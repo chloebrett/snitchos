@@ -9,7 +9,11 @@ SECTIONS {
   } > ram
   .rodata : { *(.rodata .rodata*) } > ram
   .data : { *(.data .data*) } > ram
-  .bss : { *(.bss .bss*) } > ram
+  .bss : {
+    __bss_start = .;
+    *(.bss .bss*)
+    __bss_end = .;
+  } > ram
   . = ALIGN(16);
   __stack_bottom = .;
   . += 0x10000;
