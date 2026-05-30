@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["kernel", "protocol", "host-reader", "xtask"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
