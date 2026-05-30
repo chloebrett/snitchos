@@ -11,4 +11,11 @@ SECTIONS {
   __stack_bottom = .;
   . += 0x10000;
   __stack_top = .;
+
+  /DISCARD/ : {
+    *(.eh_frame .eh_frame.*)
+    *(.eh_frame_hdr)
+    *(.note .note.*)
+    *(.comment)
+  }
 }
