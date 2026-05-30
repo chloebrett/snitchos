@@ -7,11 +7,18 @@ SECTIONS {
     KEEP(*(.text.boot))
     *(.text .text*)
   } > ram
-  .rodata : { *(.rodata .rodata*) } > ram
-  .data : { *(.data .data*) } > ram
+  .rodata : {
+    *(.rodata .rodata*)
+    *(.srodata .srodata*)
+  } > ram
+  .data : {
+    *(.data .data*)
+    *(.sdata .sdata*)
+  } > ram
   .bss : {
     __bss_start = .;
     *(.bss .bss*)
+    *(.sbss .sbss*)
     __bss_end = .;
   } > ram
   . = ALIGN(16);
