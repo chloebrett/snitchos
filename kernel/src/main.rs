@@ -40,19 +40,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
 
   dtb::print_info(&dtb, uart_addr);
 
-  if let Some(base) = virtio_console::find_console_base(&dtb) {
-    println!("virtio-console found at {:#x}", base);
-    // SAFETY: find_console_base returned this base after verifying the
-    // device at that address is a virtio-console.
-    match unsafe { virtio_console::init_handshake(base) } {
-      Ok(()) => {
-        println!("virtio-console: handshake ok");
-        send_hello(base, dtb::timebase_hz(&dtb));
-      }
-      Err(e) => println!("virtio-console: handshake failed: {:?}", e),
+  // SAFETY: dtb came from the DTB we just parsed; init does
+  // discovery + handshake + global handle setup.
+  match unsafe { virtio_console::init(&dtb) } {
+    Ok(()) => {
+      println!("virtio-console: ready");
+      send_hello(dtb::timebase_hz(&dtb));
     }
-  } else {
-    println!("virtio-console: not found");
+    Err(e) => println!("virtio-console: init failed: {:?}", e),
   }
 
   println!("I am alive");
@@ -65,8 +60,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
 }
 
 /// Encode a `Frame::Hello` with the discovered CPU timebase and ship it
-/// out the virtio-console TX queue. First real telemetry on the wire.
-fn send_hello(virtio_base: usize, timebase_hz: u32) {
+/// out the virtio-console. First real telemetry on the wire.
+fn send_hello(timebase_hz: u32) {
   let frame = protocol::Frame::Hello {
     timebase_hz: timebase_hz as u64,
     protocol_version: 1,
@@ -74,10 +69,7 @@ fn send_hello(virtio_base: usize, timebase_hz: u32) {
   let mut buf = [0u8; 32];
   match postcard::to_slice(&frame, &mut buf) {
     Ok(encoded) => {
-      // SAFETY: virtio_base is a fully-initialized virtio-console
-      // (handshake + queue setup completed above). `encoded` outlives
-      // this call because `transmit` spins until the device is done.
-      unsafe { virtio_console::transmit(virtio_base, encoded) };
+      virtio_console::send(encoded);
       println!("sent Hello ({} bytes)", encoded.len());
     }
     Err(e) => println!("postcard encode failed: {:?}", e),

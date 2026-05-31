@@ -1,0 +1,5 @@
+{
+    "// note": "rust-analyzer builds the workspace for the kernel's RISC-V target. Host crates (xtask, host-reader) will show RA errors but still build fine via `cargo build -p <crate>`. Comment out 'cargo.target' if you're editing host crates heavily.",
+    "rust-analyzer.cargo.target": "riscv64gc-unknown-none-elf",
+    "rust-analyzer.check.allTargets": false
+}

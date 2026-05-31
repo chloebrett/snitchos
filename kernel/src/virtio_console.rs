@@ -264,9 +264,19 @@ pub fn find_console_base(dtb: &Fdt) -> Option<usize> {
     None
 }
 
-/// Errors that can arise during the virtio-console handshake.
+/// The global virtio-console handle. Holds the device's MMIO base
+/// address. Set once at boot via `init`.
+///
+/// `spin::Mutex<usize>` is overkill today (base is immutable after
+/// init), but the lock will serialize concurrent senders once we have
+/// interrupts or SMP. Same pattern as the NS16550 `UART`.
+pub static CONSOLE: spin::Once<spin::Mutex<usize>> = spin::Once::new();
+
+/// Errors that can arise during virtio-console initialization.
 #[derive(Debug)]
 pub enum InitError {
+    /// No virtio-mmio slot advertised DeviceID 3 (console).
+    NotFound,
     /// Device doesn't advertise `VIRTIO_F_VERSION_1`. We don't support
     /// pre-1.0 (legacy) virtio at this register layout.
     NoVersion1,
@@ -276,6 +286,35 @@ pub enum InitError {
     /// Device's `QueueNumMax` is smaller than the queue size we want.
     /// Shouldn't happen — QEMU advertises max 1024.
     QueueTooSmall,
+}
+
+/// Discover the virtio-console in the DTB, drive the handshake, and
+/// store the base address in the `CONSOLE` static. After this returns
+/// `Ok`, `send` is usable from anywhere.
+///
+/// # Safety
+///
+/// The DTB must be valid — the same precondition we already rely on
+/// elsewhere in boot.
+pub unsafe fn init(dtb: &Fdt) -> Result<(), InitError> {
+    let base = find_console_base(dtb).ok_or(InitError::NotFound)?;
+    unsafe { init_handshake(base)? };
+    CONSOLE.call_once(|| spin::Mutex::new(base));
+    Ok(())
+}
+
+/// Send a buffer of bytes out the kernel's virtio-console. Silently
+/// no-ops if `init` hasn't completed (matches the println macro's
+/// "pre-init bytes are lost" behavior).
+pub fn send(bytes: &[u8]) {
+    let Some(handle) = CONSOLE.get() else {
+        return;
+    };
+    let base = *handle.lock();
+    // SAFETY: CONSOLE was populated by `init`, which ran handshake +
+    // queue setup against `base`. The device is ready to receive on
+    // the TX queue.
+    unsafe { transmit(base, bytes) };
 }
 
 /// Drive the virtio-mmio handshake on a discovered console device up
