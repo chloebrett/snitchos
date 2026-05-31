@@ -52,18 +52,6 @@ fn panic(info: &PanicInfo) -> ! {
   }
 }
 
-fn sbi_putchar(c: u8) {
-  unsafe {
-    asm!(
-      "ecall",
-      in("a7") 1_usize, // legacy putchar EID
-      inout("a0") c as usize => _, // byte in; return clobbered
-      out("a1") _, // also clobbered by SBI
-      options(nostack),
-    )
-  }
-}
-
 fn print_dtb_info(dtb: &fdt::Fdt) {
   for region in dtb.memory().regions() {
     println!(
@@ -91,17 +79,6 @@ fn print_dtb_info(dtb: &fdt::Fdt) {
     uart_reg.starting_address as usize,
     uart_reg.size.unwrap_or(0),
   );
-}
-
-pub struct SbiConsole;
-
-impl Write for SbiConsole {
-  fn write_str(&mut self, s: &str) -> core::fmt::Result {
-    for byte in s.bytes() {
-      sbi_putchar(byte);
-    }
-    Ok(())
-  }
 }
 
 pub struct Uart16550 {
