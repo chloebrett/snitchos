@@ -18,7 +18,7 @@ fn main() -> std::io::Result<()> {
 
 /// Open a connection to the kernel's telemetry socket.
 fn connect() -> std::io::Result<UnixStream> {
-    todo!()
+    UnixStream::connect(SOCKET_PATH)
 }
 
 /// Drive the read-decode-emit loop over any byte source. Each fully
@@ -59,9 +59,59 @@ fn decode_stream<R: Read>(
     }
 }
 
-/// Pretty-print a decoded frame to stdout.
+/// Pretty-print a decoded frame to stdout. One line per frame.
 fn print_frame(frame: &Frame<'_>) {
-    todo!()
+    match frame {
+        Frame::Hello {
+            timebase_hz,
+            protocol_version,
+        } => {
+            println!(
+                "Hello              timebase={} Hz  protocol_version={}",
+                timebase_hz, protocol_version
+            );
+        }
+        Frame::StringRegister { id, value } => {
+            println!("StringRegister     id={:?}  value={:?}", id, value);
+        }
+        Frame::SpanStart {
+            id,
+            parent,
+            name_id,
+            t,
+        } => {
+            println!(
+                "SpanStart          id={:?}  parent={:?}  name_id={:?}  t={}",
+                id, parent, name_id, t
+            );
+        }
+        Frame::SpanEnd { id, t } => {
+            println!("SpanEnd            id={:?}  t={}", id, t);
+        }
+        Frame::Event {
+            span_id,
+            name_id,
+            t,
+        } => {
+            println!(
+                "Event              span_id={:?}  name_id={:?}  t={}",
+                span_id, name_id, t
+            );
+        }
+        Frame::Metric {
+            name_id,
+            value,
+            t,
+        } => {
+            println!(
+                "Metric             name_id={:?}  value={}  t={}",
+                name_id, value, t
+            );
+        }
+        Frame::Dropped { count } => {
+            println!("Dropped            count={}", count);
+        }
+    }
 }
 
 /// Try to decode one `Frame` from the front of `buf`. Returns the

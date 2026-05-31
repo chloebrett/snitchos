@@ -2,6 +2,7 @@ use std::process::{Command, ExitCode};
 
 const KERNEL_TARGET: &str = "riscv64gc-unknown-none-elf";
 const KERNEL_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/kernel";
+const HOST_READER_BIN: &str = "target/debug/host-reader";
 const TELEMETRY_SOCKET: &str = "/tmp/snitch-telemetry.sock";
 
 fn main() -> ExitCode {
@@ -11,6 +12,7 @@ fn main() -> ExitCode {
     match cmd {
         "up" => up(),
         "build" => build(),
+        "reader" => reader(),
         "help" | "-h" | "--help" => {
             usage();
             ExitCode::SUCCESS
@@ -29,6 +31,7 @@ fn usage() {
     eprintln!("subcommands:");
     eprintln!("  build   build the kernel ELF");
     eprintln!("  up      build the kernel and run it in QEMU");
+    eprintln!("  reader  build and run the host-reader");
 }
 
 fn build() -> ExitCode {
@@ -44,20 +47,17 @@ fn build() -> ExitCode {
 }
 
 fn up() -> ExitCode {
-    let build_status = build();
-    if build_status != ExitCode::SUCCESS {
-        return build_status;
+    if build() != ExitCode::SUCCESS {
+        return ExitCode::from(1);
     }
 
     // Clean up any stale socket from a previous run so QEMU can bind.
     let _ = std::fs::remove_file(TELEMETRY_SOCKET);
 
     // wait=on blocks QEMU at startup until a telemetry client connects.
-    // Connect with: `nc -U /tmp/snitch-telemetry.sock | xxd` (or send to
-    // the host-reader once that exists).
-    let chardev_arg = format!(
-        "socket,path={TELEMETRY_SOCKET},server=on,wait=on,id=telemetry"
-    );
+    // Run `cargo xtask reader` in another terminal to satisfy that wait.
+    let chardev_arg =
+        format!("socket,path={TELEMETRY_SOCKET},server=on,wait=on,id=telemetry");
 
     let status = Command::new("qemu-system-riscv64")
         .args([
@@ -68,18 +68,37 @@ fn up() -> ExitCode {
             "-nographic",
             "-bios", "default",
             "-kernel", KERNEL_BIN,
-            // Telemetry channel: a virtio-console wired to a Unix domain
-            // socket on the host. host-reader connects to this socket.
             // Force modern virtio-mmio (version 2). Without this, QEMU
             // exposes the legacy (version 1) layout for backward compat,
             // which has a different register set we don't implement.
             "-global", "virtio-mmio.force-legacy=false",
+            // Telemetry channel: a virtio-console wired to a Unix domain
+            // socket on the host. host-reader connects to this socket.
             "-chardev", &chardev_arg,
             "-device", "virtio-serial-device",
             "-device", "virtconsole,chardev=telemetry",
         ])
         .status()
         .expect("failed to invoke qemu-system-riscv64");
+    if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn reader() -> ExitCode {
+    let build = Command::new("cargo")
+        .args(["build", "-p", "host-reader"])
+        .status()
+        .expect("failed to invoke cargo");
+    if !build.success() {
+        return ExitCode::from(1);
+    }
+
+    let status = Command::new(HOST_READER_BIN)
+        .status()
+        .expect("failed to invoke host-reader");
     if status.success() {
         ExitCode::SUCCESS
     } else {
