@@ -9,6 +9,7 @@ use fdt::Fdt;
 mod console;
 mod dtb;
 mod tracing;
+mod trap;
 mod uart;
 mod virtio_console;
 
