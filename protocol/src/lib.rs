@@ -8,14 +8,29 @@
 
 use serde::{Serialize, Deserialize};
 
+/// Identifier of a string in the runtime intern table. `StringRegister`
+/// frames populate the table; every `*_name_id` field references it.
+/// `u32` because the table has far fewer entries than spans do.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy, Hash)]
+#[serde(transparent)]
+pub struct StringId(pub u32);
+
+/// Identifier of a span. Minted by the kernel as a per-CPU-partitioned
+/// counter — `u64` because the design assumes long-running kernels with
+/// many harts producing many spans.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy, Hash)]
+#[serde(transparent)]
+pub struct SpanId(pub u64);
+
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
-enum Frame {
+enum Frame<'a> {
   Hello { timebase_hz: u64, protocol_version: u8 },
-  SpanStart { id: u64, parent: u64, name_id: u32, t: u64 },
-  SpanEnd { id: u64, t: u64 },
-  Event { span_id: u64, name_id: u32, t: u64 },
-  Metric { name_id: u32, value: i64, t: u64 },
+  SpanStart { id: SpanId, parent: SpanId, name_id: StringId, t: u64 },
+  SpanEnd { id: SpanId, t: u64 },
+  Event { span_id: SpanId, name_id: StringId, t: u64 },
+  Metric { name_id: StringId, value: i64, t: u64 },
   Dropped { count: u32 },
+  StringRegister { id: StringId, value: &'a str },
 }
 
 #[cfg(test)]
@@ -44,7 +59,7 @@ mod tests {
   #[test]
   fn span_end_roundtrips() {
     let frame = Frame::SpanEnd {
-      id: 511,
+      id: SpanId(511),
       t: 1234,
     };
 
@@ -59,9 +74,9 @@ mod tests {
   #[test]
   fn span_start_roundtrips() {
     let frame = Frame::SpanStart {
-      id: 42,
-      parent: 7,
-      name_id: 3,
+      id: SpanId(42),
+      parent: SpanId(7),
+      name_id: StringId(3),
       t: 1234,
     };
 
@@ -76,8 +91,8 @@ mod tests {
   #[test]
   fn event_roundtrips() {
     let frame = Frame::Event {
-      span_id: 42,
-      name_id: 9,
+      span_id: SpanId(42),
+      name_id: StringId(9),
       t: 1234,
     };
 
@@ -94,7 +109,7 @@ mod tests {
   #[test]
   fn metric_roundtrips() {
     let frame = Frame::Metric {
-      name_id: 12,
+      name_id: StringId(12),
       value: -42,
       t: 1234,
     };
@@ -110,6 +125,23 @@ mod tests {
   #[test]
   fn dropped_roundtrips() {
     let frame = Frame::Dropped { count: 17 };
+
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+
+    assert_eq!(frame, decoded);
+  }
+
+  /// Roundtrip a `Frame::StringRegister` through postcard and back. The
+  /// `value` field is a borrowed `&str` — the decoded frame borrows from
+  /// the encode buffer, which must outlive the decoded value.
+  #[test]
+  fn string_register_roundtrips() {
+    let frame = Frame::StringRegister {
+      id: StringId(99),
+      value: "kernel.heartbeat",
+    };
 
     let mut buf = [0u8; 64];
     let used = postcard::to_slice(&frame, &mut buf).unwrap();
