@@ -12,18 +12,18 @@ global_asm!(include_str!("entry.S"));
 macro_rules! print {
   ($($arg:tt)*) => {{
     use core::fmt::Write;
-    let _ = write!(&mut $crate::SbiConsole, $($arg)*);
+    let _ = write!(&mut $crate::Uart16550::new(0x10000000), $($arg)*);
   }}
 }
 
 macro_rules! println {
   () => {{
     use core::fmt::Write;
-    let _ = writeln!(&mut $crate::SbiConsole);
+    let _ = writeln!(&mut $crate::Uart16550::new(0x10000000));
   }};
   ($($arg:tt)*) => {{
     use core::fmt::Write;
-    let _ = writeln!(&mut $crate::SbiConsole, $($arg)*);
+    let _ = writeln!(&mut $crate::Uart16550::new(0x10000000), $($arg)*);
   }}
 }
 
@@ -118,5 +118,14 @@ impl Uart16550 {
       while lsr_addr.read_volatile() & 0b00100000 == 0 {}
       thr_addr.write_volatile(c);
     }
+  }
+}
+
+impl Write for Uart16550 {
+  fn write_str(&mut self, s: &str) -> core::fmt::Result {
+    for byte in s.bytes() {
+      self.putchar(byte);
+    }
+    Ok(())
   }
 }
