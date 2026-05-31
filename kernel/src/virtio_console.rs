@@ -141,6 +141,31 @@ static mut TX_QUEUE: Virtqueue = Virtqueue {
     },
 };
 
+/// Static RX queue. The virtio-console spec requires the driver to
+/// initialize both port 0 receive and transmit queues. We don't actually
+/// receive in v0.1, so this stays empty — but the device needs to see it
+/// configured or it may refuse to process TX.
+static mut RX_QUEUE: Virtqueue = Virtqueue {
+    desc: [VirtqDesc {
+        addr: 0,
+        len: 0,
+        flags: 0,
+        next: 0,
+    }; QSIZE],
+    avail: VirtqAvail {
+        flags: 0,
+        idx: 0,
+        ring: [0; QSIZE],
+        used_event: 0,
+    },
+    used: VirtqUsed {
+        flags: 0,
+        idx: 0,
+        ring: [VirtqUsedElem { id: 0, len: 0 }; QSIZE],
+        avail_event: 0,
+    },
+};
+
 /// Read a 32-bit virtio-mmio register.
 ///
 /// # Safety
@@ -309,7 +334,32 @@ pub unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
             return Err(InitError::FeaturesRejected);
         }
 
-        // 7. Virtqueue setup for the TX queue.
+        // 7. Virtqueue setup. virtio-console requires BOTH port 0 RX
+        //    (queue 0) and TX (queue 1) to be configured, even if we
+        //    never plan to receive — the device may silently drop our
+        //    TX otherwise.
+
+        // RX queue.
+        write_reg(base, REG_QUEUE_SEL, QUEUE_RX);
+        let max = read_reg(base, REG_QUEUE_NUM_MAX);
+        if (max as usize) < QSIZE {
+            write_reg(base, REG_STATUS, status | STATUS_FAILED);
+            return Err(InitError::QueueTooSmall);
+        }
+        write_reg(base, REG_QUEUE_NUM, QSIZE as u32);
+
+        let rx_desc = &raw const RX_QUEUE.desc as u64;
+        let rx_avail = &raw const RX_QUEUE.avail as u64;
+        let rx_used = &raw const RX_QUEUE.used as u64;
+        write_reg(base, REG_QUEUE_DESC_LOW, rx_desc as u32);
+        write_reg(base, REG_QUEUE_DESC_HIGH, (rx_desc >> 32) as u32);
+        write_reg(base, REG_QUEUE_DRIVER_LOW, rx_avail as u32);
+        write_reg(base, REG_QUEUE_DRIVER_HIGH, (rx_avail >> 32) as u32);
+        write_reg(base, REG_QUEUE_DEVICE_LOW, rx_used as u32);
+        write_reg(base, REG_QUEUE_DEVICE_HIGH, (rx_used >> 32) as u32);
+        write_reg(base, REG_QUEUE_READY, 1);
+
+        // TX queue.
         write_reg(base, REG_QUEUE_SEL, QUEUE_TX);
         let max = read_reg(base, REG_QUEUE_NUM_MAX);
         if (max as usize) < QSIZE {
@@ -318,30 +368,20 @@ pub unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
         }
         write_reg(base, REG_QUEUE_NUM, QSIZE as u32);
 
-        // Tell the device where our three queue regions live. virtual=physical
-        // here because the MMU is off.
-        let desc_addr = &raw const TX_QUEUE.desc as u64;
-        let avail_addr = &raw const TX_QUEUE.avail as u64;
-        let used_addr = &raw const TX_QUEUE.used as u64;
-
-        write_reg(base, REG_QUEUE_DESC_LOW, desc_addr as u32);
-        write_reg(base, REG_QUEUE_DESC_HIGH, (desc_addr >> 32) as u32);
-        write_reg(base, REG_QUEUE_DRIVER_LOW, avail_addr as u32);
-        write_reg(base, REG_QUEUE_DRIVER_HIGH, (avail_addr >> 32) as u32);
-        write_reg(base, REG_QUEUE_DEVICE_LOW, used_addr as u32);
-        write_reg(base, REG_QUEUE_DEVICE_HIGH, (used_addr >> 32) as u32);
-
-        // Queue is live.
+        let tx_desc = &raw const TX_QUEUE.desc as u64;
+        let tx_avail = &raw const TX_QUEUE.avail as u64;
+        let tx_used = &raw const TX_QUEUE.used as u64;
+        write_reg(base, REG_QUEUE_DESC_LOW, tx_desc as u32);
+        write_reg(base, REG_QUEUE_DESC_HIGH, (tx_desc >> 32) as u32);
+        write_reg(base, REG_QUEUE_DRIVER_LOW, tx_avail as u32);
+        write_reg(base, REG_QUEUE_DRIVER_HIGH, (tx_avail >> 32) as u32);
+        write_reg(base, REG_QUEUE_DEVICE_LOW, tx_used as u32);
+        write_reg(base, REG_QUEUE_DEVICE_HIGH, (tx_used >> 32) as u32);
         write_reg(base, REG_QUEUE_READY, 1);
 
         // 8. DRIVER_OK: "I'm fully set up; treat me as a working driver."
         status |= STATUS_DRIVER_OK;
         write_reg(base, REG_STATUS, status);
-
-        // Suppress unused-warning on REG_QUEUE_NOTIFY / QUEUE_RX until step 8
-        // (transmit) — they exist in the layout but we don't ring/notify yet.
-        let _ = REG_QUEUE_NOTIFY;
-        let _ = QUEUE_RX;
     }
     Ok(())
 }

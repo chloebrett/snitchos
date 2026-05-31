@@ -45,7 +45,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: find_console_base returned this base after verifying the
     // device at that address is a virtio-console.
     match unsafe { virtio_console::init_handshake(base) } {
-      Ok(()) => println!("virtio-console: handshake ok"),
+      Ok(()) => {
+        println!("virtio-console: handshake ok");
+        send_hello(base, dtb::timebase_hz(&dtb));
+      }
       Err(e) => println!("virtio-console: handshake failed: {:?}", e),
     }
   } else {
@@ -58,6 +61,26 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     unsafe {
       asm!("wfi");
     }
+  }
+}
+
+/// Encode a `Frame::Hello` with the discovered CPU timebase and ship it
+/// out the virtio-console TX queue. First real telemetry on the wire.
+fn send_hello(virtio_base: usize, timebase_hz: u32) {
+  let frame = protocol::Frame::Hello {
+    timebase_hz: timebase_hz as u64,
+    protocol_version: 1,
+  };
+  let mut buf = [0u8; 32];
+  match postcard::to_slice(&frame, &mut buf) {
+    Ok(encoded) => {
+      // SAFETY: virtio_base is a fully-initialized virtio-console
+      // (handshake + queue setup completed above). `encoded` outlives
+      // this call because `transmit` spins until the device is done.
+      unsafe { virtio_console::transmit(virtio_base, encoded) };
+      println!("sent Hello ({} bytes)", encoded.len());
+    }
+    Err(e) => println!("postcard encode failed: {:?}", e),
   }
 }
 

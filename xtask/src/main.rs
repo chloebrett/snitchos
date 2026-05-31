@@ -52,8 +52,11 @@ fn up() -> ExitCode {
     // Clean up any stale socket from a previous run so QEMU can bind.
     let _ = std::fs::remove_file(TELEMETRY_SOCKET);
 
+    // wait=on blocks QEMU at startup until a telemetry client connects.
+    // Connect with: `nc -U /tmp/snitch-telemetry.sock | xxd` (or send to
+    // the host-reader once that exists).
     let chardev_arg = format!(
-        "socket,path={TELEMETRY_SOCKET},server=on,wait=off,id=telemetry"
+        "socket,path={TELEMETRY_SOCKET},server=on,wait=on,id=telemetry"
     );
 
     let status = Command::new("qemu-system-riscv64")

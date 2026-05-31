@@ -23,7 +23,7 @@ pub struct StringId(pub u32);
 pub struct SpanId(pub u64);
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
-enum Frame<'a> {
+pub enum Frame<'a> {
   Hello { timebase_hz: u64, protocol_version: u8 },
   SpanStart { id: SpanId, parent: SpanId, name_id: StringId, t: u64 },
   SpanEnd { id: SpanId, t: u64 },

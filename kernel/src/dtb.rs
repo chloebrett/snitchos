@@ -20,11 +20,14 @@ pub fn uart_addr(dtb: &Fdt) -> usize {
 /// CPU timebase frequency in Hz, parsed from the `cpus` node's
 /// `timebase-frequency` property. Manual decode because `fdt` 0.1.5 doesn't
 /// surface it as a typed accessor.
+///
+/// The property lives on the parent `cpus` node, not on `cpu@0`. Earlier
+/// code looked it up via `dtb.cpus().next().properties()` which returns
+/// cpu@0's own properties — the result was silently 0.
 pub fn timebase_hz(dtb: &Fdt) -> u32 {
   dtb
-    .cpus()
-    .next()
-    .and_then(|c| c.properties().find(|p| p.name == "timebase-frequency"))
+    .find_node("/cpus")
+    .and_then(|n| n.properties().find(|p| p.name == "timebase-frequency"))
     .and_then(|p| {
       let bytes = p.value;
       (bytes.len() == 4).then(|| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
