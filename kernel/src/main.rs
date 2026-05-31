@@ -28,7 +28,10 @@ macro_rules! println {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kmain(_hart_id: usize, _dtb_phys: usize) -> ! {
+pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
+  let dtb = unsafe { fdt::Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
+  print_dtb_info(&dtb);
+
   println!("I am alive");
 
   loop {
@@ -59,6 +62,35 @@ fn sbi_putchar(c: u8) {
       options(nostack),
     )
   }
+}
+
+fn print_dtb_info(dtb: &fdt::Fdt) {
+  for region in dtb.memory().regions() {
+    println!(
+      "memory: {:#x} ({} bytes)",
+      region.starting_address as usize,
+      region.size.unwrap_or(0),
+    );
+  }
+
+  let timebase = dtb
+    .cpus()
+    .next()
+    .and_then(|c| c.properties().find(|p| p.name == "timebase-frequency"))
+    .and_then(|p| {
+      let bytes = p.value;
+      (bytes.len() == 4).then(|| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    })
+    .unwrap_or(0);
+  println!("timebase: {} Hz", timebase);
+
+  let uart = dtb.find_compatible(&["ns16550a"]).unwrap();
+  let uart_reg = uart.reg().unwrap().next().unwrap();
+  println!(
+    "uart: {:#x} ({} bytes)",
+    uart_reg.starting_address as usize,
+    uart_reg.size.unwrap_or(0),
+  );
 }
 
 pub struct SbiConsole;
