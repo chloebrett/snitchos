@@ -1,0 +1,25 @@
+# Tempo config — local single-binary mode.
+# Receives OTLP/HTTP on :4318; serves the query API on :3200.
+
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /tmp/tempo/blocks
+    wal:
+      path: /tmp/tempo/wal
+
+# Retain traces for 24h. Plenty for local dev.
+compactor:
+  compaction:
+    block_retention: 24h

@@ -34,6 +34,22 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Bring the observability stack (Tempo + Prometheus + Grafana)
+    /// up or down via docker compose.
+    Stack {
+        #[command(subcommand)]
+        cmd: StackCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum StackCmd {
+    /// `docker compose up -d` the stack.
+    Up,
+    /// `docker compose down` the stack.
+    Down,
+    /// `docker compose logs -f` the stack.
+    Logs,
 }
 
 fn main() -> ExitCode {
@@ -46,6 +62,26 @@ fn main() -> ExitCode {
             all.extend(args);
             run_collector(&all)
         }
+        Cmd::Stack { cmd } => stack(cmd),
+    }
+}
+
+fn stack(cmd: StackCmd) -> ExitCode {
+    let subcommand: &[&str] = match cmd {
+        StackCmd::Up => &["up", "-d"],
+        StackCmd::Down => &["down"],
+        StackCmd::Logs => &["logs", "-f"],
+    };
+
+    let status = Command::new("docker")
+        .args(["compose", "-f", "stack/docker-compose.yml"])
+        .args(subcommand)
+        .status()
+        .expect("failed to invoke docker compose");
+    if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 

@@ -1,0 +1,15 @@
+# Prometheus scrape config.
+# Pulls metrics from the SnitchOS collector running on the host.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: snitchos-collector
+    static_configs:
+      - targets:
+          # `host.docker.internal` reaches the macOS/Linux host from
+          # inside the Prometheus container. Collector serves /metrics
+          # here when started with `--prometheus 9091`.
+          - host.docker.internal:9091

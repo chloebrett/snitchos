@@ -1,0 +1,10 @@
+# Auto-load dashboard JSON files dropped into this directory.
+
+apiVersion: 1
+
+providers:
+  - name: snitchos
+    folder: SnitchOS
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards
