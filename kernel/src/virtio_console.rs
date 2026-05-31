@@ -346,31 +346,84 @@ pub unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
     Ok(())
 }
 
-/// Send a frame's bytes out the virtio-console.
+/// Send a buffer of bytes out the virtio-console TX queue, blocking
+/// until the device confirms it has drained the buffer.
+///
+/// The flow is the canonical virtio TX cycle:
+///
+/// 1. Fill descriptor slot 0 with `{addr, len, flags=0, next=0}`. We
+///    always use slot 0 because we only allow one TX in flight at a
+///    time (we spin on completion before returning), so slot 0 is
+///    always free by the time we re-enter.
+/// 2. Snapshot the avail/used index counters *before* submitting, so
+///    we know what value to bump and what to wait on.
+/// 3. Push descriptor index `0` into the available ring at
+///    `avail.ring[avail.idx % QSIZE]`, then bump `avail.idx`. The
+///    device watches `avail.idx` and processes anything new.
+/// 4. Write `QUEUE_TX` to `QueueNotify`. This is the only trap we
+///    take on the TX path — everything else is silent shared-memory
+///    coordination. Without the notify, the device never knows we
+///    submitted.
+/// 5. Poll `used.idx` until it advances. The advance means the
+///    device has read our buffer; `bytes` is safe to release.
 ///
 /// # Safety
 ///
-/// `base` must be the MMIO base of a virtio-console that has completed
-/// `init_handshake`. `bytes` must outlive the call.
+/// - `base` must be the MMIO base of a virtio-console that has
+///   completed `init_handshake` (specifically: TX queue set up and
+///   `DRIVER_OK` set).
+/// - `bytes` must remain valid for the entire call. We hand the
+///   device a raw pointer; if `bytes` is freed or moves, the device
+///   reads garbage. The spin-wait at the end is what makes
+///   stack-allocated buffers safe — by the time we return, the
+///   device is done.
+///
+/// # Known weaknesses
+///
+/// - **Single descriptor in flight.** We reuse slot 0 forever; no
+///   concurrency on the TX path. A real driver would use a free-list
+///   of slots and submit multiple before any completion.
+/// - **Polling, not interrupt-driven.** The CPU spins until
+///   `used.idx` moves. Wastes cycles. v0.3 (interrupts milestone)
+///   would replace this with a wait queue + IRQ handler.
+/// - **No memory barriers between the descriptor write and the
+///   notify.** On QEMU, all writes are visible by the time we take
+///   the trap, so this works in practice. On real hardware, the CPU
+///   could reorder the notify ahead of the descriptor fill — we'd
+///   need a write fence (`fence ow,ow` on RISC-V) before the notify.
+/// - **No timeout.** If the device wedges, we spin forever. A real
+///   driver bounds the wait and surfaces a `DeviceStuck` error.
+/// - **No queue-init check.** SAFETY comment says you must call
+///   `init_handshake` first; if you don't, this writes into an
+///   un-set-up TX_QUEUE that the device isn't reading. The device
+///   never advances `used.idx`, and we spin forever.
 pub unsafe fn transmit(base: usize, bytes: &[u8]) {
+    // 1. Fill descriptor slot 0 with the buffer pointer + length.
     let desc_ptr = &raw mut TX_QUEUE.desc[0];
     unsafe {
         desc_ptr.write_volatile(VirtqDesc {
             addr: bytes.as_ptr() as u64,
             len: bytes.len() as u32,
-            flags: 0, // none
-            next: 0,  // default
+            flags: 0, // single buffer, driver-to-device, no chaining
+            next: 0,  // irrelevant without NEXT
         });
     }
 
     unsafe {
+        // 2. Snapshot the ring index counters.
         let avail_idx_before = (&raw const TX_QUEUE.avail.idx).read_volatile();
         let used_idx_before = (&raw const TX_QUEUE.used.idx).read_volatile();
 
+        // 3. Push descriptor index 0 into the available ring, then
+        //    bump avail.idx. Index field wraps naturally as u16.
         (&raw mut TX_QUEUE.avail.ring[(avail_idx_before as usize) % QSIZE]).write_volatile(0);
         (&raw mut TX_QUEUE.avail.idx).write_volatile(avail_idx_before.wrapping_add(1));
+
+        // 4. Poke the device. (Memory ordering caveat — see "Known
+        //    weaknesses." Fine on QEMU.)
         write_reg(base, REG_QUEUE_NOTIFY, QUEUE_TX);
 
+        // 5. Spin until the device confirms our descriptor is done.
         while (&raw const TX_QUEUE.used.idx).read_volatile() == used_idx_before {}
     }
 }
