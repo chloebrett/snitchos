@@ -1,37 +1,41 @@
 use std::process::{Command, ExitCode};
 
+use clap::{Parser, Subcommand};
+
 const KERNEL_TARGET: &str = "riscv64gc-unknown-none-elf";
 const KERNEL_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/kernel";
 const HOST_READER_BIN: &str = "target/debug/host-reader";
 const TELEMETRY_SOCKET: &str = "/tmp/snitch-telemetry.sock";
 
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let cmd = args.first().map(String::as_str).unwrap_or("help");
-
-    match cmd {
-        "up" => up(),
-        "build" => build(),
-        "reader" => reader(&args[1..]),
-        "help" | "-h" | "--help" => {
-            usage();
-            ExitCode::SUCCESS
-        }
-        other => {
-            eprintln!("unknown subcommand: {other}");
-            usage();
-            ExitCode::from(2)
-        }
-    }
+/// Orchestration commands for the SnitchOS workspace.
+#[derive(Parser)]
+#[command(about, version)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
 }
 
-fn usage() {
-    eprintln!("usage: cargo xtask <subcommand>");
-    eprintln!();
-    eprintln!("subcommands:");
-    eprintln!("  build   build the kernel ELF");
-    eprintln!("  up      build the kernel and run it in QEMU");
-    eprintln!("  reader  build and run the host-reader");
+#[derive(Subcommand)]
+enum Cmd {
+    /// Build the kernel ELF.
+    Build,
+    /// Build the kernel and run it in QEMU.
+    Up,
+    /// Build and run the host-reader. Any trailing args are forwarded
+    /// to host-reader (e.g. `cargo xtask reader -- --pretty`).
+    Reader {
+        /// Args forwarded to host-reader.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+fn main() -> ExitCode {
+    match Cli::parse().cmd {
+        Cmd::Build => build(),
+        Cmd::Up => up(),
+        Cmd::Reader { args } => reader(&args),
+    }
 }
 
 fn build() -> ExitCode {
