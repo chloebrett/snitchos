@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use protocol::{Frame, SpanId, StringId};
+use protocol::{Frame, MetricKind, SpanId, StringId};
 
 use crate::virtio_console;
 
@@ -45,8 +45,18 @@ pub fn send_hello(timebase_hz: u32) {
 /// kernel.boot, heartbeat, a handful of init phases. 64 is plenty.
 const MAX_INTERNED: usize = 64;
 
+/// An entry in the intern table. Beyond the name itself we also track
+/// whether the host has been told this name's metric type via
+/// `Frame::MetricRegister` — avoids emitting duplicate type declarations
+/// when `register_counter`/`gauge`/`histogram` is called repeatedly.
+#[derive(Copy, Clone)]
+struct InternEntry {
+    name: &'static str,
+    metric_registered: bool,
+}
+
 struct InternTable {
-    entries: [Option<&'static str>; MAX_INTERNED],
+    entries: [Option<InternEntry>; MAX_INTERNED],
     next_id: u32,
 }
 
@@ -76,8 +86,8 @@ pub fn register_or_lookup(name: &'static str) -> StringId {
 
     // Scan existing entries — pointer equality, O(N) but N is small.
     for (i, entry) in table.entries.iter().enumerate() {
-        if let Some(s) = entry {
-            if s.as_ptr() == name.as_ptr() {
+        if let Some(e) = entry {
+            if e.name.as_ptr() == name.as_ptr() {
                 return StringId(i as u32);
             }
         }
@@ -92,7 +102,10 @@ pub fn register_or_lookup(name: &'static str) -> StringId {
             MAX_INTERNED,
         );
     }
-    table.entries[slot] = Some(name);
+    table.entries[slot] = Some(InternEntry {
+        name,
+        metric_registered: false,
+    });
     table.next_id = id + 1;
 
     emit_frame(&Frame::StringRegister {
@@ -101,6 +114,85 @@ pub fn register_or_lookup(name: &'static str) -> StringId {
     });
 
     StringId(id)
+}
+
+/// Number of names currently registered in the intern table. Exposed
+/// as a metric (`snitchos.intern.strings_used`).
+pub fn intern_count() -> u32 {
+    INTERN_TABLE.lock().next_id
+}
+
+/// Register a metric with its kind. If the name is new, both
+/// `StringRegister` and `MetricRegister` are emitted; if the name was
+/// previously registered but never as a metric, only `MetricRegister`
+/// is emitted; if both have been registered before, nothing happens.
+///
+/// Calling `register_counter("foo")` and then `register_gauge("foo")`
+/// is a programmer error — the second call won't re-declare the kind,
+/// so the host will see `"foo"` as a Counter forever. Don't do that.
+fn register_metric(name: &'static str, kind: MetricKind) -> StringId {
+    let mut table = INTERN_TABLE.lock();
+
+    // Existing entry?
+    for (i, entry) in table.entries.iter_mut().enumerate() {
+        if let Some(e) = entry {
+            if e.name.as_ptr() == name.as_ptr() {
+                let id = StringId(i as u32);
+                if !e.metric_registered {
+                    e.metric_registered = true;
+                    emit_frame(&Frame::MetricRegister { name_id: id, kind });
+                }
+                return id;
+            }
+        }
+    }
+
+    // New entry — emit both StringRegister and MetricRegister.
+    let id = table.next_id;
+    let slot = id as usize;
+    if slot >= MAX_INTERNED {
+        panic!(
+            "tracing: intern table full ({} entries); bump MAX_INTERNED",
+            MAX_INTERNED,
+        );
+    }
+    table.entries[slot] = Some(InternEntry {
+        name,
+        metric_registered: true,
+    });
+    table.next_id = id + 1;
+
+    let sid = StringId(id);
+    emit_frame(&Frame::StringRegister { id: sid, value: name });
+    emit_frame(&Frame::MetricRegister { name_id: sid, kind });
+    sid
+}
+
+/// Register `name` as a Counter metric. Returns its `StringId` for use
+/// with `emit_metric`. Idempotent — safe to call every iteration of a
+/// loop; the host only sees one `MetricRegister`.
+pub fn register_counter(name: &'static str) -> StringId {
+    register_metric(name, MetricKind::Counter)
+}
+
+/// Register `name` as a Gauge metric.
+pub fn register_gauge(name: &'static str) -> StringId {
+    register_metric(name, MetricKind::Gauge)
+}
+
+/// Register `name` as a Histogram metric.
+pub fn register_histogram(name: &'static str) -> StringId {
+    register_metric(name, MetricKind::Histogram)
+}
+
+/// Emit a metric sample. The name must have been registered first via
+/// `register_counter` / `register_gauge` / `register_histogram`.
+pub fn emit_metric(name_id: StringId, value: i64) {
+    emit_frame(&Frame::Metric {
+        name_id,
+        value,
+        t: timestamp(),
+    });
 }
 
 /// Open a span named `$name` for the current scope. Expands to a

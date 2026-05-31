@@ -70,12 +70,25 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
 
     println!("I am alive — entering heartbeat");
 
-    // Heartbeat loop: emit a span once per timebase tick (1 second on QEMU).
+    // Register the v0.2 metric set. `register_*` is idempotent; we
+    // could call inside the loop, but pulling it out makes the
+    // intent clearer and saves a per-iteration table lookup.
+    let heartbeat_count = tracing::register_counter("snitchos.heartbeat.count");
+    let intern_used = tracing::register_gauge("snitchos.intern.strings_used");
+    let time_ticks = tracing::register_gauge("snitchos.time.ticks");
+
+    // Heartbeat loop: emit a span + the metric set once per timebase
+    // tick (1 second on QEMU).
+    let mut count: i64 = 0;
     let mut next = tracing::timestamp() + timebase_hz;
     loop {
         while tracing::timestamp() < next {}
         {
             span!("kernel.heartbeat");
+            count += 1;
+            tracing::emit_metric(heartbeat_count, count);
+            tracing::emit_metric(intern_used, tracing::intern_count() as i64);
+            tracing::emit_metric(time_ticks, tracing::timestamp() as i64);
         }
         next += timebase_hz;
     }
