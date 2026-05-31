@@ -5,7 +5,9 @@
 //! All frames go out the virtio-console (`virtio_console::send`). The
 //! host-reader decodes them.
 
-use protocol::{Frame, StringId};
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use protocol::{Frame, SpanId, StringId};
 
 use crate::virtio_console;
 
@@ -85,6 +87,88 @@ pub fn register_or_lookup(name: &'static str) -> StringId {
     });
 
     StringId(id)
+}
+
+/// Open a span named `$name` for the current scope. Expands to a
+/// `let _span = ...` binding so the guard lives until the caller's
+/// scope ends. The span's `SpanEnd` frame fires automatically when
+/// the guard drops.
+///
+/// ```ignore
+/// fn boot() {
+///     span!("kernel.boot");
+///     {
+///         span!("serial_init");
+///         // ... whatever the span covers ...
+///     }  // serial_init ends here
+/// }  // kernel.boot ends here
+/// ```
+///
+/// Implementation note: this MUST be a statement-emitting macro, not a
+/// block-expression. If it were `{ let _g = ...; }` the guard would
+/// drop at the end of the macro's block, ending the span immediately
+/// instead of at the caller's scope boundary.
+#[macro_export]
+macro_rules! span {
+    ($name:expr) => {
+        let _span = $crate::tracing::span_start($name);
+    };
+}
+
+// --- Span machinery ---
+
+/// Monotonic span ID source. Starts at 1 so that `SpanId(0)` can act as
+/// the "no parent" sentinel.
+///
+/// v0.1: single-hart, single counter. v0.5+ SMP will partition the u64
+/// space per-CPU to avoid cross-hart coordination (see design doc:
+/// "per-CPU-partitioned u64 counter").
+static SPAN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// The id of the currently open innermost span on this hart, or 0
+/// (`SpanId(0)`) at the root level. New spans read this to find their
+/// parent; their `Drop` restores the previous value.
+static CURRENT_SPAN: AtomicU64 = AtomicU64::new(0);
+
+/// RAII guard returned by `span_start`. Drops emit `SpanEnd` and
+/// restore `CURRENT_SPAN` to the parent.
+///
+/// Known weaknesses:
+/// - `mem::forget(span)` skips `Drop`, leaking the span (no SpanEnd
+///   on the wire) and corrupting `CURRENT_SPAN` for everything after.
+///   The `span!` macro avoids handing the user a name-bound guard
+///   they could forget.
+pub struct Span {
+    id: SpanId,
+    parent: SpanId,
+}
+
+impl Drop for Span {
+    fn drop(&mut self) {
+        emit_frame(&Frame::SpanEnd {
+            id: self.id,
+            t: timestamp(),
+        });
+        // Restore CURRENT_SPAN to the parent so any later sibling span
+        // sees the correct parent.
+        CURRENT_SPAN.store(self.parent.0, Ordering::Relaxed);
+    }
+}
+
+/// Open a span named `name`. Returns a `Span` guard whose `Drop` will
+/// emit `SpanEnd`. Nesting is automatic from Rust scopes.
+pub fn span_start(name: &'static str) -> Span {
+    let parent = SpanId(CURRENT_SPAN.load(Ordering::Relaxed));
+    let id = SpanId(SPAN_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
+    CURRENT_SPAN.store(id.0, Ordering::Relaxed);
+    let name_id = register_or_lookup(name);
+    emit_frame(&Frame::SpanStart {
+        id,
+        parent,
+        name_id,
+        t: timestamp(),
+    });
+    Span { id, parent }
 }
 
 // --- Frame emission ---

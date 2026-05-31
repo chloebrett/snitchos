@@ -63,6 +63,13 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         id_a, id_b, id_a_again
     );
 
+    {
+        span!("kernel.boot");
+        {
+            span!("inner_step");
+        }
+    }
+
     loop {
         unsafe {
             asm!("wfi");
