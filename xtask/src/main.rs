@@ -67,6 +67,10 @@ fn up() -> ExitCode {
             "-kernel", KERNEL_BIN,
             // Telemetry channel: a virtio-console wired to a Unix domain
             // socket on the host. host-reader connects to this socket.
+            // Force modern virtio-mmio (version 2). Without this, QEMU
+            // exposes the legacy (version 1) layout for backward compat,
+            // which has a different register set we don't implement.
+            "-global", "virtio-mmio.force-legacy=false",
             "-chardev", &chardev_arg,
             "-device", "virtio-serial-device",
             "-device", "virtconsole,chardev=telemetry",

@@ -9,6 +9,7 @@ use fdt::Fdt;
 mod console;
 mod dtb;
 mod uart;
+mod virtio_console;
 
 // Pull in the boot stub (entry.S). It defines `_start`, sets up the stack
 // pointer, zeros .bss, and calls `kmain`. See linker.ld for the memory layout
@@ -38,6 +39,18 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
   unsafe { console::init(uart_addr) };
 
   dtb::print_info(&dtb, uart_addr);
+
+  if let Some(base) = virtio_console::find_console_base(&dtb) {
+    println!("virtio-console found at {:#x}", base);
+    // SAFETY: find_console_base returned this base after verifying the
+    // device at that address is a virtio-console.
+    match unsafe { virtio_console::init_handshake(base) } {
+      Ok(()) => println!("virtio-console: handshake ok"),
+      Err(e) => println!("virtio-console: handshake failed: {:?}", e),
+    }
+  } else {
+    println!("virtio-console: not found");
+  }
 
   println!("I am alive");
 
