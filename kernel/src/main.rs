@@ -5,31 +5,53 @@ use core::panic::PanicInfo;
 use core::arch::global_asm;
 use core::arch::asm;
 use core::fmt::Write;
+use fdt::Fdt;
 
 global_asm!(include_str!("entry.S"));
+
+pub static UART: spin::Once<spin::Mutex<Uart16550>> = spin::Once::new();
 
 #[allow(unused_macros)]
 macro_rules! print {
   ($($arg:tt)*) => {{
     use core::fmt::Write;
-    let _ = write!(&mut $crate::Uart16550::new(0x10000000), $($arg)*);
+    if let Some(uart) = $crate::UART.get() {
+      let _ = write!(&mut *uart.lock(), $($arg)*);
+    } else {
+      let mut uart = $crate::Uart16550::new(0x10000000);
+      let _ = write!(&mut uart, $($arg)*);
+    }
   }}
 }
 
 macro_rules! println {
   () => {{
     use core::fmt::Write;
-    let _ = writeln!(&mut $crate::Uart16550::new(0x10000000));
+    if let Some(uart) = $crate::UART.get() {
+      let _ = writeln!(&mut *uart.lock());
+    } else {
+      let mut uart = $crate::Uart16550::new(0x10000000);
+      let _ = writeln!(&mut uart);
+    }
   }};
   ($($arg:tt)*) => {{
     use core::fmt::Write;
-    let _ = writeln!(&mut $crate::Uart16550::new(0x10000000), $($arg)*);
+    if let Some(uart) = $crate::UART.get() {
+      let _ = writeln!(&mut *uart.lock(), $($arg)*);
+    } else {
+      let mut uart = $crate::Uart16550::new(0x10000000);
+      let _ = writeln!(&mut uart, $($arg)*);
+    }
   }}
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
-  let dtb = unsafe { fdt::Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
+  let dtb = unsafe { Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
+
+  let uart_addr = dtb_uart_addr(&dtb);
+  UART.call_once(|| spin::Mutex::new(Uart16550::new(uart_addr)));
+
   print_dtb_info(&dtb);
 
   println!("I am alive");
@@ -52,7 +74,12 @@ fn panic(info: &PanicInfo) -> ! {
   }
 }
 
-fn print_dtb_info(dtb: &fdt::Fdt) {
+fn dtb_uart_addr(dtb: &Fdt) -> usize {
+  let uart = dtb.find_compatible(&["ns16550a"]).unwrap();
+  uart.reg().unwrap().next().unwrap().starting_address as usize
+}
+
+fn print_dtb_info(dtb: &Fdt) {
   for region in dtb.memory().regions() {
     println!(
       "memory: {:#x} ({} bytes)",

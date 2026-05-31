@@ -6,3 +6,4 @@ publish = false
 
 [dependencies]
 fdt = "0.1.5"
+spin = "0.10"
