@@ -12,7 +12,7 @@ fn main() -> ExitCode {
     match cmd {
         "up" => up(),
         "build" => build(),
-        "reader" => reader(),
+        "reader" => reader(&args[1..]),
         "help" | "-h" | "--help" => {
             usage();
             ExitCode::SUCCESS
@@ -87,7 +87,7 @@ fn up() -> ExitCode {
     }
 }
 
-fn reader() -> ExitCode {
+fn reader(extra_args: &[String]) -> ExitCode {
     let build = Command::new("cargo")
         .args(["build", "-p", "host-reader"])
         .status()
@@ -97,6 +97,7 @@ fn reader() -> ExitCode {
     }
 
     let status = Command::new(HOST_READER_BIN)
+        .args(extra_args)
         .status()
         .expect("failed to invoke host-reader");
     if status.success() {

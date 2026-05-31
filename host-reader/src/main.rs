@@ -7,13 +7,24 @@
 use std::io::Read;
 use std::os::unix::net::UnixStream;
 
+use clap::Parser;
 use protocol::Frame;
 
 const SOCKET_PATH: &str = "/tmp/snitch-telemetry.sock";
 
+/// Connect to the kernel's telemetry socket and pretty-print frames.
+#[derive(Parser)]
+#[command(about, version)]
+struct Args {
+    /// Use multi-line pretty Debug format instead of single-line.
+    #[arg(long)]
+    pretty: bool,
+}
+
 fn main() -> std::io::Result<()> {
+    let args = Args::parse();
     let mut stream = connect()?;
-    decode_stream(&mut stream, print_frame)
+    decode_stream(&mut stream, |frame| print_frame(frame, args.pretty))
 }
 
 /// Open a connection to the kernel's telemetry socket.
@@ -59,58 +70,13 @@ fn decode_stream<R: Read>(
     }
 }
 
-/// Pretty-print a decoded frame to stdout. One line per frame.
-fn print_frame(frame: &Frame<'_>) {
-    match frame {
-        Frame::Hello {
-            timebase_hz,
-            protocol_version,
-        } => {
-            println!(
-                "Hello              timebase={} Hz  protocol_version={}",
-                timebase_hz, protocol_version
-            );
-        }
-        Frame::StringRegister { id, value } => {
-            println!("StringRegister     id={:?}  value={:?}", id, value);
-        }
-        Frame::SpanStart {
-            id,
-            parent,
-            name_id,
-            t,
-        } => {
-            println!(
-                "SpanStart          id={:?}  parent={:?}  name_id={:?}  t={}",
-                id, parent, name_id, t
-            );
-        }
-        Frame::SpanEnd { id, t } => {
-            println!("SpanEnd            id={:?}  t={}", id, t);
-        }
-        Frame::Event {
-            span_id,
-            name_id,
-            t,
-        } => {
-            println!(
-                "Event              span_id={:?}  name_id={:?}  t={}",
-                span_id, name_id, t
-            );
-        }
-        Frame::Metric {
-            name_id,
-            value,
-            t,
-        } => {
-            println!(
-                "Metric             name_id={:?}  value={}  t={}",
-                name_id, value, t
-            );
-        }
-        Frame::Dropped { count } => {
-            println!("Dropped            count={}", count);
-        }
+/// Print a decoded frame to stdout. Uses the derived `Debug` impl; with
+/// `pretty=true`, multi-line pretty format for easier inspection.
+fn print_frame(frame: &Frame<'_>, pretty: bool) {
+    if pretty {
+        println!("{frame:#?}");
+    } else {
+        println!("{frame:?}");
     }
 }
 

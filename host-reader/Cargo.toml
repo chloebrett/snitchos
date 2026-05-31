@@ -7,3 +7,4 @@ publish = false
 [dependencies]
 protocol = { path = "../protocol" }
 postcard = "1"
+clap = { version = "4", features = ["derive"] }
