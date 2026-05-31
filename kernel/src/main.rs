@@ -40,12 +40,13 @@ pub extern "C" fn kmain(_hart_id: usize, _dtb_phys: usize) -> ! {
 
 /// This function is called on panic.
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {
-      unsafe {
-        asm!("wfi");
-      }
+fn panic(info: &PanicInfo) -> ! {
+  println!("Kernel panic: {}", info);
+  loop {
+    unsafe {
+      asm!("wfi");
     }
+  }
 }
 
 fn sbi_putchar(c: u8) {
