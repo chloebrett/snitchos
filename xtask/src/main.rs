@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 
 const KERNEL_TARGET: &str = "riscv64gc-unknown-none-elf";
 const KERNEL_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/kernel";
-const HOST_READER_BIN: &str = "target/debug/host-reader";
+const COLLECTOR_BIN: &str = "target/debug/collector";
 const TELEMETRY_SOCKET: &str = "/tmp/snitch-telemetry.sock";
 
 /// Orchestration commands for the SnitchOS workspace.
@@ -21,10 +21,16 @@ enum Cmd {
     Build,
     /// Build the kernel and run it in QEMU.
     Up,
-    /// Build and run the host-reader. Any trailing args are forwarded
-    /// to host-reader (e.g. `cargo xtask reader -- --pretty`).
+    /// Build and run the collector (telemetry consumer). Trailing args
+    /// are forwarded to the collector, e.g.
+    /// `cargo xtask collect -- --text --otlp http://localhost:4318`.
+    Collect {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Build and run the collector in text-only mode (decoded frames
+    /// printed to stdout). Shorthand for `collect -- --text`.
     Reader {
-        /// Args forwarded to host-reader.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -34,7 +40,12 @@ fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Build => build(),
         Cmd::Up => up(),
-        Cmd::Reader { args } => reader(&args),
+        Cmd::Collect { args } => run_collector(&args),
+        Cmd::Reader { args } => {
+            let mut all = vec!["--text".to_string()];
+            all.extend(args);
+            run_collector(&all)
+        }
     }
 }
 
@@ -59,7 +70,8 @@ fn up() -> ExitCode {
     let _ = std::fs::remove_file(TELEMETRY_SOCKET);
 
     // wait=on blocks QEMU at startup until a telemetry client connects.
-    // Run `cargo xtask reader` in another terminal to satisfy that wait.
+    // Run `cargo xtask collect` (or `cargo xtask reader`) in another
+    // terminal to satisfy that wait.
     let chardev_arg =
         format!("socket,path={TELEMETRY_SOCKET},server=on,wait=on,id=telemetry");
 
@@ -77,7 +89,7 @@ fn up() -> ExitCode {
             // which has a different register set we don't implement.
             "-global", "virtio-mmio.force-legacy=false",
             // Telemetry channel: a virtio-console wired to a Unix domain
-            // socket on the host. host-reader connects to this socket.
+            // socket on the host. The collector connects to this socket.
             "-chardev", &chardev_arg,
             "-device", "virtio-serial-device",
             "-device", "virtconsole,chardev=telemetry",
@@ -91,19 +103,19 @@ fn up() -> ExitCode {
     }
 }
 
-fn reader(extra_args: &[String]) -> ExitCode {
+fn run_collector(extra_args: &[String]) -> ExitCode {
     let build = Command::new("cargo")
-        .args(["build", "-p", "host-reader"])
+        .args(["build", "-p", "collector"])
         .status()
         .expect("failed to invoke cargo");
     if !build.success() {
         return ExitCode::from(1);
     }
 
-    let status = Command::new(HOST_READER_BIN)
+    let status = Command::new(COLLECTOR_BIN)
         .args(extra_args)
         .status()
-        .expect("failed to invoke host-reader");
+        .expect("failed to invoke collector");
     if status.success() {
         ExitCode::SUCCESS
     } else {

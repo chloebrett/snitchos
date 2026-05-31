@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "protocol", "host-reader", "xtask"]
+members = ["kernel", "protocol", "collector", "xtask"]
 
 [profile.dev]
 panic = "abort"

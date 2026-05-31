@@ -12,7 +12,7 @@ Working:
 - DTB parse (memory, UART, timebase)
 - virtio-console driver: discovery + modern-spec handshake + virtqueue + TX
 - `protocol` crate: 7-variant postcard-encoded `Frame` enum, hosted TDD
-- `host-reader`: connects to QEMU's Unix socket; decodes frames from a stream
+- `collector`: connects to QEMU's Unix socket; decodes frames from a stream
 - `tracing` module: timestamps from the `time` CSR, string intern table, RAII-guarded spans via the `span!` macro, pre-init buffering with a `Dropped { count }` checkpoint after flush
 - `kernel.boot` opens at boot with `console_init` + `telemetry_init` sub-spans, then a `kernel.heartbeat` span emitted once per timebase tick
 - `xtask` orchestration: `cargo xtask up` / `cargo xtask reader`
@@ -30,7 +30,7 @@ Use two terminals:
 # reader connects in terminal B.
 cargo xtask up
 
-# Terminal B — host-reader. Connects to the telemetry socket,
+# Terminal B — collector. Connects to the telemetry socket,
 # decodes Frames, prints them.
 cargo xtask reader
 
@@ -45,7 +45,7 @@ Quit QEMU with `Ctrl-A x`.
 ```
 cargo xtask build      # build the kernel ELF
 cargo xtask up         # build kernel + run in QEMU (telemetry waits for reader)
-cargo xtask reader     # build + run host-reader
+cargo xtask reader     # build + run collector
 cargo xtask reader -- --pretty   # multi-line debug output
 cargo xtask --help
 ```
@@ -62,7 +62,7 @@ cargo xtask --help
 ```
 kernel/         no_std RISC-V S-mode kernel; entry.S, linker.ld, drivers
 protocol/       postcard-encoded telemetry Frame enum (no_std)
-host-reader/    host-side reader; connects to the telemetry socket
+collector/    host-side reader; connects to the telemetry socket
 xtask/          orchestration commands (this file's "Quick start")
 docs/           project design + milestone plans
 plans/          in-progress implementation plans
