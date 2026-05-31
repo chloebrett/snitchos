@@ -40,7 +40,7 @@
 ## the bit-number bug
 
 - wrote `0b00010000` for "bit 5" (THR empty). actually wrote bit 4.
-- the confusion: assumed 2^5 = 16. it's 32.
+- the confusion: assumed 0b00010000 = 2^5, it's actually 2^4.
 - bit numbering is 0-indexed — "bit N" is the one with value 2^N. so:
   - bit 0 = value 1
   - bit 4 = value 16 = `0b00010000`
@@ -91,7 +91,7 @@
 
 ## what i learned
 
-- linker scripts and entry assembly were *the* learning, not boring detail. write them by hand once.
+- linker scripts and entry assembly were _the_ learning, not boring detail. write them by hand once.
 - bit-numbering off-by-ones are silent and devastating.
 - volatile in Rust is a property of the access, not the type. more honest than C.
 - `unsafe` is documentation, not just permission.
