@@ -9,12 +9,12 @@
 
 services:
   tempo:
-    image: grafana/tempo:latest
+    image: grafana/tempo:2.6.0
     container_name: snitchos-tempo
     command: -config.file=/etc/tempo.yaml
     volumes:
       - ./tempo.yaml:/etc/tempo.yaml:ro
-      - tempo-data:/tmp/tempo
+      - tempo-data:/var/tempo
     ports:
       - "3200:3200"   # Tempo HTTP API (Grafana queries here).
       - "4318:4318"   # OTLP/HTTP receiver (collector POSTs here).

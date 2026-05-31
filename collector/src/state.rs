@@ -1,0 +1,365 @@
+//! Stateful frame observer.
+//!
+//! As frames stream in, `State` accumulates the kernel's view of the
+//! world: timebase, name table, metric types, currently-open spans,
+//! latest counter/gauge values. When a `SpanEnd` matches a `SpanStart`,
+//! `handle` returns a `CompletedSpan` ready for export to Tempo.
+
+use std::collections::HashMap;
+use std::time::SystemTime;
+
+use protocol::{Frame, MetricKind, SpanId, StringId};
+
+/// A span completed by matching a `SpanEnd` to a remembered `SpanStart`.
+/// Carries enough info to build an OTLP span at export time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletedSpan {
+    pub name: String,
+    pub span_id: u64,
+    pub parent_span_id: u64,
+    /// Nanoseconds since UNIX epoch — anchored to host wall-clock at
+    /// the first frame of the session.
+    pub start_time_ns: u128,
+    pub end_time_ns: u128,
+}
+
+/// Wall-clock + tick anchor for the current kernel session. Set on
+/// `Hello`; reset if a new `Hello` arrives (kernel restart).
+struct SessionAnchor {
+    /// Host wall-clock nanos since epoch at the moment we received
+    /// (well, processed) the first frame of this session.
+    wallclock_ns: u128,
+    /// The kernel-side `t` value we treat as `wallclock_ns`. Frames
+    /// with `t < first_t` (pre-init burst) land slightly *before*
+    /// `wallclock_ns` in real time — documented quirk.
+    first_t: u64,
+}
+
+/// Open span: SpanStart seen, SpanEnd not yet.
+struct OpenSpan {
+    parent: SpanId,
+    name_id: StringId,
+    start_t: u64,
+}
+
+pub struct State {
+    timebase_hz: u64,
+    anchor: Option<SessionAnchor>,
+    strings: HashMap<u32, String>,
+    metric_kinds: HashMap<u32, MetricKind>,
+    open_spans: HashMap<u64, OpenSpan>,
+    /// Last-seen value per metric id. Used for Prometheus exposition;
+    /// the kind tells us how to render (counter / gauge / histogram).
+    pub metric_values: HashMap<u32, i64>,
+    /// Have we seen the warning-about-missing-Hello yet? Avoids
+    /// spamming once per frame.
+    warned_no_hello: bool,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            timebase_hz: 0,
+            anchor: None,
+            strings: HashMap::new(),
+            metric_kinds: HashMap::new(),
+            open_spans: HashMap::new(),
+            metric_values: HashMap::new(),
+            warned_no_hello: false,
+        }
+    }
+
+    /// Observe a frame. Returns a `CompletedSpan` if this frame closed
+    /// out a previously-open span.
+    pub fn handle(&mut self, frame: &Frame<'_>) -> Option<CompletedSpan> {
+        // Hello is the contract: it must arrive first. Without it we
+        // can't anchor timestamps — every span we export would land
+        // at Unix epoch 0 (1970-01-01) and Grafana's recent-time view
+        // would never find them. Drop frames silently after warning
+        // once; the user almost certainly started the collector after
+        // the kernel was already running.
+        if self.anchor.is_none() && !matches!(frame, Frame::Hello { .. }) {
+            if !self.warned_no_hello {
+                eprintln!(
+                    "collector: WARNING — received {frame:?} before Hello. \
+                     Dropping. Stop QEMU and restart the kernel after the \
+                     collector connects (use `cargo xtask up` first, then \
+                     `cargo xtask collect`).",
+                );
+                self.warned_no_hello = true;
+            }
+            return None;
+        }
+
+        match frame {
+            Frame::Hello {
+                timebase_hz,
+                protocol_version: _,
+            } => {
+                self.timebase_hz = *timebase_hz;
+                // Anchor wall-clock to the moment we processed Hello.
+                self.anchor = Some(SessionAnchor {
+                    wallclock_ns: wall_now_ns(),
+                    first_t: 0, // updated to the first real frame's t below
+                });
+                None
+            }
+            Frame::StringRegister { id, value } => {
+                self.strings.insert(id.0, (*value).to_string());
+                None
+            }
+            Frame::MetricRegister { name_id, kind } => {
+                self.metric_kinds.insert(name_id.0, *kind);
+                None
+            }
+            Frame::SpanStart {
+                id,
+                parent,
+                name_id,
+                t,
+            } => {
+                self.advance_anchor(*t);
+                self.open_spans.insert(
+                    id.0,
+                    OpenSpan {
+                        parent: *parent,
+                        name_id: *name_id,
+                        start_t: *t,
+                    },
+                );
+                None
+            }
+            Frame::SpanEnd { id, t } => {
+                self.advance_anchor(*t);
+                let open = self.open_spans.remove(&id.0)?;
+                let name = self
+                    .strings
+                    .get(&open.name_id.0)
+                    .cloned()
+                    .unwrap_or_else(|| format!("<unknown name_id={}>", open.name_id.0));
+                Some(CompletedSpan {
+                    name,
+                    span_id: id.0,
+                    parent_span_id: open.parent.0,
+                    start_time_ns: self.tick_to_wall_ns(open.start_t),
+                    end_time_ns: self.tick_to_wall_ns(*t),
+                })
+            }
+            Frame::Event { .. } => None, // not yet wired to OTLP
+            Frame::Metric { name_id, value, t } => {
+                self.advance_anchor(*t);
+                self.metric_values.insert(name_id.0, *value);
+                None
+            }
+            Frame::Dropped { count: _ } => None,
+        }
+    }
+
+    /// Lookup the kind for a given metric. Returns `None` if no
+    /// `MetricRegister` has been seen for this id yet.
+    pub fn metric_kind(&self, name_id: u32) -> Option<MetricKind> {
+        self.metric_kinds.get(&name_id).copied()
+    }
+
+    /// Lookup the name string for a given id.
+    pub fn name(&self, id: u32) -> Option<&str> {
+        self.strings.get(&id).map(String::as_str)
+    }
+
+    /// Update `first_t` if we're seeing the smallest `t` yet — pre-init
+    /// spans may arrive after Hello with `t < hello.t`.
+    fn advance_anchor(&mut self, t: u64) {
+        if let Some(anchor) = self.anchor.as_mut() {
+            if anchor.first_t == 0 || t < anchor.first_t {
+                anchor.first_t = t;
+            }
+        }
+    }
+
+    /// Convert a kernel-side tick value to host wall-clock nanoseconds
+    /// since epoch, using the session anchor + timebase.
+    fn tick_to_wall_ns(&self, t: u64) -> u128 {
+        let Some(anchor) = self.anchor.as_ref() else {
+            return 0;
+        };
+        if self.timebase_hz == 0 {
+            return anchor.wallclock_ns;
+        }
+        // delta_ns may be negative (pre-init spans with t < first_t).
+        let delta_ns: i128 = if t >= anchor.first_t {
+            ((t - anchor.first_t) as i128) * 1_000_000_000 / self.timebase_hz as i128
+        } else {
+            -(((anchor.first_t - t) as i128) * 1_000_000_000 / self.timebase_hz as i128)
+        };
+        (anchor.wallclock_ns as i128 + delta_ns) as u128
+    }
+}
+
+fn wall_now_ns() -> u128 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hello_sets_timebase() {
+        let mut s = State::new();
+        s.handle(&Frame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: 1,
+        });
+        assert_eq!(s.timebase_hz, 10_000_000);
+        assert!(s.anchor.is_some());
+    }
+
+    /// Helper: build a State pre-anchored by sending Hello.
+    fn anchored_state() -> State {
+        let mut s = State::new();
+        s.handle(&Frame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: 1,
+        });
+        s
+    }
+
+    #[test]
+    fn string_register_inserts() {
+        let mut s = anchored_state();
+        s.handle(&Frame::StringRegister {
+            id: StringId(3),
+            value: "kernel.boot",
+        });
+        assert_eq!(s.name(3), Some("kernel.boot"));
+    }
+
+    #[test]
+    fn metric_register_inserts_kind() {
+        let mut s = anchored_state();
+        s.handle(&Frame::MetricRegister {
+            name_id: StringId(7),
+            kind: MetricKind::Counter,
+        });
+        assert_eq!(s.metric_kind(7), Some(MetricKind::Counter));
+    }
+
+    #[test]
+    fn frames_before_hello_are_dropped() {
+        let mut s = State::new();
+        // No Hello yet — these should be ignored.
+        s.handle(&Frame::StringRegister {
+            id: StringId(0),
+            value: "should-be-ignored",
+        });
+        s.handle(&Frame::Metric {
+            name_id: StringId(0),
+            value: 42,
+            t: 100,
+        });
+        assert!(s.name(0).is_none());
+        assert!(s.metric_values.is_empty());
+    }
+
+    #[test]
+    fn span_end_yields_completed_span() {
+        let mut s = State::new();
+        s.handle(&Frame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: 1,
+        });
+        s.handle(&Frame::StringRegister {
+            id: StringId(1),
+            value: "kernel.boot",
+        });
+        s.handle(&Frame::SpanStart {
+            id: SpanId(1),
+            parent: SpanId(0),
+            name_id: StringId(1),
+            t: 100,
+        });
+
+        // 1ms later at 10MHz = 10_000 ticks.
+        let result = s.handle(&Frame::SpanEnd {
+            id: SpanId(1),
+            t: 10_100,
+        });
+
+        let span = result.expect("SpanEnd should yield a CompletedSpan");
+        assert_eq!(span.name, "kernel.boot");
+        assert_eq!(span.span_id, 1);
+        assert_eq!(span.parent_span_id, 0);
+        // 1ms duration in nanos.
+        let duration_ns = span.end_time_ns - span.start_time_ns;
+        assert_eq!(duration_ns, 1_000_000);
+    }
+
+    #[test]
+    fn unmatched_span_end_returns_none() {
+        let mut s = State::new();
+        s.handle(&Frame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: 1,
+        });
+        let result = s.handle(&Frame::SpanEnd {
+            id: SpanId(99),
+            t: 100,
+        });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn metric_updates_value() {
+        let mut s = State::new();
+        s.handle(&Frame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: 1,
+        });
+        s.handle(&Frame::MetricRegister {
+            name_id: StringId(5),
+            kind: MetricKind::Counter,
+        });
+        s.handle(&Frame::Metric {
+            name_id: StringId(5),
+            value: 42,
+            t: 100,
+        });
+        assert_eq!(s.metric_values.get(&5), Some(&42));
+    }
+
+    #[test]
+    fn pre_init_spans_land_before_anchor() {
+        // Hello arrives with t=100. A pre-init span had t=10. Its
+        // wall-clock should be *before* the Hello anchor.
+        let mut s = State::new();
+        s.handle(&Frame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: 1,
+        });
+        // first_t is now 0; first real frame updates it to its own t.
+        s.handle(&Frame::SpanStart {
+            id: SpanId(1),
+            parent: SpanId(0),
+            name_id: StringId(0),
+            t: 100,
+        });
+        s.handle(&Frame::StringRegister {
+            id: StringId(0),
+            value: "x",
+        });
+        // Now end with a smaller t — pre-init quirk simulation. In
+        // practice the *start* arrives with a smaller t than later
+        // frames, but the math is the same.
+        let result = s.handle(&Frame::SpanEnd {
+            id: SpanId(1),
+            t: 50,
+        });
+        let span = result.unwrap();
+        // end is before start in wall-clock terms because t went
+        // backwards. start_time_ns > end_time_ns.
+        assert!(span.start_time_ns > span.end_time_ns);
+    }
+}

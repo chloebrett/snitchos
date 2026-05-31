@@ -11,15 +11,20 @@ use std::os::unix::net::UnixStream;
 use clap::Parser;
 use protocol::Frame;
 
+mod otlp;
+mod state;
+
 const SOCKET_PATH: &str = "/tmp/snitch-telemetry.sock";
 
 /// Connect to the kernel's telemetry socket, decode `Frame`s, and route
-/// them to the configured output sinks. At least one of `--text`,
-/// `--otlp`, or `--prometheus` must be enabled.
+/// them to the configured output sinks. OTLP export is on by default
+/// (pointing at the docker-compose Tempo instance); disable with
+/// `--no-otlp`. Prometheus exposition is off by default until v0.2
+/// step 7 is implemented.
 #[derive(Parser)]
 #[command(about, version)]
 struct Args {
-    /// Print decoded frames to stdout.
+    /// Print decoded frames to stdout in addition to other outputs.
     #[arg(long)]
     text: bool,
 
@@ -27,10 +32,14 @@ struct Args {
     #[arg(long)]
     pretty: bool,
 
-    /// OTLP/HTTP endpoint for trace export (e.g.
-    /// `http://localhost:4318`). NOT YET IMPLEMENTED.
+    /// OTLP/HTTP endpoint for trace export. Default matches the
+    /// docker-compose Tempo instance.
+    #[arg(long, default_value = "http://localhost:4318")]
+    otlp: String,
+
+    /// Disable OTLP export (e.g. for the `reader` xtask shortcut).
     #[arg(long)]
-    otlp: Option<String>,
+    no_otlp: bool,
 
     /// TCP port to serve Prometheus `/metrics` on. NOT YET IMPLEMENTED.
     #[arg(long)]
@@ -40,24 +49,31 @@ struct Args {
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
-    if !args.text && args.otlp.is_none() && args.prometheus.is_none() {
-        eprintln!(
-            "error: must specify at least one output: --text, --otlp <url>, or --prometheus <port>",
-        );
-        std::process::exit(2);
-    }
-
-    if let Some(endpoint) = &args.otlp {
-        eprintln!("warning: --otlp {endpoint} not yet implemented; ignoring");
-    }
+    let exporter = (!args.no_otlp).then(|| otlp::Exporter::new(&args.otlp));
     if let Some(port) = args.prometheus {
         eprintln!("warning: --prometheus {port} not yet implemented; ignoring");
     }
 
+    eprintln!("collector: connecting to {SOCKET_PATH}");
+    if exporter.is_some() {
+        eprintln!("collector: exporting OTLP traces to {}", &args.otlp);
+        eprintln!("collector: view traces at http://localhost:3000 (Grafana → Explore → Tempo)");
+    }
+    if args.text {
+        eprintln!("collector: text output enabled");
+    }
+
     let mut stream = UnixStream::connect(SOCKET_PATH)?;
+    eprintln!("collector: connected; waiting for frames");
+    let mut state = state::State::new();
     decode_stream(&mut stream, |frame| {
         if args.text {
             print_frame(frame, args.pretty);
+        }
+        if let Some(completed) = state.handle(frame) {
+            if let Some(exporter) = exporter.as_ref() {
+                exporter.export(&completed);
+            }
         }
     })?;
 

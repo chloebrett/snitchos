@@ -57,11 +57,13 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             // SAFETY: dtb came from the DTB we just parsed.
             match unsafe { virtio_console::init(&dtb) } {
                 Ok(()) => {
-                    // Flush the spans we've buffered so far (kernel.boot
+                    // Hello MUST be the first frame on the wire — the host
+                    // anchors session wall-clock to its arrival. Then flush
+                    // the spans we've been buffering so far (kernel.boot
                     // start, console_init pair, telemetry_init start).
+                    tracing::send_hello(timebase_hz as u32);
                     tracing::flush_pre_init();
                     println!("virtio-console: ready");
-                    tracing::send_hello(timebase_hz as u32);
                 }
                 Err(e) => println!("virtio-console: init failed: {:?}", e),
             }

@@ -8,3 +8,6 @@ publish = false
 protocol = { path = "../protocol" }
 postcard = "1"
 clap = { version = "4", features = ["derive"] }
+prost = "0.13"
+ureq = "2"
+fastrand = "2"
