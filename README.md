@@ -17,3 +17,9 @@ cargo objdump -p kernel --target riscv64gc-unknown-none-elf -- -h
   - Ctrl-A c — toggle to QEMU's monitor (a debug shell). Same combo again to return.
   - Ctrl-A h — help
 ```
+
+```
+qemu-system-riscv64 -machine virt -machine dumpdtb=virt.dtb
+brew install dtc
+dtc -I dtb -O dts virt.dtb -o virt.dts
+```
