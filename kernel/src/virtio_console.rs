@@ -15,7 +15,18 @@ const REG_DEVICE_FEATURES: usize = 0x010;
 const REG_DEVICE_FEATURES_SEL: usize = 0x014;
 const REG_DRIVER_FEATURES: usize = 0x020;
 const REG_DRIVER_FEATURES_SEL: usize = 0x024;
+const REG_QUEUE_SEL: usize = 0x030;
+const REG_QUEUE_NUM_MAX: usize = 0x034;
+const REG_QUEUE_NUM: usize = 0x038;
+const REG_QUEUE_READY: usize = 0x044;
+const REG_QUEUE_NOTIFY: usize = 0x050;
 const REG_STATUS: usize = 0x070;
+const REG_QUEUE_DESC_LOW: usize = 0x080;
+const REG_QUEUE_DESC_HIGH: usize = 0x084;
+const REG_QUEUE_DRIVER_LOW: usize = 0x090;
+const REG_QUEUE_DRIVER_HIGH: usize = 0x094;
+const REG_QUEUE_DEVICE_LOW: usize = 0x0A0;
+const REG_QUEUE_DEVICE_HIGH: usize = 0x0A4;
 
 // --- Status register bits. The device's state machine. ---
 
@@ -41,6 +52,89 @@ const DEVICE_ID_CONSOLE: u32 = 3;
 /// drivers MUST accept this; if the device doesn't advertise it,
 /// the device is too old for us.
 const F_VERSION_1: u64 = 1 << 32;
+
+/// Descriptor flags. Used in the `flags` field of `VirtqDesc`.
+#[allow(dead_code)]
+const DESC_F_NEXT: u16 = 0x1;
+#[allow(dead_code)]
+const DESC_F_WRITE: u16 = 0x2;
+#[allow(dead_code)]
+const DESC_F_INDIRECT: u16 = 0x4;
+
+/// virtio-console queue indices (no MULTIPORT feature).
+const QUEUE_RX: u32 = 0;
+const QUEUE_TX: u32 = 1;
+
+/// Number of descriptors in our TX queue. Power of 2 required by spec.
+const QSIZE: usize = 8;
+
+/// One descriptor: "buffer at `addr` of `len` bytes, with these flags,
+/// optionally chained to the descriptor at index `next`."
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+struct VirtqDesc {
+  addr: u64,
+  len: u32,
+  flags: u16,
+  next: u16,
+}
+
+/// Available ring: driver tells the device which descriptors to look at.
+#[derive(Copy, Clone)]
+#[repr(C)]
+struct VirtqAvail {
+  flags: u16,
+  idx: u16,
+  ring: [u16; QSIZE],
+  used_event: u16,
+}
+
+/// Used ring entry: "descriptor `id` is done; `len` bytes were written
+/// (only meaningful for device-to-driver buffers)."
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+struct VirtqUsedElem {
+  id: u32,
+  len: u32,
+}
+
+/// Used ring: device tells the driver which descriptors are done.
+#[derive(Copy, Clone)]
+#[repr(C)]
+struct VirtqUsed {
+  flags: u16,
+  idx: u16,
+  ring: [VirtqUsedElem; QSIZE],
+  avail_event: u16,
+}
+
+/// All three ring regions for one queue, in one statically-allocated
+/// block. The outer 16-byte alignment satisfies the descriptor table's
+/// alignment requirement; the inner sub-regions inherit it.
+#[repr(C, align(16))]
+struct Virtqueue {
+  desc: [VirtqDesc; QSIZE],
+  avail: VirtqAvail,
+  used: VirtqUsed,
+}
+
+/// Static TX queue for the virtio-console. Lives in `.bss`. Single
+/// instance — we have one console and one TX path in v0.1.
+static mut TX_QUEUE: Virtqueue = Virtqueue {
+  desc: [VirtqDesc { addr: 0, len: 0, flags: 0, next: 0 }; QSIZE],
+  avail: VirtqAvail {
+    flags: 0,
+    idx: 0,
+    ring: [0; QSIZE],
+    used_event: 0,
+  },
+  used: VirtqUsed {
+    flags: 0,
+    idx: 0,
+    ring: [VirtqUsedElem { id: 0, len: 0 }; QSIZE],
+    avail_event: 0,
+  },
+};
 
 /// Read a 32-bit virtio-mmio register.
 ///
@@ -146,6 +240,9 @@ pub enum InitError {
   /// We wrote `FEATURES_OK` but the device cleared it back — meaning it
   /// can't agree to the feature set we offered.
   FeaturesRejected,
+  /// Device's `QueueNumMax` is smaller than the queue size we want.
+  /// Shouldn't happen — QEMU advertises max 1024.
+  QueueTooSmall,
 }
 
 /// Drive the virtio-mmio handshake on a discovered console device up
@@ -204,8 +301,39 @@ pub unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
       return Err(InitError::FeaturesRejected);
     }
 
-    // Suppress unused-import warning until step 7 (DRIVER_OK).
-    let _ = STATUS_DRIVER_OK;
+    // 7. Virtqueue setup for the TX queue.
+    write_reg(base, REG_QUEUE_SEL, QUEUE_TX);
+    let max = read_reg(base, REG_QUEUE_NUM_MAX);
+    if (max as usize) < QSIZE {
+      write_reg(base, REG_STATUS, status | STATUS_FAILED);
+      return Err(InitError::QueueTooSmall);
+    }
+    write_reg(base, REG_QUEUE_NUM, QSIZE as u32);
+
+    // Tell the device where our three queue regions live. virtual=physical
+    // here because the MMU is off.
+    let desc_addr = &raw const TX_QUEUE.desc as u64;
+    let avail_addr = &raw const TX_QUEUE.avail as u64;
+    let used_addr = &raw const TX_QUEUE.used as u64;
+
+    write_reg(base, REG_QUEUE_DESC_LOW, desc_addr as u32);
+    write_reg(base, REG_QUEUE_DESC_HIGH, (desc_addr >> 32) as u32);
+    write_reg(base, REG_QUEUE_DRIVER_LOW, avail_addr as u32);
+    write_reg(base, REG_QUEUE_DRIVER_HIGH, (avail_addr >> 32) as u32);
+    write_reg(base, REG_QUEUE_DEVICE_LOW, used_addr as u32);
+    write_reg(base, REG_QUEUE_DEVICE_HIGH, (used_addr >> 32) as u32);
+
+    // Queue is live.
+    write_reg(base, REG_QUEUE_READY, 1);
+
+    // 8. DRIVER_OK: "I'm fully set up; treat me as a working driver."
+    status |= STATUS_DRIVER_OK;
+    write_reg(base, REG_STATUS, status);
+
+    // Suppress unused-warning on REG_QUEUE_NOTIFY / QUEUE_RX until step 8
+    // (transmit) — they exist in the layout but we don't ring/notify yet.
+    let _ = REG_QUEUE_NOTIFY;
+    let _ = QUEUE_RX;
   }
   Ok(())
 }
