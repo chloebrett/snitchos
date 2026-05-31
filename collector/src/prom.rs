@@ -57,6 +57,8 @@ pub fn serve(state: Arc<Mutex<State>>, port: u16) -> std::io::Result<()> {
 /// Prometheus forbids dots.
 fn format_metrics(state: &State) -> String {
     let mut out = String::new();
+
+    // Counters and gauges — single value per metric.
     for (name_id, value) in state.metric_values.iter() {
         let Some(raw_name) = state.name(*name_id) else {
             continue;
@@ -64,16 +66,47 @@ fn format_metrics(state: &State) -> String {
         let Some(kind) = state.metric_kind(*name_id) else {
             continue;
         };
+        if matches!(kind, MetricKind::Histogram) {
+            continue; // handled below
+        }
         let prom_name = sanitize(raw_name);
         let kind_str = match kind {
             MetricKind::Counter => "counter",
             MetricKind::Gauge => "gauge",
-            MetricKind::Histogram => "histogram",
+            MetricKind::Histogram => unreachable!(),
         };
         out.push_str(&format!("# HELP {prom_name} {raw_name}\n"));
         out.push_str(&format!("# TYPE {prom_name} {kind_str}\n"));
         out.push_str(&format!("{prom_name} {value}\n"));
     }
+
+    // Histograms — bucket counts (cumulative), sum, count.
+    for (name_id, hist) in state.histograms.iter() {
+        let Some(raw_name) = state.name(*name_id) else {
+            continue;
+        };
+        let prom_name = sanitize(raw_name);
+        out.push_str(&format!("# HELP {prom_name} {raw_name}\n"));
+        out.push_str(&format!("# TYPE {prom_name} histogram\n"));
+
+        // Prometheus expects cumulative bucket counts.
+        let mut cumulative: u64 = 0;
+        for (i, &bound) in State::HISTOGRAM_BOUNDS.iter().enumerate() {
+            if let Some(&c) = hist.buckets.get(i) {
+                cumulative += c;
+            }
+            out.push_str(&format!(
+                "{prom_name}_bucket{{le=\"{bound}\"}} {cumulative}\n"
+            ));
+        }
+        cumulative += hist.inf_count;
+        out.push_str(&format!(
+            "{prom_name}_bucket{{le=\"+Inf\"}} {cumulative}\n"
+        ));
+        out.push_str(&format!("{prom_name}_sum {}\n", hist.sum));
+        out.push_str(&format!("{prom_name}_count {}\n", hist.count));
+    }
+
     out
 }
 

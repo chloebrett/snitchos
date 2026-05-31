@@ -89,6 +89,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let heartbeat_count = tracing::register_counter("snitchos.heartbeat.count");
     let intern_used = tracing::register_gauge("snitchos.intern.strings_used");
     let time_ticks = tracing::register_gauge("snitchos.time.ticks");
+    let irq_duration = tracing::register_histogram("snitchos.irq.timer.duration_ticks");
 
     // Arm the periodic timer and enable interrupts. From here on, the
     // CPU wakes us via timer IRQ instead of us spinning on the cycle
@@ -111,6 +112,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(heartbeat_count, count);
             tracing::emit_metric(intern_used, tracing::intern_count() as i64);
             tracing::emit_metric(time_ticks, tracing::timestamp() as i64);
+            // Histogram observation: how long the last IRQ took. The
+            // handler measured rdtime delta; main thread emits.
+            let dur = trap::LAST_IRQ_DURATION.load(Ordering::Relaxed);
+            tracing::emit_metric(irq_duration, dur as i64);
         }
     }
 }

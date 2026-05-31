@@ -18,6 +18,47 @@ pub static TIMER_INTERVAL_TICKS: AtomicU64 = AtomicU64::new(0);
 /// Set by the timer IRQ handler; the main thread polls + clears.
 pub static TICK_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// Duration of the most recent timer IRQ in ticks. The IRQ handler
+/// measures `rdtime` at entry and exit; the main thread reads this
+/// after wake and emits a histogram observation. (We can't emit
+/// telemetry from the IRQ itself — would deadlock on the intern /
+/// virtio_console mutexes.)
+pub static LAST_IRQ_DURATION: AtomicU64 = AtomicU64::new(0);
+
+/// Abstract clock: read current time, schedule a future interrupt.
+/// One implementation today (`SstcClock`); the trait shape is here
+/// for when we add an SBI fallback or different platforms. Not yet
+/// plumbed through — `arm_timer` / `init_timer` use the raw CSR ops
+/// directly. Suppressed dead-code lint until that wiring lands.
+#[allow(dead_code)]
+pub trait Clock {
+    /// Monotonic ticks since boot (raw cycle counter from the `time` CSR).
+    fn now(&self) -> u64;
+    /// Schedule the next timer interrupt for when the cycle counter
+    /// reaches `deadline`. Implicitly acks any prior pending timer.
+    fn arm(&self, deadline: u64);
+}
+
+/// SSTC-based clock: reads `time` CSR directly, writes `stimecmp`
+/// (CSR 0x14d) to arm. No SBI round-trip.
+#[allow(dead_code)]
+pub struct SstcClock;
+
+impl Clock for SstcClock {
+    fn now(&self) -> u64 {
+        let t: u64;
+        unsafe {
+            asm!("rdtime {}", out(reg) t);
+        }
+        t
+    }
+    fn arm(&self, deadline: u64) {
+        unsafe {
+            asm!("csrw 0x14d, {}", in(reg) deadline);
+        }
+    }
+}
+
 /// Saved register state at trap entry. The assembly stores into these
 /// fields in this order; the Rust dispatcher reads them by name.
 ///
@@ -73,18 +114,25 @@ pub extern "C" fn trap_handler(_frame: *mut TrapFrame) {
     }
 }
 
-/// Timer IRQ handler. Kept tiny: arm the next deadline (which acks
-/// the current pending bit), then set a flag so the main thread knows
-/// to do the real work. **No locks taken here** — the main thread
-/// owns all telemetry emission.
+/// Timer IRQ handler. Kept tiny: measure duration, arm the next
+/// deadline (which acks the current pending bit), then set a flag so
+/// the main thread knows to do the real work. **No locks taken here**
+/// — the main thread owns all telemetry emission.
 fn handle_timer() {
-    let now: u64;
+    let start: u64;
     unsafe {
-        asm!("rdtime {}", out(reg) now);
+        asm!("rdtime {}", out(reg) start);
     }
+
     let interval = TIMER_INTERVAL_TICKS.load(Ordering::Relaxed);
-    arm_timer(now + interval);
+    arm_timer(start + interval);
     TICK_PENDING.store(true, Ordering::Relaxed);
+
+    let end: u64;
+    unsafe {
+        asm!("rdtime {}", out(reg) end);
+    }
+    LAST_IRQ_DURATION.store(end.wrapping_sub(start), Ordering::Relaxed);
 }
 
 /// One-time timer setup: set the interval, arm the first deadline,

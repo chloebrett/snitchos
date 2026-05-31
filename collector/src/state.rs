@@ -42,15 +42,50 @@ struct OpenSpan {
     start_t: u64,
 }
 
+/// A single histogram metric — buckets of observations.
+///
+/// Boundaries are inclusive upper bounds; `bucket[i]` counts the
+/// observations whose value is `<= boundaries[i]` and `> boundaries[i-1]`.
+/// On Prometheus exposition, we convert to cumulative counts as the
+/// format expects.
+#[derive(Debug, Default)]
+pub struct Histogram {
+    /// Counts in each bucket (non-cumulative).
+    pub buckets: Vec<u64>,
+    /// Observations exceeding the highest boundary (the `+Inf` bucket).
+    pub inf_count: u64,
+    /// Sum of all observed values.
+    pub sum: u64,
+    /// Total observations.
+    pub count: u64,
+}
+
+impl Histogram {
+    pub fn observe(&mut self, value: u64, boundaries: &[u64]) {
+        if self.buckets.len() != boundaries.len() {
+            self.buckets = vec![0; boundaries.len()];
+        }
+        let idx = boundaries.iter().position(|&b| value <= b);
+        match idx {
+            Some(i) => self.buckets[i] += 1,
+            None => self.inf_count += 1,
+        }
+        self.sum = self.sum.saturating_add(value);
+        self.count += 1;
+    }
+}
+
 pub struct State {
     timebase_hz: u64,
     anchor: Option<SessionAnchor>,
     strings: HashMap<u32, String>,
     metric_kinds: HashMap<u32, MetricKind>,
     open_spans: HashMap<u64, OpenSpan>,
-    /// Last-seen value per metric id. Used for Prometheus exposition;
-    /// the kind tells us how to render (counter / gauge / histogram).
+    /// Last-seen value per counter/gauge metric. Histograms go in
+    /// `histograms` instead.
     pub metric_values: HashMap<u32, i64>,
+    /// Histogram state per metric (bucket counts + sum + total).
+    pub histograms: HashMap<u32, Histogram>,
     /// Have we seen the warning-about-missing-Hello yet? Avoids
     /// spamming once per frame.
     warned_no_hello: bool,
@@ -65,9 +100,18 @@ impl State {
             metric_kinds: HashMap::new(),
             open_spans: HashMap::new(),
             metric_values: HashMap::new(),
+            histograms: HashMap::new(),
             warned_no_hello: false,
         }
     }
+
+    /// Default bucket boundaries for histogram observations. Exponential
+    /// from 100 ticks up to 1 million ticks, which spans the realistic
+    /// range for IRQ duration (typically hundreds of ticks) up to
+    /// "something is very wrong" territory.
+    pub const HISTOGRAM_BOUNDS: &'static [u64] = &[
+        100, 250, 500, 1_000, 2_500, 5_000, 10_000, 25_000, 100_000, 1_000_000,
+    ];
 
     /// Observe a frame. Returns a `CompletedSpan` if this frame closed
     /// out a previously-open span.
@@ -148,7 +192,18 @@ impl State {
             Frame::Event { .. } => None, // not yet wired to OTLP
             Frame::Metric { name_id, value, t } => {
                 self.advance_anchor(*t);
-                self.metric_values.insert(name_id.0, *value);
+                // Route histogram-kind metrics to the histogram table;
+                // counters/gauges to the value table.
+                match self.metric_kinds.get(&name_id.0).copied() {
+                    Some(MetricKind::Histogram) => {
+                        let hist = self.histograms.entry(name_id.0).or_default();
+                        let v = (*value).max(0) as u64;
+                        hist.observe(v, Self::HISTOGRAM_BOUNDS);
+                    }
+                    _ => {
+                        self.metric_values.insert(name_id.0, *value);
+                    }
+                }
                 None
             }
             Frame::Dropped { count: _ } => None,
