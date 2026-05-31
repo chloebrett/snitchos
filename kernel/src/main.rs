@@ -3,6 +3,7 @@
 
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicBool, Ordering};
 use fdt::Fdt;
 
 mod console;
@@ -31,9 +32,12 @@ global_asm!(include_str!("entry.S"));
 pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
   let dtb = unsafe { Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
 
-  console::init(dtb::uart_addr(&dtb));
+  let uart_addr = dtb::uart_addr(&dtb);
+  // SAFETY: uart_addr came from the DTB's ns16550a node, which OpenSBI
+  // promises is a real UART on this machine.
+  unsafe { console::init(uart_addr) };
 
-  dtb::print_info(&dtb);
+  dtb::print_info(&dtb, uart_addr);
 
   println!("I am alive");
 
@@ -44,19 +48,26 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
   }
 }
 
-/// Panic handler. Prints the panic info and parks forever.
-///
-/// Known weaknesses:
-/// - Uses `println!`, which locks the UART. A panic that fires while the
-///   UART mutex is held (e.g. from inside a `write_str`) will deadlock.
-/// - No recursion guard. If formatting `info` itself panics, we recurse
-///   into this handler indefinitely.
-/// - On a real board with a flaky UART, the panic message may never reach
-///   the user. Eventually we'd want a fallback emit path (a hardware reset
-///   button is sometimes the only correct answer).
+/// Recursion guard for the panic handler. Set on entry; if already set, we
+/// must already be panicking and shouldn't try to print again (formatting the
+/// panic info could itself panic, leading to infinite recursion).
+static PANICKING: AtomicBool = AtomicBool::new(false);
+
+/// Panic handler. Bypasses the UART mutex to avoid deadlocking if a panic
+/// fires mid-`println!` (the lock would already be held by the outer caller).
+/// Uses a recursion guard so a panic-during-panic doesn't infinite-loop.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-  println!("Kernel panic: {}", info);
+  if !PANICKING.swap(true, Ordering::Relaxed) {
+    // First time through. Print directly to a fresh UART, no lock.
+    //
+    // SAFETY: 0x10000000 is the NS16550A MMIO base on QEMU `virt`. Bypassing
+    // the lock means we may interleave with whatever was printing when the
+    // panic fired — accepted because we're already in a fatal state.
+    use core::fmt::Write;
+    let mut uart = unsafe { uart::Uart16550::new(0x10000000) };
+    let _ = writeln!(&mut uart, "Kernel panic: {}", info);
+  }
   loop {
     unsafe {
       asm!("wfi");

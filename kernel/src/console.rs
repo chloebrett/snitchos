@@ -19,8 +19,13 @@ pub static UART: spin::Once<spin::Mutex<Uart16550>> = spin::Once::new();
 
 /// Initialize the kernel console with the given UART MMIO base address.
 /// Safe to call exactly once; subsequent calls are no-ops thanks to `Once`.
-pub fn init(uart_addr: usize) {
-  UART.call_once(|| spin::Mutex::new(Uart16550::new(uart_addr)));
+///
+/// # Safety
+///
+/// `uart_addr` must be the MMIO base of a real NS16550A-compatible UART
+/// (see `Uart16550::new`).
+pub unsafe fn init(uart_addr: usize) {
+  UART.call_once(|| spin::Mutex::new(unsafe { Uart16550::new(uart_addr) }));
 }
 
 /// Print formatted output to the kernel console (no trailing newline).
@@ -35,7 +40,10 @@ macro_rules! print {
     if let Some(uart) = $crate::console::UART.get() {
       let _ = write!(&mut *uart.lock(), $($arg)*);
     } else {
-      let mut uart = $crate::uart::Uart16550::new(0x10000000);
+      // SAFETY: 0x10000000 is the NS16550A MMIO base on QEMU `virt`. The
+      // pre-init fallback only fires before `console::init` runs, so no
+      // other writer is using the device yet.
+      let mut uart = unsafe { $crate::uart::Uart16550::new(0x10000000) };
       let _ = write!(&mut uart, $($arg)*);
     }
   }};
@@ -50,7 +58,10 @@ macro_rules! println {
     if let Some(uart) = $crate::console::UART.get() {
       let _ = writeln!(&mut *uart.lock());
     } else {
-      let mut uart = $crate::uart::Uart16550::new(0x10000000);
+      // SAFETY: 0x10000000 is the NS16550A MMIO base on QEMU `virt`. The
+      // pre-init fallback only fires before `console::init` runs, so no
+      // other writer is using the device yet.
+      let mut uart = unsafe { $crate::uart::Uart16550::new(0x10000000) };
       let _ = writeln!(&mut uart);
     }
   }};
@@ -59,7 +70,10 @@ macro_rules! println {
     if let Some(uart) = $crate::console::UART.get() {
       let _ = writeln!(&mut *uart.lock(), $($arg)*);
     } else {
-      let mut uart = $crate::uart::Uart16550::new(0x10000000);
+      // SAFETY: 0x10000000 is the NS16550A MMIO base on QEMU `virt`. The
+      // pre-init fallback only fires before `console::init` runs, so no
+      // other writer is using the device yet.
+      let mut uart = unsafe { $crate::uart::Uart16550::new(0x10000000) };
       let _ = writeln!(&mut uart, $($arg)*);
     }
   }};

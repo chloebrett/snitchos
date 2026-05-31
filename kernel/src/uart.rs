@@ -30,7 +30,16 @@ pub struct Uart16550 {
 
 impl Uart16550 {
   /// Construct a driver for a UART at the given MMIO base address.
-  pub const fn new(base: usize) -> Self { Uart16550 { base } }
+  ///
+  /// # Safety
+  ///
+  /// `base` must be the MMIO base of a real NS16550A-compatible UART, and
+  /// the caller must ensure that any other code touching the same registers
+  /// either coordinates through this driver (e.g. via a shared `Mutex`) or
+  /// doesn't conflict. Constructing two `Uart16550`s pointing at the same
+  /// region without external coordination is undefined behavior at the
+  /// device-state level (the type system can't see it).
+  pub const unsafe fn new(base: usize) -> Self { Uart16550 { base } }
 
   /// Block until the transmit holding register is empty, then send one byte.
   ///

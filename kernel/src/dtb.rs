@@ -17,17 +17,26 @@ pub fn uart_addr(dtb: &Fdt) -> usize {
   uart.reg().unwrap().next().unwrap().starting_address as usize
 }
 
+/// CPU timebase frequency in Hz, parsed from the `cpus` node's
+/// `timebase-frequency` property. Manual decode because `fdt` 0.1.5 doesn't
+/// surface it as a typed accessor.
+pub fn timebase_hz(dtb: &Fdt) -> u32 {
+  dtb
+    .cpus()
+    .next()
+    .and_then(|c| c.properties().find(|p| p.name == "timebase-frequency"))
+    .and_then(|p| {
+      let bytes = p.value;
+      (bytes.len() == 4).then(|| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    })
+    .unwrap_or(0)
+}
+
 /// Print the load-bearing values we extract from the DTB: memory regions,
 /// the CPU timebase frequency, and the UART MMIO range. Mostly a v0.1
 /// sanity-check — once we wire these into the real allocator, clock, and
 /// driver registry, this function goes away.
-///
-/// Known weaknesses:
-/// - Manually decodes `timebase-frequency` because the `fdt` 0.1.5 crate
-///   doesn't surface it as a typed accessor.
-/// - Re-runs `find_compatible("ns16550a")` after `uart_addr` already did
-///   the same lookup. Cheap but wasted work.
-pub fn print_info(dtb: &Fdt) {
+pub fn print_info(dtb: &Fdt, uart_addr: usize) {
   for region in dtb.memory().regions() {
     crate::println!(
       "memory: {:#x} ({} bytes)",
@@ -36,22 +45,7 @@ pub fn print_info(dtb: &Fdt) {
     );
   }
 
-  let timebase = dtb
-    .cpus()
-    .next()
-    .and_then(|c| c.properties().find(|p| p.name == "timebase-frequency"))
-    .and_then(|p| {
-      let bytes = p.value;
-      (bytes.len() == 4).then(|| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-    })
-    .unwrap_or(0);
-  crate::println!("timebase: {} Hz", timebase);
+  crate::println!("timebase: {} Hz", timebase_hz(dtb));
 
-  let uart = dtb.find_compatible(&["ns16550a"]).unwrap();
-  let uart_reg = uart.reg().unwrap().next().unwrap();
-  crate::println!(
-    "uart: {:#x} ({} bytes)",
-    uart_reg.starting_address as usize,
-    uart_reg.size.unwrap_or(0),
-  );
+  crate::println!("uart: {:#x}", uart_addr);
 }
