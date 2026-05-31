@@ -11,3 +11,4 @@ clap = { version = "4", features = ["derive"] }
 prost = "0.13"
 ureq = "2"
 fastrand = "2"
+tiny_http = "0.12"

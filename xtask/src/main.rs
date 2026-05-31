@@ -59,7 +59,11 @@ fn main() -> ExitCode {
         Cmd::Collect { args } => run_collector(&args),
         Cmd::Reader { args } => {
             // Reader = text-only debug view; no docker dependency.
-            let mut all = vec!["--text".to_string(), "--no-otlp".to_string()];
+            let mut all = vec![
+                "--text".to_string(),
+                "--no-otlp".to_string(),
+                "--no-prometheus".to_string(),
+            ];
             all.extend(args);
             run_collector(&all)
         }

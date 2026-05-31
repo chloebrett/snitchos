@@ -7,11 +7,13 @@
 
 use std::io::Read;
 use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use protocol::Frame;
 
 mod otlp;
+mod prom;
 mod state;
 
 const SOCKET_PATH: &str = "/tmp/snitch-telemetry.sock";
@@ -41,17 +43,24 @@ struct Args {
     #[arg(long)]
     no_otlp: bool,
 
-    /// TCP port to serve Prometheus `/metrics` on. NOT YET IMPLEMENTED.
+    /// TCP port to serve Prometheus `/metrics` on. Default matches
+    /// the docker-compose Prometheus scrape config.
+    #[arg(long, default_value_t = 9091)]
+    prometheus: u16,
+
+    /// Disable the Prometheus /metrics endpoint.
     #[arg(long)]
-    prometheus: Option<u16>,
+    no_prometheus: bool,
 }
 
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
     let exporter = (!args.no_otlp).then(|| otlp::Exporter::new(&args.otlp));
-    if let Some(port) = args.prometheus {
-        eprintln!("warning: --prometheus {port} not yet implemented; ignoring");
+    let state = Arc::new(Mutex::new(state::State::new()));
+
+    if !args.no_prometheus {
+        prom::serve(state.clone(), args.prometheus)?;
     }
 
     eprintln!("collector: connecting to {SOCKET_PATH}");
@@ -59,17 +68,20 @@ fn main() -> std::io::Result<()> {
         eprintln!("collector: exporting OTLP traces to {}", &args.otlp);
         eprintln!("collector: view traces at http://localhost:3000 (Grafana → Explore → Tempo)");
     }
+    if !args.no_prometheus {
+        eprintln!("collector: serving Prometheus /metrics on :{}", args.prometheus);
+    }
     if args.text {
         eprintln!("collector: text output enabled");
     }
 
     let mut stream = UnixStream::connect(SOCKET_PATH)?;
     eprintln!("collector: connected; waiting for frames");
-    let mut state = state::State::new();
     decode_stream(&mut stream, |frame| {
         if args.text {
             print_frame(frame, args.pretty);
         }
+        let mut state = state.lock().unwrap();
         if let Some(completed) = state.handle(frame) {
             if let Some(exporter) = exporter.as_ref() {
                 exporter.export(&completed);
