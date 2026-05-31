@@ -22,6 +22,20 @@ pub struct StringId(pub u32);
 #[serde(transparent)]
 pub struct SpanId(pub u64);
 
+/// Semantic kind of a metric. Declared once per metric name via
+/// `Frame::MetricRegister`; the host uses this to format the metric
+/// correctly (Prometheus counter vs gauge vs histogram).
+///
+/// Counters are monotonically increasing; gauges are snapshot values;
+/// histograms hold distributions (bucket encoding TBD when we have a
+/// histogram-emitting site).
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy, Hash)]
+pub enum MetricKind {
+  Counter,
+  Gauge,
+  Histogram,
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum Frame<'a> {
   Hello { timebase_hz: u64, protocol_version: u8 },
@@ -31,6 +45,7 @@ pub enum Frame<'a> {
   Metric { name_id: StringId, value: i64, t: u64 },
   Dropped { count: u32 },
   StringRegister { id: StringId, value: &'a str },
+  MetricRegister { name_id: StringId, kind: MetricKind },
 }
 
 #[cfg(test)]
@@ -148,5 +163,24 @@ mod tests {
     let decoded: Frame = postcard::from_bytes(used).unwrap();
 
     assert_eq!(frame, decoded);
+  }
+
+  /// Roundtrip a `Frame::MetricRegister` for each `MetricKind`.
+  /// Declares metric type once per name; subsequent `Metric` frames
+  /// look up the kind by name_id.
+  #[test]
+  fn metric_register_roundtrips() {
+    for kind in [MetricKind::Counter, MetricKind::Gauge, MetricKind::Histogram] {
+      let frame = Frame::MetricRegister {
+        name_id: StringId(7),
+        kind,
+      };
+
+      let mut buf = [0u8; 64];
+      let used = postcard::to_slice(&frame, &mut buf).unwrap();
+      let decoded: Frame = postcard::from_bytes(used).unwrap();
+
+      assert_eq!(frame, decoded);
+    }
   }
 }
