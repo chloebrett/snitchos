@@ -32,48 +32,52 @@ global_asm!(include_str!("entry.S"));
 ///   periodic work — the kernel just `wfi`s indefinitely once init prints out.
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
+    // DTB parse runs before the kernel.boot span: the parse needs to
+    // succeed before we even know where the UART is, and tracing isn't
+    // useful before there's a way to emit. Treat it as bootstrap.
     let dtb = unsafe { Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
+    let timebase_hz = dtb::timebase_hz(&dtb) as u64;
 
-    let uart_addr = dtb::uart_addr(&dtb);
-    // SAFETY: uart_addr came from the DTB's ns16550a node, which OpenSBI
-    // promises is a real UART on this machine.
-    unsafe { console::init(uart_addr) };
-
-    dtb::print_info(&dtb, uart_addr);
-
-    // SAFETY: dtb came from the DTB we just parsed; init does
-    // discovery + handshake + global handle setup.
-    match unsafe { virtio_console::init(&dtb) } {
-        Ok(()) => {
-            println!("virtio-console: ready");
-            send_hello(dtb::timebase_hz(&dtb));
-        }
-        Err(e) => println!("virtio-console: init failed: {:?}", e),
-    }
-
-    println!("I am alive");
-
-    println!("time: {}", tracing::timestamp());
-
-    let id_a = tracing::register_or_lookup("foo");
-    let id_b = tracing::register_or_lookup("bar");
-    let id_a_again = tracing::register_or_lookup("foo");
-    println!(
-        "ids: foo={:?} bar={:?} foo_again={:?}",
-        id_a, id_b, id_a_again
-    );
-
+    // Open kernel.boot, with sub-spans for each init phase. All frames
+    // emitted before virtio-console is ready get pre-init-buffered.
     {
         span!("kernel.boot");
+
+        let uart_addr = dtb::uart_addr(&dtb);
         {
-            span!("inner_step");
+            span!("console_init");
+            // SAFETY: uart_addr came from the DTB's ns16550a node.
+            unsafe { console::init(uart_addr) };
+        }
+
+        dtb::print_info(&dtb, uart_addr);
+
+        {
+            span!("telemetry_init");
+            // SAFETY: dtb came from the DTB we just parsed.
+            match unsafe { virtio_console::init(&dtb) } {
+                Ok(()) => {
+                    // Flush the spans we've buffered so far (kernel.boot
+                    // start, console_init pair, telemetry_init start).
+                    tracing::flush_pre_init();
+                    println!("virtio-console: ready");
+                    send_hello(timebase_hz as u32);
+                }
+                Err(e) => println!("virtio-console: init failed: {:?}", e),
+            }
         }
     }
 
+    println!("I am alive — entering heartbeat");
+
+    // Heartbeat loop: emit a span once per timebase tick (1 second on QEMU).
+    let mut next = tracing::timestamp() + timebase_hz;
     loop {
-        unsafe {
-            asm!("wfi");
+        while tracing::timestamp() < next {}
+        {
+            span!("kernel.heartbeat");
         }
+        next += timebase_hz;
     }
 }
 
