@@ -181,6 +181,9 @@ pub fn register_gauge(name: &'static str) -> StringId {
 }
 
 /// Register `name` as a Histogram metric.
+///
+/// Currently unused — wired up at v0.3 step 8 (IRQ duration metric).
+#[allow(dead_code)]
 pub fn register_histogram(name: &'static str) -> StringId {
     register_metric(name, MetricKind::Histogram)
 }

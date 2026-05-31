@@ -90,16 +90,21 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let intern_used = tracing::register_gauge("snitchos.intern.strings_used");
     let time_ticks = tracing::register_gauge("snitchos.time.ticks");
 
-    unsafe {
-        asm!("ebreak");
-    }
+    // Arm the periodic timer and enable interrupts. From here on, the
+    // CPU wakes us via timer IRQ instead of us spinning on the cycle
+    // counter.
+    //
+    // SAFETY: trap vector was installed at the top of kmain; the
+    // handler is ready.
+    unsafe { trap::init_timer(timebase_hz) };
 
-    // Heartbeat loop: emit a span + the metric set once per timebase
-    // tick (1 second on QEMU).
+    // Heartbeat loop: wfi until the timer IRQ flips TICK_PENDING,
+    // then emit a span + the metric set.
     let mut count: i64 = 0;
-    let mut next = tracing::timestamp() + timebase_hz;
     loop {
-        while tracing::timestamp() < next {}
+        while !trap::TICK_PENDING.swap(false, Ordering::Relaxed) {
+            unsafe { asm!("wfi") };
+        }
         {
             span!("kernel.heartbeat");
             count += 1;
@@ -107,7 +112,6 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(intern_used, tracing::intern_count() as i64);
             tracing::emit_metric(time_ticks, tracing::timestamp() as i64);
         }
-        next += timebase_hz;
     }
 }
 
