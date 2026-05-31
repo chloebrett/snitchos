@@ -8,9 +8,28 @@ use core::fmt::Write;
 
 global_asm!(include_str!("entry.S"));
 
+#[allow(unused_macros)]
+macro_rules! print {
+  ($($arg:tt)*) => {{
+    use core::fmt::Write;
+    let _ = write!(&mut $crate::SbiConsole, $($arg)*);
+  }}
+}
+
+macro_rules! println {
+  () => {{
+    use core::fmt::Write;
+    let _ = writeln!(&mut $crate::SbiConsole);
+  }};
+  ($($arg:tt)*) => {{
+    use core::fmt::Write;
+    let _ = writeln!(&mut $crate::SbiConsole, $($arg)*);
+  }}
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain(_hart_id: usize, _dtb_phys: usize) -> ! {
-  let _ = writeln!(&mut SbiConsole, "I am alive");
+  println!("I am alive");
 
   loop {
     unsafe {
