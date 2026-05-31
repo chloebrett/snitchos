@@ -8,7 +8,6 @@
 
 core::arch::global_asm!(include_str!("trap.S"));
 
-use crate::println;
 use core::arch::asm;
 
 /// Saved register state at trap entry. The assembly stores into these
@@ -55,7 +54,7 @@ pub struct TrapFrame {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
+pub extern "C" fn trap_handler(_frame: *mut TrapFrame) {
     let scause: u64;
     unsafe {
         asm!("csrr {}, scause", out(reg) scause);
@@ -63,4 +62,24 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
     let is_interrupt = (scause >> 63) & 1 == 1;
     let code = scause & !(1u64 << 63);
     panic!("trap! is_interrupt={is_interrupt}, code={code}, scause={scause:#x}");
+}
+
+/// Install our `trap_entry` (from `trap.S`) as the S-mode trap vector.
+/// After this returns, every trap (exception or interrupt) routes to
+/// our handler. Call once, at boot, before anything that might trap.
+///
+/// # Safety
+///
+/// No other code should be relying on the previous `stvec` value.
+/// At first boot stvec is undefined; we're writing it for the first time.
+pub unsafe fn set_trap_vector() {
+    unsafe extern "C" {
+        fn trap_entry();
+    }
+    let addr = trap_entry as *const () as usize;
+    unsafe {
+        asm!(
+          "csrw stvec, {}", in(reg) addr
+        );
+    }
 }

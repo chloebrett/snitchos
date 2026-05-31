@@ -33,6 +33,16 @@ global_asm!(include_str!("entry.S"));
 ///   periodic work — the kernel just `wfi`s indefinitely once init prints out.
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
+    // Install the trap vector first. Any trap that fires before this
+    // (e.g. an exception during DTB parse) would jump to whatever
+    // garbage stvec holds at reset — likely a fault loop. We don't
+    // expect traps at boot, but the cost of being defensive is one
+    // CSR write.
+    //
+    // SAFETY: no other code is running; interrupts are disabled
+    // (SIE clear at boot).
+    unsafe { trap::set_trap_vector() };
+
     // DTB parse runs before the kernel.boot span: the parse needs to
     // succeed before we even know where the UART is, and tracing isn't
     // useful before there's a way to emit. Treat it as bootstrap.
@@ -79,6 +89,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let heartbeat_count = tracing::register_counter("snitchos.heartbeat.count");
     let intern_used = tracing::register_gauge("snitchos.intern.strings_used");
     let time_ticks = tracing::register_gauge("snitchos.time.ticks");
+
+    unsafe {
+        asm!("ebreak");
+    }
 
     // Heartbeat loop: emit a span + the metric set once per timebase
     // tick (1 second on QEMU).
