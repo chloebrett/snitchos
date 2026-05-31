@@ -12,9 +12,8 @@ use protocol::Frame;
 const SOCKET_PATH: &str = "/tmp/snitch-telemetry.sock";
 
 fn main() -> std::io::Result<()> {
-    let stream = connect()?;
-    read_frames(stream)?;
-    Ok(())
+    let mut stream = connect()?;
+    decode_stream(&mut stream, print_frame)
 }
 
 /// Open a connection to the kernel's telemetry socket.
@@ -22,10 +21,42 @@ fn connect() -> std::io::Result<UnixStream> {
     todo!()
 }
 
-/// Read frames from the stream until it closes or errors. Decode each
-/// frame and hand it off to `print_frame`.
-fn read_frames(stream: UnixStream) -> std::io::Result<()> {
-    todo!()
+/// Drive the read-decode-emit loop over any byte source. Each fully
+/// decoded `Frame` is handed to `on_frame`. Returns when the stream
+/// closes cleanly (EOF), or with `Err` on I/O or decode error.
+fn decode_stream<R: Read>(
+    stream: &mut R,
+    mut on_frame: impl FnMut(&Frame<'_>),
+) -> std::io::Result<()> {
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    let mut tmp = [0u8; 256];
+
+    loop {
+        // Drain as many complete frames as the buffer currently holds.
+        loop {
+            let consumed = match try_decode_frame(&buf) {
+                Ok((frame, n)) => {
+                    on_frame(&frame);
+                    n
+                }
+                Err(postcard::Error::DeserializeUnexpectedEnd) => break, // need more bytes
+                Err(e) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("frame decode error: {e:?}"),
+                    ));
+                }
+            };
+            buf.drain(..consumed);
+        }
+
+        // Read more bytes; EOF returns Ok(0).
+        let n = stream.read(&mut tmp)?;
+        if n == 0 {
+            return Ok(());
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
 }
 
 /// Pretty-print a decoded frame to stdout.
@@ -87,6 +118,110 @@ mod tests {
             matches!(err, postcard::Error::DeserializeUnexpectedEnd),
             "expected DeserializeUnexpectedEnd, got {err:?}",
         );
+    }
+
+    /// A `Read` impl that hands out at most `chunk_size` bytes per call.
+    /// Simulates the real-world behavior of TCP / Unix sockets returning
+    /// short reads.
+    struct ChunkedReader {
+        data: Vec<u8>,
+        pos: usize,
+        chunk_size: usize,
+    }
+
+    impl Read for ChunkedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let avail = self.data.len() - self.pos;
+            let n = avail.min(self.chunk_size).min(buf.len());
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    /// Even when the stream returns one byte at a time, `decode_stream`
+    /// should accumulate them, decode the complete frame, and emit it.
+    #[test]
+    fn decode_stream_handles_partial_reads() {
+        let frame = Frame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: 1,
+        };
+        let mut scratch = [0u8; 64];
+        let encoded = postcard::to_slice(&frame, &mut scratch).unwrap();
+
+        let reader = ChunkedReader {
+            data: encoded.to_vec(),
+            pos: 0,
+            chunk_size: 1,
+        };
+        let mut count = 0;
+        decode_stream(&mut { reader }, |_| count += 1)
+            .expect("decode_stream should succeed");
+        assert_eq!(count, 1);
+    }
+
+    /// Two encoded frames back-to-back in the stream should both come
+    /// out in order.
+    #[test]
+    fn decode_stream_yields_multiple_frames() {
+        use std::io::Cursor;
+
+        let frame_a = Frame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: 1,
+        };
+        let frame_b = Frame::SpanEnd {
+            id: protocol::SpanId(42),
+            t: 1234,
+        };
+
+        let mut buf = Vec::new();
+        {
+            let mut scratch = [0u8; 64];
+            buf.extend_from_slice(postcard::to_slice(&frame_a, &mut scratch).unwrap());
+            buf.extend_from_slice(postcard::to_slice(&frame_b, &mut scratch).unwrap());
+        }
+
+        let mut seen: Vec<&'static str> = Vec::new();
+        decode_stream(&mut Cursor::new(buf), |f| match f {
+            Frame::Hello { .. } => seen.push("hello"),
+            Frame::SpanEnd { .. } => seen.push("span_end"),
+            _ => panic!("unexpected frame {f:?}"),
+        })
+        .expect("decode_stream should succeed");
+
+        assert_eq!(seen, vec!["hello", "span_end"]);
+    }
+
+    /// `decode_stream` should yield exactly the one frame in the input,
+    /// then return Ok at EOF.
+    #[test]
+    fn decode_stream_yields_single_hello() {
+        use std::io::Cursor;
+
+        let frame = Frame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: 1,
+        };
+        let mut buf = [0u8; 64];
+        let encoded_len = postcard::to_slice(&frame, &mut buf).unwrap().len();
+        let bytes: Vec<u8> = buf[..encoded_len].to_vec();
+
+        let mut count = 0;
+        decode_stream(&mut Cursor::new(bytes), |f| {
+            assert!(matches!(
+                f,
+                Frame::Hello {
+                    timebase_hz: 10_000_000,
+                    protocol_version: 1,
+                }
+            ));
+            count += 1;
+        })
+        .expect("decode_stream should succeed");
+
+        assert_eq!(count, 1);
     }
 
     /// Trailing bytes after one frame's encoding must not affect the
