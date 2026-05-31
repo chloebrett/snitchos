@@ -103,3 +103,20 @@ impl Write for SbiConsole {
     Ok(())
   }
 }
+
+pub struct Uart16550 {
+  base: usize,
+}
+
+impl Uart16550 {
+  pub const fn new(base: usize) -> Self { Uart16550 { base } }
+
+  pub fn putchar(&self, c: u8) {
+    let thr_addr = self.base as *mut u8;
+    let lsr_addr = (self.base + 5) as *const u8;
+    unsafe {
+      while lsr_addr.read_volatile() & 0b00100000 == 0 {}
+      thr_addr.write_volatile(c);
+    }
+  }
+}
