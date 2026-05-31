@@ -192,7 +192,9 @@ unsafe fn write_reg(base: usize, offset: usize, value: u32) {
 
 /// Diagnostic: dump magic/version/device-id for every virtio-mmio slot.
 /// Use this to figure out why discovery isn't matching what you expect.
-pub fn probe_all_slots(dtb: &Fdt) {
+/// Kept around as a tool, not wired into the boot path.
+#[allow(dead_code)]
+fn probe_all_slots(dtb: &Fdt) {
     for node in dtb.all_nodes() {
         let is_virtio = node
             .compatible()
@@ -230,7 +232,7 @@ pub fn probe_all_slots(dtb: &Fdt) {
 ///   handling would need rework.
 /// - Doesn't surface *why* a slot was skipped (empty / wrong version /
 ///   wrong device). For debugging we could log per-slot probe results.
-pub fn find_console_base(dtb: &Fdt) -> Option<usize> {
+fn find_console_base(dtb: &Fdt) -> Option<usize> {
     for node in dtb.all_nodes() {
         let is_virtio = node
             .compatible()
@@ -326,7 +328,7 @@ pub fn send(bytes: &[u8]) {
 /// `base` must be the MMIO base of a real virtio-mmio device whose
 /// DeviceID is `3` (virtio-console). The device must not currently be
 /// in use by anyone else — this function resets it.
-pub unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
+unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
     unsafe {
         // 1. Reset: write 0 to Status, returning the device to a clean state.
         write_reg(base, REG_STATUS, 0);
@@ -476,9 +478,11 @@ pub unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
 ///   `init_handshake` first; if you don't, this writes into an
 ///   un-set-up TX_QUEUE that the device isn't reading. The device
 ///   never advances `used.idx`, and we spin forever.
-pub unsafe fn transmit(base: usize, bytes: &[u8]) {
+unsafe fn transmit(base: usize, bytes: &[u8]) {
     // 1. Fill descriptor slot 0 with the buffer pointer + length.
-    let desc_ptr = &raw mut TX_QUEUE.desc[0];
+    // SAFETY: TX_QUEUE is a static mut; we hold the device's mutex via
+    // the caller (`send`), so no other writer touches it concurrently.
+    let desc_ptr = unsafe { &raw mut TX_QUEUE.desc[0] };
     unsafe {
         desc_ptr.write_volatile(VirtqDesc {
             addr: bytes.as_ptr() as u64,

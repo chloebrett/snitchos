@@ -61,7 +61,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     // start, console_init pair, telemetry_init start).
                     tracing::flush_pre_init();
                     println!("virtio-console: ready");
-                    send_hello(timebase_hz as u32);
+                    tracing::send_hello(timebase_hz as u32);
                 }
                 Err(e) => println!("virtio-console: init failed: {:?}", e),
             }
@@ -78,23 +78,6 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             span!("kernel.heartbeat");
         }
         next += timebase_hz;
-    }
-}
-
-/// Encode a `Frame::Hello` with the discovered CPU timebase and ship it
-/// out the virtio-console. First real telemetry on the wire.
-fn send_hello(timebase_hz: u32) {
-    let frame = protocol::Frame::Hello {
-        timebase_hz: timebase_hz as u64,
-        protocol_version: 1,
-    };
-    let mut buf = [0u8; 32];
-    match postcard::to_slice(&frame, &mut buf) {
-        Ok(encoded) => {
-            virtio_console::send(encoded);
-            println!("sent Hello ({} bytes)", encoded.len());
-        }
-        Err(e) => println!("postcard encode failed: {:?}", e),
     }
 }
 

@@ -25,6 +25,20 @@ pub fn timestamp() -> u64 {
     t
 }
 
+/// Encode a `Frame::Hello` with the given CPU timebase and ship it out
+/// the virtio-console. The very first frame on the wire — tells the host
+/// what `timebase_hz` to use when interpreting subsequent timestamps.
+pub fn send_hello(timebase_hz: u32) {
+    let frame = Frame::Hello {
+        timebase_hz: timebase_hz as u64,
+        protocol_version: 1,
+    };
+    let mut buf = [0u8; 32];
+    if let Ok(encoded) = postcard::to_slice(&frame, &mut buf) {
+        virtio_console::send(encoded);
+    }
+}
+
 // --- String intern table ---
 
 /// Maximum number of unique strings we can register. Sized for v0.1 —
