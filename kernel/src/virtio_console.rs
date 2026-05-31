@@ -73,20 +73,20 @@ const QSIZE: usize = 8;
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
 struct VirtqDesc {
-  addr: u64,
-  len: u32,
-  flags: u16,
-  next: u16,
+    addr: u64,
+    len: u32,
+    flags: u16,
+    next: u16,
 }
 
 /// Available ring: driver tells the device which descriptors to look at.
 #[derive(Copy, Clone)]
 #[repr(C)]
 struct VirtqAvail {
-  flags: u16,
-  idx: u16,
-  ring: [u16; QSIZE],
-  used_event: u16,
+    flags: u16,
+    idx: u16,
+    ring: [u16; QSIZE],
+    used_event: u16,
 }
 
 /// Used ring entry: "descriptor `id` is done; `len` bytes were written
@@ -94,18 +94,18 @@ struct VirtqAvail {
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
 struct VirtqUsedElem {
-  id: u32,
-  len: u32,
+    id: u32,
+    len: u32,
 }
 
 /// Used ring: device tells the driver which descriptors are done.
 #[derive(Copy, Clone)]
 #[repr(C)]
 struct VirtqUsed {
-  flags: u16,
-  idx: u16,
-  ring: [VirtqUsedElem; QSIZE],
-  avail_event: u16,
+    flags: u16,
+    idx: u16,
+    ring: [VirtqUsedElem; QSIZE],
+    avail_event: u16,
 }
 
 /// All three ring regions for one queue, in one statically-allocated
@@ -113,27 +113,32 @@ struct VirtqUsed {
 /// alignment requirement; the inner sub-regions inherit it.
 #[repr(C, align(16))]
 struct Virtqueue {
-  desc: [VirtqDesc; QSIZE],
-  avail: VirtqAvail,
-  used: VirtqUsed,
+    desc: [VirtqDesc; QSIZE],
+    avail: VirtqAvail,
+    used: VirtqUsed,
 }
 
 /// Static TX queue for the virtio-console. Lives in `.bss`. Single
 /// instance — we have one console and one TX path in v0.1.
 static mut TX_QUEUE: Virtqueue = Virtqueue {
-  desc: [VirtqDesc { addr: 0, len: 0, flags: 0, next: 0 }; QSIZE],
-  avail: VirtqAvail {
-    flags: 0,
-    idx: 0,
-    ring: [0; QSIZE],
-    used_event: 0,
-  },
-  used: VirtqUsed {
-    flags: 0,
-    idx: 0,
-    ring: [VirtqUsedElem { id: 0, len: 0 }; QSIZE],
-    avail_event: 0,
-  },
+    desc: [VirtqDesc {
+        addr: 0,
+        len: 0,
+        flags: 0,
+        next: 0,
+    }; QSIZE],
+    avail: VirtqAvail {
+        flags: 0,
+        idx: 0,
+        ring: [0; QSIZE],
+        used_event: 0,
+    },
+    used: VirtqUsed {
+        flags: 0,
+        idx: 0,
+        ring: [VirtqUsedElem { id: 0, len: 0 }; QSIZE],
+        avail_event: 0,
+    },
 };
 
 /// Read a 32-bit virtio-mmio register.
@@ -143,8 +148,8 @@ static mut TX_QUEUE: Virtqueue = Virtqueue {
 /// `base` must be the MMIO base of a real virtio-mmio device, and
 /// `offset` must be a valid register offset within that device's region.
 unsafe fn read_reg(base: usize, offset: usize) -> u32 {
-  let addr = (base + offset) as *const u32;
-  unsafe { addr.read_volatile() }
+    let addr = (base + offset) as *const u32;
+    unsafe { addr.read_volatile() }
 }
 
 /// Write a 32-bit virtio-mmio register.
@@ -156,36 +161,39 @@ unsafe fn read_reg(base: usize, offset: usize) -> u32 {
 /// (e.g. a Status bit pattern that violates the device's state machine)
 /// can put the device into the FAILED state.
 unsafe fn write_reg(base: usize, offset: usize, value: u32) {
-  let addr = (base + offset) as *mut u32;
-  unsafe { addr.write_volatile(value) }
+    let addr = (base + offset) as *mut u32;
+    unsafe { addr.write_volatile(value) }
 }
 
 /// Diagnostic: dump magic/version/device-id for every virtio-mmio slot.
 /// Use this to figure out why discovery isn't matching what you expect.
 pub fn probe_all_slots(dtb: &Fdt) {
-  for node in dtb.all_nodes() {
-    let is_virtio = node
-      .compatible()
-      .map(|c| c.all().any(|s| s == "virtio,mmio"))
-      .unwrap_or(false);
-    if !is_virtio {
-      continue;
+    for node in dtb.all_nodes() {
+        let is_virtio = node
+            .compatible()
+            .map(|c| c.all().any(|s| s == "virtio,mmio"))
+            .unwrap_or(false);
+        if !is_virtio {
+            continue;
+        }
+
+        let Some(reg) = node.reg().and_then(|mut r| r.next()) else {
+            continue;
+        };
+        let base = reg.starting_address as usize;
+
+        // SAFETY: the DTB told us this is a virtio-mmio register region.
+        let magic = unsafe { read_reg(base, REG_MAGIC_VALUE) };
+        let version = unsafe { read_reg(base, REG_VERSION) };
+        let device_id = unsafe { read_reg(base, REG_DEVICE_ID) };
+        crate::println!(
+            "virtio-mmio @ {:#x}: magic={:#x} version={} device_id={}",
+            base,
+            magic,
+            version,
+            device_id,
+        );
     }
-
-    let Some(reg) = node.reg().and_then(|mut r| r.next()) else {
-      continue;
-    };
-    let base = reg.starting_address as usize;
-
-    // SAFETY: the DTB told us this is a virtio-mmio register region.
-    let magic = unsafe { read_reg(base, REG_MAGIC_VALUE) };
-    let version = unsafe { read_reg(base, REG_VERSION) };
-    let device_id = unsafe { read_reg(base, REG_DEVICE_ID) };
-    crate::println!(
-      "virtio-mmio @ {:#x}: magic={:#x} version={} device_id={}",
-      base, magic, version, device_id,
-    );
-  }
 }
 
 /// Walk the DTB for `virtio,mmio` slots, probe each, and return the MMIO
@@ -198,51 +206,51 @@ pub fn probe_all_slots(dtb: &Fdt) {
 /// - Doesn't surface *why* a slot was skipped (empty / wrong version /
 ///   wrong device). For debugging we could log per-slot probe results.
 pub fn find_console_base(dtb: &Fdt) -> Option<usize> {
-  for node in dtb.all_nodes() {
-    let is_virtio = node
-      .compatible()
-      .map(|c| c.all().any(|s| s == "virtio,mmio"))
-      .unwrap_or(false);
-    if !is_virtio {
-      continue;
-    }
+    for node in dtb.all_nodes() {
+        let is_virtio = node
+            .compatible()
+            .map(|c| c.all().any(|s| s == "virtio,mmio"))
+            .unwrap_or(false);
+        if !is_virtio {
+            continue;
+        }
 
-    let Some(reg) = node.reg().and_then(|mut r| r.next()) else {
-      continue;
-    };
-    let base = reg.starting_address as usize;
+        let Some(reg) = node.reg().and_then(|mut r| r.next()) else {
+            continue;
+        };
+        let base = reg.starting_address as usize;
 
-    // SAFETY: the DTB told us this is a virtio-mmio register region.
-    let magic = unsafe { read_reg(base, REG_MAGIC_VALUE) };
-    if magic != MAGIC {
-      continue;
-    }
+        // SAFETY: the DTB told us this is a virtio-mmio register region.
+        let magic = unsafe { read_reg(base, REG_MAGIC_VALUE) };
+        if magic != MAGIC {
+            continue;
+        }
 
-    let version = unsafe { read_reg(base, REG_VERSION) };
-    if version != VERSION {
-      continue;
-    }
+        let version = unsafe { read_reg(base, REG_VERSION) };
+        if version != VERSION {
+            continue;
+        }
 
-    let device_id = unsafe { read_reg(base, REG_DEVICE_ID) };
-    if device_id == DEVICE_ID_CONSOLE {
-      return Some(base);
+        let device_id = unsafe { read_reg(base, REG_DEVICE_ID) };
+        if device_id == DEVICE_ID_CONSOLE {
+            return Some(base);
+        }
     }
-  }
-  None
+    None
 }
 
 /// Errors that can arise during the virtio-console handshake.
 #[derive(Debug)]
 pub enum InitError {
-  /// Device doesn't advertise `VIRTIO_F_VERSION_1`. We don't support
-  /// pre-1.0 (legacy) virtio at this register layout.
-  NoVersion1,
-  /// We wrote `FEATURES_OK` but the device cleared it back — meaning it
-  /// can't agree to the feature set we offered.
-  FeaturesRejected,
-  /// Device's `QueueNumMax` is smaller than the queue size we want.
-  /// Shouldn't happen — QEMU advertises max 1024.
-  QueueTooSmall,
+    /// Device doesn't advertise `VIRTIO_F_VERSION_1`. We don't support
+    /// pre-1.0 (legacy) virtio at this register layout.
+    NoVersion1,
+    /// We wrote `FEATURES_OK` but the device cleared it back — meaning it
+    /// can't agree to the feature set we offered.
+    FeaturesRejected,
+    /// Device's `QueueNumMax` is smaller than the queue size we want.
+    /// Shouldn't happen — QEMU advertises max 1024.
+    QueueTooSmall,
 }
 
 /// Drive the virtio-mmio handshake on a discovered console device up
@@ -255,85 +263,114 @@ pub enum InitError {
 /// DeviceID is `3` (virtio-console). The device must not currently be
 /// in use by anyone else — this function resets it.
 pub unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
-  unsafe {
-    // 1. Reset: write 0 to Status, returning the device to a clean state.
-    write_reg(base, REG_STATUS, 0);
+    unsafe {
+        // 1. Reset: write 0 to Status, returning the device to a clean state.
+        write_reg(base, REG_STATUS, 0);
 
-    // 2. ACKNOWLEDGE: "I see you, device."
-    let mut status = STATUS_ACKNOWLEDGE;
-    write_reg(base, REG_STATUS, status);
+        // 2. ACKNOWLEDGE: "I see you, device."
+        let mut status = STATUS_ACKNOWLEDGE;
+        write_reg(base, REG_STATUS, status);
 
-    // 3. DRIVER: "I know how to drive you."
-    status |= STATUS_DRIVER;
-    write_reg(base, REG_STATUS, status);
+        // 3. DRIVER: "I know how to drive you."
+        status |= STATUS_DRIVER;
+        write_reg(base, REG_STATUS, status);
 
-    // 4. Feature negotiation. Read both halves of the 64-bit feature
-    //    space, decide what we accept, write our subset back.
-    write_reg(base, REG_DEVICE_FEATURES_SEL, 0);
-    let dev_lo = read_reg(base, REG_DEVICE_FEATURES) as u64;
-    write_reg(base, REG_DEVICE_FEATURES_SEL, 1);
-    let dev_hi = read_reg(base, REG_DEVICE_FEATURES) as u64;
-    let device_features = (dev_hi << 32) | dev_lo;
+        // 4. Feature negotiation. Read both halves of the 64-bit feature
+        //    space, decide what we accept, write our subset back.
+        write_reg(base, REG_DEVICE_FEATURES_SEL, 0);
+        let dev_lo = read_reg(base, REG_DEVICE_FEATURES) as u64;
+        write_reg(base, REG_DEVICE_FEATURES_SEL, 1);
+        let dev_hi = read_reg(base, REG_DEVICE_FEATURES) as u64;
+        let device_features = (dev_hi << 32) | dev_lo;
 
-    if device_features & F_VERSION_1 == 0 {
-      write_reg(base, REG_STATUS, status | STATUS_FAILED);
-      return Err(InitError::NoVersion1);
+        if device_features & F_VERSION_1 == 0 {
+            write_reg(base, REG_STATUS, status | STATUS_FAILED);
+            return Err(InitError::NoVersion1);
+        }
+
+        // We accept VERSION_1 only. No CONSOLE_F_SIZE/MULTIPORT/EMERG_WRITE
+        // — basic output is enough for v0.1.
+        let driver_features = F_VERSION_1;
+
+        write_reg(base, REG_DRIVER_FEATURES_SEL, 0);
+        write_reg(base, REG_DRIVER_FEATURES, driver_features as u32);
+        write_reg(base, REG_DRIVER_FEATURES_SEL, 1);
+        write_reg(base, REG_DRIVER_FEATURES, (driver_features >> 32) as u32);
+
+        // 5. FEATURES_OK: "I've committed; don't change features on me."
+        status |= STATUS_FEATURES_OK;
+        write_reg(base, REG_STATUS, status);
+
+        // 6. Verify the bit stuck. The device clears FEATURES_OK if it can't
+        //    agree to what we offered.
+        let read_back = read_reg(base, REG_STATUS);
+        if read_back & STATUS_FEATURES_OK == 0 {
+            write_reg(base, REG_STATUS, read_back | STATUS_FAILED);
+            return Err(InitError::FeaturesRejected);
+        }
+
+        // 7. Virtqueue setup for the TX queue.
+        write_reg(base, REG_QUEUE_SEL, QUEUE_TX);
+        let max = read_reg(base, REG_QUEUE_NUM_MAX);
+        if (max as usize) < QSIZE {
+            write_reg(base, REG_STATUS, status | STATUS_FAILED);
+            return Err(InitError::QueueTooSmall);
+        }
+        write_reg(base, REG_QUEUE_NUM, QSIZE as u32);
+
+        // Tell the device where our three queue regions live. virtual=physical
+        // here because the MMU is off.
+        let desc_addr = &raw const TX_QUEUE.desc as u64;
+        let avail_addr = &raw const TX_QUEUE.avail as u64;
+        let used_addr = &raw const TX_QUEUE.used as u64;
+
+        write_reg(base, REG_QUEUE_DESC_LOW, desc_addr as u32);
+        write_reg(base, REG_QUEUE_DESC_HIGH, (desc_addr >> 32) as u32);
+        write_reg(base, REG_QUEUE_DRIVER_LOW, avail_addr as u32);
+        write_reg(base, REG_QUEUE_DRIVER_HIGH, (avail_addr >> 32) as u32);
+        write_reg(base, REG_QUEUE_DEVICE_LOW, used_addr as u32);
+        write_reg(base, REG_QUEUE_DEVICE_HIGH, (used_addr >> 32) as u32);
+
+        // Queue is live.
+        write_reg(base, REG_QUEUE_READY, 1);
+
+        // 8. DRIVER_OK: "I'm fully set up; treat me as a working driver."
+        status |= STATUS_DRIVER_OK;
+        write_reg(base, REG_STATUS, status);
+
+        // Suppress unused-warning on REG_QUEUE_NOTIFY / QUEUE_RX until step 8
+        // (transmit) — they exist in the layout but we don't ring/notify yet.
+        let _ = REG_QUEUE_NOTIFY;
+        let _ = QUEUE_RX;
+    }
+    Ok(())
+}
+
+/// Send a frame's bytes out the virtio-console.
+///
+/// # Safety
+///
+/// `base` must be the MMIO base of a virtio-console that has completed
+/// `init_handshake`. `bytes` must outlive the call.
+pub unsafe fn transmit(base: usize, bytes: &[u8]) {
+    let desc_ptr = &raw mut TX_QUEUE.desc[0];
+    unsafe {
+        desc_ptr.write_volatile(VirtqDesc {
+            addr: bytes.as_ptr() as u64,
+            len: bytes.len() as u32,
+            flags: 0, // none
+            next: 0,  // default
+        });
     }
 
-    // We accept VERSION_1 only. No CONSOLE_F_SIZE/MULTIPORT/EMERG_WRITE
-    // — basic output is enough for v0.1.
-    let driver_features = F_VERSION_1;
+    unsafe {
+        let avail_idx_before = (&raw const TX_QUEUE.avail.idx).read_volatile();
+        let used_idx_before = (&raw const TX_QUEUE.used.idx).read_volatile();
 
-    write_reg(base, REG_DRIVER_FEATURES_SEL, 0);
-    write_reg(base, REG_DRIVER_FEATURES, driver_features as u32);
-    write_reg(base, REG_DRIVER_FEATURES_SEL, 1);
-    write_reg(base, REG_DRIVER_FEATURES, (driver_features >> 32) as u32);
+        (&raw mut TX_QUEUE.avail.ring[(avail_idx_before as usize) % QSIZE]).write_volatile(0);
+        (&raw mut TX_QUEUE.avail.idx).write_volatile(avail_idx_before.wrapping_add(1));
+        write_reg(base, REG_QUEUE_NOTIFY, QUEUE_TX);
 
-    // 5. FEATURES_OK: "I've committed; don't change features on me."
-    status |= STATUS_FEATURES_OK;
-    write_reg(base, REG_STATUS, status);
-
-    // 6. Verify the bit stuck. The device clears FEATURES_OK if it can't
-    //    agree to what we offered.
-    let read_back = read_reg(base, REG_STATUS);
-    if read_back & STATUS_FEATURES_OK == 0 {
-      write_reg(base, REG_STATUS, read_back | STATUS_FAILED);
-      return Err(InitError::FeaturesRejected);
+        while (&raw const TX_QUEUE.used.idx).read_volatile() == used_idx_before {}
     }
-
-    // 7. Virtqueue setup for the TX queue.
-    write_reg(base, REG_QUEUE_SEL, QUEUE_TX);
-    let max = read_reg(base, REG_QUEUE_NUM_MAX);
-    if (max as usize) < QSIZE {
-      write_reg(base, REG_STATUS, status | STATUS_FAILED);
-      return Err(InitError::QueueTooSmall);
-    }
-    write_reg(base, REG_QUEUE_NUM, QSIZE as u32);
-
-    // Tell the device where our three queue regions live. virtual=physical
-    // here because the MMU is off.
-    let desc_addr = &raw const TX_QUEUE.desc as u64;
-    let avail_addr = &raw const TX_QUEUE.avail as u64;
-    let used_addr = &raw const TX_QUEUE.used as u64;
-
-    write_reg(base, REG_QUEUE_DESC_LOW, desc_addr as u32);
-    write_reg(base, REG_QUEUE_DESC_HIGH, (desc_addr >> 32) as u32);
-    write_reg(base, REG_QUEUE_DRIVER_LOW, avail_addr as u32);
-    write_reg(base, REG_QUEUE_DRIVER_HIGH, (avail_addr >> 32) as u32);
-    write_reg(base, REG_QUEUE_DEVICE_LOW, used_addr as u32);
-    write_reg(base, REG_QUEUE_DEVICE_HIGH, (used_addr >> 32) as u32);
-
-    // Queue is live.
-    write_reg(base, REG_QUEUE_READY, 1);
-
-    // 8. DRIVER_OK: "I'm fully set up; treat me as a working driver."
-    status |= STATUS_DRIVER_OK;
-    write_reg(base, REG_STATUS, status);
-
-    // Suppress unused-warning on REG_QUEUE_NOTIFY / QUEUE_RX until step 8
-    // (transmit) — they exist in the layout but we don't ring/notify yet.
-    let _ = REG_QUEUE_NOTIFY;
-    let _ = QUEUE_RX;
-  }
-  Ok(())
 }
