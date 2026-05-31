@@ -8,6 +8,7 @@ use fdt::Fdt;
 
 mod console;
 mod dtb;
+mod tracing;
 mod uart;
 mod virtio_console;
 
@@ -31,49 +32,59 @@ global_asm!(include_str!("entry.S"));
 ///   periodic work — the kernel just `wfi`s indefinitely once init prints out.
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
-  let dtb = unsafe { Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
+    let dtb = unsafe { Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
 
-  let uart_addr = dtb::uart_addr(&dtb);
-  // SAFETY: uart_addr came from the DTB's ns16550a node, which OpenSBI
-  // promises is a real UART on this machine.
-  unsafe { console::init(uart_addr) };
+    let uart_addr = dtb::uart_addr(&dtb);
+    // SAFETY: uart_addr came from the DTB's ns16550a node, which OpenSBI
+    // promises is a real UART on this machine.
+    unsafe { console::init(uart_addr) };
 
-  dtb::print_info(&dtb, uart_addr);
+    dtb::print_info(&dtb, uart_addr);
 
-  // SAFETY: dtb came from the DTB we just parsed; init does
-  // discovery + handshake + global handle setup.
-  match unsafe { virtio_console::init(&dtb) } {
-    Ok(()) => {
-      println!("virtio-console: ready");
-      send_hello(dtb::timebase_hz(&dtb));
+    // SAFETY: dtb came from the DTB we just parsed; init does
+    // discovery + handshake + global handle setup.
+    match unsafe { virtio_console::init(&dtb) } {
+        Ok(()) => {
+            println!("virtio-console: ready");
+            send_hello(dtb::timebase_hz(&dtb));
+        }
+        Err(e) => println!("virtio-console: init failed: {:?}", e),
     }
-    Err(e) => println!("virtio-console: init failed: {:?}", e),
-  }
 
-  println!("I am alive");
+    println!("I am alive");
 
-  loop {
-    unsafe {
-      asm!("wfi");
+    println!("time: {}", tracing::timestamp());
+
+    let id_a = tracing::register_or_lookup("foo");
+    let id_b = tracing::register_or_lookup("bar");
+    let id_a_again = tracing::register_or_lookup("foo");
+    println!(
+        "ids: foo={:?} bar={:?} foo_again={:?}",
+        id_a, id_b, id_a_again
+    );
+
+    loop {
+        unsafe {
+            asm!("wfi");
+        }
     }
-  }
 }
 
 /// Encode a `Frame::Hello` with the discovered CPU timebase and ship it
 /// out the virtio-console. First real telemetry on the wire.
 fn send_hello(timebase_hz: u32) {
-  let frame = protocol::Frame::Hello {
-    timebase_hz: timebase_hz as u64,
-    protocol_version: 1,
-  };
-  let mut buf = [0u8; 32];
-  match postcard::to_slice(&frame, &mut buf) {
-    Ok(encoded) => {
-      virtio_console::send(encoded);
-      println!("sent Hello ({} bytes)", encoded.len());
+    let frame = protocol::Frame::Hello {
+        timebase_hz: timebase_hz as u64,
+        protocol_version: 1,
+    };
+    let mut buf = [0u8; 32];
+    match postcard::to_slice(&frame, &mut buf) {
+        Ok(encoded) => {
+            virtio_console::send(encoded);
+            println!("sent Hello ({} bytes)", encoded.len());
+        }
+        Err(e) => println!("postcard encode failed: {:?}", e),
     }
-    Err(e) => println!("postcard encode failed: {:?}", e),
-  }
 }
 
 /// Recursion guard for the panic handler. Set on entry; if already set, we
@@ -86,19 +97,19 @@ static PANICKING: AtomicBool = AtomicBool::new(false);
 /// Uses a recursion guard so a panic-during-panic doesn't infinite-loop.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-  if !PANICKING.swap(true, Ordering::Relaxed) {
-    // First time through. Print directly to a fresh UART, no lock.
-    //
-    // SAFETY: 0x10000000 is the NS16550A MMIO base on QEMU `virt`. Bypassing
-    // the lock means we may interleave with whatever was printing when the
-    // panic fired — accepted because we're already in a fatal state.
-    use core::fmt::Write;
-    let mut uart = unsafe { uart::Uart16550::new(0x10000000) };
-    let _ = writeln!(&mut uart, "Kernel panic: {}", info);
-  }
-  loop {
-    unsafe {
-      asm!("wfi");
+    if !PANICKING.swap(true, Ordering::Relaxed) {
+        // First time through. Print directly to a fresh UART, no lock.
+        //
+        // SAFETY: 0x10000000 is the NS16550A MMIO base on QEMU `virt`. Bypassing
+        // the lock means we may interleave with whatever was printing when the
+        // panic fired — accepted because we're already in a fatal state.
+        use core::fmt::Write;
+        let mut uart = unsafe { uart::Uart16550::new(0x10000000) };
+        let _ = writeln!(&mut uart, "Kernel panic: {}", info);
     }
-  }
+    loop {
+        unsafe {
+            asm!("wfi");
+        }
+    }
 }
