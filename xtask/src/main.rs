@@ -2,6 +2,7 @@ use std::process::{Command, ExitCode};
 
 const KERNEL_TARGET: &str = "riscv64gc-unknown-none-elf";
 const KERNEL_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/kernel";
+const TELEMETRY_SOCKET: &str = "/tmp/snitch-telemetry.sock";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -48,6 +49,13 @@ fn up() -> ExitCode {
         return build_status;
     }
 
+    // Clean up any stale socket from a previous run so QEMU can bind.
+    let _ = std::fs::remove_file(TELEMETRY_SOCKET);
+
+    let chardev_arg = format!(
+        "socket,path={TELEMETRY_SOCKET},server=on,wait=off,id=telemetry"
+    );
+
     let status = Command::new("qemu-system-riscv64")
         .args([
             "-machine", "virt",
@@ -57,6 +65,11 @@ fn up() -> ExitCode {
             "-nographic",
             "-bios", "default",
             "-kernel", KERNEL_BIN,
+            // Telemetry channel: a virtio-console wired to a Unix domain
+            // socket on the host. host-reader connects to this socket.
+            "-chardev", &chardev_arg,
+            "-device", "virtio-serial-device",
+            "-device", "virtconsole,chardev=telemetry",
         ])
         .status()
         .expect("failed to invoke qemu-system-riscv64");
