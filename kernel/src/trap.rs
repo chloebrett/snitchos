@@ -11,6 +11,8 @@ core::arch::global_asm!(include_str!("trap.S"));
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use kernel_core::trap::{TrapCause, decode_scause};
+
 /// How many ticks between timer interrupts. Set by `init_timer` from
 /// the DTB timebase; the IRQ handler reads it to arm the next deadline.
 pub static TIMER_INTERVAL_TICKS: AtomicU64 = AtomicU64::new(0);
@@ -141,47 +143,6 @@ pub unsafe fn init_timer(interval_ticks: u64) {
     TIMER_INTERVAL_TICKS.store(interval_ticks, Ordering::Relaxed);
     CLOCK.arm(CLOCK.now() + interval_ticks);
     unsafe { enable_timer_interrupts() };
-}
-
-/// Decoded form of the `scause` CSR. The top bit of `scause` is the
-/// interrupt-vs-exception flag; the remaining bits are the cause code
-/// whose meaning depends on that flag. We name the ones we handle and
-/// preserve the raw code for the others.
-///
-/// The `u64` fields on `UnknownInterrupt` / `UnknownException` are read
-/// only via the `Debug` impl in panic messages — which rustc's
-/// `dead_code` lint doesn't count as a "real" use. `#[allow]` it.
-#[derive(Debug, Clone, Copy)]
-#[expect(dead_code, reason = "u64 payloads are read only via Debug in panic messages")]
-enum TrapCause {
-    SupervisorTimerInterrupt,
-    SupervisorExternalInterrupt,
-    SupervisorSoftwareInterrupt,
-    Breakpoint,
-    EnvCallFromUMode,
-    EnvCallFromSMode,
-    UnknownInterrupt(u64),
-    UnknownException(u64),
-}
-
-fn decode_scause(scause: u64) -> TrapCause {
-    let is_interrupt = (scause >> 63) & 1 == 1;
-    let code = scause & !(1u64 << 63);
-    if is_interrupt {
-        match code {
-            1 => TrapCause::SupervisorSoftwareInterrupt,
-            5 => TrapCause::SupervisorTimerInterrupt,
-            9 => TrapCause::SupervisorExternalInterrupt,
-            other => TrapCause::UnknownInterrupt(other),
-        }
-    } else {
-        match code {
-            3 => TrapCause::Breakpoint,
-            8 => TrapCause::EnvCallFromUMode,
-            9 => TrapCause::EnvCallFromSMode,
-            other => TrapCause::UnknownException(other),
-        }
-    }
 }
 
 /// Enable S-mode timer interrupts. Sets the per-source enable bit
