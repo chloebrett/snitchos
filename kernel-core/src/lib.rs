@@ -9,4 +9,5 @@
 #![forbid(unsafe_code)]
 
 pub mod clock;
+pub mod sink;
 pub mod trap;
