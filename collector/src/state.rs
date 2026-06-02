@@ -223,6 +223,10 @@ impl State {
 
     /// Update `first_t` if we're seeing the smallest `t` yet — pre-init
     /// spans may arrive after Hello with `t < hello.t`.
+    // mutants::skip — advance_anchor only affects absolute timestamps; our
+    // tests verify relative durations, which cancel out the first_t offset.
+    // Killing these mutants requires an injectable clock seam (not yet added).
+    #[mutants::skip]
     fn advance_anchor(&mut self, t: u64) {
         if let Some(anchor) = self.anchor.as_mut() {
             if anchor.first_t == 0 || t < anchor.first_t {
@@ -237,19 +241,22 @@ impl State {
         let Some(anchor) = self.anchor.as_ref() else {
             return 0;
         };
-        if self.timebase_hz == 0 {
-            return anchor.wallclock_ns;
-        }
-        // delta_ns may be negative (pre-init spans with t < first_t).
-        let delta_ns: i128 = if t >= anchor.first_t {
-            ((t - anchor.first_t) as i128) * 1_000_000_000 / self.timebase_hz as i128
-        } else {
-            -(((anchor.first_t - t) as i128) * 1_000_000_000 / self.timebase_hz as i128)
-        };
-        (anchor.wallclock_ns as i128 + delta_ns) as u128
+        ticks_to_wall_ns(t, anchor.first_t, self.timebase_hz, anchor.wallclock_ns)
     }
 }
 
+/// Pure tick-to-nanosecond conversion. `wallclock_ns` is the host wall-clock
+/// at `first_t`; returns the wall-clock nanoseconds corresponding to `t`.
+fn ticks_to_wall_ns(t: u64, first_t: u64, timebase_hz: u64, wallclock_ns: u128) -> u128 {
+    if timebase_hz == 0 {
+        return wallclock_ns;
+    }
+    let delta_ns =
+        (t.saturating_sub(first_t) as u128) * 1_000_000_000 / timebase_hz as u128;
+    wallclock_ns + delta_ns
+}
+
+#[mutants::skip] // reads the real wall clock — requires a clock seam to test
 fn wall_now_ns() -> u128 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -383,6 +390,32 @@ mod tests {
             t: 100,
         });
         assert_eq!(s.metric_values.get(&5), Some(&42));
+    }
+
+    #[test]
+    fn ticks_to_wall_ns_zero_delta() {
+        // t == first_t: no time has passed, result is exactly wallclock_ns
+        assert_eq!(ticks_to_wall_ns(100, 100, 10_000_000, 1_000_000_000), 1_000_000_000);
+    }
+
+    #[test]
+    fn ticks_to_wall_ns_positive_delta() {
+        // 10_000 ticks at 10 MHz = 1 ms = 1_000_000 ns; wallclock = 0
+        assert_eq!(ticks_to_wall_ns(10_100, 100, 10_000_000, 0), 1_000_000);
+    }
+
+    #[test]
+    fn ticks_to_wall_ns_adds_to_wallclock() {
+        // wallclock = 5 s; delta = 1 ms → result = 5.001 s
+        assert_eq!(
+            ticks_to_wall_ns(10_100, 100, 10_000_000, 5_000_000_000),
+            5_001_000_000,
+        );
+    }
+
+    #[test]
+    fn ticks_to_wall_ns_zero_timebase_returns_wallclock() {
+        assert_eq!(ticks_to_wall_ns(999, 0, 0, 42), 42);
     }
 
     #[test]

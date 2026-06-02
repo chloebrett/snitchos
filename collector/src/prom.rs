@@ -14,6 +14,7 @@ use crate::state::State;
 /// Spawn the metrics server on the given port. Runs until the process
 /// exits. Errors during request handling are logged to stderr but don't
 /// take the server down.
+#[mutants::skip] // binds a real TCP socket — not unit-testable
 pub fn serve(state: Arc<Mutex<State>>, port: u16) -> std::io::Result<()> {
     let addr = format!("0.0.0.0:{port}");
     let server = tiny_http::Server::http(&addr).map_err(|e| {

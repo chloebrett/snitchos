@@ -53,6 +53,7 @@ struct Args {
     no_prometheus: bool,
 }
 
+#[mutants::skip] // I/O entry point — not unit-testable
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
@@ -144,6 +145,7 @@ fn decode_stream<R: Read>(
 
 /// Print a decoded frame to stdout. Uses the derived `Debug` impl; with
 /// `pretty=true`, multi-line pretty format for easier inspection.
+#[mutants::skip] // pure stdout I/O — behaviour verified by running the binary
 fn print_frame(frame: &Frame<'_>, pretty: bool) {
     if pretty {
         println!("{frame:#?}");

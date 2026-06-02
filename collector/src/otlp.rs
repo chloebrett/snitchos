@@ -122,6 +122,7 @@ impl Exporter {
     }
 
     /// Build an OTLP request containing one span and POST it.
+    #[mutants::skip] // makes real HTTP calls — not unit-testable without a mock server
     pub fn export(&self, span: &CompletedSpan) {
         let proto_span = Span {
             trace_id: self.trace_id.to_vec(),
@@ -198,6 +199,7 @@ impl Exporter {
     }
 }
 
+#[mutants::skip] // non-deterministic — output cannot be asserted
 fn random_trace_id() -> [u8; 16] {
     let mut id = [0u8; 16];
     for b in id.iter_mut() {

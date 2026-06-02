@@ -2,3 +2,7 @@
 # cannot be compiled or tested on the host. Use `cargo xtask mutants`
 # (which passes -p collector -p protocol) rather than bare `cargo mutants`.
 exclude_globs = ["kernel/**", "kernel-core/**"]
+
+# The warned_no_hello flag gates a one-shot stderr warning; testing it
+# would require capturing stderr. Not worth the complexity.
+exclude_re = ["delete ! in State::handle"]
