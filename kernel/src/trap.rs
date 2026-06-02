@@ -11,6 +11,7 @@ core::arch::global_asm!(include_str!("trap.S"));
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use kernel_core::clock::Clock;
 use kernel_core::trap::{TrapCause, decode_scause};
 
 /// How many ticks between timer interrupts. Set by `init_timer` from
@@ -27,19 +28,9 @@ pub static TICK_PENDING: AtomicBool = AtomicBool::new(false);
 /// virtio_console mutexes.)
 pub static LAST_IRQ_DURATION: AtomicU64 = AtomicU64::new(0);
 
-/// Abstract clock: read current time, schedule a future interrupt.
-/// One implementation today (`SstcClock`); the trait shape is here
-/// for when we add an SBI fallback or different platforms.
-pub trait Clock {
-    /// Monotonic ticks since boot (raw cycle counter from the `time` CSR).
-    fn now(&self) -> u64;
-    /// Schedule the next timer interrupt for when the cycle counter
-    /// reaches `deadline`. Implicitly acks any prior pending timer.
-    fn arm(&self, deadline: u64);
-}
-
 /// SSTC-based clock: reads `time` CSR directly, writes `stimecmp`
-/// (CSR 0x14d) to arm. No SBI round-trip.
+/// (CSR 0x14d) to arm. No SBI round-trip. Implements
+/// `kernel_core::clock::Clock`.
 pub struct SstcClock;
 
 impl Clock for SstcClock {

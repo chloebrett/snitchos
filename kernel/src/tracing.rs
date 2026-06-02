@@ -9,7 +9,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use protocol::{Frame, MetricKind, SpanId, StringId};
 
-use crate::trap::{CLOCK, Clock};
+use kernel_core::clock::Clock;
+
+use crate::trap::CLOCK;
 use crate::virtio_console;
 
 /// Read the RISC-V `time` CSR — a monotonically increasing 64-bit cycle
