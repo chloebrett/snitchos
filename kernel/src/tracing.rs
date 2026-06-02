@@ -48,15 +48,29 @@ pub fn send_hello(timebase_hz: u32) {
 
 static INTERN_TABLE: spin::Mutex<InternTable> = spin::Mutex::new(InternTable::new());
 
-/// Adapter that lets `kernel_core` types (which only know `FrameSink`)
-/// emit through this module's `emit_frame`. Zero-sized; constructed
-/// fresh per call. Stays simple until step 8 of the carve-out, which
-/// folds the virtio-console + pre-init dispatch into this impl.
+/// The kernel's single `FrameSink`: encode the frame with postcard,
+/// then either ship to the virtio-console (if it's up) or append to
+/// the pre-init buffer for later flush.
+///
+/// The 128-byte encode buffer is sized for span / event / metric
+/// frames and short `StringRegister`s (the longest name we register is
+/// ~30 chars). Frames that don't fit are silently dropped — encoding
+/// failure is a programmer error (frame too big or postcard bug),
+/// distinct from pre-init overflow which the buffer counts and the
+/// host learns about via `Frame::Dropped`.
 struct KernelSink;
 
 impl FrameSink for KernelSink {
     fn emit(&mut self, frame: &Frame<'_>) {
-        emit_frame(frame);
+        let mut buf = [0u8; 128];
+        let Ok(bytes) = postcard::to_slice(frame, &mut buf) else {
+            return;
+        };
+        if virtio_console::CONSOLE.get().is_some() {
+            virtio_console::send(bytes);
+        } else {
+            PRE_INIT_BUFFER.lock().append(bytes);
+        }
     }
 }
 
@@ -201,27 +215,9 @@ pub fn flush_pre_init() {
     emit_frame(&Frame::Dropped { count: dropped });
 }
 
-/// Encode a single frame into a stack buffer and ship it out the
-/// virtio-console — or, if the console isn't up yet, append to the
-/// pre-init buffer so it can be flushed later.
-///
-/// The 128-byte buffer is sized for span/event/metric frames and
-/// short `StringRegister`s (the longest name we register is ~30 chars).
-///
-/// Known weaknesses:
-/// - **Buffer overflow drops frames.** Encode failure (frame > 128 B)
-///   or pre-init buffer full → frame silently dropped (or, in the
-///   pre-init case, the dropped counter increments and `flush_pre_init`
-///   emits a `Dropped` to tell the host).
+/// Thin wrapper for module-internal call sites that want to emit a
+/// frame without naming `KernelSink`. Equivalent to constructing one
+/// and calling `.emit`.
 fn emit_frame(frame: &Frame<'_>) {
-    let mut buf = [0u8; 128];
-    let Ok(bytes) = postcard::to_slice(frame, &mut buf) else {
-        return;
-    };
-
-    if virtio_console::CONSOLE.get().is_some() {
-        virtio_console::send(bytes);
-    } else {
-        PRE_INIT_BUFFER.lock().append(bytes);
-    }
+    KernelSink.emit(frame);
 }
