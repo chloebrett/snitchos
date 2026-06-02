@@ -23,8 +23,10 @@ pub fn uart_addr(dtb: &Fdt) -> usize {
 ///
 /// The property lives on the parent `cpus` node, not on `cpu@0`. Earlier
 /// code looked it up via `dtb.cpus().next().properties()` which returns
-/// cpu@0's own properties — the result was silently 0.
-pub fn timebase_hz(dtb: &Fdt) -> u32 {
+/// cpu@0's own properties — the result was silently 0. Returns `None` if
+/// the property is missing or malformed; 0 is never a meaningful answer,
+/// so we make the absence explicit instead of papering over it.
+pub fn timebase_hz(dtb: &Fdt) -> Option<u32> {
   dtb
     .find_node("/cpus")
     .and_then(|n| n.properties().find(|p| p.name == "timebase-frequency"))
@@ -32,7 +34,6 @@ pub fn timebase_hz(dtb: &Fdt) -> u32 {
       let bytes = p.value;
       (bytes.len() == 4).then(|| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     })
-    .unwrap_or(0)
 }
 
 /// Print the load-bearing values we extract from the DTB: memory regions,
@@ -48,7 +49,10 @@ pub fn print_info(dtb: &Fdt, uart_addr: usize) {
     );
   }
 
-  crate::println!("timebase: {} Hz", timebase_hz(dtb));
+  match timebase_hz(dtb) {
+    Some(hz) => crate::println!("timebase: {} Hz", hz),
+    None => crate::println!("timebase: <missing>"),
+  }
 
   crate::println!("uart: {:#x}", uart_addr);
 }

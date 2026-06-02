@@ -47,7 +47,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // succeed before we even know where the UART is, and tracing isn't
     // useful before there's a way to emit. Treat it as bootstrap.
     let dtb = unsafe { Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
-    let timebase_hz = dtb::timebase_hz(&dtb) as u64;
+    let timebase_hz = dtb::timebase_hz(&dtb)
+        .expect("DTB missing /cpus/timebase-frequency — can't run without a clock") as u64;
 
     // Open kernel.boot, with sub-spans for each init phase. All frames
     // emitted before virtio-console is ready get pre-init-buffered.
