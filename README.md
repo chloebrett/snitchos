@@ -10,20 +10,25 @@ The operating system that snitches on itself 🐀
 
 **v0.2 "Grafana arrives"** — *complete*. Tempo + Prometheus + Grafana stack via docker-compose; collector exports OTLP traces + serves Prometheus `/metrics`; provisioned dashboard shows live kernel telemetry.
 
+**v0.3 "Interrupts & clock"** — *complete*. Full S-mode trap handling (entry/exit asm + Rust dispatcher); SSTC-based timer interrupts; heartbeat is timer-driven (`wfi` between ticks) instead of busy-spin. First histogram metric (`snitchos.irq.timer.duration_ticks`) end-to-end through the collector's bucket accumulation into Grafana.
+
 Working:
 
 - no_std kernel; handwritten boot stub + linker script; ns16550a UART driver
 - DTB parse (memory, UART, timebase)
 - virtio-console driver: discovery + modern-spec handshake + virtqueue + TX
+- S-mode trap handler: register save/restore asm, Rust dispatcher with typed `scause` decoding, `stvec` install at boot
+- SSTC timer: arm via `stimecmp` CSR; per-source + global interrupt enable; deferred-work pattern (IRQ stays tiny, main thread does heartbeat)
+- `Clock` trait + `SstcClock` impl (abstraction surface for future SBI / non-RISC-V impls)
 - `protocol` crate: postcard-encoded `Frame` enum (`Hello`, `SpanStart/End`, `Event`, `Metric`, `MetricRegister`, `StringRegister`, `Dropped`) with `MetricKind` (`Counter`/`Gauge`/`Histogram`), hosted TDD
 - `tracing` module: timestamps from the `time` CSR, string intern table with metric-type registration, RAII-guarded spans via the `span!` macro, pre-init buffering with a `Dropped { count }` checkpoint after flush
 - kernel-side metric helpers: `register_counter` / `register_gauge` / `register_histogram` / `emit_metric`
-- `kernel.boot` opens at boot with `console_init` + `telemetry_init` sub-spans; `kernel.heartbeat` span + metric set emitted once per timebase tick
-- `collector` (host-side): decodes the wire stream, reassembles spans, exports OTLP/HTTP to Tempo, serves Prometheus text on `/metrics`
-- docker-compose stack: Tempo + Prometheus + Grafana, all auto-provisioned (datasources + dashboard)
+- `kernel.boot` opens at boot with `console_init` + `telemetry_init` sub-spans; `kernel.heartbeat` span + metric set emitted once per timer tick
+- `collector` (host-side): decodes the wire stream, reassembles spans, exports OTLP/HTTP to Tempo, serves Prometheus text on `/metrics` with full counter/gauge/histogram bucketing
+- docker-compose stack: Tempo + Prometheus + Grafana, all auto-provisioned (datasources + dashboard with timer-IRQ percentile panel)
 - `xtask` orchestration: `cargo xtask up` (kernel) / `cargo xtask collect` (collector) / `cargo xtask stack {up,down,logs}`
 
-Up next: **v0.3 (interrupts + clock)** — timer interrupts via SBI, monotonic `Clock` trait, trap handler, heartbeat becomes timer-driven instead of busy-spinning. First histogram metric: `snitchos.irq.duration_ticks`.
+Up next: **v0.4 (memory)** — page-table setup, higher-half kernel, physical frame allocator, kernel heap; allocators instrumented (allocation/free as metrics, heap pressure visible in Grafana).
 
 See [posts/](posts/) for the per-milestone devlog.
 
