@@ -1,0 +1,229 @@
+//! Intern table for string names that appear in the wire protocol.
+//! Pointer-keyed (not content-keyed) — see `lookup_or_insert` for why.
+//! Frame emission for newly-registered names is delegated to a
+//! `FrameSink` so the kernel and tests share one code path.
+
+use protocol::{Frame, MetricKind, StringId};
+
+use crate::sink::FrameSink;
+
+/// Maximum number of unique strings the table can hold. Sized for v0.1
+/// — kernel.boot, heartbeat, a handful of init phases. Bump when more
+/// span/metric names enter the kernel.
+pub const MAX_INTERNED: usize = 64;
+
+#[derive(Copy, Clone)]
+struct InternEntry {
+    name: &'static str,
+    metric_registered: bool,
+}
+
+pub struct InternTable {
+    entries: [Option<InternEntry>; MAX_INTERNED],
+    next_id: u32,
+}
+
+impl InternTable {
+    pub const fn new() -> Self {
+        Self {
+            entries: [None; MAX_INTERNED],
+            next_id: 0,
+        }
+    }
+
+    /// Scan + insert. Returns `(id, is_new)` so callers know whether to
+    /// emit a `StringRegister`. Equality is by **pointer**, not value —
+    /// two `&'static str`s with the same characters from different
+    /// allocations get distinct ids. Acceptable for v0.1 (one crate
+    /// minting names); revisit if userspace ever registers names.
+    ///
+    /// Panics if the table is full. Programmer error: bump
+    /// `MAX_INTERNED` or stop creating unique names.
+    fn lookup_or_insert(&mut self, name: &'static str) -> (StringId, bool) {
+        for (i, entry) in self.entries.iter().enumerate() {
+            if let Some(e) = entry {
+                if e.name.as_ptr() == name.as_ptr() {
+                    return (StringId(i as u32), false);
+                }
+            }
+        }
+
+        let id = self.next_id;
+        let slot = id as usize;
+        if slot >= MAX_INTERNED {
+            panic!(
+                "intern table full ({} entries); bump MAX_INTERNED",
+                MAX_INTERNED,
+            );
+        }
+        self.entries[slot] = Some(InternEntry {
+            name,
+            metric_registered: false,
+        });
+        self.next_id = id + 1;
+        (StringId(id), true)
+    }
+
+    /// Look up `name`, allocating a slot + emitting `StringRegister`
+    /// if it's new.
+    pub fn register_or_lookup(
+        &mut self,
+        name: &'static str,
+        sink: &mut dyn FrameSink,
+    ) -> StringId {
+        let (id, is_new) = self.lookup_or_insert(name);
+        if is_new {
+            sink.emit(&Frame::StringRegister { id, value: name });
+        }
+        id
+    }
+
+    /// Register `name` as a metric with `kind`. Emits `StringRegister`
+    /// if the name is new, then `MetricRegister` if the name wasn't
+    /// previously declared as a metric. Calling twice with different
+    /// kinds is a programmer error — the second call sees
+    /// `metric_registered: true` and skips emit, so the host's first-seen
+    /// kind wins.
+    pub fn register_metric(
+        &mut self,
+        name: &'static str,
+        kind: MetricKind,
+        sink: &mut dyn FrameSink,
+    ) -> StringId {
+        let (id, is_new) = self.lookup_or_insert(name);
+        if is_new {
+            sink.emit(&Frame::StringRegister { id, value: name });
+        }
+        let entry = self.entries[id.0 as usize]
+            .as_mut()
+            .expect("lookup_or_insert guarantees the slot is populated");
+        if !entry.metric_registered {
+            entry.metric_registered = true;
+            sink.emit(&Frame::MetricRegister { name_id: id, kind });
+        }
+        id
+    }
+
+    /// Number of distinct names currently held.
+    pub fn count(&self) -> u32 {
+        self.next_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sink::capture::CapturingSink;
+    extern crate std;
+    use std::boxed::Box;
+    use std::format;
+
+    fn decode<'a>(bytes: &'a [u8]) -> Frame<'a> {
+        postcard::from_bytes(bytes).unwrap()
+    }
+
+    #[test]
+    fn new_name_assigns_id_zero_and_emits_string_register() {
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+
+        let id = table.register_or_lookup("foo", &mut sink);
+
+        assert_eq!(id, StringId(0));
+        assert_eq!(sink.len(), 1);
+        assert_eq!(
+            decode(&sink.raw()[0]),
+            Frame::StringRegister { id: StringId(0), value: "foo" },
+        );
+    }
+
+    #[test]
+    fn same_pointer_returns_same_id_without_re_emitting() {
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+
+        let id1 = table.register_or_lookup("foo", &mut sink);
+        let id2 = table.register_or_lookup("foo", &mut sink);
+
+        assert_eq!(id1, id2);
+        assert_eq!(sink.len(), 1, "second lookup must not emit");
+    }
+
+    #[test]
+    fn same_content_different_pointer_gets_distinct_ids() {
+        // Documents the pointer-equality choice. Two different
+        // `&'static str` allocations with identical content.
+        let a: &'static str = Box::leak(Box::<str>::from("dup"));
+        let b: &'static str = Box::leak(Box::<str>::from("dup"));
+        assert_ne!(a.as_ptr(), b.as_ptr(), "leaked strs must have distinct pointers");
+
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+
+        let id_a = table.register_or_lookup(a, &mut sink);
+        let id_b = table.register_or_lookup(b, &mut sink);
+
+        assert_ne!(id_a, id_b);
+        assert_eq!(sink.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "intern table full")]
+    fn filling_to_max_then_one_more_panics() {
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+        for i in 0..MAX_INTERNED {
+            let s: &'static str = Box::leak(format!("name{i}").into_boxed_str());
+            table.register_or_lookup(s, &mut sink);
+        }
+        let overflow: &'static str = Box::leak(Box::<str>::from("one too many"));
+        table.register_or_lookup(overflow, &mut sink);
+    }
+
+    #[test]
+    fn register_counter_then_gauge_does_not_redeclare_kind() {
+        // Programmer error mode, documented in the source: the second
+        // call sees `metric_registered: true` and skips emit. Host
+        // never learns the new kind. Test pins this so we don't
+        // silently "fix" it without an explicit decision.
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+
+        table.register_metric("m", MetricKind::Counter, &mut sink);
+        table.register_metric("m", MetricKind::Gauge, &mut sink);
+
+        // Exactly: StringRegister + MetricRegister(Counter). Nothing else.
+        assert_eq!(sink.len(), 2);
+        assert!(matches!(
+            decode(&sink.raw()[1]),
+            Frame::MetricRegister { kind: MetricKind::Counter, .. },
+        ));
+    }
+
+    #[test]
+    fn lookup_then_register_metric_emits_metric_register_only() {
+        // Name was interned for a span first; later promoted to a metric.
+        // StringRegister fires on first call, MetricRegister on second
+        // — no duplicate StringRegister.
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+
+        table.register_or_lookup("m", &mut sink);
+        table.register_metric("m", MetricKind::Counter, &mut sink);
+
+        assert_eq!(sink.len(), 2);
+        assert!(matches!(decode(&sink.raw()[0]), Frame::StringRegister { .. }));
+        assert!(matches!(decode(&sink.raw()[1]), Frame::MetricRegister { .. }));
+    }
+
+    #[test]
+    fn count_reflects_distinct_names() {
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+        assert_eq!(table.count(), 0);
+        table.register_or_lookup("a", &mut sink);
+        table.register_or_lookup("b", &mut sink);
+        table.register_or_lookup("a", &mut sink); // duplicate, no bump
+        assert_eq!(table.count(), 2);
+    }
+}

@@ -10,6 +10,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use protocol::{Frame, MetricKind, SpanId, StringId};
 
 use kernel_core::clock::Clock;
+use kernel_core::intern::InternTable;
+use kernel_core::sink::FrameSink;
 
 use crate::trap::CLOCK;
 use crate::virtio_console;
@@ -39,65 +41,23 @@ pub fn send_hello(timebase_hz: u32) {
 }
 
 // --- String intern table ---
+//
+// The table logic lives in `kernel_core::intern::InternTable`. The
+// kernel binary holds the one global instance behind a Mutex, plus a
+// `KernelSink` adapter that routes frame emits through `emit_frame`.
 
-/// Maximum number of unique strings we can register. Sized for v0.1 —
-/// kernel.boot, heartbeat, a handful of init phases. 64 is plenty.
-const MAX_INTERNED: usize = 64;
+static INTERN_TABLE: spin::Mutex<InternTable> = spin::Mutex::new(InternTable::new());
 
-/// An entry in the intern table. Beyond the name itself we also track
-/// whether the host has been told this name's metric type via
-/// `Frame::MetricRegister` — avoids emitting duplicate type declarations
-/// when `register_counter`/`gauge`/`histogram` is called repeatedly.
-#[derive(Copy, Clone)]
-struct InternEntry {
-    name: &'static str,
-    metric_registered: bool,
-}
+/// Adapter that lets `kernel_core` types (which only know `FrameSink`)
+/// emit through this module's `emit_frame`. Zero-sized; constructed
+/// fresh per call. Stays simple until step 8 of the carve-out, which
+/// folds the virtio-console + pre-init dispatch into this impl.
+struct KernelSink;
 
-struct InternTable {
-    entries: [Option<InternEntry>; MAX_INTERNED],
-    next_id: u32,
-}
-
-static INTERN_TABLE: spin::Mutex<InternTable> = spin::Mutex::new(InternTable {
-    entries: [None; MAX_INTERNED],
-    next_id: 0,
-});
-
-/// Look up `name` in the intern table, inserting a new entry if absent.
-/// Returns `(id, is_new)`: `is_new` is true iff this call allocated a
-/// fresh slot, so the caller knows whether to emit a `StringRegister`.
-///
-/// Equality is by **pointer**, not value. Two `&'static str`s with the
-/// same characters from different crates would be registered twice —
-/// fine for v0.1 (single-crate kernel), worth fixing if userspace ever
-/// registers names.
-///
-/// Panics if the table is full. Programmer error: bump `MAX_INTERNED`
-/// or stop creating unique names.
-fn lookup_or_insert(table: &mut InternTable, name: &'static str) -> (StringId, bool) {
-    for (i, entry) in table.entries.iter().enumerate() {
-        if let Some(e) = entry {
-            if e.name.as_ptr() == name.as_ptr() {
-                return (StringId(i as u32), false);
-            }
-        }
+impl FrameSink for KernelSink {
+    fn emit(&mut self, frame: &Frame<'_>) {
+        emit_frame(frame);
     }
-
-    let id = table.next_id;
-    let slot = id as usize;
-    if slot >= MAX_INTERNED {
-        panic!(
-            "tracing: intern table full ({} entries); bump MAX_INTERNED",
-            MAX_INTERNED,
-        );
-    }
-    table.entries[slot] = Some(InternEntry {
-        name,
-        metric_registered: false,
-    });
-    table.next_id = id + 1;
-    (StringId(id), true)
 }
 
 /// Look up `name` in the intern table. If it's new, assign a fresh
@@ -109,58 +69,36 @@ fn lookup_or_insert(table: &mut InternTable, name: &'static str) -> (StringId, b
 /// order is intern → virtio_console::CONSOLE. As long as nothing else
 /// takes them in the opposite order we're fine; v0.1 has no other lockers.
 pub fn register_or_lookup(name: &'static str) -> StringId {
-    let mut table = INTERN_TABLE.lock();
-    let (id, is_new) = lookup_or_insert(&mut table, name);
-    if is_new {
-        emit_frame(&Frame::StringRegister { id, value: name });
-    }
-    id
+    INTERN_TABLE.lock().register_or_lookup(name, &mut KernelSink)
 }
 
 /// Number of names currently registered in the intern table. Exposed
 /// as a metric (`snitchos.intern.strings_used`).
 pub fn intern_count() -> u32 {
-    INTERN_TABLE.lock().next_id
-}
-
-/// Register a metric with its kind. If the name is new, both
-/// `StringRegister` and `MetricRegister` are emitted; if the name was
-/// previously registered but never as a metric, only `MetricRegister`
-/// is emitted; if both have been registered before, nothing happens.
-///
-/// Calling `register_counter("foo")` and then `register_gauge("foo")`
-/// is a programmer error — the second call won't re-declare the kind,
-/// so the host will see `"foo"` as a Counter forever. Don't do that.
-fn register_metric(name: &'static str, kind: MetricKind) -> StringId {
-    let mut table = INTERN_TABLE.lock();
-    let (id, is_new) = lookup_or_insert(&mut table, name);
-    if is_new {
-        emit_frame(&Frame::StringRegister { id, value: name });
-    }
-    // SAFETY: lookup_or_insert guarantees the slot is populated.
-    let entry = table.entries[id.0 as usize].as_mut().unwrap();
-    if !entry.metric_registered {
-        entry.metric_registered = true;
-        emit_frame(&Frame::MetricRegister { name_id: id, kind });
-    }
-    id
+    INTERN_TABLE.lock().count()
 }
 
 /// Register `name` as a Counter metric. Returns its `StringId` for use
 /// with `emit_metric`. Idempotent — safe to call every iteration of a
 /// loop; the host only sees one `MetricRegister`.
 pub fn register_counter(name: &'static str) -> StringId {
-    register_metric(name, MetricKind::Counter)
+    INTERN_TABLE
+        .lock()
+        .register_metric(name, MetricKind::Counter, &mut KernelSink)
 }
 
 /// Register `name` as a Gauge metric.
 pub fn register_gauge(name: &'static str) -> StringId {
-    register_metric(name, MetricKind::Gauge)
+    INTERN_TABLE
+        .lock()
+        .register_metric(name, MetricKind::Gauge, &mut KernelSink)
 }
 
 /// Register `name` as a Histogram metric.
 pub fn register_histogram(name: &'static str) -> StringId {
-    register_metric(name, MetricKind::Histogram)
+    INTERN_TABLE
+        .lock()
+        .register_metric(name, MetricKind::Histogram, &mut KernelSink)
 }
 
 /// Emit a metric sample. The name must have been registered first via
