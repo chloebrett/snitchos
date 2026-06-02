@@ -1,6 +1,169 @@
 //! Test harness: spawns QEMU, reads the virtio-console socket on a
 //! reader thread, decodes frames, and surfaces them to the main
-//! (assertion) thread via a channel. See step 3 in
-//! `plans/kernel-integration-tests.md`.
+//! (assertion) thread via a channel.
 //!
-//! Skeleton — fleshed out in step 3.
+//! Lifecycle: `Harness::spawn` returns a live handle. `wait_for` blocks
+//! up to a per-call wallclock budget for a frame matching a predicate.
+//! `Drop` always kills QEMU and removes the socket, so a panicking
+//! test still cleans up.
+
+use std::collections::HashMap;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use protocol::stream::{OwnedFrame, decode_stream};
+use protocol::{StringId};
+
+const KERNEL_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/kernel";
+
+/// Maps `StringId` → name as we observe `StringRegister` frames. Matchers
+/// read this so they can say "is this span 'kernel.boot'?" without
+/// hard-coding ids.
+pub type StringTable = HashMap<StringId, String>;
+
+/// Live integration-test handle. Killing the child and unlinking the
+/// socket happens in `Drop`.
+pub struct Harness {
+    qemu: Child,
+    rx: Receiver<OwnedFrame>,
+    strings: StringTable,
+    socket_path: PathBuf,
+}
+
+impl Harness {
+    /// Build the kernel (if needed), spawn QEMU pointing at a fresh
+    /// per-test socket, accept the connection, and start the reader
+    /// thread.
+    pub fn spawn(label: &str) -> Result<Self, String> {
+        build_kernel()?;
+
+        let socket_path = socket_path_for(label);
+        let _ = std::fs::remove_file(&socket_path);
+
+        // QEMU is the listener (server=on,wait=on); we connect to it
+        // as a client. Matches the `cargo xtask up` setup the collector
+        // already uses — so we exercise the same wire path.
+        let chardev = format!(
+            "socket,path={},server=on,wait=on,id=telemetry",
+            socket_path.display(),
+        );
+
+        let qemu = Command::new("qemu-system-riscv64")
+            .args([
+                "-machine", "virt",
+                "-cpu", "rv64",
+                "-smp", "1",
+                "-m", "128M",
+                "-nographic",
+                "-bios", "default",
+                "-kernel", KERNEL_BIN,
+                "-global", "virtio-mmio.force-legacy=false",
+                "-chardev", &chardev,
+                "-device", "virtio-serial-device",
+                "-device", "virtconsole,chardev=telemetry",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("spawn qemu: {e}"))?;
+
+        // Wait for QEMU to create the socket, then connect.
+        let stream = connect_with_deadline(&socket_path, Duration::from_secs(10))?;
+
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let mut stream = stream;
+            let _ = decode_stream(&mut stream, |frame| {
+                let _ = tx.send(OwnedFrame::from_borrowed(frame));
+            });
+        });
+
+        Ok(Self {
+            qemu,
+            rx,
+            strings: HashMap::new(),
+            socket_path,
+        })
+    }
+
+    /// Block up to `budget` for a frame matching `pred`. Returns the
+    /// matching frame, or `None` on deadline. Every frame consumed
+    /// along the way updates the internal string table — later
+    /// matchers can resolve any `StringId` seen so far.
+    pub fn wait_for(
+        &mut self,
+        budget: Duration,
+        pred: impl Fn(&OwnedFrame, &StringTable) -> bool,
+    ) -> Option<OwnedFrame> {
+        let deadline = Instant::now() + budget;
+        loop {
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            match self.rx.recv_timeout(remaining) {
+                Ok(frame) => {
+                    self.absorb_string_register(&frame);
+                    if pred(&frame, &self.strings) {
+                        return Some(frame);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => return None,
+                Err(RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    }
+
+    /// Look up a name in the string table. Useful for matchers that
+    /// want to assert "this SpanStart's name_id resolves to ...".
+    pub fn name_of(&self, id: StringId) -> Option<&str> {
+        self.strings.get(&id).map(String::as_str)
+    }
+
+    fn absorb_string_register(&mut self, frame: &OwnedFrame) {
+        if let OwnedFrame::StringRegister { id, value } = frame {
+            self.strings.insert(*id, value.clone());
+        }
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let _ = self.qemu.kill();
+        let _ = self.qemu.wait();
+        let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+fn build_kernel() -> Result<(), String> {
+    let status = Command::new("cargo")
+        .args(["build", "-p", "kernel", "--target", "riscv64gc-unknown-none-elf"])
+        .status()
+        .map_err(|e| format!("build kernel: {e}"))?;
+    if !status.success() {
+        return Err("kernel build failed".to_string());
+    }
+    Ok(())
+}
+
+fn socket_path_for(label: &str) -> PathBuf {
+    PathBuf::from(format!("/tmp/snitch-itest-{}-{}.sock", label, std::process::id()))
+}
+
+fn connect_with_deadline(
+    path: &std::path::Path,
+    budget: Duration,
+) -> Result<UnixStream, String> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match UnixStream::connect(path) {
+            Ok(s) => return Ok(s),
+            Err(_) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("connect {}: {e}", path.display())),
+        }
+    }
+}

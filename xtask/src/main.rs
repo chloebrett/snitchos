@@ -163,7 +163,7 @@ fn up() -> ExitCode {
 
 fn run_mutants(extra_args: &[String]) -> ExitCode {
     let status = Command::new("cargo")
-        .args(["mutants", "-p", "collector", "-p", "protocol"])
+        .args(["mutants", "-p", "collector", "-p", "protocol", "--features", "protocol/std"])
         .args(extra_args)
         .status()
         .expect("failed to invoke cargo mutants");

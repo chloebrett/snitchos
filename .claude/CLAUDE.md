@@ -153,56 +153,86 @@ For detailed guidance on expectations and documentation, load the `expectations`
 - [cargo-nextest](https://nexte.st/)
 - [insta snapshot testing](https://insta.rs/)
 
-## Project-Specific: Slay the Spire
+## Project-Specific: SnitchOS
 
-**Architecture reference:** `plans/architecture.md` — read this before making structural changes.
+SnitchOS is a RISC-V microkernel whose first-class concern is observability. Boot-time spans, metrics, and events go out a dedicated virtio-console as postcard-encoded `Frame`s; a host-side `collector` decodes them into OTLP traces (Tempo) and Prometheus metrics (Grafana).
 
-### Two renderers, one shared core
-
-`slay-tui` has two render paths:
-- `game::run_game` — plain text, `impl Write`. Used by `--plain`, `--script`, and snapshot tests.
-- `tui::run_tui` — ratatui interactive UI. Default when stdout is a TTY.
-
-Both go through `engine::apply_and_drain` and share all formatting helpers in `engine.rs`. **When changing how the game looks**, update the shared formatters in `engine.rs` (e.g. `describe_event`) — both renderers pick up the change automatically.
-
-### Running the game
+### Workspace layout
 
 ```
-cargo run                                       # ratatui UI (interactive)
-cargo run -- --plain                            # plain text via stdin
-cargo run -- --script path/to/file.slay         # plain text from script
-cargo run -- --debug                            # enable debug commands
+kernel/       no_std, no_main, riscv64gc-unknown-none-elf only.
+              Asm boot stub, trap handler, virtio-console driver,
+              ns16550a UART, panic handler. Statics live here.
+kernel-core/  no_std, host-buildable. Pure data + bookkeeping with
+              no asm / MMIO / CSRs: intern table, span registry,
+              pre-init buffer, scause decoding, Clock trait,
+              FrameSink trait. All host-tested via `cargo test`.
+protocol/     no_std by default. The `Frame` enum + postcard
+              encoding. `features = ["std"]` opts in to
+              `protocol::stream` (decoder + `OwnedFrame`).
+collector/    Host-side decoder. Reads virtio-console socket,
+              decodes frames, exports OTLP + serves Prometheus.
+xtask/        Build / run / test orchestration. See subcommands
+              in README.
+stack/        docker-compose for Tempo + Prometheus + Grafana.
+plans/        Per-milestone and per-refactor implementation plans.
+docs/         Architecture and design.
+posts/        Devlog notes per milestone.
 ```
 
-### Snapshot tests
+### Running
 
-Snapshot tests cover the **plain text renderer** end-to-end (they use `run_game` directly). Run after any change to render functions, event descriptions, state transitions, or the shared formatters in `engine.rs`:
 ```
-cargo test -p slay-tui --test scripts
-```
-
-If snapshots fail after an intentional output change, accept:
-```
-INSTA_UPDATE=always cargo test -p slay-tui --test scripts
-```
-
-Add a new scenario:
-```
-# 1. Create crates/slay-tui/tests/scripts/<name>.slay
-# 2. Generate its snapshot:
-INSTA_UPDATE=new cargo test -p slay-tui --test scripts
+cargo xtask up                # build kernel + run in QEMU (telemetry chardev waits for a client)
+cargo xtask collect           # build + run collector (OTLP + Prometheus)
+cargo xtask reader            # collector in text-only mode (no docker stack)
+cargo xtask stack {up,down,logs}  # docker-compose the Tempo/Prometheus/Grafana stack
+cargo xtask test [scenario]   # kernel integration tests in QEMU
+cargo xtask build             # just build the kernel ELF
 ```
 
-Always commit `.snap` files alongside the `.slay` scripts that produce them.
+### Tests, by layer
 
-### TUI tests
+| Layer | Command | What it covers |
+|---|---|---|
+| Unit (kernel-core) | `cargo test -p kernel-core` | Intern table, span registry, pre-init buffer, scause decoding, frame sink capture |
+| Unit (protocol)    | `cargo test -p protocol --features std` | Frame roundtrips + stream decoder |
+| Unit (collector)   | `cargo test -p collector` | Span state machine, prom/otlp encoding |
+| Integration        | `cargo xtask test` | Boots the kernel in QEMU, asserts on the decoded wire frame sequence |
 
-The ratatui path is tested via ratatui's `TestBackend` — see `crates/slay-tui/src/tui.rs::tests`. These render frames into an in-memory cell buffer and assert on text content. No real terminal needed:
-```
-cargo test -p slay-tui --lib tui::
-```
+The kernel binary itself has no `#[test]`s — it's `no_std`/`no_main` and won't build for the host target. All testable logic lives in `kernel-core`; everything that touches asm / CSRs / MMIO stays in `kernel/` and is covered (transitively) by the QEMU integration tests.
 
-When changing `tui.rs` layout or widgets, update or add a test that asserts the expected text appears in the rendered buffer.
+### Integration test scenarios
+
+`cargo xtask test` spawns one QEMU per scenario and reads decoded `Frame`s off the virtio-console socket. Scenarios in `xtask/src/itest/scenarios.rs`:
+
+- **`boot-reaches-heartbeat`** — Hello → `kernel.boot` SpanStart → `Dropped(0)` after pre-init flush → first `kernel.heartbeat` SpanStart.
+- **`heartbeat-cadence`** — two consecutive heartbeats with monotonic timestamps.
+- **`pre-init-order`** — first `StringRegister` is `kernel.boot`, every subsequent SpanStart resolves through an earlier StringRegister.
+
+Add a scenario: implement a `Result<(), String>` function in `scenarios.rs`, register it in `xtask/src/itest.rs::SCENARIOS`, run `cargo xtask test <name>`. The harness handles QEMU lifecycle and socket cleanup.
+
+Skips cleanly (exit 0) if `qemu-system-riscv64` isn't on `PATH`.
+
+### When changing the wire format
+
+`protocol::Frame` is the contract between kernel and host. If you:
+
+- **Add a variant**: update `kernel-core::sink::FrameSink` consumers if relevant, then add a matching arm in `OwnedFrame::from_borrowed` (`protocol/src/stream.rs`). Tests will fail to compile until you do.
+- **Change a field**: re-run the integration tests; they assert on the post-decode shape.
+- **Reorder existing variants**: don't. Postcard's enum encoding is positional — reordering silently breaks the wire format for all old captures.
+
+### Two telemetry channels, don't confuse them
+
+- **NS16550A UART** (`println!`) — human-readable boot log, no protocol, no decoder. Use for ad-hoc debugging.
+- **virtio-console** (telemetry frames) — structured `Frame`s, decoded by `collector` and the integration tests. Use for anything we want to observe or assert on.
+
+### Architecture references
+
+- [docs/observability-design.md](../docs/observability-design.md) — wire format, span semantics.
+- [docs/trap-and-interrupt-model.md](../docs/trap-and-interrupt-model.md) — RISC-V trap handling.
+- [docs/roadmap-and-milestones.md](../docs/roadmap-and-milestones.md) — current milestone, what's done, what's next.
+- [plans/scaling-corners.md](../plans/scaling-corners.md) — known corners that v0.1 sidesteps (SMP, lock-during-IRQ, etc.).
 
 ## Summary
 

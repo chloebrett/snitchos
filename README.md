@@ -72,8 +72,37 @@ cargo xtask reader             # collector in text-only mode (no docker needed)
 cargo xtask stack up           # docker-compose up the stack
 cargo xtask stack down         # docker-compose down
 cargo xtask stack logs         # tail container logs
+cargo xtask test               # run all kernel integration tests in QEMU
+cargo xtask test <scenario>    # run one scenario by name
 cargo xtask --help
 ```
+
+## Kernel integration tests
+
+`cargo xtask test` boots the kernel in QEMU, reads the virtio-console
+telemetry stream, decodes `Frame`s, and asserts on the sequence.
+Requires `qemu-system-riscv64` on `PATH` (skips cleanly with exit 0 if
+missing).
+
+Scenarios:
+
+- **`boot-reaches-heartbeat`** — Hello frame first on wire → `kernel.boot`
+  SpanStart → `Dropped(0)` checkpoint after pre-init flush → first
+  `kernel.heartbeat` SpanStart. Proves boot order and that the timer
+  IRQ is actually firing.
+- **`heartbeat-cadence`** — two consecutive `kernel.heartbeat` spans
+  arrive with monotonically-increasing timestamps. Proves the IRQ keeps
+  firing across multiple ticks.
+- **`pre-init-order`** — first `StringRegister` on the wire is for
+  `kernel.boot`, and every observed `SpanStart`'s `name_id` was
+  registered earlier in the stream. Proves the pre-init buffer drains
+  in order.
+
+Each scenario spawns its own QEMU process and per-pid socket
+(`/tmp/snitch-itest-<scenario>-<pid>.sock`); the harness always kills
+QEMU and removes the socket on drop, so a panicking test cleans up.
+
+A full `cargo xtask test` takes ~5 seconds wallclock.
 
 ## Reading
 
