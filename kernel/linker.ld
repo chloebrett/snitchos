@@ -3,6 +3,7 @@ MEMORY {
   ram (rwx) : ORIGIN = 0x80200000, LENGTH = 128M
 }
 SECTIONS {
+  __kernel_start = ORIGIN(ram);
   .text : {
     KEEP(*(.text.boot))
     *(.text .text*)
@@ -25,6 +26,7 @@ SECTIONS {
   __stack_bottom = .;
   . += 0x10000;
   __stack_top = .;
+  __kernel_end = .;
 
   /DISCARD/ : {
     *(.eh_frame .eh_frame.*)

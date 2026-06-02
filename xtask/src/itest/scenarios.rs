@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use protocol::stream::OwnedFrame;
 
+use protocol::SpanId;
+
 use super::harness::Harness;
 use super::matchers::{is_dropped, is_hello, is_span_start_named, is_string_register_named};
 
@@ -54,6 +56,33 @@ pub fn heartbeat_cadence() -> Result<(), String> {
     // test without parsing the Hello frame. Monotonicity alone
     // proves the timer is advancing across two IRQs, which is what
     // this scenario is for.
+    Ok(())
+}
+
+/// MMU is turned on between `kernel.boot` and the first heartbeat,
+/// and the kernel survives: we see a `kernel.mmu.enable` SpanStart,
+/// the matching SpanEnd (proves the satp write + sfence didn't
+/// crash), and then at least one `kernel.heartbeat` SpanStart (proves
+/// the kernel keeps running with paging on).
+pub fn mmu_enabled() -> Result<(), String> {
+    let mut h = Harness::spawn("mmu")?;
+
+    let start = h
+        .wait_for(SEC * 5, is_span_start_named("kernel.mmu.enable"))
+        .ok_or("no kernel.mmu.enable SpanStart within 5s")?;
+    let span_id: SpanId = match start {
+        OwnedFrame::SpanStart { id, .. } => id,
+        _ => return Err("matched non-SpanStart (impossible)".to_string()),
+    };
+
+    h.wait_for(SEC * 5, move |f, _| {
+        matches!(f, OwnedFrame::SpanEnd { id, .. } if *id == span_id)
+    })
+    .ok_or("no matching kernel.mmu.enable SpanEnd within 5s — satp write or sfence crashed?")?;
+
+    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no kernel.heartbeat after mmu.enable — kernel hung with paging on?")?;
+
     Ok(())
 }
 

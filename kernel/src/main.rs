@@ -8,6 +8,7 @@ use fdt::Fdt;
 
 mod console;
 mod dtb;
+mod mmu;
 mod tracing;
 mod trap;
 mod uart;
@@ -99,6 +100,19 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: trap vector was installed at the top of kmain; the
     // handler is ready.
     unsafe { trap::init_timer(timebase_hz) };
+
+    // Turn paging on. Identity-only for v0.4 step 1 — every region
+    // the kernel touches is mapped VA = PA, so the satp write is a
+    // no-op from the perspective of any pointer in flight.
+    //
+    // SAFETY: MMU is off (nothing wrote satp before us). All
+    // pre-satp init has completed; the only code that runs after this
+    // is the heartbeat loop, which only touches the kernel image and
+    // the virtio-mmio region — both identity-mapped by `enable`.
+    {
+        span!("kernel.mmu.enable");
+        unsafe { mmu::enable(&dtb) };
+    }
 
     // Heartbeat loop: wfi until the timer IRQ flips TICK_PENDING,
     // then emit a span + the metric set.
