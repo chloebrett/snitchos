@@ -1,12 +1,10 @@
 [package]
-name = "kernel"
+name = "kernel-core"
 version = "0.0.1"
 edition = "2024"
 publish = false
 
 [dependencies]
-fdt = "0.1.5"
 spin = "0.10"
 protocol = { path = "../protocol" }
 postcard = { version = "1", default-features = false }
-kernel-core = { path = "../kernel-core" }

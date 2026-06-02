@@ -425,6 +425,16 @@ name = "kernel"
 version = "0.0.1"
 dependencies = [
  "fdt",
+ "kernel-core",
+ "postcard",
+ "protocol",
+ "spin 0.10.0",
+]
+
+[[package]]
+name = "kernel-core"
+version = "0.0.1"
+dependencies = [
  "postcard",
  "protocol",
  "spin 0.10.0",
