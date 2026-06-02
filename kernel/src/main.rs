@@ -134,11 +134,11 @@ fn panic(info: &PanicInfo) -> ! {
     if !PANICKING.swap(true, Ordering::Relaxed) {
         // First time through. Print directly to a fresh UART, no lock.
         //
-        // SAFETY: 0x10000000 is the NS16550A MMIO base on QEMU `virt`. Bypassing
-        // the lock means we may interleave with whatever was printing when the
-        // panic fired — accepted because we're already in a fatal state.
+        // SAFETY: bypassing the lock means we may interleave with whatever
+        // was printing when the panic fired — accepted because we're already
+        // in a fatal state.
         use core::fmt::Write;
-        let mut uart = unsafe { uart::Uart16550::new(0x10000000) };
+        let mut uart = unsafe { uart::Uart16550::new(console::QEMU_VIRT_UART_BASE) };
         let _ = writeln!(&mut uart, "Kernel panic: {}", info);
     }
     loop {

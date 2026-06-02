@@ -27,10 +27,7 @@ pub static LAST_IRQ_DURATION: AtomicU64 = AtomicU64::new(0);
 
 /// Abstract clock: read current time, schedule a future interrupt.
 /// One implementation today (`SstcClock`); the trait shape is here
-/// for when we add an SBI fallback or different platforms. Not yet
-/// plumbed through — `arm_timer` / `init_timer` use the raw CSR ops
-/// directly. Suppressed dead-code lint until that wiring lands.
-#[allow(dead_code)]
+/// for when we add an SBI fallback or different platforms.
 pub trait Clock {
     /// Monotonic ticks since boot (raw cycle counter from the `time` CSR).
     fn now(&self) -> u64;
@@ -41,7 +38,6 @@ pub trait Clock {
 
 /// SSTC-based clock: reads `time` CSR directly, writes `stimecmp`
 /// (CSR 0x14d) to arm. No SBI round-trip.
-#[allow(dead_code)]
 pub struct SstcClock;
 
 impl Clock for SstcClock {
@@ -58,6 +54,12 @@ impl Clock for SstcClock {
         }
     }
 }
+
+/// The clock used by the IRQ handler and boot-time timer setup. A
+/// single concrete instance lives here so the handler doesn't need to
+/// take a `&dyn Clock` (no allocator, and the cost of dynamic dispatch
+/// in an IRQ is silly when we only ever have one impl).
+pub const CLOCK: SstcClock = SstcClock;
 
 /// Saved register state at trap entry. The assembly stores into these
 /// fields in this order; the Rust dispatcher reads them by name.
@@ -119,19 +121,11 @@ pub extern "C" fn trap_handler(_frame: *mut TrapFrame) {
 /// the main thread knows to do the real work. **No locks taken here**
 /// — the main thread owns all telemetry emission.
 fn handle_timer() {
-    let start: u64;
-    unsafe {
-        asm!("rdtime {}", out(reg) start);
-    }
-
+    let start = CLOCK.now();
     let interval = TIMER_INTERVAL_TICKS.load(Ordering::Relaxed);
-    arm_timer(start + interval);
+    CLOCK.arm(start + interval);
     TICK_PENDING.store(true, Ordering::Relaxed);
-
-    let end: u64;
-    unsafe {
-        asm!("rdtime {}", out(reg) end);
-    }
+    let end = CLOCK.now();
     LAST_IRQ_DURATION.store(end.wrapping_sub(start), Ordering::Relaxed);
 }
 
@@ -145,11 +139,7 @@ fn handle_timer() {
 /// otherwise the first timer interrupt jumps to garbage.
 pub unsafe fn init_timer(interval_ticks: u64) {
     TIMER_INTERVAL_TICKS.store(interval_ticks, Ordering::Relaxed);
-    let now: u64;
-    unsafe {
-        asm!("rdtime {}", out(reg) now);
-    }
-    arm_timer(now + interval_ticks);
+    CLOCK.arm(CLOCK.now() + interval_ticks);
     unsafe { enable_timer_interrupts() };
 }
 
@@ -162,7 +152,7 @@ pub unsafe fn init_timer(interval_ticks: u64) {
 /// only via the `Debug` impl in panic messages — which rustc's
 /// `dead_code` lint doesn't count as a "real" use. `#[allow]` it.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "u64 payloads are read only via Debug in panic messages")]
 enum TrapCause {
     SupervisorTimerInterrupt,
     SupervisorExternalInterrupt,
@@ -191,22 +181,6 @@ fn decode_scause(scause: u64) -> TrapCause {
             9 => TrapCause::EnvCallFromSMode,
             other => TrapCause::UnknownException(other),
         }
-    }
-}
-
-/// Program the next supervisor timer interrupt to fire when the
-/// `time` CSR reaches `deadline`. Uses the SSTC extension (the `sstc`
-/// flag in the DTB ISA list confirms QEMU `virt` supports it) —
-/// S-mode writes `stimecmp` directly, no SBI round-trip.
-///
-/// Writing a new deadline also acks any previous pending timer
-/// interrupt (because `time < new_stimecmp` again until we cross it).
-///
-/// Some assemblers don't yet know the symbolic name `stimecmp`; we
-/// use the numeric CSR address `0x14d` to be safe.
-pub fn arm_timer(deadline: u64) {
-    unsafe {
-        asm!("csrw 0x14d, {}", in(reg) deadline);
     }
 }
 

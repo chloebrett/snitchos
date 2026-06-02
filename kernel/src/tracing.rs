@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use protocol::{Frame, MetricKind, SpanId, StringId};
 
+use crate::trap::{CLOCK, Clock};
 use crate::virtio_console;
 
 /// Read the RISC-V `time` CSR — a monotonically increasing 64-bit cycle
@@ -18,11 +19,7 @@ use crate::virtio_console;
 /// kernel never does the division (avoids overflow in the
 /// `ticks * 10^9 / hz` form, and keeps the math out of the hot path).
 pub fn timestamp() -> u64 {
-    let t: u64;
-    unsafe {
-        core::arch::asm!("rdtime {t}", t = out(reg) t);
-    }
-    t
+    CLOCK.now()
 }
 
 /// Encode a `Frame::Hello` with the given CPU timebase and ship it out
@@ -65,35 +62,26 @@ static INTERN_TABLE: spin::Mutex<InternTable> = spin::Mutex::new(InternTable {
     next_id: 0,
 });
 
-/// Look up `name` in the intern table. If it's new, assign a fresh
-/// `StringId` and emit a `Frame::StringRegister` so the host learns
-/// the mapping. If it's already known, return the existing id without
-/// emitting.
+/// Look up `name` in the intern table, inserting a new entry if absent.
+/// Returns `(id, is_new)`: `is_new` is true iff this call allocated a
+/// fresh slot, so the caller knows whether to emit a `StringRegister`.
 ///
 /// Equality is by **pointer**, not value. Two `&'static str`s with the
 /// same characters from different crates would be registered twice —
 /// fine for v0.1 (single-crate kernel), worth fixing if userspace ever
 /// registers names.
 ///
-/// Known weaknesses:
-/// - **Panics if the table is full.** Programmer error: bump
-///   `MAX_INTERNED` or stop creating unique names.
-/// - **Holds the table lock during the wire emit.** Locking order is
-///   intern → virtio_console::CONSOLE. As long as nothing else takes
-///   them in the opposite order we're fine; v0.1 has no other lockers.
-pub fn register_or_lookup(name: &'static str) -> StringId {
-    let mut table = INTERN_TABLE.lock();
-
-    // Scan existing entries — pointer equality, O(N) but N is small.
+/// Panics if the table is full. Programmer error: bump `MAX_INTERNED`
+/// or stop creating unique names.
+fn lookup_or_insert(table: &mut InternTable, name: &'static str) -> (StringId, bool) {
     for (i, entry) in table.entries.iter().enumerate() {
         if let Some(e) = entry {
             if e.name.as_ptr() == name.as_ptr() {
-                return StringId(i as u32);
+                return (StringId(i as u32), false);
             }
         }
     }
 
-    // New string. Assign id, store, emit.
     let id = table.next_id;
     let slot = id as usize;
     if slot >= MAX_INTERNED {
@@ -107,13 +95,24 @@ pub fn register_or_lookup(name: &'static str) -> StringId {
         metric_registered: false,
     });
     table.next_id = id + 1;
+    (StringId(id), true)
+}
 
-    emit_frame(&Frame::StringRegister {
-        id: StringId(id),
-        value: name,
-    });
-
-    StringId(id)
+/// Look up `name` in the intern table. If it's new, assign a fresh
+/// `StringId` and emit a `Frame::StringRegister` so the host learns
+/// the mapping. If it's already known, return the existing id without
+/// emitting.
+///
+/// Known weakness: holds the table lock during the wire emit. Locking
+/// order is intern → virtio_console::CONSOLE. As long as nothing else
+/// takes them in the opposite order we're fine; v0.1 has no other lockers.
+pub fn register_or_lookup(name: &'static str) -> StringId {
+    let mut table = INTERN_TABLE.lock();
+    let (id, is_new) = lookup_or_insert(&mut table, name);
+    if is_new {
+        emit_frame(&Frame::StringRegister { id, value: name });
+    }
+    id
 }
 
 /// Number of names currently registered in the intern table. Exposed
@@ -132,40 +131,17 @@ pub fn intern_count() -> u32 {
 /// so the host will see `"foo"` as a Counter forever. Don't do that.
 fn register_metric(name: &'static str, kind: MetricKind) -> StringId {
     let mut table = INTERN_TABLE.lock();
-
-    // Existing entry?
-    for (i, entry) in table.entries.iter_mut().enumerate() {
-        if let Some(e) = entry {
-            if e.name.as_ptr() == name.as_ptr() {
-                let id = StringId(i as u32);
-                if !e.metric_registered {
-                    e.metric_registered = true;
-                    emit_frame(&Frame::MetricRegister { name_id: id, kind });
-                }
-                return id;
-            }
-        }
+    let (id, is_new) = lookup_or_insert(&mut table, name);
+    if is_new {
+        emit_frame(&Frame::StringRegister { id, value: name });
     }
-
-    // New entry — emit both StringRegister and MetricRegister.
-    let id = table.next_id;
-    let slot = id as usize;
-    if slot >= MAX_INTERNED {
-        panic!(
-            "tracing: intern table full ({} entries); bump MAX_INTERNED",
-            MAX_INTERNED,
-        );
+    // SAFETY: lookup_or_insert guarantees the slot is populated.
+    let entry = table.entries[id.0 as usize].as_mut().unwrap();
+    if !entry.metric_registered {
+        entry.metric_registered = true;
+        emit_frame(&Frame::MetricRegister { name_id: id, kind });
     }
-    table.entries[slot] = Some(InternEntry {
-        name,
-        metric_registered: true,
-    });
-    table.next_id = id + 1;
-
-    let sid = StringId(id);
-    emit_frame(&Frame::StringRegister { id: sid, value: name });
-    emit_frame(&Frame::MetricRegister { name_id: sid, kind });
-    sid
+    id
 }
 
 /// Register `name` as a Counter metric. Returns its `StringId` for use
@@ -181,9 +157,6 @@ pub fn register_gauge(name: &'static str) -> StringId {
 }
 
 /// Register `name` as a Histogram metric.
-///
-/// Currently unused — wired up at v0.3 step 8 (IRQ duration metric).
-#[allow(dead_code)]
 pub fn register_histogram(name: &'static str) -> StringId {
     register_metric(name, MetricKind::Histogram)
 }

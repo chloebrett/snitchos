@@ -21,12 +21,11 @@ const REG_QUEUE_NUM: usize = 0x038;
 const REG_QUEUE_READY: usize = 0x044;
 const REG_QUEUE_NOTIFY: usize = 0x050;
 const REG_STATUS: usize = 0x070;
+// 64-bit queue address slots — written via `write_reg64`, which fills
+// the LOW half here and the HIGH half at `LOW + 4`.
 const REG_QUEUE_DESC_LOW: usize = 0x080;
-const REG_QUEUE_DESC_HIGH: usize = 0x084;
 const REG_QUEUE_DRIVER_LOW: usize = 0x090;
-const REG_QUEUE_DRIVER_HIGH: usize = 0x094;
 const REG_QUEUE_DEVICE_LOW: usize = 0x0A0;
-const REG_QUEUE_DEVICE_HIGH: usize = 0x0A4;
 
 // --- Status register bits. The device's state machine. ---
 
@@ -54,11 +53,11 @@ const DEVICE_ID_CONSOLE: u32 = 3;
 const F_VERSION_1: u64 = 1 << 32;
 
 /// Descriptor flags. Used in the `flags` field of `VirtqDesc`.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "spec constants; only flags=0 is used today")]
 const DESC_F_NEXT: u16 = 0x1;
-#[allow(dead_code)]
+#[expect(dead_code, reason = "spec constants; only flags=0 is used today")]
 const DESC_F_WRITE: u16 = 0x2;
-#[allow(dead_code)]
+#[expect(dead_code, reason = "spec constants; only flags=0 is used today")]
 const DESC_F_INDIRECT: u16 = 0x4;
 
 /// virtio-console queue indices (no MULTIPORT feature).
@@ -190,10 +189,58 @@ unsafe fn write_reg(base: usize, offset: usize, value: u32) {
     unsafe { addr.write_volatile(value) }
 }
 
+/// Write a 64-bit value to a pair of virtio-mmio low/high 32-bit
+/// registers. Convention: `low_offset` is the LOW half; `low_offset+4`
+/// is the HIGH half — matches every desc/avail/used address pair in
+/// the spec.
+///
+/// # Safety
+///
+/// Same as `write_reg`. Both registers must belong to the same logical
+/// 64-bit address slot.
+unsafe fn write_reg64(base: usize, low_offset: usize, value: u64) {
+    unsafe {
+        write_reg(base, low_offset, value as u32);
+        write_reg(base, low_offset + 4, (value >> 32) as u32);
+    }
+}
+
+/// Configure one virtqueue against the device: select it, check the
+/// device's max queue size against ours, write our queue size, install
+/// the three ring base addresses (descriptor table, available ring,
+/// used ring), and mark it ready.
+///
+/// # Safety
+///
+/// `base` must be the MMIO base of a virtio-mmio device that's in the
+/// FEATURES_OK state. `queue` must outlive the device's use of it (in
+/// practice that's `'static`, which is why we take a pointer not a
+/// reference — the device writes to the used ring, and we don't want
+/// to imply Rust's aliasing rules cover device accesses).
+unsafe fn setup_queue(base: usize, sel: u32, queue: *const Virtqueue) -> Result<(), InitError> {
+    unsafe {
+        write_reg(base, REG_QUEUE_SEL, sel);
+        let max = read_reg(base, REG_QUEUE_NUM_MAX);
+        if (max as usize) < QSIZE {
+            return Err(InitError::QueueTooSmall);
+        }
+        write_reg(base, REG_QUEUE_NUM, QSIZE as u32);
+
+        let desc = &raw const (*queue).desc as u64;
+        let avail = &raw const (*queue).avail as u64;
+        let used = &raw const (*queue).used as u64;
+        write_reg64(base, REG_QUEUE_DESC_LOW, desc);
+        write_reg64(base, REG_QUEUE_DRIVER_LOW, avail);
+        write_reg64(base, REG_QUEUE_DEVICE_LOW, used);
+        write_reg(base, REG_QUEUE_READY, 1);
+    }
+    Ok(())
+}
+
 /// Diagnostic: dump magic/version/device-id for every virtio-mmio slot.
 /// Use this to figure out why discovery isn't matching what you expect.
 /// Kept around as a tool, not wired into the boot path.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "diagnostic; kept as a debugging tool, not wired into boot")]
 fn probe_all_slots(dtb: &Fdt) {
     for node in dtb.all_nodes() {
         let is_virtio = node
@@ -379,46 +426,14 @@ unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
         //    (queue 0) and TX (queue 1) to be configured, even if we
         //    never plan to receive — the device may silently drop our
         //    TX otherwise.
-
-        // RX queue.
-        write_reg(base, REG_QUEUE_SEL, QUEUE_RX);
-        let max = read_reg(base, REG_QUEUE_NUM_MAX);
-        if (max as usize) < QSIZE {
+        if let Err(e) = setup_queue(base, QUEUE_RX, &raw const RX_QUEUE) {
             write_reg(base, REG_STATUS, status | STATUS_FAILED);
-            return Err(InitError::QueueTooSmall);
+            return Err(e);
         }
-        write_reg(base, REG_QUEUE_NUM, QSIZE as u32);
-
-        let rx_desc = &raw const RX_QUEUE.desc as u64;
-        let rx_avail = &raw const RX_QUEUE.avail as u64;
-        let rx_used = &raw const RX_QUEUE.used as u64;
-        write_reg(base, REG_QUEUE_DESC_LOW, rx_desc as u32);
-        write_reg(base, REG_QUEUE_DESC_HIGH, (rx_desc >> 32) as u32);
-        write_reg(base, REG_QUEUE_DRIVER_LOW, rx_avail as u32);
-        write_reg(base, REG_QUEUE_DRIVER_HIGH, (rx_avail >> 32) as u32);
-        write_reg(base, REG_QUEUE_DEVICE_LOW, rx_used as u32);
-        write_reg(base, REG_QUEUE_DEVICE_HIGH, (rx_used >> 32) as u32);
-        write_reg(base, REG_QUEUE_READY, 1);
-
-        // TX queue.
-        write_reg(base, REG_QUEUE_SEL, QUEUE_TX);
-        let max = read_reg(base, REG_QUEUE_NUM_MAX);
-        if (max as usize) < QSIZE {
+        if let Err(e) = setup_queue(base, QUEUE_TX, &raw const TX_QUEUE) {
             write_reg(base, REG_STATUS, status | STATUS_FAILED);
-            return Err(InitError::QueueTooSmall);
+            return Err(e);
         }
-        write_reg(base, REG_QUEUE_NUM, QSIZE as u32);
-
-        let tx_desc = &raw const TX_QUEUE.desc as u64;
-        let tx_avail = &raw const TX_QUEUE.avail as u64;
-        let tx_used = &raw const TX_QUEUE.used as u64;
-        write_reg(base, REG_QUEUE_DESC_LOW, tx_desc as u32);
-        write_reg(base, REG_QUEUE_DESC_HIGH, (tx_desc >> 32) as u32);
-        write_reg(base, REG_QUEUE_DRIVER_LOW, tx_avail as u32);
-        write_reg(base, REG_QUEUE_DRIVER_HIGH, (tx_avail >> 32) as u32);
-        write_reg(base, REG_QUEUE_DEVICE_LOW, tx_used as u32);
-        write_reg(base, REG_QUEUE_DEVICE_HIGH, (tx_used >> 32) as u32);
-        write_reg(base, REG_QUEUE_READY, 1);
 
         // 8. DRIVER_OK: "I'm fully set up; treat me as a working driver."
         status |= STATUS_DRIVER_OK;

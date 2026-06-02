@@ -28,6 +28,28 @@ pub unsafe fn init(uart_addr: usize) {
   UART.call_once(|| spin::Mutex::new(unsafe { Uart16550::new(uart_addr) }));
 }
 
+/// Hardcoded NS16550A MMIO base for QEMU `virt`. Used by the macro
+/// fallback below when `UART` isn't initialized yet (early boot, or
+/// panic-during-init). Wrong on any other board — see `console.rs`
+/// known weaknesses.
+pub const QEMU_VIRT_UART_BASE: usize = 0x10000000;
+
+/// Returns a UART driver pointing at the QEMU `virt` MMIO base. Used by
+/// the `print!`/`println!` macros when `UART` isn't initialized yet.
+/// Kept here so the fallback's SAFETY justification lives in one place.
+///
+/// # Safety
+///
+/// Only safe to call before `console::init` has run (no other writer is
+/// using the device yet) or from the panic handler (we're already in a
+/// fatal state). Not exported for general use — it's `pub` so the macros
+/// can reach it, not because callers should.
+pub unsafe fn _pre_init_uart() -> Uart16550 {
+  // SAFETY: see function-level doc; precondition is that no other code
+  // currently holds the UART.
+  unsafe { Uart16550::new(QEMU_VIRT_UART_BASE) }
+}
+
 /// Print formatted output to the kernel console (no trailing newline).
 ///
 /// Uses the initialized `UART` static once it's set; before that, falls back
@@ -40,10 +62,8 @@ macro_rules! print {
     if let Some(uart) = $crate::console::UART.get() {
       let _ = write!(&mut *uart.lock(), $($arg)*);
     } else {
-      // SAFETY: 0x10000000 is the NS16550A MMIO base on QEMU `virt`. The
-      // pre-init fallback only fires before `console::init` runs, so no
-      // other writer is using the device yet.
-      let mut uart = unsafe { $crate::uart::Uart16550::new(0x10000000) };
+      // SAFETY: pre-init fallback fires before console::init runs.
+      let mut uart = unsafe { $crate::console::_pre_init_uart() };
       let _ = write!(&mut uart, $($arg)*);
     }
   }};
@@ -53,27 +73,14 @@ macro_rules! print {
 /// Same fallback behavior as `print!`.
 #[macro_export]
 macro_rules! println {
-  () => {{
-    use core::fmt::Write;
-    if let Some(uart) = $crate::console::UART.get() {
-      let _ = writeln!(&mut *uart.lock());
-    } else {
-      // SAFETY: 0x10000000 is the NS16550A MMIO base on QEMU `virt`. The
-      // pre-init fallback only fires before `console::init` runs, so no
-      // other writer is using the device yet.
-      let mut uart = unsafe { $crate::uart::Uart16550::new(0x10000000) };
-      let _ = writeln!(&mut uart);
-    }
-  }};
+  () => { $crate::print!("\n") };
   ($($arg:tt)*) => {{
     use core::fmt::Write;
     if let Some(uart) = $crate::console::UART.get() {
       let _ = writeln!(&mut *uart.lock(), $($arg)*);
     } else {
-      // SAFETY: 0x10000000 is the NS16550A MMIO base on QEMU `virt`. The
-      // pre-init fallback only fires before `console::init` runs, so no
-      // other writer is using the device yet.
-      let mut uart = unsafe { $crate::uart::Uart16550::new(0x10000000) };
+      // SAFETY: pre-init fallback fires before console::init runs.
+      let mut uart = unsafe { $crate::console::_pre_init_uart() };
       let _ = writeln!(&mut uart, $($arg)*);
     }
   }};
