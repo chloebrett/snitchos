@@ -359,3 +359,83 @@ tests, no `static mut`).
   moved out).
 - No behavioral change to the kernel's runtime output. Frames on the
   wire are byte-identical.
+
+## As-built notes (post-implementation)
+
+What actually happened, and where it deviated from the plan above.
+
+### Deviations
+
+- **Span: no static-sink wart.** Plan §B and step 6 proposed a
+  `spin::Once<&'static dyn FrameSink>` so `Span::drop` could find a
+  sink. The actual implementation makes `kernel_core::span::SpanRegistry`
+  purely about bookkeeping (id allocation, parent stack) and leaves
+  `Span` + its `Drop` impl on the kernel side, where it already has
+  access to `emit_frame`. Cleaner — no static-sink discovery, no
+  lifetime gymnastics, and `kernel-core` stays sink-free for spans.
+  The registry exposes `open() -> SpanOpen { id, parent }`, `close(&SpanOpen)`,
+  and `current() -> SpanId`.
+
+- **No `Ctx { sink, clock }` struct.** Plan §B proposed bundling
+  `&mut dyn FrameSink` and `&dyn Clock` into a single threaded
+  parameter. Turned out neither move required it: the kernel-core
+  types (intern table, span registry, pre-init buffer) don't need a
+  clock to do their bookkeeping. Timestamps are read at the kernel-side
+  call sites (via the existing `CLOCK` constant) and passed into the
+  frame as a plain field. The plan over-specified this; remove on next
+  edit.
+
+- **CapturingSink shape.** Plan §A waved at "an `OwnedFrame` type for
+  tests." Actual implementation in `kernel_core::sink::capture` is
+  simpler: store the postcard-encoded bytes (`Vec<Vec<u8>>`, gated
+  `#[cfg(test)]`), and decode at the assertion site via
+  `postcard::from_bytes`. Tests get back a typed `Frame<'a>` borrowed
+  from the captured bytes. Avoids defining a parallel owned type.
+
+- **Pre-init buffer: `drain` takes a `FnOnce(&[u8])`, not a sink.**
+  Plan step 7 said "flush emits the buffered bytes (assert on sink)."
+  In practice, the buffered bytes are already postcard-encoded and go
+  straight to the wire, not back through a sink. So `drain` hands the
+  contiguous slice to a caller-supplied callback. The kernel side
+  passes `|bytes| virtio_console::send(bytes)`. Tests pass a `Vec`
+  extender. The `Dropped` frame still emits through the sink after
+  drain returns, on the kernel side.
+
+### Step 4 detail
+
+The `FrameSink` trait and `CapturingSink` test helper landed exactly
+as planned. The trait has no production impls inside `kernel-core` —
+all impls live in the kernel binary (or tests). `CapturingSink` has
+two self-tests (capture in order, captures emitted frame) so later
+modules can lean on it.
+
+### Test count
+
+26 host tests landed in `kernel-core` (estimate was ~18). Breakdown:
+
+- `trap`: 7 (timer / software / external / breakpoint / U-mode ecall /
+  S-mode ecall distinguished / unknown-interrupt + unknown-exception
+  preserve raw code)
+- `sink::capture`: 2
+- `intern`: 7
+- `span`: 6
+- `preinit`: 7 (+ 1 lightweight smoke for saturating add)
+
+### Dead-code annotations
+
+When `TrapCause` moved from a private kernel enum to a `pub`
+kernel-core enum, the existing `#[expect(dead_code)]` on it
+immediately fired `unfulfilled_lint_expectations` — exactly the
+self-cleaning behavior we set up in the earlier session. Removed the
+annotation. Pattern worth repeating: when promoting a private type to
+`pub` across a crate boundary, expect any `#[expect(dead_code)]` on it
+to become stale.
+
+### What we did NOT do
+
+- **Step 9 as a separate phase.** Tests were written inline with each
+  move (steps 5–7), so step 9 collapsed into the earlier steps. No
+  bulk test-writing pass at the end.
+- **Move `dtb.rs` or `protocol`.** Kept in scope per the plan.
+- **QEMU integration tests.** Still future work; see the plan's
+  "What we're not doing" section.
