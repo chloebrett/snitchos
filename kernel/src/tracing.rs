@@ -9,6 +9,7 @@ use protocol::{Frame, MetricKind, StringId};
 
 use kernel_core::clock::Clock;
 use kernel_core::intern::InternTable;
+use kernel_core::preinit::PreInitBuffer;
 use kernel_core::sink::FrameSink;
 use kernel_core::span::SpanRegistry;
 
@@ -181,23 +182,10 @@ pub fn span_start(name: &'static str) -> Span {
 
 // --- Frame emission, with pre-init buffering ---
 
-/// Bytes we buffer up before `virtio_console::init` has completed.
-/// 1 KiB is plenty for all the boot-phase spans + their StringRegisters
-/// (each frame is ~10–30 bytes).
-const PRE_INIT_BYTES: usize = 1024;
-
-struct PreInit {
-    bytes: [u8; PRE_INIT_BYTES],
-    len: usize,
-    /// Count of frames that couldn't fit in the buffer.
-    dropped: u32,
-}
-
-static PRE_INIT_BUFFER: spin::Mutex<PreInit> = spin::Mutex::new(PreInit {
-    bytes: [0; PRE_INIT_BYTES],
-    len: 0,
-    dropped: 0,
-});
+/// Bytes we buffer up before `virtio_console::init` has completed. The
+/// storage and append/drain mechanics live in `kernel_core::preinit`;
+/// this is just the kernel's one instance.
+static PRE_INIT_BUFFER: spin::Mutex<PreInitBuffer> = spin::Mutex::new(PreInitBuffer::new());
 
 /// Flush any frames buffered while the virtio-console was still
 /// initializing. Call this exactly once, right after
@@ -207,17 +195,9 @@ static PRE_INIT_BUFFER: spin::Mutex<PreInit> = spin::Mutex::new(PreInit {
 /// this as a positive "buffer flushed, here's the loss count"
 /// checkpoint. `count == 0` means no frames were lost.
 pub fn flush_pre_init() {
-    let dropped = {
-        let mut buffer = PRE_INIT_BUFFER.lock();
-        if buffer.len > 0 {
-            virtio_console::send(&buffer.bytes[..buffer.len]);
-            buffer.len = 0;
-        }
-        let dropped = buffer.dropped;
-        buffer.dropped = 0;
-        dropped
-        // Lock drops here.
-    };
+    let dropped = PRE_INIT_BUFFER
+        .lock()
+        .drain(|bytes| virtio_console::send(bytes));
     emit_frame(&Frame::Dropped { count: dropped });
 }
 
@@ -231,7 +211,7 @@ pub fn flush_pre_init() {
 /// Known weaknesses:
 /// - **Buffer overflow drops frames.** Encode failure (frame > 128 B)
 ///   or pre-init buffer full → frame silently dropped (or, in the
-///   pre-init case, the `overflow` flag fires and `flush_pre_init`
+///   pre-init case, the dropped counter increments and `flush_pre_init`
 ///   emits a `Dropped` to tell the host).
 fn emit_frame(frame: &Frame<'_>) {
     let mut buf = [0u8; 128];
@@ -242,15 +222,6 @@ fn emit_frame(frame: &Frame<'_>) {
     if virtio_console::CONSOLE.get().is_some() {
         virtio_console::send(bytes);
     } else {
-        // Append to pre-init buffer; count drops if we don't fit.
-        let mut buffer = PRE_INIT_BUFFER.lock();
-        let start = buffer.len;
-        let end = start + bytes.len();
-        if end <= PRE_INIT_BYTES {
-            buffer.bytes[start..end].copy_from_slice(bytes);
-            buffer.len = end;
-        } else {
-            buffer.dropped = buffer.dropped.saturating_add(1);
-        }
+        PRE_INIT_BUFFER.lock().append(bytes);
     }
 }
