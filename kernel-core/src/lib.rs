@@ -11,4 +11,5 @@
 pub mod clock;
 pub mod intern;
 pub mod sink;
+pub mod span;
 pub mod trap;
