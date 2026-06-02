@@ -1,2 +1,10 @@
 [alias]
 xtask = "run --package xtask --"
+
+# Use the `medany` code model for the riscv64 kernel build. Default
+# (`medlow`) assumes absolute symbol addresses fit in the low 2 GiB
+# sign-extended, which breaks once the kernel is linked at higher-half
+# VAs (v0.4 step 2 onward). `medany` uses PC-relative addressing for
+# symbol references — works regardless of where the code is loaded.
+[target.riscv64gc-unknown-none-elf]
+rustflags = ["-C", "code-model=medium"]

@@ -65,11 +65,16 @@ impl InternTable {
     }
 
     /// Look up `name`, allocating a slot + emitting `StringRegister`
-    /// if it's new.
-    pub fn register_or_lookup(
+    /// if it's new. Generic over `S` (not `&mut dyn FrameSink`) so the
+    /// compiler monomorphizes per-call — no vtable, no absolute
+    /// function pointers stored in static memory. Important for the
+    /// kernel's higher-half link layout: dyn dispatch would compile
+    /// to absolute function pointer loads that wouldn't resolve
+    /// until paging is on with a higher-half mapping.
+    pub fn register_or_lookup<S: FrameSink>(
         &mut self,
         name: &'static str,
-        sink: &mut dyn FrameSink,
+        sink: &mut S,
     ) -> StringId {
         let (id, is_new) = self.lookup_or_insert(name);
         if is_new {
@@ -84,11 +89,11 @@ impl InternTable {
     /// kinds is a programmer error — the second call sees
     /// `metric_registered: true` and skips emit, so the host's first-seen
     /// kind wins.
-    pub fn register_metric(
+    pub fn register_metric<S: FrameSink>(
         &mut self,
         name: &'static str,
         kind: MetricKind,
-        sink: &mut dyn FrameSink,
+        sink: &mut S,
     ) -> StringId {
         let (id, is_new) = self.lookup_or_insert(name);
         if is_new {
