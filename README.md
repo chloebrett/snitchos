@@ -12,6 +12,8 @@ The operating system that snitches on itself 🐀
 
 **v0.3 "Interrupts & clock"** — *complete*. Full S-mode trap handling (entry/exit asm + Rust dispatcher); SSTC-based timer interrupts; heartbeat is timer-driven (`wfi` between ticks) instead of busy-spin. First histogram metric (`snitchos.irq.timer.duration_ticks`) end-to-end through the collector's bucket accumulation into Grafana.
 
+**v0.3.1 "Making the kernel testable"** — *complete*. Carved out `kernel-core` (host-buildable `no_std` library) holding the intern table, span registry, pre-init buffer, scause decoding, and the `FrameSink`/`Clock` traits. 29 host unit tests over the data logic. New `xtask test` harness boots the kernel in QEMU, decodes the virtio-console telemetry stream, asserts on the `Frame` sequence — 3 scenarios passing in ~5s wallclock. See [posts/post-8-making-the-kernel-testable.md](posts/post-8-making-the-kernel-testable.md).
+
 Working:
 
 - no_std kernel; handwritten boot stub + linker script; ns16550a UART driver
@@ -22,11 +24,12 @@ Working:
 - `Clock` trait + `SstcClock` impl (abstraction surface for future SBI / non-RISC-V impls)
 - `protocol` crate: postcard-encoded `Frame` enum (`Hello`, `SpanStart/End`, `Event`, `Metric`, `MetricRegister`, `StringRegister`, `Dropped`) with `MetricKind` (`Counter`/`Gauge`/`Histogram`), hosted TDD
 - `tracing` module: timestamps from the `time` CSR, string intern table with metric-type registration, RAII-guarded spans via the `span!` macro, pre-init buffering with a `Dropped { count }` checkpoint after flush
+- `kernel-core` library (host-buildable `no_std`): intern table, span registry, pre-init buffer, scause decoder, `FrameSink` + `Clock` traits — 29 host unit tests cover the data logic
 - kernel-side metric helpers: `register_counter` / `register_gauge` / `register_histogram` / `emit_metric`
 - `kernel.boot` opens at boot with `console_init` + `telemetry_init` sub-spans; `kernel.heartbeat` span + metric set emitted once per timer tick
 - `collector` (host-side): decodes the wire stream, reassembles spans, exports OTLP/HTTP to Tempo, serves Prometheus text on `/metrics` with full counter/gauge/histogram bucketing
 - docker-compose stack: Tempo + Prometheus + Grafana, all auto-provisioned (datasources + dashboard with timer-IRQ percentile panel)
-- `xtask` orchestration: `cargo xtask up` (kernel) / `cargo xtask collect` (collector) / `cargo xtask stack {up,down,logs}`
+- `xtask` orchestration: `cargo xtask up` (kernel) / `cargo xtask collect` (collector) / `cargo xtask stack {up,down,logs}` / `cargo xtask test` (kernel integration scenarios in QEMU)
 
 Up next: **v0.4 (memory)** — page-table setup, higher-half kernel, physical frame allocator, kernel heap; allocators instrumented (allocation/free as metrics, heap pressure visible in Grafana).
 
@@ -110,6 +113,9 @@ A full `cargo xtask test` takes ~5 seconds wallclock.
 - [docs/v0.1-hello-traced-world.md](docs/v0.1-hello-traced-world.md) — v0.1 milestone plan.
 - [plans/v0.2-grafana.md](plans/v0.2-grafana.md) — v0.2 implementation plan.
 - [plans/virtio-console.md](plans/virtio-console.md) — virtio-console implementation plan.
+- [plans/v0.3-interrupts.md](plans/v0.3-interrupts.md) — v0.3 implementation plan.
+- [plans/kernel-core-carveout.md](plans/kernel-core-carveout.md) — the host-testability extraction plan + as-built notes.
+- [plans/kernel-integration-tests.md](plans/kernel-integration-tests.md) — the QEMU-driven scenario harness.
 - [plans/scaling-corners.md](plans/scaling-corners.md) — known corners for SMP / interrupts.
 - [posts/](posts/) — devlog notes as we go.
 
@@ -117,7 +123,8 @@ A full `cargo xtask test` takes ~5 seconds wallclock.
 
 ```
 kernel/         no_std RISC-V S-mode kernel; entry.S, linker.ld, drivers
-protocol/       postcard-encoded telemetry Frame enum (no_std)
+kernel-core/    host-buildable no_std lib: pure data + bookkeeping, unit-tested
+protocol/       postcard-encoded telemetry Frame enum (no_std); std-gated stream decoder
 collector/      host-side: decode frames; export OTLP; serve /metrics
 xtask/          orchestration commands (this file's "Quick start")
 stack/          docker-compose: Tempo + Prometheus + Grafana + provisioning
