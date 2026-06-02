@@ -209,3 +209,33 @@ fn random_trace_id() -> [u8; 16] {
 fn clamp_u128_to_u64(v: u128) -> u64 {
     v.min(u64::MAX as u128) as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_passes_through_values_within_range() {
+        assert_eq!(clamp_u128_to_u64(0), 0);
+        assert_eq!(clamp_u128_to_u64(1_000_000), 1_000_000);
+        assert_eq!(clamp_u128_to_u64(u64::MAX as u128), u64::MAX);
+    }
+
+    #[test]
+    fn clamp_saturates_at_u64_max() {
+        assert_eq!(clamp_u128_to_u64(u64::MAX as u128 + 1), u64::MAX);
+        assert_eq!(clamp_u128_to_u64(u128::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn exporter_appends_v1_traces_to_bare_url() {
+        let e = Exporter::new("http://localhost:4318");
+        assert_eq!(e.endpoint, "http://localhost:4318/v1/traces");
+    }
+
+    #[test]
+    fn exporter_does_not_double_append_v1_traces() {
+        let e = Exporter::new("http://localhost:4318/v1/traces");
+        assert_eq!(e.endpoint, "http://localhost:4318/v1/traces");
+    }
+}

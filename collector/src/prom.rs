@@ -128,6 +128,68 @@ fn sanitize(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::{Frame, MetricKind, StringId};
+
+    fn state_with_scalar(name: &'static str, kind: MetricKind, value: i64) -> State {
+        let mut s = State::new();
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        s.handle(&Frame::StringRegister { id: StringId(1), value: name });
+        s.handle(&Frame::MetricRegister { name_id: StringId(1), kind });
+        s.handle(&Frame::Metric { name_id: StringId(1), value, t: 100 });
+        s
+    }
+
+    #[test]
+    fn format_counter_emits_type_and_value() {
+        let s = state_with_scalar("snitchos.heartbeat.count", MetricKind::Counter, 42);
+        let out = format_metrics(&s);
+        assert!(out.contains("# TYPE snitchos_heartbeat_count counter\n"), "got:\n{out}");
+        assert!(out.contains("snitchos_heartbeat_count 42\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn format_gauge_emits_type_and_value() {
+        let s = state_with_scalar("cpu.temp", MetricKind::Gauge, 72);
+        let out = format_metrics(&s);
+        assert!(out.contains("# TYPE cpu_temp gauge\n"), "got:\n{out}");
+        assert!(out.contains("cpu_temp 72\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn format_histogram_emits_cumulative_buckets_sum_count() {
+        let mut s = State::new();
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        s.handle(&Frame::StringRegister { id: StringId(1), value: "irq.duration" });
+        s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Histogram });
+        // 50 → bucket[0] (≤100), 200 → bucket[1] (≤250)
+        s.handle(&Frame::Metric { name_id: StringId(1), value: 50, t: 100 });
+        s.handle(&Frame::Metric { name_id: StringId(1), value: 200, t: 100 });
+
+        let out = format_metrics(&s);
+        assert!(out.contains("# TYPE irq_duration histogram\n"), "got:\n{out}");
+        // non-cumulative: bucket[0]=1, bucket[1]=1 → cumulative: le=100→1, le=250→2
+        assert!(out.contains("irq_duration_bucket{le=\"100\"} 1\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_bucket{le=\"250\"} 2\n"), "got:\n{out}");
+        // remaining buckets all still 2
+        assert!(out.contains("irq_duration_bucket{le=\"+Inf\"} 2\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_sum 250\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_count 2\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn format_histogram_inf_observation_appears_in_inf_bucket() {
+        let mut s = State::new();
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        s.handle(&Frame::StringRegister { id: StringId(1), value: "irq.duration" });
+        s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Histogram });
+        // 2_000_000 exceeds all bounds → inf_count
+        s.handle(&Frame::Metric { name_id: StringId(1), value: 2_000_000, t: 100 });
+
+        let out = format_metrics(&s);
+        assert!(out.contains("irq_duration_bucket{le=\"+Inf\"} 1\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_bucket{le=\"1000000\"} 0\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_sum 2000000\n"), "got:\n{out}");
+    }
 
     #[test]
     fn sanitize_replaces_dots() {

@@ -386,6 +386,54 @@ mod tests {
     }
 
     #[test]
+    fn histogram_observe_routes_to_first_bucket() {
+        let mut h = Histogram::default();
+        h.observe(50, State::HISTOGRAM_BOUNDS);
+        assert_eq!(h.buckets[0], 1);
+        assert_eq!(h.count, 1);
+        assert_eq!(h.sum, 50);
+    }
+
+    #[test]
+    fn histogram_observe_on_boundary_lands_in_that_bucket() {
+        let mut h = Histogram::default();
+        h.observe(100, State::HISTOGRAM_BOUNDS);
+        assert_eq!(h.buckets[0], 1);
+        assert_eq!(h.inf_count, 0);
+    }
+
+    #[test]
+    fn histogram_observe_exceeds_all_bounds_goes_to_inf() {
+        let mut h = Histogram::default();
+        h.observe(2_000_000, State::HISTOGRAM_BOUNDS);
+        assert_eq!(h.buckets.iter().sum::<u64>(), 0);
+        assert_eq!(h.inf_count, 1);
+        assert_eq!(h.count, 1);
+        assert_eq!(h.sum, 2_000_000);
+    }
+
+    #[test]
+    fn histogram_accumulates_sum_and_count_across_observations() {
+        let mut h = Histogram::default();
+        h.observe(50, State::HISTOGRAM_BOUNDS);
+        h.observe(200, State::HISTOGRAM_BOUNDS);
+        assert_eq!(h.count, 2);
+        assert_eq!(h.sum, 250);
+        assert_eq!(h.buckets[0], 1);
+        assert_eq!(h.buckets[1], 1);
+    }
+
+    #[test]
+    fn histogram_metric_routes_to_histogram_table_not_values() {
+        let mut s = State::new();
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Histogram });
+        s.handle(&Frame::Metric { name_id: StringId(1), value: 50, t: 100 });
+        assert!(s.metric_values.get(&1).is_none());
+        assert!(s.histograms.get(&1).is_some());
+    }
+
+    #[test]
     fn pre_init_spans_land_before_anchor() {
         // Hello arrives with t=100. A pre-init span had t=10. Its
         // wall-clock should be *before* the Hello anchor.
