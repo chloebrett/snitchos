@@ -10,6 +10,35 @@ use std::time::SystemTime;
 
 use protocol::{Frame, MetricKind, SpanId, StringId};
 
+/// Injectable source of host wall-clock nanoseconds since epoch.
+pub trait WallClock: Send {
+    fn now_ns(&self) -> u128;
+}
+
+/// Production impl — reads `SystemTime::now()`.
+pub struct SystemWallClock;
+
+impl WallClock for SystemWallClock {
+    #[cfg_attr(test, mutants::skip)] // reads the real wall clock — not unit-testable
+    fn now_ns(&self) -> u128 {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    }
+}
+
+/// Test double — returns the pinned value supplied at construction.
+#[cfg(test)]
+pub(crate) struct FakeWallClock(pub u128);
+
+#[cfg(test)]
+impl WallClock for FakeWallClock {
+    fn now_ns(&self) -> u128 {
+        self.0
+    }
+}
+
 /// A span completed by matching a `SpanEnd` to a remembered `SpanStart`.
 /// Carries enough info to build an OTLP span at export time.
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +105,7 @@ impl Histogram {
 }
 
 pub struct State {
+    clock: Box<dyn WallClock>,
     timebase_hz: u64,
     anchor: Option<SessionAnchor>,
     strings: HashMap<u32, String>,
@@ -92,8 +122,9 @@ pub struct State {
 }
 
 impl State {
-    pub fn new() -> Self {
+    pub fn new(clock: impl WallClock + 'static) -> Self {
         Self {
+            clock: Box::new(clock),
             timebase_hz: 0,
             anchor: None,
             strings: HashMap::new(),
@@ -143,7 +174,7 @@ impl State {
                 self.timebase_hz = *timebase_hz;
                 // Anchor wall-clock to the moment we processed Hello.
                 self.anchor = Some(SessionAnchor {
-                    wallclock_ns: wall_now_ns(),
+                    wallclock_ns: self.clock.now_ns(),
                     first_t: 0, // updated to the first real frame's t below
                 });
                 None
@@ -223,10 +254,6 @@ impl State {
 
     /// Update `first_t` if we're seeing the smallest `t` yet — pre-init
     /// spans may arrive after Hello with `t < hello.t`.
-    // mutants::skip — advance_anchor only affects absolute timestamps; our
-    // tests verify relative durations, which cancel out the first_t offset.
-    // Killing these mutants requires an injectable clock seam (not yet added).
-    #[mutants::skip]
     fn advance_anchor(&mut self, t: u64) {
         if let Some(anchor) = self.anchor.as_mut() {
             if anchor.first_t == 0 || t < anchor.first_t {
@@ -256,13 +283,6 @@ fn ticks_to_wall_ns(t: u64, first_t: u64, timebase_hz: u64, wallclock_ns: u128) 
     wallclock_ns + delta_ns
 }
 
-#[mutants::skip] // reads the real wall clock — requires a clock seam to test
-fn wall_now_ns() -> u128 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-}
 
 #[cfg(test)]
 mod tests {
@@ -270,7 +290,7 @@ mod tests {
 
     #[test]
     fn hello_sets_timebase() {
-        let mut s = State::new();
+        let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello {
             timebase_hz: 10_000_000,
             protocol_version: 1,
@@ -281,7 +301,7 @@ mod tests {
 
     /// Helper: build a State pre-anchored by sending Hello.
     fn anchored_state() -> State {
-        let mut s = State::new();
+        let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello {
             timebase_hz: 10_000_000,
             protocol_version: 1,
@@ -311,7 +331,7 @@ mod tests {
 
     #[test]
     fn frames_before_hello_are_dropped() {
-        let mut s = State::new();
+        let mut s = State::new(FakeWallClock(0));
         // No Hello yet — these should be ignored.
         s.handle(&Frame::StringRegister {
             id: StringId(0),
@@ -328,7 +348,7 @@ mod tests {
 
     #[test]
     fn span_end_yields_completed_span() {
-        let mut s = State::new();
+        let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello {
             timebase_hz: 10_000_000,
             protocol_version: 1,
@@ -361,7 +381,7 @@ mod tests {
 
     #[test]
     fn unmatched_span_end_returns_none() {
-        let mut s = State::new();
+        let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello {
             timebase_hz: 10_000_000,
             protocol_version: 1,
@@ -375,7 +395,7 @@ mod tests {
 
     #[test]
     fn metric_updates_value() {
-        let mut s = State::new();
+        let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello {
             timebase_hz: 10_000_000,
             protocol_version: 1,
@@ -390,6 +410,36 @@ mod tests {
             t: 100,
         });
         assert_eq!(s.metric_values.get(&5), Some(&42));
+    }
+
+    #[test]
+    fn span_timestamps_anchored_to_hello_wallclock() {
+        // wallclock = 1s at Hello time; first frame sets first_t=100.
+        // start should be exactly at anchor; end should be 1ms later.
+        let mut s = State::new(FakeWallClock(1_000_000_000));
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        s.handle(&Frame::StringRegister { id: StringId(1), value: "x" });
+        s.handle(&Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(1), t: 100 });
+        let span = s.handle(&Frame::SpanEnd { id: SpanId(1), t: 10_100 }).unwrap();
+        assert_eq!(span.start_time_ns, 1_000_000_000);
+        assert_eq!(span.end_time_ns,   1_001_000_000);
+    }
+
+    #[test]
+    fn advance_anchor_tracks_minimum_tick() {
+        // First span arrives at t=1_000 (sets first_t=1_000).
+        // Second span arrives at t=100 (should pull first_t down to 100).
+        // We verify by checking end_time_ns of the second span, which
+        // depends on the correct first_t being 100, not 1_000.
+        let mut s = State::new(FakeWallClock(0));
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        s.handle(&Frame::StringRegister { id: StringId(1), value: "x" });
+        s.handle(&Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(1), t: 1_000 });
+        s.handle(&Frame::SpanStart { id: SpanId(2), parent: SpanId(0), name_id: StringId(1), t: 100 });
+        let span = s.handle(&Frame::SpanEnd { id: SpanId(2), t: 600 }).unwrap();
+        // first_t=100: start=(100-100)/10MHz=0, end=(600-100)/10MHz=50µs
+        assert_eq!(span.start_time_ns, 0);
+        assert_eq!(span.end_time_ns, 50_000);
     }
 
     #[test]
@@ -458,7 +508,7 @@ mod tests {
 
     #[test]
     fn histogram_metric_routes_to_histogram_table_not_values() {
-        let mut s = State::new();
+        let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Histogram });
         s.handle(&Frame::Metric { name_id: StringId(1), value: 50, t: 100 });
@@ -470,7 +520,7 @@ mod tests {
     fn pre_init_spans_land_before_anchor() {
         // Hello arrives with t=100. A pre-init span had t=10. Its
         // wall-clock should be *before* the Hello anchor.
-        let mut s = State::new();
+        let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello {
             timebase_hz: 10_000_000,
             protocol_version: 1,

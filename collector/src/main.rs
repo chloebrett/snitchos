@@ -5,12 +5,12 @@
 //! v0.2 scope: `--text` works; `--otlp` and `--prometheus` are stubs
 //! that print "not yet implemented" — wired up in later steps.
 
-use std::io::Read;
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use protocol::Frame;
+use protocol::stream::decode_stream;
 
 mod otlp;
 mod prom;
@@ -53,12 +53,12 @@ struct Args {
     no_prometheus: bool,
 }
 
-#[mutants::skip] // I/O entry point — not unit-testable
+#[cfg_attr(test, mutants::skip)] // I/O entry point — not unit-testable
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
     let exporter = (!args.no_otlp).then(|| otlp::Exporter::new(&args.otlp));
-    let state = Arc::new(Mutex::new(state::State::new()));
+    let state = Arc::new(Mutex::new(state::State::new(state::SystemWallClock)));
 
     if !args.no_prometheus {
         prom::serve(state.clone(), args.prometheus)?;
@@ -94,58 +94,9 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Try to decode one `Frame` from the front of `buf`. Returns the
-/// decoded frame and the number of bytes it consumed.
-///
-/// `Result` (rather than `Option`) keeps the caller honest:
-/// `postcard::Error::DeserializeUnexpectedEnd` means "the buffer ended
-/// mid-frame, read more"; any other error means "the bytes don't match
-/// the protocol," which is worth surfacing rather than silently
-/// spinning forever.
-fn try_decode_frame<'a>(buf: &'a [u8]) -> Result<(Frame<'a>, usize), postcard::Error> {
-    postcard::take_from_bytes(buf).map(|(frame, rest)| (frame, buf.len() - rest.len()))
-}
-
-/// Drive the read-decode-emit loop over any byte source. Each fully
-/// decoded `Frame` is handed to `on_frame`. Returns when the stream
-/// closes cleanly (EOF), or with `Err` on I/O or decode error.
-fn decode_stream<R: Read>(
-    stream: &mut R,
-    mut on_frame: impl FnMut(&Frame<'_>),
-) -> std::io::Result<()> {
-    let mut buf: Vec<u8> = Vec::with_capacity(1024);
-    let mut tmp = [0u8; 256];
-
-    loop {
-        // Drain as many complete frames as the buffer currently holds.
-        loop {
-            let consumed = match try_decode_frame(&buf) {
-                Ok((frame, n)) => {
-                    on_frame(&frame);
-                    n
-                }
-                Err(postcard::Error::DeserializeUnexpectedEnd) => break,
-                Err(e) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("frame decode error: {e:?}"),
-                    ));
-                }
-            };
-            buf.drain(..consumed);
-        }
-
-        let n = stream.read(&mut tmp)?;
-        if n == 0 {
-            return Ok(());
-        }
-        buf.extend_from_slice(&tmp[..n]);
-    }
-}
-
 /// Print a decoded frame to stdout. Uses the derived `Debug` impl; with
 /// `pretty=true`, multi-line pretty format for easier inspection.
-#[mutants::skip] // pure stdout I/O — behaviour verified by running the binary
+#[cfg_attr(test, mutants::skip)] // pure stdout I/O — behaviour verified by running the binary
 fn print_frame(frame: &Frame<'_>, pretty: bool) {
     if pretty {
         println!("{frame:#?}");
@@ -154,154 +105,4 @@ fn print_frame(frame: &Frame<'_>, pretty: bool) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use protocol::{MetricKind, SpanId, StringId};
-    use std::io::Cursor;
-
-    #[test]
-    fn decodes_hello() {
-        let frame = Frame::Hello {
-            timebase_hz: 10_000_000,
-            protocol_version: 1,
-        };
-        let mut buf = [0u8; 64];
-        let encoded = postcard::to_slice(&frame, &mut buf).unwrap();
-        let encoded_len = encoded.len();
-
-        let (decoded, consumed) = try_decode_frame(encoded).expect("decode should succeed");
-        assert_eq!(decoded, frame);
-        assert_eq!(consumed, encoded_len);
-    }
-
-    #[test]
-    fn truncated_returns_unexpected_end() {
-        let frame = Frame::Hello {
-            timebase_hz: 10_000_000,
-            protocol_version: 1,
-        };
-        let mut buf = [0u8; 64];
-        let encoded = postcard::to_slice(&frame, &mut buf).unwrap();
-        let truncated = &encoded[..encoded.len() - 1];
-
-        let err = try_decode_frame(truncated).expect_err("should fail");
-        assert!(
-            matches!(err, postcard::Error::DeserializeUnexpectedEnd),
-            "expected DeserializeUnexpectedEnd, got {err:?}",
-        );
-    }
-
-    #[test]
-    fn ignores_trailing_bytes() {
-        let frame = Frame::Hello {
-            timebase_hz: 10_000_000,
-            protocol_version: 1,
-        };
-        let mut buf = [0u8; 64];
-        let encoded_len = postcard::to_slice(&frame, &mut buf).unwrap().len();
-
-        let garbage = [0xAAu8, 0xBB, 0xCC, 0xDD];
-        let mut combined = Vec::with_capacity(encoded_len + garbage.len());
-        combined.extend_from_slice(&buf[..encoded_len]);
-        combined.extend_from_slice(&garbage);
-
-        let (decoded, consumed) =
-            try_decode_frame(&combined).expect("decode should succeed");
-        assert_eq!(decoded, frame);
-        assert_eq!(consumed, encoded_len);
-    }
-
-    #[test]
-    fn decode_stream_yields_single_hello() {
-        let frame = Frame::Hello {
-            timebase_hz: 10_000_000,
-            protocol_version: 1,
-        };
-        let mut buf = [0u8; 64];
-        let encoded_len = postcard::to_slice(&frame, &mut buf).unwrap().len();
-        let bytes: Vec<u8> = buf[..encoded_len].to_vec();
-
-        let mut count = 0;
-        decode_stream(&mut Cursor::new(bytes), |f| {
-            assert!(matches!(
-                f,
-                Frame::Hello {
-                    timebase_hz: 10_000_000,
-                    protocol_version: 1,
-                }
-            ));
-            count += 1;
-        })
-        .expect("decode_stream should succeed");
-
-        assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn decode_stream_yields_multiple_frames() {
-        let frame_a = Frame::Hello {
-            timebase_hz: 10_000_000,
-            protocol_version: 1,
-        };
-        let frame_b = Frame::SpanEnd {
-            id: SpanId(42),
-            t: 1234,
-        };
-
-        let mut buf = Vec::new();
-        {
-            let mut scratch = [0u8; 64];
-            buf.extend_from_slice(postcard::to_slice(&frame_a, &mut scratch).unwrap());
-            buf.extend_from_slice(postcard::to_slice(&frame_b, &mut scratch).unwrap());
-        }
-
-        let mut seen: Vec<&'static str> = Vec::new();
-        decode_stream(&mut Cursor::new(buf), |f| match f {
-            Frame::Hello { .. } => seen.push("hello"),
-            Frame::SpanEnd { .. } => seen.push("span_end"),
-            _ => panic!("unexpected frame {f:?}"),
-        })
-        .expect("decode_stream should succeed");
-
-        assert_eq!(seen, vec!["hello", "span_end"]);
-    }
-
-    /// `Read` impl that hands out at most `chunk_size` bytes per call.
-    /// Simulates the short-reads behavior of TCP / Unix sockets.
-    struct ChunkedReader {
-        data: Vec<u8>,
-        pos: usize,
-        chunk_size: usize,
-    }
-
-    impl Read for ChunkedReader {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let avail = self.data.len() - self.pos;
-            let n = avail.min(self.chunk_size).min(buf.len());
-            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
-            self.pos += n;
-            Ok(n)
-        }
-    }
-
-    #[test]
-    fn decode_stream_handles_partial_reads() {
-        let frame = Frame::MetricRegister {
-            name_id: StringId(7),
-            kind: MetricKind::Counter,
-        };
-        let mut scratch = [0u8; 64];
-        let encoded = postcard::to_slice(&frame, &mut scratch).unwrap();
-
-        let reader = ChunkedReader {
-            data: encoded.to_vec(),
-            pos: 0,
-            chunk_size: 1,
-        };
-        let mut count = 0;
-        decode_stream(&mut { reader }, |_| count += 1)
-            .expect("decode_stream should succeed");
-        assert_eq!(count, 1);
-    }
-}
+// Stream-decoding tests moved with the impl to `protocol::stream`.

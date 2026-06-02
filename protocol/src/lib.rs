@@ -8,6 +8,9 @@
 
 use serde::{Serialize, Deserialize};
 
+#[cfg(feature = "std")]
+pub mod stream;
+
 /// Identifier of a string in the runtime intern table. `StringRegister`
 /// frames populate the table; every `*_name_id` field references it.
 /// `u32` because the table has far fewer entries than spans do.

@@ -14,7 +14,7 @@ use crate::state::State;
 /// Spawn the metrics server on the given port. Runs until the process
 /// exits. Errors during request handling are logged to stderr but don't
 /// take the server down.
-#[mutants::skip] // binds a real TCP socket — not unit-testable
+#[cfg_attr(test, mutants::skip)] // binds a real TCP socket — not unit-testable
 pub fn serve(state: Arc<Mutex<State>>, port: u16) -> std::io::Result<()> {
     let addr = format!("0.0.0.0:{port}");
     let server = tiny_http::Server::http(&addr).map_err(|e| {
@@ -129,10 +129,11 @@ fn sanitize(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::FakeWallClock;
     use protocol::{Frame, MetricKind, StringId};
 
     fn state_with_scalar(name: &'static str, kind: MetricKind, value: i64) -> State {
-        let mut s = State::new();
+        let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::StringRegister { id: StringId(1), value: name });
         s.handle(&Frame::MetricRegister { name_id: StringId(1), kind });
@@ -158,7 +159,7 @@ mod tests {
 
     #[test]
     fn format_histogram_emits_cumulative_buckets_sum_count() {
-        let mut s = State::new();
+        let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::StringRegister { id: StringId(1), value: "irq.duration" });
         s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Histogram });
@@ -179,7 +180,7 @@ mod tests {
 
     #[test]
     fn format_histogram_inf_observation_appears_in_inf_bucket() {
-        let mut s = State::new();
+        let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::StringRegister { id: StringId(1), value: "irq.duration" });
         s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Histogram });

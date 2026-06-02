@@ -2,6 +2,8 @@ use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
 
+mod itest;
+
 const KERNEL_TARGET: &str = "riscv64gc-unknown-none-elf";
 const KERNEL_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/kernel";
 const COLLECTOR_BIN: &str = "target/debug/collector";
@@ -47,6 +49,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: StackCmd,
     },
+    /// Run kernel integration tests in QEMU. With no scenario name,
+    /// runs every known scenario and reports a pass/fail summary.
+    Test {
+        /// Optional scenario name to run. Omit to run all.
+        scenario: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -76,6 +84,7 @@ fn main() -> ExitCode {
             run_collector(&all)
         }
         Cmd::Stack { cmd } => stack(cmd),
+        Cmd::Test { scenario } => itest::run(scenario.as_deref()),
     }
 }
 

@@ -4,6 +4,13 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
+[features]
+default = []
+# Enables `protocol::stream` — `std::io::Read`-driven decoder and the
+# allocating `OwnedFrame` type. Off by default so the kernel keeps
+# building no_std.
+std = []
+
 [dependencies]
 serde = { version = "1", default-features = false, features = ["derive"] }
 postcard = { version = "1", default-features = false }

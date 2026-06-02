@@ -5,4 +5,9 @@ exclude_globs = ["kernel/**", "kernel-core/**"]
 
 # The warned_no_hello flag gates a one-shot stderr warning; testing it
 # would require capturing stderr. Not worth the complexity.
-exclude_re = ["delete ! in State::handle"]
+exclude_re = [
+  # One-shot stderr warning; testing it requires capturing stderr.
+  "delete ! in State::handle",
+  # Equivalent mutant: `first_t = t` when `t == first_t` is a no-op.
+  "replace < with <= in State::advance_anchor",
+]
