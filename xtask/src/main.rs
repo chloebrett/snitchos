@@ -34,6 +34,13 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Run mutation testing against the host-testable crates (collector +
+    /// protocol). Trailing args are forwarded to cargo-mutants, e.g.
+    /// `cargo xtask mutants -- -j 4`.
+    Mutants {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Bring the observability stack (Tempo + Prometheus + Grafana)
     /// up or down via docker compose.
     Stack {
@@ -56,6 +63,7 @@ fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Build => build(),
         Cmd::Up => up(),
+        Cmd::Mutants { args } => run_mutants(&args),
         Cmd::Collect { args } => run_collector(&args),
         Cmd::Reader { args } => {
             // Reader = text-only debug view; no docker dependency.
@@ -137,6 +145,19 @@ fn up() -> ExitCode {
         ])
         .status()
         .expect("failed to invoke qemu-system-riscv64");
+    if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn run_mutants(extra_args: &[String]) -> ExitCode {
+    let status = Command::new("cargo")
+        .args(["mutants", "-p", "collector", "-p", "protocol"])
+        .args(extra_args)
+        .status()
+        .expect("failed to invoke cargo mutants");
     if status.success() {
         ExitCode::SUCCESS
     } else {

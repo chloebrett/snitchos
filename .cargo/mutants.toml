@@ -1,0 +1,4 @@
+# Exclude kernel crates from mutation — they target RISC-V (no_std) and
+# cannot be compiled or tested on the host. Use `cargo xtask mutants`
+# (which passes -p collector -p protocol) rather than bare `cargo mutants`.
+exclude_globs = ["kernel/**", "kernel-core/**"]
