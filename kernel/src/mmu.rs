@@ -232,34 +232,34 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
     }
 }
 
-/// Tear down the identity mapping for the kernel-image gigapage
-/// (`[0x80000000, 0xC0000000)` = root entry 2). After this returns,
-/// any access to an identity-VA kernel-image address (`0x80200000+`)
-/// faults — the kernel must use higher-half VAs exclusively for its
-/// code and statics.
-///
-/// **Keeps identity MMIO mapped** (root entry 0). `CONSOLE` and `UART`
-/// statics still hold physical MMIO bases; the panic handler and the
-/// `_pre_init_uart()` fallback still poke physical UART. Removing
-/// identity-MMIO is a future checkpoint that requires patching those
-/// + adding higher-half MMIO mappings.
+/// Tear down both identity mappings: the kernel-image gigapage
+/// (`[0x80000000, 0xC0000000)` = root entry 2) and the MMIO gigapage
+/// (`[0x00000000, 0x40000000)` = root entry 0). After this returns,
+/// any access to an identity-half VA faults — the kernel must use
+/// higher-half VAs exclusively, including for MMIO.
 ///
 /// # Safety
 ///
-/// - MMU must be on with the dual-map installed by `enable`.
+/// - MMU must be on with the dual-map installed by `enable`, and the
+///   higher-half MMIO mapping must be live.
 /// - Kernel must currently be running at higher-half PC + sp
 ///   (trampoline already executed). Calling this while at identity
 ///   PC would yank the rug out from under the running instruction
 ///   stream.
+/// - `CONSOLE` and `UART` statics must already hold higher-half VAs,
+///   and the panic-handler / `_pre_init_uart` paths must already
+///   route through `emergency_uart_base()`. Otherwise the next print
+///   faults.
 /// - DTB region (which lived in the identity kernel gigapage) becomes
 ///   unreachable after this. Caller must not read through `&Fdt`
 ///   afterwards.
-pub unsafe fn unmap_identity_kernel() {
+pub unsafe fn unmap_identity() {
     unsafe {
         let root = &mut *(&raw mut BOOT_PT_ROOT);
-        // Root entry 2 covers identity [0x80000000, 0xC0000000) — the
-        // kernel image, stack, DTB, and any other identity-half data
-        // in that gigapage.
+        // Root entry 0: identity [0x00000000, 0x40000000) — MMIO.
+        root.set_entry(0, 0);
+        // Root entry 2: identity [0x80000000, 0xC0000000) — kernel
+        // image, stack, DTB.
         root.set_entry(2, 0);
         asm!("sfence.vma", options(nostack, nomem));
     }

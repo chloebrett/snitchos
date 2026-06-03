@@ -154,23 +154,16 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // handler is ready.
     unsafe { trap::init_timer(timebase_hz) };
 
-    // Tear down the identity mapping for the kernel-image gigapage.
-    // From here on, any access to a kernel-image identity VA
-    // (`0x80200000+`) faults. The kernel image, its stack, and the
-    // DTB region all stop being reachable via identity — only
-    // higher-half VAs work.
-    //
-    // Identity MMIO (root entry 0) stays mapped: `CONSOLE` and `UART`
-    // statics still hold physical addresses, and the panic handler's
-    // UART poke is hardcoded physical. Removing identity MMIO is a
-    // future cleanup that needs higher-half MMIO mappings + patched
-    // statics first.
+    // Tear down both identity mappings. From here on, any access to
+    // an identity-half VA — kernel image, stack, DTB, or MMIO — faults.
+    // The kernel runs purely in higher-half: code, statics, `CONSOLE`,
+    // `UART`, and the emergency UART path (via `emergency_uart_base`)
+    // all hold or compute higher-half VAs.
     //
     // SAFETY: kernel is running at higher-half PC + sp (trampoline
-    // executed above). DTB is no longer accessed — the only thing
-    // after this is the heartbeat loop, which touches statics +
-    // MMIO only.
-    unsafe { mmu::unmap_identity_kernel() };
+    // executed above). DTB is no longer accessed. `CONSOLE` and `UART`
+    // were initialized with higher-half VAs in increments 2 and 3.
+    unsafe { mmu::unmap_identity() };
 
     // Heartbeat loop: wfi until the timer IRQ flips TICK_PENDING,
     // then emit a span + the metric set.
