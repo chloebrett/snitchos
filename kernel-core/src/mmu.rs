@@ -4,6 +4,33 @@
 //!
 //! See `plans/v0.4-memory-concepts.md` § 2-3 for the Sv39 reference.
 
+/// VA = PA + KERNEL_OFFSET for kernel-space mappings. Matches Linux
+/// RISC-V's `PAGE_OFFSET - PHYS_BASE` with PHYS_BASE = 0x80000000.
+/// The kernel image at PA 0x80200000 maps to higher-half VA
+/// `0xffffffff_80200000`.
+pub const KERNEL_OFFSET: usize = 0xffffffff_00000000;
+
+/// Convert a kernel virtual address to its physical address. Strips
+/// `KERNEL_OFFSET` if the VA is in the higher-half range; passes
+/// identity-range VAs through unchanged.
+///
+/// Used at the boundary where the kernel hands an address to a device
+/// (virtio queue addresses, DMA buffer pointers). Devices have no MMU
+/// and treat the value as physical, so anywhere we'd otherwise pass
+/// `&static as u64` or `slice.as_ptr() as u64` we route through this.
+///
+/// Pre-trampoline (PC at identity), `&static as usize` is PC-relative
+/// and gives the physical address, so this function is a no-op.
+/// Post-trampoline (PC at higher-half), `&static as usize` gives a
+/// higher-half VA, and this strips `KERNEL_OFFSET`.
+pub const fn va_to_pa(va: usize) -> usize {
+    if va >= KERNEL_OFFSET {
+        va - KERNEL_OFFSET
+    } else {
+        va
+    }
+}
+
 /// PTE permission and attribute bits. V (valid) is always set on any
 /// PTE this module produces. A (accessed) and D (dirty) are pre-set
 /// to 1 on every leaf — eliminates the hardware-update trap path.
@@ -165,6 +192,24 @@ mod tests {
         assert_eq!(pte & PTE_D, 0);
         // PPN = 0x80300 → at bits 53:10 = 0x80300 << 10 = 0x200C0000.
         assert_eq!(pte & !0x3ff, 0x200C0000);
+    }
+
+    #[test]
+    fn va_to_pa_identity_input_passes_through() {
+        // Identity-range addresses (below KERNEL_OFFSET) are already
+        // physical; va_to_pa must not subtract anything.
+        assert_eq!(va_to_pa(0x80200000), 0x80200000);
+        assert_eq!(va_to_pa(0x10000000), 0x10000000);
+        assert_eq!(va_to_pa(0), 0);
+    }
+
+    #[test]
+    fn va_to_pa_higher_half_input_strips_kernel_offset() {
+        // Higher-half VAs (>= KERNEL_OFFSET) get KERNEL_OFFSET
+        // subtracted to recover the physical address.
+        assert_eq!(va_to_pa(KERNEL_OFFSET + 0x80200000), 0x80200000);
+        assert_eq!(va_to_pa(KERNEL_OFFSET + 0x10000000), 0x10000000);
+        assert_eq!(va_to_pa(KERNEL_OFFSET), 0);
     }
 
     #[test]

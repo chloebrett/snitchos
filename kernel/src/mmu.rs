@@ -13,6 +13,8 @@ use core::arch::asm;
 use fdt::Fdt;
 use kernel_core::mmu::{PageTable, PtePerms};
 
+pub use kernel_core::mmu::{KERNEL_OFFSET, va_to_pa};
+
 /// 2 MiB — the page size for every leaf in our boot table.
 const PAGE_2MIB: usize = 2 * 1024 * 1024;
 
@@ -82,33 +84,6 @@ pub fn collect_mmio_regions(dtb: &Fdt) -> MmioRegions {
         regions.insert(reg.starting_address as usize);
     }
     regions
-}
-
-/// VA = PA + KERNEL_OFFSET for kernel-space mappings. Matches Linux
-/// RISC-V's `PAGE_OFFSET - PHYS_BASE` with PHYS_BASE = 0x80000000.
-/// The kernel image at PA 0x80200000 maps to higher-half VA
-/// 0xffffffff_80200000.
-pub const KERNEL_OFFSET: usize = 0xffffffff_00000000;
-
-/// Convert a kernel virtual address to its physical address. Strips
-/// `KERNEL_OFFSET` if the VA is in the higher-half range; passes
-/// identity-range VAs through unchanged.
-///
-/// Used at the boundary where the kernel hands an address to a device
-/// (virtio queue addresses, DMA buffer pointers). Devices have no MMU
-/// and treat the value as physical, so anywhere we'd otherwise pass
-/// `&static as u64` or `slice.as_ptr() as u64` we route through this.
-///
-/// Pre-trampoline (PC at identity), `&static as usize` is PC-relative
-/// and gives the physical address, so this function is a no-op.
-/// Post-trampoline (PC at higher-half), `&static as usize` gives a
-/// higher-half VA, and this strips `KERNEL_OFFSET`.
-pub const fn va_to_pa(va: usize) -> usize {
-    if va >= KERNEL_OFFSET {
-        va - KERNEL_OFFSET
-    } else {
-        va
-    }
 }
 
 unsafe extern "C" {
