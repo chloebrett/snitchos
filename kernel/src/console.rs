@@ -17,15 +17,26 @@ use crate::uart::Uart16550;
 ///   deadlock. Real kernels use a recursion-guarded console here.
 pub static UART: spin::Once<spin::Mutex<Uart16550>> = spin::Once::new();
 
-/// Initialize the kernel console with the given UART MMIO base address.
-/// Safe to call exactly once; subsequent calls are no-ops thanks to `Once`.
+/// Initialize the kernel console with the given UART MMIO base
+/// physical address (typically pulled from the DTB).
+///
+/// Translates to the higher-half VA before storing — the kernel runs
+/// at higher-half PC after the trampoline, and the identity MMIO
+/// mapping gets unmapped in `mmu::unmap_identity_kernel`'s successor.
+/// The MMIO region is dual-mapped by `mmu::enable`, so this works
+/// from the moment `enable` returns.
+///
+/// Safe to call exactly once; subsequent calls are no-ops thanks to
+/// `Once`.
 ///
 /// # Safety
 ///
-/// `uart_addr` must be the MMIO base of a real NS16550A-compatible UART
-/// (see `Uart16550::new`).
+/// `uart_addr` must be the physical MMIO base of a real
+/// NS16550A-compatible UART, and `mmu::enable` must have run (so the
+/// higher-half MMIO mapping is live).
 pub unsafe fn init(uart_addr: usize) {
-  UART.call_once(|| spin::Mutex::new(unsafe { Uart16550::new(uart_addr) }));
+  let va = uart_addr + crate::mmu::KERNEL_OFFSET;
+  UART.call_once(|| spin::Mutex::new(unsafe { Uart16550::new(va) }));
 }
 
 /// Hardcoded NS16550A MMIO base for QEMU `virt`. Used by the macro
