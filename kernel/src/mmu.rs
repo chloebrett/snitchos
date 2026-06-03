@@ -170,33 +170,41 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
     // no concurrent reads of BOOT_PT_*. Population finishes before
     // satp is written.
     unsafe {
-        // Kernel image: round both ends to 2 MiB so we cover the
-        // whole image plus a bit of slop. Dual-mapped: identity (where
-        // the kernel runs at boot) and higher-half (where it runs
-        // after the trampoline). Identity gets unmapped later, in
-        // `unmap_identity_kernel`.
         let mid_kernel_pa = (&raw const BOOT_PT_MID_KERNEL) as usize;
-        let mid_higher_kernel_pa = (&raw const BOOT_PT_MID_HIGHER_KERNEL) as usize;
+        let mid_higher_pa = (&raw const BOOT_PT_MID_HIGHER_KERNEL) as usize;
+        let mid_mmio_pa = (&raw const BOOT_PT_MID_MMIO) as usize;
+
+        // Three small helpers, one per mid table, hiding the
+        // `&mut *(&raw mut STATIC)` dance that would otherwise repeat
+        // at every call site.
+        let map_id_kernel = |va, pa| {
+            (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
+                &mut *(&raw mut BOOT_PT_MID_KERNEL),
+                mid_kernel_pa, va, pa, perms,
+            );
+        };
+        let map_higher_kernel = |va, pa| {
+            (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
+                &mut *(&raw mut BOOT_PT_MID_HIGHER_KERNEL),
+                mid_higher_pa, va, pa, perms,
+            );
+        };
+        let map_id_mmio = |va, pa| {
+            (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
+                &mut *(&raw mut BOOT_PT_MID_MMIO),
+                mid_mmio_pa, va, pa, perms,
+            );
+        };
+
+        // Kernel image: dual-mapped at identity (where the kernel runs
+        // at boot) and higher-half (where it runs after the
+        // trampoline). Identity gets unmapped in `unmap_identity_kernel`.
         let kstart_aligned = kernel_start & !(PAGE_2MIB - 1);
         let kend_aligned = (kernel_end + PAGE_2MIB - 1) & !(PAGE_2MIB - 1);
         let mut addr = kstart_aligned;
         while addr < kend_aligned {
-            // Identity.
-            (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
-                &mut *(&raw mut BOOT_PT_MID_KERNEL),
-                mid_kernel_pa,
-                addr,
-                addr,
-                perms,
-            );
-            // Higher-half.
-            (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
-                &mut *(&raw mut BOOT_PT_MID_HIGHER_KERNEL),
-                mid_higher_kernel_pa,
-                addr + KERNEL_OFFSET,
-                addr,
-                perms,
-            );
+            map_id_kernel(addr, addr);
+            map_higher_kernel(addr + KERNEL_OFFSET, addr);
             addr += PAGE_2MIB;
         }
 
@@ -204,40 +212,19 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
         // Caller builds `mmio_regions` (currently hardcoded in `kmain`
         // for QEMU `virt`; `collect_mmio_regions` would do it from the
         // DTB but is parked — see findings).
-        let mid_mmio_pa = (&raw const BOOT_PT_MID_MMIO) as usize;
         for &base in mmio_regions.as_slice() {
-            (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
-                &mut *(&raw mut BOOT_PT_MID_MMIO),
-                mid_mmio_pa,
-                base,
-                base,
-                perms,
-            );
+            map_id_mmio(base, base);
         }
 
-        // DTB region. The kernel keeps using `&Fdt` after this
-        // function returns (timebase_hz, uart_addr, virtio_console::init),
-        // so the DTB pages must be mapped. One 2 MiB page covers any
-        // sane DTB (typically < 64 KiB).
+        // DTB region. Kernel keeps using `&Fdt` after this returns
+        // (timebase_hz, uart_addr, virtio_console::init). One 2 MiB
+        // page covers any sane DTB (< 64 KiB). Routes through whichever
+        // identity mid table covers its gigapage.
         let dtb_aligned = dtb_phys & !(PAGE_2MIB - 1);
-        let dtb_gig = dtb_aligned >> 30;
-        let kernel_gig = kernel_start >> 30;
-        if dtb_gig == kernel_gig {
-            (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
-                &mut *(&raw mut BOOT_PT_MID_KERNEL),
-                mid_kernel_pa,
-                dtb_aligned,
-                dtb_aligned,
-                perms,
-            );
+        if (dtb_aligned >> 30) == (kernel_start >> 30) {
+            map_id_kernel(dtb_aligned, dtb_aligned);
         } else {
-            (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
-                &mut *(&raw mut BOOT_PT_MID_MMIO),
-                mid_mmio_pa,
-                dtb_aligned,
-                dtb_aligned,
-                perms,
-            );
+            map_id_mmio(dtb_aligned, dtb_aligned);
         }
 
         // Turn it on. PPN field is bits 43:0; MODE in bits 63:60.
