@@ -11,6 +11,11 @@ default = []
 # scenario to observe the allocator running out cleanly. NOT for
 # production builds.
 oom-leak = []
+# Replaces the per-heartbeat heap smoke (`Vec::with_capacity(256)` +
+# drop) with a per-heartbeat leak loop that allocates 4 KiB blocks via
+# `alloc::alloc::alloc` (returns null on failure, no panic) until the
+# heap is exhausted. Used by the `heap-oom` integration scenario.
+heap-oom = []
 
 [dependencies]
 fdt = "0.1.5"

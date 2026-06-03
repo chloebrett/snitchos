@@ -220,6 +220,7 @@ The kernel binary itself has no `#[test]`s — it's `no_std`/`no_main` and won't
 - **`frame-allocator-metrics`** — `snitchos.frames.allocated_total` ≥ 1 within 10 s.
 - **`frame-allocator-oom`** — built with `--features oom-leak`; asserts `alloc_failed_total > 0` within 15 s and the kernel keeps heartbeating after.
 - **`kernel-heap-metrics`** — `snitchos.heap.alloc_total ≥ 1` and `snitchos.heap.bytes_used` observed within 10 s; heartbeat survives after.
+- **`heap-oom`** — built with `--features heap-oom`; leaks 256 × 4 KiB blocks per heartbeat via `Vec::try_reserve_exact` + `mem::forget`, exhausts the 4 MiB heap over ~4 heartbeats; asserts `heap.alloc_failed_total > 0` within 15 s and the kernel keeps heartbeating.
 
 Add a scenario: implement a `Result<(), String>` function in `scenarios.rs`, register it in `xtask/src/itest.rs::SCENARIOS`, run `cargo xtask test <name>`. The harness handles QEMU lifecycle and socket cleanup. Use `Harness::spawn_with_features(label, &["feature"])` if the scenario needs a non-default kernel variant (currently only `oom-leak` does).
 

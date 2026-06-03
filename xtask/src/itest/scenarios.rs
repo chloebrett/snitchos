@@ -71,6 +71,39 @@ pub fn kernel_heap_metrics() -> Result<(), String> {
     Ok(())
 }
 
+/// Kernel heap exhausts cleanly and the kernel survives. The
+/// `heap-oom`-feature kernel leaks 256 × 4 KiB blocks per heartbeat
+/// via `Vec::try_reserve_exact` + `mem::forget`. The 4 MiB heap
+/// runs out in ~4 heartbeats, giving a visible decay curve in
+/// Grafana (same shape as `frame-allocator-oom`). We assert:
+///
+///   1. `snitchos.heap.alloc_failed_total` rises above 0 — the
+///      heap handled OOM by returning null, not by panicking.
+///   2. Two more heartbeats arrive after — kernel didn't hang
+///      after exhaustion, metrics keep flowing.
+pub fn heap_oom() -> Result<(), String> {
+    let mut h = Harness::spawn_with_features("heap-oom", &["heap-oom"])?;
+
+    h.wait_for(SEC * 15, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.heap.alloc_failed_total")
+                && *value > 0
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no heap.alloc_failed_total > 0 within 15s — heap_oom feature off, leak too small, or allocator panicked instead of returning null",
+    )?;
+
+    h.wait_for(SEC * 5, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat within 5s after first heap alloc failure — kernel hung?")?;
+    h.wait_for(SEC * 5, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no second heartbeat post-OOM — kernel hung after one more tick?")?;
+
+    Ok(())
+}
+
 /// Frame allocator exhausts the pool cleanly and the kernel survives.
 /// The `oom-leak`-feature kernel leaks 8192 frames per heartbeat
 /// (32 MiB), so the ~32K-frame pool runs out in ~4 heartbeats on the

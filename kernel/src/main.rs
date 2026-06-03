@@ -249,13 +249,36 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     let _ = frame::alloc_zeroed();
                 }
             }
-            // Heap smoke: allocate, write, drop. Proves the heap is
-            // live and produces movement on the heap metrics so the
-            // dashboards aren't flat zeros. Cheap (256 B), runs every
-            // heartbeat.
+            // Heap smoke. Default build: alloc + write + drop a 256 B
+            // Vec — proves the heap is live, keeps `bytes_used` near
+            // 0 across heartbeats.
+            //
+            // `heap-oom` feature: per-heartbeat leak loop using the
+            // raw GlobalAlloc API (returns null on failure rather than
+            // panicking through `alloc_error_handler`). After the
+            // heap exhausts, every subsequent iteration's first
+            // allocation returns null immediately and bumps
+            // `alloc_failed_total` — so the counter climbs once per
+            // heartbeat post-OOM, and the kernel keeps heartbeating.
+            #[cfg(not(feature = "heap-oom"))]
             {
                 let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(256);
                 v.push(count as u8);
+            }
+            #[cfg(feature = "heap-oom")]
+            {
+                // Leak 256 × 4 KiB blocks per heartbeat — exhausts the
+                // 4 MiB heap over ~4 heartbeats, giving Grafana a
+                // visible decay curve instead of a single-sample step.
+                // `try_reserve_exact` returns `Err` on alloc failure
+                // rather than panicking through `alloc_error_handler`.
+                for _ in 0..256 {
+                    let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+                    if v.try_reserve_exact(4096).is_err() {
+                        break;
+                    }
+                    core::mem::forget(v);
+                }
             }
             tracing::emit_metric(heartbeat_count, count);
             tracing::emit_metric(intern_used, tracing::intern_count() as i64);

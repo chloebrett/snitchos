@@ -24,6 +24,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario { name: "frame-allocator-metrics",    run: scenarios::frame_allocator_metrics },
     Scenario { name: "frame-allocator-oom",        run: scenarios::frame_allocator_oom },
     Scenario { name: "kernel-heap-metrics",        run: scenarios::kernel_heap_metrics },
+    Scenario { name: "heap-oom",                   run: scenarios::heap_oom },
 ];
 
 /// Entry point from `main`. `Some(name)` runs one scenario;
