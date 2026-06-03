@@ -73,32 +73,6 @@ pub fn heartbeat_cadence() -> Result<(), String> {
     Ok(())
 }
 
-/// Higher-half mapping resolves at runtime: the kernel reads a known
-/// byte (the first byte of `__kernel_start`) through both the identity
-/// and higher-half VAs and asserts equality. The check is wrapped in a
-/// `kernel.mmu.higher_half_verify` span; if the higher-half read
-/// faulted, the SpanEnd never fires and the trap handler panics (and
-/// no heartbeats follow). Success requires both ends of the span PLUS
-/// a heartbeat after.
-pub fn mmu_higher_half_verify() -> Result<(), String> {
-    let mut h = Harness::spawn("higherhalf")?;
-
-    let start = h
-        .wait_for(SEC * 5, is_span_start_named("kernel.mmu.higher_half_verify"))
-        .ok_or("no kernel.mmu.higher_half_verify SpanStart within 5s")?;
-    let span_id: SpanId = match start {
-        OwnedFrame::SpanStart { id, .. } => id,
-        _ => return Err("matched non-SpanStart (impossible)".to_string()),
-    };
-    h.wait_for(SEC * 5, move |f, _| {
-        matches!(f, OwnedFrame::SpanEnd { id, .. } if *id == span_id)
-    })
-    .ok_or("no matching SpanEnd within 5s — higher-half read faulted?")?;
-    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
-        .ok_or("no kernel.heartbeat after the verify span")?;
-    Ok(())
-}
-
 /// Pre-init buffer preserves frame order across the flush. Two
 /// invariants:
 ///

@@ -226,9 +226,13 @@ unsafe fn setup_queue(base: usize, sel: u32, queue: *const Virtqueue) -> Result<
         }
         write_reg(base, REG_QUEUE_NUM, QSIZE as u32);
 
-        let desc = &raw const (*queue).desc as u64;
-        let avail = &raw const (*queue).avail as u64;
-        let used = &raw const (*queue).used as u64;
+        // Device has no MMU — addresses we give it must be physical.
+        // `va_to_pa` is a no-op when the kernel runs at identity PC
+        // (the cast already yields physical); it strips KERNEL_OFFSET
+        // once the kernel runs at higher-half PC.
+        let desc = crate::mmu::va_to_pa(&raw const (*queue).desc as usize) as u64;
+        let avail = crate::mmu::va_to_pa(&raw const (*queue).avail as usize) as u64;
+        let used = crate::mmu::va_to_pa(&raw const (*queue).used as usize) as u64;
         write_reg64(base, REG_QUEUE_DESC_LOW, desc);
         write_reg64(base, REG_QUEUE_DRIVER_LOW, avail);
         write_reg64(base, REG_QUEUE_DEVICE_LOW, used);
@@ -500,7 +504,8 @@ unsafe fn transmit(base: usize, bytes: &[u8]) {
     let desc_ptr = unsafe { &raw mut TX_QUEUE.desc[0] };
     unsafe {
         desc_ptr.write_volatile(VirtqDesc {
-            addr: bytes.as_ptr() as u64,
+            // Device has no MMU — translate VA to PA.
+            addr: crate::mmu::va_to_pa(bytes.as_ptr() as usize) as u64,
             len: bytes.len() as u32,
             flags: 0, // single buffer, driver-to-device, no chaining
             next: 0,  // irrelevant without NEXT

@@ -96,6 +96,27 @@ pub fn collect_mmio_regions(dtb: &Fdt) -> MmioRegions {
 /// step 2c (linker change + early satp + move kernel to higher-half).
 pub const KERNEL_OFFSET: usize = 0xffffffff_00000000;
 
+/// Convert a kernel virtual address to its physical address. Strips
+/// `KERNEL_OFFSET` if the VA is in the higher-half range; passes
+/// identity-range VAs through unchanged.
+///
+/// Used at the boundary where the kernel hands an address to a device
+/// (virtio queue addresses, DMA buffer pointers). Devices have no MMU
+/// and treat the value as physical, so anywhere we'd otherwise pass
+/// `&static as u64` or `slice.as_ptr() as u64` we route through this.
+///
+/// Pre-trampoline (PC at identity), `&static as usize` is PC-relative
+/// and gives the physical address, so this function is a no-op.
+/// Post-trampoline (PC at higher-half), `&static as usize` gives a
+/// higher-half VA, and this strips `KERNEL_OFFSET`.
+pub const fn va_to_pa(va: usize) -> usize {
+    if va >= KERNEL_OFFSET {
+        va - KERNEL_OFFSET
+    } else {
+        va
+    }
+}
+
 unsafe extern "C" {
     /// Start of the kernel image (linker symbol, see linker.ld).
     static __kernel_start: u8;
@@ -226,27 +247,3 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
     }
 }
 
-/// Smoke-test the higher-half mapping by reading the first byte of
-/// `__kernel_start` through both its identity VA and its higher-half
-/// VA (`identity + KERNEL_OFFSET`), and asserting equality.
-///
-/// If the higher-half mapping isn't actually installed in the page
-/// table, the higher-half load faults — the trap handler panics with
-/// an unhandled-trap message, and no further code runs (no SpanEnd,
-/// no heartbeat). Both reads succeeding and matching proves the
-/// dual-map works at runtime.
-///
-/// # Safety
-///
-/// Must be called after `mmu::enable()` has installed the dual-map
-/// and written `satp`. With MMU off, the higher-half VA is bogus.
-pub unsafe fn verify_higher_half_mapping() {
-    let id_addr = (&raw const __kernel_start) as *const u8;
-    let high_addr = ((id_addr as usize).wrapping_add(KERNEL_OFFSET)) as *const u8;
-    let id_byte = unsafe { id_addr.read_volatile() };
-    let high_byte = unsafe { high_addr.read_volatile() };
-    assert_eq!(
-        id_byte, high_byte,
-        "higher-half mapping should alias identity for kernel image",
-    );
-}

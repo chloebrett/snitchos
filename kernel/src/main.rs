@@ -60,6 +60,34 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: MMU is off (boot default). Kernel image is dual-mapped
     // (identity + higher-half); MMIO regions identity-mapped.
     unsafe { mmu::enable(&mmio_regions, dtb_phys) };
+
+    // Step 2d-1 trampoline: jump PC from identity to higher-half, fix
+    // up sp the same way. The dual-map keeps identity addresses valid
+    // (so we can still return through callers' identity-VA `ra`s
+    // already on the stack), but new function calls from here on use
+    // PC-relative addressing that lands on higher-half. `&static`
+    // values now produce higher-half VAs; any address we hand to a
+    // device must go through `mmu::va_to_pa` (checkpoint 1 did this).
+    //
+    // Inline (not a function) because `ret` from a trampoline fn would
+    // jump back to caller's identity-VA `ra` — the whole point is to
+    // leave identity-PC space.
+    //
+    // SAFETY: dual-map is live (`mmu::enable` above); sp's old and
+    // new VAs alias the same physical stack page.
+    unsafe {
+        core::arch::asm!(
+            "lla  t0, 1f",         // t0 = identity-PC VA of 1f
+            "add  t0, t0, {off}",  // t0 = higher-half VA of 1f
+            "add  sp, sp, {off}",  // sp = higher-half VA of stack top
+            "jr   t0",
+            "1:",
+            off = in(reg) mmu::KERNEL_OFFSET,
+            out("t0") _,
+            options(nostack),
+        );
+    }
+
     let timebase_hz = dtb::timebase_hz(&dtb)
         .expect("DTB missing /cpus/timebase-frequency — can't run without a clock") as u64;
 
@@ -71,12 +99,6 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     //
     // SAFETY: MMU on, higher-half mapped, trap path resolvable.
     unsafe { trap::set_trap_vector() };
-
-    // Step 2a/2b smoke test: verify the higher-half mapping resolves.
-    {
-        span!("kernel.mmu.higher_half_verify");
-        unsafe { mmu::verify_higher_half_mapping() };
-    }
 
     // Open kernel.boot, with sub-spans for each init phase. All frames
     // emitted before virtio-console is ready get pre-init-buffered.
