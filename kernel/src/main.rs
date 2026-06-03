@@ -92,6 +92,18 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         );
     }
 
+    // Verify we're actually at higher-half PC. `auipc rd, 0` puts
+    // `current_pc + 0` in `rd`, so the result is the runtime address
+    // of this instruction. If the trampoline silently no-ops in a
+    // future regression, this comes back identity-range and the
+    // `kernel.runs_at_higher_half` span never emits — caught by the
+    // matching integration scenario.
+    let pc: usize;
+    unsafe { core::arch::asm!("auipc {}, 0", out(reg) pc) };
+    if pc >= mmu::KERNEL_OFFSET {
+        span!("kernel.runs_at_higher_half");
+    }
+
     let timebase_hz = dtb::timebase_hz(&dtb)
         .expect("DTB missing /cpus/timebase-frequency — can't run without a clock") as u64;
 

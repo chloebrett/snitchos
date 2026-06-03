@@ -12,6 +12,19 @@ use super::matchers::{is_dropped, is_hello, is_span_start_named, is_string_regis
 
 const SEC: Duration = Duration::from_secs(1);
 
+/// Explicit assertion that the kernel runs at higher-half PC. After
+/// `mmu::enable` + trampoline, the kernel reads its current PC via
+/// `auipc` and only emits the `kernel.runs_at_higher_half` span if PC
+/// is in the higher-half range. If a future change silently leaves PC
+/// at identity (broken trampoline), the span never appears and this
+/// scenario times out.
+pub fn kernel_runs_at_higher_half() -> Result<(), String> {
+    let mut h = Harness::spawn("higherhalf")?;
+    h.wait_for(SEC * 5, is_span_start_named("kernel.runs_at_higher_half"))
+        .ok_or("no kernel.runs_at_higher_half SpanStart — PC isn't actually at higher-half post-trampoline")?;
+    Ok(())
+}
+
 /// Boot sequence reaches the heartbeat loop: Hello → kernel.boot
 /// SpanStart → Dropped(0) (proves pre-init flush ran cleanly) →
 /// first kernel.heartbeat SpanStart (proves the timer IRQ is firing).
