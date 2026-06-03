@@ -99,13 +99,15 @@ unsafe extern "C" {
     static __kernel_end: u8;
 }
 
-/// The boot page table. One root plus three mid-level tables:
+/// The boot page table. One root plus four mid-level tables:
 /// - `BOOT_PT_MID_MMIO` for the identity gigapage covering MMIO
 ///   (around `0x10000000`).
 /// - `BOOT_PT_MID_KERNEL` for the identity gigapage covering the
 ///   kernel image and DTB (around `0x80200000`).
 /// - `BOOT_PT_MID_HIGHER_KERNEL` for the higher-half gigapage covering
 ///   the kernel image at `KERNEL_OFFSET + 0x80200000`.
+/// - `BOOT_PT_MID_HIGHER_MMIO` for the higher-half gigapage covering
+///   MMIO at `KERNEL_OFFSET + 0x10000000`.
 ///
 /// `static mut` so that `enable` can populate them once at boot and
 /// the satp PPN field can name their physical addresses. After
@@ -116,6 +118,7 @@ static mut BOOT_PT_ROOT: PageTable = PageTable::new();
 static mut BOOT_PT_MID_KERNEL: PageTable = PageTable::new();
 static mut BOOT_PT_MID_MMIO: PageTable = PageTable::new();
 static mut BOOT_PT_MID_HIGHER_KERNEL: PageTable = PageTable::new();
+static mut BOOT_PT_MID_HIGHER_MMIO: PageTable = PageTable::new();
 
 /// Build the boot page table and turn the MMU on. Installs:
 /// - Identity + higher-half mappings for the kernel image (covers
@@ -154,6 +157,7 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
         let mid_kernel_pa = (&raw const BOOT_PT_MID_KERNEL) as usize;
         let mid_higher_pa = (&raw const BOOT_PT_MID_HIGHER_KERNEL) as usize;
         let mid_mmio_pa = (&raw const BOOT_PT_MID_MMIO) as usize;
+        let mid_higher_mmio_pa = (&raw const BOOT_PT_MID_HIGHER_MMIO) as usize;
 
         // Three small helpers, one per mid table, hiding the
         // `&mut *(&raw mut STATIC)` dance that would otherwise repeat
@@ -176,6 +180,12 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
                 mid_mmio_pa, va, pa, perms,
             );
         };
+        let map_higher_mmio = |va, pa| {
+            (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
+                &mut *(&raw mut BOOT_PT_MID_HIGHER_MMIO),
+                mid_higher_mmio_pa, va, pa, perms,
+            );
+        };
 
         // Kernel image: dual-mapped at identity (where the kernel runs
         // at boot) and higher-half (where it runs after the
@@ -189,12 +199,14 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
             addr += PAGE_2MIB;
         }
 
-        // MMIO: identity-map each pre-collected 2 MiB-aligned base.
-        // Caller builds `mmio_regions` (currently hardcoded in `kmain`
-        // for QEMU `virt`; `collect_mmio_regions` would do it from the
-        // DTB but is parked — see findings).
+        // MMIO: dual-mapped at identity (where `CONSOLE`/`UART` and
+        // the panic-handler UART poke read from until the higher-half
+        // patches land) and higher-half (where they'll read from once
+        // identity-MMIO is unmapped). Caller builds `mmio_regions`
+        // (currently hardcoded in `kmain` for QEMU `virt`).
         for &base in mmio_regions.as_slice() {
             map_id_mmio(base, base);
+            map_higher_mmio(base + KERNEL_OFFSET, base);
         }
 
         // DTB region. Kernel keeps using `&Fdt` after this returns
