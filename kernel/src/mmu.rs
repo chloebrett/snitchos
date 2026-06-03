@@ -11,9 +11,9 @@
 use core::arch::asm;
 
 use fdt::Fdt;
-use kernel_core::mmu::{PageTable, PtePerms};
+use kernel_core::mmu::{PageTable, PtePerms, leaf_pte};
 
-pub use kernel_core::mmu::{KERNEL_OFFSET, va_to_pa};
+pub use kernel_core::mmu::{KERNEL_OFFSET, LINEAR_OFFSET, va_to_pa};
 
 /// 2 MiB — the page size for every leaf in our boot table.
 const PAGE_2MIB: usize = 2 * 1024 * 1024;
@@ -209,6 +209,21 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
             map_id_mmio(base, base);
             map_higher_mmio(base + KERNEL_OFFSET, base);
         }
+
+        // Linear map: one 1 GiB Sv39 huge-page leaf installed directly
+        // in the root, mapping
+        // `[LINEAR_OFFSET + 0x80000000, LINEAR_OFFSET + 0xC0000000)`
+        // to physical `[0x80000000, 0xC0000000)`. Covers all of
+        // QEMU `virt`'s RAM up to 1 GiB; platforms with more RAM
+        // would need additional leaves.
+        //
+        // This is the mapping the frame allocator will use to give
+        // any allocated frame a kernel-reachable VA via
+        // `pa_to_kernel_va`.
+        let linear_va = LINEAR_OFFSET + 0x80000000;
+        let linear_idx = (linear_va >> 30) & 0x1ff;
+        let linear_leaf = leaf_pte(0x80000000, perms);
+        (&mut *(&raw mut BOOT_PT_ROOT)).set_entry(linear_idx, linear_leaf);
 
         // DTB region. Kernel keeps using `&Fdt` after this returns
         // (timebase_hz, uart_addr, virtio_console::init). One 2 MiB
