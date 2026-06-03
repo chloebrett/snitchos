@@ -167,6 +167,19 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // handler is ready.
     unsafe { trap::init_timer(timebase_hz) };
 
+    // Frame allocator init. Walks the DTB's `/memory` node, marks
+    // SBI / kernel-image / DTB regions as reserved, releases everything
+    // else into the free pool. After this returns, `frame::alloc()` is
+    // usable from anywhere.
+    //
+    // Must run before `unmap_identity` because the DTB region lives in
+    // the identity kernel gigapage that's about to disappear.
+    //
+    // SAFETY: called exactly once, with a valid `&Fdt` and the
+    // corresponding `dtb_phys`, post-trampoline (so `__kernel_*`
+    // symbol VAs resolve and `va_to_pa` recovers their physical bounds).
+    unsafe { frame::init_from_dtb(&dtb, dtb_phys).expect("frame allocator init") };
+
     // DTB physical region lives in the identity gigapage we're about
     // to tear down. Drop the borrow first to make "no DTB access from
     // here on" load-bearing instead of incidental. `Fdt` has no `Drop`
