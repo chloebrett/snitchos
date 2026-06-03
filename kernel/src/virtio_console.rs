@@ -274,13 +274,16 @@ fn probe_all_slots(dtb: &Fdt) {
     }
 }
 
-/// Walk the DTB for `virtio,mmio` slots, probe each, and return the MMIO
-/// base of the first one whose attached device is a virtio-console
-/// (DeviceID 3). Returns `None` if no console is attached.
+/// Walk the DTB for `virtio,mmio` slots, probe each, and return the
+/// MMIO base of the first one whose attached device is a
+/// virtio-console (DeviceID 3). Returns the **higher-half VA** of the
+/// base; probes run through that VA too, so the function doesn't
+/// depend on identity-MMIO being live. Returns `None` if no console
+/// is attached.
 ///
 /// Known weaknesses:
-/// - Returns only the first console found. v0.1 has just one; multi-port
-///   handling would need rework.
+/// - Returns only the first console found. v0.1 has just one;
+///   multi-port handling would need rework.
 /// - Doesn't surface *why* a slot was skipped (empty / wrong version /
 ///   wrong device). For debugging we could log per-slot probe results.
 fn find_console_base(dtb: &Fdt) -> Option<usize> {
@@ -296,7 +299,7 @@ fn find_console_base(dtb: &Fdt) -> Option<usize> {
         let Some(reg) = node.reg().and_then(|mut r| r.next()) else {
             continue;
         };
-        let base = reg.starting_address as usize;
+        let base = reg.starting_address as usize + crate::mmu::KERNEL_OFFSET;
 
         // SAFETY: the DTB told us this is a virtio-mmio register region.
         let magic = unsafe { read_reg(base, REG_MAGIC_VALUE) };
@@ -352,11 +355,12 @@ pub enum InitError {
 /// higher-half MMIO mapping is live) — the same precondition the rest
 /// of post-MMU boot relies on.
 pub unsafe fn init(dtb: &Fdt) -> Result<(), InitError> {
+    // `base` is a higher-half VA — `find_console_base` translates
+    // through `KERNEL_OFFSET` so all MMIO in this function runs
+    // through the higher-half mapping, not identity.
     let base = find_console_base(dtb).ok_or(InitError::NotFound)?;
     unsafe { init_handshake(base)? };
-    // Store the higher-half VA. `send` reads MMIO via the stored
-    // value; after identity MMIO is unmapped, only higher-half works.
-    CONSOLE.call_once(|| spin::Mutex::new(base + crate::mmu::KERNEL_OFFSET));
+    CONSOLE.call_once(|| spin::Mutex::new(base));
     Ok(())
 }
 

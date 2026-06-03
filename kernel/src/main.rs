@@ -154,6 +154,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // handler is ready.
     unsafe { trap::init_timer(timebase_hz) };
 
+    // DTB physical region lives in the identity gigapage we're about
+    // to tear down. Drop the borrow first to make "no DTB access from
+    // here on" load-bearing instead of incidental. `Fdt` has no `Drop`
+    // impl, so this is just a binding-scope close.
+    let _ = dtb;
+
     // Tear down both identity mappings. From here on, any access to
     // an identity-half VA — kernel image, stack, DTB, or MMIO — faults.
     // The kernel runs purely in higher-half: code, statics, `CONSOLE`,
@@ -161,8 +167,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // all hold or compute higher-half VAs.
     //
     // SAFETY: kernel is running at higher-half PC + sp (trampoline
-    // executed above). DTB is no longer accessed. `CONSOLE` and `UART`
-    // were initialized with higher-half VAs in increments 2 and 3.
+    // executed above). `CONSOLE` and `UART` were initialized with
+    // higher-half VAs in earlier increments.
     unsafe { mmu::unmap_identity() };
 
     // Heartbeat loop: wfi until the timer IRQ flips TICK_PENDING,
