@@ -27,8 +27,10 @@ pub const HEAP_SIZE: usize = HEAP_FRAMES * frame::FRAME_SIZE;
 /// lock to keep emission off the allocator's critical path. Capacity
 /// and live bytes-used come from `stats()` (a brief lock take from the
 /// heartbeat) — the allocator already tracks those internally, so
-/// mirroring them in atomics would be redundant and slightly wrong
-/// (atomics measured `layout.size()` sums, missing per-block overhead).
+/// mirroring them in atomics would be redundant. Note `Heap::used()`
+/// sums alignment-padded `layout.size()` for live allocations; it does
+/// not include hole-list metadata bytes, so it's a slight undercount
+/// of how much of the region is unavailable.
 pub static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static DEALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static ALLOC_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -37,16 +39,22 @@ pub static ALLOC_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 pub struct Stats {
     /// Total heap region size in bytes.
     pub capacity: usize,
-    /// Bytes currently allocated, including per-block overhead.
+    /// Sum of alignment-padded `layout.size()` across live allocations.
+    /// Excludes hole-list metadata, so slightly undercounts unavailable
+    /// bytes vs the true `capacity - free`.
     pub used: usize,
-    /// Bytes currently free.
+    /// Bytes the heap considers free — `capacity - used`, so does
+    /// include hole-list metadata as "free" even though it isn't
+    /// usable for allocations.
     pub free: usize,
 }
 
 /// `GlobalAlloc` wrapper around a `spin::Mutex<Heap>`. We don't use
-/// `linked_list_allocator::LockedHeap` directly because we want the
-/// `dealloc` path to bump `BYTES_USED` *after* the lock is released,
-/// and the LockedHeap wrapper doesn't give us that seam.
+/// `linked_list_allocator::LockedHeap` directly because we need to
+/// bump `ALLOC_COUNT` / `DEALLOC_COUNT` / `ALLOC_FAIL_COUNT` in the
+/// alloc/dealloc paths, and LockedHeap doesn't expose hooks for that.
+/// Using project `spin` rather than the crate-bundled lock also keeps
+/// the lock type consistent with the rest of the kernel.
 struct KernelHeap {
     inner: spin::Mutex<Heap>,
 }

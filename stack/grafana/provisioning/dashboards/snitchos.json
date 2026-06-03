@@ -426,7 +426,7 @@
       "id": 12,
       "type": "stat",
       "title": "Heap bytes used",
-      "description": "Approximate kernel-heap occupancy. Sum of `layout.size()` across live allocations — does not include per-block overhead, so it's an underestimate vs the heap's internal bookkeeping. Out of a 4 MiB region.",
+      "description": "Kernel-heap occupancy from `Heap::used()` — sum of alignment-padded `layout.size()` across live allocations. Excludes hole-list metadata, so slightly undercounts unavailable bytes. Out of a 4 MiB region.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 6, "x": 0, "y": 40 },
       "targets": [
@@ -573,7 +573,7 @@
       "id": 17,
       "type": "gauge",
       "title": "Heap utilisation",
-      "description": "bytes_used / bytes_capacity. Includes per-block overhead — this is the heap's own bookkeeping, not a layout.size() sum.",
+      "description": "bytes_used / bytes_capacity. Sum of alignment-padded `layout.size()` for live allocations divided by total region; excludes hole-list metadata so slightly understates true pressure.",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "gridPos": { "h": 8, "w": 6, "x": 0, "y": 56 },
       "targets": [

@@ -310,8 +310,9 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             // gauges come from `heap::stats()`, which briefly takes
             // the heap lock — safe from the heartbeat (single-
             // threaded, no contention with allocator callers).
-            // `bytes_used` is the true number including per-block
-            // overhead, not a `layout.size()` sum.
+            // `bytes_used` sums alignment-padded `layout.size()` for
+            // live allocations; it excludes hole-list metadata, so
+            // it slightly undercounts unavailable bytes.
             tracing::emit_metric(
                 heap_alloc_total,
                 heap::ALLOC_COUNT.load(Ordering::Relaxed) as i64,
