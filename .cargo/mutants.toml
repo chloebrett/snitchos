@@ -10,4 +10,13 @@ exclude_re = [
   "delete ! in State::handle",
   # Equivalent mutant: `first_t = t` when `t == first_t` is a no-op.
   "replace < with <= in State::advance_anchor",
+  # Equivalent mutants in mmu.rs: R,W,X,G are bits 1,2,3,5 (disjoint),
+  # so | and ^ produce the same value in rwxg().
+  "replace | with \\^ in PtePerms::rwxg",
+  # Equivalent mutants: PPN occupies bits 53:10 and flag bits are 7:0 —
+  # structurally disjoint for any page-aligned PA, so | and ^ are identical.
+  "replace | with \\^ in leaf_pte",
+  "replace | with \\^ in branch_pte",
+  # Equivalent mutant: 1 << 0 == 1 >> 0 == 1 — same constant either way.
+  "replace << with >> in leaf_pte",
 ]

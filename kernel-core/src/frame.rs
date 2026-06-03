@@ -9,10 +9,13 @@
 
 /// Frame bitmap. `bits` is the backing storage; `capacity` is the
 /// number of frames actually tracked (may be < `bits.len() * 64` if
-/// the cap doesn't fall on a word boundary).
+/// the cap doesn't fall on a word boundary). `frames_free` is
+/// maintained internally so `count_free` and the OOM check in `alloc`
+/// are O(1).
 pub struct Bitmap<'a> {
     bits: &'a mut [u64],
     capacity: usize,
+    frames_free: usize,
 }
 
 impl<'a> Bitmap<'a> {
@@ -28,37 +31,40 @@ impl<'a> Bitmap<'a> {
         for w in bits.iter_mut() {
             *w = 0;
         }
-        Self { bits, capacity }
+        Self { bits, capacity, frames_free: 0 }
     }
 
     /// Mark frames `[start, start + count)` as free. Out-of-range
     /// frames (start ≥ capacity, or extending past capacity) are
-    /// clamped silently.
+    /// clamped silently. Idempotent — bits already set stay set and
+    /// don't double-count in `frames_free`.
     pub fn release_range(&mut self, start: usize, count: usize) {
         if start >= self.capacity {
             return;
         }
         let end = (start + count).min(self.capacity);
         for f in start..end {
-            self.set_bit(f);
+            self.set_bit_tracked(f);
         }
     }
 
     /// Allocate the lowest-indexed free frame. Returns its index, or
-    /// `None` if no frames are free.
+    /// `None` if no frames are free. Returns immediately when the
+    /// pool is empty (no scan) — critical for OOM workloads where
+    /// many failing allocs may happen per tick.
     pub fn alloc(&mut self) -> Option<usize> {
-        // Scan words for the first non-zero one. `trailing_zeros` then
-        // gives the lowest free bit.
+        if self.frames_free == 0 {
+            return None;
+        }
         for (i, w) in self.bits.iter_mut().enumerate() {
             if *w != 0 {
                 let bit = w.trailing_zeros() as usize;
                 let frame = i * 64 + bit;
                 if frame >= self.capacity {
-                    // Word had bits set past capacity — shouldn't
-                    // happen because release_range clamps, but guard.
                     return None;
                 }
                 *w &= !(1u64 << bit);
+                self.frames_free -= 1;
                 return Some(frame);
             }
         }
@@ -75,30 +81,32 @@ impl<'a> Bitmap<'a> {
             "free({frame}) is past capacity {}",
             self.capacity,
         );
-        self.set_bit(frame);
+        self.set_bit_tracked(frame);
     }
 
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
-    /// O(words). Cache externally if it becomes a hot path.
+    /// O(1) — reads the maintained counter.
     pub fn count_free(&self) -> usize {
-        let mut total = 0usize;
-        for w in self.bits.iter() {
-            total += w.count_ones() as usize;
-        }
-        // Clamp in case any bits are set past capacity (shouldn't
-        // happen — release_range clamps — but defensive).
-        total.min(self.capacity)
+        self.frames_free
     }
 
     pub fn count_in_use(&self) -> usize {
-        self.capacity - self.count_free()
+        self.capacity - self.frames_free
     }
 
-    fn set_bit(&mut self, frame: usize) {
-        self.bits[frame / 64] |= 1u64 << (frame % 64);
+    /// Set the bit and bump `frames_free` only on a 0→1 transition.
+    /// Used by both `release_range` and `free` so the counter stays
+    /// accurate under idempotent retries.
+    fn set_bit_tracked(&mut self, frame: usize) {
+        let word_idx = frame / 64;
+        let mask = 1u64 << (frame % 64);
+        if self.bits[word_idx] & mask == 0 {
+            self.bits[word_idx] |= mask;
+            self.frames_free += 1;
+        }
     }
 }
 

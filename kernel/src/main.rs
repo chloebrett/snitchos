@@ -214,9 +214,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             count += 1;
             // Smoke pattern that exercises the allocator each heartbeat.
             // Default build: alloc+free, keeps `in_use` bounded.
-            // `oom-leak` feature: leak 1024 frames per tick to force
-            // the allocator to run out cleanly (used by the
-            // `frame-allocator-oom` integration scenario).
+            // `oom-leak` feature: leak 8192 frames per tick (32 MiB)
+            // so the allocator's ~32K-frame free pool exhausts in
+            // ~4 heartbeats. Used by the `frame-allocator-oom`
+            // integration scenario.
             #[cfg(not(feature = "oom-leak"))]
             {
                 if let Some(frame) = frame::alloc_zeroed() {
@@ -225,7 +226,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             }
             #[cfg(feature = "oom-leak")]
             {
-                for _ in 0..1024 {
+                for _ in 0..8192 {
                     let _ = frame::alloc_zeroed();
                 }
             }
