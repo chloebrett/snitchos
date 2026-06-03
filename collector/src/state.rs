@@ -171,11 +171,11 @@ impl State {
                 timebase_hz,
                 protocol_version: _,
             } => {
+                self.reset_session();
                 self.timebase_hz = *timebase_hz;
-                // Anchor wall-clock to the moment we processed Hello.
                 self.anchor = Some(SessionAnchor {
                     wallclock_ns: self.clock.now_ns(),
-                    first_t: 0, // updated to the first real frame's t below
+                    first_t: 0,
                 });
                 None
             }
@@ -241,6 +241,12 @@ impl State {
         }
     }
 
+    /// Timebase from the most recent `Hello`, or `None` before any
+    /// `Hello` has been received.
+    pub fn timebase_hz(&self) -> Option<u64> {
+        self.anchor.as_ref().map(|_| self.timebase_hz)
+    }
+
     /// Lookup the kind for a given metric. Returns `None` if no
     /// `MetricRegister` has been seen for this id yet.
     pub fn metric_kind(&self, name_id: u32) -> Option<MetricKind> {
@@ -250,6 +256,15 @@ impl State {
     /// Lookup the name string for a given id.
     pub fn name(&self, id: u32) -> Option<&str> {
         self.strings.get(&id).map(String::as_str)
+    }
+
+    fn reset_session(&mut self) {
+        self.strings.clear();
+        self.metric_kinds.clear();
+        self.open_spans.clear();
+        self.metric_values.clear();
+        self.histograms.clear();
+        self.warned_no_hello = false;
     }
 
     /// Update `first_t` if we're seeing the smallest `t` yet — pre-init
@@ -410,6 +425,35 @@ mod tests {
             t: 100,
         });
         assert_eq!(s.metric_values.get(&5), Some(&42));
+    }
+
+    #[test]
+    fn timebase_hz_is_none_before_hello() {
+        let s = State::new(FakeWallClock(0));
+        assert_eq!(s.timebase_hz(), None);
+    }
+
+    #[test]
+    fn timebase_hz_returns_value_from_hello() {
+        let mut s = State::new(FakeWallClock(0));
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        assert_eq!(s.timebase_hz(), Some(10_000_000));
+    }
+
+    #[test]
+    fn second_hello_resets_session_state() {
+        let mut s = State::new(FakeWallClock(0));
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        s.handle(&Frame::StringRegister { id: StringId(1), value: "x" });
+        s.handle(&Frame::MetricRegister { name_id: StringId(2), kind: MetricKind::Counter });
+        s.handle(&Frame::Metric { name_id: StringId(2), value: 42, t: 100 });
+
+        // Kernel restarts — second Hello must clear all per-session state.
+        s.handle(&Frame::Hello { timebase_hz: 20_000_000, protocol_version: 1 });
+
+        assert!(s.name(1).is_none(), "string table should be cleared on Hello");
+        assert!(s.metric_kind(2).is_none(), "metric kinds should be cleared on Hello");
+        assert!(s.metric_values.is_empty(), "metric values should be cleared on Hello");
     }
 
     #[test]

@@ -192,6 +192,14 @@ mod tests {
     }
 
     #[test]
+    fn split_va_extracts_nonzero_vpn0() {
+        // 0x80201000 = 0x80200000 + one 4 KiB page → vpn0 = 1, not 0.
+        // Catches mutations of the vpn0 extraction (>> 12) that survive
+        // when all test VAs are 2 MiB-aligned and vpn0 is coincidentally 0.
+        assert_eq!(split_va(0x80201000), (2, 1, 1, 0));
+    }
+
+    #[test]
     fn split_va_handles_mmio_region() {
         // 0x10000000 → vpn2 = 0, vpn1 = 128, vpn0 = 0.
         assert_eq!(split_va(0x10000000), (0, 128, 0, 0));

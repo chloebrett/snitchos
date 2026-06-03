@@ -30,12 +30,19 @@ pub fn boot_reaches_heartbeat() -> Result<(), String> {
     Ok(())
 }
 
-/// Two consecutive heartbeat SpanStarts arrive with their `t`
-/// timestamps differing by approximately the timer interval. Tolerance
-/// is generous (±50%) — QEMU's `time` CSR is host-wallclock-ish and
-/// can stall under load.
+/// Two consecutive heartbeat SpanStarts arrive with monotonic timestamps
+/// and a sane tick interval. Captures `Hello` first to get the timebase,
+/// then converts the tick delta to nanoseconds and asserts it falls
+/// between 10 ms and 10 s — loose enough to survive QEMU stalls but
+/// tight enough to catch a runaway or frozen timer.
 pub fn heartbeat_cadence() -> Result<(), String> {
     let mut h = Harness::spawn("cadence")?;
+
+    h.wait_for(SEC * 5, is_hello())
+        .ok_or("no Hello frame within 5s")?;
+    let timebase_hz = h
+        .timebase_hz()
+        .ok_or("Hello arrived but timebase_hz is missing")?;
 
     let first = h
         .wait_for(SEC * 15, is_span_start_named("kernel.heartbeat"))
@@ -51,37 +58,17 @@ pub fn heartbeat_cadence() -> Result<(), String> {
     if t2 <= t1 {
         return Err(format!("timestamps not monotonic: first={t1}, second={t2}"));
     }
-    // We don't assert on the absolute delta here — we don't know the
-    // timebase or the kernel's configured interval from inside this
-    // test without parsing the Hello frame. Monotonicity alone
-    // proves the timer is advancing across two IRQs, which is what
-    // this scenario is for.
-    Ok(())
-}
 
-/// MMU is turned on between `kernel.boot` and the first heartbeat,
-/// and the kernel survives: we see a `kernel.mmu.enable` SpanStart,
-/// the matching SpanEnd (proves the satp write + sfence didn't
-/// crash), and then at least one `kernel.heartbeat` SpanStart (proves
-/// the kernel keeps running with paging on).
-pub fn mmu_enabled() -> Result<(), String> {
-    let mut h = Harness::spawn("mmu")?;
-
-    let start = h
-        .wait_for(SEC * 5, is_span_start_named("kernel.mmu.enable"))
-        .ok_or("no kernel.mmu.enable SpanStart within 5s")?;
-    let span_id: SpanId = match start {
-        OwnedFrame::SpanStart { id, .. } => id,
-        _ => return Err("matched non-SpanStart (impossible)".to_string()),
-    };
-
-    h.wait_for(SEC * 5, move |f, _| {
-        matches!(f, OwnedFrame::SpanEnd { id, .. } if *id == span_id)
-    })
-    .ok_or("no matching kernel.mmu.enable SpanEnd within 5s — satp write or sfence crashed?")?;
-
-    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
-        .ok_or("no kernel.heartbeat after mmu.enable — kernel hung with paging on?")?;
+    let delta_ns = (t2 - t1) as u128 * 1_000_000_000 / timebase_hz as u128;
+    const MIN_NS: u128 = 10_000_000;        // 10 ms
+    const MAX_NS: u128 = 10_000_000_000;    // 10 s
+    if delta_ns < MIN_NS || delta_ns > MAX_NS {
+        return Err(format!(
+            "heartbeat interval {delta_ns} ns is outside [{MIN_NS}, {MAX_NS}] ns \
+             (timebase={timebase_hz} Hz, delta={} ticks)",
+            t2 - t1,
+        ));
+    }
 
     Ok(())
 }

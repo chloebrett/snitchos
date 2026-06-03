@@ -32,6 +32,7 @@ pub struct Harness {
     rx: Receiver<OwnedFrame>,
     strings: StringTable,
     socket_path: PathBuf,
+    timebase_hz: Option<u64>,
 }
 
 impl Harness {
@@ -88,6 +89,7 @@ impl Harness {
             rx,
             strings: HashMap::new(),
             socket_path,
+            timebase_hz: None,
         })
     }
 
@@ -105,7 +107,7 @@ impl Harness {
             let remaining = deadline.checked_duration_since(Instant::now())?;
             match self.rx.recv_timeout(remaining) {
                 Ok(frame) => {
-                    self.absorb_string_register(&frame);
+                    self.absorb(&frame);
                     if pred(&frame, &self.strings) {
                         return Some(frame);
                     }
@@ -122,9 +124,22 @@ impl Harness {
         self.strings.get(&id).map(String::as_str)
     }
 
-    fn absorb_string_register(&mut self, frame: &OwnedFrame) {
-        if let OwnedFrame::StringRegister { id, value } = frame {
-            self.strings.insert(*id, value.clone());
+    /// Timebase frequency from the most recent `Hello` frame, or `None`
+    /// if `Hello` has not arrived yet. Use this to convert kernel tick
+    /// deltas to wall-clock durations inside scenarios.
+    pub fn timebase_hz(&self) -> Option<u64> {
+        self.timebase_hz
+    }
+
+    fn absorb(&mut self, frame: &OwnedFrame) {
+        match frame {
+            OwnedFrame::StringRegister { id, value } => {
+                self.strings.insert(*id, value.clone());
+            }
+            OwnedFrame::Hello { timebase_hz, .. } => {
+                self.timebase_hz = Some(*timebase_hz);
+            }
+            _ => {}
         }
     }
 }

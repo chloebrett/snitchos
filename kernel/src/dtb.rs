@@ -27,13 +27,19 @@ pub fn uart_addr(dtb: &Fdt) -> usize {
 /// the property is missing or malformed; 0 is never a meaningful answer,
 /// so we make the absence explicit instead of papering over it.
 pub fn timebase_hz(dtb: &Fdt) -> Option<u32> {
-  dtb
-    .find_node("/cpus")
-    .and_then(|n| n.properties().find(|p| p.name == "timebase-frequency"))
-    .and_then(|p| {
+  // Explicit for-loop rather than .and_then().find().and_then() — the
+  // chained-closures form crashes pre-MMU with higher-half link in a
+  // way we never isolated. See plans/v0.4-memory-findings.md.
+  let node = dtb.find_node("/cpus")?;
+  for p in node.properties() {
+    if p.name == "timebase-frequency" {
       let bytes = p.value;
-      (bytes.len() == 4).then(|| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-    })
+      if bytes.len() == 4 {
+        return Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+      }
+    }
+  }
+  None
 }
 
 /// Print the load-bearing values we extract from the DTB: memory regions,

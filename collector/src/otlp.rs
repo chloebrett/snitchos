@@ -11,6 +11,7 @@
 use prost::Message;
 
 use crate::state::CompletedSpan;
+use crate::SpanExporter;
 
 // --- OTLP proto subset (prost-derived) ---------------------------------
 
@@ -200,6 +201,12 @@ impl Exporter {
 }
 
 #[cfg_attr(test, mutants::skip)] // non-deterministic — output cannot be asserted
+impl SpanExporter for Exporter {
+    fn export(&self, span: &CompletedSpan) {
+        self.export(span);
+    }
+}
+
 fn random_trace_id() -> [u8; 16] {
     let mut id = [0u8; 16];
     for b in id.iter_mut() {

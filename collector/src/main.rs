@@ -16,6 +16,14 @@ mod otlp;
 mod prom;
 mod state;
 
+/// Sink for completed spans. Implement this to add a new output format.
+/// Each implementation receives every `CompletedSpan` produced by the
+/// kernel session; routing (enable/disable, endpoint config) is the
+/// caller's responsibility.
+pub trait SpanExporter: Send {
+    fn export(&self, span: &state::CompletedSpan);
+}
+
 const SOCKET_PATH: &str = "/tmp/snitch-telemetry.sock";
 
 /// Connect to the kernel's telemetry socket, decode `Frame`s, and route
@@ -57,7 +65,10 @@ struct Args {
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
-    let exporter = (!args.no_otlp).then(|| otlp::Exporter::new(&args.otlp));
+    let mut exporters: Vec<Box<dyn SpanExporter>> = Vec::new();
+    if !args.no_otlp {
+        exporters.push(Box::new(otlp::Exporter::new(&args.otlp)));
+    }
     let state = Arc::new(Mutex::new(state::State::new(state::SystemWallClock)));
 
     if !args.no_prometheus {
@@ -65,7 +76,7 @@ fn main() -> std::io::Result<()> {
     }
 
     eprintln!("collector: connecting to {SOCKET_PATH}");
-    if exporter.is_some() {
+    if !args.no_otlp {
         eprintln!("collector: exporting OTLP traces to {}", &args.otlp);
         eprintln!("collector: view traces at http://localhost:3000 (Grafana → Explore → Tempo)");
     }
@@ -84,7 +95,7 @@ fn main() -> std::io::Result<()> {
         }
         let mut state = state.lock().unwrap();
         if let Some(completed) = state.handle(frame) {
-            if let Some(exporter) = exporter.as_ref() {
+            for exporter in &exporters {
                 exporter.export(&completed);
             }
         }

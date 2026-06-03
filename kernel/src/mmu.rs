@@ -19,6 +19,71 @@ const PAGE_2MIB: usize = 2 * 1024 * 1024;
 /// Sv39 mode field value for the `satp` register.
 const SATP_MODE_SV39: u64 = 8;
 
+/// A set of 2 MiB-aligned physical bases to identity-map for MMIO.
+/// Collected from the DTB before `mmu::enable` runs so that page-table
+/// construction is decoupled from DTB traversal.
+pub struct MmioRegions {
+    bases: [usize; Self::CAP],
+    len: usize,
+}
+
+impl MmioRegions {
+    const CAP: usize = 16;
+
+    pub const fn new() -> Self {
+        Self { bases: [0; Self::CAP], len: 0 }
+    }
+
+    /// Insert a 2 MiB-aligned base if not already present. Silently
+    /// drops the entry if the buffer is full (QEMU `virt` collapses
+    /// to 1-2 distinct 2 MiB regions; 16 is plenty of headroom).
+    pub fn insert(&mut self, base: usize) {
+        let aligned = base & !(PAGE_2MIB - 1);
+        for i in 0..self.len {
+            if self.bases[i] == aligned {
+                return;
+            }
+        }
+        if self.len < Self::CAP {
+            self.bases[self.len] = aligned;
+            self.len += 1;
+        }
+    }
+
+    pub fn as_slice(&self) -> &[usize] {
+        &self.bases[..self.len]
+    }
+}
+
+/// Walk the DTB for `ns16550a` and `virtio,mmio` nodes; return the set
+/// of distinct 2 MiB-aligned bases covering them.
+///
+/// **Currently unused — `kmain` hardcodes the MMIO region instead.**
+/// DTB iteration crashes pre-MMU under higher-half link in a way we
+/// haven't isolated (see `plans/v0.4-memory-findings.md`). Kept here
+/// for the day we figure it out.
+#[expect(dead_code, reason = "DTB iter pre-MMU crashes under higher-half link — see findings")]
+pub fn collect_mmio_regions(dtb: &Fdt) -> MmioRegions {
+    let mut regions = MmioRegions::new();
+    for node in dtb.all_nodes() {
+        let is_mmio = node
+            .compatible()
+            .map(|c| {
+                c.all()
+                    .any(|s| s == "ns16550a" || s == "virtio,mmio")
+            })
+            .unwrap_or(false);
+        if !is_mmio {
+            continue;
+        }
+        let Some(reg) = node.reg().and_then(|mut r| r.next()) else {
+            continue;
+        };
+        regions.insert(reg.starting_address as usize);
+    }
+    regions
+}
+
 /// VA = PA + KERNEL_OFFSET for kernel-space mappings. Matches Linux
 /// RISC-V's `PAGE_OFFSET - PHYS_BASE` with PHYS_BASE = 0x80000000.
 /// The kernel image at PA 0x80200000 maps to higher-half VA
@@ -69,7 +134,7 @@ static mut BOOT_PT_MID_HIGHER_KERNEL: PageTable = PageTable::new();
 ///   the call site must be inside one of the regions we identity-map
 ///   (kernel image + MMIO). The position-1 boot order (call just
 ///   before the heartbeat loop) satisfies this — see plan.
-pub unsafe fn enable(dtb: &Fdt) {
+pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
     // SAFETY: linker symbols are addresses, not values. Take pointers,
     // never deref.
     let kernel_start = (&raw const __kernel_start) as usize;
@@ -110,34 +175,41 @@ pub unsafe fn enable(dtb: &Fdt) {
             addr += PAGE_2MIB;
         }
 
-        // MMIO: every distinct 2 MiB region containing an ns16550a or
-        // virtio,mmio node. The QEMU `virt` layout puts UART at
-        // 0x10000000 and the virtio-mmio slots at 0x10001000+ — all in
-        // one 2 MiB region — but discovering from the DTB matches the
-        // long-term shape and dedupes naturally via `map_2mib`'s
-        // idempotency.
+        // MMIO: identity-map each pre-collected 2 MiB-aligned base.
+        // Pre-collection happens in `collect_mmio_regions` from the
+        // DTB; we don't borrow `&Fdt` here.
         let mid_mmio_pa = (&raw const BOOT_PT_MID_MMIO) as usize;
-        for node in dtb.all_nodes() {
-            let is_mmio = node
-                .compatible()
-                .map(|c| {
-                    c.all()
-                        .any(|s| s == "ns16550a" || s == "virtio,mmio")
-                })
-                .unwrap_or(false);
-            if !is_mmio {
-                continue;
-            }
-            let Some(reg) = node.reg().and_then(|mut r| r.next()) else {
-                continue;
-            };
-            let base = reg.starting_address as usize;
-            let aligned = base & !(PAGE_2MIB - 1);
+        for &base in mmio_regions.as_slice() {
             (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
                 &mut *(&raw mut BOOT_PT_MID_MMIO),
                 mid_mmio_pa,
-                aligned,
-                aligned,
+                base,
+                base,
+                perms,
+            );
+        }
+
+        // DTB region. The kernel keeps using `&Fdt` after this
+        // function returns (timebase_hz, uart_addr, virtio_console::init),
+        // so the DTB pages must be mapped. One 2 MiB page covers any
+        // sane DTB (typically < 64 KiB).
+        let dtb_aligned = dtb_phys & !(PAGE_2MIB - 1);
+        let dtb_gig = dtb_aligned >> 30;
+        let kernel_gig = kernel_start >> 30;
+        if dtb_gig == kernel_gig {
+            (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
+                &mut *(&raw mut BOOT_PT_MID_KERNEL),
+                mid_kernel_pa,
+                dtb_aligned,
+                dtb_aligned,
+                perms,
+            );
+        } else {
+            (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
+                &mut *(&raw mut BOOT_PT_MID_MMIO),
+                mid_mmio_pa,
+                dtb_aligned,
+                dtb_aligned,
                 perms,
             );
         }

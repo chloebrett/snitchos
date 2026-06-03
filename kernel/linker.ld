@@ -1,10 +1,13 @@
 ENTRY(_start)
 MEMORY {
-  ram (rwx) : ORIGIN = 0x80200000, LENGTH = 128M
+  ram (rwx) : ORIGIN = 0xffffffff80200000, LENGTH = 128M
 }
+/* VMA in higher-half (matches Linux RISC-V's PAGE_OFFSET). LMA is the
+ * physical address OpenSBI loads us at; AT(0x80200000) anchors LMAs
+ * on .text, and subsequent sections follow contiguously. */
 SECTIONS {
   __kernel_start = ORIGIN(ram);
-  .text : {
+  .text : AT(0x80200000) {
     KEEP(*(.text.boot))
     *(.text .text*)
   } > ram

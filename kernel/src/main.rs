@@ -34,22 +34,49 @@ global_asm!(include_str!("entry.S"));
 ///   periodic work — the kernel just `wfi`s indefinitely once init prints out.
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
-    // Install the trap vector first. Any trap that fires before this
-    // (e.g. an exception during DTB parse) would jump to whatever
-    // garbage stvec holds at reset — likely a fault loop. We don't
-    // expect traps at boot, but the cost of being defensive is one
-    // CSR write.
-    //
-    // SAFETY: no other code is running; interrupts are disabled
-    // (SIE clear at boot).
-    unsafe { trap::set_trap_vector() };
-
-    // DTB parse runs before the kernel.boot span: the parse needs to
-    // succeed before we even know where the UART is, and tracing isn't
-    // useful before there's a way to emit. Treat it as bootstrap.
+    // DTB parse must come first — we need it to discover MMIO regions
+    // before we build the boot page table. Pure parsing, no formatted
+    // output, no fn-pointer-dispatched calls. Safe with MMU off
+    // regardless of where the kernel is linked.
     let dtb = unsafe { Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
+    // MMIO regions: hardcoded to [0x10000000, 0x10200000) — the 2 MiB
+    // region containing the NS16550A UART and the virtio-mmio slots on
+    // QEMU `virt`. DTB-driven discovery (`collect_mmio_regions`)
+    // crashes pre-MMU under higher-half link in a way we haven't
+    // isolated; see plans/v0.4-memory-findings.md.
+    let mut mmio_regions = mmu::MmioRegions::new();
+    mmio_regions.insert(0x10000000);
+
+    // Turn paging on EARLY — before any code that loads an absolute
+    // function-pointer value to a higher-half VA (formatted println!
+    // via fmt::Arguments, trap_entry's address). After the linker
+    // change to higher-half ORIGIN, those values point at higher-half
+    // VAs that only resolve once the dual-map is live.
+    //
+    // span!() is safe pre-MMU because FrameSink dispatch was
+    // monomorphized — no vtable, no fn pointers — and pre-init
+    // buffering just copies bytes.
+    //
+    // SAFETY: MMU is off (boot default). Kernel image is dual-mapped
+    // (identity + higher-half); MMIO regions identity-mapped.
+    unsafe { mmu::enable(&mmio_regions, dtb_phys) };
     let timebase_hz = dtb::timebase_hz(&dtb)
         .expect("DTB missing /cpus/timebase-frequency — can't run without a clock") as u64;
+
+    // Trap vector second. `trap_entry`'s address is now a higher-half
+    // VA (linker change); writing it to stvec only makes sense with the
+    // higher-half mapping live. Window between OpenSBI handoff and
+    // here has no installed handler — we don't expect traps during
+    // DTB parse / mmu::enable, same as the previous boot order.
+    //
+    // SAFETY: MMU on, higher-half mapped, trap path resolvable.
+    unsafe { trap::set_trap_vector() };
+
+    // Step 2a/2b smoke test: verify the higher-half mapping resolves.
+    {
+        span!("kernel.mmu.higher_half_verify");
+        unsafe { mmu::verify_higher_half_mapping() };
+    }
 
     // Open kernel.boot, with sub-spans for each init phase. All frames
     // emitted before virtio-console is ready get pre-init-buffered.
@@ -100,30 +127,6 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: trap vector was installed at the top of kmain; the
     // handler is ready.
     unsafe { trap::init_timer(timebase_hz) };
-
-    // Turn paging on. Identity-only for v0.4 step 1 — every region
-    // the kernel touches is mapped VA = PA, so the satp write is a
-    // no-op from the perspective of any pointer in flight.
-    //
-    // SAFETY: MMU is off (nothing wrote satp before us). All
-    // pre-satp init has completed; the only code that runs after this
-    // is the heartbeat loop, which only touches the kernel image and
-    // the virtio-mmio region — both identity-mapped by `enable`.
-    {
-        span!("kernel.mmu.enable");
-        unsafe { mmu::enable(&dtb) };
-    }
-
-    // Step 2a/2b smoke test: read a known byte through the higher-half
-    // VA we just installed alongside identity. If the higher-half
-    // mapping isn't actually live, this load faults and the trap
-    // handler panics — no SpanEnd, no heartbeat. Removed in a later
-    // step once the kernel ACTUALLY runs at higher-half (then the
-    // identity read becomes meaningless).
-    {
-        span!("kernel.mmu.higher_half_verify");
-        unsafe { mmu::verify_higher_half_mapping() };
-    }
 
     // Heartbeat loop: wfi until the timer IRQ flips TICK_PENDING,
     // then emit a span + the metric set.
