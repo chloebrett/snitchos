@@ -158,6 +158,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let intern_used = tracing::register_gauge("snitchos.intern.strings_used");
     let time_ticks = tracing::register_gauge("snitchos.time.ticks");
     let irq_duration = tracing::register_histogram("snitchos.irq.timer.duration_ticks");
+    let frames_allocated = tracing::register_counter("snitchos.frames.allocated_total");
+    let frames_freed = tracing::register_counter("snitchos.frames.freed_total");
+    let frames_alloc_failed = tracing::register_counter("snitchos.frames.alloc_failed_total");
+    let frames_in_use = tracing::register_gauge("snitchos.frames.in_use");
+    let frames_free = tracing::register_gauge("snitchos.frames.free");
 
     // Arm the periodic timer and enable interrupts. From here on, the
     // CPU wakes us via timer IRQ instead of us spinning on the cycle
@@ -214,6 +219,25 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             // handler measured rdtime delta; main thread emits.
             let dur = trap::LAST_IRQ_DURATION.load(Ordering::Relaxed);
             tracing::emit_metric(irq_duration, dur as i64);
+            // Frame allocator telemetry. Counters drain atomically;
+            // gauges briefly take the allocator lock (heartbeat is
+            // single-threaded so no contention).
+            tracing::emit_metric(
+                frames_allocated,
+                frame::ALLOC_COUNT.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                frames_freed,
+                frame::FREE_COUNT.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                frames_alloc_failed,
+                frame::ALLOC_FAIL_COUNT.load(Ordering::Relaxed) as i64,
+            );
+            if let Some(stats) = frame::stats() {
+                tracing::emit_metric(frames_in_use, stats.in_use as i64);
+                tracing::emit_metric(frames_free, stats.free as i64);
+            }
         }
     }
 }
