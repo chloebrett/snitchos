@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod clock;
+pub mod frame;
 pub mod intern;
 pub mod mmu;
 pub mod preinit;
