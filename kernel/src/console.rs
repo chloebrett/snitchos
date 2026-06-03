@@ -45,20 +45,38 @@ pub unsafe fn init(uart_addr: usize) {
 /// known weaknesses.
 pub const QEMU_VIRT_UART_BASE: usize = 0x10000000;
 
-/// Returns a UART driver pointing at the QEMU `virt` MMIO base. Used by
-/// the `print!`/`println!` macros when `UART` isn't initialized yet.
-/// Kept here so the fallback's SAFETY justification lives in one place.
+/// Returns a UART driver pointing at the QEMU `virt` UART. Used by the
+/// `print!`/`println!` macros when `UART` isn't initialized yet, and
+/// by the panic handler.
+///
+/// Reads `satp` to pick the right address space: physical when the
+/// MMU is off (pre-`mmu::enable`), higher-half VA when it's on (the
+/// only mapping guaranteed to survive identity-MMIO unmap).
 ///
 /// # Safety
 ///
-/// Only safe to call before `console::init` has run (no other writer is
-/// using the device yet) or from the panic handler (we're already in a
-/// fatal state). Not exported for general use — it's `pub` so the macros
-/// can reach it, not because callers should.
+/// Only safe to call before `console::init` has run (no other writer
+/// is using the device yet) or from the panic handler (we're already
+/// in a fatal state). Not exported for general use — it's `pub` so
+/// the macros can reach it, not because callers should.
 pub unsafe fn _pre_init_uart() -> Uart16550 {
   // SAFETY: see function-level doc; precondition is that no other code
   // currently holds the UART.
-  unsafe { Uart16550::new(QEMU_VIRT_UART_BASE) }
+  unsafe { Uart16550::new(emergency_uart_base()) }
+}
+
+/// Pick the UART MMIO base address that's valid for the current
+/// `satp` state. Used by `_pre_init_uart` and the panic handler — both
+/// can fire at any boot stage, including pre-MMU and post-identity-unmap.
+pub fn emergency_uart_base() -> usize {
+  let satp: u64;
+  // SAFETY: `csrr satp` is a non-trapping read in S-mode.
+  unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp) };
+  if satp != 0 {
+    QEMU_VIRT_UART_BASE + crate::mmu::KERNEL_OFFSET
+  } else {
+    QEMU_VIRT_UART_BASE
+  }
 }
 
 /// Print formatted output to the kernel console (no trailing newline).

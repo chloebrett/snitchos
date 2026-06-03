@@ -208,9 +208,10 @@ fn panic(info: &PanicInfo) -> ! {
         //
         // SAFETY: bypassing the lock means we may interleave with whatever
         // was printing when the panic fired — accepted because we're already
-        // in a fatal state.
+        // in a fatal state. `emergency_uart_base` reads satp so this works
+        // in any boot stage (MMU off, identity-MMIO mapped, or higher-half-only).
         use core::fmt::Write;
-        let mut uart = unsafe { uart::Uart16550::new(console::QEMU_VIRT_UART_BASE) };
+        let mut uart = unsafe { uart::Uart16550::new(console::emergency_uart_base()) };
         let _ = writeln!(&mut uart, "Kernel panic: {}", info);
     }
     loop {
