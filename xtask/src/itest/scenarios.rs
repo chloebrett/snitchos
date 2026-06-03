@@ -36,6 +36,41 @@ pub fn frame_allocator_metrics() -> Result<(), String> {
     Ok(())
 }
 
+/// Kernel heap is initialized and exercised. Each heartbeat does a
+/// `Vec::with_capacity(256)` + push + drop, so the heap counters tick
+/// up over time. We assert:
+///
+///   1. `snitchos.heap.alloc_total` rises above 0 — `#[global_allocator]`
+///      is wired, `heap::init` ran, the linear-map VA is writable.
+///   2. `snitchos.heap.bytes_used` is observed — the gauge emits even
+///      if the smoke leaves it near 0 after drop.
+///   3. At least one heartbeat survives after — the heap doesn't
+///      break the boot/loop path.
+pub fn kernel_heap_metrics() -> Result<(), String> {
+    let mut h = Harness::spawn("heap")?;
+
+    let frame = h
+        .wait_for(SEC * 10, is_metric_named("snitchos.heap.alloc_total"))
+        .ok_or("no snitchos.heap.alloc_total metric within 10s — heap not initialised or not emitting?")?;
+    let value = match frame {
+        OwnedFrame::Metric { value, .. } => value,
+        _ => return Err("matched non-metric (impossible)".to_string()),
+    };
+    if value < 1 {
+        return Err(format!(
+            "heap.alloc_total = {value}, expected ≥ 1 (heap init ran but smoke didn't alloc?)"
+        ));
+    }
+
+    h.wait_for(SEC * 5, is_metric_named("snitchos.heap.bytes_used"))
+        .ok_or("no snitchos.heap.bytes_used metric within 5s")?;
+
+    h.wait_for(SEC * 5, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat after heap metric — heap broke the loop?")?;
+
+    Ok(())
+}
+
 /// Frame allocator exhausts the pool cleanly and the kernel survives.
 /// The `oom-leak`-feature kernel leaks 8192 frames per heartbeat
 /// (32 MiB), so the ~32K-frame pool runs out in ~4 heartbeats on the

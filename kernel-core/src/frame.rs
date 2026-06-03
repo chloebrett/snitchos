@@ -71,6 +71,43 @@ impl<'a> Bitmap<'a> {
         None
     }
 
+    /// Allocate `n` consecutive free frames. Returns the starting
+    /// frame index, or `None` if no run of `n` exists. Marks all `n`
+    /// bits used and decrements `frames_free` by `n` on success.
+    /// `n == 0` returns `None` — zero-length allocation is a
+    /// programmer error, not a degenerate success.
+    pub fn alloc_contiguous(&mut self, n: usize) -> Option<usize> {
+        if n == 0 || n > self.frames_free {
+            return None;
+        }
+        let mut run_start: Option<usize> = None;
+        let mut run_len: usize = 0;
+        for frame in 0..self.capacity {
+            let word_idx = frame / 64;
+            let mask = 1u64 << (frame % 64);
+            if self.bits[word_idx] & mask != 0 {
+                if run_start.is_none() {
+                    run_start = Some(frame);
+                }
+                run_len += 1;
+                if run_len == n {
+                    let start = run_start.unwrap();
+                    for f in start..start + n {
+                        let w = f / 64;
+                        let m = 1u64 << (f % 64);
+                        self.bits[w] &= !m;
+                    }
+                    self.frames_free -= n;
+                    return Some(start);
+                }
+            } else {
+                run_start = None;
+                run_len = 0;
+            }
+        }
+        None
+    }
+
     /// Mark `frame` as free. Idempotent — double-free is a no-op
     /// rather than a panic so callers can be lazy in error paths.
     /// Out-of-range frames panic (programmer error, not a graceful
@@ -221,6 +258,77 @@ mod tests {
         assert_eq!(bm.capacity(), 70);
         bm.release_range(0, 100);  // requests beyond cap are clamped
         assert_eq!(bm.count_free(), 70);
+    }
+
+    #[test]
+    fn alloc_contiguous_returns_run_start() {
+        // Frames 10..20 free, rest in-use. A run of 5 should start at 10.
+        let (mut storage, cap) = empty(64);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        bm.release_range(10, 10);
+        assert_eq!(bm.alloc_contiguous(5), Some(10));
+    }
+
+    #[test]
+    fn alloc_contiguous_spans_word_boundary() {
+        // 60..70 free; a run of 8 must straddle the u64 boundary at 64.
+        let (mut storage, cap) = empty(128);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        bm.release_range(60, 10);
+        assert_eq!(bm.alloc_contiguous(8), Some(60));
+        // All 8 marked used; remaining 2 (68, 69) still free.
+        assert_eq!(bm.count_free(), 2);
+        assert_eq!(bm.alloc(), Some(68));
+    }
+
+    #[test]
+    fn alloc_contiguous_returns_none_when_no_run_fits() {
+        // Free frames scattered: 0,1,2 and 10,11. No run of 4.
+        let (mut storage, cap) = empty(64);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        bm.release_range(0, 3);
+        bm.release_range(10, 2);
+        assert_eq!(bm.alloc_contiguous(4), None);
+        // State preserved on failure.
+        assert_eq!(bm.count_free(), 5);
+    }
+
+    #[test]
+    fn alloc_contiguous_skips_used_bits_in_middle() {
+        // 0..5 free, 5 used, 6..20 free. Run of 10 must start at 6, not 0.
+        let (mut storage, cap) = empty(64);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        bm.release_range(0, 5);
+        bm.release_range(6, 14);
+        assert_eq!(bm.alloc_contiguous(10), Some(6));
+    }
+
+    #[test]
+    fn alloc_contiguous_decrements_frames_free_by_n() {
+        let (mut storage, cap) = empty(256);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        bm.release_range(0, 256);
+        assert_eq!(bm.count_free(), 256);
+        assert_eq!(bm.alloc_contiguous(100), Some(0));
+        assert_eq!(bm.count_free(), 156);
+    }
+
+    #[test]
+    fn alloc_contiguous_zero_returns_none() {
+        let (mut storage, cap) = empty(64);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        bm.release_range(0, 64);
+        assert_eq!(bm.alloc_contiguous(0), None);
+        assert_eq!(bm.count_free(), 64);
+    }
+
+    #[test]
+    fn alloc_contiguous_larger_than_pool_returns_none() {
+        let (mut storage, cap) = empty(64);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        bm.release_range(0, 64);
+        assert_eq!(bm.alloc_contiguous(65), None);
+        assert_eq!(bm.count_free(), 64);
     }
 
     #[test]

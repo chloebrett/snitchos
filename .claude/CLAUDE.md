@@ -164,7 +164,9 @@ kernel/       no_std, no_main, riscv64gc-unknown-none-elf only.
               Asm boot stub, trap handler, virtio-console driver,
               ns16550a UART, panic handler, the `mmu::enable` /
               trampoline / `unmap_identity` flow, and the static
-              `frame::FRAME_BITS` storage + `Mutex<Allocator>` wrapper.
+              `frame::FRAME_BITS` storage + `Mutex<Allocator>` wrapper,
+              and the `#[global_allocator]` `heap::HEAP` backed by
+              `linked_list_allocator` over a 4 MiB linear-map region.
               Statics live here.
 kernel-core/  no_std, host-buildable. Pure data + bookkeeping with
               no asm / MMIO / CSRs: intern table, span registry,
@@ -217,6 +219,7 @@ The kernel binary itself has no `#[test]`s — it's `no_std`/`no_main` and won't
 - **`kernel-runs-at-higher-half`** — kernel's own `auipc`-read PC is ≥ `KERNEL_OFFSET` post-trampoline.
 - **`frame-allocator-metrics`** — `snitchos.frames.allocated_total` ≥ 1 within 10 s.
 - **`frame-allocator-oom`** — built with `--features oom-leak`; asserts `alloc_failed_total > 0` within 15 s and the kernel keeps heartbeating after.
+- **`kernel-heap-metrics`** — `snitchos.heap.alloc_total ≥ 1` and `snitchos.heap.bytes_used` observed within 10 s; heartbeat survives after.
 
 Add a scenario: implement a `Result<(), String>` function in `scenarios.rs`, register it in `xtask/src/itest.rs::SCENARIOS`, run `cargo xtask test <name>`. The harness handles QEMU lifecycle and socket cleanup. Use `Harness::spawn_with_features(label, &["feature"])` if the scenario needs a non-default kernel variant (currently only `oom-leak` does).
 
@@ -235,12 +238,12 @@ Skips cleanly (exit 0) if `qemu-system-riscv64` isn't on `PATH`.
 - **NS16550A UART** (`println!`) — human-readable boot log, no protocol, no decoder. Use for ad-hoc debugging.
 - **virtio-console** (telemetry frames) — structured `Frame`s, decoded by `collector` and the integration tests. Use for anything we want to observe or assert on.
 
-### Memory layout, post v0.4 step 3
+### Memory layout, post v0.4 step 4
 
 The kernel image is linked at higher-half VAs (`0xffffffff80200000+`) and runs at higher-half PC after the trampoline in `kmain`. Identity mappings are torn down by `mmu::unmap_identity` later in boot. There are three logical address spaces in play, and which one to use depends on the consumer:
 
 - **Higher-half kernel VAs** (`KERNEL_OFFSET + pa`) — for kernel image, statics, stack. PC-relative addressing (under `code-model=medium`) resolves here naturally for `&static`.
-- **Linear-map VAs** (`LINEAR_OFFSET + pa`, via `pa_to_kernel_va`) — for any allocated frame the kernel wants to dereference. One 1 GiB Sv39 huge-page leaf in `BOOT_PT_ROOT[322]` covers all of physical RAM up to 1 GiB.
+- **Linear-map VAs** (`LINEAR_OFFSET + pa`, via `pa_to_kernel_va`) — for any allocated frame the kernel wants to dereference. One 1 GiB Sv39 huge-page leaf in `BOOT_PT_ROOT[322]` covers all of physical RAM up to 1 GiB. The kernel heap also lives here: `heap::init` grabs 1024 contiguous frames from `frame::alloc_contiguous` and hands their linear-map VA to `linked_list_allocator`. The 4 MiB region is sub-allocated by `#[global_allocator]`; `Box`/`Vec`/`String` and the rest of `alloc::` work after `heap::init` runs.
 - **Physical addresses** — for anything handed to a device (virtio DMA buffer pointers, queue ring addresses written to `REG_QUEUE_DESC_LOW/HIGH`). Devices have no MMU.
 
 Gotchas worth re-reading `plans/v0.4-memory-findings.md` before disturbing:
@@ -250,6 +253,8 @@ Gotchas worth re-reading `plans/v0.4-memory-findings.md` before disturbing:
 - `fmt::Arguments` (every formatted `println!`) embeds absolute fn-pointer values to type-specific formatters. Those resolve only after the higher-half mapping is live, so **no formatted `println!` before `mmu::enable`**.
 - Anything that walks the DTB pre-MMU under higher-half link crashes silently in a way we never isolated. MMIO regions in `kmain` are hardcoded for QEMU `virt`; the DTB-driven `collect_mmio_regions` exists but is parked behind `#[expect(dead_code)]`.
 - The frame allocator's `Bitmap::frames_free` is the maintained source of truth for the free count. Don't compute `count_free` by popcount-scanning the bits — it's O(words) and the OOM workload showed it stalls heartbeats. The maintained counter is also what makes `alloc` O(1) when the pool is empty.
+- The kernel heap region is fixed at 4 MiB (1024 contiguous frames) for v0.4. To grow it without finding a new contiguous PA run, we need a dedicated heap VA range with per-frame PTE install — strategy (b) in `plans/v0.4-memory-step-4-kernel-heap.md`. Until then, `HEAP_FRAMES` is the only knob.
+- Never emit a telemetry frame from inside `GlobalAlloc::alloc`/`dealloc`. The virtio TX path takes a `Mutex` that, on first use of a string, registers through the intern table which may itself allocate. Re-entry deadlock. Same pattern as the frame allocator and the IRQ handler: bump an atomic in the alloc path, drain in the heartbeat loop.
 
 ### Architecture references
 
@@ -258,6 +263,7 @@ Gotchas worth re-reading `plans/v0.4-memory-findings.md` before disturbing:
 - [docs/roadmap-and-milestones.md](../docs/roadmap-and-milestones.md) — current milestone, what's done, what's next.
 - [plans/v0.4-memory-concepts.md](../plans/v0.4-memory-concepts.md) — Sv39, higher-half, frame allocator concepts.
 - [plans/v0.4-memory-step-3-frame-allocator-concepts.md](../plans/v0.4-memory-step-3-frame-allocator-concepts.md) — the linear-map design call.
+- [plans/v0.4-memory-step-4-kernel-heap.md](../plans/v0.4-memory-step-4-kernel-heap.md) — heap region strategy, allocator choice, deferred-emission constraint.
 - [plans/v0.4-memory-findings.md](../plans/v0.4-memory-findings.md) — what we learned building higher-half + frame allocator; read **before** touching the boot order or any address-translation site.
 - [plans/scaling-corners.md](../plans/scaling-corners.md) — known corners that v0.1 sidesteps (SMP, lock-during-IRQ, etc.).
 

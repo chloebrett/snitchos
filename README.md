@@ -14,7 +14,7 @@ The operating system that snitches on itself 🐀
 
 **v0.3.1 "Making the kernel testable"** — *complete*. Carved out `kernel-core` (host-buildable `no_std` library) holding the intern table, span registry, pre-init buffer, scause decoding, and the `FrameSink`/`Clock` traits. 29 host unit tests over the data logic. New `xtask test` harness boots the kernel in QEMU, decodes the virtio-console telemetry stream, asserts on the `Frame` sequence — 3 scenarios passing in ~5s wallclock. See [posts/post-8-making-the-kernel-testable.md](posts/post-8-making-the-kernel-testable.md).
 
-**v0.4 steps 1–3** — *complete*. Sv39 paging on, dual-mapped boot table, kernel relinked at higher-half VAs with PC trampoline + identity unmap, `va_to_pa` at every device-DMA site so virtio still works. 1 GiB Sv39 huge-page leaf installs a linear map of all physical RAM at `0xffffffd0_00000000+` so any allocated frame has a kernel-reachable VA via `pa_to_kernel_va`. Bitmap-based frame allocator in `kernel_core::frame` with O(1) free-count + short-circuit; kernel-side `frame::{alloc, alloc_zeroed, free, stats}` API; DTB-driven init reserving SBI / kernel image / DTB regions. Five new metrics (`snitchos.frames.*`) drive five new Grafana panels including a steady-state allocations-vs-frees view and an OOM curve when the `oom-leak` feature is on. See [posts/post-9-moving-the-kernel-without-breaking-it.md](posts/post-9-moving-the-kernel-without-breaking-it.md) and [posts/post-10-frame-by-frame.md](posts/post-10-frame-by-frame.md).
+**v0.4 steps 1–4** — *complete*. Sv39 paging on, dual-mapped boot table, kernel relinked at higher-half VAs with PC trampoline + identity unmap, `va_to_pa` at every device-DMA site so virtio still works. 1 GiB Sv39 huge-page leaf installs a linear map of all physical RAM at `0xffffffd0_00000000+` so any allocated frame has a kernel-reachable VA via `pa_to_kernel_va`. Bitmap-based frame allocator in `kernel_core::frame` with O(1) free-count + short-circuit; kernel-side `frame::{alloc, alloc_zeroed, free, stats}` API; DTB-driven init reserving SBI / kernel image / DTB regions. Five new metrics (`snitchos.frames.*`) drive five new Grafana panels including a steady-state allocations-vs-frees view and an OOM curve when the `oom-leak` feature is on. See [posts/post-9-moving-the-kernel-without-breaking-it.md](posts/post-9-moving-the-kernel-without-breaking-it.md) and [posts/post-10-frame-by-frame.md](posts/post-10-frame-by-frame.md).
 
 Working:
 
@@ -33,9 +33,10 @@ Working:
 - docker-compose stack: Tempo + Prometheus + Grafana, all auto-provisioned (datasources + dashboard with timer-IRQ percentile panel)
 - `xtask` orchestration: `cargo xtask up` (kernel) / `cargo xtask collect` (collector) / `cargo xtask stack {up,down,logs}` / `cargo xtask test` (kernel integration scenarios in QEMU)
 - Sv39 page tables, higher-half kernel, identity unmap, linear map at `0xffffffd0_00000000` so all physical RAM is reachable via `pa_to_kernel_va`
-- physical frame allocator (4 KiB pages, bitmap-tracked) with `frame::{alloc, alloc_zeroed, free, stats}`; DTB-driven init; per-frame metrics on the wire and in Grafana
+- physical frame allocator (4 KiB pages, bitmap-tracked) with `frame::{alloc, alloc_contiguous, alloc_zeroed, free, stats}`; DTB-driven init; per-frame metrics on the wire and in Grafana
+- kernel heap: `#[global_allocator]` backed by `linked_list_allocator` over a 4 MiB contiguous run of frames mapped through the linear map. `Box` / `Vec` / `String` / `BTreeMap` work inside the kernel. Four heap metrics (`snitchos.heap.{alloc_total, dealloc_total, alloc_failed_total, bytes_used}`) drained from the heartbeat loop
 
-Up next: **v0.4 step 4 (kernel heap)** — `GlobalAlloc` impl on top of `frame::alloc`, so `Box` / `Vec` / `String` / `BTreeMap` start working inside the kernel. Then v0.5 (threading + round-robin scheduler).
+Up next: **v0.5 (threading + round-robin scheduler)**. Allocator A/B (`talc` vs `linked_list_allocator`) is a fast-follow gated on richer heap instrumentation (fragmentation, size buckets).
 
 See [posts/](posts/) for the per-milestone devlog.
 
@@ -137,6 +138,7 @@ rebuild between the default-feature scenarios and the OOM scenario).
 - [plans/v0.4-memory-step-1-satp-on.md](plans/v0.4-memory-step-1-satp-on.md) — Sv39 identity boot table + first `csrw satp`.
 - [plans/v0.4-memory-step-3-frame-allocator-concepts.md](plans/v0.4-memory-step-3-frame-allocator-concepts.md) — bitmap vs linked-list vs buddy; the linear-map design call.
 - [plans/v0.4-memory-step-3-frame-allocator.md](plans/v0.4-memory-step-3-frame-allocator.md) — frame allocator implementation plan.
+- [plans/v0.4-memory-step-4-kernel-heap.md](plans/v0.4-memory-step-4-kernel-heap.md) — kernel heap implementation plan.
 - [plans/v0.4-memory-findings.md](plans/v0.4-memory-findings.md) — what we learned (and what we worked around) building higher-half.
 - [plans/scaling-corners.md](plans/scaling-corners.md) — known corners for SMP / interrupts.
 - [posts/](posts/) — devlog notes as we go.

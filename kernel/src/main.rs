@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -9,6 +11,7 @@ use fdt::Fdt;
 mod console;
 mod dtb;
 mod frame;
+mod heap;
 mod mmu;
 mod tracing;
 mod trap;
@@ -163,6 +166,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let frames_alloc_failed = tracing::register_counter("snitchos.frames.alloc_failed_total");
     let frames_in_use = tracing::register_gauge("snitchos.frames.in_use");
     let frames_free = tracing::register_gauge("snitchos.frames.free");
+    let heap_alloc_total = tracing::register_counter("snitchos.heap.alloc_total");
+    let heap_dealloc_total = tracing::register_counter("snitchos.heap.dealloc_total");
+    let heap_alloc_failed = tracing::register_counter("snitchos.heap.alloc_failed_total");
+    let heap_bytes_used = tracing::register_gauge("snitchos.heap.bytes_used");
 
     // Arm the periodic timer and enable interrupts. From here on, the
     // CPU wakes us via timer IRQ instead of us spinning on the cycle
@@ -184,6 +191,16 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // corresponding `dtb_phys`, post-trampoline (so `__kernel_*`
     // symbol VAs resolve and `va_to_pa` recovers their physical bounds).
     unsafe { frame::init_from_dtb(&dtb, dtb_phys).expect("frame allocator init") };
+
+    // Kernel heap. Pulls a contiguous run of frames from the frame
+    // allocator and hands their linear-map VA to
+    // `linked_list_allocator`. After this, anything in `alloc::`
+    // (`Box`, `Vec`, formatted strings that exceed the stack buffer)
+    // works inside the kernel.
+    //
+    // SAFETY: called exactly once, after frame allocator init, with
+    // the linear map live (installed by `mmu::enable`).
+    unsafe { heap::init() };
 
     // DTB physical region lives in the identity gigapage we're about
     // to tear down. Drop the borrow first to make "no DTB access from
@@ -230,6 +247,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     let _ = frame::alloc_zeroed();
                 }
             }
+            // Heap smoke: allocate, write, drop. Proves the heap is
+            // live and produces movement on the heap metrics so the
+            // dashboards aren't flat zeros. Cheap (256 B), runs every
+            // heartbeat.
+            {
+                let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(256);
+                v.push(count as u8);
+            }
             tracing::emit_metric(heartbeat_count, count);
             tracing::emit_metric(intern_used, tracing::intern_count() as i64);
             tracing::emit_metric(time_ticks, tracing::timestamp() as i64);
@@ -256,6 +281,27 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 tracing::emit_metric(frames_in_use, stats.in_use as i64);
                 tracing::emit_metric(frames_free, stats.free as i64);
             }
+            // Kernel heap telemetry. All atomics — no allocator lock
+            // is held during emission. `bytes_used` is approximate
+            // (sum of `layout.size()`, not the heap's internal
+            // bookkeeping including per-block overhead) but the
+            // shape is what Grafana needs.
+            tracing::emit_metric(
+                heap_alloc_total,
+                heap::ALLOC_COUNT.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                heap_dealloc_total,
+                heap::DEALLOC_COUNT.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                heap_alloc_failed,
+                heap::ALLOC_FAIL_COUNT.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                heap_bytes_used,
+                heap::BYTES_USED.load(Ordering::Relaxed) as i64,
+            );
         }
     }
 }
