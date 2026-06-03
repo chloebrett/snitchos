@@ -200,13 +200,14 @@ impl Exporter {
     }
 }
 
-#[cfg_attr(test, mutants::skip)] // non-deterministic — output cannot be asserted
+#[mutants::skip] // delegates to inherent export; real skip is on that method
 impl SpanExporter for Exporter {
     fn export(&self, span: &CompletedSpan) {
         self.export(span);
     }
 }
 
+#[mutants::skip] // non-deterministic — output cannot be asserted
 fn random_trace_id() -> [u8; 16] {
     let mut id = [0u8; 16];
     for b in id.iter_mut() {

@@ -36,6 +36,45 @@ pub fn frame_allocator_metrics() -> Result<(), String> {
     Ok(())
 }
 
+/// Frame allocator exhausts the pool cleanly and the kernel survives.
+/// The kmain heartbeat leaks 1024 frames per tick (4 MiB), so after
+/// ~32 heartbeats on the default QEMU `virt` config the allocator
+/// runs out. We assert:
+///
+///   1. `snitchos.frames.alloc_failed_total` eventually rises above 0
+///      — the allocator handled OOM by returning `None`, not by
+///      crashing.
+///   2. At least two more heartbeats arrive after the first failure
+///      — the kernel didn't lock up; metrics keep flowing.
+pub fn frame_allocator_oom() -> Result<(), String> {
+    // Build the kernel with the `oom-leak` feature so the heartbeat
+    // smoke leaks 1024 frames/tick instead of doing alloc+free.
+    let mut h = Harness::spawn_with_features("oom", &["oom-leak"])?;
+
+    // (1) Wait up to 45s for the first non-zero alloc_failed_total.
+    // ~32 heartbeats × ~1s each = ~32s; 45s gives slack for slow runs.
+    h.wait_for(SEC * 45, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.frames.alloc_failed_total")
+                && *value > 0
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no alloc_failed_total > 0 within 45s — leak rate too low, allocator broken, or kernel died",
+    )?;
+
+    // (2) Two more heartbeat SpanStarts post-OOM. Proves the kernel
+    // didn't crash trying to alloc after exhaustion.
+    h.wait_for(SEC * 5, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat within 5s after first alloc failure — kernel hung?")?;
+    h.wait_for(SEC * 5, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no second heartbeat after first alloc failure — kernel hung after one more tick?")?;
+
+    Ok(())
+}
+
 /// Explicit assertion that the kernel runs at higher-half PC. After
 /// `mmu::enable` + trampoline, the kernel reads its current PC via
 /// `auipc` and only emits the `kernel.runs_at_higher_half` span if PC

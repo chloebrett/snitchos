@@ -212,13 +212,22 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         {
             span!("kernel.heartbeat");
             count += 1;
-            // Smoke alloc + free per heartbeat. `alloc_zeroed` exercises
-            // the linear map (writes 4 KiB via the linear-map VA), and
-            // the matching `free` keeps `in_use` bounded. The counters
-            // tick up over time so the integration scenario can observe
-            // movement.
-            if let Some(frame) = frame::alloc_zeroed() {
-                frame::free(frame);
+            // Smoke pattern that exercises the allocator each heartbeat.
+            // Default build: alloc+free, keeps `in_use` bounded.
+            // `oom-leak` feature: leak 1024 frames per tick to force
+            // the allocator to run out cleanly (used by the
+            // `frame-allocator-oom` integration scenario).
+            #[cfg(not(feature = "oom-leak"))]
+            {
+                if let Some(frame) = frame::alloc_zeroed() {
+                    frame::free(frame);
+                }
+            }
+            #[cfg(feature = "oom-leak")]
+            {
+                for _ in 0..1024 {
+                    let _ = frame::alloc_zeroed();
+                }
             }
             tracing::emit_metric(heartbeat_count, count);
             tracing::emit_metric(intern_used, tracing::intern_count() as i64);

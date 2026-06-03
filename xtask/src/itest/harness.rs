@@ -44,7 +44,15 @@ impl Harness {
     /// per-test socket, accept the connection, and start the reader
     /// thread.
     pub fn spawn(label: &str) -> Result<Self, String> {
-        build_kernel()?;
+        Self::spawn_with_features(label, &[])
+    }
+
+    /// Like `spawn`, but builds the kernel with the given cargo
+    /// features enabled. Used by scenarios that need a non-default
+    /// kernel variant — currently just `frame-allocator-oom`, which
+    /// opts in to the `oom-leak` feature.
+    pub fn spawn_with_features(label: &str, features: &[&str]) -> Result<Self, String> {
+        build_kernel(features)?;
 
         let socket_path = socket_path_for(label);
         let _ = std::fs::remove_file(&socket_path);
@@ -194,8 +202,8 @@ impl Drop for Harness {
     }
 }
 
-fn build_kernel() -> Result<(), String> {
-    let status = qemu::build_kernel().map_err(|e| format!("build kernel: {e}"))?;
+fn build_kernel(features: &[&str]) -> Result<(), String> {
+    let status = qemu::build_kernel(features).map_err(|e| format!("build kernel: {e}"))?;
     if !status.success() {
         return Err("kernel build failed".to_string());
     }

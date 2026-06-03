@@ -182,6 +182,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn u_perm_occupies_bit_4() {
+        // bit 4 is the U (user-mode) flag per the Sv39 spec.
+        assert_eq!(PtePerms::U.bits(), 1 << 4);
+    }
+
+    #[test]
+    fn union_combines_disjoint_perms() {
+        // | and & give the same result for equal inputs, but differ for
+        // disjoint ones — kill the | → & mutant.
+        let rw = PtePerms::R.union(PtePerms::W);
+        assert_eq!(rw.bits(), PtePerms::R.bits() | PtePerms::W.bits());
+    }
+
+    #[test]
+    fn union_is_idempotent() {
+        // R ^ R = 0, so R.union(R) = R only with |. Kills the | → ^ mutant.
+        assert_eq!(PtePerms::R.union(PtePerms::R).bits(), PtePerms::R.bits());
+    }
+
+    #[test]
     fn leaf_pte_encodes_ppn_and_flags() {
         // PA 0x80200000 → PPN 0x80200 → field bits = 0x80200 << 10 = 0x20080000.
         // Permissions: R+W+X+G = bits 1|2|3|5 = 0b101110 = 0x2E.

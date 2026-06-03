@@ -34,9 +34,13 @@ pub fn base_command(chardev_arg: &str) -> Command {
     cmd
 }
 
-/// Invoke `cargo build -p kernel`. Returns the exit status.
-pub fn build_kernel() -> std::io::Result<std::process::ExitStatus> {
-    Command::new("cargo")
-        .args(["build", "-p", "kernel", "--target", KERNEL_TARGET])
-        .status()
+/// Invoke `cargo build -p kernel` with optional cargo features.
+/// Returns the exit status.
+pub fn build_kernel(features: &[&str]) -> std::io::Result<std::process::ExitStatus> {
+    let mut cmd = Command::new("cargo");
+    cmd.args(["build", "-p", "kernel", "--target", KERNEL_TARGET]);
+    if !features.is_empty() {
+        cmd.arg("--features").arg(features.join(","));
+    }
+    cmd.status()
 }

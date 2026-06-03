@@ -108,7 +108,7 @@ fn stack(cmd: StackCmd) -> ExitCode {
 }
 
 fn build() -> ExitCode {
-    let status = qemu::build_kernel().expect("failed to invoke cargo");
+    let status = qemu::build_kernel(&[]).expect("failed to invoke cargo");
     if status.success() { ExitCode::SUCCESS } else { ExitCode::from(1) }
 }
 
