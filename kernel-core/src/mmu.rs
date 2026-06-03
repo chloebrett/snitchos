@@ -162,6 +162,26 @@ mod tests {
     }
 
     #[test]
+    fn higher_half_va_indexes_different_root_entry_than_identity() {
+        // Pins that, with KERNEL_OFFSET = 0xffffffff_00000000, the
+        // kernel image's higher-half VA (0xffffffff_80200000) lands in
+        // a different root entry than its identity VA (0x80200000).
+        // This means dual-mapping kernel image → identity AND →
+        // higher-half does not alias inside the same root entry, so
+        // the two leaves can coexist via separate mid tables.
+        const KERNEL_OFFSET: usize = 0xffffffff_00000000;
+        let id_va = 0x80200000usize;
+        let high_va = id_va + KERNEL_OFFSET;
+
+        let (id_vpn2, _, _, _) = split_va(id_va);
+        let (high_vpn2, _, _, _) = split_va(high_va);
+
+        assert_eq!(id_vpn2, 2, "identity kernel should index root[2]");
+        assert_eq!(high_vpn2, 510, "higher-half kernel should index root[510]");
+        assert_ne!(id_vpn2, high_vpn2);
+    }
+
+    #[test]
     fn split_va_extracts_indices() {
         // 0x80200000 = 0b 10_0000_0001 0_0000_0000 0_0000_0000 0000_0000_0000
         //   bits 38..30 = 0b 0000_0000_10 = 2

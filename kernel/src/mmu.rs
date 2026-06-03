@@ -19,6 +19,18 @@ const PAGE_2MIB: usize = 2 * 1024 * 1024;
 /// Sv39 mode field value for the `satp` register.
 const SATP_MODE_SV39: u64 = 8;
 
+/// VA = PA + KERNEL_OFFSET for kernel-space mappings. Matches Linux
+/// RISC-V's `PAGE_OFFSET - PHYS_BASE` with PHYS_BASE = 0x80000000.
+/// The kernel image at PA 0x80200000 maps to higher-half VA
+/// 0xffffffff_80200000.
+///
+/// **v0.4 step 2a state.** The higher-half mapping built below is
+/// unused — the linker still places the kernel at identity VAs and
+/// the kernel runs at those addresses. The higher-half entries exist
+/// only to prove the table-building code works and to set up for
+/// step 2c (linker change + early satp + move kernel to higher-half).
+pub const KERNEL_OFFSET: usize = 0xffffffff_00000000;
+
 unsafe extern "C" {
     /// Start of the kernel image (linker symbol, see linker.ld).
     static __kernel_start: u8;
@@ -38,6 +50,11 @@ unsafe extern "C" {
 static mut BOOT_PT_ROOT: PageTable = PageTable::new();
 static mut BOOT_PT_MID_KERNEL: PageTable = PageTable::new();
 static mut BOOT_PT_MID_MMIO: PageTable = PageTable::new();
+/// Higher-half mid table for the gigapage containing the kernel image
+/// at `KERNEL_OFFSET + 0x80200000` (= root index 510). Populated in
+/// step 2a; unused until a future step relinks the kernel at
+/// higher-half.
+static mut BOOT_PT_MID_HIGHER_KERNEL: PageTable = PageTable::new();
 
 /// Build the boot identity-mapping table from the kernel image bounds
 /// (linker symbols) plus MMIO regions discovered in the DTB, then
@@ -65,16 +82,28 @@ pub unsafe fn enable(dtb: &Fdt) {
     // satp is written.
     unsafe {
         // Kernel image: round both ends to 2 MiB so we cover the
-        // whole image plus a bit of slop.
+        // whole image plus a bit of slop. Dual-mapped: identity (the
+        // kernel runs there) AND higher-half (unused in step 2a;
+        // proving the table-building code works).
         let mid_kernel_pa = (&raw const BOOT_PT_MID_KERNEL) as usize;
+        let mid_higher_kernel_pa = (&raw const BOOT_PT_MID_HIGHER_KERNEL) as usize;
         let kstart_aligned = kernel_start & !(PAGE_2MIB - 1);
         let kend_aligned = (kernel_end + PAGE_2MIB - 1) & !(PAGE_2MIB - 1);
         let mut addr = kstart_aligned;
         while addr < kend_aligned {
+            // Identity.
             (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
                 &mut *(&raw mut BOOT_PT_MID_KERNEL),
                 mid_kernel_pa,
                 addr,
+                addr,
+                perms,
+            );
+            // Higher-half.
+            (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
+                &mut *(&raw mut BOOT_PT_MID_HIGHER_KERNEL),
+                mid_higher_kernel_pa,
+                addr + KERNEL_OFFSET,
                 addr,
                 perms,
             );
