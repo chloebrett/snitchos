@@ -80,6 +80,12 @@ impl PageTable {
         self.entries[idx]
     }
 
+    /// Set entry `idx` to `value` raw. Used by the kernel to clear an
+    /// identity-half root entry as part of step 2d (identity unmap).
+    pub fn set_entry(&mut self, idx: usize, value: u64) {
+        self.entries[idx] = value;
+    }
+
     /// Install a 2 MiB identity-ish leaf in this root table at
     /// VA `va`, pointing at PA `pa`, with `perms`. `mid` is the
     /// level-1 page table to use for `va`'s gigapage range; if the
@@ -159,6 +165,19 @@ mod tests {
         assert_eq!(pte & PTE_D, 0);
         // PPN = 0x80300 → at bits 53:10 = 0x80300 << 10 = 0x200C0000.
         assert_eq!(pte & !0x3ff, 0x200C0000);
+    }
+
+    #[test]
+    fn set_entry_clears_and_replaces_specific_index() {
+        let mut pt = PageTable::new();
+        pt.set_entry(2, 0xdeadbeef);
+        pt.set_entry(5, 0xcafebabe);
+        assert_eq!(pt.entry(2), 0xdeadbeef);
+        assert_eq!(pt.entry(5), 0xcafebabe);
+        // Clear entry 2; entry 5 untouched.
+        pt.set_entry(2, 0);
+        assert_eq!(pt.entry(2), 0);
+        assert_eq!(pt.entry(5), 0xcafebabe);
     }
 
     #[test]

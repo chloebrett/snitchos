@@ -247,3 +247,36 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
     }
 }
 
+/// Tear down the identity mapping for the kernel-image gigapage
+/// (`[0x80000000, 0xC0000000)` = root entry 2). After this returns,
+/// any access to an identity-VA kernel-image address (`0x80200000+`)
+/// faults — the kernel must use higher-half VAs exclusively for its
+/// code and statics.
+///
+/// **Keeps identity MMIO mapped** (root entry 0). `CONSOLE` and `UART`
+/// statics still hold physical MMIO bases; the panic handler and the
+/// `_pre_init_uart()` fallback still poke physical UART. Removing
+/// identity-MMIO is a future checkpoint that requires patching those
+/// + adding higher-half MMIO mappings.
+///
+/// # Safety
+///
+/// - MMU must be on with the dual-map installed by `enable`.
+/// - Kernel must currently be running at higher-half PC + sp
+///   (trampoline already executed). Calling this while at identity
+///   PC would yank the rug out from under the running instruction
+///   stream.
+/// - DTB region (which lived in the identity kernel gigapage) becomes
+///   unreachable after this. Caller must not read through `&Fdt`
+///   afterwards.
+pub unsafe fn unmap_identity_kernel() {
+    unsafe {
+        let root = &mut *(&raw mut BOOT_PT_ROOT);
+        // Root entry 2 covers identity [0x80000000, 0xC0000000) — the
+        // kernel image, stack, DTB, and any other identity-half data
+        // in that gigapage.
+        root.set_entry(2, 0);
+        asm!("sfence.vma", options(nostack, nomem));
+    }
+}
+

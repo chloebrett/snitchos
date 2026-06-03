@@ -150,6 +150,23 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // handler is ready.
     unsafe { trap::init_timer(timebase_hz) };
 
+    // Step 2d checkpoint 3: tear down the identity mapping for the
+    // kernel-image gigapage. From here on, any access to a kernel-
+    // image identity VA (0x80200000+) faults. The kernel image, its
+    // stack, and the DTB region all stop being reachable via
+    // identity addresses — only higher-half VAs work.
+    //
+    // Identity MMIO (root entry 0) stays mapped: `CONSOLE` and
+    // `UART` statics still hold physical addresses, and the panic
+    // handler's UART poke is hardcoded physical. Removing identity
+    // MMIO is a future checkpoint.
+    //
+    // SAFETY: kernel is running at higher-half PC + sp (trampoline
+    // executed above). DTB is no longer accessed — the only thing
+    // after this is the heartbeat loop, which touches statics +
+    // MMIO only.
+    unsafe { mmu::unmap_identity_kernel() };
+
     // Heartbeat loop: wfi until the timer IRQ flips TICK_PENDING,
     // then emit a span + the metric set.
     let mut count: i64 = 0;
