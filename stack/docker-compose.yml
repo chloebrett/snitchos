@@ -2,6 +2,7 @@
 #
 # - Tempo:      OTLP/HTTP receiver + trace storage.
 # - Prometheus: scrapes the collector's /metrics endpoint.
+# - Loki:       log aggregation (collector pushes one line per span).
 # - Grafana:    dashboards (anonymous admin access for local dev).
 #
 # Bring up with `cargo xtask stack up`. The collector running on the
@@ -37,6 +38,14 @@ services:
       # (macOS docker desktop sets this automatically).
       - "host.docker.internal:host-gateway"
 
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: snitchos-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"   # HTTP API — collector POSTs spans here.
+    restart: unless-stopped
+
   grafana:
     image: grafana/grafana:latest
     container_name: snitchos-grafana
@@ -53,9 +62,11 @@ services:
     depends_on:
       - tempo
       - prometheus
+      - loki
     restart: unless-stopped
 
 volumes:
   tempo-data:
   prometheus-data:
   grafana-data:
+  loki-data:

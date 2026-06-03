@@ -3,9 +3,8 @@ use std::process::{Command, ExitCode};
 use clap::{Parser, Subcommand};
 
 mod itest;
+mod qemu;
 
-const KERNEL_TARGET: &str = "riscv64gc-unknown-none-elf";
-const KERNEL_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/kernel";
 const COLLECTOR_BIN: &str = "target/debug/collector";
 const TELEMETRY_SOCKET: &str = "/tmp/snitch-telemetry.sock";
 
@@ -78,6 +77,7 @@ fn main() -> ExitCode {
             let mut all = vec![
                 "--text".to_string(),
                 "--no-otlp".to_string(),
+                "--no-loki".to_string(),
                 "--no-prometheus".to_string(),
             ];
             all.extend(args);
@@ -108,15 +108,8 @@ fn stack(cmd: StackCmd) -> ExitCode {
 }
 
 fn build() -> ExitCode {
-    let status = Command::new("cargo")
-        .args(["build", "-p", "kernel", "--target", KERNEL_TARGET])
-        .status()
-        .expect("failed to invoke cargo");
-    if status.success() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    }
+    let status = qemu::build_kernel().expect("failed to invoke cargo");
+    if status.success() { ExitCode::SUCCESS } else { ExitCode::from(1) }
 }
 
 fn up() -> ExitCode {
@@ -133,25 +126,7 @@ fn up() -> ExitCode {
     let chardev_arg =
         format!("socket,path={TELEMETRY_SOCKET},server=on,wait=on,id=telemetry");
 
-    let status = Command::new("qemu-system-riscv64")
-        .args([
-            "-machine", "virt",
-            "-cpu", "rv64",
-            "-smp", "1",
-            "-m", "128M",
-            "-nographic",
-            "-bios", "default",
-            "-kernel", KERNEL_BIN,
-            // Force modern virtio-mmio (version 2). Without this, QEMU
-            // exposes the legacy (version 1) layout for backward compat,
-            // which has a different register set we don't implement.
-            "-global", "virtio-mmio.force-legacy=false",
-            // Telemetry channel: a virtio-console wired to a Unix domain
-            // socket on the host. The collector connects to this socket.
-            "-chardev", &chardev_arg,
-            "-device", "virtio-serial-device",
-            "-device", "virtconsole,chardev=telemetry",
-        ])
+    let status = qemu::base_command(&chardev_arg)
         .status()
         .expect("failed to invoke qemu-system-riscv64");
     if status.success() {

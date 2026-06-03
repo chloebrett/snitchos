@@ -12,6 +12,7 @@ use clap::Parser;
 use protocol::Frame;
 use protocol::stream::decode_stream;
 
+mod loki;
 mod otlp;
 mod prom;
 mod state;
@@ -51,6 +52,15 @@ struct Args {
     #[arg(long)]
     no_otlp: bool,
 
+    /// Loki HTTP endpoint for log push. Default matches the
+    /// docker-compose Loki instance.
+    #[arg(long, default_value = "http://localhost:3100")]
+    loki: String,
+
+    /// Disable Loki log push.
+    #[arg(long)]
+    no_loki: bool,
+
     /// TCP port to serve Prometheus `/metrics` on. Default matches
     /// the docker-compose Prometheus scrape config.
     #[arg(long, default_value_t = 9091)]
@@ -69,6 +79,9 @@ fn main() -> std::io::Result<()> {
     if !args.no_otlp {
         exporters.push(Box::new(otlp::Exporter::new(&args.otlp)));
     }
+    if !args.no_loki {
+        exporters.push(Box::new(loki::Exporter::new(&args.loki)));
+    }
     let state = Arc::new(Mutex::new(state::State::new(state::SystemWallClock)));
 
     if !args.no_prometheus {
@@ -79,6 +92,9 @@ fn main() -> std::io::Result<()> {
     if !args.no_otlp {
         eprintln!("collector: exporting OTLP traces to {}", &args.otlp);
         eprintln!("collector: view traces at http://localhost:3000 (Grafana → Explore → Tempo)");
+    }
+    if !args.no_loki {
+        eprintln!("collector: pushing logs to {}", &args.loki);
     }
     if !args.no_prometheus {
         eprintln!("collector: serving Prometheus /metrics on :{}", args.prometheus);

@@ -7,18 +7,18 @@
 //! `Drop` always kills QEMU and removes the socket, so a panicking
 //! test still cleans up.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use protocol::stream::{OwnedFrame, decode_stream};
-use protocol::{StringId};
+use protocol::StringId;
 
-const KERNEL_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/kernel";
+use crate::qemu;
 
 /// Maps `StringId` → name as we observe `StringRegister` frames. Matchers
 /// read this so they can say "is this span 'kernel.boot'?" without
@@ -33,6 +33,10 @@ pub struct Harness {
     strings: StringTable,
     socket_path: PathBuf,
     timebase_hz: Option<u64>,
+    /// Rolling window of the last few frames received. Printed on
+    /// timeout so failures say "boot reached Hello + SpanStart, then
+    /// nothing" rather than just "no heartbeat within 10s".
+    recent: VecDeque<OwnedFrame>,
 }
 
 impl Harness {
@@ -53,20 +57,7 @@ impl Harness {
             socket_path.display(),
         );
 
-        let qemu = Command::new("qemu-system-riscv64")
-            .args([
-                "-machine", "virt",
-                "-cpu", "rv64",
-                "-smp", "1",
-                "-m", "128M",
-                "-nographic",
-                "-bios", "default",
-                "-kernel", KERNEL_BIN,
-                "-global", "virtio-mmio.force-legacy=false",
-                "-chardev", &chardev,
-                "-device", "virtio-serial-device",
-                "-device", "virtconsole,chardev=telemetry",
-            ])
+        let qemu = qemu::base_command(&chardev)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .stdin(Stdio::null())
@@ -90,6 +81,7 @@ impl Harness {
             strings: HashMap::new(),
             socket_path,
             timebase_hz: None,
+            recent: VecDeque::new(),
         })
     }
 
@@ -112,8 +104,14 @@ impl Harness {
                         return Some(frame);
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => return None,
-                Err(RecvTimeoutError::Disconnected) => return None,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.dump_recent("timeout");
+                    return None;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.dump_recent("QEMU disconnected");
+                    return None;
+                }
             }
         }
     }
@@ -141,6 +139,50 @@ impl Harness {
             }
             _ => {}
         }
+        if self.recent.len() >= 8 {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(frame.clone());
+    }
+
+    fn dump_recent(&self, reason: &str) {
+        if self.recent.is_empty() {
+            eprintln!("  [{reason}: no frames arrived]");
+            return;
+        }
+        eprintln!("  [{reason}: last {} frame(s) seen]", self.recent.len());
+        for frame in &self.recent {
+            eprintln!("    {}", self.describe(frame));
+        }
+    }
+
+    fn describe(&self, frame: &OwnedFrame) -> String {
+        match frame {
+            OwnedFrame::Hello { timebase_hz, protocol_version } =>
+                format!("Hello {{ timebase_hz={timebase_hz}, protocol_version={protocol_version} }}"),
+            OwnedFrame::StringRegister { id, value } =>
+                format!("StringRegister {{ {id:?} = {value:?} }}"),
+            OwnedFrame::MetricRegister { name_id, kind } => {
+                let name = self.strings.get(name_id).map(String::as_str).unwrap_or("?");
+                format!("MetricRegister {{ {name:?} kind={kind:?} }}")
+            }
+            OwnedFrame::SpanStart { id, parent, name_id, t } => {
+                let name = self.strings.get(name_id).map(String::as_str).unwrap_or("?");
+                format!("SpanStart {{ {name:?} id={id:?} parent={parent:?} t={t} }}")
+            }
+            OwnedFrame::SpanEnd { id, t } =>
+                format!("SpanEnd {{ id={id:?} t={t} }}"),
+            OwnedFrame::Event { span_id, name_id, t } => {
+                let name = self.strings.get(name_id).map(String::as_str).unwrap_or("?");
+                format!("Event {{ {name:?} span={span_id:?} t={t} }}")
+            }
+            OwnedFrame::Metric { name_id, value, t } => {
+                let name = self.strings.get(name_id).map(String::as_str).unwrap_or("?");
+                format!("Metric {{ {name:?} value={value} t={t} }}")
+            }
+            OwnedFrame::Dropped { count } =>
+                format!("Dropped {{ count={count} }}"),
+        }
     }
 }
 
@@ -153,10 +195,7 @@ impl Drop for Harness {
 }
 
 fn build_kernel() -> Result<(), String> {
-    let status = Command::new("cargo")
-        .args(["build", "-p", "kernel", "--target", "riscv64gc-unknown-none-elf"])
-        .status()
-        .map_err(|e| format!("build kernel: {e}"))?;
+    let status = qemu::build_kernel().map_err(|e| format!("build kernel: {e}"))?;
     if !status.success() {
         return Err("kernel build failed".to_string());
     }
