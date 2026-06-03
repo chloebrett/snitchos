@@ -27,11 +27,17 @@ global_asm!(include_str!("entry.S"));
 ///
 /// MMU is off, interrupts are off. We have a valid stack and a zeroed .bss.
 ///
+/// Boot order is load-bearing — see comments inline. In particular,
+/// `mmu::enable` must run before any code that touches an absolute
+/// symbol VA (formatted `println!`, `set_trap_vector`), and
+/// `va_to_pa` translation at every device-DMA site (in
+/// `virtio_console`) must already be in place before the trampoline
+/// moves PC to higher-half.
+///
 /// Known weaknesses:
-/// - All DTB lookups `.unwrap()`. If the DTB is malformed or missing the
-///   expected nodes, we panic during the first println-able operation.
-/// - We never return from this, but we don't bring up interrupts or any
-///   periodic work — the kernel just `wfi`s indefinitely once init prints out.
+/// - DTB lookups `.unwrap()` / `.expect()`. A malformed DTB panics
+///   immediately; the panic handler may not produce output before
+///   `console::init` runs.
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // DTB parse must come first — we need it to discover MMIO regions
@@ -61,17 +67,17 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // (identity + higher-half); MMIO regions identity-mapped.
     unsafe { mmu::enable(&mmio_regions, dtb_phys) };
 
-    // Step 2d-1 trampoline: jump PC from identity to higher-half, fix
-    // up sp the same way. The dual-map keeps identity addresses valid
-    // (so we can still return through callers' identity-VA `ra`s
-    // already on the stack), but new function calls from here on use
-    // PC-relative addressing that lands on higher-half. `&static`
-    // values now produce higher-half VAs; any address we hand to a
-    // device must go through `mmu::va_to_pa` (checkpoint 1 did this).
+    // Trampoline to higher-half: jump PC and shift sp by KERNEL_OFFSET.
+    // The dual-map keeps identity addresses valid for `ra` values
+    // already on the stack, but new function calls use PC-relative
+    // addressing that now lands on higher-half. `&static as usize`
+    // values produce higher-half VAs from here on; any address we
+    // hand to a device must go through `mmu::va_to_pa` — see uses in
+    // `virtio_console`.
     //
-    // Inline (not a function) because `ret` from a trampoline fn would
-    // jump back to caller's identity-VA `ra` — the whole point is to
-    // leave identity-PC space.
+    // Inline (not a function) because `ret` from a trampoline fn
+    // would jump back to the caller's identity-VA `ra`, defeating
+    // the purpose.
     //
     // SAFETY: dual-map is live (`mmu::enable` above); sp's old and
     // new VAs alias the same physical stack page.
@@ -91,11 +97,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let timebase_hz = dtb::timebase_hz(&dtb)
         .expect("DTB missing /cpus/timebase-frequency — can't run without a clock") as u64;
 
-    // Trap vector second. `trap_entry`'s address is now a higher-half
-    // VA (linker change); writing it to stvec only makes sense with the
-    // higher-half mapping live. Window between OpenSBI handoff and
-    // here has no installed handler — we don't expect traps during
-    // DTB parse / mmu::enable, same as the previous boot order.
+    // Install the trap vector. `trap_entry`'s symbol value is a
+    // higher-half VA, so `stvec` only points somewhere meaningful with
+    // the MMU on. The window between OpenSBI handoff and here has no
+    // installed handler — we don't expect traps during DTB parse,
+    // `mmu::enable`, or the trampoline.
     //
     // SAFETY: MMU on, higher-half mapped, trap path resolvable.
     unsafe { trap::set_trap_vector() };
@@ -150,16 +156,17 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // handler is ready.
     unsafe { trap::init_timer(timebase_hz) };
 
-    // Step 2d checkpoint 3: tear down the identity mapping for the
-    // kernel-image gigapage. From here on, any access to a kernel-
-    // image identity VA (0x80200000+) faults. The kernel image, its
-    // stack, and the DTB region all stop being reachable via
-    // identity addresses — only higher-half VAs work.
+    // Tear down the identity mapping for the kernel-image gigapage.
+    // From here on, any access to a kernel-image identity VA
+    // (`0x80200000+`) faults. The kernel image, its stack, and the
+    // DTB region all stop being reachable via identity — only
+    // higher-half VAs work.
     //
-    // Identity MMIO (root entry 0) stays mapped: `CONSOLE` and
-    // `UART` statics still hold physical addresses, and the panic
-    // handler's UART poke is hardcoded physical. Removing identity
-    // MMIO is a future checkpoint.
+    // Identity MMIO (root entry 0) stays mapped: `CONSOLE` and `UART`
+    // statics still hold physical addresses, and the panic handler's
+    // UART poke is hardcoded physical. Removing identity MMIO is a
+    // future cleanup that needs higher-half MMIO mappings + patched
+    // statics first.
     //
     // SAFETY: kernel is running at higher-half PC + sp (trampoline
     // executed above). DTB is no longer accessed — the only thing

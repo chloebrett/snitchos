@@ -88,12 +88,6 @@ pub fn collect_mmio_regions(dtb: &Fdt) -> MmioRegions {
 /// RISC-V's `PAGE_OFFSET - PHYS_BASE` with PHYS_BASE = 0x80000000.
 /// The kernel image at PA 0x80200000 maps to higher-half VA
 /// 0xffffffff_80200000.
-///
-/// **v0.4 step 2a state.** The higher-half mapping built below is
-/// unused — the linker still places the kernel at identity VAs and
-/// the kernel runs at those addresses. The higher-half entries exist
-/// only to prove the table-building code works and to set up for
-/// step 2c (linker change + early satp + move kernel to higher-half).
 pub const KERNEL_OFFSET: usize = 0xffffffff_00000000;
 
 /// Convert a kernel virtual address to its physical address. Strips
@@ -124,37 +118,46 @@ unsafe extern "C" {
     static __kernel_end: u8;
 }
 
-/// The boot identity-mapping page table. One root + two mid-level
-/// tables — one for the gigapage containing MMIO at 0x10000000, one
-/// for the gigapage containing the kernel image around 0x80200000.
+/// The boot page table. One root plus three mid-level tables:
+/// - `BOOT_PT_MID_MMIO` for the identity gigapage covering MMIO
+///   (around `0x10000000`).
+/// - `BOOT_PT_MID_KERNEL` for the identity gigapage covering the
+///   kernel image and DTB (around `0x80200000`).
+/// - `BOOT_PT_MID_HIGHER_KERNEL` for the higher-half gigapage covering
+///   the kernel image at `KERNEL_OFFSET + 0x80200000`.
 ///
-/// `static mut` so that `enable()` can populate them once at boot and
-/// the satp PPN field can name their physical addresses. After the
-/// satp write they're immutable in practice — a future "boot-only
-/// memory reclaimed" pass will move these into a discardable linker
-/// section.
+/// `static mut` so that `enable` can populate them once at boot and
+/// the satp PPN field can name their physical addresses. After
+/// `enable` writes satp they're functionally immutable — a future
+/// "boot-only memory reclaimed" pass will move these into a
+/// discardable linker section.
 static mut BOOT_PT_ROOT: PageTable = PageTable::new();
 static mut BOOT_PT_MID_KERNEL: PageTable = PageTable::new();
 static mut BOOT_PT_MID_MMIO: PageTable = PageTable::new();
-/// Higher-half mid table for the gigapage containing the kernel image
-/// at `KERNEL_OFFSET + 0x80200000` (= root index 510). Populated in
-/// step 2a; unused until a future step relinks the kernel at
-/// higher-half.
 static mut BOOT_PT_MID_HIGHER_KERNEL: PageTable = PageTable::new();
 
-/// Build the boot identity-mapping table from the kernel image bounds
-/// (linker symbols) plus MMIO regions discovered in the DTB, then
-/// write satp + sfence.vma. Kernel keeps running at the same virtual
-/// addresses (identity).
+/// Build the boot page table and turn the MMU on. Installs:
+/// - Identity + higher-half mappings for the kernel image (covers
+///   `.text`, `.rodata`, `.data`, `.bss`, stack).
+/// - Identity mappings for `mmio_regions` (UART + virtio-mmio slots).
+/// - Identity mapping for the 2 MiB page containing `dtb_phys` so
+///   `&Fdt`-based DTB access still works after this returns.
+/// Writes `satp` with Sv39 mode and the root PPN, then `sfence.vma`.
+///
+/// After this returns the kernel runs with paging on but still at
+/// identity PC. The trampoline in `kmain` is what moves PC/sp to
+/// higher-half; this function just builds the world the trampoline
+/// needs.
 ///
 /// # Safety
 ///
 /// - Must be called exactly once.
 /// - MMU must be off at entry (mode = Bare in `satp`).
-/// - Every code address, stack address, and data pointer in use at
-///   the call site must be inside one of the regions we identity-map
-///   (kernel image + MMIO). The position-1 boot order (call just
-///   before the heartbeat loop) satisfies this — see plan.
+/// - Must be called before any code that loads an absolute symbol VA
+///   into a register (formatted `println!`, `dyn` dispatch via
+///   absolute fn pointers, `trap_entry as *const () as usize`). With
+///   higher-half link, those values only resolve once the higher-half
+///   mapping is live.
 pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
     // SAFETY: linker symbols are addresses, not values. Take pointers,
     // never deref.
@@ -168,9 +171,10 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
     // satp is written.
     unsafe {
         // Kernel image: round both ends to 2 MiB so we cover the
-        // whole image plus a bit of slop. Dual-mapped: identity (the
-        // kernel runs there) AND higher-half (unused in step 2a;
-        // proving the table-building code works).
+        // whole image plus a bit of slop. Dual-mapped: identity (where
+        // the kernel runs at boot) and higher-half (where it runs
+        // after the trampoline). Identity gets unmapped later, in
+        // `unmap_identity_kernel`.
         let mid_kernel_pa = (&raw const BOOT_PT_MID_KERNEL) as usize;
         let mid_higher_kernel_pa = (&raw const BOOT_PT_MID_HIGHER_KERNEL) as usize;
         let kstart_aligned = kernel_start & !(PAGE_2MIB - 1);
@@ -197,8 +201,9 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
         }
 
         // MMIO: identity-map each pre-collected 2 MiB-aligned base.
-        // Pre-collection happens in `collect_mmio_regions` from the
-        // DTB; we don't borrow `&Fdt` here.
+        // Caller builds `mmio_regions` (currently hardcoded in `kmain`
+        // for QEMU `virt`; `collect_mmio_regions` would do it from the
+        // DTB but is parked — see findings).
         let mid_mmio_pa = (&raw const BOOT_PT_MID_MMIO) as usize;
         for &base in mmio_regions.as_slice() {
             (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
