@@ -162,11 +162,16 @@ SnitchOS is a RISC-V microkernel whose first-class concern is observability. Boo
 ```
 kernel/       no_std, no_main, riscv64gc-unknown-none-elf only.
               Asm boot stub, trap handler, virtio-console driver,
-              ns16550a UART, panic handler. Statics live here.
+              ns16550a UART, panic handler, the `mmu::enable` /
+              trampoline / `unmap_identity` flow, and the static
+              `frame::FRAME_BITS` storage + `Mutex<Allocator>` wrapper.
+              Statics live here.
 kernel-core/  no_std, host-buildable. Pure data + bookkeeping with
               no asm / MMIO / CSRs: intern table, span registry,
-              pre-init buffer, scause decoding, Clock trait,
-              FrameSink trait. All host-tested via `cargo test`.
+              pre-init buffer, scause decoding, Clock + FrameSink
+              traits, Sv39 page-table primitives + `KERNEL_OFFSET` /
+              `LINEAR_OFFSET` / `va_to_pa` / `pa_to_kernel_va`, and
+              the `frame::Bitmap`. All host-tested via `cargo test`.
 protocol/     no_std by default. The `Frame` enum + postcard
               encoding. `features = ["std"]` opts in to
               `protocol::stream` (decoder + `OwnedFrame`).
@@ -209,8 +214,11 @@ The kernel binary itself has no `#[test]`s — it's `no_std`/`no_main` and won't
 - **`boot-reaches-heartbeat`** — Hello → `kernel.boot` SpanStart → `Dropped(0)` after pre-init flush → first `kernel.heartbeat` SpanStart.
 - **`heartbeat-cadence`** — two consecutive heartbeats with monotonic timestamps.
 - **`pre-init-order`** — first `StringRegister` is `kernel.boot`, every subsequent SpanStart resolves through an earlier StringRegister.
+- **`kernel-runs-at-higher-half`** — kernel's own `auipc`-read PC is ≥ `KERNEL_OFFSET` post-trampoline.
+- **`frame-allocator-metrics`** — `snitchos.frames.allocated_total` ≥ 1 within 10 s.
+- **`frame-allocator-oom`** — built with `--features oom-leak`; asserts `alloc_failed_total > 0` within 15 s and the kernel keeps heartbeating after.
 
-Add a scenario: implement a `Result<(), String>` function in `scenarios.rs`, register it in `xtask/src/itest.rs::SCENARIOS`, run `cargo xtask test <name>`. The harness handles QEMU lifecycle and socket cleanup.
+Add a scenario: implement a `Result<(), String>` function in `scenarios.rs`, register it in `xtask/src/itest.rs::SCENARIOS`, run `cargo xtask test <name>`. The harness handles QEMU lifecycle and socket cleanup. Use `Harness::spawn_with_features(label, &["feature"])` if the scenario needs a non-default kernel variant (currently only `oom-leak` does).
 
 Skips cleanly (exit 0) if `qemu-system-riscv64` isn't on `PATH`.
 
@@ -227,11 +235,30 @@ Skips cleanly (exit 0) if `qemu-system-riscv64` isn't on `PATH`.
 - **NS16550A UART** (`println!`) — human-readable boot log, no protocol, no decoder. Use for ad-hoc debugging.
 - **virtio-console** (telemetry frames) — structured `Frame`s, decoded by `collector` and the integration tests. Use for anything we want to observe or assert on.
 
+### Memory layout, post v0.4 step 3
+
+The kernel image is linked at higher-half VAs (`0xffffffff80200000+`) and runs at higher-half PC after the trampoline in `kmain`. Identity mappings are torn down by `mmu::unmap_identity` later in boot. There are three logical address spaces in play, and which one to use depends on the consumer:
+
+- **Higher-half kernel VAs** (`KERNEL_OFFSET + pa`) — for kernel image, statics, stack. PC-relative addressing (under `code-model=medium`) resolves here naturally for `&static`.
+- **Linear-map VAs** (`LINEAR_OFFSET + pa`, via `pa_to_kernel_va`) — for any allocated frame the kernel wants to dereference. One 1 GiB Sv39 huge-page leaf in `BOOT_PT_ROOT[322]` covers all of physical RAM up to 1 GiB.
+- **Physical addresses** — for anything handed to a device (virtio DMA buffer pointers, queue ring addresses written to `REG_QUEUE_DESC_LOW/HIGH`). Devices have no MMU.
+
+Gotchas worth re-reading `plans/v0.4-memory-findings.md` before disturbing:
+
+- Anything that passes a kernel address to a device must go through `mmu::va_to_pa`. There are four such sites in `virtio_console.rs`; grep before adding a fifth.
+- Anything that needs the *physical* address of a kernel symbol (e.g., reserving the kernel image in the frame allocator's bitmap) must do `va_to_pa((&raw const __sym) as usize)` because post-trampoline that operand is a higher-half VA.
+- `fmt::Arguments` (every formatted `println!`) embeds absolute fn-pointer values to type-specific formatters. Those resolve only after the higher-half mapping is live, so **no formatted `println!` before `mmu::enable`**.
+- Anything that walks the DTB pre-MMU under higher-half link crashes silently in a way we never isolated. MMIO regions in `kmain` are hardcoded for QEMU `virt`; the DTB-driven `collect_mmio_regions` exists but is parked behind `#[expect(dead_code)]`.
+- The frame allocator's `Bitmap::frames_free` is the maintained source of truth for the free count. Don't compute `count_free` by popcount-scanning the bits — it's O(words) and the OOM workload showed it stalls heartbeats. The maintained counter is also what makes `alloc` O(1) when the pool is empty.
+
 ### Architecture references
 
 - [docs/observability-design.md](../docs/observability-design.md) — wire format, span semantics.
 - [docs/trap-and-interrupt-model.md](../docs/trap-and-interrupt-model.md) — RISC-V trap handling.
 - [docs/roadmap-and-milestones.md](../docs/roadmap-and-milestones.md) — current milestone, what's done, what's next.
+- [plans/v0.4-memory-concepts.md](../plans/v0.4-memory-concepts.md) — Sv39, higher-half, frame allocator concepts.
+- [plans/v0.4-memory-step-3-frame-allocator-concepts.md](../plans/v0.4-memory-step-3-frame-allocator-concepts.md) — the linear-map design call.
+- [plans/v0.4-memory-findings.md](../plans/v0.4-memory-findings.md) — what we learned building higher-half + frame allocator; read **before** touching the boot order or any address-translation site.
 - [plans/scaling-corners.md](../plans/scaling-corners.md) — known corners that v0.1 sidesteps (SMP, lock-during-IRQ, etc.).
 
 ## Summary
