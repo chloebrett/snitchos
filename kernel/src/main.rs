@@ -45,13 +45,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // output, no fn-pointer-dispatched calls. Safe with MMU off
     // regardless of where the kernel is linked.
     let dtb = unsafe { Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
-    // MMIO regions: hardcoded to [0x10000000, 0x10200000) — the 2 MiB
-    // region containing the NS16550A UART and the virtio-mmio slots on
-    // QEMU `virt`. DTB-driven discovery (`collect_mmio_regions`)
-    // crashes pre-MMU under higher-half link in a way we haven't
-    // isolated; see plans/v0.4-memory-findings.md.
+    // MMIO regions: hardcoded for QEMU `virt`. DTB-driven discovery
+    // (`collect_mmio_regions`) crashes pre-MMU under higher-half link
+    // in a way we haven't isolated; see plans/v0.4-memory-findings.md.
     let mut mmio_regions = mmu::MmioRegions::new();
-    mmio_regions.insert(0x10000000);
+    mmio_regions.insert(mmu::QEMU_VIRT_MMIO_BASE);
 
     // Turn paging on EARLY — before any code that loads an absolute
     // function-pointer value to a higher-half VA (formatted println!

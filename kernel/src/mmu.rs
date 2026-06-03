@@ -18,6 +18,12 @@ pub use kernel_core::mmu::{KERNEL_OFFSET, va_to_pa};
 /// 2 MiB — the page size for every leaf in our boot table.
 const PAGE_2MIB: usize = 2 * 1024 * 1024;
 
+/// 2 MiB-aligned base of the MMIO region on QEMU `virt`. Covers the
+/// NS16550A UART at `0x10000000` plus the eight virtio-mmio slots at
+/// `0x10001000+`. Hardcoded here while DTB-driven discovery is
+/// parked (see `collect_mmio_regions`).
+pub const QEMU_VIRT_MMIO_BASE: usize = 0x10000000;
+
 /// Sv39 mode field value for the `satp` register.
 const SATP_MODE_SV39: u64 = 8;
 
