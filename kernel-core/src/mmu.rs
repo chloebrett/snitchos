@@ -10,6 +10,28 @@
 /// `0xffffffff_80200000`.
 pub const KERNEL_OFFSET: usize = 0xffffffff_00000000;
 
+/// Base offset for the kernel's linear map of physical memory.
+/// PA `p` is reachable at VA `p + LINEAR_OFFSET` for the range covered
+/// by `mmu::enable`'s linear-map leaf (currently a single 1 GiB Sv39
+/// huge page covering RAM at PA `0x80000000`).
+///
+/// Picked to satisfy Sv39's canonical-high rule (bits 63:39 must equal
+/// bit 38) for all in-range physical addresses, and to land in a root
+/// PTE index distinct from the kernel-image and MMIO higher-half
+/// mappings.
+pub const LINEAR_OFFSET: usize = 0xffffffd0_00000000;
+
+/// Convert a physical address to the kernel's linear-map VA. Inverse
+/// of `va_to_pa` for the linear-map range (not for kernel-image VAs
+/// in the higher-half mapping at `KERNEL_OFFSET`).
+///
+/// Used by the frame allocator and its callers: anything that needs
+/// to dereference the contents of an allocated frame (zero it, write
+/// a fresh page table into it, etc.) does so at `pa_to_kernel_va(pa)`.
+pub const fn pa_to_kernel_va(pa: usize) -> usize {
+    pa + LINEAR_OFFSET
+}
+
 /// Convert a kernel virtual address to its physical address. Strips
 /// `KERNEL_OFFSET` if the VA is in the higher-half range; passes
 /// identity-range VAs through unchanged.
@@ -192,6 +214,31 @@ mod tests {
         assert_eq!(pte & PTE_D, 0);
         // PPN = 0x80300 → at bits 53:10 = 0x80300 << 10 = 0x200C0000.
         assert_eq!(pte & !0x3ff, 0x200C0000);
+    }
+
+    #[test]
+    fn pa_to_kernel_va_offsets_into_linear_map() {
+        // PA 0 → start of linear-map VA range.
+        assert_eq!(pa_to_kernel_va(0), LINEAR_OFFSET);
+        // Start of QEMU virt RAM.
+        assert_eq!(pa_to_kernel_va(0x80000000), LINEAR_OFFSET + 0x80000000);
+        // Kernel image base.
+        assert_eq!(pa_to_kernel_va(0x80200000), LINEAR_OFFSET + 0x80200000);
+    }
+
+    #[test]
+    fn pa_to_kernel_va_results_are_canonical_high() {
+        // Every output must satisfy Sv39's sign-extension rule:
+        // bits 63:39 all equal bit 38. With LINEAR_OFFSET in the
+        // canonical-high range, any PA in [0, 1 GiB) stays there.
+        for pa in [0usize, 0x80000000, 0x80200000, 0xBFFFF000] {
+            let va = pa_to_kernel_va(pa);
+            let bit_38 = (va >> 38) & 1;
+            let bits_63_39 = va >> 39;
+            assert_eq!(bit_38, 1, "VA {va:#x} not in canonical-high (bit 38 = 0)");
+            // bits 63:39 = 25 ones means bits_63_39 == 0x1FFFFFF.
+            assert_eq!(bits_63_39, 0x1FFFFFF, "VA {va:#x} fails sign extension");
+        }
     }
 
     #[test]
