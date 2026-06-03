@@ -190,7 +190,7 @@ posts/        Devlog notes per milestone.
 ### Running
 
 ```
-cargo xtask up                # build kernel + run in QEMU (telemetry chardev waits for a client)
+cargo xtask boot              # build kernel + run in QEMU (telemetry chardev waits for a client)
 cargo xtask collect           # build + run collector (OTLP + Prometheus)
 cargo xtask reader            # collector in text-only mode (no docker stack)
 cargo xtask stack {up,down,logs}  # docker-compose the Tempo/Prometheus/Grafana stack

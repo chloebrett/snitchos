@@ -21,7 +21,7 @@ enum Cmd {
     /// Build the kernel ELF.
     Build,
     /// Build the kernel and run it in QEMU.
-    Up,
+    Boot,
     /// Build and run the collector (telemetry consumer). Trailing args
     /// are forwarded to the collector, e.g.
     /// `cargo xtask collect -- --text --otlp http://localhost:4318`.
@@ -69,7 +69,7 @@ enum StackCmd {
 fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Build => build(),
-        Cmd::Up => up(),
+        Cmd::Boot => boot(),
         Cmd::Mutants { args } => run_mutants(&args),
         Cmd::Collect { args } => run_collector(&args),
         Cmd::Reader { args } => {
@@ -112,7 +112,7 @@ fn build() -> ExitCode {
     if status.success() { ExitCode::SUCCESS } else { ExitCode::from(1) }
 }
 
-fn up() -> ExitCode {
+fn boot() -> ExitCode {
     if build() != ExitCode::SUCCESS {
         return ExitCode::from(1);
     }

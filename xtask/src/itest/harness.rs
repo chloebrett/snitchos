@@ -58,7 +58,7 @@ impl Harness {
         let _ = std::fs::remove_file(&socket_path);
 
         // QEMU is the listener (server=on,wait=on); we connect to it
-        // as a client. Matches the `cargo xtask up` setup the collector
+        // as a client. Matches the `cargo xtask boot` setup the collector
         // already uses — so we exercise the same wire path.
         let chardev = format!(
             "socket,path={},server=on,wait=on,id=telemetry",

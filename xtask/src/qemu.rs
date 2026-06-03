@@ -1,4 +1,4 @@
-//! Shared QEMU invocation helpers used by both `cargo xtask up` and
+//! Shared QEMU invocation helpers used by both `cargo xtask boot` and
 //! the integration-test harness. Keeping the args in one place means
 //! a QEMU flag change (e.g. for higher-half kernels in v0.4) only
 //! needs to be made once.

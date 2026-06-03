@@ -31,7 +31,7 @@ Working:
 - `kernel.boot` opens at boot with `console_init` + `telemetry_init` sub-spans; `kernel.heartbeat` span + metric set emitted once per timer tick
 - `collector` (host-side): decodes the wire stream, reassembles spans, exports OTLP/HTTP to Tempo, serves Prometheus text on `/metrics` with full counter/gauge/histogram bucketing
 - docker-compose stack: Tempo + Prometheus + Grafana, all auto-provisioned (datasources + dashboard with timer-IRQ percentile panel)
-- `xtask` orchestration: `cargo xtask up` (kernel) / `cargo xtask collect` (collector) / `cargo xtask stack {up,down,logs}` / `cargo xtask test` (kernel integration scenarios in QEMU)
+- `xtask` orchestration: `cargo xtask boot` (kernel) / `cargo xtask collect` (collector) / `cargo xtask stack {up,down,logs}` / `cargo xtask test` (kernel integration scenarios in QEMU)
 - Sv39 page tables, higher-half kernel, identity unmap, linear map at `0xffffffd0_00000000` so all physical RAM is reachable via `pa_to_kernel_va`
 - physical frame allocator (4 KiB pages, bitmap-tracked) with `frame::{alloc, alloc_contiguous, alloc_zeroed, free, stats}`; DTB-driven init; per-frame metrics on the wire and in Grafana
 - kernel heap: `#[global_allocator]` backed by `linked_list_allocator` over a 4 MiB contiguous run of frames mapped through the linear map. `Box` / `Vec` / `String` / `BTreeMap` work inside the kernel. Four heap metrics (`snitchos.heap.{alloc_total, dealloc_total, alloc_failed_total, bytes_used}`) drained from the heartbeat loop
@@ -51,7 +51,7 @@ cargo xtask stack up
 
 # Terminal A — kernel + QEMU. Blocks at the telemetry chardev until
 # the collector connects in terminal B.
-cargo xtask up
+cargo xtask boot
 
 # Terminal B — collector. Decodes frames, posts OTLP to Tempo,
 # serves Prometheus /metrics on :9091.
@@ -73,7 +73,7 @@ cargo xtask reader -- --pretty  # multi-line debug format
 
 ```
 cargo xtask build              # build the kernel ELF
-cargo xtask up                 # build kernel + run in QEMU
+cargo xtask boot                 # build kernel + run in QEMU
 cargo xtask collect            # build + run collector (OTLP + Prometheus)
 cargo xtask collect -- --text  # also print decoded frames to stdout
 cargo xtask reader             # collector in text-only mode (no docker needed)

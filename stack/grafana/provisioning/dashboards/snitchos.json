@@ -421,6 +421,185 @@
         "legend": { "displayMode": "list", "placement": "bottom" },
         "tooltip": { "mode": "multi" }
       }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Heap bytes used",
+      "description": "Approximate kernel-heap occupancy. Sum of `layout.size()` across live allocations — does not include per-block overhead, so it's an underestimate vs the heap's internal bookkeeping. Out of a 4 MiB region.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 40 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_heap_bytes_used",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 3145728 },
+              { "color": "red", "value": 4000000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Heap allocation failures (total)",
+      "description": "Monotonic counter — every GlobalAlloc::alloc that returned null. Healthy kernel: 0. A non-zero value means the heap is out of space — bump HEAP_FRAMES or implement growable heap (strategy (b) in the step-4 plan).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 40 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_heap_alloc_failed_total",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Heap allocation rate (per second)",
+      "description": "Rate of heap allocations and deallocations per second, computed from cumulative counters. Should track each other in steady state.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(snitchos_heap_alloc_total[1m])",
+          "legendFormat": "allocations/s",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "refId": "B",
+          "expr": "rate(snitchos_heap_dealloc_total[1m])",
+          "legendFormat": "deallocations/s",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "pointSize": 3
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Heap allocations / deallocations (cumulative)",
+      "description": "Monotonic counters — should track each other in steady state (alloc + drop per heartbeat). Divergence visualises a leak.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_heap_alloc_total",
+          "legendFormat": "alloc_total",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "refId": "B",
+          "expr": "snitchos_heap_dealloc_total",
+          "legendFormat": "dealloc_total",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "pointSize": 3
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Heap bytes used (over time)",
+      "description": "Live heap occupancy. Flat under matched alloc/free, climbs under leak, drops to baseline under bulk free.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_heap_bytes_used",
+          "legendFormat": "bytes_used",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "pointSize": 3
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
     }
   ]
 }

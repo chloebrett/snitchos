@@ -10,8 +10,8 @@
 
 use prost::Message;
 
-use crate::state::CompletedSpan;
 use crate::SpanExporter;
+use crate::state::CompletedSpan;
 
 // --- OTLP proto subset (prost-derived) ---------------------------------
 
@@ -181,8 +181,7 @@ impl Exporter {
                 }
                 // First few successful posts: print so the user knows
                 // they're flowing.
-                static N: std::sync::atomic::AtomicUsize =
-                    std::sync::atomic::AtomicUsize::new(0);
+                static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
                 let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n < 3 {
                     eprintln!(
@@ -200,14 +199,14 @@ impl Exporter {
     }
 }
 
-#[mutants::skip] // delegates to inherent export; real skip is on that method
+#[cfg_attr(test, mutants::skip)] // delegates to inherent export; real skip is on that method
 impl SpanExporter for Exporter {
     fn export(&self, span: &CompletedSpan) {
         self.export(span);
     }
 }
 
-#[mutants::skip] // non-deterministic — output cannot be asserted
+#[cfg_attr(test, mutants::skip)] // non-deterministic — output cannot be asserted
 fn random_trace_id() -> [u8; 16] {
     let mut id = [0u8; 16];
     for b in id.iter_mut() {

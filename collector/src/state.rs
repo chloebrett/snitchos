@@ -158,7 +158,7 @@ impl State {
                 eprintln!(
                     "collector: WARNING — received {frame:?} before Hello. \
                      Dropping. Stop QEMU and restart the kernel after the \
-                     collector connects (use `cargo xtask up` first, then \
+                     collector connects (use `cargo xtask boot` first, then \
                      `cargo xtask collect`).",
                 );
                 self.warned_no_hello = true;
