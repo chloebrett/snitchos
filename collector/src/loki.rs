@@ -30,7 +30,7 @@ impl Exporter {
 }
 
 impl SpanExporter for Exporter {
-    #[mutants::skip] // HTTP I/O — not unit-testable without a mock server
+    #[cfg_attr(test, mutants::skip)] // HTTP I/O — not unit-testable without a mock server
     fn export(&self, span: &CompletedSpan) {
         let line = format_line(span);
         let ts = span.start_time_ns.to_string();

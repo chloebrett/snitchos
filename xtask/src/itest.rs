@@ -17,10 +17,11 @@ pub(crate) struct Scenario {
 }
 
 const SCENARIOS: &[Scenario] = &[
-    Scenario { name: "boot-reaches-heartbeat",   run: scenarios::boot_reaches_heartbeat },
-    Scenario { name: "heartbeat-cadence",        run: scenarios::heartbeat_cadence },
-    Scenario { name: "pre-init-order",           run: scenarios::pre_init_order },
+    Scenario { name: "boot-reaches-heartbeat",     run: scenarios::boot_reaches_heartbeat },
+    Scenario { name: "heartbeat-cadence",          run: scenarios::heartbeat_cadence },
+    Scenario { name: "pre-init-order",             run: scenarios::pre_init_order },
     Scenario { name: "kernel-runs-at-higher-half", run: scenarios::kernel_runs_at_higher_half },
+    Scenario { name: "frame-allocator-metrics",    run: scenarios::frame_allocator_metrics },
 ];
 
 /// Entry point from `main`. `Some(name)` runs one scenario;

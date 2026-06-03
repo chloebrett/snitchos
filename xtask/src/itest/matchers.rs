@@ -26,3 +26,12 @@ pub fn is_dropped(expected: u32) -> impl Fn(&OwnedFrame, &StringTable) -> bool {
 pub fn is_string_register_named(name: &'static str) -> impl Fn(&OwnedFrame, &StringTable) -> bool {
     move |f, _| matches!(f, OwnedFrame::StringRegister { value, .. } if value == name)
 }
+
+pub fn is_metric_named(name: &'static str) -> impl Fn(&OwnedFrame, &StringTable) -> bool {
+    move |f, strings| match f {
+        OwnedFrame::Metric { name_id, .. } => {
+            strings.get(name_id).map(String::as_str) == Some(name)
+        }
+        _ => false,
+    }
+}

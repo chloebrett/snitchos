@@ -8,9 +8,33 @@ use protocol::stream::OwnedFrame;
 use protocol::SpanId;
 
 use super::harness::Harness;
-use super::matchers::{is_dropped, is_hello, is_span_start_named, is_string_register_named};
+use super::matchers::{is_dropped, is_hello, is_metric_named, is_span_start_named, is_string_register_named};
 
 const SEC: Duration = Duration::from_secs(1);
+
+/// Frame allocator is initialized and exercised. Each heartbeat does
+/// an `alloc_zeroed` + `free`, so the counters tick up over time. The
+/// scenario waits for a `snitchos.frames.allocated_total` metric with
+/// value ≥ 1, which proves: init ran, the linear map resolves (the
+/// zeroing wrote 4 KiB via `pa_to_kernel_va`), and at least one
+/// heartbeat completed.
+pub fn frame_allocator_metrics() -> Result<(), String> {
+    let mut h = Harness::spawn("frames")?;
+
+    let frame = h
+        .wait_for(SEC * 10, is_metric_named("snitchos.frames.allocated_total"))
+        .ok_or("no snitchos.frames.allocated_total metric within 10s")?;
+    let value = match frame {
+        OwnedFrame::Metric { value, .. } => value,
+        _ => return Err("matched non-metric (impossible)".to_string()),
+    };
+    if value < 1 {
+        return Err(format!(
+            "frames.allocated_total = {value}, expected ≥ 1 (linear map fault or smoke alloc never ran?)"
+        ));
+    }
+    Ok(())
+}
 
 /// Explicit assertion that the kernel runs at higher-half PC. After
 /// `mmu::enable` + trampoline, the kernel reads its current PC via
