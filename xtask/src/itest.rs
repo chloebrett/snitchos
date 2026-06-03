@@ -21,6 +21,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario { name: "heartbeat-cadence",      run: scenarios::heartbeat_cadence },
     Scenario { name: "pre-init-order",         run: scenarios::pre_init_order },
     Scenario { name: "mmu-enabled",            run: scenarios::mmu_enabled },
+    Scenario { name: "mmu-higher-half-verify", run: scenarios::mmu_higher_half_verify },
 ];
 
 /// Entry point from `main`. `Some(name)` runs one scenario;

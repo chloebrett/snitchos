@@ -114,6 +114,17 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         unsafe { mmu::enable(&dtb) };
     }
 
+    // Step 2a/2b smoke test: read a known byte through the higher-half
+    // VA we just installed alongside identity. If the higher-half
+    // mapping isn't actually live, this load faults and the trap
+    // handler panics — no SpanEnd, no heartbeat. Removed in a later
+    // step once the kernel ACTUALLY runs at higher-half (then the
+    // identity read becomes meaningless).
+    {
+        span!("kernel.mmu.higher_half_verify");
+        unsafe { mmu::verify_higher_half_mapping() };
+    }
+
     // Heartbeat loop: wfi until the timer IRQ flips TICK_PENDING,
     // then emit a span + the metric set.
     let mut count: i64 = 0;

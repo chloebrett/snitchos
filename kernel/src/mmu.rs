@@ -153,3 +153,28 @@ pub unsafe fn enable(dtb: &Fdt) {
         );
     }
 }
+
+/// Smoke-test the higher-half mapping by reading the first byte of
+/// `__kernel_start` through both its identity VA and its higher-half
+/// VA (`identity + KERNEL_OFFSET`), and asserting equality.
+///
+/// If the higher-half mapping isn't actually installed in the page
+/// table, the higher-half load faults — the trap handler panics with
+/// an unhandled-trap message, and no further code runs (no SpanEnd,
+/// no heartbeat). Both reads succeeding and matching proves the
+/// dual-map works at runtime.
+///
+/// # Safety
+///
+/// Must be called after `mmu::enable()` has installed the dual-map
+/// and written `satp`. With MMU off, the higher-half VA is bogus.
+pub unsafe fn verify_higher_half_mapping() {
+    let id_addr = (&raw const __kernel_start) as *const u8;
+    let high_addr = ((id_addr as usize).wrapping_add(KERNEL_OFFSET)) as *const u8;
+    let id_byte = unsafe { id_addr.read_volatile() };
+    let high_byte = unsafe { high_addr.read_volatile() };
+    assert_eq!(
+        id_byte, high_byte,
+        "higher-half mapping should alias identity for kernel image",
+    );
+}
