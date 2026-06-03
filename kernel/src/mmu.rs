@@ -199,10 +199,11 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
             addr += PAGE_2MIB;
         }
 
-        // MMIO: dual-mapped at identity (where `CONSOLE`/`UART` and
-        // the panic-handler UART poke read from until the higher-half
-        // patches land) and higher-half (where they'll read from once
-        // identity-MMIO is unmapped). Caller builds `mmio_regions`
+        // MMIO: dual-mapped at identity (used by `init_handshake`
+        // before `CONSOLE` is set, and by the panic handler via
+        // `emergency_uart_base` when satp is 0) and higher-half (used
+        // by `CONSOLE`/`UART` after init, and after `unmap_identity`
+        // tears down the identity copy). Caller builds `mmio_regions`
         // (currently hardcoded in `kmain` for QEMU `virt`).
         for &base in mmio_regions.as_slice() {
             map_id_mmio(base, base);

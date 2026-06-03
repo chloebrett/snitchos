@@ -10,9 +10,10 @@ use crate::uart::Uart16550;
 /// never actually contends.
 ///
 /// Known weaknesses:
-/// - Accessed via the print!/println! macros, which silently fall back to a
-///   hardcoded `0x10000000` if this hasn't been initialized yet. The fallback
-///   only works on QEMU `virt` and any other board would lose pre-init output.
+/// - Accessed via the print!/println! macros, which silently fall back to
+///   `_pre_init_uart()` (via `emergency_uart_base()`) if this hasn't been
+///   initialized yet. The base is hardcoded for QEMU `virt`; any other board
+///   would lose pre-init output.
 /// - No re-entrancy guard. A panic inside a print would try to lock again and
 ///   deadlock. Real kernels use a recursion-guarded console here.
 pub static UART: spin::Once<spin::Mutex<Uart16550>> = spin::Once::new();
@@ -21,10 +22,10 @@ pub static UART: spin::Once<spin::Mutex<Uart16550>> = spin::Once::new();
 /// physical address (typically pulled from the DTB).
 ///
 /// Translates to the higher-half VA before storing — the kernel runs
-/// at higher-half PC after the trampoline, and the identity MMIO
-/// mapping gets unmapped in `mmu::unmap_identity_kernel`'s successor.
-/// The MMIO region is dual-mapped by `mmu::enable`, so this works
-/// from the moment `enable` returns.
+/// at higher-half PC after the trampoline, and `mmu::unmap_identity`
+/// later tears down the identity MMIO mapping. The MMIO region is
+/// dual-mapped by `mmu::enable`, so this works from the moment
+/// `enable` returns.
 ///
 /// Safe to call exactly once; subsequent calls are no-ops thanks to
 /// `Once`.
@@ -39,26 +40,25 @@ pub unsafe fn init(uart_addr: usize) {
   UART.call_once(|| spin::Mutex::new(unsafe { Uart16550::new(va) }));
 }
 
-/// Hardcoded NS16550A MMIO base for QEMU `virt`. Used by the macro
-/// fallback below when `UART` isn't initialized yet (early boot, or
-/// panic-during-init). Wrong on any other board — see `console.rs`
+/// Hardcoded NS16550A physical MMIO base for QEMU `virt`. Used via
+/// `emergency_uart_base()` by both the macro fallback (`_pre_init_uart`)
+/// and the panic handler. Wrong on any other board — see `console.rs`
 /// known weaknesses.
 pub const QEMU_VIRT_UART_BASE: usize = 0x10000000;
 
-/// Returns a UART driver pointing at the QEMU `virt` UART. Used by the
-/// `print!`/`println!` macros when `UART` isn't initialized yet, and
-/// by the panic handler.
+/// Returns a UART driver pointing at the QEMU `virt` UART. Used by
+/// the `print!`/`println!` macros when `UART` isn't initialized yet.
+/// (The panic handler builds its own UART directly via
+/// `emergency_uart_base()` so it doesn't depend on this function.)
 ///
-/// Reads `satp` to pick the right address space: physical when the
-/// MMU is off (pre-`mmu::enable`), higher-half VA when it's on (the
-/// only mapping guaranteed to survive identity-MMIO unmap).
+/// Picks the address space via `emergency_uart_base`: physical when
+/// the MMU is off, higher-half when it's on.
 ///
 /// # Safety
 ///
-/// Only safe to call before `console::init` has run (no other writer
-/// is using the device yet) or from the panic handler (we're already
-/// in a fatal state). Not exported for general use — it's `pub` so
-/// the macros can reach it, not because callers should.
+/// Only safe to call before `console::init` has run — no other writer
+/// is using the device yet. Not exported for general use; it's `pub`
+/// so the macros can reach it, not because callers should.
 pub unsafe fn _pre_init_uart() -> Uart16550 {
   // SAFETY: see function-level doc; precondition is that no other code
   // currently holds the UART.
@@ -82,8 +82,8 @@ pub fn emergency_uart_base() -> usize {
 /// Print formatted output to the kernel console (no trailing newline).
 ///
 /// Uses the initialized `UART` static once it's set; before that, falls back
-/// to a hardcoded `Uart16550::new(0x10000000)`. The fallback is what lets the
-/// panic handler still print if a panic fires during early boot.
+/// to `_pre_init_uart()` (which routes through `emergency_uart_base()` so
+/// the right address space is picked for the current MMU state).
 #[macro_export]
 macro_rules! print {
   ($($arg:tt)*) => {{
