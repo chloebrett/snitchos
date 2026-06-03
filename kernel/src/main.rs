@@ -169,7 +169,9 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let heap_alloc_total = tracing::register_counter("snitchos.heap.alloc_total");
     let heap_dealloc_total = tracing::register_counter("snitchos.heap.dealloc_total");
     let heap_alloc_failed = tracing::register_counter("snitchos.heap.alloc_failed_total");
+    let heap_bytes_capacity = tracing::register_gauge("snitchos.heap.bytes_capacity");
     let heap_bytes_used = tracing::register_gauge("snitchos.heap.bytes_used");
+    let heap_bytes_free = tracing::register_gauge("snitchos.heap.bytes_free");
 
     // Arm the periodic timer and enable interrupts. From here on, the
     // CPU wakes us via timer IRQ instead of us spinning on the cycle
@@ -281,11 +283,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 tracing::emit_metric(frames_in_use, stats.in_use as i64);
                 tracing::emit_metric(frames_free, stats.free as i64);
             }
-            // Kernel heap telemetry. All atomics — no allocator lock
-            // is held during emission. `bytes_used` is approximate
-            // (sum of `layout.size()`, not the heap's internal
-            // bookkeeping including per-block overhead) but the
-            // shape is what Grafana needs.
+            // Kernel heap telemetry. Counters are atomics; the byte
+            // gauges come from `heap::stats()`, which briefly takes
+            // the heap lock — safe from the heartbeat (single-
+            // threaded, no contention with allocator callers).
+            // `bytes_used` is the true number including per-block
+            // overhead, not a `layout.size()` sum.
             tracing::emit_metric(
                 heap_alloc_total,
                 heap::ALLOC_COUNT.load(Ordering::Relaxed) as i64,
@@ -298,10 +301,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 heap_alloc_failed,
                 heap::ALLOC_FAIL_COUNT.load(Ordering::Relaxed) as i64,
             );
-            tracing::emit_metric(
-                heap_bytes_used,
-                heap::BYTES_USED.load(Ordering::Relaxed) as i64,
-            );
+            if let Some(hstats) = heap::stats() {
+                tracing::emit_metric(heap_bytes_capacity, hstats.capacity as i64);
+                tracing::emit_metric(heap_bytes_used, hstats.used as i64);
+                tracing::emit_metric(heap_bytes_free, hstats.free as i64);
+            }
         }
     }
 }

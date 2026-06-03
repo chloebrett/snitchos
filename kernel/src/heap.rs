@@ -12,7 +12,7 @@
 //! via an allocation.
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use linked_list_allocator::Heap;
 
@@ -24,11 +24,24 @@ pub const HEAP_FRAMES: usize = 1024;
 pub const HEAP_SIZE: usize = HEAP_FRAMES * frame::FRAME_SIZE;
 
 /// Counters drained by the heartbeat thread. Updated outside the heap
-/// lock to keep emission off the allocator's critical path.
+/// lock to keep emission off the allocator's critical path. Capacity
+/// and live bytes-used come from `stats()` (a brief lock take from the
+/// heartbeat) — the allocator already tracks those internally, so
+/// mirroring them in atomics would be redundant and slightly wrong
+/// (atomics measured `layout.size()` sums, missing per-block overhead).
 pub static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static DEALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static ALLOC_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
-pub static BYTES_USED: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug)]
+pub struct Stats {
+    /// Total heap region size in bytes.
+    pub capacity: usize,
+    /// Bytes currently allocated, including per-block overhead.
+    pub used: usize,
+    /// Bytes currently free.
+    pub free: usize,
+}
 
 /// `GlobalAlloc` wrapper around a `spin::Mutex<Heap>`. We don't use
 /// `linked_list_allocator::LockedHeap` directly because we want the
@@ -49,7 +62,6 @@ unsafe impl GlobalAlloc for KernelHeap {
         match result {
             Ok(nn) => {
                 ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-                BYTES_USED.fetch_add(layout.size(), Ordering::Relaxed);
                 nn.as_ptr()
             }
             Err(_) => {
@@ -68,8 +80,22 @@ unsafe impl GlobalAlloc for KernelHeap {
                 .deallocate(core::ptr::NonNull::new_unchecked(ptr), layout);
         }
         DEALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        BYTES_USED.fetch_sub(layout.size(), Ordering::Relaxed);
     }
+}
+
+/// Snapshot of the heap's occupancy. Briefly takes the heap lock —
+/// safe to call from the heartbeat thread (single-threaded, no
+/// contention with the allocator). Returns `None` before `init` runs.
+pub fn stats() -> Option<Stats> {
+    let h = HEAP.inner.lock();
+    if h.size() == 0 {
+        return None;
+    }
+    Some(Stats {
+        capacity: h.size(),
+        used: h.used(),
+        free: h.free(),
+    })
 }
 
 /// Initialise the kernel heap. Pulls `HEAP_FRAMES` contiguous physical

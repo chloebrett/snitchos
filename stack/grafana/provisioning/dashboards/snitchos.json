@@ -570,6 +570,42 @@
       }
     },
     {
+      "id": 17,
+      "type": "gauge",
+      "title": "Heap utilisation",
+      "description": "bytes_used / bytes_capacity. Includes per-block overhead — this is the heap's own bookkeeping, not a layout.size() sum.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 56 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_heap_bytes_used / snitchos_heap_bytes_capacity",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.75 },
+              { "color": "red", "value": 0.9 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      }
+    },
+    {
       "id": 16,
       "type": "timeseries",
       "title": "Heap bytes used (over time)",
