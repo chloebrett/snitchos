@@ -8,6 +8,7 @@ use fdt::Fdt;
 
 mod console;
 mod dtb;
+mod frame;
 mod mmu;
 mod tracing;
 mod trap;
