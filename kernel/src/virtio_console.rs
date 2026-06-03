@@ -342,17 +342,21 @@ pub enum InitError {
 }
 
 /// Discover the virtio-console in the DTB, drive the handshake, and
-/// store the base address in the `CONSOLE` static. After this returns
-/// `Ok`, `send` is usable from anywhere.
+/// store the device's MMIO base in the `CONSOLE` static as a
+/// higher-half VA. After this returns `Ok`, `send` is usable from
+/// anywhere.
 ///
 /// # Safety
 ///
-/// The DTB must be valid — the same precondition we already rely on
-/// elsewhere in boot.
+/// The DTB must be valid, and `mmu::enable` must have run (so the
+/// higher-half MMIO mapping is live) — the same precondition the rest
+/// of post-MMU boot relies on.
 pub unsafe fn init(dtb: &Fdt) -> Result<(), InitError> {
     let base = find_console_base(dtb).ok_or(InitError::NotFound)?;
     unsafe { init_handshake(base)? };
-    CONSOLE.call_once(|| spin::Mutex::new(base));
+    // Store the higher-half VA. `send` reads MMIO via the stored
+    // value; after identity MMIO is unmapped, only higher-half works.
+    CONSOLE.call_once(|| spin::Mutex::new(base + crate::mmu::KERNEL_OFFSET));
     Ok(())
 }
 
