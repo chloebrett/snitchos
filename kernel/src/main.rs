@@ -420,6 +420,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 sched_yield_overhead,
                 sched::LAST_YIELD_OVERHEAD_TICKS.load(Ordering::Relaxed) as i64,
             );
+            for snap in sched::task_snapshots() {
+                tracing::emit_metric(snap.cpu_time_metric, snap.cpu_time_ticks as i64);
+                tracing::emit_metric(snap.runs_metric, snap.runs as i64);
+            }
             tracing::emit_metric(
                 task_a_loops,
                 TASK_A_LOOPS.load(Ordering::Relaxed) as i64,

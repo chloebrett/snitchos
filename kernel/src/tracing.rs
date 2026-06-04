@@ -101,6 +101,16 @@ pub fn register_counter(name: &'static str) -> StringId {
         .register_metric(name, MetricKind::Counter, &mut KernelSink)
 }
 
+/// Like `register_counter` but takes an owned `String` — the kernel
+/// leaks it into `'static`. Use only for runtime-built names whose
+/// total count is bounded (e.g. per-task metric names registered
+/// once per task at spawn time). Every call commits ~bytes_of(name)
+/// to the heap forever.
+pub fn register_counter_owned(name: alloc::string::String) -> StringId {
+    let leaked: &'static str = alloc::boxed::Box::leak(name.into_boxed_str());
+    register_counter(leaked)
+}
+
 /// Register `name` as a Gauge metric.
 pub fn register_gauge(name: &'static str) -> StringId {
     INTERN_TABLE

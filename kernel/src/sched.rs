@@ -101,10 +101,15 @@ pub struct Task {
     pub span_cursor: SpanCursor,
     /// Total time on-CPU in `time`-CSR ticks. Bumped on every yield
     /// out of this task; read by the heartbeat to emit
-    /// `snitchos.task.cpu_time_ticks{task=name}`.
+    /// `snitchos.task.<name>.cpu_time_ticks`.
     pub cpu_time_ticks: AtomicU64,
     /// How many times the scheduler has picked this task.
     pub runs: AtomicU64,
+    /// Pre-registered metric ids so the heartbeat emit path doesn't
+    /// re-format strings per tick. Populated by `spawn` /
+    /// `register_bare_task`.
+    pub cpu_time_metric: protocol::StringId,
+    pub runs_metric: protocol::StringId,
     /// Saved register state while off-CPU. `UnsafeCell` because the
     /// asm needs `*mut` access while the `Task` is borrowed `&` from
     /// the scheduler's `Vec`. The mutex around the scheduler
@@ -126,6 +131,12 @@ unsafe impl Sync for Task {}
 
 impl Task {
     fn new_bare(id: TaskId, name: String, state: TaskState) -> Self {
+        let cpu_time_metric = crate::tracing::register_counter_owned(
+            alloc::format!("snitchos.task.{name}.cpu_time_ticks"),
+        );
+        let runs_metric = crate::tracing::register_counter_owned(
+            alloc::format!("snitchos.task.{name}.runs_total"),
+        );
         Self {
             id,
             name,
@@ -133,6 +144,8 @@ impl Task {
             span_cursor: SpanCursor::new(),
             cpu_time_ticks: AtomicU64::new(0),
             runs: AtomicU64::new(0),
+            cpu_time_metric,
+            runs_metric,
             context: UnsafeCell::new(TaskContext::default()),
             _stack: None,
         }
@@ -216,6 +229,31 @@ pub fn stats() -> SchedStats {
     }
 }
 
+/// Per-task snapshot for metric emission. Briefly takes the scheduler
+/// lock to walk the task table, allocates an owned name string per
+/// task so the caller can drop the lock before doing slow virtio
+/// emits.
+pub struct TaskSnapshot {
+    pub cpu_time_metric: protocol::StringId,
+    pub runs_metric: protocol::StringId,
+    pub cpu_time_ticks: u64,
+    pub runs: u64,
+}
+
+pub fn task_snapshots() -> Vec<TaskSnapshot> {
+    let sched = SCHEDULER.lock();
+    sched
+        .tasks
+        .iter()
+        .map(|t| TaskSnapshot {
+            cpu_time_metric: t.cpu_time_metric,
+            runs_metric: t.runs_metric,
+            cpu_time_ticks: t.cpu_time_ticks.load(Ordering::Relaxed),
+            runs: t.runs.load(Ordering::Relaxed),
+        })
+        .collect()
+}
+
 /// Currently-running task. v0.5 step 4 stub: returns 0 (the boot /
 /// main task) unconditionally. Step 7 wires this to the real
 /// scheduler bookkeeping; until then `SpanStart` carries `task_id=0`
@@ -230,6 +268,16 @@ pub fn current_task_id() -> TaskId {
 /// single-hart it's a plain atomic; v0.5.x preempt + v0.7+ SMP can
 /// swap this to `PerCpu<AtomicU32>` without touching callers.
 static CURRENT_TASK: AtomicU32 = AtomicU32::new(0);
+
+/// Timestamp when the current task last became `Running`. On every
+/// `yield_now` we compute `now - CURRENT_TASK_ENTRY_TICK` and add to
+/// the outgoing task's `cpu_time_ticks` — this is the per-task
+/// on-CPU time accumulator.
+///
+/// Initial value 0 is "uninitialised"; we lazy-init on the first
+/// `yield_now` rather than during boot so we don't have to thread a
+/// timestamp through `register_bare_task`.
+static CURRENT_TASK_ENTRY_TICK: AtomicU64 = AtomicU64::new(0);
 
 /// Install a freshly-built task into the table without a stack or
 /// context. v0.5 step 4 scope: lets the boot path register itself as
@@ -310,15 +358,19 @@ pub fn yield_now() {
         }
 
         // Single pass through the task table to capture both context
-        // pointers + bump the picked task's runs counter. Box<Task>
-        // means the Task itself sits at a stable heap address even if
-        // the Vec reallocates, so the raw pointers stay valid past
-        // the lock drop.
+        // pointers, accumulate the outgoing task's on-CPU time, and
+        // bump the incoming task's runs counter. Box<Task> means the
+        // Task itself sits at a stable heap address even if the Vec
+        // reallocates, so the raw pointers stay valid past the lock
+        // drop.
+        let prev_entry = CURRENT_TASK_ENTRY_TICK.load(Ordering::Relaxed);
+        let on_cpu_delta = if prev_entry == 0 { 0 } else { t_entry.wrapping_sub(prev_entry) };
         let mut current_ctx: *mut TaskContext = core::ptr::null_mut();
         let mut next_ctx: *mut TaskContext = core::ptr::null_mut();
         for task in &sched.tasks {
             if task.id == current_id {
                 current_ctx = task.context.get();
+                task.cpu_time_ticks.fetch_add(on_cpu_delta, Ordering::Relaxed);
             }
             if task.id == next_id {
                 next_ctx = task.context.get();
@@ -341,6 +393,11 @@ pub fn yield_now() {
     let t_before_switch = crate::tracing::timestamp();
     LAST_YIELD_OVERHEAD_TICKS
         .store(t_before_switch.wrapping_sub(t_entry), Ordering::Relaxed);
+    // The next task is about to become Running. Record its entry
+    // tick now (close enough — the switch asm is a handful of
+    // cycles). When it next yields it'll compute its on-CPU delta
+    // from this.
+    CURRENT_TASK_ENTRY_TICK.store(t_before_switch, Ordering::Relaxed);
 
     // SAFETY: both pointers point at `UnsafeCell<TaskContext>` storage
     // inside `Box<Task>` allocations owned by `SCHEDULER.tasks`. The
