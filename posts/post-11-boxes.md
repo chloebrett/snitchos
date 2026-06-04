@@ -71,11 +71,27 @@
 - plumbed both signals end-to-end: `kernel_core::heap::Stats` gained two fields, `heap::stats()` reads them, the heartbeat emits `snitchos.heap.free_blocks` + `snitchos.heap.largest_free_block_bytes`, Grafana panels render both.
 - the gap between `largest_free_block_bytes` and `bytes_free` is exactly the fragmentation cost: "you have N bytes free but can't allocate anything bigger than M." that's the story Grafana now tells. previous incarnation: "the heap is X% full." current incarnation: "the heap is X% full and Y% fragmented."
 
+### tracking the fork diff
+
+- forked dependencies drift silently. the fix: `vendor/patches/linked_list_allocator.patch`, a unified diff against the registry source, checked in alongside the vendored tree. two hunks, both additions, nothing removed from upstream.
+- regenerate with `diff -u ~/.cargo/registry/src/.../hole.rs vendor/.../hole.rs >> vendor/patches/linked_list_allocator.patch`. when 0.11 ships: `patch -p1 < ...` + re-verify. the diff is ~20 lines — small enough to audit and small enough to rebase without drama.
+
 ### what fork buys vs costs
 
 - buys: real fragmentation observability. precondition for any meaningful allocator A/B comparison — without it, "is `talc` better than `linked_list_allocator`?" is a vibes-based question.
 - costs: maintenance. when upstream LLA releases 0.11, rebase the patch. when adding new introspection (size buckets, allocation lifetimes), that's another fork patch.
 - the right call when the convention "use upstream as-is" trades observability for nothing-real. SnitchOS's whole identity is observability-first; the fork follows.
+
+## the heap smoke, properly
+
+- the `Vec::with_capacity(256)` heartbeat smoke from step 4 proves the heap is live but puts nothing interesting on the dashboard. `bytes_used` flickers to 256 and back; `free_blocks` sits at 1; `largest_free_block` monotonically shrinks as the heap grows. technically correct, observably boring.
+- wanted something that exercises all three new signals simultaneously. three requirements: (1) cumulative heap state that grows across heartbeats, (2) many small separate allocations so `free_blocks` tells a story, (3) a periodic event that demonstrates what fragmentation *is*.
+- `FactorTable`: a `BTreeMap<u64, u64>` mapping each integer to its smallest prime factor. each heartbeat, factorize the next 200 integers and insert. every 10 heartbeats, evict composites (entries where `spf ≠ n`). the eviction is the fragmentation event.
+- why `BTreeMap`: each node is a small, individually heap-allocated object (~40 bytes in alloc's B-tree). 200 inserts per tick → 200 separate heap objects → `free_blocks` meaningfully above 1. a `Vec` would give one contiguous slab; you'd see `bytes_used` grow but no fragmentation signal worth watching.
+- why prime factorization: the eviction has a clean mathematical definition. before eviction: ~200 entries. after: roughly π(n) primes in that range, so ~17–20 for the first cycle. the freed slots leave non-contiguous holes throughout the B-tree's memory — `free_blocks` spikes, `largest_free_block` stays small even while `bytes_free` recovers.
+- three dashboard signals: `entries` (sawtooth — climbs 200/tick, drops ~80% on eviction), `primes` (slow monotone ramp — prime density π(n)/n is decreasing, so each cycle contributes fewer new primes than the last), `candidate` (straight ramp — throughput readout). all three tell different parts of the story simultaneously.
+- all the logic lives in `kernel_core::heap_smoke::FactorTable` — the first time kernel-core uses `alloc`. 8 host tests cover: empty state, spf correctness for primes and composites, post-eviction entry counts, correctness of `extend` after `evict_composites`, and prime-count monotonicity across eviction cycles. the kernel side (`kernel::heap_smoke`) is just a `Mutex<Option<FactorTable>>` + `step()` / `stats()`.
+- clearly marked temporary throughout with `// SMOKE TEST — remove once real kernel workloads drive heap metrics`. the right removal signal: a real kernel workload (first process, first syscall, a scheduler runqueue) that puts persistent state on the heap. until then, the factor table fills the gap honestly.
 
 ## what i learned
 
@@ -83,6 +99,7 @@
 - **`#![forbid(unsafe_code)]` as a default is a forcing function for good factoring.** when it bites, the bite usually points at the right seam. concentrating unsafe at the hardware boundary makes the algorithmic core testable, and "host-testable" turns out to mean "actually testable" in practice.
 - **`#[expect(...)]` is the version of `#[allow(...)]` you should be using.** it's a TODO with the compiler as enforcer. the dead-code suppression on `mmu::map` auto-cleaned itself the moment a caller landed; nobody had to remember to revisit it.
 - **policy / mechanism split keeps showing up.** watermark grow extracted into a pure function with six host tests, vs leaving it as four lines inline in `main.rs` with zero coverage. the inline version "worked"; the extracted version proves it works under boundary conditions.
+- **the grafana `datasource` field is non-optional.** new panels constructed programmatically without `datasource: {type, uid}` on both the panel and each target cause the query to hang indefinitely — not "no data," not an error, just a spinner that never resolves. easy to miss when building panels in code; easy to diagnose by diffing against a working panel.
 - **virtual contiguity is free; physical contiguity is expensive.** every paging-aware kernel surrenders the latter to get the former. P2's heap is the simplest non-trivial example: `map` calls turn scattered PA into contiguous VA, and the `linked_list_allocator` above is none the wiser.
 - **forking a dependency for the right reason is fine.** observability isn't a vague "it'd be nice"; it's load-bearing for this project. the LLA fork is a few dozen lines of patch and unblocks a thread that was otherwise stalled on "we can't see what we'd need to see."
 
@@ -109,7 +126,10 @@
 | ✓ | `linked_list_allocator` forked locally; `Heap::free_block_stats()` exposes hole-list signals |
 | ✓ | integration scenarios: `kernel-heap-metrics`, `heap-oom` (asserts grow → OOM → survival) |
 | ✓ | `Bitmap::alloc_contiguous` retained as a primitive (7 host tests); unused by heap post-P2 but useful for future DMA |
-| ✓ | 84 host tests + 8/8 integration scenarios green |
+| ✓ | `linked_list_allocator` forked; diff tracked in `vendor/patches/linked_list_allocator.patch` |
+| ✓ | `kernel_core::heap_smoke::FactorTable` — BTreeMap prime-factor table, 8 host tests; exercises `free_blocks` + `largest_free_block_bytes` |
+| ✓ | Grafana smoke panels: `entries` (sawtooth), `primes` (monotone), `candidate` (ramp) |
+| ✓ | 92 host tests + 8/8 integration scenarios green |
 
 ## what's next
 
