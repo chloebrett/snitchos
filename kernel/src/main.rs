@@ -240,8 +240,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // `yield_now` picks it. `ThreadRegister` frames are emitted by
     // both calls so the collector can resolve task ids to names.
     let _ = sched::register_bare_task("main", kernel_core::sched::TaskState::Running);
+    let _ = sched::spawn("idle", idle_entry);
     let _ = sched::spawn("task_demo", task_demo_entry);
-
 
     // DTB physical region lives in the identity gigapage we're about
     // to tear down. Drop the borrow first to make "no DTB access from
@@ -264,12 +264,13 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // then emit a span + the metric set.
     let mut count: i64 = 0;
     loop {
-        // Cooperative wait. `yield_now` lets other ready tasks run;
-        // when the runqueue is empty we `wfi`. The timer IRQ flips
-        // `TICK_PENDING` and wakes us out of `wfi`.
-        while !trap::TICK_PENDING.swap(false, Ordering::Relaxed) {
+        // Main as task 0: check for a pending tick; if set, do the
+        // heartbeat work; either way, yield. The `wfi` for "nothing
+        // to do, just wait" lives in the idle thread now — main
+        // doesn't sleep, it just rounds through the scheduler.
+        if !trap::TICK_PENDING.swap(false, Ordering::Relaxed) {
             sched::yield_now();
-            unsafe { asm!("wfi") };
+            continue;
         }
         {
             span!("kernel.heartbeat");
@@ -418,6 +419,18 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(smoke_primes, sst.primes as i64);
             tracing::emit_metric(smoke_candidate, sst.candidate as i64);
         }
+        sched::yield_now();
+    }
+}
+
+/// Idle thread. The "what runs when nothing else wants the CPU"
+/// task. `wfi` sleeps until any interrupt arrives (timer being the
+/// only one v0.5 cares about); the subsequent `yield_now` hands
+/// control to whoever is now ready.
+extern "C" fn idle_entry() -> ! {
+    loop {
+        unsafe { asm!("wfi") };
+        sched::yield_now();
     }
 }
 
