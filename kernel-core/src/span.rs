@@ -1,64 +1,99 @@
-//! Span parent-stack bookkeeping. Pure: allocates monotonically-
-//! increasing span ids and tracks which span is currently innermost,
-//! so a new span can record its parent and Drop can restore it.
+//! Span parent-stack bookkeeping. Two pieces:
+//!
+//! - [`SpanIds`] — global monotonic id allocator. One static for the
+//!   whole kernel; span ids are unique across all tasks so wire frames
+//!   and Tempo trace IDs don't collide.
+//! - [`SpanCursor`] — per-task tracker of the innermost open span.
+//!   Lives inside each `Task`; the scheduler swaps which cursor the
+//!   span open/close paths consult on context switch.
 //!
 //! No frame emission here — the kernel binary owns the wire
 //! (`SpanStart` at open, `SpanEnd` at close, both with timestamps from
 //! a `Clock`). Keeping emission out of this module means tests can run
-//! without a sink or a clock, and the kernel doesn't have to thread a
-//! sink through `Drop`.
+//! without a sink or a clock.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use protocol::SpanId;
 
-/// Per-hart span bookkeeping. Single-hart for v0.1; SMP will need one
-/// of these per CPU (and partitioned id space — see the plan).
-pub struct SpanRegistry {
-    /// Next id to hand out. Starts at 1 so `SpanId(0)` reads as "no
-    /// parent" / root.
+/// Global span-id allocator. One static instance for the whole kernel.
+/// `AtomicU64` because multiple harts (eventually) and multiple tasks
+/// (today, after v0.5) call `allocate` concurrently.
+pub struct SpanIds {
     next_id: AtomicU64,
-    /// Innermost open span on this hart, or 0 if none open.
+}
+
+impl SpanIds {
+    /// Construct with id allocator at 1 — `SpanId(0)` is reserved as
+    /// the "no parent" / root sentinel.
+    pub const fn new() -> Self {
+        Self { next_id: AtomicU64::new(1) }
+    }
+
+    /// Hand out the next span id.
+    pub fn allocate(&self) -> SpanId {
+        SpanId(self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl Default for SpanIds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Per-task tracker of "the innermost open span on this task." Loaded
+/// to get the parent when opening a new span; stored to install or
+/// restore on open / close.
+///
+/// `AtomicU64` rather than a plain `u64` because the field is accessed
+/// through `&self`. Cooperative-single-task today, but the API shape
+/// supports any access pattern (preempt mid-span, IRQ handler opening
+/// its own span on the same hart, etc.) without changing callers.
+pub struct SpanCursor {
     current: AtomicU64,
 }
 
+impl SpanCursor {
+    pub const fn new() -> Self {
+        Self { current: AtomicU64::new(0) }
+    }
+
+    /// Current innermost span id, or `SpanId(0)` if no span is open.
+    pub fn current(&self) -> SpanId {
+        SpanId(self.current.load(Ordering::Relaxed))
+    }
+}
+
+impl Default for SpanCursor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Bookkeeping result from `open`. The caller emits `SpanStart` using
-/// these fields, then stashes `id` + `parent` so it can hand them back
-/// to `close` when the span ends.
+/// these fields, then stashes the value so it can hand it back to
+/// `close` when the span ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpanOpen {
     pub id: SpanId,
     pub parent: SpanId,
 }
 
-impl SpanRegistry {
-    pub const fn new() -> Self {
-        Self {
-            next_id: AtomicU64::new(1),
-            current: AtomicU64::new(0),
-        }
-    }
+/// Open a new span. Mints a fresh id from `ids`, records the previous
+/// innermost as the parent, installs the new id as innermost on
+/// `cursor`.
+pub fn open(ids: &SpanIds, cursor: &SpanCursor) -> SpanOpen {
+    let parent = SpanId(cursor.current.load(Ordering::Relaxed));
+    let id = ids.allocate();
+    cursor.current.store(id.0, Ordering::Relaxed);
+    SpanOpen { id, parent }
+}
 
-    /// Open a new span. Mints a fresh id, records the previously-current
-    /// span as the parent, and installs the new span as current.
-    pub fn open(&self) -> SpanOpen {
-        let parent = SpanId(self.current.load(Ordering::Relaxed));
-        let id = SpanId(self.next_id.fetch_add(1, Ordering::Relaxed));
-        self.current.store(id.0, Ordering::Relaxed);
-        SpanOpen { id, parent }
-    }
-
-    /// Close the span whose `open` returned `span`. Restores `current`
-    /// to that span's parent.
-    pub fn close(&self, span: &SpanOpen) {
-        self.current.store(span.parent.0, Ordering::Relaxed);
-    }
-
-    /// Current innermost span id, or `SpanId(0)` if none open. Exposed
-    /// for tests; not used by the kernel today.
-    pub fn current(&self) -> SpanId {
-        SpanId(self.current.load(Ordering::Relaxed))
-    }
+/// Close the span whose `open` returned `span`. Restores `cursor` to
+/// that span's parent.
+pub fn close(cursor: &SpanCursor, span: &SpanOpen) {
+    cursor.current.store(span.parent.0, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -67,8 +102,9 @@ mod tests {
 
     #[test]
     fn root_span_has_no_parent() {
-        let reg = SpanRegistry::new();
-        let s = reg.open();
+        let ids = SpanIds::new();
+        let cursor = SpanCursor::new();
+        let s = open(&ids, &cursor);
         assert_eq!(s.parent, SpanId(0));
     }
 
@@ -76,38 +112,42 @@ mod tests {
     fn first_id_is_one() {
         // Reserve 0 for "no parent" / sentinel — so the first allocated
         // span must be 1, not 0.
-        let reg = SpanRegistry::new();
-        let s = reg.open();
+        let ids = SpanIds::new();
+        let cursor = SpanCursor::new();
+        let s = open(&ids, &cursor);
         assert_eq!(s.id, SpanId(1));
     }
 
     #[test]
     fn nested_open_records_outer_as_parent() {
-        let reg = SpanRegistry::new();
-        let outer = reg.open();
-        let inner = reg.open();
+        let ids = SpanIds::new();
+        let cursor = SpanCursor::new();
+        let outer = open(&ids, &cursor);
+        let inner = open(&ids, &cursor);
         assert_eq!(inner.parent, outer.id);
     }
 
     #[test]
-    fn close_restores_current_to_parent() {
-        let reg = SpanRegistry::new();
-        let outer = reg.open();
-        let inner = reg.open();
-        assert_eq!(reg.current(), inner.id);
-        reg.close(&inner);
-        assert_eq!(reg.current(), outer.id);
-        reg.close(&outer);
-        assert_eq!(reg.current(), SpanId(0));
+    fn close_restores_cursor_to_parent() {
+        let ids = SpanIds::new();
+        let cursor = SpanCursor::new();
+        let outer = open(&ids, &cursor);
+        let inner = open(&ids, &cursor);
+        assert_eq!(cursor.current(), inner.id);
+        close(&cursor, &inner);
+        assert_eq!(cursor.current(), outer.id);
+        close(&cursor, &outer);
+        assert_eq!(cursor.current(), SpanId(0));
     }
 
     #[test]
     fn siblings_share_parent_and_have_distinct_ids() {
-        let reg = SpanRegistry::new();
-        let outer = reg.open();
-        let a = reg.open();
-        reg.close(&a);
-        let b = reg.open();
+        let ids = SpanIds::new();
+        let cursor = SpanCursor::new();
+        let outer = open(&ids, &cursor);
+        let a = open(&ids, &cursor);
+        close(&cursor, &a);
+        let b = open(&ids, &cursor);
         assert_eq!(a.parent, outer.id);
         assert_eq!(b.parent, outer.id);
         assert_ne!(a.id, b.id);
@@ -117,11 +157,36 @@ mod tests {
     fn ids_monotonically_increase_across_open_close() {
         // Closing a span doesn't recycle its id — important for the
         // host-side decoder to disambiguate spans.
-        let reg = SpanRegistry::new();
-        let a = reg.open();
-        reg.close(&a);
-        let b = reg.open();
+        let ids = SpanIds::new();
+        let cursor = SpanCursor::new();
+        let a = open(&ids, &cursor);
+        close(&cursor, &a);
+        let b = open(&ids, &cursor);
         assert_eq!(a.id, SpanId(1));
         assert_eq!(b.id, SpanId(2));
+    }
+
+    #[test]
+    fn two_cursors_with_shared_ids_dont_share_current_span() {
+        // The whole point of splitting: two tasks each have their own
+        // cursor, but draw from the same global id pool. Span ids stay
+        // unique; "innermost open span" is per-task.
+        let ids = SpanIds::new();
+        let cursor_a = SpanCursor::new();
+        let cursor_b = SpanCursor::new();
+
+        let a_outer = open(&ids, &cursor_a);
+        let b_outer = open(&ids, &cursor_b);
+
+        // Each task sees its own current; ids are globally unique.
+        assert_eq!(cursor_a.current(), a_outer.id);
+        assert_eq!(cursor_b.current(), b_outer.id);
+        assert_ne!(a_outer.id, b_outer.id);
+
+        // B's outer is NOT A's parent. If we'd kept the global cursor,
+        // a's outer would have B's id as parent — that's exactly the
+        // bug the split avoids.
+        assert_eq!(a_outer.parent, SpanId(0));
+        assert_eq!(b_outer.parent, SpanId(0));
     }
 }

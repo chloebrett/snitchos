@@ -11,7 +11,7 @@ use kernel_core::clock::Clock;
 use kernel_core::intern::InternTable;
 use kernel_core::preinit::PreInitBuffer;
 use kernel_core::sink::FrameSink;
-use kernel_core::span::SpanRegistry;
+use kernel_core::span::{self, SpanCursor, SpanIds};
 
 use crate::trap::CLOCK;
 use crate::virtio_console;
@@ -153,13 +153,16 @@ macro_rules! span {
 
 // --- Span machinery ---
 //
-// `SpanRegistry` (in kernel-core) owns the id-allocation + parent-stack
-// bookkeeping; this module owns the wire emit (SpanStart on open,
-// SpanEnd on Drop) and the static instance.
-
-/// Per-hart span registry. Single-hart for v0.1; SMP will need one per
-/// CPU plus id-space partitioning (see plans/scaling-corners.md).
-static SPAN_REGISTRY: SpanRegistry = SpanRegistry::new();
+// Span bookkeeping splits into two pieces (post-v0.5 step 2):
+//
+//   - `SPAN_IDS`: global monotonic id allocator. One static, shared
+//     across all tasks. Ids stay unique across the system.
+//   - `SPAN_CURSOR`: per-task innermost-span tracker. v0.5 cooperative
+//     still has only one task running at a time, so there's still one
+//     static cursor; once `Task::span_cursor` lands and gets swapped
+//     on context switch, this static disappears.
+static SPAN_IDS: SpanIds = SpanIds::new();
+static SPAN_CURSOR: SpanCursor = SpanCursor::new();
 
 /// RAII guard returned by `span_start`. Drop emits `SpanEnd` and
 /// restores the parent-stack to the parent.
@@ -176,7 +179,7 @@ impl Drop for Span {
             id: self.0.id,
             t: timestamp(),
         });
-        SPAN_REGISTRY.close(&self.0);
+        span::close(&SPAN_CURSOR, &self.0);
     }
 }
 
@@ -184,7 +187,7 @@ impl Drop for Span {
 /// emit `SpanEnd`. Nesting is automatic from Rust scopes.
 pub fn span_start(name: &'static str) -> Span {
     let name_id = register_or_lookup(name);
-    let open = SPAN_REGISTRY.open();
+    let open = span::open(&SPAN_IDS, &SPAN_CURSOR);
     emit_frame(&Frame::SpanStart {
         id: open.id,
         parent: open.parent,
