@@ -939,7 +939,11 @@
         {
           "expr": "snitchos_heap_free_blocks",
           "legendFormat": "free blocks",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
@@ -954,6 +958,10 @@
         "tooltip": {
           "mode": "single"
         }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
       }
     },
     {
@@ -970,7 +978,11 @@
         {
           "expr": "snitchos_heap_largest_free_block_bytes",
           "legendFormat": "largest free block",
-          "refId": "A"
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "fieldConfig": {
@@ -985,6 +997,10 @@
         "tooltip": {
           "mode": "single"
         }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
       }
     }
   ]
