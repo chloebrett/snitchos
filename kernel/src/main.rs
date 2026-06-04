@@ -180,6 +180,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let heap_grow_failed = tracing::register_counter("snitchos.heap.grow_failed_total");
     let heap_free_blocks = tracing::register_gauge("snitchos.heap.free_blocks");
     let heap_largest_free_block = tracing::register_gauge("snitchos.heap.largest_free_block_bytes");
+    let sched_smoke_marker_hits = tracing::register_counter("snitchos.sched.smoke_marker_hits");
     // SMOKE TEST metrics — remove with heap_smoke module
     let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
     let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
@@ -215,6 +216,17 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: called exactly once, after frame allocator init, with
     // the linear map live (installed by `mmu::enable`).
     unsafe { heap::init() };
+
+    // v0.5 step 5 smoke: build a marker task context, switch into
+    // it, marker bumps a counter and switches back. Proves the
+    // context-switch asm (`sched::switch`) round-trips correctly
+    // before any of the real spawn/yield machinery is built on top.
+    // If the asm is broken the kernel crashes or hangs here; the
+    // `boot-reaches-heartbeat` scenario times out either way.
+    //
+    // SAFETY: called exactly once, with the heap live and no other
+    // task running.
+    unsafe { sched::smoke() };
 
     // DTB physical region lives in the identity gigapage we're about
     // to tear down. Drop the borrow first to make "no DTB access from
@@ -367,6 +379,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(
                 heap_grow_failed,
                 heap::GROW_FAIL_COUNT.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                sched_smoke_marker_hits,
+                sched::SMOKE_MARKER_HITS.load(Ordering::Relaxed) as i64,
             );
             // SMOKE TEST — remove with heap_smoke module
             heap_smoke::step(count);

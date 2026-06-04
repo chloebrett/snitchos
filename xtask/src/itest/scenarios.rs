@@ -83,6 +83,42 @@ pub fn kernel_heap_metrics() -> Result<(), String> {
 ///   2. `snitchos.heap.alloc_failed_total` rises above 0 — eventual
 ///      OOM is still cleanly handled (null return, not panic).
 ///   3. Two more heartbeats arrive after — kernel survives OOM.
+/// Context-switch asm round-trips correctly. After `heap::init`,
+/// `kmain` calls `sched::smoke()` which builds a hand-rigged
+/// `TaskContext` pointing at a marker function, switches into it,
+/// and switches back. The marker bumps `SMOKE_MARKER_HITS` once.
+/// The heartbeat emits the counter; this scenario asserts it
+/// observed exactly 1 within budget. The asm could be wrong in
+/// subtler ways than "crashes the kernel" — this scenario catches
+/// e.g. corrupting callee-saved registers (would cause weird
+/// failures elsewhere) or never actually entering the marker.
+pub fn sched_context_switch_smoke() -> Result<(), String> {
+    let mut h = Harness::spawn("schedsmoke")?;
+
+    let frame = h
+        .wait_for(SEC * 10, |f, strings| match f {
+            OwnedFrame::Metric { name_id, value, .. } => {
+                strings.get(name_id).map(String::as_str)
+                    == Some("snitchos.sched.smoke_marker_hits")
+                    && *value >= 1
+            }
+            _ => false,
+        })
+        .ok_or(
+            "no sched.smoke_marker_hits >= 1 within 10s — asm switched into marker but never came back, or marker never ran, or counter not emitted",
+        )?;
+    let value = match frame {
+        OwnedFrame::Metric { value, .. } => value,
+        _ => return Err("matched non-metric (impossible)".to_string()),
+    };
+    if value != 1 {
+        return Err(format!(
+            "sched.smoke_marker_hits = {value}, expected exactly 1 (smoke runs once at init)"
+        ));
+    }
+    Ok(())
+}
+
 pub fn heap_oom() -> Result<(), String> {
     let mut h = Harness::spawn_with_features("heap-oom", &["heap-oom"])?;
 
