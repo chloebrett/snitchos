@@ -27,6 +27,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario { name: "sched-context-switch-smoke", run: scenarios::sched_context_switch_smoke },
     Scenario { name: "sched-spawn-registers-thread", run: scenarios::sched_spawn_registers_thread },
     Scenario { name: "sched-yield-round-trips",      run: scenarios::sched_yield_round_trips },
+    Scenario { name: "sched-spans-carry-task-id",    run: scenarios::sched_spans_carry_task_id },
     Scenario { name: "heap-oom",                   run: scenarios::heap_oom },
 ];
 

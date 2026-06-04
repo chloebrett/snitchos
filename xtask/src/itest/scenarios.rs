@@ -120,44 +120,52 @@ pub fn sched_context_switch_smoke() -> Result<(), String> {
 }
 
 /// `kmain` registers task 0 as "main" via `register_bare_task` and
-/// spawns "task_demo" via `spawn(name, entry)`. Each call emits a
-/// `ThreadRegister` frame. This scenario asserts both frames appear
-/// within budget, proving that `spawn` builds + queues a task
-/// successfully and the wire format carries names through to the
-/// collector.
-///
-/// We don't assert task_demo actually *runs* — `yield_now` lands in
-/// step 7 and is the consumer that makes the runqueue produce work.
+/// spawns "idle", "task_a", "task_b" via `spawn(name, entry)`. Each
+/// call emits a `ThreadRegister` frame. This scenario asserts all
+/// four appear within budget, proving `spawn` builds + queues each
+/// task and the wire carries names through to the collector.
 pub fn sched_spawn_registers_thread() -> Result<(), String> {
     let mut h = Harness::spawn("schedspawn")?;
 
     h.wait_for(SEC * 5, is_thread_register_named("main"))
-        .ok_or("no ThreadRegister for 'main' within 5s — register_bare_task not emitting?")?;
-    h.wait_for(SEC * 5, is_thread_register_named("task_demo"))
-        .ok_or("no ThreadRegister for 'task_demo' within 5s — spawn() not emitting?")?;
+        .ok_or("no ThreadRegister for 'main' within 5s")?;
+    h.wait_for(SEC * 5, is_thread_register_named("idle"))
+        .ok_or("no ThreadRegister for 'idle' within 5s")?;
+    h.wait_for(SEC * 5, is_thread_register_named("task_a"))
+        .ok_or("no ThreadRegister for 'task_a' within 5s")?;
+    h.wait_for(SEC * 5, is_thread_register_named("task_b"))
+        .ok_or("no ThreadRegister for 'task_b' within 5s")?;
 
     Ok(())
 }
 
-/// `yield_now()` round-trips at least once. Main's wait-for-tick
-/// loop calls `yield_now` before `wfi`; task_demo immediately yields
-/// back. The heartbeat eventually emits `task_demo.loops` and
-/// `sched.context_switches_total`; both should rise above 0 within
-/// budget. Proves cooperative round-robin works end-to-end.
+/// Cooperative round-robin works: main, idle, task_a, task_b are all
+/// taking turns. We assert both demo tasks' loop counters rise above
+/// 0 within budget, plus the scheduler's cumulative switch counter
+/// climbs. That triplet rules out "yield_now does nothing" and "only
+/// one task runs."
 pub fn sched_yield_round_trips() -> Result<(), String> {
     let mut h = Harness::spawn("schedyield")?;
 
     h.wait_for(SEC * 15, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
-                == Some("snitchos.task_demo.loops")
+                == Some("snitchos.task_a.loops")
                 && *value > 0
         }
         _ => false,
     })
-    .ok_or(
-        "no task_demo.loops > 0 within 15s — yield_now never reached demo, or never came back",
-    )?;
+    .ok_or("no task_a.loops > 0 within 15s")?;
+
+    h.wait_for(SEC * 15, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.task_b.loops")
+                && *value > 0
+        }
+        _ => false,
+    })
+    .ok_or("no task_b.loops > 0 within 15s — round-robin not reaching task_b")?;
 
     h.wait_for(SEC * 15, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
@@ -167,9 +175,52 @@ pub fn sched_yield_round_trips() -> Result<(), String> {
         }
         _ => false,
     })
-    .ok_or(
-        "no sched.context_switches_total > 0 within 15s — switch counter never bumped",
-    )?;
+    .ok_or("no sched.context_switches_total > 0 within 15s")?;
+
+    Ok(())
+}
+
+/// Each demo task emits a `task_x.tick` span per iteration. Asserts
+/// that within budget we see both `task_a.tick` and `task_b.tick`
+/// SpanStart frames on the wire, and each carries its own `task_id`
+/// (matching the `ThreadRegister` for its name). Proves spans are
+/// correctly tagged to the task that emitted them.
+pub fn sched_spans_carry_task_id() -> Result<(), String> {
+    let mut h = Harness::spawn("schedspans")?;
+
+    // First the ThreadRegisters so we know the id↔name mapping.
+    let task_a_reg = h
+        .wait_for(SEC * 5, is_thread_register_named("task_a"))
+        .ok_or("no ThreadRegister for 'task_a'")?;
+    let task_b_reg = h
+        .wait_for(SEC * 5, is_thread_register_named("task_b"))
+        .ok_or("no ThreadRegister for 'task_b'")?;
+    let task_a_id = match task_a_reg {
+        OwnedFrame::ThreadRegister { id, .. } => id,
+        _ => return Err("matched non-ThreadRegister".to_string()),
+    };
+    let task_b_id = match task_b_reg {
+        OwnedFrame::ThreadRegister { id, .. } => id,
+        _ => return Err("matched non-ThreadRegister".to_string()),
+    };
+
+    h.wait_for(SEC * 15, |f, strings| match f {
+        OwnedFrame::SpanStart { name_id, task_id, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("task_a.tick")
+                && *task_id == task_a_id
+        }
+        _ => false,
+    })
+    .ok_or("no SpanStart 'task_a.tick' with task_id matching task_a's ThreadRegister")?;
+
+    h.wait_for(SEC * 15, |f, strings| match f {
+        OwnedFrame::SpanStart { name_id, task_id, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("task_b.tick")
+                && *task_id == task_b_id
+        }
+        _ => false,
+    })
+    .ok_or("no SpanStart 'task_b.tick' with task_id matching task_b's ThreadRegister")?;
 
     Ok(())
 }

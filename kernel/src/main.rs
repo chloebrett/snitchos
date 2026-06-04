@@ -182,7 +182,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let heap_largest_free_block = tracing::register_gauge("snitchos.heap.largest_free_block_bytes");
     let sched_smoke_marker_hits = tracing::register_counter("snitchos.sched.smoke_marker_hits");
     let sched_context_switches = tracing::register_counter("snitchos.sched.context_switches_total");
-    let task_demo_loops = tracing::register_counter("snitchos.task_demo.loops");
+    let task_a_loops = tracing::register_counter("snitchos.task_a.loops");
+    let task_b_loops = tracing::register_counter("snitchos.task_b.loops");
     // SMOKE TEST metrics — remove with heap_smoke module
     let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
     let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
@@ -241,7 +242,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // both calls so the collector can resolve task ids to names.
     let _ = sched::register_bare_task("main", kernel_core::sched::TaskState::Running);
     let _ = sched::spawn("idle", idle_entry);
-    let _ = sched::spawn("task_demo", task_demo_entry);
+    let _ = sched::spawn("task_a", task_a_entry);
+    let _ = sched::spawn("task_b", task_b_entry);
 
     // DTB physical region lives in the identity gigapage we're about
     // to tear down. Drop the borrow first to make "no DTB access from
@@ -409,8 +411,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 sched::CONTEXT_SWITCHES.load(Ordering::Relaxed) as i64,
             );
             tracing::emit_metric(
-                task_demo_loops,
-                TASK_DEMO_LOOPS.load(Ordering::Relaxed) as i64,
+                task_a_loops,
+                TASK_A_LOOPS.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                task_b_loops,
+                TASK_B_LOOPS.load(Ordering::Relaxed) as i64,
             );
             // SMOKE TEST — remove with heap_smoke module
             heap_smoke::step(count);
@@ -434,17 +440,35 @@ extern "C" fn idle_entry() -> ! {
     }
 }
 
-/// Demo task. Bumps `TASK_DEMO_LOOPS` then yields, in a tight loop.
-/// With main's wait-for-tick loop also calling `yield_now`, the
-/// scheduler ping-pongs between the two — proving cooperative
-/// round-robin works end-to-end. The heartbeat emits the counter as
-/// `snitchos.task_demo.loops` so the integration scenario can assert
-/// task_demo actually ran.
-static TASK_DEMO_LOOPS: AtomicU64 = AtomicU64::new(0);
+/// Demo tasks. Each opens a per-iteration `task_x.tick` span, bumps
+/// its counter, and yields. With main and idle in the mix the
+/// scheduler round-robins through all four; both tasks' `tick`
+/// spans interleave on the wire, each correctly tagged with its
+/// own `task_id`.
+///
+/// The span is opened-then-immediately-closed inside an explicit
+/// block so it's never alive across the yield. Per-task `SpanCursor`
+/// swapping on context switch is a future refinement; until then,
+/// the discipline is "balance the cursor before yielding."
+static TASK_A_LOOPS: AtomicU64 = AtomicU64::new(0);
+static TASK_B_LOOPS: AtomicU64 = AtomicU64::new(0);
 
-extern "C" fn task_demo_entry() -> ! {
+extern "C" fn task_a_entry() -> ! {
     loop {
-        TASK_DEMO_LOOPS.fetch_add(1, Ordering::Relaxed);
+        {
+            span!("task_a.tick");
+            TASK_A_LOOPS.fetch_add(1, Ordering::Relaxed);
+        }
+        sched::yield_now();
+    }
+}
+
+extern "C" fn task_b_entry() -> ! {
+    loop {
+        {
+            span!("task_b.tick");
+            TASK_B_LOOPS.fetch_add(1, Ordering::Relaxed);
+        }
         sched::yield_now();
     }
 }
