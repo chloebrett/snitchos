@@ -15,6 +15,7 @@ mod heap;
 mod heap_smoke; // SMOKE TEST — remove once real workloads drive heap metrics
 mod mmu;
 mod percpu;
+mod sched;
 mod sync;
 mod tracing;
 mod trap;

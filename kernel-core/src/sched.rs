@@ -12,6 +12,21 @@ use alloc::collections::VecDeque;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TaskId(pub u32);
 
+/// Where a task is in the scheduler's lifecycle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TaskState {
+    /// On the runqueue, waiting for a turn on the CPU.
+    Ready,
+    /// Currently on-CPU.
+    Running,
+    /// Off-CPU, waiting on something. Placeholder until v0.5.x adds
+    /// real blocking primitives.
+    Blocked,
+    /// Entry function returned (today: impossible since `fn() -> !`,
+    /// but placeholder so the state machine is complete).
+    Exited,
+}
+
 /// FIFO queue of `Ready` tasks. Cooperative round-robin scheduler
 /// pops from front, runs the task, then pushes the same task back
 /// onto the end if it's still ready.
@@ -20,7 +35,7 @@ pub struct Runqueue {
 }
 
 impl Runqueue {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { ready: VecDeque::new() }
     }
 
