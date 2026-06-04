@@ -7,3 +7,6 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+[patch.crates-io]
+linked_list_allocator = { path = "vendor/linked_list_allocator" }
