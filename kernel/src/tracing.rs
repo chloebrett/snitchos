@@ -125,6 +125,13 @@ pub fn emit_metric(name_id: StringId, value: i64) {
     });
 }
 
+/// Emit a `ThreadRegister` frame. Called once per `sched::spawn` so
+/// the collector can resolve `task_id` → human-readable name on
+/// subsequent `SpanStart` frames and OTLP `thread.name` attributes.
+pub fn emit_thread_register(id: kernel_core::sched::TaskId, name: &str) {
+    emit_frame(&Frame::ThreadRegister { id: id.0, name });
+}
+
 /// Open a span named `$name` for the current scope. Expands to a
 /// `let _span = ...` binding so the guard lives until the caller's
 /// scope ends. The span's `SpanEnd` frame fires automatically when

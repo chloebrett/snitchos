@@ -7,7 +7,7 @@ use protocol::stream::OwnedFrame;
 
 
 use super::harness::Harness;
-use super::matchers::{is_dropped, is_hello, is_metric_named, is_span_start_named, is_string_register_named};
+use super::matchers::{is_dropped, is_hello, is_metric_named, is_span_start_named, is_string_register_named, is_thread_register_named};
 
 const SEC: Duration = Duration::from_secs(1);
 
@@ -116,6 +116,26 @@ pub fn sched_context_switch_smoke() -> Result<(), String> {
             "sched.smoke_marker_hits = {value}, expected exactly 1 (smoke runs once at init)"
         ));
     }
+    Ok(())
+}
+
+/// `kmain` registers task 0 as "main" via `register_bare_task` and
+/// spawns "task_demo" via `spawn(name, entry)`. Each call emits a
+/// `ThreadRegister` frame. This scenario asserts both frames appear
+/// within budget, proving that `spawn` builds + queues a task
+/// successfully and the wire format carries names through to the
+/// collector.
+///
+/// We don't assert task_demo actually *runs* — `yield_now` lands in
+/// step 7 and is the consumer that makes the runqueue produce work.
+pub fn sched_spawn_registers_thread() -> Result<(), String> {
+    let mut h = Harness::spawn("schedspawn")?;
+
+    h.wait_for(SEC * 5, is_thread_register_named("main"))
+        .ok_or("no ThreadRegister for 'main' within 5s — register_bare_task not emitting?")?;
+    h.wait_for(SEC * 5, is_thread_register_named("task_demo"))
+        .ok_or("no ThreadRegister for 'task_demo' within 5s — spawn() not emitting?")?;
+
     Ok(())
 }
 

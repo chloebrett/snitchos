@@ -228,6 +228,18 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // task running.
     unsafe { sched::smoke() };
 
+    // v0.5 step 6: register the boot context as task 0 ("main") and
+    // spawn a demo task. `register_bare_task` doesn't allocate a
+    // stack — main inherits the boot stack. `spawn` allocates a
+    // 16 KiB stack and rigs a `TaskContext` so the first switch
+    // into the task lands in its entry function.
+    //
+    // The demo task sits on the runqueue idle until step 7's
+    // `yield_now` picks it. `ThreadRegister` frames are emitted by
+    // both calls so the collector can resolve task ids to names.
+    let _ = sched::register_bare_task("main", kernel_core::sched::TaskState::Running);
+    let _ = sched::spawn("task_demo", task_demo_entry);
+
     // DTB physical region lives in the identity gigapage we're about
     // to tear down. Drop the borrow first to make "no DTB access from
     // here on" load-bearing instead of incidental. `Fdt` has no `Drop`
@@ -391,6 +403,18 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(smoke_primes, sst.primes as i64);
             tracing::emit_metric(smoke_candidate, sst.candidate as i64);
         }
+    }
+}
+
+/// Demo task spawned in `kmain` to give the v0.5 step 6 integration
+/// test something to observe a `ThreadRegister` for. Doesn't yet run
+/// — sits on the runqueue until step 7's `yield_now` exists.
+/// Eventually this becomes a smoke that emits a counter span each
+/// iteration; for now it's an infinite `wfi` so if `yield_now` does
+/// accidentally pick it up, it idles cleanly.
+extern "C" fn task_demo_entry() -> ! {
+    loop {
+        unsafe { asm!("wfi") };
     }
 }
 

@@ -18,7 +18,10 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::arch::global_asm;
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+use protocol::Frame;
 
 use kernel_core::sched::{Runqueue, TaskId, TaskState};
 use kernel_core::span::SpanCursor;
@@ -67,10 +70,30 @@ unsafe extern "C" {
     pub fn switch(from: *mut TaskContext, to: *mut TaskContext);
 }
 
-/// One kernel thread. Today: id, name, scheduler state, span cursor,
-/// stats. Steps 5+ add the saved register context and stack
-/// ownership; step 2's `span::SpanCursor` already gives each task its
-/// own innermost-span tracker.
+/// Per-task stack size in bytes. 16 KiB is generous for kernel work
+/// (the call graphs we have today don't get deep); cheap on 128 MiB.
+pub const STACK_SIZE: usize = 16384;
+
+/// Stack with 16-byte alignment so RISC-V's `extern "C"` ABI is
+/// satisfied on first entry. Used both by `spawn()`-built tasks and
+/// by the v0.5-step-5 smoke.
+#[repr(C, align(16))]
+pub struct Stack([u8; STACK_SIZE]);
+
+impl Stack {
+    pub const fn new_zeroed() -> Self {
+        Self([0u8; STACK_SIZE])
+    }
+    pub fn top_addr(&self) -> u64 {
+        (self as *const _ as u64) + STACK_SIZE as u64
+    }
+}
+
+/// One kernel thread. The `context` field holds the saved
+/// callee-saved register set while the task is off-CPU; the asm
+/// reads/writes it through a `*mut TaskContext`. `_stack` keeps the
+/// stack memory alive — the raw `sp` value in `context` points into
+/// it, so the `Box` must outlive any running of this task.
 pub struct Task {
     pub id: TaskId,
     pub name: String,
@@ -82,10 +105,27 @@ pub struct Task {
     pub cpu_time_ticks: AtomicU64,
     /// How many times the scheduler has picked this task.
     pub runs: AtomicU64,
+    /// Saved register state while off-CPU. `UnsafeCell` because the
+    /// asm needs `*mut` access while the `Task` is borrowed `&` from
+    /// the scheduler's `Vec`. The mutex around the scheduler
+    /// serialises any access to `Task`; the asm holds exclusive
+    /// access through the `*mut` for the duration of the switch.
+    pub context: UnsafeCell<TaskContext>,
+    /// Backing storage for the task's stack. `None` for task 0
+    /// which inherits the boot stack. Field is read by no one
+    /// directly; it's here for `Drop` to free the stack when the
+    /// task is reaped.
+    _stack: Option<Box<Stack>>,
 }
 
+// SAFETY: Task contains an UnsafeCell<TaskContext> (which is !Sync).
+// Access is serialised through the SCHEDULER mutex; the asm holds an
+// exclusive `*mut` for the duration of a `switch` and there is no
+// concurrent reader on the single-hart cooperative v0.5.
+unsafe impl Sync for Task {}
+
 impl Task {
-    fn new(id: TaskId, name: String, state: TaskState) -> Self {
+    fn new_bare(id: TaskId, name: String, state: TaskState) -> Self {
         Self {
             id,
             name,
@@ -93,6 +133,8 @@ impl Task {
             span_cursor: SpanCursor::new(),
             cpu_time_ticks: AtomicU64::new(0),
             runs: AtomicU64::new(0),
+            context: UnsafeCell::new(TaskContext::default()),
+            _stack: None,
         }
     }
 }
@@ -167,8 +209,48 @@ static CURRENT_TASK: AtomicU32 = AtomicU32::new(0);
 /// lands in step 6.
 pub fn register_bare_task(name: &str, state: TaskState) -> TaskId {
     let id = alloc_task_id();
-    let task = Box::new(Task::new(id, String::from(name), state));
+    let task = Box::new(Task::new_bare(id, String::from(name), state));
+    let owned_name = task.name.clone();
     SCHEDULER.lock().tasks.push(task);
+    crate::tracing::emit_thread_register(id, &owned_name);
+    id
+}
+
+/// Spawn a new kernel thread. Allocates a 16 KiB stack, rigs a
+/// `TaskContext` so the first `switch` into the task lands in
+/// `entry`, registers the task with the scheduler, and pushes it
+/// onto the runqueue. Emits a `ThreadRegister` frame so the
+/// collector can resolve the task id to a name.
+///
+/// The task does not run immediately — it sits on the runqueue
+/// until the scheduler picks it (step 7's `yield_now`).
+///
+/// `entry` is `extern "C" fn() -> !` so the function's call ABI
+/// matches what the asm hands it on first switch, and the type
+/// system says it won't return (because if it does, we don't have
+/// anywhere to return *to*).
+pub fn spawn(name: &str, entry: extern "C" fn() -> !) -> TaskId {
+    let id = alloc_task_id();
+    let stack: Box<Stack> = Box::new(Stack::new_zeroed());
+    let sp = stack.top_addr();
+
+    let mut task = Box::new(Task::new_bare(id, String::from(name), TaskState::Ready));
+    // SAFETY: we have unique ownership of `task`; nothing else
+    // references it yet.
+    unsafe {
+        let ctx = &mut *task.context.get();
+        ctx.ra = entry as *const () as u64;
+        ctx.sp = sp;
+    }
+    task._stack = Some(stack);
+
+    let owned_name = task.name.clone();
+    {
+        let mut sched = SCHEDULER.lock();
+        sched.tasks.push(task);
+        sched.runqueue.push_back(id);
+    }
+    crate::tracing::emit_thread_register(id, &owned_name);
     id
 }
 
@@ -180,7 +262,7 @@ pub fn register_bare_task(name: &str, state: TaskState) -> TaskId {
 pub static SMOKE_MARKER_HITS: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C, align(16))]
-struct SmokeStack([u8; 16384]);
+struct SmokeStack([u8; STACK_SIZE]);
 
 /// Bare `UnsafeCell<TaskContext>` static. Mutex would deadlock since
 /// `marker_fn` re-enters the smoke path and tries to lock the same
@@ -225,8 +307,8 @@ static SMOKE_MARKER_CTX: SmokeCtx = SmokeCtx(core::cell::UnsafeCell::new(TaskCon
 pub unsafe fn smoke() {
     // Leak — one-time smoke, the 16 KiB stack belongs to the marker
     // forever. Step 6's `spawn` will track stack ownership properly.
-    let stack: Box<SmokeStack> = Box::new(SmokeStack([0u8; 16384]));
-    let stack_top = (stack.as_ref() as *const _ as u64) + 16384;
+    let stack: Box<SmokeStack> = Box::new(SmokeStack([0u8; STACK_SIZE]));
+    let stack_top = (stack.as_ref() as *const _ as u64) + STACK_SIZE as u64;
     core::mem::forget(stack);
 
     // SAFETY: single-hart, single-thread, smoke runs once at init;

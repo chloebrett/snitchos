@@ -27,6 +27,10 @@ pub fn is_string_register_named(name: &'static str) -> impl Fn(&OwnedFrame, &Str
     move |f, _| matches!(f, OwnedFrame::StringRegister { value, .. } if value == name)
 }
 
+pub fn is_thread_register_named(name: &'static str) -> impl Fn(&OwnedFrame, &StringTable) -> bool {
+    move |f, _| matches!(f, OwnedFrame::ThreadRegister { name: n, .. } if n == name)
+}
+
 pub fn is_metric_named(name: &'static str) -> impl Fn(&OwnedFrame, &StringTable) -> bool {
     move |f, strings| match f {
         OwnedFrame::Metric { name_id, .. } => {

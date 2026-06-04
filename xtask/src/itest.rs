@@ -25,6 +25,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario { name: "frame-allocator-oom",        run: scenarios::frame_allocator_oom },
     Scenario { name: "kernel-heap-metrics",        run: scenarios::kernel_heap_metrics },
     Scenario { name: "sched-context-switch-smoke", run: scenarios::sched_context_switch_smoke },
+    Scenario { name: "sched-spawn-registers-thread", run: scenarios::sched_spawn_registers_thread },
     Scenario { name: "heap-oom",                   run: scenarios::heap_oom },
 ];
 
