@@ -21,7 +21,7 @@ use core::arch::global_asm;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use protocol::Frame;
+use protocol::{Frame, SwitchReason};
 
 use kernel_core::sched::{Runqueue, TaskId, TaskState};
 use kernel_core::span::SpanCursor;
@@ -178,6 +178,11 @@ impl Scheduler {
 /// inside `Mutex::lock` cover every access uniformly.
 pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 
+/// Cumulative count of context switches the scheduler has performed.
+/// Bumped per `yield_now` that actually switched (no-op yields when
+/// the runqueue was empty don't count).
+pub static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
+
 /// Allocator for new task ids. Monotonically increasing; never
 /// recycles. `Task 0` is reserved for the boot context, allocated
 /// when `init_with_current_as_main` runs in step 8.
@@ -252,6 +257,70 @@ pub fn spawn(name: &str, entry: extern "C" fn() -> !) -> TaskId {
     }
     crate::tracing::emit_thread_register(id, &owned_name);
     id
+}
+
+/// Voluntarily yield CPU to the next task on the runqueue. The
+/// current task is pushed onto the back of the runqueue; the next
+/// task is popped from the front and switched into. If the runqueue
+/// is empty, returns immediately (nothing else wants the CPU).
+///
+/// Cooperative-v0.5: every kernel thread is expected to call this
+/// periodically (or at any blocking point). Preempt-disable for
+/// not-yet-existent preemption + lock-discipline ("don't yield while
+/// holding a `kernel::sync::Mutex`") is on the caller for now.
+pub fn yield_now() {
+    let current_id = TaskId(CURRENT_TASK.load(Ordering::Relaxed));
+
+    let (current_ctx, next_ctx, next_id) = {
+        let mut sched = SCHEDULER.lock();
+        let Some(next_id) = sched.runqueue.pop_front() else {
+            return; // nothing else ready — keep running
+        };
+        if next_id == current_id {
+            // Shouldn't happen — current task is supposed to be off the
+            // runqueue while running — but defensively don't switch
+            // into ourselves (would corrupt the saved context).
+            sched.runqueue.push_back(next_id);
+            return;
+        }
+
+        // Single pass through the task table to capture both context
+        // pointers + bump the picked task's runs counter. Box<Task>
+        // means the Task itself sits at a stable heap address even if
+        // the Vec reallocates, so the raw pointers stay valid past
+        // the lock drop.
+        let mut current_ctx: *mut TaskContext = core::ptr::null_mut();
+        let mut next_ctx: *mut TaskContext = core::ptr::null_mut();
+        for task in &sched.tasks {
+            if task.id == current_id {
+                current_ctx = task.context.get();
+            }
+            if task.id == next_id {
+                next_ctx = task.context.get();
+                task.runs.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        assert!(!current_ctx.is_null(), "current task missing from table");
+        assert!(!next_ctx.is_null(), "next task missing from table");
+
+        sched.runqueue.push_back(current_id);
+        CURRENT_TASK.store(next_id.0, Ordering::Relaxed);
+
+        (current_ctx, next_ctx, next_id)
+        // Lock dropped here. The asm runs without the scheduler lock.
+    };
+
+    CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    crate::tracing::emit_context_switch(current_id, next_id, SwitchReason::Yield);
+
+    // SAFETY: both pointers point at `UnsafeCell<TaskContext>` storage
+    // inside `Box<Task>` allocations owned by `SCHEDULER.tasks`. The
+    // `Vec` may reallocate its slice of `Box` pointers, but the
+    // `Task` allocations sit at stable heap addresses. The asm has
+    // exclusive access to both for the duration of the call (cooperative
+    // single-hart; no preemption mid-switch).
+    unsafe { switch(current_ctx, next_ctx) };
+    // We've been resumed (a future yield switched back into us).
 }
 
 // --- v0.5 step 5 smoke: round-trip the asm without involving the runqueue ---

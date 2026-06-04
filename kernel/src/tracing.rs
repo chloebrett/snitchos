@@ -132,6 +132,22 @@ pub fn emit_thread_register(id: kernel_core::sched::TaskId, name: &str) {
     emit_frame(&Frame::ThreadRegister { id: id.0, name });
 }
 
+/// Emit a `ContextSwitch` frame. Called by `sched::yield_now` on
+/// every actual switch. Makes scheduler decisions first-class
+/// traceable events.
+pub fn emit_context_switch(
+    from: kernel_core::sched::TaskId,
+    to: kernel_core::sched::TaskId,
+    reason: protocol::SwitchReason,
+) {
+    emit_frame(&Frame::ContextSwitch {
+        from: from.0,
+        to: to.0,
+        t: timestamp(),
+        reason,
+    });
+}
+
 /// Open a span named `$name` for the current scope. Expands to a
 /// `let _span = ...` binding so the guard lives until the caller's
 /// scope ends. The span's `SpanEnd` frame fires automatically when

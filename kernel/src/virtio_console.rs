@@ -367,15 +367,32 @@ pub unsafe fn init(dtb: &Fdt) -> Result<(), InitError> {
 /// Send a buffer of bytes out the kernel's virtio-console. Silently
 /// no-ops if `init` hasn't completed (matches the println macro's
 /// "pre-init bytes are lost" behavior).
+/// Per-emit staging buffer. The virtio device wants a *physical*
+/// address in its descriptor. Frames built on heap-backed task stacks
+/// have VAs in the heap range (`HEAP_VA_BASE+`), which `mmu::va_to_pa`
+/// does NOT translate — it only strips `KERNEL_OFFSET`. Passing a
+/// heap VA to the device would silently DMA random physical memory.
+///
+/// Copying into this static (which lives in the kernel-image `.bss`,
+/// so `va_to_pa` strips `KERNEL_OFFSET` correctly) sidesteps the
+/// issue. Serialised through the same `CONSOLE` mutex `send` already
+/// takes, so no extra synchronisation needed.
+static mut TX_STAGING: [u8; 256] = [0u8; 256];
+
 pub fn send(bytes: &[u8]) {
     let Some(handle) = CONSOLE.get() else {
         return;
     };
     let base = *handle.lock();
-    // SAFETY: CONSOLE was populated by `init`, which ran handshake +
-    // queue setup against `base`. The device is ready to receive on
-    // the TX queue.
-    unsafe { transmit(base, bytes) };
+    let len = bytes.len().min(unsafe { (&raw const TX_STAGING).read() }.len());
+    // SAFETY: CONSOLE was just locked — single writer to TX_STAGING +
+    // the device for the duration of the lock + transmit.
+    unsafe {
+        let staging = &raw mut TX_STAGING;
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), staging as *mut u8, len);
+        let staged = core::slice::from_raw_parts((staging as *const u8), len);
+        transmit(base, staged);
+    }
 }
 
 /// Drive the virtio-mmio handshake on a discovered console device up

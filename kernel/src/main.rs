@@ -5,7 +5,7 @@ extern crate alloc;
 
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use fdt::Fdt;
 
 mod console;
@@ -181,6 +181,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let heap_free_blocks = tracing::register_gauge("snitchos.heap.free_blocks");
     let heap_largest_free_block = tracing::register_gauge("snitchos.heap.largest_free_block_bytes");
     let sched_smoke_marker_hits = tracing::register_counter("snitchos.sched.smoke_marker_hits");
+    let sched_context_switches = tracing::register_counter("snitchos.sched.context_switches_total");
+    let task_demo_loops = tracing::register_counter("snitchos.task_demo.loops");
     // SMOKE TEST metrics — remove with heap_smoke module
     let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
     let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
@@ -240,6 +242,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let _ = sched::register_bare_task("main", kernel_core::sched::TaskState::Running);
     let _ = sched::spawn("task_demo", task_demo_entry);
 
+
     // DTB physical region lives in the identity gigapage we're about
     // to tear down. Drop the borrow first to make "no DTB access from
     // here on" load-bearing instead of incidental. `Fdt` has no `Drop`
@@ -261,7 +264,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // then emit a span + the metric set.
     let mut count: i64 = 0;
     loop {
+        // Cooperative wait. `yield_now` lets other ready tasks run;
+        // when the runqueue is empty we `wfi`. The timer IRQ flips
+        // `TICK_PENDING` and wakes us out of `wfi`.
         while !trap::TICK_PENDING.swap(false, Ordering::Relaxed) {
+            sched::yield_now();
             unsafe { asm!("wfi") };
         }
         {
@@ -396,6 +403,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 sched_smoke_marker_hits,
                 sched::SMOKE_MARKER_HITS.load(Ordering::Relaxed) as i64,
             );
+            tracing::emit_metric(
+                sched_context_switches,
+                sched::CONTEXT_SWITCHES.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                task_demo_loops,
+                TASK_DEMO_LOOPS.load(Ordering::Relaxed) as i64,
+            );
             // SMOKE TEST — remove with heap_smoke module
             heap_smoke::step(count);
             let sst = heap_smoke::stats();
@@ -406,15 +421,18 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     }
 }
 
-/// Demo task spawned in `kmain` to give the v0.5 step 6 integration
-/// test something to observe a `ThreadRegister` for. Doesn't yet run
-/// — sits on the runqueue until step 7's `yield_now` exists.
-/// Eventually this becomes a smoke that emits a counter span each
-/// iteration; for now it's an infinite `wfi` so if `yield_now` does
-/// accidentally pick it up, it idles cleanly.
+/// Demo task. Bumps `TASK_DEMO_LOOPS` then yields, in a tight loop.
+/// With main's wait-for-tick loop also calling `yield_now`, the
+/// scheduler ping-pongs between the two — proving cooperative
+/// round-robin works end-to-end. The heartbeat emits the counter as
+/// `snitchos.task_demo.loops` so the integration scenario can assert
+/// task_demo actually ran.
+static TASK_DEMO_LOOPS: AtomicU64 = AtomicU64::new(0);
+
 extern "C" fn task_demo_entry() -> ! {
     loop {
-        unsafe { asm!("wfi") };
+        TASK_DEMO_LOOPS.fetch_add(1, Ordering::Relaxed);
+        sched::yield_now();
     }
 }
 

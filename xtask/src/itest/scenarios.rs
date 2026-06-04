@@ -139,6 +139,41 @@ pub fn sched_spawn_registers_thread() -> Result<(), String> {
     Ok(())
 }
 
+/// `yield_now()` round-trips at least once. Main's wait-for-tick
+/// loop calls `yield_now` before `wfi`; task_demo immediately yields
+/// back. The heartbeat eventually emits `task_demo.loops` and
+/// `sched.context_switches_total`; both should rise above 0 within
+/// budget. Proves cooperative round-robin works end-to-end.
+pub fn sched_yield_round_trips() -> Result<(), String> {
+    let mut h = Harness::spawn("schedyield")?;
+
+    h.wait_for(SEC * 15, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.task_demo.loops")
+                && *value > 0
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no task_demo.loops > 0 within 15s — yield_now never reached demo, or never came back",
+    )?;
+
+    h.wait_for(SEC * 15, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.sched.context_switches_total")
+                && *value > 0
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no sched.context_switches_total > 0 within 15s — switch counter never bumped",
+    )?;
+
+    Ok(())
+}
+
 pub fn heap_oom() -> Result<(), String> {
     let mut h = Harness::spawn_with_features("heap-oom", &["heap-oom"])?;
 
