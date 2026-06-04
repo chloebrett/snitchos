@@ -113,10 +113,13 @@ pub fn stats() -> Option<Stats> {
     if h.size() == 0 {
         return None;
     }
+    let (free_blocks, largest_free_block) = h.free_block_stats();
     Some(Stats {
         capacity: h.size(),
         used: h.used(),
         free: h.free(),
+        free_blocks,
+        largest_free_block,
     })
 }
 

@@ -240,6 +240,14 @@ impl Heap {
         self.size() - self.used
     }
 
+    /// Returns `(free_block_count, largest_free_block_bytes)`.
+    ///
+    /// Walks the internal hole list — O(n) in the number of free blocks. The
+    /// caller must hold the heap lock for the duration.
+    pub fn free_block_stats(&self) -> (usize, usize) {
+        self.holes.free_block_stats()
+    }
+
     /// Extends the size of the heap by creating a new hole at the end.
     ///
     /// Small extensions are not guaranteed to grow the usable size of

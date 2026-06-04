@@ -439,6 +439,28 @@ impl HoleList {
         })
     }
 
+    /// Returns `(free_block_count, largest_free_block_bytes)` by walking the
+    /// hole list. O(n) in the number of free blocks. Safe to call at any time
+    /// the list is in a consistent state (i.e. not mid-allocation).
+    pub fn free_block_stats(&self) -> (usize, usize) {
+        let mut count = 0usize;
+        let mut largest = 0usize;
+        let mut next = self.first.next;
+        while let Some(hole) = next {
+            // SAFETY: every node in the list was placed there by `make_hole`
+            // or `HoleList::new`, which write a valid `Hole` before inserting
+            // the pointer. The list is only mutated while the `Heap` lock is
+            // held; callers of `free_block_stats` must hold the same lock.
+            let hole_ref = unsafe { hole.as_ref() };
+            count += 1;
+            if hole_ref.size > largest {
+                largest = hole_ref.size;
+            }
+            next = hole_ref.next;
+        }
+        (count, largest)
+    }
+
     pub(crate) unsafe fn extend(&mut self, by: usize) {
         assert!(!self.top.is_null(), "tried to extend an empty heap");
 

@@ -18,7 +18,7 @@ mod tests {
     }
 
     fn stats(capacity: usize, used: usize) -> Stats {
-        Stats { capacity, used, free: capacity - used }
+        Stats { capacity, used, free: capacity - used, free_blocks: 0, largest_free_block: 0 }
     }
 
     #[test]
@@ -97,6 +97,12 @@ pub struct Stats {
     /// include hole-list metadata as "free" even though it isn't
     /// usable for allocations.
     pub free: usize,
+    /// Number of discontiguous free blocks (holes) in the allocator.
+    /// High values relative to `free` indicate fragmentation.
+    pub free_blocks: usize,
+    /// Size of the largest single free block in bytes. The maximum
+    /// allocation that can succeed without a grow event.
+    pub largest_free_block: usize,
 }
 
 #[derive(Clone, Copy, Debug)]

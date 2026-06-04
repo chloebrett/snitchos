@@ -174,6 +174,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let heap_bytes_free = tracing::register_gauge("snitchos.heap.bytes_free");
     let heap_grow_total = tracing::register_counter("snitchos.heap.grow_total");
     let heap_grow_failed = tracing::register_counter("snitchos.heap.grow_failed_total");
+    let heap_free_blocks = tracing::register_gauge("snitchos.heap.free_blocks");
+    let heap_largest_free_block = tracing::register_gauge("snitchos.heap.largest_free_block_bytes");
 
     // Arm the periodic timer and enable interrupts. From here on, the
     // CPU wakes us via timer IRQ instead of us spinning on the cycle
@@ -334,6 +336,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 tracing::emit_metric(heap_bytes_capacity, hstats.capacity as i64);
                 tracing::emit_metric(heap_bytes_used, hstats.used as i64);
                 tracing::emit_metric(heap_bytes_free, hstats.free as i64);
+                tracing::emit_metric(heap_free_blocks, hstats.free_blocks as i64);
+                tracing::emit_metric(heap_largest_free_block, hstats.largest_free_block as i64);
                 // Watermark grow. The policy (when + by how much) is
                 // pure logic in `kernel_core::heap`; this loop owns
                 // the side effect of acting on the decision.
