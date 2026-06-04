@@ -1085,6 +1085,35 @@
       }
     },
     {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Active threads (idle excluded)",
+      "description": "Per-task CPU time rate excluding idle's `wfi`-dominated band. Use this to see relative work between non-idle threads when idle would otherwise drown them out.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 76 },
+      "targets": [
+        { "refId": "A", "expr": "rate(snitchos_task_main_cpu_time_ticks[30s])", "legendFormat": "main", "datasource": { "type": "prometheus", "uid": "prometheus" }, "interval": "5s" },
+        { "refId": "B", "expr": "rate(snitchos_task_task_a_cpu_time_ticks[30s])", "legendFormat": "task_a", "datasource": { "type": "prometheus", "uid": "prometheus" }, "interval": "5s" },
+        { "refId": "C", "expr": "rate(snitchos_task_task_b_cpu_time_ticks[30s])", "legendFormat": "task_b", "datasource": { "type": "prometheus", "uid": "prometheus" }, "interval": "5s" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "stacking": { "mode": "normal", "group": "A" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
       "id": 30,
       "type": "timeseries",
       "title": "Thread timeline (CPU time share)",
