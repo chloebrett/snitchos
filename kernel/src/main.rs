@@ -182,6 +182,9 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let heap_largest_free_block = tracing::register_gauge("snitchos.heap.largest_free_block_bytes");
     let sched_smoke_marker_hits = tracing::register_counter("snitchos.sched.smoke_marker_hits");
     let sched_context_switches = tracing::register_counter("snitchos.sched.context_switches_total");
+    let sched_runqueue_depth = tracing::register_gauge("snitchos.sched.runqueue_depth");
+    let sched_tasks_total = tracing::register_gauge("snitchos.sched.tasks_total");
+    let sched_yield_overhead = tracing::register_histogram("snitchos.sched.yield_overhead_ticks");
     let task_a_loops = tracing::register_counter("snitchos.task_a.loops");
     let task_b_loops = tracing::register_counter("snitchos.task_b.loops");
     // SMOKE TEST metrics — remove with heap_smoke module
@@ -409,6 +412,13 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(
                 sched_context_switches,
                 sched::CONTEXT_SWITCHES.load(Ordering::Relaxed) as i64,
+            );
+            let sched_snap = sched::stats();
+            tracing::emit_metric(sched_runqueue_depth, sched_snap.runqueue_depth as i64);
+            tracing::emit_metric(sched_tasks_total, sched_snap.tasks_total as i64);
+            tracing::emit_metric(
+                sched_yield_overhead,
+                sched::LAST_YIELD_OVERHEAD_TICKS.load(Ordering::Relaxed) as i64,
             );
             tracing::emit_metric(
                 task_a_loops,

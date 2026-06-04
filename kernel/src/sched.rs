@@ -183,6 +183,15 @@ pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 /// the runqueue was empty don't count).
 pub static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
 
+/// Time spent in `yield_now`'s bookkeeping (everything from function
+/// entry up to but not including the `switch` asm). Captures the
+/// scheduler's per-yield overhead — lock acquisition, runqueue
+/// manipulation, context-pointer lookup, the `ContextSwitch` frame
+/// emission. Does NOT include the asm itself (a handful of cycles)
+/// or the time off-CPU (which is "everyone else's time," not ours).
+/// Sampled by the heartbeat into a histogram.
+pub static LAST_YIELD_OVERHEAD_TICKS: AtomicU64 = AtomicU64::new(0);
+
 /// Allocator for new task ids. Monotonically increasing; never
 /// recycles. `Task 0` is reserved for the boot context, allocated
 /// when `init_with_current_as_main` runs in step 8.
@@ -190,6 +199,21 @@ static NEXT_TASK_ID: AtomicU32 = AtomicU32::new(0);
 
 fn alloc_task_id() -> TaskId {
     TaskId(NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Snapshot of scheduler counts. Cheap; briefly takes the scheduler
+/// lock. Called by the heartbeat each tick.
+pub struct SchedStats {
+    pub tasks_total: usize,
+    pub runqueue_depth: usize,
+}
+
+pub fn stats() -> SchedStats {
+    let sched = SCHEDULER.lock();
+    SchedStats {
+        tasks_total: sched.task_count(),
+        runqueue_depth: sched.runqueue_depth(),
+    }
 }
 
 /// Currently-running task. v0.5 step 4 stub: returns 0 (the boot /
@@ -269,6 +293,7 @@ pub fn spawn(name: &str, entry: extern "C" fn() -> !) -> TaskId {
 /// not-yet-existent preemption + lock-discipline ("don't yield while
 /// holding a `kernel::sync::Mutex`") is on the caller for now.
 pub fn yield_now() {
+    let t_entry = crate::tracing::timestamp();
     let current_id = TaskId(CURRENT_TASK.load(Ordering::Relaxed));
 
     let (current_ctx, next_ctx, next_id) = {
@@ -312,6 +337,10 @@ pub fn yield_now() {
 
     CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
     crate::tracing::emit_context_switch(current_id, next_id, SwitchReason::Yield);
+
+    let t_before_switch = crate::tracing::timestamp();
+    LAST_YIELD_OVERHEAD_TICKS
+        .store(t_before_switch.wrapping_sub(t_entry), Ordering::Relaxed);
 
     // SAFETY: both pointers point at `UnsafeCell<TaskContext>` storage
     // inside `Box<Task>` allocations owned by `SCHEDULER.tasks`. The
