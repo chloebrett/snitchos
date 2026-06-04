@@ -180,6 +180,43 @@ pub fn sched_yield_round_trips() -> Result<(), String> {
     Ok(())
 }
 
+/// `ContextSwitch` frames arrive on the wire with sane `from` / `to`
+/// values. We harvest the ThreadRegister id for each known task,
+/// then wait for a ContextSwitch frame whose endpoints are both
+/// recognised task ids and whose reason is `Yield` (only switch
+/// flavour in cooperative v0.5). Proves the scheduler is emitting
+/// the per-switch event, not just the cumulative counter.
+pub fn sched_context_switches_on_wire() -> Result<(), String> {
+    use std::collections::HashSet;
+
+    let mut h = Harness::spawn("schedcs")?;
+
+    let mut task_ids: HashSet<u32> = HashSet::new();
+    for name in ["main", "idle", "task_a", "task_b"] {
+        let frame = h
+            .wait_for(SEC * 5, is_thread_register_named(name))
+            .ok_or_else(|| std::format!("no ThreadRegister for '{name}'"))?;
+        if let OwnedFrame::ThreadRegister { id, .. } = frame {
+            task_ids.insert(id);
+        }
+    }
+
+    h.wait_for(SEC * 10, move |f, _| match f {
+        OwnedFrame::ContextSwitch { from, to, reason, .. } => {
+            task_ids.contains(from)
+                && task_ids.contains(to)
+                && from != to
+                && matches!(reason, protocol::SwitchReason::Yield)
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no ContextSwitch{Yield} with both endpoints being known task ids within 10s",
+    )?;
+
+    Ok(())
+}
+
 /// Each demo task emits a `task_x.tick` span per iteration. Asserts
 /// that within budget we see both `task_a.tick` and `task_b.tick`
 /// SpanStart frames on the wire, and each carries its own `task_id`
