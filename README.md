@@ -2,11 +2,11 @@
 
 The operating system that snitches on itself 🐀
 
-![SnitchOS in Grafana 1](posts/tracing-1.png)
+![SnitchOS in Grafana 1](posts/tracing-30min-1.png)
 
-![SnitchOS in Grafana 2](posts/tracing-2.png)
+![SnitchOS in Grafana 2](posts/tracing-30min-2.png)
 
-![SnitchOS in Grafana 3](posts/tracing-3.png)
+![SnitchOS in Grafana 3](posts/tracing-30min-3.png)
 
 ## Status
 

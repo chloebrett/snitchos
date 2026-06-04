@@ -17,6 +17,7 @@ pub mod heap;
 pub mod intern;
 pub mod mmu;
 pub mod preinit;
+pub mod sched;
 pub mod sink;
 pub mod span;
 pub mod trap;
