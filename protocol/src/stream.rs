@@ -8,7 +8,7 @@ use std::io::Read;
 use std::string::{String, ToString};
 use std::vec::Vec;
 
-use crate::{Frame, MetricKind, SpanId, StringId};
+use crate::{Frame, MetricKind, SpanId, StringId, SwitchReason};
 
 /// Owned, lifetime-free counterpart of `Frame<'a>`. The host-side
 /// reader thread decodes into a temporary buffer and converts to
@@ -20,13 +20,15 @@ use crate::{Frame, MetricKind, SpanId, StringId};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnedFrame {
     Hello { timebase_hz: u64, protocol_version: u8 },
-    SpanStart { id: SpanId, parent: SpanId, name_id: StringId, t: u64 },
+    SpanStart { id: SpanId, parent: SpanId, name_id: StringId, t: u64, task_id: u32 },
     SpanEnd { id: SpanId, t: u64 },
     Event { span_id: SpanId, name_id: StringId, t: u64 },
     Metric { name_id: StringId, value: i64, t: u64 },
     Dropped { count: u32 },
     StringRegister { id: StringId, value: String },
     MetricRegister { name_id: StringId, kind: MetricKind },
+    ThreadRegister { id: u32, name: String },
+    ContextSwitch { from: u32, to: u32, t: u64, reason: SwitchReason },
 }
 
 impl OwnedFrame {
@@ -35,8 +37,8 @@ impl OwnedFrame {
             Frame::Hello { timebase_hz, protocol_version } => {
                 OwnedFrame::Hello { timebase_hz, protocol_version }
             }
-            Frame::SpanStart { id, parent, name_id, t } => {
-                OwnedFrame::SpanStart { id, parent, name_id, t }
+            Frame::SpanStart { id, parent, name_id, t, task_id } => {
+                OwnedFrame::SpanStart { id, parent, name_id, t, task_id }
             }
             Frame::SpanEnd { id, t } => OwnedFrame::SpanEnd { id, t },
             Frame::Event { span_id, name_id, t } => {
@@ -51,6 +53,12 @@ impl OwnedFrame {
             }
             Frame::MetricRegister { name_id, kind } => {
                 OwnedFrame::MetricRegister { name_id, kind }
+            }
+            Frame::ThreadRegister { id, name } => {
+                OwnedFrame::ThreadRegister { id, name: name.to_string() }
+            }
+            Frame::ContextSwitch { from, to, t, reason } => {
+                OwnedFrame::ContextSwitch { from, to, t, reason }
             }
         }
     }
@@ -138,7 +146,9 @@ mod tests {
         // checklist of variants.
         for f in [
             Frame::Hello { timebase_hz: 1, protocol_version: 0 },
-            Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(0), t: 1 },
+            Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(0), t: 1, task_id: 0 },
+            Frame::ThreadRegister { id: 1, name: "task_a" },
+            Frame::ContextSwitch { from: 1, to: 2, t: 1, reason: SwitchReason::Yield },
             Frame::SpanEnd { id: SpanId(1), t: 2 },
             Frame::Event { span_id: SpanId(1), name_id: StringId(0), t: 3 },
             Frame::Metric { name_id: StringId(0), value: 5, t: 4 },

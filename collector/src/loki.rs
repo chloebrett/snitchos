@@ -91,6 +91,8 @@ mod tests {
             parent_span_id: parent,
             start_time_ns: start_ns,
             end_time_ns: end_ns,
+            task_id: 0,
+            thread_name: None,
         }
     }
 

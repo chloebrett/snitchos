@@ -50,6 +50,13 @@ pub struct CompletedSpan {
     /// the first frame of the session.
     pub start_time_ns: u128,
     pub end_time_ns: u128,
+    /// Task that opened this span (0 = main/boot task). Mapped to a
+    /// human-readable name via the State's `thread_names` table; the
+    /// export path materialises it as a `thread.name` OTLP attribute.
+    pub task_id: u32,
+    /// Cached thread name at SpanEnd time. `None` if no
+    /// `ThreadRegister` for this task_id arrived before SpanEnd.
+    pub thread_name: Option<String>,
 }
 
 /// Wall-clock + tick anchor for the current kernel session. Set on
@@ -69,6 +76,7 @@ struct OpenSpan {
     parent: SpanId,
     name_id: StringId,
     start_t: u64,
+    task_id: u32,
 }
 
 /// A single histogram metric — buckets of observations.
@@ -111,6 +119,10 @@ pub struct State {
     strings: HashMap<u32, String>,
     metric_kinds: HashMap<u32, MetricKind>,
     open_spans: HashMap<u64, OpenSpan>,
+    /// task_id → human-readable thread name. Populated by
+    /// `ThreadRegister`; consulted at SpanEnd to tag the completed
+    /// span with its `thread.name`.
+    thread_names: HashMap<u32, String>,
     /// Last-seen value per counter/gauge metric. Histograms go in
     /// `histograms` instead.
     pub metric_values: HashMap<u32, i64>,
@@ -130,6 +142,7 @@ impl State {
             strings: HashMap::new(),
             metric_kinds: HashMap::new(),
             open_spans: HashMap::new(),
+            thread_names: HashMap::new(),
             metric_values: HashMap::new(),
             histograms: HashMap::new(),
             warned_no_hello: false,
@@ -192,6 +205,7 @@ impl State {
                 parent,
                 name_id,
                 t,
+                task_id,
             } => {
                 self.advance_anchor(*t);
                 self.open_spans.insert(
@@ -200,6 +214,7 @@ impl State {
                         parent: *parent,
                         name_id: *name_id,
                         start_t: *t,
+                        task_id: *task_id,
                     },
                 );
                 None
@@ -212,12 +227,15 @@ impl State {
                     .get(&open.name_id.0)
                     .cloned()
                     .unwrap_or_else(|| format!("<unknown name_id={}>", open.name_id.0));
+                let thread_name = self.thread_names.get(&open.task_id).cloned();
                 Some(CompletedSpan {
                     name,
                     span_id: id.0,
                     parent_span_id: open.parent.0,
                     start_time_ns: self.tick_to_wall_ns(open.start_t),
                     end_time_ns: self.tick_to_wall_ns(*t),
+                    task_id: open.task_id,
+                    thread_name,
                 })
             }
             Frame::Event { .. } => None, // not yet wired to OTLP
@@ -238,6 +256,18 @@ impl State {
                 None
             }
             Frame::Dropped { count: _ } => None,
+            Frame::ThreadRegister { id, name } => {
+                self.thread_names.insert(*id, (*name).to_string());
+                None
+            }
+            Frame::ContextSwitch { t, .. } => {
+                // Not yet wired to OTLP — surfaced as scheduler
+                // metrics + a future trace-event API. Advance the
+                // anchor so any timestamp-based downstream logic sees
+                // continued progress.
+                self.advance_anchor(*t);
+                None
+            }
         }
     }
 
@@ -377,6 +407,7 @@ mod tests {
             parent: SpanId(0),
             name_id: StringId(1),
             t: 100,
+            task_id: 0,
         });
 
         // 1ms later at 10MHz = 10_000 ticks.
@@ -463,7 +494,7 @@ mod tests {
         let mut s = State::new(FakeWallClock(1_000_000_000));
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::StringRegister { id: StringId(1), value: "x" });
-        s.handle(&Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(1), t: 100 });
+        s.handle(&Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(1), t: 100, task_id: 0 });
         let span = s.handle(&Frame::SpanEnd { id: SpanId(1), t: 10_100 }).unwrap();
         assert_eq!(span.start_time_ns, 1_000_000_000);
         assert_eq!(span.end_time_ns,   1_001_000_000);
@@ -478,8 +509,8 @@ mod tests {
         let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::StringRegister { id: StringId(1), value: "x" });
-        s.handle(&Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(1), t: 1_000 });
-        s.handle(&Frame::SpanStart { id: SpanId(2), parent: SpanId(0), name_id: StringId(1), t: 100 });
+        s.handle(&Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(1), t: 1_000, task_id: 0 });
+        s.handle(&Frame::SpanStart { id: SpanId(2), parent: SpanId(0), name_id: StringId(1), t: 100, task_id: 0 });
         let span = s.handle(&Frame::SpanEnd { id: SpanId(2), t: 600 }).unwrap();
         // first_t=100: start=(100-100)/10MHz=0, end=(600-100)/10MHz=50µs
         assert_eq!(span.start_time_ns, 0);
@@ -575,6 +606,7 @@ mod tests {
             parent: SpanId(0),
             name_id: StringId(0),
             t: 100,
+            task_id: 0,
         });
         s.handle(&Frame::StringRegister {
             id: StringId(0),

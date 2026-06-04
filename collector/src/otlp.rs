@@ -71,6 +71,12 @@ struct Span {
     start_time_unix_nano: u64,
     #[prost(fixed64, tag = "8")]
     end_time_unix_nano: u64,
+    /// Per-span attributes (OTel semantic conventions). We emit
+    /// `thread.id` (always) and `thread.name` (when ThreadRegister
+    /// has resolved the task_id). Tempo renders them in the trace
+    /// detail view.
+    #[prost(message, repeated, tag = "9")]
+    attributes: Vec<KeyValue>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -125,6 +131,21 @@ impl Exporter {
     /// Build an OTLP request containing one span and POST it.
     #[cfg_attr(test, mutants::skip)] // makes real HTTP calls — not unit-testable without a mock server
     pub fn export(&self, span: &CompletedSpan) {
+        let mut attributes = vec![KeyValue {
+            key: "thread.id".to_string(),
+            value: Some(AnyValue {
+                string_value: span.task_id.to_string(),
+            }),
+        }];
+        if let Some(name) = &span.thread_name {
+            attributes.push(KeyValue {
+                key: "thread.name".to_string(),
+                value: Some(AnyValue {
+                    string_value: name.clone(),
+                }),
+            });
+        }
+
         let proto_span = Span {
             trace_id: self.trace_id.to_vec(),
             span_id: span.span_id.to_be_bytes().to_vec(),
@@ -138,6 +159,7 @@ impl Exporter {
             kind: 1, // INTERNAL
             start_time_unix_nano: clamp_u128_to_u64(span.start_time_ns),
             end_time_unix_nano: clamp_u128_to_u64(span.end_time_ns),
+            attributes,
         };
 
         let req = ExportTraceServiceRequest {

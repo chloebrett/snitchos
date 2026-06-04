@@ -193,6 +193,9 @@ pub fn span_start(name: &'static str) -> Span {
         parent: open.parent,
         name_id,
         t: timestamp(),
+        // v0.5 step 3: emit task_id=0 (boot/main task) until the
+        // scheduler lands and we can query `sched::current_task_id()`.
+        task_id: 0,
     });
     Span(open)
 }
