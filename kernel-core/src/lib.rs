@@ -8,7 +8,10 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
 pub mod clock;
+pub mod heap_smoke;
 pub mod frame;
 pub mod heap;
 pub mod intern;

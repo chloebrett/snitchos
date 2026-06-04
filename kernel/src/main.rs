@@ -12,6 +12,7 @@ mod console;
 mod dtb;
 mod frame;
 mod heap;
+mod heap_smoke; // SMOKE TEST — remove once real workloads drive heap metrics
 mod mmu;
 mod tracing;
 mod trap;
@@ -176,6 +177,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let heap_grow_failed = tracing::register_counter("snitchos.heap.grow_failed_total");
     let heap_free_blocks = tracing::register_gauge("snitchos.heap.free_blocks");
     let heap_largest_free_block = tracing::register_gauge("snitchos.heap.largest_free_block_bytes");
+    // SMOKE TEST metrics — remove with heap_smoke module
+    let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
+    let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
+    let smoke_candidate = tracing::register_gauge("snitchos.heap_smoke.candidate");
 
     // Arm the periodic timer and enable interrupts. From here on, the
     // CPU wakes us via timer IRQ instead of us spinning on the cycle
@@ -360,6 +365,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 heap_grow_failed,
                 heap::GROW_FAIL_COUNT.load(Ordering::Relaxed) as i64,
             );
+            // SMOKE TEST — remove with heap_smoke module
+            heap_smoke::step(count);
+            let sst = heap_smoke::stats();
+            tracing::emit_metric(smoke_entries, sst.entries as i64);
+            tracing::emit_metric(smoke_primes, sst.primes as i64);
+            tracing::emit_metric(smoke_candidate, sst.candidate as i64);
         }
     }
 }
