@@ -21,6 +21,12 @@ pub const KERNEL_OFFSET: usize = 0xffffffff_00000000;
 /// mappings.
 pub const LINEAR_OFFSET: usize = 0xffffffd0_00000000;
 
+/// Base of the kernel-heap virtual-address range. The heap grows into
+/// the 1 GiB slot starting here (root PTE 256). Picked to satisfy
+/// Sv39 canonical-high (bits 63:39 == bit 38) and to not collide with
+/// the kernel-image (510), linear-map (322), or MMIO (508) root slots.
+pub const HEAP_VA_BASE: usize = 0xffffffc0_00000000;
+
 /// Convert a physical address to the kernel's linear-map VA. Inverse
 /// of `va_to_pa` for the linear-map range (not for kernel-image VAs
 /// in the higher-half mapping at `KERNEL_OFFSET`).
@@ -549,6 +555,26 @@ mod tests {
         assert_eq!(pte & PTE_D, 0);
         // PPN = 0x80300 → at bits 53:10 = 0x80300 << 10 = 0x200C0000.
         assert_eq!(pte & !0x3ff, 0x200C0000);
+    }
+
+    #[test]
+    fn heap_va_base_lands_in_distinct_root_slot() {
+        // Sanity-check the heap's root-PTE slot. Must:
+        //   - be canonical-high (bits 63:39 == bit 38 == 1),
+        //   - index a root entry distinct from kernel image (510),
+        //     linear map (322), and MMIO (508),
+        //   - be 1 GiB-aligned (so the whole root slot is the heap).
+        let (vpn2, vpn1, vpn0, offset) = split_va(HEAP_VA_BASE);
+        assert_eq!(vpn1, 0);
+        assert_eq!(vpn0, 0);
+        assert_eq!(offset, 0);
+        assert_ne!(vpn2, 510, "would collide with higher-half kernel image");
+        assert_ne!(vpn2, 322, "would collide with linear map");
+        assert_ne!(vpn2, 508, "would collide with higher-half MMIO");
+        let bit_38 = (HEAP_VA_BASE >> 38) & 1;
+        let bits_63_39 = HEAP_VA_BASE >> 39;
+        assert_eq!(bit_38, 1);
+        assert_eq!(bits_63_39, 0x1FFFFFF);
     }
 
     #[test]

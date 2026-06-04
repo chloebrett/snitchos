@@ -172,6 +172,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let heap_bytes_capacity = tracing::register_gauge("snitchos.heap.bytes_capacity");
     let heap_bytes_used = tracing::register_gauge("snitchos.heap.bytes_used");
     let heap_bytes_free = tracing::register_gauge("snitchos.heap.bytes_free");
+    let heap_grow_total = tracing::register_counter("snitchos.heap.grow_total");
+    let heap_grow_failed = tracing::register_counter("snitchos.heap.grow_failed_total");
 
     // Arm the periodic timer and enable interrupts. From here on, the
     // CPU wakes us via timer IRQ instead of us spinning on the cycle
@@ -267,12 +269,15 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             }
             #[cfg(feature = "heap-oom")]
             {
-                // Leak 256 × 4 KiB blocks per heartbeat — exhausts the
-                // 4 MiB heap over ~4 heartbeats, giving Grafana a
-                // visible decay curve instead of a single-sample step.
-                // `try_reserve_exact` returns `Err` on alloc failure
-                // rather than panicking through `alloc_error_handler`.
-                for _ in 0..256 {
+                // Leak 4096 × 4 KiB blocks per heartbeat (16 MiB/tick).
+                // P2's watermark grow adds 1 MiB/tick, so net pressure
+                // is +15 MiB/tick — the ~120 MiB usable RAM (post
+                // kernel + bitmap + tables) exhausts in ~8 heartbeats.
+                // `try_reserve_exact` returns `Err` rather than
+                // panicking; the underlying null-return from
+                // `GlobalAlloc::alloc` still bumps `ALLOC_FAIL_COUNT`
+                // so the OOM signal makes it to telemetry.
+                for _ in 0..4096 {
                     let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
                     if v.try_reserve_exact(4096).is_err() {
                         break;
@@ -329,7 +334,30 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 tracing::emit_metric(heap_bytes_capacity, hstats.capacity as i64);
                 tracing::emit_metric(heap_bytes_used, hstats.used as i64);
                 tracing::emit_metric(heap_bytes_free, hstats.free as i64);
+                // Watermark grow: if free drops below 25% of capacity
+                // and the heap hasn't hit its 1 GiB ceiling, extend by
+                // 1 MiB (256 frames). Heartbeat is single-threaded so
+                // it's safe to take the heap lock here; allocators
+                // running between heartbeats see the larger heap on
+                // their next call. Failure (ceiling, OOM, map error)
+                // bumps grow_failed_total and we keep going — the
+                // next alloc will fail with alloc_failed_total as
+                // today.
+                let watermark = hstats.capacity / 4;
+                if hstats.free < watermark
+                    && hstats.capacity < heap::MAX_HEAP_SIZE
+                {
+                    let _ = heap::extend(256);
+                }
             }
+            tracing::emit_metric(
+                heap_grow_total,
+                heap::GROW_COUNT.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                heap_grow_failed,
+                heap::GROW_FAIL_COUNT.load(Ordering::Relaxed) as i64,
+            );
         }
     }
 }

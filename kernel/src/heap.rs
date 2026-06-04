@@ -1,10 +1,12 @@
-//! Kernel heap. A `#[global_allocator]` backed by a contiguous run of
-//! physical frames mapped through the linear map. Once `init` runs,
-//! `Box`, `Vec`, `String`, and the rest of `alloc::` are usable.
+//! Kernel heap. A `#[global_allocator]` backed by physical frames
+//! mapped one-by-one into a dedicated 1 GiB VA window via
+//! `mmu::map`. Once `init` runs, `Box`, `Vec`, `String`, and the
+//! rest of `alloc::` are usable. The heap grows on demand from the
+//! heartbeat loop when free bytes drop below a watermark.
 //!
-//! Region strategy is (a) from the step-4 plan: one contiguous frame
-//! run grabbed at boot, addressed via `pa_to_kernel_va`. Fixed-size
-//! for v0.4; growable variant is a fast-follow.
+//! Region strategy is (b) from the step-4 plan: a dedicated VA range
+//! at `HEAP_VA_BASE` (root PTE 256), per-frame PTE install. Heap VAs
+//! are contiguous by construction; frame PAs are scattered.
 //!
 //! Telemetry counters are atomics drained by the heartbeat thread —
 //! never emit a frame from inside `GlobalAlloc::alloc` or `dealloc`,
@@ -12,16 +14,22 @@
 //! via an allocation.
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use linked_list_allocator::Heap;
 
-use crate::frame;
-use kernel_core::mmu::pa_to_kernel_va;
+use crate::{frame, mmu};
+use kernel_core::mmu::{HEAP_VA_BASE, PtePerms};
 
-/// 4 MiB heap = 1024 frames. Fixed for v0.4.
-pub const HEAP_FRAMES: usize = 1024;
-pub const HEAP_SIZE: usize = HEAP_FRAMES * frame::FRAME_SIZE;
+/// Initial heap = 4 MiB = 1024 frames. The heap may grow up to
+/// `MAX_HEAP_FRAMES` via `extend` from the heartbeat loop.
+pub const INITIAL_HEAP_FRAMES: usize = 1024;
+pub const INITIAL_HEAP_SIZE: usize = INITIAL_HEAP_FRAMES * frame::FRAME_SIZE;
+
+/// Heap ceiling — one full root-PTE slot = 1 GiB = 262144 frames. Past
+/// this we'd need a second root-PTE slot; flag as OOM instead for v0.4.
+pub const MAX_HEAP_FRAMES: usize = (1024 * 1024 * 1024) / frame::FRAME_SIZE;
+pub const MAX_HEAP_SIZE: usize = MAX_HEAP_FRAMES * frame::FRAME_SIZE;
 
 /// Counters drained by the heartbeat thread. Updated outside the heap
 /// lock to keep emission off the allocator's critical path. Capacity
@@ -34,6 +42,15 @@ pub const HEAP_SIZE: usize = HEAP_FRAMES * frame::FRAME_SIZE;
 pub static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static DEALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static ALLOC_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Counters for grow attempts — bumped from `extend` (heartbeat path,
+/// so it's safe to take the allocator lock when emitting metrics).
+pub static GROW_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static GROW_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Highest VA currently mapped + 1. Bumped by `init` and `extend`.
+/// Single-writer (boot, then heartbeat); reads in the same context.
+static HEAP_TOP: AtomicUsize = AtomicUsize::new(HEAP_VA_BASE);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Stats {
@@ -106,24 +123,68 @@ pub fn stats() -> Option<Stats> {
     })
 }
 
-/// Initialise the kernel heap. Pulls `HEAP_FRAMES` contiguous physical
-/// frames, computes their linear-map VA, hands the region to
-/// `linked_list_allocator`.
+/// Initialise the kernel heap. Allocates `INITIAL_HEAP_FRAMES`
+/// individual physical frames and `map`s each into the heap VA
+/// range starting at `HEAP_VA_BASE`. PAs are scattered; VAs are
+/// contiguous by construction.
 ///
 /// # Safety
 ///
-/// Must be called exactly once, after `frame::init_from_dtb` and
-/// before any code that allocates (anything in `alloc::` — `Box`,
-/// `Vec`, formatted strings that need heap, etc.). The linear map
-/// (set up by `mmu::enable`) must be live, since the heap lives at
-/// `pa_to_kernel_va(first_frame_pa)`.
+/// Call exactly once, after `frame::init_from_dtb` and before any
+/// `alloc::` use. The kernel must be at higher-half PC so `mmu::map`
+/// resolves `BOOT_PT_ROOT`'s PA correctly.
 pub unsafe fn init() {
-    let first = frame::alloc_contiguous(HEAP_FRAMES)
-        .expect("heap init: no contiguous run of HEAP_FRAMES frames");
-    let va = pa_to_kernel_va(first.addr()) as *mut u8;
-    // SAFETY: `va..va+HEAP_SIZE` is HEAP_FRAMES contiguous frames just
-    // reserved by `frame::alloc_contiguous`. The linear-map leaf in
-    // BOOT_PT_ROOT[322] makes the VA range writable. Nothing else
-    // aliases — the bitmap marked these frames in-use atomically.
-    unsafe { HEAP.inner.lock().init(va, HEAP_SIZE) };
+    grow_va_range(INITIAL_HEAP_FRAMES).expect("heap init: out of frames or map() failed");
+    // SAFETY: `grow_va_range` just installed PTEs for
+    // `[HEAP_VA_BASE, HEAP_VA_BASE + INITIAL_HEAP_SIZE)` mapping into
+    // freshly-allocated frames with R+W permissions; nothing else
+    // aliases that VA window (root PTE 256 is exclusively ours).
+    unsafe {
+        HEAP.inner.lock().init(HEAP_VA_BASE as *mut u8, INITIAL_HEAP_SIZE);
+    }
+}
+
+/// Grow the heap by `extra_frames` frames. Allocates frames, maps
+/// them above the current top, and tells `linked_list_allocator`
+/// about the new bytes. Returns `Err(())` on any frame-alloc or
+/// `map` failure; partial progress is *not* unwound (consistent with
+/// the step-5 plan's leak-on-failure policy).
+///
+/// Bumps `GROW_COUNT` on success, `GROW_FAIL_COUNT` on failure.
+pub fn extend(extra_frames: usize) -> Result<(), ()> {
+    let result = grow_va_range(extra_frames);
+    match result {
+        Ok(extra_bytes) => {
+            // SAFETY: `grow_va_range` just installed PTEs for
+            // `[prev_top, prev_top + extra_bytes)`, contiguous with
+            // the existing heap top. `linked_list_allocator::extend`
+            // requires exactly that.
+            unsafe { HEAP.inner.lock().extend(extra_bytes) };
+            GROW_COUNT.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        Err(()) => {
+            GROW_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+            Err(())
+        }
+    }
+}
+
+/// Allocate `n` frames and `map` each into the heap VA range
+/// starting at the current `HEAP_TOP`. On success returns the
+/// number of bytes added. Common path for both `init` and `extend`.
+fn grow_va_range(n: usize) -> Result<usize, ()> {
+    let start_top = HEAP_TOP.load(Ordering::Relaxed);
+    let end_top = start_top.checked_add(n * frame::FRAME_SIZE).ok_or(())?;
+    if end_top > HEAP_VA_BASE + MAX_HEAP_SIZE {
+        return Err(());
+    }
+    let perms = PtePerms::R.union(PtePerms::W).union(PtePerms::G);
+    for i in 0..n {
+        let frame = frame::alloc_zeroed().ok_or(())?;
+        let va = start_top + i * frame::FRAME_SIZE;
+        mmu::map(va, frame.addr(), perms).map_err(|_| ())?;
+    }
+    HEAP_TOP.store(end_top, Ordering::Relaxed);
+    Ok(n * frame::FRAME_SIZE)
 }

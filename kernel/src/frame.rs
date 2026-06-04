@@ -63,11 +63,6 @@ impl Allocator {
         Some(PhysFrame(self.ram_base + idx * FRAME_SIZE))
     }
 
-    fn alloc_contiguous(&mut self, n: usize) -> Option<PhysFrame> {
-        let idx = self.bitmap.alloc_contiguous(n)?;
-        Some(PhysFrame(self.ram_base + idx * FRAME_SIZE))
-    }
-
     fn free(&mut self, frame: PhysFrame) {
         let idx = (frame.0 - self.ram_base) / FRAME_SIZE;
         self.bitmap.free(idx);
@@ -156,24 +151,6 @@ pub fn alloc() -> Option<PhysFrame> {
     match result {
         Some(frame) => {
             ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-            Some(frame)
-        }
-        None => {
-            ALLOC_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
-            None
-        }
-    }
-}
-
-/// Allocate `n` consecutive physical frames. Returns the first frame
-/// (caller knows `n`). Bumps `ALLOC_COUNT` by `n` on success;
-/// `ALLOC_FAIL_COUNT` by 1 on failure (per *call*, not per frame).
-pub fn alloc_contiguous(n: usize) -> Option<PhysFrame> {
-    let alloc = FRAME_ALLOC.get()?;
-    let result = alloc.lock().alloc_contiguous(n);
-    match result {
-        Some(frame) => {
-            ALLOC_COUNT.fetch_add(n as u64, Ordering::Relaxed);
             Some(frame)
         }
         None => {

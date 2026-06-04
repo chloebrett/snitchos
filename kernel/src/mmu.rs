@@ -330,7 +330,6 @@ impl PtMem for KernelPtMem {
 ///   higher-level intent (e.g. "this VA belongs to the heap range").
 /// - Single-hart only. SMP requires TLB-shootdown IPIs to other
 ///   harts; not in scope for v0.4.
-#[expect(dead_code, reason = "P1 deliverable — heap migration in P2 wires the caller")]
 pub fn map(va: usize, pa: usize, perms: PtePerms) -> Result<(), MapError> {
     let root_pa = va_to_pa((&raw const BOOT_PT_ROOT) as usize);
     let mut mem = KernelPtMem;
