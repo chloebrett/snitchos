@@ -10,6 +10,7 @@
 
 pub mod clock;
 pub mod frame;
+pub mod heap;
 pub mod intern;
 pub mod mmu;
 pub mod preinit;

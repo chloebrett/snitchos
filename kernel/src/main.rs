@@ -334,20 +334,18 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 tracing::emit_metric(heap_bytes_capacity, hstats.capacity as i64);
                 tracing::emit_metric(heap_bytes_used, hstats.used as i64);
                 tracing::emit_metric(heap_bytes_free, hstats.free as i64);
-                // Watermark grow: if free drops below 25% of capacity
-                // and the heap hasn't hit its 1 GiB ceiling, extend by
-                // 1 MiB (256 frames). Heartbeat is single-threaded so
-                // it's safe to take the heap lock here; allocators
-                // running between heartbeats see the larger heap on
-                // their next call. Failure (ceiling, OOM, map error)
-                // bumps grow_failed_total and we keep going — the
-                // next alloc will fail with alloc_failed_total as
-                // today.
-                let watermark = hstats.capacity / 4;
-                if hstats.free < watermark
-                    && hstats.capacity < heap::MAX_HEAP_SIZE
+                // Watermark grow. The policy (when + by how much) is
+                // pure logic in `kernel_core::heap`; this loop owns
+                // the side effect of acting on the decision.
+                // Heartbeat is single-threaded so it's safe to take
+                // the heap lock for `extend`. On failure (ceiling,
+                // OOM, map error) we bump `grow_failed_total` and
+                // keep going — the next alloc fails with
+                // `alloc_failed_total` as today.
+                if let Some(frames) =
+                    heap::watermark_grow_decision(hstats, &heap::WATERMARK)
                 {
-                    let _ = heap::extend(256);
+                    let _ = heap::extend(frames);
                 }
             }
             tracing::emit_metric(

@@ -21,6 +21,17 @@ use linked_list_allocator::Heap;
 use crate::{frame, mmu};
 use kernel_core::mmu::{HEAP_VA_BASE, PtePerms};
 
+pub use kernel_core::heap::{Stats, WatermarkConfig, watermark_grow_decision};
+
+/// Watermark policy for this kernel. Grow at 25% free, 256 frames per
+/// grow event, ceiling at MAX_HEAP_SIZE.
+pub const WATERMARK: WatermarkConfig = WatermarkConfig {
+    max_size: MAX_HEAP_SIZE,
+    free_threshold_pct: 25,
+    grow_frames: 256,
+    frame_size: frame::FRAME_SIZE,
+};
+
 /// Initial heap = 4 MiB = 1024 frames. The heap may grow up to
 /// `MAX_HEAP_FRAMES` via `extend` from the heartbeat loop.
 pub const INITIAL_HEAP_FRAMES: usize = 1024;
@@ -51,20 +62,6 @@ pub static GROW_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Highest VA currently mapped + 1. Bumped by `init` and `extend`.
 /// Single-writer (boot, then heartbeat); reads in the same context.
 static HEAP_TOP: AtomicUsize = AtomicUsize::new(HEAP_VA_BASE);
-
-#[derive(Clone, Copy, Debug)]
-pub struct Stats {
-    /// Total heap region size in bytes.
-    pub capacity: usize,
-    /// Sum of alignment-padded `layout.size()` across live allocations.
-    /// Excludes hole-list metadata, so slightly undercounts unavailable
-    /// bytes vs the true `capacity - free`.
-    pub used: usize,
-    /// Bytes the heap considers free — `capacity - used`, so does
-    /// include hole-list metadata as "free" even though it isn't
-    /// usable for allocations.
-    pub free: usize,
-}
 
 /// `GlobalAlloc` wrapper around a `spin::Mutex<Heap>`. We don't use
 /// `linked_list_allocator::LockedHeap` directly because we need to
