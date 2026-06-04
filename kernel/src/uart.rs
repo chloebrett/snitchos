@@ -23,7 +23,7 @@ use core::fmt::Write;
 /// - **Multiple `Uart16550`s pointing at the same MMIO address don't
 ///   coordinate.** The `&self` API is correct because the struct has no
 ///   state to race over, but the *device* does, and `&self` doesn't help
-///   there. Serialization is provided externally via `spin::Mutex<Uart16550>`.
+///   there. Serialization is provided externally via `kernel::sync::Mutex<Uart16550>`.
 pub struct Uart16550 {
   base: usize,
 }

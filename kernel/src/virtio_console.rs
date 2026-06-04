@@ -323,10 +323,10 @@ fn find_console_base(dtb: &Fdt) -> Option<usize> {
 /// The global virtio-console handle. Holds the device's MMIO base
 /// address. Set once at boot via `init`.
 ///
-/// `spin::Mutex<usize>` is overkill today (base is immutable after
-/// init), but the lock will serialize concurrent senders once we have
+/// `Mutex<usize>` is overkill today (base is immutable after init),
+/// but the lock will serialize concurrent senders once we have
 /// interrupts or SMP. Same pattern as the NS16550 `UART`.
-pub static CONSOLE: spin::Once<spin::Mutex<usize>> = spin::Once::new();
+pub static CONSOLE: crate::sync::Once<crate::sync::Mutex<usize>> = crate::sync::Once::new();
 
 /// Errors that can arise during virtio-console initialization.
 #[derive(Debug)]
@@ -360,7 +360,7 @@ pub unsafe fn init(dtb: &Fdt) -> Result<(), InitError> {
     // through the higher-half mapping, not identity.
     let base = find_console_base(dtb).ok_or(InitError::NotFound)?;
     unsafe { init_handshake(base)? };
-    CONSOLE.call_once(|| spin::Mutex::new(base));
+    CONSOLE.call_once(|| crate::sync::Mutex::new(base));
     Ok(())
 }
 

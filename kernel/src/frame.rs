@@ -30,7 +30,7 @@ const BITMAP_WORDS: usize = MAX_FRAMES / 64;
 static mut FRAME_BITS: [u64; BITMAP_WORDS] = [0u64; BITMAP_WORDS];
 
 /// The global frame allocator. Populated by `init_from_dtb`.
-static FRAME_ALLOC: spin::Once<spin::Mutex<Allocator>> = spin::Once::new();
+static FRAME_ALLOC: crate::sync::Once<crate::sync::Mutex<Allocator>> = crate::sync::Once::new();
 
 /// Counters drained by the heartbeat thread. Updated outside the
 /// allocator lock to keep emission off the critical path.
@@ -140,7 +140,7 @@ pub unsafe fn init_from_dtb(dtb: &Fdt, dtb_phys: usize) -> Result<(), InitError>
         }
     }
 
-    FRAME_ALLOC.call_once(|| spin::Mutex::new(Allocator { bitmap, ram_base }));
+    FRAME_ALLOC.call_once(|| crate::sync::Mutex::new(Allocator { bitmap, ram_base }));
     Ok(())
 }
 

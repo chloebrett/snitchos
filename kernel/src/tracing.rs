@@ -46,7 +46,7 @@ pub fn send_hello(timebase_hz: u32) {
 // kernel binary holds the one global instance behind a Mutex, plus a
 // `KernelSink` adapter that routes frame emits through `emit_frame`.
 
-static INTERN_TABLE: spin::Mutex<InternTable> = spin::Mutex::new(InternTable::new());
+static INTERN_TABLE: crate::sync::Mutex<InternTable> = crate::sync::Mutex::new(InternTable::new());
 
 /// The kernel's single `FrameSink`: encode the frame with postcard,
 /// then either ship to the virtio-console (if it's up) or append to
@@ -199,7 +199,7 @@ pub fn span_start(name: &'static str) -> Span {
 /// Bytes we buffer up before `virtio_console::init` has completed. The
 /// storage and append/drain mechanics live in `kernel_core::preinit`;
 /// this is just the kernel's one instance.
-static PRE_INIT_BUFFER: spin::Mutex<PreInitBuffer> = spin::Mutex::new(PreInitBuffer::new());
+static PRE_INIT_BUFFER: crate::sync::Mutex<PreInitBuffer> = crate::sync::Mutex::new(PreInitBuffer::new());
 
 /// Flush any frames buffered while the virtio-console was still
 /// initializing. Call this exactly once, right after

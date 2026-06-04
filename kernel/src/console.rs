@@ -5,9 +5,9 @@ use crate::uart::Uart16550;
 
 /// The kernel's console UART, initialized lazily from the DTB at boot.
 ///
-/// Wrapping in `spin::Mutex` lets multiple call sites serialize their writes
-/// once we have interrupts or SMP — today (single hart, no interrupts) it
-/// never actually contends.
+/// Wrapping in `kernel::sync::Mutex` lets multiple call sites serialize
+/// their writes once we have interrupts or SMP — today (single hart, no
+/// interrupts) it never actually contends.
 ///
 /// Known weaknesses:
 /// - Accessed via the print!/println! macros, which silently fall back to
@@ -16,7 +16,7 @@ use crate::uart::Uart16550;
 ///   would lose pre-init output.
 /// - No re-entrancy guard. A panic inside a print would try to lock again and
 ///   deadlock. Real kernels use a recursion-guarded console here.
-pub static UART: spin::Once<spin::Mutex<Uart16550>> = spin::Once::new();
+pub static UART: crate::sync::Once<crate::sync::Mutex<Uart16550>> = crate::sync::Once::new();
 
 /// Initialize the kernel console with the given UART MMIO base
 /// physical address (typically pulled from the DTB).
@@ -37,7 +37,7 @@ pub static UART: spin::Once<spin::Mutex<Uart16550>> = spin::Once::new();
 /// higher-half MMIO mapping is live).
 pub unsafe fn init(uart_addr: usize) {
   let va = uart_addr + crate::mmu::KERNEL_OFFSET;
-  UART.call_once(|| spin::Mutex::new(unsafe { Uart16550::new(va) }));
+  UART.call_once(|| crate::sync::Mutex::new(unsafe { Uart16550::new(va) }));
 }
 
 /// Hardcoded NS16550A physical MMIO base for QEMU `virt`. Used via

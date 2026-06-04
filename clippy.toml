@@ -1,0 +1,5 @@
+disallowed-types = [
+    { path = "spin::Mutex", reason = "use kernel::sync::Mutex" },
+    { path = "spin::MutexGuard", reason = "use kernel::sync::MutexGuard" },
+    { path = "spin::Once", reason = "use kernel::sync::Once" },
+]

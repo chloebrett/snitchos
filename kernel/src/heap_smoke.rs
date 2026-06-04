@@ -4,7 +4,8 @@
 // lock and the static.
 
 use kernel_core::heap_smoke::FactorTable;
-use spin::Mutex;
+
+use crate::sync::Mutex;
 
 /// Integers to factorize per heartbeat.
 pub const BATCH: usize = 200;

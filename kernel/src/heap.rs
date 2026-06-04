@@ -63,19 +63,20 @@ pub static GROW_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Single-writer (boot, then heartbeat); reads in the same context.
 static HEAP_TOP: AtomicUsize = AtomicUsize::new(HEAP_VA_BASE);
 
-/// `GlobalAlloc` wrapper around a `spin::Mutex<Heap>`. We don't use
-/// `linked_list_allocator::LockedHeap` directly because we need to
-/// bump `ALLOC_COUNT` / `DEALLOC_COUNT` / `ALLOC_FAIL_COUNT` in the
-/// alloc/dealloc paths, and LockedHeap doesn't expose hooks for that.
-/// Using project `spin` rather than the crate-bundled lock also keeps
-/// the lock type consistent with the rest of the kernel.
+/// `GlobalAlloc` wrapper around a `kernel::sync::Mutex<Heap>`. We
+/// don't use `linked_list_allocator::LockedHeap` directly because we
+/// need to bump `ALLOC_COUNT` / `DEALLOC_COUNT` / `ALLOC_FAIL_COUNT`
+/// in the alloc/dealloc paths, and LockedHeap doesn't expose hooks
+/// for that. Going through `kernel::sync` also keeps the lock type
+/// consistent with the rest of the kernel — preempt/IRQ-disable
+/// hooks land in one place when they land.
 struct KernelHeap {
-    inner: spin::Mutex<Heap>,
+    inner: crate::sync::Mutex<Heap>,
 }
 
 #[global_allocator]
 static HEAP: KernelHeap = KernelHeap {
-    inner: spin::Mutex::new(Heap::empty()),
+    inner: crate::sync::Mutex::new(Heap::empty()),
 };
 
 unsafe impl GlobalAlloc for KernelHeap {
