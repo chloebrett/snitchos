@@ -255,6 +255,7 @@ Gotchas worth re-reading `plans/v0.4-memory-findings.md` before disturbing:
 - Anything that walks the DTB pre-MMU under higher-half link crashes silently in a way we never isolated. MMIO regions in `kmain` are hardcoded for QEMU `virt`; the DTB-driven `collect_mmio_regions` exists but is parked behind `#[expect(dead_code)]`.
 - The frame allocator's `Bitmap::frames_free` is the maintained source of truth for the free count. Don't compute `count_free` by popcount-scanning the bits — it's O(words) and the OOM workload showed it stalls heartbeats. The maintained counter is also what makes `alloc` O(1) when the pool is empty.
 - The kernel heap region is fixed at 4 MiB (1024 contiguous frames) for v0.4. To grow it without finding a new contiguous PA run, we need a dedicated heap VA range with per-frame PTE install — strategy (b) in `plans/v0.4-memory-step-4-kernel-heap.md`. Until then, `HEAP_FRAMES` is the only knob.
+- `kernel::mmu::map(va, pa, perms)` exists from step 5 P1 but has no caller yet. Walk logic lives in `kernel_core::mmu::map` (pure, host-tested via a `PtMem` mock; no `unsafe` in kernel-core), kernel-side adds `KernelPtMem` over `frame::alloc_zeroed` + `pa_to_kernel_va` plus `sfence.vma vaddr` after success. Single-hart only — SMP needs TLB-shootdown IPIs. The first consumer is the growable heap in P2.
 - Never emit a telemetry frame from inside `GlobalAlloc::alloc`/`dealloc`. The virtio TX path takes a `Mutex` that, on first use of a string, registers through the intern table which may itself allocate. Re-entry deadlock. Same pattern as the frame allocator and the IRQ handler: bump an atomic in the alloc path, drain in the heartbeat loop.
 
 ### Architecture references
@@ -265,6 +266,7 @@ Gotchas worth re-reading `plans/v0.4-memory-findings.md` before disturbing:
 - [plans/v0.4-memory-concepts.md](../plans/v0.4-memory-concepts.md) — Sv39, higher-half, frame allocator concepts.
 - [plans/v0.4-memory-step-3-frame-allocator-concepts.md](../plans/v0.4-memory-step-3-frame-allocator-concepts.md) — the linear-map design call.
 - [plans/v0.4-memory-step-4-kernel-heap.md](../plans/v0.4-memory-step-4-kernel-heap.md) — heap region strategy, allocator choice, deferred-emission constraint.
+- [plans/v0.4-memory-step-5-page-table-mutation.md](../plans/v0.4-memory-step-5-page-table-mutation.md) — `map(va, pa, perms)` API; P1 (primitive) + P2 (growable heap) split.
 - [plans/v0.4-memory-findings.md](../plans/v0.4-memory-findings.md) — what we learned building higher-half + frame allocator; read **before** touching the boot order or any address-translation site.
 - [plans/scaling-corners.md](../plans/scaling-corners.md) — known corners that v0.1 sidesteps (SMP, lock-during-IRQ, etc.).
 

@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use protocol::stream::OwnedFrame;
 
-use protocol::SpanId;
 
 use super::harness::Harness;
 use super::matchers::{is_dropped, is_hello, is_metric_named, is_span_start_named, is_string_register_named};

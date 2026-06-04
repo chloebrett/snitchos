@@ -11,7 +11,7 @@
 use core::arch::asm;
 
 use fdt::Fdt;
-use kernel_core::mmu::{PageTable, PtePerms, leaf_pte};
+use kernel_core::mmu::{self as core_mmu, MapError, PageTable, PtMem, PtePerms, leaf_pte};
 
 pub use kernel_core::mmu::{KERNEL_OFFSET, LINEAR_OFFSET, va_to_pa};
 
@@ -279,5 +279,69 @@ pub unsafe fn unmap_identity() {
         root.set_entry(2, 0);
         asm!("sfence.vma", options(nostack, nomem));
     }
+}
+
+/// `PtMem` impl backed by the kernel's frame allocator and the
+/// linear map. Tables live as 4 KiB physical frames; the kernel
+/// dereferences them at `pa_to_kernel_va(pa)`.
+struct KernelPtMem;
+
+impl PtMem for KernelPtMem {
+    fn alloc_zeroed_table(&mut self) -> Option<usize> {
+        crate::frame::alloc_zeroed().map(|f| f.addr())
+    }
+
+    fn read_entry(&self, table_pa: usize, idx: usize) -> u64 {
+        let ptr = kernel_core::mmu::pa_to_kernel_va(table_pa) as *const u64;
+        // SAFETY: `table_pa` was either returned by `alloc_zeroed_table`
+        // (a frame the allocator handed us, reachable via the linear
+        // map) or is the root table's PA. `idx` is in 0..512 — caller
+        // contract; `map`'s walk only ever uses `vpn[]` indices. Single
+        // hart, single-threaded use during a `map` call.
+        unsafe { ptr.add(idx).read_volatile() }
+    }
+
+    fn write_entry(&mut self, table_pa: usize, idx: usize, value: u64) {
+        let ptr = kernel_core::mmu::pa_to_kernel_va(table_pa) as *mut u64;
+        // SAFETY: same as `read_entry`. `&mut self` ensures no
+        // concurrent reader on this impl during the write; the MMU
+        // walker is the only other reader and we sfence in the
+        // wrapper after the whole `map` call.
+        unsafe { ptr.add(idx).write_volatile(value) };
+    }
+}
+
+/// Install a 4 KiB leaf PTE mapping VA `va` → PA `pa` with `perms`
+/// in the kernel's live page table. Allocates intermediate tables
+/// via `frame::alloc_zeroed` if needed. On success, flushes the TLB
+/// entry for `va` on this hart via `sfence.vma`.
+///
+/// Returns `Err(MapError::AlreadyMapped)` if any walked PTE
+/// conflicts (huge-page leaf or existing 4 KiB leaf), or
+/// `Err(MapError::OutOfFrames)` if the frame allocator is empty.
+///
+/// # Safety
+///
+/// - Must run with MMU on (the wrapper accesses tables through the
+///   linear map at `pa_to_kernel_va`).
+/// - Caller must ensure the VA range isn't already in use for
+///   something else the kernel relies on. The walk catches
+///   already-mapped collisions, but doesn't reason about
+///   higher-level intent (e.g. "this VA belongs to the heap range").
+/// - Single-hart only. SMP requires TLB-shootdown IPIs to other
+///   harts; not in scope for v0.4.
+#[expect(dead_code, reason = "P1 deliverable — heap migration in P2 wires the caller")]
+pub fn map(va: usize, pa: usize, perms: PtePerms) -> Result<(), MapError> {
+    let root_pa = va_to_pa((&raw const BOOT_PT_ROOT) as usize);
+    let mut mem = KernelPtMem;
+    let result = core_mmu::map(root_pa, va, pa, perms, &mut mem);
+    if result.is_ok() {
+        // SAFETY: single instruction, register operand. Invalidates
+        // the TLB entry for `va` on this hart (rs2=zero ⇒ all ASIDs,
+        // rs1=`va` ⇒ this VA only). Single-hart, no IPI broadcast
+        // needed.
+        unsafe { asm!("sfence.vma {0}, zero", in(reg) va, options(nostack, nomem)) };
+    }
+    result
 }
 
