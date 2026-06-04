@@ -467,10 +467,25 @@ extern "C" fn idle_entry() -> ! {
 static TASK_A_LOOPS: AtomicU64 = AtomicU64::new(0);
 static TASK_B_LOOPS: AtomicU64 = AtomicU64::new(0);
 
+/// Burn an appreciable amount of CPU so the per-task `cpu_time_ticks`
+/// rate is visible against idle's wfi-dominated time. ~15M LCG iters
+/// is ~50ms of wallclock on QEMU virt; task_b doubles it.
+///
+/// `black_box(x)` keeps the loop body from being optimised out — the
+/// LCG state has to look observable to the compiler.
+fn burn_lcg(iterations: u32) {
+    let mut x: u64 = 1;
+    for _ in 0..iterations {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    }
+    let _ = core::hint::black_box(x);
+}
+
 extern "C" fn task_a_entry() -> ! {
     loop {
         {
             span!("task_a.tick");
+            burn_lcg(300_000);
             TASK_A_LOOPS.fetch_add(1, Ordering::Relaxed);
         }
         sched::yield_now();
@@ -481,6 +496,7 @@ extern "C" fn task_b_entry() -> ! {
     loop {
         {
             span!("task_b.tick");
+            burn_lcg(900_000);
             TASK_B_LOOPS.fetch_add(1, Ordering::Relaxed);
         }
         sched::yield_now();

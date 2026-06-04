@@ -39,7 +39,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -86,7 +87,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -145,7 +147,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -195,7 +198,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -274,7 +278,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         },
         {
           "refId": "B",
@@ -283,7 +288,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         },
         {
           "refId": "C",
@@ -292,7 +298,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -339,7 +346,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -389,7 +397,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -447,7 +456,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -502,7 +512,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         },
         {
           "refId": "B",
@@ -511,7 +522,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -559,7 +571,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         },
         {
           "refId": "B",
@@ -568,7 +581,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -615,7 +629,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -673,7 +688,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -728,7 +744,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         },
         {
           "refId": "B",
@@ -737,7 +754,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -785,7 +803,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         },
         {
           "refId": "B",
@@ -794,7 +813,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -841,7 +861,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -900,7 +921,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -943,7 +965,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -982,7 +1005,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -1025,7 +1049,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         },
         {
           "refId": "B",
@@ -1034,7 +1059,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
@@ -1063,13 +1089,57 @@
       "type": "timeseries",
       "title": "Thread timeline (CPU time share)",
       "description": "Per-task on-CPU time rate, stacked. Width of each band shows that thread's recent CPU share. Sum equals wallclock when the scheduler is fully utilising the CPU; idle's band absorbs whatever's left.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 80 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 80
+      },
       "targets": [
-        { "refId": "A", "expr": "rate(snitchos_task_main_cpu_time_ticks[30s])", "legendFormat": "main", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "refId": "B", "expr": "rate(snitchos_task_idle_cpu_time_ticks[30s])", "legendFormat": "idle", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "refId": "C", "expr": "rate(snitchos_task_task_a_cpu_time_ticks[30s])", "legendFormat": "task_a", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "refId": "D", "expr": "rate(snitchos_task_task_b_cpu_time_ticks[30s])", "legendFormat": "task_b", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        {
+          "refId": "A",
+          "expr": "rate(snitchos_task_main_cpu_time_ticks[30s])",
+          "legendFormat": "main",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(snitchos_task_idle_cpu_time_ticks[30s])",
+          "legendFormat": "idle",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(snitchos_task_task_a_cpu_time_ticks[30s])",
+          "legendFormat": "task_a",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        },
+        {
+          "refId": "D",
+          "expr": "rate(snitchos_task_task_b_cpu_time_ticks[30s])",
+          "legendFormat": "task_b",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        }
       ],
       "fieldConfig": {
         "defaults": {
@@ -1078,14 +1148,22 @@
             "drawStyle": "line",
             "lineWidth": 1,
             "fillOpacity": 60,
-            "stacking": { "mode": "normal", "group": "A" }
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
           }
         },
         "overrides": []
       },
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -1093,26 +1171,47 @@
       "type": "timeseries",
       "title": "Context switches per second",
       "description": "Derivative of `snitchos.sched.context_switches_total`. With 4 tasks cooperative-yielding tightly, expect hundreds to thousands per second.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 88 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 88
+      },
       "targets": [
         {
           "refId": "A",
           "expr": "rate(snitchos_sched_context_switches_total[30s])",
           "legendFormat": "switches/s",
-          "datasource": { "type": "prometheus", "uid": "prometheus" }
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
         },
         "overrides": []
       },
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "single" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
       }
     },
     {
@@ -1120,23 +1219,67 @@
       "type": "timeseries",
       "title": "Yield overhead (ticks, percentiles)",
       "description": "Time spent in `yield_now`'s bookkeeping path: lock acquisition + runqueue manipulation + ContextSwitch frame emission. Does NOT include the asm itself or time off-CPU.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 88 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 88
+      },
       "targets": [
-        { "refId": "A", "expr": "histogram_quantile(0.50, rate(snitchos_sched_yield_overhead_ticks_bucket[1m]))", "legendFormat": "p50", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "refId": "B", "expr": "histogram_quantile(0.95, rate(snitchos_sched_yield_overhead_ticks_bucket[1m]))", "legendFormat": "p95", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "refId": "C", "expr": "histogram_quantile(0.99, rate(snitchos_sched_yield_overhead_ticks_bucket[1m]))", "legendFormat": "p99", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, rate(snitchos_sched_yield_overhead_ticks_bucket[1m]))",
+          "legendFormat": "p50",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, rate(snitchos_sched_yield_overhead_ticks_bucket[1m]))",
+          "legendFormat": "p95",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, rate(snitchos_sched_yield_overhead_ticks_bucket[1m]))",
+          "legendFormat": "p99",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5 }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
         },
         "overrides": []
       },
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -1144,24 +1287,77 @@
       "type": "timeseries",
       "title": "Per-thread scheduling rate (runs/sec)",
       "description": "How often each task is picked off the runqueue, per second. In strict round-robin with N runnable tasks, all of them track at ~switches/s \u00f7 N.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 96 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 96
+      },
       "targets": [
-        { "refId": "A", "expr": "rate(snitchos_task_main_runs_total[30s])", "legendFormat": "main", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "refId": "B", "expr": "rate(snitchos_task_idle_runs_total[30s])", "legendFormat": "idle", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "refId": "C", "expr": "rate(snitchos_task_task_a_runs_total[30s])", "legendFormat": "task_a", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "refId": "D", "expr": "rate(snitchos_task_task_b_runs_total[30s])", "legendFormat": "task_b", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        {
+          "refId": "A",
+          "expr": "rate(snitchos_task_main_runs_total[30s])",
+          "legendFormat": "main",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(snitchos_task_idle_runs_total[30s])",
+          "legendFormat": "idle",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(snitchos_task_task_a_runs_total[30s])",
+          "legendFormat": "task_a",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        },
+        {
+          "refId": "D",
+          "expr": "rate(snitchos_task_task_b_runs_total[30s])",
+          "legendFormat": "task_b",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
-          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5 }
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5
+          }
         },
         "overrides": []
       },
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       }
     },
     {
@@ -1169,60 +1365,150 @@
       "type": "stat",
       "title": "Tasks total",
       "description": "Count of tasks in the scheduler's table. Steady-state for v0.5: 4 (main, idle, task_a, task_b).",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 96 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 96
+      },
       "targets": [
-        { "refId": "A", "expr": "snitchos_sched_tasks_total", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        {
+          "refId": "A",
+          "expr": "snitchos_sched_tasks_total",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
-      "options": { "colorMode": "value", "graphMode": "none", "textMode": "auto" }
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
     },
     {
       "id": 35,
       "type": "stat",
       "title": "Runqueue depth",
       "description": "How many tasks are currently `Ready`. With 4 tasks where one is on-CPU, expect 3.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 96 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 96
+      },
       "targets": [
-        { "refId": "A", "expr": "snitchos_sched_runqueue_depth", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        {
+          "refId": "A",
+          "expr": "snitchos_sched_runqueue_depth",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
-      "options": { "colorMode": "value", "graphMode": "area", "textMode": "auto" }
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
     },
     {
       "id": 36,
       "type": "stat",
       "title": "Cumulative context switches",
       "description": "Total yields since boot. Cooperative-only: only `Yield`-reason switches contribute.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 100 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 100
+      },
       "targets": [
-        { "refId": "A", "expr": "snitchos_sched_context_switches_total", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        {
+          "refId": "A",
+          "expr": "snitchos_sched_context_switches_total",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
-      "options": { "colorMode": "value", "graphMode": "area", "textMode": "auto" }
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
     },
     {
       "id": 21,
@@ -1246,7 +1532,8 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "interval": "5s"
         }
       ],
       "fieldConfig": {
