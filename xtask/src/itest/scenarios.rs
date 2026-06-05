@@ -180,6 +180,71 @@ pub fn sched_yield_round_trips() -> Result<(), String> {
     Ok(())
 }
 
+/// A span that's open across a `yield_now` closes correctly when the
+/// task is resumed. task_a opens `task_a.tick`, yields mid-span,
+/// gets re-scheduled, then closes. The wire should show:
+///
+///   1. SpanStart for "task_a.tick" with `task_id == task_a_id`,
+///      `parent == SpanId(0)` (top-level — proves per-task cursor
+///      isn't being polluted by other tasks' spans).
+///   2. At least one ContextSwitch leaving task_a, and one returning.
+///   3. SpanEnd for the same span id as (1).
+///
+/// Without per-task `SpanCursor` wiring, the parent in (1) could be
+/// any other task's currently-open span, and (3)'s pop would land on
+/// the wrong cursor. This scenario is the structural proof that the
+/// per-task wiring works.
+pub fn sched_span_survives_yield() -> Result<(), String> {
+    use protocol::SpanId;
+
+    let mut h = Harness::spawn("schedspansurvive")?;
+
+    let task_a_reg = h
+        .wait_for(SEC * 5, is_thread_register_named("task_a"))
+        .ok_or("no ThreadRegister for 'task_a'")?;
+    let task_a_id = match task_a_reg {
+        OwnedFrame::ThreadRegister { id, .. } => id,
+        _ => return Err("matched non-ThreadRegister".to_string()),
+    };
+
+    let span_start = h
+        .wait_for(SEC * 15, |f, strings| match f {
+            OwnedFrame::SpanStart { name_id, task_id, parent, .. } => {
+                strings.get(name_id).map(String::as_str) == Some("task_a.tick")
+                    && *task_id == task_a_id
+                    && *parent == SpanId(0)
+            }
+            _ => false,
+        })
+        .ok_or(
+            "no top-level SpanStart 'task_a.tick' on task_a within 15s — wiring may have parented it to another task's span",
+        )?;
+    let span_id = match span_start {
+        OwnedFrame::SpanStart { id, .. } => id,
+        _ => return Err("matched non-SpanStart".to_string()),
+    };
+
+    h.wait_for(SEC * 10, move |f, _| match f {
+        OwnedFrame::ContextSwitch { from, .. } => *from == task_a_id,
+        _ => false,
+    })
+    .ok_or("no ContextSwitch leaving task_a within 10s after the span opened")?;
+
+    h.wait_for(SEC * 10, move |f, _| match f {
+        OwnedFrame::ContextSwitch { to, .. } => *to == task_a_id,
+        _ => false,
+    })
+    .ok_or("no ContextSwitch returning to task_a within 10s — task_a was orphaned mid-span")?;
+
+    h.wait_for(SEC * 10, move |f, _| match f {
+        OwnedFrame::SpanEnd { id, .. } => *id == span_id,
+        _ => false,
+    })
+    .ok_or("no SpanEnd matching the surviving span's id within 10s — close popped the wrong cursor or never ran")?;
+
+    Ok(())
+}
+
 /// `ContextSwitch` frames arrive on the wire with sane `from` / `to`
 /// values. We harvest the ThreadRegister id for each known task,
 /// then wait for a ContextSwitch frame whose endpoints are both

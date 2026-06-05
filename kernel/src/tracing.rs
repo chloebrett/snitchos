@@ -186,33 +186,64 @@ macro_rules! span {
 
 // --- Span machinery ---
 //
-// Span bookkeeping splits into two pieces (post-v0.5 step 2):
+// Two pieces:
 //
 //   - `SPAN_IDS`: global monotonic id allocator. One static, shared
 //     across all tasks. Ids stay unique across the system.
-//   - `SPAN_CURSOR`: per-task innermost-span tracker. v0.5 cooperative
-//     still has only one task running at a time, so there's still one
-//     static cursor; once `Task::span_cursor` lands and gets swapped
-//     on context switch, this static disappears.
+//   - Per-task `SpanCursor`: each `Task` owns one (via `Task.span_cursor`).
+//     `sched::CURRENT_SPAN_CURSOR` points at the running task's cursor;
+//     yield_now updates it on every context switch.
+//   - `FALLBACK_CURSOR`: used for spans opened before task 0 is registered
+//     (the pre-init kernel.boot region). After register_bare_task seeds
+//     CURRENT_SPAN_CURSOR, new spans use per-task cursors.
+//
+// Each `Span` guard remembers the cursor it was opened on, so close
+// always pops from the right stack — even if the running task has
+// changed in between.
 static SPAN_IDS: SpanIds = SpanIds::new();
-static SPAN_CURSOR: SpanCursor = SpanCursor::new();
+static FALLBACK_CURSOR: SpanCursor = SpanCursor::new();
+
+fn current_cursor() -> &'static SpanCursor {
+    let ptr = crate::sched::CURRENT_SPAN_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
+    if ptr.is_null() {
+        &FALLBACK_CURSOR
+    } else {
+        // SAFETY: ptr points at a `SpanCursor` inside a `Box<Task>` in
+        // `SCHEDULER.tasks`. Tasks are never reaped in v0.5, so the
+        // Task allocation lives forever and the cursor address stays
+        // valid.
+        unsafe { &*ptr }
+    }
+}
 
 /// RAII guard returned by `span_start`. Drop emits `SpanEnd` and
-/// restores the parent-stack to the parent.
+/// pops the span off the cursor it was opened on.
+///
+/// `cursor` is the cursor that was current at `span_start` time. We
+/// keep it so a span that survives a context switch closes on the
+/// same cursor it opened on, rather than picking up whichever task
+/// happens to be running at Drop time.
 ///
 /// Known weakness: `mem::forget(span)` skips Drop, leaking the span
-/// (no SpanEnd on the wire) and leaving the registry pointing at this
+/// (no SpanEnd on the wire) and leaving the cursor pointing at this
 /// span forever. The `span!` macro avoids handing the user a name-bound
 /// guard they could forget.
-pub struct Span(kernel_core::span::SpanOpen);
+pub struct Span {
+    open: kernel_core::span::SpanOpen,
+    cursor: *const SpanCursor,
+}
 
 impl Drop for Span {
     fn drop(&mut self) {
         emit_frame(&Frame::SpanEnd {
-            id: self.0.id,
+            id: self.open.id,
             t: timestamp(),
         });
-        span::close(&SPAN_CURSOR, &self.0);
+        // SAFETY: cursor was valid at span_start; pointer to a
+        // `SpanCursor` inside a `Box<Task>` (or the static fallback)
+        // stays valid for the lifetime of this kernel.
+        let cursor = unsafe { &*self.cursor };
+        span::close(cursor, &self.open);
     }
 }
 
@@ -220,7 +251,8 @@ impl Drop for Span {
 /// emit `SpanEnd`. Nesting is automatic from Rust scopes.
 pub fn span_start(name: &'static str) -> Span {
     let name_id = register_or_lookup(name);
-    let open = span::open(&SPAN_IDS, &SPAN_CURSOR);
+    let cursor = current_cursor();
+    let open = span::open(&SPAN_IDS, cursor);
     emit_frame(&Frame::SpanStart {
         id: open.id,
         parent: open.parent,
@@ -228,7 +260,7 @@ pub fn span_start(name: &'static str) -> Span {
         t: timestamp(),
         task_id: crate::sched::current_task_id().0,
     });
-    Span(open)
+    Span { open, cursor: cursor as *const _ }
 }
 
 // --- Frame emission, with pre-init buffering ---

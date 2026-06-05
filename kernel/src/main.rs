@@ -485,7 +485,13 @@ extern "C" fn task_a_entry() -> ! {
     loop {
         {
             span!("task_a.tick");
-            burn_lcg(300_000);
+            // Split the work around a yield to exercise the
+            // "span survives a context switch" path. Per-task
+            // SpanCursor means task_b's spans opened in between
+            // don't get parented to this still-open span.
+            burn_lcg(150_000);
+            sched::yield_now();
+            burn_lcg(150_000);
             TASK_A_LOOPS.fetch_add(1, Ordering::Relaxed);
         }
         sched::yield_now();

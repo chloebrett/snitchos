@@ -19,7 +19,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use protocol::{Frame, SwitchReason};
 
@@ -279,6 +279,18 @@ static CURRENT_TASK: AtomicU32 = AtomicU32::new(0);
 /// timestamp through `register_bare_task`.
 static CURRENT_TASK_ENTRY_TICK: AtomicU64 = AtomicU64::new(0);
 
+/// Pointer to the current task's `SpanCursor`. Updated on context
+/// switch and during `register_bare_task` for task 0. Read by
+/// `tracing::span_start` so each task's span stack is independent —
+/// task A's open spans don't end up as task B's parents.
+///
+/// Initial value null: any span opened before task 0 is registered
+/// (the pre-init kernel.boot region) falls back to the static
+/// cursor in `tracing::SPAN_CURSOR`. Span guards remember which
+/// cursor opened them so close happens on the right one, even if
+/// the current pointer has moved on.
+pub static CURRENT_SPAN_CURSOR: AtomicPtr<SpanCursor> = AtomicPtr::new(core::ptr::null_mut());
+
 /// Install a freshly-built task into the table without a stack or
 /// context. v0.5 step 4 scope: lets the boot path register itself as
 /// task 0 so `current_task_id()` and SpanStart task_id round-trip
@@ -288,7 +300,15 @@ pub fn register_bare_task(name: &str, state: TaskState) -> TaskId {
     let id = alloc_task_id();
     let task = Box::new(Task::new_bare(id, String::from(name), state));
     let owned_name = task.name.clone();
+    // Pointer to this task's cursor — stable because Box<Task> heap
+    // address won't change. Use it to seed CURRENT_SPAN_CURSOR if no
+    // task is current yet; bare-registered tasks (task 0 / main)
+    // are the running context at the moment they register.
+    let cursor_ptr = (&task.span_cursor as *const SpanCursor) as *mut SpanCursor;
     SCHEDULER.lock().tasks.push(task);
+    if CURRENT_SPAN_CURSOR.load(Ordering::Relaxed).is_null() {
+        CURRENT_SPAN_CURSOR.store(cursor_ptr, Ordering::Relaxed);
+    }
     crate::tracing::emit_thread_register(id, &owned_name);
     id
 }
@@ -367,6 +387,7 @@ pub fn yield_now() {
         let on_cpu_delta = if prev_entry == 0 { 0 } else { t_entry.wrapping_sub(prev_entry) };
         let mut current_ctx: *mut TaskContext = core::ptr::null_mut();
         let mut next_ctx: *mut TaskContext = core::ptr::null_mut();
+        let mut next_cursor: *mut SpanCursor = core::ptr::null_mut();
         for task in &sched.tasks {
             if task.id == current_id {
                 current_ctx = task.context.get();
@@ -374,6 +395,7 @@ pub fn yield_now() {
             }
             if task.id == next_id {
                 next_ctx = task.context.get();
+                next_cursor = (&task.span_cursor as *const SpanCursor) as *mut SpanCursor;
                 task.runs.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -382,6 +404,7 @@ pub fn yield_now() {
 
         sched.runqueue.push_back(current_id);
         CURRENT_TASK.store(next_id.0, Ordering::Relaxed);
+        CURRENT_SPAN_CURSOR.store(next_cursor, Ordering::Relaxed);
 
         (current_ctx, next_ctx, next_id)
         // Lock dropped here. The asm runs without the scheduler lock.
