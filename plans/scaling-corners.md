@@ -22,11 +22,13 @@ On SMP: hart 0 opens a span, hart 1 reads `CURRENT_SPAN` and sees hart
 0's id, **claims hart 0's span as its parent**. The span tree gets
 cross-hart edges that don't reflect any real call relationship.
 
-**Fix when SMP arrives (≈ v0.5):** per-CPU `CURRENT_SPAN`. RISC-V has
+**Fix when SMP arrives (v0.6):** per-CPU `CURRENT_SPAN`. RISC-V has
 the `tp` register reserved for per-hart pointers; wire it to a
 `PerCpu<AtomicU64>` abstraction. The design doc already specifies the
 shape ("per-CPU-partitioned `u64` counter") for span IDs — extend the
-same treatment to CURRENT_SPAN.
+same treatment to CURRENT_SPAN. The `PerCpu<T>` chokepoint is already
+in place from the v0.5 pre-SMP-sync prefactor; v0.6 makes it real.
+See `plans/v0.6-smp-cooperative.md`.
 
 ### 2. Single TX descriptor slot in virtio-console
 
@@ -87,7 +89,10 @@ These looked suspicious but checked out:
   which is only called via `send`, which is gated by `Mutex<usize>`.
   Serialization preserved as long as nobody bypasses `send`.
 - **Pre-init buffer.** Single-writer (boot hart only). Other harts
-  haven't been brought up yet during pre-init.
+  haven't been brought up yet during pre-init. v0.6 preserves this
+  invariant: secondaries come up post-MMU (after `kmain` has already
+  drained the pre-init buffer), so the "single-writer by *design*"
+  property holds for free.
 - **Panic recursion guard `PANICKING: AtomicBool`.** Global, so "any
   hart panics → whole system panics." Correct v0.1 behavior; we don't
   have fault isolation yet.
@@ -115,8 +120,8 @@ it's added.
 
 | issue | severity at SMP | when to fix |
 |---|---|---|
-| Global `CURRENT_SPAN` | **breaks span tree correctness** | v0.5 (SMP) |
-| Single TX descriptor slot | slow, not incorrect | v0.5 (SMP) |
-| Locks vs interrupts | deadlock if not handled | v0.3 (interrupts) |
-| Per-CPU span ID partition | cache traffic only | optional v0.5+ |
-| spin::Mutex vs sleeping | wastes cycles | when scheduler exists |
+| Global `CURRENT_SPAN` | **breaks span tree correctness** | v0.6 (SMP) |
+| Single TX descriptor slot | slow, not incorrect | deferred past v0.6 — correctness fine under multi-hart, perf follow-up |
+| Locks vs interrupts | deadlock if not handled | v0.3 (interrupts) — addressed |
+| Per-CPU span ID partition | cache traffic only | v0.6 (SMP), folds into `PerCpu` lift |
+| spin::Mutex vs sleeping | wastes cycles | when blocking primitives exist (post-v0.8 IPC) |
