@@ -3,6 +3,7 @@ use std::process::{Command, ExitCode};
 use clap::{Parser, Subcommand};
 
 mod itest;
+mod loc;
 mod qemu;
 
 const COLLECTOR_BIN: &str = "target/debug/collector";
@@ -54,6 +55,9 @@ enum Cmd {
         /// Optional scenario name to run. Omit to run all.
         scenario: Option<String>,
     },
+    /// Count lines of code across the workspace, split by crate and
+    /// by production vs test lines.
+    Loc,
 }
 
 #[derive(Subcommand)]
@@ -85,6 +89,7 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test { scenario } => itest::run(scenario.as_deref()),
+        Cmd::Loc => loc::run(),
     }
 }
 
