@@ -127,6 +127,7 @@ pub extern "C" fn trap_handler(_frame: *mut TrapFrame) {
     }
     match decode_scause(scause) {
         TrapCause::SupervisorTimerInterrupt => handle_timer(),
+        TrapCause::SupervisorSoftwareInterrupt => crate::ipi::handle_pending(),
         other => panic!("unhandled trap: {other:?} (scause={scause:#x})"),
     }
 }
@@ -177,6 +178,23 @@ pub unsafe fn enable_timer_interrupts() {
         asm!("csrs sie, {}", in(reg) 1u64 << 5);
         // sstatus.SIE = bit 1 (Supervisor Interrupt Enable, global).
         asm!("csrs sstatus, {}", in(reg) 1u64 << 1);
+    }
+}
+
+/// Enable S-mode software interrupts (IPIs). `sie.SSIE` = bit 1.
+/// `sstatus.SIE` is set globally by `enable_timer_interrupts`;
+/// call this either before or after — the per-source bit is what
+/// gates SSIP-driven trap entry.
+///
+/// # Safety
+///
+/// Trap vector must be installed and `ipi::handle_pending` must be
+/// ready to run. Any pending `SSIP` from before this call fires
+/// immediately on return.
+pub unsafe fn enable_software_interrupts() {
+    unsafe {
+        // sie.SSIE = bit 1.
+        asm!("csrs sie, {}", in(reg) 1u64 << 1);
     }
 }
 

@@ -13,8 +13,10 @@ mod dtb;
 mod frame;
 mod heap;
 mod heap_smoke; // SMOKE TEST — remove once real workloads drive heap metrics
+mod ipi;
 mod mmu;
 mod percpu;
+mod sbi;
 mod sched;
 mod sync;
 mod tracing;
@@ -205,6 +207,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let workload_histogram_sum = tracing::register_gauge("snitchos.workload.histogram_sum");
     let workload_lock_wait = tracing::register_counter("snitchos.workload.lock_wait_ticks_total");
     let workload_queue_depth = tracing::register_gauge("snitchos.workload.queue_depth");
+    let ipi_received = tracing::register_counter("snitchos.ipi.received_total");
     // SMOKE TEST metrics — remove with heap_smoke module
     let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
     let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
@@ -217,6 +220,20 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: trap vector was installed at the top of kmain; the
     // handler is ready.
     unsafe { trap::init_timer(timebase_hz) };
+
+    // v0.6 step 7: enable S-mode software interrupts (the IPI
+    // channel). Trap vector + handler are already installed; the
+    // `ipi::handle_pending` dispatcher is the SSIP path.
+    //
+    // SAFETY: trap vector installed; sstatus.SIE already enabled
+    // by init_timer above.
+    unsafe { trap::enable_software_interrupts() };
+
+    // Smoke: send ourselves a Wakeup IPI. The trap handler reads
+    // ipi_pending via Acquire, bumps RECEIVED_TOTAL, and returns.
+    // The `ipi-self-wakeup` integration scenario asserts the
+    // counter reaches at least 1.
+    ipi::send(percpu::current_hartid(), ipi::IPI_WAKEUP);
 
     // Frame allocator init. Walks the DTB's `/memory` node, marks
     // SBI / kernel-image / DTB regions as reserved, releases everything
@@ -472,6 +489,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(
                 workload_queue_depth,
                 workload::queue_depth() as i64,
+            );
+            tracing::emit_metric(
+                ipi_received,
+                ipi::RECEIVED_TOTAL.load(Ordering::Relaxed) as i64,
             );
             // SMOKE TEST — remove with heap_smoke module
             heap_smoke::step(count);

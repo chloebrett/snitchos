@@ -529,6 +529,42 @@ pub fn pre_init_order() -> Result<(), String> {
     }
 }
 
+/// v0.6 step 7: IPI primitive smoke. Boot hart sends itself a
+/// `Wakeup` IPI after init; the software-interrupt trap handler
+/// reads the pending bitflags, dispatches, and bumps
+/// `snitchos.ipi.received_total`. We assert the counter reaches
+/// at least 1 within 10s — proves:
+///
+///   1. SBI `send_ipi` ECALL works (the IPI was raised)
+///   2. SSIE is enabled in `sie` (the interrupt was taken)
+///   3. The trap handler routes `SupervisorSoftwareInterrupt`
+///   4. `ipi_pending` Release/Acquire pair carries the bitflag
+///      across the IRQ boundary
+///   5. The dispatcher recognises `IPI_WAKEUP` and runs its handler
+///
+/// Single-hart smoke: target is `current_hartid()`. Cross-hart
+/// delivery lands when secondary harts boot in step 8.
+pub fn ipi_self_wakeup() -> Result<(), String> {
+    let mut h = Harness::spawn("ipi-self")?;
+
+    h.wait_for(SEC * 10, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.ipi.received_total")
+                && *value >= 1
+        }
+        _ => false,
+    })
+    .ok_or(
+        "ipi.received_total never reached 1 within 10s — \
+         SBI send_ipi failed, SSIE not enabled, trap handler didn't \
+         route software interrupt, or the dispatcher didn't process \
+         the pending bit",
+    )?;
+
+    Ok(())
+}
+
 /// v0.6 step 1: cooperative single-hart producer/consumer histogram.
 /// Producer task generates LCG samples in batches; consumer task
 /// drains them under a `kernel::sync::Mutex` and bins them into a

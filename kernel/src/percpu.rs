@@ -59,6 +59,7 @@
 //! See `plans/v0.6-smp-cooperative.md`.
 
 use core::arch::asm;
+use core::sync::atomic::AtomicU32;
 
 /// Maximum harts supported. Single-hart through v0.6 step 10; the
 /// constant bumps when secondary-hart bring-up lands.
@@ -79,12 +80,21 @@ pub struct PerHartData {
     /// Dense logical id `0..MAX_HARTS`. Read by `current_hartid()`
     /// via `tp`. Initialised once in `init()`.
     pub hart_id: u32,
+    /// IPI pending bitflags. Sender does
+    /// `ipi_pending.fetch_or(msg_bit, Release)` (publishes any
+    /// payload it wrote first); receiver does
+    /// `ipi_pending.swap(0, Acquire)` (sees the payload). See the
+    /// module-level memory-ordering discipline.
+    pub ipi_pending: AtomicU32,
 }
 
 /// One slot per hart. Statically initialised to `hart_id = i` so a
 /// secondary hart starting cold (before its `init()` runs) at least
 /// sees a stable value at its slot.
-pub static PER_HART_DATA: [PerHartData; MAX_HARTS] = [PerHartData { hart_id: 0 }];
+pub static PER_HART_DATA: [PerHartData; MAX_HARTS] = [PerHartData {
+    hart_id: 0,
+    ipi_pending: AtomicU32::new(0),
+}];
 
 /// Initialise this hart's per-CPU context. Sets `tp` to point at this
 /// hart's `PER_HART_DATA` slot so subsequent `current_hartid()` calls
@@ -154,4 +164,22 @@ pub fn current_hartid() -> usize {
     // valid PerHartData. The `hart_id` field is at offset 0 (per the
     // `#[repr(C)]` layout).
     unsafe { (*(tp as *const PerHartData)).hart_id as usize }
+}
+
+/// Borrow this hart's `PerHartData` slot for direct field access
+/// (e.g., `ipi_pending`). Reads `tp`; same fallback as
+/// `current_hartid()` if `tp` is out of range.
+#[inline]
+pub fn this_cpu() -> &'static PerHartData {
+    let tp: usize;
+    unsafe { asm!("mv {}, tp", out(reg) tp, options(nostack, preserves_flags)) };
+
+    let base = (&raw const PER_HART_DATA[0]) as usize;
+    let end = base + core::mem::size_of::<[PerHartData; MAX_HARTS]>();
+    if tp < base || tp >= end {
+        return &PER_HART_DATA[0];
+    }
+    // SAFETY: tp is in range, points at a valid PerHartData with
+    // 'static lifetime (the array is a static).
+    unsafe { &*(tp as *const PerHartData) }
 }
