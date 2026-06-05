@@ -37,32 +37,39 @@ Multiple kernel threads, context switching, the simplest possible scheduler (rou
 
 **Post angle:** "Following a trace across a context switch." Multi-thread trace view.
 
-## v0.6a — First userspace process (built deliberately wrong)
+## v0.6 — SMP (cooperative)
+Second hart online, per-CPU discipline made real, page-table mutation extended with TLB-shootdown IPIs, wire format carries `hart_id`. **Cooperative**, not preemptive — each hart runs its own runqueue, tasks `yield_now()` voluntarily, idle harts `wfi` and wake on IPI. Headline workload: a producer/consumer histogram that first runs cooperative single-core (baseline post), then on two harts with `Mutex<VecDeque>` (the chokepoint shows its cost), then with `heapless::spsc` (the chokepoint goes away).
+
+**Why here, not later:** late SMP is an *unbounded audit* across every global and every "no-one-else-is-here" assumption — silent bugs under weak memory ordering. Late capabilities, by contrast, is a *scoped refactor* (rewrite the syscall layer). The v0.5 sync/percpu prefactor positioned this exactly; the audit surface is still small and enumerable today. Capabilities and IPC are the first concurrency-shaped subsystems — designing them post-SMP means they're born multi-hart-correct.
+
+**Post angle:** three posts from one milestone — "two heartbeats on two harts," "what the chokepoint cost me," "what removing it bought me." See `plans/v0.6-smp-cooperative.md`.
+
+## v0.7a — First userspace process (built deliberately wrong)
 User-mode entry, the first userspace process, exactly one syscall — with ambient authority, no capability discipline. Built intentionally the "Unix way" so the next milestone can feel the pain.
 
 **Post angle:** "The first userspace process — and why I built it wrong on purpose."
 
-## v0.6b — Capability system
-Introduce capabilities as the only access path. Refactor v0.6a's syscall to be capability-mediated. Per-process capability tables, capabilities as kernel objects, root caps to init only. Kernel begins adopting caps internally where it makes sense.
+## v0.7b — Capability system
+Introduce capabilities as the only access path. Refactor v0.7a's syscall to be capability-mediated. Per-process capability tables, capabilities as kernel objects, root caps to init only. Kernel begins adopting caps internally where it makes sense. Designed against the v0.6 multi-hart substrate from the start — no SMP retrofit later.
 
 **Post angle:** "Why I rewrote the syscall layer: ambient authority vs. capabilities." The project's identity crystallizes here — a strong essay milestone.
 
-## v0.7 — IPC over capabilities
-Synchronous capability-based channels. First two-process workload. IPC paths fully traced — spans cross the process boundary. Notifications as a separate primitive (roughly the Zircon model).
+## v0.8 — IPC over capabilities
+Synchronous capability-based channels. First two-process workload. IPC paths fully traced — spans cross the process boundary. Notifications as a separate primitive (roughly the Zircon model). Endpoint state designed multi-hart-correct from day one.
 
 **Post angle:** "Two processes talking, and watching every word."
 
-## v0.8 — Priorities & time-sliced scheduler
-Scheduler evolves: static priorities, priority aging, time slicing. Borg-style two-tier (latency-sensitive + batch) is deferred further out. Scheduler decision traces get richer.
+## v0.9 — Preemption, priorities, time-sliced scheduler
+Cooperative becomes preemptive. Timer-driven preemption with full-trap-frame context switch (today's cooperative `switch` elides caller-saved regs per SysV ABI and can't survive mid-instruction interrupts). The `kernel::sync` chokepoint absorbs preempt-disable hooks in one file. Static priorities and time slicing layer on top. Borg-style two-tier (latency-sensitive + batch) is deferred further out.
 
-**Post angle:** "Making the scheduler care about priority."
+**Post angle:** "Making the scheduler take the CPU back."
 
-## v0.9 — Minimal RAMfs behind a stable Filesystem trait
+## v0.10 — Minimal RAMfs behind a stable Filesystem trait
 A RAM-backed filesystem as a userspace component, accessed via capabilities. **The `Filesystem` trait is the deliverable** — `open / read / write / stat` etc. — with a trivial in-memory implementation behind it. Not persistent, no snapshots. CoW and content-addressing are additive later behind this same trait.
 
 **Post angle:** "A filesystem in userspace — and the interface that lets it grow."
 
-## v0.10 — Metrics-ingestion workload, end-to-end
+## v0.11 — Metrics-ingestion workload, end-to-end
 The first real workload: a personal metrics ingestion server running as a userspace SnitchOS component. Laptop/phone push metrics in; SnitchOS stores them; they're served back out to Grafana. Network ingress via the host-bridge cheat (host shim forwards data in over the existing channel — no in-kernel network stack yet). The "OS is real" moment: observability now observes something real instead of trivia.
 
 **Post angle:** "SnitchOS does an actual job now." End-to-end demo: real data flowing through a traced, capability-secured microkernel.
@@ -81,7 +88,7 @@ Polish, hardening, a coherent demo, and a wrap-up of the blog/video series. The 
 - **aarch64 port.** Forces the HAL to actually be correct. "SnitchOS now runs on a Raspberry Pi." Timing unscheduled — slot when the HAL is mature.
 
 # Numbering note
-Milestone numbers are contiguous (v0.1…v0.10, v1.0). Punted/unscheduled work lives in the post-v1.0 list rather than holding reserved version numbers. If a milestone turns out too big mid-flight, split it and renumber forward.
+Milestone numbers are contiguous (v0.1…v0.11, v1.0). Punted/unscheduled work lives in the post-v1.0 list rather than holding reserved version numbers. If a milestone turns out too big mid-flight, split it and renumber forward — as happened when SMP was inserted at v0.6 (pushing the original v0.6a/v0.6b → v0.7a/v0.7b and everything downstream forward by one).
 
 # Open questions
 - Exact audio insertion point — v1.1 is the current plan, but there are factors pushing it both earlier and later. Tracked on the Audio sub-page.
