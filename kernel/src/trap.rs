@@ -14,11 +14,32 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use kernel_core::clock::Clock;
 use kernel_core::trap::{TrapCause, decode_scause};
 
+// ## Memory ordering note for the timer-IRQ statics below
+//
+// `TICK_PENDING` (set by ISR, read by main) and `LAST_IRQ_DURATION`
+// (written by ISR, read by main after observing TICK_PENDING) form a
+// classic publication pattern. Across harts that pattern needs
+// `Release` on the store side and `Acquire` on the load side.
+//
+// Here both ends always run on the same hart: the timer interrupt is
+// a local CSR-driven IRQ, taken on whichever hart's `stimecmp`
+// expired. Trap return synchronises *all* of the handler's memory
+// ops with the resumed thread by hardware — the resumed thread
+// cannot observe the bit flip without also observing the duration
+// write. Therefore `Relaxed` is correct.
+//
+// Under v0.9 preemption + multi-hart, this argument still holds
+// (each hart's timer IRQ still runs on that hart). If we ever move
+// to a single global heartbeat collected from one designated hart,
+// these become genuinely cross-hart and need Release/Acquire.
+
 /// How many ticks between timer interrupts. Set by `init_timer` from
 /// the DTB timebase; the IRQ handler reads it to arm the next deadline.
+/// `Relaxed`: init-once, then read forever — no payload to publish.
 pub static TIMER_INTERVAL_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Set by the timer IRQ handler; the main thread polls + clears.
+/// `Relaxed`: same-CPU IRQ handoff — trap return sequences memory.
 pub static TICK_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Duration of the most recent timer IRQ in ticks. The IRQ handler
@@ -26,6 +47,7 @@ pub static TICK_PENDING: AtomicBool = AtomicBool::new(false);
 /// after wake and emits a histogram observation. (We can't emit
 /// telemetry from the IRQ itself — would deadlock on the intern /
 /// virtio_console mutexes.)
+/// `Relaxed`: same-CPU IRQ handoff — see block comment above.
 pub static LAST_IRQ_DURATION: AtomicU64 = AtomicU64::new(0);
 
 /// SSTC-based clock: reads `time` CSR directly, writes `stimecmp`

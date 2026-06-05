@@ -102,9 +102,10 @@ pub struct Task {
     pub span_cursor: SpanCursor,
     /// Total time on-CPU in `time`-CSR ticks. Bumped on every yield
     /// out of this task; read by the heartbeat to emit
-    /// `snitchos.task.<name>.cpu_time_ticks`.
+    /// `snitchos.task.<name>.cpu_time_ticks`. `Relaxed`: counter.
     pub cpu_time_ticks: AtomicU64,
     /// How many times the scheduler has picked this task.
+    /// `Relaxed`: counter.
     pub runs: AtomicU64,
     /// Pre-registered metric ids so the heartbeat emit path doesn't
     /// re-format strings per tick. Populated by `spawn` /
@@ -194,7 +195,7 @@ pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 
 /// Cumulative count of context switches the scheduler has performed.
 /// Bumped per `yield_now` that actually switched (no-op yields when
-/// the runqueue was empty don't count).
+/// the runqueue was empty don't count). `Relaxed`: pure counter.
 pub static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
 
 /// Time spent in `yield_now`'s bookkeeping (everything from function
@@ -203,12 +204,14 @@ pub static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
 /// manipulation, context-pointer lookup, the `ContextSwitch` frame
 /// emission. Does NOT include the asm itself (a handful of cycles)
 /// or the time off-CPU (which is "everyone else's time," not ours).
-/// Sampled by the heartbeat into a histogram.
+/// Sampled by the heartbeat into a histogram. `Relaxed`: last-value
+/// snapshot, no payload.
 pub static LAST_YIELD_OVERHEAD_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Allocator for new task ids. Monotonically increasing; never
 /// recycles. `Task 0` is reserved for the boot context, allocated
 /// when `init_with_current_as_main` runs in step 8.
+/// `Relaxed`: the atomic *is* the id allocation; no payload.
 static NEXT_TASK_ID: AtomicU32 = AtomicU32::new(0);
 
 fn alloc_task_id() -> TaskId {
@@ -268,6 +271,10 @@ pub fn current_task_id() -> TaskId {
 /// in v0.6 step 5. Single-hart through step 10: every access reads /
 /// writes `[0]`. Under multi-hart, each hart sees its own slot and
 /// the call sites stay identical.
+///
+/// `Relaxed` everywhere: per-CPU means only the owning hart touches
+/// this slot, so there is no cross-hart observer to order against.
+/// See `kernel::percpu` for the kernel-wide ordering discipline.
 static CURRENT_TASK: PerCpu<AtomicU32> =
     PerCpu::new([const { AtomicU32::new(0) }; MAX_HARTS]);
 
@@ -278,7 +285,7 @@ static CURRENT_TASK: PerCpu<AtomicU32> =
 ///
 /// Initial value 0 is "uninitialised"; we lazy-init on the first
 /// `yield_now` rather than during boot so we don't have to thread a
-/// timestamp through `register_bare_task`.
+/// timestamp through `register_bare_task`. `Relaxed`: per-CPU.
 static CURRENT_TASK_ENTRY_TICK: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; MAX_HARTS]);
 
@@ -292,6 +299,12 @@ static CURRENT_TASK_ENTRY_TICK: PerCpu<AtomicU64> =
 /// cursor in `tracing::SPAN_CURSOR`. Span guards remember which
 /// cursor opened them so close happens on the right one, even if
 /// the current pointer has moved on.
+///
+/// `Relaxed`: per-CPU pointer; the pointed-at `SpanCursor` lives
+/// inside `Box<Task>` (stable heap address) and has its own atomic
+/// for the open-span stack. The pointer publication doesn't need
+/// to publish the `SpanCursor`'s contents because the next reader
+/// is on the same hart (yield lands in the next task on this CPU).
 pub static CURRENT_SPAN_CURSOR: PerCpu<AtomicPtr<SpanCursor>> =
     PerCpu::new([const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_HARTS]);
 
@@ -440,7 +453,7 @@ pub fn yield_now() {
 
 /// Bumped each time the smoke marker function runs. The heartbeat
 /// emits this as `snitchos.sched.smoke_marker_hits`; the integration
-/// scenario asserts it's > 0 after boot.
+/// scenario asserts it's > 0 after boot. `Relaxed`: counter.
 pub static SMOKE_MARKER_HITS: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C, align(16))]

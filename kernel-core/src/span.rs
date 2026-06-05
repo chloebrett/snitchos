@@ -30,7 +30,10 @@ impl SpanIds {
         Self { next_id: AtomicU64::new(1) }
     }
 
-    /// Hand out the next span id.
+    /// Hand out the next span id. `Relaxed`: the atomic *is* the id
+    /// allocation; no other memory synchronises through it. Multi-hart
+    /// contention on this single counter is a known scaling corner —
+    /// per-CPU partitioning is documented in `plans/scaling-corners.md`.
     pub fn allocate(&self) -> SpanId {
         SpanId(self.next_id.fetch_add(1, Ordering::Relaxed))
     }
@@ -50,6 +53,11 @@ impl Default for SpanIds {
 /// through `&self`. Cooperative-single-task today, but the API shape
 /// supports any access pattern (preempt mid-span, IRQ handler opening
 /// its own span on the same hart, etc.) without changing callers.
+///
+/// `Relaxed` everywhere: each cursor is owned by exactly one task,
+/// and at most one task runs per hart at a time, so accesses are
+/// effectively per-CPU. No cross-hart observer means no ordering
+/// needed.
 pub struct SpanCursor {
     current: AtomicU64,
 }

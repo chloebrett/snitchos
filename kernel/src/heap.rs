@@ -50,17 +50,23 @@ pub const MAX_HEAP_SIZE: usize = MAX_HEAP_FRAMES * frame::FRAME_SIZE;
 /// sums alignment-padded `layout.size()` for live allocations; it does
 /// not include hole-list metadata bytes, so it's a slight undercount
 /// of how much of the region is unavailable.
+/// `Relaxed` everywhere: pure tallies. See `kernel::percpu` for the
+/// kernel-wide ordering discipline.
 pub static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static DEALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static ALLOC_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Counters for grow attempts — bumped from `extend` (heartbeat path,
 /// so it's safe to take the allocator lock when emitting metrics).
+/// `Relaxed`: tallies, no payload.
 pub static GROW_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static GROW_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Highest VA currently mapped + 1. Bumped by `init` and `extend`.
 /// Single-writer (boot, then heartbeat); reads in the same context.
+/// `Relaxed`: the atomic is for lock-free reads, no other memory
+/// synchronises through this value — actual mapping state is published
+/// via `mmu::map`'s `sfence.vma` on the same hart.
 static HEAP_TOP: AtomicUsize = AtomicUsize::new(HEAP_VA_BASE);
 
 /// `GlobalAlloc` wrapper around a `kernel::sync::Mutex<Heap>`. We

@@ -29,6 +29,14 @@ const BATCH: usize = 64;
 const PRODUCER_SEED: u64 = 0xc0ffee_dead_beef;
 
 static QUEUE: Mutex<Option<VecDeque<u64>>> = Mutex::new(None);
+
+// `Relaxed` everywhere on the workload atomics: each `fetch_add` is a
+// pure counter (per-bin tally for HISTOGRAM, total counts for
+// PRODUCED/CONSUMED/LOCK_WAIT). Inter-bin and inter-counter
+// consistency is not load-bearing — the heartbeat drains them
+// independently and the correctness oracle
+// `histogram_sum >= SAMPLES_CONSUMED` holds at boundaries.
+// See `kernel::percpu` for the kernel-wide ordering discipline.
 static HISTOGRAM: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 
 pub static SAMPLES_PRODUCED: AtomicU64 = AtomicU64::new(0);

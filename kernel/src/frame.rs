@@ -34,6 +34,7 @@ static FRAME_ALLOC: crate::sync::Once<crate::sync::Mutex<Allocator>> = crate::sy
 
 /// Counters drained by the heartbeat thread. Updated outside the
 /// allocator lock to keep emission off the critical path.
+/// `Relaxed` everywhere: pure tallies, no payload to publish.
 pub static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static FREE_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static ALLOC_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);

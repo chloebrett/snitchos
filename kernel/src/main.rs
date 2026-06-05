@@ -505,6 +505,8 @@ extern "C" fn idle_entry() -> ! {
 /// block so it's never alive across the yield. Per-task `SpanCursor`
 /// swapping on context switch is a future refinement; until then,
 /// the discipline is "balance the cursor before yielding."
+// `Relaxed`: pure tallies. See `kernel::percpu` for the kernel-wide
+// ordering discipline.
 static TASK_A_LOOPS: AtomicU64 = AtomicU64::new(0);
 static TASK_B_LOOPS: AtomicU64 = AtomicU64::new(0);
 
@@ -553,6 +555,12 @@ extern "C" fn task_b_entry() -> ! {
 /// Recursion guard for the panic handler. Set on entry; if already set, we
 /// must already be panicking and shouldn't try to print again (formatting the
 /// panic info could itself panic, leading to infinite recursion).
+///
+/// `Relaxed` on the `swap`: the guard prevents *re-entry on this same hart*
+/// (formatting that itself panics). The atomic value is the whole signal;
+/// no payload to publish. SMP later: `scaling-corners.md` documents
+/// "any hart panics → whole system panics" as the v0.1 contract — when
+/// fault isolation lands this will become a per-hart guard.
 static PANICKING: AtomicBool = AtomicBool::new(false);
 
 /// Panic handler. Bypasses the UART mutex to avoid deadlocking if a panic
