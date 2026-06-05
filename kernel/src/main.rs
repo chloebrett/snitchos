@@ -21,6 +21,7 @@ mod tracing;
 mod trap;
 mod uart;
 mod virtio_console;
+mod workload;
 
 // Pull in the boot stub (entry.S). It defines `_start`, sets up the stack
 // pointer, zeros .bss, and calls `kmain`. See linker.ld for the memory layout
@@ -187,6 +188,9 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let sched_yield_overhead = tracing::register_histogram("snitchos.sched.yield_overhead_ticks");
     let task_a_loops = tracing::register_counter("snitchos.task_a.loops");
     let task_b_loops = tracing::register_counter("snitchos.task_b.loops");
+    let workload_produced = tracing::register_counter("snitchos.workload.samples_produced_total");
+    let workload_consumed = tracing::register_counter("snitchos.workload.samples_consumed_total");
+    let workload_histogram_sum = tracing::register_gauge("snitchos.workload.histogram_sum");
     // SMOKE TEST metrics — remove with heap_smoke module
     let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
     let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
@@ -247,6 +251,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let _ = sched::spawn("idle", idle_entry);
     let _ = sched::spawn("task_a", task_a_entry);
     let _ = sched::spawn("task_b", task_b_entry);
+    let _ = sched::spawn("workload_producer", workload::producer_entry);
+    let _ = sched::spawn("workload_consumer", workload::consumer_entry);
 
     // DTB physical region lives in the identity gigapage we're about
     // to tear down. Drop the borrow first to make "no DTB access from
@@ -431,6 +437,19 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(
                 task_b_loops,
                 TASK_B_LOOPS.load(Ordering::Relaxed) as i64,
+            );
+            // v0.6 step 1: producer/consumer workload.
+            tracing::emit_metric(
+                workload_produced,
+                workload::SAMPLES_PRODUCED.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                workload_consumed,
+                workload::SAMPLES_CONSUMED.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                workload_histogram_sum,
+                workload::histogram_sum() as i64,
             );
             // SMOKE TEST — remove with heap_smoke module
             heap_smoke::step(count);

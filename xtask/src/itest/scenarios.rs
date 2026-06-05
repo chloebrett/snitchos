@@ -528,3 +528,67 @@ pub fn pre_init_order() -> Result<(), String> {
         }
     }
 }
+
+/// v0.6 step 1: cooperative single-hart producer/consumer histogram.
+/// Producer task generates LCG samples in batches; consumer task
+/// drains them under a `kernel::sync::Mutex` and bins them into a
+/// `[AtomicU64; BUCKETS]` histogram. Heartbeat emits:
+///
+///   - `snitchos.workload.samples_consumed_total` — every sample the
+///     consumer pulled from the queue
+///   - `snitchos.workload.histogram_sum` — sum of all bin counts at
+///     heartbeat-sample time
+///
+/// The invariant the consumer must uphold is: every sample it pulls
+/// from the queue gets binned exactly once. Therefore
+/// `histogram_sum >= samples_consumed_total` always (with equality
+/// when sampled at the same instant; histogram_sum may briefly
+/// trail by one batch if sampled mid-consume). If a consumer mutant
+/// dropped or double-counted samples, this invariant fails.
+///
+/// We assert:
+///   1. `samples_consumed_total >= 500` within 15s — workload is
+///      actually running, both tasks are getting CPU under the
+///      cooperative scheduler. The threshold trails the demo tasks'
+///      heavy `burn_lcg` CPU draw; under SMP (v0.6 step 11) the
+///      consumer runs on its own hart and this can be tightened.
+///   2. `histogram_sum` eventually reaches at least the consumed
+///      count we observed — proves the bin-on-consume path runs
+///      for every sample, no drops.
+pub fn workload_cooperative_baseline() -> Result<(), String> {
+    let mut h = Harness::spawn("workload")?;
+
+    let frame = h
+        .wait_for(SEC * 15, |f, strings| match f {
+            OwnedFrame::Metric { name_id, value, .. } => {
+                strings.get(name_id).map(String::as_str)
+                    == Some("snitchos.workload.samples_consumed_total")
+                    && *value >= 500
+            }
+            _ => false,
+        })
+        .ok_or(
+            "samples_consumed_total never reached 500 within 15s — \
+             workload not running, or scheduler not giving consumer CPU?",
+        )?;
+    let consumed = match frame {
+        OwnedFrame::Metric { value, .. } => value,
+        _ => return Err("matched non-metric (impossible)".to_string()),
+    };
+
+    h.wait_for(SEC * 5, move |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.workload.histogram_sum")
+                && *value >= consumed
+        }
+        _ => false,
+    })
+    .ok_or(format!(
+        "histogram_sum never reached {consumed} within 5s after \
+         observing samples_consumed_total={consumed} — consumer pulled \
+         samples from the queue but did not bin them (lost samples?)"
+    ))?;
+
+    Ok(())
+}

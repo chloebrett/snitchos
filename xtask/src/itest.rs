@@ -31,6 +31,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario { name: "sched-context-switches-on-wire", run: scenarios::sched_context_switches_on_wire },
     Scenario { name: "sched-span-survives-yield",    run: scenarios::sched_span_survives_yield },
     Scenario { name: "heap-oom",                   run: scenarios::heap_oom },
+    Scenario { name: "workload-cooperative-baseline", run: scenarios::workload_cooperative_baseline },
 ];
 
 /// Entry point from `main`. `Some(name)` runs one scenario;
