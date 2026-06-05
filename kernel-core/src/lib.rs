@@ -21,3 +21,4 @@ pub mod sched;
 pub mod sink;
 pub mod span;
 pub mod trap;
+pub mod workload;
