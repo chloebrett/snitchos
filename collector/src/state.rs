@@ -206,6 +206,7 @@ impl State {
                 name_id,
                 t,
                 task_id,
+                hart_id: _,
             } => {
                 self.advance_anchor(*t);
                 self.open_spans.insert(
@@ -266,6 +267,13 @@ impl State {
                 // anchor so any timestamp-based downstream logic sees
                 // continued progress.
                 self.advance_anchor(*t);
+                None
+            }
+            Frame::HartRegister { .. } => {
+                // v0.6: collector accepts but doesn't yet surface to
+                // OTLP / Prometheus. Future: populate `host.cpu_id`
+                // on spans + a per-hart label on metrics. Numeric ids
+                // remain valid in the meantime.
                 None
             }
         }
@@ -408,6 +416,7 @@ mod tests {
             name_id: StringId(1),
             t: 100,
             task_id: 0,
+            hart_id: 0,
         });
 
         // 1ms later at 10MHz = 10_000 ticks.
@@ -494,7 +503,7 @@ mod tests {
         let mut s = State::new(FakeWallClock(1_000_000_000));
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::StringRegister { id: StringId(1), value: "x" });
-        s.handle(&Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(1), t: 100, task_id: 0 });
+        s.handle(&Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(1), t: 100, task_id: 0, hart_id: 0 });
         let span = s.handle(&Frame::SpanEnd { id: SpanId(1), t: 10_100 }).unwrap();
         assert_eq!(span.start_time_ns, 1_000_000_000);
         assert_eq!(span.end_time_ns,   1_001_000_000);
@@ -509,8 +518,8 @@ mod tests {
         let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::StringRegister { id: StringId(1), value: "x" });
-        s.handle(&Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(1), t: 1_000, task_id: 0 });
-        s.handle(&Frame::SpanStart { id: SpanId(2), parent: SpanId(0), name_id: StringId(1), t: 100, task_id: 0 });
+        s.handle(&Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(1), t: 1_000, task_id: 0, hart_id: 0 });
+        s.handle(&Frame::SpanStart { id: SpanId(2), parent: SpanId(0), name_id: StringId(1), t: 100, task_id: 0, hart_id: 0 });
         let span = s.handle(&Frame::SpanEnd { id: SpanId(2), t: 600 }).unwrap();
         // first_t=100: start=(100-100)/10MHz=0, end=(600-100)/10MHz=50µs
         assert_eq!(span.start_time_ns, 0);
@@ -607,6 +616,7 @@ mod tests {
             name_id: StringId(0),
             t: 100,
             task_id: 0,
+            hart_id: 0,
         });
         s.handle(&Frame::StringRegister {
             id: StringId(0),

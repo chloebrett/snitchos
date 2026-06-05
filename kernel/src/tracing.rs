@@ -32,7 +32,7 @@ pub fn timestamp() -> u64 {
 pub fn send_hello(timebase_hz: u32) {
     let frame = Frame::Hello {
         timebase_hz: timebase_hz as u64,
-        protocol_version: 1,
+        protocol_version: protocol::PROTOCOL_VERSION,
     };
     let mut buf = [0u8; 32];
     if let Ok(encoded) = postcard::to_slice(&frame, &mut buf) {
@@ -155,6 +155,7 @@ pub fn emit_context_switch(
         to: to.0,
         t: timestamp(),
         reason,
+        hart_id: crate::percpu::current_hartid() as u8,
     });
 }
 
@@ -259,6 +260,7 @@ pub fn span_start(name: &'static str) -> Span {
         name_id,
         t: timestamp(),
         task_id: crate::sched::current_task_id().0,
+        hart_id: crate::percpu::current_hartid() as u8,
     });
     Span { open, cursor: cursor as *const _ }
 }

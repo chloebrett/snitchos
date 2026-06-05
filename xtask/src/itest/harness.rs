@@ -174,14 +174,14 @@ impl Harness {
                 let name = self.strings.get(name_id).map(String::as_str).unwrap_or("?");
                 format!("MetricRegister {{ {name:?} kind={kind:?} }}")
             }
-            OwnedFrame::SpanStart { id, parent, name_id, t, task_id } => {
+            OwnedFrame::SpanStart { id, parent, name_id, t, task_id, hart_id } => {
                 let name = self.strings.get(name_id).map(String::as_str).unwrap_or("?");
-                format!("SpanStart {{ {name:?} id={id:?} parent={parent:?} t={t} task={task_id} }}")
+                format!("SpanStart {{ {name:?} id={id:?} parent={parent:?} t={t} task={task_id} hart={hart_id} }}")
             }
             OwnedFrame::ThreadRegister { id, name } =>
                 format!("ThreadRegister {{ id={id} name={name:?} }}"),
-            OwnedFrame::ContextSwitch { from, to, t, reason } =>
-                format!("ContextSwitch {{ from={from} to={to} reason={reason:?} t={t} }}"),
+            OwnedFrame::ContextSwitch { from, to, t, reason, hart_id } =>
+                format!("ContextSwitch {{ from={from} to={to} reason={reason:?} t={t} hart={hart_id} }}"),
             OwnedFrame::SpanEnd { id, t } =>
                 format!("SpanEnd {{ id={id:?} t={t} }}"),
             OwnedFrame::Event { span_id, name_id, t } => {
@@ -194,6 +194,8 @@ impl Harness {
             }
             OwnedFrame::Dropped { count } =>
                 format!("Dropped {{ count={count} }}"),
+            OwnedFrame::HartRegister { id, mhartid, role } =>
+                format!("HartRegister {{ id={id} mhartid={mhartid} role={role:?} }}"),
         }
     }
 }

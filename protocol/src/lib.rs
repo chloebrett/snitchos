@@ -11,6 +11,21 @@ use serde::{Serialize, Deserialize};
 #[cfg(feature = "std")]
 pub mod stream;
 
+/// Wire-format version. The kernel emits this in `Frame::Hello` so the
+/// host can sanity-check it understands the payload. Bumped on every
+/// *breaking* change to the encoded layout — adding a field to an
+/// existing variant (positional encoding), reordering variants, etc.
+/// Adding a new variant at the end of the enum is technically
+/// non-breaking but still bumps in practice because old collectors
+/// won't decode the new variant.
+///
+/// History:
+///   - 1: v0.1 — initial. Pre-`task_id` on SpanStart, pre-ContextSwitch.
+///   - 2: v0.6 — added `hart_id` to SpanStart + ContextSwitch, added
+///     HartRegister variant. The wire-format break performed before
+///     any external consumer of v0.6 captures exists.
+pub const PROTOCOL_VERSION: u8 = 2;
+
 /// Identifier of a string in the runtime intern table. `StringRegister`
 /// frames populate the table; every `*_name_id` field references it.
 /// `u32` because the table has far fewer entries than spans do.
@@ -42,6 +57,16 @@ pub enum MetricKind {
 /// Why the scheduler picked a different task. Carried on
 /// `Frame::ContextSwitch` so traces show *why* a switch happened, not
 /// just that one did.
+/// What role a hart plays in the system. Carried on
+/// `Frame::HartRegister` so the host can label dashboards and traces.
+/// Distinguishes the boot hart (runs heartbeat, ran pre-MMU setup)
+/// from secondary worker harts.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy)]
+pub enum HartRole {
+  Boot,
+  Worker,
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy)]
 pub enum SwitchReason {
   /// Running task voluntarily called `yield_now`.
@@ -59,7 +84,7 @@ pub enum SwitchReason {
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum Frame<'a> {
   Hello { timebase_hz: u64, protocol_version: u8 },
-  SpanStart { id: SpanId, parent: SpanId, name_id: StringId, t: u64, task_id: u32 },
+  SpanStart { id: SpanId, parent: SpanId, name_id: StringId, t: u64, task_id: u32, hart_id: u8 },
   SpanEnd { id: SpanId, t: u64 },
   Event { span_id: SpanId, name_id: StringId, t: u64 },
   Metric { name_id: StringId, value: i64, t: u64 },
@@ -73,7 +98,12 @@ pub enum Frame<'a> {
   /// of `Frame` go at the END of the enum — postcard encodes
   /// discriminants positionally and reordering breaks wire compat
   /// for all prior captures.
-  ContextSwitch { from: u32, to: u32, t: u64, reason: SwitchReason },
+  ContextSwitch { from: u32, to: u32, t: u64, reason: SwitchReason, hart_id: u8 },
+  /// One emitted per hart at bring-up. `id` is the dense `0..MAX_HARTS`
+  /// logical hart id used by all other frames; `mhartid` is the
+  /// platform-assigned id from the SBI handoff (may be sparse or
+  /// non-zero based). `role` labels the hart's purpose for dashboards.
+  HartRegister { id: u8, mhartid: u64, role: HartRole },
 }
 
 #[cfg(test)]
@@ -85,7 +115,7 @@ mod tests {
   fn hello_roundtrips() {
     let frame = Frame::Hello {
       timebase_hz: 10_000_000,
-      protocol_version: 1,
+      protocol_version: PROTOCOL_VERSION,
     };
 
     // Encode into a fixed buffer; no allocator needed.
@@ -122,6 +152,7 @@ mod tests {
       name_id: StringId(3),
       t: 1234,
       task_id: 0,
+      hart_id: 0,
     };
 
     let mut buf = [0u8; 64];
@@ -226,6 +257,7 @@ mod tests {
         to: 3,
         t: 1234,
         reason,
+        hart_id: 0,
       };
 
       let mut buf = [0u8; 64];
@@ -246,6 +278,7 @@ mod tests {
       name_id: StringId(3),
       t: 1234,
       task_id: 5,
+      hart_id: 0,
     };
 
     let mut buf = [0u8; 64];
@@ -253,6 +286,62 @@ mod tests {
     let decoded: Frame = postcard::from_bytes(used).unwrap();
 
     assert_eq!(frame, decoded);
+  }
+
+  /// `ContextSwitch` carries `hart_id` (v0.6 step 3) so a trace can
+  /// distinguish "task 5 → idle on hart 0" from "task 5 → idle on
+  /// hart 1." Verify with a non-zero hart id.
+  #[test]
+  fn context_switch_carries_hart_id() {
+    let frame = Frame::ContextSwitch {
+      from: 1,
+      to: 2,
+      t: 1234,
+      reason: SwitchReason::Yield,
+      hart_id: 1,
+    };
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+    assert_eq!(frame, decoded);
+  }
+
+  /// `SpanStart` now also carries `hart_id` (v0.6 step 3). Verify
+  /// the roundtrip with a non-zero hart id so an "always 0" mutant
+  /// can't pass.
+  #[test]
+  fn span_start_carries_hart_id() {
+    let frame = Frame::SpanStart {
+      id: SpanId(42),
+      parent: SpanId(7),
+      name_id: StringId(3),
+      t: 1234,
+      task_id: 0,
+      hart_id: 1,
+    };
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+    assert_eq!(frame, decoded);
+  }
+
+  /// Roundtrip a `Frame::HartRegister` for each `HartRole`. v0.6
+  /// emits one of these per hart at bring-up so the collector can
+  /// resolve `hart_id` (dense `0..MAX_HARTS`) to the platform
+  /// `mhartid` and to a role label for trace/dashboard display.
+  #[test]
+  fn hart_register_roundtrips() {
+    for role in [HartRole::Boot, HartRole::Worker] {
+      let frame = Frame::HartRegister {
+        id: 0,
+        mhartid: 0,
+        role,
+      };
+      let mut buf = [0u8; 64];
+      let used = postcard::to_slice(&frame, &mut buf).unwrap();
+      let decoded: Frame = postcard::from_bytes(used).unwrap();
+      assert_eq!(frame, decoded);
+    }
   }
 
   /// Roundtrip a `Frame::MetricRegister` for each `MetricKind`.
