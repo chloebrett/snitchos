@@ -9,7 +9,7 @@ pub fn run() -> ExitCode {
 
     let rs_files = collect_rs_files(workspace_root);
 
-    let mut by_crate: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut by_crate: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
     let mut vendor_total = 0usize;
 
     for path in &rs_files {
@@ -23,14 +23,15 @@ pub fn run() -> ExitCode {
             .into_owned();
 
         let content = fs::read_to_string(path).unwrap_or_default();
-        let (prod, test) = count_file_lines(&content);
+        let (prod, test, comment) = count_file_lines(&content);
 
         if crate_name == "vendor" {
-            vendor_total += prod + test;
+            vendor_total += prod + test + comment;
         } else {
-            let entry = by_crate.entry(crate_name).or_insert((0, 0));
+            let entry = by_crate.entry(crate_name).or_insert((0, 0, 0));
             entry.0 += prod;
             entry.1 += test;
+            entry.2 += comment;
         }
     }
 
@@ -73,9 +74,16 @@ fn collect_rs_files_inner(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
 /// `#[test]` attributed item.  Brace-depth tracking is used to find the
 /// end of the block; string literals containing `{`/`}` may slightly skew
 /// the count, but the error is negligible in practice.
-fn count_file_lines(content: &str) -> (usize, usize) {
+/// Returns `(prod_lines, test_lines, comment_lines)`.
+///
+/// A line is a comment if, outside a test block, its non-whitespace content
+/// starts with `//`.  Lines that are code with a trailing `// ...` are prod.
+/// Lines inside a `#[cfg(test)]`/`#[test]` block (including any comments
+/// within) are counted as test, not comment.
+fn count_file_lines(content: &str) -> (usize, usize, usize) {
     let mut prod = 0usize;
     let mut test = 0usize;
+    let mut comment = 0usize;
     let mut in_test = false;
     let mut depth = 0i32;
     let mut awaiting_open = false;
@@ -85,6 +93,7 @@ fn count_file_lines(content: &str) -> (usize, usize) {
         let has_test_attr = trimmed.starts_with("#[cfg(test)]")
             || trimmed.starts_with("#[test]")
             || trimmed.starts_with("#[cfg(test,");
+        let is_comment_line = trimmed.starts_with("//");
 
         let net: i32 = line
             .chars()
@@ -114,50 +123,52 @@ fn count_file_lines(content: &str) -> (usize, usize) {
         } else if has_test_attr {
             awaiting_open = true;
             test += 1;
+        } else if is_comment_line {
+            comment += 1;
         } else {
             prod += 1;
         }
     }
 
-    (prod, test)
+    (prod, test, comment)
 }
 
-fn print_table(by_crate: &BTreeMap<String, (usize, usize)>, vendor_total: usize) {
-    let sep = "─".repeat(48);
+fn print_table(by_crate: &BTreeMap<String, (usize, usize, usize)>, vendor_total: usize) {
+    let sep = "─".repeat(58);
 
     println!("SnitchOS workspace — lines of code");
     println!("{sep}");
-    println!("{:<14}  {:>7}  {:>7}  {:>7}", "crate", "prod", "test", "total");
+    println!("{:<14}  {:>7}  {:>7}  {:>7}  {:>7}", "crate", "prod", "test", "comment", "total");
     println!("{sep}");
 
     let mut total_prod = 0usize;
     let mut total_test = 0usize;
+    let mut total_comment = 0usize;
 
-    for (name, (prod, test)) in by_crate {
-        let total = prod + test;
-        let test_str = if *test == 0 {
-            "—".to_string()
-        } else {
-            fmt_n(*test)
-        };
+    for (name, (prod, test, comment)) in by_crate {
+        let total = prod + test + comment;
+        let dash = |n: usize| if n == 0 { "—".to_string() } else { fmt_n(n) };
         println!(
-            "{:<14}  {:>7}  {:>7}  {:>7}",
+            "{:<14}  {:>7}  {:>7}  {:>7}  {:>7}",
             name,
             fmt_n(*prod),
-            test_str,
+            dash(*test),
+            dash(*comment),
             fmt_n(total),
         );
         total_prod += prod;
         total_test += test;
+        total_comment += comment;
     }
 
     println!("{sep}");
     println!(
-        "{:<14}  {:>7}  {:>7}  {:>7}",
+        "{:<14}  {:>7}  {:>7}  {:>7}  {:>7}",
         "total",
         fmt_n(total_prod),
         fmt_n(total_test),
-        fmt_n(total_prod + total_test),
+        fmt_n(total_comment),
+        fmt_n(total_prod + total_test + total_comment),
     );
 
     if vendor_total > 0 {
@@ -190,7 +201,7 @@ mod tests {
     #[test]
     fn pure_prod_file() {
         let src = "fn main() {\n    println!(\"hi\");\n}\n";
-        assert_eq!(count_file_lines(src), (3, 0));
+        assert_eq!(count_file_lines(src), (3, 0, 0));
     }
 
     #[test]
@@ -208,9 +219,50 @@ mod tests {
     }
 }
 ";
-        let (prod, test) = count_file_lines(src);
+        let (prod, test, comment) = count_file_lines(src);
         assert_eq!(prod, 2, "prod");
         assert_eq!(test, 9, "test");
+        assert_eq!(comment, 0, "comment");
+    }
+
+    #[test]
+    fn line_comment_counted_separately() {
+        let src = "// top-level comment\nfn foo() {}\n";
+        let (prod, test, comment) = count_file_lines(src);
+        assert_eq!(prod, 1, "prod");
+        assert_eq!(test, 0, "test");
+        assert_eq!(comment, 1, "comment");
+    }
+
+    #[test]
+    fn doc_comment_counted_separately() {
+        let src = "/// docs for foo\nfn foo() {}\n";
+        let (prod, _test, comment) = count_file_lines(src);
+        assert_eq!(prod, 1, "prod");
+        assert_eq!(comment, 1, "comment");
+    }
+
+    #[test]
+    fn trailing_comment_on_code_line_is_prod() {
+        let src = "let x = 1; // inline\n";
+        let (prod, _, comment) = count_file_lines(src);
+        assert_eq!(prod, 1, "prod");
+        assert_eq!(comment, 0, "comment — trailing comment is not a comment line");
+    }
+
+    #[test]
+    fn comment_inside_test_block_counts_as_test_not_comment() {
+        let src = "\
+#[cfg(test)]
+mod tests {
+    // a test helper comment
+    fn helper() {}
+}
+";
+        let (prod, test, comment) = count_file_lines(src);
+        assert_eq!(prod, 0, "prod");
+        assert_eq!(test, 5, "test");
+        assert_eq!(comment, 0, "comment — inside test block, stays as test");
     }
 
     #[test]
@@ -223,14 +275,15 @@ fn standalone() {
     assert!(helper());
 }
 ";
-        let (prod, test) = count_file_lines(src);
+        let (prod, test, comment) = count_file_lines(src);
         assert_eq!(prod, 2, "prod");
         assert_eq!(test, 4, "test");
+        assert_eq!(comment, 0, "comment");
     }
 
     #[test]
     fn blank_file() {
-        assert_eq!(count_file_lines(""), (0, 0));
+        assert_eq!(count_file_lines(""), (0, 0, 0));
     }
 
     #[test]
@@ -247,9 +300,10 @@ mod tests {
     }
 }
 ";
-        let (prod, test) = count_file_lines(src);
+        let (prod, test, comment) = count_file_lines(src);
         assert_eq!(prod, 2, "prod");
         assert_eq!(test, 8, "test");
+        assert_eq!(comment, 0, "comment");
     }
 
     #[test]
