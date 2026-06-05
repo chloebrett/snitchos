@@ -191,6 +191,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let workload_produced = tracing::register_counter("snitchos.workload.samples_produced_total");
     let workload_consumed = tracing::register_counter("snitchos.workload.samples_consumed_total");
     let workload_histogram_sum = tracing::register_gauge("snitchos.workload.histogram_sum");
+    let workload_lock_wait = tracing::register_counter("snitchos.workload.lock_wait_ticks_total");
+    let workload_queue_depth = tracing::register_gauge("snitchos.workload.queue_depth");
     // SMOKE TEST metrics — remove with heap_smoke module
     let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
     let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
@@ -450,6 +452,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(
                 workload_histogram_sum,
                 workload::histogram_sum() as i64,
+            );
+            tracing::emit_metric(
+                workload_lock_wait,
+                workload::LOCK_WAIT_TICKS_TOTAL.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                workload_queue_depth,
+                workload::queue_depth() as i64,
             );
             // SMOKE TEST — remove with heap_smoke module
             heap_smoke::step(count);

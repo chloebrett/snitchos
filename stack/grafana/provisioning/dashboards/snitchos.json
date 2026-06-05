@@ -1585,6 +1585,176 @@
           "mode": "multi"
         }
       }
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "Workload — throughput (samples/s)",
+      "description": "v0.6 step 1 producer/consumer histogram, cooperative single hart. Producer and consumer rates should track each other (queue drains as fast as it fills). Post-SMP (step 11) expect both rates to roughly double.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 108 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(snitchos_workload_samples_produced_total[1m])",
+          "legendFormat": "produced/s",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "interval": "5s"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(snitchos_workload_samples_consumed_total[1m])",
+          "legendFormat": "consumed/s",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "pointSize": 3 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Workload — cumulative samples",
+      "description": "Monotonic counters. Lines should overlap (consumer keeps up with producer). Any visible gap means samples are sitting in the queue.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 116 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_workload_samples_produced_total",
+          "legendFormat": "produced",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "interval": "5s"
+        },
+        {
+          "refId": "B",
+          "expr": "snitchos_workload_samples_consumed_total",
+          "legendFormat": "consumed",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "interval": "5s"
+        },
+        {
+          "refId": "C",
+          "expr": "snitchos_workload_histogram_sum",
+          "legendFormat": "histogram sum",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Workload — queue depth",
+      "description": "How many samples are sitting in the Mutex<VecDeque> at heartbeat-sample time. Cooperative single hart: oscillates between 0 and one batch (consumer drains immediately after producer yields). SMP-with-Mutex (step 11): expected to be more stable around a steady-state depth. SMP-with-SPSC (step 12): even tighter.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 116 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_workload_queue_depth",
+          "legendFormat": "depth",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "Workload — lock wait rate (ticks/s)",
+      "description": "Sum of `rdtime` deltas measured around `QUEUE.lock()` acquires, per second. Cooperative single hart: ~0 (no concurrent contender). SMP-with-Mutex (step 11): rises sharply when producer and consumer fight for the cacheline. SMP-with-SPSC (step 12): falls back to ~0. This panel is the headline of post 3.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 124 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(snitchos_workload_lock_wait_ticks_total[1m])",
+          "legendFormat": "wait ticks/s",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
+    },
+    {
+      "id": 44,
+      "type": "stat",
+      "title": "Samples lost (produced − histogram_sum)",
+      "description": "Correctness oracle. Always 0 (or briefly positive while a batch is in-flight in the queue, but bounded by BATCH=64). If this ever climbs, the consumer is dropping samples.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 124 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_workload_samples_produced_total - snitchos_workload_histogram_sum",
+          "legendFormat": "lost",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 65 },
+              { "color": "red", "value": 1000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
     }
   ]
 }

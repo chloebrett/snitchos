@@ -23,6 +23,7 @@ use kernel_core::workload::{bin_of, Lcg, BUCKETS};
 
 use crate::sched;
 use crate::sync::Mutex;
+use crate::tracing;
 
 const BATCH: usize = 64;
 const PRODUCER_SEED: u64 = 0xc0ffee_dead_beef;
@@ -33,6 +34,14 @@ static HISTOGRAM: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 pub static SAMPLES_PRODUCED: AtomicU64 = AtomicU64::new(0);
 pub static SAMPLES_CONSUMED: AtomicU64 = AtomicU64::new(0);
 
+/// Cumulative ticks spent waiting to acquire `QUEUE` across all
+/// producer and consumer lock acquisitions. Today's cooperative
+/// single-hart kernel sees ~0 wait (no contender can run while we're
+/// trying to lock); the value will become interesting in v0.6 step 11
+/// when producer + consumer run on different harts and the lock
+/// cacheline starts ping-ponging.
+pub static LOCK_WAIT_TICKS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 /// Sum across all histogram bins at the moment of the call. The
 /// individual `fetch_add` operations are `Relaxed` (each bin is its own
 /// counter; bins don't synchronise with each other), so this sum may
@@ -42,6 +51,16 @@ pub static SAMPLES_CONSUMED: AtomicU64 = AtomicU64::new(0);
 /// only races with it at yield boundaries.
 pub fn histogram_sum() -> u64 {
     HISTOGRAM.iter().map(|b| b.load(Ordering::Relaxed)).sum()
+}
+
+/// Current queue depth. Briefly takes the queue lock — safe to call
+/// from the heartbeat (single-threaded vs. producer/consumer in v0.6
+/// step 1; under SMP this is one more lock contender but still bounded).
+/// Returns 0 if the queue hasn't been initialised yet (first call into
+/// producer/consumer not happened).
+pub fn queue_depth() -> usize {
+    let guard = QUEUE.lock();
+    guard.as_ref().map(|q| q.len()).unwrap_or(0)
 }
 
 pub extern "C" fn producer_entry() -> ! {
@@ -55,8 +74,11 @@ pub extern "C" fn producer_entry() -> ! {
             for slot in &mut batch {
                 *slot = lcg.next();
             }
+            let t_lock_start = tracing::timestamp();
             {
                 let mut guard = QUEUE.lock();
+                let wait = tracing::timestamp().saturating_sub(t_lock_start);
+                LOCK_WAIT_TICKS_TOTAL.fetch_add(wait, Ordering::Relaxed);
                 let q = guard.get_or_insert_with(VecDeque::new);
                 for s in batch {
                     q.push_back(s);
@@ -74,8 +96,11 @@ pub extern "C" fn consumer_entry() -> ! {
             crate::span!("workload.consume");
             // Drain a batch under the lock, bin off-lock.
             let mut buf = [0u64; BATCH];
+            let t_lock_start = tracing::timestamp();
             let n = {
                 let mut guard = QUEUE.lock();
+                let wait = tracing::timestamp().saturating_sub(t_lock_start);
+                LOCK_WAIT_TICKS_TOTAL.fetch_add(wait, Ordering::Relaxed);
                 let q = guard.get_or_insert_with(VecDeque::new);
                 let n = q.len().min(BATCH);
                 for slot in buf.iter_mut().take(n) {
