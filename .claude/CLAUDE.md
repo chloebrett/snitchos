@@ -221,6 +221,12 @@ The kernel binary itself has no `#[test]`s — it's `no_std`/`no_main` and won't
 - **`frame-allocator-oom`** — built with `--features oom-leak`; asserts `alloc_failed_total > 0` within 15 s and the kernel keeps heartbeating after.
 - **`kernel-heap-metrics`** — `snitchos.heap.alloc_total ≥ 1` and `snitchos.heap.bytes_used` observed within 10 s; heartbeat survives after.
 - **`heap-oom`** — built with `--features heap-oom`; leaks 4096 × 4 KiB blocks per heartbeat (16 MiB/tick) via `Vec::try_reserve_exact` + `mem::forget`. Watermark grow adds 1 MiB/tick; net pressure ~15 MiB/tick exhausts ~120 MiB usable RAM in ~8 heartbeats. Asserts `heap.grow_total > 0` (P2 grow engaged), then `heap.alloc_failed_total > 0` (clean OOM), then the kernel keeps heartbeating.
+- **`sched-context-switch-smoke`** — asserts `snitchos.sched.smoke_marker_hits == 1` within 10 s. Boot-time round-trip of the asm `switch` primitive into a hand-rigged marker function and back.
+- **`sched-spawn-registers-thread`** — asserts `ThreadRegister` frames appear for `main`, `idle`, `task_a`, `task_b`.
+- **`sched-yield-round-trips`** — asserts both `task_a.loops > 0` and `task_b.loops > 0` plus `sched.context_switches_total > 0`. Proves cooperative round-robin reaches all demo tasks.
+- **`sched-spans-carry-task-id`** — asserts each demo task's `task_x.tick` SpanStart carries `task_id` matching that task's ThreadRegister id.
+- **`sched-context-switches-on-wire`** — asserts a `ContextSwitch{Yield}` frame with both endpoints being known task ids appears on the wire.
+- **`sched-span-survives-yield`** — task_a yields mid-span; scenario asserts the SpanStart→ContextSwitch(leave)→ContextSwitch(return)→SpanEnd sequence with matching span id and `parent==SpanId(0)`. Structural proof that per-task `SpanCursor` wiring works.
 
 Add a scenario: implement a `Result<(), String>` function in `scenarios.rs`, register it in `xtask/src/itest.rs::SCENARIOS`, run `cargo xtask test <name>`. The harness handles QEMU lifecycle and socket cleanup. Use `Harness::spawn_with_features(label, &["feature"])` if the scenario needs a non-default kernel variant (currently only `oom-leak` does).
 
@@ -238,6 +244,40 @@ Skips cleanly (exit 0) if `qemu-system-riscv64` isn't on `PATH`.
 
 - **NS16550A UART** (`println!`) — human-readable boot log, no protocol, no decoder. Use for ad-hoc debugging.
 - **virtio-console** (telemetry frames) — structured `Frame`s, decoded by `collector` and the integration tests. Use for anything we want to observe or assert on.
+
+### Scheduler (v0.5)
+
+Cooperative round-robin over a single CPU. The kernel runs out of one of its tasks at any moment; there is no dedicated scheduler thread. The scheduler is a *library*: `kernel_core::sched::Runqueue` + `kernel::sched::yield_now()`. `yield_now` runs on the calling task's stack — saves its callee-saved registers into its `TaskContext`, picks the next ready task, loads its registers, `ret`s into it.
+
+Four tasks at boot:
+
+- **task 0 = "main"** — IS `kmain`. `register_bare_task("main")` declares the running boot context as task 0; from then on, every `yield_now` from main saves into / restores from task 0's `TaskContext`. The boot stack from `entry.S` is task 0's stack.
+- **idle** — `loop { wfi; yield_now(); }`. Owns the `wfi` for the whole kernel; nobody else sleeps.
+- **task_a, task_b** — demo workers. Each opens a `task_x.tick` span, burns LCG iterations, yields, closes the span. task_a holds its span open across a yield to exercise per-task `SpanCursor` correctness.
+
+Key static state:
+
+- `SCHEDULER: kernel::sync::Mutex<Scheduler>` — task table (`Vec<Box<Task>>`) and `Runqueue`. `Box<Task>` guarantees stable heap addresses so raw `*mut TaskContext` and `*const SpanCursor` pointers stay valid past the mutex drop.
+- `CURRENT_TASK: AtomicU32` — id of the running task on this hart. Read by `current_task_id()` for `SpanStart.task_id`.
+- `CURRENT_TASK_ENTRY_TICK: AtomicU64` — timestamp when the running task last became Running. `yield_now` computes `now - entry` and adds to the outgoing task's `cpu_time_ticks`.
+- `CURRENT_SPAN_CURSOR: AtomicPtr<SpanCursor>` — pointer to the running task's span cursor. Updated on every switch. `tracing::span_start` reads it for the parent; `Span` guards remember which cursor they opened on so close lands on the right one even after surviving a yield.
+- `CONTEXT_SWITCHES: AtomicU64` and `LAST_YIELD_OVERHEAD_TICKS: AtomicU64` — telemetry.
+
+API: `spawn(name, entry: extern "C" fn() -> !)` allocates a 16 KiB `Box<Stack>`, rigs `TaskContext { ra: entry, sp: stack.top() }`, registers + queues. `yield_now()` voluntarily switches. `current_task_id()` for telemetry. `task_snapshots()` for per-task metric drain. No `unspawn` / `exit` / `join` in v0.5 (tasks are `-> !`).
+
+Lock discipline:
+
+- **Never hold a `kernel::sync::Mutex` across `yield_now()`.** Cooperative; not enforced; a debug-only "held locks at yield" assert is a v0.5.x candidate.
+- The scheduler mutex is dropped before the asm `switch` runs — Tasks live in `Box<Task>` so the raw context pointers remain valid past the drop.
+- `virtio_console::send` stages the frame bytes through a static `TX_STAGING` buffer. **Required because `mmu::va_to_pa()` only handles `KERNEL_OFFSET`-range VAs; heap-allocated task stacks have VAs in `HEAP_VA_BASE+` which `va_to_pa` passes through unchanged**, so without staging the virtio descriptor would carry a heap VA where the device expects a PA — silently DMA-ing wrong physical memory. Caught during v0.5 step 7 debug.
+
+Per-task observability:
+
+- Each `Task` carries `cpu_time_ticks` and `runs` atomics + pre-registered `cpu_time_metric` and `runs_metric` StringIds.
+- Names are built once at spawn via `format!` and leaked into `'static` via `tracing::register_counter_owned(String)` — bounded leak (one pair per task).
+- Heartbeat walks `sched::task_snapshots()` per tick and emits one `snitchos.task.<name>.cpu_time_ticks` + `snitchos.task.<name>.runs_total` per task.
+
+The post angle (v0.5): "following a trace across a context switch." Tempo's trace view shows `task_a.tick` opened, then ContextSwitch frames, then SpanEnd — all attributable via the `thread.name` OTLP attribute populated from `ThreadRegister`.
 
 ### Memory layout, post v0.4 step 4
 
@@ -272,6 +312,7 @@ Gotchas worth re-reading `plans/v0.4-memory-findings.md` before disturbing:
 - [plans/v0.4-memory-step-5-page-table-mutation.md](../plans/v0.4-memory-step-5-page-table-mutation.md) — `map(va, pa, perms)` API; P1 (primitive) + P2 (growable heap) split.
 - [plans/v0.5-pre-smp-sync-prefactor.md](../plans/v0.5-pre-smp-sync-prefactor.md) — `kernel::sync` chokepoint + `kernel::percpu` stub. Lands before v0.5 threading so lock discipline is in one place.
 - [plans/v0.5-threading.md](../plans/v0.5-threading.md) — cooperative round-robin scheduler, per-task span stack, `ThreadRegister` + `ContextSwitch` wire frames.
+- [posts/post-12-the-kernel-takes-turns.md](../posts/post-12-the-kernel-takes-turns.md) — v0.5 devlog.
 - [plans/v0.4-memory-findings.md](../plans/v0.4-memory-findings.md) — what we learned building higher-half + frame allocator; read **before** touching the boot order or any address-translation site.
 - [plans/scaling-corners.md](../plans/scaling-corners.md) — known corners that v0.1 sidesteps (SMP, lock-during-IRQ, etc.).
 
