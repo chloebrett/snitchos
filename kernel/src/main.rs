@@ -101,6 +101,18 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         );
     }
 
+    // v0.6 step 4: install the per-hart pointer. `PER_HART_DATA` is a
+    // higher-half static, so this must run post-trampoline. From here
+    // on, `percpu::current_hartid()` reads through `tp` instead of
+    // returning a hardcoded 0. On a single hart the observable value
+    // is identical; the plumbing matters for v0.6 steps that bring up
+    // a second hart and need each hart to identify itself.
+    //
+    // SAFETY: trampoline executed (higher-half VAs resolve);
+    // `_hart_id` is the SBI-handoff hartid (0 on the boot path); no
+    // per-hart-aware code has run yet.
+    unsafe { percpu::init(_hart_id) };
+
     // Verify we're actually at higher-half PC. `auipc rd, 0` puts
     // `current_pc + 0` in `rd`, so the result is the runtime address
     // of this instruction. If the trampoline silently no-ops in a

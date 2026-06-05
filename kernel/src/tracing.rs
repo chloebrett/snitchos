@@ -205,7 +205,7 @@ static SPAN_IDS: SpanIds = SpanIds::new();
 static FALLBACK_CURSOR: SpanCursor = SpanCursor::new();
 
 fn current_cursor() -> &'static SpanCursor {
-    let ptr = crate::sched::CURRENT_SPAN_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
+    let ptr = crate::sched::CURRENT_SPAN_CURSOR.this_cpu().load(core::sync::atomic::Ordering::Relaxed);
     if ptr.is_null() {
         &FALLBACK_CURSOR
     } else {

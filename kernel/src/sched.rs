@@ -26,6 +26,7 @@ use protocol::{Frame, SwitchReason};
 use kernel_core::sched::{Runqueue, TaskId, TaskState};
 use kernel_core::span::SpanCursor;
 
+use crate::percpu::{PerCpu, MAX_HARTS};
 use crate::sync::Mutex;
 
 global_asm!(include_str!("sched.S"));
@@ -260,14 +261,15 @@ pub fn task_snapshots() -> Vec<TaskSnapshot> {
 /// uniformly, which is correct because there genuinely is only one
 /// running task.
 pub fn current_task_id() -> TaskId {
-    TaskId(CURRENT_TASK.load(Ordering::Relaxed))
+    TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed))
 }
 
-/// Storage for "which task is on CPU right now," per-CPU eventually
-/// (wrapped in `PerCpu<AtomicU32>` once SMP arrives). For v0.5
-/// single-hart it's a plain atomic; v0.5.x preempt + v0.7+ SMP can
-/// swap this to `PerCpu<AtomicU32>` without touching callers.
-static CURRENT_TASK: AtomicU32 = AtomicU32::new(0);
+/// Storage for "which task is on CPU right now," lifted to `PerCpu`
+/// in v0.6 step 5. Single-hart through step 10: every access reads /
+/// writes `[0]`. Under multi-hart, each hart sees its own slot and
+/// the call sites stay identical.
+static CURRENT_TASK: PerCpu<AtomicU32> =
+    PerCpu::new([const { AtomicU32::new(0) }; MAX_HARTS]);
 
 /// Timestamp when the current task last became `Running`. On every
 /// `yield_now` we compute `now - CURRENT_TASK_ENTRY_TICK` and add to
@@ -277,7 +279,8 @@ static CURRENT_TASK: AtomicU32 = AtomicU32::new(0);
 /// Initial value 0 is "uninitialised"; we lazy-init on the first
 /// `yield_now` rather than during boot so we don't have to thread a
 /// timestamp through `register_bare_task`.
-static CURRENT_TASK_ENTRY_TICK: AtomicU64 = AtomicU64::new(0);
+static CURRENT_TASK_ENTRY_TICK: PerCpu<AtomicU64> =
+    PerCpu::new([const { AtomicU64::new(0) }; MAX_HARTS]);
 
 /// Pointer to the current task's `SpanCursor`. Updated on context
 /// switch and during `register_bare_task` for task 0. Read by
@@ -289,7 +292,8 @@ static CURRENT_TASK_ENTRY_TICK: AtomicU64 = AtomicU64::new(0);
 /// cursor in `tracing::SPAN_CURSOR`. Span guards remember which
 /// cursor opened them so close happens on the right one, even if
 /// the current pointer has moved on.
-pub static CURRENT_SPAN_CURSOR: AtomicPtr<SpanCursor> = AtomicPtr::new(core::ptr::null_mut());
+pub static CURRENT_SPAN_CURSOR: PerCpu<AtomicPtr<SpanCursor>> =
+    PerCpu::new([const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_HARTS]);
 
 /// Install a freshly-built task into the table without a stack or
 /// context. v0.5 step 4 scope: lets the boot path register itself as
@@ -306,8 +310,8 @@ pub fn register_bare_task(name: &str, state: TaskState) -> TaskId {
     // are the running context at the moment they register.
     let cursor_ptr = (&task.span_cursor as *const SpanCursor) as *mut SpanCursor;
     SCHEDULER.lock().tasks.push(task);
-    if CURRENT_SPAN_CURSOR.load(Ordering::Relaxed).is_null() {
-        CURRENT_SPAN_CURSOR.store(cursor_ptr, Ordering::Relaxed);
+    if CURRENT_SPAN_CURSOR.this_cpu().load(Ordering::Relaxed).is_null() {
+        CURRENT_SPAN_CURSOR.this_cpu().store(cursor_ptr, Ordering::Relaxed);
     }
     crate::tracing::emit_thread_register(id, &owned_name);
     id
@@ -362,7 +366,7 @@ pub fn spawn(name: &str, entry: extern "C" fn() -> !) -> TaskId {
 /// holding a `kernel::sync::Mutex`") is on the caller for now.
 pub fn yield_now() {
     let t_entry = crate::tracing::timestamp();
-    let current_id = TaskId(CURRENT_TASK.load(Ordering::Relaxed));
+    let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
 
     let (current_ctx, next_ctx, next_id) = {
         let mut sched = SCHEDULER.lock();
@@ -383,7 +387,7 @@ pub fn yield_now() {
         // Task itself sits at a stable heap address even if the Vec
         // reallocates, so the raw pointers stay valid past the lock
         // drop.
-        let prev_entry = CURRENT_TASK_ENTRY_TICK.load(Ordering::Relaxed);
+        let prev_entry = CURRENT_TASK_ENTRY_TICK.this_cpu().load(Ordering::Relaxed);
         let on_cpu_delta = if prev_entry == 0 { 0 } else { t_entry.wrapping_sub(prev_entry) };
         let mut current_ctx: *mut TaskContext = core::ptr::null_mut();
         let mut next_ctx: *mut TaskContext = core::ptr::null_mut();
@@ -403,8 +407,8 @@ pub fn yield_now() {
         assert!(!next_ctx.is_null(), "next task missing from table");
 
         sched.runqueue.push_back(current_id);
-        CURRENT_TASK.store(next_id.0, Ordering::Relaxed);
-        CURRENT_SPAN_CURSOR.store(next_cursor, Ordering::Relaxed);
+        CURRENT_TASK.this_cpu().store(next_id.0, Ordering::Relaxed);
+        CURRENT_SPAN_CURSOR.this_cpu().store(next_cursor, Ordering::Relaxed);
 
         (current_ctx, next_ctx, next_id)
         // Lock dropped here. The asm runs without the scheduler lock.
@@ -420,7 +424,7 @@ pub fn yield_now() {
     // tick now (close enough — the switch asm is a handful of
     // cycles). When it next yields it'll compute its on-CPU delta
     // from this.
-    CURRENT_TASK_ENTRY_TICK.store(t_before_switch, Ordering::Relaxed);
+    CURRENT_TASK_ENTRY_TICK.this_cpu().store(t_before_switch, Ordering::Relaxed);
 
     // SAFETY: both pointers point at `UnsafeCell<TaskContext>` storage
     // inside `Box<Task>` allocations owned by `SCHEDULER.tasks`. The
