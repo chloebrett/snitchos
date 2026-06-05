@@ -648,7 +648,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 975
+        "y": 40
       },
       "targets": [
         {
@@ -681,6 +681,46 @@
       }
     },
     {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Heap largest free block",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "targets": [
+        {
+          "expr": "snitchos_heap_largest_free_block_bytes",
+          "legendFormat": "largest free block",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 2
+          }
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      }
+    },
+    {
       "id": 20,
       "type": "timeseries",
       "title": "Heap smoke \u2014 entries (sawtooth = eviction)",
@@ -692,7 +732,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 975
+        "y": 48
       },
       "targets": [
         {
@@ -738,46 +778,6 @@
       }
     },
     {
-      "id": 19,
-      "type": "timeseries",
-      "title": "Heap largest free block",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 975
-      },
-      "targets": [
-        {
-          "expr": "snitchos_heap_largest_free_block_bytes",
-          "legendFormat": "largest free block",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "interval": "5s"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes",
-          "custom": {
-            "lineWidth": 2
-          }
-        }
-      },
-      "options": {
-        "tooltip": {
-          "mode": "single"
-        }
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      }
-    },
-    {
       "id": 21,
       "type": "timeseries",
       "title": "Heap smoke \u2014 candidate",
@@ -789,7 +789,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 975
+        "y": 48
       },
       "targets": [
         {
