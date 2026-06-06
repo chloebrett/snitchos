@@ -126,53 +126,28 @@ impl Arena {
             "free({start}, {size}) overlaps an existing free block — double free or bad span",
         );
 
-        // If there are no free blocks, this becomes the only one.
-        if self.free.is_empty() {
-            self.free.push(FreeBlock { start, size });
-            return;
-        }
+        let i = self
+            .free
+            .iter()
+            .position(|b| b.start > start)
+            .unwrap_or(self.free.len());
+        let merge_prev = i > 0 && self.free[i - 1].start + self.free[i - 1].size == start;
+        let merge_next = i < self.free.len() && start + size == self.free[i].start;
 
-        let Some(next_index) = self.free.iter().position(|it| it.start > start) else {
-            // At end.
-            let last_free = self.free.last_mut().expect("At least one elem expected");
-            if last_free.start + last_free.size == start {
-                last_free.size += size;
-            } else {
-                self.free.push(FreeBlock { start, size });
-            }
-            return;
-        };
-
-        if self.free.len() == 1 {
-            // At start.
-            let first_free = self.free.first_mut().expect("At least one elem expected");
-            if start + size == first_free.start {
-                first_free.start = start;
-                first_free.size += size;
-            } else {
-                self.free.insert(next_index, FreeBlock { start, size });
-            }
-            return;
-        }
-
-        // In middle.
-        let prev = self.free[next_index - 1];
-        let next = self.free[next_index];
-        let merge_prev = prev.start + prev.size == start;
-        let merge_next = start + size == next.start;
         if merge_prev && merge_next {
-            let prev = &mut self.free[next_index - 1];
-            prev.size += size + next.size;
-            self.free.remove(next_index);
+            let next_size = self.free[i].size;
+            let prev = &mut self.free[i - 1];
+            prev.size += size + next_size;
+            self.free.remove(i);
         } else if merge_prev {
-            let prev = &mut self.free[next_index - 1];
+            let prev = &mut self.free[i - 1];
             prev.size += size;
         } else if merge_next {
-            let next = &mut self.free[next_index];
+            let next = &mut self.free[i];
             next.start -= size;
             next.size += size;
         } else {
-            self.free.insert(next_index, FreeBlock { start, size });
+            self.free.insert(i, FreeBlock { start, size });
         }
     }
 }
@@ -306,5 +281,46 @@ mod tests {
         assert_eq!(a.fragments(), 2);
         assert_eq!(a.free_bytes(), 20);
         assert_eq!(a.largest_free_block(), 10);
+    }
+
+    // Build a two-block free list with empty space at the very front, then
+    // free into that front. `next_index` is 0 here (no left neighbour), which
+    // the `len() == 1` special-case doesn't cover when len > 1.
+    fn arena_with_two_blocks_and_a_front_gap() -> Arena {
+        let mut a = Arena::new(100);
+        a.alloc(100).unwrap(); // drain to empty
+        a.free(20, 10);
+        a.free(40, 10); // free list: [{20,10}, {40,10}]
+        assert_eq!(a.fragments(), 2);
+        a
+    }
+
+    #[test]
+    fn freeing_at_the_front_of_a_multi_block_list_non_adjacent() {
+        let mut a = arena_with_two_blocks_and_a_front_gap();
+        a.free(0, 10); // before both blocks, touches neither → new front fragment
+        assert_eq!(a.fragments(), 3);
+        assert_eq!(a.free_bytes(), 30);
+        assert_eq!(a.largest_free_block(), 10);
+    }
+
+    #[test]
+    fn freeing_at_the_front_of_a_multi_block_list_merges_first() {
+        let mut a = arena_with_two_blocks_and_a_front_gap();
+        a.free(10, 10); // 10+10 == 20 → must merge into the first block
+        assert_eq!(a.fragments(), 2);
+        assert_eq!(a.free_bytes(), 30);
+        assert_eq!(a.largest_free_block(), 20); // {10,20} now the biggest
+    }
+
+    #[test]
+    fn freeing_a_lone_gap_in_the_middle_adds_a_fragment() {
+        let mut a = Arena::new(100);
+        a.alloc(100).unwrap();
+        a.free(0, 10);
+        a.free(80, 10); // [{0,10}, {80,10}]
+        a.free(40, 10); // sits between, adjacent to neither → pure middle insert
+        assert_eq!(a.fragments(), 3);
+        assert_eq!(a.free_bytes(), 30);
     }
 }
