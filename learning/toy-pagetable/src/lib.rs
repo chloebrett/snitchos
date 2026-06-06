@@ -184,8 +184,31 @@ impl Mem {
     // (matches the real kernel; see the step-5 plan).
     // ===================================================================
     pub fn map_4kib(&mut self, va: usize, pa: usize, perms: Perms) -> Result<(), MapError> {
-        let _ = (va, pa, perms);
-        todo!("EXERCISE 3: write walk — see the comment above")
+        let (vpn2, vpn1, vpn0, offset) = split_va(va);
+        let vpn = [vpn0, vpn1, vpn2];
+
+        let mut pa = pa;
+        for level in [2, 1] {
+            let pte = self.read(pa, vpn[level]);
+            if pte_is_leaf(pte) {
+                return Err(MapError::AlreadyMapped);
+            } else if pte_is_branch(pte) {
+                pa = pte_addr(pte);
+            } else if !pte_is_valid(pte) {
+                let Some(new_table) = self.alloc_table() else {
+                    return Err(MapError::OutOfFrames);
+                };
+                pa = new_table;
+            }
+        }
+
+        let pte = self.read(pa, vpn[0]);
+        if !pte_is_valid(pte) {
+            return Err(MapError::AlreadyMapped);
+        }
+        self.write(pa, offset, leaf_pte(pa, perms));
+
+        Ok(())
     }
 }
 
@@ -221,7 +244,7 @@ pub fn split_va(va: usize) -> (usize, usize, usize, usize) {
 ///
 /// Walking past level 0 without hitting a leaf is also a fault.
 pub fn translate(mem: &Mem, root_pa: usize, va: usize) -> Option<usize> {
-    let (vpn2, vpn1, vpn0, offset) = split_va(va);
+    let (vpn2, vpn1, vpn0, _offset) = split_va(va);
     let vpn = [vpn0, vpn1, vpn2];
 
     let mut pa = root_pa;
