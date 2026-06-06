@@ -81,7 +81,21 @@ impl Arena {
     // kernel-core/src/frame.rs (which is the fixed-size cousin).
     // -------------------------------------------------------------------
     pub fn alloc(&mut self, size: usize) -> Option<usize> {
-        todo!("EXERCISE 1: first-fit alloc + split — see comment above")
+        let (index, block) = self
+            .free
+            .iter_mut()
+            .enumerate()
+            .find(|(i, it)| it.size >= size)?;
+        let taken = block.start;
+        if block.size > size {
+            block.start += size;
+            block.size -= size;
+        } else {
+            self.free.remove(index);
+        }
+        Some(taken)
+        // q: this push/remove from vec is inefficient, right?
+        // is a linked list better? do we use that in the kernel?
     }
 
     // -------------------------------------------------------------------
