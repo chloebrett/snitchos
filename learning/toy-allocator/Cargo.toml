@@ -9,3 +9,9 @@ edition = "2021"
 # a static byte region.
 
 [dependencies]
+
+[dev-dependencies]
+# Property-based testing with automatic shrinking: when a generated
+# alloc/free sequence breaks an invariant, proptest minimises it to the
+# smallest reproducer instead of just printing a seed.
+proptest = "1"

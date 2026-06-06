@@ -353,88 +353,90 @@ mod tests {
         assert!(a.free_bytes() <= a.size, "free bytes exceeded the arena");
     }
 
-    // --- Property / model-based test ------------------------------------
+    // --- Property-based test (proptest, with shrinking) -----------------
     //
-    // Instead of hand-picking scenarios, drive the arena with a long,
-    // deterministic pseudo-random sequence of allocs and frees, and after
-    // EVERY op assert the structural invariants. A model (`live`) tracks the
-    // regions currently handed out so we only ever free valid spans and can
-    // check byte conservation. This catches whole classes of bugs (like the
-    // merge double-count) without anyone predicting the failing geometry.
+    // Instead of hand-picking scenarios, proptest GENERATES sequences of
+    // alloc/free ops, replays each against the arena while a model (`live`)
+    // tracks what's handed out, and checks the invariants after every op.
+    // When a sequence fails, proptest SHRINKS it to the smallest reproducer
+    // (fewest ops, smallest sizes) and prints that — not just a seed.
+    use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
 
-    /// Deterministic, dependency-free PRNG. Same seed → same sequence, so a
-    /// failure is always reproducible. (xorshift requires a non-zero state.)
-    fn xorshift64(state: &mut u64) -> u64 {
-        let mut x = *state;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        *state = x;
-        x
+    /// One step in a generated program. `Free(idx)` is an arbitrary index;
+    /// at replay time we take it modulo the number of live allocations, so a
+    /// shrunk sequence (with allocs removed) is still always a valid program.
+    #[derive(Debug, Clone)]
+    enum Op {
+        Alloc(usize),
+        Free(usize),
     }
 
-    /// The free list must always be: in bounds, strictly sorted, non-empty
-    /// blocks, and with a real GAP between consecutive blocks (anything
-    /// touching should have coalesced). Plus: free + handed-out == capacity.
-    fn assert_invariants(a: &Arena, live_bytes: usize) {
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            (1usize..=32).prop_map(Op::Alloc),
+            (0usize..64).prop_map(Op::Free),
+        ]
+    }
+
+    /// The free list must always be: in bounds, non-empty blocks, and with a
+    /// real GAP between consecutive blocks (anything touching should have
+    /// coalesced). Strict `<` enforces sorted + non-overlapping +
+    /// non-adjacent in one shot. Plus: free + handed-out == capacity.
+    fn check_invariants(a: &Arena, live_bytes: usize) -> Result<(), TestCaseError> {
         let blocks = a.free_list();
         for (i, b) in blocks.iter().enumerate() {
-            assert!(b.size > 0, "degenerate zero-size block at {i}: {blocks:?}");
-            assert!(
+            prop_assert!(b.size > 0, "degenerate zero-size block at {i}: {blocks:?}");
+            prop_assert!(
                 b.start + b.size <= a.size,
                 "block runs past the arena: {b:?} in {blocks:?}",
             );
             if i > 0 {
                 let prev = blocks[i - 1];
-                // Strict `<` enforces sorted + non-overlapping + non-adjacent
-                // in one shot: `==` would mean "should have merged", `>` means
-                // overlap or out-of-order.
-                assert!(
+                prop_assert!(
                     prev.start + prev.size < b.start,
                     "blocks not coalesced or out of order: {prev:?} then {b:?}",
                 );
             }
         }
-        assert_eq!(
+        prop_assert_eq!(
             a.free_bytes() + live_bytes,
             a.size,
-            "byte conservation broken: free={} + live={} != size={}",
-            a.free_bytes(),
-            live_bytes,
-            a.size,
+            "byte conservation broken (free + live != capacity)"
         );
+        Ok(())
     }
 
-    #[test]
-    fn property_random_alloc_free_preserves_invariants() {
-        const ARENA: usize = 256;
-        const OPS: usize = 400;
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
 
-        for seed in 0..64u64 {
+        #[test]
+        fn random_alloc_free_preserves_invariants(
+            ops in prop::collection::vec(op_strategy(), 0..400),
+        ) {
+            const ARENA: usize = 256;
             let mut a = Arena::new(ARENA);
             let mut live: Vec<(usize, usize)> = Vec::new(); // (offset, size) handed out
             let mut live_bytes = 0usize;
-            let mut rng = (seed + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
 
-            assert_invariants(&a, live_bytes);
-
-            for _ in 0..OPS {
-                // Bias slightly toward alloc when nothing is live so we don't
-                // spin on the empty branch.
-                let do_alloc = live.is_empty() || xorshift64(&mut rng) % 2 == 0;
-                if do_alloc {
-                    let size = (xorshift64(&mut rng) % 32) as usize + 1; // 1..=32
-                    if let Some(off) = a.alloc(size) {
-                        live.push((off, size));
-                        live_bytes += size;
+            check_invariants(&a, live_bytes)?;
+            for op in ops {
+                match op {
+                    Op::Alloc(size) => {
+                        if let Some(off) = a.alloc(size) {
+                            live.push((off, size));
+                            live_bytes += size;
+                        }
                     }
-                } else {
-                    let idx = (xorshift64(&mut rng) % live.len() as u64) as usize;
-                    let (off, size) = live.swap_remove(idx);
-                    a.free(off, size);
-                    live_bytes -= size;
+                    Op::Free(idx) => {
+                        if !live.is_empty() {
+                            let (off, size) = live.swap_remove(idx % live.len());
+                            a.free(off, size);
+                            live_bytes -= size;
+                        }
+                    }
                 }
-                assert_invariants(&a, live_bytes);
+                check_invariants(&a, live_bytes)?;
             }
         }
     }
