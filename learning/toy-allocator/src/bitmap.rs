@@ -21,7 +21,11 @@ impl FrameBitmap {
     /// everything reserved and frees only real RAM).
     pub fn new(capacity: usize) -> Self {
         let words = capacity.div_ceil(64);
-        Self { bits: vec![0u64; words], capacity, free: 0 }
+        Self {
+            bits: vec![0u64; words],
+            capacity,
+            free: 0,
+        }
     }
 
     /// Mark `[start, start + count)` free (clamped to capacity).
@@ -82,7 +86,22 @@ impl FrameBitmap {
     // This is line-for-line `Bitmap::alloc` in kernel-core/src/frame.rs.
     // -------------------------------------------------------------------
     pub fn alloc(&mut self) -> Option<usize> {
-        todo!("EXERCISE 3: lowest-free-frame via trailing_zeros — see comment")
+        if self.free == 0 {
+            return None;
+        }
+
+        for (i, word) in self.bits.iter_mut().enumerate() {
+            let bit = word.trailing_zeros() as usize;
+            if bit == 64 {
+                continue;
+            } else {
+                self.free -= 1;
+                *word &= !(1u64 << bit);
+                return Some(bit + i * 64);
+            }
+        }
+
+        return None;
     }
 }
 
@@ -127,6 +146,10 @@ mod tests {
         bm.release_range(0, 2);
         let f = bm.alloc().unwrap();
         bm.free(f);
-        assert_eq!(bm.alloc(), Some(f), "freed frame should be handed out again");
+        assert_eq!(
+            bm.alloc(),
+            Some(f),
+            "freed frame should be handed out again"
+        );
     }
 }

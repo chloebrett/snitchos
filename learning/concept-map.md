@@ -65,12 +65,12 @@ Ratings start blank (`—`). The "Quiz" column tracks whether we've probed it ye
 
 | Sub-topic | Grounded in | Rating | Quiz |
 |---|---|---|---|
-| Bitmap allocator: 1 bit per frame, free=1 convention | `kernel-core/src/frame.rs` | 2 | ☑ |
-| First-free via `trailing_zeros` (O(words)) | `Bitmap::alloc` | 2 | ☑ |
-| Maintaining `frames_free` for O(1) empty-check | `set_bit_tracked` | — | ☐ |
+| Bitmap allocator: 1 bit per frame, free=1 convention | `kernel-core/src/frame.rs` | 4 | ☑ |
+| First-free via `trailing_zeros` (O(words)) | `Bitmap::alloc` | 4 | ☑ |
+| Maintaining `frames_free` for O(1) empty-check | `set_bit_tracked` | 3 | ☑ |
 | Contiguous allocation & fragmentation | `alloc_contiguous` | — | ☐ |
 | Reserving the kernel image (the `va_to_pa(&sym)` trick) | CLAUDE.md gotchas | — | ☐ |
-| **Toy:** `toy-allocator` (free-list + bitmap) | `learning/toy-allocator/` | — | ☐ |
+| **Toy:** `toy-allocator` (free-list + bitmap) | `learning/toy-allocator/` | ✅ | ☑ |
 
 ## 5. The kernel heap
 *`Box`/`Vec` for the kernel.*
