@@ -49,12 +49,12 @@ Ratings start blank (`—`). The "Quiz" column tracks whether we've probed it ye
 | Sub-topic | Grounded in | Rating | Quiz |
 |---|---|---|---|
 | What a page table *is*; VA → PA translation | `kernel-core/src/mmu.rs` | 3 | ☑ |
-| Sv39 specifics: 39-bit VA, 3 levels, VPN/offset split | `kernel-core/src/mmu.rs` | 3 | ☑ |
-| PTE encoding: PPN + permission bits (V/R/W/X/G/U/A/D) | `leaf_pte`, `PtePerms` | — | ☐ |
-| The multi-level walk (and huge-page leaves) | `core_mmu::map` | 2 | ☑ |
+| Sv39 specifics: 39-bit VA, 3 levels, VPN/offset split | `kernel-core/src/mmu.rs` | 4 | ☑ |
+| PTE encoding: PPN + permission bits (V/R/W/X/G/U/A/D) | `leaf_pte`, `PtePerms` | 3 | ☑ |
+| The multi-level walk (and huge-page leaves) | `core_mmu::map` | 4 | ☑ |
 | `satp`: turning translation on; the mode field | `mmu::enable` | — | ☐ |
 | `sfence.vma`: why & when you flush the TLB | `kernel::mmu::map` | — | ☐ |
-| The four address spaces: identity / higher-half / linear / heap | CLAUDE.md "Memory layout" | — | ☐ |
+| The four address spaces: identity / higher-half / linear / heap | CLAUDE.md "Memory layout" | 3 | ☑ |
 | The trampoline: jumping PC + sp to higher-half | `kmain` asm block | 2 | ☑ |
 | `va_to_pa` / `pa_to_kernel_va`: which lens, when | `mmu.rs` | — | ☐ |
 | Tearing down the identity map (`unmap_identity`) | `mmu.rs` | — | ☐ |

@@ -197,11 +197,11 @@ impl Mem {
 ///   * VPN[0] = bits 20:12   (shift right 12)
 ///   * offset = bits 11:0    (mask `0xfff`)
 pub fn split_va(va: usize) -> (usize, usize, usize, usize) {
-    let a = va >> 30;
-    let b = (va >> 21) - 512 * a;
-    let c = (va >> 12) - 512 * b - 512 * 512 * a;
-    let d = va & 0xfff;
-    (a, b, c, d)
+    let vpn2 = (va >> 30) & 0x1ff;
+    let vpn1 = (va >> 21) & 0x1ff;
+    let vpn0 = (va >> 12) & 0x1ff;
+    let offset = va & 0xfff;
+    (vpn2, vpn1, vpn0, offset)
 }
 
 /// Translate a VA to a PA by walking the page table — i.e. do by hand
@@ -221,8 +221,22 @@ pub fn split_va(va: usize) -> (usize, usize, usize, usize) {
 ///
 /// Walking past level 0 without hitting a leaf is also a fault.
 pub fn translate(mem: &Mem, root_pa: usize, va: usize) -> Option<usize> {
-    let _ = (mem, root_pa, va);
-    todo!("EXERCISE 2: read walk with huge-page leaves — see the comment above")
+    let (vpn2, vpn1, vpn0, offset) = split_va(va);
+    let vpn = [vpn0, vpn1, vpn2];
+
+    let mut pa = root_pa;
+    for level in [2, 1, 0] {
+        let pte = mem.read(pa, vpn[level]);
+        if !pte_is_valid(pte) {
+            return None;
+        }
+        pa = pte_addr(pte);
+        if pte_is_leaf(pte) {
+            let offset_mask = (1 << (12 + 9 * level)) - 1;
+            return Some(pa | (va & offset_mask));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -249,6 +263,17 @@ mod tests {
         // All-ones in each field → every VPN should be 0x1ff, offset 0xfff.
         let va = (0x1ff << 30) | (0x1ff << 21) | (0x1ff << 12) | 0xfff;
         assert_eq!(split_va(va), (0x1ff, 0x1ff, 0x1ff, 0xfff));
+    }
+
+    #[test]
+    fn split_va_higher_half_kernel_va_lands_in_root_slot_510() {
+        // The kernel image's higher-half VA. The mask must drop the
+        // sign-extension bits 63:39, but bits 38:32 ARE real address bits:
+        //   0xffffffff_80200000 → bits 38:30 = 0b111111110 = 510.
+        // So vpn2 = 510 (NOT 2 — the identity VA 0x80200000 is what gives 2).
+        // Dual-mapping the kernel at root[2] (identity) and root[510]
+        // (higher-half) works precisely because these don't collide.
+        assert_eq!(split_va(0xffffffff_80200000), (510, 1, 0, 0));
     }
 
     // ---- Test helper: hand-build a mapping at a chosen leaf level ------
