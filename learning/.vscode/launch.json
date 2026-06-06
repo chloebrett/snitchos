@@ -1,0 +1,35 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug toy-allocator tests (prompt for filter)",
+      "cargo": {
+        "args": ["test", "--no-run", "--lib", "--package=toy-allocator"],
+        "filter": { "name": "toy-allocator", "kind": "lib" }
+      },
+      "args": ["${input:testFilter}", "--exact", "--nocapture"],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug toy-allocator tests (all)",
+      "cargo": {
+        "args": ["test", "--no-run", "--lib", "--package=toy-allocator"],
+        "filter": { "name": "toy-allocator", "kind": "lib" }
+      },
+      "args": ["--nocapture"],
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "testFilter",
+      "type": "promptString",
+      "description": "Exact test path, e.g. freelist::tests::free_returns_bytes_to_the_pool",
+      "default": "freelist::tests::free_returns_bytes_to_the_pool"
+    }
+  ]
+}

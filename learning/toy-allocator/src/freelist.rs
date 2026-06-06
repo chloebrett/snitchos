@@ -119,7 +119,61 @@ impl Arena {
     // heap's fragmentation metrics depend entirely on this working.
     // -------------------------------------------------------------------
     pub fn free(&mut self, start: usize, size: usize) {
-        todo!("EXERCISE 2: free + coalesce — see comment above")
+        debug_assert!(
+            self.free
+                .iter()
+                .all(|b| start + size <= b.start || b.start + b.size <= start),
+            "free({start}, {size}) overlaps an existing free block — double free or bad span",
+        );
+
+        // If there are no free blocks, this becomes the only one.
+        if self.free.is_empty() {
+            self.free.push(FreeBlock { start, size });
+            return;
+        }
+
+        let Some(next_index) = self.free.iter().position(|it| it.start > start) else {
+            // At end.
+            let last_free = self.free.last_mut().expect("At least one elem expected");
+            if last_free.start + last_free.size == start {
+                last_free.size += size;
+            } else {
+                self.free.push(FreeBlock { start, size });
+            }
+            return;
+        };
+
+        if self.free.len() == 1 {
+            // At start.
+            let first_free = self.free.first_mut().expect("At least one elem expected");
+            if start + size == first_free.start {
+                first_free.start = start;
+                first_free.size += size;
+            } else {
+                self.free.insert(next_index, FreeBlock { start, size });
+            }
+            return;
+        }
+
+        // In middle.
+        let prev = self.free[next_index - 1];
+        let next = self.free[next_index];
+        let merge_prev = prev.start + prev.size == start;
+        let merge_next = start + size == next.start;
+        if merge_prev && merge_next {
+            let prev = &mut self.free[next_index - 1];
+            prev.size += size + next.size;
+            self.free.remove(next_index);
+        } else if merge_prev {
+            let prev = &mut self.free[next_index - 1];
+            prev.size += size;
+        } else if merge_next {
+            let next = &mut self.free[next_index];
+            next.start -= size;
+            next.size += size;
+        } else {
+            self.free.insert(next_index, FreeBlock { start, size });
+        }
     }
 }
 
@@ -184,6 +238,38 @@ mod tests {
         assert_eq!(a.free_bytes(), 100);
         assert_eq!(a.fragments(), 1);
         assert_eq!(a.largest_free_block(), 100);
+    }
+
+    #[test]
+    fn free_into_empty_list_becomes_the_only_block() {
+        let mut a = Arena::new(100);
+        a.alloc(100).unwrap(); // drains the arena — free list is now empty
+        assert_eq!(a.fragments(), 0);
+
+        a.free(0, 100); // no neighbours to coalesce with; just insert
+        assert_eq!(a.fragments(), 1);
+        assert_eq!(a.free_bytes(), 100);
+        assert_eq!(a.largest_free_block(), 100);
+    }
+
+    #[test]
+    fn freeing_in_ascending_order_coalesces_at_the_tail() {
+        let mut a = Arena::new(30);
+        a.alloc(30).unwrap(); // drain to empty
+
+        a.free(0, 10); // empty-list path → [{0,10}]
+        a.free(10, 10); // past the end AND right-adjacent to the tail → extends it
+        assert_eq!(
+            a.fragments(),
+            1,
+            "10 should merge into the tail, not append"
+        );
+        assert_eq!(a.free_bytes(), 20);
+        assert_eq!(a.largest_free_block(), 20);
+
+        a.free(20, 10); // tail-adjacent again → one block covers everything
+        assert_eq!(a.fragments(), 1);
+        assert_eq!(a.largest_free_block(), 30);
     }
 
     #[test]
