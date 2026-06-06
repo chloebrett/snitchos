@@ -142,6 +142,13 @@ pub fn emit_thread_register(id: kernel_core::sched::TaskId, name: &str) {
     emit_frame(&Frame::ThreadRegister { id: id.0, name });
 }
 
+/// Emit a `HartRegister` frame. Called once per hart at bring-up so
+/// the collector can resolve `hart_id` → role (and platform
+/// `mhartid` for correlation with hardware docs).
+pub fn emit_hart_register(id: u8, mhartid: u64, role: protocol::HartRole) {
+    emit_frame(&Frame::HartRegister { id, mhartid, role });
+}
+
 /// Emit a `ContextSwitch` frame. Called by `sched::yield_now` on
 /// every actual switch. Makes scheduler decisions first-class
 /// traceable events.

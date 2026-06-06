@@ -8,6 +8,11 @@ MEMORY {
 SECTIONS {
   __kernel_start = ORIGIN(ram);
   .text : AT(0x80200000) {
+    /* `_start` must be at PA 0x80200000 — that's where OpenSBI jumps
+     * the boot hart. `.text.entry` is the dedicated section just for
+     * the entry stub (entry.S) so it's never reordered relative to
+     * other boot-time asm (`.text.boot`, e.g. secondary.S). */
+    KEEP(*(.text.entry))
     KEEP(*(.text.boot))
     *(.text .text*)
   } > ram

@@ -529,6 +529,30 @@ pub fn pre_init_order() -> Result<(), String> {
     }
 }
 
+/// v0.6 step 8: secondary hart bring-up. After SBI `hart_start`,
+/// hart 1 runs `_secondary_start` asm (sets sp, loads SATP,
+/// trampolines to higher-half) and enters `secondary_main`, which
+/// initialises per-CPU state and emits `HartRegister { id: 1 }`.
+/// The scenario asserts the frame appears on the wire within 5s.
+///
+/// Proves: SBI HSM ECALL works, the secondary entry asm correctly
+/// sets up sp + SATP + tp, hart 1 reaches higher-half + Rust, and
+/// the wire-format `HartRegister` variant carries through the
+/// collector.
+pub fn smp_secondary_hart_boots() -> Result<(), String> {
+    let mut h = Harness::spawn("smp-boot")?;
+
+    h.wait_for(SEC * 5, |f, _| {
+        matches!(f, OwnedFrame::HartRegister { id: 1, .. })
+    })
+    .ok_or(
+        "no HartRegister{id:1} within 5s — hart 1 didn't reach \
+         secondary_main, or the SATP/sp setup faulted silently, or \
+         SBI hart_start returned an error",
+    )?;
+    Ok(())
+}
+
 /// v0.6 step 7: IPI primitive smoke. Boot hart sends itself a
 /// `Wakeup` IPI after init; the software-interrupt trap handler
 /// reads the pending bitflags, dispatches, and bumps

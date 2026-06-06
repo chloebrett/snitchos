@@ -1,4 +1,4 @@
-.section .text.boot
+.section .text.entry
 .globl _start
 _start:
   la sp, __stack_top

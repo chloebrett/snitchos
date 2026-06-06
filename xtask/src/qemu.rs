@@ -16,7 +16,9 @@ pub fn base_command(chardev_arg: &str) -> Command {
     cmd.args([
         "-machine", "virt",
         "-cpu", "rv64",
-        "-smp", "1",
+        // v0.6: two harts. Hart 0 is the boot hart; hart 1 is
+        // parked in OpenSBI until kmain calls sbi_hart_start.
+        "-smp", "2",
         "-m", "128M",
         "-nographic",
         "-bios", "default",

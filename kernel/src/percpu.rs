@@ -61,9 +61,11 @@
 use core::arch::asm;
 use core::sync::atomic::AtomicU32;
 
-/// Maximum harts supported. Single-hart through v0.6 step 10; the
-/// constant bumps when secondary-hart bring-up lands.
-pub const MAX_HARTS: usize = 1;
+/// Maximum harts supported. Bumped to 2 in v0.6 step 8 for the
+/// cooperative-SMP demo (one boot hart + one worker). Each hart
+/// gets its own `PER_HART_DATA` slot, its own `PerCpu<T>` cell, and
+/// (step 10) its own runqueue + idle task.
+pub const MAX_HARTS: usize = 2;
 
 /// Per-hart bookkeeping. `tp` register points at this hart's slot in
 /// `PER_HART_DATA`. New fields land here as v0.6 steps progress —
@@ -91,10 +93,10 @@ pub struct PerHartData {
 /// One slot per hart. Statically initialised to `hart_id = i` so a
 /// secondary hart starting cold (before its `init()` runs) at least
 /// sees a stable value at its slot.
-pub static PER_HART_DATA: [PerHartData; MAX_HARTS] = [PerHartData {
-    hart_id: 0,
-    ipi_pending: AtomicU32::new(0),
-}];
+pub static PER_HART_DATA: [PerHartData; MAX_HARTS] = [
+    PerHartData { hart_id: 0, ipi_pending: AtomicU32::new(0) },
+    PerHartData { hart_id: 1, ipi_pending: AtomicU32::new(0) },
+];
 
 /// Initialise this hart's per-CPU context. Sets `tp` to point at this
 /// hart's `PER_HART_DATA` slot so subsequent `current_hartid()` calls

@@ -19,6 +19,9 @@ use core::arch::asm;
 /// SBI IPI extension id ("sPI" packed as ASCII).
 const EID_IPI: u64 = 0x735049;
 
+/// SBI HSM (Hart State Management) extension id ("HSM" packed as ASCII).
+const EID_HSM: u64 = 0x48534D;
+
 /// Send an inter-processor interrupt to a set of harts.
 ///
 /// `hart_mask`: bitmask of harts to target, where bit `i` selects
@@ -46,4 +49,29 @@ pub fn send_ipi(hart_mask: u64, hart_mask_base: u64) {
     if error != 0 {
         panic!("sbi_send_ipi failed: error={error}");
     }
+}
+
+/// Wake a parked hart and jump it to `start_addr` (a *physical*
+/// address, since the target starts with MMU off). `opaque` is
+/// passed as `a1` to the target on entry.
+///
+/// SBI HSM extension, FID 0 (`sbi_hart_start`).
+///
+/// Returns the SBI error code: 0 on success, non-zero on failure.
+/// Caller decides how to react — for v0.6 step 8 the kernel panics
+/// because there's nothing to do if hart 1 can't start.
+pub fn hart_start(hartid: u64, start_addr: u64, opaque: u64) -> i64 {
+    let error: i64;
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") EID_HSM,
+            in("a6") 0_u64,  // FID 0 = sbi_hart_start
+            inlateout("a0") hartid => error,
+            in("a1") start_addr,
+            in("a2") opaque,
+            options(nostack),
+        );
+    }
+    error
 }
