@@ -324,6 +324,113 @@
           "mode": "multi"
         }
       }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Harts online",
+      "description": "Build-time hart-count cap (MAX_HARTS). v0.6 step 8 brought this from 1 to 2; v0.6 step 10 will start scheduling tasks onto the secondary.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_smp_harts_total",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "green", "value": 2 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Boot hart mhartid",
+      "description": "Platform hart id OpenSBI handed kmain as the boot hart (the value of `a0` at kmain entry). Under QEMU -smp 2 this is not deterministic: OpenSBI picks 0 or 1 across boots. Useful for correlating logs with the boot hart's identity.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_smp_boot_hart_id",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [ { "color": "blue", "value": null } ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Secondary hart wfi rate",
+      "description": "How often hart 1 has woken from `wfi` and looped. v0.6 step 8: hart 1 has no work, so the rate is whatever stray interrupts QEMU delivers (typically near zero). v0.6 step 10 will give hart 1 a runqueue + idle task, and this will jump to a steady rate as scheduling decisions wake it via IPI.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(snitchos_smp_secondary_wfi_total[1m])",
+          "legendFormat": "wfi wakeups/s",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "interval": "5s"
+        },
+        {
+          "refId": "B",
+          "expr": "snitchos_smp_secondary_wfi_total",
+          "legendFormat": "cumulative (right axis)",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5 }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "cumulative (right axis)" },
+            "properties": [ { "id": "custom.axisPlacement", "value": "right" } ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      }
     }
   ]
 }

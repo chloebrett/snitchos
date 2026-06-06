@@ -236,6 +236,15 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let workload_lock_wait = tracing::register_counter("snitchos.workload.lock_wait_ticks_total");
     let workload_queue_depth = tracing::register_gauge("snitchos.workload.queue_depth");
     let ipi_received = tracing::register_counter("snitchos.ipi.received_total");
+    // v0.6 step 8 SMP visibility metrics. `harts_total` is the build-
+    // time hart-count cap; `boot_hart_id` is what mhartid OpenSBI gave
+    // us as the boot hart (not always 0 under -smp 2); `secondary_wfi`
+    // ticks each time the secondary hart wakes from wfi (today only
+    // step 10's runqueue + IPI wakeup will give it anything to do —
+    // before that it climbs on stray interrupts only).
+    let smp_harts_total = tracing::register_gauge("snitchos.smp.harts_total");
+    let smp_boot_hart_id = tracing::register_gauge("snitchos.smp.boot_hart_id");
+    let smp_secondary_wfi = tracing::register_counter("snitchos.smp.secondary_wfi_total");
     // SMOKE TEST metrics — remove with heap_smoke module
     let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
     let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
@@ -328,6 +337,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // because that's where we statically placed it.
     let boot_mhartid = _hart_id as u64;
     let secondary_mhartid = 1u64 - boot_mhartid;
+    BOOT_MHARTID.store(boot_mhartid, Ordering::Relaxed);
     tracing::emit_hart_register(0, boot_mhartid, protocol::HartRole::Boot);
     unsafe { secondary::prepare_for_secondary() };
     let entry_pa = unsafe {
@@ -555,6 +565,15 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 ipi_received,
                 ipi::RECEIVED_TOTAL.load(Ordering::Relaxed) as i64,
             );
+            tracing::emit_metric(smp_harts_total, percpu::MAX_HARTS as i64);
+            tracing::emit_metric(
+                smp_boot_hart_id,
+                BOOT_MHARTID.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                smp_secondary_wfi,
+                secondary::SECONDARY_WFI_COUNT.load(Ordering::Relaxed) as i64,
+            );
             // SMOKE TEST — remove with heap_smoke module
             heap_smoke::step(count);
             let sst = heap_smoke::stats();
@@ -587,6 +606,13 @@ extern "C" fn idle_entry() -> ! {
 /// block so it's never alive across the yield. Per-task `SpanCursor`
 /// swapping on context switch is a future refinement; until then,
 /// the discipline is "balance the cursor before yielding."
+/// mhartid OpenSBI handed kmain as `_hart_id`. Captured at the top of
+/// the bring-up block; drained by the heartbeat as
+/// `snitchos.smp.boot_hart_id`. Useful because OpenSBI's choice of
+/// boot hart is not always 0 under `-smp 2`. `Relaxed`: single
+/// writer (boot path), read by heartbeat on the same hart.
+static BOOT_MHARTID: AtomicU64 = AtomicU64::new(0);
+
 // `Relaxed`: pure tallies. See `kernel::percpu` for the kernel-wide
 // ordering discipline.
 static TASK_A_LOOPS: AtomicU64 = AtomicU64::new(0);
