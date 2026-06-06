@@ -126,35 +126,29 @@ impl Arena {
             "free({start}, {size}) overlaps an existing free block — double free or bad span",
         );
 
-        let i = self
-            .free
-            .iter()
-            .position(|b| b.start > start)
-            .unwrap_or(self.free.len());
+        let i = self.free.partition_point(|b| b.start < start);
         let merge_prev = i > 0 && self.free[i - 1].start + self.free[i - 1].size == start;
         let merge_next = i < self.free.len() && start + size == self.free[i].start;
 
-        if merge_prev {
-            let prev = &mut self.free[i - 1];
-            prev.size += size;
-        }
-
-        if merge_next {
-            if merge_prev {
-                let next_size = self.free[i].size;
-                let prev = &mut self.free[i - 1];
-                prev.size += next_size;
-                self.free.remove(i);
-            } else {
-                let next = &mut self.free[i];
-                next.start -= size;
-                next.size += size;
-            }
-        }
-
-        if !merge_prev && !merge_next {
-            self.free.insert(i, FreeBlock { start, size });
-        }
+        let lo = if merge_prev {
+            self.free[i - 1].start
+        } else {
+            start
+        };
+        let hi = if merge_next {
+            self.free[i].start + self.free[i].size
+        } else {
+            start + size
+        };
+        let from = if merge_prev { i - 1 } else { i };
+        let to = if merge_next { i + 1 } else { i };
+        self.free.splice(
+            from..to,
+            [FreeBlock {
+                start: lo,
+                size: hi - lo,
+            }],
+        );
     }
 }
 
