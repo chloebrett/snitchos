@@ -129,7 +129,11 @@ pub struct Mem {
 impl Mem {
     /// `cap` = max intermediate-table allocations (root is free).
     pub fn new(cap: usize) -> Self {
-        Self { tables: vec![[0u64; 512]], cap, allocs: 0 }
+        Self {
+            tables: vec![[0u64; 512]],
+            cap,
+            allocs: 0,
+        }
     }
 
     pub fn root_pa(&self) -> usize {
@@ -193,8 +197,11 @@ impl Mem {
 ///   * VPN[0] = bits 20:12   (shift right 12)
 ///   * offset = bits 11:0    (mask `0xfff`)
 pub fn split_va(va: usize) -> (usize, usize, usize, usize) {
-    let _ = va;
-    todo!("EXERCISE 1: split the VA into vpn2/vpn1/vpn0/offset")
+    let a = va >> 30;
+    let b = (va >> 21) - 512 * a;
+    let c = (va >> 12) - 512 * b - 512 * 512 * a;
+    let d = va & 0xfff;
+    (a, b, c, d)
 }
 
 /// Translate a VA to a PA by walking the page table — i.e. do by hand
