@@ -81,11 +81,14 @@ impl Arena {
     // kernel-core/src/frame.rs (which is the fixed-size cousin).
     // -------------------------------------------------------------------
     pub fn alloc(&mut self, size: usize) -> Option<usize> {
+        if size == 0 {
+            return None;
+        }
         let (index, block) = self
             .free
             .iter_mut()
             .enumerate()
-            .find(|(i, it)| it.size >= size)?;
+            .find(|(_, it)| it.size >= size)?;
         let taken = block.start;
         if block.size > size {
             block.start += size;
