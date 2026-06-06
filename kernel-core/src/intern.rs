@@ -7,10 +7,12 @@ use protocol::{Frame, MetricKind, StringId};
 
 use crate::sink::FrameSink;
 
-/// Maximum number of unique strings the table can hold. Sized for v0.1
-/// — kernel.boot, heartbeat, a handful of init phases. Bump when more
-/// span/metric names enter the kernel.
-pub const MAX_INTERNED: usize = 64;
+/// Maximum number of unique strings the table can hold. Each task
+/// `spawn` adds ~3 strings (the task name + 2 per-task metric names).
+/// Bumped to 128 in v0.6 step 10 because adding `hart_1_main` +
+/// `hart_1_probe` to the existing v0.5 task set + workload metrics +
+/// SMP metrics pushed past 64.
+pub const MAX_INTERNED: usize = 128;
 
 #[derive(Copy, Clone)]
 struct InternEntry {

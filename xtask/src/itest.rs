@@ -34,6 +34,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario { name: "workload-cooperative-baseline", run: scenarios::workload_cooperative_baseline },
     Scenario { name: "ipi-self-wakeup",            run: scenarios::ipi_self_wakeup },
     Scenario { name: "smp-secondary-hart-boots",   run: scenarios::smp_secondary_hart_boots },
+    Scenario { name: "smp-spawn-on-hart-1-runs",   run: scenarios::smp_spawn_on_hart_1_runs },
 ];
 
 /// Entry point from `main`. `Some(name)` runs one scenario;

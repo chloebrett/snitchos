@@ -66,6 +66,23 @@ pub static SECONDARY_READY: AtomicBool = AtomicBool::new(false);
 /// alive" signal in dashboards. `Relaxed`: per-hart counter.
 pub static SECONDARY_WFI_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Bumped by `probe_entry` each loop. Used by the
+/// `smp-spawn-on-hart-1-runs` integration scenario to prove that a
+/// task spawned cross-hart actually executes on the target.
+/// `Relaxed`: counter.
+pub static PROBE_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Demo task spawned via `spawn_on(1, "hart_1_probe", probe_entry)`
+/// from kmain. Increments `PROBE_TICKS` and yields. Existence on
+/// hart 1's runqueue is what `spawn_on` produces; the increments are
+/// what `yield_now` on hart 1 executes after picking it.
+pub extern "C" fn probe_entry() -> ! {
+    loop {
+        PROBE_TICKS.fetch_add(1, Ordering::Relaxed);
+        crate::sched::yield_now();
+    }
+}
+
 /// Stash boot-time values the secondary's asm + Rust need to read.
 /// **Call from hart 0 before `sbi::hart_start`.**
 ///
@@ -142,12 +159,41 @@ pub extern "C" fn secondary_main(_mhartid: usize, hartid: usize) -> ! {
     // Release: any state we wrote that hart 0 needs to see (the
     // HartRegister frame's intern-table entries) is published
     // before hart 0's Acquire load below.
+    // Install the trap vector (same `trap_entry` hart 0 uses, lives
+    // at a higher-half VA). Then enable software interrupts (IPIs)
+    // and timer interrupts. Hart 1 needs its own timer cadence: each
+    // hart has independent `stimecmp`, and without a wakeup source
+    // hart 1's idle-style loop would `wfi` forever after the first
+    // task yields back.
+    //
+    // SAFETY: post-MMU, trap_entry's higher-half VA resolves;
+    // `init_timer` arms *this hart's* stimecmp and enables STIE +
+    // SIE; `enable_software_interrupts` enables SSIE.
+    unsafe {
+        crate::trap::set_trap_vector();
+        let interval = crate::trap::TIMER_INTERVAL_TICKS
+            .load(Ordering::Relaxed);
+        crate::trap::init_timer(interval);
+        crate::trap::enable_software_interrupts();
+    }
+
     SECONDARY_READY.store(true, Ordering::Release);
 
-    // v0.6 step 8 scope: just idle. Step 10 adds per-hart runqueue
-    // and an idle task that wfi's between yields; for now,
-    // wfi-and-loop is the worker.
+    // v0.6 step 10: enroll in the scheduler as this hart's "main"
+    // task. From here on `current_task_id()` returns our id and
+    // `yield_now()` cycles through this hart's runqueue. Any task
+    // someone has `spawn_on(1, ...)`d will land here.
+    let _ = crate::sched::register_bare_task(
+        "hart_1_main",
+        kernel_core::sched::TaskState::Running,
+    );
+
+    // SMP-cooperative idle loop: yield first (picks up any queued
+    // task), then sleep until the next timer IRQ or an IPI breaks
+    // wfi. Each wake bumps SECONDARY_WFI_COUNT for the
+    // `snitchos.smp.secondary_wfi_total` heartbeat metric.
     loop {
+        crate::sched::yield_now();
         unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)); }
         SECONDARY_WFI_COUNT.fetch_add(1, Ordering::Relaxed);
     }

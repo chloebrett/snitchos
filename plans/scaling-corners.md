@@ -80,6 +80,8 @@ Things that work on SMP but serialize hard:
 | `SPAN_ID_COUNTER` atomic | `fetch_add` contention-free, but cache traffic | doc-recommended fix: per-CPU partition |
 | Heartbeat loop assumes 1 heartbeat | needs N independent or one designated hart | trivially refactorable |
 | `spin::Mutex` vs sleeping mutex | wastes cycles under contention | wait for scheduler (v0.5+) |
+| TLB shootdown is per-PTE, unbatched | `mmu::map/unmap` does one IPI roundtrip per PTE; multi-page workloads pay N × IPI latency | needs `mmu_gather`-style batching: queue up VAs touched, broadcast once at the end. Already burned us once — heap-oom went red the moment shootdown wasn't filtered to remap/unmap only. |
+| No ASID tagging on the TLB | every context switch needs a full shootdown to evict the outgoing process's entries | add ASID allocation + tag PTEs + `sfence.vma rs1=va, rs2=asid` to scope shootdowns per address space. Big win once userspace lands and context switches start crossing page tables (v0.7+). Also enables PCID-style "TLB doesn't have to flush on switch." |
 
 ## Not corners
 

@@ -529,6 +529,34 @@ pub fn pre_init_order() -> Result<(), String> {
     }
 }
 
+/// v0.6 step 10: cross-hart spawn. Boot hart calls
+/// `spawn_on(1, "hart_1_probe", probe_entry)`, which puts the task on
+/// hart 1's runqueue and sends `IPI_WAKEUP`. Hart 1 takes the IPI,
+/// breaks `wfi`, yields, picks the probe, and the probe's loop
+/// increments `PROBE_TICKS`. The scenario asserts the metric reaches
+/// at least 10 within 10s — proves the whole chain works:
+/// per-hart runqueue, cross-hart spawn enqueue, IPI wakeup, hart 1's
+/// trap+dispatch, `yield_now` on hart 1, task execution.
+pub fn smp_spawn_on_hart_1_runs() -> Result<(), String> {
+    let mut h = Harness::spawn("smp-spawn")?;
+
+    h.wait_for(SEC * 10, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.smp.hart_1_probe_ticks_total")
+                && *value >= 10
+        }
+        _ => false,
+    })
+    .ok_or(
+        "hart_1_probe_ticks_total never reached 10 within 10s — \
+         hart 1 didn't pick up the spawn_on'd task. Per-hart runqueue \
+         not wired, IPI_WAKEUP not delivered, hart 1 not handling \
+         software interrupts, or hart_1_main's yield_now broken.",
+    )?;
+    Ok(())
+}
+
 /// v0.6 step 8: secondary hart bring-up. After SBI `hart_start`,
 /// hart 1 runs `_secondary_start` asm (sets sp, loads SATP,
 /// trampolines to higher-half) and enters `secondary_main`, which

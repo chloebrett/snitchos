@@ -137,6 +137,19 @@ pub struct PerHartData {
 /// — this bitmap only gates *whether* to attempt that handshake.
 pub static SMP_ONLINE_HARTS: AtomicU64 = AtomicU64::new(0);
 
+/// Logical hart id (`0..MAX_HARTS`) → platform `mhartid`. Written by
+/// `kmain` once OpenSBI's boot hart selection is known; read by
+/// `ipi::send` to translate the logical target to the mhartid the
+/// SBI `send_ipi` call expects.
+///
+/// Initialised to the identity mapping so single-hart and "boot hart
+/// is mhartid 0" cases work without any explicit setup. Boot path
+/// overwrites with the actual mapping derived from `_hart_id`.
+pub static LOGICAL_TO_MHARTID: [core::sync::atomic::AtomicU64; MAX_HARTS] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(1),
+];
+
 pub static PER_HART_DATA: [PerHartData; MAX_HARTS] = [
     PerHartData {
         hart_id: 0,

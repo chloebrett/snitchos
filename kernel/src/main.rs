@@ -129,16 +129,26 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     mark(b'E');
 
     // v0.6 step 4: install the per-hart pointer. `PER_HART_DATA` is a
-    // higher-half static, so this must run post-trampoline. From here
-    // on, `percpu::current_hartid()` reads through `tp` instead of
-    // returning a hardcoded 0. On a single hart the observable value
-    // is identical; the plumbing matters for v0.6 steps that bring up
-    // a second hart and need each hart to identify itself.
+    // higher-half static, so this must run post-trampoline.
     //
-    // SAFETY: trampoline executed (higher-half VAs resolve);
-    // `_hart_id` is the SBI-handoff hartid (0 on the boot path); no
+    // We pass *logical* hartid 0 here, regardless of what mhartid
+    // OpenSBI handed us as `_hart_id`. The boot hart is by definition
+    // logical hart 0 (kmain runs there once, owns all the boot
+    // bookkeeping); the secondary always comes up as logical hart 1
+    // via `secondary_main(_, 1)`. The platform `mhartid` is captured
+    // separately into `BOOT_MHARTID` for telemetry; the dense logical
+    // id is what every other piece of the kernel reasons about.
+    //
+    // SAFETY: trampoline executed (higher-half VAs resolve); no
     // per-hart-aware code has run yet.
-    unsafe { percpu::init(_hart_id) };
+    unsafe { percpu::init(0) };
+
+    // Record the logical→mhartid mapping so `ipi::send(logical_id)`
+    // can translate to the platform mhartid that `sbi_send_ipi`
+    // expects. With MAX_HARTS=2 and OpenSBI free to pick either as
+    // boot, the mapping is { 0 → _hart_id, 1 → 1-_hart_id }.
+    percpu::LOGICAL_TO_MHARTID[0].store(_hart_id as u64, Ordering::Relaxed);
+    percpu::LOGICAL_TO_MHARTID[1].store(1u64 - _hart_id as u64, Ordering::Relaxed);
     mark(b'F');
 
     // Verify we're actually at higher-half PC. `auipc rd, 0` puts
@@ -249,6 +259,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         tracing::register_counter("snitchos.mmu.shootdowns_received_total");
     let mmu_shootdowns_sent =
         tracing::register_counter("snitchos.mmu.shootdowns_sent_total");
+    let smp_probe_ticks =
+        tracing::register_counter("snitchos.smp.hart_1_probe_ticks_total");
     // SMOKE TEST metrics — remove with heap_smoke module
     let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
     let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
@@ -365,6 +377,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     while !secondary::SECONDARY_READY.load(Ordering::Acquire) {
         core::hint::spin_loop();
     }
+
+    // v0.6 step 10: cross-hart spawn smoke. Probe lands on hart 1's
+    // runqueue + IPI wakeup nudges hart 1 to pick it.
+    let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
 
     // Tear down both identity mappings. From here on, any access to
     // an identity-half VA — kernel image, stack, DTB, or MMIO — faults.
@@ -585,6 +601,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(
                 mmu_shootdowns_sent,
                 mmu::SHOOTDOWNS_SENT_TOTAL.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                smp_probe_ticks,
+                secondary::PROBE_TICKS.load(Ordering::Relaxed) as i64,
             );
             // SMOKE TEST — remove with heap_smoke module
             heap_smoke::step(count);

@@ -64,7 +64,11 @@ pub fn send(target_hart: usize, msg: u32) {
     PER_HART_DATA[target_hart]
         .ipi_pending
         .fetch_or(msg, Ordering::Release);
-    sbi::send_ipi(1u64 << target_hart, 0);
+    // SBI expects the *platform mhartid* mask, not the logical id.
+    // Translate via the table kmain populated at boot.
+    let mhartid = crate::percpu::LOGICAL_TO_MHARTID[target_hart]
+        .load(Ordering::Relaxed);
+    sbi::send_ipi(1u64 << mhartid, 0);
 }
 
 /// Trap-handler entry point for `SupervisorSoftwareInterrupt`.

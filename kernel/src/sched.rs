@@ -158,18 +158,25 @@ impl Task {
 /// is a `Vec<Box<Task>>` so individual `Task` allocations don't move
 /// when the vector grows — context-switch will hand the asm a stable
 /// raw pointer per task.
+///
+/// v0.6 step 10: `runqueues` is per-hart. Each hart pops from its own
+/// runqueue in `yield_now`, so cross-hart spawns (`spawn_on`) land in
+/// the target hart's queue. There is no work-stealing — an idle hart
+/// with an empty runqueue runs its idle task and `wfi`s until an IPI
+/// arrives saying "you have new work."
 pub struct Scheduler {
     /// All known tasks, indexed by their position in this vec. `id.0`
     /// equals `tasks[i].id.0`; the vec is never reordered.
     tasks: Vec<Box<Task>>,
-    runqueue: Runqueue,
+    /// One runqueue per hart. Hart `i` pops from `runqueues[i]`.
+    runqueues: [Runqueue; crate::percpu::MAX_HARTS],
 }
 
 impl Scheduler {
     const fn new() -> Self {
         Self {
             tasks: Vec::new(),
-            runqueue: Runqueue::new(),
+            runqueues: [const { Runqueue::new() }; crate::percpu::MAX_HARTS],
         }
     }
 
@@ -177,8 +184,11 @@ impl Scheduler {
         self.tasks.len()
     }
 
-    pub fn runqueue_depth(&self) -> usize {
-        self.runqueue.len()
+    /// Depth of `hartid`'s runqueue. Lock-protected access from the
+    /// heartbeat (which reads the boot hart's depth as the scheduler
+    /// gauge today; per-hart depth gauges land if needed).
+    pub fn runqueue_depth(&self, hartid: usize) -> usize {
+        self.runqueues[hartid].len()
     }
 
     /// Iterate the task table for telemetry purposes (heartbeat
@@ -227,9 +237,13 @@ pub struct SchedStats {
 
 pub fn stats() -> SchedStats {
     let sched = SCHEDULER.lock();
+    // Per-hart runqueue: report the calling hart's depth. The boot
+    // hart's heartbeat is what reads this today; multi-hart per-runqueue
+    // depth gauges would require a different metric shape.
+    let me = crate::percpu::current_hartid();
     SchedStats {
         tasks_total: sched.task_count(),
-        runqueue_depth: sched.runqueue_depth(),
+        runqueue_depth: sched.runqueue_depth(me),
     }
 }
 
@@ -318,11 +332,17 @@ pub fn register_bare_task(name: &str, state: TaskState) -> TaskId {
     let task = Box::new(Task::new_bare(id, String::from(name), state));
     let owned_name = task.name.clone();
     // Pointer to this task's cursor — stable because Box<Task> heap
-    // address won't change. Use it to seed CURRENT_SPAN_CURSOR if no
-    // task is current yet; bare-registered tasks (task 0 / main)
-    // are the running context at the moment they register.
+    // address won't change. Used to seed `CURRENT_SPAN_CURSOR` so the
+    // calling hart's span emissions parent correctly under this task.
     let cursor_ptr = (&task.span_cursor as *const SpanCursor) as *mut SpanCursor;
     SCHEDULER.lock().tasks.push(task);
+    // Seed this hart's per-CPU current-task slots so subsequent
+    // `current_task_id()`, span emissions, and the first `yield_now`
+    // see *this* task, not the default (task 0). Pre-step-10 this
+    // worked by coincidence because hart 0 always registered first
+    // and got id=0 (matching the AtomicU32 default); hart 1 gets a
+    // non-zero id and would silently impersonate task 0 without this.
+    CURRENT_TASK.this_cpu().store(id.0, Ordering::Relaxed);
     if CURRENT_SPAN_CURSOR.this_cpu().load(Ordering::Relaxed).is_null() {
         CURRENT_SPAN_CURSOR.this_cpu().store(cursor_ptr, Ordering::Relaxed);
     }
@@ -344,6 +364,17 @@ pub fn register_bare_task(name: &str, state: TaskState) -> TaskId {
 /// system says it won't return (because if it does, we don't have
 /// anywhere to return *to*).
 pub fn spawn(name: &str, entry: extern "C" fn() -> !) -> TaskId {
+    spawn_on(crate::percpu::current_hartid(), name, entry)
+}
+
+/// Spawn a new kernel thread on a specific hart. The task lands on
+/// `hart`'s runqueue; if `hart != current_hartid()`, an `IPI_WAKEUP`
+/// is sent to that hart so it breaks out of `wfi` and notices the
+/// new work. v0.6 step 10 caller: kmain spawning workload tasks
+/// could leave them on hart 0 (`spawn`) or migrate consumer to
+/// hart 1 (`spawn_on(1, ...)`); the latter is step 11's headline.
+pub fn spawn_on(hart: usize, name: &str, entry: extern "C" fn() -> !) -> TaskId {
+    debug_assert!(hart < crate::percpu::MAX_HARTS);
     let id = alloc_task_id();
     let stack: Box<Stack> = Box::new(Stack::new_zeroed());
     let sp = stack.top_addr();
@@ -362,9 +393,15 @@ pub fn spawn(name: &str, entry: extern "C" fn() -> !) -> TaskId {
     {
         let mut sched = SCHEDULER.lock();
         sched.tasks.push(task);
-        sched.runqueue.push_back(id);
+        sched.runqueues[hart].push_back(id);
     }
     crate::tracing::emit_thread_register(id, &owned_name);
+
+    // Cross-hart spawn: wake the target so it picks up the new task
+    // instead of staying in wfi indefinitely.
+    if hart != crate::percpu::current_hartid() {
+        crate::ipi::send(hart, crate::ipi::IPI_WAKEUP);
+    }
     id
 }
 
@@ -380,17 +417,18 @@ pub fn spawn(name: &str, entry: extern "C" fn() -> !) -> TaskId {
 pub fn yield_now() {
     let t_entry = crate::tracing::timestamp();
     let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
+    let me = crate::percpu::current_hartid();
 
     let (current_ctx, next_ctx, next_id) = {
         let mut sched = SCHEDULER.lock();
-        let Some(next_id) = sched.runqueue.pop_front() else {
-            return; // nothing else ready — keep running
+        let Some(next_id) = sched.runqueues[me].pop_front() else {
+            return; // nothing else ready on this hart — keep running
         };
         if next_id == current_id {
             // Shouldn't happen — current task is supposed to be off the
             // runqueue while running — but defensively don't switch
             // into ourselves (would corrupt the saved context).
-            sched.runqueue.push_back(next_id);
+            sched.runqueues[me].push_back(next_id);
             return;
         }
 
@@ -419,7 +457,7 @@ pub fn yield_now() {
         assert!(!current_ctx.is_null(), "current task missing from table");
         assert!(!next_ctx.is_null(), "next task missing from table");
 
-        sched.runqueue.push_back(current_id);
+        sched.runqueues[me].push_back(current_id);
         CURRENT_TASK.this_cpu().store(next_id.0, Ordering::Relaxed);
         CURRENT_SPAN_CURSOR.this_cpu().store(next_cursor, Ordering::Relaxed);
 
