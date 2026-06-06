@@ -173,6 +173,13 @@ fn debug(features: &str) -> ExitCode {
     eprintln!("Useful: `si` (step instruction), `info registers`,");
     eprintln!("`disassemble`, `x/16i $pc` (next 16 instructions).");
     eprintln!();
+    eprintln!("Pre-MMU debugging gotcha: `break kmain` resolves to the");
+    eprintln!("higher-half VA (0xffffffff8020....), which won't fire while");
+    eprintln!("the MMU is off and the kernel runs at PA 0x8020.... For");
+    eprintln!("pre-trampoline breakpoints, use the physical address:");
+    eprintln!("`break *0x80204724` (= linker VA minus KERNEL_OFFSET).");
+    eprintln!("After the trampoline, symbol breakpoints work normally.");
+    eprintln!();
 
     let status = qemu::base_command(&chardev_arg)
         // -s = listen on localhost:1234 for GDB.
