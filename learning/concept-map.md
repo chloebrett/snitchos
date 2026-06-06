@@ -77,12 +77,12 @@ Ratings start blank (`—`). The "Quiz" column tracks whether we've probed it ye
 
 | Sub-topic | Grounded in | Rating | Quiz |
 |---|---|---|---|
-| `#[global_allocator]` & the `GlobalAlloc` trait | `kernel/src/heap.rs` | — | ☐ |
-| Free-list allocation (linked_list_allocator) | `vendor/linked_list_allocator` | — | ☐ |
+| `#[global_allocator]` & the `GlobalAlloc` trait | `kernel/src/heap.rs` | 2 | ☑ |
+| Free-list allocation (linked_list_allocator) | `vendor/linked_list_allocator` | 4 | ☑ |
 | Growing on demand: the watermark policy | `kernel_core::heap::watermark_grow_decision` | 1 | ☑ |
 | Heap VA window vs scattered backing frames | CLAUDE.md memory layout | 2 | ☑ |
 | Re-entrancy: never emit telemetry inside `alloc` | CLAUDE.md gotchas | — | ☐ |
-| **Toy:** alloc free-list (shared with `toy-allocator`) | `learning/toy-allocator/` | — | ☐ |
+| **Toy:** alloc free-list (shared with `toy-allocator`) | `learning/toy-allocator/` | 4 | ☑ |
 
 ## 6. Traps & interrupts
 *How the CPU interrupts us, and how we get back.*

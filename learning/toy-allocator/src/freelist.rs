@@ -134,19 +134,25 @@ impl Arena {
         let merge_prev = i > 0 && self.free[i - 1].start + self.free[i - 1].size == start;
         let merge_next = i < self.free.len() && start + size == self.free[i].start;
 
-        if merge_prev && merge_next {
-            let next_size = self.free[i].size;
-            let prev = &mut self.free[i - 1];
-            prev.size += size + next_size;
-            self.free.remove(i);
-        } else if merge_prev {
+        if merge_prev {
             let prev = &mut self.free[i - 1];
             prev.size += size;
-        } else if merge_next {
-            let next = &mut self.free[i];
-            next.start -= size;
-            next.size += size;
-        } else {
+        }
+
+        if merge_next {
+            if merge_prev {
+                let next_size = self.free[i].size;
+                let prev = &mut self.free[i - 1];
+                prev.size += next_size;
+                self.free.remove(i);
+            } else {
+                let next = &mut self.free[i];
+                next.start -= size;
+                next.size += size;
+            }
+        }
+
+        if !merge_prev && !merge_next {
             self.free.insert(i, FreeBlock { start, size });
         }
     }
@@ -322,5 +328,114 @@ mod tests {
         a.free(40, 10); // sits between, adjacent to neither → pure middle insert
         assert_eq!(a.fragments(), 3);
         assert_eq!(a.free_bytes(), 30);
+    }
+
+    #[test]
+    fn filling_an_exact_hole_between_two_blocks_merges_all_three() {
+        // Build [{0,10}, {20,10}] with a 10-byte hole at [10,20) between them,
+        // then free into that hole. This is the ONLY geometry that routes
+        // through the merge_prev && merge_next arm in the middle of the list
+        // (not at the front or tail).
+        let mut a = Arena::new(30);
+        a.alloc(30).unwrap(); // drain to empty
+        a.free(0, 10);
+        a.free(20, 10); // [{0,10}, {20,10}]
+        assert_eq!(a.fragments(), 2);
+
+        a.free(10, 10); // exact hole, flanked on both sides → all three merge
+        assert_eq!(a.fragments(), 1);
+        assert_eq!(
+            a.free_bytes(),
+            30,
+            "coalescing must conserve bytes, not invent them"
+        );
+        assert_eq!(a.largest_free_block(), 30);
+        assert!(a.free_bytes() <= a.size, "free bytes exceeded the arena");
+    }
+
+    // --- Property / model-based test ------------------------------------
+    //
+    // Instead of hand-picking scenarios, drive the arena with a long,
+    // deterministic pseudo-random sequence of allocs and frees, and after
+    // EVERY op assert the structural invariants. A model (`live`) tracks the
+    // regions currently handed out so we only ever free valid spans and can
+    // check byte conservation. This catches whole classes of bugs (like the
+    // merge double-count) without anyone predicting the failing geometry.
+
+    /// Deterministic, dependency-free PRNG. Same seed → same sequence, so a
+    /// failure is always reproducible. (xorshift requires a non-zero state.)
+    fn xorshift64(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    /// The free list must always be: in bounds, strictly sorted, non-empty
+    /// blocks, and with a real GAP between consecutive blocks (anything
+    /// touching should have coalesced). Plus: free + handed-out == capacity.
+    fn assert_invariants(a: &Arena, live_bytes: usize) {
+        let blocks = a.free_list();
+        for (i, b) in blocks.iter().enumerate() {
+            assert!(b.size > 0, "degenerate zero-size block at {i}: {blocks:?}");
+            assert!(
+                b.start + b.size <= a.size,
+                "block runs past the arena: {b:?} in {blocks:?}",
+            );
+            if i > 0 {
+                let prev = blocks[i - 1];
+                // Strict `<` enforces sorted + non-overlapping + non-adjacent
+                // in one shot: `==` would mean "should have merged", `>` means
+                // overlap or out-of-order.
+                assert!(
+                    prev.start + prev.size < b.start,
+                    "blocks not coalesced or out of order: {prev:?} then {b:?}",
+                );
+            }
+        }
+        assert_eq!(
+            a.free_bytes() + live_bytes,
+            a.size,
+            "byte conservation broken: free={} + live={} != size={}",
+            a.free_bytes(),
+            live_bytes,
+            a.size,
+        );
+    }
+
+    #[test]
+    fn property_random_alloc_free_preserves_invariants() {
+        const ARENA: usize = 256;
+        const OPS: usize = 400;
+
+        for seed in 0..64u64 {
+            let mut a = Arena::new(ARENA);
+            let mut live: Vec<(usize, usize)> = Vec::new(); // (offset, size) handed out
+            let mut live_bytes = 0usize;
+            let mut rng = (seed + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+
+            assert_invariants(&a, live_bytes);
+
+            for _ in 0..OPS {
+                // Bias slightly toward alloc when nothing is live so we don't
+                // spin on the empty branch.
+                let do_alloc = live.is_empty() || xorshift64(&mut rng) % 2 == 0;
+                if do_alloc {
+                    let size = (xorshift64(&mut rng) % 32) as usize + 1; // 1..=32
+                    if let Some(off) = a.alloc(size) {
+                        live.push((off, size));
+                        live_bytes += size;
+                    }
+                } else {
+                    let idx = (xorshift64(&mut rng) % live.len() as u64) as usize;
+                    let (off, size) = live.swap_remove(idx);
+                    a.free(off, size);
+                    live_bytes -= size;
+                }
+                assert_invariants(&a, live_bytes);
+            }
+        }
     }
 }
