@@ -58,6 +58,18 @@ enum Cmd {
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
     Loc,
+    /// Build the kernel and run it under QEMU with a GDB stub (`-s -S`).
+    /// QEMU halts at start and listens on localhost:1234; attach with
+    /// lldb or riscv64-unknown-elf-gdb from another terminal. Prints
+    /// ready-to-copy attach commands.
+    ///
+    /// Use `--features <feat>` to build feature-flagged kernels (e.g.
+    /// `--features heap-oom` to debug the heap-oom regression).
+    Debug {
+        /// Cargo features to enable on the kernel build, comma-separated.
+        #[arg(long, default_value = "")]
+        features: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -90,6 +102,7 @@ fn main() -> ExitCode {
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test { scenario } => itest::run(scenario.as_deref()),
         Cmd::Loc => loc::run(),
+        Cmd::Debug { features } => debug(&features),
     }
 }
 
@@ -115,6 +128,63 @@ fn stack(cmd: StackCmd) -> ExitCode {
 fn build() -> ExitCode {
     let status = qemu::build_kernel(&[]).expect("failed to invoke cargo");
     if status.success() { ExitCode::SUCCESS } else { ExitCode::from(1) }
+}
+
+fn debug(features: &str) -> ExitCode {
+    // Build with whatever features the caller requested.
+    let features_vec: Vec<&str> = if features.is_empty() {
+        Vec::new()
+    } else {
+        features.split(',').collect()
+    };
+    let status = qemu::build_kernel(&features_vec)
+        .expect("failed to invoke cargo");
+    if !status.success() {
+        return ExitCode::from(1);
+    }
+
+    // Clean up any stale telemetry socket from a previous run.
+    let _ = std::fs::remove_file(TELEMETRY_SOCKET);
+
+    // `wait=off` so the chardev doesn't block — we want QEMU to halt
+    // at start (via -S) waiting for the debugger, not waiting for a
+    // telemetry client. Telemetry is irrelevant in debug runs.
+    let chardev_arg =
+        format!("socket,path={TELEMETRY_SOCKET},server=on,wait=off,id=telemetry");
+
+    eprintln!();
+    eprintln!("QEMU starting paused (halted at entry).");
+    eprintln!("In another terminal, attach a debugger:");
+    eprintln!();
+    eprintln!("  # lldb (Apple-shipped on macOS):");
+    eprintln!("  lldb target/{}/debug/kernel", qemu::KERNEL_TARGET);
+    eprintln!("  (lldb) gdb-remote localhost:1234");
+    eprintln!("  (lldb) breakpoint set --name kmain");
+    eprintln!("  (lldb) breakpoint set --name _start");
+    eprintln!("  (lldb) continue");
+    eprintln!();
+    eprintln!("  # GDB (if riscv-gnu-toolchain installed):");
+    eprintln!("  riscv64-unknown-elf-gdb target/{}/debug/kernel", qemu::KERNEL_TARGET);
+    eprintln!("  (gdb) target remote :1234");
+    eprintln!("  (gdb) break kmain");
+    eprintln!("  (gdb) break _start");
+    eprintln!("  (gdb) continue");
+    eprintln!();
+    eprintln!("Useful: `si` (step instruction), `info registers`,");
+    eprintln!("`disassemble`, `x/16i $pc` (next 16 instructions).");
+    eprintln!();
+
+    let status = qemu::base_command(&chardev_arg)
+        // -s = listen on localhost:1234 for GDB.
+        // -S = halt CPU at startup; wait for the debugger to `continue`.
+        .args(["-s", "-S"])
+        .status()
+        .expect("failed to invoke qemu-system-riscv64");
+    if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }
 
 fn boot() -> ExitCode {
