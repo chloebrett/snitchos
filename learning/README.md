@@ -39,7 +39,7 @@ This is its own cargo workspace (see `learning/Cargo.toml`), deliberately
 | Crate | Concept | Maps to | Status |
 |---|---|---|---|
 | `toy-allocator` | free-list / bitmap allocation, splitting, coalescing | `kernel-core/src/frame.rs`, `vendor/linked_list_allocator` | ✅ scaffolded |
-| `toy-pagetable` | Sv39 multi-level VA→PA walk | `kernel-core/src/mmu.rs` | ⏳ planned |
+| `toy-pagetable` | Sv39 multi-level VA→PA walk, huge-page leaves | `kernel-core/src/mmu.rs` | ✅ scaffolded |
 | `toy-scheduler` | round-robin runqueue + context-switch model | `kernel-core/src/sched.rs`, `kernel/src/sched.S` | ⏳ planned |
 | `toy-virtqueue` | descriptor ring / DMA addressing | `kernel/src/virtio_console.rs` | ⏳ planned |
 

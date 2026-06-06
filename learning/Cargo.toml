@@ -2,8 +2,9 @@
 resolver = "2"
 members = [
     "toy-allocator",
-    # More toy crates get added here as we build them (toy-pagetable,
-    # toy-scheduler, ...). Each is a standalone, host-tested crate that
+    "toy-pagetable",
+    # More toy crates get added here as we build them (toy-scheduler,
+    # toy-virtqueue, ...). Each is a standalone, host-tested crate that
     # isolates one kernel concept so you can play with it without the
     # rest of the OS in the way.
 ]

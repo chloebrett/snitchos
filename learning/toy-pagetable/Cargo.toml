@@ -1,0 +1,14 @@
+[package]
+name = "toy-pagetable"
+version = "0.1.0"
+edition = "2021"
+
+# A standalone Sv39 page-table playground. `std` is fine — learning aid,
+# not kernel code. The bit layouts and walk are identical to
+# kernel-core/src/mmu.rs; only the backing store is a plain Vec of tables
+# instead of real physical frames.
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"

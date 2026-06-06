@@ -224,7 +224,7 @@ the unprobed rows).
 | Lesson | Crate | Status |
 |---|---|---|
 | 3 | `toy-allocator` | ✅ built — go finish the exercises |
-| 1 | `toy-pagetable` | ⏳ I'll scaffold when you reach Lesson 1 |
+| 1 | `toy-pagetable` | ✅ scaffolded — 3 exercises (split_va, translate, map_4kib) |
 | 2 | `toy-virtqueue` | ⏳ scaffold at Lesson 2 |
 | 5 | `toy-scheduler` | ⏳ scaffold at Lesson 5 |
 
