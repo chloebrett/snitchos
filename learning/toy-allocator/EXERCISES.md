@@ -1,13 +1,14 @@
 # toy-allocator — exercises
 
-Two allocation strategies, both used by the real kernel. Implement the
-`todo!()`s so the tests pass.
+Three allocation strategies. Free-list + bitmap model the real kernel; buddy
+models what *Linux* does instead. Implement the `todo!()`s so the tests pass.
 
 ```bash
 cd learning
 cargo test -p toy-allocator        # all of it
 cargo test -p toy-allocator freelist::   # just the free-list tests
 cargo test -p toy-allocator bitmap::     # just the bitmap tests
+cargo test -p toy-allocator buddy::      # just the buddy tests
 ```
 
 Each test failing is a `todo!()` panic until you implement it. Implement,
@@ -70,6 +71,43 @@ heartbeats during the OOM stress test. See the note in
 should end up nearly identical.
 
 **Done when:** all `bitmap::tests` pass.
+
+---
+
+## Exercise A — buddy alloc + split (`src/buddy.rs`)
+
+**Concept.** Blocks come in power-of-two sizes ("orders"), one free list per
+order. To allocate order `k`, find the smallest free order `j >= k`; if `j > k`,
+**split** repeatedly — each split of an order-`o` block makes two order-`(o-1)`
+buddies; keep one, free the other — until you reach `k`. O(log n), and sizes
+always being powers of two is what makes the buddy trick possible.
+
+**Maps to:** Linux's `__rmqueue_smallest` + `expand`.
+
+**Done when:** the `alloc_*` and `two_order0_allocs_are_buddies` tests pass.
+
+---
+
+## Exercise B — buddy free + XOR coalesce (`src/buddy.rs`) ★
+
+**Concept.** The gem. A block's buddy is `offset ^ (1 << order)` — they differ
+in exactly one bit because order-`k` blocks are aligned to `2^k`. On free, check
+if the buddy is *also* free at this order: if so, remove it, merge into an
+order-`(k+1)` block (start = `min(offset, buddy)`), and repeat upward. One XOR +
+one lookup per level — **O(1) coalescing, no neighbour scan** (contrast the
+free-list, which walks to find neighbours). That's why Linux uses buddy for
+physical pages, and why it can hand back large contiguous runs that a bitmap
+can't cheaply reconstruct.
+
+The invariant to preserve (and what the proptest checks): **no two free buddies
+ever both sit in the same free list** — they must have merged. That's the buddy
+analogue of the free-list's "no two adjacent free blocks."
+
+**Maps to:** Linux's `__free_one_page` coalescing loop.
+
+**Done when:** `free_coalesces_buddies_back_to_the_full_block`,
+`free_with_allocated_buddy_does_not_coalesce`, and the proptest
+`random_alloc_free_preserves_buddy_invariants` pass.
 
 ---
 

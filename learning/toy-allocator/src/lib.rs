@@ -1,5 +1,5 @@
-//! toy-allocator — a standalone playground for the two allocation
-//! strategies the kernel uses:
+//! toy-allocator — a standalone playground for the three allocation
+//! strategies worth knowing:
 //!
 //! - [`freelist`] — a free-list allocator with **splitting** and
 //!   **coalescing**. This is the model behind the kernel *heap*
@@ -11,8 +11,14 @@
 //!   (`kernel-core/src/frame.rs`). Fixed-size allocations; no
 //!   fragmentation, but no variable sizes either.
 //!
-//! Both ship with failing tests and `todo!()` exercises. See
+//! - [`buddy`] — a power-of-two buddy allocator. Not used by SnitchOS
+//!   (which chose the bitmap), but it's what *Linux* uses for physical
+//!   pages. O(1) coalescing via the XOR-buddy trick; the tradeoff is
+//!   internal fragmentation (sizes round up to a power of two).
+//!
+//! All ship with failing tests and `todo!()` exercises. See
 //! `EXERCISES.md`. Run `cargo test -p toy-allocator`.
 
 pub mod bitmap;
+pub mod buddy;
 pub mod freelist;
