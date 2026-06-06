@@ -125,6 +125,18 @@ pub struct PerHartData {
 /// One slot per hart. Statically initialised to `hart_id = i` so a
 /// secondary hart starting cold (before its `init()` runs) at least
 /// sees a stable value at its slot.
+/// Bitmap of harts that have run `init()` and are live for cross-hart
+/// signalling (IPIs, TLB shootdowns). Bit `i` set ⇒ hart `i` is online
+/// and will respond to IPIs. `mmu::shootdown` consults this so it
+/// doesn't try to handshake with a target that's still parked in
+/// OpenSBI (which would spin-wait forever for an ack).
+///
+/// `AtomicU64` so MAX_HARTS up to 64 fits naturally. `Relaxed` on
+/// reads/writes: the actual cross-hart synchronisation a shootdown
+/// needs is provided by the `ipi_pending`/`shootdown_ack` handshake
+/// — this bitmap only gates *whether* to attempt that handshake.
+pub static SMP_ONLINE_HARTS: AtomicU64 = AtomicU64::new(0);
+
 pub static PER_HART_DATA: [PerHartData; MAX_HARTS] = [
     PerHartData {
         hart_id: 0,
@@ -164,6 +176,9 @@ pub unsafe fn init(hartid: usize) {
     unsafe {
         asm!("mv tp, {}", in(reg) ptr, options(nostack, preserves_flags));
     }
+    // Announce we're online. Any initiator that observes our bit set
+    // will start expecting shootdown acks from us.
+    SMP_ONLINE_HARTS.fetch_or(1u64 << hartid, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Container for "one value per hart." Indexes into `[T; MAX_HARTS]`

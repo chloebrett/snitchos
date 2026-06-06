@@ -35,14 +35,22 @@ use crate::sbi;
 /// today; the value is in the trap itself, which breaks `wfi`.
 pub const IPI_WAKEUP: u32 = 1 << 0;
 
-/// TLB shootdown request. Target runs `sfence.vma` (range read from
-/// a separate per-hart slot, not yet wired). Reserved for step 9.
+/// TLB shootdown request. Target reads the VA from its own
+/// `PerHartData.shootdown_va`, runs `sfence.vma vaddr`, then bumps
+/// `shootdown_ack` so the initiator's spin-wait can release. See
+/// the 7-step handshake in `kernel::percpu`'s module docstring.
 pub const IPI_TLB_SHOOTDOWN: u32 = 1 << 1;
 
 /// Cumulative count of software interrupts dispatched by this
 /// kernel. Drained by the heartbeat as
 /// `snitchos.ipi.received_total`. `Relaxed`: counter.
 pub static RECEIVED_TOTAL: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Cumulative count of TLB shootdown requests this kernel has serviced
+/// as a receiver. Drained by the heartbeat as
+/// `snitchos.mmu.shootdowns_received_total`. `Relaxed`: counter.
+pub static SHOOTDOWNS_RECEIVED_TOTAL: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
 /// Send `msg` to `target_hart`. Sets the pending bit *before*
@@ -91,7 +99,30 @@ pub fn handle_pending() {
         // code re-evaluates "is there work."
     }
     if bits & IPI_TLB_SHOOTDOWN != 0 {
-        // Reserved for step 9.
+        // The initiator wrote `shootdown_va` before the Release
+        // `fetch_or` on `ipi_pending`; our Acquire swap above lifted
+        // any reordering, so this load sees the value the initiator
+        // published. `Relaxed` is fine for the load itself — the
+        // happens-before came from the Acquire on `ipi_pending`.
+        let va = percpu::this_cpu().shootdown_va.load(Ordering::Relaxed);
+
+        // SAFETY: `sfence.vma rs1=va, rs2=zero` is a non-trapping
+        // S-mode instruction that flushes the TLB entry for this VA
+        // (any ASID). No memory is read or written.
+        unsafe {
+            core::arch::asm!(
+                "sfence.vma {}, zero",
+                in(reg) va,
+                options(nostack, preserves_flags),
+            );
+        }
+
+        // Release: the initiator's spin-wait on `shootdown_ack` uses
+        // Acquire; once the initiator sees the bumped value, the
+        // sfence above has happened-before that observation.
+        percpu::this_cpu().shootdown_ack.fetch_add(1, Ordering::Release);
+
+        SHOOTDOWNS_RECEIVED_TOTAL.fetch_add(1, Ordering::Relaxed);
     }
 
     RECEIVED_TOTAL.fetch_add(1, Ordering::Relaxed);

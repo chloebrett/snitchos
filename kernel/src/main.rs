@@ -245,6 +245,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let smp_harts_total = tracing::register_gauge("snitchos.smp.harts_total");
     let smp_boot_hart_id = tracing::register_gauge("snitchos.smp.boot_hart_id");
     let smp_secondary_wfi = tracing::register_counter("snitchos.smp.secondary_wfi_total");
+    let mmu_shootdowns_received =
+        tracing::register_counter("snitchos.mmu.shootdowns_received_total");
+    let mmu_shootdowns_sent =
+        tracing::register_counter("snitchos.mmu.shootdowns_sent_total");
     // SMOKE TEST metrics — remove with heap_smoke module
     let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
     let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
@@ -573,6 +577,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(
                 smp_secondary_wfi,
                 secondary::SECONDARY_WFI_COUNT.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                mmu_shootdowns_received,
+                ipi::SHOOTDOWNS_RECEIVED_TOTAL.load(Ordering::Relaxed) as i64,
+            );
+            tracing::emit_metric(
+                mmu_shootdowns_sent,
+                mmu::SHOOTDOWNS_SENT_TOTAL.load(Ordering::Relaxed) as i64,
             );
             // SMOKE TEST — remove with heap_smoke module
             heap_smoke::step(count);

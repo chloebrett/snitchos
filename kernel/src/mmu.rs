@@ -328,19 +328,100 @@ impl PtMem for KernelPtMem {
 ///   something else the kernel relies on. The walk catches
 ///   already-mapped collisions, but doesn't reason about
 ///   higher-level intent (e.g. "this VA belongs to the heap range").
-/// - Single-hart only. SMP requires TLB-shootdown IPIs to other
-///   harts; not in scope for v0.4.
+/// - v0.6 step 9: `map` does a **local** `sfence.vma` only. New
+///   mappings (which is what `map` is — `core_mmu::map` errors out if
+///   the leaf PTE is already valid) don't need cross-hart broadcast:
+///   no other hart can have a stale TLB entry for a VA that was
+///   previously unmapped; they'd just take a fault and walk the new
+///   PTE. Cross-hart `shootdown(va)` is the primitive for **remap**
+///   and **unmap** flows (not yet wired into mmu::map proper).
 pub fn map(va: usize, pa: usize, perms: PtePerms) -> Result<(), MapError> {
     let root_pa = va_to_pa((&raw const BOOT_PT_ROOT) as usize);
     let mut mem = KernelPtMem;
     let result = core_mmu::map(root_pa, va, pa, perms, &mut mem);
     if result.is_ok() {
         // SAFETY: single instruction, register operand. Invalidates
-        // the TLB entry for `va` on this hart (rs2=zero ⇒ all ASIDs,
-        // rs1=`va` ⇒ this VA only). Single-hart, no IPI broadcast
-        // needed.
+        // the TLB entry for `va` on this hart only.
         unsafe { asm!("sfence.vma {0}, zero", in(reg) va, options(nostack, nomem)) };
     }
     result
+}
+
+/// Cumulative count of TLB shootdowns this hart has initiated as a
+/// sender (i.e. how many `mmu::map`/`unmap` calls actually fired).
+/// Drained by the heartbeat as
+/// `snitchos.mmu.shootdowns_sent_total`. `Relaxed`: counter.
+pub static SHOOTDOWNS_SENT_TOTAL: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Invalidate the TLB entry for `va` on this hart locally, then ensure
+/// every other online hart does the same before returning.
+///
+/// Protocol (the 7-step handshake from `kernel::percpu`'s home doc):
+///
+///   1. Local `sfence.vma va` — covers the calling hart.
+///   2. For each other online hart `t`:
+///      - Write `t.shootdown_va = va`
+///      - Snapshot `t.shootdown_ack` as `pre`
+///      - Send `IPI_TLB_SHOOTDOWN` (the `fetch_or` on
+///        `t.ipi_pending` is `Release`, publishing `shootdown_va`)
+///      - Raise the SBI IPI
+///   3. Spin-wait on each target's `shootdown_ack` (`Acquire`)
+///      until it exceeds `pre`. Once true, that target has run its
+///      sfence and the new mapping is universally visible.
+///
+/// Skips harts not in `SMP_ONLINE_HARTS`. v0.6 boot calls
+/// `heap::init` before hart 1 is online; the bitmap check makes
+/// those calls a no-op for the offline hart.
+pub fn shootdown(va: usize) {
+    // (1) local first — covers the calling hart even if there are no
+    // other online harts to ack.
+    //
+    // SAFETY: single instruction, register operand. Flushes the TLB
+    // entry for `va` on this hart (any ASID).
+    unsafe { asm!("sfence.vma {0}, zero", in(reg) va, options(nostack, nomem)) };
+
+    let me = crate::percpu::current_hartid();
+    let online = crate::percpu::SMP_ONLINE_HARTS
+        .load(core::sync::atomic::Ordering::Relaxed);
+
+    // (2) publish shootdown_va + snapshot acks for each target. We
+    // do this in a loop so all sends complete before any spin-wait,
+    // which lets multiple targets fence in parallel.
+    let mut pre_acks = [0u64; crate::percpu::MAX_HARTS];
+    let mut targeted = 0u64;
+    for target in 0..crate::percpu::MAX_HARTS {
+        if target == me {
+            continue;
+        }
+        if online & (1u64 << target) == 0 {
+            continue; // hart not online yet — sfence on it is moot
+        }
+        let slot = &crate::percpu::PER_HART_DATA[target];
+        slot.shootdown_va
+            .store(va as u64, core::sync::atomic::Ordering::Relaxed);
+        pre_acks[target] = slot
+            .shootdown_ack
+            .load(core::sync::atomic::Ordering::Relaxed);
+        crate::ipi::send(target, crate::ipi::IPI_TLB_SHOOTDOWN);
+        targeted |= 1u64 << target;
+    }
+
+    // (3) spin-wait each targeted hart's ack to advance.
+    for target in 0..crate::percpu::MAX_HARTS {
+        if targeted & (1u64 << target) == 0 {
+            continue;
+        }
+        let slot = &crate::percpu::PER_HART_DATA[target];
+        while slot
+            .shootdown_ack
+            .load(core::sync::atomic::Ordering::Acquire)
+            <= pre_acks[target]
+        {
+            core::hint::spin_loop();
+        }
+    }
+
+    SHOOTDOWNS_SENT_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
