@@ -58,7 +58,7 @@ Ratings start blank (`—`). The "Quiz" column tracks whether we've probed it ye
 | The trampoline: jumping PC + sp to higher-half | `kmain` asm block | 2 | ☑ |
 | `va_to_pa` / `pa_to_kernel_va`: which lens, when | `mmu.rs` | — | ☐ |
 | Tearing down the identity map (`unmap_identity`) | `mmu.rs` | — | ☐ |
-| **Toy:** `toy-pagetable` (planned) | `learning/` | — | ☐ |
+| **Toy:** `toy-pagetable` (Sv39 split + translate + map) | `learning/toy-pagetable/` | ✅ | ☑ |
 
 ## 4. Physical memory: the frame allocator
 *Hands out 4 KiB physical frames.*

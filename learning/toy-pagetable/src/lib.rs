@@ -183,11 +183,11 @@ impl Mem {
     // A failed allocation does NOT unwind partially-installed tables
     // (matches the real kernel; see the step-5 plan).
     // ===================================================================
-    pub fn map_4kib(&mut self, va: usize, pa: usize, perms: Perms) -> Result<(), MapError> {
-        let (vpn2, vpn1, vpn0, offset) = split_va(va);
+    pub fn map_4kib(&mut self, va: usize, target_pa: usize, perms: Perms) -> Result<(), MapError> {
+        let (vpn2, vpn1, vpn0, _offset) = split_va(va);
         let vpn = [vpn0, vpn1, vpn2];
 
-        let mut pa = pa;
+        let mut pa = self.root_pa();
         for level in [2, 1] {
             let pte = self.read(pa, vpn[level]);
             if pte_is_leaf(pte) {
@@ -198,15 +198,16 @@ impl Mem {
                 let Some(new_table) = self.alloc_table() else {
                     return Err(MapError::OutOfFrames);
                 };
+                self.write(pa, vpn[level], branch_pte(new_table));
                 pa = new_table;
             }
         }
 
         let pte = self.read(pa, vpn[0]);
-        if !pte_is_valid(pte) {
+        if pte_is_valid(pte) {
             return Err(MapError::AlreadyMapped);
         }
-        self.write(pa, offset, leaf_pte(pa, perms));
+        self.write(pa, vpn[0], leaf_pte(target_pa, perms));
 
         Ok(())
     }
