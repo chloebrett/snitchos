@@ -163,8 +163,8 @@ fn debug(features: &str) -> ExitCode {
     eprintln!("  (lldb) breakpoint set --name _start");
     eprintln!("  (lldb) continue");
     eprintln!();
-    eprintln!("  # GDB (if riscv-gnu-toolchain installed):");
-    eprintln!("  riscv64-unknown-elf-gdb target/{}/debug/kernel", qemu::KERNEL_TARGET);
+    eprintln!("  # GDB (from `brew install riscv64-elf-gdb`):");
+    eprintln!("  riscv64-elf-gdb target/{}/debug/kernel", qemu::KERNEL_TARGET);
     eprintln!("  (gdb) target remote :1234");
     eprintln!("  (gdb) break kmain");
     eprintln!("  (gdb) break _start");
