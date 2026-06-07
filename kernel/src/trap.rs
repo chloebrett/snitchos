@@ -125,7 +125,6 @@ pub extern "C" fn trap_handler(_frame: *mut TrapFrame) {
     unsafe {
         asm!("csrr {}, scause", out(reg) scause);
     }
-    crate::tag("trap enter");
     match decode_scause(scause) {
         TrapCause::SupervisorTimerInterrupt => handle_timer(),
         TrapCause::SupervisorSoftwareInterrupt => crate::ipi::handle_pending(),

@@ -191,9 +191,7 @@ pub extern "C" fn secondary_main(_mhartid: usize, hartid: usize) -> ! {
     // wfi. Each wake bumps SECONDARY_WFI_COUNT for the
     // `snitchos.smp.secondary_wfi_total` heartbeat metric.
     loop {
-        crate::tag("H1/loop yield-enter");
         crate::sched::yield_now();
-        crate::tag("H1/loop yield-return");
         unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)); }
         SECONDARY_WFI_COUNT.fetch_add(1, Ordering::Relaxed);
     }

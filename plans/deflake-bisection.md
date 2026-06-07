@@ -573,22 +573,97 @@ halting, so we'd see that for any path through `trap_handler`'s
 
 Either way: QEMU exits ~100ms after kernel boot. Fits the data.
 
-### Next step: UART tag instrumentation
+### Spawn amplification didn't work
 
-Add raw UART tags (via `console::emergency_uart_base()`, no lock) at
-choke points in the spawn/pickup path:
+Hypothesis: if the race fires per-spawn, calling `spawn_on(1, ...)` in
+a tight 20× loop would compound to a near-100% per-run failure rate,
+letting downstream narrowing tests use x10 instead of x100.
 
-- Hart 0 in `spawn_on`: `[H0/spawn] enter`, `[H0/spawn] after-push`,
-  `[H0/spawn] after-emit_thread_register`, `[H0/spawn] after-IPI`.
-- Hart 1 in `secondary_main` idle loop: `[H1/loop] yield-enter`,
-  `[H1/loop] yield-return`, `[H1/loop] wfi`.
-- Hart 1 in `noop_entry`: `[H1/noop] hit`.
-- Hart 1 in `trap_handler`: `[H1/trap] enter scause=…`, `[H1/trap] ret`.
+Reality: 20× spawn at thread=multi, no instrumentation → **0/10 runs failed**.
+Amplification did not compound the rate.
 
-On a failing run, the last tag printed identifies the death zone.
-Tradeoff: cheap UART writes are still MMIO; if the race window is tight
-enough, the instrumentation might suppress the flake. That outcome is
-itself a data point (race is tighter than expected).
+Likely explanation: the race is in the **first** spawn/pickup only.
+After the first task lands on hart 1, hart 1's IPI handler has run once,
+its scheduler state is warm, runqueue is settled — subsequent spawns hit
+a primed, less vulnerable hart 1. Multiplying spawns doesn't multiply the
+race window because the window is in the *first* handoff.
+
+Implication for downstream tests: cannot speed up by amplification. Must
+use x100+ iterations per narrowing test to distinguish "rate ≈ 0" from
+"rate ≈ 1-3%". At 1-2% true rate, P(0 in 30) ≈ 50-74% (too high a chance
+of false-negative); P(0 in 100) ≈ 4-37%; P(0 in 200) ≈ 0.2-13%. x100
+is the minimum credible test length once we're in the rate-suppressed
+regime.
+
+### UART tag instrumentation — race fully suppressed
+
+Added raw UART writes (via `console::emergency_uart_base()`, no lock) at
+9 choke points in the spawn/pickup path:
+
+- Hart 0 in `spawn_on`: enter, after-push, after-emit_thread_register, after-IPI (4 tags)
+- Hart 1 in `secondary_main` idle loop: yield-enter, yield-return (2 tags)
+- Hart 1 in `noop_entry`: hit (1 tag)
+- Hart 1 in `trap_handler`: enter, return (2 tags)
+
+Result: **200/200 clean** at thread=multi. Race fully suppressed.
+
+### Fence sweep — partial only
+
+Replaced the UART `tag(_s)` helper body with `fence(SeqCst)`. Same 9 sites,
+but instead of MMIO writes, just CPU pipeline fences.
+
+Result: **2/200 (~1%)** — partial suppression. Down from ~5% baseline,
+but not eliminated.
+
+**Conclusion**: the bug has both an ordering and a timing/cross-thread-sync
+component. Fences reduce rate (ordering covers part of the window). Only
+MMIO + QEMU BQL acquire (which serializes across vCPU host threads) closes
+it completely.
+
+### Tag location bisection
+
+Started removing UART tag regions to find which one carries the
+suppression. Cleanest reading is comparing rates against the two
+endpoints:
+
+- All 9 tags as UART: **0/200**
+- All 9 tags as fence: **2/200 (~1%)**
+- Baseline (no tags): **3/100 (~3-5%)**
+
+| State | Tags kept (UART) | Result |
+|---|---|---|
+| All H0 + H1 | 9 sites | 0/200 |
+| H0 tags removed, H1 kept | 5 sites (loop ×2, noop, trap ×2) | 0/130 (30+100) |
+| H1 loop + noop removed, trap ×2 kept | 2 sites (trap enter, trap return) | 0/100 |
+| Only `trap enter` | 1 site | 1/100 (~1%) — **partial suppression** |
+| Only `trap return` | 1 site | _in progress_ |
+
+So far: `trap return` is the candidate for full suppression. `trap enter`
+gives the same ~1% rate as fence-everywhere, suggesting `trap enter` is
+roughly fence-equivalent (CPU-side ordering only). `trap return` may be
+the lone critical MMIO trap.
+
+### Why might `trap return` be critical?
+
+If true, this points at: **a write performed after `trap_handler` returns
+but before sret on hart 1 is not visible to hart 0 in time**, OR **a load
+performed on hart 1 right after sret needs cross-vCPU sync** that only the
+MMIO BQL acquire provides.
+
+The UART write at `trap return` happens INSIDE `trap_handler` (just before
+its Rust frame is popped), so before the actual `sret` instruction. It's
+the last thing the trap handler does before returning. That UART write
+forces hart 1's vCPU to take BQL just before the trap returns — serializing
+against hart 0's concurrent activity.
+
+Without that BQL acquire, hart 1 returns from the trap and resumes
+execution. If the resumed code reads state hart 0 was setting up, hart 1
+might see a stale value.
+
+In the noop-entry-wfi-forever variant, the resumed code on hart 1 after
+the IPI handler returns is hart_1_main's idle loop in `secondary_main`:
+the `yield_now()` call (or the `wfi` resume after a timer trap, etc.).
+yield_now then reads the SCHEDULER mutex / runqueue state set up by hart 0.
 
 ## Separate finding: timer-IRQ statics are global, should be per-CPU
 

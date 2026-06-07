@@ -382,10 +382,9 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     while !secondary::SECONDARY_READY.load(Ordering::Acquire) {
         core::hint::spin_loop();
     }
-    // DEFLAKE EXPERIMENT L2a: spawn_on with a noop task body. spawn_on
-    // internally fires the IPI; hart 1 picks up the task and runs the
-    // no-op loop. No frame emissions from hart 1.
-    let _ = sched::spawn_on(1, "hart_1_noop", noop_entry);
+    // v0.6 step 10: cross-hart spawn smoke. Probe lands on hart 1's
+    // runqueue + IPI wakeup nudges hart 1 to pick it.
+    let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
 
     // Tear down both identity mappings. From here on, any access to
     // an identity-half VA — kernel image, stack, DTB, or MMIO — faults.
@@ -636,7 +635,6 @@ extern "C" fn idle_entry() -> ! {
 /// L2a noop probe — empty task body. No tracing emissions, no scheduler
 /// interaction after pickup. Just sit in wfi forever.
 extern "C" fn noop_entry() -> ! {
-    crate::tag("H1/noop hit");
     loop { unsafe { asm!("wfi") } }
 }
 
