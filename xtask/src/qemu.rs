@@ -19,6 +19,14 @@ pub fn base_command(chardev_arg: &str) -> Command {
         // v0.6: two harts. Hart 0 is the boot hart; hart 1 is
         // parked in OpenSBI until kmain calls sbi_hart_start.
         "-smp", "2",
+        // Multi-thread TCG. Default `thread=single` multiplexes all
+        // VCPUs on one host thread, which under -smp 2 starves
+        // whichever hart isn't currently executing — the symptom
+        // we hit was hart 0's timer IRQ skipping 8 sim-seconds
+        // because hart 1 dominated emulation. `thread=multi` gives
+        // each VCPU its own host thread, restoring fair timer
+        // delivery. Required for reliable suite runs.
+        "-accel", "tcg,thread=multi",
         "-m", "128M",
         "-nographic",
         "-bios", "default",
