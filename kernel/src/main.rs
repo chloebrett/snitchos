@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 use fdt::Fdt;
 
 mod console;
@@ -14,6 +14,7 @@ mod dtb;
 mod frame;
 mod heap;
 mod heap_smoke; // SMOKE TEST — remove once real workloads drive heap metrics
+mod heartbeat;
 mod ipi;
 mod mmu;
 mod panic;
@@ -214,81 +215,15 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
 
     println!("I am alive — entering heartbeat");
 
-    // Register the v0.2 metric set. `register_*` is idempotent; we
-    // could call inside the loop, but pulling it out makes the
-    // intent clearer and saves a per-iteration table lookup.
-    let heartbeat_count = tracing::register_counter("snitchos.heartbeat.count");
-    let intern_used = tracing::register_gauge("snitchos.intern.strings_used");
-    let time_ticks = tracing::register_gauge("snitchos.time.ticks");
-    let irq_duration = tracing::register_histogram("snitchos.irq.timer.duration_ticks");
-    let frames_allocated = tracing::register_counter("snitchos.frames.allocated_total");
-    let frames_freed = tracing::register_counter("snitchos.frames.freed_total");
-    let frames_alloc_failed = tracing::register_counter("snitchos.frames.alloc_failed_total");
-    let frames_in_use = tracing::register_gauge("snitchos.frames.in_use");
-    let frames_free = tracing::register_gauge("snitchos.frames.free");
-    let heap_alloc_total = tracing::register_counter("snitchos.heap.alloc_total");
-    let heap_dealloc_total = tracing::register_counter("snitchos.heap.dealloc_total");
-    let heap_alloc_failed = tracing::register_counter("snitchos.heap.alloc_failed_total");
-    let heap_bytes_capacity = tracing::register_gauge("snitchos.heap.bytes_capacity");
-    let heap_bytes_used = tracing::register_gauge("snitchos.heap.bytes_used");
-    let heap_bytes_free = tracing::register_gauge("snitchos.heap.bytes_free");
-    let heap_grow_total = tracing::register_counter("snitchos.heap.grow_total");
-    let heap_grow_failed = tracing::register_counter("snitchos.heap.grow_failed_total");
-    let heap_free_blocks = tracing::register_gauge("snitchos.heap.free_blocks");
-    let heap_largest_free_block = tracing::register_gauge("snitchos.heap.largest_free_block_bytes");
-    let sched_smoke_marker_hits = tracing::register_counter("snitchos.sched.smoke_marker_hits");
-    let sched_context_switches = tracing::register_counter("snitchos.sched.context_switches_total");
-    let sched_runqueue_depth = tracing::register_gauge("snitchos.sched.runqueue_depth");
-    let sched_tasks_total = tracing::register_gauge("snitchos.sched.tasks_total");
-    let sched_yield_overhead = tracing::register_histogram("snitchos.sched.yield_overhead_ticks");
-    let task_a_loops = tracing::register_counter("snitchos.task_a.loops");
-    let task_b_loops = tracing::register_counter("snitchos.task_b.loops");
-    let workload_produced = tracing::register_counter("snitchos.workload.samples_produced_total");
-    let workload_consumed = tracing::register_counter("snitchos.workload.samples_consumed_total");
-    let workload_histogram_sum = tracing::register_gauge("snitchos.workload.histogram_sum");
-    let workload_lock_wait = tracing::register_counter("snitchos.workload.lock_wait_ticks_total");
-    let workload_queue_depth = tracing::register_gauge("snitchos.workload.queue_depth");
-    let ipi_received = tracing::register_counter("snitchos.ipi.received_total");
-    // v0.6 step 8 SMP visibility metrics. `harts_total` is the build-
-    // time hart-count cap; `boot_hart_id` is what mhartid OpenSBI gave
-    // us as the boot hart (not always 0 under -smp 2); `secondary_wfi`
-    // ticks each time the secondary hart wakes from wfi (today only
-    // step 10's runqueue + IPI wakeup will give it anything to do —
-    // before that it climbs on stray interrupts only).
-    let smp_harts_total = tracing::register_gauge("snitchos.smp.harts_total");
-    let smp_boot_hart_id = tracing::register_gauge("snitchos.smp.boot_hart_id");
-    let smp_secondary_wfi = tracing::register_counter("snitchos.smp.secondary_wfi_total");
-    let mmu_shootdowns_received =
-        tracing::register_counter("snitchos.mmu.shootdowns_received_total");
-    let mmu_shootdowns_sent =
-        tracing::register_counter("snitchos.mmu.shootdowns_sent_total");
-    let smp_probe_ticks =
-        tracing::register_counter("snitchos.smp.hart_1_probe_ticks_total");
-    // Spawn-storm scenario completion metric. Emitted every heartbeat
-    // under the feature, monotonically tracking how many storm tasks
-    // have acked. The scenario asserts it reaches deflake::spawn_storm::N.
-    #[cfg(feature = "deflake-spawn-storm")]
-    let spawn_storm_acks = tracing::register_counter("snitchos.deflake.spawn_storm_acks");
-    // IPI-pong scenario completion metric. Emitted every heartbeat
-    // under the feature; reaches `N` when hart 0 has finished
-    // sending all IPIs. The scenario asserts both this value and
-    // `snitchos.ipi.received_total` so we can tell apart "hart 0
-    // wedged" (sends stays low) from "hart 1 stopped receiving"
-    // (sends reaches N but received does not).
-    #[cfg(feature = "deflake-ipi-pong")]
-    let ipi_pong_sends = tracing::register_counter("snitchos.deflake.ipi_pong_sends");
-    // Shootdown storm completion metric. Reaches `N` when hart 0 has
-    // finished initiating all shootdowns (each blocks until hart 1's
-    // ack returns). If hart 0 wedges on a Acquire-load of
-    // shootdown_ack (built-in confounder) or hart 1 wedges on its
-    // pickup, this stays below N.
-    #[cfg(feature = "deflake-shootdown-storm")]
-    let shootdown_storm_sends =
-        tracing::register_counter("snitchos.deflake.shootdown_storm_sends");
-    // SMOKE TEST metrics — remove with heap_smoke module
-    let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
-    let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
-    let smoke_candidate = tracing::register_gauge("snitchos.heap_smoke.candidate");
+    // Register the metric set early — BEFORE timer init, spawns, or
+    // anything else that might compete with us for CPU. Each
+    // `register_*` call emits two virtio frames (StringRegister +
+    // MetricRegister), so ~35 metrics ≈ 70 sends, each blocking on
+    // the device. Doing this after task spawns would interleave the
+    // sends with workload-task time slices, starving them. The
+    // registered `Metrics` is held until `heartbeat::run` consumes
+    // it at the end of kmain.
+    let metrics = heartbeat::Metrics::register();
 
     // Arm the periodic timer and enable interrupts. From here on, the
     // CPU wakes us via timer IRQ instead of us spinning on the cycle
@@ -385,7 +320,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // because that's where we statically placed it.
     let boot_mhartid = _hart_id as u64;
     let secondary_mhartid = 1u64 - boot_mhartid;
-    BOOT_MHARTID.store(boot_mhartid, Ordering::Relaxed);
+    heartbeat::BOOT_MHARTID.store(boot_mhartid, Ordering::Relaxed);
     tracing::emit_hart_register(0, boot_mhartid, protocol::HartRole::Boot);
     unsafe { secondary::prepare_for_secondary() };
     let entry_pa = {
@@ -421,278 +356,5 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // higher-half VAs in earlier increments.
     unsafe { mmu::unmap_identity() };
 
-    // Heartbeat loop: wfi until the timer IRQ flips TICK_PENDING,
-    // then emit a span + the metric set.
-    let mut count: i64 = 0;
-    loop {
-        // Main as task 0: check for a pending tick; if set, do the
-        // heartbeat work; either way, yield. The `wfi` for "nothing
-        // to do, just wait" lives in the idle thread now — main
-        // doesn't sleep, it just rounds through the scheduler.
-        if !trap::TICK_PENDING.this_cpu().swap(false, Ordering::Relaxed) {
-            sched::yield_now();
-            continue;
-        }
-        {
-            span!("kernel.heartbeat");
-            count += 1;
-            // Smoke pattern that exercises the allocator each heartbeat.
-            // Default build: alloc+free, keeps `in_use` bounded.
-            // `oom-leak` feature: leak 8192 frames per tick (32 MiB)
-            // so the allocator's ~32K-frame free pool exhausts in
-            // ~4 heartbeats. Used by the `frame-allocator-oom`
-            // integration scenario.
-            #[cfg(not(feature = "oom-leak"))]
-            {
-                if let Some(frame) = frame::alloc_zeroed() {
-                    frame::free(frame);
-                }
-            }
-            #[cfg(feature = "oom-leak")]
-            {
-                for _ in 0..8192 {
-                    let _ = frame::alloc_zeroed();
-                }
-            }
-            // Heap smoke. Default build: alloc + write + drop a 256 B
-            // Vec — proves the heap is live, keeps `bytes_used` near
-            // 0 across heartbeats.
-            //
-            // `heap-oom` feature: per-heartbeat leak loop using the
-            // raw GlobalAlloc API (returns null on failure rather than
-            // panicking through `alloc_error_handler`). After the
-            // heap exhausts, every subsequent iteration's first
-            // allocation returns null immediately and bumps
-            // `alloc_failed_total` — so the counter climbs once per
-            // heartbeat post-OOM, and the kernel keeps heartbeating.
-            #[cfg(not(feature = "heap-oom"))]
-            {
-                let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(256);
-                v.push(count as u8);
-            }
-            #[cfg(feature = "heap-oom")]
-            {
-                // Leak 4096 × 4 KiB blocks per heartbeat (16 MiB/tick).
-                // P2's watermark grow adds 1 MiB/tick, so net pressure
-                // is +15 MiB/tick — the ~120 MiB usable RAM (post
-                // kernel + bitmap + tables) exhausts in ~8 heartbeats.
-                // `try_reserve_exact` returns `Err` rather than
-                // panicking; the underlying null-return from
-                // `GlobalAlloc::alloc` still bumps `ALLOC_FAIL_COUNT`
-                // so the OOM signal makes it to telemetry.
-                for _ in 0..4096 {
-                    let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-                    if v.try_reserve_exact(4096).is_err() {
-                        break;
-                    }
-                    core::mem::forget(v);
-                }
-            }
-            tracing::emit_metric(heartbeat_count, count);
-            tracing::emit_metric(intern_used, tracing::intern_count() as i64);
-            tracing::emit_metric(time_ticks, tracing::timestamp() as i64);
-            // Histogram observation: how long the last IRQ took. The
-            // handler measured rdtime delta; main thread emits.
-            let dur = trap::LAST_IRQ_DURATION.this_cpu().load(Ordering::Relaxed);
-            tracing::emit_metric(irq_duration, dur as i64);
-            // Frame allocator telemetry. Counters drain atomically;
-            // gauges briefly take the allocator lock (heartbeat is
-            // single-threaded so no contention).
-            tracing::emit_metric(
-                frames_allocated,
-                frame::ALLOC_COUNT.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                frames_freed,
-                frame::FREE_COUNT.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                frames_alloc_failed,
-                frame::ALLOC_FAIL_COUNT.load(Ordering::Relaxed) as i64,
-            );
-            if let Some(stats) = frame::stats() {
-                tracing::emit_metric(frames_in_use, stats.in_use as i64);
-                tracing::emit_metric(frames_free, stats.free as i64);
-            }
-            // Kernel heap telemetry. Counters are atomics; the byte
-            // gauges come from `heap::stats()`, which briefly takes
-            // the heap lock — safe from the heartbeat (single-
-            // threaded, no contention with allocator callers).
-            // `bytes_used` sums alignment-padded `layout.size()` for
-            // live allocations; it excludes hole-list metadata, so
-            // it slightly undercounts unavailable bytes.
-            tracing::emit_metric(
-                heap_alloc_total,
-                heap::ALLOC_COUNT.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                heap_dealloc_total,
-                heap::DEALLOC_COUNT.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                heap_alloc_failed,
-                heap::ALLOC_FAIL_COUNT.load(Ordering::Relaxed) as i64,
-            );
-            if let Some(hstats) = heap::stats() {
-                tracing::emit_metric(heap_bytes_capacity, hstats.capacity as i64);
-                tracing::emit_metric(heap_bytes_used, hstats.used as i64);
-                tracing::emit_metric(heap_bytes_free, hstats.free as i64);
-                tracing::emit_metric(heap_free_blocks, hstats.free_blocks as i64);
-                tracing::emit_metric(heap_largest_free_block, hstats.largest_free_block as i64);
-                // Watermark grow. The policy (when + by how much) is
-                // pure logic in `kernel_core::heap`; this loop owns
-                // the side effect of acting on the decision.
-                // Heartbeat is single-threaded so it's safe to take
-                // the heap lock for `extend`. On failure (ceiling,
-                // OOM, map error) we bump `grow_failed_total` and
-                // keep going — the next alloc fails with
-                // `alloc_failed_total` as today.
-                if let Some(frames) =
-                    heap::watermark_grow_decision(hstats, &heap::WATERMARK)
-                {
-                    let _ = heap::extend(frames);
-                }
-            }
-            tracing::emit_metric(
-                heap_grow_total,
-                heap::GROW_COUNT.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                heap_grow_failed,
-                heap::GROW_FAIL_COUNT.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                sched_smoke_marker_hits,
-                sched::SMOKE_MARKER_HITS.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                sched_context_switches,
-                sched::CONTEXT_SWITCHES.load(Ordering::Relaxed) as i64,
-            );
-            let sched_snap = sched::stats();
-            tracing::emit_metric(sched_runqueue_depth, sched_snap.runqueue_depth as i64);
-            tracing::emit_metric(sched_tasks_total, sched_snap.tasks_total as i64);
-            tracing::emit_metric(
-                sched_yield_overhead,
-                sched::LAST_YIELD_OVERHEAD_TICKS.load(Ordering::Relaxed) as i64,
-            );
-            // Per-task metrics: gated off under `deflake-spawn-storm`
-            // because that build uses sentinel StringIds for these
-            // (see Task::new_bare) — emitting against id 0 would
-            // mis-tag whichever name id 0 is.
-            #[cfg(not(feature = "deflake-spawn-storm"))]
-            for snap in sched::task_snapshots() {
-                tracing::emit_metric(snap.cpu_time_metric, snap.cpu_time_ticks as i64);
-                tracing::emit_metric(snap.runs_metric, snap.runs as i64);
-            }
-            tracing::emit_metric(
-                task_a_loops,
-                demo_tasks::TASK_A_LOOPS.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                task_b_loops,
-                demo_tasks::TASK_B_LOOPS.load(Ordering::Relaxed) as i64,
-            );
-            // v0.6 step 1: producer/consumer workload.
-            tracing::emit_metric(
-                workload_produced,
-                workload::SAMPLES_PRODUCED.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                workload_consumed,
-                workload::SAMPLES_CONSUMED.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                workload_histogram_sum,
-                workload::histogram_sum() as i64,
-            );
-            tracing::emit_metric(
-                workload_lock_wait,
-                workload::LOCK_WAIT_TICKS_TOTAL.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                workload_queue_depth,
-                workload::queue_depth() as i64,
-            );
-            tracing::emit_metric(
-                ipi_received,
-                ipi::RECEIVED_TOTAL.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(smp_harts_total, percpu::MAX_HARTS as i64);
-            tracing::emit_metric(
-                smp_boot_hart_id,
-                BOOT_MHARTID.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                smp_secondary_wfi,
-                secondary::SECONDARY_WFI_COUNT.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                mmu_shootdowns_received,
-                ipi::SHOOTDOWNS_RECEIVED_TOTAL.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                mmu_shootdowns_sent,
-                mmu::SHOOTDOWNS_SENT_TOTAL.load(Ordering::Relaxed) as i64,
-            );
-            tracing::emit_metric(
-                smp_probe_ticks,
-                secondary::PROBE_TICKS.load(Ordering::Relaxed) as i64,
-            );
-            // SMOKE TEST — remove with heap_smoke module
-            heap_smoke::step(count);
-            let sst = heap_smoke::stats();
-            tracing::emit_metric(smoke_entries, sst.entries as i64);
-            tracing::emit_metric(smoke_primes, sst.primes as i64);
-            tracing::emit_metric(smoke_candidate, sst.candidate as i64);
-            // Spawn-storm: run once on the first heartbeat tick. Blocks
-            // main until all N tasks ack, so subsequent heartbeats see
-            // the storm already complete. Storm completion is observed
-            // by the integration scenario via the metric below.
-            #[cfg(feature = "deflake-spawn-storm")]
-            {
-                if count == 1 {
-                    deflake::spawn_storm::run();
-                }
-                tracing::emit_metric(
-                    spawn_storm_acks,
-                    deflake::spawn_storm::ACK_COUNTER.load(Ordering::Relaxed) as i64,
-                );
-            }
-            #[cfg(feature = "deflake-ipi-pong")]
-            {
-                if count == 1 {
-                    deflake::ipi_pong::run();
-                }
-                tracing::emit_metric(
-                    ipi_pong_sends,
-                    deflake::ipi_pong::SENDS.load(Ordering::Relaxed) as i64,
-                );
-            }
-            #[cfg(feature = "deflake-shootdown-storm")]
-            {
-                if count == 1 {
-                    deflake::shootdown::run();
-                }
-                tracing::emit_metric(
-                    shootdown_storm_sends,
-                    deflake::shootdown::SENDS.load(Ordering::Relaxed) as i64,
-                );
-            }
-        }
-        sched::yield_now();
-    }
+    heartbeat::run(metrics)
 }
-
-
-/// mhartid OpenSBI handed kmain as `_hart_id`. Captured at the top of
-/// the bring-up block; drained by the heartbeat as
-/// `snitchos.smp.boot_hart_id`. Useful because OpenSBI's choice of
-/// boot hart is not always 0 under `-smp 2`. `Relaxed`: single
-/// writer (boot path), read by heartbeat on the same hart.
-static BOOT_MHARTID: AtomicU64 = AtomicU64::new(0);
-
-
-
-
-
