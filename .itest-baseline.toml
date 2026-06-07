@@ -1,7 +1,7 @@
 [scenarios.heartbeat-cadence.current]
-commit = "e3d6b9f"
-runs = 3
+commit = "1264aa2"
+runs = 2
 failures = 0
-recorded_at = "2026-06-07T13:12:01.456514Z"
-mean_duration_ms = 2373.5542499999997
-p95_duration_ms = 2384.909334
+recorded_at = "2026-06-07T13:25:30.118074Z"
+mean_duration_ms = 2376.978875
+p95_duration_ms = 2381.905958

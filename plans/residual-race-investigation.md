@@ -509,6 +509,28 @@ counts. Spawn-storm's design ceiling means we can't test the third
   loads (virtio descriptor reads after hart 1 wrote them, allocator
   metadata, anything in `kmain`'s heartbeat that reads a counter
   hart 1 might have bumped).
+- **H9: the original 8% residual is at least two distinct bugs.**
+  Discovered while refactoring kmain: an unrelated metric-registration
+  ordering bug caused `workload-cooperative-baseline` to fail at ~40%
+  with a clearly distinct signature — `max wait 41.3s of 45s budget`,
+  kernel alive and emitting, just throughput-starved. This is
+  **not** the `QEMU disconnected: fast-exit` signature of the
+  cross-hart race. The fix was non-controversial (registration was
+  interleaving 70 virtio sends with workload-task time slices).
+  Implication: when the original 8% was measured, some unknown
+  subset may have been *budget-exhaustion* failures (kernel alive,
+  just slow), not the cross-hart wedge. Re-baselining needs a
+  per-failure signature check before counting it as the race.
+- **H10: `tag("trap return")` may be load-bearing for *timing*, not
+  *memory ordering*.** The UART write costs a few microseconds per
+  trap exit. If a subset of the residual is timing-pressure
+  (slow-enough scenario just barely meets its budget), this delay
+  could be doing the load-bearing work — not the cross-hart memory
+  fence we attributed it to. Falsifiable: replace `tag()` with a
+  fixed `rdtime`-spin of equivalent duration (no MMIO, no memory
+  side effect). If the race stays suppressed, the fix is timing,
+  not fence. If it returns, the fix is the fence. This isolates the
+  two effects we've been conflating.
 
 ### Next experiments worth trying
 
@@ -528,3 +550,15 @@ counts. Spawn-storm's design ceiling means we can't test the third
   the fresh-`switch`-after-fresh-`wfi` window the spawn-storm
   couldn't reach. Defer unless the cheaper experiments above don't
   narrow further.
+- **Fence vs delay isolation (H10).** Replace `tag("trap return")`
+  with `rdtime`-spin of ~5 µs (matching the UART write's wall
+  duration). Run default suite `--repeat 20`. If the suite-wide
+  rate stays at the fixed value, the fix was timing-pressure. If
+  it climbs to the fix-off baseline, the fix was the MMIO fence.
+  This is the cheapest experiment that splits H10.
+- **Signature-classify the original 8%.** Re-run the default suite
+  `--repeat 50` with fix off. Per failure, classify as
+  *disconnect-fast-exit* (kernel wedge → cross-hart race candidate)
+  or *budget-exhausted* (kernel alive → timing/throughput
+  candidate). Output: two separate rates. Lets us see if the 8%
+  is one phenomenon or several (H9).

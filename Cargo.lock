@@ -1126,7 +1126,6 @@ dependencies = [
  "clap",
  "itest-harness",
  "protocol",
- "time",
 ]
 
 [[package]]

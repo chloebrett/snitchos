@@ -2,15 +2,10 @@
 //! reads frames off the virtio-console socket, and asserts on the
 //! decoded `Frame` sequence. See `plans/kernel-integration-tests.md`.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Instant;
 
-use itest_harness::{
-    Aggregator, Baseline, BaselineFile, ComparisonRender, DEFAULT_ALPHA, RunTotals,
-    render_comparison, verdict as verdict_fn,
-};
-use time::OffsetDateTime;
+use itest_harness::RunnerConfig;
 
 use crate::qemu;
 
@@ -23,13 +18,10 @@ mod harness;
 mod matchers;
 mod scenarios;
 
-/// One scenario registered with the runner. Name is what the user
-/// types on the CLI; `run` returns `Ok(())` or a human-readable
-/// failure reason.
-pub(crate) struct Scenario {
-    pub name: &'static str,
-    pub run: fn() -> Result<(), String>,
-}
+/// Use the harness's scenario type — same shape (name + fn pointer);
+/// the runner loop lives there too. The list below is the SnitchOS
+/// catalog.
+use itest_harness::Scenario;
 
 const SCENARIOS: &[Scenario] = &[
     Scenario { name: "boot-reaches-heartbeat",     run: scenarios::boot_reaches_heartbeat },
@@ -69,18 +61,6 @@ pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool, update_ba
         return ExitCode::SUCCESS;
     }
 
-    if !keep_existing_qemus {
-        kill_stale_qemus();
-    }
-
-    // One-shot default-features build, so per-scenario `Harness::spawn` calls
-    // don't re-invoke cargo per iteration. Feature builds still happen per
-    // spawn_with_features call.
-    if let Err(e) = qemu::build_kernel(&[]) {
-        eprintln!("xtask itest: kernel build failed: {e}");
-        return ExitCode::from(2);
-    }
-
     let to_run: Vec<&Scenario> = match name {
         Some(n) => match SCENARIOS.iter().find(|s| s.name == n) {
             Some(s) => vec![s],
@@ -93,187 +73,28 @@ pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool, update_ba
         None => SCENARIOS.iter().collect(),
     };
 
-    let runs = repeat.max(1);
-    let mut aggregator = Aggregator::new();
+    // Hook closures. None of these escape the call — the lifetime
+    // parameter on RunnerConfig keeps them bounded to this scope.
+    let kill_stale = kill_stale_qemus;
+    let build = || {
+        qemu::build_kernel(&[])
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
+    let log_path_for = |_scenario_name: &str| harness::take_last_log_path();
+    let max_wait_for = harness::take_last_max_wait;
+    let commit_for = current_commit_short;
 
-    for run_idx in 0..runs {
-        if runs > 1 {
-            eprintln!("\n=== run {}/{} ===", run_idx + 1, runs);
-        }
-        let mut failed_this_run = 0;
-        for s in &to_run {
-            eprint!("test {} ... ", s.name);
-            let start = Instant::now();
-            let outcome = (s.run)();
-            aggregator.record_duration(s.name, start.elapsed());
-            // Drained after the scenario returns (Harness::Drop wrote it).
-            // `None` if the scenario never built a Harness, which today
-            // shouldn't happen but is harmless.
-            let timing = harness::take_last_max_wait();
-            let timing_str = timing
-                .map(|(actual, budget)| {
-                    format!(
-                        " (max wait {:.1}s of {:.0}s budget)",
-                        actual.as_secs_f64(),
-                        budget.as_secs_f64()
-                    )
-                })
-                .unwrap_or_default();
-            match outcome {
-                Ok(()) => {
-                    eprintln!("ok{timing_str}");
-                    // Drained but unused on success — keeps the
-                    // thread-local empty for the next scenario.
-                    let _ = harness::take_last_log_path();
-                }
-                Err(e) => {
-                    eprintln!("FAILED{timing_str}");
-                    eprintln!("  {e}");
-                    if let Some(log_path) = harness::take_last_log_path() {
-                        match std::fs::read_to_string(&log_path) {
-                            Ok(contents) if !contents.trim().is_empty() => {
-                                eprintln!("  --- QEMU log ({}) ---", log_path.display());
-                                // Tail-style: last ~80 lines, enough
-                                // to catch a panic + preceding boot
-                                // markers without flooding the
-                                // terminal.
-                                let lines: Vec<&str> = contents.lines().collect();
-                                let tail_start = lines.len().saturating_sub(80);
-                                for line in &lines[tail_start..] {
-                                    eprintln!("  | {line}");
-                                }
-                                eprintln!("  --- end QEMU log ---");
-                            }
-                            Ok(_) => {}
-                            Err(e) => eprintln!("  (failed to read log {}: {e})", log_path.display()),
-                        }
-                    }
-                    failed_this_run += 1;
-                    aggregator.record_fail(s.name);
-                }
-            }
-        }
-        let total = to_run.len();
-        eprintln!("\n{} passed, {} failed", total - failed_this_run, failed_this_run);
-        aggregator.finish_run(RunTotals {
-            passed: total - failed_this_run,
-            failed: failed_this_run,
-        });
-    }
+    let config = RunnerConfig {
+        kill_stale: (!keep_existing_qemus).then_some(&kill_stale as &dyn Fn()),
+        one_shot_build: Some(&build),
+        log_path_for: Some(&log_path_for),
+        max_wait_for: Some(&max_wait_for),
+        current_commit: Some(&commit_for),
+        baseline_file: Some(PathBuf::from(BASELINE_PATH)),
+    };
 
-    // Single-run path: behaviour unchanged from before.
-    if runs == 1 {
-        return if aggregator.run_totals()[0].failed == 0 {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::from(1)
-        };
-    }
-
-    // Multi-run aggregate: per-run summary + flake table.
-    eprint!("{}", aggregator.render_aggregate(runs));
-
-    // Baseline comparison + optional update. Both no-op if the file
-    // doesn't exist and we're not asked to write it.
-    let baseline_path = Path::new(BASELINE_PATH);
-    let mut baseline_file = load_baseline_or_warn(baseline_path);
-    print_baseline_comparisons(&to_run, &aggregator, baseline_file.as_ref());
-    if update_baseline {
-        let updated = ensure_baseline_file(baseline_file.take());
-        let written = apply_current_run_to_baseline(updated, &to_run, &aggregator);
-        if let Err(e) = written.save_path(baseline_path) {
-            eprintln!("warning: failed to write {BASELINE_PATH}: {e}");
-        } else {
-            eprintln!("\nUpdated {BASELINE_PATH} with current run's results.");
-        }
-    }
-
-    if aggregator.any_failures() {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
-}
-
-/// Load the baseline file from `path`, returning `None` if it doesn't
-/// exist. A parse error is surfaced as a warning but treated as
-/// "no baseline available" — better than crashing the run.
-fn load_baseline_or_warn(path: &Path) -> Option<BaselineFile> {
-    if !path.exists() {
-        return None;
-    }
-    match BaselineFile::load_path(path) {
-        Ok(f) => Some(f),
-        Err(e) => {
-            eprintln!(
-                "warning: failed to parse {}: {e} — proceeding without baseline.",
-                path.display()
-            );
-            None
-        }
-    }
-}
-
-fn ensure_baseline_file(existing: Option<BaselineFile>) -> BaselineFile {
-    existing.unwrap_or_default()
-}
-
-/// Per-scenario baseline comparison, printed after the aggregate.
-/// Skipped entirely if no baseline file exists.
-fn print_baseline_comparisons(
-    to_run: &[&Scenario],
-    aggregator: &Aggregator,
-    baseline_file: Option<&BaselineFile>,
-) {
-    let Some(file) = baseline_file else { return };
-    eprintln!("\n=== baseline comparison ===");
-    let runs = aggregator.runs();
-    for s in to_run {
-        let failures = aggregator.fail_count(s.name);
-        let baseline = file.current_for(s.name);
-        let v = verdict_fn(failures, runs, baseline, DEFAULT_ALPHA);
-        eprint!(
-            "{}",
-            render_comparison(&ComparisonRender {
-                scenario: s.name,
-                failures,
-                runs,
-                mean_duration: aggregator.mean_duration(s.name),
-                p95_duration: aggregator.p95_duration(s.name),
-                baseline,
-                verdict: v,
-            })
-        );
-    }
-}
-
-/// Build a fresh `Baseline` per scenario from the current run and
-/// fold it into the baseline file via `update_current`.
-fn apply_current_run_to_baseline(
-    mut file: BaselineFile,
-    to_run: &[&Scenario],
-    aggregator: &Aggregator,
-) -> BaselineFile {
-    let runs = aggregator.runs();
-    let commit = current_commit_short().unwrap_or_else(|| "unknown".to_string());
-    let now = OffsetDateTime::now_utc();
-    for s in to_run {
-        let baseline = Baseline {
-            commit: commit.clone(),
-            build_hash: None,
-            runs,
-            failures: aggregator.fail_count(s.name),
-            recorded_at: now,
-            mean_duration_ms: aggregator
-                .mean_duration(s.name)
-                .map(|d| d.as_secs_f64() * 1000.0),
-            p95_duration_ms: aggregator
-                .p95_duration(s.name)
-                .map(|d| d.as_secs_f64() * 1000.0),
-        };
-        file.update_current(s.name, baseline);
-    }
-    file
+    itest_harness::run(&to_run, repeat, update_baseline, &config)
 }
 
 /// Returns the short commit hash for HEAD via `git rev-parse`. None on

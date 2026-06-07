@@ -11,11 +11,13 @@
 
 pub mod aggregate;
 pub mod baseline;
+pub mod runner;
 pub mod stats;
 pub mod verdict;
 
 pub use aggregate::{Aggregator, RunTotals};
 pub use baseline::{Baseline, BaselineError, BaselineFile, ScenarioBaseline};
+pub use runner::{RunnerConfig, Scenario, run};
 pub use stats::{ConfidenceInterval, two_proportion_p_value, wilson_score_95};
 pub use verdict::{
     ComparisonRender, DEFAULT_ALPHA, Direction, Verdict, render_comparison, verdict,
