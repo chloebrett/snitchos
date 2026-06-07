@@ -113,8 +113,17 @@ pub struct Task {
     pub runs: AtomicU64,
     /// Pre-registered metric ids so the heartbeat emit path doesn't
     /// re-format strings per tick. Populated by `spawn` /
-    /// `register_bare_task`.
+    /// `register_bare_task`. Sentinel (`StringId(0)`) under
+    /// `deflake-spawn-storm` where the per-task emit loop is gated off.
+    #[cfg_attr(
+        feature = "deflake-spawn-storm",
+        expect(dead_code, reason = "deflake-spawn-storm gates the per-task metric emit loop")
+    )]
     pub cpu_time_metric: protocol::StringId,
+    #[cfg_attr(
+        feature = "deflake-spawn-storm",
+        expect(dead_code, reason = "deflake-spawn-storm gates the per-task metric emit loop")
+    )]
     pub runs_metric: protocol::StringId,
     /// Saved register state while off-CPU. `UnsafeCell` because the
     /// asm needs `*mut` access while the `Task` is borrowed `&` from
@@ -275,6 +284,10 @@ pub fn stats() -> SchedStats {
 /// lock to walk the task table, allocates an owned name string per
 /// task so the caller can drop the lock before doing slow virtio
 /// emits.
+#[cfg_attr(
+    feature = "deflake-spawn-storm",
+    expect(dead_code, reason = "deflake-spawn-storm gates the per-task metric emit loop")
+)]
 pub struct TaskSnapshot {
     pub cpu_time_metric: protocol::StringId,
     pub runs_metric: protocol::StringId,
@@ -282,6 +295,10 @@ pub struct TaskSnapshot {
     pub runs: u64,
 }
 
+#[cfg_attr(
+    feature = "deflake-spawn-storm",
+    expect(dead_code, reason = "deflake-spawn-storm gates the per-task metric emit loop")
+)]
 pub fn task_snapshots() -> Vec<TaskSnapshot> {
     let sched = SCHEDULER.lock();
     sched

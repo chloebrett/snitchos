@@ -184,6 +184,10 @@ pub fn alloc_zeroed() -> Option<PhysFrame> {
 
 /// Return a frame to the free pool. Double-free is idempotent
 /// (`Bitmap::free` is); out-of-range frames panic (programmer error).
+#[cfg_attr(
+    feature = "oom-leak",
+    expect(dead_code, reason = "oom-leak skips frees by design")
+)]
 pub fn free(frame: PhysFrame) {
     if let Some(alloc) = FRAME_ALLOC.get() {
         alloc.lock().free(frame);
