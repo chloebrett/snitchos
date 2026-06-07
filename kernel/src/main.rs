@@ -632,12 +632,6 @@ extern "C" fn idle_entry() -> ! {
     }
 }
 
-/// L2a noop probe — empty task body. No tracing emissions, no scheduler
-/// interaction after pickup. Just sit in wfi forever.
-extern "C" fn noop_entry() -> ! {
-    loop { unsafe { asm!("wfi") } }
-}
-
 /// Demo tasks. Each opens a per-iteration `task_x.tick` span, bumps
 /// its counter, and yields. With main and idle in the mix the
 /// scheduler round-robins through all four; both tasks' `tick`
