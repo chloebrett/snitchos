@@ -196,7 +196,18 @@ cargo xtask reader            # collector in text-only mode (no docker stack)
 cargo xtask stack {up,down,logs}  # docker-compose the Tempo/Prometheus/Grafana stack
 cargo xtask test [scenario]   # kernel integration tests in QEMU
 cargo xtask build             # just build the kernel ELF
+cargo xtask clippy [-- args]  # clippy the WHOLE workspace correctly (see note below)
 ```
+
+**Linting:** use `cargo xtask clippy`, not `cargo clippy --workspace`. The kernel
+only builds for `riscv64gc-unknown-none-elf`; a plain workspace clippy compiles it
+for the host, where it can't link (duplicate `panic_impl`, unknown `a7` registers).
+`xtask clippy` lints host crates for the host and the kernel for riscv in one go.
+Forward args to both, e.g. `cargo xtask clippy -- --fix --allow-dirty`. **Caveat:**
+do NOT blanket `--fix` the kernel — clippy's `deref_addrof` autofix rewrites the
+required `&mut *(&raw mut STATIC)` idiom into a forbidden direct `&mut STATIC`.
+Those sites carry a justified `#[allow(clippy::deref_addrof, reason = ...)]`.
+(Stable can't auto-target a single package; `forced-target` needs nightly.)
 
 ### Tests, by layer
 

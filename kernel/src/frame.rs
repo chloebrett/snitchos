@@ -131,8 +131,8 @@ pub unsafe fn init_from_dtb(dtb: &Fdt, dtb_phys: usize) -> Result<(), InitError>
     // SAFETY: `init_from_dtb` is documented to run exactly once at
     // boot; no other code touches FRAME_BITS.
     #[allow(
-        clippy::borrow_deref_ref,
-        reason = "`&mut *(&raw mut STATIC)` is the required raw-pointer-to-static reference idiom; clippy misreads the raw deref as a redundant `&*&` borrow"
+        clippy::deref_addrof,
+        reason = "`&mut *(&raw mut STATIC)` is the required raw-pointer-to-static reference idiom; clippy's deref_addrof misreads `*(&raw mut X)` as a redundant `*&`"
     )]
     let bits: &'static mut [u64] = unsafe { &mut *(&raw mut FRAME_BITS) };
     let mut bitmap = Bitmap::new(bits, total_frames);

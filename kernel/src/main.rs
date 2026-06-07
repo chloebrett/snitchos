@@ -50,6 +50,7 @@ global_asm!(include_str!("entry.S"));
 /// - DTB lookups `.unwrap()` / `.expect()`. A malformed DTB panics
 ///   immediately; the panic handler may not produce output before
 ///   `console::init` runs.
+///
 /// Single-byte raw-UART tracer. No locks, no formatting, no statics
 /// touched (other than the MMIO read of `satp` to pick the address
 /// space). Safe to call from anywhere in boot — including pre-MMU

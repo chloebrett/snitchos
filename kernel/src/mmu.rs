@@ -144,8 +144,8 @@ static mut BOOT_PT_MID_HIGHER_MMIO: PageTable = PageTable::new();
 ///   higher-half link, those values only resolve once the higher-half
 ///   mapping is live.
 #[allow(
-    clippy::borrow_deref_ref,
-    reason = "`&mut *(&raw mut BOOT_PT_*)` is the required raw-pointer-to-static reference idiom; clippy misreads the raw deref as a redundant `&*&` borrow"
+    clippy::deref_addrof,
+    reason = "`&mut *(&raw mut BOOT_PT_*)` is the required raw-pointer-to-static reference idiom; clippy's deref_addrof misreads `*(&raw mut X)` as a redundant `*&`"
 )]
 pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
     // SAFETY: linker symbols are addresses, not values. Take pointers,
@@ -275,8 +275,8 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
 ///   unreachable after this. Caller must not read through `&Fdt`
 ///   afterwards.
 #[allow(
-    clippy::borrow_deref_ref,
-    reason = "`&mut *(&raw mut BOOT_PT_ROOT)` is the required raw-pointer-to-static reference idiom; clippy misreads the raw deref as a redundant `&*&` borrow"
+    clippy::deref_addrof,
+    reason = "`&mut *(&raw mut BOOT_PT_ROOT)` is the required raw-pointer-to-static reference idiom; clippy's deref_addrof misreads `*(&raw mut X)` as a redundant `*&`"
 )]
 pub unsafe fn unmap_identity() {
     unsafe {

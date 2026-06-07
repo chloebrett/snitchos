@@ -281,9 +281,9 @@ impl State {
 
     /// Timebase from the most recent `Hello`, or `None` before any
     /// `Hello` has been received.
-    #[expect(
+    #[allow(
         dead_code,
-        reason = "accessor exposed for consumers/tests; no caller reads it yet"
+        reason = "accessor exposed for consumers/tests; used in tests but no production caller yet, so dead_code fires only in the lib build"
     )]
     pub fn timebase_hz(&self) -> Option<u64> {
         self.anchor.as_ref().map(|_| self.timebase_hz)

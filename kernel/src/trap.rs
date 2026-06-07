@@ -2,8 +2,8 @@
 //!
 //! `trap_entry` (defined in `trap.S`) is the symbol pointed at by
 //! `stvec`. The CPU jumps here on any trap (interrupt, exception,
-//! environment call). Its only job is to save the trapped GPRs + sepc
-//! + sstatus into a `TrapFrame` on the current stack, hand the frame
+//! environment call). Its only job is to save the trapped GPRs, `sepc`,
+//! and `sstatus` into a `TrapFrame` on the current stack, hand the frame
 //! pointer to `trap_handler`, then restore everything and `sret`.
 
 core::arch::global_asm!(include_str!("trap.S"));
