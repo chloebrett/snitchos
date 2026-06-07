@@ -137,9 +137,21 @@ unsafe impl Sync for Task {}
 
 impl Task {
     fn new_bare(id: TaskId, name: String, state: TaskState) -> Self {
+        // Under `deflake-spawn-storm` we spawn ~200 tasks back-to-back.
+        // Each `register_counter_owned` call mints a fresh leaked
+        // 'static str whose pointer becomes a new intern-table slot
+        // (the table dedupes by pointer identity, not by content), so
+        // 200 spawns × 2 metrics would blow MAX_INTERNED=128. The
+        // heartbeat's per-task metric emit loop is also gated off
+        // under this feature, so a sentinel StringId is fine here.
+        #[cfg(feature = "deflake-spawn-storm")]
+        let (cpu_time_metric, runs_metric) =
+            (protocol::StringId(0), protocol::StringId(0));
+        #[cfg(not(feature = "deflake-spawn-storm"))]
         let cpu_time_metric = crate::tracing::register_counter_owned(
             alloc::format!("snitchos.task.{name}.cpu_time_ticks"),
         );
+        #[cfg(not(feature = "deflake-spawn-storm"))]
         let runs_metric = crate::tracing::register_counter_owned(
             alloc::format!("snitchos.task.{name}.runs_total"),
         );
@@ -407,7 +419,17 @@ pub fn spawn_on(hart: usize, name: &str, entry: extern "C" fn() -> !) -> TaskId 
         sched.tasks.push(task);
         sched.runqueues[hart].push_back(id);
     }
+    // Under `deflake-spawn-storm` we skip ThreadRegister so the spawn
+    // path has no MMIO (virtio) write between writing the new
+    // `ctx.ra/sp` and sending the IPI. The whole point of the storm
+    // scenario is to maximise per-trial race exposure; an MMIO write
+    // here acquires the BQL and would silently close the race window
+    // each iteration. See `plans/residual-race-investigation.md`
+    // appendix A.
+    #[cfg(not(feature = "deflake-spawn-storm"))]
     crate::tracing::emit_thread_register(id, &owned_name);
+    #[cfg(feature = "deflake-spawn-storm")]
+    let _ = owned_name;
 
     // Cross-hart spawn: wake the target so it picks up the new task
     // instead of staying in wfi indefinitely.

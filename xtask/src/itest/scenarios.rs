@@ -690,3 +690,92 @@ pub fn workload_cooperative_baseline() -> Result<(), String> {
 
     Ok(())
 }
+
+/// Cross-hart spawn storm. Hart 0 calls `spawn_on(1, deflake_body)` in
+/// a serialised loop: each iteration is one trial of the residual
+/// memory-ordering race on hart 1's IPI pickup path. Each task bumps
+/// `ACK_COUNTER` from its body; hart 0's wait-poll is MMIO-fenced via
+/// a UART LSR read so its cross-hart Acquire is guaranteed-fresh
+/// (decouples scenario failures from the symmetric load-side flake).
+///
+/// Asserts `snitchos.deflake.spawn_storm_acks` reaches `N` (200) within
+/// 30 s. Under the trap-return `tag()` fix this should pass 100/100.
+/// With the fix removed it should flake at ≥80% per run.
+///
+/// Built with `--features deflake-spawn-storm` so the default boot
+/// workload is replaced by the storm; the gating also turns off the
+/// per-spawn `emit_thread_register` so no incidental BQL fence closes
+/// the window mid-storm. See `plans/residual-race-investigation.md`.
+pub fn deflake_spawn_storm() -> Result<(), String> {
+    let mut h = Harness::spawn_with_features(
+        "deflake-spawn-storm",
+        &["deflake-spawn-storm"],
+    )?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.deflake.spawn_storm_acks")
+                && *value >= 200
+        }
+        _ => false,
+    })
+    .ok_or(
+        "snitchos.deflake.spawn_storm_acks never reached 200 within \
+         30s — hart 1 failed to pick up one of the spawn_on'd tasks, \
+         likely the residual cross-hart memory-ordering race on \
+         the IPI → switch path. See plans/residual-race-investigation.md.",
+    )?;
+    Ok(())
+}
+
+/// Tight IPI_WAKEUP storm from hart 0 to hart 1. Each iteration of the
+/// inner loop is one `hart 1 in wfi → IPI → trap → swap-Acquire → sret
+/// → resume` trial. At N=10 000 and ~100 µs pacing, the full storm
+/// takes ~1 s wall.
+///
+/// Two checks:
+///   1. `snitchos.deflake.ipi_pong_sends == N` — hart 0 completed the
+///      loop. Anything less means hart 0 wedged or deadlocked mid-loop.
+///   2. `snitchos.ipi.received_total >= N / 2` — hart 1 actually
+///      handled at least half the IPIs (the rest may have coalesced
+///      under pacing jitter). If the value stays small, hart 1 wedged
+///      on its pickup path.
+///
+/// See `plans/residual-race-investigation.md` appendix A.
+pub fn deflake_ipi_pong() -> Result<(), String> {
+    let mut h = Harness::spawn_with_features(
+        "deflake-ipi-pong",
+        &["deflake-ipi-pong"],
+    )?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.deflake.ipi_pong_sends")
+                && *value >= 10_000
+        }
+        _ => false,
+    })
+    .ok_or(
+        "snitchos.deflake.ipi_pong_sends never reached 10000 within \
+         30s — hart 0 did not finish the IPI loop; deadlock or wedge \
+         on hart 0 (likely shared static or symmetric load-side flake).",
+    )?;
+
+    h.wait_for(SEC * 10, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.ipi.received_total")
+                && *value >= 5_000
+        }
+        _ => false,
+    })
+    .ok_or(
+        "snitchos.ipi.received_total never reached 5000 within 10s \
+         after the send loop finished — hart 1 stopped processing IPIs \
+         partway through. This is the residual race signature on the \
+         post-sret pickup path.",
+    )?;
+    Ok(())
+}

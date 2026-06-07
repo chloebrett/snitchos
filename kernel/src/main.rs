@@ -26,6 +26,132 @@ mod uart;
 mod virtio_console;
 mod workload;
 
+#[cfg(feature = "deflake-ipi-pong")]
+mod deflake_ipi_pong {
+    //! Tight IPI_WAKEUP loop from hart 0 to hart 1. Each iteration is
+    //! one `hart 1 in wfi → IPI → trap → swap-Acquire → sret → resume`
+    //! trial — directly the post-sret memory-ordering window the
+    //! deflake residual was suspected to live on. No spawning, no
+    //! heap growth: scales to ~10k trials per boot.
+    //!
+    //! Pacing: hart 0 sends one IPI, then spins on `rdtime` for
+    //! `DELAY_TICKS` before the next send. At timebase 10 MHz, 1 000
+    //! ticks ≈ 100 µs — long enough that hart 1 (`hart_1_main`'s
+    //! `yield → wfi → wake → yield`) re-enters `wfi` before the next
+    //! IPI lands. Without pacing the IPIs coalesce into one trap on
+    //! hart 1 and the trial count collapses.
+    //!
+    //! No MMIO touches on hart 0 inside the loop — the storm's whole
+    //! point is to leave the kernel's race window unfenced. `rdtime`
+    //! is a CSR read, not MMIO.
+
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    pub const N: u64 = 10_000;
+
+    /// Inter-IPI delay on hart 0, in `rdtime` ticks. Tuned so hart 1
+    /// has time to `sret → loop iter → yield → wfi` before the next
+    /// IPI lands. Too low: IPIs coalesce (RECEIVED_TOTAL << N). Too
+    /// high: storm takes forever.
+    const DELAY_TICKS: u64 = 1_000;
+
+    /// Count of IPI sends issued by hart 0. Bumped after each send;
+    /// the heartbeat re-emits as `snitchos.deflake.ipi_pong_sends`.
+    /// Survival signal: if hart 0 wedged or the kernel hung mid-loop,
+    /// this counter stays below N. `Relaxed` — single writer.
+    pub static SENDS: AtomicU64 = AtomicU64::new(0);
+
+    fn now() -> u64 {
+        let t: u64;
+        // SAFETY: rdtime is a S-mode-readable CSR; reading it has no
+        // side effects.
+        unsafe { core::arch::asm!("rdtime {}", out(reg) t) };
+        t
+    }
+
+    /// Drive the storm. Sends N IPIs paced by DELAY_TICKS each.
+    pub fn run() {
+        for _ in 0..N {
+            crate::ipi::send(1, crate::ipi::IPI_WAKEUP);
+            SENDS.fetch_add(1, Ordering::Relaxed);
+            let deadline = now() + DELAY_TICKS;
+            while now() < deadline {
+                core::hint::spin_loop();
+            }
+        }
+    }
+}
+
+#[cfg(feature = "deflake-spawn-storm")]
+mod deflake_storm {
+    //! Cross-hart spawn storm for the `deflake-spawn-storm` integration
+    //! scenario. Drives N serialised `spawn_on(1, body)` iterations from
+    //! hart 0 with an MMIO-fenced ack wait. Each iteration is one trial
+    //! of the residual cross-hart memory-ordering race on hart 1's
+    //! IPI pickup path. See `plans/residual-race-investigation.md`.
+
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// Number of spawn iterations. With per-trial flake rate ≈ 1%
+    /// (eyeballed from suite-wide 8% across ~8 cross-hart trials), 200
+    /// iterations gives ~87% per-run flake without the fix — enough
+    /// signal for `--repeat 5`.
+    pub const N: u64 = 200;
+
+    /// Cumulative count of spawned tasks that reached their body and
+    /// bumped this counter. Hart 0's storm loop polls it after each
+    /// spawn; the heartbeat re-emits its value every tick as the
+    /// `snitchos.deflake.spawn_storm_acks` metric.
+    /// `Release` on the bump pairs with `Acquire` on hart 0's poll —
+    /// but multi-thread TCG is the entire reason we don't trust that
+    /// pairing, hence `fence_via_uart_lsr` below.
+    pub static ACK_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Body run by every storm task on hart 1. Touches a stack-local
+    /// (H2 probe — proves the new task's `sp` resolves to writable
+    /// memory), bumps the ack counter, then cycles through `yield_now`
+    /// forever because v0.5 tasks can't exit.
+    pub extern "C" fn body() -> ! {
+        let marker: u64 = 0xdead_beef_cafe_f00d;
+        core::hint::black_box(marker);
+        ACK_COUNTER.fetch_add(1, Ordering::Release);
+        loop {
+            crate::sched::yield_now();
+        }
+    }
+
+    /// Single-MMIO-read BQL fence used by hart 0's ack-wait spin. The
+    /// UART LSR at base+5 has no side effects on read. QEMU's MMIO
+    /// path acquires the Big QEMU Lock, which serialises against
+    /// other vCPUs and incidentally provides the cross-hart memory
+    /// fence that multi-thread TCG drops on plain `Acquire`. Hart 0
+    /// is the observer, not the hart under test — fencing it does
+    /// not interfere with the race window on hart 1's pickup path.
+    fn fence_via_uart_lsr() {
+        let lsr = crate::console::emergency_uart_base() + 5;
+        // SAFETY: lsr is the 16550 line-status register; reading it is
+        // a non-destructive observation. The address is mapped (the
+        // emergency UART base is always reachable post-MMU).
+        unsafe { core::ptr::read_volatile(lsr as *const u8) };
+    }
+
+    /// Drive the storm. Iteration `i` spawns one minimal task on
+    /// hart 1 and waits for the ack counter to exceed `i` before
+    /// advancing. Returns when all N tasks have acked.
+    pub fn run() {
+        for i in 0..N {
+            crate::sched::spawn_on(1, "deflake", body);
+            loop {
+                fence_via_uart_lsr();
+                if ACK_COUNTER.load(Ordering::Acquire) > i {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+        }
+    }
+}
+
 // Pull in the boot stub (entry.S). It defines `_start`, sets up the stack
 // pointer, zeros .bss, and calls `kmain`. See linker.ld for the memory layout
 // it depends on (__stack_top, __bss_start, __bss_end).
@@ -273,6 +399,19 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         tracing::register_counter("snitchos.mmu.shootdowns_sent_total");
     let smp_probe_ticks =
         tracing::register_counter("snitchos.smp.hart_1_probe_ticks_total");
+    // Spawn-storm scenario completion metric. Emitted every heartbeat
+    // under the feature, monotonically tracking how many storm tasks
+    // have acked. The scenario asserts it reaches deflake_storm::N.
+    #[cfg(feature = "deflake-spawn-storm")]
+    let spawn_storm_acks = tracing::register_counter("snitchos.deflake.spawn_storm_acks");
+    // IPI-pong scenario completion metric. Emitted every heartbeat
+    // under the feature; reaches `N` when hart 0 has finished
+    // sending all IPIs. The scenario asserts both this value and
+    // `snitchos.ipi.received_total` so we can tell apart "hart 0
+    // wedged" (sends stays low) from "hart 1 stopped receiving"
+    // (sends reaches N but received does not).
+    #[cfg(feature = "deflake-ipi-pong")]
+    let ipi_pong_sends = tracing::register_counter("snitchos.deflake.ipi_pong_sends");
     // SMOKE TEST metrics — remove with heap_smoke module
     let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
     let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
@@ -345,10 +484,18 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // both calls so the collector can resolve task ids to names.
     let _ = sched::register_bare_task("main", kernel_core::sched::TaskState::Running);
     let _ = sched::spawn("idle", idle_entry);
-    let _ = sched::spawn("task_a", task_a_entry);
-    let _ = sched::spawn("task_b", task_b_entry);
-    let _ = sched::spawn("workload_producer", workload::producer_entry);
-    let _ = sched::spawn("workload_consumer", workload::consumer_entry);
+    // Under `deflake-spawn-storm` the kernel boots with just main +
+    // idle on hart 0 (and idle on hart 1, spawned in secondary_main).
+    // The storm spawns its own minimal worker tasks on hart 1 below;
+    // including the demo + workload tasks here would add unrelated
+    // scheduling activity that masks the cross-hart race window.
+    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong")))]
+    {
+        let _ = sched::spawn("task_a", task_a_entry);
+        let _ = sched::spawn("task_b", task_b_entry);
+        let _ = sched::spawn("workload_producer", workload::producer_entry);
+        let _ = sched::spawn("workload_consumer", workload::consumer_entry);
+    }
 
     // DTB physical region lives in the identity gigapage we're about
     // to tear down. Drop the borrow first to make "no DTB access from
@@ -383,7 +530,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         core::hint::spin_loop();
     }
     // v0.6 step 10: cross-hart spawn smoke. Probe lands on hart 1's
-    // runqueue + IPI wakeup nudges hart 1 to pick it.
+    // runqueue + IPI wakeup nudges hart 1 to pick it. Gated out under
+    // `deflake-spawn-storm` so hart 1 stays in `wfi` until the storm
+    // loop's spawn_on's wake it — each wake then has the maximum
+    // "fresh trap" race exposure.
+    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong")))]
     let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
 
     // Tear down both identity mappings. From here on, any access to
@@ -552,6 +703,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 sched_yield_overhead,
                 sched::LAST_YIELD_OVERHEAD_TICKS.load(Ordering::Relaxed) as i64,
             );
+            // Per-task metrics: gated off under `deflake-spawn-storm`
+            // because that build uses sentinel StringIds for these
+            // (see Task::new_bare) — emitting against id 0 would
+            // mis-tag whichever name id 0 is.
+            #[cfg(not(feature = "deflake-spawn-storm"))]
             for snap in sched::task_snapshots() {
                 tracing::emit_metric(snap.cpu_time_metric, snap.cpu_time_ticks as i64);
                 tracing::emit_metric(snap.runs_metric, snap.runs as i64);
@@ -616,6 +772,30 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(smoke_entries, sst.entries as i64);
             tracing::emit_metric(smoke_primes, sst.primes as i64);
             tracing::emit_metric(smoke_candidate, sst.candidate as i64);
+            // Spawn-storm: run once on the first heartbeat tick. Blocks
+            // main until all N tasks ack, so subsequent heartbeats see
+            // the storm already complete. Storm completion is observed
+            // by the integration scenario via the metric below.
+            #[cfg(feature = "deflake-spawn-storm")]
+            {
+                if count == 1 {
+                    deflake_storm::run();
+                }
+                tracing::emit_metric(
+                    spawn_storm_acks,
+                    deflake_storm::ACK_COUNTER.load(Ordering::Relaxed) as i64,
+                );
+            }
+            #[cfg(feature = "deflake-ipi-pong")]
+            {
+                if count == 1 {
+                    deflake_ipi_pong::run();
+                }
+                tracing::emit_metric(
+                    ipi_pong_sends,
+                    deflake_ipi_pong::SENDS.load(Ordering::Relaxed) as i64,
+                );
+            }
         }
         sched::yield_now();
     }
@@ -668,6 +848,7 @@ fn burn_lcg(iterations: u32) {
     let _ = core::hint::black_box(x);
 }
 
+#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong"), allow(dead_code))]
 extern "C" fn task_a_entry() -> ! {
     loop {
         {
@@ -685,6 +866,7 @@ extern "C" fn task_a_entry() -> ! {
     }
 }
 
+#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong"), allow(dead_code))]
 extern "C" fn task_b_entry() -> ! {
     loop {
         {

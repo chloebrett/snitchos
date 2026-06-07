@@ -16,6 +16,21 @@ oom-leak = []
 # `alloc::alloc::alloc` (returns null on failure, no panic) until the
 # heap is exhausted. Used by the `heap-oom` integration scenario.
 heap-oom = []
+# Replaces the default boot workload (task_a, task_b, producer,
+# consumer) with a cross-hart spawn storm: hart 0 runs
+# `spawn_on(1, deflake_body)` in a serialised loop and waits for each
+# task's ack atomic to bump before the next iteration. Used by the
+# `deflake-spawn-storm` integration scenario to characterise the
+# residual cross-hart memory-ordering race on hart 1's IPI pickup
+# path. See `plans/residual-race-investigation.md`.
+deflake-spawn-storm = []
+# Replaces the default boot workload with a tight IPI_WAKEUP loop from
+# hart 0 to hart 1. Each iteration is one
+# `hart 1 in wfi → IPI → trap → swap-Acquire → sret → resume` trial,
+# directly testing the post-sret memory-ordering window the deflake
+# residual was suspected to live on. ~10k iterations per boot, no
+# heap growth (no per-iteration spawn). Used by `deflake-ipi-pong`.
+deflake-ipi-pong = []
 
 [dependencies]
 fdt = "0.1.5"
