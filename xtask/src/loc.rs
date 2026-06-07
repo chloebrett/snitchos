@@ -41,12 +41,12 @@ pub fn run() -> ExitCode {
 
 fn collect_rs_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    collect_rs_files_inner(root, root, &mut out);
+    collect_rs_files_inner(root, &mut out);
     out.sort();
     out
 }
 
-fn collect_rs_files_inner(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_rs_files_inner(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -61,7 +61,7 @@ fn collect_rs_files_inner(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
             if name_str == "target" {
                 continue;
             }
-            collect_rs_files_inner(root, &path, out);
+            collect_rs_files_inner(&path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             out.push(path);
         }
@@ -187,7 +187,7 @@ fn fmt_n(n: usize) -> String {
     for (i, &b) in bytes.iter().enumerate() {
         result.push(b);
         let remaining = bytes.len() - 1 - i;
-        if remaining > 0 && remaining % 3 == 0 {
+        if remaining > 0 && remaining.is_multiple_of(3) {
             result.push(b',');
         }
     }

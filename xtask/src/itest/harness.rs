@@ -37,6 +37,12 @@ pub struct Harness {
     /// timeout so failures say "boot reached Hello + SpanStart, then
     /// nothing" rather than just "no heartbeat within 10s".
     recent: VecDeque<OwnedFrame>,
+    /// The longest single `wait_for` this scenario has issued so far,
+    /// together with the budget for that wait. The runner reads this
+    /// after each scenario to print "max waited 1.6s of 30s budget",
+    /// which surfaces over-sized budgets without anyone digging
+    /// through logs.
+    max_wait: (Duration, Duration),
 }
 
 impl Harness {
@@ -90,6 +96,7 @@ impl Harness {
             socket_path,
             timebase_hz: None,
             recent: VecDeque::new(),
+            max_wait: (Duration::ZERO, Duration::ZERO),
         })
     }
 
@@ -97,31 +104,51 @@ impl Harness {
     /// matching frame, or `None` on deadline. Every frame consumed
     /// along the way updates the internal string table — later
     /// matchers can resolve any `StringId` seen so far.
+    ///
+    /// Records the actual wait elapsed against the budget; the runner
+    /// reads the max-so-far via `max_wait()` to surface tight budgets.
     pub fn wait_for(
         &mut self,
         budget: Duration,
         pred: impl Fn(&OwnedFrame, &StringTable) -> bool,
     ) -> Option<OwnedFrame> {
-        let deadline = Instant::now() + budget;
-        loop {
-            let remaining = deadline.checked_duration_since(Instant::now())?;
+        let start = Instant::now();
+        let deadline = start + budget;
+        let result = loop {
+            let remaining = match deadline.checked_duration_since(Instant::now()) {
+                Some(r) => r,
+                None => break None,
+            };
             match self.rx.recv_timeout(remaining) {
                 Ok(frame) => {
                     self.absorb(&frame);
                     if pred(&frame, &self.strings) {
-                        return Some(frame);
+                        break Some(frame);
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     self.dump_recent("timeout");
-                    return None;
+                    break None;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     self.dump_recent("QEMU disconnected");
-                    return None;
+                    break None;
                 }
             }
+        };
+        let elapsed = start.elapsed();
+        if elapsed > self.max_wait.0 {
+            self.max_wait = (elapsed, budget);
         }
+        result
+    }
+
+    /// (`actual`, `budget`) of the longest `wait_for` issued so far.
+    /// Used by the runner to print e.g. `max wait 1.6s of 30s budget`,
+    /// flagging budgets that are over-sized (much bigger than actual)
+    /// or tight (actual close to budget).
+    pub fn max_wait(&self) -> (Duration, Duration) {
+        self.max_wait
     }
 
     /// Look up a name in the string table. Useful for matchers that
@@ -202,10 +229,29 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
+        // Stash the longest wait so the test runner can print it
+        // after the scenario function returns. Thread-local because
+        // scenarios run sequentially on the runner's main thread.
+        LAST_MAX_WAIT.with(|cell| cell.set(Some(self.max_wait)));
         let _ = self.qemu.kill();
         let _ = self.qemu.wait();
         let _ = std::fs::remove_file(&self.socket_path);
     }
+}
+
+thread_local! {
+    /// Per-thread slot for the most-recently-dropped Harness's
+    /// `max_wait`. The test runner reads this after each scenario
+    /// function returns. `None` if the scenario didn't construct a
+    /// Harness (or the slot has already been consumed).
+    static LAST_MAX_WAIT: std::cell::Cell<Option<(Duration, Duration)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Consume the last-scenario's max wait timing. Returns `None` if
+/// no Harness has been dropped since the last call.
+pub fn take_last_max_wait() -> Option<(Duration, Duration)> {
+    LAST_MAX_WAIT.with(|cell| cell.take())
 }
 
 fn build_kernel(features: &[&str]) -> Result<(), String> {

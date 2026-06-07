@@ -43,6 +43,16 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Clippy the whole workspace correctly: host crates for the host,
+    /// the kernel for its bare-metal riscv target (which plain
+    /// `cargo clippy --workspace` can't do — it builds the kernel for the
+    /// host, where it won't link). Trailing args are forwarded to both
+    /// invocations, e.g. `cargo xtask clippy -- --fix --allow-dirty` or
+    /// `cargo xtask clippy -- -- -D warnings`.
+    Clippy {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Bring the observability stack (Tempo + Prometheus + Grafana)
     /// up or down via docker compose.
     Stack {
@@ -51,9 +61,16 @@ enum Cmd {
     },
     /// Run kernel integration tests in QEMU. With no scenario name,
     /// runs every known scenario and reports a pass/fail summary.
+    /// Use `--repeat N` to run the suite N times back-to-back; an
+    /// aggregate flake report lists scenarios that failed in at
+    /// least one run.
     Test {
         /// Optional scenario name to run. Omit to run all.
         scenario: Option<String>,
+        /// Number of times to repeat the run. Useful for flake
+        /// detection. Default 1.
+        #[arg(long, default_value_t = 1)]
+        repeat: u32,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -87,6 +104,7 @@ fn main() -> ExitCode {
         Cmd::Build => build(),
         Cmd::Boot => boot(),
         Cmd::Mutants { args } => run_mutants(&args),
+        Cmd::Clippy { args } => run_clippy(&args),
         Cmd::Collect { args } => run_collector(&args),
         Cmd::Reader { args } => {
             // Reader = text-only debug view; no docker dependency.
@@ -100,7 +118,7 @@ fn main() -> ExitCode {
             run_collector(&all)
         }
         Cmd::Stack { cmd } => stack(cmd),
-        Cmd::Test { scenario } => itest::run(scenario.as_deref()),
+        Cmd::Test { scenario, repeat } => itest::run(scenario.as_deref(), repeat),
         Cmd::Loc => loc::run(),
         Cmd::Debug { features } => debug(&features),
     }
@@ -212,6 +230,36 @@ fn boot() -> ExitCode {
         .status()
         .expect("failed to invoke qemu-system-riscv64");
     if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn run_clippy(extra_args: &[String]) -> ExitCode {
+    // Host-buildable crates: lint everything including tests.
+    let host = Command::new("cargo")
+        .args([
+            "clippy",
+            "-p", "kernel-core",
+            "-p", "protocol",
+            "-p", "collector",
+            "-p", "xtask",
+            "--all-targets",
+        ])
+        .args(extra_args)
+        .status()
+        .expect("failed to invoke cargo clippy");
+
+    // The kernel only compiles for bare-metal riscv. No `--all-targets`:
+    // it has no host-buildable test target.
+    let kernel = Command::new("cargo")
+        .args(["clippy", "-p", "kernel", "--target", qemu::KERNEL_TARGET])
+        .args(extra_args)
+        .status()
+        .expect("failed to invoke cargo clippy");
+
+    if host.success() && kernel.success() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)

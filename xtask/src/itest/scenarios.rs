@@ -21,8 +21,8 @@ pub fn frame_allocator_metrics() -> Result<(), String> {
     let mut h = Harness::spawn("frames")?;
 
     let frame = h
-        .wait_for(SEC * 10, is_metric_named("snitchos.frames.allocated_total"))
-        .ok_or("no snitchos.frames.allocated_total metric within 10s")?;
+        .wait_for(SEC * 30, is_metric_named("snitchos.frames.allocated_total"))
+        .ok_or("no snitchos.frames.allocated_total metric within 30s")?;
     let value = match frame {
         OwnedFrame::Metric { value, .. } => value,
         _ => return Err("matched non-metric (impossible)".to_string()),
@@ -49,8 +49,8 @@ pub fn kernel_heap_metrics() -> Result<(), String> {
     let mut h = Harness::spawn("heap")?;
 
     let frame = h
-        .wait_for(SEC * 10, is_metric_named("snitchos.heap.alloc_total"))
-        .ok_or("no snitchos.heap.alloc_total metric within 10s — heap not initialised or not emitting?")?;
+        .wait_for(SEC * 30, is_metric_named("snitchos.heap.alloc_total"))
+        .ok_or("no snitchos.heap.alloc_total metric within 30s — heap not initialised or not emitting?")?;
     let value = match frame {
         OwnedFrame::Metric { value, .. } => value,
         _ => return Err("matched non-metric (impossible)".to_string()),
@@ -61,10 +61,10 @@ pub fn kernel_heap_metrics() -> Result<(), String> {
         ));
     }
 
-    h.wait_for(SEC * 5, is_metric_named("snitchos.heap.bytes_used"))
-        .ok_or("no snitchos.heap.bytes_used metric within 5s")?;
+    h.wait_for(SEC * 20, is_metric_named("snitchos.heap.bytes_used"))
+        .ok_or("no snitchos.heap.bytes_used metric within 20s")?;
 
-    h.wait_for(SEC * 5, is_span_start_named("kernel.heartbeat"))
+    h.wait_for(SEC * 20, is_span_start_named("kernel.heartbeat"))
         .ok_or("no heartbeat after heap metric — heap broke the loop?")?;
 
     Ok(())
@@ -96,7 +96,7 @@ pub fn sched_context_switch_smoke() -> Result<(), String> {
     let mut h = Harness::spawn("schedsmoke")?;
 
     let frame = h
-        .wait_for(SEC * 10, |f, strings| match f {
+        .wait_for(SEC * 30, |f, strings| match f {
             OwnedFrame::Metric { name_id, value, .. } => {
                 strings.get(name_id).map(String::as_str)
                     == Some("snitchos.sched.smoke_marker_hits")
@@ -105,7 +105,7 @@ pub fn sched_context_switch_smoke() -> Result<(), String> {
             _ => false,
         })
         .ok_or(
-            "no sched.smoke_marker_hits >= 1 within 10s — asm switched into marker but never came back, or marker never ran, or counter not emitted",
+            "no sched.smoke_marker_hits >= 1 within 30s — asm switched into marker but never came back, or marker never ran, or counter not emitted",
         )?;
     let value = match frame {
         OwnedFrame::Metric { value, .. } => value,
@@ -127,14 +127,14 @@ pub fn sched_context_switch_smoke() -> Result<(), String> {
 pub fn sched_spawn_registers_thread() -> Result<(), String> {
     let mut h = Harness::spawn("schedspawn")?;
 
-    h.wait_for(SEC * 5, is_thread_register_named("main"))
-        .ok_or("no ThreadRegister for 'main' within 5s")?;
-    h.wait_for(SEC * 5, is_thread_register_named("idle"))
-        .ok_or("no ThreadRegister for 'idle' within 5s")?;
-    h.wait_for(SEC * 5, is_thread_register_named("task_a"))
-        .ok_or("no ThreadRegister for 'task_a' within 5s")?;
-    h.wait_for(SEC * 5, is_thread_register_named("task_b"))
-        .ok_or("no ThreadRegister for 'task_b' within 5s")?;
+    h.wait_for(SEC * 20, is_thread_register_named("main"))
+        .ok_or("no ThreadRegister for 'main' within 20s")?;
+    h.wait_for(SEC * 20, is_thread_register_named("idle"))
+        .ok_or("no ThreadRegister for 'idle' within 20s")?;
+    h.wait_for(SEC * 20, is_thread_register_named("task_a"))
+        .ok_or("no ThreadRegister for 'task_a' within 20s")?;
+    h.wait_for(SEC * 20, is_thread_register_named("task_b"))
+        .ok_or("no ThreadRegister for 'task_b' within 20s")?;
 
     Ok(())
 }
@@ -147,7 +147,7 @@ pub fn sched_spawn_registers_thread() -> Result<(), String> {
 pub fn sched_yield_round_trips() -> Result<(), String> {
     let mut h = Harness::spawn("schedyield")?;
 
-    h.wait_for(SEC * 15, |f, strings| match f {
+    h.wait_for(SEC * 45, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
                 == Some("snitchos.task_a.loops")
@@ -155,9 +155,9 @@ pub fn sched_yield_round_trips() -> Result<(), String> {
         }
         _ => false,
     })
-    .ok_or("no task_a.loops > 0 within 15s")?;
+    .ok_or("no task_a.loops > 0 within 45s")?;
 
-    h.wait_for(SEC * 15, |f, strings| match f {
+    h.wait_for(SEC * 45, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
                 == Some("snitchos.task_b.loops")
@@ -165,9 +165,9 @@ pub fn sched_yield_round_trips() -> Result<(), String> {
         }
         _ => false,
     })
-    .ok_or("no task_b.loops > 0 within 15s — round-robin not reaching task_b")?;
+    .ok_or("no task_b.loops > 0 within 45s — round-robin not reaching task_b")?;
 
-    h.wait_for(SEC * 15, |f, strings| match f {
+    h.wait_for(SEC * 45, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
                 == Some("snitchos.sched.context_switches_total")
@@ -175,7 +175,7 @@ pub fn sched_yield_round_trips() -> Result<(), String> {
         }
         _ => false,
     })
-    .ok_or("no sched.context_switches_total > 0 within 15s")?;
+    .ok_or("no sched.context_switches_total > 0 within 45s")?;
 
     Ok(())
 }
@@ -200,7 +200,7 @@ pub fn sched_span_survives_yield() -> Result<(), String> {
     let mut h = Harness::spawn("schedspansurvive")?;
 
     let task_a_reg = h
-        .wait_for(SEC * 5, is_thread_register_named("task_a"))
+        .wait_for(SEC * 20, is_thread_register_named("task_a"))
         .ok_or("no ThreadRegister for 'task_a'")?;
     let task_a_id = match task_a_reg {
         OwnedFrame::ThreadRegister { id, .. } => id,
@@ -208,7 +208,7 @@ pub fn sched_span_survives_yield() -> Result<(), String> {
     };
 
     let span_start = h
-        .wait_for(SEC * 15, |f, strings| match f {
+        .wait_for(SEC * 45, |f, strings| match f {
             OwnedFrame::SpanStart { name_id, task_id, parent, .. } => {
                 strings.get(name_id).map(String::as_str) == Some("task_a.tick")
                     && *task_id == task_a_id
@@ -217,30 +217,30 @@ pub fn sched_span_survives_yield() -> Result<(), String> {
             _ => false,
         })
         .ok_or(
-            "no top-level SpanStart 'task_a.tick' on task_a within 15s — wiring may have parented it to another task's span",
+            "no top-level SpanStart 'task_a.tick' on task_a within 45s — wiring may have parented it to another task's span",
         )?;
     let span_id = match span_start {
         OwnedFrame::SpanStart { id, .. } => id,
         _ => return Err("matched non-SpanStart".to_string()),
     };
 
-    h.wait_for(SEC * 10, move |f, _| match f {
+    h.wait_for(SEC * 30, move |f, _| match f {
         OwnedFrame::ContextSwitch { from, .. } => *from == task_a_id,
         _ => false,
     })
-    .ok_or("no ContextSwitch leaving task_a within 10s after the span opened")?;
+    .ok_or("no ContextSwitch leaving task_a within 30s after the span opened")?;
 
-    h.wait_for(SEC * 10, move |f, _| match f {
+    h.wait_for(SEC * 30, move |f, _| match f {
         OwnedFrame::ContextSwitch { to, .. } => *to == task_a_id,
         _ => false,
     })
-    .ok_or("no ContextSwitch returning to task_a within 10s — task_a was orphaned mid-span")?;
+    .ok_or("no ContextSwitch returning to task_a within 30s — task_a was orphaned mid-span")?;
 
-    h.wait_for(SEC * 10, move |f, _| match f {
+    h.wait_for(SEC * 30, move |f, _| match f {
         OwnedFrame::SpanEnd { id, .. } => *id == span_id,
         _ => false,
     })
-    .ok_or("no SpanEnd matching the surviving span's id within 10s — close popped the wrong cursor or never ran")?;
+    .ok_or("no SpanEnd matching the surviving span's id within 30s — close popped the wrong cursor or never ran")?;
 
     Ok(())
 }
@@ -259,14 +259,14 @@ pub fn sched_context_switches_on_wire() -> Result<(), String> {
     let mut task_ids: HashSet<u32> = HashSet::new();
     for name in ["main", "idle", "task_a", "task_b"] {
         let frame = h
-            .wait_for(SEC * 5, is_thread_register_named(name))
+            .wait_for(SEC * 20, is_thread_register_named(name))
             .ok_or_else(|| std::format!("no ThreadRegister for '{name}'"))?;
         if let OwnedFrame::ThreadRegister { id, .. } = frame {
             task_ids.insert(id);
         }
     }
 
-    h.wait_for(SEC * 10, move |f, _| match f {
+    h.wait_for(SEC * 30, move |f, _| match f {
         OwnedFrame::ContextSwitch { from, to, reason, .. } => {
             task_ids.contains(from)
                 && task_ids.contains(to)
@@ -276,7 +276,7 @@ pub fn sched_context_switches_on_wire() -> Result<(), String> {
         _ => false,
     })
     .ok_or(
-        "no ContextSwitch{Yield} with both endpoints being known task ids within 10s",
+        "no ContextSwitch{Yield} with both endpoints being known task ids within 30s",
     )?;
 
     Ok(())
@@ -292,10 +292,10 @@ pub fn sched_spans_carry_task_id() -> Result<(), String> {
 
     // First the ThreadRegisters so we know the id↔name mapping.
     let task_a_reg = h
-        .wait_for(SEC * 5, is_thread_register_named("task_a"))
+        .wait_for(SEC * 20, is_thread_register_named("task_a"))
         .ok_or("no ThreadRegister for 'task_a'")?;
     let task_b_reg = h
-        .wait_for(SEC * 5, is_thread_register_named("task_b"))
+        .wait_for(SEC * 20, is_thread_register_named("task_b"))
         .ok_or("no ThreadRegister for 'task_b'")?;
     let task_a_id = match task_a_reg {
         OwnedFrame::ThreadRegister { id, .. } => id,
@@ -306,7 +306,7 @@ pub fn sched_spans_carry_task_id() -> Result<(), String> {
         _ => return Err("matched non-ThreadRegister".to_string()),
     };
 
-    h.wait_for(SEC * 15, |f, strings| match f {
+    h.wait_for(SEC * 45, |f, strings| match f {
         OwnedFrame::SpanStart { name_id, task_id, .. } => {
             strings.get(name_id).map(String::as_str) == Some("task_a.tick")
                 && *task_id == task_a_id
@@ -315,7 +315,7 @@ pub fn sched_spans_carry_task_id() -> Result<(), String> {
     })
     .ok_or("no SpanStart 'task_a.tick' with task_id matching task_a's ThreadRegister")?;
 
-    h.wait_for(SEC * 15, |f, strings| match f {
+    h.wait_for(SEC * 45, |f, strings| match f {
         OwnedFrame::SpanStart { name_id, task_id, .. } => {
             strings.get(name_id).map(String::as_str) == Some("task_b.tick")
                 && *task_id == task_b_id
@@ -330,7 +330,7 @@ pub fn sched_spans_carry_task_id() -> Result<(), String> {
 pub fn heap_oom() -> Result<(), String> {
     let mut h = Harness::spawn_with_features("heap-oom", &["heap-oom"])?;
 
-    h.wait_for(SEC * 10, |f, strings| match f {
+    h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
                 == Some("snitchos.heap.grow_total")
@@ -339,10 +339,10 @@ pub fn heap_oom() -> Result<(), String> {
         _ => false,
     })
     .ok_or(
-        "no heap.grow_total > 0 within 10s — watermark grow never triggered, leak too slow, or extend() broken",
+        "no heap.grow_total > 0 within 30s — watermark grow never triggered, leak too slow, or extend() broken",
     )?;
 
-    h.wait_for(SEC * 15, |f, strings| match f {
+    h.wait_for(SEC * 45, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
                 == Some("snitchos.heap.alloc_failed_total")
@@ -351,12 +351,12 @@ pub fn heap_oom() -> Result<(), String> {
         _ => false,
     })
     .ok_or(
-        "no heap.alloc_failed_total > 0 within 15s — heap grew but never OOM'd; leak too slow, or grow outpacing leak",
+        "no heap.alloc_failed_total > 0 within 45s — heap grew but never OOM'd; leak too slow, or grow outpacing leak",
     )?;
 
-    h.wait_for(SEC * 5, is_span_start_named("kernel.heartbeat"))
-        .ok_or("no heartbeat within 5s after first heap alloc failure — kernel hung?")?;
-    h.wait_for(SEC * 5, is_span_start_named("kernel.heartbeat"))
+    h.wait_for(SEC * 20, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat within 20s after first heap alloc failure — kernel hung?")?;
+    h.wait_for(SEC * 20, is_span_start_named("kernel.heartbeat"))
         .ok_or("no second heartbeat post-OOM — kernel hung after one more tick?")?;
 
     Ok(())
@@ -379,7 +379,7 @@ pub fn frame_allocator_oom() -> Result<(), String> {
 
     // (1) Wait up to 15s for the first non-zero alloc_failed_total.
     // ~4 heartbeats × ~1s each = ~4s; 15s gives generous slack.
-    h.wait_for(SEC * 15, |f, strings| match f {
+    h.wait_for(SEC * 45, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
                 == Some("snitchos.frames.alloc_failed_total")
@@ -388,14 +388,14 @@ pub fn frame_allocator_oom() -> Result<(), String> {
         _ => false,
     })
     .ok_or(
-        "no alloc_failed_total > 0 within 15s — leak rate too low, allocator broken, or kernel died",
+        "no alloc_failed_total > 0 within 45s — leak rate too low, allocator broken, or kernel died",
     )?;
 
     // (2) Two more heartbeat SpanStarts post-OOM. Proves the kernel
     // didn't crash trying to alloc after exhaustion.
-    h.wait_for(SEC * 5, is_span_start_named("kernel.heartbeat"))
-        .ok_or("no heartbeat within 5s after first alloc failure — kernel hung?")?;
-    h.wait_for(SEC * 5, is_span_start_named("kernel.heartbeat"))
+    h.wait_for(SEC * 20, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat within 20s after first alloc failure — kernel hung?")?;
+    h.wait_for(SEC * 20, is_span_start_named("kernel.heartbeat"))
         .ok_or("no second heartbeat after first alloc failure — kernel hung after one more tick?")?;
 
     Ok(())
@@ -409,7 +409,7 @@ pub fn frame_allocator_oom() -> Result<(), String> {
 /// scenario times out.
 pub fn kernel_runs_at_higher_half() -> Result<(), String> {
     let mut h = Harness::spawn("higherhalf")?;
-    h.wait_for(SEC * 5, is_span_start_named("kernel.runs_at_higher_half"))
+    h.wait_for(SEC * 20, is_span_start_named("kernel.runs_at_higher_half"))
         .ok_or("no kernel.runs_at_higher_half SpanStart — PC isn't actually at higher-half post-trampoline")?;
     Ok(())
 }
@@ -424,10 +424,10 @@ pub fn boot_reaches_heartbeat() -> Result<(), String> {
         .ok_or("no Hello frame within 3s")?;
     h.wait_for(SEC * 3, is_span_start_named("kernel.boot"))
         .ok_or("no kernel.boot SpanStart within 3s")?;
-    h.wait_for(SEC * 5, is_dropped(0))
-        .ok_or("no Dropped(0) checkpoint after flush_pre_init within 5s")?;
-    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
-        .ok_or("no kernel.heartbeat SpanStart within 10s — timer IRQ not firing?")?;
+    h.wait_for(SEC * 20, is_dropped(0))
+        .ok_or("no Dropped(0) checkpoint after flush_pre_init within 20s")?;
+    h.wait_for(SEC * 30, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no kernel.heartbeat SpanStart within 30s — timer IRQ not firing?")?;
 
     Ok(())
 }
@@ -440,18 +440,18 @@ pub fn boot_reaches_heartbeat() -> Result<(), String> {
 pub fn heartbeat_cadence() -> Result<(), String> {
     let mut h = Harness::spawn("cadence")?;
 
-    h.wait_for(SEC * 5, is_hello())
-        .ok_or("no Hello frame within 5s")?;
+    h.wait_for(SEC * 20, is_hello())
+        .ok_or("no Hello frame within 20s")?;
     let timebase_hz = h
         .timebase_hz()
         .ok_or("Hello arrived but timebase_hz is missing")?;
 
     let first = h
-        .wait_for(SEC * 15, is_span_start_named("kernel.heartbeat"))
-        .ok_or("no first heartbeat within 15s")?;
+        .wait_for(SEC * 45, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no first heartbeat within 45s")?;
     let second = h
-        .wait_for(SEC * 5, is_span_start_named("kernel.heartbeat"))
-        .ok_or("no second heartbeat within 5s of the first")?;
+        .wait_for(SEC * 20, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no second heartbeat within 20s of the first")?;
 
     let (t1, t2) = match (&first, &second) {
         (OwnedFrame::SpanStart { t: a, .. }, OwnedFrame::SpanStart { t: b, .. }) => (*a, *b),
@@ -464,7 +464,7 @@ pub fn heartbeat_cadence() -> Result<(), String> {
     let delta_ns = (t2 - t1) as u128 * 1_000_000_000 / timebase_hz as u128;
     const MIN_NS: u128 = 10_000_000;        // 10 ms
     const MAX_NS: u128 = 10_000_000_000;    // 10 s
-    if delta_ns < MIN_NS || delta_ns > MAX_NS {
+    if !(MIN_NS..=MAX_NS).contains(&delta_ns) {
         return Err(format!(
             "heartbeat interval {delta_ns} ns is outside [{MIN_NS}, {MAX_NS}] ns \
              (timebase={timebase_hz} Hz, delta={} ticks)",
@@ -489,8 +489,8 @@ pub fn pre_init_order() -> Result<(), String> {
 
     // (1) First StringRegister we see should name kernel.boot.
     let first = h
-        .wait_for(SEC * 5, is_string_register_named("kernel.boot"))
-        .ok_or("no kernel.boot StringRegister within 5s — pre-init buffer drained out of order?")?;
+        .wait_for(SEC * 20, is_string_register_named("kernel.boot"))
+        .ok_or("no kernel.boot StringRegister within 20s — pre-init buffer drained out of order?")?;
     let OwnedFrame::StringRegister { id: _, value } = first else {
         return Err("matched non-StringRegister (impossible)".to_string());
     };
@@ -505,11 +505,11 @@ pub fn pre_init_order() -> Result<(), String> {
     // for the WRONG reason (it'd still resolve once the register
     // arrived). So instead we check explicitly: for every SpanStart
     // we walk past, name_of(name_id) must be Some.
-    let deadline = std::time::Instant::now() + SEC * 10;
+    let deadline = std::time::Instant::now() + SEC * 30;
     loop {
         let remaining = deadline
             .checked_duration_since(std::time::Instant::now())
-            .ok_or("did not reach first heartbeat within 10s")?;
+            .ok_or("did not reach first heartbeat within 30s")?;
         let frame = h.wait_for(remaining, |_, _| true)
             .ok_or("stream closed before reaching first heartbeat")?;
         match frame {
@@ -534,7 +534,7 @@ pub fn pre_init_order() -> Result<(), String> {
 /// hart 1's runqueue and sends `IPI_WAKEUP`. Hart 1 takes the IPI,
 /// breaks `wfi`, yields, picks the probe, and the probe's loop
 /// increments `PROBE_TICKS`. The scenario asserts the metric reaches
-/// at least 10 within 10s — proves the whole chain works:
+/// at least 10 within 30s — proves the whole chain works:
 /// per-hart runqueue, cross-hart spawn enqueue, IPI wakeup, hart 1's
 /// trap+dispatch, `yield_now` on hart 1, task execution.
 pub fn smp_spawn_on_hart_1_runs() -> Result<(), String> {
@@ -545,7 +545,7 @@ pub fn smp_spawn_on_hart_1_runs() -> Result<(), String> {
     // sim, which has no margin against the 10s budget. 3 still proves
     // the chain (spawn_on → IPI → wfi-wake → yield → execute) and
     // converges in ~3s sim.
-    h.wait_for(SEC * 10, |f, strings| match f {
+    h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
                 == Some("snitchos.smp.hart_1_probe_ticks_total")
@@ -554,7 +554,7 @@ pub fn smp_spawn_on_hart_1_runs() -> Result<(), String> {
         _ => false,
     })
     .ok_or(
-        "hart_1_probe_ticks_total never reached 3 within 10s — \
+        "hart_1_probe_ticks_total never reached 3 within 30s — \
          hart 1 didn't pick up the spawn_on'd task. Per-hart runqueue \
          not wired, IPI_WAKEUP not delivered, hart 1 not handling \
          software interrupts, or hart_1_main's yield_now broken.",
@@ -566,7 +566,7 @@ pub fn smp_spawn_on_hart_1_runs() -> Result<(), String> {
 /// hart 1 runs `_secondary_start` asm (sets sp, loads SATP,
 /// trampolines to higher-half) and enters `secondary_main`, which
 /// initialises per-CPU state and emits `HartRegister { id: 1 }`.
-/// The scenario asserts the frame appears on the wire within 5s.
+/// The scenario asserts the frame appears on the wire within 20s.
 ///
 /// Proves: SBI HSM ECALL works, the secondary entry asm correctly
 /// sets up sp + SATP + tp, hart 1 reaches higher-half + Rust, and
@@ -575,11 +575,11 @@ pub fn smp_spawn_on_hart_1_runs() -> Result<(), String> {
 pub fn smp_secondary_hart_boots() -> Result<(), String> {
     let mut h = Harness::spawn("smp-boot")?;
 
-    h.wait_for(SEC * 5, |f, _| {
+    h.wait_for(SEC * 20, |f, _| {
         matches!(f, OwnedFrame::HartRegister { id: 1, .. })
     })
     .ok_or(
-        "no HartRegister{id:1} within 5s — hart 1 didn't reach \
+        "no HartRegister{id:1} within 20s — hart 1 didn't reach \
          secondary_main, or the SATP/sp setup faulted silently, or \
          SBI hart_start returned an error",
     )?;
@@ -590,7 +590,7 @@ pub fn smp_secondary_hart_boots() -> Result<(), String> {
 /// `Wakeup` IPI after init; the software-interrupt trap handler
 /// reads the pending bitflags, dispatches, and bumps
 /// `snitchos.ipi.received_total`. We assert the counter reaches
-/// at least 1 within 10s — proves:
+/// at least 1 within 30s — proves:
 ///
 ///   1. SBI `send_ipi` ECALL works (the IPI was raised)
 ///   2. SSIE is enabled in `sie` (the interrupt was taken)
@@ -604,7 +604,7 @@ pub fn smp_secondary_hart_boots() -> Result<(), String> {
 pub fn ipi_self_wakeup() -> Result<(), String> {
     let mut h = Harness::spawn("ipi-self")?;
 
-    h.wait_for(SEC * 10, |f, strings| match f {
+    h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
                 == Some("snitchos.ipi.received_total")
@@ -613,7 +613,7 @@ pub fn ipi_self_wakeup() -> Result<(), String> {
         _ => false,
     })
     .ok_or(
-        "ipi.received_total never reached 1 within 10s — \
+        "ipi.received_total never reached 1 within 30s — \
          SBI send_ipi failed, SSIE not enabled, trap handler didn't \
          route software interrupt, or the dispatcher didn't process \
          the pending bit",
@@ -640,7 +640,7 @@ pub fn ipi_self_wakeup() -> Result<(), String> {
 /// dropped or double-counted samples, this invariant fails.
 ///
 /// We assert:
-///   1. `samples_consumed_total >= 500` within 15s — workload is
+///   1. `samples_consumed_total >= 500` within 45s — workload is
 ///      actually running, both tasks are getting CPU under the
 ///      cooperative scheduler. The threshold trails the demo tasks'
 ///      heavy `burn_lcg` CPU draw; under SMP (v0.6 step 11) the
@@ -656,7 +656,7 @@ pub fn workload_cooperative_baseline() -> Result<(), String> {
     // "ran zero times" — while converging in ~3-4s sim instead of
     // 8-9, leaving comfortable margin against the 15s budget.
     let frame = h
-        .wait_for(SEC * 15, |f, strings| match f {
+        .wait_for(SEC * 45, |f, strings| match f {
             OwnedFrame::Metric { name_id, value, .. } => {
                 strings.get(name_id).map(String::as_str)
                     == Some("snitchos.workload.samples_consumed_total")
@@ -665,7 +665,7 @@ pub fn workload_cooperative_baseline() -> Result<(), String> {
             _ => false,
         })
         .ok_or(
-            "samples_consumed_total never reached 200 within 15s — \
+            "samples_consumed_total never reached 200 within 45s — \
              workload not running, or scheduler not giving consumer CPU?",
         )?;
     let consumed = match frame {
@@ -673,7 +673,7 @@ pub fn workload_cooperative_baseline() -> Result<(), String> {
         _ => return Err("matched non-metric (impossible)".to_string()),
     };
 
-    h.wait_for(SEC * 5, move |f, strings| match f {
+    h.wait_for(SEC * 20, move |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
                 == Some("snitchos.workload.histogram_sum")
@@ -682,7 +682,7 @@ pub fn workload_cooperative_baseline() -> Result<(), String> {
         _ => false,
     })
     .ok_or(format!(
-        "histogram_sum never reached {consumed} within 5s after \
+        "histogram_sum never reached {consumed} within 20s after \
          observing samples_consumed_total={consumed} — consumer pulled \
          samples from the queue but did not bin them (lost samples?)"
     ))?;

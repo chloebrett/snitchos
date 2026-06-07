@@ -38,8 +38,11 @@ const SCENARIOS: &[Scenario] = &[
 ];
 
 /// Entry point from `main`. `Some(name)` runs one scenario;
-/// `None` runs them all.
-pub fn run(name: Option<&str>) -> ExitCode {
+/// `None` runs them all. `repeat` controls how many full passes
+/// to perform — useful for surfacing flaky scenarios.
+pub fn run(name: Option<&str>, repeat: u32) -> ExitCode {
+    use std::collections::BTreeMap;
+
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
         return ExitCode::SUCCESS;
@@ -57,22 +60,70 @@ pub fn run(name: Option<&str>) -> ExitCode {
         None => SCENARIOS.iter().collect(),
     };
 
-    let mut failed = 0;
-    for s in &to_run {
-        eprint!("test {} ... ", s.name);
-        match (s.run)() {
-            Ok(()) => eprintln!("ok"),
-            Err(e) => {
-                eprintln!("FAILED");
-                eprintln!("  {e}");
-                failed += 1;
+    let runs = repeat.max(1);
+    // Per-scenario fail counter across all runs. BTreeMap keeps the
+    // aggregate report in scenario-registration order via the name key.
+    let mut fail_count: BTreeMap<&str, u32> = BTreeMap::new();
+    // Per-run pass/fail totals — printed in the aggregate at the end.
+    let mut run_totals: Vec<(usize, usize)> = Vec::with_capacity(runs as usize);
+
+    for run_idx in 0..runs {
+        if runs > 1 {
+            eprintln!("\n=== run {}/{} ===", run_idx + 1, runs);
+        }
+        let mut failed_this_run = 0;
+        for s in &to_run {
+            eprint!("test {} ... ", s.name);
+            let outcome = (s.run)();
+            // Drained after the scenario returns (Harness::Drop wrote it).
+            // `None` if the scenario never built a Harness, which today
+            // shouldn't happen but is harmless.
+            let timing = harness::take_last_max_wait();
+            let timing_str = timing
+                .map(|(actual, budget)| {
+                    format!(
+                        " (max wait {:.1}s of {:.0}s budget)",
+                        actual.as_secs_f64(),
+                        budget.as_secs_f64()
+                    )
+                })
+                .unwrap_or_default();
+            match outcome {
+                Ok(()) => eprintln!("ok{timing_str}"),
+                Err(e) => {
+                    eprintln!("FAILED{timing_str}");
+                    eprintln!("  {e}");
+                    failed_this_run += 1;
+                    *fail_count.entry(s.name).or_insert(0) += 1;
+                }
             }
         }
+        let total = to_run.len();
+        eprintln!("\n{} passed, {} failed", total - failed_this_run, failed_this_run);
+        run_totals.push((total - failed_this_run, failed_this_run));
     }
 
-    let total = to_run.len();
-    eprintln!("\n{} passed, {} failed", total - failed, failed);
-    if failed == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) }
+    // Single-run path: behaviour unchanged from before.
+    if runs == 1 {
+        return if run_totals[0].1 == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) };
+    }
+
+    // Multi-run aggregate: per-run summary + flake table.
+    eprintln!("\n=== aggregate over {runs} runs ===");
+    for (i, (pass, fail)) in run_totals.iter().enumerate() {
+        eprintln!("  run {}: {pass} passed, {fail} failed", i + 1);
+    }
+    let total_runs = runs;
+    if fail_count.is_empty() {
+        eprintln!("\nNo flakes — every scenario passed every run.");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("\nFlaky scenarios (failed at least once):");
+        for (name, count) in &fail_count {
+            eprintln!("  {name}: {count}/{total_runs} runs failed");
+        }
+        ExitCode::from(1)
+    }
 }
 
 fn qemu_available() -> bool {
