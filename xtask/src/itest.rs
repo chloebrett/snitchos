@@ -4,9 +4,10 @@
 
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use itest_harness::{
-    Aggregator, Baseline, BaselineFile, DEFAULT_ALPHA, RunTotals,
+    Aggregator, Baseline, BaselineFile, ComparisonRender, DEFAULT_ALPHA, RunTotals,
     render_comparison, verdict as verdict_fn,
 };
 use time::OffsetDateTime;
@@ -102,7 +103,9 @@ pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool, update_ba
         let mut failed_this_run = 0;
         for s in &to_run {
             eprint!("test {} ... ", s.name);
+            let start = Instant::now();
             let outcome = (s.run)();
+            aggregator.record_duration(s.name, start.elapsed());
             // Drained after the scenario returns (Harness::Drop wrote it).
             // `None` if the scenario never built a Harness, which today
             // shouldn't happen but is harmless.
@@ -229,7 +232,18 @@ fn print_baseline_comparisons(
         let failures = aggregator.fail_count(s.name);
         let baseline = file.current_for(s.name);
         let v = verdict_fn(failures, runs, baseline, DEFAULT_ALPHA);
-        eprint!("{}", render_comparison(s.name, failures, runs, baseline, v));
+        eprint!(
+            "{}",
+            render_comparison(&ComparisonRender {
+                scenario: s.name,
+                failures,
+                runs,
+                mean_duration: aggregator.mean_duration(s.name),
+                p95_duration: aggregator.p95_duration(s.name),
+                baseline,
+                verdict: v,
+            })
+        );
     }
 }
 
@@ -250,6 +264,12 @@ fn apply_current_run_to_baseline(
             runs,
             failures: aggregator.fail_count(s.name),
             recorded_at: now,
+            mean_duration_ms: aggregator
+                .mean_duration(s.name)
+                .map(|d| d.as_secs_f64() * 1000.0),
+            p95_duration_ms: aggregator
+                .p95_duration(s.name)
+                .map(|d| d.as_secs_f64() * 1000.0),
         };
         file.update_current(s.name, baseline);
     }

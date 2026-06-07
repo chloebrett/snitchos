@@ -40,7 +40,7 @@ use time::OffsetDateTime;
 use time::serde::rfc3339;
 
 /// A single baseline measurement for one scenario.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Baseline {
     /// Git commit at which this measurement was taken.
     pub commit: String,
@@ -57,6 +57,15 @@ pub struct Baseline {
     /// When the measurement was taken. RFC 3339 UTC.
     #[serde(with = "rfc3339")]
     pub recorded_at: OffsetDateTime,
+    /// Mean per-iteration wall-clock time in milliseconds. Optional
+    /// for back-compat: older baseline files don't have this and
+    /// callers shouldn't crash on absence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean_duration_ms: Option<f64>,
+    /// p95 per-iteration wall-clock time in milliseconds. Same
+    /// back-compat treatment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p95_duration_ms: Option<f64>,
 }
 
 impl Baseline {
@@ -73,7 +82,7 @@ impl Baseline {
 /// absent (a scenario the file knows about but has never recorded a
 /// baseline for) — useful when committing a fresh scenario row that
 /// will be populated by the next `--update-baseline` run.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScenarioBaseline {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<Baseline>,
@@ -82,7 +91,7 @@ pub struct ScenarioBaseline {
 }
 
 /// Root document of the baseline TOML.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BaselineFile {
     #[serde(default)]
     pub scenarios: BTreeMap<String, ScenarioBaseline>,
@@ -166,6 +175,8 @@ mod tests {
             runs,
             failures,
             recorded_at: at,
+            mean_duration_ms: None,
+            p95_duration_ms: None,
         }
     }
 
@@ -254,6 +265,33 @@ mod tests {
         assert!(s.contains("build_hash = \"deadbeef\""));
         let parsed = BaselineFile::load_str(&s).unwrap();
         assert_eq!(parsed, f);
+    }
+
+    #[test]
+    fn timing_fields_round_trip_when_present() {
+        let mut f = BaselineFile::new();
+        let mut b = make_baseline("abc", 50, 3, datetime!(2026-06-08 10:00:00 UTC));
+        b.mean_duration_ms = Some(1234.5);
+        b.p95_duration_ms = Some(1500.0);
+        f.update_current("heartbeat-cadence", b);
+        let s = f.to_string().unwrap();
+        assert!(s.contains("mean_duration_ms = 1234.5"));
+        assert!(s.contains("p95_duration_ms = 1500.0"));
+        let parsed = BaselineFile::load_str(&s).unwrap();
+        assert_eq!(parsed, f);
+    }
+
+    #[test]
+    fn timing_fields_absent_in_serialized_form_when_none() {
+        // No timing data → no mean/p95 lines in the TOML.
+        let mut f = BaselineFile::new();
+        f.update_current(
+            "x",
+            make_baseline("c", 50, 3, datetime!(2026-06-08 10:00:00 UTC)),
+        );
+        let s = f.to_string().unwrap();
+        assert!(!s.contains("mean_duration_ms"));
+        assert!(!s.contains("p95_duration_ms"));
     }
 
     #[test]
