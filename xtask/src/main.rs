@@ -59,19 +59,26 @@ enum Cmd {
         #[command(subcommand)]
         cmd: StackCmd,
     },
-    /// Run kernel integration tests in QEMU. With no scenario name,
-    /// runs every known scenario and reports a pass/fail summary.
-    /// Use `--repeat N` to run the suite N times back-to-back; an
-    /// aggregate flake report lists scenarios that failed in at
-    /// least one run.
+    /// Run all host-side unit tests across the workspace
+    /// (`kernel-core`, `protocol --features std`, `collector`).
+    /// Fast (~1s). Doesn't touch QEMU.
+    Test,
+    /// Run kernel integration tests in QEMU. By default, runs the
+    /// workspace unit tests first and only proceeds to integration
+    /// if they all pass (use `--skip-unit-tests` to bypass).
+    ///
+    /// With no scenario name, runs every known integration
+    /// scenario and reports a pass/fail summary. Use `--repeat N`
+    /// to run the suite N times back-to-back; an aggregate flake
+    /// report lists scenarios that failed in at least one run.
     ///
     /// By default, any `qemu-system-riscv64` processes already
     /// running on the host are killed before the suite starts — a
     /// stale QEMU from a prior `cargo xtask boot` or debug session
     /// would otherwise compete for host CPU and cause flakes. Use
-    /// `--keep-existing-qemus` to disable this if you genuinely want
-    /// concurrent QEMUs.
-    Test {
+    /// `--keep-existing-qemus` to disable this if you genuinely
+    /// want concurrent QEMUs.
+    Itest {
         /// Optional scenario name to run. Omit to run all.
         scenario: Option<String>,
         /// Number of times to repeat the run. Useful for flake
@@ -83,6 +90,11 @@ enum Cmd {
         /// concurrent debug QEMU alive (rare).
         #[arg(long, default_value_t = false)]
         keep_existing_qemus: bool,
+        /// Skip running the workspace unit tests as a prerequisite.
+        /// Off by default — unit tests run first; integration only
+        /// proceeds if they pass.
+        #[arg(long, default_value_t = false)]
+        skip_unit_tests: bool,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -130,7 +142,16 @@ fn main() -> ExitCode {
             run_collector(&all)
         }
         Cmd::Stack { cmd } => stack(cmd),
-        Cmd::Test { scenario, repeat, keep_existing_qemus } => {
+        Cmd::Test => itest::run_unit_tests(),
+        Cmd::Itest { scenario, repeat, keep_existing_qemus, skip_unit_tests } => {
+            if !skip_unit_tests {
+                let unit = itest::run_unit_tests();
+                if unit != ExitCode::SUCCESS {
+                    eprintln!("\nunit tests failed — skipping integration. Pass --skip-unit-tests to force.");
+                    return unit;
+                }
+                eprintln!();
+            }
             itest::run(scenario.as_deref(), repeat, keep_existing_qemus)
         }
         Cmd::Loc => loc::run(),

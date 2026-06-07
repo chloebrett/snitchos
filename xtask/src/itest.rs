@@ -156,6 +156,50 @@ pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool) -> ExitCo
     }
 }
 
+/// Workspace crates that have host-runnable `cargo test` suites.
+/// The kernel itself is `no_std`/`no_main` and won't build for the
+/// host — testable logic lives in `kernel-core`. Each entry is the
+/// crate name plus any extra args (features) the suite needs.
+const UNIT_TEST_CRATES: &[(&str, &[&str])] = &[
+    ("kernel-core", &[]),
+    ("protocol", &["--features", "std"]),
+    ("collector", &[]),
+];
+
+/// Run every workspace crate's host unit tests, in order. Returns
+/// `SUCCESS` only if all crates pass. Bails out on first failure
+/// (no point continuing if `kernel-core` is broken).
+pub fn run_unit_tests() -> ExitCode {
+    eprintln!("=== unit tests ===");
+    for (crate_name, extra_args) in UNIT_TEST_CRATES {
+        eprint!("  {crate_name} ... ");
+        let status = std::process::Command::new("cargo")
+            .args(["test", "-p", crate_name, "--quiet"])
+            .args(*extra_args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output();
+        match status {
+            Ok(out) if out.status.success() => eprintln!("ok"),
+            Ok(out) => {
+                eprintln!("FAILED");
+                // Surface the actual test failure output so the user
+                // doesn't have to re-run with --verbose.
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                for line in stderr.lines() {
+                    eprintln!("    {line}");
+                }
+                return ExitCode::from(1);
+            }
+            Err(e) => {
+                eprintln!("FAILED to invoke cargo: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 fn qemu_available() -> bool {
     std::process::Command::new("qemu-system-riscv64")
         .arg("--version")
