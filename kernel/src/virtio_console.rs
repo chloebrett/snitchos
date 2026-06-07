@@ -547,8 +547,12 @@ unsafe fn transmit(base: usize, bytes: &[u8]) {
         (&raw mut TX_QUEUE.avail.ring[(avail_idx_before as usize) % QSIZE]).write_volatile(0);
         (&raw mut TX_QUEUE.avail.idx).write_volatile(avail_idx_before.wrapping_add(1));
 
-        // 4. Poke the device. (Memory ordering caveat — see "Known
-        //    weaknesses." Fine on QEMU.)
+        // 4. Make the descriptor + ring writes globally visible BEFORE
+        //    the device thread sees the notify-induced wake. Required
+        //    under multi-thread TCG (one host thread per emulated CPU
+        //    + a device thread) and real hardware. fence(Release) lowers
+        //    to RISC-V `fence rw,w`.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         write_reg(base, REG_QUEUE_NOTIFY, QUEUE_TX);
 
         // 5. Spin until the device confirms our descriptor is done.
