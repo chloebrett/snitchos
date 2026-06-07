@@ -703,6 +703,125 @@ Fix: build kernel once up-front in `itest::run()`, and skip the
 in-Harness build when features is empty. Feature-specific scenarios
 (currently just `oom-leak`) still rebuild per call.
 
+## Full-suite measurement
+
+`heartbeat-cadence` x200 came back 0/200 with the trap-return UART tag,
+strongly suggesting full suppression. But running the entire suite
+revealed the picture is messier — Bug B still fires occasionally on
+other scenarios.
+
+### With trap-return UART tag — suite x50
+
+**4 failures across 900 scenario-runs (50 × 18) = 0.44% per scenario.**
+**Per-run: 4/50 = 8% flaky.**
+
+Distinct flaky scenarios (each 1/50):
+- `boot-reaches-heartbeat`
+- `heartbeat-cadence` (the 200/200 was lucky — at 0.5% true rate,
+  P(0 in 200) ≈ 37%)
+- `kernel-heap-metrics`
+- `sched-yield-round-trips`
+
+### Baseline calibration at `d40e7cf` (fence only, no tag) — suite x5
+
+- 6 failures across 5 × 18 = 90 scenario-runs = **6.7% per scenario**
+- Per-run: 3/5 = **60% flaky**
+
+Flaky scenarios at baseline (different mix each run):
+- `pre-init-order` 2/5
+- `frame-allocator-metrics` 1/5
+- `frame-allocator-oom` 1/5
+- `sched-spans-carry-task-id` 1/5
+- `sched-yield-round-trips` 1/5
+
+### Comparison
+
+| Variant | Per-scenario rate | Per-run rate |
+|---|---|---|
+| Baseline (`d40e7cf`) | 6.7% | 60% |
+| Trap-return UART tag | 0.44% | 8% |
+| **Suppression factor** | **~15×** | **~7.5×** |
+
+A real and substantial fix, even if not complete. Per-run flake drops
+from "fails most runs" to "fails 1 in 12."
+
+## Decision: ship the trap-return UART tag for now
+
+Rationale:
+- 15×/7.5× rate reduction is significant.
+- CI cost is small: `cargo xtask itest --repeat 3` gives P(all 3 clean)
+  ≈ 78%; P(at least one clean) ≈ 99.95%. Acceptable gate.
+- A targeted-load-Acquire fix is uncertain and could take much longer
+  to land. Better to unblock CI now and circle back.
+- The fix is one UART writeln; cosmetic noise on the human-readable
+  boot log but no perf or correctness cost.
+
+### What "shipping" means in practice
+
+1. Replace the deflake-experiment `tag` helper with a permanent
+   single-byte UART write (no formatted writeln, no recursive risk).
+   Choose an invisible byte (e.g. `\0`) so it doesn't pollute the
+   human-readable boot log.
+2. Document it in `kernel/src/trap.rs` as a known workaround for a
+   cross-vCPU sync issue under multi-thread TCG. Link to this plan.
+3. Remove all other tag sites (H0/spawn, H1/loop, H1/noop, trap enter).
+4. Keep the harness "build once" change in `xtask/src/itest.rs` —
+   real correctness improvement independent of Bug B.
+5. Restore original kmain shape (probe spawn restored, noop_entry
+   removed, deflake EXPERIMENT comments cleaned up).
+6. Confirm `-smp 2, thread=multi` is restored in `qemu.rs`.
+
+## Open follow-ups (deferred)
+
+### (a) Catching the residual 8% per-run
+
+The trap-return tag is timing/MMIO-based, not a correctness fix. There's
+a real ordering issue underneath. Track the residual:
+
+- Same QEMU-disconnect fast-exit signature.
+- Hits different scenarios on different runs (no single bad scenario).
+- Need to find the actual cross-hart load on hart 1 that sees stale
+  data from hart 0. Probably right after `sret` from the IPI trap.
+- Add UART instrumentation at finer granularity inside hart 1's pickup
+  path (asm `switch` saves, post-switch sp load, first context-load on
+  noop_entry) to narrow.
+
+### (b) Refining the fix to be less hacky
+
+The `tag("trap return")` UART writeln is debug-shaped. Production fix
+candidates:
+
+- Single MMIO read of a no-op register (e.g. UART LSR). Cheaper, no
+  log noise, same BQL acquire.
+- SBI ecall (probe extension 0). Also cross-thread sync via M-mode;
+  possibly cheaper.
+- A properly-placed `fence(SeqCst)` IF we identify the kernel-side
+  ordering site that closes the race. Fences alone didn't suffice in
+  the broad sweep; placement-sensitive.
+
+### (c) Timer-IRQ statics should be per-CPU
+
+Independent finding (already documented above): `TICK_PENDING`,
+`TIMER_INTERVAL_TICKS`, `LAST_IRQ_DURATION` are global atomics used by
+both harts. Telemetry corruption (not a crash), but architecturally
+wrong for SMP. Lift to `PerCpu<AtomicX>`.
+
+### (d) Investigate QEMU multi-thread TCG specifically
+
+The fact that an MMIO trap closes the race where `fence(SeqCst)` alone
+doesn't strongly suggests QEMU's multi-thread TCG isn't fully honouring
+RISC-V's memory model for cross-vCPU atomics. Worth filing a QEMU
+question if we can construct a minimal repro outside SnitchOS.
+
+### (e) Real-hardware test
+
+If we ever get this onto real RISC-V hardware, the race might not
+reproduce — cache coherency + AMO instructions could provide the
+synchronization that QEMU multi-thread TCG misses. That would confirm
+(d) and tell us the kernel is actually correct.
+
+---
+
 Corridor narrowed to 4 commits, all surface-level:
 
 ```
