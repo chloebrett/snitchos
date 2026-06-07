@@ -14,6 +14,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use kernel_core::clock::Clock;
 use kernel_core::trap::{TrapCause, decode_scause};
 
+use crate::percpu::PerCpu;
+
 // ## Memory ordering note for the timer-IRQ statics below
 //
 // `TICK_PENDING` (set by ISR, read by main) and `LAST_IRQ_DURATION`
@@ -21,34 +23,41 @@ use kernel_core::trap::{TrapCause, decode_scause};
 // classic publication pattern. Across harts that pattern needs
 // `Release` on the store side and `Acquire` on the load side.
 //
-// Here both ends always run on the same hart: the timer interrupt is
-// a local CSR-driven IRQ, taken on whichever hart's `stimecmp`
-// expired. Trap return synchronises *all* of the handler's memory
-// ops with the resumed thread by hardware — the resumed thread
-// cannot observe the bit flip without also observing the duration
-// write. Therefore `Relaxed` is correct.
+// Both are now `PerCpu<T>`: each hart's ISR touches only its own
+// cell, and that hart's main/idle loop reads the same cell. Both
+// ends are guaranteed same-hart by construction (the ISR runs on
+// whichever hart's `stimecmp` expired; `this_cpu()` reads `tp`).
+// Trap return synchronises the handler's memory ops with the
+// resumed thread by hardware, so `Relaxed` is correct.
 //
-// Under v0.9 preemption + multi-hart, this argument still holds
-// (each hart's timer IRQ still runs on that hart). If we ever move
-// to a single global heartbeat collected from one designated hart,
-// these become genuinely cross-hart and need Release/Acquire.
+// Pre-PerCpu these were globals shared by both harts. Hart 0's ISR
+// could clobber a tick that hart 1 had not yet polled (correctness
+// for the heartbeat cadence on the secondary) and hart 0's
+// heartbeat could observe hart 1's `LAST_IRQ_DURATION` (telemetry
+// corruption). See `plans/deflake-bisection.md` follow-up (c).
 
 /// How many ticks between timer interrupts. Set by `init_timer` from
-/// the DTB timebase; the IRQ handler reads it to arm the next deadline.
+/// the DTB timebase; both harts' IRQ handlers read it to arm the
+/// next deadline. Init-once global shared config — the cadence is
+/// the same on every hart, so there's no per-CPU state to track.
 /// `Relaxed`: init-once, then read forever — no payload to publish.
 pub static TIMER_INTERVAL_TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Set by the timer IRQ handler; the main thread polls + clears.
+/// Set by the timer IRQ handler; the main/idle loop polls + clears.
+/// One cell per hart — see block comment above.
 /// `Relaxed`: same-CPU IRQ handoff — trap return sequences memory.
-pub static TICK_PENDING: AtomicBool = AtomicBool::new(false);
+pub static TICK_PENDING: PerCpu<AtomicBool> =
+    PerCpu::new([AtomicBool::new(false), AtomicBool::new(false)]);
 
 /// Duration of the most recent timer IRQ in ticks. The IRQ handler
 /// measures `rdtime` at entry and exit; the main thread reads this
-/// after wake and emits a histogram observation. (We can't emit
-/// telemetry from the IRQ itself — would deadlock on the intern /
-/// virtio_console mutexes.)
+/// after wake and emits a histogram observation. One cell per hart
+/// so each hart's heartbeat reports its own IRQ cost. (We can't
+/// emit telemetry from the IRQ itself — would deadlock on the
+/// intern / virtio_console mutexes.)
 /// `Relaxed`: same-CPU IRQ handoff — see block comment above.
-pub static LAST_IRQ_DURATION: AtomicU64 = AtomicU64::new(0);
+pub static LAST_IRQ_DURATION: PerCpu<AtomicU64> =
+    PerCpu::new([AtomicU64::new(0), AtomicU64::new(0)]);
 
 /// SSTC-based clock: reads `time` CSR directly, writes `stimecmp`
 /// (CSR 0x14d) to arm. No SBI round-trip. Implements
@@ -141,9 +150,11 @@ fn handle_timer() {
     let start = CLOCK.now();
     let interval = TIMER_INTERVAL_TICKS.load(Ordering::Relaxed);
     CLOCK.arm(start + interval);
-    TICK_PENDING.store(true, Ordering::Relaxed);
+    TICK_PENDING.this_cpu().store(true, Ordering::Relaxed);
     let end = CLOCK.now();
-    LAST_IRQ_DURATION.store(end.wrapping_sub(start), Ordering::Relaxed);
+    LAST_IRQ_DURATION
+        .this_cpu()
+        .store(end.wrapping_sub(start), Ordering::Relaxed);
 }
 
 /// One-time timer setup: set the interval, arm the first deadline,

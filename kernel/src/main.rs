@@ -405,7 +405,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // heartbeat work; either way, yield. The `wfi` for "nothing
         // to do, just wait" lives in the idle thread now — main
         // doesn't sleep, it just rounds through the scheduler.
-        if !trap::TICK_PENDING.swap(false, Ordering::Relaxed) {
+        if !trap::TICK_PENDING.this_cpu().swap(false, Ordering::Relaxed) {
             sched::yield_now();
             continue;
         }
@@ -469,7 +469,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             tracing::emit_metric(time_ticks, tracing::timestamp() as i64);
             // Histogram observation: how long the last IRQ took. The
             // handler measured rdtime delta; main thread emits.
-            let dur = trap::LAST_IRQ_DURATION.load(Ordering::Relaxed);
+            let dur = trap::LAST_IRQ_DURATION.this_cpu().load(Ordering::Relaxed);
             tracing::emit_metric(irq_duration, dur as i64);
             // Frame allocator telemetry. Counters drain atomically;
             // gauges briefly take the allocator lock (heartbeat is
