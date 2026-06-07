@@ -83,6 +83,7 @@ pub fn kernel_heap_metrics() -> Result<(), String> {
 ///   2. `snitchos.heap.alloc_failed_total` rises above 0 — eventual
 ///      OOM is still cleanly handled (null return, not panic).
 ///   3. Two more heartbeats arrive after — kernel survives OOM.
+///
 /// Context-switch asm round-trips correctly. After `heap::init`,
 /// `kmain` calls `sched::smoke()` which builds a hand-rigged
 /// `TaskContext` pointing at a marker function, switches into it,

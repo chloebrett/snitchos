@@ -126,6 +126,7 @@ static mut BOOT_PT_MID_HIGHER_MMIO: PageTable = PageTable::new();
 /// - Identity mappings for `mmio_regions` (UART + virtio-mmio slots).
 /// - Identity mapping for the 2 MiB page containing `dtb_phys` so
 ///   `&Fdt`-based DTB access still works after this returns.
+///
 /// Writes `satp` with Sv39 mode and the root PPN, then `sfence.vma`.
 ///
 /// After this returns the kernel runs with paging on but still at
@@ -142,6 +143,10 @@ static mut BOOT_PT_MID_HIGHER_MMIO: PageTable = PageTable::new();
 ///   absolute fn pointers, `trap_entry as *const () as usize`). With
 ///   higher-half link, those values only resolve once the higher-half
 ///   mapping is live.
+#[allow(
+    clippy::borrow_deref_ref,
+    reason = "`&mut *(&raw mut BOOT_PT_*)` is the required raw-pointer-to-static reference idiom; clippy misreads the raw deref as a redundant `&*&` borrow"
+)]
 pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
     // SAFETY: linker symbols are addresses, not values. Take pointers,
     // never deref.
@@ -269,6 +274,10 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
 /// - DTB region (which lived in the identity kernel gigapage) becomes
 ///   unreachable after this. Caller must not read through `&Fdt`
 ///   afterwards.
+#[allow(
+    clippy::borrow_deref_ref,
+    reason = "`&mut *(&raw mut BOOT_PT_ROOT)` is the required raw-pointer-to-static reference idiom; clippy misreads the raw deref as a redundant `&*&` borrow"
+)]
 pub unsafe fn unmap_identity() {
     unsafe {
         let root = &mut *(&raw mut BOOT_PT_ROOT);
@@ -373,6 +382,14 @@ pub static SHOOTDOWNS_SENT_TOTAL: core::sync::atomic::AtomicU64 =
 /// Skips harts not in `SMP_ONLINE_HARTS`. v0.6 boot calls
 /// `heap::init` before hart 1 is online; the bitmap check makes
 /// those calls a no-op for the offline hart.
+#[expect(
+    dead_code,
+    reason = "TLB-shootdown IPI path for SMP; not called until multi-hart bring-up wires it in"
+)]
+#[allow(
+    clippy::needless_range_loop,
+    reason = "`target` is also used as a hart-bitmask shift (`1 << target`), so the index is load-bearing, not pure iteration"
+)]
 pub fn shootdown(va: usize) {
     // (1) local first — covers the calling hart even if there are no
     // other online harts to ack.

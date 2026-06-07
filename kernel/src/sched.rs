@@ -98,6 +98,10 @@ impl Stack {
 pub struct Task {
     pub id: TaskId,
     pub name: String,
+    #[expect(
+        dead_code,
+        reason = "task lifecycle state; tracked for the scheduler but no consumer reads it until blocking/wait states land"
+    )]
     pub state: TaskState,
     pub span_cursor: SpanCursor,
     /// Total time on-CPU in `time`-CSR ticks. Bumped on every yield
@@ -167,6 +171,10 @@ impl Task {
 pub struct Scheduler {
     /// All known tasks, indexed by their position in this vec. `id.0`
     /// equals `tasks[i].id.0`; the vec is never reordered.
+    #[allow(
+        clippy::vec_box,
+        reason = "the Box is load-bearing: it gives each Task a stable heap address so the raw `*mut TaskContext` / `*const SpanCursor` pointers stay valid across Vec growth and past the scheduler-mutex drop"
+    )]
     tasks: Vec<Box<Task>>,
     /// One runqueue per hart. Hart `i` pops from `runqueues[i]`.
     runqueues: [Runqueue; crate::percpu::MAX_HARTS],
@@ -193,6 +201,10 @@ impl Scheduler {
 
     /// Iterate the task table for telemetry purposes (heartbeat
     /// emits per-task metrics by walking this).
+    #[expect(
+        dead_code,
+        reason = "task-table accessor; heartbeat currently drains via task_snapshots(), this is kept for direct iteration"
+    )]
     pub fn tasks(&self) -> &[Box<Task>] {
         &self.tasks
     }

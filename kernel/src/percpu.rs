@@ -210,6 +210,10 @@ impl<T> PerCpu<T> {
         &self.cells[current_hartid()]
     }
 
+    #[expect(
+        dead_code,
+        reason = "mutable per-CPU accessor; the &self variant is used today, this lands when a caller needs &mut per-CPU state"
+    )]
     pub fn this_cpu_mut(&mut self) -> &mut T {
         &mut self.cells[current_hartid()]
     }

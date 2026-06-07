@@ -160,6 +160,10 @@ impl Harness {
     /// Used by the runner to print e.g. `max wait 1.6s of 30s budget`,
     /// flagging budgets that are over-sized (much bigger than actual)
     /// or tight (actual close to budget).
+    #[expect(
+        dead_code,
+        reason = "per-scenario max-wait accessor; the runner reads via take_last_max_wait() today, this is kept for direct queries"
+    )]
     pub fn max_wait(&self) -> (Duration, Duration) {
         self.max_wait
     }

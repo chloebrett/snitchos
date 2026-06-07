@@ -103,14 +103,12 @@ pub unsafe fn prepare_for_secondary() {
     // Address of one-past-end of the secondary stack. Hart 1's sp
     // starts here and grows down through SECONDARY_STACK.
     //
-    // SAFETY: SECONDARY_STACK is a static; computing its end address
-    // does not deref the memory. We write the symbol — the asm
-    // reads `la SECONDARY_STACK_TOP`, which yields the address of
-    // the static (not its value); so we need the *value at that
-    // address* to be the stack top.
-    let stack_top = unsafe {
-        (&raw const SECONDARY_STACK as usize) + core::mem::size_of::<SecondaryStack>()
-    };
+    // Computing the stack's end address is safe: `&raw const` takes a
+    // pointer without dereferencing, and the rest is plain usize math.
+    // (The asm reads `la SECONDARY_STACK_TOP` to get the address of the
+    // static, so the value stored there must be the stack top.)
+    let stack_top =
+        (&raw const SECONDARY_STACK as usize) + core::mem::size_of::<SecondaryStack>();
 
     unsafe {
         // Stack-top address. The asm `la t0, X; ld sp, 0(t0)`

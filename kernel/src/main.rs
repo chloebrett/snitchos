@@ -356,7 +356,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     BOOT_MHARTID.store(boot_mhartid, Ordering::Relaxed);
     tracing::emit_hart_register(0, boot_mhartid, protocol::HartRole::Boot);
     unsafe { secondary::prepare_for_secondary() };
-    let entry_pa = unsafe {
+    let entry_pa = {
         // _secondary_start is a global asm symbol. Get its address
         // (a higher-half VA post-link) and translate to PA — that's
         // what sbi_hart_start expects since the secondary starts
