@@ -40,12 +40,18 @@ const SCENARIOS: &[Scenario] = &[
 /// Entry point from `main`. `Some(name)` runs one scenario;
 /// `None` runs them all. `repeat` controls how many full passes
 /// to perform — useful for surfacing flaky scenarios.
-pub fn run(name: Option<&str>, repeat: u32) -> ExitCode {
+/// `keep_existing_qemus` disables the pre-run cleanup of stale
+/// `qemu-system-riscv64` processes (default: cleanup runs).
+pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool) -> ExitCode {
     use std::collections::BTreeMap;
 
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
         return ExitCode::SUCCESS;
+    }
+
+    if !keep_existing_qemus {
+        kill_stale_qemus();
     }
 
     let to_run: Vec<&Scenario> = match name {
@@ -89,10 +95,34 @@ pub fn run(name: Option<&str>, repeat: u32) -> ExitCode {
                 })
                 .unwrap_or_default();
             match outcome {
-                Ok(()) => eprintln!("ok{timing_str}"),
+                Ok(()) => {
+                    eprintln!("ok{timing_str}");
+                    // Drained but unused on success — keeps the
+                    // thread-local empty for the next scenario.
+                    let _ = harness::take_last_log_path();
+                }
                 Err(e) => {
                     eprintln!("FAILED{timing_str}");
                     eprintln!("  {e}");
+                    if let Some(log_path) = harness::take_last_log_path() {
+                        match std::fs::read_to_string(&log_path) {
+                            Ok(contents) if !contents.trim().is_empty() => {
+                                eprintln!("  --- QEMU log ({}) ---", log_path.display());
+                                // Tail-style: last ~80 lines, enough
+                                // to catch a panic + preceding boot
+                                // markers without flooding the
+                                // terminal.
+                                let lines: Vec<&str> = contents.lines().collect();
+                                let tail_start = lines.len().saturating_sub(80);
+                                for line in &lines[tail_start..] {
+                                    eprintln!("  | {line}");
+                                }
+                                eprintln!("  --- end QEMU log ---");
+                            }
+                            Ok(_) => {}
+                            Err(e) => eprintln!("  (failed to read log {}: {e})", log_path.display()),
+                        }
+                    }
                     failed_this_run += 1;
                     *fail_count.entry(s.name).or_insert(0) += 1;
                 }
@@ -134,4 +164,62 @@ fn qemu_available() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Wipe out any `qemu-system-riscv64` processes already on the host.
+/// Run before the suite by default — a stale QEMU from `cargo xtask
+/// boot`, a debug session, or a previous interrupted suite would
+/// compete for host CPU and cause spurious flakes. Bypassed with
+/// `--keep-existing-qemus`.
+///
+/// Uses `pkill -9` so we don't wait for SIGTERM handlers; if any
+/// QEMU genuinely owns important state the user should pass the
+/// flag. After killing, briefly polls until the process table is
+/// clear (cap at 2s) so the suite doesn't immediately race the
+/// scheduler reaping the corpses.
+fn kill_stale_qemus() {
+    use std::time::{Duration, Instant};
+
+    let count_before = pgrep_count("qemu-system-riscv64");
+    if count_before == 0 {
+        return;
+    }
+
+    let _ = std::process::Command::new("pkill")
+        .args(["-9", "qemu-system-riscv64"])
+        .status();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if pgrep_count("qemu-system-riscv64") == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let count_after = pgrep_count("qemu-system-riscv64");
+    if count_after > 0 {
+        eprintln!(
+            "xtask test: warning — {count_after} qemu-system-riscv64 \
+             process(es) still alive after pkill -9, suite may flake"
+        );
+    } else {
+        eprintln!(
+            "xtask test: killed {count_before} stale qemu-system-riscv64 \
+             process(es) (use --keep-existing-qemus to skip)"
+        );
+    }
+}
+
+fn pgrep_count(pattern: &str) -> u32 {
+    std::process::Command::new("pgrep")
+        .arg(pattern)
+        .output()
+        .ok()
+        .map(|o| {
+            std::str::from_utf8(&o.stdout)
+                .map(|s| s.lines().count() as u32)
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
 }

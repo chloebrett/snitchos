@@ -64,6 +64,13 @@ enum Cmd {
     /// Use `--repeat N` to run the suite N times back-to-back; an
     /// aggregate flake report lists scenarios that failed in at
     /// least one run.
+    ///
+    /// By default, any `qemu-system-riscv64` processes already
+    /// running on the host are killed before the suite starts — a
+    /// stale QEMU from a prior `cargo xtask boot` or debug session
+    /// would otherwise compete for host CPU and cause flakes. Use
+    /// `--keep-existing-qemus` to disable this if you genuinely want
+    /// concurrent QEMUs.
     Test {
         /// Optional scenario name to run. Omit to run all.
         scenario: Option<String>,
@@ -71,6 +78,11 @@ enum Cmd {
         /// detection. Default 1.
         #[arg(long, default_value_t = 1)]
         repeat: u32,
+        /// Skip the pre-run cleanup of stale `qemu-system-riscv64`
+        /// processes. Off by default; use when you want to leave a
+        /// concurrent debug QEMU alive (rare).
+        #[arg(long, default_value_t = false)]
+        keep_existing_qemus: bool,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -118,7 +130,9 @@ fn main() -> ExitCode {
             run_collector(&all)
         }
         Cmd::Stack { cmd } => stack(cmd),
-        Cmd::Test { scenario, repeat } => itest::run(scenario.as_deref(), repeat),
+        Cmd::Test { scenario, repeat, keep_existing_qemus } => {
+            itest::run(scenario.as_deref(), repeat, keep_existing_qemus)
+        }
         Cmd::Loc => loc::run(),
         Cmd::Debug { features } => debug(&features),
     }

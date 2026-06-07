@@ -71,9 +71,22 @@ impl Harness {
             socket_path.display(),
         );
 
+        // Redirect QEMU's stdout (kernel UART via `-nographic`) and
+        // stderr (QEMU's own warnings) to a per-scenario log file.
+        // The runner dumps this file when a scenario fails — clean
+        // runs stay quiet, failures get the kernel's last words.
+        let log_path = log_path_for(label);
+        let _ = std::fs::remove_file(&log_path);
+        let stdout_log = std::fs::File::create(&log_path)
+            .map_err(|e| format!("open log {}: {e}", log_path.display()))?;
+        let stderr_log = stdout_log
+            .try_clone()
+            .map_err(|e| format!("clone log handle: {e}"))?;
+        LAST_LOG_PATH.with(|cell| *cell.borrow_mut() = Some(log_path.clone()));
+
         let qemu = qemu::base_command(&chardev)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(stdout_log))
+            .stderr(Stdio::from(stderr_log))
             .stdin(Stdio::null())
             .spawn()
             .map_err(|e| format!("spawn qemu: {e}"))?;
@@ -233,8 +246,51 @@ impl Drop for Harness {
         // after the scenario function returns. Thread-local because
         // scenarios run sequentially on the runner's main thread.
         LAST_MAX_WAIT.with(|cell| cell.set(Some(self.max_wait)));
+
+        // Signal the child. `Child::kill` on Unix is SIGKILL, which
+        // can't be caught — should produce a corpse promptly.
         let _ = self.qemu.kill();
-        let _ = self.qemu.wait();
+
+        // Poll for the corpse with a deadline. `wait()` alone would
+        // block indefinitely if QEMU somehow refused to die (e.g.,
+        // PID stuck in `D` state in a host kernel call). That's
+        // exotic but if it happens we want to know loudly rather
+        // than hang the test runner — and the next scenario would
+        // run alongside a live competing QEMU, which is exactly the
+        // kind of host-CPU contention that causes spurious flakes.
+        const REAPING_TIMEOUT: Duration = Duration::from_secs(5);
+        let deadline = Instant::now() + REAPING_TIMEOUT;
+        let mut reaped = false;
+        while Instant::now() < deadline {
+            match self.qemu.try_wait() {
+                Ok(Some(_)) => {
+                    reaped = true;
+                    break;
+                }
+                Ok(None) => {
+                    // Still running — brief sleep before next poll.
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => {
+                    // try_wait failed (child already reaped by some
+                    // other code path). Treat as reaped.
+                    eprintln!("Harness::Drop: try_wait error {e:?}; treating as reaped");
+                    reaped = true;
+                    break;
+                }
+            }
+        }
+
+        if !reaped {
+            panic!(
+                "Harness::Drop: QEMU PID {} did not exit within {:?} \
+                 after SIGKILL — refusing to leak it into the next \
+                 scenario.",
+                self.qemu.id(),
+                REAPING_TIMEOUT
+            );
+        }
+
         let _ = std::fs::remove_file(&self.socket_path);
     }
 }
@@ -246,12 +302,23 @@ thread_local! {
     /// Harness (or the slot has already been consumed).
     static LAST_MAX_WAIT: std::cell::Cell<Option<(Duration, Duration)>> =
         const { std::cell::Cell::new(None) };
+
+    /// Per-thread slot for the most recently-spawned Harness's QEMU
+    /// log file path. The runner dumps this on test failure.
+    static LAST_LOG_PATH: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Consume the last-scenario's max wait timing. Returns `None` if
 /// no Harness has been dropped since the last call.
 pub fn take_last_max_wait() -> Option<(Duration, Duration)> {
     LAST_MAX_WAIT.with(|cell| cell.take())
+}
+
+/// Consume the last-scenario's QEMU log file path. Returns `None` if
+/// no Harness has spawned since the last call.
+pub fn take_last_log_path() -> Option<PathBuf> {
+    LAST_LOG_PATH.with(|cell| cell.borrow_mut().take())
 }
 
 fn build_kernel(features: &[&str]) -> Result<(), String> {
@@ -264,6 +331,10 @@ fn build_kernel(features: &[&str]) -> Result<(), String> {
 
 fn socket_path_for(label: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/snitch-itest-{}-{}.sock", label, std::process::id()))
+}
+
+fn log_path_for(label: &str) -> PathBuf {
+    PathBuf::from(format!("/tmp/snitch-itest-{}-{}.log", label, std::process::id()))
 }
 
 fn connect_with_deadline(
