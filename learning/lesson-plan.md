@@ -225,7 +225,7 @@ the unprobed rows).
 |---|---|---|
 | 3 | `toy-allocator` | ✅ built — go finish the exercises |
 | 1 | `toy-pagetable` | ✅ scaffolded — 3 exercises (split_va, translate, map_4kib) |
-| 2 | `toy-virtqueue` | ⏳ scaffold at Lesson 2 |
+| 2 | `toy-virtqueue` | ✅ scaffolded — 2 exercises (publish, device_poll) |
 | 5 | `toy-scheduler` | ⏳ scaffold at Lesson 5 |
 
 ## Suggested cadence

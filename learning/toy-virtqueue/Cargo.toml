@@ -1,0 +1,14 @@
+[package]
+name = "toy-virtqueue"
+version = "0.1.0"
+edition = "2021"
+
+# A standalone virtio descriptor-ring playground. `std` is fine — learning
+# aid, not kernel code. The ring protocol and the VA→PA-for-DMA rule mirror
+# kernel/src/virtio_console.rs; the "device" is a fake that reads a Vec<u8>
+# standing in for physical memory.
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
