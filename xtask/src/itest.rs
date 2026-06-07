@@ -39,6 +39,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario { name: "smp-spawn-on-hart-1-runs",   run: scenarios::smp_spawn_on_hart_1_runs },
     Scenario { name: "deflake-spawn-storm",        run: scenarios::deflake_spawn_storm },
     Scenario { name: "deflake-ipi-pong",           run: scenarios::deflake_ipi_pong },
+    Scenario { name: "deflake-shootdown-storm",    run: scenarios::deflake_shootdown_storm },
 ];
 
 /// Entry point from `main`. `Some(name)` runs one scenario;
@@ -176,6 +177,7 @@ const UNIT_TEST_CRATES: &[(&str, &[&str])] = &[
     ("kernel-core", &[]),
     ("protocol", &["--features", "std"]),
     ("collector", &[]),
+    ("itest-harness", &[]),
 ];
 
 /// Run every workspace crate's host unit tests, in order. Returns

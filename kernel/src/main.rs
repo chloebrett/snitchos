@@ -26,6 +26,71 @@ mod uart;
 mod virtio_console;
 mod workload;
 
+#[cfg(feature = "deflake-shootdown-storm")]
+mod deflake_shootdown {
+    //! Tight `mmu::shootdown(va)` loop from hart 0. Each iteration:
+    //!
+    //!   - hart 0 writes `shootdown_va` into hart 1's PerHartData,
+    //!     snapshots `shootdown_ack`, sends `IPI_TLB_SHOOTDOWN`,
+    //!     spin-waits (Acquire) on `shootdown_ack` to advance.
+    //!   - hart 1 takes the IPI; `ipi::handle_pending` does
+    //!     `ipi_pending.swap(0, Acquire)`, reads `shootdown_va`,
+    //!     runs `sfence.vma`, bumps `shootdown_ack` with Release.
+    //!
+    //! Tests the IPI payload-read path — distinct from `deflake-ipi-pong`
+    //! which has no payload. The race window we're probing: does
+    //! hart 1 actually see the `shootdown_va` value hart 0 wrote
+    //! before the IPI, on multi-thread TCG? If not, hart 1 sfences
+    //! the wrong address; the test still completes (sfence with any
+    //! VA is harmless on a fresh-mapping kernel) but the
+    //! `shootdowns_received_total` counter still climbs.
+    //!
+    //! **Built-in confounder.** Hart 0's spin-wait inside
+    //! `mmu::shootdown` is itself an Acquire load on
+    //! `shootdown_ack`. If multi-thread TCG drops it, hart 0 wedges
+    //! before hart 1 can be blamed. We accept this trade — the
+    //! kernel's existing API is the API we're testing. A wedge here
+    //! is informative either way (kernel does have a real bug;
+    //! whether on hart 0 or hart 1 is downstream of the wedge).
+    //!
+    //! Choice of VA: `KERNEL_OFFSET` — a real higher-half VA that
+    //! is always mapped, so sfence on it on hart 1 is a real TLB op,
+    //! not a no-op. Using an arbitrary unmapped VA would sfence
+    //! nothing; using a userspace VA (none exist) would be
+    //! meaningless. KERNEL_OFFSET is also the address whose mapping
+    //! v0.4 step 2 set up, so it's the canonical "real translation"
+    //! to flush.
+
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    pub const N: u64 = 5_000;
+    const DELAY_TICKS: u64 = 2_000;
+
+    /// Count of shootdowns initiated by hart 0. The heartbeat re-emits
+    /// as `snitchos.deflake.shootdown_storm_sends`. `Relaxed` —
+    /// single writer.
+    pub static SENDS: AtomicU64 = AtomicU64::new(0);
+
+    fn now() -> u64 {
+        let t: u64;
+        // SAFETY: rdtime is S-mode-readable; no side effects.
+        unsafe { core::arch::asm!("rdtime {}", out(reg) t) };
+        t
+    }
+
+    pub fn run() {
+        let va = crate::mmu::KERNEL_OFFSET;
+        for _ in 0..N {
+            crate::mmu::shootdown(va);
+            SENDS.fetch_add(1, Ordering::Relaxed);
+            let deadline = now() + DELAY_TICKS;
+            while now() < deadline {
+                core::hint::spin_loop();
+            }
+        }
+    }
+}
+
 #[cfg(feature = "deflake-ipi-pong")]
 mod deflake_ipi_pong {
     //! Tight IPI_WAKEUP loop from hart 0 to hart 1. Each iteration is
@@ -412,6 +477,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // (sends reaches N but received does not).
     #[cfg(feature = "deflake-ipi-pong")]
     let ipi_pong_sends = tracing::register_counter("snitchos.deflake.ipi_pong_sends");
+    // Shootdown storm completion metric. Reaches `N` when hart 0 has
+    // finished initiating all shootdowns (each blocks until hart 1's
+    // ack returns). If hart 0 wedges on a Acquire-load of
+    // shootdown_ack (built-in confounder) or hart 1 wedges on its
+    // pickup, this stays below N.
+    #[cfg(feature = "deflake-shootdown-storm")]
+    let shootdown_storm_sends =
+        tracing::register_counter("snitchos.deflake.shootdown_storm_sends");
     // SMOKE TEST metrics — remove with heap_smoke module
     let smoke_entries = tracing::register_gauge("snitchos.heap_smoke.entries");
     let smoke_primes = tracing::register_gauge("snitchos.heap_smoke.primes");
@@ -489,7 +562,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // The storm spawns its own minimal worker tasks on hart 1 below;
     // including the demo + workload tasks here would add unrelated
     // scheduling activity that masks the cross-hart race window.
-    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong")))]
+    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm")))]
     {
         let _ = sched::spawn("task_a", task_a_entry);
         let _ = sched::spawn("task_b", task_b_entry);
@@ -534,7 +607,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // `deflake-spawn-storm` so hart 1 stays in `wfi` until the storm
     // loop's spawn_on's wake it — each wake then has the maximum
     // "fresh trap" race exposure.
-    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong")))]
+    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm")))]
     let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
 
     // Tear down both identity mappings. From here on, any access to
@@ -796,6 +869,16 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     deflake_ipi_pong::SENDS.load(Ordering::Relaxed) as i64,
                 );
             }
+            #[cfg(feature = "deflake-shootdown-storm")]
+            {
+                if count == 1 {
+                    deflake_shootdown::run();
+                }
+                tracing::emit_metric(
+                    shootdown_storm_sends,
+                    deflake_shootdown::SENDS.load(Ordering::Relaxed) as i64,
+                );
+            }
         }
         sched::yield_now();
     }
@@ -848,7 +931,7 @@ fn burn_lcg(iterations: u32) {
     let _ = core::hint::black_box(x);
 }
 
-#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong"), allow(dead_code))]
+#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm"), allow(dead_code))]
 extern "C" fn task_a_entry() -> ! {
     loop {
         {
@@ -866,7 +949,7 @@ extern "C" fn task_a_entry() -> ! {
     }
 }
 
-#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong"), allow(dead_code))]
+#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm"), allow(dead_code))]
 extern "C" fn task_b_entry() -> ! {
     loop {
         {

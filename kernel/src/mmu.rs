@@ -382,9 +382,12 @@ pub static SHOOTDOWNS_SENT_TOTAL: core::sync::atomic::AtomicU64 =
 /// Skips harts not in `SMP_ONLINE_HARTS`. v0.6 boot calls
 /// `heap::init` before hart 1 is online; the bitmap check makes
 /// those calls a no-op for the offline hart.
-#[expect(
-    dead_code,
-    reason = "TLB-shootdown IPI path for SMP; not called until multi-hart bring-up wires it in"
+#[cfg_attr(
+    not(feature = "deflake-shootdown-storm"),
+    expect(
+        dead_code,
+        reason = "TLB-shootdown IPI path for SMP; not called until multi-hart bring-up wires it in"
+    )
 )]
 #[allow(
     clippy::needless_range_loop,

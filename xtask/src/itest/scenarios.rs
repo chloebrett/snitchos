@@ -779,3 +779,55 @@ pub fn deflake_ipi_pong() -> Result<(), String> {
     )?;
     Ok(())
 }
+
+/// Tight `mmu::shootdown(va)` storm from hart 0 to hart 1. Each
+/// iteration: hart 0 writes shootdown_va, sends IPI_TLB_SHOOTDOWN,
+/// spin-waits on shootdown_ack; hart 1's IPI handler does the
+/// Acquire-swap, reads the va, sfences, Release-bumps the ack.
+/// Tests the IPI payload-read path — a different surface from
+/// `deflake-ipi-pong` (no payload).
+///
+/// Asserts both:
+///   1. `snitchos.deflake.shootdown_storm_sends == N` — hart 0
+///      completed the loop. Below N means hart 0 wedged on its
+///      built-in Acquire spin (symmetric load-side flake) OR hart 1
+///      stopped acking.
+///   2. `snitchos.mmu.shootdowns_received_total >= N - tolerance` —
+///      hart 1 actually handled the shootdowns. (Per-iteration ack
+///      means coalescing shouldn't happen here, unlike ipi-pong.)
+pub fn deflake_shootdown_storm() -> Result<(), String> {
+    let mut h = Harness::spawn_with_features(
+        "deflake-shootdown-storm",
+        &["deflake-shootdown-storm"],
+    )?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.deflake.shootdown_storm_sends")
+                && *value >= 5_000
+        }
+        _ => false,
+    })
+    .ok_or(
+        "snitchos.deflake.shootdown_storm_sends never reached 5000 \
+         within 30s — hart 0 did not finish the shootdown loop. Either \
+         hart 0 wedged on its Acquire spin-wait of shootdown_ack \
+         (symmetric load-side flake) or hart 1 stopped acking.",
+    )?;
+
+    h.wait_for(SEC * 10, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.mmu.shootdowns_received_total")
+                && *value >= 4_900
+        }
+        _ => false,
+    })
+    .ok_or(
+        "snitchos.mmu.shootdowns_received_total never reached 4900 \
+         within 10s after the send loop finished — hart 1 silently \
+         skipped some shootdowns or its IPI handler is broken.",
+    )?;
+    Ok(())
+}
