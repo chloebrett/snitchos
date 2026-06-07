@@ -76,6 +76,12 @@ impl Aggregator {
         self.fail_count.get(scenario).copied().unwrap_or(0)
     }
 
+    /// Total failures across all scenarios and all runs recorded so
+    /// far. Used by the runner's `--fail-fast=K` early-exit check.
+    pub fn total_failures(&self) -> u32 {
+        self.fail_count.values().sum()
+    }
+
     /// Total number of `--repeat` iterations recorded so far.
     pub fn runs(&self) -> u32 {
         self.run_totals.len() as u32
@@ -226,6 +232,23 @@ mod tests {
         assert_eq!(agg.fail_count("heartbeat-cadence"), 1);
         assert_eq!(agg.fail_count("never-ran"), 0);
         assert_eq!(agg.runs(), 1);
+    }
+
+    #[test]
+    fn total_failures_sums_across_scenarios_and_runs() {
+        let mut agg = Aggregator::new();
+        agg.record_fail("a");
+        agg.record_fail("b");
+        agg.finish_run(RunTotals { passed: 0, failed: 2 });
+        agg.record_fail("a");
+        agg.finish_run(RunTotals { passed: 0, failed: 1 });
+        assert_eq!(agg.total_failures(), 3);
+    }
+
+    #[test]
+    fn total_failures_zero_when_no_failures() {
+        let agg = Aggregator::new();
+        assert_eq!(agg.total_failures(), 0);
     }
 
     #[test]

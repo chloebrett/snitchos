@@ -101,6 +101,14 @@ enum Cmd {
         /// onto `history`. Use after an intentional rate change.
         #[arg(long, default_value_t = false)]
         update_baseline: bool,
+        /// Abort the `--repeat` sweep once the cumulative failure count
+        /// across all scenarios and runs reaches this value. Default
+        /// off (the run goes to completion). Useful for "confirm
+        /// flakiness fast" — with `--fail-fast 3`, a flaky kernel
+        /// usually wraps within ~30 scenario-runs instead of the full
+        /// `--repeat N`. Check fires at iteration boundaries.
+        #[arg(long)]
+        fail_fast: Option<u32>,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -149,7 +157,7 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, keep_existing_qemus, skip_unit_tests, update_baseline } => {
+        Cmd::Itest { scenario, repeat, keep_existing_qemus, skip_unit_tests, update_baseline, fail_fast } => {
             if !skip_unit_tests {
                 let unit = itest::run_unit_tests();
                 if unit != ExitCode::SUCCESS {
@@ -158,7 +166,7 @@ fn main() -> ExitCode {
                 }
                 eprintln!();
             }
-            itest::run(scenario.as_deref(), repeat, keep_existing_qemus, update_baseline)
+            itest::run(scenario.as_deref(), repeat, keep_existing_qemus, update_baseline, fail_fast)
         }
         Cmd::Loc => loc::run(),
         Cmd::Debug { features } => debug(&features),

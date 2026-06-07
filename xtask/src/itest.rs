@@ -55,7 +55,13 @@ const SCENARIOS: &[Scenario] = &[
 /// `update_baseline` writes the current run's per-scenario results
 /// back to `.itest-baseline.toml` (pushing the previous `current`
 /// into `history`) after the run completes.
-pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool, update_baseline: bool) -> ExitCode {
+pub fn run(
+    name: Option<&str>,
+    repeat: u32,
+    keep_existing_qemus: bool,
+    update_baseline: bool,
+    fail_fast: Option<u32>,
+) -> ExitCode {
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
         return ExitCode::SUCCESS;
@@ -92,6 +98,7 @@ pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool, update_ba
         max_wait_for: Some(&max_wait_for),
         current_commit: Some(&commit_for),
         baseline_file: Some(PathBuf::from(BASELINE_PATH)),
+        fail_fast,
     };
 
     itest_harness::run(&to_run, repeat, update_baseline, &config)

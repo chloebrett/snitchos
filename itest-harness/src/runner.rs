@@ -61,6 +61,14 @@ pub struct RunnerConfig<'a> {
     /// Path to the baseline TOML. If `None`, baseline comparison is
     /// skipped and `--update-baseline` is a no-op (with a warning).
     pub baseline_file: Option<PathBuf>,
+
+    /// Stop early once cumulative failures reach this many. `None`
+    /// (the default) lets the run go to completion. Useful for
+    /// "confirm flakiness fast" workflows: with K=3, a flaky kernel
+    /// usually wraps within ~30 scenario-runs instead of the full
+    /// `--repeat N`. The check fires at iteration boundaries, not
+    /// mid-iteration — the per-run output stays coherent.
+    pub fail_fast: Option<u32>,
 }
 
 /// Run `scenarios` `repeat` times. If `update_baseline` is true, write
@@ -132,6 +140,21 @@ pub fn run(
             passed: total - failed_this_run,
             failed: failed_this_run,
         });
+
+        // `--fail-fast=K`: abort the outer loop once K total failures
+        // have accumulated. Print a one-liner so the user sees why
+        // the run ended early.
+        if let Some(k) = config.fail_fast
+            && aggregator.total_failures() >= k
+        {
+            eprintln!(
+                "\n--fail-fast: {} total failures reached (threshold {k}); aborting after run {}/{}.",
+                aggregator.total_failures(),
+                run_idx + 1,
+                runs
+            );
+            break;
+        }
     }
 
     // Single-run path: behaviour unchanged from before.
@@ -351,6 +374,44 @@ mod tests {
 
     fn count_kill() {
         KILL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn fail_fast_breaks_outer_loop_at_threshold() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_counters();
+        let fail = Scenario { name: "fail-1", run: always_fail };
+        // Without fail-fast, repeat=10 would invoke fail-1 ten times.
+        // With fail-fast=3, the runner stops after the 3rd iteration.
+        let config = RunnerConfig {
+            fail_fast: Some(3),
+            ..RunnerConfig::default()
+        };
+        let _ = run(&[&fail], 10, false, &config);
+        assert_eq!(FAIL_COUNTER.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn fail_fast_does_not_trigger_when_threshold_not_reached() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_counters();
+        let fail = Scenario { name: "fail-1", run: always_fail };
+        // 5 failures requested, threshold of 100 — full run completes.
+        let config = RunnerConfig {
+            fail_fast: Some(100),
+            ..RunnerConfig::default()
+        };
+        let _ = run(&[&fail], 5, false, &config);
+        assert_eq!(FAIL_COUNTER.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn fail_fast_none_runs_to_completion_with_failures() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_counters();
+        let fail = Scenario { name: "fail-1", run: always_fail };
+        let _ = run(&[&fail], 7, false, &RunnerConfig::default());
+        assert_eq!(FAIL_COUNTER.load(Ordering::Relaxed), 7);
     }
 
     #[test]
