@@ -28,6 +28,13 @@ See [posts/post-9-moving-the-kernel-without-breaking-it.md](posts/post-9-moving-
 
 **v0.5 "Threading & round-robin scheduler"** — _complete_. Cooperative round-robin scheduler over a single CPU; four kernel threads at boot (main, idle, task_a, task_b). `Task` struct + `Scheduler` + asm context switch in `kernel::sched`; pure-data shape (Runqueue, TaskState) in `kernel_core::sched`. New wire frames: `ThreadRegister` and `ContextSwitch{reason}`; `SpanStart` gains `task_id`. Per-task `SpanCursor` swapped on context switch so spans can survive yields without parent-chain corruption. Per-task `cpu_time_ticks` + `runs_total` metrics on the wire; Grafana thread-timeline + active-threads + switches/sec + yield-overhead percentiles. SMP-prep pre-factor before threading: `kernel::sync::{Mutex, Once}` chokepoint + `kernel::percpu::PerCpu<T>` stub + clippy `disallowed_types` lint blocks raw `spin::Mutex` outside `kernel::sync`. See [posts/post-12-the-kernel-takes-turns.md](posts/post-12-the-kernel-takes-turns.md).
 
+**v0.6 "Cooperative SMP"** — _in progress_. Three-post arc landing at a producer/consumer workload migrated across two harts.
+
+- **Step 1 (cooperative single-hart baseline)** — _complete_. Producer/consumer histogram workload: `kernel::sync::Mutex<VecDeque<u64>>` queue, `[AtomicU64; 64]` histogram, pure-logic `Lcg` / `bin_of` / `bin_sample` in `kernel_core::workload` (8 host tests). Five metrics drive the new "Workload" Grafana section. See [posts/post-13-producer-consumer-baseline.md](posts/post-13-producer-consumer-baseline.md).
+- **Steps 3–10 (SMP infrastructure)** — _complete_. Hart 1 boots. Wire format adds `hart_id: u8` to `SpanStart` + `ContextSwitch` and a new `HartRegister { id, mhartid, role }` variant (`PROTOCOL_VERSION` 1→2). `tp` register convention + `PerHartData[MAX_HARTS]` with cacheline-aligned slots; `CURRENT_TASK` / `CURRENT_TASK_ENTRY_TICK` / `CURRENT_SPAN_CURSOR` lifted into `PerCpu<T>`. IPI primitive over SBI `sPI` extension; `IpiMessage` bitflags (`Wakeup`, `TlbShootdown`); receive-side trap-dispatcher; first `Release`/`Acquire` pair the kernel uses. SBI HSM bring-up (`sbi::hart_start`); `_secondary_start` asm sets up SP + SATP + trampoline; `secondary_main` enrolls as `hart_1_main` and runs an idle yield/wfi loop. TLB shootdown slots + receive-side handler + initiator (`mmu::shootdown(va)`); per-(hart) `shootdown_va` / `shootdown_ack`; second cross-hart handshake. Per-hart runqueue + `spawn_on(hart, name, entry)` + cross-hart `IPI_WAKEUP`. Weak-memory audit documented every kernel atomic. SMP visibility on the system dashboard (`Harts online`, `Boot hart mhartid`, `Secondary hart wfi rate`). Six bugs caught by the integration suite along the way (linker section collision, mhartid-vs-logical-id translation, `CURRENT_TASK` seeding, intern-table overflow, asm stack-pointer dereference, virtio TX staging requirement). See [posts/post-14-hart-1-wakes-up.md](posts/post-14-hart-1-wakes-up.md).
+- **Step 11 (workload consumer migrates to hart 1)** — _pending_. The chokepoint earns its keep.
+- **Step 12 (`Mutex<VecDeque>` → `heapless::spsc::Queue`)** — _pending_. The chokepoint gets retired.
+
 Working:
 
 - no_std kernel; handwritten boot stub + linker script; ns16550a UART driver
@@ -51,7 +58,7 @@ Working:
 - SMP-shaped sync primitives: every kernel lock goes through `kernel::sync::{Mutex, Once}`, a single chokepoint with no-op preempt/IRQ hooks today. `kernel::percpu::PerCpu<T>` + `current_hartid()` stub the per-CPU access pattern. Workspace `disallowed_types` clippy lint blocks raw `spin::Mutex` outside `kernel::sync`. Sets v0.5 threading up so preempt-disable + SMP IRQ-disable land in one file
 - cooperative round-robin kernel-thread scheduler: `Task` struct + `Scheduler` + asm context switch (`kernel::sched::switch`); 4 threads at boot (main, idle, task_a, task_b); `spawn(name, entry)` + `yield_now()` API; cumulative `context_switches_total`, per-task `cpu_time_ticks` + `runs_total` metrics; per-task `SpanCursor` swapped on context switch so spans can survive yields. Wire format additions: `ThreadRegister`, `ContextSwitch{reason}`, `task_id` on `SpanStart`. Collector populates OTLP `thread.id` + `thread.name` attributes per span — Tempo trace view shows scheduler decisions inline.
 
-Up next: **v0.5.x (preemption + lock discipline)** or straight to **v0.6 (first userspace process)** depending on what feels load-bearing first. Allocator A/B (`talc` vs `linked_list_allocator`) is a fast-follow gated on richer heap instrumentation; fragmentation introspection involves forking LLA.
+Up next: **v0.6 step 11** — migrate the workload consumer to hart 1 (post 15 of the devlog). Then **v0.6 step 12** swaps the `Mutex<VecDeque>` for `heapless::spsc::Queue` and the trilogy closes. After v0.6: **v0.7 (userspace + caps + IPC)** is the next big arc.
 
 See [posts/](posts/) for the per-milestone devlog.
 
@@ -95,50 +102,57 @@ cargo xtask reader             # collector in text-only mode (no docker needed)
 cargo xtask stack up           # docker-compose up the stack
 cargo xtask stack down         # docker-compose down
 cargo xtask stack logs         # tail container logs
-cargo xtask test               # run all kernel integration tests in QEMU
-cargo xtask test <scenario>    # run one scenario by name
+cargo xtask test               # run all host-side unit tests (kernel-core, protocol, collector)
+cargo xtask itest              # run kernel integration tests in QEMU (unit tests run first; --skip-unit-tests to bypass)
+cargo xtask itest <scenario>   # run one scenario by name
+cargo xtask itest --repeat N   # run the suite N times back-to-back; aggregate flake report
+cargo xtask debug              # build kernel + run QEMU paused with GDB stub on :1234
+cargo xtask loc                # lines of code by crate + production/test split
 cargo xtask --help
 ```
 
-## Kernel integration tests
+## Tests
 
-`cargo xtask test` boots the kernel in QEMU, reads the virtio-console
-telemetry stream, decodes `Frame`s, and asserts on the sequence.
-Requires `qemu-system-riscv64` on `PATH` (skips cleanly with exit 0 if
-missing).
+Two layers, two commands.
 
-Scenarios:
+**`cargo xtask test`** runs all host-side unit tests in ~1 second:
 
-- **`boot-reaches-heartbeat`** — Hello frame first on wire → `kernel.boot`
-  SpanStart → `Dropped(0)` checkpoint after pre-init flush → first
-  `kernel.heartbeat` SpanStart. Proves boot order and that the timer
-  IRQ is actually firing.
-- **`heartbeat-cadence`** — two consecutive `kernel.heartbeat` spans
-  arrive with monotonically-increasing timestamps. Proves the IRQ keeps
-  firing across multiple ticks.
-- **`pre-init-order`** — first `StringRegister` on the wire is for
-  `kernel.boot`, and every observed `SpanStart`'s `name_id` was
-  registered earlier in the stream. Proves the pre-init buffer drains
-  in order.
-- **`kernel-runs-at-higher-half`** — kernel reads its own PC via
-  `auipc` post-trampoline and only emits a `kernel.runs_at_higher_half`
-  span if PC ≥ `KERNEL_OFFSET`. Catches a silently-no-op trampoline.
-- **`frame-allocator-metrics`** — `snitchos.frames.allocated_total`
-  reaches ≥1 within 10 s. Proves the frame allocator init ran and
-  the linear map resolves (alloc_zeroed writes 4 KiB through
-  `pa_to_kernel_va`).
-- **`frame-allocator-oom`** — built with the `oom-leak` cargo feature
-  so the heartbeat smoke leaks 8192 frames/tick. Asserts
-  `snitchos.frames.alloc_failed_total > 0` within 15 s (the pool
-  exhausts in ~4 heartbeats) and that two more heartbeats arrive
-  post-OOM, proving the kernel survives memory exhaustion cleanly.
+- `kernel-core` — intern table, span registry, pre-init buffer, scause decoding, MMU walk logic, frame bitmap, heap watermark policy, scheduler runqueue, workload pure logic (LCG / bin_of / bin_sample).
+- `protocol --features std` — wire-format roundtrip tests + OwnedFrame conversion.
+- `collector` — span state machine, OTLP/Prometheus encoding, histogram bucketing.
 
-Each scenario spawns its own QEMU process and per-pid socket
-(`/tmp/snitch-itest-<scenario>-<pid>.sock`); the harness always kills
-QEMU and removes the socket on drop, so a panicking test cleans up.
+**`cargo xtask itest`** runs kernel integration scenarios in QEMU.
+By default, unit tests run first; integration only proceeds if they
+pass (skip with `--skip-unit-tests`). Each scenario spawns its own
+QEMU and asserts on the decoded wire stream. Requires
+`qemu-system-riscv64` on `PATH` (skips cleanly if missing). Stale
+QEMU processes from prior `cargo xtask boot` or debug sessions are
+killed at suite start by default (`--keep-existing-qemus` to disable).
 
-A full `cargo xtask test` takes ~12 seconds wallclock (one feature-flag
-rebuild between the default-feature scenarios and the OOM scenario).
+Scenarios (v0.6 has 18):
+
+- **Boot + telemetry**: `boot-reaches-heartbeat`, `heartbeat-cadence`, `pre-init-order`, `kernel-runs-at-higher-half`.
+- **Frame allocator**: `frame-allocator-metrics`, `frame-allocator-oom` (built with `--features oom-leak`).
+- **Kernel heap**: `kernel-heap-metrics`, `heap-oom` (built with `--features heap-oom`).
+- **Scheduler (v0.5)**: `sched-context-switch-smoke`, `sched-spawn-registers-thread`, `sched-yield-round-trips`, `sched-spans-carry-task-id`, `sched-context-switches-on-wire`, `sched-span-survives-yield`.
+- **Workload (v0.6 step 1)**: `workload-cooperative-baseline` — producer/consumer histogram correctness invariant holds (`histogram_sum >= samples_consumed`).
+- **SMP (v0.6 steps 7–10)**: `ipi-self-wakeup`, `smp-secondary-hart-boots`, `smp-spawn-on-hart-1-runs`, `smp-frames-carry-hart-1`.
+
+Useful flags:
+
+- `--repeat N` — run the whole suite N times back-to-back, then print an aggregate flake table listing scenarios that failed at least once.
+- `--keep-existing-qemus` — don't `pkill` stale QEMUs at start (rare; useful if you want a concurrent debug QEMU).
+- `--skip-unit-tests` — bypass the unit-test prerequisite.
+
+On each test line, the runner prints `(max wait Xs of Ys budget)` so
+over-sized budgets are visible at a glance. On failure, the last 80
+lines of the scenario's QEMU log (kernel UART + QEMU stderr) are
+dumped inline — captures panic messages without anyone re-running
+under a debugger.
+
+A clean `cargo xtask itest` run is ~50 seconds wallclock (mostly
+QEMU boot times; two feature-flag rebuilds between default and OOM
+scenarios).
 
 ## Reading
 
@@ -155,6 +169,9 @@ rebuild between the default-feature scenarios and the OOM scenario).
 - [plans/v0.4-memory-step-3-frame-allocator.md](plans/v0.4-memory-step-3-frame-allocator.md) — frame allocator implementation plan.
 - [plans/v0.4-memory-step-4-kernel-heap.md](plans/v0.4-memory-step-4-kernel-heap.md) — kernel heap implementation plan.
 - [plans/v0.4-memory-findings.md](plans/v0.4-memory-findings.md) — what we learned (and what we worked around) building higher-half.
+- [plans/v0.5-pre-smp-sync-prefactor.md](plans/v0.5-pre-smp-sync-prefactor.md) — `kernel::sync` chokepoint + `PerCpu<T>` stub. The SMP-shaped pre-factor that landed before v0.5 threading.
+- [plans/v0.5-threading.md](plans/v0.5-threading.md) — cooperative round-robin scheduler, per-task span stack, `ThreadRegister` + `ContextSwitch` wire frames.
+- [plans/v0.6-smp-cooperative.md](plans/v0.6-smp-cooperative.md) — the SMP-cooperative milestone: producer/consumer workload migrated across two harts in three posts.
 - [plans/scaling-corners.md](plans/scaling-corners.md) — known corners for SMP / interrupts.
 - [posts/](posts/) — devlog notes as we go.
 
