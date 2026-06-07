@@ -831,3 +831,32 @@ pub fn deflake_shootdown_storm() -> Result<(), String> {
     )?;
     Ok(())
 }
+
+/// v0.5.x minimal task-exit: a spawned task can call `sched::exit_now`
+/// and the kernel keeps running. The boot path spawns `exit_smoke`,
+/// whose body bumps `EXIT_SMOKE_HITS` and calls `exit_now`. The
+/// asm `switch_into` loads the next ready context (idle) and `ret`s
+/// into it without saving the exiting task's registers.
+///
+/// Asserts `snitchos.sched.exit_smoke_hits == 1` within 30 s.
+/// Passing this proves: state flip to `Exited`, runqueue dispatch,
+/// asm `switch_into` correctness, and the exiting task's stack being
+/// abandoned cleanly (no scribble, no fault).
+pub fn sched_task_exits_cleanly() -> Result<(), String> {
+    let mut h = Harness::spawn("sched-exit")?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.sched.exit_smoke_hits")
+                && *value >= 1
+        }
+        _ => false,
+    })
+    .ok_or(
+        "snitchos.sched.exit_smoke_hits never reached 1 within 30s — \
+         exit smoke task didn't run, or `exit_now` faulted, or the \
+         kernel hung after the asm switch_into.",
+    )?;
+    Ok(())
+}

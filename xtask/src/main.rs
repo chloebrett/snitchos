@@ -109,6 +109,11 @@ enum Cmd {
         /// `--repeat N`. Check fires at iteration boundaries.
         #[arg(long)]
         fail_fast: Option<u32>,
+        /// Print the `.itest-baseline.toml` summary and exit without
+        /// running anything. Useful for quickly inspecting recorded
+        /// per-scenario rates and history.
+        #[arg(long, default_value_t = false)]
+        baseline_show: bool,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -157,7 +162,10 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, keep_existing_qemus, skip_unit_tests, update_baseline, fail_fast } => {
+        Cmd::Itest { scenario, repeat, keep_existing_qemus, skip_unit_tests, update_baseline, fail_fast, baseline_show } => {
+            if baseline_show {
+                return itest::show_baseline();
+            }
             if !skip_unit_tests {
                 let unit = itest::run_unit_tests();
                 if unit != ExitCode::SUCCESS {

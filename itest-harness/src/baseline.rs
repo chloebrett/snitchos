@@ -142,6 +142,63 @@ impl BaselineFile {
         let s = self.to_string().map_err(BaselineError::TomlSer)?;
         fs::write(path, s).map_err(BaselineError::Io)
     }
+
+    /// Render the file as a human-readable summary for `--baseline-show`.
+    /// One block per scenario; current measurement first, then history
+    /// in chronological order. Timing fields shown when present.
+    pub fn render_summary(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        if self.scenarios.is_empty() {
+            let _ = writeln!(out, "(no scenarios recorded)");
+            return out;
+        }
+        for (name, entry) in &self.scenarios {
+            let _ = writeln!(out, "{name}");
+            if let Some(b) = &entry.current {
+                let _ = writeln!(out, "  current  {}", render_baseline(b));
+            } else {
+                let _ = writeln!(out, "  current  (none)");
+            }
+            if !entry.history.is_empty() {
+                let _ = writeln!(out, "  history:");
+                for b in &entry.history {
+                    let _ = writeln!(out, "    {}", render_baseline(b));
+                }
+            }
+        }
+        out
+    }
+}
+
+fn render_baseline(b: &Baseline) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let pct = if b.runs == 0 {
+        0.0
+    } else {
+        100.0 * f64::from(b.failures) / f64::from(b.runs)
+    };
+    let _ = write!(
+        out,
+        "{}/{}  ({:.1}%) at {}, recorded {}",
+        b.failures,
+        b.runs,
+        pct,
+        b.commit,
+        b.recorded_at
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "(invalid timestamp)".to_string())
+    );
+    if let Some(hash) = &b.build_hash {
+        let _ = write!(out, " build={hash}");
+    }
+    if let (Some(mean), Some(p95)) = (b.mean_duration_ms, b.p95_duration_ms) {
+        let _ = write!(out, "\n             timing: mean {:.0}ms, p95 {:.0}ms", mean, p95);
+    } else if let Some(mean) = b.mean_duration_ms {
+        let _ = write!(out, "\n             timing: mean {:.0}ms", mean);
+    }
+    out
 }
 
 #[derive(Debug)]
@@ -292,6 +349,56 @@ mod tests {
         let s = f.to_string().unwrap();
         assert!(!s.contains("mean_duration_ms"));
         assert!(!s.contains("p95_duration_ms"));
+    }
+
+    #[test]
+    fn render_summary_empty_file() {
+        let f = BaselineFile::new();
+        let out = f.render_summary();
+        assert!(out.contains("(no scenarios recorded)"));
+    }
+
+    #[test]
+    fn render_summary_with_current_and_history() {
+        let mut f = BaselineFile::new();
+        f.update_current(
+            "heartbeat-cadence",
+            make_baseline("aaa", 100, 5, datetime!(2026-06-01 12:00:00 UTC)),
+        );
+        f.update_current(
+            "heartbeat-cadence",
+            make_baseline("bbb", 200, 12, datetime!(2026-06-08 12:00:00 UTC)),
+        );
+        let out = f.render_summary();
+        assert!(out.contains("heartbeat-cadence"));
+        // Current
+        assert!(out.contains("12/200  (6.0%) at bbb"));
+        assert!(out.contains("recorded 2026-06-08T12:00:00Z"));
+        // History (previous current pushed back)
+        assert!(out.contains("history:"));
+        assert!(out.contains("5/100  (5.0%) at aaa"));
+    }
+
+    #[test]
+    fn render_summary_shows_timing_when_present() {
+        let mut f = BaselineFile::new();
+        let mut b = make_baseline("abc", 50, 3, datetime!(2026-06-08 10:00:00 UTC));
+        b.mean_duration_ms = Some(1234.0);
+        b.p95_duration_ms = Some(1500.0);
+        f.update_current("x", b);
+        let out = f.render_summary();
+        assert!(out.contains("timing: mean 1234ms, p95 1500ms"));
+    }
+
+    #[test]
+    fn render_summary_omits_timing_when_absent() {
+        let mut f = BaselineFile::new();
+        f.update_current(
+            "x",
+            make_baseline("abc", 50, 3, datetime!(2026-06-08 10:00:00 UTC)),
+        );
+        let out = f.render_summary();
+        assert!(!out.contains("timing"));
     }
 
     #[test]

@@ -2,10 +2,10 @@
 //! reads frames off the virtio-console socket, and asserts on the
 //! decoded `Frame` sequence. See `plans/kernel-integration-tests.md`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use itest_harness::RunnerConfig;
+use itest_harness::{BaselineFile, RunnerConfig};
 
 use crate::qemu;
 
@@ -45,6 +45,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario { name: "deflake-spawn-storm",        run: scenarios::deflake_spawn_storm },
     Scenario { name: "deflake-ipi-pong",           run: scenarios::deflake_ipi_pong },
     Scenario { name: "deflake-shootdown-storm",    run: scenarios::deflake_shootdown_storm },
+    Scenario { name: "sched-task-exits-cleanly",   run: scenarios::sched_task_exits_cleanly },
 ];
 
 /// Entry point from `main`. `Some(name)` runs one scenario;
@@ -102,6 +103,28 @@ pub fn run(
     };
 
     itest_harness::run(&to_run, repeat, update_baseline, &config)
+}
+
+/// Load `.itest-baseline.toml` and print its rendered summary. Exits
+/// with `0` on success (including "file doesn't exist" — that's a
+/// valid initial state). Returns `1` only on parse error.
+pub fn show_baseline() -> ExitCode {
+    let path = Path::new(BASELINE_PATH);
+    if !path.exists() {
+        eprintln!("no baseline file at {BASELINE_PATH}");
+        return ExitCode::SUCCESS;
+    }
+    match BaselineFile::load_path(path) {
+        Ok(file) => {
+            eprintln!("=== {BASELINE_PATH} ===\n");
+            eprint!("{}", file.render_summary());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("failed to parse {BASELINE_PATH}: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// Returns the short commit hash for HEAD via `git rev-parse`. None on
