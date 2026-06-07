@@ -2,11 +2,21 @@
 //! reads frames off the virtio-console socket, and asserts on the
 //! decoded `Frame` sequence. See `plans/kernel-integration-tests.md`.
 
+use std::path::Path;
 use std::process::ExitCode;
 
-use itest_harness::{Aggregator, RunTotals};
+use itest_harness::{
+    Aggregator, Baseline, BaselineFile, DEFAULT_ALPHA, RunTotals,
+    render_comparison, verdict as verdict_fn,
+};
+use time::OffsetDateTime;
 
 use crate::qemu;
+
+/// Per-repo location of the flake-rate baseline. Lives in repo root so
+/// PR diffs surface baseline changes alongside the changes that
+/// motivated them.
+const BASELINE_PATH: &str = ".itest-baseline.toml";
 
 mod harness;
 mod matchers;
@@ -49,7 +59,10 @@ const SCENARIOS: &[Scenario] = &[
 /// to perform — useful for surfacing flaky scenarios.
 /// `keep_existing_qemus` disables the pre-run cleanup of stale
 /// `qemu-system-riscv64` processes (default: cleanup runs).
-pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool) -> ExitCode {
+/// `update_baseline` writes the current run's per-scenario results
+/// back to `.itest-baseline.toml` (pushing the previous `current`
+/// into `history`) after the run completes.
+pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool, update_baseline: bool) -> ExitCode {
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
         return ExitCode::SUCCESS;
@@ -156,10 +169,110 @@ pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool) -> ExitCo
 
     // Multi-run aggregate: per-run summary + flake table.
     eprint!("{}", aggregator.render_aggregate(runs));
+
+    // Baseline comparison + optional update. Both no-op if the file
+    // doesn't exist and we're not asked to write it.
+    let baseline_path = Path::new(BASELINE_PATH);
+    let mut baseline_file = load_baseline_or_warn(baseline_path);
+    print_baseline_comparisons(&to_run, &aggregator, baseline_file.as_ref());
+    if update_baseline {
+        let updated = ensure_baseline_file(baseline_file.take());
+        let written = apply_current_run_to_baseline(updated, &to_run, &aggregator);
+        if let Err(e) = written.save_path(baseline_path) {
+            eprintln!("warning: failed to write {BASELINE_PATH}: {e}");
+        } else {
+            eprintln!("\nUpdated {BASELINE_PATH} with current run's results.");
+        }
+    }
+
     if aggregator.any_failures() {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Load the baseline file from `path`, returning `None` if it doesn't
+/// exist. A parse error is surfaced as a warning but treated as
+/// "no baseline available" — better than crashing the run.
+fn load_baseline_or_warn(path: &Path) -> Option<BaselineFile> {
+    if !path.exists() {
+        return None;
+    }
+    match BaselineFile::load_path(path) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!(
+                "warning: failed to parse {}: {e} — proceeding without baseline.",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+fn ensure_baseline_file(existing: Option<BaselineFile>) -> BaselineFile {
+    existing.unwrap_or_default()
+}
+
+/// Per-scenario baseline comparison, printed after the aggregate.
+/// Skipped entirely if no baseline file exists.
+fn print_baseline_comparisons(
+    to_run: &[&Scenario],
+    aggregator: &Aggregator,
+    baseline_file: Option<&BaselineFile>,
+) {
+    let Some(file) = baseline_file else { return };
+    eprintln!("\n=== baseline comparison ===");
+    let runs = aggregator.runs();
+    for s in to_run {
+        let failures = aggregator.fail_count(s.name);
+        let baseline = file.current_for(s.name);
+        let v = verdict_fn(failures, runs, baseline, DEFAULT_ALPHA);
+        eprint!("{}", render_comparison(s.name, failures, runs, baseline, v));
+    }
+}
+
+/// Build a fresh `Baseline` per scenario from the current run and
+/// fold it into the baseline file via `update_current`.
+fn apply_current_run_to_baseline(
+    mut file: BaselineFile,
+    to_run: &[&Scenario],
+    aggregator: &Aggregator,
+) -> BaselineFile {
+    let runs = aggregator.runs();
+    let commit = current_commit_short().unwrap_or_else(|| "unknown".to_string());
+    let now = OffsetDateTime::now_utc();
+    for s in to_run {
+        let baseline = Baseline {
+            commit: commit.clone(),
+            build_hash: None,
+            runs,
+            failures: aggregator.fail_count(s.name),
+            recorded_at: now,
+        };
+        file.update_current(s.name, baseline);
+    }
+    file
+}
+
+/// Returns the short commit hash for HEAD via `git rev-parse`. None on
+/// any failure (not in a git checkout, git missing, etc.). The baseline
+/// file falls back to "unknown" in that case.
+fn current_commit_short() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 

@@ -95,6 +95,12 @@ enum Cmd {
         /// proceeds if they pass.
         #[arg(long, default_value_t = false)]
         skip_unit_tests: bool,
+        /// After the run, overwrite the `current` baseline entry for
+        /// each scenario in `.itest-baseline.toml` with the current
+        /// run's results. The previous `current` (if any) is pushed
+        /// onto `history`. Use after an intentional rate change.
+        #[arg(long, default_value_t = false)]
+        update_baseline: bool,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -143,7 +149,7 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, keep_existing_qemus, skip_unit_tests } => {
+        Cmd::Itest { scenario, repeat, keep_existing_qemus, skip_unit_tests, update_baseline } => {
             if !skip_unit_tests {
                 let unit = itest::run_unit_tests();
                 if unit != ExitCode::SUCCESS {
@@ -152,7 +158,7 @@ fn main() -> ExitCode {
                 }
                 eprintln!();
             }
-            itest::run(scenario.as_deref(), repeat, keep_existing_qemus)
+            itest::run(scenario.as_deref(), repeat, keep_existing_qemus, update_baseline)
         }
         Cmd::Loc => loc::run(),
         Cmd::Debug { features } => debug(&features),

@@ -1,0 +1,5 @@
+[scenarios.heartbeat-cadence.current]
+commit = "1217a3a"
+runs = 2
+failures = 0
+recorded_at = "2026-06-07T12:52:49.843191Z"

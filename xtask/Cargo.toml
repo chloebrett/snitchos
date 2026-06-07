@@ -8,3 +8,4 @@ publish = false
 clap = { version = "4", features = ["derive"] }
 protocol = { path = "../protocol", features = ["std"] }
 itest-harness = { path = "../itest-harness" }
+time = { version = "0.3", default-features = false, features = ["std"] }

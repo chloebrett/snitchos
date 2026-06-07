@@ -12,7 +12,9 @@
 pub mod aggregate;
 pub mod baseline;
 pub mod stats;
+pub mod verdict;
 
 pub use aggregate::{Aggregator, RunTotals};
 pub use baseline::{Baseline, BaselineError, BaselineFile, ScenarioBaseline};
 pub use stats::{ConfidenceInterval, two_proportion_p_value, wilson_score_95};
+pub use verdict::{DEFAULT_ALPHA, Direction, Verdict, render_comparison, verdict};

@@ -66,6 +66,17 @@ impl Aggregator {
         self.fail_count.iter().map(|(name, count)| (name.as_str(), *count))
     }
 
+    /// Cumulative fail count for a single scenario across all runs.
+    /// Returns 0 for scenarios that never failed (or never ran).
+    pub fn fail_count(&self, scenario: &str) -> u32 {
+        self.fail_count.get(scenario).copied().unwrap_or(0)
+    }
+
+    /// Total number of `--repeat` iterations recorded so far.
+    pub fn runs(&self) -> u32 {
+        self.run_totals.len() as u32
+    }
+
     /// Render the multi-run aggregate summary. Format matches xtask's
     /// pre-extraction output so a side-by-side diff during migration is
     /// zero lines.
@@ -157,6 +168,16 @@ mod tests {
         assert!(out.contains("run 2: 18 passed, 0 failed"));
         assert!(out.contains("No flakes"));
         assert!(!out.contains("Flaky scenarios"));
+    }
+
+    #[test]
+    fn fail_count_returns_zero_for_unrecorded_scenarios() {
+        let mut agg = Aggregator::new();
+        agg.record_fail("heartbeat-cadence");
+        agg.finish_run(RunTotals { passed: 17, failed: 1 });
+        assert_eq!(agg.fail_count("heartbeat-cadence"), 1);
+        assert_eq!(agg.fail_count("never-ran"), 0);
+        assert_eq!(agg.runs(), 1);
     }
 
     #[test]
