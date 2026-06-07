@@ -31,6 +31,17 @@ mod workload;
 // it depends on (__stack_top, __bss_start, __bss_end).
 global_asm!(include_str!("entry.S"));
 
+/// DEFLAKE: lock-free single-line UART tag. Used to bisect where the kernel
+/// dies during the Bug B silent reset. SAFETY: bypasses CONSOLE/UART mutex,
+/// so output may interleave with concurrent prints — accepted for forensic
+/// instrumentation. `emergency_uart_base` reads satp so this works in any
+/// boot stage.
+pub(crate) fn tag(s: &str) {
+    use core::fmt::Write;
+    let mut uart = unsafe { uart::Uart16550::new(console::emergency_uart_base()) };
+    let _ = writeln!(&mut uart, "[TAG] {s}");
+}
+
 /// Kernel entry point, called from `_start` (see entry.S).
 ///
 /// Inputs come from OpenSBI's S-mode handoff contract:
@@ -358,10 +369,6 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     tracing::emit_hart_register(0, boot_mhartid, protocol::HartRole::Boot);
     unsafe { secondary::prepare_for_secondary() };
     let entry_pa = {
-        // _secondary_start is a global asm symbol. Get its address
-        // (a higher-half VA post-link) and translate to PA — that's
-        // what sbi_hart_start expects since the secondary starts
-        // with MMU off.
         unsafe extern "C" {
             fn _secondary_start();
         }
@@ -371,17 +378,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     if err != 0 {
         panic!("sbi_hart_start({secondary_mhartid}) failed: error={err}");
     }
-    // Acquire: pair with the Release on SECONDARY_READY in
-    // secondary_main. Once we observe `true`, the secondary has
-    // trampolined and is running purely from higher-half — the
-    // identity mappings are safe to remove.
+    // Acquire: pair with the Release on SECONDARY_READY in secondary_main.
     while !secondary::SECONDARY_READY.load(Ordering::Acquire) {
         core::hint::spin_loop();
     }
-
-    // v0.6 step 10: cross-hart spawn smoke. Probe lands on hart 1's
-    // runqueue + IPI wakeup nudges hart 1 to pick it.
-    let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
+    // DEFLAKE EXPERIMENT L2a: spawn_on with a noop task body. spawn_on
+    // internally fires the IPI; hart 1 picks up the task and runs the
+    // no-op loop. No frame emissions from hart 1.
+    let _ = sched::spawn_on(1, "hart_1_noop", noop_entry);
 
     // Tear down both identity mappings. From here on, any access to
     // an identity-half VA — kernel image, stack, DTB, or MMIO — faults.
@@ -627,6 +631,13 @@ extern "C" fn idle_entry() -> ! {
         unsafe { asm!("wfi") };
         sched::yield_now();
     }
+}
+
+/// L2a noop probe — empty task body. No tracing emissions, no scheduler
+/// interaction after pickup. Just sit in wfi forever.
+extern "C" fn noop_entry() -> ! {
+    crate::tag("H1/noop hit");
+    loop { unsafe { asm!("wfi") } }
 }
 
 /// Demo tasks. Each opens a per-iteration `task_x.tick` span, bumps

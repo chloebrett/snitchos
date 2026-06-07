@@ -58,7 +58,12 @@ impl Harness {
     /// kernel variant — currently just `frame-allocator-oom`, which
     /// opts in to the `oom-leak` feature.
     pub fn spawn_with_features(label: &str, features: &[&str]) -> Result<Self, String> {
-        build_kernel(features)?;
+        // Only rebuild for non-default features. Default-feature builds happen
+        // once up-front in `itest::run` so `--repeat N` doesn't race with
+        // mid-run source edits or burn time on per-iteration build checks.
+        if !features.is_empty() {
+            build_kernel(features)?;
+        }
 
         let socket_path = socket_path_for(label);
         let _ = std::fs::remove_file(&socket_path);

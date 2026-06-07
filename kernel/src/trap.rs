@@ -125,11 +125,13 @@ pub extern "C" fn trap_handler(_frame: *mut TrapFrame) {
     unsafe {
         asm!("csrr {}, scause", out(reg) scause);
     }
+    crate::tag("trap enter");
     match decode_scause(scause) {
         TrapCause::SupervisorTimerInterrupt => handle_timer(),
         TrapCause::SupervisorSoftwareInterrupt => crate::ipi::handle_pending(),
         other => panic!("unhandled trap: {other:?} (scause={scause:#x})"),
     }
+    crate::tag("trap return");
 }
 
 /// Timer IRQ handler. Kept tiny: measure duration, arm the next

@@ -386,6 +386,7 @@ pub fn spawn(name: &str, entry: extern "C" fn() -> !) -> TaskId {
 /// could leave them on hart 0 (`spawn`) or migrate consumer to
 /// hart 1 (`spawn_on(1, ...)`); the latter is step 11's headline.
 pub fn spawn_on(hart: usize, name: &str, entry: extern "C" fn() -> !) -> TaskId {
+    crate::tag("H0/spawn enter");
     debug_assert!(hart < crate::percpu::MAX_HARTS);
     let id = alloc_task_id();
     let stack: Box<Stack> = Box::new(Stack::new_zeroed());
@@ -407,12 +408,15 @@ pub fn spawn_on(hart: usize, name: &str, entry: extern "C" fn() -> !) -> TaskId 
         sched.tasks.push(task);
         sched.runqueues[hart].push_back(id);
     }
+    crate::tag("H0/spawn after-push");
     crate::tracing::emit_thread_register(id, &owned_name);
+    crate::tag("H0/spawn after-emit_thread_register");
 
     // Cross-hart spawn: wake the target so it picks up the new task
     // instead of staying in wfi indefinitely.
     if hart != crate::percpu::current_hartid() {
         crate::ipi::send(hart, crate::ipi::IPI_WAKEUP);
+        crate::tag("H0/spawn after-IPI");
     }
     id
 }

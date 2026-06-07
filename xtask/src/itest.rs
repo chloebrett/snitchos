@@ -4,6 +4,8 @@
 
 use std::process::ExitCode;
 
+use crate::qemu;
+
 mod harness;
 mod matchers;
 mod scenarios;
@@ -52,6 +54,14 @@ pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool) -> ExitCo
 
     if !keep_existing_qemus {
         kill_stale_qemus();
+    }
+
+    // One-shot default-features build, so per-scenario `Harness::spawn` calls
+    // don't re-invoke cargo per iteration. Feature builds still happen per
+    // spawn_with_features call.
+    if let Err(e) = qemu::build_kernel(&[]) {
+        eprintln!("xtask itest: kernel build failed: {e}");
+        return ExitCode::from(2);
     }
 
     let to_run: Vec<&Scenario> = match name {

@@ -302,6 +302,332 @@ Next step (separate investigation, not bisection):
 - Documenting the bisection log as it ran (this file) was invaluable for
   catching my own corridor-direction error at sub-step 4. Keep doing this.
 
+## Bug B root cause: cross-hart memory ordering under multi-thread TCG
+
+### Corrected understanding of the failure
+
+I initially read the UART log as "kernel hangs right after 'I am alive —
+entering heartbeat'." That was wrong. The harness's per-failure frame
+dump shows the kernel runs well into the workload before dying:
+
+```
+Metric { "snitchos.heap_smoke.candidate" value=202 t=13177300 }   # ~1.3 s
+SpanEnd { id=SpanId(9) t=13177630 }
+ContextSwitch { from=0 to=1 reason=Yield t=13178340 hart=0 }
+ContextSwitch { from=1 to=2 reason=Yield t=20703800 hart=0 }
+SpanEnd { id=SpanId(5) t=21251040 }
+ContextSwitch { from=2 to=3 reason=Yield t=21255000 hart=0 }
+ContextSwitch { from=6 to=7 reason=Yield t=21255090 hart=1 }
+SpanStart { "task_b.tick" id=SpanId(10) parent=SpanId(0) t=21256700 task=3 hart=1 }
+```
+
+Both harts are running, tasks are cooperating, heap smoke is producing
+metrics. Then the connection dies. The scenario reports `no second
+heartbeat within 20s of the first`. So:
+
+1. Kernel boots cleanly.
+2. First heartbeat fires.
+3. Kernel keeps running into the workload — several seconds of frames.
+4. At some point, the kernel silently exits / faults to M-mode →
+   OpenSBI reset → QEMU exits → harness sees socket EOF.
+
+UART output stops at "I am alive" because that was the last `println!`
+on the normal boot path; after that the kernel only emits via virtio.
+Absence of UART output post-failure is not informative.
+
+### Counterfactual: thread=single TCG
+
+Tested HEAD with `-accel tcg,thread=single` (replacing the default
+`thread=multi`) plus the virtio_console::transmit fence. Result:
+**100 runs, 0 failures (50/50 + 50/50 confirmation)**.
+
+At HEAD's prior rate of 3-9%, P(0 in 100) ≈ 5×10⁻⁵ to 4×10⁻⁴. The bug
+is suppressed by single-thread TCG with extremely high confidence.
+
+### Why this isolates the cause
+
+- `thread=single` multiplexes both vCPUs on one host thread. The kernel
+  still *sees* two harts, timer IRQs still fire, tasks still context-switch
+  — but at the host level only one instruction executes at a time. Memory
+  ops are effectively sequentially consistent.
+- `thread=multi` gives each vCPU its own host thread. Two physical CPUs.
+  Memory ops may be reordered by the host CPU unless barriers prevent it.
+
+If the bug were a missing lock, a reentrant section, an IRQ-vs-main race
+on the same hart, etc., single-thread interleaving would still expose it.
+It does not. The bug *requires* parallel execution → it must be a
+**memory-ordering issue on cross-hart shared state**.
+
+### What's almost certainly the bug
+
+Post 14's weak-memory audit pass (`062e745` "steps 4 and 5") deliberately
+left most kernel atomics as `Relaxed` with the rationale "single hart
+today; revisit when SMP arrives." Once hart 1 is genuinely running on its
+own host thread, those Relaxed sites that span hart 0 ↔ hart 1 become
+genuine cross-hart synchronization points and need Release/Acquire pairs.
+
+Specific suspects to audit (highest priority first):
+
+1. **`SECONDARY_READY` spin-wait** in `kmain` before `unmap_identity`.
+   Hart 0 spin-waits for `SECONDARY_READY = true` to know hart 1 has
+   trampolined past the identity gigapage before tearing it down. If
+   hart 0 sees `SECONDARY_READY = true` (Relaxed) but hasn't seen hart 1's
+   page-table-related writes, unmap_identity tears down a mapping hart 1
+   is still using → fault on hart 1 → triple-fault → OpenSBI reset.
+   Fits the symptom shape exactly (delayed silent reboot after both harts
+   are running).
+2. **`CURRENT_TASK` per-cpu loads on cross-hart wake.** `spawn_on(hart, ...)`
+   sets up the target hart's runqueue then fires an IPI wakeup. If the
+   IPI handler reads runqueue state without Acquire ordering against the
+   `spawn_on` writer's Release, hart 1 could pop a half-initialized task.
+3. **The TLB shootdown `shootdown_va` / `shootdown_ack` pair**. Documented
+   as needing Release/Acquire in the percpu.rs docstring. Verify the
+   implementation matches the doc — easy to drop one of the orderings
+   during refactoring.
+4. **Intern table cross-hart access.** If hart 1 emits a frame with a
+   name only hart 0 has registered so far, the intern table mutex
+   serializes — but the underlying entries are read after lock release.
+   The mutex's lock/unlock should provide Acquire/Release, but verify
+   `kernel::sync::Mutex` actually emits the right ordering.
+
+### Things ruled out
+
+- **`virtio_console::transmit` missing memory barrier between descriptor
+  write and notify.** Hypothesized first because the doc comment explicitly
+  flagged it. Fix applied (`fence(Release)` before the notify). Ran HEAD
+  + fence at thread=multi for 36 runs, got 3 failures (same rate). The
+  fence is correct on its own merits but does not fix Bug B. Keeping
+  the change.
+
+### Decision: revert thread=single
+
+`thread=single` would mask the bug and re-introduce timer fairness
+problems (the whole reason `thread=multi` was adopted in `318a2e5`). The
+real fix is to audit cross-hart atomic orderings.
+
+## Next session
+
+1. Revert qemu.rs to `thread=multi`.
+2. Keep the `fence(Release)` in virtio_console::transmit (correct
+   regardless of Bug B).
+3. Audit `SECONDARY_READY` ordering as the first suspect — `kmain` and
+   `secondary_main`. Confirm the spin-wait uses `Acquire` and hart 1's
+   publish uses `Release`.
+4. Re-run heartbeat-cadence --repeat 100 after each fix to gauge progress.
+
+## SeqCst sweep — atomic ordering ruled out
+
+Replaced every `Ordering::Relaxed`/`Release`/`Acquire`/`AcqRel` in
+`kernel/src` and `kernel-core/src` (92 sites total) with `Ordering::SeqCst`.
+Re-ran heartbeat-cadence at `-smp 2, thread=multi`: 3 failures in 56 runs
+≈ 5.4%, statistically identical to the un-modified baseline.
+
+**Conclusion: the bug is not in any of the kernel's Rust atomic ordering
+sites.** Post 14's anticipation that "every Relaxed becomes a question
+mark when hart 1 actually runs" turned out to be wrong / incomplete —
+the weak-memory audit's classifications were correct as far as the
+atomics go.
+
+What this DOES rule in: the race is hiding in something the SeqCst sweep
+cannot reach — a non-atomic shared-state pattern.
+
+Candidates:
+- `static mut` accessed via raw pointers (TX_QUEUE, TX_STAGING, page
+  tables, virtqueue rings)
+- The asm `switch` context manipulation
+- `sfence.vma` (asm — not a Rust atomic)
+- Hart 1's hardware MMU page-table walks against pages hart 0 mutates
+- Per-task `SpanCursor` stack (raw array in `Box<Task>`)
+- SBI / OpenSBI interaction (cross-hart IPI is mediated by M-mode)
+- QEMU multi-thread TCG behavior at one of those boundaries
+
+## Hart 1 disable experiment — bug isolated to hart 1 code
+
+Patched `kmain` to skip the secondary-hart bringup entirely:
+
+- Skip `sbi::hart_start(secondary_mhartid, ...)`
+- Skip the `SECONDARY_READY` Acquire spin-wait
+- Skip `spawn_on(1, "hart_1_probe", ...)`
+
+Hart 1 stays parked in OpenSBI. QEMU still emulates two vCPU threads at
+`-accel tcg,thread=multi`, but only hart 0 executes Rust kernel code.
+
+Result: **100/100 clean** at `cargo xtask itest heartbeat-cadence --repeat 100`.
+
+### Cumulative empirical map
+
+| Config | hart 1 active? | Result |
+|---|---|---|
+| Baseline (HEAD) | yes | 3-9% fail |
+| `tcg,thread=single` | yes | 0/100 |
+| HEAD + SeqCst sweep | yes | ~6% fail |
+| `kmain` skip hart 1 | **no** | **0/100** |
+
+The race lives in **hart-1-active code paths**: secondary bringup asm,
+`prepare_for_secondary`, `secondary_main`, the `SECONDARY_READY` publish,
+`spawn_on(1, ...)`, hart 1's IPI handler, hart 1's idle/scheduler loop,
+or the probe task itself.
+
+## Wind-back plan
+
+Add hart 1 bringup back in layers and test each.
+
+| Layer | Add back | Hypothesis |
+|---|---|---|
+| L1 | `sbi::hart_start` + `SECONDARY_READY` wait. Hart 1 boots and idles forever; no spawn_on. | Bug is in the bringup mechanics (asm, tp, trampoline, SECONDARY_READY publish). |
+| L2 | Add `spawn_on(1, "hart_1_probe", ...)`. Hart 1 actually runs a Rust task. | Bug is in cross-hart spawn / IPI / runqueue access. |
+| L3 | (When step 11 lands) move workload consumer to hart 1. | Bug specific to cross-hart producer/consumer queue. |
+
+Each step ≈ 7 min (--repeat 100). 2-3 narrowing steps land us on the
+guilty subsystem; from there it's read-the-code and fix.
+
+## Workaround note (not adopted)
+
+A `--features no-hart-1` build config would suppress the flake while we
+investigate. Not pursued — investigation should resolve, not paper over,
+the underlying race. But documented here in case CI needs reliability
+before the fix lands.
+
+## L2 sub-narrowing — disjoint experiments
+
+After L1 came back 0/200 (hart 1 boots + idles, no cross-hart work), the
+next narrowing tested L2 sub-cases. These are DISJOINT, not nested:
+
+| Test | spawn_on(1, …) | IPI fired | Task runs on hart 1 | Result |
+|---|---|---|---|---|
+| L1 | ✗ | ✗ | ✗ | 0/200 |
+| **L2c** | ✗ | ✓ (hart 0 → hart 1) | ✗ | **0/100** |
+| **L2a** | ✓ | ✓ (via spawn_on) | ✓ (no-op body, no tracing) | **1/30 BAD** |
+| L2 / HEAD | ✓ | ✓ | ✓ (probe with tracing) | ~3-9% |
+
+### Test recipes
+
+- **L2c**: replaced `spawn_on(1, "hart_1_probe", probe_entry)` with
+  `ipi::send(1, ipi::IPI_WAKEUP)`. Hart 1's IPI handler runs but finds
+  empty runqueue.
+- **L2a**: added `extern "C" fn noop_entry() -> ! { loop { sched::yield_now(); } }`
+  and used `spawn_on(1, "hart_1_noop", noop_entry)`. No frame emissions
+  from hart 1.
+
+### Conclusions from L2c + L2a
+
+- **The IPI dispatch itself is innocent** (L2c clean). Hart 1's IPI
+  handler reading `ipi_pending`, dispatching WAKEUP, returning to idle —
+  none of that is racy.
+- **The probe's frame emissions on hart 1 are innocent** (L2a flakes even
+  with a no-op task body). The bug is NOT in cross-hart tracing /
+  virtio TX / intern table access from hart 1.
+- **The race is in the spawn handoff itself**: spawn_on writing to
+  runqueue[1] + IPI delivery + hart 1's yield_now finding the new task
+  + the asm `switch` into the new task on hart 1.
+
+### L2a' (post-pickup-idle) — also flaky
+
+Replaced `noop_entry`'s `loop { yield_now() }` with `loop { wfi }` — the
+picked-up task does NO scheduler interaction, just sits in wfi forever.
+
+- spawn_on(1, "hart_1_noop", noop_entry-wfi-only) x30 → 1 failure at run 26
+  (same fast-disconnect 0.1s signature)
+
+**Implication: the race is in the spawn handoff + first pickup itself**,
+not in any post-pickup scheduler activity. The bug fires before noop_entry
+even gets to execute its body in a meaningful way.
+
+The race lives in one of:
+1. `spawn_on` from hart 0: Task::new_bare (with 2 × register_counter_owned
+   = intern lock + virtio TX × 2) → SCHEDULER lock → push tasks + runqueue →
+   unlock → emit_thread_register → ipi::send.
+2. Hart 1's IPI handler firing during spawn_on's tail.
+3. Hart 1's first yield_now: SCHEDULER lock → pop_front → find ctx → unlock.
+4. The first asm `switch(current_ctx, next_ctx)` on hart 1.
+
+### Code read — nothing obvious
+
+Read every step of (1)-(4):
+
+- `spawn_on` is a normal mutex-protected push, then virtio TX, then IPI.
+  Mutex provides AcqRel; happens-before to hart 1's yield_now is sound.
+- `task.context.get()` returns a stable heap address (`Box<Task>` doesn't
+  move on `Vec` reallocation), so the raw pointer passed to asm `switch`
+  is correct.
+- `TaskContext` defaults to all-zero; first switch saves into hart_1_main_ctx
+  before loading noop_ctx, so the all-zero default never gets executed.
+- Asm `switch` (`kernel/src/sched.S`) is a straightforward callee-saved
+  save/restore + `ret`. Sound by inspection.
+
+Whatever the bug is, it's not visible in the kernel's Rust source under
+ordinary code review.
+
+### Symptom shape supports silent-reset-to-OpenSBI
+
+Failure UART ends at `I am alive — entering heartbeat` with no kernel
+panic message. The Rust panic handler prints "Kernel panic: …" before
+halting, so we'd see that for any path through `trap_handler`'s
+`panic!()` arm. Absence implies:
+
+- A double-fault: a trap fires during trap entry asm (e.g., stack write
+  during `addi sp, sp, -N` + register-save sequence) → M-mode → OpenSBI
+  reset → QEMU exits.
+- OR a trap that doesn't get delegated to S-mode and goes straight to
+  M-mode (less likely — virt machine delegates exceptions standardly).
+
+Either way: QEMU exits ~100ms after kernel boot. Fits the data.
+
+### Next step: UART tag instrumentation
+
+Add raw UART tags (via `console::emergency_uart_base()`, no lock) at
+choke points in the spawn/pickup path:
+
+- Hart 0 in `spawn_on`: `[H0/spawn] enter`, `[H0/spawn] after-push`,
+  `[H0/spawn] after-emit_thread_register`, `[H0/spawn] after-IPI`.
+- Hart 1 in `secondary_main` idle loop: `[H1/loop] yield-enter`,
+  `[H1/loop] yield-return`, `[H1/loop] wfi`.
+- Hart 1 in `noop_entry`: `[H1/noop] hit`.
+- Hart 1 in `trap_handler`: `[H1/trap] enter scause=…`, `[H1/trap] ret`.
+
+On a failing run, the last tag printed identifies the death zone.
+Tradeoff: cheap UART writes are still MMIO; if the race window is tight
+enough, the instrumentation might suppress the flake. That outcome is
+itself a data point (race is tighter than expected).
+
+## Separate finding: timer-IRQ statics are global, should be per-CPU
+
+While reading hart 1's pickup path, noticed `kernel/src/trap.rs` keeps
+three timer-related atomics as global statics, not `PerCpu<T>`:
+
+- `TIMER_INTERVAL_TICKS` — interval read by both harts' IRQ handlers.
+  Both harts call `init_timer(interval_ticks)`. Same value end up, so
+  benign, but architecturally wrong.
+- `TICK_PENDING` — flipped by either hart's timer IRQ, polled by hart 0's
+  heartbeat loop. Hart 1's timer firing causes hart 0 to do heartbeat
+  work on hart 1's schedule. Telemetry-perturbing, not crash-causing.
+- `LAST_IRQ_DURATION` — both harts' timer IRQs overwrite it; hart 0's
+  heartbeat reads it for the duration histogram. Hart 1's overwrites
+  corrupt hart 0's reading. Telemetry corruption, not crash.
+
+The docstring at trap.rs:19-30 explicitly notes these are correct under
+the assumption that "trap return synchronises this hart's handler with
+this hart's main thread" — true single-hart, no longer true under SMP
+in the sense that each hart now has its own thread to coordinate with.
+
+Fix: lift each to `PerCpu<AtomicX>`. Not Bug B (these are correctness
+issues for telemetry only), but should land alongside the Bug B fix.
+Keep this issue paired with the deflake plan so it doesn't get lost.
+
+## Harness improvement landed during this session
+
+`cargo xtask itest` previously called `qemu::build_kernel` from inside
+`Harness::spawn_with_features`, which ran on every scenario invocation —
+i.e. once per --repeat iteration. This caused mid-run source edits to
+race with the in-flight test binary: if I edited a kernel source file
+between iterations, the next iteration's `cargo build` would rebuild
+and swap the kernel ELF under the running QEMU, contaminating the rest
+of the --repeat sweep.
+
+Fix: build kernel once up-front in `itest::run()`, and skip the
+in-Harness build when features is empty. Feature-specific scenarios
+(currently just `oom-leak`) still rebuild per call.
+
 Corridor narrowed to 4 commits, all surface-level:
 
 ```
