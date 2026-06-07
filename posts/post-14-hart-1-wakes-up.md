@@ -138,6 +138,37 @@ Step 12 replaces the `Mutex<VecDeque>` with `heapless::spsc::Queue`. The chokepo
 
 That's the v0.6 trilogy. Post 13 was the baseline. Post 14 (this one) was the infrastructure. Post 15 is the cost. Post 16 is the win.
 
+## side work: a `learning/` sandbox
+
+Parallel to the SMP plumbing, a deliberate detour: instead of writing more kernel code I half-understood, I built a place to *understand the primitives the kernel rests on* — from scratch, in isolation, test-first. It lives in `learning/`, a **separate cargo workspace** excluded from the root so it never drags `no_std`/riscv constraints into host-buildable toys (and never gets built by `cargo xtask`).
+
+Three moving parts:
+
+- **`concept-map.md`** — ten conceptual areas (privilege model, boot/linking, Sv39 MMU, frame allocator, heap, traps, concurrency, scheduling, DMA, observability) broken into ~60 sub-topics, each tied to a real file. I self-rated each 0–5 via a quiz. The honest result: strong on "what is it for" and concurrency *theory*, weak on *applied mechanics* — DMA scored a flat **0**, context-switch register saving **0**, per-CPU and heap-growth **1**. The gaps clustered exactly where I'd been pattern-matching instead of knowing.
+- **`lesson-plan.md`** — eight lessons ordered by dependency, not by weakness. The MMU address-space model comes early because DMA, heap growth, and the trampoline are all corollaries of it.
+- **`toy-*/` crates** — standalone, host-tested miniatures of one kernel concept each, shipped with a full test suite and the core algorithm left as a `todo!()` exercise. Each maps line-for-line to the real thing:
+  - **`toy-allocator`** — three strategies. A free-list with splitting + coalescing (the `linked_list_allocator` heap model), a one-bit-per-frame bitmap (`kernel-core/src/frame.rs`), and — because it's worth knowing what the *other* design looks like — a power-of-two **buddy** allocator (what Linux uses for physical pages; the O(1) XOR-buddy coalescing trick, in deliberate contrast to SnitchOS's bitmap choice).
+  - **`toy-pagetable`** — the Sv39 walk: VA split, `translate` (the *read* walk the kernel never writes — it leans on hardware), and `map_4kib` (the write walk). The thing that finally clicked: **a huge page is just stopping the walk early, so the index bits you didn't consume fold into the page offset.**
+  - **`toy-virtqueue`** — the descriptor ring, modelling physical memory as a `Vec<u8>` the fake device indexes *directly*. That direct index is the whole lesson: a device has no MMU, so the descriptor must carry a **physical** address. It even reconstructs the real `TX_STAGING` hazard as a stretch goal.
+
+Building these the hard way paid off immediately. The free-list alone surfaced two genuine bugs — a `usize` underflow when freeing at the front of a multi-block list, and a merge-both **double-count** that the unit test literally named `freeing_a_hole_coalesces_both_neighbours` *failed to exercise* (its geometry routed through the tail branch instead). That second one is the lesson: **green ≠ correct.** The fix was to graduate from hand-picked cases to a `proptest` property test (`free + live == capacity`, "no two free blocks adjacent"), which found the bug class from a random sequence and *shrank* it to a four-op reproducer — `Alloc(1), Alloc(1), Free(6), Free(0)` — that I checked in as a regression seed. The same conservation invariant is what the kernel's `heap.bytes_used + bytes_free == capacity` gauge asserts at runtime; the toy is the unit-test version of the live health check.
+
+(There's a noted follow-up out of this: `kernel-core/src/frame.rs` only ever asserts `count_free()` against literals, never against a popcount of the bits — so a drift of the maintained `frames_free` counter would go unnoticed. A `proptest` for the real frame allocator is queued.)
+
+## clippy across a split-target workspace
+
+The mixed workspace has a sharp edge I hadn't hit until I tried to lint everything: **`cargo clippy --workspace` fails.** The kernel only builds for `riscv64gc-unknown-none-elf`, and a plain workspace clippy compiles it for the *host*, where it can't link — duplicate `panic_impl` lang item, unknown `a7`/`a6` registers, the works.
+
+The clean fix would be Cargo's `forced-target`, which pins a single package to one target. But that's `per-package-target`, **nightly-only** — and worse, putting it in `Cargo.toml` makes the manifest fail to load on stable *entirely*, committing the whole project (and CI, and every contributor) to nightly. For a `--target` papercut, on a kernel that's deliberately stable (riscv64 is a tier-2 target; nothing here needs nightly), that trade is lopsided. So instead: a **`cargo xtask clippy`** subcommand that lints host crates for the host and the kernel for riscv in one go, with args forwarded to both. Documented in CLAUDE.md so nobody reaches for the broken `--workspace` form again.
+
+Then the cleanup itself — ~45 lints across the workspace — turned into its own small war story, fitting for this post:
+
+- **`cargo clippy --fix` broke the kernel.** Its `deref_addrof` autofix rewrote `&mut *(&raw mut STATIC)` — the *required* edition-2024 idiom for taking a reference to a mutable static — into a forbidden direct `&mut STATIC`, turning `frame.rs` and `mmu.rs` into ~15 compile errors. Reverted via `git checkout` (both files were clean), and the sites now carry a justified `#[allow(clippy::deref_addrof, reason = …)]`. Lesson, rhyming with the linker-order one above: never blanket-`--fix` code that does raw-pointer-to-static work.
+- **`vec_box` wanted to delete a load-bearing `Box`.** It flagged `Scheduler.tasks: Vec<Box<Task>>` as redundant indirection — but the `Box` is exactly what gives each task a *stable heap address* so the raw `*mut TaskContext` pointers survive the mutex drop (post 12's whole correctness argument). Clippy's "fix" would have been a real bug. `#[allow(clippy::vec_box, reason = …)]`.
+- **The dead-code warnings were this milestone's own scaffolding.** `mmu::shootdown`, `percpu::this_cpu_mut`, `Task.state`, `Scheduler::tasks()` — the SMP pieces wired up in *this* post but not yet *called* — got `#[expect(dead_code, reason = …)]`, which self-resolves the moment a caller arrives.
+
+Net: `cargo xtask clippy` is zero-warning across the whole workspace, and the kernel's intentional false-positives are documented rather than suppressed blind.
+
 ---
 
 *[TBD: screenshots — the new system-dashboard panels showing 2 harts online; Tempo trace view of hart_1_probe ticking; the lone red flake from the suite's last `--repeat 5` showing kernel UART output dumped under FAILED]*
