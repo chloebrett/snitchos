@@ -9,18 +9,6 @@
 //! See `plans/itest-harness-extraction.md` for the migration plan and
 //! the broader rationale.
 
-/// Crate version. Exposed mainly so the smoke test below has something
-/// to reference until real public types land.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub mod aggregate;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn crate_loads() {
-        // If this fails to compile, `cargo test -p itest-harness` isn't
-        // wired up correctly. The body is intentionally trivial.
-        let _ = VERSION;
-    }
-}
+pub use aggregate::{Aggregator, RunTotals};

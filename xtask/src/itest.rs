@@ -4,6 +4,8 @@
 
 use std::process::ExitCode;
 
+use itest_harness::{Aggregator, RunTotals};
+
 use crate::qemu;
 
 mod harness;
@@ -48,8 +50,6 @@ const SCENARIOS: &[Scenario] = &[
 /// `keep_existing_qemus` disables the pre-run cleanup of stale
 /// `qemu-system-riscv64` processes (default: cleanup runs).
 pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool) -> ExitCode {
-    use std::collections::BTreeMap;
-
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
         return ExitCode::SUCCESS;
@@ -80,11 +80,7 @@ pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool) -> ExitCo
     };
 
     let runs = repeat.max(1);
-    // Per-scenario fail counter across all runs. BTreeMap keeps the
-    // aggregate report in scenario-registration order via the name key.
-    let mut fail_count: BTreeMap<&str, u32> = BTreeMap::new();
-    // Per-run pass/fail totals — printed in the aggregate at the end.
-    let mut run_totals: Vec<(usize, usize)> = Vec::with_capacity(runs as usize);
+    let mut aggregator = Aggregator::new();
 
     for run_idx in 0..runs {
         if runs > 1 {
@@ -137,35 +133,33 @@ pub fn run(name: Option<&str>, repeat: u32, keep_existing_qemus: bool) -> ExitCo
                         }
                     }
                     failed_this_run += 1;
-                    *fail_count.entry(s.name).or_insert(0) += 1;
+                    aggregator.record_fail(s.name);
                 }
             }
         }
         let total = to_run.len();
         eprintln!("\n{} passed, {} failed", total - failed_this_run, failed_this_run);
-        run_totals.push((total - failed_this_run, failed_this_run));
+        aggregator.finish_run(RunTotals {
+            passed: total - failed_this_run,
+            failed: failed_this_run,
+        });
     }
 
     // Single-run path: behaviour unchanged from before.
     if runs == 1 {
-        return if run_totals[0].1 == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) };
+        return if aggregator.run_totals()[0].failed == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        };
     }
 
     // Multi-run aggregate: per-run summary + flake table.
-    eprintln!("\n=== aggregate over {runs} runs ===");
-    for (i, (pass, fail)) in run_totals.iter().enumerate() {
-        eprintln!("  run {}: {pass} passed, {fail} failed", i + 1);
-    }
-    let total_runs = runs;
-    if fail_count.is_empty() {
-        eprintln!("\nNo flakes — every scenario passed every run.");
-        ExitCode::SUCCESS
-    } else {
-        eprintln!("\nFlaky scenarios (failed at least once):");
-        for (name, count) in &fail_count {
-            eprintln!("  {name}: {count}/{total_runs} runs failed");
-        }
+    eprint!("{}", aggregator.render_aggregate(runs));
+    if aggregator.any_failures() {
         ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
