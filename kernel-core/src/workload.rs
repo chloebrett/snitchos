@@ -37,6 +37,10 @@ impl Lcg {
         Self { state: seed }
     }
 
+    // `next` is the natural name for an LCG step; it's an infinite
+    // generator, not an `Iterator` (no `Option`, never ends), so the
+    // standard-trait confusion the lint warns about doesn't apply.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u64 {
         self.state = self
             .state

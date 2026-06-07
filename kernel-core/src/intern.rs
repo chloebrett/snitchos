@@ -25,6 +25,12 @@ pub struct InternTable {
     next_id: u32,
 }
 
+impl Default for InternTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InternTable {
     pub const fn new() -> Self {
         Self {
@@ -43,11 +49,10 @@ impl InternTable {
     /// `MAX_INTERNED` or stop creating unique names.
     fn lookup_or_insert(&mut self, name: &'static str) -> (StringId, bool) {
         for (i, entry) in self.entries.iter().enumerate() {
-            if let Some(e) = entry {
-                if e.name.as_ptr() == name.as_ptr() {
+            if let Some(e) = entry
+                && e.name.as_ptr() == name.as_ptr() {
                     return (StringId(i as u32), false);
                 }
-            }
         }
 
         let id = self.next_id;

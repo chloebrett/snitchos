@@ -14,6 +14,12 @@ pub struct FactorTable {
     next: u64,
 }
 
+impl Default for FactorTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FactorTable {
     pub fn new() -> Self {
         Self { table: BTreeMap::new(), next: 2 }
@@ -49,10 +55,10 @@ impl FactorTable {
 
 fn smallest_prime_factor(n: u64, known: &BTreeMap<u64, u64>) -> u64 {
     for (&k, &v) in known.iter() {
-        if k.checked_mul(k).map_or(true, |kk| kk > n) {
+        if k.checked_mul(k).is_none_or(|kk| kk > n) {
             break;
         }
-        if k == v && n % k == 0 {
+        if k == v && n.is_multiple_of(k) {
             return k;
         }
     }

@@ -26,7 +26,7 @@ use crate::sync::Mutex;
 use crate::tracing;
 
 const BATCH: usize = 64;
-const PRODUCER_SEED: u64 = 0xc0ffee_dead_beef;
+const PRODUCER_SEED: u64 = 0x00c0_ffee_dead_beef;
 
 static QUEUE: Mutex<Option<VecDeque<u64>>> = Mutex::new(None);
 

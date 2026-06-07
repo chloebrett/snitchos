@@ -289,7 +289,7 @@ static PRE_INIT_BUFFER: crate::sync::Mutex<PreInitBuffer> = crate::sync::Mutex::
 pub fn flush_pre_init() {
     let dropped = PRE_INIT_BUFFER
         .lock()
-        .drain(|bytes| virtio_console::send(bytes));
+        .drain(virtio_console::send);
     emit_frame(&Frame::Dropped { count: dropped });
 }
 

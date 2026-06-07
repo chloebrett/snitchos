@@ -308,11 +308,10 @@ impl State {
     /// Update `first_t` if we're seeing the smallest `t` yet — pre-init
     /// spans may arrive after Hello with `t < hello.t`.
     fn advance_anchor(&mut self, t: u64) {
-        if let Some(anchor) = self.anchor.as_mut() {
-            if anchor.first_t == 0 || t < anchor.first_t {
+        if let Some(anchor) = self.anchor.as_mut()
+            && (anchor.first_t == 0 || t < anchor.first_t) {
                 anchor.first_t = t;
             }
-        }
     }
 
     /// Convert a kernel-side tick value to host wall-clock nanoseconds
@@ -596,8 +595,8 @@ mod tests {
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Histogram });
         s.handle(&Frame::Metric { name_id: StringId(1), value: 50, t: 100 });
-        assert!(s.metric_values.get(&1).is_none());
-        assert!(s.histograms.get(&1).is_some());
+        assert!(!s.metric_values.contains_key(&1));
+        assert!(s.histograms.contains_key(&1));
     }
 
     #[test]

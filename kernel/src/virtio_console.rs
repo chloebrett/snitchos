@@ -390,7 +390,7 @@ pub fn send(bytes: &[u8]) {
     unsafe {
         let staging = &raw mut TX_STAGING;
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), staging as *mut u8, len);
-        let staged = core::slice::from_raw_parts((staging as *const u8), len);
+        let staged = core::slice::from_raw_parts(staging as *const u8, len);
         transmit(base, staged);
     }
 }

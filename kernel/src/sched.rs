@@ -21,7 +21,7 @@ use core::arch::global_asm;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use protocol::{Frame, SwitchReason};
+use protocol::SwitchReason;
 
 use kernel_core::sched::{Runqueue, TaskId, TaskState};
 use kernel_core::span::SpanCursor;

@@ -19,6 +19,12 @@ pub struct PreInitBuffer {
     dropped: u32,
 }
 
+impl Default for PreInitBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PreInitBuffer {
     pub const fn new() -> Self {
         Self {

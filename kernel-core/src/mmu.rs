@@ -126,6 +126,12 @@ pub struct PageTable {
     entries: [u64; 512],
 }
 
+impl Default for PageTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PageTable {
     pub const fn new() -> Self {
         Self { entries: [0; 512] }
@@ -348,7 +354,7 @@ mod tests {
     /// Walk root → mid → leaf table given the freshly-built root, returning
     /// the leaf PageTable that holds the final PTE. Avoids repeating the
     /// branch-chasing boilerplate in every assertion.
-    fn leaf_table_of<'a>(mem: &'a MockPtMem, va: usize) -> &'a PageTable {
+    fn leaf_table_of(mem: &MockPtMem, va: usize) -> &PageTable {
         let (vpn2, vpn1, _, _) = split_va(va);
         let root = mem.table(mem.root_pa());
         let mid_pa = branch_pte_child_pa(root.entry(vpn2));

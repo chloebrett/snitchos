@@ -18,8 +18,7 @@ use crate::state::State;
 pub fn serve(state: Arc<Mutex<State>>, port: u16) -> std::io::Result<()> {
     let addr = format!("0.0.0.0:{port}");
     let server = tiny_http::Server::http(&addr).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
+        std::io::Error::other(
             format!("tiny_http bind: {e}"),
         )
     })?;
