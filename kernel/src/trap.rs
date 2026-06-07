@@ -139,7 +139,7 @@ pub extern "C" fn trap_handler(_frame: *mut TrapFrame) {
         TrapCause::SupervisorSoftwareInterrupt => crate::ipi::handle_pending(),
         other => panic!("unhandled trap: {other:?} (scause={scause:#x})"),
     }
-    crate::tag("trap return");
+    crate::panic::tag("trap return");
 }
 
 /// Timer IRQ handler. Kept tiny: measure duration, arm the next

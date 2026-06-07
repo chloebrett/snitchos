@@ -451,16 +451,80 @@ The race does not live on hart 1's post-sret memory-ordering window.
 - If we get task-exit later, the same scenario becomes a real H1/H2
   probe at scale.
 
+### `deflake-shootdown-storm` falsified the payload-read hypothesis
+
+Hart 0 calls `mmu::shootdown(KERNEL_OFFSET)` 5 000 times paced at
+~200 µs. Each iteration: write `shootdown_va` → IPI → hart 1 Acquire-
+swaps `ipi_pending`, reads `shootdown_va`, sfences, Release-bumps
+`shootdown_ack` → hart 0 Acquire-spins on `shootdown_ack`.
+
+| Fix | Pass rate | Trials |
+|-----|-----------|--------|
+| on  | 10/10     | 50 000 |
+| off | 10/10     | 50 000 |
+
+**The Release/Acquire chain on `shootdown_va` is also not where the
+residual lives.** Notable because this scenario has a built-in
+confounder: hart 0's spin-wait inside `mmu::shootdown` is itself an
+Acquire load that, if multi-thread TCG dropped it, would wedge hart 0
+before hart 1 could be blamed. It does not wedge — so neither
+direction of the cross-hart Acquire is broken at this scale.
+
+### Combined falsification summary
+
+| Code path | Trials (fix off) | Pass rate |
+|-----------|------------------|-----------|
+| Hart 1 post-sret resume (ipi-pong)        | 100 000 | 100% |
+| Hart 1 IPI payload read (shootdown-storm) |  50 000 | 100% |
+| Hart 1 fresh-`switch` post-IPI (spawn-storm) | ~10 effective | 100% w/ fence, 95% w/o |
+
+Two of the original three hypothesis classes are out at high trial
+counts. Spawn-storm's design ceiling means we can't test the third
+(fresh `switch` post-fresh-`wfi`) at scale without task-exit.
+
+### Hypothesis ranking post-experiments
+
+- ~~H1: stale `*next_ctx` dereference in `switch`~~ — possibly still
+  live for the *fresh-context-after-fresh-wfi* case only. Spawn-storm
+  could not test at scale.
+- ~~H2: new task stack reads~~ — same caveat.
+- ~~H3: runqueue id race~~ — already ruled out at planning time.
+- ~~H4: SpanCursor pointer race~~ — same.
+- ~~H5: compiler reorder across lock drop~~ — implausible.
+- ~~H_post-sret (the deflake doc's lead)~~ — falsified at 100 k trials.
+- ~~H_payload (shootdown IPI carries data via Release/Acquire)~~ —
+  falsified at 50 k trials.
+- **H6: boot-time race.** The residual fires during secondary
+  bring-up, MMU teardown, or the first-heartbeat window — not during
+  steady-state scheduling. Suite-wide 8% maps to "8% of boots come
+  up broken." Cheap to test: boot-and-immediately-exit scenario
+  under `--repeat 50` with fix off.
+- **H7: cross-hart heap allocator state.** Allocator metadata mutates
+  under Mutex on one hart and is dereferenced on another. If the
+  mutex Release isn't honoured by multi-thread TCG, the dereferencing
+  hart can see stale chunk-list pointers, free-list bytes, etc.
+- **H8: hart 0 load-side, not hart 1.** The `tag("trap return")`
+  fence runs on hart 1's trap exit but flushes BQL globally, so it
+  fences hart 0 too. Removing it could fail by hart-0-side stale
+  loads (virtio descriptor reads after hart 1 wrote them, allocator
+  metadata, anything in `kmain`'s heartbeat that reads a counter
+  hart 1 might have bumped).
+
 ### Next experiments worth trying
 
-- **Build (2): shootdown storm.** Tight `mmu::shootdown(va)` loop
-  from hart 0 — exercises the IPI payload-read path and the
-  `shootdown_va` Release/Acquire chain. Different code path from
-  ipi-pong; possibly hits H7-ish surfaces.
-- **Boot-bisect.** Add a scenario that boots and asserts only that
-  the kernel reaches the first heartbeat. Run it under fix-off
-  `--repeat 50`. If it fails at non-zero rate, H6 is supported.
-- **Hart 0 load-side audit.** Cheaper than instrumenting: walk
-  `kmain` post-secondary-bringup and identify every load that
-  depends on something hart 1 wrote. Audit for missing Acquire +
-  what would fence it under multi-thread TCG.
+- **Boot-bisect.** A scenario that boots and asserts only that the
+  kernel reaches the first heartbeat. `--repeat 50` under fix off.
+  A non-zero failure rate supports H6 cleanly.
+- **Hart 0 load-side audit (H8).** Walk `kmain` post-secondary-
+  bringup and the heartbeat path; identify every load that depends
+  on something hart 1 wrote. Each one is an Acquire-load that
+  multi-thread TCG might drop. Output: a list of candidate stale-
+  read sites with proposed local fences. Cheaper than instrumenting.
+- **Heap stress storm (H7).** Tight loop of cross-hart spawns where
+  the spawned task body does a tight `Vec::with_capacity` / drop
+  loop. Forces alternating-hart allocator metadata mutation. Looks
+  for stale chunk-list reads.
+- **Build task-exit.** Big undertaking, but unlocks a real test of
+  the fresh-`switch`-after-fresh-`wfi` window the spawn-storm
+  couldn't reach. Defer unless the cheaper experiments above don't
+  narrow further.

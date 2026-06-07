@@ -3,18 +3,20 @@
 
 extern crate alloc;
 
-use core::arch::{asm, global_asm};
-use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::arch::global_asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use fdt::Fdt;
 
 mod console;
+mod deflake;
+mod demo_tasks;
 mod dtb;
 mod frame;
 mod heap;
 mod heap_smoke; // SMOKE TEST — remove once real workloads drive heap metrics
 mod ipi;
 mod mmu;
+mod panic;
 mod percpu;
 mod sbi;
 mod secondary;
@@ -26,212 +28,10 @@ mod uart;
 mod virtio_console;
 mod workload;
 
-#[cfg(feature = "deflake-shootdown-storm")]
-mod deflake_shootdown {
-    //! Tight `mmu::shootdown(va)` loop from hart 0. Each iteration:
-    //!
-    //!   - hart 0 writes `shootdown_va` into hart 1's PerHartData,
-    //!     snapshots `shootdown_ack`, sends `IPI_TLB_SHOOTDOWN`,
-    //!     spin-waits (Acquire) on `shootdown_ack` to advance.
-    //!   - hart 1 takes the IPI; `ipi::handle_pending` does
-    //!     `ipi_pending.swap(0, Acquire)`, reads `shootdown_va`,
-    //!     runs `sfence.vma`, bumps `shootdown_ack` with Release.
-    //!
-    //! Tests the IPI payload-read path — distinct from `deflake-ipi-pong`
-    //! which has no payload. The race window we're probing: does
-    //! hart 1 actually see the `shootdown_va` value hart 0 wrote
-    //! before the IPI, on multi-thread TCG? If not, hart 1 sfences
-    //! the wrong address; the test still completes (sfence with any
-    //! VA is harmless on a fresh-mapping kernel) but the
-    //! `shootdowns_received_total` counter still climbs.
-    //!
-    //! **Built-in confounder.** Hart 0's spin-wait inside
-    //! `mmu::shootdown` is itself an Acquire load on
-    //! `shootdown_ack`. If multi-thread TCG drops it, hart 0 wedges
-    //! before hart 1 can be blamed. We accept this trade — the
-    //! kernel's existing API is the API we're testing. A wedge here
-    //! is informative either way (kernel does have a real bug;
-    //! whether on hart 0 or hart 1 is downstream of the wedge).
-    //!
-    //! Choice of VA: `KERNEL_OFFSET` — a real higher-half VA that
-    //! is always mapped, so sfence on it on hart 1 is a real TLB op,
-    //! not a no-op. Using an arbitrary unmapped VA would sfence
-    //! nothing; using a userspace VA (none exist) would be
-    //! meaningless. KERNEL_OFFSET is also the address whose mapping
-    //! v0.4 step 2 set up, so it's the canonical "real translation"
-    //! to flush.
-
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    pub const N: u64 = 5_000;
-    const DELAY_TICKS: u64 = 2_000;
-
-    /// Count of shootdowns initiated by hart 0. The heartbeat re-emits
-    /// as `snitchos.deflake.shootdown_storm_sends`. `Relaxed` —
-    /// single writer.
-    pub static SENDS: AtomicU64 = AtomicU64::new(0);
-
-    fn now() -> u64 {
-        let t: u64;
-        // SAFETY: rdtime is S-mode-readable; no side effects.
-        unsafe { core::arch::asm!("rdtime {}", out(reg) t) };
-        t
-    }
-
-    pub fn run() {
-        let va = crate::mmu::KERNEL_OFFSET;
-        for _ in 0..N {
-            crate::mmu::shootdown(va);
-            SENDS.fetch_add(1, Ordering::Relaxed);
-            let deadline = now() + DELAY_TICKS;
-            while now() < deadline {
-                core::hint::spin_loop();
-            }
-        }
-    }
-}
-
-#[cfg(feature = "deflake-ipi-pong")]
-mod deflake_ipi_pong {
-    //! Tight IPI_WAKEUP loop from hart 0 to hart 1. Each iteration is
-    //! one `hart 1 in wfi → IPI → trap → swap-Acquire → sret → resume`
-    //! trial — directly the post-sret memory-ordering window the
-    //! deflake residual was suspected to live on. No spawning, no
-    //! heap growth: scales to ~10k trials per boot.
-    //!
-    //! Pacing: hart 0 sends one IPI, then spins on `rdtime` for
-    //! `DELAY_TICKS` before the next send. At timebase 10 MHz, 1 000
-    //! ticks ≈ 100 µs — long enough that hart 1 (`hart_1_main`'s
-    //! `yield → wfi → wake → yield`) re-enters `wfi` before the next
-    //! IPI lands. Without pacing the IPIs coalesce into one trap on
-    //! hart 1 and the trial count collapses.
-    //!
-    //! No MMIO touches on hart 0 inside the loop — the storm's whole
-    //! point is to leave the kernel's race window unfenced. `rdtime`
-    //! is a CSR read, not MMIO.
-
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    pub const N: u64 = 10_000;
-
-    /// Inter-IPI delay on hart 0, in `rdtime` ticks. Tuned so hart 1
-    /// has time to `sret → loop iter → yield → wfi` before the next
-    /// IPI lands. Too low: IPIs coalesce (RECEIVED_TOTAL << N). Too
-    /// high: storm takes forever.
-    const DELAY_TICKS: u64 = 1_000;
-
-    /// Count of IPI sends issued by hart 0. Bumped after each send;
-    /// the heartbeat re-emits as `snitchos.deflake.ipi_pong_sends`.
-    /// Survival signal: if hart 0 wedged or the kernel hung mid-loop,
-    /// this counter stays below N. `Relaxed` — single writer.
-    pub static SENDS: AtomicU64 = AtomicU64::new(0);
-
-    fn now() -> u64 {
-        let t: u64;
-        // SAFETY: rdtime is a S-mode-readable CSR; reading it has no
-        // side effects.
-        unsafe { core::arch::asm!("rdtime {}", out(reg) t) };
-        t
-    }
-
-    /// Drive the storm. Sends N IPIs paced by DELAY_TICKS each.
-    pub fn run() {
-        for _ in 0..N {
-            crate::ipi::send(1, crate::ipi::IPI_WAKEUP);
-            SENDS.fetch_add(1, Ordering::Relaxed);
-            let deadline = now() + DELAY_TICKS;
-            while now() < deadline {
-                core::hint::spin_loop();
-            }
-        }
-    }
-}
-
-#[cfg(feature = "deflake-spawn-storm")]
-mod deflake_storm {
-    //! Cross-hart spawn storm for the `deflake-spawn-storm` integration
-    //! scenario. Drives N serialised `spawn_on(1, body)` iterations from
-    //! hart 0 with an MMIO-fenced ack wait. Each iteration is one trial
-    //! of the residual cross-hart memory-ordering race on hart 1's
-    //! IPI pickup path. See `plans/residual-race-investigation.md`.
-
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    /// Number of spawn iterations. With per-trial flake rate ≈ 1%
-    /// (eyeballed from suite-wide 8% across ~8 cross-hart trials), 200
-    /// iterations gives ~87% per-run flake without the fix — enough
-    /// signal for `--repeat 5`.
-    pub const N: u64 = 200;
-
-    /// Cumulative count of spawned tasks that reached their body and
-    /// bumped this counter. Hart 0's storm loop polls it after each
-    /// spawn; the heartbeat re-emits its value every tick as the
-    /// `snitchos.deflake.spawn_storm_acks` metric.
-    /// `Release` on the bump pairs with `Acquire` on hart 0's poll —
-    /// but multi-thread TCG is the entire reason we don't trust that
-    /// pairing, hence `fence_via_uart_lsr` below.
-    pub static ACK_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    /// Body run by every storm task on hart 1. Touches a stack-local
-    /// (H2 probe — proves the new task's `sp` resolves to writable
-    /// memory), bumps the ack counter, then cycles through `yield_now`
-    /// forever because v0.5 tasks can't exit.
-    pub extern "C" fn body() -> ! {
-        let marker: u64 = 0xdead_beef_cafe_f00d;
-        core::hint::black_box(marker);
-        ACK_COUNTER.fetch_add(1, Ordering::Release);
-        loop {
-            crate::sched::yield_now();
-        }
-    }
-
-    /// Single-MMIO-read BQL fence used by hart 0's ack-wait spin. The
-    /// UART LSR at base+5 has no side effects on read. QEMU's MMIO
-    /// path acquires the Big QEMU Lock, which serialises against
-    /// other vCPUs and incidentally provides the cross-hart memory
-    /// fence that multi-thread TCG drops on plain `Acquire`. Hart 0
-    /// is the observer, not the hart under test — fencing it does
-    /// not interfere with the race window on hart 1's pickup path.
-    fn fence_via_uart_lsr() {
-        let lsr = crate::console::emergency_uart_base() + 5;
-        // SAFETY: lsr is the 16550 line-status register; reading it is
-        // a non-destructive observation. The address is mapped (the
-        // emergency UART base is always reachable post-MMU).
-        unsafe { core::ptr::read_volatile(lsr as *const u8) };
-    }
-
-    /// Drive the storm. Iteration `i` spawns one minimal task on
-    /// hart 1 and waits for the ack counter to exceed `i` before
-    /// advancing. Returns when all N tasks have acked.
-    pub fn run() {
-        for i in 0..N {
-            crate::sched::spawn_on(1, "deflake", body);
-            loop {
-                fence_via_uart_lsr();
-                if ACK_COUNTER.load(Ordering::Acquire) > i {
-                    break;
-                }
-                core::hint::spin_loop();
-            }
-        }
-    }
-}
-
 // Pull in the boot stub (entry.S). It defines `_start`, sets up the stack
 // pointer, zeros .bss, and calls `kmain`. See linker.ld for the memory layout
 // it depends on (__stack_top, __bss_start, __bss_end).
 global_asm!(include_str!("entry.S"));
-
-/// DEFLAKE: lock-free single-line UART tag. Used to bisect where the kernel
-/// dies during the Bug B silent reset. SAFETY: bypasses CONSOLE/UART mutex,
-/// so output may interleave with concurrent prints — accepted for forensic
-/// instrumentation. `emergency_uart_base` reads satp so this works in any
-/// boot stage.
-pub(crate) fn tag(s: &str) {
-    use core::fmt::Write;
-    let mut uart = unsafe { uart::Uart16550::new(console::emergency_uart_base()) };
-    let _ = writeln!(&mut uart, "[TAG] {s}");
-}
 
 /// Kernel entry point, called from `_start` (see entry.S).
 ///
@@ -466,7 +266,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         tracing::register_counter("snitchos.smp.hart_1_probe_ticks_total");
     // Spawn-storm scenario completion metric. Emitted every heartbeat
     // under the feature, monotonically tracking how many storm tasks
-    // have acked. The scenario asserts it reaches deflake_storm::N.
+    // have acked. The scenario asserts it reaches deflake::spawn_storm::N.
     #[cfg(feature = "deflake-spawn-storm")]
     let spawn_storm_acks = tracing::register_counter("snitchos.deflake.spawn_storm_acks");
     // IPI-pong scenario completion metric. Emitted every heartbeat
@@ -556,7 +356,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // `yield_now` picks it. `ThreadRegister` frames are emitted by
     // both calls so the collector can resolve task ids to names.
     let _ = sched::register_bare_task("main", kernel_core::sched::TaskState::Running);
-    let _ = sched::spawn("idle", idle_entry);
+    let _ = sched::spawn("idle", demo_tasks::idle_entry);
     // Under `deflake-spawn-storm` the kernel boots with just main +
     // idle on hart 0 (and idle on hart 1, spawned in secondary_main).
     // The storm spawns its own minimal worker tasks on hart 1 below;
@@ -564,8 +364,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // scheduling activity that masks the cross-hart race window.
     #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm")))]
     {
-        let _ = sched::spawn("task_a", task_a_entry);
-        let _ = sched::spawn("task_b", task_b_entry);
+        let _ = sched::spawn("task_a", demo_tasks::task_a_entry);
+        let _ = sched::spawn("task_b", demo_tasks::task_b_entry);
         let _ = sched::spawn("workload_producer", workload::producer_entry);
         let _ = sched::spawn("workload_consumer", workload::consumer_entry);
     }
@@ -787,11 +587,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             }
             tracing::emit_metric(
                 task_a_loops,
-                TASK_A_LOOPS.load(Ordering::Relaxed) as i64,
+                demo_tasks::TASK_A_LOOPS.load(Ordering::Relaxed) as i64,
             );
             tracing::emit_metric(
                 task_b_loops,
-                TASK_B_LOOPS.load(Ordering::Relaxed) as i64,
+                demo_tasks::TASK_B_LOOPS.load(Ordering::Relaxed) as i64,
             );
             // v0.6 step 1: producer/consumer workload.
             tracing::emit_metric(
@@ -852,31 +652,31 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             #[cfg(feature = "deflake-spawn-storm")]
             {
                 if count == 1 {
-                    deflake_storm::run();
+                    deflake::spawn_storm::run();
                 }
                 tracing::emit_metric(
                     spawn_storm_acks,
-                    deflake_storm::ACK_COUNTER.load(Ordering::Relaxed) as i64,
+                    deflake::spawn_storm::ACK_COUNTER.load(Ordering::Relaxed) as i64,
                 );
             }
             #[cfg(feature = "deflake-ipi-pong")]
             {
                 if count == 1 {
-                    deflake_ipi_pong::run();
+                    deflake::ipi_pong::run();
                 }
                 tracing::emit_metric(
                     ipi_pong_sends,
-                    deflake_ipi_pong::SENDS.load(Ordering::Relaxed) as i64,
+                    deflake::ipi_pong::SENDS.load(Ordering::Relaxed) as i64,
                 );
             }
             #[cfg(feature = "deflake-shootdown-storm")]
             {
                 if count == 1 {
-                    deflake_shootdown::run();
+                    deflake::shootdown::run();
                 }
                 tracing::emit_metric(
                     shootdown_storm_sends,
-                    deflake_shootdown::SENDS.load(Ordering::Relaxed) as i64,
+                    deflake::shootdown::SENDS.load(Ordering::Relaxed) as i64,
                 );
             }
         }
@@ -884,27 +684,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     }
 }
 
-/// Idle thread. The "what runs when nothing else wants the CPU"
-/// task. `wfi` sleeps until any interrupt arrives (timer being the
-/// only one v0.5 cares about); the subsequent `yield_now` hands
-/// control to whoever is now ready.
-extern "C" fn idle_entry() -> ! {
-    loop {
-        unsafe { asm!("wfi") };
-        sched::yield_now();
-    }
-}
 
-/// Demo tasks. Each opens a per-iteration `task_x.tick` span, bumps
-/// its counter, and yields. With main and idle in the mix the
-/// scheduler round-robins through all four; both tasks' `tick`
-/// spans interleave on the wire, each correctly tagged with its
-/// own `task_id`.
-///
-/// The span is opened-then-immediately-closed inside an explicit
-/// block so it's never alive across the yield. Per-task `SpanCursor`
-/// swapping on context switch is a future refinement; until then,
-/// the discipline is "balance the cursor before yielding."
 /// mhartid OpenSBI handed kmain as `_hart_id`. Captured at the top of
 /// the bring-up block; drained by the heartbeat as
 /// `snitchos.smp.boot_hart_id`. Useful because OpenSBI's choice of
@@ -912,85 +692,7 @@ extern "C" fn idle_entry() -> ! {
 /// writer (boot path), read by heartbeat on the same hart.
 static BOOT_MHARTID: AtomicU64 = AtomicU64::new(0);
 
-// `Relaxed`: pure tallies. See `kernel::percpu` for the kernel-wide
-// ordering discipline.
-static TASK_A_LOOPS: AtomicU64 = AtomicU64::new(0);
-static TASK_B_LOOPS: AtomicU64 = AtomicU64::new(0);
 
-/// Burn an appreciable amount of CPU so the per-task `cpu_time_ticks`
-/// rate is visible against idle's wfi-dominated time. ~15M LCG iters
-/// is ~50ms of wallclock on QEMU virt; task_b doubles it.
-///
-/// `black_box(x)` keeps the loop body from being optimised out — the
-/// LCG state has to look observable to the compiler.
-fn burn_lcg(iterations: u32) {
-    let mut x: u64 = 1;
-    for _ in 0..iterations {
-        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    }
-    let _ = core::hint::black_box(x);
-}
 
-#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm"), allow(dead_code))]
-extern "C" fn task_a_entry() -> ! {
-    loop {
-        {
-            span!("task_a.tick");
-            // Split the work around a yield to exercise the
-            // "span survives a context switch" path. Per-task
-            // SpanCursor means task_b's spans opened in between
-            // don't get parented to this still-open span.
-            burn_lcg(150_000);
-            sched::yield_now();
-            burn_lcg(150_000);
-            TASK_A_LOOPS.fetch_add(1, Ordering::Relaxed);
-        }
-        sched::yield_now();
-    }
-}
 
-#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm"), allow(dead_code))]
-extern "C" fn task_b_entry() -> ! {
-    loop {
-        {
-            span!("task_b.tick");
-            burn_lcg(900_000);
-            TASK_B_LOOPS.fetch_add(1, Ordering::Relaxed);
-        }
-        sched::yield_now();
-    }
-}
 
-/// Recursion guard for the panic handler. Set on entry; if already set, we
-/// must already be panicking and shouldn't try to print again (formatting the
-/// panic info could itself panic, leading to infinite recursion).
-///
-/// `Relaxed` on the `swap`: the guard prevents *re-entry on this same hart*
-/// (formatting that itself panics). The atomic value is the whole signal;
-/// no payload to publish. SMP later: `scaling-corners.md` documents
-/// "any hart panics → whole system panics" as the v0.1 contract — when
-/// fault isolation lands this will become a per-hart guard.
-static PANICKING: AtomicBool = AtomicBool::new(false);
-
-/// Panic handler. Bypasses the UART mutex to avoid deadlocking if a panic
-/// fires mid-`println!` (the lock would already be held by the outer caller).
-/// Uses a recursion guard so a panic-during-panic doesn't infinite-loop.
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    if !PANICKING.swap(true, Ordering::Relaxed) {
-        // First time through. Print directly to a fresh UART, no lock.
-        //
-        // SAFETY: bypassing the lock means we may interleave with whatever
-        // was printing when the panic fired — accepted because we're already
-        // in a fatal state. `emergency_uart_base` reads satp so this works
-        // in any boot stage (MMU off, identity-MMIO mapped, or higher-half-only).
-        use core::fmt::Write;
-        let mut uart = unsafe { uart::Uart16550::new(console::emergency_uart_base()) };
-        let _ = writeln!(&mut uart, "Kernel panic: {}", info);
-    }
-    loop {
-        unsafe {
-            asm!("wfi");
-        }
-    }
-}
