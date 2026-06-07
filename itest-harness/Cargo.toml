@@ -5,3 +5,9 @@ edition = "2024"
 publish = false
 
 [dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+toml = "0.8"
+time = { version = "0.3", default-features = false, features = ["std", "serde-well-known", "formatting", "parsing"] }
+
+[dev-dependencies]
+time = { version = "0.3", default-features = false, features = ["std", "serde-well-known", "formatting", "parsing", "macros"] }

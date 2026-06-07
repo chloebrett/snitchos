@@ -10,5 +10,9 @@
 //! the broader rationale.
 
 pub mod aggregate;
+pub mod baseline;
+pub mod stats;
 
 pub use aggregate::{Aggregator, RunTotals};
+pub use baseline::{Baseline, BaselineError, BaselineFile, ScenarioBaseline};
+pub use stats::{ConfidenceInterval, two_proportion_p_value, wilson_score_95};
