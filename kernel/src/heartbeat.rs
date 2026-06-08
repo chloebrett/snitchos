@@ -87,6 +87,10 @@ pub struct Metrics {
     mutex_storm_acquires_hart0: StringId,
     #[cfg(feature = "deflake-mutex-storm")]
     mutex_storm_acquires_hart1: StringId,
+    #[cfg(feature = "deflake-virtio-storm")]
+    virtio_storm_hart0_emits: StringId,
+    #[cfg(feature = "deflake-virtio-storm")]
+    virtio_storm_hart1_iterations: StringId,
 }
 
 impl Metrics {
@@ -173,6 +177,14 @@ impl Metrics {
             #[cfg(feature = "deflake-mutex-storm")]
             mutex_storm_acquires_hart1: tracing::register_counter(
                 "snitchos.deflake.mutex_storm_acquires_hart1",
+            ),
+            #[cfg(feature = "deflake-virtio-storm")]
+            virtio_storm_hart0_emits: tracing::register_counter(
+                "snitchos.deflake.virtio_storm_hart0_emits",
+            ),
+            #[cfg(feature = "deflake-virtio-storm")]
+            virtio_storm_hart1_iterations: tracing::register_counter(
+                "snitchos.deflake.virtio_storm_hart1_iterations",
             ),
         }
     }
@@ -486,6 +498,17 @@ fn emit_deflake_metrics(m: &Metrics, count: i64) {
         tracing::emit_metric(
             m.mutex_storm_acquires_hart1,
             crate::deflake::mutex_storm::ACQUIRES_HART1.load(Ordering::Relaxed) as i64,
+        );
+    }
+    #[cfg(feature = "deflake-virtio-storm")]
+    {
+        tracing::emit_metric(
+            m.virtio_storm_hart0_emits,
+            crate::deflake::virtio_storm::HART0_EMITS.load(Ordering::Relaxed) as i64,
+        );
+        tracing::emit_metric(
+            m.virtio_storm_hart1_iterations,
+            crate::deflake::virtio_storm::HART1_ITERATIONS.load(Ordering::Relaxed) as i64,
         );
     }
 }

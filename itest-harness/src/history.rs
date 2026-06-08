@@ -150,6 +150,93 @@ pub fn current_hostname() -> Option<String> {
     std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty())
 }
 
+/// Per-scenario stats reconstructed from `iterations.ndjson`. Mirrors
+/// the fields a `Baseline` cares about, minus identity (commit /
+/// recorded_at — those come from `metadata.toml`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveredScenario {
+    pub runs: u32,
+    pub failures: u32,
+    pub mean_duration_ms: Option<f64>,
+    pub p95_duration_ms: Option<f64>,
+}
+
+/// Full result of `aggregate_run_dir`: the run-level `metadata.toml`
+/// plus per-scenario stats derived from streaming the NDJSON.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveredRun {
+    pub metadata: RunMetadata,
+    pub scenarios: std::collections::BTreeMap<String, RecoveredScenario>,
+}
+
+/// Rebuild per-scenario stats by streaming `iterations.ndjson`. Used by
+/// `--recover-pending`: if the pending sidecar is lost (process killed
+/// before the runner could write it), the NDJSON has every iteration
+/// we observed and we can reconstruct the partial baseline from it.
+///
+/// Malformed lines are skipped with a warning to stderr rather than
+/// failing the recovery — better partial-recovery than no-recovery.
+pub fn aggregate_run_dir(run_dir: &Path) -> io::Result<RecoveredRun> {
+    let meta_str = std::fs::read_to_string(run_dir.join("metadata.toml"))?;
+    let metadata: RunMetadata =
+        toml::from_str(&meta_str).map_err(|e| io::Error::other(e.to_string()))?;
+
+    let mut runs_per: std::collections::BTreeMap<String, u32> = Default::default();
+    let mut fails_per: std::collections::BTreeMap<String, u32> = Default::default();
+    let mut durations: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+
+    for row in read_iterations(&run_dir.join("iterations.ndjson"))? {
+        let row = match row {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("warning: skipping malformed iteration row: {e}");
+                continue;
+            }
+        };
+        *runs_per.entry(row.scenario.clone()).or_insert(0) += 1;
+        if row.result == ResultKind::Fail {
+            *fails_per.entry(row.scenario.clone()).or_insert(0) += 1;
+        }
+        durations
+            .entry(row.scenario)
+            .or_default()
+            .push(row.duration_ms);
+    }
+
+    let scenarios = runs_per
+        .into_iter()
+        .map(|(name, runs)| {
+            let failures = fails_per.get(&name).copied().unwrap_or(0);
+            let durs = durations.remove(&name).unwrap_or_default();
+            let (mean_ms, p95_ms) = summarise_durations(&durs);
+            (
+                name,
+                RecoveredScenario {
+                    runs,
+                    failures,
+                    mean_duration_ms: mean_ms,
+                    p95_duration_ms: p95_ms,
+                },
+            )
+        })
+        .collect();
+
+    Ok(RecoveredRun { metadata, scenarios })
+}
+
+fn summarise_durations(durs: &[u32]) -> (Option<f64>, Option<f64>) {
+    if durs.is_empty() {
+        return (None, None);
+    }
+    let mean = durs.iter().map(|&d| f64::from(d)).sum::<f64>() / durs.len() as f64;
+    let mut sorted: Vec<u32> = durs.to_vec();
+    sorted.sort_unstable();
+    // Nearest-rank p95, 1-indexed: ceil(0.95 * n).
+    let rank = ((0.95 * sorted.len() as f64).ceil() as usize).max(1);
+    let p95 = f64::from(sorted[rank - 1]);
+    (Some(mean), Some(p95))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +377,62 @@ mod tests {
             .collect::<io::Result<_>>()
             .unwrap();
         assert_eq!(rows.len(), 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn aggregate_run_dir_reconstructs_per_scenario_stats() {
+        let root = fresh_test_dir();
+        let metadata = RunMetadata {
+            run: RunMetadataInner {
+                started_at: datetime!(2026-06-08 12:30:15 UTC),
+                commit: "abc1234".to_string(),
+                build_hash: Some("deadbeef".to_string()),
+                requested_repeat: 5,
+                fail_fast: None,
+                scenarios: vec!["scn-a".to_string(), "scn-b".to_string()],
+                hostname: None,
+            },
+        };
+        let (run_dir, mut writer) = create_run_dir(&root, &metadata).unwrap();
+        // scn-a: 3 runs, 1 failure. scn-b: 2 runs, 0 failures.
+        for (iter, scn, result, dur) in [
+            (1, "scn-a", ResultKind::Pass, 100),
+            (1, "scn-b", ResultKind::Pass, 200),
+            (2, "scn-a", ResultKind::Fail, 150),
+            (2, "scn-b", ResultKind::Pass, 220),
+            (3, "scn-a", ResultKind::Pass, 110),
+        ] {
+            writer
+                .append(&IterationRow {
+                    iteration: iter,
+                    scenario: scn.to_string(),
+                    started_at: datetime!(2026-06-08 12:30:15 UTC),
+                    duration_ms: dur,
+                    result,
+                    error: if result == ResultKind::Fail {
+                        Some("synthetic".into())
+                    } else {
+                        None
+                    },
+                    log: None,
+                })
+                .unwrap();
+        }
+        drop(writer);
+
+        let recovered = aggregate_run_dir(&run_dir).unwrap();
+        assert_eq!(recovered.metadata, metadata);
+        let a = recovered.scenarios.get("scn-a").unwrap();
+        assert_eq!(a.runs, 3);
+        assert_eq!(a.failures, 1);
+        assert!((a.mean_duration_ms.unwrap() - 120.0).abs() < 1e-6);
+        // p95 of [100, 110, 150] is 150 (nearest-rank).
+        assert_eq!(a.p95_duration_ms, Some(150.0));
+        let b = recovered.scenarios.get("scn-b").unwrap();
+        assert_eq!(b.runs, 2);
+        assert_eq!(b.failures, 0);
+
         std::fs::remove_dir_all(&root).ok();
     }
 

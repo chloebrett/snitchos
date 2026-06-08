@@ -909,3 +909,38 @@ pub fn deflake_mutex_storm() -> Result<(), String> {
     )?;
     Ok(())
 }
+
+/// Virtio-emit storm. Hart 0 calls `tracing::emit_metric` in a tight
+/// loop (each call: intern check + frame serialize + TX_STAGING.lock +
+/// virtio descriptor + MMIO notify). Hart 1 does pure Relaxed
+/// `fetch_add` on a shared atomic. No cross-hart mutex contention.
+///
+/// Tests H11-refined: is the cross-hart bug specifically inside the
+/// virtio TX path? With fix on, BQL fences at every trap return
+/// should keep this clean. With fix off, if H11-refined is right,
+/// hart 0 should wedge mid-emit and the counter stalls.
+///
+/// Asserts `snitchos.deflake.virtio_storm_hart0_emits` reaches N
+/// (5 000) within 30 s. See `plans/residual-race-investigation.md`
+/// appendix C.
+pub fn deflake_virtio_storm() -> Result<(), String> {
+    let mut h = Harness::spawn_with_features(
+        "deflake-virtio-storm",
+        &["deflake-virtio-storm"],
+    )?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.deflake.virtio_storm_hart0_emits")
+                && *value >= 5_000
+        }
+        _ => false,
+    })
+    .ok_or(
+        "snitchos.deflake.virtio_storm_hart0_emits never reached \
+         5000 within 30s — hart 0's emit loop didn't finish; \
+         likely H11-refined fired (virtio TX path bug).",
+    )?;
+    Ok(())
+}

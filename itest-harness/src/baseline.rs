@@ -175,6 +175,39 @@ impl BaselineFile {
     /// Conventional path of the pending sidecar for `canonical_path`.
     /// Appends `.pending` to the filename — e.g.
     /// `.itest-baseline.toml` → `.itest-baseline.toml.pending`.
+    /// Build a fresh `BaselineFile` from a recovered run-directory.
+    /// Every scenario gets a `partial` marker pointing back at the run
+    /// directory; `requested_runs` reflects the original `--repeat N`
+    /// the run was invoked with so reviewers can see how short of
+    /// completion the recovery sits. Used by xtask's
+    /// `--recover-pending` to reconstruct the pending sidecar from
+    /// NDJSON after the in-process write was lost.
+    pub fn from_recovered(
+        recovered: &crate::history::RecoveredRun,
+        run_dir_name: &str,
+    ) -> Self {
+        let now = OffsetDateTime::now_utc();
+        let mut file = Self::new();
+        for (name, stats) in &recovered.scenarios {
+            let baseline = Baseline {
+                commit: recovered.metadata.run.commit.clone(),
+                build_hash: recovered.metadata.run.build_hash.clone(),
+                runs: stats.runs,
+                failures: stats.failures,
+                recorded_at: now,
+                mean_duration_ms: stats.mean_duration_ms,
+                p95_duration_ms: stats.p95_duration_ms,
+                partial: Some(PartialMarker {
+                    requested_runs: recovered.metadata.run.requested_repeat,
+                    interrupted_at: now,
+                    run_dir: Some(run_dir_name.to_string()),
+                }),
+            };
+            file.update_current(name, baseline);
+        }
+        file
+    }
+
     pub fn pending_path_for(canonical_path: &Path) -> PathBuf {
         let mut p = canonical_path.to_path_buf();
         let mut name = p

@@ -15,6 +15,86 @@
 //! See `plans/residual-race-investigation.md` for hypothesis tree,
 //! experiment ladder, and falsified-by-trial-count tables.
 
+#[cfg(feature = "deflake-virtio-storm")]
+pub mod virtio_storm {
+    //! Validation experiment for H11-refined: is the cross-hart bug
+    //! specifically in the virtio-console emission path
+    //! (`virtio_console::send` + `TX_STAGING` + MMIO notify)?
+    //!
+    //! Hart 0 runs a task that calls `tracing::emit_metric` in a
+    //! tight loop — each call interns + serializes a frame + pushes
+    //! it through `TX_STAGING` + virtio descriptor ring + MMIO
+    //! notify. Hart 1 runs a task that does pure Relaxed
+    //! `fetch_add` on a shared atomic.
+    //!
+    //! No cross-hart mutex contention. Hart 0 owns `TX_STAGING` and
+    //! `INTERN_TABLE` end-to-end; hart 1 only touches its own
+    //! atomic. The only shared state is the atomic and (implicitly)
+    //! the cache lines holding the virtio descriptor ring / staging
+    //! buffer.
+    //!
+    //! If H11-refined is right, the bug fires when hart 0 is in the
+    //! middle of the virtio emit path while hart 1 mutates memory.
+    //! Predict ≥30% per-boot flake with fix off.
+
+    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    use crate::tracing;
+
+    pub const N: u64 = 5_000;
+
+    /// `StringId` of the metric used by the storm body. Registered
+    /// once by `init()` before the storm task starts. Stored as a
+    /// raw `u32` so it can sit in a `pub static` without needing a
+    /// const constructor for `StringId`.
+    pub static EMIT_METRIC: AtomicU32 = AtomicU32::new(0);
+
+    /// Count of `emit_metric` calls completed by hart 0. Bumped
+    /// after every successful emit. `Relaxed` — single writer.
+    pub static HART0_EMITS: AtomicU64 = AtomicU64::new(0);
+
+    /// Count of atomic fetch_adds completed by hart 1. Bumped per
+    /// iteration. `Relaxed` — single writer.
+    pub static HART1_ITERATIONS: AtomicU64 = AtomicU64::new(0);
+
+    /// Hart 0 sets this when its emit loop finishes; hart 1 polls
+    /// it to know when to stop. Without this, hart 1 would race
+    /// ahead and exit before hart 0 made any progress, and we'd
+    /// have no overlap.
+    pub static HART1_STOP: AtomicBool = AtomicBool::new(false);
+
+    /// The shared atomic hart 1 hammers. Hart 0 never touches it
+    /// inside the storm body — but the cache line is implicitly
+    /// shared between vCPUs via QEMU's coherency emulation.
+    pub static SHARED: AtomicU64 = AtomicU64::new(0);
+
+    /// Register the storm's emission metric. Called from kmain
+    /// after the heartbeat metrics are registered (so the order on
+    /// the wire is heartbeat-set first, then this).
+    pub fn init() {
+        let id = tracing::register_counter("snitchos.deflake.virtio_storm_emits");
+        EMIT_METRIC.store(id.0, Ordering::Relaxed);
+    }
+
+    pub extern "C" fn body_hart0() -> ! {
+        let metric = protocol::StringId(EMIT_METRIC.load(Ordering::Relaxed));
+        for i in 0..N {
+            tracing::emit_metric(metric, i as i64);
+            HART0_EMITS.fetch_add(1, Ordering::Relaxed);
+        }
+        HART1_STOP.store(true, Ordering::Relaxed);
+        crate::sched::exit_now()
+    }
+
+    pub extern "C" fn body_hart1() -> ! {
+        while !HART1_STOP.load(Ordering::Relaxed) {
+            SHARED.fetch_add(1, Ordering::Relaxed);
+            HART1_ITERATIONS.fetch_add(1, Ordering::Relaxed);
+        }
+        crate::sched::exit_now()
+    }
+}
+
 #[cfg(feature = "deflake-mutex-storm")]
 pub mod mutex_storm {
     //! Validation experiment for revised-H7. Both harts run a

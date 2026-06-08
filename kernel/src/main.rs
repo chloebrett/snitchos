@@ -302,7 +302,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // The storm spawns its own minimal worker tasks on hart 1 below;
     // including the demo + workload tasks here would add unrelated
     // scheduling activity that masks the cross-hart race window.
-    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm")))]
+    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
     {
         let _ = sched::spawn("task_a", demo_tasks::task_a_entry);
         let _ = sched::spawn("task_b", demo_tasks::task_b_entry);
@@ -347,7 +347,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // `deflake-spawn-storm` so hart 1 stays in `wfi` until the storm
     // loop's spawn_on's wake it — each wake then has the maximum
     // "fresh trap" race exposure.
-    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm")))]
+    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
     let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
 
     // Mutex-storm: spawn the two contender tasks. They run as soon
@@ -357,6 +357,18 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     {
         let _ = sched::spawn("mutex_storm_h0", deflake::mutex_storm::body_hart0);
         let _ = sched::spawn_on(1, "mutex_storm_h1", deflake::mutex_storm::body_hart1);
+    }
+
+    // Virtio-storm: pre-register the storm's emission metric (so
+    // its StringRegister frame doesn't get emitted from inside the
+    // storm loop, which would muddy the per-iteration timing), then
+    // spawn the two bodies. Hart 0 emits frames; hart 1 spins
+    // atomics until hart 0 signals stop.
+    #[cfg(feature = "deflake-virtio-storm")]
+    {
+        deflake::virtio_storm::init();
+        let _ = sched::spawn("virtio_storm_h0", deflake::virtio_storm::body_hart0);
+        let _ = sched::spawn_on(1, "virtio_storm_h1", deflake::virtio_storm::body_hart1);
     }
 
     // Tear down both identity mappings. From here on, any access to

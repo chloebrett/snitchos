@@ -21,6 +21,7 @@ pub use aggregate::{Aggregator, RunTotals};
 pub use baseline::{
     Baseline, BaselineError, BaselineFile, PartialMarker, ScenarioBaseline, SummaryOptions,
 };
+pub use history::{RecoveredRun, RecoveredScenario, aggregate_run_dir};
 pub use lock::{ItestLock, LockError};
 pub use runner::{RunnerConfig, Scenario, run};
 pub use stats::{ConfidenceInterval, two_proportion_p_value, wilson_score_95};

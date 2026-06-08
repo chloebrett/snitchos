@@ -141,6 +141,13 @@ enum Cmd {
         /// Idempotent (no-op if no pending file exists).
         #[arg(long, default_value_t = false)]
         discard_pending: bool,
+        /// Rebuild the pending baseline from a per-run history
+        /// directory's NDJSON. Use when the in-process pending write
+        /// was lost (e.g. process killed mid-iteration). Path is the
+        /// run directory, e.g. `.itest-runs/2026-06-08T12-30-15Z`.
+        /// Refuses to overwrite an existing pending file.
+        #[arg(long, value_name = "RUN_DIR")]
+        recover_pending: Option<std::path::PathBuf>,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -189,7 +196,10 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, promote_pending, discard_pending } => {
+        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, promote_pending, discard_pending, recover_pending } => {
+            if let Some(dir) = recover_pending {
+                return itest::recover_pending(dir);
+            }
             if promote_pending {
                 return itest::promote_pending();
             }

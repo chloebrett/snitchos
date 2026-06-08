@@ -46,6 +46,13 @@ deflake-shootdown-storm = []
 # payload in the critical section — just the acquire/release pair.
 # Used by `deflake-mutex-storm`.
 deflake-mutex-storm = []
+# Replaces the default boot workload with a virtio-emit storm:
+# hart 0 runs a task that calls `tracing::emit_metric` in a tight
+# loop (virtio_console::send + TX_STAGING + MMIO notify), while
+# hart 1 runs a task that does pure Relaxed atomic bumps on a
+# shared cell. No cross-hart mutex contention. Tests H11-refined:
+# is the cross-hart bug inside the virtio TX path specifically?
+deflake-virtio-storm = []
 
 [dependencies]
 fdt = "0.1.5"

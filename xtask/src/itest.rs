@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use itest_harness::{BaselineFile, ItestLock, LockError, RunnerConfig, SummaryOptions};
+use itest_harness::{
+    BaselineFile, ItestLock, LockError, RunnerConfig, SummaryOptions, aggregate_run_dir,
+};
 
 use crate::qemu;
 
@@ -81,6 +83,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario { name: "deflake-shootdown-storm",    run: scenarios::deflake_shootdown_storm },
     Scenario { name: "sched-task-exits-cleanly",   run: scenarios::sched_task_exits_cleanly },
     Scenario { name: "deflake-mutex-storm",        run: scenarios::deflake_mutex_storm },
+    Scenario { name: "deflake-virtio-storm",       run: scenarios::deflake_virtio_storm },
 ];
 
 /// Entry point from `main`. `Some(name)` runs one scenario;
@@ -230,6 +233,55 @@ pub fn discard_pending() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Rebuild the pending baseline sidecar from a per-run history
+/// directory's NDJSON. Used when the in-process pending write was
+/// lost (process killed before the runner could write it, disk full
+/// at the wrong moment, etc.). Refuses if a pending file already
+/// exists — caller should `--discard-pending` or `--promote-pending`
+/// first, then re-run recovery.
+pub fn recover_pending(run_dir: PathBuf) -> ExitCode {
+    let canonical = Path::new(BASELINE_PATH);
+    let pending = BaselineFile::pending_path_for(canonical);
+    if pending.exists() {
+        eprintln!(
+            "refusing to overwrite existing pending baseline at {}.\n\
+             Promote (--promote-pending) or discard (--discard-pending) it first.",
+            pending.display()
+        );
+        return ExitCode::from(1);
+    }
+    if !run_dir.exists() {
+        eprintln!("run directory does not exist: {}", run_dir.display());
+        return ExitCode::from(1);
+    }
+    let recovered = match aggregate_run_dir(&run_dir) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("failed to aggregate run directory: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let run_dir_name = run_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let file = BaselineFile::from_recovered(&recovered, &run_dir_name);
+    if let Err(e) = file.save_path(&pending) {
+        eprintln!("failed to write pending baseline: {e}");
+        return ExitCode::from(1);
+    }
+    eprintln!(
+        "Recovered pending baseline from {} → {}.\n\
+         {} scenarios reconstructed. Inspect with --baseline-show, then\n\
+         --promote-pending or --discard-pending.",
+        run_dir.display(),
+        pending.display(),
+        recovered.scenarios.len(),
+    );
+    ExitCode::SUCCESS
 }
 
 /// Load `.itest-baseline.toml` and print its rendered summary. Exits

@@ -767,6 +767,101 @@ TCG. Candidate moves:
 **If the prediction fails:** revised-H7 is wrong; data still useful.
 Move to H8 / H10 / signature-classify.
 
+### Result: revised-H7 is effectively falsified
+
+Built `deflake-mutex-storm` per the design above. Ran fix-off
+`--repeat 20` (1/20 = 5.0% [0.9, 23.6]) then `--repeat 50`
+(1/50 = 2.0% [0.4, 10.5]). Combined: 2/70 = 2.9% [0.8, 9.9].
+
+This is the *lowest* rate among scenarios with any mutex pressure
+— and the storm has by far the *highest* raw mutex contention rate
+in the suite (≈150 000 acquires/s/hart × 2 harts × 1.3 s × 2 op/lock
+≈ 1 M atomic operations per run on the shared mutex byte). If
+revised-H7 were the bug, this scenario should flake at near-100%.
+
+| Scenario                          | Mutex op shape              | Flake (fix on) |
+|-----------------------------------|-----------------------------|---------------:|
+| **deflake-mutex-storm (fix OFF)** | Mutex<()>: empty critical   | 2.9% [0.8, 9.9]|
+| kernel-heap-metrics               | heap allocator              | 5.0%           |
+| sched-spans-carry-task-id         | INTERN_TABLE + TX_STAGING   | 5.0%           |
+| sched-span-survives-yield         | INTERN_TABLE + TX_STAGING   | 2.5%           |
+| workload-cooperative-baseline     | workload + INTERN+TX        | 2.5%           |
+| deflake-ipi-pong                  | atomics only                | 0%             |
+| deflake-shootdown-storm           | atomics only                | 0%             |
+
+The pattern that *did* survive: scenarios with `INTERN_TABLE +
+TX_STAGING` (the span emission path) and the heap allocator flake;
+scenarios that lock only an "empty" mutex don't (above the baseline
+mutex rate). The storm body's critical section is one Relaxed
+atomic bump — no allocation, no MMIO, no other mutex.
+
+The flaky cluster shares something *more specific* than "uses a
+mutex":
+
+- **Span emissions: INTERN_TABLE → virtio_console::send (with
+  TX_STAGING).** Long critical section. Touches both
+  ordinary memory (the intern table entries, the staging buffer)
+  and MMIO (the virtio notify register).
+- **Heap allocator: linked-list operations under the heap mutex.**
+  Touches significant amounts of heap metadata, including
+  freelist pointers, allocation headers.
+- **Both involve writes to memory that other code reads outside
+  the critical section.** Span emission writes a frame into
+  `TX_STAGING`; virtio DMA reads it. Heap allocation writes header
+  bytes; subsequent allocator calls read them. Mutex-storm's
+  critical section writes nothing other harts read.
+
+That common factor — **publication of memory from inside a critical
+section, consumed outside** — is the new hypothesis surface.
+
+### H11 (new): virtio TX path is the bug surface
+
+The leading candidate after mutex-storm falsified revised-H7:
+
+> **The cross-hart bug is specifically inside the virtio-console
+> emission path** — `virtio_console::send` and its
+> `TX_STAGING.lock()` + descriptor-ring update + MMIO notify. Not a
+> general mutex problem; this *particular* chain of operations has
+> a stale-read or ordering hazard on multi-thread TCG.
+
+Why this fits:
+
+- Every flaky scenario in the suite emits virtio frames inside a
+  critical section that races with hart-1 memory ops.
+- The atomic-only zero-flake scenarios (ipi-pong, shootdown-storm)
+  *do* emit frames, but only their final completion metric — most
+  of the run is hart 0 spin-waiting on hart 1's atomic. No
+  per-second virtio emission.
+- The trap-return `tag()` fix is itself a virtio-adjacent MMIO
+  write that also goes through (different) MMIO. The BQL fence it
+  provides closes the same code path.
+
+### Validation experiment: `deflake-virtio-storm`
+
+Hart 0 runs a task that emits virtio frames in a tight loop (one
+metric emission per iteration via `tracing::emit_metric`). Hart 1
+runs a task that does Relaxed `fetch_add` on a shared atomic in a
+tight loop. No mutex contention between them, no shared
+non-atomic memory. Just:
+
+- Hart 0: virtio frame emission churn.
+- Hart 1: pure atomic work.
+
+Predict:
+
+| Fix | Predicted rate |
+|-----|----------------|
+| on  | clean (≥40/40) |
+| off | high (≥30% per boot) if H11-refined is right |
+
+If high: the virtio path is the bug surface; audit
+`virtio_console::send` and `TX_STAGING` interactions. If clean:
+H11-refined is wrong; the flaky scenarios share something *else*
+we haven't isolated (maybe the heap allocator specifically;
+heap-metrics is the only flaky scenario without virtio emission
+in its hot path — well, it does emit metrics, but at heartbeat
+rate, not in tight loops).
+
 ### What this implies for the other open hypotheses
 
 - **H6 (boot-time race)**: less likely. The flake distribution
