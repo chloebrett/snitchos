@@ -7,9 +7,9 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use itest_harness::{
-    BaselineFile, ItestLock, LockError, RunnerConfig, SummaryOptions, aggregate_run_dir,
-    prune_runs as prune_runs_in, push_otlp, push_otlp_with_timeout, render_prometheus,
-    write_atomic,
+    BaselineFile, CpuProfile, ItestLock, LockError, RunnerConfig, SummaryOptions,
+    aggregate_run_dir, prune_runs as prune_runs_in, push_otlp, push_otlp_with_timeout,
+    render_prometheus, write_atomic,
 };
 
 use crate::qemu;
@@ -108,6 +108,7 @@ const SCENARIOS: &[Scenario] = &[
 /// `update_baseline` writes the current run's per-scenario results
 /// back to `.itest-baseline.toml` (pushing the previous `current`
 /// into `history`) after the run completes.
+#[allow(clippy::too_many_arguments, reason = "1:1 with the CLI flags; refactor when more land")]
 pub fn run(
     name: Option<&str>,
     repeat: u32,
@@ -116,6 +117,8 @@ pub fn run(
     fail_fast: Option<u32>,
     auto_push: bool,
     jobs: u32,
+    cpu_jobs: u32,
+    profile_filter: Option<CpuProfile>,
 ) -> ExitCode {
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
@@ -173,6 +176,23 @@ pub fn run(
         },
         None => SCENARIOS.iter().collect(),
     };
+    let to_run: Vec<&Scenario> = match profile_filter {
+        Some(p) => {
+            let label = match p {
+                CpuProfile::Wfi => "wfi",
+                CpuProfile::Cpu => "cpu",
+            };
+            let filtered: Vec<&Scenario> =
+                to_run.into_iter().filter(|s| s.cpu_profile == p).collect();
+            if filtered.is_empty() {
+                eprintln!("--profile {label}: no scenarios match this filter");
+                return ExitCode::from(2);
+            }
+            eprintln!("--profile {label}: {} scenarios selected", filtered.len());
+            filtered
+        }
+        None => to_run,
+    };
 
     // Hook closures. None of these escape the call — the lifetime
     // parameter on RunnerConfig keeps them bounded to this scope.
@@ -200,6 +220,7 @@ pub fn run(
         interrupt: Some(&INTERRUPT),
         history_root: Some(PathBuf::from(HISTORY_ROOT)),
         jobs,
+        cpu_jobs,
     };
 
     let outcome = itest_harness::run(&to_run, repeat, update_baseline, &config);

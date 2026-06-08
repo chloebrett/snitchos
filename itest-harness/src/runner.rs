@@ -153,6 +153,14 @@ pub struct RunnerConfig<'a> {
     /// interrupt check) before the next begins — fan-out is intra-
     /// iteration only.
     pub jobs: u32,
+
+    /// Worker count for the Cpu-bound batch (the scenarios marked
+    /// `Scenario::cpu_bound`). They run in their own pass after the
+    /// Wfi batch finishes. `0` means "auto: `max(1, jobs / 2)`",
+    /// which keeps each Cpu worker on its own host core when
+    /// `jobs <= num_cpus`. Override when on a small CI runner or
+    /// when you want fully-serial Cpu execution (set to 1).
+    pub cpu_jobs: u32,
 }
 
 /// Run `scenarios` `repeat` times. If `update_baseline` is true, write
@@ -257,89 +265,56 @@ pub fn run(
             count
         } else {
             // Parallel path. Partition by `cpu_profile`: Wfi scenarios
-            // fan out across the worker pool, Cpu scenarios run
-            // serially afterwards on one host core at a time so they
-            // don't contend with each other (or stretch wall-clock
-            // past per-scenario timeouts).
+            // fan out across `jobs` workers; Cpu scenarios run in a
+            // second pass at the (typically smaller) `cpu_jobs` width
+            // so each Cpu worker tends to land on its own host core.
             let (wfi_scenarios, cpu_scenarios): (Vec<&Scenario>, Vec<&Scenario>) =
                 scenarios
                     .iter()
                     .copied()
                     .partition(|s| matches!(s.cpu_profile, CpuProfile::Wfi));
 
+            // Resolve `cpu_jobs == 0` to the "half of jobs, min 1"
+            // default. Already-resolved values (xtask passes them as
+            // a `u32`) pass through untouched.
+            let cpu_jobs = if config.cpu_jobs == 0 {
+                (jobs / 2).max(1)
+            } else {
+                config.cpu_jobs
+            };
+
             let mut iter_failed = 0usize;
 
-            // --- Wfi parallel batch ---
             if !wfi_scenarios.is_empty() {
-                let work: Mutex<VecDeque<&Scenario>> =
-                    Mutex::new(wfi_scenarios.into_iter().collect());
-                let log_path_for = config.log_path_for;
-                let max_wait_for = config.max_wait_for;
-                let history_dir_ref = history_dir.as_deref();
-                let history_writer_ref = &history_writer;
-                let work_ref = &work;
-
-                let per_worker: Vec<(Aggregator, usize)> = thread::scope(|sc| {
-                    let mut handles = Vec::with_capacity(jobs as usize);
-                    for _ in 0..jobs {
-                        handles.push(sc.spawn(move || {
-                            let mut worker_agg = Aggregator::new();
-                            let mut worker_failed = 0usize;
-                            loop {
-                                let next = {
-                                    let mut q = work_ref
-                                        .lock()
-                                        .expect("work-queue poisoned");
-                                    q.pop_front()
-                                };
-                                let Some(s) = next else { break };
-                                let res = process_one_scenario(
-                                    s,
-                                    run_idx,
-                                    &mut worker_agg,
-                                    history_writer_ref,
-                                    history_dir_ref,
-                                    log_path_for,
-                                    max_wait_for,
-                                    ScenarioFormat::Prefixed,
-                                );
-                                if res.failed {
-                                    worker_failed += 1;
-                                }
-                            }
-                            (worker_agg, worker_failed)
-                        }));
-                    }
-                    handles
-                        .into_iter()
-                        .map(|h| h.join().expect("worker panicked"))
-                        .collect()
-                });
-
-                iter_failed += per_worker.iter().map(|(_, f)| *f).sum::<usize>();
-                for (worker_agg, _) in per_worker {
-                    local.merge(worker_agg);
-                }
+                let (wfi_agg, wfi_failed) = run_parallel_batch(
+                    wfi_scenarios,
+                    jobs,
+                    run_idx,
+                    &history_writer,
+                    history_dir.as_deref(),
+                    config.log_path_for,
+                    config.max_wait_for,
+                );
+                local.merge(wfi_agg);
+                iter_failed += wfi_failed;
             }
 
-            // --- Cpu serial pass ---
             if !cpu_scenarios.is_empty() {
-                eprintln!("--- cpu-bound scenarios (serial) ---");
-                for s in cpu_scenarios {
-                    let res = process_one_scenario(
-                        s,
-                        run_idx,
-                        &mut local,
-                        &history_writer,
-                        history_dir.as_deref(),
-                        config.log_path_for,
-                        config.max_wait_for,
-                        ScenarioFormat::Prefixed,
-                    );
-                    if res.failed {
-                        iter_failed += 1;
-                    }
-                }
+                eprintln!(
+                    "--- cpu-bound scenarios ({} parallel) ---",
+                    cpu_jobs
+                );
+                let (cpu_agg, cpu_failed) = run_parallel_batch(
+                    cpu_scenarios,
+                    cpu_jobs,
+                    run_idx,
+                    &history_writer,
+                    history_dir.as_deref(),
+                    config.log_path_for,
+                    config.max_wait_for,
+                );
+                local.merge(cpu_agg);
+                iter_failed += cpu_failed;
             }
 
             iter_failed
@@ -478,6 +453,71 @@ pub fn run(
     }
 
     exit_code_with_interrupt(&aggregator, interrupted)
+}
+
+/// Run a batch of scenarios across `workers` threads pulling from a
+/// shared work queue. Used twice per iteration: once for Wfi-batch
+/// scenarios at `jobs` workers, once for Cpu-batch scenarios at
+/// `cpu_jobs` workers (typically half of `jobs`). Returns the merged
+/// per-batch `Aggregator` plus the total failure count across all
+/// scenarios in the batch.
+#[allow(clippy::too_many_arguments, reason = "shape mirrors process_one_scenario")]
+fn run_parallel_batch<'a>(
+    scenarios: Vec<&'a Scenario>,
+    workers: u32,
+    run_idx: u32,
+    history_writer: &'a Mutex<Option<HistoryWriter>>,
+    history_dir: Option<&'a Path>,
+    log_path_for: Option<LogPathFn<'a>>,
+    max_wait_for: Option<MaxWaitFn<'a>>,
+) -> (Aggregator, usize) {
+    if scenarios.is_empty() || workers == 0 {
+        return (Aggregator::new(), 0);
+    }
+    let work: Mutex<VecDeque<&'a Scenario>> = Mutex::new(scenarios.into_iter().collect());
+    let work_ref = &work;
+
+    let per_worker: Vec<(Aggregator, usize)> = thread::scope(|sc| {
+        let mut handles = Vec::with_capacity(workers as usize);
+        for _ in 0..workers {
+            handles.push(sc.spawn(move || {
+                let mut worker_agg = Aggregator::new();
+                let mut worker_failed = 0usize;
+                loop {
+                    let next = work_ref
+                        .lock()
+                        .expect("work-queue poisoned")
+                        .pop_front();
+                    let Some(s) = next else { break };
+                    let res = process_one_scenario(
+                        s,
+                        run_idx,
+                        &mut worker_agg,
+                        history_writer,
+                        history_dir,
+                        log_path_for,
+                        max_wait_for,
+                        ScenarioFormat::Prefixed,
+                    );
+                    if res.failed {
+                        worker_failed += 1;
+                    }
+                }
+                (worker_agg, worker_failed)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("worker panicked"))
+            .collect()
+    });
+
+    let total_failed = per_worker.iter().map(|(_, f)| *f).sum();
+    let mut merged = Aggregator::new();
+    for (worker_agg, _) in per_worker {
+        merged.merge(worker_agg);
+    }
+    (merged, total_failed)
 }
 
 /// Output format for `process_one_scenario`. Sequential runs use
@@ -798,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_bound_scenarios_run_in_serial_pass_after_wfi_batch() {
+    fn cpu_bound_batch_runs_after_wfi_batch() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_counters();
         CPU_INVOCATION_TIMES.lock().unwrap().clear();
@@ -811,8 +851,11 @@ mod tests {
             Scenario::cpu_bound("cpu-b", slow_cpu_tracked),
         ];
         let refs: Vec<&Scenario> = scns.iter().collect();
+        // cpu_jobs=1 to keep the Cpu batch sequential for this test,
+        // so the Wfi-then-Cpu ordering is what's actually being asserted.
         let config = RunnerConfig {
             jobs: 4,
+            cpu_jobs: 1,
             ..RunnerConfig::default()
         };
         let _ = run(&refs, 1, false, &config);
@@ -824,7 +867,7 @@ mod tests {
         assert_eq!(cpu_times.len(), 2);
 
         // Every Cpu invocation should start AFTER both Wfi invocations
-        // (the Wfi batch completes before the Cpu serial pass starts).
+        // started (the Wfi batch finishes before the Cpu pass begins).
         let latest_wfi_start = *wfi_times.iter().max().unwrap();
         for cpu_start in &cpu_times {
             assert!(
@@ -832,24 +875,42 @@ mod tests {
                 "Cpu scenario started before Wfi batch finished"
             );
         }
+    }
 
-        // Cpu invocations should themselves be serial — the second
-        // starts AFTER the first sleep completes (~50ms later).
-        let mut cpu_sorted = cpu_times.clone();
-        cpu_sorted.sort();
-        let gap = cpu_sorted[1].duration_since(cpu_sorted[0]);
+    #[test]
+    fn cpu_jobs_auto_default_is_half_of_jobs() {
+        // jobs=4, cpu_jobs=0 → auto-resolves to 2. Two Cpu scenarios
+        // should run concurrently (not serially), so total wall-clock
+        // is roughly one sleep window, not two.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_counters();
+        let scns = [
+            Scenario::cpu_bound("cpu-a", slow_cpu_pass),
+            Scenario::cpu_bound("cpu-b", slow_cpu_pass),
+        ];
+        let refs: Vec<&Scenario> = scns.iter().collect();
+        let config = RunnerConfig {
+            jobs: 4,
+            cpu_jobs: 0, // auto
+            ..RunnerConfig::default()
+        };
+        let start = std::time::Instant::now();
+        let _ = run(&refs, 1, false, &config);
+        let elapsed = start.elapsed();
+        assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 2);
+        // 2 × 150ms serially would be ~300ms. cpu_jobs=2 should be
+        // ~200ms (one sleep window + thread overhead).
         assert!(
-            gap.as_millis() >= 40,
-            "Cpu scenarios appear to overlap; gap={:?}",
-            gap
+            elapsed.as_millis() < 280,
+            "expected cpu_jobs=2 parallelism; elapsed={:?}",
+            elapsed
         );
     }
 
     #[test]
-    fn all_cpu_bound_scenarios_run_serially_with_no_wfi_batch() {
+    fn cpu_jobs_one_keeps_cpu_batch_serial() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_counters();
-        CPU_INVOCATION_TIMES.lock().unwrap().clear();
         let scns = [
             Scenario::cpu_bound("cpu-a", slow_cpu_pass),
             Scenario::cpu_bound("cpu-b", slow_cpu_pass),
@@ -858,18 +919,17 @@ mod tests {
         let refs: Vec<&Scenario> = scns.iter().collect();
         let config = RunnerConfig {
             jobs: 4,
+            cpu_jobs: 1,
             ..RunnerConfig::default()
         };
         let start = std::time::Instant::now();
         let _ = run(&refs, 1, false, &config);
         let elapsed = start.elapsed();
         assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 3);
-        // Serial expectation: 3 × 150ms = 450ms minimum. (Parallel
-        // would be ~200ms; this test guards against accidental
-        // parallelisation of Cpu-bound work.)
+        // Serial expectation: 3 × 150ms = 450ms minimum.
         assert!(
             elapsed.as_millis() >= 400,
-            "Cpu scenarios appear to have run in parallel; elapsed={:?}",
+            "Cpu scenarios appear to have run in parallel under cpu_jobs=1; elapsed={:?}",
             elapsed
         );
     }

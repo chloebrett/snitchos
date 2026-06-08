@@ -1,6 +1,6 @@
 use std::process::{Command, ExitCode};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 mod itest;
 mod loc;
@@ -190,15 +190,35 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         no_auto_push: bool,
         /// Number of scenarios to run in parallel. Default `1` matches
-        /// today's sequential behaviour. Values >1 reserve the flag
-        /// for manual experimentation — actual parallel execution
-        /// arrives in a later step of `plans/itest-parallel-scenarios.md`.
+        /// today's sequential behaviour. The runner partitions
+        /// scenarios into Wfi-bounded (parallel at `--jobs` width) and
+        /// Cpu-bounded (parallel at `--cpu-jobs` width, run as a
+        /// separate pass after Wfi). See
+        /// `plans/itest-parallel-scenarios.md`.
         #[arg(
             long,
             default_value_t = 1,
             value_parser = clap::value_parser!(u32).range(1..=64),
         )]
         jobs: u32,
+        /// Worker count for the Cpu-bound scenario batch. `0`
+        /// (the default) auto-resolves to `max(1, --jobs / 2)`,
+        /// which keeps each Cpu worker on its own host core when
+        /// `--jobs <= num_cpus`. Override on small CI runners or
+        /// to force fully-serial Cpu execution (`--cpu-jobs 1`).
+        #[arg(
+            long,
+            default_value_t = 0,
+            value_parser = clap::value_parser!(u32).range(0..=64),
+        )]
+        cpu_jobs: u32,
+        /// Filter scenarios by classification. `--profile wfi` runs
+        /// only wfi-bounded scenarios; `--profile cpu` runs only
+        /// the Cpu-bound set. Useful for isolating which batch is
+        /// driving wall-clock or flake behaviour while tuning
+        /// `--jobs` / `--cpu-jobs`.
+        #[arg(long, value_name = "PROFILE")]
+        profile: Option<ProfileFilter>,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -215,6 +235,17 @@ enum Cmd {
         #[arg(long, default_value = "")]
         features: String,
     },
+}
+
+/// Scenario classification filter for `cargo xtask itest --profile`.
+/// Maps to `itest_harness::CpuProfile`. The variant set is open —
+/// add new ones (e.g. `Smp`, `Deflake`) as more useful axes emerge.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ProfileFilter {
+    /// Only wfi-bounded scenarios.
+    Wfi,
+    /// Only cpu-bound scenarios (the `Scenario::cpu_bound` set).
+    Cpu,
 }
 
 #[derive(Subcommand)]
@@ -247,7 +278,7 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, prune_runs, keep_last, export_prom, push_otlp, no_auto_push, jobs } => {
+        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, prune_runs, keep_last, export_prom, push_otlp, no_auto_push, jobs, cpu_jobs, profile } => {
             if let Some(endpoint) = push_otlp {
                 return itest::push_otlp_metrics(endpoint);
             }
@@ -277,7 +308,11 @@ fn main() -> ExitCode {
                 }
                 eprintln!();
             }
-            itest::run(scenario.as_deref(), repeat, force, update_baseline, fail_fast, !no_auto_push, jobs)
+            let profile_filter = profile.map(|p| match p {
+                ProfileFilter::Wfi => itest_harness::CpuProfile::Wfi,
+                ProfileFilter::Cpu => itest_harness::CpuProfile::Cpu,
+            });
+            itest::run(scenario.as_deref(), repeat, force, update_baseline, fail_fast, !no_auto_push, jobs, cpu_jobs, profile_filter)
         }
         Cmd::Loc => loc::run(),
         Cmd::Debug { features } => debug(&features),
