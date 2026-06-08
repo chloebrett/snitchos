@@ -2,8 +2,9 @@
 //! `Frame`s from the byte stream, and routes them to one or more
 //! output sinks (stdout / OTLP / Prometheus).
 //!
-//! v0.2 scope: `--text` works; `--otlp` and `--prometheus` are stubs
-//! that print "not yet implemented" — wired up in later steps.
+//! Four sinks, all live: stdout (`--text`), OTLP/HTTP traces to Tempo,
+//! Loki log push, and a Prometheus `/metrics` endpoint. OTLP, Loki, and
+//! Prometheus are on by default; each has a `--no-*` flag to disable it.
 
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
@@ -30,8 +31,8 @@ const SOCKET_PATH: &str = "/tmp/snitch-telemetry.sock";
 /// Connect to the kernel's telemetry socket, decode `Frame`s, and route
 /// them to the configured output sinks. OTLP export is on by default
 /// (pointing at the docker-compose Tempo instance); disable with
-/// `--no-otlp`. Prometheus exposition is off by default until v0.2
-/// step 7 is implemented.
+/// `--no-otlp`. Prometheus exposition is also on by default (serving on
+/// `--prometheus`'s port); disable with `--no-prometheus`.
 #[derive(Parser)]
 #[command(about, version)]
 struct Args {
