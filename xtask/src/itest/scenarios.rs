@@ -785,7 +785,15 @@ pub fn workload_cooperative_baseline() -> Result<(), String> {
 /// hart batch handoffs per run — enough interleavings to give the
 /// memory-ordering hazard room to manifest.
 pub fn smp_producer_consumer_correctness() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("smp-workload", "smp")?;
+    // `burst=256` instead of the default 1. At burst=1 the workload is
+    // cadence-bound (~64 samples/s — see post 19), so reaching 1000
+    // samples takes ~16s. A burst makes the two harts' batches overlap,
+    // which both reaches the threshold in well under a second *and*
+    // puts the correctness oracle under genuine cross-hart contention
+    // rather than near-serial 1 Hz blips. (`burst=` and `workload=` are
+    // separate bootargs tokens; the kernel applies burst for any
+    // workload.)
+    let mut h = Harness::spawn_with_workload("smp-workload", "smp burst=256")?;
 
     let frame = h
         .wait_for(SEC * 45, |f, strings| match f {

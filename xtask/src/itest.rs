@@ -185,14 +185,12 @@ pub fn run(
         Some(n) => {
             let mut selected = Vec::new();
             for part in n.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-                match SCENARIOS.iter().find(|s| s.name == part) {
-                    Some(s) => selected.push(s),
-                    None => {
-                        eprintln!("unknown scenario: {part}");
-                        eprintln!("known: {}", SCENARIOS.iter().map(|s| s.name).collect::<Vec<_>>().join(", "));
-                        return ExitCode::from(2);
-                    }
-                }
+                let Some(s) = SCENARIOS.iter().find(|s| s.name == part) else {
+                    eprintln!("unknown scenario: {part}");
+                    eprintln!("known: {}", SCENARIOS.iter().map(|s| s.name).collect::<Vec<_>>().join(", "));
+                    return ExitCode::from(2);
+                };
+                selected.push(s);
             }
             if selected.is_empty() {
                 eprintln!("no scenarios selected (empty list?)");

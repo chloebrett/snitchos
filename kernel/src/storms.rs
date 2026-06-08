@@ -20,6 +20,18 @@
 //! `MutexGuard` in `virtio_console::send`, since fixed); they are kept
 //! as regression guards. See `plans/residual-race-investigation.md`.
 
+/// Single-MMIO-read BQL fence used by the storms' cross-hart spin-waits.
+/// The 16550 LSR at base+5 reads without side effects, and QEMU's MMIO
+/// path takes the Big QEMU Lock — which serialises against other vCPUs
+/// and incidentally supplies the cross-hart memory fence multi-thread
+/// TCG drops on a plain `Acquire`. Fence the *observer*/coordinator
+/// hart with this, never the hart whose race window is under test.
+fn fence_via_uart_lsr() {
+    let lsr = crate::console::emergency_uart_base() + 5;
+    // SAFETY: the 16550 LSR is a mapped, side-effect-free register.
+    unsafe { core::ptr::read_volatile(lsr as *const u8) };
+}
+
 pub mod virtio_storm {
     //! Validation experiment for H11-refined: is the cross-hart bug
     //! specifically in the virtio-console emission path
@@ -206,21 +218,6 @@ pub mod spawn_storm {
         crate::sched::exit_now()
     }
 
-    /// Single-MMIO-read BQL fence used by hart 0's ack-wait spin. The
-    /// UART LSR at base+5 has no side effects on read. QEMU's MMIO
-    /// path acquires the Big QEMU Lock, which serialises against
-    /// other vCPUs and incidentally provides the cross-hart memory
-    /// fence that multi-thread TCG drops on plain `Acquire`. Hart 0
-    /// is the observer, not the hart under test — fencing it does
-    /// not interfere with the race window on hart 1's pickup path.
-    fn fence_via_uart_lsr() {
-        let lsr = crate::console::emergency_uart_base() + 5;
-        // SAFETY: lsr is the 16550 line-status register; reading it
-        // is a non-destructive observation. The address is mapped
-        // (the emergency UART base is always reachable post-MMU).
-        unsafe { core::ptr::read_volatile(lsr as *const u8) };
-    }
-
     /// Drive the storm. Iteration `i` spawns one minimal task on
     /// hart 1 and waits for the ack counter to exceed `i` before
     /// advancing. Returns when all N tasks have acked.
@@ -228,7 +225,7 @@ pub mod spawn_storm {
         for i in 0..N {
             crate::sched::spawn_on(1, "deflake", body);
             loop {
-                fence_via_uart_lsr();
+                super::fence_via_uart_lsr();
                 if ACK_COUNTER.load(Ordering::Acquire) > i {
                     break;
                 }
@@ -448,18 +445,6 @@ pub mod tlb_shootdown {
         PtePerms::R.union(PtePerms::W).union(PtePerms::G)
     }
 
-    /// Single-MMIO-read BQL fence for hart 0's ack spin — the UART LSR
-    /// at base+5 reads without side effects, and QEMU's MMIO path takes
-    /// the Big QEMU Lock, supplying the cross-hart fence multi-thread
-    /// TCG drops on a plain `Acquire`. Used only on hart 0 (the
-    /// coordinator); hart 1 (the hart under test) never does MMIO in its
-    /// read loop, so its TLB state stays the thing we're measuring.
-    fn fence_via_uart_lsr() {
-        let lsr = crate::console::emergency_uart_base() + 5;
-        // SAFETY: the 16550 LSR is a mapped, side-effect-free register.
-        unsafe { core::ptr::read_volatile(lsr as *const u8) };
-    }
-
     /// hart 0: allocate + fill the two frames, install `V → A`, publish
     /// round 0. Runs once, at the top of `run`.
     fn setup() {
@@ -496,7 +481,7 @@ pub mod tlb_shootdown {
             // then does hart 1 hold the *old* translation we're about to
             // invalidate.
             loop {
-                fence_via_uart_lsr();
+                super::fence_via_uart_lsr();
                 if HART1_READS.load(Ordering::Acquire) >= i {
                     break;
                 }
@@ -518,7 +503,7 @@ pub mod tlb_shootdown {
         }
         // Drain the final round, then release the reader.
         loop {
-            fence_via_uart_lsr();
+            super::fence_via_uart_lsr();
             if HART1_READS.load(Ordering::Acquire) > N {
                 break;
             }
@@ -609,19 +594,11 @@ pub mod ping_pong {
     pub static PING_TURNS: AtomicU64 = AtomicU64::new(0);
     pub static PONG_TURNS: AtomicU64 = AtomicU64::new(0);
 
-    /// Side-effect-free 16550 LSR read — the BQL fence multi-thread TCG
-    /// drops on a plain `Acquire`. See [`super::spawn_storm`].
-    fn fence_via_uart_lsr() {
-        let lsr = crate::console::emergency_uart_base() + 5;
-        // SAFETY: the 16550 LSR is a mapped, side-effect-free register.
-        unsafe { core::ptr::read_volatile(lsr as *const u8) };
-    }
-
     /// Busy-wait until it is `mine`'s turn. No yield / `wfi` — see the
     /// module doc for why this oracle stays off the sleep path.
     fn await_turn(mine: u32) {
         while TURN.load(Ordering::Acquire) != mine {
-            fence_via_uart_lsr();
+            super::fence_via_uart_lsr();
             core::hint::spin_loop();
         }
     }
