@@ -131,6 +131,15 @@ impl Aggregator {
         Some(sorted[idx])
     }
 
+    /// Sum of every recorded scenario duration across every scenario.
+    /// In a per-iteration aggregator this is the iteration's total
+    /// CPU time (each scenario consumes ~one host core for its
+    /// duration). Compare against wall-clock to see the parallelism
+    /// factor.
+    pub fn total_duration(&self) -> Duration {
+        self.durations.values().flatten().sum()
+    }
+
     /// Fold `other` into `self`. Used by the parallel runner to
     /// gather per-worker (or per-iteration) aggregators back into a
     /// single suite-level view at the end of a run. Semantics:
@@ -328,6 +337,21 @@ mod tests {
         }
         assert_eq!(a.p95_duration("scn"), b.p95_duration("scn"));
         assert_eq!(a.mean_duration("scn"), b.mean_duration("scn"));
+    }
+
+    #[test]
+    fn total_duration_sums_across_all_scenarios() {
+        let mut agg = Aggregator::new();
+        agg.record_duration("a", Duration::from_millis(100));
+        agg.record_duration("a", Duration::from_millis(200));
+        agg.record_duration("b", Duration::from_millis(50));
+        assert_eq!(agg.total_duration(), Duration::from_millis(350));
+    }
+
+    #[test]
+    fn total_duration_zero_when_no_observations() {
+        let agg = Aggregator::new();
+        assert_eq!(agg.total_duration(), Duration::ZERO);
     }
 
     #[test]

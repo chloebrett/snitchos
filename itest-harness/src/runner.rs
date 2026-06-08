@@ -232,6 +232,7 @@ pub fn run(
         // intra-iteration. `jobs == 1` keeps the sequential output
         // format ("test X ... ok"); `jobs > 1` runs N worker threads
         // pulling from a shared queue, prefix-line output.
+        let iter_wall_start = Instant::now();
         let mut local = Aggregator::new();
         let total = scenarios.len();
 
@@ -344,7 +345,15 @@ pub fn run(
             iter_failed
         };
 
-        eprintln!("\n{} passed, {} failed", total - failed_this_run, failed_this_run);
+        let iter_wall = iter_wall_start.elapsed();
+        let iter_cpu = local.total_duration();
+        eprintln!(
+            "\n{} passed, {} failed in {:.1} seconds wall time, {:.1} seconds CPU time",
+            total - failed_this_run,
+            failed_this_run,
+            iter_wall.as_secs_f64(),
+            iter_cpu.as_secs_f64(),
+        );
         local.finish_run(RunTotals {
             passed: total - failed_this_run,
             failed: failed_this_run,
