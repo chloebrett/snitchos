@@ -114,9 +114,22 @@ enum Cmd {
         fail_fast: Option<u32>,
         /// Print the `.itest-baseline.toml` summary and exit without
         /// running anything. Useful for quickly inspecting recorded
-        /// per-scenario rates and history.
+        /// per-scenario rates. By default shows only the `current`
+        /// entry per scenario; pass `--include-history` for the full
+        /// chronological listing.
         #[arg(long, default_value_t = false)]
         baseline_show: bool,
+        /// Include each scenario's prior `current` measurements
+        /// (i.e. `history`) in `--baseline-show`. Ignored unless
+        /// `--baseline-show` is also passed.
+        #[arg(long, default_value_t = false)]
+        include_history: bool,
+        /// Restrict `--baseline-show` to scenarios with at least one
+        /// failure recorded in `current`. Sorted descending by
+        /// Wilson-score lower bound (tie-break: upper bound) so the
+        /// most-confidently-flaky scenario floats to the top.
+        #[arg(long, default_value_t = false)]
+        flakes_only: bool,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -165,9 +178,9 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show } => {
+        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only } => {
             if baseline_show {
-                return itest::show_baseline();
+                return itest::show_baseline(include_history, flakes_only);
             }
             if !skip_unit_tests {
                 let unit = itest::run_unit_tests();

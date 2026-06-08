@@ -144,23 +144,59 @@ impl BaselineFile {
     }
 
     /// Render the file as a human-readable summary for `--baseline-show`.
-    /// One block per scenario; current measurement first, then history
-    /// in chronological order. Timing fields shown when present.
-    pub fn render_summary(&self) -> String {
+    /// See `SummaryOptions` for the filter/sort knobs.
+    pub fn render_summary(&self, opts: SummaryOptions) -> String {
         use std::fmt::Write;
         let mut out = String::new();
         if self.scenarios.is_empty() {
             let _ = writeln!(out, "(no scenarios recorded)");
             return out;
         }
-        for (name, entry) in &self.scenarios {
+
+        // Pre-collect so we can filter and sort. Bias is toward
+        // surfacing "most-confidently-flaky" first when sorting; the
+        // alphabetical default is fine when not.
+        let mut entries: Vec<(&String, &ScenarioBaseline)> = self
+            .scenarios
+            .iter()
+            .filter(|(_, e)| {
+                if !opts.flakes_only {
+                    return true;
+                }
+                e.current.as_ref().is_some_and(|b| b.failures > 0)
+            })
+            .collect();
+
+        if opts.flakes_only {
+            // Sort descending by Wilson lower bound, then upper bound.
+            // The lower bound is "how confident are we this scenario
+            // is at-least-this-flaky" — a high lower bound is the
+            // most worrying signal. Upper bound tie-breaks ties.
+            entries.sort_by(|(_, a), (_, b)| {
+                let ci_a = a.current.as_ref().map(|b| crate::stats::wilson_score_95(b.failures, b.runs));
+                let ci_b = b.current.as_ref().map(|b| crate::stats::wilson_score_95(b.failures, b.runs));
+                let key_a = ci_a.map(|c| (c.lower, c.upper)).unwrap_or((0.0, 0.0));
+                let key_b = ci_b.map(|c| (c.lower, c.upper)).unwrap_or((0.0, 0.0));
+                // Descending: b before a.
+                key_b
+                    .partial_cmp(&key_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
+        if entries.is_empty() {
+            let _ = writeln!(out, "(no flaky scenarios recorded)");
+            return out;
+        }
+
+        for (name, entry) in entries {
             let _ = writeln!(out, "{name}");
             if let Some(b) = &entry.current {
                 let _ = writeln!(out, "  current  {}", render_baseline(b));
             } else {
                 let _ = writeln!(out, "  current  (none)");
             }
-            if !entry.history.is_empty() {
+            if opts.include_history && !entry.history.is_empty() {
                 let _ = writeln!(out, "  history:");
                 for b in &entry.history {
                     let _ = writeln!(out, "    {}", render_baseline(b));
@@ -169,6 +205,20 @@ impl BaselineFile {
         }
         out
     }
+}
+
+/// Filter and sort knobs for `BaselineFile::render_summary`. All
+/// default to `false` (full alphabetical listing of `current` only).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SummaryOptions {
+    /// Include each scenario's prior `current` entries (now in
+    /// `history`) below its current measurement.
+    pub include_history: bool,
+    /// Filter out scenarios whose `current` measurement has zero
+    /// failures, and sort the remainder descending by Wilson-score
+    /// lower bound (tie-break: upper bound). Surfaces "the most
+    /// confidently flaky scenario" at the top.
+    pub flakes_only: bool,
 }
 
 fn render_baseline(b: &Baseline) -> String {
@@ -328,6 +378,60 @@ mod tests {
     }
 
     #[test]
+    fn render_summary_flakes_only_filters_zero_failure_scenarios() {
+        let mut f = BaselineFile::new();
+        f.update_current(
+            "clean-scenario",
+            make_baseline("aaa", 100, 0, datetime!(2026-06-08 12:00:00 UTC)),
+        );
+        f.update_current(
+            "flaky-scenario",
+            make_baseline("bbb", 100, 3, datetime!(2026-06-08 12:00:00 UTC)),
+        );
+        let out = f.render_summary(SummaryOptions { flakes_only: true, ..Default::default() });
+        assert!(out.contains("flaky-scenario"));
+        assert!(!out.contains("clean-scenario"));
+    }
+
+    #[test]
+    fn render_summary_flakes_only_sorts_by_lower_bound_descending() {
+        let mut f = BaselineFile::new();
+        // Three scenarios with the same observed rate (5%) but
+        // different sample sizes. Larger N → narrower CI → higher
+        // lower bound. So order should be c (200) > a (100) > b (50).
+        f.update_current(
+            "small-n", // 5/100, CI roughly [1.7%, 11.2%]
+            make_baseline("a", 100, 5, datetime!(2026-06-08 12:00:00 UTC)),
+        );
+        f.update_current(
+            "tiny-n", // 2.5/50 ≈ same rate, CI roughly [0.7%, 17%]
+            make_baseline("b", 50, 2, datetime!(2026-06-08 12:00:00 UTC)),
+        );
+        f.update_current(
+            "big-n", // 10/200, same rate, CI roughly [2.7%, 9.0%]
+            make_baseline("c", 200, 10, datetime!(2026-06-08 12:00:00 UTC)),
+        );
+        let out = f.render_summary(SummaryOptions { flakes_only: true, ..Default::default() });
+        let big_idx = out.find("big-n").expect("big-n present");
+        let small_idx = out.find("small-n").expect("small-n present");
+        let tiny_idx = out.find("tiny-n").expect("tiny-n present");
+        // big-n has the tightest CI → highest lower bound → first.
+        assert!(big_idx < small_idx, "big-n should sort above small-n");
+        assert!(small_idx < tiny_idx, "small-n should sort above tiny-n");
+    }
+
+    #[test]
+    fn render_summary_flakes_only_empty_when_no_flakes() {
+        let mut f = BaselineFile::new();
+        f.update_current(
+            "clean",
+            make_baseline("aaa", 100, 0, datetime!(2026-06-08 12:00:00 UTC)),
+        );
+        let out = f.render_summary(SummaryOptions { flakes_only: true, ..Default::default() });
+        assert!(out.contains("no flaky scenarios"));
+    }
+
+    #[test]
     fn timing_fields_round_trip_when_present() {
         let mut f = BaselineFile::new();
         let mut b = make_baseline("abc", 50, 3, datetime!(2026-06-08 10:00:00 UTC));
@@ -357,12 +461,12 @@ mod tests {
     #[test]
     fn render_summary_empty_file() {
         let f = BaselineFile::new();
-        let out = f.render_summary();
+        let out = f.render_summary(SummaryOptions::default());
         assert!(out.contains("(no scenarios recorded)"));
     }
 
     #[test]
-    fn render_summary_with_current_and_history() {
+    fn render_summary_current_only_omits_history_by_default() {
         let mut f = BaselineFile::new();
         f.update_current(
             "heartbeat-cadence",
@@ -372,12 +476,30 @@ mod tests {
             "heartbeat-cadence",
             make_baseline("bbb", 200, 12, datetime!(2026-06-08 12:00:00 UTC)),
         );
-        let out = f.render_summary();
-        assert!(out.contains("heartbeat-cadence"));
+        let out = f.render_summary(SummaryOptions::default());
+        // Current is shown.
+        assert!(out.contains("12/200"));
+        assert!(out.contains("at bbb"));
+        // History is hidden.
+        assert!(!out.contains("history:"));
+        assert!(!out.contains("at aaa"));
+    }
+
+    #[test]
+    fn render_summary_with_history_includes_previous_currents() {
+        let mut f = BaselineFile::new();
+        f.update_current(
+            "heartbeat-cadence",
+            make_baseline("aaa", 100, 5, datetime!(2026-06-01 12:00:00 UTC)),
+        );
+        f.update_current(
+            "heartbeat-cadence",
+            make_baseline("bbb", 200, 12, datetime!(2026-06-08 12:00:00 UTC)),
+        );
+        let out = f.render_summary(SummaryOptions { include_history: true, ..Default::default() });
         // Current
         assert!(out.contains("12/200  (6.0%, 95% CI ["));
         assert!(out.contains("at bbb"));
-        assert!(out.contains("recorded 2026-06-08T12:00:00Z"));
         // History (previous current pushed back)
         assert!(out.contains("history:"));
         assert!(out.contains("5/100  (5.0%, 95% CI ["));
@@ -391,7 +513,7 @@ mod tests {
         b.mean_duration_ms = Some(1234.0);
         b.p95_duration_ms = Some(1500.0);
         f.update_current("x", b);
-        let out = f.render_summary();
+        let out = f.render_summary(SummaryOptions::default());
         assert!(out.contains("timing: mean 1234ms, p95 1500ms"));
     }
 
@@ -402,7 +524,7 @@ mod tests {
             "x",
             make_baseline("abc", 50, 3, datetime!(2026-06-08 10:00:00 UTC)),
         );
-        let out = f.render_summary();
+        let out = f.render_summary(SummaryOptions::default());
         assert!(!out.contains("timing"));
     }
 

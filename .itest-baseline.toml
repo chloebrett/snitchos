@@ -263,12 +263,12 @@ mean_duration_ms = 1199.241791
 p95_duration_ms = 1199.377833
 
 [scenarios.sched-spawn-registers-thread.current]
-commit = "0a56a95"
-runs = 40
+commit = "1ce555f"
+runs = 1000
 failures = 0
-recorded_at = "2026-06-08T00:42:25.503932Z"
-mean_duration_ms = 194.589113
-p95_duration_ms = 205.75241699999998
+recorded_at = "2026-06-08T00:55:19.614364Z"
+mean_duration_ms = 190.58124600000002
+p95_duration_ms = 198.394584
 
 [[scenarios.sched-spawn-registers-thread.history]]
 commit = "0a56a95"
@@ -277,6 +277,14 @@ failures = 0
 recorded_at = "2026-06-08T00:09:00.770373Z"
 mean_duration_ms = 192.91725000000002
 p95_duration_ms = 194.585083
+
+[[scenarios.sched-spawn-registers-thread.history]]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 194.589113
+p95_duration_ms = 205.75241699999998
 
 [scenarios.sched-task-exits-cleanly.current]
 commit = "0a56a95"

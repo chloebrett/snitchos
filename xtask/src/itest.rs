@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use itest_harness::{BaselineFile, ItestLock, LockError, RunnerConfig};
+use itest_harness::{BaselineFile, ItestLock, LockError, RunnerConfig, SummaryOptions};
 
 use crate::qemu;
 
@@ -151,7 +151,7 @@ pub fn run(
 /// Load `.itest-baseline.toml` and print its rendered summary. Exits
 /// with `0` on success (including "file doesn't exist" — that's a
 /// valid initial state). Returns `1` only on parse error.
-pub fn show_baseline() -> ExitCode {
+pub fn show_baseline(include_history: bool, flakes_only: bool) -> ExitCode {
     let path = Path::new(BASELINE_PATH);
     if !path.exists() {
         eprintln!("no baseline file at {BASELINE_PATH}");
@@ -160,7 +160,13 @@ pub fn show_baseline() -> ExitCode {
     match BaselineFile::load_path(path) {
         Ok(file) => {
             eprintln!("=== {BASELINE_PATH} ===\n");
-            eprint!("{}", file.render_summary());
+            eprint!(
+                "{}",
+                file.render_summary(SummaryOptions {
+                    include_history,
+                    flakes_only,
+                })
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
