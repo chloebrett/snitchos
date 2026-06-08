@@ -17,6 +17,7 @@ mod loki;
 mod otlp;
 mod prom;
 mod state;
+mod url;
 
 /// Sink for completed spans. Implement this to add a new output format.
 /// Each implementation receives every `CompletedSpan` produced by the

@@ -96,8 +96,8 @@ struct AnyValue {
 // --- Exporter ----------------------------------------------------------
 
 /// Per-frame OTLP/HTTP exporter. Holds the endpoint URL, a ureq agent
-/// for connection reuse, and a random 16-byte `trace_id` used for all
-/// spans in this session.
+/// for connection reuse, and a 16-byte `trace_id` (unique per session)
+/// used for all spans in this session.
 ///
 /// Known weaknesses:
 /// - **Per-frame POSTs.** One HTTP request per span. Fine at heartbeat
@@ -115,16 +115,10 @@ pub struct Exporter {
 
 impl Exporter {
     pub fn new(endpoint: &str) -> Self {
-        // The OTLP/HTTP traces path is /v1/traces.
-        let endpoint = if endpoint.ends_with("/v1/traces") {
-            endpoint.to_string()
-        } else {
-            format!("{}/v1/traces", endpoint.trim_end_matches('/'))
-        };
         Self {
-            endpoint,
+            endpoint: crate::url::ensure_suffix(endpoint, "/v1/traces"),
             agent: ureq::AgentBuilder::new().build(),
-            trace_id: random_trace_id(),
+            trace_id: session_trace_id(),
         }
     }
 
@@ -228,13 +222,15 @@ impl SpanExporter for Exporter {
     }
 }
 
-#[cfg_attr(test, mutants::skip)] // non-deterministic — output cannot be asserted
-fn random_trace_id() -> [u8; 16] {
-    let mut id = [0u8; 16];
-    for b in &mut id {
-        *b = fastrand::u8(..);
-    }
-    id
+/// A 16-byte `trace_id` for this collector session. Derived from the
+/// start-time nanoseconds — all we need is uniqueness per collector run
+/// (so each kernel session lands under its own Tempo trace), not entropy.
+#[cfg_attr(test, mutants::skip)] // time-dependent — output cannot be asserted
+fn session_trace_id() -> [u8; 16] {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+        .to_le_bytes()
 }
 
 fn clamp_u128_to_u64(v: u128) -> u64 {
@@ -259,14 +255,8 @@ mod tests {
     }
 
     #[test]
-    fn exporter_appends_v1_traces_to_bare_url() {
+    fn exporter_wires_the_v1_traces_path() {
         let e = Exporter::new("http://localhost:4318");
-        assert_eq!(e.endpoint, "http://localhost:4318/v1/traces");
-    }
-
-    #[test]
-    fn exporter_does_not_double_append_v1_traces() {
-        let e = Exporter::new("http://localhost:4318/v1/traces");
         assert_eq!(e.endpoint, "http://localhost:4318/v1/traces");
     }
 }

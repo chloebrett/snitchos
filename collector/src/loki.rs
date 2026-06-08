@@ -17,13 +17,8 @@ pub struct Exporter {
 
 impl Exporter {
     pub fn new(endpoint: &str) -> Self {
-        let endpoint = if endpoint.ends_with("/loki/api/v1/push") {
-            endpoint.to_string()
-        } else {
-            format!("{}/loki/api/v1/push", endpoint.trim_end_matches('/'))
-        };
         Self {
-            endpoint,
+            endpoint: crate::url::ensure_suffix(endpoint, "/loki/api/v1/push"),
             agent: ureq::AgentBuilder::new().build(),
         }
     }
@@ -156,14 +151,8 @@ mod tests {
     // --- Exporter::new endpoint normalisation ---
 
     #[test]
-    fn exporter_appends_push_path_to_bare_url() {
+    fn exporter_wires_the_loki_push_path() {
         let e = Exporter::new("http://localhost:3100");
-        assert_eq!(e.endpoint, "http://localhost:3100/loki/api/v1/push");
-    }
-
-    #[test]
-    fn exporter_does_not_double_append_push_path() {
-        let e = Exporter::new("http://localhost:3100/loki/api/v1/push");
         assert_eq!(e.endpoint, "http://localhost:3100/loki/api/v1/push");
     }
 }
