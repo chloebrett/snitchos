@@ -336,9 +336,9 @@ impl Harness {
                 let name = self.strings.get(name_id).map_or("?", String::as_str);
                 format!("Event {{ {name:?} span={span_id:?} t={t} }}")
             }
-            OwnedFrame::Metric { name_id, value, t } => {
+            OwnedFrame::Metric { name_id, value, t, hart_id } => {
                 let name = self.strings.get(name_id).map_or("?", String::as_str);
-                format!("Metric {{ {name:?} value={value} t={t} }}")
+                format!("Metric {{ {name:?} value={value} t={t} hart={hart_id} }}")
             }
             OwnedFrame::Dropped { count } =>
                 format!("Dropped {{ count={count} }}"),

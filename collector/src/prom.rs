@@ -59,12 +59,15 @@ pub fn serve(state: Arc<Mutex<State>>, port: u16) -> std::io::Result<()> {
 fn format_metrics(state: &State) -> String {
     let mut out = String::new();
 
-    // Counters and gauges — single value per metric.
-    for (name_id, value) in &state.metric_values {
-        let Some(raw_name) = state.name(*name_id) else {
+    // Counters and gauges. State is keyed by (name_id, hart_id); group
+    // by name so HELP/TYPE is emitted once per family, then one
+    // `{hart="N"}`-labelled value line per emitting hart. BTreeMap keeps
+    // the output deterministic (family order + hart order).
+    for (name_id, harts) in group_by_name(state.metric_values.iter().map(|(&k, &v)| (k, v))) {
+        let Some(raw_name) = state.name(name_id) else {
             continue;
         };
-        let Some(kind) = state.metric_kind(*name_id) else {
+        let Some(kind) = state.metric_kind(name_id) else {
             continue;
         };
         if matches!(kind, MetricKind::Histogram) {
@@ -78,33 +81,55 @@ fn format_metrics(state: &State) -> String {
         };
         let _ = writeln!(out, "# HELP {prom_name} {raw_name}");
         let _ = writeln!(out, "# TYPE {prom_name} {kind_str}");
-        let _ = writeln!(out, "{prom_name} {value}");
+        for (hart_id, value) in harts {
+            let _ = writeln!(out, "{prom_name}{{hart=\"{hart_id}\"}} {value}");
+        }
     }
 
-    // Histograms — bucket counts (cumulative), sum, count.
-    for (name_id, hist) in &state.histograms {
-        let Some(raw_name) = state.name(*name_id) else {
+    // Histograms — bucket counts (cumulative), sum, count. Same
+    // group-by-name treatment; each hart gets its own labelled series.
+    for (name_id, harts) in group_by_name(state.histograms.iter().map(|(&k, v)| (k, v))) {
+        let Some(raw_name) = state.name(name_id) else {
             continue;
         };
         let prom_name = sanitize(raw_name);
         let _ = writeln!(out, "# HELP {prom_name} {raw_name}");
         let _ = writeln!(out, "# TYPE {prom_name} histogram");
 
-        // Prometheus expects cumulative bucket counts.
-        let mut cumulative: u64 = 0;
-        for (i, &bound) in State::HISTOGRAM_BOUNDS.iter().enumerate() {
-            if let Some(&c) = hist.buckets.get(i) {
-                cumulative += c;
+        for (hart_id, hist) in harts {
+            // Prometheus expects cumulative bucket counts.
+            let mut cumulative: u64 = 0;
+            for (i, &bound) in State::HISTOGRAM_BOUNDS.iter().enumerate() {
+                if let Some(&c) = hist.buckets.get(i) {
+                    cumulative += c;
+                }
+                let _ = writeln!(out, "{prom_name}_bucket{{hart=\"{hart_id}\",le=\"{bound}\"}} {cumulative}");
             }
-            let _ = writeln!(out, "{prom_name}_bucket{{le=\"{bound}\"}} {cumulative}");
+            cumulative += hist.inf_count;
+            let _ = writeln!(out, "{prom_name}_bucket{{hart=\"{hart_id}\",le=\"+Inf\"}} {cumulative}");
+            let _ = writeln!(out, "{prom_name}_sum{{hart=\"{hart_id}\"}} {}", hist.sum);
+            let _ = writeln!(out, "{prom_name}_count{{hart=\"{hart_id}\"}} {}", hist.count);
         }
-        cumulative += hist.inf_count;
-        let _ = writeln!(out, "{prom_name}_bucket{{le=\"+Inf\"}} {cumulative}");
-        let _ = writeln!(out, "{prom_name}_sum {}", hist.sum);
-        let _ = writeln!(out, "{prom_name}_count {}", hist.count);
     }
 
     out
+}
+
+/// Regroup `(name_id, hart_id)`-keyed entries into name → sorted
+/// `(hart_id, value)` list. `BTreeMap` + the inner sort make the
+/// exposition order deterministic regardless of `HashMap` iteration.
+fn group_by_name<V>(
+    entries: impl Iterator<Item = ((u32, u8), V)>,
+) -> std::collections::BTreeMap<u32, Vec<(u8, V)>> {
+    let mut by_name: std::collections::BTreeMap<u32, Vec<(u8, V)>> =
+        std::collections::BTreeMap::new();
+    for ((name_id, hart_id), v) in entries {
+        by_name.entry(name_id).or_default().push((hart_id, v));
+    }
+    for harts in by_name.values_mut() {
+        harts.sort_by_key(|(hart_id, _)| *hart_id);
+    }
+    by_name
 }
 
 /// Replace any character not in `[a-zA-Z0-9_:]` with `_`. Required so
@@ -133,24 +158,41 @@ mod tests {
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::StringRegister { id: StringId(1), value: name });
         s.handle(&Frame::MetricRegister { name_id: StringId(1), kind });
-        s.handle(&Frame::Metric { name_id: StringId(1), value, t: 100 });
+        s.handle(&Frame::Metric { name_id: StringId(1), value, t: 100, hart_id: 0 });
         s
     }
 
     #[test]
-    fn format_counter_emits_type_and_value() {
+    fn format_counter_emits_type_and_hart_labelled_value() {
         let s = state_with_scalar("snitchos.heartbeat.count", MetricKind::Counter, 42);
         let out = format_metrics(&s);
         assert!(out.contains("# TYPE snitchos_heartbeat_count counter\n"), "got:\n{out}");
-        assert!(out.contains("snitchos_heartbeat_count 42\n"), "got:\n{out}");
+        assert!(out.contains("snitchos_heartbeat_count{hart=\"0\"} 42\n"), "got:\n{out}");
     }
 
     #[test]
-    fn format_gauge_emits_type_and_value() {
+    fn format_gauge_emits_type_and_hart_labelled_value() {
         let s = state_with_scalar("cpu.temp", MetricKind::Gauge, 72);
         let out = format_metrics(&s);
         assert!(out.contains("# TYPE cpu_temp gauge\n"), "got:\n{out}");
-        assert!(out.contains("cpu_temp 72\n"), "got:\n{out}");
+        assert!(out.contains("cpu_temp{hart=\"0\"} 72\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn format_same_counter_from_two_harts_emits_one_family_two_labelled_lines() {
+        let mut s = State::new(FakeWallClock(0));
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        s.handle(&Frame::StringRegister { id: StringId(1), value: "snitchos.sched.switches" });
+        s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Counter });
+        s.handle(&Frame::Metric { name_id: StringId(1), value: 10, t: 100, hart_id: 0 });
+        s.handle(&Frame::Metric { name_id: StringId(1), value: 7, t: 100, hart_id: 1 });
+
+        let out = format_metrics(&s);
+        // HELP/TYPE appear exactly once for the family.
+        assert_eq!(out.matches("# TYPE snitchos_sched_switches counter").count(), 1, "got:\n{out}");
+        // One value line per hart.
+        assert!(out.contains("snitchos_sched_switches{hart=\"0\"} 10\n"), "got:\n{out}");
+        assert!(out.contains("snitchos_sched_switches{hart=\"1\"} 7\n"), "got:\n{out}");
     }
 
     #[test]
@@ -160,18 +202,18 @@ mod tests {
         s.handle(&Frame::StringRegister { id: StringId(1), value: "irq.duration" });
         s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Histogram });
         // 50 → bucket[0] (≤100), 200 → bucket[1] (≤250)
-        s.handle(&Frame::Metric { name_id: StringId(1), value: 50, t: 100 });
-        s.handle(&Frame::Metric { name_id: StringId(1), value: 200, t: 100 });
+        s.handle(&Frame::Metric { name_id: StringId(1), value: 50, t: 100, hart_id: 0 });
+        s.handle(&Frame::Metric { name_id: StringId(1), value: 200, t: 100, hart_id: 0 });
 
         let out = format_metrics(&s);
         assert!(out.contains("# TYPE irq_duration histogram\n"), "got:\n{out}");
         // non-cumulative: bucket[0]=1, bucket[1]=1 → cumulative: le=100→1, le=250→2
-        assert!(out.contains("irq_duration_bucket{le=\"100\"} 1\n"), "got:\n{out}");
-        assert!(out.contains("irq_duration_bucket{le=\"250\"} 2\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_bucket{hart=\"0\",le=\"100\"} 1\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_bucket{hart=\"0\",le=\"250\"} 2\n"), "got:\n{out}");
         // remaining buckets all still 2
-        assert!(out.contains("irq_duration_bucket{le=\"+Inf\"} 2\n"), "got:\n{out}");
-        assert!(out.contains("irq_duration_sum 250\n"), "got:\n{out}");
-        assert!(out.contains("irq_duration_count 2\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_bucket{hart=\"0\",le=\"+Inf\"} 2\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_sum{hart=\"0\"} 250\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_count{hart=\"0\"} 2\n"), "got:\n{out}");
     }
 
     #[test]
@@ -181,12 +223,12 @@ mod tests {
         s.handle(&Frame::StringRegister { id: StringId(1), value: "irq.duration" });
         s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Histogram });
         // 2_000_000 exceeds all bounds → inf_count
-        s.handle(&Frame::Metric { name_id: StringId(1), value: 2_000_000, t: 100 });
+        s.handle(&Frame::Metric { name_id: StringId(1), value: 2_000_000, t: 100, hart_id: 0 });
 
         let out = format_metrics(&s);
-        assert!(out.contains("irq_duration_bucket{le=\"+Inf\"} 1\n"), "got:\n{out}");
-        assert!(out.contains("irq_duration_bucket{le=\"1000000\"} 0\n"), "got:\n{out}");
-        assert!(out.contains("irq_duration_sum 2000000\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_bucket{hart=\"0\",le=\"+Inf\"} 1\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_bucket{hart=\"0\",le=\"1000000\"} 0\n"), "got:\n{out}");
+        assert!(out.contains("irq_duration_sum{hart=\"0\"} 2000000\n"), "got:\n{out}");
     }
 
     #[test]

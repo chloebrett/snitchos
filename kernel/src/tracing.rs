@@ -132,6 +132,7 @@ pub fn emit_metric(name_id: StringId, value: i64) {
         name_id,
         value,
         t: timestamp(),
+        hart_id: crate::percpu::current_hartid() as u8,
     });
 }
 

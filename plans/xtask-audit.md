@@ -1,5 +1,22 @@
 # Plan: `cargo xtask audit [crate]` — mechanical evidence-gatherer for crate-audit
 
+**Status:** IMPLEMENTED (2026-06-08). `xtask/src/audit.rs` + shared
+`xtask/src/source.rs` (the `test_line_mask` extracted from `loc.rs`). 36 xtask
+tests green, clippy-clean. Scope cut from the plan below: **`cargo-public-api`
+and `cargo-udeps` were dropped** — public-api is redundant with our own
+`extract_pub_symbols` surface enumeration and needs nightly; udeps needs nightly
++ a full build. `cargo-machete` (unused deps) is wired in and assumed installed.
+The `--udeps` flag was not added. Everything else below shipped as specified.
+
+Validation: `cargo xtask audit kernel-core` reproduced the hand-audit's
+`alloc_contiguous`/`count_in_use` candidates AND surfaced a **real unused dep
+(`spin`)** the hand-pass missed (see `plans/kernel-core-audit.md` finding 0).
+Confirmed the documented limitation live: common names (`new`, `is_empty`)
+over-count via collision and aren't flagged — the accepted precision-over-recall
+trade. (`is_empty`'s hand-audit demote finding is therefore NOT auto-surfaced.)
+
+---
+
 **Status:** proposed (plan only — no code yet).
 
 **What this is:** a small, robust Rust tool that replaces the **painful, fragile

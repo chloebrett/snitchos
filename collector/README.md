@@ -89,13 +89,14 @@ support.
 don't yet produce OTLP/Prometheus output (`ContextSwitch` still advances
 the time anchor so downstream timestamps keep progressing) — matching the
 protocol's "define the wire format ahead of its consumers" stance.
-They're reserved, not dropped. Note the hart a span ran on *is* now
+They're reserved, not dropped. Note the hart a span ran on *is*
 surfaced — as `host.cpu_id`, sourced straight from `SpanStart.hart_id`
-rather than from `HartRegister`. `HartRegister`'s `role` (Boot/Worker)
-stays unsurfaced; a per-hart *metric* label would need it, but
-`Frame::Metric` carries no `hart_id`, so per-hart metric labels are
-deferred behind a wire change. `Event` is the OTLP span-event slot,
-awaiting its first emitter (~v0.8).
+rather than from `HartRegister`. Metrics are likewise hart-labelled: the
+`hart_id` on `Frame::Metric` (PROTOCOL_VERSION 3) keys collector state by
+`(name_id, hart_id)` and surfaces as a `{hart="N"}` Prometheus label, so
+same-named counters from different harts no longer clobber. `HartRegister`'s
+`role` (Boot/Worker) is the one bit still unsurfaced. `Event` is the OTLP
+span-event slot, awaiting its first emitter (~v0.8).
 
 **Exporters never take the process down.** HTTP failures (Tempo/Loki
 down, slow, non-2xx) are logged to stderr and swallowed; there's no

@@ -127,11 +127,12 @@ pub struct State {
     /// `ThreadRegister`; consulted at `SpanEnd` to tag the completed
     /// span with its `thread.name`.
     thread_names: HashMap<u32, String>,
-    /// Last-seen value per counter/gauge metric. Histograms go in
-    /// `histograms` instead.
-    pub metric_values: HashMap<u32, i64>,
-    /// Histogram state per metric (bucket counts + sum + total).
-    pub histograms: HashMap<u32, Histogram>,
+    /// Last-seen value per counter/gauge metric, keyed by
+    /// `(name_id, hart_id)` so same-named metrics from different harts
+    /// don't clobber each other. Histograms go in `histograms` instead.
+    pub metric_values: HashMap<(u32, u8), i64>,
+    /// Histogram state per metric, keyed by `(name_id, hart_id)`.
+    pub histograms: HashMap<(u32, u8), Histogram>,
     /// Have we seen the warning-about-missing-Hello yet? Avoids
     /// spamming once per frame.
     warned_no_hello: bool,
@@ -252,18 +253,21 @@ impl State {
             // genuinely has nothing to export.
             #[allow(clippy::match_same_arms, reason = "distinct intent; see comment")]
             Frame::Event { .. } => None, // reserved: OTLP span-event, no emitter yet
-            Frame::Metric { name_id, value, t } => {
+            Frame::Metric { name_id, value, t, hart_id } => {
                 self.advance_anchor(*t);
                 // Route histogram-kind metrics to the histogram table;
-                // counters/gauges to the value table.
+                // counters/gauges to the value table. Keyed by
+                // (name_id, hart_id) — the metric kind, however, is a
+                // per-name property (MetricRegister carries no hart_id).
+                let key = (name_id.0, *hart_id);
                 match self.metric_kinds.get(&name_id.0).copied() {
                     Some(MetricKind::Histogram) => {
-                        let hist = self.histograms.entry(name_id.0).or_default();
+                        let hist = self.histograms.entry(key).or_default();
                         let v = (*value).max(0) as u64;
                         hist.observe(v, Self::HISTOGRAM_BOUNDS);
                     }
                     _ => {
-                        self.metric_values.insert(name_id.0, *value);
+                        self.metric_values.insert(key, *value);
                     }
                 }
                 None
@@ -282,13 +286,13 @@ impl State {
                 None
             }
             Frame::HartRegister { .. } => {
-                // v0.6: `host.cpu_id` is now populated on spans straight
-                // from `SpanStart.hart_id` (see otlp::span_attributes),
-                // so the hart is observable without this frame. The
-                // `role` (Boot/Worker) is still unsurfaced — a per-hart
-                // dashboard label would want it, but `Frame::Metric`
-                // carries no `hart_id`, so per-hart metric labels need a
-                // wire change and are deferred. Numeric ids remain valid.
+                // v0.6: the hart is observable on both telemetry kinds —
+                // spans carry `host.cpu_id` from `SpanStart.hart_id` (see
+                // otlp::span_attributes), and metrics carry a `hart="N"`
+                // Prometheus label keyed off `Metric.hart_id` (see
+                // prom::format_metrics). `HartRegister`'s `role`
+                // (Boot/Worker) is the one bit still unsurfaced; numeric
+                // ids remain valid in the meantime.
                 None
             }
         }
@@ -402,6 +406,7 @@ mod tests {
             name_id: StringId(0),
             value: 42,
             t: 100,
+            hart_id: 0,
         });
         assert!(s.name(0).is_none());
         assert!(s.metric_values.is_empty());
@@ -500,8 +505,29 @@ mod tests {
             name_id: StringId(5),
             value: 42,
             t: 100,
+            hart_id: 0,
         });
-        assert_eq!(s.metric_values.get(&5), Some(&42));
+        assert_eq!(s.metric_values.get(&(5, 0)), Some(&42));
+    }
+
+    #[test]
+    fn same_named_metric_from_two_harts_stays_distinct() {
+        // The whole point of `hart_id` on `Metric`: two harts emitting
+        // the same counter name must not clobber each other. State keys
+        // by (name_id, hart_id), so both values survive side by side.
+        let mut s = State::new(FakeWallClock(0));
+        s.handle(&Frame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: 1,
+        });
+        s.handle(&Frame::MetricRegister {
+            name_id: StringId(5),
+            kind: MetricKind::Counter,
+        });
+        s.handle(&Frame::Metric { name_id: StringId(5), value: 42, t: 100, hart_id: 0 });
+        s.handle(&Frame::Metric { name_id: StringId(5), value: 99, t: 100, hart_id: 1 });
+        assert_eq!(s.metric_values.get(&(5, 0)), Some(&42));
+        assert_eq!(s.metric_values.get(&(5, 1)), Some(&99));
     }
 
     #[test]
@@ -510,7 +536,7 @@ mod tests {
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::StringRegister { id: StringId(1), value: "x" });
         s.handle(&Frame::MetricRegister { name_id: StringId(2), kind: MetricKind::Counter });
-        s.handle(&Frame::Metric { name_id: StringId(2), value: 42, t: 100 });
+        s.handle(&Frame::Metric { name_id: StringId(2), value: 42, t: 100, hart_id: 0 });
 
         // Kernel restarts — second Hello must clear all per-session state.
         s.handle(&Frame::Hello { timebase_hz: 20_000_000, protocol_version: 1 });
@@ -619,9 +645,9 @@ mod tests {
         let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Histogram });
-        s.handle(&Frame::Metric { name_id: StringId(1), value: 50, t: 100 });
-        assert!(!s.metric_values.contains_key(&1));
-        assert!(s.histograms.contains_key(&1));
+        s.handle(&Frame::Metric { name_id: StringId(1), value: 50, t: 100, hart_id: 0 });
+        assert!(!s.metric_values.contains_key(&(1, 0)));
+        assert!(s.histograms.contains_key(&(1, 0)));
     }
 
     #[test]

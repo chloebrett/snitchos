@@ -286,7 +286,7 @@ pub fn measure(
             Ok(OwnedFrame::StringRegister { id, value }) => {
                 names.insert(id, value);
             }
-            Ok(OwnedFrame::Metric { name_id, value, t }) => {
+            Ok(OwnedFrame::Metric { name_id, value, t, .. }) => {
                 if let Some(metric) = names.get(&name_id).and_then(|n| Metric::from_wire(n)) {
                     points.push(Point { metric, t, value });
                 }

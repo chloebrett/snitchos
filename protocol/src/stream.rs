@@ -23,7 +23,7 @@ pub enum OwnedFrame {
     SpanStart { id: SpanId, parent: SpanId, name_id: StringId, t: u64, task_id: u32, hart_id: u8 },
     SpanEnd { id: SpanId, t: u64 },
     Event { span_id: SpanId, name_id: StringId, t: u64 },
-    Metric { name_id: StringId, value: i64, t: u64 },
+    Metric { name_id: StringId, value: i64, t: u64, hart_id: u8 },
     Dropped { count: u32 },
     StringRegister { id: StringId, value: String },
     MetricRegister { name_id: StringId, kind: MetricKind },
@@ -45,8 +45,8 @@ impl OwnedFrame {
             Frame::Event { span_id, name_id, t } => {
                 OwnedFrame::Event { span_id, name_id, t }
             }
-            Frame::Metric { name_id, value, t } => {
-                OwnedFrame::Metric { name_id, value, t }
+            Frame::Metric { name_id, value, t, hart_id } => {
+                OwnedFrame::Metric { name_id, value, t, hart_id }
             }
             Frame::Dropped { count } => OwnedFrame::Dropped { count },
             Frame::StringRegister { id, value } => {
@@ -155,7 +155,7 @@ mod tests {
             Frame::ContextSwitch { from: 1, to: 2, t: 1, reason: SwitchReason::Yield, hart_id: 0 },
             Frame::SpanEnd { id: SpanId(1), t: 2 },
             Frame::Event { span_id: SpanId(1), name_id: StringId(0), t: 3 },
-            Frame::Metric { name_id: StringId(0), value: 5, t: 4 },
+            Frame::Metric { name_id: StringId(0), value: 5, t: 4, hart_id: 0 },
             Frame::Dropped { count: 7 },
             Frame::StringRegister { id: StringId(0), value: "x" },
             Frame::MetricRegister { name_id: StringId(0), kind: MetricKind::Counter },

@@ -19,6 +19,7 @@ the [`itest-harness`](../itest-harness/README.md) library.
 | `cargo xtask clippy [-- args]` | Lint the WHOLE workspace correctly (kernel for riscv, host for host) |
 | `cargo xtask mutants [-- args]` | Mutation testing with the right config + feature flags |
 | `cargo xtask loc` | Lines-of-code by crate, split production vs test |
+| `cargo xtask audit <crate> [--json]` | Crate-audit evidence for one crate (caller table + candidates + unused deps). See below. |
 
 ## Integration tests: `cargo xtask itest`
 
@@ -192,6 +193,34 @@ snitchos_itest_baseline_failure_rate_ratio > 0.01                 # flaking > 1%
 topk(5, snitchos_itest_baseline_p95_duration_ms_milliseconds)     # slow scenarios
 snitchos_itest_baseline_partial_ratio == 1                        # interrupted runs you forgot
 ```
+
+## Crate audit: `cargo xtask audit <crate>`
+
+Mechanical evidence-gatherer for the `crate-audit` skill — it replaces the
+fragile per-symbol bash (greps that trip on `\r`, single-letter idents, and
+`dead_code` builds that are blind to `pub` items in `pub` modules). For one
+crate it prints:
+
+- a per-`pub`-symbol caller table — **ext** (sibling-crate callers) / **int**
+  (this crate, non-test) / **test** (test-only callers) — sorted least-used first;
+- **candidates** — `pub` items with `ext == 0` (verify before acting);
+- **unused dependencies** via `cargo machete`;
+- debt **markers** (`TODO`/`FIXME`/`#[allow]`/`dead_code`/…).
+
+```
+cargo xtask audit kernel-core            # text table
+cargo xtask audit kernel-core --json     # machine-readable, for the skill
+cargo xtask audit kernel-core --include-short   # also count ≤2-char idents
+```
+
+**It flags candidates; it never decides.** Counts are line/word-boundary
+heuristics (no `syn`, no name resolution), so they *over-count* on name
+collisions — a `pub fn new`/`is_empty` collides with every other `new`/`is_empty`
+in the workspace and reads as "used". That's the safe direction: the tool
+under-reports deadness, so a flagged zero-caller item is high-confidence, but a
+*uniquely* named item is the only kind it can clear. Always verify candidates
+against the design docs (reserved wire/ABI surface defined ahead of its consumer
+is *keep*, not dead). Requires `cargo install cargo-machete`.
 
 ## clippy caveats
 

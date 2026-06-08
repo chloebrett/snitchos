@@ -25,7 +25,10 @@ pub mod stream;
 ///   - 2: v0.6 — added `hart_id` to `SpanStart` + `ContextSwitch`, added
 ///     `HartRegister` variant. The wire-format break performed before
 ///     any external consumer of v0.6 captures exists.
-pub const PROTOCOL_VERSION: u8 = 2;
+///   - 3: v0.6 closeout — added `hart_id` to `Metric` so the collector
+///     keys metric state by `(name_id, hart_id)` instead of letting
+///     same-named counters from different harts clobber each other.
+pub const PROTOCOL_VERSION: u8 = 3;
 
 /// Identifier of a string in the runtime intern table. `StringRegister`
 /// frames populate the table; every `*_name_id` field references it.
@@ -99,7 +102,7 @@ pub enum Frame<'a> {
   /// break the wire format. See `docs/observability-design.md`
   /// ("profiling rides on Event").
   Event { span_id: SpanId, name_id: StringId, t: u64 },
-  Metric { name_id: StringId, value: i64, t: u64 },
+  Metric { name_id: StringId, value: i64, t: u64, hart_id: u8 },
   Dropped { count: u32 },
   StringRegister { id: StringId, value: &'a str },
   MetricRegister { name_id: StringId, kind: MetricKind },
@@ -199,12 +202,31 @@ mod tests {
       name_id: StringId(12),
       value: -42,
       t: 1234,
+      hart_id: 0,
     };
 
     let mut buf = [0u8; 64];
     let used = postcard::to_slice(&frame, &mut buf).unwrap();
     let decoded: Frame = postcard::from_bytes(used).unwrap();
 
+    assert_eq!(frame, decoded);
+  }
+
+  /// `Metric` carries `hart_id` (v0.6 closeout) so the collector can
+  /// key same-named counters by the hart that emitted them rather than
+  /// clobbering across harts. Verify with a non-zero hart id so an
+  /// "always 0" mutant can't pass.
+  #[test]
+  fn metric_carries_hart_id() {
+    let frame = Frame::Metric {
+      name_id: StringId(12),
+      value: -42,
+      t: 1234,
+      hart_id: 1,
+    };
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
     assert_eq!(frame, decoded);
   }
 

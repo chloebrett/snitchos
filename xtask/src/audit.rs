@@ -1,5 +1,5 @@
 //! `cargo xtask audit <crate>` — mechanical evidence-gatherer for the
-//! `crate-audit` skill. Replaces fragile bash (per-symbol greps, dead_code
+//! `crate-audit` skill. Replaces fragile bash (per-symbol greps, `dead_code`
 //! builds blind to `pub`-in-`pub`-mod) with a deterministic table.
 //!
 //! This is **not** a static analyzer: line/word-boundary heuristics, no `syn`,
@@ -14,8 +14,14 @@ use std::process::{Command, ExitCode};
 
 use crate::source::test_line_mask;
 
-/// Top-level dirs under the workspace root that aren't sibling crates.
-const NON_CRATE_DIRS: [&str; 6] = ["vendor", "target", "stack", "docs", "plans", "posts"];
+/// Top-level dirs under the workspace root that aren't sibling consumers.
+/// `learning/` is a separate workspace of standalone toy crates that re-use
+/// allocator/page-table type names but never depend on the audited crate;
+/// counting them would be pure name-collision noise. (Note: this very comment
+/// is why symbol names are kept out of it — the caller scan matches prose in
+/// sibling crates too, so a name spelled here would inflate its own ext count.)
+const NON_CRATE_DIRS: [&str; 7] =
+    ["vendor", "target", "stack", "docs", "plans", "posts", "learning"];
 
 /// `cargo xtask audit <crate>`: print the per-symbol caller table, the
 /// zero-caller candidates, debt markers, and unused deps for one crate.
@@ -156,7 +162,7 @@ fn print_report(
     println!("crate-audit evidence — {crate_name}");
     println!("(counts are a lower bound on deadness — verify candidates vs design docs, rule 6)");
     println!("{sep}");
-    println!("{:<28}  {:>6}  {:>4} {:>4} {:>4}  {}", "symbol", "kind", "ext", "int", "tst", "site");
+    println!("{:<28}  {:>6}  {:>4} {:>4} {:>4}  site", "symbol", "kind", "ext", "int", "tst");
     println!("{sep}");
 
     let mut rows: Vec<&SymbolReport> = reports.iter().collect();
@@ -254,6 +260,7 @@ fn render_json(
 
 /// Minimal JSON string encoder — quotes and escapes `"`, `\`, and control chars.
 fn jstr(s: &str) -> String {
+    use std::fmt::Write;
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -263,7 +270,9 @@ fn jstr(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
             c => out.push(c),
         }
     }
@@ -356,6 +365,9 @@ pub fn build_reports(
     let mut reports = Vec::new();
     for (file, content, mask) in &target_masks {
         for sym in extract_pub_symbols(content, mask) {
+            if !allow_short && sym.name.len() <= 2 {
+                continue;
+            }
             let (mut int, mut test) = (0usize, 0usize);
             for (_, c, m) in &target_masks {
                 let (p, t) = count_callers(&sym.name, c, m, allow_short);
@@ -396,7 +408,7 @@ pub fn extract_pub_symbols(content: &str, test_mask: &[bool]) -> Vec<PubSymbol> 
 /// Parse a single source line into `(kind, name)` if it declares a bare-`pub`
 /// item. Returns `None` for non-pub lines, restricted visibility, or `pub use`.
 fn parse_pub_line(line: &str) -> Option<(SymbolKind, String)> {
-    let mut toks = line.trim_start().split_whitespace();
+    let mut toks = line.split_whitespace();
     if toks.next()? != "pub" {
         return None;
     }
@@ -504,10 +516,8 @@ pub fn parse_machete(stdout: &str) -> Vec<(String, String)> {
             current = Some(krate);
         } else if line.starts_with([' ', '\t']) {
             let dep = line.trim();
-            if let Some(krate) = &current {
-                if !dep.is_empty() {
-                    out.push((krate.clone(), dep.to_string()));
-                }
+            if let Some(krate) = current.as_ref().filter(|_| !dep.is_empty()) {
+                out.push((krate.clone(), dep.to_string()));
             }
         } else if !line.is_empty() {
             current = None;
@@ -721,6 +731,15 @@ fn caller() { used_int(); }
         assert_eq!(by("used_int").verdict, Verdict::DemotePubCrate);
         assert_eq!(by("dead").verdict, Verdict::DeadCandidate);
         assert_eq!(by("used_ext").file, "frame.rs");
+    }
+
+    #[test]
+    fn build_reports_omits_short_idents_unless_opted_in() {
+        // A one-char `pub const R` would otherwise show 0/0/0 and masquerade
+        // as a dead candidate — it's really a perm flag used everywhere.
+        let target = vec![("mmu.rs".to_string(), "pub const R: u8 = 1;\n".to_string())];
+        assert!(build_reports(&target, &[], false).is_empty());
+        assert_eq!(build_reports(&target, &[], true).len(), 1);
     }
 
     #[test]

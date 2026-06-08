@@ -56,31 +56,55 @@ in scope. Abstraction is good when it pays its way — the discipline is to
 
 ## Step 2 — Gather evidence
 
+**Start with the tool.** `cargo xtask audit <crate> --json` does the boring 80%
+mechanically (it's the SnitchOS replacement for the fragile per-symbol bash — see
+`plans/xtask-audit.md`). One command gives you, for the crate:
+
+```bash
+cargo xtask audit <crate> --json    # for parsing; drop --json for the human table
+```
+
+- **`symbols[]`** — every bare-`pub` item with `{name, kind, file, line, ext,
+  int, test, verdict}`. `ext` = sibling-crate callers, `int` = this crate
+  non-test, `test` = test-only. `verdict` ∈ keep-public / demote-pub(crate) /
+  test-only / dead-candidate.
+- **`unused_deps[]`** — `cargo machete` findings (`cargo install cargo-machete`).
+- **`markers[]`** — `TODO/FIXME/HACK/#[allow]/#[expect]/dead_code/stub` sites.
+
+**Trust it, but know its blind spots** (it's word-boundary heuristics, no name
+resolution — `plans/xtask-audit.md` has the full rationale):
+
+- It **over-counts on name collisions**: a `pub fn new` / `is_empty` / `len`
+  reads as `ext` huge because every other `new` in the workspace matches. So a
+  *high* count on a common name proves nothing; a **zero** count is the
+  trustworthy signal. Treat `dead-candidate`/`test-only` rows as the candidate
+  list; for common-named items, fall back to the manual cross-ref below.
+- It only sees **bare `pub`** (skips `pub(crate)` and items inside
+  `#[cfg(test)]`) and ≤2-char idents (pass `--include-short` to include them).
+- `verdict` is a candidate, never a conclusion — **rule 6 still applies**: a
+  zero-caller wire/ABI variant may be reserved surface. Verify in docs/plans.
+
+**Then fill the gaps the tool doesn't cover:**
+
 ```bash
 wc -l <crate>/src/*.rs | sort -n                       # where's the mass?
-cargo xtask loc 2>/dev/null || tokei <crate>           # prod vs test split
+cargo xtask loc                                        # prod vs test split
 
-RUSTFLAGS="-W dead_code -W unused" cargo build -p <crate> 2>&1 | grep -iE 'never used|unused'
-cargo clippy -p <crate> --all-targets 2>&1 | grep -iE 'warning|never used'
-# dead_code does NOT fire on `pub` items in `pub` modules — cross-ref those by hand.
+# Features (tool doesn't analyse these):
+grep -A30 '\[features\]' <crate>/Cargo.toml; grep -rn 'cfg(feature' <crate>/src/   # declared vs gating
+grep -rn 'feature = ' . --include=Cargo.toml                                       # who enables them
 
-grep -rn 'dead_code\|#\[allow\|#\[expect\|TODO\|FIXME\|HACK\|deprecated\|legacy\|for now\|not yet\|TBD\|stub' <crate>/src/
-grep -rnE 'pub (fn|struct|enum|trait|const|type|mod) ' <crate>/src/   # API inventory
+# Privatization detector — the compiler finds what grep/heuristics miss:
+# demote `pub mod`→`mod` and rebuild; it flags every now-unreachable `pub fn`
+# (esp. test-only ones). The tool can't do this — it's the strongest check.
 
-# Cross-reference each PUBLIC symbol: ext = consumer-crate callers, int = callers
-# elsewhere in THIS crate. SANITY-CHECK the harness on one symbol you KNOW is used
-# before trusting it — an all-zero table almost always means the grep is broken
-# (unquoted var, wrong dir), not that everything's dead.
-for sym in <Sym1> <Sym2> ...; do
+# Manual cross-ref ONLY for common-named symbols the tool over-counts, or to
+# double-check a candidate. SANITY-CHECK on a symbol you KNOW is used first —
+# an all-zero table means the grep is broken, not that everything's dead.
+for sym in <CommonNamedSym> ...; do
   printf "%-30s ext=%s int=%s\n" "$sym" \
     "$(grep -rw "$sym" <consumer-dirs> | wc -l)" "$(grep -rw "$sym" <crate>/src | wc -l)"
 done
-# ext>0 → keep public.  ext=0,int>0 → demote pub(crate)/drop re-export.
-# ext=0,int=0 → dead — but apply rule 6 for contract surface.
-
-grep -A30 '\[features\]' <crate>/Cargo.toml; grep -rn 'cfg(feature' <crate>/src/   # declared vs gating
-grep -rn 'feature = ' . --include=Cargo.toml                                       # who enables them
-grep -A40 '\[dependencies\]' <crate>/Cargo.toml   # then grep each dep's import sites — one-use deps are removable
 ```
 
 Multi-module lib with re-exports? Also check which modules the consumer
