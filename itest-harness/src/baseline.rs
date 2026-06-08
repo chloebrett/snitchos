@@ -368,6 +368,16 @@ fn render_baseline(b: &Baseline) -> String {
     } else if let Some(mean) = b.mean_duration_ms {
         let _ = write!(out, "\n             timing: mean {:.0}ms", mean);
     }
+    if let Some(p) = &b.partial {
+        let _ = write!(
+            out,
+            "\n             PARTIAL: {}/{} requested",
+            b.runs, p.requested_runs
+        );
+        if let Some(dir) = &p.run_dir {
+            let _ = write!(out, ", run-dir {dir}");
+        }
+    }
     out
 }
 
@@ -633,6 +643,24 @@ mod tests {
         f.update_current("x", b);
         let out = f.render_summary(SummaryOptions::default());
         assert!(out.contains("timing: mean 1234ms, p95 1500ms"));
+    }
+
+    #[test]
+    fn render_summary_marks_partial_entries() {
+        let mut f = BaselineFile::new();
+        let mut b = make_baseline("abc", 27, 2, datetime!(2026-06-08 10:00:00 UTC));
+        b.partial = Some(PartialMarker {
+            requested_runs: 100,
+            interrupted_at: datetime!(2026-06-08 10:05:00 UTC),
+            run_dir: Some("2026-06-08T10-00-00Z".to_string()),
+        });
+        f.update_current("x", b);
+        let out = f.render_summary(SummaryOptions::default());
+        assert!(
+            out.contains("PARTIAL: 27/100 requested"),
+            "expected PARTIAL marker; got:\n{out}"
+        );
+        assert!(out.contains("run-dir 2026-06-08T10-00-00Z"));
     }
 
     #[test]

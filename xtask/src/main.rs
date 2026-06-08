@@ -130,6 +130,11 @@ enum Cmd {
         /// most-confidently-flaky scenario floats to the top.
         #[arg(long, default_value_t = false)]
         flakes_only: bool,
+        /// With `--baseline-show`, render the `.pending` sidecar
+        /// instead of the canonical baseline. Use to inspect a partial
+        /// baseline before deciding to promote or discard it.
+        #[arg(long, default_value_t = false)]
+        pending: bool,
         /// Promote `.itest-baseline.toml.pending` into the canonical
         /// baseline. The previous canonical `current` per scenario is
         /// pushed to `history`; the partial marker is stripped. Run
@@ -205,7 +210,7 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, promote_pending, discard_pending, recover_pending, prune_runs, keep_last } => {
+        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, prune_runs, keep_last } => {
             if prune_runs {
                 return itest::prune_runs(keep_last);
             }
@@ -219,7 +224,7 @@ fn main() -> ExitCode {
                 return itest::discard_pending();
             }
             if baseline_show {
-                return itest::show_baseline(include_history, flakes_only);
+                return itest::show_baseline(include_history, flakes_only, pending);
             }
             if !skip_unit_tests {
                 let unit = itest::run_unit_tests();

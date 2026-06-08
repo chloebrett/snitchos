@@ -139,7 +139,9 @@ pub extern "C" fn trap_handler(_frame: *mut TrapFrame) {
         TrapCause::SupervisorSoftwareInterrupt => crate::ipi::handle_pending(),
         other => panic!("unhandled trap: {other:?} (scause={scause:#x})"),
     }
-    crate::panic::tag("trap return");
+    // crate::panic::tag("trap return");
+    // ^ Temporarily disabled for kernel-heap-metrics fix-off
+    // baseline measurement (H12/H6 validation). Restore before commit.
 }
 
 /// Timer IRQ handler. Kept tiny: measure duration, arm the next

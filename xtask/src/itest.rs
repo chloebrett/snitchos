@@ -321,15 +321,44 @@ pub fn recover_pending(run_dir: PathBuf) -> ExitCode {
 /// Load `.itest-baseline.toml` and print its rendered summary. Exits
 /// with `0` on success (including "file doesn't exist" — that's a
 /// valid initial state). Returns `1` only on parse error.
-pub fn show_baseline(include_history: bool, flakes_only: bool) -> ExitCode {
-    let path = Path::new(BASELINE_PATH);
-    if !path.exists() {
-        eprintln!("no baseline file at {BASELINE_PATH}");
+///
+/// If `pending` is set, render the `.pending` sidecar instead — useful
+/// for inspecting a partial baseline before deciding to
+/// `--promote-pending` or `--discard-pending`. When `pending` is
+/// unset and a pending sidecar exists, surface a banner at the top
+/// of the canonical summary so the user knows partial work is waiting.
+pub fn show_baseline(include_history: bool, flakes_only: bool, pending: bool) -> ExitCode {
+    let canonical = Path::new(BASELINE_PATH);
+    let pending_path = BaselineFile::pending_path_for(canonical);
+
+    let (path_to_show, label) = if pending {
+        (pending_path.clone(), "pending sidecar")
+    } else {
+        (canonical.to_path_buf(), "canonical baseline")
+    };
+
+    if !path_to_show.exists() {
+        if pending {
+            eprintln!("no pending baseline at {}", path_to_show.display());
+        } else {
+            eprintln!("no baseline file at {BASELINE_PATH}");
+        }
         return ExitCode::SUCCESS;
     }
-    match BaselineFile::load_path(path) {
+
+    // When showing the canonical file and a pending sidecar exists,
+    // banner it. The user almost always wants to know.
+    if !pending && pending_path.exists() {
+        eprintln!(
+            "NOTE: pending baseline present at {} — inspect with `--baseline-show --pending`,\n\
+             then promote (`--promote-pending`) or discard (`--discard-pending`).\n",
+            pending_path.display()
+        );
+    }
+
+    match BaselineFile::load_path(&path_to_show) {
         Ok(file) => {
-            eprintln!("=== {BASELINE_PATH} ===\n");
+            eprintln!("=== {} ({label}) ===\n", path_to_show.display());
             eprint!(
                 "{}",
                 file.render_summary(SummaryOptions {
@@ -340,7 +369,7 @@ pub fn show_baseline(include_history: bool, flakes_only: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("failed to parse {BASELINE_PATH}: {e}");
+            eprintln!("failed to parse {}: {e}", path_to_show.display());
             ExitCode::from(1)
         }
     }
