@@ -189,6 +189,16 @@ enum Cmd {
         /// noise.
         #[arg(long, default_value_t = false)]
         no_auto_push: bool,
+        /// Number of scenarios to run in parallel. Default `1` matches
+        /// today's sequential behaviour. Values >1 reserve the flag
+        /// for manual experimentation — actual parallel execution
+        /// arrives in a later step of `plans/itest-parallel-scenarios.md`.
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u32).range(1..=64),
+        )]
+        jobs: u32,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -237,7 +247,7 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, prune_runs, keep_last, export_prom, push_otlp, no_auto_push } => {
+        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, prune_runs, keep_last, export_prom, push_otlp, no_auto_push, jobs } => {
             if let Some(endpoint) = push_otlp {
                 return itest::push_otlp_metrics(endpoint);
             }
@@ -267,7 +277,7 @@ fn main() -> ExitCode {
                 }
                 eprintln!();
             }
-            itest::run(scenario.as_deref(), repeat, force, update_baseline, fail_fast, !no_auto_push)
+            itest::run(scenario.as_deref(), repeat, force, update_baseline, fail_fast, !no_auto_push, jobs)
         }
         Cmd::Loc => loc::run(),
         Cmd::Debug { features } => debug(&features),

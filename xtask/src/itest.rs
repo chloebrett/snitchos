@@ -108,7 +108,18 @@ pub fn run(
     update_baseline: bool,
     fail_fast: Option<u32>,
     auto_push: bool,
+    jobs: u32,
 ) -> ExitCode {
+    // Step 1 of plans/itest-parallel-scenarios.md: the flag exists,
+    // the wiring is in place, but the actual worker pool lands in a
+    // later step. Be honest about that to anyone who tries it.
+    if jobs > 1 {
+        eprintln!(
+            "warning: --jobs {jobs} is reserved for parallel execution \
+             but the worker pool is not implemented yet — running sequentially.\n\
+             See plans/itest-parallel-scenarios.md."
+        );
+    }
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
         return ExitCode::SUCCESS;
