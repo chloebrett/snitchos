@@ -1,6 +1,6 @@
-//! Panic handler and the lock-free `tag` UART helper. Both bypass
-//! `CONSOLE` / `UART` mutexes so they're usable from inside fatal
-//! paths (panic) and forensic instrumentation (trap exit).
+//! Panic handler. Bypasses `CONSOLE` / `UART` mutexes so it's usable
+//! from inside fatal paths (a panic mid-`println!` would otherwise
+//! deadlock on the held lock).
 
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -8,19 +8,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::console;
 use crate::uart;
-
-/// DEFLAKE: lock-free single-line UART tag. Originally used to bisect
-/// where the kernel dies during the Bug B silent reset; now also the
-/// trap-return MMIO fence keeping the residual cross-hart race
-/// suppressed. SAFETY: bypasses CONSOLE/UART mutex, so output may
-/// interleave with concurrent prints — accepted for forensic
-/// instrumentation. `emergency_uart_base` reads satp so this works
-/// in any boot stage.
-pub(crate) fn tag(s: &str) {
-    use core::fmt::Write;
-    let mut uart = unsafe { uart::Uart16550::new(console::emergency_uart_base()) };
-    let _ = writeln!(&mut uart, "[TAG] {s}");
-}
 
 /// Recursion guard for the panic handler. Set on entry; if already
 /// set, we must already be panicking and shouldn't try to print again
