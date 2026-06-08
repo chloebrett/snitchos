@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use itest_harness::{BaselineFile, ItestLock, LockError, RunnerConfig, SummaryOptions};
 
@@ -18,6 +19,29 @@ const BASELINE_PATH: &str = ".itest-baseline.toml";
 /// `.itest.lock` entry in `.gitignore`) so it's easy to find and
 /// inspect — `cat .itest.lock` shows the PID of the current holder.
 const LOCK_PATH: &str = ".itest.lock";
+
+/// Set by the SIGINT handler. First Ctrl-C trips this to `true`; the
+/// runner sees it at the next iteration boundary and writes a
+/// partial baseline. Second Ctrl-C in the handler exits the process
+/// directly.
+static INTERRUPT: AtomicBool = AtomicBool::new(false);
+
+fn install_ctrlc_handler() {
+    let _ = ctrlc::set_handler(|| {
+        // swap returns the previous value. If it was already true,
+        // this is the second Ctrl-C → force-quit.
+        if INTERRUPT.swap(true, Ordering::SeqCst) {
+            eprintln!("\n(second Ctrl-C — force-quit; pending baseline NOT written)");
+            std::process::exit(130);
+        } else {
+            eprintln!(
+                "\n(Ctrl-C — finishing current iteration; \
+                 partial baseline will be written if --update-baseline. \
+                 Press Ctrl-C again to force-quit.)"
+            );
+        }
+    });
+}
 
 mod harness;
 mod matchers;
@@ -136,6 +160,10 @@ pub fn run(
     let max_wait_for = harness::take_last_max_wait;
     let commit_for = current_commit_short;
 
+    // Install the SIGINT handler before constructing config — the
+    // INTERRUPT flag is what the runner reads at iteration boundaries.
+    install_ctrlc_handler();
+
     let config = RunnerConfig {
         one_shot_build: Some(&build),
         log_path_for: Some(&log_path_for),
@@ -143,12 +171,58 @@ pub fn run(
         current_commit: Some(&commit_for),
         baseline_file: Some(PathBuf::from(BASELINE_PATH)),
         fail_fast,
-        // Step A: surface the pending-file path now; the interrupt
-        // handler that writes to it lands in step B.
         pending_baseline: Some(PathBuf::from(format!("{BASELINE_PATH}.pending"))),
+        interrupt: Some(&INTERRUPT),
     };
 
     itest_harness::run(&to_run, repeat, update_baseline, &config)
+}
+
+/// Promote `.itest-baseline.toml.pending` into the canonical baseline
+/// file. Wraps `BaselineFile::promote_pending` with user-facing
+/// messaging and `--baseline-show`-friendly exit codes.
+pub fn promote_pending() -> ExitCode {
+    let canonical = Path::new(BASELINE_PATH);
+    let pending = BaselineFile::pending_path_for(canonical);
+    if !pending.exists() {
+        eprintln!("no pending baseline at {}", pending.display());
+        return ExitCode::from(1);
+    }
+    match BaselineFile::promote_pending(canonical) {
+        Ok(_) => {
+            eprintln!(
+                "Promoted {} → {} (previous current pushed to history).",
+                pending.display(),
+                canonical.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("promote failed: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Delete the pending baseline sidecar if present. Idempotent.
+pub fn discard_pending() -> ExitCode {
+    let canonical = Path::new(BASELINE_PATH);
+    let pending = BaselineFile::pending_path_for(canonical);
+    let existed = pending.exists();
+    match BaselineFile::discard_pending(canonical) {
+        Ok(()) => {
+            if existed {
+                eprintln!("Discarded {}.", pending.display());
+            } else {
+                eprintln!("No pending baseline to discard ({}).", pending.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("discard failed: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// Load `.itest-baseline.toml` and print its rendered summary. Exits

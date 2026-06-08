@@ -130,6 +130,17 @@ enum Cmd {
         /// most-confidently-flaky scenario floats to the top.
         #[arg(long, default_value_t = false)]
         flakes_only: bool,
+        /// Promote `.itest-baseline.toml.pending` into the canonical
+        /// baseline. The previous canonical `current` per scenario is
+        /// pushed to `history`; the partial marker is stripped. Run
+        /// after inspecting a pending file from an interrupted
+        /// `--update-baseline` run.
+        #[arg(long, default_value_t = false)]
+        promote_pending: bool,
+        /// Delete `.itest-baseline.toml.pending` without promoting.
+        /// Idempotent (no-op if no pending file exists).
+        #[arg(long, default_value_t = false)]
+        discard_pending: bool,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -178,7 +189,13 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only } => {
+        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, promote_pending, discard_pending } => {
+            if promote_pending {
+                return itest::promote_pending();
+            }
+            if discard_pending {
+                return itest::discard_pending();
+            }
             if baseline_show {
                 return itest::show_baseline(include_history, flakes_only);
             }

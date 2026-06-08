@@ -33,7 +33,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -90,8 +90,11 @@ pub struct PartialMarker {
     /// Relative path to the per-run history directory under
     /// `.itest-runs/`. Used by `--recover-pending` to rebuild this
     /// entry from the underlying NDJSON if the pending file is
-    /// lost or corrupted.
-    pub run_dir: String,
+    /// lost or corrupted. `None` when no history directory exists —
+    /// step B writes pending files without one; step C onward fills
+    /// it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_dir: Option<String>,
 }
 
 impl Baseline {
@@ -167,6 +170,61 @@ impl BaselineFile {
     pub fn save_path(&self, path: &Path) -> Result<(), BaselineError> {
         let s = self.to_string().map_err(BaselineError::TomlSer)?;
         fs::write(path, s).map_err(BaselineError::Io)
+    }
+
+    /// Conventional path of the pending sidecar for `canonical_path`.
+    /// Appends `.pending` to the filename — e.g.
+    /// `.itest-baseline.toml` → `.itest-baseline.toml.pending`.
+    pub fn pending_path_for(canonical_path: &Path) -> PathBuf {
+        let mut p = canonical_path.to_path_buf();
+        let mut name = p
+            .file_name()
+            .unwrap_or_default()
+            .to_os_string();
+        name.push(".pending");
+        p.set_file_name(name);
+        p
+    }
+
+    /// Promote the pending file at `<canonical>.pending` into
+    /// `canonical_path`: each scenario's `current` in the pending
+    /// becomes the new canonical `current` (the previous one is
+    /// pushed to `history` per `update_current`). The `partial`
+    /// marker is stripped on promotion. Pending file is removed
+    /// after a successful write. Returns the updated canonical.
+    pub fn promote_pending(canonical_path: &Path) -> Result<Self, BaselineError> {
+        let pending_path = Self::pending_path_for(canonical_path);
+        if !pending_path.exists() {
+            return Err(BaselineError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("no pending file at {}", pending_path.display()),
+            )));
+        }
+        let pending = Self::load_path(&pending_path)?;
+        let mut canonical = if canonical_path.exists() {
+            Self::load_path(canonical_path)?
+        } else {
+            Self::default()
+        };
+        for (name, entry) in pending.scenarios {
+            if let Some(mut current) = entry.current {
+                current.partial = None; // promoted entries are no longer partial
+                canonical.update_current(&name, current);
+            }
+        }
+        canonical.save_path(canonical_path)?;
+        std::fs::remove_file(&pending_path).map_err(BaselineError::Io)?;
+        Ok(canonical)
+    }
+
+    /// Delete the pending sidecar at `<canonical>.pending` if it
+    /// exists. Idempotent: no-op when the file is already absent.
+    pub fn discard_pending(canonical_path: &Path) -> std::io::Result<()> {
+        let pending_path = Self::pending_path_for(canonical_path);
+        if pending_path.exists() {
+            std::fs::remove_file(&pending_path)?;
+        }
+        Ok(())
     }
 
     /// Render the file as a human-readable summary for `--baseline-show`.
@@ -555,6 +613,118 @@ mod tests {
         assert!(!out.contains("timing"));
     }
 
+    fn fresh_test_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let i = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!(
+            "itest-harness-baseline-test-{}-{i}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn pending_path_appends_suffix() {
+        let p = BaselineFile::pending_path_for(Path::new(".itest-baseline.toml"));
+        assert_eq!(p.file_name().unwrap(), ".itest-baseline.toml.pending");
+    }
+
+    #[test]
+    fn promote_pending_when_no_pending_returns_not_found() {
+        let dir = fresh_test_dir();
+        let canonical = dir.join("baseline.toml");
+        let result = BaselineFile::promote_pending(&canonical);
+        match result {
+            Err(BaselineError::Io(e)) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn promote_pending_moves_current_strips_partial_archives_previous() {
+        let dir = fresh_test_dir();
+        let canonical = dir.join("baseline.toml");
+        let pending = dir.join("baseline.toml.pending");
+
+        // Previous canonical: one full run.
+        let mut canonical_file = BaselineFile::new();
+        canonical_file.update_current(
+            "heartbeat-cadence",
+            make_baseline("aaa", 200, 10, datetime!(2026-06-01 12:00:00 UTC)),
+        );
+        canonical_file.save_path(&canonical).unwrap();
+
+        // Pending: a partial run that we'll promote.
+        let mut pending_file = BaselineFile::new();
+        let mut b = make_baseline("bbb", 487, 23, datetime!(2026-06-08 12:30:15 UTC));
+        b.partial = Some(PartialMarker {
+            requested_runs: 1000,
+            interrupted_at: datetime!(2026-06-08 13:15:42 UTC),
+            run_dir: None,
+        });
+        pending_file.update_current("heartbeat-cadence", b);
+        pending_file.save_path(&pending).unwrap();
+
+        let promoted = BaselineFile::promote_pending(&canonical).unwrap();
+        let entry = &promoted.scenarios["heartbeat-cadence"];
+        let current = entry.current.as_ref().unwrap();
+        // Pending's data is now the canonical current.
+        assert_eq!(current.commit, "bbb");
+        assert_eq!(current.runs, 487);
+        // Partial marker stripped on promotion.
+        assert!(current.partial.is_none());
+        // Previous canonical is in history.
+        assert_eq!(entry.history.len(), 1);
+        assert_eq!(entry.history[0].commit, "aaa");
+
+        // Pending file removed.
+        assert!(!pending.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn promote_pending_with_no_existing_canonical_creates_one() {
+        let dir = fresh_test_dir();
+        let canonical = dir.join("baseline.toml");
+        let pending = dir.join("baseline.toml.pending");
+        let mut pending_file = BaselineFile::new();
+        pending_file.update_current(
+            "scn",
+            make_baseline("abc", 50, 3, datetime!(2026-06-08 10:00:00 UTC)),
+        );
+        pending_file.save_path(&pending).unwrap();
+        assert!(!canonical.exists());
+
+        let _ = BaselineFile::promote_pending(&canonical).unwrap();
+        assert!(canonical.exists());
+        assert!(!pending.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn discard_pending_removes_file_when_present() {
+        let dir = fresh_test_dir();
+        let canonical = dir.join("baseline.toml");
+        let pending = dir.join("baseline.toml.pending");
+        std::fs::write(&pending, "# stub\n").unwrap();
+        BaselineFile::discard_pending(&canonical).unwrap();
+        assert!(!pending.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn discard_pending_when_absent_is_noop() {
+        let dir = fresh_test_dir();
+        let canonical = dir.join("baseline.toml");
+        // No pending file exists; discard should not error.
+        BaselineFile::discard_pending(&canonical).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn partial_marker_absent_in_toml_by_default() {
         let mut f = BaselineFile::new();
@@ -574,7 +744,7 @@ mod tests {
         b.partial = Some(PartialMarker {
             requested_runs: 1000,
             interrupted_at: datetime!(2026-06-08 13:15:42 UTC),
-            run_dir: ".itest-runs/2026-06-08T12-30-15Z".to_string(),
+            run_dir: Some(".itest-runs/2026-06-08T12-30-15Z".to_string()),
         });
         f.update_current("heartbeat-cadence", b);
         let s = f.to_string().unwrap();

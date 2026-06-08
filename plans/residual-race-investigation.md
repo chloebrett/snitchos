@@ -594,32 +594,62 @@ Use `--repeat 40` minimum when claiming a hypothesis is falsified.
 The `.itest-baseline.toml` aggregator is the right primitive for
 this — it accumulates trials across sessions and shows CIs.
 
-### Suite-wide flake distribution (40 runs, fix on, commit `0a56a95`)
+### Suite-wide flake distribution (fix on)
 
-| Scenario                          | Fails | Rate  | 95% CI         |
-|-----------------------------------|------:|------:|----------------|
-| deflake-spawn-storm               | 3/40  | 7.5%  | [2.6%, 19.9%]  |
-| kernel-heap-metrics               | 2/40  | 5.0%  | [1.4%, 16.5%]  |
-| sched-spans-carry-task-id         | 2/40  | 5.0%  | [1.4%, 16.5%]  |
-| sched-span-survives-yield         | 1/40  | 2.5%  | [0.4%, 12.9%]  |
-| workload-cooperative-baseline     | 1/40  | 2.5%  | [0.4%, 12.9%]  |
-| deflake-ipi-pong                  | 0/40  | 0%    | [0%, 8.8%]     |
-| deflake-shootdown-storm           | 0/40  | 0%    | [0%, 8.8%]     |
-| ipi-self-wakeup                   | 0/40  | 0%    | [0%, 8.8%]     |
-| smp-secondary-hart-boots          | 0/40  | 0%    | [0%, 8.8%]     |
-| smp-spawn-on-hart-1-runs          | 0/40  | 0%    | [0%, 8.8%]     |
-| sched-task-exits-cleanly          | 0/40  | 0%    | [0%, 8.8%]     |
-| boot-reaches-heartbeat            | 0/40  | 0%    | [0%, 8.8%]     |
-| heartbeat-cadence                 | 0/40  | 0%    | [0%, 8.8%]     |
-| pre-init-order                    | 0/40  | 0%    | [0%, 8.8%]     |
-| kernel-runs-at-higher-half        | 0/40  | 0%    | [0%, 8.8%]     |
-| frame-allocator-metrics           | 0/40  | 0%    | [0%, 8.8%]     |
-| frame-allocator-oom               | 0/40  | 0%    | [0%, 8.8%]     |
-| heap-oom                          | 0/40  | 0%    | [0%, 8.8%]     |
-| sched-context-switch-smoke        | 0/40  | 0%    | [0%, 8.8%]     |
-| sched-spawn-registers-thread      | 0/40  | 0%    | [0%, 8.8%]     |
-| sched-yield-round-trips           | 0/40  | 0%    | [0%, 8.8%]     |
-| sched-context-switches-on-wire    | 0/40  | 0%    | [0%, 8.8%]     |
+Most scenarios measured at 40 runs (commit `0a56a95`).
+`deflake-spawn-storm` re-measured at 100 runs (commit `db2c9e2`,
+after v0.5.x task-exit landed) — the bigger sample plus the
+task-exit change moved the point estimate from 7.5% down to 1.0%.
+Treat 40-run rates as upper-bound-prone: the CI is wide.
+
+| Scenario                          | Fails  | Rate  | 95% CI         | Commit    |
+|-----------------------------------|-------:|------:|----------------|-----------|
+| kernel-heap-metrics               | 2/40   | 5.0%  | [1.4%, 16.5%]  | 0a56a95   |
+| sched-spans-carry-task-id         | 2/40   | 5.0%  | [1.4%, 16.5%]  | 0a56a95   |
+| sched-span-survives-yield         | 1/40   | 2.5%  | [0.4%, 12.9%]  | 0a56a95   |
+| workload-cooperative-baseline     | 1/40   | 2.5%  | [0.4%, 12.9%]  | 0a56a95   |
+| deflake-spawn-storm               | 1/100  | 1.0%  | [0.2%, 5.4%]   | db2c9e2   |
+| deflake-ipi-pong                  | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| deflake-shootdown-storm           | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| ipi-self-wakeup                   | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| smp-secondary-hart-boots          | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| smp-spawn-on-hart-1-runs          | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| sched-task-exits-cleanly          | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| boot-reaches-heartbeat            | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| heartbeat-cadence                 | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| pre-init-order                    | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| kernel-runs-at-higher-half        | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| frame-allocator-metrics           | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| frame-allocator-oom               | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| heap-oom                          | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| sched-context-switch-smoke        | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| sched-spawn-registers-thread      | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| sched-yield-round-trips           | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+| sched-context-switches-on-wire    | 0/40   | 0%    | [0%, 8.8%]     | 0a56a95   |
+
+**Commit gap to note:** the spawn-storm rate moved from `3/40`
+(7.5%) at `0a56a95` to `1/100` (1.0%) at `db2c9e2`. The harness
+reports p=0.0370 for the change. **This is almost certainly sample
+noise**, not a real improvement:
+
+- Task-exit (`c432d7a`) was already landed in `0a56a95`. The
+  spawn-storm body has been using `exit_now` in both measurements.
+- The only changes between the two commits are itest-harness
+  improvements (`1ce555f` CI computation, `f2058f1` summary
+  options, `db2c9e2` partial-marker support). No kernel code
+  changed.
+- ~22 scenarios are checked against the same null hypothesis on
+  every comparison; a single p=0.037 with that many tests is well
+  within what you'd expect from multiple-testing inflation.
+- The 95% CIs overlap: [2.6%, 19.9%] for 3/40 vs [0.2%, 5.4%] for
+  1/100. The point estimates are different but both samples are
+  consistent with a true rate around 1–4%.
+
+**Treat the spawn-storm rate as ~1–5% with wide uncertainty.** The
+40-run measurements for the other scenarios likely also have wide
+uncertainty in either direction. A re-baseline of the full suite at
+larger N (≥100 per scenario) is needed before any cross-scenario
+ranking is load-bearing for hypothesis selection.
 
 ### The structural pattern
 
@@ -628,16 +658,19 @@ Every zero-flake scenario does not.
 
 **Flaky / mutex-pressure:**
 
-- `deflake-spawn-storm`: 3 SCHEDULER mutex acquires per iteration
-  (hart 0 spawn, hart 1 pop for body, hart 1 pop for hart_1_main
-  after exit) × 200 iterations × N boots.
-- `kernel-heap-metrics`: heap allocator mutex on every heap op
-  during the heartbeat smoke + grow.
-- `sched-spans-carry-task-id`, `sched-span-survives-yield`: span! →
-  `INTERN_TABLE.lock()` → on first-hit virtio
-  `TX_STAGING.lock()`; both harts emit spans.
-- `workload-cooperative-baseline`: workload `Mutex<VecDeque<u64>>`
-  + repeated span emissions on both harts.
+- `kernel-heap-metrics`, `sched-spans-carry-task-id` (both 5% at
+  0a56a95): heap allocator mutex (heartbeat smoke + watermark
+  grow) and `INTERN_TABLE.lock()` + virtio `TX_STAGING.lock()` on
+  every span emission.
+- `sched-span-survives-yield`, `workload-cooperative-baseline`
+  (both 2.5% at 0a56a95): span emissions across yields + workload
+  `Mutex<VecDeque<u64>>`.
+- `deflake-spawn-storm` (1% at db2c9e2): 3 SCHEDULER mutex acquires
+  per iteration (hart 0 spawn, hart 1 pop for body, hart 1 pop for
+  hart_1_main after exit) × 200 iterations × N boots. Lower rate
+  than spans/heap despite higher mutex op count — the contended
+  mutex is SCHEDULER, accessed in a tighter critical section than
+  INTERN_TABLE.
 
 **Zero-flake / atomics-only:**
 
@@ -681,15 +714,20 @@ section is a possible race window.
 
 **Why the previous hypotheses are weaker:**
 
-- H1 (stale `ra`/`sp` deref): the storm exposes this path 4 000
-  times yet only at 7.5%; per-trial rate is ~0.04%. If H1 were the
-  bug, we'd expect uniform per-trial probability and a flat
-  ~0.04%-times-trials curve. Instead the rate matches scenarios
-  with *fewer* `switch` invocations but *more* mutex pressure (heap,
-  spans). That's not what an H1 race profile would look like.
-- H_post-sret: we have 100 000 clean trials. Either falsified or
-  the bug requires both post-sret AND something else (which then
-  becomes the something-else).
+- H1 (stale `ra`/`sp` deref): the post-task-exit storm exposes
+  this path effectively 200 times per boot. The 1/100 measurement
+  puts the per-boot rate in [0.2%, 5.4%]; even at the upper bound,
+  per-trial rate is ≲ 3e−4. If H1 were the dominant bug, the storm
+  should flake at a rate several orders of magnitude higher than
+  the other suite scenarios. It does not — the storm sits at or
+  below the suite's general mutex-pressure floor. The bug is
+  somewhere that does not scale with `switch`-into-fresh-context
+  count.
+- H2 (stack reads): same shape of argument. Storm body touches a
+  stack-local marker on every iteration; per-trial rate bounded
+  the same way. Same near-falsification.
+- H_post-sret: 100 000 clean trials. The bug doesn't live on the
+  bare resume window.
 
 ### Validation experiment: `deflake-mutex-storm`
 

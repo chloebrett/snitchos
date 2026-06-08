@@ -69,10 +69,15 @@ pub struct RunnerConfig<'a> {
     /// Path where a *partial* baseline gets written if the run is
     /// interrupted mid-`--repeat` (graceful Ctrl-C). Only consulted
     /// when `update_baseline` is true; never overwrites the canonical
-    /// baseline file. Step A: the field exists but the interrupt
-    /// path that consumes it lands in step B. See
-    /// `plans/itest-history-and-pending.md`.
+    /// baseline file. See `plans/itest-history-and-pending.md`.
     pub pending_baseline: Option<PathBuf>,
+
+    /// Interrupt signal. The runner reads this at every iteration
+    /// boundary; when it's `true`, the loop breaks gracefully and
+    /// (if `update_baseline`) the partial baseline goes to
+    /// `pending_baseline` instead of the canonical file. The caller
+    /// sets it from a signal handler (xtask uses `ctrlc`).
+    pub interrupt: Option<&'a std::sync::atomic::AtomicBool>,
 }
 
 /// Run `scenarios` `repeat` times. If `update_baseline` is true, write
@@ -96,6 +101,7 @@ pub fn run(
 
     let runs = repeat.max(1);
     let mut aggregator = Aggregator::new();
+    let mut interrupted = false;
 
     for run_idx in 0..runs {
         if runs > 1 {
@@ -156,6 +162,21 @@ pub fn run(
             );
             break;
         }
+
+        // Graceful interrupt: external signal handler flipped this
+        // bool. Finish printing the per-run summary above, then exit
+        // the loop. Pending-baseline write happens below.
+        if let Some(flag) = config.interrupt
+            && flag.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            interrupted = true;
+            eprintln!(
+                "\nInterrupted after run {}/{}. Writing partial baseline (if --update-baseline).",
+                run_idx + 1,
+                runs
+            );
+            break;
+        }
     }
 
     // Single-run path: behaviour unchanged from before.
@@ -177,30 +198,72 @@ pub fn run(
     print_baseline_comparisons(scenarios, &aggregator, baseline_file.as_ref());
 
     if update_baseline {
-        let Some(path) = config.baseline_file.as_deref() else {
-            eprintln!("warning: --update-baseline requested but no baseline_file path was supplied");
-            return exit_code(&aggregator);
-        };
         let commit = config
             .current_commit
             .and_then(|f| f())
             .unwrap_or_else(|| "unknown".to_string());
         let now = OffsetDateTime::now_utc();
-        let updated = apply_current_run_to_baseline(
-            baseline_file.unwrap_or_default(),
-            scenarios,
-            &aggregator,
-            &commit,
-            now,
-        );
-        if let Err(e) = updated.save_path(path) {
-            eprintln!("warning: failed to write {}: {e}", path.display());
+
+        if interrupted {
+            // Pending path: fresh BaselineFile (never load the
+            // previous pending — each interrupted run produces its
+            // own snapshot); every entry gets a `partial` marker so
+            // promote-time tooling can flag the incomplete-ness.
+            let Some(path) = config.pending_baseline.as_deref() else {
+                eprintln!(
+                    "warning: interrupted with --update-baseline but no \
+                     pending_baseline path was supplied"
+                );
+                return exit_code_with_interrupt(&aggregator, interrupted);
+            };
+            let partial = crate::baseline::PartialMarker {
+                requested_runs: runs,
+                interrupted_at: now,
+                run_dir: None, // step C will populate
+            };
+            let pending = apply_current_run_to_baseline_with_partial(
+                BaselineFile::default(),
+                scenarios,
+                &aggregator,
+                &commit,
+                now,
+                Some(&partial),
+            );
+            if let Err(e) = pending.save_path(path) {
+                eprintln!("warning: failed to write {}: {e}", path.display());
+            } else {
+                eprintln!(
+                    "\nWrote partial baseline to {} ({} of {} requested iterations). \
+                     Promote with --promote-pending or discard with --discard-pending.",
+                    path.display(),
+                    aggregator.runs(),
+                    runs
+                );
+            }
         } else {
-            eprintln!("\nUpdated {} with current run's results.", path.display());
+            let Some(path) = config.baseline_file.as_deref() else {
+                eprintln!(
+                    "warning: --update-baseline requested but no baseline_file path was supplied"
+                );
+                return exit_code_with_interrupt(&aggregator, interrupted);
+            };
+            let updated = apply_current_run_to_baseline_with_partial(
+                baseline_file.unwrap_or_default(),
+                scenarios,
+                &aggregator,
+                &commit,
+                now,
+                None,
+            );
+            if let Err(e) = updated.save_path(path) {
+                eprintln!("warning: failed to write {}: {e}", path.display());
+            } else {
+                eprintln!("\nUpdated {} with current run's results.", path.display());
+            }
         }
     }
 
-    exit_code(&aggregator)
+    exit_code_with_interrupt(&aggregator, interrupted)
 }
 
 fn exit_code(aggregator: &Aggregator) -> ExitCode {
@@ -208,6 +271,16 @@ fn exit_code(aggregator: &Aggregator) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Conventional Unix exit code 130 = "terminated by SIGINT", regardless
+/// of whether scenarios passed or failed within the truncated run.
+fn exit_code_with_interrupt(aggregator: &Aggregator, interrupted: bool) -> ExitCode {
+    if interrupted {
+        ExitCode::from(130)
+    } else {
+        exit_code(aggregator)
     }
 }
 
@@ -272,12 +345,13 @@ fn print_baseline_comparisons(
     }
 }
 
-fn apply_current_run_to_baseline(
+fn apply_current_run_to_baseline_with_partial(
     mut file: BaselineFile,
     scenarios: &[&Scenario],
     aggregator: &Aggregator,
     commit: &str,
     now: OffsetDateTime,
+    partial: Option<&crate::baseline::PartialMarker>,
 ) -> BaselineFile {
     let runs = aggregator.runs();
     for s in scenarios {
@@ -293,7 +367,7 @@ fn apply_current_run_to_baseline(
             p95_duration_ms: aggregator
                 .p95_duration(s.name)
                 .map(|d| d.as_secs_f64() * 1000.0),
-            partial: None,
+            partial: partial.cloned(),
         };
         file.update_current(s.name, baseline);
     }
@@ -370,6 +444,61 @@ mod tests {
         assert_eq!(BUILD_COUNTER.load(Ordering::Relaxed), 1);
         // Scenario should never have been called.
         assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn interrupt_breaks_outer_loop_at_iteration_boundary() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_counters();
+        let pass = Scenario { name: "pass-1", run: always_pass };
+        // Pre-set the interrupt flag: the runner should observe it
+        // after the first iteration finishes and break.
+        let flag = std::sync::atomic::AtomicBool::new(true);
+        let config = RunnerConfig {
+            interrupt: Some(&flag),
+            ..RunnerConfig::default()
+        };
+        let _ = run(&[&pass], 10, false, &config);
+        // First iteration completes; interrupt check at boundary breaks.
+        assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn interrupt_with_update_baseline_writes_pending_not_canonical() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_counters();
+        let pass = Scenario { name: "pass-1", run: always_pass };
+
+        let dir = std::env::temp_dir().join(format!(
+            "itest-harness-pending-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let canonical = dir.join("baseline.toml");
+        let pending = dir.join("baseline.toml.pending");
+        // Pre-populate the canonical so we can later assert it was untouched.
+        std::fs::write(&canonical, "# untouched\n").unwrap();
+
+        let flag = std::sync::atomic::AtomicBool::new(true);
+        let config = RunnerConfig {
+            interrupt: Some(&flag),
+            baseline_file: Some(canonical.clone()),
+            pending_baseline: Some(pending.clone()),
+            ..RunnerConfig::default()
+        };
+        let _ = run(&[&pass], 10, true, &config);
+
+        // Canonical untouched.
+        let canonical_after = std::fs::read_to_string(&canonical).unwrap();
+        assert_eq!(canonical_after, "# untouched\n");
+        // Pending written with the partial marker.
+        let pending_after = std::fs::read_to_string(&pending).unwrap();
+        assert!(pending_after.contains("[scenarios.pass-1.current.partial]"));
+        assert!(pending_after.contains("requested_runs = 10"));
+        // Only 1 iteration actually completed before the boundary check.
+        assert!(pending_after.contains("runs = 1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

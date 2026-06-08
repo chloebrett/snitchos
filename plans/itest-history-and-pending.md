@@ -357,6 +357,62 @@ Punt step A's interesting behavior until interrupt arrives in step B.
 1. When canonical and pending both exist: show canonical with a warning at top: "pending baseline also present at <path>. Run `--promote-pending` or `--discard-pending` to clear."
 2. `--baseline-show --pending` flag to inspect the pending file specifically (partial entries clearly marked).
 
+### step H: CI flake metrics into Grafana
+
+Closes the observability loop: the same Tempo/Prometheus/Grafana stack that ingests kernel telemetry also surfaces CI-side flake metrics. Designed in two sub-steps so the cheap, useful thing lands first.
+
+**H1: batch export (NDJSON → Prometheus textfile)**
+
+Add `cargo xtask itest --emit-metrics <path>` (or default to `target/ci-metrics.prom`). Reads `.itest-baseline.toml` plus the most recent N run directories' NDJSON; emits a Prometheus exposition file:
+
+```
+# HELP ci_baseline_failure_rate Per-scenario rate from .itest-baseline.toml current.
+# TYPE ci_baseline_failure_rate gauge
+ci_baseline_failure_rate{scenario="heartbeat-cadence"} 0.06
+
+# HELP ci_iteration_duration_seconds Per-scenario per-iteration wall-clock duration.
+# TYPE ci_iteration_duration_seconds histogram
+ci_iteration_duration_seconds_bucket{scenario="heartbeat-cadence",le="0.5"} 0
+ci_iteration_duration_seconds_bucket{scenario="heartbeat-cadence",le="1.0"} 0
+ci_iteration_duration_seconds_bucket{scenario="heartbeat-cadence",le="1.5"} 187
+ci_iteration_duration_seconds_bucket{scenario="heartbeat-cadence",le="2.0"} 195
+ci_iteration_duration_seconds_bucket{scenario="heartbeat-cadence",le="+Inf"} 200
+ci_iteration_duration_seconds_sum{scenario="heartbeat-cadence"} 248.6
+ci_iteration_duration_seconds_count{scenario="heartbeat-cadence"} 200
+
+# HELP ci_iterations_total Cumulative iteration count per scenario+result.
+# TYPE ci_iterations_total counter
+ci_iterations_total{scenario="heartbeat-cadence",result="pass"} 188
+ci_iterations_total{scenario="heartbeat-cadence",result="fail"} 12
+```
+
+Prometheus `node_exporter`'s textfile collector (or `--collector.textfile.directory`) scrapes the file. No new networking, no new ports — Prometheus just reads the file on its scrape interval.
+
+Pros: trivially testable; zero runtime overhead during itest runs; metrics survive process death (it's just a file).
+Cons: not real-time during a long run; metrics only update when explicitly emitted.
+
+**H2: live OTLP push during runs**
+
+Layered on top of H1. `xtask itest` opens an OTLP HTTP connection at run start and pushes per-iteration observations as they happen. NDJSON still writes (it's the durable record); OTLP push is parallel.
+
+- Dep: `opentelemetry-rust` + `opentelemetry-otlp` HTTP exporter.
+- Resilient to collector being down — buffer locally, drop if buffer overflows, log a warning.
+- Both run-level info (commit, hostname, requested_repeat) and per-iteration data flow.
+
+Pros: real-time Grafana updates during 3-hour baseline runs.
+Cons: more dep surface; needs the collector reachable.
+
+**Grafana dashboards** (independent of H1 vs H2):
+
+- *Per-scenario flake rate over time* — heatmap, scenarios on Y, time on X, color = failure rate.
+- *Iteration duration distribution per scenario* — histogram percentile lines (p50/p95/p99) over time. This is the view that makes bimodal timing distributions and creeping regressions immediately visible.
+- *Baseline-vs-current comparison panel* — current run's `current` baseline vs. previous, with statistical confidence band overlaid.
+- *Run summary card* — last N runs, link to NDJSON paths for forensic dive-in.
+
+These are why H exists. The numerical baseline comparison we have today answers "is this regressing?" Grafana answers "what's the *shape* of the regression?"
+
+**Dependencies on prior steps**: H1 needs C (NDJSON writer) and the existing baseline machinery. H2 needs H1's metric model definitions but otherwise stands alone. Both depend on the Tempo/Prometheus/Grafana stack already in `stack/docker-compose.yml`.
+
 ## open decisions
 
 These are things to lock in as we implement:
