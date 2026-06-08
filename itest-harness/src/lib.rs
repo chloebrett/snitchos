@@ -20,24 +20,14 @@ pub mod signature;
 pub mod stats;
 pub mod verdict;
 
-pub use aggregate::{Aggregator, RunTotals};
-pub use baseline::{
-    Baseline, BaselineError, BaselineFile, PartialMarker, ScenarioBaseline, SummaryOptions,
-};
-pub use history::{
-    PruneReport, RecoveredRun, RecoveredScenario, aggregate_run_dir, prune_runs,
-};
+// Flat re-exports are exactly what the consumer (`xtask`) imports. Items
+// used only inside this crate are reached via their `crate::<module>::`
+// path, not re-exported here — keeping the public surface == the actual
+// contract. (crate-audit finding #1.)
+pub use baseline::{BaselineFile, SummaryOptions};
+pub use history::{aggregate_run_dir, prune_runs};
 pub use lock::{ItestLock, LockError};
-pub use otlp::{
-    build_payload as build_otlp_payload, metrics_endpoint, push as push_otlp,
-    push_with_timeout as push_otlp_with_timeout,
-};
+pub use otlp::{push as push_otlp, push_with_timeout as push_otlp_with_timeout};
 pub use prom::{render_prometheus, write_atomic};
 pub use runner::{CpuProfile, RunnerConfig, Scenario, run};
-pub use signature::{
-    CaptureLevel, ErrorOrigin, FailureCapture, FailureEvidence, Signature, WaitOutcome, classify,
-};
-pub use stats::{ConfidenceInterval, two_proportion_p_value, wilson_score_95};
-pub use verdict::{
-    ComparisonRender, DEFAULT_ALPHA, Direction, Verdict, render_comparison, verdict,
-};
+pub use signature::{CaptureLevel, ErrorOrigin, FailureCapture, WaitOutcome};
