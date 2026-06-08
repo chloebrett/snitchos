@@ -1,6 +1,7 @@
-//! Wire format for `SnitchOS` telemetry. Postcard-encoded `Frame` enum,
-//! length-prefixed on the wire (the framing is the transport's job, not
-//! this crate's).
+//! Wire format for `SnitchOS` telemetry. Postcard-encoded `Frame` enum.
+//! Postcard's encoding is self-delimiting, so frames are written
+//! back-to-back with no outer length prefix; the decoder peels one frame
+//! at a time (see `stream::try_decode_frame`).
 //!
 //! `no_std` so the kernel can use it; tests are hosted.
 
