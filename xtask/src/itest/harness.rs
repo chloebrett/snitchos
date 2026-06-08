@@ -204,6 +204,65 @@ impl Harness {
         result
     }
 
+    /// Negative oracle: assert a "bad" frame never appears within `window`.
+    ///
+    /// For inverted-assertion scenarios (a TLB shootdown leaving no stale
+    /// read, an invariant never violated) the *success* path is the window
+    /// elapsing with no match. Plain `wait_for` expresses this as
+    /// `if wait_for(..).is_some() { Err } else { Ok }`, but its timeout branch
+    /// then dumps the alarming `[timeout: last N frames]` block and records a
+    /// failure capture — on what is actually a pass. `assert_absent` inverts
+    /// that: a clean-elapsed window logs `negative-oracle window elapsed clean`
+    /// and returns `Ok(())`; a matching (bad) frame dumps the offending tail
+    /// and returns `Err(on_present)`. `what` is a short label for the logs.
+    ///
+    /// A mid-window disconnect is a failure, not a clean pass: QEMU dying means
+    /// we cannot conclude the bad event was absent.
+    pub fn assert_absent(
+        &mut self,
+        window: Duration,
+        what: &str,
+        on_present: impl Into<String>,
+        pred: impl Fn(&OwnedFrame, &StringTable) -> bool,
+    ) -> Result<(), String> {
+        let start = Instant::now();
+        let deadline = start + window;
+        let outcome = loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break Ok(());
+            };
+            match self.rx.recv_timeout(remaining) {
+                Ok(frame) => {
+                    self.absorb(&frame);
+                    if pred(&frame, &self.strings) {
+                        self.dump_recent("negative oracle tripped");
+                        break Err(on_present.into());
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => break Ok(()),
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.dump_recent("QEMU disconnected");
+                    self.record_failure_capture(WaitOutcome::Disconnected);
+                    break Err(format!(
+                        "QEMU disconnected while asserting absence of {what} — \
+                         cannot conclude the bad event never happened"
+                    ));
+                }
+            }
+        };
+        let elapsed = start.elapsed();
+        if elapsed > self.max_wait.0 {
+            self.max_wait = (elapsed, window);
+        }
+        if outcome.is_ok() {
+            eprintln!(
+                "  [negative-oracle window elapsed clean: {:.1}s, no {what}]",
+                elapsed.as_secs_f64()
+            );
+        }
+        outcome
+    }
+
     /// (`actual`, `budget`) of the longest `wait_for` issued so far.
     /// Used by the runner to print e.g. `max wait 1.6s of 30s budget`,
     /// flagging budgets that are over-sized (much bigger than actual)

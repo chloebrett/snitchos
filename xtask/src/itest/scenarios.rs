@@ -1006,26 +1006,24 @@ pub fn smp_tlb_shootdown_visible() -> Result<(), String> {
     // The oracle is cumulative and re-emitted every heartbeat, so by the
     // time rounds >= 100 any stale read is latched and will reappear.
     // Finding one within a few ticks is the failure this scenario exists
-    // to catch.
-    if h.wait_for(SEC * 5, |f, strings| match f {
-        OwnedFrame::Metric { name_id, value, .. } => {
-            strings.get(name_id).map(String::as_str)
-                == Some("snitchos.smp.tlb_stale_reads")
-                && *value > 0
-        }
-        _ => false,
-    })
-    .is_some()
-    {
-        return Err(
-            "hart 1 observed a STALE TLB translation after a remap \
-             (tlb_stale_reads > 0) — mmu::remap's shootdown did not \
-             invalidate the other hart's cached entry."
-                .to_string(),
-        );
-    }
-
-    Ok(())
+    // to catch — so the *clean* path is this 5s window elapsing with no
+    // `tlb_stale_reads > 0`. `assert_absent` makes that an explicit pass
+    // (no scary timeout dump), not a `wait_for` that happens to time out.
+    h.assert_absent(
+        SEC * 5,
+        "tlb_stale_reads>0",
+        "hart 1 observed a STALE TLB translation after a remap \
+         (tlb_stale_reads > 0) — mmu::remap's shootdown did not \
+         invalidate the other hart's cached entry.",
+        |f, strings| match f {
+            OwnedFrame::Metric { name_id, value, .. } => {
+                strings.get(name_id).map(String::as_str)
+                    == Some("snitchos.smp.tlb_stale_reads")
+                    && *value > 0
+            }
+            _ => false,
+        },
+    )
 }
 
 /// v0.6 step 13: cross-hart ping-pong cadence — a wakeup oracle
