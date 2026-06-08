@@ -5,240 +5,204 @@ description: Audit a Rust crate or module for bloat, dead code, unused features,
 
 # crate-audit — crate/module debt audit
 
-Systematically find what a crate no longer needs, what's duplicated, and what's
-structurally rotting — backed by evidence, not vibes. Produce a report the human
-acts on; **do not delete or refactor without explicit approval.**
+Find what a crate no longer needs, what's duplicated, and what's structurally
+rotting — and, just as much, where a *warranted* abstraction would make it
+better. Backed by evidence, not vibes. Produce a report the human acts on;
+**do not delete, refactor, or abstract without explicit approval.**
+
+Auditing is not only subtractive. Removing cruft and *adding* the right seam
+(a shared helper, a named type, a trait that makes a thing testable) are both
+in scope. Abstraction is good when it pays its way — the discipline is to
+*offer* it with its trade-offs and let the human choose, never to impose it.
 
 ## Operating rules
 
-1. **Evidence before every claim.** "Unused" requires a grep that finds zero
-   callers. "Duplicated" requires showing both sites. "Dead feature" requires
-   showing the flag gates nothing. No finding without a command output behind it.
-2. **Audit, then report. Don't edit.** This skill produces a findings report.
-   Offer to apply the *obvious wins* only after the human picks them. Never
-   bundle a refactor into the audit.
-3. **Separate "delete now" from "needs your call."** A `pub` item with no
-   in-repo caller might be deliberate external/library API. Flag the ambiguity;
-   let the human decide. Default to *flag*, not *delete*.
-4. **Justified duplication is not debt.** Two code paths that look similar but
-   serve genuinely different contracts (e.g. a text exporter and a protobuf
-   exporter) are not automatically collapsible. Say why it might be intentional.
-5. **Respect the project's conventions** (CLAUDE.md, existing patterns). Debt is
-   *drift from the codebase's own norms*, not drift from your preferences.
-6. **"No in-repo producer" ≠ dead for contract surface.** Wire formats, ABIs,
-   protocol enums, and public schemas are routinely defined *complete and ahead
-   of their consumers* — a variant with zero emit sites may be a reserved slot,
-   not cruft. Before flagging such an item, **grep the design docs / `plans/` /
-   roadmap for its name and intent** (`grep -rin <Symbol> docs/ plans/`). If a
-   doc says "defined now, used later" or "reserved for vX", the finding is
-   *keep*, and the audit's job is to confirm the source comment says so too.
-   Treat the grep miss as a *prompt to read the design*, never as the verdict.
+1. **Evidence before every claim.** "Unused" = a grep with zero callers.
+   "Duplicated" = both sites shown. "Dead feature" = the flag gates nothing. No
+   finding without a command output behind it.
+2. **Audit, then report. Don't edit.** Offer to apply the *obvious wins* only
+   after the human picks them. Never bundle a refactor into the audit.
+3. **Separate "delete now" from "needs your call."** Default to *flag*, not
+   *delete*, for anything that might be deliberate (external API, reserved
+   surface, intentional divergence).
+4. **Justified duplication is not debt.** Code paths that look similar but serve
+   different contracts (a text exporter vs a protobuf one) aren't collapsible.
+   Say why it might be intentional.
+5. **Debt is drift from the codebase's own norms** (CLAUDE.md, sibling crates) —
+   not drift from your preferences.
+6. **"No producer" ≠ dead for contract surface.** Wire formats, ABIs, protocol
+   enums, public schemas are routinely defined *ahead of their consumers* — a
+   variant with zero emit sites may be a reserved slot. Before flagging one,
+   `grep -rin <Symbol> docs/ plans/`. If the design reserves it, the finding is
+   *keep* (at most: make the source comment say so). A grep miss is a prompt to
+   read the design, never the verdict.
 
 ## Step 1 — Scope
 
-Establish before analysing:
+- **Target**: which crate / module(s), and its **mandate** (read its lib.rs /
+  module docs — bloat is code that doesn't serve the mandate).
+- **Consumers + publish status** — the decisive scoping fact:
+  - `publish = false` + few internal consumers → "unused-by-them == dead"; no
+    external-API escape hatch, so the "might be public API" caveat doesn't apply.
+  - **Bin/leaf crate** (nothing depends on it) → there are no consumer dirs at
+    all; every `pub` is internal-only. Lean on the `dead_code` build + a
+    "called only by tests" check rather than cross-crate greps.
+  - Published / many consumers → be conservative about `pub` items.
 
-- **The target**: which crate / module(s).
-- **Its consumers + publish status**: who calls it, and is it published? Check
-  `grep -n 'publish' <crate>/Cargo.toml` and enumerate importers
-  (`grep -rln '<crate_underscored>::' <other-crates>/`). **This is the decisive
-  scoping fact:** if `publish = false` *and* there's a single internal consumer,
-  then **unused-by-that-consumer == dead** — there's no external-API escape
-  hatch, so the "might be public API" caveat doesn't apply. If it's published or
-  has many consumers, be far more conservative about `pub` items.
-- **Its mandate**: what is this crate *supposed* to be? (Read its lib.rs / module
-  docs.) Bloat is code that doesn't serve the mandate.
+  ```bash
+  grep -n publish <crate>/Cargo.toml
+  grep -rln '<crate_underscored>::' <other-crates>/   # who imports it
+  ```
 
-## Step 2 — Gather evidence (run the battery)
-
-Adapt paths to the target. Capture outputs; they're the backing for findings.
+## Step 2 — Gather evidence
 
 ```bash
-# Size + shape — where is the mass?
-wc -l <crate>/src/*.rs | sort -n
-cargo xtask loc 2>/dev/null || tokei <crate>   # prod vs test vs comment split
+wc -l <crate>/src/*.rs | sort -n                       # where's the mass?
+cargo xtask loc 2>/dev/null || tokei <crate>           # prod vs test split
 
-# Compiler/linter dead-code signal (strongest evidence)
 RUSTFLAGS="-W dead_code -W unused" cargo build -p <crate> 2>&1 | grep -iE 'never used|unused'
 cargo clippy -p <crate> --all-targets 2>&1 | grep -iE 'warning|never used'
-# Note: pub items are NOT flagged by dead_code — cross-reference them manually (below).
+# dead_code does NOT fire on `pub` items in `pub` modules — cross-ref those by hand.
 
-# Existing debt markers
-grep -rn 'dead_code\|#\[allow\|#\[expect\|TODO\|FIXME\|XXX\|HACK\|deprecated\|legacy\|for now\|temporary' <crate>/src/
+grep -rn 'dead_code\|#\[allow\|#\[expect\|TODO\|FIXME\|HACK\|deprecated\|legacy\|for now\|not yet\|TBD\|stub' <crate>/src/
+grep -rnE 'pub (fn|struct|enum|trait|const|type|mod) ' <crate>/src/   # API inventory
 
-# Public API inventory
-grep -rnE 'pub (fn|struct|enum|trait|const|type|mod) ' <crate>/src/
-
-# Cross-reference each PUBLIC symbol against usage — at TWO levels (the key move):
-#   (a) CONSUMER usage: callers in the consumer crate(s).
-#   (b) INTERNAL usage: callers elsewhere in THIS crate (outside the symbol's module).
-# The two counts give a clean decision per symbol (see below).
+# Cross-reference each PUBLIC symbol: ext = consumer-crate callers, int = callers
+# elsewhere in THIS crate. SANITY-CHECK the harness on one symbol you KNOW is used
+# before trusting it — an all-zero table almost always means the grep is broken
+# (unquoted var, wrong dir), not that everything's dead.
 for sym in <Sym1> <Sym2> ...; do
-  ext=$(grep -rw "$sym" <consumer-dirs> 2>/dev/null | wc -l)
-  int=$(grep -rw "$sym" <crate>/src 2>/dev/null | grep -vE "pub (fn|struct|enum|const|use|type)|//" | wc -l)
-  printf "%-30s ext=%s int=%s\n" "$sym" "$ext" "$int"
+  printf "%-30s ext=%s int=%s\n" "$sym" \
+    "$(grep -rw "$sym" <consumer-dirs> | wc -l)" "$(grep -rw "$sym" <crate>/src | wc -l)"
 done
+# ext>0 → keep public.  ext=0,int>0 → demote pub(crate)/drop re-export.
+# ext=0,int=0 → dead — but apply rule 6 for contract surface.
 
-# Decision from (ext, int):
-#   ext=0 int=0  → DEAD. Delete the item.
-#   ext=0 int>0  → INTERNAL ONLY. Drop its lib.rs re-export; demote to pub(crate).
-#                  (a heavily-used-internally symbol is NOT dead — don't delete it.)
-#   ext>0        → KEEP public.
-
-# Module privacy: does the consumer use `<crate>::<module>::` PATHS, or only the
-# flat re-exports? Modules never path-accessed can be `mod` (private), making the
-# re-export block the sole public surface. (Catches whole-module over-exposure.)
-grep -rhoE '<crate_underscored>::[a-z_]+::' <consumer-dirs> | sort -u
-
-# Before trimming re-exports: confirm INTERNAL code imports siblings via
-# `crate::<mod>::Item` paths, not bare `crate::Item` (the re-export). If the
-# latter, removing the re-export breaks internal compile.
-grep -rhn 'use crate::' <crate>/src | grep -vE 'use crate::\{?[a-z_]+::'   # empty = safe to trim
-
-# Features: declared vs gating vs enabled
-grep -A30 '\[features\]' <crate>/Cargo.toml
-grep -rn 'cfg(feature' <crate>/src/         # what each feature actually gates
-grep -rn 'feature = ' . --include=Cargo.toml # who enables them
-
-# Dependency usage — heavy dep for trivial use?
-grep -A40 '\[dependencies\]' <crate>/Cargo.toml
-# for each dep, grep its import sites; a dep used in one place may be removable.
-
-# Arg-threading / god-functions (architectural smell)
-grep -rn 'too_many_arguments\|fn .*(' <crate>/src | grep -cE '\(.*,.*,.*,.*,.*,.*,'  # 6+ args
+grep -A30 '\[features\]' <crate>/Cargo.toml; grep -rn 'cfg(feature' <crate>/src/   # declared vs gating
+grep -rn 'feature = ' . --include=Cargo.toml                                       # who enables them
+grep -A40 '\[dependencies\]' <crate>/Cargo.toml   # then grep each dep's import sites — one-use deps are removable
 ```
+
+Multi-module lib with re-exports? Also check which modules the consumer
+*path-accesses* (`grep -rhoE '<crate>::[a-z_]+::' <consumer-dirs> | sort -u`) —
+never-accessed ones can be private. And before trimming a re-export, confirm
+internal code imports siblings via `crate::mod::Item`, not the bare `crate::Item`
+re-export (the latter breaks on removal).
 
 ## Step 3 — Analyse across dimensions
 
-For each, ask the questions and record findings with evidence. Go deeper than a
-yes/no — name the specific symbol/line/site.
+Record findings with evidence — name the specific symbol/line/site.
 
 ### A. Dead code & unused exports
-- Which `pub` items have **zero callers** outside their module *and* zero
-  consumer-crate usage? (compiler won't warn on `pub` — you must grep.)
-- **Privatization is a dead-code detector.** `dead_code` analysis *skips* `pub`
-  items in `pub` modules. After confirming a module is internal-only (consumer
-  uses flat re-exports, not module paths), demoting `pub mod`→`mod` makes the
-  compiler check every `pub fn`/method inside it — and it will flag ones that
-  grep misses (e.g. methods called *only by tests*, which look "used" to a naive
-  grep). Do the demotion, then read the new warnings. (Test-only items that
-  survive: scope them `#[cfg(test)]` rather than deleting if they keep tests
-  readable; truly dead ones: delete.)
-- Should still-public-but-internal-only items be `pub(crate)` / private?
-- Any `#[allow(dead_code)]` / `#[expect(dead_code)]` — is the code waiting for a
-  caller that never came?
-- Unreachable match arms, `if false`, vestigial error variants never constructed?
-- Re-exports in `lib.rs` that nothing imports?
+- `pub` items with zero callers outside their module *and* zero consumer usage.
+- **Privatization is a dead-code detector.** After confirming a module is
+  internal-only, demote `pub mod`→`mod`: the compiler then checks every `pub fn`
+  inside and flags ones grep misses (e.g. called *only by tests*). Test-only
+  survivors: scope `#[cfg(test)]` if they keep tests readable; else delete.
+- Still-public-but-internal items that should be `pub(crate)` / private.
+- `#[allow(dead_code)]` waiting for a caller that never came. **Read the
+  justification — it may describe a crate shape that no longer exists** (e.g.
+  "for the lib build" on a crate that's bin-only).
+- Unreachable arms, `if false`, error variants never constructed, dead re-exports.
 
-### A′. Lint/style "debt" — check it's actually ENFORCED first
-- Before reporting lint findings (pedantic clippy, style nits, missing doc
-  sections), check whether that lint is *enforced*: `deny`/`warn` crate attrs, a
-  `[lints]` table, `clippy.toml`, or CI. An unenforced standard from a docs file
-  (e.g. "CLAUDE.md says deny pedantic") is **aspiration, not a norm** — flagging
-  N warnings against it imposes your preference, not the codebase's. If the crate
-  is *consistent with its siblings* (none enforce it), it isn't drifting. Report
-  it as a workspace-policy question, not crate debt. (Counts + "% auto-fixable"
-  are useful context for that policy decision.)
+### A′. Lint/style "debt" — check it's ENFORCED first
+Before reporting lint findings, check the lint is actually enforced (`[lints]`
+table, `deny`/`warn` attrs, `clippy.toml`, CI). A standard from a docs file that
+nothing enforces is **aspiration, not a norm** — and if the crate matches its
+siblings, it isn't drifting. Report it as a workspace-policy question, not crate
+debt. (But a lint that *is* enforced and *fires today* is real — fix or
+`#[allow(..., reason)]` it.)
 
-### B. Unused / vestigial features
-- Cargo features declared but gating nothing, or never enabled by anyone?
-- Feature flags effectively always-on (so the flag is noise) or never-on (dead)?
-- CLI flags / config options that are parsed but never read, or wired to nothing?
-- Config knobs (`Option<T>`, enums) that only ever take one value in practice?
+### B. Unused / vestigial features & config
+- Cargo features that gate nothing, or that nobody enables; flags always-on (noise)
+  or never-on (dead).
+- CLI flags / config knobs parsed but never read, or that only ever take one value.
 
 ### C. Speculative / YAGNI code
-- Abstractions (traits, generics, hooks) with exactly **one** implementation and
-  no second on the horizon — is the indirection paying rent?
-- "For the future" code with no current caller (the thing you almost shipped but
-  parked) — delete it; git remembers. **Exception: contract surface** (wire/ABI/
-  protocol enum variants, schema fields) defined ahead of its producer on purpose
-  — check the design docs first (operating rule 6) before calling it speculative.
-  A no-producer variant + a doc that reserves it = keep; the only fix is making
-  the *source comment* say "reserved" too.
-- Extensibility points (plugin registries, strategy enums) exercised by one case.
-- Over-parameterised functions whose extra params are always passed the same value.
+- Abstractions (traits, generics, hooks) with one impl and no second on the
+  horizon — is the indirection paying rent?
+- Parked "for the future" code with no caller — delete it; git remembers.
+  **Exception: contract surface** (wire/ABI/schema) defined ahead of its producer
+  is reserved, not speculative — rule 6.
+- Extensibility points exercised by one case; params always passed the same value.
 
 ### D. Repetition (collapsible)
-- Near-duplicate logic across modules/functions — show both, propose the shared
-  helper *or* explain why they must stay separate (different contracts).
-- Repeated construction boilerplate (the same struct built field-by-field in N
-  places) — a constructor / `From` / builder.
-- Copy-pasted test fixtures — a factory function.
-- Parallel `match` arms or per-variant code that a macro / trait method collapses.
-- The same grep/transform pipeline inlined repeatedly.
-- **The "edit-N-places" tell:** did a recent change touch the *same logical thing*
-  in multiple files? (`git log -p` / recent diff for a feature added in two
-  places at once.) A catalogue/enum/list maintained in parallel across files is
-  duplication that *will* drift — e.g. adding one metric to both a text exporter
-  and a protobuf exporter. Strong signal for "extract a single source."
+- Near-duplicate logic — show both, propose the shared helper *or* explain why
+  they must diverge.
+- Repeated construction boilerplate → constructor / `From` / builder. Copy-pasted
+  fixtures → factory. Parallel `match` arms → macro / trait method.
+- **The "edit-N-places" tell:** a recent change that touched the *same logical
+  thing* in multiple files (a catalogue/enum/list kept in parallel) *will* drift.
+  Strong signal for "extract a single source."
 
 ### E. Architectural debt
-- `too_many_arguments` (6+) — threading state that wants a context struct.
-- God-functions / god-modules doing several unrelated jobs; or the inverse —
-  a "module" that's one tiny function nobody else needs.
-- Two different ways to do the same thing in the codebase (inconsistent patterns).
-- Primitive obsession — bare `(u32, u32)` / stringly-typed where a named type
-  would prevent bugs.
-- Leaky abstractions: a "pure" module that secretly does I/O; a layer that just
-  forwards.
-- Coupling smells: module A reaches into B's internals; cyclic-ish dependencies.
-- Mismatch with stated architecture (CLAUDE.md says X, code does Y).
+- `too_many_arguments` (6+) → a context struct. God-functions/modules, or the
+  inverse (a "module" that's one function nobody else needs).
+- Two ways to do the same thing; primitive obsession (`(u32, u32)` where a named
+  type prevents bugs); leaky abstractions (a "pure" module that does I/O); a layer
+  that just forwards; A reaching into B's internals; CLAUDE.md says X, code does Y.
 
 ### F. API surface & types
-- Over-broad `pub` (publishing internals as API).
-- Structs with all-public fields that should have invariants / constructors.
-- Types that exist only to be converted to another type immediately.
+- Over-broad `pub`; all-public-field structs that want invariants/constructors;
+  types that exist only to be immediately converted to another.
 
 ### G. Test & doc debt
-- Test-to-prod ratio anomalies (a tiny module with a huge test file, or logic
-  with none).
-- Weak tests: `assert!(true)`, round-trip-only tests, tests that restate the impl.
-- Duplicated fixtures (link to D).
-- Comments that describe *what* not *why*, stale comments, and **SAFETY/invariant
-  comments that lie** (assert a guarantee the code doesn't keep — high severity,
-  these cause real bugs).
+- Test-to-prod ratio anomalies; weak tests (`assert!(true)`, round-trip-only,
+  restating the impl); duplicated fixtures (→ D).
+- Stale comments, what-not-why comments, and **SAFETY/invariant comments that lie**
+  (assert a guarantee the code doesn't keep — high severity).
+- **Load-bearing claims in module/header docs the code doesn't keep.** A confident
+  noun ("length-prefixed on the wire", "lock-free", "O(1)") reads as authoritative
+  and greps as fine — verify it against the implementation. Surfacing trick: try to
+  *explain the module from its docs*; the false claim dies when you re-derive it.
 
 ### H. Dependencies
-- Deps pulled in for one trivial call (replaceable with std / a few lines).
-- Heavy transitive cost for light use.
-- Multiple deps doing the same job.
+- Deps pulled in for one trivial call (replaceable with std / a few lines); heavy
+  transitive cost for light use; two deps doing the same job.
 
 ## Step 4 — Report
 
-Produce a prioritized findings table. Each finding:
+Prioritized table, one row per finding:
 
 | # | Dimension | Severity | Finding | Evidence | Recommendation | Effort | Risk |
 
-- **Severity**: high (active hazard / real confusion) · med (clear debt) · low (nit).
-- **Evidence**: the file:line + the grep/command output that proves it.
-- **Risk**: of *acting* on it — e.g. "may be external API," "changes wire format."
+- **Severity**: high (active hazard) · med (clear debt) · low (nit).
+- **Evidence**: file:line + the grep/command output that proves it.
+- **Risk**: of *acting* — "may be external API," "changes wire format."
 
-Then split into two lists the human chooses from:
+Then split into lists for the human:
 
-- **Obvious wins (safe to delete/collapse now)** — zero-caller private items,
-  dead branches, parked code, exact-duplicate fixtures. Low risk, high confidence.
-- **Needs your call** — anything touching public API, wire/serialization formats,
-  load-bearing-but-subtle code, or "duplication" that might be intentional.
-  Present the trade-off; don't decide for them.
+- **Obvious wins** — zero-caller private items, dead branches, parked code,
+  exact-duplicate fixtures, stale docs, unused deps. Low risk, high confidence.
+- **Needs your call** — public API, wire/serialization formats, load-bearing
+  subtle code, "duplication" that might be intentional. Present the trade-off;
+  don't decide for them.
+- **Abstraction opportunities** — where the audit surfaces *missing* structure
+  that would genuinely pay: duplication a shared helper collapses (fewer
+  edit-N-places sites), primitive obsession a named type designs a bug class out
+  of, an untestable dependency a trait/seam unlocks. Propose each as a concrete
+  sketch with its **benefit and its cost** (indirection, more code, a new
+  module), and **ask before applying** — recommend only when you'd defend it on
+  the merits, and say plainly when the duplication is honestly fine as-is.
 
-Close with a one-line **mass estimate**: roughly how many lines each bucket
-removes, so the human can judge whether it's worth a session.
+Close with a one-line **mass estimate** (lines each bucket adds or removes).
 
 ## Step 5 — Apply (only on request)
 
-If — and only if — the human picks items, apply them following the project's
-workflow (TDD where logic changes, run the relevant tests + clippy after each
-deletion, keep each change small and independently revertable). Re-run the
-build/clippy after every removal to confirm nothing depended on it. Never batch a
-big delete without checking the suite is still green.
+Only if the human picks items. Follow the project's workflow (TDD where logic
+changes); re-run tests + clippy after *each* removal to confirm nothing depended
+on it; keep changes small and independently revertable. Never batch a big delete
+without checking the suite is green.
 
-## Anti-patterns (don't do these)
+## Anti-patterns
 
-- Declaring code dead from a single narrow grep. Cross-check consumer crates and
-  trait-dispatch / macro-generated call sites (grep misses these).
-- Treating all duplication as collapsible. Some is honest divergence.
+- Declaring code dead from one narrow grep — cross-check consumer crates and
+  trait-dispatch / macro call sites (grep misses these), and for contract surface,
+  the design docs (rule 6).
+- Trusting an all-zero usage table without sanity-checking the grep harness.
+- Treating all duplication as collapsible — some is honest divergence.
 - Deleting `pub` API because the *repo* doesn't use it — it may be the point.
-- Calling a no-producer wire/protocol variant "dead" without grepping the design
-  docs — it's usually a reserved slot defined ahead of its consumer (rule 6).
-- "Simplifying" by adding an abstraction (that's usually *more* code, not less).
+- *Imposing* an abstraction, or adding indirection that doesn't pay rent. (The
+  opposite mistake is just as real: refusing to *offer* a warranted one because
+  "less code" feels safer. Propose it, with costs, and let the human decide.)
 - Bundling the refactor into the audit. Report first.

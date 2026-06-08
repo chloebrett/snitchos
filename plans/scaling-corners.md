@@ -69,6 +69,34 @@ The "disable interrupts in the critical section" pattern is the
 standard kernel idiom. Probably want a `local_irq_save` / `restore`
 RAII guard that wraps lock acquisition.
 
+### 4. Cooperative idle can't race-free wait on an IPI-signalled condition
+
+The idle task is `loop { wfi; yield }`. A hart that wants to sleep
+until another hart signals "you have work" (set a flag, then
+`IPI_WAKEUP`) has a lost-wakeup hole: if the IPI lands in the window
+*between* the waiter's condition-check and its `wfi`, the software-
+interrupt handler clears `SSIP` (the `Wakeup` arm is a no-op), and the
+subsequent `wfi` then sees nothing pending and sleeps until the next
+timer tick (1 Hz). The flag is already set, but idle never re-checks
+it. So IPI-driven sleep-wait silently degrades to timer cadence.
+
+Found building `smp-ping-pong-cadence` (v0.6 step 13): a bidirectional
+ping-pong where each side yielded to `wfi` and relied on the partner's
+IPI ran at exactly 1 Hz instead of the IPI rate. The scenario was
+rewritten to busy-spin (it's an alternation oracle, not a sleep-wait
+test); the one-directional IPI-wake-from-`wfi` path is still covered by
+`ipi-pong` / `spawn-storm`, which avoid the hole because the *signal*
+is a runqueue entry the woken idle loop re-checks, and they don't race
+a check against the `wfi`.
+
+**Fix:** race-free condition-wait needs interrupts disabled across the
+check-and-`wfi` (RISC-V `wfi` wakes on pending interrupts even when
+masked, so the IPI's `SSIP` survives to break the `wfi`). That is the
+same `local_irq_save`/preempt-disable machinery deferred to v0.9
+(preemption). Until then, harts must not sleep-wait on a memory
+condition signalled only by an IPI — keep the signal a runqueue entry,
+or busy-spin.
+
 ## Correct but doesn't scale
 
 Things that work on SMP but serialize hard:
