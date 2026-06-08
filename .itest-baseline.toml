@@ -319,16 +319,12 @@ mean_duration_ms = 423.382663
 p95_duration_ms = 1203.457209
 
 [scenarios.sched-span-survives-yield.current]
-commit = "87a9963"
+commit = "61c9e41"
 runs = 500
-failures = 12
-recorded_at = "2026-06-08T05:39:49.688809Z"
-mean_duration_ms = 2286.6069319999997
-p95_duration_ms = 2270.580709
-
-[scenarios.sched-span-survives-yield.current.signature_counts]
-wedge = 10
-budget_exhausted = 2
+failures = 0
+recorded_at = "2026-06-08T05:51:51.458584Z"
+mean_duration_ms = 2202.1628259999998
+p95_duration_ms = 2278.28125
 
 [[scenarios.sched-span-survives-yield.history]]
 commit = "0a56a95"
@@ -364,6 +360,18 @@ p95_duration_ms = 2283.179208
 
 [scenarios.sched-span-survives-yield.history.signature_counts]
 wedge = 3
+
+[[scenarios.sched-span-survives-yield.history]]
+commit = "87a9963"
+runs = 500
+failures = 12
+recorded_at = "2026-06-08T05:39:49.688809Z"
+mean_duration_ms = 2286.6069319999997
+p95_duration_ms = 2270.580709
+
+[scenarios.sched-span-survives-yield.history.signature_counts]
+wedge = 10
+budget_exhausted = 2
 
 [scenarios.sched-spans-carry-task-id.current]
 commit = "ee4ce32"

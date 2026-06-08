@@ -281,6 +281,7 @@ Lock discipline:
 - **Never hold a `kernel::sync::Mutex` across `yield_now()`.** Cooperative; not enforced; a debug-only "held locks at yield" assert is a v0.5.x candidate.
 - The scheduler mutex is dropped before the asm `switch` runs — Tasks live in `Box<Task>` so the raw context pointers remain valid past the drop.
 - `virtio_console::send` stages the frame bytes through a static `TX_STAGING` buffer. **Required because `mmu::va_to_pa()` only handles `KERNEL_OFFSET`-range VAs; heap-allocated task stacks have VAs in `HEAP_VA_BASE+` which `va_to_pa` passes through unchanged**, so without staging the virtio descriptor would carry a heap VA where the device expects a PA — silently DMA-ing wrong physical memory. Caught during v0.5 step 7 debug.
+- **`let x = *MUTEX.lock();` releases the lock at the `;`.** `lock()` returns a temporary `MutexGuard`; deref-and-copy doesn't borrow it, so no lifetime extension — the guard drops immediately and any shared state touched afterward is unprotected. Bind the guard: `let g = MUTEX.lock(); let x = *g; …`. This exact bug in `virtio_console::send` was the ~2% cross-hart wedge (two harts racing `TX_STAGING` + the virtqueue ring during hart-1 task registration); the failure-signature classifier + capture corpus pinned it. See [plans/tx-staging-cross-hart-race.md](../plans/tx-staging-cross-hart-race.md).
 
 Per-task observability:
 

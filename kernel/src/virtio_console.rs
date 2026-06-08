@@ -383,16 +383,31 @@ pub fn send(bytes: &[u8]) {
     let Some(handle) = CONSOLE.get() else {
         return;
     };
-    let base = *handle.lock();
+    // Hold the CONSOLE guard across the ENTIRE stage+transmit. Binding
+    // it to a named local is load-bearing: the obvious-looking
+    // `let base = *handle.lock();` locks, copies `base` out, and then
+    // drops the *temporary* guard at the `;` — releasing the lock before
+    // TX_STAGING is even written. Two harts emitting concurrently (hart 1
+    // registering its tasks while hart 0 heartbeats) then race on the
+    // shared `TX_STAGING` buffer and the virtqueue ring: interleaved
+    // bytes corrupt the frame (garbled StringRegister / ThreadRegister
+    // names on the wire) and a clobbered descriptor wedges the device.
+    // See plans/tx-staging-cross-hart-race.md.
+    let guard = handle.lock();
+    let base = *guard;
     let len = bytes.len().min(unsafe { (&raw const TX_STAGING).read() }.len());
-    // SAFETY: CONSOLE was just locked — single writer to TX_STAGING +
-    // the device for the duration of the lock + transmit.
+    // SAFETY: `guard` is held for the whole block, so this hart is the
+    // single writer to TX_STAGING and the sole driver of the virtqueue
+    // for the duration of the staging copy and `transmit`.
     unsafe {
         let staging = &raw mut TX_STAGING;
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), staging as *mut u8, len);
         let staged = core::slice::from_raw_parts(staging as *const u8, len);
         transmit(base, staged);
     }
+    // Explicit: the lock is released only after `transmit` returns, not
+    // before it — the bug this replaced dropped it at `let base = ...`.
+    drop(guard);
 }
 
 /// Drive the virtio-mmio handshake on a discovered console device up
