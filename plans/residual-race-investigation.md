@@ -862,6 +862,86 @@ heap-metrics is the only flaky scenario without virtio emission
 in its hot path — well, it does emit metrics, but at heartbeat
 rate, not in tight loops).
 
+### Result: H11-refined falsified
+
+Built `deflake-virtio-storm`. Hart 0 calls `tracing::emit_metric`
+in a tight 5 000-iteration loop (intern check + frame serialise +
+`TX_STAGING.lock()` + virtio descriptor + MMIO notify). Hart 1
+spins `SHARED.fetch_add(1, Relaxed)`. No cross-hart mutex
+contention. Fix-off `--repeat 50`: **0/50, CI [0%, 7.1%]**.
+250 000 virtio frame emissions with concurrent cross-hart atomic
+activity, zero flakes.
+
+The virtio TX path is **not** the bug surface. Whatever the bug
+is, it isn't fired by "hart 0 hammers virtio while hart 1 mutates
+memory."
+
+### Where we are after five storm-scenarios
+
+| Storm                  | Cross-hart shape                                | Fix-off rate         |
+|------------------------|-------------------------------------------------|----------------------|
+| `deflake-ipi-pong`     | atomics only                                    | 0/100  (0%)          |
+| `deflake-shootdown-storm` | atomic IPI + payload read                     | 0/50   (0%)          |
+| `deflake-spawn-storm`  | fresh-switch + spawn-side SCHEDULER mutex       | ≈ 1% (1/100, fix on) |
+| `deflake-mutex-storm`  | hard cross-hart `Mutex<()>` contention          | 2/70   (≈3%)         |
+| `deflake-virtio-storm` | hart 0 virtio + hart 1 atomic                   | 0/50   (0%)          |
+
+**None of the storms come close to the default-suite flaky cluster's
+2.5–5% rate, even fix-off, even with extreme contention on a single
+kernel subsystem.**
+
+This shifts the picture substantially:
+
+- The bug is *not* localized to any single steady-state subsystem we
+  can isolate with a targeted storm.
+- The mutex-pressure cluster's correlation with flakiness was real
+  (atomic-only scenarios are clean, mutex-using scenarios flake)
+  but the *mechanism* isn't mutex contention per se.
+- More likely candidates after this round of falsification: H6
+  (per-boot race), H8 (hart 0 load-side from system-wide state),
+  H9 (multiple bugs), and the new H12 below.
+
+### H12 (new): combined-workload-state race
+
+> **The bug requires the kernel to be in a fully-loaded state**:
+> many tasks, frequent context switches, span emissions, heap
+> allocations, AND timer + IPI traffic — all happening together. No
+> single one of these is the trigger; the bug fires when several
+> overlap.
+
+Why this fits:
+
+- Storms all isolate one subsystem and gate out the rest. Clean.
+- Default suite scenarios all share the same fully-loaded boot:
+  ~8 tasks, demo workload, scheduler activity, heap-smoke, virtio
+  emissions per heartbeat. Flaky at 2.5–5%.
+- The flake rate is *similar across very different default scenarios*
+  (heap-metrics 5%, spans 5%, workload-baseline 2.5%) — suggesting
+  the trigger is shared boot/runtime state, not the specific
+  assertion each scenario makes.
+
+H12 is hard to test by constructing yet another storm — it's the
+*opposite* of an isolation experiment. The cheapest validation is
+to re-run an existing flaky default scenario fix-off at N=50 and
+see if its rate is in the 2–10% range. If yes, the rate is
+boot-distribution-uniform and H12/H6 are well supported. If much
+higher, the bug is at least partly scenario-specific.
+
+### Updated cheapest-next-experiment list
+
+1. **`kernel-heap-metrics` fix-off `--repeat 50`**. ~3 min run.
+   Re-baselines a known-flaky default scenario without the fix.
+   Splits "fix moves rate from X to 5%" from "5% is the true rate
+   with or without the fix."
+2. **Full flaky-default suite fix-off `--repeat 50` each**. ~15 min.
+   Get the per-scenario fix-off distribution. If all 4 scenarios
+   land in 2–10%, H12 is strongly supported.
+3. **Signature-classify** (H9) — re-read failure logs from existing
+   flake samples to separate disconnect-fast-exit from
+   budget-exhausted.
+4. **`rdtime`-spin fix substitute** (H10) — isolate timing vs
+   fence.
+
 ### What this implies for the other open hypotheses
 
 - **H6 (boot-time race)**: less likely. The flake distribution

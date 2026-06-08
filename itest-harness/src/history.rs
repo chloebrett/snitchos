@@ -224,6 +224,73 @@ pub fn aggregate_run_dir(run_dir: &Path) -> io::Result<RecoveredRun> {
     Ok(RecoveredRun { metadata, scenarios })
 }
 
+/// Result of `prune_runs`: which directories were retained vs removed.
+/// Names are bare directory names (not full paths) so they round-trip
+/// through user-facing output cleanly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PruneReport {
+    pub kept: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+/// Keep the most-recent `keep_last` run directories under `history_root`
+/// and remove the rest. Directory names are sorted lexicographically —
+/// safe because `run_dir_name` emits ISO-8601 timestamps that sort the
+/// same as their chronological order.
+///
+/// `keep_last == 0` removes every run directory. Non-directory entries
+/// and entries whose names don't match the timestamp format are left
+/// untouched — caller's manual files don't get nuked.
+///
+/// Returns kept/removed names in chronological order (oldest first).
+/// Missing `history_root` returns an empty report rather than an error
+/// — pruning a never-used checkout is a no-op, not a failure.
+pub fn prune_runs(history_root: &Path, keep_last: usize) -> io::Result<PruneReport> {
+    if !history_root.exists() {
+        return Ok(PruneReport { kept: Vec::new(), removed: Vec::new() });
+    }
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(history_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !looks_like_run_dir_name(&name) {
+            continue;
+        }
+        names.push(name);
+    }
+    names.sort();
+    let total = names.len();
+    let cut = total.saturating_sub(keep_last);
+    let (to_remove, to_keep) = names.split_at(cut);
+    for name in to_remove {
+        std::fs::remove_dir_all(history_root.join(name))?;
+    }
+    Ok(PruneReport {
+        kept: to_keep.to_vec(),
+        removed: to_remove.to_vec(),
+    })
+}
+
+/// Recognise our generated `YYYY-MM-DDTHH-MM-SSZ` shape — guards
+/// against `prune_runs` deleting user-placed files inside `.itest-runs/`.
+fn looks_like_run_dir_name(name: &str) -> bool {
+    // Length 20, ends in 'Z', positions per the format string in
+    // `run_dir_name`.
+    let bytes = name.as_bytes();
+    bytes.len() == 20
+        && bytes[19] == b'Z'
+        && bytes[10] == b'T'
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[13] == b'-'
+        && bytes[16] == b'-'
+}
+
 fn summarise_durations(durs: &[u32]) -> (Option<f64>, Option<f64>) {
     if durs.is_empty() {
         return (None, None);
@@ -433,6 +500,82 @@ mod tests {
         assert_eq!(b.runs, 2);
         assert_eq!(b.failures, 0);
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn prune_runs_keeps_most_recent_n_and_removes_older() {
+        let root = fresh_test_dir();
+        // Create five run dirs with distinct (and sortable) timestamps.
+        let names = [
+            "2026-06-01T12-00-00Z",
+            "2026-06-02T12-00-00Z",
+            "2026-06-03T12-00-00Z",
+            "2026-06-04T12-00-00Z",
+            "2026-06-05T12-00-00Z",
+        ];
+        for n in names {
+            std::fs::create_dir_all(root.join(n)).unwrap();
+            std::fs::write(root.join(n).join("placeholder"), b"x").unwrap();
+        }
+        let report = prune_runs(&root, 2).unwrap();
+        assert_eq!(
+            report.kept,
+            vec![
+                "2026-06-04T12-00-00Z".to_string(),
+                "2026-06-05T12-00-00Z".to_string(),
+            ]
+        );
+        assert_eq!(
+            report.removed,
+            vec![
+                "2026-06-01T12-00-00Z".to_string(),
+                "2026-06-02T12-00-00Z".to_string(),
+                "2026-06-03T12-00-00Z".to_string(),
+            ]
+        );
+        for n in &report.removed {
+            assert!(!root.join(n).exists());
+        }
+        for n in &report.kept {
+            assert!(root.join(n).exists());
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn prune_runs_ignores_non_run_dir_entries() {
+        let root = fresh_test_dir();
+        std::fs::create_dir_all(root.join("2026-06-01T12-00-00Z")).unwrap();
+        std::fs::write(root.join("README"), b"hi").unwrap();
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        let report = prune_runs(&root, 0).unwrap();
+        assert_eq!(report.kept, Vec::<String>::new());
+        assert_eq!(report.removed, vec!["2026-06-01T12-00-00Z".to_string()]);
+        assert!(root.join("README").exists());
+        assert!(root.join("notes").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn prune_runs_missing_root_returns_empty_report() {
+        let path = std::env::temp_dir().join(format!(
+            "itest-harness-prune-missing-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        let report = prune_runs(&path, 5).unwrap();
+        assert!(report.kept.is_empty());
+        assert!(report.removed.is_empty());
+    }
+
+    #[test]
+    fn prune_runs_keep_more_than_exists_is_noop() {
+        let root = fresh_test_dir();
+        std::fs::create_dir_all(root.join("2026-06-01T12-00-00Z")).unwrap();
+        let report = prune_runs(&root, 10).unwrap();
+        assert_eq!(report.removed, Vec::<String>::new());
+        assert_eq!(report.kept, vec!["2026-06-01T12-00-00Z".to_string()]);
         std::fs::remove_dir_all(&root).ok();
     }
 

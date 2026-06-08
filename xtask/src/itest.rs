@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use itest_harness::{
     BaselineFile, ItestLock, LockError, RunnerConfig, SummaryOptions, aggregate_run_dir,
+    prune_runs as prune_runs_in,
 };
 
 use crate::qemu;
@@ -230,6 +231,39 @@ pub fn discard_pending() -> ExitCode {
         }
         Err(e) => {
             eprintln!("discard failed: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Prune `.itest-runs/` to the most-recent `keep_last` run directories.
+/// Older ones are removed wholesale (NDJSON, metadata, captured logs).
+/// Exit 0 always on success, including the no-op case.
+pub fn prune_runs(keep_last: usize) -> ExitCode {
+    let root = PathBuf::from(HISTORY_ROOT);
+    match prune_runs_in(&root, keep_last) {
+        Ok(report) => {
+            if report.removed.is_empty() {
+                eprintln!(
+                    "No runs removed ({} kept under {}).",
+                    report.kept.len(),
+                    root.display()
+                );
+            } else {
+                eprintln!(
+                    "Removed {} run(s) from {} (kept {} most-recent):",
+                    report.removed.len(),
+                    root.display(),
+                    report.kept.len()
+                );
+                for n in &report.removed {
+                    eprintln!("  - {n}");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("prune failed: {e}");
             ExitCode::from(1)
         }
     }

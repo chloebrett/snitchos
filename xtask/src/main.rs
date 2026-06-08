@@ -148,6 +148,15 @@ enum Cmd {
         /// Refuses to overwrite an existing pending file.
         #[arg(long, value_name = "RUN_DIR")]
         recover_pending: Option<std::path::PathBuf>,
+        /// Prune `.itest-runs/` to the most recent N directories.
+        /// Pass with `--keep-last N`. Per-run NDJSON, metadata, and
+        /// captured failure logs in older runs are removed.
+        #[arg(long, default_value_t = false)]
+        prune_runs: bool,
+        /// Number of run directories to retain when `--prune-runs` is set.
+        /// Ignored otherwise. `0` removes everything.
+        #[arg(long, default_value_t = 20)]
+        keep_last: usize,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -196,7 +205,10 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, promote_pending, discard_pending, recover_pending } => {
+        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, promote_pending, discard_pending, recover_pending, prune_runs, keep_last } => {
+            if prune_runs {
+                return itest::prune_runs(keep_last);
+            }
             if let Some(dir) = recover_pending {
                 return itest::recover_pending(dir);
             }
