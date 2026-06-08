@@ -571,3 +571,192 @@ hart 1 returns to `wfi` between trials, so each spawn is genuinely
   or *budget-exhausted* (kernel alive → timing/throughput
   candidate). Output: two separate rates. Lets us see if the 8%
   is one phenomenon or several (H9).
+
+---
+
+## Appendix C: 40-run baseline + revised top suspect
+
+### The H1/H2 falsification was overconfident
+
+Two `--repeat 20` runs of `deflake-spawn-storm` (fix on, then fix off)
+both came back 20/20 clean. Appendix B claimed this **falsified H1
+(stale `*next_ctx` deref) and H2 (stale stack reads) at 4 000 trials**.
+
+That conclusion was wrong. A 40-run baseline (commit `0a56a95`, fix on)
+on the same scenario shows **3/40 = 7.5% per-boot flake**. The 95% CI
+for 0/20 is `[0%, 16.8%]` — easily covers 7.5%. The clean
+`--repeat 20` samples were luck; they don't falsify anything at the
+per-boot rates the suite actually exhibits.
+
+**Methodological lesson:** `--repeat 20` is enough to *measure* a
+known ≥10% rate but not enough to *rule out* anything at < ~10%.
+Use `--repeat 40` minimum when claiming a hypothesis is falsified.
+The `.itest-baseline.toml` aggregator is the right primitive for
+this — it accumulates trials across sessions and shows CIs.
+
+### Suite-wide flake distribution (40 runs, fix on, commit `0a56a95`)
+
+| Scenario                          | Fails | Rate  | 95% CI         |
+|-----------------------------------|------:|------:|----------------|
+| deflake-spawn-storm               | 3/40  | 7.5%  | [2.6%, 19.9%]  |
+| kernel-heap-metrics               | 2/40  | 5.0%  | [1.4%, 16.5%]  |
+| sched-spans-carry-task-id         | 2/40  | 5.0%  | [1.4%, 16.5%]  |
+| sched-span-survives-yield         | 1/40  | 2.5%  | [0.4%, 12.9%]  |
+| workload-cooperative-baseline     | 1/40  | 2.5%  | [0.4%, 12.9%]  |
+| deflake-ipi-pong                  | 0/40  | 0%    | [0%, 8.8%]     |
+| deflake-shootdown-storm           | 0/40  | 0%    | [0%, 8.8%]     |
+| ipi-self-wakeup                   | 0/40  | 0%    | [0%, 8.8%]     |
+| smp-secondary-hart-boots          | 0/40  | 0%    | [0%, 8.8%]     |
+| smp-spawn-on-hart-1-runs          | 0/40  | 0%    | [0%, 8.8%]     |
+| sched-task-exits-cleanly          | 0/40  | 0%    | [0%, 8.8%]     |
+| boot-reaches-heartbeat            | 0/40  | 0%    | [0%, 8.8%]     |
+| heartbeat-cadence                 | 0/40  | 0%    | [0%, 8.8%]     |
+| pre-init-order                    | 0/40  | 0%    | [0%, 8.8%]     |
+| kernel-runs-at-higher-half        | 0/40  | 0%    | [0%, 8.8%]     |
+| frame-allocator-metrics           | 0/40  | 0%    | [0%, 8.8%]     |
+| frame-allocator-oom               | 0/40  | 0%    | [0%, 8.8%]     |
+| heap-oom                          | 0/40  | 0%    | [0%, 8.8%]     |
+| sched-context-switch-smoke        | 0/40  | 0%    | [0%, 8.8%]     |
+| sched-spawn-registers-thread      | 0/40  | 0%    | [0%, 8.8%]     |
+| sched-yield-round-trips           | 0/40  | 0%    | [0%, 8.8%]     |
+| sched-context-switches-on-wire    | 0/40  | 0%    | [0%, 8.8%]     |
+
+### The structural pattern
+
+Every flaky scenario hammers a **kernel `spin::Mutex` cross-hart**.
+Every zero-flake scenario does not.
+
+**Flaky / mutex-pressure:**
+
+- `deflake-spawn-storm`: 3 SCHEDULER mutex acquires per iteration
+  (hart 0 spawn, hart 1 pop for body, hart 1 pop for hart_1_main
+  after exit) × 200 iterations × N boots.
+- `kernel-heap-metrics`: heap allocator mutex on every heap op
+  during the heartbeat smoke + grow.
+- `sched-spans-carry-task-id`, `sched-span-survives-yield`: span! →
+  `INTERN_TABLE.lock()` → on first-hit virtio
+  `TX_STAGING.lock()`; both harts emit spans.
+- `workload-cooperative-baseline`: workload `Mutex<VecDeque<u64>>`
+  + repeated span emissions on both harts.
+
+**Zero-flake / atomics-only:**
+
+- `deflake-ipi-pong`: hart 0 sends IPIs, hart 1 receives. Both ends
+  touch only `AtomicU32` `ipi_pending` and `AtomicU64` counters. No
+  mutex.
+- `deflake-shootdown-storm`: same — IPI + sfence + ack atomic.
+- `ipi-self-wakeup`, `smp-secondary-hart-boots`: setup, no
+  steady-state mutex contention.
+- `sched-task-exits-cleanly`: one task spawn, one exit. Two
+  SCHEDULER lock acquires total — well below the contention rate
+  needed to fire the race.
+- All boot scenarios: pre-multi-hart, single threaded.
+
+### Revised top suspect: spin::Mutex Acquire/Release under multi-thread TCG
+
+**Claim:** the `kernel::sync::Mutex` (currently a thin wrapper over
+`spin::Mutex`) has an Acquire-on-lock and Release-on-drop pair that
+multi-thread TCG fails to honour reliably. Every cross-hart critical
+section is a possible race window.
+
+**Why this matches everything:**
+
+- **Single-thread TCG vanishes the bug.** No atomic ordering needed;
+  scheduling is interleaved by QEMU. ✓
+- **Cosmetic clippy commits unmask it.** Codegen tweaks around the
+  CAS sequence in `spin::Mutex::lock()` widen or narrow the window
+  between "load lock byte" and "CAS attempt". ✓
+- **BQL fence (`tag("trap return")`) suppresses globally.** Every
+  trap exit serialises every vCPU's memory state. Catches mutex
+  windows. ✓
+- **`fence(SeqCst)` alone in the broad sweep didn't suffice.** Fence
+  has to land between the CAS-loop's load and store *inside* the
+  mutex implementation, not at random call sites. We never tested
+  that placement. ✓
+- **Atomic-only scenarios are clean.** No mutex critical section to
+  race in. ✓
+- **Mutex-pressure scenarios scale with contention rate.**
+  spawn-storm (3 acquires/iter × 200/boot) > heap-metrics
+  (heartbeat-rate) > spans (spans-per-second). ✓
+
+**Why the previous hypotheses are weaker:**
+
+- H1 (stale `ra`/`sp` deref): the storm exposes this path 4 000
+  times yet only at 7.5%; per-trial rate is ~0.04%. If H1 were the
+  bug, we'd expect uniform per-trial probability and a flat
+  ~0.04%-times-trials curve. Instead the rate matches scenarios
+  with *fewer* `switch` invocations but *more* mutex pressure (heap,
+  spans). That's not what an H1 race profile would look like.
+- H_post-sret: we have 100 000 clean trials. Either falsified or
+  the bug requires both post-sret AND something else (which then
+  becomes the something-else).
+
+### Validation experiment: `deflake-mutex-storm`
+
+Hart 0 and hart 1 each take and release a shared `kernel::sync::Mutex<()>`
+in a tight loop, no payload, no other work. Pacing on each hart
+similar to the existing storms. Two metrics:
+
+- `snitchos.deflake.mutex_storm_hart0_acquires` (hart 0's acquire
+  count).
+- `snitchos.deflake.mutex_storm_hart1_acquires` (hart 1's).
+
+The scenario asserts both counters reach N (e.g. 100 000) within T.
+
+**Predictions:**
+
+- Fix on: passes 40/40. The BQL fence at trap return covers it.
+- Fix off: flakes hard — predict ≥30% per-boot rate. The
+  contention rate per second is far higher than spawn-storm's, and
+  there is *nothing else* in the scenario that could break.
+
+**Counter-prediction (revised-H7 wrong):**
+
+- Fix off: still passes 40/40. The mutex isn't the issue; flaky
+  scenarios share something else we haven't seen.
+
+**If the prediction holds:** we have a high-rate repro. From there
+the fix is to find what's wrong with `spin::Mutex` on multi-thread
+TCG. Candidate moves:
+
+- Read `spin::Mutex::lock` source, look for ordering gaps in the
+  CAS loop. Patch locally or vendor.
+- Try `parking_lot`-style mutex (different CAS shape).
+- Add explicit `fence(SeqCst)` inside our `kernel::sync::Mutex`
+  acquire and release. If this closes the race AND `spin::Mutex`
+  unmodified does not, we've isolated the bug to spin's ordering.
+
+**If the prediction fails:** revised-H7 is wrong; data still useful.
+Move to H8 / H10 / signature-classify.
+
+### What this implies for the other open hypotheses
+
+- **H6 (boot-time race)**: less likely. The flake distribution
+  shows runtime-rate dependence on mutex contention. Pure boot
+  races would not scale with steady-state contention.
+- **H7 (cross-hart heap allocator state)**: subsumed by revised-H7.
+  The allocator *is* a cross-hart-mutex-contended subsystem.
+- **H8 (hart 0 load-side)**: still possible, but the mutex bug
+  hypothesis covers most hart-0-reads-hart-1-wrote situations
+  because most such reads happen inside critical sections.
+- **H9 (multiple bugs)**: still plausible —
+  workload-cooperative-baseline's "QEMU disconnect at 0.6s"
+  signature could be a different bug from
+  `kernel-heap-metrics`'s.
+- **H10 (timing not fence)**: orthogonal to revised-H7 and still
+  worth running. `rdtime`-spin substitution test stands.
+
+### Recommended next experiments, in priority order
+
+1. **`deflake-mutex-storm`** (revised-H7 validation). ~30 min build,
+   ~5 min run. Splits revised-H7 cleanly.
+2. **`deflake-span-storm`** — hart 1 runs a tight `span!()` body
+   on top of task-exit. Tests INTERN_TABLE + TX_STAGING contention
+   specifically. ~30 min build. Confirms or refines the mutex
+   hypothesis (which mutex is the bad one).
+3. **Fence-vs-delay isolation (H10)**. Replace `tag()` with
+   `rdtime`-spin equivalent. ~15 min.
+4. **`spin::Mutex` source read**. If revised-H7 validates, audit
+   the acquire/release sequence in our vendored `spin` (or
+   upstream's). Look for missing `Ordering` arguments or wrong
+   fence placement.
