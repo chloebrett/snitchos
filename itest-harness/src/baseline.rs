@@ -761,6 +761,7 @@ mod tests {
                 },
             },
             scenarios: recovered_scenarios,
+            signature_counts: std::collections::BTreeMap::new(),
         };
 
         file.adopt_recovered(&recovered);

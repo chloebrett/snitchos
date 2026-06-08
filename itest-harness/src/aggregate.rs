@@ -12,6 +12,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use crate::signature::Signature;
+
 /// Pass/fail counts for a single `--repeat` iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunTotals {
@@ -34,6 +36,9 @@ pub struct Aggregator {
     /// Per-scenario, per-iteration wall-clock durations. Appended in
     /// observation order; sorted for percentile computation.
     durations: BTreeMap<String, Vec<Duration>>,
+    /// Suite-wide count of failures by cause-bucket. Failures with no
+    /// recorded signature count as `Unknown`.
+    signature_count: BTreeMap<Signature, u32>,
 }
 
 impl Aggregator {
@@ -41,11 +46,29 @@ impl Aggregator {
         Self::default()
     }
 
-    /// Record one scenario failure during the current run.
+    /// Record one scenario failure during the current run, untyped (no
+    /// cause-bucket). Equivalent to `record_fail_with_signature(_, None)`.
     pub fn record_fail(&mut self, scenario: &str) {
+        self.record_fail_with_signature(scenario, None);
+    }
+
+    /// Record one scenario failure with its classified cause-bucket. A
+    /// `None` signature counts toward `Unknown` so every failure is
+    /// represented in the breakdown.
+    pub fn record_fail_with_signature(&mut self, scenario: &str, signature: Option<Signature>) {
         // `entry` + `or_insert(0)` mirrors xtask's prior implementation;
         // the count is total failures for this scenario across all runs.
         *self.fail_count.entry(scenario.to_string()).or_insert(0) += 1;
+        *self
+            .signature_count
+            .entry(signature.unwrap_or(Signature::Unknown))
+            .or_insert(0) += 1;
+    }
+
+    /// Suite-wide failure counts by cause-bucket, lexicographic by
+    /// variant. Empty when there were no failures.
+    pub fn signature_counts(&self) -> &BTreeMap<Signature, u32> {
+        &self.signature_count
     }
 
     /// Capture this run's totals. Call once per `--repeat` iteration
@@ -163,6 +186,9 @@ impl Aggregator {
                 .or_default()
                 .append(&mut samples);
         }
+        for (sig, count) in other.signature_count {
+            *self.signature_count.entry(sig).or_insert(0) += count;
+        }
     }
 
     /// Render the multi-run aggregate summary. Format matches xtask's
@@ -188,6 +214,25 @@ impl Aggregator {
             for (name, count) in &self.fail_count {
                 let _ = writeln!(out, "  {name}: {count}/{total_runs} runs failed");
             }
+            out.push_str(&self.render_signature_breakdown());
+        }
+        out
+    }
+
+    /// Render the suite-wide failure-by-bucket breakdown, or the empty
+    /// string when nothing failed. Shared by `render_aggregate` (the
+    /// `--repeat` summary) and the single-run failure path, so a one-off
+    /// run that flakes still reports which bucket it hit.
+    pub fn render_signature_breakdown(&self) -> String {
+        use std::fmt::Write;
+        if self.signature_count.is_empty() {
+            return String::new();
+        }
+        let mut out = String::new();
+        let total: u32 = self.signature_count.values().sum();
+        let _ = writeln!(out, "\nFailure signatures ({total} total):");
+        for (sig, count) in &self.signature_count {
+            let _ = writeln!(out, "  {}: {count}", sig.label());
         }
         out
     }
@@ -480,6 +525,30 @@ mod tests {
             left_first.mean_duration("scn"),
             right_first.mean_duration("scn")
         );
+    }
+
+    #[test]
+    fn signature_counts_accumulate_merge_and_render() {
+        use crate::signature::Signature;
+        let mut a = Aggregator::new();
+        a.record_fail_with_signature("scn-a", Some(Signature::Wedge));
+        a.record_fail_with_signature("scn-b", Some(Signature::BudgetExhausted));
+        let mut b = Aggregator::new();
+        b.record_fail_with_signature("scn-c", Some(Signature::Wedge));
+        b.record_fail_with_signature("scn-d", None); // unclassified — counted as Unknown
+        a.merge(b);
+        a.finish_run(RunTotals { passed: 0, failed: 4 });
+
+        let counts = a.signature_counts();
+        assert_eq!(counts.get(&Signature::Wedge), Some(&2));
+        assert_eq!(counts.get(&Signature::BudgetExhausted), Some(&1));
+        assert_eq!(counts.get(&Signature::Unknown), Some(&1));
+
+        let out = a.render_aggregate(1);
+        assert!(out.contains("Failure signatures"));
+        assert!(out.contains("wedge: 2"));
+        assert!(out.contains("budget_exhausted: 1"));
+        assert!(out.contains("unknown: 1"));
     }
 
     #[test]

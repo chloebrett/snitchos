@@ -190,6 +190,9 @@ pub struct RecoveredScenario {
 pub struct RecoveredRun {
     pub metadata: RunMetadata,
     pub scenarios: std::collections::BTreeMap<String, RecoveredScenario>,
+    /// Suite-wide failure counts by cause-bucket across the run. Failures
+    /// with no recorded signature (older rows) count as `Unknown`.
+    pub signature_counts: std::collections::BTreeMap<crate::signature::Signature, u32>,
 }
 
 /// Rebuild per-scenario stats by streaming `iterations.ndjson`. Used by
@@ -207,6 +210,8 @@ pub fn aggregate_run_dir(run_dir: &Path) -> io::Result<RecoveredRun> {
     let mut runs_per: std::collections::BTreeMap<String, u32> = Default::default();
     let mut fails_per: std::collections::BTreeMap<String, u32> = Default::default();
     let mut durations: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+    let mut signature_counts: std::collections::BTreeMap<crate::signature::Signature, u32> =
+        Default::default();
 
     for row in read_iterations(&run_dir.join("iterations.ndjson"))? {
         let row = match row {
@@ -219,6 +224,9 @@ pub fn aggregate_run_dir(run_dir: &Path) -> io::Result<RecoveredRun> {
         *runs_per.entry(row.scenario.clone()).or_insert(0) += 1;
         if row.result == ResultKind::Fail {
             *fails_per.entry(row.scenario.clone()).or_insert(0) += 1;
+            *signature_counts
+                .entry(row.signature.unwrap_or(crate::signature::Signature::Unknown))
+                .or_insert(0) += 1;
         }
         durations
             .entry(row.scenario)
@@ -244,7 +252,11 @@ pub fn aggregate_run_dir(run_dir: &Path) -> io::Result<RecoveredRun> {
         })
         .collect();
 
-    Ok(RecoveredRun { metadata, scenarios })
+    Ok(RecoveredRun {
+        metadata,
+        scenarios,
+        signature_counts,
+    })
 }
 
 /// Result of `prune_runs`: which directories were retained vs removed.
@@ -573,6 +585,53 @@ mod tests {
         assert_eq!(b.runs, 2);
         assert_eq!(b.failures, 0);
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn aggregate_run_dir_counts_signatures_for_failures_only() {
+        use crate::signature::Signature;
+        let root = fresh_test_dir();
+        let metadata = RunMetadata {
+            run: RunMetadataInner {
+                started_at: datetime!(2026-06-08 12:30:15 UTC),
+                commit: "abc1234".to_string(),
+                build_hash: None,
+                requested_repeat: 5,
+                fail_fast: None,
+                scenarios: vec!["s".to_string()],
+                hostname: None,
+            },
+        };
+        let (run_dir, mut writer) = create_run_dir(&root, &metadata).unwrap();
+        for (scn, result, sig) in [
+            ("a", ResultKind::Fail, Some(Signature::Wedge)),
+            ("b", ResultKind::Fail, Some(Signature::Wedge)),
+            ("c", ResultKind::Fail, Some(Signature::BudgetExhausted)),
+            ("d", ResultKind::Fail, None), // unclassified fail → Unknown
+            ("e", ResultKind::Pass, None), // a pass must NOT be counted
+        ] {
+            writer
+                .append(&IterationRow {
+                    iteration: 1,
+                    scenario: scn.to_string(),
+                    started_at: datetime!(2026-06-08 12:30:15 UTC),
+                    duration_ms: 100,
+                    result,
+                    error: None,
+                    log: None,
+                    signature: sig,
+                })
+                .unwrap();
+        }
+        drop(writer);
+
+        let recovered = aggregate_run_dir(&run_dir).unwrap();
+        let sc = &recovered.signature_counts;
+        assert_eq!(sc.get(&Signature::Wedge), Some(&2));
+        assert_eq!(sc.get(&Signature::BudgetExhausted), Some(&1));
+        assert_eq!(sc.get(&Signature::Unknown), Some(&1));
+        assert_eq!(sc.values().sum::<u32>(), 4); // the pass is excluded
         std::fs::remove_dir_all(&root).ok();
     }
 

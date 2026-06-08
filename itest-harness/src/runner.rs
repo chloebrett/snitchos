@@ -558,11 +558,13 @@ fn finalize_run(
     interrupted: bool,
     history_dir: Option<PathBuf>,
 ) -> ExitCode {
-    // Single-run path: behaviour unchanged from before.
+    // Single-run path: no multi-run aggregate, but a one-off run that
+    // flakes still reports which cause-bucket(s) it hit.
     if runs == 1 {
         return if aggregator.run_totals()[0].failed == 0 {
             ExitCode::SUCCESS
         } else {
+            eprint!("{}", aggregator.render_signature_breakdown());
             ExitCode::from(1)
         };
     }
@@ -831,7 +833,7 @@ fn process_one_scenario(
                 eprintln!("warning: failed to write capture sidecar: {e}");
             }
             failed = true;
-            local.record_fail(s.name);
+            local.record_fail_with_signature(s.name, row_signature);
             (crate::history::ResultKind::Fail, Some(e.clone()))
         }
     };

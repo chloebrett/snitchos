@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// Which cause-bucket a failed iteration is attributed to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Signature {
     /// QEMU's frame socket disconnected: the kernel stopped emitting and
@@ -65,6 +65,21 @@ pub enum ErrorOrigin {
     /// Produced by a scenario assertion — an awaited frame never arrived
     /// or an observed value didn't match. About kernel behaviour.
     Scenario,
+}
+
+impl Signature {
+    /// Stable snake_case label, matching the serde representation. Used
+    /// for rendering breakdowns and as a map/metric key.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Signature::Wedge => "wedge",
+            Signature::BudgetExhausted => "budget_exhausted",
+            Signature::Stalled => "stalled",
+            Signature::Harness => "harness",
+            Signature::Unknown => "unknown",
+        }
+    }
 }
 
 /// Evidence captured about a single failed iteration. All fields are
