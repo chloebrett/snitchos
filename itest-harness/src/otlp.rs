@@ -18,7 +18,7 @@ use std::io;
 use prost::Message;
 
 use crate::baseline::BaselineFile;
-use crate::stats::wilson_score_95;
+use crate::metrics::{MetricValue, baseline_metrics};
 
 // --- OTLP proto subset (prost-derived) -------------------------------------
 //
@@ -145,140 +145,39 @@ pub fn build_payload(file: &BaselineFile, now_ns: u64) -> Vec<u8> {
 }
 
 fn build_request(file: &BaselineFile, now_ns: u64) -> ExportMetricsServiceRequest {
-    let mut metrics: Vec<Metric> = Vec::with_capacity(9);
-    // Pre-build per-scenario data sets, one Vec per metric. Each will
-    // become the `data_points` of its Gauge.
-    let mut runs_pts: Vec<NumberDataPoint> = Vec::new();
-    let mut fails_pts: Vec<NumberDataPoint> = Vec::new();
-    let mut rate_pts: Vec<NumberDataPoint> = Vec::new();
-    let mut wlo_pts: Vec<NumberDataPoint> = Vec::new();
-    let mut wup_pts: Vec<NumberDataPoint> = Vec::new();
-    let mut mean_pts: Vec<NumberDataPoint> = Vec::new();
-    let mut p95_pts: Vec<NumberDataPoint> = Vec::new();
-    let mut partial_pts: Vec<NumberDataPoint> = Vec::new();
-    let mut recorded_pts: Vec<NumberDataPoint> = Vec::new();
-    let mut sig_pts: Vec<NumberDataPoint> = Vec::new();
-
-    for (name, entry) in &file.scenarios {
-        let Some(b) = &entry.current else { continue };
-        let attrs = vec![KeyValue {
-            key: "scenario".to_string(),
-            value: Some(AnyValue {
-                string_value: name.clone(),
-            }),
-        }];
-        let ci = wilson_score_95(b.failures, b.runs);
-        let rate = if b.runs == 0 {
-            0.0
-        } else {
-            f64::from(b.failures) / f64::from(b.runs)
-        };
-
-        runs_pts.push(int_point(attrs.clone(), now_ns, i64::from(b.runs)));
-        fails_pts.push(int_point(attrs.clone(), now_ns, i64::from(b.failures)));
-        rate_pts.push(double_point(attrs.clone(), now_ns, rate));
-        wlo_pts.push(double_point(attrs.clone(), now_ns, ci.lower));
-        wup_pts.push(double_point(attrs.clone(), now_ns, ci.upper));
-        if let Some(m) = b.mean_duration_ms {
-            mean_pts.push(double_point(attrs.clone(), now_ns, m));
-        }
-        if let Some(p) = b.p95_duration_ms {
-            p95_pts.push(double_point(attrs.clone(), now_ns, p));
-        }
-        partial_pts.push(int_point(
-            attrs.clone(),
-            now_ns,
-            if b.partial.is_some() { 1 } else { 0 },
-        ));
-        for (sig, count) in &b.signature_counts {
-            let mut sig_attrs = attrs.clone();
-            sig_attrs.push(KeyValue {
-                key: "signature".to_string(),
-                value: Some(AnyValue {
-                    string_value: sig.label().to_string(),
-                }),
-            });
-            sig_pts.push(int_point(sig_attrs, now_ns, i64::from(*count)));
-        }
-        recorded_pts.push(int_point(
-            attrs,
-            now_ns,
-            b.recorded_at.unix_timestamp(),
-        ));
-    }
-
-    let mut push = |name: &str, desc: &str, unit: &str, points: Vec<NumberDataPoint>| {
-        if points.is_empty() {
-            return;
-        }
-        metrics.push(Metric {
-            name: name.to_string(),
-            description: desc.to_string(),
-            unit: unit.to_string(),
-            data: Some(metric_data::Data::Gauge(Gauge { data_points: points })),
-        });
-    };
-
-    push(
-        "snitchos.itest.baseline.runs",
-        "Number of --repeat iterations in the current baseline.",
-        "1",
-        runs_pts,
-    );
-    push(
-        "snitchos.itest.baseline.failures",
-        "Number of failed iterations in the current baseline.",
-        "1",
-        fails_pts,
-    );
-    push(
-        "snitchos.itest.baseline.failure_rate",
-        "Observed failure rate in the current baseline (0.0-1.0).",
-        "1",
-        rate_pts,
-    );
-    push(
-        "snitchos.itest.baseline.wilson_lower",
-        "Wilson-score 95% CI lower bound on the failure rate.",
-        "1",
-        wlo_pts,
-    );
-    push(
-        "snitchos.itest.baseline.wilson_upper",
-        "Wilson-score 95% CI upper bound on the failure rate.",
-        "1",
-        wup_pts,
-    );
-    push(
-        "snitchos.itest.baseline.mean_duration_ms",
-        "Mean per-iteration wall-clock duration.",
-        "ms",
-        mean_pts,
-    );
-    push(
-        "snitchos.itest.baseline.p95_duration_ms",
-        "p95 per-iteration wall-clock duration.",
-        "ms",
-        p95_pts,
-    );
-    push(
-        "snitchos.itest.baseline.partial",
-        "1 if the current baseline reflects an interrupted run, else 0.",
-        "1",
-        partial_pts,
-    );
-    push(
-        "snitchos.itest.baseline.recorded_at_seconds",
-        "Unix timestamp (seconds) when the current baseline was recorded.",
-        "s",
-        recorded_pts,
-    );
-    push(
-        "snitchos.itest.baseline.signature",
-        "Per-scenario failure count by cause-bucket (signature attribute).",
-        "1",
-        sig_pts,
-    );
+    // Build the metric set from the shared catalogue (same metrics, same
+    // per-scenario values as the prom exporter); render each series' points
+    // as int/double OTLP data points. Empty series are skipped.
+    let metrics: Vec<Metric> = baseline_metrics(file)
+        .into_iter()
+        .filter(|s| !s.points.is_empty())
+        .map(|s| {
+            let data_points = s
+                .points
+                .iter()
+                .map(|p| {
+                    let attrs = p
+                        .labels
+                        .iter()
+                        .map(|(k, v)| KeyValue {
+                            key: (*k).to_string(),
+                            value: Some(AnyValue { string_value: v.clone() }),
+                        })
+                        .collect();
+                    match p.value {
+                        MetricValue::Int(i) => int_point(attrs, now_ns, i),
+                        MetricValue::Float(f) => double_point(attrs, now_ns, f),
+                    }
+                })
+                .collect();
+            Metric {
+                name: format!("snitchos.itest.baseline.{}", s.suffix),
+                description: s.help.to_string(),
+                unit: s.unit.to_string(),
+                data: Some(metric_data::Data::Gauge(Gauge { data_points })),
+            }
+        })
+        .collect();
 
     ExportMetricsServiceRequest {
         resource_metrics: vec![ResourceMetrics {

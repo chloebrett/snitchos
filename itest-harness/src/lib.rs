@@ -17,6 +17,7 @@ mod aggregate;
 mod baseline;
 mod history;
 mod lock;
+mod metrics;
 mod otlp;
 mod prom;
 mod runner;

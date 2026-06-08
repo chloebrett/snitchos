@@ -18,7 +18,7 @@ use std::io;
 use std::path::Path;
 
 use crate::baseline::BaselineFile;
-use crate::stats::wilson_score_95;
+use crate::metrics::{MetricValue, baseline_metrics};
 
 /// Render `file` as a Prometheus textfile-format string. One block of
 /// gauges per scenario whose `current` baseline is set. Scenarios with
@@ -26,59 +26,30 @@ use crate::stats::wilson_score_95;
 /// without adding signal.
 pub fn render_prometheus(file: &BaselineFile) -> String {
     let mut out = String::new();
-
-    // HELP/TYPE preambles — emitted once each, not per scenario.
-    let metrics = [
-        ("snitchos_itest_baseline_runs", "Number of --repeat iterations in the current baseline."),
-        ("snitchos_itest_baseline_failures", "Number of failed iterations in the current baseline."),
-        ("snitchos_itest_baseline_failure_rate", "Observed failure rate in the current baseline (0.0–1.0)."),
-        ("snitchos_itest_baseline_wilson_lower", "Wilson-score 95% CI lower bound on the failure rate."),
-        ("snitchos_itest_baseline_wilson_upper", "Wilson-score 95% CI upper bound on the failure rate."),
-        ("snitchos_itest_baseline_mean_duration_ms", "Mean per-iteration wall-clock duration, milliseconds."),
-        ("snitchos_itest_baseline_p95_duration_ms", "p95 per-iteration wall-clock duration, milliseconds."),
-        ("snitchos_itest_baseline_partial", "1 if the current baseline reflects an interrupted run, else 0."),
-        ("snitchos_itest_baseline_recorded_at_seconds", "Unix timestamp (seconds) when the current baseline was recorded."),
-        ("snitchos_itest_baseline_signature", "Per-scenario failure count by cause-bucket (signature label)."),
-    ];
-    for (name, help) in metrics {
-        let _ = writeln!(out, "# HELP {name} {help}");
+    // One block per metric series: HELP/TYPE then its samples. The metric
+    // catalogue + per-scenario values come from `metrics::baseline_metrics`
+    // (shared with the OTLP exporter); this function only renders.
+    for s in baseline_metrics(file) {
+        let name = format!("snitchos_itest_baseline_{}", s.suffix);
+        let _ = writeln!(out, "# HELP {name} {}", s.help);
         let _ = writeln!(out, "# TYPE {name} gauge");
-    }
-
-    for (name, entry) in &file.scenarios {
-        let Some(b) = &entry.current else { continue };
-        let label = format!("scenario=\"{}\"", escape_label_value(name));
-        let ci = wilson_score_95(b.failures, b.runs);
-        let rate = if b.runs == 0 {
-            0.0
-        } else {
-            f64::from(b.failures) / f64::from(b.runs)
-        };
-        let partial = if b.partial.is_some() { 1 } else { 0 };
-        let recorded_at_secs = b.recorded_at.unix_timestamp();
-
-        let _ = writeln!(out, "snitchos_itest_baseline_runs{{{label}}} {}", b.runs);
-        let _ = writeln!(out, "snitchos_itest_baseline_failures{{{label}}} {}", b.failures);
-        let _ = writeln!(out, "snitchos_itest_baseline_failure_rate{{{label}}} {rate}");
-        let _ = writeln!(out, "snitchos_itest_baseline_wilson_lower{{{label}}} {}", ci.lower);
-        let _ = writeln!(out, "snitchos_itest_baseline_wilson_upper{{{label}}} {}", ci.upper);
-        if let Some(m) = b.mean_duration_ms {
-            let _ = writeln!(out, "snitchos_itest_baseline_mean_duration_ms{{{label}}} {m}");
-        }
-        if let Some(p) = b.p95_duration_ms {
-            let _ = writeln!(out, "snitchos_itest_baseline_p95_duration_ms{{{label}}} {p}");
-        }
-        let _ = writeln!(out, "snitchos_itest_baseline_partial{{{label}}} {partial}");
-        let _ = writeln!(out, "snitchos_itest_baseline_recorded_at_seconds{{{label}}} {recorded_at_secs}");
-        for (sig, count) in &b.signature_counts {
-            let _ = writeln!(
-                out,
-                "snitchos_itest_baseline_signature{{{label},signature=\"{}\"}} {count}",
-                sig.label()
-            );
+        for p in &s.points {
+            let labels = p
+                .labels
+                .iter()
+                .map(|(k, v)| format!("{k}=\"{}\"", escape_label_value(v)))
+                .collect::<Vec<_>>()
+                .join(",");
+            match p.value {
+                MetricValue::Int(i) => {
+                    let _ = writeln!(out, "{name}{{{labels}}} {i}");
+                }
+                MetricValue::Float(f) => {
+                    let _ = writeln!(out, "{name}{{{labels}}} {f}");
+                }
+            }
         }
     }
-
     out
 }
 

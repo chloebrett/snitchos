@@ -23,14 +23,20 @@ enum Cmd {
     Build,
     /// Build the kernel and run it in QEMU.
     ///
-    /// Use `--features <feat>` to boot a feature-flagged kernel (e.g.
-    /// `--features itest-workloads` to compile in the runtime-selectable
-    /// workload registry). Runtime workload selection via `-append`
-    /// lands with `boot --workload` (migration step 5).
+    /// Use `--workload <name>` to boot a runtime-selected workload for
+    /// live measurement / demos (e.g. `boot --workload smp` then
+    /// `cargo xtask reader` in another terminal). `--features <feat>`
+    /// builds a feature-flagged kernel directly.
     Boot {
         /// Cargo features to enable on the kernel build, comma-separated.
         #[arg(long, default_value = "")]
         features: String,
+        /// Select a runtime workload by name (e.g. `smp`, `frame-oom`,
+        /// `mutex-storm`). Implies `--features itest-workloads` and
+        /// passes `workload=<name>` as the kernel bootarg. With no
+        /// `--workload`, the kernel runs the default demo.
+        #[arg(long)]
+        workload: Option<String>,
     },
     /// Build and run the collector (telemetry consumer). Trailing args
     /// are forwarded to the collector, e.g.
@@ -335,7 +341,7 @@ enum StackCmd {
 fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Build => build(),
-        Cmd::Boot { features } => boot(&features),
+        Cmd::Boot { features, workload } => boot(&features, workload.as_deref()),
         Cmd::Mutants { args } => run_mutants(&args),
         Cmd::Clippy { args } => run_clippy(&args),
         Cmd::Collect { args } => run_collector(&args),
@@ -533,12 +539,18 @@ fn debug(features: &str) -> ExitCode {
     }
 }
 
-fn boot(features: &str) -> ExitCode {
-    let features_vec: Vec<&str> = if features.is_empty() {
+fn boot(features: &str, workload: Option<&str>) -> ExitCode {
+    let mut features_vec: Vec<&str> = if features.is_empty() {
         Vec::new()
     } else {
         features.split(',').collect()
     };
+    // `--workload` selects a runtime workload, which only exists in
+    // `itest-workloads` builds — imply the feature so a bare
+    // `boot --workload smp` just works.
+    if workload.is_some() && !features_vec.contains(&"itest-workloads") {
+        features_vec.push("itest-workloads");
+    }
     let status = qemu::build_kernel(&features_vec).expect("failed to invoke cargo");
     if !status.success() {
         return ExitCode::from(1);
@@ -552,7 +564,13 @@ fn boot(features: &str) -> ExitCode {
     // terminal to satisfy that wait.
     let chardev_arg = format!("socket,path={TELEMETRY_SOCKET},server=on,wait=on,id=telemetry");
 
-    let status = qemu::base_command(&chardev_arg)
+    let mut cmd = qemu::base_command(&chardev_arg);
+    if let Some(workload) = workload {
+        // Lands in /chosen/bootargs; `kmain` reads it to pick the
+        // runtime workload.
+        cmd.args(["-append", &format!("workload={workload}")]);
+    }
+    let status = cmd
         .status()
         .expect("failed to invoke qemu-system-riscv64");
     if status.success() {
