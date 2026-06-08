@@ -89,6 +89,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario::new       ("sched-span-survives-yield",   scenarios::sched_span_survives_yield),
     Scenario::cpu_bound ("heap-oom",                    scenarios::heap_oom),
     Scenario::cpu_bound ("workload-cooperative-baseline", scenarios::workload_cooperative_baseline),
+    Scenario::cpu_bound ("smp-producer-consumer-correctness", scenarios::smp_producer_consumer_correctness),
     Scenario::new       ("ipi-self-wakeup",             scenarios::ipi_self_wakeup),
     Scenario::new       ("smp-secondary-hart-boots",    scenarios::smp_secondary_hart_boots),
     Scenario::new       ("smp-spawn-on-hart-1-runs",    scenarios::smp_spawn_on_hart_1_runs),
@@ -108,6 +109,13 @@ const SCENARIOS: &[Scenario] = &[
 /// `update_baseline` writes the current run's per-scenario results
 /// back to `.itest-baseline.toml` (pushing the previous `current`
 /// into `history`) after the run completes.
+/// Set the process-wide failure-capture transcript depth. Call once at
+/// startup, before `run`. Delegates to the harness, which reads it at
+/// every `Harness::spawn`.
+pub fn set_capture_level(level: itest_harness::CaptureLevel) {
+    harness::set_capture_level(level);
+}
+
 #[allow(clippy::too_many_arguments, reason = "1:1 with the CLI flags; refactor when more land")]
 pub fn run(
     name: Option<&str>,
@@ -203,6 +211,7 @@ pub fn run(
     };
     let log_path_for = |_scenario_name: &str| harness::take_last_log_path();
     let max_wait_for = harness::take_last_max_wait;
+    let capture_for = harness::take_last_failure_capture;
     let commit_for = current_commit_short;
 
     // Install the SIGINT handler before constructing config — the
@@ -213,6 +222,7 @@ pub fn run(
         one_shot_build: Some(&build),
         log_path_for: Some(&log_path_for),
         max_wait_for: Some(&max_wait_for),
+        capture_for: Some(&capture_for),
         current_commit: Some(&commit_for),
         baseline_file: Some(PathBuf::from(BASELINE_PATH)),
         fail_fast,

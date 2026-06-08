@@ -823,6 +823,13 @@ fn process_one_scenario(
                 Some(e),
                 log_tail.as_deref(),
             ));
+            // Persist the structured capture alongside the UART log.
+            if let (Some(cap), Some(hdir)) = (&capture, history_dir)
+                && let Err(e) =
+                    crate::history::write_capture_sidecar(hdir, s.name, run_idx + 1, cap)
+            {
+                eprintln!("warning: failed to write capture sidecar: {e}");
+            }
             failed = true;
             local.record_fail(s.name);
             (crate::history::ResultKind::Fail, Some(e.clone()))

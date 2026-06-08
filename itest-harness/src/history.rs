@@ -149,6 +149,24 @@ pub fn read_iterations(path: &Path) -> io::Result<impl Iterator<Item = io::Resul
     }))
 }
 
+/// Persist a failed iteration's structured `FailureCapture` next to its
+/// `fail-*.log`, as `fail-<scenario>-<iteration>.capture.json`. Returns
+/// the bare filename (for traceability in the iteration row). This is
+/// the structured-telemetry counterpart to the UART log: the frame
+/// transcript, histogram, and per-hart timestamps the classifier and a
+/// human debugger both need, which the `.log` does not carry.
+pub fn write_capture_sidecar(
+    run_dir: &Path,
+    scenario: &str,
+    iteration: u32,
+    capture: &crate::signature::FailureCapture,
+) -> io::Result<String> {
+    let name = format!("fail-{scenario}-{iteration}.capture.json");
+    let json = serde_json::to_string_pretty(capture).map_err(io::Error::other)?;
+    std::fs::write(run_dir.join(&name), json)?;
+    Ok(name)
+}
+
 /// Best-effort hostname read: checks `HOSTNAME` env var, returns
 /// `None` if unset.
 pub fn current_hostname() -> Option<String> {
@@ -395,6 +413,25 @@ mod tests {
         assert_eq!(rows[1].result, ResultKind::Fail);
         assert_eq!(rows[1].error.as_deref(), Some("scripted failure"));
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn write_capture_sidecar_persists_round_trippable_json() {
+        use crate::signature::{FailureCapture, WaitOutcome};
+        let root = fresh_test_dir();
+        let cap = FailureCapture {
+            outcome: Some(WaitOutcome::Timeout),
+            frames_seen: 12,
+            transcript: vec!["Hello { .. }".into(), "SpanStart { .. }".into()],
+            ..Default::default()
+        };
+        let name = write_capture_sidecar(&root, "kernel-heap-metrics", 9, &cap).unwrap();
+        assert_eq!(name, "fail-kernel-heap-metrics-9.capture.json");
+
+        let raw = std::fs::read_to_string(root.join(&name)).unwrap();
+        let back: FailureCapture = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back, cap);
         std::fs::remove_dir_all(&root).ok();
     }
 

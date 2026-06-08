@@ -37,7 +37,24 @@ cargo xtask itest --repeat 100                   # flake-hunt
 cargo xtask itest --repeat 1000 --fail-fast 3    # bail after 3 failures
 cargo xtask itest --skip-unit-tests              # skip cargo test -p kernel-core
 cargo xtask itest --force                        # ignore the .itest.lock mutex
+cargo xtask itest --capture full                 # full frame transcript per failure
 ```
+
+### Failure capture and signatures
+
+Every failed iteration is attributed to a cause-bucket — `wedge`
+(kernel died / panicked), `stalled` (alive but went quiet),
+`budget_exhausted` (alive, slow), `harness` (infra), or `unknown` —
+written to the `signature` field of each `iterations.ndjson` row. The
+structured evidence behind it (wait outcome, frames seen, per-hart last
+timestamp, frame histogram, and a frame transcript) is persisted as a
+`fail-<scenario>-<n>.capture.json` sidecar next to the UART `.log`,
+since telemetry leaves over virtio and never reaches the UART log.
+
+`--capture <level>` sets the transcript depth: `summary` (no
+transcript), `tail` (default; last ~64 frames), or `full` (every frame
+from the iteration — turn this up when investigating a specific flake).
+The summary fields are captured regardless of level.
 
 One kernel build per invocation — the harness builds once at startup
 and reuses the ELF across every iteration. A `cargo build` you

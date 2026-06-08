@@ -149,6 +149,36 @@ pub fn classify(evidence: &FailureEvidence) -> Signature {
     }
 }
 
+/// How much frame transcript a failure capture persists. The summary
+/// record is always captured regardless; this governs only the
+/// transcript depth — and, because `Full` requires the harness to retain
+/// every frame, it is fixed at `Harness::spawn` time, not just at
+/// serialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureLevel {
+    /// Summary record only — no frame transcript.
+    Summary,
+    /// Summary + the tail of recent frames (the bounded ring).
+    #[default]
+    Tail,
+    /// Summary + every frame observed during the iteration.
+    Full,
+}
+
+impl std::str::FromStr for CaptureLevel {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "summary" => Ok(Self::Summary),
+            "tail" => Ok(Self::Tail),
+            "full" => Ok(Self::Full),
+            other => Err(format!(
+                "unknown capture level {other:?} (expected summary|tail|full)"
+            )),
+        }
+    }
+}
+
 /// How a failing `wait_for` ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -337,6 +367,16 @@ mod tests {
         assert!(!json.contains("frame_histogram"));
         assert!(!json.contains("last_t_per_hart"));
         assert!(!json.contains("error_origin"));
+    }
+
+    #[test]
+    fn capture_level_parses_case_insensitively_and_defaults_to_tail() {
+        use std::str::FromStr;
+        assert_eq!(CaptureLevel::from_str("summary").unwrap(), CaptureLevel::Summary);
+        assert_eq!(CaptureLevel::from_str("Tail").unwrap(), CaptureLevel::Tail);
+        assert_eq!(CaptureLevel::from_str("FULL").unwrap(), CaptureLevel::Full);
+        assert!(CaptureLevel::from_str("everything").is_err());
+        assert_eq!(CaptureLevel::default(), CaptureLevel::Tail);
     }
 
     #[test]

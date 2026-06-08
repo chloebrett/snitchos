@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use protocol::stream::{OwnedFrame, decode_stream};
 use protocol::StringId;
 
-use itest_harness::{ErrorOrigin, FailureCapture, WaitOutcome};
+use itest_harness::{CaptureLevel, ErrorOrigin, FailureCapture, WaitOutcome};
 
 use crate::qemu;
 
@@ -51,6 +51,15 @@ pub struct Harness {
     /// When the most recent frame arrived, for computing the wall-clock
     /// silence before a failing wait's deadline (stalled vs slow).
     last_frame_at: Option<Instant>,
+    /// How much frame transcript to retain — fixed at spawn from the
+    /// process-wide level. `Full` lets `recent` grow unbounded.
+    capture_level: CaptureLevel,
+    /// Running count of every frame by variant — the accurate (not
+    /// tail-truncated) histogram for a failure capture.
+    frame_histogram: BTreeMap<String, u32>,
+    /// Most recent kernel timestamp seen per hart id, from frames that
+    /// carry both — pins which hart went quiet and how far it got.
+    last_t_per_hart: BTreeMap<u32, u64>,
 }
 
 impl Harness {
@@ -130,6 +139,9 @@ impl Harness {
             max_wait: (Duration::ZERO, Duration::ZERO),
             frames_seen: 0,
             last_frame_at: None,
+            capture_level: capture_level(),
+            frame_histogram: BTreeMap::new(),
+            last_t_per_hart: BTreeMap::new(),
         })
     }
 
@@ -206,6 +218,10 @@ impl Harness {
     fn absorb(&mut self, frame: &OwnedFrame) {
         self.frames_seen = self.frames_seen.saturating_add(1);
         self.last_frame_at = Some(Instant::now());
+        *self
+            .frame_histogram
+            .entry(variant_name(frame).to_string())
+            .or_insert(0) += 1;
         match frame {
             OwnedFrame::StringRegister { id, value } => {
                 self.strings.insert(*id, value.clone());
@@ -213,9 +229,18 @@ impl Harness {
             OwnedFrame::Hello { timebase_hz, .. } => {
                 self.timebase_hz = Some(*timebase_hz);
             }
+            // Frames carrying both a hart id and a timestamp pin per-hart
+            // progress — used to spot which hart fell silent.
+            OwnedFrame::SpanStart { hart_id, t, .. }
+            | OwnedFrame::ContextSwitch { hart_id, t, .. } => {
+                self.last_t_per_hart.insert(u32::from(*hart_id), *t);
+            }
             _ => {}
         }
-        if self.recent.len() >= 8 {
+        // `Tail`/`Summary` keep a bounded ring; `Full` retains everything.
+        if !matches!(self.capture_level, CaptureLevel::Full)
+            && self.recent.len() >= TRANSCRIPT_TAIL_FRAMES
+        {
             self.recent.pop_front();
         }
         self.recent.push_back(frame.clone());
@@ -232,14 +257,16 @@ impl Harness {
             .last_frame_at
             .map(|t| u32::try_from(t.elapsed().as_millis()).unwrap_or(u32::MAX));
 
-        let mut frame_histogram: BTreeMap<String, u32> = BTreeMap::new();
-        let mut transcript = Vec::with_capacity(self.recent.len());
-        for frame in &self.recent {
-            *frame_histogram
-                .entry(variant_name(frame).to_string())
-                .or_insert(0) += 1;
-            transcript.push(self.describe(frame));
-        }
+        // The histogram and per-hart timestamps are accurate running
+        // summaries (always captured). The transcript is the heavy part,
+        // gated by the capture level: none under `Summary`, the bounded
+        // ring under `Tail`, the full retained stream under `Full`.
+        let transcript = match self.capture_level {
+            CaptureLevel::Summary => Vec::new(),
+            CaptureLevel::Tail | CaptureLevel::Full => {
+                self.recent.iter().map(|f| self.describe(f)).collect()
+            }
+        };
 
         set_last_failure_capture(FailureCapture {
             outcome: Some(outcome),
@@ -247,8 +274,8 @@ impl Harness {
             error: None,
             frames_seen: self.frames_seen,
             last_frame_wall_age_ms,
-            last_t_per_hart: BTreeMap::new(),
-            frame_histogram,
+            last_t_per_hart: self.last_t_per_hart.clone(),
+            frame_histogram: self.frame_histogram.clone(),
             transcript,
         });
     }
@@ -258,8 +285,14 @@ impl Harness {
             eprintln!("  [{reason}: no frames arrived]");
             return;
         }
-        eprintln!("  [{reason}: last {} frame(s) seen]", self.recent.len());
-        for frame in &self.recent {
+        // The ring may hold up to `TRANSCRIPT_TAIL_FRAMES` (or everything,
+        // under `Full`); the inline dump only needs the last handful. The
+        // persisted `.capture.json` sidecar carries the rest.
+        const DUMP_TAIL: usize = 8;
+        let skip = self.recent.len().saturating_sub(DUMP_TAIL);
+        let shown = self.recent.len() - skip;
+        eprintln!("  [{reason}: last {shown} of {} frame(s) seen]", self.recent.len());
+        for frame in self.recent.iter().skip(skip) {
             eprintln!("    {}", self.describe(frame));
         }
     }
@@ -352,6 +385,39 @@ impl Drop for Harness {
         }
 
         let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+/// Ring capacity for the `Tail` / `Summary` capture levels. The full
+/// transcript (and the persisted sidecar) is what holds more; this is
+/// just the bounded in-memory tail the harness keeps cheaply.
+const TRANSCRIPT_TAIL_FRAMES: usize = 64;
+
+/// Process-wide capture level, set once from the CLI before scenarios
+/// run and read by every `Harness::spawn`. Stored as the discriminant
+/// `u8` so it lives in an `AtomicU8` with no lock. `0` = the `Tail`
+/// default until `set_capture_level` is called.
+static CAPTURE_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn level_to_u8(level: CaptureLevel) -> u8 {
+    match level {
+        CaptureLevel::Tail => 0,
+        CaptureLevel::Summary => 1,
+        CaptureLevel::Full => 2,
+    }
+}
+
+/// Set the process-wide capture level. Call once at startup, before any
+/// `Harness::spawn`.
+pub fn set_capture_level(level: CaptureLevel) {
+    CAPTURE_LEVEL.store(level_to_u8(level), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn capture_level() -> CaptureLevel {
+    match CAPTURE_LEVEL.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => CaptureLevel::Summary,
+        2 => CaptureLevel::Full,
+        _ => CaptureLevel::Tail,
     }
 }
 
