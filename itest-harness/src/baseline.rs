@@ -66,6 +66,32 @@ pub struct Baseline {
     /// back-compat treatment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub p95_duration_ms: Option<f64>,
+    /// Present only when this baseline reflects an *interrupted* run
+    /// (Ctrl-C / SIGINT before all `--repeat` iterations completed).
+    /// The summary stats above are computed from however many runs
+    /// did finish. Promotion still works — `--promote-pending`
+    /// strips this field — but `--baseline-show` surfaces the
+    /// partial-ness to the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial: Option<PartialMarker>,
+}
+
+/// Metadata for a partial baseline: how short of the request we
+/// stopped, when, and the per-run history directory the data came
+/// from (so it can be reconstructed if the pending file is lost).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PartialMarker {
+    /// What `--repeat N` was requested. `runs` on the surrounding
+    /// `Baseline` is what actually completed.
+    pub requested_runs: u32,
+    /// Wall-clock UTC when the interrupt fired.
+    #[serde(with = "rfc3339")]
+    pub interrupted_at: OffsetDateTime,
+    /// Relative path to the per-run history directory under
+    /// `.itest-runs/`. Used by `--recover-pending` to rebuild this
+    /// entry from the underlying NDJSON if the pending file is
+    /// lost or corrupted.
+    pub run_dir: String,
 }
 
 impl Baseline {
@@ -287,6 +313,7 @@ mod tests {
             recorded_at: at,
             mean_duration_ms: None,
             p95_duration_ms: None,
+            partial: None,
         }
     }
 
@@ -526,6 +553,55 @@ mod tests {
         );
         let out = f.render_summary(SummaryOptions::default());
         assert!(!out.contains("timing"));
+    }
+
+    #[test]
+    fn partial_marker_absent_in_toml_by_default() {
+        let mut f = BaselineFile::new();
+        f.update_current(
+            "heartbeat-cadence",
+            make_baseline("abc", 50, 3, datetime!(2026-06-08 10:00:00 UTC)),
+        );
+        let s = f.to_string().unwrap();
+        assert!(!s.contains("[scenarios.heartbeat-cadence.current.partial]"));
+        assert!(!s.contains("requested_runs"));
+    }
+
+    #[test]
+    fn partial_marker_round_trips_when_present() {
+        let mut f = BaselineFile::new();
+        let mut b = make_baseline("abc", 487, 23, datetime!(2026-06-08 12:30:15 UTC));
+        b.partial = Some(PartialMarker {
+            requested_runs: 1000,
+            interrupted_at: datetime!(2026-06-08 13:15:42 UTC),
+            run_dir: ".itest-runs/2026-06-08T12-30-15Z".to_string(),
+        });
+        f.update_current("heartbeat-cadence", b);
+        let s = f.to_string().unwrap();
+        // TOML shape — nested table, sane field names.
+        assert!(s.contains("[scenarios.heartbeat-cadence.current.partial]"));
+        assert!(s.contains("requested_runs = 1000"));
+        assert!(s.contains("interrupted_at = \"2026-06-08T13:15:42Z\""));
+        assert!(s.contains("run_dir = \".itest-runs/2026-06-08T12-30-15Z\""));
+
+        let parsed = BaselineFile::load_str(&s).unwrap();
+        assert_eq!(parsed, f);
+    }
+
+    #[test]
+    fn old_baseline_files_parse_without_partial_field() {
+        // A baseline file from before this field existed should still
+        // parse cleanly, with `partial: None`.
+        let toml = r#"
+            [scenarios.heartbeat-cadence.current]
+            commit = "abc"
+            runs = 200
+            failures = 12
+            recorded_at = "2026-06-01T10:00:00Z"
+        "#;
+        let f = BaselineFile::load_str(toml).unwrap();
+        let current = f.current_for("heartbeat-cadence").unwrap();
+        assert!(current.partial.is_none());
     }
 
     #[test]

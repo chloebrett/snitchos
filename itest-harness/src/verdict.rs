@@ -211,6 +211,7 @@ mod tests {
             recorded_at: datetime!(2026-06-08 12:00:00 UTC),
             mean_duration_ms: None,
             p95_duration_ms: None,
+            partial: None,
         }
     }
 

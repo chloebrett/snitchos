@@ -65,6 +65,14 @@ pub struct RunnerConfig<'a> {
     /// `--repeat N`. The check fires at iteration boundaries, not
     /// mid-iteration — the per-run output stays coherent.
     pub fail_fast: Option<u32>,
+
+    /// Path where a *partial* baseline gets written if the run is
+    /// interrupted mid-`--repeat` (graceful Ctrl-C). Only consulted
+    /// when `update_baseline` is true; never overwrites the canonical
+    /// baseline file. Step A: the field exists but the interrupt
+    /// path that consumes it lands in step B. See
+    /// `plans/itest-history-and-pending.md`.
+    pub pending_baseline: Option<PathBuf>,
 }
 
 /// Run `scenarios` `repeat` times. If `update_baseline` is true, write
@@ -285,6 +293,7 @@ fn apply_current_run_to_baseline(
             p95_duration_ms: aggregator
                 .p95_duration(s.name)
                 .map(|d| d.as_secs_f64() * 1000.0),
+            partial: None,
         };
         file.update_current(s.name, baseline);
     }

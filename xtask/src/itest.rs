@@ -143,6 +143,9 @@ pub fn run(
         current_commit: Some(&commit_for),
         baseline_file: Some(PathBuf::from(BASELINE_PATH)),
         fail_fast,
+        // Step A: surface the pending-file path now; the interrupt
+        // handler that writes to it lands in step B.
+        pending_baseline: Some(PathBuf::from(format!("{BASELINE_PATH}.pending"))),
     };
 
     itest_harness::run(&to_run, repeat, update_baseline, &config)
