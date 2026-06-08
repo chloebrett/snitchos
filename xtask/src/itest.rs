@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use itest_harness::{
     BaselineFile, ItestLock, LockError, RunnerConfig, SummaryOptions, aggregate_run_dir,
-    prune_runs as prune_runs_in,
+    prune_runs as prune_runs_in, render_prometheus, write_atomic,
 };
 
 use crate::qemu;
@@ -234,6 +234,37 @@ pub fn discard_pending() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Render the canonical baseline file as Prometheus textfile-format
+/// metrics at `out_path`. Designed for `node_exporter --collector.textfile`
+/// scraping. Atomic write — half-rendered files never appear on disk.
+/// Exits 0 if the baseline file is absent (empty export is valid; an
+/// empty `.prom` file is also valid).
+pub fn export_prom(out_path: PathBuf) -> ExitCode {
+    let baseline_path = Path::new(BASELINE_PATH);
+    let file = if baseline_path.exists() {
+        match BaselineFile::load_path(baseline_path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("failed to parse {BASELINE_PATH}: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        BaselineFile::new()
+    };
+    let body = render_prometheus(&file);
+    if let Err(e) = write_atomic(&out_path, &body) {
+        eprintln!("failed to write {}: {e}", out_path.display());
+        return ExitCode::from(1);
+    }
+    eprintln!(
+        "Wrote {} ({} scenarios)",
+        out_path.display(),
+        file.scenarios.len()
+    );
+    ExitCode::SUCCESS
 }
 
 /// Prune `.itest-runs/` to the most-recent `keep_last` run directories.

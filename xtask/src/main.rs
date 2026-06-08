@@ -162,6 +162,11 @@ enum Cmd {
         /// Ignored otherwise. `0` removes everything.
         #[arg(long, default_value_t = 20)]
         keep_last: usize,
+        /// Render the canonical baseline as Prometheus textfile-format
+        /// metrics at the given path. For `node_exporter --collector.textfile`
+        /// scraping into Grafana. Atomic write.
+        #[arg(long, value_name = "PATH")]
+        export_prom: Option<std::path::PathBuf>,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -210,7 +215,10 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, prune_runs, keep_last } => {
+        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, prune_runs, keep_last, export_prom } => {
+            if let Some(out) = export_prom {
+                return itest::export_prom(out);
+            }
             if prune_runs {
                 return itest::prune_runs(keep_last);
             }
