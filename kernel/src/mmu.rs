@@ -383,10 +383,10 @@ pub static SHOOTDOWNS_SENT_TOTAL: core::sync::atomic::AtomicU64 =
 /// `heap::init` before hart 1 is online; the bitmap check makes
 /// those calls a no-op for the offline hart.
 #[cfg_attr(
-    not(feature = "deflake-shootdown-storm"),
+    not(feature = "itest-workloads"),
     expect(
         dead_code,
-        reason = "TLB-shootdown IPI path for SMP; not called until multi-hart bring-up wires it in"
+        reason = "TLB-shootdown IPI path for SMP; exercised by the shootdown-storm workload (itest-workloads); not yet wired into production multi-hart paths"
     )
 )]
 #[allow(

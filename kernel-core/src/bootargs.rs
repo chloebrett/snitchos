@@ -21,6 +21,36 @@ pub enum WorkloadKind {
     /// Kernel-heap OOM: default demo tasks, but the heartbeat leaks
     /// heap blocks each tick until the heap exhausts.
     HeapOom,
+    /// Cross-hart spawn storm: hart 0 runs a serialised `spawn_on(1, …)`
+    /// loop; hart 1 stays idle until poked. Heartbeat-driven.
+    SpawnStorm,
+    /// Tight cross-hart IPI wakeup loop (hart 0 → hart 1).
+    /// Heartbeat-driven.
+    IpiPong,
+    /// Tight `mmu::shootdown` loop from hart 0. Heartbeat-driven.
+    ShootdownStorm,
+    /// Two tasks (one per hart) hammer a shared `Mutex`. Task-driven.
+    MutexStorm,
+    /// hart 0 emit-storm over the virtio TX path, hart 1 atomic spin.
+    /// Task-driven.
+    VirtioStorm,
+}
+
+impl WorkloadKind {
+    /// True for the `*-storm` workloads, which drive hart 1 themselves
+    /// (spawn their own hart-1 task, or poke an intentionally-idle
+    /// hart 1). `kmain` uses this to decide whether to spawn the
+    /// default `hart_1_probe`.
+    pub fn is_storm(self) -> bool {
+        matches!(
+            self,
+            Self::SpawnStorm
+                | Self::IpiPong
+                | Self::ShootdownStorm
+                | Self::MutexStorm
+                | Self::VirtioStorm
+        )
+    }
 }
 
 /// Parse a `workload=<name>` selection out of the bootargs string.
@@ -35,6 +65,11 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "smp" => Some(WorkloadKind::Smp),
             "frame-oom" => Some(WorkloadKind::FrameOom),
             "heap-oom" => Some(WorkloadKind::HeapOom),
+            "spawn-storm" => Some(WorkloadKind::SpawnStorm),
+            "ipi-pong" => Some(WorkloadKind::IpiPong),
+            "shootdown-storm" => Some(WorkloadKind::ShootdownStorm),
+            "mutex-storm" => Some(WorkloadKind::MutexStorm),
+            "virtio-storm" => Some(WorkloadKind::VirtioStorm),
             _ => None,
         })
 }
@@ -56,6 +91,27 @@ mod tests {
     #[test]
     fn selects_heap_oom() {
         assert_eq!(select("workload=heap-oom"), Some(WorkloadKind::HeapOom));
+    }
+
+    #[test]
+    fn is_storm_classifies_each_kind() {
+        assert!(WorkloadKind::SpawnStorm.is_storm());
+        assert!(WorkloadKind::IpiPong.is_storm());
+        assert!(WorkloadKind::ShootdownStorm.is_storm());
+        assert!(WorkloadKind::MutexStorm.is_storm());
+        assert!(WorkloadKind::VirtioStorm.is_storm());
+        assert!(!WorkloadKind::Smp.is_storm());
+        assert!(!WorkloadKind::FrameOom.is_storm());
+        assert!(!WorkloadKind::HeapOom.is_storm());
+    }
+
+    #[test]
+    fn selects_storm_workloads() {
+        assert_eq!(select("workload=spawn-storm"), Some(WorkloadKind::SpawnStorm));
+        assert_eq!(select("workload=ipi-pong"), Some(WorkloadKind::IpiPong));
+        assert_eq!(select("workload=shootdown-storm"), Some(WorkloadKind::ShootdownStorm));
+        assert_eq!(select("workload=mutex-storm"), Some(WorkloadKind::MutexStorm));
+        assert_eq!(select("workload=virtio-storm"), Some(WorkloadKind::VirtioStorm));
     }
 
     #[test]

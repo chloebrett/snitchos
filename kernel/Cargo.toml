@@ -13,43 +13,6 @@ default = []
 # leave this off (no test/destructive workloads compiled in). See
 # `docs/runtime-workload-selection-design.md`.
 itest-workloads = []
-# Replaces the default boot workload (task_a, task_b, producer,
-# consumer) with a cross-hart spawn storm: hart 0 runs
-# `spawn_on(1, deflake_body)` in a serialised loop and waits for each
-# task's ack atomic to bump before the next iteration. Used by the
-# `deflake-spawn-storm` integration scenario to characterise the
-# residual cross-hart memory-ordering race on hart 1's IPI pickup
-# path. See `plans/residual-race-investigation.md`.
-deflake-spawn-storm = []
-# Replaces the default boot workload with a tight IPI_WAKEUP loop from
-# hart 0 to hart 1. Each iteration is one
-# `hart 1 in wfi → IPI → trap → swap-Acquire → sret → resume` trial,
-# directly testing the post-sret memory-ordering window the deflake
-# residual was suspected to live on. ~10k iterations per boot, no
-# heap growth (no per-iteration spawn). Used by `deflake-ipi-pong`.
-deflake-ipi-pong = []
-# Replaces the default boot workload with a tight `mmu::shootdown(va)`
-# loop from hart 0. Each iteration: hart 0 writes shootdown_va,
-# sends IPI_TLB_SHOOTDOWN to hart 1, spin-waits on shootdown_ack;
-# hart 1 takes the IPI, Acquire-swaps ipi_pending, reads
-# shootdown_va, sfences, Release-bumps shootdown_ack. Tests the IPI
-# payload-read path — a different code surface from `deflake-ipi-pong`
-# (which has no payload). Used by `deflake-shootdown-storm`.
-deflake-shootdown-storm = []
-# Replaces the default boot workload with two long-running tasks
-# (one per hart) that hammer a shared `kernel::sync::Mutex<()>` in a
-# tight lock/unlock loop. Tests revised-H7: is the cross-hart bug
-# inside `spin::Mutex` Acquire/Release on multi-thread TCG? No
-# payload in the critical section — just the acquire/release pair.
-# Used by `deflake-mutex-storm`.
-deflake-mutex-storm = []
-# Replaces the default boot workload with a virtio-emit storm:
-# hart 0 runs a task that calls `tracing::emit_metric` in a tight
-# loop (virtio_console::send + TX_STAGING + MMIO notify), while
-# hart 1 runs a task that does pure Relaxed atomic bumps on a
-# shared cell. No cross-hart mutex contention. Tests H11-refined:
-# is the cross-hart bug inside the virtio TX path specifically?
-deflake-virtio-storm = []
 
 [dependencies]
 fdt = "0.1.5"

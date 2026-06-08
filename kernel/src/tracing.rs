@@ -106,10 +106,6 @@ pub fn register_counter(name: &'static str) -> StringId {
 /// total count is bounded (e.g. per-task metric names registered
 /// once per task at spawn time). Every call commits ~bytes_of(name)
 /// to the heap forever.
-#[cfg_attr(
-    feature = "deflake-spawn-storm",
-    expect(dead_code, reason = "deflake-spawn-storm skips per-task metric registration")
-)]
 pub fn register_counter_owned(name: alloc::string::String) -> StringId {
     let leaked: &'static str = alloc::boxed::Box::leak(name.into_boxed_str());
     register_counter(leaked)

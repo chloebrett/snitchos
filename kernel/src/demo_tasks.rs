@@ -11,8 +11,9 @@
 //! swapping on context switch is what makes this safe; until v0.5
 //! step 7, the discipline was "balance the cursor before yielding."
 //!
-//! All three entries are gated dead-code under the deflake feature
-//! flags (kmain doesn't spawn them under any of those features).
+//! `kmain` spawns these on the default-demo path; a non-default
+//! `workload=` selection runs a different set (the cross-hart workload
+//! or a storm) instead.
 
 use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -50,16 +51,6 @@ fn burn_lcg(iterations: u32) {
     let _ = core::hint::black_box(x);
 }
 
-#[cfg_attr(
-    any(
-        feature = "deflake-spawn-storm",
-        feature = "deflake-ipi-pong",
-        feature = "deflake-shootdown-storm",
-        feature = "deflake-mutex-storm",
-        feature = "deflake-virtio-storm"
-    ),
-    allow(dead_code)
-)]
 pub extern "C" fn task_a_entry() -> ! {
     loop {
         {
@@ -77,16 +68,6 @@ pub extern "C" fn task_a_entry() -> ! {
     }
 }
 
-#[cfg_attr(
-    any(
-        feature = "deflake-spawn-storm",
-        feature = "deflake-ipi-pong",
-        feature = "deflake-shootdown-storm",
-        feature = "deflake-mutex-storm",
-        feature = "deflake-virtio-storm"
-    ),
-    allow(dead_code)
-)]
 pub extern "C" fn task_b_entry() -> ! {
     loop {
         {

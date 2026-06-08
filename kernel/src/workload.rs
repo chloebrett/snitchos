@@ -25,9 +25,7 @@ use crate::sched;
 use crate::sync::Mutex;
 use crate::tracing;
 
-#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm"), allow(dead_code))]
 const BATCH: usize = 64;
-#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm"), allow(dead_code))]
 const PRODUCER_SEED: u64 = 0x00c0_ffee_dead_beef;
 
 static QUEUE: Mutex<Option<VecDeque<u64>>> = Mutex::new(None);
@@ -82,7 +80,6 @@ pub fn queue_depth() -> usize {
     guard.as_ref().map(|q| q.len()).unwrap_or(0)
 }
 
-#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm"), allow(dead_code))]
 pub extern "C" fn producer_entry() -> ! {
     let mut lcg = Lcg::new(PRODUCER_SEED);
     loop {
@@ -110,7 +107,6 @@ pub extern "C" fn producer_entry() -> ! {
     }
 }
 
-#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm"), allow(dead_code))]
 pub extern "C" fn consumer_entry() -> ! {
     loop {
         {

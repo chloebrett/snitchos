@@ -132,20 +132,22 @@ define_metrics! {
     gauge     smoke_entries             = "snitchos.heap_smoke.entries";
     gauge     smoke_primes              = "snitchos.heap_smoke.primes";
     gauge     smoke_candidate           = "snitchos.heap_smoke.candidate";
-    // deflake scenario metrics
-    #[cfg(feature = "deflake-spawn-storm")]
+    // Storm scenario metrics — present only in `itest-workloads`
+    // builds. The metric *names* keep the historical `deflake.`
+    // namespace so existing itest baselines/dashboards stay valid.
+    #[cfg(feature = "itest-workloads")]
     counter   spawn_storm_acks          = "snitchos.deflake.spawn_storm_acks";
-    #[cfg(feature = "deflake-ipi-pong")]
+    #[cfg(feature = "itest-workloads")]
     counter   ipi_pong_sends            = "snitchos.deflake.ipi_pong_sends";
-    #[cfg(feature = "deflake-shootdown-storm")]
+    #[cfg(feature = "itest-workloads")]
     counter   shootdown_storm_sends     = "snitchos.deflake.shootdown_storm_sends";
-    #[cfg(feature = "deflake-mutex-storm")]
+    #[cfg(feature = "itest-workloads")]
     counter   mutex_storm_acquires_hart0 = "snitchos.deflake.mutex_storm_acquires_hart0";
-    #[cfg(feature = "deflake-mutex-storm")]
+    #[cfg(feature = "itest-workloads")]
     counter   mutex_storm_acquires_hart1 = "snitchos.deflake.mutex_storm_acquires_hart1";
-    #[cfg(feature = "deflake-virtio-storm")]
+    #[cfg(feature = "itest-workloads")]
     counter   virtio_storm_hart0_emits  = "snitchos.deflake.virtio_storm_hart0_emits";
-    #[cfg(feature = "deflake-virtio-storm")]
+    #[cfg(feature = "itest-workloads")]
     counter   virtio_storm_hart1_iterations = "snitchos.deflake.virtio_storm_hart1_iterations";
 }
 
@@ -176,7 +178,8 @@ pub fn run(metrics: Metrics) -> ! {
             emit_workload_metrics(&metrics);
             emit_smp_metrics(&metrics);
             emit_heap_smoke_metrics(&metrics, count);
-            emit_deflake_metrics(&metrics, count);
+            #[cfg(feature = "itest-workloads")]
+            emit_storm_metrics(&metrics, count);
         }
         sched::yield_now();
     }
@@ -294,14 +297,14 @@ fn emit_sched_metrics(m: &Metrics) {
     emit!(m, sched_runqueue_depth = sched_snap.runqueue_depth);
     emit!(m, sched_tasks_total    = sched_snap.tasks_total);
     emit!(m, sched_yield_overhead = sched::LAST_YIELD_OVERHEAD_TICKS.load(Ordering::Relaxed));
-    // Per-task metrics: gated off under `deflake-spawn-storm` because
-    // that build uses sentinel StringIds for these (see
-    // Task::new_bare) — emitting against id 0 would mis-tag whichever
-    // name id 0 is.
-    #[cfg(not(feature = "deflake-spawn-storm"))]
-    for snap in sched::task_snapshots() {
-        tracing::emit_metric(snap.cpu_time_metric, snap.cpu_time_ticks as i64);
-        tracing::emit_metric(snap.runs_metric, snap.runs as i64);
+    // Per-task metrics: skipped under the spawn storm, which uses
+    // sentinel StringIds for these (see Task::new_bare) — emitting
+    // against id 0 would mis-tag whichever name id 0 is.
+    if boot_workload::selected() != Some(kernel_core::bootargs::WorkloadKind::SpawnStorm) {
+        for snap in sched::task_snapshots() {
+            tracing::emit_metric(snap.cpu_time_metric, snap.cpu_time_ticks as i64);
+            tracing::emit_metric(snap.runs_metric, snap.runs as i64);
+        }
     }
     emit!(m, task_a_loops = crate::demo_tasks::TASK_A_LOOPS.load(Ordering::Relaxed));
     emit!(m, task_b_loops = crate::demo_tasks::TASK_B_LOOPS.load(Ordering::Relaxed));
@@ -339,45 +342,46 @@ fn emit_heap_smoke_metrics(m: &Metrics, count: i64) {
     emit!(m, smoke_candidate = sst.candidate);
 }
 
-/// Deflake scenario triggers + counters. Each storm runs once on the
-/// first heartbeat tick (blocks main until complete); subsequent
-/// heartbeats re-emit the latest counter values for the integration
-/// scenario to observe. All three blocks are independent feature
-/// gates; in practice only one is active per build.
-#[allow(unused_variables)]
-fn emit_deflake_metrics(m: &Metrics, count: i64) {
-    #[cfg(feature = "deflake-spawn-storm")]
-    {
-        if count == 1 {
-            crate::deflake::spawn_storm::run();
+/// Storm scenario triggers + counters (`itest-workloads` only). The
+/// heartbeat-driven storms (`spawn`/`ipi`/`shootdown`) run once on the
+/// first tick (blocking main until complete); the task-driven storms
+/// (`mutex`/`virtio`) run in their own spawned tasks, so here we only
+/// re-emit their progress counters. At most one storm is selected per
+/// boot.
+#[cfg(feature = "itest-workloads")]
+fn emit_storm_metrics(m: &Metrics, count: i64) {
+    use kernel_core::bootargs::WorkloadKind;
+    match boot_workload::selected() {
+        Some(WorkloadKind::SpawnStorm) => {
+            if count == 1 {
+                crate::storms::spawn_storm::run();
+            }
+            emit!(m, spawn_storm_acks = crate::storms::spawn_storm::ACK_COUNTER.load(Ordering::Relaxed));
         }
-        emit!(m, spawn_storm_acks = crate::deflake::spawn_storm::ACK_COUNTER.load(Ordering::Relaxed));
-    }
-    #[cfg(feature = "deflake-ipi-pong")]
-    {
-        if count == 1 {
-            crate::deflake::ipi_pong::run();
+        Some(WorkloadKind::IpiPong) => {
+            if count == 1 {
+                crate::storms::ipi_pong::run();
+            }
+            emit!(m, ipi_pong_sends = crate::storms::ipi_pong::SENDS.load(Ordering::Relaxed));
         }
-        emit!(m, ipi_pong_sends = crate::deflake::ipi_pong::SENDS.load(Ordering::Relaxed));
-    }
-    #[cfg(feature = "deflake-shootdown-storm")]
-    {
-        if count == 1 {
-            crate::deflake::shootdown::run();
+        Some(WorkloadKind::ShootdownStorm) => {
+            if count == 1 {
+                crate::storms::shootdown::run();
+            }
+            emit!(m, shootdown_storm_sends = crate::storms::shootdown::SENDS.load(Ordering::Relaxed));
         }
-        emit!(m, shootdown_storm_sends = crate::deflake::shootdown::SENDS.load(Ordering::Relaxed));
-    }
-    #[cfg(feature = "deflake-mutex-storm")]
-    {
-        // No `run()` call here — the storm bodies are spawned as
-        // proper tasks from kmain; main's only job is to keep
-        // emitting metrics so the harness can observe progress.
-        emit!(m, mutex_storm_acquires_hart0 = crate::deflake::mutex_storm::ACQUIRES_HART0.load(Ordering::Relaxed));
-        emit!(m, mutex_storm_acquires_hart1 = crate::deflake::mutex_storm::ACQUIRES_HART1.load(Ordering::Relaxed));
-    }
-    #[cfg(feature = "deflake-virtio-storm")]
-    {
-        emit!(m, virtio_storm_hart0_emits      = crate::deflake::virtio_storm::HART0_EMITS.load(Ordering::Relaxed));
-        emit!(m, virtio_storm_hart1_iterations = crate::deflake::virtio_storm::HART1_ITERATIONS.load(Ordering::Relaxed));
+        Some(WorkloadKind::MutexStorm) => {
+            emit!(m, mutex_storm_acquires_hart0 = crate::storms::mutex_storm::ACQUIRES_HART0.load(Ordering::Relaxed));
+            emit!(m, mutex_storm_acquires_hart1 = crate::storms::mutex_storm::ACQUIRES_HART1.load(Ordering::Relaxed));
+        }
+        Some(WorkloadKind::VirtioStorm) => {
+            emit!(m, virtio_storm_hart0_emits      = crate::storms::virtio_storm::HART0_EMITS.load(Ordering::Relaxed));
+            emit!(m, virtio_storm_hart1_iterations = crate::storms::virtio_storm::HART1_ITERATIONS.load(Ordering::Relaxed));
+        }
+        // No storm selected (default / Smp / OOM): nothing to emit.
+        None
+        | Some(WorkloadKind::Smp)
+        | Some(WorkloadKind::FrameOom)
+        | Some(WorkloadKind::HeapOom) => {}
     }
 }

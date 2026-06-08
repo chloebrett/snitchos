@@ -6,10 +6,16 @@ extern crate alloc;
 use core::arch::global_asm;
 use core::sync::atomic::Ordering;
 use fdt::Fdt;
+use kernel_core::bootargs::WorkloadKind;
 
 mod boot_workload;
 mod console;
-mod deflake;
+/// The runtime-selectable stress/regression workloads (spawn storm,
+/// IPI pong, shootdown storm, mutex storm, virtio storm). Compiled in
+/// only for `itest-workloads` builds — never production. Formerly the
+/// `deflake-*` cargo features; see `docs/runtime-workload-selection-design.md`.
+#[cfg(feature = "itest-workloads")]
+mod storms;
 mod demo_tasks;
 mod dtb;
 mod frame;
@@ -291,13 +297,6 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // The demo task sits on the runqueue idle until step 7's
     // `yield_now` picks it. `ThreadRegister` frames are emitted by
     // both calls so the collector can resolve task ids to names.
-    let _ = sched::register_bare_task("main", kernel_core::sched::TaskState::Running);
-    let _ = sched::spawn("idle", demo_tasks::idle_entry);
-    // v0.5.x exit smoke: one task that bumps a counter then calls
-    // `exit_now`. Asserts the asm + state-machine + snapshot-filter
-    // wire together without crashing the kernel. Costs one 16 KiB
-    // leaked stack at boot.
-    let _ = sched::spawn("exit_smoke", sched::exit_smoke_entry);
     // Boot workload selection. The default is the standard demo
     // (task_a, task_b, producer, consumer on hart 0). An
     // `itest-workloads` build may override it at runtime from the
@@ -306,16 +305,13 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // is purely additive. See
     // `docs/runtime-workload-selection-design.md`.
     //
-    // Gated out under the `deflake-*` storms, which strip the demo and
-    // spawn their own minimal workers below (still cargo-feature-gated
-    // pending migration step 4).
-    // Resolved unconditionally and published so the heartbeat task
-    // (which can't be passed the value) can read it back via
-    // `boot_workload::selected()` — the OOM workloads change the
-    // per-tick smoke, not the spawn layout. Only `itest-workloads`
-    // builds consult bootargs; everything else resolves to `None`
-    // (default demo).
-    let selected: Option<kernel_core::bootargs::WorkloadKind> = {
+    // Resolved and published *before any task is created*: the spawn
+    // path (`Task::new_bare`, `sched::spawn`) reads it back via
+    // `boot_workload::selected()` (the spawn storm suppresses per-task
+    // counters + ThreadRegister), as does the heartbeat (the OOM
+    // workloads change the per-tick smoke). Only `itest-workloads`
+    // builds consult bootargs; everything else resolves to `None`.
+    let selected: Option<WorkloadKind> = {
         #[cfg(feature = "itest-workloads")]
         {
             dtb.chosen().bootargs().and_then(kernel_core::bootargs::select)
@@ -327,25 +323,40 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     };
     boot_workload::init(selected);
 
-    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
+    let _ = sched::register_bare_task("main", kernel_core::sched::TaskState::Running);
+    let _ = sched::spawn("idle", demo_tasks::idle_entry);
+    // v0.5.x exit smoke: one task that bumps a counter then calls
+    // `exit_now`. Asserts the asm + state-machine + snapshot-filter
+    // wire together without crashing the kernel. Costs one 16 KiB
+    // leaked stack at boot.
+    let _ = sched::spawn("exit_smoke", sched::exit_smoke_entry);
+
+    // Pre-secondary spawns. The cross-hart workloads (SMP, the task
+    // storms) place their hart-1 tasks after `SECONDARY_READY` below;
+    // the heartbeat-driven storms spawn nothing.
     match selected {
-        Some(kernel_core::bootargs::WorkloadKind::Smp) => {
+        Some(WorkloadKind::Smp) => {
             // Cross-hart: producer on hart 0 here, consumer on hart 1
             // after SECONDARY_READY. The `Mutex<VecDeque>` queue carries
             // real inter-hart contention; task_a/task_b are absent to
             // keep hart 0's surface clean for measurement.
             let _ = sched::spawn("workload_producer", workload::producer_entry);
         }
-        // Default demo for the rest: `None`, and the OOM workloads,
-        // which keep the standard tasks and only change the heartbeat.
-        None
-        | Some(kernel_core::bootargs::WorkloadKind::FrameOom)
-        | Some(kernel_core::bootargs::WorkloadKind::HeapOom) => {
+        // Default demo: `None`, and the OOM workloads, which keep the
+        // standard tasks and only change the heartbeat.
+        None | Some(WorkloadKind::FrameOom) | Some(WorkloadKind::HeapOom) => {
             let _ = sched::spawn("task_a", demo_tasks::task_a_entry);
             let _ = sched::spawn("task_b", demo_tasks::task_b_entry);
             let _ = sched::spawn("workload_producer", workload::producer_entry);
             let _ = sched::spawn("workload_consumer", workload::consumer_entry);
         }
+        // Storms spawn post-secondary (task storms) or are entirely
+        // heartbeat-driven (spawn/ipi/shootdown).
+        Some(WorkloadKind::SpawnStorm)
+        | Some(WorkloadKind::IpiPong)
+        | Some(WorkloadKind::ShootdownStorm)
+        | Some(WorkloadKind::MutexStorm)
+        | Some(WorkloadKind::VirtioStorm) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -381,41 +392,43 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         core::hint::spin_loop();
     }
     // v0.6 step 10: cross-hart spawn smoke. Probe lands on hart 1's
-    // runqueue + IPI wakeup nudges hart 1 to pick it. Gated out under
-    // `deflake-spawn-storm` so hart 1 stays in `wfi` until the storm
-    // loop's spawn_on's wake it — each wake then has the maximum
-    // "fresh trap" race exposure.
-    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
-    let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
+    // runqueue + IPI wakeup nudges hart 1 to pick it. Skipped for the
+    // storm workloads, which drive hart 1 themselves (or keep it idle
+    // so a heartbeat-driven storm can poke it with maximum "fresh
+    // trap" race exposure).
+    if !selected.is_some_and(WorkloadKind::is_storm) {
+        let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
+    }
 
     // v0.6 step 11: place the consumer on hart 1 when the SMP workload
     // is selected. `spawn_on` enqueues it on hart 1's runqueue and IPIs
     // the hart so its idle `wfi` wakes to pick it up. Producer (hart 0)
     // and consumer (hart 1) then contend on `QUEUE` across the boundary.
-    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
-    if matches!(selected, Some(kernel_core::bootargs::WorkloadKind::Smp)) {
+    if matches!(selected, Some(WorkloadKind::Smp)) {
         let _ = sched::spawn_on(1, "workload_consumer", workload::consumer_entry);
     }
 
-    // Mutex-storm: spawn the two contender tasks. They run as soon
-    // as the scheduler picks them; each does N lock/unlock and then
-    // `exit_now`. Heartbeat re-emits their progress counters.
-    #[cfg(feature = "deflake-mutex-storm")]
-    {
-        let _ = sched::spawn("mutex_storm_h0", deflake::mutex_storm::body_hart0);
-        let _ = sched::spawn_on(1, "mutex_storm_h1", deflake::mutex_storm::body_hart1);
-    }
-
-    // Virtio-storm: pre-register the storm's emission metric (so
-    // its StringRegister frame doesn't get emitted from inside the
-    // storm loop, which would muddy the per-iteration timing), then
-    // spawn the two bodies. Hart 0 emits frames; hart 1 spins
-    // atomics until hart 0 signals stop.
-    #[cfg(feature = "deflake-virtio-storm")]
-    {
-        deflake::virtio_storm::init();
-        let _ = sched::spawn("virtio_storm_h0", deflake::virtio_storm::body_hart0);
-        let _ = sched::spawn_on(1, "virtio_storm_h1", deflake::virtio_storm::body_hart1);
+    // Task-driven storms: spawn their hart-0 + hart-1 bodies now that
+    // the secondary is online. Only present in `itest-workloads`
+    // builds; the heartbeat-driven storms (spawn/ipi/shootdown) run
+    // from the heartbeat tick and spawn nothing here.
+    #[cfg(feature = "itest-workloads")]
+    match selected {
+        // Two contenders hammer a shared `Mutex`; each does N
+        // lock/unlock then `exit_now`. Heartbeat re-emits progress.
+        Some(WorkloadKind::MutexStorm) => {
+            let _ = sched::spawn("mutex_storm_h0", storms::mutex_storm::body_hart0);
+            let _ = sched::spawn_on(1, "mutex_storm_h1", storms::mutex_storm::body_hart1);
+        }
+        // Pre-register the emission metric (so its StringRegister isn't
+        // emitted from inside the storm loop, muddying per-iteration
+        // timing), then spawn both bodies: hart 0 emits, hart 1 spins.
+        Some(WorkloadKind::VirtioStorm) => {
+            storms::virtio_storm::init();
+            let _ = sched::spawn("virtio_storm_h0", storms::virtio_storm::body_hart0);
+            let _ = sched::spawn_on(1, "virtio_storm_h1", storms::virtio_storm::body_hart1);
+        }
+        _ => {}
     }
 
     // Tear down both identity mappings. From here on, any access to

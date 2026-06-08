@@ -93,12 +93,12 @@ const SCENARIOS: &[Scenario] = &[
     Scenario::new       ("ipi-self-wakeup",             scenarios::ipi_self_wakeup),
     Scenario::new       ("smp-secondary-hart-boots",    scenarios::smp_secondary_hart_boots),
     Scenario::new       ("smp-spawn-on-hart-1-runs",    scenarios::smp_spawn_on_hart_1_runs),
-    Scenario::cpu_bound ("deflake-spawn-storm",         scenarios::deflake_spawn_storm),
-    Scenario::cpu_bound ("deflake-ipi-pong",            scenarios::deflake_ipi_pong),
-    Scenario::cpu_bound ("deflake-shootdown-storm",     scenarios::deflake_shootdown_storm),
+    Scenario::cpu_bound ("spawn-storm",         scenarios::spawn_storm),
+    Scenario::cpu_bound ("ipi-pong",            scenarios::ipi_pong),
+    Scenario::cpu_bound ("shootdown-storm",     scenarios::shootdown_storm),
     Scenario::new       ("sched-task-exits-cleanly",    scenarios::sched_task_exits_cleanly),
-    Scenario::cpu_bound ("deflake-mutex-storm",         scenarios::deflake_mutex_storm),
-    Scenario::cpu_bound ("deflake-virtio-storm",        scenarios::deflake_virtio_storm),
+    Scenario::cpu_bound ("mutex-storm",         scenarios::mutex_storm),
+    Scenario::cpu_bound ("virtio-storm",        scenarios::virtio_storm),
 ];
 
 /// Entry point from `main`. `Some(name)` runs one scenario;
@@ -490,7 +490,7 @@ fn find_most_recent_run_dir() -> Option<PathBuf> {
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .map(|e| e.path())
         .filter(|p| {
-            // Same shape check as itest_harness::history::prune_runs:
+            // Same shape check as itest_harness::prune_runs:
             // length 20, ends in 'Z', positional separators match.
             let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
                 return false;

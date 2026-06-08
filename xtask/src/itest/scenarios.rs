@@ -750,7 +750,7 @@ pub fn smp_producer_consumer_correctness() -> Result<(), String> {
     Ok(())
 }
 
-/// Cross-hart spawn storm. Hart 0 calls `spawn_on(1, deflake_body)` in
+/// Cross-hart spawn storm. Hart 0 calls `spawn_on(1, storm_body)` in
 /// a serialised loop: each iteration is one trial of the residual
 /// memory-ordering race on hart 1's IPI pickup path. Each task bumps
 /// `ACK_COUNTER` from its body; hart 0's wait-poll is MMIO-fenced via
@@ -761,15 +761,12 @@ pub fn smp_producer_consumer_correctness() -> Result<(), String> {
 /// 30 s. Under the trap-return `tag()` fix this should pass 100/100.
 /// With the fix removed it should flake at ≥80% per run.
 ///
-/// Built with `--features deflake-spawn-storm` so the default boot
+/// Built with `workload=spawn-storm` so the default boot
 /// workload is replaced by the storm; the gating also turns off the
 /// per-spawn `emit_thread_register` so no incidental BQL fence closes
 /// the window mid-storm. See `plans/residual-race-investigation.md`.
-pub fn deflake_spawn_storm() -> Result<(), String> {
-    let mut h = Harness::spawn_with_features(
-        "deflake-spawn-storm",
-        &["deflake-spawn-storm"],
-    )?;
+pub fn spawn_storm() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("spawn-storm", "spawn-storm")?;
 
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
@@ -802,11 +799,8 @@ pub fn deflake_spawn_storm() -> Result<(), String> {
 ///      on its pickup path.
 ///
 /// See `plans/residual-race-investigation.md` appendix A.
-pub fn deflake_ipi_pong() -> Result<(), String> {
-    let mut h = Harness::spawn_with_features(
-        "deflake-ipi-pong",
-        &["deflake-ipi-pong"],
-    )?;
+pub fn ipi_pong() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("ipi-pong", "ipi-pong")?;
 
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
@@ -844,7 +838,7 @@ pub fn deflake_ipi_pong() -> Result<(), String> {
 /// spin-waits on shootdown_ack; hart 1's IPI handler does the
 /// Acquire-swap, reads the va, sfences, Release-bumps the ack.
 /// Tests the IPI payload-read path — a different surface from
-/// `deflake-ipi-pong` (no payload).
+/// `ipi-pong` (no payload).
 ///
 /// Asserts both:
 ///   1. `snitchos.deflake.shootdown_storm_sends == N` — hart 0
@@ -854,11 +848,8 @@ pub fn deflake_ipi_pong() -> Result<(), String> {
 ///   2. `snitchos.mmu.shootdowns_received_total >= N - tolerance` —
 ///      hart 1 actually handled the shootdowns. (Per-iteration ack
 ///      means coalescing shouldn't happen here, unlike ipi-pong.)
-pub fn deflake_shootdown_storm() -> Result<(), String> {
-    let mut h = Harness::spawn_with_features(
-        "deflake-shootdown-storm",
-        &["deflake-shootdown-storm"],
-    )?;
+pub fn shootdown_storm() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("shootdown-storm", "shootdown-storm")?;
 
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
@@ -932,11 +923,8 @@ pub fn sched_task_exits_cleanly() -> Result<(), String> {
 /// both counters stall mid-loop; the kernel either wedges or one
 /// task never advances. See `plans/residual-race-investigation.md`
 /// appendix C.
-pub fn deflake_mutex_storm() -> Result<(), String> {
-    let mut h = Harness::spawn_with_features(
-        "deflake-mutex-storm",
-        &["deflake-mutex-storm"],
-    )?;
+pub fn mutex_storm() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("mutex-storm", "mutex-storm")?;
 
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
@@ -982,11 +970,8 @@ pub fn deflake_mutex_storm() -> Result<(), String> {
 /// Asserts `snitchos.deflake.virtio_storm_hart0_emits` reaches N
 /// (5 000) within 30 s. See `plans/residual-race-investigation.md`
 /// appendix C.
-pub fn deflake_virtio_storm() -> Result<(), String> {
-    let mut h = Harness::spawn_with_features(
-        "deflake-virtio-storm",
-        &["deflake-virtio-storm"],
-    )?;
+pub fn virtio_storm() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("virtio-storm", "virtio-storm")?;
 
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {

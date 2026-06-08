@@ -1,21 +1,25 @@
-//! Cross-hart memory-ordering investigation scenarios. Three storm
-//! workloads, each gated by its own feature, that replace the default
-//! boot demo tasks with a tight loop probing a specific kernel
-//! cross-hart code path:
+//! Cross-hart stress / regression workloads. Each replaces the default
+//! boot demo with a tight loop hammering a specific kernel cross-hart
+//! code path, selected at runtime via `workload=<name>` (the whole
+//! module compiles only into `itest-workloads` builds):
 //!
-//!   - [`spawn_storm`] (`deflake-spawn-storm`): hart 0 calls
+//!   - [`spawn_storm`] (`workload=spawn-storm`): hart 0 calls
 //!     `spawn_on(1, ...)` N times, serialised on per-task acks.
-//!   - [`ipi_pong`] (`deflake-ipi-pong`): hart 0 sends tight
+//!   - [`ipi_pong`] (`workload=ipi-pong`): hart 0 sends tight
 //!     `IPI_WAKEUP`s to hart 1 with no payload; probes the post-sret
 //!     resume window.
-//!   - [`shootdown`] (`deflake-shootdown-storm`): hart 0 calls
+//!   - [`shootdown`] (`workload=shootdown-storm`): hart 0 calls
 //!     `mmu::shootdown(KERNEL_OFFSET)` in a loop; probes the IPI
 //!     payload-read path.
+//!   - [`mutex_storm`] (`workload=mutex-storm`): two tasks hammer a
+//!     shared `Mutex` across harts.
+//!   - [`virtio_storm`] (`workload=virtio-storm`): hart 0 emit-storm
+//!     over the virtio TX path, hart 1 atomic spin.
 //!
-//! See `plans/residual-race-investigation.md` for hypothesis tree,
-//! experiment ladder, and falsified-by-trial-count tables.
+//! These originally characterised an unfixed cross-hart race (a dropped
+//! `MutexGuard` in `virtio_console::send`, since fixed); they are kept
+//! as regression guards. See `plans/residual-race-investigation.md`.
 
-#[cfg(feature = "deflake-virtio-storm")]
 pub mod virtio_storm {
     //! Validation experiment for H11-refined: is the cross-hart bug
     //! specifically in the virtio-console emission path
@@ -95,7 +99,6 @@ pub mod virtio_storm {
     }
 }
 
-#[cfg(feature = "deflake-mutex-storm")]
 pub mod mutex_storm {
     //! Validation experiment for revised-H7. Both harts run a
     //! long-running task that takes and releases a shared
@@ -165,7 +168,6 @@ pub mod mutex_storm {
     }
 }
 
-#[cfg(feature = "deflake-spawn-storm")]
 pub mod spawn_storm {
     //! Cross-hart spawn storm. Drives N serialised
     //! `spawn_on(1, body)` iterations from hart 0 with an MMIO-fenced
@@ -236,7 +238,6 @@ pub mod spawn_storm {
     }
 }
 
-#[cfg(feature = "deflake-ipi-pong")]
 pub mod ipi_pong {
     //! Tight IPI_WAKEUP loop from hart 0 to hart 1. Each iteration is
     //! one `hart 1 in wfi → IPI → trap → swap-Acquire → sret → resume`
@@ -293,7 +294,6 @@ pub mod ipi_pong {
     }
 }
 
-#[cfg(feature = "deflake-shootdown-storm")]
 pub mod shootdown {
     //! Tight `mmu::shootdown(va)` loop from hart 0. Each iteration:
     //!

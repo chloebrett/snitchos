@@ -128,8 +128,9 @@ pub struct Task {
     pub runs: AtomicU64,
     /// Pre-registered metric ids so the heartbeat emit path doesn't
     /// re-format strings per tick. Populated by `spawn` /
-    /// `register_bare_task`. Sentinel (`StringId(0)`) under
-    /// `deflake-spawn-storm` where the per-task emit loop is gated off.
+    /// `register_bare_task`. Sentinel (`StringId(0)`) under the
+    /// `workload=spawn-storm` selection where the per-task emit loop is
+    /// skipped.
     pub cpu_time_metric: protocol::StringId,
     pub runs_metric: protocol::StringId,
     /// Saved register state while off-CPU. `UnsafeCell` because the
@@ -153,24 +154,28 @@ unsafe impl Sync for Task {}
 
 impl Task {
     fn new_bare(id: TaskId, name: String, state: TaskState) -> Self {
-        // Under `deflake-spawn-storm` we spawn ~200 tasks back-to-back.
-        // Each `register_counter_owned` call mints a fresh leaked
-        // 'static str whose pointer becomes a new intern-table slot
-        // (the table dedupes by pointer identity, not by content), so
-        // 200 spawns × 2 metrics would blow MAX_INTERNED=128. The
-        // heartbeat's per-task metric emit loop is also gated off
-        // under this feature, so a sentinel StringId is fine here.
-        #[cfg(feature = "deflake-spawn-storm")]
-        let (cpu_time_metric, runs_metric) =
-            (protocol::StringId(0), protocol::StringId(0));
-        #[cfg(not(feature = "deflake-spawn-storm"))]
-        let cpu_time_metric = crate::tracing::register_counter_owned(
-            alloc::format!("snitchos.task.{name}.cpu_time_ticks"),
-        );
-        #[cfg(not(feature = "deflake-spawn-storm"))]
-        let runs_metric = crate::tracing::register_counter_owned(
-            alloc::format!("snitchos.task.{name}.runs_total"),
-        );
+        // The spawn storm spawns ~200 tasks back-to-back. Each
+        // `register_counter_owned` call mints a fresh leaked 'static str
+        // whose pointer becomes a new intern-table slot (the table
+        // dedupes by pointer identity, not by content), so 200 spawns ×
+        // 2 metrics would blow MAX_INTERNED=128. The heartbeat's
+        // per-task metric emit loop is also skipped under that workload,
+        // so a sentinel StringId is fine. (`boot_workload::selected()`
+        // is set in `kmain` before any task is created.)
+        let (cpu_time_metric, runs_metric) = if crate::boot_workload::selected()
+            == Some(kernel_core::bootargs::WorkloadKind::SpawnStorm)
+        {
+            (protocol::StringId(0), protocol::StringId(0))
+        } else {
+            (
+                crate::tracing::register_counter_owned(alloc::format!(
+                    "snitchos.task.{name}.cpu_time_ticks"
+                )),
+                crate::tracing::register_counter_owned(alloc::format!(
+                    "snitchos.task.{name}.runs_total"
+                )),
+            )
+        };
         Self {
             id,
             name,
@@ -299,10 +304,6 @@ pub fn stats() -> SchedStats {
 /// lock to walk the task table, allocates an owned name string per
 /// task so the caller can drop the lock before doing slow virtio
 /// emits.
-#[cfg_attr(
-    feature = "deflake-spawn-storm",
-    expect(dead_code, reason = "deflake-spawn-storm gates the per-task metric emit loop")
-)]
 pub struct TaskSnapshot {
     pub cpu_time_metric: protocol::StringId,
     pub runs_metric: protocol::StringId,
@@ -310,10 +311,6 @@ pub struct TaskSnapshot {
     pub runs: u64,
 }
 
-#[cfg_attr(
-    feature = "deflake-spawn-storm",
-    expect(dead_code, reason = "deflake-spawn-storm gates the per-task metric emit loop")
-)]
 pub fn task_snapshots() -> Vec<TaskSnapshot> {
     let sched = SCHEDULER.lock();
     sched
@@ -452,17 +449,19 @@ pub fn spawn_on(hart: usize, name: &str, entry: extern "C" fn() -> !) -> TaskId 
         sched.tasks.push(task);
         sched.runqueues[hart].push_back(id);
     }
-    // Under `deflake-spawn-storm` we skip ThreadRegister so the spawn
-    // path has no MMIO (virtio) write between writing the new
-    // `ctx.ra/sp` and sending the IPI. The whole point of the storm
-    // scenario is to maximise per-trial race exposure; an MMIO write
-    // here acquires the BQL and would silently close the race window
-    // each iteration. See `plans/residual-race-investigation.md`
-    // appendix A.
-    #[cfg(not(feature = "deflake-spawn-storm"))]
-    crate::tracing::emit_thread_register(id, &owned_name);
-    #[cfg(feature = "deflake-spawn-storm")]
-    let _ = owned_name;
+    // Under the spawn storm we skip ThreadRegister so the spawn path
+    // has no MMIO (virtio) write between writing the new `ctx.ra/sp`
+    // and sending the IPI. The whole point of the storm is to maximise
+    // per-trial race exposure; an MMIO write here acquires the BQL and
+    // would silently close the race window each iteration. See
+    // `plans/residual-race-investigation.md` appendix A.
+    if crate::boot_workload::selected()
+        != Some(kernel_core::bootargs::WorkloadKind::SpawnStorm)
+    {
+        crate::tracing::emit_thread_register(id, &owned_name);
+    } else {
+        let _ = owned_name;
+    }
 
     // Cross-hart spawn: wake the target so it picks up the new task
     // instead of staying in wfi indefinitely.
