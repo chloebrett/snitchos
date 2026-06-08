@@ -85,11 +85,14 @@ enum Cmd {
         /// detection. Default 1.
         #[arg(long, default_value_t = 1)]
         repeat: u32,
-        /// Skip the pre-run cleanup of stale `qemu-system-riscv64`
-        /// processes. Off by default; use when you want to leave a
-        /// concurrent debug QEMU alive (rare).
+        /// Ignore the integration-test lock at `target/.itest.lock`.
+        /// Default off: only one itest run may proceed at a time;
+        /// concurrent invocations (from another agent, terminal, or
+        /// CI job on the same checkout) get rejected with the holder's
+        /// PID. Pass `--force` if you know the lock is stale (rare —
+        /// the OS releases on holder death, including Ctrl-C).
         #[arg(long, default_value_t = false)]
-        keep_existing_qemus: bool,
+        force: bool,
         /// Skip running the workspace unit tests as a prerequisite.
         /// Off by default — unit tests run first; integration only
         /// proceeds if they pass.
@@ -162,7 +165,7 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, keep_existing_qemus, skip_unit_tests, update_baseline, fail_fast, baseline_show } => {
+        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show } => {
             if baseline_show {
                 return itest::show_baseline();
             }
@@ -174,7 +177,7 @@ fn main() -> ExitCode {
                 }
                 eprintln!();
             }
-            itest::run(scenario.as_deref(), repeat, keep_existing_qemus, update_baseline, fail_fast)
+            itest::run(scenario.as_deref(), repeat, force, update_baseline, fail_fast)
         }
         Cmd::Loc => loc::run(),
         Cmd::Debug { features } => debug(&features),

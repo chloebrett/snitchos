@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use itest_harness::{BaselineFile, RunnerConfig};
+use itest_harness::{BaselineFile, ItestLock, LockError, RunnerConfig};
 
 use crate::qemu;
 
@@ -13,6 +13,11 @@ use crate::qemu;
 /// PR diffs surface baseline changes alongside the changes that
 /// motivated them.
 const BASELINE_PATH: &str = ".itest-baseline.toml";
+
+/// Per-checkout integration-test lock. Lives at the repo root (with a
+/// `.itest.lock` entry in `.gitignore`) so it's easy to find and
+/// inspect — `cat .itest.lock` shows the PID of the current holder.
+const LOCK_PATH: &str = ".itest.lock";
 
 mod harness;
 mod matchers;
@@ -59,13 +64,53 @@ const SCENARIOS: &[Scenario] = &[
 pub fn run(
     name: Option<&str>,
     repeat: u32,
-    keep_existing_qemus: bool,
+    force: bool,
     update_baseline: bool,
     fail_fast: Option<u32>,
 ) -> ExitCode {
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
         return ExitCode::SUCCESS;
+    }
+
+    // Acquire the integration-test lock. `--force` bypasses; otherwise
+    // any contender (concurrent invocation from another terminal, agent,
+    // or CI job on the same checkout) gets rejected here with the
+    // holder's PID. The guard is held until `run` returns.
+    let _lock_guard = if force {
+        None
+    } else {
+        match ItestLock::acquire(Path::new(LOCK_PATH)) {
+            Ok(guard) => Some(guard),
+            Err(LockError::AlreadyHeld { pid }) => {
+                eprintln!("error: {}", LockError::AlreadyHeld { pid });
+                eprintln!("       Pass --force if you know the lock is stale.");
+                return ExitCode::from(2);
+            }
+            Err(LockError::Io(e)) => {
+                eprintln!("error: failed to acquire itest lock at {LOCK_PATH}: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    };
+
+    // Warn (but don't kill) about pre-existing qemus. The lock above
+    // already prevents itest-vs-itest races; the remaining concern is a
+    // user's `xtask boot` / `xtask debug` / manual QEMU running in
+    // parallel. We surface the situation rather than silently murder it.
+    let stale = detect_stale_qemus();
+    if !stale.is_empty() {
+        eprintln!(
+            "warning: {} stale qemu-system-riscv64 process(es) detected (pid {}).",
+            stale.len(),
+            stale.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+        );
+        eprintln!(
+            "         Probably from `xtask boot`/`xtask debug` or a manual invocation."
+        );
+        eprintln!(
+            "         Cross-test interference is possible. Kill them manually if needed."
+        );
     }
 
     let to_run: Vec<&Scenario> = match name {
@@ -82,7 +127,6 @@ pub fn run(
 
     // Hook closures. None of these escape the call — the lifetime
     // parameter on RunnerConfig keeps them bounded to this scope.
-    let kill_stale = kill_stale_qemus;
     let build = || {
         qemu::build_kernel(&[])
             .map(|_| ())
@@ -93,7 +137,9 @@ pub fn run(
     let commit_for = current_commit_short;
 
     let config = RunnerConfig {
-        kill_stale: (!keep_existing_qemus).then_some(&kill_stale as &dyn Fn()),
+        // kill_stale is intentionally None — the lock + warning combo
+        // above replaces the previous murder-everything approach.
+        kill_stale: None,
         one_shot_build: Some(&build),
         log_path_for: Some(&log_path_for),
         max_wait_for: Some(&max_wait_for),
@@ -207,55 +253,19 @@ fn qemu_available() -> bool {
 /// boot`, a debug session, or a previous interrupted suite would
 /// compete for host CPU and cause spurious flakes. Bypassed with
 /// `--keep-existing-qemus`.
-///
-/// Uses `pkill -9` so we don't wait for SIGTERM handlers; if any
-/// QEMU genuinely owns important state the user should pass the
-/// flag. After killing, briefly polls until the process table is
-/// clear (cap at 2s) so the suite doesn't immediately race the
-/// scheduler reaping the corpses.
-fn kill_stale_qemus() {
-    use std::time::{Duration, Instant};
-
-    let count_before = pgrep_count("qemu-system-riscv64");
-    if count_before == 0 {
-        return;
-    }
-
-    let _ = std::process::Command::new("pkill")
-        .args(["-9", "qemu-system-riscv64"])
-        .status();
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline {
-        if pgrep_count("qemu-system-riscv64") == 0 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    let count_after = pgrep_count("qemu-system-riscv64");
-    if count_after > 0 {
-        eprintln!(
-            "xtask test: warning — {count_after} qemu-system-riscv64 \
-             process(es) still alive after pkill -9, suite may flake"
-        );
-    } else {
-        eprintln!(
-            "xtask test: killed {count_before} stale qemu-system-riscv64 \
-             process(es) (use --keep-existing-qemus to skip)"
-        );
-    }
-}
-
-fn pgrep_count(pattern: &str) -> u32 {
+/// Return the PIDs of currently-running `qemu-system-riscv64`
+/// processes. The integration-test lock prevents itest-vs-itest races
+/// directly; this detection covers the remaining case of `xtask boot`,
+/// `xtask debug`, or a manually-launched QEMU sharing the machine.
+fn detect_stale_qemus() -> Vec<u32> {
     std::process::Command::new("pgrep")
-        .arg(pattern)
+        .arg("qemu-system-riscv64")
         .output()
         .ok()
         .map(|o| {
             std::str::from_utf8(&o.stdout)
-                .map(|s| s.lines().count() as u32)
-                .unwrap_or(0)
+                .map(|s| s.lines().filter_map(|l| l.trim().parse().ok()).collect())
+                .unwrap_or_default()
         })
-        .unwrap_or(0)
+        .unwrap_or_default()
 }

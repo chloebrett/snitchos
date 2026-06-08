@@ -24,3 +24,7 @@ target
 # Added by cargo
 
 /target
+
+# Integration-test mutex lock. PID-stamped; cleaned up by Drop /
+# OS handle close. See itest-harness::lock + xtask/src/itest.rs.
+/.itest.lock
