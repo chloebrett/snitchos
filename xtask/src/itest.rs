@@ -227,8 +227,13 @@ pub fn run(
 
     // Hook closures. None of these escape the call — the lifetime
     // parameter on RunnerConfig keeps them bounded to this scope.
+    // One build for the whole suite: the `itest-workloads` kernel.
+    // With no `workload=` bootarg it runs the exact default demo
+    // (additive guarantee), so default-demo scenarios use it as-is;
+    // workload scenarios select via QEMU `-append`. No per-scenario
+    // rebuilds. See `docs/runtime-workload-selection-design.md`.
     let build = || {
-        qemu::build_kernel(&[])
+        qemu::build_kernel(&["itest-workloads"])
             .map(|_| ())
             .map_err(|e| e.to_string())
     };

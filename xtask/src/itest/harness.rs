@@ -63,41 +63,28 @@ pub struct Harness {
 }
 
 impl Harness {
-    /// Build the kernel (if needed), spawn QEMU pointing at a fresh
-    /// per-test socket, accept the connection, and start the reader
-    /// thread.
+    /// Spawn QEMU on the one up-front `itest-workloads` kernel build
+    /// with no `workload=` bootarg — i.e. the default demo. Used by the
+    /// default-demo scenarios; that they pass on this binary is the
+    /// continuous proof of the additive guarantee.
     pub fn spawn(label: &str) -> Result<Self, String> {
-        Self::spawn_with_features(label, &[])
+        Self::spawn_inner(label, None)
     }
 
-    /// Like `spawn`, but builds the kernel with the given cargo
-    /// features enabled. Used by scenarios that need a compile-time
-    /// kernel variant — currently the `deflake-*` storms (pending
-    /// migration to runtime `workload=` selection in step 4).
-    pub fn spawn_with_features(label: &str, features: &[&str]) -> Result<Self, String> {
-        Self::spawn_inner(label, features, None)
-    }
-
-    /// Boot the `itest-workloads` kernel and select a runtime workload
-    /// via the `workload=<name>` kernel bootarg (QEMU `-append`). The
-    /// kernel's `kmain` reads `/chosen/bootargs` and dispatches; with
-    /// no bootarg it runs the default demo. See
+    /// Spawn QEMU on the same up-front kernel build and select a runtime
+    /// workload via the `workload=<name>` bootarg (QEMU `-append`).
+    /// `kmain` reads `/chosen/bootargs` and dispatches. No rebuild — the
+    /// whole suite shares one binary. See
     /// `docs/runtime-workload-selection-design.md`.
     pub fn spawn_with_workload(label: &str, workload: &str) -> Result<Self, String> {
-        Self::spawn_inner(label, &["itest-workloads"], Some(workload))
+        Self::spawn_inner(label, Some(workload))
     }
 
-    fn spawn_inner(
-        label: &str,
-        features: &[&str],
-        workload: Option<&str>,
-    ) -> Result<Self, String> {
-        // Only rebuild for non-default features. Default-feature builds happen
-        // once up-front in `itest::run` so `--repeat N` doesn't race with
-        // mid-run source edits or burn time on per-iteration build checks.
-        if !features.is_empty() {
-            build_kernel(features)?;
-        }
+    fn spawn_inner(label: &str, workload: Option<&str>) -> Result<Self, String> {
+        // No build here: the kernel is built once up-front in
+        // `itest::run` (so `--repeat N` doesn't race with mid-run source
+        // edits or burn time on per-iteration build checks). Scenarios
+        // differ only by the `workload=` bootarg, not the binary.
 
         // Fresh scenario on this worker thread: drop any failure capture
         // left by a prior (passing) scenario so a later failure can't
@@ -508,14 +495,6 @@ pub fn take_last_failure_capture() -> Option<FailureCapture> {
 /// no Harness has spawned since the last call.
 pub fn take_last_log_path() -> Option<PathBuf> {
     LAST_LOG_PATH.with(|cell| cell.borrow_mut().take())
-}
-
-fn build_kernel(features: &[&str]) -> Result<(), String> {
-    let status = qemu::build_kernel(features).map_err(|e| format!("build kernel: {e}"))?;
-    if !status.success() {
-        return Err("kernel build failed".to_string());
-    }
-    Ok(())
 }
 
 /// Per-Harness-spawn unique counter. Two parallel `Harness::spawn`

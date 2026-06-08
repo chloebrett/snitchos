@@ -2,7 +2,7 @@
 
 *One kernel binary. Workloads chosen at boot via kernel bootargs, not at compile time. The test scaffolding is purely additive — with no bootarg, an instrumented build runs the exact production default.*
 
-Status: **proposed** — bootargs channel **verified by spike** (see *Feasibility gate*). Supersedes the per-workload cargo-feature scheme accumulated through v0.4–v0.6.
+Status: **implemented** (steps 1–5 + build-dedup all landed; see *Migration sequence*). Supersedes the per-workload cargo-feature scheme accumulated through v0.4–v0.6.
 
 ## The problem
 
