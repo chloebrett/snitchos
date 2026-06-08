@@ -111,6 +111,30 @@ impl Baseline {
             f64::from(self.failures) / f64::from(self.runs)
         }
     }
+
+    /// Build a `current` baseline from a recovered run's per-scenario
+    /// stats. `partial` is `Some` for an interrupted recovery and `None`
+    /// for a deliberate adoption — the only difference between the two
+    /// recovery paths.
+    fn from_recovered_scenario(
+        commit: String,
+        build_hash: Option<String>,
+        stats: &crate::history::RecoveredScenario,
+        recorded_at: OffsetDateTime,
+        partial: Option<PartialMarker>,
+    ) -> Self {
+        Self {
+            commit,
+            build_hash,
+            runs: stats.runs,
+            failures: stats.failures,
+            recorded_at,
+            mean_duration_ms: stats.mean_duration_ms,
+            p95_duration_ms: stats.p95_duration_ms,
+            partial,
+            signature_counts: stats.signature_counts.clone(),
+        }
+    }
 }
 
 /// Per-scenario `current` pointer plus its history. `current` may be
@@ -195,21 +219,17 @@ impl BaselineFile {
         let now = OffsetDateTime::now_utc();
         let mut file = Self::new();
         for (name, stats) in &recovered.scenarios {
-            let baseline = Baseline {
-                commit: recovered.metadata.run.commit.clone(),
-                build_hash: recovered.metadata.run.build_hash.clone(),
-                runs: stats.runs,
-                failures: stats.failures,
-                recorded_at: now,
-                mean_duration_ms: stats.mean_duration_ms,
-                p95_duration_ms: stats.p95_duration_ms,
-                partial: Some(PartialMarker {
+            let baseline = Baseline::from_recovered_scenario(
+                recovered.metadata.run.commit.clone(),
+                recovered.metadata.run.build_hash.clone(),
+                stats,
+                now,
+                Some(PartialMarker {
                     requested_runs: recovered.metadata.run.requested_repeat,
                     interrupted_at: now,
                     run_dir: Some(run_dir_name.to_string()),
                 }),
-                signature_counts: stats.signature_counts.clone(),
-            };
+            );
             file.update_current(name, baseline);
         }
         file
@@ -225,17 +245,13 @@ impl BaselineFile {
     pub fn adopt_recovered(&mut self, recovered: &crate::history::RecoveredRun) {
         let now = OffsetDateTime::now_utc();
         for (name, stats) in &recovered.scenarios {
-            let baseline = Baseline {
-                commit: recovered.metadata.run.commit.clone(),
-                build_hash: recovered.metadata.run.build_hash.clone(),
-                runs: stats.runs,
-                failures: stats.failures,
-                recorded_at: now,
-                mean_duration_ms: stats.mean_duration_ms,
-                p95_duration_ms: stats.p95_duration_ms,
-                partial: None,
-                signature_counts: stats.signature_counts.clone(),
-            };
+            let baseline = Baseline::from_recovered_scenario(
+                recovered.metadata.run.commit.clone(),
+                recovered.metadata.run.build_hash.clone(),
+                stats,
+                now,
+                None,
+            );
             self.update_current(name, baseline);
         }
     }
