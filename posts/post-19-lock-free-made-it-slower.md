@@ -99,3 +99,25 @@ The measurement itself is a command now: `cargo xtask measure --workload <name> 
 ---
 
 *Footnote for anyone about to replace a lock with a lock-free structure because lock-free is faster: measure the thing you're actually removing. I removed 29 % lock-wait and lost 30 % throughput, because the lock had been doing something I never credited it for — amortizing the expensive part over a batch. The fix wasn't "add the lock back," it was "keep the batching, drop the blocking." And the prize wasn't speed; it was the variance collapsing from 48 % to 2 %. You can't see a 48 % spread in a single run. The single run is the thing lying to you — same as the flake rate two posts ago. Run it again. Then run it again.*
+
+---
+
+## Addendum — the housekeeping between the flake and the payoff
+
+*Post 18 covered the flake hunt. Between it and the SMP work above, three maintenance threads landed; two carried a lesson worth the same italics as the rest of this post.*
+
+### The migration left one loose end
+
+The one-binary, `workload=`-bootarg switch (above) retired the per-feature kernel builds — but it quietly broke a diagnostic. A *failed* itest scenario used to be identifiable by its build features; now every scenario boots the same binary and the variant is a runtime `-append` string the harness knew but never wrote down. So post 18's failure-capture now records it: a wedge in the `frame-oom` workload stamps `"workload": "frame-oom"` into its sidecar — the exact repro line, which the scenario's own name (`oom`) doesn't give you. Small fix, but it's the shape of gap a migration opens silently: the thing that identified *which variant* moved compile-time → runtime, and the diagnostics had to chase it.
+
+### The harness outgrew the kernel, so I audited it like one
+
+The aside from post 18 — more test code than kernel — stopped being a joke and became a task. I wrote a `crate-audit` skill (evidence-first: "unused" needs a grep with zero callers; "duplicated" needs both sites shown; honest divergence isn't debt) and pointed it at `itest-harness`. Six findings applied: public re-exports trimmed 40 → 18; modules privatized (which surfaced genuinely-dead test-only methods — the compiler won't warn on a `pub` corpse); the prom/otlp metric catalogue unified; an 8-argument signature folded into a `Hooks` struct; fixtures deduped; a `Baseline` constructor for three hand-built copies. The point wasn't the cleanup — it was turning "is this crate bloated?" into a *reusable* question, so the next crate gets the same scrutiny for free.
+
+### I argued for a lint, then the count told me to drop it
+
+This one rhymes with the queue. CLAUDE.md claims `deny(clippy::pedantic)`; nothing enforced it. Instinct: "it drifted, enforce it." Check first: *no crate in the workspace enforces pedantic* — so it was aspiration, not a norm, and flagging fifty warnings against an unenforced standard is just imposing my taste. We built a tiered policy anyway (host crates pedantic-`warn`; the bare-metal kernel exempt, because full pedantic fights register/address idioms). Then I made the confident call: keep the **cast family** everywhere, *especially* the kernel — "truncation in address math is the bug-catching core."
+
+The count said no. Turned on, the cast lints fired **~200 times**, almost all correct-by-context — a kernel does that much `as` math. A lint that fires 200× and is right 200× isn't a safety net; it's noise that buries the one that isn't. I ate the recommendation and `allow`'d the whole family. (Suspect a specific truncation? `try_into()` at that site. Don't carry a blanket warn that cries wolf.) Then ~70 genuinely-useful idiom fixes by hand, the subjective lints allowed, host crates clean.
+
+Same trap as the lock: the thing I'd have put on a slide beforehand — *lock-free is faster*, *cast lints catch bugs* — was wrong, and only switching it on and **counting** showed it. The single confident prediction is the thing lying to you. Count it.
