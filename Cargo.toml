@@ -30,6 +30,15 @@ cast_possible_wrap = "allow"
 # Exact float compares are intentional in test assertions (computed values
 # checked against known-exact expectations); prod logic doesn't do float ==.
 float_cmp = "allow"
+# Subjective / intentional-style members:
+#   unreadable_literal — address/mask constants deliberately mirror the linker
+#     script + Sv39 layout; `_` separators would obscure the datasheet match.
+#   the rest are taste calls (long-but-cohesive fns, meaningful field prefixes).
+unreadable_literal = "allow"
+too_many_lines = "allow"
+struct_field_names = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
 
 [profile.dev]
 panic = "abort"

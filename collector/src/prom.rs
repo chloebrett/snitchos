@@ -4,6 +4,7 @@
 //! state's metric values in Prometheus text exposition format. Scraped
 //! by the docker-compose Prometheus instance every 5 seconds.
 
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -75,9 +76,9 @@ fn format_metrics(state: &State) -> String {
             MetricKind::Gauge => "gauge",
             MetricKind::Histogram => unreachable!(),
         };
-        out.push_str(&format!("# HELP {prom_name} {raw_name}\n"));
-        out.push_str(&format!("# TYPE {prom_name} {kind_str}\n"));
-        out.push_str(&format!("{prom_name} {value}\n"));
+        let _ = writeln!(out, "# HELP {prom_name} {raw_name}");
+        let _ = writeln!(out, "# TYPE {prom_name} {kind_str}");
+        let _ = writeln!(out, "{prom_name} {value}");
     }
 
     // Histograms — bucket counts (cumulative), sum, count.
@@ -86,8 +87,8 @@ fn format_metrics(state: &State) -> String {
             continue;
         };
         let prom_name = sanitize(raw_name);
-        out.push_str(&format!("# HELP {prom_name} {raw_name}\n"));
-        out.push_str(&format!("# TYPE {prom_name} histogram\n"));
+        let _ = writeln!(out, "# HELP {prom_name} {raw_name}");
+        let _ = writeln!(out, "# TYPE {prom_name} histogram");
 
         // Prometheus expects cumulative bucket counts.
         let mut cumulative: u64 = 0;
@@ -95,16 +96,12 @@ fn format_metrics(state: &State) -> String {
             if let Some(&c) = hist.buckets.get(i) {
                 cumulative += c;
             }
-            out.push_str(&format!(
-                "{prom_name}_bucket{{le=\"{bound}\"}} {cumulative}\n"
-            ));
+            let _ = writeln!(out, "{prom_name}_bucket{{le=\"{bound}\"}} {cumulative}");
         }
         cumulative += hist.inf_count;
-        out.push_str(&format!(
-            "{prom_name}_bucket{{le=\"+Inf\"}} {cumulative}\n"
-        ));
-        out.push_str(&format!("{prom_name}_sum {}\n", hist.sum));
-        out.push_str(&format!("{prom_name}_count {}\n", hist.count));
+        let _ = writeln!(out, "{prom_name}_bucket{{le=\"+Inf\"}} {cumulative}");
+        let _ = writeln!(out, "{prom_name}_sum {}", hist.sum);
+        let _ = writeln!(out, "{prom_name}_count {}", hist.count);
     }
 
     out
