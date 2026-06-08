@@ -60,7 +60,36 @@ Public surface 102 → 99 `pub` items; `cargo machete` clean; 138 host tests + r
 build + clippy all green. Items 1 (reserved DMA) and 2 (documented stats accessor)
 left as-is by design.
 
+## Architecture / abstraction / complexity (dims C–F)
+
+The tool doesn't cover these — read `mmu.rs` (the 859-line module) and scanned the
+rest. **Verdict: structurally healthy.** Clippy pedantic flags no `too_many_lines`
+/ `too_many_arguments` / cognitive-complexity; the longest *production* function is
+41 lines (`map_2mib`) — the only longer items are tests. The `PtMem` trait is a
+clean port: the page-table walk is pure and host-testable, with the `unsafe` deref
+isolated in the kernel's `KernelPtMem` impl. `MapError` is a proper error enum.
+No god functions, no arg-list bloat.
+
+**Non-finding — `map` vs `remap` look duplicated but are honest divergence.** Same
+shape (split_va → walk → write leaf) but genuinely different contracts: `map` uses
+`walk_or_install` (allocates, rejects existing → `AlreadyMapped`, can `OutOfFrames`);
+`remap` uses `walk_existing` (never allocates, requires a leaf → `NotMapped`,
+overwrites). Collapsing them needs a walk-strategy enum + conflict-policy param —
+*more* complexity than two clear 8-line functions. The shared primitives
+(`split_va`, `leaf_pte`, `walk_*`) are already extracted. Leave it.
+
+### Abstraction opportunities (offered, not imposed — your call)
+
+| Opp | What | Benefit | Cost |
+|---|---|---|---|
+| **A. `Pte(u64)` newtype** | PTEs are raw `u64` today, manipulated by 6 free fns: `leaf_pte`, `branch_pte`, `pte_is_branch`, `pte_is_leaf`, `branch_pte_child_pa`, `pa_to_pte_ppn`. Wrap as `Pte(u64)` with `Pte::leaf(pa,perms)` / `Pte::branch(child_pa)` / `.is_leaf()` / `.child_pa()`. | **Recommended.** Everything in `mmu` is `u64` (PTE, PA, perms-bits) — easy to pass the wrong one; a newtype makes that a compile error and co-locates the spec encode/decode with its invariants. **Matches the crate's own `PtePerms(u64)` precedent** — it's finishing a pattern already started. | Newtype + methods; `PtMem::read_entry/write_entry` change to `Pte` (touches trait + kernel `KernelPtMem` + tests). Medium. |
+| **B. name `split_va`'s tuple** | Returns `(usize,usize,usize,usize)` = `(vpn2,vpn1,vpn0,offset)`, destructured positionally everywhere. A `struct Sv39Va { vpn: [usize;3], offset }` names them. | Smaller win — a vpn1/vpn0 swap is currently a silent bug the type system won't catch; `vpn: [usize;3]` also suits the level-indexed walk loop. | Low effort, but the tuple is always destructured immediately, so payoff is modest. |
+
+Both are TDD-able refactors behind the existing `mmu` tests (host) + the riscv
+build. A is the one I'd actually do; B is optional polish. **Ask before applying.**
+
 ## Mass estimate
 
-Net: −1 dependency, −1 `Cargo.toml` line, 3 `pub`→`pub(crate)` demotes, 0
-deletions, 0 behavior change.
+Net so far: −1 dependency, −1 `Cargo.toml` line, 3 `pub`→`pub(crate)` demotes, 0
+deletions, 0 behavior change. Abstraction A (`Pte` newtype) would be net-neutral on
+lines (free fns → methods) but a real safety gain; B is ~+10 lines.

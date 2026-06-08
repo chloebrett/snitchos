@@ -96,16 +96,66 @@ const fn pa_to_pte_ppn(pa: usize) -> u64 {
     (pa as u64) >> 2
 }
 
-/// Encode a leaf PTE for a page mapping. Sets V, A, D, plus any
-/// permissions the caller passes.
-pub const fn leaf_pte(pa: usize, perms: PtePerms) -> u64 {
-    pa_to_pte_ppn(pa) | perms.bits() | PTE_V | PTE_A | PTE_D
-}
+/// A single Sv39 page-table entry. `#[repr(transparent)]` over `u64` so a
+/// `[Pte; 512]` is bit-identical to the hardware table layout. Constructors
+/// and predicates live here so the raw bit-twiddling (and its spec invariants)
+/// is in one place instead of scattered across free functions taking bare
+/// `u64` — and so a PTE can't be silently swapped with a PA or perms `u64`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(transparent)]
+pub struct Pte(u64);
 
-/// Encode a non-leaf PTE pointing at a child page table. Per the
-/// spec, R=W=X=0 with V=1 is the non-leaf marker.
-pub(crate) const fn branch_pte(child_pa: usize) -> u64 {
-    pa_to_pte_ppn(child_pa) | PTE_V
+impl Pte {
+    /// The empty (V=0) entry — an unmapped slot.
+    pub const INVALID: Pte = Pte(0);
+
+    /// Encode a leaf PTE for a page mapping. Sets V, A, D, plus any
+    /// permissions the caller passes.
+    pub const fn leaf(pa: usize, perms: PtePerms) -> Self {
+        Pte(pa_to_pte_ppn(pa) | perms.bits() | PTE_V | PTE_A | PTE_D)
+    }
+
+    /// Encode a non-leaf PTE pointing at a child page table. Per the
+    /// spec, R=W=X=0 with V=1 is the non-leaf marker.
+    pub(crate) const fn branch(child_pa: usize) -> Self {
+        Pte(pa_to_pte_ppn(child_pa) | PTE_V)
+    }
+
+    /// Reconstruct a `Pte` from a raw `u64` read out of hardware page-table
+    /// memory. Inverse of [`Pte::raw`]; the bit pattern is trusted as-is.
+    pub const fn from_raw(bits: u64) -> Self {
+        Pte(bits)
+    }
+
+    /// The raw `u64` for storing into hardware page-table memory.
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
+    /// V=1.
+    pub(crate) const fn is_valid(self) -> bool {
+        self.0 & PTE_V != 0
+    }
+
+    /// V=1 and R=W=X=0 — points at a child table.
+    pub(crate) const fn is_branch(self) -> bool {
+        self.is_valid() && self.rwx() == 0
+    }
+
+    /// V=1 and at least one of R/W/X — a leaf mapping.
+    pub(crate) const fn is_leaf(self) -> bool {
+        self.is_valid() && self.rwx() != 0
+    }
+
+    /// Recover a child table's PA from a non-leaf PTE. Inverse of
+    /// `pa_to_pte_ppn`: PPN at bits 53:10 → PA = `pte >> 10 << 12`.
+    pub(crate) const fn child_pa(self) -> usize {
+        ((self.0 >> 10) << 12) as usize
+    }
+
+    const fn rwx(self) -> u64 {
+        self.0 & (PtePerms::R.bits() | PtePerms::W.bits() | PtePerms::X.bits())
+    }
 }
 
 /// Decompose an Sv39 virtual address into its three VPN indices and
@@ -124,7 +174,7 @@ pub(crate) const fn split_va(va: usize) -> (usize, usize, usize, usize) {
 #[derive(Clone, Copy)]
 #[repr(C, align(4096))]
 pub struct PageTable {
-    entries: [u64; 512],
+    entries: [Pte; 512],
 }
 
 impl Default for PageTable {
@@ -135,16 +185,17 @@ impl Default for PageTable {
 
 impl PageTable {
     pub const fn new() -> Self {
-        Self { entries: [0; 512] }
+        Self { entries: [Pte::INVALID; 512] }
     }
 
-    pub fn entry(&self, idx: usize) -> u64 {
+    pub fn entry(&self, idx: usize) -> Pte {
         self.entries[idx]
     }
 
-    /// Set entry `idx` to `value` raw. Used by the kernel to clear an
-    /// identity-half root entry as part of step 2d (identity unmap).
-    pub fn set_entry(&mut self, idx: usize, value: u64) {
+    /// Set entry `idx` to `value`. Used by the kernel to clear an
+    /// identity-half root entry (`Pte::INVALID`) as part of step 2d
+    /// (identity unmap).
+    pub fn set_entry(&mut self, idx: usize, value: Pte) {
         self.entries[idx] = value;
     }
 
@@ -171,18 +222,18 @@ impl PageTable {
         let (vpn2, vpn1, _, _) = split_va(va);
 
         let existing_root = self.entries[vpn2];
-        if existing_root == 0 {
-            self.entries[vpn2] = branch_pte(mid_pa);
-        } else if existing_root != branch_pte(mid_pa) {
+        if !existing_root.is_valid() {
+            self.entries[vpn2] = Pte::branch(mid_pa);
+        } else if existing_root != Pte::branch(mid_pa) {
             return false;
         }
 
-        let new_leaf = leaf_pte(pa, perms);
+        let new_leaf = Pte::leaf(pa, perms);
         let existing_leaf = mid.entries[vpn1];
         if existing_leaf == new_leaf {
             return true;
         }
-        if existing_leaf != 0 {
+        if existing_leaf.is_valid() {
             return false;
         }
         mid.entries[vpn1] = new_leaf;
@@ -204,10 +255,10 @@ pub trait PtMem {
     fn alloc_zeroed_table(&mut self) -> Option<usize>;
 
     /// Read entry `idx` of the table at `table_pa`. `idx` is in `0..512`.
-    fn read_entry(&self, table_pa: usize, idx: usize) -> u64;
+    fn read_entry(&self, table_pa: usize, idx: usize) -> Pte;
 
     /// Write entry `idx` of the table at `table_pa`. `idx` is in `0..512`.
-    fn write_entry(&mut self, table_pa: usize, idx: usize, value: u64);
+    fn write_entry(&mut self, table_pa: usize, idx: usize, value: Pte);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,26 +274,6 @@ pub enum MapError {
     /// is unmapped, an intermediate table is missing, or a huge-page
     /// leaf covers it (so there is no 4 KiB granularity to remap).
     NotMapped,
-}
-
-/// PTE has V=1, R=W=X=0 → non-leaf (points at child table).
-const fn pte_is_branch(pte: u64) -> bool {
-    let v = pte & PTE_V != 0;
-    let rwx = pte & (PtePerms::R.bits() | PtePerms::W.bits() | PtePerms::X.bits());
-    v && rwx == 0
-}
-
-/// PTE has V=1 and at least one of R/W/X — leaf.
-const fn pte_is_leaf(pte: u64) -> bool {
-    let v = pte & PTE_V != 0;
-    let rwx = pte & (PtePerms::R.bits() | PtePerms::W.bits() | PtePerms::X.bits());
-    v && rwx != 0
-}
-
-/// Recover a child table's PA from a non-leaf PTE. Inverse of
-/// `pa_to_pte_ppn`: PPN at bits 53:10 → PA = PPN << 12 = pte >> 10 << 12.
-const fn branch_pte_child_pa(pte: u64) -> usize {
-    ((pte >> 10) << 12) as usize
 }
 
 /// Install a 4 KiB leaf PTE mapping VA `va` → PA `pa` with `perms`.
@@ -266,10 +297,10 @@ pub fn map(
     let mid_pa = walk_or_install(root_pa, vpn2, mem)?;
     let leaf_table_pa = walk_or_install(mid_pa, vpn1, mem)?;
     let existing = mem.read_entry(leaf_table_pa, vpn0);
-    if existing & PTE_V != 0 {
+    if existing.is_valid() {
         return Err(MapError::AlreadyMapped);
     }
-    mem.write_entry(leaf_table_pa, vpn0, leaf_pte(pa, perms));
+    mem.write_entry(leaf_table_pa, vpn0, Pte::leaf(pa, perms));
     Ok(())
 }
 
@@ -295,10 +326,10 @@ pub fn remap(
     let mid_pa = walk_existing(root_pa, vpn2, mem)?;
     let leaf_table_pa = walk_existing(mid_pa, vpn1, mem)?;
     let existing = mem.read_entry(leaf_table_pa, vpn0);
-    if !pte_is_leaf(existing) {
+    if !existing.is_leaf() {
         return Err(MapError::NotMapped);
     }
-    mem.write_entry(leaf_table_pa, vpn0, leaf_pte(new_pa, perms));
+    mem.write_entry(leaf_table_pa, vpn0, Pte::leaf(new_pa, perms));
     Ok(())
 }
 
@@ -311,8 +342,8 @@ fn walk_existing(
     mem: &dyn PtMem,
 ) -> Result<usize, MapError> {
     let pte = mem.read_entry(table_pa, idx);
-    if pte_is_branch(pte) {
-        return Ok(branch_pte_child_pa(pte));
+    if pte.is_branch() {
+        return Ok(pte.child_pa());
     }
     Err(MapError::NotMapped)
 }
@@ -327,14 +358,14 @@ fn walk_or_install(
     mem: &mut dyn PtMem,
 ) -> Result<usize, MapError> {
     let pte = mem.read_entry(table_pa, idx);
-    if pte_is_leaf(pte) {
+    if pte.is_leaf() {
         return Err(MapError::AlreadyMapped);
     }
-    if pte_is_branch(pte) {
-        return Ok(branch_pte_child_pa(pte));
+    if pte.is_branch() {
+        return Ok(pte.child_pa());
     }
     let new_pa = mem.alloc_zeroed_table().ok_or(MapError::OutOfFrames)?;
-    mem.write_entry(table_pa, idx, branch_pte(new_pa));
+    mem.write_entry(table_pa, idx, Pte::branch(new_pa));
     Ok(new_pa)
 }
 
@@ -393,12 +424,12 @@ mod tests {
             Some(self.tables.len() << 12)
         }
 
-        fn read_entry(&self, table_pa: usize, idx: usize) -> u64 {
+        fn read_entry(&self, table_pa: usize, idx: usize) -> Pte {
             let t_idx = (table_pa >> 12) - 1;
             self.tables[t_idx].entries[idx]
         }
 
-        fn write_entry(&mut self, table_pa: usize, idx: usize, value: u64) {
+        fn write_entry(&mut self, table_pa: usize, idx: usize, value: Pte) {
             let t_idx = (table_pa >> 12) - 1;
             self.tables[t_idx].entries[idx] = value;
         }
@@ -410,9 +441,9 @@ mod tests {
     fn leaf_table_of(mem: &MockPtMem, va: usize) -> &PageTable {
         let (vpn2, vpn1, _, _) = split_va(va);
         let root = mem.table(mem.root_pa());
-        let mid_pa = branch_pte_child_pa(root.entry(vpn2));
+        let mid_pa = root.entry(vpn2).child_pa();
         let mid = mem.table(mid_pa);
-        let leaf_pa = branch_pte_child_pa(mid.entries[vpn1]);
+        let leaf_pa = mid.entries[vpn1].child_pa();
         mem.table(leaf_pa)
     }
 
@@ -426,12 +457,12 @@ mod tests {
         map(mem.root_pa(), va, pa, perms, &mut mem).unwrap();
 
         let root = mem.table(mem.root_pa());
-        assert!(pte_is_branch(root.entry(1)), "root[1] should be a branch");
-        let mid_pa = branch_pte_child_pa(root.entry(1));
+        assert!(root.entry(1).is_branch(), "root[1] should be a branch");
+        let mid_pa = root.entry(1).child_pa();
         let mid = mem.table(mid_pa);
-        assert!(pte_is_branch(mid.entries[1]), "mid[1] should be a branch");
+        assert!(mid.entries[1].is_branch(), "mid[1] should be a branch");
         let leaf = leaf_table_of(&mem, va);
-        assert_eq!(leaf.entries[1], leaf_pte(pa, perms));
+        assert_eq!(leaf.entries[1], Pte::leaf(pa, perms));
     }
 
     #[test]
@@ -476,7 +507,7 @@ mod tests {
         // Pre-install a 1 GiB huge-page leaf at root[1] (linear-map shape).
         let mut mem = MockPtMem::new(8);
         let root_pa = mem.root_pa();
-        mem.write_entry(root_pa, 1, leaf_pte(0x80000000, PtePerms::rwxg()));
+        mem.write_entry(root_pa, 1, Pte::leaf(0x80000000, PtePerms::rwxg()));
         // VA 0x40000000 → vpn2=1; collides with the huge leaf.
         assert_eq!(
             map(root_pa, 0x40000000, 0x90000000, PtePerms::R, &mut mem),
@@ -496,8 +527,8 @@ mod tests {
         let root_pa = mem.root_pa();
         map(root_pa, 0x1000, 0x80100000, PtePerms::R, &mut mem).unwrap();
         // Overwrite mid[2] with a 2 MiB leaf.
-        let mid_pa = branch_pte_child_pa(mem.read_entry(root_pa, 0));
-        mem.write_entry(mid_pa, 2, leaf_pte(0x80200000, PtePerms::rwxg()));
+        let mid_pa = mem.read_entry(root_pa, 0).child_pa();
+        mem.write_entry(mid_pa, 2, Pte::leaf(0x80200000, PtePerms::rwxg()));
         // VA 0x400000 → vpn2=0, vpn1=2 — collides.
         assert_eq!(
             map(root_pa, 0x400000, 0x90000000, PtePerms::R, &mut mem),
@@ -526,7 +557,7 @@ mod tests {
             Err(MapError::OutOfFrames),
         );
         assert_eq!(mem.intermediate_alloc_count(), 1, "mid was leaked");
-        assert!(pte_is_branch(mem.read_entry(root_pa, 0)));
+        assert!(mem.read_entry(root_pa, 0).is_branch());
     }
 
     #[test]
@@ -535,10 +566,10 @@ mod tests {
         let perms = PtePerms::R.union(PtePerms::W).union(PtePerms::G);
         map(mem.root_pa(), 0x1000, 0x80100000, perms, &mut mem).unwrap();
         let pte = leaf_table_of(&mem, 0x1000).entries[1];
-        assert_eq!(pte & PtePerms::R.bits(), PtePerms::R.bits());
-        assert_eq!(pte & PtePerms::W.bits(), PtePerms::W.bits());
-        assert_eq!(pte & PtePerms::G.bits(), PtePerms::G.bits());
-        assert_eq!(pte & PtePerms::X.bits(), 0);
+        assert_eq!(pte.raw() & PtePerms::R.bits(), PtePerms::R.bits());
+        assert_eq!(pte.raw() & PtePerms::W.bits(), PtePerms::W.bits());
+        assert_eq!(pte.raw() & PtePerms::G.bits(), PtePerms::G.bits());
+        assert_eq!(pte.raw() & PtePerms::X.bits(), 0);
     }
 
     #[test]
@@ -546,8 +577,8 @@ mod tests {
         let mut mem = MockPtMem::new(8);
         map(mem.root_pa(), 0x1000, 0x80100000, PtePerms::R, &mut mem).unwrap();
         let pte = leaf_table_of(&mem, 0x1000).entries[1];
-        assert_eq!(pte & PTE_A, PTE_A);
-        assert_eq!(pte & PTE_D, PTE_D);
+        assert_eq!(pte.raw() & PTE_A, PTE_A);
+        assert_eq!(pte.raw() & PTE_D, PTE_D);
     }
 
     #[test]
@@ -557,7 +588,7 @@ mod tests {
         let mut mem = MockPtMem::new(8);
         map(mem.root_pa(), 0x1000, 0x80200000, PtePerms::R, &mut mem).unwrap();
         let pte = leaf_table_of(&mem, 0x1000).entries[1];
-        let ppn_field = pte & !0x3ff;
+        let ppn_field = pte.raw() & !0x3ff;
         assert_eq!(ppn_field, 0x20080000);
     }
 
@@ -582,24 +613,40 @@ mod tests {
     }
 
     #[test]
-    fn leaf_pte_encodes_ppn_and_flags() {
-        // PA 0x80200000 → PPN 0x80200 → field bits = 0x80200 << 10 = 0x20080000.
-        // Permissions: R+W+X+G = bits 1|2|3|5 = 0b101110 = 0x2E.
-        // Plus V (bit 0), A (bit 6), D (bit 7).
-        // Total: 0x20080000 | 0x2E | 0x01 | 0x40 | 0x80 = 0x200800EF.
-        let pte = leaf_pte(0x80200000, PtePerms::rwxg());
-        assert_eq!(pte, 0x200800EF);
+    fn pte_leaf_constructor_matches_raw_encoding() {
+        let pte = Pte::leaf(0x80200000, PtePerms::rwxg());
+        assert_eq!(pte.raw(), 0x200800EF);
+        assert!(pte.is_valid());
+        assert!(pte.is_leaf());
+        assert!(!pte.is_branch());
+    }
+
+    #[test]
+    fn pte_branch_is_branch_not_leaf_and_recovers_child_pa() {
+        let pte = Pte::branch(0x80300000);
+        assert!(pte.is_valid());
+        assert!(pte.is_branch());
+        assert!(!pte.is_leaf());
+        assert_eq!(pte.child_pa(), 0x80300000);
+    }
+
+    #[test]
+    fn pte_invalid_is_neither_leaf_nor_branch() {
+        assert_eq!(Pte::INVALID.raw(), 0);
+        assert!(!Pte::INVALID.is_valid());
+        assert!(!Pte::INVALID.is_leaf());
+        assert!(!Pte::INVALID.is_branch());
     }
 
     #[test]
     fn leaf_pte_with_no_perms_still_has_v_a_d() {
         // V=1, A=1, D=1 unconditionally — caller can still produce
         // a no-access leaf if they want (rare; documents the rule).
-        let pte = leaf_pte(0, PtePerms::empty());
-        assert_eq!(pte & PTE_V, PTE_V);
-        assert_eq!(pte & PTE_A, PTE_A);
-        assert_eq!(pte & PTE_D, PTE_D);
-        assert_eq!(pte & (PtePerms::R.bits() | PtePerms::W.bits() | PtePerms::X.bits()), 0);
+        let pte = Pte::leaf(0, PtePerms::empty());
+        assert_eq!(pte.raw() & PTE_V, PTE_V);
+        assert_eq!(pte.raw() & PTE_A, PTE_A);
+        assert_eq!(pte.raw() & PTE_D, PTE_D);
+        assert_eq!(pte.raw() & (PtePerms::R.bits() | PtePerms::W.bits() | PtePerms::X.bits()), 0);
     }
 
     #[test]
@@ -607,13 +654,13 @@ mod tests {
         // R=W=X=0 with V=1 is the non-leaf marker. PPN encodes the
         // child table's PA. No A/D since hardware never sets those
         // on a non-leaf walk.
-        let pte = branch_pte(0x80300000);
-        assert_eq!(pte & PTE_V, PTE_V);
-        assert_eq!(pte & (PtePerms::R.bits() | PtePerms::W.bits() | PtePerms::X.bits()), 0);
-        assert_eq!(pte & PTE_A, 0);
-        assert_eq!(pte & PTE_D, 0);
+        let pte = Pte::branch(0x80300000);
+        assert_eq!(pte.raw() & PTE_V, PTE_V);
+        assert_eq!(pte.raw() & (PtePerms::R.bits() | PtePerms::W.bits() | PtePerms::X.bits()), 0);
+        assert_eq!(pte.raw() & PTE_A, 0);
+        assert_eq!(pte.raw() & PTE_D, 0);
         // PPN = 0x80300 → at bits 53:10 = 0x80300 << 10 = 0x200C0000.
-        assert_eq!(pte & !0x3ff, 0x200C0000);
+        assert_eq!(pte.raw() & !0x3ff, 0x200C0000);
     }
 
     #[test]
@@ -682,14 +729,16 @@ mod tests {
     #[test]
     fn set_entry_clears_and_replaces_specific_index() {
         let mut pt = PageTable::new();
-        pt.set_entry(2, 0xdeadbeef);
-        pt.set_entry(5, 0xcafebabe);
-        assert_eq!(pt.entry(2), 0xdeadbeef);
-        assert_eq!(pt.entry(5), 0xcafebabe);
+        let a = Pte::leaf(0x80200000, PtePerms::rwxg());
+        let b = Pte::branch(0x80300000);
+        pt.set_entry(2, a);
+        pt.set_entry(5, b);
+        assert_eq!(pt.entry(2), a);
+        assert_eq!(pt.entry(5), b);
         // Clear entry 2; entry 5 untouched.
-        pt.set_entry(2, 0);
-        assert_eq!(pt.entry(2), 0);
-        assert_eq!(pt.entry(5), 0xcafebabe);
+        pt.set_entry(2, Pte::INVALID);
+        assert_eq!(pt.entry(2), Pte::INVALID);
+        assert_eq!(pt.entry(5), b);
     }
 
     #[test]
@@ -748,7 +797,7 @@ mod tests {
         remap(mem.root_pa(), va, 0x80200000, PtePerms::R.union(PtePerms::W), &mut mem).unwrap();
 
         let pte = leaf_table_of(&mem, va).entries[1];
-        assert_eq!(pte, leaf_pte(0x80200000, PtePerms::R.union(PtePerms::W)));
+        assert_eq!(pte, Pte::leaf(0x80200000, PtePerms::R.union(PtePerms::W)));
     }
 
     #[test]
@@ -781,7 +830,7 @@ mod tests {
         // page, which remap does not do.
         let mut mem = MockPtMem::new(8);
         let root_pa = mem.root_pa();
-        mem.write_entry(root_pa, 0, leaf_pte(0x80000000, PtePerms::rwxg()));
+        mem.write_entry(root_pa, 0, Pte::leaf(0x80000000, PtePerms::rwxg()));
         assert_eq!(
             remap(root_pa, 0x1000, 0x80200000, PtePerms::R, &mut mem),
             Err(MapError::NotMapped),
@@ -807,7 +856,7 @@ mod tests {
         map(mem.root_pa(), 0x2000, 0x80300000, PtePerms::R, &mut mem).unwrap();
         let sibling_before = leaf_table_of(&mem, 0x2000).entries[2];
         remap(mem.root_pa(), 0x1000, 0x80200000, PtePerms::W, &mut mem).unwrap();
-        assert_eq!(leaf_table_of(&mem, 0x1000).entries[1], leaf_pte(0x80200000, PtePerms::W));
+        assert_eq!(leaf_table_of(&mem, 0x1000).entries[1], Pte::leaf(0x80200000, PtePerms::W));
         assert_eq!(leaf_table_of(&mem, 0x2000).entries[2], sibling_before);
     }
 
@@ -820,15 +869,15 @@ mod tests {
         assert!(root.map_2mib(&mut mid, mid_pa, 0x80200000, 0x80200000, PtePerms::rwxg()));
 
         // VA 0x80200000 → vpn2=2, vpn1=1.
-        assert_eq!(root.entry(2), branch_pte(mid_pa));
-        assert_eq!(mid.entry(1), leaf_pte(0x80200000, PtePerms::rwxg()));
+        assert_eq!(root.entry(2), Pte::branch(mid_pa));
+        assert_eq!(mid.entry(1), Pte::leaf(0x80200000, PtePerms::rwxg()));
         // All other entries untouched.
         for i in 0..512 {
             if i != 2 {
-                assert_eq!(root.entry(i), 0, "root[{i}] should be zero");
+                assert_eq!(root.entry(i), Pte::INVALID, "root[{i}] should be empty");
             }
             if i != 1 {
-                assert_eq!(mid.entry(i), 0, "mid[{i}] should be zero");
+                assert_eq!(mid.entry(i), Pte::INVALID, "mid[{i}] should be empty");
             }
         }
     }
@@ -840,7 +889,7 @@ mod tests {
         let mid_pa = 0x80300000;
         assert!(root.map_2mib(&mut mid, mid_pa, 0x80200000, 0x80200000, PtePerms::rwxg()));
         assert!(root.map_2mib(&mut mid, mid_pa, 0x80200000, 0x80200000, PtePerms::rwxg()));
-        assert_eq!(mid.entry(1), leaf_pte(0x80200000, PtePerms::rwxg()));
+        assert_eq!(mid.entry(1), Pte::leaf(0x80200000, PtePerms::rwxg()));
     }
 
     #[test]
@@ -852,8 +901,8 @@ mod tests {
         let mid_pa = 0x80300000;
         assert!(root.map_2mib(&mut mid, mid_pa, 0x80200000, 0x80200000, PtePerms::rwxg()));
         assert!(root.map_2mib(&mut mid, mid_pa, 0x80400000, 0x80400000, PtePerms::rwxg()));
-        assert_eq!(root.entry(2), branch_pte(mid_pa));
-        assert_eq!(mid.entry(1), leaf_pte(0x80200000, PtePerms::rwxg()));
-        assert_eq!(mid.entry(2), leaf_pte(0x80400000, PtePerms::rwxg()));
+        assert_eq!(root.entry(2), Pte::branch(mid_pa));
+        assert_eq!(mid.entry(1), Pte::leaf(0x80200000, PtePerms::rwxg()));
+        assert_eq!(mid.entry(2), Pte::leaf(0x80400000, PtePerms::rwxg()));
     }
 }

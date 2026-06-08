@@ -11,7 +11,7 @@
 use core::arch::asm;
 
 use fdt::Fdt;
-use kernel_core::mmu::{self as core_mmu, MapError, PageTable, PtMem, PtePerms, leaf_pte};
+use kernel_core::mmu::{self as core_mmu, MapError, PageTable, Pte, PtMem, PtePerms};
 
 pub use kernel_core::mmu::{KERNEL_OFFSET, LINEAR_OFFSET, va_to_pa};
 
@@ -227,7 +227,7 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
         // `pa_to_kernel_va`.
         let linear_va = LINEAR_OFFSET + 0x80000000;
         let linear_idx = (linear_va >> 30) & 0x1ff;
-        let linear_leaf = leaf_pte(0x80000000, perms);
+        let linear_leaf = Pte::leaf(0x80000000, perms);
         (&mut *(&raw mut BOOT_PT_ROOT)).set_entry(linear_idx, linear_leaf);
 
         // DTB region. Kernel keeps using `&Fdt` after this returns
@@ -282,10 +282,10 @@ pub unsafe fn unmap_identity() {
     unsafe {
         let root = &mut *(&raw mut BOOT_PT_ROOT);
         // Root entry 0: identity [0x00000000, 0x40000000) — MMIO.
-        root.set_entry(0, 0);
+        root.set_entry(0, Pte::INVALID);
         // Root entry 2: identity [0x80000000, 0xC0000000) — kernel
         // image, stack, DTB.
-        root.set_entry(2, 0);
+        root.set_entry(2, Pte::INVALID);
         asm!("sfence.vma", options(nostack, nomem));
     }
 }
@@ -300,23 +300,23 @@ impl PtMem for KernelPtMem {
         crate::frame::alloc_zeroed().map(|f| f.addr())
     }
 
-    fn read_entry(&self, table_pa: usize, idx: usize) -> u64 {
+    fn read_entry(&self, table_pa: usize, idx: usize) -> Pte {
         let ptr = kernel_core::mmu::pa_to_kernel_va(table_pa) as *const u64;
         // SAFETY: `table_pa` was either returned by `alloc_zeroed_table`
         // (a frame the allocator handed us, reachable via the linear
         // map) or is the root table's PA. `idx` is in 0..512 — caller
         // contract; `map`'s walk only ever uses `vpn[]` indices. Single
         // hart, single-threaded use during a `map` call.
-        unsafe { ptr.add(idx).read_volatile() }
+        Pte::from_raw(unsafe { ptr.add(idx).read_volatile() })
     }
 
-    fn write_entry(&mut self, table_pa: usize, idx: usize, value: u64) {
+    fn write_entry(&mut self, table_pa: usize, idx: usize, value: Pte) {
         let ptr = kernel_core::mmu::pa_to_kernel_va(table_pa) as *mut u64;
         // SAFETY: same as `read_entry`. `&mut self` ensures no
         // concurrent reader on this impl during the write; the MMU
         // walker is the only other reader and we sfence in the
         // wrapper after the whole `map` call.
-        unsafe { ptr.add(idx).write_volatile(value) };
+        unsafe { ptr.add(idx).write_volatile(value.raw()) };
     }
 }
 
