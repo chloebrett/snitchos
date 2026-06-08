@@ -153,6 +153,12 @@ pub fn run(
         if runs > 1 {
             eprintln!("\n=== run {}/{} ===", run_idx + 1, runs);
         }
+        // Step 2 of plans/itest-parallel-scenarios.md: each iteration
+        // populates a local `Aggregator`, which is then merged into the
+        // master. Behaviour-equivalent at `--jobs 1`; step 3 swaps the
+        // sequential scenario loop for a worker pool that produces
+        // per-worker aggregators reduced via the same `merge`.
+        let mut local = Aggregator::new();
         let mut failed_this_run = 0;
         for s in scenarios {
             eprint!("test {} ... ", s.name);
@@ -160,7 +166,7 @@ pub fn run(
             let start = Instant::now();
             let outcome = (s.run)();
             let elapsed = start.elapsed();
-            aggregator.record_duration(s.name, elapsed);
+            local.record_duration(s.name, elapsed);
 
             let timing_str = config
                 .max_wait_for
@@ -205,7 +211,7 @@ pub fn run(
                         }
                     }
                     failed_this_run += 1;
-                    aggregator.record_fail(s.name);
+                    local.record_fail(s.name);
                     (crate::history::ResultKind::Fail, Some(e.clone()))
                 }
             };
@@ -227,10 +233,11 @@ pub fn run(
         }
         let total = scenarios.len();
         eprintln!("\n{} passed, {} failed", total - failed_this_run, failed_this_run);
-        aggregator.finish_run(RunTotals {
+        local.finish_run(RunTotals {
             passed: total - failed_this_run,
             failed: failed_this_run,
         });
+        aggregator.merge(local);
 
         // `--fail-fast=K`: abort the outer loop once K total failures
         // have accumulated. Print a one-liner so the user sees why

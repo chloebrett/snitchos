@@ -131,6 +131,31 @@ impl Aggregator {
         Some(sorted[idx])
     }
 
+    /// Fold `other` into `self`. Used by the parallel runner to
+    /// gather per-worker (or per-iteration) aggregators back into a
+    /// single suite-level view at the end of a run. Semantics:
+    ///
+    /// - `fail_count`: per-scenario pointwise sum.
+    /// - `run_totals`: append `other`'s after `self`'s. Caller is
+    ///   responsible for the ordering it wants — chronological,
+    ///   worker-grouped, etc.
+    /// - `durations`: per-scenario, concat `other`'s observations
+    ///   after `self`'s. Mean / p95 are computed lazily over the
+    ///   merged vector, so observation order across the merge is
+    ///   irrelevant.
+    pub fn merge(&mut self, other: Aggregator) {
+        for (name, count) in other.fail_count {
+            *self.fail_count.entry(name).or_insert(0) += count;
+        }
+        self.run_totals.extend(other.run_totals);
+        for (name, mut samples) in other.durations {
+            self.durations
+                .entry(name)
+                .or_default()
+                .append(&mut samples);
+        }
+    }
+
     /// Render the multi-run aggregate summary. Format matches xtask's
     /// pre-extraction output so a side-by-side diff during migration is
     /// zero lines.
@@ -303,6 +328,134 @@ mod tests {
         }
         assert_eq!(a.p95_duration("scn"), b.p95_duration("scn"));
         assert_eq!(a.mean_duration("scn"), b.mean_duration("scn"));
+    }
+
+    #[test]
+    fn merge_into_empty_yields_same_data() {
+        let mut a = Aggregator::new();
+        let mut b = Aggregator::new();
+        b.record_fail("heartbeat-cadence");
+        b.record_duration("heartbeat-cadence", Duration::from_millis(120));
+        b.finish_run(RunTotals { passed: 17, failed: 1 });
+
+        a.merge(b);
+
+        assert_eq!(a.fail_count("heartbeat-cadence"), 1);
+        assert_eq!(a.run_totals(), &[RunTotals { passed: 17, failed: 1 }]);
+        assert_eq!(
+            a.mean_duration("heartbeat-cadence"),
+            Some(Duration::from_millis(120))
+        );
+    }
+
+    #[test]
+    fn merge_sums_per_scenario_fail_counts() {
+        let mut a = Aggregator::new();
+        let mut b = Aggregator::new();
+        // a saw heartbeat-cadence fail twice, kernel-heap-metrics once.
+        a.record_fail("heartbeat-cadence");
+        a.record_fail("heartbeat-cadence");
+        a.record_fail("kernel-heap-metrics");
+        // b saw heartbeat-cadence fail once, frame-allocator-metrics once.
+        b.record_fail("heartbeat-cadence");
+        b.record_fail("frame-allocator-metrics");
+
+        a.merge(b);
+
+        assert_eq!(a.fail_count("heartbeat-cadence"), 3);
+        assert_eq!(a.fail_count("kernel-heap-metrics"), 1);
+        assert_eq!(a.fail_count("frame-allocator-metrics"), 1);
+        assert_eq!(a.total_failures(), 5);
+    }
+
+    #[test]
+    fn merge_appends_run_totals_in_order() {
+        let mut a = Aggregator::new();
+        let mut b = Aggregator::new();
+        a.finish_run(RunTotals { passed: 18, failed: 0 });
+        a.finish_run(RunTotals { passed: 17, failed: 1 });
+        b.finish_run(RunTotals { passed: 16, failed: 2 });
+        b.finish_run(RunTotals { passed: 15, failed: 3 });
+
+        a.merge(b);
+
+        assert_eq!(
+            a.run_totals(),
+            &[
+                RunTotals { passed: 18, failed: 0 },
+                RunTotals { passed: 17, failed: 1 },
+                RunTotals { passed: 16, failed: 2 },
+                RunTotals { passed: 15, failed: 3 },
+            ]
+        );
+        assert_eq!(a.runs(), 4);
+    }
+
+    #[test]
+    fn merge_concats_per_scenario_durations() {
+        // Equivalence check: split observations across two aggregators
+        // and merge, vs record all into one. Statistics should match.
+        let mut split_a = Aggregator::new();
+        let mut split_b = Aggregator::new();
+        let mut whole = Aggregator::new();
+        for ms in [50, 10, 30u64] {
+            split_a.record_duration("scn", Duration::from_millis(ms));
+        }
+        for ms in [20, 100u64] {
+            split_b.record_duration("scn", Duration::from_millis(ms));
+        }
+        for ms in [50, 10, 30, 20, 100u64] {
+            whole.record_duration("scn", Duration::from_millis(ms));
+        }
+        split_a.merge(split_b);
+
+        assert_eq!(split_a.mean_duration("scn"), whole.mean_duration("scn"));
+        assert_eq!(split_a.p95_duration("scn"), whole.p95_duration("scn"));
+    }
+
+    #[test]
+    fn merge_is_associative_on_typical_workload() {
+        // (a ⊕ b) ⊕ c should equal a ⊕ (b ⊕ c) for the operations we
+        // do. Important for step 3: workers' aggregators get merged
+        // pairwise; the result must not depend on the merge tree.
+        let make = |fails: &[&str], totals: &[(usize, usize)], durs: &[(u64,)]| {
+            let mut x = Aggregator::new();
+            for f in fails {
+                x.record_fail(f);
+            }
+            for &(p, f) in totals {
+                x.finish_run(RunTotals { passed: p, failed: f });
+            }
+            for &(ms,) in durs {
+                x.record_duration("scn", Duration::from_millis(ms));
+            }
+            x
+        };
+        let left_first = {
+            let mut a = make(&["x", "y"], &[(10, 1)], &[(100,)]);
+            let b = make(&["x"], &[(11, 0)], &[(50,)]);
+            let c = make(&["z"], &[(9, 2)], &[(200,)]);
+            a.merge(b);
+            a.merge(c);
+            a
+        };
+        let right_first = {
+            let a = make(&["x", "y"], &[(10, 1)], &[(100,)]);
+            let mut bc = make(&["x"], &[(11, 0)], &[(50,)]);
+            let c = make(&["z"], &[(9, 2)], &[(200,)]);
+            bc.merge(c);
+            let mut all = a;
+            all.merge(bc);
+            all
+        };
+        assert_eq!(left_first.fail_count("x"), right_first.fail_count("x"));
+        assert_eq!(left_first.fail_count("y"), right_first.fail_count("y"));
+        assert_eq!(left_first.fail_count("z"), right_first.fail_count("z"));
+        assert_eq!(left_first.run_totals(), right_first.run_totals());
+        assert_eq!(
+            left_first.mean_duration("scn"),
+            right_first.mean_duration("scn")
+        );
     }
 
     #[test]
