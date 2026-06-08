@@ -238,6 +238,10 @@ impl State {
                     thread_name,
                 })
             }
+            // Kept distinct from the `Dropped` arm despite the identical
+            // body: `Event` is parked pending OTLP wiring, whereas
+            // `Dropped` genuinely has nothing to export.
+            #[allow(clippy::match_same_arms, reason = "distinct intent; see comment")]
             Frame::Event { .. } => None, // not yet wired to OTLP
             Frame::Metric { name_id, value, t } => {
                 self.advance_anchor(*t);
@@ -276,16 +280,6 @@ impl State {
                 None
             }
         }
-    }
-
-    /// Timebase from the most recent `Hello`, or `None` before any
-    /// `Hello` has been received.
-    #[allow(
-        dead_code,
-        reason = "accessor exposed for consumers/tests; used in tests but no production caller yet, so dead_code fires only in the lib build"
-    )]
-    pub fn timebase_hz(&self) -> Option<u64> {
-        self.anchor.as_ref().map(|_| self.timebase_hz)
     }
 
     /// Lookup the kind for a given metric. Returns `None` if no
@@ -467,19 +461,6 @@ mod tests {
             t: 100,
         });
         assert_eq!(s.metric_values.get(&5), Some(&42));
-    }
-
-    #[test]
-    fn timebase_hz_is_none_before_hello() {
-        let s = State::new(FakeWallClock(0));
-        assert_eq!(s.timebase_hz(), None);
-    }
-
-    #[test]
-    fn timebase_hz_returns_value_from_hello() {
-        let mut s = State::new(FakeWallClock(0));
-        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
-        assert_eq!(s.timebase_hz(), Some(10_000_000));
     }
 
     #[test]

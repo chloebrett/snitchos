@@ -130,7 +130,7 @@ impl Exporter {
 
     /// Build an OTLP request containing one span and POST it.
     #[cfg_attr(test, mutants::skip)] // makes real HTTP calls — not unit-testable without a mock server
-    pub fn export(&self, span: &CompletedSpan) {
+    fn export(&self, span: &CompletedSpan) {
         let mut attributes = vec![KeyValue {
             key: "thread.id".to_string(),
             value: Some(AnyValue {
