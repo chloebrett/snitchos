@@ -71,7 +71,7 @@ pub fn kernel_heap_metrics() -> Result<(), String> {
 }
 
 /// Kernel heap grows under pressure, then exhausts cleanly. The
-/// `heap-oom`-feature kernel leaks 4096 × 4 KiB blocks per heartbeat
+/// `workload=heap-oom` selection leaks 4096 × 4 KiB blocks per heartbeat
 /// (16 MiB/tick) via `Vec::try_reserve_exact` + `mem::forget`. P2's
 /// watermark grow adds 1 MiB/tick when free drops below 25%, so the
 /// heap visibly expands from 4 MiB toward its frame-supply ceiling
@@ -329,7 +329,7 @@ pub fn sched_spans_carry_task_id() -> Result<(), String> {
 }
 
 pub fn heap_oom() -> Result<(), String> {
-    let mut h = Harness::spawn_with_features("heap-oom", &["heap-oom"])?;
+    let mut h = Harness::spawn_with_workload("heap-oom", "heap-oom")?;
 
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
@@ -364,7 +364,7 @@ pub fn heap_oom() -> Result<(), String> {
 }
 
 /// Frame allocator exhausts the pool cleanly and the kernel survives.
-/// The `oom-leak`-feature kernel leaks 8192 frames per heartbeat
+/// The `workload=frame-oom` selection leaks 8192 frames per heartbeat
 /// (32 MiB), so the ~32K-frame pool runs out in ~4 heartbeats on the
 /// default QEMU `virt` config. We assert:
 ///
@@ -374,9 +374,9 @@ pub fn heap_oom() -> Result<(), String> {
 ///   2. At least two more heartbeats arrive after the first failure
 ///      — the kernel didn't lock up; metrics keep flowing.
 pub fn frame_allocator_oom() -> Result<(), String> {
-    // Build the kernel with the `oom-leak` feature so the heartbeat
-    // smoke leaks 8192 frames/tick instead of doing alloc+free.
-    let mut h = Harness::spawn_with_features("oom", &["oom-leak"])?;
+    // Select the `frame-oom` workload so the heartbeat smoke leaks
+    // 8192 frames/tick instead of doing alloc+free.
+    let mut h = Harness::spawn_with_workload("oom", "frame-oom")?;
 
     // (1) Wait up to 15s for the first non-zero alloc_failed_total.
     // ~4 heartbeats × ~1s each = ~4s; 15s gives generous slack.

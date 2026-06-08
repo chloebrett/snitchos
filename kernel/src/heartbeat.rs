@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use protocol::StringId;
 
-use crate::{frame, heap, heap_smoke, ipi, mmu, percpu, sched, secondary, span, tracing, trap, workload};
+use crate::{boot_workload, frame, heap, heap_smoke, ipi, mmu, percpu, sched, secondary, span, tracing, trap, workload};
 
 /// Declarative metric set. Each line names a kind (`counter`,
 /// `gauge`, `histogram`), a struct field, and the wire path. The
@@ -183,40 +183,36 @@ pub fn run(metrics: Metrics) -> ! {
 }
 
 /// Smoke pattern that exercises the frame allocator each heartbeat.
-/// Default build: alloc+free, keeps `in_use` bounded. `oom-leak`
-/// feature: leak 8192 frames per tick (32 MiB) so the allocator's
-/// ~32K-frame free pool exhausts in ~4 heartbeats. Used by the
-/// `frame-allocator-oom` integration scenario.
+/// Default: alloc+free, keeps `in_use` bounded. Under the
+/// `workload=frame-oom` selection: leak 8192 frames per tick (32 MiB)
+/// so the allocator's ~32K-frame free pool exhausts in ~4 heartbeats.
+/// Drives the `frame-allocator-oom` integration scenario.
 fn frame_smoke() {
-    #[cfg(not(feature = "oom-leak"))]
-    {
-        if let Some(frame) = frame::alloc_zeroed() {
-            frame::free(frame);
-        }
-    }
-    #[cfg(feature = "oom-leak")]
-    {
+    use kernel_core::bootargs::WorkloadKind;
+    if boot_workload::selected() == Some(WorkloadKind::FrameOom) {
         for _ in 0..8192 {
             let _ = frame::alloc_zeroed();
         }
+    } else if let Some(frame) = frame::alloc_zeroed() {
+        frame::free(frame);
     }
 }
 
-/// Heap smoke. Default build: alloc + write + drop a 256 B Vec —
-/// proves the heap is live, keeps `bytes_used` near 0 across
-/// heartbeats. `heap-oom` feature: per-heartbeat leak loop using the
-/// raw `GlobalAlloc` API (returns null on failure rather than
-/// panicking through `alloc_error_handler`). After the heap exhausts,
-/// every subsequent iteration's first allocation returns null
-/// immediately and bumps `alloc_failed_total` — so the counter climbs
-/// once per heartbeat post-OOM, and the kernel keeps heartbeating.
+/// Heap smoke. Default: alloc + write + drop a 256 B Vec — proves the
+/// heap is live, keeps `bytes_used` near 0 across heartbeats. Under the
+/// `workload=heap-oom` selection: per-heartbeat leak loop using the raw
+/// `GlobalAlloc` API (returns null on failure rather than panicking
+/// through `alloc_error_handler`). After the heap exhausts, every
+/// subsequent iteration's first allocation returns null immediately and
+/// bumps `alloc_failed_total` — so the counter climbs once per
+/// heartbeat post-OOM, and the kernel keeps heartbeating.
 fn heap_smoke_pattern(count: i64) {
-    #[cfg(not(feature = "heap-oom"))]
-    {
+    use kernel_core::bootargs::WorkloadKind;
+    if boot_workload::selected() != Some(WorkloadKind::HeapOom) {
         let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(256);
         v.push(count as u8);
+        return;
     }
-    #[cfg(feature = "heap-oom")]
     {
         let _ = count;
         // Leak 4096 × 4 KiB blocks per heartbeat (16 MiB/tick). P2's

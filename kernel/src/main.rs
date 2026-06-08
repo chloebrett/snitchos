@@ -7,6 +7,7 @@ use core::arch::global_asm;
 use core::sync::atomic::Ordering;
 use fdt::Fdt;
 
+mod boot_workload;
 mod console;
 mod deflake;
 mod demo_tasks;
@@ -308,7 +309,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // Gated out under the `deflake-*` storms, which strip the demo and
     // spawn their own minimal workers below (still cargo-feature-gated
     // pending migration step 4).
-    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
+    // Resolved unconditionally and published so the heartbeat task
+    // (which can't be passed the value) can read it back via
+    // `boot_workload::selected()` — the OOM workloads change the
+    // per-tick smoke, not the spawn layout. Only `itest-workloads`
+    // builds consult bootargs; everything else resolves to `None`
+    // (default demo).
     let selected: Option<kernel_core::bootargs::WorkloadKind> = {
         #[cfg(feature = "itest-workloads")]
         {
@@ -319,21 +325,26 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             None
         }
     };
+    boot_workload::init(selected);
+
     #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
     match selected {
-        None => {
-            // Default demo: all four tasks on hart 0.
-            let _ = sched::spawn("task_a", demo_tasks::task_a_entry);
-            let _ = sched::spawn("task_b", demo_tasks::task_b_entry);
-            let _ = sched::spawn("workload_producer", workload::producer_entry);
-            let _ = sched::spawn("workload_consumer", workload::consumer_entry);
-        }
         Some(kernel_core::bootargs::WorkloadKind::Smp) => {
             // Cross-hart: producer on hart 0 here, consumer on hart 1
             // after SECONDARY_READY. The `Mutex<VecDeque>` queue carries
             // real inter-hart contention; task_a/task_b are absent to
             // keep hart 0's surface clean for measurement.
             let _ = sched::spawn("workload_producer", workload::producer_entry);
+        }
+        // Default demo for the rest: `None`, and the OOM workloads,
+        // which keep the standard tasks and only change the heartbeat.
+        None
+        | Some(kernel_core::bootargs::WorkloadKind::FrameOom)
+        | Some(kernel_core::bootargs::WorkloadKind::HeapOom) => {
+            let _ = sched::spawn("task_a", demo_tasks::task_a_entry);
+            let _ = sched::spawn("task_b", demo_tasks::task_b_entry);
+            let _ = sched::spawn("workload_producer", workload::producer_entry);
+            let _ = sched::spawn("workload_consumer", workload::consumer_entry);
         }
     }
 

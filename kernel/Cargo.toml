@@ -6,16 +6,6 @@ publish = false
 
 [features]
 default = []
-# Replaces the per-heartbeat alloc+free smoke with a per-heartbeat
-# 1024-frame leak. Used by the `frame-allocator-oom` integration
-# scenario to observe the allocator running out cleanly. NOT for
-# production builds.
-oom-leak = []
-# Replaces the per-heartbeat heap smoke (`Vec::with_capacity(256)` +
-# drop) with a per-heartbeat leak loop that allocates 4 KiB blocks via
-# `alloc::alloc::alloc` (returns null on failure, no panic) until the
-# heap is exhausted. Used by the `heap-oom` integration scenario.
-heap-oom = []
 # Umbrella for the runtime-selectable workload registry. Additive
 # only: with no `workload=` bootarg an `itest-workloads` kernel runs
 # the exact default demo, so the integration suite can build one

@@ -15,6 +15,12 @@ pub enum WorkloadKind {
     /// Cross-hart producer/consumer: producer on hart 0, consumer on
     /// hart 1 (v0.6 step 11).
     Smp,
+    /// Frame-allocator OOM: keep the default demo tasks, but the
+    /// heartbeat leaks frames each tick until the pool exhausts.
+    FrameOom,
+    /// Kernel-heap OOM: default demo tasks, but the heartbeat leaks
+    /// heap blocks each tick until the heap exhausts.
+    HeapOom,
 }
 
 /// Parse a `workload=<name>` selection out of the bootargs string.
@@ -27,6 +33,8 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
         .find_map(|tok| tok.strip_prefix("workload="))
         .and_then(|name| match name {
             "smp" => Some(WorkloadKind::Smp),
+            "frame-oom" => Some(WorkloadKind::FrameOom),
+            "heap-oom" => Some(WorkloadKind::HeapOom),
             _ => None,
         })
 }
@@ -38,6 +46,16 @@ mod tests {
     #[test]
     fn selects_smp_from_workload_key() {
         assert_eq!(select("workload=smp"), Some(WorkloadKind::Smp));
+    }
+
+    #[test]
+    fn selects_frame_oom() {
+        assert_eq!(select("workload=frame-oom"), Some(WorkloadKind::FrameOom));
+    }
+
+    #[test]
+    fn selects_heap_oom() {
+        assert_eq!(select("workload=heap-oom"), Some(WorkloadKind::HeapOom));
     }
 
     #[test]

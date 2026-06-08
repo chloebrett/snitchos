@@ -270,7 +270,7 @@ enum Cmd {
     /// ready-to-copy attach commands.
     ///
     /// Use `--features <feat>` to build feature-flagged kernels (e.g.
-    /// `--features heap-oom` to debug the heap-oom regression).
+    /// `--features deflake-spawn-storm` to debug a storm scenario).
     Debug {
         /// Cargo features to enable on the kernel build, comma-separated.
         #[arg(long, default_value = "")]

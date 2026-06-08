@@ -71,9 +71,9 @@ impl Harness {
     }
 
     /// Like `spawn`, but builds the kernel with the given cargo
-    /// features enabled. Used by scenarios that need a non-default
-    /// kernel variant — e.g. `frame-allocator-oom` opts in to the
-    /// `oom-leak` feature.
+    /// features enabled. Used by scenarios that need a compile-time
+    /// kernel variant — currently the `deflake-*` storms (pending
+    /// migration to runtime `workload=` selection in step 4).
     pub fn spawn_with_features(label: &str, features: &[&str]) -> Result<Self, String> {
         Self::spawn_inner(label, features, None)
     }
