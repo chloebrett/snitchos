@@ -30,6 +30,12 @@ pub struct Scenario {
     pub run: fn() -> Result<(), String>,
 }
 
+/// Per-scenario log-path lookup. Returns the path to a scenario's
+/// log file (so the runner can dump the tail on failure + copy it
+/// into the run-dir), or `None` when no log was captured. Aliased to
+/// keep `RunnerConfig` under clippy's `type_complexity` threshold.
+pub type LogPathFn<'a> = &'a dyn Fn(&str) -> Option<PathBuf>;
+
 /// Hooks the runner calls during execution. Each is `Option<&dyn Fn>`
 /// so consumers can supply only what they need. Lifetime parameter
 /// matches the surrounding `run()` call — hooks don't escape.
@@ -42,7 +48,7 @@ pub struct RunnerConfig<'a> {
     /// Called after each scenario; returns the path to that scenario's
     /// log file, or `None` if no log was captured. The runner dumps
     /// the last ~80 lines on failure.
-    pub log_path_for: Option<&'a dyn Fn(&str) -> Option<PathBuf>>,
+    pub log_path_for: Option<LogPathFn<'a>>,
 
     /// Called after each scenario; returns `(actual_elapsed, budget)`
     /// from whatever the consumer's harness measured (NOT the same as
