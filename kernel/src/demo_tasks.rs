@@ -56,7 +56,8 @@ fn burn_lcg(iterations: u32) {
         feature = "deflake-ipi-pong",
         feature = "deflake-shootdown-storm",
         feature = "deflake-mutex-storm",
-        feature = "deflake-virtio-storm"
+        feature = "deflake-virtio-storm",
+        feature = "smp-workload"
     ),
     allow(dead_code)
 )]
@@ -83,7 +84,8 @@ pub extern "C" fn task_a_entry() -> ! {
         feature = "deflake-ipi-pong",
         feature = "deflake-shootdown-storm",
         feature = "deflake-mutex-storm",
-        feature = "deflake-virtio-storm"
+        feature = "deflake-virtio-storm",
+        feature = "smp-workload"
     ),
     allow(dead_code)
 )]

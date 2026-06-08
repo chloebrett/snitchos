@@ -691,6 +691,64 @@ pub fn workload_cooperative_baseline() -> Result<(), String> {
     Ok(())
 }
 
+/// v0.6 step 11: the producer/consumer workload, but cross-hart.
+/// Built `--features smp-workload` so the producer runs on hart 0 and
+/// the consumer on hart 1; the `Mutex<VecDeque>` queue now carries
+/// genuine inter-hart contention (the v0.6 thesis — the chokepoint
+/// earns its keep by being *visible*).
+///
+/// This is the SMP analogue of `workload-cooperative-baseline`. The
+/// same correctness oracle applies — `histogram_sum >= samples_consumed`
+/// — but now the consumer's bin writes and consumed counter cross a
+/// hart boundary before the heartbeat (hart 0) reads them. A missing
+/// Release/Acquire pair would let hart 0 observe `consumed` ahead of
+/// the bins, so `histogram_sum < consumed` and this scenario fails.
+/// Run under `--repeat 10` (the commit gate) to surface that race.
+///
+/// Threshold = 1000 (not the baseline's 200): the consumer now has its
+/// own hart, so it converges fast, and 1000 samples forces ~16 cross-
+/// hart batch handoffs per run — enough interleavings to give the
+/// memory-ordering hazard room to manifest.
+pub fn smp_producer_consumer_correctness() -> Result<(), String> {
+    let mut h = Harness::spawn_with_features("smp-workload", &["smp-workload"])?;
+
+    let frame = h
+        .wait_for(SEC * 45, |f, strings| match f {
+            OwnedFrame::Metric { name_id, value, .. } => {
+                strings.get(name_id).map(String::as_str)
+                    == Some("snitchos.workload.samples_consumed_total")
+                    && *value >= 1000
+            }
+            _ => false,
+        })
+        .ok_or(
+            "samples_consumed_total never reached 1000 within 45s — \
+             consumer not running on hart 1, or cross-hart spawn/IPI \
+             wakeup not delivering work?",
+        )?;
+    let consumed = match frame {
+        OwnedFrame::Metric { value, .. } => value,
+        _ => return Err("matched non-metric (impossible)".to_string()),
+    };
+
+    h.wait_for(SEC * 20, move |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.workload.histogram_sum")
+                && *value >= consumed
+        }
+        _ => false,
+    })
+    .ok_or(format!(
+        "histogram_sum never reached {consumed} within 20s after \
+         observing samples_consumed_total={consumed} — cross-hart \
+         samples lost, or hart 0 observed consumed ahead of the bin \
+         writes (missing Release/Acquire on the consumed counter?)"
+    ))?;
+
+    Ok(())
+}
+
 /// Cross-hart spawn storm. Hart 0 calls `spawn_on(1, deflake_body)` in
 /// a serialised loop: each iteration is one trial of the residual
 /// memory-ordering race on hart 1's IPI pickup path. Each task bumps

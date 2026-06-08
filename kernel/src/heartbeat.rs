@@ -313,7 +313,12 @@ fn emit_sched_metrics(m: &Metrics) {
 
 fn emit_workload_metrics(m: &Metrics) {
     emit!(m, workload_produced      = workload::SAMPLES_PRODUCED.load(Ordering::Relaxed));
-    emit!(m, workload_consumed      = workload::SAMPLES_CONSUMED.load(Ordering::Relaxed));
+    // Acquire, and read *before* histogram_sum(): pairs with the
+    // consumer's Release on SAMPLES_CONSUMED (possibly on hart 1 under
+    // `smp-workload`). Observing consumed=V here guarantees the
+    // subsequent histogram read sees every bin write that produced V,
+    // so the emitted `histogram_sum >= consumed` oracle holds.
+    emit!(m, workload_consumed      = workload::SAMPLES_CONSUMED.load(Ordering::Acquire));
     emit!(m, workload_histogram_sum = workload::histogram_sum());
     emit!(m, workload_lock_wait     = workload::LOCK_WAIT_TICKS_TOTAL.load(Ordering::Relaxed));
     emit!(m, workload_queue_depth   = workload::queue_depth());

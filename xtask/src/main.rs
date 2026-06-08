@@ -224,7 +224,7 @@ enum Cmd {
         /// to force fully-serial Cpu execution (`--cpu-jobs 1`).
         #[arg(
             long,
-            default_value_t = 0,
+            default_value_t = 1,
             value_parser = clap::value_parser!(u32).range(0..=64),
         )]
         cpu_jobs: u32,
@@ -235,6 +235,15 @@ enum Cmd {
         /// `--jobs` / `--cpu-jobs`.
         #[arg(long, value_name = "PROFILE")]
         profile: Option<ProfileFilter>,
+        /// How much frame transcript to persist for each failed
+        /// scenario, as a `fail-<scenario>-<n>.capture.json` sidecar.
+        /// `summary` keeps the classifier's summary record only; `tail`
+        /// (default) adds the last ~64 frames; `full` adds every frame
+        /// from the iteration. The summary record itself (outcome, frame
+        /// counts, per-hart timestamps, histogram) is always captured
+        /// regardless of level.
+        #[arg(long, value_name = "LEVEL", default_value_t = CaptureArg::Tail)]
+        capture: CaptureArg,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -251,6 +260,39 @@ enum Cmd {
         #[arg(long, default_value = "")]
         features: String,
     },
+}
+
+/// Failure-capture transcript depth for `cargo xtask itest --capture`.
+/// Maps to `itest_harness::CaptureLevel`.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CaptureArg {
+    /// Summary record only — no frame transcript.
+    Summary,
+    /// Summary + the last ~64 frames (default).
+    Tail,
+    /// Summary + every frame from the iteration.
+    Full,
+}
+
+impl std::fmt::Display for CaptureArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            CaptureArg::Summary => "summary",
+            CaptureArg::Tail => "tail",
+            CaptureArg::Full => "full",
+        };
+        f.write_str(s)
+    }
+}
+
+impl From<CaptureArg> for itest_harness::CaptureLevel {
+    fn from(arg: CaptureArg) -> Self {
+        match arg {
+            CaptureArg::Summary => itest_harness::CaptureLevel::Summary,
+            CaptureArg::Tail => itest_harness::CaptureLevel::Tail,
+            CaptureArg::Full => itest_harness::CaptureLevel::Full,
+        }
+    }
 }
 
 /// Scenario classification filter for `cargo xtask itest --profile`.
@@ -294,7 +336,31 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, adopt_run, prune_runs, keep_last, export_prom, push_otlp, no_auto_push, jobs, cpu_jobs, profile } => {
+        Cmd::Itest {
+            scenario,
+            repeat,
+            force,
+            skip_unit_tests,
+            update_baseline,
+            fail_fast,
+            baseline_show,
+            include_history,
+            flakes_only,
+            pending,
+            promote_pending,
+            discard_pending,
+            recover_pending,
+            adopt_run,
+            prune_runs,
+            keep_last,
+            export_prom,
+            push_otlp,
+            no_auto_push,
+            jobs,
+            cpu_jobs,
+            profile,
+            capture,
+        } => {
             if let Some(endpoint) = push_otlp {
                 return itest::push_otlp_metrics(endpoint);
             }
@@ -327,7 +393,9 @@ fn main() -> ExitCode {
             if !skip_unit_tests {
                 let unit = itest::run_unit_tests();
                 if unit != ExitCode::SUCCESS {
-                    eprintln!("\nunit tests failed — skipping integration. Pass --skip-unit-tests to force.");
+                    eprintln!(
+                        "\nunit tests failed — skipping integration. Pass --skip-unit-tests to force."
+                    );
                     return unit;
                 }
                 eprintln!();
@@ -336,7 +404,18 @@ fn main() -> ExitCode {
                 ProfileFilter::Wfi => itest_harness::CpuProfile::Wfi,
                 ProfileFilter::Cpu => itest_harness::CpuProfile::Cpu,
             });
-            itest::run(scenario.as_deref(), repeat, force, update_baseline, fail_fast, !no_auto_push, jobs, cpu_jobs, profile_filter)
+            itest::set_capture_level(capture.into());
+            itest::run(
+                scenario.as_deref(),
+                repeat,
+                force,
+                update_baseline,
+                fail_fast,
+                !no_auto_push,
+                jobs,
+                cpu_jobs,
+                profile_filter,
+            )
         }
         Cmd::Loc => loc::run(),
         Cmd::Debug { features } => debug(&features),
@@ -364,7 +443,11 @@ fn stack(cmd: StackCmd) -> ExitCode {
 
 fn build() -> ExitCode {
     let status = qemu::build_kernel(&[]).expect("failed to invoke cargo");
-    if status.success() { ExitCode::SUCCESS } else { ExitCode::from(1) }
+    if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }
 
 fn debug(features: &str) -> ExitCode {
@@ -374,8 +457,7 @@ fn debug(features: &str) -> ExitCode {
     } else {
         features.split(',').collect()
     };
-    let status = qemu::build_kernel(&features_vec)
-        .expect("failed to invoke cargo");
+    let status = qemu::build_kernel(&features_vec).expect("failed to invoke cargo");
     if !status.success() {
         return ExitCode::from(1);
     }
@@ -386,8 +468,7 @@ fn debug(features: &str) -> ExitCode {
     // `wait=off` so the chardev doesn't block — we want QEMU to halt
     // at start (via -S) waiting for the debugger, not waiting for a
     // telemetry client. Telemetry is irrelevant in debug runs.
-    let chardev_arg =
-        format!("socket,path={TELEMETRY_SOCKET},server=on,wait=off,id=telemetry");
+    let chardev_arg = format!("socket,path={TELEMETRY_SOCKET},server=on,wait=off,id=telemetry");
 
     eprintln!();
     eprintln!("QEMU starting paused (halted at entry).");
@@ -401,7 +482,10 @@ fn debug(features: &str) -> ExitCode {
     eprintln!("  (lldb) continue");
     eprintln!();
     eprintln!("  # GDB (from `brew install riscv64-elf-gdb`):");
-    eprintln!("  riscv64-elf-gdb target/{}/debug/kernel", qemu::KERNEL_TARGET);
+    eprintln!(
+        "  riscv64-elf-gdb target/{}/debug/kernel",
+        qemu::KERNEL_TARGET
+    );
     eprintln!("  (gdb) target remote :1234");
     eprintln!("  (gdb) break kmain");
     eprintln!("  (gdb) break _start");
@@ -442,8 +526,7 @@ fn boot() -> ExitCode {
     // wait=on blocks QEMU at startup until a telemetry client connects.
     // Run `cargo xtask collect` (or `cargo xtask reader`) in another
     // terminal to satisfy that wait.
-    let chardev_arg =
-        format!("socket,path={TELEMETRY_SOCKET},server=on,wait=on,id=telemetry");
+    let chardev_arg = format!("socket,path={TELEMETRY_SOCKET},server=on,wait=on,id=telemetry");
 
     let status = qemu::base_command(&chardev_arg)
         .status()
@@ -460,10 +543,14 @@ fn run_clippy(extra_args: &[String]) -> ExitCode {
     let host = Command::new("cargo")
         .args([
             "clippy",
-            "-p", "kernel-core",
-            "-p", "protocol",
-            "-p", "collector",
-            "-p", "xtask",
+            "-p",
+            "kernel-core",
+            "-p",
+            "protocol",
+            "-p",
+            "collector",
+            "-p",
+            "xtask",
             "--all-targets",
         ])
         .args(extra_args)
@@ -487,7 +574,17 @@ fn run_clippy(extra_args: &[String]) -> ExitCode {
 
 fn run_mutants(extra_args: &[String]) -> ExitCode {
     let status = Command::new("cargo")
-        .args(["mutants", "-p", "collector", "-p", "protocol", "-p", "kernel-core", "--features", "protocol/std"])
+        .args([
+            "mutants",
+            "-p",
+            "collector",
+            "-p",
+            "protocol",
+            "-p",
+            "kernel-core",
+            "--features",
+            "protocol/std",
+        ])
         .args(extra_args)
         .status()
         .expect("failed to invoke cargo mutants");

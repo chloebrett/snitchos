@@ -32,13 +32,22 @@ const PRODUCER_SEED: u64 = 0x00c0_ffee_dead_beef;
 
 static QUEUE: Mutex<Option<VecDeque<u64>>> = Mutex::new(None);
 
-// `Relaxed` everywhere on the workload atomics: each `fetch_add` is a
-// pure counter (per-bin tally for HISTOGRAM, total counts for
-// PRODUCED/CONSUMED/LOCK_WAIT). Inter-bin and inter-counter
-// consistency is not load-bearing — the heartbeat drains them
-// independently and the correctness oracle
-// `histogram_sum >= SAMPLES_CONSUMED` holds at boundaries.
-// See `kernel::percpu` for the kernel-wide ordering discipline.
+// `Relaxed` on the per-bin tallies and on PRODUCED/LOCK_WAIT: each is a
+// pure counter and inter-bin consistency isn't load-bearing.
+//
+// SAMPLES_CONSUMED is the exception. The consumer bins a batch
+// (HISTOGRAM, Relaxed) and *then* bumps SAMPLES_CONSUMED — and under
+// `smp-workload` the consumer runs on hart 1 while the heartbeat reads
+// both counters on hart 0. To keep the correctness oracle
+// `histogram_sum >= SAMPLES_CONSUMED` valid across that hart boundary,
+// the SAMPLES_CONSUMED bump is a `Release` and the heartbeat's read is
+// the matching `Acquire` (see `heartbeat::emit_workload_metrics`): an
+// Acquire-load that observes a consumed value V is guaranteed to see
+// every bin write sequenced before that Release, so a subsequent
+// histogram read yields `>= V`. With plain Relaxed, hart 0 could
+// observe the consumed bump ahead of the bin writes and the oracle
+// would spuriously fail. See `kernel::percpu` for the kernel-wide
+// ordering discipline.
 static HISTOGRAM: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 
 pub static SAMPLES_PRODUCED: AtomicU64 = AtomicU64::new(0);
@@ -124,7 +133,10 @@ pub extern "C" fn consumer_entry() -> ! {
                 let bin = bin_of(*s, BUCKETS);
                 HISTOGRAM[bin].fetch_add(1, Ordering::Relaxed);
             }
-            SAMPLES_CONSUMED.fetch_add(n as u64, Ordering::Relaxed);
+            // Release: publishes the bin writes above to the hart 0
+            // heartbeat's Acquire-load. See the SAMPLES_CONSUMED note
+            // at the top of this module.
+            SAMPLES_CONSUMED.fetch_add(n as u64, Ordering::Release);
         }
         sched::yield_now();
     }

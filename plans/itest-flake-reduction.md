@@ -187,17 +187,41 @@ serialization choice.
    substring fallback, panic-in-log → `Wedge` on untagged data,
    `Stalled` via `last_frame_wall_age_ms ≥ STALL_QUIET_MS`. `ErrorOrigin`
    /`FailureEvidence`/`Signature`/`classify` exported from the crate root.
-2. TODO — `FailureCapture` owned/serializable record (summary fields +
-   optional transcript), TDD its (de)serialization; `classify` consumes it.
-3. TODO — harness wiring: capture outcome / `frames_seen` /
-   `last_frame_wall_age_ms` / per-hart last-`t` / frame histogram +
-   `ErrorOrigin` stamping into a `LAST_FAILURE_CAPTURE` thread-local
-   (same pattern as `LAST_MAX_WAIT`/`LAST_LOG_PATH`); runner persists per
-   the capture level; enlarge the `recent` ring; add the `--capture` /
-   `--capture-passes` flags.
-4. TODO — surface the signature in `iterations.ndjson` (new field), the
-   end-of-run summary, and a per-bucket column in the baseline
-   aggregation so Grafana breaks the rate down by bucket.
+2. ✅ DONE — `FailureCapture` owned/serializable record (summary fields:
+   `outcome`/`error_origin`/`error`/`frames_seen`/`last_frame_wall_age_ms`
+   /`last_t_per_hart`/`frame_histogram` + bounded `transcript`).
+   `WaitOutcome` enum, `evidence()` borrowed view + `classify()`
+   convenience. Three serde guards lock the NDJSON field shape, the
+   round-trip, and `summary`-level compactness. Exported from crate root.
+3. ✅ DONE — harness wiring. `Harness` tracks `frames_seen`,
+   `last_frame_at`, a running `frame_histogram` + `last_t_per_hart`, and
+   a level-aware `recent` ring (64-frame tail, unbounded under `Full`). A
+   failing `wait_for` records a `FailureCapture` (outcome, frame stats,
+   per-hart last-`t`, accurate histogram, level-gated transcript,
+   `ErrorOrigin::Scenario`) into a `LAST_FAILURE_CAPTURE` thread-local,
+   cleared at each `spawn`. Runner pulls it via the `capture_for` hook,
+   reads the UART log tail, calls `classify_failure`, stamps `signature`
+   on the `IterationRow`, and persists the full capture as a
+   `fail-<scenario>-<n>.capture.json` sidecar. `--capture summary|tail|full`
+   sets a process-global level read at `spawn`. **Verified end-to-end:**
+   a forced 50 ms timeout under `--capture full` produced a 98-frame
+   sidecar with accurate histogram + per-hart `t` + `budget_exhausted`
+   signature; passing rows omit the signature. **Deferred niceties:**
+   `--capture-passes` (persist passing iterations — heaviest mode); explicit
+   `ErrorOrigin::Harness` stamp on spawn-error captures (today spawn
+   failures classify correctly via the error-string fallback).
+4. ✅ DONE (terminal + aggregation) — `Aggregator` tracks suite-wide
+   `signature_count` (a `None` signature counts as `Unknown`); the
+   end-of-run summary prints a `Failure signatures (N total): wedge: 2,
+   …` breakdown, shown on **both** the single-run failure path and the
+   `--repeat` aggregate. `aggregate_run_dir` reconstructs the same
+   per-bucket counts from a run's NDJSON (so `--adopt-run` / recovery and
+   any historical run are queryable). `Signature::label()` gives the
+   stable snake_case key. **Still TODO (Grafana export):** persist
+   per-bucket counts into `.itest-baseline.toml`, emit per-bucket gauges
+   via the prom textfile + OTLP exporters, and add a dashboard panel.
+   Open design question: suite-wide vs per-scenario-per-bucket schema in
+   the baseline (the latter is Grafana-ideal but a 2-D schema expansion).
 
 **Done when:** a `--repeat 50` run reports the residual split into the
 buckets per scenario, persisted to NDJSON and visible in the existing

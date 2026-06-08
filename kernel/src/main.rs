@@ -302,12 +302,22 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // The storm spawns its own minimal worker tasks on hart 1 below;
     // including the demo + workload tasks here would add unrelated
     // scheduling activity that masks the cross-hart race window.
-    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
+    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm", feature = "smp-workload")))]
     {
         let _ = sched::spawn("task_a", demo_tasks::task_a_entry);
         let _ = sched::spawn("task_b", demo_tasks::task_b_entry);
         let _ = sched::spawn("workload_producer", workload::producer_entry);
         let _ = sched::spawn("workload_consumer", workload::consumer_entry);
+    }
+
+    // v0.6 step 11: cross-hart workload. The producer runs on hart 0
+    // (spawned here); the consumer is spawned onto hart 1 below, after
+    // `SECONDARY_READY`, so the `Mutex<VecDeque>` queue carries real
+    // inter-hart contention. task_a/task_b are intentionally absent to
+    // keep hart 0's surface clean for measurement.
+    #[cfg(feature = "smp-workload")]
+    {
+        let _ = sched::spawn("workload_producer", workload::producer_entry);
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -349,6 +359,13 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // "fresh trap" race exposure.
     #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
     let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
+
+    // v0.6 step 11: place the consumer on hart 1. `spawn_on` enqueues
+    // it on hart 1's runqueue and IPIs the hart so its idle `wfi`
+    // wakes to pick it up. Producer (hart 0) and consumer (hart 1) now
+    // contend on the `QUEUE` mutex across the hart boundary.
+    #[cfg(feature = "smp-workload")]
+    let _ = sched::spawn_on(1, "workload_consumer", workload::consumer_entry);
 
     // Mutex-storm: spawn the two contender tasks. They run as soon
     // as the scheduler picks them; each does N lock/unlock and then
