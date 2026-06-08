@@ -42,6 +42,13 @@ pub enum Signature {
     /// soft wedge: distinct from `Wedge` (process still up) and from
     /// `BudgetExhausted` (frames were still flowing at the deadline).
     Stalled,
+    /// Timed out with one hart's guest clock frozen far behind another's
+    /// — a *single-hart* stall, while the rest of the kernel keeps
+    /// emitting. The global frame stream looks alive (so it isn't
+    /// `Stalled`), but `last_t_per_hart` shows one hart went silent early
+    /// (deadlock / lock-across-yield on that hart, or a cross-hart
+    /// producer/consumer stall). Only visible per-hart.
+    HartStalled,
     /// Infrastructure failure unrelated to kernel behaviour: QEMU spawn
     /// or socket-connect error, child-reap failure, or an external
     /// interrupt (SIGINT) tearing the run down mid-scenario.
@@ -76,6 +83,7 @@ impl Signature {
             Signature::Wedge => "wedge",
             Signature::BudgetExhausted => "budget_exhausted",
             Signature::Stalled => "stalled",
+            Signature::HartStalled => "hart_stalled",
             Signature::Harness => "harness",
             Signature::Unknown => "unknown",
         }
@@ -109,6 +117,11 @@ pub struct FailureEvidence<'a> {
     /// before the deadline (stalled). `None` if the harness did not
     /// record it.
     pub last_frame_wall_age_ms: Option<u32>,
+    /// Guest-tick spread between the fastest and slowest hart at failure
+    /// time (`max - min` of `last_t_per_hart`). Large → one hart's clock
+    /// froze far behind the others (a per-hart stall). `None` when fewer
+    /// than two harts have a timestamp.
+    pub hart_t_spread_ticks: Option<u64>,
 }
 
 /// Wall-clock silence, in milliseconds, beyond which a still-alive
@@ -119,6 +132,14 @@ pub struct FailureEvidence<'a> {
 /// against the scenario's own observed inter-frame cadence once that is
 /// captured.
 const STALL_QUIET_MS: u32 = 10_000;
+
+/// Guest-tick spread between harts beyond which one is treated as stalled
+/// far behind the others. Harts share the CLINT mtime, so in healthy
+/// operation their last-seen timestamps stay within a heartbeat (~1 s);
+/// a multi-second lag means one hart went silent. ~5 guest-seconds at the
+/// QEMU `virt` 10 MHz timebase. Same cadence-assuming heuristic as
+/// `STALL_QUIET_MS`.
+const HART_STALL_SPREAD_TICKS: u64 = 50_000_000;
 
 /// Attribute a failed iteration to a cause-bucket.
 #[must_use]
@@ -156,10 +177,21 @@ pub fn classify(evidence: &FailureEvidence) -> Signature {
 
     match evidence.disconnected {
         Some(true) => Signature::Wedge,
-        Some(false) => match evidence.last_frame_wall_age_ms {
-            Some(age) if age >= STALL_QUIET_MS => Signature::Stalled,
-            _ => Signature::BudgetExhausted,
-        },
+        // Timed out, QEMU alive. A single hart frozen far behind the
+        // others outranks the global age signal: the stream looks alive
+        // (some hart keeps emitting) but one hart is dead.
+        Some(false) => {
+            if evidence
+                .hart_t_spread_ticks
+                .is_some_and(|spread| spread >= HART_STALL_SPREAD_TICKS)
+            {
+                Signature::HartStalled
+            } else if evidence.last_frame_wall_age_ms.is_some_and(|age| age >= STALL_QUIET_MS) {
+                Signature::Stalled
+            } else {
+                Signature::BudgetExhausted
+            }
+        }
         None => Signature::Unknown,
     }
 }
@@ -255,7 +287,21 @@ impl FailureCapture {
             disconnected: self.outcome.map(|o| o == WaitOutcome::Disconnected),
             frames_seen: Some(self.frames_seen),
             last_frame_wall_age_ms: self.last_frame_wall_age_ms,
+            hart_t_spread_ticks: self.hart_t_spread_ticks(),
         }
+    }
+
+    /// Guest-tick spread between the fastest and slowest hart at failure
+    /// time, or `None` when fewer than two harts have a timestamp. A
+    /// large spread is the per-hart-stall signal.
+    #[must_use]
+    pub fn hart_t_spread_ticks(&self) -> Option<u64> {
+        if self.last_t_per_hart.len() < 2 {
+            return None;
+        }
+        let max = self.last_t_per_hart.values().max()?;
+        let min = self.last_t_per_hart.values().min()?;
+        Some(max - min)
     }
 
     /// Classify this capture. Convenience over `classify(&self.evidence())`
@@ -287,6 +333,7 @@ pub fn classify_failure<'a>(
             .map(|o| o == WaitOutcome::Disconnected),
         frames_seen: capture.map(|c| c.frames_seen),
         last_frame_wall_age_ms: capture.and_then(|c| c.last_frame_wall_age_ms),
+        hart_t_spread_ticks: capture.and_then(FailureCapture::hart_t_spread_ticks),
     };
     classify(&ev)
 }
@@ -395,6 +442,20 @@ mod tests {
     }
 
     #[test]
+    fn capture_with_one_frozen_hart_classifies_as_hart_stalled() {
+        // The sched-yield-round-trips shape: hart 0 ran to ~44s, hart 1
+        // frozen at ~1.2s; QEMU alive (timeout). The capture's per-hart
+        // timestamps drive the classification through the real bridge.
+        let cap = FailureCapture {
+            outcome: Some(WaitOutcome::Timeout),
+            frames_seen: 7518,
+            last_t_per_hart: BTreeMap::from([(0u32, 442_604_260u64), (1u32, 12_322_570u64)]),
+            ..Default::default()
+        };
+        assert_eq!(cap.classify(), Signature::HartStalled);
+    }
+
+    #[test]
     fn capture_with_disconnect_outcome_classifies_as_wedge() {
         let cap = FailureCapture {
             outcome: Some(WaitOutcome::Disconnected),
@@ -493,6 +554,33 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(classify(&ev), Signature::Wedge);
+    }
+
+    #[test]
+    fn one_hart_frozen_while_another_advances_is_hart_stalled() {
+        // Timeout, QEMU alive, frames flowing — but one hart's clock is
+        // frozen ~43 guest-seconds behind the other. A per-hart stall,
+        // not a generic budget timeout.
+        let ev = FailureEvidence {
+            disconnected: Some(false),
+            frames_seen: Some(7518),
+            hart_t_spread_ticks: Some(430_000_000), // ~43s @ 10 MHz
+            ..Default::default()
+        };
+        assert_eq!(classify(&ev), Signature::HartStalled);
+    }
+
+    #[test]
+    fn small_hart_spread_is_not_a_stall() {
+        // Harts share the CLINT clock; sub-second skew is normal → a
+        // plain budget timeout, not a stall.
+        let ev = FailureEvidence {
+            disconnected: Some(false),
+            frames_seen: Some(50),
+            hart_t_spread_ticks: Some(5_000_000), // 0.5s @ 10 MHz
+            ..Default::default()
+        };
+        assert_eq!(classify(&ev), Signature::BudgetExhausted);
     }
 
     #[test]

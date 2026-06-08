@@ -175,6 +175,11 @@ pub struct RunnerConfig<'a> {
     /// explicitly to parallelise. `0` is floored to 1 (the CLI
     /// rejects 0 outright).
     pub cpu_jobs: u32,
+
+    /// The full command line that launched this run, recorded into the
+    /// run's `metadata.toml` for exact reproduction and to capture the
+    /// parallelism a failure occurred under. `None` omits it.
+    pub invocation: Option<String>,
 }
 
 /// Run `scenarios` `repeat` times. If `update_baseline` is true, write
@@ -224,6 +229,9 @@ pub fn run(
                 fail_fast: config.fail_fast,
                 scenarios: scenarios.iter().map(|s| s.name.to_string()).collect(),
                 hostname: crate::history::current_hostname(),
+                jobs: Some(config.jobs),
+                cpu_jobs: Some(config.cpu_jobs),
+                invocation: config.invocation.clone(),
             },
         };
         match crate::history::create_run_dir(root, &metadata) {

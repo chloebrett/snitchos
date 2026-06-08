@@ -72,6 +72,18 @@ pub struct RunMetadataInner {
     pub scenarios: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// Wfi-batch worker count (`--jobs`). Records the parallelism a run
+    /// executed under, so a failure can be reproduced / its host
+    /// contention reasoned about. `None` for metadata written before
+    /// this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jobs: Option<u32>,
+    /// Cpu-batch worker count (`--cpu-jobs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_jobs: Option<u32>,
+    /// The full command line that launched the run, for exact repro.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation: Option<String>,
 }
 
 /// Compute the run-directory name. Format: UTC RFC-3339-style truncated
@@ -384,6 +396,9 @@ mod tests {
                 fail_fast: Some(3),
                 scenarios: vec!["scn-a".to_string(), "scn-b".to_string()],
                 hostname: None,
+                jobs: None,
+                cpu_jobs: None,
+                invocation: None,
             },
         };
         let (run_dir, mut writer) = create_run_dir(&root, &metadata).unwrap();
@@ -485,6 +500,30 @@ mod tests {
     }
 
     #[test]
+    fn metadata_records_parallelism_and_invocation() {
+        let meta = RunMetadata {
+            run: RunMetadataInner {
+                started_at: datetime!(2026-06-08 12:30:15 UTC),
+                commit: "abc1234".to_string(),
+                build_hash: None,
+                requested_repeat: 50,
+                fail_fast: None,
+                scenarios: vec!["s".to_string()],
+                hostname: None,
+                jobs: Some(10),
+                cpu_jobs: Some(3),
+                invocation: Some("xtask itest --jobs 10 --cpu-jobs 3".to_string()),
+            },
+        };
+        let toml_str = toml::to_string_pretty(&meta).unwrap();
+        assert!(toml_str.contains("jobs = 10"));
+        assert!(toml_str.contains("cpu_jobs = 3"));
+        assert!(toml_str.contains("xtask itest --jobs 10 --cpu-jobs 3"));
+        let back: RunMetadata = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back, meta);
+    }
+
+    #[test]
     fn ndjson_format_is_one_object_per_line() {
         let root = fresh_test_dir();
         let metadata = RunMetadata {
@@ -496,6 +535,9 @@ mod tests {
                 fail_fast: None,
                 scenarios: vec!["s".to_string()],
                 hostname: None,
+                jobs: None,
+                cpu_jobs: None,
+                invocation: None,
             },
         };
         let (run_dir, mut writer) = create_run_dir(&root, &metadata).unwrap();
@@ -553,6 +595,9 @@ mod tests {
                 fail_fast: None,
                 scenarios: vec!["scn-a".to_string(), "scn-b".to_string()],
                 hostname: None,
+                jobs: None,
+                cpu_jobs: None,
+                invocation: None,
             },
         };
         let (run_dir, mut writer) = create_run_dir(&root, &metadata).unwrap();
@@ -611,6 +656,9 @@ mod tests {
                 fail_fast: None,
                 scenarios: vec!["s".to_string()],
                 hostname: None,
+                jobs: None,
+                cpu_jobs: None,
+                invocation: None,
             },
         };
         let (run_dir, mut writer) = create_run_dir(&root, &metadata).unwrap();
@@ -656,6 +704,9 @@ mod tests {
                 fail_fast: None,
                 scenarios: vec!["s".to_string()],
                 hostname: None,
+                jobs: None,
+                cpu_jobs: None,
+                invocation: None,
             },
         };
         let (run_dir, mut writer) = create_run_dir(&root, &metadata).unwrap();

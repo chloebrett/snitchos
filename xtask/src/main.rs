@@ -253,6 +253,12 @@ enum Cmd {
         /// regardless of level.
         #[arg(long, value_name = "LEVEL", default_value_t = CaptureArg::Tail)]
         capture: CaptureArg,
+        /// Scenario name(s) to exclude from the run. Repeatable and/or
+        /// comma-separated: `--skip a --skip b` or `--skip a,b`. Applied
+        /// after `--profile`. Useful to run a batch while leaving out a
+        /// known-slow or known-failing scenario.
+        #[arg(long, value_name = "SCENARIO", value_delimiter = ',')]
+        skip: Vec<String>,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -369,6 +375,7 @@ fn main() -> ExitCode {
             cpu_jobs,
             profile,
             capture,
+            skip,
         } => {
             if let Some(endpoint) = push_otlp {
                 return itest::push_otlp_metrics(endpoint);
@@ -424,6 +431,7 @@ fn main() -> ExitCode {
                 jobs,
                 cpu_jobs,
                 profile_filter,
+                &skip,
             )
         }
         Cmd::Loc => loc::run(),

@@ -127,6 +127,7 @@ pub fn run(
     jobs: u32,
     cpu_jobs: u32,
     profile_filter: Option<CpuProfile>,
+    skip: &[String],
 ) -> ExitCode {
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
@@ -201,6 +202,28 @@ pub fn run(
         }
         None => to_run,
     };
+    let to_run: Vec<&Scenario> = if skip.is_empty() {
+        to_run
+    } else {
+        // Warn on unknown skip names — usually a typo, and silently
+        // skipping nothing would hide it.
+        for s in skip {
+            if !SCENARIOS.iter().any(|sc| sc.name == s.as_str()) {
+                eprintln!("warning: --skip {s:?}: no such scenario (ignored)");
+            }
+        }
+        let before = to_run.len();
+        let filtered: Vec<&Scenario> = to_run
+            .into_iter()
+            .filter(|sc| !skip.iter().any(|s| s == sc.name))
+            .collect();
+        eprintln!("--skip: excluded {} scenario(s)", before - filtered.len());
+        if filtered.is_empty() {
+            eprintln!("--skip: all selected scenarios were excluded; nothing to run");
+            return ExitCode::from(2);
+        }
+        filtered
+    };
 
     // Hook closures. None of these escape the call — the lifetime
     // parameter on RunnerConfig keeps them bounded to this scope.
@@ -231,6 +254,7 @@ pub fn run(
         history_root: Some(PathBuf::from(HISTORY_ROOT)),
         jobs,
         cpu_jobs,
+        invocation: Some(std::env::args().collect::<Vec<_>>().join(" ")),
     };
 
     let outcome = itest_harness::run(&to_run, repeat, update_baseline, &config);
