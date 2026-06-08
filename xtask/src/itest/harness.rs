@@ -7,7 +7,7 @@
 //! `Drop` always kills QEMU and removes the socket, so a panicking
 //! test still cleans up.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 
 use protocol::stream::{OwnedFrame, decode_stream};
 use protocol::StringId;
+
+use itest_harness::{ErrorOrigin, FailureCapture, WaitOutcome};
 
 use crate::qemu;
 
@@ -43,6 +45,12 @@ pub struct Harness {
     /// which surfaces over-sized budgets without anyone digging
     /// through logs.
     max_wait: (Duration, Duration),
+    /// Total telemetry frames absorbed this scenario — the
+    /// `frames_seen` field of a failure capture.
+    frames_seen: u32,
+    /// When the most recent frame arrived, for computing the wall-clock
+    /// silence before a failing wait's deadline (stalled vs slow).
+    last_frame_at: Option<Instant>,
 }
 
 impl Harness {
@@ -64,6 +72,11 @@ impl Harness {
         if !features.is_empty() {
             build_kernel(features)?;
         }
+
+        // Fresh scenario on this worker thread: drop any failure capture
+        // left by a prior (passing) scenario so a later failure can't
+        // inherit it.
+        clear_last_failure_capture();
 
         let socket_path = socket_path_for(label);
         let _ = std::fs::remove_file(&socket_path);
@@ -115,6 +128,8 @@ impl Harness {
             timebase_hz: None,
             recent: VecDeque::new(),
             max_wait: (Duration::ZERO, Duration::ZERO),
+            frames_seen: 0,
+            last_frame_at: None,
         })
     }
 
@@ -146,10 +161,12 @@ impl Harness {
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     self.dump_recent("timeout");
+                    self.record_failure_capture(WaitOutcome::Timeout);
                     break None;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     self.dump_recent("QEMU disconnected");
+                    self.record_failure_capture(WaitOutcome::Disconnected);
                     break None;
                 }
             }
@@ -187,6 +204,8 @@ impl Harness {
     }
 
     fn absorb(&mut self, frame: &OwnedFrame) {
+        self.frames_seen = self.frames_seen.saturating_add(1);
+        self.last_frame_at = Some(Instant::now());
         match frame {
             OwnedFrame::StringRegister { id, value } => {
                 self.strings.insert(*id, value.clone());
@@ -200,6 +219,38 @@ impl Harness {
             self.recent.pop_front();
         }
         self.recent.push_back(frame.clone());
+    }
+
+    /// Snapshot the current scenario state into the thread-local failure
+    /// capture the runner reads after the scenario returns. Records the
+    /// load-bearing summary (outcome, frames seen, wall-silence before
+    /// the deadline) plus a frame-tail transcript and histogram for
+    /// debugging. `error_origin` is `Scenario` — a failing `wait_for` is
+    /// a scenario assertion, not infra.
+    fn record_failure_capture(&self, outcome: WaitOutcome) {
+        let last_frame_wall_age_ms = self
+            .last_frame_at
+            .map(|t| u32::try_from(t.elapsed().as_millis()).unwrap_or(u32::MAX));
+
+        let mut frame_histogram: BTreeMap<String, u32> = BTreeMap::new();
+        let mut transcript = Vec::with_capacity(self.recent.len());
+        for frame in &self.recent {
+            *frame_histogram
+                .entry(variant_name(frame).to_string())
+                .or_insert(0) += 1;
+            transcript.push(self.describe(frame));
+        }
+
+        set_last_failure_capture(FailureCapture {
+            outcome: Some(outcome),
+            error_origin: Some(ErrorOrigin::Scenario),
+            error: None,
+            frames_seen: self.frames_seen,
+            last_frame_wall_age_ms,
+            last_t_per_hart: BTreeMap::new(),
+            frame_histogram,
+            transcript,
+        });
     }
 
     fn dump_recent(&self, reason: &str) {
@@ -304,6 +355,24 @@ impl Drop for Harness {
     }
 }
 
+/// Short, stable variant name for a frame — the histogram key and a
+/// compact label. Mirrors the `OwnedFrame` variants.
+fn variant_name(frame: &OwnedFrame) -> &'static str {
+    match frame {
+        OwnedFrame::Hello { .. } => "Hello",
+        OwnedFrame::StringRegister { .. } => "StringRegister",
+        OwnedFrame::MetricRegister { .. } => "MetricRegister",
+        OwnedFrame::SpanStart { .. } => "SpanStart",
+        OwnedFrame::SpanEnd { .. } => "SpanEnd",
+        OwnedFrame::Event { .. } => "Event",
+        OwnedFrame::Metric { .. } => "Metric",
+        OwnedFrame::Dropped { .. } => "Dropped",
+        OwnedFrame::ThreadRegister { .. } => "ThreadRegister",
+        OwnedFrame::ContextSwitch { .. } => "ContextSwitch",
+        OwnedFrame::HartRegister { .. } => "HartRegister",
+    }
+}
+
 thread_local! {
     /// Per-thread slot for the most-recently-dropped Harness's
     /// `max_wait`. The test runner reads this after each scenario
@@ -311,6 +380,12 @@ thread_local! {
     /// Harness (or the slot has already been consumed).
     static LAST_MAX_WAIT: std::cell::Cell<Option<(Duration, Duration)>> =
         const { std::cell::Cell::new(None) };
+
+    /// Per-thread slot for the most recent failure capture. Set by
+    /// `record_failure_capture` on a failing `wait_for`, cleared at each
+    /// `spawn`, drained by the runner via `take_last_failure_capture`.
+    static LAST_FAILURE_CAPTURE: std::cell::RefCell<Option<FailureCapture>> =
+        const { std::cell::RefCell::new(None) };
 
     /// Per-thread slot for the most recently-spawned Harness's QEMU
     /// log file path. The runner dumps this on test failure.
@@ -322,6 +397,22 @@ thread_local! {
 /// no Harness has been dropped since the last call.
 pub fn take_last_max_wait() -> Option<(Duration, Duration)> {
     LAST_MAX_WAIT.with(|cell| cell.take())
+}
+
+fn set_last_failure_capture(capture: FailureCapture) {
+    LAST_FAILURE_CAPTURE.with(|cell| *cell.borrow_mut() = Some(capture));
+}
+
+fn clear_last_failure_capture() {
+    LAST_FAILURE_CAPTURE.with(|cell| *cell.borrow_mut() = None);
+}
+
+/// Consume the last failing `wait_for`'s structured capture. Returns
+/// `None` if the scenario failed without a wait timeout/disconnect
+/// (e.g. a value-mismatch assertion), in which case the runner
+/// classifies from the error string and log tail alone.
+pub fn take_last_failure_capture() -> Option<FailureCapture> {
+    LAST_FAILURE_CAPTURE.with(|cell| cell.borrow_mut().take())
 }
 
 /// Consume the last-scenario's QEMU log file path. Returns `None` if

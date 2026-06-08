@@ -38,6 +38,11 @@ pub struct IterationRow {
     /// Step D wires this up; step C leaves it `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
+    /// Cause-bucket this failure was attributed to. Present only when
+    /// `result == Fail` and the harness captured enough evidence to
+    /// classify. Drives the per-bucket flake-rate breakdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<crate::signature::Signature>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -359,6 +364,7 @@ mod tests {
                 result: ResultKind::Pass,
                 error: None,
                 log: None,
+                signature: None,
             })
             .unwrap();
         writer
@@ -370,6 +376,7 @@ mod tests {
                 result: ResultKind::Fail,
                 error: Some("scripted failure".to_string()),
                 log: None,
+                signature: None,
             })
             .unwrap();
         drop(writer);
@@ -389,6 +396,33 @@ mod tests {
         assert_eq!(rows[1].error.as_deref(), Some("scripted failure"));
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn iteration_row_carries_failure_signature() {
+        let row = IterationRow {
+            iteration: 9,
+            scenario: "kernel-heap-metrics".to_string(),
+            started_at: datetime!(2026-06-08 12:30:15 UTC),
+            duration_ms: 30_001,
+            result: ResultKind::Fail,
+            error: Some("no snitchos.heap.alloc_total within 30s".to_string()),
+            log: Some("fail-kernel-heap-metrics-9.log".to_string()),
+            signature: Some(crate::signature::Signature::BudgetExhausted),
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["signature"], "budget_exhausted");
+
+        let back: IterationRow = serde_json::from_value(json).unwrap();
+        assert_eq!(back, row);
+
+        // A passing row omits the signature entirely.
+        let pass = IterationRow {
+            signature: None,
+            ..row
+        };
+        let pass_json = serde_json::to_string(&pass).unwrap();
+        assert!(!pass_json.contains("signature"));
     }
 
     #[test]
@@ -416,6 +450,7 @@ mod tests {
                     result: ResultKind::Pass,
                     error: None,
                     log: None,
+                    signature: None,
                 })
                 .unwrap();
         }
@@ -483,6 +518,7 @@ mod tests {
                         None
                     },
                     log: None,
+                    signature: None,
                 })
                 .unwrap();
         }

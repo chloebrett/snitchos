@@ -17,8 +17,13 @@
 //! emitting → alive-but-slow), which `Harness::wait_for` knows at the
 //! moment of failure.
 
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
 /// Which cause-bucket a failed iteration is attributed to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Signature {
     /// QEMU's frame socket disconnected: the kernel stopped emitting and
     /// the process exited. The classic cross-hart-wedge signature — the
@@ -51,7 +56,8 @@ pub enum Signature {
 /// site that produces the error, so the classifier never has to infer
 /// infra-vs-kernel from error text. This is the robust path; the error
 /// string is only sniffed as a fallback for untagged historical data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ErrorOrigin {
     /// Produced by harness infrastructure — QEMU launch, socket connect,
     /// kernel build, child reap. Not about the kernel under test.
@@ -143,6 +149,103 @@ pub fn classify(evidence: &FailureEvidence) -> Signature {
     }
 }
 
+/// How a failing `wait_for` ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitOutcome {
+    /// The frame socket disconnected — QEMU exited.
+    Disconnected,
+    /// The deadline elapsed with QEMU still alive.
+    Timeout,
+}
+
+/// The persisted, owned record of a single failed iteration. This is the
+/// serialized artifact (sidecar to `fail-*.log`); the classifier's
+/// `FailureEvidence` is a borrowed view over it. The summary fields are
+/// always captured; `transcript` is bounded by the configured capture
+/// level (empty under `summary`, a tail under `tail`, the whole stream
+/// under `full`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureCapture {
+    /// How the failing wait ended. `None` if not recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<WaitOutcome>,
+    /// Origin tag of the error, stamped by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_origin: Option<ErrorOrigin>,
+    /// The scenario's returned error string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Total telemetry frames observed before the failure.
+    pub frames_seen: u32,
+    /// Wall-clock gap, milliseconds, between the last frame and the
+    /// deadline. `None` if not recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_frame_wall_age_ms: Option<u32>,
+    /// Last observed kernel timestamp per hart id — pins which hart went
+    /// quiet, and how far each got.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_t_per_hart: BTreeMap<u32, u64>,
+    /// Count of frames by variant name (e.g. `SpanStart`, `Metric`) —
+    /// pins which boot phase the failure landed in.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub frame_histogram: BTreeMap<String, u32>,
+    /// Decoded frame transcript (tail or full stream per capture level).
+    /// Empty under `summary`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript: Vec<String>,
+}
+
+impl FailureCapture {
+    /// Borrowed classifier view. `log_tail` is not held by the capture
+    /// (it lives in the separate `.log` file); the caller fills it in
+    /// when the UART log is available for panic / external-signal
+    /// detection.
+    #[must_use]
+    pub fn evidence(&self) -> FailureEvidence<'_> {
+        FailureEvidence {
+            error_origin: self.error_origin,
+            error: self.error.as_deref(),
+            log_tail: None,
+            disconnected: self.outcome.map(|o| o == WaitOutcome::Disconnected),
+            frames_seen: Some(self.frames_seen),
+            last_frame_wall_age_ms: self.last_frame_wall_age_ms,
+        }
+    }
+
+    /// Classify this capture. Convenience over `classify(&self.evidence())`
+    /// for callers that have no UART log to contribute.
+    #[must_use]
+    pub fn classify(&self) -> Signature {
+        classify(&self.evidence())
+    }
+}
+
+/// Assemble the available evidence about a failed iteration and
+/// classify it. Combines the harness's structured `FailureCapture`
+/// (outcome, frame stats, origin tag) with the error string and the
+/// UART log tail — the latter two are reachable by the runner even when
+/// no capture was recorded (spawn failures, non-wait assertions). The
+/// capture's own fields take precedence where both are present.
+#[must_use]
+pub fn classify_failure<'a>(
+    capture: Option<&'a FailureCapture>,
+    error: Option<&'a str>,
+    log_tail: Option<&'a str>,
+) -> Signature {
+    let ev = FailureEvidence {
+        error_origin: capture.and_then(|c| c.error_origin),
+        error: capture.and_then(|c| c.error.as_deref()).or(error),
+        log_tail,
+        disconnected: capture
+            .and_then(|c| c.outcome)
+            .map(|o| o == WaitOutcome::Disconnected),
+        frames_seen: capture.map(|c| c.frames_seen),
+        last_frame_wall_age_ms: capture.and_then(|c| c.last_frame_wall_age_ms),
+    };
+    classify(&ev)
+}
+
 /// Markers that identify an error string as originating in the harness
 /// infrastructure rather than a scenario assertion. Mirrors the `Err`
 /// prefixes produced by `Harness::spawn` and the kernel build step.
@@ -160,6 +263,91 @@ fn is_harness_error(error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_failure_prefers_capture_but_lets_log_panic_win() {
+        // The capture says "timeout, alive" (would be BudgetExhausted),
+        // but the UART log — available only to the runner, not the
+        // capture — shows a panic. The panic wins.
+        let cap = FailureCapture {
+            outcome: Some(WaitOutcome::Timeout),
+            error_origin: Some(ErrorOrigin::Scenario),
+            frames_seen: 40,
+            ..Default::default()
+        };
+        let sig = classify_failure(
+            Some(&cap),
+            Some("no kernel.heartbeat within 30s"),
+            Some("…entering heartbeat\nKernel panic: out of bounds"),
+        );
+        assert_eq!(sig, Signature::Wedge);
+    }
+
+    #[test]
+    fn classify_failure_without_capture_falls_back_to_error_and_log() {
+        // No capture recorded (e.g. a spawn failure or a non-wait
+        // assertion). Classification still works off the error string
+        // and log tail.
+        assert_eq!(
+            classify_failure(None, Some("spawn qemu: not found"), None),
+            Signature::Harness,
+        );
+        assert_eq!(
+            classify_failure(None, Some("no ThreadRegister for 'main'"), None),
+            Signature::Unknown,
+        );
+    }
+
+    #[test]
+    fn capture_serializes_with_stable_field_shape_and_round_trips() {
+        let cap = FailureCapture {
+            outcome: Some(WaitOutcome::Timeout),
+            error_origin: Some(ErrorOrigin::Scenario),
+            error: Some("no kernel.heartbeat within 30s".to_string()),
+            frames_seen: 7,
+            last_frame_wall_age_ms: Some(150),
+            last_t_per_hart: BTreeMap::from([(0u32, 1_000u64)]),
+            frame_histogram: BTreeMap::from([("SpanStart".to_string(), 2u32)]),
+            transcript: vec!["Hello { .. }".to_string()],
+        };
+        let json = serde_json::to_value(&cap).unwrap();
+        assert_eq!(json["outcome"], "timeout");
+        assert_eq!(json["error_origin"], "scenario");
+        assert_eq!(json["frames_seen"], 7);
+        assert_eq!(json["last_frame_wall_age_ms"], 150);
+        assert_eq!(json["last_t_per_hart"]["0"], 1000);
+        assert_eq!(json["frame_histogram"]["SpanStart"], 2);
+
+        let back: FailureCapture = serde_json::from_value(json).unwrap();
+        assert_eq!(back, cap);
+    }
+
+    #[test]
+    fn summary_only_capture_omits_empty_fields() {
+        // A `summary`-level capture stays compact: empty maps/vecs and
+        // unset options are skipped, but the always-present count is not.
+        let cap = FailureCapture {
+            outcome: Some(WaitOutcome::Disconnected),
+            frames_seen: 0,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cap).unwrap();
+        assert!(json.contains("frames_seen"));
+        assert!(!json.contains("transcript"));
+        assert!(!json.contains("frame_histogram"));
+        assert!(!json.contains("last_t_per_hart"));
+        assert!(!json.contains("error_origin"));
+    }
+
+    #[test]
+    fn capture_with_disconnect_outcome_classifies_as_wedge() {
+        let cap = FailureCapture {
+            outcome: Some(WaitOutcome::Disconnected),
+            frames_seen: 3,
+            ..Default::default()
+        };
+        assert_eq!(cap.classify(), Signature::Wedge);
+    }
 
     #[test]
     fn socket_disconnect_is_a_wedge() {

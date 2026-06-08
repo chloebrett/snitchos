@@ -88,6 +88,14 @@ pub type LogPathFn<'a> = &'a (dyn Fn(&str) -> Option<PathBuf> + Send + Sync);
 /// thread-locals work. Same `Send + Sync` rationale as `LogPathFn`.
 pub type MaxWaitFn<'a> = &'a (dyn Fn() -> Option<(Duration, Duration)> + Send + Sync);
 
+/// Per-scenario failure-capture hook. Called after a *failed*
+/// `(scenario.run)()` from the same thread (so `harness`-side
+/// thread-locals work), returning the structured `FailureCapture` the
+/// harness recorded, or `None` if it captured nothing (e.g. a non-wait
+/// assertion). Same `Send + Sync` rationale as `LogPathFn`.
+pub type CaptureFn<'a> =
+    &'a (dyn Fn() -> Option<crate::signature::FailureCapture> + Send + Sync);
+
 /// Hooks the runner calls during execution. Each is `Option<&dyn Fn>`
 /// so consumers can supply only what they need. Lifetime parameter
 /// matches the surrounding `run()` call — hooks don't escape.
@@ -107,6 +115,11 @@ pub struct RunnerConfig<'a> {
     /// the runner's wall-clock timing — this is e.g. virtio-frame wait
     /// budget exposure). Used only for inline display.
     pub max_wait_for: Option<MaxWaitFn<'a>>,
+
+    /// Called after a failed scenario; returns the harness's structured
+    /// `FailureCapture` for cause-bucket classification. `None` skips
+    /// classification (the iteration row's `signature` stays unset).
+    pub capture_for: Option<CaptureFn<'a>>,
 
     /// Called once when writing a new baseline entry. Returns the
     /// short git commit hash, or `None` if unavailable.
@@ -279,6 +292,7 @@ pub fn run(
         let work_ref = &work;
         let log_path_for = config.log_path_for;
         let max_wait_for = config.max_wait_for;
+        let capture_for = config.capture_for;
         let history_dir_ref = history_dir.as_deref();
         let history_writer_ref = &history_writer;
         let interrupt = config.interrupt;
@@ -310,6 +324,7 @@ pub fn run(
                             history_dir_ref,
                             log_path_for,
                             max_wait_for,
+                            capture_for,
                             ScenarioFormat::Prefixed,
                         );
                         let totals = if res.failed {
@@ -410,6 +425,7 @@ pub fn run(
                     history_dir.as_deref(),
                     config.log_path_for,
                     config.max_wait_for,
+                    config.capture_for,
                     ScenarioFormat::Inline,
                 );
                 if res.failed {
@@ -449,6 +465,7 @@ pub fn run(
                     history_dir.as_deref(),
                     config.log_path_for,
                     config.max_wait_for,
+                    config.capture_for,
                     None,
                 );
                 local.merge(wfi_agg);
@@ -469,6 +486,7 @@ pub fn run(
                     history_dir.as_deref(),
                     config.log_path_for,
                     config.max_wait_for,
+                    config.capture_for,
                     None,
                 );
                 local.merge(cpu_agg);
@@ -647,6 +665,7 @@ fn run_parallel_batch<'a>(
     history_dir: Option<&'a Path>,
     log_path_for: Option<LogPathFn<'a>>,
     max_wait_for: Option<MaxWaitFn<'a>>,
+    capture_for: Option<CaptureFn<'a>>,
     stop_signal: Option<&'a std::sync::atomic::AtomicBool>,
 ) -> (Aggregator, usize) {
     if work_items.is_empty() || workers == 0 {
@@ -681,6 +700,7 @@ fn run_parallel_batch<'a>(
                         history_dir,
                         log_path_for,
                         max_wait_for,
+                        capture_for,
                         ScenarioFormat::Prefixed,
                     );
                     if res.failed {
@@ -735,6 +755,7 @@ fn process_one_scenario(
     history_dir: Option<&Path>,
     log_path_for: Option<LogPathFn<'_>>,
     max_wait_for: Option<MaxWaitFn<'_>>,
+    capture_for: Option<CaptureFn<'_>>,
     format: ScenarioFormat,
 ) -> ScenarioOutcome {
     if matches!(format, ScenarioFormat::Inline) {
@@ -763,6 +784,7 @@ fn process_one_scenario(
     };
 
     let mut row_log: Option<String> = None;
+    let mut row_signature: Option<crate::signature::Signature> = None;
     let mut failed = false;
     let (row_result, row_error) = match &outcome {
         Ok(()) => {
@@ -772,10 +794,12 @@ fn process_one_scenario(
         Err(e) => {
             eprintln!("{prefix}FAILED{timing_str}");
             eprintln!("{prefix}  {e}");
+            let mut log_tail: Option<String> = None;
             if let Some(get_path) = log_path_for
                 && let Some(log_path) = get_path(s.name)
             {
                 dump_log_tail(&log_path);
+                log_tail = std::fs::read_to_string(&log_path).ok();
                 if let Some(hdir) = history_dir {
                     let dest_name = format!("fail-{}-{}.log", s.name, run_idx + 1);
                     let dest = hdir.join(&dest_name);
@@ -788,6 +812,17 @@ fn process_one_scenario(
                     }
                 }
             }
+            // Pull the harness's structured capture (same thread, so its
+            // thread-local is live) and attribute the failure to a
+            // cause-bucket. Always produces a signature on failure —
+            // `Unknown` when evidence is thin — so no failure goes
+            // unattributed.
+            let capture = capture_for.and_then(|f| f());
+            row_signature = Some(crate::signature::classify_failure(
+                capture.as_ref(),
+                Some(e),
+                log_tail.as_deref(),
+            ));
             failed = true;
             local.record_fail(s.name);
             (crate::history::ResultKind::Fail, Some(e.clone()))
@@ -804,6 +839,7 @@ fn process_one_scenario(
         result: row_result,
         error: row_error,
         log: row_log,
+        signature: row_signature,
     };
     if let Some(writer) = history_writer
         .lock()
