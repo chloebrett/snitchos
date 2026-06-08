@@ -16,7 +16,7 @@ use crate::signature::Signature;
 
 /// Pass/fail counts for a single `--repeat` iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RunTotals {
+pub(crate) struct RunTotals {
     pub passed: usize,
     pub failed: usize,
 }
@@ -30,7 +30,7 @@ pub struct RunTotals {
 /// coupled the report to the consumer's static lifetime. Lexicographic
 /// is good enough and decoupling is the point.)
 #[derive(Debug, Default, Clone)]
-pub struct Aggregator {
+pub(crate) struct Aggregator {
     fail_count: BTreeMap<String, u32>,
     run_totals: Vec<RunTotals>,
     /// Per-scenario, per-iteration wall-clock durations. Appended in
@@ -59,7 +59,7 @@ impl Aggregator {
     /// Record one scenario failure with its classified cause-bucket. A
     /// `None` signature counts toward `Unknown` so every failure is
     /// represented in the breakdown.
-    pub fn record_fail_with_signature(&mut self, scenario: &str, signature: Option<Signature>) {
+    pub(crate) fn record_fail_with_signature(&mut self, scenario: &str, signature: Option<Signature>) {
         // `entry` + `or_insert(0)` mirrors xtask's prior implementation;
         // the count is total failures for this scenario across all runs.
         *self.fail_count.entry(scenario.to_string()).or_insert(0) += 1;
@@ -73,7 +73,7 @@ impl Aggregator {
 
     /// Suite-wide failure counts by cause-bucket, folded across every
     /// scenario. Empty when there were no failures.
-    pub fn signature_counts(&self) -> BTreeMap<Signature, u32> {
+    pub(crate) fn signature_counts(&self) -> BTreeMap<Signature, u32> {
         let mut folded: BTreeMap<Signature, u32> = BTreeMap::new();
         for per_scenario in self.signature_by_scenario.values() {
             for (sig, count) in per_scenario {
@@ -85,7 +85,7 @@ impl Aggregator {
 
     /// Failure counts by cause-bucket for one scenario. Empty for a
     /// scenario that never failed.
-    pub fn signature_counts_for(&self, scenario: &str) -> BTreeMap<Signature, u32> {
+    pub(crate) fn signature_counts_for(&self, scenario: &str) -> BTreeMap<Signature, u32> {
         self.signature_by_scenario
             .get(scenario)
             .cloned()
@@ -94,17 +94,17 @@ impl Aggregator {
 
     /// Capture this run's totals. Call once per `--repeat` iteration
     /// after every scenario has been recorded.
-    pub fn finish_run(&mut self, totals: RunTotals) {
+    pub(crate) fn finish_run(&mut self, totals: RunTotals) {
         self.run_totals.push(totals);
     }
 
     /// Did any scenario fail in any run?
-    pub fn any_failures(&self) -> bool {
+    pub(crate) fn any_failures(&self) -> bool {
         !self.fail_count.is_empty()
     }
 
     /// Per-run pass/fail totals, in run order.
-    pub fn run_totals(&self) -> &[RunTotals] {
+    pub(crate) fn run_totals(&self) -> &[RunTotals] {
         &self.run_totals
     }
 
@@ -118,13 +118,13 @@ impl Aggregator {
 
     /// Cumulative fail count for a single scenario across all runs.
     /// Returns 0 for scenarios that never failed (or never ran).
-    pub fn fail_count(&self, scenario: &str) -> u32 {
+    pub(crate) fn fail_count(&self, scenario: &str) -> u32 {
         self.fail_count.get(scenario).copied().unwrap_or(0)
     }
 
     /// Total failures across all scenarios and all runs recorded so
     /// far. Used by the runner's `--fail-fast=K` early-exit check.
-    pub fn total_failures(&self) -> u32 {
+    pub(crate) fn total_failures(&self) -> u32 {
         self.fail_count.values().sum()
     }
 
@@ -135,7 +135,7 @@ impl Aggregator {
 
     /// Record a wall-clock duration observation for a scenario in this
     /// run. Call once per scenario per `--repeat` iteration.
-    pub fn record_duration(&mut self, scenario: &str, duration: Duration) {
+    pub(crate) fn record_duration(&mut self, scenario: &str, duration: Duration) {
         self.durations
             .entry(scenario.to_string())
             .or_default()
@@ -145,7 +145,7 @@ impl Aggregator {
     /// Mean of the recorded durations for `scenario`. `None` if no
     /// observations exist (scenario never ran, or timing was never
     /// recorded).
-    pub fn mean_duration(&self, scenario: &str) -> Option<Duration> {
+    pub(crate) fn mean_duration(&self, scenario: &str) -> Option<Duration> {
         let v = self.durations.get(scenario)?;
         if v.is_empty() {
             return None;
@@ -157,7 +157,7 @@ impl Aggregator {
     /// p95 of the recorded durations via the nearest-rank method:
     /// sort the samples and pick the value at `ceil(0.95 * n) - 1`.
     /// `None` if no observations.
-    pub fn p95_duration(&self, scenario: &str) -> Option<Duration> {
+    pub(crate) fn p95_duration(&self, scenario: &str) -> Option<Duration> {
         self.percentile_duration(scenario, 0.95)
     }
 
@@ -182,7 +182,7 @@ impl Aggregator {
     /// CPU time (each scenario consumes ~one host core for its
     /// duration). Compare against wall-clock to see the parallelism
     /// factor.
-    pub fn total_duration(&self) -> Duration {
+    pub(crate) fn total_duration(&self) -> Duration {
         self.durations.values().flatten().sum()
     }
 
@@ -198,7 +198,7 @@ impl Aggregator {
     ///   after `self`'s. Mean / p95 are computed lazily over the
     ///   merged vector, so observation order across the merge is
     ///   irrelevant.
-    pub fn merge(&mut self, other: Aggregator) {
+    pub(crate) fn merge(&mut self, other: Aggregator) {
         for (name, count) in other.fail_count {
             *self.fail_count.entry(name).or_insert(0) += count;
         }
@@ -220,7 +220,7 @@ impl Aggregator {
     /// Render the multi-run aggregate summary. Format matches xtask's
     /// pre-extraction output so a side-by-side diff during migration is
     /// zero lines.
-    pub fn render_aggregate(&self, total_runs: u32) -> String {
+    pub(crate) fn render_aggregate(&self, total_runs: u32) -> String {
         use std::fmt::Write;
         let mut out = String::new();
         let _ = writeln!(out, "\n=== aggregate over {total_runs} runs ===");
@@ -249,7 +249,7 @@ impl Aggregator {
     /// string when nothing failed. Shared by `render_aggregate` (the
     /// `--repeat` summary) and the single-run failure path, so a one-off
     /// run that flakes still reports which bucket it hit.
-    pub fn render_signature_breakdown(&self) -> String {
+    pub(crate) fn render_signature_breakdown(&self) -> String {
         use std::fmt::Write;
         let folded = self.signature_counts();
         if folded.is_empty() {

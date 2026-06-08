@@ -301,7 +301,7 @@ impl FailureCapture {
     /// time, or `None` when fewer than two harts have a timestamp. A
     /// large spread is the per-hart-stall signal.
     #[must_use]
-    pub fn hart_t_spread_ticks(&self) -> Option<u64> {
+    pub(crate) fn hart_t_spread_ticks(&self) -> Option<u64> {
         if self.last_t_per_hart.len() < 2 {
             return None;
         }
@@ -325,7 +325,7 @@ impl FailureCapture {
 /// no capture was recorded (spawn failures, non-wait assertions). The
 /// capture's own fields take precedence where both are present.
 #[must_use]
-pub fn classify_failure<'a>(
+pub(crate) fn classify_failure<'a>(
     capture: Option<&'a FailureCapture>,
     error: Option<&'a str>,
     log_tail: Option<&'a str>,

@@ -81,19 +81,19 @@ impl Scenario {
 /// from their own threads. Plain `fn`-pointer and capture-free
 /// closures satisfy this automatically; consumers that need shared
 /// state should use `Arc` / `Mutex` rather than `Rc` / `RefCell`.
-pub type LogPathFn<'a> = &'a (dyn Fn(&str) -> Option<PathBuf> + Send + Sync);
+pub(crate) type LogPathFn<'a> = &'a (dyn Fn(&str) -> Option<PathBuf> + Send + Sync);
 
 /// Per-scenario timing-hook signature. Called immediately after
 /// `(scenario.run)()` from the same thread, so `harness`-side
 /// thread-locals work. Same `Send + Sync` rationale as `LogPathFn`.
-pub type MaxWaitFn<'a> = &'a (dyn Fn() -> Option<(Duration, Duration)> + Send + Sync);
+pub(crate) type MaxWaitFn<'a> = &'a (dyn Fn() -> Option<(Duration, Duration)> + Send + Sync);
 
 /// Per-scenario failure-capture hook. Called after a *failed*
 /// `(scenario.run)()` from the same thread (so `harness`-side
 /// thread-locals work), returning the structured `FailureCapture` the
 /// harness recorded, or `None` if it captured nothing (e.g. a non-wait
 /// assertion). Same `Send + Sync` rationale as `LogPathFn`.
-pub type CaptureFn<'a> =
+pub(crate) type CaptureFn<'a> =
     &'a (dyn Fn() -> Option<crate::signature::FailureCapture> + Send + Sync);
 
 /// The three per-scenario callbacks, bundled so they thread through the

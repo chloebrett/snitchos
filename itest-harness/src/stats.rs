@@ -21,7 +21,7 @@ const Z_95: f64 = 1.959_963_984_540_054;
 /// Inclusive `[lower, upper]` bounds for a binomial proportion, both in
 /// `[0.0, 1.0]`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ConfidenceInterval {
+pub(crate) struct ConfidenceInterval {
     pub lower: f64,
     pub upper: f64,
 }
@@ -33,7 +33,7 @@ pub struct ConfidenceInterval {
 /// - `k == 0` → lower bound is 0.0 (Wilson handles this without going
 ///   negative, unlike the Wald interval).
 /// - `k == n` → upper bound is 1.0.
-pub fn wilson_score_95(failures: u32, runs: u32) -> ConfidenceInterval {
+pub(crate) fn wilson_score_95(failures: u32, runs: u32) -> ConfidenceInterval {
     if runs == 0 {
         return ConfidenceInterval { lower: 0.0, upper: 1.0 };
     }
@@ -59,7 +59,7 @@ pub fn wilson_score_95(failures: u32, runs: u32) -> ConfidenceInterval {
 ///   `k == 0`), the pooled SE is 0 and the test is undefined — we
 ///   return `1.0` (treat as consistent; we can't distinguish anything).
 /// - If both samples are identical proportions, p ≈ 1.0.
-pub fn two_proportion_p_value(k1: u32, n1: u32, k2: u32, n2: u32) -> f64 {
+pub(crate) fn two_proportion_p_value(k1: u32, n1: u32, k2: u32, n2: u32) -> f64 {
     if n1 == 0 || n2 == 0 {
         return 1.0;
     }

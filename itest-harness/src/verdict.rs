@@ -17,7 +17,7 @@ use crate::stats::{two_proportion_p_value, wilson_score_95};
 
 /// Default p-value threshold for declaring rates different. Conventional
 /// 5% two-sided gate.
-pub const DEFAULT_ALPHA: f64 = 0.05;
+pub(crate) const DEFAULT_ALPHA: f64 = 0.05;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Verdict {
@@ -36,7 +36,7 @@ pub enum Verdict {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Direction {
+pub(crate) enum Direction {
     /// Current rate is higher than baseline (regression).
     Worse,
     /// Current rate is lower than baseline (improvement).
@@ -74,7 +74,7 @@ pub fn verdict(
 /// All the inputs `render_comparison` needs for one scenario. Struct
 /// instead of long positional args so adding new dimensions (timing,
 /// future telemetry) doesn't churn every call site.
-pub struct ComparisonRender<'a> {
+pub(crate) struct ComparisonRender<'a> {
     pub scenario: &'a str,
     pub failures: u32,
     pub runs: u32,
@@ -95,7 +95,7 @@ pub struct ComparisonRender<'a> {
 /// ```
 ///
 /// The timing line is omitted entirely when neither side has data.
-pub fn render_comparison(r: &ComparisonRender<'_>) -> String {
+pub(crate) fn render_comparison(r: &ComparisonRender<'_>) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{}:", r.scenario);
 

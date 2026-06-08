@@ -28,28 +28,44 @@ at `state.rs:254` — keep.
   `WallClock`, `SpanExporter`, `HISTOGRAM_BOUNDS`) could be `pub(crate)` since a
   bin exposes nothing. Cosmetic; not worth a churn PR.
 
-## itest-harness — the real finding: ~55% over-exposed surface
+## itest-harness — DONE: surface 99 → 56 pub items
 
-Sole consumer is `xtask`. **55 of 99 `pub` items are never named by xtask**
-(`ext=0`, `int>0`) — internal-only API exposed as `pub`. Confirmed by spot-check:
-`Aggregator`, `wilson_score_95`, `ConfidenceInterval`, `PruneReport`,
-`HistoryWriter`, `RunMetadataInner`, `BaselineError`, … all have 0 xtask callers.
+Sole consumer is `xtask`. 55 of 99 `pub` items showed `ext=0`. Ran the
+compiler-backed privatization sweep: demoted all 55 to `pub(crate)`, rebuilt
+`itest-harness + xtask`, re-promoted exactly what the compiler proved was
+cross-crate. **Result: 43 demoted, 12 re-promoted; public surface 99 → 56, zero
+deletions.** All 150 itest-harness + 36 xtask tests green, clippy clean.
 
-- **Not dead** — these are used *within* itest-harness; they're just over-broad
-  visibility. No deletion.
-- **Recommendation (needs your call):** a `pub` → `pub(crate)` sweep on the
-  ext=0 set. The compiler-backed way is the **privatization detector**: demote in
-  batches and rebuild — anything that breaks was genuinely cross-crate; anything
-  that compiles was internal. Shrinks the API surface ~2× to what its one
-  consumer actually needs.
-- **Caveat:** itest-harness is a *harness library* — some breadth may be
-  deliberate for future reuse / testability. But `publish = false` + single
-  consumer weakens that; this is the textbook "internal-only, demote" case.
-- **Marker false positive:** `baseline.rs:898 std::fs::write(&pending, "# stub\n")`
-  — the literal `# stub` in a test string, not a real stub. Ignore.
+The 12 re-promotions were all **tool false positives** — two classes the
+word-boundary heuristic structurally can't see:
+
+1. **Re-export alias** (1): `push_with_timeout` is consumed by xtask as
+   `push_otlp_with_timeout` (`pub use otlp::push_with_timeout as …` in lib.rs).
+   The tool counts by declared name, so the aliased use is invisible → `ext=0`.
+2. **Type used positionally in a public signature** (11): `BaselineError`,
+   `ScenarioBaseline`, `Signature`, `PruneReport`, `RecoveredRun`,
+   `RecoveredScenario`, `FailureEvidence`, `Baseline`, `RunMetadata`,
+   `RunMetadataInner`, `PartialMarker`. xtask calls e.g. `BaselineFile::load_path`
+   (returns `Result<_, BaselineError>`) or reads `prune_runs`'s `PruneReport`
+   without ever *naming* the type → `ext=0`. The compiler's `private_interfaces`
+   lint + "type is private" errors surfaced the whole transitive closure (a pub
+   field's type must be ≥ as visible as the field), re-promoted in 4 rebuild
+   rounds until it converged.
+
+- **Marker false positive** (unchanged): `baseline.rs` `"# stub\n"` literal —
+  not a real stub.
 
 ## Net
 
-protocol/collector: no action. itest-harness: one optional privatization sweep
-(~55 `pub`→`pub(crate)`, zero deletions). No unused deps anywhere (contrast
+protocol/collector: no action. itest-harness: **done** — 43 `pub`→`pub(crate)`,
+zero deletions, surface nearly halved. No unused deps anywhere (contrast
 `kernel-core`'s `spin`, `plans/kernel-core-audit.md` finding 0).
+
+## Lesson for the tool / skill
+
+The sweep confirmed two structural false-positive classes in `xtask audit`'s
+`ext` count — re-export aliases and types-used-positionally-in-public-signatures.
+Both mean: **`ext=0` is a candidate, and the compiler is the oracle.** The
+privatization sweep (demote-all-then-let-the-compiler-re-promote) is the correct
+procedure precisely because it turns those blind spots into build errors. Noted
+in `plans/xtask-audit.md` and the `crate-audit` skill.

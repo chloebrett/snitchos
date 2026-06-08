@@ -18,7 +18,7 @@ use time::serde::rfc3339;
 /// `iterations.ndjson`. Field shape is the contract for tier H1's
 /// metrics exporter.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct IterationRow {
+pub(crate) struct IterationRow {
     /// 1-indexed iteration number — matches the runner's `--repeat`
     /// counter.
     pub iteration: u32,
@@ -47,7 +47,7 @@ pub struct IterationRow {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ResultKind {
+pub(crate) enum ResultKind {
     Pass,
     Fail,
 }
@@ -108,7 +108,7 @@ pub fn run_dir_name(started_at: OffsetDateTime) -> String {
 /// Create a new run directory under `history_root`, write `metadata.toml`,
 /// return both the directory path and an opened `HistoryWriter` ready
 /// to append rows.
-pub fn create_run_dir(history_root: &Path, metadata: &RunMetadata) -> io::Result<(PathBuf, HistoryWriter)> {
+pub(crate) fn create_run_dir(history_root: &Path, metadata: &RunMetadata) -> io::Result<(PathBuf, HistoryWriter)> {
     let dir = history_root.join(run_dir_name(metadata.run.started_at));
     std::fs::create_dir_all(&dir)?;
     let meta_path = dir.join("metadata.toml");
@@ -120,7 +120,7 @@ pub fn create_run_dir(history_root: &Path, metadata: &RunMetadata) -> io::Result
 }
 
 /// Append-only handle to `iterations.ndjson`. `Drop` closes the file.
-pub struct HistoryWriter {
+pub(crate) struct HistoryWriter {
     file: File,
 }
 
@@ -149,7 +149,7 @@ impl HistoryWriter {
 /// Streaming reader for `iterations.ndjson`. Yields one row at a time;
 /// stops at EOF. Malformed lines bubble up as errors but don't
 /// abort the iteration — caller decides whether to skip or stop.
-pub fn read_iterations(path: &Path) -> io::Result<impl Iterator<Item = io::Result<IterationRow>>> {
+pub(crate) fn read_iterations(path: &Path) -> io::Result<impl Iterator<Item = io::Result<IterationRow>>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     Ok(reader.lines().filter_map(|line_res| match line_res {
@@ -167,7 +167,7 @@ pub fn read_iterations(path: &Path) -> io::Result<impl Iterator<Item = io::Resul
 /// the structured-telemetry counterpart to the UART log: the frame
 /// transcript, histogram, and per-hart timestamps the classifier and a
 /// human debugger both need, which the `.log` does not carry.
-pub fn write_capture_sidecar(
+pub(crate) fn write_capture_sidecar(
     run_dir: &Path,
     scenario: &str,
     iteration: u32,
@@ -181,7 +181,7 @@ pub fn write_capture_sidecar(
 
 /// Best-effort hostname read: checks `HOSTNAME` env var, returns
 /// `None` if unset.
-pub fn current_hostname() -> Option<String> {
+pub(crate) fn current_hostname() -> Option<String> {
     std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty())
 }
 

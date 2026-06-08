@@ -164,7 +164,7 @@ impl BaselineFile {
     /// Replace `current` for the given scenario with `new`, pushing the
     /// previous `current` (if any) onto `history`. History is kept in
     /// chronological order of insertion.
-    pub fn update_current(&mut self, scenario: &str, new: Baseline) {
+    pub(crate) fn update_current(&mut self, scenario: &str, new: Baseline) {
         let entry = self
             .scenarios
             .entry(scenario.to_string())
@@ -175,13 +175,13 @@ impl BaselineFile {
         entry.current = Some(new);
     }
 
-    pub fn current_for(&self, scenario: &str) -> Option<&Baseline> {
+    pub(crate) fn current_for(&self, scenario: &str) -> Option<&Baseline> {
         self.scenarios.get(scenario).and_then(|s| s.current.as_ref())
     }
 
     /// Parse the TOML representation. Returns the parse error verbatim
     /// so the caller can surface it to the user.
-    pub fn load_str(s: &str) -> Result<Self, toml::de::Error> {
+    pub(crate) fn load_str(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
     }
 

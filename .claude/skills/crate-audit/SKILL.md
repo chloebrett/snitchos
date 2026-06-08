@@ -81,8 +81,22 @@ resolution — `plans/xtask-audit.md` has the full rationale):
   list; for common-named items, fall back to the manual cross-ref below.
 - It only sees **bare `pub`** (skips `pub(crate)` and items inside
   `#[cfg(test)]`) and ≤2-char idents (pass `--include-short` to include them).
+- It **under-counts** (false `ext=0`) two ways the heuristic can't see — both
+  proven on the itest-harness sweep (`plans/audit-revisit-post-xtask-audit.md`):
+  (a) **re-export aliases** — `pub use x as y` then the consumer calls `y`, so the
+  count-by-declared-name misses it; (b) **a type used positionally in a public
+  signature** — the consumer calls `Foo::bar()` returning `Result<_, MyError>`
+  without naming `MyError`, so `MyError` shows `ext=0` despite being public API.
 - `verdict` is a candidate, never a conclusion — **rule 6 still applies**: a
   zero-caller wire/ABI variant may be reserved surface. Verify in docs/plans.
+
+**To act on an `ext=0` batch, let the compiler be the oracle** (the privatization
+sweep): demote the whole `ext=0` set to `pub(crate)`, rebuild the crate **+ its
+consumers**, and re-promote exactly what breaks. This converts both blind spots
+above into hard errors — a re-export alias fails with E0364, a positionally-used
+type with `private_interfaces` / "type is private" (re-promote the transitive
+closure: a pub field's type must be ≥ as visible as the field). Iterate to green;
+what stays `pub(crate)` was genuinely internal. Zero deletions, zero guesswork.
 
 **Then fill the gaps the tool doesn't cover:**
 

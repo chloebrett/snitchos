@@ -78,7 +78,7 @@ struct Metric {
 
 mod metric_data {
     #[derive(Clone, PartialEq, prost::Oneof)]
-    pub enum Data {
+    pub(crate) enum Data {
         #[prost(message, tag = "5")]
         Gauge(super::Gauge),
     }
@@ -105,7 +105,7 @@ struct NumberDataPoint {
 
 mod number_data_point {
     #[derive(Clone, PartialEq, prost::Oneof)]
-    pub enum Value {
+    pub(crate) enum Value {
         #[prost(double, tag = "4")]
         AsDouble(f64),
         #[prost(sfixed64, tag = "6")]
@@ -136,7 +136,7 @@ struct AnyValue {
 /// `now_ns` is the timestamp stamped onto every data point. Caller
 /// supplies it so tests are deterministic and so the live push can
 /// share one timestamp across the whole batch.
-pub fn build_payload(file: &BaselineFile, now_ns: u64) -> Vec<u8> {
+pub(crate) fn build_payload(file: &BaselineFile, now_ns: u64) -> Vec<u8> {
     let req = build_request(file, now_ns);
     let mut buf = Vec::with_capacity(req.encoded_len());
     // encode() on Vec only fails on OOM — we accept that as a panic.
@@ -222,7 +222,7 @@ fn int_point(attrs: Vec<KeyValue>, now_ns: u64, value: i64) -> NumberDataPoint {
 /// either the receiver root (`http://host:port`) or a path-bearing URL;
 /// we append `/v1/metrics` if it's missing. Matches the
 /// `collector::otlp::Exporter::new` normalisation for traces.
-pub fn metrics_endpoint(base: &str) -> String {
+pub(crate) fn metrics_endpoint(base: &str) -> String {
     if base.ends_with("/v1/metrics") {
         base.to_string()
     } else {
