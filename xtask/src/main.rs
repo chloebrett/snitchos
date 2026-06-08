@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 mod itest;
 mod loc;
+mod measure;
 mod qemu;
 
 const COLLECTOR_BIN: &str = "target/debug/collector";
@@ -37,6 +38,28 @@ enum Cmd {
         /// `--workload`, the kernel runs the default demo.
         #[arg(long)]
         workload: Option<String>,
+    },
+    /// Boot a runtime-selected workload, capture its telemetry for a
+    /// fixed window, and print steady-state stats (throughput, lock-wait
+    /// fraction, queue depth). Replicable version of the
+    /// boot+reader+parse measurement. See
+    /// `docs/v0.6-mutex-vs-spsc-measurements.md`.
+    Measure {
+        /// Workload to select and measure (e.g. `smp`).
+        #[arg(long)]
+        workload: String,
+        /// Capture window in seconds (wall clock).
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+        /// Seconds of the consumed series to skip as boot transient.
+        #[arg(long, default_value_t = 6.0)]
+        warmup: f64,
+        /// Kernel timebase in Hz (QEMU `virt` = 10 MHz).
+        #[arg(long, default_value_t = measure::DEFAULT_TIMEBASE_HZ)]
+        timebase_hz: u64,
+        /// Emit a markdown table (for pasting into the measurements doc).
+        #[arg(long, default_value_t = false)]
+        markdown: bool,
     },
     /// Build and run the collector (telemetry consumer). Trailing args
     /// are forwarded to the collector, e.g.
@@ -342,6 +365,9 @@ fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Build => build(),
         Cmd::Boot { features, workload } => boot(&features, workload.as_deref()),
+        Cmd::Measure { workload, seconds, warmup, timebase_hz, markdown } => {
+            measure::measure(&workload, seconds, warmup, timebase_hz, markdown)
+        }
         Cmd::Mutants { args } => run_mutants(&args),
         Cmd::Clippy { args } => run_clippy(&args),
         Cmd::Collect { args } => run_collector(&args),
