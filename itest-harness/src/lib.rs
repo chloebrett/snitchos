@@ -23,6 +23,8 @@ mod prom;
 mod runner;
 mod signature;
 mod stats;
+#[cfg(test)]
+mod test_support;
 mod verdict;
 
 // Flat re-exports are exactly what the consumer (`xtask`) imports. Items

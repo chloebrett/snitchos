@@ -99,22 +99,9 @@ fn escape_label_value(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::baseline::{Baseline, PartialMarker};
+    use crate::baseline::PartialMarker;
+    use crate::test_support::baseline_with;
     use time::macros::datetime;
-
-    fn baseline_with(runs: u32, failures: u32) -> Baseline {
-        Baseline {
-            commit: "abc1234".to_string(),
-            build_hash: None,
-            runs,
-            failures,
-            recorded_at: datetime!(2026-06-08 12:00:00 UTC),
-            mean_duration_ms: Some(1200.0),
-            p95_duration_ms: Some(1500.0),
-            partial: None,
-            signature_counts: Default::default(),
-        }
-    }
 
     #[test]
     fn render_emits_help_and_type_lines_once_per_metric() {
