@@ -236,12 +236,23 @@ machinery needed.
    separate serial pass, or reserves slot weight = 1 / `num_cpus`
    for each running `Cpu` scenario. Start with "serial pass" — it's
    the simplest correct thing.
-6. **A/B harness (one shot, ad-hoc).** Run the two-prop test
-   described above. Don't ship `--jobs > 1` as default until it
-   passes.
+6. **Run the A/B.** No new harness needed — we already have
+   `verdict` + `two_proportion_p_value` printing per-scenario
+   `Worse` / `Better` / `Consistent` verdicts at the end of every
+   run against `.itest-baseline.toml`. Procedure:
+
+   - Confirm or rebuild a sequential baseline:
+     `cargo xtask itest --update-baseline --repeat 200 --jobs 1`.
+   - Run the same workload in parallel:
+     `cargo xtask itest --repeat 200 --jobs 4`.
+   - Read off the existing per-scenario verdict block. Any
+     `Worse` with `p < 0.05` means parallelism shifted that
+     scenario's measured rate — keep `--jobs > 1` opt-in.
+   - All `Consistent` (and any `Better` is fine) → safe to flip
+     the default.
 7. **Default flip.** Change `--jobs` default to
    `min(2 × num_cpus, scenario_count)`. Document the flip in
-   `posts/`. If A/B data showed CPU-bound scenarios shift even with
+   `posts/`. If the A/B showed CPU-bound scenarios shift even with
    the serial-pass mitigation, the right next step is per-scenario
    weighting rather than a smaller default.
 

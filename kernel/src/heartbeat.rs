@@ -4,16 +4,72 @@
 //! the per-tick smoke patterns (frame + heap exercise, see feature
 //! flags), and emits every metric registered in [`Metrics`].
 //!
-//! The metric set is a single struct so kmain holds one value instead
-//! of 35+ locals. `Metrics::register` is the only side-effecting
-//! constructor; reads + emits inside the tick are plain field
-//! accesses.
+//! The metric set is built with the [`define_metrics!`] macro: one
+//! list, one line per metric, with optional `#[cfg]` per line. The
+//! macro generates both the struct declaration and the
+//! `register()` constructor, so adding or removing a metric is a
+//! one-line edit. Inside [`run`], the [`emit!`] macro wraps the
+//! `tracing::emit_metric(..., expr as i64)` call so each emission
+//! is one line.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use protocol::StringId;
 
 use crate::{frame, heap, heap_smoke, ipi, mmu, percpu, sched, secondary, span, tracing, trap, workload};
+
+/// Declarative metric set. Each line names a kind (`counter`,
+/// `gauge`, `histogram`), a struct field, and the wire path. The
+/// expansion produces:
+///
+/// ```ignore
+/// pub struct Metrics { field: StringId, ... }
+/// impl Metrics {
+///     pub fn register() -> Self { Self { field: tracing::register_*(path), ... } }
+/// }
+/// ```
+///
+/// `#[cfg]` (or any other attribute) applied to a line is forwarded
+/// to both the struct field and the initialiser, so feature gating
+/// each metric is a single annotation.
+macro_rules! define_metrics {
+    (
+        $(
+            $(#[$attr:meta])*
+            $kind:ident $name:ident = $path:literal;
+        )*
+    ) => {
+        pub struct Metrics {
+            $(
+                $(#[$attr])*
+                $name: StringId,
+            )*
+        }
+
+        impl Metrics {
+            pub fn register() -> Self {
+                Self {
+                    $(
+                        $(#[$attr])*
+                        $name: define_metrics!(@reg $kind $path),
+                    )*
+                }
+            }
+        }
+    };
+    (@reg counter   $path:literal) => { tracing::register_counter($path) };
+    (@reg gauge     $path:literal) => { tracing::register_gauge($path) };
+    (@reg histogram $path:literal) => { tracing::register_histogram($path) };
+}
+
+/// `emit!(m, field = expr)` ⇒ `tracing::emit_metric(m.field, expr as i64)`.
+/// Centralises the `as i64` cast and the `m.field` access so each
+/// per-tick emit site is one line.
+macro_rules! emit {
+    ($m:expr, $field:ident = $value:expr) => {
+        tracing::emit_metric($m.$field, $value as i64)
+    };
+}
 
 /// mhartid OpenSBI handed kmain as `_hart_id`. Captured at the top of
 /// the bring-up block; drained by the heartbeat as
@@ -22,172 +78,75 @@ use crate::{frame, heap, heap_smoke, ipi, mmu, percpu, sched, secondary, span, t
 /// (boot path), read by heartbeat on the same hart.
 pub static BOOT_MHARTID: AtomicU64 = AtomicU64::new(0);
 
-/// All `StringId`s for the metrics the heartbeat emits. Constructed
-/// once via [`Metrics::register`] right before [`run`] takes over; the
-/// register calls are idempotent so re-running them would be safe but
-/// wasteful (each does a hash-table insert + frame emit).
-pub struct Metrics {
-    heartbeat_count: StringId,
-    intern_used: StringId,
-    time_ticks: StringId,
-    irq_duration: StringId,
+// All `StringId`s for the metrics the heartbeat emits. Constructed
+// once via Metrics::register right before run() takes over; the
+// register calls are idempotent so re-running them would be safe but
+// wasteful (each does a hash-table insert + frame emit).
+define_metrics! {
+    counter   heartbeat_count           = "snitchos.heartbeat.count";
+    gauge     intern_used               = "snitchos.intern.strings_used";
+    gauge     time_ticks                = "snitchos.time.ticks";
+    histogram irq_duration              = "snitchos.irq.timer.duration_ticks";
     // frame allocator
-    frames_allocated: StringId,
-    frames_freed: StringId,
-    frames_alloc_failed: StringId,
-    frames_in_use: StringId,
-    frames_free: StringId,
+    counter   frames_allocated          = "snitchos.frames.allocated_total";
+    counter   frames_freed              = "snitchos.frames.freed_total";
+    counter   frames_alloc_failed       = "snitchos.frames.alloc_failed_total";
+    gauge     frames_in_use             = "snitchos.frames.in_use";
+    gauge     frames_free               = "snitchos.frames.free";
     // kernel heap
-    heap_alloc_total: StringId,
-    heap_dealloc_total: StringId,
-    heap_alloc_failed: StringId,
-    heap_bytes_capacity: StringId,
-    heap_bytes_used: StringId,
-    heap_bytes_free: StringId,
-    heap_grow_total: StringId,
-    heap_grow_failed: StringId,
-    heap_free_blocks: StringId,
-    heap_largest_free_block: StringId,
+    counter   heap_alloc_total          = "snitchos.heap.alloc_total";
+    counter   heap_dealloc_total        = "snitchos.heap.dealloc_total";
+    counter   heap_alloc_failed         = "snitchos.heap.alloc_failed_total";
+    gauge     heap_bytes_capacity       = "snitchos.heap.bytes_capacity";
+    gauge     heap_bytes_used           = "snitchos.heap.bytes_used";
+    gauge     heap_bytes_free           = "snitchos.heap.bytes_free";
+    counter   heap_grow_total           = "snitchos.heap.grow_total";
+    counter   heap_grow_failed          = "snitchos.heap.grow_failed_total";
+    gauge     heap_free_blocks          = "snitchos.heap.free_blocks";
+    gauge     heap_largest_free_block   = "snitchos.heap.largest_free_block_bytes";
     // scheduler
-    sched_smoke_marker_hits: StringId,
-    sched_exit_smoke_hits: StringId,
-    sched_context_switches: StringId,
-    sched_runqueue_depth: StringId,
-    sched_tasks_total: StringId,
-    sched_yield_overhead: StringId,
+    counter   sched_smoke_marker_hits   = "snitchos.sched.smoke_marker_hits";
+    counter   sched_exit_smoke_hits     = "snitchos.sched.exit_smoke_hits";
+    counter   sched_context_switches    = "snitchos.sched.context_switches_total";
+    gauge     sched_runqueue_depth      = "snitchos.sched.runqueue_depth";
+    gauge     sched_tasks_total         = "snitchos.sched.tasks_total";
+    histogram sched_yield_overhead      = "snitchos.sched.yield_overhead_ticks";
     // demo tasks
-    task_a_loops: StringId,
-    task_b_loops: StringId,
+    counter   task_a_loops              = "snitchos.task_a.loops";
+    counter   task_b_loops              = "snitchos.task_b.loops";
     // workload
-    workload_produced: StringId,
-    workload_consumed: StringId,
-    workload_histogram_sum: StringId,
-    workload_lock_wait: StringId,
-    workload_queue_depth: StringId,
+    counter   workload_produced         = "snitchos.workload.samples_produced_total";
+    counter   workload_consumed         = "snitchos.workload.samples_consumed_total";
+    gauge     workload_histogram_sum    = "snitchos.workload.histogram_sum";
+    counter   workload_lock_wait        = "snitchos.workload.lock_wait_ticks_total";
+    gauge     workload_queue_depth      = "snitchos.workload.queue_depth";
     // SMP / IPI
-    ipi_received: StringId,
-    smp_harts_total: StringId,
-    smp_boot_hart_id: StringId,
-    smp_secondary_wfi: StringId,
-    mmu_shootdowns_received: StringId,
-    mmu_shootdowns_sent: StringId,
-    smp_probe_ticks: StringId,
+    counter   ipi_received              = "snitchos.ipi.received_total";
+    gauge     smp_harts_total           = "snitchos.smp.harts_total";
+    gauge     smp_boot_hart_id          = "snitchos.smp.boot_hart_id";
+    counter   smp_secondary_wfi         = "snitchos.smp.secondary_wfi_total";
+    counter   mmu_shootdowns_received   = "snitchos.mmu.shootdowns_received_total";
+    counter   mmu_shootdowns_sent       = "snitchos.mmu.shootdowns_sent_total";
+    counter   smp_probe_ticks           = "snitchos.smp.hart_1_probe_ticks_total";
     // SMOKE TEST metrics — remove with heap_smoke module
-    smoke_entries: StringId,
-    smoke_primes: StringId,
-    smoke_candidate: StringId,
+    gauge     smoke_entries             = "snitchos.heap_smoke.entries";
+    gauge     smoke_primes              = "snitchos.heap_smoke.primes";
+    gauge     smoke_candidate           = "snitchos.heap_smoke.candidate";
     // deflake scenario metrics
     #[cfg(feature = "deflake-spawn-storm")]
-    spawn_storm_acks: StringId,
+    counter   spawn_storm_acks          = "snitchos.deflake.spawn_storm_acks";
     #[cfg(feature = "deflake-ipi-pong")]
-    ipi_pong_sends: StringId,
+    counter   ipi_pong_sends            = "snitchos.deflake.ipi_pong_sends";
     #[cfg(feature = "deflake-shootdown-storm")]
-    shootdown_storm_sends: StringId,
+    counter   shootdown_storm_sends     = "snitchos.deflake.shootdown_storm_sends";
     #[cfg(feature = "deflake-mutex-storm")]
-    mutex_storm_acquires_hart0: StringId,
+    counter   mutex_storm_acquires_hart0 = "snitchos.deflake.mutex_storm_acquires_hart0";
     #[cfg(feature = "deflake-mutex-storm")]
-    mutex_storm_acquires_hart1: StringId,
+    counter   mutex_storm_acquires_hart1 = "snitchos.deflake.mutex_storm_acquires_hart1";
     #[cfg(feature = "deflake-virtio-storm")]
-    virtio_storm_hart0_emits: StringId,
+    counter   virtio_storm_hart0_emits  = "snitchos.deflake.virtio_storm_hart0_emits";
     #[cfg(feature = "deflake-virtio-storm")]
-    virtio_storm_hart1_iterations: StringId,
-}
-
-impl Metrics {
-    pub fn register() -> Self {
-        Self {
-            heartbeat_count: tracing::register_counter("snitchos.heartbeat.count"),
-            intern_used: tracing::register_gauge("snitchos.intern.strings_used"),
-            time_ticks: tracing::register_gauge("snitchos.time.ticks"),
-            irq_duration: tracing::register_histogram("snitchos.irq.timer.duration_ticks"),
-            frames_allocated: tracing::register_counter("snitchos.frames.allocated_total"),
-            frames_freed: tracing::register_counter("snitchos.frames.freed_total"),
-            frames_alloc_failed: tracing::register_counter("snitchos.frames.alloc_failed_total"),
-            frames_in_use: tracing::register_gauge("snitchos.frames.in_use"),
-            frames_free: tracing::register_gauge("snitchos.frames.free"),
-            heap_alloc_total: tracing::register_counter("snitchos.heap.alloc_total"),
-            heap_dealloc_total: tracing::register_counter("snitchos.heap.dealloc_total"),
-            heap_alloc_failed: tracing::register_counter("snitchos.heap.alloc_failed_total"),
-            heap_bytes_capacity: tracing::register_gauge("snitchos.heap.bytes_capacity"),
-            heap_bytes_used: tracing::register_gauge("snitchos.heap.bytes_used"),
-            heap_bytes_free: tracing::register_gauge("snitchos.heap.bytes_free"),
-            heap_grow_total: tracing::register_counter("snitchos.heap.grow_total"),
-            heap_grow_failed: tracing::register_counter("snitchos.heap.grow_failed_total"),
-            heap_free_blocks: tracing::register_gauge("snitchos.heap.free_blocks"),
-            heap_largest_free_block: tracing::register_gauge(
-                "snitchos.heap.largest_free_block_bytes",
-            ),
-            sched_smoke_marker_hits: tracing::register_counter(
-                "snitchos.sched.smoke_marker_hits",
-            ),
-            sched_exit_smoke_hits: tracing::register_counter(
-                "snitchos.sched.exit_smoke_hits",
-            ),
-            sched_context_switches: tracing::register_counter(
-                "snitchos.sched.context_switches_total",
-            ),
-            sched_runqueue_depth: tracing::register_gauge("snitchos.sched.runqueue_depth"),
-            sched_tasks_total: tracing::register_gauge("snitchos.sched.tasks_total"),
-            sched_yield_overhead: tracing::register_histogram(
-                "snitchos.sched.yield_overhead_ticks",
-            ),
-            task_a_loops: tracing::register_counter("snitchos.task_a.loops"),
-            task_b_loops: tracing::register_counter("snitchos.task_b.loops"),
-            workload_produced: tracing::register_counter(
-                "snitchos.workload.samples_produced_total",
-            ),
-            workload_consumed: tracing::register_counter(
-                "snitchos.workload.samples_consumed_total",
-            ),
-            workload_histogram_sum: tracing::register_gauge("snitchos.workload.histogram_sum"),
-            workload_lock_wait: tracing::register_counter(
-                "snitchos.workload.lock_wait_ticks_total",
-            ),
-            workload_queue_depth: tracing::register_gauge("snitchos.workload.queue_depth"),
-            ipi_received: tracing::register_counter("snitchos.ipi.received_total"),
-            smp_harts_total: tracing::register_gauge("snitchos.smp.harts_total"),
-            smp_boot_hart_id: tracing::register_gauge("snitchos.smp.boot_hart_id"),
-            smp_secondary_wfi: tracing::register_counter("snitchos.smp.secondary_wfi_total"),
-            mmu_shootdowns_received: tracing::register_counter(
-                "snitchos.mmu.shootdowns_received_total",
-            ),
-            mmu_shootdowns_sent: tracing::register_counter(
-                "snitchos.mmu.shootdowns_sent_total",
-            ),
-            smp_probe_ticks: tracing::register_counter(
-                "snitchos.smp.hart_1_probe_ticks_total",
-            ),
-            smoke_entries: tracing::register_gauge("snitchos.heap_smoke.entries"),
-            smoke_primes: tracing::register_gauge("snitchos.heap_smoke.primes"),
-            smoke_candidate: tracing::register_gauge("snitchos.heap_smoke.candidate"),
-            #[cfg(feature = "deflake-spawn-storm")]
-            spawn_storm_acks: tracing::register_counter(
-                "snitchos.deflake.spawn_storm_acks",
-            ),
-            #[cfg(feature = "deflake-ipi-pong")]
-            ipi_pong_sends: tracing::register_counter("snitchos.deflake.ipi_pong_sends"),
-            #[cfg(feature = "deflake-shootdown-storm")]
-            shootdown_storm_sends: tracing::register_counter(
-                "snitchos.deflake.shootdown_storm_sends",
-            ),
-            #[cfg(feature = "deflake-mutex-storm")]
-            mutex_storm_acquires_hart0: tracing::register_counter(
-                "snitchos.deflake.mutex_storm_acquires_hart0",
-            ),
-            #[cfg(feature = "deflake-mutex-storm")]
-            mutex_storm_acquires_hart1: tracing::register_counter(
-                "snitchos.deflake.mutex_storm_acquires_hart1",
-            ),
-            #[cfg(feature = "deflake-virtio-storm")]
-            virtio_storm_hart0_emits: tracing::register_counter(
-                "snitchos.deflake.virtio_storm_hart0_emits",
-            ),
-            #[cfg(feature = "deflake-virtio-storm")]
-            virtio_storm_hart1_iterations: tracing::register_counter(
-                "snitchos.deflake.virtio_storm_hart1_iterations",
-            ),
-        }
-    }
+    counter   virtio_storm_hart1_iterations = "snitchos.deflake.virtio_storm_hart1_iterations";
 }
 
 /// Heartbeat main loop. Never returns. Waits for the timer-IRQ
@@ -278,34 +237,24 @@ fn heap_smoke_pattern(count: i64) {
 }
 
 fn emit_core(m: &Metrics, count: i64) {
-    tracing::emit_metric(m.heartbeat_count, count);
-    tracing::emit_metric(m.intern_used, tracing::intern_count() as i64);
-    tracing::emit_metric(m.time_ticks, tracing::timestamp() as i64);
+    emit!(m, heartbeat_count = count);
+    emit!(m, intern_used     = tracing::intern_count());
+    emit!(m, time_ticks      = tracing::timestamp());
     // Histogram observation: how long the last IRQ took. The handler
     // measured rdtime delta; main thread emits.
-    let dur = trap::LAST_IRQ_DURATION.this_cpu().load(Ordering::Relaxed);
-    tracing::emit_metric(m.irq_duration, dur as i64);
+    emit!(m, irq_duration    = trap::LAST_IRQ_DURATION.this_cpu().load(Ordering::Relaxed));
 }
 
 /// Frame allocator telemetry. Counters drain atomically; gauges
 /// briefly take the allocator lock (heartbeat is single-threaded so
 /// no contention).
 fn emit_frame_metrics(m: &Metrics) {
-    tracing::emit_metric(
-        m.frames_allocated,
-        frame::ALLOC_COUNT.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.frames_freed,
-        frame::FREE_COUNT.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.frames_alloc_failed,
-        frame::ALLOC_FAIL_COUNT.load(Ordering::Relaxed) as i64,
-    );
+    emit!(m, frames_allocated    = frame::ALLOC_COUNT.load(Ordering::Relaxed));
+    emit!(m, frames_freed        = frame::FREE_COUNT.load(Ordering::Relaxed));
+    emit!(m, frames_alloc_failed = frame::ALLOC_FAIL_COUNT.load(Ordering::Relaxed));
     if let Some(stats) = frame::stats() {
-        tracing::emit_metric(m.frames_in_use, stats.in_use as i64);
-        tracing::emit_metric(m.frames_free, stats.free as i64);
+        emit!(m, frames_in_use = stats.in_use);
+        emit!(m, frames_free   = stats.free);
     }
 }
 
@@ -324,58 +273,31 @@ fn emit_frame_metrics(m: &Metrics) {
 /// and keep going — the next alloc fails with `alloc_failed_total`
 /// as today.
 fn emit_heap_metrics(m: &Metrics) {
-    tracing::emit_metric(
-        m.heap_alloc_total,
-        heap::ALLOC_COUNT.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.heap_dealloc_total,
-        heap::DEALLOC_COUNT.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.heap_alloc_failed,
-        heap::ALLOC_FAIL_COUNT.load(Ordering::Relaxed) as i64,
-    );
+    emit!(m, heap_alloc_total   = heap::ALLOC_COUNT.load(Ordering::Relaxed));
+    emit!(m, heap_dealloc_total = heap::DEALLOC_COUNT.load(Ordering::Relaxed));
+    emit!(m, heap_alloc_failed  = heap::ALLOC_FAIL_COUNT.load(Ordering::Relaxed));
     if let Some(hstats) = heap::stats() {
-        tracing::emit_metric(m.heap_bytes_capacity, hstats.capacity as i64);
-        tracing::emit_metric(m.heap_bytes_used, hstats.used as i64);
-        tracing::emit_metric(m.heap_bytes_free, hstats.free as i64);
-        tracing::emit_metric(m.heap_free_blocks, hstats.free_blocks as i64);
-        tracing::emit_metric(m.heap_largest_free_block, hstats.largest_free_block as i64);
+        emit!(m, heap_bytes_capacity     = hstats.capacity);
+        emit!(m, heap_bytes_used         = hstats.used);
+        emit!(m, heap_bytes_free         = hstats.free);
+        emit!(m, heap_free_blocks        = hstats.free_blocks);
+        emit!(m, heap_largest_free_block = hstats.largest_free_block);
         if let Some(frames) = heap::watermark_grow_decision(hstats, &heap::WATERMARK) {
             let _ = heap::extend(frames);
         }
     }
-    tracing::emit_metric(
-        m.heap_grow_total,
-        heap::GROW_COUNT.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.heap_grow_failed,
-        heap::GROW_FAIL_COUNT.load(Ordering::Relaxed) as i64,
-    );
+    emit!(m, heap_grow_total  = heap::GROW_COUNT.load(Ordering::Relaxed));
+    emit!(m, heap_grow_failed = heap::GROW_FAIL_COUNT.load(Ordering::Relaxed));
 }
 
 fn emit_sched_metrics(m: &Metrics) {
-    tracing::emit_metric(
-        m.sched_smoke_marker_hits,
-        sched::SMOKE_MARKER_HITS.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.sched_exit_smoke_hits,
-        sched::EXIT_SMOKE_HITS.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.sched_context_switches,
-        sched::CONTEXT_SWITCHES.load(Ordering::Relaxed) as i64,
-    );
+    emit!(m, sched_smoke_marker_hits = sched::SMOKE_MARKER_HITS.load(Ordering::Relaxed));
+    emit!(m, sched_exit_smoke_hits   = sched::EXIT_SMOKE_HITS.load(Ordering::Relaxed));
+    emit!(m, sched_context_switches  = sched::CONTEXT_SWITCHES.load(Ordering::Relaxed));
     let sched_snap = sched::stats();
-    tracing::emit_metric(m.sched_runqueue_depth, sched_snap.runqueue_depth as i64);
-    tracing::emit_metric(m.sched_tasks_total, sched_snap.tasks_total as i64);
-    tracing::emit_metric(
-        m.sched_yield_overhead,
-        sched::LAST_YIELD_OVERHEAD_TICKS.load(Ordering::Relaxed) as i64,
-    );
+    emit!(m, sched_runqueue_depth = sched_snap.runqueue_depth);
+    emit!(m, sched_tasks_total    = sched_snap.tasks_total);
+    emit!(m, sched_yield_overhead = sched::LAST_YIELD_OVERHEAD_TICKS.load(Ordering::Relaxed));
     // Per-task metrics: gated off under `deflake-spawn-storm` because
     // that build uses sentinel StringIds for these (see
     // Task::new_bare) — emitting against id 0 would mis-tag whichever
@@ -385,68 +307,35 @@ fn emit_sched_metrics(m: &Metrics) {
         tracing::emit_metric(snap.cpu_time_metric, snap.cpu_time_ticks as i64);
         tracing::emit_metric(snap.runs_metric, snap.runs as i64);
     }
-    tracing::emit_metric(
-        m.task_a_loops,
-        crate::demo_tasks::TASK_A_LOOPS.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.task_b_loops,
-        crate::demo_tasks::TASK_B_LOOPS.load(Ordering::Relaxed) as i64,
-    );
+    emit!(m, task_a_loops = crate::demo_tasks::TASK_A_LOOPS.load(Ordering::Relaxed));
+    emit!(m, task_b_loops = crate::demo_tasks::TASK_B_LOOPS.load(Ordering::Relaxed));
 }
 
 fn emit_workload_metrics(m: &Metrics) {
-    tracing::emit_metric(
-        m.workload_produced,
-        workload::SAMPLES_PRODUCED.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.workload_consumed,
-        workload::SAMPLES_CONSUMED.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(m.workload_histogram_sum, workload::histogram_sum() as i64);
-    tracing::emit_metric(
-        m.workload_lock_wait,
-        workload::LOCK_WAIT_TICKS_TOTAL.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(m.workload_queue_depth, workload::queue_depth() as i64);
+    emit!(m, workload_produced      = workload::SAMPLES_PRODUCED.load(Ordering::Relaxed));
+    emit!(m, workload_consumed      = workload::SAMPLES_CONSUMED.load(Ordering::Relaxed));
+    emit!(m, workload_histogram_sum = workload::histogram_sum());
+    emit!(m, workload_lock_wait     = workload::LOCK_WAIT_TICKS_TOTAL.load(Ordering::Relaxed));
+    emit!(m, workload_queue_depth   = workload::queue_depth());
 }
 
 fn emit_smp_metrics(m: &Metrics) {
-    tracing::emit_metric(
-        m.ipi_received,
-        ipi::RECEIVED_TOTAL.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(m.smp_harts_total, percpu::MAX_HARTS as i64);
-    tracing::emit_metric(
-        m.smp_boot_hart_id,
-        BOOT_MHARTID.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.smp_secondary_wfi,
-        secondary::SECONDARY_WFI_COUNT.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.mmu_shootdowns_received,
-        ipi::SHOOTDOWNS_RECEIVED_TOTAL.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.mmu_shootdowns_sent,
-        mmu::SHOOTDOWNS_SENT_TOTAL.load(Ordering::Relaxed) as i64,
-    );
-    tracing::emit_metric(
-        m.smp_probe_ticks,
-        secondary::PROBE_TICKS.load(Ordering::Relaxed) as i64,
-    );
+    emit!(m, ipi_received            = ipi::RECEIVED_TOTAL.load(Ordering::Relaxed));
+    emit!(m, smp_harts_total         = percpu::MAX_HARTS);
+    emit!(m, smp_boot_hart_id        = BOOT_MHARTID.load(Ordering::Relaxed));
+    emit!(m, smp_secondary_wfi       = secondary::SECONDARY_WFI_COUNT.load(Ordering::Relaxed));
+    emit!(m, mmu_shootdowns_received = ipi::SHOOTDOWNS_RECEIVED_TOTAL.load(Ordering::Relaxed));
+    emit!(m, mmu_shootdowns_sent     = mmu::SHOOTDOWNS_SENT_TOTAL.load(Ordering::Relaxed));
+    emit!(m, smp_probe_ticks         = secondary::PROBE_TICKS.load(Ordering::Relaxed));
 }
 
 /// SMOKE TEST — remove with heap_smoke module.
 fn emit_heap_smoke_metrics(m: &Metrics, count: i64) {
     heap_smoke::step(count);
     let sst = heap_smoke::stats();
-    tracing::emit_metric(m.smoke_entries, sst.entries as i64);
-    tracing::emit_metric(m.smoke_primes, sst.primes as i64);
-    tracing::emit_metric(m.smoke_candidate, sst.candidate as i64);
+    emit!(m, smoke_entries   = sst.entries);
+    emit!(m, smoke_primes    = sst.primes);
+    emit!(m, smoke_candidate = sst.candidate);
 }
 
 /// Deflake scenario triggers + counters. Each storm runs once on the
@@ -461,54 +350,33 @@ fn emit_deflake_metrics(m: &Metrics, count: i64) {
         if count == 1 {
             crate::deflake::spawn_storm::run();
         }
-        tracing::emit_metric(
-            m.spawn_storm_acks,
-            crate::deflake::spawn_storm::ACK_COUNTER.load(Ordering::Relaxed) as i64,
-        );
+        emit!(m, spawn_storm_acks = crate::deflake::spawn_storm::ACK_COUNTER.load(Ordering::Relaxed));
     }
     #[cfg(feature = "deflake-ipi-pong")]
     {
         if count == 1 {
             crate::deflake::ipi_pong::run();
         }
-        tracing::emit_metric(
-            m.ipi_pong_sends,
-            crate::deflake::ipi_pong::SENDS.load(Ordering::Relaxed) as i64,
-        );
+        emit!(m, ipi_pong_sends = crate::deflake::ipi_pong::SENDS.load(Ordering::Relaxed));
     }
     #[cfg(feature = "deflake-shootdown-storm")]
     {
         if count == 1 {
             crate::deflake::shootdown::run();
         }
-        tracing::emit_metric(
-            m.shootdown_storm_sends,
-            crate::deflake::shootdown::SENDS.load(Ordering::Relaxed) as i64,
-        );
+        emit!(m, shootdown_storm_sends = crate::deflake::shootdown::SENDS.load(Ordering::Relaxed));
     }
     #[cfg(feature = "deflake-mutex-storm")]
     {
         // No `run()` call here — the storm bodies are spawned as
         // proper tasks from kmain; main's only job is to keep
         // emitting metrics so the harness can observe progress.
-        tracing::emit_metric(
-            m.mutex_storm_acquires_hart0,
-            crate::deflake::mutex_storm::ACQUIRES_HART0.load(Ordering::Relaxed) as i64,
-        );
-        tracing::emit_metric(
-            m.mutex_storm_acquires_hart1,
-            crate::deflake::mutex_storm::ACQUIRES_HART1.load(Ordering::Relaxed) as i64,
-        );
+        emit!(m, mutex_storm_acquires_hart0 = crate::deflake::mutex_storm::ACQUIRES_HART0.load(Ordering::Relaxed));
+        emit!(m, mutex_storm_acquires_hart1 = crate::deflake::mutex_storm::ACQUIRES_HART1.load(Ordering::Relaxed));
     }
     #[cfg(feature = "deflake-virtio-storm")]
     {
-        tracing::emit_metric(
-            m.virtio_storm_hart0_emits,
-            crate::deflake::virtio_storm::HART0_EMITS.load(Ordering::Relaxed) as i64,
-        );
-        tracing::emit_metric(
-            m.virtio_storm_hart1_iterations,
-            crate::deflake::virtio_storm::HART1_ITERATIONS.load(Ordering::Relaxed) as i64,
-        );
+        emit!(m, virtio_storm_hart0_emits      = crate::deflake::virtio_storm::HART0_EMITS.load(Ordering::Relaxed));
+        emit!(m, virtio_storm_hart1_iterations = crate::deflake::virtio_storm::HART1_ITERATIONS.load(Ordering::Relaxed));
     }
 }
