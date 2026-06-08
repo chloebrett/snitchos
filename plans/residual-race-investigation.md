@@ -942,6 +942,78 @@ higher, the bug is at least partly scenario-specific.
 4. **`rdtime`-spin fix substitute** (H10) — isolate timing vs
    fence.
 
+### Result: the fix was dormant — removed
+
+Ran (1) and (2) above. All four flaky default scenarios at fix-off
+N=50, vs their N=40 fix-on baselines at commit `0a56a95`:
+
+| Scenario                          | Fix off (50)   | Fix on (40)    | p     |
+|-----------------------------------|----------------|----------------|------:|
+| kernel-heap-metrics               | 1/50 (2.0%)    | 2/40 (5.0%)    | 0.43  |
+| sched-spans-carry-task-id         | 0/50 (0%)      | 2/40 (5.0%)    | 0.11  |
+| sched-span-survives-yield         | 5/50 (10.0%)   | 1/40 (2.5%)    | 0.16  |
+| workload-cooperative-baseline     | 1/50 (2.0%)    | 1/40 (2.5%)    | 0.87  |
+
+All four: **consistent** (p > 0.05). Aggregate fix-off 7/200 = 3.5%
+vs fix-on 6/160 = 3.75% — essentially identical. The
+`tag("trap return")` MMIO fence is **doing nothing detectable** on
+the current commit.
+
+Verified by removing the fix entirely (deleted both the
+`crate::panic::tag("trap return")` call in `trap_handler` and the
+`panic::tag` helper itself) and re-running the same 4 scenarios at
+N=50:
+
+| Scenario                          | Fix removed (50) | Fix on (40)  | p     |
+|-----------------------------------|------------------|--------------|------:|
+| kernel-heap-metrics               | 2/50 (4.0%)      | 2/40 (5.0%)  | 0.82  |
+| sched-spans-carry-task-id         | 2/50 (4.0%)      | 2/40 (5.0%)  | 0.82  |
+| sched-span-survives-yield         | 3/50 (6.0%)      | 1/40 (2.5%)  | 0.42  |
+| workload-cooperative-baseline     | 4/50 (8.0%)      | 1/40 (2.5%)  | 0.26  |
+
+Same conclusion: all consistent. Rates aggregate 11/200 = 5.5% vs
+6/160 = 3.75% — directionally slightly higher with the fix removed
+but not statistically distinguishable at p < 0.05 for any
+individual scenario.
+
+### Interpretation
+
+**The original Bug B is gone.** Something we landed during this
+investigation cycle — likely v0.5.x task-exit, the per-CPU lifting
+of `TICK_PENDING`/`LAST_IRQ_DURATION` (follow-up c), or some
+combination of the scheduler refactors and `main.rs` split —
+fixed whatever the trap-return fence was masking.
+
+The ~3.5–5.5% residual is **baseline jitter**, not a coherent
+single-cause bug. Candidates:
+
+- v0.5 cooperative-scheduling timing variation under multi-thread
+  TCG (different boots schedule differently → some scenarios miss
+  their throughput threshold).
+- QEMU multi-thread TCG inherent emulation rate of subtle
+  mis-orderings, low enough to be tolerable for development.
+- Per-scenario timing windows that occasionally lose to virtio
+  emission latency.
+
+None of these is "*the* residual bug." H9 was right: there isn't
+one residual; there's a low rate of disparate flakes from
+different sources.
+
+### What's still worth doing
+
+- **Re-baseline the full suite at the current commit** (N≥50 each)
+  for a clean post-fix-removed reference.
+- **Investigate any single scenario that durably exceeds ~5%** at
+  high N (none does today; `sched-span-survives-yield`'s 10%
+  earlier looked anomalous and dropped back to 6% on re-run).
+- **Resist the temptation to re-add a generic fence "fix" for the
+  next bug.** What we've learned: targeted experiments at high N
+  beat blanket MMIO fences. The MMIO fence makes the kernel slower
+  and obscures the actual rate.
+- **Cooperative SMP's flake floor is real but uncoordinated.** Any
+  future flake investigation should start with a per-scenario
+  N=50 baseline before forming a hypothesis tree.
+
 ### What this implies for the other open hypotheses
 
 - **H6 (boot-time race)**: less likely. The flake distribution
