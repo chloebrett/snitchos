@@ -191,10 +191,11 @@ posts/        Devlog notes per milestone.
 
 ```
 cargo xtask boot              # build kernel + run in QEMU (telemetry chardev waits for a client)
+cargo xtask boot --workload smp   # boot a runtime-selected workload (implies itest-workloads); see "Runtime workloads"
 cargo xtask collect           # build + run collector (OTLP + Prometheus)
 cargo xtask reader            # collector in text-only mode (no docker stack)
 cargo xtask stack {up,down,logs}  # docker-compose the Tempo/Prometheus/Grafana stack
-cargo xtask test [scenario]   # kernel integration tests in QEMU
+cargo xtask itest [scenario]  # kernel integration tests in QEMU (host unit tests are `cargo xtask test`)
 cargo xtask build             # just build the kernel ELF
 cargo xtask clippy [-- args]  # clippy the WHOLE workspace correctly (see note below)
 ```
@@ -222,24 +223,37 @@ The kernel binary itself has no `#[test]`s — it's `no_std`/`no_main` and won't
 
 ### Integration test scenarios
 
-`cargo xtask test` spawns one QEMU per scenario and reads decoded `Frame`s off the virtio-console socket. Scenarios in `xtask/src/itest/scenarios.rs`:
+`cargo xtask itest` spawns one QEMU per scenario and reads decoded `Frame`s off the virtio-console socket. The whole suite builds **one** `itest-workloads` kernel up front and selects per-scenario via the `workload=` bootarg (see "Runtime workloads" below). Scenarios in `xtask/src/itest/scenarios.rs`:
 
 - **`boot-reaches-heartbeat`** — Hello → `kernel.boot` SpanStart → `Dropped(0)` after pre-init flush → first `kernel.heartbeat` SpanStart.
 - **`heartbeat-cadence`** — two consecutive heartbeats with monotonic timestamps.
 - **`pre-init-order`** — first `StringRegister` is `kernel.boot`, every subsequent SpanStart resolves through an earlier StringRegister.
 - **`kernel-runs-at-higher-half`** — kernel's own `auipc`-read PC is ≥ `KERNEL_OFFSET` post-trampoline.
 - **`frame-allocator-metrics`** — `snitchos.frames.allocated_total` ≥ 1 within 10 s.
-- **`frame-allocator-oom`** — built with `--features oom-leak`; asserts `alloc_failed_total > 0` within 15 s and the kernel keeps heartbeating after.
+- **`frame-allocator-oom`** — selects `workload=frame-oom`; asserts `alloc_failed_total > 0` within 15 s and the kernel keeps heartbeating after.
 - **`kernel-heap-metrics`** — `snitchos.heap.alloc_total ≥ 1` and `snitchos.heap.bytes_used` observed within 10 s; heartbeat survives after.
-- **`heap-oom`** — built with `--features heap-oom`; leaks 4096 × 4 KiB blocks per heartbeat (16 MiB/tick) via `Vec::try_reserve_exact` + `mem::forget`. Watermark grow adds 1 MiB/tick; net pressure ~15 MiB/tick exhausts ~120 MiB usable RAM in ~8 heartbeats. Asserts `heap.grow_total > 0` (P2 grow engaged), then `heap.alloc_failed_total > 0` (clean OOM), then the kernel keeps heartbeating.
+- **`heap-oom`** — selects `workload=heap-oom`; leaks 4096 × 4 KiB blocks per heartbeat (16 MiB/tick) via `Vec::try_reserve_exact` + `mem::forget`. Watermark grow adds 1 MiB/tick; net pressure ~15 MiB/tick exhausts ~120 MiB usable RAM in ~8 heartbeats. Asserts `heap.grow_total > 0` (P2 grow engaged), then `heap.alloc_failed_total > 0` (clean OOM), then the kernel keeps heartbeating.
 - **`sched-context-switch-smoke`** — asserts `snitchos.sched.smoke_marker_hits == 1` within 10 s. Boot-time round-trip of the asm `switch` primitive into a hand-rigged marker function and back.
 - **`sched-spawn-registers-thread`** — asserts `ThreadRegister` frames appear for `main`, `idle`, `task_a`, `task_b`.
 - **`sched-yield-round-trips`** — asserts both `task_a.loops > 0` and `task_b.loops > 0` plus `sched.context_switches_total > 0`. Proves cooperative round-robin reaches all demo tasks.
 - **`sched-spans-carry-task-id`** — asserts each demo task's `task_x.tick` SpanStart carries `task_id` matching that task's ThreadRegister id.
 - **`sched-context-switches-on-wire`** — asserts a `ContextSwitch{Yield}` frame with both endpoints being known task ids appears on the wire.
 - **`sched-span-survives-yield`** — task_a yields mid-span; scenario asserts the SpanStart→ContextSwitch(leave)→ContextSwitch(return)→SpanEnd sequence with matching span id and `parent==SpanId(0)`. Structural proof that per-task `SpanCursor` wiring works.
+- **`workload-cooperative-baseline`** — default build (single-hart producer/consumer); asserts `samples_consumed ≥ 200` then `histogram_sum ≥ consumed`.
+- **`smp-producer-consumer-correctness`** — `workload=smp` (producer hart 0, consumer hart 1); asserts `samples_consumed ≥ 1000` then `histogram_sum ≥ consumed` across the hart boundary (the cross-hart Release/Acquire oracle).
+- **`smp-secondary-hart-boots`**, **`smp-spawn-on-hart-1-runs`**, **`ipi-self-wakeup`** — SMP bring-up + IPI smokes.
+- **`spawn-storm` / `ipi-pong` / `shootdown-storm` / `mutex-storm` / `virtio-storm`** — cross-hart stress/regression workloads (formerly the `deflake-*` features), selected via `workload=<name>`. Kept as guards after the bug they characterised (a dropped `MutexGuard` in `virtio_console::send`) was fixed.
 
-Add a scenario: implement a `Result<(), String>` function in `scenarios.rs`, register it in `xtask/src/itest.rs::SCENARIOS`, run `cargo xtask test <name>`. The harness handles QEMU lifecycle and socket cleanup. Use `Harness::spawn_with_features(label, &["feature"])` if the scenario needs a non-default kernel variant (currently only `oom-leak` does).
+Add a scenario: implement a `Result<(), String>` function in `scenarios.rs`, register it in `xtask/src/itest.rs::SCENARIOS`, run `cargo xtask itest <name>`. The harness handles QEMU lifecycle and socket cleanup.
+
+### Runtime workloads
+
+Non-default boot behaviours (the SMP cross-hart workload, the OOM leaks, the stress storms) are **selected at runtime**, not compiled in per-build. One `itest-workloads` kernel binary holds the whole registry; the `workload=<name>` kernel bootarg (QEMU `-append`) picks one. With no bootarg the kernel runs the exact default demo, so the registry is **purely additive** — production builds leave `itest-workloads` off and compile none of it. Full design + rationale: [docs/runtime-workload-selection-design.md](../docs/runtime-workload-selection-design.md).
+
+- **From a scenario:** `Harness::spawn_with_workload(label, "smp")` — boots the shared `itest-workloads` build with `-append workload=smp`. `Harness::spawn(label)` boots the same build with no bootarg (default demo). Neither rebuilds; the suite builds once.
+- **Live (measurement / demo):** `cargo xtask boot --workload smp` then `cargo xtask reader` (or `collect` → Grafana). No rebuild to switch workloads.
+- **Adding a workload:** add a `WorkloadKind` variant + parse arm in `kernel-core::bootargs` (host-tested), then dispatch on `boot_workload::selected()` in `kmain` (spawn layout) and/or `heartbeat` (per-tick behaviour); storm bodies live in `kernel::storms` (itest-workloads only).
+- **Genuinely compile-time variants** (rare — something that must change codegen, not just boot behaviour) would reintroduce a build hook; none exist today.
 
 Skips cleanly (exit 0) if `qemu-system-riscv64` isn't on `PATH`.
 

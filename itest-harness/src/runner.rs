@@ -96,6 +96,16 @@ pub type MaxWaitFn<'a> = &'a (dyn Fn() -> Option<(Duration, Duration)> + Send + 
 pub type CaptureFn<'a> =
     &'a (dyn Fn() -> Option<crate::signature::FailureCapture> + Send + Sync);
 
+/// The three per-scenario callbacks, bundled so they thread through the
+/// runner as one value instead of three. `Copy` (every field is an
+/// `Option<&dyn Fn>`), so passing by value into worker closures is free.
+#[derive(Clone, Copy, Default)]
+pub struct Hooks<'a> {
+    pub log_path_for: Option<LogPathFn<'a>>,
+    pub max_wait_for: Option<MaxWaitFn<'a>>,
+    pub capture_for: Option<CaptureFn<'a>>,
+}
+
 /// Hooks the runner calls during execution. Each is `Option<&dyn Fn>`
 /// so consumers can supply only what they need. Lifetime parameter
 /// matches the surrounding `run()` call — hooks don't escape.
@@ -180,6 +190,18 @@ pub struct RunnerConfig<'a> {
     /// run's `metadata.toml` for exact reproduction and to capture the
     /// parallelism a failure occurred under. `None` omits it.
     pub invocation: Option<String>,
+}
+
+impl<'a> RunnerConfig<'a> {
+    /// The per-scenario callbacks, bundled. `Copy`, so callers thread it
+    /// by value into the worker pools.
+    fn hooks(&self) -> Hooks<'a> {
+        Hooks {
+            log_path_for: self.log_path_for,
+            max_wait_for: self.max_wait_for,
+            capture_for: self.capture_for,
+        }
+    }
 }
 
 /// Run `scenarios` `repeat` times. If `update_baseline` is true, write
@@ -296,9 +318,7 @@ pub fn run(
         let work: Mutex<VecDeque<(u32, &Scenario)>> =
             Mutex::new(work_items.into_iter().collect());
         let work_ref = &work;
-        let log_path_for = config.log_path_for;
-        let max_wait_for = config.max_wait_for;
-        let capture_for = config.capture_for;
+        let hooks = config.hooks();
         let history_dir_ref = history_dir.as_deref();
         let history_writer_ref = &history_writer;
         let interrupt = config.interrupt;
@@ -328,9 +348,7 @@ pub fn run(
                             &mut worker_agg,
                             history_writer_ref,
                             history_dir_ref,
-                            log_path_for,
-                            max_wait_for,
-                            capture_for,
+                            hooks,
                             ScenarioFormat::Prefixed,
                         );
                         let totals = if res.failed {
@@ -429,9 +447,7 @@ pub fn run(
                     &mut local,
                     &history_writer,
                     history_dir.as_deref(),
-                    config.log_path_for,
-                    config.max_wait_for,
-                    config.capture_for,
+                    config.hooks(),
                     ScenarioFormat::Inline,
                 );
                 if res.failed {
@@ -466,9 +482,7 @@ pub fn run(
                     jobs,
                     &history_writer,
                     history_dir.as_deref(),
-                    config.log_path_for,
-                    config.max_wait_for,
-                    config.capture_for,
+                    config.hooks(),
                     None,
                 );
                 local.merge(wfi_agg);
@@ -487,9 +501,7 @@ pub fn run(
                     cpu_jobs,
                     &history_writer,
                     history_dir.as_deref(),
-                    config.log_path_for,
-                    config.max_wait_for,
-                    config.capture_for,
+                    config.hooks(),
                     None,
                 );
                 local.merge(cpu_agg);
@@ -662,15 +674,12 @@ fn finalize_run(
 /// The aggregator's `run_totals` is NOT populated here — callers
 /// decide whether each completed item is its own "iteration" (stress
 /// mode) or just one of many in a single iteration (Wfi/Cpu batch).
-#[allow(clippy::too_many_arguments, reason = "shape mirrors process_one_scenario")]
 fn run_parallel_batch<'a>(
     work_items: Vec<(u32, &'a Scenario)>,
     workers: u32,
     history_writer: &'a Mutex<Option<HistoryWriter>>,
     history_dir: Option<&'a Path>,
-    log_path_for: Option<LogPathFn<'a>>,
-    max_wait_for: Option<MaxWaitFn<'a>>,
-    capture_for: Option<CaptureFn<'a>>,
+    hooks: Hooks<'a>,
     stop_signal: Option<&'a std::sync::atomic::AtomicBool>,
 ) -> (Aggregator, usize) {
     if work_items.is_empty() || workers == 0 {
@@ -703,9 +712,7 @@ fn run_parallel_batch<'a>(
                         &mut worker_agg,
                         history_writer,
                         history_dir,
-                        log_path_for,
-                        max_wait_for,
-                        capture_for,
+                        hooks,
                         ScenarioFormat::Prefixed,
                     );
                     if res.failed {
@@ -751,16 +758,13 @@ struct ScenarioOutcome {
 /// `take_last_log_path` / `take_last_max_wait`) is reachable through
 /// the supplied hooks. That's the whole point of running hooks here
 /// rather than back on the orchestrator thread.
-#[allow(clippy::too_many_arguments, reason = "all of these are caller state with no natural grouping")]
 fn process_one_scenario(
     s: &Scenario,
     run_idx: u32,
     local: &mut Aggregator,
     history_writer: &Mutex<Option<HistoryWriter>>,
     history_dir: Option<&Path>,
-    log_path_for: Option<LogPathFn<'_>>,
-    max_wait_for: Option<MaxWaitFn<'_>>,
-    capture_for: Option<CaptureFn<'_>>,
+    hooks: Hooks<'_>,
     format: ScenarioFormat,
 ) -> ScenarioOutcome {
     if matches!(format, ScenarioFormat::Inline) {
@@ -772,7 +776,8 @@ fn process_one_scenario(
     let elapsed = start.elapsed();
     local.record_duration(s.name, elapsed);
 
-    let timing_str = max_wait_for
+    let timing_str = hooks
+        .max_wait_for
         .and_then(|f| f())
         .map(|(actual, budget)| {
             format!(
@@ -800,7 +805,7 @@ fn process_one_scenario(
             eprintln!("{prefix}FAILED{timing_str}");
             eprintln!("{prefix}  {e}");
             let mut log_tail: Option<String> = None;
-            if let Some(get_path) = log_path_for
+            if let Some(get_path) = hooks.log_path_for
                 && let Some(log_path) = get_path(s.name)
             {
                 dump_log_tail(&log_path);
@@ -822,7 +827,7 @@ fn process_one_scenario(
             // cause-bucket. Always produces a signature on failure —
             // `Unknown` when evidence is thin — so no failure goes
             // unattributed.
-            let capture = capture_for.and_then(|f| f());
+            let capture = hooks.capture_for.and_then(|f| f());
             row_signature = Some(crate::signature::classify_failure(
                 capture.as_ref(),
                 Some(e),
