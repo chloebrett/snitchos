@@ -45,8 +45,8 @@ pub struct SpanId(pub u64);
 /// correctly (Prometheus counter vs gauge vs histogram).
 ///
 /// Counters are monotonically increasing; gauges are snapshot values;
-/// histograms hold distributions (bucket encoding TBD when we have a
-/// histogram-emitting site).
+/// histograms hold distributions, observed via repeated `Metric` frames
+/// and bucketed host-side by the collector.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy, Hash)]
 pub enum MetricKind {
   Counter,
@@ -54,9 +54,6 @@ pub enum MetricKind {
   Histogram,
 }
 
-/// Why the scheduler picked a different task. Carried on
-/// `Frame::ContextSwitch` so traces show *why* a switch happened, not
-/// just that one did.
 /// What role a hart plays in the system. Carried on
 /// `Frame::HartRegister` so the host can label dashboards and traces.
 /// Distinguishes the boot hart (runs heartbeat, ran pre-MMU setup)
@@ -67,6 +64,9 @@ pub enum HartRole {
   Worker,
 }
 
+/// Why the scheduler picked a different task. Carried on
+/// `Frame::ContextSwitch` so traces show *why* a switch happened, not
+/// just that one did.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy)]
 pub enum SwitchReason {
   /// Running task voluntarily called `yield_now`.
