@@ -80,7 +80,8 @@ forbids dots).
 `build.rs` — `otlp.rs` declares just the message tree we actually emit
 (`ExportTraceServiceRequest → ResourceSpans → ScopeSpans → Span`) as
 `prost`-derived structs. Enough for spans with timing, parent linkage,
-and `thread.{id,name}` attributes; no events, links, or full attribute
+and `thread.{id,name}` + `host.cpu_id` attributes (built by the pure
+`span_attributes` helper); no span-events, links, or full attribute
 support.
 
 **Some frames are accepted but not yet surfaced.** `Event`,
@@ -88,7 +89,13 @@ support.
 don't yet produce OTLP/Prometheus output (`ContextSwitch` still advances
 the time anchor so downstream timestamps keep progressing) — matching the
 protocol's "define the wire format ahead of its consumers" stance.
-They're reserved, not dropped.
+They're reserved, not dropped. Note the hart a span ran on *is* now
+surfaced — as `host.cpu_id`, sourced straight from `SpanStart.hart_id`
+rather than from `HartRegister`. `HartRegister`'s `role` (Boot/Worker)
+stays unsurfaced; a per-hart *metric* label would need it, but
+`Frame::Metric` carries no `hart_id`, so per-hart metric labels are
+deferred behind a wire change. `Event` is the OTLP span-event slot,
+awaiting its first emitter (~v0.8).
 
 **Exporters never take the process down.** HTTP failures (Tempo/Loki
 down, slow, non-2xx) are logged to stderr and swallowed; there's no

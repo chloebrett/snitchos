@@ -56,6 +56,10 @@ pub struct CompletedSpan {
     /// Cached thread name at `SpanEnd` time. `None` if no
     /// `ThreadRegister` for this `task_id` arrived before `SpanEnd`.
     pub thread_name: Option<String>,
+    /// Hart the span opened on (from `SpanStart.hart_id`). The export
+    /// path surfaces it as the `host.cpu_id` OTLP attribute so Tempo
+    /// can slice traces by CPU.
+    pub hart_id: u8,
 }
 
 /// Wall-clock + tick anchor for the current kernel session. Set on
@@ -76,6 +80,7 @@ struct OpenSpan {
     name_id: StringId,
     start_t: u64,
     task_id: u32,
+    hart_id: u8,
 }
 
 /// A single histogram metric — buckets of observations.
@@ -205,7 +210,7 @@ impl State {
                 name_id,
                 t,
                 task_id,
-                hart_id: _,
+                hart_id,
             } => {
                 self.advance_anchor(*t);
                 self.open_spans.insert(
@@ -215,6 +220,7 @@ impl State {
                         name_id: *name_id,
                         start_t: *t,
                         task_id: *task_id,
+                        hart_id: *hart_id,
                     },
                 );
                 None
@@ -236,13 +242,16 @@ impl State {
                     end_time_ns: self.tick_to_wall_ns(*t),
                     task_id: open.task_id,
                     thread_name,
+                    hart_id: open.hart_id,
                 })
             }
             // Kept distinct from the `Dropped` arm despite the identical
-            // body: `Event` is parked pending OTLP wiring, whereas
-            // `Dropped` genuinely has nothing to export.
+            // body: `Event` is a reserved wire slot with no emitter yet
+            // (first one ~v0.8 — see protocol's `Frame::Event` doc),
+            // parked pending OTLP span-event wiring, whereas `Dropped`
+            // genuinely has nothing to export.
             #[allow(clippy::match_same_arms, reason = "distinct intent; see comment")]
-            Frame::Event { .. } => None, // not yet wired to OTLP
+            Frame::Event { .. } => None, // reserved: OTLP span-event, no emitter yet
             Frame::Metric { name_id, value, t } => {
                 self.advance_anchor(*t);
                 // Route histogram-kind metrics to the histogram table;
@@ -273,10 +282,13 @@ impl State {
                 None
             }
             Frame::HartRegister { .. } => {
-                // v0.6: collector accepts but doesn't yet surface to
-                // OTLP / Prometheus. Future: populate `host.cpu_id`
-                // on spans + a per-hart label on metrics. Numeric ids
-                // remain valid in the meantime.
+                // v0.6: `host.cpu_id` is now populated on spans straight
+                // from `SpanStart.hart_id` (see otlp::span_attributes),
+                // so the hart is observable without this frame. The
+                // `role` (Boot/Worker) is still unsurfaced — a per-hart
+                // dashboard label would want it, but `Frame::Metric`
+                // carries no `hart_id`, so per-hart metric labels need a
+                // wire change and are deferred. Numeric ids remain valid.
                 None
             }
         }
@@ -428,6 +440,35 @@ mod tests {
         // 1ms duration in nanos.
         let duration_ns = span.end_time_ns - span.start_time_ns;
         assert_eq!(duration_ns, 1_000_000);
+    }
+
+    #[test]
+    fn completed_span_carries_originating_hart_id() {
+        // v0.6: the wire stamps each SpanStart with the hart it opened
+        // on. The collector must carry that through to the CompletedSpan
+        // so the export path can surface it as `host.cpu_id`.
+        let mut s = State::new(FakeWallClock(0));
+        s.handle(&Frame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: 1,
+        });
+        s.handle(&Frame::StringRegister {
+            id: StringId(1),
+            value: "task_b.tick",
+        });
+        s.handle(&Frame::SpanStart {
+            id: SpanId(1),
+            parent: SpanId(0),
+            name_id: StringId(1),
+            t: 100,
+            task_id: 3,
+            hart_id: 1,
+        });
+
+        let span = s
+            .handle(&Frame::SpanEnd { id: SpanId(1), t: 200 })
+            .expect("SpanEnd should yield a CompletedSpan");
+        assert_eq!(span.hart_id, 1);
     }
 
     #[test]

@@ -72,9 +72,10 @@ struct Span {
     #[prost(fixed64, tag = "8")]
     end_time_unix_nano: u64,
     /// Per-span attributes (`OTel` semantic conventions). We emit
-    /// `thread.id` (always) and `thread.name` (when `ThreadRegister`
-    /// has resolved the `task_id`). Tempo renders them in the trace
-    /// detail view.
+    /// `thread.id` and `host.cpu_id` (always) and `thread.name` (when
+    /// `ThreadRegister` has resolved the `task_id`). Tempo renders them
+    /// in the trace detail view; `host.cpu_id` lets traces be sliced by
+    /// the hart the span ran on. Built by `span_attributes`.
     #[prost(message, repeated, tag = "9")]
     attributes: Vec<KeyValue>,
 }
@@ -125,20 +126,7 @@ impl Exporter {
     /// Build an OTLP request containing one span and POST it.
     #[cfg_attr(test, mutants::skip)] // makes real HTTP calls — not unit-testable without a mock server
     fn export(&self, span: &CompletedSpan) {
-        let mut attributes = vec![KeyValue {
-            key: "thread.id".to_string(),
-            value: Some(AnyValue {
-                string_value: span.task_id.to_string(),
-            }),
-        }];
-        if let Some(name) = &span.thread_name {
-            attributes.push(KeyValue {
-                key: "thread.name".to_string(),
-                value: Some(AnyValue {
-                    string_value: name.clone(),
-                }),
-            });
-        }
+        let attributes = span_attributes(span);
 
         let proto_span = Span {
             trace_id: self.trace_id.to_vec(),
@@ -237,6 +225,37 @@ fn clamp_u128_to_u64(v: u128) -> u64 {
     v.min(u128::from(u64::MAX)) as u64
 }
 
+/// Build the per-span OTLP attributes (`OTel` semantic conventions):
+/// `thread.id` and `host.cpu_id` always; `thread.name` only once a
+/// `ThreadRegister` has resolved the `task_id`. Pure so the export
+/// path's real-HTTP `mutants::skip` doesn't leave the attribute set
+/// untested.
+fn span_attributes(span: &CompletedSpan) -> Vec<KeyValue> {
+    let mut attributes = vec![
+        KeyValue {
+            key: "thread.id".to_string(),
+            value: Some(AnyValue {
+                string_value: span.task_id.to_string(),
+            }),
+        },
+        KeyValue {
+            key: "host.cpu_id".to_string(),
+            value: Some(AnyValue {
+                string_value: span.hart_id.to_string(),
+            }),
+        },
+    ];
+    if let Some(name) = &span.thread_name {
+        attributes.push(KeyValue {
+            key: "thread.name".to_string(),
+            value: Some(AnyValue {
+                string_value: name.clone(),
+            }),
+        });
+    }
+    attributes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +277,50 @@ mod tests {
     fn exporter_wires_the_v1_traces_path() {
         let e = Exporter::new("http://localhost:4318");
         assert_eq!(e.endpoint, "http://localhost:4318/v1/traces");
+    }
+
+    fn completed(task_id: u32, thread_name: Option<&str>, hart_id: u8) -> CompletedSpan {
+        CompletedSpan {
+            name: "task_b.tick".to_string(),
+            span_id: 1,
+            parent_span_id: 0,
+            start_time_ns: 0,
+            end_time_ns: 1,
+            task_id,
+            thread_name: thread_name.map(str::to_string),
+            hart_id,
+        }
+    }
+
+    fn attr<'a>(attrs: &'a [KeyValue], key: &str) -> Option<&'a str> {
+        attrs
+            .iter()
+            .find(|kv| kv.key == key)
+            .and_then(|kv| kv.value.as_ref())
+            .map(|v| v.string_value.as_str())
+    }
+
+    #[test]
+    fn span_attributes_surface_hart_as_host_cpu_id() {
+        let attrs = span_attributes(&completed(3, Some("task_b"), 1));
+        assert_eq!(attr(&attrs, "host.cpu_id"), Some("1"));
+    }
+
+    #[test]
+    fn span_attributes_always_carry_thread_id() {
+        let attrs = span_attributes(&completed(3, None, 0));
+        assert_eq!(attr(&attrs, "thread.id"), Some("3"));
+    }
+
+    #[test]
+    fn span_attributes_omit_thread_name_when_unresolved() {
+        let attrs = span_attributes(&completed(3, None, 0));
+        assert_eq!(attr(&attrs, "thread.name"), None);
+    }
+
+    #[test]
+    fn span_attributes_include_thread_name_when_resolved() {
+        let attrs = span_attributes(&completed(3, Some("task_b"), 0));
+        assert_eq!(attr(&attrs, "thread.name"), Some("task_b"));
     }
 }

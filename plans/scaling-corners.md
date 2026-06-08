@@ -30,6 +30,18 @@ same treatment to CURRENT_SPAN. The `PerCpu<T>` chokepoint is already
 in place from the v0.5 pre-SMP-sync prefactor; v0.6 makes it real.
 See `plans/v0.6-smp-cooperative.md`.
 
+> **RESOLVED (v0.6).** The global `CURRENT_SPAN` no longer exists. The
+> v0.5 scheduler already made the open-span stack per-*task* (each
+> `Task` owns a `SpanCursor`); v0.6's per-CPU lift made the pointer to
+> the running task's cursor per-hart — `sched::CURRENT_SPAN_CURSOR:
+> PerCpu<AtomicPtr<SpanCursor>>`, read via `.this_cpu()` in
+> `tracing::current_cursor`. Hart 1 can no longer claim hart 0's span
+> as a parent: each hart resolves parentage through its own cursor.
+> The `smp-spans-carry-hart-id` and `sched-span-survives-yield`
+> scenarios guard it. (The span-*id* allocator `SPAN_IDS` stayed a
+> single global static — correct, just cache traffic; see the per-CPU
+> span-id-partition row below, which was *not* done in v0.6.)
+
 ### 2. Single TX descriptor slot in virtio-console
 
 ```rust
@@ -150,8 +162,9 @@ it's added.
 
 | issue | severity at SMP | when to fix |
 |---|---|---|
-| Global `CURRENT_SPAN` | **breaks span tree correctness** | v0.6 (SMP) |
+| Global `CURRENT_SPAN` | **breaks span tree correctness** | ✅ **resolved v0.6** — per-task `SpanCursor` + per-hart `CURRENT_SPAN_CURSOR` |
 | Single TX descriptor slot | slow, not incorrect | deferred past v0.6 — correctness fine under multi-hart, perf follow-up |
 | Locks vs interrupts | deadlock if not handled | v0.3 (interrupts) — addressed |
-| Per-CPU span ID partition | cache traffic only | v0.6 (SMP), folds into `PerCpu` lift |
+| Per-CPU span ID partition | cache traffic only | **not done in v0.6** — `SPAN_IDS` stayed a global monotonic counter (correct, contention-free `fetch_add`); deferred as a pure perf optimization |
+| Cooperative idle can't race-free wait on IPI condition | sleep-wait degrades to 1 Hz timer cadence | found v0.6 (ping-pong); needs `local_irq_save` → v0.9 (preemption) |
 | spin::Mutex vs sleeping | wastes cycles | when blocking primitives exist (post-v0.8 IPC) |

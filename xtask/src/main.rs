@@ -2,10 +2,12 @@ use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+mod audit;
 mod itest;
 mod loc;
 mod measure;
 mod qemu;
+mod source;
 
 const COLLECTOR_BIN: &str = "target/debug/collector";
 const TELEMETRY_SOCKET: &str = "/tmp/snitch-telemetry.sock";
@@ -304,6 +306,23 @@ enum Cmd {
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
     Loc,
+    /// Gather crate-audit evidence for one crate: per-`pub`-symbol caller
+    /// table (ext/int/test), zero-caller candidates, debt markers, and unused
+    /// dependencies (`cargo machete`). Mechanical input for the `crate-audit`
+    /// skill — flags candidates, never deletes. Counts are a lower bound on
+    /// deadness (name collisions over-count), so verify candidates against the
+    /// design docs (rule 6) before acting. Requires `cargo-machete` on `PATH`.
+    Audit {
+        /// Crate (workspace dir) to audit, e.g. `kernel-core`.
+        crate_name: String,
+        /// Emit machine-readable JSON instead of the text table.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// Include ≤2-char identifiers (off by default — single/double-letter
+        /// names match as words everywhere and flood the counts with noise).
+        #[arg(long, default_value_t = false)]
+        include_short: bool,
+    },
     /// Build the kernel and run it under QEMU with a GDB stub (`-s -S`).
     /// QEMU halts at start and listens on localhost:1234; attach with
     /// lldb or riscv64-unknown-elf-gdb from another terminal. Prints
@@ -479,6 +498,9 @@ fn main() -> ExitCode {
             )
         }
         Cmd::Loc => loc::run(),
+        Cmd::Audit { crate_name, json, include_short } => {
+            audit::run(&crate_name, json, include_short)
+        }
         Cmd::Debug { features } => debug(&features),
     }
 }

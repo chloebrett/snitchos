@@ -88,6 +88,7 @@ mod tests {
             end_time_ns: end_ns,
             task_id: 0,
             thread_name: None,
+            hart_id: 0,
         }
     }
 

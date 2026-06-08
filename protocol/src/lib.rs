@@ -88,6 +88,16 @@ pub enum Frame<'a> {
   Hello { timebase_hz: u64, protocol_version: u8 },
   SpanStart { id: SpanId, parent: SpanId, name_id: StringId, t: u64, task_id: u32, hart_id: u8 },
   SpanEnd { id: SpanId, t: u64 },
+  /// A point-in-time annotation on a span (the OTLP "span event"
+  /// primitive). **Reserved, no emitter yet:** the wire slot and the
+  /// roundtrip test exist, but no kernel site produces one and the
+  /// collector parks it. First emitter is expected around v0.8, when
+  /// IPC gives spans something worth annotating mid-flight (e.g. a
+  /// message send/receive marker on a cross-process span). Kept in
+  /// place rather than removed because postcard's positional enum
+  /// encoding means deleting it would renumber every later variant and
+  /// break the wire format. See `docs/observability-design.md`
+  /// ("profiling rides on Event").
   Event { span_id: SpanId, name_id: StringId, t: u64 },
   Metric { name_id: StringId, value: i64, t: u64 },
   Dropped { count: u32 },

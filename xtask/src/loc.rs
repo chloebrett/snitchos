@@ -83,46 +83,11 @@ fn count_file_lines(content: &str) -> (usize, usize, usize) {
     let mut prod = 0usize;
     let mut test = 0usize;
     let mut comment = 0usize;
-    let mut in_test = false;
-    let mut depth = 0i32;
-    let mut awaiting_open = false;
 
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        let has_test_attr = trimmed.starts_with("#[cfg(test)]")
-            || trimmed.starts_with("#[test]")
-            || trimmed.starts_with("#[cfg(test,");
-        let is_comment_line = trimmed.starts_with("//");
-
-        let net: i32 = line
-            .chars()
-            .map(|c| match c {
-                '{' => 1,
-                '}' => -1,
-                _ => 0,
-            })
-            .sum();
-
-        if in_test {
+    for (line, is_test) in content.lines().zip(crate::source::test_line_mask(content)) {
+        if is_test {
             test += 1;
-            depth += net;
-            if depth <= 0 {
-                in_test = false;
-                depth = 0;
-            }
-        } else if awaiting_open {
-            test += 1;
-            if net > 0 {
-                in_test = true;
-                depth = net;
-                awaiting_open = false;
-            } else if net < 0 {
-                awaiting_open = false;
-            }
-        } else if has_test_attr {
-            awaiting_open = true;
-            test += 1;
-        } else if is_comment_line {
+        } else if line.trim_start().starts_with("//") {
             comment += 1;
         } else {
             prod += 1;
