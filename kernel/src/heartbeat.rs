@@ -50,6 +50,7 @@ pub struct Metrics {
     heap_largest_free_block: StringId,
     // scheduler
     sched_smoke_marker_hits: StringId,
+    sched_exit_smoke_hits: StringId,
     sched_context_switches: StringId,
     sched_runqueue_depth: StringId,
     sched_tasks_total: StringId,
@@ -110,6 +111,9 @@ impl Metrics {
             ),
             sched_smoke_marker_hits: tracing::register_counter(
                 "snitchos.sched.smoke_marker_hits",
+            ),
+            sched_exit_smoke_hits: tracing::register_counter(
+                "snitchos.sched.exit_smoke_hits",
             ),
             sched_context_switches: tracing::register_counter(
                 "snitchos.sched.context_switches_total",
@@ -332,6 +336,10 @@ fn emit_sched_metrics(m: &Metrics) {
     tracing::emit_metric(
         m.sched_smoke_marker_hits,
         sched::SMOKE_MARKER_HITS.load(Ordering::Relaxed) as i64,
+    );
+    tracing::emit_metric(
+        m.sched_exit_smoke_hits,
+        sched::EXIT_SMOKE_HITS.load(Ordering::Relaxed) as i64,
     );
     tracing::emit_metric(
         m.sched_context_switches,

@@ -476,18 +476,27 @@ direction of the cross-hart Acquire is broken at this scale.
 |-----------|------------------|-----------|
 | Hart 1 post-sret resume (ipi-pong)        | 100 000 | 100% |
 | Hart 1 IPI payload read (shootdown-storm) |  50 000 | 100% |
-| Hart 1 fresh-`switch` post-IPI (spawn-storm) | ~10 effective | 100% w/ fence, 95% w/o |
+| Hart 1 fresh-`switch` post-IPI (spawn-storm, pre-exit) | ~10 effective | 100% w/ fence, 95% w/o |
+| Hart 1 fresh-`switch` post-IPI (spawn-storm, post-exit) | 4 000 | 100% |
 
-Two of the original three hypothesis classes are out at high trial
-counts. Spawn-storm's design ceiling means we can't test the third
-(fresh `switch` post-fresh-`wfi`) at scale without task-exit.
+All three originally-suspected hypothesis classes are now out at high
+trial counts. After v0.5.x minimal task-exit landed, the spawn-storm
+exercises real fresh `switch`-into-fresh-context at every iteration:
+hart 1 returns to `wfi` between trials, so each spawn is genuinely
+`wfi → IPI → trap → sret → yield_now → switch → body`. 200 iterations
+× 20 boots = 4 000 effective trials. Zero flake.
 
 ### Hypothesis ranking post-experiments
 
-- ~~H1: stale `*next_ctx` dereference in `switch`~~ — possibly still
-  live for the *fresh-context-after-fresh-wfi* case only. Spawn-storm
-  could not test at scale.
-- ~~H2: new task stack reads~~ — same caveat.
+- ~~H1: stale `*next_ctx` dereference in `switch`~~ — **falsified at
+  4 000 trials** after v0.5.x task-exit landed and the spawn-storm
+  began exercising real fresh `switch` post-fresh-`wfi`. The asm
+  load of `ra`/`sp` from a context hart 0 wrote then IPI-published
+  reliably observes the writes.
+- ~~H2: new task stack reads~~ — **falsified at 4 000 trials**, same
+  experiment. The storm body touches a stack-local marker
+  immediately on entry; that read of a stack hart 0 zeroed then
+  handed off via IPI never observes stale bytes.
 - ~~H3: runqueue id race~~ — already ruled out at planning time.
 - ~~H4: SpanCursor pointer race~~ — same.
 - ~~H5: compiler reorder across lock drop~~ — implausible.

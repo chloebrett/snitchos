@@ -69,6 +69,20 @@ unsafe extern "C" {
     ///   and whose `sp` is the top of an exclusive, sufficiently
     ///   aligned stack region.
     pub fn switch(from: *mut TaskContext, to: *mut TaskContext);
+
+    /// Load-only sibling of `switch`. Loads callee-saved + sp + ra
+    /// from `to` and `ret`s into the resumed thread. Used by
+    /// `exit_now` to abandon the current task without saving its
+    /// register state.
+    ///
+    /// # Safety
+    ///
+    /// `to` must point at a valid populated `TaskContext` whose `ra`
+    /// is a callable address and whose `sp` is the top of a valid
+    /// stack region exclusively held by that task. After this runs,
+    /// the caller's stack and registers are forgotten — the calling
+    /// task is gone.
+    pub fn switch_into(to: *mut TaskContext) -> !;
 }
 
 /// Per-task stack size in bytes. 16 KiB is generous for kernel work
@@ -98,10 +112,11 @@ impl Stack {
 pub struct Task {
     pub id: TaskId,
     pub name: String,
-    #[expect(
-        dead_code,
-        reason = "task lifecycle state; tracked for the scheduler but no consumer reads it until blocking/wait states land"
-    )]
+    /// Set to `Exited` by [`exit_now`]; consumers (`task_count`,
+    /// `task_snapshots`) filter exited entries so the heartbeat
+    /// gauges don't keep reporting them after the task is gone.
+    /// `Ready` / `Running` distinctions aren't currently load-bearing
+    /// outside the runqueue, but the value is correct.
     pub state: TaskState,
     pub span_cursor: SpanCursor,
     /// Total time on-CPU in `time`-CSR ticks. Bumped on every yield
@@ -115,15 +130,7 @@ pub struct Task {
     /// re-format strings per tick. Populated by `spawn` /
     /// `register_bare_task`. Sentinel (`StringId(0)`) under
     /// `deflake-spawn-storm` where the per-task emit loop is gated off.
-    #[cfg_attr(
-        feature = "deflake-spawn-storm",
-        expect(dead_code, reason = "deflake-spawn-storm gates the per-task metric emit loop")
-    )]
     pub cpu_time_metric: protocol::StringId,
-    #[cfg_attr(
-        feature = "deflake-spawn-storm",
-        expect(dead_code, reason = "deflake-spawn-storm gates the per-task metric emit loop")
-    )]
     pub runs_metric: protocol::StringId,
     /// Saved register state while off-CPU. `UnsafeCell` because the
     /// asm needs `*mut` access while the `Task` is borrowed `&` from
@@ -209,8 +216,16 @@ impl Scheduler {
         }
     }
 
+    /// Number of *live* tasks in the table. Exited tasks remain in
+    /// `tasks` (leaked, no reaping yet) but are filtered here so the
+    /// heartbeat `snitchos.sched.tasks_total` gauge tracks the
+    /// scheduler's actual workload rather than its lifetime spawn
+    /// count.
     pub fn task_count(&self) -> usize {
-        self.tasks.len()
+        self.tasks
+            .iter()
+            .filter(|t| t.state != TaskState::Exited)
+            .count()
     }
 
     /// Depth of `hartid`'s runqueue. Lock-protected access from the
@@ -304,6 +319,7 @@ pub fn task_snapshots() -> Vec<TaskSnapshot> {
     sched
         .tasks
         .iter()
+        .filter(|t| t.state != TaskState::Exited)
         .map(|t| TaskSnapshot {
             cpu_time_metric: t.cpu_time_metric,
             runs_metric: t.runs_metric,
@@ -538,12 +554,103 @@ pub fn yield_now() {
     // We've been resumed (a future yield switched back into us).
 }
 
+/// Terminate the calling task. Marks it `Exited`, picks the next
+/// ready task on this hart, and switches into it via the load-only
+/// `switch_into` asm. Never returns.
+///
+/// The exited task's `Box<Task>` and `Box<Stack>` remain allocated
+/// in `SCHEDULER.tasks` — v0.5.x minimal-scope variant; reaping
+/// lands later. `task_count` and `task_snapshots` filter out
+/// `Exited` entries so the heartbeat doesn't keep reporting them.
+///
+/// Open spans on the calling task's cursor are NOT auto-closed —
+/// the caller must balance them first. The cursor itself becomes
+/// inert (nothing reads it after exit).
+///
+/// # Panics
+///
+/// If the runqueue is empty when this is called — there's nothing
+/// to switch into. Storm scenarios ensure `hart_1_main` stays on
+/// hart 1's queue specifically to keep this invariant.
+pub fn exit_now() -> ! {
+    let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
+    let me = crate::percpu::current_hartid();
+
+    let (next_ctx, next_id) = {
+        let mut sched = SCHEDULER.lock();
+
+        // Mark current Exited so `task_count` / `task_snapshots`
+        // skip it from this point on.
+        for task in sched.tasks.iter_mut() {
+            if task.id == current_id {
+                task.state = TaskState::Exited;
+                break;
+            }
+        }
+
+        // Current task is running, not on the runqueue, so nothing
+        // to remove. Pick the next ready task.
+        let Some(next_id) = sched.runqueues[me].pop_front() else {
+            panic!("sched::exit_now: runqueue empty on hart {me}");
+        };
+
+        // Resolve next's context + span cursor. Same shape as the
+        // tail of yield_now's lock body.
+        let mut next_ctx: *mut TaskContext = core::ptr::null_mut();
+        let mut next_cursor: *mut SpanCursor = core::ptr::null_mut();
+        for task in &sched.tasks {
+            if task.id == next_id {
+                next_ctx = task.context.get();
+                next_cursor = (&task.span_cursor as *const SpanCursor) as *mut SpanCursor;
+                task.runs.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+        }
+        assert!(!next_ctx.is_null(), "exit_now: next task missing from table");
+
+        CURRENT_TASK.this_cpu().store(next_id.0, Ordering::Relaxed);
+        CURRENT_SPAN_CURSOR.this_cpu().store(next_cursor, Ordering::Relaxed);
+
+        (next_ctx, next_id)
+        // Lock dropped here.
+    };
+
+    CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    // Re-use `Yield` reason on the wire — wire-format `Exit` variant
+    // is deferred until a host-side consumer needs to distinguish.
+    crate::tracing::emit_context_switch(current_id, next_id, SwitchReason::Yield);
+    CURRENT_TASK_ENTRY_TICK
+        .this_cpu()
+        .store(crate::tracing::timestamp(), Ordering::Relaxed);
+
+    // SAFETY: `next_ctx` points at the `UnsafeCell<TaskContext>` of
+    // a live `Box<Task>` in `SCHEDULER.tasks`. The exiting task's
+    // stack is abandoned, but its `Box<Task>` is leaked (not freed),
+    // so no dangling reference. The asm `ret`s into the next task's
+    // body on its own stack — the calling task's `sp` is gone the
+    // instant `switch_into` writes the new one.
+    unsafe { switch_into(next_ctx) }
+}
+
 // --- v0.5 step 5 smoke: round-trip the asm without involving the runqueue ---
 
 /// Bumped each time the smoke marker function runs. The heartbeat
 /// emits this as `snitchos.sched.smoke_marker_hits`; the integration
 /// scenario asserts it's > 0 after boot. `Relaxed`: counter.
 pub static SMOKE_MARKER_HITS: AtomicU64 = AtomicU64::new(0);
+
+/// Bumped by the `exit_smoke_entry` task body. Heartbeat emits as
+/// `snitchos.sched.exit_smoke_hits`; the `sched-task-exits-cleanly`
+/// scenario asserts it reaches 1 — proves a spawned task can call
+/// `exit_now()` without taking the kernel down. `Relaxed`: counter.
+pub static EXIT_SMOKE_HITS: AtomicU64 = AtomicU64::new(0);
+
+/// Task body for the exit smoke. Bumps `EXIT_SMOKE_HITS` then
+/// terminates via `exit_now`. Spawned once at boot from `kmain`.
+pub extern "C" fn exit_smoke_entry() -> ! {
+    EXIT_SMOKE_HITS.fetch_add(1, Ordering::Relaxed);
+    exit_now()
+}
 
 #[repr(C, align(16))]
 struct SmokeStack([u8; STACK_SIZE]);

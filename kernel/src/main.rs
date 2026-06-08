@@ -292,6 +292,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // both calls so the collector can resolve task ids to names.
     let _ = sched::register_bare_task("main", kernel_core::sched::TaskState::Running);
     let _ = sched::spawn("idle", demo_tasks::idle_entry);
+    // v0.5.x exit smoke: one task that bumps a counter then calls
+    // `exit_now`. Asserts the asm + state-machine + snapshot-filter
+    // wire together without crashing the kernel. Costs one 16 KiB
+    // leaked stack at boot.
+    let _ = sched::spawn("exit_smoke", sched::exit_smoke_entry);
     // Under `deflake-spawn-storm` the kernel boots with just main +
     // idle on hart 0 (and idle on hart 1, spawned in secondary_main).
     // The storm spawns its own minimal worker tasks on hart 1 below;

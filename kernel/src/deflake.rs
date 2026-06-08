@@ -41,15 +41,17 @@ pub mod spawn_storm {
 
     /// Body run by every storm task on hart 1. Touches a stack-local
     /// (H2 probe — proves the new task's `sp` resolves to writable
-    /// memory), bumps the ack counter, then cycles through `yield_now`
-    /// forever because v0.5 tasks can't exit.
+    /// memory), bumps the ack counter, then exits. With v0.5.x's
+    /// minimal task-exit, the task is removed from the runqueue and
+    /// hart 1 returns to `wfi` (via `hart_1_main`'s yield-then-wfi
+    /// loop) before the next spawn arrives — restoring the
+    /// `hart 1 in wfi → IPI → trap → switch` trial pattern the
+    /// storm exists to test.
     pub extern "C" fn body() -> ! {
         let marker: u64 = 0xdead_beef_cafe_f00d;
         core::hint::black_box(marker);
         ACK_COUNTER.fetch_add(1, Ordering::Release);
-        loop {
-            crate::sched::yield_now();
-        }
+        crate::sched::exit_now()
     }
 
     /// Single-MMIO-read BQL fence used by hart 0's ack-wait spin. The
