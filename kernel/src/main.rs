@@ -343,6 +343,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             // keep hart 0's surface clean for measurement.
             let _ = sched::spawn("workload_producer", workload::producer_entry);
         }
+        Some(WorkloadKind::SmpSpsc) => {
+            // Same as Smp but over a lock-free `heapless::spsc` ring.
+            // Split the ring before either endpoint's task can run.
+            workload::init_spsc();
+            let _ = sched::spawn("workload_producer", workload::spsc_producer_entry);
+        }
         // Default demo: `None`, and the OOM workloads, which keep the
         // standard tasks and only change the heartbeat.
         None | Some(WorkloadKind::FrameOom) | Some(WorkloadKind::HeapOom) => {
@@ -401,12 +407,19 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
     }
 
-    // v0.6 step 11: place the consumer on hart 1 when the SMP workload
-    // is selected. `spawn_on` enqueues it on hart 1's runqueue and IPIs
+    // v0.6 step 11/12: place the consumer on hart 1 for the cross-hart
+    // workloads. `spawn_on` enqueues it on hart 1's runqueue and IPIs
     // the hart so its idle `wfi` wakes to pick it up. Producer (hart 0)
-    // and consumer (hart 1) then contend on `QUEUE` across the boundary.
-    if matches!(selected, Some(WorkloadKind::Smp)) {
-        let _ = sched::spawn_on(1, "workload_consumer", workload::consumer_entry);
+    // and consumer (hart 1) then share the queue across the boundary —
+    // contending on the `Mutex` (Smp) or lock-free over SPSC (SmpSpsc).
+    match selected {
+        Some(WorkloadKind::Smp) => {
+            let _ = sched::spawn_on(1, "workload_consumer", workload::consumer_entry);
+        }
+        Some(WorkloadKind::SmpSpsc) => {
+            let _ = sched::spawn_on(1, "workload_consumer", workload::spsc_consumer_entry);
+        }
+        _ => {}
     }
 
     // Task-driven storms: spawn their hart-0 + hart-1 bodies now that

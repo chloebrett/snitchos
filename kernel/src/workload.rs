@@ -19,6 +19,7 @@
 use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use heapless::spsc::{Consumer, Producer, Queue};
 use kernel_core::workload::{bin_of, Lcg, BUCKETS};
 
 use crate::sched;
@@ -90,14 +91,16 @@ pub fn histogram_sum() -> u64 {
     HISTOGRAM.iter().map(|b| b.load(Ordering::Relaxed)).sum()
 }
 
-/// Current queue depth. Briefly takes the queue lock — safe to call
-/// from the heartbeat (single-threaded vs. producer/consumer in v0.6
-/// step 1; under SMP this is one more lock contender but still bounded).
-/// Returns 0 if the queue hasn't been initialised yet (first call into
-/// producer/consumer not happened).
+/// In-flight samples = produced − consumed. Equals the queue length
+/// by construction (every produced sample is queued until consumed),
+/// works for both the `Mutex` and SPSC variants, and takes **no lock**
+/// — so the heartbeat reading this doesn't become a third contender on
+/// the `Mutex` queue (which would inflate the very lock-wait we're
+/// measuring). Bounded by `QUEUE_CAP`.
 pub fn queue_depth() -> usize {
-    let guard = QUEUE.lock();
-    guard.as_ref().map(|q| q.len()).unwrap_or(0)
+    let produced = SAMPLES_PRODUCED.load(Ordering::Relaxed);
+    let consumed = SAMPLES_CONSUMED.load(Ordering::Relaxed);
+    usize::try_from(produced.saturating_sub(consumed)).unwrap_or(usize::MAX)
 }
 
 pub extern "C" fn producer_entry() -> ! {
@@ -161,6 +164,102 @@ pub extern "C" fn consumer_entry() -> ! {
             // heartbeat's Acquire-load. See the SAMPLES_CONSUMED note
             // at the top of this module.
             SAMPLES_CONSUMED.fetch_add(n as u64, Ordering::Release);
+        }
+        sched::yield_now();
+    }
+}
+
+// ---- Lock-free SPSC variant (`workload=smp-spsc`, v0.6 step 12) ----
+//
+// Same producer/consumer/histogram and the same `burst=N` knob, but the
+// queue is a lock-free `heapless::spsc` ring instead of
+// `Mutex<VecDeque>`. The hot path never takes a lock, so
+// `LOCK_WAIT_TICKS_TOTAL` stays 0 — that's the "chokepoint removed" the
+// measurement and the lock-wait Grafana panel show. Capacity matches
+// `QUEUE_CAP` (heapless `Queue<T, N>` holds N-1 items).
+
+const SPSC_N: usize = QUEUE_CAP + 1;
+
+/// The SPSC ring. `static mut` because `split` needs a `&'static mut`
+/// once at init; thereafter the `Producer`/`Consumer` endpoints own
+/// disjoint ends and synchronise via the ring's internal atomics —
+/// safe for one producer (hart 0) + one consumer (hart 1), which is
+/// exactly what SPSC is for.
+static mut SPSC_QUEUE: Queue<u64, SPSC_N> = Queue::new();
+
+/// One-time handoff slots: `init_spsc` (hart 0, boot) puts the split
+/// endpoints here; each task `take`s its endpoint once at entry, then
+/// owns it and runs lock-free. The `Mutex` guards only the handoff.
+static SPSC_PRODUCER: Mutex<Option<Producer<'static, u64, SPSC_N>>> = Mutex::new(None);
+static SPSC_CONSUMER: Mutex<Option<Consumer<'static, u64, SPSC_N>>> = Mutex::new(None);
+
+/// Split the SPSC ring and stash its endpoints. Call once from `kmain`
+/// before spawning the spsc tasks.
+pub fn init_spsc() {
+    // SAFETY: called exactly once at boot, on hart 0, before the spsc
+    // producer/consumer tasks are spawned — so this `&mut` to the static
+    // is unique and there are no concurrent users yet.
+    #[allow(
+        clippy::deref_addrof,
+        reason = "&mut *(&raw mut STATIC) is the required idiom for a unique &mut to a static; \
+                  clippy's deref_addrof autofix would rewrite it to the forbidden &mut STATIC"
+    )]
+    let queue: &'static mut Queue<u64, SPSC_N> = unsafe { &mut *(&raw mut SPSC_QUEUE) };
+    let (producer, consumer) = queue.split();
+    *SPSC_PRODUCER.lock() = Some(producer);
+    *SPSC_CONSUMER.lock() = Some(consumer);
+}
+
+pub extern "C" fn spsc_producer_entry() -> ! {
+    let mut producer = SPSC_PRODUCER
+        .lock()
+        .take()
+        .expect("init_spsc must run before spsc_producer is scheduled");
+    let mut lcg = Lcg::new(PRODUCER_SEED);
+    loop {
+        let burst = BURST.load(Ordering::Relaxed);
+        crate::span!("workload.produce");
+        for _ in 0..burst {
+            let mut batch = [0u64; BATCH];
+            for slot in &mut batch {
+                *slot = lcg.next();
+            }
+            let mut pushed = 0u64;
+            for &s in &batch {
+                // Lock-free enqueue. `Err` = ring full → backpressure;
+                // drop this sample. `produced` counts what was actually
+                // enqueued, so `produced − consumed` stays the depth.
+                if producer.enqueue(s).is_ok() {
+                    pushed += 1;
+                }
+            }
+            SAMPLES_PRODUCED.fetch_add(pushed, Ordering::Relaxed);
+        }
+        sched::yield_now();
+    }
+}
+
+pub extern "C" fn spsc_consumer_entry() -> ! {
+    let mut consumer = SPSC_CONSUMER
+        .lock()
+        .take()
+        .expect("init_spsc must run before spsc_consumer is scheduled");
+    loop {
+        let burst = BURST.load(Ordering::Relaxed);
+        crate::span!("workload.consume");
+        for _ in 0..burst {
+            let mut n = 0u64;
+            for _ in 0..BATCH {
+                match consumer.dequeue() {
+                    Some(s) => {
+                        HISTOGRAM[bin_of(s, BUCKETS)].fetch_add(1, Ordering::Relaxed);
+                        n += 1;
+                    }
+                    None => break,
+                }
+            }
+            // Release: same cross-hart publish as the Mutex consumer.
+            SAMPLES_CONSUMED.fetch_add(n, Ordering::Release);
         }
         sched::yield_now();
     }

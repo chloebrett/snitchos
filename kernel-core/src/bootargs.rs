@@ -12,9 +12,13 @@
 /// "an alternate workload," never "the default."
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkloadKind {
-    /// Cross-hart producer/consumer: producer on hart 0, consumer on
-    /// hart 1 (v0.6 step 11).
+    /// Cross-hart producer/consumer over `Mutex<VecDeque>`: producer on
+    /// hart 0, consumer on hart 1 (v0.6 step 11).
     Smp,
+    /// As [`Smp`](Self::Smp) but over a lock-free `heapless::spsc`
+    /// queue instead of `Mutex<VecDeque>` (v0.6 step 12). The A/B
+    /// counterpart for the lock-contention measurement.
+    SmpSpsc,
     /// Frame-allocator OOM: keep the default demo tasks, but the
     /// heartbeat leaks frames each tick until the pool exhausts.
     FrameOom,
@@ -74,6 +78,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
         .find_map(|tok| tok.strip_prefix("workload="))
         .and_then(|name| match name {
             "smp" => Some(WorkloadKind::Smp),
+            "smp-spsc" => Some(WorkloadKind::SmpSpsc),
             "frame-oom" => Some(WorkloadKind::FrameOom),
             "heap-oom" => Some(WorkloadKind::HeapOom),
             "spawn-storm" => Some(WorkloadKind::SpawnStorm),
@@ -92,6 +97,13 @@ mod tests {
     #[test]
     fn selects_smp_from_workload_key() {
         assert_eq!(select("workload=smp"), Some(WorkloadKind::Smp));
+    }
+
+    #[test]
+    fn selects_smp_spsc() {
+        assert_eq!(select("workload=smp-spsc"), Some(WorkloadKind::SmpSpsc));
+        // `smp-spsc` must not be mis-parsed as `smp`.
+        assert_ne!(select("workload=smp-spsc"), Some(WorkloadKind::Smp));
     }
 
     #[test]

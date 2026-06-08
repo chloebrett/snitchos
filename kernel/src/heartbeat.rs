@@ -378,9 +378,10 @@ fn emit_storm_metrics(m: &Metrics, count: i64) {
             emit!(m, virtio_storm_hart0_emits      = crate::storms::virtio_storm::HART0_EMITS.load(Ordering::Relaxed));
             emit!(m, virtio_storm_hart1_iterations = crate::storms::virtio_storm::HART1_ITERATIONS.load(Ordering::Relaxed));
         }
-        // No storm selected (default / Smp / OOM): nothing to emit.
+        // No storm selected (default / Smp / SmpSpsc / OOM): nothing to emit.
         None
         | Some(WorkloadKind::Smp)
+        | Some(WorkloadKind::SmpSpsc)
         | Some(WorkloadKind::FrameOom)
         | Some(WorkloadKind::HeapOom) => {}
     }
