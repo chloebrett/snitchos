@@ -2,7 +2,7 @@
 
 *One kernel binary. Workloads chosen at boot via kernel bootargs, not at compile time. The test scaffolding is purely additive — with no bootarg, an instrumented build runs the exact production default.*
 
-Status: **proposed** (mechanism unverified — see *Feasibility gate* below). Supersedes the per-workload cargo-feature scheme accumulated through v0.4–v0.6.
+Status: **proposed** — bootargs channel **verified by spike** (see *Feasibility gate*). Supersedes the per-workload cargo-feature scheme accumulated through v0.4–v0.6.
 
 ## The problem
 
@@ -76,20 +76,20 @@ The DTB read must happen **before `unmap_identity`** — the DTB physical region
 - Live measurement/demo of any workload without a rebuild.
 
 **Costs / caveats (named, accepted)**
-- **The itest binary is not a hypothetical lean binary.** Compiling the registry in changes layout/codegen. Irrelevant for most scenarios — *except* the **deflake** scenarios, which exist to characterise a cross-hart memory-ordering race, and codegen edges are exactly what mask/unmask that class of bug. Their signal becomes "about the itest build." Accepted because there is no separate production deploy yet (the kernel *is* the artifact); mitigation: port the deflake storms **last** and compare their flake rate before/after the move.
+- **The itest binary is not a hypothetical lean binary.** Compiling the registry in changes layout/codegen. Accepted because there is no separate production deploy yet (the kernel *is* the artifact). Historical note: an earlier draft worried this would distort the `*-storm` scenarios because they characterised an unfixed cross-hart race. That race was found and fixed — a dropped `MutexGuard` in `virtio_console::send` (a logic bug, not memory ordering), so the storms are now ordinary regression/stress tests with no special codegen sensitivity. A flake-rate sanity check after migrating them is still prudent, but they need no special porting order.
 - **Destructive workloads ship in the itest kernel.** `heap-oom`/`oom-leak` deliberately exhaust/crash. Harmless under runtime gating — each scenario is its own QEMU and they only fire when selected — but worth stating so nobody is surprised the OOM code is present.
 - **Loss of dead-code elimination when the feature is on.** By design; the feature-off build stays lean, which is the build that would ever ship.
 
-## Feasibility gate (do before committing to the refactor)
+## Feasibility gate — ✅ verified
 
-The one load-bearing unknown: whether `-append` reaches `/chosen/bootargs` with our `-kernel <ELF>` + `virt` setup, and whether it's readable in `kmain` before `unmap_identity`. **Spike:** a throwaway read of `dtb.chosen().bootargs()` in `kmain` that `println!`s whatever `-append "workload=smp"` passed. ~15 min; everything else is mechanical, so this derisks the whole plan. If it doesn't work, fall back to `fw_cfg` (alternative 2) — the internal design (enum + `select` + `Once` + two dispatch sites) is unchanged; only the input channel swaps.
+The one load-bearing unknown was whether `-append` reaches `/chosen/bootargs` with our `-kernel <ELF>` + `virt` setup, and whether it's readable in `kmain` before `unmap_identity`. **Confirmed by spike:** a throwaway `dtb.chosen().bootargs()` read in `kmain` (placed right after `console::init`, well before `unmap_identity`) printed `bootargs = "workload=smp-spike"` for `-append "workload=smp-spike"`. The `fdt` 0.1.5 `chosen().bootargs()` accessor works post-MMU here; no closure-chain crash (that gotcha is pre-MMU only). The `fw_cfg` fallback (alternative 2) is therefore not needed; if it ever were, the internal design (enum + `select` + `Once` + two dispatch sites) is unchanged — only the input channel swaps.
 
 ## Migration sequence (incremental, each step green)
 
-1. **Spike** the bootargs read (feasibility gate).
+1. ~~**Spike** the bootargs read~~ — done (feasibility gate above).
 2. Add `itest-workloads` + `WorkloadKind` + `select()` (TDD in `kernel-core`) + the `Once` and two dispatch sites, registering **`smp-workload` only**. Prove one-build + `-append` selection on `smp-producer-consumer-correctness` and a default-demo scenario.
 3. Port `oom-leak`, `heap-oom`. Delete their feature defs.
-4. Port the `deflake-*` storms **last**, watching their flake rate across the move. Delete their feature defs.
+4. Port the `*-storm` workloads (any order — the race they once characterised is fixed). **Rename here:** they become runtime selections `workload=mutex-storm`, `workload=spawn-storm`, etc. — the now-misleading `deflake-` prefix disappears as the cargo features are deleted, so no separate rename-then-delete churn. A flake-rate sanity check after the move is prudent but not gating.
 5. Add `cargo xtask boot --workload`.
 
 ## Open questions
