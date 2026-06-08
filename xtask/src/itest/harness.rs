@@ -338,12 +338,33 @@ fn build_kernel(features: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+/// Per-Harness-spawn unique counter. Two parallel `Harness::spawn`
+/// calls (same scenario, different iteration or worker) would
+/// otherwise collide on `(label, pid)`. Each helper increment yields
+/// a fresh suffix.
+static SPAWN_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn next_spawn_id() -> u64 {
+    SPAWN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn socket_path_for(label: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/snitch-itest-{}-{}.sock", label, std::process::id()))
+    PathBuf::from(format!(
+        "/tmp/snitch-itest-{}-{}-{}.sock",
+        label,
+        std::process::id(),
+        next_spawn_id()
+    ))
 }
 
 fn log_path_for(label: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/snitch-itest-{}-{}.log", label, std::process::id()))
+    PathBuf::from(format!(
+        "/tmp/snitch-itest-{}-{}-{}.log",
+        label,
+        std::process::id(),
+        next_spawn_id()
+    ))
 }
 
 fn connect_with_deadline(

@@ -203,15 +203,17 @@ enum Cmd {
         /// noise.
         #[arg(long, default_value_t = false)]
         no_auto_push: bool,
-        /// Number of scenarios to run in parallel. Default `1` matches
-        /// today's sequential behaviour. The runner partitions
-        /// scenarios into Wfi-bounded (parallel at `--jobs` width) and
-        /// Cpu-bounded (parallel at `--cpu-jobs` width, run as a
-        /// separate pass after Wfi). See
+        /// Number of scenarios to run in parallel. Default `10`
+        /// (validated against an empirical A/B at this width — all
+        /// scenarios stayed `consistent` against the sequential
+        /// baseline). The runner partitions scenarios into
+        /// Wfi-bounded (parallel at `--jobs` width) and Cpu-bounded
+        /// (parallel at `--cpu-jobs` width, run as a separate pass
+        /// after Wfi). Pass `--jobs 1` to force sequential. See
         /// `plans/itest-parallel-scenarios.md`.
         #[arg(
             long,
-            default_value_t = 1,
+            default_value_t = 10,
             value_parser = clap::value_parser!(u32).range(1..=64),
         )]
         jobs: u32,

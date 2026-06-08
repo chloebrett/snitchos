@@ -250,11 +250,21 @@ machinery needed.
      scenario's measured rate — keep `--jobs > 1` opt-in.
    - All `Consistent` (and any `Better` is fine) → safe to flip
      the default.
-7. **Default flip.** Change `--jobs` default to
-   `min(2 × num_cpus, scenario_count)`. Document the flip in
-   `posts/`. If the A/B showed CPU-bound scenarios shift even with
-   the serial-pass mitigation, the right next step is per-scenario
-   weighting rather than a smaller default.
+7. **Default flip.** Done: `--jobs` default flipped to `10` based
+   on the A/B data (50 iterations Wfi-only at `--jobs 10 --cpu-jobs
+   3`: all 16 scenarios came back `consistent` against the 40-run
+   sequential baseline, p > 0.12 across the board). The
+   `2 × num_cpus` target from earlier in this plan was theoretical;
+   the empirical sweet spot landed at `10` on the dev machine and we
+   shipped that.
+
+   Watch item: `frame-allocator-oom` showed 3/50 fails (6%) vs
+   baseline 0/40, p=0.12 — under the statistical threshold but the
+   highest-rate new appearance. If a follow-up run trips it past
+   p<0.05 it gets marked parallelism-sensitive and the mitigation
+   options are (a) move it to the Cpu batch even though it's not
+   guest-CPU-heavy, or (b) per-scenario weighting in the Wfi
+   scheduler.
 
 Each step leaves the suite working. Steps 1-4 ship together as a
 "opt-in --jobs N" PR; step 6 is a separate PR gated on step 5's data.

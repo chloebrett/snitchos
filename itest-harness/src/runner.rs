@@ -231,6 +231,160 @@ pub fn run(
     let history_writer: Mutex<Option<HistoryWriter>> = Mutex::new(initial_history_writer);
     let jobs = config.jobs.max(1);
 
+    // Stress mode: single scenario × `--repeat N` iterations in
+    // parallel. The plan's "deferred" extension. Kicks in when there
+    // are N>1 iterations of exactly one scenario AND jobs > 1.
+    // Fail-fast still works via a stop flag; SIGINT still works via
+    // the external INTERRUPT atomic. All N iterations land in the
+    // aggregator before the per-iteration loop below runs (which
+    // is skipped because we set runs=0 by returning early).
+    if scenarios.len() == 1 && runs > 1 && jobs > 1 {
+        let s = scenarios[0];
+        let workers = match s.cpu_profile {
+            CpuProfile::Wfi => jobs,
+            CpuProfile::Cpu => {
+                let cj = config.cpu_jobs;
+                if cj == 0 { (jobs / 2).max(1) } else { cj }
+            }
+        };
+        eprintln!(
+            "\n=== stress mode: {} × {} iterations of {} ===",
+            workers, runs, s.name
+        );
+        let iter_wall_start = Instant::now();
+
+        // Fail-fast: workers check this between pops. We set it when
+        // cumulative failures cross the threshold. Distinct from
+        // config.interrupt so SIGINT vs fail-fast produce different
+        // exit codes.
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let failures_so_far = std::sync::atomic::AtomicU32::new(0);
+        let fail_fast = config.fail_fast;
+        let stop_ref = &stop;
+        let failures_ref = &failures_so_far;
+
+        // Tracker closure: each worker calls this after every
+        // scenario completion so fail-fast counts are coherent across
+        // workers. We piggy-back on the existing log_path_for
+        // /max_wait_for hooks by NOT extending the hooks; instead,
+        // we observe failures by re-checking the per-worker
+        // aggregator after each pop. Cleaner: process_one_scenario
+        // already returns a ScenarioOutcome that's threaded through
+        // run_parallel_batch's worker loop. To keep this stress path
+        // contained, we use a custom worker pool here.
+        let work_items: Vec<(u32, &Scenario)> =
+            (0..runs).map(|i| (i, s)).collect();
+        let work: Mutex<VecDeque<(u32, &Scenario)>> =
+            Mutex::new(work_items.into_iter().collect());
+        let work_ref = &work;
+        let log_path_for = config.log_path_for;
+        let max_wait_for = config.max_wait_for;
+        let history_dir_ref = history_dir.as_deref();
+        let history_writer_ref = &history_writer;
+        let interrupt = config.interrupt;
+
+        let per_worker: Vec<Aggregator> = thread::scope(|sc| {
+            let mut handles = Vec::with_capacity(workers as usize);
+            for _ in 0..workers {
+                handles.push(sc.spawn(move || {
+                    let mut worker_agg = Aggregator::new();
+                    loop {
+                        if stop_ref.load(std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        if interrupt
+                            .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+                        {
+                            break;
+                        }
+                        let next = work_ref
+                            .lock()
+                            .expect("work-queue poisoned")
+                            .pop_front();
+                        let Some((iter_idx, s)) = next else { break };
+                        let res = process_one_scenario(
+                            s,
+                            iter_idx,
+                            &mut worker_agg,
+                            history_writer_ref,
+                            history_dir_ref,
+                            log_path_for,
+                            max_wait_for,
+                            ScenarioFormat::Prefixed,
+                        );
+                        let totals = if res.failed {
+                            let n = failures_ref
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                + 1;
+                            if let Some(k) = fail_fast
+                                && n >= k
+                            {
+                                stop_ref
+                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            RunTotals { passed: 0, failed: 1 }
+                        } else {
+                            RunTotals { passed: 1, failed: 0 }
+                        };
+                        worker_agg.finish_run(totals);
+                    }
+                    worker_agg
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("worker panicked"))
+                .collect()
+        });
+
+        for w in per_worker {
+            aggregator.merge(w);
+        }
+
+        let stopped_early = stop.load(std::sync::atomic::Ordering::SeqCst);
+        if stopped_early
+            && let Some(k) = fail_fast
+        {
+            eprintln!(
+                "\n--fail-fast: {} total failures reached (threshold {k}); stopped early.",
+                aggregator.total_failures()
+            );
+        }
+        if interrupt.is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst)) {
+            interrupted = true;
+            eprintln!(
+                "\nInterrupted during stress run. Writing partial baseline (if --update-baseline)."
+            );
+        }
+
+        let iter_wall = iter_wall_start.elapsed();
+        let iter_cpu = aggregator.total_duration();
+        let completed = aggregator.runs();
+        let total_failed = aggregator.total_failures();
+        let passed_count = completed.saturating_sub(total_failed);
+        eprintln!(
+            "\nstress: {}/{} iterations passed, {} failed in {:.1} seconds wall time, {:.1} seconds CPU time",
+            passed_count,
+            completed,
+            total_failed,
+            iter_wall.as_secs_f64(),
+            iter_cpu.as_secs_f64(),
+        );
+
+        // Skip the per-iteration loop below — stress mode owns the
+        // aggregator state in full. Continue to baseline / pending
+        // / exit-code logic via a labelled jump.
+        return finalize_run(
+            scenarios,
+            runs,
+            update_baseline,
+            config,
+            aggregator,
+            interrupted,
+            history_dir,
+        );
+    }
+
     for run_idx in 0..runs {
         if runs > 1 {
             eprintln!("\n=== run {}/{} ===", run_idx + 1, runs);
@@ -286,14 +440,16 @@ pub fn run(
             let mut iter_failed = 0usize;
 
             if !wfi_scenarios.is_empty() {
+                let work: Vec<(u32, &Scenario)> =
+                    wfi_scenarios.into_iter().map(|s| (run_idx, s)).collect();
                 let (wfi_agg, wfi_failed) = run_parallel_batch(
-                    wfi_scenarios,
+                    work,
                     jobs,
-                    run_idx,
                     &history_writer,
                     history_dir.as_deref(),
                     config.log_path_for,
                     config.max_wait_for,
+                    None,
                 );
                 local.merge(wfi_agg);
                 iter_failed += wfi_failed;
@@ -304,14 +460,16 @@ pub fn run(
                     "--- cpu-bound scenarios ({} parallel) ---",
                     cpu_jobs
                 );
+                let work: Vec<(u32, &Scenario)> =
+                    cpu_scenarios.into_iter().map(|s| (run_idx, s)).collect();
                 let (cpu_agg, cpu_failed) = run_parallel_batch(
-                    cpu_scenarios,
+                    work,
                     cpu_jobs,
-                    run_idx,
                     &history_writer,
                     history_dir.as_deref(),
                     config.log_path_for,
                     config.max_wait_for,
+                    None,
                 );
                 local.merge(cpu_agg);
                 iter_failed += cpu_failed;
@@ -366,6 +524,22 @@ pub fn run(
         }
     }
 
+    finalize_run(scenarios, runs, update_baseline, config, aggregator, interrupted, history_dir)
+}
+
+/// Post-loop logic shared by the per-iteration path and stress mode:
+/// render the aggregate, compare against baseline, optionally write
+/// a new baseline (or pending sidecar if interrupted), return the
+/// exit code.
+fn finalize_run(
+    scenarios: &[&Scenario],
+    runs: u32,
+    update_baseline: bool,
+    config: &RunnerConfig<'_>,
+    aggregator: Aggregator,
+    interrupted: bool,
+    history_dir: Option<PathBuf>,
+) -> ExitCode {
     // Single-run path: behaviour unchanged from before.
     if runs == 1 {
         return if aggregator.run_totals()[0].failed == 0 {
@@ -392,10 +566,6 @@ pub fn run(
         let now = OffsetDateTime::now_utc();
 
         if interrupted {
-            // Pending path: fresh BaselineFile (never load the
-            // previous pending — each interrupted run produces its
-            // own snapshot); every entry gets a `partial` marker so
-            // promote-time tooling can flag the incomplete-ness.
             let Some(path) = config.pending_baseline.as_deref() else {
                 eprintln!(
                     "warning: interrupted with --update-baseline but no \
@@ -455,26 +625,35 @@ pub fn run(
     exit_code_with_interrupt(&aggregator, interrupted)
 }
 
-/// Run a batch of scenarios across `workers` threads pulling from a
-/// shared work queue. Used twice per iteration: once for Wfi-batch
-/// scenarios at `jobs` workers, once for Cpu-batch scenarios at
-/// `cpu_jobs` workers (typically half of `jobs`). Returns the merged
-/// per-batch `Aggregator` plus the total failure count across all
-/// scenarios in the batch.
+/// Run a batch of (iteration, scenario) work items across `workers`
+/// threads pulling from a shared queue. Used three ways:
+///
+/// - **Wfi-batch fan-out** within one iteration: all pairs share the
+///   same `run_idx`; one item per scenario.
+/// - **Cpu-batch fan-out** within one iteration: same shape as
+///   above but at the typically-smaller `cpu_jobs` width.
+/// - **Stress mode** (single scenario × `--repeat N`): pairs are
+///   `(0, s), (1, s), ..., (N-1, s)`; one item per iteration.
+///
+/// Returns the merged per-batch `Aggregator` plus total failures.
+/// The aggregator's `run_totals` is NOT populated here — callers
+/// decide whether each completed item is its own "iteration" (stress
+/// mode) or just one of many in a single iteration (Wfi/Cpu batch).
 #[allow(clippy::too_many_arguments, reason = "shape mirrors process_one_scenario")]
 fn run_parallel_batch<'a>(
-    scenarios: Vec<&'a Scenario>,
+    work_items: Vec<(u32, &'a Scenario)>,
     workers: u32,
-    run_idx: u32,
     history_writer: &'a Mutex<Option<HistoryWriter>>,
     history_dir: Option<&'a Path>,
     log_path_for: Option<LogPathFn<'a>>,
     max_wait_for: Option<MaxWaitFn<'a>>,
+    stop_signal: Option<&'a std::sync::atomic::AtomicBool>,
 ) -> (Aggregator, usize) {
-    if scenarios.is_empty() || workers == 0 {
+    if work_items.is_empty() || workers == 0 {
         return (Aggregator::new(), 0);
     }
-    let work: Mutex<VecDeque<&'a Scenario>> = Mutex::new(scenarios.into_iter().collect());
+    let work: Mutex<VecDeque<(u32, &'a Scenario)>> =
+        Mutex::new(work_items.into_iter().collect());
     let work_ref = &work;
 
     let per_worker: Vec<(Aggregator, usize)> = thread::scope(|sc| {
@@ -484,14 +663,19 @@ fn run_parallel_batch<'a>(
                 let mut worker_agg = Aggregator::new();
                 let mut worker_failed = 0usize;
                 loop {
+                    if stop_signal
+                        .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst))
+                    {
+                        break;
+                    }
                     let next = work_ref
                         .lock()
                         .expect("work-queue poisoned")
                         .pop_front();
-                    let Some(s) = next else { break };
+                    let Some((iter_idx, s)) = next else { break };
                     let res = process_one_scenario(
                         s,
-                        run_idx,
+                        iter_idx,
                         &mut worker_agg,
                         history_writer,
                         history_dir,
@@ -904,6 +1088,96 @@ mod tests {
             elapsed.as_millis() < 280,
             "expected cpu_jobs=2 parallelism; elapsed={:?}",
             elapsed
+        );
+    }
+
+    #[test]
+    fn stress_mode_runs_single_scenario_iterations_in_parallel() {
+        // Single scenario × 8 iterations at jobs=4 → 4 workers run
+        // the iterations concurrently; wall-clock is roughly
+        // ceil(8/4) * 200ms = ~400ms, well under the sequential
+        // floor of 1600ms.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_counters();
+        let scns = [Scenario::new("stress-target", slow_pass)];
+        let refs: Vec<&Scenario> = scns.iter().collect();
+        let config = RunnerConfig {
+            jobs: 4,
+            ..RunnerConfig::default()
+        };
+        let start = std::time::Instant::now();
+        let _ = run(&refs, 8, false, &config);
+        let elapsed = start.elapsed();
+        assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 8);
+        // 8 × 200ms sequential = 1600ms. 4-wide parallel ~400ms.
+        // Generous slack for spawn/merge overhead.
+        assert!(
+            elapsed.as_millis() < 900,
+            "expected parallel stress; elapsed={:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn stress_mode_inactive_when_repeat_is_one() {
+        // repeat=1 should not enter stress mode — falls through to
+        // the standard per-iteration loop with a single scenario.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_counters();
+        let scns = [Scenario::new("once", always_pass)];
+        let refs: Vec<&Scenario> = scns.iter().collect();
+        let config = RunnerConfig {
+            jobs: 8,
+            ..RunnerConfig::default()
+        };
+        let _ = run(&refs, 1, false, &config);
+        assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn stress_mode_inactive_when_jobs_is_one() {
+        // jobs=1 means sequential — no stress fan-out even with
+        // single scenario × repeat>1.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_counters();
+        let scns = [Scenario::new("once", slow_pass)];
+        let refs: Vec<&Scenario> = scns.iter().collect();
+        let config = RunnerConfig {
+            jobs: 1,
+            ..RunnerConfig::default()
+        };
+        let start = std::time::Instant::now();
+        let _ = run(&refs, 4, false, &config);
+        let elapsed = start.elapsed();
+        assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 4);
+        // Should be ~800ms sequential, not ~200ms parallel.
+        assert!(
+            elapsed.as_millis() >= 700,
+            "expected sequential at jobs=1; elapsed={:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn stress_mode_fail_fast_stops_workers_after_threshold() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_counters();
+        let scns = [Scenario::new("fail-1", always_fail)];
+        let refs: Vec<&Scenario> = scns.iter().collect();
+        let config = RunnerConfig {
+            jobs: 4,
+            fail_fast: Some(2),
+            ..RunnerConfig::default()
+        };
+        let _ = run(&refs, 100, false, &config);
+        // Workers may overshoot slightly (each takes ~one extra item
+        // before observing the stop flag). Bound loosely: at least 2
+        // (threshold) and at most threshold + jobs (one in-flight per
+        // worker at the moment fail-fast trips).
+        let n = FAIL_COUNTER.load(Ordering::Relaxed);
+        assert!(
+            (2..=2 + 4 + 1).contains(&n),
+            "expected fail-fast around threshold; got {n}"
         );
     }
 
