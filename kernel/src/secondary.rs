@@ -76,7 +76,7 @@ pub static PROBE_TICKS: AtomicU64 = AtomicU64::new(0);
 /// from kmain. Increments `PROBE_TICKS` and yields. Existence on
 /// hart 1's runqueue is what `spawn_on` produces; the increments are
 /// what `yield_now` on hart 1 executes after picking it.
-#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm"), allow(dead_code))]
+#[cfg_attr(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm"), allow(dead_code))]
 pub extern "C" fn probe_entry() -> ! {
     loop {
         PROBE_TICKS.fetch_add(1, Ordering::Relaxed);

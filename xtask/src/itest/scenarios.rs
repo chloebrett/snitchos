@@ -860,3 +860,52 @@ pub fn sched_task_exits_cleanly() -> Result<(), String> {
     )?;
     Ok(())
 }
+
+/// Mutex-contention storm: both harts run a long-running task that
+/// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
+/// times. Tests revised-H7 — is the cross-hart bug inside
+/// `spin::Mutex`'s Acquire/Release pair on multi-thread TCG?
+///
+/// Asserts both `snitchos.deflake.mutex_storm_acquires_hart0` and
+/// `snitchos.deflake.mutex_storm_acquires_hart1` reach N within
+/// 30 s. With fix on (trap-return BQL fence) the storm should
+/// complete cleanly. With fix off, if revised-H7 is right one or
+/// both counters stall mid-loop; the kernel either wedges or one
+/// task never advances. See `plans/residual-race-investigation.md`
+/// appendix C.
+pub fn deflake_mutex_storm() -> Result<(), String> {
+    let mut h = Harness::spawn_with_features(
+        "deflake-mutex-storm",
+        &["deflake-mutex-storm"],
+    )?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.deflake.mutex_storm_acquires_hart0")
+                && *value >= 100_000
+        }
+        _ => false,
+    })
+    .ok_or(
+        "snitchos.deflake.mutex_storm_acquires_hart0 never reached \
+         100000 within 30s — hart 0's mutex storm task didn't \
+         complete its loop; likely revised-H7 fired (Acquire on \
+         spin::Mutex lock dropped under multi-thread TCG).",
+    )?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.deflake.mutex_storm_acquires_hart1")
+                && *value >= 100_000
+        }
+        _ => false,
+    })
+    .ok_or(
+        "snitchos.deflake.mutex_storm_acquires_hart1 never reached \
+         100000 within 30s — hart 1's mutex storm task didn't \
+         complete its loop. Same diagnosis as hart 0.",
+    )?;
+    Ok(())
+}

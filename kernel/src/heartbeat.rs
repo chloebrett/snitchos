@@ -83,6 +83,10 @@ pub struct Metrics {
     ipi_pong_sends: StringId,
     #[cfg(feature = "deflake-shootdown-storm")]
     shootdown_storm_sends: StringId,
+    #[cfg(feature = "deflake-mutex-storm")]
+    mutex_storm_acquires_hart0: StringId,
+    #[cfg(feature = "deflake-mutex-storm")]
+    mutex_storm_acquires_hart1: StringId,
 }
 
 impl Metrics {
@@ -161,6 +165,14 @@ impl Metrics {
             #[cfg(feature = "deflake-shootdown-storm")]
             shootdown_storm_sends: tracing::register_counter(
                 "snitchos.deflake.shootdown_storm_sends",
+            ),
+            #[cfg(feature = "deflake-mutex-storm")]
+            mutex_storm_acquires_hart0: tracing::register_counter(
+                "snitchos.deflake.mutex_storm_acquires_hart0",
+            ),
+            #[cfg(feature = "deflake-mutex-storm")]
+            mutex_storm_acquires_hart1: tracing::register_counter(
+                "snitchos.deflake.mutex_storm_acquires_hart1",
             ),
         }
     }
@@ -460,6 +472,20 @@ fn emit_deflake_metrics(m: &Metrics, count: i64) {
         tracing::emit_metric(
             m.shootdown_storm_sends,
             crate::deflake::shootdown::SENDS.load(Ordering::Relaxed) as i64,
+        );
+    }
+    #[cfg(feature = "deflake-mutex-storm")]
+    {
+        // No `run()` call here — the storm bodies are spawned as
+        // proper tasks from kmain; main's only job is to keep
+        // emitting metrics so the harness can observe progress.
+        tracing::emit_metric(
+            m.mutex_storm_acquires_hart0,
+            crate::deflake::mutex_storm::ACQUIRES_HART0.load(Ordering::Relaxed) as i64,
+        );
+        tracing::emit_metric(
+            m.mutex_storm_acquires_hart1,
+            crate::deflake::mutex_storm::ACQUIRES_HART1.load(Ordering::Relaxed) as i64,
         );
     }
 }

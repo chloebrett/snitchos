@@ -39,6 +39,13 @@ deflake-ipi-pong = []
 # payload-read path — a different code surface from `deflake-ipi-pong`
 # (which has no payload). Used by `deflake-shootdown-storm`.
 deflake-shootdown-storm = []
+# Replaces the default boot workload with two long-running tasks
+# (one per hart) that hammer a shared `kernel::sync::Mutex<()>` in a
+# tight lock/unlock loop. Tests revised-H7: is the cross-hart bug
+# inside `spin::Mutex` Acquire/Release on multi-thread TCG? No
+# payload in the critical section — just the acquire/release pair.
+# Used by `deflake-mutex-storm`.
+deflake-mutex-storm = []
 
 [dependencies]
 fdt = "0.1.5"

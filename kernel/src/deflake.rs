@@ -15,6 +15,76 @@
 //! See `plans/residual-race-investigation.md` for hypothesis tree,
 //! experiment ladder, and falsified-by-trial-count tables.
 
+#[cfg(feature = "deflake-mutex-storm")]
+pub mod mutex_storm {
+    //! Validation experiment for revised-H7. Both harts run a
+    //! long-running task that takes and releases a shared
+    //! `kernel::sync::Mutex<()>` `N` times in a tight loop. No payload
+    //! in the critical section — the only operation under the lock is
+    //! a Relaxed atomic bump (to prevent dead-code elimination from
+    //! collapsing the loop body).
+    //!
+    //! Each task bumps a per-hart `ACQUIRES_HART{0,1}` counter at
+    //! the start of every iteration; the heartbeat re-emits both as
+    //! metrics. Scenario asserts both counters reach `N`. With fix on,
+    //! BQL fences at every trap return should keep this clean. With
+    //! fix off, if revised-H7 is right (Acquire/Release on the
+    //! `spin::Mutex` CAS dropped by multi-thread TCG), one or both
+    //! tasks should wedge mid-loop and the counter stalls.
+    //!
+    //! Why both harts are *running tasks* (not main + spawned task):
+    //! main is the source of heartbeat emissions, so it needs to keep
+    //! ticking even when the storm is running. Both storm tasks
+    //! cooperatively yield... actually no — they don't yield. Each
+    //! task hammers its loop straight through, then calls `exit_now`.
+    //! With N=100k and ~100 ns per uncontended acquire, the loop is
+    //! ~10 ms wall — main starves for that brief window then
+    //! resumes. Acceptable.
+
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::sync::Mutex;
+
+    pub const N: u64 = 100_000;
+
+    /// The contended mutex. `()` payload so no work happens under the
+    /// lock — only the lock/unlock atomic sequence is exercised.
+    pub static MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Per-hart acquire counts. Bumped at the START of each iteration
+    /// (before the lock acquire) — so a stall mid-acquire leaves the
+    /// counter below N, distinguishable from a stall mid-release.
+    /// `Relaxed` — single writer per cell.
+    pub static ACQUIRES_HART0: AtomicU64 = AtomicU64::new(0);
+    pub static ACQUIRES_HART1: AtomicU64 = AtomicU64::new(0);
+
+    /// Atomic touched inside the critical section. Prevents the loop
+    /// body from being optimised to "lock/unlock with no observable
+    /// effect." `Relaxed` — the mutex is what we're testing, not
+    /// this counter.
+    pub static IN_CRITICAL_BUMP: AtomicU64 = AtomicU64::new(0);
+
+    pub extern "C" fn body_hart0() -> ! {
+        for _ in 0..N {
+            ACQUIRES_HART0.fetch_add(1, Ordering::Relaxed);
+            let _guard = MUTEX.lock();
+            IN_CRITICAL_BUMP.fetch_add(1, Ordering::Relaxed);
+            drop(_guard);
+        }
+        crate::sched::exit_now()
+    }
+
+    pub extern "C" fn body_hart1() -> ! {
+        for _ in 0..N {
+            ACQUIRES_HART1.fetch_add(1, Ordering::Relaxed);
+            let _guard = MUTEX.lock();
+            IN_CRITICAL_BUMP.fetch_add(1, Ordering::Relaxed);
+            drop(_guard);
+        }
+        crate::sched::exit_now()
+    }
+}
+
 #[cfg(feature = "deflake-spawn-storm")]
 pub mod spawn_storm {
     //! Cross-hart spawn storm. Drives N serialised

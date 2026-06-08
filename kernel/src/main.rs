@@ -302,7 +302,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // The storm spawns its own minimal worker tasks on hart 1 below;
     // including the demo + workload tasks here would add unrelated
     // scheduling activity that masks the cross-hart race window.
-    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm")))]
+    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm")))]
     {
         let _ = sched::spawn("task_a", demo_tasks::task_a_entry);
         let _ = sched::spawn("task_b", demo_tasks::task_b_entry);
@@ -347,8 +347,17 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // `deflake-spawn-storm` so hart 1 stays in `wfi` until the storm
     // loop's spawn_on's wake it — each wake then has the maximum
     // "fresh trap" race exposure.
-    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm")))]
+    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm")))]
     let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
+
+    // Mutex-storm: spawn the two contender tasks. They run as soon
+    // as the scheduler picks them; each does N lock/unlock and then
+    // `exit_now`. Heartbeat re-emits their progress counters.
+    #[cfg(feature = "deflake-mutex-storm")]
+    {
+        let _ = sched::spawn("mutex_storm_h0", deflake::mutex_storm::body_hart0);
+        let _ = sched::spawn_on(1, "mutex_storm_h1", deflake::mutex_storm::body_hart1);
+    }
 
     // Tear down both identity mappings. From here on, any access to
     // an identity-half VA — kernel image, stack, DTB, or MMIO — faults.

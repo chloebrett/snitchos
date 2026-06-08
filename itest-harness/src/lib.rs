@@ -11,6 +11,7 @@
 
 pub mod aggregate;
 pub mod baseline;
+pub mod history;
 pub mod lock;
 pub mod runner;
 pub mod stats;

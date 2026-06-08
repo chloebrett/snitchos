@@ -20,6 +20,11 @@ const BASELINE_PATH: &str = ".itest-baseline.toml";
 /// inspect — `cat .itest.lock` shows the PID of the current holder.
 const LOCK_PATH: &str = ".itest.lock";
 
+/// Per-checkout root for per-run history directories (tier 2 NDJSON +
+/// tier 3 log copies). Each itest run creates a timestamped
+/// subdirectory under here. Gitignored.
+const HISTORY_ROOT: &str = ".itest-runs";
+
 /// Set by the SIGINT handler. First Ctrl-C trips this to `true`; the
 /// runner sees it at the next iteration boundary and writes a
 /// partial baseline. Second Ctrl-C in the handler exits the process
@@ -75,6 +80,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario { name: "deflake-ipi-pong",           run: scenarios::deflake_ipi_pong },
     Scenario { name: "deflake-shootdown-storm",    run: scenarios::deflake_shootdown_storm },
     Scenario { name: "sched-task-exits-cleanly",   run: scenarios::sched_task_exits_cleanly },
+    Scenario { name: "deflake-mutex-storm",        run: scenarios::deflake_mutex_storm },
 ];
 
 /// Entry point from `main`. `Some(name)` runs one scenario;
@@ -173,6 +179,7 @@ pub fn run(
         fail_fast,
         pending_baseline: Some(PathBuf::from(format!("{BASELINE_PATH}.pending"))),
         interrupt: Some(&INTERRUPT),
+        history_root: Some(PathBuf::from(HISTORY_ROOT)),
     };
 
     itest_harness::run(&to_run, repeat, update_baseline, &config)

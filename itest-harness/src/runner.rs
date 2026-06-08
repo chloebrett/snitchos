@@ -78,6 +78,14 @@ pub struct RunnerConfig<'a> {
     /// `pending_baseline` instead of the canonical file. The caller
     /// sets it from a signal handler (xtask uses `ctrlc`).
     pub interrupt: Option<&'a std::sync::atomic::AtomicBool>,
+
+    /// Root directory for per-run history (NDJSON + metadata + log
+    /// copies). When set, the runner creates a timestamped
+    /// subdirectory at start, writes `metadata.toml`, and appends one
+    /// JSON row per scenario invocation to `iterations.ndjson`. When
+    /// `None`, no history is written. See
+    /// `plans/itest-history-and-pending.md` step C.
+    pub history_root: Option<PathBuf>,
 }
 
 /// Run `scenarios` `repeat` times. If `update_baseline` is true, write
@@ -103,6 +111,44 @@ pub fn run(
     let mut aggregator = Aggregator::new();
     let mut interrupted = false;
 
+    // History (tier 2/3). Create the run-dir + open the NDJSON writer
+    // if a history_root was supplied. Failure here is non-fatal: log
+    // and proceed without history.
+    let now_for_history = OffsetDateTime::now_utc();
+    let mut history_writer: Option<crate::history::HistoryWriter> = None;
+    let mut history_dir: Option<PathBuf> = None;
+    if let Some(root) = config.history_root.as_deref() {
+        let commit = config
+            .current_commit
+            .and_then(|f| f())
+            .unwrap_or_else(|| "unknown".to_string());
+        let metadata = crate::history::RunMetadata {
+            run: crate::history::RunMetadataInner {
+                started_at: now_for_history,
+                commit,
+                build_hash: None,
+                requested_repeat: runs,
+                fail_fast: config.fail_fast,
+                scenarios: scenarios.iter().map(|s| s.name.to_string()).collect(),
+                hostname: crate::history::current_hostname(),
+            },
+        };
+        match crate::history::create_run_dir(root, &metadata) {
+            Ok((dir, writer)) => {
+                eprintln!("history: writing per-iteration records to {}", dir.display());
+                history_dir = Some(dir);
+                history_writer = Some(writer);
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to create history directory under {}: {e} — \
+                     proceeding without per-iteration history.",
+                    root.display()
+                );
+            }
+        }
+    }
+
     for run_idx in 0..runs {
         if runs > 1 {
             eprintln!("\n=== run {}/{} ===", run_idx + 1, runs);
@@ -110,9 +156,11 @@ pub fn run(
         let mut failed_this_run = 0;
         for s in scenarios {
             eprint!("test {} ... ", s.name);
+            let started_at = OffsetDateTime::now_utc();
             let start = Instant::now();
             let outcome = (s.run)();
-            aggregator.record_duration(s.name, start.elapsed());
+            let elapsed = start.elapsed();
+            aggregator.record_duration(s.name, elapsed);
 
             let timing_str = config
                 .max_wait_for
@@ -126,8 +174,11 @@ pub fn run(
                 })
                 .unwrap_or_default();
 
-            match outcome {
-                Ok(()) => eprintln!("ok{timing_str}"),
+            let (row_result, row_error) = match &outcome {
+                Ok(()) => {
+                    eprintln!("ok{timing_str}");
+                    (crate::history::ResultKind::Pass, None)
+                }
                 Err(e) => {
                     eprintln!("FAILED{timing_str}");
                     eprintln!("  {e}");
@@ -138,6 +189,22 @@ pub fn run(
                     }
                     failed_this_run += 1;
                     aggregator.record_fail(s.name);
+                    (crate::history::ResultKind::Fail, Some(e.clone()))
+                }
+            };
+
+            if let Some(writer) = history_writer.as_mut() {
+                let row = crate::history::IterationRow {
+                    iteration: run_idx + 1,
+                    scenario: s.name.to_string(),
+                    started_at,
+                    duration_ms: elapsed.as_millis().min(u32::MAX as u128) as u32,
+                    result: row_result,
+                    error: row_error,
+                    log: None, // step D: capture log path here
+                };
+                if let Err(e) = writer.append(&row) {
+                    eprintln!("warning: failed to append history row: {e}");
                 }
             }
         }
@@ -219,7 +286,9 @@ pub fn run(
             let partial = crate::baseline::PartialMarker {
                 requested_runs: runs,
                 interrupted_at: now,
-                run_dir: None, // step C will populate
+                run_dir: history_dir
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned()),
             };
             let pending = apply_current_run_to_baseline_with_partial(
                 BaselineFile::default(),
@@ -408,7 +477,9 @@ mod tests {
 
     #[test]
     fn run_with_only_passing_scenarios_invokes_scenarios_n_times() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        // Don't `unwrap` — a panicking test poisons the mutex; we don't
+        // want one failure to cascade through every other runner test.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_counters();
         let s = Scenario { name: "pass-1", run: always_pass };
         let _ = run(&[&s], 3, false, &RunnerConfig::default());
@@ -417,7 +488,9 @@ mod tests {
 
     #[test]
     fn run_with_one_failing_scenario_invokes_both_each_iteration() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        // Don't `unwrap` — a panicking test poisons the mutex; we don't
+        // want one failure to cascade through every other runner test.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_counters();
         let pass = Scenario { name: "pass-1", run: always_pass };
         let fail = Scenario { name: "fail-1", run: always_fail };
@@ -433,7 +506,9 @@ mod tests {
 
     #[test]
     fn build_hook_failure_aborts_run() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        // Don't `unwrap` — a panicking test poisons the mutex; we don't
+        // want one failure to cascade through every other runner test.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_counters();
         let s = Scenario { name: "pass-1", run: always_pass };
         let config = RunnerConfig {
@@ -447,8 +522,68 @@ mod tests {
     }
 
     #[test]
+    fn history_root_writes_metadata_and_ndjson() {
+        // Don't `unwrap` — a panicking test poisons the mutex; we don't
+        // want one failure to cascade through every other runner test.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_counters();
+        let pass = Scenario { name: "pass-1", run: always_pass };
+        let fail = Scenario { name: "fail-1", run: always_fail };
+
+        let root = std::env::temp_dir().join(format!(
+            "itest-harness-runner-history-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let config = RunnerConfig {
+            history_root: Some(root.clone()),
+            ..RunnerConfig::default()
+        };
+        let _ = run(&[&pass, &fail], 2, false, &config);
+
+        // Find the single run subdir.
+        let entries: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1, "expected one run-dir under history root");
+        let run_dir = entries[0].path();
+
+        // metadata.toml exists with the right shape. We don't pin the
+        // exact TOML formatting of `scenarios` (the toml crate may
+        // wrap a vec of strings across lines); just check that both
+        // names are present in the file.
+        let meta = std::fs::read_to_string(run_dir.join("metadata.toml")).unwrap();
+        assert!(meta.contains("requested_repeat = 2"));
+        assert!(meta.contains("\"pass-1\""));
+        assert!(meta.contains("\"fail-1\""));
+
+        // iterations.ndjson has 4 rows (2 scenarios × 2 iterations).
+        let ndjson_path = run_dir.join("iterations.ndjson");
+        let rows: Vec<_> = crate::history::read_iterations(&ndjson_path)
+            .unwrap()
+            .collect::<std::io::Result<_>>()
+            .unwrap();
+        assert_eq!(rows.len(), 4);
+        // First two rows: iteration 1, pass then fail.
+        assert_eq!(rows[0].iteration, 1);
+        assert_eq!(rows[0].scenario, "pass-1");
+        assert_eq!(rows[0].result, crate::history::ResultKind::Pass);
+        assert_eq!(rows[1].iteration, 1);
+        assert_eq!(rows[1].scenario, "fail-1");
+        assert_eq!(rows[1].result, crate::history::ResultKind::Fail);
+        assert_eq!(rows[1].error.as_deref(), Some("scripted failure"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn interrupt_breaks_outer_loop_at_iteration_boundary() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        // Don't `unwrap` — a panicking test poisons the mutex; we don't
+        // want one failure to cascade through every other runner test.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_counters();
         let pass = Scenario { name: "pass-1", run: always_pass };
         // Pre-set the interrupt flag: the runner should observe it
@@ -465,7 +600,9 @@ mod tests {
 
     #[test]
     fn interrupt_with_update_baseline_writes_pending_not_canonical() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        // Don't `unwrap` — a panicking test poisons the mutex; we don't
+        // want one failure to cascade through every other runner test.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_counters();
         let pass = Scenario { name: "pass-1", run: always_pass };
 
@@ -503,7 +640,9 @@ mod tests {
 
     #[test]
     fn fail_fast_breaks_outer_loop_at_threshold() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        // Don't `unwrap` — a panicking test poisons the mutex; we don't
+        // want one failure to cascade through every other runner test.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_counters();
         let fail = Scenario { name: "fail-1", run: always_fail };
         // Without fail-fast, repeat=10 would invoke fail-1 ten times.
@@ -518,7 +657,9 @@ mod tests {
 
     #[test]
     fn fail_fast_does_not_trigger_when_threshold_not_reached() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        // Don't `unwrap` — a panicking test poisons the mutex; we don't
+        // want one failure to cascade through every other runner test.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_counters();
         let fail = Scenario { name: "fail-1", run: always_fail };
         // 5 failures requested, threshold of 100 — full run completes.
@@ -532,7 +673,9 @@ mod tests {
 
     #[test]
     fn fail_fast_none_runs_to_completion_with_failures() {
-        let _guard = TEST_LOCK.lock().unwrap();
+        // Don't `unwrap` — a panicking test poisons the mutex; we don't
+        // want one failure to cascade through every other runner test.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_counters();
         let fail = Scenario { name: "fail-1", run: always_fail };
         let _ = run(&[&fail], 7, false, &RunnerConfig::default());

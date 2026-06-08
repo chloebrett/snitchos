@@ -28,3 +28,13 @@ target
 # Integration-test mutex lock. PID-stamped; cleaned up by Drop /
 # OS handle close. See itest-harness::lock + xtask/src/itest.rs.
 /.itest.lock
+
+# Pending partial baseline from an interrupted itest run.
+# Promote with `cargo xtask itest --promote-pending` or discard with
+# `--discard-pending`.
+/.itest-baseline.toml.pending
+
+# Per-run history directories (tier 2 NDJSON + tier 3 log copies).
+# One subdir per itest invocation. Pruned manually or by future
+# `cargo xtask itest --prune-runs`.
+/.itest-runs/
