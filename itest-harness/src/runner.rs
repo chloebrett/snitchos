@@ -174,6 +174,7 @@ pub fn run(
                 })
                 .unwrap_or_default();
 
+            let mut row_log: Option<String> = None;
             let (row_result, row_error) = match &outcome {
                 Ok(()) => {
                     eprintln!("ok{timing_str}");
@@ -186,6 +187,22 @@ pub fn run(
                         && let Some(log_path) = get_path(s.name)
                     {
                         dump_log_tail(&log_path);
+                        // Tier 3: persist the per-failure log into the
+                        // run directory. The NDJSON row's `log` field
+                        // gets the filename so a future viewer can
+                        // open it directly from the run dir.
+                        if let Some(hdir) = history_dir.as_ref() {
+                            let dest_name =
+                                format!("fail-{}-{}.log", s.name, run_idx + 1);
+                            let dest = hdir.join(&dest_name);
+                            match std::fs::copy(&log_path, &dest) {
+                                Ok(_) => row_log = Some(dest_name),
+                                Err(e) => eprintln!(
+                                    "warning: failed to copy log to {}: {e}",
+                                    dest.display()
+                                ),
+                            }
+                        }
                     }
                     failed_this_run += 1;
                     aggregator.record_fail(s.name);
@@ -201,7 +218,7 @@ pub fn run(
                     duration_ms: elapsed.as_millis().min(u32::MAX as u128) as u32,
                     result: row_result,
                     error: row_error,
-                    log: None, // step D: capture log path here
+                    log: row_log,
                 };
                 if let Err(e) = writer.append(&row) {
                     eprintln!("warning: failed to append history row: {e}");
@@ -519,6 +536,57 @@ mod tests {
         assert_eq!(BUILD_COUNTER.load(Ordering::Relaxed), 1);
         // Scenario should never have been called.
         assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn failure_log_copied_into_run_dir_and_referenced_in_ndjson() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_counters();
+        let fail = Scenario { name: "fail-1", run: always_fail };
+
+        // Synthesise a log file that the log_path_for hook will return.
+        let scratch = std::env::temp_dir().join(format!(
+            "itest-harness-fail-log-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let log_path = scratch.join("fake-qemu.log");
+        std::fs::write(&log_path, "synthetic log contents\n").unwrap();
+        let log_path_for = |_name: &str| Some(log_path.clone());
+
+        let history_root = scratch.join("history");
+        std::fs::create_dir_all(&history_root).unwrap();
+        let config = RunnerConfig {
+            log_path_for: Some(&log_path_for),
+            history_root: Some(history_root.clone()),
+            ..RunnerConfig::default()
+        };
+        let _ = run(&[&fail], 1, false, &config);
+
+        // Find the run dir.
+        let entries: Vec<_> = std::fs::read_dir(&history_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        let run_dir = entries[0].path();
+
+        // Log file copied with the expected name.
+        let copied = run_dir.join("fail-fail-1-1.log");
+        assert!(copied.exists(), "log file should be copied to run dir");
+        let copied_content = std::fs::read_to_string(&copied).unwrap();
+        assert_eq!(copied_content, "synthetic log contents\n");
+
+        // NDJSON row references it.
+        let rows: Vec<_> = crate::history::read_iterations(&run_dir.join("iterations.ndjson"))
+            .unwrap()
+            .collect::<std::io::Result<_>>()
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].log.as_deref(), Some("fail-fail-1-1.log"));
+
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]
