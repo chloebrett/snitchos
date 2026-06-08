@@ -182,6 +182,9 @@ pub struct RecoveredScenario {
     pub failures: u32,
     pub mean_duration_ms: Option<f64>,
     pub p95_duration_ms: Option<f64>,
+    /// This scenario's failure counts by cause-bucket. Failures with no
+    /// recorded signature count as `Unknown`.
+    pub signature_counts: std::collections::BTreeMap<crate::signature::Signature, u32>,
 }
 
 /// Full result of `aggregate_run_dir`: the run-level `metadata.toml`
@@ -210,8 +213,9 @@ pub fn aggregate_run_dir(run_dir: &Path) -> io::Result<RecoveredRun> {
     let mut runs_per: std::collections::BTreeMap<String, u32> = Default::default();
     let mut fails_per: std::collections::BTreeMap<String, u32> = Default::default();
     let mut durations: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
-    let mut signature_counts: std::collections::BTreeMap<crate::signature::Signature, u32> =
-        Default::default();
+    type SigMap = std::collections::BTreeMap<crate::signature::Signature, u32>;
+    let mut signature_counts: SigMap = Default::default();
+    let mut signatures_per: std::collections::BTreeMap<String, SigMap> = Default::default();
 
     for row in read_iterations(&run_dir.join("iterations.ndjson"))? {
         let row = match row {
@@ -224,8 +228,12 @@ pub fn aggregate_run_dir(run_dir: &Path) -> io::Result<RecoveredRun> {
         *runs_per.entry(row.scenario.clone()).or_insert(0) += 1;
         if row.result == ResultKind::Fail {
             *fails_per.entry(row.scenario.clone()).or_insert(0) += 1;
-            *signature_counts
-                .entry(row.signature.unwrap_or(crate::signature::Signature::Unknown))
+            let sig = row.signature.unwrap_or(crate::signature::Signature::Unknown);
+            *signature_counts.entry(sig).or_insert(0) += 1;
+            *signatures_per
+                .entry(row.scenario.clone())
+                .or_default()
+                .entry(sig)
                 .or_insert(0) += 1;
         }
         durations
@@ -240,6 +248,7 @@ pub fn aggregate_run_dir(run_dir: &Path) -> io::Result<RecoveredRun> {
             let failures = fails_per.get(&name).copied().unwrap_or(0);
             let durs = durations.remove(&name).unwrap_or_default();
             let (mean_ms, p95_ms) = summarise_durations(&durs);
+            let signature_counts = signatures_per.remove(&name).unwrap_or_default();
             (
                 name,
                 RecoveredScenario {
@@ -247,6 +256,7 @@ pub fn aggregate_run_dir(run_dir: &Path) -> io::Result<RecoveredRun> {
                     failures,
                     mean_duration_ms: mean_ms,
                     p95_duration_ms: p95_ms,
+                    signature_counts,
                 },
             )
         })
@@ -585,6 +595,51 @@ mod tests {
         assert_eq!(b.runs, 2);
         assert_eq!(b.failures, 0);
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn aggregate_run_dir_tracks_per_scenario_signatures() {
+        use crate::signature::Signature;
+        let root = fresh_test_dir();
+        let metadata = RunMetadata {
+            run: RunMetadataInner {
+                started_at: datetime!(2026-06-08 12:30:15 UTC),
+                commit: "abc1234".to_string(),
+                build_hash: None,
+                requested_repeat: 4,
+                fail_fast: None,
+                scenarios: vec!["s".to_string()],
+                hostname: None,
+            },
+        };
+        let (run_dir, mut writer) = create_run_dir(&root, &metadata).unwrap();
+        for (result, sig) in [
+            (ResultKind::Fail, Some(Signature::Wedge)),
+            (ResultKind::Fail, Some(Signature::Wedge)),
+            (ResultKind::Fail, Some(Signature::BudgetExhausted)),
+            (ResultKind::Pass, None),
+        ] {
+            writer
+                .append(&IterationRow {
+                    iteration: 1,
+                    scenario: "s".to_string(),
+                    started_at: datetime!(2026-06-08 12:30:15 UTC),
+                    duration_ms: 100,
+                    result,
+                    error: None,
+                    log: None,
+                    signature: sig,
+                })
+                .unwrap();
+        }
+        drop(writer);
+
+        let recovered = aggregate_run_dir(&run_dir).unwrap();
+        let sc = &recovered.scenarios["s"].signature_counts;
+        assert_eq!(sc.get(&Signature::Wedge), Some(&2));
+        assert_eq!(sc.get(&Signature::BudgetExhausted), Some(&1));
+        assert_eq!(sc.values().sum::<u32>(), 3);
         std::fs::remove_dir_all(&root).ok();
     }
 

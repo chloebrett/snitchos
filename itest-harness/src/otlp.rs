@@ -157,6 +157,7 @@ fn build_request(file: &BaselineFile, now_ns: u64) -> ExportMetricsServiceReques
     let mut p95_pts: Vec<NumberDataPoint> = Vec::new();
     let mut partial_pts: Vec<NumberDataPoint> = Vec::new();
     let mut recorded_pts: Vec<NumberDataPoint> = Vec::new();
+    let mut sig_pts: Vec<NumberDataPoint> = Vec::new();
 
     for (name, entry) in &file.scenarios {
         let Some(b) = &entry.current else { continue };
@@ -189,6 +190,16 @@ fn build_request(file: &BaselineFile, now_ns: u64) -> ExportMetricsServiceReques
             now_ns,
             if b.partial.is_some() { 1 } else { 0 },
         ));
+        for (sig, count) in &b.signature_counts {
+            let mut sig_attrs = attrs.clone();
+            sig_attrs.push(KeyValue {
+                key: "signature".to_string(),
+                value: Some(AnyValue {
+                    string_value: sig.label().to_string(),
+                }),
+            });
+            sig_pts.push(int_point(sig_attrs, now_ns, i64::from(*count)));
+        }
         recorded_pts.push(int_point(
             attrs,
             now_ns,
@@ -261,6 +272,12 @@ fn build_request(file: &BaselineFile, now_ns: u64) -> ExportMetricsServiceReques
         "Unix timestamp (seconds) when the current baseline was recorded.",
         "s",
         recorded_pts,
+    );
+    push(
+        "snitchos.itest.baseline.signature",
+        "Per-scenario failure count by cause-bucket (signature attribute).",
+        "1",
+        sig_pts,
     );
 
     ExportMetricsServiceRequest {
@@ -391,6 +408,7 @@ mod tests {
             mean_duration_ms: Some(1200.0),
             p95_duration_ms: Some(1500.0),
             partial: None,
+            signature_counts: Default::default(),
         }
     }
 
@@ -410,6 +428,35 @@ mod tests {
     fn metrics_endpoint_idempotent_when_already_present() {
         let s = "http://localhost:9090/api/v1/otlp/v1/metrics";
         assert_eq!(metrics_endpoint(s), s);
+    }
+
+    #[test]
+    fn payload_emits_per_scenario_per_signature_metric() {
+        use crate::signature::Signature;
+        let mut f = BaselineFile::new();
+        let mut b = baseline_with(50, 5);
+        b.signature_counts.insert(Signature::Wedge, 2);
+        f.update_current("workload-cooperative-baseline", b);
+        let body = build_payload(&f, 1_700_000_000_000_000_000);
+        let decoded = ExportMetricsServiceRequest::decode(&*body).unwrap();
+        let sm = &decoded.resource_metrics[0].scope_metrics[0];
+        let sig = sm
+            .metrics
+            .iter()
+            .find(|m| m.name == "snitchos.itest.baseline.signature")
+            .expect("signature metric");
+        let Some(metric_data::Data::Gauge(g)) = &sig.data else {
+            panic!("expected gauge");
+        };
+        assert_eq!(g.data_points.len(), 1);
+        let dp = &g.data_points[0];
+        let sig_attr = dp
+            .attributes
+            .iter()
+            .find(|kv| kv.key == "signature")
+            .expect("signature attr");
+        assert_eq!(sig_attr.value.as_ref().unwrap().string_value, "wedge");
+        assert!(dp.attributes.iter().any(|kv| kv.key == "scenario"));
     }
 
     #[test]

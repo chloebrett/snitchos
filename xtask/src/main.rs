@@ -217,15 +217,16 @@ enum Cmd {
             value_parser = clap::value_parser!(u32).range(1..=64),
         )]
         jobs: u32,
-        /// Worker count for the Cpu-bound scenario batch. `0`
-        /// (the default) auto-resolves to `max(1, --jobs / 2)`,
-        /// which keeps each Cpu worker on its own host core when
-        /// `--jobs <= num_cpus`. Override on small CI runners or
-        /// to force fully-serial Cpu execution (`--cpu-jobs 1`).
+        /// Worker count for the Cpu-bound scenario batch. Defaults to
+        /// `1` (fully serial): Cpu scenarios run real guest work — often
+        /// multi-vcpu (e.g. the SMP workload + deflake storms use 2
+        /// harts each) — so running them concurrently oversubscribes the
+        /// host and makes timing-sensitive scenarios flaky. Raise it
+        /// explicitly only when you know the box has the cores to spare.
         #[arg(
             long,
             default_value_t = 1,
-            value_parser = clap::value_parser!(u32).range(0..=64),
+            value_parser = clap::value_parser!(u32).range(1..=64),
         )]
         cpu_jobs: u32,
         /// Filter scenarios by classification. `--profile wfi` runs

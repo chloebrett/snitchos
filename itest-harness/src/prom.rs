@@ -38,6 +38,7 @@ pub fn render_prometheus(file: &BaselineFile) -> String {
         ("snitchos_itest_baseline_p95_duration_ms", "p95 per-iteration wall-clock duration, milliseconds."),
         ("snitchos_itest_baseline_partial", "1 if the current baseline reflects an interrupted run, else 0."),
         ("snitchos_itest_baseline_recorded_at_seconds", "Unix timestamp (seconds) when the current baseline was recorded."),
+        ("snitchos_itest_baseline_signature", "Per-scenario failure count by cause-bucket (signature label)."),
     ];
     for (name, help) in metrics {
         let _ = writeln!(out, "# HELP {name} {help}");
@@ -69,6 +70,13 @@ pub fn render_prometheus(file: &BaselineFile) -> String {
         }
         let _ = writeln!(out, "snitchos_itest_baseline_partial{{{label}}} {partial}");
         let _ = writeln!(out, "snitchos_itest_baseline_recorded_at_seconds{{{label}}} {recorded_at_secs}");
+        for (sig, count) in &b.signature_counts {
+            let _ = writeln!(
+                out,
+                "snitchos_itest_baseline_signature{{{label},signature=\"{}\"}} {count}",
+                sig.label()
+            );
+        }
     }
 
     out
@@ -133,6 +141,7 @@ mod tests {
             mean_duration_ms: Some(1200.0),
             p95_duration_ms: Some(1500.0),
             partial: None,
+            signature_counts: Default::default(),
         }
     }
 
@@ -146,6 +155,24 @@ mod tests {
         assert_eq!(out.matches("# HELP snitchos_itest_baseline_runs ").count(), 1);
         assert_eq!(out.matches("# TYPE snitchos_itest_baseline_runs gauge").count(), 1);
         assert_eq!(out.matches("# HELP snitchos_itest_baseline_failure_rate ").count(), 1);
+    }
+
+    #[test]
+    fn render_emits_per_scenario_per_signature_gauges() {
+        use crate::signature::Signature;
+        let mut f = BaselineFile::new();
+        let mut b = baseline_with(50, 5);
+        b.signature_counts.insert(Signature::Wedge, 2);
+        b.signature_counts.insert(Signature::BudgetExhausted, 3);
+        f.update_current("workload-cooperative-baseline", b);
+        let out = render_prometheus(&f);
+        assert!(out.contains("# TYPE snitchos_itest_baseline_signature gauge"));
+        assert!(out.contains(
+            "snitchos_itest_baseline_signature{scenario=\"workload-cooperative-baseline\",signature=\"wedge\"} 2"
+        ));
+        assert!(out.contains(
+            "snitchos_itest_baseline_signature{scenario=\"workload-cooperative-baseline\",signature=\"budget_exhausted\"} 3"
+        ));
     }
 
     #[test]

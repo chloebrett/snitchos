@@ -36,9 +36,10 @@ pub struct Aggregator {
     /// Per-scenario, per-iteration wall-clock durations. Appended in
     /// observation order; sorted for percentile computation.
     durations: BTreeMap<String, Vec<Duration>>,
-    /// Suite-wide count of failures by cause-bucket. Failures with no
-    /// recorded signature count as `Unknown`.
-    signature_count: BTreeMap<Signature, u32>,
+    /// Per-scenario count of failures by cause-bucket. Failures with no
+    /// recorded signature count as `Unknown`. The suite-wide breakdown
+    /// is folded from this on demand.
+    signature_by_scenario: BTreeMap<String, BTreeMap<Signature, u32>>,
 }
 
 impl Aggregator {
@@ -60,15 +61,32 @@ impl Aggregator {
         // the count is total failures for this scenario across all runs.
         *self.fail_count.entry(scenario.to_string()).or_insert(0) += 1;
         *self
-            .signature_count
+            .signature_by_scenario
+            .entry(scenario.to_string())
+            .or_default()
             .entry(signature.unwrap_or(Signature::Unknown))
             .or_insert(0) += 1;
     }
 
-    /// Suite-wide failure counts by cause-bucket, lexicographic by
-    /// variant. Empty when there were no failures.
-    pub fn signature_counts(&self) -> &BTreeMap<Signature, u32> {
-        &self.signature_count
+    /// Suite-wide failure counts by cause-bucket, folded across every
+    /// scenario. Empty when there were no failures.
+    pub fn signature_counts(&self) -> BTreeMap<Signature, u32> {
+        let mut folded: BTreeMap<Signature, u32> = BTreeMap::new();
+        for per_scenario in self.signature_by_scenario.values() {
+            for (sig, count) in per_scenario {
+                *folded.entry(*sig).or_insert(0) += count;
+            }
+        }
+        folded
+    }
+
+    /// Failure counts by cause-bucket for one scenario. Empty for a
+    /// scenario that never failed.
+    pub fn signature_counts_for(&self, scenario: &str) -> BTreeMap<Signature, u32> {
+        self.signature_by_scenario
+            .get(scenario)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Capture this run's totals. Call once per `--repeat` iteration
@@ -186,8 +204,11 @@ impl Aggregator {
                 .or_default()
                 .append(&mut samples);
         }
-        for (sig, count) in other.signature_count {
-            *self.signature_count.entry(sig).or_insert(0) += count;
+        for (scenario, per_scenario) in other.signature_by_scenario {
+            let dst = self.signature_by_scenario.entry(scenario).or_default();
+            for (sig, count) in per_scenario {
+                *dst.entry(sig).or_insert(0) += count;
+            }
         }
     }
 
@@ -225,13 +246,14 @@ impl Aggregator {
     /// run that flakes still reports which bucket it hit.
     pub fn render_signature_breakdown(&self) -> String {
         use std::fmt::Write;
-        if self.signature_count.is_empty() {
+        let folded = self.signature_counts();
+        if folded.is_empty() {
             return String::new();
         }
         let mut out = String::new();
-        let total: u32 = self.signature_count.values().sum();
+        let total: u32 = folded.values().sum();
         let _ = writeln!(out, "\nFailure signatures ({total} total):");
-        for (sig, count) in &self.signature_count {
+        for (sig, count) in &folded {
             let _ = writeln!(out, "  {}: {count}", sig.label());
         }
         out
@@ -525,6 +547,26 @@ mod tests {
             left_first.mean_duration("scn"),
             right_first.mean_duration("scn")
         );
+    }
+
+    #[test]
+    fn signature_counts_are_tracked_per_scenario() {
+        use crate::signature::Signature;
+        let mut agg = Aggregator::new();
+        agg.record_fail_with_signature("scn-a", Some(Signature::Wedge));
+        agg.record_fail_with_signature("scn-a", Some(Signature::BudgetExhausted));
+        agg.record_fail_with_signature("scn-b", Some(Signature::Wedge));
+
+        let a = agg.signature_counts_for("scn-a");
+        assert_eq!(a.get(&Signature::Wedge), Some(&1));
+        assert_eq!(a.get(&Signature::BudgetExhausted), Some(&1));
+        let b = agg.signature_counts_for("scn-b");
+        assert_eq!(b.get(&Signature::Wedge), Some(&1));
+        assert!(agg.signature_counts_for("never-failed").is_empty());
+
+        // The suite-wide fold still works (drives the terminal summary).
+        assert_eq!(agg.signature_counts().get(&Signature::Wedge), Some(&2));
+        assert_eq!(agg.signature_counts().get(&Signature::BudgetExhausted), Some(&1));
     }
 
     #[test]

@@ -74,6 +74,12 @@ pub struct Baseline {
     /// partial-ness to the user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial: Option<PartialMarker>,
+    /// Failure counts by cause-bucket for this scenario over the
+    /// measured runs (see `signature` in the iteration NDJSON). Empty
+    /// for older baselines or scenarios that never failed. Drives the
+    /// per-scenario per-bucket Grafana breakdown.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub signature_counts: BTreeMap<crate::signature::Signature, u32>,
 }
 
 /// Metadata for a partial baseline: how short of the request we
@@ -202,6 +208,7 @@ impl BaselineFile {
                     interrupted_at: now,
                     run_dir: Some(run_dir_name.to_string()),
                 }),
+                signature_counts: stats.signature_counts.clone(),
             };
             file.update_current(name, baseline);
         }
@@ -227,6 +234,7 @@ impl BaselineFile {
                 mean_duration_ms: stats.mean_duration_ms,
                 p95_duration_ms: stats.p95_duration_ms,
                 partial: None,
+                signature_counts: stats.signature_counts.clone(),
             };
             self.update_current(name, baseline);
         }
@@ -439,7 +447,27 @@ mod tests {
             mean_duration_ms: None,
             p95_duration_ms: None,
             partial: None,
+            signature_counts: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn baseline_signature_counts_round_trip() {
+        use crate::signature::Signature;
+        let mut f = BaselineFile::new();
+        let mut b = make_baseline("abc1234", 50, 5, datetime!(2026-06-08 15:42:33 UTC));
+        b.signature_counts.insert(Signature::Wedge, 2);
+        b.signature_counts.insert(Signature::BudgetExhausted, 3);
+        f.update_current("workload-cooperative-baseline", b);
+
+        let s = f.to_string().unwrap();
+        assert!(s.contains("wedge"));
+        let parsed = BaselineFile::load_str(&s).unwrap();
+        assert_eq!(parsed, f);
+
+        let cur = parsed.current_for("workload-cooperative-baseline").unwrap();
+        assert_eq!(cur.signature_counts.get(&Signature::Wedge), Some(&2));
+        assert_eq!(cur.signature_counts.get(&Signature::BudgetExhausted), Some(&3));
     }
 
     #[test]
@@ -746,6 +774,7 @@ mod tests {
                 failures: 1,
                 mean_duration_ms: Some(2100.0),
                 p95_duration_ms: Some(3200.0),
+                signature_counts: BTreeMap::new(),
             },
         );
         let recovered = crate::history::RecoveredRun {

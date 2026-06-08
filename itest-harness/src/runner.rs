@@ -169,10 +169,11 @@ pub struct RunnerConfig<'a> {
 
     /// Worker count for the Cpu-bound batch (the scenarios marked
     /// `Scenario::cpu_bound`). They run in their own pass after the
-    /// Wfi batch finishes. `0` means "auto: `max(1, jobs / 2)`",
-    /// which keeps each Cpu worker on its own host core when
-    /// `jobs <= num_cpus`. Override when on a small CI runner or
-    /// when you want fully-serial Cpu execution (set to 1).
+    /// Wfi batch finishes. Floored to 1, so the batch runs **serially
+    /// by default** — Cpu scenarios run real guest work (often
+    /// multi-vcpu) and must not contend with each other. Set `> 1`
+    /// explicitly to parallelise. `0` is floored to 1 (the CLI
+    /// rejects 0 outright).
     pub cpu_jobs: u32,
 }
 
@@ -255,10 +256,7 @@ pub fn run(
         let s = scenarios[0];
         let workers = match s.cpu_profile {
             CpuProfile::Wfi => jobs,
-            CpuProfile::Cpu => {
-                let cj = config.cpu_jobs;
-                if cj == 0 { (jobs / 2).max(1) } else { cj }
-            }
+            CpuProfile::Cpu => config.cpu_jobs.max(1),
         };
         eprintln!(
             "\n=== stress mode: {} × {} iterations of {} ===",
@@ -444,14 +442,11 @@ pub fn run(
                     .copied()
                     .partition(|s| matches!(s.cpu_profile, CpuProfile::Wfi));
 
-            // Resolve `cpu_jobs == 0` to the "half of jobs, min 1"
-            // default. Already-resolved values (xtask passes them as
-            // a `u32`) pass through untouched.
-            let cpu_jobs = if config.cpu_jobs == 0 {
-                (jobs / 2).max(1)
-            } else {
-                config.cpu_jobs
-            };
+            // Cpu batch runs serially by default (`cpu_jobs` floored
+            // to 1). Halving was removed: Cpu scenarios run real guest
+            // work and must not contend with each other. Set
+            // `cpu_jobs > 1` explicitly to parallelise the batch.
+            let cpu_jobs = config.cpu_jobs.max(1);
 
             let mut iter_failed = 0usize;
 
@@ -964,6 +959,7 @@ fn apply_current_run_to_baseline_with_partial(
                 .p95_duration(s.name)
                 .map(|d| d.as_secs_f64() * 1000.0),
             partial: partial.cloned(),
+            signature_counts: aggregator.signature_counts_for(s.name),
         };
         file.update_current(s.name, baseline);
     }
@@ -1107,10 +1103,12 @@ mod tests {
     }
 
     #[test]
-    fn cpu_jobs_auto_default_is_half_of_jobs() {
-        // jobs=4, cpu_jobs=0 → auto-resolves to 2. Two Cpu scenarios
-        // should run concurrently (not serially), so total wall-clock
-        // is roughly one sleep window, not two.
+    fn cpu_jobs_zero_resolves_to_serial_not_halved() {
+        // cpu_jobs=0 must run the Cpu batch *serially* (floored to 1),
+        // never the old "half of jobs" auto-resolution. So two Cpu
+        // scenarios take two sleep windows, not one — regardless of
+        // `jobs`. (The CLI rejects 0; this guards the library floor
+        // for default-constructed configs.)
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_counters();
         let scns = [
@@ -1120,18 +1118,18 @@ mod tests {
         let refs: Vec<&Scenario> = scns.iter().collect();
         let config = RunnerConfig {
             jobs: 4,
-            cpu_jobs: 0, // auto
+            cpu_jobs: 0, // must NOT auto-resolve to jobs/2
             ..RunnerConfig::default()
         };
         let start = std::time::Instant::now();
         let _ = run(&refs, 1, false, &config);
         let elapsed = start.elapsed();
         assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 2);
-        // 2 × 150ms serially would be ~300ms. cpu_jobs=2 should be
-        // ~200ms (one sleep window + thread overhead).
+        // Serial: 2 × 150ms = 300ms minimum. Halving (the removed
+        // behavior) would have run both at once in ~200ms.
         assert!(
-            elapsed.as_millis() < 280,
-            "expected cpu_jobs=2 parallelism; elapsed={:?}",
+            elapsed.as_millis() >= 280,
+            "Cpu batch ran in parallel under cpu_jobs=0 (halving not removed?); elapsed={:?}",
             elapsed
         );
     }

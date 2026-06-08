@@ -212,6 +212,7 @@ mod tests {
             mean_duration_ms: None,
             p95_duration_ms: None,
             partial: None,
+            signature_counts: Default::default(),
         }
     }
 
