@@ -18,45 +18,51 @@ _Audited 2026-06-08. Evidence-backed; no edits made._
   can't be made private. No dead private code (everything is `pub`, so the compiler
   can't flag it — cross-referenced manually below).
 
+## Resolution (post-review, 2026-06-08)
+
+All six findings triaged. **#1, #5, #6 applied** (doc fixes + visibility demotion).
+**#2, #3 investigated and kept** — both are reserved-by-design, not speculative cruft
+(see corrected rows below). **#4 kept** — intentional. No further action; nothing in
+this crate warrants a code change beyond what's already landed.
+
 ## Findings
 
 | # | Dim | Sev | Finding | Evidence | Recommendation | Effort | Risk |
 |---|-----|-----|---------|----------|----------------|--------|------|
-| 1 | G | **med** | `HartRole`'s doc comment is garbled and `SwitchReason` has none. The block at `lib.rs:57-68` opens with *SwitchReason's* text ("Why the scheduler picked a different task. Carried on `Frame::ContextSwitch`…") then mid-comment switches to describing hart roles. `SwitchReason` (`lib.rs:70`) is left with no doc at all. | `lib.rs:57-82` — one doc block, two subjects; the enum below it bare. | Split: give `SwitchReason` back its first paragraph, leave `HartRole` only the hart-role text. Pure doc fix. | XS | none |
-| 2 | C | **med** | `Frame::Event` is a wire variant with **no producer**. Kernel never constructs it (0 sites); collector explicitly parks it (`state.rs:241: Frame::Event { .. } => None, // not yet wired to OTLP`); harness only formats it for display. | `grep 'Frame::Event' kernel/ kernel-core/` → 0. `state.rs:241`. | Keep *or* drop — your call (wire format). It costs a discriminant slot and an arm in every match/test. If events aren't on the near roadmap, deleting it removes ~6 lines across `Frame`, `OwnedFrame`, `from_borrowed`, tests. | S | wire-format break (but no external captures) |
-| 3 | C | **med** | 3 of 4 `SwitchReason` variants are speculative: kernel only ever emits `Yield`. `Preempt`/`Blocked` are doc'd "reserved for v0.5.x"; `Exit` has no such note and is also never emitted (v0.5 tasks are `-> !`). | `sched.rs:535,620` emit only `SwitchReason::Yield`; no other emit sites. | Keep `Preempt`/`Blocked` (documented placeholders, near-term). Reconsider `Exit` — either doc it as reserved like the others or drop it. Your call. | XS | wire-format (positional discriminants — see note) |
-| 4 | D | med | `Frame<'a>` and `OwnedFrame` are parallel 11-variant enums; adding/changing a variant means editing **4 sites in lockstep**: `Frame`, `OwnedFrame`, the `from_borrowed` match, and the "canonical checklist" test list. The v0.6 `hart_id` add touched all four. The "edit-N-places" tell. | `lib.rs:85-107` ‖ `stream.rs:21-69` ‖ `stream.rs:151-163`. | **Likely intentional** — the borrow-vs-owned (`&str` vs `String`) and no_std-vs-std split is a real contract difference, and the duplication is the price of the kernel staying allocator-free. A macro or `Frame<S: AsStr>` generic would collapse it but cost clarity in the wire-format source of truth. Flagging the maintenance cost, not recommending a change. | M | readability of the contract |
-| 5 | A | low | `try_decode_frame` is `pub` with **zero external callers** — used only by `decode_stream` internally and by tests. | `grep try_decode_frame` consumers → 0; callers = `stream.rs:95` + tests. | Demote to `pub(crate)`, *or* keep `pub` if it's deliberately offered as a decode primitive. Trivial either way. | XS | none (publish=false) |
-| 6 | G | low | Stale comment: `MetricKind::Histogram`'s "bucket encoding **TBD** when we have a histogram-emitting site" — we now have one. Histograms are emitted (`tracing.rs:125`, `heartbeat.rs:242`) and fully decoded/exported (`collector/state.rs`). | `lib.rs:46-49` vs live histogram pipeline. | Drop the "TBD/when we have a site" framing; the site exists. | XS | none |
+| 1 | G | **med** | `HartRole`'s doc comment is garbled and `SwitchReason` has none. The block at `lib.rs:57-68` opens with *SwitchReason's* text ("Why the scheduler picked a different task. Carried on `Frame::ContextSwitch`…") then mid-comment switches to describing hart roles. `SwitchReason` (`lib.rs:70`) is left with no doc at all. | `lib.rs:57-82` — one doc block, two subjects; the enum below it bare. | **✅ DONE.** Split: `SwitchReason` got its paragraph back, `HartRole` keeps only the hart-role text. | XS | none |
+| 2 | C | ~~med~~ → **keep** | `Frame::Event` is a wire variant with no producer. Kernel never constructs it; collector parks it (`state.rs:241: => None, // not yet wired to OTLP`). | `grep 'Frame::Event' kernel/ kernel-core/` → 0 (in any commit). `state.rs:241`. | **KEEP — reserved by design.** `docs/observability-design.md:21,27` locks 3 primitives (Span/**Event**/Metric, "profiling rides on Event") and states "all 7 frame types defined now; kernel uses 5 in v0.1." Defined-but-unemitted is the intended state, not debt. The `from_borrowed` arm + test are the deliberate cost. | — | n/a (keeping) |
+| 3 | C | ~~med~~ → **keep** | Kernel only ever emits `SwitchReason::Yield`; `Preempt`/`Blocked`/`Exit` never emitted. | `sched.rs:535,620` emit only `Yield`. | **KEEP all four — reserved by design.** `plans/v0.5-threading.md:202-208` enumerates the full enum up front; `Exit` ↔ `TaskState::Exited` + the task-exit feature tracked in `plans/residual-race-investigation.md` (483,492,558). **✅ Applied** the only real gap: added a "reserved for task-exit" note to `Exit` for parity with `Preempt`/`Blocked`. | XS | none |
+| 4 | D | med → **keep** | `Frame<'a>` and `OwnedFrame` are parallel 11-variant enums; a variant change edits 4 sites in lockstep (`Frame`, `OwnedFrame`, `from_borrowed`, the test checklist). | `lib.rs:85-107` ‖ `stream.rs:21-69` ‖ `stream.rs:151-163`. | **KEEP — intentional.** Borrow-vs-owned (`&str` vs `String`) is a hard contract requirement (kernel is `no_std`, can't allocate `String`). The exhaustive match + test list are a *designed* compile-time checklist (`stream.rs:18-19,146-150` say so). Collapsing via macro/generic obscures the wire-format source of truth — more cleverness, not less. | — | n/a (keeping) |
+| 5 | A | low | `try_decode_frame` is `pub` with zero external callers — used only by `decode_stream` internally and by tests. | `grep try_decode_frame` consumers → 0; callers = `stream.rs:95` + tests. | **✅ DONE.** Demoted to `pub(crate)`. | XS | none (publish=false) |
+| 6 | G | low | Stale comment: `MetricKind::Histogram`'s "bucket encoding **TBD** when we have a histogram-emitting site" — we now have one. | `lib.rs:46-49` vs live pipeline (`tracing.rs:125`, `heartbeat.rs:242`, `collector/state.rs`). | **✅ DONE.** Comment now describes the live (observed-via-`Metric`, host-bucketed) behavior. | XS | none |
 
-## Two lists
+## Outcome
 
-**Obvious wins (safe now, low risk):**
-- **#1** — fix the garbled `HartRole`/`SwitchReason` doc (actively misleading; pure comment edit).
-- **#6** — refresh the stale `Histogram` "TBD" comment.
-- **#5** — `try_decode_frame` → `pub(crate)` (if you don't intend it as public API).
+**Applied (doc-only + one visibility keyword, zero behavior change):**
+- **#1** — split the garbled `HartRole`/`SwitchReason` doc.
+- **#3** — added a "reserved for task-exit" note to `SwitchReason::Exit` for parity.
+- **#5** — `try_decode_frame` → `pub(crate)`.
+- **#6** — refreshed the stale `Histogram` "TBD" comment.
 
-Mass: ~0 prod lines, doc-only + one visibility keyword.
+Verified: `cargo build -p protocol`, `cargo test -p protocol --features std` (23 pass),
+clippy all clean.
 
-**Needs your call (wire format / intentional design):**
-- **#2** `Frame::Event` — delete the no-producer variant, or keep it parked?
-- **#3** `SwitchReason::Exit` — document-as-reserved or drop? (Keep `Preempt`/`Blocked`.)
-- **#4** `Frame`/`OwnedFrame` duplication — accept as the contract's honest cost, or collapse via macro/generic?
+**Kept, deliberately (reserved-by-design, not debt):**
+- **#2** `Frame::Event` — locked primitive (`docs/observability-design.md:21,27`); profiling will ride on it.
+- **#3** `SwitchReason::{Preempt,Blocked,Exit}` — full enum defined up front per `plans/v0.5-threading.md`; `Exit` ↔ the planned task-exit feature.
+- **#4** `Frame`/`OwnedFrame` duplication — the borrow-vs-owned split is a hard `no_std` constraint; the lockstep match/test list is a *designed* compile-time checklist.
 
-Mass if you delete #2: ~6 lines across 4 files. #3/#4 are judgement, not mass.
-
-> **Wire-format note (applies to #2, #3):** postcard encodes enum discriminants
-> *positionally*. `Event` and the `SwitchReason` variants sit **mid-enum**, so
-> removing them shifts every later discriminant and breaks decode of any prior
-> capture. Per CLAUDE.md the rule is "new variants at the END, never reorder."
-> Deleting a mid-enum variant is the same hazard in reverse. Safe only because
-> `publish = false` and no external v0.6 captures exist — but it would still
-> invalidate any saved corpus. Bump `PROTOCOL_VERSION` (currently 2) if you do it.
+> **Wire-format note (for any future deletion of #2/#3):** postcard encodes enum
+> discriminants *positionally*. `Event` and the `SwitchReason` variants sit
+> **mid-enum**, so removing one shifts every later discriminant and breaks decode
+> of any prior capture (the inverse of the "new variants at the END, never reorder"
+> rule in CLAUDE.md). Were the design to change, deletion would still need a
+> `PROTOCOL_VERSION` bump (currently 2) and invalidate any saved corpus.
 
 ## Verdict
 
-`protocol/` is a small, well-tested, well-documented contract crate that's doing
-exactly its job — no architectural debt, no dead private code, no lint drift. The
-only *active hazard* is the garbled doc comment (#1). Everything else is a
-deliberate-design question (speculative variants you may want to keep) or a
-cosmetic cleanup. Not a session's worth of work; #1 + #6 are a 5-minute fix.
+`protocol/` is a small, well-tested, well-documented contract crate doing exactly
+its job — no architectural debt, no dead private code, no lint drift. The one
+*active hazard* (the garbled doc comment, #1) is fixed. Everything flagged as
+"unused" turned out to be reserved-by-design wire surface, confirmed against the
+design docs and plans — correctly kept. Nothing further to do.

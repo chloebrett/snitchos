@@ -77,7 +77,8 @@ pub enum SwitchReason {
   /// Running task hit a blocking primitive and went off-CPU.
   /// Placeholder until v0.5.x adds real blocking.
   Blocked,
-  /// Running task ran its entry function to completion.
+  /// Running task ran its entry function to completion. Not emitted in
+  /// v0.5 (tasks are `-> !`); reserved for the task-exit feature.
   Exit,
 }
 
