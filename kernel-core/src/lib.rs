@@ -10,6 +10,7 @@
 
 extern crate alloc;
 
+pub mod bootargs;
 pub mod clock;
 pub mod heap_smoke;
 pub mod frame;

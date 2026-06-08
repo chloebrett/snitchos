@@ -297,27 +297,44 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // wire together without crashing the kernel. Costs one 16 KiB
     // leaked stack at boot.
     let _ = sched::spawn("exit_smoke", sched::exit_smoke_entry);
-    // Under `deflake-spawn-storm` the kernel boots with just main +
-    // idle on hart 0 (and idle on hart 1, spawned in secondary_main).
-    // The storm spawns its own minimal worker tasks on hart 1 below;
-    // including the demo + workload tasks here would add unrelated
-    // scheduling activity that masks the cross-hart race window.
-    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm", feature = "smp-workload")))]
-    {
-        let _ = sched::spawn("task_a", demo_tasks::task_a_entry);
-        let _ = sched::spawn("task_b", demo_tasks::task_b_entry);
-        let _ = sched::spawn("workload_producer", workload::producer_entry);
-        let _ = sched::spawn("workload_consumer", workload::consumer_entry);
-    }
-
-    // v0.6 step 11: cross-hart workload. The producer runs on hart 0
-    // (spawned here); the consumer is spawned onto hart 1 below, after
-    // `SECONDARY_READY`, so the `Mutex<VecDeque>` queue carries real
-    // inter-hart contention. task_a/task_b are intentionally absent to
-    // keep hart 0's surface clean for measurement.
-    #[cfg(feature = "smp-workload")]
-    {
-        let _ = sched::spawn("workload_producer", workload::producer_entry);
+    // Boot workload selection. The default is the standard demo
+    // (task_a, task_b, producer, consumer on hart 0). An
+    // `itest-workloads` build may override it at runtime from the
+    // `workload=` kernel bootarg (QEMU `-append`); production builds
+    // never consult bootargs and always run the default — the registry
+    // is purely additive. See
+    // `docs/runtime-workload-selection-design.md`.
+    //
+    // Gated out under the `deflake-*` storms, which strip the demo and
+    // spawn their own minimal workers below (still cargo-feature-gated
+    // pending migration step 4).
+    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
+    let selected: Option<kernel_core::bootargs::WorkloadKind> = {
+        #[cfg(feature = "itest-workloads")]
+        {
+            dtb.chosen().bootargs().and_then(kernel_core::bootargs::select)
+        }
+        #[cfg(not(feature = "itest-workloads"))]
+        {
+            None
+        }
+    };
+    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
+    match selected {
+        None => {
+            // Default demo: all four tasks on hart 0.
+            let _ = sched::spawn("task_a", demo_tasks::task_a_entry);
+            let _ = sched::spawn("task_b", demo_tasks::task_b_entry);
+            let _ = sched::spawn("workload_producer", workload::producer_entry);
+            let _ = sched::spawn("workload_consumer", workload::consumer_entry);
+        }
+        Some(kernel_core::bootargs::WorkloadKind::Smp) => {
+            // Cross-hart: producer on hart 0 here, consumer on hart 1
+            // after SECONDARY_READY. The `Mutex<VecDeque>` queue carries
+            // real inter-hart contention; task_a/task_b are absent to
+            // keep hart 0's surface clean for measurement.
+            let _ = sched::spawn("workload_producer", workload::producer_entry);
+        }
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -360,12 +377,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
     let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
 
-    // v0.6 step 11: place the consumer on hart 1. `spawn_on` enqueues
-    // it on hart 1's runqueue and IPIs the hart so its idle `wfi`
-    // wakes to pick it up. Producer (hart 0) and consumer (hart 1) now
-    // contend on the `QUEUE` mutex across the hart boundary.
-    #[cfg(feature = "smp-workload")]
-    let _ = sched::spawn_on(1, "workload_consumer", workload::consumer_entry);
+    // v0.6 step 11: place the consumer on hart 1 when the SMP workload
+    // is selected. `spawn_on` enqueues it on hart 1's runqueue and IPIs
+    // the hart so its idle `wfi` wakes to pick it up. Producer (hart 0)
+    // and consumer (hart 1) then contend on `QUEUE` across the boundary.
+    #[cfg(not(any(feature = "deflake-spawn-storm", feature = "deflake-ipi-pong", feature = "deflake-shootdown-storm", feature = "deflake-mutex-storm", feature = "deflake-virtio-storm")))]
+    if matches!(selected, Some(kernel_core::bootargs::WorkloadKind::Smp)) {
+        let _ = sched::spawn_on(1, "workload_consumer", workload::consumer_entry);
+    }
 
     // Mutex-storm: spawn the two contender tasks. They run as soon
     // as the scheduler picks them; each does N lock/unlock and then

@@ -72,9 +72,26 @@ impl Harness {
 
     /// Like `spawn`, but builds the kernel with the given cargo
     /// features enabled. Used by scenarios that need a non-default
-    /// kernel variant — currently just `frame-allocator-oom`, which
-    /// opts in to the `oom-leak` feature.
+    /// kernel variant — e.g. `frame-allocator-oom` opts in to the
+    /// `oom-leak` feature.
     pub fn spawn_with_features(label: &str, features: &[&str]) -> Result<Self, String> {
+        Self::spawn_inner(label, features, None)
+    }
+
+    /// Boot the `itest-workloads` kernel and select a runtime workload
+    /// via the `workload=<name>` kernel bootarg (QEMU `-append`). The
+    /// kernel's `kmain` reads `/chosen/bootargs` and dispatches; with
+    /// no bootarg it runs the default demo. See
+    /// `docs/runtime-workload-selection-design.md`.
+    pub fn spawn_with_workload(label: &str, workload: &str) -> Result<Self, String> {
+        Self::spawn_inner(label, &["itest-workloads"], Some(workload))
+    }
+
+    fn spawn_inner(
+        label: &str,
+        features: &[&str],
+        workload: Option<&str>,
+    ) -> Result<Self, String> {
         // Only rebuild for non-default features. Default-feature builds happen
         // once up-front in `itest::run` so `--repeat N` doesn't race with
         // mid-run source edits or burn time on per-iteration build checks.
@@ -111,7 +128,13 @@ impl Harness {
             .map_err(|e| format!("clone log handle: {e}"))?;
         LAST_LOG_PATH.with(|cell| *cell.borrow_mut() = Some(log_path.clone()));
 
-        let qemu = qemu::base_command(&chardev)
+        let mut qemu_cmd = qemu::base_command(&chardev);
+        if let Some(workload) = workload {
+            // Lands in /chosen/bootargs; `kmain` reads it to pick the
+            // runtime workload.
+            qemu_cmd.args(["-append", &format!("workload={workload}")]);
+        }
+        let qemu = qemu_cmd
             .stdout(Stdio::from(stdout_log))
             .stderr(Stdio::from(stderr_log))
             .stdin(Stdio::null())

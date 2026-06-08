@@ -37,8 +37,8 @@ static QUEUE: Mutex<Option<VecDeque<u64>>> = Mutex::new(None);
 //
 // SAMPLES_CONSUMED is the exception. The consumer bins a batch
 // (HISTOGRAM, Relaxed) and *then* bumps SAMPLES_CONSUMED — and under
-// `smp-workload` the consumer runs on hart 1 while the heartbeat reads
-// both counters on hart 0. To keep the correctness oracle
+// the `workload=smp` selection the consumer runs on hart 1 while the
+// heartbeat reads both counters on hart 0. To keep the correctness oracle
 // `histogram_sum >= SAMPLES_CONSUMED` valid across that hart boundary,
 // the SAMPLES_CONSUMED bump is a `Release` and the heartbeat's read is
 // the matching `Acquire` (see `heartbeat::emit_workload_metrics`): an

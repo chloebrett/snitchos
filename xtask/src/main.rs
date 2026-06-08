@@ -24,8 +24,9 @@ enum Cmd {
     /// Build the kernel and run it in QEMU.
     ///
     /// Use `--features <feat>` to boot a feature-flagged kernel (e.g.
-    /// `--features smp-workload` to run the cross-hart producer/consumer
-    /// for live measurement in `cargo xtask reader` / Grafana).
+    /// `--features itest-workloads` to compile in the runtime-selectable
+    /// workload registry). Runtime workload selection via `-append`
+    /// lands with `boot --workload` (migration step 5).
     Boot {
         /// Cargo features to enable on the kernel build, comma-separated.
         #[arg(long, default_value = "")]

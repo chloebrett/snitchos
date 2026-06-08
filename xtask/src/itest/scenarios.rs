@@ -692,10 +692,11 @@ pub fn workload_cooperative_baseline() -> Result<(), String> {
 }
 
 /// v0.6 step 11: the producer/consumer workload, but cross-hart.
-/// Built `--features smp-workload` so the producer runs on hart 0 and
-/// the consumer on hart 1; the `Mutex<VecDeque>` queue now carries
-/// genuine inter-hart contention (the v0.6 thesis — the chokepoint
-/// earns its keep by being *visible*).
+/// Selected at runtime via the `workload=smp` bootarg on the
+/// `itest-workloads` kernel — producer on hart 0, consumer on hart 1;
+/// the `Mutex<VecDeque>` queue now carries genuine inter-hart
+/// contention (the v0.6 thesis — the chokepoint earns its keep by
+/// being *visible*).
 ///
 /// This is the SMP analogue of `workload-cooperative-baseline`. The
 /// same correctness oracle applies — `histogram_sum >= samples_consumed`
@@ -710,7 +711,7 @@ pub fn workload_cooperative_baseline() -> Result<(), String> {
 /// hart batch handoffs per run — enough interleavings to give the
 /// memory-ordering hazard room to manifest.
 pub fn smp_producer_consumer_correctness() -> Result<(), String> {
-    let mut h = Harness::spawn_with_features("smp-workload", &["smp-workload"])?;
+    let mut h = Harness::spawn_with_workload("smp-workload", "smp")?;
 
     let frame = h
         .wait_for(SEC * 45, |f, strings| match f {

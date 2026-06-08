@@ -16,13 +16,13 @@ oom-leak = []
 # `alloc::alloc::alloc` (returns null on failure, no panic) until the
 # heap is exhausted. Used by the `heap-oom` integration scenario.
 heap-oom = []
-# v0.6 step 11: cross-hart producer/consumer. Producer stays on
-# hart 0; the consumer is spawned via `spawn_on(1, …)` so the
-# `Mutex<VecDeque>` queue takes genuine inter-hart contention. Strips
-# task_a/task_b for a clean measurement surface (the default build
-# keeps all four tasks on hart 0). Used by the
-# `smp-producer-consumer-correctness` integration scenario.
-smp-workload = []
+# Umbrella for the runtime-selectable workload registry. Additive
+# only: with no `workload=` bootarg an `itest-workloads` kernel runs
+# the exact default demo, so the integration suite can build one
+# binary and select per-scenario via QEMU `-append`. Production builds
+# leave this off (no test/destructive workloads compiled in). See
+# `docs/runtime-workload-selection-design.md`.
+itest-workloads = []
 # Replaces the default boot workload (task_a, task_b, producer,
 # consumer) with a cross-hart spawn storm: hart 0 runs
 # `spawn_on(1, deflake_body)` in a serialised loop and waits for each

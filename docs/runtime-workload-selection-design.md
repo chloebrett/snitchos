@@ -87,7 +87,7 @@ The one load-bearing unknown was whether `-append` reaches `/chosen/bootargs` wi
 ## Migration sequence (incremental, each step green)
 
 1. ~~**Spike** the bootargs read~~ — done (feasibility gate above).
-2. Add `itest-workloads` + `WorkloadKind` + `select()` (TDD in `kernel-core`) + the `Once` and two dispatch sites, registering **`smp-workload` only**. Prove one-build + `-append` selection on `smp-producer-consumer-correctness` and a default-demo scenario.
+2. ~~Add `itest-workloads` + `WorkloadKind` + `select()` + the `kmain` dispatch, registering `smp` only; migrate `smp-producer-consumer-correctness` to `-append workload=smp`.~~ **Done** — `kernel_core::bootargs::{WorkloadKind, select}` (TDD'd, mutants clean), `kmain` selects via `dtb.chosen().bootargs()`, `smp-workload` cargo feature deleted, scenario green 10/10 via `Harness::spawn_with_workload("smp")`. *(The `kmain` dispatch reads the selection into a local rather than a `Once` — only `kmain` needs it today; revisit `Once` if the heartbeat needs it in step 3.)* **Deferred sub-step:** the suite still rebuilds per `itest-workloads` scenario; flipping the up-front build to `itest-workloads` so the whole suite shares one binary is the build-dedup win, best done once more workloads are ported.
 3. Port `oom-leak`, `heap-oom`. Delete their feature defs.
 4. Port the `*-storm` workloads (any order — the race they once characterised is fixed). **Rename here:** they become runtime selections `workload=mutex-storm`, `workload=spawn-storm`, etc. — the now-misleading `deflake-` prefix disappears as the cargo features are deleted, so no separate rename-then-delete churn. A flake-rate sanity check after the move is prudent but not gating.
 5. Add `cargo xtask boot --workload`.
