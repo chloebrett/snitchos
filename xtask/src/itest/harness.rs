@@ -175,9 +175,8 @@ impl Harness {
         let start = Instant::now();
         let deadline = start + budget;
         let result = loop {
-            let remaining = match deadline.checked_duration_since(Instant::now()) {
-                Some(r) => r,
-                None => break None,
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break None;
             };
             match self.rx.recv_timeout(remaining) {
                 Ok(frame) => {

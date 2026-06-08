@@ -85,8 +85,8 @@ mod tests {
     #[test]
     fn unknown_interrupt_preserves_raw_code() {
         assert_eq!(
-            decode_scause(INTERRUPT_BIT | 42),
-            TrapCause::UnknownInterrupt(42),
+            decode_scause(INTERRUPT_BIT | 0x2a),
+            TrapCause::UnknownInterrupt(0x2a),
         );
     }
 

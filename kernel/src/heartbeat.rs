@@ -149,6 +149,11 @@ define_metrics! {
     counter   virtio_storm_hart0_emits  = "snitchos.deflake.virtio_storm_hart0_emits";
     #[cfg(feature = "itest-workloads")]
     counter   virtio_storm_hart1_iterations = "snitchos.deflake.virtio_storm_hart1_iterations";
+    // TLB-shootdown correctness oracle (itest-workloads only).
+    #[cfg(feature = "itest-workloads")]
+    counter   tlb_remap_rounds          = "snitchos.smp.tlb_remap_rounds";
+    #[cfg(feature = "itest-workloads")]
+    counter   tlb_stale_reads           = "snitchos.smp.tlb_stale_reads";
 }
 
 /// Heartbeat main loop. Never returns. Waits for the timer-IRQ
@@ -377,6 +382,13 @@ fn emit_storm_metrics(m: &Metrics, count: i64) {
         Some(WorkloadKind::VirtioStorm) => {
             emit!(m, virtio_storm_hart0_emits      = crate::storms::virtio_storm::HART0_EMITS.load(Ordering::Relaxed));
             emit!(m, virtio_storm_hart1_iterations = crate::storms::virtio_storm::HART1_ITERATIONS.load(Ordering::Relaxed));
+        }
+        Some(WorkloadKind::TlbShootdownVisible) => {
+            if count == 1 {
+                crate::storms::tlb_shootdown::run();
+            }
+            emit!(m, tlb_remap_rounds = crate::storms::tlb_shootdown::ROUNDS.load(Ordering::Relaxed));
+            emit!(m, tlb_stale_reads  = crate::storms::tlb_shootdown::STALE_READS.load(Ordering::Relaxed));
         }
         // No storm selected (default / Smp* / OOM): nothing to emit.
         None

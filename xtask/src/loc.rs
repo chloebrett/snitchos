@@ -47,9 +47,8 @@ fn collect_rs_files(root: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_rs_files_inner(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
     };
 
     for entry in entries.flatten() {

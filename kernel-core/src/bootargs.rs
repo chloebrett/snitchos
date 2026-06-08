@@ -44,6 +44,12 @@ pub enum WorkloadKind {
     /// hart 0 emit-storm over the virtio TX path, hart 1 atomic spin.
     /// Task-driven.
     VirtioStorm,
+    /// Cross-hart TLB-shootdown *correctness* workload: hart 0 remaps a
+    /// shared VA between two frames and shoots down; hart 1 reads
+    /// through the VA each round and must never see the stale frame.
+    /// Task-driven; the initiator yields so the heartbeat keeps
+    /// draining the round / stale-read counters (so *not* a storm).
+    TlbShootdownVisible,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -70,6 +76,7 @@ impl WorkloadKind {
                 | Self::ShootdownStorm
                 | Self::MutexStorm
                 | Self::VirtioStorm
+                | Self::TlbShootdownVisible
         )
     }
 }
@@ -93,6 +100,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "shootdown-storm" => Some(WorkloadKind::ShootdownStorm),
             "mutex-storm" => Some(WorkloadKind::MutexStorm),
             "virtio-storm" => Some(WorkloadKind::VirtioStorm),
+            "tlb-shootdown" => Some(WorkloadKind::TlbShootdownVisible),
             _ => None,
         })
 }
@@ -149,6 +157,23 @@ mod tests {
         assert_eq!(select("workload=shootdown-storm"), Some(WorkloadKind::ShootdownStorm));
         assert_eq!(select("workload=mutex-storm"), Some(WorkloadKind::MutexStorm));
         assert_eq!(select("workload=virtio-storm"), Some(WorkloadKind::VirtioStorm));
+    }
+
+    #[test]
+    fn selects_tlb_shootdown() {
+        assert_eq!(
+            select("workload=tlb-shootdown"),
+            Some(WorkloadKind::TlbShootdownVisible),
+        );
+    }
+
+    #[test]
+    fn tlb_shootdown_is_a_storm() {
+        // Heartbeat-driven (hart 0's round loop runs once on the first
+        // tick) and spawns its own hart-1 reader — so it is
+        // storm-classified: the default `hart_1_probe` is skipped and
+        // its driver runs from `emit_storm_metrics`.
+        assert!(WorkloadKind::TlbShootdownVisible.is_storm());
     }
 
     #[test]

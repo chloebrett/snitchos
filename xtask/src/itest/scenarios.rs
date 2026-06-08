@@ -882,6 +882,70 @@ pub fn shootdown_storm() -> Result<(), String> {
     Ok(())
 }
 
+/// v0.6 step 13: TLB-shootdown *correctness* (not just plumbing).
+/// `shootdown-storm` proves the IPI payload-read path; this proves the
+/// consequence — after hart 0 repoints a VA at a new frame and shoots
+/// down, hart 1 stops reading the old one.
+///
+/// The `tlb-shootdown` workload has hart 0 remap a shared VA between
+/// two pre-filled frames each round (firing `mmu::remap` →
+/// `shootdown`), while hart 1 reads through that VA every round. hart 1
+/// reads the *old* frame before each remap, caching the stale
+/// translation; only the shootdown's cross-hart `sfence` can
+/// invalidate it. A miss shows up as a stale read.
+///
+/// We assert:
+///   1. `snitchos.smp.tlb_remap_rounds` reaches 100 — the remap/read
+///      loop actually ran enough rounds that the result isn't vacuous
+///      (a fresh-map-only test would pass without any shootdown).
+///   2. `snitchos.smp.tlb_stale_reads` is never observed `> 0` — the
+///      cumulative, re-emitted oracle. Any stale read means a hart kept
+///      a stale TLB entry after a remap: shootdown failed.
+///
+/// Teeth are proven out of band by a deliberately-broken counterfactual
+/// (see `plans/v0.6-step-13-tlb-shootdown-visible.md`).
+pub fn smp_tlb_shootdown_visible() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("tlb-shootdown", "tlb-shootdown")?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.smp.tlb_remap_rounds")
+                && *value >= 100
+        }
+        _ => false,
+    })
+    .ok_or(
+        "tlb_remap_rounds never reached 100 within 30s — the remap/read \
+         loop didn't run. hart 1 reader didn't pick up, `run` wedged on \
+         a shootdown ack, or the heartbeat never drove the driver.",
+    )?;
+
+    // The oracle is cumulative and re-emitted every heartbeat, so by the
+    // time rounds >= 100 any stale read is latched and will reappear.
+    // Finding one within a few ticks is the failure this scenario exists
+    // to catch.
+    if h.wait_for(SEC * 5, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.smp.tlb_stale_reads")
+                && *value > 0
+        }
+        _ => false,
+    })
+    .is_some()
+    {
+        return Err(
+            "hart 1 observed a STALE TLB translation after a remap \
+             (tlb_stale_reads > 0) — mmu::remap's shootdown did not \
+             invalidate the other hart's cached entry."
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 /// v0.5.x minimal task-exit: a spawned task can call `sched::exit_now`
 /// and the kernel keeps running. The boot path spawns `exit_smoke`,
 /// whose body bumps `EXIT_SMOKE_HITS` and calls `exit_now`. The

@@ -80,6 +80,7 @@ impl PtePerms {
 
     pub const fn bits(self) -> u64 { self.0 }
 
+    #[must_use]
     pub const fn union(self, other: PtePerms) -> Self { PtePerms(self.0 | other.0) }
 }
 
@@ -218,6 +219,10 @@ pub enum MapError {
     /// `PtMem::alloc_zeroed_table` returned `None` while the walk
     /// was trying to install an intermediate table.
     OutOfFrames,
+    /// `remap` found no 4 KiB leaf to overwrite at this VA — the VA
+    /// is unmapped, an intermediate table is missing, or a huge-page
+    /// leaf covers it (so there is no 4 KiB granularity to remap).
+    NotMapped,
 }
 
 /// PTE has V=1, R=W=X=0 → non-leaf (points at child table).
@@ -268,6 +273,50 @@ pub fn map(
     Ok(())
 }
 
+/// Overwrite the existing 4 KiB leaf PTE for `va` with one mapping to
+/// `new_pa` with `perms`. Walks only *existing* tables (never
+/// allocates) and requires a valid 4 KiB leaf already present; the
+/// caller is responsible for the TLB shootdown after a successful
+/// return (this is what makes `remap` distinct from `map` — the old
+/// translation may be cached on other harts).
+///
+/// Returns `Err(NotMapped)` if the VA is unmapped, an intermediate
+/// table is missing, or a huge-page leaf covers the VA. Unlike `map`,
+/// `remap` never returns `OutOfFrames` (it allocates nothing) and
+/// never returns `AlreadyMapped` (overwriting is the whole point).
+pub fn remap(
+    root_pa: usize,
+    va: usize,
+    new_pa: usize,
+    perms: PtePerms,
+    mem: &mut dyn PtMem,
+) -> Result<(), MapError> {
+    let (vpn2, vpn1, vpn0, _) = split_va(va);
+    let mid_pa = walk_existing(root_pa, vpn2, mem)?;
+    let leaf_table_pa = walk_existing(mid_pa, vpn1, mem)?;
+    let existing = mem.read_entry(leaf_table_pa, vpn0);
+    if !pte_is_leaf(existing) {
+        return Err(MapError::NotMapped);
+    }
+    mem.write_entry(leaf_table_pa, vpn0, leaf_pte(new_pa, perms));
+    Ok(())
+}
+
+/// Descend one level through an *existing* branch PTE. Returns the
+/// child table PA. Errors `NotMapped` if the slot is empty (no table)
+/// or holds a leaf (huge page — no child table to descend into).
+fn walk_existing(
+    table_pa: usize,
+    idx: usize,
+    mem: &dyn PtMem,
+) -> Result<usize, MapError> {
+    let pte = mem.read_entry(table_pa, idx);
+    if pte_is_branch(pte) {
+        return Ok(branch_pte_child_pa(pte));
+    }
+    Err(MapError::NotMapped)
+}
+
 /// At `table_pa[idx]`: if V=0, allocate + install a non-leaf PTE
 /// pointing at the new table and return its PA. If V=1 and the PTE
 /// is non-leaf, recover and return the child PA. If V=1 and the PTE
@@ -316,6 +365,10 @@ mod tests {
             }
         }
 
+        #[allow(
+            clippy::unused_self,
+            reason = "mirrors the real PtMem accessor shape; the mock root is always slot 0"
+        )]
         fn root_pa(&self) -> usize {
             (1) << 12
         }
@@ -681,6 +734,81 @@ mod tests {
     fn split_va_handles_mmio_region() {
         // 0x10000000 → vpn2 = 0, vpn1 = 128, vpn0 = 0.
         assert_eq!(split_va(0x10000000), (0, 128, 0, 0));
+    }
+
+    #[test]
+    fn remap_overwrites_existing_leaf_with_new_pa() {
+        // The whole point of remap: a VA already mapped to PA-A is
+        // pointed at PA-B with new perms, in place. The leaf PTE must
+        // now encode B, not A.
+        let mut mem = MockPtMem::new(8);
+        let va = 0x1000;
+        map(mem.root_pa(), va, 0x80100000, PtePerms::R, &mut mem).unwrap();
+
+        remap(mem.root_pa(), va, 0x80200000, PtePerms::R.union(PtePerms::W), &mut mem).unwrap();
+
+        let pte = leaf_table_of(&mem, va).entries[1];
+        assert_eq!(pte, leaf_pte(0x80200000, PtePerms::R.union(PtePerms::W)));
+    }
+
+    #[test]
+    fn remap_on_unmapped_va_returns_not_mapped() {
+        // Nothing mapped at all — the leaf table doesn't even exist.
+        let mut mem = MockPtMem::new(8);
+        assert_eq!(
+            remap(mem.root_pa(), 0x1000, 0x80200000, PtePerms::R, &mut mem),
+            Err(MapError::NotMapped),
+        );
+    }
+
+    #[test]
+    fn remap_when_leaf_slot_empty_returns_not_mapped() {
+        // Intermediates exist (a sibling VA in the same leaf table is
+        // mapped) but the target VA's own leaf slot is V=0.
+        let mut mem = MockPtMem::new(8);
+        // 0x1000 and 0x2000 share vpn2/vpn1; vpn0 = 1 vs 2.
+        map(mem.root_pa(), 0x1000, 0x80100000, PtePerms::R, &mut mem).unwrap();
+        assert_eq!(
+            remap(mem.root_pa(), 0x2000, 0x80200000, PtePerms::R, &mut mem),
+            Err(MapError::NotMapped),
+        );
+    }
+
+    #[test]
+    fn remap_when_huge_leaf_covers_va_returns_not_mapped() {
+        // A 1 GiB huge leaf at root[0] covers VA 0x1000. There is no
+        // 4 KiB leaf to remap — descending would mean splitting a huge
+        // page, which remap does not do.
+        let mut mem = MockPtMem::new(8);
+        let root_pa = mem.root_pa();
+        mem.write_entry(root_pa, 0, leaf_pte(0x80000000, PtePerms::rwxg()));
+        assert_eq!(
+            remap(root_pa, 0x1000, 0x80200000, PtePerms::R, &mut mem),
+            Err(MapError::NotMapped),
+        );
+    }
+
+    #[test]
+    fn remap_allocates_no_tables() {
+        // remap must walk existing tables only. After a map (which
+        // allocated 2 intermediates), a remap allocates nothing more.
+        let mut mem = MockPtMem::new(8);
+        map(mem.root_pa(), 0x1000, 0x80100000, PtePerms::R, &mut mem).unwrap();
+        let before = mem.intermediate_alloc_count();
+        remap(mem.root_pa(), 0x1000, 0x80200000, PtePerms::R, &mut mem).unwrap();
+        assert_eq!(mem.intermediate_alloc_count(), before);
+    }
+
+    #[test]
+    fn remap_changes_only_the_target_leaf() {
+        // A sibling mapping in the same leaf table must be untouched.
+        let mut mem = MockPtMem::new(8);
+        map(mem.root_pa(), 0x1000, 0x80100000, PtePerms::R, &mut mem).unwrap();
+        map(mem.root_pa(), 0x2000, 0x80300000, PtePerms::R, &mut mem).unwrap();
+        let sibling_before = leaf_table_of(&mem, 0x2000).entries[2];
+        remap(mem.root_pa(), 0x1000, 0x80200000, PtePerms::W, &mut mem).unwrap();
+        assert_eq!(leaf_table_of(&mem, 0x1000).entries[1], leaf_pte(0x80200000, PtePerms::W));
+        assert_eq!(leaf_table_of(&mem, 0x2000).entries[2], sibling_before);
     }
 
     #[test]

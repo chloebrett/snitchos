@@ -96,6 +96,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario::cpu_bound ("spawn-storm",         scenarios::spawn_storm),
     Scenario::cpu_bound ("ipi-pong",            scenarios::ipi_pong),
     Scenario::cpu_bound ("shootdown-storm",     scenarios::shootdown_storm),
+    Scenario::cpu_bound ("smp-tlb-shootdown-visible", scenarios::smp_tlb_shootdown_visible),
     Scenario::new       ("sched-task-exits-cleanly",    scenarios::sched_task_exits_cleanly),
     Scenario::cpu_bound ("mutex-storm",         scenarios::mutex_storm),
     Scenario::cpu_bound ("virtio-storm",        scenarios::virtio_storm),

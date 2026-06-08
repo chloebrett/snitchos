@@ -352,3 +352,211 @@ pub mod shootdown {
         }
     }
 }
+
+pub mod tlb_shootdown {
+    //! Cross-hart TLB-shootdown **correctness** workload — the oracle
+    //! `shootdown-storm` deliberately isn't. The storm proves the IPI
+    //! payload-read plumbing (counters climb even if hart 1 sfences the
+    //! wrong VA); this proves the *consequence*: after hart 0 repoints a
+    //! VA at a new frame, hart 1 stops reading the old one.
+    //!
+    //! ## The teeth (why a fresh map wouldn't do)
+    //!
+    //! If hart 1 had no TLB entry for the test VA, its page-fault walker
+    //! would resolve the new PTE correctly whether or not shootdown ran
+    //! — a vacuous pass. So each round hart 1 reads **through** the VA
+    //! *before* the remap, caching the old translation; only the
+    //! shootdown's `sfence` can invalidate it. Under QEMU TCG the
+    //! softmmu TLB only flushes on an intercepted `sfence.vma`, so a
+    //! missing / wrong-VA shootdown genuinely leaves hart 1 reading the
+    //! stale frame — `STALE_READS` catches it. (Teeth proven out of band
+    //! by a deliberately-broken counterfactual; see the step-13 plan.)
+    //!
+    //! ## Protocol (one shared VA `V`, two pre-filled frames A/B)
+    //!
+    //!   - **Setup (hart 0):** alloc frames A, B; write distinct
+    //!     sentinels into each via the linear map; `map(V → A)`; publish
+    //!     round 0.
+    //!   - **hart 0 driver (`run`, heartbeat-driven, one shot):** for
+    //!     `i` in `1..=N`: wait until hart 1 has read round `i-1` (so it
+    //!     cached the old frame); `remap(V → other frame)` — which fires
+    //!     the cross-hart `shootdown(V)`; publish `EXPECTED` then
+    //!     `ROUND = i`.
+    //!   - **hart 1 reader (`reader_body`, task):** on each new round,
+    //!     read `*V`; if it isn't the expected sentinel, bump
+    //!     `STALE_READS`; record the round and ack it.
+    //!
+    //! Ordering: hart 0 stores `EXPECTED` then `ROUND` (Release); hart 1
+    //! Acquire-loads `ROUND`, then reads `V`, then `EXPECTED`. The
+    //! shootdown completes (hart 1's IPI handler sfenced + acked) inside
+    //! `remap` *before* `ROUND` is published, so a correct shootdown
+    //! means the round-`i` read re-walks to frame `i`.
+
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    use kernel_core::mmu::{PtePerms, pa_to_kernel_va};
+
+    /// Rounds the driver runs. Each is one cross-hart remap+shootdown
+    /// round-trip; the scenario only needs to observe enough of them to
+    /// rule out a vacuous pass.
+    pub const N: u64 = 512;
+
+    const SENTINEL_A: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+    const SENTINEL_B: u64 = 0xBBBB_BBBB_BBBB_BBBB;
+
+    /// Dedicated test VA in a fresh root slot one gigapage above the
+    /// heap (root slot 257). Nothing else maps here, so the initial
+    /// `map` installs clean intermediates and the remap can't collide.
+    const TEST_VA: usize = kernel_core::mmu::HEAP_VA_BASE + (1 << 30);
+
+    /// Highest round hart 1 has read. Heartbeat re-emits as
+    /// `snitchos.smp.tlb_remap_rounds` — proves the workload actually
+    /// ran (not a vacuous pass). `Relaxed`: single writer (hart 1).
+    pub static ROUNDS: AtomicU64 = AtomicU64::new(0);
+
+    /// Count of reads where hart 1 saw the *stale* frame after a remap.
+    /// Heartbeat re-emits as `snitchos.smp.tlb_stale_reads`. Must stay
+    /// 0 — any nonzero value is a missed shootdown. `Relaxed`: single
+    /// writer (hart 1).
+    pub static STALE_READS: AtomicU64 = AtomicU64::new(0);
+
+    /// Current round, published by hart 0 (Release) and observed by
+    /// hart 1 (Acquire). Carries the happens-before for `EXPECTED`.
+    static ROUND: AtomicU64 = AtomicU64::new(0);
+
+    /// Sentinel hart 1 should read this round. Stored before `ROUND`.
+    static EXPECTED: AtomicU64 = AtomicU64::new(0);
+
+    /// Count of rounds hart 1 has read (= highest round read + 1; 0 =
+    /// none). hart 0 waits on this so it only remaps after hart 1 has
+    /// cached the old translation.
+    static HART1_READS: AtomicU64 = AtomicU64::new(0);
+
+    /// hart 0 → hart 1: setup is complete, `V` is mapped, start reading.
+    static SETUP_DONE: AtomicBool = AtomicBool::new(false);
+
+    /// hart 0 → hart 1: the round loop finished; the reader may exit.
+    static STOP: AtomicBool = AtomicBool::new(false);
+
+    /// Physical addresses of the two frames, published by `setup`.
+    static FRAME_A_PA: AtomicU64 = AtomicU64::new(0);
+    static FRAME_B_PA: AtomicU64 = AtomicU64::new(0);
+
+    /// R+W+G leaf perms for the test page (kernel-global, read/written
+    /// as a `u64`; no execute needed).
+    fn perms() -> PtePerms {
+        PtePerms::R.union(PtePerms::W).union(PtePerms::G)
+    }
+
+    /// Single-MMIO-read BQL fence for hart 0's ack spin — the UART LSR
+    /// at base+5 reads without side effects, and QEMU's MMIO path takes
+    /// the Big QEMU Lock, supplying the cross-hart fence multi-thread
+    /// TCG drops on a plain `Acquire`. Used only on hart 0 (the
+    /// coordinator); hart 1 (the hart under test) never does MMIO in its
+    /// read loop, so its TLB state stays the thing we're measuring.
+    fn fence_via_uart_lsr() {
+        let lsr = crate::console::emergency_uart_base() + 5;
+        // SAFETY: the 16550 LSR is a mapped, side-effect-free register.
+        unsafe { core::ptr::read_volatile(lsr as *const u8) };
+    }
+
+    /// hart 0: allocate + fill the two frames, install `V → A`, publish
+    /// round 0. Runs once, at the top of `run`.
+    fn setup() {
+        let Some(fa) = crate::frame::alloc_zeroed() else {
+            panic!("tlb-shootdown: OOM allocating frame A");
+        };
+        let Some(fb) = crate::frame::alloc_zeroed() else {
+            panic!("tlb-shootdown: OOM allocating frame B");
+        };
+        let (pa_a, pa_b) = (fa.addr(), fb.addr());
+        // SAFETY: both frames are freshly allocated and reachable via
+        // the linear map; we write one `u64` sentinel into each.
+        unsafe {
+            (pa_to_kernel_va(pa_a) as *mut u64).write_volatile(SENTINEL_A);
+            (pa_to_kernel_va(pa_b) as *mut u64).write_volatile(SENTINEL_B);
+        }
+        FRAME_A_PA.store(pa_a as u64, Ordering::Relaxed);
+        FRAME_B_PA.store(pa_b as u64, Ordering::Relaxed);
+        if crate::mmu::map(TEST_VA, pa_a, perms()).is_err() {
+            panic!("tlb-shootdown: initial map of TEST_VA failed");
+        }
+        EXPECTED.store(SENTINEL_A, Ordering::Relaxed);
+        ROUND.store(0, Ordering::Release);
+        SETUP_DONE.store(true, Ordering::Release);
+    }
+
+    /// hart 0 driver. Called once from the heartbeat (first tick),
+    /// blocking main until the N rounds complete.
+    pub fn run() {
+        setup();
+        for i in 1..=N {
+            // Wait until hart 1 has read round i-1 (HART1_READS counts
+            // rounds read, so == i means rounds 0..=i-1 are done). Only
+            // then does hart 1 hold the *old* translation we're about to
+            // invalidate.
+            loop {
+                fence_via_uart_lsr();
+                if HART1_READS.load(Ordering::Acquire) >= i {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            let (pa, sentinel) = if i & 1 == 1 {
+                (FRAME_B_PA.load(Ordering::Relaxed) as usize, SENTINEL_B)
+            } else {
+                (FRAME_A_PA.load(Ordering::Relaxed) as usize, SENTINEL_A)
+            };
+            // remap fires the cross-hart shootdown; on success hart 1's
+            // stale TLB entry for TEST_VA is invalidated before we
+            // publish the new round.
+            if crate::mmu::remap(TEST_VA, pa, perms()).is_err() {
+                panic!("tlb-shootdown: remap of mapped TEST_VA failed");
+            }
+            EXPECTED.store(sentinel, Ordering::Relaxed);
+            ROUND.store(i, Ordering::Release);
+        }
+        // Drain the final round, then release the reader.
+        loop {
+            fence_via_uart_lsr();
+            if HART1_READS.load(Ordering::Acquire) > N {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        STOP.store(true, Ordering::Release);
+    }
+
+    /// hart 1 reader task. Reads through `V` once per published round
+    /// and records any stale read.
+    pub extern "C" fn reader_body() -> ! {
+        while !SETUP_DONE.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+        let mut last = u64::MAX;
+        loop {
+            if STOP.load(Ordering::Acquire) {
+                crate::sched::exit_now();
+            }
+            let r = ROUND.load(Ordering::Acquire);
+            if r == last {
+                core::hint::spin_loop();
+                continue;
+            }
+            last = r;
+            // Read THROUGH the test VA. The previous round's read cached
+            // frame[r-1] in this hart's TLB; if hart 0's shootdown for
+            // round r worked, this re-walk now sees frame[r].
+            //
+            // SAFETY: TEST_VA is a live kernel-global 4 KiB mapping
+            // (installed by `setup`, repointed by `run`); reading a
+            // `u64` through it is valid.
+            let v = unsafe { (TEST_VA as *const u64).read_volatile() };
+            if v != EXPECTED.load(Ordering::Relaxed) {
+                STALE_READS.fetch_add(1, Ordering::Relaxed);
+            }
+            ROUNDS.store(r, Ordering::Relaxed);
+            HART1_READS.store(r + 1, Ordering::Release);
+        }
+    }
+}

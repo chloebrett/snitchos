@@ -367,7 +367,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::IpiPong)
         | Some(WorkloadKind::ShootdownStorm)
         | Some(WorkloadKind::MutexStorm)
-        | Some(WorkloadKind::VirtioStorm) => {}
+        | Some(WorkloadKind::VirtioStorm)
+        | Some(WorkloadKind::TlbShootdownVisible) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -448,6 +449,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             storms::virtio_storm::init();
             let _ = sched::spawn("virtio_storm_h0", storms::virtio_storm::body_hart0);
             let _ = sched::spawn_on(1, "virtio_storm_h1", storms::virtio_storm::body_hart1);
+        }
+        // TLB-shootdown correctness: hart 0's round loop is
+        // heartbeat-driven (`emit_storm_metrics`); here we spawn the
+        // hart-1 reader that holds the stale translation under test.
+        Some(WorkloadKind::TlbShootdownVisible) => {
+            let _ = sched::spawn_on(1, "tlb_reader", storms::tlb_shootdown::reader_body);
         }
         _ => {}
     }

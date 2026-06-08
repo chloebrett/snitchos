@@ -356,6 +356,44 @@ pub fn map(va: usize, pa: usize, perms: PtePerms) -> Result<(), MapError> {
     result
 }
 
+/// Repoint an already-mapped 4 KiB VA `va` at a new PA `new_pa` with
+/// `perms`, then shoot down the stale translation on every hart.
+///
+/// This is the first — and currently only — real mmu path that fires a
+/// cross-hart `shootdown`. `map` deliberately does a *local* sfence
+/// only (a fresh mapping can't be cached stale anywhere). A remap is
+/// different: the old VA→PA translation may sit in any hart's TLB, so
+/// after overwriting the leaf we must `shootdown(va)` so no hart keeps
+/// reading the old frame. `shootdown` does the local `sfence.vma` too,
+/// so this covers the calling hart as well.
+///
+/// Returns `Err(MapError::NotMapped)` if `va` has no 4 KiB leaf to
+/// overwrite (unmapped, missing intermediate, or huge-page-covered).
+/// Allocates nothing.
+///
+/// # Safety
+///
+/// - Must run with MMU on (tables are reached through the linear map).
+/// - Caller must ensure repointing `va` is intended — any hart
+///   currently dereferencing `va` will, after the shootdown, observe
+///   `new_pa`'s contents.
+#[cfg_attr(
+    not(feature = "itest-workloads"),
+    expect(
+        dead_code,
+        reason = "remap+shootdown path for SMP; exercised by the tlb-shootdown workload (itest-workloads); not yet wired into production multi-hart paths"
+    )
+)]
+pub fn remap(va: usize, new_pa: usize, perms: PtePerms) -> Result<(), MapError> {
+    let root_pa = va_to_pa((&raw const BOOT_PT_ROOT) as usize);
+    let mut mem = KernelPtMem;
+    let result = core_mmu::remap(root_pa, va, new_pa, perms, &mut mem);
+    if result.is_ok() {
+        shootdown(va);
+    }
+    result
+}
+
 /// Cumulative count of TLB shootdowns this hart has initiated as a
 /// sender (i.e. how many `mmu::map`/`unmap` calls actually fired).
 /// Drained by the heartbeat as
@@ -382,13 +420,6 @@ pub static SHOOTDOWNS_SENT_TOTAL: core::sync::atomic::AtomicU64 =
 /// Skips harts not in `SMP_ONLINE_HARTS`. v0.6 boot calls
 /// `heap::init` before hart 1 is online; the bitmap check makes
 /// those calls a no-op for the offline hart.
-#[cfg_attr(
-    not(feature = "itest-workloads"),
-    expect(
-        dead_code,
-        reason = "TLB-shootdown IPI path for SMP; exercised by the shootdown-storm workload (itest-workloads); not yet wired into production multi-hart paths"
-    )
-)]
 #[allow(
     clippy::needless_range_loop,
     reason = "`target` is also used as a hart-bitmask shift (`1 << target`), so the index is load-bearing, not pure iteration"
