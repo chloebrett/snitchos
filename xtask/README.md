@@ -130,10 +130,12 @@ half-written file.
 
 ```bash
 cargo xtask stack up
-cargo xtask itest --push-otlp http://127.0.0.1:9090/api/v1/otlp
+cargo xtask itest --push-otlp                                        # default endpoint (localhost stack)
+cargo xtask itest --push-otlp https://prom.example/api/v1/otlp       # custom endpoint
 ```
 
-The bundled `stack/docker-compose.yml` boots Prometheus with
+`--push-otlp` without a value targets `http://127.0.0.1:9090/api/v1/otlp`
+— the bundled `stack/docker-compose.yml` boots Prometheus with
 `--web.enable-otlp-receiver`, so OTLP/HTTP metrics ingest at
 `/api/v1/otlp/v1/metrics`. `/v1/metrics` is appended automatically
 if missing. Wire `--push-otlp` into a cron entry, a post-run hook,

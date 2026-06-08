@@ -168,12 +168,19 @@ enum Cmd {
         #[arg(long, value_name = "PATH")]
         export_prom: Option<std::path::PathBuf>,
         /// Push the canonical baseline live to an OTLP/HTTP metrics
-        /// receiver. Endpoint is the receiver root (e.g.
-        /// `http://localhost:9090/api/v1/otlp` for Prometheus with
-        /// `--web.enable-otlp-receiver`); `/v1/metrics` is appended
-        /// automatically. Useful in CI / cron / a post-run hook to
-        /// land flake-rate data in Grafana without a textfile-collector.
-        #[arg(long, value_name = "ENDPOINT")]
+        /// receiver. Pass `--push-otlp` alone to target the bundled
+        /// stack's Prometheus receiver at
+        /// `http://127.0.0.1:9090/api/v1/otlp`, or pass an explicit
+        /// endpoint URL (the receiver root — `/v1/metrics` is
+        /// appended automatically). Useful in CI / cron / a post-run
+        /// hook to land flake-rate data in Grafana without a
+        /// textfile-collector.
+        #[arg(
+            long,
+            value_name = "ENDPOINT",
+            num_args = 0..=1,
+            default_missing_value = "http://127.0.0.1:9090/api/v1/otlp",
+        )]
         push_otlp: Option<String>,
     },
     /// Count lines of code across the workspace, split by crate and

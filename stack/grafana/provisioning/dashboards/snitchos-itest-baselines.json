@@ -195,6 +195,56 @@
       }
     },
     {
+      "id": 11,
+      "type": "bargauge",
+      "title": "Top 10 flake offenders (perceived rate)",
+      "description": "Point-estimate failure rate (failures / runs). Compare against the Wilson lower / upper bounds beside this panel to see how confident we are in each rate.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, snitchos_itest_baseline_failure_rate_ratio)",
+          "legendFormat": "{{scenario}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.01 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "valueMode": "color"
+      }
+    },
+    {
       "id": 5,
       "type": "bargauge",
       "title": "Top 10 flake offenders (Wilson lower bound)",
@@ -205,8 +255,8 @@
       },
       "gridPos": {
         "h": 10,
-        "w": 12,
-        "x": 0,
+        "w": 8,
+        "x": 8,
         "y": 4
       },
       "targets": [
@@ -245,6 +295,56 @@
       }
     },
     {
+      "id": 12,
+      "type": "bargauge",
+      "title": "Top 10 flake offenders (Wilson upper bound)",
+      "description": "Upper bound of the Wilson-score 95% CI. \"How flaky could this scenario plausibly be?\" High upper bound with a low lower bound = small sample, statistically inconclusive — run with --repeat to tighten the band.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, snitchos_itest_baseline_wilson_upper_ratio)",
+          "legendFormat": "{{scenario}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.05 },
+              { "color": "red", "value": 0.20 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "valueMode": "color"
+      }
+    },
+    {
       "id": 6,
       "type": "bargauge",
       "title": "Top 10 slow scenarios (p95 duration)",
@@ -255,9 +355,9 @@
       },
       "gridPos": {
         "h": 10,
-        "w": 12,
-        "x": 12,
-        "y": 4
+        "w": 24,
+        "x": 0,
+        "y": 14
       },
       "targets": [
         {
@@ -274,7 +374,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
-          "decimals": 0,
+          "decimals": 1,
           "min": 0,
           "thresholds": {
             "mode": "absolute",
@@ -307,7 +407,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 24
       },
       "targets": [
         {
@@ -442,7 +542,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 24
+        "y": 34
       },
       "targets": [
         {
@@ -492,7 +592,7 @@
         "h": 9,
         "w": 12,
         "x": 0,
-        "y": 33
+        "y": 43
       },
       "targets": [
         {
@@ -542,7 +642,7 @@
         "h": 9,
         "w": 12,
         "x": 12,
-        "y": 33
+        "y": 43
       },
       "targets": [
         {
