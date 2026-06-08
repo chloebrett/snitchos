@@ -54,7 +54,7 @@ impl FactorTable {
 }
 
 fn smallest_prime_factor(n: u64, known: &BTreeMap<u64, u64>) -> u64 {
-    for (&k, &v) in known.iter() {
+    for (&k, &v) in known {
         if k.checked_mul(k).is_none_or(|kk| kk > n) {
             break;
         }

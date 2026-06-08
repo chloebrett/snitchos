@@ -5,7 +5,7 @@
 //! partial flag, and recorded-at timestamp. Designed to be scraped by
 //! `node_exporter --collector.textfile.directory=<dir>` so flake-rate
 //! and timing trends land in Grafana alongside the rest of the
-//! SnitchOS observability story.
+//! `SnitchOS` observability story.
 //!
 //! Atomic-rename pattern: writers should write to `<path>.$$` then
 //! `rename` into `<path>` so partially-written files never get
@@ -213,7 +213,7 @@ mod tests {
         // No leftover tmp files.
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "tmp files left behind: {leftovers:?}");

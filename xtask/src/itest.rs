@@ -62,7 +62,7 @@ mod matchers;
 mod scenarios;
 
 /// Use the harness's scenario type — same shape (name + fn pointer);
-/// the runner loop lives there too. The list below is the SnitchOS
+/// the runner loop lives there too. The list below is the `SnitchOS`
 /// catalog.
 use itest_harness::Scenario;
 
@@ -175,13 +175,10 @@ pub fn run(
     }
 
     let to_run: Vec<&Scenario> = match name {
-        Some(n) => match SCENARIOS.iter().find(|s| s.name == n) {
-            Some(s) => vec![s],
-            None => {
-                eprintln!("unknown scenario: {n}");
-                eprintln!("known: {}", SCENARIOS.iter().map(|s| s.name).collect::<Vec<_>>().join(", "));
-                return ExitCode::from(2);
-            }
+        Some(n) => if let Some(s) = SCENARIOS.iter().find(|s| s.name == n) { vec![s] } else {
+            eprintln!("unknown scenario: {n}");
+            eprintln!("known: {}", SCENARIOS.iter().map(|s| s.name).collect::<Vec<_>>().join(", "));
+            return ExitCode::from(2);
         },
         None => SCENARIOS.iter().collect(),
     };
@@ -296,8 +293,7 @@ fn try_auto_push() {
     };
     let now_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos().min(u64::MAX as u128) as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos().min(u128::from(u64::MAX)) as u64);
     let connect_timeout = Some(std::time::Duration::from_secs(1));
     let read_timeout = Some(std::time::Duration::from_secs(3));
     match push_otlp_with_timeout(endpoint, &file, now_ns, connect_timeout, read_timeout) {
@@ -373,7 +369,7 @@ pub fn discard_pending() -> ExitCode {
 /// `endpoint`. Endpoint should be the OTLP receiver root, e.g.
 /// `http://localhost:9090/api/v1/otlp` for Prometheus with
 /// `--web.enable-otlp-receiver`, or `http://localhost:4318` for the
-/// OTel collector default. `/v1/metrics` is appended automatically.
+/// `OTel` collector default. `/v1/metrics` is appended automatically.
 pub fn push_otlp_metrics(endpoint: String) -> ExitCode {
     let baseline_path = Path::new(BASELINE_PATH);
     let file = if baseline_path.exists() {
@@ -393,8 +389,7 @@ pub fn push_otlp_metrics(endpoint: String) -> ExitCode {
     // same baseline at the same instant.
     let now_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos().min(u64::MAX as u128) as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos().min(u128::from(u64::MAX)) as u64);
     match push_otlp(&endpoint, &file, now_ns) {
         Ok(status) if (200..300).contains(&status) => {
             eprintln!(
@@ -491,8 +486,8 @@ fn find_most_recent_run_dir() -> Option<PathBuf> {
     }
     let mut candidates: Vec<PathBuf> = std::fs::read_dir(root)
         .ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.path())
         .filter(|p| {
             // Same shape check as itest_harness::prune_runs:
@@ -523,15 +518,12 @@ pub fn adopt_run(run_dir: Option<PathBuf>) -> ExitCode {
     let canonical = Path::new(BASELINE_PATH);
     let run_dir = match run_dir {
         Some(p) => p,
-        None => match find_most_recent_run_dir() {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "no run directories found under {HISTORY_ROOT}/ — \
-                     run `cargo xtask itest` at least once first."
-                );
-                return ExitCode::from(1);
-            }
+        None => if let Some(p) = find_most_recent_run_dir() { p } else {
+            eprintln!(
+                "no run directories found under {HISTORY_ROOT}/ — \
+                 run `cargo xtask itest` at least once first."
+            );
+            return ExitCode::from(1);
         },
     };
     if !run_dir.exists() {
@@ -749,8 +741,7 @@ fn qemu_available() -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Wipe out any `qemu-system-riscv64` processes already on the host.

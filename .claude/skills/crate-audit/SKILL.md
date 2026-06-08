@@ -122,6 +122,16 @@ yes/no — name the specific symbol/line/site.
 - Unreachable match arms, `if false`, vestigial error variants never constructed?
 - Re-exports in `lib.rs` that nothing imports?
 
+### A′. Lint/style "debt" — check it's actually ENFORCED first
+- Before reporting lint findings (pedantic clippy, style nits, missing doc
+  sections), check whether that lint is *enforced*: `deny`/`warn` crate attrs, a
+  `[lints]` table, `clippy.toml`, or CI. An unenforced standard from a docs file
+  (e.g. "CLAUDE.md says deny pedantic") is **aspiration, not a norm** — flagging
+  N warnings against it imposes your preference, not the codebase's. If the crate
+  is *consistent with its siblings* (none enforce it), it isn't drifting. Report
+  it as a workspace-policy question, not crate debt. (Counts + "% auto-fixable"
+  are useful context for that policy decision.)
+
 ### B. Unused / vestigial features
 - Cargo features declared but gating nothing, or never enabled by anyone?
 - Feature flags effectively always-on (so the flag is noise) or never-on (dead)?

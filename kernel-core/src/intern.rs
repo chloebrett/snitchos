@@ -57,12 +57,9 @@ impl InternTable {
 
         let id = self.next_id;
         let slot = id as usize;
-        if slot >= MAX_INTERNED {
-            panic!(
-                "intern table full ({} entries); bump MAX_INTERNED",
-                MAX_INTERNED,
-            );
-        }
+        assert!(slot < MAX_INTERNED, 
+            "intern table full ({MAX_INTERNED} entries); bump MAX_INTERNED",
+        );
         self.entries[slot] = Some(InternEntry {
             name,
             metric_registered: false,
@@ -130,7 +127,7 @@ mod tests {
     use std::boxed::Box;
     use std::format;
 
-    fn decode<'a>(bytes: &'a [u8]) -> Frame<'a> {
+    fn decode(bytes: &[u8]) -> Frame<'_> {
         postcard::from_bytes(bytes).unwrap()
     }
 

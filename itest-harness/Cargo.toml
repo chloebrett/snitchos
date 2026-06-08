@@ -14,3 +14,6 @@ ureq = "2"
 
 [dev-dependencies]
 time = { version = "0.3", default-features = false, features = ["std", "serde-well-known", "formatting", "parsing", "macros"] }
+
+[lints]
+workspace = true

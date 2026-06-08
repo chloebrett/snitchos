@@ -1,7 +1,7 @@
 //! Physical frame bitmap. Pure data — wraps a caller-provided slice
 //! of `u64`s plus a frame count. Convention: bit = 1 means free,
 //! bit = 0 means in-use. So "find first set bit" is the alloc op,
-//! which trailing_zeros makes O(words).
+//! which `trailing_zeros` makes O(words).
 //!
 //! The kernel side (`kernel::frame`) holds the static backing storage
 //! and a `Mutex<Bitmap>` around an instance. Telemetry counters live

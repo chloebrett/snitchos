@@ -222,11 +222,14 @@ fn print_report(workload: &str, s: &Summary, markdown: bool) {
 
 /// Boot `workload`, capture telemetry for `seconds`, print steady-state
 /// stats (skipping `warmup_secs`). Builds the `itest-workloads` kernel.
+/// `burst`, when `Some`, is passed as the `burst=N` bootarg (batches per
+/// yield) to dial up queue contention.
 pub fn measure(
     workload: &str,
     seconds: u64,
     warmup_secs: f64,
     timebase_hz: u64,
+    burst: Option<usize>,
     markdown: bool,
 ) -> ExitCode {
     match qemu::build_kernel(&["itest-workloads"]) {
@@ -240,8 +243,12 @@ pub fn measure(
 
     let _ = std::fs::remove_file(MEASURE_SOCKET);
     let chardev = format!("socket,path={MEASURE_SOCKET},server=on,wait=on,id=telemetry");
+    let append = match burst {
+        Some(b) => format!("workload={workload} burst={b}"),
+        None => format!("workload={workload}"),
+    };
     let mut cmd = qemu::base_command(&chardev);
-    cmd.args(["-append", &format!("workload={workload}")])
+    cmd.args(["-append", &append])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .stdin(Stdio::null());

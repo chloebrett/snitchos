@@ -75,7 +75,7 @@ pub enum ErrorOrigin {
 }
 
 impl Signature {
-    /// Stable snake_case label, matching the serde representation. Used
+    /// Stable `snake_case` label, matching the serde representation. Used
     /// for rendering breakdowns and as a map/metric key.
     #[must_use]
     pub fn label(self) -> &'static str {

@@ -491,8 +491,7 @@ pub fn run(
 
             if !cpu_scenarios.is_empty() {
                 eprintln!(
-                    "--- cpu-bound scenarios ({} parallel) ---",
-                    cpu_jobs
+                    "--- cpu-bound scenarios ({cpu_jobs} parallel) ---"
                 );
                 let work: Vec<(u32, &Scenario)> =
                     cpu_scenarios.into_iter().map(|s| (run_idx, s)).collect();
@@ -852,7 +851,7 @@ fn process_one_scenario(
         iteration: run_idx + 1,
         scenario: s.name.to_string(),
         started_at,
-        duration_ms: elapsed.as_millis().min(u32::MAX as u128) as u32,
+        duration_ms: elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
         result: row_result,
         error: row_error,
         log: row_log,
@@ -1022,7 +1021,7 @@ mod tests {
         // Four slow scenarios sleeping 200ms each. Sequential = 800ms.
         // Parallel with jobs=4 should finish in roughly one sleep window
         // (~250ms), well under the sequential floor.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let scns = [
             Scenario::new("slow-a", slow_pass),
@@ -1045,8 +1044,7 @@ mod tests {
         // accounts for thread spawn + per-scenario bookkeeping.
         assert!(
             elapsed.as_millis() < 500,
-            "expected parallel speedup; elapsed={:?}",
-            elapsed
+            "expected parallel speedup; elapsed={elapsed:?}"
         );
     }
 
@@ -1077,7 +1075,7 @@ mod tests {
 
     #[test]
     fn cpu_bound_batch_runs_after_wfi_batch() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         CPU_INVOCATION_TIMES.lock().unwrap().clear();
         WFI_INVOCATION_TIMES.lock().unwrap().clear();
@@ -1122,7 +1120,7 @@ mod tests {
         // scenarios take two sleep windows, not one — regardless of
         // `jobs`. (The CLI rejects 0; this guards the library floor
         // for default-constructed configs.)
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let scns = [
             Scenario::cpu_bound("cpu-a", slow_cpu_pass),
@@ -1142,8 +1140,7 @@ mod tests {
         // behavior) would have run both at once in ~200ms.
         assert!(
             elapsed.as_millis() >= 280,
-            "Cpu batch ran in parallel under cpu_jobs=0 (halving not removed?); elapsed={:?}",
-            elapsed
+            "Cpu batch ran in parallel under cpu_jobs=0 (halving not removed?); elapsed={elapsed:?}"
         );
     }
 
@@ -1153,7 +1150,7 @@ mod tests {
         // the iterations concurrently; wall-clock is roughly
         // ceil(8/4) * 200ms = ~400ms, well under the sequential
         // floor of 1600ms.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let scns = [Scenario::new("stress-target", slow_pass)];
         let refs: Vec<&Scenario> = scns.iter().collect();
@@ -1169,8 +1166,7 @@ mod tests {
         // Generous slack for spawn/merge overhead.
         assert!(
             elapsed.as_millis() < 900,
-            "expected parallel stress; elapsed={:?}",
-            elapsed
+            "expected parallel stress; elapsed={elapsed:?}"
         );
     }
 
@@ -1178,7 +1174,7 @@ mod tests {
     fn stress_mode_inactive_when_repeat_is_one() {
         // repeat=1 should not enter stress mode — falls through to
         // the standard per-iteration loop with a single scenario.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let scns = [Scenario::new("once", always_pass)];
         let refs: Vec<&Scenario> = scns.iter().collect();
@@ -1194,7 +1190,7 @@ mod tests {
     fn stress_mode_inactive_when_jobs_is_one() {
         // jobs=1 means sequential — no stress fan-out even with
         // single scenario × repeat>1.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let scns = [Scenario::new("once", slow_pass)];
         let refs: Vec<&Scenario> = scns.iter().collect();
@@ -1209,14 +1205,13 @@ mod tests {
         // Should be ~800ms sequential, not ~200ms parallel.
         assert!(
             elapsed.as_millis() >= 700,
-            "expected sequential at jobs=1; elapsed={:?}",
-            elapsed
+            "expected sequential at jobs=1; elapsed={elapsed:?}"
         );
     }
 
     #[test]
     fn stress_mode_fail_fast_stops_workers_after_threshold() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let scns = [Scenario::new("fail-1", always_fail)];
         let refs: Vec<&Scenario> = scns.iter().collect();
@@ -1239,7 +1234,7 @@ mod tests {
 
     #[test]
     fn cpu_jobs_one_keeps_cpu_batch_serial() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let scns = [
             Scenario::cpu_bound("cpu-a", slow_cpu_pass),
@@ -1259,15 +1254,14 @@ mod tests {
         // Serial expectation: 3 × 150ms = 450ms minimum.
         assert!(
             elapsed.as_millis() >= 400,
-            "Cpu scenarios appear to have run in parallel under cpu_jobs=1; elapsed={:?}",
-            elapsed
+            "Cpu scenarios appear to have run in parallel under cpu_jobs=1; elapsed={elapsed:?}"
         );
     }
 
     #[test]
     fn parallel_jobs_aggregator_merge_matches_sequential() {
         // Same workload, jobs=1 vs jobs=4: total fail counts must match.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let scns = [
             Scenario::new("pass-1", always_pass),
@@ -1291,7 +1285,7 @@ mod tests {
     fn run_with_only_passing_scenarios_invokes_scenarios_n_times() {
         // Don't `unwrap` — a panicking test poisons the mutex; we don't
         // want one failure to cascade through every other runner test.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let s = Scenario::new("pass-1", always_pass);
         let _ = run(&[&s], 3, false, &RunnerConfig::default());
@@ -1302,7 +1296,7 @@ mod tests {
     fn run_with_one_failing_scenario_invokes_both_each_iteration() {
         // Don't `unwrap` — a panicking test poisons the mutex; we don't
         // want one failure to cascade through every other runner test.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let pass = Scenario::new("pass-1", always_pass);
         let fail = Scenario::new("fail-1", always_fail);
@@ -1320,7 +1314,7 @@ mod tests {
     fn build_hook_failure_aborts_run() {
         // Don't `unwrap` — a panicking test poisons the mutex; we don't
         // want one failure to cascade through every other runner test.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let s = Scenario::new("pass-1", always_pass);
         let config = RunnerConfig {
@@ -1335,7 +1329,7 @@ mod tests {
 
     #[test]
     fn failure_log_copied_into_run_dir_and_referenced_in_ndjson() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let fail = Scenario::new("fail-1", always_fail);
 
@@ -1362,7 +1356,7 @@ mod tests {
         // Find the run dir.
         let entries: Vec<_> = std::fs::read_dir(&history_root)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
         assert_eq!(entries.len(), 1);
         let run_dir = entries[0].path();
@@ -1388,7 +1382,7 @@ mod tests {
     fn history_root_writes_metadata_and_ndjson() {
         // Don't `unwrap` — a panicking test poisons the mutex; we don't
         // want one failure to cascade through every other runner test.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let pass = Scenario::new("pass-1", always_pass);
         let fail = Scenario::new("fail-1", always_fail);
@@ -1409,7 +1403,7 @@ mod tests {
         // Find the single run subdir.
         let entries: Vec<_> = std::fs::read_dir(&root)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
         assert_eq!(entries.len(), 1, "expected one run-dir under history root");
         let run_dir = entries[0].path();
@@ -1446,7 +1440,7 @@ mod tests {
     fn interrupt_breaks_outer_loop_at_iteration_boundary() {
         // Don't `unwrap` — a panicking test poisons the mutex; we don't
         // want one failure to cascade through every other runner test.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let pass = Scenario::new("pass-1", always_pass);
         // Pre-set the interrupt flag: the runner should observe it
@@ -1465,7 +1459,7 @@ mod tests {
     fn interrupt_with_update_baseline_writes_pending_not_canonical() {
         // Don't `unwrap` — a panicking test poisons the mutex; we don't
         // want one failure to cascade through every other runner test.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let pass = Scenario::new("pass-1", always_pass);
 
@@ -1505,7 +1499,7 @@ mod tests {
     fn fail_fast_breaks_outer_loop_at_threshold() {
         // Don't `unwrap` — a panicking test poisons the mutex; we don't
         // want one failure to cascade through every other runner test.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let fail = Scenario::new("fail-1", always_fail);
         // Without fail-fast, repeat=10 would invoke fail-1 ten times.
@@ -1522,7 +1516,7 @@ mod tests {
     fn fail_fast_does_not_trigger_when_threshold_not_reached() {
         // Don't `unwrap` — a panicking test poisons the mutex; we don't
         // want one failure to cascade through every other runner test.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let fail = Scenario::new("fail-1", always_fail);
         // 5 failures requested, threshold of 100 — full run completes.
@@ -1538,7 +1532,7 @@ mod tests {
     fn fail_fast_none_runs_to_completion_with_failures() {
         // Don't `unwrap` — a panicking test poisons the mutex; we don't
         // want one failure to cascade through every other runner test.
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_counters();
         let fail = Scenario::new("fail-1", always_fail);
         let _ = run(&[&fail], 7, false, &RunnerConfig::default());

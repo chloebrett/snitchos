@@ -169,7 +169,7 @@ fn fmt_duration_ms(ms: f64) -> String {
     if ms >= 1000.0 {
         format!("{:.1}s", ms / 1000.0)
     } else {
-        format!("{:.0}ms", ms)
+        format!("{ms:.0}ms")
     }
 }
 

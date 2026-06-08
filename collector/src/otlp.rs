@@ -1,7 +1,7 @@
 //! Minimal OTLP/HTTP trace exporter.
 //!
 //! We carry only the subset of the OTLP proto we actually emit:
-//! ExportTraceServiceRequest → ResourceSpans → ScopeSpans → Span.
+//! `ExportTraceServiceRequest` → `ResourceSpans` → `ScopeSpans` → Span.
 //! No attributes, no events, no links. Plenty for v0.2 — we just
 //! want spans with start/end times and parent linkage in Tempo.
 //!
@@ -63,7 +63,7 @@ struct Span {
     parent_span_id: Vec<u8>,
     #[prost(string, tag = "5")]
     name: String,
-    /// SpanKind enum: 0 = unspecified, 1 = internal, 2 = server, ...
+    /// `SpanKind` enum: 0 = unspecified, 1 = internal, 2 = server, ...
     /// We always use INTERNAL.
     #[prost(int32, tag = "6")]
     kind: i32,
@@ -71,9 +71,9 @@ struct Span {
     start_time_unix_nano: u64,
     #[prost(fixed64, tag = "8")]
     end_time_unix_nano: u64,
-    /// Per-span attributes (OTel semantic conventions). We emit
-    /// `thread.id` (always) and `thread.name` (when ThreadRegister
-    /// has resolved the task_id). Tempo renders them in the trace
+    /// Per-span attributes (`OTel` semantic conventions). We emit
+    /// `thread.id` (always) and `thread.name` (when `ThreadRegister`
+    /// has resolved the `task_id`). Tempo renders them in the trace
     /// detail view.
     #[prost(message, repeated, tag = "9")]
     attributes: Vec<KeyValue>,
@@ -96,14 +96,14 @@ struct AnyValue {
 // --- Exporter ----------------------------------------------------------
 
 /// Per-frame OTLP/HTTP exporter. Holds the endpoint URL, a ureq agent
-/// for connection reuse, and a random 16-byte trace_id used for all
+/// for connection reuse, and a random 16-byte `trace_id` used for all
 /// spans in this session.
 ///
 /// Known weaknesses:
 /// - **Per-frame POSTs.** One HTTP request per span. Fine at heartbeat
 ///   rates; would buffer/batch under load.
-/// - **One trace_id per Exporter instance.** All session spans get the
-///   same trace_id, so they all appear under one trace in Tempo. New
+/// - **One `trace_id` per Exporter instance.** All session spans get the
+///   same `trace_id`, so they all appear under one trace in Tempo. New
 ///   `Exporter::new()` for a new kernel session.
 /// - **No retry / no backpressure.** If Tempo is slow or down, exports
 ///   fail silently (logged to stderr).
@@ -231,14 +231,14 @@ impl SpanExporter for Exporter {
 #[cfg_attr(test, mutants::skip)] // non-deterministic — output cannot be asserted
 fn random_trace_id() -> [u8; 16] {
     let mut id = [0u8; 16];
-    for b in id.iter_mut() {
+    for b in &mut id {
         *b = fastrand::u8(..);
     }
     id
 }
 
 fn clamp_u128_to_u64(v: u128) -> u64 {
-    v.min(u64::MAX as u128) as u64
+    v.min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
@@ -249,12 +249,12 @@ mod tests {
     fn clamp_passes_through_values_within_range() {
         assert_eq!(clamp_u128_to_u64(0), 0);
         assert_eq!(clamp_u128_to_u64(1_000_000), 1_000_000);
-        assert_eq!(clamp_u128_to_u64(u64::MAX as u128), u64::MAX);
+        assert_eq!(clamp_u128_to_u64(u128::from(u64::MAX)), u64::MAX);
     }
 
     #[test]
     fn clamp_saturates_at_u64_max() {
-        assert_eq!(clamp_u128_to_u64(u64::MAX as u128 + 1), u64::MAX);
+        assert_eq!(clamp_u128_to_u64(u128::from(u64::MAX) + 1), u64::MAX);
         assert_eq!(clamp_u128_to_u64(u128::MAX), u64::MAX);
     }
 

@@ -2,12 +2,12 @@
 //!
 //! Mirrors the data emitted by `render_prometheus`, but pushed live
 //! as OTLP gauge metrics to an OTLP-compatible receiver (Prometheus
-//! with `--web.enable-otlp-receiver`, OTel collector, etc.). Step H2
+//! with `--web.enable-otlp-receiver`, `OTel` collector, etc.). Step H2
 //! of the itest history/pending plan.
 //!
 //! Why both textfile (`prom`) AND live push (this module)? Textfile
 //! is zero-infra and survives no-network; OTLP is live and integrates
-//! into existing OTel pipelines. Same data, two transports.
+//! into existing `OTel` pipelines. Same data, two transports.
 //!
 //! Proto subset is hand-rolled (matching `collector/src/otlp.rs`) to
 //! avoid pulling the full `opentelemetry-proto` crate just for nine

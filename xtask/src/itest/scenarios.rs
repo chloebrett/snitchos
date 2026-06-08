@@ -121,7 +121,7 @@ pub fn sched_context_switch_smoke() -> Result<(), String> {
 }
 
 /// `kmain` registers task 0 as "main" via `register_bare_task` and
-/// spawns "idle", "task_a", "task_b" via `spawn(name, entry)`. Each
+/// spawns "idle", "`task_a`", "`task_b`" via `spawn(name, entry)`. Each
 /// call emits a `ThreadRegister` frame. This scenario asserts all
 /// four appear within budget, proving `spawn` builds + queues each
 /// task and the wire carries names through to the collector.
@@ -140,10 +140,10 @@ pub fn sched_spawn_registers_thread() -> Result<(), String> {
     Ok(())
 }
 
-/// Cooperative round-robin works: main, idle, task_a, task_b are all
+/// Cooperative round-robin works: main, idle, `task_a`, `task_b` are all
 /// taking turns. We assert both demo tasks' loop counters rise above
 /// 0 within budget, plus the scheduler's cumulative switch counter
-/// climbs. That triplet rules out "yield_now does nothing" and "only
+/// climbs. That triplet rules out "`yield_now` does nothing" and "only
 /// one task runs."
 pub fn sched_yield_round_trips() -> Result<(), String> {
     let mut h = Harness::spawn("schedyield")?;
@@ -182,14 +182,14 @@ pub fn sched_yield_round_trips() -> Result<(), String> {
 }
 
 /// A span that's open across a `yield_now` closes correctly when the
-/// task is resumed. task_a opens `task_a.tick`, yields mid-span,
+/// task is resumed. `task_a` opens `task_a.tick`, yields mid-span,
 /// gets re-scheduled, then closes. The wire should show:
 ///
-///   1. SpanStart for "task_a.tick" with `task_id == task_a_id`,
+///   1. `SpanStart` for "`task_a.tick`" with `task_id == task_a_id`,
 ///      `parent == SpanId(0)` (top-level — proves per-task cursor
 ///      isn't being polluted by other tasks' spans).
-///   2. At least one ContextSwitch leaving task_a, and one returning.
-///   3. SpanEnd for the same span id as (1).
+///   2. At least one `ContextSwitch` leaving `task_a`, and one returning.
+///   3. `SpanEnd` for the same span id as (1).
 ///
 /// Without per-task `SpanCursor` wiring, the parent in (1) could be
 /// any other task's currently-open span, and (3)'s pop would land on
@@ -247,8 +247,8 @@ pub fn sched_span_survives_yield() -> Result<(), String> {
 }
 
 /// `ContextSwitch` frames arrive on the wire with sane `from` / `to`
-/// values. We harvest the ThreadRegister id for each known task,
-/// then wait for a ContextSwitch frame whose endpoints are both
+/// values. We harvest the `ThreadRegister` id for each known task,
+/// then wait for a `ContextSwitch` frame whose endpoints are both
 /// recognised task ids and whose reason is `Yield` (only switch
 /// flavour in cooperative v0.5). Proves the scheduler is emitting
 /// the per-switch event, not just the cumulative counter.
@@ -285,7 +285,7 @@ pub fn sched_context_switches_on_wire() -> Result<(), String> {
 
 /// Each demo task emits a `task_x.tick` span per iteration. Asserts
 /// that within budget we see both `task_a.tick` and `task_b.tick`
-/// SpanStart frames on the wire, and each carries its own `task_id`
+/// `SpanStart` frames on the wire, and each carries its own `task_id`
 /// (matching the `ThreadRegister` for its name). Proves spans are
 /// correctly tagged to the task that emitted them.
 pub fn sched_spans_carry_task_id() -> Result<(), String> {
@@ -416,8 +416,8 @@ pub fn kernel_runs_at_higher_half() -> Result<(), String> {
 }
 
 /// Boot sequence reaches the heartbeat loop: Hello → kernel.boot
-/// SpanStart → Dropped(0) (proves pre-init flush ran cleanly) →
-/// first kernel.heartbeat SpanStart (proves the timer IRQ is firing).
+/// `SpanStart` → Dropped(0) (proves pre-init flush ran cleanly) →
+/// first kernel.heartbeat `SpanStart` (proves the timer IRQ is firing).
 pub fn boot_reaches_heartbeat() -> Result<(), String> {
     let mut h = Harness::spawn("boot")?;
 
@@ -433,7 +433,7 @@ pub fn boot_reaches_heartbeat() -> Result<(), String> {
     Ok(())
 }
 
-/// Two consecutive heartbeat SpanStarts arrive with monotonic timestamps
+/// Two consecutive heartbeat `SpanStarts` arrive with monotonic timestamps
 /// and a sane tick interval. Captures `Hello` first to get the timebase,
 /// then converts the tick delta to nanoseconds and asserts it falls
 /// between 10 ms and 10 s — loose enough to survive QEMU stalls but
@@ -462,7 +462,7 @@ pub fn heartbeat_cadence() -> Result<(), String> {
         return Err(format!("timestamps not monotonic: first={t1}, second={t2}"));
     }
 
-    let delta_ns = (t2 - t1) as u128 * 1_000_000_000 / timebase_hz as u128;
+    let delta_ns = u128::from(t2 - t1) * 1_000_000_000 / u128::from(timebase_hz);
     const MIN_NS: u128 = 10_000_000;        // 10 ms
     const MAX_NS: u128 = 10_000_000_000;    // 10 s
     if !(MIN_NS..=MAX_NS).contains(&delta_ns) {
@@ -480,10 +480,10 @@ pub fn heartbeat_cadence() -> Result<(), String> {
 /// invariants:
 ///
 ///   1. The first `StringRegister` on the wire is for "kernel.boot"
-///      — it was registered before virtio_console::init succeeded,
+///      — it was registered before `virtio_console::init` succeeded,
 ///      so it lived in the pre-init buffer.
 ///   2. Every span's `name_id` was registered earlier in the stream.
-///      If the buffer dequeued out of order we'd see SpanStarts
+///      If the buffer dequeued out of order we'd see `SpanStarts`
 ///      referencing unknown ids.
 pub fn pre_init_order() -> Result<(), String> {
     let mut h = Harness::spawn("preinit")?;
@@ -517,8 +517,7 @@ pub fn pre_init_order() -> Result<(), String> {
             OwnedFrame::SpanStart { name_id, .. } => {
                 if h.name_of(name_id).is_none() {
                     return Err(format!(
-                        "SpanStart references unregistered name_id {:?} — buffer flush is out of order",
-                        name_id
+                        "SpanStart references unregistered name_id {name_id:?} — buffer flush is out of order"
                     ));
                 }
                 if h.name_of(name_id) == Some("kernel.heartbeat") {
@@ -636,7 +635,7 @@ pub fn ipi_self_wakeup() -> Result<(), String> {
 /// The invariant the consumer must uphold is: every sample it pulls
 /// from the queue gets binned exactly once. Therefore
 /// `histogram_sum >= samples_consumed_total` always (with equality
-/// when sampled at the same instant; histogram_sum may briefly
+/// when sampled at the same instant; `histogram_sum` may briefly
 /// trail by one batch if sampled mid-consume). If a consumer mutant
 /// dropped or double-counted samples, this invariant fails.
 ///
@@ -785,7 +784,7 @@ pub fn spawn_storm() -> Result<(), String> {
     Ok(())
 }
 
-/// Tight IPI_WAKEUP storm from hart 0 to hart 1. Each iteration of the
+/// Tight `IPI_WAKEUP` storm from hart 0 to hart 1. Each iteration of the
 /// inner loop is one `hart 1 in wfi → IPI → trap → swap-Acquire → sret
 /// → resume` trial. At N=10 000 and ~100 µs pacing, the full storm
 /// takes ~1 s wall.
@@ -834,8 +833,8 @@ pub fn ipi_pong() -> Result<(), String> {
 }
 
 /// Tight `mmu::shootdown(va)` storm from hart 0 to hart 1. Each
-/// iteration: hart 0 writes shootdown_va, sends IPI_TLB_SHOOTDOWN,
-/// spin-waits on shootdown_ack; hart 1's IPI handler does the
+/// iteration: hart 0 writes `shootdown_va`, sends `IPI_TLB_SHOOTDOWN`,
+/// spin-waits on `shootdown_ack`; hart 1's IPI handler does the
 /// Acquire-swap, reads the va, sfences, Release-bumps the ack.
 /// Tests the IPI payload-read path — a different surface from
 /// `ipi-pong` (no payload).
@@ -958,7 +957,7 @@ pub fn mutex_storm() -> Result<(), String> {
 }
 
 /// Virtio-emit storm. Hart 0 calls `tracing::emit_metric` in a tight
-/// loop (each call: intern check + frame serialize + TX_STAGING.lock +
+/// loop (each call: intern check + frame serialize + `TX_STAGING.lock` +
 /// virtio descriptor + MMIO notify). Hart 1 does pure Relaxed
 /// `fetch_add` on a shared atomic. No cross-hart mutex contention.
 ///

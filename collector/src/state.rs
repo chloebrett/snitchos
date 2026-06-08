@@ -23,8 +23,7 @@ impl WallClock for SystemWallClock {
     fn now_ns(&self) -> u128 {
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
+            .map_or(0, |d| d.as_nanos())
     }
 }
 
@@ -54,8 +53,8 @@ pub struct CompletedSpan {
     /// human-readable name via the State's `thread_names` table; the
     /// export path materialises it as a `thread.name` OTLP attribute.
     pub task_id: u32,
-    /// Cached thread name at SpanEnd time. `None` if no
-    /// `ThreadRegister` for this task_id arrived before SpanEnd.
+    /// Cached thread name at `SpanEnd` time. `None` if no
+    /// `ThreadRegister` for this `task_id` arrived before `SpanEnd`.
     pub thread_name: Option<String>,
 }
 
@@ -71,7 +70,7 @@ struct SessionAnchor {
     first_t: u64,
 }
 
-/// Open span: SpanStart seen, SpanEnd not yet.
+/// Open span: `SpanStart` seen, `SpanEnd` not yet.
 struct OpenSpan {
     parent: SpanId,
     name_id: StringId,
@@ -119,8 +118,8 @@ pub struct State {
     strings: HashMap<u32, String>,
     metric_kinds: HashMap<u32, MetricKind>,
     open_spans: HashMap<u64, OpenSpan>,
-    /// task_id → human-readable thread name. Populated by
-    /// `ThreadRegister`; consulted at SpanEnd to tag the completed
+    /// `task_id` → human-readable thread name. Populated by
+    /// `ThreadRegister`; consulted at `SpanEnd` to tag the completed
     /// span with its `thread.name`.
     thread_names: HashMap<u32, String>,
     /// Last-seen value per counter/gauge metric. Histograms go in
@@ -335,7 +334,7 @@ fn ticks_to_wall_ns(t: u64, first_t: u64, timebase_hz: u64, wallclock_ns: u128) 
         return wallclock_ns;
     }
     let delta_ns =
-        (t.saturating_sub(first_t) as u128) * 1_000_000_000 / timebase_hz as u128;
+        u128::from(t.saturating_sub(first_t)) * 1_000_000_000 / u128::from(timebase_hz);
     wallclock_ns + delta_ns
 }
 

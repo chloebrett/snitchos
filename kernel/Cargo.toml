@@ -21,3 +21,13 @@ protocol = { path = "../protocol" }
 postcard = { version = "1", default-features = false }
 kernel-core = { path = "../kernel-core" }
 linked_list_allocator = { version = "0.10", default-features = false }
+
+# Bug-catching cast subset only — truncation/precision/sign/wrap matter in
+# address/size/frame math. NOT full pedantic: bare-metal register/address
+# idioms make `as` casts pervasive and mostly correct-by-context, so full
+# pedantic would be `#[allow]` churn. `warn`, not `deny`.
+[lints.clippy]
+cast_possible_truncation = "warn"
+cast_precision_loss = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"

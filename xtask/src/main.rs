@@ -10,7 +10,7 @@ mod qemu;
 const COLLECTOR_BIN: &str = "target/debug/collector";
 const TELEMETRY_SOCKET: &str = "/tmp/snitch-telemetry.sock";
 
-/// Orchestration commands for the SnitchOS workspace.
+/// Orchestration commands for the `SnitchOS` workspace.
 #[derive(Parser)]
 #[command(about, version)]
 struct Cli {
@@ -38,6 +38,12 @@ enum Cmd {
         /// `--workload`, the kernel runs the default demo.
         #[arg(long)]
         workload: Option<String>,
+        /// Batches per yield for the producer/consumer (`burst=N`
+        /// bootarg). Higher = more queue contention (e.g. 65536 for the
+        /// contended-Mutex Grafana view). Only meaningful with
+        /// `--workload smp`/`smp-spsc`.
+        #[arg(long)]
+        burst: Option<usize>,
     },
     /// Boot a runtime-selected workload, capture its telemetry for a
     /// fixed window, and print steady-state stats (throughput, lock-wait
@@ -57,6 +63,10 @@ enum Cmd {
         /// Kernel timebase in Hz (QEMU `virt` = 10 MHz).
         #[arg(long, default_value_t = measure::DEFAULT_TIMEBASE_HZ)]
         timebase_hz: u64,
+        /// Batches per yield (`burst=N` bootarg). Higher = more queue
+        /// contention. Omit for the default low-contention shape.
+        #[arg(long)]
+        burst: Option<usize>,
         /// Emit a markdown table (for pasting into the measurements doc).
         #[arg(long, default_value_t = false)]
         markdown: bool,
@@ -364,9 +374,9 @@ enum StackCmd {
 fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Build => build(),
-        Cmd::Boot { features, workload } => boot(&features, workload.as_deref()),
-        Cmd::Measure { workload, seconds, warmup, timebase_hz, markdown } => {
-            measure::measure(&workload, seconds, warmup, timebase_hz, markdown)
+        Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
+        Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {
+            measure::measure(&workload, seconds, warmup, timebase_hz, burst, markdown)
         }
         Cmd::Mutants { args } => run_mutants(&args),
         Cmd::Clippy { args } => run_clippy(&args),
@@ -565,16 +575,16 @@ fn debug(features: &str) -> ExitCode {
     }
 }
 
-fn boot(features: &str, workload: Option<&str>) -> ExitCode {
+fn boot(features: &str, workload: Option<&str>, burst: Option<usize>) -> ExitCode {
     let mut features_vec: Vec<&str> = if features.is_empty() {
         Vec::new()
     } else {
         features.split(',').collect()
     };
-    // `--workload` selects a runtime workload, which only exists in
-    // `itest-workloads` builds — imply the feature so a bare
+    // `--workload`/`--burst` select runtime behaviour, which only exists
+    // in `itest-workloads` builds — imply the feature so a bare
     // `boot --workload smp` just works.
-    if workload.is_some() && !features_vec.contains(&"itest-workloads") {
+    if (workload.is_some() || burst.is_some()) && !features_vec.contains(&"itest-workloads") {
         features_vec.push("itest-workloads");
     }
     let status = qemu::build_kernel(&features_vec).expect("failed to invoke cargo");
@@ -591,10 +601,15 @@ fn boot(features: &str, workload: Option<&str>) -> ExitCode {
     let chardev_arg = format!("socket,path={TELEMETRY_SOCKET},server=on,wait=on,id=telemetry");
 
     let mut cmd = qemu::base_command(&chardev_arg);
-    if let Some(workload) = workload {
-        // Lands in /chosen/bootargs; `kmain` reads it to pick the
-        // runtime workload.
-        cmd.args(["-append", &format!("workload={workload}")]);
+    // Lands in /chosen/bootargs; `kmain` reads it to pick the runtime
+    // workload + burst.
+    let bootargs: Vec<String> = workload
+        .map(|w| format!("workload={w}"))
+        .into_iter()
+        .chain(burst.map(|b| format!("burst={b}")))
+        .collect();
+    if !bootargs.is_empty() {
+        cmd.args(["-append", &bootargs.join(" ")]);
     }
     let status = cmd
         .status()

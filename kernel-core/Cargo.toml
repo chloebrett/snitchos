@@ -8,3 +8,6 @@ publish = false
 spin = "0.10"
 protocol = { path = "../protocol" }
 postcard = { version = "1", default-features = false }
+
+[lints]
+workspace = true

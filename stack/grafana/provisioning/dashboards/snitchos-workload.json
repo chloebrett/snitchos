@@ -298,6 +298,54 @@
         "graphMode": "area",
         "textMode": "auto"
       }
+    },
+    {
+      "id": 45,
+      "type": "timeseries",
+      "title": "Workload \u2014 lock-wait % of wall time",
+      "description": "`rate(lock_wait_ticks)/timebase`, the fraction of wall time the producer/consumer spend blocked on `QUEUE.lock()` (summed across both tasks). ~0 % when uncontended; rises with `burst=N` as the two harts overlap (\u224829 % at burst=65536 with Mutex). The SPSC variant (`workload=smp-spsc`) drops this back to ~0. Assumes the 10 MHz QEMU `virt` timebase.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(snitchos_workload_lock_wait_ticks_total[1m]) / 10000000 * 100",
+          "legendFormat": "lock-wait %",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
     }
   ]
 }

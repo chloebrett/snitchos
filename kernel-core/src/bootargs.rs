@@ -36,6 +36,17 @@ pub enum WorkloadKind {
     VirtioStorm,
 }
 
+/// Look up a `key=<usize>` parameter in the bootargs string (e.g.
+/// `burst=128`). Returns `None` if the key is absent or the value
+/// doesn't parse. Whole-token match, so `burst` does not match
+/// `bursty=5`.
+pub fn param_usize(bootargs: &str, key: &str) -> Option<usize> {
+    bootargs
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix(key)?.strip_prefix('='))
+        .and_then(|v| v.parse().ok())
+}
+
 impl WorkloadKind {
     /// True for the `*-storm` workloads, which drive hart 1 themselves
     /// (spawn their own hart-1 task, or poke an intentionally-idle
@@ -112,6 +123,22 @@ mod tests {
         assert_eq!(select("workload=shootdown-storm"), Some(WorkloadKind::ShootdownStorm));
         assert_eq!(select("workload=mutex-storm"), Some(WorkloadKind::MutexStorm));
         assert_eq!(select("workload=virtio-storm"), Some(WorkloadKind::VirtioStorm));
+    }
+
+    #[test]
+    fn param_usize_reads_burst() {
+        assert_eq!(param_usize("burst=128", "burst"), Some(128));
+        assert_eq!(param_usize("workload=smp burst=64", "burst"), Some(64));
+        assert_eq!(param_usize("burst=64 workload=smp", "burst"), Some(64));
+    }
+
+    #[test]
+    fn param_usize_absent_or_bad_is_none() {
+        assert_eq!(param_usize("workload=smp", "burst"), None);
+        assert_eq!(param_usize("", "burst"), None);
+        assert_eq!(param_usize("burst=", "burst"), None);
+        assert_eq!(param_usize("burst=abc", "burst"), None);
+        assert_eq!(param_usize("bursty=5", "burst"), None);
     }
 
     #[test]

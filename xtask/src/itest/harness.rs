@@ -36,7 +36,7 @@ pub struct Harness {
     socket_path: PathBuf,
     timebase_hz: Option<u64>,
     /// Rolling window of the last few frames received. Printed on
-    /// timeout so failures say "boot reached Hello + SpanStart, then
+    /// timeout so failures say "boot reached Hello + `SpanStart`, then
     /// nothing" rather than just "no heartbeat within 10s".
     recent: VecDeque<OwnedFrame>,
     /// The longest single `wait_for` this scenario has issued so far,
@@ -218,7 +218,7 @@ impl Harness {
     }
 
     /// Look up a name in the string table. Useful for matchers that
-    /// want to assert "this SpanStart's name_id resolves to ...".
+    /// want to assert "this `SpanStart`'s `name_id` resolves to ...".
     pub fn name_of(&self, id: StringId) -> Option<&str> {
         self.strings.get(&id).map(String::as_str)
     }
@@ -320,11 +320,11 @@ impl Harness {
             OwnedFrame::StringRegister { id, value } =>
                 format!("StringRegister {{ {id:?} = {value:?} }}"),
             OwnedFrame::MetricRegister { name_id, kind } => {
-                let name = self.strings.get(name_id).map(String::as_str).unwrap_or("?");
+                let name = self.strings.get(name_id).map_or("?", String::as_str);
                 format!("MetricRegister {{ {name:?} kind={kind:?} }}")
             }
             OwnedFrame::SpanStart { id, parent, name_id, t, task_id, hart_id } => {
-                let name = self.strings.get(name_id).map(String::as_str).unwrap_or("?");
+                let name = self.strings.get(name_id).map_or("?", String::as_str);
                 format!("SpanStart {{ {name:?} id={id:?} parent={parent:?} t={t} task={task_id} hart={hart_id} }}")
             }
             OwnedFrame::ThreadRegister { id, name } =>
@@ -334,11 +334,11 @@ impl Harness {
             OwnedFrame::SpanEnd { id, t } =>
                 format!("SpanEnd {{ id={id:?} t={t} }}"),
             OwnedFrame::Event { span_id, name_id, t } => {
-                let name = self.strings.get(name_id).map(String::as_str).unwrap_or("?");
+                let name = self.strings.get(name_id).map_or("?", String::as_str);
                 format!("Event {{ {name:?} span={span_id:?} t={t} }}")
             }
             OwnedFrame::Metric { name_id, value, t } => {
-                let name = self.strings.get(name_id).map(String::as_str).unwrap_or("?");
+                let name = self.strings.get(name_id).map_or("?", String::as_str);
                 format!("Metric {{ {name:?} value={value} t={t} }}")
             }
             OwnedFrame::Dropped { count } =>
@@ -390,15 +390,13 @@ impl Drop for Harness {
             }
         }
 
-        if !reaped {
-            panic!(
-                "Harness::Drop: QEMU PID {} did not exit within {:?} \
-                 after SIGKILL — refusing to leak it into the next \
-                 scenario.",
-                self.qemu.id(),
-                REAPING_TIMEOUT
-            );
-        }
+        assert!(reaped, 
+            "Harness::Drop: QEMU PID {} did not exit within {:?} \
+             after SIGKILL — refusing to leak it into the next \
+             scenario.",
+            self.qemu.id(),
+            REAPING_TIMEOUT
+        );
 
         let _ = std::fs::remove_file(&self.socket_path);
     }
@@ -478,7 +476,7 @@ thread_local! {
 /// Consume the last-scenario's max wait timing. Returns `None` if
 /// no Harness has been dropped since the last call.
 pub fn take_last_max_wait() -> Option<(Duration, Duration)> {
-    LAST_MAX_WAIT.with(|cell| cell.take())
+    LAST_MAX_WAIT.with(std::cell::Cell::take)
 }
 
 fn set_last_failure_capture(capture: FailureCapture) {

@@ -59,7 +59,7 @@ fn format_metrics(state: &State) -> String {
     let mut out = String::new();
 
     // Counters and gauges — single value per metric.
-    for (name_id, value) in state.metric_values.iter() {
+    for (name_id, value) in &state.metric_values {
         let Some(raw_name) = state.name(*name_id) else {
             continue;
         };
@@ -81,7 +81,7 @@ fn format_metrics(state: &State) -> String {
     }
 
     // Histograms — bucket counts (cumulative), sum, count.
-    for (name_id, hist) in state.histograms.iter() {
+    for (name_id, hist) in &state.histograms {
         let Some(raw_name) = state.name(*name_id) else {
             continue;
         };

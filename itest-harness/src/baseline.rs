@@ -340,8 +340,8 @@ impl BaselineFile {
             entries.sort_by(|(_, a), (_, b)| {
                 let ci_a = a.current.as_ref().map(|b| crate::stats::wilson_score_95(b.failures, b.runs));
                 let ci_b = b.current.as_ref().map(|b| crate::stats::wilson_score_95(b.failures, b.runs));
-                let key_a = ci_a.map(|c| (c.lower, c.upper)).unwrap_or((0.0, 0.0));
-                let key_b = ci_b.map(|c| (c.lower, c.upper)).unwrap_or((0.0, 0.0));
+                let key_a = ci_a.map_or((0.0, 0.0), |c| (c.lower, c.upper));
+                let key_b = ci_b.map_or((0.0, 0.0), |c| (c.lower, c.upper));
                 // Descending: b before a.
                 key_b
                     .partial_cmp(&key_a)
@@ -412,9 +412,9 @@ fn render_baseline(b: &Baseline) -> String {
         let _ = write!(out, " build={hash}");
     }
     if let (Some(mean), Some(p95)) = (b.mean_duration_ms, b.p95_duration_ms) {
-        let _ = write!(out, "\n             timing: mean {:.0}ms, p95 {:.0}ms", mean, p95);
+        let _ = write!(out, "\n             timing: mean {mean:.0}ms, p95 {p95:.0}ms");
     } else if let Some(mean) = b.mean_duration_ms {
-        let _ = write!(out, "\n             timing: mean {:.0}ms", mean);
+        let _ = write!(out, "\n             timing: mean {mean:.0}ms");
     }
     if let Some(p) = &b.partial {
         let _ = write!(

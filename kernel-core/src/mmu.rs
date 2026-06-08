@@ -4,8 +4,8 @@
 //!
 //! See `plans/v0.4-memory-concepts.md` § 2-3 for the Sv39 reference.
 
-/// VA = PA + KERNEL_OFFSET for kernel-space mappings. Matches Linux
-/// RISC-V's `PAGE_OFFSET - PHYS_BASE` with PHYS_BASE = 0x80000000.
+/// VA = PA + `KERNEL_OFFSET` for kernel-space mappings. Matches Linux
+/// RISC-V's `PAGE_OFFSET - PHYS_BASE` with `PHYS_BASE` = 0x80000000.
 /// The kernel image at PA 0x80200000 maps to higher-half VA
 /// `0xffffffff_80200000`.
 pub const KERNEL_OFFSET: usize = 0xffffffff_00000000;
@@ -295,7 +295,7 @@ mod tests {
     extern crate std;
     use std::vec::Vec;
 
-    /// Host-side `PtMem` backed by a Vec of PageTables. PA encoding:
+    /// Host-side `PtMem` backed by a Vec of `PageTables`. PA encoding:
     /// `(index + 1) << 12` so PA=0 stays distinguishable from "unset"
     /// and the encoding survives the `>>12 <<10` round-trip through
     /// PTE PPN bits. Slot 0 is reserved for the root.
@@ -352,7 +352,7 @@ mod tests {
     }
 
     /// Walk root → mid → leaf table given the freshly-built root, returning
-    /// the leaf PageTable that holds the final PTE. Avoids repeating the
+    /// the leaf `PageTable` that holds the final PTE. Avoids repeating the
     /// branch-chasing boilerplate in every assertion.
     fn leaf_table_of(mem: &MockPtMem, va: usize) -> &PageTable {
         let (vpn2, vpn1, _, _) = split_va(va);

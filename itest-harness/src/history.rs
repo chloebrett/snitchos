@@ -187,7 +187,7 @@ pub fn current_hostname() -> Option<String> {
 
 /// Per-scenario stats reconstructed from `iterations.ndjson`. Mirrors
 /// the fields a `Baseline` cares about, minus identity (commit /
-/// recorded_at — those come from `metadata.toml`).
+/// `recorded_at` — those come from `metadata.toml`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecoveredScenario {
     pub runs: u32,

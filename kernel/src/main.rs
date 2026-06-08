@@ -311,17 +311,18 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // counters + ThreadRegister), as does the heartbeat (the OOM
     // workloads change the per-tick smoke). Only `itest-workloads`
     // builds consult bootargs; everything else resolves to `None`.
-    let selected: Option<WorkloadKind> = {
-        #[cfg(feature = "itest-workloads")]
-        {
-            dtb.chosen().bootargs().and_then(kernel_core::bootargs::select)
-        }
-        #[cfg(not(feature = "itest-workloads"))]
-        {
-            None
-        }
-    };
+    #[cfg(feature = "itest-workloads")]
+    let bootargs: Option<&str> = dtb.chosen().bootargs();
+    #[cfg(not(feature = "itest-workloads"))]
+    let bootargs: Option<&str> = None;
+    let selected: Option<WorkloadKind> = bootargs.and_then(kernel_core::bootargs::select);
     boot_workload::init(selected);
+    // Optional `burst=N` tunes how many batches the producer/consumer
+    // run per yield — used to dial up `Mutex` contention for the
+    // mutex-vs-spsc measurement. Absent → default (1, low contention).
+    if let Some(n) = bootargs.and_then(|a| kernel_core::bootargs::param_usize(a, "burst")) {
+        workload::set_burst(n);
+    }
 
     let _ = sched::register_bare_task("main", kernel_core::sched::TaskState::Running);
     let _ = sched::spawn("idle", demo_tasks::idle_entry);

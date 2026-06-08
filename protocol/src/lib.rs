@@ -1,4 +1,4 @@
-//! Wire format for SnitchOS telemetry. Postcard-encoded `Frame` enum,
+//! Wire format for `SnitchOS` telemetry. Postcard-encoded `Frame` enum,
 //! length-prefixed on the wire (the framing is the transport's job, not
 //! this crate's).
 //!
@@ -20,9 +20,9 @@ pub mod stream;
 /// won't decode the new variant.
 ///
 /// History:
-///   - 1: v0.1 — initial. Pre-`task_id` on SpanStart, pre-ContextSwitch.
-///   - 2: v0.6 — added `hart_id` to SpanStart + ContextSwitch, added
-///     HartRegister variant. The wire-format break performed before
+///   - 1: v0.1 — initial. Pre-`task_id` on `SpanStart`, pre-ContextSwitch.
+///   - 2: v0.6 — added `hart_id` to `SpanStart` + `ContextSwitch`, added
+///     `HartRegister` variant. The wire-format break performed before
 ///     any external consumer of v0.6 captures exists.
 pub const PROTOCOL_VERSION: u8 = 2;
 
@@ -346,7 +346,7 @@ mod tests {
 
   /// Roundtrip a `Frame::MetricRegister` for each `MetricKind`.
   /// Declares metric type once per name; subsequent `Metric` frames
-  /// look up the kind by name_id.
+  /// look up the kind by `name_id`.
   #[test]
   fn metric_register_roundtrips() {
     for kind in [MetricKind::Counter, MetricKind::Gauge, MetricKind::Histogram] {

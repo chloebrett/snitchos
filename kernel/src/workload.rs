@@ -17,7 +17,7 @@
 //! `workload-cooperative-baseline` integration scenario asserts this.
 
 use alloc::collections::VecDeque;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use kernel_core::workload::{bin_of, Lcg, BUCKETS};
 
@@ -27,6 +27,26 @@ use crate::tracing;
 
 const BATCH: usize = 64;
 const PRODUCER_SEED: u64 = 0x00c0_ffee_dead_beef;
+
+/// Bounded queue capacity (matches the planned SPSC ring size so the
+/// Mutex and SPSC variants are an apples-to-apples comparison). When
+/// full, the producer's push is a no-op but still takes the lock — so
+/// backpressure shows up as lock traffic, not unbounded memory growth.
+const QUEUE_CAP: usize = 4096;
+
+/// Batches each task runs per `yield_now`. Default 1 (one batch then
+/// yield — the cooperative, low-contention shape). A larger burst keeps
+/// each hart in its loop long enough that producer (hart 0) and
+/// consumer (hart 1) overlap and actually contend on `QUEUE`. Set at
+/// boot from the `burst=N` kernel bootarg via `set_burst`. See
+/// `docs/v0.6-mutex-vs-spsc-measurements.md`.
+static BURST: AtomicUsize = AtomicUsize::new(1);
+
+/// Set the per-yield burst length (clamped to ≥ 1). Called once from
+/// `kmain` when a `burst=N` bootarg is present.
+pub fn set_burst(n: usize) {
+    BURST.store(n.max(1), Ordering::Relaxed);
+}
 
 static QUEUE: Mutex<Option<VecDeque<u64>>> = Mutex::new(None);
 
@@ -83,8 +103,12 @@ pub fn queue_depth() -> usize {
 pub extern "C" fn producer_entry() -> ! {
     let mut lcg = Lcg::new(PRODUCER_SEED);
     loop {
-        {
-            crate::span!("workload.produce");
+        let burst = BURST.load(Ordering::Relaxed);
+        // One span per burst, not per batch — per-batch spans would
+        // flood the wire (and their virtio MMIO would dwarf the lock
+        // traffic we're trying to measure).
+        crate::span!("workload.produce");
+        for _ in 0..burst {
             // Generate a batch off-lock so the lock critical section
             // is just the queue push, not the LCG work.
             let mut batch = [0u64; BATCH];
@@ -92,16 +116,19 @@ pub extern "C" fn producer_entry() -> ! {
                 *slot = lcg.next();
             }
             let t_lock_start = tracing::timestamp();
-            {
+            let pushed = {
                 let mut guard = QUEUE.lock();
                 let wait = tracing::timestamp().saturating_sub(t_lock_start);
                 LOCK_WAIT_TICKS_TOTAL.fetch_add(wait, Ordering::Relaxed);
                 let q = guard.get_or_insert_with(VecDeque::new);
-                for s in batch {
+                let room = QUEUE_CAP.saturating_sub(q.len());
+                let take = BATCH.min(room);
+                for &s in batch.iter().take(take) {
                     q.push_back(s);
                 }
-            }
-            SAMPLES_PRODUCED.fetch_add(BATCH as u64, Ordering::Relaxed);
+                take
+            };
+            SAMPLES_PRODUCED.fetch_add(pushed as u64, Ordering::Relaxed);
         }
         sched::yield_now();
     }
@@ -109,8 +136,9 @@ pub extern "C" fn producer_entry() -> ! {
 
 pub extern "C" fn consumer_entry() -> ! {
     loop {
-        {
-            crate::span!("workload.consume");
+        let burst = BURST.load(Ordering::Relaxed);
+        crate::span!("workload.consume");
+        for _ in 0..burst {
             // Drain a batch under the lock, bin off-lock.
             let mut buf = [0u64; BATCH];
             let t_lock_start = tracing::timestamp();
