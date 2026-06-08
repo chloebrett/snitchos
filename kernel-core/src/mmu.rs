@@ -158,15 +158,26 @@ impl Pte {
     }
 }
 
-/// Decompose an Sv39 virtual address into its three VPN indices and
-/// the page offset. VPN[i] indexes the i-th level of the page table
-/// walk, root = VPN[2].
-pub(crate) const fn split_va(va: usize) -> (usize, usize, usize, usize) {
-    let vpn2 = (va >> 30) & 0x1ff;
-    let vpn1 = (va >> 21) & 0x1ff;
-    let vpn0 = (va >> 12) & 0x1ff;
-    let offset = va & 0xfff;
-    (vpn2, vpn1, vpn0, offset)
+/// An Sv39 virtual address split into its three VPN indices and the page
+/// offset. `vpn2` indexes the root table, `vpn1` the mid, `vpn0` the leaf —
+/// naming the levels so a `vpn1`/`vpn0` swap is a field-name error, not a
+/// silent positional bug the old `(usize, usize, usize, usize)` tuple allowed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Sv39Va {
+    pub vpn2: usize,
+    pub vpn1: usize,
+    pub vpn0: usize,
+    pub offset: usize,
+}
+
+/// Decompose an Sv39 virtual address into its VPN indices and page offset.
+pub(crate) const fn split_va(va: usize) -> Sv39Va {
+    Sv39Va {
+        vpn2: (va >> 30) & 0x1ff,
+        vpn1: (va >> 21) & 0x1ff,
+        vpn0: (va >> 12) & 0x1ff,
+        offset: va & 0xfff,
+    }
 }
 
 /// 4 KiB-aligned page table holding 512 Sv39 PTEs. The layout is
@@ -219,7 +230,7 @@ impl PageTable {
         pa: usize,
         perms: PtePerms,
     ) -> bool {
-        let (vpn2, vpn1, _, _) = split_va(va);
+        let Sv39Va { vpn2, vpn1, .. } = split_va(va);
 
         let existing_root = self.entries[vpn2];
         if !existing_root.is_valid() {
@@ -293,7 +304,7 @@ pub fn map(
     perms: PtePerms,
     mem: &mut dyn PtMem,
 ) -> Result<(), MapError> {
-    let (vpn2, vpn1, vpn0, _) = split_va(va);
+    let Sv39Va { vpn2, vpn1, vpn0, .. } = split_va(va);
     let mid_pa = walk_or_install(root_pa, vpn2, mem)?;
     let leaf_table_pa = walk_or_install(mid_pa, vpn1, mem)?;
     let existing = mem.read_entry(leaf_table_pa, vpn0);
@@ -322,7 +333,7 @@ pub fn remap(
     perms: PtePerms,
     mem: &mut dyn PtMem,
 ) -> Result<(), MapError> {
-    let (vpn2, vpn1, vpn0, _) = split_va(va);
+    let Sv39Va { vpn2, vpn1, vpn0, .. } = split_va(va);
     let mid_pa = walk_existing(root_pa, vpn2, mem)?;
     let leaf_table_pa = walk_existing(mid_pa, vpn1, mem)?;
     let existing = mem.read_entry(leaf_table_pa, vpn0);
@@ -439,7 +450,7 @@ mod tests {
     /// the leaf `PageTable` that holds the final PTE. Avoids repeating the
     /// branch-chasing boilerplate in every assertion.
     fn leaf_table_of(mem: &MockPtMem, va: usize) -> &PageTable {
-        let (vpn2, vpn1, _, _) = split_va(va);
+        let Sv39Va { vpn2, vpn1, .. } = split_va(va);
         let root = mem.table(mem.root_pa());
         let mid_pa = root.entry(vpn2).child_pa();
         let mid = mem.table(mid_pa);
@@ -670,7 +681,7 @@ mod tests {
         //   - index a root entry distinct from kernel image (510),
         //     linear map (322), and MMIO (508),
         //   - be 1 GiB-aligned (so the whole root slot is the heap).
-        let (vpn2, vpn1, vpn0, offset) = split_va(HEAP_VA_BASE);
+        let Sv39Va { vpn2, vpn1, vpn0, offset } = split_va(HEAP_VA_BASE);
         assert_eq!(vpn1, 0);
         assert_eq!(vpn0, 0);
         assert_eq!(offset, 0);
@@ -753,8 +764,8 @@ mod tests {
         let id_va = 0x80200000usize;
         let high_va = id_va + KERNEL_OFFSET;
 
-        let (id_vpn2, _, _, _) = split_va(id_va);
-        let (high_vpn2, _, _, _) = split_va(high_va);
+        let id_vpn2 = split_va(id_va).vpn2;
+        let high_vpn2 = split_va(high_va).vpn2;
 
         assert_eq!(id_vpn2, 2, "identity kernel should index root[2]");
         assert_eq!(high_vpn2, 510, "higher-half kernel should index root[510]");
@@ -768,7 +779,7 @@ mod tests {
         //   bits 29..21 = 0b 0000_0000_1  = 1
         //   bits 20..12 = 0
         //   offset      = 0
-        assert_eq!(split_va(0x80200000), (2, 1, 0, 0));
+        assert_eq!(split_va(0x80200000), Sv39Va { vpn2: 2, vpn1: 1, vpn0: 0, offset: 0 });
     }
 
     #[test]
@@ -776,13 +787,13 @@ mod tests {
         // 0x80201000 = 0x80200000 + one 4 KiB page → vpn0 = 1, not 0.
         // Catches mutations of the vpn0 extraction (>> 12) that survive
         // when all test VAs are 2 MiB-aligned and vpn0 is coincidentally 0.
-        assert_eq!(split_va(0x80201000), (2, 1, 1, 0));
+        assert_eq!(split_va(0x80201000), Sv39Va { vpn2: 2, vpn1: 1, vpn0: 1, offset: 0 });
     }
 
     #[test]
     fn split_va_handles_mmio_region() {
         // 0x10000000 → vpn2 = 0, vpn1 = 128, vpn0 = 0.
-        assert_eq!(split_va(0x10000000), (0, 128, 0, 0));
+        assert_eq!(split_va(0x10000000), Sv39Va { vpn2: 0, vpn1: 128, vpn0: 0, offset: 0 });
     }
 
     #[test]

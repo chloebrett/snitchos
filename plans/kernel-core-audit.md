@@ -82,11 +82,15 @@ overwrites). Collapsing them needs a walk-strategy enum + conflict-policy param 
 
 | Opp | What | Benefit | Cost |
 |---|---|---|---|
-| **A. `Pte(u64)` newtype** | PTEs are raw `u64` today, manipulated by 6 free fns: `leaf_pte`, `branch_pte`, `pte_is_branch`, `pte_is_leaf`, `branch_pte_child_pa`, `pa_to_pte_ppn`. Wrap as `Pte(u64)` with `Pte::leaf(pa,perms)` / `Pte::branch(child_pa)` / `.is_leaf()` / `.child_pa()`. | **Recommended.** Everything in `mmu` is `u64` (PTE, PA, perms-bits) — easy to pass the wrong one; a newtype makes that a compile error and co-locates the spec encode/decode with its invariants. **Matches the crate's own `PtePerms(u64)` precedent** — it's finishing a pattern already started. | Newtype + methods; `PtMem::read_entry/write_entry` change to `Pte` (touches trait + kernel `KernelPtMem` + tests). Medium. |
-| **B. name `split_va`'s tuple** | Returns `(usize,usize,usize,usize)` = `(vpn2,vpn1,vpn0,offset)`, destructured positionally everywhere. A `struct Sv39Va { vpn: [usize;3], offset }` names them. | Smaller win — a vpn1/vpn0 swap is currently a silent bug the type system won't catch; `vpn: [usize;3]` also suits the level-indexed walk loop. | Low effort, but the tuple is always destructured immediately, so payoff is modest. |
+| **A. `Pte(u64)` newtype** | PTEs were raw `u64`, manipulated by 6 free fns (`leaf_pte`, `branch_pte`, `pte_is_branch`, `pte_is_leaf`, `branch_pte_child_pa`, `pa_to_pte_ppn`). Now `Pte(u64)` `#[repr(transparent)]` with `Pte::leaf` / `::branch` / `::from_raw` / `.raw()` / `.is_leaf()` / `.is_branch()` / `.child_pa()` / `INVALID`. | Everything in `mmu` was `u64` (PTE, PA, perms-bits) — easy to pass the wrong one; the newtype makes that a compile error and co-locates spec encode/decode with its invariants. Finishes the `PtePerms(u64)` precedent. | `PtMem::read_entry/write_entry` now speak `Pte`; `PageTable.entries` is `[Pte;512]` (transparent → identical layout). Touched trait + `KernelPtMem` + tests. |
+| **B. `Sv39Va` named type** | `split_va` returned `(usize,usize,usize,usize)` destructured at 8 sites. Now `struct Sv39Va { vpn2, vpn1, vpn0, offset }`; call sites use named destructuring. | A `vpn1`/`vpn0` swap is now a field-name error, not a silent positional bug. Chose individual fields over `[usize;3]` (the walk is unrolled, not a loop — revisit to an array iff Sv48 / a generic level-loop lands). | Low; all 8 sites + 3 tests in `mmu.rs`. |
 
-Both are TDD-able refactors behind the existing `mmu` tests (host) + the riscv
-build. A is the one I'd actually do; B is optional polish. **Ask before applying.**
+✅ **Both DONE.** Implemented TDD-first behind the existing `mmu` host tests +
+riscv build. 140 host tests pass (was 138: +3 `Pte` tests, −1 redundant encoding
+test), `cargo xtask build` clean, `cargo clippy -p kernel-core` clean. Net-neutral
+on production lines; the gain is type safety, not size. Visibility hygiene applied
+(`Pte::leaf`/`raw`/`from_raw`/`INVALID` are `pub` for the kernel; `branch`/
+predicates `pub(crate)`; `Sv39Va` `pub(crate)`).
 
 ## Mass estimate
 

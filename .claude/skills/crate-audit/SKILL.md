@@ -230,6 +230,33 @@ Then split into lists for the human:
   module), and **ask before applying** — recommend only when you'd defend it on
   the merits, and say plainly when the duplication is honestly fine as-is.
 
+**This bucket is mandatory, never empty by omission.** `xtask audit` only finds
+the subtractive stuff (dead code, unused deps); the additive wins are invisible to
+it and are often the highest-value outcome of the whole audit. Always run the
+abstraction pass by hand and **state the conclusion explicitly** — either "here
+are the opportunities" or "none warranted, and here's why." A report that lists
+only deletions has skipped half its job. Fast heuristics for the by-hand pass:
+- **Primitive obsession:** a function returning a bare tuple (`-> (usize, usize,
+  usize, usize)`) or a cluster of free functions all taking/returning the same raw
+  `u64`/`usize` that has a *semantic* identity → a newtype. **Tell:** the same
+  tuple destructured (`let (a, b, _, _) = …`) at many call sites.
+- **Finish-the-pattern:** the crate already has one newtype (`PtePerms(u64)`) but
+  a sibling concept stays raw (`u64` PTEs) → extend the existing idiom, low
+  friction, matches house style.
+- **God-`u64`:** one `u64` plays several roles (a PTE, a PA, perm-bits) so the
+  compiler can't stop you passing the wrong one → newtypes make the mix a type
+  error.
+
+> **Worked example (SnitchOS, kernel-core `mmu`).** The mechanical audit found
+> only `spin` (unused dep) + 3 demotes. The *valuable* outcome came from the
+> mandatory by-hand pass: PTEs were raw `u64` manipulated by 6 free functions, and
+> `split_va` returned a 4-`usize` tuple destructured at 8 sites. Offered two
+> newtypes — `Pte(u64)` (`#[repr(transparent)]`, finishing the `PtePerms`
+> precedent) and `Sv39Va` — with benefit/cost. Both shipped TDD-first behind the
+> existing mmu tests + riscv build, net-neutral on lines, real safety gain
+> (a PTE can no longer be confused with a PA; a vpn swap is a field-name error).
+> *This is the kind of finding to actively hunt for — not a bonus, the point.*
+
 Close with a one-line **mass estimate** (lines each bucket adds or removes).
 
 ## Step 5 — Apply (only on request)
