@@ -78,6 +78,13 @@ pub static PROBE_TICKS: AtomicU64 = AtomicU64::new(0);
 /// what `yield_now` on hart 1 executes after picking it.
 pub extern "C" fn probe_entry() -> ! {
     loop {
+        // A span tagged with this hart's id (via `span_start`'s
+        // `current_hartid()`). It is the wire-format proof that a
+        // cross-hart-spawned task both *runs on* and is *attributed to*
+        // hart 1 — drives `smp-spans-carry-hart-id` and
+        // `smp-ipi-wakes-idle-hart`. RAII: closes at the end of the
+        // loop body.
+        crate::span!("hart1.probe");
         PROBE_TICKS.fetch_add(1, Ordering::Relaxed);
         crate::sched::yield_now();
     }

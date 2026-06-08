@@ -154,6 +154,10 @@ define_metrics! {
     counter   tlb_remap_rounds          = "snitchos.smp.tlb_remap_rounds";
     #[cfg(feature = "itest-workloads")]
     counter   tlb_stale_reads           = "snitchos.smp.tlb_stale_reads";
+    #[cfg(feature = "itest-workloads")]
+    counter   ping_turns                = "snitchos.smp.ping_turns_total";
+    #[cfg(feature = "itest-workloads")]
+    counter   pong_turns                = "snitchos.smp.pong_turns_total";
 }
 
 /// Heartbeat main loop. Never returns. Waits for the timer-IRQ
@@ -389,6 +393,13 @@ fn emit_storm_metrics(m: &Metrics, count: i64) {
             }
             emit!(m, tlb_remap_rounds = crate::storms::tlb_shootdown::ROUNDS.load(Ordering::Relaxed));
             emit!(m, tlb_stale_reads  = crate::storms::tlb_shootdown::STALE_READS.load(Ordering::Relaxed));
+        }
+        Some(WorkloadKind::PingPong) => {
+            if count == 1 {
+                crate::storms::ping_pong::run();
+            }
+            emit!(m, ping_turns = crate::storms::ping_pong::PING_TURNS.load(Ordering::Relaxed));
+            emit!(m, pong_turns = crate::storms::ping_pong::PONG_TURNS.load(Ordering::Relaxed));
         }
         // No storm selected (default / Smp* / OOM): nothing to emit.
         None

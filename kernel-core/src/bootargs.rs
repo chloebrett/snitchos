@@ -50,6 +50,11 @@ pub enum WorkloadKind {
     /// Task-driven; the initiator yields so the heartbeat keeps
     /// draining the round / stale-read counters (so *not* a storm).
     TlbShootdownVisible,
+    /// Cross-hart ping-pong: ping (hart 0) and pong (hart 1) alternate
+    /// turns via a shared turn flag, each handing off with an
+    /// `IPI_WAKEUP` so the idle partner re-wakes. Task-driven; an
+    /// alternation/wakeup cadence oracle.
+    PingPong,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -77,6 +82,7 @@ impl WorkloadKind {
                 | Self::MutexStorm
                 | Self::VirtioStorm
                 | Self::TlbShootdownVisible
+                | Self::PingPong
         )
     }
 }
@@ -101,6 +107,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "mutex-storm" => Some(WorkloadKind::MutexStorm),
             "virtio-storm" => Some(WorkloadKind::VirtioStorm),
             "tlb-shootdown" => Some(WorkloadKind::TlbShootdownVisible),
+            "ping-pong" => Some(WorkloadKind::PingPong),
             _ => None,
         })
 }
@@ -174,6 +181,18 @@ mod tests {
         // storm-classified: the default `hart_1_probe` is skipped and
         // its driver runs from `emit_storm_metrics`.
         assert!(WorkloadKind::TlbShootdownVisible.is_storm());
+    }
+
+    #[test]
+    fn selects_ping_pong() {
+        assert_eq!(select("workload=ping-pong"), Some(WorkloadKind::PingPong));
+    }
+
+    #[test]
+    fn ping_pong_is_a_storm() {
+        // Task-driven cross-hart workload that spawns its own hart-1
+        // task (pong) and skips the default probe.
+        assert!(WorkloadKind::PingPong.is_storm());
     }
 
     #[test]

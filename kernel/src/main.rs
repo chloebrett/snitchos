@@ -368,7 +368,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::ShootdownStorm)
         | Some(WorkloadKind::MutexStorm)
         | Some(WorkloadKind::VirtioStorm)
-        | Some(WorkloadKind::TlbShootdownVisible) => {}
+        | Some(WorkloadKind::TlbShootdownVisible)
+        | Some(WorkloadKind::PingPong) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -455,6 +456,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // hart-1 reader that holds the stale translation under test.
         Some(WorkloadKind::TlbShootdownVisible) => {
             let _ = sched::spawn_on(1, "tlb_reader", storms::tlb_shootdown::reader_body);
+        }
+        // Cross-hart ping-pong: pong on hart 1; ping is heartbeat-driven
+        // on hart 0 (`emit_storm_metrics`). They alternate a shared turn
+        // flag in lockstep.
+        Some(WorkloadKind::PingPong) => {
+            let _ = sched::spawn_on(1, "pong", storms::ping_pong::pong_body);
         }
         _ => {}
     }

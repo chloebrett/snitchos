@@ -127,7 +127,8 @@ enum Cmd {
     /// `--keep-existing-qemus` to disable this if you genuinely
     /// want concurrent QEMUs.
     Itest {
-        /// Optional scenario name to run. Omit to run all.
+        /// Scenario name, or a comma-separated list (`a,b,c`). Omit to
+        /// run all.
         scenario: Option<String>,
         /// Number of times to repeat the run. Useful for flake
         /// detection. Default 1.

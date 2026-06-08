@@ -563,6 +563,80 @@ pub fn smp_spawn_on_hart_1_runs() -> Result<(), String> {
     Ok(())
 }
 
+/// v0.6 step 13: the wire-format `hart_id` is correct end-to-end.
+/// `SpanStart` carries `hart_id` stamped from `current_hartid()` at
+/// open time, so a span's `hart_id` is the hart it actually ran on.
+/// The default workload runs `task_a` on hart 0 and the `hart_1_probe`
+/// on hart 1, so we should see both attributions on the wire:
+///
+///   - a `task_a.tick` SpanStart with `hart_id == 0`, and
+///   - a `hart1.probe` SpanStart with `hart_id == 1`.
+///
+/// Proves the per-hart attribution path (kernel `current_hartid()` →
+/// `Frame::SpanStart.hart_id` → collector) for *both* harts. Distinct
+/// from `smp-spawn-on-hart-1-runs` (which checks a metric counter, not
+/// the span's hart attribution).
+pub fn smp_spans_carry_hart_id() -> Result<(), String> {
+    let mut h = Harness::spawn("smp-spans")?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::SpanStart { name_id, hart_id, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("task_a.tick")
+                && *hart_id == 0
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no task_a.tick SpanStart with hart_id==0 within 30s — hart 0 \
+         spans aren't carrying the right hart_id (or task_a never ran).",
+    )?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::SpanStart { name_id, hart_id, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("hart1.probe")
+                && *hart_id == 1
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no hart1.probe SpanStart with hart_id==1 within 30s — hart 1's \
+         spans aren't carrying hart_id==1 (probe didn't run on hart 1, \
+         or current_hartid() is wrong on the secondary).",
+    )?;
+
+    Ok(())
+}
+
+/// v0.6 step 13: an idle hart is woken by an IPI to run new work.
+/// hart 1 boots straight into its idle task (`wfi`) with an empty
+/// runqueue; the only thing that puts it to work is hart 0's
+/// `spawn_on(1, "hart_1_probe", …)`, which enqueues the task and sends
+/// `IPI_WAKEUP`. The probe's first span — tagged `hart_id == 1` — is
+/// the end-to-end proof the IPI pulled hart 1 out of `wfi` and ran it.
+///
+/// Asserts the `hart1.probe` SpanStart (`hart_id == 1`) appears within
+/// 20s. (Complements `smp-spawn-on-hart-1-runs`, which proves
+/// *sustained* progress via the metric; this guards the *wake* edge
+/// itself, observed as a span.)
+pub fn smp_ipi_wakes_idle_hart() -> Result<(), String> {
+    let mut h = Harness::spawn("smp-ipi-idle")?;
+
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::SpanStart { name_id, hart_id, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("hart1.probe")
+                && *hart_id == 1
+        }
+        _ => false,
+    })
+    .ok_or(
+        "hart1.probe span (hart_id==1) never appeared within 20s — the \
+         idle hart wasn't woken: spawn_on didn't enqueue, IPI_WAKEUP \
+         wasn't delivered, or hart 1 never left wfi.",
+    )?;
+
+    Ok(())
+}
+
 /// v0.6 step 8: secondary hart bring-up. After SBI `hart_start`,
 /// hart 1 runs `_secondary_start` asm (sets sp, loads SATP,
 /// trampolines to higher-half) and enters `secondary_main`, which
@@ -942,6 +1016,52 @@ pub fn smp_tlb_shootdown_visible() -> Result<(), String> {
                 .to_string(),
         );
     }
+
+    Ok(())
+}
+
+/// v0.6 step 13: cross-hart ping-pong cadence — a wakeup oracle
+/// independent of the producer/consumer workload. ping (hart 0) and
+/// pong (hart 1) alternate turns through a shared flag, each handing
+/// off with an `IPI_WAKEUP` to the partner, which had fallen idle in
+/// `wfi`. Both turn counters reaching K=200 is only possible under
+/// strict, repeated cross-hart re-wake.
+///
+/// We assert both `snitchos.smp.ping_turns_total` and
+/// `snitchos.smp.pong_turns_total` reach 200 within budget. The budget
+/// is the teeth: with the IPI working each handoff is microseconds; a
+/// silently-dropped wakeup would leave each side waiting on the 1 Hz
+/// timer, so 400 handoffs would take minutes and time out.
+pub fn smp_ping_pong_cadence() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("ping-pong", "ping-pong")?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.smp.ping_turns_total")
+                && *value >= 200
+        }
+        _ => false,
+    })
+    .ok_or(
+        "ping_turns_total never reached 200 within 30s — ping stalled. \
+         Likely a handoff wasn't woken: hart 1's pong didn't re-wake \
+         hart 0 by IPI, so the turn flag wedged (or the IPI is only \
+         delivering at timer cadence).",
+    )?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.smp.pong_turns_total")
+                && *value >= 200
+        }
+        _ => false,
+    })
+    .ok_or(
+        "pong_turns_total never reached 200 within 30s — pong stalled. \
+         The idle hart 1 wasn't re-woken by hart 0's handoff IPI.",
+    )?;
 
     Ok(())
 }

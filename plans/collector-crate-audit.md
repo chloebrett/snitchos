@@ -3,8 +3,20 @@
 _Audited 2026-06-08. Evidence-backed._
 
 > **Applied 2026-06-08:** #6 (removed unused `postcard` dep), #1 + #2 (fixed the
-> two stale doc comments). Verified: `cargo test -p collector` → 45 pass, clippy
-> clean. Remaining findings (#3, #4, #5, #7, #8) left for a later pass.
+> two stale doc comments), #3 (**deleted** `timebase_hz()` accessor + its two
+> accessor-only tests — the `self.timebase_hz` field stays, exercised via
+> `tick_to_wall_ns`), #5 (silenced `match_same_arms` with a documented intent
+> note), #8 (dropped needless `pub` on `otlp::Exporter::export`). Verified:
+> `cargo test -p collector` → 43 pass, **clippy fully clean** (the one firing
+> warning is gone).
+>
+> **Applied 2026-06-08 (round 2):** #4 — extracted `url::ensure_suffix` into a new
+> `collector/src/url.rs` (not a generic `util.rs`); both exporters delegate; the
+> two redundant double-append tests collapsed into three focused `url` tests + a
+> per-exporter wiring guard. #7 — dropped `fastrand`; the OTLP `trace_id` now
+> derives from session start-time nanos (`session_trace_id`), since per-run
+> uniqueness — not entropy — is all it needs. Verified: 44 pass, clippy clean,
+> no `fastrand` left in the tree. **All collector findings now resolved.**
 
 ## Scope
 

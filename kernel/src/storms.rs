@@ -560,3 +560,95 @@ pub mod tlb_shootdown {
         }
     }
 }
+
+pub mod ping_pong {
+    //! Cross-hart bidirectional strict-alternation cadence oracle. ping
+    //! (hart 0) and pong (hart 1) hand a single shared `TURN` flag back
+    //! and forth (0 = ping's turn, 1 = pong's): each side busy-waits for
+    //! its turn, takes it, and flips the flag to the partner. Both turn
+    //! counters reaching `K` proves `K` strict, lockstep alternations
+    //! happened across the hart boundary — neither side can advance
+    //! until the other has handed off.
+    //!
+    //! What this uniquely covers (vs the other SMP guards): it is the
+    //! only *bidirectional* cross-hart liveness test. If either hart's
+    //! write of `TURN` were not visible to the other (the multi-thread
+    //! TCG Acquire-drop the deflake saga chased), the flag wedges and
+    //! both counters stall — the scenario's budget catches it. The
+    //! `fence_via_uart_lsr` in the wait loop is the established
+    //! visibility workaround.
+    //!
+    //! **Why busy-spin, not IPI-wake-from-`wfi`:** an earlier cut had
+    //! each side yield to idle and `wfi`, relying on the partner's
+    //! `IPI_WAKEUP` to re-wake it. That hit a lost-wakeup — if the IPI
+    //! lands between the turn-check and the `wfi`, `handle_pending`
+    //! clears `SSIP` and the `wfi` then sleeps until the 1 Hz timer
+    //! (race-free IPI condition-wait needs IRQs disabled across
+    //! check+`wfi`, which is preemption-era machinery). The
+    //! one-directional IPI-wake path is already covered by `ipi-pong` /
+    //! `spawn-storm` / `ipi-self-wakeup`; this oracle deliberately
+    //! avoids `wfi` so it measures alternation, not the scheduler's
+    //! (current) inability to sleep-wait on a memory condition.
+    //!
+    //! hart 0's ping runs heartbeat-driven (`run`, one shot on the
+    //! first tick, blocking main while pong busy-spins on hart 1), so
+    //! the heartbeat can drain both counters once it returns — same
+    //! pattern as `tlb_shootdown`.
+
+    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    /// Turns each side takes.
+    pub const K: u64 = 200;
+
+    /// Whose turn it is: 0 = ping (hart 0), 1 = pong (hart 1). ping
+    /// goes first.
+    static TURN: AtomicU32 = AtomicU32::new(0);
+
+    /// Turns completed by each side. Heartbeat re-emits both. `Relaxed`:
+    /// one writer per cell.
+    pub static PING_TURNS: AtomicU64 = AtomicU64::new(0);
+    pub static PONG_TURNS: AtomicU64 = AtomicU64::new(0);
+
+    /// Side-effect-free 16550 LSR read — the BQL fence multi-thread TCG
+    /// drops on a plain `Acquire`. See [`super::spawn_storm`].
+    fn fence_via_uart_lsr() {
+        let lsr = crate::console::emergency_uart_base() + 5;
+        // SAFETY: the 16550 LSR is a mapped, side-effect-free register.
+        unsafe { core::ptr::read_volatile(lsr as *const u8) };
+    }
+
+    /// Busy-wait until it is `mine`'s turn. No yield / `wfi` — see the
+    /// module doc for why this oracle stays off the sleep path.
+    fn await_turn(mine: u32) {
+        while TURN.load(Ordering::Acquire) != mine {
+            fence_via_uart_lsr();
+            core::hint::spin_loop();
+        }
+    }
+
+    /// hart 0 driver — heartbeat-driven, runs once. Takes K turns,
+    /// handing off to pong (hart 1) between each.
+    pub fn run() {
+        for _ in 0..K {
+            await_turn(0);
+            {
+                crate::span!("ping.turn");
+                PING_TURNS.fetch_add(1, Ordering::Relaxed);
+            }
+            TURN.store(1, Ordering::Release);
+        }
+    }
+
+    /// hart 1 pong task. Mirror of `run`; exits after K turns.
+    pub extern "C" fn pong_body() -> ! {
+        for _ in 0..K {
+            await_turn(1);
+            {
+                crate::span!("pong.turn");
+                PONG_TURNS.fetch_add(1, Ordering::Relaxed);
+            }
+            TURN.store(0, Ordering::Release);
+        }
+        crate::sched::exit_now()
+    }
+}

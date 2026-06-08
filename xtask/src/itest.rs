@@ -93,10 +93,13 @@ const SCENARIOS: &[Scenario] = &[
     Scenario::new       ("ipi-self-wakeup",             scenarios::ipi_self_wakeup),
     Scenario::new       ("smp-secondary-hart-boots",    scenarios::smp_secondary_hart_boots),
     Scenario::new       ("smp-spawn-on-hart-1-runs",    scenarios::smp_spawn_on_hart_1_runs),
+    Scenario::new       ("smp-spans-carry-hart-id",     scenarios::smp_spans_carry_hart_id),
+    Scenario::new       ("smp-ipi-wakes-idle-hart",     scenarios::smp_ipi_wakes_idle_hart),
     Scenario::cpu_bound ("spawn-storm",         scenarios::spawn_storm),
     Scenario::cpu_bound ("ipi-pong",            scenarios::ipi_pong),
     Scenario::cpu_bound ("shootdown-storm",     scenarios::shootdown_storm),
     Scenario::cpu_bound ("smp-tlb-shootdown-visible", scenarios::smp_tlb_shootdown_visible),
+    Scenario::cpu_bound ("smp-ping-pong-cadence",     scenarios::smp_ping_pong_cadence),
     Scenario::new       ("sched-task-exits-cleanly",    scenarios::sched_task_exits_cleanly),
     Scenario::cpu_bound ("mutex-storm",         scenarios::mutex_storm),
     Scenario::cpu_bound ("virtio-storm",        scenarios::virtio_storm),
@@ -176,11 +179,27 @@ pub fn run(
     }
 
     let to_run: Vec<&Scenario> = match name {
-        Some(n) => if let Some(s) = SCENARIOS.iter().find(|s| s.name == n) { vec![s] } else {
-            eprintln!("unknown scenario: {n}");
-            eprintln!("known: {}", SCENARIOS.iter().map(|s| s.name).collect::<Vec<_>>().join(", "));
-            return ExitCode::from(2);
-        },
+        // One name, or a comma-separated list (`itest a,b,c`).
+        // Whitespace around each name is trimmed; any unknown name is a
+        // hard error — a typo shouldn't silently run a subset.
+        Some(n) => {
+            let mut selected = Vec::new();
+            for part in n.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                match SCENARIOS.iter().find(|s| s.name == part) {
+                    Some(s) => selected.push(s),
+                    None => {
+                        eprintln!("unknown scenario: {part}");
+                        eprintln!("known: {}", SCENARIOS.iter().map(|s| s.name).collect::<Vec<_>>().join(", "));
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            if selected.is_empty() {
+                eprintln!("no scenarios selected (empty list?)");
+                return ExitCode::from(2);
+            }
+            selected
+        }
         None => SCENARIOS.iter().collect(),
     };
     let to_run: Vec<&Scenario> = match profile_filter {
