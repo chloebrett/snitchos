@@ -31,10 +31,13 @@ acts on; **do not delete or refactor without explicit approval.**
 Establish before analysing:
 
 - **The target**: which crate / module(s).
-- **Its consumers**: who calls it? Another crate in the workspace? A binary?
-  External (published) API? This determines whether unused-in-repo == dead.
-  Find them: `grep -rl "use <crate>::" --include=*.rs .` and check `Cargo.toml`
-  `[dependencies]` reverse-edges.
+- **Its consumers + publish status**: who calls it, and is it published? Check
+  `grep -n 'publish' <crate>/Cargo.toml` and enumerate importers
+  (`grep -rln '<crate_underscored>::' <other-crates>/`). **This is the decisive
+  scoping fact:** if `publish = false` *and* there's a single internal consumer,
+  then **unused-by-that-consumer == dead** — there's no external-API escape
+  hatch, so the "might be public API" caveat doesn't apply. If it's published or
+  has many consumers, be far more conservative about `pub` items.
 - **Its mandate**: what is this crate *supposed* to be? (Read its lib.rs / module
   docs.) Bloat is code that doesn't serve the mandate.
 
@@ -58,12 +61,31 @@ grep -rn 'dead_code\|#\[allow\|#\[expect\|TODO\|FIXME\|XXX\|HACK\|deprecated\|le
 # Public API inventory
 grep -rnE 'pub (fn|struct|enum|trait|const|type|mod) ' <crate>/src/
 
-# Cross-reference each PUBLIC symbol against real usage (the key move for libs):
-#   for each `pub` name, count callers OUTSIDE its own module + in consumer crates.
+# Cross-reference each PUBLIC symbol against usage — at TWO levels (the key move):
+#   (a) CONSUMER usage: callers in the consumer crate(s).
+#   (b) INTERNAL usage: callers elsewhere in THIS crate (outside the symbol's module).
+# The two counts give a clean decision per symbol (see below).
 for sym in <Sym1> <Sym2> ...; do
-  n=$(grep -rw "$sym" <consumer-dirs> <crate>/src 2>/dev/null | grep -v "pub .* $sym" | wc -l)
-  printf "%-30s %s\n" "$sym" "$n"
+  ext=$(grep -rw "$sym" <consumer-dirs> 2>/dev/null | wc -l)
+  int=$(grep -rw "$sym" <crate>/src 2>/dev/null | grep -vE "pub (fn|struct|enum|const|use|type)|//" | wc -l)
+  printf "%-30s ext=%s int=%s\n" "$sym" "$ext" "$int"
 done
+
+# Decision from (ext, int):
+#   ext=0 int=0  → DEAD. Delete the item.
+#   ext=0 int>0  → INTERNAL ONLY. Drop its lib.rs re-export; demote to pub(crate).
+#                  (a heavily-used-internally symbol is NOT dead — don't delete it.)
+#   ext>0        → KEEP public.
+
+# Module privacy: does the consumer use `<crate>::<module>::` PATHS, or only the
+# flat re-exports? Modules never path-accessed can be `mod` (private), making the
+# re-export block the sole public surface. (Catches whole-module over-exposure.)
+grep -rhoE '<crate_underscored>::[a-z_]+::' <consumer-dirs> | sort -u
+
+# Before trimming re-exports: confirm INTERNAL code imports siblings via
+# `crate::<mod>::Item` paths, not bare `crate::Item` (the re-export). If the
+# latter, removing the re-export breaks internal compile.
+grep -rhn 'use crate::' <crate>/src | grep -vE 'use crate::\{?[a-z_]+::'   # empty = safe to trim
 
 # Features: declared vs gating vs enabled
 grep -A30 '\[features\]' <crate>/Cargo.toml
@@ -114,6 +136,11 @@ yes/no — name the specific symbol/line/site.
 - Copy-pasted test fixtures — a factory function.
 - Parallel `match` arms or per-variant code that a macro / trait method collapses.
 - The same grep/transform pipeline inlined repeatedly.
+- **The "edit-N-places" tell:** did a recent change touch the *same logical thing*
+  in multiple files? (`git log -p` / recent diff for a feature added in two
+  places at once.) A catalogue/enum/list maintained in parallel across files is
+  duplication that *will* drift — e.g. adding one metric to both a text exporter
+  and a protobuf exporter. Strong signal for "extract a single source."
 
 ### E. Architectural debt
 - `too_many_arguments` (6+) — threading state that wants a context struct.

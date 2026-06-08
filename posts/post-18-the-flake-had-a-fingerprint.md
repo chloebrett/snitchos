@@ -128,6 +128,12 @@
 - **2-D Grafana** — per-scenario × per-bucket counts through the baseline, prom/OTLP exporters, and a dashboard table. "5% flaky" became "which scenario fails how."
 - **`--skip <scenario>`**, and `metadata.toml` now records `jobs` / `cpu_jobs` / the full invocation — a failure's run dir tells you the parallelism it ran under.
 
+## an aside: the harness out-grew the kernel
+
+- `cargo xtask loc` after this session: the integration infra (`itest-harness` + `xtask`, **9,568 lines**) is now bigger than the kernel (`kernel` + `kernel-core`, **7,817**). `itest-harness` alone out-masses the kernel binary crate.
+- not bloat — `kernel` is `no_std`/`no_main` and carries **zero** test lines by construction; it externalizes its entire test burden to `kernel-core` and the QEMU suite. **`itest-harness` + `xtask` *are* the kernel's test suite.**
+- the punchline: *on a project whose first-class concern is observability, the machinery for observing the kernel out-massing the kernel is the system working as intended — and the kernel that can't test itself made its test harness the biggest crate in the tree.*
+
 ## what's next
 
 - `sched-yield-round-trips`'s `hart_stalled` is a **real open bug** — hart 1 freezes at ~1.2s, almost certainly the v0.6 `workload_consumer`'s cross-hart lock discipline. Tooling labels it; next session fixes it.
