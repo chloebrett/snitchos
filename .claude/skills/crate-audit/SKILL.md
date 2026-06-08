@@ -25,6 +25,14 @@ acts on; **do not delete or refactor without explicit approval.**
    exporter) are not automatically collapsible. Say why it might be intentional.
 5. **Respect the project's conventions** (CLAUDE.md, existing patterns). Debt is
    *drift from the codebase's own norms*, not drift from your preferences.
+6. **"No in-repo producer" ≠ dead for contract surface.** Wire formats, ABIs,
+   protocol enums, and public schemas are routinely defined *complete and ahead
+   of their consumers* — a variant with zero emit sites may be a reserved slot,
+   not cruft. Before flagging such an item, **grep the design docs / `plans/` /
+   roadmap for its name and intent** (`grep -rin <Symbol> docs/ plans/`). If a
+   doc says "defined now, used later" or "reserved for vX", the finding is
+   *keep*, and the audit's job is to confirm the source comment says so too.
+   Treat the grep miss as a *prompt to read the design*, never as the verdict.
 
 ## Step 1 — Scope
 
@@ -142,7 +150,11 @@ yes/no — name the specific symbol/line/site.
 - Abstractions (traits, generics, hooks) with exactly **one** implementation and
   no second on the horizon — is the indirection paying rent?
 - "For the future" code with no current caller (the thing you almost shipped but
-  parked) — delete it; git remembers.
+  parked) — delete it; git remembers. **Exception: contract surface** (wire/ABI/
+  protocol enum variants, schema fields) defined ahead of its producer on purpose
+  — check the design docs first (operating rule 6) before calling it speculative.
+  A no-producer variant + a doc that reserves it = keep; the only fix is making
+  the *source comment* say "reserved" too.
 - Extensibility points (plugin registries, strategy enums) exercised by one case.
 - Over-parameterised functions whose extra params are always passed the same value.
 
@@ -226,5 +238,7 @@ big delete without checking the suite is still green.
   trait-dispatch / macro-generated call sites (grep misses these).
 - Treating all duplication as collapsible. Some is honest divergence.
 - Deleting `pub` API because the *repo* doesn't use it — it may be the point.
+- Calling a no-producer wire/protocol variant "dead" without grepping the design
+  docs — it's usually a reserved slot defined ahead of its consumer (rule 6).
 - "Simplifying" by adding an abstraction (that's usually *more* code, not less).
 - Bundling the refactor into the audit. Report first.
