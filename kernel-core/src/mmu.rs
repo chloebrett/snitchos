@@ -104,14 +104,14 @@ pub const fn leaf_pte(pa: usize, perms: PtePerms) -> u64 {
 
 /// Encode a non-leaf PTE pointing at a child page table. Per the
 /// spec, R=W=X=0 with V=1 is the non-leaf marker.
-pub const fn branch_pte(child_pa: usize) -> u64 {
+pub(crate) const fn branch_pte(child_pa: usize) -> u64 {
     pa_to_pte_ppn(child_pa) | PTE_V
 }
 
 /// Decompose an Sv39 virtual address into its three VPN indices and
 /// the page offset. VPN[i] indexes the i-th level of the page table
 /// walk, root = VPN[2].
-pub const fn split_va(va: usize) -> (usize, usize, usize, usize) {
+pub(crate) const fn split_va(va: usize) -> (usize, usize, usize, usize) {
     let vpn2 = (va >> 30) & 0x1ff;
     let vpn1 = (va >> 21) & 0x1ff;
     let vpn0 = (va >> 12) & 0x1ff;

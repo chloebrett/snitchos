@@ -11,7 +11,7 @@
 /// Capacity in bytes. Sized for all boot-phase frames (kernel.boot
 /// `SpanStart`, `console_init` pair, `telemetry_init` start) plus their
 /// `StringRegisters`. Each frame is ~10–30 bytes; 1 KiB is plenty.
-pub const PRE_INIT_BYTES: usize = 1024;
+pub(crate) const PRE_INIT_BYTES: usize = 1024;
 
 pub struct PreInitBuffer {
     bytes: [u8; PRE_INIT_BYTES],
