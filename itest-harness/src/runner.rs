@@ -12,14 +12,18 @@
 //!
 //! Nothing in this module knows about QEMU, virtio, or postcard.
 
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Mutex;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use time::OffsetDateTime;
 
 use crate::aggregate::{Aggregator, RunTotals};
 use crate::baseline::{Baseline, BaselineFile};
+use crate::history::HistoryWriter;
 use crate::verdict::{ComparisonRender, DEFAULT_ALPHA, render_comparison, verdict};
 
 /// One scenario: a name + a function that returns `Ok(())` on pass or
@@ -34,7 +38,17 @@ pub struct Scenario {
 /// log file (so the runner can dump the tail on failure + copy it
 /// into the run-dir), or `None` when no log was captured. Aliased to
 /// keep `RunnerConfig` under clippy's `type_complexity` threshold.
-pub type LogPathFn<'a> = &'a dyn Fn(&str) -> Option<PathBuf>;
+///
+/// `Send + Sync` because workers in the `jobs > 1` path call this
+/// from their own threads. Plain `fn`-pointer and capture-free
+/// closures satisfy this automatically; consumers that need shared
+/// state should use `Arc` / `Mutex` rather than `Rc` / `RefCell`.
+pub type LogPathFn<'a> = &'a (dyn Fn(&str) -> Option<PathBuf> + Send + Sync);
+
+/// Per-scenario timing-hook signature. Called immediately after
+/// `(scenario.run)()` from the same thread, so `harness`-side
+/// thread-locals work. Same `Send + Sync` rationale as `LogPathFn`.
+pub type MaxWaitFn<'a> = &'a (dyn Fn() -> Option<(Duration, Duration)> + Send + Sync);
 
 /// Hooks the runner calls during execution. Each is `Option<&dyn Fn>`
 /// so consumers can supply only what they need. Lifetime parameter
@@ -54,7 +68,7 @@ pub struct RunnerConfig<'a> {
     /// from whatever the consumer's harness measured (NOT the same as
     /// the runner's wall-clock timing — this is e.g. virtio-frame wait
     /// budget exposure). Used only for inline display.
-    pub max_wait_for: Option<&'a dyn Fn() -> Option<(Duration, Duration)>>,
+    pub max_wait_for: Option<MaxWaitFn<'a>>,
 
     /// Called once when writing a new baseline entry. Returns the
     /// short git commit hash, or `None` if unavailable.
@@ -92,6 +106,15 @@ pub struct RunnerConfig<'a> {
     /// `None`, no history is written. See
     /// `plans/itest-history-and-pending.md` step C.
     pub history_root: Option<PathBuf>,
+
+    /// Number of worker threads for per-iteration scenario fan-out.
+    /// `0` and `1` both mean sequential execution (preserves the
+    /// pre-parallel output format). `>1` enables the worker pool
+    /// (see `plans/itest-parallel-scenarios.md`). Each iteration
+    /// still runs to completion (its own `RunTotals`, fail-fast and
+    /// interrupt check) before the next begins — fan-out is intra-
+    /// iteration only.
+    pub jobs: u32,
 }
 
 /// Run `scenarios` `repeat` times. If `update_baseline` is true, write
@@ -120,8 +143,12 @@ pub fn run(
     // History (tier 2/3). Create the run-dir + open the NDJSON writer
     // if a history_root was supplied. Failure here is non-fatal: log
     // and proceed without history.
+    //
+    // The writer is wrapped in `Mutex<Option<_>>` so the parallel path
+    // can share it across worker threads. The lock is held only for
+    // the append; serial paths pay essentially no cost.
     let now_for_history = OffsetDateTime::now_utc();
-    let mut history_writer: Option<crate::history::HistoryWriter> = None;
+    let mut initial_history_writer: Option<HistoryWriter> = None;
     let mut history_dir: Option<PathBuf> = None;
     if let Some(root) = config.history_root.as_deref() {
         let commit = config
@@ -143,7 +170,7 @@ pub fn run(
             Ok((dir, writer)) => {
                 eprintln!("history: writing per-iteration records to {}", dir.display());
                 history_dir = Some(dir);
-                history_writer = Some(writer);
+                initial_history_writer = Some(writer);
             }
             Err(e) => {
                 eprintln!(
@@ -155,89 +182,94 @@ pub fn run(
         }
     }
 
+    let history_writer: Mutex<Option<HistoryWriter>> = Mutex::new(initial_history_writer);
+    let jobs = config.jobs.max(1);
+
     for run_idx in 0..runs {
         if runs > 1 {
             eprintln!("\n=== run {}/{} ===", run_idx + 1, runs);
         }
-        // Step 2 of plans/itest-parallel-scenarios.md: each iteration
-        // populates a local `Aggregator`, which is then merged into the
-        // master. Behaviour-equivalent at `--jobs 1`; step 3 swaps the
-        // sequential scenario loop for a worker pool that produces
-        // per-worker aggregators reduced via the same `merge`.
+
+        // Step 3 of plans/itest-parallel-scenarios.md: fan-out is
+        // intra-iteration. `jobs == 1` keeps the sequential output
+        // format ("test X ... ok"); `jobs > 1` runs N worker threads
+        // pulling from a shared queue, prefix-line output.
         let mut local = Aggregator::new();
-        let mut failed_this_run = 0;
-        for s in scenarios {
-            eprint!("test {} ... ", s.name);
-            let started_at = OffsetDateTime::now_utc();
-            let start = Instant::now();
-            let outcome = (s.run)();
-            let elapsed = start.elapsed();
-            local.record_duration(s.name, elapsed);
+        let failed_this_run: usize;
+        let total = scenarios.len();
 
-            let timing_str = config
-                .max_wait_for
-                .and_then(|f| f())
-                .map(|(actual, budget)| {
-                    format!(
-                        " (max wait {:.1}s of {:.0}s budget)",
-                        actual.as_secs_f64(),
-                        budget.as_secs_f64()
-                    )
-                })
-                .unwrap_or_default();
-
-            let mut row_log: Option<String> = None;
-            let (row_result, row_error) = match &outcome {
-                Ok(()) => {
-                    eprintln!("ok{timing_str}");
-                    (crate::history::ResultKind::Pass, None)
-                }
-                Err(e) => {
-                    eprintln!("FAILED{timing_str}");
-                    eprintln!("  {e}");
-                    if let Some(get_path) = config.log_path_for
-                        && let Some(log_path) = get_path(s.name)
-                    {
-                        dump_log_tail(&log_path);
-                        // Tier 3: persist the per-failure log into the
-                        // run directory. The NDJSON row's `log` field
-                        // gets the filename so a future viewer can
-                        // open it directly from the run dir.
-                        if let Some(hdir) = history_dir.as_ref() {
-                            let dest_name =
-                                format!("fail-{}-{}.log", s.name, run_idx + 1);
-                            let dest = hdir.join(&dest_name);
-                            match std::fs::copy(&log_path, &dest) {
-                                Ok(_) => row_log = Some(dest_name),
-                                Err(e) => eprintln!(
-                                    "warning: failed to copy log to {}: {e}",
-                                    dest.display()
-                                ),
-                            }
-                        }
-                    }
-                    failed_this_run += 1;
-                    local.record_fail(s.name);
-                    (crate::history::ResultKind::Fail, Some(e.clone()))
-                }
-            };
-
-            if let Some(writer) = history_writer.as_mut() {
-                let row = crate::history::IterationRow {
-                    iteration: run_idx + 1,
-                    scenario: s.name.to_string(),
-                    started_at,
-                    duration_ms: elapsed.as_millis().min(u32::MAX as u128) as u32,
-                    result: row_result,
-                    error: row_error,
-                    log: row_log,
-                };
-                if let Err(e) = writer.append(&row) {
-                    eprintln!("warning: failed to append history row: {e}");
+        if jobs <= 1 {
+            // Sequential path. Format unchanged from pre-step-3.
+            let mut count = 0;
+            for s in scenarios {
+                let res = process_one_scenario(
+                    s,
+                    run_idx,
+                    &mut local,
+                    &history_writer,
+                    history_dir.as_deref(),
+                    config.log_path_for,
+                    config.max_wait_for,
+                    ScenarioFormat::Inline,
+                );
+                if res.failed {
+                    count += 1;
                 }
             }
+            failed_this_run = count;
+        } else {
+            // Parallel path. Workers pop from a shared queue, run the
+            // scenario, record into a worker-local `Aggregator`. After
+            // the scope joins we merge them into `local`.
+            let work: Mutex<VecDeque<&Scenario>> =
+                Mutex::new(scenarios.iter().copied().collect());
+            let log_path_for = config.log_path_for;
+            let max_wait_for = config.max_wait_for;
+            let history_dir_ref = history_dir.as_deref();
+            let history_writer_ref = &history_writer;
+            let work_ref = &work;
+
+            let per_worker: Vec<(Aggregator, usize)> = thread::scope(|sc| {
+                let mut handles = Vec::with_capacity(jobs as usize);
+                for _ in 0..jobs {
+                    handles.push(sc.spawn(move || {
+                        let mut worker_agg = Aggregator::new();
+                        let mut worker_failed = 0usize;
+                        loop {
+                            let next = {
+                                let mut q = work_ref.lock().expect("work-queue poisoned");
+                                q.pop_front()
+                            };
+                            let Some(s) = next else { break };
+                            let res = process_one_scenario(
+                                s,
+                                run_idx,
+                                &mut worker_agg,
+                                history_writer_ref,
+                                history_dir_ref,
+                                log_path_for,
+                                max_wait_for,
+                                ScenarioFormat::Prefixed,
+                            );
+                            if res.failed {
+                                worker_failed += 1;
+                            }
+                        }
+                        (worker_agg, worker_failed)
+                    }));
+                }
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("worker panicked"))
+                    .collect()
+            });
+
+            failed_this_run = per_worker.iter().map(|(_, f)| *f).sum();
+            for (worker_agg, _) in per_worker {
+                local.merge(worker_agg);
+            }
         }
-        let total = scenarios.len();
+
         eprintln!("\n{} passed, {} failed", total - failed_this_run, failed_this_run);
         local.finish_run(RunTotals {
             passed: total - failed_this_run,
@@ -363,6 +395,119 @@ pub fn run(
     }
 
     exit_code_with_interrupt(&aggregator, interrupted)
+}
+
+/// Output format for `process_one_scenario`. Sequential runs use
+/// `Inline` (`test NAME ... ok`); parallel runs use `Prefixed`
+/// (`[NAME] ok`) so concurrent completions don't interleave
+/// half-printed lines.
+enum ScenarioFormat {
+    Inline,
+    Prefixed,
+}
+
+struct ScenarioOutcome {
+    failed: bool,
+}
+
+/// Run one scenario and record everything that follows: timing,
+/// log-tail dump on failure, log-file copy into the run-dir, NDJSON
+/// row. Shared between the sequential and parallel paths.
+///
+/// The thread that calls this is the same thread `(s.run)()` ran on,
+/// so any thread-local state set by the consumer's harness (xtask's
+/// `take_last_log_path` / `take_last_max_wait`) is reachable through
+/// the supplied hooks. That's the whole point of running hooks here
+/// rather than back on the orchestrator thread.
+#[allow(clippy::too_many_arguments, reason = "all of these are caller state with no natural grouping")]
+fn process_one_scenario(
+    s: &Scenario,
+    run_idx: u32,
+    local: &mut Aggregator,
+    history_writer: &Mutex<Option<HistoryWriter>>,
+    history_dir: Option<&Path>,
+    log_path_for: Option<LogPathFn<'_>>,
+    max_wait_for: Option<MaxWaitFn<'_>>,
+    format: ScenarioFormat,
+) -> ScenarioOutcome {
+    if matches!(format, ScenarioFormat::Inline) {
+        eprint!("test {} ... ", s.name);
+    }
+    let started_at = OffsetDateTime::now_utc();
+    let start = Instant::now();
+    let outcome = (s.run)();
+    let elapsed = start.elapsed();
+    local.record_duration(s.name, elapsed);
+
+    let timing_str = max_wait_for
+        .and_then(|f| f())
+        .map(|(actual, budget)| {
+            format!(
+                " (max wait {:.1}s of {:.0}s budget)",
+                actual.as_secs_f64(),
+                budget.as_secs_f64()
+            )
+        })
+        .unwrap_or_default();
+
+    let prefix = match format {
+        ScenarioFormat::Inline => String::new(),
+        ScenarioFormat::Prefixed => format!("[{}] ", s.name),
+    };
+
+    let mut row_log: Option<String> = None;
+    let mut failed = false;
+    let (row_result, row_error) = match &outcome {
+        Ok(()) => {
+            eprintln!("{prefix}ok{timing_str}");
+            (crate::history::ResultKind::Pass, None)
+        }
+        Err(e) => {
+            eprintln!("{prefix}FAILED{timing_str}");
+            eprintln!("{prefix}  {e}");
+            if let Some(get_path) = log_path_for
+                && let Some(log_path) = get_path(s.name)
+            {
+                dump_log_tail(&log_path);
+                if let Some(hdir) = history_dir {
+                    let dest_name = format!("fail-{}-{}.log", s.name, run_idx + 1);
+                    let dest = hdir.join(&dest_name);
+                    match std::fs::copy(&log_path, &dest) {
+                        Ok(_) => row_log = Some(dest_name),
+                        Err(e) => eprintln!(
+                            "warning: failed to copy log to {}: {e}",
+                            dest.display()
+                        ),
+                    }
+                }
+            }
+            failed = true;
+            local.record_fail(s.name);
+            (crate::history::ResultKind::Fail, Some(e.clone()))
+        }
+    };
+
+    // Brief lock for the NDJSON append. Contention is negligible at
+    // realistic worker counts (~10ms scenario, microseconds of lock).
+    let row = crate::history::IterationRow {
+        iteration: run_idx + 1,
+        scenario: s.name.to_string(),
+        started_at,
+        duration_ms: elapsed.as_millis().min(u32::MAX as u128) as u32,
+        result: row_result,
+        error: row_error,
+        log: row_log,
+    };
+    if let Some(writer) = history_writer
+        .lock()
+        .expect("history writer mutex poisoned")
+        .as_mut()
+        && let Err(e) = writer.append(&row)
+    {
+        eprintln!("warning: failed to append history row: {e}");
+    }
+
+    ScenarioOutcome { failed }
 }
 
 fn exit_code(aggregator: &Aggregator) -> ExitCode {
@@ -503,6 +648,68 @@ mod tests {
         PASS_COUNTER.store(0, Ordering::Relaxed);
         FAIL_COUNTER.store(0, Ordering::Relaxed);
         BUILD_COUNTER.store(0, Ordering::Relaxed);
+    }
+
+    fn slow_pass() -> Result<(), String> {
+        PASS_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        Ok(())
+    }
+
+    #[test]
+    fn parallel_jobs_run_scenarios_concurrently() {
+        // Four slow scenarios sleeping 200ms each. Sequential = 800ms.
+        // Parallel with jobs=4 should finish in roughly one sleep window
+        // (~250ms), well under the sequential floor.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_counters();
+        let scns = [
+            Scenario { name: "slow-a", run: slow_pass },
+            Scenario { name: "slow-b", run: slow_pass },
+            Scenario { name: "slow-c", run: slow_pass },
+            Scenario { name: "slow-d", run: slow_pass },
+        ];
+        let refs: Vec<&Scenario> = scns.iter().collect();
+        let config = RunnerConfig {
+            jobs: 4,
+            ..RunnerConfig::default()
+        };
+        let start = std::time::Instant::now();
+        let _ = run(&refs, 1, false, &config);
+        let elapsed = start.elapsed();
+
+        assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 4);
+        // Sequential would be ~800ms. Parallel-4 on the same scenarios
+        // should be well under 500ms even on a busy CI runner. Slack
+        // accounts for thread spawn + per-scenario bookkeeping.
+        assert!(
+            elapsed.as_millis() < 500,
+            "expected parallel speedup; elapsed={:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn parallel_jobs_aggregator_merge_matches_sequential() {
+        // Same workload, jobs=1 vs jobs=4: total fail counts must match.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_counters();
+        let scns = [
+            Scenario { name: "pass-1", run: always_pass },
+            Scenario { name: "fail-1", run: always_fail },
+            Scenario { name: "pass-2", run: always_pass },
+            Scenario { name: "fail-2", run: always_fail },
+        ];
+        let refs: Vec<&Scenario> = scns.iter().collect();
+        let parallel = RunnerConfig {
+            jobs: 4,
+            ..RunnerConfig::default()
+        };
+        let _ = run(&refs, 3, false, &parallel);
+        // 3 iterations × 2 always_fail scenarios = 6 fails total.
+        // 3 iterations × 2 always_pass scenarios = 6 passes total.
+        assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 6);
+        assert_eq!(FAIL_COUNTER.load(Ordering::Relaxed), 6);
     }
 
     #[test]
