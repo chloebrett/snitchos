@@ -678,6 +678,70 @@
         },
         "tooltip": { "mode": "multi", "sort": "desc" }
       }
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Failure buckets by scenario (cause-bucket breakdown)",
+      "description": "Per-scenario failure counts split by classified cause-bucket (wedge / stalled / budget_exhausted / harness / unknown). Sorted by count so the worst scenario/bucket pairs float to the top. Turns 'X% flaky' into 'which scenario fails how'.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_itest_baseline_signature_ratio or snitchos_itest_baseline_signature",
+          "format": "table",
+          "instant": true,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "scenario": "scenario",
+              "signature": "bucket",
+              "Value": "count"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [{ "field": "count", "desc": true }]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "filterable": true },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "count", "desc": true }]
+      }
     }
   ]
 }

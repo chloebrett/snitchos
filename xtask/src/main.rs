@@ -22,7 +22,15 @@ enum Cmd {
     /// Build the kernel ELF.
     Build,
     /// Build the kernel and run it in QEMU.
-    Boot,
+    ///
+    /// Use `--features <feat>` to boot a feature-flagged kernel (e.g.
+    /// `--features smp-workload` to run the cross-hart producer/consumer
+    /// for live measurement in `cargo xtask reader` / Grafana).
+    Boot {
+        /// Cargo features to enable on the kernel build, comma-separated.
+        #[arg(long, default_value = "")]
+        features: String,
+    },
     /// Build and run the collector (telemetry consumer). Trailing args
     /// are forwarded to the collector, e.g.
     /// `cargo xtask collect -- --text --otlp http://localhost:4318`.
@@ -320,7 +328,7 @@ enum StackCmd {
 fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Build => build(),
-        Cmd::Boot => boot(),
+        Cmd::Boot { features } => boot(&features),
         Cmd::Mutants { args } => run_mutants(&args),
         Cmd::Clippy { args } => run_clippy(&args),
         Cmd::Collect { args } => run_collector(&args),
@@ -516,8 +524,14 @@ fn debug(features: &str) -> ExitCode {
     }
 }
 
-fn boot() -> ExitCode {
-    if build() != ExitCode::SUCCESS {
+fn boot(features: &str) -> ExitCode {
+    let features_vec: Vec<&str> = if features.is_empty() {
+        Vec::new()
+    } else {
+        features.split(',').collect()
+    };
+    let status = qemu::build_kernel(&features_vec).expect("failed to invoke cargo");
+    if !status.success() {
         return ExitCode::from(1);
     }
 

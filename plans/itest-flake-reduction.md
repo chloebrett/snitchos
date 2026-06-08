@@ -210,18 +210,27 @@ serialization choice.
    `--capture-passes` (persist passing iterations — heaviest mode); explicit
    `ErrorOrigin::Harness` stamp on spawn-error captures (today spawn
    failures classify correctly via the error-string fallback).
-4. ✅ DONE (terminal + aggregation) — `Aggregator` tracks suite-wide
-   `signature_count` (a `None` signature counts as `Unknown`); the
-   end-of-run summary prints a `Failure signatures (N total): wedge: 2,
-   …` breakdown, shown on **both** the single-run failure path and the
-   `--repeat` aggregate. `aggregate_run_dir` reconstructs the same
-   per-bucket counts from a run's NDJSON (so `--adopt-run` / recovery and
-   any historical run are queryable). `Signature::label()` gives the
-   stable snake_case key. **Still TODO (Grafana export):** persist
-   per-bucket counts into `.itest-baseline.toml`, emit per-bucket gauges
-   via the prom textfile + OTLP exporters, and add a dashboard panel.
-   Open design question: suite-wide vs per-scenario-per-bucket schema in
-   the baseline (the latter is Grafana-ideal but a 2-D schema expansion).
+4. ✅ DONE — full per-scenario-per-bucket (2-D) pipeline.
+   - **Terminal:** `Aggregator` tracks per-scenario signatures (folded to
+     a suite-wide total); the end-of-run summary prints `Failure
+     signatures (N total): wedge: 2, …` on **both** the single-run
+     failure path and the `--repeat` aggregate.
+   - **Aggregation:** `aggregate_run_dir` reconstructs per-scenario and
+     suite-wide counts from a run's NDJSON (so `--adopt-run` / recovery /
+     any historical run are queryable). `RecoveredScenario.signature_counts`.
+   - **Baseline:** `Baseline.signature_counts` persists per-scenario
+     buckets to `.itest-baseline.toml` (TOML enum-string keys; round-trip
+     tested), populated from both the `--update-baseline` path and
+     `from_recovered`/`adopt_recovered`.
+   - **Export:** prom textfile emits `snitchos_itest_baseline_signature{
+     scenario,signature}`; OTLP emits `snitchos.itest.baseline.signature`
+     with `scenario` + `signature` attributes.
+   - **Grafana:** a "Failure buckets by scenario" table panel
+     (`snitchos-itest-baselines.json`), sorted by count, query tolerant
+     of the `_ratio`/raw suffix ambiguity.
+   `Signature::label()` is the stable snake_case key shared across all
+   layers. Schema chosen: **per-scenario-per-bucket (2-D)**, not
+   suite-wide, so the dashboard answers "which scenario fails how".
 
 **Done when:** a `--repeat 50` run reports the residual split into the
 buckets per scenario, persisted to NDJSON and visible in the existing
