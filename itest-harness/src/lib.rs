@@ -16,6 +16,7 @@ pub mod lock;
 pub mod otlp;
 pub mod prom;
 pub mod runner;
+pub mod signature;
 pub mod stats;
 pub mod verdict;
 
@@ -33,6 +34,7 @@ pub use otlp::{
 };
 pub use prom::{render_prometheus, write_atomic};
 pub use runner::{CpuProfile, RunnerConfig, Scenario, run};
+pub use signature::{ErrorOrigin, FailureEvidence, Signature, classify};
 pub use stats::{ConfidenceInterval, two_proportion_p_value, wilson_score_95};
 pub use verdict::{
     ComparisonRender, DEFAULT_ALPHA, Direction, Verdict, render_comparison, verdict,
