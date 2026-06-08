@@ -5,9 +5,9 @@
 //! The consumer (xtask, for now) plugs in:
 //!
 //! - The scenario list (`&[Scenario]`).
-//! - Hooks: `kill_stale`, `one_shot_build`, `log_path_for`,
-//!   `max_wait_for`, `current_commit`. All optional; the runner
-//!   no-ops when a hook is `None`.
+//! - Hooks: `one_shot_build`, `log_path_for`, `max_wait_for`,
+//!   `current_commit`. All optional; the runner no-ops when a hook
+//!   is `None`.
 //! - The baseline file path.
 //!
 //! Nothing in this module knows about QEMU, virtio, or postcard.
@@ -35,10 +35,6 @@ pub struct Scenario {
 /// matches the surrounding `run()` call — hooks don't escape.
 #[derive(Default)]
 pub struct RunnerConfig<'a> {
-    /// Called once before the first scenario. Typical use:
-    /// `pkill qemu-system-riscv64` to clear stale subjects.
-    pub kill_stale: Option<&'a dyn Fn()>,
-
     /// Called once before any scenarios. Errors abort the run with
     /// exit code 2. Typical use: `cargo build -p kernel`.
     pub one_shot_build: Option<&'a dyn Fn() -> Result<(), String>>,
@@ -83,9 +79,6 @@ pub fn run(
     update_baseline: bool,
     config: &RunnerConfig<'_>,
 ) -> ExitCode {
-    if let Some(f) = config.kill_stale {
-        f();
-    }
     if let Some(build) = config.one_shot_build
         && let Err(e) = build()
     {
@@ -312,7 +305,6 @@ mod tests {
 
     static PASS_COUNTER: AtomicU32 = AtomicU32::new(0);
     static FAIL_COUNTER: AtomicU32 = AtomicU32::new(0);
-    static KILL_COUNTER: AtomicU32 = AtomicU32::new(0);
     static BUILD_COUNTER: AtomicU32 = AtomicU32::new(0);
 
     fn always_pass() -> Result<(), String> {
@@ -328,7 +320,6 @@ mod tests {
     fn reset_counters() {
         PASS_COUNTER.store(0, Ordering::Relaxed);
         FAIL_COUNTER.store(0, Ordering::Relaxed);
-        KILL_COUNTER.store(0, Ordering::Relaxed);
         BUILD_COUNTER.store(0, Ordering::Relaxed);
     }
 
@@ -372,10 +363,6 @@ mod tests {
         assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 0);
     }
 
-    fn count_kill() {
-        KILL_COUNTER.fetch_add(1, Ordering::Relaxed);
-    }
-
     #[test]
     fn fail_fast_breaks_outer_loop_at_threshold() {
         let _guard = TEST_LOCK.lock().unwrap();
@@ -414,17 +401,4 @@ mod tests {
         assert_eq!(FAIL_COUNTER.load(Ordering::Relaxed), 7);
     }
 
-    #[test]
-    fn kill_stale_hook_invoked_once_before_scenarios() {
-        let _guard = TEST_LOCK.lock().unwrap();
-        reset_counters();
-        let s = Scenario { name: "pass-1", run: always_pass };
-        let config = RunnerConfig {
-            kill_stale: Some(&count_kill),
-            ..RunnerConfig::default()
-        };
-        let _ = run(&[&s], 3, false, &config);
-        assert_eq!(KILL_COUNTER.load(Ordering::Relaxed), 1);
-        assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 3);
-    }
 }

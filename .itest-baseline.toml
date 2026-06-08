@@ -1,7 +1,359 @@
+[scenarios.boot-reaches-heartbeat.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 1167.090602
+p95_duration_ms = 1175.7485000000001
+
+[[scenarios.boot-reaches-heartbeat.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 1274.783291
+p95_duration_ms = 1386.1716660000002
+
+[scenarios.deflake-ipi-pong.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 3219.9249550000004
+p95_duration_ms = 3241.963708
+
+[[scenarios.deflake-ipi-pong.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 3311.448125
+p95_duration_ms = 3402.673625
+
+[scenarios.deflake-shootdown-storm.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 3236.915623
+p95_duration_ms = 3260.244959
+
+[[scenarios.deflake-shootdown-storm.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 3315.25252
+p95_duration_ms = 3410.03275
+
+[scenarios.deflake-spawn-storm.current]
+commit = "0a56a95"
+runs = 40
+failures = 3
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 1909.8512319999998
+p95_duration_ms = 2293.2129579999996
+
+[[scenarios.deflake-spawn-storm.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 2320.5144999999998
+p95_duration_ms = 2416.797833
+
+[scenarios.frame-allocator-metrics.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 1160.517857
+p95_duration_ms = 1167.706542
+
+[[scenarios.frame-allocator-metrics.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 1263.426833
+p95_duration_ms = 1380.057875
+
+[scenarios.frame-allocator-oom.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 6480.138472000001
+p95_duration_ms = 6518.1715
+
+[[scenarios.frame-allocator-oom.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 6517.562019999999
+p95_duration_ms = 6572.734791
+
+[scenarios.heap-oom.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 4449.75677
+p95_duration_ms = 4490.759958
+
+[[scenarios.heap-oom.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 4532.621916
+p95_duration_ms = 4669.588083
+
 [scenarios.heartbeat-cadence.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 3154.422694
+p95_duration_ms = 3188.748833
+
+[[scenarios.heartbeat-cadence.history]]
 commit = "1264aa2"
 runs = 2
 failures = 0
 recorded_at = "2026-06-07T13:25:30.118074Z"
 mean_duration_ms = 2376.978875
 p95_duration_ms = 2381.905958
+
+[[scenarios.heartbeat-cadence.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 2772.5784999999996
+p95_duration_ms = 3161.520334
+
+[scenarios.ipi-self-wakeup.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 1399.964255
+p95_duration_ms = 1422.924375
+
+[[scenarios.ipi-self-wakeup.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 1390.5218539999998
+p95_duration_ms = 1398.434583
+
+[scenarios.kernel-heap-metrics.current]
+commit = "0a56a95"
+runs = 40
+failures = 2
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 2376.093536
+p95_duration_ms = 2407.8237919999997
+
+[[scenarios.kernel-heap-metrics.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 2362.4481250000003
+p95_duration_ms = 2390.320167
+
+[scenarios.kernel-runs-at-higher-half.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 141.660786
+p95_duration_ms = 151.100166
+
+[[scenarios.kernel-runs-at-higher-half.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 132.773958
+p95_duration_ms = 135.642458
+
+[scenarios.pre-init-order.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 1165.938681
+p95_duration_ms = 1174.637667
+
+[[scenarios.pre-init-order.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 1240.290687
+p95_duration_ms = 1318.400375
+
+[scenarios.sched-context-switch-smoke.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 1488.160219
+p95_duration_ms = 1521.5379169999999
+
+[[scenarios.sched-context-switch-smoke.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 1456.6736250000001
+p95_duration_ms = 1487.331084
+
+[scenarios.sched-context-switches-on-wire.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 423.382663
+p95_duration_ms = 1203.457209
+
+[[scenarios.sched-context-switches-on-wire.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 195.15225
+p95_duration_ms = 197.806417
+
+[scenarios.sched-span-survives-yield.current]
+commit = "0a56a95"
+runs = 40
+failures = 1
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 2154.936164
+p95_duration_ms = 2224.531709
+
+[[scenarios.sched-span-survives-yield.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 2195.993562
+p95_duration_ms = 2208.875833
+
+[scenarios.sched-spans-carry-task-id.current]
+commit = "0a56a95"
+runs = 40
+failures = 2
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 2422.178813
+p95_duration_ms = 2202.425917
+
+[[scenarios.sched-spans-carry-task-id.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 1199.241791
+p95_duration_ms = 1199.377833
+
+[scenarios.sched-spawn-registers-thread.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 194.589113
+p95_duration_ms = 205.75241699999998
+
+[[scenarios.sched-spawn-registers-thread.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 192.91725000000002
+p95_duration_ms = 194.585083
+
+[scenarios.sched-task-exits-cleanly.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 1164.54605
+p95_duration_ms = 1178.332083
+
+[[scenarios.sched-task-exits-cleanly.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 1158.496187
+p95_duration_ms = 1161.612083
+
+[scenarios.sched-yield-round-trips.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 3741.4493330000005
+p95_duration_ms = 3793.265375
+
+[[scenarios.sched-yield-round-trips.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 3765.664666
+p95_duration_ms = 3771.64075
+
+[scenarios.smp-secondary-hart-boots.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 197.870755
+p95_duration_ms = 208.331583
+
+[[scenarios.smp-secondary-hart-boots.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 194.876083
+p95_duration_ms = 194.917667
+
+[scenarios.smp-spawn-on-hart-1-runs.current]
+commit = "0a56a95"
+runs = 40
+failures = 0
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 2390.815235
+p95_duration_ms = 2419.1479170000002
+
+[[scenarios.smp-spawn-on-hart-1-runs.history]]
+commit = "0a56a95"
+runs = 2
+failures = 0
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 2366.6083750000003
+p95_duration_ms = 2396.833625
+
+[scenarios.workload-cooperative-baseline.current]
+commit = "0a56a95"
+runs = 40
+failures = 1
+recorded_at = "2026-06-08T00:42:25.503932Z"
+mean_duration_ms = 4342.709046999999
+p95_duration_ms = 4440.765667
+
+[[scenarios.workload-cooperative-baseline.history]]
+commit = "0a56a95"
+runs = 2
+failures = 1
+recorded_at = "2026-06-08T00:09:00.770373Z"
+mean_duration_ms = 3299.567083
+p95_duration_ms = 4394.889417

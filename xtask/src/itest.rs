@@ -137,9 +137,6 @@ pub fn run(
     let commit_for = current_commit_short;
 
     let config = RunnerConfig {
-        // kill_stale is intentionally None — the lock + warning combo
-        // above replaces the previous murder-everything approach.
-        kill_stale: None,
         one_shot_build: Some(&build),
         log_path_for: Some(&log_path_for),
         max_wait_for: Some(&max_wait_for),

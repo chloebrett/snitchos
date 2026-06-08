@@ -179,12 +179,15 @@ fn render_baseline(b: &Baseline) -> String {
     } else {
         100.0 * f64::from(b.failures) / f64::from(b.runs)
     };
+    let ci = crate::stats::wilson_score_95(b.failures, b.runs);
     let _ = write!(
         out,
-        "{}/{}  ({:.1}%) at {}, recorded {}",
+        "{}/{}  ({:.1}%, 95% CI [{:.1}%, {:.1}%]) at {}, recorded {}",
         b.failures,
         b.runs,
         pct,
+        ci.lower * 100.0,
+        ci.upper * 100.0,
         b.commit,
         b.recorded_at
             .format(&time::format_description::well_known::Rfc3339)
@@ -372,11 +375,13 @@ mod tests {
         let out = f.render_summary();
         assert!(out.contains("heartbeat-cadence"));
         // Current
-        assert!(out.contains("12/200  (6.0%) at bbb"));
+        assert!(out.contains("12/200  (6.0%, 95% CI ["));
+        assert!(out.contains("at bbb"));
         assert!(out.contains("recorded 2026-06-08T12:00:00Z"));
         // History (previous current pushed back)
         assert!(out.contains("history:"));
-        assert!(out.contains("5/100  (5.0%) at aaa"));
+        assert!(out.contains("5/100  (5.0%, 95% CI ["));
+        assert!(out.contains("at aaa"));
     }
 
     #[test]
