@@ -66,31 +66,38 @@ mod scenarios;
 /// catalog.
 use itest_harness::Scenario;
 
+// CPU-profile classification per plans/itest-parallel-scenarios.md
+// step 5. `cpu_bound` scenarios run real guest work between heartbeats
+// (allocator pressure, storm workloads, context-switch loops) and get
+// a serial pass in the parallel runner so they don't contend with each
+// other. `new` scenarios are wfi-bounded and fan out across the worker
+// pool. Initial classification is conservative — refine with `top`/`htop`
+// observation.
 const SCENARIOS: &[Scenario] = &[
-    Scenario { name: "boot-reaches-heartbeat",     run: scenarios::boot_reaches_heartbeat },
-    Scenario { name: "heartbeat-cadence",          run: scenarios::heartbeat_cadence },
-    Scenario { name: "pre-init-order",             run: scenarios::pre_init_order },
-    Scenario { name: "kernel-runs-at-higher-half", run: scenarios::kernel_runs_at_higher_half },
-    Scenario { name: "frame-allocator-metrics",    run: scenarios::frame_allocator_metrics },
-    Scenario { name: "frame-allocator-oom",        run: scenarios::frame_allocator_oom },
-    Scenario { name: "kernel-heap-metrics",        run: scenarios::kernel_heap_metrics },
-    Scenario { name: "sched-context-switch-smoke", run: scenarios::sched_context_switch_smoke },
-    Scenario { name: "sched-spawn-registers-thread", run: scenarios::sched_spawn_registers_thread },
-    Scenario { name: "sched-yield-round-trips",      run: scenarios::sched_yield_round_trips },
-    Scenario { name: "sched-spans-carry-task-id",    run: scenarios::sched_spans_carry_task_id },
-    Scenario { name: "sched-context-switches-on-wire", run: scenarios::sched_context_switches_on_wire },
-    Scenario { name: "sched-span-survives-yield",    run: scenarios::sched_span_survives_yield },
-    Scenario { name: "heap-oom",                   run: scenarios::heap_oom },
-    Scenario { name: "workload-cooperative-baseline", run: scenarios::workload_cooperative_baseline },
-    Scenario { name: "ipi-self-wakeup",            run: scenarios::ipi_self_wakeup },
-    Scenario { name: "smp-secondary-hart-boots",   run: scenarios::smp_secondary_hart_boots },
-    Scenario { name: "smp-spawn-on-hart-1-runs",   run: scenarios::smp_spawn_on_hart_1_runs },
-    Scenario { name: "deflake-spawn-storm",        run: scenarios::deflake_spawn_storm },
-    Scenario { name: "deflake-ipi-pong",           run: scenarios::deflake_ipi_pong },
-    Scenario { name: "deflake-shootdown-storm",    run: scenarios::deflake_shootdown_storm },
-    Scenario { name: "sched-task-exits-cleanly",   run: scenarios::sched_task_exits_cleanly },
-    Scenario { name: "deflake-mutex-storm",        run: scenarios::deflake_mutex_storm },
-    Scenario { name: "deflake-virtio-storm",       run: scenarios::deflake_virtio_storm },
+    Scenario::new       ("boot-reaches-heartbeat",      scenarios::boot_reaches_heartbeat),
+    Scenario::new       ("heartbeat-cadence",           scenarios::heartbeat_cadence),
+    Scenario::new       ("pre-init-order",              scenarios::pre_init_order),
+    Scenario::new       ("kernel-runs-at-higher-half",  scenarios::kernel_runs_at_higher_half),
+    Scenario::new       ("frame-allocator-metrics",     scenarios::frame_allocator_metrics),
+    Scenario::new       ("frame-allocator-oom",         scenarios::frame_allocator_oom),
+    Scenario::new       ("kernel-heap-metrics",         scenarios::kernel_heap_metrics),
+    Scenario::new       ("sched-context-switch-smoke",  scenarios::sched_context_switch_smoke),
+    Scenario::new       ("sched-spawn-registers-thread", scenarios::sched_spawn_registers_thread),
+    Scenario::cpu_bound ("sched-yield-round-trips",     scenarios::sched_yield_round_trips),
+    Scenario::new       ("sched-spans-carry-task-id",   scenarios::sched_spans_carry_task_id),
+    Scenario::new       ("sched-context-switches-on-wire", scenarios::sched_context_switches_on_wire),
+    Scenario::new       ("sched-span-survives-yield",   scenarios::sched_span_survives_yield),
+    Scenario::cpu_bound ("heap-oom",                    scenarios::heap_oom),
+    Scenario::cpu_bound ("workload-cooperative-baseline", scenarios::workload_cooperative_baseline),
+    Scenario::new       ("ipi-self-wakeup",             scenarios::ipi_self_wakeup),
+    Scenario::new       ("smp-secondary-hart-boots",    scenarios::smp_secondary_hart_boots),
+    Scenario::new       ("smp-spawn-on-hart-1-runs",    scenarios::smp_spawn_on_hart_1_runs),
+    Scenario::cpu_bound ("deflake-spawn-storm",         scenarios::deflake_spawn_storm),
+    Scenario::cpu_bound ("deflake-ipi-pong",            scenarios::deflake_ipi_pong),
+    Scenario::cpu_bound ("deflake-shootdown-storm",     scenarios::deflake_shootdown_storm),
+    Scenario::new       ("sched-task-exits-cleanly",    scenarios::sched_task_exits_cleanly),
+    Scenario::cpu_bound ("deflake-mutex-storm",         scenarios::deflake_mutex_storm),
+    Scenario::cpu_bound ("deflake-virtio-storm",        scenarios::deflake_virtio_storm),
 ];
 
 /// Entry point from `main`. `Some(name)` runs one scenario;
