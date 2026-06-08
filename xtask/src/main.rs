@@ -153,6 +153,20 @@ enum Cmd {
         /// Refuses to overwrite an existing pending file.
         #[arg(long, value_name = "RUN_DIR")]
         recover_pending: Option<std::path::PathBuf>,
+        /// Retroactively promote a completed run as the canonical
+        /// baseline. `--adopt-run` alone picks the most recent
+        /// `.itest-runs/<ts>/` directory; pass an explicit path to
+        /// adopt a specific run. Useful when you ran `cargo xtask
+        /// itest --repeat N` without `--update-baseline` and want
+        /// to keep the results. Previous canonical entries are
+        /// pushed to history.
+        #[arg(
+            long,
+            value_name = "RUN_DIR",
+            num_args = 0..=1,
+            default_missing_value = "@latest",
+        )]
+        adopt_run: Option<String>,
         /// Prune `.itest-runs/` to the most recent N directories.
         /// Pass with `--keep-last N`. Per-run NDJSON, metadata, and
         /// captured failure logs in older runs are removed.
@@ -278,7 +292,7 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, prune_runs, keep_last, export_prom, push_otlp, no_auto_push, jobs, cpu_jobs, profile } => {
+        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, adopt_run, prune_runs, keep_last, export_prom, push_otlp, no_auto_push, jobs, cpu_jobs, profile } => {
             if let Some(endpoint) = push_otlp {
                 return itest::push_otlp_metrics(endpoint);
             }
@@ -290,6 +304,14 @@ fn main() -> ExitCode {
             }
             if let Some(dir) = recover_pending {
                 return itest::recover_pending(dir);
+            }
+            if let Some(target) = adopt_run {
+                let run_dir = if target == "@latest" {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(target))
+                };
+                return itest::adopt_run(run_dir);
             }
             if promote_pending {
                 return itest::promote_pending();

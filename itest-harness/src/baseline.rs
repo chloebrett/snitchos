@@ -208,6 +208,30 @@ impl BaselineFile {
         file
     }
 
+    /// Retroactively adopt a completed run as the new canonical
+    /// baseline. Per-scenario rows are added via `update_current`, so
+    /// the previous `current` for each scenario lands in `history`.
+    /// No partial marker — adoption is a deliberate "promote this
+    /// run". Mutates `self` in place; caller decides whether to load
+    /// the existing canonical first (preserving the rest of history)
+    /// or start from `BaselineFile::new()` (full reset).
+    pub fn adopt_recovered(&mut self, recovered: &crate::history::RecoveredRun) {
+        let now = OffsetDateTime::now_utc();
+        for (name, stats) in &recovered.scenarios {
+            let baseline = Baseline {
+                commit: recovered.metadata.run.commit.clone(),
+                build_hash: recovered.metadata.run.build_hash.clone(),
+                runs: stats.runs,
+                failures: stats.failures,
+                recorded_at: now,
+                mean_duration_ms: stats.mean_duration_ms,
+                p95_duration_ms: stats.p95_duration_ms,
+                partial: None,
+            };
+            self.update_current(name, baseline);
+        }
+    }
+
     pub fn pending_path_for(canonical_path: &Path) -> PathBuf {
         let mut p = canonical_path.to_path_buf();
         let mut name = p
@@ -702,6 +726,57 @@ mod tests {
             other => panic!("expected NotFound, got {other:?}"),
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn adopt_recovered_pushes_previous_current_to_history_and_strips_partial() {
+        // Existing canonical: one prior run for heartbeat-cadence.
+        let mut file = BaselineFile::new();
+        file.update_current(
+            "heartbeat-cadence",
+            make_baseline("aaa", 200, 10, datetime!(2026-06-01 12:00:00 UTC)),
+        );
+
+        // A recovered run with fresh numbers for the same scenario.
+        let mut recovered_scenarios = BTreeMap::new();
+        recovered_scenarios.insert(
+            "heartbeat-cadence".to_string(),
+            crate::history::RecoveredScenario {
+                runs: 50,
+                failures: 1,
+                mean_duration_ms: Some(2100.0),
+                p95_duration_ms: Some(3200.0),
+            },
+        );
+        let recovered = crate::history::RecoveredRun {
+            metadata: crate::history::RunMetadata {
+                run: crate::history::RunMetadataInner {
+                    started_at: datetime!(2026-06-08 12:30:15 UTC),
+                    commit: "bbb1234".to_string(),
+                    build_hash: Some("hash-b".to_string()),
+                    requested_repeat: 50,
+                    fail_fast: None,
+                    scenarios: vec!["heartbeat-cadence".to_string()],
+                    hostname: None,
+                },
+            },
+            scenarios: recovered_scenarios,
+        };
+
+        file.adopt_recovered(&recovered);
+
+        let entry = &file.scenarios["heartbeat-cadence"];
+        let current = entry.current.as_ref().unwrap();
+        // Recovered numbers are now canonical.
+        assert_eq!(current.commit, "bbb1234");
+        assert_eq!(current.runs, 50);
+        assert_eq!(current.failures, 1);
+        // No partial marker — adopt is a deliberate promotion.
+        assert!(current.partial.is_none());
+        // Previous canonical is in history.
+        assert_eq!(entry.history.len(), 1);
+        assert_eq!(entry.history[0].commit, "aaa");
+        assert_eq!(entry.history[0].runs, 200);
     }
 
     #[test]
