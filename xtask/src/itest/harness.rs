@@ -60,6 +60,10 @@ pub struct Harness {
     /// Most recent kernel timestamp seen per hart id, from frames that
     /// carry both — pins which hart went quiet and how far it got.
     last_t_per_hart: BTreeMap<u32, u64>,
+    /// The runtime workload selected for this scenario (`-append
+    /// workload=<name>`), or `None` for the default demo. Recorded into a
+    /// failure capture so a flake says which variant it ran.
+    workload: Option<String>,
 }
 
 impl Harness {
@@ -152,6 +156,7 @@ impl Harness {
             capture_level: capture_level(),
             frame_histogram: BTreeMap::new(),
             last_t_per_hart: BTreeMap::new(),
+            workload: workload.map(str::to_string),
         })
     }
 
@@ -282,6 +287,7 @@ impl Harness {
             outcome: Some(outcome),
             error_origin: Some(ErrorOrigin::Scenario),
             error: None,
+            workload: self.workload.clone(),
             frames_seen: self.frames_seen,
             last_frame_wall_age_ms,
             last_t_per_hart: self.last_t_per_hart.clone(),

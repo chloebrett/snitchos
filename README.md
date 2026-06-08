@@ -129,14 +129,18 @@ QEMU and asserts on the decoded wire stream. Requires
 QEMU processes from prior `cargo xtask boot` or debug sessions are
 killed at suite start by default (`--keep-existing-qemus` to disable).
 
-Scenarios (v0.6 has 18):
+The suite builds **one** `itest-workloads` kernel and selects per-scenario
+via the `workload=<name>` bootarg (no per-scenario rebuilds; see
+[docs/runtime-workload-selection-design.md](docs/runtime-workload-selection-design.md)).
+Scenarios (25):
 
 - **Boot + telemetry**: `boot-reaches-heartbeat`, `heartbeat-cadence`, `pre-init-order`, `kernel-runs-at-higher-half`.
-- **Frame allocator**: `frame-allocator-metrics`, `frame-allocator-oom` (built with `--features oom-leak`).
-- **Kernel heap**: `kernel-heap-metrics`, `heap-oom` (built with `--features heap-oom`).
-- **Scheduler (v0.5)**: `sched-context-switch-smoke`, `sched-spawn-registers-thread`, `sched-yield-round-trips`, `sched-spans-carry-task-id`, `sched-context-switches-on-wire`, `sched-span-survives-yield`.
-- **Workload (v0.6 step 1)**: `workload-cooperative-baseline` — producer/consumer histogram correctness invariant holds (`histogram_sum >= samples_consumed`).
-- **SMP (v0.6 steps 7–10)**: `ipi-self-wakeup`, `smp-secondary-hart-boots`, `smp-spawn-on-hart-1-runs`, `smp-frames-carry-hart-1`.
+- **Frame allocator**: `frame-allocator-metrics`, `frame-allocator-oom` (`workload=frame-oom`).
+- **Kernel heap**: `kernel-heap-metrics`, `heap-oom` (`workload=heap-oom`).
+- **Scheduler (v0.5)**: `sched-context-switch-smoke`, `sched-spawn-registers-thread`, `sched-yield-round-trips`, `sched-spans-carry-task-id`, `sched-context-switches-on-wire`, `sched-span-survives-yield`, `sched-task-exits-cleanly`.
+- **Workload (v0.6)**: `workload-cooperative-baseline` (single-hart) and `smp-producer-consumer-correctness` (`workload=smp`, producer hart 0 / consumer hart 1) — producer/consumer histogram correctness invariant holds (`histogram_sum >= samples_consumed`), the latter across the hart boundary.
+- **SMP (v0.6 steps 7–10)**: `ipi-self-wakeup`, `smp-secondary-hart-boots`, `smp-spawn-on-hart-1-runs`.
+- **Stress storms**: `spawn-storm`, `ipi-pong`, `shootdown-storm`, `mutex-storm`, `virtio-storm` — cross-hart regression guards, each `workload=<name>`.
 
 Useful flags:
 

@@ -253,6 +253,12 @@ pub struct FailureCapture {
     /// The scenario's returned error string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The runtime-selected workload (`-append workload=<name>`) this
+    /// scenario booted, or `None` for the default demo. Records *which
+    /// variant* ran, for reproduction — the scenario name doesn't always
+    /// reveal it (label `oom` → workload `frame-oom`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<String>,
     /// Total telemetry frames observed before the failure.
     pub frames_seen: u32,
     /// Wall-clock gap, milliseconds, between the last frame and the
@@ -391,11 +397,32 @@ mod tests {
     }
 
     #[test]
+    fn capture_carries_runtime_workload_for_reproduction() {
+        // The runtime-selected workload (`-append workload=X`) is recorded
+        // so a failed scenario's capture says exactly how to reproduce it
+        // (the scenario→workload map isn't 1:1).
+        let cap = FailureCapture {
+            outcome: Some(WaitOutcome::Timeout),
+            workload: Some("frame-oom".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&cap).unwrap();
+        assert_eq!(json["workload"], "frame-oom");
+        let back: FailureCapture = serde_json::from_value(json).unwrap();
+        assert_eq!(back.workload.as_deref(), Some("frame-oom"));
+
+        // The default demo (no bootarg) omits the field.
+        let demo = FailureCapture { frames_seen: 1, ..Default::default() };
+        assert!(!serde_json::to_string(&demo).unwrap().contains("workload"));
+    }
+
+    #[test]
     fn capture_serializes_with_stable_field_shape_and_round_trips() {
         let cap = FailureCapture {
             outcome: Some(WaitOutcome::Timeout),
             error_origin: Some(ErrorOrigin::Scenario),
             error: Some("no kernel.heartbeat within 30s".to_string()),
+            workload: Some("smp".to_string()),
             frames_seen: 7,
             last_frame_wall_age_ms: Some(150),
             last_t_per_hart: BTreeMap::from([(0u32, 1_000u64)]),
