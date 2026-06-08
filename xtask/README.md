@@ -126,7 +126,13 @@ cargo xtask itest --export-prom /var/lib/node_exporter/textfile/snitchos-itest.p
 Atomic write: tmp file then `rename`, so the scraper can't catch a
 half-written file.
 
-**B. Live OTLP push** (uses the bundled stack):
+**Auto-push at end of run**: By default, every `cargo xtask itest`
+run that completes (or is interrupted) tries to push the canonical
+baseline to `http://127.0.0.1:9090/api/v1/otlp` and warns if the
+endpoint isn't reachable (1s connect timeout). Pass `--no-auto-push`
+to silence in CI / scripts.
+
+**B. Live OTLP push** (one-shot, no test run):
 
 ```bash
 cargo xtask stack up

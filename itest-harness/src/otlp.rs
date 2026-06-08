@@ -318,8 +318,27 @@ pub fn metrics_endpoint(base: &str) -> String {
 /// OTLP/HTTP receiver. Returns the HTTP status on a server response,
 /// or an `io::Error` on transport failure. Caller decides whether
 /// to retry.
-pub fn post(endpoint: &str, body: &[u8]) -> io::Result<u16> {
-    let agent = ureq::AgentBuilder::new().build();
+///
+/// `connect_timeout` bounds how long we wait for the TCP handshake;
+/// `read_timeout` bounds how long we wait for the receiver to send
+/// response bytes back. Pass `None` for "use the agent's default
+/// (effectively unbounded)". Auto-push at end of run sets a short
+/// connect timeout so a stack-not-running case fails fast instead
+/// of stalling the run for ~75s.
+pub fn post(
+    endpoint: &str,
+    body: &[u8],
+    connect_timeout: Option<std::time::Duration>,
+    read_timeout: Option<std::time::Duration>,
+) -> io::Result<u16> {
+    let mut builder = ureq::AgentBuilder::new();
+    if let Some(t) = connect_timeout {
+        builder = builder.timeout_connect(t);
+    }
+    if let Some(t) = read_timeout {
+        builder = builder.timeout_read(t);
+    }
+    let agent = builder.build();
     match agent
         .post(endpoint)
         .set("Content-Type", "application/x-protobuf")
@@ -334,10 +353,25 @@ pub fn post(endpoint: &str, body: &[u8]) -> io::Result<u16> {
 /// One-shot push: build the payload from `file`, POST to `endpoint`,
 /// return the HTTP status. `now_ns` is the timestamp stamped on every
 /// data point. Caller-supplied so tests are deterministic.
+///
+/// Uses ureq's default (effectively unbounded) timeouts. For the
+/// auto-push-at-end-of-run case use `push_with_timeout` so a missing
+/// stack doesn't stall the run.
 pub fn push(endpoint: &str, file: &BaselineFile, now_ns: u64) -> io::Result<u16> {
+    push_with_timeout(endpoint, file, now_ns, None, None)
+}
+
+/// Same as `push` with caller-supplied timeouts.
+pub fn push_with_timeout(
+    endpoint: &str,
+    file: &BaselineFile,
+    now_ns: u64,
+    connect_timeout: Option<std::time::Duration>,
+    read_timeout: Option<std::time::Duration>,
+) -> io::Result<u16> {
     let endpoint = metrics_endpoint(endpoint);
     let body = build_payload(file, now_ns);
-    post(&endpoint, &body)
+    post(&endpoint, &body, connect_timeout, read_timeout)
 }
 
 #[cfg(test)]

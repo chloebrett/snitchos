@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use itest_harness::{
     BaselineFile, ItestLock, LockError, RunnerConfig, SummaryOptions, aggregate_run_dir,
-    prune_runs as prune_runs_in, push_otlp, render_prometheus, write_atomic,
+    prune_runs as prune_runs_in, push_otlp, push_otlp_with_timeout, render_prometheus,
+    write_atomic,
 };
 
 use crate::qemu;
@@ -27,6 +28,11 @@ const LOCK_PATH: &str = ".itest.lock";
 /// tier 3 log copies). Each itest run creates a timestamped
 /// subdirectory under here. Gitignored.
 const HISTORY_ROOT: &str = ".itest-runs";
+
+/// Default OTLP receiver targeted by `--push-otlp` (no value) and the
+/// end-of-run auto-push. Matches `stack/docker-compose.yml`'s
+/// Prometheus container started with `--web.enable-otlp-receiver`.
+const DEFAULT_OTLP_ENDPOINT: &str = "http://127.0.0.1:9090/api/v1/otlp";
 
 /// Set by the SIGINT handler. First Ctrl-C trips this to `true`; the
 /// runner sees it at the next iteration boundary and writes a
@@ -101,6 +107,7 @@ pub fn run(
     force: bool,
     update_baseline: bool,
     fail_fast: Option<u32>,
+    auto_push: bool,
 ) -> ExitCode {
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
@@ -186,7 +193,64 @@ pub fn run(
         history_root: Some(PathBuf::from(HISTORY_ROOT)),
     };
 
-    itest_harness::run(&to_run, repeat, update_baseline, &config)
+    let outcome = itest_harness::run(&to_run, repeat, update_baseline, &config);
+
+    if auto_push {
+        try_auto_push();
+    }
+
+    outcome
+}
+
+/// Probe the bundled stack's OTLP receiver and push the canonical
+/// baseline if it answers. Warn (don't be silent) when it doesn't —
+/// the user opted in to live metrics by enabling auto-push (it's on
+/// by default), so silent skipping would hide the misconfiguration.
+///
+/// Bounded by a short connect timeout so a missing stack costs ~1s
+/// at the end of a run, not ureq's default ~75s.
+fn try_auto_push() {
+    let endpoint = DEFAULT_OTLP_ENDPOINT;
+    let baseline_path = Path::new(BASELINE_PATH);
+    let file = if baseline_path.exists() {
+        match BaselineFile::load_path(baseline_path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("auto-push: skipped — failed to parse {BASELINE_PATH}: {e}");
+                return;
+            }
+        }
+    } else {
+        // No baseline yet (e.g. first run on a fresh checkout).
+        // Nothing to push; silent skip is correct here.
+        return;
+    };
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    let connect_timeout = Some(std::time::Duration::from_secs(1));
+    let read_timeout = Some(std::time::Duration::from_secs(3));
+    match push_otlp_with_timeout(endpoint, &file, now_ns, connect_timeout, read_timeout) {
+        Ok(status) if (200..300).contains(&status) => {
+            eprintln!(
+                "auto-push: pushed {} scenarios to {endpoint} (HTTP {status})",
+                file.scenarios.len()
+            );
+        }
+        Ok(status) => {
+            eprintln!(
+                "auto-push: OTLP receiver at {endpoint} returned HTTP {status}.\n\
+                 Confirm the stack is healthy, or pass --no-auto-push to silence."
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "auto-push: OTLP receiver at {endpoint} not reachable ({e}).\n\
+                 Run `cargo xtask stack up`, or pass --no-auto-push to silence."
+            );
+        }
+    }
 }
 
 /// Promote `.itest-baseline.toml.pending` into the canonical baseline

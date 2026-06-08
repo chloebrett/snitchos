@@ -182,6 +182,13 @@ enum Cmd {
             default_missing_value = "http://127.0.0.1:9090/api/v1/otlp",
         )]
         push_otlp: Option<String>,
+        /// Disable the end-of-run auto-push. By default, after the
+        /// test run completes, we try to push the canonical baseline
+        /// to the bundled stack's OTLP receiver and warn if it's not
+        /// reachable. Pass this in CI / scripts where the warning is
+        /// noise.
+        #[arg(long, default_value_t = false)]
+        no_auto_push: bool,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -230,7 +237,7 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, prune_runs, keep_last, export_prom, push_otlp } => {
+        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, prune_runs, keep_last, export_prom, push_otlp, no_auto_push } => {
             if let Some(endpoint) = push_otlp {
                 return itest::push_otlp_metrics(endpoint);
             }
@@ -260,7 +267,7 @@ fn main() -> ExitCode {
                 }
                 eprintln!();
             }
-            itest::run(scenario.as_deref(), repeat, force, update_baseline, fail_fast)
+            itest::run(scenario.as_deref(), repeat, force, update_baseline, fail_fast, !no_auto_push)
         }
         Cmd::Loc => loc::run(),
         Cmd::Debug { features } => debug(&features),
