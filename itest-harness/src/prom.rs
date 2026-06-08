@@ -173,7 +173,8 @@ mod tests {
     fn render_skips_scenarios_without_current() {
         let mut f = BaselineFile::new();
         f.update_current("real", baseline_with(10, 0));
-        f.scenarios.insert("ghost".to_string(), Default::default());
+        f.scenarios
+            .insert("ghost".to_string(), crate::baseline::ScenarioBaseline::default());
         let out = render_prometheus(&f);
         assert!(out.contains("scenario=\"real\""));
         assert!(!out.contains("scenario=\"ghost\""));

@@ -428,7 +428,8 @@ mod tests {
     fn payload_skips_scenarios_without_current() {
         let mut f = BaselineFile::new();
         f.update_current("real", baseline_with(10, 0));
-        f.scenarios.insert("ghost".to_string(), Default::default());
+        f.scenarios
+            .insert("ghost".to_string(), crate::baseline::ScenarioBaseline::default());
         let body = build_payload(&f, 0);
         let decoded = ExportMetricsServiceRequest::decode(&*body).unwrap();
         let runs = decoded.resource_metrics[0].scope_metrics[0]

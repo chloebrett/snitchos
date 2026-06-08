@@ -21,6 +21,6 @@ pub(crate) fn baseline_with(runs: u32, failures: u32) -> Baseline {
         mean_duration_ms: Some(1200.0),
         p95_duration_ms: Some(1500.0),
         partial: None,
-        signature_counts: Default::default(),
+        signature_counts: std::collections::BTreeMap::new(),
     }
 }

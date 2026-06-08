@@ -222,12 +222,14 @@ pub fn aggregate_run_dir(run_dir: &Path) -> io::Result<RecoveredRun> {
     let metadata: RunMetadata =
         toml::from_str(&meta_str).map_err(|e| io::Error::other(e.to_string()))?;
 
-    let mut runs_per: std::collections::BTreeMap<String, u32> = Default::default();
-    let mut fails_per: std::collections::BTreeMap<String, u32> = Default::default();
-    let mut durations: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
     type SigMap = std::collections::BTreeMap<crate::signature::Signature, u32>;
-    let mut signature_counts: SigMap = Default::default();
-    let mut signatures_per: std::collections::BTreeMap<String, SigMap> = Default::default();
+    let mut runs_per: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    let mut fails_per: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    let mut durations: std::collections::BTreeMap<String, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    let mut signature_counts: SigMap = SigMap::new();
+    let mut signatures_per: std::collections::BTreeMap<String, SigMap> =
+        std::collections::BTreeMap::new();
 
     for row in read_iterations(&run_dir.join("iterations.ndjson"))? {
         let row = match row {
