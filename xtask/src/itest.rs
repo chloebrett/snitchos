@@ -370,7 +370,7 @@ pub fn discard_pending() -> ExitCode {
 /// `http://localhost:9090/api/v1/otlp` for Prometheus with
 /// `--web.enable-otlp-receiver`, or `http://localhost:4318` for the
 /// `OTel` collector default. `/v1/metrics` is appended automatically.
-pub fn push_otlp_metrics(endpoint: String) -> ExitCode {
+pub fn push_otlp_metrics(endpoint: &str) -> ExitCode {
     let baseline_path = Path::new(BASELINE_PATH);
     let file = if baseline_path.exists() {
         match BaselineFile::load_path(baseline_path) {
@@ -390,7 +390,7 @@ pub fn push_otlp_metrics(endpoint: String) -> ExitCode {
     let now_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos().min(u128::from(u64::MAX)) as u64);
-    match push_otlp(&endpoint, &file, now_ns) {
+    match push_otlp(endpoint, &file, now_ns) {
         Ok(status) if (200..300).contains(&status) => {
             eprintln!(
                 "Pushed {} scenarios to {} (HTTP {status})",
@@ -415,7 +415,7 @@ pub fn push_otlp_metrics(endpoint: String) -> ExitCode {
 /// scraping. Atomic write — half-rendered files never appear on disk.
 /// Exits 0 if the baseline file is absent (empty export is valid; an
 /// empty `.prom` file is also valid).
-pub fn export_prom(out_path: PathBuf) -> ExitCode {
+pub fn export_prom(out_path: &Path) -> ExitCode {
     let baseline_path = Path::new(BASELINE_PATH);
     let file = if baseline_path.exists() {
         match BaselineFile::load_path(baseline_path) {
@@ -429,7 +429,7 @@ pub fn export_prom(out_path: PathBuf) -> ExitCode {
         BaselineFile::new()
     };
     let body = render_prometheus(&file);
-    if let Err(e) = write_atomic(&out_path, &body) {
+    if let Err(e) = write_atomic(out_path, &body) {
         eprintln!("failed to write {}: {e}", out_path.display());
         return ExitCode::from(1);
     }
@@ -570,7 +570,7 @@ pub fn adopt_run(run_dir: Option<PathBuf>) -> ExitCode {
 /// at the wrong moment, etc.). Refuses if a pending file already
 /// exists — caller should `--discard-pending` or `--promote-pending`
 /// first, then re-run recovery.
-pub fn recover_pending(run_dir: PathBuf) -> ExitCode {
+pub fn recover_pending(run_dir: &Path) -> ExitCode {
     let canonical = Path::new(BASELINE_PATH);
     let pending = BaselineFile::pending_path_for(canonical);
     if pending.exists() {
@@ -585,7 +585,7 @@ pub fn recover_pending(run_dir: PathBuf) -> ExitCode {
         eprintln!("run directory does not exist: {}", run_dir.display());
         return ExitCode::from(1);
     }
-    let recovered = match aggregate_run_dir(&run_dir) {
+    let recovered = match aggregate_run_dir(run_dir) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("failed to aggregate run directory: {e}");

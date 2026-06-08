@@ -349,6 +349,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             workload::init_spsc();
             let _ = sched::spawn("workload_producer", workload::spsc_producer_entry);
         }
+        Some(WorkloadKind::SmpSpscBatch) => {
+            // Lock-free ring that fences per-batch (shared static, no split).
+            let _ = sched::spawn("workload_producer", workload::spsc_batch_producer_entry);
+        }
         // Default demo: `None`, and the OOM workloads, which keep the
         // standard tasks and only change the heartbeat.
         None | Some(WorkloadKind::FrameOom) | Some(WorkloadKind::HeapOom) => {
@@ -418,6 +422,9 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         }
         Some(WorkloadKind::SmpSpsc) => {
             let _ = sched::spawn_on(1, "workload_consumer", workload::spsc_consumer_entry);
+        }
+        Some(WorkloadKind::SmpSpscBatch) => {
+            let _ = sched::spawn_on(1, "workload_consumer", workload::spsc_batch_consumer_entry);
         }
         _ => {}
     }

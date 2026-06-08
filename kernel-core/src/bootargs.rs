@@ -17,8 +17,14 @@ pub enum WorkloadKind {
     Smp,
     /// As [`Smp`](Self::Smp) but over a lock-free `heapless::spsc`
     /// queue instead of `Mutex<VecDeque>` (v0.6 step 12). The A/B
-    /// counterpart for the lock-contention measurement.
+    /// counterpart for the lock-contention measurement. Fences
+    /// per-item.
     SmpSpsc,
+    /// As [`SmpSpsc`](Self::SmpSpsc) but over a batched ring
+    /// (`kernel_core::batch_ring`) that fences once *per batch* — the
+    /// controlled third variant isolating per-item vs per-batch
+    /// cross-hart fence cost.
+    SmpSpscBatch,
     /// Frame-allocator OOM: keep the default demo tasks, but the
     /// heartbeat leaks frames each tick until the pool exhausts.
     FrameOom,
@@ -79,6 +85,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
         .and_then(|name| match name {
             "smp" => Some(WorkloadKind::Smp),
             "smp-spsc" => Some(WorkloadKind::SmpSpsc),
+            "smp-spsc-batch" => Some(WorkloadKind::SmpSpscBatch),
             "frame-oom" => Some(WorkloadKind::FrameOom),
             "heap-oom" => Some(WorkloadKind::HeapOom),
             "spawn-storm" => Some(WorkloadKind::SpawnStorm),
@@ -104,6 +111,13 @@ mod tests {
         assert_eq!(select("workload=smp-spsc"), Some(WorkloadKind::SmpSpsc));
         // `smp-spsc` must not be mis-parsed as `smp`.
         assert_ne!(select("workload=smp-spsc"), Some(WorkloadKind::Smp));
+    }
+
+    #[test]
+    fn selects_smp_spsc_batch() {
+        assert_eq!(select("workload=smp-spsc-batch"), Some(WorkloadKind::SmpSpscBatch));
+        // Distinct from the per-item spsc variant.
+        assert_ne!(select("workload=smp-spsc-batch"), Some(WorkloadKind::SmpSpsc));
     }
 
     #[test]

@@ -20,6 +20,7 @@ use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use heapless::spsc::{Consumer, Producer, Queue};
+use kernel_core::batch_ring::BatchRing;
 use kernel_core::workload::{bin_of, Lcg, BUCKETS};
 
 use crate::sched;
@@ -260,6 +261,50 @@ pub extern "C" fn spsc_consumer_entry() -> ! {
             }
             // Release: same cross-hart publish as the Mutex consumer.
             SAMPLES_CONSUMED.fetch_add(n, Ordering::Release);
+        }
+        sched::yield_now();
+    }
+}
+
+// ---- Batched lock-free SPSC (`workload=smp-spsc-batch`) ----
+//
+// The controlled third variant: a lock-free ring that fences once *per
+// batch* (like the Mutex's per-batch lock) instead of per item (like
+// heapless). Isolates whether the high-burst SPSC slowdown is the
+// per-item Release fences. `BatchRing` is `Sync`, so both tasks share
+// the static directly — no split/handoff. Lock-free → LOCK_WAIT stays 0.
+
+static BATCH_RING: BatchRing<QUEUE_CAP> = BatchRing::new();
+
+pub extern "C" fn spsc_batch_producer_entry() -> ! {
+    let mut lcg = Lcg::new(PRODUCER_SEED);
+    loop {
+        let burst = BURST.load(Ordering::Relaxed);
+        crate::span!("workload.produce");
+        for _ in 0..burst {
+            let mut batch = [0u64; BATCH];
+            for slot in &mut batch {
+                *slot = lcg.next();
+            }
+            // One Release publishes the whole 64-item batch.
+            let pushed = BATCH_RING.enqueue_batch(&batch) as u64;
+            SAMPLES_PRODUCED.fetch_add(pushed, Ordering::Relaxed);
+        }
+        sched::yield_now();
+    }
+}
+
+pub extern "C" fn spsc_batch_consumer_entry() -> ! {
+    loop {
+        let burst = BURST.load(Ordering::Relaxed);
+        crate::span!("workload.consume");
+        for _ in 0..burst {
+            let mut buf = [0u64; BATCH];
+            let n = BATCH_RING.dequeue_batch(&mut buf);
+            for &s in &buf[..n] {
+                HISTOGRAM[bin_of(s, BUCKETS)].fetch_add(1, Ordering::Relaxed);
+            }
+            SAMPLES_CONSUMED.fetch_add(n as u64, Ordering::Release);
         }
         sched::yield_now();
     }

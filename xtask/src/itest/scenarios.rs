@@ -439,6 +439,9 @@ pub fn boot_reaches_heartbeat() -> Result<(), String> {
 /// between 10 ms and 10 s — loose enough to survive QEMU stalls but
 /// tight enough to catch a runaway or frozen timer.
 pub fn heartbeat_cadence() -> Result<(), String> {
+    const MIN_NS: u128 = 10_000_000; // 10 ms
+    const MAX_NS: u128 = 10_000_000_000; // 10 s
+
     let mut h = Harness::spawn("cadence")?;
 
     h.wait_for(SEC * 20, is_hello())
@@ -463,8 +466,6 @@ pub fn heartbeat_cadence() -> Result<(), String> {
     }
 
     let delta_ns = u128::from(t2 - t1) * 1_000_000_000 / u128::from(timebase_hz);
-    const MIN_NS: u128 = 10_000_000;        // 10 ms
-    const MAX_NS: u128 = 10_000_000_000;    // 10 s
     if !(MIN_NS..=MAX_NS).contains(&delta_ns) {
         return Err(format!(
             "heartbeat interval {delta_ns} ns is outside [{MIN_NS}, {MAX_NS}] ns \

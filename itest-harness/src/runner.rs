@@ -418,9 +418,9 @@ pub fn run(
             runs,
             update_baseline,
             config,
-            aggregator,
+            &aggregator,
             interrupted,
-            history_dir,
+            history_dir.as_deref(),
         );
     }
 
@@ -556,7 +556,15 @@ pub fn run(
         }
     }
 
-    finalize_run(scenarios, runs, update_baseline, config, aggregator, interrupted, history_dir)
+    finalize_run(
+        scenarios,
+        runs,
+        update_baseline,
+        config,
+        &aggregator,
+        interrupted,
+        history_dir.as_deref(),
+    )
 }
 
 /// Post-loop logic shared by the per-iteration path and stress mode:
@@ -568,9 +576,9 @@ fn finalize_run(
     runs: u32,
     update_baseline: bool,
     config: &RunnerConfig<'_>,
-    aggregator: Aggregator,
+    aggregator: &Aggregator,
     interrupted: bool,
-    history_dir: Option<PathBuf>,
+    history_dir: Option<&Path>,
 ) -> ExitCode {
     // Single-run path: no multi-run aggregate, but a one-off run that
     // flakes still reports which cause-bucket(s) it hit.
@@ -590,7 +598,7 @@ fn finalize_run(
         .baseline_file
         .as_deref()
         .and_then(load_baseline_or_warn);
-    print_baseline_comparisons(scenarios, &aggregator, baseline_file.as_ref());
+    print_baseline_comparisons(scenarios, aggregator, baseline_file.as_ref());
 
     if update_baseline {
         let commit = config
@@ -605,19 +613,17 @@ fn finalize_run(
                     "warning: interrupted with --update-baseline but no \
                      pending_baseline path was supplied"
                 );
-                return exit_code_with_interrupt(&aggregator, interrupted);
+                return exit_code_with_interrupt(aggregator, interrupted);
             };
             let partial = crate::baseline::PartialMarker {
                 requested_runs: runs,
                 interrupted_at: now,
-                run_dir: history_dir
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned()),
+                run_dir: history_dir.map(|p| p.to_string_lossy().into_owned()),
             };
             let pending = apply_current_run_to_baseline_with_partial(
                 BaselineFile::default(),
                 scenarios,
-                &aggregator,
+                aggregator,
                 &commit,
                 now,
                 Some(&partial),
@@ -638,12 +644,12 @@ fn finalize_run(
                 eprintln!(
                     "warning: --update-baseline requested but no baseline_file path was supplied"
                 );
-                return exit_code_with_interrupt(&aggregator, interrupted);
+                return exit_code_with_interrupt(aggregator, interrupted);
             };
             let updated = apply_current_run_to_baseline_with_partial(
                 baseline_file.unwrap_or_default(),
                 scenarios,
-                &aggregator,
+                aggregator,
                 &commit,
                 now,
                 None,
@@ -656,7 +662,7 @@ fn finalize_run(
         }
     }
 
-    exit_code_with_interrupt(&aggregator, interrupted)
+    exit_code_with_interrupt(aggregator, interrupted)
 }
 
 /// Run a batch of (iteration, scenario) work items across `workers`
@@ -739,6 +745,7 @@ fn run_parallel_batch<'a>(
 /// `Inline` (`test NAME ... ok`); parallel runs use `Prefixed`
 /// (`[NAME] ok`) so concurrent completions don't interleave
 /// half-printed lines.
+#[derive(Clone, Copy)]
 enum ScenarioFormat {
     Inline,
     Prefixed,
@@ -980,6 +987,13 @@ fn apply_current_run_to_baseline_with_partial(
 
 #[cfg(test)]
 mod tests {
+    // The `*_pass`/`*_fail` helpers below are used as `Scenario` fn
+    // pointers, whose type is fixed at `fn() -> Result<(), String>`, so
+    // their always-`Ok`/`Err` returns are required, not redundant.
+    #![allow(
+        clippy::unnecessary_wraps,
+        reason = "return type fixed by the Scenario fn-pointer signature"
+    )]
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};

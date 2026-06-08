@@ -118,9 +118,9 @@ mod tests {
         // Feed N samples through bin_sample; the sum of bins must be
         // exactly N. Always. No matter the seed, no matter the bin
         // distribution.
+        const N: u64 = 50_000;
         let mut hist = [0u64; BUCKETS];
         let mut lcg = Lcg::new(0xdead);
-        const N: u64 = 50_000;
         for _ in 0..N {
             bin_sample(&mut hist, lcg.next());
         }

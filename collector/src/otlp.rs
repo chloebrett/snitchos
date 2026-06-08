@@ -195,15 +195,15 @@ impl Exporter {
             .send_bytes(&buf)
         {
             Ok(resp) => {
+                // First few successful posts: print so the user knows
+                // they're flowing.
+                static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
                 let status = resp.status();
                 // Read the body so the connection releases.
                 let body = resp.into_string().unwrap_or_default();
                 if status != 200 {
                     eprintln!("otlp: POST status={status} body={body}");
                 }
-                // First few successful posts: print so the user knows
-                // they're flowing.
-                static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
                 let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n < 3 {
                     eprintln!(

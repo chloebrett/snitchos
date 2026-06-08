@@ -297,14 +297,14 @@ impl Harness {
     }
 
     fn dump_recent(&self, reason: &str) {
-        if self.recent.is_empty() {
-            eprintln!("  [{reason}: no frames arrived]");
-            return;
-        }
         // The ring may hold up to `TRANSCRIPT_TAIL_FRAMES` (or everything,
         // under `Full`); the inline dump only needs the last handful. The
         // persisted `.capture.json` sidecar carries the rest.
         const DUMP_TAIL: usize = 8;
+        if self.recent.is_empty() {
+            eprintln!("  [{reason}: no frames arrived]");
+            return;
+        }
         let skip = self.recent.len().saturating_sub(DUMP_TAIL);
         let shown = self.recent.len() - skip;
         eprintln!("  [{reason}: last {shown} of {} frame(s) seen]", self.recent.len());
@@ -351,6 +351,8 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
+        const REAPING_TIMEOUT: Duration = Duration::from_secs(5);
+
         // Stash the longest wait so the test runner can print it
         // after the scenario function returns. Thread-local because
         // scenarios run sequentially on the runner's main thread.
@@ -367,7 +369,6 @@ impl Drop for Harness {
         // than hang the test runner — and the next scenario would
         // run alongside a live competing QEMU, which is exactly the
         // kind of host-CPU contention that causes spurious flakes.
-        const REAPING_TIMEOUT: Duration = Duration::from_secs(5);
         let deadline = Instant::now() + REAPING_TIMEOUT;
         let mut reaped = false;
         while Instant::now() < deadline {

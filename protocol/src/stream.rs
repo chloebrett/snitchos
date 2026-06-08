@@ -76,7 +76,7 @@ impl OwnedFrame {
 /// mid-frame, read more"; any other error means "the bytes don't match
 /// the protocol," which is worth surfacing rather than silently
 /// spinning forever.
-pub fn try_decode_frame<'a>(buf: &'a [u8]) -> Result<(Frame<'a>, usize), postcard::Error> {
+pub fn try_decode_frame(buf: &[u8]) -> Result<(Frame<'_>, usize), postcard::Error> {
     postcard::take_from_bytes(buf).map(|(frame, rest)| (frame, buf.len() - rest.len()))
 }
 

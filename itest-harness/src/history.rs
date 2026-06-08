@@ -218,11 +218,12 @@ pub struct RecoveredRun {
 /// Malformed lines are skipped with a warning to stderr rather than
 /// failing the recovery — better partial-recovery than no-recovery.
 pub fn aggregate_run_dir(run_dir: &Path) -> io::Result<RecoveredRun> {
+    type SigMap = std::collections::BTreeMap<crate::signature::Signature, u32>;
+
     let meta_str = std::fs::read_to_string(run_dir.join("metadata.toml"))?;
     let metadata: RunMetadata =
         toml::from_str(&meta_str).map_err(|e| io::Error::other(e.to_string()))?;
 
-    type SigMap = std::collections::BTreeMap<crate::signature::Signature, u32>;
     let mut runs_per: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
     let mut fails_per: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
     let mut durations: std::collections::BTreeMap<String, Vec<u32>> =

@@ -361,7 +361,7 @@ enum ProfileFilter {
     Cpu,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone, Copy)]
 enum StackCmd {
     /// `docker compose up -d` the stack.
     Up,
@@ -421,16 +421,16 @@ fn main() -> ExitCode {
             skip,
         } => {
             if let Some(endpoint) = push_otlp {
-                return itest::push_otlp_metrics(endpoint);
+                return itest::push_otlp_metrics(&endpoint);
             }
             if let Some(out) = export_prom {
-                return itest::export_prom(out);
+                return itest::export_prom(&out);
             }
             if prune_runs {
                 return itest::prune_runs(keep_last);
             }
             if let Some(dir) = recover_pending {
-                return itest::recover_pending(dir);
+                return itest::recover_pending(&dir);
             }
             if let Some(target) = adopt_run {
                 let run_dir = if target == "@latest" {

@@ -27,6 +27,9 @@ cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
 cast_possible_wrap = "allow"
+# Exact float compares are intentional in test assertions (computed values
+# checked against known-exact expectations); prod logic doesn't do float ==.
+float_cmp = "allow"
 
 [profile.dev]
 panic = "abort"
