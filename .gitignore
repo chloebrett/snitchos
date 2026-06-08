@@ -27,14 +27,18 @@ target
 
 # Integration-test mutex lock. PID-stamped; cleaned up by Drop /
 # OS handle close. See itest-harness::lock + xtask/src/itest.rs.
-/.itest.lock
+# Unanchored — running xtask itest from a non-root cwd creates the
+# lock relative to that cwd; we want all of them ignored.
+.itest.lock
 
 # Pending partial baseline from an interrupted itest run.
 # Promote with `cargo xtask itest --promote-pending` or discard with
-# `--discard-pending`.
-/.itest-baseline.toml.pending
+# `--discard-pending`. Same anywhere-cwd reasoning as above.
+.itest-baseline.toml.pending
 
 # Per-run history directories (tier 2 NDJSON + tier 3 log copies).
-# One subdir per itest invocation. Pruned manually or by future
-# `cargo xtask itest --prune-runs`.
-/.itest-runs/
+# One subdir per itest invocation. Pruned manually or by
+# `cargo xtask itest --prune-runs`. Explicit `**/` makes the
+# at-any-depth match unambiguous (a trailing-slash-only pattern
+# anchored unexpectedly here on git 2.50).
+.itest-runs

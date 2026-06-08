@@ -1,5 +1,0 @@
-[run]
-started_at = "2026-06-08T02:18:27.124208Z"
-commit = "44f3f0f"
-requested_repeat = 1
-scenarios = ["boot-reaches-heartbeat"]

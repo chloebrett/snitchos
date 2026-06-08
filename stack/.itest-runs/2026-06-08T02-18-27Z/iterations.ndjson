@@ -1,1 +1,0 @@
-{"iteration":1,"scenario":"boot-reaches-heartbeat","started_at":"2026-06-08T02:18:27.137081Z","duration_ms":65,"result":"fail","error":"no Hello frame within 3s","log":"fail-boot-reaches-heartbeat-1.log"}
