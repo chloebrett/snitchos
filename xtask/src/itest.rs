@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use itest_harness::{
     BaselineFile, ItestLock, LockError, RunnerConfig, SummaryOptions, aggregate_run_dir,
-    prune_runs as prune_runs_in, render_prometheus, write_atomic,
+    prune_runs as prune_runs_in, push_otlp, render_prometheus, write_atomic,
 };
 
 use crate::qemu;
@@ -231,6 +231,52 @@ pub fn discard_pending() -> ExitCode {
         }
         Err(e) => {
             eprintln!("discard failed: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// One-shot push of the canonical baseline as OTLP/HTTP metrics to
+/// `endpoint`. Endpoint should be the OTLP receiver root, e.g.
+/// `http://localhost:9090/api/v1/otlp` for Prometheus with
+/// `--web.enable-otlp-receiver`, or `http://localhost:4318` for the
+/// OTel collector default. `/v1/metrics` is appended automatically.
+pub fn push_otlp_metrics(endpoint: String) -> ExitCode {
+    let baseline_path = Path::new(BASELINE_PATH);
+    let file = if baseline_path.exists() {
+        match BaselineFile::load_path(baseline_path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("failed to parse {BASELINE_PATH}: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        eprintln!("no baseline file at {BASELINE_PATH}; nothing to push");
+        return ExitCode::SUCCESS;
+    };
+    // Wall-clock nanoseconds since the epoch. Same timestamp on every
+    // data point in this batch — they're all observations of the
+    // same baseline at the same instant.
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    match push_otlp(&endpoint, &file, now_ns) {
+        Ok(status) if (200..300).contains(&status) => {
+            eprintln!(
+                "Pushed {} scenarios to {} (HTTP {status})",
+                file.scenarios.len(),
+                endpoint
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(status) => {
+            eprintln!("OTLP receiver returned HTTP {status} from {endpoint}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("OTLP push to {endpoint} failed: {e}");
             ExitCode::from(1)
         }
     }

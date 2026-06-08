@@ -167,6 +167,14 @@ enum Cmd {
         /// scraping into Grafana. Atomic write.
         #[arg(long, value_name = "PATH")]
         export_prom: Option<std::path::PathBuf>,
+        /// Push the canonical baseline live to an OTLP/HTTP metrics
+        /// receiver. Endpoint is the receiver root (e.g.
+        /// `http://localhost:9090/api/v1/otlp` for Prometheus with
+        /// `--web.enable-otlp-receiver`); `/v1/metrics` is appended
+        /// automatically. Useful in CI / cron / a post-run hook to
+        /// land flake-rate data in Grafana without a textfile-collector.
+        #[arg(long, value_name = "ENDPOINT")]
+        push_otlp: Option<String>,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -215,7 +223,10 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
-        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, prune_runs, keep_last, export_prom } => {
+        Cmd::Itest { scenario, repeat, force, skip_unit_tests, update_baseline, fail_fast, baseline_show, include_history, flakes_only, pending, promote_pending, discard_pending, recover_pending, prune_runs, keep_last, export_prom, push_otlp } => {
+            if let Some(endpoint) = push_otlp {
+                return itest::push_otlp_metrics(endpoint);
+            }
             if let Some(out) = export_prom {
                 return itest::export_prom(out);
             }

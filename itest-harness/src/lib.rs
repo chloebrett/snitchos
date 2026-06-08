@@ -13,6 +13,7 @@ pub mod aggregate;
 pub mod baseline;
 pub mod history;
 pub mod lock;
+pub mod otlp;
 pub mod prom;
 pub mod runner;
 pub mod stats;
@@ -26,6 +27,7 @@ pub use history::{
     PruneReport, RecoveredRun, RecoveredScenario, aggregate_run_dir, prune_runs,
 };
 pub use lock::{ItestLock, LockError};
+pub use otlp::{build_payload as build_otlp_payload, metrics_endpoint, push as push_otlp};
 pub use prom::{render_prometheus, write_atomic};
 pub use runner::{RunnerConfig, Scenario, run};
 pub use stats::{ConfidenceInterval, two_proportion_p_value, wilson_score_95};

@@ -501,10 +501,12 @@ dependencies = [
 name = "itest-harness"
 version = "0.0.1"
 dependencies = [
+ "prost",
  "serde",
  "serde_json",
  "time",
  "toml",
+ "ureq",
 ]
 
 [[package]]
