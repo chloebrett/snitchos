@@ -108,6 +108,14 @@ yes/no — name the specific symbol/line/site.
 ### A. Dead code & unused exports
 - Which `pub` items have **zero callers** outside their module *and* zero
   consumer-crate usage? (compiler won't warn on `pub` — you must grep.)
+- **Privatization is a dead-code detector.** `dead_code` analysis *skips* `pub`
+  items in `pub` modules. After confirming a module is internal-only (consumer
+  uses flat re-exports, not module paths), demoting `pub mod`→`mod` makes the
+  compiler check every `pub fn`/method inside it — and it will flag ones that
+  grep misses (e.g. methods called *only by tests*, which look "used" to a naive
+  grep). Do the demotion, then read the new warnings. (Test-only items that
+  survive: scope them `#[cfg(test)]` rather than deleting if they keep tests
+  readable; truly dead ones: delete.)
 - Should still-public-but-internal-only items be `pub(crate)` / private?
 - Any `#[allow(dead_code)]` / `#[expect(dead_code)]` — is the code waiting for a
   caller that never came?

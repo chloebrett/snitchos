@@ -47,8 +47,11 @@ impl Aggregator {
         Self::default()
     }
 
-    /// Record one scenario failure during the current run, untyped (no
-    /// cause-bucket). Equivalent to `record_fail_with_signature(_, None)`.
+    /// Test-only ergonomic recorder: an untyped failure (no cause-bucket),
+    /// equivalent to `record_fail_with_signature(_, None)`. Production
+    /// always records *with* a signature, so this exists only to keep the
+    /// aggregate tests terse.
+    #[cfg(test)]
     pub fn record_fail(&mut self, scenario: &str) {
         self.record_fail_with_signature(scenario, None);
     }
@@ -105,8 +108,10 @@ impl Aggregator {
         &self.run_totals
     }
 
-    /// Scenarios that failed at least once, with their cumulative
-    /// fail count across all runs. Iterated in lexicographic order.
+    /// Scenarios that failed at least once, with their cumulative fail
+    /// count across all runs, in lexicographic order. Test-only accessor:
+    /// production renders from `fail_count` / `signature_counts` directly.
+    #[cfg(test)]
     pub fn flaky(&self) -> impl Iterator<Item = (&str, u32)> + '_ {
         self.fail_count.iter().map(|(name, count)| (name.as_str(), *count))
     }

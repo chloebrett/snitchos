@@ -9,16 +9,20 @@
 //! See `plans/itest-harness-extraction.md` for the migration plan and
 //! the broader rationale.
 
-pub mod aggregate;
-pub mod baseline;
-pub mod history;
-pub mod lock;
-pub mod otlp;
-pub mod prom;
-pub mod runner;
-pub mod signature;
-pub mod stats;
-pub mod verdict;
+// Modules are private; the crate's public surface is exactly the flat
+// re-exports below (what `xtask` imports). Internal cross-module access
+// goes through `crate::<module>::` paths, which a private `mod` still
+// permits. (crate-audit finding #2.)
+mod aggregate;
+mod baseline;
+mod history;
+mod lock;
+mod otlp;
+mod prom;
+mod runner;
+mod signature;
+mod stats;
+mod verdict;
 
 // Flat re-exports are exactly what the consumer (`xtask`) imports. Items
 // used only inside this crate are reached via their `crate::<module>::`
