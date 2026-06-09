@@ -8,5 +8,10 @@ publish = false
 protocol = { path = "../protocol" }
 postcard = { version = "1", default-features = false }
 
+# loom is pulled in ONLY under `--cfg loom` (the model-check test run);
+# normal `cargo test` / the kernel build never see it. See tests/loom_tx.rs.
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
 [lints]
 workspace = true

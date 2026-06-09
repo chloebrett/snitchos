@@ -55,6 +55,11 @@ pub enum WorkloadKind {
     /// `IPI_WAKEUP` so the idle partner re-wakes. Task-driven; an
     /// alternation/wakeup cadence oracle.
     PingPong,
+    /// v0.7a first userspace: load the embedded `user/hello` program,
+    /// drop to U-mode on hart 1, and handle its one ambient telemetry
+    /// syscall. Hart 0 keeps heartbeating. Not a storm. (Available in
+    /// any build, not just `itest-workloads` — it's the real feature.)
+    Userspace,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -108,6 +113,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "virtio-storm" => Some(WorkloadKind::VirtioStorm),
             "tlb-shootdown" => Some(WorkloadKind::TlbShootdownVisible),
             "ping-pong" => Some(WorkloadKind::PingPong),
+            "userspace" => Some(WorkloadKind::Userspace),
             _ => None,
         })
 }
@@ -181,6 +187,16 @@ mod tests {
         // storm-classified: the default `hart_1_probe` is skipped and
         // its driver runs from `emit_storm_metrics`.
         assert!(WorkloadKind::TlbShootdownVisible.is_storm());
+    }
+
+    #[test]
+    fn selects_userspace() {
+        assert_eq!(select("workload=userspace"), Some(WorkloadKind::Userspace));
+    }
+
+    #[test]
+    fn userspace_is_not_a_storm() {
+        assert!(!WorkloadKind::Userspace.is_storm());
     }
 
     #[test]

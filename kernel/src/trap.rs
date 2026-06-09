@@ -129,7 +129,7 @@ pub struct TrapFrame {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn trap_handler(_frame: *mut TrapFrame) {
+pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
     let scause: u64;
     unsafe {
         asm!("csrr {}, scause", out(reg) scause);
@@ -137,8 +137,34 @@ pub extern "C" fn trap_handler(_frame: *mut TrapFrame) {
     match decode_scause(scause) {
         TrapCause::SupervisorTimerInterrupt => handle_timer(),
         TrapCause::SupervisorSoftwareInterrupt => crate::ipi::handle_pending(),
+        TrapCause::EnvCallFromUMode => {
+            // SAFETY: `frame` points at the `TrapFrame` `trap_entry` just
+            // built on this hart's kernel stack; we are its sole accessor
+            // for the duration of the handler.
+            handle_user_ecall(unsafe { &mut *frame });
+        }
         other => panic!("unhandled trap: {other:?} (scause={scause:#x})"),
     }
+}
+
+/// Handle an `ecall` from U-mode. v0.7a has one **ambient** syscall —
+/// `EmitMetric` — invoked with no capability check (the deliberate
+/// wrongness v0.7b repairs). Reads the syscall number from `a7` and the
+/// argument from `a0`, then advances `sepc` past the `ecall`.
+fn handle_user_ecall(frame: &mut TrapFrame) {
+    use snitchos_abi::Syscall;
+    match Syscall::from_usize(frame.a7 as usize) {
+        Some(Syscall::EmitMetric) => {
+            if let Some(id) = crate::user::user_metric_id() {
+                crate::tracing::emit_metric(id, frame.a0 as i64);
+            }
+            frame.a0 = 0; // success
+        }
+        None => frame.a0 = u64::MAX, // unknown syscall
+    }
+    // `ecall` is a 4-byte instruction; without advancing past it, `sret`
+    // would re-execute it and we'd trap on it forever.
+    frame.sepc = frame.sepc.wrapping_add(4);
 }
 
 /// Timer IRQ handler. Kept tiny: measure duration, arm the next

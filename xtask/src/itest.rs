@@ -100,6 +100,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario::new       ("sched-task-exits-cleanly",    scenarios::sched_task_exits_cleanly),
     Scenario::cpu_bound ("mutex-storm",         scenarios::mutex_storm),
     Scenario::cpu_bound ("virtio-storm",        scenarios::virtio_storm),
+    Scenario::cpu_bound ("userspace-emits-telemetry", scenarios::userspace_emits_telemetry),
 ];
 
 /// Set the process-wide failure-capture transcript depth. Call once at
@@ -265,10 +266,14 @@ pub fn run(config: RunConfig) -> ExitCode {
     // (additive guarantee), so default-demo scenarios use it as-is;
     // workload scenarios select via QEMU `-append`. No per-scenario
     // rebuilds. See `docs/runtime-workload-selection-design.md`.
-    let build = || {
-        qemu::build_kernel(&["itest-workloads"])
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+    let build = || match qemu::build_kernel(&["itest-workloads"]) {
+        // A non-zero exit (e.g. a compile error) MUST abort the run —
+        // otherwise the suite silently runs the previously-built (stale)
+        // kernel and reports bogus pass/fail. `map(|_| ())` used to drop
+        // the status and hide exactly that.
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("kernel build failed ({status})")),
+        Err(e) => Err(e.to_string()),
     };
     let log_path_for = |_scenario_name: &str| harness::take_last_log_path();
     let max_wait_for = harness::take_last_max_wait;
@@ -375,32 +380,59 @@ const UNIT_TEST_CRATES: &[(&str, &[&str])] = &[
 pub fn run_unit_tests() -> ExitCode {
     eprintln!("=== unit tests ===");
     for (crate_name, extra_args) in UNIT_TEST_CRATES {
-        eprint!("  {crate_name} ... ");
-        let status = std::process::Command::new("cargo")
-            .args(["test", "-p", crate_name, "--quiet"])
-            .args(*extra_args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .output();
-        match status {
-            Ok(out) if out.status.success() => eprintln!("ok"),
-            Ok(out) => {
-                eprintln!("FAILED");
-                // Surface the actual test failure output so the user
-                // doesn't have to re-run with --verbose.
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                for line in stderr.lines() {
-                    eprintln!("    {line}");
-                }
-                return ExitCode::from(1);
-            }
-            Err(e) => {
-                eprintln!("FAILED to invoke cargo: {e}");
-                return ExitCode::from(1);
-            }
+        let mut args = vec!["test", "-p", crate_name, "--quiet"];
+        args.extend_from_slice(extra_args);
+        if !run_cargo_test(crate_name, &args, &[]) {
+            return ExitCode::from(1);
         }
     }
+    // The loom model-check tests (kernel-core/tests/loom_tx.rs) live
+    // behind `--cfg loom`, where loom swaps in its own Mutex/thread/
+    // UnsafeCell. They need a separate compilation with that cfg set; a
+    // normal `cargo test` compiles the file to nothing. The config-level
+    // rustflags are riscv-target-scoped, so overriding RUSTFLAGS for this
+    // host build clobbers nothing.
+    if !run_cargo_test(
+        "kernel-core (loom)",
+        &["test", "-p", "kernel-core", "--test", "loom_tx", "--quiet"],
+        &[("RUSTFLAGS", "--cfg loom")],
+    ) {
+        return ExitCode::from(1);
+    }
     ExitCode::SUCCESS
+}
+
+/// Run one `cargo test` invocation, printing `ok`/`FAILED` for `label`.
+/// On failure surfaces the captured stderr so the user needn't re-run
+/// with `--verbose`. `env` overrides are applied to the child (e.g.
+/// `RUSTFLAGS=--cfg loom`). Returns `true` iff the suite passed.
+fn run_cargo_test(label: &str, args: &[&str], env: &[(&str, &str)]) -> bool {
+    eprint!("  {label} ... ");
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            eprintln!("ok");
+            true
+        }
+        Ok(out) => {
+            eprintln!("FAILED");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            for line in stderr.lines() {
+                eprintln!("    {line}");
+            }
+            false
+        }
+        Err(e) => {
+            eprintln!("FAILED to invoke cargo: {e}");
+            false
+        }
+    }
 }
 
 fn qemu_available() -> bool {

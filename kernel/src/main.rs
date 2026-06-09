@@ -370,7 +370,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::MutexStorm)
         | Some(WorkloadKind::VirtioStorm)
         | Some(WorkloadKind::TlbShootdownVisible)
-        | Some(WorkloadKind::PingPong) => {}
+        | Some(WorkloadKind::PingPong)
+        // Userspace: hart 0 just heartbeats; the user program is placed on
+        // hart 1 after SECONDARY_READY.
+        | Some(WorkloadKind::Userspace) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -410,7 +413,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // storm workloads, which drive hart 1 themselves (or keep it idle
     // so a heartbeat-driven storm can poke it with maximum "fresh
     // trap" race exposure).
-    if !selected.is_some_and(WorkloadKind::is_storm) {
+    if !selected.is_some_and(|w| w.is_storm() || w == WorkloadKind::Userspace) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
     }
 
@@ -428,6 +431,13 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         }
         Some(WorkloadKind::SmpSpscBatch) => {
             let _ = sched::spawn_on(1, "workload_consumer", workload::spsc_batch_consumer_entry);
+        }
+        // v0.7a first userspace: register the ambient telemetry counter on
+        // hart 0, then run the user program on hart 1 (hart 0 keeps
+        // heartbeating). `user_main_entry` loads + drops to U-mode.
+        Some(WorkloadKind::Userspace) => {
+            user::init_metric();
+            let _ = sched::spawn_on(1, "user_main", user::user_main_entry);
         }
         _ => {}
     }

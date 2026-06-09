@@ -401,12 +401,13 @@ fn emit_storm_metrics(m: &Metrics, count: i64) {
             emit!(m, ping_turns = crate::storms::ping_pong::PING_TURNS.load(Ordering::Relaxed));
             emit!(m, pong_turns = crate::storms::ping_pong::PONG_TURNS.load(Ordering::Relaxed));
         }
-        // No storm selected (default / Smp* / OOM): nothing to emit.
+        // No storm selected (default / Smp* / OOM / userspace): nothing to emit.
         None
         | Some(WorkloadKind::Smp)
         | Some(WorkloadKind::SmpSpsc)
         | Some(WorkloadKind::SmpSpscBatch)
         | Some(WorkloadKind::FrameOom)
-        | Some(WorkloadKind::HeapOom) => {}
+        | Some(WorkloadKind::HeapOom)
+        | Some(WorkloadKind::Userspace) => {}
     }
 }

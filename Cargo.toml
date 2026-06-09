@@ -17,6 +17,12 @@ exclude = ["learning"]
 # legitimate address/size/duration `as` math that the cast lints fire ~200×
 # and are overwhelmingly correct-by-context — a blanket warn there is noise,
 # not signal. Audit a specific suspect truncation with `try_into()` instead.
+[workspace.lints.rust]
+# `--cfg loom` is set via RUSTFLAGS for the kernel-core loom model-check
+# tests (tests/loom_tx.rs). Declare it so check-cfg doesn't flag the
+# `#[cfg(loom)]` gates as unexpected.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"

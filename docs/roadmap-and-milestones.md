@@ -82,6 +82,7 @@ Polish, hardening, a coherent demo, and a wrap-up of the blog/video series. The 
 # Post-v1.0 (sequenced loosely)
 - **v1.1 — Audio.** Over-engineered audio subsystem: sub-millisecond deadlines as a first-class concern, RT scheduling, audio-specific observability (per-buffer traces, XRun forensics, latency histograms). Its own multi-post arc. Optimize hard for demo interestingness here.
 - **v1.2 — Real network stack.** smoltcp as a capability-isolated userspace component over virtio-net. Replaces the host-bridge cheat. Every packet a span; watch TCP slow-start in Grafana.
+- **virtio RX → kernel shell → telemetry control plane.** Build the device-*writeable* receive path on the virtio-console: pre-posted buffers, `DESC_F_WRITE`, and **interrupt-driven** completion — the RX dual of today's polled TX (retires `transmit`'s "polling, not interrupt-driven" weakness). First consumer is a minimal kernel REPL (`ps`, `meminfo`, `tasks`) over the console; then a host→kernel `Frame` control plane reusing the *same* command dispatch — the collector pushes runtime knobs (trace verbosity, workload select, heartbeat interval). One dispatch table, two front-ends: a human line-parser and a `Frame` decoder. The hard part (RX + IRQ virtqueue) is shared; REPL vs control-plane is just what sits on top. Strong candidate to pull in pre-v1.0 — the interactive shell is a cheap, demoable first consumer, and the control plane is squarely on the observability thesis. Post-caps, the control plane becomes a capability-mediated surface. **Post angle:** "the kernel starts taking orders from its observer."
 - **FS deepening — CoW + snapshots, then content-addressed + Merkle.** Additive behind the v0.9 `Filesystem` trait. Filesystem-as-Git. "The day SnitchOS learned to remember things."
 - **Borg-style two-tier scheduler.** Latency-sensitive + batch tiers, SLO-driven scheduling, counterfactual analysis.
 - **WASM userspace.** WASM as a universal portable runtime; capabilities map onto WASM imports.
@@ -92,5 +93,6 @@ Milestone numbers are contiguous (v0.1…v0.11, v1.0). Punted/unscheduled work l
 
 # Open questions
 - Exact audio insertion point — v1.1 is the current plan, but there are factors pushing it both earlier and later. Tracked on the Audio sub-page.
+- Whether to pull the **virtio RX → kernel shell → control plane** work in pre-v1.0 (currently in the post-v1.0 list). The RX+IRQ virtqueue path is useful infrastructure regardless, the REPL is a tangible demo, and the control plane is on-thesis — but a host→kernel command surface arguably wants the v0.7b capability layer underneath it first.
 - Whether to interleave a non-FS milestone between v0.9 and the FS-deepening work to avoid an FS-heavy stretch.
 - aarch64 timing.

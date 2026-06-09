@@ -1178,3 +1178,39 @@ pub fn virtio_storm() -> Result<(), String> {
     )?;
     Ok(())
 }
+
+/// v0.7a first userspace (`workload=userspace`): the embedded `user/hello`
+/// is loaded into the boot table's low half, the kernel drops to U-mode on
+/// hart 1, and the program issues one ambient `EmitMetric` syscall. We assert:
+///
+///   1. `snitchos.user.telemetry_total` appears — proving the whole chain:
+///      ELF load + per-segment map with the `U` bit + sret-to-U + U-mode
+///      executes + the `ecall` traps back + the handler emits on its behalf.
+///   2. Its value is 42 — the argument `hello` passes in `a0` crossed the
+///      U→S boundary intact.
+///   3. A `kernel.heartbeat` arrives after — hart 0 kept ticking while
+///      hart 1 ran userspace.
+pub fn userspace_emits_telemetry() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("userspace", "userspace")?;
+
+    let frame = h
+        .wait_for(SEC * 10, is_metric_named("snitchos.user.telemetry_total"))
+        .ok_or(
+            "no snitchos.user.telemetry_total within 10s — userspace never \
+             reached the syscall (ELF load / map(U) / sret-to-U / ecall path broke?)",
+        )?;
+    let value = match frame {
+        OwnedFrame::Metric { value, .. } => value,
+        _ => return Err("matched non-metric (impossible)".to_string()),
+    };
+    if value != 42 {
+        return Err(format!(
+            "user telemetry value = {value}, expected 42 (the arg hello passes in a0)"
+        ));
+    }
+
+    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat after the userspace syscall — hart 0 wedged while hart 1 ran U?")?;
+
+    Ok(())
+}

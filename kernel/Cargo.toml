@@ -20,6 +20,7 @@ spin = "0.10"
 protocol = { path = "../protocol" }
 postcard = { version = "1", default-features = false }
 kernel-core = { path = "../kernel-core" }
+snitchos-abi = { path = "../abi" }
 linked_list_allocator = { version = "0.10", default-features = false }
 # Lock-free SPSC ring for the `workload=smp-spsc` variant (v0.6 step 12).
 heapless = "0.8"
