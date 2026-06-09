@@ -2,7 +2,9 @@
 
 *Mechanism in the kernel, policy in userspace. Synchronous by default. Capability-gated. Every message traced.*
 
-Not built until v0.7. Designed now because the IPC message format and the trace-context commitment shape the observability protocol and the kernel boundary.
+Not built until v0.8. Designed now because the IPC message format and the trace-context commitment shape the observability protocol and the kernel boundary.
+
+> **Numbering note:** this page predates the SMP insertion at v0.6, which pushed everything downstream forward by one. IPC (synchronous endpoints + notifications) now lands at **v0.8** (was v0.7); userspace + capabilities are the preceding **v0.7a/v0.7b**. References below have been updated accordingly. See `docs/roadmap-and-milestones.md` for the current sequence.
 
 # Stated philosophy: "don't communicate by sharing memory" — at the OS level
 Go's slogan — *don't communicate by sharing memory; share memory by communicating* — is the guiding philosophy, but it reframes at the OS level.
@@ -56,7 +58,7 @@ Consequences:
 - The IPC message format reserves a first-class slot for trace context.
 - The kernel's IPC path touches the tracing system.
 - The mechanism: the current span is per-thread kernel state ("span context lives in the task struct"); the IPC path copies it into the message automatically.
-- The v0.1 protocol's `parent_id` field is the seed of this. IPC at v0.7 is where it grows up.
+- The v0.1 protocol's `parent_id` field is the seed of this. IPC at v0.8 is where it grows up.
 
 This is the feature that makes the observability pillar impressive: "watch a single trace flow through five userspace services and the kernel" is the demo.
 
@@ -83,7 +85,7 @@ Mild gravitational pull worth noting: the software that runs well on SnitchOS is
 - Trace context is a first-class kernel-populated slot in every IPC message; mechanism is per-thread span context in the task struct.
 - Compatibility: Rust source portability + WASM. POSIX IPC explicitly unsupported — a deliberate, accepted cost.
 
-# Open / deferred to v0.7
+# Open / deferred to v0.8
 - Abortable / timeout send semantics for deadlock mitigation.
 - Exact message-register count and inline payload size.
 - Server loop shape and multi-client handling conventions.

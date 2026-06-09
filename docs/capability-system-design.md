@@ -2,14 +2,16 @@
 
 *No ambient authority. Every resource access goes through an unforgeable handle. The project's second pillar.*
 
-Not built until v0.6b. Designed now because it is a compounding decision — the kernel/userspace boundary, IPC, and the syscall surface all assume this shape.
+Not built until v0.7b. Designed now because it is a compounding decision — the kernel/userspace boundary, IPC, and the syscall surface all assume this shape.
+
+> **Numbering note:** this page predates the SMP insertion at v0.6, which pushed everything downstream forward by one. References below have been updated: capabilities land at **v0.7b** (was v0.6b), the deliberately-wrong first syscall at **v0.7a** (was v0.6a), and IPC endpoints/notifications at **v0.8** (was v0.7). See `docs/roadmap-and-milestones.md` for the current sequence.
 
 # The kernel surface: "invoke a capability"
 **Framing: one conceptual operation.** The kernel API is, conceptually, a single operation: *invoke a capability*. "Syscalls" are messages to the kernel's own objects or to userspace services. This is the seL4 framing and it is the story SnitchOS tells about its kernel surface.
 
 **Reality: a small enumerated set.** Mechanically there are a few distinct trap entry points — capability invocation, plus a couple of primitives like yield and a debug/telemetry escape hatch. This is fine; even seL4 has a handful of distinct kernel operations. The conceptual model is "invoke a capability"; the implementation is "a small fixed set." b-framing, c-reality.
 
-This decision *is* the v0.6a → v0.6b narrative: v0.6a builds one ambient syscall deliberately the wrong way; v0.6b refactors it into capability invocation.
+This decision *is* the v0.7a → v0.7b narrative: v0.7a builds one ambient syscall deliberately the wrong way; v0.7b refactors it into capability invocation.
 
 # What a capability is
 
@@ -32,26 +34,26 @@ The set of things a capability can point at, in roughly the order milestones nee
 - **Thread** — a thread of execution (v0.5)
 - **AddressSpace** — a virtual address space / page table (v0.4–0.6)
 - **MemoryRegion** — a chunk of physical memory that can be mapped (v0.4)
-- **Endpoint** — an IPC channel endpoint (v0.7)
-- **Notification** — the lightweight signal primitive, separate from IPC (v0.7)
+- **Endpoint** — an IPC channel endpoint (v0.8)
+- **Notification** — the lightweight signal primitive, separate from IPC (v0.8)
 - **Interrupt** — the right to receive a hardware interrupt (v0.3+)
-- **CapTable** — a process's own capability table, so capabilities can be granted and revoked (v0.6b)
+- **CapTable** — a process's own capability table, so capabilities can be granted and revoked (v0.7b)
 - **TelemetrySink** — *(provisional)* a capability to emit telemetry. A userspace component can only emit telemetry if it holds this capability — observability becomes capability-governed, and you can see and control who is allowed to snitch. **Flagged as provisional**: revisit if it does not pay off in practice; telemetry could instead stay an ambient kernel service.
 
 # The kernel snitches freely; userspace needs a cap
-Tension: if telemetry is a capability, the kernel needs that capability to emit its own spans — but the kernel emits telemetry from v0.1, long before capabilities exist (v0.6b).
+Tension: if telemetry is a capability, the kernel needs that capability to emit its own spans — but the kernel emits telemetry from v0.1, long before capabilities exist (v0.7b).
 
 Resolution: the **kernel's own** telemetry emission is ambient and direct — it is the kernel, it is allowed to do anything. `TelemetrySink` capabilities govern only **userspace components** emitting telemetry. The rule: *userspace needs a capability to snitch; the kernel snitches freely.* Capabilities govern the boundary, not the kernel's internals. Nothing about v0.1 changes.
 
-# Capability operations (sketch — detailed at v0.6b)
+# Capability operations (sketch — detailed at v0.7b)
 - **Invoke** — the one operation; do the thing the capability authorizes.
 - **Grant / transfer** — pass a capability to another process, through IPC (see IPC page).
 - **Attenuate** — derive a weaker capability (fewer rights) to the same object.
-- **Revoke** — invalidate a capability. Revocation strategy (membranes / generation numbers / capability lists / time bounds) is its own design discussion, deferred to v0.6b. Earlier conversation leaned: membranes as default, time-bounds as attenuation, generation numbers as fallback.
+- **Revoke** — invalidate a capability. Revocation strategy (membranes / generation numbers / capability lists / time bounds) is its own design discussion, deferred to v0.7b. Earlier conversation leaned: membranes as default, time-bounds as attenuation, generation numbers as fallback.
 - Capabilities cannot be forged or synthesized from thin air. The kernel mediates every transfer.
 
 # Bootstrap
-Root capabilities are granted to the `init` process only. All other capabilities flow from there, by grant and attenuation, through IPC. This is the delicate part of any capability system — detailed when v0.6b is planned.
+Root capabilities are granted to the `init` process only. All other capabilities flow from there, by grant and attenuation, through IPC. This is the delicate part of any capability system — detailed when v0.7b is planned.
 
 # Observability angle
 Every capability invocation is observable — a span or event. "Watch every authority decision in the system" is a natural SnitchOS demo and ties the two pillars (observability + capabilities) together directly.
@@ -64,7 +66,7 @@ Every capability invocation is observable — a span or event. "Watch every auth
 - `TelemetrySink` as a capability: **provisional**, revisit if it does not pay off.
 - Kernel telemetry is ambient; userspace telemetry is capability-governed.
 
-# Open / deferred to v0.6b
+# Open / deferred to v0.7b
 - Revocation strategy in detail.
 - Bootstrap sequence in detail.
 - Whether the kernel adopts capabilities internally, and where.

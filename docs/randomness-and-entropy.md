@@ -1,6 +1,8 @@
 # 🎲 Randomness & entropy
 
-*Not a v0.1 concern. Lands around v0.6b. Captured now so the decisions aren't re-litigated later.*
+*Not a v0.1 concern. Lands around v0.7b. Captured now so the decisions aren't re-litigated later.*
+
+> **Numbering note:** this page predates the SMP insertion at v0.6, which pushed everything downstream forward by one. The CSPRNG now lands around **v0.7b** (was v0.6b). References below have been updated. See `docs/roadmap-and-milestones.md` for the current sequence.
 
 # The core distinction: uniqueness vs. unpredictability
 The single most useful idea in this area. Two different properties, two different right tools:
@@ -59,7 +61,7 @@ A CSPRNG is deterministic — it expands a seed. If the attacker knows or can gu
 
 # Recommendation for SnitchOS
 - **v0.1 (now): build no RNG.** Span IDs are counters. No randomness is needed yet.
-- **v0.6b (capabilities) onward:** introduce a single kernel CSPRNG instance (ChaCha20-based), seeded at boot from the best available source, behind an `Rng` / `EntropySource` trait so the seeding backend is swappable. Seed priority: `virtio-rng` → RISC-V `seed` CSR → device-tree seed → cycle-counter jitter. Reseed periodically as entropy accumulates.
+- **v0.7b (capabilities) onward:** introduce a single kernel CSPRNG instance (ChaCha20-based), seeded at boot from the best available source, behind an `Rng` / `EntropySource` trait so the seeding backend is swappable. Seed priority: `virtio-rng` → RISC-V `seed` CSR → device-tree seed → cycle-counter jitter. Reseed periodically as entropy accumulates.
 - **The trait matters more than the algorithm.** Same principle as everywhere else: `Rng`/`EntropySource` is the interface, ChaCha is one implementation, the seed source is pluggable. Porting to aarch64 or real hardware changes only the seeding backend.
 - **Scope honesty.** "ChaCha20 CSPRNG + virtio-rng seed + periodic reseed + a trait boundary" is the right amount of engineering for V1. It is *not* a hardened production entropy subsystem (Linux's `random.c` is thousands of lines: entropy estimation, multiple pools, reseed scheduling, premature-use handling). That depth can become its own milestone later if it gets interesting.
 
@@ -69,7 +71,7 @@ The entropy subsystem should itself be traced — estimated entropy at boot, eac
 # Decisions locked
 - Span IDs: per-CPU-partitioned `u64` counter. No RNG.
 - No randomness subsystem in v0.1.
-- CSPRNG arrives ~v0.6b: ChaCha20-based, behind an `Rng`/`EntropySource` trait.
+- CSPRNG arrives ~v0.7b: ChaCha20-based, behind an `Rng`/`EntropySource` trait.
 - Seed source priority: virtio-rng → RISC-V `seed` CSR → device-tree seed → timing jitter.
 - Mersenne Twister: never used for anything security-relevant.
 - Entropy subsystem is traced like everything else.
