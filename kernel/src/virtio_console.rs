@@ -113,39 +113,6 @@ unsafe fn queue_config(sel: u32, queue: *const Virtqueue) -> kernel_core::virtio
     }
 }
 
-/// Diagnostic: dump magic/version/device-id for every virtio-mmio slot.
-/// Use this to figure out why discovery isn't matching what you expect.
-/// Kept around as a tool, not wired into the boot path.
-#[expect(dead_code, reason = "diagnostic; kept as a debugging tool, not wired into boot")]
-fn probe_all_slots(dtb: &Fdt) {
-    for node in dtb.all_nodes() {
-        let is_virtio = node
-            .compatible()
-            .map(|c| c.all().any(|s| s == "virtio,mmio"))
-            .unwrap_or(false);
-        if !is_virtio {
-            continue;
-        }
-
-        let Some(reg) = node.reg().and_then(|mut r| r.next()) else {
-            continue;
-        };
-        let base = reg.starting_address as usize;
-
-        // SAFETY: the DTB told us this is a virtio-mmio register region.
-        let magic = unsafe { read_reg(base, REG_MAGIC_VALUE) };
-        let version = unsafe { read_reg(base, REG_VERSION) };
-        let device_id = unsafe { read_reg(base, REG_DEVICE_ID) };
-        crate::println!(
-            "virtio-mmio @ {:#x}: magic={:#x} version={} device_id={}",
-            base,
-            magic,
-            version,
-            device_id,
-        );
-    }
-}
-
 /// Walk the DTB for `virtio,mmio` slots, probe each, and return the
 /// MMIO base of the first one whose attached device is a
 /// virtio-console (DeviceID 3). Returns the **higher-half VA** of the
@@ -297,7 +264,9 @@ pub fn send(bytes: &[u8]) {
     // See plans/tx-staging-cross-hart-race.md.
     let guard = handle.lock();
     let base = *guard;
-    let len = bytes.len().min(unsafe { (&raw const TX_STAGING).read() }.len());
+    let len = bytes
+        .len()
+        .min(unsafe { (&raw const TX_STAGING).read() }.len());
     // SAFETY: `guard` is held for the whole block, so this hart is the
     // single writer to TX_STAGING and the sole driver of the virtqueue
     // for the duration of the staging copy and `transmit`.
