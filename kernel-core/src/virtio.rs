@@ -24,6 +24,13 @@ pub fn negotiate_features(device_features: u64) -> Option<u64> {
     Some(F_VERSION_1)
 }
 
+/// Whether our queue of `qsize` descriptors fits within the device's
+/// advertised `QueueNumMax`. The device sets the ceiling; we must not
+/// configure a queue larger than it allows.
+pub fn queue_size_fits(device_max: u32, qsize: usize) -> bool {
+    device_max as usize >= qsize
+}
+
 /// Descriptor flags for the `flags` field of [`VirtqDesc`]. Only
 /// `flags = 0` (single buffer, driver-to-device) is used today; the
 /// rest are spec constants kept for completeness.
@@ -122,6 +129,27 @@ mod tests {
     #[test]
     fn negotiate_rejects_empty_feature_set() {
         assert_eq!(negotiate_features(0), None);
+    }
+
+    #[test]
+    fn queue_size_fits_when_device_max_exceeds_ours() {
+        assert!(queue_size_fits(1024, QSIZE));
+    }
+
+    #[test]
+    fn queue_size_fits_at_exact_match() {
+        // Device max equal to our size is a fit (>=, not >).
+        assert!(queue_size_fits(QSIZE as u32, QSIZE));
+    }
+
+    #[test]
+    fn queue_size_does_not_fit_when_device_max_is_one_short() {
+        assert!(!queue_size_fits(QSIZE as u32 - 1, QSIZE));
+    }
+
+    #[test]
+    fn queue_size_does_not_fit_when_device_max_is_zero() {
+        assert!(!queue_size_fits(0, QSIZE));
     }
 
     #[test]

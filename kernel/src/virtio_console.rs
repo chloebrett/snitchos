@@ -161,7 +161,7 @@ unsafe fn setup_queue(base: usize, sel: u32, queue: *const Virtqueue) -> Result<
     unsafe {
         write_reg(base, REG_QUEUE_SEL, sel);
         let max = read_reg(base, REG_QUEUE_NUM_MAX);
-        if (max as usize) < QSIZE {
+        if !kernel_core::virtio::queue_size_fits(max, QSIZE) {
             return Err(InitError::QueueTooSmall);
         }
         write_reg(base, REG_QUEUE_NUM, QSIZE as u32);
