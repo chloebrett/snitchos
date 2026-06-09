@@ -1,10 +1,10 @@
 [scenarios.boot-reaches-heartbeat.current]
-commit = "64c2edf"
-runs = 1
+commit = "b1fc683"
+runs = 10
 failures = 0
-recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 1407.0
-p95_duration_ms = 1407.0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 1469.9
+p95_duration_ms = 1557.0
 
 [[scenarios.boot-reaches-heartbeat.history]]
 commit = "0a56a95"
@@ -29,6 +29,14 @@ failures = 1
 recorded_at = "2026-06-08T03:19:40.712107Z"
 mean_duration_ms = 1454.54
 p95_duration_ms = 1600.0
+
+[[scenarios.boot-reaches-heartbeat.history]]
+commit = "64c2edf"
+runs = 1
+failures = 0
+recorded_at = "2026-06-08T10:33:38.82212Z"
+mean_duration_ms = 1407.0
+p95_duration_ms = 1407.0
 
 [scenarios.deflake-ipi-pong.current]
 commit = "0a56a95"
@@ -87,12 +95,12 @@ mean_duration_ms = 1909.8512319999998
 p95_duration_ms = 2293.2129579999996
 
 [scenarios.frame-allocator-metrics.current]
-commit = "64c2edf"
-runs = 1
+commit = "b1fc683"
+runs = 10
 failures = 0
-recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 1446.0
-p95_duration_ms = 1446.0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 1480.5
+p95_duration_ms = 1559.0
 
 [[scenarios.frame-allocator-metrics.history]]
 commit = "0a56a95"
@@ -118,13 +126,21 @@ recorded_at = "2026-06-08T03:19:40.712107Z"
 mean_duration_ms = 1608.56
 p95_duration_ms = 1708.0
 
-[scenarios.frame-allocator-oom.current]
+[[scenarios.frame-allocator-metrics.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 6455.0
-p95_duration_ms = 6455.0
+mean_duration_ms = 1446.0
+p95_duration_ms = 1446.0
+
+[scenarios.frame-allocator-oom.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 6482.0
+p95_duration_ms = 6535.0
 
 [[scenarios.frame-allocator-oom.history]]
 commit = "0a56a95"
@@ -166,13 +182,21 @@ recorded_at = "2026-06-08T06:30:37.626791Z"
 mean_duration_ms = 6620.610601
 p95_duration_ms = 6796.454542
 
-[scenarios.heap-oom.current]
+[[scenarios.frame-allocator-oom.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 4382.0
-p95_duration_ms = 4382.0
+mean_duration_ms = 6455.0
+p95_duration_ms = 6455.0
+
+[scenarios.heap-oom.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 4371.9
+p95_duration_ms = 4397.0
 
 [[scenarios.heap-oom.history]]
 commit = "0a56a95"
@@ -190,13 +214,21 @@ recorded_at = "2026-06-08T00:42:25.503932Z"
 mean_duration_ms = 4449.75677
 p95_duration_ms = 4490.759958
 
-[scenarios.heartbeat-cadence.current]
+[[scenarios.heap-oom.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 2462.0
-p95_duration_ms = 2462.0
+mean_duration_ms = 4382.0
+p95_duration_ms = 4382.0
+
+[scenarios.heartbeat-cadence.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 2470.9
+p95_duration_ms = 2529.0
 
 [[scenarios.heartbeat-cadence.history]]
 commit = "1264aa2"
@@ -230,7 +262,23 @@ recorded_at = "2026-06-08T03:19:40.712107Z"
 mean_duration_ms = 2426.82
 p95_duration_ms = 2539.0
 
+[[scenarios.heartbeat-cadence.history]]
+commit = "64c2edf"
+runs = 1
+failures = 0
+recorded_at = "2026-06-08T10:33:38.82212Z"
+mean_duration_ms = 2462.0
+p95_duration_ms = 2462.0
+
 [scenarios.ipi-pong.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 3155.4
+p95_duration_ms = 3162.0
+
+[[scenarios.ipi-pong.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
@@ -239,12 +287,12 @@ mean_duration_ms = 3154.0
 p95_duration_ms = 3154.0
 
 [scenarios.ipi-self-wakeup.current]
-commit = "64c2edf"
-runs = 1
+commit = "b1fc683"
+runs = 10
 failures = 0
-recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 1372.0
-p95_duration_ms = 1372.0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 1353.1
+p95_duration_ms = 1371.0
 
 [[scenarios.ipi-self-wakeup.history]]
 commit = "0a56a95"
@@ -270,13 +318,21 @@ recorded_at = "2026-06-08T03:19:40.712107Z"
 mean_duration_ms = 1476.4
 p95_duration_ms = 1575.0
 
-[scenarios.kernel-heap-metrics.current]
+[[scenarios.ipi-self-wakeup.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 2463.0
-p95_duration_ms = 2463.0
+mean_duration_ms = 1372.0
+p95_duration_ms = 1372.0
+
+[scenarios.kernel-heap-metrics.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 2471.8
+p95_duration_ms = 2532.0
 
 [[scenarios.kernel-heap-metrics.history]]
 commit = "0a56a95"
@@ -302,13 +358,21 @@ recorded_at = "2026-06-08T03:19:40.712107Z"
 mean_duration_ms = 2427.42
 p95_duration_ms = 2550.0
 
-[scenarios.kernel-runs-at-higher-half.current]
+[[scenarios.kernel-heap-metrics.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 159.0
-p95_duration_ms = 159.0
+mean_duration_ms = 2463.0
+p95_duration_ms = 2463.0
+
+[scenarios.kernel-runs-at-higher-half.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 193.6
+p95_duration_ms = 239.0
 
 [[scenarios.kernel-runs-at-higher-half.history]]
 commit = "0a56a95"
@@ -334,7 +398,23 @@ recorded_at = "2026-06-08T03:19:40.712107Z"
 mean_duration_ms = 196.42
 p95_duration_ms = 233.0
 
+[[scenarios.kernel-runs-at-higher-half.history]]
+commit = "64c2edf"
+runs = 1
+failures = 0
+recorded_at = "2026-06-08T10:33:38.82212Z"
+mean_duration_ms = 159.0
+p95_duration_ms = 159.0
+
 [scenarios.mutex-storm.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 1284.9
+p95_duration_ms = 1298.0
+
+[[scenarios.mutex-storm.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
@@ -343,12 +423,12 @@ mean_duration_ms = 1276.0
 p95_duration_ms = 1276.0
 
 [scenarios.pre-init-order.current]
-commit = "64c2edf"
-runs = 1
+commit = "b1fc683"
+runs = 10
 failures = 0
-recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 1392.0
-p95_duration_ms = 1392.0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 1477.7
+p95_duration_ms = 1557.0
 
 [[scenarios.pre-init-order.history]]
 commit = "0a56a95"
@@ -374,13 +454,21 @@ recorded_at = "2026-06-08T03:19:40.712107Z"
 mean_duration_ms = 1457.88
 p95_duration_ms = 1567.0
 
-[scenarios.sched-context-switch-smoke.current]
+[[scenarios.pre-init-order.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 1400.0
-p95_duration_ms = 1400.0
+mean_duration_ms = 1392.0
+p95_duration_ms = 1392.0
+
+[scenarios.sched-context-switch-smoke.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 1477.4
+p95_duration_ms = 1523.0
 
 [[scenarios.sched-context-switch-smoke.history]]
 commit = "0a56a95"
@@ -414,13 +502,21 @@ recorded_at = "2026-06-08T06:26:09.966963Z"
 mean_duration_ms = 1467.6394400000001
 p95_duration_ms = 1586.00275
 
-[scenarios.sched-context-switches-on-wire.current]
+[[scenarios.sched-context-switch-smoke.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 275.0
-p95_duration_ms = 275.0
+mean_duration_ms = 1400.0
+p95_duration_ms = 1400.0
+
+[scenarios.sched-context-switches-on-wire.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 230.5
+p95_duration_ms = 287.0
 
 [[scenarios.sched-context-switches-on-wire.history]]
 commit = "0a56a95"
@@ -446,13 +542,21 @@ recorded_at = "2026-06-08T03:19:40.712107Z"
 mean_duration_ms = 331.84
 p95_duration_ms = 1188.0
 
-[scenarios.sched-span-survives-yield.current]
+[[scenarios.sched-context-switches-on-wire.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 2185.0
-p95_duration_ms = 2185.0
+mean_duration_ms = 275.0
+p95_duration_ms = 275.0
+
+[scenarios.sched-span-survives-yield.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 2175.7
+p95_duration_ms = 2183.0
 
 [[scenarios.sched-span-survives-yield.history]]
 commit = "0a56a95"
@@ -509,13 +613,21 @@ recorded_at = "2026-06-08T05:51:51.458584Z"
 mean_duration_ms = 2202.1628259999998
 p95_duration_ms = 2278.28125
 
-[scenarios.sched-spans-carry-task-id.current]
+[[scenarios.sched-span-survives-yield.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 1251.0
-p95_duration_ms = 1251.0
+mean_duration_ms = 2185.0
+p95_duration_ms = 2185.0
+
+[scenarios.sched-spans-carry-task-id.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 1295.1
+p95_duration_ms = 1363.0
 
 [[scenarios.sched-spans-carry-task-id.history]]
 commit = "0a56a95"
@@ -549,13 +661,21 @@ recorded_at = "2026-06-08T06:24:55.927589Z"
 mean_duration_ms = 1232.5714269999999
 p95_duration_ms = 1311.884708
 
-[scenarios.sched-spawn-registers-thread.current]
+[[scenarios.sched-spans-carry-task-id.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 340.0
-p95_duration_ms = 340.0
+mean_duration_ms = 1251.0
+p95_duration_ms = 1251.0
+
+[scenarios.sched-spawn-registers-thread.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 323.6
+p95_duration_ms = 367.0
 
 [[scenarios.sched-spawn-registers-thread.history]]
 commit = "0a56a95"
@@ -589,13 +709,21 @@ recorded_at = "2026-06-08T03:19:40.712107Z"
 mean_duration_ms = 322.84
 p95_duration_ms = 401.0
 
-[scenarios.sched-task-exits-cleanly.current]
+[[scenarios.sched-spawn-registers-thread.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 1364.0
-p95_duration_ms = 1364.0
+mean_duration_ms = 340.0
+p95_duration_ms = 340.0
+
+[scenarios.sched-task-exits-cleanly.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 1357.6
+p95_duration_ms = 1381.0
 
 [[scenarios.sched-task-exits-cleanly.history]]
 commit = "0a56a95"
@@ -621,13 +749,21 @@ recorded_at = "2026-06-08T03:19:40.712107Z"
 mean_duration_ms = 1467.56
 p95_duration_ms = 1506.0
 
-[scenarios.sched-yield-round-trips.current]
+[[scenarios.sched-task-exits-cleanly.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 3380.0
-p95_duration_ms = 3380.0
+mean_duration_ms = 1364.0
+p95_duration_ms = 1364.0
+
+[scenarios.sched-yield-round-trips.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 3368.5
+p95_duration_ms = 3391.0
 
 [[scenarios.sched-yield-round-trips.history]]
 commit = "0a56a95"
@@ -645,7 +781,23 @@ recorded_at = "2026-06-08T00:42:25.503932Z"
 mean_duration_ms = 3741.4493330000005
 p95_duration_ms = 3793.265375
 
+[[scenarios.sched-yield-round-trips.history]]
+commit = "64c2edf"
+runs = 1
+failures = 0
+recorded_at = "2026-06-08T10:33:38.82212Z"
+mean_duration_ms = 3380.0
+p95_duration_ms = 3380.0
+
 [scenarios.shootdown-storm.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 3165.3
+p95_duration_ms = 3216.0
+
+[[scenarios.shootdown-storm.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
@@ -653,7 +805,31 @@ recorded_at = "2026-06-08T10:33:38.82212Z"
 mean_duration_ms = 3155.0
 p95_duration_ms = 3155.0
 
+[scenarios.smp-ipi-wakes-idle-hart.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 210.9
+p95_duration_ms = 219.0
+
+[scenarios.smp-ping-pong-cadence.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 1198.9
+p95_duration_ms = 1205.0
+
 [scenarios.smp-producer-consumer-correctness.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 2159.4
+p95_duration_ms = 2168.0
+
+[[scenarios.smp-producer-consumer-correctness.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
@@ -662,12 +838,12 @@ mean_duration_ms = 17216.0
 p95_duration_ms = 17216.0
 
 [scenarios.smp-secondary-hart-boots.current]
-commit = "64c2edf"
-runs = 1
+commit = "b1fc683"
+runs = 10
 failures = 0
-recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 209.0
-p95_duration_ms = 209.0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 215.0
+p95_duration_ms = 227.0
 
 [[scenarios.smp-secondary-hart-boots.history]]
 commit = "0a56a95"
@@ -693,13 +869,29 @@ recorded_at = "2026-06-08T03:19:40.712107Z"
 mean_duration_ms = 225.02
 p95_duration_ms = 284.0
 
-[scenarios.smp-spawn-on-hart-1-runs.current]
+[[scenarios.smp-secondary-hart-boots.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
 recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 2318.0
-p95_duration_ms = 2318.0
+mean_duration_ms = 209.0
+p95_duration_ms = 209.0
+
+[scenarios.smp-spans-carry-hart-id.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 1211.8
+p95_duration_ms = 1225.0
+
+[scenarios.smp-spawn-on-hart-1-runs.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 2355.0
+p95_duration_ms = 2382.0
 
 [[scenarios.smp-spawn-on-hart-1-runs.history]]
 commit = "0a56a95"
@@ -725,7 +917,23 @@ recorded_at = "2026-06-08T03:19:40.712107Z"
 mean_duration_ms = 2490.82
 p95_duration_ms = 2646.0
 
+[[scenarios.smp-spawn-on-hart-1-runs.history]]
+commit = "64c2edf"
+runs = 1
+failures = 0
+recorded_at = "2026-06-08T10:33:38.82212Z"
+mean_duration_ms = 2318.0
+p95_duration_ms = 2318.0
+
 [scenarios.smp-tlb-shootdown-visible.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 6180.6
+p95_duration_ms = 6190.0
+
+[[scenarios.smp-tlb-shootdown-visible.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
@@ -734,6 +942,14 @@ mean_duration_ms = 6177.0
 p95_duration_ms = 6177.0
 
 [scenarios.spawn-storm.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 1479.8
+p95_duration_ms = 2315.0
+
+[[scenarios.spawn-storm.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
@@ -742,6 +958,14 @@ mean_duration_ms = 1284.0
 p95_duration_ms = 1284.0
 
 [scenarios.virtio-storm.current]
+commit = "b1fc683"
+runs = 10
+failures = 0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 1347.6
+p95_duration_ms = 1397.0
+
+[[scenarios.virtio-storm.history]]
 commit = "64c2edf"
 runs = 1
 failures = 0
@@ -750,12 +974,12 @@ mean_duration_ms = 1349.0
 p95_duration_ms = 1349.0
 
 [scenarios.workload-cooperative-baseline.current]
-commit = "64c2edf"
-runs = 1
+commit = "b1fc683"
+runs = 10
 failures = 0
-recorded_at = "2026-06-08T10:33:38.82212Z"
-mean_duration_ms = 4390.0
-p95_duration_ms = 4390.0
+recorded_at = "2026-06-09T08:45:03.89098Z"
+mean_duration_ms = 4366.3
+p95_duration_ms = 4401.0
 
 [[scenarios.workload-cooperative-baseline.history]]
 commit = "0a56a95"
@@ -772,3 +996,11 @@ failures = 1
 recorded_at = "2026-06-08T00:42:25.503932Z"
 mean_duration_ms = 4342.709046999999
 p95_duration_ms = 4440.765667
+
+[[scenarios.workload-cooperative-baseline.history]]
+commit = "64c2edf"
+runs = 1
+failures = 0
+recorded_at = "2026-06-08T10:33:38.82212Z"
+mean_duration_ms = 4390.0
+p95_duration_ms = 4390.0

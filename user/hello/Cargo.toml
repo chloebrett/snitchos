@@ -1,0 +1,13 @@
+[package]
+name = "hello"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Bare-metal U-mode program. Like `kernel`, it only builds for
+# riscv64gc-unknown-none-elf (its own `user.ld` links it at a fixed
+# low-half VA) and does NOT opt into the workspace pedantic lints —
+# register/address idioms fight them. Built via `cargo xtask build`.
+
+[dependencies]
+snitchos-abi = { path = "../../abi" }

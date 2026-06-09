@@ -7,6 +7,10 @@ use std::process::Command;
 
 pub const KERNEL_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/kernel";
 pub const KERNEL_TARGET: &str = "riscv64gc-unknown-none-elf";
+/// The first userspace program, built for the same bare riscv target as
+/// the kernel but linked at a low-half VA via its own `user.ld`. The
+/// kernel embeds this ELF and loads it in v0.7a Step 4.
+pub const USER_HELLO_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/hello";
 
 /// Build a `Command` pre-loaded with every QEMU arg that is common to
 /// all invocations. The caller finishes it with `.status()` or
@@ -53,4 +57,13 @@ pub fn build_kernel(features: &[&str]) -> std::io::Result<std::process::ExitStat
         cmd.arg("--features").arg(features.join(","));
     }
     cmd.status()
+}
+
+/// Build the `hello` userspace program for the bare riscv target. The
+/// kernel embeds the resulting ELF (`USER_HELLO_BIN`) and loads it; build
+/// this before the kernel so the embedded copy is current.
+pub fn build_user() -> std::io::Result<std::process::ExitStatus> {
+    Command::new("cargo")
+        .args(["build", "-p", "hello", "--target", KERNEL_TARGET])
+        .status()
 }

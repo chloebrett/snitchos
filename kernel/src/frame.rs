@@ -138,16 +138,14 @@ pub unsafe fn init_from_dtb(dtb: &Fdt, dtb_phys: usize) -> Result<(), InitError>
     let mut bitmap = Bitmap::new(bits, total_frames);
 
     // All frames start in-use. Release everything that isn't in a
-    // reserved region.
-    for f in 0..total_frames {
-        let pa = ram_base + f * FRAME_SIZE;
-        let in_sbi = pa < kernel_start;
-        let in_kernel = pa >= kernel_start && pa < kernel_end;
-        let in_dtb = pa >= dtb_start && pa < dtb_end;
-        if !(in_sbi || in_kernel || in_dtb) {
-            bitmap.release_range(f, 1);
-        }
-    }
+    // reserved region: the SBI hole below the kernel image, the kernel
+    // image itself, and the DTB.
+    kernel_core::frame::release_unreserved(
+        &mut bitmap,
+        ram_base,
+        FRAME_SIZE,
+        &[(0, kernel_start), (kernel_start, kernel_end), (dtb_start, dtb_end)],
+    );
 
     FRAME_ALLOC.call_once(|| crate::sync::Mutex::new(Allocator { bitmap, ram_base }));
     Ok(())

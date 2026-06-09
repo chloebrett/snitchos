@@ -487,6 +487,11 @@ fn stack(cmd: StackCmd) -> ExitCode {
 }
 
 fn build() -> ExitCode {
+    // User program first: the kernel embeds its ELF.
+    let user = qemu::build_user().expect("failed to invoke cargo");
+    if !user.success() {
+        return ExitCode::from(1);
+    }
     let status = qemu::build_kernel(&[]).expect("failed to invoke cargo");
     if status.success() {
         ExitCode::SUCCESS
@@ -619,16 +624,26 @@ fn run_clippy(extra_args: &[String]) -> ExitCode {
             "collector",
             "-p",
             "xtask",
+            "-p",
+            "snitchos-abi",
             "--all-targets",
         ])
         .args(extra_args)
         .status()
         .expect("failed to invoke cargo clippy");
 
-    // The kernel only compiles for bare-metal riscv. No `--all-targets`:
-    // it has no host-buildable test target.
+    // The kernel and the userspace program only compile for bare-metal
+    // riscv. No `--all-targets`: neither has a host-buildable test target.
     let kernel = Command::new("cargo")
-        .args(["clippy", "-p", "kernel", "--target", qemu::KERNEL_TARGET])
+        .args([
+            "clippy",
+            "-p",
+            "kernel",
+            "-p",
+            "hello",
+            "--target",
+            qemu::KERNEL_TARGET,
+        ])
         .args(extra_args)
         .status()
         .expect("failed to invoke cargo clippy");

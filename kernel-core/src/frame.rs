@@ -147,6 +147,31 @@ impl<'a> Bitmap<'a> {
     }
 }
 
+/// Release every frame whose base physical address falls outside all
+/// `reserved` ranges, leaving reserved frames in-use. Ranges are
+/// half-open `[start, end)` over physical addresses; a frame is judged
+/// by its base PA (`ram_base + idx * frame_size`) only, so a reserved
+/// range whose `end` is not frame-aligned still reserves the frame it
+/// lands inside but not the next one.
+///
+/// The kernel calls this once at boot with the SBI / kernel-image / DTB
+/// regions; the bitmap starts all-in-use (per `Bitmap::new`), so this
+/// is the sole step that populates the free pool.
+pub fn release_unreserved(
+    bitmap: &mut Bitmap,
+    ram_base: usize,
+    frame_size: usize,
+    reserved: &[(usize, usize)],
+) {
+    for f in 0..bitmap.capacity() {
+        let pa = ram_base + f * frame_size;
+        let reserved_hit = reserved.iter().any(|&(start, end)| pa >= start && pa < end);
+        if !reserved_hit {
+            bitmap.release_range(f, 1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +354,83 @@ mod tests {
         bm.release_range(0, 64);
         assert_eq!(bm.alloc_contiguous(65), None);
         assert_eq!(bm.count_free(), 64);
+    }
+
+    #[test]
+    fn release_unreserved_frees_frames_outside_every_reserved_range() {
+        // 10 frames of size 4096 from ram_base 0. Reserve frame 0 only.
+        let (mut storage, cap) = empty(10);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        release_unreserved(&mut bm, 0, 4096, &[(0, 4096)]);
+        // Frame 0 (pa 0) stays in-use; frames 1..10 freed.
+        assert_eq!(bm.count_free(), 9);
+        assert_eq!(bm.count_in_use(), 1);
+    }
+
+    #[test]
+    fn release_unreserved_treats_range_end_as_exclusive() {
+        // Reserve [0, 4096): only frame 0 (base 0). Frame 1's base is
+        // exactly 4096 == end, so it is NOT reserved.
+        let (mut storage, cap) = empty(4);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        release_unreserved(&mut bm, 0, 4096, &[(0, 4096)]);
+        assert_eq!(bm.count_in_use(), 1); // only frame 0
+        assert_eq!(bm.alloc(), Some(1)); // frame 1 is free
+    }
+
+    #[test]
+    fn release_unreserved_reserves_by_base_pa_not_overlap() {
+        // Non-frame-aligned end at 4097. Frame 0 (base 0) and frame 1
+        // (base 4096) are both < 4097 → reserved. Frame 2 (base 8192)
+        // is free, even though frame 1 straddles the boundary.
+        let (mut storage, cap) = empty(4);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        release_unreserved(&mut bm, 0, 4096, &[(0, 4097)]);
+        assert_eq!(bm.count_in_use(), 2); // frames 0 and 1
+        assert_eq!(bm.alloc(), Some(2)); // frame 2 is the lowest free
+    }
+
+    #[test]
+    fn release_unreserved_honours_multiple_disjoint_ranges() {
+        // Reserve frame 0 and frame 5; the other 8 are freed.
+        let (mut storage, cap) = empty(10);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        release_unreserved(&mut bm, 0, 4096, &[(0, 4096), (5 * 4096, 6 * 4096)]);
+        assert_eq!(bm.count_free(), 8);
+        assert_eq!(bm.alloc(), Some(1)); // frame 0 reserved, 1 is lowest free
+    }
+
+    #[test]
+    fn release_unreserved_handles_sbi_kernel_dtb_shape() {
+        // Realistic boot layout. ram_base below the kernel image leaves
+        // an SBI hole; the kernel image and the DTB are carved out.
+        let ram_base = 0x8000_0000;
+        let frame = 4096;
+        let kernel_start = ram_base + 2 * frame; // frames 0,1 are SBI
+        let kernel_end = kernel_start + 2 * frame; // frames 2,3 are kernel
+        let dtb_start = ram_base + 6 * frame; // frame 6 is DTB
+        let dtb_end = dtb_start + frame;
+        let (mut storage, cap) = empty(8);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        release_unreserved(
+            &mut bm,
+            ram_base,
+            frame,
+            &[(0, kernel_start), (kernel_start, kernel_end), (dtb_start, dtb_end)],
+        );
+        // Reserved: frames 0,1 (SBI), 2,3 (kernel), 6 (DTB) = 5 frames.
+        // Free: frames 4,5,7 = 3 frames.
+        assert_eq!(bm.count_in_use(), 5);
+        assert_eq!(bm.count_free(), 3);
+        assert_eq!(bm.alloc(), Some(4)); // lowest free is past the kernel
+    }
+
+    #[test]
+    fn release_unreserved_with_no_reserved_ranges_frees_everything() {
+        let (mut storage, cap) = empty(16);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        release_unreserved(&mut bm, 0x8000_0000, 4096, &[]);
+        assert_eq!(bm.count_free(), 16);
     }
 
     #[test]

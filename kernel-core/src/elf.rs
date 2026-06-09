@@ -211,6 +211,30 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_real_hello_user_program() {
+        // The actual compiled `user/hello` ELF (regenerate with
+        // `cargo xtask build`). Integration check that our real toolchain
+        // output parses end-to-end — not a hand-built buffer. Locks the
+        // contract between what the linker emits and what the loader reads.
+        let img = include_bytes!("../fixtures/hello.elf");
+        let plan = parse(img).expect("the hello user program should parse");
+
+        // Non-PIE ET_EXEC linked at the fixed low-half VA (see user.ld).
+        assert_eq!(plan.entry, 0x1000_0000);
+        // Exactly the two PT_LOAD segments; GNU_STACK and the RISC-V
+        // attributes header (PT 0x70000003) are skipped.
+        assert_eq!(plan.segments.len(), 2);
+
+        let code = plan.segments[0];
+        assert_eq!(code.vaddr, 0x1000_0000);
+        assert_eq!(code.perms, SegmentPerms { read: true, write: false, exec: true });
+
+        let bss = plan.segments[1];
+        assert!(bss.mem_size > bss.file_size, "stack/bss is zero-filled (memsz > filesz)");
+        assert_eq!(bss.perms, SegmentPerms { read: true, write: true, exec: false });
+    }
+
+    #[test]
     fn rejects_an_image_without_the_elf_magic() {
         let not_elf = [0u8; 64];
         assert_eq!(parse(&not_elf), Err(ElfError::BadMagic));
