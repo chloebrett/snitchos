@@ -33,6 +33,7 @@ mod sync;
 mod tracing;
 mod trap;
 mod uart;
+mod user;
 mod virtio_console;
 mod workload;
 

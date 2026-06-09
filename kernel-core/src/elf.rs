@@ -205,7 +205,7 @@ mod tests {
     }
 
     /// A minimal well-formed RISC-V ELF64 executable: 64-bit, machine
-    /// 243, ET_EXEC.
+    /// 243, `ET_EXEC`.
     fn valid_elf(entry: u64, phs: &[Ph], tail_len: usize) -> Vec<u8> {
         build_elf(2, 243, 2, entry, phs, tail_len)
     }

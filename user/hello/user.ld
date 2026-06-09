@@ -21,7 +21,13 @@ SECTIONS {
     *(.data .data*)
     *(.sdata .sdata*)
   } > ram
-  .bss : {
+  /* Page-align the writable segment so it never shares a 4 KiB page with
+   * R-X code — lets the kernel map each PT_LOAD with real W^X. NOTE: the
+   * alignment MUST be the section's ALIGN() attribute (after the `:`).
+   * A bare `. = ALIGN(0x1000);` between sections is silently ignored when
+   * sections use a `> region` (`> ram` here): the section start comes
+   * from the region's allocation pointer, not the location counter. */
+  .bss : ALIGN(0x1000) {
     __bss_start = .;
     *(.bss .bss*)
     *(.sbss .sbss*)

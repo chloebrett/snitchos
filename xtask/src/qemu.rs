@@ -56,6 +56,14 @@ pub fn build_kernel(features: &[&str]) -> std::io::Result<std::process::ExitStat
     if !features.is_empty() {
         cmd.arg("--features").arg(features.join(","));
     }
+    // Embed the freshly-built user ELF if it exists; the kernel's build.rs
+    // falls back to the committed fixture otherwise. Absolute path because
+    // `include_bytes!` in build.rs resolves relative paths against the
+    // source file, not the build's cwd. `canonicalize` fails (→ no env →
+    // fixture) when `hello` hasn't been built yet.
+    if let Ok(abs) = std::path::Path::new(USER_HELLO_BIN).canonicalize() {
+        cmd.env("SNITCHOS_USER_ELF", abs);
+    }
     cmd.status()
 }
 

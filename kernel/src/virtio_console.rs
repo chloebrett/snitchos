@@ -52,70 +52,14 @@ const DEVICE_ID_CONSOLE: u32 = 3;
 /// the device is too old for us.
 const F_VERSION_1: u64 = 1 << 32;
 
-/// Descriptor flags. Used in the `flags` field of `VirtqDesc`.
-#[expect(dead_code, reason = "spec constants; only flags=0 is used today")]
-const DESC_F_NEXT: u16 = 0x1;
-#[expect(dead_code, reason = "spec constants; only flags=0 is used today")]
-const DESC_F_WRITE: u16 = 0x2;
-#[expect(dead_code, reason = "spec constants; only flags=0 is used today")]
-const DESC_F_INDIRECT: u16 = 0x4;
-
 /// virtio-console queue indices (no MULTIPORT feature).
 const QUEUE_RX: u32 = 0;
 const QUEUE_TX: u32 = 1;
 
-/// Number of descriptors in our TX queue. Power of 2 required by spec.
-const QSIZE: usize = 8;
-
-/// One descriptor: "buffer at `addr` of `len` bytes, with these flags,
-/// optionally chained to the descriptor at index `next`."
-#[derive(Copy, Clone, Debug)]
-#[repr(C)]
-struct VirtqDesc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
-}
-
-/// Available ring: driver tells the device which descriptors to look at.
-#[derive(Copy, Clone)]
-#[repr(C)]
-struct VirtqAvail {
-    flags: u16,
-    idx: u16,
-    ring: [u16; QSIZE],
-    used_event: u16,
-}
-
-/// Used ring entry: "descriptor `id` is done; `len` bytes were written
-/// (only meaningful for device-to-driver buffers)."
-#[derive(Copy, Clone, Debug)]
-#[repr(C)]
-struct VirtqUsedElem {
-    id: u32,
-    len: u32,
-}
-
-/// Used ring: device tells the driver which descriptors are done.
-#[derive(Copy, Clone)]
-#[repr(C)]
-struct VirtqUsed {
-    flags: u16,
-    idx: u16,
-    ring: [VirtqUsedElem; QSIZE],
-    avail_event: u16,
-}
-
-/// All three ring regions for one queue, in one statically-allocated
-/// block. The outer 16-byte alignment satisfies the descriptor table's
-/// alignment requirement; the inner sub-regions inherit it.
-#[repr(C, align(16))]
-struct Virtqueue {
-    desc: [VirtqDesc; QSIZE],
-    avail: VirtqAvail,
-    used: VirtqUsed,
-}
+/// virtqueue layout structs + spec constants live in `kernel_core::virtio`
+/// (pure data, host-tested for DMA-layout correctness). The kernel owns
+/// the statics, volatile register access, and the handshake.
+use kernel_core::virtio::{QSIZE, VirtqAvail, VirtqDesc, VirtqUsed, VirtqUsedElem, Virtqueue};
 
 /// Static TX queue for the virtio-console. Lives in `.bss`. Single
 /// instance — we have one console and one TX path in v0.1.
