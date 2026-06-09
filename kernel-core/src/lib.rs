@@ -13,6 +13,7 @@ extern crate alloc;
 pub mod batch_ring;
 pub mod bootargs;
 pub mod clock;
+pub mod elf;
 pub mod heap_smoke;
 pub mod frame;
 pub mod heap;
