@@ -29,7 +29,7 @@ const LOCK_PATH: &str = ".itest.lock";
 /// subdirectory under here. Gitignored.
 const HISTORY_ROOT: &str = ".itest-runs";
 
-/// Default OTLP receiver targeted by `--push-otlp` (no value) and the
+/// Default OTLP receiver targeted by `baseline push` (no value) and the
 /// end-of-run auto-push. Matches `stack/docker-compose.yml`'s
 /// Prometheus container started with `--web.enable-otlp-receiver`.
 const DEFAULT_OTLP_ENDPOINT: &str = "http://127.0.0.1:9090/api/v1/otlp";
@@ -338,7 +338,7 @@ fn try_auto_push() {
 
 /// Promote `.itest-baseline.toml.pending` into the canonical baseline
 /// file. Wraps `BaselineFile::promote_pending` with user-facing
-/// messaging and `--baseline-show`-friendly exit codes.
+/// messaging and `baseline show`-friendly exit codes.
 pub fn promote_pending() -> ExitCode {
     let canonical = Path::new(BASELINE_PATH);
     let pending = BaselineFile::pending_path_for(canonical);
@@ -384,11 +384,13 @@ pub fn discard_pending() -> ExitCode {
 }
 
 /// One-shot push of the canonical baseline as OTLP/HTTP metrics to
-/// `endpoint`. Endpoint should be the OTLP receiver root, e.g.
-/// `http://localhost:9090/api/v1/otlp` for Prometheus with
+/// `endpoint`, defaulting to [`DEFAULT_OTLP_ENDPOINT`] (the bundled stack's
+/// Prometheus receiver) when `None`. Endpoint should be the OTLP receiver
+/// root, e.g. `http://localhost:9090/api/v1/otlp` for Prometheus with
 /// `--web.enable-otlp-receiver`, or `http://localhost:4318` for the
 /// `OTel` collector default. `/v1/metrics` is appended automatically.
-pub fn push_otlp_metrics(endpoint: &str) -> ExitCode {
+pub fn push_otlp_metrics(endpoint: Option<&str>) -> ExitCode {
+    let endpoint = endpoint.unwrap_or(DEFAULT_OTLP_ENDPOINT);
     let baseline_path = Path::new(BASELINE_PATH);
     let file = if baseline_path.exists() {
         match BaselineFile::load_path(baseline_path) {
@@ -586,7 +588,7 @@ pub fn adopt_run(run_dir: Option<PathBuf>) -> ExitCode {
 /// directory's NDJSON. Used when the in-process pending write was
 /// lost (process killed before the runner could write it, disk full
 /// at the wrong moment, etc.). Refuses if a pending file already
-/// exists — caller should `--discard-pending` or `--promote-pending`
+/// exists — caller should `baseline discard` or `baseline promote`
 /// first, then re-run recovery.
 pub fn recover_pending(run_dir: &Path) -> ExitCode {
     let canonical = Path::new(BASELINE_PATH);
@@ -594,7 +596,7 @@ pub fn recover_pending(run_dir: &Path) -> ExitCode {
     if pending.exists() {
         eprintln!(
             "refusing to overwrite existing pending baseline at {}.\n\
-             Promote (--promote-pending) or discard (--discard-pending) it first.",
+             Promote (`baseline promote`) or discard (`baseline discard`) it first.",
             pending.display()
         );
         return ExitCode::from(1);
@@ -622,8 +624,8 @@ pub fn recover_pending(run_dir: &Path) -> ExitCode {
     }
     eprintln!(
         "Recovered pending baseline from {} → {}.\n\
-         {} scenarios reconstructed. Inspect with --baseline-show, then\n\
-         --promote-pending or --discard-pending.",
+         {} scenarios reconstructed. Inspect with `baseline show`, then\n\
+         `baseline promote` or `baseline discard`.",
         run_dir.display(),
         pending.display(),
         recovered.scenarios.len(),
@@ -637,7 +639,7 @@ pub fn recover_pending(run_dir: &Path) -> ExitCode {
 ///
 /// If `pending` is set, render the `.pending` sidecar instead — useful
 /// for inspecting a partial baseline before deciding to
-/// `--promote-pending` or `--discard-pending`. When `pending` is
+/// `baseline promote` or `baseline discard`. When `pending` is
 /// unset and a pending sidecar exists, surface a banner at the top
 /// of the canonical summary so the user knows partial work is waiting.
 pub fn show_baseline(include_history: bool, flakes_only: bool, pending: bool) -> ExitCode {
@@ -663,8 +665,8 @@ pub fn show_baseline(include_history: bool, flakes_only: bool, pending: bool) ->
     // banner it. The user almost always wants to know.
     if !pending && pending_path.exists() {
         eprintln!(
-            "NOTE: pending baseline present at {} — inspect with `--baseline-show --pending`,\n\
-             then promote (`--promote-pending`) or discard (`--discard-pending`).\n",
+            "NOTE: pending baseline present at {} — inspect with `baseline show --pending`,\n\
+             then promote (`baseline promote`) or discard (`baseline discard`).\n",
             pending_path.display()
         );
     }

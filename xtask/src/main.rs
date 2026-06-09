@@ -163,90 +163,6 @@ enum Cmd {
         /// `--repeat N`. Check fires at iteration boundaries.
         #[arg(long)]
         fail_fast: Option<u32>,
-        /// Print the `.itest-baseline.toml` summary and exit without
-        /// running anything. Useful for quickly inspecting recorded
-        /// per-scenario rates. By default shows only the `current`
-        /// entry per scenario; pass `--include-history` for the full
-        /// chronological listing.
-        #[arg(long, default_value_t = false)]
-        baseline_show: bool,
-        /// Include each scenario's prior `current` measurements
-        /// (i.e. `history`) in `--baseline-show`. Ignored unless
-        /// `--baseline-show` is also passed.
-        #[arg(long, default_value_t = false)]
-        include_history: bool,
-        /// Restrict `--baseline-show` to scenarios with at least one
-        /// failure recorded in `current`. Sorted descending by
-        /// Wilson-score lower bound (tie-break: upper bound) so the
-        /// most-confidently-flaky scenario floats to the top.
-        #[arg(long, default_value_t = false)]
-        flakes_only: bool,
-        /// With `--baseline-show`, render the `.pending` sidecar
-        /// instead of the canonical baseline. Use to inspect a partial
-        /// baseline before deciding to promote or discard it.
-        #[arg(long, default_value_t = false)]
-        pending: bool,
-        /// Promote `.itest-baseline.toml.pending` into the canonical
-        /// baseline. The previous canonical `current` per scenario is
-        /// pushed to `history`; the partial marker is stripped. Run
-        /// after inspecting a pending file from an interrupted
-        /// `--update-baseline` run.
-        #[arg(long, default_value_t = false)]
-        promote_pending: bool,
-        /// Delete `.itest-baseline.toml.pending` without promoting.
-        /// Idempotent (no-op if no pending file exists).
-        #[arg(long, default_value_t = false)]
-        discard_pending: bool,
-        /// Rebuild the pending baseline from a per-run history
-        /// directory's NDJSON. Use when the in-process pending write
-        /// was lost (e.g. process killed mid-iteration). Path is the
-        /// run directory, e.g. `.itest-runs/2026-06-08T12-30-15Z`.
-        /// Refuses to overwrite an existing pending file.
-        #[arg(long, value_name = "RUN_DIR")]
-        recover_pending: Option<std::path::PathBuf>,
-        /// Retroactively promote a completed run as the canonical
-        /// baseline. `--adopt-run` alone picks the most recent
-        /// `.itest-runs/<ts>/` directory; pass an explicit path to
-        /// adopt a specific run. Useful when you ran `cargo xtask
-        /// itest --repeat N` without `--update-baseline` and want
-        /// to keep the results. Previous canonical entries are
-        /// pushed to history.
-        #[arg(
-            long,
-            value_name = "RUN_DIR",
-            num_args = 0..=1,
-            default_missing_value = "@latest",
-        )]
-        adopt_run: Option<String>,
-        /// Prune `.itest-runs/` to the most recent N directories.
-        /// Pass with `--keep-last N`. Per-run NDJSON, metadata, and
-        /// captured failure logs in older runs are removed.
-        #[arg(long, default_value_t = false)]
-        prune_runs: bool,
-        /// Number of run directories to retain when `--prune-runs` is set.
-        /// Ignored otherwise. `0` removes everything.
-        #[arg(long, default_value_t = 20)]
-        keep_last: usize,
-        /// Render the canonical baseline as Prometheus textfile-format
-        /// metrics at the given path. For `node_exporter --collector.textfile`
-        /// scraping into Grafana. Atomic write.
-        #[arg(long, value_name = "PATH")]
-        export_prom: Option<std::path::PathBuf>,
-        /// Push the canonical baseline live to an OTLP/HTTP metrics
-        /// receiver. Pass `--push-otlp` alone to target the bundled
-        /// stack's Prometheus receiver at
-        /// `http://127.0.0.1:9090/api/v1/otlp`, or pass an explicit
-        /// endpoint URL (the receiver root — `/v1/metrics` is
-        /// appended automatically). Useful in CI / cron / a post-run
-        /// hook to land flake-rate data in Grafana without a
-        /// textfile-collector.
-        #[arg(
-            long,
-            value_name = "ENDPOINT",
-            num_args = 0..=1,
-            default_missing_value = "http://127.0.0.1:9090/api/v1/otlp",
-        )]
-        push_otlp: Option<String>,
         /// Disable the end-of-run auto-push. By default, after the
         /// test run completes, we try to push the canonical baseline
         /// to the bundled stack's OTLP receiver and warn if it's not
@@ -302,6 +218,13 @@ enum Cmd {
         /// known-slow or known-failing scenario.
         #[arg(long, value_name = "SCENARIO", value_delimiter = ',')]
         skip: Vec<String>,
+    },
+    /// Inspect and manage the integration-test baseline
+    /// (`.itest-baseline.toml`) and per-run history (`.itest-runs/`).
+    /// These are the management verbs that used to be `itest` flags.
+    Baseline {
+        #[command(subcommand)]
+        cmd: BaselineCmd,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -391,6 +314,70 @@ enum StackCmd {
     Logs,
 }
 
+/// Baseline / run-history management. Each verb is a distinct, mutually
+/// exclusive operation — the reason these are subcommands rather than the
+/// mutually-incompatible `itest` flags they grew from.
+#[derive(Subcommand)]
+enum BaselineCmd {
+    /// Print the canonical baseline summary and exit. By default shows
+    /// only the `current` entry per scenario.
+    Show {
+        /// Include each scenario's prior `current` measurements (history).
+        #[arg(long, default_value_t = false)]
+        include_history: bool,
+        /// Restrict to scenarios with at least one recorded failure,
+        /// sorted by Wilson-score lower bound (most-confidently-flaky first).
+        #[arg(long, default_value_t = false)]
+        flakes_only: bool,
+        /// Render the `.pending` sidecar instead of the canonical baseline.
+        #[arg(long, default_value_t = false)]
+        pending: bool,
+    },
+    /// Promote `.itest-baseline.toml.pending` into the canonical baseline.
+    /// Previous canonical `current` per scenario is pushed to `history`;
+    /// the partial marker is stripped.
+    Promote,
+    /// Delete `.itest-baseline.toml.pending` without promoting. Idempotent.
+    Discard,
+    /// Rebuild the pending baseline from a per-run history directory's
+    /// NDJSON (e.g. `.itest-runs/2026-06-08T12-30-15Z`). Use when the
+    /// in-process pending write was lost. Refuses to overwrite an existing
+    /// pending file.
+    Recover {
+        /// The run directory to rebuild from.
+        run_dir: std::path::PathBuf,
+    },
+    /// Retroactively adopt a completed run as the canonical baseline.
+    /// With no path, adopts the most recent `.itest-runs/<ts>/`. Use after
+    /// an `itest --repeat N` you ran without `--update-baseline`. Previous
+    /// canonical entries are pushed to history.
+    Adopt {
+        /// Specific run directory; omit to adopt the most recent.
+        run_dir: Option<std::path::PathBuf>,
+    },
+    /// Prune `.itest-runs/` to the most recent N directories. Per-run
+    /// NDJSON, metadata, and captured failure logs in older runs are removed.
+    Prune {
+        /// Number of run directories to retain. `0` removes everything.
+        #[arg(long, default_value_t = 20)]
+        keep_last: usize,
+    },
+    /// Render the canonical baseline as Prometheus textfile-format metrics
+    /// for `node_exporter --collector.textfile` scraping. Atomic write.
+    Export {
+        /// Output path for the `.prom` textfile.
+        path: std::path::PathBuf,
+    },
+    /// Push the canonical baseline live to an OTLP/HTTP metrics receiver.
+    /// With no endpoint, targets the bundled stack's Prometheus receiver at
+    /// `http://127.0.0.1:9090/api/v1/otlp` (`/v1/metrics` is appended).
+    /// Useful in CI / cron / a post-run hook.
+    Push {
+        /// Receiver root URL; omit for the bundled stack's endpoint.
+        endpoint: Option<String>,
+    },
+}
+
 fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Build => build(),
@@ -421,18 +408,6 @@ fn main() -> ExitCode {
             skip_unit_tests,
             update_baseline,
             fail_fast,
-            baseline_show,
-            include_history,
-            flakes_only,
-            pending,
-            promote_pending,
-            discard_pending,
-            recover_pending,
-            adopt_run,
-            prune_runs,
-            keep_last,
-            export_prom,
-            push_otlp,
             no_auto_push,
             jobs,
             cpu_jobs,
@@ -440,35 +415,6 @@ fn main() -> ExitCode {
             capture,
             skip,
         } => {
-            if let Some(endpoint) = push_otlp {
-                return itest::push_otlp_metrics(&endpoint);
-            }
-            if let Some(out) = export_prom {
-                return itest::export_prom(&out);
-            }
-            if prune_runs {
-                return itest::prune_runs(keep_last);
-            }
-            if let Some(dir) = recover_pending {
-                return itest::recover_pending(&dir);
-            }
-            if let Some(target) = adopt_run {
-                let run_dir = if target == "@latest" {
-                    None
-                } else {
-                    Some(std::path::PathBuf::from(target))
-                };
-                return itest::adopt_run(run_dir);
-            }
-            if promote_pending {
-                return itest::promote_pending();
-            }
-            if discard_pending {
-                return itest::discard_pending();
-            }
-            if baseline_show {
-                return itest::show_baseline(include_history, flakes_only, pending);
-            }
             if !skip_unit_tests {
                 let unit = itest::run_unit_tests();
                 if unit != ExitCode::SUCCESS {
@@ -497,11 +443,27 @@ fn main() -> ExitCode {
                 &skip,
             )
         }
+        Cmd::Baseline { cmd } => baseline(cmd),
         Cmd::Loc => loc::run(),
         Cmd::Audit { crate_name, json, include_short } => {
             audit::run(&crate_name, json, include_short)
         }
         Cmd::Debug { features } => debug(&features),
+    }
+}
+
+fn baseline(cmd: BaselineCmd) -> ExitCode {
+    match cmd {
+        BaselineCmd::Show { include_history, flakes_only, pending } => {
+            itest::show_baseline(include_history, flakes_only, pending)
+        }
+        BaselineCmd::Promote => itest::promote_pending(),
+        BaselineCmd::Discard => itest::discard_pending(),
+        BaselineCmd::Recover { run_dir } => itest::recover_pending(&run_dir),
+        BaselineCmd::Adopt { run_dir } => itest::adopt_run(run_dir),
+        BaselineCmd::Prune { keep_last } => itest::prune_runs(keep_last),
+        BaselineCmd::Export { path } => itest::export_prom(&path),
+        BaselineCmd::Push { endpoint } => itest::push_otlp_metrics(endpoint.as_deref()),
     }
 }
 

@@ -16,6 +16,7 @@ the [`itest-harness`](../itest-harness/README.md) library.
 | `cargo xtask stack {up,down,logs}` | docker-compose the Tempo + Prometheus + Loki + Grafana stack |
 | `cargo xtask test` | Run host unit tests across the workspace |
 | `cargo xtask itest [...]` | Kernel integration tests in QEMU. See below. |
+| `cargo xtask baseline <verb>` | Inspect/manage the flake baseline + run history: `show`, `promote`, `discard`, `recover`, `adopt`, `prune`, `export`, `push`. See below. |
 | `cargo xtask clippy [-- args]` | Lint the WHOLE workspace correctly (kernel for riscv, host for host) |
 | `cargo xtask mutants [-- args]` | Mutation testing with the right config + feature flags |
 | `cargo xtask loc` | Lines-of-code by crate, split production vs test |
@@ -76,9 +77,9 @@ prints a verdict (`Consistent`, `Worse`, `Better`).
 
 ```bash
 cargo xtask itest --update-baseline --repeat 100      # rewrite baseline from this run
-cargo xtask itest --baseline-show                     # render the canonical file
-cargo xtask itest --baseline-show --include-history   # show prior currents too
-cargo xtask itest --baseline-show --flakes-only       # only nonzero-failure scenarios
+cargo xtask baseline show                     # render the canonical file
+cargo xtask baseline show --include-history   # show prior currents too
+cargo xtask baseline show --flakes-only       # only nonzero-failure scenarios
 ```
 
 `--flakes-only` sorts by Wilson-score 95% CI lower bound
@@ -93,10 +94,10 @@ file. A second Ctrl-C in the same handler force-quits without
 writing anything.
 
 ```bash
-cargo xtask itest --baseline-show              # banners if a pending file exists
-cargo xtask itest --baseline-show --pending    # render the .pending sidecar
-cargo xtask itest --promote-pending            # accept it as the new baseline
-cargo xtask itest --discard-pending            # throw it away
+cargo xtask baseline show              # banners if a pending file exists
+cargo xtask baseline show --pending    # render the .pending sidecar
+cargo xtask baseline promote            # accept it as the new baseline
+cargo xtask baseline discard            # throw it away
 ```
 
 Every `--repeat` run also writes a directory under
@@ -111,7 +112,7 @@ name. If the process dies before the in-memory pending file gets
 written, rebuild it from the NDJSON:
 
 ```bash
-cargo xtask itest --recover-pending .itest-runs/2026-06-08T12-30-15Z
+cargo xtask baseline recover .itest-runs/2026-06-08T12-30-15Z
 ```
 
 Refuses if a pending file already exists — promote or discard it
@@ -120,9 +121,9 @@ first.
 ### Pruning history
 
 ```bash
-cargo xtask itest --prune-runs                       # keep 20 newest (default)
-cargo xtask itest --prune-runs --keep-last 50        # keep 50
-cargo xtask itest --prune-runs --keep-last 0         # nuke all of .itest-runs/
+cargo xtask baseline prune                       # keep 20 newest (default)
+cargo xtask baseline prune --keep-last 50        # keep 50
+cargo xtask baseline prune --keep-last 0         # nuke all of .itest-runs/
 ```
 
 Only directories matching the `YYYY-MM-DDTHH-MM-SSZ` shape are
@@ -138,7 +139,7 @@ transports, same data.
 `node_exporter --collector.textfile.directory=`):
 
 ```bash
-cargo xtask itest --export-prom /var/lib/node_exporter/textfile/snitchos-itest.prom
+cargo xtask baseline export /var/lib/node_exporter/textfile/snitchos-itest.prom
 ```
 
 Atomic write: tmp file then `rename`, so the scraper can't catch a
@@ -154,15 +155,15 @@ to silence in CI / scripts.
 
 ```bash
 cargo xtask stack up
-cargo xtask itest --push-otlp                                        # default endpoint (localhost stack)
-cargo xtask itest --push-otlp https://prom.example/api/v1/otlp       # custom endpoint
+cargo xtask baseline push                                        # default endpoint (localhost stack)
+cargo xtask baseline push https://prom.example/api/v1/otlp       # custom endpoint
 ```
 
-`--push-otlp` without a value targets `http://127.0.0.1:9090/api/v1/otlp`
+`baseline push` with no endpoint targets `http://127.0.0.1:9090/api/v1/otlp`
 — the bundled `stack/docker-compose.yml` boots Prometheus with
 `--web.enable-otlp-receiver`, so OTLP/HTTP metrics ingest at
 `/api/v1/otlp/v1/metrics`. `/v1/metrics` is appended automatically
-if missing. Wire `--push-otlp` into a cron entry, a post-run hook,
+if missing. Wire `baseline push` into a cron entry, a post-run hook,
 or a CI step.
 
 ### Metric name reference

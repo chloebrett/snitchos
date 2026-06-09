@@ -107,6 +107,7 @@ cargo xtask test               # run all host-side unit tests (kernel-core, prot
 cargo xtask itest              # run kernel integration tests in QEMU (unit tests run first; --skip-unit-tests to bypass)
 cargo xtask itest <scenario>   # run one scenario by name
 cargo xtask itest --repeat N   # run the suite N times back-to-back; aggregate flake report
+cargo xtask baseline show      # inspect the flake baseline (also: promote/discard/recover/adopt/prune/export/push)
 cargo xtask debug              # build kernel + run QEMU paused with GDB stub on :1234
 cargo xtask loc                # lines of code by crate + production/test split
 cargo xtask --help

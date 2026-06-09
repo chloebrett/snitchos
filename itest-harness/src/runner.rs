@@ -633,7 +633,7 @@ fn finalize_run(
             } else {
                 eprintln!(
                     "\nWrote partial baseline to {} ({} of {} requested iterations). \
-                     Promote with --promote-pending or discard with --discard-pending.",
+                     Promote with `baseline promote` or discard with `baseline discard`.",
                     path.display(),
                     aggregator.runs(),
                     runs

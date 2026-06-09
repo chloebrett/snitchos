@@ -69,8 +69,8 @@ pub struct Baseline {
     /// Present only when this baseline reflects an *interrupted* run
     /// (Ctrl-C / SIGINT before all `--repeat` iterations completed).
     /// The summary stats above are computed from however many runs
-    /// did finish. Promotion still works — `--promote-pending`
-    /// strips this field — but `--baseline-show` surfaces the
+    /// did finish. Promotion still works — `baseline promote`
+    /// strips this field — but `baseline show` surfaces the
     /// partial-ness to the user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial: Option<PartialMarker>,
@@ -94,7 +94,7 @@ pub struct PartialMarker {
     #[serde(with = "rfc3339")]
     pub interrupted_at: OffsetDateTime,
     /// Relative path to the per-run history directory under
-    /// `.itest-runs/`. Used by `--recover-pending` to rebuild this
+    /// `.itest-runs/`. Used by `baseline recover` to rebuild this
     /// entry from the underlying NDJSON if the pending file is
     /// lost or corrupted. `None` when no history directory exists —
     /// step B writes pending files without one; step C onward fills
@@ -210,7 +210,7 @@ impl BaselineFile {
     /// directory; `requested_runs` reflects the original `--repeat N`
     /// the run was invoked with so reviewers can see how short of
     /// completion the recovery sits. Used by xtask's
-    /// `--recover-pending` to reconstruct the pending sidecar from
+    /// `baseline recover` to reconstruct the pending sidecar from
     /// NDJSON after the in-process write was lost.
     pub fn from_recovered(
         recovered: &crate::history::RecoveredRun,
@@ -308,7 +308,7 @@ impl BaselineFile {
         Ok(())
     }
 
-    /// Render the file as a human-readable summary for `--baseline-show`.
+    /// Render the file as a human-readable summary for `baseline show`.
     /// See `SummaryOptions` for the filter/sort knobs.
     pub fn render_summary(&self, opts: SummaryOptions) -> String {
         use std::fmt::Write;

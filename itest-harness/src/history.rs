@@ -211,7 +211,7 @@ pub struct RecoveredRun {
 }
 
 /// Rebuild per-scenario stats by streaming `iterations.ndjson`. Used by
-/// `--recover-pending`: if the pending sidecar is lost (process killed
+/// `baseline recover`: if the pending sidecar is lost (process killed
 /// before the runner could write it), the NDJSON has every iteration
 /// we observed and we can reconstruct the partial baseline from it.
 ///
