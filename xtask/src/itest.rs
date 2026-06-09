@@ -102,14 +102,6 @@ const SCENARIOS: &[Scenario] = &[
     Scenario::cpu_bound ("virtio-storm",        scenarios::virtio_storm),
 ];
 
-/// Entry point from `main`. `Some(name)` runs one scenario;
-/// `None` runs them all. `repeat` controls how many full passes
-/// to perform — useful for surfacing flaky scenarios.
-/// `keep_existing_qemus` disables the pre-run cleanup of stale
-/// `qemu-system-riscv64` processes (default: cleanup runs).
-/// `update_baseline` writes the current run's per-scenario results
-/// back to `.itest-baseline.toml` (pushing the previous `current`
-/// into `history`) after the run completes.
 /// Set the process-wide failure-capture transcript depth. Call once at
 /// startup, before `run`. Delegates to the harness, which reads it at
 /// every `Harness::spawn`.
@@ -117,19 +109,48 @@ pub fn set_capture_level(level: itest_harness::CaptureLevel) {
     harness::set_capture_level(level);
 }
 
-#[allow(clippy::too_many_arguments, reason = "1:1 with the CLI flags; refactor when more land")]
-pub fn run(
-    name: Option<&str>,
-    repeat: u32,
-    force: bool,
-    update_baseline: bool,
-    fail_fast: Option<u32>,
-    auto_push: bool,
-    jobs: u32,
-    cpu_jobs: u32,
-    profile_filter: Option<CpuProfile>,
-    skip: &[String],
-) -> ExitCode {
+/// Options for one `run` — the `itest` subcommand's flags, grouped so the
+/// entry point takes a single value instead of ten positional arguments.
+pub struct RunConfig {
+    /// Scenario name or comma-separated list; `None` runs every scenario.
+    pub name: Option<String>,
+    /// Number of full passes to perform — surfaces flaky scenarios.
+    pub repeat: u32,
+    /// Bypass the integration-test lock (use only if it's known stale).
+    pub force: bool,
+    /// After the run, write each scenario's results back to the baseline
+    /// (previous `current` pushed to `history`).
+    pub update_baseline: bool,
+    /// Abort the repeat sweep once cumulative failures reach this count.
+    pub fail_fast: Option<u32>,
+    /// Push the canonical baseline to OTLP when the run finishes.
+    pub auto_push: bool,
+    /// Parallel workers for the wfi-bounded scenario batch.
+    pub jobs: u32,
+    /// Parallel workers for the cpu-bound scenario batch.
+    pub cpu_jobs: u32,
+    /// Restrict the run to one CPU-profile class.
+    pub profile_filter: Option<CpuProfile>,
+    /// Scenario names to exclude (applied after `profile_filter`).
+    pub skip: Vec<String>,
+}
+
+/// Entry point from `main`: select scenarios per `config`, run them in QEMU
+/// (optionally repeating `config.repeat` times), and compare against the
+/// baseline. `config.name` picks scenarios (`None` = all).
+pub fn run(config: RunConfig) -> ExitCode {
+    let RunConfig {
+        name,
+        repeat,
+        force,
+        update_baseline,
+        fail_fast,
+        auto_push,
+        jobs,
+        cpu_jobs,
+        profile_filter,
+        skip,
+    } = config;
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
         return ExitCode::SUCCESS;
@@ -175,7 +196,7 @@ pub fn run(
         );
     }
 
-    let to_run: Vec<&Scenario> = match name {
+    let to_run: Vec<&Scenario> = match name.as_deref() {
         // One name, or a comma-separated list (`itest a,b,c`).
         // Whitespace around each name is trimmed; any unknown name is a
         // hard error — a typo shouldn't silently run a subset.
@@ -219,7 +240,7 @@ pub fn run(
     } else {
         // Warn on unknown skip names — usually a typo, and silently
         // skipping nothing would hide it.
-        for s in skip {
+        for s in &skip {
             if !SCENARIOS.iter().any(|sc| sc.name == s.as_str()) {
                 eprintln!("warning: --skip {s:?}: no such scenario (ignored)");
             }

@@ -122,12 +122,11 @@ enum Cmd {
     /// to run the suite N times back-to-back; an aggregate flake
     /// report lists scenarios that failed in at least one run.
     ///
-    /// By default, any `qemu-system-riscv64` processes already
-    /// running on the host are killed before the suite starts — a
-    /// stale QEMU from a prior `cargo xtask boot` or debug session
-    /// would otherwise compete for host CPU and cause flakes. Use
-    /// `--keep-existing-qemus` to disable this if you genuinely
-    /// want concurrent QEMUs.
+    /// If `qemu-system-riscv64` processes are already running (e.g. a
+    /// stale QEMU from a prior `cargo xtask boot` or debug session, which
+    /// could compete for host CPU and cause flakes), the run warns about
+    /// them but does not kill them — the itest lock already prevents
+    /// itest-vs-itest races. Kill stragglers manually if needed.
     Itest {
         /// Scenario name, or a comma-separated list (`a,b,c`). Omit to
         /// run all.
@@ -430,18 +429,18 @@ fn main() -> ExitCode {
                 ProfileFilter::Cpu => itest_harness::CpuProfile::Cpu,
             });
             itest::set_capture_level(capture.into());
-            itest::run(
-                scenario.as_deref(),
+            itest::run(itest::RunConfig {
+                name: scenario,
                 repeat,
                 force,
                 update_baseline,
                 fail_fast,
-                !no_auto_push,
+                auto_push: !no_auto_push,
                 jobs,
                 cpu_jobs,
                 profile_filter,
-                &skip,
-            )
+                skip,
+            })
         }
         Cmd::Baseline { cmd } => baseline(cmd),
         Cmd::Loc => loc::run(),
