@@ -7,6 +7,23 @@
 /// Number of descriptors in our TX queue. Power of 2 required by spec.
 pub const QSIZE: usize = 8;
 
+/// `VIRTIO_F_VERSION_1` — bit 32 of the feature space. Modern virtio
+/// drivers MUST accept this; a device that doesn't advertise it is too
+/// old (legacy) for our modern register layout.
+pub const F_VERSION_1: u64 = 1 << 32;
+
+/// Negotiate features with a device given the 64-bit feature set it
+/// advertises. We accept exactly `VIRTIO_F_VERSION_1` and nothing else
+/// (no `CONSOLE_F_SIZE` / `MULTIPORT` / `EMERG_WRITE` — basic output
+/// suffices). Returns `Some(driver_features)` to write back, or `None`
+/// if the device doesn't advertise `VERSION_1` and must be rejected.
+pub fn negotiate_features(device_features: u64) -> Option<u64> {
+    if device_features & F_VERSION_1 == 0 {
+        return None;
+    }
+    Some(F_VERSION_1)
+}
+
 /// Descriptor flags for the `flags` field of [`VirtqDesc`]. Only
 /// `flags = 0` (single buffer, driver-to-device) is used today; the
 /// rest are spec constants kept for completeness.
@@ -86,6 +103,25 @@ mod tests {
         assert_eq!(size_of::<VirtqUsedElem>(), 8);
         assert_eq!(offset_of!(VirtqUsedElem, id), 0);
         assert_eq!(offset_of!(VirtqUsedElem, len), 4);
+    }
+
+    #[test]
+    fn negotiate_accepts_version_1_and_offers_only_it() {
+        // Device advertises VERSION_1 plus some other features; we
+        // commit to VERSION_1 only.
+        let device = F_VERSION_1 | 0xFF;
+        assert_eq!(negotiate_features(device), Some(F_VERSION_1));
+    }
+
+    #[test]
+    fn negotiate_rejects_when_version_1_absent() {
+        // Lower 32 bits all set, but bit 32 (VERSION_1) clear → reject.
+        assert_eq!(negotiate_features(0xFFFF_FFFF), None);
+    }
+
+    #[test]
+    fn negotiate_rejects_empty_feature_set() {
+        assert_eq!(negotiate_features(0), None);
     }
 
     #[test]

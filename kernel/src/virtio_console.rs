@@ -47,10 +47,6 @@ const VERSION: u32 = 2;
 /// DeviceID for virtio-console.
 const DEVICE_ID_CONSOLE: u32 = 3;
 
-/// `VIRTIO_F_VERSION_1` — bit 32 of the feature space. Modern virtio
-/// drivers MUST accept this; if the device doesn't advertise it,
-/// the device is too old for us.
-const F_VERSION_1: u64 = 1 << 32;
 
 /// virtio-console queue indices (no MULTIPORT feature).
 const QUEUE_RX: u32 = 0;
@@ -384,14 +380,10 @@ unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
         let dev_hi = read_reg(base, REG_DEVICE_FEATURES) as u64;
         let device_features = (dev_hi << 32) | dev_lo;
 
-        if device_features & F_VERSION_1 == 0 {
+        let Some(driver_features) = kernel_core::virtio::negotiate_features(device_features) else {
             write_reg(base, REG_STATUS, status | STATUS_FAILED);
             return Err(InitError::NoVersion1);
-        }
-
-        // We accept VERSION_1 only. No CONSOLE_F_SIZE/MULTIPORT/EMERG_WRITE
-        // — basic output is enough for v0.1.
-        let driver_features = F_VERSION_1;
+        };
 
         write_reg(base, REG_DRIVER_FEATURES_SEL, 0);
         write_reg(base, REG_DRIVER_FEATURES, driver_features as u32);
