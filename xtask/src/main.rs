@@ -453,17 +453,18 @@ fn main() -> ExitCode {
 }
 
 fn baseline(cmd: BaselineCmd) -> ExitCode {
+    use itest::baseline as bl;
     match cmd {
         BaselineCmd::Show { include_history, flakes_only, pending } => {
-            itest::show_baseline(include_history, flakes_only, pending)
+            bl::show_baseline(include_history, flakes_only, pending)
         }
-        BaselineCmd::Promote => itest::promote_pending(),
-        BaselineCmd::Discard => itest::discard_pending(),
-        BaselineCmd::Recover { run_dir } => itest::recover_pending(&run_dir),
-        BaselineCmd::Adopt { run_dir } => itest::adopt_run(run_dir),
-        BaselineCmd::Prune { keep_last } => itest::prune_runs(keep_last),
-        BaselineCmd::Export { path } => itest::export_prom(&path),
-        BaselineCmd::Push { endpoint } => itest::push_otlp_metrics(endpoint.as_deref()),
+        BaselineCmd::Promote => bl::promote_pending(),
+        BaselineCmd::Discard => bl::discard_pending(),
+        BaselineCmd::Recover { run_dir } => bl::recover_pending(&run_dir),
+        BaselineCmd::Adopt { run_dir } => bl::adopt_run(run_dir),
+        BaselineCmd::Prune { keep_last } => bl::prune_runs(keep_last),
+        BaselineCmd::Export { path } => bl::export_prom(&path),
+        BaselineCmd::Push { endpoint } => bl::push_otlp_metrics(endpoint.as_deref()),
     }
 }
 
