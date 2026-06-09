@@ -569,8 +569,8 @@ pub fn smp_spawn_on_hart_1_runs() -> Result<(), String> {
 /// The default workload runs `task_a` on hart 0 and the `hart_1_probe`
 /// on hart 1, so we should see both attributions on the wire:
 ///
-///   - a `task_a.tick` SpanStart with `hart_id == 0`, and
-///   - a `hart1.probe` SpanStart with `hart_id == 1`.
+///   - a `task_a.tick` `SpanStart` with `hart_id == 0`, and
+///   - a `hart1.probe` `SpanStart` with `hart_id == 1`.
 ///
 /// Proves the per-hart attribution path (kernel `current_hartid()` →
 /// `Frame::SpanStart.hart_id` → collector) for *both* harts. Distinct
@@ -614,7 +614,7 @@ pub fn smp_spans_carry_hart_id() -> Result<(), String> {
 /// `IPI_WAKEUP`. The probe's first span — tagged `hart_id == 1` — is
 /// the end-to-end proof the IPI pulled hart 1 out of `wfi` and ran it.
 ///
-/// Asserts the `hart1.probe` SpanStart (`hart_id == 1`) appears within
+/// Asserts the `hart1.probe` `SpanStart` (`hart_id == 1`) appears within
 /// 20s. (Complements `smp-spawn-on-hart-1-runs`, which proves
 /// *sustained* progress via the metric; this guards the *wake* edge
 /// itself, observed as a span.)

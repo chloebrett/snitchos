@@ -76,6 +76,50 @@ mod tests {
     }
 
     #[test]
+    fn next_heap_top_adds_frames_within_ceiling() {
+        // start at base, add 10 frames of 4096 under a generous ceiling.
+        let start = 0x4000_0000;
+        let ceiling = start + 1024 * 4096;
+        assert_eq!(next_heap_top(start, 10, 4096, ceiling), Some(start + 10 * 4096));
+    }
+
+    #[test]
+    fn next_heap_top_allows_exact_fit_at_ceiling() {
+        // end_top == ceiling is permitted (the check is strict `>`).
+        let start = 0x4000_0000;
+        let ceiling = start + 4 * 4096;
+        assert_eq!(next_heap_top(start, 4, 4096, ceiling), Some(ceiling));
+    }
+
+    #[test]
+    fn next_heap_top_rejects_one_frame_over_ceiling() {
+        let start = 0x4000_0000;
+        let ceiling = start + 4 * 4096;
+        assert_eq!(next_heap_top(start, 5, 4096, ceiling), None);
+    }
+
+    #[test]
+    fn next_heap_top_rejects_frame_count_byte_overflow() {
+        // n_frames * frame_size overflows usize before the ceiling even
+        // matters — the latent unchecked-multiply case.
+        let ceiling = usize::MAX;
+        assert_eq!(next_heap_top(0, usize::MAX, 4096, ceiling), None);
+    }
+
+    #[test]
+    fn next_heap_top_rejects_top_addition_overflow() {
+        // bytes fit, but start_top + bytes wraps past usize::MAX. Ceiling
+        // is max so only the add-overflow can trigger the None.
+        assert_eq!(next_heap_top(usize::MAX - 4096, 2, 4096, usize::MAX), None);
+    }
+
+    #[test]
+    fn next_heap_top_zero_frames_is_a_noop_top() {
+        let start = 0x4000_0000;
+        assert_eq!(next_heap_top(start, 0, 4096, start + 4096), Some(start));
+    }
+
+    #[test]
     fn returns_none_when_capacity_is_zero() {
         // Init hasn't run yet — heap has no capacity, no decision to
         // make. Stays defensive: never reports "grow this empty thing."
@@ -132,4 +176,24 @@ pub fn watermark_grow_decision(stats: Stats, cfg: &WatermarkConfig) -> Option<us
     }
     let headroom_frames = (cfg.max_size - stats.capacity) / cfg.frame_size;
     Some(cfg.grow_frames.min(headroom_frames))
+}
+
+/// Compute the new heap top after mapping `n_frames` more frames above
+/// `start_top`, or `None` if the grow can't proceed: the byte count
+/// overflows `usize`, the new top overflows `usize`, or the new top
+/// would exceed `ceiling`. `ceiling` is inclusive — a grow that lands
+/// exactly on it is allowed. Pure arithmetic; the kernel does the
+/// actual frame allocation and PTE installs only after this says `Some`.
+pub fn next_heap_top(
+    start_top: usize,
+    n_frames: usize,
+    frame_size: usize,
+    ceiling: usize,
+) -> Option<usize> {
+    let bytes = n_frames.checked_mul(frame_size)?;
+    let end_top = start_top.checked_add(bytes)?;
+    if end_top > ceiling {
+        return None;
+    }
+    Some(end_top)
 }

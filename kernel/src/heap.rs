@@ -182,10 +182,9 @@ pub fn extend(extra_frames: usize) -> Result<(), ()> {
 /// number of bytes added. Common path for both `init` and `extend`.
 fn grow_va_range(n: usize) -> Result<usize, ()> {
     let start_top = HEAP_TOP.load(Ordering::Relaxed);
-    let end_top = start_top.checked_add(n * frame::FRAME_SIZE).ok_or(())?;
-    if end_top > HEAP_VA_BASE + MAX_HEAP_SIZE {
-        return Err(());
-    }
+    let ceiling = HEAP_VA_BASE + MAX_HEAP_SIZE;
+    let end_top =
+        kernel_core::heap::next_heap_top(start_top, n, frame::FRAME_SIZE, ceiling).ok_or(())?;
     let perms = PtePerms::R.union(PtePerms::W).union(PtePerms::G);
     for i in 0..n {
         let frame = frame::alloc_zeroed().ok_or(())?;
@@ -193,5 +192,5 @@ fn grow_va_range(n: usize) -> Result<usize, ()> {
         mmu::map(va, frame.addr(), perms).map_err(|_| ())?;
     }
     HEAP_TOP.store(end_top, Ordering::Relaxed);
-    Ok(n * frame::FRAME_SIZE)
+    Ok(end_top - start_top)
 }
