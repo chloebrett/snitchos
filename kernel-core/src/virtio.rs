@@ -186,6 +186,21 @@ pub fn handshake<T: MmioTransport>(
     Ok(())
 }
 
+/// Stage `bytes` into `staging` (clamped to its capacity) and hand the
+/// staged prefix to `emit`, returning how many bytes were staged. The
+/// caller holds whatever lock guards `staging` for the entire call, so
+/// the copy and the emit observe the same exclusive buffer — that
+/// invariant is what makes the TX path safe under concurrent senders.
+/// The kernel's `emit` performs the actual virtqueue transmit; the copy
+/// exists because the device needs a kernel-image (`.bss`) address it
+/// can translate to a PA, not a heap-VA caller buffer.
+pub fn stage_and_emit<F: FnOnce(&[u8])>(staging: &mut [u8], bytes: &[u8], emit: F) -> usize {
+    let len = bytes.len().min(staging.len());
+    staging[..len].copy_from_slice(&bytes[..len]);
+    emit(&staging[..len]);
+    len
+}
+
 /// Whether the device has advanced the used ring past the snapshot
 /// taken before submitting. The driver polls `used.idx`; any change
 /// means the device drained our descriptor and the buffer is safe to
@@ -640,6 +655,25 @@ mod tests {
         let e = avail_enqueue(u16::MAX, QSIZE);
         assert_eq!(e.ring_slot, (u16::MAX as usize) % QSIZE);
         assert_eq!(e.next_idx, 0);
+    }
+
+    #[test]
+    fn stage_and_emit_copies_then_emits_the_staged_bytes() {
+        let mut staging = [0u8; 8];
+        let mut seen = Vec::new();
+        let n = stage_and_emit(&mut staging, &[1, 2, 3], |s| seen.extend_from_slice(s));
+        assert_eq!(n, 3);
+        assert_eq!(&staging[..3], &[1, 2, 3]);
+        assert_eq!(seen, [1, 2, 3]);
+    }
+
+    #[test]
+    fn stage_and_emit_clamps_to_staging_capacity() {
+        let mut staging = [0u8; 4];
+        let mut seen = Vec::new();
+        let n = stage_and_emit(&mut staging, &[1, 2, 3, 4, 5, 6], |s| seen.extend_from_slice(s));
+        assert_eq!(n, 4);
+        assert_eq!(seen, [1, 2, 3, 4]); // emit saw only what fit
     }
 
     #[test]

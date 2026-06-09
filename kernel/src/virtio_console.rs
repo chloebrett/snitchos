@@ -159,13 +159,33 @@ fn find_console_base(dtb: &Fdt) -> Option<usize> {
     None
 }
 
-/// The global virtio-console handle. Holds the device's MMIO base
-/// address. Set once at boot via `init`.
+/// Length of the per-console TX staging buffer.
+const TX_STAGING_LEN: usize = 256;
+
+/// The mutex-guarded state for one virtio-console: its MMIO base plus
+/// the TX staging buffer.
 ///
-/// `Mutex<usize>` is overkill today (base is immutable after init),
-/// but the lock will serialize concurrent senders once we have
-/// interrupts or SMP. Same pattern as the NS16550 `UART`.
-pub static CONSOLE: crate::sync::Once<crate::sync::Mutex<usize>> = crate::sync::Once::new();
+/// The buffer lives **inside** the mutex on purpose. The device's
+/// descriptor needs a *physical* address; frames built on heap-backed
+/// task stacks have heap-range VAs that `mmu::va_to_pa` won't translate,
+/// so `send` copies them into this `.bss`-resident buffer (whose VA
+/// `va_to_pa` strips correctly) before handing it to the device.
+///
+/// Guarding the buffer with the same lock as `base` is what makes the
+/// stage→transmit critical section exclusive across concurrent senders
+/// (two harts emitting at once). Crucially, `TxStaging` is **not**
+/// `Copy`, so the old footgun `let base = *handle.lock();` — which
+/// copied `base` out and dropped the guard early, leaving the buffer
+/// unprotected — no longer compiles. See plans/tx-staging-cross-hart-race.md.
+pub struct TxStaging {
+    base: usize,
+    buf: [u8; TX_STAGING_LEN],
+}
+
+/// The global virtio-console handle. Set once at boot via `init`. The
+/// lock serializes concurrent senders (interrupts / SMP) across the
+/// whole stage+transmit. Same lock pattern as the NS16550 `UART`.
+pub static CONSOLE: crate::sync::Once<crate::sync::Mutex<TxStaging>> = crate::sync::Once::new();
 
 /// Errors that can arise during virtio-console initialization: either
 /// the kernel-side DTB discovery failed (`NotFound`), or the pure
@@ -223,56 +243,31 @@ pub unsafe fn init(dtb: &Fdt) -> Result<(), InitError> {
     // through the higher-half mapping, not identity.
     let base = find_console_base(dtb).ok_or(InitError::NotFound)?;
     unsafe { init_handshake(base)? };
-    CONSOLE.call_once(|| crate::sync::Mutex::new(base));
+    CONSOLE.call_once(|| crate::sync::Mutex::new(TxStaging { base, buf: [0u8; TX_STAGING_LEN] }));
     Ok(())
 }
 
 /// Send a buffer of bytes out the kernel's virtio-console. Silently
 /// no-ops if `init` hasn't completed (matches the println macro's
 /// "pre-init bytes are lost" behavior).
-/// Per-emit staging buffer. The virtio device wants a *physical*
-/// address in its descriptor. Frames built on heap-backed task stacks
-/// have VAs in the heap range (`HEAP_VA_BASE+`), which `mmu::va_to_pa`
-/// does NOT translate — it only strips `KERNEL_OFFSET`. Passing a
-/// heap VA to the device would silently DMA random physical memory.
 ///
-/// Copying into this static (which lives in the kernel-image `.bss`,
-/// so `va_to_pa` strips `KERNEL_OFFSET` correctly) sidesteps the
-/// issue. Serialised through the same `CONSOLE` mutex `send` already
-/// takes, so no extra synchronisation needed.
-static mut TX_STAGING: [u8; 256] = [0u8; 256];
-
+/// The `CONSOLE` guard is held across the entire stage+transmit. Because
+/// the staging buffer lives *inside* the guarded `TxStaging`, the lock
+/// structurally covers both the copy and the device handoff — there's no
+/// way to touch the buffer without holding it.
 pub fn send(bytes: &[u8]) {
     let Some(handle) = CONSOLE.get() else {
         return;
     };
-    // Hold the CONSOLE guard across the ENTIRE stage+transmit. Binding
-    // it to a named local is load-bearing: the obvious-looking
-    // `let base = *handle.lock();` locks, copies `base` out, and then
-    // drops the *temporary* guard at the `;` — releasing the lock before
-    // TX_STAGING is even written. Two harts emitting concurrently (hart 1
-    // registering its tasks while hart 0 heartbeats) then race on the
-    // shared `TX_STAGING` buffer and the virtqueue ring: interleaved
-    // bytes corrupt the frame (garbled StringRegister / ThreadRegister
-    // names on the wire) and a clobbered descriptor wedges the device.
-    // See plans/tx-staging-cross-hart-race.md.
-    let guard = handle.lock();
-    let base = *guard;
-    let len = bytes
-        .len()
-        .min(unsafe { (&raw const TX_STAGING).read() }.len());
-    // SAFETY: `guard` is held for the whole block, so this hart is the
-    // single writer to TX_STAGING and the sole driver of the virtqueue
-    // for the duration of the staging copy and `transmit`.
-    unsafe {
-        let staging = &raw mut TX_STAGING;
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), staging as *mut u8, len);
-        let staged = core::slice::from_raw_parts(staging as *const u8, len);
+    let mut staging = handle.lock();
+    let base = staging.base;
+    // SAFETY: the guard is held for the whole `stage_and_emit` call, so
+    // this hart is the single writer to the staging buffer and the sole
+    // driver of the virtqueue while `transmit` runs. `staged` points into
+    // the `.bss`-resident buffer, so `transmit`'s `va_to_pa` is correct.
+    kernel_core::virtio::stage_and_emit(&mut staging.buf, bytes, |staged| unsafe {
         transmit(base, staged);
-    }
-    // Explicit: the lock is released only after `transmit` returns, not
-    // before it — the bug this replaced dropped it at `let base = ...`.
-    drop(guard);
+    });
 }
 
 /// Drive the virtio-mmio handshake on a discovered console device up
