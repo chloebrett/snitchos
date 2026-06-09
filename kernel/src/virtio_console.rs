@@ -167,29 +167,23 @@ fn find_console_base(dtb: &Fdt) -> Option<usize> {
 /// interrupts or SMP. Same pattern as the NS16550 `UART`.
 pub static CONSOLE: crate::sync::Once<crate::sync::Mutex<usize>> = crate::sync::Once::new();
 
-/// Errors that can arise during virtio-console initialization.
+/// Errors that can arise during virtio-console initialization: either
+/// the kernel-side DTB discovery failed (`NotFound`), or the pure
+/// `kernel_core::virtio::handshake` did (`Handshake`).
 #[derive(Debug)]
 pub enum InitError {
     /// No virtio-mmio slot advertised DeviceID 3 (console).
     NotFound,
-    /// Device doesn't advertise `VIRTIO_F_VERSION_1`. We don't support
-    /// pre-1.0 (legacy) virtio at this register layout.
-    NoVersion1,
-    /// We wrote `FEATURES_OK` but the device cleared it back — meaning it
-    /// can't agree to the feature set we offered.
-    FeaturesRejected,
-    /// Device's `QueueNumMax` is smaller than the queue size we want.
-    /// Shouldn't happen — QEMU advertises max 1024.
-    QueueTooSmall,
+    /// The device bring-up handshake failed — see the wrapped reason.
+    Handshake(
+        #[expect(dead_code, reason = "surfaced via Debug in the init-failure log, not matched on")]
+        kernel_core::virtio::HandshakeError,
+    ),
 }
 
 impl From<kernel_core::virtio::HandshakeError> for InitError {
     fn from(e: kernel_core::virtio::HandshakeError) -> Self {
-        match e {
-            kernel_core::virtio::HandshakeError::NoVersion1 => InitError::NoVersion1,
-            kernel_core::virtio::HandshakeError::FeaturesRejected => InitError::FeaturesRejected,
-            kernel_core::virtio::HandshakeError::QueueTooSmall => InitError::QueueTooSmall,
-        }
+        InitError::Handshake(e)
     }
 }
 
