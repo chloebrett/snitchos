@@ -6,56 +6,15 @@
 
 use fdt::Fdt;
 
-// --- virtio-mmio register offsets. ---
-
-const REG_MAGIC_VALUE: usize = 0x000;
-const REG_VERSION: usize = 0x004;
-const REG_DEVICE_ID: usize = 0x008;
-const REG_DEVICE_FEATURES: usize = 0x010;
-const REG_DEVICE_FEATURES_SEL: usize = 0x014;
-const REG_DRIVER_FEATURES: usize = 0x020;
-const REG_DRIVER_FEATURES_SEL: usize = 0x024;
-const REG_QUEUE_SEL: usize = 0x030;
-const REG_QUEUE_NUM_MAX: usize = 0x034;
-const REG_QUEUE_NUM: usize = 0x038;
-const REG_QUEUE_READY: usize = 0x044;
-const REG_QUEUE_NOTIFY: usize = 0x050;
-const REG_STATUS: usize = 0x070;
-// 64-bit queue address slots — written via `write_reg64`, which fills
-// the LOW half here and the HIGH half at `LOW + 4`.
-const REG_QUEUE_DESC_LOW: usize = 0x080;
-const REG_QUEUE_DRIVER_LOW: usize = 0x090;
-const REG_QUEUE_DEVICE_LOW: usize = 0x0A0;
-
-// --- Status register bits. The device's state machine. ---
-
-const STATUS_ACKNOWLEDGE: u32 = 0x01;
-const STATUS_DRIVER: u32 = 0x02;
-const STATUS_DRIVER_OK: u32 = 0x04;
-const STATUS_FEATURES_OK: u32 = 0x08;
-const STATUS_FAILED: u32 = 0x80;
-
-// --- Constants. ---
-
-/// Magic value at offset 0 of every virtio-mmio slot: the four bytes
-/// `"virt"` interpreted as a little-endian u32.
-const MAGIC: u32 = 0x74726976;
-
-/// Modern virtio-mmio version. Legacy is 1; we don't support legacy.
-const VERSION: u32 = 2;
-
-/// DeviceID for virtio-console.
-const DEVICE_ID_CONSOLE: u32 = 3;
-
-
-/// virtio-console queue indices (no MULTIPORT feature).
-const QUEUE_RX: u32 = 0;
-const QUEUE_TX: u32 = 1;
-
-/// virtqueue layout structs + spec constants live in `kernel_core::virtio`
-/// (pure data, host-tested for DMA-layout correctness). The kernel owns
-/// the statics, volatile register access, and the handshake.
-use kernel_core::virtio::{QSIZE, VirtqAvail, VirtqDesc, VirtqUsed, VirtqUsedElem, Virtqueue};
+/// The virtio-mmio register map, status bits, spec constants, and the
+/// virtqueue layout structs all live in `kernel_core::virtio` (pure
+/// data, host-tested). The kernel owns the statics, the volatile
+/// register access, and the handshake driving them.
+use kernel_core::virtio::{
+    DEVICE_ID_CONSOLE, MAGIC, QSIZE, QUEUE_RX, QUEUE_TX, REG_DEVICE_ID, REG_MAGIC_VALUE,
+    REG_QUEUE_NOTIFY, REG_VERSION, VERSION, VirtqAvail, VirtqDesc, VirtqUsed, VirtqUsedElem,
+    Virtqueue,
+};
 
 /// Static TX queue for the virtio-console. Lives in `.bss`. Single
 /// instance — we have one console and one TX path in v0.1.
@@ -129,56 +88,29 @@ unsafe fn write_reg(base: usize, offset: usize, value: u32) {
     unsafe { addr.write_volatile(value) }
 }
 
-/// Write a 64-bit value to a pair of virtio-mmio low/high 32-bit
-/// registers. Convention: `low_offset` is the LOW half; `low_offset+4`
-/// is the HIGH half — matches every desc/avail/used address pair in
-/// the spec.
+/// Build a `QueueConfig` for one virtqueue: translate the three ring
+/// regions' VAs to physical addresses (the device has no MMU) so the
+/// host-tested `kernel_core::virtio::handshake` can install them.
 ///
 /// # Safety
 ///
-/// Same as `write_reg`. Both registers must belong to the same logical
-/// 64-bit address slot.
-unsafe fn write_reg64(base: usize, low_offset: usize, value: u64) {
+/// `queue` must outlive the device's use of it (in practice `'static`,
+/// which is why we take a pointer not a reference — the device writes
+/// to the used ring and we don't want to imply Rust's aliasing rules
+/// cover device accesses).
+unsafe fn queue_config(sel: u32, queue: *const Virtqueue) -> kernel_core::virtio::QueueConfig {
+    // `va_to_pa` is a no-op at identity PC and strips KERNEL_OFFSET once
+    // the kernel runs higher-half.
+    // SAFETY: `queue` is a 'static Virtqueue; taking the field addresses
+    // and translating them to PAs is sound.
     unsafe {
-        write_reg(base, low_offset, value as u32);
-        write_reg(base, low_offset + 4, (value >> 32) as u32);
-    }
-}
-
-/// Configure one virtqueue against the device: select it, check the
-/// device's max queue size against ours, write our queue size, install
-/// the three ring base addresses (descriptor table, available ring,
-/// used ring), and mark it ready.
-///
-/// # Safety
-///
-/// `base` must be the MMIO base of a virtio-mmio device that's in the
-/// FEATURES_OK state. `queue` must outlive the device's use of it (in
-/// practice that's `'static`, which is why we take a pointer not a
-/// reference — the device writes to the used ring, and we don't want
-/// to imply Rust's aliasing rules cover device accesses).
-unsafe fn setup_queue(base: usize, sel: u32, queue: *const Virtqueue) -> Result<(), InitError> {
-    unsafe {
-        write_reg(base, REG_QUEUE_SEL, sel);
-        let max = read_reg(base, REG_QUEUE_NUM_MAX);
-        if !kernel_core::virtio::queue_size_fits(max, QSIZE) {
-            return Err(InitError::QueueTooSmall);
+        kernel_core::virtio::QueueConfig {
+            sel,
+            desc_pa: crate::mmu::va_to_pa(&raw const (*queue).desc as usize) as u64,
+            avail_pa: crate::mmu::va_to_pa(&raw const (*queue).avail as usize) as u64,
+            used_pa: crate::mmu::va_to_pa(&raw const (*queue).used as usize) as u64,
         }
-        write_reg(base, REG_QUEUE_NUM, QSIZE as u32);
-
-        // Device has no MMU — addresses we give it must be physical.
-        // `va_to_pa` is a no-op when the kernel runs at identity PC
-        // (the cast already yields physical); it strips KERNEL_OFFSET
-        // once the kernel runs at higher-half PC.
-        let desc = crate::mmu::va_to_pa(&raw const (*queue).desc as usize) as u64;
-        let avail = crate::mmu::va_to_pa(&raw const (*queue).avail as usize) as u64;
-        let used = crate::mmu::va_to_pa(&raw const (*queue).used as usize) as u64;
-        write_reg64(base, REG_QUEUE_DESC_LOW, desc);
-        write_reg64(base, REG_QUEUE_DRIVER_LOW, avail);
-        write_reg64(base, REG_QUEUE_DEVICE_LOW, used);
-        write_reg(base, REG_QUEUE_READY, 1);
     }
-    Ok(())
 }
 
 /// Diagnostic: dump magic/version/device-id for every virtio-mmio slot.
@@ -284,6 +216,36 @@ pub enum InitError {
     QueueTooSmall,
 }
 
+impl From<kernel_core::virtio::HandshakeError> for InitError {
+    fn from(e: kernel_core::virtio::HandshakeError) -> Self {
+        match e {
+            kernel_core::virtio::HandshakeError::NoVersion1 => InitError::NoVersion1,
+            kernel_core::virtio::HandshakeError::FeaturesRejected => InitError::FeaturesRejected,
+            kernel_core::virtio::HandshakeError::QueueTooSmall => InitError::QueueTooSmall,
+        }
+    }
+}
+
+/// A virtio-mmio device addressed by its higher-half MMIO base. Adapts
+/// the kernel's volatile register access to the host-testable
+/// `MmioTransport` trait so the feature handshake can live in kernel-core.
+struct MmioConsole {
+    base: usize,
+}
+
+impl kernel_core::virtio::MmioTransport for MmioConsole {
+    fn read_reg(&self, offset: usize) -> u32 {
+        // SAFETY: `base` is a discovered virtio-mmio base (`find_console_base`)
+        // and `offset` is a register within that device's region.
+        unsafe { read_reg(self.base, offset) }
+    }
+
+    fn write_reg(&mut self, offset: usize, value: u32) {
+        // SAFETY: as above; the handshake only writes valid register values.
+        unsafe { write_reg(self.base, offset, value) }
+    }
+}
+
 /// Discover the virtio-console in the DTB, drive the handshake, and
 /// store the device's MMIO base in the `CONSOLE` static as a
 /// higher-half VA. After this returns `Ok`, `send` is usable from
@@ -360,66 +322,18 @@ pub fn send(bytes: &[u8]) {
 /// DeviceID is `3` (virtio-console). The device must not currently be
 /// in use by anyone else — this function resets it.
 unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
-    unsafe {
-        // 1. Reset: write 0 to Status, returning the device to a clean state.
-        write_reg(base, REG_STATUS, 0);
-
-        // 2. ACKNOWLEDGE: "I see you, device."
-        let mut status = STATUS_ACKNOWLEDGE;
-        write_reg(base, REG_STATUS, status);
-
-        // 3. DRIVER: "I know how to drive you."
-        status |= STATUS_DRIVER;
-        write_reg(base, REG_STATUS, status);
-
-        // 4. Feature negotiation. Read both halves of the 64-bit feature
-        //    space, decide what we accept, write our subset back.
-        write_reg(base, REG_DEVICE_FEATURES_SEL, 0);
-        let dev_lo = read_reg(base, REG_DEVICE_FEATURES) as u64;
-        write_reg(base, REG_DEVICE_FEATURES_SEL, 1);
-        let dev_hi = read_reg(base, REG_DEVICE_FEATURES) as u64;
-        let device_features = (dev_hi << 32) | dev_lo;
-
-        let Some(driver_features) = kernel_core::virtio::negotiate_features(device_features) else {
-            write_reg(base, REG_STATUS, status | STATUS_FAILED);
-            return Err(InitError::NoVersion1);
-        };
-
-        write_reg(base, REG_DRIVER_FEATURES_SEL, 0);
-        write_reg(base, REG_DRIVER_FEATURES, driver_features as u32);
-        write_reg(base, REG_DRIVER_FEATURES_SEL, 1);
-        write_reg(base, REG_DRIVER_FEATURES, (driver_features >> 32) as u32);
-
-        // 5. FEATURES_OK: "I've committed; don't change features on me."
-        status |= STATUS_FEATURES_OK;
-        write_reg(base, REG_STATUS, status);
-
-        // 6. Verify the bit stuck. The device clears FEATURES_OK if it can't
-        //    agree to what we offered.
-        let read_back = read_reg(base, REG_STATUS);
-        if read_back & STATUS_FEATURES_OK == 0 {
-            write_reg(base, REG_STATUS, read_back | STATUS_FAILED);
-            return Err(InitError::FeaturesRejected);
-        }
-
-        // 7. Virtqueue setup. virtio-console requires BOTH port 0 RX
-        //    (queue 0) and TX (queue 1) to be configured, even if we
-        //    never plan to receive — the device may silently drop our
-        //    TX otherwise.
-        if let Err(e) = setup_queue(base, QUEUE_RX, &raw const RX_QUEUE) {
-            write_reg(base, REG_STATUS, status | STATUS_FAILED);
-            return Err(e);
-        }
-        if let Err(e) = setup_queue(base, QUEUE_TX, &raw const TX_QUEUE) {
-            write_reg(base, REG_STATUS, status | STATUS_FAILED);
-            return Err(e);
-        }
-
-        // 8. DRIVER_OK: "I'm fully set up; treat me as a working driver."
-        status |= STATUS_DRIVER_OK;
-        write_reg(base, REG_STATUS, status);
-    }
-    Ok(())
+    let mut dev = MmioConsole { base };
+    // virtio-console requires BOTH port 0 RX (queue 0) and TX (queue 1)
+    // configured, even though we never receive — the device may silently
+    // drop our TX otherwise.
+    // SAFETY: RX_QUEUE / TX_QUEUE are 'static.
+    let queues = unsafe {
+        [
+            queue_config(QUEUE_RX, &raw const RX_QUEUE),
+            queue_config(QUEUE_TX, &raw const TX_QUEUE),
+        ]
+    };
+    kernel_core::virtio::handshake(&mut dev, &queues, QSIZE).map_err(InitError::from)
 }
 
 /// Send a buffer of bytes out the virtio-console TX queue, blocking
