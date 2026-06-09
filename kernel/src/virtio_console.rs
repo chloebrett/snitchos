@@ -494,9 +494,11 @@ unsafe fn transmit(base: usize, bytes: &[u8]) {
         let used_idx_before = (&raw const TX_QUEUE.used.idx).read_volatile();
 
         // 3. Push descriptor index 0 into the available ring, then
-        //    bump avail.idx. Index field wraps naturally as u16.
-        (&raw mut TX_QUEUE.avail.ring[(avail_idx_before as usize) % QSIZE]).write_volatile(0);
-        (&raw mut TX_QUEUE.avail.idx).write_volatile(avail_idx_before.wrapping_add(1));
+        //    bump avail.idx. Ring slot + next index (with their distinct
+        //    wrap points) come from the host-tested pure helper.
+        let enq = kernel_core::virtio::avail_enqueue(avail_idx_before, QSIZE);
+        (&raw mut TX_QUEUE.avail.ring[enq.ring_slot]).write_volatile(0);
+        (&raw mut TX_QUEUE.avail.idx).write_volatile(enq.next_idx);
 
         // 4. Make the descriptor + ring writes globally visible BEFORE
         //    the device thread sees the notify-induced wake. Required
@@ -507,6 +509,9 @@ unsafe fn transmit(base: usize, bytes: &[u8]) {
         write_reg(base, REG_QUEUE_NOTIFY, QUEUE_TX);
 
         // 5. Spin until the device confirms our descriptor is done.
-        while (&raw const TX_QUEUE.used.idx).read_volatile() == used_idx_before {}
+        while !kernel_core::virtio::used_advanced(
+            used_idx_before,
+            (&raw const TX_QUEUE.used.idx).read_volatile(),
+        ) {}
     }
 }

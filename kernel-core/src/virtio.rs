@@ -24,6 +24,39 @@ pub fn negotiate_features(device_features: u64) -> Option<u64> {
     Some(F_VERSION_1)
 }
 
+/// Where to place a descriptor in the available ring and what the
+/// `avail.idx` counter becomes afterwards. See [`avail_enqueue`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct AvailEnqueue {
+    /// Index into `avail.ring[]` to write the descriptor id into.
+    /// Wraps at `qsize` (the ring is a power-of-two circular buffer).
+    pub ring_slot: usize,
+    /// Value to store into `avail.idx` after writing the ring slot.
+    /// Grows monotonically and wraps at `u16` — NOT at `qsize`.
+    pub next_idx: u16,
+}
+
+/// Compute the available-ring placement for the next descriptor given
+/// the current `avail.idx`. The device reads `avail.idx` to learn how
+/// many entries are live; the driver writes the descriptor id at
+/// `idx % qsize` and then advances `idx`. The ring slot wraps at
+/// `qsize`; the index itself wraps only at `u16`.
+pub fn avail_enqueue(current_idx: u16, qsize: usize) -> AvailEnqueue {
+    AvailEnqueue {
+        ring_slot: current_idx as usize % qsize,
+        next_idx: current_idx.wrapping_add(1),
+    }
+}
+
+/// Whether the device has advanced the used ring past the snapshot
+/// taken before submitting. The driver polls `used.idx`; any change
+/// means the device drained our descriptor and the buffer is safe to
+/// reuse. `used.idx` wraps at `u16`, so a strict inequality (not `>`)
+/// is what correctly treats `MAX -> 0` as progress.
+pub fn used_advanced(before: u16, now: u16) -> bool {
+    now != before
+}
+
 /// Whether our queue of `qsize` descriptors fits within the device's
 /// advertised `QueueNumMax`. The device sets the ceiling; we must not
 /// configure a queue larger than it allows.
@@ -150,6 +183,56 @@ mod tests {
     #[test]
     fn queue_size_does_not_fit_when_device_max_is_zero() {
         assert!(!queue_size_fits(0, QSIZE));
+    }
+
+    #[test]
+    fn avail_enqueue_at_start() {
+        let e = avail_enqueue(0, QSIZE);
+        assert_eq!(e.ring_slot, 0);
+        assert_eq!(e.next_idx, 1);
+    }
+
+    #[test]
+    fn avail_enqueue_at_last_slot_before_wrap() {
+        // idx 7 with qsize 8: last ring slot; idx climbs to 8.
+        let e = avail_enqueue(7, QSIZE);
+        assert_eq!(e.ring_slot, 7);
+        assert_eq!(e.next_idx, 8);
+    }
+
+    #[test]
+    fn avail_enqueue_ring_slot_wraps_while_idx_keeps_climbing() {
+        // idx 8 with qsize 8: the RING slot wraps to 0, but avail.idx
+        // does not — it keeps growing monotonically.
+        let e = avail_enqueue(8, QSIZE);
+        assert_eq!(e.ring_slot, 0);
+        assert_eq!(e.next_idx, 9);
+    }
+
+    #[test]
+    fn avail_enqueue_idx_wraps_at_u16_max() {
+        // The avail.idx counter wraps at u16; the ring slot is its
+        // value mod qsize.
+        let e = avail_enqueue(u16::MAX, QSIZE);
+        assert_eq!(e.ring_slot, (u16::MAX as usize) % QSIZE);
+        assert_eq!(e.next_idx, 0);
+    }
+
+    #[test]
+    fn used_not_advanced_while_idx_unchanged() {
+        // Device hasn't touched used.idx yet — keep spinning.
+        assert!(!used_advanced(5, 5));
+    }
+
+    #[test]
+    fn used_advanced_when_idx_moves_forward() {
+        assert!(used_advanced(5, 6));
+    }
+
+    #[test]
+    fn used_advanced_across_u16_wrap() {
+        // used.idx wraps at u16; MAX -> 0 still counts as "advanced".
+        assert!(used_advanced(u16::MAX, 0));
     }
 
     #[test]
