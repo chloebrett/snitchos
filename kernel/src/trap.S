@@ -48,6 +48,21 @@
 .globl trap_entry
 .align 4
 trap_entry:
+    # Get onto a trusted kernel stack before touching memory. A trap from
+    # U-mode arrives with sp = the user's stack pointer (attacker-chosen);
+    # spilling registers there would be a kernel write-what-where. By
+    # convention sscratch == 0 in the kernel, == this thread's kernel stack
+    # top while in user. Swap sp <-> sscratch atomically (one insn, so the
+    # user's sp is preserved in sscratch rather than lost):
+    csrrw sp, sscratch, sp
+    #   from user:   sscratch held kstk -> sp = kstk (good), sscratch = usp
+    #   from kernel: sscratch held 0    -> sp = 0,           sscratch = ksp
+    # The swap is unconditional, so detect the from-kernel case (sp == 0)
+    # and undo it; the undo also restores sscratch = 0 (convention heals).
+    bnez sp, 1f              # sp != 0 -> came from user, skip the undo
+    csrrw sp, sscratch, sp   # from kernel: sp = ksp, sscratch back to 0
+    1:                       # sp is a valid kernel stack on both paths now
+
     # Allocate the trap frame on the current stack.
     addi sp, sp, -288
 
@@ -58,9 +73,22 @@ trap_entry:
     sd tp, 24(sp)        # x4
     sd t0, 32(sp)        # x5 — t0 is safely saved now, use it as scratch
 
-    # Compute and save the caller's sp.
-    addi t0, sp, 288
-    sd t0, 8(sp)         # caller's sp
+    # Compute and save the caller's sp. Path-dependent now that traps
+    # can arrive from user mode (t0 is already saved above, free scratch):
+    #   from kernel (SPP=1): caller sp is just above our frame (sp + 288).
+    #   from user   (SPP=0): the entry swap parked the user's sp in
+    #                        sscratch; sp + 288 is the kernel stack top,
+    #                        not the caller's sp.
+    csrr t0, sstatus
+    andi t0, t0, 0x100   # isolate SPP (bit 8): 0 => trap came from user
+    bnez t0, 2f
+    csrr t0, sscratch    # from user: caller sp = parked user sp
+    sd t0, 8(sp)
+    j 3f
+2:
+    addi t0, sp, 288     # from kernel: caller sp = frame top
+    sd t0, 8(sp)
+3:
 
     # Continue saving the rest of the GPRs.
     sd t1, 40(sp)        # x6
@@ -109,9 +137,23 @@ trap_entry:
     ld t0, 248(sp)
     csrw sepc, t0
 
-    # Restore all GPRs. Skip the sp slot at offset 8 — we'll
-    # deallocate the frame with `addi sp, sp, 288` below, which
-    # implicitly restores sp to its pre-trap value.
+    # Re-arm sscratch for the NEXT trap, based on where we return to
+    # (SPP read from the sstatus we just restored; t0 free until the GPR
+    # reload below):
+    #   to user (SPP=0): park this thread's kernel stack top (frame top =
+    #                    sp + 288) so the next trap entry swaps onto it.
+    #   to kernel (SPP=1): sscratch is already 0 by the in-kernel
+    #                      convention (the entry undo restored it) — leave it.
+    ld t0, 256(sp)
+    andi t0, t0, 0x100
+    bnez t0, 4f
+    addi t0, sp, 288
+    csrw sscratch, t0
+4:
+
+    # Restore all GPRs. The sp slot at offset 8 is restored last, below,
+    # from the saved caller sp (correct for both user- and kernel-origin
+    # traps — see the path-dependent save at entry).
     ld ra,   0(sp)       # x1
     ld gp,  16(sp)       # x3
     ld tp,  24(sp)       # x4
@@ -143,8 +185,10 @@ trap_entry:
     ld t5, 232(sp)       # x30
     ld t6, 240(sp)       # x31
 
-    # Deallocate the frame. This also restores sp to its pre-trap value.
-    addi sp, sp, 288
+    # Restore sp from the saved caller-sp slot, which also deallocates
+    # the frame. Correct for BOTH paths: kernel-origin -> frame top
+    # (== old `addi sp, sp, 288`), user-origin -> the parked user sp.
+    ld sp, 8(sp)
 
     # Return from supervisor trap. CPU jumps to sepc and restores SIE
     # from SPIE.

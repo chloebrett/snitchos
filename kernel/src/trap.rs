@@ -209,9 +209,17 @@ pub unsafe fn enable_software_interrupts() {
     }
 }
 
-/// Install our `trap_entry` (from `trap.S`) as the S-mode trap vector.
+/// Install our `trap_entry` (from `trap.S`) as the S-mode trap vector,
+/// and establish the in-kernel `sscratch` convention.
 /// After this returns, every trap (exception or interrupt) routes to
-/// our handler. Call once, at boot, before anything that might trap.
+/// our handler. Call once per hart, at boot, before anything that might
+/// trap.
+///
+/// `sscratch` is zeroed here: `trap_entry`'s stack-switch swap uses
+/// `sscratch == 0` as the "we were already in the kernel, this is a
+/// trusted stack" sentinel. While running user code the scheduler parks
+/// the thread's kernel stack top in `sscratch` instead; the trap exit
+/// re-arms it. At boot we are in the kernel, so the sentinel is 0.
 ///
 /// # Safety
 ///
@@ -224,7 +232,9 @@ pub unsafe fn set_trap_vector() {
     let addr = trap_entry as *const () as usize;
     unsafe {
         asm!(
-          "csrw stvec, {}", in(reg) addr
+          "csrw stvec, {}",
+          "csrw sscratch, zero",
+          in(reg) addr,
         );
     }
 }
