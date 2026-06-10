@@ -1240,3 +1240,22 @@ pub fn userspace_cannot_touch_kernel() -> Result<(), String> {
 
     Ok(())
 }
+
+/// v0.7b grant snitching (`workload=userspace`): the kernel emits
+/// `snitchos.cap.grants_total` when it grants the bootstrap `TelemetrySink`
+/// to the process — authority being *created* is observable, not just
+/// authority being *exercised*. Granting is wired into the userspace boot
+/// path, so any userspace workload exercises it; we assert the counter
+/// reaches the wire (it only emits if `Process::bootstrap` + the grant
+/// snitch actually ran).
+pub fn userspace_grant_snitched() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("userspace", "userspace")?;
+
+    h.wait_for(SEC * 10, is_metric_named("snitchos.cap.grants_total"))
+        .ok_or(
+            "no snitchos.cap.grants_total within 10s — the kernel granted the \
+             bootstrap TelemetrySink without snitching it (grant path / counter broke?)",
+        )?;
+
+    Ok(())
+}
