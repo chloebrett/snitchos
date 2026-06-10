@@ -31,6 +31,11 @@ pub enum Syscall {
     /// counter. The single kernel surface; "syscalls" are messages to
     /// capabilities.
     Invoke = 0,
+    /// Terminate the calling process. Does not return — the kernel marks
+    /// the user task `Exited` and switches the hart to its next ready task.
+    /// (Not capability-mediated: a process can always end itself. v0.7b
+    /// leaks the address space + caps on exit; reclamation is later.)
+    Exit = 1,
 }
 
 impl Syscall {
@@ -41,6 +46,7 @@ impl Syscall {
     pub const fn from_usize(n: usize) -> Option<Self> {
         match n {
             0 => Some(Self::Invoke),
+            1 => Some(Self::Exit),
             _ => None,
         }
     }

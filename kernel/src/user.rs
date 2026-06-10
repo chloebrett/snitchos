@@ -52,6 +52,11 @@ static CAP_GRANTS_METRIC: Once<StringId> = Once::new();
 /// in trap context (same discipline as `faults_total`).
 static CAP_DENIED_METRIC: Once<StringId> = Once::new();
 
+/// The counter the kernel bumps when a user process **exits** (the `Exit`
+/// syscall). Emitted once per exit from the trap handler, so pre-registered
+/// here. Proves the process terminated cleanly rather than spinning.
+static USER_EXITS_METRIC: Once<StringId> = Once::new();
+
 /// A loaded program, ready to enter.
 pub struct Loaded {
     /// The entry-point VA (`e_entry`) to put in `sepc`.
@@ -78,6 +83,7 @@ pub fn init_metric() {
     USER_FAULT_METRIC.call_once(|| tracing::register_counter("snitchos.user.faults_total"));
     CAP_GRANTS_METRIC.call_once(|| tracing::register_counter("snitchos.cap.grants_total"));
     CAP_DENIED_METRIC.call_once(|| tracing::register_counter("snitchos.cap.denied_total"));
+    USER_EXITS_METRIC.call_once(|| tracing::register_counter("snitchos.user.exits_total"));
 }
 
 /// The `StringId` for the userspace telemetry counter (or `None` pre-init).
@@ -93,6 +99,11 @@ pub fn user_fault_metric_id() -> Option<StringId> {
 /// The `StringId` for the capability-grant counter (or `None` pre-init).
 pub fn cap_grants_metric_id() -> Option<StringId> {
     CAP_GRANTS_METRIC.get().copied()
+}
+
+/// The `StringId` for the process-exit counter (or `None` pre-init).
+pub fn user_exits_metric_id() -> Option<StringId> {
+    USER_EXITS_METRIC.get().copied()
 }
 
 /// The `StringId` for the denied-invocation counter (or `None` pre-init).

@@ -53,8 +53,15 @@ pub extern "C" fn rust_main() -> ! {
         );
     }
 
-    loop {
-        core::hint::spin_loop();
+    // We're done — exit instead of busy-spinning. The kernel terminates us
+    // and the hart goes idle (`wfi`) rather than pegging a core.
+    // SAFETY: `Exit` never returns; the kernel switches the hart away.
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") Syscall::Exit as usize,
+            options(noreturn),
+        );
     }
 }
 

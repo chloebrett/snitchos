@@ -1290,6 +1290,27 @@ pub fn userspace_grant_snitched() -> Result<(), String> {
     Ok(())
 }
 
+/// v0.7b clean process exit (`workload=userspace`): after its syscalls,
+/// `hello` invokes `Exit` instead of busy-spinning. The kernel marks the
+/// user task `Exited` and switches hart 1 back to its idle loop (which
+/// `wfi`s) — making the workload wfi-bounded rather than core-pegging.
+/// Asserts the exit is snitched (`snitchos.user.exits_total`) and the
+/// kernel keeps heartbeating (a clean exit, not a wedge).
+pub fn userspace_process_exits() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("userspace", "userspace")?;
+
+    h.wait_for(SEC * 10, is_metric_named("snitchos.user.exits_total"))
+        .ok_or(
+            "no snitchos.user.exits_total within 10s — the user process did not \
+             exit cleanly (Exit syscall / exit_now path broke, or hello still spins?)",
+        )?;
+
+    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat after the user process exited — did exit wedge the kernel?")?;
+
+    Ok(())
+}
+
 /// v0.7b authority event (`workload=userspace`): the bootstrap grant emits a
 /// first-class `CapEvent::Granted` — richer than the `grants_total` counter
 /// (it carries the global cap id, holder, object kind, and rights). This is

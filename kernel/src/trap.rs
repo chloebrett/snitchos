@@ -182,11 +182,29 @@ fn handle_user_ecall(frame: &mut TrapFrame) {
     use snitchos_abi::Syscall;
     match Syscall::from_usize(frame.a7 as usize) {
         Some(Syscall::Invoke) => handle_invoke(frame),
-        None => frame.a0 = u64::MAX, // unknown syscall
+        Some(Syscall::Exit) => handle_exit(), // does not return
+        None => frame.a0 = u64::MAX,          // unknown syscall
     }
     // `ecall` is a 4-byte instruction; without advancing past it, `sret`
-    // would re-execute it and we'd trap on it forever.
+    // would re-execute it and we'd trap on it forever. (Not reached for
+    // `Exit` — `handle_exit` never returns.)
     frame.sepc = frame.sepc.wrapping_add(4);
+}
+
+/// Terminate the calling user process. Snitches `snitchos.user.exits_total`,
+/// clears this hart's current-process pointer (the process is gone), then
+/// hands the hart to its next ready task via `sched::exit_now` — which never
+/// returns. On the userspace workload that next task is `hart_1_main`, whose
+/// idle loop `wfi`s, so the hart goes truly idle rather than busy-spinning.
+/// v0.7b leaks the address space + caps; reclamation is a later milestone.
+fn handle_exit() -> ! {
+    if let Some(id) = crate::user::user_exits_metric_id() {
+        crate::tracing::emit_metric(id, 1);
+    }
+    crate::process::CURRENT_PROCESS
+        .this_cpu()
+        .store(core::ptr::null_mut(), Ordering::Relaxed);
+    crate::sched::exit_now()
 }
 
 /// Capability invocation. Resolve `a0` against the running process's

@@ -100,11 +100,15 @@ const SCENARIOS: &[Scenario] = &[
     Scenario::new       ("sched-task-exits-cleanly",    scenarios::sched_task_exits_cleanly),
     Scenario::cpu_bound ("mutex-storm",         scenarios::mutex_storm),
     Scenario::cpu_bound ("virtio-storm",        scenarios::virtio_storm),
-    Scenario::cpu_bound ("userspace-emits-telemetry", scenarios::userspace_emits_telemetry),
-    Scenario::cpu_bound ("userspace-cannot-touch-kernel", scenarios::userspace_cannot_touch_kernel),
-    Scenario::cpu_bound ("userspace-grant-snitched", scenarios::userspace_grant_snitched),
-    Scenario::cpu_bound ("userspace-cap-denied", scenarios::userspace_cap_denied),
-    Scenario::cpu_bound ("userspace-cap-granted-event", scenarios::userspace_cap_granted_event),
+    // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back
+    // to its idle `wfi` loop) and `faulter` faults (the kernel parks the hart
+    // in `wfi`). So they fan out in the parallel pool rather than a serial pass.
+    Scenario::new       ("userspace-emits-telemetry", scenarios::userspace_emits_telemetry),
+    Scenario::new       ("userspace-cannot-touch-kernel", scenarios::userspace_cannot_touch_kernel),
+    Scenario::new       ("userspace-grant-snitched", scenarios::userspace_grant_snitched),
+    Scenario::new       ("userspace-cap-denied", scenarios::userspace_cap_denied),
+    Scenario::new       ("userspace-cap-granted-event", scenarios::userspace_cap_granted_event),
+    Scenario::new       ("userspace-process-exits", scenarios::userspace_process_exits),
 ];
 
 /// Set the process-wide failure-capture transcript depth. Call once at
