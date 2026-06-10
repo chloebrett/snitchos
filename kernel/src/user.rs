@@ -19,6 +19,7 @@ use kernel_core::mmu::{MapError, PtePerms};
 use protocol::StringId;
 
 use crate::frame::{self, FRAME_SIZE};
+use crate::process::Process;
 use crate::sync::Once;
 use crate::{mmu, tracing};
 
@@ -37,6 +38,13 @@ static USER_METRIC: Once<StringId> = Once::new();
 /// The counter a U-mode page fault bumps — the isolation firewall doing its
 /// job. Registered alongside [`USER_METRIC`]; read by the fault handler.
 static USER_FAULT_METRIC: Once<StringId> = Once::new();
+
+/// The counter the kernel bumps each time it **grants** a capability —
+/// authority being created. v0.7b grants exactly once (the bootstrap
+/// `TelemetrySink`), so this reaches 1; the richer `CapEvent` frame is the
+/// sequenced follow-on. Registered alongside the others so the grant site
+/// emits without interning.
+static CAP_GRANTS_METRIC: Once<StringId> = Once::new();
 
 /// A loaded program, ready to enter.
 pub struct Loaded {
@@ -62,6 +70,7 @@ pub enum LoadError {
 pub fn init_metric() {
     USER_METRIC.call_once(|| tracing::register_counter("snitchos.user.telemetry_total"));
     USER_FAULT_METRIC.call_once(|| tracing::register_counter("snitchos.user.faults_total"));
+    CAP_GRANTS_METRIC.call_once(|| tracing::register_counter("snitchos.cap.grants_total"));
 }
 
 /// The `StringId` for the userspace telemetry counter (or `None` pre-init).
@@ -74,6 +83,11 @@ pub fn user_fault_metric_id() -> Option<StringId> {
     USER_FAULT_METRIC.get().copied()
 }
 
+/// The `StringId` for the capability-grant counter (or `None` pre-init).
+pub fn cap_grants_metric_id() -> Option<StringId> {
+    CAP_GRANTS_METRIC.get().copied()
+}
+
 /// Hart-1 entry for `workload=userspace`: run the `hello` program.
 pub extern "C" fn user_main_entry() -> ! {
     run(HELLO_ELF)
@@ -84,12 +98,23 @@ pub extern "C" fn faulter_main_entry() -> ! {
     run(FAULTER_ELF)
 }
 
-/// Build a fresh address space, load `image` into it, and drop to U-mode.
-/// Never returns — the hart runs userspace from here.
+/// Build a fresh address space, grant the process its bootstrap
+/// capability, load `image` into it, and drop to U-mode. Never returns —
+/// the hart runs userspace from here.
 fn run(image: &'static [u8]) -> ! {
     // Each process gets its own root page table (kernel high-half shared in).
     let root_pa = mmu::new_user_root().expect("userspace: no frame for user root page table");
-    match load(root_pa, image) {
+
+    // Grant the bootstrap capability: one `TelemetrySink` bound to the
+    // userspace telemetry counter. The cap *names* the sink, so the syscall
+    // (Step 5) needs no string from U-mode. The kernel snitches the grant.
+    let counter = user_metric_id().expect("userspace telemetry counter registered before entry");
+    let (process, _bootstrap_handle) = Process::bootstrap(root_pa, counter);
+    if let Some(id) = cap_grants_metric_id() {
+        tracing::emit_metric(id, 1);
+    }
+
+    match load(process.root_pa, image) {
         Ok(loaded) => enter(loaded, root_pa),
         Err(e) => panic!("userspace load failed: {e:?}"),
     }

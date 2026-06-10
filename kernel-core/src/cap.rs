@@ -144,6 +144,22 @@ impl CapTable {
         Self { slots: Vec::new() }
     }
 
+    /// Build the initial capability table for the v0.7b `init` process:
+    /// exactly one [`Object::TelemetrySink`] bound to `counter`, with
+    /// `EMIT`. Returns the table and the handle the sink landed at (the
+    /// well-known bootstrap handle the user program invokes). This is the
+    /// "root cap to init only" policy — the *only* authority a userspace
+    /// process is born with in v0.7b.
+    #[must_use]
+    pub fn bootstrap_telemetry(counter: StringId) -> (Self, Handle) {
+        let mut table = Self::new();
+        let handle = table.insert(Capability {
+            object: Object::TelemetrySink { counter },
+            rights: Rights::EMIT,
+        });
+        (table, handle)
+    }
+
     /// Place `cap` in the table and return the handle that names it.
     /// Used at bootstrap to grant a process its root capabilities.
     pub fn insert(&mut self, cap: Capability) -> Handle {
@@ -222,6 +238,22 @@ mod tests {
             rights: Rights::NONE,
         };
         assert!(!cap.rights.contains(Rights::EMIT));
+    }
+
+    #[test]
+    fn the_bootstrap_grant_gives_init_exactly_one_emit_telemetry_sink() {
+        // The "root cap to init only" policy, pinned: granting the wrong
+        // rights or object here is a privilege bug, so it's host-tested
+        // rather than left to the itest.
+        let counter = StringId(42);
+        let (table, handle) = CapTable::bootstrap_telemetry(counter);
+
+        let cap = table.resolve(handle).expect("the bootstrap handle resolves");
+        assert_eq!(cap.object, Object::TelemetrySink { counter });
+        assert!(cap.rights.contains(Rights::EMIT));
+        // The single bootstrap grant lands at the well-known handle the
+        // user program is told to invoke (Step 4's `TELEMETRY_SINK_HANDLE`).
+        assert_eq!(handle.raw(), 0);
     }
 
     #[test]

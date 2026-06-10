@@ -26,6 +26,7 @@ mod ipi;
 mod mmu;
 mod panic;
 mod percpu;
+mod process;
 mod sbi;
 mod secondary;
 mod sched;
