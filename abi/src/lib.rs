@@ -4,13 +4,16 @@
 //! `ecall` site) so neither side hard-codes a magic number. `no_std`,
 //! no dependencies — just the contract.
 //!
-//! v0.7a has exactly one syscall, invoked with **ambient authority** (any
-//! U-mode code may call it, the kernel performs no capability check). v0.7b
-//! reframes the same operation as a capability invocation. See
-//! `docs/capability-system-design.md`.
+//! v0.7b: the kernel surface is **invoke a capability**. A program names a
+//! capability by an opaque handle (an index into *its own* `CapTable`) and
+//! the kernel validates every invocation against that table — no ambient
+//! authority. (v0.7a's `EmitMetric` was the deliberately-wrong ambient
+//! version this replaces.) See `docs/capability-system-design.md`.
 //!
 //! Calling convention (RISC-V, Linux/SBI-style): syscall number in `a7`,
-//! arguments in `a0..`, result in `a0`.
+//! arguments in `a0..`, result in `a0`. For `Invoke`: `a0` = capability
+//! handle, `a1` = the operation's argument; `a0` on return is `0` on
+//! success or nonzero on a denied/unknown invocation.
 
 #![no_std]
 
@@ -21,10 +24,13 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Syscall {
-    /// Emit a telemetry metric on the caller's behalf. Argument `a0` is
-    /// the value. Ambient in v0.7a; gated by a `TelemetrySink` capability
-    /// in v0.7b.
-    EmitMetric = 0,
+    /// Invoke a capability. `a0` = handle (into the caller's `CapTable`),
+    /// `a1` = argument. The kernel resolves the handle against the caller's
+    /// table, checks the capability's rights, and performs the authorized
+    /// operation — for a `TelemetrySink`, emitting `a1` to the bound
+    /// counter. The single kernel surface; "syscalls" are messages to
+    /// capabilities.
+    Invoke = 0,
 }
 
 impl Syscall {
@@ -34,8 +40,15 @@ impl Syscall {
     #[must_use]
     pub const fn from_usize(n: usize) -> Option<Self> {
         match n {
-            0 => Some(Self::EmitMetric),
+            0 => Some(Self::Invoke),
             _ => None,
         }
     }
 }
+
+/// The handle the bootstrap `TelemetrySink` capability lands at in a
+/// freshly granted process — the well-known root cap `init` is born
+/// holding. Matches the first slot of an empty `CapTable` (`index 0`,
+/// `generation 0`), so its raw value is `0`. The kernel grants it; the
+/// program invokes it.
+pub const TELEMETRY_SINK_HANDLE: usize = 0;

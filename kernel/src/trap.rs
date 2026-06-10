@@ -173,24 +173,59 @@ fn handle_user_fault() -> ! {
     }
 }
 
-/// Handle an `ecall` from U-mode. v0.7a has one **ambient** syscall —
-/// `EmitMetric` — invoked with no capability check (the deliberate
-/// wrongness v0.7b repairs). Reads the syscall number from `a7` and the
-/// argument from `a0`, then advances `sepc` past the `ecall`.
+/// Handle an `ecall` from U-mode. The v0.7b kernel surface is **invoke a
+/// capability**: `a7` selects the syscall (`Invoke`), `a0` is the handle
+/// into the *calling process's* `CapTable`, `a1` the argument. We resolve
+/// and rights-check against that table (no ambient authority), then advance
+/// `sepc` past the `ecall`.
 fn handle_user_ecall(frame: &mut TrapFrame) {
     use snitchos_abi::Syscall;
     match Syscall::from_usize(frame.a7 as usize) {
-        Some(Syscall::EmitMetric) => {
-            if let Some(id) = crate::user::user_metric_id() {
-                crate::tracing::emit_metric(id, frame.a0 as i64);
-            }
-            frame.a0 = 0; // success
-        }
+        Some(Syscall::Invoke) => handle_invoke(frame),
         None => frame.a0 = u64::MAX, // unknown syscall
     }
     // `ecall` is a 4-byte instruction; without advancing past it, `sret`
     // would re-execute it and we'd trap on it forever.
     frame.sepc = frame.sepc.wrapping_add(4);
+}
+
+/// Capability invocation. Resolve `a0` against the running process's
+/// `CapTable`; on success perform the authorized operation (emit `a1` to
+/// the `TelemetrySink`'s bound counter), else refuse with a nonzero `a0`.
+/// The authority decision itself is the pure, host-tested
+/// [`kernel_core::cap::invoke_telemetry`]; here we only act on its result.
+fn handle_invoke(frame: &mut TrapFrame) {
+    use kernel_core::cap::{Handle, invoke_telemetry};
+
+    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
+    // SAFETY: set by `user::run` on this hart before `sret`; the `Process`
+    // lives in that never-returning frame. Null only if no user process is
+    // running here — which then could not have issued this U-mode `ecall`.
+    let Some(proc) = (unsafe { proc.as_ref() }) else {
+        frame.a0 = u64::MAX;
+        return;
+    };
+
+    let handle = Handle::from_raw(frame.a0 as u32);
+    // Resolve under the lock, copy out the counter, drop the lock before
+    // emitting — never hold a Mutex across telemetry emission.
+    let outcome = invoke_telemetry(&proc.caps.lock(), handle);
+    match outcome {
+        Ok(counter) => {
+            crate::tracing::emit_metric(counter, frame.a1 as i64);
+            frame.a0 = 0; // success
+        }
+        Err(_denied) => {
+            // Snitch the refused authority decision. Counter is pre-
+            // registered (`user::init_metric`), so no interning in trap
+            // context. The richer `CapEvent` frame is the sequenced
+            // follow-on (carries granter/object/rights a counter can't).
+            if let Some(id) = crate::user::cap_denied_metric_id() {
+                crate::tracing::emit_metric(id, 1);
+            }
+            frame.a0 = u64::MAX; // refused
+        }
+    }
 }
 
 /// Timer IRQ handler. Kept tiny: measure duration, arm the next

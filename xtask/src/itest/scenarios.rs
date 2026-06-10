@@ -1241,6 +1241,36 @@ pub fn userspace_cannot_touch_kernel() -> Result<(), String> {
     Ok(())
 }
 
+/// v0.7b denial payoff (`workload=userspace`): after invoking the
+/// `TelemetrySink` it *was* granted (handle 0), `hello` deliberately
+/// invokes a handle it was **never granted** (handle 1 — its table holds
+/// only handle 0). The kernel resolves it against the process's own
+/// `CapTable`, finds nothing, refuses, and snitches
+/// `snitchos.cap.denied_total`. The capability twin of
+/// `userspace-cannot-touch-kernel`: there the page table said no; here the
+/// capability table does — and the refusal is observable. We assert:
+///
+///   1. `snitchos.cap.denied_total` appears — an ungranted invocation was
+///      refused (had ambient authority leaked, the invoke would have
+///      "succeeded" and no denial counter would ever emit → fail).
+///   2. A `kernel.heartbeat` arrives after — a denied cap is a clean
+///      refusal, not a wedge.
+pub fn userspace_cap_denied() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("userspace", "userspace")?;
+
+    h.wait_for(SEC * 10, is_metric_named("snitchos.cap.denied_total"))
+        .ok_or(
+            "no snitchos.cap.denied_total within 10s — an invocation of an \
+             ungranted handle was NOT refused (ambient authority leaked?) or \
+             denier never ran",
+        )?;
+
+    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat after the denied invocation — did a refused cap wedge the kernel?")?;
+
+    Ok(())
+}
+
 /// v0.7b grant snitching (`workload=userspace`): the kernel emits
 /// `snitchos.cap.grants_total` when it grants the bootstrap `TelemetrySink`
 /// to the process — authority being *created* is observable, not just

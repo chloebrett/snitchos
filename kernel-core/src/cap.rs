@@ -128,6 +128,35 @@ struct Slot {
     cap: Capability,
 }
 
+/// Why a capability *invocation* was refused. Distinct from [`CapError`]
+/// (which only covers handle resolution): an invocation can also fail
+/// because the named capability lacks the right the operation needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Denied {
+    /// The handle named no live capability (out of bounds or stale).
+    NoSuchCapability,
+    /// The capability exists but lacks the right this operation requires.
+    MissingRight,
+}
+
+/// Resolve a `TelemetrySink` invocation: `handle` must name a capability
+/// in `table` carrying [`Rights::EMIT`] over an [`Object::TelemetrySink`].
+/// Returns the bound counter the kernel should emit to, or why the
+/// invocation is refused.
+///
+/// This is the v0.7b authority decision, pure and host-tested. The kernel
+/// side only acts on the result: emit on `Ok`, snitch + return an error
+/// code on `Err`. (One object type today, so the object match is
+/// irrefutable; it becomes a real discriminator when the object zoo grows.)
+pub fn invoke_telemetry(table: &CapTable, handle: Handle) -> Result<StringId, Denied> {
+    let cap = table.resolve(handle).map_err(|_| Denied::NoSuchCapability)?;
+    if !cap.rights.contains(Rights::EMIT) {
+        return Err(Denied::MissingRight);
+    }
+    let Object::TelemetrySink { counter } = cap.object;
+    Ok(counter)
+}
+
 /// A process's capability table: opaque [`Handle`]s in, [`Capability`]
 /// references out, validated against this table alone. Slots are never
 /// emptied in v0.7b (no revocation), so a present index always holds a
@@ -238,6 +267,37 @@ mod tests {
             rights: Rights::NONE,
         };
         assert!(!cap.rights.contains(Rights::EMIT));
+    }
+
+    #[test]
+    fn invoking_a_granted_telemetry_sink_yields_its_bound_counter() {
+        let counter = StringId(99);
+        let (table, handle) = CapTable::bootstrap_telemetry(counter);
+
+        assert_eq!(invoke_telemetry(&table, handle), Ok(counter));
+    }
+
+    #[test]
+    fn invoking_an_unknown_handle_is_denied_as_no_such_capability() {
+        let table = CapTable::new();
+        assert_eq!(invoke_telemetry(&table, Handle::from_raw(0)), Err(Denied::NoSuchCapability));
+    }
+
+    #[test]
+    fn invoking_a_stale_handle_is_denied_as_no_such_capability() {
+        let (table, handle) = CapTable::bootstrap_telemetry(StringId(1));
+        let stale = Handle::new(handle.index(), handle.generation() + 1);
+        assert_eq!(invoke_telemetry(&table, stale), Err(Denied::NoSuchCapability));
+    }
+
+    #[test]
+    fn invoking_a_capability_that_lacks_emit_is_denied_for_the_missing_right() {
+        let mut table = CapTable::new();
+        let handle = table.insert(Capability {
+            object: Object::TelemetrySink { counter: StringId(1) },
+            rights: Rights::NONE,
+        });
+        assert_eq!(invoke_telemetry(&table, handle), Err(Denied::MissingRight));
     }
 
     #[test]

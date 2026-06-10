@@ -8,10 +8,24 @@
 //! [`kernel_core::cap`]; this module only decides *where the table lives*
 //! and grants the bootstrap capability. See `plans/v0.7b-capabilities.md`.
 
+use core::sync::atomic::AtomicPtr;
+
 use kernel_core::cap::{CapTable, Handle};
 use protocol::StringId;
 
+use crate::percpu::{MAX_HARTS, PerCpu};
 use crate::sync::Mutex;
+
+/// The process running on each hart, so the syscall trap handler can reach
+/// its [`CapTable`] to validate an invocation. Mirrors
+/// `sched::CURRENT_SPAN_CURSOR`. Set by `user::run` before the `sret` into
+/// U-mode; read in `trap::handle_user_ecall`.
+///
+/// `Relaxed`: a per-CPU pointer whose only reader is the syscall trap on
+/// the *same* hart that stored it (trap-return synchronises by hardware).
+/// The pointed-at `Process` lives in `run`'s frame, which never returns.
+pub static CURRENT_PROCESS: PerCpu<AtomicPtr<Process>> =
+    PerCpu::new([const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_HARTS]);
 
 /// One userspace process. Owns its address space (`root_pa`) and its
 /// capability table.
@@ -24,9 +38,8 @@ pub struct Process {
     /// one — even though v0.7b runs one thread per process — so grant and
     /// (future) revoke are multi-hart-correct when v0.8 adds a second
     /// process. **Never held across `sret`/`yield_now`** (the cooperative
-    /// lock discipline). The Step 5 syscall dispatcher is the first
-    /// reader.
-    #[allow(dead_code, reason = "read by the Step 5 capability-invocation syscall dispatcher")]
+    /// lock discipline). Read by `trap::handle_user_ecall` via
+    /// [`CURRENT_PROCESS`] to validate a capability invocation.
     pub caps: Mutex<CapTable>,
 }
 

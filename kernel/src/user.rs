@@ -46,6 +46,12 @@ static USER_FAULT_METRIC: Once<StringId> = Once::new();
 /// emits without interning.
 static CAP_GRANTS_METRIC: Once<StringId> = Once::new();
 
+/// The counter the kernel bumps when it **refuses** a capability
+/// invocation — an authority decision going the other way. Bumped from the
+/// syscall trap handler (hart 1), so pre-registered here to avoid interning
+/// in trap context (same discipline as `faults_total`).
+static CAP_DENIED_METRIC: Once<StringId> = Once::new();
+
 /// A loaded program, ready to enter.
 pub struct Loaded {
     /// The entry-point VA (`e_entry`) to put in `sepc`.
@@ -71,6 +77,7 @@ pub fn init_metric() {
     USER_METRIC.call_once(|| tracing::register_counter("snitchos.user.telemetry_total"));
     USER_FAULT_METRIC.call_once(|| tracing::register_counter("snitchos.user.faults_total"));
     CAP_GRANTS_METRIC.call_once(|| tracing::register_counter("snitchos.cap.grants_total"));
+    CAP_DENIED_METRIC.call_once(|| tracing::register_counter("snitchos.cap.denied_total"));
 }
 
 /// The `StringId` for the userspace telemetry counter (or `None` pre-init).
@@ -86,6 +93,11 @@ pub fn user_fault_metric_id() -> Option<StringId> {
 /// The `StringId` for the capability-grant counter (or `None` pre-init).
 pub fn cap_grants_metric_id() -> Option<StringId> {
     CAP_GRANTS_METRIC.get().copied()
+}
+
+/// The `StringId` for the denied-invocation counter (or `None` pre-init).
+pub fn cap_denied_metric_id() -> Option<StringId> {
+    CAP_DENIED_METRIC.get().copied()
 }
 
 /// Hart-1 entry for `workload=userspace`: run the `hello` program.
@@ -113,6 +125,13 @@ fn run(image: &'static [u8]) -> ! {
     if let Some(id) = cap_grants_metric_id() {
         tracing::emit_metric(id, 1);
     }
+
+    // Publish the process so the syscall trap handler can reach its
+    // CapTable. `process` lives in this frame, which never returns (`enter`
+    // is `-> !`), so the pointer stays valid for every trap from U-mode.
+    crate::process::CURRENT_PROCESS
+        .this_cpu()
+        .store(core::ptr::addr_of!(process).cast_mut(), core::sync::atomic::Ordering::Relaxed);
 
     match load(process.root_pa, image) {
         Ok(loaded) => enter(loaded, root_pa),

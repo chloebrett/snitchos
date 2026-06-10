@@ -11,7 +11,7 @@
 #![no_main]
 
 use core::arch::global_asm;
-use snitchos_abi::Syscall;
+use snitchos_abi::{Syscall, TELEMETRY_SINK_HANDLE};
 
 global_asm!(include_str!("../start.S"));
 
@@ -21,14 +21,17 @@ const KERNEL_PROBE_VA: usize = 0xffff_ffff_8020_0000;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_main() -> ! {
-    // Prove we reached U-mode (and the syscall path works from here too).
+    // Prove we reached U-mode (and the syscall path works from here too):
+    // invoke the bootstrap TelemetrySink we were granted, like `hello`.
     let marker: usize = 99;
-    // SAFETY: ambient telemetry syscall; the kernel reads a7/a0 and returns.
+    // SAFETY: the kernel resolves a0 (our handle) against our CapTable,
+    // emits a1, and returns.
     unsafe {
         core::arch::asm!(
             "ecall",
-            in("a7") Syscall::EmitMetric as usize,
-            in("a0") marker,
+            in("a7") Syscall::Invoke as usize,
+            in("a0") TELEMETRY_SINK_HANDLE,
+            in("a1") marker,
             lateout("a0") _,
         );
     }

@@ -57,7 +57,11 @@ Resolution: the **kernel's own** telemetry emission is ambient and direct — it
 - Capabilities cannot be forged or synthesized from thin air. The kernel mediates every transfer.
 
 # Bootstrap
-Root capabilities are granted to the `init` process only. All other capabilities flow from there, by grant and attenuation, through IPC. This is the delicate part of any capability system — detailed when v0.7b is planned.
+Root capabilities are granted to the `init` process only. All other capabilities flow from there, by grant and attenuation, through IPC.
+
+**v0.7b status — enforcement real, handing-over faked.** The process *holds* a real, validated capability, but it names it with a **hardcoded constant** (`abi::TELEMETRY_SINK_HANDLE = 0`): the kernel grants the sink into a fresh empty `CapTable` so it lands at `index 0, gen 0`, and the program hardcodes `0`. The two sides share an *assumption about insert order*, not a message. Fine for one root cap; it does not scale past it.
+
+**The mechanism (v0.8): a startup capability set.** The kernel hands a new process its initial handles in a structure read at entry — seL4's `seL4_BootInfo`, structurally **Linux's `auxv`** (kernel writes startup facts onto the new process's initial area, the runtime captures them, the kernel forgets them; env vars are the same shape one layer up). `crt0` in the `user-runtime` crate surfaces them to `main`, so the program *receives* `TelemetrySink(handle)` instead of guessing slot 0. Transfer-over-IPC (`Endpoint`) is how caps flow *after* startup; `BootInfo` is how the *initial* set arrives. See [the v0.7b plan](../plans/v0.7b-capabilities.md#where-the-handle-comes-from--a-stopgap-and-the-v08-mechanism).
 
 # Observability angle: authority as a first-class observable
 

@@ -103,6 +103,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario::cpu_bound ("userspace-emits-telemetry", scenarios::userspace_emits_telemetry),
     Scenario::cpu_bound ("userspace-cannot-touch-kernel", scenarios::userspace_cannot_touch_kernel),
     Scenario::cpu_bound ("userspace-grant-snitched", scenarios::userspace_grant_snitched),
+    Scenario::cpu_bound ("userspace-cap-denied", scenarios::userspace_cap_denied),
 ];
 
 /// Set the process-wide failure-capture transcript depth. Call once at
