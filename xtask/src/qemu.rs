@@ -11,6 +11,9 @@ pub const KERNEL_TARGET: &str = "riscv64gc-unknown-none-elf";
 /// the kernel but linked at a low-half VA via its own `user.ld`. The
 /// kernel embeds this ELF and loads it in v0.7a Step 4.
 pub const USER_HELLO_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/hello";
+/// The isolation-probe userspace program (`workload=userspace-fault`); a
+/// second binary in the `hello` crate. Embedded like [`USER_HELLO_BIN`].
+pub const USER_FAULTER_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/faulter";
 
 /// Build a `Command` pre-loaded with every QEMU arg that is common to
 /// all invocations. The caller finishes it with `.status()` or
@@ -56,13 +59,16 @@ pub fn build_kernel(features: &[&str]) -> std::io::Result<std::process::ExitStat
     if !features.is_empty() {
         cmd.arg("--features").arg(features.join(","));
     }
-    // Embed the freshly-built user ELF if it exists; the kernel's build.rs
-    // falls back to the committed fixture otherwise. Absolute path because
-    // `include_bytes!` in build.rs resolves relative paths against the
-    // source file, not the build's cwd. `canonicalize` fails (→ no env →
-    // fixture) when `hello` hasn't been built yet.
+    // Embed the freshly-built user ELFs if they exist; the kernel's build.rs
+    // falls back to the committed fixtures otherwise. Absolute paths because
+    // `include_bytes!` in build.rs resolves relative paths against the source
+    // file, not the build's cwd. `canonicalize` fails (→ no env → fixture)
+    // when the programs haven't been built yet.
     if let Ok(abs) = std::path::Path::new(USER_HELLO_BIN).canonicalize() {
         cmd.env("SNITCHOS_USER_ELF", abs);
+    }
+    if let Ok(abs) = std::path::Path::new(USER_FAULTER_BIN).canonicalize() {
+        cmd.env("SNITCHOS_FAULTER_ELF", abs);
     }
     cmd.status()
 }

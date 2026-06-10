@@ -1214,3 +1214,29 @@ pub fn userspace_emits_telemetry() -> Result<(), String> {
 
     Ok(())
 }
+
+/// v0.7a isolation (`workload=userspace-fault`): the `faulter` program emits
+/// a marker, then reads a kernel high-half VA from U-mode. That page is
+/// mapped in the process's address space (the kernel high-half is shared into
+/// every user root) but carries no `U` bit, so the load faults to S-mode. We
+/// assert:
+///
+///   1. `snitchos.user.faults_total` appears — the `U`-bit firewall caught
+///      a U-mode access to kernel memory (had it NOT faulted, the read would
+///      have succeeded and no counter would ever be emitted → fail).
+///   2. A `kernel.heartbeat` arrives after — hart 0 stayed healthy while the
+///      kernel firewalled (and parked) the offending hart-1 process.
+pub fn userspace_cannot_touch_kernel() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("userspace-fault", "userspace-fault")?;
+
+    h.wait_for(SEC * 10, is_metric_named("snitchos.user.faults_total"))
+        .ok_or(
+            "no snitchos.user.faults_total within 10s — a U-mode read of a kernel \
+             VA did NOT fault (isolation broken!) or faulter never ran",
+        )?;
+
+    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat after the U-mode fault — kernel destabilised by firewalling userspace?")?;
+
+    Ok(())
+}

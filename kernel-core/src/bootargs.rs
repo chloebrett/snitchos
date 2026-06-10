@@ -60,6 +60,10 @@ pub enum WorkloadKind {
     /// syscall. Hart 0 keeps heartbeating. Not a storm. (Available in
     /// any build, not just `itest-workloads` — it's the real feature.)
     Userspace,
+    /// v0.7a isolation probe: like [`Userspace`](Self::Userspace) but runs
+    /// the `faulter` program, which reads a kernel VA from U-mode — the
+    /// `U`-bit firewall must fault it. Not a storm.
+    UserspaceFault,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -114,6 +118,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "tlb-shootdown" => Some(WorkloadKind::TlbShootdownVisible),
             "ping-pong" => Some(WorkloadKind::PingPong),
             "userspace" => Some(WorkloadKind::Userspace),
+            "userspace-fault" => Some(WorkloadKind::UserspaceFault),
             _ => None,
         })
 }
@@ -195,8 +200,14 @@ mod tests {
     }
 
     #[test]
-    fn userspace_is_not_a_storm() {
+    fn selects_userspace_fault() {
+        assert_eq!(select("workload=userspace-fault"), Some(WorkloadKind::UserspaceFault));
+    }
+
+    #[test]
+    fn userspace_workloads_are_not_storms() {
         assert!(!WorkloadKind::Userspace.is_storm());
+        assert!(!WorkloadKind::UserspaceFault.is_storm());
     }
 
     #[test]

@@ -143,7 +143,33 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             // for the duration of the handler.
             handle_user_ecall(unsafe { &mut *frame });
         }
+        // Instruction/load/store page fault (codes 12/13/15) from U-mode is
+        // the isolation firewall catching userspace touching memory it has no
+        // `U`-bit access to. Count it and park (v0.7a has no process teardown).
+        // The same fault from S-mode is a real kernel bug — fall through to panic.
+        TrapCause::UnknownException(12 | 13 | 15)
+            if unsafe { &*frame }.sstatus & SSTATUS_SPP == 0 =>
+        {
+            handle_user_fault();
+        }
         other => panic!("unhandled trap: {other:?} (scause={scause:#x})"),
+    }
+}
+
+/// `sstatus.SPP` (bit 8): the privilege the trap came from. 0 = User.
+const SSTATUS_SPP: u64 = 1 << 8;
+
+/// A U-mode access faulted — the page-table `U`-bit firewall did its job
+/// (v0.7a has no capability layer yet; that's v0.7b). Count it and park this
+/// hart: with no process teardown we can't reschedule, and returning would
+/// re-run the faulting instruction forever. Hart 0 carries on. Never returns.
+fn handle_user_fault() -> ! {
+    if let Some(id) = crate::user::user_fault_metric_id() {
+        crate::tracing::emit_metric(id, 1);
+    }
+    loop {
+        // SAFETY: park until the next interrupt; nothing to do on this hart.
+        unsafe { asm!("wfi", options(nomem, nostack)) };
     }
 }
 

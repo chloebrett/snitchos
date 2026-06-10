@@ -101,6 +101,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario::cpu_bound ("mutex-storm",         scenarios::mutex_storm),
     Scenario::cpu_bound ("virtio-storm",        scenarios::virtio_storm),
     Scenario::cpu_bound ("userspace-emits-telemetry", scenarios::userspace_emits_telemetry),
+    Scenario::cpu_bound ("userspace-cannot-touch-kernel", scenarios::userspace_cannot_touch_kernel),
 ];
 
 /// Set the process-wide failure-capture transcript depth. Call once at

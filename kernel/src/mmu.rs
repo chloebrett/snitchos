@@ -346,14 +346,50 @@ impl PtMem for KernelPtMem {
 ///   and **unmap** flows (not yet wired into mmu::map proper).
 pub fn map(va: usize, pa: usize, perms: PtePerms) -> Result<(), MapError> {
     let root_pa = va_to_pa((&raw const BOOT_PT_ROOT) as usize);
-    let mut mem = KernelPtMem;
-    let result = core_mmu::map(root_pa, va, pa, perms, &mut mem);
+    let result = map_in(root_pa, va, pa, perms);
     if result.is_ok() {
         // SAFETY: single instruction, register operand. Invalidates
         // the TLB entry for `va` on this hart only.
         unsafe { asm!("sfence.vma {0}, zero", in(reg) va, options(nostack, nomem)) };
     }
     result
+}
+
+/// Install a 4 KiB leaf PTE in an **arbitrary** root page table (given by
+/// its physical address), allocating intermediate tables as needed. Unlike
+/// [`map`], does **no** `sfence` — the intended use is building an
+/// *inactive* address space (e.g. a fresh user root before its `satp`
+/// switch), where no TLB entries exist yet. The walk is the host-tested
+/// `kernel_core::mmu::map`.
+pub fn map_in(root_pa: usize, va: usize, pa: usize, perms: PtePerms) -> Result<(), MapError> {
+    let mut mem = KernelPtMem;
+    core_mmu::map(root_pa, va, pa, perms, &mut mem)
+}
+
+/// Allocate a fresh root page table for a new (user) address space and
+/// share the kernel's high half into it, returning the root's physical
+/// address. Sv39 root slots 256..512 are the high half (kernel image,
+/// linear map, heap); copying those root entries shares the whole kernel
+/// mapping, so a trap/syscall needs no page-table switch and the kernel
+/// stays reachable while userspace runs (the Q27a decision). The low half
+/// (slots 0..256) is left unmapped — the loader fills it with `U` pages.
+///
+/// Returns `None` if the frame allocator is empty.
+pub fn new_user_root() -> Option<usize> {
+    let root_pa = crate::frame::alloc_zeroed()?.addr();
+    let boot_root_pa = va_to_pa((&raw const BOOT_PT_ROOT) as usize);
+    let mut mem = KernelPtMem;
+    for idx in 256..512 {
+        let entry = mem.read_entry(boot_root_pa, idx);
+        mem.write_entry(root_pa, idx, entry);
+    }
+    Some(root_pa)
+}
+
+/// The `satp` value (Sv39 mode + root PPN) that activates the address
+/// space rooted at `root_pa`. Written with `csrw satp` + `sfence.vma`.
+pub fn satp_for(root_pa: usize) -> u64 {
+    (SATP_MODE_SV39 << 60) | ((root_pa as u64) >> 12)
 }
 
 /// Repoint an already-mapped 4 KiB VA `va` at a new PA `new_pa` with

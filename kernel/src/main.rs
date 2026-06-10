@@ -373,7 +373,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::PingPong)
         // Userspace: hart 0 just heartbeats; the user program is placed on
         // hart 1 after SECONDARY_READY.
-        | Some(WorkloadKind::Userspace) => {}
+        | Some(WorkloadKind::Userspace)
+        | Some(WorkloadKind::UserspaceFault) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -413,7 +414,9 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // storm workloads, which drive hart 1 themselves (or keep it idle
     // so a heartbeat-driven storm can poke it with maximum "fresh
     // trap" race exposure).
-    if !selected.is_some_and(|w| w.is_storm() || w == WorkloadKind::Userspace) {
+    if !selected
+        .is_some_and(|w| w.is_storm() || matches!(w, WorkloadKind::Userspace | WorkloadKind::UserspaceFault))
+    {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
     }
 
@@ -438,6 +441,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         Some(WorkloadKind::Userspace) => {
             user::init_metric();
             let _ = sched::spawn_on(1, "user_main", user::user_main_entry);
+        }
+        // Isolation probe: the `faulter` program reads a kernel VA and the
+        // kernel counts the U-fault. Same hart-1 placement as Userspace.
+        Some(WorkloadKind::UserspaceFault) => {
+            user::init_metric();
+            let _ = sched::spawn_on(1, "user_fault", user::faulter_main_entry);
         }
         _ => {}
     }
