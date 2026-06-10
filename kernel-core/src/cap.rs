@@ -59,10 +59,51 @@ pub struct Capability {
 }
 
 /// An opaque reference to a capability *within the table that issued it*.
-/// In v0.7b a handle is a bare slot index; Step 2 packs a generation tag
-/// alongside so a reused slot cannot alias a stale handle.
+///
+/// Packs a slot `index` (low [`Handle::INDEX_BITS`] bits) and a
+/// `generation` (the rest) into one `u32` — the width the syscall ABI
+/// carries in a register. The generation is dead weight in v0.7b
+/// (nothing frees a slot, so it is always 0), but it is what lets a
+/// future revocation reuse a slot without a stale handle aliasing the new
+/// occupant: bump the slot's generation and every old handle to it fails
+/// [`CapTable::resolve`] with [`CapError::Stale`]. Cheap now, expensive to
+/// retrofit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Handle(u32);
+
+impl Handle {
+    /// Bits of the packed `u32` given to the slot index. 16 indexes far
+    /// more capabilities than any v0.7b process holds and leaves 16 bits
+    /// of generation — generous on both axes for a tiny table.
+    const INDEX_BITS: u32 = 16;
+    const INDEX_MASK: u32 = (1 << Self::INDEX_BITS) - 1;
+
+    fn new(index: u32, generation: u32) -> Self {
+        Self((generation << Self::INDEX_BITS) | (index & Self::INDEX_MASK))
+    }
+
+    fn index(self) -> u32 {
+        self.0 & Self::INDEX_MASK
+    }
+
+    fn generation(self) -> u32 {
+        self.0 >> Self::INDEX_BITS
+    }
+
+    /// Rebuild a handle from the raw `u32` the syscall ABI delivered in a
+    /// register. Total: any `u32` is a syntactically valid handle;
+    /// [`CapTable::resolve`] is what decides whether it names anything.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// The raw `u32` to hand back across the syscall boundary.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
 
 /// Why a handle failed to resolve. Every variant is a *rejection* the
 /// kernel returns to U-mode — never a panic, never the wrong capability.
@@ -72,15 +113,29 @@ pub struct Handle(u32);
 pub enum CapError {
     /// The index names no slot in this table.
     OutOfBounds,
+    /// The slot exists, but the handle's generation does not match it —
+    /// a handle outliving the slot it named. (Cannot occur in v0.7b,
+    /// where nothing bumps a generation; the check guards future
+    /// revocation.)
+    Stale,
+}
+
+/// One occupied slot: the capability plus the generation a valid handle
+/// to it must carry.
+#[derive(Debug, Clone, Copy)]
+struct Slot {
+    generation: u32,
+    cap: Capability,
 }
 
 /// A process's capability table: opaque [`Handle`]s in, [`Capability`]
 /// references out, validated against this table alone. Slots are never
 /// emptied in v0.7b (no revocation), so a present index always holds a
-/// capability.
+/// capability — but each carries a generation so a stale handle is
+/// rejected rather than aliased once revocation lands.
 #[derive(Debug, Default)]
 pub struct CapTable {
-    slots: Vec<Capability>,
+    slots: Vec<Slot>,
 }
 
 impl CapTable {
@@ -92,16 +147,24 @@ impl CapTable {
     /// Place `cap` in the table and return the handle that names it.
     /// Used at bootstrap to grant a process its root capabilities.
     pub fn insert(&mut self, cap: Capability) -> Handle {
-        let index = self.slots.len();
-        self.slots.push(cap);
-        Handle(index as u32)
+        let index = self.slots.len() as u32;
+        let generation = 0; // fresh slot; revocation would advance this
+        self.slots.push(Slot { generation, cap });
+        Handle::new(index, generation)
     }
 
     /// Resolve a handle to the capability it names, validating it against
     /// this table. A bad handle is a [`CapError`], not a panic — this is
-    /// the trust boundary between U-mode and the kernel.
+    /// the trust boundary between U-mode and the kernel. Bounds are
+    /// checked first, then the generation: a present slot with a
+    /// mismatched generation is [`CapError::Stale`], never the wrong
+    /// capability.
     pub fn resolve(&self, handle: Handle) -> Result<&Capability, CapError> {
-        self.slots.get(handle.0 as usize).ok_or(CapError::OutOfBounds)
+        let slot = self.slots.get(handle.index() as usize).ok_or(CapError::OutOfBounds)?;
+        if slot.generation != handle.generation() {
+            return Err(CapError::Stale);
+        }
+        Ok(&slot.cap)
     }
 }
 
@@ -159,6 +222,54 @@ mod tests {
             rights: Rights::NONE,
         };
         assert!(!cap.rights.contains(Rights::EMIT));
+    }
+
+    #[test]
+    fn a_handle_with_a_stale_generation_is_rejected_not_aliased_to_the_slot() {
+        // The slot exists and holds a capability, but the handle's
+        // generation does not match the slot's. This is the case a future
+        // revocation creates (free slot, bump generation, reuse): a stale
+        // handle must be refused, never silently resolve to whatever now
+        // lives in that slot.
+        let mut table = CapTable::new();
+        let valid = table.insert(emit_sink());
+        let stale = Handle::new(valid.index(), valid.generation() + 1);
+
+        assert_eq!(table.resolve(stale), Err(CapError::Stale));
+        assert!(table.resolve(valid).is_ok());
+    }
+
+    #[test]
+    fn a_handle_survives_a_round_trip_through_its_raw_register_value() {
+        // The syscall ABI carries a handle as a bare `u32` in a register;
+        // the kernel rebuilds it with `from_raw`. That must preserve both
+        // index and generation, so the rebuilt handle resolves identically.
+        let mut table = CapTable::new();
+        table.insert(emit_sink()); // occupy slot 0 so the handle under test isn't `raw == 0`
+        let handle = table.insert(Capability {
+            object: Object::TelemetrySink { counter: StringId(2) },
+            rights: Rights::EMIT,
+        });
+        // Guard: a zero raw value would let a stubbed `raw()` pass vacuously.
+        assert_ne!(handle.raw(), 0);
+
+        let rebuilt = Handle::from_raw(handle.raw());
+
+        assert_eq!(rebuilt, handle);
+        assert_eq!(table.resolve(rebuilt), table.resolve(handle));
+    }
+
+    #[test]
+    fn a_handle_packs_and_unpacks_both_index_and_generation() {
+        // Non-trivial values in *both* fields: a stubbed accessor (→ 0/1),
+        // a flipped shift, or a wrong mask all change the result, so the
+        // packing is pinned rather than coincidentally matching a small id.
+        let handle = Handle::new(5, 3);
+
+        assert_eq!(handle.index(), 5);
+        assert_eq!(handle.generation(), 3);
+        assert_eq!(Handle::from_raw(handle.raw()), handle);
+        assert_ne!(handle.raw(), 0);
     }
 
     #[test]
