@@ -53,14 +53,86 @@ Resolution: the **kernel's own** telemetry emission is ambient and direct — it
 - **Invoke** — the one operation; do the thing the capability authorizes.
 - **Grant / transfer** — pass a capability to another process, through IPC (see IPC page).
 - **Attenuate** — derive a weaker capability (fewer rights) to the same object.
-- **Revoke** — invalidate a capability. Revocation strategy (membranes / generation numbers / capability lists / time bounds) is its own design discussion, deferred to v0.7b. Earlier conversation leaned: membranes as default, time-bounds as attenuation, generation numbers as fallback.
+- **Revoke** — invalidate a capability. **Single-cap revocation is already seeded:** the v0.7b `Handle` generation tag *is* the primitive — bump a slot's generation and every stale handle to it fails `resolve`. **Recursive revocation** (kill a cap and everything derived from it) additionally needs the kernel to track derivation edges (an in-kernel CDT) — deferred until derivation exists (v0.8 transfer). The host-reconstructed tree visualises revocation (subtree goes dark) but never *enforces* it. Strategy in detail (membranes / time-bounds) still deferred; the generation tag is the fallback that's free today.
 - Capabilities cannot be forged or synthesized from thin air. The kernel mediates every transfer.
 
 # Bootstrap
 Root capabilities are granted to the `init` process only. All other capabilities flow from there, by grant and attenuation, through IPC. This is the delicate part of any capability system — detailed when v0.7b is planned.
 
-# Observability angle
-Every capability invocation is observable — a span or event. "Watch every authority decision in the system" is a natural SnitchOS demo and ties the two pillars (observability + capabilities) together directly.
+# Observability angle: authority as a first-class observable
+
+The two pillars meet here. Every **authority decision** is snitched, and
+the security policy itself becomes a *derived view* in the observability
+stack. This is where capabilities stop being plumbing and become the
+demo.
+
+## What gets snitched (and what doesn't)
+Decisions worth observing are the **rare, high-value** ones, not the hot
+ones:
+
+- **Grant** — the kernel snitches when it hands out a capability. Grants
+  *create* authority (invocations merely *exercise* it), so the grant
+  stream is the richest, most security-relevant signal on the wire. The
+  kernel snitches its own grants freely (consistent with "kernel snitches
+  freely"); no cap needed to do so.
+- **Deny** — a refused invocation (bad/stale handle, missing right) is an
+  observable event. This is the cap twin of v0.7a's `faults_total`.
+- **Invoke** — observed **by effect** (the thing the invocation did,
+  e.g. the emitted metric), *not* as a per-call event. Invokes can be
+  hot; a per-invoke event would be syscall-volume noise. A counter is the
+  most we'd add.
+- Later: **Revoke**, **Transfer / Attenuate** — the edges that turn the
+  event log into a tree (see below).
+
+**Sequencing (v0.7b):** `cap.grants_total` + `cap.denied_total`
+**counters first** (cheap, no wire change), then a dedicated `CapEvent`
+**frame** (`Granted | Invoked | Denied`, later `Revoked | Transferred`)
+that carries the fields a counter can't.
+
+## The capability derivation tree — emitted, not stored
+Capabilities are *derived* from one another: the kernel mints a root and
+grants it to `init`; `init` grants / attenuates / transfers to produce
+children. Those parent→child edges form the **capability derivation
+tree** (seL4's CDT). SnitchOS handles this tree the same way it handles
+the trace tree:
+
+> **The kernel does not store the tree. It emits the events; the host
+> reconstructs it.** Exactly as the kernel emits span start/end and Tempo
+> builds the trace tree — never storing it in-kernel. The cap derivation
+> tree is to *authority* what the trace tree is to *execution*.
+
+This keeps the kernel microkernel-minimal and makes the security policy a
+view in the collector. For host reconstruction to work, each capability
+needs a **global telemetry id** — a monotonic `u64`, minted like a span
+id, **distinct from the per-process `Handle`** (the handle is local and
+ambiguous across processes; the host needs a global id to thread edges).
+The `CapEvent` frame carries this id + a parent-cap-id field from the
+start, even though at v0.7b every cap is a root with no parent — cheap to
+include, expensive to retrofit (same logic as the generation tag).
+
+**Two trees, don't conflate them:** the *enforcement* tree (in-kernel
+CDT, built only when revocation lands) is what the kernel trusts to
+revoke; the *observability* tree (host-reconstructed from the stream) is
+for visualisation and audit. They should agree — "does the observed tree
+match the kernel's enforcement state?" is itself a snitch-on-the-snitch
+consistency check — but enforcement can **never** trust the host tree.
+
+## Visualisation (v0.8+, once derivation makes it a real tree)
+At v0.7b the "tree" is a depth-1 star (kernel → bootstrap caps); it earns
+a visualiser only once **v0.8 transfer/attenuate** create real edges.
+Then, mostly in native Grafana:
+
+- **Structure** — Grafana **Node Graph** panel over a collector JSON
+  endpoint (Infinity / JSON datasource); nodes by object type + holder,
+  edges by rights.
+- **Cross-links** — Tempo span links / Grafana data links templated on
+  the cap id: jump from an invocation span to the cap graph filtered to
+  the authority that permitted it.
+- **Revoke goes dark** — node colour driven by a status field.
+- **Replay** — *stepwise* via the time picker ("as of time T") works
+  natively; *smooth animated* replay wants a thin bespoke viewer over the
+  **same** `CapEvent` stream (a rendering choice, not a data-model
+  change).
 
 # Decisions locked
 - Kernel surface: "invoke a capability" framing; small enumerated set in reality.
