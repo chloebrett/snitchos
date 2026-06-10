@@ -338,8 +338,24 @@ or ramfb — the bulk) + serial-console input (~days) + a fixed-timestep game lo
 2D drawing via `embedded-graphics` (~free). Board port (SPI panel + GPIO) is a separate,
 board-only phase (+1–2+ weeks with the silent-failure tax).
 
-- **Tetris:** platform + **~1–3 days** of pure-logic game (host-tested). ≈ **2–2.5 weeks
-  total in QEMU**, ~90% reusable platform.
+- **Tetris (first — deliberately):** platform + **~1–3 days** of pure-logic game
+  (host-tested). ≈ **2–2.5 weeks total in QEMU**, ~90% reusable platform. It's first because
+  it needs *zero art* — colored cells + bitmap-font score text, all shipped by
+  `embedded-graphics` — so it proves the real-time platform (framebuffer + input + loop,
+  under the SPI display-transport/double-buffer constraint) with no asset production.
+- **Slay the Spire port (the first real *app* / userspace flagship — *after* Tetris):**
+  turn-based 2D, so GUI-light in *compute* (no rasterizer, no framerate pressure) but
+  **graphics-heavy in *assets***. The terminal version leaned on **emoji**, which are free as
+  terminal text but on a framebuffer become **sprites you must produce** (`embedded-graphics`
+  does monochrome bitmap fonts, *not* color emoji). Cost: (a) de-`std` the well-factored core
+  to `no_std + alloc` + `hashbrown`, **injecting clock/RNG/IO behind traits** (the existing
+  `WallClock` pattern) and discarding the TUI; (b) a **sprite/atlas pipeline** — curate the
+  finite emoji set into pre-rendered sprites (e.g. from open Twemoji/Noto Emoji) + a blitter;
+  (c) the 2D layout (easy). Comes after Tetris *because* Tetris needs no art while StS needs
+  the sprite pipeline. Variable: how `std`-entangled the core is (well-factored → core port
+  is days-to-weeks; tangled → de-`std` grind). **Killer synergy:** a run is decisions + RNG,
+  so OS-owned RNG/time make runs **deterministically replayable + tamper-evident** for free
+  (primitives #5/#12) — the best possible fit for the replay/provenance story.
 - **Simple Minecraft (huge variance):** adds a **software 3D renderer** — the one genuinely
   novel subsystem (~1–3 weeks to "decent," more to optimize for playable fps — the
   high-variance item) — plus known voxel algorithms (greedy meshing, raycast place/break,
@@ -565,12 +581,28 @@ session-relay server; perf ceiling for emulated 3D; transport via WebSocket/WebR
 
 **Sequencing (smallest demoable first):**
 1. Prove the arcade in QEMU: `Framebuffer`/`Input` ports → virtio-gpu-2D/ramfb + serial
-   input → **Tetris on SnitchOS**, in a window.
+   input → **Tetris** (needs *zero art* — the platform-prover).
 2. Observability over it: frame-time + input-latency spans → Grafana.
-3. Board bring-up: serial console → framebuffer (SPI panel first; display controller if you
+3. **Sprite/atlas pipeline → port the Slay the Spire clone** (de-`std` core + emoji→sprite
+   atlas) as the first real userspace-flagship *app*. Tetris first because it needs no art;
+   StS second because it needs the sprite pipeline.
+4. Board bring-up: serial console → framebuffer (SPI panel first; display controller if you
    need to uncap fps) → GPIO/bridge input.
-4. **2D before 3D; solo before multiplayer; Mac-host-as-P2 before 2-board.**
-5. Network REPL (dwmac + smoltcp) when untethered interaction is wanted.
+5. **2D before 3D; solo before multiplayer; Mac-host-as-P2 before 2-board.** (Both Tetris and
+   StS are 2D; Minecraft is the 3D step.)
+6. Network REPL (dwmac + smoltcp) when untethered interaction is wanted.
+
+**Far-future application — the portfolio homepage (an application of §11).** "Boots when you
+open the website": the *real* unmodified kernel in a wasm RISC-V emulator (Option B — fine
+here, since a portfolio is GUI-light, so the emulated-3D slideshow caveat doesn't bite), with
+the **SnitchOS boot log + live span tree as the loading screen** (latency-as-spectacle). Lands
+in a hardcoded portfolio shell; projects are launchable tiles (incl. playable Tetris / the StS
+clone). Self-quantifying (#9): the page shows its own live heap/scheduler. Caveats — bundle
+size, and a canvas-rendered OS is invisible to screen readers / search / awkward on mobile —
+resolved by **progressive enhancement**: a normal accessible/indexable HTML portfolio that
+*embeds the OS as the hero demo*, not the only path to content. Composes with the StS port
+into a recursive flex: *a game you built, on an OS you built, in a browser tab, fully traced,
+one click away.*
 
 **Open questions:**
 - **VF2 vs an RVV board.** If hardware-accelerated compute / fast 3D matters, the SpacemiT K1

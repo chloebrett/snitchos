@@ -38,7 +38,11 @@ The set of things a capability can point at, in roughly the order milestones nee
 - **Notification** — the lightweight signal primitive, separate from IPC (v0.8)
 - **Interrupt** — the right to receive a hardware interrupt (v0.3+)
 - **CapTable** — a process's own capability table, so capabilities can be granted and revoked (v0.7b)
-- **TelemetrySink** — *(provisional)* a capability to emit telemetry. A userspace component can only emit telemetry if it holds this capability — observability becomes capability-governed, and you can see and control who is allowed to snitch. **Flagged as provisional**: revisit if it does not pay off in practice; telemetry could instead stay an ambient kernel service.
+- **MemoryRegion** — a chunk of physical memory + the right to map it into an address space. The canonical microkernel cap (seL4's Frame/Untyped). **Deliberately *not* v0.7b** — it has no consumer until something grows or *shares* memory, and a cap with no consumer is machinery for its own sake. Its real reason to exist is shared memory between two processes, so it lands with **v0.8 IPC**. Distinct from an allocator: a `malloc` subdivides bytes *within* memory you already hold (retail); a `MemoryRegion` cap is how you *acquired* that memory and the right to place it in an address space (wholesale). See [v0.7b plan](../plans/v0.7b-capabilities.md) for why it's excluded.
+- **TelemetrySink** — **the v0.7b first object** (confirmed, no longer provisional). A boolean cap: "may emit telemetry." A userspace component can reach the collector *only* if it holds this cap — observability becomes capability-governed; you can see and control who is allowed to snitch, and a process with no cap has no telemetry egress at all.
+  - **Identity is kernel-stamped, never a parameter.** The frame's attribution (`thread.name` / owning identity) is set by the kernel from the calling process — so a process *cannot* emit *as* anyone else. This makes trace-forgery impossible *by construction*, which is strictly better than making non-forgery a granted right (a right can be over-granted; "identity isn't a syscall argument" can't be). There is therefore **no `EMIT_AS_ANY` right** — it was considered and rejected.
+  - **Register-on-emit, no separate right.** Registration is *not* a distinct right or distinct call — register and emit are the same operation from userspace (this was considered as `REGISTER` and rejected). **Scope note:** the conceptual end-state is `emit(name, value)` with the kernel interning the name on first use, but a user-passed *name* means the kernel reads a user string buffer — which needs `SUM` + user-pointer validation, deliberately deferred past v0.7a. So **v0.7b ships the value-only form**: the `TelemetrySink` cap is *bound at creation* to a kernel-registered counter, and `invoke(handle, value)` emits to it — no string crosses the boundary, `SUM` stays `0`. User-named metrics arrive when `SUM`/user-buffer-copy lands (naturally alongside v0.8 IPC message buffers). The capability naming the sink (rather than the user passing a name) is in fact *more* capability-idiomatic.
+  - **Rights are vacuous-but-present at v0.7b.** One `EMIT` bit, one method. Attenuation and multi-method dispatch are real machinery the cap *system* carries, but `TelemetrySink` does not exercise them — that is deliberate. The skeleton is proven here against the minimal object; richer facets are exercised by objects that have a genuine reason to be rich (`Endpoint` transfer at v0.8, `File` read-only-vs-read-write attenuation at v0.10). Do not inflate `TelemetrySink` to make v0.7b feel substantial.
 
 # The kernel snitches freely; userspace needs a cap
 Tension: if telemetry is a capability, the kernel needs that capability to emit its own spans — but the kernel emits telemetry from v0.1, long before capabilities exist (v0.7b).
@@ -63,11 +67,13 @@ Every capability invocation is observable — a span or event. "Watch every auth
 - Sparse handles (Zircon model): per-process `CapTable`, opaque `u32` handles, kernel validates against the caller's table. Not seL4 CSpace.
 - Capability shape: `{ object, rights }`. Attenuation by holding multiple caps to one object with different rights.
 - Kernel object set as listed above.
-- `TelemetrySink` as a capability: **provisional**, revisit if it does not pay off.
+- `TelemetrySink` is **confirmed** as the v0.7b first object: a boolean "may emit" cap, kernel-stamped identity (no `EMIT_AS_ANY`), register-on-emit (no separate `REGISTER` right). Not provisional.
+- `MemoryRegion` is **deferred to v0.8** — no consumer until shared memory exists. It is not redundant with an allocator (wholesale vs. retail); it is the substrate an allocator stands on and the only mechanism for sharing.
 - Kernel telemetry is ambient; userspace telemetry is capability-governed.
+- Handle layout carries a **generation tag** from v0.7b (slotmap-style `index + generation`) even though nothing revokes yet — cheap now, expensive to retrofit; makes later revocation "bump the slot's generation."
 
-# Open / deferred to v0.7b
-- Revocation strategy in detail.
-- Bootstrap sequence in detail.
+# Open / deferred to later
+- Revocation strategy in detail (the generation-tag seed is in place at v0.7b; the *policy* — membranes vs. time-bounds — is deferred).
+- Cap **transfer / grant between processes** — impossible at v0.7b (one process, no IPC). Lands at **v0.8** with `Endpoint`.
 - Whether the kernel adopts capabilities internally, and where.
-- Rights bitmask exact contents.
+- Rights bitmask exact contents beyond `EMIT` (richer bits arrive with `Endpoint`/`File`).
