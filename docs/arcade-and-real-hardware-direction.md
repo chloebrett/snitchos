@@ -356,7 +356,194 @@ board bring-up; the rest is trivial or known-algorithm grind.
 
 ---
 
-## 10. Recurring principles (the through-lines)
+## 10. Novel OS-level "wow factor" primitives
+
+What makes these novel — vs commercial consoles *and* hobby game-OSes — is one inversion:
+**SnitchOS is the platform/console layer itself, but transparent, capability-secured, and
+OS-owned, instead of a closed, app-mediated, cloud-locked service.** Two corollaries no
+console can match:
+- **Honesty by construction** — the platform *measures* games from the outside; a game can't
+  fake its playtime or hide that it stutters (the snitch is the OS, not the app).
+- **Safety by construction** — capability-confined games mean *untrusted* code runs safely.
+
+And because the OS owns the I/O boundary (input, time, randomness, render, score, identity),
+it gets cross-cutting superpowers no game could have alone. The catalog (Tier = novelty +
+strategic value; Rides = the milestone it depends on):
+
+1. **Sessions/host-join as a capability; leaderboards & saves *above* games.** A game is a
+   process handed a "play session" cap; the session (identity, score sink, input routing,
+   render surface) is an OS object that **outlives the game** — crash a game and the session
+   survives, relaunching it into the same lobby slot. Cross-game profiles. *Tier 1. Rides
+   v0.7b caps + v0.10 FS.*
+2. **Honest, OS-measured playtime & accounting.** Playtime, per-game CPU/mem/energy, lifetime
+   dropped-frame counts — measured from outside, uniform, un-fakeable. *Cheap. Rides
+   observability.*
+3. **Observable multi-tenancy / native split-screen.** N games as capability-confined
+   tenants; a compositor tiles the screen; the scheduler time-slices; you *watch the OS
+   arbitrate* in Grafana (who's starving, fairness, per-tenant frame budgets). Input is a cap
+   you route to a tenant — hot-swap which game your controller drives. The best stress-test
+   *and* the best demo. *Tier 1. Rides v0.9 preemption/priorities.*
+4. **Untrusted games run safely.** A game gets exactly a render cap + input cap + score cap,
+   nothing else — a stranger's downloaded game can't escape, and denials are traced. *Tier 1.
+   Rides v0.7b caps.*
+5. **Record-and-replay / determinism as a primitive.** The OS mediates all nondeterminism
+   (input, clock, RNG) → bit-exact replay that *every game inherits for free*: instant
+   replays, ghosts, tamper-evident speedrun verification (caps + trace = provenance), "replay
+   the exact dropped frame." *Tier 1. Rides the I/O boundary + caps.*
+6. **Live QoS/fairness as a visible, tunable knob.** Tune scheduler priority live (control
+   plane); see the effect in Grafana ("give Minecraft more CPU, watch Tetris's budget
+   shrink"). *Stretch. Rides v0.9.*
+7. **Cross-game OS mechanics.** Meta-currency earned in any title spendable in another;
+   achievements defined by the OS *observing* behavior (not game-reported); a global
+   aggregate score. The platform has game-mechanic agency. *Stretch. Rides sessions + FS.*
+8. **Physical & internet effects.** Cabinet LED/7-seg/rumble driven by *OS* events (hart
+   load, GC pressure); physical *OS* buttons ("snapshot this trace", "spawn another game").
+   Internet **spectate-by-trace** — stream the *telemetry*, not video; reconstruct the
+   session in a viewer/Grafana (bandwidth-tiny, infinitely inspectable); a public "what's
+   playing now" trace dashboard. *Cheap (physical) → Stretch (internet). Rides GPIO / v1.2
+   net + control plane.*
+9. **The self-quantifying cabinet.** The machine displays its own lifetime stats — uptime,
+   games played, frames rendered, hottest hart, biggest OOM survived, longest session. It
+   snitches on itself. *Cheap. Rides observability.*
+
+**Throughline:** these aren't bolted-on game features — they're OS primitives that emerge
+from *owning the I/O boundary, securing it with capabilities, and observing everything*, and
+they're directly downstream of milestones already planned. Tier-1 picks (1, 3, 4, 5) are the
+"nobody else does this": consoles can't (opaque/closed platform, single-title, trust-the-app)
+and hobby game-OSes don't (one game, no platform layer).
+
+### The compositor as a creative primitive — arbitrary-angle & dynamic split
+
+A deeper take on #3. Once the *OS* owns compositing, split-screen stops being axis-aligned
+rectangles (which is all any console/game does). Each tenant renders to its own surface and
+the compositor decides per-pixel which tenant owns it — a 50/50 vertical split is just
+`x < W/2`; an **arbitrary angle** is "which side of line `ax+by+c=0`", one cheap test per
+pixel (nearly free, since software rendering already touches every pixel). That generalizes:
+
+- **Animated / dynamic splits** — the dividing line *moves or rotates* live, tied to game
+  state (the leader's region grows; the boundary swings as the match shifts). The *layout
+  itself becomes feedback*, provided uniformly to every game.
+- **Arbitrary regions** — circular PiP, hexagonal tiles, a **Voronoi split for N players**
+  (cells grow/shrink), a tenant rendered into *any* shape.
+- **Cross-tenant compositor effects** — the OS holds all surfaces, so it can blend/fade
+  between games, warp a tenant (rotate/scale/perspective), or open a "portal" where one
+  region is a window into another game.
+- **Layout-as-mechanic** — players fight over screen real estate; the OS arbitrates the
+  boundary from their inputs. The split *is* the game, provided to any title.
+
+Great "only here" demo: *"watch the screen split rotate as the match swings."*
+
+### Further primitives (round 2)
+
+Tier / ⚡ cheap-ish / 🌋 ambitious, as before:
+
+10. **Observability overlay as a toggleable in-game "debug vision" HUD** ⚡ — a key toggles
+    the live OS traces *on top of* the running game (frame timing, which hart, heap pressure,
+    the scheduler juggling tenants). Observability as a player-toggleable AR layer, not a
+    separate tab. *Tier 1.*
+11. **Live game migration between cabinet and browser tab** 🌋 — move a *running* game (its
+    session + state are OS objects) from the physical cabinet into a browser tab mid-play and
+    back. Live process migration across a hardware↔WASM boundary; ties sessions + caps + §11.
+    *Tier 1, ambitious.*
+12. **Tamper-evident, replayable leaderboards (anti-cheat by construction)** — since the OS
+    mediates input/time/RNG and traces everything, each high score ships with a verifiable,
+    replayable trace the OS attests to. The snitch thesis *as* anti-cheat. *Tier 1.* (Rides
+    #5.)
+13. **OS-level universal mods/filters via capability shims** — insert an OS shim between a
+    game and the surfaces it owns. **The honest line: the OS can transform any *signal it
+    sits on* without understanding the game, but not *meaning it has no access to*.**
+    - *Generic (works on any title):* render filters (CRT, colorblind, post-fx — OS owns the
+      framebuffer); input/accessibility remaps (rebind, hold→toggle, repeat — OS owns input);
+      **slow-mo / time-scaling** — the real generic *difficulty* lever: the OS owns the
+      clock, so it decouples game-time from wall-time (slow the game → you react in real time
+      → easier; speed up → harder), effective for any *timing-bound* game; score handicap (OS
+      owns the score sink); RNG reroll/seed control (OS owns the stream — gives
+      reroll/seed-scum, semantically blind).
+    - *NOT generic:* semantic difficulty (enemy health, hitboxes, AI) needs the game's
+      internal model — the OS can't touch it on an arbitrary title.
+    - *Middle path:* a **difficulty *contract*** games opt into (a cap/param) for unified UI +
+      handicap-adjusted leaderboards; non-adopters still get the generic boundary transforms.
+    *Tier 1 for the generic transforms; the contract is opt-in.*
+14. **Rollback netcode as an OS primitive** 🌋 — the GGPO-style rollback fighting games
+    hand-roll falls out for free if the OS owns determinism + input; any game inherits real
+    netcode. *Tier 1, ambitious.* (Rides #5 + v1.2 net.)
+15. **"Twitch-plays-anything"** ⚡ — the OS multiplexes input from many session participants
+    into one single-player game (everyone controls the one Tetris), or fans one input to N
+    synced instances. Crowd co-op the game never coded for. *Fun, cheapish.*
+16. **Time-travel / rewind any game** 🌋 — extend record/replay to rewind *live* (state
+    snapshots via the cap/IPC model): a universal "rewind" button the OS gives every title.
+    *Ambitious.* (Rides #5.)
+17. **Synesthetic kernel — A/V reactive to OS internals** ⚡ — chiptune tempo tracks the
+    scheduler tick; the LED strip pulses on heap growth; the screen glitches on a TLB
+    shootdown. Internal state *as* performance. Demoscene-flavored, on-brand. *Cheap, high
+    charm.*
+18. **Crash as narrated spectacle** ⚡ — with crash-survivable sessions + observability, a
+    game dying becomes a feature: the OS catches it, shows the autopsy (last frames + trace),
+    and resurrects it into the session. Robustness made showable. *Cheap, distinctive.*
+19. **Energy/thermal as a visible game stat + "eco mode"** — the OS measures per-game joules;
+    expose "X J/hr", cap a power budget, watch the framerate/power tradeoff live.
+    *Niche but on-thesis.* (Needs real power telemetry on hardware; modeled in the emulator.)
+20. **Games that span multiple cabinets/screens** 🌋 — networked sessions let N cabinets
+    side-by-side render one continuous world (split-screen *across machines*); browser tabs as
+    extra panes. *Ambitious, great visual.*
+
+Lead picks: the **debug-vision overlay (#10)** and **arbitrary/dynamic split** are cheap,
+immediately striking, and scream "observable OS." **Live migration (#11)** and
+**tamper-evident leaderboards (#12)** are the ambitious "nobody else *can* do this" flagships
+once caps + sessions + WASM land. The **synesthetic kernel (#17)** and **crash-as-spectacle
+(#18)** are cheap charm reinforcing the identity.
+
+## 11. In-browser portability (WASM): SnitchOS in a tab
+
+The portability thesis's ultimate payoff: **the same OS on a real cabinet *and* in a browser
+tab, sharing sessions.** "Run SnitchOS in WASM" forks three ways:
+
+- **(A) Compile the kernel to wasm — nonsensical.** The kernel *is* hardware mediation (CSRs,
+  MMU, traps, MMIO); wasm removes the hardware (it's a sandboxed VM, and the browser is
+  already its supervisor). Stubbing all that out isn't running the OS.
+- **(B) Run the *unmodified* kernel in a wasm RISC-V emulator.** Precedent: Bellard's
+  TinyEMU/jslinux runs riscv Linux in-browser. The kernel thinks it's on QEMU `virt`; the
+  emulator wires virtio-gpu → `<canvas>`, virtio-input → keyboard + the **Gamepad API**,
+  virtio-net → a **WebSocket**, telemetry → an in-page view. **The browser becomes another
+  board** (QEMU / VF2 / K1 / browser = four targets, identical kernel) — the HAL thesis
+  validated. *Catch: emulation overhead — 2D/Tetris fine, software 3D likely a slideshow.*
+- **(B′) Compile the *portable upper half* (platform layer + games, above the HAL traits) to
+  `wasm32`** with browser-native port backends (canvas / Gamepad / WebSocket). Native wasm
+  speed → 3D viable. Requires the clean HAL split you're already building.
+
+**The crucial distinction — B ports the *guarantees*, B′ ports the *experience*.** B′ runs in
+one wasm sandbox: you get the split-screen compositor + session-joining, but *not* real
+capability isolation / crash-survival / true multi-tenancy (there's no microkernel
+underneath — it's one module). Only **B** (full emulation) preserves the OS-guarantee
+features (#1/#4/#5 above) in-browser, at the cost of speed.
+- Want a *real* SnitchOS in the tab (caps, isolation)? → **B**, accept the 2D/perf ceiling.
+- Want it to *look and play* like one, fast, incl. 3D? → **B′**.
+- You can do both: B′ for playable clients, B as the "boot the genuine OS in your tab"
+  showpiece.
+
+**"Same sessions" works because sessions are a *network protocol*, not a local thing.** Each
+instance (cabinet or browser) runs the OS features locally and joins shared sessions over the
+net. Browsers can only WebSocket/WebRTC, so bridge through a **session-relay server** both the
+browser (WS) and the physical arcade (UDP/ethernet via dwmac + smoltcp) speak to. Split-screen
+is a local compositor capability everyone has; the *session* is the shared, networked thing.
+So a browser can run its own local split-screen *and* be in a multiplayer session with the
+cabinet.
+
+**Why it's a huge win:** shareability. Most hobby OSes need build + QEMU; this one becomes a
+**URL** — "click, SnitchOS boots in your tab, you're in the session in seconds." Transformative
+for the blog/video (a reader plays a round *inline*) and for multiplayer reach. Combined with
+spectate-by-trace: watch live, then click to jump in. And it's observable *in the browser*.
+
+**Don't conflate with the roadmap's "WASM userspace"** — that's the *inverse* (SnitchOS
+*hosts* wasm apps; capabilities map onto wasm imports). This is *a browser hosts SnitchOS*.
+Opposite nesting.
+
+**Status:** far-future north-star — needs the network stack, sessions, and the game platform
+first. It's the portability payoff you design *toward*, not a next step. Costs: a wasm-rv
+emulator + device bridges (B) or the HAL split + browser port backends (B′), plus a
+session-relay server; perf ceiling for emulated 3D; transport via WebSocket/WebRTC.
+
+## 12. Recurring principles (the through-lines)
 
 1. **Documentation/ownership beats reverse-engineering.** Choose public ISAs (RVV) or
    hardware you authored (FPGA); never RE a commercial GPU.
@@ -374,7 +561,7 @@ board bring-up; the rest is trivial or known-algorithm grind.
 
 ---
 
-## 11. Candidate sequencing & open questions
+## 13. Candidate sequencing & open questions
 
 **Sequencing (smallest demoable first):**
 1. Prove the arcade in QEMU: `Framebuffer`/`Input` ports → virtio-gpu-2D/ramfb + serial
