@@ -53,3 +53,23 @@
 
 - all five crates are audited and clean: `kernel-core`, `protocol`, `collector`, `itest-harness`, `xtask`. the audit muscle is a tool plus a sharper skill now, so the cost of the next one is mostly the part that was always the point — reading the code and asking what isn't there.
 - two crates still have no README. post 20 taught me that writing one is a verification pass — the `protocol` "length-prefixed" lie only died when I tried to explain it. so that's the next place a confident-sounding sentence gets checked against the machine.
+
+## the sequel — answering the question for virtio
+
+- the audit only finds two axes: what's **dead** (subtract) and what's **missing** (add). this session hit the third it's blind to — code on the **wrong side of a seam**: pure logic stranded in the bare-metal `kernel` crate where no host test can reach. the fix isn't delete or abstract, it's **relocate** — move it to `kernel-core`, leave the hardware shell behind.
+- two warm-ups proved the shape. `frame.rs`'s reserved-region arithmetic → `kernel_core::frame::release_unreserved` (11/11 mutants caught). `grow_va_range`'s ceiling math → `kernel_core::heap::next_heap_top` — and moving it **surfaced a latent bug**: the in-place version multiplied `n * FRAME_SIZE` _unchecked_ before the `checked_add`. you don't see it until you write the test that pokes the overflow. _extraction is a bug-finder._
+- then the big one: the entire virtio-mmio bring-up — register map, feature negotiation, queue setup, the reset→ack→driver→features-ok→driver-ok state machine — lifted into `kernel_core::virtio` behind a `MmioTransport` trait, host-tested against a `FakeVirtioDevice`. exactly the `PtMem` port shape the crate already had: **pure logic + a trait + a fake; the volatile MMIO, `va_to_pa`, and the `fence` stay in the kernel.** the win the tool can't see: `NoVersion1` and `QueueTooSmall` were **dead under QEMU** (it always offers VERSION_1 and queue-max 1024) — code that had _never run_. behind the fake, each is one assertion. _relocation makes the unreachable testable._
+- mutation flagged five survivors — all `|`→`^` on the status bits. not missing tests: the bits (`0x01/0x02/0x08/0x80`) are disjoint and each set exactly once, so `^` ≡ `|`. an **equivalent mutant** you kill by understanding, not by adding a test (same class as the documented `advance_anchor` one). _a survivor is a question too._
+
+## the flake, made impossible — then deterministic
+
+- the payoff target: the ~2% cross-hart wedge from the deflake saga — a dropped `MutexGuard` in `virtio_console::send`. root cause, named at last: `CONSOLE: Mutex<usize>` guarded a **`Copy`** base address while the actually-shared state — the `TX_STAGING` buffer — lived _outside_ the lock. **the lock guarded the wrong thing.**
+- **structural fix:** put the buffer _inside_ the mutex — `Mutex<TxStaging>`, deliberately **not `Copy`** — so the original footgun `let base = *handle.lock();` (copy-out, drop-the-guard-at-the-`;`) **no longer compiles** (E0507, can't move out of the guard). the bug class is dead by construction, not by comment.
+- **deterministic regression:** a `loom` model-check (`kernel-core/tests/loom_tx.rs`, `#![cfg(loom)]`) that exhaustively explores the interleavings. the correct primitive passes; a **buggy twin** modelling the old architecture (buffer in an outside-the-lock `UnsafeCell`, guard dropped early) fails; a meta-assertion pins _both_, so the detector can't silently rot. a 2%-of-the-time flake became **won't-compile + caught on every run.** wired into `cargo xtask test`, so it gates every suite.
+- a tidy-up the seam forced: `HandshakeError` lives in kernel-core, `InitError` in the kernel — nested the former into the latter (`InitError::Handshake(_)`) so the pure handshake owns its failures and the kernel adds only `NotFound`, the DTB-discovery one that can't move.
+
+## what i learned (sequel)
+
+- **the third question is "what's on the wrong side of a seam."** the tool finds dead and missing; it can't see logic stranded in the hardware crate. relocating it is where the host tests, the found bug, and the killed flake all came from.
+- **the seam has one shape, reused every time:** pure logic in kernel-core, a trait for the hardware (`MmioTransport`, like `PtMem`), a fake for the test. the kernel keeps only what genuinely touches silicon — MMIO, `va_to_pa`, the fence, the lock discipline.
+- **a flake is a design smell with a structural fix.** "guard the thing that's actually shared" turned a memory-ordering scare into a one-line type change the compiler enforces — and `loom` turned "caught it by luck at 2%" into "caught every run." the lock guarding a `Copy` value was the whole bug.

@@ -1,4 +1,4 @@
-# Post 23 — Built wrong on purpose
+# Post 24 — Built wrong on purpose
 
 - v0.7a: the first userspace process. It runs in U-mode in its own address space, makes exactly one syscall, and snitches a metric to Grafana — then tries to read kernel memory and gets slapped down. The syscall has **no permission check**: any user code can call it, the Unix way. That wrongness is the point. v0.7b rewrites it into a capability invocation, and you only feel why if you first build the version that doesn't have one. ~600 lines, two asm sequences I'd been dreading, and a harness bug that ran the wrong kernel for an hour.
 
