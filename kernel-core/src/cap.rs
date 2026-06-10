@@ -27,11 +27,11 @@ impl Rights {
     /// attenuation; useful as a "held but powerless" cap in tests.
     pub const NONE: Rights = Rights(0);
 
-    /// May emit telemetry through a [`Object::TelemetrySink`].
-    // `1 << 0` reads as "bit 0" (the next right will be `1 << 1`).
-    // cargo-mutants flags `<< → >>` here as a survivor; it is an
-    // equivalent mutant — `1 << 0 == 1 >> 0 == 1` — not a test gap.
-    pub const EMIT: Rights = Rights(1 << 0);
+    /// May emit telemetry through a [`Object::TelemetrySink`]. Bits are
+    /// written as binary literals (next rights: `0b0010`, `0b0100`, …) —
+    /// no shift to misread, and no no-op `1 << 0` for mutation testing to
+    /// flag as an equivalent mutant.
+    pub const EMIT: Rights = Rights(0b0001);
 
     /// Whether `self` grants every right in `other`.
     #[must_use]
