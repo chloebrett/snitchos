@@ -487,11 +487,7 @@ fn stack(cmd: StackCmd) -> ExitCode {
 }
 
 fn build() -> ExitCode {
-    // User program first: the kernel embeds its ELF.
-    let user = qemu::build_user().expect("failed to invoke cargo");
-    if !user.success() {
-        return ExitCode::from(1);
-    }
+    // The kernel's build.rs builds + embeds the userspace programs itself.
     let status = qemu::build_kernel(&[]).expect("failed to invoke cargo");
     if status.success() {
         ExitCode::SUCCESS

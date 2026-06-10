@@ -211,13 +211,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_real_hello_user_program() {
-        // The actual compiled `user/hello` ELF (regenerate with
-        // `cargo xtask build`). Integration check that our real toolchain
-        // output parses end-to-end — not a hand-built buffer. Locks the
-        // contract between what the linker emits and what the loader reads.
-        let img = include_bytes!("../fixtures/hello.elf");
-        let plan = parse(img).expect("the hello user program should parse");
+    fn parses_real_toolchain_elf_output() {
+        // A *frozen* real toolchain ELF (a checked-in `user/hello` build),
+        // kept solely as a parser fixture — the kernel embeds freshly-built
+        // programs now (see `kernel/build.rs`), nothing ships this. Frozen on
+        // purpose: it pins the parser against real linker output (GNU_STACK,
+        // RISC-V attributes header, zero-filled bss) without churning when
+        // `hello` changes. Not a hand-built buffer.
+        let img = include_bytes!("../fixtures/sample-user.elf");
+        let plan = parse(img).expect("the sample user ELF should parse");
 
         // Non-PIE ET_EXEC linked at the fixed low-half VA (see user.ld).
         assert_eq!(plan.entry, 0x1000_0000);
