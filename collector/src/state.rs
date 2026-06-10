@@ -295,6 +295,16 @@ impl State {
                 // ids remain valid in the meantime.
                 None
             }
+            Frame::CapEvent { t, .. } => {
+                // v0.7b: the authority event is on the wire (the itest reads
+                // it directly off the socket). Host-side reconstruction of the
+                // capability derivation tree from these events — and the
+                // Grafana node-graph view — is v0.8, once transfer/attenuation
+                // produce real parent→child edges. Advance the anchor for
+                // timestamp continuity in the meantime.
+                self.advance_anchor(*t);
+                None
+            }
         }
     }
 

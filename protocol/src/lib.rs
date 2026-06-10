@@ -119,6 +119,45 @@ pub enum Frame<'a> {
   /// platform-assigned id from the SBI handoff (may be sparse or
   /// non-zero based). `role` labels the hart's purpose for dashboards.
   HartRegister { id: u8, mhartid: u64, role: HartRole },
+  /// An **authority decision** — a capability's lifecycle event. v0.7b
+  /// emits only `Granted` (the bootstrap `TelemetrySink`); the kernel
+  /// snitches authority being *created*, which a counter can't describe
+  /// (granter, object, rights). Designed for host-side reconstruction of
+  /// the capability derivation tree: `cap_id` is a **global** id minted
+  /// per grant (NOT the per-process `Handle`, which is local), and
+  /// `parent_cap_id` is the cap this one was derived from (`0` = root;
+  /// always `0` until v0.8 introduces transfer/attenuation). New variants
+  /// go at the END — postcard encodes discriminants positionally. See
+  /// `docs/capability-system-design.md` ("authority as a host-reconstructed
+  /// tree").
+  CapEvent {
+    kind: CapEventKind,
+    cap_id: u64,
+    parent_cap_id: u64,
+    holder: u32,
+    object: CapObject,
+    rights: u32,
+    t: u64,
+    hart_id: u8,
+  },
+}
+
+/// The lifecycle phase of a [`Frame::CapEvent`]. v0.7b emits only
+/// `Granted`; the rest are reserved wire slots (append new kinds at the
+/// END — postcard is positional). `Invoked`/`Denied` are audit events;
+/// `Revoked`/`Transferred` are the derivation-tree edges v0.8 adds.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy)]
+pub enum CapEventKind {
+  /// A new capability was created and handed to `holder`.
+  Granted,
+}
+
+/// What a [`Frame::CapEvent`]'s capability points at. v0.7b has one object
+/// type; append future kinds (`Endpoint`, `MemoryRegion`, …) at the END.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy)]
+pub enum CapObject {
+  /// Permission to emit telemetry to a bound counter.
+  TelemetrySink,
 }
 
 #[cfg(test)]
@@ -149,6 +188,28 @@ mod tests {
     let frame = Frame::SpanEnd {
       id: SpanId(511),
       t: 1234,
+    };
+
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+
+    assert_eq!(frame, decoded);
+  }
+
+  /// Roundtrip a `Frame::CapEvent` through postcard and back — the
+  /// authority-lifecycle event (v0.7b emits `Granted`).
+  #[test]
+  fn cap_event_roundtrips() {
+    let frame = Frame::CapEvent {
+      kind: CapEventKind::Granted,
+      cap_id: 1,
+      parent_cap_id: 0,
+      holder: 7,
+      object: CapObject::TelemetrySink,
+      rights: 0b0001,
+      t: 1234,
+      hart_id: 1,
     };
 
     let mut buf = [0u8; 64];

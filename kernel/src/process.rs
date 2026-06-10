@@ -8,7 +8,7 @@
 //! [`kernel_core::cap`]; this module only decides *where the table lives*
 //! and grants the bootstrap capability. See `plans/v0.7b-capabilities.md`.
 
-use core::sync::atomic::AtomicPtr;
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use kernel_core::cap::{CapTable, Handle};
 use protocol::StringId;
@@ -26,6 +26,19 @@ use crate::sync::Mutex;
 /// The pointed-at `Process` lives in `run`'s frame, which never returns.
 pub static CURRENT_PROCESS: PerCpu<AtomicPtr<Process>> =
     PerCpu::new([const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_HARTS]);
+
+/// Monotonic source of **global** capability ids for `CapEvent` frames.
+/// Distinct from the per-process [`Handle`]: a handle is local and
+/// ambiguous across processes, but the host needs a stable global id to
+/// thread the derivation tree. Starts at 1 so `0` is the "root / no parent"
+/// sentinel in `CapEvent.parent_cap_id`. `Relaxed`: a unique-id counter
+/// needs atomicity, not ordering.
+static NEXT_CAP_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Mint the next global capability id (for a `CapEvent`).
+pub fn next_cap_id() -> u64 {
+    NEXT_CAP_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// One userspace process. Owns its address space (`root_pa`) and its
 /// capability table.

@@ -403,6 +403,8 @@ impl Harness {
                 format!("Dropped {{ count={count} }}"),
             OwnedFrame::HartRegister { id, mhartid, role } =>
                 format!("HartRegister {{ id={id} mhartid={mhartid} role={role:?} }}"),
+            OwnedFrame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, t, hart_id } =>
+                format!("CapEvent {{ {kind:?} cap_id={cap_id} parent={parent_cap_id} holder={holder} object={object:?} rights={rights:#b} t={t} hart={hart_id} }}"),
         }
     }
 }
@@ -509,6 +511,7 @@ fn variant_name(frame: &OwnedFrame) -> &'static str {
         OwnedFrame::ThreadRegister { .. } => "ThreadRegister",
         OwnedFrame::ContextSwitch { .. } => "ContextSwitch",
         OwnedFrame::HartRegister { .. } => "HartRegister",
+        OwnedFrame::CapEvent { .. } => "CapEvent",
     }
 }
 

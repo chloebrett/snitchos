@@ -7,7 +7,7 @@ use protocol::stream::OwnedFrame;
 
 
 use super::harness::Harness;
-use super::matchers::{is_dropped, is_hello, is_metric_named, is_span_start_named, is_string_register_named, is_thread_register_named};
+use super::matchers::{is_cap_granted_telemetry, is_dropped, is_hello, is_metric_named, is_span_start_named, is_string_register_named, is_thread_register_named};
 
 const SEC: Duration = Duration::from_secs(1);
 
@@ -1285,6 +1285,25 @@ pub fn userspace_grant_snitched() -> Result<(), String> {
         .ok_or(
             "no snitchos.cap.grants_total within 10s — the kernel granted the \
              bootstrap TelemetrySink without snitching it (grant path / counter broke?)",
+        )?;
+
+    Ok(())
+}
+
+/// v0.7b authority event (`workload=userspace`): the bootstrap grant emits a
+/// first-class `CapEvent::Granted` — richer than the `grants_total` counter
+/// (it carries the global cap id, holder, object kind, and rights). This is
+/// the seed of the host-reconstructed capability derivation tree (v0.8).
+/// Asserts the event reaches the wire with object `TelemetrySink` and `EMIT`
+/// rights.
+pub fn userspace_cap_granted_event() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("userspace", "userspace")?;
+
+    h.wait_for(SEC * 10, is_cap_granted_telemetry())
+        .ok_or(
+            "no CapEvent::Granted{TelemetrySink, EMIT} within 10s — the kernel \
+             granted the bootstrap cap without emitting the authority event \
+             (or emitted wrong object/rights)",
         )?;
 
     Ok(())

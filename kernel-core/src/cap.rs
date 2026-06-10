@@ -38,6 +38,12 @@ impl Rights {
     pub const fn contains(self, other: Rights) -> bool {
         self.0 & other.0 == other.0
     }
+
+    /// The raw bitmask, for placing on the `CapEvent` wire frame.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
 }
 
 /// What a capability points at. One variant in v0.7b; the enum is the
@@ -258,6 +264,14 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(table.resolve(first).unwrap().object, Object::TelemetrySink { counter: StringId(1) });
         assert_eq!(table.resolve(second).unwrap().object, Object::TelemetrySink { counter: StringId(2) });
+    }
+
+    #[test]
+    fn rights_expose_their_raw_bits_for_the_wire() {
+        // The CapEvent frame carries rights as a u32; the kernel reads them
+        // off the granted capability rather than re-deriving the constant.
+        assert_eq!(Rights::EMIT.bits(), 0b0001);
+        assert_eq!(Rights::NONE.bits(), 0);
     }
 
     #[test]

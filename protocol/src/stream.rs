@@ -8,7 +8,7 @@ use std::io::Read;
 use std::string::{String, ToString};
 use std::vec::Vec;
 
-use crate::{Frame, HartRole, MetricKind, SpanId, StringId, SwitchReason};
+use crate::{CapEventKind, CapObject, Frame, HartRole, MetricKind, SpanId, StringId, SwitchReason};
 
 /// Owned, lifetime-free counterpart of `Frame<'a>`. The host-side
 /// reader thread decodes into a temporary buffer and converts to
@@ -30,6 +30,16 @@ pub enum OwnedFrame {
     ThreadRegister { id: u32, name: String },
     ContextSwitch { from: u32, to: u32, t: u64, reason: SwitchReason, hart_id: u8 },
     HartRegister { id: u8, mhartid: u64, role: HartRole },
+    CapEvent {
+        kind: CapEventKind,
+        cap_id: u64,
+        parent_cap_id: u64,
+        holder: u32,
+        object: CapObject,
+        rights: u32,
+        t: u64,
+        hart_id: u8,
+    },
 }
 
 impl OwnedFrame {
@@ -63,6 +73,9 @@ impl OwnedFrame {
             }
             Frame::HartRegister { id, mhartid, role } => {
                 OwnedFrame::HartRegister { id, mhartid, role }
+            }
+            Frame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, t, hart_id } => {
+                OwnedFrame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, t, hart_id }
             }
         }
     }

@@ -104,6 +104,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario::cpu_bound ("userspace-cannot-touch-kernel", scenarios::userspace_cannot_touch_kernel),
     Scenario::cpu_bound ("userspace-grant-snitched", scenarios::userspace_grant_snitched),
     Scenario::cpu_bound ("userspace-cap-denied", scenarios::userspace_cap_denied),
+    Scenario::cpu_bound ("userspace-cap-granted-event", scenarios::userspace_cap_granted_event),
 ];
 
 /// Set the process-wide failure-capture transcript depth. Call once at

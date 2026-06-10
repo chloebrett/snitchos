@@ -3,6 +3,7 @@
 //! straight into `Harness::wait_for`.
 
 use protocol::stream::OwnedFrame;
+use protocol::{CapEventKind, CapObject};
 
 use super::harness::StringTable;
 
@@ -38,4 +39,18 @@ pub fn is_metric_named(name: &'static str) -> impl Fn(&OwnedFrame, &StringTable)
         }
         _ => false,
     }
+}
+
+/// A `CapEvent::Granted` for a `TelemetrySink` whose rights carry `EMIT`
+/// (bit 0) — the bootstrap grant as a first-class authority event.
+pub fn is_cap_granted_telemetry() -> impl Fn(&OwnedFrame, &StringTable) -> bool {
+    |f, _| matches!(
+        f,
+        OwnedFrame::CapEvent {
+            kind: CapEventKind::Granted,
+            object: CapObject::TelemetrySink,
+            rights,
+            ..
+        } if rights & 0b0001 != 0
+    )
 }

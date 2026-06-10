@@ -150,6 +150,25 @@ pub fn emit_hart_register(id: u8, mhartid: u64, role: protocol::HartRole) {
     emit_frame(&Frame::HartRegister { id, mhartid, role });
 }
 
+/// Emit a `CapEvent::Granted` frame — the kernel snitching authority being
+/// *created*. Richer than the `cap.grants_total` counter (that is a rate,
+/// this an attributed fact): carries the global `cap_id`, the `holder`
+/// identity, the object kind, and the granted `rights`, so the host can
+/// reconstruct the capability derivation tree. `parent_cap_id` is `0`
+/// (root) — no derivation until v0.8.
+pub fn emit_cap_granted(cap_id: u64, holder: u32, object: protocol::CapObject, rights: u32) {
+    emit_frame(&Frame::CapEvent {
+        kind: protocol::CapEventKind::Granted,
+        cap_id,
+        parent_cap_id: 0,
+        holder,
+        object,
+        rights,
+        t: timestamp(),
+        hart_id: crate::percpu::current_hartid() as u8,
+    });
+}
+
 /// Emit a `ContextSwitch` frame. Called by `sched::yield_now` on
 /// every actual switch. Makes scheduler decisions first-class
 /// traceable events.
