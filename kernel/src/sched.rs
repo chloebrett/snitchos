@@ -156,11 +156,14 @@ impl Task {
     fn new_bare(id: TaskId, name: String, state: TaskState) -> Self {
         // The spawn storm spawns ~200 tasks back-to-back. Each
         // `register_counter_owned` call mints a fresh leaked 'static str
-        // whose pointer becomes a new intern-table slot (the table
-        // dedupes by pointer identity, not by content), so 200 spawns ×
-        // 2 metrics would blow MAX_INTERNED=128. The heartbeat's
-        // per-task metric emit loop is also skipped under that workload,
-        // so a sentinel StringId is fine. (`boot_workload::selected()`
+        // whose pointer becomes a new intern-table entry (the
+        // `register_or_lookup` path is pointer-keyed, so each fresh leak
+        // is distinct — `lookup_by_content` would dedupe but isn't used
+        // here), so 200 spawns × 2 metrics would permanently leak ~400
+        // 'static strings and grow the intern table for a throwaway
+        // stress workload. The
+        // heartbeat's per-task metric emit loop is also skipped under that
+        // workload, so a sentinel StringId is fine. (`boot_workload::selected()`
         // is set in `kmain` before any task is created.)
         let (cpu_time_metric, runs_metric) = if crate::boot_workload::selected()
             == Some(kernel_core::bootargs::WorkloadKind::SpawnStorm)

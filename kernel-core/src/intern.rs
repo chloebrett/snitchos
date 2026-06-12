@@ -3,34 +3,36 @@
 //! Frame emission for newly-registered names is delegated to a
 //! `FrameSink` so the kernel and tests share one code path.
 
+use alloc::vec::Vec;
+
 use protocol::{Frame, MetricKind, StringId};
 
 use crate::sink::FrameSink;
 
-/// Maximum number of unique strings the table can hold. Each task
-/// `spawn` adds ~3 strings (the task name + 2 per-task metric names).
-/// Bumped to 128 in v0.6 step 10 because adding `hart_1_main` +
-/// `hart_1_probe` to the existing v0.5 task set + workload metrics +
-/// SMP metrics pushed past 64.
+/// Inline capacity: how many strings the table holds without touching the
+/// allocator. The first strings are interned during boot *before the
+/// allocator exists* — `span!("kernel.boot")` runs long before `heap::init()`
+/// (see `kmain`) — so that prefix must live in fixed, allocator-free storage.
+/// Everything registered past this spills into the heap-backed `overflow`,
+/// which is only ever pushed once the heap is up.
 ///
-/// **Why a fixed array and not a `Vec`:** the first strings are interned
-/// during boot *before the allocator exists* — `span!("kernel.boot")` runs
-/// long before `heap::init()` (see `kmain`). A heap-backed table would
-/// allocate on the first boot string and fault. So the storage must be
-/// allocator-free, which means a fixed cap chosen with headroom rather than
-/// a growable buffer.
+/// **Invariant:** the number of strings interned *before* `heap::init` must
+/// not exceed `INLINE_CAP` — a spill before the allocator exists would
+/// `Vec::push` with no heap and fault. Pre-heap interning is just
+/// `kernel.boot` + the init-phase spans (~10-20), so 64 is comfortable
+/// headroom. (This is the one boot-order coupling the table carries.)
 ///
-/// **Why O(n) lookup is fine:** every lookup is a linear scan, but `n` is
-/// bounded by this cap. Kernel strings are a known, modest set (~100), and
-/// the *userspace* contribution is bounded separately by a per-process span-
-/// name quota (`handle_span_open`) — so a program cannot drive `n` up to the
-/// point where the scan, or the permanent `Box::leak` of each new name,
-/// becomes a DoS. With `n` bounded in the low hundreds, a few hundred short
-/// `memcmp`s per lookup is tens of microseconds: not worth a hash index.
-/// (If a real need for thousands of names ever appears, add a
+/// **Why O(n) lookup is fine:** every lookup is a linear scan, and the total
+/// `n` is bounded in practice — kernel strings are a known, modest set (~100),
+/// and the *userspace* contribution is bounded by a per-process span-name
+/// quota (`handle_span_open`), so a program cannot drive `n` to where the scan
+/// — or the permanent `Box::leak` of each new name — becomes a denial of
+/// service. A few
+/// hundred short `memcmp`s per lookup is tens of microseconds: not worth a
+/// hash index. (If thousands of names ever become real, add a
 /// `BTreeMap<&'static str, StringId>` index then — and revisit span-name GC,
 /// since leaked names are never reclaimed today.)
-pub const MAX_INTERNED: usize = 128;
+pub const INLINE_CAP: usize = 64;
 
 #[derive(Copy, Clone)]
 struct InternEntry {
@@ -38,9 +40,14 @@ struct InternEntry {
     metric_registered: bool,
 }
 
+/// Two-region intern storage: a fixed inline array for the pre-allocator boot
+/// prefix, then a heap-backed `Vec` for everything after. Ids are dense and
+/// contiguous across the boundary — `0..INLINE_CAP` live inline, `INLINE_CAP..`
+/// live in `overflow` at index `id - INLINE_CAP`.
 pub struct InternTable {
-    entries: [Option<InternEntry>; MAX_INTERNED],
-    next_id: u32,
+    inline: [Option<InternEntry>; INLINE_CAP],
+    inline_len: usize,
+    overflow: Vec<InternEntry>,
 }
 
 impl Default for InternTable {
@@ -52,37 +59,64 @@ impl Default for InternTable {
 impl InternTable {
     pub const fn new() -> Self {
         Self {
-            entries: [None; MAX_INTERNED],
-            next_id: 0,
+            inline: [None; INLINE_CAP],
+            inline_len: 0,
+            overflow: Vec::new(),
+        }
+    }
+
+    /// Walk every live entry with its dense id, inline region first.
+    fn iter(&self) -> impl Iterator<Item = (u32, &InternEntry)> {
+        self.inline[..self.inline_len]
+            .iter()
+            .flatten()
+            .enumerate()
+            .map(|(i, e)| (i as u32, e))
+            .chain(
+                self.overflow
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| ((INLINE_CAP + i) as u32, e)),
+            )
+    }
+
+    /// Mutable access to the entry with `id`, across the region boundary.
+    fn entry_mut(&mut self, id: usize) -> Option<&mut InternEntry> {
+        if id < INLINE_CAP {
+            self.inline[id].as_mut()
+        } else {
+            self.overflow.get_mut(id - INLINE_CAP)
+        }
+    }
+
+    /// Append a fresh entry, returning its dense id. Fills the inline region
+    /// first; once full, spills into the heap-backed `overflow` (which is why
+    /// the pre-heap string count must stay under `INLINE_CAP`).
+    fn push(&mut self, entry: InternEntry) -> u32 {
+        if self.inline_len < INLINE_CAP {
+            let id = self.inline_len;
+            self.inline[id] = Some(entry);
+            self.inline_len += 1;
+            id as u32
+        } else {
+            let id = INLINE_CAP + self.overflow.len();
+            self.overflow.push(entry);
+            id as u32
         }
     }
 
     /// Scan + insert. Returns `(id, is_new)` so callers know whether to
     /// emit a `StringRegister`. Equality is by **pointer**, not value —
     /// two `&'static str`s with the same characters from different
-    /// allocations get distinct ids. Acceptable for v0.1 (one crate
-    /// minting names); revisit if userspace ever registers names.
-    ///
-    /// Panics if the table is full. Programmer error: bump
-    /// `MAX_INTERNED` or stop creating unique names.
+    /// allocations get distinct ids. The content-keyed [`lookup_by_content`]
+    /// is the path for runtime-built names (e.g. userspace span names).
     fn lookup_or_insert(&mut self, name: &'static str) -> (StringId, bool) {
-        for (i, entry) in self.entries.iter().enumerate() {
-            if let Some(e) = entry
-                && e.name.as_ptr() == name.as_ptr() {
-                    return (StringId(i as u32), false);
-                }
+        for (id, e) in self.iter() {
+            if e.name.as_ptr() == name.as_ptr() {
+                return (StringId(id), false);
+            }
         }
-
-        let id = self.next_id;
-        let slot = id as usize;
-        assert!(slot < MAX_INTERNED, 
-            "intern table full ({MAX_INTERNED} entries); bump MAX_INTERNED",
-        );
-        self.entries[slot] = Some(InternEntry {
-            name,
-            metric_registered: false,
-        });
-        self.next_id = id + 1;
+        let id = self.push(InternEntry { name, metric_registered: false });
         (StringId(id), true)
     }
 
@@ -114,11 +148,9 @@ impl InternTable {
     /// table; the table is small.
     #[must_use]
     pub fn lookup_by_content(&self, name: &str) -> Option<StringId> {
-        for (i, entry) in self.entries.iter().enumerate() {
-            if let Some(e) = entry
-                && e.name == name
-            {
-                return Some(StringId(i as u32));
+        for (id, e) in self.iter() {
+            if e.name == name {
+                return Some(StringId(id));
             }
         }
         None
@@ -140,8 +172,8 @@ impl InternTable {
         if is_new {
             sink.emit(&Frame::StringRegister { id, value: name });
         }
-        let entry = self.entries[id.0 as usize]
-            .as_mut()
+        let entry = self
+            .entry_mut(id.0 as usize)
             .expect("lookup_or_insert guarantees the slot is populated");
         if !entry.metric_registered {
             entry.metric_registered = true;
@@ -152,7 +184,7 @@ impl InternTable {
 
     /// Number of distinct names currently held.
     pub fn count(&self) -> u32 {
-        self.next_id
+        (self.inline_len + self.overflow.len()) as u32
     }
 }
 
@@ -242,16 +274,49 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "intern table full")]
-    fn filling_to_max_then_one_more_panics() {
+    fn grows_past_the_inline_cap_into_the_heap_overflow() {
         let mut table = InternTable::new();
         let mut sink = CapturingSink::new();
-        for i in 0..MAX_INTERNED {
+        // Register well past INLINE_CAP (and past the old fixed 128 cap): the
+        // inline region fills, then entries spill into the heap-backed Vec.
+        // The old fixed-array table panicked here; the hybrid grows.
+        let count = 200usize;
+        let mut ids = Vec::new();
+        for i in 0..count {
             let s: &'static str = Box::leak(format!("name{i}").into_boxed_str());
+            ids.push(table.register_or_lookup(s, &mut sink));
+        }
+        assert_eq!(table.count(), count as u32);
+        // Every name — inline and spilled — still resolves to its dense id.
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(table.lookup_by_content(&format!("name{i}")), Some(*id));
+        }
+        // The first spilled entry sits immediately past the inline region.
+        assert_eq!(ids[INLINE_CAP], StringId(INLINE_CAP as u32));
+    }
+
+    #[test]
+    fn register_metric_resolves_a_spilled_overflow_entry() {
+        // Exercises `entry_mut` across the region boundary: the metric name
+        // lands in the heap overflow (id >= INLINE_CAP), and a second call
+        // must find the *same* entry (metric_registered already set) rather
+        // than a mis-indexed one — pinning the overflow index arithmetic.
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+        for i in 0..INLINE_CAP {
+            let s: &'static str = Box::leak(format!("filler{i}").into_boxed_str());
             table.register_or_lookup(s, &mut sink);
         }
-        let overflow: &'static str = Box::leak(Box::<str>::from("one too many"));
-        table.register_or_lookup(overflow, &mut sink);
+        let m: &'static str = Box::leak(Box::<str>::from("overflow.metric"));
+        let before = sink.len();
+
+        let id1 = table.register_metric(m, MetricKind::Counter, &mut sink);
+        assert!(id1.0 as usize >= INLINE_CAP, "name must land in overflow");
+        assert_eq!(sink.len(), before + 2, "first: StringRegister + MetricRegister");
+
+        let id2 = table.register_metric(m, MetricKind::Counter, &mut sink);
+        assert_eq!(id1, id2);
+        assert_eq!(sink.len(), before + 2, "second call must re-find the entry, not re-emit");
     }
 
     #[test]
