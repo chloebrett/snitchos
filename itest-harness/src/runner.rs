@@ -51,25 +51,70 @@ pub enum CpuProfile {
 /// One scenario: a name + a function that returns `Ok(())` on pass or
 /// a human-readable error string on failure. `cpu_profile` defaults
 /// to `Wfi`; mark CPU-heavy scenarios via `Scenario::cpu_bound`.
+#[derive(Debug)]
 pub struct Scenario {
     pub name: &'static str,
     pub run: fn() -> Result<(), String>,
     pub cpu_profile: CpuProfile,
+    /// Free-form labels for `--tag` selection (e.g. `["userspace"]`,
+    /// `["smp", "stress"]`). Defaults to empty; annotate via `tagged`.
+    pub tags: &'static [&'static str],
 }
 
 impl Scenario {
     /// New `Wfi`-profile scenario. Const-fn so it composes inside
     /// `const SCENARIOS: &[Scenario]` arrays.
     pub const fn new(name: &'static str, run: fn() -> Result<(), String>) -> Self {
-        Self { name, run, cpu_profile: CpuProfile::Wfi }
+        Self { name, run, cpu_profile: CpuProfile::Wfi, tags: &[] }
     }
 
     /// New `Cpu`-profile scenario. For scenarios that run real
     /// guest CPU work between heartbeats — allocator pressure
     /// loops, context-switch storms, etc. Same const-fn property.
     pub const fn cpu_bound(name: &'static str, run: fn() -> Result<(), String>) -> Self {
-        Self { name, run, cpu_profile: CpuProfile::Cpu }
+        Self { name, run, cpu_profile: CpuProfile::Cpu, tags: &[] }
     }
+
+    /// Annotate with selection tags. Chainable and const so it composes
+    /// after `new`/`cpu_bound` inside `const SCENARIOS` arrays:
+    /// `Scenario::cpu_bound("spawn-storm", f).tagged(&["smp", "stress"])`.
+    #[must_use]
+    pub const fn tagged(mut self, tags: &'static [&'static str]) -> Self {
+        self.tags = tags;
+        self
+    }
+}
+
+/// Select scenarios carrying any of the requested `tags` (set union):
+/// `--tag smp --tag stress` yields every scenario tagged either. A
+/// requested tag carried by *no* scenario in `scenarios` is treated as
+/// an error (almost always a typo — matching nothing silently would
+/// hide it); the returned message names the offending tag. An empty
+/// `tags` slice is a no-op that returns every scenario unchanged.
+pub fn select_by_tags<'a>(
+    scenarios: &[&'a Scenario],
+    tags: &[String],
+) -> Result<Vec<&'a Scenario>, String> {
+    if tags.is_empty() {
+        return Ok(scenarios.to_vec());
+    }
+    if let Some(unknown) = tags
+        .iter()
+        .find(|t| !scenarios.iter().any(|s| s.tags.contains(&t.as_str())))
+    {
+        let mut known: Vec<&str> = scenarios.iter().flat_map(|s| s.tags.iter().copied()).collect();
+        known.sort_unstable();
+        known.dedup();
+        return Err(format!(
+            "unknown tag: {unknown}\nknown tags: {}",
+            known.join(", ")
+        ));
+    }
+    Ok(scenarios
+        .iter()
+        .copied()
+        .filter(|s| s.tags.iter().any(|t| tags.iter().any(|req| req == t)))
+        .collect())
 }
 
 /// Per-scenario log-path lookup. Returns the path to a scenario's
@@ -1553,4 +1598,52 @@ mod tests {
         assert_eq!(FAIL_COUNTER.load(Ordering::Relaxed), 7);
     }
 
+    fn tagged_catalog() -> [Scenario; 4] {
+        [
+            Scenario::new("userspace-hello", always_pass).tagged(&["userspace"]),
+            Scenario::new("smp-boot", always_pass).tagged(&["smp"]),
+            Scenario::cpu_bound("spawn-storm", always_pass).tagged(&["smp", "stress"]),
+            Scenario::new("boot-heartbeat", always_pass),
+        ]
+    }
+
+    fn names(scns: &[&Scenario]) -> Vec<&'static str> {
+        scns.iter().map(|s| s.name).collect()
+    }
+
+    #[test]
+    fn select_by_tags_unions_matching_scenarios() {
+        let catalog = tagged_catalog();
+        let refs: Vec<&Scenario> = catalog.iter().collect();
+        let selected = select_by_tags(&refs, &["smp".to_string()]).unwrap();
+        assert_eq!(names(&selected), vec!["smp-boot", "spawn-storm"]);
+    }
+
+    #[test]
+    fn select_by_tags_takes_the_union_of_multiple_tags() {
+        let catalog = tagged_catalog();
+        let refs: Vec<&Scenario> = catalog.iter().collect();
+        let selected =
+            select_by_tags(&refs, &["userspace".to_string(), "stress".to_string()]).unwrap();
+        assert_eq!(names(&selected), vec!["userspace-hello", "spawn-storm"]);
+    }
+
+    #[test]
+    fn select_by_tags_errors_loudly_on_an_unknown_tag() {
+        let catalog = tagged_catalog();
+        let refs: Vec<&Scenario> = catalog.iter().collect();
+        // A tag carried by no scenario is almost always a typo; matching
+        // nothing silently would hide it.
+        let err = select_by_tags(&refs, &["usrspace".to_string()]).unwrap_err();
+        assert!(err.contains("usrspace"), "error should name the bad tag: {err}");
+    }
+
+    #[test]
+    fn select_by_tags_rejects_a_mix_of_known_and_unknown() {
+        let catalog = tagged_catalog();
+        let refs: Vec<&Scenario> = catalog.iter().collect();
+        let err =
+            select_by_tags(&refs, &["smp".to_string(), "bogus".to_string()]).unwrap_err();
+        assert!(err.contains("bogus"), "error should name the bad tag: {err}");
+    }
 }
