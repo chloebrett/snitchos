@@ -302,9 +302,17 @@ fn handle_span_open(frame: &mut TrapFrame) {
         return;
     };
 
-    // Intern on demand + open a span on this task's cursor; hand back the
-    // `{id, parent}` close token (id in a0, parent in a1).
-    let opened = crate::tracing::span_open_owned(name);
+    // Intern on demand (quota-gated) + open a span on this task's cursor; hand
+    // back the `{id, parent}` close token (id in a0, parent in a1). A new name
+    // past the per-process quota is refused without registering.
+    let Some(opened) = crate::tracing::span_open_bounded(
+        name,
+        &proc.span_names_registered,
+        crate::process::Process::MAX_SPAN_NAMES,
+    ) else {
+        refuse(frame, sc, RefusalReason::Quota);
+        return;
+    };
     frame.a0 = opened.id.0;
     frame.a1 = opened.parent.0;
 }

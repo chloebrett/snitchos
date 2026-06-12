@@ -8,7 +8,7 @@
 //! [`kernel_core::cap`]; this module only decides *where the table lives*
 //! and grants the bootstrap capability. See `plans/v0.7b-capabilities.md`.
 
-use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 use kernel_core::cap::{CapTable, Handle};
 use protocol::StringId;
@@ -54,9 +54,24 @@ pub struct Process {
     /// lock discipline). Read by `trap::handle_user_ecall` via
     /// [`CURRENT_PROCESS`] to validate a capability invocation.
     pub caps: Mutex<CapTable>,
+
+    /// Count of **distinct span names this process has introduced** into the
+    /// global intern table. Bounds the per-process contribution to the
+    /// permanent `Box::leak` of each new span name (and the table's growth):
+    /// once it reaches [`Process::MAX_SPAN_NAMES`] a span-open with a new name
+    /// is refused. Repeats and names another process already registered cost
+    /// nothing (they resolve via `lookup_by_content`). Incremented under the
+    /// intern lock at the registration site, so the check-and-bump is precise.
+    pub span_names_registered: AtomicU32,
 }
 
 impl Process {
+    /// Cap on distinct span names a single process may introduce. Generous
+    /// for a real program (a handful of `worker.tick`-style names), small
+    /// enough that a misbehaving program can't leak unbounded `'static`
+    /// strings or grow the intern table without limit.
+    pub const MAX_SPAN_NAMES: u32 = 16;
+
     /// Build the process for `root_pa` and grant it its bootstrap
     /// capabilities: a `TelemetrySink` bound to `telemetry_counter` and a
     /// `SpanSink`, each with `EMIT` — the "root caps to init only" policy.
@@ -67,6 +82,11 @@ impl Process {
     /// the caller snitches each (`cap.grants_total` + a `CapEvent`).
     pub fn bootstrap(root_pa: usize, telemetry_counter: StringId) -> (Self, Handle, Handle) {
         let (table, telemetry, span) = CapTable::bootstrap(telemetry_counter);
-        (Self { root_pa, caps: Mutex::new(table) }, telemetry, span)
+        let process = Self {
+            root_pa,
+            caps: Mutex::new(table),
+            span_names_registered: AtomicU32::new(0),
+        };
+        (process, telemetry, span)
     }
 }

@@ -86,11 +86,13 @@ impl Scenario {
 }
 
 /// Select scenarios carrying any of the requested `tags` (set union):
-/// `--tag smp --tag stress` yields every scenario tagged either. A
-/// requested tag carried by *no* scenario in `scenarios` is treated as
-/// an error (almost always a typo — matching nothing silently would
-/// hide it); the returned message names the offending tag. An empty
-/// `tags` slice is a no-op that returns every scenario unchanged.
+/// `--tag smp --tag stress` (or `--tag smp,stress`) yields every
+/// scenario tagged either — same comma-means-also convention as the
+/// positional scenario list (`itest a,b,c`). A requested tag carried by
+/// *no* scenario is an error (almost always a typo — matching nothing
+/// silently would hide it); the returned message names the offending
+/// tag. An empty `tags` slice is a no-op that returns every scenario
+/// unchanged.
 pub fn select_by_tags<'a>(
     scenarios: &[&'a Scenario],
     tags: &[String],

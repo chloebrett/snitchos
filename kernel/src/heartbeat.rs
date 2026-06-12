@@ -409,6 +409,7 @@ fn emit_storm_metrics(m: &Metrics, count: i64) {
         | Some(WorkloadKind::FrameOom)
         | Some(WorkloadKind::HeapOom)
         | Some(WorkloadKind::Userspace)
-        | Some(WorkloadKind::UserspaceFault) => {}
+        | Some(WorkloadKind::UserspaceFault)
+        | Some(WorkloadKind::UserspaceSpanflood) => {}
     }
 }

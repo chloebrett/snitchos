@@ -30,6 +30,10 @@ pub static HELLO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_USER_ELF"));
 /// kernel VA to prove the `U`-bit firewall faults it.
 pub static FAULTER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FAULTER_ELF"));
 
+/// The `workload=userspace-spanflood` program: opens spans with many distinct
+/// names to exceed the per-process span-name quota.
+pub static SPANFLOOD_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPANFLOOD_ELF"));
+
 /// The counter the `EmitMetric` syscall bumps. Registered once on hart 0
 /// (`init_metric`) so the `MetricRegister` frame isn't emitted from inside
 /// the trap handler; the handler (on hart 1) reads it via [`user_metric_id`].
@@ -119,6 +123,11 @@ pub extern "C" fn user_main_entry() -> ! {
 /// Hart-1 entry for `workload=userspace-fault`: run the isolation probe.
 pub extern "C" fn faulter_main_entry() -> ! {
     run(FAULTER_ELF)
+}
+
+/// Hart-1 entry for `workload=userspace-spanflood`: run the span-quota probe.
+pub extern "C" fn spanflood_main_entry() -> ! {
+    run(SPANFLOOD_ELF)
 }
 
 /// Build a fresh address space, grant the process its bootstrap

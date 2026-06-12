@@ -348,7 +348,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // Userspace: hart 0 just heartbeats; the user program is placed on
         // hart 1 after SECONDARY_READY.
         | Some(WorkloadKind::Userspace)
-        | Some(WorkloadKind::UserspaceFault) => {}
+        | Some(WorkloadKind::UserspaceFault)
+        | Some(WorkloadKind::UserspaceSpanflood) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -389,7 +390,13 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // so a heartbeat-driven storm can poke it with maximum "fresh
     // trap" race exposure).
     if !selected.is_some_and(|w| {
-        w.is_storm() || matches!(w, WorkloadKind::Userspace | WorkloadKind::UserspaceFault)
+        w.is_storm()
+            || matches!(
+                w,
+                WorkloadKind::Userspace
+                    | WorkloadKind::UserspaceFault
+                    | WorkloadKind::UserspaceSpanflood
+            )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
     }
@@ -421,6 +428,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         Some(WorkloadKind::UserspaceFault) => {
             user::init_metric();
             let _ = sched::spawn_on(1, "user_fault", user::faulter_main_entry);
+        }
+        // Span-quota probe: `spanflood` opens many distinctly-named spans; the
+        // kernel refuses the surplus past `Process::MAX_SPAN_NAMES`.
+        Some(WorkloadKind::UserspaceSpanflood) => {
+            user::init_metric();
+            let _ = sched::spawn_on(1, "user_spanflood", user::spanflood_main_entry);
         }
         _ => {}
     }

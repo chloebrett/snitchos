@@ -74,35 +74,35 @@ use itest_harness::Scenario;
 // fan-out-parallel, `cpu` = serial pass (real guest work between
 // heartbeats). See `itest_harness::scenarios!`.
 const SCENARIOS: &[Scenario] = itest_harness::scenarios! {
-    wfi "boot-reaches-heartbeat"          scenarios::boot_reaches_heartbeat;
-    wfi "heartbeat-cadence"               scenarios::heartbeat_cadence;
-    wfi "pre-init-order"                  scenarios::pre_init_order;
-    wfi "kernel-runs-at-higher-half"      scenarios::kernel_runs_at_higher_half;
-    wfi "frame-allocator-metrics"         scenarios::frame_allocator_metrics;
-    wfi "frame-allocator-oom"             scenarios::frame_allocator_oom;
-    wfi "kernel-heap-metrics"             scenarios::kernel_heap_metrics;
-    wfi "sched-context-switch-smoke"      scenarios::sched_context_switch_smoke;
-    wfi "sched-spawn-registers-thread"    scenarios::sched_spawn_registers_thread;
-    cpu "sched-yield-round-trips"         scenarios::sched_yield_round_trips;
-    wfi "sched-spans-carry-task-id"       scenarios::sched_spans_carry_task_id;
-    wfi "sched-context-switches-on-wire"  scenarios::sched_context_switches_on_wire;
-    wfi "sched-span-survives-yield"       scenarios::sched_span_survives_yield;
-    cpu "heap-oom"                        scenarios::heap_oom;
-    cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline;
-    cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness;
-    wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup;
-    wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots;
-    wfi "smp-spawn-on-hart-1-runs"        scenarios::smp_spawn_on_hart_1_runs;
-    wfi "smp-spans-carry-hart-id"         scenarios::smp_spans_carry_hart_id;
-    wfi "smp-ipi-wakes-idle-hart"         scenarios::smp_ipi_wakes_idle_hart;
-    cpu "spawn-storm"                     scenarios::spawn_storm;
-    cpu "ipi-pong"                        scenarios::ipi_pong;
-    cpu "shootdown-storm"                 scenarios::shootdown_storm;
-    cpu "smp-tlb-shootdown-visible"       scenarios::smp_tlb_shootdown_visible;
-    cpu "smp-ping-pong-cadence"           scenarios::smp_ping_pong_cadence;
-    wfi "sched-task-exits-cleanly"        scenarios::sched_task_exits_cleanly;
-    cpu "mutex-storm"                     scenarios::mutex_storm;
-    cpu "virtio-storm"                    scenarios::virtio_storm;
+    wfi "boot-reaches-heartbeat"          scenarios::boot_reaches_heartbeat         [boot];
+    wfi "heartbeat-cadence"               scenarios::heartbeat_cadence              [boot];
+    wfi "pre-init-order"                  scenarios::pre_init_order                 [boot];
+    wfi "kernel-runs-at-higher-half"      scenarios::kernel_runs_at_higher_half     [boot];
+    wfi "frame-allocator-metrics"         scenarios::frame_allocator_metrics        [frame];
+    wfi "frame-allocator-oom"             scenarios::frame_allocator_oom            [frame, oom];
+    wfi "kernel-heap-metrics"             scenarios::kernel_heap_metrics            [heap];
+    wfi "sched-context-switch-smoke"      scenarios::sched_context_switch_smoke     [sched];
+    wfi "sched-spawn-registers-thread"    scenarios::sched_spawn_registers_thread   [sched];
+    cpu "sched-yield-round-trips"         scenarios::sched_yield_round_trips        [sched];
+    wfi "sched-spans-carry-task-id"       scenarios::sched_spans_carry_task_id      [sched];
+    wfi "sched-context-switches-on-wire"  scenarios::sched_context_switches_on_wire [sched];
+    wfi "sched-span-survives-yield"       scenarios::sched_span_survives_yield      [sched];
+    cpu "heap-oom"                        scenarios::heap_oom                       [heap, oom];
+    cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline  [workload];
+    cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness [smp, workload];
+    wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup                [smp, ipi];
+    wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots       [smp];
+    wfi "smp-spawn-on-hart-1-runs"        scenarios::smp_spawn_on_hart_1_runs       [smp];
+    wfi "smp-spans-carry-hart-id"         scenarios::smp_spans_carry_hart_id        [smp];
+    wfi "smp-ipi-wakes-idle-hart"         scenarios::smp_ipi_wakes_idle_hart        [smp, ipi];
+    cpu "spawn-storm"                     scenarios::spawn_storm                    [smp, stress];
+    cpu "ipi-pong"                        scenarios::ipi_pong                       [smp, ipi, stress];
+    cpu "shootdown-storm"                 scenarios::shootdown_storm                [smp, stress];
+    cpu "smp-tlb-shootdown-visible"       scenarios::smp_tlb_shootdown_visible      [smp];
+    cpu "smp-ping-pong-cadence"           scenarios::smp_ping_pong_cadence          [smp, ipi];
+    wfi "sched-task-exits-cleanly"        scenarios::sched_task_exits_cleanly       [sched];
+    cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress];
+    cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress];
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back
     // to its idle `wfi` loop) and `faulter` faults (the kernel parks the hart
     // in `wfi`). So they fan out in the parallel pool rather than a serial pass.
@@ -116,6 +116,7 @@ const SCENARIOS: &[Scenario] = itest_harness::scenarios! {
     wfi "userspace-spansink-granted"      scenarios::userspace_spansink_granted     [userspace];
     wfi "userspace-emits-span"            scenarios::userspace_emits_span           [userspace];
     wfi "userspace-refusal-snitched"      scenarios::userspace_refusal_snitched     [userspace];
+    wfi "userspace-quota-refused"         scenarios::userspace_quota_refused        [userspace];
 };
 
 /// Set the process-wide failure-capture transcript depth. Call once at

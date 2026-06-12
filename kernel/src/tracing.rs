@@ -86,24 +86,6 @@ pub fn register_or_lookup(name: &'static str) -> StringId {
     INTERN_TABLE.lock().register_or_lookup(name, &mut KernelSink)
 }
 
-/// Like [`register_or_lookup`] but for a **runtime** (non-`'static`) name —
-/// e.g. a span name copied from U-mode. Content-dedups first, so a repeated
-/// name costs nothing; only on a genuine first sighting does it leak the name
-/// into `'static` and register it (emitting `StringRegister`). The leak is
-/// bounded by the per-process span-name quota at the call site.
-///
-/// Safe from a synchronous syscall handler: it holds no lock the alloc path
-/// could re-enter (alloc only bumps atomics, never emits), and the intern →
-/// virtio lock order matches [`register_or_lookup`].
-pub fn register_or_lookup_owned(name: &str) -> StringId {
-    let mut table = INTERN_TABLE.lock();
-    if let Some(id) = table.lookup_by_content(name) {
-        return id;
-    }
-    let leaked: &'static str = alloc::boxed::Box::leak(alloc::boxed::Box::<str>::from(name));
-    table.register_or_lookup(leaked, &mut KernelSink)
-}
-
 /// Snitch a **refused syscall** — a first-class observability event so a
 /// denied U-mode request is never silent (the whole point: a refusal you can
 /// see beats a result frame that never appeared). `syscall` is the raw `a7`,
@@ -119,13 +101,40 @@ pub fn emit_syscall_refused(syscall: u8, reason: protocol::RefusalReason) {
     });
 }
 
-/// Open a span named `name` (a runtime string) on the calling task's cursor,
-/// emit `SpanStart`, and return the bookkeeping (`id` + `parent`). The
-/// non-RAII, owned-name twin of [`span_start`]: userspace holds the
-/// `{id, parent}` as an opaque close token (just as the kernel's `Span` guard
-/// does), and hands it back to [`span_close_checked`] when the span ends.
-pub fn span_open_owned(name: &str) -> span::SpanOpen {
-    let name_id = register_or_lookup_owned(name);
+/// Intern `name` (a runtime string copied from U-mode) and open a span on the
+/// calling task's cursor, returning the `{id, parent}` close token (which
+/// userspace holds, just as the kernel's `Span` guard does). Non-RAII twin of
+/// [`span_start`]: the matching `SpanEnd` comes from a later
+/// [`span_close_checked`].
+///
+/// A genuinely **new** name is gated by a per-process quota: `registered`
+/// counts distinct names this process has introduced; if it has reached `max`,
+/// a new name is **refused** (returns `None`) without registering — bounding
+/// the permanent `Box::leak` and the table's growth. Repeats and names another
+/// process already registered always succeed and cost nothing (content-deduped
+/// via `lookup_by_content`). The lookup, quota check, registration, and
+/// counter bump all run under the intern lock, so the decision is precise — no
+/// check-then-register race.
+pub fn span_open_bounded(
+    name: &str,
+    registered: &core::sync::atomic::AtomicU32,
+    max: u32,
+) -> Option<span::SpanOpen> {
+    use core::sync::atomic::Ordering;
+    let name_id = {
+        let mut table = INTERN_TABLE.lock();
+        if let Some(id) = table.lookup_by_content(name) {
+            id
+        } else if registered.load(Ordering::Relaxed) >= max {
+            return None;
+        } else {
+            let leaked: &'static str =
+                alloc::boxed::Box::leak(alloc::boxed::Box::<str>::from(name));
+            let id = table.register_or_lookup(leaked, &mut KernelSink);
+            registered.fetch_add(1, Ordering::Relaxed);
+            id
+        }
+    };
     let cursor = current_cursor();
     let open = span::open(&SPAN_IDS, cursor);
     emit_frame(&Frame::SpanStart {
@@ -136,7 +145,7 @@ pub fn span_open_owned(name: &str) -> span::SpanOpen {
         task_id: crate::sched::current_task_id().0,
         hart_id: crate::percpu::current_hartid() as u8,
     });
-    open
+    Some(open)
 }
 
 /// Close a userspace span: the caller hands back the `{id, parent}` token from
