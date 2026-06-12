@@ -59,6 +59,37 @@ pub const fn va_to_pa(va: usize) -> usize {
     }
 }
 
+/// Top of the Sv39 user half. Valid user VAs live in `[0, USER_VA_END)`;
+/// everything at or above is the non-canonical hole or the kernel high-half
+/// (`HEAP_VA_BASE`, `LINEAR_OFFSET`, `KERNEL_OFFSET` all sit far above this).
+pub const USER_VA_END: usize = 1 << 38;
+
+/// Largest buffer the kernel will copy in from a user process in one syscall.
+/// Bounds the work a single `copy_from_user` can demand and caps span-name /
+/// log-string lengths.
+pub const MAX_USER_STR_LEN: usize = 256;
+
+/// True iff `[ptr, ptr + len)` is a buffer the kernel may safely read from a
+/// user process: non-null, length within `MAX_USER_STR_LEN`, no address
+/// wraparound, and wholly inside the user half. The last guard is the
+/// security boundary — without it a process could smuggle a kernel-high-half
+/// pointer and turn a "copy this string" syscall into a read-oracle for
+/// kernel memory.
+///
+/// This is a bounds check, not a page-table walk: whether the range is
+/// actually *mapped* is a separate concern, caught at access time (a
+/// fault-graceful copy is a deferred refinement).
+#[must_use]
+pub const fn user_range_ok(ptr: usize, len: usize) -> bool {
+    if ptr == 0 || len > MAX_USER_STR_LEN {
+        return false;
+    }
+    match ptr.checked_add(len) {
+        Some(end) => end <= USER_VA_END,
+        None => false,
+    }
+}
+
 /// PTE permission and attribute bits. V (valid) is always set on any
 /// PTE this module produces. A (accessed) and D (dirty) are pre-set
 /// to 1 on every leaf — eliminates the hardware-update trap path.
@@ -385,6 +416,46 @@ mod tests {
     use super::*;
     extern crate std;
     use std::vec::Vec;
+
+    #[test]
+    fn user_range_accepts_low_half_buffer() {
+        assert!(user_range_ok(0x1000, 16));
+    }
+
+    #[test]
+    fn user_range_accepts_buffer_ending_exactly_at_user_top() {
+        // Half-open: last byte is USER_VA_END - 1, so end == USER_VA_END is fine.
+        assert!(user_range_ok(USER_VA_END - 16, 16));
+    }
+
+    #[test]
+    fn user_range_rejects_null() {
+        assert!(!user_range_ok(0, 16));
+    }
+
+    #[test]
+    fn user_range_rejects_kernel_high_half() {
+        assert!(!user_range_ok(KERNEL_OFFSET, 16));
+        assert!(!user_range_ok(HEAP_VA_BASE, 16));
+        assert!(!user_range_ok(LINEAR_OFFSET, 16));
+    }
+
+    #[test]
+    fn user_range_rejects_crossing_the_user_top() {
+        // ptr is in the user half but ptr + len spills past it.
+        assert!(!user_range_ok(USER_VA_END - 8, 16));
+    }
+
+    #[test]
+    fn user_range_rejects_wraparound() {
+        assert!(!user_range_ok(usize::MAX - 4, 16));
+    }
+
+    #[test]
+    fn user_range_rejects_over_long() {
+        assert!(!user_range_ok(0x1000, MAX_USER_STR_LEN + 1));
+        assert!(user_range_ok(0x1000, MAX_USER_STR_LEN));
+    }
 
     /// Host-side `PtMem` backed by a Vec of `PageTables`. PA encoding:
     /// `(index + 1) << 12` so PA=0 stays distinguishable from "unset"

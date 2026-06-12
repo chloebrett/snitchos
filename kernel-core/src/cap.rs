@@ -55,6 +55,12 @@ pub enum Object {
     /// value; identity is kernel-stamped and the counter is named by the
     /// capability, so no string crosses the syscall boundary.
     TelemetrySink { counter: StringId },
+    /// Permission to open and close spans on the holder's per-task span
+    /// cursor. Carries no payload: the span *name* arrives per-call from
+    /// userspace (interned kernel-side on demand), while the parent span and
+    /// task id are kernel-stamped. Distinct from `TelemetrySink` so emitting
+    /// a span and bumping a counter are separately granted authorities.
+    SpanSink,
 }
 
 /// An unforgeable `{ object, rights }` pair.
@@ -143,6 +149,11 @@ pub enum Denied {
     NoSuchCapability,
     /// The capability exists but lacks the right this operation requires.
     MissingRight,
+    /// The capability resolves and has the right, but names a different
+    /// object kind than the operation targets — e.g. a span op handed a
+    /// `TelemetrySink` handle, or vice versa. Holding the integer is not
+    /// enough; it must name the *right kind* of thing.
+    WrongObject,
 }
 
 /// Resolve a `TelemetrySink` invocation: `handle` must name a capability
@@ -159,8 +170,26 @@ pub fn invoke_telemetry(table: &CapTable, handle: Handle) -> Result<StringId, De
     if !cap.rights.contains(Rights::EMIT) {
         return Err(Denied::MissingRight);
     }
-    let Object::TelemetrySink { counter } = cap.object;
+    let Object::TelemetrySink { counter } = cap.object else {
+        return Err(Denied::WrongObject);
+    };
     Ok(counter)
+}
+
+/// Resolve a `SpanSink` invocation: `handle` must name a capability in
+/// `table` carrying [`Rights::EMIT`] over an [`Object::SpanSink`]. Returns
+/// `Ok(())` when the holder is authorized to open a span — name, parent, and
+/// task id are all supplied kernel-side, so there is nothing to hand back.
+/// Pure and host-tested, the span twin of [`invoke_telemetry`].
+pub fn invoke_span(table: &CapTable, handle: Handle) -> Result<(), Denied> {
+    let cap = table.resolve(handle).map_err(|_| Denied::NoSuchCapability)?;
+    if !cap.rights.contains(Rights::EMIT) {
+        return Err(Denied::MissingRight);
+    }
+    let Object::SpanSink = cap.object else {
+        return Err(Denied::WrongObject);
+    };
+    Ok(())
 }
 
 /// A process's capability table: opaque [`Handle`]s in, [`Capability`]
@@ -222,6 +251,43 @@ impl CapTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invoke_span_accepts_spansink_with_emit() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability { object: Object::SpanSink, rights: Rights::EMIT });
+        assert_eq!(invoke_span(&table, h), Ok(()));
+    }
+
+    #[test]
+    fn invoke_span_refuses_spansink_without_emit() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability { object: Object::SpanSink, rights: Rights::NONE });
+        assert_eq!(invoke_span(&table, h), Err(Denied::MissingRight));
+    }
+
+    #[test]
+    fn invoke_span_refuses_telemetry_sink_as_wrong_object() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::TelemetrySink { counter: StringId(1) },
+            rights: Rights::EMIT,
+        });
+        assert_eq!(invoke_span(&table, h), Err(Denied::WrongObject));
+    }
+
+    #[test]
+    fn invoke_span_refuses_unknown_handle() {
+        let table = CapTable::new();
+        assert_eq!(invoke_span(&table, Handle::from_raw(0)), Err(Denied::NoSuchCapability));
+    }
+
+    #[test]
+    fn invoke_telemetry_refuses_spansink_as_wrong_object() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability { object: Object::SpanSink, rights: Rights::EMIT });
+        assert_eq!(invoke_telemetry(&table, h), Err(Denied::WrongObject));
+    }
     use protocol::StringId;
 
     #[test]
@@ -235,7 +301,9 @@ mod tests {
         let cap = table.resolve(handle).expect("a freshly inserted handle resolves");
 
         assert!(cap.rights.contains(Rights::EMIT));
-        let Object::TelemetrySink { counter } = cap.object;
+        let Object::TelemetrySink { counter } = cap.object else {
+            panic!("bootstrap granted a non-TelemetrySink object");
+        };
         assert_eq!(counter, StringId(7));
     }
 
