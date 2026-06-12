@@ -70,50 +70,53 @@ use itest_harness::Scenario;
 // other. `new` scenarios are wfi-bounded and fan out across the worker
 // pool. Initial classification is conservative — refine with `top`/`htop`
 // observation.
-const SCENARIOS: &[Scenario] = &[
-    Scenario::new       ("boot-reaches-heartbeat",      scenarios::boot_reaches_heartbeat),
-    Scenario::new       ("heartbeat-cadence",           scenarios::heartbeat_cadence),
-    Scenario::new       ("pre-init-order",              scenarios::pre_init_order),
-    Scenario::new       ("kernel-runs-at-higher-half",  scenarios::kernel_runs_at_higher_half),
-    Scenario::new       ("frame-allocator-metrics",     scenarios::frame_allocator_metrics),
-    Scenario::new       ("frame-allocator-oom",         scenarios::frame_allocator_oom),
-    Scenario::new       ("kernel-heap-metrics",         scenarios::kernel_heap_metrics),
-    Scenario::new       ("sched-context-switch-smoke",  scenarios::sched_context_switch_smoke),
-    Scenario::new       ("sched-spawn-registers-thread", scenarios::sched_spawn_registers_thread),
-    Scenario::cpu_bound ("sched-yield-round-trips",     scenarios::sched_yield_round_trips),
-    Scenario::new       ("sched-spans-carry-task-id",   scenarios::sched_spans_carry_task_id),
-    Scenario::new       ("sched-context-switches-on-wire", scenarios::sched_context_switches_on_wire),
-    Scenario::new       ("sched-span-survives-yield",   scenarios::sched_span_survives_yield),
-    Scenario::cpu_bound ("heap-oom",                    scenarios::heap_oom),
-    Scenario::cpu_bound ("workload-cooperative-baseline", scenarios::workload_cooperative_baseline),
-    Scenario::cpu_bound ("smp-producer-consumer-correctness", scenarios::smp_producer_consumer_correctness),
-    Scenario::new       ("ipi-self-wakeup",             scenarios::ipi_self_wakeup),
-    Scenario::new       ("smp-secondary-hart-boots",    scenarios::smp_secondary_hart_boots),
-    Scenario::new       ("smp-spawn-on-hart-1-runs",    scenarios::smp_spawn_on_hart_1_runs),
-    Scenario::new       ("smp-spans-carry-hart-id",     scenarios::smp_spans_carry_hart_id),
-    Scenario::new       ("smp-ipi-wakes-idle-hart",     scenarios::smp_ipi_wakes_idle_hart),
-    Scenario::cpu_bound ("spawn-storm",         scenarios::spawn_storm),
-    Scenario::cpu_bound ("ipi-pong",            scenarios::ipi_pong),
-    Scenario::cpu_bound ("shootdown-storm",     scenarios::shootdown_storm),
-    Scenario::cpu_bound ("smp-tlb-shootdown-visible", scenarios::smp_tlb_shootdown_visible),
-    Scenario::cpu_bound ("smp-ping-pong-cadence",     scenarios::smp_ping_pong_cadence),
-    Scenario::new       ("sched-task-exits-cleanly",    scenarios::sched_task_exits_cleanly),
-    Scenario::cpu_bound ("mutex-storm",         scenarios::mutex_storm),
-    Scenario::cpu_bound ("virtio-storm",        scenarios::virtio_storm),
+// Row grammar: `<profile> "<name>" <fn> [tag, …]? ;` — `wfi` =
+// fan-out-parallel, `cpu` = serial pass (real guest work between
+// heartbeats). See `itest_harness::scenarios!`.
+const SCENARIOS: &[Scenario] = itest_harness::scenarios! {
+    wfi "boot-reaches-heartbeat"          scenarios::boot_reaches_heartbeat;
+    wfi "heartbeat-cadence"               scenarios::heartbeat_cadence;
+    wfi "pre-init-order"                  scenarios::pre_init_order;
+    wfi "kernel-runs-at-higher-half"      scenarios::kernel_runs_at_higher_half;
+    wfi "frame-allocator-metrics"         scenarios::frame_allocator_metrics;
+    wfi "frame-allocator-oom"             scenarios::frame_allocator_oom;
+    wfi "kernel-heap-metrics"             scenarios::kernel_heap_metrics;
+    wfi "sched-context-switch-smoke"      scenarios::sched_context_switch_smoke;
+    wfi "sched-spawn-registers-thread"    scenarios::sched_spawn_registers_thread;
+    cpu "sched-yield-round-trips"         scenarios::sched_yield_round_trips;
+    wfi "sched-spans-carry-task-id"       scenarios::sched_spans_carry_task_id;
+    wfi "sched-context-switches-on-wire"  scenarios::sched_context_switches_on_wire;
+    wfi "sched-span-survives-yield"       scenarios::sched_span_survives_yield;
+    cpu "heap-oom"                        scenarios::heap_oom;
+    cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline;
+    cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness;
+    wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup;
+    wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots;
+    wfi "smp-spawn-on-hart-1-runs"        scenarios::smp_spawn_on_hart_1_runs;
+    wfi "smp-spans-carry-hart-id"         scenarios::smp_spans_carry_hart_id;
+    wfi "smp-ipi-wakes-idle-hart"         scenarios::smp_ipi_wakes_idle_hart;
+    cpu "spawn-storm"                     scenarios::spawn_storm;
+    cpu "ipi-pong"                        scenarios::ipi_pong;
+    cpu "shootdown-storm"                 scenarios::shootdown_storm;
+    cpu "smp-tlb-shootdown-visible"       scenarios::smp_tlb_shootdown_visible;
+    cpu "smp-ping-pong-cadence"           scenarios::smp_ping_pong_cadence;
+    wfi "sched-task-exits-cleanly"        scenarios::sched_task_exits_cleanly;
+    cpu "mutex-storm"                     scenarios::mutex_storm;
+    cpu "virtio-storm"                    scenarios::virtio_storm;
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back
     // to its idle `wfi` loop) and `faulter` faults (the kernel parks the hart
     // in `wfi`). So they fan out in the parallel pool rather than a serial pass.
-    Scenario::new       ("userspace-emits-telemetry", scenarios::userspace_emits_telemetry).tagged(&["userspace"]),
-    Scenario::new       ("userspace-cannot-touch-kernel", scenarios::userspace_cannot_touch_kernel).tagged(&["userspace"]),
-    Scenario::new       ("userspace-grant-snitched", scenarios::userspace_grant_snitched).tagged(&["userspace"]),
-    Scenario::new       ("userspace-cap-denied", scenarios::userspace_cap_denied).tagged(&["userspace"]),
-    Scenario::new       ("userspace-cap-granted-event", scenarios::userspace_cap_granted_event).tagged(&["userspace"]),
-    Scenario::new       ("userspace-process-exits", scenarios::userspace_process_exits).tagged(&["userspace"]),
-    Scenario::new       ("userspace-yield-round-trips", scenarios::userspace_yield_round_trips).tagged(&["userspace"]),
-    Scenario::new       ("userspace-spansink-granted", scenarios::userspace_spansink_granted).tagged(&["userspace"]),
-    Scenario::new       ("userspace-emits-span", scenarios::userspace_emits_span).tagged(&["userspace"]),
-    Scenario::new       ("userspace-refusal-snitched", scenarios::userspace_refusal_snitched).tagged(&["userspace"]),
-];
+    wfi "userspace-emits-telemetry"       scenarios::userspace_emits_telemetry     [userspace];
+    wfi "userspace-cannot-touch-kernel"   scenarios::userspace_cannot_touch_kernel  [userspace];
+    wfi "userspace-grant-snitched"        scenarios::userspace_grant_snitched       [userspace];
+    wfi "userspace-cap-denied"            scenarios::userspace_cap_denied           [userspace];
+    wfi "userspace-cap-granted-event"     scenarios::userspace_cap_granted_event    [userspace];
+    wfi "userspace-process-exits"         scenarios::userspace_process_exits        [userspace];
+    wfi "userspace-yield-round-trips"     scenarios::userspace_yield_round_trips     [userspace];
+    wfi "userspace-spansink-granted"      scenarios::userspace_spansink_granted     [userspace];
+    wfi "userspace-emits-span"            scenarios::userspace_emits_span           [userspace];
+    wfi "userspace-refusal-snitched"      scenarios::userspace_refusal_snitched     [userspace];
+};
 
 /// Set the process-wide failure-capture transcript depth. Call once at
 /// startup, before `run`. Delegates to the harness, which reads it at
@@ -220,22 +223,10 @@ pub fn run(config: RunConfig) -> ExitCode {
         eprintln!("error: --tag cannot be combined with a positional scenario name");
         return ExitCode::from(2);
     }
-    // Base selection: by tag (union over the full catalog) when `--tag`
-    // is given, else by name (or all). `--profile` / `--skip` filter
-    // whatever this produces.
-    let to_run: Vec<&Scenario> = if !tags.is_empty() {
-        let all: Vec<&Scenario> = SCENARIOS.iter().collect();
-        match itest_harness::select_by_tags(&all, &tags) {
-            Ok(selected) => {
-                eprintln!("--tag: {} scenario(s) selected", selected.len());
-                selected
-            }
-            Err(msg) => {
-                eprintln!("{msg}");
-                return ExitCode::from(2);
-            }
-        }
-    } else {
+    // Base selection: by name (or all) when no `--tag` is given, else
+    // by tag (union over the full catalog). `--profile` / `--skip`
+    // filter whatever this produces.
+    let to_run: Vec<&Scenario> = if tags.is_empty() {
         match name.as_deref() {
         // One name, or a comma-separated list (`itest a,b,c`).
         // Whitespace around each name is trimmed; any unknown name is a
@@ -257,6 +248,18 @@ pub fn run(config: RunConfig) -> ExitCode {
             selected
         }
         None => SCENARIOS.iter().collect(),
+        }
+    } else {
+        let all: Vec<&Scenario> = SCENARIOS.iter().collect();
+        match itest_harness::select_by_tags(&all, &tags) {
+            Ok(selected) => {
+                eprintln!("--tag: {} scenario(s) selected", selected.len());
+                selected
+            }
+            Err(msg) => {
+                eprintln!("{msg}");
+                return ExitCode::from(2);
+            }
         }
     };
     let to_run: Vec<&Scenario> = match profile_filter {
