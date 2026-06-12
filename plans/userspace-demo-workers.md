@@ -93,6 +93,45 @@ boundary — that was the anti-pattern of the first sketch.
   closes — mirroring the kernel's `Span` guard, so the program writes
   `let _s = tracer.span("worker_a.tick");`.
 
+## Intern table & the userspace-name DoS (DONE: growable table)
+
+Letting userspace name strings turns the intern table into a
+resource-exhaustion surface. Two facts shaped the fix:
+
+- **Interning runs pre-allocator** — `span!("kernel.boot")` interns long
+  before `heap::init()` (`kmain`). So the table can't be a plain `Vec`.
+- **The table dedups `register_or_lookup` by *pointer*** — fine for
+  `'static` literals, but a userspace name repeated each tick would
+  re-register and (formerly) overflow the fixed 128-entry array → panic.
+
+**DONE — growable hybrid table** (`kernel-core::intern`): a fixed inline
+region (`INLINE_CAP = 64`) for the pre-allocator boot prefix, spilling
+into a heap-backed `Vec` once the allocator is up. Removes the arbitrary
+cap and the panic; ids stay dense across the boundary. Invariant:
+pre-heap strings (~10–20) must stay under `INLINE_CAP` (documented in the
+struct). `lookup_by_content` (added earlier) gives content-dedup so a
+repeated userspace name resolves instead of re-registering. O(n) lookup
+is fine because `n` is bounded by the quota below (reasoning recorded at
+the const).
+
+**Per-process span-name quota (lands in `handle_span_open`, 3b-1).** With
+the table growable, the *only* DoS bound is a quota on distinct names a
+process introduces — which also bounds the permanent `Box::leak` of each
+new name.
+
+- State: `Process { span_names_registered: AtomicU32 }`,
+  `MAX_SPAN_NAMES_PER_PROCESS` (≈16).
+- Enforcement (under the intern lock already held for the lookup):
+  `lookup_by_content(name)` → `Some` ⇒ reuse, free (repeats/shared names
+  cost nothing); `None` ⇒ if `span_names_registered >= cap` **refuse**
+  (nonzero `a0`, no panic), else leak+register and `+= 1`.
+- Refusal is itself observable: snitch `snitchos.user.span_refused_total`.
+- Counts only *names this process introduced* (a name another process
+  already registered resolves free), so the sum across processes bounds
+  total userspace names.
+- TOCTOU: a process is single-threaded today; and the check+increment sit
+  under the intern lock, so it's precise for free.
+
 ## Scope
 
 - **Userspace spans: IN** (the point of this plan).
@@ -119,6 +158,8 @@ kernel-mode `task_a`/`task_b` threads remaining.
 | User-buffer transfer | `copy_from_user`: range-validate `(ptr,len)` in the user VA window; direct read (satp is the user's during trap); fault-graceful copy deferred |
 | Span attribution | reuse `CURRENT_SPAN_CURSOR` + `current_task_id()` — kernel-side, free |
 | Authority | distinct `SpanSink` capability granted at startup |
+| Intern table | **DONE** — growable hybrid: fixed `INLINE_CAP=64` inline (pre-allocator boot prefix) + heap `Vec` overflow; no fixed cap, no panic; O(n) lookup bounded by the quota |
+| Userspace-name DoS bound | per-process span-name quota in `handle_span_open` — `MAX_SPAN_NAMES_PER_PROCESS≈16`, refuse-not-panic, `span_refused_total` snitched; repeats/shared names free |
 | Span handle | `span_open -> span_id` token; runtime `Span` RAII guard closes on drop |
 | Syscall ABI | append `Yield`, `SpanOpen`, `SpanClose` to `snitchos_abi::Syscall`; never renumber |
 | Worker telemetry | `worker_x.tick` span + per-worker progress counter |
@@ -168,23 +209,44 @@ coding.*
 
 > **PR boundary** — pure validation, independently mergeable.
 
-### Step 3: `SpanOpen`/`SpanClose` syscalls — string-in, kernel interns
+### Step 3: userspace tracing — split into sub-steps
+
+Done so far (each its own commit):
+- **3a-L1** ✅ cap-core `Object::SpanSink` + `invoke_span` + `Denied::WrongObject`.
+- **3a-L2** ✅ `protocol::CapObject::SpanSink`; `CapTable::bootstrap` grants
+  both caps; `run()` snitches both `CapEvent::Granted`s; itest
+  `userspace-spansink-granted`.
+- **3b-0** ✅ `InternTable::lookup_by_content` (content dedup) + growable
+  hybrid table (inline + heap overflow); boot itest confirms pre-allocator
+  path.
+
+**3b-1 (the behavioral half — next):** deliver the span handle + the
+syscalls + the quota.
 
 **Acceptance criteria**: a U-mode program holding a `SpanSink` cap calls
 `tracer.span("hello.work")`; the kernel copies the name (range-validated),
-interns-or-reuses it, emits a `SpanStart` carrying the user task's
-`task_id` and the parent from `CURRENT_SPAN_CURSOR`, and on drop emits the
-matching `SpanEnd`. Naming a string never seen before emits exactly one
-`StringRegister`; naming it again emits none. *Confirm before coding.*
+interns-or-reuses it (content dedup), emits a `SpanStart` carrying the
+user task's `task_id` and the parent from `CURRENT_SPAN_CURSOR`, and on
+drop emits the matching `SpanEnd`. First sighting of a name emits exactly
+one `StringRegister`; repeats emit none. A process past
+`MAX_SPAN_NAMES_PER_PROCESS` distinct names is **refused** (nonzero `a0`,
+`span_refused_total` snitched), not panicked. *Confirm before coding.*
 **RED**: itest `userspace-emits-span` — `hello` opens/closes one named
 span; assert the `StringRegister` for `hello.work`, a `SpanStart` with
 `task_id ==` the user task, and a matching `SpanEnd`.
-**GREEN**: append `SpanOpen`/`SpanClose` to `abi`; grant a `SpanSink` at
-startup; `handle_span_open` copies the name via `copy_from_user`, interns
-on demand, calls the existing `tracing::span_start`, returns `span_id`;
-`handle_span_close` ends it; runtime `Span` guard + `Tracer::span`.
-**MUTATE**: the intern-or-reuse path (a survivor that double-registers),
-the attribution (`task_id`/parent), the cap rights check.
+**GREEN**:
+- delivery: `enter()` sets `a1`; `Startup` becomes 2-field (telemetry +
+  span handle); `run()` passes both.
+- abi: append `SpanOpen`/`SpanClose`.
+- kernel tracing: `register_or_lookup_owned(&str)` (leak-on-new via
+  `lookup_by_content`) + `span_start_id(StringId) -> SpanId` /
+  `span_end(SpanId)` primitives (existing `span_start` is `'static`+RAII).
+- trap: `handle_span_open` — `copy_from_user` (gated by `user_range_ok`,
+  lock-drop discipline) → quota check → intern → emit `SpanStart`, return
+  `span_id`; `handle_span_close` → `SpanEnd`.
+- runtime: `Tracer` + `Span` RAII guard; `hello` opens/closes a span.
+**MUTATE**: intern-or-reuse (double-register survivor), attribution
+(`task_id`/parent), cap rights check, the quota boundary.
 **KILL MUTANTS**: survivors.
 **REFACTOR**: assess.
 **Done when**: `--repeat 10` green, mutation reviewed, human approves.
