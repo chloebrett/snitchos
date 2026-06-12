@@ -12,6 +12,24 @@ use crate::sink::FrameSink;
 /// Bumped to 128 in v0.6 step 10 because adding `hart_1_main` +
 /// `hart_1_probe` to the existing v0.5 task set + workload metrics +
 /// SMP metrics pushed past 64.
+///
+/// **Why a fixed array and not a `Vec`:** the first strings are interned
+/// during boot *before the allocator exists* — `span!("kernel.boot")` runs
+/// long before `heap::init()` (see `kmain`). A heap-backed table would
+/// allocate on the first boot string and fault. So the storage must be
+/// allocator-free, which means a fixed cap chosen with headroom rather than
+/// a growable buffer.
+///
+/// **Why O(n) lookup is fine:** every lookup is a linear scan, but `n` is
+/// bounded by this cap. Kernel strings are a known, modest set (~100), and
+/// the *userspace* contribution is bounded separately by a per-process span-
+/// name quota (`handle_span_open`) — so a program cannot drive `n` up to the
+/// point where the scan, or the permanent `Box::leak` of each new name,
+/// becomes a DoS. With `n` bounded in the low hundreds, a few hundred short
+/// `memcmp`s per lookup is tens of microseconds: not worth a hash index.
+/// (If a real need for thousands of names ever appears, add a
+/// `BTreeMap<&'static str, StringId>` index then — and revisit span-name GC,
+/// since leaked names are never reclaimed today.)
 pub const MAX_INTERNED: usize = 128;
 
 #[derive(Copy, Clone)]

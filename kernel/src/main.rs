@@ -10,12 +10,6 @@ use kernel_core::bootargs::WorkloadKind;
 
 mod boot_workload;
 mod console;
-/// The runtime-selectable stress/regression workloads (spawn storm,
-/// IPI pong, shootdown storm, mutex storm, virtio storm). Compiled in
-/// only for `itest-workloads` builds — never production. Formerly the
-/// `deflake-*` cargo features; see `docs/runtime-workload-selection-design.md`.
-#[cfg(feature = "itest-workloads")]
-mod storms;
 mod demo_tasks;
 mod dtb;
 mod frame;
@@ -28,8 +22,14 @@ mod panic;
 mod percpu;
 mod process;
 mod sbi;
-mod secondary;
 mod sched;
+mod secondary;
+/// The runtime-selectable stress/regression workloads (spawn storm,
+/// IPI pong, shootdown storm, mutex storm, virtio storm). Compiled in
+/// only for `itest-workloads` builds — never production. Formerly the
+/// `deflake-*` cargo features; see `docs/runtime-workload-selection-design.md`.
+#[cfg(feature = "itest-workloads")]
+mod storms;
 mod sync;
 mod tracing;
 mod trap;
@@ -62,41 +62,18 @@ global_asm!(include_str!("entry.S"));
 /// - DTB lookups `.unwrap()` / `.expect()`. A malformed DTB panics
 ///   immediately; the panic handler may not produce output before
 ///   `console::init` runs.
-///
-/// Single-byte raw-UART tracer. No locks, no formatting, no statics
-/// touched (other than the MMIO read of `satp` to pick the address
-/// space). Safe to call from anywhere in boot — including pre-MMU
-/// (writes physical UART) and post-MMU (writes higher-half VA).
-///
-/// Temporary instrumentation to bisect heap-oom's silent early hang.
-fn mark(c: u8) {
-    unsafe {
-        let satp: u64;
-        core::arch::asm!("csrr {}, satp", out(reg) satp);
-        let base = if satp != 0 {
-            0x10000000usize + mmu::KERNEL_OFFSET
-        } else {
-            0x10000000usize
-        };
-        core::ptr::write_volatile(base as *mut u8, c);
-    }
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
-    mark(b'A');
     // DTB parse must come first — we need it to discover MMIO regions
     // before we build the boot page table. Pure parsing, no formatted
     // output, no fn-pointer-dispatched calls. Safe with MMU off
     // regardless of where the kernel is linked.
     let dtb = unsafe { Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
-    mark(b'B');
     // MMIO regions: hardcoded for QEMU `virt`. DTB-driven discovery
     // (`collect_mmio_regions`) crashes pre-MMU under higher-half link
     // in a way we haven't isolated; see plans/v0.4-memory-findings.md.
     let mut mmio_regions = mmu::MmioRegions::new();
     mmio_regions.insert(mmu::QEMU_VIRT_MMIO_BASE);
-    mark(b'C');
 
     // Turn paging on EARLY — before any code that loads an absolute
     // function-pointer value to a higher-half VA (formatted println!
@@ -111,7 +88,6 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: MMU is off (boot default). Kernel image is dual-mapped
     // (identity + higher-half); MMIO regions identity-mapped.
     unsafe { mmu::enable(&mmio_regions, dtb_phys) };
-    mark(b'D');
 
     // Trampoline to higher-half: jump PC and shift sp by KERNEL_OFFSET.
     // The dual-map keeps identity addresses valid for `ra` values
@@ -139,7 +115,6 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             options(nostack),
         );
     }
-    mark(b'E');
 
     // v0.6 step 4: install the per-hart pointer. `PER_HART_DATA` is a
     // higher-half static, so this must run post-trampoline.
@@ -162,7 +137,6 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // boot, the mapping is { 0 → _hart_id, 1 → 1-_hart_id }.
     percpu::LOGICAL_TO_MHARTID[0].store(_hart_id as u64, Ordering::Relaxed);
     percpu::LOGICAL_TO_MHARTID[1].store(1u64 - _hart_id as u64, Ordering::Relaxed);
-    mark(b'F');
 
     // Verify we're actually at higher-half PC. `auipc rd, 0` puts
     // `current_pc + 0` in `rd`, so the result is the runtime address
@@ -175,10 +149,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     if pc >= mmu::KERNEL_OFFSET {
         span!("kernel.runs_at_higher_half");
     }
-    mark(b'G');
 
     let timebase_hz = dtb::timebase_hz(&dtb)
-        .expect("DTB missing /cpus/timebase-frequency — can't run without a clock") as u64;
+        .expect("DTB missing /cpus/timebase-frequency — can't run without a clock")
+        as u64;
 
     // Install the trap vector. `trap_entry`'s symbol value is a
     // higher-half VA, so `stvec` only points somewhere meaningful with
@@ -188,7 +162,6 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     //
     // SAFETY: MMU on, higher-half mapped, trap path resolvable.
     unsafe { trap::set_trap_vector() };
-    mark(b'H');
 
     // Open kernel.boot, with sub-spans for each init phase. All frames
     // emitted before virtio-console is ready get pre-init-buffered.
@@ -415,9 +388,9 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // storm workloads, which drive hart 1 themselves (or keep it idle
     // so a heartbeat-driven storm can poke it with maximum "fresh
     // trap" race exposure).
-    if !selected
-        .is_some_and(|w| w.is_storm() || matches!(w, WorkloadKind::Userspace | WorkloadKind::UserspaceFault))
-    {
+    if !selected.is_some_and(|w| {
+        w.is_storm() || matches!(w, WorkloadKind::Userspace | WorkloadKind::UserspaceFault)
+    }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
     }
 
