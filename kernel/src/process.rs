@@ -58,15 +58,15 @@ pub struct Process {
 
 impl Process {
     /// Build the process for `root_pa` and grant it its bootstrap
-    /// capabilities: exactly one `TelemetrySink` bound to
-    /// `telemetry_counter`, with `EMIT` — the "root cap to init only"
-    /// policy. Returns the process and the well-known [`Handle`] the sink
-    /// landed at (the handle the user program is told to invoke).
+    /// capabilities: a `TelemetrySink` bound to `telemetry_counter` and a
+    /// `SpanSink`, each with `EMIT` — the "root caps to init only" policy.
+    /// Returns the process and the two well-known [`Handle`]s (telemetry,
+    /// span) the sinks landed at, which the kernel hands to the program.
     ///
-    /// The grant itself is the only authority a v0.7b userspace process is
-    /// born with; the caller snitches it (`cap.grants_total`).
-    pub fn bootstrap(root_pa: usize, telemetry_counter: StringId) -> (Self, Handle) {
-        let (table, handle) = CapTable::bootstrap_telemetry(telemetry_counter);
-        (Self { root_pa, caps: Mutex::new(table) }, handle)
+    /// These grants are the only authority a userspace process is born with;
+    /// the caller snitches each (`cap.grants_total` + a `CapEvent`).
+    pub fn bootstrap(root_pa: usize, telemetry_counter: StringId) -> (Self, Handle, Handle) {
+        let (table, telemetry, span) = CapTable::bootstrap(telemetry_counter);
+        (Self { root_pa, caps: Mutex::new(table) }, telemetry, span)
     }
 }

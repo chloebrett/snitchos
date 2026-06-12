@@ -158,6 +158,8 @@ pub enum CapEventKind {
 pub enum CapObject {
   /// Permission to emit telemetry to a bound counter.
   TelemetrySink,
+  /// Permission to open and close spans on the holder's span cursor.
+  SpanSink,
 }
 
 #[cfg(test)]
@@ -209,6 +211,28 @@ mod tests {
       object: CapObject::TelemetrySink,
       rights: 0b0001,
       t: 1234,
+      hart_id: 1,
+    };
+
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+
+    assert_eq!(frame, decoded);
+  }
+
+  /// Roundtrip a `Frame::CapEvent` carrying the `SpanSink` object — the
+  /// second capability kind, granted alongside the bootstrap `TelemetrySink`.
+  #[test]
+  fn cap_event_spansink_roundtrips() {
+    let frame = Frame::CapEvent {
+      kind: CapEventKind::Granted,
+      cap_id: 2,
+      parent_cap_id: 0,
+      holder: 7,
+      object: CapObject::SpanSink,
+      rights: 0b0001,
+      t: 5678,
       hart_id: 1,
     };
 

@@ -132,19 +132,23 @@ fn run(image: &'static [u8]) -> ! {
     // userspace telemetry counter. The cap *names* the sink, so the syscall
     // (Step 5) needs no string from U-mode. The kernel snitches the grant.
     let counter = user_metric_id().expect("userspace telemetry counter registered before entry");
-    let (process, bootstrap_handle) = Process::bootstrap(root_pa, counter);
-    // The kernel snitches the grant two ways: the `cap.grants_total` counter
-    // (a rate) and a rich `CapEvent::Granted` (an attributed fact carrying
-    // the global cap id, holder, object, and rights — the tree seed).
-    if let Some(id) = cap_grants_metric_id() {
-        tracing::emit_metric(id, 1);
+    let (process, bootstrap_handle, _span_handle) = Process::bootstrap(root_pa, counter);
+    // The kernel snitches each grant two ways: the `cap.grants_total` counter
+    // (a rate) and a rich `CapEvent::Granted` (an attributed fact carrying the
+    // global cap id, holder, object, and rights — the derivation-tree seed).
+    // Both bootstrap caps carry `EMIT`; they differ only in object kind.
+    let holder = crate::sched::current_task_id().0;
+    for object in [protocol::CapObject::TelemetrySink, protocol::CapObject::SpanSink] {
+        if let Some(id) = cap_grants_metric_id() {
+            tracing::emit_metric(id, 1);
+        }
+        tracing::emit_cap_granted(
+            crate::process::next_cap_id(),
+            holder,
+            object,
+            kernel_core::cap::Rights::EMIT.bits(),
+        );
     }
-    tracing::emit_cap_granted(
-        crate::process::next_cap_id(),
-        crate::sched::current_task_id().0,
-        protocol::CapObject::TelemetrySink,
-        kernel_core::cap::Rights::EMIT.bits(),
-    );
 
     // Publish the process so the syscall trap handler can reach its
     // CapTable. `process` lives in this frame, which never returns (`enter`

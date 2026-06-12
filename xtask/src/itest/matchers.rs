@@ -54,3 +54,17 @@ pub fn is_cap_granted_telemetry() -> impl Fn(&OwnedFrame, &StringTable) -> bool 
         } if rights & 0b0001 != 0
     )
 }
+
+/// A `CapEvent::Granted` for a `SpanSink` whose rights carry `EMIT` (bit 0) —
+/// the second bootstrap grant, the authority to open spans from U-mode.
+pub fn is_cap_granted_span() -> impl Fn(&OwnedFrame, &StringTable) -> bool {
+    |f, _| matches!(
+        f,
+        OwnedFrame::CapEvent {
+            kind: CapEventKind::Granted,
+            object: CapObject::SpanSink,
+            rights,
+            ..
+        } if rights & 0b0001 != 0
+    )
+}

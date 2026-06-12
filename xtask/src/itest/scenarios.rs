@@ -7,7 +7,7 @@ use protocol::stream::OwnedFrame;
 
 
 use super::harness::Harness;
-use super::matchers::{is_cap_granted_telemetry, is_dropped, is_hello, is_metric_named, is_span_start_named, is_string_register_named, is_thread_register_named};
+use super::matchers::{is_cap_granted_span, is_cap_granted_telemetry, is_dropped, is_hello, is_metric_named, is_span_start_named, is_string_register_named, is_thread_register_named};
 
 const SEC: Duration = Duration::from_secs(1);
 
@@ -1382,6 +1382,23 @@ pub fn userspace_cap_granted_event() -> Result<(), String> {
             "no CapEvent::Granted{TelemetrySink, EMIT} within 10s — the kernel \
              granted the bootstrap cap without emitting the authority event \
              (or emitted wrong object/rights)",
+        )?;
+
+    Ok(())
+}
+
+/// Second bootstrap grant (`workload=userspace`): alongside the
+/// `TelemetrySink`, `init` is granted a `SpanSink` — the authority to open
+/// spans from U-mode (consumed by the span syscalls). Asserts the grant
+/// reaches the wire as a `CapEvent::Granted{SpanSink, EMIT}`, proving the
+/// capability exists before any program tries to use it.
+pub fn userspace_spansink_granted() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("userspace", "userspace")?;
+
+    h.wait_for(SEC * 10, is_cap_granted_span())
+        .ok_or(
+            "no CapEvent::Granted{SpanSink, EMIT} within 10s — the bootstrap grant \
+             did not include a span sink (or emitted wrong object/rights)",
         )?;
 
     Ok(())

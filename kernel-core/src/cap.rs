@@ -208,20 +208,22 @@ impl CapTable {
         Self { slots: Vec::new() }
     }
 
-    /// Build the initial capability table for the v0.7b `init` process:
-    /// exactly one [`Object::TelemetrySink`] bound to `counter`, with
-    /// `EMIT`. Returns the table and the handle the sink landed at (the
-    /// well-known bootstrap handle the user program invokes). This is the
-    /// "root cap to init only" policy — the *only* authority a userspace
-    /// process is born with in v0.7b.
+    /// Build the initial capability table for the `init` process: the two
+    /// bootstrap authorities, each with `EMIT` over its own object — a
+    /// [`Object::TelemetrySink`] bound to `counter`, then an
+    /// [`Object::SpanSink`]. Returns the table and the two handles, in grant
+    /// order (telemetry in slot 0, span in slot 1). This is the "root caps to
+    /// init only" policy — the *only* authority a userspace process is born
+    /// with.
     #[must_use]
-    pub fn bootstrap_telemetry(counter: StringId) -> (Self, Handle) {
+    pub fn bootstrap(counter: StringId) -> (Self, Handle, Handle) {
         let mut table = Self::new();
-        let handle = table.insert(Capability {
+        let telemetry = table.insert(Capability {
             object: Object::TelemetrySink { counter },
             rights: Rights::EMIT,
         });
-        (table, handle)
+        let span = table.insert(Capability { object: Object::SpanSink, rights: Rights::EMIT });
+        (table, telemetry, span)
     }
 
     /// Place `cap` in the table and return the handle that names it.
@@ -354,7 +356,7 @@ mod tests {
     #[test]
     fn invoking_a_granted_telemetry_sink_yields_its_bound_counter() {
         let counter = StringId(99);
-        let (table, handle) = CapTable::bootstrap_telemetry(counter);
+        let (table, handle, _span) = CapTable::bootstrap(counter);
 
         assert_eq!(invoke_telemetry(&table, handle), Ok(counter));
     }
@@ -367,7 +369,7 @@ mod tests {
 
     #[test]
     fn invoking_a_stale_handle_is_denied_as_no_such_capability() {
-        let (table, handle) = CapTable::bootstrap_telemetry(StringId(1));
+        let (table, handle, _span) = CapTable::bootstrap(StringId(1));
         let stale = Handle::new(handle.index(), handle.generation() + 1);
         assert_eq!(invoke_telemetry(&table, stale), Err(Denied::NoSuchCapability));
     }
@@ -383,21 +385,24 @@ mod tests {
     }
 
     #[test]
-    fn the_bootstrap_grant_gives_init_exactly_one_emit_telemetry_sink() {
-        // The "root cap to init only" policy, pinned: granting the wrong
-        // rights or object here is a privilege bug, so it's host-tested
-        // rather than left to the itest.
+    fn the_bootstrap_grant_gives_init_a_telemetry_sink_and_a_span_sink() {
+        // The "root caps to init only" policy, pinned: init is born with
+        // exactly two authorities — emit telemetry and open spans — each with
+        // EMIT over its own object. Granting the wrong rights or object here
+        // is a privilege bug, so it's host-tested, not left to the itest.
         let counter = StringId(42);
-        let (table, handle) = CapTable::bootstrap_telemetry(counter);
+        let (table, telemetry, span) = CapTable::bootstrap(counter);
 
-        let cap = table.resolve(handle).expect("the bootstrap handle resolves");
-        assert_eq!(cap.object, Object::TelemetrySink { counter });
-        assert!(cap.rights.contains(Rights::EMIT));
-        // The single bootstrap grant lands in the first (empty) slot. The
-        // kernel hands this handle to the process at startup (in `a0`); the
-        // program no longer assumes a value, but the deterministic slot makes
-        // this assertion meaningful.
-        assert_eq!(handle.raw(), 0);
+        let tcap = table.resolve(telemetry).expect("the telemetry handle resolves");
+        assert_eq!(tcap.object, Object::TelemetrySink { counter });
+        assert!(tcap.rights.contains(Rights::EMIT));
+        // Telemetry lands in the first (empty) slot; the kernel hands it to
+        // the process at startup. The deterministic slot makes this meaningful.
+        assert_eq!(telemetry.raw(), 0);
+
+        let scap = table.resolve(span).expect("the span handle resolves");
+        assert_eq!(scap.object, Object::SpanSink);
+        assert!(scap.rights.contains(Rights::EMIT));
     }
 
     #[test]
