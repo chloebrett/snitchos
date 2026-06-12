@@ -7,7 +7,7 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{Startup, TelemetrySink, exit};
+use snitchos_user::{Startup, TelemetrySink, exit, yield_now};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_main(startup: Startup) -> ! {
@@ -19,6 +19,11 @@ pub extern "C" fn rust_main(startup: Startup) -> ! {
     // denial) — the point of capabilities is that holding the integer isn't
     // enough, the kernel checks it against *our* table.
     let _ = TelemetrySink::from_raw_handle(1).emit(42);
+
+    // Voluntarily give up the CPU. We can't call the kernel's `yield_now`
+    // directly — this `ecall`s `Yield`, the kernel reschedules, and control
+    // returns here on a later turn. Proves cooperative userspace works.
+    yield_now();
 
     // Done — exit so the hart goes idle (`wfi`) instead of busy-spinning.
     exit();

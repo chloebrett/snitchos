@@ -87,6 +87,19 @@ pub fn exit() -> ! {
     }
 }
 
+/// Voluntarily yield the CPU. We can't call the kernel's `yield_now` directly
+/// (it runs on kernel stacks); instead we `ecall` `Yield` and the kernel
+/// yields on our behalf, returning here on a later reschedule. The kernel
+/// saves and restores our full register frame across the trap, so all
+/// registers are intact on return — nothing to clobber.
+pub fn yield_now() {
+    // SAFETY: `ecall` traps to the kernel, which runs `yield_now()` and
+    // resumes us at the instruction after the `ecall` with our frame intact.
+    unsafe {
+        asm!("ecall", in("a7") Syscall::Yield as usize);
+    }
+}
+
 /// A capability to emit telemetry — an unforgeable handle the kernel checks
 /// against this process's table. Holding the integer is not authority.
 #[derive(Clone, Copy)]

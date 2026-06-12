@@ -36,6 +36,13 @@ pub enum Syscall {
     /// (Not capability-mediated: a process can always end itself. v0.7b
     /// leaks the address space + caps on exit; reclamation is later.)
     Exit = 1,
+    /// Voluntarily yield the CPU. The kernel runs `yield_now()` on the
+    /// caller's behalf — switching to the next ready task — then returns
+    /// here on a later reschedule, so control resumes after the `ecall`.
+    /// Not capability-mediated: yielding grants no authority, it only
+    /// relinquishes the CPU. The cooperative path; preemption (v0.8) is
+    /// the involuntary counterpart.
+    Yield = 2,
 }
 
 impl Syscall {
@@ -47,8 +54,26 @@ impl Syscall {
         match n {
             0 => Some(Self::Invoke),
             1 => Some(Self::Exit),
+            2 => Some(Self::Yield),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn syscall_numbers_round_trip() {
+        assert_eq!(Syscall::Invoke as usize, 0);
+        assert_eq!(Syscall::Exit as usize, 1);
+        assert_eq!(Syscall::Yield as usize, 2);
+
+        assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
+        assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
+        assert_eq!(Syscall::from_usize(2), Some(Syscall::Yield));
+        assert_eq!(Syscall::from_usize(3), None);
     }
 }
 

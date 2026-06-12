@@ -183,7 +183,8 @@ fn handle_user_ecall(frame: &mut TrapFrame) {
     match Syscall::from_usize(frame.a7 as usize) {
         Some(Syscall::Invoke) => handle_invoke(frame),
         Some(Syscall::Exit) => handle_exit(), // does not return
-        None => frame.a0 = u64::MAX,          // unknown syscall
+        Some(Syscall::Yield) => crate::sched::yield_now(),
+        None => frame.a0 = u64::MAX, // unknown syscall
     }
     // `ecall` is a 4-byte instruction; without advancing past it, `sret`
     // would re-execute it and we'd trap on it forever. (Not reached for

@@ -1311,6 +1311,63 @@ pub fn userspace_process_exits() -> Result<(), String> {
     Ok(())
 }
 
+/// Cooperative `Yield` syscall (`workload=userspace`): `hello` calls
+/// `yield_now()` before `exit()`. A userspace task can't call the kernel's
+/// `yield_now` directly — it `ecall`s `Yield`, the kernel yields on its
+/// behalf, and a later reschedule returns control to U-mode past the
+/// `ecall`. We assert a full round trip:
+///
+///   1. A `ContextSwitch` LEAVING `user_main` — it gave up the CPU. (Not
+///      decisive on its own: `exit_now` also stamps `Yield` on the wire.)
+///   2. A `ContextSwitch` RETURNING to `user_main` — the decisive proof. An
+///      exited process never comes back, so a return means `yield_now`
+///      resumed U-mode at the instruction after the `ecall`.
+///   3. `snitchos.user.exits_total` after the resume — `hello` reached
+///      `exit()`, which follows the `yield_now()`, so control flowed past it.
+pub fn userspace_yield_round_trips() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("yieldrt", "userspace")?;
+
+    let user_id = match h
+        .wait_for(SEC * 20, is_thread_register_named("user_main"))
+        .ok_or("no ThreadRegister for 'user_main' within 20s")?
+    {
+        OwnedFrame::ThreadRegister { id, .. } => id,
+        _ => return Err("matched non-ThreadRegister".to_string()),
+    };
+
+    // Departure: user_main leaves the CPU. NB `exit_now` ALSO stamps `Yield`
+    // on the wire (the wire `Exit` variant is unused), so a departure alone
+    // does NOT prove a yield — it could be the exit. The *return* below is
+    // what distinguishes them.
+    h.wait_for(SEC * 10, move |f, _| match f {
+        OwnedFrame::ContextSwitch { from, reason, .. } => {
+            *from == user_id && matches!(reason, protocol::SwitchReason::Yield)
+        }
+        _ => false,
+    })
+    .ok_or("no ContextSwitch leaving user_main within 10s — user_main never ran?")?;
+
+    // Return: the scheduler comes BACK to user_main. A process that exited
+    // never returns, so this is the round-trip proof — yield_now resumed
+    // U-mode rather than the program simply ending.
+    h.wait_for(SEC * 10, move |f, _| match f {
+        OwnedFrame::ContextSwitch { to, reason, .. } => {
+            *to == user_id && matches!(reason, protocol::SwitchReason::Yield)
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no ContextSwitch returning to user_main within 10s — control never resumed \
+         past yield_now (dispatch arm missing / sepc not advanced, or hello didn't yield)",
+    )?;
+
+    // Clean completion after the resume.
+    h.wait_for(SEC * 10, is_metric_named("snitchos.user.exits_total"))
+        .ok_or("no exits_total after the resume — hello didn't reach exit past the yield")?;
+
+    Ok(())
+}
+
 /// v0.7b authority event (`workload=userspace`): the bootstrap grant emits a
 /// first-class `CapEvent::Granted` — richer than the `grants_total` counter
 /// (it carries the global cap id, holder, object kind, and rights). This is
