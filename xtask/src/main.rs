@@ -636,6 +636,8 @@ fn run_clippy(extra_args: &[String]) -> ExitCode {
             "-p",
             "kernel",
             "-p",
+            "snitchos-user",
+            "-p",
             "hello",
             "--target",
             qemu::KERNEL_TARGET,

@@ -1,0 +1,13 @@
+[package]
+name = "snitchos-user"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# The SnitchOS userspace runtime: crt0 (`_start`), panic handler, and typed
+# capability bindings shared by every U-mode program. Bare-metal, builds only
+# for riscv64gc-unknown-none-elf (its `start.S` is RISC-V asm). Program crates
+# depend on this and provide only `rust_main`.
+
+[dependencies]
+snitchos-abi = { path = "../../abi" }

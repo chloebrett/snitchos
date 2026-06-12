@@ -9,5 +9,7 @@ publish = false
 # low-half VA) and does NOT opt into the workspace pedantic lints —
 # register/address idioms fight them. Built via `cargo xtask build`.
 
+# The program logic only; crt0, panic handler, and the syscall/capability
+# API all come from the shared `snitchos-user` runtime.
 [dependencies]
-snitchos-abi = { path = "../../abi" }
+snitchos-user = { path = "../runtime" }

@@ -8,5 +8,4 @@ fn main() {
     // the program headers + PT_LOAD bytes, which `-s` keeps.
     println!("cargo:rustc-link-arg=-s");
     println!("cargo:rerun-if-changed={dir}/user.ld");
-    println!("cargo:rerun-if-changed={dir}/src/start.S");
 }

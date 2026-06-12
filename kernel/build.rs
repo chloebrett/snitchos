@@ -78,6 +78,8 @@ fn build_and_embed_user(kernel_dir: &str) {
         "user/hello/user.ld",
         "user/hello/Cargo.toml",
         "user/hello/build.rs",
+        "user/runtime/src",
+        "user/runtime/Cargo.toml",
         "abi/src",
         "abi/Cargo.toml",
     ] {
