@@ -13,5 +13,91 @@
   "statusLine": {
     "type": "command",
     "command": "npx -y @owloops/claude-powerline --style=powerline"
+  },
+  "permissions": {
+    "deny": [
+      "Bash(find * -delete)",
+      "Bash(find * -exec *)",
+      "Bash(find * -execdir *)",
+      "Bash(find * -ok *)",
+      "Bash(sed -i*)",
+      "Bash(sed * -i*)",
+      "Bash(sed --in-place*)",
+      "Bash(pkill -9*)"
+    ],
+    "allow": [
+      "WebSearch",
+      "Read(//tmp/**)",
+      "Read(//private/tmp/**)",
+      "Bash(sed:*)",
+      "Bash(awk:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(echo:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(sort:*)",
+      "Bash(uniq:*)",
+      "Bash(cut:*)",
+      "Bash(tr:*)",
+      "Bash(tee:*)",
+      "Bash(wc:*)",
+      "Bash(xargs:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(rust-objdump:*)",
+      "Bash(objdump:*)",
+      "Bash(readelf:*)",
+      "Bash(llvm-nm:*)",
+      "Bash(nm:*)",
+      "Bash(dtc:*)",
+      "Bash(pkill:*)",
+      "Bash(kill:*)",
+      "Bash(ps:*)",
+      "Bash(ulimit:*)",
+      "Bash(timeout:*)",
+      "Bash(gtimeout:*)",
+      "Bash(qemu-system-riscv64:*)",
+      "Bash(riscv64-elf-gdb:*)",
+      "Bash(lldb:*)",
+      "Bash(brew:*)",
+      "Bash(python3:*)",
+      "Bash(rustc:*)",
+      "Bash(docker compose:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo xtask:*)",
+      "Bash(cargo run:*)",
+      "Bash(cargo objdump:*)",
+      "Bash(cargo search:*)",
+      "Bash(cargo mutants:*)",
+      "Bash(cargo machete:*)",
+      "Bash(cargo install:*)",
+      "Bash(cargo clean:*)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": false,
+    "autoAllowBashIfSandboxed": true,
+    "filesystem": {
+      "allowWrite": [
+        ".",
+        "/tmp",
+        "/private/tmp",
+        "/var/folders",
+        "/private/var/folders",
+        "~/.cargo",
+        "~/.rustup",
+        "~/.claude"
+      ]
+    },
+    "network": {
+      "allowLocalBinding": true,
+      "allowAllUnixSockets": true
+    }
   }
 }
