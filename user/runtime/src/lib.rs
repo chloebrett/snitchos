@@ -2,9 +2,11 @@
 //! capability bindings shared by every U-mode program.
 //!
 //! A program crate depends on this, declares `#![no_std] #![no_main]`, and
-//! defines a single `#[no_mangle] extern "C" fn rust_main() -> !`. It carries
-//! no `_start`, no panic handler, and no raw `ecall` — `start.S` sets up the
-//! stack and calls `rust_main`, and the API below wraps the syscall ABI.
+//! defines a single `#[no_mangle] extern "C" fn rust_main(startup: Startup) ->
+//! !`. It carries no `_start`, no panic handler, and no raw `ecall` —
+//! `start.S` sets up the stack and tail-calls `rust_main` (the kernel left the
+//! startup capabilities in `a0`, the SysV first-arg register), and the API
+//! below wraps the syscall ABI.
 //!
 //! The API is **capability-shaped**, not POSIX-shaped: a program holds typed
 //! handles (`TelemetrySink`) that the kernel validates against *its own*
@@ -16,9 +18,31 @@
 
 use core::arch::asm;
 
-use snitchos_abi::{Syscall, TELEMETRY_SINK_HANDLE};
+use snitchos_abi::Syscall;
 
 core::arch::global_asm!(include_str!("start.S"));
+
+/// The capabilities a process is handed at startup. The kernel passes them in
+/// registers at entry and `crt0` forwards them to `rust_main(startup)`.
+///
+/// `repr(transparent)` over `usize`: today it carries the single bootstrap
+/// telemetry handle (in `a0`). When caps multiply (v0.8 IPC) `a0` becomes a
+/// pointer to an in-memory `BootInfo` page — but this *program-facing* type
+/// stays put, so programs don't change. The program receives its authority
+/// rather than assuming a well-known handle.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct Startup {
+    telemetry_handle: usize,
+}
+
+impl Startup {
+    /// The `TelemetrySink` capability the kernel granted this process.
+    #[must_use]
+    pub fn telemetry(self) -> TelemetrySink {
+        TelemetrySink::from_raw_handle(self.telemetry_handle)
+    }
+}
 
 /// Minimal panic handler: a U-mode program has nowhere to report to yet, so
 /// spin. (A future `Exit`-with-status, or a debug-console-write capability,
@@ -71,13 +95,6 @@ pub struct TelemetrySink {
 }
 
 impl TelemetrySink {
-    /// The bootstrap sink every process is granted at startup. (v0.7b: a
-    /// well-known handle; v0.8: handed over via the startup capability set.)
-    #[must_use]
-    pub const fn bootstrap() -> Self {
-        Self { handle: TELEMETRY_SINK_HANDLE }
-    }
-
     /// Wrap an arbitrary raw handle. Naming a handle is free; *using* it is
     /// what the kernel validates — so this is how a program reaches for
     /// authority (and is refused, if it was never granted that handle).

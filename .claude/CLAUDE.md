@@ -129,6 +129,7 @@ For relentless plan or design interrogation before implementation, load the `gri
 - **Write to files, not chat** — When asked to produce a plan, document, or artifact, always persist it to a file. You may also present it inline for approval, but the file is the source of truth.
 - **Plan-only mode** — When asked for a plan, design, or document only, produce ONLY that artifact. Do not write production code, test code, or make any implementation changes unless explicitly asked.
 - **Incremental output** — When exploring a codebase, produce a first draft of output within 3-4 tool calls. Refine iteratively rather than front-loading all exploration before producing anything.
+- **Atomic Bash, no narration pipelines** — Issue one logical command per Bash call. Do NOT chain steps with `;`/`&&`, and do NOT append `echo`/`$?` to narrate exit codes — the tool result already carries stdout/stderr and exit status. Multi-statement scripts and shell expansions (`$?`, `$(…)`) defeat the permission allowlist and force a manual prompt; atomic calls clear it silently. If steps are independent, emit them as parallel Bash calls in one message instead of one chained command. Pipes into a single filter (`cmd | grep …`) are fine; chaining whole commands is not.
 
 ## Working with Claude
 

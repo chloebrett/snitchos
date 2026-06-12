@@ -325,8 +325,10 @@ mod tests {
         let cap = table.resolve(handle).expect("the bootstrap handle resolves");
         assert_eq!(cap.object, Object::TelemetrySink { counter });
         assert!(cap.rights.contains(Rights::EMIT));
-        // The single bootstrap grant lands at the well-known handle the
-        // user program is told to invoke (Step 4's `TELEMETRY_SINK_HANDLE`).
+        // The single bootstrap grant lands in the first (empty) slot. The
+        // kernel hands this handle to the process at startup (in `a0`); the
+        // program no longer assumes a value, but the deterministic slot makes
+        // this assertion meaningful.
         assert_eq!(handle.raw(), 0);
     }
 

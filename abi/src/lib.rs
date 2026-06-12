@@ -52,9 +52,3 @@ impl Syscall {
     }
 }
 
-/// The handle the bootstrap `TelemetrySink` capability lands at in a
-/// freshly granted process — the well-known root cap `init` is born
-/// holding. Matches the first slot of an empty `CapTable` (`index 0`,
-/// `generation 0`), so its raw value is `0`. The kernel grants it; the
-/// program invokes it.
-pub const TELEMETRY_SINK_HANDLE: usize = 0;

@@ -132,7 +132,7 @@ fn run(image: &'static [u8]) -> ! {
     // userspace telemetry counter. The cap *names* the sink, so the syscall
     // (Step 5) needs no string from U-mode. The kernel snitches the grant.
     let counter = user_metric_id().expect("userspace telemetry counter registered before entry");
-    let (process, _bootstrap_handle) = Process::bootstrap(root_pa, counter);
+    let (process, bootstrap_handle) = Process::bootstrap(root_pa, counter);
     // The kernel snitches the grant two ways: the `cap.grants_total` counter
     // (a rate) and a rich `CapEvent::Granted` (an attributed fact carrying
     // the global cap id, holder, object, and rights — the tree seed).
@@ -153,8 +153,11 @@ fn run(image: &'static [u8]) -> ! {
         .this_cpu()
         .store(core::ptr::addr_of!(process).cast_mut(), core::sync::atomic::Ordering::Relaxed);
 
+    // Hand the process its bootstrap capability *by value*: the kernel sets
+    // `a0` to the granted handle at entry, so the program receives its caps
+    // instead of assuming a well-known handle. Neither side hardcodes a slot.
     match load(process.root_pa, image) {
-        Ok(loaded) => enter(loaded, root_pa),
+        Ok(loaded) => enter(loaded, root_pa, bootstrap_handle.raw() as usize),
         Err(e) => panic!("userspace load failed: {e:?}"),
     }
 }
@@ -243,7 +246,9 @@ const FS: usize = 0b11 << 13; // FP state: clear -> Off (kernel + program are in
 const SIE: usize = 1 << 1; // Interrupt Enable (live): clear before arming sscratch
 
 /// Switch to the process's address space (`root_pa`) and drop to U-mode at
-/// `loaded.entry`. Never returns.
+/// `loaded.entry`, with `a0` set to `startup_a0` — the startup capability the
+/// program receives (its `crt0` passes `a0` straight into `rust_main`). Never
+/// returns.
 ///
 /// `satp` is switched first: the kernel high-half is shared into `root_pa`,
 /// so this function's own code/stack (and the trap path it's about to enter)
@@ -251,13 +256,14 @@ const SIE: usize = 1 << 1; // Interrupt Enable (live): clear before arming sscra
 /// (mask interrupts) *before* arming `sscratch`, so a stray timer IRQ can't
 /// see a nonzero `sscratch` in S-mode and mis-take the from-user path in
 /// `trap_entry`. `sret` then drops to U *and* restores `SIE` from `SPIE`.
-pub fn enter(loaded: Loaded, root_pa: usize) -> ! {
+pub fn enter(loaded: Loaded, root_pa: usize, startup_a0: usize) -> ! {
     let satp = mmu::satp_for(root_pa);
     // SAFETY: switches the active address space to the user root (kernel
     // high-half shared, so we keep executing), then forges a trap-return into
     // U-mode. `sscratch` is armed with this hart's kernel sp so the eventual
     // ecall trap switches onto it; sstatus is set for U-mode entry with
-    // interrupts on, SUM off, FP off.
+    // interrupts on, SUM off, FP off. `a0` carries the startup handle into the
+    // program (the SysV first-arg register; sret leaves it untouched).
     unsafe {
         core::arch::asm!(
         "csrw satp, {satp}",
@@ -271,6 +277,7 @@ pub fn enter(loaded: Loaded, root_pa: usize) -> ! {
         clear = in(reg) (SPP | SUM | FS | SIE),
         set = in(reg) (SPIE),
         entry = in(reg) loaded.entry,
+        in("a0") startup_a0,
         options(noreturn));
     }
 }
