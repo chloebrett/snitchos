@@ -195,6 +195,9 @@ pub enum RefusalReason {
   BadUtf8,
   /// The caller hit its per-process span-name quota.
   Quota,
+  /// A span-close named an id that isn't the caller's innermost open span
+  /// (out-of-order or forged close).
+  BadSpanId,
 }
 
 #[cfg(test)]
@@ -530,6 +533,7 @@ mod tests {
       RefusalReason::BadUserRange,
       RefusalReason::BadUtf8,
       RefusalReason::Quota,
+      RefusalReason::BadSpanId,
     ] {
       let frame = Frame::SyscallRefused {
         syscall: 3,

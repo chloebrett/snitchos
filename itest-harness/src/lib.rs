@@ -38,3 +38,45 @@ pub use otlp::{push as push_otlp, push_with_timeout as push_otlp_with_timeout};
 pub use prom::{render_prometheus, write_atomic};
 pub use runner::{CpuProfile, RunnerConfig, Scenario, run, select_by_tags};
 pub use signature::{CaptureLevel, ErrorOrigin, FailureCapture, WaitOutcome};
+
+/// Build a `&[Scenario]` catalog as a table instead of a wall of
+/// `Scenario::new(...).tagged(...)` calls. One row per scenario:
+///
+/// ```ignore
+/// const SCENARIOS: &[Scenario] = scenarios! {
+///     wfi "boot-reaches-heartbeat" scenarios::boot_reaches_heartbeat;
+///     cpu "spawn-storm"            scenarios::spawn_storm            [smp, stress];
+///     wfi "userspace-emits-span"   scenarios::userspace_emits_span   [userspace];
+/// };
+/// ```
+///
+/// Row grammar: `<profile> <name-literal> <fn-path> [tag, tag, …]? ;`
+/// — `wfi` maps to [`Scenario::new`], `cpu` to [`Scenario::cpu_bound`];
+/// the bracketed tag list is optional and its bare idents become the
+/// string tags (`[smp, stress]` → `.tagged(&["smp", "stress"])`).
+/// Tags must be valid identifiers — single words, no hyphens.
+#[macro_export]
+macro_rules! scenarios {
+    // Entry point: a `;`-separated list of rows, optional trailing `;`.
+    ( $( $profile:ident $name:literal $func:path $( [ $( $tag:ident ),* $(,)? ] )? );* $(;)? ) => {
+        &[
+            $( $crate::scenarios!(@row $profile $name $func $( [ $( $tag ),* ] )? ) ),*
+        ]
+    };
+
+    // Per-row expansion, dispatched on the profile keyword and on
+    // whether a tag list is present. `stringify!` turns each tag ident
+    // into its string form.
+    (@row wfi $name:literal $func:path) => {
+        $crate::Scenario::new($name, $func)
+    };
+    (@row cpu $name:literal $func:path) => {
+        $crate::Scenario::cpu_bound($name, $func)
+    };
+    (@row wfi $name:literal $func:path [ $( $tag:ident ),* ]) => {
+        $crate::Scenario::new($name, $func).tagged(&[ $( stringify!($tag) ),* ])
+    };
+    (@row cpu $name:literal $func:path [ $( $tag:ident ),* ]) => {
+        $crate::Scenario::cpu_bound($name, $func).tagged(&[ $( stringify!($tag) ),* ])
+    };
+}

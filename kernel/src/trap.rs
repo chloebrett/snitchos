@@ -185,7 +185,7 @@ fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::Exit) => handle_exit(), // does not return
         Some(Syscall::Yield) => crate::sched::yield_now(),
         Some(Syscall::SpanOpen) => handle_span_open(frame),
-        Some(Syscall::SpanClose) => frame.a0 = u64::MAX, // checkpoint 2
+        Some(Syscall::SpanClose) => handle_span_close(frame),
         None => {
             let n = frame.a7 as u8;
             refuse(frame, n, protocol::RefusalReason::UnknownSyscall);
@@ -302,8 +302,27 @@ fn handle_span_open(frame: &mut TrapFrame) {
         return;
     };
 
-    // Intern on demand + open a span on this task's cursor; hand back the id.
-    frame.a0 = crate::tracing::span_open_owned(name).0;
+    // Intern on demand + open a span on this task's cursor; hand back the
+    // `{id, parent}` close token (id in a0, parent in a1).
+    let opened = crate::tracing::span_open_owned(name);
+    frame.a0 = opened.id.0;
+    frame.a1 = opened.parent.0;
+}
+
+/// Close a span on behalf of U-mode. `a0` = span id, `a1` = parent id (the
+/// token `SpanOpen` returned). The kernel validates the id is the caller's
+/// innermost open span (cursor top), refusing an out-of-order/forged close.
+fn handle_span_close(frame: &mut TrapFrame) {
+    use protocol::{RefusalReason, SpanId};
+    use snitchos_abi::Syscall;
+
+    let id = SpanId(frame.a0);
+    let parent = SpanId(frame.a1);
+    if crate::tracing::span_close_checked(id, parent) {
+        frame.a0 = 0; // success
+    } else {
+        refuse(frame, Syscall::SpanClose as u8, RefusalReason::BadSpanId);
+    }
 }
 
 /// Refuse a syscall: snitch a `SyscallRefused` event (so the denial is never

@@ -238,36 +238,36 @@ Done so far (each its own commit):
   hybrid table (inline + heap overflow); boot itest confirms pre-allocator
   path.
 
-**3b-1 (the behavioral half — next):** deliver the span handle + the
-syscalls + the quota.
+**3b-1 (the behavioral half) — split into green checkpoints:**
 
-**Acceptance criteria**: a U-mode program holding a `SpanSink` cap calls
-`tracer.span("hello.work")`; the kernel copies the name (range-validated),
-interns-or-reuses it (content dedup), emits a `SpanStart` carrying the
-user task's `task_id` and the parent from `CURRENT_SPAN_CURSOR`, and on
-drop emits the matching `SpanEnd`. First sighting of a name emits exactly
-one `StringRegister`; repeats emit none. A process past
-`MAX_SPAN_NAMES_PER_PROCESS` distinct names is **refused** (nonzero `a0`,
-`span_refused_total` snitched), not panicked. *Confirm before coding.*
-**RED**: itest `userspace-emits-span` — `hello` opens/closes one named
-span; assert the `StringRegister` for `hello.work`, a `SpanStart` with
-`task_id ==` the user task, and a matching `SpanEnd`.
-**GREEN**:
-- delivery: `enter()` sets `a1`; `Startup` becomes 2-field (telemetry +
-  span handle); `run()` passes both.
-- abi: append `SpanOpen`/`SpanClose`.
-- kernel tracing: `register_or_lookup_owned(&str)` (leak-on-new via
-  `lookup_by_content`) + `span_start_id(StringId) -> SpanId` /
-  `span_end(SpanId)` primitives (existing `span_start` is `'static`+RAII).
-- trap: `handle_span_open` — `copy_from_user` (gated by `user_range_ok`,
-  lock-drop discipline) → quota check → intern → emit `SpanStart`, return
-  `span_id`; `handle_span_close` → **validate id against the cursor top,
-  refuse a mismatch** → `SpanEnd`.
-- runtime: `Tracer` + `Span` RAII guard holding `Option<SpanId>` (Drop skips
-  close when open was refused); `hello` opens/closes a span.
-**MUTATE**: intern-or-reuse (double-register survivor), attribution
-(`task_id`/parent), cap rights check, the quota boundary, the
-close-validates-cursor-top check.
+- **abi** ✅ `SpanOpen=3`/`SpanClose=4` (host-tested, 0 missed mutants).
+- **CP1 — deliver + `SpanOpen` → `SpanStart`** ✅ `enter()` `a1` + 2-field
+  `repr(C) Startup` + runtime `Tracer::open` + `handle_span_open` (cap
+  check → SUM-guarded `copy_from_user` → on-demand intern via
+  `register_or_lookup_owned` → `span_open_owned` emits `SpanStart`). itest
+  `userspace-emits-span`, 0/10. *(Bug caught: `enter()` had the `a1` param
+  but the asm wasn't wired — the struct-ABI footgun. Found via the capture.)*
+- **#1 — syscall refusal observability** ✅ `Frame::SyscallRefused {
+  syscall, reason, task_id, … }` + `RefusalReason` enum, emitted at every
+  refusal site (`refuse()` helper). Denials are labelled wire events, not
+  silent. itest `userspace-refusal-snitched`, 0/10. Collector passes it
+  through (Prometheus `syscall_refused_total{reason}` export is a follow-on).
+- **CP2 — `SpanClose` + RAII guard (NEXT).** `handle_span_close`:
+  **validate the id against the cursor top, refuse a mismatch** (snitch
+  `SyscallRefused`) → `span::close` → `SpanEnd`. Runtime `Span` guard
+  holding `Option<SpanId>` (Drop skips close when open was refused).
+  `hello` switches to `let _s = tracer.span(...)`. itest extends
+  `userspace-emits-span` to assert the matching `SpanEnd`.
+- **CP3 — per-process span-name quota.** In `handle_span_open`: on a
+  *new* name, if `proc.span_names_registered >= MAX_SPAN_NAMES_PER_PROCESS`
+  → `refuse(SpanOpen, RefusalReason::Quota)` (the reason already exists,
+  thanks to #1) and do NOT register; else register + `+= 1`. Repeats/shared
+  names cost nothing. itest: a program opening `>cap` distinct names is
+  refused with `Quota`, the kernel keeps heartbeating.
+
+**MUTATE** (per checkpoint): cap rights check, attribution
+(`task_id`/parent), intern-or-reuse double-register, the
+close-validates-cursor-top check, the quota boundary.
 
 > **Follow-on itest (3b-2, after `Yield` + spans both exist):**
 > `userspace-span-survives-yield` — a U-mode program opens a span, `yield`s
@@ -275,12 +275,18 @@ close-validates-cursor-top check.
 > ContextSwitch(return) → SpanEnd` with matching span id. The userspace
 > analog of `sched-span-survives-yield`; the direct proof `drop()` isn't
 > confused by a context switch.
-**KILL MUTANTS**: survivors.
-**REFACTOR**: assess.
-**Done when**: `--repeat 10` green, mutation reviewed, human approves.
 
-> **PR boundary** — userspace tracing works, proven with `hello`. This is
-> the v0.9-enabling capability and the v0.8 demo enricher.
+> **Deferred instrumentation (debuggability follow-ons, from the CP1
+> delivery-bug retro):** (#2) a startup delivery self-check — the runtime
+> echoes received handles, or `CapEvent::Granted` carries the local handle
+> value — so an unwired-`a1`-style bug is self-evident at boot; (#4) a
+> name-keyed capture summary (distinct span names / `user.*` metrics seen)
+> so early-but-scrolled-off activity is queryable without a re-run.
+> (#1 — reason-coded refusals — is **done**, above.)
+
+> **PR boundary** (per checkpoint) — each of CP1/#1/CP2/CP3 is its own
+> commit. Userspace tracing is the v0.9-enabling capability and the v0.8
+> demo enricher.
 
 ### Step 4: A `worker` program — span + progress + yield, in a loop
 

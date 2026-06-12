@@ -22,8 +22,31 @@ use snitchos_abi::Syscall;
 
 core::arch::global_asm!(include_str!("start.S"));
 
-/// The capabilities a process is handed at startup. The kernel passes them in
-/// registers at entry and `crt0` forwards them to `rust_main(startup)`.
+unsafe extern "C" {
+    /// The program's entry, provided by each `#[no_mangle]` binary. Returns
+    /// `()` — the runtime calls [`exit`] afterward, so the program never has
+    /// to, and every RAII guard (e.g. a span [`Span`]) drops on return,
+    /// *before* the process terminates.
+    fn rust_main(startup: Startup);
+}
+
+/// Runtime entry — `crt0` (`start.S`) tail-calls here with the kernel's two
+/// startup handles in `a0`/`a1`. Builds [`Startup`] from those scalars (no
+/// struct-in-registers assumption across the asm boundary), runs the program,
+/// then terminates the process once `rust_main` returns and its guards drop.
+#[unsafe(no_mangle)]
+extern "C" fn __snitchos_start(telemetry_handle: usize, span_handle: usize) -> ! {
+    // SAFETY: every program links this runtime and provides `rust_main` per
+    // the contract above.
+    unsafe {
+        rust_main(Startup { telemetry_handle, span_handle });
+    }
+    exit();
+}
+
+/// The capabilities a process is handed at startup. The kernel sets the two
+/// handles in `a0`/`a1` at entry; `__snitchos_start` reads them as scalars and
+/// builds this struct, then hands it to `rust_main`.
 ///
 /// `repr(C)` over two `usize`s, delivered in `a0`/`a1`: the bootstrap
 /// `TelemetrySink` and `SpanSink` handles. When caps multiply further (v0.8
@@ -130,11 +153,6 @@ impl TelemetrySink {
     }
 }
 
-/// An opaque span id the kernel returned from [`Tracer::open`]. Hand it back
-/// to close the span. (A later step wraps this in an RAII `Span` guard.)
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct SpanId(pub u64);
-
 /// A capability to open spans — an unforgeable handle the kernel checks
 /// against this process's table, distinct from the telemetry sink.
 #[derive(Clone, Copy)]
@@ -149,25 +167,55 @@ impl Tracer {
         Self { handle }
     }
 
-    /// Open a span named `name`. The kernel validates our `SpanSink` cap,
-    /// copies and interns `name`, and opens a span on this task's cursor.
-    /// Returns the span id, or `None` if the kernel refused (bad capability,
-    /// bad name pointer, or per-process span-name quota).
-    #[must_use]
-    pub fn open(self, name: &str) -> Option<SpanId> {
-        let ret: usize;
+    /// Open a span named `name`, returning an RAII [`Span`] guard that closes
+    /// it on drop. The kernel validates our `SpanSink` cap, copies and interns
+    /// `name`, and opens a span on this task's cursor. If the kernel refuses
+    /// (bad capability, bad name pointer, or per-process span-name quota), the
+    /// guard is a no-op — there's nothing to close.
+    pub fn span(self, name: &str) -> Span {
+        let id: usize;
+        let parent: usize;
         // SAFETY: `ecall` traps to the kernel, which validates the handle,
-        // copies `name` from our memory under `user_range_ok`, and returns the
-        // span id in a0 (or `usize::MAX` on refusal).
+        // copies `name` under `user_range_ok`, opens the span, and returns the
+        // id in a0 and parent in a1 (a0 = `usize::MAX` on refusal). We hold the
+        // `{id, parent}` as an opaque close token, exactly as the kernel's own
+        // `Span` guard does.
         unsafe {
             asm!(
                 "ecall",
                 in("a7") Syscall::SpanOpen as usize,
-                inlateout("a0") self.handle => ret,
-                in("a1") name.as_ptr(),
+                inlateout("a0") self.handle => id,
+                inlateout("a1") name.as_ptr() as usize => parent,
                 in("a2") name.len(),
             );
         }
-        (ret != usize::MAX).then_some(SpanId(ret as u64))
+        Span {
+            token: (id != usize::MAX).then_some((id as u64, parent as u64)),
+        }
+    }
+}
+
+/// RAII guard for an open span: closes it on drop (the kernel emits `SpanEnd`),
+/// mirroring the kernel's own `Span` guard. Holds `None` when the open was
+/// refused, in which case drop is a no-op. `mem::forget`ting it leaks the span
+/// (no `SpanEnd`) — a self-inflicted, observable bug, same as kernel-side.
+#[must_use = "dropping the Span closes it; binding to `_` closes it immediately"]
+pub struct Span {
+    token: Option<(u64, u64)>,
+}
+
+impl Drop for Span {
+    fn drop(&mut self) {
+        let Some((id, parent)) = self.token else { return };
+        // SAFETY: `ecall`; the kernel validates `id` against the cursor top and
+        // emits `SpanEnd`. a0 returns a status we ignore.
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::SpanClose as usize,
+                inlateout("a0") id => _,
+                in("a1") parent,
+            );
+        }
     }
 }

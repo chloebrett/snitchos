@@ -1646,4 +1646,34 @@ mod tests {
             select_by_tags(&refs, &["smp".to_string(), "bogus".to_string()]).unwrap_err();
         assert!(err.contains("bogus"), "error should name the bad tag: {err}");
     }
+
+    #[test]
+    fn scenarios_macro_builds_entries_with_profiles_and_tags() {
+        let table: &[Scenario] = crate::scenarios! {
+            wfi "plain"      always_pass;
+            cpu "storm"      always_pass  [smp, stress];
+            wfi "userspaced" always_pass  [userspace];
+        };
+        assert_eq!(table.len(), 3);
+
+        assert_eq!(table[0].name, "plain");
+        assert_eq!(table[0].cpu_profile, CpuProfile::Wfi);
+        assert!(table[0].tags.is_empty());
+
+        assert_eq!(table[1].name, "storm");
+        assert_eq!(table[1].cpu_profile, CpuProfile::Cpu);
+        assert_eq!(table[1].tags, ["smp", "stress"].as_slice());
+
+        assert_eq!(table[2].name, "userspaced");
+        assert_eq!(table[2].cpu_profile, CpuProfile::Wfi);
+        assert_eq!(table[2].tags, ["userspace"].as_slice());
+    }
+
+    #[test]
+    fn scenarios_macro_tolerates_a_trailing_semicolon() {
+        let table: &[Scenario] = crate::scenarios! {
+            wfi "only" always_pass;
+        };
+        assert_eq!(table.len(), 1);
+    }
 }

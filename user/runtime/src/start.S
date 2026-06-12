@@ -8,5 +8,5 @@
 .globl _start
 _start:
     la sp, __stack_top      # medany: pc-relative, valid at our link VA
-    call rust_main
+    call __snitchos_start    # runtime entry: builds Startup, runs main, exits
 1:  j 1b

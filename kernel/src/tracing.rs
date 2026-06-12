@@ -120,10 +120,11 @@ pub fn emit_syscall_refused(syscall: u8, reason: protocol::RefusalReason) {
 }
 
 /// Open a span named `name` (a runtime string) on the calling task's cursor,
-/// emit `SpanStart`, and return the raw span id. The non-RAII, owned-name twin
-/// of [`span_start`]: userspace holds the close token, so there's no guard
-/// here — the matching `SpanEnd` comes from a later `span_close(id)`.
-pub fn span_open_owned(name: &str) -> SpanId {
+/// emit `SpanStart`, and return the bookkeeping (`id` + `parent`). The
+/// non-RAII, owned-name twin of [`span_start`]: userspace holds the
+/// `{id, parent}` as an opaque close token (just as the kernel's `Span` guard
+/// does), and hands it back to [`span_close_checked`] when the span ends.
+pub fn span_open_owned(name: &str) -> span::SpanOpen {
     let name_id = register_or_lookup_owned(name);
     let cursor = current_cursor();
     let open = span::open(&SPAN_IDS, cursor);
@@ -135,7 +136,24 @@ pub fn span_open_owned(name: &str) -> SpanId {
         task_id: crate::sched::current_task_id().0,
         hart_id: crate::percpu::current_hartid() as u8,
     });
-    open.id
+    open
+}
+
+/// Close a userspace span: the caller hands back the `{id, parent}` token from
+/// [`span_open_owned`]. Validates `id` against the **cursor top** — only the
+/// innermost open span may close — refusing an out-of-order or forged id
+/// (returns `false`). On success emits `SpanEnd` and restores the cursor to
+/// `parent`. The cursor is per-task, so a bad close can only desync the
+/// caller's own cursor.
+#[must_use]
+pub fn span_close_checked(id: SpanId, parent: SpanId) -> bool {
+    let cursor = current_cursor();
+    if cursor.current() != id {
+        return false;
+    }
+    emit_frame(&Frame::SpanEnd { id, t: timestamp() });
+    span::close(cursor, &span::SpanOpen { id, parent });
+    true
 }
 
 /// Number of names currently registered in the intern table. Exposed

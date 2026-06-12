@@ -217,6 +217,13 @@ enum Cmd {
         /// known-slow or known-failing scenario.
         #[arg(long, value_name = "SCENARIO", value_delimiter = ',')]
         skip: Vec<String>,
+        /// Select scenarios by tag (union). Repeatable and/or
+        /// comma-separated: `--tag userspace --tag smp` or
+        /// `--tag userspace,smp` runs every scenario carrying either
+        /// tag. A tag no scenario carries is an error (typo guard).
+        /// Can't be combined with a positional scenario name.
+        #[arg(long, value_name = "TAG", value_delimiter = ',')]
+        tag: Vec<String>,
     },
     /// Inspect and manage the integration-test baseline
     /// (`.itest-baseline.toml`) and per-run history (`.itest-runs/`).
@@ -413,6 +420,7 @@ fn main() -> ExitCode {
             profile,
             capture,
             skip,
+            tag,
         } => {
             if !skip_unit_tests {
                 let unit = itest::run_unit_tests();
@@ -440,6 +448,7 @@ fn main() -> ExitCode {
                 cpu_jobs,
                 profile_filter,
                 skip,
+                tags: tag,
             })
         }
         Cmd::Baseline { cmd } => baseline(cmd),

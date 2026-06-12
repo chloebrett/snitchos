@@ -1421,16 +1421,31 @@ pub fn userspace_emits_span() -> Result<(), String> {
         _ => return Err("matched non-ThreadRegister".to_string()),
     };
 
-    h.wait_for(SEC * 10, move |f, strings| match f {
-        OwnedFrame::SpanStart { name_id, task_id, .. } => {
-            strings.get(name_id).map(String::as_str) == Some("hello.work")
-                && *task_id == user_id
-        }
-        _ => false,
-    })
+    let span_id = match h
+        .wait_for(SEC * 10, move |f, strings| match f {
+            OwnedFrame::SpanStart { name_id, task_id, .. } => {
+                strings.get(name_id).map(String::as_str) == Some("hello.work")
+                    && *task_id == user_id
+            }
+            _ => false,
+        })
+        .ok_or(
+            "no SpanStart 'hello.work' attributed to user_main within 10s — the SpanOpen \
+             path (cap check / copy_from_user / intern / emit) refused or broke",
+        )? {
+        OwnedFrame::SpanStart { id, .. } => id,
+        _ => return Err("matched non-SpanStart".to_string()),
+    };
+
+    // The runtime `Span` RAII guard closes on drop: the matching `SpanEnd`
+    // proves SpanClose round-trips (and the cursor-top validation accepted it).
+    h.wait_for(
+        SEC * 10,
+        move |f, _| matches!(f, OwnedFrame::SpanEnd { id, .. } if *id == span_id),
+    )
     .ok_or(
-        "no SpanStart 'hello.work' attributed to user_main within 10s — the SpanOpen \
-         path (cap check / copy_from_user / intern / emit) refused or broke",
+        "no SpanEnd matching the hello.work span within 10s — the RAII Span guard / \
+         SpanClose path didn't close it",
     )?;
 
     Ok(())

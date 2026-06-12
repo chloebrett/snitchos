@@ -103,16 +103,16 @@ const SCENARIOS: &[Scenario] = &[
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back
     // to its idle `wfi` loop) and `faulter` faults (the kernel parks the hart
     // in `wfi`). So they fan out in the parallel pool rather than a serial pass.
-    Scenario::new       ("userspace-emits-telemetry", scenarios::userspace_emits_telemetry),
-    Scenario::new       ("userspace-cannot-touch-kernel", scenarios::userspace_cannot_touch_kernel),
-    Scenario::new       ("userspace-grant-snitched", scenarios::userspace_grant_snitched),
-    Scenario::new       ("userspace-cap-denied", scenarios::userspace_cap_denied),
-    Scenario::new       ("userspace-cap-granted-event", scenarios::userspace_cap_granted_event),
-    Scenario::new       ("userspace-process-exits", scenarios::userspace_process_exits),
-    Scenario::new       ("userspace-yield-round-trips", scenarios::userspace_yield_round_trips),
-    Scenario::new       ("userspace-spansink-granted", scenarios::userspace_spansink_granted),
-    Scenario::new       ("userspace-emits-span", scenarios::userspace_emits_span),
-    Scenario::new       ("userspace-refusal-snitched", scenarios::userspace_refusal_snitched),
+    Scenario::new       ("userspace-emits-telemetry", scenarios::userspace_emits_telemetry).tagged(&["userspace"]),
+    Scenario::new       ("userspace-cannot-touch-kernel", scenarios::userspace_cannot_touch_kernel).tagged(&["userspace"]),
+    Scenario::new       ("userspace-grant-snitched", scenarios::userspace_grant_snitched).tagged(&["userspace"]),
+    Scenario::new       ("userspace-cap-denied", scenarios::userspace_cap_denied).tagged(&["userspace"]),
+    Scenario::new       ("userspace-cap-granted-event", scenarios::userspace_cap_granted_event).tagged(&["userspace"]),
+    Scenario::new       ("userspace-process-exits", scenarios::userspace_process_exits).tagged(&["userspace"]),
+    Scenario::new       ("userspace-yield-round-trips", scenarios::userspace_yield_round_trips).tagged(&["userspace"]),
+    Scenario::new       ("userspace-spansink-granted", scenarios::userspace_spansink_granted).tagged(&["userspace"]),
+    Scenario::new       ("userspace-emits-span", scenarios::userspace_emits_span).tagged(&["userspace"]),
+    Scenario::new       ("userspace-refusal-snitched", scenarios::userspace_refusal_snitched).tagged(&["userspace"]),
 ];
 
 /// Set the process-wide failure-capture transcript depth. Call once at
@@ -146,6 +146,9 @@ pub struct RunConfig {
     pub profile_filter: Option<CpuProfile>,
     /// Scenario names to exclude (applied after `profile_filter`).
     pub skip: Vec<String>,
+    /// Select scenarios carrying any of these tags (union). Mutually
+    /// exclusive with `name`. Empty = no tag filtering.
+    pub tags: Vec<String>,
 }
 
 /// Entry point from `main`: select scenarios per `config`, run them in QEMU
@@ -163,6 +166,7 @@ pub fn run(config: RunConfig) -> ExitCode {
         cpu_jobs,
         profile_filter,
         skip,
+        tags,
     } = config;
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
@@ -209,7 +213,30 @@ pub fn run(config: RunConfig) -> ExitCode {
         );
     }
 
-    let to_run: Vec<&Scenario> = match name.as_deref() {
+    // `--tag` and a positional name select scenarios two different ways;
+    // combining them is ambiguous, so reject it rather than guess an
+    // intersection-vs-union. Each invocation picks one selection mode.
+    if !tags.is_empty() && name.is_some() {
+        eprintln!("error: --tag cannot be combined with a positional scenario name");
+        return ExitCode::from(2);
+    }
+    // Base selection: by tag (union over the full catalog) when `--tag`
+    // is given, else by name (or all). `--profile` / `--skip` filter
+    // whatever this produces.
+    let to_run: Vec<&Scenario> = if !tags.is_empty() {
+        let all: Vec<&Scenario> = SCENARIOS.iter().collect();
+        match itest_harness::select_by_tags(&all, &tags) {
+            Ok(selected) => {
+                eprintln!("--tag: {} scenario(s) selected", selected.len());
+                selected
+            }
+            Err(msg) => {
+                eprintln!("{msg}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        match name.as_deref() {
         // One name, or a comma-separated list (`itest a,b,c`).
         // Whitespace around each name is trimmed; any unknown name is a
         // hard error — a typo shouldn't silently run a subset.
@@ -230,6 +257,7 @@ pub fn run(config: RunConfig) -> ExitCode {
             selected
         }
         None => SCENARIOS.iter().collect(),
+        }
     };
     let to_run: Vec<&Scenario> = match profile_filter {
         Some(p) => {

@@ -10,25 +10,23 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{Startup, exit};
+use snitchos_user::Startup;
 
 /// A kernel high-half VA that is always mapped (the kernel image base, per
 /// `kernel/linker.ld`) but carries no `U` bit. A U-mode load here faults.
 const KERNEL_PROBE_VA: usize = 0xffff_ffff_8020_0000;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_main(startup: Startup) -> ! {
+pub extern "C" fn rust_main(startup: Startup) {
     // Prove we reached U-mode and the syscall path works from here too.
     let _ = startup.telemetry().emit(99);
 
     // The probe: a U-mode load of a kernel VA. Mapped but not `U`, so this
     // faults to S-mode and never returns here — the kernel counts the fault
-    // and parks this hart.
+    // and parks this hart. If isolation were BROKEN the read would succeed and
+    // we'd return, and the runtime would exit the process.
     // SAFETY: deliberately faulting; the kernel handles the trap.
     unsafe {
         core::ptr::read_volatile(KERNEL_PROBE_VA as *const u64);
     }
-
-    // Only reached if isolation is BROKEN (the read succeeded).
-    exit();
 }
