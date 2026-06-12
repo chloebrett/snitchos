@@ -87,6 +87,25 @@ impl InternTable {
         id
     }
 
+    /// Find `name` by **content** (not pointer), returning its id if some
+    /// same-valued name is already registered. Unlike [`register_or_lookup`]'s
+    /// pointer equality, this lets a runtime-built string — e.g. a userspace
+    /// span name copied in per-syscall — resolve to an existing id, so the
+    /// caller leaks-and-registers only on a genuine first sighting rather than
+    /// on every repeated call (which would overflow the table). O(n) over the
+    /// table; the table is small.
+    #[must_use]
+    pub fn lookup_by_content(&self, name: &str) -> Option<StringId> {
+        for (i, entry) in self.entries.iter().enumerate() {
+            if let Some(e) = entry
+                && e.name == name
+            {
+                return Some(StringId(i as u32));
+            }
+        }
+        None
+    }
+
     /// Register `name` as a metric with `kind`. Emits `StringRegister`
     /// if the name is new, then `MetricRegister` if the name wasn't
     /// previously declared as a metric. Calling twice with different
@@ -156,6 +175,34 @@ mod tests {
 
         assert_eq!(id1, id2);
         assert_eq!(sink.len(), 1, "second lookup must not emit");
+    }
+
+    #[test]
+    fn lookup_by_content_finds_a_registered_name_by_value() {
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+        let id = table.register_or_lookup("worker.tick", &mut sink);
+        assert_eq!(table.lookup_by_content("worker.tick"), Some(id));
+    }
+
+    #[test]
+    fn lookup_by_content_returns_none_for_an_unregistered_name() {
+        let table = InternTable::new();
+        assert_eq!(table.lookup_by_content("never.registered"), None);
+    }
+
+    #[test]
+    fn lookup_by_content_matches_on_value_not_pointer() {
+        // Unlike `register_or_lookup` (pointer equality), content lookup
+        // resolves a runtime-built string to the id of a same-valued
+        // registered name — the property userspace span names rely on so that
+        // repeating a name doesn't re-register and overflow the table.
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+        let registered: &'static str = Box::leak(Box::<str>::from("dup"));
+        let id = table.register_or_lookup(registered, &mut sink);
+        let runtime_built = format!("d{}", "up"); // distinct allocation, same chars
+        assert_eq!(table.lookup_by_content(&runtime_built), Some(id));
     }
 
     #[test]
