@@ -104,6 +104,21 @@ pub fn register_or_lookup_owned(name: &str) -> StringId {
     table.register_or_lookup(leaked, &mut KernelSink)
 }
 
+/// Snitch a **refused syscall** — a first-class observability event so a
+/// denied U-mode request is never silent (the whole point: a refusal you can
+/// see beats a result frame that never appeared). `syscall` is the raw `a7`,
+/// `reason` says what failed; task and hart are stamped here. Safe from a
+/// synchronous syscall handler (same emit path as `emit_metric`).
+pub fn emit_syscall_refused(syscall: u8, reason: protocol::RefusalReason) {
+    emit_frame(&Frame::SyscallRefused {
+        syscall,
+        reason,
+        task_id: crate::sched::current_task_id().0,
+        t: timestamp(),
+        hart_id: crate::percpu::current_hartid() as u8,
+    });
+}
+
 /// Open a span named `name` (a runtime string) on the calling task's cursor,
 /// emit `SpanStart`, and return the raw span id. The non-RAII, owned-name twin
 /// of [`span_start`]: userspace holds the close token, so there's no guard

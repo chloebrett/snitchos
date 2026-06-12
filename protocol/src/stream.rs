@@ -8,7 +8,10 @@ use std::io::Read;
 use std::string::{String, ToString};
 use std::vec::Vec;
 
-use crate::{CapEventKind, CapObject, Frame, HartRole, MetricKind, SpanId, StringId, SwitchReason};
+use crate::{
+    CapEventKind, CapObject, Frame, HartRole, MetricKind, RefusalReason, SpanId, StringId,
+    SwitchReason,
+};
 
 /// Owned, lifetime-free counterpart of `Frame<'a>`. The host-side
 /// reader thread decodes into a temporary buffer and converts to
@@ -40,6 +43,7 @@ pub enum OwnedFrame {
         t: u64,
         hart_id: u8,
     },
+    SyscallRefused { syscall: u8, reason: RefusalReason, task_id: u32, t: u64, hart_id: u8 },
 }
 
 impl OwnedFrame {
@@ -76,6 +80,9 @@ impl OwnedFrame {
             }
             Frame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, t, hart_id } => {
                 OwnedFrame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, t, hart_id }
+            }
+            Frame::SyscallRefused { syscall, reason, task_id, t, hart_id } => {
+                OwnedFrame::SyscallRefused { syscall, reason, task_id, t, hart_id }
             }
         }
     }

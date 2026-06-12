@@ -186,7 +186,10 @@ fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::Yield) => crate::sched::yield_now(),
         Some(Syscall::SpanOpen) => handle_span_open(frame),
         Some(Syscall::SpanClose) => frame.a0 = u64::MAX, // checkpoint 2
-        None => frame.a0 = u64::MAX, // unknown syscall
+        None => {
+            let n = frame.a7 as u8;
+            refuse(frame, n, protocol::RefusalReason::UnknownSyscall);
+        }
     }
     // `ecall` is a 4-byte instruction; without advancing past it, `sret`
     // would re-execute it and we'd trap on it forever. (Not reached for
@@ -217,7 +220,9 @@ fn handle_exit() -> ! {
 /// [`kernel_core::cap::invoke_telemetry`]; here we only act on its result.
 fn handle_invoke(frame: &mut TrapFrame) {
     use kernel_core::cap::{Handle, invoke_telemetry};
+    use snitchos_abi::Syscall;
 
+    let sc = Syscall::Invoke as u8;
     let proc = crate::process::CURRENT_PROCESS
         .this_cpu()
         .load(Ordering::Relaxed);
@@ -225,7 +230,7 @@ fn handle_invoke(frame: &mut TrapFrame) {
     // lives in that never-returning frame. Null only if no user process is
     // running here — which then could not have issued this U-mode `ecall`.
     let Some(proc) = (unsafe { proc.as_ref() }) else {
-        frame.a0 = u64::MAX;
+        refuse(frame, sc, protocol::RefusalReason::NoProcess);
         return;
     };
 
@@ -238,15 +243,17 @@ fn handle_invoke(frame: &mut TrapFrame) {
             crate::tracing::emit_metric(counter, frame.a1 as i64);
             frame.a0 = 0; // success
         }
-        Err(_denied) => {
-            // Snitch the refused authority decision. Counter is pre-
-            // registered (`user::init_metric`), so no interning in trap
-            // context. The richer `CapEvent` frame is the sequenced
-            // follow-on (carries granter/object/rights a counter can't).
+        Err(denied) => {
+            // Snitch the refused authority decision two ways: the pre-
+            // registered `cap_denied_total` counter (a rate) and a
+            // `SyscallRefused` event carrying the *reason* (self-describing,
+            // so a denial is never a silent missing-result). Counter is pre-
+            // registered (`user::init_metric`) to avoid interning in trap
+            // context.
             if let Some(id) = crate::user::cap_denied_metric_id() {
                 crate::tracing::emit_metric(id, 1);
             }
-            frame.a0 = u64::MAX; // refused
+            refuse(frame, sc, refusal_for(denied)); // emits SyscallRefused + sets a0
         }
     }
 }
@@ -258,24 +265,28 @@ fn handle_invoke(frame: &mut TrapFrame) {
 fn handle_span_open(frame: &mut TrapFrame) {
     use kernel_core::cap::{Handle, invoke_span};
     use kernel_core::mmu::MAX_USER_STR_LEN;
+    use protocol::RefusalReason;
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::SpanOpen as u8;
 
     let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
     // SAFETY: set by `user::run` on this hart before `sret`; the `Process`
     // lives in that never-returning frame. Null only if no user process runs
     // here — which then could not have issued this U-mode `ecall`.
     let Some(proc) = (unsafe { proc.as_ref() }) else {
-        frame.a0 = u64::MAX;
+        refuse(frame, sc, RefusalReason::NoProcess);
         return;
     };
 
     // Authority: the caller must hold a `SpanSink` cap at handle `a0`. Resolve
     // under the lock, then drop it before the intern/emit path.
-    let authorized = {
+    let denied = {
         let caps = proc.caps.lock();
-        invoke_span(&caps, Handle::from_raw(frame.a0 as u32)).is_ok()
+        invoke_span(&caps, Handle::from_raw(frame.a0 as u32)).err()
     };
-    if !authorized {
-        frame.a0 = u64::MAX;
+    if let Some(d) = denied {
+        refuse(frame, sc, refusal_for(d));
         return;
     }
 
@@ -283,16 +294,34 @@ fn handle_span_open(frame: &mut TrapFrame) {
     let mut buf = [0u8; MAX_USER_STR_LEN];
     let Some(bytes) = crate::user::copy_from_user(frame.a1 as usize, frame.a2 as usize, &mut buf)
     else {
-        frame.a0 = u64::MAX;
+        refuse(frame, sc, RefusalReason::BadUserRange);
         return;
     };
     let Ok(name) = core::str::from_utf8(bytes) else {
-        frame.a0 = u64::MAX;
+        refuse(frame, sc, RefusalReason::BadUtf8);
         return;
     };
 
     // Intern on demand + open a span on this task's cursor; hand back the id.
     frame.a0 = crate::tracing::span_open_owned(name).0;
+}
+
+/// Refuse a syscall: snitch a `SyscallRefused` event (so the denial is never
+/// silent) and return the error sentinel in `a0`.
+fn refuse(frame: &mut TrapFrame, syscall: u8, reason: protocol::RefusalReason) {
+    crate::tracing::emit_syscall_refused(syscall, reason);
+    frame.a0 = u64::MAX;
+}
+
+/// Map a capability-invocation denial to its wire refusal reason.
+fn refusal_for(denied: kernel_core::cap::Denied) -> protocol::RefusalReason {
+    use kernel_core::cap::Denied;
+    use protocol::RefusalReason;
+    match denied {
+        Denied::NoSuchCapability => RefusalReason::CapNotFound,
+        Denied::MissingRight => RefusalReason::CapWrongRights,
+        Denied::WrongObject => RefusalReason::CapWrongObject,
+    }
 }
 
 /// Timer IRQ handler. Kept tiny: measure duration, arm the next

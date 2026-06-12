@@ -305,6 +305,14 @@ impl State {
                 self.advance_anchor(*t);
                 None
             }
+            Frame::SyscallRefused { t, .. } => {
+                // The refusal event is on the wire (the itest reads it directly).
+                // Surfacing it as a Prometheus `syscall_refused_total{reason}`
+                // counter / OTLP span-event is a follow-on; for now just keep
+                // the timeline anchored.
+                self.advance_anchor(*t);
+                None
+            }
         }
     }
 

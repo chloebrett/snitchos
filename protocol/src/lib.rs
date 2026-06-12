@@ -140,6 +140,18 @@ pub enum Frame<'a> {
     t: u64,
     hart_id: u8,
   },
+  /// The kernel **refused a syscall**, and why. A first-class observability
+  /// event so a denied U-mode request is never silent — `syscall` is the raw
+  /// `a7` number, `reason` says what failed, `task_id` attributes the caller.
+  /// Turns "no result frame appeared" debugging into a labelled signal. New
+  /// variants go at the END — postcard encodes discriminants positionally.
+  SyscallRefused {
+    syscall: u8,
+    reason: RefusalReason,
+    task_id: u32,
+    t: u64,
+    hart_id: u8,
+  },
 }
 
 /// The lifecycle phase of a [`Frame::CapEvent`]. v0.7b emits only
@@ -160,6 +172,29 @@ pub enum CapObject {
   TelemetrySink,
   /// Permission to open and close spans on the holder's span cursor.
   SpanSink,
+}
+
+/// Why the kernel refused a syscall (the `reason` in [`Frame::SyscallRefused`]).
+/// One per distinguishable failure so a denied request is self-describing on
+/// the wire. Append new reasons at the END — postcard encodes positionally.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone, Copy)]
+pub enum RefusalReason {
+  /// `a7` named no known syscall.
+  UnknownSyscall,
+  /// No user process is bound to the calling hart (should not happen).
+  NoProcess,
+  /// The capability handle resolved to nothing (out of bounds or stale).
+  CapNotFound,
+  /// The capability lacked the right the operation needs.
+  CapWrongRights,
+  /// The capability named a different object kind than the op targets.
+  CapWrongObject,
+  /// A user pointer/length was not a valid, in-bounds user buffer.
+  BadUserRange,
+  /// A copied-in name was not valid UTF-8.
+  BadUtf8,
+  /// The caller hit its per-process span-name quota.
+  Quota,
 }
 
 #[cfg(test)]
@@ -478,6 +513,34 @@ mod tests {
       let used = postcard::to_slice(&frame, &mut buf).unwrap();
       let decoded: Frame = postcard::from_bytes(used).unwrap();
 
+      assert_eq!(frame, decoded);
+    }
+  }
+
+  /// Roundtrip a `Frame::SyscallRefused` for each `RefusalReason` — the
+  /// self-describing "the kernel said no, and here's why" event.
+  #[test]
+  fn syscall_refused_roundtrips_each_reason() {
+    for reason in [
+      RefusalReason::UnknownSyscall,
+      RefusalReason::NoProcess,
+      RefusalReason::CapNotFound,
+      RefusalReason::CapWrongRights,
+      RefusalReason::CapWrongObject,
+      RefusalReason::BadUserRange,
+      RefusalReason::BadUtf8,
+      RefusalReason::Quota,
+    ] {
+      let frame = Frame::SyscallRefused {
+        syscall: 3,
+        reason,
+        task_id: 5,
+        t: 1234,
+        hart_id: 1,
+      };
+      let mut buf = [0u8; 64];
+      let used = postcard::to_slice(&frame, &mut buf).unwrap();
+      let decoded: Frame = postcard::from_bytes(used).unwrap();
       assert_eq!(frame, decoded);
     }
   }

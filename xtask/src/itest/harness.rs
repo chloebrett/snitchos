@@ -405,6 +405,8 @@ impl Harness {
                 format!("HartRegister {{ id={id} mhartid={mhartid} role={role:?} }}"),
             OwnedFrame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, t, hart_id } =>
                 format!("CapEvent {{ {kind:?} cap_id={cap_id} parent={parent_cap_id} holder={holder} object={object:?} rights={rights:#b} t={t} hart={hart_id} }}"),
+            OwnedFrame::SyscallRefused { syscall, reason, task_id, t, hart_id } =>
+                format!("SyscallRefused {{ syscall={syscall} reason={reason:?} task={task_id} t={t} hart={hart_id} }}"),
         }
     }
 }
@@ -512,6 +514,7 @@ fn variant_name(frame: &OwnedFrame) -> &'static str {
         OwnedFrame::ContextSwitch { .. } => "ContextSwitch",
         OwnedFrame::HartRegister { .. } => "HartRegister",
         OwnedFrame::CapEvent { .. } => "CapEvent",
+        OwnedFrame::SyscallRefused { .. } => "SyscallRefused",
     }
 }
 

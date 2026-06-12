@@ -265,7 +265,7 @@ const SIE: usize = 1 << 1; // Interrupt Enable (live): clear before arming sscra
 /// the user pointer. Fault-graceful copy (an in-range but unmapped pointer) is
 /// a deferred refinement; today such a pointer faults to S-mode (kernel bug
 /// panic) rather than refusing — userspace can only pass mapped names.
-pub fn copy_from_user<'a>(ptr: usize, len: usize, dst: &'a mut [u8]) -> Option<&'a [u8]> {
+pub fn copy_from_user(ptr: usize, len: usize, dst: &mut [u8]) -> Option<&[u8]> {
     if !kernel_core::mmu::user_range_ok(ptr, len) || len > dst.len() {
         return None;
     }
