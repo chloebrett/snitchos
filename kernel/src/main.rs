@@ -349,7 +349,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // hart 1 after SECONDARY_READY.
         | Some(WorkloadKind::Userspace)
         | Some(WorkloadKind::UserspaceFault)
-        | Some(WorkloadKind::UserspaceSpanflood) => {}
+        | Some(WorkloadKind::UserspaceSpanFlood) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -395,7 +395,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 w,
                 WorkloadKind::Userspace
                     | WorkloadKind::UserspaceFault
-                    | WorkloadKind::UserspaceSpanflood
+                    | WorkloadKind::UserspaceSpanFlood
             )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
@@ -429,11 +429,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             user::init_metric();
             let _ = sched::spawn_on(1, "user_fault", user::faulter_main_entry);
         }
-        // Span-quota probe: `spanflood` opens many distinctly-named spans; the
+        // Span-quota probe: `span-flood` opens many distinctly-named spans; the
         // kernel refuses the surplus past `Process::MAX_SPAN_NAMES`.
-        Some(WorkloadKind::UserspaceSpanflood) => {
+        Some(WorkloadKind::UserspaceSpanFlood) => {
             user::init_metric();
-            let _ = sched::spawn_on(1, "user_spanflood", user::spanflood_main_entry);
+            let _ = sched::spawn_on(1, "user_span_flood", user::span_flood_main_entry);
         }
         _ => {}
     }

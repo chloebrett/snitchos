@@ -1481,17 +1481,17 @@ pub fn userspace_refusal_snitched() -> Result<(), String> {
     Ok(())
 }
 
-/// Per-process span-name quota (`workload=userspace-spanflood`): `spanflood`
+/// Per-process span-name quota (`workload=userspace-span-flood`): `span-flood`
 /// opens spans with 20 distinct names — past `Process::MAX_SPAN_NAMES` (16) —
 /// so the kernel must refuse the surplus with `SyscallRefused{Quota}` rather
 /// than leak unbounded `'static` names or panic. Asserts the quota refusal and
 /// that the kernel keeps heartbeating after.
 pub fn userspace_quota_refused() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("uquota", "userspace-spanflood")?;
+    let mut h = Harness::spawn_with_workload("uquota", "userspace-span-flood")?;
 
     let user_id = match h
-        .wait_for(SEC * 20, is_thread_register_named("user_spanflood"))
-        .ok_or("no ThreadRegister for 'user_spanflood' within 20s")?
+        .wait_for(SEC * 20, is_thread_register_named("user_span_flood"))
+        .ok_or("no ThreadRegister for 'user_span_flood' within 20s")?
     {
         OwnedFrame::ThreadRegister { id, .. } => id,
         _ => return Err("matched non-ThreadRegister".to_string()),
@@ -1504,7 +1504,7 @@ pub fn userspace_quota_refused() -> Result<(), String> {
         _ => false,
     })
     .ok_or(
-        "no SyscallRefused{Quota} from user_spanflood within 10s — the span-name quota \
+        "no SyscallRefused{Quota} from user_span_flood within 10s — the span-name quota \
          didn't refuse the surplus (off-by-one, or not enforced)",
     )?;
 

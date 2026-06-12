@@ -64,10 +64,10 @@ pub enum WorkloadKind {
     /// the `faulter` program, which reads a kernel VA from U-mode — the
     /// `U`-bit firewall must fault it. Not a storm.
     UserspaceFault,
-    /// Span-quota probe: runs the `spanflood` program, which opens spans with
+    /// Span-quota probe: runs the `span-flood` program, which opens spans with
     /// many distinct names to exceed `Process::MAX_SPAN_NAMES` — the kernel
     /// must refuse the surplus (`SyscallRefused{Quota}`) without panicking.
-    UserspaceSpanflood,
+    UserspaceSpanFlood,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -123,7 +123,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "ping-pong" => Some(WorkloadKind::PingPong),
             "userspace" => Some(WorkloadKind::Userspace),
             "userspace-fault" => Some(WorkloadKind::UserspaceFault),
-            "userspace-spanflood" => Some(WorkloadKind::UserspaceSpanflood),
+            "userspace-span-flood" => Some(WorkloadKind::UserspaceSpanFlood),
             _ => None,
         })
 }
@@ -210,10 +210,10 @@ mod tests {
     }
 
     #[test]
-    fn selects_userspace_spanflood() {
+    fn selects_userspace_span_flood() {
         assert_eq!(
-            select("workload=userspace-spanflood"),
-            Some(WorkloadKind::UserspaceSpanflood)
+            select("workload=userspace-span-flood"),
+            Some(WorkloadKind::UserspaceSpanFlood)
         );
     }
 

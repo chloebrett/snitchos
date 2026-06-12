@@ -1,4 +1,4 @@
-//! Span-quota probe (`workload=userspace-spanflood`): open spans with more
+//! Span-quota probe (`workload=userspace-span-flood`): open spans with more
 //! distinct names than `Process::MAX_SPAN_NAMES` (16). Each *new* name counts
 //! against the per-process quota; once it's exhausted the kernel refuses the
 //! open (`SyscallRefused{Quota}`) rather than leaking an unbounded number of
