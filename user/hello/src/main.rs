@@ -14,6 +14,11 @@ pub extern "C" fn rust_main(startup: Startup) -> ! {
     // Emit through the capability the kernel handed us at startup.
     let _ = startup.telemetry().emit(42);
 
+    // Open a span via the SpanSink capability we were granted. The kernel
+    // copies + interns the name and opens a span on our task's cursor.
+    // (Closing it comes with the RAII guard in the next step.)
+    let _ = startup.tracer().open("hello.work");
+
     // Reach for authority we were never granted: handle 1, when our table
     // holds only the startup handle. The kernel refuses (and snitches the
     // denial) — the point of capabilities is that holding the integer isn't

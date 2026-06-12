@@ -111,6 +111,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario::new       ("userspace-process-exits", scenarios::userspace_process_exits),
     Scenario::new       ("userspace-yield-round-trips", scenarios::userspace_yield_round_trips),
     Scenario::new       ("userspace-spansink-granted", scenarios::userspace_spansink_granted),
+    Scenario::new       ("userspace-emits-span", scenarios::userspace_emits_span),
 ];
 
 /// Set the process-wide failure-capture transcript depth. Call once at

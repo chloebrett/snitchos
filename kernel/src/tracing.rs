@@ -5,7 +5,7 @@
 //! All frames go out the virtio-console (`virtio_console::send`). The
 //! host-reader decodes them.
 
-use protocol::{Frame, MetricKind, StringId};
+use protocol::{Frame, MetricKind, SpanId, StringId};
 
 use kernel_core::clock::Clock;
 use kernel_core::intern::InternTable;
@@ -84,6 +84,43 @@ impl FrameSink for KernelSink {
 /// takes them in the opposite order we're fine; v0.1 has no other lockers.
 pub fn register_or_lookup(name: &'static str) -> StringId {
     INTERN_TABLE.lock().register_or_lookup(name, &mut KernelSink)
+}
+
+/// Like [`register_or_lookup`] but for a **runtime** (non-`'static`) name —
+/// e.g. a span name copied from U-mode. Content-dedups first, so a repeated
+/// name costs nothing; only on a genuine first sighting does it leak the name
+/// into `'static` and register it (emitting `StringRegister`). The leak is
+/// bounded by the per-process span-name quota at the call site.
+///
+/// Safe from a synchronous syscall handler: it holds no lock the alloc path
+/// could re-enter (alloc only bumps atomics, never emits), and the intern →
+/// virtio lock order matches [`register_or_lookup`].
+pub fn register_or_lookup_owned(name: &str) -> StringId {
+    let mut table = INTERN_TABLE.lock();
+    if let Some(id) = table.lookup_by_content(name) {
+        return id;
+    }
+    let leaked: &'static str = alloc::boxed::Box::leak(alloc::boxed::Box::<str>::from(name));
+    table.register_or_lookup(leaked, &mut KernelSink)
+}
+
+/// Open a span named `name` (a runtime string) on the calling task's cursor,
+/// emit `SpanStart`, and return the raw span id. The non-RAII, owned-name twin
+/// of [`span_start`]: userspace holds the close token, so there's no guard
+/// here — the matching `SpanEnd` comes from a later `span_close(id)`.
+pub fn span_open_owned(name: &str) -> SpanId {
+    let name_id = register_or_lookup_owned(name);
+    let cursor = current_cursor();
+    let open = span::open(&SPAN_IDS, cursor);
+    emit_frame(&Frame::SpanStart {
+        id: open.id,
+        parent: open.parent,
+        name_id,
+        t: timestamp(),
+        task_id: crate::sched::current_task_id().0,
+        hart_id: crate::percpu::current_hartid() as u8,
+    });
+    open.id
 }
 
 /// Number of names currently registered in the intern table. Exposed

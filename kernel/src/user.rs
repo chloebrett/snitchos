@@ -132,7 +132,7 @@ fn run(image: &'static [u8]) -> ! {
     // userspace telemetry counter. The cap *names* the sink, so the syscall
     // (Step 5) needs no string from U-mode. The kernel snitches the grant.
     let counter = user_metric_id().expect("userspace telemetry counter registered before entry");
-    let (process, bootstrap_handle, _span_handle) = Process::bootstrap(root_pa, counter);
+    let (process, bootstrap_handle, span_handle) = Process::bootstrap(root_pa, counter);
     // The kernel snitches each grant two ways: the `cap.grants_total` counter
     // (a rate) and a rich `CapEvent::Granted` (an attributed fact carrying the
     // global cap id, holder, object, and rights — the derivation-tree seed).
@@ -161,7 +161,12 @@ fn run(image: &'static [u8]) -> ! {
     // `a0` to the granted handle at entry, so the program receives its caps
     // instead of assuming a well-known handle. Neither side hardcodes a slot.
     match load(process.root_pa, image) {
-        Ok(loaded) => enter(loaded, root_pa, bootstrap_handle.raw() as usize),
+        Ok(loaded) => enter(
+            loaded,
+            root_pa,
+            bootstrap_handle.raw() as usize,
+            span_handle.raw() as usize,
+        ),
         Err(e) => panic!("userspace load failed: {e:?}"),
     }
 }
@@ -249,9 +254,36 @@ const SUM: usize = 1 << 18; // Supervisor User Memory access: clear -> S can't t
 const FS: usize = 0b11 << 13; // FP state: clear -> Off (kernel + program are integer-only)
 const SIE: usize = 1 << 1; // Interrupt Enable (live): clear before arming sscratch
 
+/// Copy a byte buffer from user memory into `dst`, returning the copied slice,
+/// or `None` if `(ptr, len)` is not a valid user range (or doesn't fit `dst`).
+///
+/// The user pages are mapped — the trap kept the process's `satp` — but `SUM`
+/// is cleared while in U-mode, so a bare kernel deref of a user pointer would
+/// fault. We range-check with `user_range_ok`, then briefly set `sstatus.SUM`
+/// to permit the read, copy into the kernel buffer, and clear it again. The
+/// copy must complete before `SUM` drops: the caller dereferences `dst`, never
+/// the user pointer. Fault-graceful copy (an in-range but unmapped pointer) is
+/// a deferred refinement; today such a pointer faults to S-mode (kernel bug
+/// panic) rather than refusing — userspace can only pass mapped names.
+pub fn copy_from_user<'a>(ptr: usize, len: usize, dst: &'a mut [u8]) -> Option<&'a [u8]> {
+    if !kernel_core::mmu::user_range_ok(ptr, len) || len > dst.len() {
+        return None;
+    }
+    // SAFETY: range validated wholly within the user half and `<= dst.len()`;
+    // the process page table is active so the bytes are mapped. `SUM` is set
+    // only across the copy and cleared immediately after.
+    unsafe {
+        core::arch::asm!("csrs sstatus, {}", in(reg) SUM);
+        core::ptr::copy_nonoverlapping(ptr as *const u8, dst.as_mut_ptr(), len);
+        core::arch::asm!("csrc sstatus, {}", in(reg) SUM);
+    }
+    Some(&dst[..len])
+}
+
 /// Switch to the process's address space (`root_pa`) and drop to U-mode at
-/// `loaded.entry`, with `a0` set to `startup_a0` — the startup capability the
-/// program receives (its `crt0` passes `a0` straight into `rust_main`). Never
+/// `loaded.entry`, with `a0`/`a1` set to `startup_a0`/`startup_a1` — the two
+/// startup capability handles the program receives (its `crt0` passes them
+/// straight into `rust_main` as the `Startup` struct's two fields). Never
 /// returns.
 ///
 /// `satp` is switched first: the kernel high-half is shared into `root_pa`,
@@ -260,7 +292,7 @@ const SIE: usize = 1 << 1; // Interrupt Enable (live): clear before arming sscra
 /// (mask interrupts) *before* arming `sscratch`, so a stray timer IRQ can't
 /// see a nonzero `sscratch` in S-mode and mis-take the from-user path in
 /// `trap_entry`. `sret` then drops to U *and* restores `SIE` from `SPIE`.
-pub fn enter(loaded: Loaded, root_pa: usize, startup_a0: usize) -> ! {
+pub fn enter(loaded: Loaded, root_pa: usize, startup_a0: usize, startup_a1: usize) -> ! {
     let satp = mmu::satp_for(root_pa);
     // SAFETY: switches the active address space to the user root (kernel
     // high-half shared, so we keep executing), then forges a trap-return into
@@ -282,6 +314,7 @@ pub fn enter(loaded: Loaded, root_pa: usize, startup_a0: usize) -> ! {
         set = in(reg) (SPIE),
         entry = in(reg) loaded.entry,
         in("a0") startup_a0,
+        in("a1") startup_a1,
         options(noreturn));
     }
 }

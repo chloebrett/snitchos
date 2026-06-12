@@ -25,15 +25,16 @@ core::arch::global_asm!(include_str!("start.S"));
 /// The capabilities a process is handed at startup. The kernel passes them in
 /// registers at entry and `crt0` forwards them to `rust_main(startup)`.
 ///
-/// `repr(transparent)` over `usize`: today it carries the single bootstrap
-/// telemetry handle (in `a0`). When caps multiply (v0.8 IPC) `a0` becomes a
-/// pointer to an in-memory `BootInfo` page — but this *program-facing* type
-/// stays put, so programs don't change. The program receives its authority
-/// rather than assuming a well-known handle.
-#[repr(transparent)]
+/// `repr(C)` over two `usize`s, delivered in `a0`/`a1`: the bootstrap
+/// `TelemetrySink` and `SpanSink` handles. When caps multiply further (v0.8
+/// IPC) `a0` would become a pointer to an in-memory `BootInfo` page — but this
+/// *program-facing* type stays put, so programs don't change. The program
+/// receives its authority rather than assuming well-known handles.
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Startup {
     telemetry_handle: usize,
+    span_handle: usize,
 }
 
 impl Startup {
@@ -41,6 +42,12 @@ impl Startup {
     #[must_use]
     pub fn telemetry(self) -> TelemetrySink {
         TelemetrySink::from_raw_handle(self.telemetry_handle)
+    }
+
+    /// The `SpanSink` capability — authority to open spans from U-mode.
+    #[must_use]
+    pub fn tracer(self) -> Tracer {
+        Tracer::from_raw_handle(self.span_handle)
     }
 }
 
@@ -120,5 +127,47 @@ impl TelemetrySink {
     /// `Err(Denied)` if it refused the invocation.
     pub fn emit(self, value: i64) -> Result<(), Denied> {
         invoke(self.handle, value as usize)
+    }
+}
+
+/// An opaque span id the kernel returned from [`Tracer::open`]. Hand it back
+/// to close the span. (A later step wraps this in an RAII `Span` guard.)
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SpanId(pub u64);
+
+/// A capability to open spans — an unforgeable handle the kernel checks
+/// against this process's table, distinct from the telemetry sink.
+#[derive(Clone, Copy)]
+pub struct Tracer {
+    handle: usize,
+}
+
+impl Tracer {
+    /// Wrap a raw span-sink handle (the kernel validates it on use).
+    #[must_use]
+    pub const fn from_raw_handle(handle: usize) -> Self {
+        Self { handle }
+    }
+
+    /// Open a span named `name`. The kernel validates our `SpanSink` cap,
+    /// copies and interns `name`, and opens a span on this task's cursor.
+    /// Returns the span id, or `None` if the kernel refused (bad capability,
+    /// bad name pointer, or per-process span-name quota).
+    #[must_use]
+    pub fn open(self, name: &str) -> Option<SpanId> {
+        let ret: usize;
+        // SAFETY: `ecall` traps to the kernel, which validates the handle,
+        // copies `name` from our memory under `user_range_ok`, and returns the
+        // span id in a0 (or `usize::MAX` on refusal).
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::SpanOpen as usize,
+                inlateout("a0") self.handle => ret,
+                in("a1") name.as_ptr(),
+                in("a2") name.len(),
+            );
+        }
+        (ret != usize::MAX).then_some(SpanId(ret as u64))
     }
 }

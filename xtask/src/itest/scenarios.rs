@@ -1403,3 +1403,35 @@ pub fn userspace_spansink_granted() -> Result<(), String> {
 
     Ok(())
 }
+
+/// Userspace tracing (`workload=userspace`): `hello` opens a span named
+/// "hello.work" through its `SpanSink` capability. The kernel copies the name
+/// out of U-mode, interns it on demand, and opens a span on hello's task
+/// cursor. Asserts a `SpanStart` for "hello.work" attributed to the
+/// `user_main` task — exercising the whole SpanOpen path: cap check →
+/// copy_from_user → intern → emit, with kernel-stamped attribution.
+pub fn userspace_emits_span() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("uspan", "userspace")?;
+
+    let user_id = match h
+        .wait_for(SEC * 20, is_thread_register_named("user_main"))
+        .ok_or("no ThreadRegister for 'user_main' within 20s")?
+    {
+        OwnedFrame::ThreadRegister { id, .. } => id,
+        _ => return Err("matched non-ThreadRegister".to_string()),
+    };
+
+    h.wait_for(SEC * 10, move |f, strings| match f {
+        OwnedFrame::SpanStart { name_id, task_id, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("hello.work")
+                && *task_id == user_id
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no SpanStart 'hello.work' attributed to user_main within 10s — the SpanOpen \
+         path (cap check / copy_from_user / intern / emit) refused or broke",
+    )?;
+
+    Ok(())
+}

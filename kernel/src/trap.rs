@@ -184,7 +184,8 @@ fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::Invoke) => handle_invoke(frame),
         Some(Syscall::Exit) => handle_exit(), // does not return
         Some(Syscall::Yield) => crate::sched::yield_now(),
-        Some(Syscall::SpanOpen) | Some(Syscall::SpanClose) => todo!(),
+        Some(Syscall::SpanOpen) => handle_span_open(frame),
+        Some(Syscall::SpanClose) => frame.a0 = u64::MAX, // checkpoint 2
         None => frame.a0 = u64::MAX, // unknown syscall
     }
     // `ecall` is a 4-byte instruction; without advancing past it, `sret`
@@ -248,6 +249,50 @@ fn handle_invoke(frame: &mut TrapFrame) {
             frame.a0 = u64::MAX; // refused
         }
     }
+}
+
+/// Open a span on behalf of U-mode. `a0` = `SpanSink` handle, `a1` = name
+/// pointer, `a2` = name length. Validates the capability, copies + interns the
+/// name, opens a span on the calling task's cursor, and returns the span id in
+/// `a0` (or `u64::MAX` on refusal).
+fn handle_span_open(frame: &mut TrapFrame) {
+    use kernel_core::cap::{Handle, invoke_span};
+    use kernel_core::mmu::MAX_USER_STR_LEN;
+
+    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
+    // SAFETY: set by `user::run` on this hart before `sret`; the `Process`
+    // lives in that never-returning frame. Null only if no user process runs
+    // here — which then could not have issued this U-mode `ecall`.
+    let Some(proc) = (unsafe { proc.as_ref() }) else {
+        frame.a0 = u64::MAX;
+        return;
+    };
+
+    // Authority: the caller must hold a `SpanSink` cap at handle `a0`. Resolve
+    // under the lock, then drop it before the intern/emit path.
+    let authorized = {
+        let caps = proc.caps.lock();
+        invoke_span(&caps, Handle::from_raw(frame.a0 as u32)).is_ok()
+    };
+    if !authorized {
+        frame.a0 = u64::MAX;
+        return;
+    }
+
+    // Copy the span name out of user memory (range-validated, SUM-guarded).
+    let mut buf = [0u8; MAX_USER_STR_LEN];
+    let Some(bytes) = crate::user::copy_from_user(frame.a1 as usize, frame.a2 as usize, &mut buf)
+    else {
+        frame.a0 = u64::MAX;
+        return;
+    };
+    let Ok(name) = core::str::from_utf8(bytes) else {
+        frame.a0 = u64::MAX;
+        return;
+    };
+
+    // Intern on demand + open a span on this task's cursor; hand back the id.
+    frame.a0 = crate::tracing::span_open_owned(name).0;
 }
 
 /// Timer IRQ handler. Kept tiny: measure duration, arm the next
