@@ -1,6 +1,6 @@
 {
   "theme": "auto",
-  "model": "sonnet",
+  "model": "opus",
   "enabledPlugins": {
     "feature-dev@claude-code-plugins": true,
     "frontend-design@claude-code-plugins": true,
@@ -24,6 +24,18 @@
       "Bash(sed * -i*)",
       "Bash(sed --in-place*)",
       "Bash(pkill -9*)"
+    ],
+    "ask": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git reset:*)",
+      "Bash(git clean:*)",
+      "Bash(git checkout:*)",
+      "Bash(git rebase:*)",
+      "Bash(git merge:*)",
+      "Bash(brew:*)",
+      "Bash(cargo install:*)"
     ],
     "allow": [
       "WebSearch",
@@ -61,7 +73,6 @@
       "Bash(qemu-system-riscv64:*)",
       "Bash(riscv64-elf-gdb:*)",
       "Bash(lldb:*)",
-      "Bash(brew:*)",
       "Bash(python3:*)",
       "Bash(rustc:*)",
       "Bash(docker compose:*)",
@@ -74,8 +85,6 @@
       "Bash(cargo objdump:*)",
       "Bash(cargo search:*)",
       "Bash(cargo mutants:*)",
-      "Bash(cargo machete:*)",
-      "Bash(cargo install:*)",
       "Bash(cargo clean:*)"
     ]
   },
