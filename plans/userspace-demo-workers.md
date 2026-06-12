@@ -92,6 +92,24 @@ boundary — that was the anti-pattern of the first sketch.
   `snitchos-user` runtime wraps this in a `Span` guard whose `Drop`
   closes — mirroring the kernel's `Span` guard, so the program writes
   `let _s = tracer.span("worker_a.tick");`.
+  - The guard holds `Option<SpanId>`: `SpanOpen` can be **refused** (quota),
+    so `Drop` skips the close when the open never succeeded — otherwise it'd
+    `SpanClose` a bogus id.
+- **`drop()` is preemption-safe — by construction, not luck.** A userspace
+  span held open across a `yield`/preemption closes correctly because (1) the
+  span cursor is **per-task and restored on every context switch** (the
+  existing `sched-span-survives-yield` machinery), (2) `SpanClose` is handled
+  in the *closing task's own context*, so the current cursor *is* the
+  opener's, (3) Rust's LIFO drop order matches the cursor stack, and (4) the
+  **non-preemptible-kernel** v0.8 choice means the handler can't be preempted
+  mid-cursor-update. Userspace can't store a kernel cursor pointer (as the
+  kernel guard does defensively) — it doesn't need to: same task ⇒ same cursor.
+- **`handle_span_close` validates the id against the cursor top** and refuses
+  a mismatch (nonzero `a0`). A buggy/forged out-of-order close then can't
+  silently desync even its *own* cursor; blast radius is that task's cursor
+  regardless (can't touch another task or process). `mem::forget(span)`
+  remains a self-inflicted, *observable* leak (an unterminated span on the
+  wire) — same known weakness as the kernel guard, not worth defending now.
 
 ## Intern table & the userspace-name DoS (DONE: growable table)
 
@@ -243,10 +261,20 @@ span; assert the `StringRegister` for `hello.work`, a `SpanStart` with
   `span_end(SpanId)` primitives (existing `span_start` is `'static`+RAII).
 - trap: `handle_span_open` — `copy_from_user` (gated by `user_range_ok`,
   lock-drop discipline) → quota check → intern → emit `SpanStart`, return
-  `span_id`; `handle_span_close` → `SpanEnd`.
-- runtime: `Tracer` + `Span` RAII guard; `hello` opens/closes a span.
+  `span_id`; `handle_span_close` → **validate id against the cursor top,
+  refuse a mismatch** → `SpanEnd`.
+- runtime: `Tracer` + `Span` RAII guard holding `Option<SpanId>` (Drop skips
+  close when open was refused); `hello` opens/closes a span.
 **MUTATE**: intern-or-reuse (double-register survivor), attribution
-(`task_id`/parent), cap rights check, the quota boundary.
+(`task_id`/parent), cap rights check, the quota boundary, the
+close-validates-cursor-top check.
+
+> **Follow-on itest (3b-2, after `Yield` + spans both exist):**
+> `userspace-span-survives-yield` — a U-mode program opens a span, `yield`s
+> mid-span, resumes, closes; assert `SpanStart → ContextSwitch(leave) →
+> ContextSwitch(return) → SpanEnd` with matching span id. The userspace
+> analog of `sched-span-survives-yield`; the direct proof `drop()` isn't
+> confused by a context switch.
 **KILL MUTANTS**: survivors.
 **REFACTOR**: assess.
 **Done when**: `--repeat 10` green, mutation reviewed, human approves.

@@ -184,6 +184,7 @@ fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::Invoke) => handle_invoke(frame),
         Some(Syscall::Exit) => handle_exit(), // does not return
         Some(Syscall::Yield) => crate::sched::yield_now(),
+        Some(Syscall::SpanOpen) | Some(Syscall::SpanClose) => todo!(),
         None => frame.a0 = u64::MAX, // unknown syscall
     }
     // `ecall` is a 4-byte instruction; without advancing past it, `sret`
@@ -216,7 +217,9 @@ fn handle_exit() -> ! {
 fn handle_invoke(frame: &mut TrapFrame) {
     use kernel_core::cap::{Handle, invoke_telemetry};
 
-    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
+    let proc = crate::process::CURRENT_PROCESS
+        .this_cpu()
+        .load(Ordering::Relaxed);
     // SAFETY: set by `user::run` on this hart before `sret`; the `Process`
     // lives in that never-returning frame. Null only if no user process is
     // running here — which then could not have issued this U-mode `ecall`.

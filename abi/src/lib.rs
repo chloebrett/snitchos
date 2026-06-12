@@ -43,6 +43,14 @@ pub enum Syscall {
     /// relinquishes the CPU. The cooperative path; preemption (v0.8) is
     /// the involuntary counterpart.
     Yield = 2,
+    /// Open a span. `a0` = `SpanSink` capability handle, `a1` = pointer to
+    /// the span name in user memory, `a2` = its length. The kernel copies
+    /// and interns the name, opens a span on the caller's task cursor, and
+    /// returns an opaque span id in `a0` (or an error sentinel if refused).
+    SpanOpen = 3,
+    /// Close a span previously opened with [`Self::SpanOpen`]. `a0` = the
+    /// span id the open returned. Emits the matching `SpanEnd`.
+    SpanClose = 4,
 }
 
 impl Syscall {
@@ -55,6 +63,8 @@ impl Syscall {
             0 => Some(Self::Invoke),
             1 => Some(Self::Exit),
             2 => Some(Self::Yield),
+            3 => Some(Self::SpanOpen),
+            4 => Some(Self::SpanClose),
             _ => None,
         }
     }
@@ -69,11 +79,15 @@ mod tests {
         assert_eq!(Syscall::Invoke as usize, 0);
         assert_eq!(Syscall::Exit as usize, 1);
         assert_eq!(Syscall::Yield as usize, 2);
+        assert_eq!(Syscall::SpanOpen as usize, 3);
+        assert_eq!(Syscall::SpanClose as usize, 4);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
         assert_eq!(Syscall::from_usize(2), Some(Syscall::Yield));
-        assert_eq!(Syscall::from_usize(3), None);
+        assert_eq!(Syscall::from_usize(3), Some(Syscall::SpanOpen));
+        assert_eq!(Syscall::from_usize(4), Some(Syscall::SpanClose));
+        assert_eq!(Syscall::from_usize(5), None);
     }
 }
 
