@@ -12,6 +12,59 @@ use alloc::collections::VecDeque;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TaskId(pub u32);
 
+/// Static scheduling priority (v0.8b). Higher runs first; `Normal` is the
+/// default. Discriminants are the level used by [`aged_priority`] arithmetic —
+/// `High` is the ceiling aging saturates at.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Priority {
+    Low = 0,
+    Normal = 1,
+    High = 2,
+}
+
+/// Effective priority *level* of a ready task, accounting for aging: its base
+/// level plus one level per `step` ticks it has waited, saturating at
+/// [`Priority::High`]. This is what keeps low-priority tasks from starving — the
+/// longer one waits, the higher it effectively bids for the CPU.
+///
+/// `step == 0` disables aging (no boost, never panics — no division by zero).
+/// Pure so the policy is host-tested off-target; [`pick_next`] composes it.
+#[must_use]
+pub fn aged_priority(base: Priority, waited_ticks: u64, step: u64) -> u8 {
+    let boost = if step == 0 { 0 } else { waited_ticks / step };
+    ((base as u64) + boost).min(Priority::High as u64) as u8
+}
+
+/// A ready task the scheduler may pick: its id, base priority, and when it last
+/// entered the ready set (for aging).
+#[derive(Clone, Copy, Debug)]
+pub struct Candidate {
+    pub id: TaskId,
+    pub base: Priority,
+    pub enqueued_tick: u64,
+}
+
+/// Choose the next task to run from the ready set: the one with the highest
+/// *effective* ([`aged_priority`]) level, ties broken by longest wait (smallest
+/// `enqueued_tick`) so equal-priority tasks round-robin fairly. `None` if the
+/// ready set is empty.
+///
+/// `waited = now - enqueued_tick`, saturating at 0 if the clock is non-monotonic
+/// (never panics, never boosts on a bogus wait). Pure: the kernel builds
+/// `candidates` from its task table and runs the winner.
+#[must_use]
+pub fn pick_next(candidates: &[Candidate], now: u64, step: u64) -> Option<TaskId> {
+    candidates
+        .iter()
+        .max_by_key(|c| {
+            let waited = now.saturating_sub(c.enqueued_tick);
+            // Higher effective priority wins; among equals, the longest waiter
+            // (smallest enqueued_tick → largest `Reverse`) wins.
+            (aged_priority(c.base, waited, step), core::cmp::Reverse(c.enqueued_tick))
+        })
+        .map(|c| c.id)
+}
+
 /// Where a task is in the scheduler's lifecycle.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TaskState {
@@ -247,5 +300,99 @@ mod tests {
         // If `now` is before `entry` (clock went backwards / wraparound),
         // never report expiry and never panic — guard, don't subtract-overflow.
         assert!(!quantum_expired(100, 50, 10));
+    }
+
+    #[test]
+    fn aging_no_boost_below_a_step() {
+        // Waited less than one step — effective priority is still the base.
+        assert_eq!(aged_priority(Priority::Low, 9, 10), Priority::Low as u8);
+    }
+
+    #[test]
+    fn aging_one_boost_at_the_step_boundary() {
+        // Exactly one step waited → one level of boost.
+        assert_eq!(aged_priority(Priority::Low, 10, 10), Priority::Normal as u8);
+    }
+
+    #[test]
+    fn aging_saturates_at_high() {
+        // A Low task waiting many steps can't exceed High — no runaway boost.
+        assert_eq!(aged_priority(Priority::Low, 100, 10), Priority::High as u8);
+    }
+
+    #[test]
+    fn aging_a_high_task_stays_high() {
+        assert_eq!(aged_priority(Priority::High, 50, 10), Priority::High as u8);
+    }
+
+    #[test]
+    fn aging_normal_reaches_high_after_one_step() {
+        assert_eq!(aged_priority(Priority::Normal, 10, 10), Priority::High as u8);
+    }
+
+    #[test]
+    fn aging_disabled_when_step_is_zero() {
+        // `step == 0` must not divide-by-zero; it disables aging entirely.
+        assert_eq!(aged_priority(Priority::Low, 1_000_000, 0), Priority::Low as u8);
+    }
+
+    fn cand(id: u32, base: Priority, enqueued_tick: u64) -> Candidate {
+        Candidate { id: TaskId(id), base, enqueued_tick }
+    }
+
+    #[test]
+    fn pick_from_empty_is_none() {
+        assert_eq!(pick_next(&[], 100, 10), None);
+    }
+
+    #[test]
+    fn pick_single_candidate_returns_it() {
+        assert_eq!(pick_next(&[cand(7, Priority::Low, 0)], 100, 10), Some(TaskId(7)));
+    }
+
+    #[test]
+    fn pick_highest_base_priority_when_all_fresh() {
+        // All enqueued "now" → no aging → pure base priority decides.
+        let cs = [
+            cand(1, Priority::Low, 100),
+            cand(2, Priority::High, 100),
+            cand(3, Priority::Normal, 100),
+        ];
+        assert_eq!(pick_next(&cs, 100, 10), Some(TaskId(2)));
+    }
+
+    #[test]
+    fn pick_aged_low_overtakes_fresh_normal() {
+        // A Low task that has waited two steps ages to High and beats a freshly
+        // enqueued Normal — this is the anti-starvation guarantee.
+        let cs = [
+            cand(1, Priority::Normal, 100), // fresh → effective Normal
+            cand(2, Priority::Low, 80),     // waited 20 = 2 steps → effective High
+        ];
+        assert_eq!(pick_next(&cs, 100, 10), Some(TaskId(2)));
+    }
+
+    #[test]
+    fn pick_breaks_ties_by_longest_wait() {
+        // Equal effective priority → the task that has waited longest (smallest
+        // enqueued_tick) runs, giving round-robin fairness within a level.
+        let cs = [
+            cand(1, Priority::Normal, 90),
+            cand(2, Priority::Normal, 50), // waited longer
+            cand(3, Priority::Normal, 70),
+        ];
+        assert_eq!(pick_next(&cs, 100, 1000), Some(TaskId(2)));
+    }
+
+    #[test]
+    fn pick_non_monotonic_wait_does_not_panic_or_boost() {
+        // Task 1 was enqueued in the "future" (now < enqueued): the wait must
+        // saturate to 0 — no boost, no overflow/panic — leaving it at its base
+        // High. Task 2 waited only 5 < step, so it stays Low. High wins.
+        let cs = [
+            cand(1, Priority::High, 200), // enqueued after `now` → wait saturates to 0
+            cand(2, Priority::Low, 95),   // waited 5 < step → no boost → Low
+        ];
+        assert_eq!(pick_next(&cs, 100, 10), Some(TaskId(1)));
     }
 }

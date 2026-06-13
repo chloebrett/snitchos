@@ -19,6 +19,7 @@ pub mod heap_smoke;
 pub mod frame;
 pub mod heap;
 pub mod intern;
+pub mod ipc;
 pub mod mmu;
 pub mod preinit;
 pub mod sched;

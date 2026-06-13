@@ -1,0 +1,192 @@
+//! Synchronous endpoint rendezvous — the pure v0.9 IPC core.
+//!
+//! An endpoint is a meeting point with a wait queue. Its invariant: it
+//! never holds senders *and* receivers at once — the instant both exist
+//! they rendezvous and both proceed. So at rest it is in exactly one of
+//! three states. [`on_send`] / [`on_receive`] are the mirror-image
+//! transition functions: pure, host-tested, no kernel state. The kernel
+//! side owns the table of endpoints, the parked messages, and the
+//! block/wake wiring; this module owns only the bookkeeping and its
+//! invariant. Mirrors `heap::watermark_grow_decision` /
+//! `sched::quantum_expired`.
+//!
+//! See `plans/v0.9-ipc.md`.
+
+use alloc::collections::VecDeque;
+
+use crate::sched::TaskId;
+
+/// An endpoint at rest. The invariant — never both sides waiting — is
+/// upheld by [`on_send`] / [`on_receive`]: senders only accumulate while
+/// no receiver waits, and the first receiver drains a sender (and vice
+/// versa). The waiting queues are never empty: draining the last waiter
+/// collapses the endpoint back to `Idle`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndpointState {
+    /// Nobody waiting.
+    Idle,
+    /// Senders blocked, waiting for a receiver. FIFO: the front sender
+    /// rendezvouses with the next receiver to arrive.
+    SendersWaiting(VecDeque<TaskId>),
+    /// Receivers blocked, waiting for a sender. FIFO likewise.
+    ReceiversWaiting(VecDeque<TaskId>),
+}
+
+/// What the caller of a `send`/`receive` must do as a result of the
+/// transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RendezvousAction {
+    /// No peer was waiting: the caller is now parked on the endpoint and
+    /// must block (give up the CPU).
+    Block,
+    /// A peer was waiting: pair with `peer` (copy the message across and
+    /// wake it). Neither side stays blocked.
+    Rendezvous { peer: TaskId },
+}
+
+/// Pop the front waiter from a non-empty queue, collapsing the endpoint
+/// back to `Idle` when that was the last one. `rebuild` reconstructs the
+/// same waiting variant around the remainder.
+fn drain_front(
+    mut queue: VecDeque<TaskId>,
+    rebuild: impl FnOnce(VecDeque<TaskId>) -> EndpointState,
+) -> (EndpointState, TaskId) {
+    // SAFETY (logic, not memory): a waiting queue is never empty by
+    // construction — `on_send`/`on_receive` collapse to `Idle` the moment
+    // the last waiter drains, so this variant only ever holds ≥1 waiter.
+    let peer = queue.pop_front().expect("a waiting queue is never empty by construction");
+    let next = if queue.is_empty() { EndpointState::Idle } else { rebuild(queue) };
+    (next, peer)
+}
+
+/// Transition for a sender arriving at the endpoint: rendezvous with a
+/// waiting receiver if one exists, otherwise park behind any other
+/// senders and block.
+#[must_use]
+pub fn on_send(state: EndpointState, me: TaskId) -> (EndpointState, RendezvousAction) {
+    match state {
+        EndpointState::ReceiversWaiting(queue) => {
+            let (next, peer) = drain_front(queue, EndpointState::ReceiversWaiting);
+            (next, RendezvousAction::Rendezvous { peer })
+        }
+        EndpointState::Idle => {
+            (EndpointState::SendersWaiting(VecDeque::from([me])), RendezvousAction::Block)
+        }
+        EndpointState::SendersWaiting(mut queue) => {
+            queue.push_back(me);
+            (EndpointState::SendersWaiting(queue), RendezvousAction::Block)
+        }
+    }
+}
+
+/// Transition for a receiver arriving at the endpoint. The mirror of
+/// [`on_send`].
+#[must_use]
+pub fn on_receive(state: EndpointState, me: TaskId) -> (EndpointState, RendezvousAction) {
+    match state {
+        EndpointState::SendersWaiting(queue) => {
+            let (next, peer) = drain_front(queue, EndpointState::SendersWaiting);
+            (next, RendezvousAction::Rendezvous { peer })
+        }
+        EndpointState::Idle => {
+            (EndpointState::ReceiversWaiting(VecDeque::from([me])), RendezvousAction::Block)
+        }
+        EndpointState::ReceiversWaiting(mut queue) => {
+            queue.push_back(me);
+            (EndpointState::ReceiversWaiting(queue), RendezvousAction::Block)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn senders(ids: &[u32]) -> EndpointState {
+        EndpointState::SendersWaiting(ids.iter().copied().map(TaskId).collect())
+    }
+
+    fn receivers(ids: &[u32]) -> EndpointState {
+        EndpointState::ReceiversWaiting(ids.iter().copied().map(TaskId).collect())
+    }
+
+    #[test]
+    fn send_into_idle_blocks_and_parks_the_sender() {
+        let (state, action) = on_send(EndpointState::Idle, TaskId(7));
+
+        assert_eq!(action, RendezvousAction::Block);
+        assert_eq!(state, senders(&[7]));
+    }
+
+    #[test]
+    fn receive_into_idle_blocks_and_parks_the_receiver() {
+        let (state, action) = on_receive(EndpointState::Idle, TaskId(7));
+
+        assert_eq!(action, RendezvousAction::Block);
+        assert_eq!(state, receivers(&[7]));
+    }
+
+    #[test]
+    fn receive_with_one_sender_waiting_rendezvouses_and_collapses_to_idle() {
+        let (state, action) = on_receive(senders(&[3]), TaskId(9));
+
+        assert_eq!(action, RendezvousAction::Rendezvous { peer: TaskId(3) });
+        assert_eq!(state, EndpointState::Idle);
+    }
+
+    #[test]
+    fn send_with_one_receiver_waiting_rendezvouses_and_collapses_to_idle() {
+        let (state, action) = on_send(receivers(&[3]), TaskId(9));
+
+        assert_eq!(action, RendezvousAction::Rendezvous { peer: TaskId(3) });
+        assert_eq!(state, EndpointState::Idle);
+    }
+
+    #[test]
+    fn a_second_sender_queues_behind_the_first() {
+        let (state, action) = on_send(senders(&[1]), TaskId(2));
+
+        assert_eq!(action, RendezvousAction::Block);
+        assert_eq!(state, senders(&[1, 2]));
+    }
+
+    #[test]
+    fn a_second_receiver_queues_behind_the_first() {
+        let (state, action) = on_receive(receivers(&[1]), TaskId(2));
+
+        assert_eq!(action, RendezvousAction::Block);
+        assert_eq!(state, receivers(&[1, 2]));
+    }
+
+    #[test]
+    fn senders_rendezvous_in_fifo_arrival_order() {
+        let (state, _) = on_send(EndpointState::Idle, TaskId(1));
+        let (state, _) = on_send(state, TaskId(2));
+
+        let (state, first) = on_receive(state, TaskId(10));
+        assert_eq!(first, RendezvousAction::Rendezvous { peer: TaskId(1) });
+        assert_eq!(state, senders(&[2]));
+
+        let (state, second) = on_receive(state, TaskId(11));
+        assert_eq!(second, RendezvousAction::Rendezvous { peer: TaskId(2) });
+        assert_eq!(state, EndpointState::Idle);
+    }
+
+    #[test]
+    fn a_send_into_receivers_never_produces_a_both_sides_waiting_state() {
+        // The invariant: a sender arriving while receivers wait drains a
+        // receiver and never appends itself alongside them.
+        let (state, action) = on_send(receivers(&[1, 2]), TaskId(99));
+
+        assert_eq!(action, RendezvousAction::Rendezvous { peer: TaskId(1) });
+        assert_eq!(state, receivers(&[2]));
+    }
+
+    #[test]
+    fn a_receive_into_senders_never_produces_a_both_sides_waiting_state() {
+        let (state, action) = on_receive(senders(&[1, 2]), TaskId(99));
+
+        assert_eq!(action, RendezvousAction::Rendezvous { peer: TaskId(1) });
+        assert_eq!(state, senders(&[2]));
+    }
+}
