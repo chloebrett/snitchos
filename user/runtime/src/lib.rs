@@ -18,9 +18,24 @@
 
 use core::arch::asm;
 
+use linked_list_allocator::LockedHeap;
 use snitchos_abi::Syscall;
 
 core::arch::global_asm!(include_str!("start.S"));
+
+/// Userspace heap arena — a fixed region in `.bss` that the ELF loader maps
+/// (the same way it maps the stack). 64 KiB is generous for the small programs
+/// we run today; growing it on demand (a `brk`-style syscall + `Heap::extend`)
+/// is a later step. Running out is a clean alloc error, not UB.
+const HEAP_SIZE: usize = 64 * 1024;
+static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+
+/// The userspace global allocator: a spinlock-wrapped linked-list heap over
+/// [`HEAP`]. Initialised once in [`__snitchos_start`] before any program code
+/// runs. (The lock gives this `&self` static its interior mutability; it has
+/// nothing to do with the heap being fixed-size.)
+#[global_allocator]
+static ALLOC: LockedHeap = LockedHeap::empty();
 
 unsafe extern "C" {
     /// The program's entry, provided by each `#[no_mangle]` binary. Returns
@@ -36,6 +51,14 @@ unsafe extern "C" {
 /// then terminates the process once `rust_main` returns and its guards drop.
 #[unsafe(no_mangle)]
 extern "C" fn __snitchos_start(telemetry_handle: usize, span_handle: usize) -> ! {
+    // SAFETY: `HEAP` is a static `.bss` arena the loader maps; this runs once,
+    // before `rust_main` (and thus before any allocation). `addr_of_mut!`
+    // avoids forming a reference to the `static mut`.
+    unsafe {
+        ALLOC
+            .lock()
+            .init(core::ptr::addr_of_mut!(HEAP).cast::<u8>(), HEAP_SIZE);
+    }
     // SAFETY: every program links this runtime and provides `rust_main` per
     // the contract above.
     unsafe {

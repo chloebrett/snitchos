@@ -11,3 +11,8 @@ publish = false
 
 [dependencies]
 snitchos-abi = { path = "../../abi" }
+# Userspace heap: a `LockedHeap` global allocator (a `Spinlock<Heap>` — the lock
+# gives the `#[global_allocator]` static its interior mutability) over a static
+# `.bss` arena. Same vendored fork the kernel uses (workspace `[patch]`); its
+# `Heap` supports `extend`, so growth later (a brk syscall) needs no swap.
+linked_list_allocator = { version = "0.10" }
