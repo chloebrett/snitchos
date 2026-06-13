@@ -45,6 +45,7 @@ pub enum OwnedFrame {
     },
     SyscallRefused { syscall: u8, reason: RefusalReason, task_id: u32, t: u64, hart_id: u8 },
     Log { msg: String, task_id: u32, t: u64, hart_id: u8 },
+    Message { endpoint: u32, from: u32, to: u32, parent_span: SpanId, t: u64, hart_id: u8 },
 }
 
 impl OwnedFrame {
@@ -87,6 +88,9 @@ impl OwnedFrame {
             }
             Frame::Log { msg, task_id, t, hart_id } => {
                 OwnedFrame::Log { msg: msg.to_string(), task_id, t, hart_id }
+            }
+            Frame::Message { endpoint, from, to, parent_span, t, hart_id } => {
+                OwnedFrame::Message { endpoint, from, to, parent_span, t, hart_id }
             }
         }
     }
@@ -167,6 +171,16 @@ mod tests {
     }
 
     #[test]
+    fn owned_frame_round_trips_message() {
+        let f = Frame::Message { endpoint: 2, from: 4, to: 5, parent_span: SpanId(42), t: 1234, hart_id: 1 };
+        let owned = OwnedFrame::from_borrowed(&f);
+        assert_eq!(
+            owned,
+            OwnedFrame::Message { endpoint: 2, from: 4, to: 5, parent_span: SpanId(42), t: 1234, hart_id: 1 },
+        );
+    }
+
+    #[test]
     fn owned_frame_handles_every_variant() {
         // Add a case here when adding a Frame variant. The match in
         // `from_borrowed` is exhaustive so this is belt-and-braces;
@@ -184,6 +198,7 @@ mod tests {
             Frame::StringRegister { id: StringId(0), value: "x" },
             Frame::MetricRegister { name_id: StringId(0), kind: MetricKind::Counter },
             Frame::HartRegister { id: 0, mhartid: 0, role: crate::HartRole::Boot },
+            Frame::Message { endpoint: 1, from: 2, to: 3, parent_span: SpanId(4), t: 5, hart_id: 0 },
         ] {
             // Just exercising — that we get *some* OwnedFrame back
             // without panicking covers the variant.

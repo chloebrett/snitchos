@@ -543,6 +543,8 @@ impl View {
                 format!("SyscallRefused {{ syscall={syscall} reason={reason:?} task={task_id} t={t} hart={hart_id} }}"),
             OwnedFrame::Log { msg, task_id, t, hart_id } =>
                 format!("Log {{ {msg:?} task={task_id} t={t} hart={hart_id} }}"),
+            OwnedFrame::Message { endpoint, from, to, parent_span, t, hart_id } =>
+                format!("Message {{ endpoint={endpoint} from={from} to={to} parent={parent_span:?} t={t} hart={hart_id} }}"),
         }
     }
 }
@@ -647,6 +649,7 @@ fn variant_name(frame: &OwnedFrame) -> &'static str {
         OwnedFrame::CapEvent { .. } => "CapEvent",
         OwnedFrame::SyscallRefused { .. } => "SyscallRefused",
         OwnedFrame::Log { .. } => "Log",
+        OwnedFrame::Message { .. } => "Message",
     }
 }
 

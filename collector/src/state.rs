@@ -333,6 +333,14 @@ impl State {
                 self.advance_anchor(*t);
                 None
             }
+            Frame::Message { t, .. } => {
+                // v0.9 IPC rendezvous. On the wire (the itest reads it
+                // directly). Rooting the receiver's span under `parent_span`
+                // — the trace crossing the process boundary — is the v0.9
+                // headline, surfaced once an emitter exists. Anchor for now.
+                self.advance_anchor(*t);
+                None
+            }
         }
     }
 

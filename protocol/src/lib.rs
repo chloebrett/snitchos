@@ -159,6 +159,13 @@ pub enum Frame<'a> {
   /// (the collector can surface it as logs), attributed to `task_id`. New
   /// variants go at the END — postcard encodes discriminants positionally.
   Log { msg: &'a str, task_id: u32, t: u64, hart_id: u8 },
+  /// A synchronous **IPC rendezvous** (v0.9): a message crossed from task
+  /// `from` to task `to` over endpoint `endpoint`. `parent_span` is the
+  /// sender's open span at send time, carried so the host can root the
+  /// receiver's handling span under it — the trace following the message
+  /// across the process boundary. New variants go at the END — postcard
+  /// encodes discriminants positionally.
+  Message { endpoint: u32, from: u32, to: u32, parent_span: SpanId, t: u64, hart_id: u8 },
 }
 
 /// The lifecycle phase of a [`Frame::CapEvent`]. v0.7b emits only
@@ -306,6 +313,27 @@ mod tests {
       object: CapObject::Endpoint,
       rights: 0b0010,
       t: 9012,
+      hart_id: 1,
+    };
+
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+
+    assert_eq!(frame, decoded);
+  }
+
+  /// Roundtrip a `Frame::Message` — the v0.9 IPC rendezvous record. Carries
+  /// the trace link (`parent_span`, the sender's open span) so the host can
+  /// stitch the receiver's work under the sender's span across the boundary.
+  #[test]
+  fn message_roundtrips() {
+    let frame = Frame::Message {
+      endpoint: 2,
+      from: 4,
+      to: 5,
+      parent_span: SpanId(42),
+      t: 1234,
       hart_id: 1,
     };
 
