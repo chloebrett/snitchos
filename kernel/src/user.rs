@@ -180,9 +180,16 @@ fn run(image: &'static [u8]) -> ! {
     // Publish the process so the syscall trap handler can reach its
     // CapTable. `process` lives in this frame, which never returns (`enter`
     // is `-> !`), so the pointer stays valid for every trap from U-mode.
+    let process_ptr = core::ptr::addr_of!(process).cast_mut();
     crate::process::CURRENT_PROCESS
         .this_cpu()
-        .store(core::ptr::addr_of!(process).cast_mut(), core::sync::atomic::Ordering::Relaxed);
+        .store(process_ptr, core::sync::atomic::Ordering::Relaxed);
+
+    // Associate this task with its address space so that when the scheduler
+    // later switches *back* into it (after another userspace task ran), it
+    // reloads `satp` + `CURRENT_PROCESS`. Without this, a second userspace
+    // process would resume under the previous process's page table.
+    crate::sched::set_current_address_space(process.root_pa, process_ptr);
 
     // Hand the process its bootstrap capability *by value*: the kernel sets
     // `a0` to the granted handle at entry, so the program receives its caps

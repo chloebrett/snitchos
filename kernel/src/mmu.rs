@@ -11,7 +11,7 @@
 use core::arch::asm;
 
 use fdt::Fdt;
-use kernel_core::mmu::{self as core_mmu, MapError, PageTable, Pte, PtMem, PtePerms};
+use kernel_core::mmu::{self as core_mmu, MapError, PageTable, PtMem, Pte, PtePerms};
 
 pub use kernel_core::mmu::{KERNEL_OFFSET, LINEAR_OFFSET, va_to_pa};
 
@@ -39,7 +39,10 @@ impl MmioRegions {
     const CAP: usize = 16;
 
     pub const fn new() -> Self {
-        Self { bases: [0; Self::CAP], len: 0 }
+        Self {
+            bases: [0; Self::CAP],
+            len: 0,
+        }
     }
 
     /// Insert a 2 MiB-aligned base if not already present. Silently
@@ -70,16 +73,16 @@ impl MmioRegions {
 /// DTB iteration crashes pre-MMU under higher-half link in a way we
 /// haven't isolated (see `plans/v0.4-memory-findings.md`). Kept here
 /// for the day we figure it out.
-#[expect(dead_code, reason = "DTB iter pre-MMU crashes under higher-half link — see findings")]
+#[expect(
+    dead_code,
+    reason = "DTB iter pre-MMU crashes under higher-half link — see findings"
+)]
 pub fn collect_mmio_regions(dtb: &Fdt) -> MmioRegions {
     let mut regions = MmioRegions::new();
     for node in dtb.all_nodes() {
         let is_mmio = node
             .compatible()
-            .map(|c| {
-                c.all()
-                    .any(|s| s == "ns16550a" || s == "virtio,mmio")
-            })
+            .map(|c| c.all().any(|s| s == "ns16550a" || s == "virtio,mmio"))
             .unwrap_or(false);
         if !is_mmio {
             continue;
@@ -170,25 +173,37 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
         let map_id_kernel = |va, pa| {
             (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
                 &mut *(&raw mut BOOT_PT_MID_KERNEL),
-                mid_kernel_pa, va, pa, perms,
+                mid_kernel_pa,
+                va,
+                pa,
+                perms,
             );
         };
         let map_higher_kernel = |va, pa| {
             (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
                 &mut *(&raw mut BOOT_PT_MID_HIGHER_KERNEL),
-                mid_higher_pa, va, pa, perms,
+                mid_higher_pa,
+                va,
+                pa,
+                perms,
             );
         };
         let map_id_mmio = |va, pa| {
             (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
                 &mut *(&raw mut BOOT_PT_MID_MMIO),
-                mid_mmio_pa, va, pa, perms,
+                mid_mmio_pa,
+                va,
+                pa,
+                perms,
             );
         };
         let map_higher_mmio = |va, pa| {
             (&mut *(&raw mut BOOT_PT_ROOT)).map_2mib(
                 &mut *(&raw mut BOOT_PT_MID_HIGHER_MMIO),
-                mid_higher_mmio_pa, va, pa, perms,
+                mid_higher_mmio_pa,
+                va,
+                pa,
+                perms,
             );
         };
 
@@ -392,6 +407,40 @@ pub fn satp_for(root_pa: usize) -> u64 {
     (SATP_MODE_SV39 << 60) | ((root_pa as u64) >> 12)
 }
 
+/// Physical address of the root page table currently active in `satp` on
+/// this hart. Reads the live CSR (PPN is bits 43:0 in Sv39) and shifts it
+/// back to a PA — the single source of truth for "which address space is
+/// loaded," so the scheduler needn't track it separately.
+#[must_use]
+pub fn current_satp_root() -> usize {
+    let satp: usize;
+    // SAFETY: reads a CSR; no memory access, no side effects.
+    unsafe { asm!("csrr {}, satp", out(reg) satp, options(nomem, nostack)) };
+    const PPN_MASK: usize = (1 << 44) - 1;
+    (satp & PPN_MASK) << 12
+}
+
+/// Activate the address space rooted at `root_pa` on this hart: write
+/// `satp` (Sv39 mode + PPN) and `sfence.vma` to flush stale translations.
+/// Used by the scheduler to switch address spaces when it switches into a
+/// task that lives in a different user root than the one currently loaded.
+pub fn activate(root_pa: usize) {
+    let satp = satp_for(root_pa);
+    // SAFETY: switches the active address space. Every address space shares
+    // the kernel high-half (`new_user_root` copies slots 256..512 from the
+    // boot root), so the currently-executing kernel code/stack stay mapped
+    // across the switch. The `sfence.vma` flushes translations cached under
+    // the old root.
+    unsafe {
+        asm!(
+            "csrw satp, {satp}",
+            "sfence.vma",
+            satp = in(reg) satp,
+            options(nostack),
+        );
+    }
+}
+
 /// Repoint an already-mapped 4 KiB VA `va` at a new PA `new_pa` with
 /// `perms`, then shoot down the stale translation on every hart.
 ///
@@ -469,8 +518,7 @@ pub fn shootdown(va: usize) {
     unsafe { asm!("sfence.vma {0}, zero", in(reg) va, options(nostack, nomem)) };
 
     let me = crate::percpu::current_hartid();
-    let online = crate::percpu::SMP_ONLINE_HARTS
-        .load(core::sync::atomic::Ordering::Relaxed);
+    let online = crate::percpu::SMP_ONLINE_HARTS.load(core::sync::atomic::Ordering::Relaxed);
 
     // (2) publish shootdown_va + snapshot acks for each target. We
     // do this in a loop so all sends complete before any spin-wait,
@@ -511,4 +559,3 @@ pub fn shootdown(va: usize) {
 
     SHOOTDOWNS_SENT_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
-

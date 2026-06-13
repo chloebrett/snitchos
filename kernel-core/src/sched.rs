@@ -62,6 +62,26 @@ impl Default for Runqueue {
     }
 }
 
+/// Decide whether switching into a task requires reloading `satp`, and to
+/// which root page-table PA.
+///
+/// `active_root` is the root currently loaded in `satp`. `next_root` is the
+/// incoming task's user address space, or `None` for a kernel task — which
+/// runs correctly under whatever root is loaded, because the kernel high-half
+/// is mapped into every address space.
+///
+/// Returns `Some(root)` when the caller must write `root` to `satp` (and
+/// `sfence.vma`), or `None` when the loaded `satp` already serves the next
+/// task. Pure so the policy is host-tested away from the asm; the kernel-side
+/// `yield_now` reads the result and does the CSR write.
+#[must_use]
+pub fn address_space_switch(active_root: usize, next_root: Option<usize>) -> Option<usize> {
+    match next_root {
+        Some(root) if root != active_root => Some(root),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +167,35 @@ mod tests {
         q.push_back(TaskId(u32::MAX));
         assert_eq!(q.pop_front(), Some(TaskId(0)));
         assert_eq!(q.pop_front(), Some(TaskId(u32::MAX)));
+    }
+
+    #[test]
+    fn switch_into_kernel_task_keeps_current_satp() {
+        // A kernel task (no address space) runs under whatever root is
+        // loaded — the kernel high-half is mapped into every space — so
+        // no `satp` write is needed.
+        assert_eq!(address_space_switch(0xA000, None), None);
+    }
+
+    #[test]
+    fn switch_into_same_address_space_is_a_noop() {
+        // Switching into a user task whose root is already in `satp`
+        // (e.g. kernel idle ran under it in between) needs no reload —
+        // avoids a redundant TLB flush.
+        assert_eq!(address_space_switch(0xB000, Some(0xB000)), None);
+    }
+
+    #[test]
+    fn switch_into_different_address_space_loads_the_next_root() {
+        // The crux: switching from one user process to another with a
+        // distinct root must load the *next* task's root into `satp`.
+        assert_eq!(address_space_switch(0xB000, Some(0xC000)), Some(0xC000));
+    }
+
+    #[test]
+    fn switch_returns_the_next_root_not_the_active_one() {
+        // Guards against returning `active_root` — the value written to
+        // `satp` must be the incoming task's address space.
+        assert_eq!(address_space_switch(0x1000, Some(0x2000)), Some(0x2000));
     }
 }

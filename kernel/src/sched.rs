@@ -19,12 +19,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::arch::global_asm;
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use protocol::SwitchReason;
 
-use kernel_core::sched::{Runqueue, TaskId, TaskState};
+use kernel_core::sched::{address_space_switch, Runqueue, TaskId, TaskState};
 use kernel_core::span::SpanCursor;
+
+use crate::process::Process;
 
 use crate::percpu::{PerCpu, MAX_HARTS};
 use crate::sync::Mutex;
@@ -119,6 +121,21 @@ pub struct Task {
     /// outside the runqueue, but the value is correct.
     pub state: TaskState,
     pub span_cursor: SpanCursor,
+    /// The user address space this task runs in: the root page-table PA,
+    /// or `0` for a kernel task (`main`/`idle`), which runs under whatever
+    /// root is loaded — the kernel high-half is mapped into every space.
+    /// Set by `user::run` (via [`set_current_address_space`]) once the task
+    /// has built its `Process`, before it `enter`s U-mode. The scheduler
+    /// reads it on switch to decide whether to reload `satp`.
+    /// `Relaxed`: written once by the task itself, read by the same hart's
+    /// scheduler; no cross-hart publication of pointed-at state here.
+    pub address_space: AtomicUsize,
+    /// Pointer to this task's [`Process`] (for `CURRENT_PROCESS` on switch),
+    /// or null for a kernel task. Set alongside [`Task::address_space`]; the
+    /// `Process` lives in `user::run`'s never-returning frame, so the pointer
+    /// stays valid. `Relaxed`: same single-writer-same-hart-reader discipline
+    /// as `CURRENT_PROCESS` itself.
+    pub process: AtomicPtr<Process>,
     /// Total time on-CPU in `time`-CSR ticks. Bumped on every yield
     /// out of this task; read by the heartbeat to emit
     /// `snitchos.task.<name>.cpu_time_ticks`. `Relaxed`: counter.
@@ -184,6 +201,8 @@ impl Task {
             name,
             state,
             span_cursor: SpanCursor::new(),
+            address_space: AtomicUsize::new(0),
+            process: AtomicPtr::new(core::ptr::null_mut()),
             cpu_time_ticks: AtomicU64::new(0),
             runs: AtomicU64::new(0),
             cpu_time_metric,
@@ -338,6 +357,27 @@ pub fn current_task_id() -> TaskId {
     TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed))
 }
 
+/// Associate the currently-running task with the user address space it is
+/// about to enter: its root page-table PA and its [`Process`]. Called by
+/// `user::run` after building the process but before `enter`, so that when
+/// the scheduler later switches *back* into this task it reloads `satp` and
+/// republishes `CURRENT_PROCESS`. Without this, a second userspace process
+/// would resume under the previous process's address space.
+///
+/// `proc` must point at a `Process` that outlives every future run of this
+/// task — `user::run`'s frame never returns, satisfying that.
+pub fn set_current_address_space(root_pa: usize, proc: *mut Process) {
+    let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
+    let sched = SCHEDULER.lock();
+    for task in &sched.tasks {
+        if task.id == current_id {
+            task.address_space.store(root_pa, Ordering::Relaxed);
+            task.process.store(proc, Ordering::Relaxed);
+            break;
+        }
+    }
+}
+
 /// Storage for "which task is on CPU right now," lifted to `PerCpu`
 /// in v0.6 step 5. Single-hart through step 10: every access reads /
 /// writes `[0]`. Under multi-hart, each hart sees its own slot and
@@ -474,6 +514,28 @@ pub fn spawn_on(hart: usize, name: &str, entry: extern "C" fn() -> !) -> TaskId 
     id
 }
 
+/// Reload `satp` and `CURRENT_PROCESS` if the task being switched into
+/// lives in a different user address space than the one currently loaded.
+///
+/// `next_root` is the incoming task's root PA (`0` for a kernel task);
+/// `next_proc` its `Process` pointer. A kernel task (`root == 0`) runs under
+/// whatever space is loaded — the high-half is shared — so nothing changes.
+/// A user task whose root already matches `satp` (e.g. an `idle` ran under it
+/// in between) needs no reload either. Only a genuine cross-address-space
+/// switch writes the CSR (`mmu::activate` does the `sfence.vma`) and
+/// republishes the process for the trap handler. Must run *after* the
+/// scheduler lock drops and *before* the `switch` asm, so the resumed task
+/// `sret`s under its own address space.
+fn switch_address_space(next_root: usize, next_proc: *mut Process) {
+    let next = (next_root != 0).then_some(next_root);
+    if let Some(root) = address_space_switch(crate::mmu::current_satp_root(), next) {
+        crate::mmu::activate(root);
+        crate::process::CURRENT_PROCESS
+            .this_cpu()
+            .store(next_proc, Ordering::Relaxed);
+    }
+}
+
 /// Voluntarily yield CPU to the next task on the runqueue. The
 /// current task is pushed onto the back of the runqueue; the next
 /// task is popped from the front and switched into. If the runqueue
@@ -488,7 +550,7 @@ pub fn yield_now() {
     let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
     let me = crate::percpu::current_hartid();
 
-    let (current_ctx, next_ctx, next_id) = {
+    let (current_ctx, next_ctx, next_id, next_root, next_proc) = {
         let mut sched = SCHEDULER.lock();
         let Some(next_id) = sched.runqueues[me].pop_front() else {
             return; // nothing else ready on this hart — keep running
@@ -512,6 +574,8 @@ pub fn yield_now() {
         let mut current_ctx: *mut TaskContext = core::ptr::null_mut();
         let mut next_ctx: *mut TaskContext = core::ptr::null_mut();
         let mut next_cursor: *mut SpanCursor = core::ptr::null_mut();
+        let mut next_root: usize = 0;
+        let mut next_proc: *mut Process = core::ptr::null_mut();
         for task in &sched.tasks {
             if task.id == current_id {
                 current_ctx = task.context.get();
@@ -520,6 +584,8 @@ pub fn yield_now() {
             if task.id == next_id {
                 next_ctx = task.context.get();
                 next_cursor = (&task.span_cursor as *const SpanCursor) as *mut SpanCursor;
+                next_root = task.address_space.load(Ordering::Relaxed);
+                next_proc = task.process.load(Ordering::Relaxed);
                 task.runs.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -530,9 +596,11 @@ pub fn yield_now() {
         CURRENT_TASK.this_cpu().store(next_id.0, Ordering::Relaxed);
         CURRENT_SPAN_CURSOR.this_cpu().store(next_cursor, Ordering::Relaxed);
 
-        (current_ctx, next_ctx, next_id)
+        (current_ctx, next_ctx, next_id, next_root, next_proc)
         // Lock dropped here. The asm runs without the scheduler lock.
     };
+
+    switch_address_space(next_root, next_proc);
 
     CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
     crate::tracing::emit_context_switch(current_id, next_id, SwitchReason::Yield);
@@ -578,7 +646,7 @@ pub fn exit_now() -> ! {
     let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
     let me = crate::percpu::current_hartid();
 
-    let (next_ctx, next_id) = {
+    let (next_ctx, next_id, next_root, next_proc) = {
         let mut sched = SCHEDULER.lock();
 
         // Mark current Exited so `task_count` / `task_snapshots`
@@ -596,14 +664,18 @@ pub fn exit_now() -> ! {
             panic!("sched::exit_now: runqueue empty on hart {me}");
         };
 
-        // Resolve next's context + span cursor. Same shape as the
-        // tail of yield_now's lock body.
+        // Resolve next's context + span cursor + address space. Same
+        // shape as the tail of yield_now's lock body.
         let mut next_ctx: *mut TaskContext = core::ptr::null_mut();
         let mut next_cursor: *mut SpanCursor = core::ptr::null_mut();
+        let mut next_root: usize = 0;
+        let mut next_proc: *mut Process = core::ptr::null_mut();
         for task in &sched.tasks {
             if task.id == next_id {
                 next_ctx = task.context.get();
                 next_cursor = (&task.span_cursor as *const SpanCursor) as *mut SpanCursor;
+                next_root = task.address_space.load(Ordering::Relaxed);
+                next_proc = task.process.load(Ordering::Relaxed);
                 task.runs.fetch_add(1, Ordering::Relaxed);
                 break;
             }
@@ -613,9 +685,11 @@ pub fn exit_now() -> ! {
         CURRENT_TASK.this_cpu().store(next_id.0, Ordering::Relaxed);
         CURRENT_SPAN_CURSOR.this_cpu().store(next_cursor, Ordering::Relaxed);
 
-        (next_ctx, next_id)
+        (next_ctx, next_id, next_root, next_proc)
         // Lock dropped here.
     };
+
+    switch_address_space(next_root, next_proc);
 
     CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
     // Re-use `Yield` reason on the wire — wire-format `Exit` variant
