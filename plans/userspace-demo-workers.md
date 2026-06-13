@@ -2,11 +2,13 @@
 
 **Work lands on:** `main` (no feature branches — see CLAUDE.md)
 **Status:** Active — prerequisite for `plans/v0.8-preemption.md`.
-**Progress (2026-06-13):** Steps 1–4 ✅ (Yield, `copy_from_user`, full userspace
-tracing — CP1/refusal/CP2/CP3 all landed — and a single `worker` program). **Step
-5 is next** and is bigger than its one-line summary: it needs an
-*address-space-aware scheduler* (the crux written up below). Step 6 (retire kernel
-`task_a`/`task_b`) then closes out the v0.8 prerequisite.
+**Progress (2026-06-13):** Steps 1–5 ✅ **— plan essentially complete.** Steps 1–4
+(Yield, `copy_from_user`, full userspace tracing, single `worker`) plus Step 5
+(the *address-space-aware scheduler* + two cooperative userspace workers). **Step
+6 (retire `task_a`/`task_b`) was CANCELLED** in favour of "keep both" — the
+kernel tasks stay as the kernel-mode switch fixture; the userspace workers are an
+additional demo (see Step 6 below for the two-switch-paths rationale). Remaining:
+the user's `itest --repeat 10` gate + commits for the Step-5 checkpoints.
 
 Two coupled deliverables:
 
@@ -422,24 +424,44 @@ keep (mirrors `heap::watermark_grow_decision`).
 > address-space-aware switch (CP5-1) is the reusable substrate; v0.8 preemption
 > and v0.9 multi-process IPC both stand on it.
 
-### Step 6: Retire kernel-mode `task_a` / `task_b`
+### Step 6: ~~Retire kernel-mode `task_a` / `task_b`~~ → KEEP BOTH (cancelled 2026-06-13)
 
-**Acceptance criteria**: the kernel `sched::spawn("task_a", …)`/`task_b`
-calls and `demo_tasks::task_*_entry` are gone; the default demo's worker
-tasks are the userspace ones; sched itest scenarios referencing
-`task_a`/`task_b` are updated to the userspace workers. *Confirm before
-coding — touches several scenarios.*
-**RED**: update affected `scenarios.rs` to assert the userspace workers'
-behaviour; they fail against the still-kernel workers.
-**GREEN**: remove the kernel demo-task spawns + `demo_tasks`; point the
-default workload at the userspace workers.
-**MUTATE**: n/a (deletion) — rely on updated scenarios.
-**KILL MUTANTS**: grep `task_a`/`task_b` for silently-lost coverage.
-**REFACTOR**: remove now-dead span plumbing.
-**Done when**: full `cargo xtask itest --repeat 10` green, human approves.
+**Decision (confirmed by user 2026-06-13): do NOT retire `task_a`/`task_b`.**
+A context switch exercises **two distinct paths**, and each deserves its own
+test:
 
-> **PR boundary** — kernel-mode demo workers removed; end state reached.
-> v0.8 builds on `workload=user-hog` (a worker variant omitting `yield`).
+1. **Pure kernel switch** — a kernel thread calls `yield_now()` directly;
+   `switch` swaps kernel-stack→kernel-stack (14 callee-saved regs, no trap
+   frame). This is `task_a`→`task_b` on the **default** boot.
+2. **Trap-mediated userspace switch** — a userspace task `ecall`s `Yield`,
+   traps in, and `yield_now()` runs *inside the trap handler* with the full
+   trap frame parked on the kernel stack **plus the `satp`/`CURRENT_PROCESS`
+   swap** (CP5-1). This is `worker_a`→`worker_b` under `workload=workers`.
+
+They share the `switch` asm but differ in everything around it. Retiring the
+kernel tasks would leave path (1) without dedicated coverage (only
+`workload-cooperative-baseline`'s producer/consumer would touch it, and not the
+span-survives-yield / context-switch-frame proofs). So:
+
+- **`task_a`/`task_b` + `demo_tasks` stay** as the kernel-mode scheduler
+  fixture (cheap: two leaked 16 KiB stacks + ~80 lines). The default boot is
+  unchanged.
+- **The userspace workers are an *additional* demo**, not a replacement, with
+  their own `two-userspace-workers-round-robin` scenario (path 2).
+- The 5 existing `sched-*` scenarios stay pointed at the kernel `task_a`/`task_b`
+  (path 1) — unchanged. Their userspace twins are **not** ported, because two of
+  them (`sched-yield-round-trips`, `sched-spans-carry-task-id`) are already fully
+  covered by the two-worker scenario, and the other three test the *kernel* path
+  we're deliberately keeping.
+
+**This means the plan is complete with Step 5.** No deletion, no scenario
+porting. The original "retire" framing predated separating the two switch paths;
+keeping a kernel-mode switching test is the better call.
+
+> **End state reached** (pending the user's `itest --repeat 10` gate + commits).
+> v0.8 builds on `workload=user-hog` (a worker variant omitting `yield`) — an
+> *additional* runtime workload alongside the cooperative workers, consistent
+> with "keep both."
 
 ## Pre-PR Quality Gate
 
