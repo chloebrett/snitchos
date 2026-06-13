@@ -8,6 +8,8 @@ pub enum Token {
     Float(f64),
     Bool(bool),
     Ident(String),
+    /// Lambda placeholder: `None` is bare `$` (≡ `$a`); `Some("a")` is `$a`.
+    Placeholder(Option<String>),
     // Keywords
     Prod,
     Sum,
@@ -22,6 +24,38 @@ pub enum Token {
     And,
     Or,
     Not,
+    // Operators & punctuation
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Eq,        // =
+    EqEq,      // ==
+    NotEq,     // !=
+    Lt,        // <
+    Le,        // <=
+    Gt,        // >
+    Ge,        // >=
+    Arrow,     // ->
+    FatArrow,  // =>
+    Bar,       // |
+    Pipe,      // |>
+    Question,  // ?
+    QuestionDot, // ?.
+    Dot,       // .
+    DotDot,    // ..  (range / spread)
+    DotDotEq,  // ..= (inclusive range)
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Comma,
+    Semicolon,
+    At,
+    Colon,
     Eof,
 }
 
@@ -94,8 +128,73 @@ pub fn lex(src: &str) -> Vec<Token> {
                 }
             }
             tokens.push(keyword(&text).unwrap_or(Token::Ident(text)));
+        } else if c == '$' {
+            chars.next(); // consume '$'
+            let mut name = String::new();
+            while let Some(&d) = chars.peek() {
+                if d.is_ascii_alphanumeric() || d == '_' {
+                    name.push(d);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            tokens.push(Token::Placeholder(if name.is_empty() {
+                None
+            } else {
+                Some(name)
+            }));
         } else {
-            chars.next();
+            chars.next(); // consume the first operator char `c`
+            // `eat(next)` consumes a second char if it matches, for two-char operators.
+            let mut eat = |want: char| {
+                if chars.peek() == Some(&want) {
+                    chars.next();
+                    true
+                } else {
+                    false
+                }
+            };
+            let tok = match c {
+                '-' if eat('>') => Some(Token::Arrow),
+                '-' => Some(Token::Minus),
+                '=' if eat('>') => Some(Token::FatArrow),
+                '=' if eat('=') => Some(Token::EqEq),
+                '=' => Some(Token::Eq),
+                '!' if eat('=') => Some(Token::NotEq),
+                '<' if eat('=') => Some(Token::Le),
+                '<' => Some(Token::Lt),
+                '>' if eat('=') => Some(Token::Ge),
+                '>' => Some(Token::Gt),
+                '|' if eat('>') => Some(Token::Pipe),
+                '|' => Some(Token::Bar),
+                '?' if eat('.') => Some(Token::QuestionDot),
+                '?' => Some(Token::Question),
+                '.' if eat('.') => Some(if eat('=') {
+                    Token::DotDotEq
+                } else {
+                    Token::DotDot
+                }),
+                '.' => Some(Token::Dot),
+                '+' => Some(Token::Plus),
+                '*' => Some(Token::Star),
+                '/' => Some(Token::Slash),
+                '%' => Some(Token::Percent),
+                '(' => Some(Token::LParen),
+                ')' => Some(Token::RParen),
+                '{' => Some(Token::LBrace),
+                '}' => Some(Token::RBrace),
+                '[' => Some(Token::LBracket),
+                ']' => Some(Token::RBracket),
+                ',' => Some(Token::Comma),
+                ';' => Some(Token::Semicolon),
+                '@' => Some(Token::At),
+                ':' => Some(Token::Colon),
+                _ => None,
+            };
+            if let Some(t) = tok {
+                tokens.push(t);
+            }
         }
     }
     tokens.push(Token::Eof);
@@ -144,5 +243,57 @@ mod tests {
             lex("letter"),
             vec![Token::Ident("letter".to_string()), Token::Eof]
         );
+    }
+
+    #[test]
+    fn lexes_single_char_punctuation() {
+        use Token::{
+            At, Colon, Comma, Eof, LBrace, LBracket, LParen, Percent, Plus, RBrace, RBracket,
+            RParen, Semicolon, Slash, Star,
+        };
+        assert_eq!(
+            lex("+ * / % ( ) { } [ ] , ; @ :"),
+            vec![
+                Plus, Star, Slash, Percent, LParen, RParen, LBrace, RBrace, LBracket, RBracket,
+                Comma, Semicolon, At, Colon, Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_multi_char_operators() {
+        use Token::{
+            Arrow, Bar, Eof, Eq, EqEq, FatArrow, Ge, Gt, Le, Lt, Minus, NotEq, Pipe, Question,
+            QuestionDot,
+        };
+        assert_eq!(
+            lex("- -> = == => < <= > >= != | |> ? ?."),
+            vec![
+                Minus, Arrow, Eq, EqEq, FatArrow, Lt, Le, Gt, Ge, NotEq, Bar, Pipe, Question,
+                QuestionDot, Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_the_dot_family() {
+        use Token::{Dot, DotDot, DotDotEq, Eof};
+        assert_eq!(lex(". .. ..="), vec![Dot, DotDot, DotDotEq, Eof]);
+    }
+
+    #[test]
+    fn a_range_glues_to_its_operands() {
+        use Token::{DotDot, Eof, Ident, Int};
+        assert_eq!(
+            lex("0..n"),
+            vec![Int(0), DotDot, Ident("n".to_string()), Eof]
+        );
+    }
+
+    #[test]
+    fn lexes_placeholders() {
+        use Token::{Eof, Placeholder};
+        assert_eq!(lex("$"), vec![Placeholder(None), Eof]);
+        assert_eq!(lex("$a"), vec![Placeholder(Some("a".to_string())), Eof]);
     }
 }
