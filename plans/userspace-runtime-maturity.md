@@ -60,27 +60,42 @@ Fixed-size; running out is a clean alloc-error (abort/panic → spin), not UB.
 **Open:** `HEAP_SIZE` (start ~64 KiB); a large `.bss` arena grows the mapped
 region but not the file image (`.bss` has `filesz=0`).
 
-## 2. A normal `fn main()` ✅ DONE — *no macro*
+## 2. A normal `fn main()` ✅ DONE — `#[entry]` macro
 
-Briefly built as a proc-macro (`#[snitchos_user::main]`), then **deleted the
-macro entirely** in favour of the runtime calling an `extern "C" fn main()`
-directly. On stable `no_std` you can't get a zero-decoration `fn main()` (the
-`main` lang item needs std/nightly), so a program writes:
+Built as a proc-macro (`#[snitchos_user::main]`), briefly **deleted** in favour
+of a bare `#[unsafe(no_mangle)] extern "C" fn main()`, then **reinstated as
+`#[entry]`** — the decision reversed once the entry tax was judged the bigger
+irritant than a one-crate proc-macro dependency. On stable `no_std` you can't
+get a *zero*-decoration `fn main()` (the `main` lang item needs std/nightly),
+but `#[entry]` hides the ABI plumbing so a program writes:
 
 ```rust
-#[unsafe(no_mangle)]
-extern "C" fn main() {
+#![no_std]
+#![no_main]
+use snitchos_user::entry;
+
+#[entry]
+fn main() {
     let _span = snitchos_user::tracer().span("hello.work");
 }
 ```
+
+The macro lives in `user/macros` (`snitchos-user-macros`, `proc-macro = true`)
+and is re-exported as `snitchos_user::entry`. Its whole job is a token
+transform — parse the `fn`, set its ABI to `extern "C"`, prepend
+`#[unsafe(no_mangle)]` — factored into a `proc_macro2`-typed `expand_entry`
+(host-unit-tested; the `#[proc_macro_attribute]` shell can't be called from a
+test). The pattern is cortex-m-rt's `#[entry]` / `#[embassy::main]`; the whole
+embedded ecosystem chose an attribute macro over the nightly `start` lang item
+for exactly this. The two crate-level attrs (`#![no_std] #![no_main]`) are
+irreducible on stable — only a real `std` target (step 4) removes `#![no_std]`.
 
 `__snitchos_start` inits the heap, stores the two startup handles into runtime
 atomics, calls `main()`, then `exit`s. The free accessors
 `snitchos_user::tracer()` / `telemetry()` read the atomics — the std-like shape
 (`main()` takes nothing; you call library fns for your environment). The
-`Startup` struct is gone (the caps are just the accessors). The `#[no_mangle]
-extern "C"` decoration is the honest no_std entry tax; the trade vs a proc-macro
-crate is worth it. All four programs converted; 10/10 flake-clean.
+`Startup` struct is gone (the caps are just the accessors). All seven programs
+converted (`hello` + six bins); userspace scenarios green through QEMU.
 
 ### Original design notes (superseded — kept for context)
 

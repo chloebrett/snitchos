@@ -82,6 +82,25 @@ pub fn address_space_switch(active_root: usize, next_root: Option<usize>) -> Opt
     }
 }
 
+/// Whether the running task has used up its time slice and should be preempted.
+///
+/// `entry_tick` is when the task last became Running; `now` the current clock;
+/// `quantum` the slice length (both in the same timer-tick unit). Returns
+/// `true` once at least a full `quantum` has elapsed (`>=`, so a task can't
+/// straddle the boundary forever). A non-monotonic clock (`now < entry_tick` —
+/// wraparound or a clock that went backwards) returns `false` rather than
+/// panicking on overflow: never preempt on a bogus elapsed time.
+///
+/// Pure so the policy is host-tested away from the timer handler (mirrors
+/// `heap::watermark_grow_decision`); the kernel passes its `QUANTUM_TICKS`.
+#[must_use]
+pub fn quantum_expired(entry_tick: u64, now: u64, quantum: u64) -> bool {
+    match now.checked_sub(entry_tick) {
+        Some(elapsed) => elapsed >= quantum,
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +216,36 @@ mod tests {
         // Guards against returning `active_root` — the value written to
         // `satp` must be the incoming task's address space.
         assert_eq!(address_space_switch(0x1000, Some(0x2000)), Some(0x2000));
+    }
+
+    #[test]
+    fn quantum_not_expired_below_the_slice() {
+        // Less than a full quantum on-CPU — the task keeps running.
+        assert!(!quantum_expired(100, 105, 10));
+    }
+
+    #[test]
+    fn quantum_expired_at_the_boundary() {
+        // Exactly one quantum elapsed counts as expired (`>=`), so a task
+        // can't run a hair past its slice forever by landing on the boundary.
+        assert!(quantum_expired(100, 110, 10));
+    }
+
+    #[test]
+    fn quantum_expired_past_the_slice() {
+        assert!(quantum_expired(100, 200, 10));
+    }
+
+    #[test]
+    fn quantum_not_expired_at_entry_instant() {
+        // Zero time elapsed — definitely not expired.
+        assert!(!quantum_expired(100, 100, 10));
+    }
+
+    #[test]
+    fn quantum_non_monotonic_clock_does_not_expire() {
+        // If `now` is before `entry` (clock went backwards / wraparound),
+        // never report expiry and never panic — guard, don't subtract-overflow.
+        assert!(!quantum_expired(100, 50, 10));
     }
 }

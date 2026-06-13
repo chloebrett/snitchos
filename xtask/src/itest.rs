@@ -156,6 +156,7 @@ catalog! {
     wfi "userspace-quota-refused"         scenarios::userspace_quota_refused        [userspace]  {"userspace-span-flood"};
     cpu "two-userspace-workers-round-robin" scenarios::two_userspace_workers_round_robin [userspace] {"workers"};
     wfi "heap-grows-on-demand"            scenarios::heap_grows_on_demand           [userspace]  {"heap-grow"};
+    cpu "user-hog-starves-peer"           scenarios::user_hog_starves_peer          [userspace]  {"user-hog"};
 }
 
 /// Set the process-wide failure-capture transcript depth. Call once at

@@ -1539,3 +1539,59 @@ pub fn heap_grows_on_demand(h: &mut View) -> Result<(), String> {
 
     Ok(())
 }
+
+/// v0.8 preemption — *characterisation of the bug preemption fixes*
+/// (`workload=user-hog`). A non-cooperative `user_hog` (tight U-mode `loop {}`,
+/// no syscalls, no `yield`) is co-located on hart 1 with a cooperative
+/// `worker_a` peer. Without preemption the hog never relinquishes the CPU, so
+/// the peer **starves**: it registers but makes no real progress. This pins the
+/// pre-preemption behaviour; Step 4 flips it (the peer progresses + a
+/// `ContextSwitch{Preempt}` appears). The kernel keeps heartbeating throughout —
+/// only the peer is starved, the kernel isn't wedged.
+pub fn user_hog_starves_peer(h: &mut View) -> Result<(), String> {
+    // The peer is spawned — the kernel emits its ThreadRegister at spawn time.
+    h.wait_for(SEC * 10, is_thread_register_named("worker_a"))
+        .ok_or("no ThreadRegister for peer 'worker_a' within 10s")?;
+
+    // The hog gets the CPU and monopolises it. We observe this via hart 0's
+    // heartbeat (the per-task `runs_total` it emits for every task), not via any
+    // output of the hog itself — a hart running a syscall-free loop emits
+    // nothing. `runs_total >= 1` means the scheduler picked the hog.
+    h.wait_for(SEC * 10, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.task.user_hog.runs_total")
+                && *value >= 1
+        }
+        _ => false,
+    })
+    .ok_or("user_hog never scheduled (runs_total stayed 0) within 10s")?;
+
+    // The peer starves. A cooperative peer would be re-picked every round, so
+    // its `runs_total` would climb; under the non-yielding hog it never does.
+    // Assert it does not reach 2 within the window — tolerating a single pre-hog
+    // scheduling if the peer is picked first (it can never be picked a *second*
+    // time while the hog monopolises the CPU). Under preemption (Step 4) this
+    // counter climbs freely and the scenario flips to failing.
+    let peer_progressed = h.wait_for(SEC * 6, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.task.worker_a.runs_total")
+                && *value >= 2
+        }
+        _ => false,
+    });
+    if peer_progressed.is_some() {
+        return Err(
+            "peer worker_a was scheduled 2+ times — it is NOT starving (is preemption already \
+             active? this characterisation must run on the pre-Step-4 kernel)"
+                .to_string(),
+        );
+    }
+
+    // The kernel itself is healthy: hart 0's heartbeat keeps firing even though
+    // the hog has wedged hart 1's userspace.
+    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat — the hog wedged the whole kernel, not just the peer")?;
+
+    Ok(())
+}

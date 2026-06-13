@@ -76,6 +76,12 @@ pub enum WorkloadKind {
     /// allocates far past the runtime's per-region map size — forcing the
     /// `talc` allocator to `map_anon` more frames from the kernel on demand.
     HeapGrow,
+    /// v0.8 preemption fixture: a `user-hog` program that runs a tight U-mode
+    /// `loop {}` (no syscalls, no `yield`) co-located with a cooperative
+    /// `worker_a` peer. Without preemption the hog never relinquishes the CPU
+    /// and the peer starves; the timer-driven preemption (Step 4) is what lets
+    /// the peer make progress.
+    UserHog,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -134,6 +140,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "userspace-span-flood" => Some(WorkloadKind::UserspaceSpanFlood),
             "workers" => Some(WorkloadKind::Workers),
             "heap-grow" => Some(WorkloadKind::HeapGrow),
+            "user-hog" => Some(WorkloadKind::UserHog),
             _ => None,
         })
 }
@@ -222,6 +229,11 @@ mod tests {
     #[test]
     fn selects_heap_grow() {
         assert_eq!(select("workload=heap-grow"), Some(WorkloadKind::HeapGrow));
+    }
+
+    #[test]
+    fn selects_user_hog() {
+        assert_eq!(select("workload=user-hog"), Some(WorkloadKind::UserHog));
     }
 
     #[test]

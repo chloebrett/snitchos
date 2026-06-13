@@ -44,6 +44,11 @@ pub static WORKER_B_ELF: &[u8] = include_bytes!(env!("SNITCHOS_WORKER_B_ELF"));
 /// map size to force on-demand heap growth via `MapAnon`.
 pub static HEAP_GROW_ELF: &[u8] = include_bytes!(env!("SNITCHOS_HEAP_GROW_ELF"));
 
+/// The `workload=user-hog` program: a tight U-mode `loop {}` (no syscalls, no
+/// `yield`) — the v0.8 preemption fixture. Starves a co-located cooperative
+/// peer until the timer preempts it.
+pub static USER_HOG_ELF: &[u8] = include_bytes!(env!("SNITCHOS_USER_HOG_ELF"));
+
 /// The counter the `EmitMetric` syscall bumps. Registered once on hart 0
 /// (`init_metric`) so the `MetricRegister` frame isn't emitted from inside
 /// the trap handler; the handler (on hart 1) reads it via [`user_metric_id`].
@@ -154,6 +159,11 @@ pub extern "C" fn worker_b_main_entry() -> ! {
 /// Hart-1 entry for `workload=heap-grow`: run the heap-growth probe.
 pub extern "C" fn heap_grow_main_entry() -> ! {
     run(HEAP_GROW_ELF)
+}
+
+/// Hart-1 entry for `workload=user-hog`: run the uncooperative CPU hog.
+pub extern "C" fn user_hog_main_entry() -> ! {
+    run(USER_HOG_ELF)
 }
 
 /// Build a fresh address space, grant the process its bootstrap

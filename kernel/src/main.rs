@@ -351,7 +351,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::UserspaceFault)
         | Some(WorkloadKind::UserspaceSpanFlood)
         | Some(WorkloadKind::Workers)
-        | Some(WorkloadKind::HeapGrow) => {}
+        | Some(WorkloadKind::HeapGrow)
+        | Some(WorkloadKind::UserHog) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -400,6 +401,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::UserspaceSpanFlood
                     | WorkloadKind::Workers
                     | WorkloadKind::HeapGrow
+                    | WorkloadKind::UserHog
             )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
@@ -453,6 +455,15 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         Some(WorkloadKind::HeapGrow) => {
             user::init_metric();
             let _ = sched::spawn_on(1, "heap_grow", user::heap_grow_main_entry);
+        }
+        // Preemption fixture: an uncooperative `user_hog` (tight U-mode loop)
+        // co-located on hart 1 with a cooperative `worker_a` peer. The hog is
+        // spawned first so it runs first and never relinquishes — the peer
+        // starves until timer preemption (Step 4) takes the CPU back.
+        Some(WorkloadKind::UserHog) => {
+            user::init_metric();
+            let _ = sched::spawn_on(1, "user_hog", user::user_hog_main_entry);
+            let _ = sched::spawn_on(1, "worker_a", user::worker_a_main_entry);
         }
         _ => {}
     }
