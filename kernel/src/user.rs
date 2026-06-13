@@ -34,6 +34,10 @@ pub static FAULTER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FAULTER_ELF"));
 /// names to exceed the per-process span-name quota.
 pub static SPAN_FLOOD_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAN_FLOOD_ELF"));
 
+/// The `workload=workers` program: a cooperative worker that loops
+/// {open span, bump progress, yield}.
+pub static WORKER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_WORKER_ELF"));
+
 /// The counter the `EmitMetric` syscall bumps. Registered once on hart 0
 /// (`init_metric`) so the `MetricRegister` frame isn't emitted from inside
 /// the trap handler; the handler (on hart 1) reads it via [`user_metric_id`].
@@ -128,6 +132,11 @@ pub extern "C" fn faulter_main_entry() -> ! {
 /// Hart-1 entry for `workload=userspace-span-flood`: run the span-quota probe.
 pub extern "C" fn span_flood_main_entry() -> ! {
     run(SPAN_FLOOD_ELF)
+}
+
+/// Hart-1 entry for `workload=workers`: run a cooperative demo worker.
+pub extern "C" fn worker_main_entry() -> ! {
+    run(WORKER_ELF)
 }
 
 /// Build a fresh address space, grant the process its bootstrap

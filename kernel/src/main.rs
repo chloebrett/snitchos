@@ -349,7 +349,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // hart 1 after SECONDARY_READY.
         | Some(WorkloadKind::Userspace)
         | Some(WorkloadKind::UserspaceFault)
-        | Some(WorkloadKind::UserspaceSpanFlood) => {}
+        | Some(WorkloadKind::UserspaceSpanFlood)
+        | Some(WorkloadKind::Workers) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -396,6 +397,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 WorkloadKind::Userspace
                     | WorkloadKind::UserspaceFault
                     | WorkloadKind::UserspaceSpanFlood
+                    | WorkloadKind::Workers
             )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
@@ -434,6 +436,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         Some(WorkloadKind::UserspaceSpanFlood) => {
             user::init_metric();
             let _ = sched::spawn_on(1, "user_span_flood", user::span_flood_main_entry);
+        }
+        // Demo worker: a cooperative userspace task that loops {span, progress,
+        // yield} — the userspace successor to kernel `task_a`/`task_b`.
+        Some(WorkloadKind::Workers) => {
+            user::init_metric();
+            let _ = sched::spawn_on(1, "worker", user::worker_main_entry);
         }
         _ => {}
     }

@@ -1513,3 +1513,45 @@ pub fn userspace_quota_refused() -> Result<(), String> {
 
     Ok(())
 }
+
+/// Userspace demo worker (`workload=workers`): a cooperative `worker` process
+/// loops {open a `worker.tick` span, bump a progress counter, `yield`}. Asserts
+/// the worker registers, its progress counter climbs, and it emits repeated
+/// `worker.tick` spans attributed to it — the userspace successor to the
+/// kernel-mode `task_a`/`task_b`, cooperating via the `yield` syscall.
+pub fn workers_make_progress() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("workers", "workers")?;
+
+    let worker_id = match h
+        .wait_for(SEC * 20, is_thread_register_named("worker"))
+        .ok_or("no ThreadRegister for 'worker' within 20s")?
+    {
+        OwnedFrame::ThreadRegister { id, .. } => id,
+        _ => return Err("matched non-ThreadRegister".to_string()),
+    };
+
+    // The worker emits an incrementing progress counter each tick.
+    h.wait_for(SEC * 10, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value >= 5
+        }
+        _ => false,
+    })
+    .ok_or("worker progress counter did not reach 5 within 10s — worker not running/yielding?")?;
+
+    // It opens a fresh `worker.tick` span each iteration — find two, proving the
+    // loop repeats and spans are attributed to the worker task.
+    for nth in ["first", "second"] {
+        h.wait_for(SEC * 10, move |f, strings| match f {
+            OwnedFrame::SpanStart { name_id, task_id, .. } => {
+                strings.get(name_id).map(String::as_str) == Some("worker.tick")
+                    && *task_id == worker_id
+            }
+            _ => false,
+        })
+        .ok_or_else(|| std::format!("no {nth} worker.tick span from the worker within 10s"))?;
+    }
+
+    Ok(())
+}

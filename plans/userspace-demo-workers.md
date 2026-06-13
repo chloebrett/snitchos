@@ -288,7 +288,13 @@ close-validates-cursor-top check, the quota boundary.
 > commit. Userspace tracing is the v0.9-enabling capability and the v0.8
 > demo enricher.
 
-### Step 4: A `worker` program — span + progress + yield, in a loop
+### Step 4: A `worker` program — span + progress + yield, in a loop ✅ DONE
+
+`worker` program + `workload=workers` (bootargs host-tested) loops {open
+`worker.tick` span, bump progress, `yield`}; `workers-make-progress` asserts
+the worker registers, progress climbs, and ≥2 `worker.tick` spans are
+attributed to it. 10/10 flake-clean. (Literal span name for one worker; Step 5
+folds in `format!`-ed per-worker ids using the new userspace allocator.)
 
 **Acceptance criteria**: an embedded `worker` ELF loops { open
 `worker.tick` span; bump progress counter; `yield`; close span }; a new

@@ -70,6 +70,7 @@ fn build_and_embed_user(kernel_dir: &str) {
     embed(&format!("{bin_dir}/hello"), "SNITCHOS_USER_ELF");
     embed(&format!("{bin_dir}/faulter"), "SNITCHOS_FAULTER_ELF");
     embed(&format!("{bin_dir}/span-flood"), "SNITCHOS_SPAN_FLOOD_ELF");
+    embed(&format!("{bin_dir}/worker"), "SNITCHOS_WORKER_ELF");
 
     // Rebuild the embed whenever a user program — or its only dependency, the
     // `abi` crate — changes. Directory paths are watched recursively by cargo,

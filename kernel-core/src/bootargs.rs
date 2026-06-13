@@ -68,6 +68,10 @@ pub enum WorkloadKind {
     /// many distinct names to exceed `Process::MAX_SPAN_NAMES` — the kernel
     /// must refuse the surplus (`SyscallRefused{Quota}`) without panicking.
     UserspaceSpanFlood,
+    /// Userspace demo workers: cooperative `worker` processes that loop
+    /// {open a span, bump progress, `yield`}, the userspace successors to the
+    /// kernel-mode `task_a`/`task_b`. (v0.7 follow-on; the road to v0.8.)
+    Workers,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -124,6 +128,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "userspace" => Some(WorkloadKind::Userspace),
             "userspace-fault" => Some(WorkloadKind::UserspaceFault),
             "userspace-span-flood" => Some(WorkloadKind::UserspaceSpanFlood),
+            "workers" => Some(WorkloadKind::Workers),
             _ => None,
         })
 }
@@ -202,6 +207,11 @@ mod tests {
     #[test]
     fn selects_userspace() {
         assert_eq!(select("workload=userspace"), Some(WorkloadKind::Userspace));
+    }
+
+    #[test]
+    fn selects_workers() {
+        assert_eq!(select("workload=workers"), Some(WorkloadKind::Workers));
     }
 
     #[test]

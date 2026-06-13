@@ -117,6 +117,7 @@ const SCENARIOS: &[Scenario] = itest_harness::scenarios! {
     wfi "userspace-emits-span"            scenarios::userspace_emits_span           [userspace];
     wfi "userspace-refusal-snitched"      scenarios::userspace_refusal_snitched     [userspace];
     wfi "userspace-quota-refused"         scenarios::userspace_quota_refused        [userspace];
+    cpu "workers-make-progress"           scenarios::workers_make_progress          [userspace];
 };
 
 /// Set the process-wide failure-capture transcript depth. Call once at
