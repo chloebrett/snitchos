@@ -133,6 +133,7 @@ catalog! {
     cpu "smp-tlb-shootdown-visible"       scenarios::smp_tlb_shootdown_visible      [smp]           {"tlb-shootdown"};
     cpu "smp-ping-pong-cadence"           scenarios::smp_ping_pong_cadence          [smp, ipi]      {"ping-pong"};
     wfi "sched-task-exits-cleanly"        scenarios::sched_task_exits_cleanly       [sched];
+    wfi "block-wake-smoke"                scenarios::block_wake_smoke               [sched]         {"block-wake"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back

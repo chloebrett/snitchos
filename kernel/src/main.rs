@@ -336,6 +336,13 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             let _ = sched::spawn("workload_producer", workload::producer_entry);
             let _ = sched::spawn("workload_consumer", workload::consumer_entry);
         }
+        // v0.9 block/wake smoke: a blocker + waker on hart 0. The blocker
+        // calls `block_current`; the waker `wake`s it. Single-hart, kernel
+        // tasks — no hart-1 placement (skipped from the probe below).
+        Some(WorkloadKind::BlockWake) => {
+            let _ = sched::spawn("blocker", sched::block_wake_blocker_entry);
+            let _ = sched::spawn("waker", sched::block_wake_waker_entry);
+        }
         // Storms spawn post-secondary (task storms) or are entirely
         // heartbeat-driven (spawn/ipi/shootdown).
         Some(WorkloadKind::SpawnStorm)
@@ -404,6 +411,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::HeapGrow
                     | WorkloadKind::UserHog
                     | WorkloadKind::Priorities
+                    | WorkloadKind::BlockWake
             )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);

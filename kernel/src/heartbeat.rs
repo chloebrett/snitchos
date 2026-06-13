@@ -107,6 +107,7 @@ define_metrics! {
     // scheduler
     counter   sched_smoke_marker_hits   = "snitchos.sched.smoke_marker_hits";
     counter   sched_exit_smoke_hits     = "snitchos.sched.exit_smoke_hits";
+    counter   sched_wake_resumed        = "snitchos.sched.wake_resumed";
     counter   sched_context_switches    = "snitchos.sched.context_switches_total";
     counter   sched_preemptions         = "snitchos.sched.preemptions_total";
     gauge     sched_runqueue_depth      = "snitchos.sched.runqueue_depth";
@@ -302,6 +303,7 @@ fn emit_heap_metrics(m: &Metrics) {
 fn emit_sched_metrics(m: &Metrics) {
     emit!(m, sched_smoke_marker_hits = sched::SMOKE_MARKER_HITS.load(Ordering::Relaxed));
     emit!(m, sched_exit_smoke_hits   = sched::EXIT_SMOKE_HITS.load(Ordering::Relaxed));
+    emit!(m, sched_wake_resumed      = sched::WAKE_RESUMED.load(Ordering::Relaxed));
     emit!(m, sched_context_switches  = sched::CONTEXT_SWITCHES.load(Ordering::Relaxed));
     emit!(m, sched_preemptions       = sched::PREEMPTIONS.load(Ordering::Relaxed));
     let sched_snap = sched::stats();
@@ -416,6 +418,7 @@ fn emit_storm_metrics(m: &Metrics, count: i64) {
         | Some(WorkloadKind::Workers)
         | Some(WorkloadKind::HeapGrow)
         | Some(WorkloadKind::UserHog)
-        | Some(WorkloadKind::Priorities) => {}
+        | Some(WorkloadKind::Priorities)
+        | Some(WorkloadKind::BlockWake) => {}
     }
 }

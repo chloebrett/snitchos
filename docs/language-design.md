@@ -49,13 +49,171 @@ Consequence to stay honest about: capability typing _inside_ the language is the
 
 An **actor model** — where the concurrency primitive _is_ the isolation unit _is_ an IPC endpoint, share-nothing message-passing, each actor its own kernel process — is recognized as the most elegant fit for SnitchOS (concurrency + isolation + capabilities collapse into one mechanism; messages are already traceable IPC frames). It is **explicitly deferred to a possible second language**, because (a) it's fully gated on IPC (v0.9, unbuilt) and (b) it's a whole-language identity commitment, not a runtime bolt-on. Filed here so the option isn't lost.
 
+# Surface syntax
+
+_Worked out interactively; firm enough to build a lexer/parser against, but pre-implementation, so treat as strong leanings. The capability and telemetry constructs below (`uses`, `span`) are shown in context but get their own design passes — see Open questions._
+
+Design rule running underneath all of it: **two arrows, one job each.** `->` means _"maps to"_ everywhere — return types, function types, and lambdas. `=>` means _"case / condition"_ — the conditional and match arms. No token does double duty; that's what keeps it from reading as "Kotlin and Rust had a baby."
+
+## Canonical sample
+
+```
+type Reading(sensor: Str, celsius: Int)
+
+fn average(nums: List<Int>) -> Int =
+    nums.isEmpty() => 0 | nums.sum() / nums.len()
+
+fn report(readings: List<Reading>) uses Telemetry {
+    use <- span("report")
+
+    let hot =
+        readings
+        |> filter($.celsius > 30)
+        |> map($.celsius)
+
+    emit("sensor.hot.avg_celsius", average(hot))
+}
+```
+
+## Bindings — immutable by default
+
+- `let x = …` — immutable binding (the common case).
+- `let mut x = …` — mutable; mutation is the marked form.
+
+Borrowed from Rust (a liked language; deliberately _not_ Kotlin's `val`/`var`, the single biggest "this is Kotlin" tell). The keyword-light "immutable binding has no keyword at all" variant was considered and dropped — the declare-vs-reassign disambiguation tax wasn't worth the saved keyword.
+
+## Functions & types
+
+- `fn name(params) -> Ret = expr` — single-expression body.
+- `fn name(params) -> Ret { … }` — block body.
+- `type Point(x: Int, y: Int)` — record/product type, concise (no `class`, no `data class`).
+- `name: Type` annotations, no semicolons, expression-oriented throughout — shared "modern tasteful" surface (Kotlin/Rust/Swift/TS), not a Kotlin tell, so kept.
+
+## Conditionals & matching
+
+- **Binary conditional expression:** `cond => a | b` — symbolic, deliberately _not_ on `?` (which is reserved for the error family below). Reads as a tiny truth-table.
+- **Multi-way:** `match` (pattern matching is table stakes for this family; it subsumes any N-way `cond`).
+
+## Pipes
+
+- `|>` — left-to-right data flow. Immutable-by-default means writing transformations constantly; the pipe makes them read forward instead of inside-out, and is the most visible departure from Kotlin/Rust.
+
+## Lambdas
+
+One arrow-based form, no brace-as-delimiter, no `|x|`, no `\x`:
+
+- `x -> body` — single named param.
+- `(x, y) -> body` — multiple params (parens group them).
+- `() -> body` — zero-arg thunk.
+- `_ -> v` — ignore the arg → constant lambda (the one case the placeholder sugar structurally can't express).
+- `x -> { stmts; result }` — block body; braces here are just an ordinary block _expression_, not lambda syntax.
+
+**Placeholder sugar** for the trivial inline case:
+
+- `$` — the implicit argument; shorthand for `$a`.
+- `$a`, `$b`, `$c` … — positional implicit args (letters, not numbers — they read as names). Arity = highest letter referenced.
+- A placeholder forms a lambda only when it appears as a **direct call argument**; its extent is that argument expression (delimited by the call's parens/commas). Anything nested or ambiguous → write the explicit `x -> …`. Keeps the magic shallow.
+
+```
+map($ * 2)            // \x   -> x * 2   ($ is always $a, so $ * $ is "square", arity 1)
+fold(0, $a + $b)      // \a b -> a + b
+sortBy($a.age < $b.age)
+map(_ -> 0)           // constant
+```
+
+**Operators as functions** — a bare operator in argument position _is_ its binary function: `fold(0, +)`, `reduce(max)`, `sortBy(<)`. Haskell-style sections (`(* 2)`) are deliberately _omitted_ — `$` already covers partial application, and one way is enough.
+
+## Errors & absence — the `?` family
+
+Three std types, split by intent:
+
+- `Maybe<T>` (`Some`/`None`) — absence.
+- `Result<T, E>` — the _intent-named_ fallible type; what `?` primarily targets.
+- `Either<A, B>` — the genuinely-neutral two-arm sum (neither side is "error," e.g. `Either<Cached, Fresh>`).
+
+Two short-circuit operators, both backed by **one trait that std implements for `Maybe`/`Result` and users can implement for their own types**:
+
+- `x?` — _function-level_ try: if `x` is the failure case, return it from the enclosing function; else unwrap and continue.
+- `x?.y` — _expression-level_ safe navigation: short-circuits the chain to the failure/empty value (staying wrapped), else accesses `.y`. `user?.address?.zip : Maybe<Zip>`.
+
+`?` deliberately does **not** apply to `Either` — it has no canonical failure side, and that asymmetry _is_ the documentation that `Result` is the failure type.
+
+## `use <-` (from Gleam) — block sugar, not a keyword zoo
+
+`use <- f(...)` turns "the rest of this block" into a callback handed to `f`. It desugars:
+
+```
+use <- span("report")          //  ≡   span("report", fn() {
+emit("x", 1)                   //          emit("x", 1)
+// …rest of block…             //          // …rest of block…
+                               //      })
+```
+
+General form `use x <- f(...)` ≡ `f(fn(x) { rest })`. This makes spans, resource scoping (the `defer` job), and mutex scoping all _ordinary functions_ instead of bespoke syntax — i.e. **telemetry-as-syntax becomes telemetry-as-library**. Accepted cost: `use` has "magic" control flow (everything after it is captured), which reads oddly until it clicks.
+
+## String interpolation
+
+- `"temp is \(avg)°C"` — interpolate with `\(…)`, reusing the in-string "`\` = something special" convention. This keeps `$` reserved exclusively for lambda placeholders (no overload).
+
+# Type system
+
+_Same status as Surface syntax: worked out, pre-implementation, strong leanings._
+
+**Stance — data-first, with a marked OO exception.** The default and the bulk is immutable algebraic data (`prod`/`sum`). `class` is the deliberately-marked exception for objects that genuinely have identity and evolving state. Polymorphism is interfaces only — **no inheritance anywhere.** This is a distinct middle position: Java is "everything is a class, inherit freely"; Rust is "no classes, traits + ownership"; this is neither. Null does not exist (absence is `Maybe`), and the GC removes Rust's ownership ceremony.
+
+> **Why this isn't a Rust or Java clone.** The data-declaration layer below is _intentionally_ familiar — borrowing the best-understood forms is the tasteful move, not the cloning move. The language's identity lives entirely in the parts nothing else has: `uses` capabilities-as-effects, the `?`/`?.` trait family, `use <-` making telemetry a library, and (unbuilt) the capability effect system + a VM that emits spans for its own GC/dispatch. It is an _effects-and-observability language wearing comfortable data-modeling clothes._
+
+## Products & sums — one tree, two roots
+
+A `prod` declares a product root (fields AND-ed); a `sum` declares a sum root (variants OR-ed); every sum variant is itself a product, so a `prod` is the degenerate one-variant sum. `prod` (∏) / `sum` (∑) keeps the mathematical symmetry; `prod` was chosen over `tup` (collides with anonymous tuples) and over the 7-char `product`.
+
+```
+prod Point(x: Int, y: Int)
+
+sum Shape =
+    | Circle(radius: Int)
+    | Rect(w: Int, h: Int)
+```
+
+The std error/absence types are _just sums_ — the sign the algebra is load-bearing:
+
+```
+sum Maybe<T>     = Some(T) | None
+sum Result<T, E> = Ok(T)   | Err(E)
+sum Either<A, B> = Left(A) | Right(B)
+```
+
+- **Value semantics:** `prod`/`sum` are immutable with **structural equality** (two `Point(1,2)` are equal).
+- **Construction & update:** `Point(1, 2)` positional, `Point(x: 1, y: 2)` Swift-style labels, `Point(..p, x: 10)` functional update (immutable → copy).
+- **Tuples** are the anonymous product: `(Int, Str)`.
+- **GC dividends:** recursive sums need no `Box` (`sum List<T> = Cons(T, List<T>) | Nil` just works), and `match` over a sum is **compiler-checked exhaustive** (dovetails with the no-exceptions stance).
+
+## class — the reference object (no inheritance)
+
+`class` is for things with **identity** and encapsulated, optionally-mutable state — a `Connection`, a `Cache`, a `Counter`. The crisp line: `prod` is a _value_ (structural equality, immutable); a `class` instance is a _reference_ (identity equality, may hold `mut` state).
+
+- **No `extends`, ever.** Polymorphism comes only through interfaces.
+- Sane-defaults-unlike-Java: fields immutable (`val`-like) unless `mut`; no null.
+
+## interface — the only polymorphism
+
+Behavior contracts; the sole dispatch mechanism. This is Java-core (interfaces), not a trait reinvention — though it shares traits' discipline:
+
+- **Definition-side coherence:** a type's methods and interface conformances live with the type, in its own module — no orphan/extension-from-afar, so behavior is always findable.
+- **Default methods** on interfaces give behavior composition; data composition is embedding.
+- **GC makes dynamic dispatch the easy path** (unlike Rust). An interface-typed value is just a heap object + vtable, like Go/Java — `fn render(d: Drawable)` taking any `Drawable` is the natural default; generics (`fn f<T: Drawable>`) remain available for the monomorphized path. `self` needs no `&`/`&mut`/lifetimes.
+
+## What the VM implements (the learning core)
+
+Even without class inheritance, the JVM-shaped lessons are intact: object headers (class ptr, GC bits, identity hash), **interface vtables/itables + dynamic dispatch**, `instanceof`-via-interface, constructors, field layout. The single dropped lesson — superclass-prefix vtable layout — is traded for interface dispatch (itables / inline caches), the more interesting half of real JVM dispatch.
+
 # Open questions — the interesting surface
 
 These are where the design risk budget is deliberately spent, and the next things to work out. Each will get its own pass.
 
 - **Capabilities as effects.** Functions declaring the authority they need (`fn log(msg: Str) uses TelemetrySink`), the compiler tracking the `uses` set up the call graph, startup caps arriving from `a0`/`a1` and threading down, affine/linear cap values so authority can't be forged or duplicated. The strongest reason the language exists on _this_ OS. How much of this is checked at compile time vs reified in the VM?
 - **Telemetry as syntax.** Spans and metrics as first-class constructs (`span foo { ... }` auto-emitting SpanStart/SpanEnd over the existing `Frame` protocol; declared counters). Plus the reflexive win: the VM narrates _its own_ execution — GC pauses, allocation rate, cap checks, dispatch — as spans in the same Grafana as the kernel.
-- **Syntax & surface semantics.** Immutable by default (`let` immutable, explicit `mut`/`var`), concise, Java-like but without the ceremony. Concrete grammar TBD.
+- **Syntax & type system.** Now substantially worked out — see [Surface syntax](#surface-syntax) and [Type system](#type-system) above. Remaining grammar gaps: generics beyond `List<T>` (bounds, variance), module/visibility (which also defines encapsulation + the interface-coherence boundary), method/`interface`-conformance declaration syntax, and the precise `match` pattern grammar.
 
 # References
 

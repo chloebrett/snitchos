@@ -1048,6 +1048,42 @@ pub fn sched_task_exits_cleanly(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.9 block/wake smoke (`workload=block-wake`): a `blocker` kernel task
+/// stores its id, arms a flag, and calls `block_current` — leaving the CPU
+/// *off* the runqueue (not re-enqueued, unlike `yield_now`). A `waker` peer
+/// spins yielding until it sees the flag, then calls `wake(blocker)`, which
+/// returns the blocker to `Ready`. The scheduler picks it; `block_current`
+/// returns; the blocker bumps `snitchos.sched.wake_resumed`. Asserting it
+/// reaches exactly 1 proves the round-trip: block → switch-away → wake →
+/// resume. A hang (lost wakeup, or the two-way `switch` not saving/restoring
+/// the blocker's context) is caught by the timeout.
+pub fn block_wake_smoke(h: &mut View) -> Result<(), String> {
+    let frame = h
+        .wait_for(SEC * 30, |f, strings| match f {
+            OwnedFrame::Metric { name_id, value, .. } => {
+                strings.get(name_id).map(String::as_str)
+                    == Some("snitchos.sched.wake_resumed")
+                    && *value >= 1
+            }
+            _ => false,
+        })
+        .ok_or(
+            "no sched.wake_resumed >= 1 within 30s — blocker never resumed \
+             after wake (lost wakeup, block_current didn't save context, or \
+             wake didn't re-enqueue)",
+        )?;
+    let value = match frame {
+        OwnedFrame::Metric { value, .. } => value,
+        _ => return Err("matched non-metric (impossible)".to_string()),
+    };
+    if value != 1 {
+        return Err(format!(
+            "sched.wake_resumed = {value}, expected exactly 1 (blocker resumes once)"
+        ));
+    }
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

@@ -87,6 +87,11 @@ pub enum WorkloadKind {
     /// respected), but the Low worker still makes progress (aging prevents
     /// starvation) — "ordered, but fair."
     Priorities,
+    /// v0.9 block/wake smoke: a `blocker` kernel task calls `block_current`
+    /// and a `waker` peer wakes it, proving a task can leave the CPU off the
+    /// runqueue and be resumed. The substrate IPC's blocking `send`/`receive`
+    /// ride on. Task-driven, single hart.
+    BlockWake,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -147,6 +152,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "heap-grow" => Some(WorkloadKind::HeapGrow),
             "user-hog" => Some(WorkloadKind::UserHog),
             "priorities" => Some(WorkloadKind::Priorities),
+            "block-wake" => Some(WorkloadKind::BlockWake),
             _ => None,
         })
 }
@@ -245,6 +251,11 @@ mod tests {
     #[test]
     fn selects_priorities() {
         assert_eq!(select("workload=priorities"), Some(WorkloadKind::Priorities));
+    }
+
+    #[test]
+    fn selects_block_wake() {
+        assert_eq!(select("workload=block-wake"), Some(WorkloadKind::BlockWake));
     }
 
     #[test]

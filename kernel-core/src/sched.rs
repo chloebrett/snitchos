@@ -204,9 +204,34 @@ pub fn quantum_expired(entry_tick: u64, now: u64, quantum: u64) -> bool {
     }
 }
 
+/// Whether a `wake` should re-enqueue the task — true only when it is
+/// actually [`TaskState::Blocked`]. The idempotence guard for `wake`: a
+/// second wake (or one that races the task already back on the runqueue)
+/// finds it non-`Blocked` and is a no-op, so a task is never double-enqueued.
+/// Pure so the guard is host-tested away from the scheduler lock.
+#[must_use]
+pub fn on_wake(state: TaskState) -> bool {
+    matches!(state, TaskState::Blocked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blocked_task_is_enqueued_when_woken() {
+        assert!(on_wake(TaskState::Blocked));
+    }
+
+    #[test]
+    fn waking_a_non_blocked_task_is_a_no_op() {
+        // The idempotence guard: a wake that races a task already back on
+        // the runqueue (Ready), on-CPU (Running), or gone (Exited) must NOT
+        // re-enqueue it — a double enqueue corrupts the ready set.
+        assert!(!on_wake(TaskState::Ready));
+        assert!(!on_wake(TaskState::Running));
+        assert!(!on_wake(TaskState::Exited));
+    }
 
     /// A default-priority ready candidate — for runqueue tests that only care
     /// about ordering/membership of ids, not priority.

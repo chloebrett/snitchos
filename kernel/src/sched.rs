@@ -833,6 +833,105 @@ pub fn exit_now() -> ! {
     unsafe { switch_into(next_ctx) }
 }
 
+/// Block the calling task: mark it `Blocked`, switch to the next ready task
+/// **without** re-enqueuing the caller, and park until a later [`wake`]
+/// returns it to the runqueue and the scheduler picks it — at which point
+/// control returns past the `switch` here. The third sibling of
+/// [`yield_now`]/[`reschedule`] (re-enqueues, two-way `switch`) and
+/// [`exit_now`] (no re-enqueue, one-way `switch_into`): block does *not*
+/// re-enqueue (like exit) but *does* save its context for resumption (like
+/// yield), so it uses the two-way `switch`.
+///
+/// v0.9 IPC's blocking `send`/`receive` are this function's callers. The
+/// endpoint `Mutex` MUST be dropped before calling this (lock discipline:
+/// never hold a `kernel::sync::Mutex` across a switch).
+///
+/// Idle is always ready, so a target always exists; if the runqueue is
+/// somehow empty we keep running rather than deadlock the hart (a blocked
+/// caller with nothing to switch to is a caller bug).
+pub fn block_current() {
+    let t_entry = crate::tracing::timestamp();
+    let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
+    let me = crate::percpu::current_hartid();
+
+    let (current_ctx, next_ctx, next_id, next_root, next_proc) = {
+        let mut sched = SCHEDULER.lock();
+        let Some(next_id) = pick_next(sched.runqueues[me].iter(), t_entry, AGING_STEP_TICKS) else {
+            return; // nothing else ready — don't strand the hart
+        };
+        sched.runqueues[me].remove(next_id);
+
+        let prev_entry = CURRENT_TASK_ENTRY_TICK.this_cpu().load(Ordering::Relaxed);
+        let on_cpu_delta = if prev_entry == 0 { 0 } else { t_entry.wrapping_sub(prev_entry) };
+        let mut current_ctx: *mut TaskContext = core::ptr::null_mut();
+        let mut next_ctx: *mut TaskContext = core::ptr::null_mut();
+        let mut next_cursor: *mut SpanCursor = core::ptr::null_mut();
+        let mut next_root: usize = 0;
+        let mut next_proc: *mut Process = core::ptr::null_mut();
+        for task in sched.tasks.iter_mut() {
+            if task.id == current_id {
+                // The block itself: state flips, and — unlike `reschedule` —
+                // the task is NOT pushed back onto the runqueue.
+                task.state = TaskState::Blocked;
+                current_ctx = task.context.get();
+                task.cpu_time_ticks.fetch_add(on_cpu_delta, Ordering::Relaxed);
+            }
+            if task.id == next_id {
+                next_ctx = task.context.get();
+                next_cursor = core::ptr::from_ref(&task.span_cursor).cast_mut();
+                next_root = task.address_space.load(Ordering::Relaxed);
+                next_proc = task.process.load(Ordering::Relaxed);
+                task.runs.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        assert!(!current_ctx.is_null(), "block_current: current task missing from table");
+        assert!(!next_ctx.is_null(), "block_current: next task missing from table");
+        CURRENT_TASK.this_cpu().store(next_id.0, Ordering::Relaxed);
+        CURRENT_SPAN_CURSOR.this_cpu().store(next_cursor, Ordering::Relaxed);
+
+        (current_ctx, next_ctx, next_id, next_root, next_proc)
+        // Lock dropped here. The asm runs without the scheduler lock.
+    };
+
+    switch_address_space(next_root, next_proc);
+    CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    crate::tracing::emit_context_switch(current_id, next_id, SwitchReason::Blocked);
+    let t_before_switch = crate::tracing::timestamp();
+    LAST_YIELD_OVERHEAD_TICKS.store(t_before_switch.wrapping_sub(t_entry), Ordering::Relaxed);
+    CURRENT_TASK_ENTRY_TICK.this_cpu().store(t_before_switch, Ordering::Relaxed);
+
+    // SAFETY: both pointers point at `UnsafeCell<TaskContext>` storage inside
+    // `Box<Task>` allocations owned by `SCHEDULER.tasks` (stable heap
+    // addresses past the lock drop). The two-way `switch` saves our
+    // callee-saved regs + sp into `current_ctx` so a later resume returns
+    // right here. Single-hart cooperative; no preemption mid-switch.
+    unsafe { switch(current_ctx, next_ctx) };
+    // Resumed: a `wake` re-enqueued us and the scheduler picked us again.
+}
+
+/// Return a `Blocked` task to the runqueue so the scheduler can pick it.
+/// The [`kernel_core::sched::on_wake`] guard makes this idempotent: waking a
+/// task that is already `Ready`/`Running`/`Exited` (a racing or duplicate
+/// wake) is a no-op, so a task is never double-enqueued. Enqueues on the
+/// current hart's runqueue (single-hart v0.9 core; cross-hart wake — enqueue
+/// on the task's home hart + IPI — is the deferred follow-on).
+pub fn wake(id: TaskId) {
+    let now = crate::tracing::timestamp();
+    let me = crate::percpu::current_hartid();
+    let mut sched = SCHEDULER.lock();
+    let priority = sched.tasks.iter_mut().find(|t| t.id == id).and_then(|task| {
+        if kernel_core::sched::on_wake(task.state) {
+            task.state = TaskState::Ready;
+            Some(task.priority)
+        } else {
+            None
+        }
+    });
+    if let Some(base) = priority {
+        sched.runqueues[me].push_back(Candidate { id, base, enqueued_tick: now });
+    }
+}
+
 // --- v0.5 step 5 smoke: round-trip the asm without involving the runqueue ---
 
 /// Bumped each time the smoke marker function runs. The heartbeat
@@ -850,6 +949,41 @@ pub static EXIT_SMOKE_HITS: AtomicU64 = AtomicU64::new(0);
 /// terminates via `exit_now`. Spawned once at boot from `kmain`.
 pub extern "C" fn exit_smoke_entry() -> ! {
     EXIT_SMOKE_HITS.fetch_add(1, Ordering::Relaxed);
+    exit_now()
+}
+
+/// Bumped once when the `block-wake` smoke's blocker resumes after being
+/// woken. Heartbeat emits `snitchos.sched.wake_resumed`; the
+/// `block-wake-smoke` scenario asserts it reaches 1. `Relaxed`: counter.
+pub static WAKE_RESUMED: AtomicU64 = AtomicU64::new(0);
+
+/// Set by the blocker immediately before it blocks. The waker spins yielding
+/// until it observes this — so it only ever wakes a task that has already
+/// reached `block_current` (and, single-hart non-preemptible, is already
+/// `Blocked` by the time the flag is visible: nothing runs between the store
+/// and the block's switch). Closes the lost-wakeup window for the smoke.
+static BLOCK_WAKE_ARMED: AtomicU32 = AtomicU32::new(0);
+
+/// The blocker's task id, published before it arms; read by the waker.
+static BLOCK_WAKE_BLOCKER_ID: AtomicU32 = AtomicU32::new(0);
+
+/// `workload=block-wake` blocker: publish id, arm, block; on resume record
+/// the wake and exit.
+pub extern "C" fn block_wake_blocker_entry() -> ! {
+    BLOCK_WAKE_BLOCKER_ID.store(current_task_id().0, Ordering::Relaxed);
+    BLOCK_WAKE_ARMED.store(1, Ordering::Relaxed);
+    block_current();
+    WAKE_RESUMED.fetch_add(1, Ordering::Relaxed);
+    exit_now()
+}
+
+/// `workload=block-wake` waker: yield until the blocker has armed (so is
+/// `Blocked`), wake it, then exit.
+pub extern "C" fn block_wake_waker_entry() -> ! {
+    while BLOCK_WAKE_ARMED.load(Ordering::Relaxed) == 0 {
+        yield_now();
+    }
+    wake(TaskId(BLOCK_WAKE_BLOCKER_ID.load(Ordering::Relaxed)));
     exit_now()
 }
 
