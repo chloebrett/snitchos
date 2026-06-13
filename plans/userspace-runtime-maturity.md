@@ -103,13 +103,30 @@ fn main() {
 - The capability accessors reading a global mirror how `std` exposes the
   environment (you call `std::env::args()`, you don't receive it as a param).
 
-## 3. Growable heap
+## 3. Growable heap ✅ DONE — *mmap-shaped, not `sbrk`*
 
-When fixed-size bites: a `brk`/`mmap`-style syscall where userspace asks the
-kernel to map more pages into its address space, reusing the `mmu::map`
-primitive the kernel heap already uses. **Std assumes a growable heap**, so
-this is also a prerequisite for step 4. Bounded (a per-process heap cap, same
-spirit as the span-name quota).
+Built as a **`MapAnon`** syscall (abi=5), *not* `sbrk` — `sbrk`/`brk` is the
+legacy single-break abstraction (musl doesn't use it at all); the modern,
+**capability-aligned** primitive is mmap (region-returning, individually
+unmappable, eventually a `MemoryRegion` capability — the slot the `cap::Object`
+enum already reserves). `MapAnon(bytes) → base`: the kernel maps fresh zeroed
+frames into the process root (`mmu::map_in` + local `sfence.vma`), tracks
+`Process.heap_top`, caps at `HEAP_MAX = 16 MiB`, refuses with
+`SyscallRefused{OutOfMemory}`.
+
+Userspace swapped from `linked_list_allocator` to **`talc`** (multi-region; the
+kernel heap keeps `lla`). `talc`'s `OomHandler` is the grow-on-demand hook: on
+allocation failure it `map_anon`s a region (request + 64 KiB headroom) and
+`claim`s it. **Lazy** — no startup map; the first allocation triggers the
+first `map_anon`. `talc` doesn't assume regions abut, so the kernel's
+bump-pointer placement can become disjoint + add `munmap` later, no ABI break.
+
+`heap-grow` program allocates 512 KiB (past one region), writes + sums it, and
+emits the sum — `heap-grows-on-demand` asserts `524288`; 0/10 flake-clean.
+
+Not yet (vs real libc `malloc`): **demand paging** (real `mmap` is lazy —
+frames on first touch via a user page-fault handler; ours is eager),
+`munmap`/return-to-OS, and per-thread arenas.
 
 ## 4. `std`-compatible userspace — the north star, scoped WASI-shaped
 

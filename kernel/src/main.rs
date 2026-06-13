@@ -350,7 +350,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::Userspace)
         | Some(WorkloadKind::UserspaceFault)
         | Some(WorkloadKind::UserspaceSpanFlood)
-        | Some(WorkloadKind::Workers) => {}
+        | Some(WorkloadKind::Workers)
+        | Some(WorkloadKind::HeapGrow) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -398,6 +399,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::UserspaceFault
                     | WorkloadKind::UserspaceSpanFlood
                     | WorkloadKind::Workers
+                    | WorkloadKind::HeapGrow
             )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
@@ -442,6 +444,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         Some(WorkloadKind::Workers) => {
             user::init_metric();
             let _ = sched::spawn_on(1, "worker", user::worker_main_entry);
+        }
+        // Heap-growth probe: a userspace program allocates past one region,
+        // forcing the runtime to `map_anon` more frames from the kernel.
+        Some(WorkloadKind::HeapGrow) => {
+            user::init_metric();
+            let _ = sched::spawn_on(1, "heap_grow", user::heap_grow_main_entry);
         }
         _ => {}
     }

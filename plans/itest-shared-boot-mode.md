@@ -23,10 +23,12 @@ failure-signature capture that the separate-boot model gives us.
   `:path` matcher fragment). Catalog populated with every scenario's
   workload; guard comment on the nine `{"userspace"}` rows. Macro tests
   extended. Host-only; no scenario bodies touched yet.
-- **Next: step 4** — extract `View` (cursor + per-scenario assertion
-  state) from the QEMU-owning `Harness`; migrate the 41 scenario fns to
-  `fn(&mut View)` and drop their in-fn `spawn`. All-or-nothing on the `run`
-  signature; needs a QEMU suite run to validate (the user runs it).
+- **Next: step 4** — the inverted-execution refactor (see "Step 4
+  architecture" below). Extract `View`/`Boot` in xtask, make the runner
+  group-and-delegate to a consumer executor that returns reports, migrate
+  the 41 scenario fns to `fn(&mut View)`. Larger than first scoped, but
+  the well-factored end state. Needs a QEMU suite run to validate (the
+  user runs it).
 
 Non-goal: replacing the separate-boot model. Shared mode is an
 additional, opt-in mode. The flake gate (`--repeat 10`) and baseline
@@ -137,6 +139,77 @@ feedback; separate for flake hunting and baselines, where isolation and
 per-scenario flake rates actually matter. We keep the deflake machinery;
 we just don't engage it in the fast mode.
 
+## Step 4 architecture: invert where execution lives
+
+The naive step-4 (make `Scenario.run` a `fn(&mut View)`) doesn't fit: `View`
+is protocol/QEMU-specific so it must live in **xtask**, but `Scenario`
+lives in the deliberately protocol-free **itest-harness**, whose generic
+runner calls `(s.run)()` with no args and can't construct a `View`. The
+shims/thread-locals that would bridge that are a symptom of a misplaced
+seam. The well-factored fix is to **invert where execution lives**.
+
+Today's tell: the runner reads `max_wait_for` / `capture_for` /
+`log_path_for` *thread-locals* that the xtask harness stashes during
+`(s.run)()`. That's action-at-a-distance because the scenario owns its
+boot and the runner only gets to scrape the aftermath. Remove it.
+
+**The split of responsibility:**
+
+- The **runner** (itest-harness) owns *orchestration*: scenario selection,
+  grouping, parallelism, `--repeat` aggregation, flake baselines, history,
+  signature capture.
+- The **consumer** (xtask) owns *execution of a group of scenarios against
+  one subject*, returning structured reports.
+
+Separate-vs-shared is then **not two code paths** — it's only *how the
+runner groups before delegating*: separate → each scenario is a group of
+one; shared → group by `workload`. The executor is identical for both; it
+just runs "this group on one boot."
+
+**itest-harness (generic, protocol-free):**
+
+- `Scenario<P>` — metadata (`name`, `cpu_profile`, `tags`, `workload`)
+  **plus an opaque payload `P`** the runner carries but never inspects.
+  `P` defaults to `fn() -> Result<(), String>` (keeps the crate's own
+  runner tests trivial); xtask sets `P = fn(&mut View) -> Result<(), String>`.
+- `ScenarioReport { result, max_wait, capture, log_path }` — returned by
+  execution, **replacing the three thread-local hooks entirely**.
+- A consumer executor in `RunnerConfig`:
+  `run_group: &dyn Fn(&[&Scenario<P>]) -> Vec<ScenarioReport>`.
+  The runner groups, calls `run_group` per group, aggregates the reports
+  exactly as it aggregates results today.
+
+**xtask (owns everything frame/QEMU, cohesively):**
+
+- `Boot` — owns the QEMU child + socket + `Arc<Recorder>`; kills on drop.
+- `Recorder` — the append-only frame buffer (already built, step 1–2).
+- `View` — cursor + per-scenario assertion state + frame-specific helpers
+  (`wait_for`, `assert_absent`, `name_of`, `timebase_hz`); the prefactored
+  `Harness` *minus* QEMU ownership.
+- `run_group(group)` — spawn **one** `Boot`, run each scenario's
+  `fn(&mut View)` against a fresh `View`, collect `ScenarioReport`s, drop
+  the `Boot`. Mode-agnostic: the runner decides whether the group has 1 or
+  9 members.
+
+**What this buys:**
+
+- Separate and shared collapse to one executor; the only difference is the
+  runner's grouping (generic — group by `workload`).
+- Scenarios become pure `fn(&mut View)` assertions: composable, no
+  in-fn `spawn`, no thread-locals.
+- The `max_wait_for` / `capture_for` / `log_path_for` hooks **disappear**,
+  replaced by `ScenarioReport` fields — no action-at-a-distance.
+- The crate boundary becomes honest: itest-harness orchestrates *opaque*
+  scenarios; xtask owns the subject + assertions. This is the "consumers
+  plug in their own Subject" design the crate's own docs gesture at.
+
+**Cost (accepted):** `Scenario<P>` ripples generics through the runner and
+`RunnerConfig`; the runner's per-scenario path is rewritten from
+`(s.run)()` + hook-scraping to `run_group(group) -> reports`; the harness's
+own runner tests gain a trivial `P = fn()` executor; xtask's `harness.rs`
+splits into `Boot` + `View` + the executor; all 41 scenarios migrate to
+`fn(&mut View)` and the catalog/macro carry the payload.
+
 ## Declaring the boot in the catalog
 
 Today the workload is a string buried inside each scenario fn
@@ -174,7 +247,10 @@ String>`. Per scenario this is mechanical:
    `h.name_of` / `h.timebase_hz` / `h.assert_absent`).
 
 41 functions, rote. The workload string each used moves to its catalog
-row (previous section).
+row (previous section). *Who* calls these `fn(&mut View)`s — the
+`run_group` executor that spawns the `Boot` and hands each a fresh `View`
+— is covered in "Step 4 architecture"; the scenario bodies themselves no
+longer spawn anything.
 
 ## Exceptions (the actual risk surface)
 
@@ -213,10 +289,13 @@ row (previous section).
 - `--shared` flag on `cargo xtask itest` (default off → separate, today's
   gate semantics preserved). Composes with `--tag` (`--tag userspace
   --shared` = the nine userspace assertions off one boot) and `--skip`.
-- Shared path: partition `to_run` by `workload`, spawn one Recorder per
-  group, fan groups across the existing worker pool (the unit of
-  parallelism becomes the *group*), evaluate each group's Views
-  sequentially within its worker.
+- The runner's grouping is the *only* mode-dependent code: separate →
+  each scenario is a singleton group; shared → partition `to_run` by
+  `workload`. Both then call the same `run_group` executor (per "Step 4
+  architecture") and aggregate the returned `ScenarioReport`s. Groups fan
+  across the existing worker pool — the unit of parallelism becomes the
+  group; within a group the executor runs Views sequentially (Vec scans
+  are CPU-trivial).
 - The Cpu/Wfi profile partition still applies at the group level: a group
   is Cpu-bound if any member is.
 - Baseline writes + `--update-baseline` refuse (warn) in shared mode —
@@ -243,20 +322,34 @@ QEMU by feeding a synthetic `Vec<OwnedFrame>`.
 3. **Add `workload` to the `scenarios!` row grammar + `Scenario`.**
    Host-test the macro expansion (extend the existing `scenarios_macro_*`
    tests). Catalog still compiles; workload field unused so far.
-4. **Migrate scenarios to `fn(&mut View)` + move workloads to rows.** Do
-   it one workload-group at a time, starting with userspace (9). After
-   each group: full suite green in separate mode. Mechanical; the View
-   API matches the old Harness API exactly.
-5. **Per-view incremental table for `pre_init_order`** (exception 3).
-6. **Runner: `--shared` + grouping.** Default off. Add a host test for
-   the partition-by-workload grouping. Then: `cargo xtask itest --tag
-   userspace --shared` boots once for all nine; compare wall-clock to the
-   separate run; full-suite `--shared` green.
-7. **Docs:** README flag + a short `docs/` note; a guard comment on the
+4. **Invert execution in itest-harness (host-tested, no QEMU).** This is
+   the core of "Step 4 architecture". Sub-steps, each green:
+   a. `Scenario<P = fn() -> Result<…>>` generic + `ScenarioReport`. The
+      crate's own runner tests gain a trivial `P = fn()` executor and
+      assert on returned reports instead of thread-locals.
+   b. Replace the runner's `(s.run)()` + `max_wait_for`/`capture_for`/
+      `log_path_for` hooks with a `run_group: Fn(&[&Scenario<P>]) ->
+      Vec<ScenarioReport>` executor + grouping (separate = singletons).
+      Delete the three thread-local hooks. All host-testable with a fake
+      executor.
+5. **Split xtask `Harness` → `Boot` + `View`; add the `run_group`
+   executor.** `Boot` owns QEMU + Recorder; `View` is the cursor +
+   assertions. Executor spawns one Boot per group, runs each payload
+   against a fresh View, returns reports. Migrate all 41 scenarios to
+   `fn(&mut View)` and the catalog/macro to carry the `fn(&mut View)`
+   payload. Separate mode must stay behaviour-identical — validate with
+   `--repeat 10` (the commit gate). This is the step that needs QEMU.
+6. **Per-view incremental table for `pre_init_order`** (exception 3).
+7. **Runner: `--shared` + grouping.** Default off — flip the grouping from
+   singletons to group-by-`workload`. The executor is unchanged. Host-test
+   the grouping; then `cargo xtask itest --tag userspace --shared` boots
+   once for all nine; compare wall-clock; full-suite `--shared` green.
+8. **Docs:** README flag + a short `docs/` note; a guard comment on the
    userspace group (exception 2).
 
-Land 1–2 first and stop: that's the whole risk (does record-and-replay
-preserve behaviour?) retired with zero scenario churn. 3–7 are additive.
+Land 1–3 first (done). Step 4 (a/b) is host-only and retires the runner
+re-architecture with zero QEMU risk. Step 5 is the QEMU-validated one and
+should be done against a green build. 6–8 are additive.
 
 ## Risks / open questions
 

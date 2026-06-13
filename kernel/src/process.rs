@@ -8,7 +8,7 @@
 //! [`kernel_core::cap`]; this module only decides *where the table lives*
 //! and grants the bootstrap capability. See `plans/v0.7b-capabilities.md`.
 
-use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use kernel_core::cap::{CapTable, Handle};
 use protocol::StringId;
@@ -63,6 +63,13 @@ pub struct Process {
     /// nothing (they resolve via `lookup_by_content`). Incremented under the
     /// intern lock at the registration site, so the check-and-bump is precise.
     pub span_names_registered: AtomicU32,
+
+    /// Top of this process's growable heap region (the next VA the `Sbrk`
+    /// syscall will map). Starts at [`Process::HEAP_BASE`]; the runtime's
+    /// allocator grows it on demand, capped at `HEAP_BASE + HEAP_MAX`. The
+    /// process runs on one hart at a time, so the atomic is just for `&self`
+    /// access; `Relaxed` suffices.
+    pub heap_top: AtomicUsize,
 }
 
 impl Process {
@@ -71,6 +78,16 @@ impl Process {
     /// enough that a misbehaving program can't leak unbounded `'static`
     /// strings or grow the intern table without limit.
     pub const MAX_SPAN_NAMES: u32 = 16;
+
+    /// Base VA of the per-process growable heap region. Well clear of the
+    /// program image (linked at `0x1000_0000`, 16 MiB) and the kernel
+    /// high-half; in the Sv39 user half. The `Sbrk` syscall maps frames here
+    /// on demand.
+    pub const HEAP_BASE: usize = 0x2000_0000;
+
+    /// Maximum a single process's heap may grow — bounds the frames a
+    /// misbehaving program can pin via `Sbrk`. 16 MiB is generous for the demo.
+    pub const HEAP_MAX: usize = 16 * 1024 * 1024;
 
     /// Build the process for `root_pa` and grant it its bootstrap
     /// capabilities: a `TelemetrySink` bound to `telemetry_counter` and a
@@ -86,6 +103,7 @@ impl Process {
             root_pa,
             caps: Mutex::new(table),
             span_names_registered: AtomicU32::new(0),
+            heap_top: AtomicUsize::new(Self::HEAP_BASE),
         };
         (process, telemetry, span)
     }

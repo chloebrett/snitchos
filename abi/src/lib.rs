@@ -51,6 +51,15 @@ pub enum Syscall {
     /// Close a span previously opened with [`Self::SpanOpen`]. `a0` = the
     /// span id the open returned. Emits the matching `SpanEnd`.
     SpanClose = 4,
+    /// Map a fresh anonymous memory region. `a0` = bytes requested
+    /// (page-aligned by the runtime). The kernel maps that many bytes of fresh
+    /// zeroed frames into the process's address space and returns the region's
+    /// **base** VA in `a0`, or `usize::MAX` if refused (out of frames, or past
+    /// the per-process memory cap). mmap-shaped, not `brk`: a region is
+    /// returned (individually unmappable later, and a `MemoryRegion` capability
+    /// eventually), and the runtime allocator (`talc`) `claim`s each one — it
+    /// does not assume regions abut, so the kernel may place them disjointly.
+    MapAnon = 5,
 }
 
 impl Syscall {
@@ -65,6 +74,7 @@ impl Syscall {
             2 => Some(Self::Yield),
             3 => Some(Self::SpanOpen),
             4 => Some(Self::SpanClose),
+            5 => Some(Self::MapAnon),
             _ => None,
         }
     }
@@ -81,13 +91,15 @@ mod tests {
         assert_eq!(Syscall::Yield as usize, 2);
         assert_eq!(Syscall::SpanOpen as usize, 3);
         assert_eq!(Syscall::SpanClose as usize, 4);
+        assert_eq!(Syscall::MapAnon as usize, 5);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
         assert_eq!(Syscall::from_usize(2), Some(Syscall::Yield));
         assert_eq!(Syscall::from_usize(3), Some(Syscall::SpanOpen));
         assert_eq!(Syscall::from_usize(4), Some(Syscall::SpanClose));
-        assert_eq!(Syscall::from_usize(5), None);
+        assert_eq!(Syscall::from_usize(5), Some(Syscall::MapAnon));
+        assert_eq!(Syscall::from_usize(6), None);
     }
 }
 

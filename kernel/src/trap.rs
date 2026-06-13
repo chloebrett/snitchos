@@ -186,6 +186,7 @@ fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::Yield) => crate::sched::yield_now(),
         Some(Syscall::SpanOpen) => handle_span_open(frame),
         Some(Syscall::SpanClose) => handle_span_close(frame),
+        Some(Syscall::MapAnon) => handle_map_anon(frame),
         None => {
             let n = frame.a7 as u8;
             refuse(frame, n, protocol::RefusalReason::UnknownSyscall);
@@ -349,6 +350,63 @@ fn refusal_for(denied: kernel_core::cap::Denied) -> protocol::RefusalReason {
         Denied::MissingRight => RefusalReason::CapWrongRights,
         Denied::WrongObject => RefusalReason::CapWrongObject,
     }
+}
+
+/// Map a fresh anonymous memory region for U-mode. `a0` = bytes requested (the
+/// runtime page-aligns). Maps that many zeroed frames into the process's heap
+/// region and returns the region's **base** VA in `a0` (or `u64::MAX` if
+/// refused — out of frames, or past the per-process memory cap). mmap-shaped:
+/// the runtime allocator `claim`s the returned region. Placement is a simple
+/// bump pointer (`heap_top`) for now; the allocator doesn't assume regions
+/// abut, so disjoint placement + unmap can land later without an ABI change.
+fn handle_map_anon(frame: &mut TrapFrame) {
+    use kernel_core::mmu::PtePerms;
+    use protocol::RefusalReason;
+    use snitchos_abi::Syscall;
+
+    use crate::frame::FRAME_SIZE;
+    use crate::process::Process;
+
+    let sc = Syscall::MapAnon as u8;
+    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
+    // SAFETY: set by `user::run` before `sret`; the `Process` lives in that
+    // never-returning frame. Null only if no user process runs here.
+    let Some(proc) = (unsafe { proc.as_ref() }) else {
+        refuse(frame, sc, RefusalReason::NoProcess);
+        return;
+    };
+
+    let bytes = (frame.a0 as usize).next_multiple_of(FRAME_SIZE);
+    let base = proc.heap_top.load(Ordering::Relaxed);
+    let end = base.saturating_add(bytes);
+    if bytes == 0 || end > Process::HEAP_BASE + Process::HEAP_MAX {
+        refuse(frame, sc, RefusalReason::OutOfMemory);
+        return;
+    }
+
+    let perms = PtePerms::U.union(PtePerms::R).union(PtePerms::W);
+    let mut va = base;
+    while va < end {
+        let Some(f) = crate::frame::alloc_zeroed() else {
+            // Out of frames mid-map: the already-mapped pages leak until process
+            // teardown (none in v0.7), and `heap_top` isn't advanced, so the
+            // runtime never `claim`s a partial region.
+            refuse(frame, sc, RefusalReason::OutOfMemory);
+            return;
+        };
+        if crate::mmu::map_in(proc.root_pa, va, f.addr(), perms).is_err() {
+            refuse(frame, sc, RefusalReason::OutOfMemory);
+            return;
+        }
+        va += FRAME_SIZE;
+    }
+    // Make the new pages visible on this hart. SAFETY: flush stale (negative)
+    // TLB entries for the freshly-mapped VAs; new mappings, so a local sfence
+    // suffices — nothing on another hart cached them.
+    unsafe { asm!("sfence.vma", options(nostack, nomem)) };
+
+    proc.heap_top.store(end, Ordering::Relaxed);
+    frame.a0 = base as u64;
 }
 
 /// Timer IRQ handler. Kept tiny: measure duration, arm the next

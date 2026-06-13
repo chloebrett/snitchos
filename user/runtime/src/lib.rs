@@ -18,27 +18,63 @@
 
 #![no_std]
 
+use core::alloc::Layout;
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use linked_list_allocator::LockedHeap;
 use snitchos_abi::Syscall;
+use talc::locking::AssumeUnlockable;
+use talc::{OomHandler, Span as TalcSpan, Talc, Talck};
 
 core::arch::global_asm!(include_str!("start.S"));
 
-/// Userspace heap arena — a fixed region in `.bss` that the ELF loader maps
-/// (the same way it maps the stack). 64 KiB is generous for the small programs
-/// we run today; growing it on demand (a `brk`-style syscall + `Heap::extend`)
-/// is a later step. Running out is a clean alloc error, not UB.
-const HEAP_SIZE: usize = 64 * 1024;
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+/// Page size — must match the kernel's `FRAME_SIZE`.
+const PAGE_SIZE: usize = 4096;
+/// Minimum bytes to `map_anon` per growth, to amortize the syscall across many
+/// small allocations rather than one map per object.
+const MIN_MAP: usize = 64 * 1024;
 
-/// The userspace global allocator: a spinlock-wrapped linked-list heap over
-/// [`HEAP`]. Initialised once in [`__snitchos_start`] before any program code
-/// runs. (The lock gives this `&self` static its interior mutability; it has
-/// nothing to do with the heap being fixed-size.)
+/// Grow-on-demand hook: when `talc` can't satisfy an allocation, it calls this,
+/// which `map_anon`s a fresh region (sized for the request + headroom) and
+/// `claim`s it. Disjoint regions are fine — `talc` is multi-region — so the
+/// kernel may place them anywhere.
+struct MmapOnOom;
+
+impl OomHandler for MmapOnOom {
+    fn handle_oom(talc: &mut Talc<Self>, layout: Layout) -> Result<(), ()> {
+        let size = layout.size().next_multiple_of(PAGE_SIZE) + MIN_MAP;
+        let base = sys_map_anon(size);
+        if base == usize::MAX {
+            return Err(()); // kernel refused — out of frames / over the cap
+        }
+        let span = TalcSpan::new(base as *mut u8, base.wrapping_add(size) as *mut u8);
+        // SAFETY: the kernel just mapped `size` bytes of fresh, exclusively-owned
+        // R/W frames at `base`; the span is page-aligned and ours alone.
+        unsafe { talc.claim(span) }.map(|_| ())
+    }
+}
+
+/// The userspace global allocator: `talc` with the grow-on-demand OOM handler,
+/// behind a no-op lock (userspace is single-threaded). Starts empty — the first
+/// allocation triggers the first `map_anon`.
 #[global_allocator]
-static ALLOC: LockedHeap = LockedHeap::empty();
+static ALLOC: Talck<AssumeUnlockable, MmapOnOom> = Talck::new(Talc::new(MmapOnOom));
+
+/// `MapAnon` syscall: ask the kernel for `bytes` of fresh anonymous memory,
+/// returning the region's base VA (or `usize::MAX` if refused).
+fn sys_map_anon(bytes: usize) -> usize {
+    let base: usize;
+    // SAFETY: `ecall` traps to the kernel, which maps `bytes` of anon R/W
+    // frames and returns the base in a0.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::MapAnon as usize,
+            inlateout("a0") bytes => base,
+        );
+    }
+    base
+}
 
 // The two startup capability handles the kernel delivers in `a0`/`a1`.
 // `__snitchos_start` stores them here before calling `main`; the free
@@ -76,14 +112,8 @@ unsafe extern "C" {
 /// runs the program, then terminates the process once `main` returns.
 #[unsafe(no_mangle)]
 extern "C" fn __snitchos_start(telemetry_handle: usize, span_handle: usize) -> ! {
-    // SAFETY: `HEAP` is a static `.bss` arena the loader maps; this runs once,
-    // before `main` (and thus before any allocation). `addr_of_mut!` avoids
-    // forming a reference to the `static mut`.
-    unsafe {
-        ALLOC
-            .lock()
-            .init(core::ptr::addr_of_mut!(HEAP).cast::<u8>(), HEAP_SIZE);
-    }
+    // The heap needs no init — `talc` is lazy; the first allocation triggers
+    // its OOM handler, which `map_anon`s the first region.
     STARTUP_TELEMETRY.store(telemetry_handle, Ordering::Relaxed);
     STARTUP_SPAN.store(span_handle, Ordering::Relaxed);
     // SAFETY: every program links this runtime and provides `main`.

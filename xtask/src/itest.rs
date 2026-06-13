@@ -122,6 +122,7 @@ const SCENARIOS: &[Scenario] = itest_harness::scenarios! {
     wfi "userspace-refusal-snitched"      scenarios::userspace_refusal_snitched     [userspace]  {"userspace"};
     wfi "userspace-quota-refused"         scenarios::userspace_quota_refused        [userspace]  {"userspace-span-flood"};
     cpu "workers-make-progress"           scenarios::workers_make_progress          [userspace]  {"workers"};
+    wfi "heap-grows-on-demand"            scenarios::heap_grows_on_demand           [userspace]  {"heap-grow"};
 };
 
 /// Set the process-wide failure-capture transcript depth. Call once at

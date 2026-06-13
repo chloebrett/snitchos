@@ -1555,3 +1555,29 @@ pub fn workers_make_progress() -> Result<(), String> {
 
     Ok(())
 }
+
+/// On-demand heap growth (`workload=heap-grow`): `heap-grow` allocates a 512 KiB
+/// buffer — far past the runtime's 64 KiB per-region map — so the `talc`
+/// allocator must `map_anon` more frames from the kernel. It fills and sums the
+/// buffer, emitting the sum (524288) only if every byte was allocated, written,
+/// and readable. Asserts that marker and a surviving heartbeat.
+pub fn heap_grows_on_demand() -> Result<(), String> {
+    let mut h = Harness::spawn_with_workload("heapgrow", "heap-grow")?;
+
+    h.wait_for(SEC * 10, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value == 512 * 1024
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no telemetry_total == 524288 within 10s — the 512 KiB allocation failed (heap didn't \
+         grow via MapAnon, or the mapped frames weren't writable)",
+    )?;
+
+    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat after heap growth — did MapAnon destabilise the kernel?")?;
+
+    Ok(())
+}

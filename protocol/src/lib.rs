@@ -198,6 +198,9 @@ pub enum RefusalReason {
   /// A span-close named an id that isn't the caller's innermost open span
   /// (out-of-order or forged close).
   BadSpanId,
+  /// A memory request could not be satisfied — out of physical frames, or
+  /// past the per-process memory cap.
+  OutOfMemory,
 }
 
 #[cfg(test)]
@@ -534,6 +537,7 @@ mod tests {
       RefusalReason::BadUtf8,
       RefusalReason::Quota,
       RefusalReason::BadSpanId,
+      RefusalReason::OutOfMemory,
     ] {
       let frame = Frame::SyscallRefused {
         syscall: 3,

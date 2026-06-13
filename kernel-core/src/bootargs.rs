@@ -72,6 +72,10 @@ pub enum WorkloadKind {
     /// {open a span, bump progress, `yield`}, the userspace successors to the
     /// kernel-mode `task_a`/`task_b`. (v0.7 follow-on; the road to v0.8.)
     Workers,
+    /// Userspace heap-growth probe: runs the `heap-grow` program, which
+    /// allocates far past the runtime's per-region map size — forcing the
+    /// `talc` allocator to `map_anon` more frames from the kernel on demand.
+    HeapGrow,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -129,6 +133,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "userspace-fault" => Some(WorkloadKind::UserspaceFault),
             "userspace-span-flood" => Some(WorkloadKind::UserspaceSpanFlood),
             "workers" => Some(WorkloadKind::Workers),
+            "heap-grow" => Some(WorkloadKind::HeapGrow),
             _ => None,
         })
 }
@@ -212,6 +217,11 @@ mod tests {
     #[test]
     fn selects_workers() {
         assert_eq!(select("workload=workers"), Some(WorkloadKind::Workers));
+    }
+
+    #[test]
+    fn selects_heap_grow() {
+        assert_eq!(select("workload=heap-grow"), Some(WorkloadKind::HeapGrow));
     }
 
     #[test]

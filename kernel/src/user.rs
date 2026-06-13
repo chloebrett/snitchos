@@ -38,6 +38,10 @@ pub static SPAN_FLOOD_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAN_FLOOD_ELF"
 /// {open span, bump progress, yield}.
 pub static WORKER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_WORKER_ELF"));
 
+/// The `workload=heap-grow` program: allocates past the runtime's per-region
+/// map size to force on-demand heap growth via `MapAnon`.
+pub static HEAP_GROW_ELF: &[u8] = include_bytes!(env!("SNITCHOS_HEAP_GROW_ELF"));
+
 /// The counter the `EmitMetric` syscall bumps. Registered once on hart 0
 /// (`init_metric`) so the `MetricRegister` frame isn't emitted from inside
 /// the trap handler; the handler (on hart 1) reads it via [`user_metric_id`].
@@ -137,6 +141,11 @@ pub extern "C" fn span_flood_main_entry() -> ! {
 /// Hart-1 entry for `workload=workers`: run a cooperative demo worker.
 pub extern "C" fn worker_main_entry() -> ! {
     run(WORKER_ELF)
+}
+
+/// Hart-1 entry for `workload=heap-grow`: run the heap-growth probe.
+pub extern "C" fn heap_grow_main_entry() -> ! {
+    run(HEAP_GROW_ELF)
 }
 
 /// Build a fresh address space, grant the process its bootstrap
