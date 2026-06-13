@@ -83,6 +83,21 @@ pub struct Capability {
     pub rights: Rights,
 }
 
+/// How many times a grant may be invoked — a property of the *grant* (the
+/// table slot), orthogonal to its [`Rights`]. `Persistent` caps are invoked
+/// repeatedly (telemetry, spans, endpoints); a `Once` cap is **consumed** on
+/// its first successful invoke (the affine/linear-capability shape — v0.9b's
+/// reply cap is the first instance). Two variants by design: no multiplicity
+/// machinery until a second `Once` consumer (cap-transfer-in-messages) earns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Multiplicity {
+    /// Invoke any number of times.
+    #[default]
+    Persistent,
+    /// Invoke exactly once, then the grant is consumed (its handle goes stale).
+    Once,
+}
+
 /// An opaque reference to a capability *within the table that issued it*.
 ///
 /// Packs a slot `index` (low [`Handle::INDEX_BITS`] bits) and a
@@ -145,12 +160,14 @@ pub enum CapError {
     Stale,
 }
 
-/// One occupied slot: the capability plus the generation a valid handle
-/// to it must carry.
+/// One table slot: the generation a valid handle must carry, the grant's
+/// [`Multiplicity`], and the capability — `None` once the slot has been
+/// consumed/freed (a tombstone awaiting reuse, so live indices stay stable).
 #[derive(Debug, Clone, Copy)]
 struct Slot {
     generation: u32,
-    cap: Capability,
+    multiplicity: Multiplicity,
+    cap: Option<Capability>,
 }
 
 /// Why a capability *invocation* was refused. Distinct from [`CapError`]
@@ -267,13 +284,66 @@ impl CapTable {
         (table, telemetry, span)
     }
 
-    /// Place `cap` in the table and return the handle that names it.
-    /// Used at bootstrap to grant a process its root capabilities.
+    /// Grant `cap` as a [`Multiplicity::Persistent`] capability and return the
+    /// handle that names it. Used at bootstrap to grant a process its root
+    /// capabilities.
     pub fn insert(&mut self, cap: Capability) -> Handle {
+        self.grant(cap, Multiplicity::Persistent)
+    }
+
+    /// Grant `cap` as a single-use [`Multiplicity::Once`] capability: the first
+    /// successful invoke should [`consume`](Self::consume) it. v0.9b's reply
+    /// cap is the first user.
+    pub fn insert_once(&mut self, cap: Capability) -> Handle {
+        self.grant(cap, Multiplicity::Once)
+    }
+
+    /// Place `cap` in the table with `multiplicity`, reusing a freed slot if
+    /// one exists (so a server consuming reply caps doesn't grow the table
+    /// unboundedly) — otherwise appending. A reused slot keeps its bumped
+    /// generation, so handles to its former occupant stay stale.
+    fn grant(&mut self, cap: Capability, multiplicity: Multiplicity) -> Handle {
+        if let Some((index, slot)) = self.slots.iter_mut().enumerate().find(|(_, s)| s.cap.is_none())
+        {
+            slot.multiplicity = multiplicity;
+            slot.cap = Some(cap);
+            return Handle::new(index as u32, slot.generation);
+        }
         let index = self.slots.len() as u32;
-        let generation = 0; // fresh slot; revocation would advance this
-        self.slots.push(Slot { generation, cap });
+        let generation = 0; // fresh slot
+        self.slots.push(Slot { generation, multiplicity, cap: Some(cap) });
         Handle::new(index, generation)
+    }
+
+    /// Consume the capability `handle` names: free its slot and bump the
+    /// generation so the handle (and any copy) now resolves [`CapError::Stale`],
+    /// and the slot can be reused at the new generation. Returns whether a live
+    /// capability was consumed. This is the consume step of a single-use
+    /// capability — and the long-reserved revocation path.
+    pub fn consume(&mut self, handle: Handle) -> bool {
+        let Some(slot) = self.slots.get_mut(handle.index() as usize) else {
+            return false;
+        };
+        if slot.generation != handle.generation() || slot.cap.is_none() {
+            return false;
+        }
+        slot.cap = None;
+        slot.generation = slot.generation.wrapping_add(1);
+        true
+    }
+
+    /// The [`Multiplicity`] of the grant `handle` names, or why it doesn't
+    /// resolve. The invoke path reads this to decide whether a successful
+    /// invoke must [`consume`](Self::consume) the cap.
+    pub fn multiplicity_of(&self, handle: Handle) -> Result<Multiplicity, CapError> {
+        let slot = self.slots.get(handle.index() as usize).ok_or(CapError::OutOfBounds)?;
+        if slot.generation != handle.generation() {
+            return Err(CapError::Stale);
+        }
+        if slot.cap.is_none() {
+            return Err(CapError::Stale);
+        }
+        Ok(slot.multiplicity)
     }
 
     /// Resolve a handle to the capability it names, validating it against
@@ -287,7 +357,10 @@ impl CapTable {
         if slot.generation != handle.generation() {
             return Err(CapError::Stale);
         }
-        Ok(&slot.cap)
+        // A freed (consumed) slot holds no capability. The generation bump on
+        // consume means no live handle reaches here, but guard rather than
+        // hand back a stale reference.
+        slot.cap.as_ref().ok_or(CapError::Stale)
     }
 }
 
@@ -570,5 +643,73 @@ mod tests {
 
         assert!(table.resolve(full).unwrap().rights.contains(Rights::EMIT));
         assert!(!table.resolve(attenuated).unwrap().rights.contains(Rights::EMIT));
+    }
+
+    // --- v0.9b: single-use (`Once`) capabilities ---
+
+    #[test]
+    fn consuming_a_capability_makes_its_handle_stale() {
+        // The consume step of a single-use capability: invoke once, then the
+        // handle (and any copy) no longer resolves.
+        let mut table = CapTable::new();
+        let h = table.insert_once(emit_sink());
+        assert!(table.resolve(h).is_ok());
+
+        assert!(table.consume(h));
+        assert_eq!(table.resolve(h), Err(CapError::Stale));
+    }
+
+    #[test]
+    fn consuming_an_unknown_handle_returns_false() {
+        let mut table = CapTable::new();
+        assert!(!table.consume(Handle::from_raw(0)));
+    }
+
+    #[test]
+    fn consuming_a_stale_handle_refuses_and_leaves_the_live_cap() {
+        // A stale-generation handle (occupied slot, wrong generation) must NOT
+        // consume the live capability now in that slot. Guards the
+        // generation-mismatch branch independently of the empty-slot branch.
+        let mut table = CapTable::new();
+        let valid = table.insert_once(emit_sink());
+        let stale = Handle::new(valid.index(), valid.generation() + 1);
+
+        assert!(!table.consume(stale));
+        assert!(table.resolve(valid).is_ok());
+    }
+
+    #[test]
+    fn a_consumed_slot_is_reused_and_old_handles_stay_stale() {
+        // The freed slot is reclaimed by the next insert (so a server's table
+        // doesn't grow per call), and the generation bump stops the old handle
+        // from aliasing the new occupant.
+        let mut table = CapTable::new();
+        let first = table.insert_once(emit_sink());
+        assert!(table.consume(first));
+
+        let second = table.insert(emit_sink());
+        assert_eq!(first.index(), second.index()); // same physical slot
+        assert_ne!(first, second); // different generation
+        assert_eq!(table.resolve(first), Err(CapError::Stale)); // old handle dead
+        assert!(table.resolve(second).is_ok()); // new handle live
+    }
+
+    #[test]
+    fn a_grant_reports_its_multiplicity() {
+        // The marker the invoke path reads to decide whether to consume.
+        let mut table = CapTable::new();
+        let persistent = table.insert(emit_sink());
+        let once = table.insert_once(emit_sink());
+
+        assert_eq!(table.multiplicity_of(persistent), Ok(Multiplicity::Persistent));
+        assert_eq!(table.multiplicity_of(once), Ok(Multiplicity::Once));
+    }
+
+    #[test]
+    fn multiplicity_of_a_consumed_handle_is_stale() {
+        let mut table = CapTable::new();
+        let once = table.insert_once(emit_sink());
+        assert!(table.consume(once));
+        assert_eq!(table.multiplicity_of(once), Err(CapError::Stale));
     }
 }
