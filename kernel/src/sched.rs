@@ -587,39 +587,63 @@ pub fn yield_now() {
     reschedule(SwitchReason::Yield);
 }
 
-/// Core context switch: pick the next ready task on this hart, switch into
-/// it, and tag the emitted `ContextSwitch` with `reason`. `yield_now` passes
-/// `Yield` (a voluntary relinquish); v0.8's timer preemption passes `Preempt`
-/// (an involuntary deschedule). Returns immediately if the runqueue is empty
-/// (nothing else wants the CPU). The full register discipline is identical
-/// either way — preemption is *layered* on this same cooperative switch (the
-/// preempted task's complete state lives in its `TrapFrame` on its kernel
-/// stack; this switch only swaps the 14 callee-saved regs + sp).
-fn reschedule(reason: SwitchReason) {
+/// What happens to the *currently running* task when the scheduler switches
+/// away from it — the one axis on which [`reschedule`], [`block_current`], and
+/// [`exit_now`] differ. Everything else about a switch (pick next, load its
+/// state, account, emit the `ContextSwitch`) is identical and lives in
+/// [`prepare_switch`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CurrentDisposition {
+    /// Voluntary/involuntary deschedule: the current task re-enters the ready
+    /// set (`yield_now`/preemption). Its `state` field is left as-is — the
+    /// runqueue membership is the source of truth.
+    Requeue,
+    /// The current task blocks: marked `Blocked` and left **off** the runqueue
+    /// until a `wake` returns it (`block_current`).
+    Block,
+    /// The current task terminates: marked `Exited` and left off the runqueue
+    /// forever (`exit_now`).
+    Exit,
+}
+
+/// The shared core of every context switch. Under the scheduler lock: pick the
+/// highest effective-priority ready task on this hart, dispose of the current
+/// task per `disposition`, load the next task's context/cursor/address-space +
+/// accounting, set the per-hart current-task state, and emit the
+/// `ContextSwitch` tagged `reason`. Returns the `(current, next)` context
+/// pointers for the caller's `switch` (two-way) or `switch_into` (one-way).
+///
+/// Returns `None` when the runqueue is empty: if `empty_ok` the caller should
+/// just keep running (`reschedule`/`block_current`); otherwise — `exit_now`,
+/// which has nowhere to go — it panics instead.
+///
+/// The pick is a single O(n) scan of this hart's ready queue (each `Candidate`
+/// carries its own priority + wait clock — base priority boosted by how long it
+/// waited (aging), ties broken by longest wait → FIFO-fair). The running task
+/// is off the queue, so it can't be re-picked. With every task at the default
+/// `Normal`, this reduces to FIFO.
+fn prepare_switch(
+    disposition: CurrentDisposition,
+    reason: SwitchReason,
+    empty_ok: bool,
+) -> Option<(*mut TaskContext, *mut TaskContext)> {
     let t_entry = crate::tracing::timestamp();
     let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
     let me = crate::percpu::current_hartid();
 
     let (current_ctx, next_ctx, next_id, next_root, next_proc) = {
         let mut sched = SCHEDULER.lock();
-        // Pick the highest *effective*-priority ready task (v0.8b): base
-        // priority boosted by how long each has waited (aging), ties → longest
-        // wait → FIFO-fair. Candidates come straight off this hart's ready
-        // queue (each carries its own priority + wait clock), so the pick is a
-        // single O(n) scan — no per-task table lookup, no allocation. The
-        // running task is off the queue, so it can't be re-picked. With every
-        // task at the default `Normal`, this reduces to longest-wait == FIFO.
         let Some(next_id) = pick_next(sched.runqueues[me].iter(), t_entry, AGING_STEP_TICKS) else {
-            return; // nothing else ready on this hart — keep running
+            assert!(empty_ok, "prepare_switch: runqueue empty on hart {me} with no fallback");
+            return None; // nothing else ready — caller keeps running
         };
         sched.runqueues[me].remove(next_id);
 
-        // Single pass through the task table to capture both context
-        // pointers, accumulate the outgoing task's on-CPU time, and
-        // bump the incoming task's runs counter. Box<Task> means the
-        // Task itself sits at a stable heap address even if the Vec
-        // reallocates, so the raw pointers stay valid past the lock
-        // drop.
+        // Single pass through the task table: dispose of the outgoing task,
+        // accumulate its on-CPU time, and capture both context pointers + the
+        // incoming task's address space. `Box<Task>` keeps each `Task` at a
+        // stable heap address even if the `Vec` reallocates, so the raw
+        // pointers stay valid past the lock drop.
         let prev_entry = CURRENT_TASK_ENTRY_TICK.this_cpu().load(Ordering::Relaxed);
         let on_cpu_delta = if prev_entry == 0 { 0 } else { t_entry.wrapping_sub(prev_entry) };
         let mut current_ctx: *mut TaskContext = core::ptr::null_mut();
@@ -628,30 +652,37 @@ fn reschedule(reason: SwitchReason) {
         let mut next_cursor: *mut SpanCursor = core::ptr::null_mut();
         let mut next_root: usize = 0;
         let mut next_proc: *mut Process = core::ptr::null_mut();
-        for task in &sched.tasks {
+        for task in sched.tasks.iter_mut() {
             if task.id == current_id {
                 current_ctx = task.context.get();
                 current_priority = task.priority;
                 task.cpu_time_ticks.fetch_add(on_cpu_delta, Ordering::Relaxed);
+                match disposition {
+                    CurrentDisposition::Requeue => {}
+                    CurrentDisposition::Block => task.state = TaskState::Blocked,
+                    CurrentDisposition::Exit => task.state = TaskState::Exited,
+                }
             }
             if task.id == next_id {
                 next_ctx = task.context.get();
-                next_cursor = (&task.span_cursor as *const SpanCursor) as *mut SpanCursor;
+                next_cursor = core::ptr::from_ref(&task.span_cursor).cast_mut();
                 next_root = task.address_space.load(Ordering::Relaxed);
                 next_proc = task.process.load(Ordering::Relaxed);
                 task.runs.fetch_add(1, Ordering::Relaxed);
             }
         }
-        assert!(!current_ctx.is_null(), "current task missing from table");
-        assert!(!next_ctx.is_null(), "next task missing from table");
+        assert!(!current_ctx.is_null(), "prepare_switch: current task missing from table");
+        assert!(!next_ctx.is_null(), "prepare_switch: next task missing from table");
 
-        // The outgoing task re-enters the ready set now — stamp its wait clock
-        // (= now) so aging measures from this moment.
-        sched.runqueues[me].push_back(Candidate {
-            id: current_id,
-            base: current_priority,
-            enqueued_tick: t_entry,
-        });
+        if disposition == CurrentDisposition::Requeue {
+            // The outgoing task re-enters the ready set now — stamp its wait
+            // clock (= now) so aging measures from this moment.
+            sched.runqueues[me].push_back(Candidate {
+                id: current_id,
+                base: current_priority,
+                enqueued_tick: t_entry,
+            });
+        }
         CURRENT_TASK.this_cpu().store(next_id.0, Ordering::Relaxed);
         CURRENT_SPAN_CURSOR.this_cpu().store(next_cursor, Ordering::Relaxed);
 
@@ -668,22 +699,32 @@ fn reschedule(reason: SwitchReason) {
     crate::tracing::emit_context_switch(current_id, next_id, reason);
 
     let t_before_switch = crate::tracing::timestamp();
-    LAST_YIELD_OVERHEAD_TICKS
-        .store(t_before_switch.wrapping_sub(t_entry), Ordering::Relaxed);
-    // The next task is about to become Running. Record its entry
-    // tick now (close enough — the switch asm is a handful of
-    // cycles). When it next yields it'll compute its on-CPU delta
-    // from this.
+    LAST_YIELD_OVERHEAD_TICKS.store(t_before_switch.wrapping_sub(t_entry), Ordering::Relaxed);
+    // The next task is about to become Running. Record its entry tick now
+    // (close enough — the switch asm is a handful of cycles); it computes its
+    // on-CPU delta from this on its next switch out.
     CURRENT_TASK_ENTRY_TICK.this_cpu().store(t_before_switch, Ordering::Relaxed);
 
-    // SAFETY: both pointers point at `UnsafeCell<TaskContext>` storage
-    // inside `Box<Task>` allocations owned by `SCHEDULER.tasks`. The
-    // `Vec` may reallocate its slice of `Box` pointers, but the
-    // `Task` allocations sit at stable heap addresses. The asm has
-    // exclusive access to both for the duration of the call (cooperative
-    // single-hart; no preemption mid-switch).
-    unsafe { switch(current_ctx, next_ctx) };
-    // We've been resumed (a future yield switched back into us).
+    Some((current_ctx, next_ctx))
+}
+
+/// Core context switch: pick the next ready task on this hart and switch into
+/// it, re-enqueuing the current task. `yield_now` passes `Yield` (voluntary);
+/// v0.8's timer preemption passes `Preempt` (involuntary). Returns immediately
+/// if the runqueue is empty. Preemption is *layered* on this same cooperative
+/// switch — the preempted task's full state lives in its `TrapFrame` on its
+/// kernel stack; this switch only swaps the 14 callee-saved regs + sp.
+fn reschedule(reason: SwitchReason) {
+    if let Some((current_ctx, next_ctx)) =
+        prepare_switch(CurrentDisposition::Requeue, reason, true)
+    {
+        // SAFETY: both pointers are into `UnsafeCell<TaskContext>` storage in
+        // stable `Box<Task>` allocations owned by `SCHEDULER.tasks`. The asm
+        // has exclusive access for the duration of the call (cooperative
+        // single-hart; no preemption mid-switch). We resume here on a later
+        // switch back into us.
+        unsafe { switch(current_ctx, next_ctx) };
+    }
 }
 
 /// Time slice a userspace task may run before the timer preempts it, in
@@ -765,71 +806,19 @@ pub fn maybe_preempt(from_user: bool) {
 /// to switch into. Storm scenarios ensure `hart_1_main` stays on
 /// hart 1's queue specifically to keep this invariant.
 pub fn exit_now() -> ! {
-    let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
-    let me = crate::percpu::current_hartid();
+    // `empty_ok = false`: a terminating task has nowhere to fall back to, so an
+    // empty runqueue is fatal (prepare_switch panics rather than returning).
+    // Re-use `Yield` on the wire — a dedicated `Exit` reason is deferred until a
+    // host consumer needs to distinguish it.
+    let (_current_ctx, next_ctx) = prepare_switch(CurrentDisposition::Exit, SwitchReason::Yield, false)
+        .expect("prepare_switch with empty_ok=false returns Some or panics");
 
-    let (next_ctx, next_id, next_root, next_proc) = {
-        let mut sched = SCHEDULER.lock();
-
-        // Mark current Exited so `task_count` / `task_snapshots`
-        // skip it from this point on.
-        for task in sched.tasks.iter_mut() {
-            if task.id == current_id {
-                task.state = TaskState::Exited;
-                break;
-            }
-        }
-
-        // Current task is running, not on the runqueue, so nothing to remove.
-        // Pick the next ready task by effective priority (same policy as
-        // `reschedule`), then take it out of the queue.
-        let now = crate::tracing::timestamp();
-        let Some(next_id) = pick_next(sched.runqueues[me].iter(), now, AGING_STEP_TICKS) else {
-            panic!("sched::exit_now: runqueue empty on hart {me}");
-        };
-        sched.runqueues[me].remove(next_id);
-
-        // Resolve next's context + span cursor + address space. Same
-        // shape as the tail of yield_now's lock body.
-        let mut next_ctx: *mut TaskContext = core::ptr::null_mut();
-        let mut next_cursor: *mut SpanCursor = core::ptr::null_mut();
-        let mut next_root: usize = 0;
-        let mut next_proc: *mut Process = core::ptr::null_mut();
-        for task in &sched.tasks {
-            if task.id == next_id {
-                next_ctx = task.context.get();
-                next_cursor = (&task.span_cursor as *const SpanCursor) as *mut SpanCursor;
-                next_root = task.address_space.load(Ordering::Relaxed);
-                next_proc = task.process.load(Ordering::Relaxed);
-                task.runs.fetch_add(1, Ordering::Relaxed);
-                break;
-            }
-        }
-        assert!(!next_ctx.is_null(), "exit_now: next task missing from table");
-
-        CURRENT_TASK.this_cpu().store(next_id.0, Ordering::Relaxed);
-        CURRENT_SPAN_CURSOR.this_cpu().store(next_cursor, Ordering::Relaxed);
-
-        (next_ctx, next_id, next_root, next_proc)
-        // Lock dropped here.
-    };
-
-    switch_address_space(next_root, next_proc);
-
-    CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
-    // Re-use `Yield` reason on the wire — wire-format `Exit` variant
-    // is deferred until a host-side consumer needs to distinguish.
-    crate::tracing::emit_context_switch(current_id, next_id, SwitchReason::Yield);
-    CURRENT_TASK_ENTRY_TICK
-        .this_cpu()
-        .store(crate::tracing::timestamp(), Ordering::Relaxed);
-
-    // SAFETY: `next_ctx` points at the `UnsafeCell<TaskContext>` of
-    // a live `Box<Task>` in `SCHEDULER.tasks`. The exiting task's
-    // stack is abandoned, but its `Box<Task>` is leaked (not freed),
-    // so no dangling reference. The asm `ret`s into the next task's
-    // body on its own stack — the calling task's `sp` is gone the
-    // instant `switch_into` writes the new one.
+    // SAFETY: `next_ctx` points at the `UnsafeCell<TaskContext>` of a live
+    // `Box<Task>` in `SCHEDULER.tasks`. The exiting task's stack is abandoned,
+    // but its `Box<Task>` is leaked (not freed), so no dangling reference. The
+    // load-only `switch_into` `ret`s into the next task on its own stack — the
+    // calling task's `sp` is gone the instant it writes the new one, so we
+    // never save the exiting context. Never returns.
     unsafe { switch_into(next_ctx) }
 }
 
@@ -850,63 +839,20 @@ pub fn exit_now() -> ! {
 /// somehow empty we keep running rather than deadlock the hart (a blocked
 /// caller with nothing to switch to is a caller bug).
 pub fn block_current() {
-    let t_entry = crate::tracing::timestamp();
-    let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
-    let me = crate::percpu::current_hartid();
-
-    let (current_ctx, next_ctx, next_id, next_root, next_proc) = {
-        let mut sched = SCHEDULER.lock();
-        let Some(next_id) = pick_next(sched.runqueues[me].iter(), t_entry, AGING_STEP_TICKS) else {
-            return; // nothing else ready — don't strand the hart
-        };
-        sched.runqueues[me].remove(next_id);
-
-        let prev_entry = CURRENT_TASK_ENTRY_TICK.this_cpu().load(Ordering::Relaxed);
-        let on_cpu_delta = if prev_entry == 0 { 0 } else { t_entry.wrapping_sub(prev_entry) };
-        let mut current_ctx: *mut TaskContext = core::ptr::null_mut();
-        let mut next_ctx: *mut TaskContext = core::ptr::null_mut();
-        let mut next_cursor: *mut SpanCursor = core::ptr::null_mut();
-        let mut next_root: usize = 0;
-        let mut next_proc: *mut Process = core::ptr::null_mut();
-        for task in sched.tasks.iter_mut() {
-            if task.id == current_id {
-                // The block itself: state flips, and — unlike `reschedule` —
-                // the task is NOT pushed back onto the runqueue.
-                task.state = TaskState::Blocked;
-                current_ctx = task.context.get();
-                task.cpu_time_ticks.fetch_add(on_cpu_delta, Ordering::Relaxed);
-            }
-            if task.id == next_id {
-                next_ctx = task.context.get();
-                next_cursor = core::ptr::from_ref(&task.span_cursor).cast_mut();
-                next_root = task.address_space.load(Ordering::Relaxed);
-                next_proc = task.process.load(Ordering::Relaxed);
-                task.runs.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        assert!(!current_ctx.is_null(), "block_current: current task missing from table");
-        assert!(!next_ctx.is_null(), "block_current: next task missing from table");
-        CURRENT_TASK.this_cpu().store(next_id.0, Ordering::Relaxed);
-        CURRENT_SPAN_CURSOR.this_cpu().store(next_cursor, Ordering::Relaxed);
-
-        (current_ctx, next_ctx, next_id, next_root, next_proc)
-        // Lock dropped here. The asm runs without the scheduler lock.
-    };
-
-    switch_address_space(next_root, next_proc);
-    CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
-    crate::tracing::emit_context_switch(current_id, next_id, SwitchReason::Blocked);
-    let t_before_switch = crate::tracing::timestamp();
-    LAST_YIELD_OVERHEAD_TICKS.store(t_before_switch.wrapping_sub(t_entry), Ordering::Relaxed);
-    CURRENT_TASK_ENTRY_TICK.this_cpu().store(t_before_switch, Ordering::Relaxed);
-
-    // SAFETY: both pointers point at `UnsafeCell<TaskContext>` storage inside
-    // `Box<Task>` allocations owned by `SCHEDULER.tasks` (stable heap
-    // addresses past the lock drop). The two-way `switch` saves our
-    // callee-saved regs + sp into `current_ctx` so a later resume returns
-    // right here. Single-hart cooperative; no preemption mid-switch.
-    unsafe { switch(current_ctx, next_ctx) };
-    // Resumed: a `wake` re-enqueued us and the scheduler picked us again.
+    // `empty_ok = true`: idle is normally ready so a target exists, but if the
+    // runqueue is somehow empty we keep running rather than strand the hart (a
+    // blocked caller with nothing to switch to is a caller bug, not a panic).
+    if let Some((current_ctx, next_ctx)) =
+        prepare_switch(CurrentDisposition::Block, SwitchReason::Blocked, true)
+    {
+        // SAFETY: both pointers are into stable `Box<Task>` contexts owned by
+        // `SCHEDULER.tasks`. The two-way `switch` saves our callee-saved regs +
+        // sp into `current_ctx`, so when a later `wake` re-enqueues us and the
+        // scheduler picks us, control returns right here. Single-hart
+        // cooperative; no preemption mid-switch.
+        unsafe { switch(current_ctx, next_ctx) };
+    }
+    // Resumed (a `wake` picked us), or nothing was ready and we kept running.
 }
 
 /// Return a `Blocked` task to the runqueue so the scheduler can pick it.
