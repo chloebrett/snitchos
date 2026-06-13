@@ -253,7 +253,27 @@ fn span_attributes(span: &CompletedSpan) -> Vec<KeyValue> {
             }),
         });
     }
+    if let Some(priority) = span.thread_priority {
+        attributes.push(KeyValue {
+            key: "thread.priority".to_string(),
+            value: Some(AnyValue {
+                string_value: priority_label(priority).to_string(),
+            }),
+        });
+    }
     attributes
+}
+
+/// Human-readable label for a scheduling priority level (matches
+/// `kernel_core::sched::Priority`). Unknown levels fall through to the raw
+/// number so a future variant still renders something.
+fn priority_label(level: u8) -> &'static str {
+    match level {
+        0 => "Low",
+        1 => "Normal",
+        2 => "High",
+        _ => "?",
+    }
 }
 
 #[cfg(test)]
@@ -288,6 +308,7 @@ mod tests {
             end_time_ns: 1,
             task_id,
             thread_name: thread_name.map(str::to_string),
+            thread_priority: None,
             hart_id,
         }
     }
@@ -322,5 +343,27 @@ mod tests {
     fn span_attributes_include_thread_name_when_resolved() {
         let attrs = span_attributes(&completed(3, Some("task_b"), 0));
         assert_eq!(attr(&attrs, "thread.name"), Some("task_b"));
+    }
+
+    #[test]
+    fn span_attributes_omit_thread_priority_when_unresolved() {
+        let attrs = span_attributes(&completed(3, None, 0));
+        assert_eq!(attr(&attrs, "thread.priority"), None);
+    }
+
+    #[test]
+    fn span_attributes_label_thread_priority_when_resolved() {
+        let mut span = completed(3, Some("greedy"), 0);
+        span.thread_priority = Some(2);
+        let attrs = span_attributes(&span);
+        assert_eq!(attr(&attrs, "thread.priority"), Some("High"));
+    }
+
+    #[test]
+    fn priority_label_covers_each_level_and_falls_back() {
+        assert_eq!(priority_label(0), "Low");
+        assert_eq!(priority_label(1), "Normal");
+        assert_eq!(priority_label(2), "High");
+        assert_eq!(priority_label(7), "?");
     }
 }

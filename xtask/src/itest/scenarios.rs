@@ -1630,6 +1630,20 @@ pub fn preemption_telemetry(h: &mut View) -> Result<(), String> {
 /// task's accumulated CPU time dominates the Low worker's by a wide margin
 /// (priority respected — an equal-share scheduler would leave them comparable).
 pub fn priorities_ordered_but_fair(h: &mut View) -> Result<(), String> {
+    // Priority is on the wire (Step 5): each task's `ThreadRegister` carries its
+    // scheduling level (0 = Low, 1 = Normal, 2 = High), so the trace can group/
+    // colour by priority. Assert the two demo tasks register at their levels.
+    h.wait_for(SEC * 20, |f, _| match f {
+        OwnedFrame::ThreadRegister { name, priority, .. } => name == "greedy" && *priority == 2,
+        _ => false,
+    })
+    .ok_or("no ThreadRegister for 'greedy' carrying priority High(2) on the wire")?;
+    h.wait_for(SEC * 20, |f, _| match f {
+        OwnedFrame::ThreadRegister { name, priority, .. } => name == "worker_b" && *priority == 0,
+        _ => false,
+    })
+    .ok_or("no ThreadRegister for 'worker_b' carrying priority Low(0) on the wire")?;
+
     let greedy_cpu = std::cell::Cell::new(0i64);
     let low_cpu = std::cell::Cell::new(0i64);
     let low_runs = std::cell::Cell::new(0i64);

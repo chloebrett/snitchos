@@ -16,6 +16,12 @@ use alloc::collections::VecDeque;
 
 use crate::sched::TaskId;
 
+/// Identifies an endpoint within the kernel's endpoint table. A capability
+/// of [`crate::cap::Object::Endpoint`] names one; the kernel resolves it to
+/// a slot. kernel-core treats it as an opaque newtype, like [`TaskId`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct EndpointId(pub u32);
+
 /// An endpoint at rest. The invariant — never both sides waiting — is
 /// upheld by [`on_send`] / [`on_receive`]: senders only accumulate while
 /// no receiver waits, and the first receiver drains a sender (and vice

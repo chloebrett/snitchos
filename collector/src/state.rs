@@ -56,6 +56,11 @@ pub struct CompletedSpan {
     /// Cached thread name at `SpanEnd` time. `None` if no
     /// `ThreadRegister` for this `task_id` arrived before `SpanEnd`.
     pub thread_name: Option<String>,
+    /// Cached scheduling priority at `SpanEnd` time (`ThreadRegister.priority`:
+    /// 0 = Low, 1 = Normal, 2 = High). `None` if no `ThreadRegister` arrived
+    /// first. Surfaced as the `thread.priority` OTLP attribute so Tempo/Grafana
+    /// can group/colour traces by priority.
+    pub thread_priority: Option<u8>,
     /// Hart the span opened on (from `SpanStart.hart_id`). The export
     /// path surfaces it as the `host.cpu_id` OTLP attribute so Tempo
     /// can slice traces by CPU.
@@ -127,6 +132,10 @@ pub struct State {
     /// `ThreadRegister`; consulted at `SpanEnd` to tag the completed
     /// span with its `thread.name`.
     thread_names: HashMap<u32, String>,
+    /// `task_id` → scheduling priority. Populated by `ThreadRegister`
+    /// alongside the name; consulted at `SpanEnd` to tag the completed span
+    /// with its `thread.priority`.
+    thread_priorities: HashMap<u32, u8>,
     /// Last-seen value per counter/gauge metric, keyed by
     /// `(name_id, hart_id)` so same-named metrics from different harts
     /// don't clobber each other. Histograms go in `histograms` instead.
@@ -148,6 +157,7 @@ impl State {
             metric_kinds: HashMap::new(),
             open_spans: HashMap::new(),
             thread_names: HashMap::new(),
+            thread_priorities: HashMap::new(),
             metric_values: HashMap::new(),
             histograms: HashMap::new(),
             warned_no_hello: false,
@@ -235,6 +245,7 @@ impl State {
                     .cloned()
                     .unwrap_or_else(|| format!("<unknown name_id={}>", open.name_id.0));
                 let thread_name = self.thread_names.get(&open.task_id).cloned();
+                let thread_priority = self.thread_priorities.get(&open.task_id).copied();
                 Some(CompletedSpan {
                     name,
                     span_id: id.0,
@@ -243,6 +254,7 @@ impl State {
                     end_time_ns: self.tick_to_wall_ns(*t),
                     task_id: open.task_id,
                     thread_name,
+                    thread_priority,
                     hart_id: open.hart_id,
                 })
             }
@@ -273,8 +285,9 @@ impl State {
                 None
             }
             Frame::Dropped { count: _ } => None,
-            Frame::ThreadRegister { id, name } => {
+            Frame::ThreadRegister { id, name, priority } => {
                 self.thread_names.insert(*id, (*name).to_string());
+                self.thread_priorities.insert(*id, *priority);
                 None
             }
             Frame::ContextSwitch { t, .. } => {

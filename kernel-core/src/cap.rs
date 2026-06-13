@@ -16,6 +16,8 @@ use alloc::vec::Vec;
 
 use protocol::StringId;
 
+use crate::ipc::EndpointId;
+
 /// The rights a capability grants, as a bitmask. v0.7b defines exactly
 /// one bit (`EMIT`); the type is the extension point so later objects
 /// (`Endpoint`, `File`) add bits without reshaping the capability.
@@ -32,6 +34,13 @@ impl Rights {
     /// no shift to misread, and no no-op `1 << 0` for mutation testing to
     /// flag as an equivalent mutant.
     pub const EMIT: Rights = Rights(0b0001);
+
+    /// May `send` on an [`Object::Endpoint`] (v0.9 IPC).
+    pub const SEND: Rights = Rights(0b0010);
+
+    /// May `receive` on an [`Object::Endpoint`] (v0.9 IPC). Disjoint from
+    /// `SEND` so a cap can grant one, the other, or both (`SEND | RECV`).
+    pub const RECV: Rights = Rights(0b0100);
 
     /// Whether `self` grants every right in `other`.
     #[must_use]
@@ -61,6 +70,10 @@ pub enum Object {
     /// task id are kernel-stamped. Distinct from `TelemetrySink` so emitting
     /// a span and bumping a counter are separately granted authorities.
     SpanSink,
+    /// A synchronous IPC endpoint (v0.9). The cap names *which* endpoint by
+    /// [`EndpointId`]; `Rights::SEND` / `Rights::RECV` decide which end the
+    /// holder may use. The rendezvous itself lives in `crate::ipc`.
+    Endpoint { id: EndpointId },
 }
 
 /// An unforgeable `{ object, rights }` pair.
@@ -192,6 +205,34 @@ pub fn invoke_span(table: &CapTable, handle: Handle) -> Result<(), Denied> {
     Ok(())
 }
 
+/// Resolve a `send` invocation: `handle` must name an [`Object::Endpoint`]
+/// in `table` carrying [`Rights::SEND`]. Returns the [`EndpointId`] the
+/// sender is targeting, or why the invocation is refused. The `recv` twin
+/// is [`invoke_recv`]; both mirror [`invoke_telemetry`].
+pub fn invoke_send(table: &CapTable, handle: Handle) -> Result<EndpointId, Denied> {
+    let cap = table.resolve(handle).map_err(|_| Denied::NoSuchCapability)?;
+    if !cap.rights.contains(Rights::SEND) {
+        return Err(Denied::MissingRight);
+    }
+    let Object::Endpoint { id } = cap.object else {
+        return Err(Denied::WrongObject);
+    };
+    Ok(id)
+}
+
+/// Resolve a `receive` invocation: `handle` must name an [`Object::Endpoint`]
+/// in `table` carrying [`Rights::RECV`]. The mirror of [`invoke_send`].
+pub fn invoke_recv(table: &CapTable, handle: Handle) -> Result<EndpointId, Denied> {
+    let cap = table.resolve(handle).map_err(|_| Denied::NoSuchCapability)?;
+    if !cap.rights.contains(Rights::RECV) {
+        return Err(Denied::MissingRight);
+    }
+    let Object::Endpoint { id } = cap.object else {
+        return Err(Denied::WrongObject);
+    };
+    Ok(id)
+}
+
 /// A process's capability table: opaque [`Handle`]s in, [`Capability`]
 /// references out, validated against this table alone. Slots are never
 /// emptied in v0.7b (no revocation), so a present index always holds a
@@ -282,6 +323,69 @@ mod tests {
     fn invoke_span_refuses_unknown_handle() {
         let table = CapTable::new();
         assert_eq!(invoke_span(&table, Handle::from_raw(0)), Err(Denied::NoSuchCapability));
+    }
+
+    #[test]
+    fn invoke_send_accepts_an_endpoint_with_the_send_right() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::Endpoint { id: EndpointId(5) },
+            rights: Rights::SEND,
+        });
+        assert_eq!(invoke_send(&table, h), Ok(EndpointId(5)));
+    }
+
+    #[test]
+    fn invoke_send_refuses_an_endpoint_lacking_the_send_right() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::Endpoint { id: EndpointId(5) },
+            rights: Rights::RECV,
+        });
+        assert_eq!(invoke_send(&table, h), Err(Denied::MissingRight));
+    }
+
+    #[test]
+    fn invoke_send_refuses_a_telemetry_sink_as_wrong_object() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::TelemetrySink { counter: StringId(1) },
+            rights: Rights::SEND,
+        });
+        assert_eq!(invoke_send(&table, h), Err(Denied::WrongObject));
+    }
+
+    #[test]
+    fn invoke_send_refuses_an_unknown_handle() {
+        let table = CapTable::new();
+        assert_eq!(invoke_send(&table, Handle::from_raw(0)), Err(Denied::NoSuchCapability));
+    }
+
+    #[test]
+    fn invoke_recv_accepts_an_endpoint_with_the_recv_right() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::Endpoint { id: EndpointId(8) },
+            rights: Rights::RECV,
+        });
+        assert_eq!(invoke_recv(&table, h), Ok(EndpointId(8)));
+    }
+
+    #[test]
+    fn invoke_recv_refuses_an_endpoint_lacking_the_recv_right() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::Endpoint { id: EndpointId(8) },
+            rights: Rights::SEND,
+        });
+        assert_eq!(invoke_recv(&table, h), Err(Denied::MissingRight));
+    }
+
+    #[test]
+    fn the_send_and_recv_rights_are_distinct_bits() {
+        assert_ne!(Rights::SEND.bits(), Rights::RECV.bits());
+        assert_ne!(Rights::SEND.bits(), Rights::EMIT.bits());
+        assert!(!Rights::SEND.contains(Rights::RECV));
     }
 
     #[test]

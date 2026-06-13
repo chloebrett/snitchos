@@ -519,8 +519,8 @@ impl View {
                 let name = self.strings.get(name_id).map_or("?", String::as_str);
                 format!("SpanStart {{ {name:?} id={id:?} parent={parent:?} t={t} task={task_id} hart={hart_id} }}")
             }
-            OwnedFrame::ThreadRegister { id, name } =>
-                format!("ThreadRegister {{ id={id} name={name:?} }}"),
+            OwnedFrame::ThreadRegister { id, name, priority } =>
+                format!("ThreadRegister {{ id={id} name={name:?} priority={priority} }}"),
             OwnedFrame::ContextSwitch { from, to, t, reason, hart_id } =>
                 format!("ContextSwitch {{ from={from} to={to} reason={reason:?} t={t} hart={hart_id} }}"),
             OwnedFrame::SpanEnd { id, t } =>

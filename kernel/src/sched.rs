@@ -461,7 +461,7 @@ pub fn register_bare_task(name: &str, state: TaskState) -> TaskId {
     if CURRENT_SPAN_CURSOR.this_cpu().load(Ordering::Relaxed).is_null() {
         CURRENT_SPAN_CURSOR.this_cpu().store(cursor_ptr, Ordering::Relaxed);
     }
-    crate::tracing::emit_thread_register(id, &owned_name);
+    crate::tracing::emit_thread_register(id, &owned_name, Priority::Normal);
     id
 }
 
@@ -539,7 +539,7 @@ pub fn spawn_on_with_priority(
     if crate::boot_workload::selected()
         != Some(kernel_core::bootargs::WorkloadKind::SpawnStorm)
     {
-        crate::tracing::emit_thread_register(id, &owned_name);
+        crate::tracing::emit_thread_register(id, &owned_name, priority);
     } else {
         let _ = owned_name;
     }

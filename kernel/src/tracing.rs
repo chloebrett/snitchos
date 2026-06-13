@@ -230,8 +230,14 @@ pub fn emit_metric(name_id: StringId, value: i64) {
 /// Emit a `ThreadRegister` frame. Called once per `sched::spawn` so
 /// the collector can resolve `task_id` → human-readable name on
 /// subsequent `SpanStart` frames and OTLP `thread.name` attributes.
-pub fn emit_thread_register(id: kernel_core::sched::TaskId, name: &str) {
-    emit_frame(&Frame::ThreadRegister { id: id.0, name });
+/// `priority` is the task's static scheduling level (`Priority as u8`:
+/// 0 = Low, 1 = Normal, 2 = High) so the trace can group/colour by it.
+pub fn emit_thread_register(
+    id: kernel_core::sched::TaskId,
+    name: &str,
+    priority: kernel_core::sched::Priority,
+) {
+    emit_frame(&Frame::ThreadRegister { id: id.0, name, priority: priority as u8 });
 }
 
 /// Emit a `HartRegister` frame. Called once per hart at bring-up so

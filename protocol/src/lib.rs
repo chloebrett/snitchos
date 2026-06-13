@@ -107,8 +107,10 @@ pub enum Frame<'a> {
   StringRegister { id: StringId, value: &'a str },
   MetricRegister { name_id: StringId, kind: MetricKind },
   /// One emitted per `spawn()`. Lets the collector resolve numeric
-  /// task ids in subsequent frames to human-readable names.
-  ThreadRegister { id: u32, name: &'a str },
+  /// task ids in subsequent frames to human-readable names. `priority`
+  /// is the task's static scheduling level (0 = Low, 1 = Normal, 2 = High)
+  /// — appended at the END of the struct so postcard wire compat holds.
+  ThreadRegister { id: u32, name: &'a str, priority: u8 },
   /// Scheduler swapped from `from` to `to` at time `t`. New variants
   /// of `Frame` go at the END of the enum — postcard encodes
   /// discriminants positionally and reordering breaks wire compat
@@ -177,6 +179,9 @@ pub enum CapObject {
   TelemetrySink,
   /// Permission to open and close spans on the holder's span cursor.
   SpanSink,
+  /// A synchronous IPC endpoint (v0.9). The bound endpoint id lives
+  /// kernel-side; this wire tag attributes the grant to the endpoint kind.
+  Endpoint,
 }
 
 /// Why the kernel refused a syscall (the `reason` in [`Frame::SyscallRefused`]).
@@ -279,6 +284,28 @@ mod tests {
       object: CapObject::SpanSink,
       rights: 0b0001,
       t: 5678,
+      hart_id: 1,
+    };
+
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+
+    assert_eq!(frame, decoded);
+  }
+
+  /// Roundtrip a `Frame::CapEvent` carrying the `Endpoint` object — the
+  /// v0.9 IPC capability kind, appended after the v0.7b objects.
+  #[test]
+  fn cap_event_endpoint_roundtrips() {
+    let frame = Frame::CapEvent {
+      kind: CapEventKind::Granted,
+      cap_id: 3,
+      parent_cap_id: 0,
+      holder: 7,
+      object: CapObject::Endpoint,
+      rights: 0b0010,
+      t: 9012,
       hart_id: 1,
     };
 
@@ -398,6 +425,7 @@ mod tests {
     let frame = Frame::ThreadRegister {
       id: 7,
       name: "task_heartbeat",
+      priority: 2,
     };
 
     let mut buf = [0u8; 64];

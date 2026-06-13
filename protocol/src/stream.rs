@@ -30,7 +30,7 @@ pub enum OwnedFrame {
     Dropped { count: u32 },
     StringRegister { id: StringId, value: String },
     MetricRegister { name_id: StringId, kind: MetricKind },
-    ThreadRegister { id: u32, name: String },
+    ThreadRegister { id: u32, name: String, priority: u8 },
     ContextSwitch { from: u32, to: u32, t: u64, reason: SwitchReason, hart_id: u8 },
     HartRegister { id: u8, mhartid: u64, role: HartRole },
     CapEvent {
@@ -70,8 +70,8 @@ impl OwnedFrame {
             Frame::MetricRegister { name_id, kind } => {
                 OwnedFrame::MetricRegister { name_id, kind }
             }
-            Frame::ThreadRegister { id, name } => {
-                OwnedFrame::ThreadRegister { id, name: name.to_string() }
+            Frame::ThreadRegister { id, name, priority } => {
+                OwnedFrame::ThreadRegister { id, name: name.to_string(), priority }
             }
             Frame::ContextSwitch { from, to, t, reason, hart_id } => {
                 OwnedFrame::ContextSwitch { from, to, t, reason, hart_id }
@@ -175,7 +175,7 @@ mod tests {
         for f in [
             Frame::Hello { timebase_hz: 1, protocol_version: 0 },
             Frame::SpanStart { id: SpanId(1), parent: SpanId(0), name_id: StringId(0), t: 1, task_id: 0, hart_id: 0 },
-            Frame::ThreadRegister { id: 1, name: "task_a" },
+            Frame::ThreadRegister { id: 1, name: "task_a", priority: 1 },
             Frame::ContextSwitch { from: 1, to: 2, t: 1, reason: SwitchReason::Yield, hart_id: 0 },
             Frame::SpanEnd { id: SpanId(1), t: 2 },
             Frame::Event { span_id: SpanId(1), name_id: StringId(0), t: 3 },
