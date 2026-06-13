@@ -40,6 +40,39 @@ The physical world is asynchronous — interrupts happen whether or not anyone i
 - **Large payloads** are transferred by granting a `MemoryRegion` capability rather than copying bytes.
 - A message is therefore *some inline words + some capabilities*. "Passing data" and "passing a capability" are the same mechanism.
 
+# Endpoint capabilities: badges, minting, and cap-transfer
+A single endpoint must serve many clients and many objects behind one receive loop. The filesystem is the motivating consumer (see [filesystem-design.md](filesystem-design.md) → *Capability mechanism*): one FS endpoint, one file capability per `(inode, rights)`. Three generic mechanisms make that work — and all three are generic precisely because **the kernel never learns what the server's objects mean**.
+
+## Badges — unforgeable per-cap labels
+A capability to an endpoint may carry a **badge**: an integer the kernel guarantees and delivers.
+- **Server-chosen, set once at mint, immutable** thereafter. The holder of a `MINT`-righted endpoint cap picks each derived cap's badge; no one can re-badge or forge it.
+- **Delivered to the receiver on every send.** The kernel stamps the arriving message with the badge of the cap the *sender used*; the receiver reads it and demultiplexes — "which of my objects / which client is this?" — against its own table.
+- **The sender cannot influence it.** A client holding `badge(inode=7, READ)` cannot present any other badge; the authority is the cap, not a number passed in the message.
+
+This is what lets one endpoint stand in for an unbounded set of server objects with no kernel object per object: the badge *is* the object selector, interpreted entirely in userspace.
+
+## Mint / derive — the generic attenuation operation
+From a capability carrying the `MINT` right, a holder derives a child capability with a **badge of its choosing** and **rights ⊆ the parent's** — monotonic; a derive can only narrow, never widen. That is the whole capability calculus the kernel exposes: a server holds a broad minting cap and hands out narrowed, badged children; the kernel enforces only "badge is whatever the minter said" + "rights never widen," attaching meaning to neither.
+
+> **Two rights layers** (see filesystem-design.md → *Two rights namespaces*): the kernel's generic `rights` mask governs **endpoint operations** (below). A server may pack its own **object rights** (e.g. file `READ`/`WRITE`) into the **badge**, where they are immutable and server-interpreted. Until a later typed-capability generalization, narrowing *object* rights is therefore a server mint, not a kernel derive.
+
+## Endpoint rights (the generic mask)
+Proposed bits — these refine the open question *"endpoint capability rights (send / receive / both)"* below:
+- **`SEND`** — may `send`/`call` on this endpoint (client side).
+- **`RECV`** — may `receive` on this endpoint (server side; normally held only by the server).
+- **`GRANT`** — may transfer capabilities *inside* a message on this endpoint (see cap-transfer).
+- **`MINT`** — may derive badged children of this cap.
+
+A typical FS *client* cap is `SEND | GRANT`, no `MINT` (it can call and receive replies that carry caps, but cannot forge new file caps); the FS itself holds the `RECV | MINT` minting cap.
+
+## Cap-transfer in messages — including replies
+A message is *inline words + capabilities*. Made concrete:
+- A `send`/`call` may include capability slots; the kernel **moves or copies** those caps into the receiver's cap table (`GRANT` required), returning fresh handles meaningful in *that* table.
+- **The reply path carries caps too.** This is load-bearing for the FS: `lookup`/`open` is a `call` whose *reply* contains a freshly-minted, badged child File cap. Without cap-transfer-on-reply a server could only return data, never capabilities — and capability-returning servers are the whole point.
+
+## Revocation
+The per-process cap table's **generation** field (`kernel-core/src/cap.rs`, dead-weight today) is the kernel-side revocation hook: bump a slot's generation and every outstanding handle to it fails to resolve. Finer liveness (per-badge — e.g. a deleted inode) is revoked in userspace: the server drops the badge→object mapping and replies not-found. **Coarse (whole-cap) revocation is the kernel's; fine (per-object) revocation is the server's.**
+
 # Async-with-data = shared region + notification, behind a channel library
 There is no buffered-channel primitive in the kernel. When userspace wants async delivery of data, the pattern is: a shared `MemoryRegion` (the ring buffer) + a `Notification` (the "I added something" poke). The buffering *policy* lives in userspace, where it is testable and replaceable — mechanism in the kernel, policy in userspace.
 
@@ -58,7 +91,7 @@ Consequences:
 - The IPC message format reserves a first-class slot for trace context.
 - The kernel's IPC path touches the tracing system.
 - The mechanism: the current span is per-thread kernel state ("span context lives in the task struct"); the IPC path copies it into the message automatically.
-- The v0.1 protocol's `parent_id` field is the seed of this. IPC at v0.8 is where it grows up.
+- The v0.1 protocol's `parent_id` field is the seed of this. IPC at v0.9 is where it grows up.
 
 This is the feature that makes the observability pillar impressive: "watch a single trace flow through five userspace services and the kernel" is the demo.
 
@@ -80,13 +113,19 @@ Mild gravitational pull worth noting: the software that runs well on SnitchOS is
 - Two primitives: synchronous endpoints (workhorse) + notifications (async, payload-free).
 - Synchronous is the default IPC primitive; direct context switch on the hot path.
 - Payload: small messages copied inline via message registers; large payloads via `MemoryRegion` capability transfer. A message is inline words + capabilities.
+- Endpoint caps carry an immutable, server-chosen **badge** delivered unforgeably to the receiver; one endpoint demuxes many objects/clients by badge.
+- Generic **mint/derive**: badged children with monotonically narrowing rights. Object-specific rights (e.g. file READ/WRITE) ride in the badge until a typed-capability generalization.
+- **Cap-transfer works on the reply path**, not just sends — required for capability-returning servers (the filesystem's `lookup`/`open`).
 - No buffered-channel kernel primitive. Async-with-data = shared region + notification, behind a userspace channel library.
 - Channel library: `mpsc`-shaped interface, **bounded by default**, with an `spsc` variant for the audio RT path.
 - Trace context is a first-class kernel-populated slot in every IPC message; mechanism is per-thread span context in the task struct.
 - Compatibility: Rust source portability + WASM. POSIX IPC explicitly unsupported — a deliberate, accepted cost.
 
-# Open / deferred to v0.8
+# Open / deferred to v0.9
 - Abortable / timeout send semantics for deadlock mitigation.
 - Exact message-register count and inline payload size.
 - Server loop shape and multi-client handling conventions.
-- Endpoint capability rights (send / receive / both).
+- Endpoint capability rights (send / receive / both) — proposed `SEND`/`RECV`/`GRANT`/`MINT` above; confirm the set.
+- Badge width and encoding (the FS proposes `inode:u32 | rights:u16 | spare:u16` in a `u64`).
+- How many capability slots a single message may carry.
+- Whether to ship the typed-capability generalization (kernel-carried, server-interpreted object rights) at v0.9 or defer to the FS's #4 evolution.
