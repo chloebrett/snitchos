@@ -5,4 +5,6 @@
 //! `plans/lang/01-grammar-and-precedence.md`; build order:
 //! `plans/lang/02-walking-skeleton.md`.
 
+pub mod ast;
 pub mod lexer;
+pub mod parser;
