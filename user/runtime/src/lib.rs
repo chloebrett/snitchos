@@ -17,9 +17,14 @@
 #![no_std]
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use linked_list_allocator::LockedHeap;
 use snitchos_abi::Syscall;
+
+/// `#[snitchos_user::main]` — write a plain `fn main()` instead of a manual
+/// `rust_main` entry shim. See the macro's docs.
+pub use snitchos_user_macros::main;
 
 core::arch::global_asm!(include_str!("start.S"));
 
@@ -36,6 +41,35 @@ static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 /// nothing to do with the heap being fixed-size.)
 #[global_allocator]
 static ALLOC: LockedHeap = LockedHeap::empty();
+
+// Startup capabilities stashed by the `#[main]` shim so the free accessors can
+// reach them — the std-like shape where `main()` takes nothing and you call
+// library functions for your environment. Two atomics rather than a `static
+// mut` (no reference to a mutable static; userspace is single-threaded so
+// `Relaxed` suffices). Set before `main()` runs; `0` is never read.
+static STARTUP_TELEMETRY: AtomicUsize = AtomicUsize::new(0);
+static STARTUP_SPAN: AtomicUsize = AtomicUsize::new(0);
+
+/// Stash the startup handles. Called by the `#[snitchos_user::main]` shim
+/// before `main()`; not for direct use.
+#[doc(hidden)]
+pub fn __set_startup(startup: Startup) {
+    STARTUP_TELEMETRY.store(startup.telemetry_handle, Ordering::Relaxed);
+    STARTUP_SPAN.store(startup.span_handle, Ordering::Relaxed);
+}
+
+/// This process's `TelemetrySink` capability. Valid inside a
+/// `#[snitchos_user::main]` `fn main()` (the runtime stashed it first).
+#[must_use]
+pub fn telemetry() -> TelemetrySink {
+    TelemetrySink::from_raw_handle(STARTUP_TELEMETRY.load(Ordering::Relaxed))
+}
+
+/// This process's `SpanSink` capability (authority to open spans).
+#[must_use]
+pub fn tracer() -> Tracer {
+    Tracer::from_raw_handle(STARTUP_SPAN.load(Ordering::Relaxed))
+}
 
 unsafe extern "C" {
     /// The program's entry, provided by each `#[no_mangle]` binary. Returns

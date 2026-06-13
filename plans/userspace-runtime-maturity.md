@@ -60,7 +60,27 @@ Fixed-size; running out is a clean alloc-error (abort/panic → spin), not UB.
 **Open:** `HEAP_SIZE` (start ~64 KiB); a large `.bss` arena grows the mapped
 region but not the file image (`.bss` has `filesz=0`).
 
-## 2. A normal `fn main()`
+## 2. A normal `fn main()` ✅ DONE
+
+Implemented as a hand-rolled (no syn/quote) proc-macro crate
+`snitchos-user-macros`, re-exported as `snitchos_user::main`. A program writes:
+
+```rust
+#[snitchos_user::main]
+fn main() {
+    let _span = snitchos_user::tracer().span("hello.work");
+}
+```
+
+The macro generates the `#[no_mangle] rust_main(Startup)` shim, which stashes
+the startup handles in two runtime atomics and calls `main()`; the free
+accessors `snitchos_user::tracer()` / `telemetry()` read them (the std-like
+shape — `main()` takes nothing, you call library fns for your environment).
+`hello` is converted and behaves identically (10/10). The old
+`rust_main(startup)` style still works (backward-compatible); `worker` /
+`span-flood` / `faulter` can migrate when convenient.
+
+### Original design notes
 
 Std's trick: `main()` takes nothing; you call library functions for your
 environment. Same here — stash `Startup` in a runtime global at

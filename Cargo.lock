@@ -939,7 +939,12 @@ version = "0.0.1"
 dependencies = [
  "linked_list_allocator",
  "snitchos-abi",
+ "snitchos-user-macros",
 ]
+
+[[package]]
+name = "snitchos-user-macros"
+version = "0.0.1"
 
 [[package]]
 name = "spin"
