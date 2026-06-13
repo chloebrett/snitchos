@@ -2,6 +2,11 @@
 
 **Work lands on:** `main` (no feature branches — see CLAUDE.md)
 **Status:** Active — prerequisite for `plans/v0.8-preemption.md`.
+**Progress (2026-06-13):** Steps 1–4 ✅ (Yield, `copy_from_user`, full userspace
+tracing — CP1/refusal/CP2/CP3 all landed — and a single `worker` program). **Step
+5 is next** and is bigger than its one-line summary: it needs an
+*address-space-aware scheduler* (the crux written up below). Step 6 (retire kernel
+`task_a`/`task_b`) then closes out the v0.8 prerequisite.
 
 Two coupled deliverables:
 
@@ -181,6 +186,8 @@ kernel-mode `task_a`/`task_b` threads remaining.
 | Span handle | `span_open -> span_id` token; runtime `Span` RAII guard closes on drop |
 | Syscall ABI | append `Yield`, `SpanOpen`, `SpanClose` to `snitchos_abi::Syscall`; never renumber |
 | Worker telemetry | `worker_x.tick` span + per-worker progress counter |
+| Worker layout | **two separate ELFs** (`worker_a`/`worker_b`), literal names + own counters — no `a0`-param, no shared text (confirmed 2026-06-13) |
+| Address space | **separate page tables** per worker; scheduler swaps `satp`+`CURRENT_PROCESS` per switch (the new Step-5 primitive) |
 | Placement | both workers co-located on one hart (the point is sharing) |
 | Wire format | none new — reuses `StringRegister` + `SpanStart`/`SpanEnd` + counter frames |
 
@@ -252,18 +259,18 @@ Done so far (each its own commit):
   refusal site (`refuse()` helper). Denials are labelled wire events, not
   silent. itest `userspace-refusal-snitched`, 0/10. Collector passes it
   through (Prometheus `syscall_refused_total{reason}` export is a follow-on).
-- **CP2 — `SpanClose` + RAII guard (NEXT).** `handle_span_close`:
+- **CP2 — `SpanClose` + RAII guard** ✅ `handle_span_close`:
   **validate the id against the cursor top, refuse a mismatch** (snitch
   `SyscallRefused`) → `span::close` → `SpanEnd`. Runtime `Span` guard
   holding `Option<SpanId>` (Drop skips close when open was refused).
-  `hello` switches to `let _s = tracer.span(...)`. itest extends
-  `userspace-emits-span` to assert the matching `SpanEnd`.
-- **CP3 — per-process span-name quota.** In `handle_span_open`: on a
+  `hello` switched to `let _s = tracer.span(...)`. `userspace-emits-span`
+  asserts the matching `SpanEnd`.
+- **CP3 — per-process span-name quota** ✅ In `handle_span_open`: on a
   *new* name, if `proc.span_names_registered >= MAX_SPAN_NAMES_PER_PROCESS`
-  → `refuse(SpanOpen, RefusalReason::Quota)` (the reason already exists,
-  thanks to #1) and do NOT register; else register + `+= 1`. Repeats/shared
-  names cost nothing. itest: a program opening `>cap` distinct names is
-  refused with `Quota`, the kernel keeps heartbeating.
+  → `refuse(SpanOpen, RefusalReason::Quota)` and do NOT register; else
+  register + `+= 1`. Repeats/shared names cost nothing. The `span-flood`
+  program + `workload=userspace-span-flood` exceed the cap; the itest asserts
+  refusal and the kernel keeps heartbeating.
 
 **MUTATE** (per checkpoint): cap rights check, attribution
 (`task_id`/parent), intern-or-reuse double-register, the
@@ -313,20 +320,95 @@ for the worker within a few seconds.
 
 ### Step 5: Two workers share one hart, both observable
 
-**Acceptance criteria**: `workload=workers` spawns **two** worker
-processes on one hart; both progress counters climb and both emit
-`worker.tick` spans (neither starves), with `context_switches_total > 0`
-across the two userspace tasks. *Confirm before coding.*
-**RED**: itest `two-userspace-workers-round-robin` — assert both
-workers' progress > 0 and both emit spans within N seconds.
-**GREEN**: spawn two `Process`es (distinct page tables + user stacks +
-distinct counters/span names); co-locate on one hart; parameterise the
-worker via `a0` (already threaded through `enter`) or two ELFs.
-**MUTATE**: spawn-layout selection.
-**KILL MUTANTS / REFACTOR**: as usual.
-**Done when**: both observable, `--repeat 10` green, human approves.
+> **Decisions (confirmed by user, 2026-06-13):**
+> - **Two separate ELFs** (`worker_a` / `worker_b`), each with a *literal*
+>   span name + own counter — no `a0`-parameterisation, no `format!` for
+>   the name. More image bloat, but no startup-arg plumbing.
+> - **Separate page tables** — each worker is a fully independent `Process`
+>   with its own root + user stack (today's model, repeated). No shared
+>   read-only text in v0.7; that's a real-OS refinement for later.
 
-> **PR boundary** — cooperative multi-userspace-task scheduling works.
+#### The crux: the scheduler must become address-space-aware
+
+"Spawn two workers" hides a genuinely new primitive. Today the scheduler
+(`yield_now` / `exit_now`) swaps **`CURRENT_SPAN_CURSOR`** per task but leaves
+**`satp`** and **`CURRENT_PROCESS`** frozen at whatever `user::enter` last set.
+That works with *one* user process only because the **kernel high-half is
+shared into every user root** — so the kernel `idle`/`main` tasks run correctly
+under the lone worker's `satp`, and `CURRENT_PROCESS` (read only on a user
+`ecall`) is never stale because there's just one.
+
+With **two** user roots that invariant breaks. When `worker_a`'s `Yield` trap
+calls `yield_now()` and switches into `worker_b`, control resumes inside
+`worker_b`'s own (earlier) `yield_now` → its trap handler → `sret`. That `sret`
+would execute under **`worker_a`'s `satp`**, where `worker_b`'s user pages
+aren't mapped, and any user `ecall` from `worker_b` would resolve
+**`worker_a`'s `CapTable`**. Wrong address space, wrong authority.
+
+Confirmed by reading the code: `trap.S`'s return path restores
+`sstatus`/`sepc`/`sscratch`/GPRs and `sret`s — it **never writes `satp`**. So
+`satp` is purely whatever was last written. The fix therefore belongs in the
+**scheduler switch path** (mirroring `CURRENT_SPAN_CURSOR`), *not* the trap
+return.
+
+**Design:**
+- Each `Task` records the address space it belongs to: an
+  `Option<AddressSpace>`-shaped pair `(root_pa, *mut Process)`, `None` for
+  kernel tasks (`idle`/`main`). Stored as atomics on `Task` so `run()` can set
+  it without re-taking the scheduler lock.
+- `user::run()` — which already builds the never-returning `process` on its own
+  kernel stack (stable pointer) — registers `(root_pa, &process)` into **its own
+  `Task`** before `enter()`.
+- In `yield_now`/`exit_now`, the single pass that resolves `next_ctx` +
+  `next_cursor` also reads the next task's `(root_pa, proc)`. After the lock
+  drops, **if the next task has a user address space**, write `satp` +
+  `sfence.vma` and store `CURRENT_PROCESS` — immediately before the `switch`
+  asm. Kernel-task switches leave `satp`/`CURRENT_PROCESS` untouched (high-half
+  is everywhere; `CURRENT_PROCESS` isn't read without a user `ecall`).
+- `enter()` still performs the **first** satp switch for a freshly-entering
+  task; the scheduler owns every subsequent one. Running a few kernel
+  instructions (the `yield_now` tail) under the *next* root before `switch` is
+  safe — kernel high-half is shared.
+
+The host-testable seam is thin (the real proof is the QEMU itest), but the
+"does the next task need an address-space switch, and to which root?" decision
+is a small pure function worth extracting + host-testing where it earns its
+keep (mirrors `heap::watermark_grow_decision`).
+
+#### Checkpoints (each its own commit)
+
+- **CP5-1 — address-space-aware switch (the new systems primitive).**
+  `Task` carries its `(root_pa, *mut Process)`; `yield_now`/`exit_now` swap
+  `satp`+`CURRENT_PROCESS` on switch into a user task; `run()` registers the
+  association.
+  **RED**: the *existing* `workers-make-progress` (single worker) must stay
+  green — it's the regression gate, since this rewires the hot context-switch
+  path. (The two-worker scenario can't pass yet — no second binary.) Mutation
+  target: the "switch needed? to which root?" decision.
+  **Done when**: single-worker `--repeat 10` green, the new decision logic
+  host-tested + mutation-clean, human approves.
+
+- **CP5-2 — the `worker_b` binary + embed pipeline.**
+  A second user binary with a literal `worker_b.tick` span + own progress
+  counter; `build.rs` resolves `SNITCHOS_WORKER_B_ELF` (fresh artifact via
+  `xtask`, else committed fixture); `user.rs` gains `WORKER_B_ELF` +
+  `worker_b_main_entry`; committed fixture under `kernel-core/fixtures/`.
+  **RED**: a host fixture-parse test (the `kernel_core::elf` pattern) accepts
+  the new ELF. **Done when**: it builds on every path, fixture parses.
+
+- **CP5-3 — spawn both, both observable (the milestone heart).**
+  Under `workload=workers`, `spawn_on(1, "worker_a", …)` **and**
+  `spawn_on(1, "worker_b", …)`.
+  **RED**: itest `two-userspace-workers-round-robin` — both progress counters
+  climb, both emit their `worker_{a,b}.tick` spans (neither starves),
+  `context_switches_total > 0` across the two userspace tasks.
+  **GREEN**: the two spawns (CP5-1 already made the cross-address-space switch
+  correct). **MUTATE**: spawn-layout selection.
+  **Done when**: both observable, `--repeat 10` green, human approves.
+
+> **PR boundary** — cooperative multi-userspace-task scheduling works. The
+> address-space-aware switch (CP5-1) is the reusable substrate; v0.8 preemption
+> and v0.9 multi-process IPC both stand on it.
 
 ### Step 6: Retire kernel-mode `task_a` / `task_b`
 
@@ -357,13 +439,13 @@ default workload at the userspace workers.
 
 ## Open questions
 
-- **One parameterised `worker` ELF vs two.** `enter` already passes
-  `startup_a0`; a single ELF keyed on `a0` (worker id) is less bloat.
-  Decide at Step 4.
+- **One parameterised `worker` ELF vs two.** ✅ RESOLVED (2026-06-13): two
+  separate ELFs with literal names — no `a0`-param. Simpler, at the cost of
+  image bloat.
 - **Shared read-only text vs separate page tables** for the two workers.
-  Shared text is the real-OS answer (one binary, two processes) and
-  cheaper on frames; separate is simpler. Lean shared if `user::load`
-  makes it easy.
+  ✅ RESOLVED (2026-06-13): separate page tables (independent `Process` each).
+  Shared read-only text (one binary, two processes — the real-OS answer) is a
+  later refinement; not v0.7.
 - **`SpanSink` vs extending `TelemetrySink`.** Distinct cap is the
   cleaner thesis (different rights); fold-in is less plumbing. Leaning
   distinct — revisit at Step 3 if the grant path is heavier than
