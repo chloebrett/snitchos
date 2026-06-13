@@ -299,7 +299,11 @@ fn handle_send(frame: &mut TrapFrame) {
 
     let me = crate::sched::current_task_id();
     let msg = [frame.a1, frame.a2, frame.a3, frame.a4];
-    match crate::ipc::send_begin(ep, me, msg) {
+    // Carry the sender's trace context: its innermost open span becomes the
+    // parent of the receiver's handling span (kernel-populated — userspace can
+    // neither forge nor forget it).
+    let parent = crate::tracing::current_span_id();
+    match crate::ipc::send_begin(ep, me, msg, parent) {
         crate::ipc::SendStep::Deliver { wake } => crate::sched::wake(wake),
         crate::ipc::SendStep::Block => crate::sched::block_current(),
     }
@@ -338,17 +342,21 @@ fn handle_receive(frame: &mut TrapFrame) {
     };
 
     let me = crate::sched::current_task_id();
-    let msg = match crate::ipc::receive_begin(ep, me) {
-        crate::ipc::RecvStep::Deliver { msg, wake } => {
+    let (msg, parent) = match crate::ipc::receive_begin(ep, me) {
+        crate::ipc::RecvStep::Deliver { msg, parent, wake } => {
             crate::sched::wake(wake);
-            msg
+            (msg, parent)
         }
         crate::ipc::RecvStep::Block => {
             crate::sched::block_current();
-            // Resumed: a sender stashed our message under our id at rendezvous.
+            // Resumed: a sender stashed our message + trace context under our id.
             crate::ipc::take_delivered(ep, me)
         }
     };
+    // Seed the sender's span as our incoming parent — the next span this task
+    // opens (its handling span) becomes a child, so the trace continues across
+    // the process boundary.
+    crate::tracing::set_current_parent(parent);
     frame.a1 = msg[0];
     frame.a2 = msg[1];
     frame.a3 = msg[2];

@@ -8,13 +8,16 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{endpoint, entry};
+use snitchos_user::{endpoint, entry, tracer};
 
 /// The payload the receiver re-emits — the itest asserts this value crosses.
 const SENTINEL: u64 = 42;
 
 #[entry]
 fn main() {
-    // Blocks until the receiver rendezvouses; on return the message was taken.
+    // Open a span and send *inside* it: the kernel captures this span as the
+    // message's trace context, so the receiver's handling span roots under it
+    // — the trace following the message across the process boundary.
+    let _span = tracer().span("ipc.send");
     let _ = endpoint().send([SENTINEL, 0, 0, 0]);
 }

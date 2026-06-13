@@ -1108,6 +1108,49 @@ pub fn ipc_message_crosses(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.9 headline (`workload=ipc`): the trace follows the message across the
+/// process boundary. The sender opens `ipc.send` and sends *inside* it; the
+/// kernel carries that span as the message's trace context and seeds it onto
+/// the receiver, so the `ipc.recv` span the receiver opens after receiving is a
+/// **child** of `ipc.send` — two different processes, one trace. Asserts the
+/// `ipc.recv` SpanStart's `parent` equals the (non-root) `ipc.send` span id.
+pub fn ipc_trace_crosses(h: &mut View) -> Result<(), String> {
+    use protocol::SpanId;
+
+    let send = h
+        .wait_for(SEC * 30, |f, strings| {
+            matches!(f, OwnedFrame::SpanStart { name_id, .. }
+                if strings.get(name_id).map(String::as_str) == Some("ipc.send"))
+        })
+        .ok_or("no SpanStart for 'ipc.send' within 30s — sender never opened its span")?;
+    let send_id = match send {
+        OwnedFrame::SpanStart { id, .. } => id,
+        _ => return Err("matched non-SpanStart (impossible)".to_string()),
+    };
+    if send_id == SpanId(0) {
+        return Err("ipc.send span id is 0 (root sentinel) — no real span to parent under".to_string());
+    }
+
+    let recv = h
+        .wait_for(SEC * 30, |f, strings| {
+            matches!(f, OwnedFrame::SpanStart { name_id, .. }
+                if strings.get(name_id).map(String::as_str) == Some("ipc.recv"))
+        })
+        .ok_or("no SpanStart for 'ipc.recv' within 30s — receiver never opened its handling span")?;
+    let recv_parent = match recv {
+        OwnedFrame::SpanStart { parent, .. } => parent,
+        _ => return Err("matched non-SpanStart (impossible)".to_string()),
+    };
+
+    if recv_parent != send_id {
+        return Err(format!(
+            "ipc.recv parent {recv_parent:?} != ipc.send id {send_id:?} — the trace did \
+             not cross the process boundary (kernel didn't seed the sender's span context)"
+        ));
+    }
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

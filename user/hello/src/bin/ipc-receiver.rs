@@ -7,13 +7,15 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{endpoint, entry, telemetry};
+use snitchos_user::{endpoint, entry, telemetry, tracer};
 
 #[entry]
 fn main() {
-    // Blocks until the sender rendezvouses, then surfaces the payload's first
-    // word as telemetry — the wire signal the itest asserts on.
+    // Blocks until the sender rendezvouses. The kernel seeds the sender's span
+    // as our incoming trace context, so the handling span we open next roots
+    // under it — proving the trace crossed the process boundary.
     if let Ok(words) = endpoint().receive() {
+        let _span = tracer().span("ipc.recv");
         let _ = telemetry().emit(words[0] as i64);
     }
 }

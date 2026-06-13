@@ -71,6 +71,14 @@ impl SpanCursor {
     pub fn current(&self) -> SpanId {
         SpanId(self.current.load(Ordering::Relaxed))
     }
+
+    /// Seed the innermost span directly — used to install *incoming* trace
+    /// context (e.g. the sender's span arriving over IPC) so the next [`open`]
+    /// on this cursor makes its span a child of `span`. Distinct from `open`,
+    /// which mints a fresh id; this installs an id minted elsewhere.
+    pub fn set_current(&self, span: SpanId) {
+        self.current.store(span.0, Ordering::Relaxed);
+    }
 }
 
 impl Default for SpanCursor {
@@ -114,6 +122,17 @@ mod tests {
         let cursor = SpanCursor::new();
         let s = open(&ids, &cursor);
         assert_eq!(s.parent, SpanId(0));
+    }
+
+    #[test]
+    fn set_current_seeds_the_parent_for_the_next_open() {
+        // Seeding an incoming span id (e.g. trace context arriving over IPC)
+        // makes the next span opened on this cursor a child of it.
+        let ids = SpanIds::new();
+        let cursor = SpanCursor::new();
+        cursor.set_current(SpanId(99));
+        let s = open(&ids, &cursor);
+        assert_eq!(s.parent, SpanId(99));
     }
 
     #[test]

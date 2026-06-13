@@ -341,6 +341,22 @@ fn current_cursor() -> &'static SpanCursor {
     }
 }
 
+/// The innermost open span on the running task's cursor, or `SpanId(0)` if
+/// none. The IPC `send` path reads this to carry the sender's trace context to
+/// the receiver (so the receiver's handling span becomes its child).
+pub fn current_span_id() -> protocol::SpanId {
+    current_cursor().current()
+}
+
+/// Seed the running task's cursor with an incoming parent span, so its next
+/// [`span_start`] (or U-mode `SpanOpen`) opens a child of `parent`. The IPC
+/// `receive` path calls this with the sender's span id — the kernel-populated
+/// trace context crossing the process boundary. `SpanId(0)` is a no-op-shaped
+/// seed (the next span is a root), so an IPC with no open sender span is safe.
+pub fn set_current_parent(parent: protocol::SpanId) {
+    current_cursor().set_current(parent);
+}
+
 /// RAII guard returned by `span_start`. Drop emits `SpanEnd` and
 /// pops the span off the cursor it was opened on.
 ///

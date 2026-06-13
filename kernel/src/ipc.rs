@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 
 use kernel_core::ipc::{on_receive, on_send, EndpointId, EndpointState, RendezvousAction};
 use kernel_core::sched::TaskId;
+use protocol::SpanId;
 
 use crate::sync::{Mutex, Once};
 
@@ -25,12 +26,28 @@ pub const MSG_WORDS: usize = 4;
 /// An inline IPC message — the words copied sender→receiver.
 pub type Message = [u64; MSG_WORDS];
 
-/// One kernel endpoint: the pure rendezvous state plus the messages of
-/// currently-blocked tasks, keyed by the **blocked** task's id. Both fields
+/// A message in flight, plus the sender's trace context. `parent` is the
+/// sender's innermost open span at send time; the kernel seeds it onto the
+/// receiver so the receiver's handling span becomes a child — the trace
+/// following the message across the process boundary. `SpanId(0)` = no context.
+#[derive(Clone, Copy)]
+struct Pending {
+    msg: Message,
+    parent: SpanId,
+}
+
+impl Default for Pending {
+    fn default() -> Self {
+        Self { msg: [0; MSG_WORDS], parent: SpanId(0) }
+    }
+}
+
+/// One kernel endpoint: the pure rendezvous state plus the in-flight messages
+/// of currently-blocked tasks, keyed by the **blocked** task's id. Both fields
 /// are touched only under [`ENDPOINTS`].
 struct Endpoint {
     state: EndpointState,
-    pending: BTreeMap<TaskId, Message>,
+    pending: BTreeMap<TaskId, Pending>,
 }
 
 impl Endpoint {
@@ -66,40 +83,42 @@ pub enum SendStep {
 
 /// What the `receive` trap handler must do once the endpoint lock is dropped.
 pub enum RecvStep {
-    /// A sender was waiting; `msg` is its payload (write it into the
-    /// receiver's frame) — wake the sender.
-    Deliver { msg: Message, wake: TaskId },
+    /// A sender was waiting; `msg` is its payload (write it into the receiver's
+    /// frame) and `parent` its trace context (seed it onto the receiver) —
+    /// wake the sender.
+    Deliver { msg: Message, parent: SpanId, wake: TaskId },
     /// No sender; block until one rendezvouses.
     Block,
 }
 
 /// Begin a `send`: drive the pure rendezvous, then either stage the message
-/// for a waiting receiver (and report whom to wake) or stash it under `me`
-/// for the caller to block on. All under the endpoint lock; the handler acts
-/// after it drops.
-pub fn send_begin(ep: EndpointId, me: TaskId, msg: Message) -> SendStep {
+/// (with the sender's `parent` trace context) for a waiting receiver and
+/// report whom to wake, or stash it under `me` for the caller to block on. All
+/// under the endpoint lock; the handler acts after it drops.
+pub fn send_begin(ep: EndpointId, me: TaskId, msg: Message, parent: SpanId) -> SendStep {
     let mut eps = ENDPOINTS.lock();
     let endpoint = &mut eps[ep.0 as usize];
     let state = core::mem::replace(&mut endpoint.state, EndpointState::Idle);
     let (next, action) = on_send(state, me);
     endpoint.state = next;
+    let pending = Pending { msg, parent };
     match action {
         RendezvousAction::Rendezvous { peer } => {
             // Deliver to the blocked receiver's slot; it reads this on resume.
-            endpoint.pending.insert(peer, msg);
+            endpoint.pending.insert(peer, pending);
             SendStep::Deliver { wake: peer }
         }
         RendezvousAction::Block => {
             // Stash my message; a future receiver takes it at rendezvous.
-            endpoint.pending.insert(me, msg);
+            endpoint.pending.insert(me, pending);
             SendStep::Block
         }
     }
 }
 
-/// Begin a `receive`: drive the pure rendezvous. If a sender was waiting,
-/// take its stashed message (to write into the receiver's frame) and report
-/// whom to wake; otherwise block.
+/// Begin a `receive`: drive the pure rendezvous. If a sender was waiting, take
+/// its stashed message + trace context and report whom to wake; otherwise
+/// block.
 pub fn receive_begin(ep: EndpointId, me: TaskId) -> RecvStep {
     let mut eps = ENDPOINTS.lock();
     let endpoint = &mut eps[ep.0 as usize];
@@ -108,17 +127,19 @@ pub fn receive_begin(ep: EndpointId, me: TaskId) -> RecvStep {
     endpoint.state = next;
     match action {
         RendezvousAction::Rendezvous { peer } => {
-            let msg = endpoint.pending.remove(&peer).unwrap_or_default();
-            RecvStep::Deliver { msg, wake: peer }
+            let Pending { msg, parent } = endpoint.pending.remove(&peer).unwrap_or_default();
+            RecvStep::Deliver { msg, parent, wake: peer }
         }
         RendezvousAction::Block => RecvStep::Block,
     }
 }
 
-/// Take the message delivered to `me` while it was blocked in `receive`. Call
-/// once, after `block_current` returns: a sender stored it under `me`'s id at
-/// rendezvous. Defaults to zeros if (impossibly) absent — never panics.
-pub fn take_delivered(ep: EndpointId, me: TaskId) -> Message {
+/// Take the message + trace context delivered to `me` while it was blocked in
+/// `receive`. Call once, after `block_current` returns: a sender stored it
+/// under `me`'s id at rendezvous. Defaults to zeros / no parent if (impossibly)
+/// absent — never panics.
+pub fn take_delivered(ep: EndpointId, me: TaskId) -> (Message, SpanId) {
     let mut eps = ENDPOINTS.lock();
-    eps[ep.0 as usize].pending.remove(&me).unwrap_or_default()
+    let Pending { msg, parent } = eps[ep.0 as usize].pending.remove(&me).unwrap_or_default();
+    (msg, parent)
 }
