@@ -58,22 +58,54 @@ mod harness;
 mod matchers;
 mod scenarios;
 
-/// Use the harness's scenario type — same shape (name + fn pointer);
-/// the runner loop lives there too. The list below is the `SnitchOS`
-/// catalog.
-use itest_harness::Scenario;
+use itest_harness::{Scenario, ScenarioReport};
 
-// CPU-profile classification per plans/itest-parallel-scenarios.md
-// step 5. `cpu_bound` scenarios run real guest work between heartbeats
-// (allocator pressure, storm workloads, context-switch loops) and get
-// a serial pass in the parallel runner so they don't contend with each
-// other. `new` scenarios are wfi-bounded and fan out across the worker
-// pool. Initial classification is conservative — refine with `top`/`htop`
-// observation.
-// Row grammar: `<profile> "<name>" <fn> [tag, …]? ;` — `wfi` =
-// fan-out-parallel, `cpu` = serial pass (real guest work between
-// heartbeats). See `itest_harness::scenarios!`.
-const SCENARIOS: &[Scenario] = itest_harness::scenarios! {
+use self::harness::{Boot, View};
+
+/// Placeholder `run` for catalog metadata. Scenarios execute via
+/// [`scenario_view_fn`] + the `run_group` executor (which spawns a
+/// [`Boot`] and runs each scenario against a [`View`]), never through
+/// `Scenario::run`. The runner only calls `Scenario::run` when no executor
+/// is configured, which never happens here — so this is unreachable.
+fn unreached_run() -> Result<(), String> {
+    unreachable!("xtask scenarios run via the run_group executor / scenario_view_fn, not Scenario::run")
+}
+
+/// Build the integration-test catalog from a table of rows. Emits two
+/// co-generated items so they can't drift: `const SCENARIOS` (metadata for
+/// the runner — the `run` field is the never-called [`unreached_run`]
+/// placeholder) and `fn scenario_view_fn(name)` mapping each scenario name
+/// to its `fn(&mut View)` assertion body (which the executor calls).
+///
+/// Row grammar: `<profile> "<name>" <fn-path> [tag, …]? {"<workload>"}? ;`
+/// — `wfi` is wfi-bounded (fans out across the parallel pool), `cpu` runs
+/// real guest work (a serial pass); tags feed `--tag` selection; the
+/// braced workload is the `workload=` bootarg + the shared-boot grouping
+/// key. (`cpu_bound` classification per plans/itest-parallel-scenarios.md.)
+macro_rules! catalog {
+    ( $(
+        $profile:ident $name:literal $func:path
+        $( [ $( $tag:ident ),* $(,)? ] )?
+        $( { $wl:literal } )?
+    );* $(;)? ) => {
+        const SCENARIOS: &[Scenario] = &[ $(
+            catalog!(@meta $profile $name)
+                $( .tagged(&[ $( stringify!($tag) ),* ]) )?
+                $( .on_workload($wl) )?
+        ),* ];
+
+        fn scenario_view_fn(name: &str) -> fn(&mut View) -> Result<(), String> {
+            match name {
+                $( $name => $func, )*
+                other => panic!("no scenario fn registered for {other:?}"),
+            }
+        }
+    };
+    (@meta wfi $name:literal) => { Scenario::new($name, unreached_run) };
+    (@meta cpu $name:literal) => { Scenario::cpu_bound($name, unreached_run) };
+}
+
+catalog! {
     wfi "boot-reaches-heartbeat"          scenarios::boot_reaches_heartbeat         [boot];
     wfi "heartbeat-cadence"               scenarios::heartbeat_cadence              [boot];
     wfi "pre-init-order"                  scenarios::pre_init_order                 [boot];
@@ -123,7 +155,7 @@ const SCENARIOS: &[Scenario] = itest_harness::scenarios! {
     wfi "userspace-quota-refused"         scenarios::userspace_quota_refused        [userspace]  {"userspace-span-flood"};
     cpu "workers-make-progress"           scenarios::workers_make_progress          [userspace]  {"workers"};
     wfi "heap-grows-on-demand"            scenarios::heap_grows_on_demand           [userspace]  {"heap-grow"};
-};
+}
 
 /// Set the process-wide failure-capture transcript depth. Call once at
 /// startup, before `run`. Delegates to the harness, which reads it at
@@ -327,22 +359,41 @@ pub fn run(config: RunConfig) -> ExitCode {
     };
     let commit_for = current_commit_short;
 
-    // The executor: run each scenario (a singleton group in separate
-    // mode — the only mode today) and package what its `Harness` recorded
-    // into a `ScenarioReport`. The scenario fn still spawns its own QEMU
-    // internally and stashes timing/capture/log-path in thread-locals;
-    // here we drain those thread-locals into the report, on the same
-    // worker thread that ran the scenario. (Step 5 replaces the in-fn
-    // spawn + thread-locals with a Boot/View the executor owns.)
-    let run_group = |scns: &[&Scenario]| -> Vec<itest_harness::ScenarioReport> {
+    // The executor: spawn one `Boot` for the group (separate mode = one
+    // scenario; shared mode = the same-workload group), then run each
+    // scenario's `fn(&mut View)` against a fresh `View` over that boot and
+    // package the View's `max_wait()` / `take_capture()` + the boot's log
+    // path into a `ScenarioReport`. All scenarios in a group share a
+    // workload (the runner's grouping invariant), so the group's bootarg
+    // is the first member's.
+    let run_group = |scns: &[&Scenario]| -> Vec<ScenarioReport> {
+        let Some(first) = scns.first() else { return Vec::new() };
+        let boot = match Boot::spawn(first.name, first.workload) {
+            Ok(boot) => boot,
+            // Spawn failure is infra, not a scenario assertion: report it
+            // for every member so the runner records each as failed.
+            Err(e) => {
+                return scns
+                    .iter()
+                    .map(|_| ScenarioReport {
+                        result: Err(format!("boot spawn failed: {e}")),
+                        max_wait: None,
+                        capture: None,
+                        log_path: None,
+                    })
+                    .collect();
+            }
+        };
+        let log_path = boot.log_path();
         scns.iter()
             .map(|s| {
-                let result = (s.run)();
-                itest_harness::ScenarioReport {
+                let mut view = boot.view();
+                let result = scenario_view_fn(s.name)(&mut view);
+                ScenarioReport {
                     result,
-                    max_wait: harness::take_last_max_wait(),
-                    capture: harness::take_last_failure_capture(),
-                    log_path: harness::take_last_log_path(),
+                    max_wait: Some(view.max_wait()),
+                    capture: view.take_capture(),
+                    log_path: Some(log_path.clone()),
                 }
             })
             .collect()

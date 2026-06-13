@@ -39,45 +39,8 @@ pub use prom::{render_prometheus, write_atomic};
 pub use runner::{CpuProfile, RunnerConfig, Scenario, ScenarioReport, run, select_by_tags};
 pub use signature::{CaptureLevel, ErrorOrigin, FailureCapture, WaitOutcome};
 
-/// Build a `&[Scenario]` catalog as a table instead of a wall of
-/// `Scenario::new(...).tagged(...)` calls. One row per scenario:
-///
-/// ```ignore
-/// const SCENARIOS: &[Scenario] = scenarios! {
-///     wfi "boot-reaches-heartbeat" scenarios::boot_reaches_heartbeat;
-///     cpu "spawn-storm"            scenarios::spawn_storm            [smp, stress];
-///     wfi "userspace-emits-span"   scenarios::userspace_emits_span   [userspace] {"userspace"};
-/// };
-/// ```
-///
-/// Row grammar: `<profile> <name-literal> <fn-path> [tag, …]? {<workload-lit>}? ;`
-/// - **profile** — `wfi` maps to [`Scenario::new`], `cpu` to [`Scenario::cpu_bound`].
-/// - **tags** — optional `[ident, …]`; bare idents become the string tags
-///   (`[smp, stress]` → `.tagged(&["smp", "stress"])`). Must be valid
-///   identifiers — single words, no hyphens.
-/// - **workload** — optional `{"<name>"}`; the runtime workload the scenario
-///   boots (`.on_workload("<name>")`), and the grouping key for shared-boot
-///   mode. Omit for the default demo. (Braced rather than a `workload`
-///   keyword because a bare ident can't follow a `:path` fragment in a
-///   matcher, but `{` can.)
-#[macro_export]
-macro_rules! scenarios {
-    // Entry point: a `;`-separated list of rows, optional trailing `;`.
-    // Each row expands to a base `Scenario` plus the optional `.tagged(…)`
-    // / `.on_workload(…)` modifiers, applied only when present.
-    ( $(
-        $profile:ident $name:literal $func:path
-        $( [ $( $tag:ident ),* $(,)? ] )?
-        $( { $wl:literal } )?
-    );* $(;)? ) => {
-        &[ $(
-            $crate::scenarios!(@base $profile $name $func)
-                $( .tagged(&[ $( stringify!($tag) ),* ]) )?
-                $( .on_workload($wl) )?
-        ),* ]
-    };
-
-    // Base constructor, dispatched on the profile keyword.
-    (@base wfi $name:literal $func:path) => { $crate::Scenario::new($name, $func) };
-    (@base cpu $name:literal $func:path) => { $crate::Scenario::cpu_bound($name, $func) };
-}
+// The catalog-building macro lives consumer-side (xtask's `catalog!`): it
+// co-generates the `Scenario` metadata table *and* the name→`fn(&mut View)`
+// dispatch the executor calls, which needs the consumer's `View` type. This
+// crate just provides the `Scenario` builders (`new`/`cpu_bound`/`tagged`/
+// `on_workload`) the consumer's macro composes.

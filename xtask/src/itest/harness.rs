@@ -1,11 +1,18 @@
-//! Test harness: spawns QEMU, reads the virtio-console socket on a
-//! reader thread, decodes frames, and surfaces them to the main
-//! (assertion) thread via a channel.
+//! Test harness, split into two pieces:
 //!
-//! Lifecycle: `Harness::spawn` returns a live handle. `wait_for` blocks
-//! up to a per-call wallclock budget for a frame matching a predicate.
-//! `Drop` always kills QEMU and removes the socket, so a panicking
-//! test still cleans up.
+//! - [`Boot`] owns one QEMU process + a frame [`Recorder`] (a reader
+//!   thread decodes the virtio-console socket and appends to it). `Drop`
+//!   kills QEMU and removes the socket, so a panicking test still cleans
+//!   up. One `Boot` per scenario (separate mode) or per workload group
+//!   (shared mode).
+//! - [`View`] is one scenario's read-cursor over a boot's recorded
+//!   stream, obtained from [`Boot::view`]. `wait_for` blocks up to a
+//!   per-call budget for a frame matching a predicate; several Views
+//!   replay the same boot independently from frame 0.
+//!
+//! The executor in `itest.rs` wires them together: spawn a `Boot`, run
+//! each scenario against a fresh `View`, read `max_wait()` / `take_capture()`
+//! into a `ScenarioReport`.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::os::unix::net::UnixStream;
@@ -111,19 +118,37 @@ enum Advance {
     Disconnected,
 }
 
-/// Live integration-test handle. Killing the child and unlinking the
-/// socket happens in `Drop`.
-pub struct Harness {
+/// Owns one live QEMU process and its frame `Recorder`. Spawned per
+/// scenario (separate mode) or per workload group (shared mode); `Drop`
+/// kills QEMU and unlinks the socket. Hand out one `View` per scenario
+/// via `view()` — several Views replay the same recorded boot.
+pub struct Boot {
     qemu: Child,
-    /// Shared recording of the frame stream (the reader thread appends).
+    socket_path: PathBuf,
+    /// Shared recording of the frame stream (the reader thread appends);
+    /// each `View` holds its own `Arc` clone + cursor.
     recorder: Arc<Recorder>,
-    /// This handle's position in `recorder.buf.frames`. Advancing it is
-    /// what `wait_for` does; `absorb` runs once per frame stepped over, so
-    /// the string table / histogram / recent-ring state is identical to
-    /// the old "absorb each frame as it leaves the channel" behaviour.
+    /// QEMU log (kernel UART + QEMU stderr); the runner dumps its tail on
+    /// failure. Surfaced to the executor via `log_path()`.
+    log_path: PathBuf,
+    /// The runtime workload this boot selected (`-append workload=<name>`),
+    /// or `None` for the default demo. Copied into each `View` for capture.
+    workload: Option<String>,
+}
+
+/// One scenario's read-cursor over a `Boot`'s recorded frame stream, plus
+/// the per-scenario assertion bookkeeping. Obtained from `Boot::view`.
+/// The frame-assertion API scenarios use: `wait_for`, `assert_absent`,
+/// `name_of`, `timebase_hz`. The executor reads `max_wait()` /
+/// `take_capture()` afterwards to build the scenario's report.
+pub struct View {
+    /// Shared with the owning `Boot`; retained so a `View` can keep
+    /// scanning buffered frames even after `Boot` drops (kills QEMU).
+    recorder: Arc<Recorder>,
+    /// This view's position in `recorder.buf.frames`. Advancing it is
+    /// what `wait_for` does; `absorb` runs once per frame stepped over.
     cursor: usize,
     strings: StringTable,
-    socket_path: PathBuf,
     timebase_hz: Option<u64>,
     /// Rolling window of the last few frames received. Printed on
     /// timeout so failures say "boot reached Hello + `SpanStart`, then
@@ -150,41 +175,27 @@ pub struct Harness {
     /// Most recent kernel timestamp seen per hart id, from frames that
     /// carry both — pins which hart went quiet and how far it got.
     last_t_per_hart: BTreeMap<u32, u64>,
-    /// The runtime workload selected for this scenario (`-append
-    /// workload=<name>`), or `None` for the default demo. Recorded into a
-    /// failure capture so a flake says which variant it ran.
+    /// The runtime workload this view's boot selected, copied from `Boot`.
+    /// Recorded into a failure capture so a flake says which variant ran.
     workload: Option<String>,
+    /// Structured failure capture, set by a failing `wait_for` /
+    /// `assert_absent` and drained by the executor (`take_capture`) into
+    /// the scenario's `ScenarioReport`. Replaces the old thread-local.
+    captured: Option<FailureCapture>,
 }
 
-impl Harness {
-    /// Spawn QEMU on the one up-front `itest-workloads` kernel build
-    /// with no `workload=` bootarg — i.e. the default demo. Used by the
-    /// default-demo scenarios; that they pass on this binary is the
-    /// continuous proof of the additive guarantee.
-    pub fn spawn(label: &str) -> Result<Self, String> {
-        Self::spawn_inner(label, None)
-    }
-
-    /// Spawn QEMU on the same up-front kernel build and select a runtime
-    /// workload via the `workload=<name>` bootarg (QEMU `-append`).
-    /// `kmain` reads `/chosen/bootargs` and dispatches. No rebuild — the
-    /// whole suite shares one binary. See
-    /// `docs/runtime-workload-selection-design.md`.
-    pub fn spawn_with_workload(label: &str, workload: &str) -> Result<Self, String> {
-        Self::spawn_inner(label, Some(workload))
-    }
-
-    fn spawn_inner(label: &str, workload: Option<&str>) -> Result<Self, String> {
+impl Boot {
+    /// Spawn QEMU on the up-front `itest-workloads` kernel build. `workload`
+    /// is the `workload=<name>` bootarg (`None` = the default demo, the
+    /// continuous proof of the additive guarantee); `kmain` reads
+    /// `/chosen/bootargs` and dispatches. No rebuild — the whole suite
+    /// shares one binary. `label` names the socket/log files (the scenario
+    /// or group name). See `docs/runtime-workload-selection-design.md`.
+    pub fn spawn(label: &str, workload: Option<&str>) -> Result<Self, String> {
         // No build here: the kernel is built once up-front in
         // `itest::run` (so `--repeat N` doesn't race with mid-run source
         // edits or burn time on per-iteration build checks). Scenarios
         // differ only by the `workload=` bootarg, not the binary.
-
-        // Fresh scenario on this worker thread: drop any failure capture
-        // left by a prior (passing) scenario so a later failure can't
-        // inherit it.
-        clear_last_failure_capture();
-
         let socket_path = socket_path_for(label);
         let _ = std::fs::remove_file(&socket_path);
 
@@ -207,7 +218,6 @@ impl Harness {
         let stderr_log = stdout_log
             .try_clone()
             .map_err(|e| format!("clone log handle: {e}"))?;
-        LAST_LOG_PATH.with(|cell| *cell.borrow_mut() = Some(log_path.clone()));
 
         let mut qemu_cmd = qemu::base_command(&chardev);
         if let Some(workload) = workload {
@@ -240,10 +250,21 @@ impl Harness {
 
         Ok(Self {
             qemu,
+            socket_path,
             recorder,
+            log_path,
+            workload: workload.map(str::to_string),
+        })
+    }
+
+    /// A fresh cursor over this boot's recorded stream. Each `View` starts
+    /// at frame 0 with its own assertion state, so several Views replay the
+    /// same boot independently (the shared-boot case).
+    pub fn view(&self) -> View {
+        View {
+            recorder: Arc::clone(&self.recorder),
             cursor: 0,
             strings: HashMap::new(),
-            socket_path,
             timebase_hz: None,
             recent: VecDeque::new(),
             max_wait: (Duration::ZERO, Duration::ZERO),
@@ -252,10 +273,19 @@ impl Harness {
             capture_level: capture_level(),
             frame_histogram: BTreeMap::new(),
             last_t_per_hart: BTreeMap::new(),
-            workload: workload.map(str::to_string),
-        })
+            workload: self.workload.clone(),
+            captured: None,
+        }
     }
 
+    /// Path to this boot's QEMU log (kernel UART + QEMU stderr). The runner
+    /// dumps its tail and copies it into the run-dir on failure.
+    pub fn log_path(&self) -> PathBuf {
+        self.log_path.clone()
+    }
+}
+
+impl View {
     /// Block up to `budget` for a frame matching `pred`. Returns the
     /// matching frame, or `None` on deadline. Every frame consumed
     /// along the way updates the internal string table — later
@@ -363,16 +393,20 @@ impl Harness {
         outcome
     }
 
-    /// (`actual`, `budget`) of the longest `wait_for` issued so far.
-    /// Used by the runner to print e.g. `max wait 1.6s of 30s budget`,
-    /// flagging budgets that are over-sized (much bigger than actual)
-    /// or tight (actual close to budget).
-    #[expect(
-        dead_code,
-        reason = "per-scenario max-wait accessor; the runner reads via take_last_max_wait() today, this is kept for direct queries"
-    )]
+    /// (`actual`, `budget`) of the longest `wait_for` issued so far. The
+    /// executor packages this into the scenario's report so the runner can
+    /// print `max wait 1.6s of 30s budget` — flagging over-sized (much
+    /// bigger than actual) or tight (actual close to budget) budgets.
     pub fn max_wait(&self) -> (Duration, Duration) {
         self.max_wait
+    }
+
+    /// Drain the structured failure capture recorded by a failing
+    /// `wait_for` / `assert_absent` (or `None` on a clean run / a
+    /// value-mismatch with no wait). The executor folds this into the
+    /// scenario's `ScenarioReport`.
+    pub fn take_capture(&mut self) -> Option<FailureCapture> {
+        self.captured.take()
     }
 
     /// Look up a name in the string table. Useful for matchers that
@@ -419,13 +453,13 @@ impl Harness {
         self.recent.push_back(frame.clone());
     }
 
-    /// Snapshot the current scenario state into the thread-local failure
-    /// capture the runner reads after the scenario returns. Records the
-    /// load-bearing summary (outcome, frames seen, wall-silence before
+    /// Snapshot the current scenario state into `self.captured`, which the
+    /// executor drains (`take_capture`) into the scenario's report. Records
+    /// the load-bearing summary (outcome, frames seen, wall-silence before
     /// the deadline) plus a frame-tail transcript and histogram for
     /// debugging. `error_origin` is `Scenario` — a failing `wait_for` is
     /// a scenario assertion, not infra.
-    fn record_failure_capture(&self, outcome: WaitOutcome) {
+    fn record_failure_capture(&mut self, outcome: WaitOutcome) {
         let last_frame_wall_age_ms = self
             .last_frame_at
             .map(|t| u32::try_from(t.elapsed().as_millis()).unwrap_or(u32::MAX));
@@ -441,7 +475,7 @@ impl Harness {
             }
         };
 
-        set_last_failure_capture(FailureCapture {
+        self.captured = Some(FailureCapture {
             outcome: Some(outcome),
             error_origin: Some(ErrorOrigin::Scenario),
             error: None,
@@ -511,14 +545,9 @@ impl Harness {
     }
 }
 
-impl Drop for Harness {
+impl Drop for Boot {
     fn drop(&mut self) {
         const REAPING_TIMEOUT: Duration = Duration::from_secs(5);
-
-        // Stash the longest wait so the test runner can print it
-        // after the scenario function returns. Thread-local because
-        // scenarios run sequentially on the runner's main thread.
-        LAST_MAX_WAIT.with(|cell| cell.set(Some(self.max_wait)));
 
         // Signal the child. `Child::kill` on Unix is SIGKILL, which
         // can't be caught — should produce a corpse promptly.
@@ -546,15 +575,15 @@ impl Drop for Harness {
                 Err(e) => {
                     // try_wait failed (child already reaped by some
                     // other code path). Treat as reaped.
-                    eprintln!("Harness::Drop: try_wait error {e:?}; treating as reaped");
+                    eprintln!("Boot::Drop: try_wait error {e:?}; treating as reaped");
                     reaped = true;
                     break;
                 }
             }
         }
 
-        assert!(reaped, 
-            "Harness::Drop: QEMU PID {} did not exit within {:?} \
+        assert!(reaped,
+            "Boot::Drop: QEMU PID {} did not exit within {:?} \
              after SIGKILL — refusing to leak it into the next \
              scenario.",
             self.qemu.id(),
@@ -618,55 +647,7 @@ fn variant_name(frame: &OwnedFrame) -> &'static str {
     }
 }
 
-thread_local! {
-    /// Per-thread slot for the most-recently-dropped Harness's
-    /// `max_wait`. The test runner reads this after each scenario
-    /// function returns. `None` if the scenario didn't construct a
-    /// Harness (or the slot has already been consumed).
-    static LAST_MAX_WAIT: std::cell::Cell<Option<(Duration, Duration)>> =
-        const { std::cell::Cell::new(None) };
-
-    /// Per-thread slot for the most recent failure capture. Set by
-    /// `record_failure_capture` on a failing `wait_for`, cleared at each
-    /// `spawn`, drained by the runner via `take_last_failure_capture`.
-    static LAST_FAILURE_CAPTURE: std::cell::RefCell<Option<FailureCapture>> =
-        const { std::cell::RefCell::new(None) };
-
-    /// Per-thread slot for the most recently-spawned Harness's QEMU
-    /// log file path. The runner dumps this on test failure.
-    static LAST_LOG_PATH: std::cell::RefCell<Option<PathBuf>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Consume the last-scenario's max wait timing. Returns `None` if
-/// no Harness has been dropped since the last call.
-pub fn take_last_max_wait() -> Option<(Duration, Duration)> {
-    LAST_MAX_WAIT.with(std::cell::Cell::take)
-}
-
-fn set_last_failure_capture(capture: FailureCapture) {
-    LAST_FAILURE_CAPTURE.with(|cell| *cell.borrow_mut() = Some(capture));
-}
-
-fn clear_last_failure_capture() {
-    LAST_FAILURE_CAPTURE.with(|cell| *cell.borrow_mut() = None);
-}
-
-/// Consume the last failing `wait_for`'s structured capture. Returns
-/// `None` if the scenario failed without a wait timeout/disconnect
-/// (e.g. a value-mismatch assertion), in which case the runner
-/// classifies from the error string and log tail alone.
-pub fn take_last_failure_capture() -> Option<FailureCapture> {
-    LAST_FAILURE_CAPTURE.with(|cell| cell.borrow_mut().take())
-}
-
-/// Consume the last-scenario's QEMU log file path. Returns `None` if
-/// no Harness has spawned since the last call.
-pub fn take_last_log_path() -> Option<PathBuf> {
-    LAST_LOG_PATH.with(|cell| cell.borrow_mut().take())
-}
-
-/// Per-Harness-spawn unique counter. Two parallel `Harness::spawn`
+/// Per-`Boot`-spawn unique counter. Two parallel `Boot::spawn`
 /// calls (same scenario, different iteration or worker) would
 /// otherwise collide on `(label, pid)`. Each helper increment yields
 /// a fresh suffix.

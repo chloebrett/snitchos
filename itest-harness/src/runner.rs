@@ -1679,53 +1679,20 @@ mod tests {
     }
 
     #[test]
-    fn scenarios_macro_builds_entries_with_profiles_and_tags() {
-        let table: &[Scenario] = crate::scenarios! {
-            wfi "plain"      always_pass;
-            cpu "storm"      always_pass  [smp, stress];
-            wfi "userspaced" always_pass  [userspace];
-        };
-        assert_eq!(table.len(), 3);
+    fn scenario_builders_compose_profile_tags_and_workload() {
+        // The catalog macro lives consumer-side now; these are the
+        // `Scenario` builders it composes.
+        let s = Scenario::cpu_bound("spawn-storm", always_pass)
+            .tagged(&["smp", "stress"])
+            .on_workload("spawn-storm");
+        assert_eq!(s.name, "spawn-storm");
+        assert_eq!(s.cpu_profile, CpuProfile::Cpu);
+        assert_eq!(s.tags, ["smp", "stress"].as_slice());
+        assert_eq!(s.workload, Some("spawn-storm"));
 
-        assert_eq!(table[0].name, "plain");
-        assert_eq!(table[0].cpu_profile, CpuProfile::Wfi);
-        assert!(table[0].tags.is_empty());
-
-        assert_eq!(table[1].name, "storm");
-        assert_eq!(table[1].cpu_profile, CpuProfile::Cpu);
-        assert_eq!(table[1].tags, ["smp", "stress"].as_slice());
-
-        assert_eq!(table[2].name, "userspaced");
-        assert_eq!(table[2].cpu_profile, CpuProfile::Wfi);
-        assert_eq!(table[2].tags, ["userspace"].as_slice());
-
-        // No `workload` token → default demo.
-        assert!(table.iter().all(|s| s.workload.is_none()));
-    }
-
-    #[test]
-    fn scenarios_macro_sets_workload_with_and_without_tags() {
-        let table: &[Scenario] = crate::scenarios! {
-            wfi "demo"        always_pass;
-            wfi "bare-wl"     always_pass               {"smp"};
-            cpu "tagged-wl"   always_pass  [userspace]  {"userspace"};
-        };
-        assert_eq!(table[0].workload, None);
-        assert_eq!(table[0].tags, [] as [&str; 0]);
-
-        assert_eq!(table[1].workload, Some("smp"));
-        assert!(table[1].tags.is_empty(), "workload without tags must not invent tags");
-
-        assert_eq!(table[2].workload, Some("userspace"));
-        assert_eq!(table[2].tags, ["userspace"].as_slice());
-        assert_eq!(table[2].cpu_profile, CpuProfile::Cpu);
-    }
-
-    #[test]
-    fn scenarios_macro_tolerates_a_trailing_semicolon() {
-        let table: &[Scenario] = crate::scenarios! {
-            wfi "only" always_pass;
-        };
-        assert_eq!(table.len(), 1);
+        let plain = Scenario::new("boot", always_pass);
+        assert_eq!(plain.cpu_profile, CpuProfile::Wfi);
+        assert!(plain.tags.is_empty());
+        assert_eq!(plain.workload, None);
     }
 }

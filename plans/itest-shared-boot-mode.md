@@ -38,12 +38,31 @@ failure-signature capture that the separate-boot model gives us.
     **Behaviour-identical** in separate mode; the runner is now inverted.
   - Host-only; QEMU behaviour unchanged but a confirming `--repeat 10` is
     wanted once the build is green (the user runs it).
-- **Next: step 5** — split xtask `Harness` → `Boot` + `View`; the executor
-  spawns one `Boot` per group and runs each scenario's `fn(&mut View)`
-  against a fresh `View`, building reports from the View (no thread-locals).
-  Migrate the 41 scenarios to `fn(&mut View)`; carry the payload in the
-  catalog. This is the QEMU-validated step. Then step 7 flips grouping to
-  enable `--shared`.
+- **Step 5 done (xtask Boot/View split + scenario migration), pending QEMU
+  validation** — compiles + all host tests green; needs a `--repeat 10`
+  confirmation once the build is unblocked.
+  - xtask `Harness` split into `Boot` (owns QEMU + Recorder, kills on drop;
+    `spawn(label, Option<workload>)`, `view()`, `log_path()`) and `View`
+    (cursor + assertion state + `wait_for`/`assert_absent`/`name_of`/
+    `timebase_hz`, plus `max_wait()`/`take_capture()` for the executor).
+    The failure-capture + max-wait + log-path **thread-locals are deleted**
+    — `View` carries them directly.
+  - All 42 scenarios migrated to `fn(&mut View)` (the in-fn `spawn` lines
+    removed; bodies otherwise untouched).
+  - The catalog macro moved consumer-side as `catalog!` in xtask: it
+    co-generates `SCENARIOS` (metadata; `run` is a never-called
+    `unreached_run` placeholder) **and** `scenario_view_fn(name) ->
+    fn(&mut View)` from the same rows (can't drift). The itest-harness
+    `scenarios!` macro + its tests were removed (replaced by a builder
+    test).
+  - The executor spawns one `Boot` per group and runs each scenario's
+    `fn(&mut View)` against a fresh `View`, building the report from
+    `view.max_wait()` / `view.take_capture()` + `boot.log_path()`. Already
+    group-shaped, so step 7 is just flipping the runner's grouping.
+- **Next: step 6** — `pre_init_order`'s incremental-table exception (only
+  if it regresses under replay; may be fine as-is). **Step 7** — runner
+  `--shared` + group-by-`workload` (the executor already handles N-member
+  groups; the runner just needs to form them and pass them).
 
 Non-goal: replacing the separate-boot model. Shared mode is an
 additional, opt-in mode. The flake gate (`--repeat 10`) and baseline

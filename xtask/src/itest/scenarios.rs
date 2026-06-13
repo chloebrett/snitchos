@@ -6,7 +6,7 @@ use std::time::Duration;
 use protocol::stream::OwnedFrame;
 
 
-use super::harness::Harness;
+use super::harness::View;
 use super::matchers::{is_cap_granted_span, is_cap_granted_telemetry, is_dropped, is_hello, is_metric_named, is_span_start_named, is_string_register_named, is_thread_register_named};
 
 const SEC: Duration = Duration::from_secs(1);
@@ -17,9 +17,7 @@ const SEC: Duration = Duration::from_secs(1);
 /// value ≥ 1, which proves: init ran, the linear map resolves (the
 /// zeroing wrote 4 KiB via `pa_to_kernel_va`), and at least one
 /// heartbeat completed.
-pub fn frame_allocator_metrics() -> Result<(), String> {
-    let mut h = Harness::spawn("frames")?;
-
+pub fn frame_allocator_metrics(h: &mut View) -> Result<(), String> {
     let frame = h
         .wait_for(SEC * 30, is_metric_named("snitchos.frames.allocated_total"))
         .ok_or("no snitchos.frames.allocated_total metric within 30s")?;
@@ -45,9 +43,7 @@ pub fn frame_allocator_metrics() -> Result<(), String> {
 ///      if the smoke leaves it near 0 after drop.
 ///   3. At least one heartbeat survives after — the heap doesn't
 ///      break the boot/loop path.
-pub fn kernel_heap_metrics() -> Result<(), String> {
-    let mut h = Harness::spawn("heap")?;
-
+pub fn kernel_heap_metrics(h: &mut View) -> Result<(), String> {
     let frame = h
         .wait_for(SEC * 30, is_metric_named("snitchos.heap.alloc_total"))
         .ok_or("no snitchos.heap.alloc_total metric within 30s — heap not initialised or not emitting?")?;
@@ -93,9 +89,7 @@ pub fn kernel_heap_metrics() -> Result<(), String> {
 /// subtler ways than "crashes the kernel" — this scenario catches
 /// e.g. corrupting callee-saved registers (would cause weird
 /// failures elsewhere) or never actually entering the marker.
-pub fn sched_context_switch_smoke() -> Result<(), String> {
-    let mut h = Harness::spawn("schedsmoke")?;
-
+pub fn sched_context_switch_smoke(h: &mut View) -> Result<(), String> {
     let frame = h
         .wait_for(SEC * 30, |f, strings| match f {
             OwnedFrame::Metric { name_id, value, .. } => {
@@ -125,9 +119,7 @@ pub fn sched_context_switch_smoke() -> Result<(), String> {
 /// call emits a `ThreadRegister` frame. This scenario asserts all
 /// four appear within budget, proving `spawn` builds + queues each
 /// task and the wire carries names through to the collector.
-pub fn sched_spawn_registers_thread() -> Result<(), String> {
-    let mut h = Harness::spawn("schedspawn")?;
-
+pub fn sched_spawn_registers_thread(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 20, is_thread_register_named("main"))
         .ok_or("no ThreadRegister for 'main' within 20s")?;
     h.wait_for(SEC * 20, is_thread_register_named("idle"))
@@ -145,9 +137,7 @@ pub fn sched_spawn_registers_thread() -> Result<(), String> {
 /// 0 within budget, plus the scheduler's cumulative switch counter
 /// climbs. That triplet rules out "`yield_now` does nothing" and "only
 /// one task runs."
-pub fn sched_yield_round_trips() -> Result<(), String> {
-    let mut h = Harness::spawn("schedyield")?;
-
+pub fn sched_yield_round_trips(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 45, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
@@ -195,10 +185,8 @@ pub fn sched_yield_round_trips() -> Result<(), String> {
 /// any other task's currently-open span, and (3)'s pop would land on
 /// the wrong cursor. This scenario is the structural proof that the
 /// per-task wiring works.
-pub fn sched_span_survives_yield() -> Result<(), String> {
+pub fn sched_span_survives_yield(h: &mut View) -> Result<(), String> {
     use protocol::SpanId;
-
-    let mut h = Harness::spawn("schedspansurvive")?;
 
     let task_a_reg = h
         .wait_for(SEC * 20, is_thread_register_named("task_a"))
@@ -252,10 +240,8 @@ pub fn sched_span_survives_yield() -> Result<(), String> {
 /// recognised task ids and whose reason is `Yield` (only switch
 /// flavour in cooperative v0.5). Proves the scheduler is emitting
 /// the per-switch event, not just the cumulative counter.
-pub fn sched_context_switches_on_wire() -> Result<(), String> {
+pub fn sched_context_switches_on_wire(h: &mut View) -> Result<(), String> {
     use std::collections::HashSet;
-
-    let mut h = Harness::spawn("schedcs")?;
 
     let mut task_ids: HashSet<u32> = HashSet::new();
     for name in ["main", "idle", "task_a", "task_b"] {
@@ -288,9 +274,7 @@ pub fn sched_context_switches_on_wire() -> Result<(), String> {
 /// `SpanStart` frames on the wire, and each carries its own `task_id`
 /// (matching the `ThreadRegister` for its name). Proves spans are
 /// correctly tagged to the task that emitted them.
-pub fn sched_spans_carry_task_id() -> Result<(), String> {
-    let mut h = Harness::spawn("schedspans")?;
-
+pub fn sched_spans_carry_task_id(h: &mut View) -> Result<(), String> {
     // First the ThreadRegisters so we know the id↔name mapping.
     let task_a_reg = h
         .wait_for(SEC * 20, is_thread_register_named("task_a"))
@@ -328,9 +312,7 @@ pub fn sched_spans_carry_task_id() -> Result<(), String> {
     Ok(())
 }
 
-pub fn heap_oom() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("heap-oom", "heap-oom")?;
-
+pub fn heap_oom(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
@@ -373,11 +355,9 @@ pub fn heap_oom() -> Result<(), String> {
 ///      crashing.
 ///   2. At least two more heartbeats arrive after the first failure
 ///      — the kernel didn't lock up; metrics keep flowing.
-pub fn frame_allocator_oom() -> Result<(), String> {
+pub fn frame_allocator_oom(h: &mut View) -> Result<(), String> {
     // Select the `frame-oom` workload so the heartbeat smoke leaks
     // 8192 frames/tick instead of doing alloc+free.
-    let mut h = Harness::spawn_with_workload("oom", "frame-oom")?;
-
     // (1) Wait up to 15s for the first non-zero alloc_failed_total.
     // ~4 heartbeats × ~1s each = ~4s; 15s gives generous slack.
     h.wait_for(SEC * 45, |f, strings| match f {
@@ -408,8 +388,7 @@ pub fn frame_allocator_oom() -> Result<(), String> {
 /// is in the higher-half range. If a future change silently leaves PC
 /// at identity (broken trampoline), the span never appears and this
 /// scenario times out.
-pub fn kernel_runs_at_higher_half() -> Result<(), String> {
-    let mut h = Harness::spawn("higherhalf")?;
+pub fn kernel_runs_at_higher_half(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 20, is_span_start_named("kernel.runs_at_higher_half"))
         .ok_or("no kernel.runs_at_higher_half SpanStart — PC isn't actually at higher-half post-trampoline")?;
     Ok(())
@@ -418,9 +397,7 @@ pub fn kernel_runs_at_higher_half() -> Result<(), String> {
 /// Boot sequence reaches the heartbeat loop: Hello → kernel.boot
 /// `SpanStart` → Dropped(0) (proves pre-init flush ran cleanly) →
 /// first kernel.heartbeat `SpanStart` (proves the timer IRQ is firing).
-pub fn boot_reaches_heartbeat() -> Result<(), String> {
-    let mut h = Harness::spawn("boot")?;
-
+pub fn boot_reaches_heartbeat(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 3, is_hello())
         .ok_or("no Hello frame within 3s")?;
     h.wait_for(SEC * 3, is_span_start_named("kernel.boot"))
@@ -438,11 +415,9 @@ pub fn boot_reaches_heartbeat() -> Result<(), String> {
 /// then converts the tick delta to nanoseconds and asserts it falls
 /// between 10 ms and 10 s — loose enough to survive QEMU stalls but
 /// tight enough to catch a runaway or frozen timer.
-pub fn heartbeat_cadence() -> Result<(), String> {
+pub fn heartbeat_cadence(h: &mut View) -> Result<(), String> {
     const MIN_NS: u128 = 10_000_000; // 10 ms
     const MAX_NS: u128 = 10_000_000_000; // 10 s
-
-    let mut h = Harness::spawn("cadence")?;
 
     h.wait_for(SEC * 20, is_hello())
         .ok_or("no Hello frame within 20s")?;
@@ -486,9 +461,7 @@ pub fn heartbeat_cadence() -> Result<(), String> {
 ///   2. Every span's `name_id` was registered earlier in the stream.
 ///      If the buffer dequeued out of order we'd see `SpanStarts`
 ///      referencing unknown ids.
-pub fn pre_init_order() -> Result<(), String> {
-    let mut h = Harness::spawn("preinit")?;
-
+pub fn pre_init_order(h: &mut View) -> Result<(), String> {
     // (1) First StringRegister we see should name kernel.boot.
     let first = h
         .wait_for(SEC * 20, is_string_register_named("kernel.boot"))
@@ -538,9 +511,7 @@ pub fn pre_init_order() -> Result<(), String> {
 /// at least 10 within 30s — proves the whole chain works:
 /// per-hart runqueue, cross-hart spawn enqueue, IPI wakeup, hart 1's
 /// trap+dispatch, `yield_now` on hart 1, task execution.
-pub fn smp_spawn_on_hart_1_runs() -> Result<(), String> {
-    let mut h = Harness::spawn("smp-spawn")?;
-
+pub fn smp_spawn_on_hart_1_runs(h: &mut View) -> Result<(), String> {
     // Threshold = 3 (not 10) because hart 1's timer is 1 Hz and the
     // probe ticks once per wfi-wake-yield cycle; 10 ticks needs ~10s
     // sim, which has no margin against the 10s budget. 3 still proves
@@ -576,9 +547,7 @@ pub fn smp_spawn_on_hart_1_runs() -> Result<(), String> {
 /// `Frame::SpanStart.hart_id` → collector) for *both* harts. Distinct
 /// from `smp-spawn-on-hart-1-runs` (which checks a metric counter, not
 /// the span's hart attribution).
-pub fn smp_spans_carry_hart_id() -> Result<(), String> {
-    let mut h = Harness::spawn("smp-spans")?;
-
+pub fn smp_spans_carry_hart_id(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::SpanStart { name_id, hart_id, .. } => {
             strings.get(name_id).map(String::as_str) == Some("task_a.tick")
@@ -618,9 +587,7 @@ pub fn smp_spans_carry_hart_id() -> Result<(), String> {
 /// 20s. (Complements `smp-spawn-on-hart-1-runs`, which proves
 /// *sustained* progress via the metric; this guards the *wake* edge
 /// itself, observed as a span.)
-pub fn smp_ipi_wakes_idle_hart() -> Result<(), String> {
-    let mut h = Harness::spawn("smp-ipi-idle")?;
-
+pub fn smp_ipi_wakes_idle_hart(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 20, |f, strings| match f {
         OwnedFrame::SpanStart { name_id, hart_id, .. } => {
             strings.get(name_id).map(String::as_str) == Some("hart1.probe")
@@ -647,9 +614,7 @@ pub fn smp_ipi_wakes_idle_hart() -> Result<(), String> {
 /// sets up sp + SATP + tp, hart 1 reaches higher-half + Rust, and
 /// the wire-format `HartRegister` variant carries through the
 /// collector.
-pub fn smp_secondary_hart_boots() -> Result<(), String> {
-    let mut h = Harness::spawn("smp-boot")?;
-
+pub fn smp_secondary_hart_boots(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 20, |f, _| {
         matches!(f, OwnedFrame::HartRegister { id: 1, .. })
     })
@@ -676,9 +641,7 @@ pub fn smp_secondary_hart_boots() -> Result<(), String> {
 ///
 /// Single-hart smoke: target is `current_hartid()`. Cross-hart
 /// delivery lands when secondary harts boot in step 8.
-pub fn ipi_self_wakeup() -> Result<(), String> {
-    let mut h = Harness::spawn("ipi-self")?;
-
+pub fn ipi_self_wakeup(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
@@ -723,9 +686,7 @@ pub fn ipi_self_wakeup() -> Result<(), String> {
 ///   2. `histogram_sum` eventually reaches at least the consumed
 ///      count we observed — proves the bin-on-consume path runs
 ///      for every sample, no drops.
-pub fn workload_cooperative_baseline() -> Result<(), String> {
-    let mut h = Harness::spawn("workload")?;
-
+pub fn workload_cooperative_baseline(h: &mut View) -> Result<(), String> {
     // Threshold = 200 (not 500). 200 samples still requires the
     // consumer to have been scheduled multiple times — far above
     // "ran zero times" — while converging in ~3-4s sim instead of
@@ -784,7 +745,7 @@ pub fn workload_cooperative_baseline() -> Result<(), String> {
 /// own hart, so it converges fast, and 1000 samples forces ~16 cross-
 /// hart batch handoffs per run — enough interleavings to give the
 /// memory-ordering hazard room to manifest.
-pub fn smp_producer_consumer_correctness() -> Result<(), String> {
+pub fn smp_producer_consumer_correctness(h: &mut View) -> Result<(), String> {
     // `burst=256` instead of the default 1. At burst=1 the workload is
     // cadence-bound (~64 samples/s — see post 19), so reaching 1000
     // samples takes ~16s. A burst makes the two harts' batches overlap,
@@ -793,8 +754,6 @@ pub fn smp_producer_consumer_correctness() -> Result<(), String> {
     // rather than near-serial 1 Hz blips. (`burst=` and `workload=` are
     // separate bootargs tokens; the kernel applies burst for any
     // workload.)
-    let mut h = Harness::spawn_with_workload("smp-workload", "smp burst=256")?;
-
     let frame = h
         .wait_for(SEC * 45, |f, strings| match f {
             OwnedFrame::Metric { name_id, value, .. } => {
@@ -847,9 +806,7 @@ pub fn smp_producer_consumer_correctness() -> Result<(), String> {
 /// workload is replaced by the storm; the gating also turns off the
 /// per-spawn `emit_thread_register` so no incidental BQL fence closes
 /// the window mid-storm. See `plans/residual-race-investigation.md`.
-pub fn spawn_storm() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("spawn-storm", "spawn-storm")?;
-
+pub fn spawn_storm(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
@@ -881,9 +838,7 @@ pub fn spawn_storm() -> Result<(), String> {
 ///      on its pickup path.
 ///
 /// See `plans/residual-race-investigation.md` appendix A.
-pub fn ipi_pong() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("ipi-pong", "ipi-pong")?;
-
+pub fn ipi_pong(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
@@ -930,9 +885,7 @@ pub fn ipi_pong() -> Result<(), String> {
 ///   2. `snitchos.mmu.shootdowns_received_total >= N - tolerance` —
 ///      hart 1 actually handled the shootdowns. (Per-iteration ack
 ///      means coalescing shouldn't happen here, unlike ipi-pong.)
-pub fn shootdown_storm() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("shootdown-storm", "shootdown-storm")?;
-
+pub fn shootdown_storm(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
@@ -986,9 +939,7 @@ pub fn shootdown_storm() -> Result<(), String> {
 ///
 /// Teeth are proven out of band by a deliberately-broken counterfactual
 /// (see `plans/v0.6-step-13-tlb-shootdown-visible.md`).
-pub fn smp_tlb_shootdown_visible() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("tlb-shootdown", "tlb-shootdown")?;
-
+pub fn smp_tlb_shootdown_visible(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
@@ -1038,9 +989,7 @@ pub fn smp_tlb_shootdown_visible() -> Result<(), String> {
 /// is the teeth: with the IPI working each handoff is microseconds; a
 /// silently-dropped wakeup would leave each side waiting on the 1 Hz
 /// timer, so 400 handoffs would take minutes and time out.
-pub fn smp_ping_pong_cadence() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("ping-pong", "ping-pong")?;
-
+pub fn smp_ping_pong_cadence(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
@@ -1082,9 +1031,7 @@ pub fn smp_ping_pong_cadence() -> Result<(), String> {
 /// Passing this proves: state flip to `Exited`, runqueue dispatch,
 /// asm `switch_into` correctness, and the exiting task's stack being
 /// abandoned cleanly (no scribble, no fault).
-pub fn sched_task_exits_cleanly() -> Result<(), String> {
-    let mut h = Harness::spawn("sched-exit")?;
-
+pub fn sched_task_exits_cleanly(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
@@ -1113,9 +1060,7 @@ pub fn sched_task_exits_cleanly() -> Result<(), String> {
 /// both counters stall mid-loop; the kernel either wedges or one
 /// task never advances. See `plans/residual-race-investigation.md`
 /// appendix C.
-pub fn mutex_storm() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("mutex-storm", "mutex-storm")?;
-
+pub fn mutex_storm(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
@@ -1160,9 +1105,7 @@ pub fn mutex_storm() -> Result<(), String> {
 /// Asserts `snitchos.deflake.virtio_storm_hart0_emits` reaches N
 /// (5 000) within 30 s. See `plans/residual-race-investigation.md`
 /// appendix C.
-pub fn virtio_storm() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("virtio-storm", "virtio-storm")?;
-
+pub fn virtio_storm(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
@@ -1190,9 +1133,7 @@ pub fn virtio_storm() -> Result<(), String> {
 ///      U→S boundary intact.
 ///   3. A `kernel.heartbeat` arrives after — hart 0 kept ticking while
 ///      hart 1 ran userspace.
-pub fn userspace_emits_telemetry() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("userspace", "userspace")?;
-
+pub fn userspace_emits_telemetry(h: &mut View) -> Result<(), String> {
     let frame = h
         .wait_for(SEC * 10, is_metric_named("snitchos.user.telemetry_total"))
         .ok_or(
@@ -1226,9 +1167,7 @@ pub fn userspace_emits_telemetry() -> Result<(), String> {
 ///      have succeeded and no counter would ever be emitted → fail).
 ///   2. A `kernel.heartbeat` arrives after — hart 0 stayed healthy while the
 ///      kernel firewalled (and parked) the offending hart-1 process.
-pub fn userspace_cannot_touch_kernel() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("userspace-fault", "userspace-fault")?;
-
+pub fn userspace_cannot_touch_kernel(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 10, is_metric_named("snitchos.user.faults_total"))
         .ok_or(
             "no snitchos.user.faults_total within 10s — a U-mode read of a kernel \
@@ -1255,9 +1194,7 @@ pub fn userspace_cannot_touch_kernel() -> Result<(), String> {
 ///      "succeeded" and no denial counter would ever emit → fail).
 ///   2. A `kernel.heartbeat` arrives after — a denied cap is a clean
 ///      refusal, not a wedge.
-pub fn userspace_cap_denied() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("userspace", "userspace")?;
-
+pub fn userspace_cap_denied(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 10, is_metric_named("snitchos.cap.denied_total"))
         .ok_or(
             "no snitchos.cap.denied_total within 10s — an invocation of an \
@@ -1278,9 +1215,7 @@ pub fn userspace_cap_denied() -> Result<(), String> {
 /// path, so any userspace workload exercises it; we assert the counter
 /// reaches the wire (it only emits if `Process::bootstrap` + the grant
 /// snitch actually ran).
-pub fn userspace_grant_snitched() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("userspace", "userspace")?;
-
+pub fn userspace_grant_snitched(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 10, is_metric_named("snitchos.cap.grants_total"))
         .ok_or(
             "no snitchos.cap.grants_total within 10s — the kernel granted the \
@@ -1296,9 +1231,7 @@ pub fn userspace_grant_snitched() -> Result<(), String> {
 /// `wfi`s) — making the workload wfi-bounded rather than core-pegging.
 /// Asserts the exit is snitched (`snitchos.user.exits_total`) and the
 /// kernel keeps heartbeating (a clean exit, not a wedge).
-pub fn userspace_process_exits() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("userspace", "userspace")?;
-
+pub fn userspace_process_exits(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 10, is_metric_named("snitchos.user.exits_total"))
         .ok_or(
             "no snitchos.user.exits_total within 10s — the user process did not \
@@ -1324,9 +1257,7 @@ pub fn userspace_process_exits() -> Result<(), String> {
 ///      resumed U-mode at the instruction after the `ecall`.
 ///   3. `snitchos.user.exits_total` after the resume — `hello` reached
 ///      `exit()`, which follows the `yield_now()`, so control flowed past it.
-pub fn userspace_yield_round_trips() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("yieldrt", "userspace")?;
-
+pub fn userspace_yield_round_trips(h: &mut View) -> Result<(), String> {
     let user_id = match h
         .wait_for(SEC * 20, is_thread_register_named("user_main"))
         .ok_or("no ThreadRegister for 'user_main' within 20s")?
@@ -1374,9 +1305,7 @@ pub fn userspace_yield_round_trips() -> Result<(), String> {
 /// the seed of the host-reconstructed capability derivation tree (v0.8).
 /// Asserts the event reaches the wire with object `TelemetrySink` and `EMIT`
 /// rights.
-pub fn userspace_cap_granted_event() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("userspace", "userspace")?;
-
+pub fn userspace_cap_granted_event(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 10, is_cap_granted_telemetry())
         .ok_or(
             "no CapEvent::Granted{TelemetrySink, EMIT} within 10s — the kernel \
@@ -1392,9 +1321,7 @@ pub fn userspace_cap_granted_event() -> Result<(), String> {
 /// spans from U-mode (consumed by the span syscalls). Asserts the grant
 /// reaches the wire as a `CapEvent::Granted{SpanSink, EMIT}`, proving the
 /// capability exists before any program tries to use it.
-pub fn userspace_spansink_granted() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("userspace", "userspace")?;
-
+pub fn userspace_spansink_granted(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 10, is_cap_granted_span())
         .ok_or(
             "no CapEvent::Granted{SpanSink, EMIT} within 10s — the bootstrap grant \
@@ -1410,9 +1337,7 @@ pub fn userspace_spansink_granted() -> Result<(), String> {
 /// cursor. Asserts a `SpanStart` for "hello.work" attributed to the
 /// `user_main` task — exercising the whole `SpanOpen` path: cap check →
 /// `copy_from_user` → intern → emit, with kernel-stamped attribution.
-pub fn userspace_emits_span() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("uspan", "userspace")?;
-
+pub fn userspace_emits_span(h: &mut View) -> Result<(), String> {
     let user_id = match h
         .wait_for(SEC * 20, is_thread_register_named("user_main"))
         .ok_or("no ThreadRegister for 'user_main' within 20s")?
@@ -1456,9 +1381,7 @@ pub fn userspace_emits_span() -> Result<(), String> {
 /// invoked as a telemetry sink). The kernel refuses — and snitches a
 /// `SyscallRefused{CapWrongObject}` so the denial is a labelled wire event,
 /// not a silent missing result. Asserts that event, attributed to `user_main`.
-pub fn userspace_refusal_snitched() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("urefuse", "userspace")?;
-
+pub fn userspace_refusal_snitched(h: &mut View) -> Result<(), String> {
     let user_id = match h
         .wait_for(SEC * 20, is_thread_register_named("user_main"))
         .ok_or("no ThreadRegister for 'user_main' within 20s")?
@@ -1486,9 +1409,7 @@ pub fn userspace_refusal_snitched() -> Result<(), String> {
 /// so the kernel must refuse the surplus with `SyscallRefused{Quota}` rather
 /// than leak unbounded `'static` names or panic. Asserts the quota refusal and
 /// that the kernel keeps heartbeating after.
-pub fn userspace_quota_refused() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("uquota", "userspace-span-flood")?;
-
+pub fn userspace_quota_refused(h: &mut View) -> Result<(), String> {
     let user_id = match h
         .wait_for(SEC * 20, is_thread_register_named("user_span_flood"))
         .ok_or("no ThreadRegister for 'user_span_flood' within 20s")?
@@ -1519,9 +1440,7 @@ pub fn userspace_quota_refused() -> Result<(), String> {
 /// the worker registers, its progress counter climbs, and it emits repeated
 /// `worker.tick` spans attributed to it — the userspace successor to the
 /// kernel-mode `task_a`/`task_b`, cooperating via the `yield` syscall.
-pub fn workers_make_progress() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("workers", "workers")?;
-
+pub fn workers_make_progress(h: &mut View) -> Result<(), String> {
     let worker_id = match h
         .wait_for(SEC * 20, is_thread_register_named("worker"))
         .ok_or("no ThreadRegister for 'worker' within 20s")?
@@ -1561,9 +1480,7 @@ pub fn workers_make_progress() -> Result<(), String> {
 /// allocator must `map_anon` more frames from the kernel. It fills and sums the
 /// buffer, emitting the sum (524288) only if every byte was allocated, written,
 /// and readable. Asserts that marker and a surviving heartbeat.
-pub fn heap_grows_on_demand() -> Result<(), String> {
-    let mut h = Harness::spawn_with_workload("heapgrow", "heap-grow")?;
-
+pub fn heap_grows_on_demand(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 10, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
