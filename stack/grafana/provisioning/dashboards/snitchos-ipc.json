@@ -1,0 +1,228 @@
+{
+  "tags": [
+    "snitchos"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "annotations": {
+    "list": []
+  },
+  "title": "SnitchOS — IPC",
+  "uid": "snitchos-ipc",
+  "id": null,
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "How to read this",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "## v0.9 — IPC over capabilities\n\nTwo userspace processes rendezvous over a capability-gated synchronous endpoint (`workload=ipc`). The **headline** is the cross-process span trace: the **Traces** panel below lists traces named `ipc.*` — click one to open the tree, where you'll see\n\n```\nipc.send      (thread.name = ipc_sender)   ← process A\n└─ ipc.recv   (thread.name = ipc_receiver) ← process B\n```\n\n`ipc.recv` is a **child** of `ipc.send` even though they live in different processes — the kernel populated the trace context across the rendezvous. The `thread.name` attribute (from the `ThreadRegister` frames) is what tells you they're distinct processes.\n\nThe demo sends **one** message, so the trace appears **once** shortly after boot and then the counters hold steady. To run it: `cargo xtask stack up`, then `cargo xtask boot --workload ipc` and `cargo xtask collect` in two terminals."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Messages delivered (total)",
+      "description": "Cumulative IPC rendezvous — one per message that crossed sender→receiver. The one-shot demo reaches 1.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_ipc_messages_total",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Blocks (total)",
+      "description": "Cumulative times a send/receive parked its caller for want of a peer — the synchronous-rendezvous backpressure. One side blocks first; reaches 1.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_ipc_blocks_total",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Messages & blocks (cumulative)",
+      "description": "The two IPC counters over time. Flat after the one-shot demo's single rendezvous; would climb under a looping workload.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "snitchos_ipc_messages_total",
+          "legendFormat": "messages",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        },
+        {
+          "refId": "B",
+          "expr": "snitchos_ipc_blocks_total",
+          "legendFormat": "blocks",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "interval": "5s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "IPC traces — click a row to open the cross-process span tree",
+      "description": "TraceQL search for spans named ipc.* (Tempo). Each row is a trace; clicking the Trace ID opens the tree where ipc.recv nests under ipc.send across the two processes.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "query": "{ name =~ \"ipc.*\" }",
+          "limit": 20,
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    }
+  ]
+}

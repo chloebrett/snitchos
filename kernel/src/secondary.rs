@@ -193,13 +193,18 @@ pub extern "C" fn secondary_main(_mhartid: usize, hartid: usize) -> ! {
         kernel_core::sched::TaskState::Running,
     );
 
-    // SMP-cooperative idle loop: yield first (picks up any queued
-    // task), then sleep until the next timer IRQ or an IPI breaks
-    // wfi. Each wake bumps SECONDARY_WFI_COUNT for the
+    // SMP-cooperative idle loop: yield first (picks up any queued task), then
+    // sleep until the next timer IRQ or an IPI breaks wfi. Only `wfi` when the
+    // runqueue is genuinely empty — `yield_now` can return to us while another
+    // task is still `Ready` (round-robin/aging rotated back here), and sleeping
+    // then would strand that task (e.g. a just-woken IPC receiver) until the
+    // next timer tick. Each real sleep bumps SECONDARY_WFI_COUNT for the
     // `snitchos.smp.secondary_wfi_total` heartbeat metric.
     loop {
         crate::sched::yield_now();
-        unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)); }
-        SECONDARY_WFI_COUNT.fetch_add(1, Ordering::Relaxed);
+        if !crate::sched::has_ready_tasks() {
+            unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)); }
+            SECONDARY_WFI_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }

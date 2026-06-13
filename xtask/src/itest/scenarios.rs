@@ -1179,6 +1179,56 @@ pub fn ipc_telemetry(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.9 wakeup-latency guard (`workload=ipc`): after the rendezvous wakes the
+/// receiver, it must run **promptly** — not wait for the next ~1s timer tick.
+/// The bug this guards: an idle loop that `wfi`s while a just-woken task sits
+/// `Ready` on its runqueue, stranding it until a timer IRQ breaks `wfi`.
+/// Asserts `ipc.recv` opens within 100ms of `ipc.send` (it was ~1s before the
+/// idle-loop fix). Reads `timebase_hz` from `Hello` so the budget is in real
+/// time regardless of the clock rate.
+pub fn ipc_wakeup_is_prompt(h: &mut View) -> Result<(), String> {
+    let hello = h
+        .wait_for(SEC * 20, |f, _| matches!(f, OwnedFrame::Hello { .. }))
+        .ok_or("no Hello frame within 20s")?;
+    let timebase_hz = match hello {
+        OwnedFrame::Hello { timebase_hz, .. } => timebase_hz,
+        _ => return Err("matched non-Hello (impossible)".to_string()),
+    };
+
+    let send = h
+        .wait_for(SEC * 30, |f, strings| {
+            matches!(f, OwnedFrame::SpanStart { name_id, .. }
+                if strings.get(name_id).map(String::as_str) == Some("ipc.send"))
+        })
+        .ok_or("no SpanStart for 'ipc.send' within 30s")?;
+    let t_send = match send {
+        OwnedFrame::SpanStart { t, .. } => t,
+        _ => return Err("matched non-SpanStart (impossible)".to_string()),
+    };
+
+    let recv = h
+        .wait_for(SEC * 30, |f, strings| {
+            matches!(f, OwnedFrame::SpanStart { name_id, .. }
+                if strings.get(name_id).map(String::as_str) == Some("ipc.recv"))
+        })
+        .ok_or("no SpanStart for 'ipc.recv' within 30s")?;
+    let t_recv = match recv {
+        OwnedFrame::SpanStart { t, .. } => t,
+        _ => return Err("matched non-SpanStart (impossible)".to_string()),
+    };
+
+    let gap_ticks = t_recv.saturating_sub(t_send);
+    let budget_ticks = timebase_hz / 10; // 100 ms
+    if gap_ticks > budget_ticks {
+        let gap_ms = (gap_ticks * 1000) / timebase_hz;
+        return Err(format!(
+            "ipc.recv opened {gap_ms}ms after ipc.send (budget 100ms) — the woken \
+             receiver waited for a timer tick because the idle loop wfi'd past ready work"
+        ));
+    }
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

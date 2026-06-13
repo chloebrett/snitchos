@@ -26,13 +26,15 @@ use crate::span;
 pub static TASK_A_LOOPS: AtomicU64 = AtomicU64::new(0);
 pub static TASK_B_LOOPS: AtomicU64 = AtomicU64::new(0);
 
-/// Idle thread. The "what runs when nothing else wants the CPU"
-/// task. `wfi` sleeps until any interrupt arrives (timer being the
-/// only one v0.5 cares about); the subsequent `yield_now` hands
-/// control to whoever is now ready.
+/// Idle thread. The "what runs when nothing else wants the CPU" task. Only
+/// `wfi` when the runqueue is genuinely empty — if a task is `Ready` (idle was
+/// picked while real work waits), sleeping would strand it until the next timer
+/// IRQ; instead fall straight through to `yield_now` and hand it the CPU.
 pub extern "C" fn idle_entry() -> ! {
     loop {
-        unsafe { asm!("wfi") };
+        if !sched::has_ready_tasks() {
+            unsafe { asm!("wfi") };
+        }
         sched::yield_now();
     }
 }

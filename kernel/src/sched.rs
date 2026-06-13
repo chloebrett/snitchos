@@ -375,6 +375,15 @@ pub fn current_task_id() -> TaskId {
     TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed))
 }
 
+/// Whether this hart's runqueue holds any `Ready` task (the caller, running, is
+/// off-queue). Idle loops check this before `wfi`: a hart must never sleep
+/// while it has runnable work, or a just-woken task (e.g. an IPC receiver the
+/// rendezvous made `Ready`) is stranded until the next timer IRQ breaks `wfi`.
+pub fn has_ready_tasks() -> bool {
+    let me = crate::percpu::current_hartid();
+    SCHEDULER.lock().runqueue_depth(me) > 0
+}
+
 /// Associate the currently-running task with the user address space it is
 /// about to enter: its root page-table PA and its [`Process`]. Called by
 /// `user::run` after building the process but before `enter`, so that when
