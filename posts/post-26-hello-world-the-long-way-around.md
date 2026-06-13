@@ -1,0 +1,66 @@
+# Post 26 — Hello, world, the long way around
+
+- between v0.7b and v0.8, the userspace runtime grew up. it got a heap, a real `fn main()`, a heap that *grows*, a `std`-shaped facade, and — the last brick — `println!`. none of it is a new milestone; it's the consolidation arc that makes the next program something you'd actually want to write. and it ends where the whole project started: the very first thing this kernel ever did, back in post 1, was print `i am alive` one character at a time. now a *userspace* program says hello — and the hello crosses a privilege boundary, lands on the wire as a structured event, and gets attributed to the task that said it. same two words, a whole operating system in between.
+
+## where the runtime was
+
+- end of v0.7b: a userspace program was a `#![no_std]` crate that hand-held everything. no allocator, so no `Vec`, no `String`, no `format!` — `span-flood` needed a *static literal table* of names because it couldn't build one. the entry point was a raw `_start`. the only way to make a sound was to invoke a capability and let the kernel emit a metric.
+- that's enough to prove the capability model. it's nowhere near enough to *write programs in*. so this arc is five small steps, each one filling in a thing you'd miss the instant you sat down to code against it.
+
+## a heap, for free
+
+- the first step cost the kernel nothing. a userspace heap is just a static byte array in `.bss` — and the ELF loader already maps `.bss` (it's how the stack works). drop a `#[global_allocator]` over it, `init` it in the crt0 before `main` runs, and programs get `alloc`: `Vec`, `String`, `Box`, `format!`.
+- the nice part is the symmetry. the *kernel* bootstrapped its heap exactly this way back in v0.4 — a fixed static region first, grow later. userspace gets the same staged story, one layer up. and `.bss` is free in the file image: `filesz = 0`, so a 64 KiB arena costs zero bytes on disk and 64 KiB of zeroed pages at load.
+- immediate payoff: `hello` now *names its span with a `format!`ed string*. that's the whole heap proven end-to-end in one line — `String` → `copy_from_user` across the boundary → intern → `SpanStart` on the wire.
+
+## deleting the macro
+
+- next, a real `fn main()`. i built it first as a proc-macro — `#[snitchos_user::main]` — because that's the embedded-Rust reflex (`cortex-m-rt`'s `#[entry]`, `#[embassy::main]`). it worked. i didn't like it. a proc-macro crate is a lot of machinery to hide three lines, and it makes the entry point *magic* instead of *legible*.
+- so i deleted it. the runtime just calls an `extern "C" fn main()` directly:
+
+```rust
+#[unsafe(no_mangle)]
+extern "C" fn main() {
+    snitchos_std::println!("hello from userspace");
+}
+```
+
+- the `#[no_mangle] extern "C"` is the honest tax of stable `no_std` — the `main` lang item needs std or nightly, and i'm not paying for either yet. but everything *else* looks like a normal `main`. it takes nothing; if you want your environment you call a library function for it. that's not a SnitchOS invention — it's how `std` already works. you call `std::env::args()`; you don't receive it as a parameter. the crt0 stashes the startup capabilities in runtime globals, and `snitchos_user::tracer()` / `telemetry()` read them back. the magic moved from a macro you can't see into a function call you can.
+
+## a heap that grows — mmap, not sbrk
+
+- a fixed 64 KiB arena is fine until it isn't. the question was *which* growth primitive, and the obvious answer is the wrong one. `sbrk`/`brk` — move a single "program break" pointer — is the abstraction every tutorial reaches for, and it's legacy: musl doesn't use it at all, and it can't express anything but one contiguous heap.
+- the modern, and for this project the *load-bearing*, primitive is `mmap`: `MapAnon(bytes) → base`. it returns a region. regions are individually addressable, individually unmappable, and — the part that matters here — **capability-shaped**. a returned region is exactly the thing that becomes a `MemoryRegion` capability later; the `cap::Object` enum already has the slot reserved. `sbrk` would have been a primitive i'd have to delete; `mmap` is one i'll grow into.
+- the kernel side: `MapAnon` maps fresh zeroed frames into the process's own page-table root, bumps `Process.heap_top`, caps at 16 MiB, and refuses with a snitched `SyscallRefused { OutOfMemory }` if you blow the cap. refuse, don't panic — a userspace program asking for too much is not a kernel bug.
+- userspace swapped allocators to match: out went `linked_list_allocator` (single-region), in came `talc` (multi-region). `talc`'s `OomHandler` is the grow hook — when an allocation can't be served, it calls `map_anon` for a fresh region and `claim`s it. and it's **lazy**: no region is mapped at startup; the *first allocation* triggers the *first* `map_anon`.
+- which, it turns out, is exactly how `malloc` works. i'd half-assumed libc's allocator was something more clever; it isn't. glibc/musl `malloc` owns a userspace allocator and, when it runs dry, reaches into the kernel for more address space (`mmap`/`brk`) and carves *that* up itself. the kernel hands out coarse pages; the allocator does the fine-grained bookkeeping. SnitchOS userspace now has the same two-tier shape — `talc` does the carving, `MapAnon` is the wholesale supply.
+- the `heap-grow` test program allocates 512 KiB (well past one region), writes a pattern, sums it, and emits the sum. the scenario asserts `524288`. the grow happened, mid-run, driven by an OOM the program never noticed.
+
+## "we support std" (most of it is `todo!`)
+
+- with a growable heap, the north star comes into view: a `std`-compatible userspace. the real thing is a custom compiler target plus a nightly `build-std` plus a port of std's `sys` layer — a v1.x undertaking. but there's a stepping stone that ships *today*.
+- `snitchos-std` is a std-*shaped* facade over `core` + `alloc` + `snitchos-user`. programs stay `#![no_std]`, but they get to write std-idiomatic code wherever it's actually wired. and the trick that makes it useful as a *map*: the parts that aren't wired yet are literally `todo!("…why…")`. reading the crate top to bottom *is* the "what's left of std" checklist.
+  - **wired:** `thread::yield_now` (→ the `Yield` syscall), `process::exit`/`abort` (→ `Exit`), and the free `core`/`alloc` re-exports — `Vec`, `String`, `format!`, `BTreeMap`, `Arc`, `Duration`.
+  - **`todo!`:** `time::Instant` (wants a read-clock syscall), `thread::spawn`/`sleep`, `sync::Mutex`, `collections::HashMap` (needs a seed) — and, encoding the *capability* constraint rather than POSIX, `fs`/`net`/`env` as *capability-rooted or unsupported*.
+- that last bullet is the one i care most about getting right, and it's why this isn't just "port std." `std::fs::File::open("/etc/passwd")` is ambient authority by construction — a global namespace addressed by a string, no capability held. that's precisely what this kernel exists to reject. so the facade keeps std's *types* (`File`, `Path`, `Read`/`Write`) and drops its *ambient semantics*: a path is a name resolved against a capability-rooted directory handle (`openat`, not `open`), and the inherently-ambient operations — absolute paths, `canonicalize`, `current_dir` — return `Unsupported`. this isn't a compromise i invented; it's the exact corner `wasm32-wasi` already turned. WASI modules get preopened directory handles at startup and resolve paths relative to them. Rust already ships that target. "no POSIX compat" turns out to be *freeing*: i owe programs the types, not the ambient behaviour.
+
+## the second hello world
+
+- the first `todo!` i filled was the obvious one: `println!`. and pulling on it is the full-circle moment that prompted this whole post.
+- **post 1, the first thing this kernel ever did:** `print!` and `println!` over the UART, by `ecall`ing into machine mode and pushing one byte at a time. no protocol. no decoder. just characters out a serial port so i could see `i am alive`. it was the *human debug channel* — raw, un-snitched, for my eyes only. that channel still exists; it's the NS16550A UART, and it's still how i print when i'm chasing a bug at 1 a.m.
+- **now, `println!` from userspace** takes the long way around. `snitchos_std::println!` formats into a heap `String`, then calls `DebugWrite` — a syscall (abi 6). the kernel `copy_from_user`s the bytes *across the U/S isolation boundary* (which means flipping `sstatus.SUM`, because S-mode can't read U pages by default — printing is the cheapest possible exercise of that machinery), and emits a `Frame::Log { msg, task_id, t, hart_id }` on the **virtio-console** — the *structured, snitched* channel. the collector decodes it. it's attributed to the task that printed it. it's an event you can assert on in a test, which is exactly what `userspace-prints` does.
+- so the same two words travelled two completely different roads. post 1: a privileged loop shoving bytes at a serial register, invisible to everything. post 26: an unprivileged program, holding a heap it grew on demand, calling a syscall that crosses a hardware privilege boundary, producing a structured telemetry frame that names who said it. *stdout became telemetry.* that gap — from "a char goes out a port" to "an authority-checked, attributed, observable event" — is the whole project in one line of output.
+- and `DebugWrite` is deliberately *not* a capability. printing isn't an authority you hold, same as `Yield` — anyone in U-mode can do it. the thing being snitched here isn't *permission*, it's the *content*: every line a userspace program prints is on the wire, attributable, forever. on a box whose entire premise is "you can watch everything," stdout was never going to be a private side channel.
+
+## what i learned
+
+- **the cheapest abstraction is the one you grow into, not the one you delete.** `sbrk` would have worked today and been a liability tomorrow. `mmap` returns a region, and a region is a capability waiting to happen. picking the primitive that *points at where you're going* costs nothing now and saves a deletion later.
+- **`malloc` is less magic than i thought.** a userspace allocator that reaches into the kernel for coarse pages and carves them up itself isn't a clever libc secret — it's the obvious two-tier design, and now i've built the small version of it.
+- **`todo!()` is a map.** "we support std, but most of it panics" sounds like a joke and is actually the clearest possible backlog. every stub is a named, located, compile-checked piece of remaining work. the facade isn't pretending to be std; it's *itemising the distance* to std.
+- **a facade is a real stepping stone, not a detour.** the `sys`-layer mapping i wrote for `snitchos-std` — `yield_now → Yield`, `println → DebugWrite`, `fs → capability-rooted` — is the *same mapping* the eventual real-target std backend needs. nothing here gets thrown away; it gets re-pointed.
+- **the bookend was always there.** i didn't plan for `println!` to be the milestone where userspace closes the loop on post 1. but the first instinct when a new execution context comes alive is *make it say something* — and the distance between how it said it the first time and how it says it now is the most honest progress metric i've got.
+
+## what's next
+
+- **v0.8: preemption.** so far every context switch in this kernel has been *voluntary* — a task calls `yield_now` and politely hands over. a timer interrupt that deschedules a task mid-computation is a different animal: it has to save the *full* trap frame, not just callee-saved registers, and it has to do it from inside an interrupt handler. that's the step that turns "cooperative threads" into "an actual scheduler," and it's the substrate IPC (v0.9) blocks and wakes on top of.
+- the userspace runtime is finally a place you'd want to write a program. next, the kernel underneath it learns to take the CPU back without being asked.

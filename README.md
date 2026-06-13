@@ -107,6 +107,7 @@ cargo xtask test               # run all host-side unit tests (kernel-core, prot
 cargo xtask itest              # run kernel integration tests in QEMU (unit tests run first; --skip-unit-tests to bypass)
 cargo xtask itest <scenario>   # run one scenario by name
 cargo xtask itest --tag userspace  # run all scenarios carrying a tag
+cargo xtask itest --shared     # group scenarios by workload; one kernel boot per group (faster)
 cargo xtask itest --repeat N   # run the suite N times back-to-back; aggregate flake report
 cargo xtask baseline show      # inspect the flake baseline (also: promote/discard/recover/adopt/prune/export/push)
 cargo xtask debug              # build kernel + run QEMU paused with GDB stub on :1234
@@ -148,7 +149,8 @@ Scenarios (25):
 Useful flags:
 
 - `--repeat N` — run the whole suite N times back-to-back, then print an aggregate flake table listing scenarios that failed at least once.
-- `--tag <tag>` — run every scenario carrying `<tag>` (union). Repeatable / comma-separated: `--tag frame --tag heap` or `--tag frame,heap` runs scenarios tagged either — same comma-means-also convention as the positional scenario list. An unknown tag errors with the known set; can't be combined with a named scenario. Tags are set per-row in the `scenarios!` table in `xtask/src/itest.rs` (`boot`, `frame`, `heap`, `oom`, `sched`, `smp`, `ipi`, `workload`, `stress`, `userspace`).
+- `--tag <tag>` — run every scenario carrying `<tag>` (union). Repeatable / comma-separated: `--tag frame --tag heap` or `--tag frame,heap` runs scenarios tagged either — same comma-means-also convention as the positional scenario list. An unknown tag errors with the known set; can't be combined with a named scenario. Tags are set per-row in the `catalog!` table in `xtask/src/itest.rs` (`boot`, `frame`, `heap`, `oom`, `sched`, `smp`, `ipi`, `workload`, `stress`, `userspace`).
+- `--shared` — shared-boot mode: group scenarios by their `workload` and run each group against a *single* kernel boot instead of one boot per scenario (the ~19 default-demo and the userspace scenarios each boot QEMU once). Each scenario reads the same recorded frame stream through its own cursor. Off by default — the flake gate (`--repeat 10`) and baselines want the per-scenario isolation of separate boots. Composes with `--tag`/`--skip`. Cuts total QEMU boots (CPU time ~40% on a full run); see [plans/itest-shared-boot-mode.md](plans/itest-shared-boot-mode.md).
 - `--keep-existing-qemus` — don't `pkill` stale QEMUs at start (rare; useful if you want a concurrent debug QEMU).
 - `--skip-unit-tests` — bypass the unit-test prerequisite.
 
