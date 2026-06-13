@@ -44,6 +44,30 @@ pub struct Candidate {
     pub enqueued_tick: u64,
 }
 
+/// Whether the timer should preempt the running task (v0.8b, priority-aware).
+///
+/// Returns `true` only if some ready task has an *effective* ([`aged_priority`])
+/// level `>=` the running task's `current_level`. The timer thus time-slices
+/// *within* a priority level (an equal-priority peer triggers a switch) and
+/// honours a higher-priority arrival, but never **demotes** a higher-priority
+/// task to a lower-priority one — that would be priority inversion. Aging is
+/// what lets a long-starved low task eventually reach the running level and so
+/// preempt even a higher-priority CPU hog.
+///
+/// `current_level` is the running task's base level (it's on-CPU, so wait = 0
+/// and `aged == base`). Pure; the kernel passes its ready queue + step.
+#[must_use]
+pub fn should_preempt(
+    current_level: u8,
+    ready: impl IntoIterator<Item = Candidate>,
+    now: u64,
+    step: u64,
+) -> bool {
+    ready
+        .into_iter()
+        .any(|c| aged_priority(c.base, now.saturating_sub(c.enqueued_tick), step) >= current_level)
+}
+
 /// Choose the next task to run from the ready set: the one with the highest
 /// *effective* ([`aged_priority`]) level, ties broken by longest wait (smallest
 /// `enqueued_tick`) so equal-priority tasks round-robin fairly. `None` if the
@@ -449,5 +473,40 @@ mod tests {
             cand(2, Priority::Low, 95),   // waited 5 < step → no boost → Low
         ];
         assert_eq!(pick_next(cs, 100, 10), Some(TaskId(1)));
+    }
+
+    const HIGH: u8 = Priority::High as u8;
+    const NORMAL: u8 = Priority::Normal as u8;
+
+    #[test]
+    fn no_preempt_when_nothing_is_ready() {
+        // Quantum expired but no other task wants the CPU — keep running.
+        assert!(!should_preempt(NORMAL, core::iter::empty(), 100, 10));
+    }
+
+    #[test]
+    fn preempt_for_a_higher_priority_ready_task() {
+        assert!(should_preempt(NORMAL, [cand(1, Priority::High, 100)], 100, 10));
+    }
+
+    #[test]
+    fn preempt_for_an_equal_priority_ready_task() {
+        // Same level → time-slice (round-robin within the level).
+        assert!(should_preempt(NORMAL, [cand(1, Priority::Normal, 100)], 100, 10));
+    }
+
+    #[test]
+    fn no_preempt_for_only_lower_priority_ready_tasks() {
+        // The running task outranks everything ready — the timer must NOT
+        // demote it across a level. This is the anti-inversion guarantee.
+        assert!(!should_preempt(HIGH, [cand(1, Priority::Low, 100), cand(2, Priority::Normal, 100)], 100, 10));
+    }
+
+    #[test]
+    fn preempt_once_a_low_task_has_aged_up_to_the_running_level() {
+        // A Low task that has waited long enough to age to the running task's
+        // level may preempt it — this is what lets aging rescue a starved task
+        // even from a higher-priority CPU hog. Low base, waited 2 steps → High.
+        assert!(should_preempt(HIGH, [cand(1, Priority::Low, 80)], 100, 10));
     }
 }

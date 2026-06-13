@@ -82,6 +82,11 @@ pub enum WorkloadKind {
     /// and the peer starves; the timer-driven preemption (Step 4) is what lets
     /// the peer make progress.
     UserHog,
+    /// v0.8b priority demo: a `High`-priority and a `Low`-priority cooperative
+    /// worker share one hart. The High worker runs far more often (priority
+    /// respected), but the Low worker still makes progress (aging prevents
+    /// starvation) — "ordered, but fair."
+    Priorities,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -141,6 +146,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "workers" => Some(WorkloadKind::Workers),
             "heap-grow" => Some(WorkloadKind::HeapGrow),
             "user-hog" => Some(WorkloadKind::UserHog),
+            "priorities" => Some(WorkloadKind::Priorities),
             _ => None,
         })
 }
@@ -234,6 +240,11 @@ mod tests {
     #[test]
     fn selects_user_hog() {
         assert_eq!(select("workload=user-hog"), Some(WorkloadKind::UserHog));
+    }
+
+    #[test]
+    fn selects_priorities() {
+        assert_eq!(select("workload=priorities"), Some(WorkloadKind::Priorities));
     }
 
     #[test]

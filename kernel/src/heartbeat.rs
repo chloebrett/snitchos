@@ -415,6 +415,7 @@ fn emit_storm_metrics(m: &Metrics, count: i64) {
         | Some(WorkloadKind::UserspaceSpanFlood)
         | Some(WorkloadKind::Workers)
         | Some(WorkloadKind::HeapGrow)
-        | Some(WorkloadKind::UserHog) => {}
+        | Some(WorkloadKind::UserHog)
+        | Some(WorkloadKind::Priorities) => {}
     }
 }

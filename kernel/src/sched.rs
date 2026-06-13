@@ -24,8 +24,8 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use protocol::SwitchReason;
 
 use kernel_core::sched::{
-    address_space_switch, quantum_expired, Candidate, pick_next, Priority, Runqueue, TaskId,
-    TaskState,
+    address_space_switch, pick_next, quantum_expired, should_preempt, Candidate, Priority, Runqueue,
+    TaskId, TaskState,
 };
 use kernel_core::span::SpanCursor;
 
@@ -722,7 +722,26 @@ pub fn maybe_preempt(from_user: bool) {
     }
     let now = crate::tracing::timestamp();
     let entry = CURRENT_TASK_ENTRY_TICK.this_cpu().load(Ordering::Relaxed);
-    if quantum_expired(entry, now, QUANTUM_TICKS) {
+    if !quantum_expired(entry, now, QUANTUM_TICKS) {
+        return;
+    }
+    // Priority-aware (v0.8b): only preempt if a ready task is of equal-or-higher
+    // *effective* priority than the running one. The timer time-slices within a
+    // level and yields to a higher arrival, but never demotes a higher-priority
+    // task to a lower one (that would be priority inversion). Aging lets a
+    // long-starved low task reach the running level and so preempt even a hog.
+    let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
+    let me = crate::percpu::current_hartid();
+    let due = {
+        let sched = SCHEDULER.lock();
+        let current_level = sched
+            .tasks
+            .iter()
+            .find(|t| t.id == current_id)
+            .map_or(Priority::Normal as u8, |t| t.priority as u8);
+        should_preempt(current_level, sched.runqueues[me].iter(), now, AGING_STEP_TICKS)
+    };
+    if due {
         reschedule(SwitchReason::Preempt);
     }
 }

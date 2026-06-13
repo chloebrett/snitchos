@@ -158,6 +158,7 @@ catalog! {
     wfi "heap-grows-on-demand"            scenarios::heap_grows_on_demand           [userspace]  {"heap-grow"};
     cpu "preempt-runaway-user-task"       scenarios::preempt_runaway_user_task      [userspace]  {"user-hog"};
     cpu "preemption-telemetry"            scenarios::preemption_telemetry           [userspace]  {"user-hog"};
+    cpu "priorities-ordered-but-fair"     scenarios::priorities_ordered_but_fair    [userspace]  {"priorities"};
 }
 
 /// Set the process-wide failure-capture transcript depth. Call once at

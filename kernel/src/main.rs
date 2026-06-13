@@ -352,7 +352,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::UserspaceSpanFlood)
         | Some(WorkloadKind::Workers)
         | Some(WorkloadKind::HeapGrow)
-        | Some(WorkloadKind::UserHog) => {}
+        | Some(WorkloadKind::UserHog)
+        | Some(WorkloadKind::Priorities) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -402,6 +403,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::Workers
                     | WorkloadKind::HeapGrow
                     | WorkloadKind::UserHog
+                    | WorkloadKind::Priorities
             )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
@@ -464,6 +466,21 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             user::init_metric();
             let _ = sched::spawn_on(1, "user_hog", user::user_hog_main_entry);
             let _ = sched::spawn_on(1, "worker_a", user::worker_a_main_entry);
+        }
+        // Priority demo (v0.8b): a High-priority CPU-bound `greedy` task (the
+        // `user_hog` tight loop — never yields) and a Low-priority cooperative
+        // `worker_b`, on hart 1. Priority-aware preemption keeps `greedy` on-CPU
+        // against the Low worker (the timer won't demote High→Low), so `greedy`
+        // dominates CPU time — yet aging periodically lifts the starved
+        // `worker_b` to the running level so it still makes progress. "Ordered,
+        // but fair."
+        Some(WorkloadKind::Priorities) => {
+            use kernel_core::sched::Priority;
+            user::init_metric();
+            let _ =
+                sched::spawn_on_with_priority(1, "greedy", user::user_hog_main_entry, Priority::High);
+            let _ =
+                sched::spawn_on_with_priority(1, "worker_b", user::worker_b_main_entry, Priority::Low);
         }
         _ => {}
     }

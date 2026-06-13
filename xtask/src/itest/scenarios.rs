@@ -1615,3 +1615,54 @@ pub fn preemption_telemetry(h: &mut View) -> Result<(), String> {
 
     Ok(())
 }
+
+/// v0.8b priority scheduling — *ordered, but fair* (`workload=priorities`). A
+/// High-priority CPU-bound `greedy` task and a Low-priority cooperative
+/// `worker_b` share hart 1. The scheduler must (a) **respect priority** —
+/// priority-aware preemption keeps `greedy` on-CPU rather than letting the timer
+/// demote it to the Low worker, so `greedy` dominates CPU time — yet (b) **stay
+/// fair** — aging lifts the starved Low worker to the running level periodically,
+/// so it still makes progress instead of starving outright (the failure mode of
+/// pure static priority).
+///
+/// Asserted on the hart-0 heartbeat's per-task metrics: the Low worker is
+/// scheduled at least twice (aging rescued it), and at that point the High
+/// task's accumulated CPU time dominates the Low worker's by a wide margin
+/// (priority respected — an equal-share scheduler would leave them comparable).
+pub fn priorities_ordered_but_fair(h: &mut View) -> Result<(), String> {
+    let greedy_cpu = std::cell::Cell::new(0i64);
+    let low_cpu = std::cell::Cell::new(0i64);
+    let low_runs = std::cell::Cell::new(0i64);
+
+    // Run until the Low worker has progressed twice (aging defeated starvation),
+    // tracking the CPU-time counters so we can compare them at that moment.
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            match strings.get(name_id).map(String::as_str) {
+                Some("snitchos.task.greedy.cpu_time_ticks") => greedy_cpu.set(*value),
+                Some("snitchos.task.worker_b.cpu_time_ticks") => low_cpu.set(*value),
+                Some("snitchos.task.worker_b.runs_total") => low_runs.set(*value),
+                _ => {}
+            }
+            low_runs.get() >= 2
+        }
+        _ => false,
+    })
+    .ok_or(
+        "low-priority worker_b never reached 2 runs within 30s — aging failed to rescue it from \
+         starvation (or the tasks didn't spawn)",
+    )?;
+
+    // Priority respected: the High CPU-bound task held the CPU far longer than
+    // the Low worker. (Without priority-aware preemption the timer would have
+    // time-sliced them toward parity.)
+    let (greedy, low) = (greedy_cpu.get(), low_cpu.get());
+    if greedy < 10 * low.max(1) {
+        return Err(std::format!(
+            "priority not respected: greedy (High) cpu_time={greedy} is not >> worker_b (Low) \
+             cpu_time={low} (expected High to dominate CPU by 10x+)"
+        ));
+    }
+
+    Ok(())
+}
