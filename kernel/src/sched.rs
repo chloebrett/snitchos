@@ -23,7 +23,10 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 
 use protocol::SwitchReason;
 
-use kernel_core::sched::{address_space_switch, quantum_expired, Runqueue, TaskId, TaskState};
+use kernel_core::sched::{
+    address_space_switch, quantum_expired, Candidate, pick_next, Priority, Runqueue, TaskId,
+    TaskState,
+};
 use kernel_core::span::SpanCursor;
 
 use crate::process::Process;
@@ -136,6 +139,13 @@ pub struct Task {
     /// stays valid. `Relaxed`: same single-writer-same-hart-reader discipline
     /// as `CURRENT_PROCESS` itself.
     pub process: AtomicPtr<Process>,
+    /// Static scheduling priority (v0.8b). Set at spawn (default `Normal`),
+    /// immutable thereafter, read under the scheduler lock when the task is
+    /// (re-)enqueued to build its [`Candidate`]. A plain field (not atomic)
+    /// because it's written once on the owned `Task` before it enters the table.
+    /// (The task's *wait clock* lives on the runqueue `Candidate`, not here — it
+    /// changes per enqueue, so it belongs with the queue entry.)
+    pub priority: Priority,
     /// Total time on-CPU in `time`-CSR ticks. Bumped on every yield
     /// out of this task; read by the heartbeat to emit
     /// `snitchos.task.<name>.cpu_time_ticks`. `Relaxed`: counter.
@@ -203,6 +213,7 @@ impl Task {
             span_cursor: SpanCursor::new(),
             address_space: AtomicUsize::new(0),
             process: AtomicPtr::new(core::ptr::null_mut()),
+            priority: Priority::Normal,
             cpu_time_ticks: AtomicU64::new(0),
             runs: AtomicU64::new(0),
             cpu_time_metric,
@@ -478,12 +489,27 @@ pub fn spawn(name: &str, entry: extern "C" fn() -> !) -> TaskId {
 /// could leave them on hart 0 (`spawn`) or migrate consumer to
 /// hart 1 (`spawn_on(1, ...)`); the latter is step 11's headline.
 pub fn spawn_on(hart: usize, name: &str, entry: extern "C" fn() -> !) -> TaskId {
+    spawn_on_with_priority(hart, name, entry, Priority::Normal)
+}
+
+/// Like [`spawn_on`] but at an explicit scheduling priority (v0.8b). Higher
+/// priority runs preferentially; aging keeps lower ones from starving. The
+/// default-priority `spawn`/`spawn_on` keep every existing call site at
+/// `Normal`, so behaviour is unchanged until a workload spawns at distinct
+/// levels.
+pub fn spawn_on_with_priority(
+    hart: usize,
+    name: &str,
+    entry: extern "C" fn() -> !,
+    priority: Priority,
+) -> TaskId {
     debug_assert!(hart < crate::percpu::MAX_HARTS);
     let id = alloc_task_id();
     let stack: Box<Stack> = Box::new(Stack::new_zeroed());
     let sp = stack.top_addr();
 
     let mut task = Box::new(Task::new_bare(id, String::from(name), TaskState::Ready));
+    task.priority = priority;
     // SAFETY: we have unique ownership of `task`; nothing else
     // references it yet.
     unsafe {
@@ -497,7 +523,12 @@ pub fn spawn_on(hart: usize, name: &str, entry: extern "C" fn() -> !) -> TaskId 
     {
         let mut sched = SCHEDULER.lock();
         sched.tasks.push(task);
-        sched.runqueues[hart].push_back(id);
+        // Enter the ready set now; stamp the wait clock (= now) for aging.
+        sched.runqueues[hart].push_back(Candidate {
+            id,
+            base: priority,
+            enqueued_tick: crate::tracing::timestamp(),
+        });
     }
     // Under the spawn storm we skip ThreadRegister so the spawn path
     // has no MMIO (virtio) write between writing the new `ctx.ra/sp`
@@ -571,16 +602,17 @@ fn reschedule(reason: SwitchReason) {
 
     let (current_ctx, next_ctx, next_id, next_root, next_proc) = {
         let mut sched = SCHEDULER.lock();
-        let Some(next_id) = sched.runqueues[me].pop_front() else {
+        // Pick the highest *effective*-priority ready task (v0.8b): base
+        // priority boosted by how long each has waited (aging), ties → longest
+        // wait → FIFO-fair. Candidates come straight off this hart's ready
+        // queue (each carries its own priority + wait clock), so the pick is a
+        // single O(n) scan — no per-task table lookup, no allocation. The
+        // running task is off the queue, so it can't be re-picked. With every
+        // task at the default `Normal`, this reduces to longest-wait == FIFO.
+        let Some(next_id) = pick_next(sched.runqueues[me].iter(), t_entry, AGING_STEP_TICKS) else {
             return; // nothing else ready on this hart — keep running
         };
-        if next_id == current_id {
-            // Shouldn't happen — current task is supposed to be off the
-            // runqueue while running — but defensively don't switch
-            // into ourselves (would corrupt the saved context).
-            sched.runqueues[me].push_back(next_id);
-            return;
-        }
+        sched.runqueues[me].remove(next_id);
 
         // Single pass through the task table to capture both context
         // pointers, accumulate the outgoing task's on-CPU time, and
@@ -591,6 +623,7 @@ fn reschedule(reason: SwitchReason) {
         let prev_entry = CURRENT_TASK_ENTRY_TICK.this_cpu().load(Ordering::Relaxed);
         let on_cpu_delta = if prev_entry == 0 { 0 } else { t_entry.wrapping_sub(prev_entry) };
         let mut current_ctx: *mut TaskContext = core::ptr::null_mut();
+        let mut current_priority = Priority::Normal;
         let mut next_ctx: *mut TaskContext = core::ptr::null_mut();
         let mut next_cursor: *mut SpanCursor = core::ptr::null_mut();
         let mut next_root: usize = 0;
@@ -598,6 +631,7 @@ fn reschedule(reason: SwitchReason) {
         for task in &sched.tasks {
             if task.id == current_id {
                 current_ctx = task.context.get();
+                current_priority = task.priority;
                 task.cpu_time_ticks.fetch_add(on_cpu_delta, Ordering::Relaxed);
             }
             if task.id == next_id {
@@ -611,7 +645,13 @@ fn reschedule(reason: SwitchReason) {
         assert!(!current_ctx.is_null(), "current task missing from table");
         assert!(!next_ctx.is_null(), "next task missing from table");
 
-        sched.runqueues[me].push_back(current_id);
+        // The outgoing task re-enters the ready set now — stamp its wait clock
+        // (= now) so aging measures from this moment.
+        sched.runqueues[me].push_back(Candidate {
+            id: current_id,
+            base: current_priority,
+            enqueued_tick: t_entry,
+        });
         CURRENT_TASK.this_cpu().store(next_id.0, Ordering::Relaxed);
         CURRENT_SPAN_CURSOR.this_cpu().store(next_cursor, Ordering::Relaxed);
 
@@ -654,6 +694,13 @@ fn reschedule(reason: SwitchReason) {
 /// quantum and is never forcibly preempted. Per-priority quanta are a v0.8b
 /// follow-on.
 pub const QUANTUM_TICKS: u64 = 2_000_000; // 0.2 s at 10 MHz
+
+/// Aging step for priority scheduling (v0.8b): a ready task's effective
+/// priority rises one level per this many ticks it waits, so a starved low
+/// task eventually out-bids steady higher-priority work. 1 s at 10 MHz — a
+/// `Low` task reaches `High` after ~2 s of waiting, visible but bounded.
+/// Cooperative tasks re-enqueue far faster than this, so they never age.
+pub const AGING_STEP_TICKS: u64 = 10_000_000;
 
 /// Timer-driven preemption entry point (v0.8). Called from the timer IRQ
 /// handler with whether the interrupted code was in **user** mode (`SPP == 0`).
@@ -714,11 +761,14 @@ pub fn exit_now() -> ! {
             }
         }
 
-        // Current task is running, not on the runqueue, so nothing
-        // to remove. Pick the next ready task.
-        let Some(next_id) = sched.runqueues[me].pop_front() else {
+        // Current task is running, not on the runqueue, so nothing to remove.
+        // Pick the next ready task by effective priority (same policy as
+        // `reschedule`), then take it out of the queue.
+        let now = crate::tracing::timestamp();
+        let Some(next_id) = pick_next(sched.runqueues[me].iter(), now, AGING_STEP_TICKS) else {
             panic!("sched::exit_now: runqueue empty on hart {me}");
         };
+        sched.runqueues[me].remove(next_id);
 
         // Resolve next's context + span cursor + address space. Same
         // shape as the tail of yield_now's lock body.

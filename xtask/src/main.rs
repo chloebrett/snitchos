@@ -392,7 +392,39 @@ enum BaselineCmd {
     },
 }
 
+/// `cargo run -p xtask` injects package-scoped vars (`CARGO_MANIFEST_DIR`,
+/// `CARGO_PKG_*`, …) into our process environment. Every child `cargo` we spawn
+/// inherits them, so a dependency shared with a child build (e.g. `ring`,
+/// pulled by the unit-test crates) bakes xtask's manifest dir into its
+/// build-script fingerprint. A subsequent *direct* shell `cargo build` sees
+/// those vars absent, marks the fingerprint dirty, and rebuilds — and the next
+/// xtask run dirties it the other way. The result is ring/rustls/ureq/xtask
+/// recompiling on every alternation between `cargo xtask …` and a plain build.
+///
+/// Strip the leaked vars once, before spawning anything, so children see the
+/// same environment a shell build would. xtask reads its own package metadata
+/// only via compile-time `env!`, which `remove_var` does not affect.
+fn scrub_inherited_cargo_env() {
+    let leaked: Vec<String> = std::env::vars()
+        .map(|(key, _)| key)
+        .filter(|key| {
+            key == "CARGO_MANIFEST_DIR"
+                || key == "CARGO_MANIFEST_PATH"
+                || key == "CARGO_CRATE_NAME"
+                || key == "CARGO_BIN_NAME"
+                || key == "CARGO_PRIMARY_PACKAGE"
+                || key.starts_with("CARGO_PKG_")
+        })
+        .collect();
+    for key in leaked {
+        // SAFETY: called as the first statement of `main`, before any thread is
+        // spawned, so there is no concurrent access to the process environment.
+        unsafe { std::env::remove_var(key) };
+    }
+}
+
 fn main() -> ExitCode {
+    scrub_inherited_cargo_env();
     match Cli::parse().cmd {
         Cmd::Build => build(),
         Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),

@@ -21,9 +21,10 @@ use crate::sched::TaskId;
 /// no receiver waits, and the first receiver drains a sender (and vice
 /// versa). The waiting queues are never empty: draining the last waiter
 /// collapses the endpoint back to `Idle`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum EndpointState {
-    /// Nobody waiting.
+    /// Nobody waiting. An endpoint is born here, so it is the default.
+    #[default]
     Idle,
     /// Senders blocked, waiting for a receiver. FIFO: the front sender
     /// rendezvouses with the next receiver to arrive.
@@ -108,6 +109,11 @@ mod tests {
 
     fn receivers(ids: &[u32]) -> EndpointState {
         EndpointState::ReceiversWaiting(ids.iter().copied().map(TaskId).collect())
+    }
+
+    #[test]
+    fn an_endpoint_is_born_idle() {
+        assert_eq!(EndpointState::default(), EndpointState::Idle);
     }
 
     #[test]

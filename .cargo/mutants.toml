@@ -19,6 +19,15 @@ exclude_re = [
   "replace \\| with \\^ in branch_pte",
   # Equivalent mutant: 1 << 0 == 1 >> 0 == 1 — same constant either way.
   "replace << with >> in leaf_pte",
+  # No viable mutant: cargo-mutants' only operator for these IPC transition
+  # functions is whole-body -> (Default::default(), ...), but their return
+  # tuples include a type with no Default (RendezvousAction / TaskId), so
+  # every such mutant is unviable. The transitions are instead pinned by
+  # exhaustive exact-equality tests in ipc::tests (both directions x
+  # Idle/queued, FIFO order, collapse-to-Idle, and the never-both invariant).
+  "replace on_send ->",
+  "replace on_receive ->",
+  "replace drain_front ->",
   # Non-deterministic: random_trace_id uses fastrand and its output cannot
   # be asserted. The linter rewrites #[mutants::skip] to
   # #[cfg_attr(test, mutants::skip)] which cargo-mutants doesn't see, so

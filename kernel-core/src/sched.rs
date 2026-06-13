@@ -53,9 +53,13 @@ pub struct Candidate {
 /// (never panics, never boosts on a bogus wait). Pure: the kernel builds
 /// `candidates` from its task table and runs the winner.
 #[must_use]
-pub fn pick_next(candidates: &[Candidate], now: u64, step: u64) -> Option<TaskId> {
+pub fn pick_next(
+    candidates: impl IntoIterator<Item = Candidate>,
+    now: u64,
+    step: u64,
+) -> Option<TaskId> {
     candidates
-        .iter()
+        .into_iter()
         .max_by_key(|c| {
             let waited = now.saturating_sub(c.enqueued_tick);
             // Higher effective priority wins; among equals, the longest waiter
@@ -80,11 +84,13 @@ pub enum TaskState {
     Exited,
 }
 
-/// FIFO queue of `Ready` tasks. Cooperative round-robin scheduler
-/// pops from front, runs the task, then pushes the same task back
-/// onto the end if it's still ready.
+/// Ready set for one hart. Stores each ready task as a [`Candidate`] —
+/// `(id, base priority, enqueued_tick)` — so the scheduler's priority pick
+/// ([`pick_next`]) reads everything it needs straight from the queue, with no
+/// per-task table lookup (that lookup was an O(n²)-per-switch trap). Insertion
+/// order is preserved; the *pick* is by effective priority, not position.
 pub struct Runqueue {
-    ready: VecDeque<TaskId>,
+    ready: VecDeque<Candidate>,
 }
 
 impl Runqueue {
@@ -100,12 +106,32 @@ impl Runqueue {
         self.ready.is_empty()
     }
 
-    pub fn push_back(&mut self, id: TaskId) {
-        self.ready.push_back(id);
+    /// Add a ready task. The caller stamps `enqueued_tick` (= now) so aging
+    /// measures the wait from this enqueue.
+    pub fn push_back(&mut self, candidate: Candidate) {
+        self.ready.push_back(candidate);
     }
 
-    pub fn pop_front(&mut self) -> Option<TaskId> {
+    pub fn pop_front(&mut self) -> Option<Candidate> {
         self.ready.pop_front()
+    }
+
+    /// Remove a specific task wherever it sits in the queue — the scheduler
+    /// picked it by effective priority, not FIFO position. Returns whether it
+    /// was present. O(n) in the queue length (small: the ready set on one hart).
+    pub fn remove(&mut self, id: TaskId) -> bool {
+        if let Some(pos) = self.ready.iter().position(|c| c.id == id) {
+            self.ready.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Iterate the ready candidates (insertion order) for the priority pick,
+    /// without draining the queue.
+    pub fn iter(&self) -> impl Iterator<Item = Candidate> + '_ {
+        self.ready.iter().copied()
     }
 }
 
@@ -158,6 +184,12 @@ pub fn quantum_expired(entry_tick: u64, now: u64, quantum: u64) -> bool {
 mod tests {
     use super::*;
 
+    /// A default-priority ready candidate — for runqueue tests that only care
+    /// about ordering/membership of ids, not priority.
+    fn rq(id: u32) -> Candidate {
+        Candidate { id: TaskId(id), base: Priority::Normal, enqueued_tick: 0 }
+    }
+
     #[test]
     fn new_runqueue_is_empty() {
         let q = Runqueue::new();
@@ -168,31 +200,54 @@ mod tests {
     #[test]
     fn pop_from_empty_returns_none() {
         let mut q = Runqueue::new();
-        assert_eq!(q.pop_front(), None);
+        assert!(q.pop_front().is_none());
+    }
+
+    #[test]
+    fn remove_takes_a_specific_task_out_of_the_middle() {
+        // Priority scheduling picks a task by effective priority, not FIFO
+        // order, so the scheduler removes the chosen id wherever it sits.
+        let mut q = Runqueue::new();
+        q.push_back(rq(1));
+        q.push_back(rq(2));
+        q.push_back(rq(3));
+        assert!(q.remove(TaskId(2)));
+        assert_eq!(q.len(), 2);
+        // The survivors keep their relative order.
+        assert_eq!(q.pop_front().map(|c| c.id), Some(TaskId(1)));
+        assert_eq!(q.pop_front().map(|c| c.id), Some(TaskId(3)));
+    }
+
+    #[test]
+    fn remove_absent_task_is_a_noop_returning_false() {
+        let mut q = Runqueue::new();
+        q.push_back(rq(1));
+        assert!(!q.remove(TaskId(9)));
+        assert_eq!(q.len(), 1);
     }
 
     #[test]
     fn push_then_pop_returns_same_task() {
         let mut q = Runqueue::new();
-        q.push_back(TaskId(7));
+        q.push_back(rq(7));
         assert!(!q.is_empty());
         assert_eq!(q.len(), 1);
-        assert_eq!(q.pop_front(), Some(TaskId(7)));
+        assert_eq!(q.pop_front().map(|c| c.id), Some(TaskId(7)));
         assert!(q.is_empty());
     }
 
     #[test]
     fn pop_order_is_fifo() {
-        // Three tasks pushed in order should pop in the same order
-        // — round-robin fairness depends on this.
+        // Three tasks pushed in order pop in the same order — the default-all-
+        // Normal case the priority pick still reduces to FIFO/longest-wait.
         let mut q = Runqueue::new();
-        q.push_back(TaskId(1));
-        q.push_back(TaskId(2));
-        q.push_back(TaskId(3));
-        assert_eq!(q.pop_front(), Some(TaskId(1)));
-        assert_eq!(q.pop_front(), Some(TaskId(2)));
-        assert_eq!(q.pop_front(), Some(TaskId(3)));
-        assert_eq!(q.pop_front(), None);
+        q.push_back(rq(1));
+        q.push_back(rq(2));
+        q.push_back(rq(3));
+        assert_eq!(q.pop_front().map(|c| c.id), Some(TaskId(1)));
+        assert_eq!(q.pop_front().map(|c| c.id), Some(TaskId(2)));
+        assert_eq!(q.pop_front().map(|c| c.id), Some(TaskId(3)));
+        assert!(q.pop_front().is_none());
     }
 
     #[test]
@@ -201,9 +256,9 @@ mod tests {
         // back at the tail. Repeating that should cycle through every
         // task in original order indefinitely.
         let mut q = Runqueue::new();
-        q.push_back(TaskId(1));
-        q.push_back(TaskId(2));
-        q.push_back(TaskId(3));
+        q.push_back(rq(1));
+        q.push_back(rq(2));
+        q.push_back(rq(3));
 
         let first = q.pop_front().unwrap();
         q.push_back(first);
@@ -213,16 +268,16 @@ mod tests {
         q.push_back(third);
 
         // After three rotations, the head should be task 1 again.
-        assert_eq!(q.pop_front(), Some(TaskId(1)));
+        assert_eq!(q.pop_front().map(|c| c.id), Some(TaskId(1)));
     }
 
     #[test]
     fn len_tracks_pushes_and_pops() {
         let mut q = Runqueue::new();
         assert_eq!(q.len(), 0);
-        q.push_back(TaskId(10));
+        q.push_back(rq(10));
         assert_eq!(q.len(), 1);
-        q.push_back(TaskId(11));
+        q.push_back(rq(11));
         assert_eq!(q.len(), 2);
         q.pop_front();
         assert_eq!(q.len(), 1);
@@ -235,10 +290,10 @@ mod tests {
         // Specific id values shouldn't be transformed by the queue —
         // we want exact-equality semantics, not "some TaskId came out."
         let mut q = Runqueue::new();
-        q.push_back(TaskId(0));
-        q.push_back(TaskId(u32::MAX));
-        assert_eq!(q.pop_front(), Some(TaskId(0)));
-        assert_eq!(q.pop_front(), Some(TaskId(u32::MAX)));
+        q.push_back(rq(0));
+        q.push_back(rq(u32::MAX));
+        assert_eq!(q.pop_front().map(|c| c.id), Some(TaskId(0)));
+        assert_eq!(q.pop_front().map(|c| c.id), Some(TaskId(u32::MAX)));
     }
 
     #[test]
@@ -342,12 +397,12 @@ mod tests {
 
     #[test]
     fn pick_from_empty_is_none() {
-        assert_eq!(pick_next(&[], 100, 10), None);
+        assert_eq!(pick_next(core::iter::empty(), 100, 10), None);
     }
 
     #[test]
     fn pick_single_candidate_returns_it() {
-        assert_eq!(pick_next(&[cand(7, Priority::Low, 0)], 100, 10), Some(TaskId(7)));
+        assert_eq!(pick_next([cand(7, Priority::Low, 0)], 100, 10), Some(TaskId(7)));
     }
 
     #[test]
@@ -358,7 +413,7 @@ mod tests {
             cand(2, Priority::High, 100),
             cand(3, Priority::Normal, 100),
         ];
-        assert_eq!(pick_next(&cs, 100, 10), Some(TaskId(2)));
+        assert_eq!(pick_next(cs, 100, 10), Some(TaskId(2)));
     }
 
     #[test]
@@ -369,7 +424,7 @@ mod tests {
             cand(1, Priority::Normal, 100), // fresh → effective Normal
             cand(2, Priority::Low, 80),     // waited 20 = 2 steps → effective High
         ];
-        assert_eq!(pick_next(&cs, 100, 10), Some(TaskId(2)));
+        assert_eq!(pick_next(cs, 100, 10), Some(TaskId(2)));
     }
 
     #[test]
@@ -381,7 +436,7 @@ mod tests {
             cand(2, Priority::Normal, 50), // waited longer
             cand(3, Priority::Normal, 70),
         ];
-        assert_eq!(pick_next(&cs, 100, 1000), Some(TaskId(2)));
+        assert_eq!(pick_next(cs, 100, 1000), Some(TaskId(2)));
     }
 
     #[test]
@@ -393,6 +448,6 @@ mod tests {
             cand(1, Priority::High, 200), // enqueued after `now` → wait saturates to 0
             cand(2, Priority::Low, 95),   // waited 5 < step → no boost → Low
         ];
-        assert_eq!(pick_next(&cs, 100, 10), Some(TaskId(1)));
+        assert_eq!(pick_next(cs, 100, 10), Some(TaskId(1)));
     }
 }
