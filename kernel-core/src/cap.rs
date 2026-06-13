@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 use protocol::StringId;
 
 use crate::ipc::EndpointId;
+use crate::sched::TaskId;
 
 /// The rights a capability grants, as a bitmask. v0.7b defines exactly
 /// one bit (`EMIT`); the type is the extension point so later objects
@@ -74,6 +75,11 @@ pub enum Object {
     /// [`EndpointId`]; `Rights::SEND` / `Rights::RECV` decide which end the
     /// holder may use. The rendezvous itself lives in `crate::ipc`.
     Endpoint { id: EndpointId },
+    /// A one-shot authority to **reply** to a blocked `call`er (v0.9b). Names
+    /// the specific caller to wake. Minted by the kernel into the server at the
+    /// `call` rendezvous and granted [`Multiplicity::Once`] — holding it *is*
+    /// the authority (no rights bit), and answering consumes it.
+    Reply { caller: TaskId },
 }
 
 /// An unforgeable `{ object, rights }` pair.
@@ -248,6 +254,20 @@ pub fn invoke_recv(table: &CapTable, handle: Handle) -> Result<EndpointId, Denie
         return Err(Denied::WrongObject);
     };
     Ok(id)
+}
+
+/// Resolve a `reply` invocation: `handle` must name an [`Object::Reply`] in
+/// `table`. Returns the [`TaskId`] of the blocked `call`er to wake. No rights
+/// check — possession of the reply cap is the authority. The cap is granted
+/// [`Multiplicity::Once`], so the kernel [`consume`](CapTable::consume)s it
+/// after a successful invoke; a second `reply` then resolves `Stale` →
+/// [`Denied::NoSuchCapability`].
+pub fn invoke_reply(table: &CapTable, handle: Handle) -> Result<TaskId, Denied> {
+    let cap = table.resolve(handle).map_err(|_| Denied::NoSuchCapability)?;
+    let Object::Reply { caller } = cap.object else {
+        return Err(Denied::WrongObject);
+    };
+    Ok(caller)
 }
 
 /// A process's capability table: opaque [`Handle`]s in, [`Capability`]
@@ -711,5 +731,43 @@ mod tests {
         let once = table.insert_once(emit_sink());
         assert!(table.consume(once));
         assert_eq!(table.multiplicity_of(once), Err(CapError::Stale));
+    }
+
+    // --- v0.9b: the reply capability ---
+
+    fn reply_cap(caller: u32) -> Capability {
+        Capability { object: Object::Reply { caller: TaskId(caller) }, rights: Rights::NONE }
+    }
+
+    #[test]
+    fn invoke_reply_returns_the_caller_to_wake() {
+        // Holding a Reply cap *is* the authority to answer that caller — no
+        // rights bit; the kernel mints it Once (granted via insert_once).
+        let mut table = CapTable::new();
+        let h = table.insert_once(reply_cap(7));
+        assert_eq!(invoke_reply(&table, h), Ok(TaskId(7)));
+    }
+
+    #[test]
+    fn invoke_reply_refuses_a_non_reply_object() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability { object: Object::SpanSink, rights: Rights::EMIT });
+        assert_eq!(invoke_reply(&table, h), Err(Denied::WrongObject));
+    }
+
+    #[test]
+    fn invoke_reply_refuses_an_unknown_handle() {
+        let table = CapTable::new();
+        assert_eq!(invoke_reply(&table, Handle::from_raw(0)), Err(Denied::NoSuchCapability));
+    }
+
+    #[test]
+    fn invoke_reply_refuses_a_consumed_handle() {
+        // After the cap is consumed (the reply already happened), a second
+        // reply through the same handle is refused — single-use enforced.
+        let mut table = CapTable::new();
+        let h = table.insert_once(reply_cap(7));
+        assert!(table.consume(h));
+        assert_eq!(invoke_reply(&table, h), Err(Denied::NoSuchCapability));
     }
 }
