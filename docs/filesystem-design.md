@@ -79,6 +79,27 @@ Receive loop: `receive()` → `(msg, badge)`; unpack `badge → (inode, file_rig
 ## Evolution to #4 (when a second server wants typed caps)
 Lift `file_rights` out of the badge into a kernel-carried generic rights field the kernel **narrows monotonically but never interprets**; any holder then attenuates file-rights without an FS round-trip, while the FS still enforces meaning per op. Generalized: a server *registers an object type*, the kernel delivers `(badge, rights)` to the owner and enforces only monotonic narrowing + unforgeable delivery. Badged endpoints are the special case; #4 is the framework.
 
+## Process isolation falls out — authority, not resources
+A long-standing hope for this design was that Docker-style process isolation would fall out *for free*. It does — but only along the **authority** axis ("*what* can you touch?"), not the **resource** axis ("*how much* can you consume?"). Docker bundles both; capabilities are an authority mechanism.
+
+| Docker mechanism | Free here? | Why |
+|---|---|---|
+| Filesystem isolation (chroot, mount ns, overlayfs) | ✅ free, **stronger** | A process sees only files it holds caps to; its root cap *is* its chroot, with no `/` to escape *into*. |
+| Process/PID isolation | ✅ free | No ambient process namespace; you reach another process only via a cap to it. |
+| IPC isolation | ✅ free | IPC is capability-gated by construction ([ipc-design.md](ipc-design.md)). |
+| Network isolation | ⚠️ partial | "No network" is free; per-container virtual networks need a cap-aware network server (v1.2). |
+| Resource limits (cgroups: CPU/mem/IO) | ❌ not free | Authority ≠ quantity — a correctly-scoped process can still spin the CPU or allocate to its ceiling. |
+| Image/layering | ❌ orthogonal | Packaging, not isolation — but lands later via the [CoW + content-addressed](#content-addressed-storage) deepening (the layered-image model, literally). |
+
+**Why the authority half is stronger than Docker.** Docker isolates by *subtraction* — Linux defaults to "see everything," and namespaces carve a restricted view of a global world (hence escapes: a leaked mount and you're back in the namespace you could always *name*). Capabilities isolate by *construction* — a process starts with nothing and can only reach what it was handed; there is no global world to escape into. The failure modes invert: Docker *fails open* (forget to restrict → too powerful), caps *fail closed* (forget to grant → too weak). And structurally, **a "container" is just a process plus its starting capability set** — `spawn(program, caps)` *is* the sandbox for the FS/process/IPC slice; no container runtime, no namespace plumbing.
+
+**Caveats.**
+- "Free" = no new *kernel* mechanism, but still needs **correct, scope-enforcing servers + deliberate grant wiring**: the FS must refuse to mint caps above a container's subtree root, and init must hand each container its own subtree root cap. Scope-subset is **FS-trusted**, not kernel-enforced — the isolation is exactly as strong as the FS is correct.
+- **The v0.10 first cut doesn't do this yet** — flat-single-root + READ/WRITE-only. Per-container subtree isolation needs hierarchical directories *plus* FS subtree-scope enforcement on `lookup`/mint; both are additive.
+- **Resources need their own answer.** Memory *could* be made cap-enforced (seL4 untyped-memory style: allocate only by spending a memory cap) — SnitchOS today uses a global frame allocator + a crude per-process 16 MiB heap ceiling (`MapAnon`), not cap-counted memory. CPU time isn't ownable that cleanly; per-container CPU quotas stay a scheduler feature. Synchronous IPC backpressure (parked sender, no buffer growth) gives partial flow control for free.
+
+*Post angle: "I didn't build containers, I just stopped handing out authority."*
+
 ## Decisions & open items
 - **Q1 — FileRights granularity → DECIDED:** start with `READ`/`WRITE` only; dir rights + `EXEC` are additive badge bits.
 - **Q2 — EXEC → DECIDED:** reserve the bit, don't enforce until we load executables (~v0.11).
