@@ -325,10 +325,28 @@ pub fn run(config: RunConfig) -> ExitCode {
         Ok(status) => Err(format!("kernel build failed ({status})")),
         Err(e) => Err(e.to_string()),
     };
-    let log_path_for = |_scenario_name: &str| harness::take_last_log_path();
-    let max_wait_for = harness::take_last_max_wait;
-    let capture_for = harness::take_last_failure_capture;
     let commit_for = current_commit_short;
+
+    // The executor: run each scenario (a singleton group in separate
+    // mode — the only mode today) and package what its `Harness` recorded
+    // into a `ScenarioReport`. The scenario fn still spawns its own QEMU
+    // internally and stashes timing/capture/log-path in thread-locals;
+    // here we drain those thread-locals into the report, on the same
+    // worker thread that ran the scenario. (Step 5 replaces the in-fn
+    // spawn + thread-locals with a Boot/View the executor owns.)
+    let run_group = |scns: &[&Scenario]| -> Vec<itest_harness::ScenarioReport> {
+        scns.iter()
+            .map(|s| {
+                let result = (s.run)();
+                itest_harness::ScenarioReport {
+                    result,
+                    max_wait: harness::take_last_max_wait(),
+                    capture: harness::take_last_failure_capture(),
+                    log_path: harness::take_last_log_path(),
+                }
+            })
+            .collect()
+    };
 
     // Install the SIGINT handler before constructing config — the
     // INTERRUPT flag is what the runner reads at iteration boundaries.
@@ -336,9 +354,7 @@ pub fn run(config: RunConfig) -> ExitCode {
 
     let config = RunnerConfig {
         one_shot_build: Some(&build),
-        log_path_for: Some(&log_path_for),
-        max_wait_for: Some(&max_wait_for),
-        capture_for: Some(&capture_for),
+        run_group: Some(&run_group),
         current_commit: Some(&commit_for),
         baseline_file: Some(PathBuf::from(BASELINE_PATH)),
         fail_fast,

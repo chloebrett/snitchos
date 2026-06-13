@@ -5,9 +5,11 @@
 //! The consumer (xtask, for now) plugs in:
 //!
 //! - The scenario list (`&[Scenario]`).
-//! - Hooks: `one_shot_build`, `log_path_for`, `max_wait_for`,
-//!   `current_commit`. All optional; the runner no-ops when a hook
-//!   is `None`.
+//! - The executor (`run_group`): launches the subject and runs a group
+//!   of scenarios, returning a `ScenarioReport` each. This is where the
+//!   consumer's boot/View/timing/capture lives.
+//! - Hooks: `one_shot_build`, `current_commit`. Optional; the runner
+//!   no-ops when `None`.
 //! - The baseline file path.
 //!
 //! Nothing in this module knows about QEMU, virtio, or postcard.
@@ -134,64 +136,57 @@ pub fn select_by_tags<'a>(
         .collect())
 }
 
-/// Per-scenario log-path lookup. Returns the path to a scenario's
-/// log file (so the runner can dump the tail on failure + copy it
-/// into the run-dir), or `None` when no log was captured. Aliased to
-/// keep `RunnerConfig` under clippy's `type_complexity` threshold.
-///
-/// `Send + Sync` because workers in the `jobs > 1` path call this
-/// from their own threads. Plain `fn`-pointer and capture-free
-/// closures satisfy this automatically; consumers that need shared
-/// state should use `Arc` / `Mutex` rather than `Rc` / `RefCell`.
-pub(crate) type LogPathFn<'a> = &'a (dyn Fn(&str) -> Option<PathBuf> + Send + Sync);
-
-/// Per-scenario timing-hook signature. Called immediately after
-/// `(scenario.run)()` from the same thread, so `harness`-side
-/// thread-locals work. Same `Send + Sync` rationale as `LogPathFn`.
-pub(crate) type MaxWaitFn<'a> = &'a (dyn Fn() -> Option<(Duration, Duration)> + Send + Sync);
-
-/// Per-scenario failure-capture hook. Called after a *failed*
-/// `(scenario.run)()` from the same thread (so `harness`-side
-/// thread-locals work), returning the structured `FailureCapture` the
-/// harness recorded, or `None` if it captured nothing (e.g. a non-wait
-/// assertion). Same `Send + Sync` rationale as `LogPathFn`.
-pub(crate) type CaptureFn<'a> =
-    &'a (dyn Fn() -> Option<crate::signature::FailureCapture> + Send + Sync);
-
-/// The three per-scenario callbacks, bundled so they thread through the
-/// runner as one value instead of three. `Copy` (every field is an
-/// `Option<&dyn Fn>`), so passing by value into worker closures is free.
-#[derive(Clone, Copy, Default)]
-pub struct Hooks<'a> {
-    pub log_path_for: Option<LogPathFn<'a>>,
-    pub max_wait_for: Option<MaxWaitFn<'a>>,
-    pub capture_for: Option<CaptureFn<'a>>,
+/// Everything the runner needs to know about one scenario's execution,
+/// returned by the consumer's executor (`run_group`). This replaces the
+/// old thread-local hooks (`log_path_for` / `max_wait_for` /
+/// `capture_for`): instead of the runner scraping thread-locals the
+/// consumer's harness stashed during `(s.run)()`, the consumer now *runs*
+/// the scenario and hands back a structured report. No action-at-a-
+/// distance.
+pub struct ScenarioReport {
+    /// `Ok(())` on pass, or the scenario's human-readable failure string.
+    pub result: Result<(), String>,
+    /// `(actual_elapsed, budget)` of the consumer's longest internal wait
+    /// (e.g. a virtio-frame wait), for the inline `max wait …` display.
+    /// `None` if the consumer measured nothing.
+    pub max_wait: Option<(Duration, Duration)>,
+    /// The consumer's structured failure capture for cause-bucket
+    /// classification, or `None` (e.g. a value-mismatch with no wait).
+    pub capture: Option<crate::signature::FailureCapture>,
+    /// Path to the scenario's log file, so the runner can dump the tail
+    /// on failure and copy it into the run-dir. `None` if no log.
+    pub log_path: Option<PathBuf>,
 }
 
-/// Hooks the runner calls during execution. Each is `Option<&dyn Fn>`
-/// so consumers can supply only what they need. Lifetime parameter
-/// matches the surrounding `run()` call — hooks don't escape.
+/// The consumer's executor: run a group of scenarios and return one
+/// report each, in order. The runner groups scenarios (separate mode =
+/// singletons; shared mode = by workload) and calls this per group; the
+/// consumer decides how to launch the subject and run the assertions.
+///
+/// `Send + Sync` because the parallel path calls it from worker threads.
+/// `Option`/`&dyn` so it's `Copy` — threading it by value into workers is
+/// free. `None` falls back to calling `(s.run)()` directly (used by the
+/// crate's own tests; real consumers supply an executor).
+pub(crate) type RunGroupFn<'a> =
+    Option<&'a (dyn Fn(&[&Scenario]) -> Vec<ScenarioReport> + Send + Sync)>;
+
+/// Everything the consumer plugs into a `run()` — the executor plus a
+/// handful of optional callbacks and paths. Each `Option<&dyn Fn>` lets
+/// consumers supply only what they need. Lifetime parameter matches the
+/// surrounding `run()` call — nothing escapes.
 #[derive(Default)]
 pub struct RunnerConfig<'a> {
     /// Called once before any scenarios. Errors abort the run with
     /// exit code 2. Typical use: `cargo build -p kernel`.
     pub one_shot_build: Option<&'a dyn Fn() -> Result<(), String>>,
 
-    /// Called after each scenario; returns the path to that scenario's
-    /// log file, or `None` if no log was captured. The runner dumps
-    /// the last ~80 lines on failure.
-    pub log_path_for: Option<LogPathFn<'a>>,
-
-    /// Called after each scenario; returns `(actual_elapsed, budget)`
-    /// from whatever the consumer's harness measured (NOT the same as
-    /// the runner's wall-clock timing — this is e.g. virtio-frame wait
-    /// budget exposure). Used only for inline display.
-    pub max_wait_for: Option<MaxWaitFn<'a>>,
-
-    /// Called after a failed scenario; returns the harness's structured
-    /// `FailureCapture` for cause-bucket classification. `None` skips
-    /// classification (the iteration row's `signature` stays unset).
-    pub capture_for: Option<CaptureFn<'a>>,
+    /// The consumer's executor: launch the subject and run a group of
+    /// scenarios, returning one `ScenarioReport` each. The runner groups
+    /// scenarios and calls this per group; `None` falls back to calling
+    /// `(s.run)()` directly with an empty report (the crate's own tests).
+    /// This replaced the old `log_path_for` / `max_wait_for` /
+    /// `capture_for` thread-local hooks.
+    pub run_group: RunGroupFn<'a>,
 
     /// Called once when writing a new baseline entry. Returns the
     /// short git commit hash, or `None` if unavailable.
@@ -252,18 +247,6 @@ pub struct RunnerConfig<'a> {
     /// run's `metadata.toml` for exact reproduction and to capture the
     /// parallelism a failure occurred under. `None` omits it.
     pub invocation: Option<String>,
-}
-
-impl<'a> RunnerConfig<'a> {
-    /// The per-scenario callbacks, bundled. `Copy`, so callers thread it
-    /// by value into the worker pools.
-    fn hooks(&self) -> Hooks<'a> {
-        Hooks {
-            log_path_for: self.log_path_for,
-            max_wait_for: self.max_wait_for,
-            capture_for: self.capture_for,
-        }
-    }
 }
 
 /// Run `scenarios` `repeat` times. If `update_baseline` is true, write
@@ -366,21 +349,17 @@ pub fn run(
         let stop_ref = &stop;
         let failures_ref = &failures_so_far;
 
-        // Tracker closure: each worker calls this after every
-        // scenario completion so fail-fast counts are coherent across
-        // workers. We piggy-back on the existing log_path_for
-        // /max_wait_for hooks by NOT extending the hooks; instead,
-        // we observe failures by re-checking the per-worker
-        // aggregator after each pop. Cleaner: process_one_scenario
-        // already returns a ScenarioOutcome that's threaded through
-        // run_parallel_batch's worker loop. To keep this stress path
-        // contained, we use a custom worker pool here.
+        // Fail-fast counts are kept coherent across workers via the
+        // shared `failures_so_far` atomic each worker bumps after a
+        // failing `process_one_scenario`. This stress path uses its own
+        // worker pool (rather than `run_parallel_batch`) to keep the
+        // single-scenario × N-iterations bookkeeping contained.
         let work_items: Vec<(u32, &Scenario)> =
             (0..runs).map(|i| (i, s)).collect();
         let work: Mutex<VecDeque<(u32, &Scenario)>> =
             Mutex::new(work_items.into_iter().collect());
         let work_ref = &work;
-        let hooks = config.hooks();
+        let run_group = config.run_group;
         let history_dir_ref = history_dir.as_deref();
         let history_writer_ref = &history_writer;
         let interrupt = config.interrupt;
@@ -410,7 +389,7 @@ pub fn run(
                             &mut worker_agg,
                             history_writer_ref,
                             history_dir_ref,
-                            hooks,
+                            run_group,
                             ScenarioFormat::Prefixed,
                         );
                         let totals = if res.failed {
@@ -509,7 +488,7 @@ pub fn run(
                     &mut local,
                     &history_writer,
                     history_dir.as_deref(),
-                    config.hooks(),
+                    config.run_group,
                     ScenarioFormat::Inline,
                 );
                 if res.failed {
@@ -544,7 +523,7 @@ pub fn run(
                     jobs,
                     &history_writer,
                     history_dir.as_deref(),
-                    config.hooks(),
+                    config.run_group,
                     None,
                 );
                 local.merge(wfi_agg);
@@ -562,7 +541,7 @@ pub fn run(
                     cpu_jobs,
                     &history_writer,
                     history_dir.as_deref(),
-                    config.hooks(),
+                    config.run_group,
                     None,
                 );
                 local.merge(cpu_agg);
@@ -746,7 +725,7 @@ fn run_parallel_batch<'a>(
     workers: u32,
     history_writer: &'a Mutex<Option<HistoryWriter>>,
     history_dir: Option<&'a Path>,
-    hooks: Hooks<'a>,
+    run_group: RunGroupFn<'a>,
     stop_signal: Option<&'a std::sync::atomic::AtomicBool>,
 ) -> (Aggregator, usize) {
     if work_items.is_empty() || workers == 0 {
@@ -779,7 +758,7 @@ fn run_parallel_batch<'a>(
                         &mut worker_agg,
                         history_writer,
                         history_dir,
-                        hooks,
+                        run_group,
                         ScenarioFormat::Prefixed,
                     );
                     if res.failed {
@@ -821,18 +800,46 @@ struct ScenarioOutcome {
 /// log-tail dump on failure, log-file copy into the run-dir, NDJSON
 /// row. Shared between the sequential and parallel paths.
 ///
-/// The thread that calls this is the same thread `(s.run)()` ran on,
-/// so any thread-local state set by the consumer's harness (xtask's
-/// `take_last_log_path` / `take_last_max_wait`) is reachable through
-/// the supplied hooks. That's the whole point of running hooks here
-/// rather than back on the orchestrator thread.
+/// Run a single scenario: delegate to the consumer's `run_group`
+/// executor as a one-element group. When no executor is supplied, call
+/// `(s.run)()` directly with an otherwise-empty report — the crate's own
+/// test path; real consumers always supply an executor (which is where
+/// the subject launch, timing, and capture live).
+fn execute_scenario(s: &Scenario, run_group: RunGroupFn<'_>) -> ScenarioReport {
+    match run_group {
+        Some(exec) => exec(std::slice::from_ref(&s)).into_iter().next().unwrap_or_else(|| {
+            ScenarioReport {
+                result: Err(format!(
+                    "executor returned no report for scenario '{}'",
+                    s.name
+                )),
+                max_wait: None,
+                capture: None,
+                log_path: None,
+            }
+        }),
+        None => ScenarioReport {
+            result: (s.run)(),
+            max_wait: None,
+            capture: None,
+            log_path: None,
+        },
+    }
+}
+
+/// Runs one scenario via the consumer's executor (`run_group`, as a
+/// singleton group) and records everything that follows: timing,
+/// log-tail dump on failure, log-file copy into the run-dir, NDJSON row.
+/// All the per-scenario facts come from the returned `ScenarioReport` —
+/// no thread-local scraping. Shared between the sequential and parallel
+/// paths.
 fn process_one_scenario(
     s: &Scenario,
     run_idx: u32,
     local: &mut Aggregator,
     history_writer: &Mutex<Option<HistoryWriter>>,
     history_dir: Option<&Path>,
-    hooks: Hooks<'_>,
+    run_group: RunGroupFn<'_>,
     format: ScenarioFormat,
 ) -> ScenarioOutcome {
     if matches!(format, ScenarioFormat::Inline) {
@@ -840,13 +847,13 @@ fn process_one_scenario(
     }
     let started_at = OffsetDateTime::now_utc();
     let start = Instant::now();
-    let outcome = (s.run)();
+    let report = execute_scenario(s, run_group);
     let elapsed = start.elapsed();
     local.record_duration(s.name, elapsed);
 
-    let timing_str = hooks
-        .max_wait_for
-        .and_then(|f| f())
+    let ScenarioReport { result: outcome, max_wait, capture, log_path } = report;
+
+    let timing_str = max_wait
         .map(|(actual, budget)| {
             format!(
                 " (max wait {:.1}s of {:.0}s budget)",
@@ -873,15 +880,13 @@ fn process_one_scenario(
             eprintln!("{prefix}FAILED{timing_str}");
             eprintln!("{prefix}  {e}");
             let mut log_tail: Option<String> = None;
-            if let Some(get_path) = hooks.log_path_for
-                && let Some(log_path) = get_path(s.name)
-            {
-                dump_log_tail(&log_path);
-                log_tail = std::fs::read_to_string(&log_path).ok();
+            if let Some(log_path) = &log_path {
+                dump_log_tail(log_path);
+                log_tail = std::fs::read_to_string(log_path).ok();
                 if let Some(hdir) = history_dir {
                     let dest_name = format!("fail-{}-{}.log", s.name, run_idx + 1);
                     let dest = hdir.join(&dest_name);
-                    match std::fs::copy(&log_path, &dest) {
+                    match std::fs::copy(log_path, &dest) {
                         Ok(_) => row_log = Some(dest_name),
                         Err(e) => eprintln!(
                             "warning: failed to copy log to {}: {e}",
@@ -890,12 +895,10 @@ fn process_one_scenario(
                     }
                 }
             }
-            // Pull the harness's structured capture (same thread, so its
-            // thread-local is live) and attribute the failure to a
+            // The report's structured capture attributes the failure to a
             // cause-bucket. Always produces a signature on failure —
             // `Unknown` when evidence is thin — so no failure goes
             // unattributed.
-            let capture = hooks.capture_for.and_then(|f| f());
             row_signature = Some(crate::signature::classify_failure(
                 capture.as_ref(),
                 Some(e),
@@ -1409,7 +1412,7 @@ mod tests {
         reset_counters();
         let fail = Scenario::new("fail-1", always_fail);
 
-        // Synthesise a log file that the log_path_for hook will return.
+        // Synthesise a log file that the executor's report will point at.
         let scratch = std::env::temp_dir().join(format!(
             "itest-harness-fail-log-test-{}",
             std::process::id()
@@ -1418,12 +1421,23 @@ mod tests {
         std::fs::create_dir_all(&scratch).unwrap();
         let log_path = scratch.join("fake-qemu.log");
         std::fs::write(&log_path, "synthetic log contents\n").unwrap();
-        let log_path_for = |_name: &str| Some(log_path.clone());
+        // Executor: run the scenario and report the synthetic log path —
+        // the runner copies it into the run-dir on failure.
+        let run_group = |scns: &[&Scenario]| -> Vec<ScenarioReport> {
+            scns.iter()
+                .map(|s| ScenarioReport {
+                    result: (s.run)(),
+                    max_wait: None,
+                    capture: None,
+                    log_path: Some(log_path.clone()),
+                })
+                .collect()
+        };
 
         let history_root = scratch.join("history");
         std::fs::create_dir_all(&history_root).unwrap();
         let config = RunnerConfig {
-            log_path_for: Some(&log_path_for),
+            run_group: Some(&run_group),
             history_root: Some(history_root.clone()),
             ..RunnerConfig::default()
         };

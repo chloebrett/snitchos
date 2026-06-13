@@ -23,12 +23,27 @@ failure-signature capture that the separate-boot model gives us.
   `:path` matcher fragment). Catalog populated with every scenario's
   workload; guard comment on the nine `{"userspace"}` rows. Macro tests
   extended. Host-only; no scenario bodies touched yet.
-- **Next: step 4** — the inverted-execution refactor (see "Step 4
-  architecture" below). Extract `View`/`Boot` in xtask, make the runner
-  group-and-delegate to a consumer executor that returns reports, migrate
-  the 41 scenario fns to `fn(&mut View)`. Larger than first scoped, but
-  the well-factored end state. Needs a QEMU suite run to validate (the
-  user runs it).
+- **Step 4 done (the runner inversion)** — itest-harness now delegates
+  execution to a consumer executor and consumes structured reports:
+  - `ScenarioReport { result, max_wait, capture, log_path }` (pub).
+  - `RunnerConfig.run_group: Option<&dyn Fn(&[&Scenario]) ->
+    Vec<ScenarioReport> + Send + Sync>`; the three thread-local hooks
+    (`log_path_for`/`max_wait_for`/`capture_for`) + the `Hooks` struct are
+    **deleted**. `process_one_scenario` runs a scenario via the executor
+    (singleton group) and reads everything from the report.
+  - `None` executor falls back to `(s.run)()` — keeps the crate's own
+    runner tests unchanged. 157 itest-harness tests green.
+  - xtask supplies the executor: calls `(s.run)()` (scenarios still spawn
+    internally) and drains the harness thread-locals into the report.
+    **Behaviour-identical** in separate mode; the runner is now inverted.
+  - Host-only; QEMU behaviour unchanged but a confirming `--repeat 10` is
+    wanted once the build is green (the user runs it).
+- **Next: step 5** — split xtask `Harness` → `Boot` + `View`; the executor
+  spawns one `Boot` per group and runs each scenario's `fn(&mut View)`
+  against a fresh `View`, building reports from the View (no thread-locals).
+  Migrate the 41 scenarios to `fn(&mut View)`; carry the payload in the
+  catalog. This is the QEMU-validated step. Then step 7 flips grouping to
+  enable `--shared`.
 
 Non-goal: replacing the separate-boot model. Shared mode is an
 additional, opt-in mode. The flake gate (`--repeat 10`) and baseline

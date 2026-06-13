@@ -36,7 +36,7 @@ pub use history::{aggregate_run_dir, prune_runs};
 pub use lock::{ItestLock, LockError};
 pub use otlp::{push as push_otlp, push_with_timeout as push_otlp_with_timeout};
 pub use prom::{render_prometheus, write_atomic};
-pub use runner::{CpuProfile, RunnerConfig, Scenario, run, select_by_tags};
+pub use runner::{CpuProfile, RunnerConfig, Scenario, ScenarioReport, run, select_by_tags};
 pub use signature::{CaptureLevel, ErrorOrigin, FailureCapture, WaitOutcome};
 
 /// Build a `&[Scenario]` catalog as a table instead of a wall of
