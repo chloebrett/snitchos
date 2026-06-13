@@ -1,6 +1,11 @@
 //! Lexer: source text → `Token`s.
 
-/// A lexical token. Grows one variant per increment as the grammar lands.
+use std::iter::Peekable;
+use std::str::Chars;
+
+/// The lexer's input cursor — a peekable stream of source chars.
+type Cursor<'a> = Peekable<Chars<'a>>;
+
 /// A piece of a string literal: literal text, or a `{expr}` interpolation
 /// whose raw source the parser sub-parses later.
 #[derive(Debug, PartialEq)]
@@ -9,6 +14,7 @@ pub enum StrPart {
     Expr(String),
 }
 
+/// A lexical token.
 #[derive(Debug, PartialEq)]
 pub enum Token {
     // Literals
@@ -90,211 +96,242 @@ fn keyword(word: &str) -> Option<Token> {
     })
 }
 
-/// Tokenize Stitch source text.
+/// Tokenize Stitch source text. Each branch delegates to a kind-specific
+/// helper; the helpers all consume their own characters from `chars`.
 #[must_use]
 pub fn lex(src: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut chars = src.chars().peekable();
     while let Some(&c) = chars.peek() {
         if c.is_ascii_digit() {
-            let mut text = String::new();
-            let mut is_float = false;
-            loop {
-                match chars.peek().copied() {
-                    Some('_') => {
-                        chars.next();
-                    }
-                    Some(d) if d.is_ascii_digit() => {
-                        text.push(d);
-                        chars.next();
-                    }
-                    // `.` starts a fraction only when a digit follows — so `0..n`
-                    // (range) leaves the dots for the operator lexer to handle.
-                    Some('.')
-                        if !is_float
-                            && matches!(chars.clone().nth(1), Some(d) if d.is_ascii_digit()) =>
-                    {
-                        is_float = true;
-                        text.push('.');
-                        chars.next();
-                    }
-                    _ => break,
-                }
-            }
-            if is_float {
-                tokens.push(Token::Float(text.parse().unwrap_or(0.0)));
-            } else {
-                tokens.push(Token::Int(text.parse().unwrap_or(0)));
-            }
+            tokens.push(lex_number(&mut chars));
         } else if c.is_ascii_alphabetic() || c == '_' {
-            let mut text = String::new();
-            while let Some(&d) = chars.peek() {
-                if d.is_ascii_alphanumeric() || d == '_' {
-                    text.push(d);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            tokens.push(keyword(&text).unwrap_or(Token::Ident(text)));
+            tokens.push(lex_word(&mut chars));
         } else if c == '"' {
-            chars.next(); // opening quote
-            let mut parts = Vec::new();
-            let mut lit = String::new();
-            loop {
-                match chars.next() {
-                    None | Some('"') => break,
-                    Some('\\') => match chars.next() {
-                        Some('n') => lit.push('\n'),
-                        Some('t') => lit.push('\t'),
-                        Some('"') => lit.push('"'),
-                        Some('\\') => lit.push('\\'),
-                        Some(other) => lit.push(other),
-                        None => break,
-                    },
-                    // `{{` is a literal brace; a lone `{` opens an interpolation.
-                    Some('{') if chars.peek() == Some(&'{') => {
-                        chars.next();
-                        lit.push('{');
-                    }
-                    Some('{') => {
-                        if !lit.is_empty() {
-                            parts.push(StrPart::Lit(std::mem::take(&mut lit)));
-                        }
-                        let mut expr = String::new();
-                        let mut depth = 1u32;
-                        loop {
-                            match chars.next() {
-                                None => break,
-                                Some('{') => {
-                                    depth += 1;
-                                    expr.push('{');
-                                }
-                                Some('}') => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        break;
-                                    }
-                                    expr.push('}');
-                                }
-                                Some(ch) => expr.push(ch),
-                            }
-                        }
-                        parts.push(StrPart::Expr(expr));
-                    }
-                    // `}}` is a literal brace; a stray `}` in text is taken literally.
-                    Some('}') => {
-                        if chars.peek() == Some(&'}') {
-                            chars.next();
-                        }
-                        lit.push('}');
-                    }
-                    Some(ch) => lit.push(ch),
-                }
-            }
-            if !lit.is_empty() || parts.is_empty() {
-                parts.push(StrPart::Lit(lit));
-            }
-            tokens.push(Token::Str(parts));
-        } else if c == '/' && matches!(chars.clone().nth(1), Some('/' | '*')) {
-            chars.next(); // consume '/'
-            if chars.next() == Some('/') {
-                // line comment: skip to end of line (newline left for whitespace)
-                while let Some(&d) = chars.peek() {
-                    if d == '\n' {
-                        break;
-                    }
-                    chars.next();
-                }
-            } else {
-                // block comment (we consumed the '*'), nestable
-                let mut depth = 1u32;
-                while depth > 0 {
-                    match chars.next() {
-                        None => break,
-                        Some('/') if chars.peek() == Some(&'*') => {
-                            chars.next();
-                            depth += 1;
-                        }
-                        Some('*') if chars.peek() == Some(&'/') => {
-                            chars.next();
-                            depth -= 1;
-                        }
-                        Some(_) => {}
-                    }
-                }
-            }
+            tokens.push(lex_string(&mut chars));
         } else if c == '$' {
-            chars.next(); // consume '$'
-            let mut name = String::new();
-            while let Some(&d) = chars.peek() {
-                if d.is_ascii_alphanumeric() || d == '_' {
-                    name.push(d);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            tokens.push(Token::Placeholder(if name.is_empty() {
-                None
-            } else {
-                Some(name)
-            }));
-        } else {
-            chars.next(); // consume the first operator char `c`
-            // `eat(next)` consumes a second char if it matches, for two-char operators.
-            let mut eat = |want: char| {
-                if chars.peek() == Some(&want) {
-                    chars.next();
-                    true
-                } else {
-                    false
-                }
-            };
-            let tok = match c {
-                '-' if eat('>') => Some(Token::Arrow),
-                '-' => Some(Token::Minus),
-                '=' if eat('>') => Some(Token::FatArrow),
-                '=' if eat('=') => Some(Token::EqEq),
-                '=' => Some(Token::Eq),
-                '!' if eat('=') => Some(Token::NotEq),
-                '<' if eat('=') => Some(Token::Le),
-                '<' => Some(Token::Lt),
-                '>' if eat('=') => Some(Token::Ge),
-                '>' => Some(Token::Gt),
-                '|' if eat('>') => Some(Token::Pipe),
-                '|' => Some(Token::Bar),
-                '?' if eat('.') => Some(Token::QuestionDot),
-                '?' => Some(Token::Question),
-                '.' if eat('.') => Some(if eat('=') {
-                    Token::DotDotEq
-                } else {
-                    Token::DotDot
-                }),
-                '.' => Some(Token::Dot),
-                '+' => Some(Token::Plus),
-                '*' => Some(Token::Star),
-                '/' => Some(Token::Slash),
-                '%' => Some(Token::Percent),
-                '(' => Some(Token::LParen),
-                ')' => Some(Token::RParen),
-                '{' => Some(Token::LBrace),
-                '}' => Some(Token::RBrace),
-                '[' => Some(Token::LBracket),
-                ']' => Some(Token::RBracket),
-                ',' => Some(Token::Comma),
-                ';' => Some(Token::Semicolon),
-                '@' => Some(Token::At),
-                ':' => Some(Token::Colon),
-                _ => None,
-            };
-            if let Some(t) = tok {
-                tokens.push(t);
-            }
+            tokens.push(lex_placeholder(&mut chars));
+        } else if c == '/' && matches!(chars.clone().nth(1), Some('/' | '*')) {
+            skip_comment(&mut chars);
+        } else if let Some(tok) = lex_operator(&mut chars) {
+            tokens.push(tok);
         }
+        // else: `lex_operator` consumed an unrecognized char and returned
+        // `None` — skip it (lenient; lexer errors are future work).
     }
     tokens.push(Token::Eof);
     tokens
+}
+
+/// Read a run of `[A-Za-z0-9_]` from the cursor (the tail of a word).
+fn read_word(chars: &mut Cursor<'_>) -> String {
+    let mut s = String::new();
+    while let Some(&d) = chars.peek() {
+        if d.is_ascii_alphanumeric() || d == '_' {
+            s.push(d);
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// Lex an int or float literal. `_` separators are ignored; a `.` only
+/// starts a fraction when a digit follows, so `0..n` leaves the dots alone.
+fn lex_number(chars: &mut Cursor<'_>) -> Token {
+    let mut text = String::new();
+    let mut is_float = false;
+    loop {
+        match chars.peek().copied() {
+            Some('_') => {
+                chars.next();
+            }
+            Some(d) if d.is_ascii_digit() => {
+                text.push(d);
+                chars.next();
+            }
+            Some('.')
+                if !is_float && matches!(chars.clone().nth(1), Some(d) if d.is_ascii_digit()) =>
+            {
+                is_float = true;
+                text.push('.');
+                chars.next();
+            }
+            _ => break,
+        }
+    }
+    if is_float {
+        Token::Float(text.parse().unwrap_or(0.0))
+    } else {
+        Token::Int(text.parse().unwrap_or(0))
+    }
+}
+
+/// Lex a word, resolving it to a keyword token or an identifier.
+fn lex_word(chars: &mut Cursor<'_>) -> Token {
+    let word = read_word(chars);
+    keyword(&word).unwrap_or(Token::Ident(word))
+}
+
+/// Lex a `$` / `$name` lambda placeholder.
+fn lex_placeholder(chars: &mut Cursor<'_>) -> Token {
+    chars.next(); // '$'
+    let name = read_word(chars);
+    Token::Placeholder(if name.is_empty() { None } else { Some(name) })
+}
+
+/// Lex a `"…"` string literal, splitting `{expr}` interpolations into parts.
+fn lex_string(chars: &mut Cursor<'_>) -> Token {
+    chars.next(); // opening quote
+    let mut parts = Vec::new();
+    let mut lit = String::new();
+    loop {
+        match chars.next() {
+            None | Some('"') => break,
+            Some('\\') => match chars.next() {
+                Some('n') => lit.push('\n'),
+                Some('t') => lit.push('\t'),
+                Some('"') => lit.push('"'),
+                Some('\\') => lit.push('\\'),
+                Some(other) => lit.push(other),
+                None => break,
+            },
+            // `{{` is a literal brace; a lone `{` opens an interpolation.
+            Some('{') if chars.peek() == Some(&'{') => {
+                chars.next();
+                lit.push('{');
+            }
+            Some('{') => {
+                if !lit.is_empty() {
+                    parts.push(StrPart::Lit(std::mem::take(&mut lit)));
+                }
+                parts.push(StrPart::Expr(read_interpolation(chars)));
+            }
+            // `}}` is a literal brace; a stray `}` in text is taken literally.
+            Some('}') => {
+                if chars.peek() == Some(&'}') {
+                    chars.next();
+                }
+                lit.push('}');
+            }
+            Some(ch) => lit.push(ch),
+        }
+    }
+    if !lit.is_empty() || parts.is_empty() {
+        parts.push(StrPart::Lit(lit));
+    }
+    Token::Str(parts)
+}
+
+/// Capture the raw source inside a `{…}` interpolation up to the matching
+/// `}`, honouring nested braces. The opening `{` is already consumed.
+fn read_interpolation(chars: &mut Cursor<'_>) -> String {
+    let mut expr = String::new();
+    let mut depth = 1u32;
+    loop {
+        match chars.next() {
+            None => break,
+            Some('{') => {
+                depth += 1;
+                expr.push('{');
+            }
+            Some('}') => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+                expr.push('}');
+            }
+            Some(ch) => expr.push(ch),
+        }
+    }
+    expr
+}
+
+/// Skip a `//` line comment or a nestable `/* */` block comment.
+/// The leading `/` is still on the cursor.
+fn skip_comment(chars: &mut Cursor<'_>) {
+    chars.next(); // '/'
+    if chars.next() == Some('/') {
+        while let Some(&d) = chars.peek() {
+            if d == '\n' {
+                break;
+            }
+            chars.next();
+        }
+    } else {
+        // block comment (the '*' is consumed), nestable
+        let mut depth = 1u32;
+        while depth > 0 {
+            match chars.next() {
+                None => break,
+                Some('/') if chars.peek() == Some(&'*') => {
+                    chars.next();
+                    depth += 1;
+                }
+                Some('*') if chars.peek() == Some(&'/') => {
+                    chars.next();
+                    depth -= 1;
+                }
+                Some(_) => {}
+            }
+        }
+    }
+}
+
+/// Lex an operator or punctuation token. Consumes the leading char; returns
+/// `None` (having consumed it) for an unrecognized char.
+fn lex_operator(chars: &mut Cursor<'_>) -> Option<Token> {
+    let c = chars.next()?;
+    // `eat(want)` consumes a second char if it matches, for two-char operators.
+    let mut eat = |want: char| {
+        if chars.peek() == Some(&want) {
+            chars.next();
+            true
+        } else {
+            false
+        }
+    };
+    Some(match c {
+        '-' if eat('>') => Token::Arrow,
+        '-' => Token::Minus,
+        '=' if eat('>') => Token::FatArrow,
+        '=' if eat('=') => Token::EqEq,
+        '=' => Token::Eq,
+        '!' if eat('=') => Token::NotEq,
+        '<' if eat('=') => Token::Le,
+        '<' => Token::Lt,
+        '>' if eat('=') => Token::Ge,
+        '>' => Token::Gt,
+        '|' if eat('>') => Token::Pipe,
+        '|' => Token::Bar,
+        '?' if eat('.') => Token::QuestionDot,
+        '?' => Token::Question,
+        '.' if eat('.') => {
+            if eat('=') {
+                Token::DotDotEq
+            } else {
+                Token::DotDot
+            }
+        }
+        '.' => Token::Dot,
+        '+' => Token::Plus,
+        '*' => Token::Star,
+        '/' => Token::Slash,
+        '%' => Token::Percent,
+        '(' => Token::LParen,
+        ')' => Token::RParen,
+        '{' => Token::LBrace,
+        '}' => Token::RBrace,
+        '[' => Token::LBracket,
+        ']' => Token::RBracket,
+        ',' => Token::Comma,
+        ';' => Token::Semicolon,
+        '@' => Token::At,
+        ':' => Token::Colon,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
