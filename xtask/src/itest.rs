@@ -79,7 +79,7 @@ const SCENARIOS: &[Scenario] = itest_harness::scenarios! {
     wfi "pre-init-order"                  scenarios::pre_init_order                 [boot];
     wfi "kernel-runs-at-higher-half"      scenarios::kernel_runs_at_higher_half     [boot];
     wfi "frame-allocator-metrics"         scenarios::frame_allocator_metrics        [frame];
-    wfi "frame-allocator-oom"             scenarios::frame_allocator_oom            [frame, oom];
+    wfi "frame-allocator-oom"             scenarios::frame_allocator_oom            [frame, oom]    {"frame-oom"};
     wfi "kernel-heap-metrics"             scenarios::kernel_heap_metrics            [heap];
     wfi "sched-context-switch-smoke"      scenarios::sched_context_switch_smoke     [sched];
     wfi "sched-spawn-registers-thread"    scenarios::sched_spawn_registers_thread   [sched];
@@ -87,37 +87,41 @@ const SCENARIOS: &[Scenario] = itest_harness::scenarios! {
     wfi "sched-spans-carry-task-id"       scenarios::sched_spans_carry_task_id      [sched];
     wfi "sched-context-switches-on-wire"  scenarios::sched_context_switches_on_wire [sched];
     wfi "sched-span-survives-yield"       scenarios::sched_span_survives_yield      [sched];
-    cpu "heap-oom"                        scenarios::heap_oom                       [heap, oom];
+    cpu "heap-oom"                        scenarios::heap_oom                       [heap, oom]    {"heap-oom"};
     cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline  [workload];
-    cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness [smp, workload];
+    cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness [smp, workload] {"smp burst=256"};
     wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup                [smp, ipi];
     wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots       [smp];
     wfi "smp-spawn-on-hart-1-runs"        scenarios::smp_spawn_on_hart_1_runs       [smp];
     wfi "smp-spans-carry-hart-id"         scenarios::smp_spans_carry_hart_id        [smp];
     wfi "smp-ipi-wakes-idle-hart"         scenarios::smp_ipi_wakes_idle_hart        [smp, ipi];
-    cpu "spawn-storm"                     scenarios::spawn_storm                    [smp, stress];
-    cpu "ipi-pong"                        scenarios::ipi_pong                       [smp, ipi, stress];
-    cpu "shootdown-storm"                 scenarios::shootdown_storm                [smp, stress];
-    cpu "smp-tlb-shootdown-visible"       scenarios::smp_tlb_shootdown_visible      [smp];
-    cpu "smp-ping-pong-cadence"           scenarios::smp_ping_pong_cadence          [smp, ipi];
+    cpu "spawn-storm"                     scenarios::spawn_storm                    [smp, stress]   {"spawn-storm"};
+    cpu "ipi-pong"                        scenarios::ipi_pong                       [smp, ipi, stress] {"ipi-pong"};
+    cpu "shootdown-storm"                 scenarios::shootdown_storm                [smp, stress]   {"shootdown-storm"};
+    cpu "smp-tlb-shootdown-visible"       scenarios::smp_tlb_shootdown_visible      [smp]           {"tlb-shootdown"};
+    cpu "smp-ping-pong-cadence"           scenarios::smp_ping_pong_cadence          [smp, ipi]      {"ping-pong"};
     wfi "sched-task-exits-cleanly"        scenarios::sched_task_exits_cleanly       [sched];
-    cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress];
-    cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress];
+    cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
+    cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back
     // to its idle `wfi` loop) and `faulter` faults (the kernel parks the hart
     // in `wfi`). So they fan out in the parallel pool rather than a serial pass.
-    wfi "userspace-emits-telemetry"       scenarios::userspace_emits_telemetry     [userspace];
-    wfi "userspace-cannot-touch-kernel"   scenarios::userspace_cannot_touch_kernel  [userspace];
-    wfi "userspace-grant-snitched"        scenarios::userspace_grant_snitched       [userspace];
-    wfi "userspace-cap-denied"            scenarios::userspace_cap_denied           [userspace];
-    wfi "userspace-cap-granted-event"     scenarios::userspace_cap_granted_event    [userspace];
-    wfi "userspace-process-exits"         scenarios::userspace_process_exits        [userspace];
-    wfi "userspace-yield-round-trips"     scenarios::userspace_yield_round_trips     [userspace];
-    wfi "userspace-spansink-granted"      scenarios::userspace_spansink_granted     [userspace];
-    wfi "userspace-emits-span"            scenarios::userspace_emits_span           [userspace];
-    wfi "userspace-refusal-snitched"      scenarios::userspace_refusal_snitched     [userspace];
-    wfi "userspace-quota-refused"         scenarios::userspace_quota_refused        [userspace];
-    cpu "workers-make-progress"           scenarios::workers_make_progress          [userspace];
+    // The nine `{"userspace"}` rows all boot the *same* `hello` run — a single
+    // execution that grants both caps, emits telemetry=42, opens hello.work,
+    // is refused a wrong-object handle, is denied an ungranted handle, yields,
+    // and exits. That shared superset is what makes them one shared-boot group.
+    wfi "userspace-emits-telemetry"       scenarios::userspace_emits_telemetry     [userspace]  {"userspace"};
+    wfi "userspace-cannot-touch-kernel"   scenarios::userspace_cannot_touch_kernel  [userspace]  {"userspace-fault"};
+    wfi "userspace-grant-snitched"        scenarios::userspace_grant_snitched       [userspace]  {"userspace"};
+    wfi "userspace-cap-denied"            scenarios::userspace_cap_denied           [userspace]  {"userspace"};
+    wfi "userspace-cap-granted-event"     scenarios::userspace_cap_granted_event    [userspace]  {"userspace"};
+    wfi "userspace-process-exits"         scenarios::userspace_process_exits        [userspace]  {"userspace"};
+    wfi "userspace-yield-round-trips"     scenarios::userspace_yield_round_trips     [userspace]  {"userspace"};
+    wfi "userspace-spansink-granted"      scenarios::userspace_spansink_granted     [userspace]  {"userspace"};
+    wfi "userspace-emits-span"            scenarios::userspace_emits_span           [userspace]  {"userspace"};
+    wfi "userspace-refusal-snitched"      scenarios::userspace_refusal_snitched     [userspace]  {"userspace"};
+    wfi "userspace-quota-refused"         scenarios::userspace_quota_refused        [userspace]  {"userspace-span-flood"};
+    cpu "workers-make-progress"           scenarios::workers_make_progress          [userspace]  {"workers"};
 };
 
 /// Set the process-wide failure-capture transcript depth. Call once at

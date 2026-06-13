@@ -9,6 +9,25 @@ Goal: cut dev-loop wall-clock by collapsing redundant boots, **without**
 losing the per-scenario isolation, flake-rate baselines, and
 failure-signature capture that the separate-boot model gives us.
 
+## Status (2026-06-13)
+
+- **Step 1–2 done** — `Harness` re-implemented on a `Recorder` (append-only
+  frame buffer + condvar + per-handle cursor) instead of the consume-once
+  mpsc channel. Behaviour-preserving; old fn signatures intact; 5 host
+  unit tests (`cargo test -p xtask recorder_tests`) cover the cursor logic
+  incl. two independent cursors replaying one buffer. Full QEMU suite green
+  (run by the user).
+- **Step 3 done** — `Scenario.workload: Option<&'static str>` +
+  `on_workload` builder; `scenarios!` row grammar gains a `{"<workload>"}`
+  clause (braced, not a `workload` keyword: a bare ident can't follow a
+  `:path` matcher fragment). Catalog populated with every scenario's
+  workload; guard comment on the nine `{"userspace"}` rows. Macro tests
+  extended. Host-only; no scenario bodies touched yet.
+- **Next: step 4** — extract `View` (cursor + per-scenario assertion
+  state) from the QEMU-owning `Harness`; migrate the 41 scenario fns to
+  `fn(&mut View)` and drop their in-fn `spawn`. All-or-nothing on the `run`
+  signature; needs a QEMU suite run to validate (the user runs it).
+
 Non-goal: replacing the separate-boot model. Shared mode is an
 additional, opt-in mode. The flake gate (`--repeat 10`) and baseline
 updates keep running in separate mode.

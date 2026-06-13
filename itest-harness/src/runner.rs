@@ -59,20 +59,26 @@ pub struct Scenario {
     /// Free-form labels for `--tag` selection (e.g. `["userspace"]`,
     /// `["smp", "stress"]`). Defaults to empty; annotate via `tagged`.
     pub tags: &'static [&'static str],
+    /// The runtime workload this scenario boots (the `workload=<name>`
+    /// bootarg), or `None` for the default demo. This is the **grouping
+    /// key** for shared-boot mode: scenarios with the same `workload`
+    /// read one boot. Declared on the catalog row via `on_workload`; see
+    /// `plans/itest-shared-boot-mode.md`.
+    pub workload: Option<&'static str>,
 }
 
 impl Scenario {
     /// New `Wfi`-profile scenario. Const-fn so it composes inside
     /// `const SCENARIOS: &[Scenario]` arrays.
     pub const fn new(name: &'static str, run: fn() -> Result<(), String>) -> Self {
-        Self { name, run, cpu_profile: CpuProfile::Wfi, tags: &[] }
+        Self { name, run, cpu_profile: CpuProfile::Wfi, tags: &[], workload: None }
     }
 
     /// New `Cpu`-profile scenario. For scenarios that run real
     /// guest CPU work between heartbeats — allocator pressure
     /// loops, context-switch storms, etc. Same const-fn property.
     pub const fn cpu_bound(name: &'static str, run: fn() -> Result<(), String>) -> Self {
-        Self { name, run, cpu_profile: CpuProfile::Cpu, tags: &[] }
+        Self { name, run, cpu_profile: CpuProfile::Cpu, tags: &[], workload: None }
     }
 
     /// Annotate with selection tags. Chainable and const so it composes
@@ -81,6 +87,15 @@ impl Scenario {
     #[must_use]
     pub const fn tagged(mut self, tags: &'static [&'static str]) -> Self {
         self.tags = tags;
+        self
+    }
+
+    /// Declare the runtime workload this scenario boots — the grouping key
+    /// for shared-boot mode. Chainable and const, composes after
+    /// `tagged`: `Scenario::new("u", f).tagged(&["userspace"]).on_workload("userspace")`.
+    #[must_use]
+    pub const fn on_workload(mut self, workload: &'static str) -> Self {
+        self.workload = Some(workload);
         self
     }
 }
@@ -1669,6 +1684,27 @@ mod tests {
         assert_eq!(table[2].name, "userspaced");
         assert_eq!(table[2].cpu_profile, CpuProfile::Wfi);
         assert_eq!(table[2].tags, ["userspace"].as_slice());
+
+        // No `workload` token → default demo.
+        assert!(table.iter().all(|s| s.workload.is_none()));
+    }
+
+    #[test]
+    fn scenarios_macro_sets_workload_with_and_without_tags() {
+        let table: &[Scenario] = crate::scenarios! {
+            wfi "demo"        always_pass;
+            wfi "bare-wl"     always_pass               {"smp"};
+            cpu "tagged-wl"   always_pass  [userspace]  {"userspace"};
+        };
+        assert_eq!(table[0].workload, None);
+        assert_eq!(table[0].tags, [] as [&str; 0]);
+
+        assert_eq!(table[1].workload, Some("smp"));
+        assert!(table[1].tags.is_empty(), "workload without tags must not invent tags");
+
+        assert_eq!(table[2].workload, Some("userspace"));
+        assert_eq!(table[2].tags, ["userspace"].as_slice());
+        assert_eq!(table[2].cpu_profile, CpuProfile::Cpu);
     }
 
     #[test]
