@@ -2,17 +2,19 @@
 //! capability bindings shared by every U-mode program.
 //!
 //! A program crate depends on this, declares `#![no_std] #![no_main]`, and
-//! defines a single `#[no_mangle] extern "C" fn rust_main(startup: Startup) ->
-//! !`. It carries no `_start`, no panic handler, and no raw `ecall` —
-//! `start.S` sets up the stack and tail-calls `rust_main` (the kernel left the
-//! startup capabilities in `a0`, the SysV first-arg register), and the API
-//! below wraps the syscall ABI.
+//! defines a plain `#[unsafe(no_mangle)] extern "C" fn main()`. It carries no
+//! `_start`, no panic handler, and no raw `ecall` — `start.S` sets up the
+//! stack and tail-calls `__snitchos_start`, which inits the heap, publishes the
+//! startup capabilities (delivered in `a0`/`a1`) for the [`telemetry`] /
+//! [`tracer`] accessors, calls `main`, then `exit`s. The API below wraps the
+//! syscall ABI and the userspace allocator.
 //!
-//! The API is **capability-shaped**, not POSIX-shaped: a program holds typed
-//! handles (`TelemetrySink`) that the kernel validates against *its own*
-//! capability table. Naming an integer is not authority. (v0.7b: the
-//! bootstrap handle is well-known; v0.8 delivers the initial capability set
-//! at startup — see `docs/capability-system-design.md`.)
+//! The API is **capability-shaped**, not POSIX-shaped: a program reaches its
+//! authority through typed handles (`TelemetrySink`, `Tracer`) that the kernel
+//! validates against *its own* capability table. Naming an integer is not
+//! authority. (`main()` taking nothing and calling accessors for its caps is
+//! the std-like shape, not ambient authority — the handles still come from the
+//! kernel-granted startup set; see `docs/capability-system-design.md`.)
 
 #![no_std]
 
@@ -21,10 +23,6 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use linked_list_allocator::LockedHeap;
 use snitchos_abi::Syscall;
-
-/// `#[snitchos_user::main]` — write a plain `fn main()` instead of a manual
-/// `rust_main` entry shim. See the macro's docs.
-pub use snitchos_user_macros::main;
 
 core::arch::global_asm!(include_str!("start.S"));
 
@@ -42,93 +40,57 @@ static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 #[global_allocator]
 static ALLOC: LockedHeap = LockedHeap::empty();
 
-// Startup capabilities stashed by the `#[main]` shim so the free accessors can
-// reach them — the std-like shape where `main()` takes nothing and you call
-// library functions for your environment. Two atomics rather than a `static
-// mut` (no reference to a mutable static; userspace is single-threaded so
-// `Relaxed` suffices). Set before `main()` runs; `0` is never read.
+// The two startup capability handles the kernel delivers in `a0`/`a1`.
+// `__snitchos_start` stores them here before calling `main`; the free
+// accessors below read them — the std-like shape where `main()` takes nothing
+// and you call library functions for your environment. Two atomics rather than
+// a `static mut` (no reference to a mutable static; userspace is
+// single-threaded so `Relaxed` suffices). Set before `main` runs; `0` is never
+// read.
 static STARTUP_TELEMETRY: AtomicUsize = AtomicUsize::new(0);
 static STARTUP_SPAN: AtomicUsize = AtomicUsize::new(0);
 
-/// Stash the startup handles. Called by the `#[snitchos_user::main]` shim
-/// before `main()`; not for direct use.
-#[doc(hidden)]
-pub fn __set_startup(startup: Startup) {
-    STARTUP_TELEMETRY.store(startup.telemetry_handle, Ordering::Relaxed);
-    STARTUP_SPAN.store(startup.span_handle, Ordering::Relaxed);
-}
-
-/// This process's `TelemetrySink` capability. Valid inside a
-/// `#[snitchos_user::main]` `fn main()` (the runtime stashed it first).
+/// This process's `TelemetrySink` capability (delivered at startup).
 #[must_use]
 pub fn telemetry() -> TelemetrySink {
     TelemetrySink::from_raw_handle(STARTUP_TELEMETRY.load(Ordering::Relaxed))
 }
 
-/// This process's `SpanSink` capability (authority to open spans).
+/// This process's `SpanSink` capability — authority to open spans.
 #[must_use]
 pub fn tracer() -> Tracer {
     Tracer::from_raw_handle(STARTUP_SPAN.load(Ordering::Relaxed))
 }
 
 unsafe extern "C" {
-    /// The program's entry, provided by each `#[no_mangle]` binary. Returns
-    /// `()` — the runtime calls [`exit`] afterward, so the program never has
-    /// to, and every RAII guard (e.g. a span [`Span`]) drops on return,
-    /// *before* the process terminates.
-    fn rust_main(startup: Startup);
+    /// The program entry, provided by each binary as
+    /// `#[unsafe(no_mangle)] extern "C" fn main()`. Returns `()` — the runtime
+    /// calls [`exit`] afterward, so the program never has to, and every RAII
+    /// guard (e.g. a span [`Span`]) drops on return, before the process ends.
+    fn main();
 }
 
 /// Runtime entry — `crt0` (`start.S`) tail-calls here with the kernel's two
-/// startup handles in `a0`/`a1`. Builds [`Startup`] from those scalars (no
-/// struct-in-registers assumption across the asm boundary), runs the program,
-/// then terminates the process once `rust_main` returns and its guards drop.
+/// startup handles in `a0`/`a1` (two plain scalars, no struct-in-registers
+/// ABI assumption). Inits the heap, publishes the handles for the accessors,
+/// runs the program, then terminates the process once `main` returns.
 #[unsafe(no_mangle)]
 extern "C" fn __snitchos_start(telemetry_handle: usize, span_handle: usize) -> ! {
     // SAFETY: `HEAP` is a static `.bss` arena the loader maps; this runs once,
-    // before `rust_main` (and thus before any allocation). `addr_of_mut!`
-    // avoids forming a reference to the `static mut`.
+    // before `main` (and thus before any allocation). `addr_of_mut!` avoids
+    // forming a reference to the `static mut`.
     unsafe {
         ALLOC
             .lock()
             .init(core::ptr::addr_of_mut!(HEAP).cast::<u8>(), HEAP_SIZE);
     }
-    // SAFETY: every program links this runtime and provides `rust_main` per
-    // the contract above.
+    STARTUP_TELEMETRY.store(telemetry_handle, Ordering::Relaxed);
+    STARTUP_SPAN.store(span_handle, Ordering::Relaxed);
+    // SAFETY: every program links this runtime and provides `main`.
     unsafe {
-        rust_main(Startup { telemetry_handle, span_handle });
+        main();
     }
     exit();
-}
-
-/// The capabilities a process is handed at startup. The kernel sets the two
-/// handles in `a0`/`a1` at entry; `__snitchos_start` reads them as scalars and
-/// builds this struct, then hands it to `rust_main`.
-///
-/// `repr(C)` over two `usize`s, delivered in `a0`/`a1`: the bootstrap
-/// `TelemetrySink` and `SpanSink` handles. When caps multiply further (v0.8
-/// IPC) `a0` would become a pointer to an in-memory `BootInfo` page — but this
-/// *program-facing* type stays put, so programs don't change. The program
-/// receives its authority rather than assuming well-known handles.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Startup {
-    telemetry_handle: usize,
-    span_handle: usize,
-}
-
-impl Startup {
-    /// The `TelemetrySink` capability the kernel granted this process.
-    #[must_use]
-    pub fn telemetry(self) -> TelemetrySink {
-        TelemetrySink::from_raw_handle(self.telemetry_handle)
-    }
-
-    /// The `SpanSink` capability — authority to open spans from U-mode.
-    #[must_use]
-    pub fn tracer(self) -> Tracer {
-        Tracer::from_raw_handle(self.span_handle)
-    }
 }
 
 /// Minimal panic handler: a U-mode program has nowhere to report to yet, so

@@ -60,27 +60,29 @@ Fixed-size; running out is a clean alloc-error (abort/panic → spin), not UB.
 **Open:** `HEAP_SIZE` (start ~64 KiB); a large `.bss` arena grows the mapped
 region but not the file image (`.bss` has `filesz=0`).
 
-## 2. A normal `fn main()` ✅ DONE
+## 2. A normal `fn main()` ✅ DONE — *no macro*
 
-Implemented as a hand-rolled (no syn/quote) proc-macro crate
-`snitchos-user-macros`, re-exported as `snitchos_user::main`. A program writes:
+Briefly built as a proc-macro (`#[snitchos_user::main]`), then **deleted the
+macro entirely** in favour of the runtime calling an `extern "C" fn main()`
+directly. On stable `no_std` you can't get a zero-decoration `fn main()` (the
+`main` lang item needs std/nightly), so a program writes:
 
 ```rust
-#[snitchos_user::main]
-fn main() {
+#[unsafe(no_mangle)]
+extern "C" fn main() {
     let _span = snitchos_user::tracer().span("hello.work");
 }
 ```
 
-The macro generates the `#[no_mangle] rust_main(Startup)` shim, which stashes
-the startup handles in two runtime atomics and calls `main()`; the free
-accessors `snitchos_user::tracer()` / `telemetry()` read them (the std-like
-shape — `main()` takes nothing, you call library fns for your environment).
-`hello` is converted and behaves identically (10/10). The old
-`rust_main(startup)` style still works (backward-compatible); `worker` /
-`span-flood` / `faulter` can migrate when convenient.
+`__snitchos_start` inits the heap, stores the two startup handles into runtime
+atomics, calls `main()`, then `exit`s. The free accessors
+`snitchos_user::tracer()` / `telemetry()` read the atomics — the std-like shape
+(`main()` takes nothing; you call library fns for your environment). The
+`Startup` struct is gone (the caps are just the accessors). The `#[no_mangle]
+extern "C"` decoration is the honest no_std entry tax; the trade vs a proc-macro
+crate is worth it. All four programs converted; 10/10 flake-clean.
 
-### Original design notes
+### Original design notes (superseded — kept for context)
 
 Std's trick: `main()` takes nothing; you call library functions for your
 environment. Same here — stash `Startup` in a runtime global at

@@ -2,7 +2,7 @@
 //! { open a `worker.tick` span, bump a progress counter, `yield` }. The
 //! userspace successor to the kernel-mode `task_a`/`task_b`.
 //!
-//! `rust_main` never returns — it's a server loop; the runtime's post-`main`
+//! `main` never returns — it's a server loop; the runtime's post-`main`
 //! `exit()` is simply never reached. The span guard opens at the top of each
 //! iteration, stays open across the `yield` (span-survives-yield), and closes
 //! at the end of the loop body. The span name is interned once (repeats are
@@ -12,12 +12,12 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{Startup, yield_now};
+use snitchos_user::{telemetry, tracer, yield_now};
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_main(startup: Startup) {
-    let tracer = startup.tracer();
-    let sink = startup.telemetry();
+extern "C" fn main() {
+    let tracer = tracer();
+    let sink = telemetry();
     let mut progress: i64 = 0;
     loop {
         let _span = tracer.span("worker.tick");

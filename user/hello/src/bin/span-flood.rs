@@ -8,11 +8,10 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::Startup;
+use snitchos_user::{telemetry, tracer};
 
 /// Twenty distinct names — four past the 16-name quota, so the last four opens
-/// must be refused. Static literals (the runtime has no allocator to build
-/// names at runtime).
+/// must be refused. Static literals (no need to allocate distinct names).
 const NAMES: &[&str] = &[
     "flood.00", "flood.01", "flood.02", "flood.03", "flood.04", "flood.05", "flood.06",
     "flood.07", "flood.08", "flood.09", "flood.10", "flood.11", "flood.12", "flood.13",
@@ -20,8 +19,8 @@ const NAMES: &[&str] = &[
 ];
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_main(startup: Startup) {
-    let tracer = startup.tracer();
+extern "C" fn main() {
+    let tracer = tracer();
     for name in NAMES {
         // Open then immediately close (the guard drops at the end of the
         // statement). Each new name consumes one quota slot; once the quota is
@@ -29,5 +28,5 @@ pub extern "C" fn rust_main(startup: Startup) {
         let _ = tracer.span(name);
     }
     // Marker so the test can confirm the program ran the whole flood.
-    let _ = startup.telemetry().emit(1);
+    let _ = telemetry().emit(1);
 }

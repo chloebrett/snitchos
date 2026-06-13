@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,11 +27,101 @@ use crate::qemu;
 /// hard-coding ids.
 pub type StringTable = HashMap<StringId, String>;
 
+/// Append-only recording of the decoded frame stream, shared between the
+/// reader thread (which pushes) and the assertion side (which scans).
+/// Replaces the old consume-once mpsc channel: frames are *retained*, not
+/// drained, so the assertion side advances a cursor over them rather than
+/// pulling each frame out once. A single cursor today (`Harness::cursor`);
+/// the retention is what will let multiple `View`s replay one boot later.
+struct Recorder {
+    buf: Mutex<RecordBuf>,
+    /// Notified on every append and on close, so a waiter blocked at the
+    /// end of the buffer wakes when a frame arrives or the stream ends.
+    grew: Condvar,
+}
+
+impl Recorder {
+    fn new() -> Self {
+        Self {
+            buf: Mutex::new(RecordBuf { frames: Vec::new(), closed: false }),
+            grew: Condvar::new(),
+        }
+    }
+
+    /// Append one decoded frame and wake any waiter sitting at the end.
+    fn push(&self, frame: OwnedFrame) {
+        let mut buf = self.buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        buf.frames.push(frame);
+        self.grew.notify_all();
+    }
+
+    /// Mark the stream ended (socket EOF / QEMU exit) and wake waiters so a
+    /// handle caught up at the end sees the disconnect instead of waiting
+    /// out its budget.
+    fn close(&self) {
+        let mut buf = self.buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        buf.closed = true;
+        self.grew.notify_all();
+    }
+
+    /// Step `cursor` one frame forward, blocking until the next frame is
+    /// available, the stream closes, or `deadline` passes. `cursor` is the
+    /// caller's own position — the buffer is never drained, so independent
+    /// cursors (the future multi-`View` case) each replay from 0.
+    fn advance(&self, cursor: &mut usize, deadline: Instant) -> Advance {
+        let mut buf = self.buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if let Some(frame) = buf.frames.get(*cursor) {
+                let frame = frame.clone();
+                *cursor += 1;
+                return Advance::Frame(frame);
+            }
+            if buf.closed {
+                return Advance::Disconnected;
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Advance::Timeout;
+            };
+            buf = self
+                .grew
+                .wait_timeout(buf, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
+/// The append-only buffer plus its end-of-stream flag, under one mutex so
+/// the "frame available or stream closed" predicate the condvar guards is
+/// checked atomically.
+struct RecordBuf {
+    frames: Vec<OwnedFrame>,
+    /// Set by the reader thread when `decode_stream` returns (socket EOF /
+    /// QEMU exit). A waiter that reaches the end with `closed == true` sees
+    /// a disconnect rather than waiting out its budget.
+    closed: bool,
+}
+
+/// Outcome of advancing the cursor by one — the record-and-replay analogue
+/// of `mpsc::RecvTimeoutError`. `Frame` carries the next frame (cloned out
+/// of the buffer); `Timeout` / `Disconnected` mirror the old channel ends.
+enum Advance {
+    Frame(OwnedFrame),
+    Timeout,
+    Disconnected,
+}
+
 /// Live integration-test handle. Killing the child and unlinking the
 /// socket happens in `Drop`.
 pub struct Harness {
     qemu: Child,
-    rx: Receiver<OwnedFrame>,
+    /// Shared recording of the frame stream (the reader thread appends).
+    recorder: Arc<Recorder>,
+    /// This handle's position in `recorder.buf.frames`. Advancing it is
+    /// what `wait_for` does; `absorb` runs once per frame stepped over, so
+    /// the string table / histogram / recent-ring state is identical to
+    /// the old "absorb each frame as it leaves the channel" behaviour.
+    cursor: usize,
     strings: StringTable,
     socket_path: PathBuf,
     timebase_hz: Option<u64>,
@@ -135,17 +225,23 @@ impl Harness {
         // Wait for QEMU to create the socket, then connect.
         let stream = connect_with_deadline(&socket_path, Duration::from_secs(10))?;
 
-        let (tx, rx) = channel();
+        let recorder = Arc::new(Recorder::new());
+        let reader_recorder = Arc::clone(&recorder);
         thread::spawn(move || {
             let mut stream = stream;
             let _ = decode_stream(&mut stream, |frame| {
-                let _ = tx.send(OwnedFrame::from_borrowed(frame));
+                reader_recorder.push(OwnedFrame::from_borrowed(frame));
             });
+            // Stream ended (socket EOF / QEMU exit): mark closed so a waiter
+            // sitting at the end sees the disconnect instead of waiting out
+            // its full budget.
+            reader_recorder.close();
         });
 
         Ok(Self {
             qemu,
-            rx,
+            recorder,
+            cursor: 0,
             strings: HashMap::new(),
             socket_path,
             timebase_hz: None,
@@ -175,22 +271,19 @@ impl Harness {
         let start = Instant::now();
         let deadline = start + budget;
         let result = loop {
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                break None;
-            };
-            match self.rx.recv_timeout(remaining) {
-                Ok(frame) => {
+            match self.advance(deadline) {
+                Advance::Frame(frame) => {
                     self.absorb(&frame);
                     if pred(&frame, &self.strings) {
                         break Some(frame);
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => {
+                Advance::Timeout => {
                     self.dump_recent("timeout");
                     self.record_failure_capture(WaitOutcome::Timeout);
                     break None;
                 }
-                Err(RecvTimeoutError::Disconnected) => {
+                Advance::Disconnected => {
                     self.dump_recent("QEMU disconnected");
                     self.record_failure_capture(WaitOutcome::Disconnected);
                     break None;
@@ -202,6 +295,16 @@ impl Harness {
             self.max_wait = (elapsed, budget);
         }
         result
+    }
+
+    /// Step this handle's cursor one frame forward. The record-and-replay
+    /// replacement for `Receiver::recv_timeout`: frames already behind the
+    /// cursor stay in the buffer (a future `View` can rescan them), and
+    /// only this handle's `cursor` advances. Delegates to `Recorder` so the
+    /// blocking/timeout logic is host-testable without a live QEMU.
+    fn advance(&mut self, deadline: Instant) -> Advance {
+        let recorder = Arc::clone(&self.recorder);
+        recorder.advance(&mut self.cursor, deadline)
     }
 
     /// Negative oracle: assert a "bad" frame never appears within `window`.
@@ -228,19 +331,16 @@ impl Harness {
         let start = Instant::now();
         let deadline = start + window;
         let outcome = loop {
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                break Ok(());
-            };
-            match self.rx.recv_timeout(remaining) {
-                Ok(frame) => {
+            match self.advance(deadline) {
+                Advance::Frame(frame) => {
                     self.absorb(&frame);
                     if pred(&frame, &self.strings) {
                         self.dump_recent("negative oracle tripped");
                         break Err(on_present.into());
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => break Ok(()),
-                Err(RecvTimeoutError::Disconnected) => {
+                Advance::Timeout => break Ok(()),
+                Advance::Disconnected => {
                     self.dump_recent("QEMU disconnected");
                     self.record_failure_capture(WaitOutcome::Disconnected);
                     break Err(format!(
@@ -608,5 +708,99 @@ fn connect_with_deadline(
             }
             Err(e) => return Err(format!("connect {}: {e}", path.display())),
         }
+    }
+}
+
+#[cfg(test)]
+mod recorder_tests {
+    //! The cursor/condvar logic of `Recorder::advance`, exercised without a
+    //! live QEMU. Validates the record-and-replay semantics the prefactor
+    //! introduced: retained (not drained) frames, per-cursor positions,
+    //! and the timeout/disconnect edges that mirror the old mpsc channel.
+    use super::{Advance, OwnedFrame, Recorder};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// `OwnedFrame::Dropped` is the simplest variant — use its `count` as a
+    /// per-frame tag so tests can assert ordering without `PartialEq`.
+    fn tagged(count: u32) -> OwnedFrame {
+        OwnedFrame::Dropped { count }
+    }
+
+    fn count_of(adv: Advance) -> u32 {
+        match adv {
+            Advance::Frame(OwnedFrame::Dropped { count }) => count,
+            Advance::Frame(other) => panic!("unexpected frame variant: {other:?}"),
+            Advance::Timeout => panic!("expected a frame, got Timeout"),
+            Advance::Disconnected => panic!("expected a frame, got Disconnected"),
+        }
+    }
+
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
+
+    #[test]
+    fn advance_yields_buffered_frames_in_order() {
+        let rec = Recorder::new();
+        rec.push(tagged(10));
+        rec.push(tagged(20));
+        let mut cursor = 0;
+        assert_eq!(count_of(rec.advance(&mut cursor, soon())), 10);
+        assert_eq!(count_of(rec.advance(&mut cursor, soon())), 20);
+        assert_eq!(cursor, 2);
+    }
+
+    #[test]
+    fn advance_times_out_when_no_frame_and_stream_open() {
+        let rec = Recorder::new();
+        let mut cursor = 0;
+        let deadline = Instant::now() + Duration::from_millis(50);
+        assert!(matches!(rec.advance(&mut cursor, deadline), Advance::Timeout));
+        assert_eq!(cursor, 0, "a timeout must not advance the cursor");
+    }
+
+    #[test]
+    fn advance_reports_disconnect_only_after_draining_buffered_frames() {
+        let rec = Recorder::new();
+        rec.push(tagged(1));
+        rec.close();
+        let mut cursor = 0;
+        // The buffered frame comes out first, even though the stream is closed.
+        assert_eq!(count_of(rec.advance(&mut cursor, soon())), 1);
+        // Only now, caught up at the end of a closed stream, is it a disconnect.
+        assert!(matches!(rec.advance(&mut cursor, soon()), Advance::Disconnected));
+    }
+
+    #[test]
+    fn advance_blocks_then_wakes_on_a_late_push() {
+        let rec = Arc::new(Recorder::new());
+        let writer = Arc::clone(&rec);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            writer.push(tagged(99));
+        });
+        let mut cursor = 0;
+        // Deadline is well past the writer's 50ms sleep, so this must block
+        // and then wake with the pushed frame — not time out.
+        assert_eq!(count_of(rec.advance(&mut cursor, soon())), 99);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn independent_cursors_each_replay_from_zero() {
+        // The whole point of recording over consuming: two cursors over one
+        // buffer each see every frame from the start. This is the multi-View
+        // foundation, proven on the prefactor's own machinery.
+        let rec = Recorder::new();
+        rec.push(tagged(1));
+        rec.push(tagged(2));
+        let mut a = 0;
+        let mut b = 0;
+        assert_eq!(count_of(rec.advance(&mut a, soon())), 1);
+        assert_eq!(count_of(rec.advance(&mut a, soon())), 2);
+        // Cursor `b` is untouched by `a`'s scan — it still sees frame 1 first.
+        assert_eq!(count_of(rec.advance(&mut b, soon())), 1);
+        assert_eq!(count_of(rec.advance(&mut b, soon())), 2);
     }
 }

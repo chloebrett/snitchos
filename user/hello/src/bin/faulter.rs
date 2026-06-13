@@ -10,16 +10,16 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::Startup;
+use snitchos_user::telemetry;
 
 /// A kernel high-half VA that is always mapped (the kernel image base, per
 /// `kernel/linker.ld`) but carries no `U` bit. A U-mode load here faults.
 const KERNEL_PROBE_VA: usize = 0xffff_ffff_8020_0000;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_main(startup: Startup) {
+extern "C" fn main() {
     // Prove we reached U-mode and the syscall path works from here too.
-    let _ = startup.telemetry().emit(99);
+    let _ = telemetry().emit(99);
 
     // The probe: a U-mode load of a kernel VA. Mapped but not `U`, so this
     // faults to S-mode and never returns here — the kernel counts the fault

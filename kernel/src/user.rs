@@ -301,8 +301,8 @@ pub fn copy_from_user(ptr: usize, len: usize, dst: &mut [u8]) -> Option<&[u8]> {
 /// Switch to the process's address space (`root_pa`) and drop to U-mode at
 /// `loaded.entry`, with `a0`/`a1` set to `startup_a0`/`startup_a1` — the two
 /// startup capability handles the program receives (its `crt0` passes them
-/// straight into `rust_main` as the `Startup` struct's two fields). Never
-/// returns.
+/// into `__snitchos_start`, which publishes them for the runtime's `telemetry`
+/// / `tracer` accessors before calling `main`). Never returns.
 ///
 /// `satp` is switched first: the kernel high-half is shared into `root_pa`,
 /// so this function's own code/stack (and the trap path it's about to enter)
