@@ -14,12 +14,23 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::sync::atomic::AtomicU64;
 
 use kernel_core::ipc::{on_receive, on_send, EndpointId, EndpointState, RendezvousAction};
 use kernel_core::sched::TaskId;
 use protocol::SpanId;
 
 use crate::sync::{Mutex, Once};
+
+/// Rendezvous count: bumped once per message delivered (the receiver side of a
+/// crossing). Drained as `snitchos.ipc.messages_total` in the heartbeat —
+/// deferred-emission, never a frame from the rendezvous itself. `Relaxed`: a
+/// counter.
+pub static MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Block count: bumped once each time a `send`/`receive` parks its caller for
+/// want of a peer. Drained as `snitchos.ipc.blocks_total`. `Relaxed`: counter.
+pub static BLOCKS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Inline message size: the four words carried in `a1..=a4`.
 pub const MSG_WORDS: usize = 4;
@@ -34,11 +45,14 @@ pub type Message = [u64; MSG_WORDS];
 struct Pending {
     msg: Message,
     parent: SpanId,
+    /// The sending task — recorded so the receiver can emit a `Message` frame
+    /// naming who it came from.
+    from: TaskId,
 }
 
 impl Default for Pending {
     fn default() -> Self {
-        Self { msg: [0; MSG_WORDS], parent: SpanId(0) }
+        Self { msg: [0; MSG_WORDS], parent: SpanId(0), from: TaskId(0) }
     }
 }
 
@@ -84,9 +98,9 @@ pub enum SendStep {
 /// What the `receive` trap handler must do once the endpoint lock is dropped.
 pub enum RecvStep {
     /// A sender was waiting; `msg` is its payload (write it into the receiver's
-    /// frame) and `parent` its trace context (seed it onto the receiver) —
-    /// wake the sender.
-    Deliver { msg: Message, parent: SpanId, wake: TaskId },
+    /// frame), `parent` its trace context (seed it onto the receiver), `from`
+    /// the sending task (for the `Message` frame) — wake the sender.
+    Deliver { msg: Message, parent: SpanId, from: TaskId, wake: TaskId },
     /// No sender; block until one rendezvouses.
     Block,
 }
@@ -101,7 +115,7 @@ pub fn send_begin(ep: EndpointId, me: TaskId, msg: Message, parent: SpanId) -> S
     let state = core::mem::replace(&mut endpoint.state, EndpointState::Idle);
     let (next, action) = on_send(state, me);
     endpoint.state = next;
-    let pending = Pending { msg, parent };
+    let pending = Pending { msg, parent, from: me };
     match action {
         RendezvousAction::Rendezvous { peer } => {
             // Deliver to the blocked receiver's slot; it reads this on resume.
@@ -127,19 +141,19 @@ pub fn receive_begin(ep: EndpointId, me: TaskId) -> RecvStep {
     endpoint.state = next;
     match action {
         RendezvousAction::Rendezvous { peer } => {
-            let Pending { msg, parent } = endpoint.pending.remove(&peer).unwrap_or_default();
-            RecvStep::Deliver { msg, parent, wake: peer }
+            let Pending { msg, parent, from } = endpoint.pending.remove(&peer).unwrap_or_default();
+            RecvStep::Deliver { msg, parent, from, wake: peer }
         }
         RendezvousAction::Block => RecvStep::Block,
     }
 }
 
-/// Take the message + trace context delivered to `me` while it was blocked in
-/// `receive`. Call once, after `block_current` returns: a sender stored it
-/// under `me`'s id at rendezvous. Defaults to zeros / no parent if (impossibly)
-/// absent — never panics.
-pub fn take_delivered(ep: EndpointId, me: TaskId) -> (Message, SpanId) {
+/// Take the message + trace context + sender delivered to `me` while it was
+/// blocked in `receive`. Call once, after `block_current` returns: a sender
+/// stored it under `me`'s id at rendezvous. Defaults to zeros / no parent /
+/// task 0 if (impossibly) absent — never panics.
+pub fn take_delivered(ep: EndpointId, me: TaskId) -> (Message, SpanId, TaskId) {
     let mut eps = ENDPOINTS.lock();
-    let Pending { msg, parent } = eps[ep.0 as usize].pending.remove(&me).unwrap_or_default();
-    (msg, parent)
+    let Pending { msg, parent, from } = eps[ep.0 as usize].pending.remove(&me).unwrap_or_default();
+    (msg, parent, from)
 }

@@ -283,6 +283,23 @@ pub fn emit_context_switch(
     });
 }
 
+/// Emit a `Message` frame for an IPC rendezvous: a message crossed from task
+/// `from` to task `to` over `endpoint`, carrying `parent` (the sender's span)
+/// as the boundary-crossing trace link. Called by the receive path at delivery
+/// — outside the endpoint critical section, and the frame is string-free (no
+/// intern, no alloc), so direct emission is safe (same context as
+/// `emit_metric` in the `Invoke` handler).
+pub fn emit_message(endpoint: u32, from: u32, to: u32, parent: protocol::SpanId) {
+    emit_frame(&Frame::Message {
+        endpoint,
+        from,
+        to,
+        parent_span: parent,
+        t: timestamp(),
+        hart_id: crate::percpu::current_hartid() as u8,
+    });
+}
+
 /// Open a span named `$name` for the current scope. Expands to a
 /// `let _span = ...` binding so the guard lives until the caller's
 /// scope ends. The span's `SpanEnd` frame fires automatically when

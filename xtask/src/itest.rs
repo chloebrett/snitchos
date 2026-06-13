@@ -136,6 +136,7 @@ catalog! {
     wfi "block-wake-smoke"                scenarios::block_wake_smoke               [sched]         {"block-wake"};
     wfi "ipc-message-crosses"             scenarios::ipc_message_crosses            [userspace, ipc] {"ipc"};
     wfi "ipc-trace-crosses"               scenarios::ipc_trace_crosses              [userspace, ipc] {"ipc"};
+    wfi "ipc-telemetry"                   scenarios::ipc_telemetry                  [userspace, ipc] {"ipc"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back

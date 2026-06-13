@@ -91,10 +91,17 @@ A placeholder (`$`, `$a`, …) appearing inside a **call argument** turns that a
 
 ## 4. Pipe semantics
 
-`|>` inserts its left operand as the **first argument** _(confirm — Elixir-style, not F#-style)_ of the call on its right:
+`|>` inserts its left operand as the **first argument** _(confirm — Elixir-style, not F#-style)_ of the call on its right. The right side is either a **call** or a bare **function reference**:
 
-- `LHS |> f(a, b)`  ≡  `f(LHS, a, b)`
-- `LHS |> f`        ≡  `f(LHS)`
+- `LHS |> f(a, b)`  ≡  `f(LHS, a, b)`     (call: LHS inserted first)
+- `LHS |> f`        ≡  `f(LHS)`            (bare reference — no empty `()` needed)
+
+The bare-reference form is the "no extra args" stage and keeps pipelines bracket-free:
+```
+[1, 2, 3] |> toSeq |> max        ≡  max(toSeq([1, 2, 3]))
+0..n |> map($ * $) |> filter($ > 10) |> sum
+```
+A pipe stage is therefore one of: a bare name (`max`, `sum`), an operator-as-function (`fold(0, +)`), or a call with its remaining args (`map($ * 2)`) — never a stray `()`. "Bare reference" means an identifier or path (`Math.sqrt`); anything more complex on the right must be an explicit call.
 
 This composes with the placeholder rule: `readings |> filter($.celsius > 30)` ≡ `filter(readings, (x) -> x.celsius > 30)`. So std collection functions are declared subject-first: `filter(list, pred)`, `map(list, f)`, `fold(list, init, f)`.
 

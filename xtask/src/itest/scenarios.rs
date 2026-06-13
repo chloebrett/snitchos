@@ -1151,6 +1151,34 @@ pub fn ipc_trace_crosses(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.9 IPC observability (`workload=ipc`): the rendezvous is counted and
+/// recorded. Asserts a `Frame::Message` reaches the wire naming distinct
+/// from/to tasks (the per-rendezvous topology record — the Step-3 wire variant
+/// finally gets an emitter), then that `snitchos.ipc.messages_total` and
+/// `snitchos.ipc.blocks_total` both reach ≥1 (deferred-emission counters,
+/// bumped at the event and drained in the heartbeat). The one-shot `Message`
+/// frame is matched first (it passes once); the cumulative counters after (a
+/// fresh heartbeat re-emits them every tick).
+pub fn ipc_telemetry(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, _strings| {
+        matches!(f, OwnedFrame::Message { from, to, .. } if from != to)
+    })
+    .ok_or("no Frame::Message with distinct from/to within 30s — the rendezvous record never reached the wire")?;
+
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.ipc.messages_total") && *value >= 1)
+    })
+    .ok_or("no snitchos.ipc.messages_total >= 1 within 30s")?;
+
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.ipc.blocks_total") && *value >= 1)
+    })
+    .ok_or("no snitchos.ipc.blocks_total >= 1 within 30s — neither side blocked on the rendezvous")?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

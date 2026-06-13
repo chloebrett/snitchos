@@ -305,7 +305,10 @@ fn handle_send(frame: &mut TrapFrame) {
     let parent = crate::tracing::current_span_id();
     match crate::ipc::send_begin(ep, me, msg, parent) {
         crate::ipc::SendStep::Deliver { wake } => crate::sched::wake(wake),
-        crate::ipc::SendStep::Block => crate::sched::block_current(),
+        crate::ipc::SendStep::Block => {
+            crate::ipc::BLOCKS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            crate::sched::block_current();
+        }
     }
     // Either path completes the rendezvous: the message was (or will be) taken
     // by the receiver. Report success.
@@ -342,17 +345,22 @@ fn handle_receive(frame: &mut TrapFrame) {
     };
 
     let me = crate::sched::current_task_id();
-    let (msg, parent) = match crate::ipc::receive_begin(ep, me) {
-        crate::ipc::RecvStep::Deliver { msg, parent, wake } => {
+    let (msg, parent, from) = match crate::ipc::receive_begin(ep, me) {
+        crate::ipc::RecvStep::Deliver { msg, parent, from, wake } => {
             crate::sched::wake(wake);
-            (msg, parent)
+            (msg, parent, from)
         }
         crate::ipc::RecvStep::Block => {
+            crate::ipc::BLOCKS_TOTAL.fetch_add(1, Ordering::Relaxed);
             crate::sched::block_current();
             // Resumed: a sender stashed our message + trace context under our id.
             crate::ipc::take_delivered(ep, me)
         }
     };
+    // The message crossed. Count it, and record the topology + trace link on
+    // the wire — both at delivery, outside the endpoint critical section.
+    crate::ipc::MESSAGES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    crate::tracing::emit_message(ep.0, from.0, me.0, parent);
     // Seed the sender's span as our incoming parent — the next span this task
     // opens (its handling span) becomes a child, so the trace continues across
     // the process boundary.
