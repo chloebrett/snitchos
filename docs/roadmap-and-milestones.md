@@ -42,7 +42,7 @@ Second hart online, per-CPU discipline made real, page-table mutation extended w
 
 **Why here, not later:** late SMP is an *unbounded audit* across every global and every "no-one-else-is-here" assumption — silent bugs under weak memory ordering. Late capabilities, by contrast, is a *scoped refactor* (rewrite the syscall layer). The v0.5 sync/percpu prefactor positioned this exactly; the audit surface is still small and enumerable today. Capabilities and IPC are the first concurrency-shaped subsystems — designing them post-SMP means they're born multi-hart-correct.
 
-**Post angle:** three posts from one milestone — "two heartbeats on two harts," "what the chokepoint cost me," "what removing it bought me." See `plans/v0.6-smp-cooperative.md`.
+**Post angle:** three posts from one milestone — "two heartbeats on two harts," "what the chokepoint cost me," "what removing it bought me." See `plans/legacy/v0.6-smp-cooperative.md`.
 
 ## v0.7a — First userspace process (built deliberately wrong)
 User-mode entry, the first userspace process, exactly one syscall — with ambient authority, no capability discipline. Built intentionally the "Unix way" so the next milestone can feel the pain.

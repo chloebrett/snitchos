@@ -377,7 +377,19 @@ keep (mirrors `heap::watermark_grow_decision`).
 
 #### Checkpoints (each its own commit)
 
-- **CP5-1 — address-space-aware switch (the new systems primitive).**
+> **Progress (2026-06-13):** CP5-1 ✅ and CP5-2+CP5-3 ✅ (merged — CP5-2 had no
+> standalone test since the build pipeline always builds fresh, so the
+> two-worker itest drove both). Step 5 **DONE**. `worker` was renamed
+> `worker_a`; `worker_b` added; `workload=workers` spawns both on hart 1;
+> scenario `two-userspace-workers-round-robin` (replacing the single-worker
+> `workers-make-progress`) is green. Pending before the final Step-5 commit:
+> the user's `itest --repeat 10` gate.
+
+- **CP5-1 — address-space-aware switch (the new systems primitive).** ✅
+  DONE. Pure `address_space_switch` (12/12 mutants); `mmu::current_satp_root`
+  + `mmu::activate`; `Task.{address_space,process}` set by `run()`;
+  `switch_address_space` in `yield_now`/`exit_now`. Single-worker regression
+  `itest --repeat 10` was green (43×10) before the second binary landed.
   `Task` carries its `(root_pa, *mut Process)`; `yield_now`/`exit_now` swap
   `satp`+`CURRENT_PROCESS` on switch into a user task; `run()` registers the
   association.

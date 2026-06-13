@@ -28,7 +28,7 @@ the `tp` register reserved for per-hart pointers; wire it to a
 shape ("per-CPU-partitioned `u64` counter") for span IDs — extend the
 same treatment to CURRENT_SPAN. The `PerCpu<T>` chokepoint is already
 in place from the v0.5 pre-SMP-sync prefactor; v0.6 makes it real.
-See `plans/v0.6-smp-cooperative.md`.
+See `plans/legacy/v0.6-smp-cooperative.md`.
 
 > **RESOLVED (v0.6).** The global `CURRENT_SPAN` no longer exists. The
 > v0.5 scheduler already made the open-span stack per-*task* (each

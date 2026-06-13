@@ -10,7 +10,7 @@ The `--udeps` flag was not added. Everything else below shipped as specified.
 
 Validation: `cargo xtask audit kernel-core` reproduced the hand-audit's
 `alloc_contiguous`/`count_in_use` candidates AND surfaced a **real unused dep
-(`spin`)** the hand-pass missed (see `plans/kernel-core-audit.md` finding 0).
+(`spin`)** the hand-pass missed (see `plans/legacy/kernel-core-audit.md` finding 0).
 Confirmed the documented limitation live: common names (`new`, `is_empty`)
 over-count via collision and aren't flagged — the accepted precision-over-recall
 trade. (`is_empty`'s hand-audit demote finding is therefore NOT auto-surfaced.)
@@ -30,7 +30,7 @@ surface), spots intentional divergence, and proposes abstractions.
 
 ## Why — the bash hurts, repeatably
 
-Running the skill on `kernel-core` (`plans/kernel-core-audit.md`), the mechanical
+Running the skill on `kernel-core` (`plans/legacy/kernel-core-audit.md`), the mechanical
 steps fought back in ways that are inherent to shell, not one-off mistakes:
 
 | Painful bash step | How it broke | Tool replacement |
@@ -166,7 +166,7 @@ anti-pattern the skill warns about, enforced in code.
 
 ## Acceptance (regression oracle = today's hand audit)
 
-`cargo xtask audit kernel-core` must reproduce `plans/kernel-core-audit.md`:
+`cargo xtask audit kernel-core` must reproduce `plans/legacy/kernel-core-audit.md`:
 - `alloc_contiguous`, `count_in_use` → candidates (ext=0).
 - `is_empty`, `PRE_INIT_BYTES` → DemotePubCrate (ext=0, int>0).
 - `CapturingSink` **absent** from candidates (it's in a `#[cfg(test)]` block).

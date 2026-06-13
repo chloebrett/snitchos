@@ -103,4 +103,4 @@ The one load-bearing unknown was whether `-append` reaches `/chosen/bootargs` wi
 - **Do any `deflake-*` storms need boot conditions a bootarg can't express?** If a storm needs something set *before* the spawn dispatch runs, confirm the bootarg is parsed early enough (it is, at the spawn site) — flagged for the step-4 port.
 
 ---
-*Companion to `plans/v0.6-smp-cooperative.md`. When this is built, fold the outcome into CLAUDE.md's workload/itest sections and delete the obsolete feature documentation from `kernel/Cargo.toml`.*
+*Companion to `plans/legacy/v0.6-smp-cooperative.md`. When this is built, fold the outcome into CLAUDE.md's workload/itest sections and delete the obsolete feature documentation from `kernel/Cargo.toml`.*

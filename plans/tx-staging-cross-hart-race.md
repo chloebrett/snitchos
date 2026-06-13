@@ -1,6 +1,6 @@
 # TX_STAGING cross-hart race — found and fixed
 
-The residual cross-hart wedge that `plans/residual-race-investigation.md`
+The residual cross-hart wedge that `plans/legacy/residual-race-investigation.md`
 chased for several sessions (and concluded was "uncorrelated jitter,
 Bug B is gone") is **real, specific, and now fixed**. It is a dropped
 lock guard in `virtio_console::send`.
@@ -16,7 +16,7 @@ diagnostic — the classic silent cross-hart wedge.
 
 The old tooling could only say "5% flaky, QEMU disconnected." The
 failure-signature classifier + per-failure `FailureCapture` sidecars
-(Workstream A, `plans/itest-flake-reduction.md`) turned that into a
+(Workstream A, `plans/legacy/itest-flake-reduction.md`) turned that into a
 diagnosis:
 
 1. **Bucketing.** A 500-iteration run of `sched-span-survives-yield`
@@ -84,7 +84,7 @@ exactly why the suite is ~98% fine.
 
 ### Why every storm scenario missed it
 
-`plans/residual-race-investigation.md`'s five storms each isolated a
+`plans/legacy/residual-race-investigation.md`'s five storms each isolated a
 single subsystem in *steady state* with a single emitter. `deflake-
 virtio-storm` had hart 0 emit while hart 1 did pure atomics — never two
 concurrent emitters. None reproduced "both harts in `send()` at once

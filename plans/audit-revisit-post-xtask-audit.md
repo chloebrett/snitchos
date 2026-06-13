@@ -59,7 +59,7 @@ word-boundary heuristic structurally can't see:
 
 protocol/collector: no action. itest-harness: **done** — 43 `pub`→`pub(crate)`,
 zero deletions, surface nearly halved. No unused deps anywhere (contrast
-`kernel-core`'s `spin`, `plans/kernel-core-audit.md` finding 0).
+`kernel-core`'s `spin`, `plans/legacy/kernel-core-audit.md` finding 0).
 
 ## Lesson for the tool / skill
 

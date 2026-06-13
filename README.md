@@ -168,20 +168,20 @@ scenarios).
 
 - [docs/README.md](docs/README.md) — design overview (the three pillars: observability, capabilities, microkernel).
 - [docs/v0.1-hello-traced-world.md](docs/v0.1-hello-traced-world.md) — v0.1 milestone plan.
-- [plans/v0.2-grafana.md](plans/v0.2-grafana.md) — v0.2 implementation plan.
-- [plans/virtio-console.md](plans/virtio-console.md) — virtio-console implementation plan.
-- [plans/v0.3-interrupts.md](plans/v0.3-interrupts.md) — v0.3 implementation plan.
-- [plans/kernel-core-carveout.md](plans/kernel-core-carveout.md) — the host-testability extraction plan + as-built notes.
-- [plans/kernel-integration-tests.md](plans/kernel-integration-tests.md) — the QEMU-driven scenario harness.
+- [plans/legacy/v0.2-grafana.md](plans/legacy/v0.2-grafana.md) — v0.2 implementation plan.
+- [plans/legacy/virtio-console.md](plans/legacy/virtio-console.md) — virtio-console implementation plan.
+- [plans/legacy/v0.3-interrupts.md](plans/legacy/v0.3-interrupts.md) — v0.3 implementation plan.
+- [plans/legacy/kernel-core-carveout.md](plans/legacy/kernel-core-carveout.md) — the host-testability extraction plan + as-built notes.
+- [plans/legacy/kernel-integration-tests.md](plans/legacy/kernel-integration-tests.md) — the QEMU-driven scenario harness.
 - [plans/v0.4-memory-concepts.md](plans/v0.4-memory-concepts.md) — Sv39, higher-half, frame allocator concepts before code.
-- [plans/v0.4-memory-step-1-satp-on.md](plans/v0.4-memory-step-1-satp-on.md) — Sv39 identity boot table + first `csrw satp`.
+- [plans/legacy/v0.4-memory-step-1-satp-on.md](plans/legacy/v0.4-memory-step-1-satp-on.md) — Sv39 identity boot table + first `csrw satp`.
 - [plans/v0.4-memory-step-3-frame-allocator-concepts.md](plans/v0.4-memory-step-3-frame-allocator-concepts.md) — bitmap vs linked-list vs buddy; the linear-map design call.
-- [plans/v0.4-memory-step-3-frame-allocator.md](plans/v0.4-memory-step-3-frame-allocator.md) — frame allocator implementation plan.
+- [plans/legacy/v0.4-memory-step-3-frame-allocator.md](plans/legacy/v0.4-memory-step-3-frame-allocator.md) — frame allocator implementation plan.
 - [plans/v0.4-memory-step-4-kernel-heap.md](plans/v0.4-memory-step-4-kernel-heap.md) — kernel heap implementation plan.
 - [plans/v0.4-memory-findings.md](plans/v0.4-memory-findings.md) — what we learned (and what we worked around) building higher-half.
 - [plans/v0.5-pre-smp-sync-prefactor.md](plans/v0.5-pre-smp-sync-prefactor.md) — `kernel::sync` chokepoint + `PerCpu<T>` stub. The SMP-shaped pre-factor that landed before v0.5 threading.
 - [plans/v0.5-threading.md](plans/v0.5-threading.md) — cooperative round-robin scheduler, per-task span stack, `ThreadRegister` + `ContextSwitch` wire frames.
-- [plans/v0.6-smp-cooperative.md](plans/v0.6-smp-cooperative.md) — the SMP-cooperative milestone: producer/consumer workload migrated across two harts in three posts.
+- [plans/legacy/v0.6-smp-cooperative.md](plans/legacy/v0.6-smp-cooperative.md) — the SMP-cooperative milestone: producer/consumer workload migrated across two harts in three posts.
 - [plans/scaling-corners.md](plans/scaling-corners.md) — known corners for SMP / interrupts.
 - [posts/](posts/) — devlog notes as we go.
 
