@@ -1,12 +1,21 @@
 //! Lexer: source text → `Token`s.
 
 /// A lexical token. Grows one variant per increment as the grammar lands.
+/// A piece of a string literal: literal text, or a `{expr}` interpolation
+/// whose raw source the parser sub-parses later.
+#[derive(Debug, PartialEq)]
+pub enum StrPart {
+    Lit(String),
+    Expr(String),
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Token {
     // Literals
     Int(i64),
     Float(f64),
     Bool(bool),
+    Str(Vec<StrPart>),
     Ident(String),
     /// Lambda placeholder: `None` is bare `$` (≡ `$a`); `Some("a")` is `$a`.
     Placeholder(Option<String>),
@@ -128,6 +137,93 @@ pub fn lex(src: &str) -> Vec<Token> {
                 }
             }
             tokens.push(keyword(&text).unwrap_or(Token::Ident(text)));
+        } else if c == '"' {
+            chars.next(); // opening quote
+            let mut parts = Vec::new();
+            let mut lit = String::new();
+            loop {
+                match chars.next() {
+                    None | Some('"') => break,
+                    Some('\\') => match chars.next() {
+                        Some('n') => lit.push('\n'),
+                        Some('t') => lit.push('\t'),
+                        Some('"') => lit.push('"'),
+                        Some('\\') => lit.push('\\'),
+                        Some(other) => lit.push(other),
+                        None => break,
+                    },
+                    // `{{` is a literal brace; a lone `{` opens an interpolation.
+                    Some('{') if chars.peek() == Some(&'{') => {
+                        chars.next();
+                        lit.push('{');
+                    }
+                    Some('{') => {
+                        if !lit.is_empty() {
+                            parts.push(StrPart::Lit(std::mem::take(&mut lit)));
+                        }
+                        let mut expr = String::new();
+                        let mut depth = 1u32;
+                        loop {
+                            match chars.next() {
+                                None => break,
+                                Some('{') => {
+                                    depth += 1;
+                                    expr.push('{');
+                                }
+                                Some('}') => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                    expr.push('}');
+                                }
+                                Some(ch) => expr.push(ch),
+                            }
+                        }
+                        parts.push(StrPart::Expr(expr));
+                    }
+                    // `}}` is a literal brace; a stray `}` in text is taken literally.
+                    Some('}') => {
+                        if chars.peek() == Some(&'}') {
+                            chars.next();
+                        }
+                        lit.push('}');
+                    }
+                    Some(ch) => lit.push(ch),
+                }
+            }
+            if !lit.is_empty() || parts.is_empty() {
+                parts.push(StrPart::Lit(lit));
+            }
+            tokens.push(Token::Str(parts));
+        } else if c == '/' && matches!(chars.clone().nth(1), Some('/' | '*')) {
+            chars.next(); // consume '/'
+            if chars.next() == Some('/') {
+                // line comment: skip to end of line (newline left for whitespace)
+                while let Some(&d) = chars.peek() {
+                    if d == '\n' {
+                        break;
+                    }
+                    chars.next();
+                }
+            } else {
+                // block comment (we consumed the '*'), nestable
+                let mut depth = 1u32;
+                while depth > 0 {
+                    match chars.next() {
+                        None => break,
+                        Some('/') if chars.peek() == Some(&'*') => {
+                            chars.next();
+                            depth += 1;
+                        }
+                        Some('*') if chars.peek() == Some(&'/') => {
+                            chars.next();
+                            depth -= 1;
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
         } else if c == '$' {
             chars.next(); // consume '$'
             let mut name = String::new();
@@ -203,7 +299,7 @@ pub fn lex(src: &str) -> Vec<Token> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Token, lex};
+    use super::{StrPart, Token, lex};
 
     #[test]
     fn lexes_an_integer_literal() {
@@ -295,5 +391,71 @@ mod tests {
         use Token::{Eof, Placeholder};
         assert_eq!(lex("$"), vec![Placeholder(None), Eof]);
         assert_eq!(lex("$a"), vec![Placeholder(Some("a".to_string())), Eof]);
+    }
+
+    #[test]
+    fn lexes_a_plain_string() {
+        assert_eq!(
+            lex("\"hello\""),
+            vec![Token::Str(vec![StrPart::Lit("hello".to_string())]), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn processes_string_escapes() {
+        // source: "a\nb\"c"  → a, newline, b, quote, c
+        assert_eq!(
+            lex("\"a\\nb\\\"c\""),
+            vec![
+                Token::Str(vec![StrPart::Lit("a\nb\"c".to_string())]),
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_string_interpolation() {
+        // source: "hi {name}!"
+        assert_eq!(
+            lex("\"hi {name}!\""),
+            vec![
+                Token::Str(vec![
+                    StrPart::Lit("hi ".to_string()),
+                    StrPart::Expr("name".to_string()),
+                    StrPart::Lit("!".to_string()),
+                ]),
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn escapes_literal_braces() {
+        // source: "{{x}}" → the literal text {x}
+        assert_eq!(
+            lex("\"{{x}}\""),
+            vec![Token::Str(vec![StrPart::Lit("{x}".to_string())]), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn skips_line_comments() {
+        assert_eq!(lex("1 // comment\n2"), vec![Token::Int(1), Token::Int(2), Token::Eof]);
+    }
+
+    #[test]
+    fn skips_nested_block_comments() {
+        assert_eq!(
+            lex("1 /* a /* nested */ b */ 2"),
+            vec![Token::Int(1), Token::Int(2), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn a_bare_slash_still_divides() {
+        assert_eq!(
+            lex("1 / 2"),
+            vec![Token::Int(1), Token::Slash, Token::Int(2), Token::Eof]
+        );
     }
 }
