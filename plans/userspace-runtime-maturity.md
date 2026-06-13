@@ -134,6 +134,26 @@ A `std` port (custom `riscv64-snitchos` target + porting std's `sys` layer) is
 the integral of the whole roadmap. **Scope it from the start as WASI-shaped**,
 not full ambient POSIX std.
 
+### 4a. `snitchos-std` facade ✅ STARTED — the stepping stone
+
+Real std needs a custom *target* + nightly `build-std` + a `sys` port (and only
+*that* drops `#![no_std]` / runs external `std` crates). As a stable stepping
+stone, **`snitchos-std`** (`user/std`) is a std-*shaped* facade over `core` +
+`alloc` + `snitchos-user` (our `sys` layer). Programs still `#![no_std]`, but
+can write std-idiomatic code where it's wired. Reading the crate is the "what's
+left of std" map: **wired** — `thread::yield_now` (→ `Yield`),
+`process::exit`/`abort` (→ `Exit`), and the free `core`/`alloc` re-exports
+(`Vec`/`String`/`format!`/`BTree*`/`Arc`/`Duration`); **`todo!("…why…")`** —
+`io::println` (needs `DebugWrite`, the iconic next step), `time::Instant`
+(read-clock syscall), `thread::spawn`/`sleep`, `sync::Mutex`,
+`collections::HashMap`, and — encoding the capability constraint, not POSIX —
+`fs`/`net`/`env` as *capability-rooted or unsupported*. `worker` drives its
+yield through `snitchos_std::thread::yield_now`, proving the wire end-to-end.
+The eventual real-target `sys` backend reuses this mapping.
+
+Next stub to fill: `io::println!` via a `DebugWrite` syscall → snitched `Log`
+frame (observable + testable). Then the facade grows one `todo!` at a time.
+
 ### The split
 
 - **Non-namespace parts map cleanly:** `alloc` (step 1), `thread` (v0.5 kernel

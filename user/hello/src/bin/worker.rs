@@ -12,7 +12,8 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{telemetry, tracer, yield_now};
+use snitchos_std::thread;
+use snitchos_user::{telemetry, tracer};
 
 #[unsafe(no_mangle)]
 extern "C" fn main() {
@@ -23,6 +24,7 @@ extern "C" fn main() {
         let _span = tracer.span("worker.tick");
         progress += 1;
         let _ = sink.emit(progress);
-        yield_now();
+        // The cooperative yield, via the std-shaped facade (→ `Yield` syscall).
+        thread::yield_now();
     }
 }

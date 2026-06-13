@@ -1,0 +1,14 @@
+[package]
+name = "snitchos-std"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# A std-SHAPED facade over `core` + `alloc` + the SnitchOS userspace runtime
+# (`snitchos-user`, our platform / `sys` layer). NOT the real `std` crate:
+# programs still `#![no_std]`. It maps std's surface onto SnitchOS — backed
+# parts are wired, the rest are documented `todo!()`s — so the crate reads as a
+# living "what's left of std" map. See `plans/userspace-runtime-maturity.md`.
+
+[dependencies]
+snitchos-user = { path = "../runtime" }
