@@ -90,6 +90,7 @@ fn sys_map_anon(bytes: usize) -> usize {
 // read.
 static STARTUP_TELEMETRY: AtomicUsize = AtomicUsize::new(0);
 static STARTUP_SPAN: AtomicUsize = AtomicUsize::new(0);
+static STARTUP_ENDPOINT: AtomicUsize = AtomicUsize::new(0);
 
 /// This process's `TelemetrySink` capability (delivered at startup).
 #[must_use]
@@ -101,6 +102,13 @@ pub fn telemetry() -> TelemetrySink {
 #[must_use]
 pub fn tracer() -> Tracer {
     Tracer::from_raw_handle(STARTUP_SPAN.load(Ordering::Relaxed))
+}
+
+/// This process's IPC `Endpoint` capability (delivered at startup; `0` if the
+/// program was launched without one — its `send`/`receive` would be refused).
+#[must_use]
+pub fn endpoint() -> Endpoint {
+    Endpoint::from_raw_handle(STARTUP_ENDPOINT.load(Ordering::Relaxed))
 }
 
 unsafe extern "C" {
@@ -116,11 +124,16 @@ unsafe extern "C" {
 /// ABI assumption). Inits the heap, publishes the handles for the accessors,
 /// runs the program, then terminates the process once `main` returns.
 #[unsafe(no_mangle)]
-extern "C" fn __snitchos_start(telemetry_handle: usize, span_handle: usize) -> ! {
+extern "C" fn __snitchos_start(
+    telemetry_handle: usize,
+    span_handle: usize,
+    endpoint_handle: usize,
+) -> ! {
     // The heap needs no init — `talc` is lazy; the first allocation triggers
     // its OOM handler, which `map_anon`s the first region.
     STARTUP_TELEMETRY.store(telemetry_handle, Ordering::Relaxed);
     STARTUP_SPAN.store(span_handle, Ordering::Relaxed);
+    STARTUP_ENDPOINT.store(endpoint_handle, Ordering::Relaxed);
     // SAFETY: every program links this runtime and provides `main`.
     unsafe {
         main();
@@ -292,5 +305,75 @@ impl Drop for Span {
                 in("a1") parent,
             );
         }
+    }
+}
+
+/// The number of inline words a single IPC message carries — matches the
+/// kernel's `MSG_WORDS`. Larger payloads will use a `MemoryRegion` capability
+/// (a later milestone); v0.9 is inline-only.
+pub const MSG_WORDS: usize = 4;
+
+/// A capability to a synchronous IPC endpoint. `send` and `receive` are
+/// rendezvous operations — each blocks until a peer arrives. Which ops are
+/// permitted depends on the rights the kernel granted (`SEND`/`RECV`); holding
+/// the integer is not authority, the kernel validates on every call.
+#[derive(Clone, Copy)]
+pub struct Endpoint {
+    handle: usize,
+}
+
+impl Endpoint {
+    /// Wrap a raw endpoint handle (the kernel validates it on use).
+    #[must_use]
+    pub const fn from_raw_handle(handle: usize) -> Self {
+        Self { handle }
+    }
+
+    /// Send an inline message, blocking until a receiver rendezvouses.
+    /// `Err(Denied)` if the kernel refused the capability (no `SEND`, or not an
+    /// endpoint handle).
+    pub fn send(self, msg: [u64; MSG_WORDS]) -> Result<(), Denied> {
+        let ret: usize;
+        // SAFETY: `ecall` traps to the kernel, which validates the handle
+        // (needs `SEND`), copies the four words, and rendezvouses with a
+        // receiver (blocking us until one arrives). a0 returns 0 on success.
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::Send as usize,
+                inlateout("a0") self.handle => ret,
+                in("a1") msg[0],
+                in("a2") msg[1],
+                in("a3") msg[2],
+                in("a4") msg[3],
+            );
+        }
+        if ret == 0 { Ok(()) } else { Err(Denied) }
+    }
+
+    /// Receive an inline message, blocking until a sender rendezvouses.
+    /// Returns the four words, or `Err(Denied)` if the kernel refused the
+    /// capability (no `RECV`, or not an endpoint handle).
+    pub fn receive(self) -> Result<[u64; MSG_WORDS], Denied> {
+        let ret: usize;
+        let w0: u64;
+        let w1: u64;
+        let w2: u64;
+        let w3: u64;
+        // SAFETY: `ecall` traps to the kernel, which validates the handle
+        // (needs `RECV`), blocks us until a sender rendezvouses, then writes
+        // status into a0 and the four message words into a1..=a4.
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::Receive as usize,
+                inlateout("a0") self.handle => ret,
+                out("a1") w0,
+                out("a2") w1,
+                out("a3") w2,
+                out("a4") w3,
+            );
+        }
+        if ret == 0 { Ok([w0, w1, w2, w3]) } else { Err(Denied) }
     }
 }

@@ -92,6 +92,11 @@ pub enum WorkloadKind {
     /// runqueue and be resumed. The substrate IPC's blocking `send`/`receive`
     /// ride on. Task-driven, single hart.
     BlockWake,
+    /// v0.9 IPC: two userspace processes (`ipc-sender`, `ipc-receiver`) share a
+    /// kernel-brokered endpoint — A holds a `SEND` cap, B a `RECV` cap. A sends
+    /// an inline message; B receives it and re-emits the payload. Time-sliced on
+    /// one hart. The milestone-heart workload.
+    Ipc,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -153,6 +158,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "user-hog" => Some(WorkloadKind::UserHog),
             "priorities" => Some(WorkloadKind::Priorities),
             "block-wake" => Some(WorkloadKind::BlockWake),
+            "ipc" => Some(WorkloadKind::Ipc),
             _ => None,
         })
 }
@@ -256,6 +262,11 @@ mod tests {
     #[test]
     fn selects_block_wake() {
         assert_eq!(select("workload=block-wake"), Some(WorkloadKind::BlockWake));
+    }
+
+    #[test]
+    fn selects_ipc() {
+        assert_eq!(select("workload=ipc"), Some(WorkloadKind::Ipc));
     }
 
     #[test]

@@ -1084,6 +1084,30 @@ pub fn block_wake_smoke(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.9 IPC milestone heart (`workload=ipc`): process A (`ipc-sender`, holding
+/// a `SEND` cap) sends the inline message `[42, 0, 0, 0]` over a kernel-brokered
+/// endpoint; process B (`ipc-receiver`, holding a `RECV` cap) receives it and
+/// re-emits word0 through its `TelemetrySink`. Asserting
+/// `snitchos.user.telemetry_total == 42` proves the *exact* payload crossed the
+/// process boundary through the synchronous rendezvous (block → switch → wake →
+/// deliver). A hang (lost wakeup, or the message never copied) trips the
+/// timeout; a wrong value catches a mis-copied word.
+pub fn ipc_message_crosses(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value == 42
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no snitchos.user.telemetry_total == 42 within 30s — the message didn't \
+         cross: receiver never received the payload, the words were mis-copied, \
+         or the rendezvous hung (lost wakeup / message not staged)",
+    )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

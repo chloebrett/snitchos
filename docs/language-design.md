@@ -58,12 +58,12 @@ Design rule running underneath all of it: **two arrows, one job each.** `->` mea
 ## Canonical sample
 
 ```
-type Reading(sensor: Str, celsius: Int)
+prod Reading(sensor: Str, celsius: Int)
 
-fn average(nums: List<Int>) -> Int =
+average(nums: List<Int>) -> Int =
     nums.isEmpty() => 0 | nums.sum() / nums.len()
 
-fn report(readings: List<Reading>) uses Telemetry {
+report(readings: List<Reading>) uses Telemetry {
     use <- span("report")
 
     let hot =
@@ -82,11 +82,12 @@ fn report(readings: List<Reading>) uses Telemetry {
 
 Borrowed from Rust (a liked language; deliberately _not_ Kotlin's `val`/`var`, the single biggest "this is Kotlin" tell). The keyword-light "immutable binding has no keyword at all" variant was considered and dropped — the declare-vs-reassign disambiguation tax wasn't worth the saved keyword.
 
-## Functions & types
+## Functions
 
-- `fn name(params) -> Ret = expr` — single-expression body.
-- `fn name(params) -> Ret { … }` — block body.
-- `type Point(x: Int, y: Int)` — record/product type, concise (no `class`, no `data class`).
+- `name(params) -> Ret = expr` — single-expression body.
+- `name(params) -> Ret { … }` — block body.
+- **No `fn` keyword.** A function is the lightest declaration there is, so it carries no keyword; keywords are reserved for the _structural_ forms (`prod`/`sum`/`contract`/`on`). Unambiguous because a bare `name(…) -> …` only appears at module scope or inside `on`.
+- Inside an `on` block, three modifiers describe a method's relationship to the receiver `@`: nothing = instance method, `mut` = may mutate `@`, `free` = no receiver (associated function). At module scope a function is inherently `free`, so the keyword isn't written there. See Type system → `on`.
 - `name: Type` annotations, no semicolons, expression-oriented throughout — shared "modern tasteful" surface (Kotlin/Rust/Swift/TS), not a Kotlin tell, so kept.
 
 ## Conditionals & matching
@@ -143,13 +144,13 @@ Two short-circuit operators, both backed by **one trait that std implements for 
 `use <- f(...)` turns "the rest of this block" into a callback handed to `f`. It desugars:
 
 ```
-use <- span("report")          //  ≡   span("report", fn() {
+use <- span("report")          //  ≡   span("report", () -> {
 emit("x", 1)                   //          emit("x", 1)
 // …rest of block…             //          // …rest of block…
                                //      })
 ```
 
-General form `use x <- f(...)` ≡ `f(fn(x) { rest })`. This makes spans, resource scoping (the `defer` job), and mutex scoping all _ordinary functions_ instead of bespoke syntax — i.e. **telemetry-as-syntax becomes telemetry-as-library**. Accepted cost: `use` has "magic" control flow (everything after it is captured), which reads oddly until it clicks.
+General form `use x <- f(...)` ≡ `f(x -> { rest })`. This makes spans, resource scoping (the `defer` job), and mutex scoping all _ordinary functions_ instead of bespoke syntax — i.e. **telemetry-as-syntax becomes telemetry-as-library**. Accepted cost: `use` has "magic" control flow (everything after it is captured), which reads oddly until it clicks.
 
 ## String interpolation
 
@@ -159,9 +160,11 @@ General form `use x <- f(...)` ≡ `f(fn(x) { rest })`. This makes spans, resour
 
 _Same status as Surface syntax: worked out, pre-implementation, strong leanings._
 
-**Stance — data-first, with a marked OO exception.** The default and the bulk is immutable algebraic data (`prod`/`sum`). `class` is the deliberately-marked exception for objects that genuinely have identity and evolving state. Polymorphism is interfaces only — **no inheritance anywhere.** This is a distinct middle position: Java is "everything is a class, inherit freely"; Rust is "no classes, traits + ownership"; this is neither. Null does not exist (absence is `Maybe`), and the GC removes Rust's ownership ceremony.
+**Stance — data-first, no classes, no inheritance.** There are exactly three type-declaration forms — `prod`, `sum`, `contract` — plus `on` blocks that attach behavior. There is **no `class` keyword and no inheritance**: data is immutable by default with mutability opt-in per field (`mut x`) and per method (`mut`), and the _only_ polymorphism is `contract` conformance, dispatched dynamically. This is effectively **Rust's data-plus-trait model, GC'd and reference-semantic, with friendlier keywords** — a distinct middle between Java ("everything is a class, inherit freely") and Rust ("structs + traits + ownership"). Null does not exist (absence is `Maybe`), and the GC removes Rust's ownership ceremony.
 
 > **Why this isn't a Rust or Java clone.** The data-declaration layer below is _intentionally_ familiar — borrowing the best-understood forms is the tasteful move, not the cloning move. The language's identity lives entirely in the parts nothing else has: `uses` capabilities-as-effects, the `?`/`?.` trait family, `use <-` making telemetry a library, and (unbuilt) the capability effect system + a VM that emits spans for its own GC/dispatch. It is an _effects-and-observability language wearing comfortable data-modeling clothes._
+>
+> The class-vs-no-class question was genuinely contested (see the keyword arc in the side-project memory): a Java-classes detour was explored for the implementation-learning value, but the dispatch/vtable lessons come through `contract` dynamic dispatch regardless, so the trait-like model wins without costing the education.
 
 ## Products & sums — one tree, two roots
 
@@ -183,37 +186,50 @@ sum Result<T, E> = Ok(T)   | Err(E)
 sum Either<A, B> = Left(A) | Right(B)
 ```
 
-- **Value semantics:** `prod`/`sum` are immutable with **structural equality** (two `Point(1,2)` are equal).
-- **Construction & update:** `Point(1, 2)` positional, `Point(x: 1, y: 2)` Swift-style labels, `Point(..p, x: 10)` functional update (immutable → copy).
+- **Mutability is opt-in:** fields are immutable unless marked `mut` (`prod Counter(mut n: Int)`); everything is a GC reference, so a `mut` field is visible through all aliases (Java/Kotlin semantics, not value copies).
+- **Equality:** structural for fully-immutable `prod`/`sum` (two `Point(1,2)` are equal); a `prod` with any `mut` field defaults to **identity** equality — so a mutable value can't be silently used as a hash key (Java's classic footgun, designed out). `===` is always identity.
+- **Construction & update:** `Point(1, 2)` positional, `Point(x: 1, y: 2)` Swift-style labels, `Point(..p, x: 10)` functional update (copy with override).
 - **Tuples** are the anonymous product: `(Int, Str)`.
 - **GC dividends:** recursive sums need no `Box` (`sum List<T> = Cons(T, List<T>) | Nil` just works), and `match` over a sum is **compiler-checked exhaustive** (dovetails with the no-exceptions stance).
 
-## class — the reference object (no inheritance)
+## on — methods & conformance
 
-`class` is for things with **identity** and encapsulated, optionally-mutable state — a `Connection`, a `Cache`, a `Counter`. The crisp line: `prod` is a _value_ (structural equality, immutable); a `class` instance is a _reference_ (identity equality, may hold `mut` state).
+Behavior attaches to any type (`prod` or `sum`) via an `on` block. The receiver is the `@` sigil (`@x` is field `x` on the receiver) — distinct from the lambda placeholder `$`, so the two never collide inside one body (`@items |> map($.price)`). Method modifiers describe the relationship to `@`:
 
-- **No `extends`, ever.** Polymorphism comes only through interfaces.
-- Sane-defaults-unlike-Java: fields immutable (`val`-like) unless `mut`; no null.
+```
+on Counter {
+    value() -> Int = @n            // instance method, immutable @
+    mut bump() { @n = @n + 1 }     // mutates @ — caller needs a `mut` binding
+    free zero() -> Counter = …     // no receiver; called Counter.zero()
+}
 
-## interface — the only polymorphism
+on Counter : Drawable {            // `: Contract` declares conformance
+    draw() uses Canvas = renderBar(@n)
+}
+```
 
-Behavior contracts; the sole dispatch mechanism. This is Java-core (interfaces), not a trait reinvention — though it shares traits' discipline:
+- `mut` methods may write `@`; calling one **requires a `mut` receiver binding** (Rust's `&mut self` discipline, no lifetimes).
+- `free` is the only modifier that appears _inside_ `on` but not at module scope (every module function is already receiver-free).
 
-- **Definition-side coherence:** a type's methods and interface conformances live with the type, in its own module — no orphan/extension-from-afar, so behavior is always findable.
-- **Default methods** on interfaces give behavior composition; data composition is embedding.
-- **GC makes dynamic dispatch the easy path** (unlike Rust). An interface-typed value is just a heap object + vtable, like Go/Java — `fn render(d: Drawable)` taking any `Drawable` is the natural default; generics (`fn f<T: Drawable>`) remain available for the monomorphized path. `self` needs no `&`/`&mut`/lifetimes.
+## contract — the only polymorphism
+
+`contract` is the behavior-contract / trait / interface — the sole dispatch mechanism, with traits' discipline:
+
+- **Definition-side coherence:** a type's `on` blocks and conformances live with the type, in its own module — no orphan/extension-from-afar (this is the "no extension" rule: behavior is defined once, with the type, and is always findable).
+- **Default methods** in a `contract` give behavior composition; data composition is embedding a `prod` in a `prod`.
+- **GC makes dynamic dispatch the easy path** (unlike Rust). A contract-typed value is just a heap object + vtable, like Go/Java — `render(d: Drawable)` taking any `Drawable` is the natural default; generics (`render<T: Drawable>(d: T)`) remain available for the monomorphized path. `@` needs no `&`/`&mut`/lifetimes.
 
 ## What the VM implements (the learning core)
 
-Even without class inheritance, the JVM-shaped lessons are intact: object headers (class ptr, GC bits, identity hash), **interface vtables/itables + dynamic dispatch**, `instanceof`-via-interface, constructors, field layout. The single dropped lesson — superclass-prefix vtable layout — is traded for interface dispatch (itables / inline caches), the more interesting half of real JVM dispatch.
+The JVM-shaped lessons are intact: object headers (type ptr, GC bits, identity hash), **contract vtables/itables + dynamic dispatch**, type-test-via-contract, constructors, field layout. The one lesson dropped with inheritance — superclass-prefix vtable layout — is traded for interface/itable dispatch (and inline caches), the more interesting half of how real JVM dispatch works.
 
 # Open questions — the interesting surface
 
 These are where the design risk budget is deliberately spent, and the next things to work out. Each will get its own pass.
 
-- **Capabilities as effects.** Functions declaring the authority they need (`fn log(msg: Str) uses TelemetrySink`), the compiler tracking the `uses` set up the call graph, startup caps arriving from `a0`/`a1` and threading down, affine/linear cap values so authority can't be forged or duplicated. The strongest reason the language exists on _this_ OS. How much of this is checked at compile time vs reified in the VM?
+- **Capabilities as effects.** Functions declaring the authority they need (`log(msg: Str) uses TelemetrySink`), the compiler tracking the `uses` set up the call graph, startup caps arriving from `a0`/`a1` and threading down, affine/linear cap values so authority can't be forged or duplicated. The strongest reason the language exists on _this_ OS. How much of this is checked at compile time vs reified in the VM?
 - **Telemetry as syntax.** Spans and metrics as first-class constructs (`span foo { ... }` auto-emitting SpanStart/SpanEnd over the existing `Frame` protocol; declared counters). Plus the reflexive win: the VM narrates _its own_ execution — GC pauses, allocation rate, cap checks, dispatch — as spans in the same Grafana as the kernel.
-- **Syntax & type system.** Now substantially worked out — see [Surface syntax](#surface-syntax) and [Type system](#type-system) above. Remaining grammar gaps: generics beyond `List<T>` (bounds, variance), module/visibility (which also defines encapsulation + the interface-coherence boundary), method/`interface`-conformance declaration syntax, and the precise `match` pattern grammar.
+- **Syntax & type system.** Now substantially worked out — see [Surface syntax](#surface-syntax) and [Type system](#type-system) above. Remaining grammar gaps: generics beyond `List<T>` (bounds, variance), module/visibility (which also defines encapsulation + the `contract`-coherence boundary), and the precise `match` pattern grammar.
 
 # References
 

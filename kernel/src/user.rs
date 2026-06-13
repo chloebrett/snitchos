@@ -49,6 +49,12 @@ pub static HEAP_GROW_ELF: &[u8] = include_bytes!(env!("SNITCHOS_HEAP_GROW_ELF"))
 /// peer until the timer preempts it.
 pub static USER_HOG_ELF: &[u8] = include_bytes!(env!("SNITCHOS_USER_HOG_ELF"));
 
+/// The `workload=ipc` programs: `ipc-sender` holds a `SEND` cap and sends one
+/// inline message; `ipc-receiver` holds a `RECV` cap, receives it, and
+/// re-emits the payload. They rendezvous over one kernel-brokered endpoint.
+pub static IPC_SENDER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_IPC_SENDER_ELF"));
+pub static IPC_RECEIVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_IPC_RECEIVER_ELF"));
+
 /// The counter the `EmitMetric` syscall bumps. Registered once on hart 0
 /// (`init_metric`) so the `MetricRegister` frame isn't emitted from inside
 /// the trap handler; the handler (on hart 1) reads it via [`user_metric_id`].
@@ -166,6 +172,20 @@ pub extern "C" fn user_hog_main_entry() -> ! {
     run(USER_HOG_ELF)
 }
 
+/// Entry for `workload=ipc`: run the IPC demo sender, granted a `SEND` cap to
+/// the shared kernel-brokered endpoint.
+pub extern "C" fn ipc_sender_main_entry() -> ! {
+    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before sender runs");
+    run_ipc(IPC_SENDER_ELF, ep, kernel_core::cap::Rights::SEND)
+}
+
+/// Entry for `workload=ipc`: run the IPC demo receiver, granted a `RECV` cap to
+/// the shared kernel-brokered endpoint.
+pub extern "C" fn ipc_receiver_main_entry() -> ! {
+    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before receiver runs");
+    run_ipc(IPC_RECEIVER_ELF, ep, kernel_core::cap::Rights::RECV)
+}
+
 /// Build a fresh address space, grant the process its bootstrap
 /// capability, load `image` into it, and drop to U-mode. Never returns —
 /// the hart runs userspace from here.
@@ -218,8 +238,59 @@ fn run(image: &'static [u8]) -> ! {
             root_pa,
             bootstrap_handle.raw() as usize,
             span_handle.raw() as usize,
+            0, // no endpoint cap for the non-IPC programs
         ),
         Err(e) => panic!("userspace load failed: {e:?}"),
+    }
+}
+
+/// Like [`run`], but additionally grants the process an [`Endpoint`] capability
+/// over `endpoint` with `rights` (`SEND` or `RECV`) — the kernel-brokered IPC
+/// cap — and delivers its handle as the third startup register (`a2`). Used by
+/// the `workload=ipc` sender/receiver. Never returns.
+///
+/// [`Endpoint`]: kernel_core::cap::Object::Endpoint
+fn run_ipc(image: &'static [u8], endpoint: kernel_core::ipc::EndpointId, rights: kernel_core::cap::Rights) -> ! {
+    use kernel_core::cap::{Capability, Object};
+
+    let root_pa = mmu::new_user_root().expect("ipc: no frame for user root page table");
+    let counter = user_metric_id().expect("userspace telemetry counter registered before entry");
+    let (process, bootstrap_handle, span_handle) = Process::bootstrap(root_pa, counter);
+
+    // Grant the IPC endpoint capability on top of the bootstrap pair.
+    let endpoint_handle =
+        process.caps.lock().insert(Capability { object: Object::Endpoint { id: endpoint }, rights });
+
+    // Snitch every grant (counter + rich CapEvent), as `run` does — now three:
+    // the two bootstrap authorities plus this endpoint cap.
+    let holder = crate::sched::current_task_id().0;
+    let grants = [
+        (protocol::CapObject::TelemetrySink, kernel_core::cap::Rights::EMIT.bits()),
+        (protocol::CapObject::SpanSink, kernel_core::cap::Rights::EMIT.bits()),
+        (protocol::CapObject::Endpoint, rights.bits()),
+    ];
+    for (object, rights_bits) in grants {
+        if let Some(id) = cap_grants_metric_id() {
+            tracing::emit_metric(id, 1);
+        }
+        tracing::emit_cap_granted(crate::process::next_cap_id(), holder, object, rights_bits);
+    }
+
+    let process_ptr = core::ptr::addr_of!(process).cast_mut();
+    crate::process::CURRENT_PROCESS
+        .this_cpu()
+        .store(process_ptr, core::sync::atomic::Ordering::Relaxed);
+    crate::sched::set_current_address_space(process.root_pa, process_ptr);
+
+    match load(process.root_pa, image) {
+        Ok(loaded) => enter(
+            loaded,
+            root_pa,
+            bootstrap_handle.raw() as usize,
+            span_handle.raw() as usize,
+            endpoint_handle.raw() as usize,
+        ),
+        Err(e) => panic!("ipc userspace load failed: {e:?}"),
     }
 }
 
@@ -344,7 +415,13 @@ pub fn copy_from_user(ptr: usize, len: usize, dst: &mut [u8]) -> Option<&[u8]> {
 /// (mask interrupts) *before* arming `sscratch`, so a stray timer IRQ can't
 /// see a nonzero `sscratch` in S-mode and mis-take the from-user path in
 /// `trap_entry`. `sret` then drops to U *and* restores `SIE` from `SPIE`.
-pub fn enter(loaded: Loaded, root_pa: usize, startup_a0: usize, startup_a1: usize) -> ! {
+pub fn enter(
+    loaded: Loaded,
+    root_pa: usize,
+    startup_a0: usize,
+    startup_a1: usize,
+    startup_a2: usize,
+) -> ! {
     let satp = mmu::satp_for(root_pa);
     // SAFETY: switches the active address space to the user root (kernel
     // high-half shared, so we keep executing), then forges a trap-return into
@@ -367,6 +444,7 @@ pub fn enter(loaded: Loaded, root_pa: usize, startup_a0: usize, startup_a1: usiz
         entry = in(reg) loaded.entry,
         in("a0") startup_a0,
         in("a1") startup_a1,
+        in("a2") startup_a2,
         options(noreturn));
     }
 }

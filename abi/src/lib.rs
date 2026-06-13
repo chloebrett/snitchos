@@ -65,6 +65,18 @@ pub enum Syscall {
     /// wire frame (so stdout is observable). Returns bytes written in `a0`, or
     /// `usize::MAX` if refused (bad pointer). Backs `println!`.
     DebugWrite = 6,
+    /// Send an inline message over a synchronous IPC endpoint (v0.9). `a0` =
+    /// `Endpoint` capability handle (needs `SEND`), `a1..=a4` = the four
+    /// message words. Rendezvous semantics: if a receiver is waiting the
+    /// message is delivered and both proceed; otherwise the sender blocks until
+    /// one arrives. Returns `0` in `a0` on success, `usize::MAX` if refused
+    /// (bad/again wrong-rights/wrong-object handle).
+    Send = 7,
+    /// Receive an inline message from a synchronous IPC endpoint (v0.9). `a0` =
+    /// `Endpoint` capability handle (needs `RECV`). Blocks until a sender
+    /// rendezvouses; returns `0` in `a0` and the four message words in
+    /// `a1..=a4`, or `usize::MAX` in `a0` if refused.
+    Receive = 8,
 }
 
 impl Syscall {
@@ -81,6 +93,8 @@ impl Syscall {
             4 => Some(Self::SpanClose),
             5 => Some(Self::MapAnon),
             6 => Some(Self::DebugWrite),
+            7 => Some(Self::Send),
+            8 => Some(Self::Receive),
             _ => None,
         }
     }
@@ -99,6 +113,8 @@ mod tests {
         assert_eq!(Syscall::SpanClose as usize, 4);
         assert_eq!(Syscall::MapAnon as usize, 5);
         assert_eq!(Syscall::DebugWrite as usize, 6);
+        assert_eq!(Syscall::Send as usize, 7);
+        assert_eq!(Syscall::Receive as usize, 8);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
@@ -107,7 +123,9 @@ mod tests {
         assert_eq!(Syscall::from_usize(4), Some(Syscall::SpanClose));
         assert_eq!(Syscall::from_usize(5), Some(Syscall::MapAnon));
         assert_eq!(Syscall::from_usize(6), Some(Syscall::DebugWrite));
-        assert_eq!(Syscall::from_usize(7), None);
+        assert_eq!(Syscall::from_usize(7), Some(Syscall::Send));
+        assert_eq!(Syscall::from_usize(8), Some(Syscall::Receive));
+        assert_eq!(Syscall::from_usize(9), None);
     }
 }
 

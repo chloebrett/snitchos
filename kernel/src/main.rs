@@ -16,6 +16,7 @@ mod frame;
 mod heap;
 mod heap_smoke; // SMOKE TEST — remove once real workloads drive heap metrics
 mod heartbeat;
+mod ipc;
 mod ipi;
 mod mmu;
 mod panic;
@@ -360,7 +361,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::Workers)
         | Some(WorkloadKind::HeapGrow)
         | Some(WorkloadKind::UserHog)
-        | Some(WorkloadKind::Priorities) => {}
+        | Some(WorkloadKind::Priorities)
+        | Some(WorkloadKind::Ipc) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -412,6 +414,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::UserHog
                     | WorkloadKind::Priorities
                     | WorkloadKind::BlockWake
+                    | WorkloadKind::Ipc
             )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
@@ -489,6 +492,16 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                 sched::spawn_on_with_priority(1, "greedy", user::user_hog_main_entry, Priority::High);
             let _ =
                 sched::spawn_on_with_priority(1, "worker_b", user::worker_b_main_entry, Priority::Low);
+        }
+        // v0.9 IPC: a kernel-brokered endpoint shared by two userspace
+        // processes on hart 1. Create the endpoint first, then spawn the
+        // receiver and sender; they rendezvous (block/wake) on hart 1. The
+        // sender holds a SEND cap, the receiver a RECV cap.
+        Some(WorkloadKind::Ipc) => {
+            user::init_metric();
+            crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
+            let _ = sched::spawn_on(1, "ipc_receiver", user::ipc_receiver_main_entry);
+            let _ = sched::spawn_on(1, "ipc_sender", user::ipc_sender_main_entry);
         }
         _ => {}
     }

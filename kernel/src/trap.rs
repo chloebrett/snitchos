@@ -191,6 +191,8 @@ fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::SpanClose) => handle_span_close(frame),
         Some(Syscall::MapAnon) => handle_map_anon(frame),
         Some(Syscall::DebugWrite) => handle_debug_write(frame),
+        Some(Syscall::Send) => handle_send(frame),
+        Some(Syscall::Receive) => handle_receive(frame),
         None => {
             let n = frame.a7 as u8;
             refuse(frame, n, protocol::RefusalReason::UnknownSyscall);
@@ -261,6 +263,97 @@ fn handle_invoke(frame: &mut TrapFrame) {
             refuse(frame, sc, refusal_for(denied)); // emits SyscallRefused + sets a0
         }
     }
+}
+
+/// Send an inline message over an IPC endpoint. `a0` = `Endpoint` handle
+/// (needs `SEND`), `a1..=a4` = the message words. Resolve the cap against the
+/// running process's table; on success drive the rendezvous: either deliver
+/// to a waiting receiver and wake it, or block until one arrives. The endpoint
+/// lock is dropped inside `ipc::send_begin` before we block/wake (never hold a
+/// lock across the switch). Returns `0` on success, the error sentinel if the
+/// capability is refused.
+fn handle_send(frame: &mut TrapFrame) {
+    use kernel_core::cap::{invoke_send, Handle};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::Send as u8;
+    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
+    // SAFETY: set by `user::run` on this hart before `sret`; null only if no
+    // user process runs here, which then could not have issued this `ecall`.
+    let Some(proc) = (unsafe { proc.as_ref() }) else {
+        refuse(frame, sc, protocol::RefusalReason::NoProcess);
+        return;
+    };
+
+    let ep = {
+        let caps = proc.caps.lock();
+        invoke_send(&caps, Handle::from_raw(frame.a0 as u32))
+    };
+    let ep = match ep {
+        Ok(ep) => ep,
+        Err(denied) => {
+            refuse(frame, sc, refusal_for(denied));
+            return;
+        }
+    };
+
+    let me = crate::sched::current_task_id();
+    let msg = [frame.a1, frame.a2, frame.a3, frame.a4];
+    match crate::ipc::send_begin(ep, me, msg) {
+        crate::ipc::SendStep::Deliver { wake } => crate::sched::wake(wake),
+        crate::ipc::SendStep::Block => crate::sched::block_current(),
+    }
+    // Either path completes the rendezvous: the message was (or will be) taken
+    // by the receiver. Report success.
+    frame.a0 = 0;
+}
+
+/// Receive an inline message from an IPC endpoint. `a0` = `Endpoint` handle
+/// (needs `RECV`). Drive the rendezvous: take a waiting sender's message (and
+/// wake it), or block until one arrives and take the message delivered to us.
+/// Writes the words into `a1..=a4` and `0` into `a0`; refuses with the error
+/// sentinel if the capability is refused.
+fn handle_receive(frame: &mut TrapFrame) {
+    use kernel_core::cap::{invoke_recv, Handle};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::Receive as u8;
+    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
+    // SAFETY: as in `handle_send`.
+    let Some(proc) = (unsafe { proc.as_ref() }) else {
+        refuse(frame, sc, protocol::RefusalReason::NoProcess);
+        return;
+    };
+
+    let ep = {
+        let caps = proc.caps.lock();
+        invoke_recv(&caps, Handle::from_raw(frame.a0 as u32))
+    };
+    let ep = match ep {
+        Ok(ep) => ep,
+        Err(denied) => {
+            refuse(frame, sc, refusal_for(denied));
+            return;
+        }
+    };
+
+    let me = crate::sched::current_task_id();
+    let msg = match crate::ipc::receive_begin(ep, me) {
+        crate::ipc::RecvStep::Deliver { msg, wake } => {
+            crate::sched::wake(wake);
+            msg
+        }
+        crate::ipc::RecvStep::Block => {
+            crate::sched::block_current();
+            // Resumed: a sender stashed our message under our id at rendezvous.
+            crate::ipc::take_delivered(ep, me)
+        }
+    };
+    frame.a1 = msg[0];
+    frame.a2 = msg[1];
+    frame.a3 = msg[2];
+    frame.a4 = msg[3];
+    frame.a0 = 0;
 }
 
 /// Open a span on behalf of U-mode. `a0` = `SpanSink` handle, `a1` = name
