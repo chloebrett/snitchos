@@ -11,6 +11,10 @@ publish = false
 
 [dependencies]
 snitchos-abi = { path = "../../abi" }
+# The `#[entry]` attribute macro, re-exported as `snitchos_user::entry`. A
+# separate crate because attribute macros can only live in a `proc-macro` crate;
+# it builds for the host and never enters the riscv program image.
+snitchos-user-macros = { path = "../macros" }
 # Userspace heap: `talc`, a multi-region allocator whose `OomHandler` is the
 # grow-on-demand hook — on allocation failure it `map_anon`s a fresh region and
 # `claim`s it. Multi-region (claims disjoint spans) is why this is `talc` and

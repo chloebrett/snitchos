@@ -1,0 +1,20 @@
+[package]
+name = "snitchos-user-macros"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Procedural macros for the SnitchOS userspace runtime. Re-exported through
+# `snitchos-user`, so programs write `#[snitchos_user::entry]` (or bring it
+# into scope as `#[entry]`). A proc-macro crate is the *only* way to define an
+# attribute macro — `macro_rules!` can define function-like macros but not
+# attributes. Builds for the host (proc-macros always run on the build host),
+# so it carries no `no_std` / riscv constraints.
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

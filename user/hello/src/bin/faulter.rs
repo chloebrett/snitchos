@@ -10,14 +10,14 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::telemetry;
+use snitchos_user::{entry, telemetry};
 
 /// A kernel high-half VA that is always mapped (the kernel image base, per
 /// `kernel/linker.ld`) but carries no `U` bit. A U-mode load here faults.
 const KERNEL_PROBE_VA: usize = 0xffff_ffff_8020_0000;
 
-#[unsafe(no_mangle)]
-extern "C" fn main() {
+#[entry]
+fn main() {
     // Prove we reached U-mode and the syscall path works from here too.
     let _ = telemetry().emit(99);
 

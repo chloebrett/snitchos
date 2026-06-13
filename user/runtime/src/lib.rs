@@ -2,7 +2,7 @@
 //! capability bindings shared by every U-mode program.
 //!
 //! A program crate depends on this, declares `#![no_std] #![no_main]`, and
-//! defines a plain `#[unsafe(no_mangle)] extern "C" fn main()`. It carries no
+//! defines a plain `#[snitchos_user::entry] fn main()`. It carries no
 //! `_start`, no panic handler, and no raw `ecall` — `start.S` sets up the
 //! stack and tail-calls `__snitchos_start`, which inits the heap, publishes the
 //! startup capabilities (delivered in `a0`/`a1`) for the [`telemetry`] /
@@ -25,6 +25,11 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use snitchos_abi::Syscall;
 use talc::locking::AssumeUnlockable;
 use talc::{OomHandler, Span as TalcSpan, Talc, Talck};
+
+/// Mark a program's entry function. Write `#[snitchos_user::entry] fn main()`
+/// (or `use snitchos_user::entry;` then `#[entry]`); the macro supplies the
+/// `#[unsafe(no_mangle)] extern "C"` decoration that [`__snitchos_start`] calls.
+pub use snitchos_user_macros::entry;
 
 core::arch::global_asm!(include_str!("start.S"));
 
@@ -99,8 +104,8 @@ pub fn tracer() -> Tracer {
 }
 
 unsafe extern "C" {
-    /// The program entry, provided by each binary as
-    /// `#[unsafe(no_mangle)] extern "C" fn main()`. Returns `()` — the runtime
+    /// The program entry, provided by each binary's `#[entry] fn main` (the
+    /// macro emits the `#[unsafe(no_mangle)] extern "C"` symbol). Returns `()` — the runtime
     /// calls [`exit`] afterward, so the program never has to, and every RAII
     /// guard (e.g. a span [`Span`]) drops on return, before the process ends.
     fn main();

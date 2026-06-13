@@ -943,7 +943,17 @@ name = "snitchos-user"
 version = "0.0.1"
 dependencies = [
  "snitchos-abi",
+ "snitchos-user-macros",
  "talc",
+]
+
+[[package]]
+name = "snitchos-user-macros"
+version = "0.0.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

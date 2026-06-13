@@ -13,13 +13,13 @@ extern crate alloc;
 
 use alloc::vec;
 
-use snitchos_user::telemetry;
+use snitchos_user::{entry, telemetry};
 
 /// 512 KiB — well past the 64 KiB minimum map, so the heap must grow.
 const SIZE: usize = 512 * 1024;
 
-#[unsafe(no_mangle)]
-extern "C" fn main() {
+#[entry]
+fn main() {
     // `vec![1u8; SIZE]` heap-allocates SIZE bytes (forcing growth) and writes
     // each one. Summing reads them all back.
     let buf = vec![1u8; SIZE];

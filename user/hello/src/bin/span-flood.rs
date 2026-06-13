@@ -8,7 +8,7 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{telemetry, tracer};
+use snitchos_user::{entry, telemetry, tracer};
 
 /// Twenty distinct names — four past the 16-name quota, so the last four opens
 /// must be refused. Static literals (no need to allocate distinct names).
@@ -18,8 +18,8 @@ const NAMES: &[&str] = &[
     "flood.14", "flood.15", "flood.16", "flood.17", "flood.18", "flood.19",
 ];
 
-#[unsafe(no_mangle)]
-extern "C" fn main() {
+#[entry]
+fn main() {
     let tracer = tracer();
     for name in NAMES {
         // Open then immediately close (the guard drops at the end of the

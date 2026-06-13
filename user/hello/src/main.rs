@@ -9,14 +9,15 @@
 
 extern crate alloc;
 
-use snitchos_user::{TelemetrySink, telemetry, tracer, yield_now};
+use snitchos_user::{TelemetrySink, entry, telemetry, tracer, yield_now};
 
-// The program entry: a plain `main` the runtime calls. The `#[no_mangle]
-// extern "C"` is the no_std entry tax (no macro hiding it). The runtime
-// publishes the startup caps before calling us — reach them via the
-// `telemetry()` / `tracer()` accessors — and `exit()`s after we return.
-#[unsafe(no_mangle)]
-extern "C" fn main() {
+// The program entry: a plain `main`. `#[entry]` supplies the
+// `#[unsafe(no_mangle)] extern "C"` decoration the runtime links against, so
+// the program reads like a normal one. The runtime publishes the startup caps
+// before calling us — reach them via the `telemetry()` / `tracer()`
+// accessors — and `exit()`s after we return.
+#[entry]
+fn main() {
     // Emit through the capability the kernel handed us at startup.
     let _ = telemetry().emit(42);
 

@@ -15,10 +15,10 @@
 #![no_main]
 
 use snitchos_std::thread;
-use snitchos_user::{telemetry, tracer};
+use snitchos_user::{entry, telemetry, tracer};
 
-#[unsafe(no_mangle)]
-extern "C" fn main() {
+#[entry]
+fn main() {
     let tracer = tracer();
     let sink = telemetry();
     let mut progress: i64 = 0;
