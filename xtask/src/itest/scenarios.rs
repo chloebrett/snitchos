@@ -1435,6 +1435,33 @@ pub fn userspace_quota_refused(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Userspace `println!` (`workload=userspace`): `hello` calls
+/// `snitchos_std::println!("hello from userspace")` — through the std facade →
+/// the `DebugWrite` syscall → a snitched `Frame::Log`. Asserts the line reaches
+/// the wire, attributed to `user_main`. Stdout-as-telemetry.
+pub fn userspace_prints(h: &mut View) -> Result<(), String> {
+    let user_id = match h
+        .wait_for(SEC * 20, is_thread_register_named("user_main"))
+        .ok_or("no ThreadRegister for 'user_main' within 20s")?
+    {
+        OwnedFrame::ThreadRegister { id, .. } => id,
+        _ => return Err("matched non-ThreadRegister".to_string()),
+    };
+
+    h.wait_for(SEC * 10, move |f, _| match f {
+        OwnedFrame::Log { msg, task_id, .. } => {
+            msg.contains("hello from userspace") && *task_id == user_id
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no Log 'hello from userspace' from user_main within 10s — the println / DebugWrite / \
+         Log-frame path refused or broke",
+    )?;
+
+    Ok(())
+}
+
 /// Userspace demo worker (`workload=workers`): a cooperative `worker` process
 /// loops {open a `worker.tick` span, bump a progress counter, `yield`}. Asserts
 /// the worker registers, its progress counter climbs, and it emits repeated

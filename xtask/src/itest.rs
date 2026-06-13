@@ -151,6 +151,7 @@ catalog! {
     wfi "userspace-yield-round-trips"     scenarios::userspace_yield_round_trips     [userspace]  {"userspace"};
     wfi "userspace-spansink-granted"      scenarios::userspace_spansink_granted     [userspace]  {"userspace"};
     wfi "userspace-emits-span"            scenarios::userspace_emits_span           [userspace]  {"userspace"};
+    wfi "userspace-prints"                scenarios::userspace_prints               [userspace]  {"userspace"};
     wfi "userspace-refusal-snitched"      scenarios::userspace_refusal_snitched     [userspace]  {"userspace"};
     wfi "userspace-quota-refused"         scenarios::userspace_quota_refused        [userspace]  {"userspace-span-flood"};
     cpu "workers-make-progress"           scenarios::workers_make_progress          [userspace]  {"workers"};
@@ -191,6 +192,9 @@ pub struct RunConfig {
     /// Select scenarios carrying any of these tags (union). Mutually
     /// exclusive with `name`. Empty = no tag filtering.
     pub tags: Vec<String>,
+    /// Shared-boot mode: group scenarios by `workload` and run each group
+    /// against one kernel boot. `false` = separate boots (the flake gate).
+    pub shared: bool,
 }
 
 /// Entry point from `main`: select scenarios per `config`, run them in QEMU
@@ -209,6 +213,7 @@ pub fn run(config: RunConfig) -> ExitCode {
         profile_filter,
         skip,
         tags,
+        shared,
     } = config;
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
@@ -415,6 +420,7 @@ pub fn run(config: RunConfig) -> ExitCode {
         jobs,
         cpu_jobs,
         invocation: Some(std::env::args().collect::<Vec<_>>().join(" ")),
+        shared,
     };
 
     let outcome = itest_harness::run(&to_run, repeat, update_baseline, &config);

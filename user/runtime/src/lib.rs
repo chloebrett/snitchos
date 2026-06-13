@@ -179,6 +179,27 @@ pub fn yield_now() {
     }
 }
 
+/// Largest single `debug_write` the kernel will copy — matches its
+/// `MAX_USER_STR_LEN`. Callers (e.g. `snitchos-std`'s `println!`) must chunk to
+/// this; a longer write would be refused.
+pub const DEBUG_WRITE_MAX: usize = 256;
+
+/// Write up to [`DEBUG_WRITE_MAX`] bytes to the debug/stdout channel (the
+/// `DebugWrite` syscall). The kernel copies them out and emits a `Log` frame.
+/// Backs `snitchos_std::println!`.
+pub fn debug_write(bytes: &[u8]) {
+    // SAFETY: `ecall`; the kernel copies `bytes` (range-validated on its side)
+    // and emits a `Log` frame. a0 returns the count, which we ignore.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::DebugWrite as usize,
+            inlateout("a0") bytes.as_ptr() as usize => _,
+            in("a1") bytes.len(),
+        );
+    }
+}
+
 /// A capability to emit telemetry — an unforgeable handle the kernel checks
 /// against this process's table. Holding the integer is not authority.
 #[derive(Clone, Copy)]

@@ -151,8 +151,17 @@ left of std" map: **wired** — `thread::yield_now` (→ `Yield`),
 yield through `snitchos_std::thread::yield_now`, proving the wire end-to-end.
 The eventual real-target `sys` backend reuses this mapping.
 
-Next stub to fill: `io::println!` via a `DebugWrite` syscall → snitched `Log`
-frame (observable + testable). Then the facade grows one `todo!` at a time.
+**First stub filled: `io::println!`** ✅ via a `DebugWrite` syscall (abi=6) →
+`copy_from_user` → a snitched `Frame::Log { msg, task_id, … }` on the wire
+(stdout-as-telemetry — observable *and* testable). The facade's `print!`/
+`println!` macros format into a heap string (one line = one `Log` frame) and
+chunk to the kernel's copy limit. `hello` prints "hello from userspace";
+`userspace-prints` asserts the `Log` frame, 10/10. `DebugWrite` is ungated
+(printing isn't an authority, like `Yield`).
+
+Next stubs, one `todo!` at a time: `time::Instant` (read-clock syscall),
+`collections::HashMap` (hashbrown + a seed), `sync::Mutex` / `thread::spawn`
+(threads), and the capability-rooted `fs`/`net`/`env`.
 
 ### The split
 

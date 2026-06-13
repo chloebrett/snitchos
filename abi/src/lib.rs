@@ -60,6 +60,11 @@ pub enum Syscall {
     /// eventually), and the runtime allocator (`talc`) `claim`s each one — it
     /// does not assume regions abut, so the kernel may place them disjointly.
     MapAnon = 5,
+    /// Write bytes to the debug/stdout channel. `a0` = pointer to the bytes,
+    /// `a1` = length. The kernel copies them out and emits a snitched `Log`
+    /// wire frame (so stdout is observable). Returns bytes written in `a0`, or
+    /// `usize::MAX` if refused (bad pointer). Backs `println!`.
+    DebugWrite = 6,
 }
 
 impl Syscall {
@@ -75,6 +80,7 @@ impl Syscall {
             3 => Some(Self::SpanOpen),
             4 => Some(Self::SpanClose),
             5 => Some(Self::MapAnon),
+            6 => Some(Self::DebugWrite),
             _ => None,
         }
     }
@@ -92,6 +98,7 @@ mod tests {
         assert_eq!(Syscall::SpanOpen as usize, 3);
         assert_eq!(Syscall::SpanClose as usize, 4);
         assert_eq!(Syscall::MapAnon as usize, 5);
+        assert_eq!(Syscall::DebugWrite as usize, 6);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
@@ -99,7 +106,8 @@ mod tests {
         assert_eq!(Syscall::from_usize(3), Some(Syscall::SpanOpen));
         assert_eq!(Syscall::from_usize(4), Some(Syscall::SpanClose));
         assert_eq!(Syscall::from_usize(5), Some(Syscall::MapAnon));
-        assert_eq!(Syscall::from_usize(6), None);
+        assert_eq!(Syscall::from_usize(6), Some(Syscall::DebugWrite));
+        assert_eq!(Syscall::from_usize(7), None);
     }
 }
 

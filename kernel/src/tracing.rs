@@ -52,17 +52,17 @@ static INTERN_TABLE: crate::sync::Mutex<InternTable> = crate::sync::Mutex::new(I
 /// then either ship to the virtio-console (if it's up) or append to
 /// the pre-init buffer for later flush.
 ///
-/// The 128-byte encode buffer is sized for span / event / metric
-/// frames and short `StringRegister`s (the longest name we register is
-/// ~30 chars). Frames that don't fit are silently dropped — encoding
-/// failure is a programmer error (frame too big or postcard bug),
-/// distinct from pre-init overflow which the buffer counts and the
-/// host learns about via `Frame::Dropped`.
+/// The 512-byte encode buffer holds span / event / metric frames, short
+/// `StringRegister`s, and a `Frame::Log` line (a userspace `println!`, capped
+/// at `MAX_USER_STR_LEN` bytes of message + framing). Frames that don't fit are
+/// silently dropped — encoding failure is a programmer error (frame too big or
+/// postcard bug), distinct from pre-init overflow which the buffer counts and
+/// the host learns about via `Frame::Dropped`.
 struct KernelSink;
 
 impl FrameSink for KernelSink {
     fn emit(&mut self, frame: &Frame<'_>) {
-        let mut buf = [0u8; 128];
+        let mut buf = [0u8; 512];
         let Ok(bytes) = postcard::to_slice(frame, &mut buf) else {
             return;
         };
@@ -95,6 +95,18 @@ pub fn emit_syscall_refused(syscall: u8, reason: protocol::RefusalReason) {
     emit_frame(&Frame::SyscallRefused {
         syscall,
         reason,
+        task_id: crate::sched::current_task_id().0,
+        t: timestamp(),
+        hart_id: crate::percpu::current_hartid() as u8,
+    });
+}
+
+/// Emit a userspace **stdout line** (from the `DebugWrite` syscall) as a `Log`
+/// frame, attributed to the current task. Stdout-as-telemetry: a `println!`
+/// becomes an observable wire event the collector can surface.
+pub fn emit_log(msg: &str) {
+    emit_frame(&Frame::Log {
+        msg,
         task_id: crate::sched::current_task_id().0,
         t: timestamp(),
         hart_id: crate::percpu::current_hartid() as u8,

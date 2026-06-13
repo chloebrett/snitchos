@@ -313,6 +313,13 @@ impl State {
                 self.advance_anchor(*t);
                 None
             }
+            Frame::Log { t, .. } => {
+                // Userspace stdout line. On the wire (the itest reads it
+                // directly); surfacing it via Loki / an OTLP log record is a
+                // follow-on. Keep the timeline anchored.
+                self.advance_anchor(*t);
+                None
+            }
         }
     }
 

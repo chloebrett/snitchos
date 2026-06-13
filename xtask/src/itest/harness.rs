@@ -38,8 +38,8 @@ pub type StringTable = HashMap<StringId, String>;
 /// reader thread (which pushes) and the assertion side (which scans).
 /// Replaces the old consume-once mpsc channel: frames are *retained*, not
 /// drained, so the assertion side advances a cursor over them rather than
-/// pulling each frame out once. A single cursor today (`Harness::cursor`);
-/// the retention is what will let multiple `View`s replay one boot later.
+/// pulling each frame out once. Each `View` holds its own `Arc` clone +
+/// cursor, so several Views replay one boot's stream independently.
 struct Recorder {
     buf: Mutex<RecordBuf>,
     /// Notified on every append and on close, so a waiter blocked at the
@@ -541,6 +541,8 @@ impl View {
                 format!("CapEvent {{ {kind:?} cap_id={cap_id} parent={parent_cap_id} holder={holder} object={object:?} rights={rights:#b} t={t} hart={hart_id} }}"),
             OwnedFrame::SyscallRefused { syscall, reason, task_id, t, hart_id } =>
                 format!("SyscallRefused {{ syscall={syscall} reason={reason:?} task={task_id} t={t} hart={hart_id} }}"),
+            OwnedFrame::Log { msg, task_id, t, hart_id } =>
+                format!("Log {{ {msg:?} task={task_id} t={t} hart={hart_id} }}"),
         }
     }
 }
@@ -644,6 +646,7 @@ fn variant_name(frame: &OwnedFrame) -> &'static str {
         OwnedFrame::HartRegister { .. } => "HartRegister",
         OwnedFrame::CapEvent { .. } => "CapEvent",
         OwnedFrame::SyscallRefused { .. } => "SyscallRefused",
+        OwnedFrame::Log { .. } => "Log",
     }
 }
 

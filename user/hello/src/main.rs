@@ -20,6 +20,10 @@ extern "C" fn main() {
     // Emit through the capability the kernel handed us at startup.
     let _ = telemetry().emit(42);
 
+    // A std-shaped `println!` — goes through the facade → `DebugWrite` syscall
+    // → a snitched `Log` frame on the wire.
+    snitchos_std::println!("hello from userspace");
+
     // Open a span for the lifetime of the program, naming it with a
     // heap-allocated `format!` string — proving the userspace allocator works
     // (no allocator → this won't link). The RAII guard closes the span

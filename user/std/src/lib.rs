@@ -115,12 +115,61 @@ pub mod collections {
 
 // --- Stubbed: the ambient-namespace surface, capability-rooted or unsupported ---
 
-/// `std::io`. TODO: `print!`/`println!`/`Stdout` need a `DebugWrite` syscall
-/// (copy_from_user → a snitched `Log` frame) — the iconic next piece.
+/// `std::io` — `print!`/`println!` to stdout. Each line is a `DebugWrite`
+/// syscall → a snitched `Frame::Log`, so userspace stdout is observable on the
+/// wire (the SnitchOS twist on "stdout"). Wired.
 pub mod io {
-    pub fn stdout() {
-        todo!("io::Stdout / println! — needs a DebugWrite syscall (the next step)")
+    use core::fmt;
+
+    /// The standard output stream — writes via the `DebugWrite` syscall.
+    pub struct Stdout;
+
+    impl fmt::Write for Stdout {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            // Chunk to the kernel's per-write limit; a long write becomes
+            // several `Log` frames.
+            for chunk in s.as_bytes().chunks(snitchos_user::DEBUG_WRITE_MAX) {
+                snitchos_user::debug_write(chunk);
+            }
+            Ok(())
+        }
     }
+
+    /// `std::io::stdout()`.
+    #[must_use]
+    pub fn stdout() -> Stdout {
+        Stdout
+    }
+
+    /// Backs the `print!`/`println!` macros. Formats into a heap string first
+    /// so one `print!` is one `Log` frame (not one per format fragment), then
+    /// writes it. Not for direct use.
+    #[doc(hidden)]
+    pub fn _print(args: fmt::Arguments) {
+        use fmt::Write;
+        let mut s = alloc::string::String::new();
+        let _ = s.write_fmt(args);
+        for chunk in s.as_bytes().chunks(snitchos_user::DEBUG_WRITE_MAX) {
+            snitchos_user::debug_write(chunk);
+        }
+    }
+}
+
+/// `print!` — write to stdout (a snitched `Log` frame), no trailing newline.
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {
+        $crate::io::_print(::core::format_args!($($arg)*))
+    };
+}
+
+/// `println!` — write a line to stdout (a snitched `Log` frame).
+#[macro_export]
+macro_rules! println {
+    () => { $crate::io::_print(::core::format_args!("\n")) };
+    ($($arg:tt)*) => {
+        $crate::io::_print(::core::format_args!("{}\n", ::core::format_args!($($arg)*)))
+    };
 }
 
 /// `std::fs` — **capability-rooted, not ambient**. TODO: the v0.10 capability

@@ -247,6 +247,14 @@ pub struct RunnerConfig<'a> {
     /// run's `metadata.toml` for exact reproduction and to capture the
     /// parallelism a failure occurred under. `None` omits it.
     pub invocation: Option<String>,
+
+    /// Shared-boot mode. `false` (default) = separate: each scenario is its
+    /// own group, so the executor spawns one subject per scenario (today's
+    /// flake-gate semantics). `true` = shared: scenarios are grouped by
+    /// `workload`, so each group's same-workload scenarios run against one
+    /// subject. The executor is identical for both — only the grouping
+    /// differs. See `plans/itest-shared-boot-mode.md`.
+    pub shared: bool,
 }
 
 /// Run `scenarios` `repeat` times. If `update_baseline` is true, write
@@ -478,12 +486,17 @@ pub fn run(
         let mut local = Aggregator::new();
         let total = scenarios.len();
 
+        // Group for execution: separate mode → singletons; shared mode →
+        // by workload. The work unit downstream is the group.
+        let groups = group_scenarios(scenarios, config.shared);
+
         let failed_this_run: usize = if jobs <= 1 {
-            // Sequential path. Format unchanged from pre-step-3.
+            // Sequential path: one group at a time, each group's members
+            // run against one subject.
             let mut count = 0;
-            for s in scenarios {
-                let res = process_one_scenario(
-                    s,
+            for group in &groups {
+                let outcomes = process_group(
+                    group,
                     run_idx,
                     &mut local,
                     &history_writer,
@@ -491,21 +504,19 @@ pub fn run(
                     config.run_group,
                     ScenarioFormat::Inline,
                 );
-                if res.failed {
-                    count += 1;
-                }
+                count += outcomes.iter().filter(|o| o.failed).count();
             }
             count
         } else {
-            // Parallel path. Partition by `cpu_profile`: Wfi scenarios
-            // fan out across `jobs` workers; Cpu scenarios run in a
-            // second pass at the (typically smaller) `cpu_jobs` width
-            // so each Cpu worker tends to land on its own host core.
-            let (wfi_scenarios, cpu_scenarios): (Vec<&Scenario>, Vec<&Scenario>) =
-                scenarios
-                    .iter()
-                    .copied()
-                    .partition(|s| matches!(s.cpu_profile, CpuProfile::Wfi));
+            // Parallel path. Partition GROUPS by `cpu_profile` (a group is
+            // Cpu-bound if *any* member is): Wfi groups fan out across
+            // `jobs` workers; Cpu groups run in a second pass at the
+            // (typically smaller) `cpu_jobs` width so each lands on its own
+            // host core.
+            let (wfi_groups, cpu_groups): (Vec<Vec<&Scenario>>, Vec<Vec<&Scenario>>) =
+                groups
+                    .into_iter()
+                    .partition(|g| g.iter().all(|s| matches!(s.cpu_profile, CpuProfile::Wfi)));
 
             // Cpu batch runs serially by default (`cpu_jobs` floored
             // to 1). Halving was removed: Cpu scenarios run real guest
@@ -515,9 +526,9 @@ pub fn run(
 
             let mut iter_failed = 0usize;
 
-            if !wfi_scenarios.is_empty() {
-                let work: Vec<(u32, &Scenario)> =
-                    wfi_scenarios.into_iter().map(|s| (run_idx, s)).collect();
+            if !wfi_groups.is_empty() {
+                let work: Vec<(u32, Vec<&Scenario>)> =
+                    wfi_groups.into_iter().map(|g| (run_idx, g)).collect();
                 let (wfi_agg, wfi_failed) = run_parallel_batch(
                     work,
                     jobs,
@@ -530,12 +541,12 @@ pub fn run(
                 iter_failed += wfi_failed;
             }
 
-            if !cpu_scenarios.is_empty() {
+            if !cpu_groups.is_empty() {
                 eprintln!(
                     "--- cpu-bound scenarios ({cpu_jobs} parallel) ---"
                 );
-                let work: Vec<(u32, &Scenario)> =
-                    cpu_scenarios.into_iter().map(|s| (run_idx, s)).collect();
+                let work: Vec<(u32, Vec<&Scenario>)> =
+                    cpu_groups.into_iter().map(|g| (run_idx, g)).collect();
                 let (cpu_agg, cpu_failed) = run_parallel_batch(
                     work,
                     cpu_jobs,
@@ -721,7 +732,7 @@ fn finalize_run(
 /// decide whether each completed item is its own "iteration" (stress
 /// mode) or just one of many in a single iteration (Wfi/Cpu batch).
 fn run_parallel_batch<'a>(
-    work_items: Vec<(u32, &'a Scenario)>,
+    work_items: Vec<(u32, Vec<&'a Scenario>)>,
     workers: u32,
     history_writer: &'a Mutex<Option<HistoryWriter>>,
     history_dir: Option<&'a Path>,
@@ -731,7 +742,7 @@ fn run_parallel_batch<'a>(
     if work_items.is_empty() || workers == 0 {
         return (Aggregator::new(), 0);
     }
-    let work: Mutex<VecDeque<(u32, &'a Scenario)>> =
+    let work: Mutex<VecDeque<(u32, Vec<&'a Scenario>)>> =
         Mutex::new(work_items.into_iter().collect());
     let work_ref = &work;
 
@@ -751,9 +762,9 @@ fn run_parallel_batch<'a>(
                         .lock()
                         .expect("work-queue poisoned")
                         .pop_front();
-                    let Some((iter_idx, s)) = next else { break };
-                    let res = process_one_scenario(
-                        s,
+                    let Some((iter_idx, group)) = next else { break };
+                    let outcomes = process_group(
+                        &group,
                         iter_idx,
                         &mut worker_agg,
                         history_writer,
@@ -761,9 +772,7 @@ fn run_parallel_batch<'a>(
                         run_group,
                         ScenarioFormat::Prefixed,
                     );
-                    if res.failed {
-                        worker_failed += 1;
-                    }
+                    worker_failed += outcomes.iter().filter(|o| o.failed).count();
                 }
                 (worker_agg, worker_failed)
             }));
@@ -796,43 +805,93 @@ struct ScenarioOutcome {
     failed: bool,
 }
 
-/// Run one scenario and record everything that follows: timing,
-/// log-tail dump on failure, log-file copy into the run-dir, NDJSON
-/// row. Shared between the sequential and parallel paths.
-///
-/// Run a single scenario: delegate to the consumer's `run_group`
-/// executor as a one-element group. When no executor is supplied, call
-/// `(s.run)()` directly with an otherwise-empty report — the crate's own
-/// test path; real consumers always supply an executor (which is where
-/// the subject launch, timing, and capture live).
-fn execute_scenario(s: &Scenario, run_group: RunGroupFn<'_>) -> ScenarioReport {
-    match run_group {
-        Some(exec) => exec(std::slice::from_ref(&s)).into_iter().next().unwrap_or_else(|| {
-            ScenarioReport {
-                result: Err(format!(
-                    "executor returned no report for scenario '{}'",
-                    s.name
-                )),
+/// Partition scenarios into execution groups. Separate mode (`shared ==
+/// false`) makes each scenario its own singleton group — today's
+/// one-subject-per-scenario semantics. Shared mode groups by `workload`
+/// (first-seen order preserved for stable output), so same-workload
+/// scenarios run against one subject. The executor handles either; only
+/// the grouping differs.
+fn group_scenarios<'a>(scenarios: &[&'a Scenario], shared: bool) -> Vec<Vec<&'a Scenario>> {
+    if !shared {
+        return scenarios.iter().map(|&s| vec![s]).collect();
+    }
+    let mut groups: Vec<Vec<&'a Scenario>> = Vec::new();
+    for &s in scenarios {
+        match groups.iter_mut().find(|g| g[0].workload == s.workload) {
+            Some(g) => g.push(s),
+            None => groups.push(vec![s]),
+        }
+    }
+    groups
+}
+
+/// Run a whole group through the consumer's `run_group` executor (one
+/// subject for the group), returning one report per member in order. When
+/// no executor is supplied, fall back to `(s.run)()` per member with an
+/// otherwise-empty report — the crate's own test path. The result is
+/// normalised to exactly `group.len()` reports: a short executor result
+/// pads with an error report so no scenario is silently dropped.
+fn execute_group(group: &[&Scenario], run_group: RunGroupFn<'_>) -> Vec<ScenarioReport> {
+    let mut produced = match run_group {
+        Some(exec) => exec(group).into_iter(),
+        None => group
+            .iter()
+            .map(|s| ScenarioReport {
+                result: (s.run)(),
                 max_wait: None,
                 capture: None,
                 log_path: None,
-            }
-        }),
-        None => ScenarioReport {
-            result: (s.run)(),
-            max_wait: None,
-            capture: None,
-            log_path: None,
-        },
-    }
+            })
+            .collect::<Vec<_>>()
+            .into_iter(),
+    };
+    group
+        .iter()
+        .map(|s| {
+            produced.next().unwrap_or_else(|| ScenarioReport {
+                result: Err(format!("executor returned no report for scenario '{}'", s.name)),
+                max_wait: None,
+                capture: None,
+                log_path: None,
+            })
+        })
+        .collect()
 }
 
-/// Runs one scenario via the consumer's executor (`run_group`, as a
-/// singleton group) and records everything that follows: timing,
+/// Execute a group (one subject) and record each member's result: timing,
 /// log-tail dump on failure, log-file copy into the run-dir, NDJSON row.
-/// All the per-scenario facts come from the returned `ScenarioReport` —
-/// no thread-local scraping. Shared between the sequential and parallel
-/// paths.
+/// The group's wall time is attributed evenly across its members (a
+/// singleton — separate mode — gets the whole time, identical to before).
+/// Shared between the sequential and parallel paths.
+fn process_group(
+    group: &[&Scenario],
+    run_idx: u32,
+    local: &mut Aggregator,
+    history_writer: &Mutex<Option<HistoryWriter>>,
+    history_dir: Option<&Path>,
+    run_group: RunGroupFn<'_>,
+    format: ScenarioFormat,
+) -> Vec<ScenarioOutcome> {
+    let started_at = OffsetDateTime::now_utc();
+    let start = Instant::now();
+    let reports = execute_group(group, run_group);
+    let group_elapsed = start.elapsed();
+    // Even split: a singleton gets the full time (separate mode, unchanged);
+    // a shared group amortises the boot across cheap per-View scans.
+    let per = group_elapsed
+        .checked_div(u32::try_from(group.len()).unwrap_or(1).max(1))
+        .unwrap_or(group_elapsed);
+    group
+        .iter()
+        .zip(reports)
+        .map(|(s, report)| {
+            process_report(s, report, per, started_at, run_idx, local, history_writer, history_dir, format)
+        })
+        .collect()
+}
+
+/// Singleton convenience over `process_group` — used by the stress path,
+/// which repeats one scenario rather than iterating a list.
 fn process_one_scenario(
     s: &Scenario,
     run_idx: u32,
@@ -842,14 +901,29 @@ fn process_one_scenario(
     run_group: RunGroupFn<'_>,
     format: ScenarioFormat,
 ) -> ScenarioOutcome {
-    if matches!(format, ScenarioFormat::Inline) {
-        eprint!("test {} ... ", s.name);
-    }
-    let started_at = OffsetDateTime::now_utc();
-    let start = Instant::now();
-    let report = execute_scenario(s, run_group);
-    let elapsed = start.elapsed();
-    local.record_duration(s.name, elapsed);
+    process_group(&[s], run_idx, local, history_writer, history_dir, run_group, format)
+        .pop()
+        .expect("process_group returns one outcome per member")
+}
+
+/// Record one scenario's outcome from its report: print the result line,
+/// dump/copy the log on failure, classify the failure signature, append
+/// the NDJSON row. `duration` is this scenario's attributed share of its
+/// group's wall time. All per-scenario facts come from the report — no
+/// thread-local scraping.
+#[allow(clippy::too_many_arguments, reason = "runner plumbing; grouping these would just move the noise")]
+fn process_report(
+    s: &Scenario,
+    report: ScenarioReport,
+    duration: Duration,
+    started_at: OffsetDateTime,
+    run_idx: u32,
+    local: &mut Aggregator,
+    history_writer: &Mutex<Option<HistoryWriter>>,
+    history_dir: Option<&Path>,
+    format: ScenarioFormat,
+) -> ScenarioOutcome {
+    local.record_duration(s.name, duration);
 
     let ScenarioReport { result: outcome, max_wait, capture, log_path } = report;
 
@@ -863,6 +937,13 @@ fn process_one_scenario(
         })
         .unwrap_or_default();
 
+    // The status line prints atomically (one `eprintln`) so parallel
+    // completions don't interleave half-lines. `status_prefix` carries the
+    // scenario name; `prefix` is the indent for any sub-lines (the error).
+    let status_prefix = match format {
+        ScenarioFormat::Inline => format!("test {} ... ", s.name),
+        ScenarioFormat::Prefixed => format!("[{}] ", s.name),
+    };
     let prefix = match format {
         ScenarioFormat::Inline => String::new(),
         ScenarioFormat::Prefixed => format!("[{}] ", s.name),
@@ -873,11 +954,11 @@ fn process_one_scenario(
     let mut failed = false;
     let (row_result, row_error) = match &outcome {
         Ok(()) => {
-            eprintln!("{prefix}ok{timing_str}");
+            eprintln!("{status_prefix}ok{timing_str}");
             (crate::history::ResultKind::Pass, None)
         }
         Err(e) => {
-            eprintln!("{prefix}FAILED{timing_str}");
+            eprintln!("{status_prefix}FAILED{timing_str}");
             eprintln!("{prefix}  {e}");
             let mut log_tail: Option<String> = None;
             if let Some(log_path) = &log_path {
@@ -923,7 +1004,7 @@ fn process_one_scenario(
         iteration: run_idx + 1,
         scenario: s.name.to_string(),
         started_at,
-        duration_ms: elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
+        duration_ms: duration.as_millis().min(u128::from(u32::MAX)) as u32,
         result: row_result,
         error: row_error,
         log: row_log,
@@ -1694,5 +1775,64 @@ mod tests {
         assert_eq!(plain.cpu_profile, CpuProfile::Wfi);
         assert!(plain.tags.is_empty());
         assert_eq!(plain.workload, None);
+    }
+
+    #[test]
+    fn group_scenarios_separate_makes_singletons() {
+        let a = Scenario::new("a", always_pass).on_workload("x");
+        let b = Scenario::new("b", always_pass).on_workload("x");
+        let refs = [&a, &b];
+        let groups = group_scenarios(&refs, false);
+        assert_eq!(groups.len(), 2, "separate mode: one group per scenario");
+        assert!(groups.iter().all(|g| g.len() == 1));
+    }
+
+    #[test]
+    fn group_scenarios_shared_groups_by_workload_preserving_order() {
+        let a = Scenario::new("a", always_pass).on_workload("x");
+        let b = Scenario::new("b", always_pass); // default demo (None)
+        let c = Scenario::new("c", always_pass).on_workload("x");
+        let d = Scenario::new("d", always_pass); // None
+        let refs = [&a, &b, &c, &d];
+        let groups = group_scenarios(&refs, true);
+        // First-seen workload order: the "x" group, then the None group.
+        assert_eq!(groups.len(), 2);
+        assert_eq!(names(&groups[0]), vec!["a", "c"]);
+        assert_eq!(names(&groups[1]), vec!["b", "d"]);
+    }
+
+    #[test]
+    fn shared_mode_hands_same_workload_scenarios_to_the_executor_as_one_group() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_counters();
+        let a = Scenario::new("a", always_pass).on_workload("w");
+        let b = Scenario::new("b", always_pass).on_workload("w");
+        let c = Scenario::new("c", always_pass); // default demo
+
+        // The executor records the size of each group it's handed.
+        let group_sizes = Mutex::new(Vec::new());
+        let run_group = |scns: &[&Scenario]| -> Vec<ScenarioReport> {
+            group_sizes.lock().unwrap().push(scns.len());
+            scns.iter()
+                .map(|s| ScenarioReport {
+                    result: (s.run)(),
+                    max_wait: None,
+                    capture: None,
+                    log_path: None,
+                })
+                .collect()
+        };
+        let config = RunnerConfig {
+            shared: true,
+            run_group: Some(&run_group),
+            ..RunnerConfig::default()
+        };
+        let _ = run(&[&a, &b, &c], 1, false, &config);
+
+        let mut sizes = group_sizes.lock().unwrap().clone();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![1, 2], "{{a,b}} is one group of 2, {{c}} a group of 1");
+        // Every scenario still ran exactly once.
+        assert_eq!(PASS_COUNTER.load(Ordering::Relaxed), 3);
     }
 }

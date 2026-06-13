@@ -59,10 +59,26 @@ failure-signature capture that the separate-boot model gives us.
     `fn(&mut View)` against a fresh `View`, building the report from
     `view.max_wait()` / `view.take_capture()` + `boot.log_path()`. Already
     group-shaped, so step 7 is just flipping the runner's grouping.
-- **Next: step 6** — `pre_init_order`'s incremental-table exception (only
-  if it regresses under replay; may be fine as-is). **Step 7** — runner
-  `--shared` + group-by-`workload` (the executor already handles N-member
-  groups; the runner just needs to form them and pass them).
+- **Steps 6 + 7 done and QEMU-validated (build unblocked).**
+  - **Step 6 is moot** — each `View` builds its own incremental string
+    table from cursor 0, so `pre_init_order`'s `name_of(id).is_none()`
+    check works per-View with no special handling. It passes in shared mode.
+  - **Step 7** — `RunnerConfig.shared` + `group_scenarios(scenarios,
+    shared)` (separate → singletons; shared → group by `workload`,
+    first-seen order). The runner's work unit is now a *group*: sequential
+    and parallel paths both iterate groups; `run_parallel_batch` fans
+    groups across workers; a group is Cpu-bound if any member is.
+    `process_one_scenario` → `process_group` (+ `process_report` per
+    member; output is now one atomic line per scenario). `--shared` CLI
+    flag (default off). 3 new host tests (separate singletons, shared
+    grouping, end-to-end group sizes via a fake executor).
+  - **Validated on real QEMU:** full suite **43/43 pass in both modes**.
+    Shared mode cuts CPU time **78.3s → 47.0s** (~40% fewer boots); wall
+    time 44.5s → 41.2s (modest — the 19-scenario default-demo group is a
+    serial long-pole on one worker).
+- **Next: step 8 (docs)** + optional wall-clock tuning (parallelise Views
+  *within* a shared group; and/or the 10 Hz itest-timer from the suite
+  audit — orthogonal, multiplies with this).
 
 Non-goal: replacing the separate-boot model. Shared mode is an
 additional, opt-in mode. The flake gate (`--repeat 10`) and baseline

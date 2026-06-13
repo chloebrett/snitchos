@@ -152,6 +152,11 @@ pub enum Frame<'a> {
     t: u64,
     hart_id: u8,
   },
+  /// A userspace **stdout line** — the bytes a program wrote via `DebugWrite`
+  /// (backing `println!`). Making stdout a wire frame keeps it observable
+  /// (the collector can surface it as logs), attributed to `task_id`. New
+  /// variants go at the END — postcard encodes discriminants positionally.
+  Log { msg: &'a str, task_id: u32, t: u64, hart_id: u8 },
 }
 
 /// The lifecycle phase of a [`Frame::CapEvent`]. v0.7b emits only
@@ -521,6 +526,21 @@ mod tests {
 
       assert_eq!(frame, decoded);
     }
+  }
+
+  /// Roundtrip a `Frame::Log` — a userspace stdout line on the wire.
+  #[test]
+  fn log_roundtrips() {
+    let frame = Frame::Log {
+      msg: "hello from userspace",
+      task_id: 5,
+      t: 1234,
+      hart_id: 1,
+    };
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+    assert_eq!(frame, decoded);
   }
 
   /// Roundtrip a `Frame::SyscallRefused` for each `RefusalReason` — the

@@ -224,6 +224,14 @@ enum Cmd {
         /// Can't be combined with a positional scenario name.
         #[arg(long, value_name = "TAG", value_delimiter = ',')]
         tag: Vec<String>,
+        /// Shared-boot mode: group scenarios by their `workload` and run
+        /// each group against a single kernel boot (so the ~19 default-demo
+        /// and ~12 userspace scenarios each boot QEMU once instead of N
+        /// times). Much faster for the inner loop / PR checks. Off by
+        /// default — the flake gate (`--repeat 10`) and baselines want the
+        /// per-scenario isolation of separate boots.
+        #[arg(long, default_value_t = false)]
+        shared: bool,
     },
     /// Inspect and manage the integration-test baseline
     /// (`.itest-baseline.toml`) and per-run history (`.itest-runs/`).
@@ -421,6 +429,7 @@ fn main() -> ExitCode {
             capture,
             skip,
             tag,
+            shared,
         } => {
             if !skip_unit_tests {
                 let unit = itest::run_unit_tests();
@@ -449,6 +458,7 @@ fn main() -> ExitCode {
                 profile_filter,
                 skip,
                 tags: tag,
+                shared,
             })
         }
         Cmd::Baseline { cmd } => baseline(cmd),

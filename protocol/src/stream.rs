@@ -44,6 +44,7 @@ pub enum OwnedFrame {
         hart_id: u8,
     },
     SyscallRefused { syscall: u8, reason: RefusalReason, task_id: u32, t: u64, hart_id: u8 },
+    Log { msg: String, task_id: u32, t: u64, hart_id: u8 },
 }
 
 impl OwnedFrame {
@@ -83,6 +84,9 @@ impl OwnedFrame {
             }
             Frame::SyscallRefused { syscall, reason, task_id, t, hart_id } => {
                 OwnedFrame::SyscallRefused { syscall, reason, task_id, t, hart_id }
+            }
+            Frame::Log { msg, task_id, t, hart_id } => {
+                OwnedFrame::Log { msg: msg.to_string(), task_id, t, hart_id }
             }
         }
     }
