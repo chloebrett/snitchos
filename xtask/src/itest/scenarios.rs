@@ -1462,42 +1462,56 @@ pub fn userspace_prints(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
-/// Userspace demo worker (`workload=workers`): a cooperative `worker` process
-/// loops {open a `worker.tick` span, bump a progress counter, `yield`}. Asserts
-/// the worker registers, its progress counter climbs, and it emits repeated
-/// `worker.tick` spans attributed to it — the userspace successor to the
-/// kernel-mode `task_a`/`task_b`, cooperating via the `yield` syscall.
-pub fn workers_make_progress(h: &mut View) -> Result<(), String> {
-    let worker_id = match h
-        .wait_for(SEC * 20, is_thread_register_named("worker"))
-        .ok_or("no ThreadRegister for 'worker' within 20s")?
-    {
-        OwnedFrame::ThreadRegister { id, .. } => id,
-        _ => return Err("matched non-ThreadRegister".to_string()),
-    };
+/// Two userspace demo workers (`workload=workers`) share one hart cooperatively:
+/// `worker_a` and `worker_b` are independent processes (distinct page tables,
+/// distinct span names) that each loop {open `worker_x.tick` span, bump
+/// progress, `yield`}. Asserts both register, both emit *repeated* spans
+/// attributed to their own task id (neither starves), and the scheduler
+/// actually context-switches between them. The proof that the
+/// address-space-aware switch (CP5-1) carries two distinct user roots on one
+/// hart — the userspace successor to kernel `task_a`/`task_b`.
+pub fn two_userspace_workers_round_robin(h: &mut View) -> Result<(), String> {
+    let mut ids = std::collections::HashMap::new();
+    for name in ["worker_a", "worker_b"] {
+        let id = match h
+            .wait_for(SEC * 20, is_thread_register_named(name))
+            .ok_or_else(|| std::format!("no ThreadRegister for '{name}' within 20s"))?
+        {
+            OwnedFrame::ThreadRegister { id, .. } => id,
+            _ => return Err("matched non-ThreadRegister".to_string()),
+        };
+        ids.insert(name, id);
+    }
 
-    // The worker emits an incrementing progress counter each tick.
-    h.wait_for(SEC * 10, |f, strings| match f {
+    // Each worker opens a fresh `worker_x.tick` span every iteration. Finding
+    // two per worker — attributed to that worker's own task id — proves both
+    // loops repeat and neither starves the other.
+    for name in ["worker_a", "worker_b"] {
+        let span_name = std::format!("{name}.tick");
+        let worker_id = ids[name];
+        for nth in ["first", "second"] {
+            let needle = span_name.clone();
+            h.wait_for(SEC * 15, move |f, strings| match f {
+                OwnedFrame::SpanStart { name_id, task_id, .. } => {
+                    strings.get(name_id).map(String::as_str) == Some(needle.as_str())
+                        && *task_id == worker_id
+                }
+                _ => false,
+            })
+            .ok_or_else(|| std::format!("no {nth} {span_name} span from {name} within 15s"))?;
+        }
+    }
+
+    // The scheduler actually switched between the two userspace tasks.
+    h.wait_for(SEC * 15, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
-            strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
-                && *value >= 5
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.sched.context_switches_total")
+                && *value > 0
         }
         _ => false,
     })
-    .ok_or("worker progress counter did not reach 5 within 10s — worker not running/yielding?")?;
-
-    // It opens a fresh `worker.tick` span each iteration — find two, proving the
-    // loop repeats and spans are attributed to the worker task.
-    for nth in ["first", "second"] {
-        h.wait_for(SEC * 10, move |f, strings| match f {
-            OwnedFrame::SpanStart { name_id, task_id, .. } => {
-                strings.get(name_id).map(String::as_str) == Some("worker.tick")
-                    && *task_id == worker_id
-            }
-            _ => false,
-        })
-        .ok_or_else(|| std::format!("no {nth} worker.tick span from the worker within 10s"))?;
-    }
+    .ok_or("no sched.context_switches_total > 0 within 15s")?;
 
     Ok(())
 }

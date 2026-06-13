@@ -154,7 +154,7 @@ catalog! {
     wfi "userspace-prints"                scenarios::userspace_prints               [userspace]  {"userspace"};
     wfi "userspace-refusal-snitched"      scenarios::userspace_refusal_snitched     [userspace]  {"userspace"};
     wfi "userspace-quota-refused"         scenarios::userspace_quota_refused        [userspace]  {"userspace-span-flood"};
-    cpu "workers-make-progress"           scenarios::workers_make_progress          [userspace]  {"workers"};
+    cpu "two-userspace-workers-round-robin" scenarios::two_userspace_workers_round_robin [userspace] {"workers"};
     wfi "heap-grows-on-demand"            scenarios::heap_grows_on_demand           [userspace]  {"heap-grow"};
 }
 

@@ -1,13 +1,15 @@
-//! Demo worker (`workload=workers`): a cooperative userspace task that loops
-//! { open a `worker.tick` span, bump a progress counter, `yield` }. The
-//! userspace successor to the kernel-mode `task_a`/`task_b`.
+//! Demo worker A (`workload=workers`): a cooperative userspace task that loops
+//! { open a `worker_a.tick` span, bump a progress counter, `yield` }. One of two
+//! independent worker processes (the other is `worker_b`) that share a single
+//! hart cooperatively — the userspace successor to the kernel-mode
+//! `task_a`/`task_b`.
 //!
 //! `main` never returns — it's a server loop; the runtime's post-`main`
 //! `exit()` is simply never reached. The span guard opens at the top of each
 //! iteration, stays open across the `yield` (span-survives-yield), and closes
 //! at the end of the loop body. The span name is interned once (repeats are
-//! free under the per-process quota). Step 5 gives each worker a distinct
-//! `format!`-ed name + counter; for one worker the bootstrap sink is enough.
+//! free under the per-process quota), and is distinct from `worker_b`'s so the
+//! two workers' spans are individually attributable on the wire.
 
 #![no_std]
 #![no_main]
@@ -21,7 +23,7 @@ extern "C" fn main() {
     let sink = telemetry();
     let mut progress: i64 = 0;
     loop {
-        let _span = tracer.span("worker.tick");
+        let _span = tracer.span("worker_a.tick");
         progress += 1;
         let _ = sink.emit(progress);
         // The cooperative yield, via the std-shaped facade (→ `Yield` syscall).

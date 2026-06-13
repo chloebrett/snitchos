@@ -439,11 +439,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             user::init_metric();
             let _ = sched::spawn_on(1, "user_span_flood", user::span_flood_main_entry);
         }
-        // Demo worker: a cooperative userspace task that loops {span, progress,
-        // yield} — the userspace successor to kernel `task_a`/`task_b`.
+        // Demo workers: two cooperative userspace processes sharing hart 1,
+        // each looping {span, progress, yield} — the userspace successor to
+        // kernel `task_a`/`task_b`. Distinct page tables + span names; the
+        // address-space-aware scheduler switch carries both roots on one hart.
         Some(WorkloadKind::Workers) => {
             user::init_metric();
-            let _ = sched::spawn_on(1, "worker", user::worker_main_entry);
+            let _ = sched::spawn_on(1, "worker_a", user::worker_a_main_entry);
+            let _ = sched::spawn_on(1, "worker_b", user::worker_b_main_entry);
         }
         // Heap-growth probe: a userspace program allocates past one region,
         // forcing the runtime to `map_anon` more frames from the kernel.

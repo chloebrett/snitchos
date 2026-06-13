@@ -34,9 +34,11 @@ pub static FAULTER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FAULTER_ELF"));
 /// names to exceed the per-process span-name quota.
 pub static SPAN_FLOOD_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAN_FLOOD_ELF"));
 
-/// The `workload=workers` program: a cooperative worker that loops
-/// {open span, bump progress, yield}.
-pub static WORKER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_WORKER_ELF"));
+/// The `workload=workers` programs: two cooperative workers that each loop
+/// {open span, bump progress, yield}. Distinct binaries (own page tables,
+/// own span names) so they're individually attributable as they share a hart.
+pub static WORKER_A_ELF: &[u8] = include_bytes!(env!("SNITCHOS_WORKER_A_ELF"));
+pub static WORKER_B_ELF: &[u8] = include_bytes!(env!("SNITCHOS_WORKER_B_ELF"));
 
 /// The `workload=heap-grow` program: allocates past the runtime's per-region
 /// map size to force on-demand heap growth via `MapAnon`.
@@ -138,9 +140,15 @@ pub extern "C" fn span_flood_main_entry() -> ! {
     run(SPAN_FLOOD_ELF)
 }
 
-/// Hart-1 entry for `workload=workers`: run a cooperative demo worker.
-pub extern "C" fn worker_main_entry() -> ! {
-    run(WORKER_ELF)
+/// Hart-1 entry for `workload=workers`: run cooperative demo worker A.
+pub extern "C" fn worker_a_main_entry() -> ! {
+    run(WORKER_A_ELF)
+}
+
+/// Hart-1 entry for `workload=workers`: run cooperative demo worker B (the
+/// twin process sharing the hart with worker A).
+pub extern "C" fn worker_b_main_entry() -> ! {
+    run(WORKER_B_ELF)
 }
 
 /// Hart-1 entry for `workload=heap-grow`: run the heap-growth probe.

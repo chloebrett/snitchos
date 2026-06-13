@@ -70,7 +70,8 @@ fn build_and_embed_user(kernel_dir: &str) {
     embed(&format!("{bin_dir}/hello"), "SNITCHOS_USER_ELF");
     embed(&format!("{bin_dir}/faulter"), "SNITCHOS_FAULTER_ELF");
     embed(&format!("{bin_dir}/span-flood"), "SNITCHOS_SPAN_FLOOD_ELF");
-    embed(&format!("{bin_dir}/worker"), "SNITCHOS_WORKER_ELF");
+    embed(&format!("{bin_dir}/worker_a"), "SNITCHOS_WORKER_A_ELF");
+    embed(&format!("{bin_dir}/worker_b"), "SNITCHOS_WORKER_B_ELF");
     embed(&format!("{bin_dir}/heap-grow"), "SNITCHOS_HEAP_GROW_ELF");
 
     // Rebuild the embed whenever a user program — or its only dependency, the
