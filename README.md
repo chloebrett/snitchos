@@ -173,11 +173,11 @@ scenarios).
 - [plans/legacy/v0.3-interrupts.md](plans/legacy/v0.3-interrupts.md) — v0.3 implementation plan.
 - [plans/legacy/kernel-core-carveout.md](plans/legacy/kernel-core-carveout.md) — the host-testability extraction plan + as-built notes.
 - [plans/legacy/kernel-integration-tests.md](plans/legacy/kernel-integration-tests.md) — the QEMU-driven scenario harness.
-- [plans/v0.4-memory-concepts.md](plans/v0.4-memory-concepts.md) — Sv39, higher-half, frame allocator concepts before code.
+- [plans/legacy/v0.4-memory-concepts.md](plans/legacy/v0.4-memory-concepts.md) — Sv39, higher-half, frame allocator concepts before code.
 - [plans/legacy/v0.4-memory-step-1-satp-on.md](plans/legacy/v0.4-memory-step-1-satp-on.md) — Sv39 identity boot table + first `csrw satp`.
-- [plans/v0.4-memory-step-3-frame-allocator-concepts.md](plans/v0.4-memory-step-3-frame-allocator-concepts.md) — bitmap vs linked-list vs buddy; the linear-map design call.
+- [plans/legacy/v0.4-memory-step-3-frame-allocator-concepts.md](plans/legacy/v0.4-memory-step-3-frame-allocator-concepts.md) — bitmap vs linked-list vs buddy; the linear-map design call.
 - [plans/legacy/v0.4-memory-step-3-frame-allocator.md](plans/legacy/v0.4-memory-step-3-frame-allocator.md) — frame allocator implementation plan.
-- [plans/v0.4-memory-step-4-kernel-heap.md](plans/v0.4-memory-step-4-kernel-heap.md) — kernel heap implementation plan.
+- [plans/legacy/v0.4-memory-step-4-kernel-heap.md](plans/legacy/v0.4-memory-step-4-kernel-heap.md) — kernel heap implementation plan.
 - [plans/v0.4-memory-findings.md](plans/v0.4-memory-findings.md) — what we learned (and what we worked around) building higher-half.
 - [plans/v0.5-pre-smp-sync-prefactor.md](plans/v0.5-pre-smp-sync-prefactor.md) — `kernel::sync` chokepoint + `PerCpu<T>` stub. The SMP-shaped pre-factor that landed before v0.5 threading.
 - [plans/v0.5-threading.md](plans/v0.5-threading.md) — cooperative round-robin scheduler, per-task span stack, `ThreadRegister` + `ContextSwitch` wire frames.

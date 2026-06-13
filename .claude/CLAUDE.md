@@ -333,10 +333,10 @@ Gotchas worth re-reading `plans/v0.4-memory-findings.md` before disturbing:
 - [docs/observability-design.md](../docs/observability-design.md) — wire format, span semantics.
 - [docs/trap-and-interrupt-model.md](../docs/trap-and-interrupt-model.md) — RISC-V trap handling.
 - [docs/roadmap-and-milestones.md](../docs/roadmap-and-milestones.md) — current milestone, what's done, what's next.
-- [plans/v0.4-memory-concepts.md](../plans/v0.4-memory-concepts.md) — Sv39, higher-half, frame allocator concepts.
-- [plans/v0.4-memory-step-3-frame-allocator-concepts.md](../plans/v0.4-memory-step-3-frame-allocator-concepts.md) — the linear-map design call.
-- [plans/v0.4-memory-step-4-kernel-heap.md](../plans/v0.4-memory-step-4-kernel-heap.md) — heap region strategy, allocator choice, deferred-emission constraint.
-- [plans/v0.4-memory-step-5-page-table-mutation.md](../plans/v0.4-memory-step-5-page-table-mutation.md) — `map(va, pa, perms)` API; P1 (primitive) + P2 (growable heap) split.
+- [plans/legacy/v0.4-memory-concepts.md](../plans/legacy/v0.4-memory-concepts.md) — Sv39, higher-half, frame allocator concepts.
+- [plans/legacy/v0.4-memory-step-3-frame-allocator-concepts.md](../plans/legacy/v0.4-memory-step-3-frame-allocator-concepts.md) — the linear-map design call.
+- [plans/legacy/v0.4-memory-step-4-kernel-heap.md](../plans/legacy/v0.4-memory-step-4-kernel-heap.md) — heap region strategy, allocator choice, deferred-emission constraint.
+- [plans/legacy/v0.4-memory-step-5-page-table-mutation.md](../plans/legacy/v0.4-memory-step-5-page-table-mutation.md) — `map(va, pa, perms)` API; P1 (primitive) + P2 (growable heap) split.
 - [plans/v0.5-pre-smp-sync-prefactor.md](../plans/v0.5-pre-smp-sync-prefactor.md) — `kernel::sync` chokepoint + `kernel::percpu` stub. Lands before v0.5 threading so lock discipline is in one place.
 - [plans/v0.5-threading.md](../plans/v0.5-threading.md) — cooperative round-robin scheduler, per-task span stack, `ThreadRegister` + `ContextSwitch` wire frames.
 - [posts/post-12-the-kernel-takes-turns.md](../posts/post-12-the-kernel-takes-turns.md) — v0.5 devlog.
