@@ -1,4 +1,4 @@
-# Lang — grammar & precedence spec (v0)
+# Stitch — grammar & precedence spec (v0)
 
 _The one design artifact that must be pinned before any parser code, because the parser **encodes** these decisions and they're expensive to retrofit. Everything semantic (methods, caps, telemetry) is a cheap incremental add on top and is deliberately **out of scope** here._
 
@@ -21,16 +21,17 @@ High-level language design: [docs/language-design.md](../../docs/language-design
 
 ### Keywords (reserved)
 ```
-prod  sum  contract  on  let  mut  free  use  uses  match
-and  or  not  for  in  while  break  continue  true  false
+prod  sum  contract  on  let  mut  free  use  uses  match  and  or  not  true  false
 ```
-That's the whole set for v0. Notably absent: `fn`, `class`, `if`, `else`, `when`, `interface`, `null`, `loop`. `_` is a token (wildcard / catch-all), not a keyword. Boolean logic is the words `and`/`or`/`not` (not `&&`/`||`/`!`) — see operator table for why.
+That's the whole set for v0. Notably absent: `fn`, `class`, `if`, `else`, `when`, `interface`, `null`, **and every loop keyword** (`for`, `while`, `loop`, `break`, `continue`) — iteration is library combinators over (lazy) sequences, not syntax; see §5a / §6a. `_` is a token (wildcard / catch-all), not a keyword. Boolean logic is the words `and`/`or`/`not` (not `&&`/`||`/`!`) — see operator table for why.
 
 ### Literals
-- **Int:** `123`, `1_000` (underscores ignored). Hex `0x1F` _(confirm — defer if not needed)_.
+- **Int:** `123`, `1_000` (underscores ignored). Decimal only in v0; hex/binary deferred (additive later).
 - **Float:** `3.14`, `1_000.5`.
 - **Bool:** `true`, `false`.
-- **Str:** `"…"` with escapes `\n \t \" \\` and **interpolation** `\(expr)` — `"temp is \(avg)°C"`. (`\(` opens an embedded expression; `$` is NOT interpolation here, it stays reserved for placeholders.)
+- **Str:** `"…"` with escapes `\n \t \" \\` and **interpolation** `{expr}` — `"temp is {avg}°C"`. Literal braces are `{{` / `}}` (format-string style). `\` is plain escapes only; `$` stays a lambda placeholder — three distinct roles in a string (`{` interpolate, `\` escape, `$` literal), no overload.
+- **List:** `[1, 2, 3]` — eager `List<T>`.
+- **Map:** `["host": 1, "port": 2]` — eager `Map<K, V>`; empty map is `[:]` (since `[]` is the empty list). List vs map disambiguated by the `:` in entries.
 
 ### Operators & punctuation
 ```
@@ -91,7 +92,7 @@ A placeholder (`$`, `$a`, …) appearing inside a **call argument** turns that a
 
 ## 4. Pipe semantics
 
-`|>` inserts its left operand as the **first argument** _(confirm — Elixir-style, not F#-style)_ of the call on its right. The right side is either a **call** or a bare **function reference**:
+`|>` inserts its left operand as the **first argument** (Elixir-style, not F#-style — confirmed) of the call on its right. The right side is either a **call** or a bare **function reference**:
 
 - `LHS |> f(a, b)`  ≡  `f(LHS, a, b)`     (call: LHS inserted first)
 - `LHS |> f`        ≡  `f(LHS)`            (bare reference — no empty `()` needed)
@@ -135,12 +136,9 @@ constDecl   = "let" "mut"? Ident (":" type)? "=" expr ;
 usesClause  = "uses" type ("," type)* ;                (* parsed; ignored in v0 *)
 body        = "=" expr | block ;
 block       = "{" stmt* "}" ;
-stmt        = constDecl | assignment | useExpr | forStmt | whileStmt
-            | "break" | "continue" | exprStmt ;
+stmt        = constDecl | assignment | useExpr | exprStmt ;   (* no loop stmts — iteration is combinators, §5a/§6a *)
 assignment  = lvalue "=" expr ;                        (* lvalue: @x, name (mut only) *)
 useExpr     = "use" (Ident "<-")? callExpr ;           (* scoping/callbacks only — NOT iteration *)
-forStmt     = "for" Ident "in" expr block ;            (* over ranges or collections *)
-whileStmt   = "while" expr block ;                     (* condition loop; `while true` = infinite *)
 
 paramList   = param ("," param)* ;
 param       = Ident (":" type)? ;
@@ -162,11 +160,15 @@ postfix     = primary postOp* ;
 postOp      = "(" argList? ")" | "[" expr "]" | "." Ident | "?." Ident | "?" ;
 primary     = literal | Ident | "@" | "@" Ident | placeholder
             | "(" expr ("," expr)* ")"                 (* grouping or tuple *)
+            | listLit | mapLit
             | matchExpr | block | construct ;
 construct   = Ident "(" argList? ")" ;                 (* prod/variant ctor; shares call syntax *)
 argList     = arg ("," arg)* ;
 arg         = (Ident ":")? expr ;                      (* Swift-style labels; ".." spread for update *)
 placeholder = "$" | "$" Ident ;                        (* $a etc; see §3 *)
+listLit     = "[" (expr ("," expr)*)? "]" ;
+mapLit      = "[" ":" "]" | "[" mapEntry ("," mapEntry)* "]" ; (* [:] = empty map *)
+mapEntry    = expr ":" expr ;                          (* the `:` distinguishes map from list *)
 
 matchExpr   = "match" expr? "{" arm* "}" ;             (* subject optional: subjectless = cond table *)
 arm         = pattern ("if" expr)? "=>" expr ;         (* guards; "_" is catch-all *)
@@ -184,16 +186,43 @@ Note `if` appears only as a match-arm guard, never as a statement — consistent
 
 ---
 
+## 5a. Collections & sequences
+
+Two eager collections + one lazy sequence. You tell eager from lazy **by the type**, and the type follows from how the value was produced.
+
+- **`List<T>`** — finite, eager, in-memory, structural equality. The default. Literal `[1, 2, 3]`.
+- **`Map<K, V>`** — eager. Literal `["host": 1, "port": 2]`, empty `[:]`. Indexing `m[k]` returns **`Maybe<V>`** (no null) — chains with `?`/`?.`.
+- **`Set<T>`** — eager; **no literal** (`[1,2,3] |> toSet`). A set literal can't be told from list/map without stealing `{…}` (blocks), and sets are rare.
+- **`Seq<T>`** — lazy, pull-based, possibly infinite. Produced by `iterate`/`repeat`/`forever`, ranges, or `list.lazy`. Materialize with `toList`/`toSet`/`toMap`.
+
+**Ranges are `Seq<Int>` (lazy):** `0..n`, inclusive `0..=n`, open/infinite `n..`. The rule is clean — **literals (`[…]`) are eager, ranges/producers are lazy.** Lazy ranges give pipeline fusion for free (`0..1_000_000 |> map(f) |> first(...)` allocates nothing) and make infinite producers possible.
+
+**Combinators are stdlib functions, not keywords** — zero grammar cost, cheap to rename, no parser impact. Defined on both `List` (eager → returns `List`) and `Seq` (lazy → returns `Seq`), dispatched on the receiver (Kotlin's model). Starter vocabulary:
+
+| group | functions |
+|---|---|
+| transform | `map` `filter` `flatMap` `zip` |
+| reduce/consume | `fold` `foldWhile` `each` `sum` `count` `any` `all` |
+| bound/search | `take` `drop` `takeWhile` `dropWhile` `first` `find` |
+| produce (lazy) | `iterate` `repeat` `forever` |
+| materialize | `toList` `toSet` `toMap`; `toSeq` / `.lazy` (List→Seq) |
+
+`fold` takes an explicit init; `find(pred)` returns `Maybe<T>`. See §6a for how this vocabulary replaces loop syntax.
+
+---
+
 ## 6. v0 parser/interpreter scope
 
 **Build first (the walking skeleton — enough to run the `average`/`report` sample with `span`/`emit` stubbed to `println!`):**
 - Lexer for §1; Pratt parser for §2–§5; `insta` snapshot tests on the AST.
-- Eval: `let` bindings + lexical scope, functions + closures, arithmetic/comparison/boolean, `prod`/`sum` construction + field access, `match` (incl. subjectless), lambdas + placeholders, pipes, ranges, `for`/`while`/`break`/`continue`, strings + interpolation.
+- Eval: `let` bindings + lexical scope, functions + closures, arithmetic/comparison/boolean (`and`/`or`/`not`), `prod`/`sum` construction + field access, `match` (incl. subjectless), lambdas + placeholders, pipes (incl. bare-reference stages), strings + interpolation.
+- Collections: eager `List`/`Map` + literals (`[…]`, `["k": v]`, `[:]`), finite ranges, and the eager combinators (`map`/`filter`/`fold`/`each`/`find`/`toList`).
 - **Dynamically typed:** parse type annotations, do **not** check them. Defers the entire type system.
-- `Maybe`/`Result` as built-in sums; `?`/`?.` hardcoded for them.
+- `Maybe`/`Result` as built-in sums; `?`/`?.` hardcoded for them. `map[k]` returns `Maybe`.
 - `span`/`emit`/`use <-` present; `span` = a host fn that prints.
 
 **Defer (each a later TDD increment, designed against the running language):**
+- **Lazy `Seq`** + infinite producers (`iterate`/`repeat`/`forever`) + `takeWhile`/`foldWhile` + lazy ranges — the increment right after the eager skeleton; this is where the loop-replacement story fully lands (and the first place laziness/TCO-avoidance matters).
 - `on`/`@`/`contract` methods + dynamic dispatch.
 - Static types, generics bounds/variance, inference, exhaustiveness checking.
 - Capabilities effect-checking (`uses` is parsed-then-ignored; caps are plain runtime values).
@@ -202,22 +231,42 @@ Note `if` appears only as a match-arm guard, never as a statement — consistent
 
 ---
 
-## 6a. Loops — model
+## 6a. Iteration — no loop keywords
 
-- **Transformation** is HOF + pipes (`fold`/`map`/`filter`), not loops — the accumulate-into-a-variable `for` doesn't exist (it's `fold`).
-- **`for x in iterable { }`** — bounded side-effecting iteration over ranges/collections. Brace-delimited (body ends at `}`, code may follow).
-- **`while cond { }`** — condition/unbounded loops (event loops, retry). `while true` is the infinite loop; no separate `loop`.
-- **`break` / `continue`** in both. Loops are **statements** (return unit); `match` remains the expression-valued brancher.
-- TCO is **deferred** — real loops mean event loops don't require tail-recursion up front.
+There are **no loop statements.** Iteration is library combinators (§5a) over lists and lazy sequences; the only real loops live inside ~12 stdlib combinators (`each`/`takeWhile`/`forever`/…) implemented in the runtime. Every imperative construct maps to one:
+
+| imperative | declarative |
+|---|---|
+| `for x in xs { … }` | `xs \|> each(\x -> { … })` |
+| `while cond { … }` | `iterate(seed, step) \|> takeWhile(\s -> cond) \|> each(…)` |
+| `break` (found it) | `find` / `first` / `takeWhile` |
+| `continue` (skip) | `filter` (before `each`) |
+| `loop { … }` (forever) | `forever(\-> { … })` |
+| accumulate + early exit | `foldWhile(init, \acc x -> … => Done(r) \| Continue(s))` |
+
+Examples that justified `while`:
+```
+forever(\-> { let msg = receive(inbox)  handle(msg) })          // event loop
+iterate(n, \i -> i - 1) |> takeWhile(\i -> i > 0) |> each(\i -> emit("tick", i))
+repeat(attempt) |> first(\r -> r.ok)                            // retry until success = "break"
+```
+
+`break`/`continue` aren't keywords — they're either combinator choices (`first`/`takeWhile`/`filter`) or values (`Done`/`Continue`). Control flow becomes data — on-brand for a match-everything language.
+
+**TCO not required for common cases:** `each`/`takeWhile`/`forever` loop *internally* in the runtime, so event/condition loops cost no user stack. TCO matters only for hand-written recursion (the escape hatch), so it stays deferred. The enabling feature is **lazy `Seq`** (a thunk/iterator protocol) so infinite producers don't materialize.
+
+> **The crazy north star (post-v0):** make iteration an *algebraic effect* (a `yield`ing generator with the consumer as handler), unifying it with the capability (`uses`) and telemetry effect machinery. Koka/OCaml-5 territory; noted, not built.
 
 ## 6b. Considered & rejected
 
-- **`use <- each(...)` for iteration** — iteration via the `use <-` mechanism (Gleam-style) was considered, but `use <-`'s "rest of the block is the body" semantics fits *spans/scoping* and mis-fits *loops* (you usually loop then continue). So iteration gets brace-delimited `for`; `use <-` stays scoping-only.
+- **Imperative loop keywords (`for`/`while`/`break`/`continue`/`loop`)** — rejected as too imperative for an immutable, expression-oriented language. Replaced by the combinator/lazy-`Seq` model above (§6a): loops are a library, not syntax. Cost accepted: lazy-sequence machinery in the runtime.
+- **`use <- each(...)` for iteration** — iteration via the `use <-` mechanism (Gleam-style) was considered, but `use <-`'s "rest of the block is the body" semantics fits *spans/scoping* and mis-fits *loops* (you usually loop then continue). Iteration is the ordinary HOF `each` with an explicit arrow lambda (`each(x -> { … })`), whose braces delimit the body cleanly; `use <-` stays scoping-only.
+- **Kotlin-style trailing-lambda sugar (`f(x) { … }`)** — excluded. It needs `{ … }` to read as a lambda literal, but here `{ }` is a *block* and lambdas are the arrow form (`x -> …`); adding it would resurrect the dropped brace-lambda and give two ways to pass a lambda. Its use cases are already covered: `use <-` for scoping/DSL/resource blocks (the `withLock { }` case), pipes for data flow, explicit arrow lambdas otherwise.
 - **Dart-style cascade (`obj..m()..n()`)** — returns the receiver so you can fire a run of mutating/setter calls at one object. Rejected: it's a *mutation* idiom (builder configuration), which fights immutable-by-default; we cover the ground with functional update (`..p`), named-arg construction, and pipes. It would also overload `..` a third time (spread + range + cascade). `..` stays spread + range only.
 - **`&&` / `||` / `!`** — replaced by `and`/`or`/`not` (keywords). Reason: keeps `|` meaning alternation *only* (sum variants / or-patterns / conditional-else), removing the `|` vs `||` near-collision, and reads better. Cost accepted: three more keywords; `!=` keeps its `!` (so `not x` but `x != y`, Python-style).
 
-## 7. Open decisions to confirm before parser work
-1. Block comments nestable? (assumed yes)
-2. Hex/other int literals in v0? (assumed no)
-3. Pipe = first-arg insertion? (assumed yes, Elixir-style)
-4. Crate layout: single `lang` host crate to start, split into `lang-lexer`/`lang-parser`/`lang-interp` later — or split now? (next plan doc)
+## 7. Resolved decisions
+1. **Block comments nestable** — yes.
+2. **Int literals: decimal only in v0** — hex/binary deferred (additive later). Bitwise `&`/`|` also deferred; since `|` already means alternation, bitwise ops — if ever needed — would be **library functions** (`bitAnd`/`bitOr`), never operators.
+3. **Pipe inserts the left operand as the first argument** (Elixir-style) — confirmed. Load-bearing: stdlib is declared subject-first (`filter(list, pred)`, `map(list, f)`, `fold(list, init, f)`).
+4. **Crate layout: single `lang` host crate to start**, split into lexer/parser/interp if it grows — detail for the `02-*` plan.

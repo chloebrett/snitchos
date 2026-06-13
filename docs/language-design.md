@@ -1,6 +1,10 @@
-# 🗣️ Language design
+# 🪡 Stitch — language design
 
-_A small, Java-shaped managed language for SnitchOS. Immutable by default, concise, with capabilities and telemetry as first-class language constructs. A learning vehicle as much as a feature._
+_Stitch: a small, immutable-by-default managed language for SnitchOS — an **effects-and-observability language wearing comfortable, familiar data-modeling clothes**._
+
+**Overview.** Stitch looks approachable — `prod`/`sum` for data, pipes, pattern matching, lightweight lambdas — but it exists for two things nothing mainstream does: **capabilities are tracked in the type system** (a function declares the authority it needs with `uses`; you can't touch authority you weren't handed), and **telemetry is first-class** (spans/metrics are ordinary `use <-` library calls, and the runtime narrates its *own* execution — GC, dispatch, allocation — as traces into the same Grafana as the kernel it runs on). Underneath it's deliberately Java-shaped — tree-walk interpreter graduating to a stack-based bytecode VM with a generational GC — because the project is partly an exercise in learning how that machinery actually works. The surface is intentionally familiar so the originality can live where it matters: making *authority* and *observability* into language primitives. A few unifying rules keep it coherent — `->` is always "maps to", `=>` always "case/condition", `|` always "alternation", `?`/`?.` a short-circuit family — and loops are a library (combinators over lazy sequences), not syntax. Source extension `.st`.
+
+> **Name origin:** _snitches get stitches_ — SnitchOS snitches (observes and reports); Stitch is the language you write the snitching in. (Credit: E.W.)
 
 Exploratory. Not on the milestone roadmap — a **parallel side project** that can move independently of the kernel track. Its first-class concern is the _implementer's_ education: how a Java-like language is actually built (front end → tree-walk → bytecode VM → generational GC). The novelty that earns it a place _on SnitchOS specifically_ is the capability and telemetry integration; the runtime techniques are deliberately conventional and well-trodden.
 
@@ -154,7 +158,7 @@ General form `use x <- f(...)` ≡ `f(x -> { rest })`. This makes spans, resourc
 
 ## String interpolation
 
-- `"temp is \(avg)°C"` — interpolate with `\(…)`, reusing the in-string "`\` = something special" convention. This keeps `$` reserved exclusively for lambda placeholders (no overload).
+- `"temp is {avg}°C"` — interpolate with `{expr}`; literal braces are `{{` / `}}` (format-string style). `\` stays plain string escapes (`\n`, `\"`) and `$` stays a lambda placeholder — three distinct roles inside a string, no overload.
 
 # Type system
 
@@ -230,6 +234,62 @@ These are where the design risk budget is deliberately spent, and the next thing
 - **Capabilities as effects.** Functions declaring the authority they need (`log(msg: Str) uses TelemetrySink`), the compiler tracking the `uses` set up the call graph, startup caps arriving from `a0`/`a1` and threading down, affine/linear cap values so authority can't be forged or duplicated. The strongest reason the language exists on _this_ OS. How much of this is checked at compile time vs reified in the VM?
 - **Telemetry as syntax.** Spans and metrics as first-class constructs (`span foo { ... }` auto-emitting SpanStart/SpanEnd over the existing `Frame` protocol; declared counters). Plus the reflexive win: the VM narrates _its own_ execution — GC pauses, allocation rate, cap checks, dispatch — as spans in the same Grafana as the kernel.
 - **Syntax & type system.** Now substantially worked out — see [Surface syntax](#surface-syntax) and [Type system](#type-system) above. Remaining grammar gaps: generics beyond `List<T>` (bounds, variance), module/visibility (which also defines encapsulation + the `contract`-coherence boundary), and the precise `match` pattern grammar.
+
+# Concurrency (parked — rides the effect system)
+
+_Not designed in detail, not for v0. Recorded so the reasoning survives. Depends on the capability **effect system** + VM **continuations** existing first — the same machinery that powers `use <-` and the iteration north-star._
+
+Already decided in passing:
+
+- **Single process, in-process tasks.** Stitch is *not* the actor language (that was the deferred separate language where actor = process = IPC endpoint). Concurrency here shares one address space.
+- **Immutable-by-default eliminates most data races by construction** — shared data is immutable, so concurrent reads are safe; races are only possible around `mut`, already the marked case.
+
+Intended model:
+
+- **No async/await coloring.** A function that suspends just declares the effect in its `uses` row — there is no async/sync function split (the most-regretted part of Rust/JS async). Concurrency lives in the effect row, not a second species of function.
+- **Structured concurrency.** A `use scope <- nursery()` block bounds task lifetime: tasks spawned in it are joined or cancelled when the block exits (including early exit via `?`). No leaked tasks.
+- **Capability-mediated.** Spawning needs a `Tasks` cap; tasks inherit a bounded cap set. Authority to create concurrency is grantable/revocable like any capability.
+- **Observable for free.** A nursery is a span; child-task spans nest under it; task switches are already traced `ContextSwitch` frames on SnitchOS. The concurrency *is* the trace.
+- **Channels are `Seq<T>`.** A channel fed by `send` is consumed as a lazy sequence (`ch |> filter |> each`), reusing the combinator vocabulary — no new receive syntax.
+- **The scheduler is a swappable handler.** Because concurrency is an effect, `with scheduler(RoundRobin) { … }` vs `with scheduler(Deterministic.seed(1)) { … }` run identical code under real or reproducible-test scheduling. (The handler side is the least-designed part — only the `uses` declaration side is settled.)
+
+```
+fetch(url: Str) -> Result<Response, NetError> uses Net, Telemetry {
+    use <- span("fetch")
+    Net.get(url)
+}
+
+fetchAll(urls: List<Str>) -> List<Result<Response, NetError>> uses Net, Tasks, Telemetry {
+    use scope <- nursery()                          // joined/cancelled at block exit
+    use <- span("fetch_all")
+    urls
+    |> map(u -> scope.spawn(() -> fetch(u)))        // all start concurrently
+    |> map(await)                                   // join each; suspends the task, not the hart
+}
+```
+
+- **Maps onto the kernel:** `spawn` → a SnitchOS task; suspend → cooperative yield (preemptive once v0.8 lands); cross-process → IPC (v0.9).
+- **Effect-set aliases** (e.g. `effect App = Net, Tasks, Telemetry`, then `uses App`) will be needed so rows stay readable — a concern for the capabilities pass.
+
+**Throughline:** capabilities (`uses`), scoping (`use <-`), iteration, and concurrency all ride the **same algebraic-effects machinery**. Build delimited continuations + handlers once in the VM, and all of it falls out — which is why parking concurrency is safe: it waits on the same foundation everything else needs.
+
+# Lineage
+
+Stitch is a patchwork, deliberately — and the name owns it. For each job it borrows the best-understood form from a language that solved it well; the originality is the **stitching** (the unifying rules below) and the two things that are nobody else's (`uses` capabilities-as-effects, telemetry-as-language) — not the individual patches. A pile of borrowed features is a Frankenstein; a coherent language is a quilt. The seam work is the value.
+
+- **Rust** — `let`/`let mut`, immutable-by-default, `?` try operator, `Result`, contract coherence / orphan rule, `..` functional-update + `..`/`..=` ranges, the monomorphised-generics path.
+- **Kotlin** — eager `List` vs lazy `Seq` split; "sane defaults, unlike Java."
+- **Gleam** — `use <-` block-callback sugar.
+- **Elixir / F#** — the `|>` pipe (first-argument insertion).
+- **Clojure / Kotlin** — lazy sequences; numbered-placeholder lineage (now `$a`/`$b`).
+- **ML / Haskell** — the `sum`/`prod` algebra, `match`, lazy sequences, the categorical naming.
+- **Scala** — `using`/`given` contextual parameters (the planned `uses` threading).
+- **Koka / Unison** — effects as the model for `uses`, and the algebraic-effects north star (iteration today, concurrency later).
+- **Swift** — argument labels; the value/reference distinction (informed the `prod` equality model).
+- **Ruby** — `@` for the receiver.
+- **Roc** — philosophically: "the platform provides the effects" ≈ "the OS provides the capabilities."
+
+The stitches that make it one language, not a heap: `->` always "maps to", `=>` always "case/condition", `|` always "alternation", `?`/`?.` one short-circuit family, two-tier data (`prod`/`sum` + `contract`, no inheritance), and no loop keywords (combinators over lazy `Seq`).
 
 # References
 
