@@ -12,49 +12,51 @@
 # Road to v1.0
 The v1.0 story: *a capability-secured microkernel running a real workload, where every operation is observable end-to-end.* Audio, networking, WASM, and FS-deepening are deliberately post-v1.0 — v1.0 is already a complete story without them.
 
-## v0.1 — Hello, traced world
+**Status legend:** ✅ shipped (code + post) · 🚧 in progress · (unmarked) not started. As of 2026-06-13: v0.1→v0.7b shipped (posts 1–26), v0.8 in progress. Capabilities (v0.7b) and the full userspace runtime exist *today* — see `kernel-core/src/cap.rs`, `user/`. Don't read the future-tense prose below as "not yet built"; trust the marker.
+
+## v0.1 — Hello, traced world ✅
 Smallest kernel that boots on RISC-V in QEMU and emits boot-phase spans + a heartbeat loop as postcard frames over a dedicated serial channel. Host-side reader pretty-prints a live span tree to stdout. No userspace, no allocator, no interrupts.
 
 **Post angle:** "Hello world, but the world snitches." Screen recording of the live span tree.
 
-## v0.2 — Grafana arrives
+## v0.2 — Grafana arrives ✅
 Replace the stdout reader with a real collector daemon. docker-compose stack: Tempo (traces), Prometheus (metrics), Grafana, optionally Loki. Add structured metrics (counters, gauges) alongside spans. Same heartbeat workload.
 
 **Post angle:** "From printf to a real observability stack." First dashboard screenshot — the "this looks like a product" reveal.
 
-## v0.3 — Interrupts & clock
+## v0.3 — Interrupts & clock ✅
 Trap handler, timer interrupts, a monotonic clock behind a `Clock` trait. The heartbeat becomes timer-driven instead of a busy loop. Trap entry/exit traced.
 
 **Post angle:** "Teaching the kernel what time it is." Trace view showing periodic timer-driven spans.
 
-## v0.4 — Memory
+## v0.4 — Memory ✅
 Page table setup, higher-half kernel layout, physical frame allocator, kernel heap. All allocators instrumented — allocation/free as metrics, heap pressure visible in Grafana.
 
 **Post angle:** "Bootstrapping allocators before allocators exist." Grafana panel of live heap usage.
 
-## v0.5 — Threading & round-robin scheduler
+## v0.5 — Threading & round-robin scheduler ✅
 Multiple kernel threads, context switching, the simplest possible scheduler (round-robin, single queue, single CPU). Span context propagates across context switches — the first genuinely hard observability problem. Scheduler decisions traced.
 
 **Post angle:** "Following a trace across a context switch." Multi-thread trace view.
 
-## v0.6 — SMP (cooperative)
+## v0.6 — SMP (cooperative) ✅
 Second hart online, per-CPU discipline made real, page-table mutation extended with TLB-shootdown IPIs, wire format carries `hart_id`. **Cooperative**, not preemptive — each hart runs its own runqueue, tasks `yield_now()` voluntarily, idle harts `wfi` and wake on IPI. Headline workload: a producer/consumer histogram that first runs cooperative single-core (baseline post), then on two harts with `Mutex<VecDeque>` (the chokepoint shows its cost), then with `heapless::spsc` (the chokepoint goes away).
 
 **Why here, not later:** late SMP is an *unbounded audit* across every global and every "no-one-else-is-here" assumption — silent bugs under weak memory ordering. Late capabilities, by contrast, is a *scoped refactor* (rewrite the syscall layer). The v0.5 sync/percpu prefactor positioned this exactly; the audit surface is still small and enumerable today. Capabilities and IPC are the first concurrency-shaped subsystems — designing them post-SMP means they're born multi-hart-correct.
 
 **Post angle:** three posts from one milestone — "two heartbeats on two harts," "what the chokepoint cost me," "what removing it bought me." See `plans/legacy/v0.6-smp-cooperative.md`.
 
-## v0.7a — First userspace process (built deliberately wrong)
+## v0.7a — First userspace process (built deliberately wrong) ✅
 User-mode entry, the first userspace process, exactly one syscall — with ambient authority, no capability discipline. Built intentionally the "Unix way" so the next milestone can feel the pain.
 
 **Post angle:** "The first userspace process — and why I built it wrong on purpose."
 
-## v0.7b — Capability system
+## v0.7b — Capability system ✅
 Introduce capabilities as the only access path. Refactor v0.7a's syscall to be capability-mediated. Per-process capability tables, capabilities as kernel objects, root caps to init only. Kernel begins adopting caps internally where it makes sense. Designed against the v0.6 multi-hart substrate from the start — no SMP retrofit later.
 
 **Post angle:** "Why I rewrote the syscall layer: ambient authority vs. capabilities." The project's identity crystallizes here — a strong essay milestone.
 
-## v0.8 — Preemption, priorities, time-sliced scheduler
+## v0.8 — Preemption, priorities, time-sliced scheduler 🚧
 Cooperative becomes preemptive. Timer-driven preemption with full-trap-frame context switch (today's cooperative `switch` elides caller-saved regs per SysV ABI and can't survive mid-instruction interrupts). The `kernel::sync` chokepoint absorbs preempt-disable hooks in one file. Static priorities and time slicing layer on top. Borg-style two-tier (latency-sensitive + batch) is deferred further out.
 
 **Why before IPC:** the two milestones are mutually unblocked — IPC's blocking paths go through voluntary `yield_now` (a normal call; caller-saved regs already dead per SysV ABI), so the full-trap-frame switch never invalidates them, and preemption needs nothing from IPC. Doing preemption first means IPC's eventual block/wake is born on the preemptive scheduler (the better substrate) rather than retrofitted onto it, and preemption's races land on a single-process system instead of colliding with brand-new endpoint state. (Swapped with v0.9 — was IPC-first.)

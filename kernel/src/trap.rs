@@ -135,7 +135,10 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
         asm!("csrr {}, scause", out(reg) scause);
     }
     match decode_scause(scause) {
-        TrapCause::SupervisorTimerInterrupt => handle_timer(),
+        // SAFETY: `frame` points at the `TrapFrame` `trap_entry` built on this
+        // hart's kernel stack; reading `sstatus` from it for the SPP gate is
+        // sound and we are its sole accessor for the duration of the handler.
+        TrapCause::SupervisorTimerInterrupt => handle_timer(unsafe { &*frame }),
         TrapCause::SupervisorSoftwareInterrupt => crate::ipi::handle_pending(),
         TrapCause::EnvCallFromUMode => {
             // SAFETY: `frame` points at the `TrapFrame` `trap_entry` just
@@ -440,7 +443,7 @@ fn handle_debug_write(frame: &mut TrapFrame) {
 /// deadline (which acks the current pending bit), then set a flag so
 /// the main thread knows to do the real work. **No locks taken here**
 /// — the main thread owns all telemetry emission.
-fn handle_timer() {
+fn handle_timer(frame: &TrapFrame) {
     let start = CLOCK.now();
     let interval = TIMER_INTERVAL_TICKS.load(Ordering::Relaxed);
     CLOCK.arm(start + interval);
@@ -449,6 +452,14 @@ fn handle_timer() {
     LAST_IRQ_DURATION
         .this_cpu()
         .store(end.wrapping_sub(start), Ordering::Relaxed);
+
+    // v0.8 preemption: if this timer interrupted a *userspace* task that has
+    // overrun its quantum, deschedule it now. `SPP == 0` means the trap came
+    // from U-mode; kernel code (`SPP == 1`) is never preempted, keeping the
+    // cooperative "exclusive until I yield" invariant. When the descheduled
+    // task is next picked, it resumes here, returns, and `trap_entry` restores
+    // its full `TrapFrame` and `sret`s to the exact user PC it was running.
+    crate::sched::maybe_preempt(frame.sstatus & SSTATUS_SPP == 0);
 }
 
 /// One-time timer setup: set the interval, arm the first deadline,

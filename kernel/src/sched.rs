@@ -23,7 +23,7 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 
 use protocol::SwitchReason;
 
-use kernel_core::sched::{address_space_switch, Runqueue, TaskId, TaskState};
+use kernel_core::sched::{address_space_switch, quantum_expired, Runqueue, TaskId, TaskState};
 use kernel_core::span::SpanCursor;
 
 use crate::process::Process;
@@ -282,6 +282,13 @@ pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 /// Bumped per `yield_now` that actually switched (no-op yields when
 /// the runqueue was empty don't count). `Relaxed`: pure counter.
 pub static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
+
+/// Cumulative count of **preemptions** — context switches the timer forced
+/// because a userspace task overran its quantum (`reschedule(Preempt)` that
+/// actually switched). A subset of `CONTEXT_SWITCHES`. Bumped in the reschedule
+/// path (an atomic, never a frame from the timer handler) and drained by the
+/// heartbeat as `snitchos.sched.preemptions_total`. `Relaxed`: pure counter.
+pub static PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
 
 /// Time spent in `yield_now`'s bookkeeping (everything from function
 /// entry up to but not including the `switch` asm). Captures the
@@ -546,6 +553,18 @@ fn switch_address_space(next_root: usize, next_proc: *mut Process) {
 /// not-yet-existent preemption + lock-discipline ("don't yield while
 /// holding a `kernel::sync::Mutex`") is on the caller for now.
 pub fn yield_now() {
+    reschedule(SwitchReason::Yield);
+}
+
+/// Core context switch: pick the next ready task on this hart, switch into
+/// it, and tag the emitted `ContextSwitch` with `reason`. `yield_now` passes
+/// `Yield` (a voluntary relinquish); v0.8's timer preemption passes `Preempt`
+/// (an involuntary deschedule). Returns immediately if the runqueue is empty
+/// (nothing else wants the CPU). The full register discipline is identical
+/// either way — preemption is *layered* on this same cooperative switch (the
+/// preempted task's complete state lives in its `TrapFrame` on its kernel
+/// stack; this switch only swaps the 14 callee-saved regs + sp).
+fn reschedule(reason: SwitchReason) {
     let t_entry = crate::tracing::timestamp();
     let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
     let me = crate::percpu::current_hartid();
@@ -603,7 +622,10 @@ pub fn yield_now() {
     switch_address_space(next_root, next_proc);
 
     CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
-    crate::tracing::emit_context_switch(current_id, next_id, SwitchReason::Yield);
+    if matches!(reason, SwitchReason::Preempt) {
+        PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    crate::tracing::emit_context_switch(current_id, next_id, reason);
 
     let t_before_switch = crate::tracing::timestamp();
     LAST_YIELD_OVERHEAD_TICKS
@@ -622,6 +644,40 @@ pub fn yield_now() {
     // single-hart; no preemption mid-switch).
     unsafe { switch(current_ctx, next_ctx) };
     // We've been resumed (a future yield switched back into us).
+}
+
+/// Time slice a userspace task may run before the timer preempts it, in
+/// `time`-CSR ticks. The QEMU timer fires every ~1 s (timebase), which bounds
+/// the *effective* granularity to a tick; this quantum (well under that) means
+/// any user task still on-CPU at a timer tick has overrun and is descheduled,
+/// while a cooperative task (sub-millisecond slices) never accumulates a full
+/// quantum and is never forcibly preempted. Per-priority quanta are a v0.8b
+/// follow-on.
+pub const QUANTUM_TICKS: u64 = 2_000_000; // 0.2 s at 10 MHz
+
+/// Timer-driven preemption entry point (v0.8). Called from the timer IRQ
+/// handler with whether the interrupted code was in **user** mode (`SPP == 0`).
+///
+/// The kernel is never preempted: if `from_user` is false we return at once,
+/// keeping the cooperative "exclusive until I yield" guarantee for kernel code.
+/// If a userspace task has used up its [`QUANTUM_TICKS`], reschedule with reason
+/// `Preempt` — the layered switch parks its full `TrapFrame` on its own kernel
+/// stack and runs the next ready task; `reschedule` returns immediately if
+/// nothing else is ready.
+///
+/// Emitting the `ContextSwitch{Preempt}` inline (inside `reschedule`) is safe
+/// *because* of the `from_user` gate: the interrupted context was in U-mode, so
+/// it held no kernel `Mutex` on this hart — the telemetry TX path it runs
+/// through can't re-entrant-deadlock against the thing we interrupted.
+pub fn maybe_preempt(from_user: bool) {
+    if !from_user {
+        return;
+    }
+    let now = crate::tracing::timestamp();
+    let entry = CURRENT_TASK_ENTRY_TICK.this_cpu().load(Ordering::Relaxed);
+    if quantum_expired(entry, now, QUANTUM_TICKS) {
+        reschedule(SwitchReason::Preempt);
+    }
 }
 
 /// Terminate the calling task. Marks it `Exited`, picks the next

@@ -2,9 +2,9 @@
 
 *Mechanism in the kernel, policy in userspace. Synchronous by default. Capability-gated. Every message traced.*
 
-Not built until v0.8. Designed now because the IPC message format and the trace-context commitment shape the observability protocol and the kernel boundary.
+Not built until v0.9. Designed now because the IPC message format and the trace-context commitment shape the observability protocol and the kernel boundary.
 
-> **Numbering note:** this page predates the SMP insertion at v0.6, which pushed everything downstream forward by one. IPC (synchronous endpoints + notifications) now lands at **v0.8** (was v0.7); userspace + capabilities are the preceding **v0.7a/v0.7b**. References below have been updated accordingly. See `docs/roadmap-and-milestones.md` for the current sequence.
+> **Numbering note:** this page predates two insertions — SMP at v0.6 and preemption at v0.8 — which pushed everything downstream forward. IPC (synchronous endpoints + notifications) now lands at **v0.9**; userspace + capabilities are the shipped **v0.7a/v0.7b**, with **v0.8 preemption** in between. See `docs/roadmap-and-milestones.md` for the current sequence.
 
 # Stated philosophy: "don't communicate by sharing memory" — at the OS level
 Go's slogan — *don't communicate by sharing memory; share memory by communicating* — is the guiding philosophy, but it reframes at the OS level.
