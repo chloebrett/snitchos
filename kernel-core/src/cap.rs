@@ -62,6 +62,15 @@ impl Rights {
     }
 }
 
+impl core::ops::BitOr for Rights {
+    type Output = Rights;
+    /// Union two rights sets — e.g. a server endpoint owner holds
+    /// `RECV | MINT` on one capability.
+    fn bitor(self, rhs: Rights) -> Rights {
+        Rights(self.0 | rhs.0)
+    }
+}
+
 /// What a capability points at. One variant in v0.7b; the enum is the
 /// extension point for the object zoo (`Endpoint`, `MemoryRegion`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,6 +548,15 @@ mod tests {
         assert_ne!(Rights::MINT.bits(), Rights::EMIT.bits());
         assert_ne!(Rights::MINT.bits(), Rights::SEND.bits());
         assert_ne!(Rights::MINT.bits(), Rights::RECV.bits());
+    }
+
+    #[test]
+    fn rights_combine_with_bitor() {
+        // A server endpoint owner holds RECV | MINT on one cap.
+        let combined = Rights::RECV | Rights::MINT;
+        assert!(combined.contains(Rights::RECV));
+        assert!(combined.contains(Rights::MINT));
+        assert!(!combined.contains(Rights::SEND));
     }
 
     #[test]
