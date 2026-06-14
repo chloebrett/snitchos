@@ -1,0 +1,22 @@
+---
+source: stitch/src/parser.rs
+expression: "p(r#\"\"total {a + b}\"\"#)"
+---
+Str(
+    [
+        Lit(
+            "total ",
+        ),
+        Interp(
+            Binary {
+                op: Add,
+                left: Var(
+                    "a",
+                ),
+                right: Var(
+                    "b",
+                ),
+            },
+        ),
+    ],
+)

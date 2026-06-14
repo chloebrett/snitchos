@@ -5,8 +5,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::{BinOp, Expr, UnOp};
-use crate::lexer::{Token, lex};
+use crate::ast::{BinOp, Expr, StrSegment, UnOp};
+use crate::lexer::{StrPart, Token, lex};
 
 /// A parse error. Carries a human-readable message; source positions are a
 /// later increment (the lexer doesn't track spans yet).
@@ -79,10 +79,28 @@ fn collect_placeholders(expr: &mut Expr, params: &mut BTreeSet<String>) {
                 collect_placeholders(value, params);
             }
         }
-        // Atoms with no sub-expressions, and explicit lambdas (their body's
-        // placeholders, if any, belong to that lambda — left for a later check).
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Var(_) | Expr::Lambda { .. } => {}
+        // Atoms with no sub-expressions, explicit lambdas (their body's
+        // placeholders belong to that lambda), and strings (interpolations are
+        // already sub-parsed) — all left for a later check.
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Var(_)
+        | Expr::Str(_)
+        | Expr::Lambda { .. } => {}
     }
+}
+
+/// Convert lexer string parts into AST segments, sub-parsing each `{expr}`
+/// interpolation's raw source into a full expression.
+fn parse_str_segments(parts: Vec<StrPart>) -> Result<Vec<StrSegment>, ParseError> {
+    parts
+        .into_iter()
+        .map(|part| match part {
+            StrPart::Lit(text) => Ok(StrSegment::Lit(text)),
+            StrPart::Expr(raw) => Ok(StrSegment::Interp(Box::new(parse(&raw)?))),
+        })
+        .collect()
 }
 
 /// Map an infix-operator token to its `BinOp`, or `None` if it isn't one.
@@ -421,6 +439,7 @@ impl Parser {
             Token::Bool(b) => Expr::Bool(b),
             Token::Ident(name) => Expr::Var(name),
             Token::Placeholder(name) => Expr::Placeholder(name),
+            Token::Str(parts) => Expr::Str(parse_str_segments(parts)?),
             Token::LParen => {
                 let inner = self.parse_expr(0)?;
                 self.expect(&Token::RParen, "')'")?;
@@ -695,5 +714,25 @@ mod tests {
     #[test]
     fn list_literal_distinct_from_indexing() {
         insta::assert_debug_snapshot!(p("[xs[0], ys[1]]"));
+    }
+
+    #[test]
+    fn parses_plain_string() {
+        insta::assert_debug_snapshot!(p(r#""hello""#));
+    }
+
+    #[test]
+    fn parses_string_interpolation() {
+        insta::assert_debug_snapshot!(p(r#""hi {name}!""#));
+    }
+
+    #[test]
+    fn interpolation_can_hold_an_expression() {
+        insta::assert_debug_snapshot!(p(r#""total {a + b}""#));
+    }
+
+    #[test]
+    fn string_works_as_map_key() {
+        insta::assert_debug_snapshot!(p(r#"["host": 1]"#));
     }
 }

@@ -1,0 +1,20 @@
+---
+source: stitch/src/parser.rs
+expression: "p(r#\"[\"host\": 1]\"#)"
+---
+Map(
+    [
+        (
+            Str(
+                [
+                    Lit(
+                        "host",
+                    ),
+                ],
+            ),
+            Int(
+                1,
+            ),
+        ),
+    ],
+)

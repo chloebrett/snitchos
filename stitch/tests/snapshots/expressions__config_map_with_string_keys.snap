@@ -1,0 +1,36 @@
+---
+source: stitch/tests/expressions.rs
+expression: "p(r#\"[\"host\": \"localhost\", \"retries\": 3]\"#)"
+---
+Map(
+    [
+        (
+            Str(
+                [
+                    Lit(
+                        "host",
+                    ),
+                ],
+            ),
+            Str(
+                [
+                    Lit(
+                        "localhost",
+                    ),
+                ],
+            ),
+        ),
+        (
+            Str(
+                [
+                    Lit(
+                        "retries",
+                    ),
+                ],
+            ),
+            Int(
+                3,
+            ),
+        ),
+    ],
+)

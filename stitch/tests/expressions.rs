@@ -52,3 +52,13 @@ fn guarded_average() {
     // The `mean` shape from samples.st: a conditional whose else-branch divides.
     insta::assert_debug_snapshot!(p("count == 0 => 0 | total / count"));
 }
+
+#[test]
+fn config_map_with_string_keys() {
+    insta::assert_debug_snapshot!(p(r#"["host": "localhost", "retries": 3]"#));
+}
+
+#[test]
+fn interpolated_message() {
+    insta::assert_debug_snapshot!(p(r#""sensor {name}: {celsius}C""#));
+}

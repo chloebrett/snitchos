@@ -1,0 +1,27 @@
+---
+source: stitch/tests/expressions.rs
+expression: "p(r#\"\"sensor {name}: {celsius}C\"\"#)"
+---
+Str(
+    [
+        Lit(
+            "sensor ",
+        ),
+        Interp(
+            Var(
+                "name",
+            ),
+        ),
+        Lit(
+            ": ",
+        ),
+        Interp(
+            Var(
+                "celsius",
+            ),
+        ),
+        Lit(
+            "C",
+        ),
+    ],
+)

@@ -61,6 +61,16 @@ pub enum Expr {
     List(Vec<Expr>),
     /// An eager map literal: `[k: v, …]` (empty is `[:]`).
     Map(Vec<(Expr, Expr)>),
+    /// A string literal, as a sequence of literal text and `{expr}`
+    /// interpolations. A plain string is a single `Lit` segment.
+    Str(Vec<StrSegment>),
+}
+
+/// One piece of a string literal in the AST.
+#[derive(Debug, PartialEq)]
+pub enum StrSegment {
+    Lit(String),
+    Interp(Box<Expr>),
 }
 
 /// Prefix unary operators.
