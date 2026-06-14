@@ -181,6 +181,31 @@ fn range_kind(op: BinOp) -> Option<bool> {
     }
 }
 
+/// Comparisons and ranges are non-associative (§2): chaining them at the same
+/// precedence level (`a < b < c`, `1..2..3`) is a parse error, not a nesting.
+fn is_non_assoc(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Eq
+            | BinOp::Ne
+            | BinOp::Lt
+            | BinOp::Le
+            | BinOp::Gt
+            | BinOp::Ge
+            | BinOp::Range
+            | BinOp::RangeIncl
+    )
+}
+
+/// The error shown when a non-associative operator is chained.
+fn non_assoc_message(op: BinOp) -> &'static str {
+    if range_kind(op).is_some() {
+        "ranges don't chain — `a..b..c` is ambiguous; use a single range"
+    } else {
+        "comparisons don't chain — write `a < b and b < c`, not `a < b < c`"
+    }
+}
+
 /// `(left, right)` binding powers (§2 precedence table). Loosest = lowest;
 /// left < right gives left-associativity.
 fn binding_power(op: BinOp) -> (u8, u8) {
@@ -256,20 +281,34 @@ impl Parser {
                     right: Box::new(self.parse_expr(r_bp)?),
                 }
             };
+            // A second operator at the same precedence level can't chain a
+            // non-associative one (`a < b < c`, `1..2..3`).
+            if is_non_assoc(op)
+                && infix_op(self.peek()).is_some_and(|next| binding_power(next).0 == l_bp)
+            {
+                return Err(ParseError::new(non_assoc_message(op)));
+            }
         }
         // The `cond => then | els` conditional binds looser than any binary
         // operator, so only consider it at the top level (not in operand
         // recursion): `a + b => c | d` is `(a + b) => c | d`.
         if min_bp == 0 && matches!(self.peek(), Token::FatArrow) {
             self.bump(); // =>
-            let then = self.parse_expr(0)?;
+            // Branches parse above the conditional's own level (min_bp = 1), so
+            // a nested `=>` won't be silently absorbed — it must be parenthesised.
+            let then = self.parse_expr(1)?;
             self.expect(&Token::Bar, "'|' in conditional")?;
-            let els = self.parse_expr(0)?;
+            let els = self.parse_expr(1)?;
             left = Expr::If {
                 cond: Box::new(left),
                 then: Box::new(then),
                 els: Box::new(els),
             };
+            if matches!(self.peek(), Token::FatArrow) {
+                return Err(ParseError::new(
+                    "chained conditionals aren't allowed — use `match` for more than two cases",
+                ));
+            }
         }
         Ok(left)
     }
@@ -1409,6 +1448,31 @@ mod tests {
     #[test]
     fn conditional_without_else_is_an_error() {
         insta::assert_debug_snapshot!(parse("x => a"));
+    }
+
+    #[test]
+    fn comparisons_do_not_chain() {
+        insta::assert_debug_snapshot!(parse("a < b < c"));
+    }
+
+    #[test]
+    fn mixed_comparisons_do_not_chain() {
+        insta::assert_debug_snapshot!(parse("a == b != c"));
+    }
+
+    #[test]
+    fn ranges_do_not_chain() {
+        insta::assert_debug_snapshot!(parse("1..2..3"));
+    }
+
+    #[test]
+    fn chained_conditionals_point_to_match() {
+        insta::assert_debug_snapshot!(parse("a => 1 | b => 2 | 3"));
+    }
+
+    #[test]
+    fn a_parenthesized_nested_conditional_is_allowed() {
+        insta::assert_debug_snapshot!(p("a => 1 | (b => 2 | 3)"));
     }
 
     #[test]

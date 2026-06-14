@@ -1,0 +1,9 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"a => 1 | b => 2 | 3\")"
+---
+Err(
+    ParseError {
+        message: "chained conditionals aren't allowed — use `match` for more than two cases",
+    },
+)

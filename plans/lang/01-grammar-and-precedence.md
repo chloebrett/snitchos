@@ -75,7 +75,7 @@ Tightest (binds first) → loosest (binds last). This is the table the Pratt/pre
 
 Mixing `|>` or `..` with `and`/`or`/comparison requires parens — rare in practice, so not worth special levels.
 
-> **Deferred parser checks (TODO):** comparisons and ranges are non-associative, and the `=> |` conditional is non-associative too — chaining it (`c1 => a | c2 => b | c`) should be a **parse error that points the user at `match`** ("chained conditionals aren't allowed — use `match`"). None of these are enforced yet; the parser currently accepts them leniently.
+> **Non-associativity (enforced):** comparisons and ranges are non-associative, and the `=> |` conditional is too — chaining any of them is a parse error. A chained comparison/range says so directly; a chained conditional (`c1 => a | c2 => b | c`) **points the user at `match`**. A genuinely nested conditional must be parenthesised.
 
 Type-level `->` (function types `A -> B -> C`) is **right-associative** = `A -> (B -> C)`.
 
@@ -280,10 +280,10 @@ repeat(attempt) |> first(\r -> r.ok)                            // retry until s
 The front-end (lexer + parser) is otherwise complete — it parses essentially all of `samples.st`. These are the remaining known gaps; none block the evaluator. (Some are cross-referenced from their sections above.)
 
 - **`uses` effects clause** on functions/methods (`report(r) uses Telemetry { … }`) — parsed nowhere yet; arrives with the capability design.
-- **Non-associativity not enforced** — comparisons, ranges, and the `=> |` conditional are parsed left-/right-associatively; chaining them should be a parse error, and a chained conditional should say **"use `match`"** (see §2 note).
 - **Statement separation is maximal-munch** — no newline-significance, so the ASI hazard stands (`a` ⏎ `-b` is `a - b`); see §1. A `Newline`-token soft separator is the eventual fix if it bites.
 
 **Closed (front-end complete for these):**
+- **Non-associativity enforced** — chained comparisons (`a < b < c`) and ranges (`1..2..3`) at the same precedence level are parse errors; a chained conditional (`a => 1 | b => 2 | 3`) errors pointing at `match`. Conditional branches parse above their own level, so a nested conditional must be parenthesised (`a => 1 | (b => 2 | c)`).
 - **Open-ended ranges** `n..` / `..n` / `..=n` / `..` — a dedicated `Expr::Range { start, end, inclusive }` node (closed ranges migrated to it too); open-from detected by whether an operand follows the `..`, open-to by a prefix `..`. Spread (`..base`) stays position-disambiguated in call args.
 - **Subjectless `match { cond => … }`** — parsed and desugared into nested `cond => then | els` conditionals (the N-ary form of the binary conditional); must end in a `_ => …` catch-all.
 - **Float & string literal *patterns*** in match arms — `Float`/`Str` patterns parse; interpolated string patterns are a parse error.

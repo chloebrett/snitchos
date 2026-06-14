@@ -1,0 +1,9 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"a == b != c\")"
+---
+Err(
+    ParseError {
+        message: "comparisons don't chain — write `a < b and b < c`, not `a < b < c`",
+    },
+)

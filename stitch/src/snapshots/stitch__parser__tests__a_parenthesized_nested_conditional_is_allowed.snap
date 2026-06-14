@@ -1,0 +1,23 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"a => 1 | (b => 2 | 3)\")"
+---
+If {
+    cond: Var(
+        "a",
+    ),
+    then: Int(
+        1,
+    ),
+    els: If {
+        cond: Var(
+            "b",
+        ),
+        then: Int(
+            2,
+        ),
+        els: Int(
+            3,
+        ),
+    },
+}
