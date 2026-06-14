@@ -565,6 +565,9 @@ mod tests {
         assert!(combined.contains(Rights::RECV));
         assert!(combined.contains(Rights::MINT));
         assert!(!combined.contains(Rights::SEND));
+        // Idempotent: union of a right with itself is itself. Distinguishes OR
+        // from XOR (which would collapse `R | R` to the empty set).
+        assert_eq!(Rights::SEND | Rights::SEND, Rights::SEND);
     }
 
     #[test]
