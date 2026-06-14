@@ -76,6 +76,12 @@ pub static BADGE_MINT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE_MINT_ELF"
 pub static BADGE_HANDOUT_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE_HANDOUT_SERVER_ELF"));
 pub static BADGE_HANDOUT_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE_HANDOUT_CLIENT_ELF"));
 
+/// The `workload=fs` programs (v0.10 RAMfs): an `fs-server` (`RECV | MINT`)
+/// that mints a root File cap on connect and serves the filesystem, and an
+/// `fs-client` (`SEND`) that attaches and issues requests.
+pub static FS_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_ELF"));
+pub static FS_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_CLIENT_ELF"));
+
 /// The counter the `EmitMetric` syscall bumps. Registered once on hart 0
 /// (`init_metric`) so the `MetricRegister` frame isn't emitted from inside
 /// the trap handler; the handler (on hart 1) reads it via [`user_metric_id`].
@@ -253,6 +259,21 @@ pub extern "C" fn badge_handout_server_main_entry() -> ! {
 pub extern "C" fn badge_handout_client_main_entry() -> ! {
     let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before badge handout client runs");
     run_ipc(BADGE_HANDOUT_CLIENT_ELF, ep, kernel_core::cap::Rights::SEND)
+}
+
+/// Entry for `workload=fs`: the FS server, granted `RECV | MINT` — it mints a
+/// root File cap on connect and (step 2b) serves the filesystem.
+pub extern "C" fn fs_server_main_entry() -> ! {
+    use kernel_core::cap::Rights;
+    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before fs server runs");
+    run_ipc(FS_SERVER_ELF, ep, Rights::RECV | Rights::MINT)
+}
+
+/// Entry for `workload=fs`: the FS client, granted `SEND` — it attaches and
+/// receives the root File cap.
+pub extern "C" fn fs_client_main_entry() -> ! {
+    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before fs client runs");
+    run_ipc(FS_CLIENT_ELF, ep, kernel_core::cap::Rights::SEND)
 }
 
 /// Build a fresh address space, grant the process its bootstrap

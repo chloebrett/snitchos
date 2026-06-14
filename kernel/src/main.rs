@@ -361,7 +361,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::Ipc)
         | Some(WorkloadKind::IpcRpc)
         | Some(WorkloadKind::BadgeMint)
-        | Some(WorkloadKind::BadgeHandout) => {}
+        | Some(WorkloadKind::BadgeHandout)
+        | Some(WorkloadKind::Fs) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -418,6 +419,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::IpcRpc
                     | WorkloadKind::BadgeMint
                     | WorkloadKind::BadgeHandout
+                    | WorkloadKind::Fs
             )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
@@ -542,6 +544,15 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             // server-assigned badge, proving the demux tells them apart.
             let _ = sched::spawn_on(1, "badge_handout_client_a", user::badge_handout_client_main_entry);
             let _ = sched::spawn_on(1, "badge_handout_client_b", user::badge_handout_client_main_entry);
+        }
+        // v0.10 RAMfs: an FS server (RECV|MINT) + a client (SEND) over one
+        // endpoint. Server first so it's receiving when the client attaches;
+        // the client connects (badge 0) and the server mints it a root File cap.
+        Some(WorkloadKind::Fs) => {
+            user::init_metric();
+            crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
+            let _ = sched::spawn_on(1, "fs_server", user::fs_server_main_entry);
+            let _ = sched::spawn_on(1, "fs_client", user::fs_client_main_entry);
         }
         _ => {}
     }

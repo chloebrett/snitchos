@@ -343,6 +343,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs"
+version = "0.0.1"
+dependencies = [
+ "fs-core",
+ "fs-proto",
+ "snitchos-std",
+ "snitchos-user",
+]
+
+[[package]]
 name = "fs-core"
 version = "0.0.1"
 

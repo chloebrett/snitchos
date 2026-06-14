@@ -42,6 +42,8 @@ fn build_and_embed_user(kernel_dir: &str) {
         "build",
         "-p",
         "hello",
+        "-p",
+        "fs",
         "--target",
         USER_TARGET,
         "--target-dir",
@@ -82,6 +84,8 @@ fn build_and_embed_user(kernel_dir: &str) {
     embed(&format!("{bin_dir}/badge-mint"), "SNITCHOS_BADGE_MINT_ELF");
     embed(&format!("{bin_dir}/badge-handout-server"), "SNITCHOS_BADGE_HANDOUT_SERVER_ELF");
     embed(&format!("{bin_dir}/badge-handout-client"), "SNITCHOS_BADGE_HANDOUT_CLIENT_ELF");
+    embed(&format!("{bin_dir}/fs-server"), "SNITCHOS_FS_SERVER_ELF");
+    embed(&format!("{bin_dir}/fs-client"), "SNITCHOS_FS_CLIENT_ELF");
 
     // Rebuild the embed whenever a user program — or its only dependency, the
     // `abi` crate — changes. Directory paths are watched recursively by cargo,
@@ -91,8 +95,14 @@ fn build_and_embed_user(kernel_dir: &str) {
         "user/hello/user.ld",
         "user/hello/Cargo.toml",
         "user/hello/build.rs",
+        "user/fs/src",
+        "user/fs/user.ld",
+        "user/fs/Cargo.toml",
+        "user/fs/build.rs",
         "user/runtime/src",
         "user/runtime/Cargo.toml",
+        "fs-core/src",
+        "fs-proto/src",
         "abi/src",
         "abi/Cargo.toml",
     ] {

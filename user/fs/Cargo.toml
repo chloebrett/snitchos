@@ -1,0 +1,15 @@
+[package]
+name = "fs"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Bare-metal U-mode FS server + client (the v0.10 RAMfs component). Like
+# `hello`, it only builds for riscv64gc-unknown-none-elf (its own `user.ld`
+# links it at a fixed low-half VA) and does NOT opt into the workspace pedantic
+# lints. Built via `kernel/build.rs`.
+[dependencies]
+snitchos-user = { path = "../runtime" }
+snitchos-std = { path = "../std" }
+fs-core = { path = "../../fs-core" }
+fs-proto = { path = "../../fs-proto" }

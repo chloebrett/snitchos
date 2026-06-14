@@ -432,6 +432,7 @@ fn emit_storm_metrics(m: &Metrics, count: i64) {
         | Some(WorkloadKind::Ipc)
         | Some(WorkloadKind::IpcRpc)
         | Some(WorkloadKind::BadgeMint)
-        | Some(WorkloadKind::BadgeHandout) => {}
+        | Some(WorkloadKind::BadgeHandout)
+        | Some(WorkloadKind::Fs) => {}
     }
 }

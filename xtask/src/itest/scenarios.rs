@@ -1435,6 +1435,31 @@ pub fn badge_demux_distinguishes_clients(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.10 FS connect (`workload=fs`), step 2a: the client attaches (badge 0) and
+/// the server mints + transfers a **root File cap** stamped `pack(root, READ)`.
+/// Asserts the kernel-snitched `CapEvent::Transferred` carries that badge —
+/// proving the new `user/fs` crate builds, embeds, spawns, and the connect
+/// handshake runs end-to-end.
+pub fn fs_connect_mints_root(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+
+    // pack(InodeId(0), FileRights::READ): inode 0 in bits [0..32), READ (0b001)
+    // in the rights field at bits [32..48). See `fs_proto::Badge`.
+    let root_badge = 1u64 << 32;
+    h.wait_for(SEC * 30, |f, _| {
+        matches!(
+            f,
+            OwnedFrame::CapEvent { kind: CapEventKind::Transferred, object: CapObject::Endpoint, badge, .. }
+                if *badge == root_badge
+        )
+    })
+    .ok_or(
+        "no CapEvent::Transferred{Endpoint, badge=pack(root,READ)} within 30s — the FS \
+         didn't mint + hand back the root File cap on connect",
+    )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

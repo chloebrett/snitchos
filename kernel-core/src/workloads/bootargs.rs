@@ -121,6 +121,12 @@ pub enum WorkloadKind {
     /// a `badge-handout-client` `call`s, receives the badged cap, and signals
     /// success. Proves a server can return capabilities to a client. One hart.
     BadgeHandout,
+    /// v0.10 `RAMfs`: an `fs` server (`RECV | MINT`) serves a flat in-memory
+    /// filesystem to an `fs-client` over one endpoint. The client connects
+    /// (badge 0) to be minted a root File cap (`pack(root, READ)`), then issues
+    /// FS requests against it; the server demuxes inode + rights by badge. One
+    /// hart.
+    Fs,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -187,6 +193,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "ipc-rpc" => Some(WorkloadKind::IpcRpc),
             "badge-mint" => Some(WorkloadKind::BadgeMint),
             "badge-handout" => Some(WorkloadKind::BadgeHandout),
+            "fs" => Some(WorkloadKind::Fs),
             _ => None,
         })
 }
@@ -222,6 +229,11 @@ mod tests {
     #[test]
     fn selects_heap_oom() {
         assert_eq!(select("workload=heap-oom"), Some(WorkloadKind::HeapOom));
+    }
+
+    #[test]
+    fn selects_fs() {
+        assert_eq!(select("workload=fs"), Some(WorkloadKind::Fs));
     }
 
     #[test]
