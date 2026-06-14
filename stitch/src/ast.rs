@@ -152,6 +152,8 @@ pub enum Expr {
         then: Box<Expr>,
         els: Box<Expr>,
     },
+    /// A tuple — the anonymous product: `(a, b, …)`. `()` is the unit tuple.
+    Tuple(Vec<Expr>),
     /// An eager list literal: `[a, b, c]`.
     List(Vec<Expr>),
     /// An eager map literal: `[k: v, …]` (empty is `[:]`).

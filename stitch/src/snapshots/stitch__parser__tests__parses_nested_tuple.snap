@@ -1,0 +1,21 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"((1, 2), 3)\")"
+---
+Tuple(
+    [
+        Tuple(
+            [
+                Int(
+                    1,
+                ),
+                Int(
+                    2,
+                ),
+            ],
+        ),
+        Int(
+            3,
+        ),
+    ],
+)

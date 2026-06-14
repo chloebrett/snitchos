@@ -1,0 +1,11 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"(a,)\")"
+---
+Tuple(
+    [
+        Var(
+            "a",
+        ),
+    ],
+)

@@ -1,0 +1,13 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"(1 + 2)\")"
+---
+Binary {
+    op: Add,
+    left: Int(
+        1,
+    ),
+    right: Int(
+        2,
+    ),
+}

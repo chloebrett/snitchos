@@ -84,9 +84,9 @@ fn collect_placeholders(expr: &mut Expr, params: &mut BTreeSet<String>) {
             collect_placeholders(then, params);
             collect_placeholders(els, params);
         }
-        Expr::List(items) => {
-            for item in items {
-                collect_placeholders(item, params);
+        Expr::Tuple(elems) | Expr::List(elems) => {
+            for elem in elems {
+                collect_placeholders(elem, params);
             }
         }
         Expr::Map(entries) => {
@@ -927,9 +927,28 @@ impl Parser {
             Token::At => Expr::SelfRef,
             Token::Str(parts) => Expr::Str(parse_str_segments(parts)?),
             Token::LParen => {
-                let inner = self.parse_expr(0)?;
-                self.expect(&Token::RParen, "')'")?;
-                inner
+                // `()` unit, `(e)` grouping, `(e, …)` tuple.
+                if matches!(self.peek(), Token::RParen) {
+                    self.bump();
+                    Expr::Tuple(Vec::new())
+                } else {
+                    let first = self.parse_expr(0)?;
+                    if matches!(self.peek(), Token::Comma) {
+                        let mut elems = vec![first];
+                        while matches!(self.peek(), Token::Comma) {
+                            self.bump();
+                            if matches!(self.peek(), Token::RParen) {
+                                break; // trailing comma (incl. the `(a,)` 1-tuple)
+                            }
+                            elems.push(self.parse_expr(0)?);
+                        }
+                        self.expect(&Token::RParen, "')'")?;
+                        Expr::Tuple(elems)
+                    } else {
+                        self.expect(&Token::RParen, "')'")?;
+                        first
+                    }
+                }
             }
             Token::LBracket => self.parse_collection()?,
             Token::LBrace => self.parse_block()?,
@@ -1401,5 +1420,30 @@ mod tests {
     #[test]
     fn parses_bare_self_reference() {
         insta::assert_debug_snapshot!(prog("on Box { get() = @ }"));
+    }
+
+    #[test]
+    fn parses_pair_tuple() {
+        insta::assert_debug_snapshot!(p("(1, 2)"));
+    }
+
+    #[test]
+    fn parses_unit_tuple() {
+        insta::assert_debug_snapshot!(p("()"));
+    }
+
+    #[test]
+    fn grouping_is_not_a_tuple() {
+        insta::assert_debug_snapshot!(p("(1 + 2)"));
+    }
+
+    #[test]
+    fn single_element_tuple_needs_trailing_comma() {
+        insta::assert_debug_snapshot!(p("(a,)"));
+    }
+
+    #[test]
+    fn parses_nested_tuple() {
+        insta::assert_debug_snapshot!(p("((1, 2), 3)"));
     }
 }
