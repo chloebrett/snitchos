@@ -1250,6 +1250,73 @@ pub fn rpc_round_trips(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.9b RPC headline (`workload=ipc-rpc`): the callee's span is **temporally
+/// nested** inside the caller's. The client opens `rpc.call` and `call`s inside
+/// it — blocking across the whole round-trip — so the server's `rpc.handle`
+/// span both descends from it (parent linkage) *and* lies within its
+/// `[start, end]` window. This is the RPC flame-graph shape that v0.9's one-way
+/// `send` cannot produce: there the child (`ipc.recv`) starts *after* the parent
+/// (`ipc.send`) has already closed (the sender doesn't wait), so containment
+/// fails — which is exactly the difference this asserts.
+pub fn rpc_trace_nests(h: &mut View) -> Result<(), String> {
+    use protocol::SpanId;
+
+    let call = h
+        .wait_for(SEC * 30, |f, strings| {
+            matches!(f, OwnedFrame::SpanStart { name_id, .. }
+                if strings.get(name_id).map(String::as_str) == Some("rpc.call"))
+        })
+        .ok_or("no SpanStart for 'rpc.call' within 30s")?;
+    let (call_id, call_start) = match call {
+        OwnedFrame::SpanStart { id, t, .. } => (id, t),
+        _ => return Err("matched non-SpanStart (impossible)".to_string()),
+    };
+    if call_id == SpanId(0) {
+        return Err("rpc.call span id is 0 (root sentinel)".to_string());
+    }
+
+    let handle = h
+        .wait_for(SEC * 30, |f, strings| {
+            matches!(f, OwnedFrame::SpanStart { name_id, .. }
+                if strings.get(name_id).map(String::as_str) == Some("rpc.handle"))
+        })
+        .ok_or("no SpanStart for 'rpc.handle' within 30s")?;
+    let (handle_id, handle_parent, handle_start) = match handle {
+        OwnedFrame::SpanStart { id, parent, t, .. } => (id, parent, t),
+        _ => return Err("matched non-SpanStart (impossible)".to_string()),
+    };
+    if handle_parent != call_id {
+        return Err(format!(
+            "rpc.handle parent {handle_parent:?} != rpc.call id {call_id:?} — not a child"
+        ));
+    }
+
+    let handle_end = h
+        .wait_for(SEC * 30, |f, _| matches!(f, OwnedFrame::SpanEnd { id, .. } if *id == handle_id))
+        .ok_or("no SpanEnd for rpc.handle within 30s")?;
+    let handle_end = match handle_end {
+        OwnedFrame::SpanEnd { t, .. } => t,
+        _ => return Err("matched non-SpanEnd (impossible)".to_string()),
+    };
+
+    let call_end = h
+        .wait_for(SEC * 30, |f, _| matches!(f, OwnedFrame::SpanEnd { id, .. } if *id == call_id))
+        .ok_or("no SpanEnd for rpc.call within 30s")?;
+    let call_end = match call_end {
+        OwnedFrame::SpanEnd { t, .. } => t,
+        _ => return Err("matched non-SpanEnd (impossible)".to_string()),
+    };
+
+    if !(call_start <= handle_start && handle_end <= call_end) {
+        return Err(format!(
+            "rpc.handle [{handle_start}, {handle_end}] not contained in rpc.call \
+             [{call_start}, {call_end}] — the caller's span didn't stay open across \
+             the callee's work (that's the one-way `send` shape, not RPC)"
+        ));
+    }
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside
