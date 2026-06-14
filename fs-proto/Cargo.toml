@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 fs-core = { path = "../fs-core" }
+snitchos-abi = { path = "../abi" }
 
 [lints]
 workspace = true

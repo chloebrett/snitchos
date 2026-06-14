@@ -14,7 +14,11 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-use fs_core::InodeId;
+use fs_core::{InodeId, NodeKind};
+
+/// The IPC message width, re-exported from the shared ABI — the wire layouts
+/// here encode into `[u64; MSG_WORDS]`.
+pub use snitchos_abi::MSG_WORDS;
 
 /// What a File cap names: an inode plus the file rights granted on it.
 /// Packed into the `u64` badge the kernel delivers unforgeably to the FS
@@ -139,10 +143,106 @@ impl core::ops::BitOr for FileRights {
     }
 }
 
+/// A `(ptr, len)` reference into the *caller's* address space — a filename or a
+/// data buffer the kernel copies across the boundary (option D). Carried as
+/// plain words on the wire; dereferenced only by the kernel copy primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserBuf {
+    pub ptr: u64,
+    pub len: u64,
+}
+
+/// Why decoding a request failed — a malformed wire message is an error to
+/// reply to, never a panic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireError {
+    /// `w0`'s opcode byte names no [`Op`].
+    UnknownOp(u8),
+    /// A `Create` carried a node-kind value that is neither `File` (0) nor
+    /// `Dir` (1).
+    BadKind(u64),
+}
+
+/// An FS request, decoded from the IPC message. The target **inode is not
+/// here** — it rides in the badge (`Badge::unpack`). Names and data buffers are
+/// [`UserBuf`] refs the kernel copies (option D). See `docs/filesystem-design.md`
+/// → *Message framing* for the locked word layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+    Stat,
+    Read { offset: u64, dst: UserBuf },
+    Write { offset: u64, src: UserBuf },
+    Lookup { name: UserBuf },
+    Create { name: UserBuf, kind: NodeKind },
+    Remove { name: UserBuf },
+    Readdir { index: u64, name_dst: UserBuf },
+}
+
+impl Request {
+    /// The opcode of this request.
+    #[must_use]
+    pub const fn op(&self) -> Op {
+        match self {
+            Request::Stat => Op::Stat,
+            Request::Read { .. } => Op::Read,
+            Request::Write { .. } => Op::Write,
+            Request::Lookup { .. } => Op::Lookup,
+            Request::Create { .. } => Op::Create,
+            Request::Remove { .. } => Op::Remove,
+            Request::Readdir { .. } => Op::Readdir,
+        }
+    }
+
+    #[must_use]
+    pub fn encode(&self) -> [u64; MSG_WORDS] {
+        let op = u64::from(self.op().to_u8());
+        match *self {
+            Request::Stat => [op, 0, 0, 0],
+            Request::Read { offset, dst } => [op, offset, dst.ptr, dst.len],
+            Request::Write { offset, src } => [op, offset, src.ptr, src.len],
+            Request::Lookup { name } | Request::Remove { name } => [op, name.ptr, name.len, 0],
+            Request::Create { name, kind } => [op, name.ptr, name.len, kind_to_wire(kind)],
+            Request::Readdir { index, name_dst } => [op, index, name_dst.ptr, name_dst.len],
+        }
+    }
+
+    pub fn decode(words: [u64; MSG_WORDS]) -> Result<Request, WireError> {
+        let [w0, w1, w2, w3] = words;
+        let op = Op::from_u8(w0 as u8).ok_or(WireError::UnknownOp(w0 as u8))?;
+        Ok(match op {
+            Op::Stat => Request::Stat,
+            Op::Read => Request::Read { offset: w1, dst: UserBuf { ptr: w2, len: w3 } },
+            Op::Write => Request::Write { offset: w1, src: UserBuf { ptr: w2, len: w3 } },
+            Op::Lookup => Request::Lookup { name: UserBuf { ptr: w1, len: w2 } },
+            Op::Create => Request::Create {
+                name: UserBuf { ptr: w1, len: w2 },
+                kind: kind_from_wire(w3)?,
+            },
+            Op::Remove => Request::Remove { name: UserBuf { ptr: w1, len: w2 } },
+            Op::Readdir => Request::Readdir { index: w1, name_dst: UserBuf { ptr: w2, len: w3 } },
+        })
+    }
+}
+
+const fn kind_to_wire(kind: NodeKind) -> u64 {
+    match kind {
+        NodeKind::File => 0,
+        NodeKind::Dir => 1,
+    }
+}
+
+const fn kind_from_wire(raw: u64) -> Result<NodeKind, WireError> {
+    match raw {
+        0 => Ok(NodeKind::File),
+        1 => Ok(NodeKind::Dir),
+        other => Err(WireError::BadKind(other)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_core::InodeId;
+    use fs_core::{InodeId, NodeKind};
 
     #[test]
     fn read_and_write_are_distinct_rights() {
@@ -231,5 +331,50 @@ mod tests {
         assert_eq!(Op::Create.to_u8(), 4);
         assert_eq!(Op::Remove.to_u8(), 5);
         assert_eq!(Op::Readdir.to_u8(), 6);
+    }
+
+    fn buf(ptr: u64, len: u64) -> UserBuf {
+        UserBuf { ptr, len }
+    }
+
+    #[test]
+    fn every_request_round_trips() {
+        let reqs = [
+            Request::Stat,
+            Request::Read { offset: 64, dst: buf(0x1000, 512) },
+            Request::Write { offset: 8, src: buf(0x2000, 16) },
+            Request::Lookup { name: buf(0x3000, 7) },
+            Request::Create { name: buf(0x4000, 9), kind: NodeKind::File },
+            Request::Remove { name: buf(0x5000, 5) },
+            Request::Readdir { index: 3, name_dst: buf(0x6000, 256) },
+        ];
+
+        for req in reqs {
+            assert_eq!(Request::decode(req.encode()), Ok(req));
+        }
+    }
+
+    #[test]
+    fn request_word_layout_is_locked() {
+        // op in w0; inode is NOT in the message (it rides in the badge).
+        assert_eq!(
+            Request::Read { offset: 64, dst: buf(0x1000, 512) }.encode(),
+            [u64::from(Op::Read.to_u8()), 64, 0x1000, 512]
+        );
+        assert_eq!(
+            Request::Create { name: buf(0x4000, 9), kind: NodeKind::Dir }.encode(),
+            [u64::from(Op::Create.to_u8()), 0x4000, 9, 1]
+        );
+    }
+
+    #[test]
+    fn decoding_an_unknown_opcode_is_an_error_not_a_panic() {
+        assert_eq!(Request::decode([200, 0, 0, 0]), Err(WireError::UnknownOp(200)));
+    }
+
+    #[test]
+    fn decoding_a_bad_node_kind_is_an_error() {
+        let words = [u64::from(Op::Create.to_u8()), 0x4000, 9, 2];
+        assert_eq!(Request::decode(words), Err(WireError::BadKind(2)));
     }
 }

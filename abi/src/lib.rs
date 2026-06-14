@@ -148,6 +148,12 @@ pub mod rights {
     pub const MINT: u32 = 0b1000;
 }
 
+/// The number of inline `u64` words a single IPC message carries. The single
+/// source of truth shared by the kernel, the userspace runtime, and any wire
+/// protocol layered on IPC (e.g. `fs-proto`). Larger payloads cross via a
+/// copy/`MemoryRegion` mechanism, not by widening this.
+pub const MSG_WORDS: usize = 4;
+
 #[cfg(test)]
 mod tests {
     use super::*;
