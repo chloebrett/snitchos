@@ -8,14 +8,14 @@ type Cursor<'a> = Peekable<Chars<'a>>;
 
 /// A piece of a string literal: literal text, or a `{expr}` interpolation
 /// whose raw source the parser sub-parses later.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum StrPart {
     Lit(String),
     Expr(String),
 }
 
 /// A lexical token.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Token {
     // Literals
     Int(i64),
