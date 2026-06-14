@@ -23,6 +23,10 @@ pub enum Value {
     /// An eager, finite, immutable list `[a, b, c]`. `Rc<[Value]>` for cheap
     /// clones; combinators produce fresh lists rather than mutating.
     List(Rc<[Value]>),
+    /// An eager map `["k": v, …]` (empty is `[:]`). An assoc-list with unique
+    /// keys: `Value` isn't hashable, and O(n) lookup is fine for the tree-walk
+    /// stage. Equality is order-insensitive.
+    Map(Rc<Vec<(Value, Value)>>),
     /// The unit value `()` — what a block with no trailing expression, and an
     /// expression evaluated only for effect, produce.
     Unit,
@@ -122,6 +126,15 @@ impl Value {
                     .join(", ");
                 format!("[{parts}]")
             }
+            Value::Map(entries) if entries.is_empty() => "[:]".to_string(),
+            Value::Map(entries) => {
+                let parts = entries
+                    .iter()
+                    .map(|(key, value)| format!("{}: {}", key.display(), value.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{parts}]")
+            }
             Value::Unit => "()".to_string(),
             Value::Closure(_) => "<function>".to_string(),
             Value::Constructor(_) => "<constructor>".to_string(),
@@ -151,6 +164,7 @@ impl Value {
             Value::Str(_) => "Str",
             Value::Tuple(_) => "Tuple",
             Value::List(_) => "List",
+            Value::Map(_) => "Map",
             Value::Unit => "Unit",
             Value::Closure(_) | Value::Constructor(_) | Value::Native(_) => "Function",
             Value::Data(_) => "a record",
@@ -167,6 +181,7 @@ impl fmt::Debug for Value {
             Value::Str(s) => write!(f, "Str({s:?})"),
             Value::Tuple(elements) => write!(f, "Tuple{elements:?}"),
             Value::List(elements) => write!(f, "List{elements:?}"),
+            Value::Map(entries) => write!(f, "Map{entries:?}"),
             Value::Unit => write!(f, "Unit"),
             Value::Closure(c) => write!(f, "Closure/{}", c.params.len()),
             Value::Constructor(c) => write!(f, "Constructor({})", c.variant),
@@ -187,6 +202,13 @@ impl PartialEq for Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) | (Value::List(a), Value::List(b)) => a == b,
+            // Maps are unordered: equal iff same size and every entry matches.
+            (Value::Map(a), Value::Map(b)) => {
+                a.len() == b.len()
+                    && a.iter().all(|(key, value)| {
+                        b.iter().any(|(k, v)| k == key && v == value)
+                    })
+            }
             (Value::Unit, Value::Unit) => true,
             (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
             (Value::Constructor(a), Value::Constructor(b)) => Rc::ptr_eq(a, b),

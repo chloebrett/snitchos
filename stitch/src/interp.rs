@@ -131,6 +131,20 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::List(values.into()))
         }
+        Expr::Map(entries) => {
+            let mut map: Vec<(Value, Value)> = Vec::new();
+            for (key_expr, value_expr) in entries {
+                let key = eval(key_expr, env)?;
+                let value = eval(value_expr, env)?;
+                // Last duplicate key wins; keep the first occurrence's position.
+                if let Some(slot) = map.iter_mut().find(|(existing, _)| *existing == key) {
+                    slot.1 = value;
+                } else {
+                    map.push((key, value));
+                }
+            }
+            Ok(Value::Map(Rc::new(map)))
+        }
         Expr::Lambda { params, body } => Ok(Value::Closure(Rc::new(ClosureData {
             params: params.clone(),
             body: (**body).clone(),
@@ -140,6 +154,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         Expr::Field { object, name } => eval_field(&eval(object, env)?, name),
         Expr::Try(operand) => eval_try(eval(operand, env)?),
         Expr::SafeField { object, name } => eval_safe_field(eval(object, env)?, name),
+        Expr::Index { object, index } => eval_index(&eval(object, env)?, &eval(index, env)?),
         _ => Err(RuntimeError::new("evaluation not yet implemented for this expression")),
     }
 }
@@ -540,6 +555,46 @@ fn try_match(pattern: &Pattern, value: &Value, env: &Env) -> Option<Env> {
             }
             Some(bound)
         }
+    }
+}
+
+/// Build a `Maybe`: `Some(value)`.
+fn some(value: Value) -> Value {
+    Value::Data(Rc::new(DataValue {
+        type_name: "Maybe".to_string(),
+        variant: "Some".to_string(),
+        fields: vec![(None, value)],
+    }))
+}
+
+/// Build a `Maybe`: `None`.
+fn none() -> Value {
+    Value::Data(Rc::new(DataValue {
+        type_name: "Maybe".to_string(),
+        variant: "None".to_string(),
+        fields: Vec::new(),
+    }))
+}
+
+/// Index a collection: `map[key]` looks up by key, `list[i]` by position. Both
+/// return a `Maybe` — `None` for a missing key or out-of-range index (no null).
+fn eval_index(object: &Value, index: &Value) -> Result<Value, RuntimeError> {
+    match object {
+        Value::Map(entries) => Ok(entries
+            .iter()
+            .find(|(key, _)| key == index)
+            .map_or_else(none, |(_, value)| some(value.clone()))),
+        Value::List(items) => {
+            let Value::Int(position) = index else {
+                return Err(RuntimeError::new(format!(
+                    "list index must be an Int, got {}",
+                    index.kind()
+                )));
+            };
+            let element = usize::try_from(*position).ok().and_then(|i| items.get(i));
+            Ok(element.map_or_else(none, |value| some(value.clone())))
+        }
+        other => Err(RuntimeError::new(format!("cannot index a {}", other.kind()))),
     }
 }
 
@@ -1448,6 +1503,60 @@ mod tests {
     #[test]
     fn interpolation_renders_a_list() {
         assert_eq!(run(r#""{[1, 2, 3]}""#), Value::Str("[1, 2, 3]".into()));
+    }
+
+    #[test]
+    fn maps_have_order_insensitive_structural_equality() {
+        assert_eq!(run(r#"["a": 1, "b": 2] == ["b": 2, "a": 1]"#), Value::Bool(true));
+        assert_eq!(run(r#"["a": 1] == ["a": 2]"#), Value::Bool(false));
+        assert_eq!(run("[:] == [:]"), Value::Bool(true));
+    }
+
+    #[test]
+    fn a_later_duplicate_map_key_wins() {
+        assert_eq!(run(r#"["a": 1, "a": 9] == ["a": 9]"#), Value::Bool(true));
+    }
+
+    #[test]
+    fn interpolation_renders_a_map() {
+        assert_eq!(run(r#""{["a": 1, "b": 2]}""#), Value::Str("[a: 1, b: 2]".into()));
+        assert_eq!(run(r#""{[:]}""#), Value::Str("[:]".into()));
+    }
+
+    #[test]
+    fn indexing_a_map_returns_some_or_none() {
+        assert_eq!(run(r#"match ["a": 1, "b": 2]["a"] { Some(v) => v  None => 0 }"#), Value::Int(1));
+        assert_eq!(run(r#"match ["a": 1, "b": 2]["z"] { Some(v) => v  None => 0 }"#), Value::Int(0));
+    }
+
+    #[test]
+    fn maps_can_be_keyed_by_any_value() {
+        assert_eq!(run(r#"match [1: "x", 2: "y"][2] { Some(v) => v  None => "?" }"#), Value::Str("y".into()));
+    }
+
+    #[test]
+    fn indexing_a_list_returns_some_or_none() {
+        assert_eq!(run("match [10, 20, 30][1] { Some(v) => v  None => -1 }"), Value::Int(20));
+        assert_eq!(run("match [10, 20, 30][9] { Some(v) => v  None => -1 }"), Value::Int(-1));
+    }
+
+    #[test]
+    fn indexing_with_safe_nav_chains() {
+        // `m[k]` is a Maybe, so `?.` flows straight on.
+        assert_eq!(
+            run_program(r#"prod Pt(x: Int)  main() = match ["p": Pt(7)]["p"]?.x { Some(v) => v  None => 0 }"#),
+            Value::Int(7)
+        );
+    }
+
+    #[test]
+    fn indexing_a_non_collection_is_an_error() {
+        assert_eq!(run_err("5[0]"), "cannot index a Int");
+    }
+
+    #[test]
+    fn a_non_int_list_index_is_an_error() {
+        assert_eq!(run_err(r#"[1, 2, 3]["x"]"#), "list index must be an Int, got Str");
     }
 
     #[test]
