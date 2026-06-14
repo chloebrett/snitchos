@@ -1692,7 +1692,7 @@ mod tests {
 
     #[test]
     fn subjectless_match_rejects_arms_after_catch_all() {
-        insta::assert_debug_snapshot!(parse(r#"match { _ => 0  x > 0 => 1 }"#));
+        insta::assert_debug_snapshot!(parse("match { _ => 0  x > 0 => 1 }"));
     }
 
     #[test]

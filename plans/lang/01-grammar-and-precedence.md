@@ -277,15 +277,17 @@ repeat(attempt) |> first(\r -> r.ok)                            // retry until s
 
 ## 8. Deferred parser gaps (TODO)
 
-The front-end (lexer + parser) is otherwise complete — it parses essentially all of `samples.st`. These are the known gaps, all deliberately deferred; none block the evaluator. (Some are cross-referenced from their sections above.)
+The front-end (lexer + parser) is otherwise complete — it parses essentially all of `samples.st`. These are the remaining known gaps; none block the evaluator. (Some are cross-referenced from their sections above.)
 
 - **`uses` effects clause** on functions/methods (`report(r) uses Telemetry { … }`) — parsed nowhere yet; arrives with the capability design.
-- **Subjectless `match { cond => … }`** (the condition-table form) — currently a clear error; the subject form is done. Its arm grammar is `cond => body`, distinct from `pattern => body`.
-- **Float & string literal *patterns*** in match arms — only `Int`/`Bool` literal patterns parse today.
-- **Top-level `let` constants** — `let` only works as a block statement; module-level constants aren't an item yet.
 - **Open-ended ranges** `n..` / `..n` — range is a binary operator needing both operands; open ranges need unary/postfix handling.
-- **Tuple / multi-param function *types*** — `(A, B) -> C` and tuple types `(A, B)` in annotations. The type parser does `Name<args>` and curried `A -> B` only. (Parsed-not-checked regardless.)
 - **Non-associativity not enforced** — comparisons, ranges, and the `=> |` conditional are parsed left-/right-associatively; chaining them should be a parse error, and a chained conditional should say **"use `match`"** (see §2 note).
 - **Statement separation is maximal-munch** — no newline-significance, so the ASI hazard stands (`a` ⏎ `-b` is `a - b`); see §1. A `Newline`-token soft separator is the eventual fix if it bites.
-- **Interpolation error context** — a parse error inside `{…}` propagates the inner message with no "in string interpolation" wrapper.
-- **Stray `;`** — lexed (`Token::Semicolon`) but no grammar uses it; would just error. The language has no semicolons.
+
+**Closed (front-end complete for these):**
+- **Subjectless `match { cond => … }`** — parsed and desugared into nested `cond => then | els` conditionals (the N-ary form of the binary conditional); must end in a `_ => …` catch-all.
+- **Float & string literal *patterns*** in match arms — `Float`/`Str` patterns parse; interpolated string patterns are a parse error.
+- **Top-level `let` constants** — `Item::Const`; `let mut?` at module scope.
+- **Tuple / multi-param function *types*** — `(A, B)` tuple types and `(A, B) -> C` (a tuple-typed `Func` param); `()` unit, `(A)` grouping.
+- **Interpolation error context** — a parse error inside `{…}` is wrapped with `in string interpolation \`{…}\`: …`.
+- **Stray `;`** — a dedicated "Stitch has no semicolons" error.
