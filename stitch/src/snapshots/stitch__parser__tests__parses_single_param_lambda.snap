@@ -1,0 +1,18 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"x -> x + 1\")"
+---
+Lambda {
+    params: [
+        "x",
+    ],
+    body: Binary {
+        op: Add,
+        left: Var(
+            "x",
+        ),
+        right: Int(
+            1,
+        ),
+    },
+}

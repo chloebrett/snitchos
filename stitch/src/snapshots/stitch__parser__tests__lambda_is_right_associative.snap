@@ -1,0 +1,17 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"x -> y -> z\")"
+---
+Lambda {
+    params: [
+        "x",
+    ],
+    body: Lambda {
+        params: [
+            "y",
+        ],
+        body: Var(
+            "z",
+        ),
+    },
+}

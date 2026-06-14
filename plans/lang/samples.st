@@ -84,7 +84,7 @@ wordCounts(text: Str) -> Map<Str, Int> =
 // ─────────────────────────────────────────────────────────────────────────
 
 sumOfSquares(n: Int) -> Int =
-    1..=n |> map($ * $) |> sum
+    1..=n |> map($ * $) |> total
 
 // infinite range, lazily cut to n
 firstEvens(n: Int) -> List<Int> =

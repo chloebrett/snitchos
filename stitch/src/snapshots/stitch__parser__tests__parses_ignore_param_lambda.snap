@@ -1,0 +1,12 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"_ -> 0\")"
+---
+Lambda {
+    params: [
+        "_",
+    ],
+    body: Int(
+        0,
+    ),
+}

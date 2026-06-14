@@ -100,7 +100,7 @@ A placeholder (`$`, `$a`, …) appearing inside a **call argument** turns that a
 The bare-reference form is the "no extra args" stage and keeps pipelines bracket-free:
 ```
 [1, 2, 3] |> toSeq |> max        ≡  max(toSeq([1, 2, 3]))
-0..n |> map($ * $) |> filter($ > 10) |> sum
+0..n |> map($ * $) |> filter($ > 10) |> total
 ```
 A pipe stage is therefore one of: a bare name (`max`, `sum`), an operator-as-function (`fold(0, +)`), or a call with its remaining args (`map($ * 2)`) — never a stray `()`. "Bare reference" means an identifier or path (`Math.sqrt`); anything more complex on the right must be an explicit call.
 
@@ -202,12 +202,14 @@ Two eager collections + one lazy sequence. You tell eager from lazy **by the typ
 | group | functions |
 |---|---|
 | transform | `map` `filter` `flatMap` `zip` |
-| reduce/consume | `fold` `foldWhile` `each` `sum` `count` `any` `all` |
+| reduce/consume | `fold` `foldWhile` `each` `total` `count` `any` `all` |
 | bound/search | `take` `drop` `takeWhile` `dropWhile` `first` `find` |
 | produce (lazy) | `iterate` `repeat` `forever` |
 | materialize | `toList` `toSet` `toMap`; `toSeq` / `.lazy` (List→Seq) |
 
 `fold` takes an explicit init; `find(pred)` returns `Maybe<T>`. See §6a for how this vocabulary replaces loop syntax.
+
+> **Keyword collision (decided):** `sum`/`prod` are **hard keywords** — reserved everywhere, not just at declaration position (the lexer already does this). So the sum *combinator* is named **`total`**, not `sum` (a list-product combinator is rare; no `prod` combinator). This is the Kotlin precedent: `when` is reserved, so Mockito uses `whenever`. Contextual keywords (reserving `sum`/`prod` only at item position) were rejected — they add parser ambiguity for little gain. A future `` `sum` `` backtick-escape could re-admit the identifier if ever needed, but not in v0.
 
 ---
 

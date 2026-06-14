@@ -41,6 +41,12 @@ pub enum Expr {
         object: Box<Expr>,
         index: Box<Expr>,
     },
+    /// A lambda: `x -> body`, `(a, b) -> body`, `() -> body`. Params are bare
+    /// names for now (`_` to ignore); type annotations arrive with declarations.
+    Lambda {
+        params: Vec<String>,
+        body: Box<Expr>,
+    },
 }
 
 /// Prefix unary operators.

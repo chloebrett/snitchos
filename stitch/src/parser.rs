@@ -86,6 +86,12 @@ impl Parser {
         &self.tokens[self.pos]
     }
 
+    /// Look `offset` tokens ahead, clamped to the trailing `Eof`.
+    fn peek_at(&self, offset: usize) -> &Token {
+        let i = (self.pos + offset).min(self.tokens.len() - 1);
+        &self.tokens[i]
+    }
+
     /// Return the current token and advance past it; stops at `Eof`.
     fn bump(&mut self) -> &Token {
         let i = self.pos;
@@ -99,6 +105,9 @@ impl Parser {
     /// bind at least as tightly as `min_bp`. Layers (tightest → loosest):
     /// `parse_atom` < `parse_prefix` < this.
     fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
+        if self.at_lambda() {
+            return self.parse_lambda();
+        }
         let mut left = self.parse_prefix()?;
         while let Some(op) = infix_op(self.peek()) {
             let (l_bp, r_bp) = binding_power(op);
@@ -114,6 +123,68 @@ impl Parser {
             };
         }
         Ok(left)
+    }
+
+    /// Does an explicit lambda start here? `Ident ->` or `( … ) ->`.
+    fn at_lambda(&self) -> bool {
+        match self.peek() {
+            Token::Ident(_) => matches!(self.peek_at(1), Token::Arrow),
+            Token::LParen => self.parens_then_arrow(),
+            _ => false,
+        }
+    }
+
+    /// Scan from the current `(` to its matching `)` and report whether an
+    /// `->` follows — i.e. whether this is a lambda param list vs. grouping.
+    fn parens_then_arrow(&self) -> bool {
+        let mut depth = 0usize;
+        for (i, tok) in self.tokens.iter().enumerate().skip(self.pos) {
+            match tok {
+                Token::LParen => depth += 1,
+                Token::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(self.tokens.get(i + 1), Some(Token::Arrow));
+                    }
+                }
+                Token::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Parse a lambda: `params -> body`. Body is a full expression (loosest),
+    /// so lambdas are right-associative (`x -> y -> z` is `x -> (y -> z)`).
+    fn parse_lambda(&mut self) -> Result<Expr, ParseError> {
+        let params = self.parse_lambda_params()?;
+        self.expect(&Token::Arrow, "'->'")?;
+        let body = self.parse_expr(0)?;
+        Ok(Expr::Lambda {
+            params,
+            body: Box::new(body),
+        })
+    }
+
+    /// Parse a lambda's parameters: a bare `name`, or `(name, …)`.
+    fn parse_lambda_params(&mut self) -> Result<Vec<String>, ParseError> {
+        if !matches!(self.peek(), Token::LParen) {
+            return Ok(vec![self.expect_ident("lambda parameter")?]);
+        }
+        self.bump(); // '('
+        let mut params = Vec::new();
+        if !matches!(self.peek(), Token::RParen) {
+            loop {
+                params.push(self.expect_ident("lambda parameter")?);
+                if matches!(self.peek(), Token::Comma) {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RParen, "')' after lambda parameters")?;
+        Ok(params)
     }
 
     /// Prefix unary operators (`-`, `not`), binding tighter than any infix.
@@ -379,5 +450,40 @@ mod tests {
     #[test]
     fn an_operator_with_no_operand_is_an_error() {
         insta::assert_debug_snapshot!(parse("1 +"));
+    }
+
+    #[test]
+    fn parses_single_param_lambda() {
+        insta::assert_debug_snapshot!(p("x -> x + 1"));
+    }
+
+    #[test]
+    fn parses_multi_param_lambda() {
+        insta::assert_debug_snapshot!(p("(a, b) -> a + b"));
+    }
+
+    #[test]
+    fn parses_zero_param_lambda() {
+        insta::assert_debug_snapshot!(p("() -> 42"));
+    }
+
+    #[test]
+    fn parses_ignore_param_lambda() {
+        insta::assert_debug_snapshot!(p("_ -> 0"));
+    }
+
+    #[test]
+    fn lambda_as_call_argument() {
+        insta::assert_debug_snapshot!(p("map(x -> x * 2)"));
+    }
+
+    #[test]
+    fn lambda_is_right_associative() {
+        insta::assert_debug_snapshot!(p("x -> y -> z"));
+    }
+
+    #[test]
+    fn parenthesized_grouping_is_not_a_lambda() {
+        insta::assert_debug_snapshot!(p("(1 + 2) * 3"));
     }
 }

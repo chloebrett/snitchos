@@ -34,3 +34,10 @@ fn nested_calls() {
 fn range_fold() {
     insta::assert_debug_snapshot!(p("0 .. count |> map(square) |> fold(0, add)"));
 }
+
+#[test]
+fn pipeline_with_lambdas() {
+    insta::assert_debug_snapshot!(p(
+        "readings |> filter(r -> r.celsius > 30) |> map(r -> r.celsius)"
+    ));
+}

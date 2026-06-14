@@ -1,0 +1,19 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"(1 + 2) * 3\")"
+---
+Binary {
+    op: Mul,
+    left: Binary {
+        op: Add,
+        left: Int(
+            1,
+        ),
+        right: Int(
+            2,
+        ),
+    },
+    right: Int(
+        3,
+    ),
+}

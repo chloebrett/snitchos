@@ -1,0 +1,10 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"() -> 42\")"
+---
+Lambda {
+    params: [],
+    body: Int(
+        42,
+    ),
+}
