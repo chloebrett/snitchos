@@ -1338,6 +1338,26 @@ pub fn rpc_telemetry(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.9b `reply_recv` (`workload=ipc-rpc`): the server's fused reply-then-
+/// receive loop serves **two** requests from the client (21→42, 50→100). The
+/// second round-trip completing proves the loop iterated *and* that the second
+/// reply cap reused the first's freed `CapTable` slot (generation-bumped, so no
+/// aliasing). Asserting `snitchos.user.telemetry_total == 100` — the second
+/// response — is the end-to-end witness of the fused path + slot reuse.
+pub fn rpc_reply_recv(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value == 100)
+    })
+    .ok_or(
+        "no snitchos.user.telemetry_total == 100 within 30s — the second RPC didn't \
+         complete (reply_recv loop didn't serve a second request, or the reused reply \
+         cap aliased / failed)",
+    )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

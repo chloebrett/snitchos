@@ -434,6 +434,40 @@ impl Endpoint {
         let reply = (reply_handle != 0).then_some(reply_handle);
         Ok(([w0, w1, w2, w3], reply))
     }
+
+    /// Fused reply-then-receive — the RPC server hot path. Answers the previous
+    /// request (`prev = Some((reply_handle, response))`; `None` on the first
+    /// iteration) and blocks for the next request in one syscall, returning it
+    /// with its reply handle. The canonical loop:
+    /// `let mut prev = None; loop { let (req, h) = ep.reply_recv(prev)?; prev = Some((h, handle(req))); }`.
+    pub fn reply_recv(
+        self,
+        prev: Option<(usize, [u64; MSG_WORDS])>,
+    ) -> Result<([u64; MSG_WORDS], usize), Denied> {
+        let (prev_handle, resp) = prev.map_or((0, [0u64; MSG_WORDS]), |(h, r)| (h, r));
+        let status: usize;
+        let w0: u64;
+        let w1: u64;
+        let w2: u64;
+        let w3: u64;
+        let next_handle: usize;
+        // SAFETY: `ecall`; a0=endpoint→status, a1..=a4=response→next request,
+        // a5=prev reply handle→next reply handle. The kernel replies the
+        // previous caller (if `prev_handle != 0`) then blocks receiving.
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::ReplyRecv as usize,
+                inlateout("a0") self.handle => status,
+                inlateout("a1") resp[0] => w0,
+                inlateout("a2") resp[1] => w1,
+                inlateout("a3") resp[2] => w2,
+                inlateout("a4") resp[3] => w3,
+                inlateout("a5") prev_handle => next_handle,
+            );
+        }
+        if status == 0 { Ok(([w0, w1, w2, w3], next_handle)) } else { Err(Denied) }
+    }
 }
 
 /// Answer an RPC: send `msg` back through a `reply_handle` obtained from

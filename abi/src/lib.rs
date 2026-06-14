@@ -89,6 +89,14 @@ pub enum Syscall {
     /// one-shot reply cap (a second `reply` is refused). Returns `0`, or
     /// `usize::MAX` if the handle is not a live reply cap.
     Reply = 10,
+    /// Fused `reply`-then-`receive` (v0.9b) — the server hot path. `a0` =
+    /// `Endpoint` handle (needs `RECV`), `a5` = the previous request's reply
+    /// handle (`0` on the first iteration — no prior reply), `a1..=a4` = the
+    /// response to that previous request. Replies the previous caller (if any),
+    /// then blocks receiving the next request: returns `0` in `a0`, the next
+    /// request words in `a1..=a4`, and its reply handle in `a5`. One trap
+    /// instead of two per request.
+    ReplyRecv = 11,
 }
 
 impl Syscall {
@@ -109,6 +117,7 @@ impl Syscall {
             8 => Some(Self::Receive),
             9 => Some(Self::Call),
             10 => Some(Self::Reply),
+            11 => Some(Self::ReplyRecv),
             _ => None,
         }
     }
@@ -131,6 +140,7 @@ mod tests {
         assert_eq!(Syscall::Receive as usize, 8);
         assert_eq!(Syscall::Call as usize, 9);
         assert_eq!(Syscall::Reply as usize, 10);
+        assert_eq!(Syscall::ReplyRecv as usize, 11);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
@@ -143,6 +153,7 @@ mod tests {
         assert_eq!(Syscall::from_usize(8), Some(Syscall::Receive));
         assert_eq!(Syscall::from_usize(9), Some(Syscall::Call));
         assert_eq!(Syscall::from_usize(10), Some(Syscall::Reply));
-        assert_eq!(Syscall::from_usize(11), None);
+        assert_eq!(Syscall::from_usize(11), Some(Syscall::ReplyRecv));
+        assert_eq!(Syscall::from_usize(12), None);
     }
 }

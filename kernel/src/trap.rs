@@ -195,6 +195,7 @@ fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::Receive) => handle_receive(frame),
         Some(Syscall::Call) => handle_call(frame),
         Some(Syscall::Reply) => handle_reply(frame),
+        Some(Syscall::ReplyRecv) => handle_reply_recv(frame),
         None => {
             let n = frame.a7 as u8;
             refuse(frame, n, protocol::RefusalReason::UnknownSyscall);
@@ -332,6 +333,18 @@ fn handle_receive(frame: &mut TrapFrame) {
         }
     };
 
+    receive_into_frame(proc, frame, ep);
+}
+
+/// The receive half of `receive`/`reply_recv`: rendezvous on `ep`, mint a
+/// reply cap for a `call` (handle into `a5`; `0` for a one-way `send`), seed the
+/// sender's trace context, and write the message + status into `frame`. Counts
+/// the crossing and snitches the `Message` frame.
+fn receive_into_frame(
+    proc: &crate::process::Process,
+    frame: &mut TrapFrame,
+    ep: kernel_core::ipc::EndpointId,
+) {
     let me = crate::sched::current_task_id();
     let delivered = match crate::ipc::receive_begin(ep, me) {
         crate::ipc::RecvStep::Deliver { delivered, wake } => {
@@ -452,17 +465,34 @@ fn handle_call(frame: &mut TrapFrame) {
 /// `reply` is refused), stashes the response for the blocked caller, and wakes
 /// it. The reply is point-to-point (server→caller), not endpoint-mediated.
 fn handle_reply(frame: &mut TrapFrame) {
-    use kernel_core::cap::{invoke_reply, Handle};
     use snitchos_abi::Syscall;
 
     let sc = Syscall::Reply as u8;
     let Some(proc) = current_process_or_refuse(frame, sc) else {
         return;
     };
+    let raw_handle = frame.a0 as u32;
+    let resp = [frame.a1, frame.a2, frame.a3, frame.a4];
+    if reply_via_cap(proc, frame, sc, raw_handle, resp).is_ok() {
+        frame.a0 = 0;
+    }
+}
 
-    let handle = Handle::from_raw(frame.a0 as u32);
-    // Resolve then consume the reply cap under the server's caps lock; drop the
-    // lock before waking (never hold a Mutex across the path that may switch).
+/// The reply half of `reply`/`reply_recv`: resolve + **consume** the one-shot
+/// reply cap `raw_handle` against `proc`, stash `resp` for the named caller, and
+/// wake it. `Err(())` (with `refuse` already emitted) if the handle is not a
+/// live reply cap. Resolve+consume under the caps lock; drop it before waking
+/// (never hold a `Mutex` across the path that may switch).
+fn reply_via_cap(
+    proc: &crate::process::Process,
+    frame: &mut TrapFrame,
+    sc: u8,
+    raw_handle: u32,
+    resp: crate::ipc::Message,
+) -> Result<(), ()> {
+    use kernel_core::cap::{invoke_reply, Handle};
+
+    let handle = Handle::from_raw(raw_handle);
     let resolved = {
         let mut caps = proc.caps.lock();
         match invoke_reply(&caps, handle) {
@@ -477,15 +507,51 @@ fn handle_reply(frame: &mut TrapFrame) {
         Ok(caller) => caller,
         Err(denied) => {
             refuse(frame, sc, refusal_for(denied));
-            return;
+            return Err(());
         }
     };
-
-    let resp = [frame.a1, frame.a2, frame.a3, frame.a4];
     crate::ipc::stash_reply(caller, resp);
     crate::sched::wake(caller);
     crate::ipc::REPLIES_TOTAL.fetch_add(1, Ordering::Relaxed);
-    frame.a0 = 0;
+    Ok(())
+}
+
+/// Fused `reply`-then-`receive` (the RPC server hot path): `a0` = `Endpoint`
+/// handle, `a5` = the previous request's reply handle (`0` = none, first
+/// iteration), `a1..=a4` = the response to it. Replies the previous caller (if
+/// any), then runs a normal receive into `frame` for the next request. One trap
+/// instead of two; reuses [`reply_via_cap`] + [`receive_into_frame`].
+fn handle_reply_recv(frame: &mut TrapFrame) {
+    use kernel_core::cap::{invoke_recv, Handle};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::ReplyRecv as u8;
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    // Reply half — skipped on the first iteration (no previous request).
+    let prev_reply = frame.a5 as u32;
+    if prev_reply != 0 {
+        let resp = [frame.a1, frame.a2, frame.a3, frame.a4];
+        if reply_via_cap(proc, frame, sc, prev_reply, resp).is_err() {
+            return; // refused — `a0` already set, don't receive
+        }
+    }
+
+    // Receive half — block for the next request on the endpoint in `a0`.
+    let ep = {
+        let caps = proc.caps.lock();
+        invoke_recv(&caps, Handle::from_raw(frame.a0 as u32))
+    };
+    let ep = match ep {
+        Ok(ep) => ep,
+        Err(denied) => {
+            refuse(frame, sc, refusal_for(denied));
+            return;
+        }
+    };
+    receive_into_frame(proc, frame, ep);
 }
 
 /// Open a span on behalf of U-mode. `a0` = `SpanSink` handle, `a1` = name

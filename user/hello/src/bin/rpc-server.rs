@@ -1,18 +1,26 @@
-//! RPC demo server (`workload=ipc-rpc`): `receive`s a request together with a
-//! one-shot reply cap, opens an `rpc.handle` span (nested under the client's
-//! `rpc.call` via the kernel-propagated trace context), computes `req * 2`, and
-//! `reply`s — waking the blocked client. crt0 / syscalls from `snitchos-user`.
+//! RPC demo server (`workload=ipc-rpc`): the canonical `reply_recv` loop —
+//! reply the previous client and block for the next request in one syscall.
+//! Each request opens an `rpc.handle` span (nested under the client's `rpc.call`
+//! via the kernel-propagated trace context) and computes `req * 2`. crt0 /
+//! syscalls from `snitchos-user`.
 
 #![no_std]
 #![no_main]
 
-use snitchos_user::{endpoint, entry, reply, tracer};
+use snitchos_user::{endpoint, entry, tracer};
 
 #[entry]
 fn main() {
-    // Receive the request and the reply handle (a `call`, so it's `Some`).
-    if let Ok((req, Some(reply_handle))) = endpoint().receive_with_reply() {
+    // `prev` carries (reply handle, response) for the request handled last
+    // iteration; `None` on the first. `reply_recv` answers it (if any) then
+    // blocks for the next request.
+    let mut prev: Option<(usize, [u64; 4])> = None;
+    loop {
+        let (req, reply_handle) = match endpoint().reply_recv(prev) {
+            Ok(next) => next,
+            Err(_) => return,
+        };
         let _span = tracer().span("rpc.handle");
-        let _ = reply(reply_handle, [req[0] * 2, 0, 0, 0]);
+        prev = Some((reply_handle, [req[0] * 2, 0, 0, 0]));
     }
 }

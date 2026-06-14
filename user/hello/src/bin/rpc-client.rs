@@ -1,22 +1,28 @@
-//! RPC demo client (`workload=ipc-rpc`): `call`s the server with a request and
-//! blocks for the reply, then re-emits the response's first word so the itest
-//! can confirm the round-trip. The `call` runs inside an `rpc.call` span that
-//! stays open across the whole round-trip — so the server's handling span nests
-//! under it (the RPC flame-graph shape). crt0 / syscalls from `snitchos-user`.
+//! RPC demo client (`workload=ipc-rpc`): makes two `call`s so the `reply_recv`
+//! server serves more than one request — exercising reply-cap **slot reuse**
+//! (the second reply cap reuses the first's freed `CapTable` slot). The first
+//! call runs inside an `rpc.call` span (the nested-trace headline); the second
+//! is the reuse stressor. Each re-emits its response so the itest can confirm
+//! both round-trips. crt0 / syscalls from `snitchos-user`.
 
 #![no_std]
 #![no_main]
 
 use snitchos_user::{endpoint, entry, telemetry, tracer};
 
-/// The request value. The server replies `REQUEST * 2`, so the emitted
-/// response (42) proves it was computed server-side, not echoed.
-const REQUEST: u64 = 21;
-
 #[entry]
 fn main() {
-    let _span = tracer().span("rpc.call");
-    if let Ok(resp) = endpoint().call([REQUEST, 0, 0, 0]) {
-        let _ = telemetry().emit(resp[0] as i64);
+    // First round-trip, traced: 21 -> 42. The `rpc.call` span stays open across
+    // the call so the server's `rpc.handle` nests under it.
+    {
+        let _span = tracer().span("rpc.call");
+        if let Ok(resp) = endpoint().call([21, 0, 0, 0]) {
+            let _ = telemetry().emit(resp[0] as i64); // 42
+        }
+    }
+    // Second round-trip: 50 -> 100. Proves the `reply_recv` loop served a second
+    // request and reused the reply-cap slot.
+    if let Ok(resp) = endpoint().call([50, 0, 0, 0]) {
+        let _ = telemetry().emit(resp[0] as i64); // 100
     }
 }
