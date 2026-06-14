@@ -1460,6 +1460,26 @@ pub fn fs_connect_mints_root(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.10 FS `Stat` (`workload=fs`), step 2b: after connecting, the client
+/// `call`s `Stat` on its root File cap; the server unpacks the badge → inode,
+/// decodes the request, runs `RamFs::stat`, and replies. The client emits a
+/// sentinel **only** when the decoded response says the root is an empty `Dir`
+/// — so this asserts the full request/response round-trip crossed the process
+/// boundary and carried the right data.
+pub fn fs_stat_root(h: &mut View) -> Result<(), String> {
+    // Client emits `0x57A7` iff `Stat(root) == Ok(Stat { kind: Dir, size: 0 })`.
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value == 0x57A7)
+    })
+    .ok_or(
+        "client didn't confirm root stat (empty Dir) within 30s — the Stat request/response \
+         didn't round-trip correctly across the FS boundary",
+    )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

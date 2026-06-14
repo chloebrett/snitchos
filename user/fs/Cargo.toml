@@ -13,3 +13,4 @@ snitchos-user = { path = "../runtime" }
 snitchos-std = { path = "../std" }
 fs-core = { path = "../../fs-core" }
 fs-proto = { path = "../../fs-proto" }
+ramfs = { path = "../../ramfs" }
