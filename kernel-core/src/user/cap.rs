@@ -28,6 +28,7 @@ pub struct Rights(u32);
 impl Rights {
     /// The empty set — a capability that grants nothing. The floor of
     /// attenuation; useful as a "held but powerless" cap in tests.
+    /// Also used for Object::Reply.
     pub const NONE: Rights = Rights(0);
 
     /// May emit telemetry through a [`Object::TelemetrySink`]. The bit values
@@ -232,7 +233,9 @@ pub enum Denied {
 /// code on `Err`. (One object type today, so the object match is
 /// irrefutable; it becomes a real discriminator when the object zoo grows.)
 pub fn invoke_telemetry(table: &CapTable, handle: Handle) -> Result<StringId, Denied> {
-    let cap = table.resolve(handle).map_err(|_| Denied::NoSuchCapability)?;
+    let cap = table
+        .resolve(handle)
+        .map_err(|_| Denied::NoSuchCapability)?;
     if !cap.rights.contains(Rights::EMIT) {
         return Err(Denied::MissingRight);
     }
@@ -248,7 +251,9 @@ pub fn invoke_telemetry(table: &CapTable, handle: Handle) -> Result<StringId, De
 /// task id are all supplied kernel-side, so there is nothing to hand back.
 /// Pure and host-tested, the span twin of [`invoke_telemetry`].
 pub fn invoke_span(table: &CapTable, handle: Handle) -> Result<(), Denied> {
-    let cap = table.resolve(handle).map_err(|_| Denied::NoSuchCapability)?;
+    let cap = table
+        .resolve(handle)
+        .map_err(|_| Denied::NoSuchCapability)?;
     if !cap.rights.contains(Rights::EMIT) {
         return Err(Denied::MissingRight);
     }
@@ -264,7 +269,9 @@ pub fn invoke_span(table: &CapTable, handle: Handle) -> Result<(), Denied> {
 /// so it can demux the sender's object (v0.9c). The `recv` twin is
 /// [`invoke_recv`]; both mirror [`invoke_telemetry`].
 pub fn invoke_send(table: &CapTable, handle: Handle) -> Result<(EndpointId, u64), Denied> {
-    let cap = table.resolve(handle).map_err(|_| Denied::NoSuchCapability)?;
+    let cap = table
+        .resolve(handle)
+        .map_err(|_| Denied::NoSuchCapability)?;
     if !cap.rights.contains(Rights::SEND) {
         return Err(Denied::MissingRight);
     }
@@ -277,7 +284,9 @@ pub fn invoke_send(table: &CapTable, handle: Handle) -> Result<(EndpointId, u64)
 /// Resolve a `receive` invocation: `handle` must name an [`Object::Endpoint`]
 /// in `table` carrying [`Rights::RECV`]. The mirror of [`invoke_send`].
 pub fn invoke_recv(table: &CapTable, handle: Handle) -> Result<EndpointId, Denied> {
-    let cap = table.resolve(handle).map_err(|_| Denied::NoSuchCapability)?;
+    let cap = table
+        .resolve(handle)
+        .map_err(|_| Denied::NoSuchCapability)?;
     if !cap.rights.contains(Rights::RECV) {
         return Err(Denied::MissingRight);
     }
@@ -294,7 +303,9 @@ pub fn invoke_recv(table: &CapTable, handle: Handle) -> Result<EndpointId, Denie
 /// after a successful invoke; a second `reply` then resolves `Stale` →
 /// [`Denied::NoSuchCapability`].
 pub fn invoke_reply(table: &CapTable, handle: Handle) -> Result<TaskId, Denied> {
-    let cap = table.resolve(handle).map_err(|_| Denied::NoSuchCapability)?;
+    let cap = table
+        .resolve(handle)
+        .map_err(|_| Denied::NoSuchCapability)?;
     let Object::Reply { caller } = cap.object else {
         return Err(Denied::WrongObject);
     };
@@ -316,7 +327,10 @@ pub fn mint_badged(parent: Capability, badge: u64, rights: Rights) -> Result<Cap
     let Object::Endpoint { id, .. } = parent.object else {
         return Err(Denied::WrongObject);
     };
-    Ok(Capability { object: Object::Endpoint { id, badge }, rights })
+    Ok(Capability {
+        object: Object::Endpoint { id, badge },
+        rights,
+    })
 }
 
 /// A process's capability table: opaque [`Handle`]s in, [`Capability`]
@@ -349,7 +363,10 @@ impl CapTable {
             object: Object::TelemetrySink { counter },
             rights: Rights::EMIT,
         });
-        let span = table.insert(Capability { object: Object::SpanSink, rights: Rights::EMIT });
+        let span = table.insert(Capability {
+            object: Object::SpanSink,
+            rights: Rights::EMIT,
+        });
         (table, telemetry, span)
     }
 
@@ -372,7 +389,11 @@ impl CapTable {
     /// unboundedly) — otherwise appending. A reused slot keeps its bumped
     /// generation, so handles to its former occupant stay stale.
     fn grant(&mut self, cap: Capability, multiplicity: Multiplicity) -> Handle {
-        if let Some((index, slot)) = self.slots.iter_mut().enumerate().find(|(_, s)| s.cap.is_none())
+        if let Some((index, slot)) = self
+            .slots
+            .iter_mut()
+            .enumerate()
+            .find(|(_, s)| s.cap.is_none())
         {
             slot.multiplicity = multiplicity;
             slot.cap = Some(cap);
@@ -380,7 +401,11 @@ impl CapTable {
         }
         let index = self.slots.len() as u32;
         let generation = 0; // fresh slot
-        self.slots.push(Slot { generation, multiplicity, cap: Some(cap) });
+        self.slots.push(Slot {
+            generation,
+            multiplicity,
+            cap: Some(cap),
+        });
         Handle::new(index, generation)
     }
 
@@ -405,7 +430,10 @@ impl CapTable {
     /// resolve. The invoke path reads this to decide whether a successful
     /// invoke must [`consume`](Self::consume) the cap.
     pub fn multiplicity_of(&self, handle: Handle) -> Result<Multiplicity, CapError> {
-        let slot = self.slots.get(handle.index() as usize).ok_or(CapError::OutOfBounds)?;
+        let slot = self
+            .slots
+            .get(handle.index() as usize)
+            .ok_or(CapError::OutOfBounds)?;
         if slot.generation != handle.generation() {
             return Err(CapError::Stale);
         }
@@ -422,7 +450,10 @@ impl CapTable {
     /// mismatched generation is [`CapError::Stale`], never the wrong
     /// capability.
     pub fn resolve(&self, handle: Handle) -> Result<&Capability, CapError> {
-        let slot = self.slots.get(handle.index() as usize).ok_or(CapError::OutOfBounds)?;
+        let slot = self
+            .slots
+            .get(handle.index() as usize)
+            .ok_or(CapError::OutOfBounds)?;
         if slot.generation != handle.generation() {
             return Err(CapError::Stale);
         }
@@ -440,14 +471,20 @@ mod tests {
     #[test]
     fn invoke_span_accepts_spansink_with_emit() {
         let mut table = CapTable::new();
-        let h = table.insert(Capability { object: Object::SpanSink, rights: Rights::EMIT });
+        let h = table.insert(Capability {
+            object: Object::SpanSink,
+            rights: Rights::EMIT,
+        });
         assert_eq!(invoke_span(&table, h), Ok(()));
     }
 
     #[test]
     fn invoke_span_refuses_spansink_without_emit() {
         let mut table = CapTable::new();
-        let h = table.insert(Capability { object: Object::SpanSink, rights: Rights::NONE });
+        let h = table.insert(Capability {
+            object: Object::SpanSink,
+            rights: Rights::NONE,
+        });
         assert_eq!(invoke_span(&table, h), Err(Denied::MissingRight));
     }
 
@@ -455,7 +492,9 @@ mod tests {
     fn invoke_span_refuses_telemetry_sink_as_wrong_object() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::TelemetrySink { counter: StringId(1) },
+            object: Object::TelemetrySink {
+                counter: StringId(1),
+            },
             rights: Rights::EMIT,
         });
         assert_eq!(invoke_span(&table, h), Err(Denied::WrongObject));
@@ -464,14 +503,20 @@ mod tests {
     #[test]
     fn invoke_span_refuses_unknown_handle() {
         let table = CapTable::new();
-        assert_eq!(invoke_span(&table, Handle::from_raw(0)), Err(Denied::NoSuchCapability));
+        assert_eq!(
+            invoke_span(&table, Handle::from_raw(0)),
+            Err(Denied::NoSuchCapability)
+        );
     }
 
     #[test]
     fn invoke_send_accepts_an_endpoint_with_the_send_right() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::Endpoint { id: EndpointId(5), badge: 0 },
+            object: Object::Endpoint {
+                id: EndpointId(5),
+                badge: 0,
+            },
             rights: Rights::SEND,
         });
         assert_eq!(invoke_send(&table, h), Ok((EndpointId(5), 0)));
@@ -481,18 +526,30 @@ mod tests {
     fn resolve_carries_the_badge_on_an_endpoint_cap() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::Endpoint { id: EndpointId(5), badge: 0xBEEF },
+            object: Object::Endpoint {
+                id: EndpointId(5),
+                badge: 0xBEEF,
+            },
             rights: Rights::SEND,
         });
         let cap = table.resolve(h).expect("freshly inserted cap resolves");
-        assert_eq!(cap.object, Object::Endpoint { id: EndpointId(5), badge: 0xBEEF });
+        assert_eq!(
+            cap.object,
+            Object::Endpoint {
+                id: EndpointId(5),
+                badge: 0xBEEF
+            }
+        );
     }
 
     #[test]
     fn invoke_send_returns_the_endpoint_and_the_senders_badge() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::Endpoint { id: EndpointId(5), badge: 0xBEEF },
+            object: Object::Endpoint {
+                id: EndpointId(5),
+                badge: 0xBEEF,
+            },
             rights: Rights::SEND,
         });
         assert_eq!(invoke_send(&table, h), Ok((EndpointId(5), 0xBEEF)));
@@ -502,7 +559,10 @@ mod tests {
     fn invoke_send_refuses_an_endpoint_lacking_the_send_right() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::Endpoint { id: EndpointId(5), badge: 0 },
+            object: Object::Endpoint {
+                id: EndpointId(5),
+                badge: 0,
+            },
             rights: Rights::RECV,
         });
         assert_eq!(invoke_send(&table, h), Err(Denied::MissingRight));
@@ -512,7 +572,9 @@ mod tests {
     fn invoke_send_refuses_a_telemetry_sink_as_wrong_object() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::TelemetrySink { counter: StringId(1) },
+            object: Object::TelemetrySink {
+                counter: StringId(1),
+            },
             rights: Rights::SEND,
         });
         assert_eq!(invoke_send(&table, h), Err(Denied::WrongObject));
@@ -521,14 +583,20 @@ mod tests {
     #[test]
     fn invoke_send_refuses_an_unknown_handle() {
         let table = CapTable::new();
-        assert_eq!(invoke_send(&table, Handle::from_raw(0)), Err(Denied::NoSuchCapability));
+        assert_eq!(
+            invoke_send(&table, Handle::from_raw(0)),
+            Err(Denied::NoSuchCapability)
+        );
     }
 
     #[test]
     fn invoke_recv_accepts_an_endpoint_with_the_recv_right() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::Endpoint { id: EndpointId(8), badge: 0 },
+            object: Object::Endpoint {
+                id: EndpointId(8),
+                badge: 0,
+            },
             rights: Rights::RECV,
         });
         assert_eq!(invoke_recv(&table, h), Ok(EndpointId(8)));
@@ -538,7 +606,10 @@ mod tests {
     fn invoke_recv_refuses_an_endpoint_lacking_the_recv_right() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::Endpoint { id: EndpointId(8), badge: 0 },
+            object: Object::Endpoint {
+                id: EndpointId(8),
+                badge: 0,
+            },
             rights: Rights::SEND,
         });
         assert_eq!(invoke_recv(&table, h), Err(Denied::MissingRight));
@@ -576,7 +647,10 @@ mod tests {
         // register; `from_bits` rebuilds the set the minter asked for.
         let r = Rights::from_bits(Rights::SEND.bits());
         assert_eq!(r, Rights::SEND);
-        assert_eq!(Rights::from_bits((Rights::RECV | Rights::MINT).bits()), Rights::RECV | Rights::MINT);
+        assert_eq!(
+            Rights::from_bits((Rights::RECV | Rights::MINT).bits()),
+            Rights::RECV | Rights::MINT
+        );
     }
 
     #[test]
@@ -584,13 +658,19 @@ mod tests {
         // A MINT-holder owns the endpoint and sets the child's rights freely —
         // here a SEND child, though the parent itself holds only MINT.
         let parent = Capability {
-            object: Object::Endpoint { id: EndpointId(7), badge: 0 },
+            object: Object::Endpoint {
+                id: EndpointId(7),
+                badge: 0,
+            },
             rights: Rights::MINT,
         };
         assert_eq!(
             mint_badged(parent, 0xF00D, Rights::SEND),
             Ok(Capability {
-                object: Object::Endpoint { id: EndpointId(7), badge: 0xF00D },
+                object: Object::Endpoint {
+                    id: EndpointId(7),
+                    badge: 0xF00D
+                },
                 rights: Rights::SEND,
             }),
         );
@@ -599,25 +679,39 @@ mod tests {
     #[test]
     fn mint_badged_refuses_a_parent_without_mint() {
         let parent = Capability {
-            object: Object::Endpoint { id: EndpointId(7), badge: 0 },
+            object: Object::Endpoint {
+                id: EndpointId(7),
+                badge: 0,
+            },
             rights: Rights::RECV,
         };
-        assert_eq!(mint_badged(parent, 0xF00D, Rights::SEND), Err(Denied::MissingRight));
+        assert_eq!(
+            mint_badged(parent, 0xF00D, Rights::SEND),
+            Err(Denied::MissingRight)
+        );
     }
 
     #[test]
     fn mint_badged_refuses_a_non_endpoint_parent() {
         let parent = Capability {
-            object: Object::TelemetrySink { counter: StringId(1) },
+            object: Object::TelemetrySink {
+                counter: StringId(1),
+            },
             rights: Rights::MINT,
         };
-        assert_eq!(mint_badged(parent, 0xF00D, Rights::SEND), Err(Denied::WrongObject));
+        assert_eq!(
+            mint_badged(parent, 0xF00D, Rights::SEND),
+            Err(Denied::WrongObject)
+        );
     }
 
     #[test]
     fn invoke_telemetry_refuses_spansink_as_wrong_object() {
         let mut table = CapTable::new();
-        let h = table.insert(Capability { object: Object::SpanSink, rights: Rights::EMIT });
+        let h = table.insert(Capability {
+            object: Object::SpanSink,
+            rights: Rights::EMIT,
+        });
         assert_eq!(invoke_telemetry(&table, h), Err(Denied::WrongObject));
     }
     use protocol::StringId;
@@ -626,11 +720,15 @@ mod tests {
     fn a_resolved_handle_returns_the_capability_that_was_inserted() {
         let mut table = CapTable::new();
         let handle = table.insert(Capability {
-            object: Object::TelemetrySink { counter: StringId(7) },
+            object: Object::TelemetrySink {
+                counter: StringId(7),
+            },
             rights: Rights::EMIT,
         });
 
-        let cap = table.resolve(handle).expect("a freshly inserted handle resolves");
+        let cap = table
+            .resolve(handle)
+            .expect("a freshly inserted handle resolves");
 
         assert!(cap.rights.contains(Rights::EMIT));
         let Object::TelemetrySink { counter } = cap.object else {
@@ -641,7 +739,9 @@ mod tests {
 
     fn emit_sink() -> Capability {
         Capability {
-            object: Object::TelemetrySink { counter: StringId(1) },
+            object: Object::TelemetrySink {
+                counter: StringId(1),
+            },
             rights: Rights::EMIT,
         }
     }
@@ -657,13 +757,25 @@ mod tests {
         let mut table = CapTable::new();
         let first = table.insert(emit_sink());
         let second = table.insert(Capability {
-            object: Object::TelemetrySink { counter: StringId(2) },
+            object: Object::TelemetrySink {
+                counter: StringId(2),
+            },
             rights: Rights::EMIT,
         });
 
         assert_ne!(first, second);
-        assert_eq!(table.resolve(first).unwrap().object, Object::TelemetrySink { counter: StringId(1) });
-        assert_eq!(table.resolve(second).unwrap().object, Object::TelemetrySink { counter: StringId(2) });
+        assert_eq!(
+            table.resolve(first).unwrap().object,
+            Object::TelemetrySink {
+                counter: StringId(1)
+            }
+        );
+        assert_eq!(
+            table.resolve(second).unwrap().object,
+            Object::TelemetrySink {
+                counter: StringId(2)
+            }
+        );
     }
 
     #[test]
@@ -677,7 +789,9 @@ mod tests {
     #[test]
     fn a_capability_without_emit_does_not_pass_the_emit_check() {
         let cap = Capability {
-            object: Object::TelemetrySink { counter: StringId(1) },
+            object: Object::TelemetrySink {
+                counter: StringId(1),
+            },
             rights: Rights::NONE,
         };
         assert!(!cap.rights.contains(Rights::EMIT));
@@ -694,21 +808,29 @@ mod tests {
     #[test]
     fn invoking_an_unknown_handle_is_denied_as_no_such_capability() {
         let table = CapTable::new();
-        assert_eq!(invoke_telemetry(&table, Handle::from_raw(0)), Err(Denied::NoSuchCapability));
+        assert_eq!(
+            invoke_telemetry(&table, Handle::from_raw(0)),
+            Err(Denied::NoSuchCapability)
+        );
     }
 
     #[test]
     fn invoking_a_stale_handle_is_denied_as_no_such_capability() {
         let (table, handle, _span) = CapTable::bootstrap(StringId(1));
         let stale = Handle::new(handle.index(), handle.generation() + 1);
-        assert_eq!(invoke_telemetry(&table, stale), Err(Denied::NoSuchCapability));
+        assert_eq!(
+            invoke_telemetry(&table, stale),
+            Err(Denied::NoSuchCapability)
+        );
     }
 
     #[test]
     fn invoking_a_capability_that_lacks_emit_is_denied_for_the_missing_right() {
         let mut table = CapTable::new();
         let handle = table.insert(Capability {
-            object: Object::TelemetrySink { counter: StringId(1) },
+            object: Object::TelemetrySink {
+                counter: StringId(1),
+            },
             rights: Rights::NONE,
         });
         assert_eq!(invoke_telemetry(&table, handle), Err(Denied::MissingRight));
@@ -723,7 +845,9 @@ mod tests {
         let counter = StringId(42);
         let (table, telemetry, span) = CapTable::bootstrap(counter);
 
-        let tcap = table.resolve(telemetry).expect("the telemetry handle resolves");
+        let tcap = table
+            .resolve(telemetry)
+            .expect("the telemetry handle resolves");
         assert_eq!(tcap.object, Object::TelemetrySink { counter });
         assert!(tcap.rights.contains(Rights::EMIT));
         // Telemetry lands in the first (empty) slot; the kernel hands it to
@@ -758,7 +882,9 @@ mod tests {
         let mut table = CapTable::new();
         table.insert(emit_sink()); // occupy slot 0 so the handle under test isn't `raw == 0`
         let handle = table.insert(Capability {
-            object: Object::TelemetrySink { counter: StringId(2) },
+            object: Object::TelemetrySink {
+                counter: StringId(2),
+            },
             rights: Rights::EMIT,
         });
         // Guard: a zero raw value would let a stubbed `raw()` pass vacuously.
@@ -790,12 +916,20 @@ mod tests {
         let mut table = CapTable::new();
         let full = table.insert(emit_sink());
         let attenuated = table.insert(Capability {
-            object: Object::TelemetrySink { counter: StringId(1) },
+            object: Object::TelemetrySink {
+                counter: StringId(1),
+            },
             rights: Rights::NONE,
         });
 
         assert!(table.resolve(full).unwrap().rights.contains(Rights::EMIT));
-        assert!(!table.resolve(attenuated).unwrap().rights.contains(Rights::EMIT));
+        assert!(
+            !table
+                .resolve(attenuated)
+                .unwrap()
+                .rights
+                .contains(Rights::EMIT)
+        );
     }
 
     // --- v0.9b: single-use (`Once`) capabilities ---
@@ -854,7 +988,10 @@ mod tests {
         let persistent = table.insert(emit_sink());
         let once = table.insert_once(emit_sink());
 
-        assert_eq!(table.multiplicity_of(persistent), Ok(Multiplicity::Persistent));
+        assert_eq!(
+            table.multiplicity_of(persistent),
+            Ok(Multiplicity::Persistent)
+        );
         assert_eq!(table.multiplicity_of(once), Ok(Multiplicity::Once));
     }
 
@@ -869,7 +1006,12 @@ mod tests {
     // --- v0.9b: the reply capability ---
 
     fn reply_cap(caller: u32) -> Capability {
-        Capability { object: Object::Reply { caller: TaskId(caller) }, rights: Rights::NONE }
+        Capability {
+            object: Object::Reply {
+                caller: TaskId(caller),
+            },
+            rights: Rights::NONE,
+        }
     }
 
     #[test]
@@ -884,14 +1026,20 @@ mod tests {
     #[test]
     fn invoke_reply_refuses_a_non_reply_object() {
         let mut table = CapTable::new();
-        let h = table.insert(Capability { object: Object::SpanSink, rights: Rights::EMIT });
+        let h = table.insert(Capability {
+            object: Object::SpanSink,
+            rights: Rights::EMIT,
+        });
         assert_eq!(invoke_reply(&table, h), Err(Denied::WrongObject));
     }
 
     #[test]
     fn invoke_reply_refuses_an_unknown_handle() {
         let table = CapTable::new();
-        assert_eq!(invoke_reply(&table, Handle::from_raw(0)), Err(Denied::NoSuchCapability));
+        assert_eq!(
+            invoke_reply(&table, Handle::from_raw(0)),
+            Err(Denied::NoSuchCapability)
+        );
     }
 
     #[test]

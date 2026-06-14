@@ -10,21 +10,22 @@
 
 extern crate alloc;
 
-pub mod batch_ring;
-pub mod bootargs;
-pub mod cap;
+// Modules are grouped by concern into directory modules (`mem/`, `obs/`,
+// `user/`, `workloads/`). Each group re-exports its children at the crate root
+// via `pub use` below, so the public API stays `kernel_core::frame`,
+// `kernel_core::cap`, etc. — the physical nesting doesn't change the paths.
+// Single-module concerns (`clock`, `sched`, `trap`, `virtio`) stay at the root.
 pub mod clock;
-pub mod elf;
-pub mod heap_smoke;
-pub mod frame;
-pub mod heap;
-pub mod intern;
-pub mod ipc;
-pub mod mmu;
-pub mod preinit;
 pub mod sched;
-pub mod sink;
-pub mod span;
 pub mod trap;
 pub mod virtio;
-pub mod workload;
+
+mod mem;
+mod obs;
+mod user;
+mod workloads;
+
+pub use mem::{frame, heap, heap_smoke, mmu};
+pub use obs::{batch_ring, intern, preinit, sink, span};
+pub use user::{cap, elf, ipc};
+pub use workloads::{bootargs, workload};
