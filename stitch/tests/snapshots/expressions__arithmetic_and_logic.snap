@@ -1,0 +1,46 @@
+---
+source: stitch/tests/expressions.rs
+expression: "p(\"a + b * 2 - c / d < limit and not done\")"
+---
+Binary {
+    op: And,
+    left: Binary {
+        op: Lt,
+        left: Binary {
+            op: Sub,
+            left: Binary {
+                op: Add,
+                left: Var(
+                    "a",
+                ),
+                right: Binary {
+                    op: Mul,
+                    left: Var(
+                        "b",
+                    ),
+                    right: Int(
+                        2,
+                    ),
+                },
+            },
+            right: Binary {
+                op: Div,
+                left: Var(
+                    "c",
+                ),
+                right: Var(
+                    "d",
+                ),
+            },
+        },
+        right: Var(
+            "limit",
+        ),
+    },
+    right: Unary {
+        op: Not,
+        operand: Var(
+            "done",
+        ),
+    },
+}

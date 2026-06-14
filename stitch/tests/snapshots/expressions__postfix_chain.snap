@@ -1,0 +1,21 @@
+---
+source: stitch/tests/expressions.rs
+expression: "p(\"cache[key]?.value + 1\")"
+---
+Binary {
+    op: Add,
+    left: SafeField {
+        object: Index {
+            object: Var(
+                "cache",
+            ),
+            index: Var(
+                "key",
+            ),
+        },
+        name: "value",
+    },
+    right: Int(
+        1,
+    ),
+}

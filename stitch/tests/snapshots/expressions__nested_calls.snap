@@ -1,0 +1,34 @@
+---
+source: stitch/tests/expressions.rs
+expression: "p(\"f(g(x), h(y, z))\")"
+---
+Call {
+    callee: Var(
+        "f",
+    ),
+    args: [
+        Call {
+            callee: Var(
+                "g",
+            ),
+            args: [
+                Var(
+                    "x",
+                ),
+            ],
+        },
+        Call {
+            callee: Var(
+                "h",
+            ),
+            args: [
+                Var(
+                    "y",
+                ),
+                Var(
+                    "z",
+                ),
+            ],
+        },
+    ],
+}

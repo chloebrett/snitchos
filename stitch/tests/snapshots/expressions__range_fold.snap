@@ -1,0 +1,42 @@
+---
+source: stitch/tests/expressions.rs
+expression: "p(\"0 .. count |> map(square) |> fold(0, add)\")"
+---
+Binary {
+    op: Pipe,
+    left: Binary {
+        op: Pipe,
+        left: Binary {
+            op: Range,
+            left: Int(
+                0,
+            ),
+            right: Var(
+                "count",
+            ),
+        },
+        right: Call {
+            callee: Var(
+                "map",
+            ),
+            args: [
+                Var(
+                    "square",
+                ),
+            ],
+        },
+    },
+    right: Call {
+        callee: Var(
+            "fold",
+        ),
+        args: [
+            Int(
+                0,
+            ),
+            Var(
+                "add",
+            ),
+        ],
+    },
+}

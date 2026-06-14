@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn lexes_a_float_literal() {
-        assert_eq!(lex("3.14"), vec![Token::Float(3.14), Token::Eof]);
+        assert_eq!(lex("2.5"), vec![Token::Float(2.5), Token::Eof]);
     }
 
     #[test]

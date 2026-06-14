@@ -1,0 +1,39 @@
+---
+source: stitch/tests/expressions.rs
+expression: "p(\"readings |> filter(hot) |> map(celsius) |> total\")"
+---
+Binary {
+    op: Pipe,
+    left: Binary {
+        op: Pipe,
+        left: Binary {
+            op: Pipe,
+            left: Var(
+                "readings",
+            ),
+            right: Call {
+                callee: Var(
+                    "filter",
+                ),
+                args: [
+                    Var(
+                        "hot",
+                    ),
+                ],
+            },
+        },
+        right: Call {
+            callee: Var(
+                "map",
+            ),
+            args: [
+                Var(
+                    "celsius",
+                ),
+            ],
+        },
+    },
+    right: Var(
+        "total",
+    ),
+}
