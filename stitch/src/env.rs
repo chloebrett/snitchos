@@ -16,6 +16,14 @@ use std::rc::Rc;
 
 use crate::value::{TelemetryEvent, Value};
 
+/// Why an assignment failed — formatted into a message by the interpreter.
+pub enum AssignError {
+    /// No binding of that name in scope.
+    Unbound,
+    /// The binding exists but wasn't declared `mut`.
+    Immutable,
+}
+
 #[derive(Clone, Default)]
 pub struct Env {
     locals: Option<Rc<Scope>>,
@@ -27,7 +35,12 @@ pub struct Env {
 
 struct Scope {
     name: String,
-    value: Value,
+    /// The binding's value lives in a shared cell, so a `mut` binding reassigned
+    /// here is visible through every clone of this scope — including closures
+    /// that captured it (capture-by-reference). Immutable bindings use a cell
+    /// too, but `assign` refuses them, so it never changes.
+    value: Rc<RefCell<Value>>,
+    mutable: bool,
     parent: Option<Rc<Scope>>,
 }
 
@@ -37,19 +50,50 @@ impl Env {
         Env::default()
     }
 
-    /// A new environment with `name` bound to `value`, shadowing any existing
-    /// binding of the same name and sharing the same globals table.
+    /// A new environment with an immutable `name` binding, shadowing any
+    /// existing binding and sharing the same globals + sink.
     #[must_use]
     pub fn extend(&self, name: String, value: Value) -> Env {
+        self.bind(name, value, false)
+    }
+
+    /// As [`extend`](Self::extend), but the binding is `mut` (assignable).
+    #[must_use]
+    pub fn extend_mut(&self, name: String, value: Value) -> Env {
+        self.bind(name, value, true)
+    }
+
+    fn bind(&self, name: String, value: Value, mutable: bool) -> Env {
         Env {
             locals: Some(Rc::new(Scope {
                 name,
-                value,
+                value: Rc::new(RefCell::new(value)),
+                mutable,
                 parent: self.locals.clone(),
             })),
             globals: Rc::clone(&self.globals),
             sink: Rc::clone(&self.sink),
         }
+    }
+
+    /// Reassign an existing `mut` binding in place (mutating its shared cell, so
+    /// the change is visible through every holder of this scope).
+    ///
+    /// # Errors
+    /// `Unbound` if no such binding; `Immutable` if it isn't `mut`.
+    pub fn assign(&self, name: &str, value: Value) -> Result<(), AssignError> {
+        let mut current = &self.locals;
+        while let Some(scope) = current {
+            if scope.name == name {
+                if !scope.mutable {
+                    return Err(AssignError::Immutable);
+                }
+                *scope.value.borrow_mut() = value;
+                return Ok(());
+            }
+            current = &scope.parent;
+        }
+        Err(AssignError::Unbound)
     }
 
     /// Record a telemetry event.
@@ -68,7 +112,7 @@ impl Env {
         let mut current = &self.locals;
         while let Some(scope) = current {
             if scope.name == name {
-                return Some(scope.value.clone());
+                return Some(scope.value.borrow().clone());
             }
             current = &scope.parent;
         }

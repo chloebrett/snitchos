@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Pattern, Stmt, StrSegment, UnOp};
-use crate::env::Env;
+use crate::env::{AssignError, Env};
 use crate::value::{
     ClosureData, Constructor, DataValue, NativeFn, RuntimeError, TelemetryEvent, Value,
 };
@@ -614,9 +614,13 @@ fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env) -> Result<Value,
     let mut scope = env.clone();
     for (index, stmt) in stmts.iter().enumerate() {
         match stmt {
-            Stmt::Let { name, value, .. } => {
+            Stmt::Let { name, mutable, value } => {
                 let bound = eval(value, &scope)?;
-                scope = scope.extend(name.clone(), bound);
+                scope = if *mutable {
+                    scope.extend_mut(name.clone(), bound)
+                } else {
+                    scope.extend(name.clone(), bound)
+                };
             }
             Stmt::Expr(expr) => {
                 eval(expr, &scope)?;
@@ -635,10 +639,26 @@ fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env) -> Result<Value,
                 }));
                 return apply_use(call, callback, &scope);
             }
-            Stmt::Assign { .. } => {
-                return Err(RuntimeError::new(
-                    "evaluation not yet implemented for this statement",
-                ));
+            Stmt::Assign { target, value } => {
+                let Expr::Var(name) = target else {
+                    return Err(RuntimeError::new(
+                        "only a variable can be assigned (field assignment needs methods)",
+                    ));
+                };
+                let new_value = eval(value, &scope)?;
+                match scope.assign(name, new_value) {
+                    Ok(()) => {}
+                    Err(AssignError::Unbound) => {
+                        return Err(RuntimeError::new(format!(
+                            "cannot assign to undefined variable `{name}`"
+                        )));
+                    }
+                    Err(AssignError::Immutable) => {
+                        return Err(RuntimeError::new(format!(
+                            "cannot assign to immutable `{name}` (declare it with `let mut`)"
+                        )));
+                    }
+                }
             }
         }
     }
@@ -992,6 +1012,33 @@ mod tests {
     #[test]
     fn a_block_without_a_trailing_expression_is_unit() {
         assert_eq!(run("{ let x = 1 }"), Value::Unit);
+    }
+
+    #[test]
+    fn a_mut_binding_can_be_reassigned() {
+        assert_eq!(run("{ let mut n = 0  n = n + 1  n = n + 1  n }"), Value::Int(2));
+    }
+
+    #[test]
+    fn reassigning_an_immutable_binding_is_an_error() {
+        assert_eq!(
+            run_err("{ let x = 1  x = 2  x }"),
+            "cannot assign to immutable `x` (declare it with `let mut`)"
+        );
+    }
+
+    #[test]
+    fn assigning_an_undefined_variable_is_an_error() {
+        assert_eq!(
+            run_err("{ y = 1 }"),
+            "cannot assign to undefined variable `y`"
+        );
+    }
+
+    #[test]
+    fn a_closure_sees_a_later_mutation_of_a_captured_mut_local() {
+        // Capture-by-reference: `f` shares `n`'s cell, so the `n = 99` is visible.
+        assert_eq!(run("{ let mut n = 0  let f = () -> n  n = 99  f() }"), Value::Int(99));
     }
 
     #[test]
