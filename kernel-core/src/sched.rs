@@ -108,6 +108,54 @@ pub enum TaskState {
     Exited,
 }
 
+/// What happens to the *currently running* task when the scheduler switches
+/// away from it — the one axis on which the kernel's `reschedule` /
+/// `block_current` / `exit_now` differ. Everything else about a switch (pick
+/// next, load its state, account, emit the `ContextSwitch`) is identical.
+///
+/// Pure so the state-transition + re-enqueue policy is host-tested away from
+/// the switch path; the kernel-side `prepare_switch` reads [`next_state`] to set
+/// the outgoing task's `state` and [`requeues`] to decide whether to push it
+/// back onto the ready set.
+///
+/// [`next_state`]: CurrentDisposition::next_state
+/// [`requeues`]: CurrentDisposition::requeues
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CurrentDisposition {
+    /// Voluntary/involuntary deschedule: the current task re-enters the ready
+    /// set (`yield_now`/preemption). Its `state` field is left as-is — the
+    /// runqueue membership is the source of truth.
+    Requeue,
+    /// The current task blocks: marked `Blocked` and left **off** the runqueue
+    /// until a `wake` returns it (`block_current`).
+    Block,
+    /// The current task terminates: marked `Exited` and left off the runqueue
+    /// forever (`exit_now`).
+    Exit,
+}
+
+impl CurrentDisposition {
+    /// The state the outgoing task should transition to, or `None` to leave its
+    /// `state` field unchanged (a [`Requeue`](Self::Requeue), whose source of
+    /// truth is runqueue membership, not the field).
+    #[must_use]
+    pub fn next_state(self) -> Option<TaskState> {
+        match self {
+            Self::Requeue => None,
+            Self::Block => Some(TaskState::Blocked),
+            Self::Exit => Some(TaskState::Exited),
+        }
+    }
+
+    /// Whether the outgoing task re-enters the ready set. Only a
+    /// [`Requeue`](Self::Requeue) does; [`Block`](Self::Block) waits for a wake
+    /// and [`Exit`](Self::Exit) is gone for good.
+    #[must_use]
+    pub fn requeues(self) -> bool {
+        matches!(self, Self::Requeue)
+    }
+}
+
 /// Ready set for one hart. Stores each ready task as a [`Candidate`] —
 /// `(id, base priority, enqueued_tick)` — so the scheduler's priority pick
 /// ([`pick_next`]) reads everything it needs straight from the queue, with no
@@ -204,6 +252,27 @@ pub fn quantum_expired(entry_tick: u64, now: u64, quantum: u64) -> bool {
     }
 }
 
+/// On-CPU time a task accrued during its turn, from when it became Running
+/// (`entry_tick`) to when it switched out (`now`), in `time`-CSR ticks.
+///
+/// `entry_tick == 0` is the "no entry recorded yet" sentinel (the scheduler
+/// lazy-inits the per-task entry tick on the first switch rather than during
+/// boot): it yields `0` so a task isn't credited the whole uptime on its first
+/// deschedule. Otherwise the delta wraps, since the 64-bit `time` CSR wraps and
+/// a span straddling that boundary must still measure the true elapsed time
+/// rather than overflow-panic.
+///
+/// Pure so the accounting is host-tested away from the switch path; the
+/// kernel-side `prepare_switch` adds the result to the outgoing task's counter.
+#[must_use]
+pub fn on_cpu_delta(entry_tick: u64, now: u64) -> u64 {
+    if entry_tick == 0 {
+        0
+    } else {
+        now.wrapping_sub(entry_tick)
+    }
+}
+
 /// Whether a `wake` should re-enqueue the task — true only when it is
 /// actually [`TaskState::Blocked`]. The idempotence guard for `wake`: a
 /// second wake (or one that races the task already back on the runqueue)
@@ -217,6 +286,52 @@ pub fn on_wake(state: TaskState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requeued_task_keeps_its_state() {
+        // A yielded/preempted task re-enters the ready set; runqueue membership
+        // is the source of truth, so its `state` field is left untouched.
+        assert_eq!(CurrentDisposition::Requeue.next_state(), None);
+    }
+
+    #[test]
+    fn blocked_task_transitions_to_blocked() {
+        assert_eq!(CurrentDisposition::Block.next_state(), Some(TaskState::Blocked));
+    }
+
+    #[test]
+    fn exited_task_transitions_to_exited() {
+        assert_eq!(CurrentDisposition::Exit.next_state(), Some(TaskState::Exited));
+    }
+
+    #[test]
+    fn only_a_requeue_returns_to_the_ready_set() {
+        // Re-enqueue is exactly the Requeue disposition: Block and Exit leave the
+        // task off the runqueue (a wake / nothing returns them, respectively).
+        assert!(CurrentDisposition::Requeue.requeues());
+        assert!(!CurrentDisposition::Block.requeues());
+        assert!(!CurrentDisposition::Exit.requeues());
+    }
+
+    #[test]
+    fn on_cpu_delta_is_zero_for_the_uninitialised_entry_sentinel() {
+        // `prev_entry == 0` means "this task has no recorded entry tick yet"
+        // (lazy-init on the first switch). Accruing `now - 0` would credit the
+        // task with the entire uptime; the sentinel must yield zero instead.
+        assert_eq!(on_cpu_delta(0, 1_000_000), 0);
+    }
+
+    #[test]
+    fn on_cpu_delta_is_the_elapsed_time_since_entry() {
+        assert_eq!(on_cpu_delta(100, 150), 50);
+    }
+
+    #[test]
+    fn on_cpu_delta_wraps_rather_than_overflowing() {
+        // The `time` CSR is 64-bit and wraps; a span straddling the wrap point
+        // must compute the true elapsed delta, not panic on overflow.
+        assert_eq!(on_cpu_delta(u64::MAX, 4), 5);
+    }
 
     #[test]
     fn a_blocked_task_is_enqueued_when_woken() {
