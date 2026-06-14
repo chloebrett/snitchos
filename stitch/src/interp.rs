@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Pattern, Stmt, StrSegment, UnOp};
 use crate::env::Env;
-use crate::value::{ClosureData, Constructor, DataValue, RuntimeError, Value};
+use crate::value::{ClosureData, Constructor, DataValue, NativeFn, RuntimeError, Value};
 
 /// Run a program: bind every top-level function into one shared global
 /// environment (so they are mutually visible — letrec), then call `main()`.
@@ -17,6 +17,9 @@ use crate::value::{ClosureData, Constructor, DataValue, RuntimeError, Value};
 pub fn eval_program(items: &[Item]) -> Result<Value, RuntimeError> {
     let env = Env::new();
     let mut globals = HashMap::new();
+    for native in NATIVES {
+        globals.insert(native.name.to_string(), Value::Native(*native));
+    }
     for item in items {
         match item {
             Item::Func { name, params, body, .. } => {
@@ -107,6 +110,13 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Tuple(values.into()))
         }
+        Expr::List(elements) => {
+            let values = elements
+                .iter()
+                .map(|element| eval(element, env))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::List(values.into()))
+        }
         Expr::Lambda { params, body } => Ok(Value::Closure(Rc::new(ClosureData {
             params: params.clone(),
             body: (**body).clone(),
@@ -123,6 +133,30 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
 /// environment the closure captured — that captured env is what makes it a
 /// closure rather than a plain function.
 fn eval_call(callee: &Value, args: &[Arg], env: &Env) -> Result<Value, RuntimeError> {
+    // Constructors are the only callees that take named args / `..` spread.
+    if let Value::Constructor(ctor) = callee {
+        return construct(ctor, args, env);
+    }
+    let mut values = Vec::with_capacity(args.len());
+    for arg in args {
+        if arg.label.is_some() {
+            return Err(RuntimeError::new(
+                "named arguments are only allowed when constructing a prod/variant",
+            ));
+        }
+        if matches!(arg.value, Expr::Spread(_)) {
+            return Err(RuntimeError::new(
+                "spread (`..`) is only allowed when constructing a prod/variant",
+            ));
+        }
+        values.push(eval(&arg.value, env)?);
+    }
+    apply_values(callee, &values)
+}
+
+/// Apply a callable to already-evaluated positional arguments. Shared by
+/// `eval_call` and the native combinators (which apply their function args).
+fn apply_values(callee: &Value, args: &[Value]) -> Result<Value, RuntimeError> {
     match callee {
         Value::Closure(closure) => {
             if args.len() != closure.params.len() {
@@ -134,13 +168,129 @@ fn eval_call(callee: &Value, args: &[Arg], env: &Env) -> Result<Value, RuntimeEr
             }
             let mut call_env = closure.env.clone();
             for (param, arg) in closure.params.iter().zip(args) {
-                call_env = call_env.extend(param.clone(), eval(&arg.value, env)?);
+                call_env = call_env.extend(param.clone(), arg.clone());
             }
             eval(&closure.body, &call_env)
         }
-        Value::Constructor(ctor) => construct(ctor, args, env),
+        Value::Native(native) => {
+            if args.len() != native.arity {
+                return Err(RuntimeError::new(format!(
+                    "{} expects {} argument(s), got {}",
+                    native.name,
+                    native.arity,
+                    args.len()
+                )));
+            }
+            (native.func)(args)
+        }
+        Value::Constructor(ctor) => make_data(ctor, args),
         _ => Err(RuntimeError::new(format!("cannot call a {}", callee.kind()))),
     }
+}
+
+/// The built-in (native) functions, registered into every program's globals.
+const NATIVES: &[NativeFn] = &[
+    NativeFn { name: "map", arity: 2, func: native_map },
+    NativeFn { name: "filter", arity: 2, func: native_filter },
+    NativeFn { name: "fold", arity: 3, func: native_fold },
+    NativeFn { name: "join", arity: 2, func: native_join },
+];
+
+/// Require a list argument, with an error tagged by the combinator `name`.
+fn expect_list<'a>(name: &str, value: &'a Value) -> Result<&'a [Value], RuntimeError> {
+    match value {
+        Value::List(items) => Ok(items),
+        other => Err(RuntimeError::new(format!(
+            "{name} expects a List, got {}",
+            other.kind()
+        ))),
+    }
+}
+
+/// `map(list, f)` — a new list with `f` applied to each element.
+fn native_map(args: &[Value]) -> Result<Value, RuntimeError> {
+    let [list, function] = args else {
+        return Err(RuntimeError::new("map expects (list, function)"));
+    };
+    let mapped = expect_list("map", list)?
+        .iter()
+        .map(|item| apply_values(function, std::slice::from_ref(item)))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Value::List(mapped.into()))
+}
+
+/// `filter(list, pred)` — the elements for which `pred` returns `true`.
+fn native_filter(args: &[Value]) -> Result<Value, RuntimeError> {
+    let [list, predicate] = args else {
+        return Err(RuntimeError::new("filter expects (list, predicate)"));
+    };
+    let mut kept = Vec::new();
+    for item in expect_list("filter", list)? {
+        match apply_values(predicate, std::slice::from_ref(item))? {
+            Value::Bool(true) => kept.push(item.clone()),
+            Value::Bool(false) => {}
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "filter predicate must return a Bool, got {}",
+                    other.kind()
+                )));
+            }
+        }
+    }
+    Ok(Value::List(kept.into()))
+}
+
+/// `fold(list, init, f)` — reduce left-to-right, `f(acc, element)`.
+fn native_fold(args: &[Value]) -> Result<Value, RuntimeError> {
+    let [list, init, function] = args else {
+        return Err(RuntimeError::new("fold expects (list, init, function)"));
+    };
+    let mut acc = init.clone();
+    for item in expect_list("fold", list)? {
+        acc = apply_values(function, &[acc, item.clone()])?;
+    }
+    Ok(acc)
+}
+
+/// `join(list, sep)` — the displayed elements concatenated with `sep` between.
+fn native_join(args: &[Value]) -> Result<Value, RuntimeError> {
+    let [list, separator] = args else {
+        return Err(RuntimeError::new("join expects (list, separator)"));
+    };
+    let Value::Str(separator) = separator else {
+        return Err(RuntimeError::new(format!(
+            "join separator must be a Str, got {}",
+            separator.kind()
+        )));
+    };
+    let parts = expect_list("join", list)?
+        .iter()
+        .map(Value::display)
+        .collect::<Vec<_>>();
+    Ok(Value::Str(parts.join(separator).into()))
+}
+
+/// Build a `Data` from a constructor and its field values, in declaration order.
+fn make_data(ctor: &Constructor, values: &[Value]) -> Result<Value, RuntimeError> {
+    if values.len() != ctor.field_names.len() {
+        return Err(RuntimeError::new(format!(
+            "{} expects {} field(s), got {}",
+            ctor.variant,
+            ctor.field_names.len(),
+            values.len()
+        )));
+    }
+    let fields = ctor
+        .field_names
+        .iter()
+        .cloned()
+        .zip(values.iter().cloned())
+        .collect();
+    Ok(Value::Data(Rc::new(DataValue {
+        type_name: ctor.type_name.clone(),
+        variant: ctor.variant.clone(),
+        fields,
+    })))
 }
 
 /// Build a `Data` value from a constructor applied to arguments. Positional
@@ -185,22 +335,18 @@ fn construct(ctor: &Constructor, args: &[Arg], env: &Env) -> Result<Value, Runti
         })?;
         *slot = Some(eval(&arg.value, env)?);
     }
-    let fields = ctor
+    let ordered = ctor
         .field_names
         .iter()
         .zip(values)
         .map(|(name, value)| {
-            value.map(|value| (name.clone(), value)).ok_or_else(|| {
+            value.ok_or_else(|| {
                 let field = name.clone().unwrap_or_else(|| "?".to_string());
                 RuntimeError::new(format!("{} is missing field `{field}`", ctor.type_name))
             })
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Value::Data(Rc::new(DataValue {
-        type_name: ctor.type_name.clone(),
-        variant: ctor.variant.clone(),
-        fields,
-    })))
+        .collect::<Result<Vec<Value>, _>>()?;
+    make_data(ctor, &ordered)
 }
 
 /// Evaluate a string literal: concatenate literal segments and the displayed
@@ -375,6 +521,8 @@ fn eval_binary(op: BinOp, left: &Value, right: &Value) -> Result<Value, RuntimeE
         (BinOp::Mul, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
         (BinOp::Div, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
         (BinOp::Rem, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
+        // `+` concatenates strings (unambiguous: strict typing rules out `1 + "x"`).
+        (BinOp::Add, Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}").into())),
         (BinOp::Eq | BinOp::Ne, _, _) => equality(op, left, right),
         (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, _, _) => ordering(op, left, right),
         _ => Err(type_mismatch(op, left, right)),
@@ -1023,5 +1171,79 @@ mod tests {
     #[test]
     fn the_empty_tuple_pattern_matches_unit() {
         assert_eq!(run("match () { () => 42 }"), Value::Int(42));
+    }
+
+    #[test]
+    fn plus_concatenates_two_strings() {
+        assert_eq!(run(r#""foo" + "bar""#), Value::Str("foobar".into()));
+    }
+
+    #[test]
+    fn plus_across_string_and_number_is_a_type_error() {
+        assert_eq!(
+            run_err(r#""a" + 1"#),
+            "operator Add cannot apply to Str and Int"
+        );
+    }
+
+    #[test]
+    fn lists_have_structural_equality() {
+        assert_eq!(run("[1, 2, 3] == [1, 2, 3]"), Value::Bool(true));
+        assert_eq!(run("[1, 2, 3] == [1, 2, 4]"), Value::Bool(false));
+        assert_eq!(run("[] == []"), Value::Bool(true));
+    }
+
+    #[test]
+    fn a_list_can_hold_computed_elements() {
+        assert_eq!(run("[1 + 1, 2 * 3] == [2, 6]"), Value::Bool(true));
+    }
+
+    #[test]
+    fn interpolation_renders_a_list() {
+        assert_eq!(run(r#""{[1, 2, 3]}""#), Value::Str("[1, 2, 3]".into()));
+    }
+
+    #[test]
+    fn map_applies_a_function_to_each_element() {
+        assert_eq!(
+            run_program("main() = map([1, 2, 3], x -> x * 2) == [2, 4, 6]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn filter_keeps_elements_satisfying_the_predicate() {
+        assert_eq!(
+            run_program("main() = filter([1, 2, 3, 4], x -> x > 2) == [3, 4]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn fold_reduces_with_an_accumulator() {
+        assert_eq!(
+            run_program("main() = fold([1, 2, 3, 4], 0, (acc, x) -> acc + x)"),
+            Value::Int(10)
+        );
+    }
+
+    #[test]
+    fn join_concatenates_displayed_elements_with_a_separator() {
+        assert_eq!(
+            run_program(r#"main() = join(["a", "b", "c"], ", ")"#),
+            Value::Str("a, b, c".into())
+        );
+        assert_eq!(
+            run_program(r#"main() = join([1, 2, 3], "-")"#),
+            Value::Str("1-2-3".into())
+        );
+    }
+
+    #[test]
+    fn map_over_a_non_list_is_an_error() {
+        assert_eq!(
+            run_program_err("main() = map(5, x -> x)"),
+            "map expects a List, got Int"
+        );
     }
 }

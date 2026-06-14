@@ -20,6 +20,9 @@ pub enum Value {
     /// A tuple — the anonymous product `(a, b, …)`. The empty tuple `()` is
     /// `Unit`, not a zero-element `Tuple`. `Rc<[Value]>` for cheap clones.
     Tuple(Rc<[Value]>),
+    /// An eager, finite, immutable list `[a, b, c]`. `Rc<[Value]>` for cheap
+    /// clones; combinators produce fresh lists rather than mutating.
+    List(Rc<[Value]>),
     /// The unit value `()` — what a block with no trailing expression, and an
     /// expression evaluated only for effect, produce.
     Unit,
@@ -32,6 +35,19 @@ pub enum Value {
     Constructor(Rc<Constructor>),
     /// A constructed `prod`/variant instance.
     Data(Rc<DataValue>),
+    /// A built-in (native) function — the stdlib combinators (`map`, `filter`,
+    /// …) implemented in Rust rather than in Stitch.
+    Native(NativeFn),
+}
+
+/// A built-in function: its name, arity, and the Rust implementation. The
+/// implementation receives already-evaluated arguments and may call back into
+/// the interpreter (e.g. `map` applies its function argument to each element).
+#[derive(Clone, Copy)]
+pub struct NativeFn {
+    pub name: &'static str,
+    pub arity: usize,
+    pub func: fn(&[Value]) -> Result<Value, RuntimeError>,
 }
 
 /// A constructor: which type/variant it builds and the names of its fields (in
@@ -86,9 +102,18 @@ impl Value {
                     .join(", ");
                 format!("({parts})")
             }
+            Value::List(elements) => {
+                let parts = elements
+                    .iter()
+                    .map(Value::display)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{parts}]")
+            }
             Value::Unit => "()".to_string(),
             Value::Closure(_) => "<function>".to_string(),
             Value::Constructor(_) => "<constructor>".to_string(),
+            Value::Native(n) => format!("<builtin {}>", n.name),
             Value::Data(d) if d.fields.is_empty() => d.variant.clone(),
             Value::Data(d) => {
                 let fields = d
@@ -113,8 +138,9 @@ impl Value {
             Value::Bool(_) => "Bool",
             Value::Str(_) => "Str",
             Value::Tuple(_) => "Tuple",
+            Value::List(_) => "List",
             Value::Unit => "Unit",
-            Value::Closure(_) | Value::Constructor(_) => "Function",
+            Value::Closure(_) | Value::Constructor(_) | Value::Native(_) => "Function",
             Value::Data(_) => "a record",
         }
     }
@@ -128,10 +154,12 @@ impl fmt::Debug for Value {
             Value::Bool(b) => write!(f, "Bool({b})"),
             Value::Str(s) => write!(f, "Str({s:?})"),
             Value::Tuple(elements) => write!(f, "Tuple{elements:?}"),
+            Value::List(elements) => write!(f, "List{elements:?}"),
             Value::Unit => write!(f, "Unit"),
             Value::Closure(c) => write!(f, "Closure/{}", c.params.len()),
             Value::Constructor(c) => write!(f, "Constructor({})", c.variant),
             Value::Data(d) => write!(f, "{}{:?}", d.variant, d.fields),
+            Value::Native(n) => write!(f, "Native({})", n.name),
         }
     }
 }
@@ -146,10 +174,11 @@ impl PartialEq for Value {
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::Tuple(a), Value::Tuple(b)) => a == b,
+            (Value::Tuple(a), Value::Tuple(b)) | (Value::List(a), Value::List(b)) => a == b,
             (Value::Unit, Value::Unit) => true,
             (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
             (Value::Constructor(a), Value::Constructor(b)) => Rc::ptr_eq(a, b),
+            (Value::Native(a), Value::Native(b)) => a.name == b.name,
             // Structural equality (decision D): same type, variant, and fields.
             (Value::Data(a), Value::Data(b)) => {
                 a.type_name == b.type_name && a.variant == b.variant && a.fields == b.fields
