@@ -1,0 +1,19 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"1 .. n + 1\")"
+---
+Binary {
+    op: Range,
+    left: Int(
+        1,
+    ),
+    right: Binary {
+        op: Add,
+        left: Var(
+            "n",
+        ),
+        right: Int(
+            1,
+        ),
+    },
+}

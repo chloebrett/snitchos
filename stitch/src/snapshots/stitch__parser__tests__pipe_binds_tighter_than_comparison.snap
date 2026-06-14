@@ -1,0 +1,19 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"x |> f == y\")"
+---
+Binary {
+    op: Eq,
+    left: Binary {
+        op: Pipe,
+        left: Var(
+            "x",
+        ),
+        right: Var(
+            "f",
+        ),
+    },
+    right: Var(
+        "y",
+    ),
+}

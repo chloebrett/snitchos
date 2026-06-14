@@ -1,0 +1,19 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"a and b or c\")"
+---
+Binary {
+    op: Or,
+    left: Binary {
+        op: And,
+        left: Var(
+            "a",
+        ),
+        right: Var(
+            "b",
+        ),
+    },
+    right: Var(
+        "c",
+    ),
+}

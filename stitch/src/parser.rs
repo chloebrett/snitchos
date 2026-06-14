@@ -22,6 +22,17 @@ fn infix_op(tok: &Token) -> Option<BinOp> {
         Token::Star => BinOp::Mul,
         Token::Slash => BinOp::Div,
         Token::Percent => BinOp::Rem,
+        Token::EqEq => BinOp::Eq,
+        Token::NotEq => BinOp::Ne,
+        Token::Lt => BinOp::Lt,
+        Token::Le => BinOp::Le,
+        Token::Gt => BinOp::Gt,
+        Token::Ge => BinOp::Ge,
+        Token::And => BinOp::And,
+        Token::Or => BinOp::Or,
+        Token::Pipe => BinOp::Pipe,
+        Token::DotDot => BinOp::Range,
+        Token::DotDotEq => BinOp::RangeIncl,
         _ => return None,
     })
 }
@@ -30,6 +41,11 @@ fn infix_op(tok: &Token) -> Option<BinOp> {
 /// left < right gives left-associativity.
 fn binding_power(op: BinOp) -> (u8, u8) {
     match op {
+        BinOp::Or => (1, 2),
+        BinOp::And => (3, 4),
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => (5, 6),
+        BinOp::Pipe => (7, 8),
+        BinOp::Range | BinOp::RangeIncl => (9, 10),
         BinOp::Add | BinOp::Sub => (11, 12),
         BinOp::Mul | BinOp::Div | BinOp::Rem => (13, 14),
     }
@@ -137,5 +153,35 @@ mod tests {
     #[test]
     fn parentheses_override_precedence() {
         insta::assert_debug_snapshot!(parse("(1 + 2) * 3"));
+    }
+
+    #[test]
+    fn parses_comparison() {
+        insta::assert_debug_snapshot!(parse("1 < 2"));
+    }
+
+    #[test]
+    fn addition_binds_tighter_than_comparison() {
+        insta::assert_debug_snapshot!(parse("1 + 2 < 3"));
+    }
+
+    #[test]
+    fn and_binds_tighter_than_or() {
+        insta::assert_debug_snapshot!(parse("a and b or c"));
+    }
+
+    #[test]
+    fn arithmetic_binds_tighter_than_pipe() {
+        insta::assert_debug_snapshot!(parse("a + b |> f"));
+    }
+
+    #[test]
+    fn pipe_binds_tighter_than_comparison() {
+        insta::assert_debug_snapshot!(parse("x |> f == y"));
+    }
+
+    #[test]
+    fn addition_binds_tighter_than_range() {
+        insta::assert_debug_snapshot!(parse("1 .. n + 1"));
     }
 }

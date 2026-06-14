@@ -16,7 +16,7 @@ pub enum Expr {
     },
 }
 
-/// Infix binary operators. Grows as more of the §2 precedence table lands.
+/// Infix binary operators.
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum BinOp {
     Add,
@@ -24,4 +24,15 @@ pub enum BinOp {
     Mul,
     Div,
     Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+    Pipe,      // |>
+    Range,     // ..
+    RangeIncl, // ..=
 }
