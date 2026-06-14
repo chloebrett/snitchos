@@ -14,6 +14,40 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    /// A prefix unary operator application.
+    Unary {
+        op: UnOp,
+        operand: Box<Expr>,
+    },
+    /// A function/constructor call: `callee(args…)`.
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    /// Field access: `object.name`.
+    Field {
+        object: Box<Expr>,
+        name: String,
+    },
+    /// Safe-navigation field access: `object?.name`.
+    SafeField {
+        object: Box<Expr>,
+        name: String,
+    },
+    /// The try operator: `expr?`.
+    Try(Box<Expr>),
+    /// Indexing: `object[index]`.
+    Index {
+        object: Box<Expr>,
+        index: Box<Expr>,
+    },
+}
+
+/// Prefix unary operators.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum UnOp {
+    Neg, // -
+    Not, // not
 }
 
 /// Infix binary operators.

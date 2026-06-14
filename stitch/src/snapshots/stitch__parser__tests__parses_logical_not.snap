@@ -1,0 +1,10 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"not a\")"
+---
+Unary {
+    op: Not,
+    operand: Var(
+        "a",
+    ),
+}

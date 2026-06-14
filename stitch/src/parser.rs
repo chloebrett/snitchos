@@ -1,7 +1,7 @@
 //! Parser: tokens → AST. A Pratt parser, grown per the §2 precedence table
 //! (`plans/lang/01-grammar-and-precedence.md`). For now: a lone int literal.
 
-use crate::ast::{BinOp, Expr};
+use crate::ast::{BinOp, Expr, UnOp};
 use crate::lexer::{Token, lex};
 
 /// Parse Stitch source into an expression.
@@ -77,10 +77,11 @@ impl Parser {
         &self.tokens[i]
     }
 
-    /// Pratt precedence climbing: parse an expression whose operators bind at
-    /// least as tightly as `min_bp`.
+    /// Pratt precedence climbing: parse an expression whose infix operators
+    /// bind at least as tightly as `min_bp`. Layers (tightest → loosest):
+    /// `parse_atom` < `parse_prefix` < this.
     fn parse_expr(&mut self, min_bp: u8) -> Expr {
-        let mut left = self.parse_primary();
+        let mut left = self.parse_prefix();
         while let Some(op) = infix_op(self.peek()) {
             let (l_bp, r_bp) = binding_power(op);
             if l_bp < min_bp {
@@ -97,7 +98,100 @@ impl Parser {
         left
     }
 
-    fn parse_primary(&mut self) -> Expr {
+    /// Prefix unary operators (`-`, `not`), binding tighter than any infix.
+    fn parse_prefix(&mut self) -> Expr {
+        let op = match self.peek() {
+            Token::Minus => UnOp::Neg,
+            Token::Not => UnOp::Not,
+            _ => return self.parse_postfix(),
+        };
+        self.bump(); // consume the operator
+        Expr::Unary {
+            op,
+            operand: Box::new(self.parse_prefix()),
+        }
+    }
+
+    /// Postfix operators (call, field, `?.`, `?`, index) — the tightest layer,
+    /// left-associative so `a.b.c` and `f(x)(y)` chain.
+    fn parse_postfix(&mut self) -> Expr {
+        let mut expr = self.parse_atom();
+        loop {
+            // Clone the lookahead token so its borrow ends before we recurse.
+            match self.peek().clone() {
+                Token::LParen => expr = self.parse_call(expr),
+                Token::Dot => {
+                    self.bump();
+                    expr = Expr::Field {
+                        object: Box::new(expr),
+                        name: self.expect_ident("field name after '.'"),
+                    };
+                }
+                Token::QuestionDot => {
+                    self.bump();
+                    expr = Expr::SafeField {
+                        object: Box::new(expr),
+                        name: self.expect_ident("field name after '?.'"),
+                    };
+                }
+                Token::Question => {
+                    self.bump();
+                    expr = Expr::Try(Box::new(expr));
+                }
+                Token::LBracket => {
+                    self.bump();
+                    let index = self.parse_expr(0);
+                    match self.bump() {
+                        Token::RBracket => {}
+                        other => panic!("expected ']', found {other:?}"),
+                    }
+                    expr = Expr::Index {
+                        object: Box::new(expr),
+                        index: Box::new(index),
+                    };
+                }
+                _ => break,
+            }
+        }
+        expr
+    }
+
+    /// Parse a call's `(args…)`; the callee is already parsed.
+    fn parse_call(&mut self, callee: Expr) -> Expr {
+        self.bump(); // '('
+        let mut args = Vec::new();
+        if !matches!(self.peek(), Token::RParen) {
+            loop {
+                args.push(self.parse_expr(0));
+                if matches!(self.peek(), Token::Comma) {
+                    self.bump();
+                    if matches!(self.peek(), Token::RParen) {
+                        break; // trailing comma
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        match self.bump() {
+            Token::RParen => {}
+            other => panic!("expected ')' in call arguments, found {other:?}"),
+        }
+        Expr::Call {
+            callee: Box::new(callee),
+            args,
+        }
+    }
+
+    /// Consume an identifier token, returning its name, or panic with context.
+    fn expect_ident(&mut self, what: &str) -> String {
+        match self.bump().clone() {
+            Token::Ident(name) => name,
+            other => panic!("expected {what}, found {other:?}"),
+        }
+    }
+
+    fn parse_atom(&mut self) -> Expr {
         // Clone the leading token so its borrow ends before we recurse.
         match self.bump().clone() {
             Token::Int(n) => Expr::Int(n),
@@ -183,5 +277,65 @@ mod tests {
     #[test]
     fn addition_binds_tighter_than_range() {
         insta::assert_debug_snapshot!(parse("1 .. n + 1"));
+    }
+
+    #[test]
+    fn parses_negation() {
+        insta::assert_debug_snapshot!(parse("-x"));
+    }
+
+    #[test]
+    fn parses_logical_not() {
+        insta::assert_debug_snapshot!(parse("not a"));
+    }
+
+    #[test]
+    fn unary_binds_tighter_than_multiplication() {
+        insta::assert_debug_snapshot!(parse("-x * y"));
+    }
+
+    #[test]
+    fn not_binds_tighter_than_and() {
+        insta::assert_debug_snapshot!(parse("not a and b"));
+    }
+
+    #[test]
+    fn parses_call_with_args() {
+        insta::assert_debug_snapshot!(parse("f(x, y)"));
+    }
+
+    #[test]
+    fn parses_empty_call() {
+        insta::assert_debug_snapshot!(parse("f()"));
+    }
+
+    #[test]
+    fn chains_field_access() {
+        insta::assert_debug_snapshot!(parse("a.b.c"));
+    }
+
+    #[test]
+    fn parses_try() {
+        insta::assert_debug_snapshot!(parse("x?"));
+    }
+
+    #[test]
+    fn parses_safe_navigation() {
+        insta::assert_debug_snapshot!(parse("a?.b"));
+    }
+
+    #[test]
+    fn parses_index() {
+        insta::assert_debug_snapshot!(parse("xs[0]"));
+    }
+
+    #[test]
+    fn postfix_binds_tighter_than_unary() {
+        insta::assert_debug_snapshot!(parse("-f(x)"));
+    }
+
+    #[test]
+    fn pipe_with_call() {
+        insta::assert_debug_snapshot!(parse("readings |> filter(p)"));
     }
 }

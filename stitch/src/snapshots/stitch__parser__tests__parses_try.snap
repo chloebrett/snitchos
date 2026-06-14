@@ -1,0 +1,9 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"x?\")"
+---
+Try(
+    Var(
+        "x",
+    ),
+)

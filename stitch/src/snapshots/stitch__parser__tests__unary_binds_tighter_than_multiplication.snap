@@ -1,0 +1,16 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"-x * y\")"
+---
+Binary {
+    op: Mul,
+    left: Unary {
+        op: Neg,
+        operand: Var(
+            "x",
+        ),
+    },
+    right: Var(
+        "y",
+    ),
+}

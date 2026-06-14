@@ -1,0 +1,10 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"a?.b\")"
+---
+SafeField {
+    object: Var(
+        "a",
+    ),
+    name: "b",
+}

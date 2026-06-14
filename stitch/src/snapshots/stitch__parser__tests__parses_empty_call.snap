@@ -1,0 +1,10 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"f()\")"
+---
+Call {
+    callee: Var(
+        "f",
+    ),
+    args: [],
+}

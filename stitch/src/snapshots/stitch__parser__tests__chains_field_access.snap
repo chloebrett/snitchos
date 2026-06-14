@@ -1,0 +1,13 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"a.b.c\")"
+---
+Field {
+    object: Field {
+        object: Var(
+            "a",
+        ),
+        name: "b",
+    },
+    name: "c",
+}

@@ -1,0 +1,12 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"xs[0]\")"
+---
+Index {
+    object: Var(
+        "xs",
+    ),
+    index: Int(
+        0,
+    ),
+}

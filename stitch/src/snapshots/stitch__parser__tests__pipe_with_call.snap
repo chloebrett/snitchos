@@ -1,0 +1,20 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"readings |> filter(p)\")"
+---
+Binary {
+    op: Pipe,
+    left: Var(
+        "readings",
+    ),
+    right: Call {
+        callee: Var(
+            "filter",
+        ),
+        args: [
+            Var(
+                "p",
+            ),
+        ],
+    },
+}

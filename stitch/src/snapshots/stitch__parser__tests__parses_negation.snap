@@ -1,0 +1,10 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"-x\")"
+---
+Unary {
+    op: Neg,
+    operand: Var(
+        "x",
+    ),
+}

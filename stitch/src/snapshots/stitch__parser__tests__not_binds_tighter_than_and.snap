@@ -1,0 +1,16 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"not a and b\")"
+---
+Binary {
+    op: And,
+    left: Unary {
+        op: Not,
+        operand: Var(
+            "a",
+        ),
+    },
+    right: Var(
+        "b",
+    ),
+}

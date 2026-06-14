@@ -1,0 +1,17 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"f(x, y)\")"
+---
+Call {
+    callee: Var(
+        "f",
+    ),
+    args: [
+        Var(
+            "x",
+        ),
+        Var(
+            "y",
+        ),
+    ],
+}
