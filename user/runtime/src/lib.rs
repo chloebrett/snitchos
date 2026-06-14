@@ -488,13 +488,12 @@ impl Endpoint {
 
     /// Fused reply-then-receive — the RPC server hot path. Answers the previous
     /// request (`prev = Some((reply_handle, response))`; `None` on the first
-    /// iteration) and blocks for the next request in one syscall, returning it
-    /// with its reply handle. The canonical loop:
-    /// `let mut prev = None; loop { let (req, h) = ep.reply_recv(prev)?; prev = Some((h, handle(req))); }`.
-    pub fn reply_recv(
-        self,
-        prev: Option<(usize, [u64; MSG_WORDS])>,
-    ) -> Result<([u64; MSG_WORDS], usize), Denied> {
+    /// iteration) and blocks for the next request in one syscall, returning it as
+    /// a [`Received`] — message, reply handle, **and the sender cap's badge**
+    /// (the receive half is exactly [`receive_with_reply`](Self::receive_with_reply),
+    /// so it carries the same demux value). The canonical loop:
+    /// `let mut prev = None; loop { let r = ep.reply_recv(prev)?; prev = r.reply.map(|h| (h, handle(r))); }`.
+    pub fn reply_recv(self, prev: Option<(usize, [u64; MSG_WORDS])>) -> Result<Received, Denied> {
         let (prev_handle, resp) = prev.map_or((0, [0u64; MSG_WORDS]), |(h, r)| (h, r));
         let status: usize;
         let w0: u64;
@@ -502,9 +501,11 @@ impl Endpoint {
         let w2: u64;
         let w3: u64;
         let next_handle: usize;
+        let badge: u64;
         // SAFETY: `ecall`; a0=endpoint→status, a1..=a4=response→next request,
-        // a5=prev reply handle→next reply handle. The kernel replies the
-        // previous caller (if `prev_handle != 0`) then blocks receiving.
+        // a5=prev reply handle→next reply handle, a6→sender badge (0 = bare). The
+        // kernel replies the previous caller (if `prev_handle != 0`) then blocks
+        // receiving.
         unsafe {
             asm!(
                 "ecall",
@@ -515,9 +516,17 @@ impl Endpoint {
                 inlateout("a3") resp[2] => w2,
                 inlateout("a4") resp[3] => w3,
                 inlateout("a5") prev_handle => next_handle,
+                out("a6") badge,
             );
         }
-        if status == 0 { Ok(([w0, w1, w2, w3], next_handle)) } else { Err(Denied) }
+        if status != 0 {
+            return Err(Denied);
+        }
+        Ok(Received {
+            msg: [w0, w1, w2, w3],
+            reply: (next_handle != 0).then_some(next_handle),
+            badge,
+        })
     }
 }
 

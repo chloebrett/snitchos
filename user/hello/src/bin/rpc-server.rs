@@ -16,11 +16,12 @@ fn main() {
     // blocks for the next request.
     let mut prev: Option<(usize, [u64; 4])> = None;
     loop {
-        let (req, reply_handle) = match endpoint().reply_recv(prev) {
+        let r = match endpoint().reply_recv(prev) {
             Ok(next) => next,
             Err(_) => return,
         };
         let _span = tracer().span("rpc.handle");
-        prev = Some((reply_handle, [req[0] * 2, 0, 0, 0]));
+        // Reply only to a `call` (reply handle present); a one-way `send` has none.
+        prev = r.reply.map(|h| (h, [r.msg[0] * 2, 0, 0, 0]));
     }
 }
