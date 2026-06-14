@@ -1,0 +1,22 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"prod Wrap(x: (Int))\")"
+---
+[
+    Prod {
+        name: "Wrap",
+        generics: [],
+        fields: [
+            Field {
+                name: Some(
+                    "x",
+                ),
+                mutable: false,
+                ty: Name {
+                    name: "Int",
+                    args: [],
+                },
+            },
+        ],
+    },
+]

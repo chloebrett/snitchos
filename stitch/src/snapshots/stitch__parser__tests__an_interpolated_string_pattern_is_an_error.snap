@@ -1,0 +1,9 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(r#\"match s { \"{x}\" => 1  _ => 0 }\"#)"
+---
+Err(
+    ParseError {
+        message: "string interpolation isn't allowed in a pattern — match on a plain string literal",
+    },
+)

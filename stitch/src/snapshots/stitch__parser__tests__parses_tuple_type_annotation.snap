@@ -1,0 +1,30 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"prod Pair(items: (Int, Str))\")"
+---
+[
+    Prod {
+        name: "Pair",
+        generics: [],
+        fields: [
+            Field {
+                name: Some(
+                    "items",
+                ),
+                mutable: false,
+                ty: Tuple(
+                    [
+                        Name {
+                            name: "Int",
+                            args: [],
+                        },
+                        Name {
+                            name: "Str",
+                            args: [],
+                        },
+                    ],
+                ),
+            },
+        ],
+    },
+]

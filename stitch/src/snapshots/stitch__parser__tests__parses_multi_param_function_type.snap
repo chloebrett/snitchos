@@ -1,0 +1,36 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"prod Handler(cb: (Int, Str) -> Bool)\")"
+---
+[
+    Prod {
+        name: "Handler",
+        generics: [],
+        fields: [
+            Field {
+                name: Some(
+                    "cb",
+                ),
+                mutable: false,
+                ty: Func {
+                    param: Tuple(
+                        [
+                            Name {
+                                name: "Int",
+                                args: [],
+                            },
+                            Name {
+                                name: "Str",
+                                args: [],
+                            },
+                        ],
+                    ),
+                    ret: Name {
+                        name: "Bool",
+                        args: [],
+                    },
+                },
+            },
+        ],
+    },
+]

@@ -125,7 +125,12 @@ fn parse_str_segments(parts: Vec<StrPart>) -> Result<Vec<StrSegment>, ParseError
         .into_iter()
         .map(|part| match part {
             StrPart::Lit(text) => Ok(StrSegment::Lit(text)),
-            StrPart::Expr(raw) => Ok(StrSegment::Interp(Box::new(parse(&raw)?))),
+            StrPart::Expr(raw) => {
+                let inner = parse(&raw).map_err(|e| {
+                    ParseError::new(format!("in string interpolation `{{{raw}}}`: {}", e.message))
+                })?;
+                Ok(StrSegment::Interp(Box::new(inner)))
+            }
         })
         .collect()
 }
@@ -529,6 +534,18 @@ impl Parser {
 
     /// Parse a `let` binding statement: `let mut? name = value`.
     fn parse_let(&mut self) -> Result<Stmt, ParseError> {
+        let (name, mutable, value) = self.parse_binding()?;
+        Ok(Stmt::Let {
+            name,
+            mutable,
+            value,
+        })
+    }
+
+    /// Parse the shared core of a binding — `let mut? name = value` — used by
+    /// both block-level `let` statements and top-level `let` constants. The
+    /// `let` keyword is consumed here.
+    fn parse_binding(&mut self) -> Result<(String, bool, Expr), ParseError> {
         self.bump(); // 'let'
         let mutable = matches!(self.peek(), Token::Mut);
         if mutable {
@@ -537,11 +554,7 @@ impl Parser {
         let name = self.expect_ident("binding name")?;
         self.expect(&Token::Eq, "'=' in let binding")?;
         let value = self.parse_expr(0)?;
-        Ok(Stmt::Let {
-            name,
-            mutable,
-            value,
-        })
+        Ok((name, mutable, value))
     }
 
     /// Parse one top-level declaration.
@@ -551,6 +564,14 @@ impl Parser {
             Token::Sum => self.parse_sum(),
             Token::Contract => self.parse_contract(),
             Token::On => self.parse_on(),
+            Token::Let => {
+                let (name, mutable, value) = self.parse_binding()?;
+                Ok(Item::Const {
+                    name,
+                    mutable,
+                    value,
+                })
+            }
             Token::Ident(_) => self.parse_func(),
             other => Err(ParseError::new(format!(
                 "expected a declaration, found {other:?}"
@@ -811,10 +832,11 @@ impl Parser {
         })
     }
 
-    /// A type: a name with optional `<…>` args, then an optional `-> ret`
-    /// (right-associative). Tuple / multi-param function types are deferred.
+    /// A type: an atom (named type or parenthesized tuple/grouping), then an
+    /// optional `-> ret` (right-associative). A `(A, B) -> C` multi-param
+    /// function type is a tuple-typed param.
     fn parse_type(&mut self) -> Result<Type, ParseError> {
-        let atom = self.parse_type_name()?;
+        let atom = self.parse_type_atom()?;
         if matches!(self.peek(), Token::Arrow) {
             self.bump();
             Ok(Type::Func {
@@ -824,6 +846,33 @@ impl Parser {
         } else {
             Ok(atom)
         }
+    }
+
+    /// A type atom: a parenthesized form (`()` unit, `(A)` grouping, `(A, B)`
+    /// tuple) or a named type with optional `<…>` arguments.
+    fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
+        if !matches!(self.peek(), Token::LParen) {
+            return self.parse_type_name();
+        }
+        self.bump(); // '('
+        if matches!(self.peek(), Token::RParen) {
+            self.bump();
+            return Ok(Type::Tuple(Vec::new()));
+        }
+        let mut elems = vec![self.parse_type()?];
+        while matches!(self.peek(), Token::Comma) {
+            self.bump();
+            if matches!(self.peek(), Token::RParen) {
+                break; // trailing comma
+            }
+            elems.push(self.parse_type()?);
+        }
+        self.expect(&Token::RParen, "')' in type")?;
+        Ok(if elems.len() == 1 {
+            elems.pop().expect("len checked == 1") // `(A)` is grouping, not a tuple
+        } else {
+            Type::Tuple(elems)
+        })
     }
 
     fn parse_type_name(&mut self) -> Result<Type, ParseError> {
@@ -846,9 +895,7 @@ impl Parser {
     /// Parse `match subject { arm* }`. The `match` keyword is already consumed.
     fn parse_match(&mut self) -> Result<Expr, ParseError> {
         if matches!(self.peek(), Token::LBrace) {
-            return Err(ParseError::new(
-                "subjectless `match { … }` (condition table) is not yet supported",
-            ));
+            return self.parse_subjectless_match();
         }
         let subject = self.parse_expr(0)?;
         self.expect(&Token::LBrace, "'{' after match subject")?;
@@ -864,6 +911,55 @@ impl Parser {
             subject: Box::new(subject),
             arms,
         })
+    }
+
+    /// Parse the subjectless `match { cond => body … _ => default }` condition
+    /// table and desugar it into nested `cond => then | els` conditionals
+    /// (`Expr::If`) — it's the N-ary form of the binary conditional. Each arm is
+    /// `condition => body`; the table must end in a `_ => …` catch-all, which
+    /// becomes the innermost else. The `{` is the current token.
+    fn parse_subjectless_match(&mut self) -> Result<Expr, ParseError> {
+        self.bump(); // '{'
+        let mut arms = Vec::new();
+        let default = loop {
+            if matches!(self.peek(), Token::RBrace) {
+                return Err(ParseError::new(
+                    "a subjectless `match` must end in a `_ => …` catch-all",
+                ));
+            }
+            if matches!(self.peek(), Token::Eof) {
+                return Err(ParseError::new("unterminated match: expected '}'"));
+            }
+            if self.at_catch_all() {
+                self.bump(); // '_'
+                self.bump(); // '=>'
+                break self.parse_expr(0)?;
+            }
+            // min_bp = 1 admits every binary operator but leaves the arm's `=>`
+            // for us (the same trick `parse_match_arm` uses for guards).
+            let cond = self.parse_expr(1)?;
+            self.expect(&Token::FatArrow, "'=>' in match arm")?;
+            arms.push((cond, self.parse_expr(0)?));
+        };
+        if !matches!(self.peek(), Token::RBrace) {
+            return Err(ParseError::new(
+                "a `_ => …` catch-all must be the last arm of a subjectless match",
+            ));
+        }
+        self.bump(); // '}'
+        Ok(arms.into_iter().rev().fold(default, |els, (cond, then)| {
+            Expr::If {
+                cond: Box::new(cond),
+                then: Box::new(then),
+                els: Box::new(els),
+            }
+        }))
+    }
+
+    /// Is the parser at a `_ =>` subjectless catch-all arm?
+    fn at_catch_all(&self) -> bool {
+        matches!(self.peek(), Token::Ident(name) if name == "_")
+            && matches!(self.peek_at(1), Token::FatArrow)
     }
 
     /// Parse one arm: `pattern (if guard)? => body`. Arms are separated by
@@ -905,7 +1001,17 @@ impl Parser {
     fn parse_pattern_atom(&mut self) -> Result<Pattern, ParseError> {
         Ok(match self.bump().clone() {
             Token::Int(n) => Pattern::Int(n),
+            Token::Float(f) => Pattern::Float(f),
             Token::Bool(b) => Pattern::Bool(b),
+            Token::Str(parts) => match parts.as_slice() {
+                [StrPart::Lit(text)] => Pattern::Str(text.clone()),
+                [] => Pattern::Str(String::new()),
+                _ => {
+                    return Err(ParseError::new(
+                        "string interpolation isn't allowed in a pattern — match on a plain string literal",
+                    ));
+                }
+            },
             Token::Ident(name) if name == "_" => Pattern::Wildcard,
             Token::Ident(name) if starts_uppercase(&name) => {
                 let args = if matches!(self.peek(), Token::LParen) {
@@ -1532,5 +1638,80 @@ mod tests {
     #[test]
     fn a_stray_semicolon_is_a_helpful_error() {
         insta::assert_debug_snapshot!(parse("1; 2"));
+    }
+
+    #[test]
+    fn an_error_inside_interpolation_names_its_context() {
+        insta::assert_debug_snapshot!(parse(r#""value is {1 +}""#));
+    }
+
+    #[test]
+    fn parses_float_literal_pattern() {
+        insta::assert_debug_snapshot!(p(r#"match x { 3.14 => "pi"  _ => "other" }"#));
+    }
+
+    #[test]
+    fn parses_string_literal_pattern() {
+        insta::assert_debug_snapshot!(p(r#"match s { "hi" => 1  _ => 0 }"#));
+    }
+
+    #[test]
+    fn an_interpolated_string_pattern_is_an_error() {
+        insta::assert_debug_snapshot!(parse(r#"match s { "{x}" => 1  _ => 0 }"#));
+    }
+
+    #[test]
+    fn parses_top_level_constant() {
+        insta::assert_debug_snapshot!(prog("let pi = 3.14"));
+    }
+
+    #[test]
+    fn parses_top_level_mut_constant() {
+        insta::assert_debug_snapshot!(prog("let mut counter = 0"));
+    }
+
+    #[test]
+    fn parses_constant_among_declarations() {
+        insta::assert_debug_snapshot!(prog("let limit = 100  area(p) = p.x * limit"));
+    }
+
+    #[test]
+    fn parses_subjectless_match_as_nested_conditionals() {
+        insta::assert_debug_snapshot!(p(r#"match { n > 10 => "big"  n > 0 => "small"  _ => "neg" }"#));
+    }
+
+    #[test]
+    fn subjectless_match_with_only_catch_all_is_the_default() {
+        insta::assert_debug_snapshot!(p("match { _ => 0 }"));
+    }
+
+    #[test]
+    fn subjectless_match_requires_a_catch_all() {
+        insta::assert_debug_snapshot!(parse(r#"match { x > 0 => "pos" }"#));
+    }
+
+    #[test]
+    fn subjectless_match_rejects_arms_after_catch_all() {
+        insta::assert_debug_snapshot!(parse(r#"match { _ => 0  x > 0 => 1 }"#));
+    }
+
+    #[test]
+    fn parses_tuple_type_annotation() {
+        insta::assert_debug_snapshot!(prog("prod Pair(items: (Int, Str))"));
+    }
+
+    #[test]
+    fn parses_multi_param_function_type() {
+        insta::assert_debug_snapshot!(prog("prod Handler(cb: (Int, Str) -> Bool)"));
+    }
+
+    #[test]
+    fn parses_thunk_type() {
+        insta::assert_debug_snapshot!(prog("prod Lazy(run: () -> Int)"));
+    }
+
+    #[test]
+    fn parenthesized_type_is_not_a_tuple() {
+        insta::assert_debug_snapshot!(prog("prod Wrap(x: (Int))"));
     }
 }

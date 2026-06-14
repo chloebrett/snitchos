@@ -1,0 +1,13 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"let mut counter = 0\")"
+---
+[
+    Const {
+        name: "counter",
+        mutable: true,
+        value: Int(
+            0,
+        ),
+    },
+]

@@ -36,6 +36,13 @@ pub enum Item {
         contract: Option<Type>,
         methods: Vec<Method>,
     },
+    /// `let name = value` / `let mut name = value` at module scope — a top-level
+    /// constant. (Type annotations on bindings are deferred, as for `Stmt::Let`.)
+    Const {
+        name: String,
+        mutable: bool,
+        value: Expr,
+    },
 }
 
 /// A method, shared by `contract` signatures and (later) `on` blocks.
@@ -96,8 +103,11 @@ pub struct Variant {
 pub enum Type {
     /// `Int`, `List<Int>`, `Maybe<T>`, `Result<T, E>`.
     Name { name: String, args: Vec<Type> },
-    /// `A -> B` (right-associative). Multi-param/tuple types are deferred.
+    /// `A -> B` (right-associative). A multi-param function type `(A, B) -> C`
+    /// is `Func { param: Tuple([A, B]), ret: C }`.
     Func { param: Box<Type>, ret: Box<Type> },
+    /// `(A, B, …)` — a tuple type. `()` is the unit type (empty tuple).
+    Tuple(Vec<Type>),
 }
 
 /// An expression.
@@ -198,7 +208,11 @@ pub enum Pattern {
     /// `_` — matches anything, binds nothing.
     Wildcard,
     Int(i64),
+    Float(f64),
     Bool(bool),
+    /// A plain string literal pattern. Interpolation is rejected at parse time
+    /// — a pattern matches a fixed value, so `"{x}"` has no meaning here.
+    Str(String),
     /// A lowercase name — matches anything and binds it.
     Binding(String),
     /// `Name` or `Name(sub, …)` — a sum variant / product destructure.

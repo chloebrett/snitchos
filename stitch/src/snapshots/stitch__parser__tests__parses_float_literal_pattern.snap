@@ -1,0 +1,35 @@
+---
+source: stitch/src/parser.rs
+expression: "p(r#\"match x { 3.14 => \"pi\"  _ => \"other\" }\"#)"
+---
+Match {
+    subject: Var(
+        "x",
+    ),
+    arms: [
+        MatchArm {
+            pattern: Float(
+                3.14,
+            ),
+            guard: None,
+            body: Str(
+                [
+                    Lit(
+                        "pi",
+                    ),
+                ],
+            ),
+        },
+        MatchArm {
+            pattern: Wildcard,
+            guard: None,
+            body: Str(
+                [
+                    Lit(
+                        "other",
+                    ),
+                ],
+            ),
+        },
+    ],
+}

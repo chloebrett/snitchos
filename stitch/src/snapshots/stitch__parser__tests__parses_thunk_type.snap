@@ -1,0 +1,27 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"prod Lazy(run: () -> Int)\")"
+---
+[
+    Prod {
+        name: "Lazy",
+        generics: [],
+        fields: [
+            Field {
+                name: Some(
+                    "run",
+                ),
+                mutable: false,
+                ty: Func {
+                    param: Tuple(
+                        [],
+                    ),
+                    ret: Name {
+                        name: "Int",
+                        args: [],
+                    },
+                },
+            },
+        ],
+    },
+]

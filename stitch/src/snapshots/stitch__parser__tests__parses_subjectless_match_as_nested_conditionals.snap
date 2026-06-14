@@ -1,0 +1,47 @@
+---
+source: stitch/src/parser.rs
+expression: "p(r#\"match { n > 10 => \"big\"  n > 0 => \"small\"  _ => \"neg\" }\"#)"
+---
+If {
+    cond: Binary {
+        op: Gt,
+        left: Var(
+            "n",
+        ),
+        right: Int(
+            10,
+        ),
+    },
+    then: Str(
+        [
+            Lit(
+                "big",
+            ),
+        ],
+    ),
+    els: If {
+        cond: Binary {
+            op: Gt,
+            left: Var(
+                "n",
+            ),
+            right: Int(
+                0,
+            ),
+        },
+        then: Str(
+            [
+                Lit(
+                    "small",
+                ),
+            ],
+        ),
+        els: Str(
+            [
+                Lit(
+                    "neg",
+                ),
+            ],
+        ),
+    },
+}

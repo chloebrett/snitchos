@@ -1,0 +1,35 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"let limit = 100  area(p) = p.x * limit\")"
+---
+[
+    Const {
+        name: "limit",
+        mutable: false,
+        value: Int(
+            100,
+        ),
+    },
+    Func {
+        name: "area",
+        params: [
+            Param {
+                name: "p",
+                ty: None,
+            },
+        ],
+        ret: None,
+        body: Binary {
+            op: Mul,
+            left: Field {
+                object: Var(
+                    "p",
+                ),
+                name: "x",
+            },
+            right: Var(
+                "limit",
+            ),
+        },
+    },
+]

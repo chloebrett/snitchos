@@ -1,0 +1,9 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(r#\"match { _ => 0  x > 0 => 1 }\"#)"
+---
+Err(
+    ParseError {
+        message: "a `_ => …` catch-all must be the last arm of a subjectless match",
+    },
+)

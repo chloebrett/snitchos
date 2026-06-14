@@ -1,0 +1,27 @@
+---
+source: stitch/src/parser.rs
+expression: "p(r#\"match s { \"hi\" => 1  _ => 0 }\"#)"
+---
+Match {
+    subject: Var(
+        "s",
+    ),
+    arms: [
+        MatchArm {
+            pattern: Str(
+                "hi",
+            ),
+            guard: None,
+            body: Int(
+                1,
+            ),
+        },
+        MatchArm {
+            pattern: Wildcard,
+            guard: None,
+            body: Int(
+                0,
+            ),
+        },
+    ],
+}

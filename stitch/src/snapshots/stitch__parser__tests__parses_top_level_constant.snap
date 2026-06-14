@@ -1,0 +1,13 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"let pi = 3.14\")"
+---
+[
+    Const {
+        name: "pi",
+        mutable: false,
+        value: Float(
+            3.14,
+        ),
+    },
+]
