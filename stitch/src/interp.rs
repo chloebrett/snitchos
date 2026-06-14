@@ -1,7 +1,9 @@
 //! Tree-walk interpreter: recursively evaluate an `Expr` to a `Value`. The AST
 //! *is* the program — no compilation. v0 is dynamically typed; see `value.rs`.
 
-use crate::ast::{BinOp, Expr};
+use std::cmp::Ordering;
+
+use crate::ast::{BinOp, Expr, UnOp};
 use crate::value::{RuntimeError, Value};
 
 /// Evaluate an expression to a value.
@@ -13,8 +15,42 @@ pub fn eval(expr: &Expr) -> Result<Value, RuntimeError> {
         Expr::Int(n) => Ok(Value::Int(*n)),
         Expr::Float(f) => Ok(Value::Float(*f)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
+        // `and`/`or` short-circuit, so they can't pre-evaluate both operands.
+        Expr::Binary { op: BinOp::And, left, right } => {
+            Ok(Value::Bool(as_bool(&eval(left)?, "`and`")? && as_bool(&eval(right)?, "`and`")?))
+        }
+        Expr::Binary { op: BinOp::Or, left, right } => {
+            Ok(Value::Bool(as_bool(&eval(left)?, "`or`")? || as_bool(&eval(right)?, "`or`")?))
+        }
         Expr::Binary { op, left, right } => eval_binary(*op, &eval(left)?, &eval(right)?),
+        Expr::Unary { op, operand } => eval_unary(*op, &eval(operand)?),
         _ => Err(RuntimeError::new("evaluation not yet implemented for this expression")),
+    }
+}
+
+/// Apply a prefix unary operator: `-` negates an Int or Float, `not` inverts a
+/// Bool. Any other operand kind is a type error.
+fn eval_unary(op: UnOp, operand: &Value) -> Result<Value, RuntimeError> {
+    match (op, operand) {
+        (UnOp::Neg, Value::Int(n)) => Ok(Value::Int(-n)),
+        (UnOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
+        (UnOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+        _ => Err(RuntimeError::new(format!(
+            "operator {op:?} cannot apply to {}",
+            operand.kind()
+        ))),
+    }
+}
+
+/// Require a value to be a `Bool`, returning a type error tagged with `context`
+/// (e.g. `` "`and`" ``) otherwise.
+fn as_bool(value: &Value, context: &str) -> Result<bool, RuntimeError> {
+    match value {
+        Value::Bool(b) => Ok(*b),
+        other => Err(RuntimeError::new(format!(
+            "{context} requires a Bool, got {}",
+            other.kind()
+        ))),
     }
 }
 
@@ -36,8 +72,41 @@ fn eval_binary(op: BinOp, left: &Value, right: &Value) -> Result<Value, RuntimeE
         (BinOp::Mul, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
         (BinOp::Div, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
         (BinOp::Rem, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
+        (BinOp::Eq | BinOp::Ne, _, _) => equality(op, left, right),
+        (BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, _, _) => ordering(op, left, right),
         _ => Err(type_mismatch(op, left, right)),
     }
+}
+
+/// `==` / `!=`: structural equality between same-kind operands. v0 is strict —
+/// comparing across kinds (`1 == 1.0`, `1 == true`) is a type error, not `false`.
+fn equality(op: BinOp, left: &Value, right: &Value) -> Result<Value, RuntimeError> {
+    let equal = match (left, right) {
+        (Value::Int(a), Value::Int(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) => a == b,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        _ => return Err(type_mismatch(op, left, right)),
+    };
+    Ok(Value::Bool(if op == BinOp::Ne { !equal } else { equal }))
+}
+
+/// `<` / `<=` / `>` / `>=`: ordering on two Ints or two Floats. A NaN operand
+/// makes every comparison `false` (IEEE 754); other kinds are a type error.
+fn ordering(op: BinOp, left: &Value, right: &Value) -> Result<Value, RuntimeError> {
+    let order = match (left, right) {
+        (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
+        _ => return Err(type_mismatch(op, left, right)),
+    };
+    let holds = order.is_some_and(|o| match op {
+        BinOp::Lt => o == Ordering::Less,
+        BinOp::Le => o != Ordering::Greater,
+        BinOp::Gt => o == Ordering::Greater,
+        BinOp::Ge => o != Ordering::Less,
+        // `ordering` is only dispatched for the four ordering operators.
+        _ => unreachable!("ordering called with non-ordering operator {op:?}"),
+    });
+    Ok(Value::Bool(holds))
 }
 
 /// Build the "operator can't apply to these kinds" error.
@@ -134,5 +203,97 @@ mod tests {
             run_err("1 + true"),
             "operator Add cannot apply to Int and Bool"
         );
+    }
+
+    #[test]
+    fn evaluates_integer_comparison() {
+        assert_eq!(run("1 == 1"), Value::Bool(true));
+        assert_eq!(run("1 != 2"), Value::Bool(true));
+        assert_eq!(run("1 < 2"), Value::Bool(true));
+        assert_eq!(run("2 <= 2"), Value::Bool(true));
+        assert_eq!(run("3 > 2"), Value::Bool(true));
+        assert_eq!(run("2 >= 3"), Value::Bool(false));
+    }
+
+    #[test]
+    fn evaluates_float_comparison() {
+        assert_eq!(run("1.5 < 2.5"), Value::Bool(true));
+        assert_eq!(run("2.5 == 2.5"), Value::Bool(true));
+        assert_eq!(run("2.5 >= 3.5"), Value::Bool(false));
+    }
+
+    #[test]
+    fn evaluates_bool_equality() {
+        assert_eq!(run("true == true"), Value::Bool(true));
+        assert_eq!(run("true != false"), Value::Bool(true));
+    }
+
+    #[test]
+    fn ordering_bools_is_a_type_error() {
+        assert_eq!(
+            run_err("true < false"),
+            "operator Lt cannot apply to Bool and Bool"
+        );
+    }
+
+    #[test]
+    fn comparing_across_kinds_is_a_type_error() {
+        assert_eq!(
+            run_err("1 == 1.0"),
+            "operator Eq cannot apply to Int and Float"
+        );
+        assert_eq!(
+            run_err("1 == true"),
+            "operator Eq cannot apply to Int and Bool"
+        );
+    }
+
+    #[test]
+    fn evaluates_boolean_and_or() {
+        assert_eq!(run("true and false"), Value::Bool(false));
+        assert_eq!(run("true and true"), Value::Bool(true));
+        assert_eq!(run("false or true"), Value::Bool(true));
+        assert_eq!(run("false or false"), Value::Bool(false));
+    }
+
+    #[test]
+    fn and_or_short_circuit_their_right_operand() {
+        // `1 + true` would be a type error if evaluated; short-circuit skips it.
+        assert_eq!(run("false and (1 + true)"), Value::Bool(false));
+        assert_eq!(run("true or (1 + true)"), Value::Bool(true));
+    }
+
+    #[test]
+    fn and_or_require_bool_operands() {
+        // Only operands that are actually evaluated get type-checked. The left
+        // always is; the right only when it isn't short-circuited away.
+        assert_eq!(run_err("1 and true"), "`and` requires a Bool, got Int");
+        assert_eq!(run_err("true and 2"), "`and` requires a Bool, got Int");
+        assert_eq!(run_err("false or 2"), "`or` requires a Bool, got Int");
+    }
+
+    #[test]
+    fn a_short_circuited_operand_is_not_type_checked() {
+        // `2` is never evaluated, so its non-Bool type is not an error in v0.
+        assert_eq!(run("true or 2"), Value::Bool(true));
+        assert_eq!(run("false and 2"), Value::Bool(false));
+    }
+
+    #[test]
+    fn evaluates_logical_not() {
+        assert_eq!(run("not true"), Value::Bool(false));
+        assert_eq!(run("not false"), Value::Bool(true));
+    }
+
+    #[test]
+    fn evaluates_numeric_negation() {
+        assert_eq!(run("-5"), Value::Int(-5));
+        assert_eq!(run("-2.5"), Value::Float(-2.5));
+    }
+
+    #[test]
+    fn unary_operators_check_their_operand_kind() {
+        assert_eq!(run_err("not 1"), "operator Not cannot apply to Int");
+        assert_eq!(run_err("-true"), "operator Neg cannot apply to Bool");
     }
 }
