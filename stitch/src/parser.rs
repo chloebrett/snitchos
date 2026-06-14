@@ -1,5 +1,7 @@
-//! Parser: tokens → AST. A Pratt parser, grown per the §2 precedence table
-//! (`plans/lang/01-grammar-and-precedence.md`). For now: a lone int literal.
+//! Parser: tokens → AST. A Pratt parser over the §2 precedence table
+//! (`plans/lang/01-grammar-and-precedence.md`). Expression grammar so far:
+//! literals, variables, unary/binary operators, grouping, and the postfix
+//! layer (calls, field access, `?.`, `?`, indexing).
 
 use crate::ast::{BinOp, Expr, UnOp};
 use crate::lexer::{Token, lex};
@@ -141,10 +143,7 @@ impl Parser {
                 Token::LBracket => {
                     self.bump();
                     let index = self.parse_expr(0);
-                    match self.bump() {
-                        Token::RBracket => {}
-                        other => panic!("expected ']', found {other:?}"),
-                    }
+                    self.expect(&Token::RBracket, "']'");
                     expr = Expr::Index {
                         object: Box::new(expr),
                         index: Box::new(index),
@@ -173,14 +172,18 @@ impl Parser {
                 }
             }
         }
-        match self.bump() {
-            Token::RParen => {}
-            other => panic!("expected ')' in call arguments, found {other:?}"),
-        }
+        self.expect(&Token::RParen, "')' in call arguments");
         Expr::Call {
             callee: Box::new(callee),
             args,
         }
+    }
+
+    /// Consume the next token, requiring it to equal `want`, or panic with
+    /// context. (The single seam where parse errors will become `Result`.)
+    fn expect(&mut self, want: &Token, what: &str) {
+        let got = self.bump();
+        assert!(got == want, "expected {what}, found {got:?}");
     }
 
     /// Consume an identifier token, returning its name, or panic with context.
@@ -200,10 +203,8 @@ impl Parser {
             Token::Ident(name) => Expr::Var(name),
             Token::LParen => {
                 let inner = self.parse_expr(0);
-                match self.bump() {
-                    Token::RParen => inner,
-                    other => panic!("expected ')', found {other:?}"),
-                }
+                self.expect(&Token::RParen, "')'");
+                inner
             }
             other => panic!("unexpected token: {other:?}"),
         }
