@@ -1,0 +1,32 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(r#\"contract Greet { hello() -> Str = \"hi\" }\"#)"
+---
+[
+    Contract {
+        name: "Greet",
+        generics: [],
+        methods: [
+            Method {
+                name: "hello",
+                modifier: Instance,
+                params: [],
+                ret: Some(
+                    Name {
+                        name: "Str",
+                        args: [],
+                    },
+                ),
+                body: Some(
+                    Str(
+                        [
+                            Lit(
+                                "hi",
+                            ),
+                        ],
+                    ),
+                ),
+            },
+        ],
+    },
+]

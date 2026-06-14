@@ -1,0 +1,26 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"contract Container<T> { get() -> T }\")"
+---
+[
+    Contract {
+        name: "Container",
+        generics: [
+            "T",
+        ],
+        methods: [
+            Method {
+                name: "get",
+                modifier: Instance,
+                params: [],
+                ret: Some(
+                    Name {
+                        name: "T",
+                        args: [],
+                    },
+                ),
+                body: None,
+            },
+        ],
+    },
+]

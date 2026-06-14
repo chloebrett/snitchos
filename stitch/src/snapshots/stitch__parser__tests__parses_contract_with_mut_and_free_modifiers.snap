@@ -1,0 +1,31 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"contract Counter { mut bump()  free zero() -> Counter }\")"
+---
+[
+    Contract {
+        name: "Counter",
+        generics: [],
+        methods: [
+            Method {
+                name: "bump",
+                modifier: Mut,
+                params: [],
+                ret: None,
+                body: None,
+            },
+            Method {
+                name: "zero",
+                modifier: Free,
+                params: [],
+                ret: Some(
+                    Name {
+                        name: "Counter",
+                        args: [],
+                    },
+                ),
+                body: None,
+            },
+        ],
+    },
+]

@@ -23,6 +23,35 @@ pub enum Item {
         ret: Option<Type>,
         body: Expr,
     },
+    /// `contract Name<generics> { method-signatures }` — a behavior contract.
+    Contract {
+        name: String,
+        generics: Vec<String>,
+        methods: Vec<Method>,
+    },
+}
+
+/// A method, shared by `contract` signatures and (later) `on` blocks.
+/// `body` is `None` for an abstract contract signature, `Some` for a default
+/// or concrete method.
+#[derive(Debug, PartialEq)]
+pub struct Method {
+    pub name: String,
+    pub modifier: MethodModifier,
+    pub params: Vec<Param>,
+    pub ret: Option<Type>,
+    pub body: Option<Expr>,
+}
+
+/// A method's relationship to the receiver `@`.
+#[derive(Debug, PartialEq)]
+pub enum MethodModifier {
+    /// Bare: an instance method with an immutable `@`.
+    Instance,
+    /// `mut`: may mutate `@`.
+    Mut,
+    /// `free`: no receiver (associated function).
+    Free,
 }
 
 /// A function parameter: `name` or `name: Type` (type optional in v0).

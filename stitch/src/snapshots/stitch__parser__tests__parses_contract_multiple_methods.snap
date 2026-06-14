@@ -1,0 +1,31 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"contract Drawable { draw()  bounds() -> Rect }\")"
+---
+[
+    Contract {
+        name: "Drawable",
+        generics: [],
+        methods: [
+            Method {
+                name: "draw",
+                modifier: Instance,
+                params: [],
+                ret: None,
+                body: None,
+            },
+            Method {
+                name: "bounds",
+                modifier: Instance,
+                params: [],
+                ret: Some(
+                    Name {
+                        name: "Rect",
+                        args: [],
+                    },
+                ),
+                body: None,
+            },
+        ],
+    },
+]

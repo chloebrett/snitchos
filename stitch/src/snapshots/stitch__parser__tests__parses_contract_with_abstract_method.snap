@@ -1,0 +1,24 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"contract Show { show() -> Str }\")"
+---
+[
+    Contract {
+        name: "Show",
+        generics: [],
+        methods: [
+            Method {
+                name: "show",
+                modifier: Instance,
+                params: [],
+                ret: Some(
+                    Name {
+                        name: "Str",
+                        args: [],
+                    },
+                ),
+                body: None,
+            },
+        ],
+    },
+]

@@ -6,7 +6,8 @@
 use std::collections::BTreeSet;
 
 use crate::ast::{
-    BinOp, Expr, Field, Item, MatchArm, Param, Pattern, Stmt, StrSegment, Type, UnOp, Variant,
+    BinOp, Expr, Field, Item, MatchArm, Method, MethodModifier, Param, Pattern, Stmt, StrSegment,
+    Type, UnOp, Variant,
 };
 use crate::lexer::{StrPart, Token, lex};
 
@@ -501,11 +502,71 @@ impl Parser {
         match self.peek() {
             Token::Prod => self.parse_prod(),
             Token::Sum => self.parse_sum(),
+            Token::Contract => self.parse_contract(),
             Token::Ident(_) => self.parse_func(),
             other => Err(ParseError::new(format!(
                 "expected a declaration, found {other:?}"
             ))),
         }
+    }
+
+    /// `contract Name<generics> { method-signatures }`.
+    fn parse_contract(&mut self) -> Result<Item, ParseError> {
+        self.bump(); // 'contract'
+        let name = self.expect_ident("contract name")?;
+        let generics = self.parse_generics()?;
+        self.expect(&Token::LBrace, "'{' after contract name")?;
+        let mut methods = Vec::new();
+        while !matches!(self.peek(), Token::RBrace) {
+            if matches!(self.peek(), Token::Eof) {
+                return Err(ParseError::new("unterminated contract: expected '}'"));
+            }
+            methods.push(self.parse_method(false)?);
+        }
+        self.bump(); // '}'
+        Ok(Item::Contract {
+            name,
+            generics,
+            methods,
+        })
+    }
+
+    /// Parse one method `mod? name(params) -> Ret? body?`. The body is `= expr`
+    /// or `{ block }`; when `require_body` is false (contract signatures) it may
+    /// be absent (abstract).
+    fn parse_method(&mut self, require_body: bool) -> Result<Method, ParseError> {
+        let modifier = if matches!(self.peek(), Token::Mut) {
+            self.bump();
+            MethodModifier::Mut
+        } else if matches!(self.peek(), Token::Free) {
+            self.bump();
+            MethodModifier::Free
+        } else {
+            MethodModifier::Instance
+        };
+        let name = self.expect_ident("method name")?;
+        self.expect(&Token::LParen, "'(' after method name")?;
+        let params = self.parse_params()?;
+        let ret = if matches!(self.peek(), Token::Arrow) {
+            self.bump();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        let body = if matches!(self.peek(), Token::Eq | Token::LBrace) {
+            Some(self.parse_body()?)
+        } else if require_body {
+            return Err(ParseError::new("expected '=' or '{' for the method body"));
+        } else {
+            None
+        };
+        Ok(Method {
+            name,
+            modifier,
+            params,
+            ret,
+            body,
+        })
     }
 
     /// A function: `name(params) -> Ret? (= expr | { block })`.
@@ -1259,5 +1320,30 @@ mod tests {
     #[test]
     fn parses_function_among_type_declarations() {
         insta::assert_debug_snapshot!(prog("prod P(x: Int)  area(p) = p.x * 2"));
+    }
+
+    #[test]
+    fn parses_contract_with_abstract_method() {
+        insta::assert_debug_snapshot!(prog("contract Show { show() -> Str }"));
+    }
+
+    #[test]
+    fn parses_contract_multiple_methods() {
+        insta::assert_debug_snapshot!(prog("contract Drawable { draw()  bounds() -> Rect }"));
+    }
+
+    #[test]
+    fn parses_contract_with_mut_and_free_modifiers() {
+        insta::assert_debug_snapshot!(prog("contract Counter { mut bump()  free zero() -> Counter }"));
+    }
+
+    #[test]
+    fn parses_contract_with_default_method() {
+        insta::assert_debug_snapshot!(prog(r#"contract Greet { hello() -> Str = "hi" }"#));
+    }
+
+    #[test]
+    fn parses_generic_contract() {
+        insta::assert_debug_snapshot!(prog("contract Container<T> { get() -> T }"));
     }
 }
