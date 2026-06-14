@@ -12,7 +12,7 @@ Bookkeeping over a block device. Key structural idea: the **inode**. An inode *i
 
 # v0.10 interface: capability-mediated access
 
-*Design-ahead. Depends on v0.9 IPC (endpoints), not yet built.*
+*Depends on v0.9 IPC (endpoints), almost done. The cap-agnostic core is built: `fs-core` (trait), `ramfs` (first impl), `fs-proto` (badge + opcodes). The IPC front-end (`user/fs`) and the option-D copy primitive are what remain.*
 
 ## The core bet
 **The kernel never learns what a "file" is.** It provides *badged endpoints*; the FS provides *all* file meaning. Mechanism in the kernel, policy in userspace — the line the [IPC design](ipc-design.md) draws.
@@ -72,6 +72,36 @@ pub trait Filesystem {
 ## Connecting layer (FS IPC front-end — above the trait)
 Receive loop: `receive()` → `(msg, badge)`; unpack `badge → (inode, file_rights)`; decode opcode; check `file_rights` permit it (else reply `Denied` + **snitch** `MissingRight` + inode + attempted right); call the cap-agnostic trait method with `inode`. For ops that *yield a new inode* (`Lookup`/`Create`), **mint a child File cap** `badge = (child_inode, parent_rights ∩ requested)` and cap-transfer it in the reply (needs `GRANT`). So **`lookup` is the cap-minting / scope-attenuating op**; `read`/`write`/`stat` are plain badged messages. Badge→inode demux lives here, above the cap-agnostic trait.
 
+## Message framing — how args & payload cross the rendezvous
+*The protocol types are realized in the `fs-proto` crate (host-testable, no kernel/IPC types): [`Op`] (one opcode per trait method, stable append-only discriminants), [`Badge`] (the Q4 packing), and [`FileRights`]. What remained open was how each op's **arguments and payload** ride the wire.*
+
+**The constraint.** An IPC message is `[u64; 4]` — **32 bytes, copied inline at a synchronous rendezvous** (no buffer, no growth). Two things shrink the problem first:
+- The **badge already carries `(inode, file_rights)`**, so the inode never goes in the message — the body is just `opcode + args`.
+- The trait **returns `usize`** for `read`/`write` (bytes transferred), so **partial transfers / chunking are already in the contract** — growing payload capacity never needs a trait change.
+
+Per-op pressure: `Stat` fits trivially; `Read`/`Write` args fit but the **bytes** don't; `Lookup`/`Create`/`Remove` carry a **name** (short ones fit, long ones don't); `Readdir` returns a **list**. Two sub-problems: **names** (bounded-ish) and **bulk bytes/lists** (unbounded).
+
+**The four options considered:**
+
+| | Mechanism | Buildable on today's IPC? | Cost |
+|---|---|---|---|
+| **A — inline, bounded** | names ≤ message size; read/write one inline chunk/call, client loops on `off`; `readdir(n)` indexed | ✅ (only needs badge-on-receive) | ~24 B/round-trip; hard name-length ceiling; clunky readdir |
+| **B — shared memory region** | a `MemoryRegion` cap maps the same frames into client + FS; message carries `(op, off, len)`, bytes live in the shared buffer (virtio / io_uring model) | ❌ needs **shared** mappings (today `MapAnon` is private) + cap lifetime | zero-copy data path, but new kernel object + exposes the whole buffer |
+| **C — multi-message streaming** | framed protocol: header msg + ⌈len/24⌉ data msgs, server reassembles | ✅ | N round-trips; **reassembly state on a shared endpoint** must key on the caller, not the badge |
+| **D — cross-AS copy** | message carries `(ptr, len)` into the sender's AS; the kernel copies across address spaces at the rendezvous (seL4 / L4 long-IPC / Zircon-channel model) | ❌ needs a kernel user→user copy primitive | one O(n) copy per transfer; new security-sensitive kernel mechanism |
+
+### DECISION → D (cross-address-space copy)
+**Message passing over memory sharing**, the Go maxim — and *stronger* here than in Go, because the parties sit across a mutually-distrusting isolation boundary, where sharing memory is a correctness **and** a confidentiality hazard. D's properties:
+- **Ownership moves, nothing is shared.** The receiver gets a private copy of *exactly* `len` bytes — no shared mutable buffer, no "is the other side done?" handshake, no over-exposure of adjacent memory (B's footgun, and against our "hand out minimal authority" identity).
+- **Single round-trip, any size** — C's clean semantics without C's chatter.
+- **Backpressure is free** — the synchronous rendezvous *is* the flow control.
+- **No long-lived kernel object** — the grant is transient (just the copy at the call), unlike B's `MemoryRegion` cap + revocation.
+- **Close to code we already have.** `SpanOpen`/`DebugWrite` already pass `(ptr, len)` and the kernel copies from user memory; D is the user→user generalization.
+
+**The cost we accept — and the escape hatch.** D copies the payload (one O(n) copy, ~2n memory bandwidth) on *every* transfer. B, once set up, is zero-copy on the data path — so for **large, sustained, high-bandwidth** streams B eventually wins (this is why virtio/io_uring, and Zircon's bulk VMOs, put the *data plane* on shared memory and keep only the *control plane* as messages). A RAMfs is not bandwidth-bound, and the project's discipline is *don't optimize until measured* (cf. the SPSC-vs-mutex milestone). So **B is reserved as a post-v1.0 data-plane optimization if a workload proves it needs it** — and A→D→B is a `fs-proto`-only progression behind the same trait and `Op` enum: zero churn above the protocol crate. (Elegant middle, if we want it later: at a local rendezvous the kernel can *remap* page-aligned pages instead of copying — L4 grant / Mach CoW — D's semantics at B's cost, since remap *moves ownership*.)
+
+**Implications.** D needs a kernel IPC extension (a `(ptr, len)` copy that validates both address spaces) layered on v0.9 rendezvous — the one piece this milestone adds below the trait. `Lookup`/`Create` replies still carry a freshly-minted child File cap (`reply_with_cap`) alongside the result, independent of payload framing.
+
 ## Revocation
 - **FS-side (fine):** drop the badge→inode mapping / mark the inode dead → later invokes reply `Stale`. No kernel involvement.
 - **Kernel-side (coarse):** bump the cap slot generation (existing hook) — kills the whole endpoint cap.
@@ -104,7 +134,8 @@ A long-standing hope for this design was that Docker-style process isolation wou
 - **Q1 — FileRights granularity → DECIDED:** start with `READ`/`WRITE` only; dir rights + `EXEC` are additive badge bits.
 - **Q2 — EXEC → DECIDED:** reserve the bit, don't enforce until we load executables (~v0.11).
 - **Q3 — First impl scope → DECIDED:** flat single-root directory; subdirs `Unsupported`, hierarchy additive.
-- **Q4 — Badge packing → default (open):** `inode: u32 | rights: u16 | spare: u16` in a `u64` badge.
+- **Q4 — Badge packing → DECIDED + realized:** `inode: u32 | rights: u16 | spare: u16` in a `u64` badge; implemented in `fs-proto::Badge` (round-trip + exact-layout tests).
+- **Q5 — Message framing → DECIDED:** option **D** (cross-address-space copy — message passing, not shared memory). See [§Message framing](#message-framing--how-args--payload-cross-the-rendezvous). Needs a kernel user→user copy primitive on top of v0.9 rendezvous; **B** (shared region) is the deferred post-v1.0 bulk data-plane optimization.
 
 # Copy-on-write and near-free crash safety
 Under CoW you never overwrite a block in place. Modify a data block → write a new copy elsewhere → the inode pointed at the old location, so write a new inode → whatever pointed at the inode is now stale → ... the cascade runs all the way **up to the root of the filesystem tree**. The whole FS is a tree; modifying anything means rewriting the path from that block up to the root.
@@ -135,7 +166,9 @@ Each mark-and-sweep run is a span — blocks scanned, marked live, swept, bytes 
 `write()` only reaches the kernel page cache (RAM). Durability requires a flush toward the device — and data can still sit in the disk's own write cache. A CoW FS makes durability tractable: it becomes one well-defined moment — is the new root committed. (See Concepts & findings: "layered claims that lie for speed.")
 
 # Open / deferred
-- The `Filesystem` trait surface — designed at v0.9.
+- The `Filesystem` trait surface — **designed + implemented** (`fs-core` trait, `ramfs` first impl, `fs-proto` wire protocol; all host-tested).
+- Message framing — **decided** (option D, cross-AS copy); the kernel copy primitive is the implementation step that remains.
+- Bulk data-plane via shared memory (option B) — deferred to post-v1.0, only if measurement demands it.
 - Hash choice for content addressing.
 - Merkle tree structure and verification — post-v1.0.
 - Log-structured layout and the cleaner — post-v1.0.
