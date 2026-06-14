@@ -1,0 +1,44 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"add(a: Int, b: Int) -> Int = a + b\")"
+---
+[
+    Func {
+        name: "add",
+        params: [
+            Param {
+                name: "a",
+                ty: Some(
+                    Name {
+                        name: "Int",
+                        args: [],
+                    },
+                ),
+            },
+            Param {
+                name: "b",
+                ty: Some(
+                    Name {
+                        name: "Int",
+                        args: [],
+                    },
+                ),
+            },
+        ],
+        ret: Some(
+            Name {
+                name: "Int",
+                args: [],
+            },
+        ),
+        body: Binary {
+            op: Add,
+            left: Var(
+                "a",
+            ),
+            right: Var(
+                "b",
+            ),
+        },
+    },
+]

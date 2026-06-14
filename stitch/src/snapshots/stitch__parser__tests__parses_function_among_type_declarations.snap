@@ -1,0 +1,44 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"prod P(x: Int)  area(p) = p.x * 2\")"
+---
+[
+    Prod {
+        name: "P",
+        generics: [],
+        fields: [
+            Field {
+                name: Some(
+                    "x",
+                ),
+                mutable: false,
+                ty: Name {
+                    name: "Int",
+                    args: [],
+                },
+            },
+        ],
+    },
+    Func {
+        name: "area",
+        params: [
+            Param {
+                name: "p",
+                ty: None,
+            },
+        ],
+        ret: None,
+        body: Binary {
+            op: Mul,
+            left: Field {
+                object: Var(
+                    "p",
+                ),
+                name: "x",
+            },
+            right: Int(
+                2,
+            ),
+        },
+    },
+]

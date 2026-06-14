@@ -1,0 +1,33 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"run() { let x = 1  x + 1 }\")"
+---
+[
+    Func {
+        name: "run",
+        params: [],
+        ret: None,
+        body: Block {
+            stmts: [
+                Let {
+                    name: "x",
+                    mutable: false,
+                    value: Int(
+                        1,
+                    ),
+                },
+            ],
+            result: Some(
+                Binary {
+                    op: Add,
+                    left: Var(
+                        "x",
+                    ),
+                    right: Int(
+                        1,
+                    ),
+                },
+            ),
+        },
+    },
+]

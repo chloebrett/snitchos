@@ -24,3 +24,14 @@ fn product_and_sum_together() {
          sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)"
     ));
 }
+
+#[test]
+fn a_small_program() {
+    // Types + functions together: a sum, a match-based function, and a
+    // pipeline function with placeholders — most of a real Stitch module.
+    insta::assert_debug_snapshot!(prog(
+        "sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)  \
+         area(s) = match s { Circle(r) => 3 * r * r  Rect(w, h) => w * h }  \
+         hot(readings, threshold) = readings |> filter($.celsius > threshold) |> map($.sensor)"
+    ));
+}

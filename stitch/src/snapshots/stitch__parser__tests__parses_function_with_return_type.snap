@@ -1,0 +1,36 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"fetch(url: Str) -> Response = get(url)\")"
+---
+[
+    Func {
+        name: "fetch",
+        params: [
+            Param {
+                name: "url",
+                ty: Some(
+                    Name {
+                        name: "Str",
+                        args: [],
+                    },
+                ),
+            },
+        ],
+        ret: Some(
+            Name {
+                name: "Response",
+                args: [],
+            },
+        ),
+        body: Call {
+            callee: Var(
+                "get",
+            ),
+            args: [
+                Var(
+                    "url",
+                ),
+            ],
+        },
+    },
+]

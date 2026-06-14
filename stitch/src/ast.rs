@@ -15,6 +15,21 @@ pub enum Item {
         generics: Vec<String>,
         variants: Vec<Variant>,
     },
+    /// A function: `name(params) -> Ret? body`. (No `fn` keyword; the `uses`
+    /// effects clause is deferred.)
+    Func {
+        name: String,
+        params: Vec<Param>,
+        ret: Option<Type>,
+        body: Expr,
+    },
+}
+
+/// A function parameter: `name` or `name: Type` (type optional in v0).
+#[derive(Debug, PartialEq)]
+pub struct Param {
+    pub name: String,
+    pub ty: Option<Type>,
 }
 
 /// A field of a product or a variant. `name` is `None` for positional fields

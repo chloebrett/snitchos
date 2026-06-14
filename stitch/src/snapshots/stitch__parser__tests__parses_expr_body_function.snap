@@ -1,0 +1,25 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"double(x) = x * 2\")"
+---
+[
+    Func {
+        name: "double",
+        params: [
+            Param {
+                name: "x",
+                ty: None,
+            },
+        ],
+        ret: None,
+        body: Binary {
+            op: Mul,
+            left: Var(
+                "x",
+            ),
+            right: Int(
+                2,
+            ),
+        },
+    },
+]

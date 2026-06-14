@@ -1,0 +1,183 @@
+---
+source: stitch/tests/programs.rs
+expression: "prog(\"sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)  \\\n         area(s) = match s { Circle(r) => 3 * r * r  Rect(w, h) => w * h }  \\\n         hot(readings, threshold) = readings |> filter($.celsius > threshold) |> map($.sensor)\")"
+---
+[
+    Sum {
+        name: "Shape",
+        generics: [],
+        variants: [
+            Variant {
+                name: "Circle",
+                fields: [
+                    Field {
+                        name: Some(
+                            "radius",
+                        ),
+                        mutable: false,
+                        ty: Name {
+                            name: "Float",
+                            args: [],
+                        },
+                    },
+                ],
+            },
+            Variant {
+                name: "Rect",
+                fields: [
+                    Field {
+                        name: Some(
+                            "w",
+                        ),
+                        mutable: false,
+                        ty: Name {
+                            name: "Float",
+                            args: [],
+                        },
+                    },
+                    Field {
+                        name: Some(
+                            "h",
+                        ),
+                        mutable: false,
+                        ty: Name {
+                            name: "Float",
+                            args: [],
+                        },
+                    },
+                ],
+            },
+        ],
+    },
+    Func {
+        name: "area",
+        params: [
+            Param {
+                name: "s",
+                ty: None,
+            },
+        ],
+        ret: None,
+        body: Match {
+            subject: Var(
+                "s",
+            ),
+            arms: [
+                MatchArm {
+                    pattern: Constructor {
+                        name: "Circle",
+                        args: [
+                            Binding(
+                                "r",
+                            ),
+                        ],
+                    },
+                    guard: None,
+                    body: Binary {
+                        op: Mul,
+                        left: Binary {
+                            op: Mul,
+                            left: Int(
+                                3,
+                            ),
+                            right: Var(
+                                "r",
+                            ),
+                        },
+                        right: Var(
+                            "r",
+                        ),
+                    },
+                },
+                MatchArm {
+                    pattern: Constructor {
+                        name: "Rect",
+                        args: [
+                            Binding(
+                                "w",
+                            ),
+                            Binding(
+                                "h",
+                            ),
+                        ],
+                    },
+                    guard: None,
+                    body: Binary {
+                        op: Mul,
+                        left: Var(
+                            "w",
+                        ),
+                        right: Var(
+                            "h",
+                        ),
+                    },
+                },
+            ],
+        },
+    },
+    Func {
+        name: "hot",
+        params: [
+            Param {
+                name: "readings",
+                ty: None,
+            },
+            Param {
+                name: "threshold",
+                ty: None,
+            },
+        ],
+        ret: None,
+        body: Binary {
+            op: Pipe,
+            left: Binary {
+                op: Pipe,
+                left: Var(
+                    "readings",
+                ),
+                right: Call {
+                    callee: Var(
+                        "filter",
+                    ),
+                    args: [
+                        Lambda {
+                            params: [
+                                "$a",
+                            ],
+                            body: Binary {
+                                op: Gt,
+                                left: Field {
+                                    object: Var(
+                                        "$a",
+                                    ),
+                                    name: "celsius",
+                                },
+                                right: Var(
+                                    "threshold",
+                                ),
+                            },
+                        },
+                    ],
+                },
+            },
+            right: Call {
+                callee: Var(
+                    "map",
+                ),
+                args: [
+                    Lambda {
+                        params: [
+                            "$a",
+                        ],
+                        body: Field {
+                            object: Var(
+                                "$a",
+                            ),
+                            name: "sensor",
+                        },
+                    },
+                ],
+            },
+        },
+    },
+]

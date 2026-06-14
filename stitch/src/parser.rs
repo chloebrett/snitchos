@@ -5,7 +5,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::{BinOp, Expr, Field, Item, MatchArm, Pattern, Stmt, StrSegment, Type, UnOp, Variant};
+use crate::ast::{
+    BinOp, Expr, Field, Item, MatchArm, Param, Pattern, Stmt, StrSegment, Type, UnOp, Variant,
+};
 use crate::lexer::{StrPart, Token, lex};
 
 /// A parse error. Carries a human-readable message; source positions are a
@@ -499,9 +501,71 @@ impl Parser {
         match self.peek() {
             Token::Prod => self.parse_prod(),
             Token::Sum => self.parse_sum(),
+            Token::Ident(_) => self.parse_func(),
             other => Err(ParseError::new(format!(
                 "expected a declaration, found {other:?}"
             ))),
+        }
+    }
+
+    /// A function: `name(params) -> Ret? (= expr | { block })`.
+    fn parse_func(&mut self) -> Result<Item, ParseError> {
+        let name = self.expect_ident("function name")?;
+        self.expect(&Token::LParen, "'(' after function name")?;
+        let params = self.parse_params()?;
+        let ret = if matches!(self.peek(), Token::Arrow) {
+            self.bump();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        let body = self.parse_body()?;
+        Ok(Item::Func {
+            name,
+            params,
+            ret,
+            body,
+        })
+    }
+
+    /// A comma-separated parameter list up to and including `)`. The `(` is
+    /// already consumed. Each param is `name` or `name: Type`.
+    fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {
+        let mut params = Vec::new();
+        if !matches!(self.peek(), Token::RParen) {
+            loop {
+                let name = self.expect_ident("parameter name")?;
+                let ty = if matches!(self.peek(), Token::Colon) {
+                    self.bump();
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+                params.push(Param { name, ty });
+                if matches!(self.peek(), Token::Comma) {
+                    self.bump();
+                    if matches!(self.peek(), Token::RParen) {
+                        break; // trailing comma
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RParen, "')' after parameters")?;
+        Ok(params)
+    }
+
+    /// A function/method body: `= expr` or a `{ block }`.
+    fn parse_body(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek(), Token::Eq) {
+            self.bump();
+            self.parse_expr(0)
+        } else if matches!(self.peek(), Token::LBrace) {
+            self.bump();
+            self.parse_block()
+        } else {
+            Err(ParseError::new("expected '=' or '{' for the function body"))
         }
     }
 
@@ -1170,5 +1234,30 @@ mod tests {
     #[test]
     fn parses_generic_field_type() {
         insta::assert_debug_snapshot!(prog("prod Bag(items: List<Int>, lookup: Map<Str, Int>)"));
+    }
+
+    #[test]
+    fn parses_expr_body_function() {
+        insta::assert_debug_snapshot!(prog("double(x) = x * 2"));
+    }
+
+    #[test]
+    fn parses_typed_function() {
+        insta::assert_debug_snapshot!(prog("add(a: Int, b: Int) -> Int = a + b"));
+    }
+
+    #[test]
+    fn parses_block_body_function() {
+        insta::assert_debug_snapshot!(prog("run() { let x = 1  x + 1 }"));
+    }
+
+    #[test]
+    fn parses_function_with_return_type() {
+        insta::assert_debug_snapshot!(prog("fetch(url: Str) -> Response = get(url)"));
+    }
+
+    #[test]
+    fn parses_function_among_type_declarations() {
+        insta::assert_debug_snapshot!(prog("prod P(x: Int)  area(p) = p.x * 2"));
     }
 }
