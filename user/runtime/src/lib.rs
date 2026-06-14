@@ -327,6 +327,16 @@ pub struct Endpoint {
     handle: usize,
 }
 
+/// What [`Endpoint::receive_with_reply`] hands back: the message words, the
+/// reply handle (`Some` if it came from a `call` — answer it with [`reply`]),
+/// and the **sender cap's badge** (`0` = a bare endpoint) — the unforgeable
+/// demux value a server uses to tell its objects/clients apart (v0.9c).
+pub struct Received {
+    pub msg: [u64; MSG_WORDS],
+    pub reply: Option<usize>,
+    pub badge: u64,
+}
+
 impl Endpoint {
     /// Wrap a raw endpoint handle (the kernel validates it on use).
     #[must_use]
@@ -443,15 +453,16 @@ impl Endpoint {
     /// Receive a message **and** the reply handle: `Some(handle)` if it came
     /// from a `call` (answer it with [`reply`]), `None` for a one-way `send`.
     /// The RPC server's receive primitive.
-    pub fn receive_with_reply(self) -> Result<([u64; MSG_WORDS], Option<usize>), Denied> {
+    pub fn receive_with_reply(self) -> Result<Received, Denied> {
         let ret: usize;
         let w0: u64;
         let w1: u64;
         let w2: u64;
         let w3: u64;
         let reply_handle: usize;
+        let badge: u64;
         // SAFETY: as `receive`, plus the kernel returns the reply-cap handle in
-        // a5 (0 = the message was a one-way `send`).
+        // a5 (0 = one-way `send`) and the sender cap's badge in a6 (0 = bare).
         unsafe {
             asm!(
                 "ecall",
@@ -462,13 +473,17 @@ impl Endpoint {
                 out("a3") w2,
                 out("a4") w3,
                 out("a5") reply_handle,
+                out("a6") badge,
             );
         }
         if ret != 0 {
             return Err(Denied);
         }
-        let reply = (reply_handle != 0).then_some(reply_handle);
-        Ok(([w0, w1, w2, w3], reply))
+        Ok(Received {
+            msg: [w0, w1, w2, w3],
+            reply: (reply_handle != 0).then_some(reply_handle),
+            badge,
+        })
     }
 
     /// Fused reply-then-receive — the RPC server hot path. Answers the previous

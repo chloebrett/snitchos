@@ -1,15 +1,15 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{endpoint, entry, telemetry};
+use snitchos_user::{endpoint, entry, Endpoint};
 
-// v0.9c cap-transfer-in-reply client. `call`s the handout server asking for a
-// cap badged 0xBEEF; the server transfers a badged cap back, which `call`
-// returns as `Some(handle)`. Emit a telemetry tick on receipt so the itest can
-// see the capability crossed the process boundary.
+// v0.9c headline client. `call`s the handout server to receive a badged cap
+// (its kernel-minted identity), then **sends on that badged cap** — so the
+// server's receive surfaces this client's badge and can tell it apart from its
+// peers. Spawned more than once; each instance gets a distinct badge.
 #[entry]
 fn main() {
-    if let Ok((_resp, Some(_cap))) = endpoint().call([0xBEEF, 0, 0, 0]) {
-        let _ = telemetry().emit(1);
+    if let Ok((_resp, Some(cap))) = endpoint().call([0, 0, 0, 0]) {
+        let _ = Endpoint::from_raw_handle(cap).send([0, 0, 0, 0]);
     }
 }

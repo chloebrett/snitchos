@@ -1386,33 +1386,51 @@ pub fn badge_mint_mints_and_refuses(h: &mut View) -> Result<(), String> {
 }
 
 /// v0.9c cap-transfer-in-reply: a `RECV | MINT` server mints a badged cap per
-/// request and hands it back in the `reply`; the client's `call` returns it, and
-/// the client emits a telemetry tick on receipt. Proves a server can return a
+/// `call` and hands it back in the `reply`. Proves a server can return a
 /// capability to a client — the keystone the filesystem's `open` needs. The
-/// handed-out cap also lands on the wire as a badged `CapEvent::Transferred`.
+/// first handout carries the server's first assigned badge (`0xBEE1`), snitched
+/// as a `CapEvent::Transferred`.
 pub fn badge_handout_transfers_cap(h: &mut View) -> Result<(), String> {
     use protocol::{CapEventKind, CapObject};
 
-    // Assert in wire order: the badged transfer lands before the client's
-    // telemetry tick, and `wait_for` advances the cursor — assert the earlier
-    // frame first or the later wait scans past it.
     h.wait_for(SEC * 30, |f, _| {
         matches!(f, OwnedFrame::CapEvent { kind: CapEventKind::Transferred, object: CapObject::Endpoint, badge, .. }
-            if *badge == 0xBEEF)
+            if *badge == 0xBEE1)
     })
     .ok_or(
-        "no CapEvent::Transferred{Endpoint, badge=0xBEEF} within 30s — the handed-out \
-         badged cap wasn't snitched",
+        "no CapEvent::Transferred{Endpoint, badge=0xBEE1} within 30s — the server didn't \
+         mint + hand back a badged cap",
     )?;
+    Ok(())
+}
 
+/// v0.9c **the headline**: one endpoint, two clients, told apart by capability.
+/// Each client `call`s the server (getting a distinct server-assigned badge,
+/// `0xBEE1`/`0xBEE2`) then `send`s on that badged cap. The kernel delivers each
+/// sender's badge to the server's single receive loop, which re-emits it. Assert
+/// **both distinct badges** surface — the demux works, by badge not by identity.
+/// Order-independent: the two emits can interleave, so accumulate.
+pub fn badge_demux_distinguishes_clients(h: &mut View) -> Result<(), String> {
+    use std::cell::Cell;
+
+    let seen_a = Cell::new(false);
+    let seen_b = Cell::new(false);
     h.wait_for(SEC * 30, |f, strings| {
-        matches!(f, OwnedFrame::Metric { name_id, value, .. }
-            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
-                && *value >= 1)
+        if let OwnedFrame::Metric { name_id, value, .. } = f
+            && strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+        {
+            if *value == 0xBEE1 {
+                seen_a.set(true);
+            }
+            if *value == 0xBEE2 {
+                seen_b.set(true);
+            }
+        }
+        seen_a.get() && seen_b.get()
     })
     .ok_or(
-        "no snitchos.user.telemetry_total >= 1 within 30s — the client never received \
-         the transferred cap (call returned no handle)",
+        "didn't see both received badges 0xBEE1 and 0xBEE2 within 30s — the server's one \
+         receive loop didn't demux the two clients by their delivered badges",
     )?;
     Ok(())
 }

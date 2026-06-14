@@ -332,10 +332,8 @@ fn handle_send(frame: &mut TrapFrame) {
         let caps = proc.caps.lock();
         invoke_send(&caps, Handle::from_raw(frame.a0 as u32))
     };
-    let ep = match ep {
-        // The sender's badge is carried by `invoke_send` but not surfaced to the
-        // receiver until Step 7 (delivery into `a6`); ignore it here.
-        Ok((ep, _badge)) => ep,
+    let (ep, badge) = match ep {
+        Ok(pair) => pair,
         Err(denied) => {
             refuse(frame, sc, refusal_for(denied));
             return;
@@ -348,7 +346,7 @@ fn handle_send(frame: &mut TrapFrame) {
     // parent of the receiver's handling span (kernel-populated — userspace can
     // neither forge nor forget it).
     let parent = crate::tracing::current_span_id();
-    match crate::ipc::send_begin(ep, me, msg, parent) {
+    match crate::ipc::send_begin(ep, me, msg, parent, badge) {
         crate::ipc::SendStep::Deliver { wake } => crate::sched::wake(wake),
         crate::ipc::SendStep::Block => {
             crate::ipc::BLOCKS_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -421,6 +419,11 @@ fn receive_into_frame(
     // `send` yields `a5 = 0`.
     frame.a5 = reply_handle_for(proc, me, delivered.reply_to);
 
+    // Deliver the sender cap's badge in `a6` (v0.9c) — the unforgeable demux
+    // value the receiver uses to tell its objects/clients apart. `0` for a bare
+    // (unbadged) cap.
+    frame.a6 = delivered.badge;
+
     // The message crossed. Count it, and record the topology + trace link on
     // the wire — both at delivery, outside the endpoint critical section.
     crate::ipc::MESSAGES_TOTAL.fetch_add(1, Ordering::Relaxed);
@@ -483,10 +486,8 @@ fn handle_call(frame: &mut TrapFrame) {
         let caps = proc.caps.lock();
         invoke_send(&caps, Handle::from_raw(frame.a0 as u32))
     };
-    let ep = match ep {
-        // The sender's badge is carried by `invoke_send` but not surfaced to the
-        // receiver until Step 7 (delivery into `a6`); ignore it here.
-        Ok((ep, _badge)) => ep,
+    let (ep, badge) = match ep {
+        Ok(pair) => pair,
         Err(denied) => {
             refuse(frame, sc, refusal_for(denied));
             return;
@@ -497,7 +498,7 @@ fn handle_call(frame: &mut TrapFrame) {
     let me = crate::sched::current_task_id();
     let req = [frame.a1, frame.a2, frame.a3, frame.a4];
     let parent = crate::tracing::current_span_id();
-    match crate::ipc::call_begin(ep, me, req, parent) {
+    match crate::ipc::call_begin(ep, me, req, parent, badge) {
         crate::ipc::SendStep::Deliver { wake } => crate::sched::wake(wake),
         crate::ipc::SendStep::Block => {}
     }

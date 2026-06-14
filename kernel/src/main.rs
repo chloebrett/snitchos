@@ -532,7 +532,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             user::init_metric();
             crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
             let _ = sched::spawn_on(1, "badge_handout_server", user::badge_handout_server_main_entry);
-            let _ = sched::spawn_on(1, "badge_handout_client", user::badge_handout_client_main_entry);
+            // Two clients over the *one* endpoint — each gets a distinct
+            // server-assigned badge, proving the demux tells them apart.
+            let _ = sched::spawn_on(1, "badge_handout_client_a", user::badge_handout_client_main_entry);
+            let _ = sched::spawn_on(1, "badge_handout_client_b", user::badge_handout_client_main_entry);
         }
         _ => {}
     }

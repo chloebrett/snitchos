@@ -144,6 +144,7 @@ catalog! {
     wfi "rpc-reply-recv"                  scenarios::rpc_reply_recv                 [userspace, ipc] {"ipc-rpc"};
     wfi "badge-mint-mints-and-refuses"    scenarios::badge_mint_mints_and_refuses   [userspace, ipc] {"badge-mint"};
     wfi "badge-handout-transfers-cap"     scenarios::badge_handout_transfers_cap    [userspace, ipc] {"badge-handout"};
+    wfi "badge-demux-distinguishes-clients" scenarios::badge_demux_distinguishes_clients [userspace, ipc] {"badge-handout"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back

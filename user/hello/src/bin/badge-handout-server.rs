@@ -1,22 +1,33 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{endpoint, entry, reply_with_cap, rights};
+use snitchos_user::{endpoint, entry, reply_with_cap, rights, telemetry};
 
-// v0.9c cap-transfer-in-reply server. Holds `RECV | MINT` on the shared
-// endpoint. For each request, it mints a badged `SEND` cap (badge = the
-// caller's requested word 0) and **hands it back in the reply** — so the client
-// ends up holding an unforgeable, badged path to this server. The whole point:
-// a server can return capabilities, not just data.
+// v0.9c headline server. Holds `RECV | MINT` on one endpoint and serves many
+// clients over it:
+//   - a `call` (reply handle present) asks for a cap → mint a **distinct**
+//     badged `SEND` cap (an incrementing per-client identity) and hand it back.
+//   - a one-way `send` (no reply handle) arrives on a badged cap → the kernel
+//     delivered the sender's badge in `r.badge`; re-emit it as telemetry so the
+//     wire shows the server told its clients apart **by capability, not by who
+//     they are** — one endpoint, one receive loop, demuxed by badge.
 #[entry]
 fn main() {
+    let mut next: u64 = 0xBEE1;
     loop {
-        let Ok((req, Some(reply_handle))) = endpoint().receive_with_reply() else {
+        let Ok(r) = endpoint().receive_with_reply() else {
             continue;
         };
-        let Ok(cap) = endpoint().mint_badged(req[0], rights::SEND) else {
-            continue;
-        };
-        let _ = reply_with_cap(reply_handle, [0, 0, 0, 0], cap);
+        match r.reply {
+            Some(reply_handle) => {
+                if let Ok(cap) = endpoint().mint_badged(next, rights::SEND) {
+                    let _ = reply_with_cap(reply_handle, [0, 0, 0, 0], cap);
+                    next += 1;
+                }
+            }
+            None => {
+                let _ = telemetry().emit(r.badge as i64);
+            }
+        }
     }
 }

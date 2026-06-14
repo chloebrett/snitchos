@@ -58,11 +58,15 @@ pub struct Delivered {
     /// The sending task — for the `Message` frame's `from`.
     pub from: TaskId,
     pub reply_to: Option<TaskId>,
+    /// The badge of the sender's endpoint cap (v0.9c), delivered to the receiver
+    /// so it can demux which object/client this message names. `0` = a bare
+    /// (unbadged) endpoint cap.
+    pub badge: u64,
 }
 
 impl Default for Delivered {
     fn default() -> Self {
-        Self { msg: [0; MSG_WORDS], parent: SpanId(0), from: TaskId(0), reply_to: None }
+        Self { msg: [0; MSG_WORDS], parent: SpanId(0), from: TaskId(0), reply_to: None, badge: 0 }
     }
 }
 
@@ -117,27 +121,28 @@ pub enum RecvStep {
 }
 
 /// Begin a one-way `send` (`reply_to = None`). See [`begin`].
-pub fn send_begin(ep: EndpointId, me: TaskId, msg: Message, parent: SpanId) -> SendStep {
-    begin(ep, me, msg, parent, None)
+pub fn send_begin(ep: EndpointId, me: TaskId, msg: Message, parent: SpanId, badge: u64) -> SendStep {
+    begin(ep, me, msg, parent, None, badge)
 }
 
 /// Begin an RPC `call` (`reply_to = Some(me)`): identical request delivery to a
 /// `send`, but the receiver will mint a reply cap and the caller blocks
 /// awaiting the reply rather than being woken at the rendezvous.
-pub fn call_begin(ep: EndpointId, me: TaskId, msg: Message, parent: SpanId) -> SendStep {
-    begin(ep, me, msg, parent, Some(me))
+pub fn call_begin(ep: EndpointId, me: TaskId, msg: Message, parent: SpanId, badge: u64) -> SendStep {
+    begin(ep, me, msg, parent, Some(me), badge)
 }
 
 /// Drive the pure rendezvous and stage the message: deliver to a waiting
 /// receiver (report whom to wake) or stash it under `me` to block on. All under
-/// the endpoint lock; the handler acts after it drops.
-fn begin(ep: EndpointId, me: TaskId, msg: Message, parent: SpanId, reply_to: Option<TaskId>) -> SendStep {
+/// the endpoint lock; the handler acts after it drops. `badge` is the sender
+/// cap's badge, delivered to the receiver for demux.
+fn begin(ep: EndpointId, me: TaskId, msg: Message, parent: SpanId, reply_to: Option<TaskId>, badge: u64) -> SendStep {
     let mut eps = ENDPOINTS.lock();
     let endpoint = &mut eps[ep.0 as usize];
     let state = core::mem::replace(&mut endpoint.state, EndpointState::Idle);
     let (next, action) = on_send(state, me);
     endpoint.state = next;
-    let delivered = Delivered { msg, parent, from: me, reply_to };
+    let delivered = Delivered { msg, parent, from: me, reply_to, badge };
     match action {
         RendezvousAction::Rendezvous { peer } => {
             // Deliver to the blocked receiver's slot; it reads this on resume.
