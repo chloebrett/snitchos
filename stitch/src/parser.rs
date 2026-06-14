@@ -63,6 +63,11 @@ fn collect_placeholders(expr: &mut Expr, params: &mut BTreeSet<String>) {
             collect_placeholders(object, params);
             collect_placeholders(index, params);
         }
+        Expr::If { cond, then, els } => {
+            collect_placeholders(cond, params);
+            collect_placeholders(then, params);
+            collect_placeholders(els, params);
+        }
         // Atoms with no sub-expressions, and explicit lambdas (their body's
         // placeholders, if any, belong to that lambda — left for a later check).
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Var(_) | Expr::Lambda { .. } => {}
@@ -157,6 +162,20 @@ impl Parser {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
+            };
+        }
+        // The `cond => then | els` conditional binds looser than any binary
+        // operator, so only consider it at the top level (not in operand
+        // recursion): `a + b => c | d` is `(a + b) => c | d`.
+        if min_bp == 0 && matches!(self.peek(), Token::FatArrow) {
+            self.bump(); // =>
+            let then = self.parse_expr(0)?;
+            self.expect(&Token::Bar, "'|' in conditional")?;
+            let els = self.parse_expr(0)?;
+            left = Expr::If {
+                cond: Box::new(left),
+                then: Box::new(then),
+                els: Box::new(els),
             };
         }
         Ok(left)
@@ -570,5 +589,25 @@ mod tests {
     #[test]
     fn placeholder_wraps_only_its_own_argument() {
         insta::assert_debug_snapshot!(p("f($ > 30, other)"));
+    }
+
+    #[test]
+    fn parses_conditional() {
+        insta::assert_debug_snapshot!(p("n < 0 => neg | pos"));
+    }
+
+    #[test]
+    fn conditional_condition_is_a_full_binary_expression() {
+        insta::assert_debug_snapshot!(p("a + b * c => x | y"));
+    }
+
+    #[test]
+    fn conditional_in_call_argument() {
+        insta::assert_debug_snapshot!(p("f(x > 0 => 1 | 0)"));
+    }
+
+    #[test]
+    fn conditional_without_else_is_an_error() {
+        insta::assert_debug_snapshot!(parse("x => a"));
     }
 }

@@ -1,0 +1,21 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"n < 0 => neg | pos\")"
+---
+If {
+    cond: Binary {
+        op: Lt,
+        left: Var(
+            "n",
+        ),
+        right: Int(
+            0,
+        ),
+    },
+    then: Var(
+        "neg",
+    ),
+    els: Var(
+        "pos",
+    ),
+}

@@ -46,3 +46,9 @@ fn pipeline_with_lambdas() {
 fn pipeline_with_placeholders() {
     insta::assert_debug_snapshot!(p("readings |> filter($.celsius > 30) |> map($.celsius)"));
 }
+
+#[test]
+fn guarded_average() {
+    // The `mean` shape from samples.st: a conditional whose else-branch divides.
+    insta::assert_debug_snapshot!(p("count == 0 => 0 | total / count"));
+}

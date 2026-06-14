@@ -51,6 +51,12 @@ pub enum Expr {
         params: Vec<String>,
         body: Box<Expr>,
     },
+    /// The inline conditional `cond => then | els`.
+    If {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        els: Box<Expr>,
+    },
 }
 
 /// Prefix unary operators.

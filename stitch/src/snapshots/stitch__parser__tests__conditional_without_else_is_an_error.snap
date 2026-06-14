@@ -1,0 +1,9 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"x => a\")"
+---
+Err(
+    ParseError {
+        message: "expected '|' in conditional, found Eof",
+    },
+)

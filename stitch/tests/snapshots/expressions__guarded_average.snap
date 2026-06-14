@@ -1,0 +1,27 @@
+---
+source: stitch/tests/expressions.rs
+expression: "p(\"count == 0 => 0 | total / count\")"
+---
+If {
+    cond: Binary {
+        op: Eq,
+        left: Var(
+            "count",
+        ),
+        right: Int(
+            0,
+        ),
+    },
+    then: Int(
+        0,
+    ),
+    els: Binary {
+        op: Div,
+        left: Var(
+            "total",
+        ),
+        right: Var(
+            "count",
+        ),
+    },
+}

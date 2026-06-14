@@ -1,0 +1,27 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"a + b * c => x | y\")"
+---
+If {
+    cond: Binary {
+        op: Add,
+        left: Var(
+            "a",
+        ),
+        right: Binary {
+            op: Mul,
+            left: Var(
+                "b",
+            ),
+            right: Var(
+                "c",
+            ),
+        },
+    },
+    then: Var(
+        "x",
+    ),
+    els: Var(
+        "y",
+    ),
+}

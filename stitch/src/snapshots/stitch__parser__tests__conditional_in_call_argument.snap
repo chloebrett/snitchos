@@ -1,0 +1,28 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"f(x > 0 => 1 | 0)\")"
+---
+Call {
+    callee: Var(
+        "f",
+    ),
+    args: [
+        If {
+            cond: Binary {
+                op: Gt,
+                left: Var(
+                    "x",
+                ),
+                right: Int(
+                    0,
+                ),
+            },
+            then: Int(
+                1,
+            ),
+            els: Int(
+                0,
+            ),
+        },
+    ],
+}
