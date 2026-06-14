@@ -308,10 +308,10 @@ impl Drop for Span {
     }
 }
 
-/// The number of inline words a single IPC message carries — matches the
-/// kernel's `MSG_WORDS`. Larger payloads will use a `MemoryRegion` capability
-/// (a later milestone); v0.9 is inline-only.
-pub const MSG_WORDS: usize = 4;
+/// The number of inline words a single IPC message carries. Re-exported from
+/// the shared [`snitchos_abi`] ABI — the single source of truth the kernel and
+/// any IPC wire protocol (`fs-proto`) read from too.
+pub use snitchos_abi::MSG_WORDS;
 
 /// A capability to a synchronous IPC endpoint. `send` and `receive` are
 /// rendezvous operations — each blocks until a peer arrives. Which ops are

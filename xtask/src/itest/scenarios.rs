@@ -2003,6 +2003,48 @@ pub fn preemption_telemetry(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.8 preemption *guard* (`workload=syscall-hog`): a syscall-heavy task is
+/// still preempted. The `syscall_hog` program loops a cheap ambient `DebugWrite`
+/// with no `yield`, so it spends the bulk of its time in S-mode — but with
+/// interrupts masked (RISC-V clears `SIE` on trap entry and SnitchOS never
+/// re-enables it during handling). The timer therefore cannot fire mid-syscall;
+/// it fires the instant the syscall `sret`s back to U-mode (`SPP == 0`), and the
+/// quantum check deschedules the hog. We prove that with a `ContextSwitch{Preempt}`
+/// leaving the hog — the hog never yields, so a switch *away* from it can only be
+/// a preemption. Regression guard: if a future version ever re-enables interrupts
+/// inside long syscalls without a `need_resched` drain, a near-100%-S-mode task
+/// like this one would dodge preemption and this assertion would fail. See
+/// `plans/v0.8c-need-resched-on-syscall-return.md`.
+pub fn syscall_hog_still_preempted(h: &mut View) -> Result<(), String> {
+    let hog_id = match h
+        .wait_for(SEC * 20, is_thread_register_named("syscall_hog"))
+        .ok_or("no ThreadRegister for 'syscall_hog' within 20s")?
+    {
+        OwnedFrame::ThreadRegister { id, .. } => id,
+        _ => return Err("matched non-ThreadRegister".to_string()),
+    };
+
+    // The headline: the timer descheduled a task that only ever leaves the CPU
+    // via the timer (it never yields), so the reason must be `Preempt`. This is
+    // the assertion that fails if a syscall-heavy task could dodge preemption.
+    h.wait_for(SEC * 30, move |f, _| match f {
+        OwnedFrame::ContextSwitch { from, reason, .. } => {
+            *from == hog_id && matches!(reason, protocol::SwitchReason::Preempt)
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no ContextSwitch{Preempt} leaving syscall_hog within 30s — a syscall-heavy task dodged preemption",
+    )?;
+
+    // The kernel stays healthy — preempting a syscall-spamming task at the
+    // (lock-free) U-mode return boundary doesn't destabilise the kernel.
+    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat — preempting the syscall hog destabilised the kernel")?;
+
+    Ok(())
+}
+
 /// v0.8b priority scheduling — *ordered, but fair* (`workload=priorities`). A
 /// High-priority CPU-bound `greedy` task and a Low-priority cooperative
 /// `worker_b` share hart 1. The scheduler must (a) **respect priority** —
