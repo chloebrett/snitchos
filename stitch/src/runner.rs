@@ -44,7 +44,7 @@ pub fn run_program_source(src: &str) -> RunResult {
         }
         Err(error) => RunResult {
             stdout,
-            stderr: format!("runtime error: {}\n", error.message),
+            stderr: format!("runtime error: {}\n", error.message()),
             exit_code: 1,
         },
     }
@@ -84,7 +84,7 @@ pub fn run_repl_line(defs: &mut Vec<Item>, line: &str) -> String {
             writeln!(out, "=> {}", value.display()).expect(INFALLIBLE);
         }
         Ok(_) => {}
-        Err(error) => writeln!(out, "runtime error: {}", error.message).expect(INFALLIBLE),
+        Err(error) => writeln!(out, "runtime error: {}", error.message()).expect(INFALLIBLE),
     }
     out
 }

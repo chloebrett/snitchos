@@ -200,17 +200,34 @@ impl PartialEq for Value {
     }
 }
 
-/// A runtime (evaluation) error. Carries a human-readable message, mirroring
-/// `ParseError`; structured variants can come later if call sites need them.
+/// The error channel of evaluation. Carries either a real fault or a control
+/// signal — `?`'s early return — which unwinds to the enclosing function rather
+/// than aborting the program. (Reusing the `Err` channel for control flow is
+/// the standard tree-walk technique for non-local return.)
 #[derive(Debug, PartialEq)]
-pub struct RuntimeError {
-    pub message: String,
+pub enum RuntimeError {
+    /// A genuine runtime error (type mismatch, division by zero, …).
+    Fault(String),
+    /// `?` short-circuit: unwind to the enclosing function and return this value.
+    Return(Value),
 }
 
 impl RuntimeError {
     pub(crate) fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
+        RuntimeError::Fault(message.into())
+    }
+
+    /// The `?` early-return control signal carrying the failure value.
+    pub(crate) fn early_return(value: Value) -> Self {
+        RuntimeError::Return(value)
+    }
+
+    /// The fault message for display. A `Return` reaching here means a `?` was
+    /// used outside any function — surfaced as a fault rather than silently lost.
+    pub fn message(&self) -> String {
+        match self {
+            RuntimeError::Fault(message) => message.clone(),
+            RuntimeError::Return(_) => "`?` used outside a function".to_string(),
         }
     }
 }

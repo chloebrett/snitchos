@@ -30,6 +30,7 @@ pub fn eval_program_with_telemetry(
     for native in NATIVES {
         globals.insert(native.name.to_string(), Value::Native(*native));
     }
+    register_builtin_types(&mut globals);
     for item in items {
         match item {
             Item::Func { name, params, body, .. } => {
@@ -137,6 +138,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         }))),
         Expr::Call { callee, args } => eval_call(&eval(callee, env)?, args, env),
         Expr::Field { object, name } => eval_field(&eval(object, env)?, name),
+        Expr::Try(operand) => eval_try(eval(operand, env)?),
+        Expr::SafeField { object, name } => eval_safe_field(eval(object, env)?, name),
         _ => Err(RuntimeError::new("evaluation not yet implemented for this expression")),
     }
 }
@@ -208,7 +211,12 @@ fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<Value, Runt
             for (param, arg) in closure.params.iter().zip(args) {
                 call_env = call_env.extend(param.clone(), arg.clone());
             }
-            eval(&closure.body, &call_env)
+            // This is a function boundary, so `?`'s early-return stops here and
+            // becomes the call's value.
+            match eval(&closure.body, &call_env) {
+                Err(RuntimeError::Return(value)) => Ok(value),
+                other => other,
+            }
         }
         Value::Native(native) => {
             if args.len() != native.arity {
@@ -224,6 +232,30 @@ fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<Value, Runt
         Value::Constructor(ctor) => make_data(ctor, args),
         _ => Err(RuntimeError::new(format!("cannot call a {}", callee.kind()))),
     }
+}
+
+/// Register the built-in `Maybe`/`Result` constructors: `Some`/`Ok`/`Err` take
+/// one positional field; `None` is a bare singleton value. (User declarations
+/// can still shadow these.)
+fn register_builtin_types(globals: &mut HashMap<String, Value>) {
+    let single_field = |type_name: &str, variant: &str| {
+        Value::Constructor(Rc::new(Constructor {
+            type_name: type_name.to_string(),
+            variant: variant.to_string(),
+            field_names: vec![None],
+        }))
+    };
+    globals.insert("Some".to_string(), single_field("Maybe", "Some"));
+    globals.insert("Ok".to_string(), single_field("Result", "Ok"));
+    globals.insert("Err".to_string(), single_field("Result", "Err"));
+    globals.insert(
+        "None".to_string(),
+        Value::Data(Rc::new(DataValue {
+            type_name: "Maybe".to_string(),
+            variant: "None".to_string(),
+            fields: Vec::new(),
+        })),
+    );
 }
 
 /// The built-in (native) functions, registered into every program's globals.
@@ -511,6 +543,54 @@ fn try_match(pattern: &Pattern, value: &Value, env: &Env) -> Option<Env> {
     }
 }
 
+/// The `?` try operator: unwrap a present value (`Some`/`Ok`), or short-circuit
+/// the enclosing function by returning the failure (`None`/`Err`) — signalled
+/// via `RuntimeError::Return`, caught at the closure boundary in `apply_values`.
+fn eval_try(value: Value) -> Result<Value, RuntimeError> {
+    if let Value::Data(data) = &value {
+        match (data.type_name.as_str(), data.variant.as_str()) {
+            ("Maybe", "Some") | ("Result", "Ok") => {
+                return Ok(data.fields.first().map_or(Value::Unit, |(_, v)| v.clone()));
+            }
+            ("Maybe", "None") | ("Result", "Err") => {
+                return Err(RuntimeError::early_return(value));
+            }
+            _ => {}
+        }
+    }
+    Err(RuntimeError::new(format!(
+        "`?` expects a Maybe or Result, got {}",
+        value.kind()
+    )))
+}
+
+/// The `?.` safe-navigation operator: map a field access *inside* a `Maybe`/
+/// `Result`. `Some(v)?.y` → `Some(v.y)`, `None?.y` → `None` (and likewise for
+/// `Ok`/`Err`) — so a chain stays wrapped and short-circuits on the empty case.
+fn eval_safe_field(object: Value, name: &str) -> Result<Value, RuntimeError> {
+    if let Value::Data(data) = &object {
+        match (data.type_name.as_str(), data.variant.as_str()) {
+            // Empty/failure case: pass straight through, unchanged.
+            ("Maybe", "None") | ("Result", "Err") => return Ok(object),
+            // Present case: access the field, re-wrap in the same variant.
+            ("Maybe", "Some") | ("Result", "Ok") => {
+                let inner = data.fields.first().map_or(Value::Unit, |(_, v)| v.clone());
+                let field = eval_field(&inner, name)?;
+                return Ok(Value::Data(Rc::new(DataValue {
+                    type_name: data.type_name.clone(),
+                    variant: data.variant.clone(),
+                    fields: vec![(None, field)],
+                })));
+            }
+            _ => {}
+        }
+    }
+    Err(RuntimeError::new(format!(
+        "`?.` expects a Maybe or Result, got {}",
+        object.kind()
+    )))
+}
+
 /// Read field `name` from a `Data` value.
 fn eval_field(object: &Value, name: &str) -> Result<Value, RuntimeError> {
     let Value::Data(data) = object else {
@@ -707,7 +787,7 @@ mod tests {
         let items = parse_program(src).expect("test program should parse");
         eval_program(&items)
             .expect_err("test program should fail at runtime")
-            .message
+            .message()
     }
 
     /// Parse then evaluate in an empty environment, unwrapping — for tests with
@@ -755,7 +835,7 @@ mod tests {
     fn run_err(src: &str) -> String {
         eval(&parse(src).expect("test input should parse"), &Env::new())
             .expect_err("test input should fail at runtime")
-            .message
+            .message()
     }
 
     #[test]
@@ -1022,7 +1102,7 @@ mod tests {
     fn a_program_without_main_is_an_error() {
         let items = parse_program("foo() = 1").expect("should parse");
         assert_eq!(
-            eval_program(&items).expect_err("should fail").message,
+            eval_program(&items).expect_err("should fail").message(),
             "no `main` function"
         );
     }
@@ -1439,6 +1519,117 @@ mod tests {
         assert_eq!(
             run_program("withTen(f) = f(10)  main() = { use n <- withTen()  n + 1 }"),
             Value::Int(11)
+        );
+    }
+
+    #[test]
+    fn maybe_is_built_in() {
+        assert_eq!(
+            run_program("main() = match Some(5) { Some(x) => x  None => 0 }"),
+            Value::Int(5)
+        );
+        assert_eq!(
+            run_program("main() = match None { Some(x) => x  None => 0 }"),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn result_is_built_in() {
+        assert_eq!(
+            run_program("main() = match Ok(7) { Ok(v) => v  Err(e) => 0 }"),
+            Value::Int(7)
+        );
+        assert_eq!(
+            run_program("main() = match Err(9) { Ok(v) => v  Err(e) => e }"),
+            Value::Int(9)
+        );
+    }
+
+    #[test]
+    fn built_in_options_have_structural_equality() {
+        assert_eq!(run_program("main() = Some(1) == Some(1)"), Value::Bool(true));
+        assert_eq!(run_program("main() = Some(1) == None"), Value::Bool(false));
+    }
+
+    #[test]
+    fn try_unwraps_a_present_value() {
+        assert_eq!(
+            run_program("f(m) = { let x = m?  Some(x + 1) }  main() = match f(Some(10)) { Some(v) => v  None => 0 }"),
+            Value::Int(11)
+        );
+    }
+
+    #[test]
+    fn try_short_circuits_on_none() {
+        // `m?` on None returns None *from f* — so f(None) is None.
+        assert_eq!(
+            run_program("f(m) = { let x = m?  Some(x + 1) }  main() = match f(None) { Some(v) => v  None => 0 }"),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn try_propagates_err() {
+        assert_eq!(
+            run_program("f(r) = { let x = r?  Ok(x) }  main() = match f(Err(5)) { Ok(v) => v  Err(e) => e }"),
+            Value::Int(5)
+        );
+    }
+
+    #[test]
+    fn try_returns_from_the_nearest_enclosing_function_only() {
+        // inner short-circuits to None; outer keeps going and returns 999.
+        let src = "inner(m) = { let x = m?  x * 10 }  \
+                   outer() = { let a = inner(None)  999 }  \
+                   main() = outer()";
+        assert_eq!(run_program(src), Value::Int(999));
+    }
+
+    #[test]
+    fn try_on_a_non_option_is_an_error() {
+        assert_eq!(
+            run_program_err("main() = { let x = 5?  x }"),
+            "`?` expects a Maybe or Result, got Int"
+        );
+    }
+
+    #[test]
+    fn safe_nav_accesses_a_field_inside_some() {
+        assert_eq!(
+            run_program(r#"prod User(name: Str)  main() = match Some(User("Bo"))?.name { Some(n) => n  None => "?" }"#),
+            Value::Str("Bo".into())
+        );
+    }
+
+    #[test]
+    fn safe_nav_passes_none_through() {
+        assert_eq!(
+            run_program(r#"main() = match None?.name { Some(n) => n  None => "absent" }"#),
+            Value::Str("absent".into())
+        );
+    }
+
+    #[test]
+    fn safe_nav_chains() {
+        let src = "prod Addr(zip: Int)  prod User(addr: Addr)  \
+                   main() = match Some(User(Addr(90210)))?.addr?.zip { Some(z) => z  None => 0 }";
+        assert_eq!(run_program(src), Value::Int(90210));
+    }
+
+    #[test]
+    fn safe_nav_passes_err_through() {
+        assert_eq!(
+            run_program("main() = match Err(7)?.name { Ok(v) => v  Err(e) => e }"),
+            Value::Int(7)
+        );
+    }
+
+    #[test]
+    fn safe_nav_on_a_non_option_is_an_error() {
+        assert_eq!(
+            run_program_err("main() = 5?.x"),
+            "`?.` expects a Maybe or Result, got Int"
         );
     }
 
