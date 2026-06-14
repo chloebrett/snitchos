@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::{BinOp, Expr, StrSegment, UnOp};
+use crate::ast::{BinOp, Expr, Stmt, StrSegment, UnOp};
 use crate::lexer::{StrPart, Token, lex};
 
 /// A parse error. Carries a human-readable message; source positions are a
@@ -87,7 +87,8 @@ fn collect_placeholders(expr: &mut Expr, params: &mut BTreeSet<String>) {
         | Expr::Bool(_)
         | Expr::Var(_)
         | Expr::Str(_)
-        | Expr::Lambda { .. } => {}
+        | Expr::Lambda { .. }
+        | Expr::Block { .. } => {}
     }
 }
 
@@ -431,6 +432,48 @@ impl Parser {
         }
     }
 
+    /// Parse a block `{ stmt* result? }`. The `{` is already consumed.
+    /// Statements are separated by maximal munch (no semicolons); the trailing
+    /// expression, if any, is the block's value.
+    fn parse_block(&mut self) -> Result<Expr, ParseError> {
+        let mut stmts = Vec::new();
+        let mut result = None;
+        while !matches!(self.peek(), Token::RBrace) {
+            if matches!(self.peek(), Token::Eof) {
+                return Err(ParseError::new("unterminated block: expected '}'"));
+            }
+            if matches!(self.peek(), Token::Let) {
+                stmts.push(self.parse_let()?);
+            } else {
+                let expr = self.parse_expr(0)?;
+                if matches!(self.peek(), Token::RBrace) {
+                    result = Some(Box::new(expr));
+                } else {
+                    stmts.push(Stmt::Expr(expr));
+                }
+            }
+        }
+        self.bump(); // '}'
+        Ok(Expr::Block { stmts, result })
+    }
+
+    /// Parse a `let` binding statement: `let mut? name = value`.
+    fn parse_let(&mut self) -> Result<Stmt, ParseError> {
+        self.bump(); // 'let'
+        let mutable = matches!(self.peek(), Token::Mut);
+        if mutable {
+            self.bump();
+        }
+        let name = self.expect_ident("binding name")?;
+        self.expect(&Token::Eq, "'=' in let binding")?;
+        let value = self.parse_expr(0)?;
+        Ok(Stmt::Let {
+            name,
+            mutable,
+            value,
+        })
+    }
+
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
         // Clone the leading token so its borrow ends before we recurse.
         Ok(match self.bump().clone() {
@@ -446,6 +489,7 @@ impl Parser {
                 inner
             }
             Token::LBracket => self.parse_collection()?,
+            Token::LBrace => self.parse_block()?,
             other => return Err(ParseError::new(format!("unexpected token: {other:?}"))),
         })
     }
@@ -734,5 +778,35 @@ mod tests {
     #[test]
     fn string_works_as_map_key() {
         insta::assert_debug_snapshot!(p(r#"["host": 1]"#));
+    }
+
+    #[test]
+    fn parses_block_with_result_only() {
+        insta::assert_debug_snapshot!(p("{ 1 + 2 }"));
+    }
+
+    #[test]
+    fn parses_empty_block() {
+        insta::assert_debug_snapshot!(p("{}"));
+    }
+
+    #[test]
+    fn parses_block_with_let() {
+        insta::assert_debug_snapshot!(p("{ let x = 1  x + 2 }"));
+    }
+
+    #[test]
+    fn parses_block_with_let_mut() {
+        insta::assert_debug_snapshot!(p("{ let mut n = 0  n }"));
+    }
+
+    #[test]
+    fn maximal_munch_separates_statements() {
+        insta::assert_debug_snapshot!(p("{ f(x)  g(y)  z }"));
+    }
+
+    #[test]
+    fn block_as_lambda_body() {
+        insta::assert_debug_snapshot!(p("x -> { let y = x * 2  y + 1 }"));
     }
 }

@@ -1,0 +1,26 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"{ let x = 1  x + 2 }\")"
+---
+Block {
+    stmts: [
+        Let {
+            name: "x",
+            mutable: false,
+            value: Int(
+                1,
+            ),
+        },
+    ],
+    result: Some(
+        Binary {
+            op: Add,
+            left: Var(
+                "x",
+            ),
+            right: Int(
+                2,
+            ),
+        },
+    ),
+}

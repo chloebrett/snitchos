@@ -1,0 +1,37 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"{ f(x)  g(y)  z }\")"
+---
+Block {
+    stmts: [
+        Expr(
+            Call {
+                callee: Var(
+                    "f",
+                ),
+                args: [
+                    Var(
+                        "x",
+                    ),
+                ],
+            },
+        ),
+        Expr(
+            Call {
+                callee: Var(
+                    "g",
+                ),
+                args: [
+                    Var(
+                        "y",
+                    ),
+                ],
+            },
+        ),
+    ],
+    result: Some(
+        Var(
+            "z",
+        ),
+    ),
+}

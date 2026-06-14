@@ -1,0 +1,18 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"{ 1 + 2 }\")"
+---
+Block {
+    stmts: [],
+    result: Some(
+        Binary {
+            op: Add,
+            left: Int(
+                1,
+            ),
+            right: Int(
+                2,
+            ),
+        },
+    ),
+}

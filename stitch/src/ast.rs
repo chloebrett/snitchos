@@ -64,6 +64,25 @@ pub enum Expr {
     /// A string literal, as a sequence of literal text and `{expr}`
     /// interpolations. A plain string is a single `Lit` segment.
     Str(Vec<StrSegment>),
+    /// A block: zero or more statements then an optional result expression.
+    /// The block evaluates to `result` (or unit if absent).
+    Block {
+        stmts: Vec<Stmt>,
+        result: Option<Box<Expr>>,
+    },
+}
+
+/// A statement inside a block.
+#[derive(Debug, PartialEq)]
+pub enum Stmt {
+    /// `let name = value` / `let mut name = value` (type annotations later).
+    Let {
+        name: String,
+        mutable: bool,
+        value: Expr,
+    },
+    /// An expression evaluated for its effect.
+    Expr(Expr),
 }
 
 /// One piece of a string literal in the AST.
