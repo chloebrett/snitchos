@@ -376,4 +376,83 @@ impl Endpoint {
         }
         if ret == 0 { Ok([w0, w1, w2, w3]) } else { Err(Denied) }
     }
+
+    /// RPC `call`: send a request and **block until the server replies**,
+    /// returning the response words. The caller's open span stays open across
+    /// the whole round-trip, so the server's handling span nests under it.
+    /// `Err(Denied)` if the kernel refused the capability.
+    pub fn call(self, msg: [u64; MSG_WORDS]) -> Result<[u64; MSG_WORDS], Denied> {
+        let ret: usize;
+        let r0: u64;
+        let r1: u64;
+        let r2: u64;
+        let r3: u64;
+        // SAFETY: `ecall`; the kernel validates the handle (needs `SEND`),
+        // delivers the request, mints a reply cap into the server, parks us
+        // until `reply`, then writes status in a0 and the response in a1..=a4.
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::Call as usize,
+                inlateout("a0") self.handle => ret,
+                inlateout("a1") msg[0] => r0,
+                inlateout("a2") msg[1] => r1,
+                inlateout("a3") msg[2] => r2,
+                inlateout("a4") msg[3] => r3,
+            );
+        }
+        if ret == 0 { Ok([r0, r1, r2, r3]) } else { Err(Denied) }
+    }
+
+    /// Receive a message **and** the reply handle: `Some(handle)` if it came
+    /// from a `call` (answer it with [`reply`]), `None` for a one-way `send`.
+    /// The RPC server's receive primitive.
+    pub fn receive_with_reply(self) -> Result<([u64; MSG_WORDS], Option<usize>), Denied> {
+        let ret: usize;
+        let w0: u64;
+        let w1: u64;
+        let w2: u64;
+        let w3: u64;
+        let reply_handle: usize;
+        // SAFETY: as `receive`, plus the kernel returns the reply-cap handle in
+        // a5 (0 = the message was a one-way `send`).
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::Receive as usize,
+                inlateout("a0") self.handle => ret,
+                out("a1") w0,
+                out("a2") w1,
+                out("a3") w2,
+                out("a4") w3,
+                out("a5") reply_handle,
+            );
+        }
+        if ret != 0 {
+            return Err(Denied);
+        }
+        let reply = (reply_handle != 0).then_some(reply_handle);
+        Ok(([w0, w1, w2, w3], reply))
+    }
+}
+
+/// Answer an RPC: send `msg` back through a `reply_handle` obtained from
+/// [`Endpoint::receive_with_reply`]. Wakes the blocked caller and consumes the
+/// one-shot reply cap. `Err(Denied)` if the handle is not a live reply cap.
+pub fn reply(reply_handle: usize, msg: [u64; MSG_WORDS]) -> Result<(), Denied> {
+    let ret: usize;
+    // SAFETY: `ecall`; the kernel resolves + consumes the reply cap, stashes
+    // the response, and wakes the caller. a0 returns 0 on success.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::Reply as usize,
+            inlateout("a0") reply_handle => ret,
+            in("a1") msg[0],
+            in("a2") msg[1],
+            in("a3") msg[2],
+            in("a4") msg[3],
+        );
+    }
+    if ret == 0 { Ok(()) } else { Err(Denied) }
 }

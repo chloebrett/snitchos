@@ -138,6 +138,7 @@ catalog! {
     wfi "ipc-trace-crosses"               scenarios::ipc_trace_crosses              [userspace, ipc] {"ipc"};
     wfi "ipc-telemetry"                   scenarios::ipc_telemetry                  [userspace, ipc] {"ipc"};
     wfi "ipc-wakeup-is-prompt"            scenarios::ipc_wakeup_is_prompt           [userspace, ipc] {"ipc"};
+    wfi "rpc-round-trips"                 scenarios::rpc_round_trips                [userspace, ipc] {"ipc-rpc"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back

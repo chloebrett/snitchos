@@ -193,6 +193,8 @@ fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::DebugWrite) => handle_debug_write(frame),
         Some(Syscall::Send) => handle_send(frame),
         Some(Syscall::Receive) => handle_receive(frame),
+        Some(Syscall::Call) => handle_call(frame),
+        Some(Syscall::Reply) => handle_reply(frame),
         None => {
             let n = frame.a7 as u8;
             refuse(frame, n, protocol::RefusalReason::UnknownSyscall);
@@ -345,30 +347,162 @@ fn handle_receive(frame: &mut TrapFrame) {
     };
 
     let me = crate::sched::current_task_id();
-    let (msg, parent, from) = match crate::ipc::receive_begin(ep, me) {
-        crate::ipc::RecvStep::Deliver { msg, parent, from, wake } => {
-            crate::sched::wake(wake);
-            (msg, parent, from)
+    let delivered = match crate::ipc::receive_begin(ep, me) {
+        crate::ipc::RecvStep::Deliver { delivered, wake } => {
+            // Wake the sender only for a one-way `send`. For a `call` the caller
+            // is parked awaiting its reply — we mint it a reply cap instead.
+            if delivered.reply_to.is_none() {
+                crate::sched::wake(wake);
+            }
+            delivered
         }
         crate::ipc::RecvStep::Block => {
             crate::ipc::BLOCKS_TOTAL.fetch_add(1, Ordering::Relaxed);
             crate::sched::block_current();
-            // Resumed: a sender stashed our message + trace context under our id.
+            // Resumed: a sender stashed our message under our id at rendezvous.
             crate::ipc::take_delivered(ep, me)
         }
     };
+
+    // If this was a `call`, mint a one-shot reply cap into *this* (server)
+    // process naming the caller, and hand its handle back in `a5`; a one-way
+    // `send` yields `a5 = 0`.
+    frame.a5 = reply_handle_for(proc, me, delivered.reply_to);
+
     // The message crossed. Count it, and record the topology + trace link on
     // the wire — both at delivery, outside the endpoint critical section.
     crate::ipc::MESSAGES_TOTAL.fetch_add(1, Ordering::Relaxed);
-    crate::tracing::emit_message(ep.0, from.0, me.0, parent);
+    crate::tracing::emit_message(ep.0, delivered.from.0, me.0, delivered.parent);
     // Seed the sender's span as our incoming parent — the next span this task
     // opens (its handling span) becomes a child, so the trace continues across
     // the process boundary.
-    crate::tracing::set_current_parent(parent);
-    frame.a1 = msg[0];
-    frame.a2 = msg[1];
-    frame.a3 = msg[2];
-    frame.a4 = msg[3];
+    crate::tracing::set_current_parent(delivered.parent);
+    frame.a1 = delivered.msg[0];
+    frame.a2 = delivered.msg[1];
+    frame.a3 = delivered.msg[2];
+    frame.a4 = delivered.msg[3];
+    frame.a0 = 0;
+}
+
+/// Mint a one-shot reply cap into `proc` (the receiving server) naming the
+/// blocked `caller`, snitch it as `CapEvent::Transferred`, and return its raw
+/// handle for `receive`'s `a5`. Returns `0` when `reply_to` is `None` (a
+/// one-way `send` — no reply expected). The first cross-process cap insertion:
+/// the kernel grants the server authority to answer exactly this caller once.
+fn reply_handle_for(
+    proc: &crate::process::Process,
+    holder: kernel_core::sched::TaskId,
+    reply_to: Option<kernel_core::sched::TaskId>,
+) -> u64 {
+    use kernel_core::cap::{Capability, Object, Rights};
+
+    let Some(caller) = reply_to else {
+        return 0;
+    };
+    let handle = proc
+        .caps
+        .lock()
+        .insert_once(Capability { object: Object::Reply { caller }, rights: Rights::NONE });
+    crate::tracing::emit_cap_transferred(
+        crate::process::next_cap_id(),
+        holder.0,
+        protocol::CapObject::Reply,
+        Rights::NONE.bits(),
+    );
+    u64::from(handle.raw())
+}
+
+/// RPC `call`: `a0` = `Endpoint` handle (needs `SEND`), `a1..=a4` = request
+/// words. Delivers the request (marked as a call so the receiver mints a reply
+/// cap), then parks the caller until `reply` wakes it — at which point the
+/// response words are written into `a1..=a4`. The caller's span stays open
+/// across the round-trip, so the server's handling span nests under it.
+fn handle_call(frame: &mut TrapFrame) {
+    use kernel_core::cap::{invoke_send, Handle};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::Call as u8;
+    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
+    // SAFETY: as in `handle_send`.
+    let Some(proc) = (unsafe { proc.as_ref() }) else {
+        refuse(frame, sc, protocol::RefusalReason::NoProcess);
+        return;
+    };
+
+    let ep = {
+        let caps = proc.caps.lock();
+        invoke_send(&caps, Handle::from_raw(frame.a0 as u32))
+    };
+    let ep = match ep {
+        Ok(ep) => ep,
+        Err(denied) => {
+            refuse(frame, sc, refusal_for(denied));
+            return;
+        }
+    };
+
+    let me = crate::sched::current_task_id();
+    let req = [frame.a1, frame.a2, frame.a3, frame.a4];
+    let parent = crate::tracing::current_span_id();
+    match crate::ipc::call_begin(ep, me, req, parent) {
+        crate::ipc::SendStep::Deliver { wake } => crate::sched::wake(wake),
+        crate::ipc::SendStep::Block => {}
+    }
+    // The caller always parks awaiting the reply — woken by `reply`, never by
+    // the request rendezvous (a receiver taking a call mints a reply cap
+    // instead of waking us).
+    crate::ipc::BLOCKS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    crate::sched::block_current();
+
+    // Resumed by `reply`: deliver the response words.
+    let resp = crate::ipc::take_reply(me);
+    frame.a1 = resp[0];
+    frame.a2 = resp[1];
+    frame.a3 = resp[2];
+    frame.a4 = resp[3];
+    frame.a0 = 0;
+}
+
+/// RPC `reply`: `a0` = reply-cap handle (from `receive`'s `a5`), `a1..=a4` =
+/// response words. Resolves + **consumes** the one-shot reply cap (a second
+/// `reply` is refused), stashes the response for the blocked caller, and wakes
+/// it. The reply is point-to-point (server→caller), not endpoint-mediated.
+fn handle_reply(frame: &mut TrapFrame) {
+    use kernel_core::cap::{invoke_reply, Handle};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::Reply as u8;
+    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
+    // SAFETY: as in `handle_send`.
+    let Some(proc) = (unsafe { proc.as_ref() }) else {
+        refuse(frame, sc, protocol::RefusalReason::NoProcess);
+        return;
+    };
+
+    let handle = Handle::from_raw(frame.a0 as u32);
+    // Resolve then consume the reply cap under the server's caps lock; drop the
+    // lock before waking (never hold a Mutex across the path that may switch).
+    let resolved = {
+        let mut caps = proc.caps.lock();
+        match invoke_reply(&caps, handle) {
+            Ok(caller) => {
+                caps.consume(handle);
+                Ok(caller)
+            }
+            Err(denied) => Err(denied),
+        }
+    };
+    let caller = match resolved {
+        Ok(caller) => caller,
+        Err(denied) => {
+            refuse(frame, sc, refusal_for(denied));
+            return;
+        }
+    };
+
+    let resp = [frame.a1, frame.a2, frame.a3, frame.a4];
+    crate::ipc::stash_reply(caller, resp);
+    crate::sched::wake(caller);
     frame.a0 = 0;
 }
 

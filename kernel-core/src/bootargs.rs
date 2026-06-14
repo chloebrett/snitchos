@@ -97,6 +97,10 @@ pub enum WorkloadKind {
     /// an inline message; B receives it and re-emits the payload. Time-sliced on
     /// one hart. The milestone-heart workload.
     Ipc,
+    /// v0.9b RPC: an `rpc-client` `call`s an `rpc-server` over an endpoint; the
+    /// server `receive`s, does work, and `reply`s through a one-shot reply cap.
+    /// The client blocks across the round-trip (nested-span trace). One hart.
+    IpcRpc,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -159,6 +163,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "priorities" => Some(WorkloadKind::Priorities),
             "block-wake" => Some(WorkloadKind::BlockWake),
             "ipc" => Some(WorkloadKind::Ipc),
+            "ipc-rpc" => Some(WorkloadKind::IpcRpc),
             _ => None,
         })
 }
@@ -267,6 +272,13 @@ mod tests {
     #[test]
     fn selects_ipc() {
         assert_eq!(select("workload=ipc"), Some(WorkloadKind::Ipc));
+    }
+
+    #[test]
+    fn selects_ipc_rpc() {
+        assert_eq!(select("workload=ipc-rpc"), Some(WorkloadKind::IpcRpc));
+        // Must not be mis-parsed as the one-way `ipc` workload.
+        assert_ne!(select("workload=ipc-rpc"), Some(WorkloadKind::Ipc));
     }
 
     #[test]

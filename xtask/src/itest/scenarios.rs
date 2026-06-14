@@ -1229,6 +1229,27 @@ pub fn ipc_wakeup_is_prompt(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.9b RPC round-trip (`workload=ipc-rpc`): the client `call`s with request
+/// 21 and blocks; the server `receive`s it with a one-shot reply cap, computes
+/// `21 * 2`, and `reply`s; the client's `call` returns 42 and re-emits it.
+/// Asserting `snitchos.user.telemetry_total == 42` proves the whole round-trip:
+/// request crossed (server saw 21), server computed, reply crossed back via the
+/// minted reply cap (client got 42). A hang (no reply / lost wakeup) trips the
+/// timeout.
+pub fn rpc_round_trips(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value == 42)
+    })
+    .ok_or(
+        "no snitchos.user.telemetry_total == 42 within 30s — the RPC round-trip didn't \
+         complete (request didn't cross, server didn't reply, or the response didn't \
+         return to the client)",
+    )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

@@ -362,7 +362,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::HeapGrow)
         | Some(WorkloadKind::UserHog)
         | Some(WorkloadKind::Priorities)
-        | Some(WorkloadKind::Ipc) => {}
+        | Some(WorkloadKind::Ipc)
+        | Some(WorkloadKind::IpcRpc) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -415,6 +416,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::Priorities
                     | WorkloadKind::BlockWake
                     | WorkloadKind::Ipc
+                    | WorkloadKind::IpcRpc
             )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
@@ -502,6 +504,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
             let _ = sched::spawn_on(1, "ipc_receiver", user::ipc_receiver_main_entry);
             let _ = sched::spawn_on(1, "ipc_sender", user::ipc_sender_main_entry);
+        }
+        // v0.9b RPC: client + server on hart 1 over the shared endpoint. Server
+        // spawned first so it can be waiting (or the client blocks until it is).
+        Some(WorkloadKind::IpcRpc) => {
+            user::init_metric();
+            crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
+            let _ = sched::spawn_on(1, "rpc_server", user::rpc_server_main_entry);
+            let _ = sched::spawn_on(1, "rpc_client", user::rpc_client_main_entry);
         }
         _ => {}
     }

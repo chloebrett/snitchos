@@ -75,8 +75,20 @@ pub enum Syscall {
     /// Receive an inline message from a synchronous IPC endpoint (v0.9). `a0` =
     /// `Endpoint` capability handle (needs `RECV`). Blocks until a sender
     /// rendezvouses; returns `0` in `a0` and the four message words in
-    /// `a1..=a4`, or `usize::MAX` in `a0` if refused.
+    /// `a1..=a4`, or `usize::MAX` in `a0` if refused. For an RPC `call`, the
+    /// reply-cap handle is returned in `a5` (`0` for a one-way `send`).
     Receive = 8,
+    /// RPC `call` over a synchronous endpoint (v0.9b): send a request **and**
+    /// block for a reply. `a0`=`Endpoint` handle (needs `SEND`), `a1..=a4`=
+    /// request words. The kernel mints a one-shot reply cap into the receiver
+    /// at the rendezvous; the caller parks until `reply`. Returns `0` in `a0`
+    /// and the reply words in `a1..=a4` (or `usize::MAX` if refused).
+    Call = 9,
+    /// Answer an RPC (v0.9b). `a0`=reply-cap handle (from `receive`'s `a5`),
+    /// `a1..=a4`=response words. Wakes the blocked caller and **consumes** the
+    /// one-shot reply cap (a second `reply` is refused). Returns `0`, or
+    /// `usize::MAX` if the handle is not a live reply cap.
+    Reply = 10,
 }
 
 impl Syscall {
@@ -95,6 +107,8 @@ impl Syscall {
             6 => Some(Self::DebugWrite),
             7 => Some(Self::Send),
             8 => Some(Self::Receive),
+            9 => Some(Self::Call),
+            10 => Some(Self::Reply),
             _ => None,
         }
     }
@@ -115,6 +129,8 @@ mod tests {
         assert_eq!(Syscall::DebugWrite as usize, 6);
         assert_eq!(Syscall::Send as usize, 7);
         assert_eq!(Syscall::Receive as usize, 8);
+        assert_eq!(Syscall::Call as usize, 9);
+        assert_eq!(Syscall::Reply as usize, 10);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
@@ -125,7 +141,8 @@ mod tests {
         assert_eq!(Syscall::from_usize(6), Some(Syscall::DebugWrite));
         assert_eq!(Syscall::from_usize(7), Some(Syscall::Send));
         assert_eq!(Syscall::from_usize(8), Some(Syscall::Receive));
-        assert_eq!(Syscall::from_usize(9), None);
+        assert_eq!(Syscall::from_usize(9), Some(Syscall::Call));
+        assert_eq!(Syscall::from_usize(10), Some(Syscall::Reply));
+        assert_eq!(Syscall::from_usize(11), None);
     }
 }
-

@@ -55,6 +55,11 @@ pub static USER_HOG_ELF: &[u8] = include_bytes!(env!("SNITCHOS_USER_HOG_ELF"));
 pub static IPC_SENDER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_IPC_SENDER_ELF"));
 pub static IPC_RECEIVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_IPC_RECEIVER_ELF"));
 
+/// The `workload=ipc-rpc` programs: `rpc-client` `call`s and `rpc-server`
+/// `reply`s over the shared endpoint — the v0.9b RPC round-trip.
+pub static RPC_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_RPC_CLIENT_ELF"));
+pub static RPC_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_RPC_SERVER_ELF"));
+
 /// The counter the `EmitMetric` syscall bumps. Registered once on hart 0
 /// (`init_metric`) so the `MetricRegister` frame isn't emitted from inside
 /// the trap handler; the handler (on hart 1) reads it via [`user_metric_id`].
@@ -184,6 +189,19 @@ pub extern "C" fn ipc_sender_main_entry() -> ! {
 pub extern "C" fn ipc_receiver_main_entry() -> ! {
     let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before receiver runs");
     run_ipc(IPC_RECEIVER_ELF, ep, kernel_core::cap::Rights::RECV)
+}
+
+/// Entry for `workload=ipc-rpc`: run the RPC client, granted a `SEND` cap (it
+/// `call`s through the endpoint; the kernel mints its reply cap into the server).
+pub extern "C" fn rpc_client_main_entry() -> ! {
+    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before rpc client runs");
+    run_ipc(RPC_CLIENT_ELF, ep, kernel_core::cap::Rights::SEND)
+}
+
+/// Entry for `workload=ipc-rpc`: run the RPC server, granted a `RECV` cap.
+pub extern "C" fn rpc_server_main_entry() -> ! {
+    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before rpc server runs");
+    run_ipc(RPC_SERVER_ELF, ep, kernel_core::cap::Rights::RECV)
 }
 
 /// Build a fresh address space, grant the process its bootstrap

@@ -424,6 +424,7 @@ fn emit_storm_metrics(m: &Metrics, count: i64) {
         | Some(WorkloadKind::UserHog)
         | Some(WorkloadKind::Priorities)
         | Some(WorkloadKind::BlockWake)
-        | Some(WorkloadKind::Ipc) => {}
+        | Some(WorkloadKind::Ipc)
+        | Some(WorkloadKind::IpcRpc) => {}
     }
 }

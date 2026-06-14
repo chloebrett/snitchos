@@ -37,22 +37,24 @@ pub const MSG_WORDS: usize = 4;
 /// An inline IPC message — the words copied sender→receiver.
 pub type Message = [u64; MSG_WORDS];
 
-/// A message in flight, plus the sender's trace context. `parent` is the
+/// A delivered message + its metadata, handed to the receiver. `parent` is the
 /// sender's innermost open span at send time; the kernel seeds it onto the
-/// receiver so the receiver's handling span becomes a child — the trace
-/// following the message across the process boundary. `SpanId(0)` = no context.
+/// receiver so its handling span becomes a child — the trace following the
+/// message across the process boundary (`SpanId(0)` = no context). `reply_to`
+/// is `Some(caller)` when the message came from a `call` (the receiver mints a
+/// one-shot reply cap for `caller`), `None` for a one-way `send`.
 #[derive(Clone, Copy)]
-struct Pending {
-    msg: Message,
-    parent: SpanId,
-    /// The sending task — recorded so the receiver can emit a `Message` frame
-    /// naming who it came from.
-    from: TaskId,
+pub struct Delivered {
+    pub msg: Message,
+    pub parent: SpanId,
+    /// The sending task — for the `Message` frame's `from`.
+    pub from: TaskId,
+    pub reply_to: Option<TaskId>,
 }
 
-impl Default for Pending {
+impl Default for Delivered {
     fn default() -> Self {
-        Self { msg: [0; MSG_WORDS], parent: SpanId(0), from: TaskId(0) }
+        Self { msg: [0; MSG_WORDS], parent: SpanId(0), from: TaskId(0), reply_to: None }
     }
 }
 
@@ -61,7 +63,7 @@ impl Default for Pending {
 /// are touched only under [`ENDPOINTS`].
 struct Endpoint {
     state: EndpointState,
-    pending: BTreeMap<TaskId, Pending>,
+    pending: BTreeMap<TaskId, Delivered>,
 }
 
 impl Endpoint {
@@ -97,42 +99,54 @@ pub enum SendStep {
 
 /// What the `receive` trap handler must do once the endpoint lock is dropped.
 pub enum RecvStep {
-    /// A sender was waiting; `msg` is its payload (write it into the receiver's
-    /// frame), `parent` its trace context (seed it onto the receiver), `from`
-    /// the sending task (for the `Message` frame) — wake the sender.
-    Deliver { msg: Message, parent: SpanId, from: TaskId, wake: TaskId },
+    /// A sender/caller was waiting; `delivered` carries its payload + metadata,
+    /// `wake` is the sender to wake **iff** it was a one-way `send`
+    /// (`delivered.reply_to == None`). For a `call` the caller is not woken
+    /// here — it awaits the `reply` — and the receiver mints a reply cap.
+    Deliver { delivered: Delivered, wake: TaskId },
     /// No sender; block until one rendezvouses.
     Block,
 }
 
-/// Begin a `send`: drive the pure rendezvous, then either stage the message
-/// (with the sender's `parent` trace context) for a waiting receiver and
-/// report whom to wake, or stash it under `me` for the caller to block on. All
-/// under the endpoint lock; the handler acts after it drops.
+/// Begin a one-way `send` (`reply_to = None`). See [`begin`].
 pub fn send_begin(ep: EndpointId, me: TaskId, msg: Message, parent: SpanId) -> SendStep {
+    begin(ep, me, msg, parent, None)
+}
+
+/// Begin an RPC `call` (`reply_to = Some(me)`): identical request delivery to a
+/// `send`, but the receiver will mint a reply cap and the caller blocks
+/// awaiting the reply rather than being woken at the rendezvous.
+pub fn call_begin(ep: EndpointId, me: TaskId, msg: Message, parent: SpanId) -> SendStep {
+    begin(ep, me, msg, parent, Some(me))
+}
+
+/// Drive the pure rendezvous and stage the message: deliver to a waiting
+/// receiver (report whom to wake) or stash it under `me` to block on. All under
+/// the endpoint lock; the handler acts after it drops.
+fn begin(ep: EndpointId, me: TaskId, msg: Message, parent: SpanId, reply_to: Option<TaskId>) -> SendStep {
     let mut eps = ENDPOINTS.lock();
     let endpoint = &mut eps[ep.0 as usize];
     let state = core::mem::replace(&mut endpoint.state, EndpointState::Idle);
     let (next, action) = on_send(state, me);
     endpoint.state = next;
-    let pending = Pending { msg, parent, from: me };
+    let delivered = Delivered { msg, parent, from: me, reply_to };
     match action {
         RendezvousAction::Rendezvous { peer } => {
             // Deliver to the blocked receiver's slot; it reads this on resume.
-            endpoint.pending.insert(peer, pending);
+            endpoint.pending.insert(peer, delivered);
             SendStep::Deliver { wake: peer }
         }
         RendezvousAction::Block => {
             // Stash my message; a future receiver takes it at rendezvous.
-            endpoint.pending.insert(me, pending);
+            endpoint.pending.insert(me, delivered);
             SendStep::Block
         }
     }
 }
 
-/// Begin a `receive`: drive the pure rendezvous. If a sender was waiting, take
-/// its stashed message + trace context and report whom to wake; otherwise
-/// block.
+/// Begin a `receive`: drive the pure rendezvous. If a sender/caller was
+/// waiting, take its stashed message + metadata and report whom to wake;
+/// otherwise block.
 pub fn receive_begin(ep: EndpointId, me: TaskId) -> RecvStep {
     let mut eps = ENDPOINTS.lock();
     let endpoint = &mut eps[ep.0 as usize];
@@ -141,19 +155,35 @@ pub fn receive_begin(ep: EndpointId, me: TaskId) -> RecvStep {
     endpoint.state = next;
     match action {
         RendezvousAction::Rendezvous { peer } => {
-            let Pending { msg, parent, from } = endpoint.pending.remove(&peer).unwrap_or_default();
-            RecvStep::Deliver { msg, parent, from, wake: peer }
+            let delivered = endpoint.pending.remove(&peer).unwrap_or_default();
+            RecvStep::Deliver { delivered, wake: peer }
         }
         RendezvousAction::Block => RecvStep::Block,
     }
 }
 
-/// Take the message + trace context + sender delivered to `me` while it was
-/// blocked in `receive`. Call once, after `block_current` returns: a sender
-/// stored it under `me`'s id at rendezvous. Defaults to zeros / no parent /
-/// task 0 if (impossibly) absent — never panics.
-pub fn take_delivered(ep: EndpointId, me: TaskId) -> (Message, SpanId, TaskId) {
+/// Take the message delivered to `me` while it was blocked in `receive`. Call
+/// once, after `block_current` returns. Defaults to an empty `Delivered` if
+/// (impossibly) absent — never panics.
+pub fn take_delivered(ep: EndpointId, me: TaskId) -> Delivered {
     let mut eps = ENDPOINTS.lock();
-    let Pending { msg, parent, from } = eps[ep.0 as usize].pending.remove(&me).unwrap_or_default();
-    (msg, parent, from)
+    eps[ep.0 as usize].pending.remove(&me).unwrap_or_default()
+}
+
+/// Point-to-point reply mailbox, keyed by the **caller** awaiting a reply. The
+/// `reply` path stashes the response here and wakes the caller; the caller's
+/// blocked `call` reads it on resume. Separate from endpoint `pending` because
+/// a reply is caller↔server, not endpoint-mediated (the caller is already off
+/// the endpoint by the time it awaits the reply).
+static REPLIES: Mutex<BTreeMap<TaskId, Message>> = Mutex::new(BTreeMap::new());
+
+/// Stash a reply `msg` for `caller` (called by `reply` before waking it).
+pub fn stash_reply(caller: TaskId, msg: Message) {
+    REPLIES.lock().insert(caller, msg);
+}
+
+/// Take the reply delivered to `me` (called by `call` after `block_current`
+/// returns). Defaults to zeros if absent — never panics.
+pub fn take_reply(me: TaskId) -> Message {
+    REPLIES.lock().remove(&me).unwrap_or([0; MSG_WORDS])
 }

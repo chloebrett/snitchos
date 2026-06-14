@@ -266,6 +266,23 @@ pub fn emit_cap_granted(cap_id: u64, holder: u32, object: protocol::CapObject, r
     });
 }
 
+/// Emit a `CapEvent::Transferred` frame — a capability handed from one holder
+/// to another (v0.9b): the kernel minting a one-shot reply cap into the server
+/// `holder` at a `call` rendezvous. `parent_cap_id` is `0` for now (a precise
+/// derivation edge to the originating `call` is a later refinement).
+pub fn emit_cap_transferred(cap_id: u64, holder: u32, object: protocol::CapObject, rights: u32) {
+    emit_frame(&Frame::CapEvent {
+        kind: protocol::CapEventKind::Transferred,
+        cap_id,
+        parent_cap_id: 0,
+        holder,
+        object,
+        rights,
+        t: timestamp(),
+        hart_id: crate::percpu::current_hartid() as u8,
+    });
+}
+
 /// Emit a `ContextSwitch` frame. Called by `sched::yield_now` on
 /// every actual switch. Makes scheduler decisions first-class
 /// traceable events.

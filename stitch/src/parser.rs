@@ -6,14 +6,30 @@
 use crate::ast::{BinOp, Expr, UnOp};
 use crate::lexer::{Token, lex};
 
-/// Parse Stitch source into an expression.
+/// A parse error. Carries a human-readable message; source positions are a
+/// later increment (the lexer doesn't track spans yet).
+#[derive(Debug, PartialEq)]
+pub struct ParseError {
+    pub message: String,
+}
+
+impl ParseError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+/// Parse Stitch source into an expression, or return a `ParseError`.
 ///
-/// # Panics
-/// The v0 parser is happy-path only: it panics on an unexpected token.
-/// Proper `Result`-based parse errors are a later increment.
-#[must_use]
-pub fn parse(src: &str) -> Expr {
-    Parser::new(src).parse_expr(0)
+/// # Errors
+/// Returns `Err` on an unexpected/missing token or trailing input.
+pub fn parse(src: &str) -> Result<Expr, ParseError> {
+    let mut parser = Parser::new(src);
+    let expr = parser.parse_expr(0)?;
+    parser.expect(&Token::Eof, "end of input")?;
+    Ok(expr)
 }
 
 /// Map an infix-operator token to its `BinOp`, or `None` if it isn't one.
