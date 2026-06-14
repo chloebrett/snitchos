@@ -176,6 +176,10 @@ pub enum Frame<'a> {
 pub enum CapEventKind {
   /// A new capability was created and handed to `holder`.
   Granted,
+  /// A capability was handed from one holder to another (v0.9b): the kernel
+  /// minting a one-shot reply cap into the server at a `call` rendezvous is the
+  /// first instance. `parent_cap_id` is the cap it derived from.
+  Transferred,
 }
 
 /// What a [`Frame::CapEvent`]'s capability points at. v0.7b has one object
@@ -189,6 +193,9 @@ pub enum CapObject {
   /// A synchronous IPC endpoint (v0.9). The bound endpoint id lives
   /// kernel-side; this wire tag attributes the grant to the endpoint kind.
   Endpoint,
+  /// A one-shot reply authority (v0.9b) — the cap the kernel mints into a
+  /// server so it can answer a blocked `call`er exactly once.
+  Reply,
 }
 
 /// Why the kernel refused a syscall (the `reason` in [`Frame::SyscallRefused`]).
@@ -334,6 +341,29 @@ mod tests {
       to: 5,
       parent_span: SpanId(42),
       t: 1234,
+      hart_id: 1,
+    };
+
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+
+    assert_eq!(frame, decoded);
+  }
+
+  /// Roundtrip a `Frame::CapEvent` carrying the `Transferred` kind + the
+  /// `Reply` object — the v0.9b reply-cap grant (a derivation-tree edge:
+  /// the reply cap derived from the `call`).
+  #[test]
+  fn cap_event_transferred_reply_roundtrips() {
+    let frame = Frame::CapEvent {
+      kind: CapEventKind::Transferred,
+      cap_id: 4,
+      parent_cap_id: 1,
+      holder: 8,
+      object: CapObject::Reply,
+      rights: 0,
+      t: 3456,
       hart_id: 1,
     };
 
