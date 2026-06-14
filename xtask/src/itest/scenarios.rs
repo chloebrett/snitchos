@@ -1499,6 +1499,24 @@ pub fn fs_create_then_stat(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.10 FS `write`/`read` (`workload=fs`), step 3b: the client writes bytes to
+/// the created file (data rides in via `CopyFromCaller`) and reads them back
+/// (out via `CopyToCaller`). The client emits a sentinel only when the bytes
+/// read back equal the bytes written — so this asserts the cross-AS copy works
+/// in *both* directions through `RamFs::write`/`read`.
+pub fn fs_write_read_roundtrip(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value == 0x317E)
+    })
+    .ok_or(
+        "client didn't confirm write→read round-trip within 30s — bytes didn't survive the \
+         cross-AS copy both ways through the FS",
+    )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

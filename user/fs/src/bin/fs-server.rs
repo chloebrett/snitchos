@@ -16,11 +16,15 @@
 use fs_core::{Filesystem, FsError, InodeId};
 use fs_proto::{Badge, FileRights, Request, Response};
 use ramfs::RamFs;
-use snitchos_user::{copy_from_caller, endpoint, entry, reply, reply_with_cap, rights};
+use snitchos_user::{copy_from_caller, copy_to_caller, endpoint, entry, reply, reply_with_cap, rights};
 
 /// Largest filename the server will pull across in one `create` (≤ the kernel's
 /// per-copy cap). Names longer than this are refused.
 const NAME_CAP: usize = 64;
+
+/// Server-side scratch for one `read`/`write` payload (≤ the kernel's per-copy
+/// cap). Larger transfers are the client's job to chunk by offset.
+const DATA_CAP: usize = 256;
 
 #[entry]
 fn main() {
@@ -53,7 +57,32 @@ fn main() {
             Ok(Request::Create { name, kind }) => {
                 create(&mut fs, reply_handle, inode, name, kind);
             }
-            // Remaining payload ops (read/write/lookup/remove/readdir): later steps.
+            Ok(Request::Write { offset, src }) => {
+                // Pull the caller's data across, then write it into the file.
+                let mut scratch = [0u8; DATA_CAP];
+                let resp = match copy_from_caller(reply_handle, src.ptr as usize, src.len as usize, scratch.as_mut_ptr() as usize) {
+                    Ok(n) => match fs.write(inode, offset, &scratch[..n]) {
+                        Ok(written) => Response::Count(written as u64),
+                        Err(e) => Response::Err(e),
+                    },
+                    Err(_) => Response::Err(FsError::Unsupported),
+                };
+                let _ = reply(reply_handle, resp.encode());
+            }
+            Ok(Request::Read { offset, dst }) => {
+                // Read into scratch, then push it out to the caller's buffer.
+                let mut scratch = [0u8; DATA_CAP];
+                let want = (dst.len as usize).min(DATA_CAP);
+                let resp = match fs.read(inode, offset, &mut scratch[..want]) {
+                    Ok(n) => match copy_to_caller(reply_handle, scratch.as_ptr() as usize, n, dst.ptr as usize) {
+                        Ok(_) => Response::Count(n as u64),
+                        Err(_) => Response::Err(FsError::Unsupported),
+                    },
+                    Err(e) => Response::Err(e),
+                };
+                let _ = reply(reply_handle, resp.encode());
+            }
+            // Remaining ops (lookup/remove/readdir): Step 4.
             Ok(_) => {
                 let _ = reply(reply_handle, Response::Err(FsError::Unsupported).encode());
             }

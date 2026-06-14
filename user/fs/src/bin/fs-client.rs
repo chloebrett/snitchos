@@ -60,4 +60,30 @@ fn main() {
     {
         let _ = telemetry().emit(0x5C7E);
     }
+
+    // Write "hi" (data rides in via CopyFromCaller), then read it back (out via
+    // CopyToCaller) and confirm the bytes survived the round-trip both ways.
+    let data = b"hi";
+    let write = Request::Write {
+        offset: 0,
+        src: UserBuf { ptr: data.as_ptr() as u64, len: data.len() as u64 },
+    };
+    let Ok((_w, _)) = file.call(write.encode()) else {
+        return;
+    };
+
+    let mut buf = [0u8; 2];
+    let read = Request::Read {
+        offset: 0,
+        dst: UserBuf { ptr: buf.as_mut_ptr() as u64, len: buf.len() as u64 },
+    };
+    let Ok((words, _)) = file.call(read.encode()) else {
+        return;
+    };
+    if let Ok(Response::Count(n)) = Response::decode(Op::Read, words)
+        && n == 2
+        && buf == *b"hi"
+    {
+        let _ = telemetry().emit(0x317E);
+    }
 }
