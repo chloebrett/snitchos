@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Pattern, Stmt, UnOp};
+use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Pattern, Stmt, StrSegment, UnOp};
 use crate::env::Env;
 use crate::value::{ClosureData, Constructor, DataValue, RuntimeError, Value};
 
@@ -73,6 +73,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         Expr::Int(n) => Ok(Value::Int(*n)),
         Expr::Float(f) => Ok(Value::Float(*f)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
+        Expr::Str(segments) => eval_string(segments),
         // `and`/`or` short-circuit, so they can't pre-evaluate both operands.
         Expr::Binary { op: BinOp::And, left, right } => Ok(Value::Bool(
             as_bool(&eval(left, env)?, "`and`")? && as_bool(&eval(right, env)?, "`and`")?,
@@ -193,6 +194,23 @@ fn construct(ctor: &Constructor, args: &[Arg], env: &Env) -> Result<Value, Runti
     })))
 }
 
+/// Evaluate a string literal. v0 handles plain (literal) strings only; an
+/// interpolation segment (`{expr}`) is a deferred increment.
+fn eval_string(segments: &[StrSegment]) -> Result<Value, RuntimeError> {
+    let mut text = String::new();
+    for segment in segments {
+        match segment {
+            StrSegment::Lit(literal) => text.push_str(literal),
+            StrSegment::Interp(_) => {
+                return Err(RuntimeError::new(
+                    "string interpolation is not yet implemented",
+                ));
+            }
+        }
+    }
+    Ok(Value::Str(text.into()))
+}
+
 /// Evaluate a `match`: try each arm's pattern against `subject` in order; the
 /// first that matches (and whose guard, if any, holds) wins. No arm matching is
 /// a runtime error (v0 has no static exhaustiveness check yet).
@@ -241,7 +259,11 @@ fn try_match(pattern: &Pattern, value: &Value, env: &Env) -> Option<Env> {
         Pattern::Or(alternatives) => alternatives
             .iter()
             .find_map(|alternative| try_match(alternative, value, env)),
-        Pattern::Str(_) | Pattern::Tuple(_) => None,
+        Pattern::Str(text) => match value {
+            Value::Str(s) => (s.as_ref() == text).then(|| env.clone()),
+            _ => None,
+        },
+        Pattern::Tuple(_) => None,
     }
 }
 
@@ -888,6 +910,31 @@ mod tests {
         assert_eq!(
             run_program("sum Color = Red | Green | Blue  main() = match Green { Red | Green => 1  Blue => 2 }"),
             Value::Int(1)
+        );
+    }
+
+    #[test]
+    fn evaluates_a_string_literal() {
+        assert_eq!(run(r#""hello""#), Value::Str("hello".into()));
+    }
+
+    #[test]
+    fn strings_have_structural_equality() {
+        assert_eq!(run(r#""a" == "a""#), Value::Bool(true));
+        assert_eq!(run(r#""a" == "b""#), Value::Bool(false));
+    }
+
+    #[test]
+    fn matches_a_string_literal_pattern() {
+        assert_eq!(run(r#"match "hi" { "hi" => 1  _ => 0 }"#), Value::Int(1));
+        assert_eq!(run(r#"match "yo" { "hi" => 1  _ => 0 }"#), Value::Int(0));
+    }
+
+    #[test]
+    fn string_interpolation_is_not_yet_implemented() {
+        assert_eq!(
+            run_err(r#""hi {name}""#),
+            "string interpolation is not yet implemented"
         );
     }
 }

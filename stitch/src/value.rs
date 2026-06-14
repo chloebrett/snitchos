@@ -14,6 +14,9 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// An immutable string. `Rc<str>` so cloning a `Value::Str` is a refcount
+    /// bump, not a copy.
+    Str(Rc<str>),
     /// The unit value `()` — what a block with no trailing expression, and an
     /// expression evaluated only for effect, produce.
     Unit,
@@ -68,6 +71,7 @@ impl Value {
             Value::Int(_) => "Int",
             Value::Float(_) => "Float",
             Value::Bool(_) => "Bool",
+            Value::Str(_) => "Str",
             Value::Unit => "Unit",
             Value::Closure(_) | Value::Constructor(_) => "Function",
             Value::Data(_) => "a record",
@@ -81,6 +85,7 @@ impl fmt::Debug for Value {
             Value::Int(n) => write!(f, "Int({n})"),
             Value::Float(x) => write!(f, "Float({x})"),
             Value::Bool(b) => write!(f, "Bool({b})"),
+            Value::Str(s) => write!(f, "Str({s:?})"),
             Value::Unit => write!(f, "Unit"),
             Value::Closure(c) => write!(f, "Closure/{}", c.params.len()),
             Value::Constructor(c) => write!(f, "Constructor({})", c.variant),
@@ -98,6 +103,7 @@ impl PartialEq for Value {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Unit, Value::Unit) => true,
             (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
             (Value::Constructor(a), Value::Constructor(b)) => Rc::ptr_eq(a, b),
