@@ -444,13 +444,23 @@ impl View {
             }
             _ => {}
         }
-        // `Tail`/`Summary` keep a bounded ring; `Full` retains everything.
-        if !matches!(self.capture_level, CaptureLevel::Full)
-            && self.recent.len() >= TRANSCRIPT_TAIL_FRAMES
-        {
-            self.recent.pop_front();
+        // Retention by level: `Full` keeps everything; `Signal` keeps every
+        // frame *except* the `ContextSwitch` noise (the readable default);
+        // `Tail`/`Summary` keep a bounded ring.
+        match self.capture_level {
+            CaptureLevel::Full => self.recent.push_back(frame.clone()),
+            CaptureLevel::Signal => {
+                if !matches!(frame, OwnedFrame::ContextSwitch { .. }) {
+                    self.recent.push_back(frame.clone());
+                }
+            }
+            CaptureLevel::Tail | CaptureLevel::Summary => {
+                if self.recent.len() >= TRANSCRIPT_TAIL_FRAMES {
+                    self.recent.pop_front();
+                }
+                self.recent.push_back(frame.clone());
+            }
         }
-        self.recent.push_back(frame.clone());
     }
 
     /// Snapshot the current scenario state into `self.captured`, which the
@@ -470,7 +480,7 @@ impl View {
         // ring under `Tail`, the full retained stream under `Full`.
         let transcript = match self.capture_level {
             CaptureLevel::Summary => Vec::new(),
-            CaptureLevel::Tail | CaptureLevel::Full => {
+            CaptureLevel::Tail | CaptureLevel::Signal | CaptureLevel::Full => {
                 self.recent.iter().map(|f| self.describe(f)).collect()
             }
         };
@@ -605,15 +615,17 @@ const TRANSCRIPT_TAIL_FRAMES: usize = 64;
 
 /// Process-wide capture level, set once from the CLI before scenarios
 /// run and read by every `Harness::spawn`. Stored as the discriminant
-/// `u8` so it lives in an `AtomicU8` with no lock. `0` = the `Tail`
-/// default until `set_capture_level` is called.
-static CAPTURE_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// `u8` so it lives in an `AtomicU8` with no lock. The initial value is
+/// `Signal` (the default), so the level is sane even before
+/// `set_capture_level` is called.
+static CAPTURE_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
 
 fn level_to_u8(level: CaptureLevel) -> u8 {
     match level {
-        CaptureLevel::Tail => 0,
-        CaptureLevel::Summary => 1,
-        CaptureLevel::Full => 2,
+        CaptureLevel::Summary => 0,
+        CaptureLevel::Tail => 1,
+        CaptureLevel::Signal => 2,
+        CaptureLevel::Full => 3,
     }
 }
 
@@ -625,9 +637,10 @@ pub fn set_capture_level(level: CaptureLevel) {
 
 fn capture_level() -> CaptureLevel {
     match CAPTURE_LEVEL.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => CaptureLevel::Summary,
-        2 => CaptureLevel::Full,
-        _ => CaptureLevel::Tail,
+        0 => CaptureLevel::Summary,
+        1 => CaptureLevel::Tail,
+        3 => CaptureLevel::Full,
+        _ => CaptureLevel::Signal,
     }
 }
 

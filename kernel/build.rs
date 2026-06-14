@@ -79,6 +79,8 @@ fn build_and_embed_user(kernel_dir: &str) {
     embed(&format!("{bin_dir}/rpc-client"), "SNITCHOS_RPC_CLIENT_ELF");
     embed(&format!("{bin_dir}/rpc-server"), "SNITCHOS_RPC_SERVER_ELF");
     embed(&format!("{bin_dir}/badge-mint"), "SNITCHOS_BADGE_MINT_ELF");
+    embed(&format!("{bin_dir}/badge-handout-server"), "SNITCHOS_BADGE_HANDOUT_SERVER_ELF");
+    embed(&format!("{bin_dir}/badge-handout-client"), "SNITCHOS_BADGE_HANDOUT_CLIENT_ELF");
 
     // Rebuild the embed whenever a user program — or its only dependency, the
     // `abi` crate — changes. Directory paths are watched recursively by cargo,

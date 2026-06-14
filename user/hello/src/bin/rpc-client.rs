@@ -22,7 +22,8 @@ fn main() {
 /// then re-emit the response.
 fn rpc(req: u64) {
     let _span = tracer().span("rpc.call");
-    if let Ok(resp) = endpoint().call([req, 0, 0, 0]) {
+    // The server replies with no cap, so ignore the transferred-handle slot.
+    if let Ok((resp, _cap)) = endpoint().call([req, 0, 0, 0]) {
         let _ = telemetry().emit(resp[0] as i64);
     }
 }

@@ -507,12 +507,32 @@ fn handle_call(frame: &mut TrapFrame) {
     crate::ipc::BLOCKS_TOTAL.fetch_add(1, Ordering::Relaxed);
     crate::sched::block_current();
 
-    // Resumed by `reply`: deliver the response words.
-    let resp = crate::ipc::take_reply(me);
-    frame.a1 = resp[0];
-    frame.a2 = resp[1];
-    frame.a3 = resp[2];
-    frame.a4 = resp[3];
+    // Resumed by `reply`: deliver the response words and, if the server handed
+    // us a capability, insert it into *our* table (we're the current process
+    // again) and return its handle in `a5` (`0` = no cap). v0.9c.
+    let reply = crate::ipc::take_reply(me);
+    frame.a1 = reply.msg[0];
+    frame.a2 = reply.msg[1];
+    frame.a3 = reply.msg[2];
+    frame.a4 = reply.msg[3];
+    frame.a5 = match reply.cap {
+        Some(cap) => {
+            let handle = proc.caps.lock().insert(cap);
+            let badge = match cap.object {
+                kernel_core::cap::Object::Endpoint { badge, .. } => badge,
+                _ => 0,
+            };
+            crate::tracing::emit_cap_transferred(
+                crate::process::next_cap_id(),
+                me.0,
+                protocol::CapObject::Endpoint,
+                cap.rights.bits(),
+                badge,
+            );
+            u64::from(handle.raw())
+        }
+        None => 0,
+    };
     frame.a0 = 0;
 }
 
@@ -529,7 +549,9 @@ fn handle_reply(frame: &mut TrapFrame) {
     };
     let raw_handle = frame.a0 as u32;
     let resp = [frame.a1, frame.a2, frame.a3, frame.a4];
-    if reply_via_cap(proc, frame, sc, raw_handle, resp).is_ok() {
+    // `a6` (v0.9c): a cap handle to transfer to the caller, `0` = none.
+    let transfer = (frame.a6 != 0).then(|| kernel_core::cap::Handle::from_raw(frame.a6 as u32));
+    if reply_via_cap(proc, frame, sc, raw_handle, resp, transfer).is_ok() {
         frame.a0 = 0;
     }
 }
@@ -545,28 +567,43 @@ fn reply_via_cap(
     sc: u8,
     raw_handle: u32,
     resp: crate::ipc::Message,
+    transfer: Option<kernel_core::cap::Handle>,
 ) -> Result<(), ()> {
     use kernel_core::cap::{invoke_reply, Handle};
 
     let handle = Handle::from_raw(raw_handle);
+    // Resolve + consume the reply cap and, if the server is handing a cap to the
+    // caller, *move* it out of the server's table (resolve, copy out, consume) —
+    // all under one lock, dropped before the wake. A transfer handle that names
+    // no cap is silently no-op (the caller simply receives no cap).
     let resolved = {
         let mut caps = proc.caps.lock();
         match invoke_reply(&caps, handle) {
+            Err(denied) => Err(denied),
             Ok(caller) => {
                 caps.consume(handle);
-                Ok(caller)
+                let cap = match transfer {
+                    Some(h) => {
+                        let c = caps.resolve(h).copied().ok();
+                        if c.is_some() {
+                            caps.consume(h);
+                        }
+                        c
+                    }
+                    None => None,
+                };
+                Ok((caller, cap))
             }
-            Err(denied) => Err(denied),
         }
     };
-    let caller = match resolved {
-        Ok(caller) => caller,
+    let (caller, cap) = match resolved {
+        Ok(pair) => pair,
         Err(denied) => {
             refuse(frame, sc, refusal_for(denied));
             return Err(());
         }
     };
-    crate::ipc::stash_reply(caller, resp);
+    crate::ipc::stash_reply(caller, crate::ipc::StashedReply { msg: resp, cap });
     crate::sched::wake(caller);
     crate::ipc::REPLIES_TOTAL.fetch_add(1, Ordering::Relaxed);
     Ok(())
@@ -590,7 +627,10 @@ fn handle_reply_recv(frame: &mut TrapFrame) {
     let prev_reply = frame.a5 as u32;
     if prev_reply != 0 {
         let resp = [frame.a1, frame.a2, frame.a3, frame.a4];
-        if reply_via_cap(proc, frame, sc, prev_reply, resp).is_err() {
+        // reply_recv does not carry a transferred cap in v0.9c (the plain `reply`
+        // path does); pass `None`. Fusing cap-transfer into the hot path is a
+        // deferred additive step.
+        if reply_via_cap(proc, frame, sc, prev_reply, resp, None).is_err() {
             return; // refused — `a0` already set, don't receive
         }
     }

@@ -64,6 +64,12 @@ pub static RPC_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_RPC_SERVER_ELF"
 /// a `RECV | MINT` minter and a `SEND`-only client that's refused.
 pub static BADGE_MINT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE_MINT_ELF"));
 
+/// The `workload=badge-handout` programs (v0.9c cap-transfer-in-reply): a
+/// `RECV | MINT` server that mints + hands back a badged cap, and a `SEND`
+/// client that `call`s and receives it.
+pub static BADGE_HANDOUT_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE_HANDOUT_SERVER_ELF"));
+pub static BADGE_HANDOUT_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE_HANDOUT_CLIENT_ELF"));
+
 /// The counter the `EmitMetric` syscall bumps. Registered once on hart 0
 /// (`init_metric`) so the `MetricRegister` frame isn't emitted from inside
 /// the trap handler; the handler (on hart 1) reads it via [`user_metric_id`].
@@ -221,6 +227,21 @@ pub extern "C" fn badge_minter_main_entry() -> ! {
 pub extern "C" fn badge_mint_client_main_entry() -> ! {
     let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before badge client runs");
     run_ipc(BADGE_MINT_ELF, ep, kernel_core::cap::Rights::SEND)
+}
+
+/// Entry for `workload=badge-handout`: the server, granted `RECV | MINT` — it
+/// mints a badged cap per request and hands it back in the reply.
+pub extern "C" fn badge_handout_server_main_entry() -> ! {
+    use kernel_core::cap::Rights;
+    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before badge handout server runs");
+    run_ipc(BADGE_HANDOUT_SERVER_ELF, ep, Rights::RECV | Rights::MINT)
+}
+
+/// Entry for `workload=badge-handout`: the client, granted `SEND` — it `call`s
+/// the server and receives the transferred badged cap.
+pub extern "C" fn badge_handout_client_main_entry() -> ! {
+    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before badge handout client runs");
+    run_ipc(BADGE_HANDOUT_CLIENT_ELF, ep, kernel_core::cap::Rights::SEND)
 }
 
 /// Build a fresh address space, grant the process its bootstrap

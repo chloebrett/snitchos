@@ -1385,6 +1385,38 @@ pub fn badge_mint_mints_and_refuses(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.9c cap-transfer-in-reply: a `RECV | MINT` server mints a badged cap per
+/// request and hands it back in the `reply`; the client's `call` returns it, and
+/// the client emits a telemetry tick on receipt. Proves a server can return a
+/// capability to a client — the keystone the filesystem's `open` needs. The
+/// handed-out cap also lands on the wire as a badged `CapEvent::Transferred`.
+pub fn badge_handout_transfers_cap(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+
+    // Assert in wire order: the badged transfer lands before the client's
+    // telemetry tick, and `wait_for` advances the cursor — assert the earlier
+    // frame first or the later wait scans past it.
+    h.wait_for(SEC * 30, |f, _| {
+        matches!(f, OwnedFrame::CapEvent { kind: CapEventKind::Transferred, object: CapObject::Endpoint, badge, .. }
+            if *badge == 0xBEEF)
+    })
+    .ok_or(
+        "no CapEvent::Transferred{Endpoint, badge=0xBEEF} within 30s — the handed-out \
+         badged cap wasn't snitched",
+    )?;
+
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value >= 1)
+    })
+    .ok_or(
+        "no snitchos.user.telemetry_total >= 1 within 30s — the client never received \
+         the transferred cap (call returned no handle)",
+    )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

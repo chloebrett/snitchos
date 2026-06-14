@@ -364,7 +364,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::Priorities)
         | Some(WorkloadKind::Ipc)
         | Some(WorkloadKind::IpcRpc)
-        | Some(WorkloadKind::BadgeMint) => {}
+        | Some(WorkloadKind::BadgeMint)
+        | Some(WorkloadKind::BadgeHandout) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -419,6 +420,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::Ipc
                     | WorkloadKind::IpcRpc
                     | WorkloadKind::BadgeMint
+                    | WorkloadKind::BadgeHandout
             )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
@@ -523,6 +525,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
             let _ = sched::spawn_on(1, "badge_minter", user::badge_minter_main_entry);
             let _ = sched::spawn_on(1, "badge_client", user::badge_mint_client_main_entry);
+        }
+        // v0.9c cap-transfer-in-reply: server (RECV|MINT) hands a badged cap back
+        // to a calling client. Server first so it's receiving when the client calls.
+        Some(WorkloadKind::BadgeHandout) => {
+            user::init_metric();
+            crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
+            let _ = sched::spawn_on(1, "badge_handout_server", user::badge_handout_server_main_entry);
+            let _ = sched::spawn_on(1, "badge_handout_client", user::badge_handout_client_main_entry);
         }
         _ => {}
     }

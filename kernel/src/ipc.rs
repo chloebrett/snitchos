@@ -178,20 +178,30 @@ pub fn take_delivered(ep: EndpointId, me: TaskId) -> Delivered {
     eps[ep.0 as usize].pending.remove(&me).unwrap_or_default()
 }
 
+/// A stashed reply: the response words plus an optional capability the server
+/// transferred to the caller (v0.9c — `reply`-carries-a-cap). The cap was moved
+/// out of the server's table and is inserted into the caller's table when it
+/// resumes; `None` is a plain v0.9b reply.
+#[derive(Clone, Copy)]
+pub struct StashedReply {
+    pub msg: Message,
+    pub cap: Option<kernel_core::cap::Capability>,
+}
+
 /// Point-to-point reply mailbox, keyed by the **caller** awaiting a reply. The
 /// `reply` path stashes the response here and wakes the caller; the caller's
 /// blocked `call` reads it on resume. Separate from endpoint `pending` because
 /// a reply is caller↔server, not endpoint-mediated (the caller is already off
 /// the endpoint by the time it awaits the reply).
-static REPLIES: Mutex<BTreeMap<TaskId, Message>> = Mutex::new(BTreeMap::new());
+static REPLIES: Mutex<BTreeMap<TaskId, StashedReply>> = Mutex::new(BTreeMap::new());
 
-/// Stash a reply `msg` for `caller` (called by `reply` before waking it).
-pub fn stash_reply(caller: TaskId, msg: Message) {
-    REPLIES.lock().insert(caller, msg);
+/// Stash a `reply` for `caller` (called by `reply` before waking it).
+pub fn stash_reply(caller: TaskId, reply: StashedReply) {
+    REPLIES.lock().insert(caller, reply);
 }
 
 /// Take the reply delivered to `me` (called by `call` after `block_current`
-/// returns). Defaults to zeros if absent — never panics.
-pub fn take_reply(me: TaskId) -> Message {
-    REPLIES.lock().remove(&me).unwrap_or([0; MSG_WORDS])
+/// returns). Defaults to empty (zeros, no cap) if absent — never panics.
+pub fn take_reply(me: TaskId) -> StashedReply {
+    REPLIES.lock().remove(&me).unwrap_or(StashedReply { msg: [0; MSG_WORDS], cap: None })
 }

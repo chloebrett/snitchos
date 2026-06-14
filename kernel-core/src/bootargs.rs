@@ -107,6 +107,11 @@ pub enum WorkloadKind {
     /// and is refused when it tries to mint (`SyscallRefused`). Same binary,
     /// outcome differs by capability. One hart.
     BadgeMint,
+    /// v0.9c cap-transfer-in-reply: a `badge-handout-server` (`RECV | MINT`)
+    /// mints a badged `SEND` cap per request and **hands it back in the reply**;
+    /// a `badge-handout-client` `call`s, receives the badged cap, and signals
+    /// success. Proves a server can return capabilities to a client. One hart.
+    BadgeHandout,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -171,6 +176,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "ipc" => Some(WorkloadKind::Ipc),
             "ipc-rpc" => Some(WorkloadKind::IpcRpc),
             "badge-mint" => Some(WorkloadKind::BadgeMint),
+            "badge-handout" => Some(WorkloadKind::BadgeHandout),
             _ => None,
         })
 }
@@ -293,6 +299,13 @@ mod tests {
         assert_eq!(select("workload=badge-mint"), Some(WorkloadKind::BadgeMint));
         // Must not be mis-parsed as the RPC workload.
         assert_ne!(select("workload=badge-mint"), Some(WorkloadKind::IpcRpc));
+    }
+
+    #[test]
+    fn selects_badge_handout() {
+        assert_eq!(select("workload=badge-handout"), Some(WorkloadKind::BadgeHandout));
+        // Must not be mis-parsed as the mint-into-own-table workload.
+        assert_ne!(select("workload=badge-handout"), Some(WorkloadKind::BadgeMint));
     }
 
     #[test]

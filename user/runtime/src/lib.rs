@@ -406,18 +406,22 @@ impl Endpoint {
     }
 
     /// RPC `call`: send a request and **block until the server replies**,
-    /// returning the response words. The caller's open span stays open across
-    /// the whole round-trip, so the server's handling span nests under it.
+    /// returning the response words **and** any capability the server
+    /// transferred back (`Some(handle)` — e.g. a badged endpoint cap from
+    /// `reply_with_cap`; `None` for a plain reply). The caller's open span stays
+    /// open across the round-trip, so the server's handling span nests under it.
     /// `Err(Denied)` if the kernel refused the capability.
-    pub fn call(self, msg: [u64; MSG_WORDS]) -> Result<[u64; MSG_WORDS], Denied> {
+    pub fn call(self, msg: [u64; MSG_WORDS]) -> Result<([u64; MSG_WORDS], Option<usize>), Denied> {
         let ret: usize;
         let r0: u64;
         let r1: u64;
         let r2: u64;
         let r3: u64;
+        let cap: usize;
         // SAFETY: `ecall`; the kernel validates the handle (needs `SEND`),
         // delivers the request, mints a reply cap into the server, parks us
-        // until `reply`, then writes status in a0 and the response in a1..=a4.
+        // until `reply`, then writes status in a0, the response in a1..=a4, and
+        // any transferred cap handle in a5 (0 = none).
         unsafe {
             asm!(
                 "ecall",
@@ -427,9 +431,13 @@ impl Endpoint {
                 inlateout("a2") msg[1] => r1,
                 inlateout("a3") msg[2] => r2,
                 inlateout("a4") msg[3] => r3,
+                out("a5") cap,
             );
         }
-        if ret == 0 { Ok([r0, r1, r2, r3]) } else { Err(Denied) }
+        if ret != 0 {
+            return Err(Denied);
+        }
+        Ok(([r0, r1, r2, r3], (cap != 0).then_some(cap)))
     }
 
     /// Receive a message **and** the reply handle: `Some(handle)` if it came
@@ -502,9 +510,24 @@ impl Endpoint {
 /// [`Endpoint::receive_with_reply`]. Wakes the blocked caller and consumes the
 /// one-shot reply cap. `Err(Denied)` if the handle is not a live reply cap.
 pub fn reply(reply_handle: usize, msg: [u64; MSG_WORDS]) -> Result<(), Denied> {
+    reply_inner(reply_handle, msg, 0)
+}
+
+/// Answer an RPC **and transfer a capability** to the caller (v0.9c): `cap` is a
+/// handle in *this* process's table (e.g. from [`Endpoint::mint_badged`]); the
+/// kernel moves it into the caller's table, and the caller's `call` returns its
+/// new handle. This is how a server hands out badged endpoint caps.
+pub fn reply_with_cap(reply_handle: usize, msg: [u64; MSG_WORDS], cap: usize) -> Result<(), Denied> {
+    reply_inner(reply_handle, msg, cap)
+}
+
+/// Shared `reply` body. `transfer` is a cap handle to hand the caller (`0` =
+/// none) — always written to `a6` so the kernel never reads a stale register.
+fn reply_inner(reply_handle: usize, msg: [u64; MSG_WORDS], transfer: usize) -> Result<(), Denied> {
     let ret: usize;
-    // SAFETY: `ecall`; the kernel resolves + consumes the reply cap, stashes
-    // the response, and wakes the caller. a0 returns 0 on success.
+    // SAFETY: `ecall`; the kernel resolves + consumes the reply cap, optionally
+    // moves the `a6` cap to the caller, stashes the response, and wakes the
+    // caller. a0 returns 0 on success.
     unsafe {
         asm!(
             "ecall",
@@ -514,6 +537,7 @@ pub fn reply(reply_handle: usize, msg: [u64; MSG_WORDS]) -> Result<(), Denied> {
             in("a2") msg[1],
             in("a3") msg[2],
             in("a4") msg[3],
+            in("a6") transfer,
         );
     }
     if ret == 0 { Ok(()) } else { Err(Denied) }
