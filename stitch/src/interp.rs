@@ -2,11 +2,37 @@
 //! *is* the program — no compilation. v0 is dynamically typed; see `value.rs`.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::ast::{Arg, BinOp, Expr, Stmt, UnOp};
+use crate::ast::{Arg, BinOp, Expr, Item, Stmt, UnOp};
 use crate::env::Env;
 use crate::value::{ClosureData, RuntimeError, Value};
+
+/// Run a program: bind every top-level function into one shared global
+/// environment (so they are mutually visible — letrec), then call `main()`.
+///
+/// # Errors
+/// Returns `Err` if there is no `main` function, or on any runtime fault.
+pub fn eval_program(items: &[Item]) -> Result<Value, RuntimeError> {
+    let env = Env::new();
+    let mut globals = HashMap::new();
+    for item in items {
+        if let Item::Func { name, params, body, .. } = item {
+            let closure = Value::Closure(Rc::new(ClosureData {
+                params: params.iter().map(|param| param.name.clone()).collect(),
+                body: body.clone(),
+                env: env.clone(),
+            }));
+            globals.insert(name.clone(), closure);
+        }
+    }
+    env.set_globals(globals);
+    let main = env
+        .lookup("main")
+        .ok_or_else(|| RuntimeError::new("no `main` function"))?;
+    eval_call(&main, &[], &env)
+}
 
 /// Evaluate an expression to a value in environment `env`.
 ///
@@ -31,6 +57,14 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         Expr::Var(name) => env
             .lookup(name)
             .ok_or_else(|| RuntimeError::new(format!("unbound variable `{name}`"))),
+        // Only the taken branch is evaluated.
+        Expr::If { cond, then, els } => {
+            if as_bool(&eval(cond, env)?, "condition")? {
+                eval(then, env)
+            } else {
+                eval(els, env)
+            }
+        }
         Expr::Block { stmts, result } => eval_block(stmts, result.as_deref(), env),
         Expr::Lambda { params, body } => Ok(Value::Closure(Rc::new(ClosureData {
             params: params.clone(),
@@ -185,9 +219,15 @@ fn type_mismatch(op: BinOp, left: &Value, right: &Value) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use crate::env::Env;
-    use crate::interp::eval;
-    use crate::parser::parse;
+    use crate::interp::{eval, eval_program};
+    use crate::parser::{parse, parse_program};
     use crate::value::Value;
+
+    /// Parse a whole program (top-level items) and run its `main`.
+    fn run_program(src: &str) -> Value {
+        let items = parse_program(src).expect("test program should parse");
+        eval_program(&items).expect("test program should evaluate")
+    }
 
     /// Parse then evaluate in an empty environment, unwrapping — for tests with
     /// valid, total programs.
@@ -399,6 +439,24 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_the_conditional_expression() {
+        assert_eq!(run("1 < 2 => 10 | 20"), Value::Int(10));
+        assert_eq!(run("1 > 2 => 10 | 20"), Value::Int(20));
+    }
+
+    #[test]
+    fn the_conditional_evaluates_only_the_taken_branch() {
+        // The untaken branch (`1 + true`) would error if evaluated.
+        assert_eq!(run("true => 1 | (1 + true)"), Value::Int(1));
+        assert_eq!(run("false => (1 + true) | 2"), Value::Int(2));
+    }
+
+    #[test]
+    fn a_non_bool_condition_is_an_error() {
+        assert_eq!(run_err("1 => 10 | 20"), "condition requires a Bool, got Int");
+    }
+
+    #[test]
     fn applies_a_lambda_to_an_argument() {
         assert_eq!(run("(x -> x + 1)(5)"), Value::Int(6));
     }
@@ -448,6 +506,43 @@ mod tests {
         assert_eq!(
             run_err("(x -> x)(1, 2)"),
             "function expects 1 argument(s), got 2"
+        );
+    }
+
+    #[test]
+    fn runs_a_recursive_top_level_function() {
+        assert_eq!(
+            run_program("fact(n) = n == 0 => 1 | n * fact(n - 1)  main() = fact(5)"),
+            Value::Int(120)
+        );
+    }
+
+    #[test]
+    fn a_top_level_function_calls_another() {
+        assert_eq!(
+            run_program("double(x) = x * 2  main() = double(21)"),
+            Value::Int(42)
+        );
+    }
+
+    #[test]
+    fn supports_mutual_recursion() {
+        assert_eq!(
+            run_program(
+                "isEven(n) = n == 0 => true | isOdd(n - 1)  \
+                 isOdd(n) = n == 0 => false | isEven(n - 1)  \
+                 main() = isEven(4)"
+            ),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn a_program_without_main_is_an_error() {
+        let items = parse_program("foo() = 1").expect("should parse");
+        assert_eq!(
+            eval_program(&items).expect_err("should fail").message,
+            "no `main` function"
         );
     }
 }
