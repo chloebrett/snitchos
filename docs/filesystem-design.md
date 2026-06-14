@@ -12,7 +12,7 @@ Bookkeeping over a block device. Key structural idea: the **inode**. An inode *i
 
 # v0.10 interface: capability-mediated access
 
-*Depends on v0.9 IPC (endpoints), almost done. The cap-agnostic core is built: `fs-core` (trait), `ramfs` (first impl), `fs-proto` (badge + opcodes). The IPC front-end (`user/fs`) and the option-D copy primitive are what remain.*
+*Depends on v0.9 IPC (endpoints), almost done. The **badged-endpoint substrate this FS needs shipped in v0.9c** (badges, `MintBadged`, cap-transfer-on-reply, badge-on-receive — see [ipc-design.md](ipc-design.md) → *Endpoint capabilities*). The cap-agnostic core is built: `fs-core` (trait), `ramfs` (first impl), `fs-proto` (badge + opcodes). The IPC front-end (`user/fs`) and the option-D copy primitive are what remain.*
 
 ## The core bet
 **The kernel never learns what a "file" is.** It provides *badged endpoints*; the FS provides *all* file meaning. Mechanism in the kernel, policy in userspace — the line the [IPC design](ipc-design.md) draws.
@@ -20,16 +20,16 @@ Bookkeeping over a block device. Key structural idea: the **inode**. An inode *i
 ## Two rights namespaces (don't conflate them)
 | | Who defines | Who enforces | Examples |
 |---|---|---|---|
-| **Endpoint rights** | kernel | kernel (on the IPC op) | `SEND`, `GRANT`, `MINT` |
+| **Endpoint rights** | kernel | kernel (on the IPC op) | `SEND`, `RECV`, `MINT` (`GRANT` deferred) |
 | **File rights** | the FS | the FS (per message) | `READ`, `WRITE`, `EXEC`, `LOOKUP`, `CREATE`, `REMOVE` |
 
 The kernel **carries** file rights but never interprets them. Generic kernel attenuation narrows only *endpoint* rights; narrowing *file* rights is an FS mint operation under #2 (below), and becomes kernel-generic only in the #4 evolution.
 
-## Capability mechanism — #2 badged endpoints (v0.9 substrate)
-New kernel object `Object::Endpoint { endpoint: EndpointId }`. A cap to it carries a **`badge: u64`** (chosen at mint by a `MINT`-righted holder, **immutable** after, delivered **unforgeably** to the receiver on every send) plus the existing generic **`rights: Rights`** (here meaning `SEND`/`GRANT`/`MINT`). **Mint/derive** is kernel-generic: from a `MINT` cap, derive a child with a chosen badge and `rights ⊆ parent` — monotonic, never widening. On send, the kernel hands the receiver `(message, badge)`; the sender can't forge the badge.
+## Capability mechanism — #2 badged endpoints (v0.9c substrate — ✅ shipped)
+`Object::Endpoint { id, badge: u64 }` (`badge == 0` = bare owner/`RECV` cap). A `MINT`-righted holder derives badged `SEND` children via the `MintBadged` syscall, setting the badge + rights; the kernel delivers the badge to the receiver in register `a6` and the sender can't forge it. Endpoint rights are `SEND`/`RECV`/`MINT` (in `snitchos_abi::rights`). The owner sets a child's rights freely (it owns the object); monotonic narrowing by non-owners — client re-delegation — is deferred. Full detail + the "badge = generalized reply cap" framing: [ipc-design.md](ipc-design.md) → *Endpoint capabilities*.
 
 ## File capabilities
-A **File cap** is a badged endpoint cap to the FS endpoint, `badge = pack(inode, file_rights)`. The FS holds the `MINT` cap; `Cap::File("/")` = `badge(root_inode, ALL)`; handing out a subset = minting a child `badge(inode, narrower_rights)`. Because the badge is immutable and FS-minted, **the FS is the sole authority over which inode + which file-rights a cap names** — both scope- and file-rights-narrowing go through an FS mint. (The kernel still narrows the *endpoint* rights generically — but that's `SEND`/`GRANT`, not `READ`/`WRITE`.) This is the *"FS holds `Cap::File("/")`, attenuates, hands out subsets"* model.
+A **File cap** is a badged endpoint cap to the FS endpoint, `badge = pack(inode, file_rights)`. The FS holds the `MINT` cap; `Cap::File("/")` = `badge(root_inode, ALL)`; handing out a subset = minting a child `badge(inode, narrower_rights)`. Because the badge is immutable and FS-minted, **the FS is the sole authority over which inode + which file-rights a cap names** — both scope- and file-rights-narrowing go through an FS mint. (Endpoint rights like `SEND` live in the kernel `rights` mask; the file rights `READ`/`WRITE` live in the badge, FS-interpreted.) This is the *"FS holds `Cap::File("/")`, attenuates, hands out subsets"* model.
 
 ## File rights (FS-defined)
 **First cut: `READ`, `WRITE` only**, gated on file inodes. Directory ops (`lookup`/`create`/`remove`/`readdir`) are ungated initially. Everything else is an additive badge bit — no trait change — along this growth path:
