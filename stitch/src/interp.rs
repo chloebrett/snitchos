@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use crate::ast::{Arg, BinOp, Expr, Item, Stmt, UnOp};
 use crate::env::Env;
-use crate::value::{ClosureData, RuntimeError, Value};
+use crate::value::{ClosureData, Constructor, DataValue, RuntimeError, Value};
 
 /// Run a program: bind every top-level function into one shared global
 /// environment (so they are mutually visible — letrec), then call `main()`.
@@ -18,13 +18,24 @@ pub fn eval_program(items: &[Item]) -> Result<Value, RuntimeError> {
     let env = Env::new();
     let mut globals = HashMap::new();
     for item in items {
-        if let Item::Func { name, params, body, .. } = item {
-            let closure = Value::Closure(Rc::new(ClosureData {
-                params: params.iter().map(|param| param.name.clone()).collect(),
-                body: body.clone(),
-                env: env.clone(),
-            }));
-            globals.insert(name.clone(), closure);
+        match item {
+            Item::Func { name, params, body, .. } => {
+                let closure = Value::Closure(Rc::new(ClosureData {
+                    params: params.iter().map(|param| param.name.clone()).collect(),
+                    body: body.clone(),
+                    env: env.clone(),
+                }));
+                globals.insert(name.clone(), closure);
+            }
+            Item::Prod { name, fields, .. } => {
+                let ctor = Value::Constructor(Rc::new(Constructor {
+                    type_name: name.clone(),
+                    variant: name.clone(),
+                    field_names: fields.iter().map(|field| field.name.clone()).collect(),
+                }));
+                globals.insert(name.clone(), ctor);
+            }
+            _ => {}
         }
     }
     env.set_globals(globals);
@@ -72,6 +83,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             env: env.clone(),
         }))),
         Expr::Call { callee, args } => eval_call(&eval(callee, env)?, args, env),
+        Expr::Field { object, name } => eval_field(&eval(object, env)?, name),
         _ => Err(RuntimeError::new("evaluation not yet implemented for this expression")),
     }
 }
@@ -81,21 +93,99 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
 /// environment the closure captured — that captured env is what makes it a
 /// closure rather than a plain function.
 fn eval_call(callee: &Value, args: &[Arg], env: &Env) -> Result<Value, RuntimeError> {
-    let Value::Closure(closure) = callee else {
-        return Err(RuntimeError::new(format!("cannot call a {}", callee.kind())));
-    };
-    if args.len() != closure.params.len() {
+    match callee {
+        Value::Closure(closure) => {
+            if args.len() != closure.params.len() {
+                return Err(RuntimeError::new(format!(
+                    "function expects {} argument(s), got {}",
+                    closure.params.len(),
+                    args.len()
+                )));
+            }
+            let mut call_env = closure.env.clone();
+            for (param, arg) in closure.params.iter().zip(args) {
+                call_env = call_env.extend(param.clone(), eval(&arg.value, env)?);
+            }
+            eval(&closure.body, &call_env)
+        }
+        Value::Constructor(ctor) => construct(ctor, args, env),
+        _ => Err(RuntimeError::new(format!("cannot call a {}", callee.kind()))),
+    }
+}
+
+/// Build a `Data` value from a constructor applied to arguments. Positional
+/// args fill fields in order; named args (`x: …`) fill by label in any order.
+fn construct(ctor: &Constructor, args: &[Arg], env: &Env) -> Result<Value, RuntimeError> {
+    let mut values: Vec<Option<Value>> = vec![None; ctor.field_names.len()];
+    let mut next_positional = 0;
+    for arg in args {
+        // `..base` — copy every field from `base` as the starting point; later
+        // args override. `base` must be a value of the same type.
+        if let Expr::Spread(base) = &arg.value {
+            let base = eval(base, env)?;
+            let Value::Data(data) = &base else {
+                return Err(RuntimeError::new(format!("can only spread a record, not {}", base.kind())));
+            };
+            if data.type_name != ctor.type_name {
+                return Err(RuntimeError::new(format!(
+                    "cannot spread a {} into {}",
+                    data.type_name, ctor.type_name
+                )));
+            }
+            for (slot, (_, value)) in values.iter_mut().zip(&data.fields) {
+                *slot = Some(value.clone());
+            }
+            continue;
+        }
+        let index = if let Some(label) = &arg.label {
+            ctor.field_index(label).ok_or_else(|| {
+                RuntimeError::new(format!("{} has no field `{label}`", ctor.type_name))
+            })?
+        } else {
+            let index = next_positional;
+            next_positional += 1;
+            index
+        };
+        let slot = values.get_mut(index).ok_or_else(|| {
+            RuntimeError::new(format!(
+                "{} expects {} field(s), got more",
+                ctor.variant,
+                ctor.field_names.len()
+            ))
+        })?;
+        *slot = Some(eval(&arg.value, env)?);
+    }
+    let fields = ctor
+        .field_names
+        .iter()
+        .zip(values)
+        .map(|(name, value)| {
+            value.map(|value| (name.clone(), value)).ok_or_else(|| {
+                let field = name.clone().unwrap_or_else(|| "?".to_string());
+                RuntimeError::new(format!("{} is missing field `{field}`", ctor.type_name))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Value::Data(Rc::new(DataValue {
+        type_name: ctor.type_name.clone(),
+        variant: ctor.variant.clone(),
+        fields,
+    })))
+}
+
+/// Read field `name` from a `Data` value.
+fn eval_field(object: &Value, name: &str) -> Result<Value, RuntimeError> {
+    let Value::Data(data) = object else {
         return Err(RuntimeError::new(format!(
-            "function expects {} argument(s), got {}",
-            closure.params.len(),
-            args.len()
+            "cannot read field `{name}` on {}",
+            object.kind()
         )));
-    }
-    let mut call_env = closure.env.clone();
-    for (param, arg) in closure.params.iter().zip(args) {
-        call_env = call_env.extend(param.clone(), eval(&arg.value, env)?);
-    }
-    eval(&closure.body, &call_env)
+    };
+    data.fields
+        .iter()
+        .find(|(field_name, _)| field_name.as_deref() == Some(name))
+        .map(|(_, value)| value.clone())
+        .ok_or_else(|| RuntimeError::new(format!("{} has no field `{name}`", data.type_name)))
 }
 
 /// Evaluate a block: thread an environment through the statements (each `let`
@@ -177,14 +267,14 @@ fn eval_binary(op: BinOp, left: &Value, right: &Value) -> Result<Value, RuntimeE
 }
 
 /// `==` / `!=`: structural equality between same-kind operands. v0 is strict —
-/// comparing across kinds (`1 == 1.0`, `1 == true`) is a type error, not `false`.
+/// comparing across kinds (`1 == 1.0`, `1 == true`) is a type error, not `false`
+/// — so we gate on the value kind, then defer to `Value`'s structural equality
+/// (which compares `prod`/`sum` data by type, variant, and fields — decision D).
 fn equality(op: BinOp, left: &Value, right: &Value) -> Result<Value, RuntimeError> {
-    let equal = match (left, right) {
-        (Value::Int(a), Value::Int(b)) => a == b,
-        (Value::Float(a), Value::Float(b)) => a == b,
-        (Value::Bool(a), Value::Bool(b)) => a == b,
-        _ => return Err(type_mismatch(op, left, right)),
-    };
+    if std::mem::discriminant(left) != std::mem::discriminant(right) {
+        return Err(type_mismatch(op, left, right));
+    }
+    let equal = left == right;
     Ok(Value::Bool(if op == BinOp::Ne { !equal } else { equal }))
 }
 
@@ -227,6 +317,14 @@ mod tests {
     fn run_program(src: &str) -> Value {
         let items = parse_program(src).expect("test program should parse");
         eval_program(&items).expect("test program should evaluate")
+    }
+
+    /// Parse and run a program, expecting a runtime error message.
+    fn run_program_err(src: &str) -> String {
+        let items = parse_program(src).expect("test program should parse");
+        eval_program(&items)
+            .expect_err("test program should fail at runtime")
+            .message
     }
 
     /// Parse then evaluate in an empty environment, unwrapping — for tests with
@@ -543,6 +641,74 @@ mod tests {
         assert_eq!(
             eval_program(&items).expect_err("should fail").message,
             "no `main` function"
+        );
+    }
+
+    #[test]
+    fn constructs_a_prod_and_reads_its_fields() {
+        assert_eq!(
+            run_program("prod Point(x: Int, y: Int)  main() = Point(1, 2).x"),
+            Value::Int(1)
+        );
+        assert_eq!(
+            run_program("prod Point(x: Int, y: Int)  main() = Point(1, 2).y"),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn reading_a_missing_field_is_an_error() {
+        assert_eq!(
+            run_program_err("prod Point(x: Int, y: Int)  main() = Point(1, 2).z"),
+            "Point has no field `z`"
+        );
+    }
+
+    #[test]
+    fn constructs_a_prod_with_named_arguments_in_any_order() {
+        assert_eq!(
+            run_program("prod Point(x: Int, y: Int)  main() = Point(y: 2, x: 1).x"),
+            Value::Int(1)
+        );
+    }
+
+    #[test]
+    fn an_unknown_field_label_is_an_error() {
+        assert_eq!(
+            run_program_err("prod Point(x: Int, y: Int)  main() = Point(x: 1, z: 9)"),
+            "Point has no field `z`"
+        );
+    }
+
+    #[test]
+    fn a_missing_field_in_construction_is_an_error() {
+        assert_eq!(
+            run_program_err("prod Point(x: Int, y: Int)  main() = Point(x: 1)"),
+            "Point is missing field `y`"
+        );
+    }
+
+    #[test]
+    fn functional_update_copies_then_overrides() {
+        assert_eq!(
+            run_program("prod Point(x: Int, y: Int)  main() = { let p = Point(1, 2)  Point(..p, x: 10).x }"),
+            Value::Int(10)
+        );
+        assert_eq!(
+            run_program("prod Point(x: Int, y: Int)  main() = { let p = Point(1, 2)  Point(..p, x: 10).y }"),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn prods_have_structural_equality() {
+        assert_eq!(
+            run_program("prod Point(x: Int, y: Int)  main() = Point(1, 2) == Point(1, 2)"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program("prod Point(x: Int, y: Int)  main() = Point(1, 2) == Point(1, 9)"),
+            Value::Bool(false)
         );
     }
 }

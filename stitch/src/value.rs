@@ -21,6 +21,36 @@ pub enum Value {
     /// bundled into one shared heap object (cheap to pass around — cloning a
     /// `Value::Closure` just bumps the `Rc`).
     Closure(Rc<ClosureData>),
+    /// A `prod`/variant constructor as a first-class value (callable to build a
+    /// `Data`); produced by registering a `prod`/`sum` declaration.
+    Constructor(Rc<Constructor>),
+    /// A constructed `prod`/variant instance.
+    Data(Rc<DataValue>),
+}
+
+/// A constructor: which type/variant it builds and the names of its fields (in
+/// declaration order; `None` for a positional field).
+pub struct Constructor {
+    pub type_name: String,
+    pub variant: String,
+    pub field_names: Vec<Option<String>>,
+}
+
+impl Constructor {
+    /// The position of the field named `label`, if any.
+    pub fn field_index(&self, label: &str) -> Option<usize> {
+        self.field_names
+            .iter()
+            .position(|name| name.as_deref() == Some(label))
+    }
+}
+
+/// A constructed value: its type and variant, and its fields in declaration
+/// order paired with their declared names (`None` if positional).
+pub struct DataValue {
+    pub type_name: String,
+    pub variant: String,
+    pub fields: Vec<(Option<String>, Value)>,
 }
 
 /// The captured contents of a closure: parameter names, the body to evaluate on
@@ -39,7 +69,8 @@ impl Value {
             Value::Float(_) => "Float",
             Value::Bool(_) => "Bool",
             Value::Unit => "Unit",
-            Value::Closure(_) => "Function",
+            Value::Closure(_) | Value::Constructor(_) => "Function",
+            Value::Data(_) => "a record",
         }
     }
 }
@@ -52,6 +83,8 @@ impl fmt::Debug for Value {
             Value::Bool(b) => write!(f, "Bool({b})"),
             Value::Unit => write!(f, "Unit"),
             Value::Closure(c) => write!(f, "Closure/{}", c.params.len()),
+            Value::Constructor(c) => write!(f, "Constructor({})", c.variant),
+            Value::Data(d) => write!(f, "{}{:?}", d.variant, d.fields),
         }
     }
 }
@@ -67,6 +100,11 @@ impl PartialEq for Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Unit, Value::Unit) => true,
             (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
+            (Value::Constructor(a), Value::Constructor(b)) => Rc::ptr_eq(a, b),
+            // Structural equality (decision D): same type, variant, and fields.
+            (Value::Data(a), Value::Data(b)) => {
+                a.type_name == b.type_name && a.variant == b.variant && a.fields == b.fields
+            }
             _ => false,
         }
     }
