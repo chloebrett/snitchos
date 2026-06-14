@@ -30,6 +30,12 @@ fn eval_binary(op: BinOp, left: &Value, right: &Value) -> Result<Value, RuntimeE
         }
         (BinOp::Div, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a / b)),
         (BinOp::Rem, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
+        // Floats follow IEEE 754: `/0.0` is ±inf, not an error.
+        (BinOp::Add, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
+        (BinOp::Sub, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
+        (BinOp::Mul, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
+        (BinOp::Div, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
+        (BinOp::Rem, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
         _ => Err(type_mismatch(op, left, right)),
     }
 }
@@ -103,5 +109,30 @@ mod tests {
     #[test]
     fn integer_remainder_by_zero_is_a_runtime_error() {
         assert_eq!(run_err("1 % 0"), "division by zero");
+    }
+
+    #[test]
+    fn evaluates_float_arithmetic() {
+        assert_eq!(run("1.5 + 2.5"), Value::Float(4.0));
+        assert_eq!(run("5.0 - 1.5"), Value::Float(3.5));
+        assert_eq!(run("2.0 * 3.0"), Value::Float(6.0));
+        assert_eq!(run("7.0 / 2.0"), Value::Float(3.5));
+        assert_eq!(run("7.0 % 2.0"), Value::Float(1.0));
+    }
+
+    #[test]
+    fn mixing_int_and_float_is_a_type_error() {
+        assert_eq!(
+            run_err("1 + 2.0"),
+            "operator Add cannot apply to Int and Float"
+        );
+    }
+
+    #[test]
+    fn arithmetic_on_a_bool_is_a_type_error() {
+        assert_eq!(
+            run_err("1 + true"),
+            "operator Add cannot apply to Int and Bool"
+        );
     }
 }
