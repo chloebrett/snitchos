@@ -3,28 +3,63 @@
 
 use std::cmp::Ordering;
 
-use crate::ast::{BinOp, Expr, UnOp};
+use crate::ast::{BinOp, Expr, Stmt, UnOp};
+use crate::env::Env;
 use crate::value::{RuntimeError, Value};
 
-/// Evaluate an expression to a value.
+/// Evaluate an expression to a value in environment `env`.
 ///
 /// # Errors
 /// Returns `Err` on a runtime fault (type mismatch, division by zero, …).
-pub fn eval(expr: &Expr) -> Result<Value, RuntimeError> {
+pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
     match expr {
         Expr::Int(n) => Ok(Value::Int(*n)),
         Expr::Float(f) => Ok(Value::Float(*f)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         // `and`/`or` short-circuit, so they can't pre-evaluate both operands.
-        Expr::Binary { op: BinOp::And, left, right } => {
-            Ok(Value::Bool(as_bool(&eval(left)?, "`and`")? && as_bool(&eval(right)?, "`and`")?))
+        Expr::Binary { op: BinOp::And, left, right } => Ok(Value::Bool(
+            as_bool(&eval(left, env)?, "`and`")? && as_bool(&eval(right, env)?, "`and`")?,
+        )),
+        Expr::Binary { op: BinOp::Or, left, right } => Ok(Value::Bool(
+            as_bool(&eval(left, env)?, "`or`")? || as_bool(&eval(right, env)?, "`or`")?,
+        )),
+        Expr::Binary { op, left, right } => {
+            eval_binary(*op, &eval(left, env)?, &eval(right, env)?)
         }
-        Expr::Binary { op: BinOp::Or, left, right } => {
-            Ok(Value::Bool(as_bool(&eval(left)?, "`or`")? || as_bool(&eval(right)?, "`or`")?))
-        }
-        Expr::Binary { op, left, right } => eval_binary(*op, &eval(left)?, &eval(right)?),
-        Expr::Unary { op, operand } => eval_unary(*op, &eval(operand)?),
+        Expr::Unary { op, operand } => eval_unary(*op, &eval(operand, env)?),
+        Expr::Var(name) => env
+            .lookup(name)
+            .ok_or_else(|| RuntimeError::new(format!("unbound variable `{name}`"))),
+        Expr::Block { stmts, result } => eval_block(stmts, result.as_deref(), env),
         _ => Err(RuntimeError::new("evaluation not yet implemented for this expression")),
+    }
+}
+
+/// Evaluate a block: thread an environment through the statements (each `let`
+/// extends a fresh child scope, so bindings are visible to later statements but
+/// not outside the block), then evaluate the trailing expression — or `Unit`
+/// if there isn't one.
+fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env) -> Result<Value, RuntimeError> {
+    let mut scope = env.clone();
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { name, value, .. } => {
+                let bound = eval(value, &scope)?;
+                scope = scope.extend(name.clone(), bound);
+            }
+            Stmt::Expr(expr) => {
+                eval(expr, &scope)?;
+            }
+            Stmt::Assign { .. } | Stmt::Use { .. } => {
+                return Err(RuntimeError::new(
+                    "evaluation not yet implemented for this statement",
+                ));
+            }
+        }
+    }
+    match result {
+        Some(expr) => eval(expr, &scope),
+        None => Ok(Value::Unit),
     }
 }
 
@@ -120,13 +155,16 @@ fn type_mismatch(op: BinOp, left: &Value, right: &Value) -> RuntimeError {
 
 #[cfg(test)]
 mod tests {
+    use crate::env::Env;
     use crate::interp::eval;
     use crate::parser::parse;
     use crate::value::Value;
 
-    /// Parse then evaluate, unwrapping — for tests with valid, total programs.
+    /// Parse then evaluate in an empty environment, unwrapping — for tests with
+    /// valid, total programs.
     fn run(src: &str) -> Value {
-        eval(&parse(src).expect("test input should parse")).expect("test input should evaluate")
+        eval(&parse(src).expect("test input should parse"), &Env::new())
+            .expect("test input should evaluate")
     }
 
     #[test]
@@ -165,7 +203,7 @@ mod tests {
 
     /// Parse then evaluate, expecting a runtime error message.
     fn run_err(src: &str) -> String {
-        eval(&parse(src).expect("test input should parse"))
+        eval(&parse(src).expect("test input should parse"), &Env::new())
             .expect_err("test input should fail at runtime")
             .message
     }
@@ -295,5 +333,39 @@ mod tests {
     fn unary_operators_check_their_operand_kind() {
         assert_eq!(run_err("not 1"), "operator Not cannot apply to Int");
         assert_eq!(run_err("-true"), "operator Neg cannot apply to Bool");
+    }
+
+    #[test]
+    fn a_let_binding_is_visible_in_the_block_result() {
+        assert_eq!(run("{ let x = 1  x + 2 }"), Value::Int(3));
+    }
+
+    #[test]
+    fn a_later_let_sees_an_earlier_binding() {
+        assert_eq!(run("{ let a = 2  let b = a + 3  b }"), Value::Int(5));
+    }
+
+    #[test]
+    fn an_inner_let_shadows_an_outer_one() {
+        // The new binding's RHS still sees the old `x` (= 1), then shadows it.
+        assert_eq!(run("{ let x = 1  let x = x + 10  x }"), Value::Int(11));
+    }
+
+    #[test]
+    fn block_scope_does_not_escape() {
+        assert_eq!(
+            run_err("{ { let secret = 5 }  secret }"),
+            "unbound variable `secret`"
+        );
+    }
+
+    #[test]
+    fn a_block_without_a_trailing_expression_is_unit() {
+        assert_eq!(run("{ let x = 1 }"), Value::Unit);
+    }
+
+    #[test]
+    fn an_unbound_variable_is_an_error() {
+        assert_eq!(run_err("nope"), "unbound variable `nope`");
     }
 }

@@ -8,6 +8,9 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// The unit value `()` — what a block with no trailing expression, and an
+    /// expression evaluated only for effect, produce.
+    Unit,
 }
 
 impl Value {
@@ -17,6 +20,7 @@ impl Value {
             Value::Int(_) => "Int",
             Value::Float(_) => "Float",
             Value::Bool(_) => "Bool",
+            Value::Unit => "Unit",
         }
     }
 }
