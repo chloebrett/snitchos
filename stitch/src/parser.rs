@@ -26,6 +26,9 @@ impl ParseError {
     }
 }
 
+/// Stitch has no statement terminators; `;` is lexed but never grammatical.
+const NO_SEMICOLONS: &str = "Stitch has no semicolons — remove the `;` (statements are separated by whitespace)";
+
 /// Parse Stitch source into an expression, or return a `ParseError`.
 ///
 /// # Errors
@@ -33,6 +36,9 @@ impl ParseError {
 pub fn parse(src: &str) -> Result<Expr, ParseError> {
     let mut parser = Parser::new(src);
     let expr = parser.parse_expr(0)?;
+    if matches!(parser.peek(), Token::Semicolon) {
+        return Err(ParseError::new(NO_SEMICOLONS));
+    }
     parser.expect(&Token::Eof, "end of input")?;
     Ok(expr)
 }
@@ -993,6 +999,7 @@ impl Parser {
             Token::LBracket => self.parse_collection()?,
             Token::LBrace => self.parse_block()?,
             Token::Match => self.parse_match()?,
+            Token::Semicolon => return Err(ParseError::new(NO_SEMICOLONS)),
             other => return Err(ParseError::new(format!("unexpected token: {other:?}"))),
         })
     }
@@ -1520,5 +1527,10 @@ mod tests {
     #[test]
     fn parses_use_without_binding() {
         insta::assert_debug_snapshot!(p(r#"{ use <- span("report")  emit(x) }"#));
+    }
+
+    #[test]
+    fn a_stray_semicolon_is_a_helpful_error() {
+        insta::assert_debug_snapshot!(parse("1; 2"));
     }
 }

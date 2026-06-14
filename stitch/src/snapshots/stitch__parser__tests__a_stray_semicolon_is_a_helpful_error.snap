@@ -1,0 +1,10 @@
+---
+source: stitch/src/parser.rs
+assertion_line: 1534
+expression: "parse(\"1; 2\")"
+---
+Err(
+    ParseError {
+        message: "Stitch has no semicolons — remove the `;` (statements are separated by whitespace)",
+    },
+)

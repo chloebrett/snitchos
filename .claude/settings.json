@@ -80,6 +80,7 @@
       "Bash(cargo check:*)",
       "Bash(cargo test:*)",
       "Bash(INSTA_UPDATE=always cargo test:*)",
+      "Bash(INSTA_UPDATE=new cargo test:*)",
       "Bash(cargo clippy:*)",
       "Bash(cargo xtask:*)",
       "Bash(cargo run:*)",
