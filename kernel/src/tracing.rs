@@ -261,6 +261,8 @@ pub fn emit_cap_granted(cap_id: u64, holder: u32, object: protocol::CapObject, r
         holder,
         object,
         rights,
+        // Bootstrap grants carry no badge; badged minting emits its own (Step 5).
+        badge: 0,
         t: timestamp(),
         hart_id: crate::percpu::current_hartid() as u8,
     });
@@ -278,6 +280,8 @@ pub fn emit_cap_transferred(cap_id: u64, holder: u32, object: protocol::CapObjec
         holder,
         object,
         rights,
+        // Reply caps carry no badge; Step 5 adds a badge param for badged mints.
+        badge: 0,
         t: timestamp(),
         hart_id: crate::percpu::current_hartid() as u8,
     });

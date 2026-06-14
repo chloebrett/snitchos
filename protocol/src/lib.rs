@@ -139,6 +139,9 @@ pub enum Frame<'a> {
     holder: u32,
     object: CapObject,
     rights: u32,
+    /// The endpoint cap's server-chosen demux value (v0.9c); `0` for objects
+    /// that carry no badge (bootstrap grants, reply caps). Kernel-opaque.
+    badge: u64,
     t: u64,
     hart_id: u8,
   },
@@ -275,6 +278,7 @@ mod tests {
       holder: 7,
       object: CapObject::TelemetrySink,
       rights: 0b0001,
+      badge: 0,
       t: 1234,
       hart_id: 1,
     };
@@ -297,6 +301,7 @@ mod tests {
       holder: 7,
       object: CapObject::SpanSink,
       rights: 0b0001,
+      badge: 0,
       t: 5678,
       hart_id: 1,
     };
@@ -319,6 +324,7 @@ mod tests {
       holder: 7,
       object: CapObject::Endpoint,
       rights: 0b0010,
+      badge: 0,
       t: 9012,
       hart_id: 1,
     };
@@ -363,7 +369,32 @@ mod tests {
       holder: 8,
       object: CapObject::Reply,
       rights: 0,
+      badge: 0,
       t: 3456,
+      hart_id: 1,
+    };
+
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+
+    assert_eq!(frame, decoded);
+  }
+
+  /// Roundtrip a `Frame::CapEvent` carrying a nonzero `badge` — the v0.9c
+  /// server-chosen demux value the kernel delivers to the receiver. Proves the
+  /// badge survives the wire (and, via `OwnedFrame`, the decode side).
+  #[test]
+  fn cap_event_carries_a_badge_roundtrips() {
+    let frame = Frame::CapEvent {
+      kind: CapEventKind::Transferred,
+      cap_id: 9,
+      parent_cap_id: 2,
+      holder: 5,
+      object: CapObject::Endpoint,
+      rights: 0b0010,
+      badge: 0xCAFE,
+      t: 7777,
       hart_id: 1,
     };
 

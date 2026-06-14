@@ -40,6 +40,7 @@ pub enum OwnedFrame {
         holder: u32,
         object: CapObject,
         rights: u32,
+        badge: u64,
         t: u64,
         hart_id: u8,
     },
@@ -80,8 +81,8 @@ impl OwnedFrame {
             Frame::HartRegister { id, mhartid, role } => {
                 OwnedFrame::HartRegister { id, mhartid, role }
             }
-            Frame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, t, hart_id } => {
-                OwnedFrame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, t, hart_id }
+            Frame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, badge, t, hart_id } => {
+                OwnedFrame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, badge, t, hart_id }
             }
             Frame::SyscallRefused { syscall, reason, task_id, t, hart_id } => {
                 OwnedFrame::SyscallRefused { syscall, reason, task_id, t, hart_id }
@@ -181,6 +182,38 @@ mod tests {
     }
 
     #[test]
+    fn owned_frame_round_trips_cap_event_with_badge() {
+        // The badge must survive Frame -> OwnedFrame, or the collector/harness
+        // see a zeroed demux value. A field copy mutation testing can't reach.
+        let f = Frame::CapEvent {
+            kind: CapEventKind::Transferred,
+            cap_id: 9,
+            parent_cap_id: 2,
+            holder: 5,
+            object: CapObject::Endpoint,
+            rights: 0b0010,
+            badge: 0xCAFE,
+            t: 7777,
+            hart_id: 1,
+        };
+        let owned = OwnedFrame::from_borrowed(&f);
+        assert_eq!(
+            owned,
+            OwnedFrame::CapEvent {
+                kind: CapEventKind::Transferred,
+                cap_id: 9,
+                parent_cap_id: 2,
+                holder: 5,
+                object: CapObject::Endpoint,
+                rights: 0b0010,
+                badge: 0xCAFE,
+                t: 7777,
+                hart_id: 1,
+            },
+        );
+    }
+
+    #[test]
     fn owned_frame_handles_every_variant() {
         // Add a case here when adding a Frame variant. The match in
         // `from_borrowed` is exhaustive so this is belt-and-braces;
@@ -199,6 +232,7 @@ mod tests {
             Frame::MetricRegister { name_id: StringId(0), kind: MetricKind::Counter },
             Frame::HartRegister { id: 0, mhartid: 0, role: crate::HartRole::Boot },
             Frame::Message { endpoint: 1, from: 2, to: 3, parent_span: SpanId(4), t: 5, hart_id: 0 },
+            Frame::CapEvent { kind: CapEventKind::Granted, cap_id: 1, parent_cap_id: 0, holder: 1, object: CapObject::Endpoint, rights: 0b0010, badge: 0, t: 1, hart_id: 0 },
         ] {
             // Just exercising — that we get *some* OwnedFrame back
             // without panicking covers the variant.

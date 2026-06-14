@@ -537,8 +537,8 @@ impl View {
                 format!("Dropped {{ count={count} }}"),
             OwnedFrame::HartRegister { id, mhartid, role } =>
                 format!("HartRegister {{ id={id} mhartid={mhartid} role={role:?} }}"),
-            OwnedFrame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, t, hart_id } =>
-                format!("CapEvent {{ {kind:?} cap_id={cap_id} parent={parent_cap_id} holder={holder} object={object:?} rights={rights:#b} t={t} hart={hart_id} }}"),
+            OwnedFrame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, badge, t, hart_id } =>
+                format!("CapEvent {{ {kind:?} cap_id={cap_id} parent={parent_cap_id} holder={holder} object={object:?} rights={rights:#b} badge={badge:#x} t={t} hart={hart_id} }}"),
             OwnedFrame::SyscallRefused { syscall, reason, task_id, t, hart_id } =>
                 format!("SyscallRefused {{ syscall={syscall} reason={reason:?} task={task_id} t={t} hart={hart_id} }}"),
             OwnedFrame::Log { msg, task_id, t, hart_id } =>
