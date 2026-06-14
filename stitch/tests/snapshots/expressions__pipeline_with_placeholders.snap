@@ -1,0 +1,55 @@
+---
+source: stitch/tests/expressions.rs
+expression: "p(\"readings |> filter($.celsius > 30) |> map($.celsius)\")"
+---
+Binary {
+    op: Pipe,
+    left: Binary {
+        op: Pipe,
+        left: Var(
+            "readings",
+        ),
+        right: Call {
+            callee: Var(
+                "filter",
+            ),
+            args: [
+                Lambda {
+                    params: [
+                        "$a",
+                    ],
+                    body: Binary {
+                        op: Gt,
+                        left: Field {
+                            object: Var(
+                                "$a",
+                            ),
+                            name: "celsius",
+                        },
+                        right: Int(
+                            30,
+                        ),
+                    },
+                },
+            ],
+        },
+    },
+    right: Call {
+        callee: Var(
+            "map",
+        ),
+        args: [
+            Lambda {
+                params: [
+                    "$a",
+                ],
+                body: Field {
+                    object: Var(
+                        "$a",
+                    ),
+                    name: "celsius",
+                },
+            },
+        ],
+    },
+}

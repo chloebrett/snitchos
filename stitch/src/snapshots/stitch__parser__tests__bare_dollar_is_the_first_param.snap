@@ -1,0 +1,19 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"each($)\")"
+---
+Call {
+    callee: Var(
+        "each",
+    ),
+    args: [
+        Lambda {
+            params: [
+                "$a",
+            ],
+            body: Var(
+                "$a",
+            ),
+        },
+    ],
+}

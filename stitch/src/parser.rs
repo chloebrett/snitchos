@@ -3,6 +3,8 @@
 //! literals, variables, unary/binary operators, grouping, and the postfix
 //! layer (calls, field access, `?.`, `?`, indexing).
 
+use std::collections::BTreeSet;
+
 use crate::ast::{BinOp, Expr, UnOp};
 use crate::lexer::{Token, lex};
 
@@ -30,6 +32,41 @@ pub fn parse(src: &str) -> Result<Expr, ParseError> {
     let expr = parser.parse_expr(0)?;
     parser.expect(&Token::Eof, "end of input")?;
     Ok(expr)
+}
+
+/// Rewrite `Placeholder` nodes in `expr` into `Var("$x")`, collecting the
+/// `$x` parameter names used. Stops at explicit `Lambda` boundaries (a
+/// placeholder inside a written-out lambda isn't ours to capture). Used to
+/// desugar `$`-placeholder arguments into lambdas at the enclosing call.
+fn collect_placeholders(expr: &mut Expr, params: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Placeholder(name) => {
+            let param = format!("${}", name.as_deref().unwrap_or("a"));
+            params.insert(param.clone());
+            *expr = Expr::Var(param);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_placeholders(left, params);
+            collect_placeholders(right, params);
+        }
+        Expr::Unary { operand, .. } | Expr::Try(operand) => collect_placeholders(operand, params),
+        Expr::Call { callee, args } => {
+            collect_placeholders(callee, params);
+            for arg in args {
+                collect_placeholders(arg, params);
+            }
+        }
+        Expr::Field { object, .. } | Expr::SafeField { object, .. } => {
+            collect_placeholders(object, params);
+        }
+        Expr::Index { object, index } => {
+            collect_placeholders(object, params);
+            collect_placeholders(index, params);
+        }
+        // Atoms with no sub-expressions, and explicit lambdas (their body's
+        // placeholders, if any, belong to that lambda — left for a later check).
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Var(_) | Expr::Lambda { .. } => {}
+    }
 }
 
 /// Map an infix-operator token to its `BinOp`, or `None` if it isn't one.
@@ -248,7 +285,7 @@ impl Parser {
         let mut args = Vec::new();
         if !matches!(self.peek(), Token::RParen) {
             loop {
-                args.push(self.parse_expr(0)?);
+                args.push(self.parse_arg()?);
                 if matches!(self.peek(), Token::Comma) {
                     self.bump();
                     if matches!(self.peek(), Token::RParen) {
@@ -264,6 +301,23 @@ impl Parser {
             callee: Box::new(callee),
             args,
         })
+    }
+
+    /// Parse one call argument, desugaring any `$`-placeholders it directly
+    /// contains into a wrapping lambda (§3). Nested calls have already
+    /// captured their own, so the placeholders left here bind to this call.
+    fn parse_arg(&mut self) -> Result<Expr, ParseError> {
+        let mut arg = self.parse_expr(0)?;
+        let mut params = BTreeSet::new();
+        collect_placeholders(&mut arg, &mut params);
+        if params.is_empty() {
+            Ok(arg)
+        } else {
+            Ok(Expr::Lambda {
+                params: params.into_iter().collect(),
+                body: Box::new(arg),
+            })
+        }
     }
 
     /// Consume the next token, requiring it to equal `want`, or panic with
@@ -292,6 +346,7 @@ impl Parser {
             Token::Float(f) => Expr::Float(f),
             Token::Bool(b) => Expr::Bool(b),
             Token::Ident(name) => Expr::Var(name),
+            Token::Placeholder(name) => Expr::Placeholder(name),
             Token::LParen => {
                 let inner = self.parse_expr(0)?;
                 self.expect(&Token::RParen, "')'")?;
@@ -485,5 +540,35 @@ mod tests {
     #[test]
     fn parenthesized_grouping_is_not_a_lambda() {
         insta::assert_debug_snapshot!(p("(1 + 2) * 3"));
+    }
+
+    #[test]
+    fn placeholder_in_call_becomes_a_lambda() {
+        insta::assert_debug_snapshot!(p("map($ * 2)"));
+    }
+
+    #[test]
+    fn bare_dollar_is_the_first_param() {
+        insta::assert_debug_snapshot!(p("each($)"));
+    }
+
+    #[test]
+    fn two_placeholders_give_arity_two() {
+        insta::assert_debug_snapshot!(p("fold(0, $a + $b)"));
+    }
+
+    #[test]
+    fn repeated_dollar_is_arity_one() {
+        insta::assert_debug_snapshot!(p("map($ * $)"));
+    }
+
+    #[test]
+    fn placeholder_with_field_access() {
+        insta::assert_debug_snapshot!(p("map($.celsius)"));
+    }
+
+    #[test]
+    fn placeholder_wraps_only_its_own_argument() {
+        insta::assert_debug_snapshot!(p("f($ > 30, other)"));
     }
 }

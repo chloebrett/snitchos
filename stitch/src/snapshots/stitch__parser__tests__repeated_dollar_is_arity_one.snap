@@ -1,0 +1,25 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"map($ * $)\")"
+---
+Call {
+    callee: Var(
+        "map",
+    ),
+    args: [
+        Lambda {
+            params: [
+                "$a",
+            ],
+            body: Binary {
+                op: Mul,
+                left: Var(
+                    "$a",
+                ),
+                right: Var(
+                    "$a",
+                ),
+            },
+        },
+    ],
+}

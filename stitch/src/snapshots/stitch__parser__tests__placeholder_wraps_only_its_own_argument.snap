@@ -1,0 +1,28 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"f($ > 30, other)\")"
+---
+Call {
+    callee: Var(
+        "f",
+    ),
+    args: [
+        Lambda {
+            params: [
+                "$a",
+            ],
+            body: Binary {
+                op: Gt,
+                left: Var(
+                    "$a",
+                ),
+                right: Int(
+                    30,
+                ),
+            },
+        },
+        Var(
+            "other",
+        ),
+    ],
+}

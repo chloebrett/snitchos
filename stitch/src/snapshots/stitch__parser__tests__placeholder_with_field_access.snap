@@ -1,0 +1,22 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"map($.celsius)\")"
+---
+Call {
+    callee: Var(
+        "map",
+    ),
+    args: [
+        Lambda {
+            params: [
+                "$a",
+            ],
+            body: Field {
+                object: Var(
+                    "$a",
+                ),
+                name: "celsius",
+            },
+        },
+    ],
+}

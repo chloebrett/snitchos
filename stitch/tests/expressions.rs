@@ -41,3 +41,8 @@ fn pipeline_with_lambdas() {
         "readings |> filter(r -> r.celsius > 30) |> map(r -> r.celsius)"
     ));
 }
+
+#[test]
+fn pipeline_with_placeholders() {
+    insta::assert_debug_snapshot!(p("readings |> filter($.celsius > 30) |> map($.celsius)"));
+}

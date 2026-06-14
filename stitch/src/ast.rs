@@ -8,6 +8,10 @@ pub enum Expr {
     Bool(bool),
     /// A name in expression position — a variable reference.
     Var(String),
+    /// A lambda placeholder before desugaring: `None` is bare `$`, `Some("a")`
+    /// is `$a`. The parser rewrites these into a `Lambda` at the call argument
+    /// that encloses them; a `Placeholder` surviving into a final AST is a bug.
+    Placeholder(Option<String>),
     /// An infix operator application.
     Binary {
         op: BinOp,
