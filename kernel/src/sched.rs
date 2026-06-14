@@ -44,6 +44,12 @@ pub use smoke::{
     SMOKE_MARKER_HITS, WAKE_RESUMED,
 };
 
+/// Userspace process / address-space bookkeeping (`process`) and the demo task
+/// bodies (`demo_tasks`). Re-exported at the crate root so call sites stay
+/// `crate::process`, `crate::demo_tasks`.
+pub mod demo_tasks;
+pub mod process;
+
 /// Saved callee-saved register set for a kernel thread that's
 /// off-CPU. Layout matches `sched.S` byte-for-byte — do not reorder
 /// or add fields without updating the asm offsets.

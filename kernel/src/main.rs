@@ -8,36 +8,31 @@ use core::sync::atomic::Ordering;
 use fdt::Fdt;
 use kernel_core::bootargs::WorkloadKind;
 
-mod boot_workload;
-mod console;
-mod demo_tasks;
+// Modules are grouped by concern into directory modules (`mem/`, `device/`,
+// `smp/`, `obs/`, `workloads/`, plus submodules under `sched`/`trap`). Each
+// group re-exports its children at the crate root via `pub(crate) use` below, so
+// call sites stay `crate::frame`, `crate::trap::user`, etc. — the physical
+// nesting doesn't change the logical paths.
+mod device;
 mod dtb;
-mod frame;
-mod heap;
-mod heap_smoke; // SMOKE TEST — remove once real workloads drive heap metrics
-mod heartbeat;
-mod ipc;
-mod ipi;
-mod mmu;
+mod mem;
+mod obs;
 mod panic;
-mod percpu;
-mod process;
 mod sbi;
 mod sched;
-mod secondary;
-/// The runtime-selectable stress/regression workloads (spawn storm,
-/// IPI pong, shootdown storm, mutex storm, virtio storm). Compiled in
-/// only for `itest-workloads` builds — never production. Formerly the
-/// `deflake-*` cargo features; see `docs/runtime-workload-selection-design.md`.
-#[cfg(feature = "itest-workloads")]
-mod storms;
-mod sync;
-mod tracing;
+mod smp;
 mod trap;
-mod uart;
-mod user;
-mod virtio_console;
-mod workload;
+mod workloads;
+
+pub(crate) use device::{console, uart, virtio_console};
+pub(crate) use mem::{frame, heap, heap_smoke, mmu};
+pub(crate) use obs::{heartbeat, tracing};
+pub(crate) use sched::{demo_tasks, process};
+pub(crate) use smp::{ipi, percpu, secondary, sync};
+pub(crate) use trap::{ipc, user};
+pub(crate) use workloads::{boot_workload, workload};
+#[cfg(feature = "itest-workloads")]
+pub(crate) use workloads::storms;
 
 // Pull in the boot stub (entry.S). It defines `_start`, sets up the stack
 // pointer, zeros .bss, and calls `kmain`. See linker.ld for the memory layout
@@ -361,6 +356,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::Workers)
         | Some(WorkloadKind::HeapGrow)
         | Some(WorkloadKind::UserHog)
+        | Some(WorkloadKind::SyscallHog)
         | Some(WorkloadKind::Priorities)
         | Some(WorkloadKind::Ipc)
         | Some(WorkloadKind::IpcRpc)
@@ -415,6 +411,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::Workers
                     | WorkloadKind::HeapGrow
                     | WorkloadKind::UserHog
+                    | WorkloadKind::SyscallHog
                     | WorkloadKind::Priorities
                     | WorkloadKind::BlockWake
                     | WorkloadKind::Ipc
@@ -482,6 +479,15 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         Some(WorkloadKind::UserHog) => {
             user::init_metric();
             let _ = sched::spawn_on(1, "user_hog", user::user_hog_main_entry);
+            let _ = sched::spawn_on(1, "worker_a", user::worker_a_main_entry);
+        }
+        // Preemption guard: a `syscall_hog` that spams a cheap ambient syscall
+        // (spending most of its time in interrupt-masked S-mode) co-located on
+        // hart 1 with a cooperative `worker_a` peer. The timer still preempts it
+        // (it can't fire mid-syscall, so it fires on the `sret` back to U-mode).
+        Some(WorkloadKind::SyscallHog) => {
+            user::init_metric();
+            let _ = sched::spawn_on(1, "syscall_hog", user::syscall_hog_main_entry);
             let _ = sched::spawn_on(1, "worker_a", user::worker_a_main_entry);
         }
         // Priority demo (v0.8b): a High-priority CPU-bound `greedy` task (the

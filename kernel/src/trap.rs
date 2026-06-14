@@ -8,6 +8,13 @@
 
 core::arch::global_asm!(include_str!("trap.S"));
 
+/// The userspace runtime entry / ELF loading (`user`) and the kernel-side IPC
+/// endpoint machinery (`ipc`) — both reached through the trap dispatch in this
+/// module. Re-exported at the crate root so call sites stay `crate::user`,
+/// `crate::ipc`.
+pub mod ipc;
+pub mod user;
+
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

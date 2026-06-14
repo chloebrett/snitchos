@@ -74,6 +74,7 @@ fn build_and_embed_user(kernel_dir: &str) {
     embed(&format!("{bin_dir}/worker_b"), "SNITCHOS_WORKER_B_ELF");
     embed(&format!("{bin_dir}/heap-grow"), "SNITCHOS_HEAP_GROW_ELF");
     embed(&format!("{bin_dir}/user_hog"), "SNITCHOS_USER_HOG_ELF");
+    embed(&format!("{bin_dir}/syscall_hog"), "SNITCHOS_SYSCALL_HOG_ELF");
     embed(&format!("{bin_dir}/ipc-sender"), "SNITCHOS_IPC_SENDER_ELF");
     embed(&format!("{bin_dir}/ipc-receiver"), "SNITCHOS_IPC_RECEIVER_ELF");
     embed(&format!("{bin_dir}/rpc-client"), "SNITCHOS_RPC_CLIENT_ELF");

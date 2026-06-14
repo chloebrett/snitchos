@@ -82,6 +82,15 @@ pub enum WorkloadKind {
     /// and the peer starves; the timer-driven preemption (Step 4) is what lets
     /// the peer make progress.
     UserHog,
+    /// v0.8 preemption guard: a `syscall-hog` program that loops issuing a cheap
+    /// ambient syscall (`DebugWrite`) back-to-back, spending most of its time in
+    /// S-mode with interrupts masked, co-located with a cooperative `worker_a`
+    /// peer. Documents that a *syscall-heavy* U-mode task is still preempted: the
+    /// timer can't fire mid-syscall (`SIE == 0` throughout trap handling), so it
+    /// fires the instant the syscall `sret`s back to U-mode (`SPP == 0`). Guards
+    /// against a regression that re-enables interrupts inside long syscalls
+    /// without a `need_resched` drain. See `plans/v0.8c-need-resched-on-syscall-return.md`.
+    SyscallHog,
     /// v0.8b priority demo: a `High`-priority and a `Low`-priority cooperative
     /// worker share one hart. The High worker runs far more often (priority
     /// respected), but the Low worker still makes progress (aging prevents
@@ -171,6 +180,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "workers" => Some(WorkloadKind::Workers),
             "heap-grow" => Some(WorkloadKind::HeapGrow),
             "user-hog" => Some(WorkloadKind::UserHog),
+            "syscall-hog" => Some(WorkloadKind::SyscallHog),
             "priorities" => Some(WorkloadKind::Priorities),
             "block-wake" => Some(WorkloadKind::BlockWake),
             "ipc" => Some(WorkloadKind::Ipc),
@@ -275,6 +285,16 @@ mod tests {
     #[test]
     fn selects_priorities() {
         assert_eq!(select("workload=priorities"), Some(WorkloadKind::Priorities));
+    }
+
+    #[test]
+    fn selects_syscall_hog() {
+        assert_eq!(select("workload=syscall-hog"), Some(WorkloadKind::SyscallHog));
+    }
+
+    #[test]
+    fn syscall_hog_is_not_a_storm() {
+        assert!(!WorkloadKind::SyscallHog.is_storm());
     }
 
     #[test]

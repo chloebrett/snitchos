@@ -49,6 +49,12 @@ pub static HEAP_GROW_ELF: &[u8] = include_bytes!(env!("SNITCHOS_HEAP_GROW_ELF"))
 /// peer until the timer preempts it.
 pub static USER_HOG_ELF: &[u8] = include_bytes!(env!("SNITCHOS_USER_HOG_ELF"));
 
+/// The `workload=syscall-hog` program: a tight loop of cheap ambient `DebugWrite`
+/// syscalls (no `yield`) — the v0.8 preemption *guard*. Proves a syscall-heavy
+/// U-mode task is still preempted despite spending most of its time in
+/// interrupt-masked S-mode.
+pub static SYSCALL_HOG_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SYSCALL_HOG_ELF"));
+
 /// The `workload=ipc` programs: `ipc-sender` holds a `SEND` cap and sends one
 /// inline message; `ipc-receiver` holds a `RECV` cap, receives it, and
 /// re-emits the payload. They rendezvous over one kernel-brokered endpoint.
@@ -185,6 +191,11 @@ pub extern "C" fn heap_grow_main_entry() -> ! {
 /// Hart-1 entry for `workload=user-hog`: run the uncooperative CPU hog.
 pub extern "C" fn user_hog_main_entry() -> ! {
     run(USER_HOG_ELF)
+}
+
+/// Hart-1 entry for `workload=syscall-hog`: run the syscall-spamming hog.
+pub extern "C" fn syscall_hog_main_entry() -> ! {
+    run(SYSCALL_HOG_ELF)
 }
 
 /// Entry for `workload=ipc`: run the IPC demo sender, granted a `SEND` cap to
