@@ -317,10 +317,10 @@ pub const MSG_WORDS: usize = 4;
 /// rendezvous operations — each blocks until a peer arrives. Which ops are
 /// permitted depends on the rights the kernel granted (`SEND`/`RECV`); holding
 /// the integer is not authority, the kernel validates on every call.
-/// The `SEND` rights bit — what a server stamps on the client caps it mints
-/// via [`Endpoint::mint_badged`]. Mirror of `kernel_core::cap::Rights::SEND`;
-/// part of the user/kernel ABI contract, keep in sync.
-pub const RIGHT_SEND: u32 = 0b0010;
+/// Capability rights bits (`rights::SEND`, …) — re-exported from the shared
+/// [`snitchos_abi::rights`] ABI so a program stamps minted caps from the same
+/// source of truth the kernel reads. Pass these to [`Endpoint::mint_badged`].
+pub use snitchos_abi::rights;
 
 #[derive(Clone, Copy)]
 pub struct Endpoint {
@@ -360,7 +360,7 @@ impl Endpoint {
     /// handle. Requires this endpoint cap to carry `MINT` (a server owner cap);
     /// `Err(Denied)` if the kernel refused. The minted cap names the same
     /// endpoint, stamped with `badge` (the server's demux value) + `rights`
-    /// (e.g. [`RIGHT_SEND`]) — hand it to a client so its messages arrive
+    /// (e.g. [`rights::SEND`]) — hand it to a client so its messages arrive
     /// badged. The cap lands in *this* process's table for now.
     pub fn mint_badged(self, badge: u64, rights: u32) -> Result<usize, Denied> {
         let ret: usize;

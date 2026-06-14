@@ -132,6 +132,22 @@ impl Syscall {
     }
 }
 
+/// Capability rights bits — the bitmask carried on a capability and on the
+/// `CapEvent` wire frame, and the rights a [`Syscall::MintBadged`] requests.
+/// The single source of truth: the kernel's typed `kernel_core::cap::Rights`
+/// wraps these, and userspace passes them raw. Neither side hard-codes the
+/// values. Binary literals (next bit `0b1_0000`) — no `1 << n` to misread.
+pub mod rights {
+    /// May emit telemetry through a `TelemetrySink`.
+    pub const EMIT: u32 = 0b0001;
+    /// May `send` on an `Endpoint`.
+    pub const SEND: u32 = 0b0010;
+    /// May `receive` on an `Endpoint`.
+    pub const RECV: u32 = 0b0100;
+    /// May mint badged `SEND` caps for an `Endpoint` the holder owns (v0.9c).
+    pub const MINT: u32 = 0b1000;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

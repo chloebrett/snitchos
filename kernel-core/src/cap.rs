@@ -30,24 +30,23 @@ impl Rights {
     /// attenuation; useful as a "held but powerless" cap in tests.
     pub const NONE: Rights = Rights(0);
 
-    /// May emit telemetry through a [`Object::TelemetrySink`]. Bits are
-    /// written as binary literals (next rights: `0b0010`, `0b0100`, …) —
-    /// no shift to misread, and no no-op `1 << 0` for mutation testing to
-    /// flag as an equivalent mutant.
-    pub const EMIT: Rights = Rights(0b0001);
+    /// May emit telemetry through a [`Object::TelemetrySink`]. The bit values
+    /// live in [`snitchos_abi::rights`] — the single source of truth shared with
+    /// userspace, so neither side hard-codes them.
+    pub const EMIT: Rights = Rights(snitchos_abi::rights::EMIT);
 
     /// May `send` on an [`Object::Endpoint`] (v0.9 IPC).
-    pub const SEND: Rights = Rights(0b0010);
+    pub const SEND: Rights = Rights(snitchos_abi::rights::SEND);
 
     /// May `receive` on an [`Object::Endpoint`] (v0.9 IPC). Disjoint from
     /// `SEND` so a cap can grant one, the other, or both (`SEND | RECV`).
-    pub const RECV: Rights = Rights(0b0100);
+    pub const RECV: Rights = Rights(snitchos_abi::rights::RECV);
 
     /// May derive badged `SEND` caps naming an [`Object::Endpoint`] the holder
     /// owns (v0.9c). The endpoint owner (a server) holds `RECV | MINT` and
     /// stamps each derived client cap's badge + rights; clients hold no `MINT`,
     /// so they cannot mint (re-delegation is a deferred follow-on).
-    pub const MINT: Rights = Rights(0b1000);
+    pub const MINT: Rights = Rights(snitchos_abi::rights::MINT);
 
     /// Whether `self` grants every right in `other`.
     #[must_use]

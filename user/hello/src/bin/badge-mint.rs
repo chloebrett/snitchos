@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{endpoint, entry, RIGHT_SEND};
+use snitchos_user::{endpoint, entry, rights};
 
 // One binary, two roles — the kernel decides which by the rights on the
 // endpoint cap it granted this process. A `RECV | MINT` holder mints a badged
@@ -10,5 +10,5 @@ use snitchos_user::{endpoint, entry, RIGHT_SEND};
 // code, decides the outcome — the whole point of v0.9c.
 #[entry]
 fn main() {
-    let _ = endpoint().mint_badged(0xF00D, RIGHT_SEND);
+    let _ = endpoint().mint_badged(0xF00D, rights::SEND);
 }

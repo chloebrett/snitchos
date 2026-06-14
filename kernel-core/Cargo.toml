@@ -7,6 +7,9 @@ publish = false
 [dependencies]
 protocol = { path = "../protocol" }
 postcard = { version = "1", default-features = false }
+# The kernel↔user ABI: single source of truth for capability rights bits
+# (`Rights` wraps `snitchos_abi::rights::*`).
+snitchos-abi = { path = "../abi" }
 
 # loom is pulled in ONLY under `--cfg loom` (the model-check test run);
 # normal `cargo test` / the kernel build never see it. See tests/loom_tx.rs.

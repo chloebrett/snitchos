@@ -7,6 +7,8 @@ publish = false
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 protocol = { path = "../protocol", features = ["std"] }
+# The kernel↔user ABI — scenarios assert on `Syscall::*` by name, not a magic number.
+snitchos-abi = { path = "../abi" }
 itest-harness = { path = "../itest-harness" }
 ctrlc = "3"
 

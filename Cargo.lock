@@ -622,6 +622,7 @@ dependencies = [
  "loom",
  "postcard",
  "protocol",
+ "snitchos-abi",
 ]
 
 [[package]]
@@ -1694,6 +1695,7 @@ dependencies = [
  "ctrlc",
  "itest-harness",
  "protocol",
+ "snitchos-abi",
 ]
 
 [[package]]

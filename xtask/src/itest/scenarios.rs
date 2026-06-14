@@ -1376,8 +1376,8 @@ pub fn badge_mint_mints_and_refuses(h: &mut View) -> Result<(), String> {
          minter didn't mint a badged cap",
     )?;
 
-    // 12 == snitchos_abi::Syscall::MintBadged (xtask has no abi dep — inlined).
-    h.wait_for(SEC * 30, |f, _| matches!(f, OwnedFrame::SyscallRefused { syscall: 12, .. }))
+    let mint_badged = snitchos_abi::Syscall::MintBadged as u8;
+    h.wait_for(SEC * 30, |f, _| matches!(f, OwnedFrame::SyscallRefused { syscall, .. } if *syscall == mint_badged))
         .ok_or(
             "no SyscallRefused{MintBadged} within 30s — the SEND-only client's mint \
              wasn't refused (the MINT gate didn't hold)",
