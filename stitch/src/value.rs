@@ -41,13 +41,25 @@ pub enum Value {
 }
 
 /// A built-in function: its name, arity, and the Rust implementation. The
-/// implementation receives already-evaluated arguments and may call back into
-/// the interpreter (e.g. `map` applies its function argument to each element).
+/// implementation receives already-evaluated arguments plus the environment
+/// (so it can reach the telemetry sink and apply function arguments), and may
+/// call back into the interpreter (e.g. `map` applies its function to each
+/// element; `span` runs a thunk).
 #[derive(Clone, Copy)]
 pub struct NativeFn {
     pub name: &'static str,
     pub arity: usize,
-    pub func: fn(&[Value]) -> Result<Value, RuntimeError>,
+    pub func: fn(&[Value], &Env) -> Result<Value, RuntimeError>,
+}
+
+/// A telemetry event recorded by `emit`/`span`. The v0 stub for the real
+/// `Frame` wire protocol — collected in a sink so the runtime (and tests) can
+/// observe what a program reported.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TelemetryEvent {
+    SpanOpen { name: String },
+    SpanClose { name: String },
+    Emit { name: String, value: Value },
 }
 
 /// A constructor: which type/variant it builds and the names of its fields (in

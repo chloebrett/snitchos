@@ -7,7 +7,9 @@ use std::rc::Rc;
 
 use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Pattern, Stmt, StrSegment, UnOp};
 use crate::env::Env;
-use crate::value::{ClosureData, Constructor, DataValue, NativeFn, RuntimeError, Value};
+use crate::value::{
+    ClosureData, Constructor, DataValue, NativeFn, RuntimeError, TelemetryEvent, Value,
+};
 
 /// Run a program: bind every top-level function into one shared global
 /// environment (so they are mutually visible — letrec), then call `main()`.
@@ -15,6 +17,14 @@ use crate::value::{ClosureData, Constructor, DataValue, NativeFn, RuntimeError, 
 /// # Errors
 /// Returns `Err` if there is no `main` function, or on any runtime fault.
 pub fn eval_program(items: &[Item]) -> Result<Value, RuntimeError> {
+    eval_program_with_telemetry(items).0
+}
+
+/// Like [`eval_program`], but also returns the telemetry (`emit`/`span`)
+/// recorded during the run — the observable output of the program.
+pub fn eval_program_with_telemetry(
+    items: &[Item],
+) -> (Result<Value, RuntimeError>, Vec<TelemetryEvent>) {
     let env = Env::new();
     let mut globals = HashMap::new();
     for native in NATIVES {
@@ -61,10 +71,11 @@ pub fn eval_program(items: &[Item]) -> Result<Value, RuntimeError> {
         }
     }
     env.set_globals(globals);
-    let main = env
-        .lookup("main")
-        .ok_or_else(|| RuntimeError::new("no `main` function"))?;
-    eval_call(&main, &[], &env)
+    let result = match env.lookup("main") {
+        Some(main) => eval_call(&main, &[], &env),
+        None => Err(RuntimeError::new("no `main` function")),
+    };
+    (result, env.telemetry())
 }
 
 /// Evaluate an expression to a value in environment `env`.
@@ -84,6 +95,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         Expr::Binary { op: BinOp::Or, left, right } => Ok(Value::Bool(
             as_bool(&eval(left, env)?, "`or`")? || as_bool(&eval(right, env)?, "`or`")?,
         )),
+        // `lhs |> f(a)` ≡ `f(lhs, a)`; `lhs |> f` ≡ `f(lhs)`.
+        Expr::Binary { op: BinOp::Pipe, left, right } => eval_pipe(left, right, env),
         Expr::Binary { op, left, right } => {
             eval_binary(*op, &eval(left, env)?, &eval(right, env)?)
         }
@@ -151,12 +164,37 @@ fn eval_call(callee: &Value, args: &[Arg], env: &Env) -> Result<Value, RuntimeEr
         }
         values.push(eval(&arg.value, env)?);
     }
-    apply_values(callee, &values)
+    apply_values(callee, &values, env)
+}
+
+/// Evaluate a pipe `left |> right`. If `right` is a call `f(a, …)`, insert
+/// `left` as the first argument: `f(left, a, …)`. Otherwise `right` is a bare
+/// function reference and is applied to `left` alone.
+fn eval_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, RuntimeError> {
+    let piped = eval(left, env)?;
+    if let Expr::Call { callee, args } = right {
+        let function = eval(callee, env)?;
+        let mut values = Vec::with_capacity(args.len() + 1);
+        values.push(piped);
+        for arg in args {
+            if arg.label.is_some() || matches!(arg.value, Expr::Spread(_)) {
+                return Err(RuntimeError::new(
+                    "a piped call takes positional arguments only",
+                ));
+            }
+            values.push(eval(&arg.value, env)?);
+        }
+        apply_values(&function, &values, env)
+    } else {
+        apply_values(&eval(right, env)?, &[piped], env)
+    }
 }
 
 /// Apply a callable to already-evaluated positional arguments. Shared by
-/// `eval_call` and the native combinators (which apply their function args).
-fn apply_values(callee: &Value, args: &[Value]) -> Result<Value, RuntimeError> {
+/// `eval_call`, pipes, `use`, and the native combinators. `env` is threaded so
+/// native functions can reach the telemetry sink (closures use their own
+/// captured environment, not this one).
+fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     match callee {
         Value::Closure(closure) => {
             if args.len() != closure.params.len() {
@@ -181,7 +219,7 @@ fn apply_values(callee: &Value, args: &[Value]) -> Result<Value, RuntimeError> {
                     args.len()
                 )));
             }
-            (native.func)(args)
+            (native.func)(args, env)
         }
         Value::Constructor(ctor) => make_data(ctor, args),
         _ => Err(RuntimeError::new(format!("cannot call a {}", callee.kind()))),
@@ -194,7 +232,46 @@ const NATIVES: &[NativeFn] = &[
     NativeFn { name: "filter", arity: 2, func: native_filter },
     NativeFn { name: "fold", arity: 3, func: native_fold },
     NativeFn { name: "join", arity: 2, func: native_join },
+    NativeFn { name: "emit", arity: 2, func: native_emit },
+    NativeFn { name: "span", arity: 2, func: native_span },
 ];
+
+/// `span(name, body)` — open a span, run the zero-argument `body` thunk, close
+/// the span, and return the body's value. The `use <- span(name)` sugar makes
+/// the rest of a block the body. v0 stub for span frames on the wire.
+fn native_span(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [name, body] = args else {
+        return Err(RuntimeError::new("span expects (name, body)"));
+    };
+    let Value::Str(name) = name else {
+        return Err(RuntimeError::new(format!(
+            "span name must be a Str, got {}",
+            name.kind()
+        )));
+    };
+    env.emit(TelemetryEvent::SpanOpen { name: name.to_string() });
+    let result = apply_values(body, &[], env)?;
+    env.emit(TelemetryEvent::SpanClose { name: name.to_string() });
+    Ok(result)
+}
+
+/// `emit(name, value)` — record a metric sample. v0 stub for the wire protocol.
+fn native_emit(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [name, value] = args else {
+        return Err(RuntimeError::new("emit expects (name, value)"));
+    };
+    let Value::Str(name) = name else {
+        return Err(RuntimeError::new(format!(
+            "emit name must be a Str, got {}",
+            name.kind()
+        )));
+    };
+    env.emit(TelemetryEvent::Emit {
+        name: name.to_string(),
+        value: value.clone(),
+    });
+    Ok(Value::Unit)
+}
 
 /// Require a list argument, with an error tagged by the combinator `name`.
 fn expect_list<'a>(name: &str, value: &'a Value) -> Result<&'a [Value], RuntimeError> {
@@ -208,25 +285,25 @@ fn expect_list<'a>(name: &str, value: &'a Value) -> Result<&'a [Value], RuntimeE
 }
 
 /// `map(list, f)` — a new list with `f` applied to each element.
-fn native_map(args: &[Value]) -> Result<Value, RuntimeError> {
+fn native_map(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     let [list, function] = args else {
         return Err(RuntimeError::new("map expects (list, function)"));
     };
     let mapped = expect_list("map", list)?
         .iter()
-        .map(|item| apply_values(function, std::slice::from_ref(item)))
+        .map(|item| apply_values(function, std::slice::from_ref(item), env))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Value::List(mapped.into()))
 }
 
 /// `filter(list, pred)` — the elements for which `pred` returns `true`.
-fn native_filter(args: &[Value]) -> Result<Value, RuntimeError> {
+fn native_filter(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     let [list, predicate] = args else {
         return Err(RuntimeError::new("filter expects (list, predicate)"));
     };
     let mut kept = Vec::new();
     for item in expect_list("filter", list)? {
-        match apply_values(predicate, std::slice::from_ref(item))? {
+        match apply_values(predicate, std::slice::from_ref(item), env)? {
             Value::Bool(true) => kept.push(item.clone()),
             Value::Bool(false) => {}
             other => {
@@ -241,19 +318,19 @@ fn native_filter(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 /// `fold(list, init, f)` — reduce left-to-right, `f(acc, element)`.
-fn native_fold(args: &[Value]) -> Result<Value, RuntimeError> {
+fn native_fold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     let [list, init, function] = args else {
         return Err(RuntimeError::new("fold expects (list, init, function)"));
     };
     let mut acc = init.clone();
     for item in expect_list("fold", list)? {
-        acc = apply_values(function, &[acc, item.clone()])?;
+        acc = apply_values(function, &[acc, item.clone()], env)?;
     }
     Ok(acc)
 }
 
 /// `join(list, sep)` — the displayed elements concatenated with `sep` between.
-fn native_join(args: &[Value]) -> Result<Value, RuntimeError> {
+fn native_join(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     let [list, separator] = args else {
         return Err(RuntimeError::new("join expects (list, separator)"));
     };
@@ -455,7 +532,7 @@ fn eval_field(object: &Value, name: &str) -> Result<Value, RuntimeError> {
 /// if there isn't one.
 fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env) -> Result<Value, RuntimeError> {
     let mut scope = env.clone();
-    for stmt in stmts {
+    for (index, stmt) in stmts.iter().enumerate() {
         match stmt {
             Stmt::Let { name, value, .. } => {
                 let bound = eval(value, &scope)?;
@@ -464,7 +541,21 @@ fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env) -> Result<Value,
             Stmt::Expr(expr) => {
                 eval(expr, &scope)?;
             }
-            Stmt::Assign { .. } | Stmt::Use { .. } => {
+            // `use x <- f(a)` turns the rest of the block into a callback and
+            // appends it to the call: `f(a, x -> { rest })` (Gleam-style).
+            Stmt::Use { binding, call } => {
+                let rest = Expr::Block {
+                    stmts: stmts[index + 1..].to_vec(),
+                    result: result.map(|expr| Box::new(expr.clone())),
+                };
+                let callback = Value::Closure(Rc::new(ClosureData {
+                    params: binding.iter().cloned().collect(),
+                    body: rest,
+                    env: scope.clone(),
+                }));
+                return apply_use(call, callback, &scope);
+            }
+            Stmt::Assign { .. } => {
                 return Err(RuntimeError::new(
                     "evaluation not yet implemented for this statement",
                 ));
@@ -474,6 +565,27 @@ fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env) -> Result<Value,
     match result {
         Some(expr) => eval(expr, &scope),
         None => Ok(Value::Unit),
+    }
+}
+
+/// Apply a `use`'s call with the rest-of-block `callback` appended as the final
+/// argument: `f(a)` becomes `f(a, callback)`, `f` becomes `f(callback)`.
+fn apply_use(call: &Expr, callback: Value, env: &Env) -> Result<Value, RuntimeError> {
+    if let Expr::Call { callee, args } = call {
+        let function = eval(callee, env)?;
+        let mut values = Vec::with_capacity(args.len() + 1);
+        for arg in args {
+            if arg.label.is_some() || matches!(arg.value, Expr::Spread(_)) {
+                return Err(RuntimeError::new(
+                    "a `use` call takes positional arguments only",
+                ));
+            }
+            values.push(eval(&arg.value, env)?);
+        }
+        values.push(callback);
+        apply_values(&function, &values, env)
+    } else {
+        apply_values(&eval(call, env)?, &[callback], env)
     }
 }
 
@@ -572,9 +684,17 @@ fn type_mismatch(op: BinOp, left: &Value, right: &Value) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use crate::env::Env;
-    use crate::interp::{eval, eval_program};
+    use crate::interp::{eval, eval_program, eval_program_with_telemetry};
     use crate::parser::{parse, parse_program};
-    use crate::value::Value;
+    use crate::value::{TelemetryEvent, Value};
+
+    /// Parse and run a program, returning the telemetry it emitted.
+    fn run_program_events(src: &str) -> Vec<TelemetryEvent> {
+        let items = parse_program(src).expect("test program should parse");
+        let (result, events) = eval_program_with_telemetry(&items);
+        result.expect("test program should evaluate");
+        events
+    }
 
     /// Parse a whole program (top-level items) and run its `main`.
     fn run_program(src: &str) -> Value {
@@ -1244,6 +1364,104 @@ mod tests {
         assert_eq!(
             run_program_err("main() = map(5, x -> x)"),
             "map expects a List, got Int"
+        );
+    }
+
+    #[test]
+    fn pipe_inserts_the_left_as_the_first_argument() {
+        // 10 |> sub(3)  ==  sub(10, 3)  ==  7
+        assert_eq!(
+            run_program("sub(a, b) = a - b  main() = 10 |> sub(3)"),
+            Value::Int(7)
+        );
+    }
+
+    #[test]
+    fn pipe_into_a_bare_reference_calls_it() {
+        assert_eq!(
+            run_program("total(xs) = fold(xs, 0, (a, b) -> a + b)  main() = [1, 2, 3] |> total"),
+            Value::Int(6)
+        );
+    }
+
+    #[test]
+    fn pipes_chain_left_to_right() {
+        assert_eq!(
+            run_program("main() = [1, 2, 3, 4] |> filter(x -> x > 2) |> map(x -> x * 10) == [30, 40]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn emit_records_a_metric() {
+        assert_eq!(
+            run_program_events(r#"main() = emit("temp", 42)"#),
+            vec![TelemetryEvent::Emit {
+                name: "temp".to_string(),
+                value: Value::Int(42)
+            }]
+        );
+    }
+
+    #[test]
+    fn span_runs_its_body_and_returns_its_value() {
+        assert_eq!(run_program(r#"main() = span("s", () -> 42)"#), Value::Int(42));
+    }
+
+    #[test]
+    fn span_brackets_its_body_with_open_and_close() {
+        assert_eq!(
+            run_program_events(r#"main() = span("s", () -> emit("x", 1))"#),
+            vec![
+                TelemetryEvent::SpanOpen { name: "s".to_string() },
+                TelemetryEvent::Emit { name: "x".to_string(), value: Value::Int(1) },
+                TelemetryEvent::SpanClose { name: "s".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn use_makes_the_rest_of_the_block_the_callback() {
+        // `use <- span("report")` ≡ `span("report", () -> { emit(...) })`
+        assert_eq!(
+            run_program_events(r#"main() = { use <- span("report")  emit("x", 1) }"#),
+            vec![
+                TelemetryEvent::SpanOpen { name: "report".to_string() },
+                TelemetryEvent::Emit { name: "x".to_string(), value: Value::Int(1) },
+                TelemetryEvent::SpanClose { name: "report".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn use_binds_the_callback_parameter() {
+        // `use n <- withTen()` ≡ `withTen(n -> { n + 1 })`; withTen(f) = f(10).
+        assert_eq!(
+            run_program("withTen(f) = f(10)  main() = { use n <- withTen()  n + 1 }"),
+            Value::Int(11)
+        );
+    }
+
+    #[test]
+    fn a_report_style_program_runs_end_to_end() {
+        // Records + field access + placeholder lambdas + pipes + combinators +
+        // `use <- span` + `emit`, together — the shape of the canonical sample.
+        let src = r#"
+            prod Reading(sensor: Str, celsius: Int)
+            report(readings) = {
+                use <- span("report")
+                let hot = readings |> filter($.celsius > 30) |> map($.celsius)
+                emit("hot.count", fold(hot, 0, (acc, _) -> acc + 1))
+            }
+            main() = report([Reading("a", 35), Reading("b", 20), Reading("c", 40)])
+        "#;
+        assert_eq!(
+            run_program_events(src),
+            vec![
+                TelemetryEvent::SpanOpen { name: "report".to_string() },
+                TelemetryEvent::Emit { name: "hot.count".to_string(), value: Value::Int(2) },
+                TelemetryEvent::SpanClose { name: "report".to_string() },
+            ]
         );
     }
 }

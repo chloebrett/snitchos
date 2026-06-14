@@ -10,16 +10,19 @@
 //! end up sharing one fully-populated table — that shared table is what makes
 //! recursion and mutual recursion work (letrec at the top level).
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::value::Value;
+use crate::value::{TelemetryEvent, Value};
 
 #[derive(Clone, Default)]
 pub struct Env {
     locals: Option<Rc<Scope>>,
     globals: Rc<OnceCell<HashMap<String, Value>>>,
+    /// Telemetry recorded by `emit`/`span`, shared across the whole program run
+    /// (every scope and closure points at the same sink).
+    sink: Rc<RefCell<Vec<TelemetryEvent>>>,
 }
 
 struct Scope {
@@ -45,7 +48,18 @@ impl Env {
                 parent: self.locals.clone(),
             })),
             globals: Rc::clone(&self.globals),
+            sink: Rc::clone(&self.sink),
         }
+    }
+
+    /// Record a telemetry event.
+    pub fn emit(&self, event: TelemetryEvent) {
+        self.sink.borrow_mut().push(event);
+    }
+
+    /// A snapshot of all telemetry recorded so far.
+    pub fn telemetry(&self) -> Vec<TelemetryEvent> {
+        self.sink.borrow().clone()
     }
 
     /// The value of the nearest local binding of `name`, else a global of that
