@@ -27,7 +27,18 @@
 
 ## now the trace nests
 
+![two RPC round-trips, each rpc.handle nested inside its rpc.call](rpc-handle-collapsed.png)
+
 - and the payoff loops back to the gap from earlier. with one-way `send` the sender doesn't wait, so the spans are disjoint. but `call` *blocks the caller across the entire round-trip* — the caller's span stays open the whole time the server is working — so the server's handling span opens and closes *inside* the caller's. the timeline finally nests: parent bar wraps child bar, the flame-graph shape, "A is waiting on B" rendered as real, visible latency. the mechanism that propagates the trace is identical to the one-way case; what changed the *shape* is the blocking discipline of the primitive. i wrote a scenario that asserts the temporal containment — and deliberately, it's an assertion the one-way `send` shape *cannot* pass. the difference between fire-and-forget and a call is now a thing the test suite checks, not a thing i eyeball.
+
+## the first call pays for everyone
+
+![the same two round-trips expanded: rpc_client calling, rpc_server handling, across two processes, with the timings](rpc-handle.png)
+
+- put the two round-trips side by side and the first one is *visibly* the expensive one: `rpc.call` 6.73ms with a 228µs `rpc.handle`, versus the second's 1.84ms with a 50µs handle. both halves got ~3–4× faster the second time around, and the trace tells you *why* without a profiler.
+- the **handle** shrank (228µs → 50µs) because of span-name interning. the *first* time a span named `rpc.call`/`rpc.handle` opens, the kernel interns the name and ships a `StringRegister` frame down the polled — not cheap — virtio TX *before* the `SpanStart`. the second handle reuses the interned name: one fewer frame on the hot path. a cold `span_open` literally costs an extra round of telemetry, and you can watch it.
+- the **call** shrank (6.73ms → 1.84ms) because of server warmup. the gap between the client opening `rpc.call` and the server opening `rpc.handle` is ~4ms on the first call (141.34ms → 145.33ms) and ~1ms on the second. on the first call the server process is still coming up — crt0, its first lazy heap `map_anon`, climbing into the `reply_recv` loop — so the request waits in the endpoint until the server is ready to receive. by the second call the server is already parked in `reply_recv` and the rendezvous is near-instant.
+- and the number that *neither* of these is: compute. the actual work is 50–228µs; the round-trip is 1.84–6.73ms. it's scheduling latency end to end — "client blocks, server gets scheduled, replies, client wakes" on one cooperative hart. the trace didn't just confirm the RPC works; it handed me the cold-start cost breakdown for free, in span durations i never instrumented for.
 
 ## the fast path that earned its keep
 
@@ -40,6 +51,7 @@
 - **reach for the concept before the mechanism.** i built `revoke()` for reply caps and felt clever about the generation field. naming the actual idea — *single-use capability* — turned a special-case hack into a general primitive with the same code, and gave three previously-arbitrary pieces (revoke, generation, multiplicity) a single coherent reason to exist. when a mechanism feels slightly bespoke, you probably haven't named the concept it's an instance of.
 - **what the caller is allowed to *know* is a security decision.** when a syscall is refused, the rich reason goes to the *observer* on the wire; the *caller* gets a single opaque "denied" bit. that's deliberate — telling a caller "this cap doesn't exist" versus "exists but you lack the right" is the 403-vs-404 leak that lets it probe the system. least authority extends to least *information*. the reason isn't lost, it's *routed* — full detail to the trusted watcher, one bit to the untrusted asker.
 - **the fast path was the only thing that tested the slow path's storage.** the single-use slot-reuse sat unexercised until `reply_recv` made a looping server idiomatic. sometimes the feature that stresses your machinery is a later, unrelated-looking one — and "i wrote the reuse logic" and "the reuse logic has ever actually run twice" are different claims.
+- **cold starts are visible, not inferred.** the first RPC round-trip ran 3–4× slower than the second, and the trace decomposed it for me without a profiler: name-interning on the cold `span_open`, plus the server still booting into its receive loop, plus scheduling latency dwarfing the 50µs of actual work. i didn't reach for a tool; the warmup tax was sitting right there in the span durations. the milestone's recurring theme again — the instrument keeps answering questions i didn't think to ask.
 
 ## what's next
 
