@@ -105,6 +105,20 @@ pub enum Syscall {
     /// `usize::MAX` if refused (handle lacks `MINT` / names no endpoint). The
     /// minted cap is handed to a client via cap-transfer (a later step).
     MintBadged = 12,
+    /// Copy bytes **from a blocked caller's** address space into the server's
+    /// own (v0.10, option D). `a0` = a one-shot reply-cap handle the server
+    /// holds (names the blocked caller — authorizes the access; **not**
+    /// consumed), `a1` = source VA in the *caller's* space, `a2` = length, `a3`
+    /// = destination VA in the *server's* space. The kernel walks the caller's
+    /// page table, validates both ranges (user-half, mapped, `R|U` source /
+    /// `W|U` dest), and copies through the linear map. Returns bytes copied in
+    /// `a0`, or `usize::MAX` if refused. The `write`/`create`-name half.
+    CopyFromCaller = 13,
+    /// Copy bytes **to a blocked caller's** address space from the server's own
+    /// (v0.10, option D). The mirror of [`Self::CopyFromCaller`]: `a0` = reply
+    /// handle, `a1` = source VA in the *server's* space, `a2` = length, `a3` =
+    /// destination VA in the *caller's* space. The `read` half.
+    CopyToCaller = 14,
 }
 
 impl Syscall {
@@ -127,6 +141,8 @@ impl Syscall {
             10 => Some(Self::Reply),
             11 => Some(Self::ReplyRecv),
             12 => Some(Self::MintBadged),
+            13 => Some(Self::CopyFromCaller),
+            14 => Some(Self::CopyToCaller),
             _ => None,
         }
     }
@@ -173,6 +189,8 @@ mod tests {
         assert_eq!(Syscall::Reply as usize, 10);
         assert_eq!(Syscall::ReplyRecv as usize, 11);
         assert_eq!(Syscall::MintBadged as usize, 12);
+        assert_eq!(Syscall::CopyFromCaller as usize, 13);
+        assert_eq!(Syscall::CopyToCaller as usize, 14);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
@@ -187,6 +205,8 @@ mod tests {
         assert_eq!(Syscall::from_usize(10), Some(Syscall::Reply));
         assert_eq!(Syscall::from_usize(11), Some(Syscall::ReplyRecv));
         assert_eq!(Syscall::from_usize(12), Some(Syscall::MintBadged));
-        assert_eq!(Syscall::from_usize(13), None);
+        assert_eq!(Syscall::from_usize(13), Some(Syscall::CopyFromCaller));
+        assert_eq!(Syscall::from_usize(14), Some(Syscall::CopyToCaller));
+        assert_eq!(Syscall::from_usize(15), None);
     }
 }

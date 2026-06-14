@@ -419,6 +419,21 @@ pub fn set_current_address_space(root_pa: usize, proc: *mut Process) {
     }
 }
 
+/// The user address-space root (`root_pa`) of the task named by `id`, or
+/// `None` if no such task or it has no user space (a kernel task, `root_pa`
+/// 0). The cross-AS copy primitive uses this to reach a blocked caller's page
+/// table: the caller is named by the reply cap, resolved to its `TaskId`, then
+/// to the `root_pa` walked here.
+pub fn address_space_of(id: TaskId) -> Option<usize> {
+    let sched = SCHEDULER.lock();
+    sched
+        .tasks
+        .iter()
+        .find(|task| task.id == id)
+        .map(|task| task.address_space.load(Ordering::Relaxed))
+        .filter(|&root_pa| root_pa != 0)
+}
+
 /// Storage for "which task is on CPU right now," lifted to `PerCpu`
 /// in v0.6 step 5. Single-hart through step 10: every access reads /
 /// writes `[0]`. Under multi-hart, each hart sees its own slot and

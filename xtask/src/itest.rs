@@ -147,6 +147,7 @@ catalog! {
     wfi "badge-demux-distinguishes-clients" scenarios::badge_demux_distinguishes_clients [userspace, ipc] {"badge-handout"};
     wfi "fs-connect-mints-root"           scenarios::fs_connect_mints_root          [userspace, ipc] {"fs"};
     wfi "fs-stat-root"                    scenarios::fs_stat_root                   [userspace, ipc] {"fs"};
+    wfi "fs-create-stat"                  scenarios::fs_create_then_stat            [userspace, ipc] {"fs"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back

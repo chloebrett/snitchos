@@ -381,6 +381,39 @@ pub fn map_in(root_pa: usize, va: usize, pa: usize, perms: PtePerms) -> Result<(
     core_mmu::map(root_pa, va, pa, perms, &mut mem)
 }
 
+/// Copy `len` bytes from `src_va` in the address space rooted at `src_root` to
+/// `dst_va` in `dst_root`, through the kernel's linear map — the cross-AS copy
+/// behind the option-D `CopyFromCaller`/`CopyToCaller` syscalls. The walk +
+/// per-page validation (`R|U` source / `W|U` dest) + chunking is the
+/// host-tested `kernel_core::mmu::copy_across`; this wraps it with the kernel's
+/// `KernelPtMem` (table reads) and the actual byte move via `pa_to_kernel_va`.
+/// Returns bytes copied on success. No `satp` switch: both page tables are read
+/// — and both resolved frames touched — through the linear map, which is mapped
+/// into every address space.
+pub fn copy_across(
+    src_root: usize,
+    src_va: usize,
+    dst_root: usize,
+    dst_va: usize,
+    len: usize,
+) -> Result<usize, core_mmu::CopyError> {
+    let mem = KernelPtMem;
+    core_mmu::copy_across(src_root, src_va, dst_root, dst_va, len, &mem, &mut |src_pa, dst_pa, n| {
+        // SAFETY: both PAs come from the walker, resolved from validated, mapped
+        // user leaves; the linear map covers all physical RAM, so each kernel VA
+        // is valid for `n` bytes. Source and destination are distinct user
+        // frames in two different address spaces — non-overlapping.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                core_mmu::pa_to_kernel_va(src_pa) as *const u8,
+                core_mmu::pa_to_kernel_va(dst_pa) as *mut u8,
+                n,
+            );
+        }
+    })
+    .map(|()| len)
+}
+
 /// Allocate a fresh root page table for a new (user) address space and
 /// share the kernel's high half into it, returning the root's physical
 /// address. Sv39 root slots 256..512 are the high half (kernel image,

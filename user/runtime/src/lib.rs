@@ -566,3 +566,59 @@ fn reply_inner(reply_handle: usize, msg: [u64; MSG_WORDS], transfer: usize) -> R
     }
     if ret == 0 { Ok(()) } else { Err(Denied) }
 }
+
+/// Copy `len` bytes from a blocked caller's memory (`src_va`, in *their* address
+/// space) into this server's buffer at `dst_va` (option D, v0.10). `reply_handle`
+/// is the one-shot reply cap naming the caller — borrowed (not consumed), so the
+/// server may copy as many times as it needs before its final `reply`. Returns
+/// the bytes copied, or `Err(Denied)` if the kernel refused (bad cap / pointer /
+/// range). The `write`/`create`-name half of the cross-AS copy.
+pub fn copy_from_caller(
+    reply_handle: usize,
+    src_va: usize,
+    len: usize,
+    dst_va: usize,
+) -> Result<usize, Denied> {
+    let ret: usize;
+    // SAFETY: `ecall`; the kernel resolves the reply cap → the caller's address
+    // space, validates both ranges, copies, and returns bytes copied in a0 (or
+    // usize::MAX on refusal).
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::CopyFromCaller as usize,
+            inlateout("a0") reply_handle => ret,
+            in("a1") src_va,
+            in("a2") len,
+            in("a3") dst_va,
+        );
+    }
+    if ret == usize::MAX { Err(Denied) } else { Ok(ret) }
+}
+
+/// Copy `len` bytes from this server's buffer (`src_va`, in *our* space) into a
+/// blocked caller's memory at `dst_va` (in *their* space) — the mirror of
+/// [`copy_from_caller`], the `read` half. `reply_handle` names + authorizes the
+/// caller (borrowed). Returns bytes copied, or `Err(Denied)` if refused.
+pub fn copy_to_caller(
+    reply_handle: usize,
+    src_va: usize,
+    len: usize,
+    dst_va: usize,
+) -> Result<usize, Denied> {
+    let ret: usize;
+    // SAFETY: `ecall`; the kernel resolves the reply cap → the caller's address
+    // space, validates both ranges, copies, and returns bytes copied in a0 (or
+    // usize::MAX on refusal).
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::CopyToCaller as usize,
+            inlateout("a0") reply_handle => ret,
+            in("a1") src_va,
+            in("a2") len,
+            in("a3") dst_va,
+        );
+    }
+    if ret == usize::MAX { Err(Denied) } else { Ok(ret) }
+}

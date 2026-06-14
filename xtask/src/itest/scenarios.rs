@@ -1480,6 +1480,25 @@ pub fn fs_stat_root(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.10 FS `create` (`workload=fs`), step 3b: the client creates a file under
+/// the root — the filename rides as a `UserBuf` the kernel copies across the
+/// process boundary (option-D `CopyFromCaller`) — receives the freshly-minted
+/// child File cap, and stats it. The client emits a sentinel only when the new
+/// node reads back as an empty `File`, so this asserts the cross-AS name copy,
+/// `RamFs::create`, and cap-mint-on-create all work end-to-end.
+pub fn fs_create_then_stat(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value == 0x5C7E)
+    })
+    .ok_or(
+        "client didn't confirm create+stat (new empty File) within 30s — the create name-copy, \
+         RamFs::create, or child-cap mint didn't round-trip across the FS boundary",
+    )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside
