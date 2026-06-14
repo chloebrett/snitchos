@@ -237,7 +237,11 @@ fn try_match(pattern: &Pattern, value: &Value, env: &Env) -> Option<Env> {
             }
             Some(bound)
         }
-        Pattern::Str(_) | Pattern::Tuple(_) | Pattern::Or(_) => None,
+        // First alternative that matches wins, with its bindings.
+        Pattern::Or(alternatives) => alternatives
+            .iter()
+            .find_map(|alternative| try_match(alternative, value, env)),
+        Pattern::Str(_) | Pattern::Tuple(_) => None,
     }
 }
 
@@ -870,6 +874,20 @@ mod tests {
         assert_eq!(
             run_program("sum Opt = Just(Int) | Nothing  main() = match Just(Just(7)) { Just(Just(n)) => n  _ => 0 }"),
             Value::Int(7)
+        );
+    }
+
+    #[test]
+    fn matches_an_or_pattern_of_literals() {
+        assert_eq!(run("match 2 { 1 | 2 | 3 => 100  _ => 0 }"), Value::Int(100));
+        assert_eq!(run("match 9 { 1 | 2 | 3 => 100  _ => 0 }"), Value::Int(0));
+    }
+
+    #[test]
+    fn matches_an_or_pattern_of_variants() {
+        assert_eq!(
+            run_program("sum Color = Red | Green | Blue  main() = match Green { Red | Green => 1  Blue => 2 }"),
+            Value::Int(1)
         );
     }
 }
