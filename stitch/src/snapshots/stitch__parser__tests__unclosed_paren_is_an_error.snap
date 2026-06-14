@@ -1,0 +1,9 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"(1\")"
+---
+Err(
+    ParseError {
+        message: "expected ')', found Eof",
+    },
+)

@@ -98,58 +98,58 @@ impl Parser {
     /// Pratt precedence climbing: parse an expression whose infix operators
     /// bind at least as tightly as `min_bp`. Layers (tightest → loosest):
     /// `parse_atom` < `parse_prefix` < this.
-    fn parse_expr(&mut self, min_bp: u8) -> Expr {
-        let mut left = self.parse_prefix();
+    fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
+        let mut left = self.parse_prefix()?;
         while let Some(op) = infix_op(self.peek()) {
             let (l_bp, r_bp) = binding_power(op);
             if l_bp < min_bp {
                 break;
             }
             self.bump(); // consume the operator
-            let right = self.parse_expr(r_bp);
+            let right = self.parse_expr(r_bp)?;
             left = Expr::Binary {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
             };
         }
-        left
+        Ok(left)
     }
 
     /// Prefix unary operators (`-`, `not`), binding tighter than any infix.
-    fn parse_prefix(&mut self) -> Expr {
+    fn parse_prefix(&mut self) -> Result<Expr, ParseError> {
         let op = match self.peek() {
             Token::Minus => UnOp::Neg,
             Token::Not => UnOp::Not,
             _ => return self.parse_postfix(),
         };
         self.bump(); // consume the operator
-        Expr::Unary {
+        Ok(Expr::Unary {
             op,
-            operand: Box::new(self.parse_prefix()),
-        }
+            operand: Box::new(self.parse_prefix()?),
+        })
     }
 
     /// Postfix operators (call, field, `?.`, `?`, index) — the tightest layer,
     /// left-associative so `a.b.c` and `f(x)(y)` chain.
-    fn parse_postfix(&mut self) -> Expr {
-        let mut expr = self.parse_atom();
+    fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_atom()?;
         loop {
             // Clone the lookahead token so its borrow ends before we recurse.
             match self.peek().clone() {
-                Token::LParen => expr = self.parse_call(expr),
+                Token::LParen => expr = self.parse_call(expr)?,
                 Token::Dot => {
                     self.bump();
                     expr = Expr::Field {
                         object: Box::new(expr),
-                        name: self.expect_ident("field name after '.'"),
+                        name: self.expect_ident("field name after '.'")?,
                     };
                 }
                 Token::QuestionDot => {
                     self.bump();
                     expr = Expr::SafeField {
                         object: Box::new(expr),
-                        name: self.expect_ident("field name after '?.'"),
+                        name: self.expect_ident("field name after '?.'")?,
                     };
                 }
                 Token::Question => {
@@ -158,8 +158,8 @@ impl Parser {
                 }
                 Token::LBracket => {
                     self.bump();
-                    let index = self.parse_expr(0);
-                    self.expect(&Token::RBracket, "']'");
+                    let index = self.parse_expr(0)?;
+                    self.expect(&Token::RBracket, "']'")?;
                     expr = Expr::Index {
                         object: Box::new(expr),
                         index: Box::new(index),
@@ -168,16 +168,16 @@ impl Parser {
                 _ => break,
             }
         }
-        expr
+        Ok(expr)
     }
 
     /// Parse a call's `(args…)`; the callee is already parsed.
-    fn parse_call(&mut self, callee: Expr) -> Expr {
+    fn parse_call(&mut self, callee: Expr) -> Result<Expr, ParseError> {
         self.bump(); // '('
         let mut args = Vec::new();
         if !matches!(self.peek(), Token::RParen) {
             loop {
-                args.push(self.parse_expr(0));
+                args.push(self.parse_expr(0)?);
                 if matches!(self.peek(), Token::Comma) {
                     self.bump();
                     if matches!(self.peek(), Token::RParen) {
@@ -188,171 +188,196 @@ impl Parser {
                 }
             }
         }
-        self.expect(&Token::RParen, "')' in call arguments");
-        Expr::Call {
+        self.expect(&Token::RParen, "')' in call arguments")?;
+        Ok(Expr::Call {
             callee: Box::new(callee),
             args,
-        }
+        })
     }
 
     /// Consume the next token, requiring it to equal `want`, or panic with
     /// context. (The single seam where parse errors will become `Result`.)
-    fn expect(&mut self, want: &Token, what: &str) {
+    fn expect(&mut self, want: &Token, what: &str) -> Result<(), ParseError> {
         let got = self.bump();
-        assert!(got == want, "expected {what}, found {got:?}");
-    }
-
-    /// Consume an identifier token, returning its name, or panic with context.
-    fn expect_ident(&mut self, what: &str) -> String {
-        match self.bump().clone() {
-            Token::Ident(name) => name,
-            other => panic!("expected {what}, found {other:?}"),
+        if got == want {
+            Ok(())
+        } else {
+            Err(ParseError::new(format!("expected {what}, found {got:?}")))
         }
     }
 
-    fn parse_atom(&mut self) -> Expr {
-        // Clone the leading token so its borrow ends before we recurse.
+    /// Consume an identifier token, returning its name.
+    fn expect_ident(&mut self, what: &str) -> Result<String, ParseError> {
         match self.bump().clone() {
+            Token::Ident(name) => Ok(name),
+            other => Err(ParseError::new(format!("expected {what}, found {other:?}"))),
+        }
+    }
+
+    fn parse_atom(&mut self) -> Result<Expr, ParseError> {
+        // Clone the leading token so its borrow ends before we recurse.
+        Ok(match self.bump().clone() {
             Token::Int(n) => Expr::Int(n),
             Token::Float(f) => Expr::Float(f),
             Token::Bool(b) => Expr::Bool(b),
             Token::Ident(name) => Expr::Var(name),
             Token::LParen => {
-                let inner = self.parse_expr(0);
-                self.expect(&Token::RParen, "')'");
+                let inner = self.parse_expr(0)?;
+                self.expect(&Token::RParen, "')'")?;
                 inner
             }
-            other => panic!("unexpected token: {other:?}"),
-        }
+            other => return Err(ParseError::new(format!("unexpected token: {other:?}"))),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::ast::Expr;
     use crate::parser::parse;
+
+    /// Parse, unwrapping — for the many tests whose input is valid Stitch.
+    fn p(src: &str) -> Expr {
+        parse(src).expect("test input should parse")
+    }
 
     #[test]
     fn parses_an_integer_literal() {
-        insta::assert_debug_snapshot!(parse("42"));
+        insta::assert_debug_snapshot!(p("42"));
     }
 
     #[test]
     fn parses_a_float_literal() {
-        insta::assert_debug_snapshot!(parse("3.14"));
+        insta::assert_debug_snapshot!(p("3.14"));
     }
 
     #[test]
     fn parses_a_bool_literal() {
-        insta::assert_debug_snapshot!(parse("true"));
+        insta::assert_debug_snapshot!(p("true"));
     }
 
     #[test]
     fn parses_a_variable_reference() {
-        insta::assert_debug_snapshot!(parse("foo"));
+        insta::assert_debug_snapshot!(p("foo"));
     }
 
     #[test]
     fn parses_addition() {
-        insta::assert_debug_snapshot!(parse("1 + 2"));
+        insta::assert_debug_snapshot!(p("1 + 2"));
     }
 
     #[test]
     fn multiplication_binds_tighter_than_addition() {
-        insta::assert_debug_snapshot!(parse("1 + 2 * 3"));
+        insta::assert_debug_snapshot!(p("1 + 2 * 3"));
     }
 
     #[test]
     fn parentheses_override_precedence() {
-        insta::assert_debug_snapshot!(parse("(1 + 2) * 3"));
+        insta::assert_debug_snapshot!(p("(1 + 2) * 3"));
     }
 
     #[test]
     fn parses_comparison() {
-        insta::assert_debug_snapshot!(parse("1 < 2"));
+        insta::assert_debug_snapshot!(p("1 < 2"));
     }
 
     #[test]
     fn addition_binds_tighter_than_comparison() {
-        insta::assert_debug_snapshot!(parse("1 + 2 < 3"));
+        insta::assert_debug_snapshot!(p("1 + 2 < 3"));
     }
 
     #[test]
     fn and_binds_tighter_than_or() {
-        insta::assert_debug_snapshot!(parse("a and b or c"));
+        insta::assert_debug_snapshot!(p("a and b or c"));
     }
 
     #[test]
     fn arithmetic_binds_tighter_than_pipe() {
-        insta::assert_debug_snapshot!(parse("a + b |> f"));
+        insta::assert_debug_snapshot!(p("a + b |> f"));
     }
 
     #[test]
     fn pipe_binds_tighter_than_comparison() {
-        insta::assert_debug_snapshot!(parse("x |> f == y"));
+        insta::assert_debug_snapshot!(p("x |> f == y"));
     }
 
     #[test]
     fn addition_binds_tighter_than_range() {
-        insta::assert_debug_snapshot!(parse("1 .. n + 1"));
+        insta::assert_debug_snapshot!(p("1 .. n + 1"));
     }
 
     #[test]
     fn parses_negation() {
-        insta::assert_debug_snapshot!(parse("-x"));
+        insta::assert_debug_snapshot!(p("-x"));
     }
 
     #[test]
     fn parses_logical_not() {
-        insta::assert_debug_snapshot!(parse("not a"));
+        insta::assert_debug_snapshot!(p("not a"));
     }
 
     #[test]
     fn unary_binds_tighter_than_multiplication() {
-        insta::assert_debug_snapshot!(parse("-x * y"));
+        insta::assert_debug_snapshot!(p("-x * y"));
     }
 
     #[test]
     fn not_binds_tighter_than_and() {
-        insta::assert_debug_snapshot!(parse("not a and b"));
+        insta::assert_debug_snapshot!(p("not a and b"));
     }
 
     #[test]
     fn parses_call_with_args() {
-        insta::assert_debug_snapshot!(parse("f(x, y)"));
+        insta::assert_debug_snapshot!(p("f(x, y)"));
     }
 
     #[test]
     fn parses_empty_call() {
-        insta::assert_debug_snapshot!(parse("f()"));
+        insta::assert_debug_snapshot!(p("f()"));
     }
 
     #[test]
     fn chains_field_access() {
-        insta::assert_debug_snapshot!(parse("a.b.c"));
+        insta::assert_debug_snapshot!(p("a.b.c"));
     }
 
     #[test]
     fn parses_try() {
-        insta::assert_debug_snapshot!(parse("x?"));
+        insta::assert_debug_snapshot!(p("x?"));
     }
 
     #[test]
     fn parses_safe_navigation() {
-        insta::assert_debug_snapshot!(parse("a?.b"));
+        insta::assert_debug_snapshot!(p("a?.b"));
     }
 
     #[test]
     fn parses_index() {
-        insta::assert_debug_snapshot!(parse("xs[0]"));
+        insta::assert_debug_snapshot!(p("xs[0]"));
     }
 
     #[test]
     fn postfix_binds_tighter_than_unary() {
-        insta::assert_debug_snapshot!(parse("-f(x)"));
+        insta::assert_debug_snapshot!(p("-f(x)"));
     }
 
     #[test]
     fn pipe_with_call() {
-        insta::assert_debug_snapshot!(parse("readings |> filter(p)"));
+        insta::assert_debug_snapshot!(p("readings |> filter(p)"));
+    }
+
+    #[test]
+    fn unclosed_paren_is_an_error() {
+        insta::assert_debug_snapshot!(parse("(1"));
+    }
+
+    #[test]
+    fn trailing_tokens_are_an_error() {
+        insta::assert_debug_snapshot!(parse("1 2"));
+    }
+
+    #[test]
+    fn an_operator_with_no_operand_is_an_error() {
+        insta::assert_debug_snapshot!(parse("1 +"));
     }
 }

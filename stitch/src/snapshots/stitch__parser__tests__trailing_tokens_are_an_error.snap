@@ -1,0 +1,9 @@
+---
+source: stitch/src/parser.rs
+expression: "parse(\"1 2\")"
+---
+Err(
+    ParseError {
+        message: "expected end of input, found Int(2)",
+    },
+)
