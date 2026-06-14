@@ -70,6 +70,36 @@ pub enum Expr {
         stmts: Vec<Stmt>,
         result: Option<Box<Expr>>,
     },
+    /// `match subject { arm* }` (subject form; subjectless is a later increment).
+    Match {
+        subject: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
+}
+
+/// One arm of a `match`: `pattern (if guard)? => body`.
+#[derive(Debug, PartialEq)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub guard: Option<Expr>,
+    pub body: Expr,
+}
+
+/// A match pattern.
+#[derive(Debug, PartialEq)]
+pub enum Pattern {
+    /// `_` — matches anything, binds nothing.
+    Wildcard,
+    Int(i64),
+    Bool(bool),
+    /// A lowercase name — matches anything and binds it.
+    Binding(String),
+    /// `Name` or `Name(sub, …)` — a sum variant / product destructure.
+    Constructor { name: String, args: Vec<Pattern> },
+    /// `(a, b, …)` — a tuple destructure.
+    Tuple(Vec<Pattern>),
+    /// `a | b | …` — matches if any alternative matches.
+    Or(Vec<Pattern>),
 }
 
 /// A statement inside a block.

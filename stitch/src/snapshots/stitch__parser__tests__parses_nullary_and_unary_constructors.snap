@@ -1,0 +1,35 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"match opt { Some(x) => x  None => 0 }\")"
+---
+Match {
+    subject: Var(
+        "opt",
+    ),
+    arms: [
+        MatchArm {
+            pattern: Constructor {
+                name: "Some",
+                args: [
+                    Binding(
+                        "x",
+                    ),
+                ],
+            },
+            guard: None,
+            body: Var(
+                "x",
+            ),
+        },
+        MatchArm {
+            pattern: Constructor {
+                name: "None",
+                args: [],
+            },
+            guard: None,
+            body: Int(
+                0,
+            ),
+        },
+    ],
+}

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::{BinOp, Expr, Stmt, StrSegment, UnOp};
+use crate::ast::{BinOp, Expr, MatchArm, Pattern, Stmt, StrSegment, UnOp};
 use crate::lexer::{StrPart, Token, lex};
 
 /// A parse error. Carries a human-readable message; source positions are a
@@ -88,7 +88,8 @@ fn collect_placeholders(expr: &mut Expr, params: &mut BTreeSet<String>) {
         | Expr::Var(_)
         | Expr::Str(_)
         | Expr::Lambda { .. }
-        | Expr::Block { .. } => {}
+        | Expr::Block { .. }
+        | Expr::Match { .. } => {}
     }
 }
 
@@ -102,6 +103,12 @@ fn parse_str_segments(parts: Vec<StrPart>) -> Result<Vec<StrSegment>, ParseError
             StrPart::Expr(raw) => Ok(StrSegment::Interp(Box::new(parse(&raw)?))),
         })
         .collect()
+}
+
+/// Does this identifier start with an uppercase letter? Used to tell a
+/// constructor pattern (`Circle`, `None`) from a binding (`x`).
+fn starts_uppercase(s: &str) -> bool {
+    s.chars().next().is_some_and(char::is_uppercase)
 }
 
 /// Map an infix-operator token to its `BinOp`, or `None` if it isn't one.
@@ -474,6 +481,120 @@ impl Parser {
         })
     }
 
+    /// Parse `match subject { arm* }`. The `match` keyword is already consumed.
+    fn parse_match(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek(), Token::LBrace) {
+            return Err(ParseError::new(
+                "subjectless `match { … }` (condition table) is not yet supported",
+            ));
+        }
+        let subject = self.parse_expr(0)?;
+        self.expect(&Token::LBrace, "'{' after match subject")?;
+        let mut arms = Vec::new();
+        while !matches!(self.peek(), Token::RBrace) {
+            if matches!(self.peek(), Token::Eof) {
+                return Err(ParseError::new("unterminated match: expected '}'"));
+            }
+            arms.push(self.parse_match_arm()?);
+        }
+        self.bump(); // '}'
+        Ok(Expr::Match {
+            subject: Box::new(subject),
+            arms,
+        })
+    }
+
+    /// Parse one arm: `pattern (if guard)? => body`. Arms are separated by
+    /// maximal munch (same as block statements).
+    fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {
+        let pattern = self.parse_pattern()?;
+        let guard = if matches!(self.peek(), Token::If) {
+            self.bump();
+            // min_bp = 1 admits every binary operator but skips the `=>`
+            // conditional — whose `=>` is the arm separator here.
+            Some(self.parse_expr(1)?)
+        } else {
+            None
+        };
+        self.expect(&Token::FatArrow, "'=>' in match arm")?;
+        let body = self.parse_expr(0)?;
+        Ok(MatchArm {
+            pattern,
+            guard,
+            body,
+        })
+    }
+
+    /// Parse a pattern, including a top-level or-pattern `a | b | …`.
+    fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let first = self.parse_pattern_atom()?;
+        if !matches!(self.peek(), Token::Bar) {
+            return Ok(first);
+        }
+        let mut alts = vec![first];
+        while matches!(self.peek(), Token::Bar) {
+            self.bump();
+            alts.push(self.parse_pattern_atom()?);
+        }
+        Ok(Pattern::Or(alts))
+    }
+
+    /// Parse a single (non-or) pattern.
+    fn parse_pattern_atom(&mut self) -> Result<Pattern, ParseError> {
+        Ok(match self.bump().clone() {
+            Token::Int(n) => Pattern::Int(n),
+            Token::Bool(b) => Pattern::Bool(b),
+            Token::Ident(name) if name == "_" => Pattern::Wildcard,
+            Token::Ident(name) if starts_uppercase(&name) => {
+                let args = if matches!(self.peek(), Token::LParen) {
+                    self.bump(); // '('
+                    self.parse_pattern_list()?
+                } else {
+                    Vec::new()
+                };
+                Pattern::Constructor { name, args }
+            }
+            Token::Ident(name) => Pattern::Binding(name),
+            Token::LParen => {
+                let mut pats = self.parse_pattern_list()?;
+                match pats.pop() {
+                    Some(single) if pats.is_empty() => single, // `(p)` is grouping
+                    Some(last) => {
+                        pats.push(last);
+                        Pattern::Tuple(pats)
+                    }
+                    None => Pattern::Tuple(Vec::new()),
+                }
+            }
+            other => {
+                return Err(ParseError::new(format!(
+                    "unexpected token in pattern: {other:?}"
+                )));
+            }
+        })
+    }
+
+    /// Parse a comma-separated pattern list up to and including `)`. The `(`
+    /// is already consumed.
+    fn parse_pattern_list(&mut self) -> Result<Vec<Pattern>, ParseError> {
+        let mut pats = Vec::new();
+        if !matches!(self.peek(), Token::RParen) {
+            loop {
+                pats.push(self.parse_pattern()?);
+                if matches!(self.peek(), Token::Comma) {
+                    self.bump();
+                    if matches!(self.peek(), Token::RParen) {
+                        break; // trailing comma
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RParen, "')' in pattern")?;
+        Ok(pats)
+    }
+
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
         // Clone the leading token so its borrow ends before we recurse.
         Ok(match self.bump().clone() {
@@ -490,6 +611,7 @@ impl Parser {
             }
             Token::LBracket => self.parse_collection()?,
             Token::LBrace => self.parse_block()?,
+            Token::Match => self.parse_match()?,
             other => return Err(ParseError::new(format!("unexpected token: {other:?}"))),
         })
     }
@@ -808,5 +930,35 @@ mod tests {
     #[test]
     fn block_as_lambda_body() {
         insta::assert_debug_snapshot!(p("x -> { let y = x * 2  y + 1 }"));
+    }
+
+    #[test]
+    fn parses_match_with_literals_and_wildcard() {
+        insta::assert_debug_snapshot!(p(r#"match n { 0 => "zero"  1 => "one"  _ => "many" }"#));
+    }
+
+    #[test]
+    fn parses_constructor_patterns() {
+        insta::assert_debug_snapshot!(p("match shape { Circle(r) => r  Rect(w, h) => w }"));
+    }
+
+    #[test]
+    fn parses_nullary_and_unary_constructors() {
+        insta::assert_debug_snapshot!(p("match opt { Some(x) => x  None => 0 }"));
+    }
+
+    #[test]
+    fn parses_or_pattern() {
+        insta::assert_debug_snapshot!(p(r#"match n { 1 | 2 | 3 => "small"  _ => "big" }"#));
+    }
+
+    #[test]
+    fn parses_guard() {
+        insta::assert_debug_snapshot!(p(r#"match n { x if x > 0 => "pos"  _ => "neg" }"#));
+    }
+
+    #[test]
+    fn parses_tuple_pattern() {
+        insta::assert_debug_snapshot!(p("match pair { (a, b) => a + b }"));
     }
 }

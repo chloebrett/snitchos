@@ -62,3 +62,11 @@ fn config_map_with_string_keys() {
 fn interpolated_message() {
     insta::assert_debug_snapshot!(p(r#""sensor {name}: {celsius}C""#));
 }
+
+#[test]
+fn shape_area_match() {
+    // The `area` function body from samples.st.
+    insta::assert_debug_snapshot!(p(
+        "match s { Circle(r) => 3 * r * r  Rect(w, h) => w * h  Triangle(b, h) => b * h / 2 }"
+    ));
+}

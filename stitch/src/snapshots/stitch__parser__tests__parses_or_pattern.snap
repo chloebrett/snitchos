@@ -1,0 +1,45 @@
+---
+source: stitch/src/parser.rs
+expression: "p(r#\"match n { 1 | 2 | 3 => \"small\"  _ => \"big\" }\"#)"
+---
+Match {
+    subject: Var(
+        "n",
+    ),
+    arms: [
+        MatchArm {
+            pattern: Or(
+                [
+                    Int(
+                        1,
+                    ),
+                    Int(
+                        2,
+                    ),
+                    Int(
+                        3,
+                    ),
+                ],
+            ),
+            guard: None,
+            body: Str(
+                [
+                    Lit(
+                        "small",
+                    ),
+                ],
+            ),
+        },
+        MatchArm {
+            pattern: Wildcard,
+            guard: None,
+            body: Str(
+                [
+                    Lit(
+                        "big",
+                    ),
+                ],
+            ),
+        },
+    ],
+}

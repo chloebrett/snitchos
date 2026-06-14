@@ -1,0 +1,48 @@
+---
+source: stitch/src/parser.rs
+expression: "p(r#\"match n { 0 => \"zero\"  1 => \"one\"  _ => \"many\" }\"#)"
+---
+Match {
+    subject: Var(
+        "n",
+    ),
+    arms: [
+        MatchArm {
+            pattern: Int(
+                0,
+            ),
+            guard: None,
+            body: Str(
+                [
+                    Lit(
+                        "zero",
+                    ),
+                ],
+            ),
+        },
+        MatchArm {
+            pattern: Int(
+                1,
+            ),
+            guard: None,
+            body: Str(
+                [
+                    Lit(
+                        "one",
+                    ),
+                ],
+            ),
+        },
+        MatchArm {
+            pattern: Wildcard,
+            guard: None,
+            body: Str(
+                [
+                    Lit(
+                        "many",
+                    ),
+                ],
+            ),
+        },
+    ],
+}

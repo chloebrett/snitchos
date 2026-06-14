@@ -1,0 +1,89 @@
+---
+source: stitch/tests/expressions.rs
+expression: "p(\"match s { Circle(r) => 3 * r * r  Rect(w, h) => w * h  Triangle(b, h) => b * h / 2 }\")"
+---
+Match {
+    subject: Var(
+        "s",
+    ),
+    arms: [
+        MatchArm {
+            pattern: Constructor {
+                name: "Circle",
+                args: [
+                    Binding(
+                        "r",
+                    ),
+                ],
+            },
+            guard: None,
+            body: Binary {
+                op: Mul,
+                left: Binary {
+                    op: Mul,
+                    left: Int(
+                        3,
+                    ),
+                    right: Var(
+                        "r",
+                    ),
+                },
+                right: Var(
+                    "r",
+                ),
+            },
+        },
+        MatchArm {
+            pattern: Constructor {
+                name: "Rect",
+                args: [
+                    Binding(
+                        "w",
+                    ),
+                    Binding(
+                        "h",
+                    ),
+                ],
+            },
+            guard: None,
+            body: Binary {
+                op: Mul,
+                left: Var(
+                    "w",
+                ),
+                right: Var(
+                    "h",
+                ),
+            },
+        },
+        MatchArm {
+            pattern: Constructor {
+                name: "Triangle",
+                args: [
+                    Binding(
+                        "b",
+                    ),
+                    Binding(
+                        "h",
+                    ),
+                ],
+            },
+            guard: None,
+            body: Binary {
+                op: Div,
+                left: Binary {
+                    op: Mul,
+                    left: Var(
+                        "b",
+                    ),
+                    right: Var(
+                        "h",
+                    ),
+                },
+                right: Int(
+                    2,
+                ),
+            },
+        },
+    ],
+}

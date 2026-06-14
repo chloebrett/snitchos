@@ -1,0 +1,45 @@
+---
+source: stitch/src/parser.rs
+expression: "p(r#\"match n { x if x > 0 => \"pos\"  _ => \"neg\" }\"#)"
+---
+Match {
+    subject: Var(
+        "n",
+    ),
+    arms: [
+        MatchArm {
+            pattern: Binding(
+                "x",
+            ),
+            guard: Some(
+                Binary {
+                    op: Gt,
+                    left: Var(
+                        "x",
+                    ),
+                    right: Int(
+                        0,
+                    ),
+                },
+            ),
+            body: Str(
+                [
+                    Lit(
+                        "pos",
+                    ),
+                ],
+            ),
+        },
+        MatchArm {
+            pattern: Wildcard,
+            guard: None,
+            body: Str(
+                [
+                    Lit(
+                        "neg",
+                    ),
+                ],
+            ),
+        },
+    ],
+}

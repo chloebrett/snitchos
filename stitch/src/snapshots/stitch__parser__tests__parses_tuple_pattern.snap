@@ -1,0 +1,33 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"match pair { (a, b) => a + b }\")"
+---
+Match {
+    subject: Var(
+        "pair",
+    ),
+    arms: [
+        MatchArm {
+            pattern: Tuple(
+                [
+                    Binding(
+                        "a",
+                    ),
+                    Binding(
+                        "b",
+                    ),
+                ],
+            ),
+            guard: None,
+            body: Binary {
+                op: Add,
+                left: Var(
+                    "a",
+                ),
+                right: Var(
+                    "b",
+                ),
+            },
+        },
+    ],
+}

@@ -1,0 +1,42 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"match shape { Circle(r) => r  Rect(w, h) => w }\")"
+---
+Match {
+    subject: Var(
+        "shape",
+    ),
+    arms: [
+        MatchArm {
+            pattern: Constructor {
+                name: "Circle",
+                args: [
+                    Binding(
+                        "r",
+                    ),
+                ],
+            },
+            guard: None,
+            body: Var(
+                "r",
+            ),
+        },
+        MatchArm {
+            pattern: Constructor {
+                name: "Rect",
+                args: [
+                    Binding(
+                        "w",
+                    ),
+                    Binding(
+                        "h",
+                    ),
+                ],
+            },
+            guard: None,
+            body: Var(
+                "w",
+            ),
+        },
+    ],
+}

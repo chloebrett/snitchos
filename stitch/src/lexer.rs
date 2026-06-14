@@ -39,6 +39,7 @@ pub enum Token {
     And,
     Or,
     Not,
+    If, // reserved, but only valid as a match-arm guard
     // Operators & punctuation
     Plus,
     Minus,
@@ -90,6 +91,7 @@ fn keyword(word: &str) -> Option<Token> {
         "and" => Token::And,
         "or" => Token::Or,
         "not" => Token::Not,
+        "if" => Token::If,
         "true" => Token::Bool(true),
         "false" => Token::Bool(false),
         _ => return None,
