@@ -232,14 +232,7 @@ fn handle_invoke(frame: &mut TrapFrame) {
     use snitchos_abi::Syscall;
 
     let sc = Syscall::Invoke as u8;
-    let proc = crate::process::CURRENT_PROCESS
-        .this_cpu()
-        .load(Ordering::Relaxed);
-    // SAFETY: set by `user::run` on this hart before `sret`; the `Process`
-    // lives in that never-returning frame. Null only if no user process is
-    // running here — which then could not have issued this U-mode `ecall`.
-    let Some(proc) = (unsafe { proc.as_ref() }) else {
-        refuse(frame, sc, protocol::RefusalReason::NoProcess);
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
         return;
     };
 
@@ -279,11 +272,7 @@ fn handle_send(frame: &mut TrapFrame) {
     use snitchos_abi::Syscall;
 
     let sc = Syscall::Send as u8;
-    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
-    // SAFETY: set by `user::run` on this hart before `sret`; null only if no
-    // user process runs here, which then could not have issued this `ecall`.
-    let Some(proc) = (unsafe { proc.as_ref() }) else {
-        refuse(frame, sc, protocol::RefusalReason::NoProcess);
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
         return;
     };
 
@@ -327,10 +316,7 @@ fn handle_receive(frame: &mut TrapFrame) {
     use snitchos_abi::Syscall;
 
     let sc = Syscall::Receive as u8;
-    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
-    // SAFETY: as in `handle_send`.
-    let Some(proc) = (unsafe { proc.as_ref() }) else {
-        refuse(frame, sc, protocol::RefusalReason::NoProcess);
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
         return;
     };
 
@@ -422,10 +408,7 @@ fn handle_call(frame: &mut TrapFrame) {
     use snitchos_abi::Syscall;
 
     let sc = Syscall::Call as u8;
-    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
-    // SAFETY: as in `handle_send`.
-    let Some(proc) = (unsafe { proc.as_ref() }) else {
-        refuse(frame, sc, protocol::RefusalReason::NoProcess);
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
         return;
     };
 
@@ -472,10 +455,7 @@ fn handle_reply(frame: &mut TrapFrame) {
     use snitchos_abi::Syscall;
 
     let sc = Syscall::Reply as u8;
-    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
-    // SAFETY: as in `handle_send`.
-    let Some(proc) = (unsafe { proc.as_ref() }) else {
-        refuse(frame, sc, protocol::RefusalReason::NoProcess);
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
         return;
     };
 
@@ -518,12 +498,7 @@ fn handle_span_open(frame: &mut TrapFrame) {
 
     let sc = Syscall::SpanOpen as u8;
 
-    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
-    // SAFETY: set by `user::run` on this hart before `sret`; the `Process`
-    // lives in that never-returning frame. Null only if no user process runs
-    // here — which then could not have issued this U-mode `ecall`.
-    let Some(proc) = (unsafe { proc.as_ref() }) else {
-        refuse(frame, sc, RefusalReason::NoProcess);
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
         return;
     };
 
@@ -599,6 +574,28 @@ fn refusal_for(denied: kernel_core::cap::Denied) -> protocol::RefusalReason {
     }
 }
 
+/// Resolve the user process running on this hart, or — if none — snitch a
+/// `NoProcess` refusal (setting the error sentinel in `a0`) and return `None`
+/// for the caller to early-return. Every capability syscall opens with this:
+/// it needs the calling process's `CapTable`.
+fn current_process_or_refuse(
+    frame: &mut TrapFrame,
+    syscall: u8,
+) -> Option<&'static crate::process::Process> {
+    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
+    // SAFETY: set by `user::run` on this hart before `sret`; the `Process` lives
+    // in that never-returning frame, so a non-null pointer is valid for the
+    // life of the kernel. Null only if no user process runs here — which then
+    // could not have issued this U-mode `ecall`.
+    match unsafe { proc.as_ref() } {
+        Some(proc) => Some(proc),
+        None => {
+            refuse(frame, syscall, protocol::RefusalReason::NoProcess);
+            None
+        }
+    }
+}
+
 /// Map a fresh anonymous memory region for U-mode. `a0` = bytes requested (the
 /// runtime page-aligns). Maps that many zeroed frames into the process's heap
 /// region and returns the region's **base** VA in `a0` (or `u64::MAX` if
@@ -615,11 +612,7 @@ fn handle_map_anon(frame: &mut TrapFrame) {
     use crate::process::Process;
 
     let sc = Syscall::MapAnon as u8;
-    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
-    // SAFETY: set by `user::run` before `sret`; the `Process` lives in that
-    // never-returning frame. Null only if no user process runs here.
-    let Some(proc) = (unsafe { proc.as_ref() }) else {
-        refuse(frame, sc, RefusalReason::NoProcess);
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
         return;
     };
 
