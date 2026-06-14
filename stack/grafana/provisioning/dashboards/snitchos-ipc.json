@@ -194,7 +194,7 @@
       "id": 5,
       "type": "table",
       "title": "IPC traces — click a row to open the cross-process span tree",
-      "description": "TraceQL search for spans named ipc.* (Tempo). Each row is a trace; clicking the Trace ID opens the tree where ipc.recv nests under ipc.send across the two processes.",
+      "description": "TraceQL search for ipc.* / rpc.* spans (Tempo). Click a row to open the tree. workload=ipc: ipc.recv descends from ipc.send but is disjoint on the timeline (one-way). workload=ipc-rpc: rpc.handle nests *inside* rpc.call (the round-trip).",
       "datasource": {
         "type": "tempo",
         "uid": "tempo"
@@ -213,7 +213,7 @@
             "uid": "tempo"
           },
           "queryType": "traceql",
-          "query": "{ name =~ \"ipc.*\" }",
+          "query": "{ name =~ \"ipc.*|rpc.*\" }",
           "limit": 20,
           "tableType": "traces"
         }
