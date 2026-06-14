@@ -7,15 +7,18 @@ Call {
         "map",
     ),
     args: [
-        Lambda {
-            params: [
-                "$a",
-            ],
-            body: Field {
-                object: Var(
+        Arg {
+            label: None,
+            value: Lambda {
+                params: [
                     "$a",
-                ),
-                name: "celsius",
+                ],
+                body: Field {
+                    object: Var(
+                        "$a",
+                    ),
+                    name: "celsius",
+                },
             },
         },
     ],

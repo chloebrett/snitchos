@@ -14,21 +14,24 @@ Binary {
                 "filter",
             ),
             args: [
-                Lambda {
-                    params: [
-                        "r",
-                    ],
-                    body: Binary {
-                        op: Gt,
-                        left: Field {
-                            object: Var(
-                                "r",
+                Arg {
+                    label: None,
+                    value: Lambda {
+                        params: [
+                            "r",
+                        ],
+                        body: Binary {
+                            op: Gt,
+                            left: Field {
+                                object: Var(
+                                    "r",
+                                ),
+                                name: "celsius",
+                            },
+                            right: Int(
+                                30,
                             ),
-                            name: "celsius",
                         },
-                        right: Int(
-                            30,
-                        ),
                     },
                 },
             ],
@@ -39,15 +42,18 @@ Binary {
             "map",
         ),
         args: [
-            Lambda {
-                params: [
-                    "r",
-                ],
-                body: Field {
-                    object: Var(
+            Arg {
+                label: None,
+                value: Lambda {
+                    params: [
                         "r",
-                    ),
-                    name: "celsius",
+                    ],
+                    body: Field {
+                        object: Var(
+                            "r",
+                        ),
+                        name: "celsius",
+                    },
                 },
             },
         ],

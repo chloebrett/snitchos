@@ -20,9 +20,12 @@ Binary {
                 "map",
             ),
             args: [
-                Var(
-                    "square",
-                ),
+                Arg {
+                    label: None,
+                    value: Var(
+                        "square",
+                    ),
+                },
             ],
         },
     },
@@ -31,12 +34,18 @@ Binary {
             "fold",
         ),
         args: [
-            Int(
-                0,
-            ),
-            Var(
-                "add",
-            ),
+            Arg {
+                label: None,
+                value: Int(
+                    0,
+                ),
+            },
+            Arg {
+                label: None,
+                value: Var(
+                    "add",
+                ),
+            },
         ],
     },
 }

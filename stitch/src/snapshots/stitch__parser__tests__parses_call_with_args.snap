@@ -1,17 +1,23 @@
 ---
 source: stitch/src/parser.rs
-expression: "parse(\"f(x, y)\")"
+expression: "p(\"f(x, y)\")"
 ---
 Call {
     callee: Var(
         "f",
     ),
     args: [
-        Var(
-            "x",
-        ),
-        Var(
-            "y",
-        ),
+        Arg {
+            label: None,
+            value: Var(
+                "x",
+            ),
+        },
+        Arg {
+            label: None,
+            value: Var(
+                "y",
+            ),
+        },
     ],
 }

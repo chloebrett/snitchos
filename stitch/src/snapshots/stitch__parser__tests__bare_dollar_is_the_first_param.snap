@@ -7,13 +7,16 @@ Call {
         "each",
     ),
     args: [
-        Lambda {
-            params: [
-                "$a",
-            ],
-            body: Var(
-                "$a",
-            ),
+        Arg {
+            label: None,
+            value: Lambda {
+                params: [
+                    "$a",
+                ],
+                body: Var(
+                    "$a",
+                ),
+            },
         },
     ],
 }

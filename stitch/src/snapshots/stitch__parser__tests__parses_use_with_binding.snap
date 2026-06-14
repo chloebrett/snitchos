@@ -1,45 +1,41 @@
 ---
-source: stitch/tests/expressions.rs
-expression: "p(\"readings |> filter(hot) |> map(celsius) |> total\")"
+source: stitch/src/parser.rs
+expression: "p(\"{ use r <- each(readings)  emit(r) }\")"
 ---
-Binary {
-    op: Pipe,
-    left: Binary {
-        op: Pipe,
-        left: Binary {
-            op: Pipe,
-            left: Var(
-                "readings",
+Block {
+    stmts: [
+        Use {
+            binding: Some(
+                "r",
             ),
-            right: Call {
+            call: Call {
                 callee: Var(
-                    "filter",
+                    "each",
                 ),
                 args: [
                     Arg {
                         label: None,
                         value: Var(
-                            "hot",
+                            "readings",
                         ),
                     },
                 ],
             },
         },
-        right: Call {
+    ],
+    result: Some(
+        Call {
             callee: Var(
-                "map",
+                "emit",
             ),
             args: [
                 Arg {
                     label: None,
                     value: Var(
-                        "celsius",
+                        "r",
                     ),
                 },
             ],
         },
-    },
-    right: Var(
-        "total",
     ),
 }

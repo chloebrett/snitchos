@@ -1,0 +1,23 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"{ @x = 5  @x }\")"
+---
+Block {
+    stmts: [
+        Assign {
+            target: Field {
+                object: SelfRef,
+                name: "x",
+            },
+            value: Int(
+                5,
+            ),
+        },
+    ],
+    result: Some(
+        Field {
+            object: SelfRef,
+            name: "x",
+        },
+    ),
+}

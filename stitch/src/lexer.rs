@@ -54,6 +54,7 @@ pub enum Token {
     Gt,        // >
     Ge,        // >=
     Arrow,     // ->
+    LArrow,    // <-
     FatArrow,  // =>
     Bar,       // |
     Pipe,      // |>
@@ -303,6 +304,7 @@ fn lex_operator(chars: &mut Cursor<'_>) -> Option<Token> {
         '=' => Token::Eq,
         '!' if eat('=') => Token::NotEq,
         '<' if eat('=') => Token::Le,
+        '<' if eat('-') => Token::LArrow,
         '<' => Token::Lt,
         '>' if eat('=') => Token::Ge,
         '>' => Token::Gt,

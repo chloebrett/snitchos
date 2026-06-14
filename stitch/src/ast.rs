@@ -68,6 +68,13 @@ pub struct Param {
     pub ty: Option<Type>,
 }
 
+/// A call argument: a value, optionally with a `label:` (Swift-style).
+#[derive(Debug, PartialEq)]
+pub struct Arg {
+    pub label: Option<String>,
+    pub value: Expr,
+}
+
 /// A field of a product or a variant. `name` is `None` for positional fields
 /// (`Celsius(Int)`, `Some(T)`); `Some` for named fields (`Point(x: Int)`).
 #[derive(Debug, PartialEq)]
@@ -103,6 +110,9 @@ pub enum Expr {
     Var(String),
     /// The method receiver `@` (self).
     SelfRef,
+    /// A spread `..base` — only valid as a construction/call argument (the
+    /// functional-update base in `Point(..p, x: 10)`).
+    Spread(Box<Expr>),
     /// A lambda placeholder before desugaring: `None` is bare `$`, `Some("a")`
     /// is `$a`. The parser rewrites these into a `Lambda` at the call argument
     /// that encloses them; a `Placeholder` surviving into a final AST is a bug.
@@ -121,7 +131,7 @@ pub enum Expr {
     /// A function/constructor call: `callee(args…)`.
     Call {
         callee: Box<Expr>,
-        args: Vec<Expr>,
+        args: Vec<Arg>,
     },
     /// Field access: `object.name`.
     Field {
@@ -208,6 +218,12 @@ pub enum Stmt {
         mutable: bool,
         value: Expr,
     },
+    /// An assignment `target = value` — `target` is an lvalue (`@x`, a `mut`
+    /// local); validity is checked at eval time, not parse time.
+    Assign { target: Expr, value: Expr },
+    /// `use binding? <- call` — Gleam-style callback sugar. The rest of the
+    /// enclosing block becomes the callback (desugared at eval time).
+    Use { binding: Option<String>, call: Expr },
     /// An expression evaluated for its effect.
     Expr(Expr),
 }

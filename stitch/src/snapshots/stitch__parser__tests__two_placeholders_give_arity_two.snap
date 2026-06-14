@@ -7,22 +7,28 @@ Call {
         "fold",
     ),
     args: [
-        Int(
-            0,
-        ),
-        Lambda {
-            params: [
-                "$a",
-                "$b",
-            ],
-            body: Binary {
-                op: Add,
-                left: Var(
+        Arg {
+            label: None,
+            value: Int(
+                0,
+            ),
+        },
+        Arg {
+            label: None,
+            value: Lambda {
+                params: [
                     "$a",
-                ),
-                right: Var(
                     "$b",
-                ),
+                ],
+                body: Binary {
+                    op: Add,
+                    left: Var(
+                        "$a",
+                    ),
+                    right: Var(
+                        "$b",
+                    ),
+                },
             },
         },
     ],

@@ -6,8 +6,8 @@
 use std::collections::BTreeSet;
 
 use crate::ast::{
-    BinOp, Expr, Field, Item, MatchArm, Method, MethodModifier, Param, Pattern, Stmt, StrSegment,
-    Type, UnOp, Variant,
+    Arg, BinOp, Expr, Field, Item, MatchArm, Method, MethodModifier, Param, Pattern, Stmt,
+    StrSegment, Type, UnOp, Variant,
 };
 use crate::lexer::{StrPart, Token, lex};
 
@@ -65,11 +65,13 @@ fn collect_placeholders(expr: &mut Expr, params: &mut BTreeSet<String>) {
             collect_placeholders(left, params);
             collect_placeholders(right, params);
         }
-        Expr::Unary { operand, .. } | Expr::Try(operand) => collect_placeholders(operand, params),
+        Expr::Unary { operand, .. } | Expr::Try(operand) | Expr::Spread(operand) => {
+            collect_placeholders(operand, params);
+        }
         Expr::Call { callee, args } => {
             collect_placeholders(callee, params);
             for arg in args {
-                collect_placeholders(arg, params);
+                collect_placeholders(&mut arg.value, params);
             }
         }
         Expr::Field { object, .. } | Expr::SafeField { object, .. } => {
@@ -376,21 +378,37 @@ impl Parser {
         })
     }
 
-    /// Parse one call argument, desugaring any `$`-placeholders it directly
-    /// contains into a wrapping lambda (§3). Nested calls have already
-    /// captured their own, so the placeholders left here bind to this call.
-    fn parse_arg(&mut self) -> Result<Expr, ParseError> {
-        let mut arg = self.parse_expr(0)?;
-        let mut params = BTreeSet::new();
-        collect_placeholders(&mut arg, &mut params);
-        if params.is_empty() {
-            Ok(arg)
-        } else {
-            Ok(Expr::Lambda {
-                params: params.into_iter().collect(),
-                body: Box::new(arg),
-            })
+    /// Parse one call argument: an optional `label:` then a value. The value's
+    /// `$`-placeholders are desugared into a wrapping lambda (§3); nested calls
+    /// have already captured their own, so placeholders here bind to this call.
+    fn parse_arg(&mut self) -> Result<Arg, ParseError> {
+        // `..base` — a spread (functional-update base).
+        if matches!(self.peek(), Token::DotDot) {
+            self.bump();
+            let base = self.parse_expr(0)?;
+            return Ok(Arg {
+                label: None,
+                value: Expr::Spread(Box::new(base)),
+            });
         }
+        let label = if matches!(self.peek(), Token::Ident(_)) && matches!(self.peek_at(1), Token::Colon)
+        {
+            let name = self.expect_ident("argument label")?;
+            self.bump(); // ':'
+            Some(name)
+        } else {
+            None
+        };
+        let mut value = self.parse_expr(0)?;
+        let mut params = BTreeSet::new();
+        collect_placeholders(&mut value, &mut params);
+        if !params.is_empty() {
+            value = Expr::Lambda {
+                params: params.into_iter().collect(),
+                body: Box::new(value),
+            };
+        }
+        Ok(Arg { label, value })
     }
 
     /// Consume the next token, requiring it to equal `want`, or panic with
@@ -468,9 +486,18 @@ impl Parser {
             }
             if matches!(self.peek(), Token::Let) {
                 stmts.push(self.parse_let()?);
+            } else if matches!(self.peek(), Token::Use) {
+                stmts.push(self.parse_use()?);
             } else {
                 let expr = self.parse_expr(0)?;
-                if matches!(self.peek(), Token::RBrace) {
+                if matches!(self.peek(), Token::Eq) {
+                    self.bump(); // '='
+                    let value = self.parse_expr(0)?;
+                    stmts.push(Stmt::Assign {
+                        target: expr,
+                        value,
+                    });
+                } else if matches!(self.peek(), Token::RBrace) {
                     result = Some(Box::new(expr));
                 } else {
                     stmts.push(Stmt::Expr(expr));
@@ -479,6 +506,19 @@ impl Parser {
         }
         self.bump(); // '}'
         Ok(Expr::Block { stmts, result })
+    }
+
+    /// Parse a `use binding? <- call` statement (Gleam-style callback sugar).
+    fn parse_use(&mut self) -> Result<Stmt, ParseError> {
+        self.bump(); // 'use'
+        let binding = if matches!(self.peek(), Token::Ident(_)) {
+            Some(self.expect_ident("use binding")?)
+        } else {
+            None
+        };
+        self.expect(&Token::LArrow, "'<-' in use")?;
+        let call = self.parse_expr(0)?;
+        Ok(Stmt::Use { binding, call })
     }
 
     /// Parse a `let` binding statement: `let mut? name = value`.
@@ -1445,5 +1485,40 @@ mod tests {
     #[test]
     fn parses_nested_tuple() {
         insta::assert_debug_snapshot!(p("((1, 2), 3)"));
+    }
+
+    #[test]
+    fn parses_named_arguments() {
+        insta::assert_debug_snapshot!(p("Point(x: 1, y: 2)"));
+    }
+
+    #[test]
+    fn parses_mixed_positional_and_named_arguments() {
+        insta::assert_debug_snapshot!(p("f(a, scale: factor * 2)"));
+    }
+
+    #[test]
+    fn parses_spread_construction() {
+        insta::assert_debug_snapshot!(p("Point(..p, x: 10)"));
+    }
+
+    #[test]
+    fn parses_self_field_assignment() {
+        insta::assert_debug_snapshot!(p("{ @x = 5  @x }"));
+    }
+
+    #[test]
+    fn parses_local_reassignment() {
+        insta::assert_debug_snapshot!(p("{ let mut n = 0  n = n + 1  n }"));
+    }
+
+    #[test]
+    fn parses_use_with_binding() {
+        insta::assert_debug_snapshot!(p("{ use r <- each(readings)  emit(r) }"));
+    }
+
+    #[test]
+    fn parses_use_without_binding() {
+        insta::assert_debug_snapshot!(p(r#"{ use <- span("report")  emit(x) }"#));
     }
 }

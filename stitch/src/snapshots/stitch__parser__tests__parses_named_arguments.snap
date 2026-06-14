@@ -1,0 +1,27 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"Point(x: 1, y: 2)\")"
+---
+Call {
+    callee: Var(
+        "Point",
+    ),
+    args: [
+        Arg {
+            label: Some(
+                "x",
+            ),
+            value: Int(
+                1,
+            ),
+        },
+        Arg {
+            label: Some(
+                "y",
+            ),
+            value: Int(
+                2,
+            ),
+        },
+    ],
+}

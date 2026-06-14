@@ -7,22 +7,25 @@ Call {
         "f",
     ),
     args: [
-        If {
-            cond: Binary {
-                op: Gt,
-                left: Var(
-                    "x",
+        Arg {
+            label: None,
+            value: If {
+                cond: Binary {
+                    op: Gt,
+                    left: Var(
+                        "x",
+                    ),
+                    right: Int(
+                        0,
+                    ),
+                },
+                then: Int(
+                    1,
                 ),
-                right: Int(
+                els: Int(
                     0,
                 ),
             },
-            then: Int(
-                1,
-            ),
-            els: Int(
-                0,
-            ),
         },
     ],
 }

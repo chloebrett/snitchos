@@ -1,6 +1,6 @@
 ---
 source: stitch/src/parser.rs
-expression: "parse(\"-f(x)\")"
+expression: "p(\"-f(x)\")"
 ---
 Unary {
     op: Neg,
@@ -9,9 +9,12 @@ Unary {
             "f",
         ),
         args: [
-            Var(
-                "x",
-            ),
+            Arg {
+                label: None,
+                value: Var(
+                    "x",
+                ),
+            },
         ],
     },
 }

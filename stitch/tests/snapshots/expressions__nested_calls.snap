@@ -7,28 +7,43 @@ Call {
         "f",
     ),
     args: [
-        Call {
-            callee: Var(
-                "g",
-            ),
-            args: [
-                Var(
-                    "x",
+        Arg {
+            label: None,
+            value: Call {
+                callee: Var(
+                    "g",
                 ),
-            ],
+                args: [
+                    Arg {
+                        label: None,
+                        value: Var(
+                            "x",
+                        ),
+                    },
+                ],
+            },
         },
-        Call {
-            callee: Var(
-                "h",
-            ),
-            args: [
-                Var(
-                    "y",
+        Arg {
+            label: None,
+            value: Call {
+                callee: Var(
+                    "h",
                 ),
-                Var(
-                    "z",
-                ),
-            ],
+                args: [
+                    Arg {
+                        label: None,
+                        value: Var(
+                            "y",
+                        ),
+                    },
+                    Arg {
+                        label: None,
+                        value: Var(
+                            "z",
+                        ),
+                    },
+                ],
+            },
         },
     ],
 }

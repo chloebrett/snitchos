@@ -7,18 +7,21 @@ Call {
         "map",
     ),
     args: [
-        Lambda {
-            params: [
-                "$a",
-            ],
-            body: Binary {
-                op: Mul,
-                left: Var(
+        Arg {
+            label: None,
+            value: Lambda {
+                params: [
                     "$a",
-                ),
-                right: Int(
-                    2,
-                ),
+                ],
+                body: Binary {
+                    op: Mul,
+                    left: Var(
+                        "$a",
+                    ),
+                    right: Int(
+                        2,
+                    ),
+                },
             },
         },
     ],

@@ -1,6 +1,6 @@
 ---
 source: stitch/src/parser.rs
-expression: "parse(\"readings |> filter(p)\")"
+expression: "p(\"readings |> filter(p)\")"
 ---
 Binary {
     op: Pipe,
@@ -12,9 +12,12 @@ Binary {
             "filter",
         ),
         args: [
-            Var(
-                "p",
-            ),
+            Arg {
+                label: None,
+                value: Var(
+                    "p",
+                ),
+            },
         ],
     },
 }

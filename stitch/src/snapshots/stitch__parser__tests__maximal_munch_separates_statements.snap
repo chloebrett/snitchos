@@ -10,9 +10,12 @@ Block {
                     "f",
                 ),
                 args: [
-                    Var(
-                        "x",
-                    ),
+                    Arg {
+                        label: None,
+                        value: Var(
+                            "x",
+                        ),
+                    },
                 ],
             },
         ),
@@ -22,9 +25,12 @@ Block {
                     "g",
                 ),
                 args: [
-                    Var(
-                        "y",
-                    ),
+                    Arg {
+                        label: None,
+                        value: Var(
+                            "y",
+                        ),
+                    },
                 ],
             },
         ),

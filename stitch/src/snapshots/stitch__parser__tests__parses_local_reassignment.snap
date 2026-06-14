@@ -1,0 +1,34 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"{ let mut n = 0  n = n + 1  n }\")"
+---
+Block {
+    stmts: [
+        Let {
+            name: "n",
+            mutable: true,
+            value: Int(
+                0,
+            ),
+        },
+        Assign {
+            target: Var(
+                "n",
+            ),
+            value: Binary {
+                op: Add,
+                left: Var(
+                    "n",
+                ),
+                right: Int(
+                    1,
+                ),
+            },
+        },
+    ],
+    result: Some(
+        Var(
+            "n",
+        ),
+    ),
+}

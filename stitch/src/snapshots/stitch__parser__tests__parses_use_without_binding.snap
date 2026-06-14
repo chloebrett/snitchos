@@ -1,0 +1,43 @@
+---
+source: stitch/src/parser.rs
+expression: "p(r#\"{ use <- span(\"report\")  emit(x) }\"#)"
+---
+Block {
+    stmts: [
+        Use {
+            binding: None,
+            call: Call {
+                callee: Var(
+                    "span",
+                ),
+                args: [
+                    Arg {
+                        label: None,
+                        value: Str(
+                            [
+                                Lit(
+                                    "report",
+                                ),
+                            ],
+                        ),
+                    },
+                ],
+            },
+        },
+    ],
+    result: Some(
+        Call {
+            callee: Var(
+                "emit",
+            ),
+            args: [
+                Arg {
+                    label: None,
+                    value: Var(
+                        "x",
+                    ),
+                },
+            ],
+        },
+    ),
+}

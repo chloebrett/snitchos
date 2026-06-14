@@ -7,22 +7,28 @@ Call {
         "f",
     ),
     args: [
-        Lambda {
-            params: [
-                "$a",
-            ],
-            body: Binary {
-                op: Gt,
-                left: Var(
+        Arg {
+            label: None,
+            value: Lambda {
+                params: [
                     "$a",
-                ),
-                right: Int(
-                    30,
-                ),
+                ],
+                body: Binary {
+                    op: Gt,
+                    left: Var(
+                        "$a",
+                    ),
+                    right: Int(
+                        30,
+                    ),
+                },
             },
         },
-        Var(
-            "other",
-        ),
+        Arg {
+            label: None,
+            value: Var(
+                "other",
+            ),
+        },
     ],
 }

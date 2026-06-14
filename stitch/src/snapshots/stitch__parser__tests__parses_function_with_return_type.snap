@@ -27,9 +27,12 @@ expression: "prog(\"fetch(url: Str) -> Response = get(url)\")"
                 "get",
             ),
             args: [
-                Var(
-                    "url",
-                ),
+                Arg {
+                    label: None,
+                    value: Var(
+                        "url",
+                    ),
+                },
             ],
         },
     },

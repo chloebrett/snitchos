@@ -1,0 +1,31 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"f(a, scale: factor * 2)\")"
+---
+Call {
+    callee: Var(
+        "f",
+    ),
+    args: [
+        Arg {
+            label: None,
+            value: Var(
+                "a",
+            ),
+        },
+        Arg {
+            label: Some(
+                "scale",
+            ),
+            value: Binary {
+                op: Mul,
+                left: Var(
+                    "factor",
+                ),
+                right: Int(
+                    2,
+                ),
+            },
+        },
+    ],
+}
