@@ -40,8 +40,9 @@ pub static CALLS_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Drained as `snitchos.ipc.replies_total`. `Relaxed`: counter.
 pub static REPLIES_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-/// Inline message size: the four words carried in `a1..=a4`.
-pub const MSG_WORDS: usize = 4;
+/// Inline message size: the four words carried in `a1..=a4`. Re-exported from
+/// `snitchos_abi`, the single source of truth shared with userspace + `fs-proto`.
+pub use snitchos_abi::MSG_WORDS;
 /// An inline IPC message — the words copied sender→receiver.
 pub type Message = [u64; MSG_WORDS];
 
