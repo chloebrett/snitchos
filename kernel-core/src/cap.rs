@@ -43,6 +43,12 @@ impl Rights {
     /// `SEND` so a cap can grant one, the other, or both (`SEND | RECV`).
     pub const RECV: Rights = Rights(0b0100);
 
+    /// May derive badged `SEND` caps naming an [`Object::Endpoint`] the holder
+    /// owns (v0.9c). The endpoint owner (a server) holds `RECV | MINT` and
+    /// stamps each derived client cap's badge + rights; clients hold no `MINT`,
+    /// so they cannot mint (re-delegation is a deferred follow-on).
+    pub const MINT: Rights = Rights(0b1000);
+
     /// Whether `self` grants every right in `other`.
     #[must_use]
     pub const fn contains(self, other: Rights) -> bool {
@@ -236,18 +242,19 @@ pub fn invoke_span(table: &CapTable, handle: Handle) -> Result<(), Denied> {
 }
 
 /// Resolve a `send` invocation: `handle` must name an [`Object::Endpoint`]
-/// in `table` carrying [`Rights::SEND`]. Returns the [`EndpointId`] the
-/// sender is targeting, or why the invocation is refused. The `recv` twin
-/// is [`invoke_recv`]; both mirror [`invoke_telemetry`].
-pub fn invoke_send(table: &CapTable, handle: Handle) -> Result<EndpointId, Denied> {
+/// in `table` carrying [`Rights::SEND`]. Returns the target [`EndpointId`]
+/// **and the cap's `badge`** — the kernel delivers the badge to the receiver
+/// so it can demux the sender's object (v0.9c). The `recv` twin is
+/// [`invoke_recv`]; both mirror [`invoke_telemetry`].
+pub fn invoke_send(table: &CapTable, handle: Handle) -> Result<(EndpointId, u64), Denied> {
     let cap = table.resolve(handle).map_err(|_| Denied::NoSuchCapability)?;
     if !cap.rights.contains(Rights::SEND) {
         return Err(Denied::MissingRight);
     }
-    let Object::Endpoint { id, .. } = cap.object else {
+    let Object::Endpoint { id, badge } = cap.object else {
         return Err(Denied::WrongObject);
     };
-    Ok(id)
+    Ok((id, badge))
 }
 
 /// Resolve a `receive` invocation: `handle` must name an [`Object::Endpoint`]
@@ -275,6 +282,24 @@ pub fn invoke_reply(table: &CapTable, handle: Handle) -> Result<TaskId, Denied> 
         return Err(Denied::WrongObject);
     };
     Ok(caller)
+}
+
+/// Derive a badged `SEND` capability for the endpoint `parent` names (v0.9c).
+/// `parent` must carry [`Rights::MINT`] over an [`Object::Endpoint`]; the
+/// returned child names the *same* endpoint, stamped with `badge` and the
+/// requested `rights`. The `MINT`-holder owns the endpoint, so it sets the
+/// child's rights freely (not a subset of its own) — the kernel only checks
+/// that it *may* mint. The child's [`Multiplicity`] is an insertion concern,
+/// decided when the caller places it in a table; this pure derive returns only
+/// the [`Capability`]. Mirrors the `invoke_*` resolvers.
+pub fn mint_badged(parent: Capability, badge: u64, rights: Rights) -> Result<Capability, Denied> {
+    if !parent.rights.contains(Rights::MINT) {
+        return Err(Denied::MissingRight);
+    }
+    let Object::Endpoint { id, .. } = parent.object else {
+        return Err(Denied::WrongObject);
+    };
+    Ok(Capability { object: Object::Endpoint { id, badge }, rights })
 }
 
 /// A process's capability table: opaque [`Handle`]s in, [`Capability`]
@@ -432,7 +457,7 @@ mod tests {
             object: Object::Endpoint { id: EndpointId(5), badge: 0 },
             rights: Rights::SEND,
         });
-        assert_eq!(invoke_send(&table, h), Ok(EndpointId(5)));
+        assert_eq!(invoke_send(&table, h), Ok((EndpointId(5), 0)));
     }
 
     #[test]
@@ -447,13 +472,13 @@ mod tests {
     }
 
     #[test]
-    fn invoke_send_accepts_a_nonzero_badged_endpoint() {
+    fn invoke_send_returns_the_endpoint_and_the_senders_badge() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
             object: Object::Endpoint { id: EndpointId(5), badge: 0xBEEF },
             rights: Rights::SEND,
         });
-        assert_eq!(invoke_send(&table, h), Ok(EndpointId(5)));
+        assert_eq!(invoke_send(&table, h), Ok((EndpointId(5), 0xBEEF)));
     }
 
     #[test]
@@ -507,6 +532,48 @@ mod tests {
         assert_ne!(Rights::SEND.bits(), Rights::RECV.bits());
         assert_ne!(Rights::SEND.bits(), Rights::EMIT.bits());
         assert!(!Rights::SEND.contains(Rights::RECV));
+    }
+
+    #[test]
+    fn the_mint_right_is_a_distinct_bit() {
+        assert_ne!(Rights::MINT.bits(), Rights::EMIT.bits());
+        assert_ne!(Rights::MINT.bits(), Rights::SEND.bits());
+        assert_ne!(Rights::MINT.bits(), Rights::RECV.bits());
+    }
+
+    #[test]
+    fn mint_badged_derives_a_badged_send_cap_from_a_mint_parent() {
+        // A MINT-holder owns the endpoint and sets the child's rights freely —
+        // here a SEND child, though the parent itself holds only MINT.
+        let parent = Capability {
+            object: Object::Endpoint { id: EndpointId(7), badge: 0 },
+            rights: Rights::MINT,
+        };
+        assert_eq!(
+            mint_badged(parent, 0xF00D, Rights::SEND),
+            Ok(Capability {
+                object: Object::Endpoint { id: EndpointId(7), badge: 0xF00D },
+                rights: Rights::SEND,
+            }),
+        );
+    }
+
+    #[test]
+    fn mint_badged_refuses_a_parent_without_mint() {
+        let parent = Capability {
+            object: Object::Endpoint { id: EndpointId(7), badge: 0 },
+            rights: Rights::RECV,
+        };
+        assert_eq!(mint_badged(parent, 0xF00D, Rights::SEND), Err(Denied::MissingRight));
+    }
+
+    #[test]
+    fn mint_badged_refuses_a_non_endpoint_parent() {
+        let parent = Capability {
+            object: Object::TelemetrySink { counter: StringId(1) },
+            rights: Rights::MINT,
+        };
+        assert_eq!(mint_badged(parent, 0xF00D, Rights::SEND), Err(Denied::WrongObject));
     }
 
     #[test]

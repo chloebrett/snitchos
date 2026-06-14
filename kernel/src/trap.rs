@@ -282,7 +282,9 @@ fn handle_send(frame: &mut TrapFrame) {
         invoke_send(&caps, Handle::from_raw(frame.a0 as u32))
     };
     let ep = match ep {
-        Ok(ep) => ep,
+        // The sender's badge is carried by `invoke_send` but not surfaced to the
+        // receiver until Step 7 (delivery into `a6`); ignore it here.
+        Ok((ep, _badge)) => ep,
         Err(denied) => {
             refuse(frame, sc, refusal_for(denied));
             return;
@@ -430,7 +432,9 @@ fn handle_call(frame: &mut TrapFrame) {
         invoke_send(&caps, Handle::from_raw(frame.a0 as u32))
     };
     let ep = match ep {
-        Ok(ep) => ep,
+        // The sender's badge is carried by `invoke_send` but not surfaced to the
+        // receiver until Step 7 (delivery into `a6`); ignore it here.
+        Ok((ep, _badge)) => ep,
         Err(denied) => {
             refuse(frame, sc, refusal_for(denied));
             return;
