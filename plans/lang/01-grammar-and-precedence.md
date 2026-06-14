@@ -11,7 +11,7 @@ High-level language design: [docs/language-design.md](../../docs/language-design
 ## 1. Lexical grammar
 
 ### Whitespace & comments
-- Whitespace is insignificant (no layout rule). Newlines separate declarations and statements but are otherwise not load-bearing.
+- Whitespace (incl. newlines) is **insignificant** — no layout rule, no Newline token. Statements in a block are separated by **maximal munch**: each statement is a complete expression (or `let` binding), and the next begins where the current can't extend (`f(x) g(y)` is two statements because `g` can't continue `f(x)`). _Deferred (TODO):_ this carries the classic ASI hazard — `a` ⏎ `-b` parses as `a - b`, not two statements. Proper newline-significance (a Newline token used as a soft separator) is a later increment if the hazard bites; until then, ambiguous cases need parens.
 - `// line comment` to end of line.
 - `/* block comment */`, **nestable** _(confirm)_.
 
@@ -21,9 +21,9 @@ High-level language design: [docs/language-design.md](../../docs/language-design
 
 ### Keywords (reserved)
 ```
-prod  sum  contract  on  let  mut  free  use  uses  match  and  or  not  true  false
+prod  sum  contract  on  let  mut  free  use  uses  match  and  or  not  if  true  false
 ```
-That's the whole set for v0. Notably absent: `fn`, `class`, `if`, `else`, `when`, `interface`, `null`, **and every loop keyword** (`for`, `while`, `loop`, `break`, `continue`) — iteration is library combinators over (lazy) sequences, not syntax; see §5a / §6a. `_` is a token (wildcard / catch-all), not a keyword. Boolean logic is the words `and`/`or`/`not` (not `&&`/`||`/`!`) — see operator table for why.
+That's the whole set for v0. **`if` is reserved but valid only as a match-arm guard** (`pat if cond => …`) — there is no `if`/`else` statement. Notably absent: `fn`, `class`, `else`, `when`, `interface`, `null`, **and every loop keyword** (`for`, `while`, `loop`, `break`, `continue`) — iteration is library combinators over (lazy) sequences, not syntax; see §5a / §6a. `_` is a token (wildcard / catch-all), not a keyword. Boolean logic is the words `and`/`or`/`not` (not `&&`/`||`/`!`) — see operator table for why.
 
 ### Literals
 - **Int:** `123`, `1_000` (underscores ignored). Decimal only in v0; hex/binary deferred (additive later).
