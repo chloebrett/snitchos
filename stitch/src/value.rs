@@ -17,6 +17,9 @@ pub enum Value {
     /// An immutable string. `Rc<str>` so cloning a `Value::Str` is a refcount
     /// bump, not a copy.
     Str(Rc<str>),
+    /// A tuple — the anonymous product `(a, b, …)`. The empty tuple `()` is
+    /// `Unit`, not a zero-element `Tuple`. `Rc<[Value]>` for cheap clones.
+    Tuple(Rc<[Value]>),
     /// The unit value `()` — what a block with no trailing expression, and an
     /// expression evaluated only for effect, produce.
     Unit,
@@ -75,6 +78,14 @@ impl Value {
             Value::Float(x) => x.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Str(s) => s.to_string(),
+            Value::Tuple(elements) => {
+                let parts = elements
+                    .iter()
+                    .map(Value::display)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({parts})")
+            }
             Value::Unit => "()".to_string(),
             Value::Closure(_) => "<function>".to_string(),
             Value::Constructor(_) => "<constructor>".to_string(),
@@ -101,6 +112,7 @@ impl Value {
             Value::Float(_) => "Float",
             Value::Bool(_) => "Bool",
             Value::Str(_) => "Str",
+            Value::Tuple(_) => "Tuple",
             Value::Unit => "Unit",
             Value::Closure(_) | Value::Constructor(_) => "Function",
             Value::Data(_) => "a record",
@@ -115,6 +127,7 @@ impl fmt::Debug for Value {
             Value::Float(x) => write!(f, "Float({x})"),
             Value::Bool(b) => write!(f, "Bool({b})"),
             Value::Str(s) => write!(f, "Str({s:?})"),
+            Value::Tuple(elements) => write!(f, "Tuple{elements:?}"),
             Value::Unit => write!(f, "Unit"),
             Value::Closure(c) => write!(f, "Closure/{}", c.params.len()),
             Value::Constructor(c) => write!(f, "Constructor({})", c.variant),
@@ -133,6 +146,7 @@ impl PartialEq for Value {
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Unit, Value::Unit) => true,
             (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
             (Value::Constructor(a), Value::Constructor(b)) => Rc::ptr_eq(a, b),

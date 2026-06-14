@@ -98,6 +98,15 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         }
         Expr::Block { stmts, result } => eval_block(stmts, result.as_deref(), env),
         Expr::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env),
+        // `()` is unit; `(a, b, …)` is a tuple.
+        Expr::Tuple(elements) if elements.is_empty() => Ok(Value::Unit),
+        Expr::Tuple(elements) => {
+            let values = elements
+                .iter()
+                .map(|element| eval(element, env))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Tuple(values.into()))
+        }
         Expr::Lambda { params, body } => Ok(Value::Closure(Rc::new(ClosureData {
             params: params.clone(),
             body: (**body).clone(),
@@ -259,7 +268,23 @@ fn try_match(pattern: &Pattern, value: &Value, env: &Env) -> Option<Env> {
             Value::Str(s) => (s.as_ref() == text).then(|| env.clone()),
             _ => None,
         },
-        Pattern::Tuple(_) => None,
+        // `()` pattern matches unit; `(a, b, …)` matches a tuple element-wise.
+        Pattern::Tuple(subpatterns) if subpatterns.is_empty() => {
+            matches!(value, Value::Unit).then(|| env.clone())
+        }
+        Pattern::Tuple(subpatterns) => {
+            let Value::Tuple(elements) = value else {
+                return None;
+            };
+            if elements.len() != subpatterns.len() {
+                return None;
+            }
+            let mut bound = env.clone();
+            for (subpattern, element) in subpatterns.iter().zip(elements.iter()) {
+                bound = try_match(subpattern, element, &bound)?;
+            }
+            Some(bound)
+        }
     }
 }
 
@@ -959,5 +984,44 @@ mod tests {
             run_program(r#"prod Point(x: Int, y: Int)  main() = "{Point(1, 2)}""#),
             Value::Str("Point(x: 1, y: 2)".into())
         );
+    }
+
+    #[test]
+    fn tuples_have_structural_equality() {
+        assert_eq!(run("(1, 2) == (1, 2)"), Value::Bool(true));
+        assert_eq!(run("(1, 2) == (1, 3)"), Value::Bool(false));
+    }
+
+    #[test]
+    fn the_empty_tuple_is_unit() {
+        assert_eq!(run("()"), Value::Unit);
+    }
+
+    #[test]
+    fn interpolation_renders_a_tuple() {
+        assert_eq!(run(r#""{(1, 2)}""#), Value::Str("(1, 2)".into()));
+    }
+
+    #[test]
+    fn destructures_a_tuple_pattern() {
+        assert_eq!(run("match (1, 2) { (a, b) => a + b }"), Value::Int(3));
+    }
+
+    #[test]
+    fn destructures_a_nested_tuple_pattern() {
+        assert_eq!(
+            run("match ((1, 2), 3) { ((a, b), c) => a + b + c }"),
+            Value::Int(6)
+        );
+    }
+
+    #[test]
+    fn a_tuple_pattern_arity_must_match() {
+        assert_eq!(run("match (1, 2, 3) { (a, b) => 0  _ => 99 }"), Value::Int(99));
+    }
+
+    #[test]
+    fn the_empty_tuple_pattern_matches_unit() {
+        assert_eq!(run("match () { () => 42 }"), Value::Int(42));
     }
 }
