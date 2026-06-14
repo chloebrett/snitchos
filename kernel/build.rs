@@ -92,14 +92,14 @@ fn build_and_embed_user(kernel_dir: &str) {
     // so this covers every source without enumerating files.
     for p in [
         "user/hello/src",
-        "user/hello/user.ld",
         "user/hello/Cargo.toml",
         "user/hello/build.rs",
         "user/fs/src",
-        "user/fs/user.ld",
         "user/fs/Cargo.toml",
         "user/fs/build.rs",
         "user/runtime/src",
+        "user/runtime/user.ld",
+        "user/runtime/build.rs",
         "user/runtime/Cargo.toml",
         "fs-core/src",
         "fs-proto/src",
