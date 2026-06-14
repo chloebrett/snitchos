@@ -45,13 +45,6 @@ impl RamFs {
             .get(ino.as_u32() as usize)
             .ok_or(FsError::NotFound)
     }
-
-    fn entry_kind(&self, ino: InodeId) -> NodeKind {
-        match self.nodes.get(ino.as_u32() as usize) {
-            Some(Node::Dir(_)) => NodeKind::Dir,
-            _ => NodeKind::File,
-        }
-    }
 }
 
 impl Filesystem for RamFs {
@@ -131,12 +124,14 @@ impl Filesystem for RamFs {
     fn readdir(&self, dir: InodeId) -> Result<Vec<DirEntry>, FsError> {
         match self.node(dir)? {
             Node::File(_) => Err(FsError::NotADir),
+            // Flat FS: every directory entry is a file (subdirs are
+            // `Unsupported`). When hierarchy lands, resolve each entry's kind.
             Node::Dir(entries) => Ok(entries
                 .iter()
                 .map(|(name, &ino)| DirEntry {
                     name: name.clone(),
                     ino,
-                    kind: self.entry_kind(ino),
+                    kind: NodeKind::File,
                 })
                 .collect()),
         }
