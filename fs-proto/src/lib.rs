@@ -14,7 +14,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-use fs_core::{InodeId, NodeKind};
+use fs_core::{FsError, InodeId, NodeKind, Stat};
 
 /// The IPC message width, re-exported from the shared ABI — the wire layouts
 /// here encode into `[u64; MSG_WORDS]`.
@@ -161,6 +161,9 @@ pub enum WireError {
     /// A `Create` carried a node-kind value that is neither `File` (0) nor
     /// `Dir` (1).
     BadKind(u64),
+    /// A response carried a status word that maps to no `FsError` (and isn't
+    /// `0` = Ok).
+    BadStatus(u64),
 }
 
 /// An FS request, decoded from the IPC message. The target **inode is not
@@ -239,10 +242,85 @@ const fn kind_from_wire(raw: u64) -> Result<NodeKind, WireError> {
     }
 }
 
+/// An FS reply, decoded against the [`Op`] that was sent (the Ok payload's shape
+/// depends on it). `w0` is the status: `0` = Ok, else an `FsError` code. New
+/// inodes from `Lookup`/`Create` ride here for information; the actual child
+/// File cap is transferred out-of-band via `reply_with_cap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Response {
+    Err(FsError),
+    /// `Stat`.
+    Stat(Stat),
+    /// `Read` / `Write`: bytes transferred.
+    Count(u64),
+    /// `Lookup` / `Create`: the resolved/created inode.
+    Inode(InodeId),
+    /// `Remove`: success, no payload.
+    Removed,
+    /// `Readdir`: one entry; `name_len` bytes were copied into the request's
+    /// `name_dst` buffer.
+    Entry { ino: InodeId, kind: NodeKind, name_len: u64 },
+}
+
+impl Response {
+    #[must_use]
+    pub fn encode(&self) -> [u64; MSG_WORDS] {
+        match *self {
+            Response::Err(e) => [status_from_error(e), 0, 0, 0],
+            Response::Stat(s) => [0, kind_to_wire(s.kind), s.size, 0],
+            Response::Count(n) => [0, n, 0, 0],
+            Response::Inode(ino) => [0, u64::from(ino.as_u32()), 0, 0],
+            Response::Removed => [0, 0, 0, 0],
+            Response::Entry { ino, kind, name_len } => {
+                [0, u64::from(ino.as_u32()), kind_to_wire(kind), name_len]
+            }
+        }
+    }
+
+    pub fn decode(op: Op, words: [u64; MSG_WORDS]) -> Result<Response, WireError> {
+        let [w0, w1, w2, w3] = words;
+        if w0 != 0 {
+            return Ok(Response::Err(error_from_status(w0)?));
+        }
+        Ok(match op {
+            Op::Stat => Response::Stat(Stat { kind: kind_from_wire(w1)?, size: w2 }),
+            Op::Read | Op::Write => Response::Count(w1),
+            Op::Lookup | Op::Create => Response::Inode(InodeId::new(w1 as u32)),
+            Op::Remove => Response::Removed,
+            Op::Readdir => {
+                Response::Entry { ino: InodeId::new(w1 as u32), kind: kind_from_wire(w2)?, name_len: w3 }
+            }
+        })
+    }
+}
+
+const fn status_from_error(e: FsError) -> u64 {
+    match e {
+        FsError::NotFound => 1,
+        FsError::NotADir => 2,
+        FsError::IsADir => 3,
+        FsError::Exists => 4,
+        FsError::Unsupported => 5,
+        FsError::NameTooLong => 6,
+    }
+}
+
+const fn error_from_status(status: u64) -> Result<FsError, WireError> {
+    match status {
+        1 => Ok(FsError::NotFound),
+        2 => Ok(FsError::NotADir),
+        3 => Ok(FsError::IsADir),
+        4 => Ok(FsError::Exists),
+        5 => Ok(FsError::Unsupported),
+        6 => Ok(FsError::NameTooLong),
+        other => Err(WireError::BadStatus(other)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_core::{InodeId, NodeKind};
+    use fs_core::{FsError, InodeId, NodeKind, Stat};
 
     #[test]
     fn read_and_write_are_distinct_rights() {
@@ -376,5 +454,67 @@ mod tests {
     fn decoding_a_bad_node_kind_is_an_error() {
         let words = [u64::from(Op::Create.to_u8()), 0x4000, 9, 2];
         assert_eq!(Request::decode(words), Err(WireError::BadKind(2)));
+    }
+
+    #[test]
+    fn every_response_round_trips() {
+        let cases = [
+            (Op::Stat, Response::Stat(Stat { kind: NodeKind::Dir, size: 0 })),
+            (Op::Read, Response::Count(512)),
+            (Op::Write, Response::Count(16)),
+            (Op::Lookup, Response::Inode(InodeId::new(7))),
+            (Op::Create, Response::Inode(InodeId::new(9))),
+            (Op::Remove, Response::Removed),
+            (Op::Readdir, Response::Entry { ino: InodeId::new(3), kind: NodeKind::File, name_len: 5 }),
+        ];
+
+        for (op, resp) in cases {
+            assert_eq!(Response::decode(op, resp.encode()), Ok(resp));
+        }
+    }
+
+    #[test]
+    fn error_responses_round_trip_under_any_op() {
+        let errors = [
+            FsError::NotFound,
+            FsError::NotADir,
+            FsError::IsADir,
+            FsError::Exists,
+            FsError::Unsupported,
+            FsError::NameTooLong,
+        ];
+
+        for e in errors {
+            assert_eq!(Response::decode(Op::Stat, Response::Err(e).encode()), Ok(Response::Err(e)));
+        }
+    }
+
+    #[test]
+    fn error_status_codes_are_stable_wire_values() {
+        // Never renumber: clients map status → FsError off these. 0 = Ok.
+        assert_eq!(Response::Err(FsError::NotFound).encode()[0], 1);
+        assert_eq!(Response::Err(FsError::NotADir).encode()[0], 2);
+        assert_eq!(Response::Err(FsError::IsADir).encode()[0], 3);
+        assert_eq!(Response::Err(FsError::Exists).encode()[0], 4);
+        assert_eq!(Response::Err(FsError::Unsupported).encode()[0], 5);
+        assert_eq!(Response::Err(FsError::NameTooLong).encode()[0], 6);
+    }
+
+    #[test]
+    fn response_word_layout_is_locked() {
+        // status 0 (Ok) in w0; Dir kind = 1.
+        assert_eq!(
+            Response::Stat(Stat { kind: NodeKind::Dir, size: 42 }).encode(),
+            [0, 1, 42, 0]
+        );
+        assert_eq!(
+            Response::Entry { ino: InodeId::new(3), kind: NodeKind::File, name_len: 5 }.encode(),
+            [0, 3, 0, 5]
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_status_is_an_error_not_a_panic() {
+        assert_eq!(Response::decode(Op::Stat, [99, 0, 0, 0]), Err(WireError::BadStatus(99)));
     }
 }
