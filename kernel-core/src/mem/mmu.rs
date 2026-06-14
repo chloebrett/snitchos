@@ -113,7 +113,14 @@ impl PtePerms {
 
     #[must_use]
     pub const fn union(self, other: PtePerms) -> Self { PtePerms(self.0 | other.0) }
+
+    /// Whether `self` grants every bit in `other`.
+    #[must_use]
+    pub const fn contains(self, other: PtePerms) -> bool { self.0 & other.0 == other.0 }
 }
+
+/// Bytes per 4 KiB page — the granularity a cross-AS copy walks at.
+pub const PAGE_SIZE: usize = 4096;
 
 /// PTE bit positions defined by the privileged spec.
 const PTE_V: u64 = 1 << 0;
@@ -186,6 +193,19 @@ impl Pte {
 
     const fn rwx(self) -> u64 {
         self.0 & (PtePerms::R.bits() | PtePerms::W.bits() | PtePerms::X.bits())
+    }
+
+    /// The mapped page's PA from a leaf PTE: PPN at bits 53:10 → `pte >> 10 << 12`.
+    pub(crate) const fn leaf_pa(self) -> usize {
+        ((self.0 >> 10) << 12) as usize
+    }
+
+    /// The R/W/X/U/G permission bits carried by this PTE. The mask is the
+    /// literal `0b11_1110` — bits 1–5 (R,W,X,U,G), which are disjoint, so a
+    /// built-up `|` mask would be a nest of equivalent mutants; the literal
+    /// has none.
+    pub(crate) const fn perms(self) -> PtePerms {
+        PtePerms(self.0 & 0b11_1110)
     }
 }
 
@@ -409,6 +429,87 @@ fn walk_or_install(
     let new_pa = mem.alloc_zeroed_table().ok_or(MapError::OutOfFrames)?;
     mem.write_entry(table_pa, idx, Pte::branch(new_pa));
     Ok(new_pa)
+}
+
+/// A translated 4 KiB leaf: the mapped page's base PA and its permissions.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Leaf {
+    pub pa: usize,
+    pub perms: PtePerms,
+}
+
+/// Resolve `va` to its 4 KiB leaf in the address space rooted at `root_pa`,
+/// returning the page-base PA + perms. `None` if the VA is unmapped, an
+/// intermediate table is missing, or a huge-page leaf covers it (no 4 KiB
+/// granularity). The read-only walk underneath a cross-AS copy — it can target
+/// *any* root, unlike a `SUM`-bit deref which only reaches the active space.
+#[must_use]
+pub fn translate(root_pa: usize, va: usize, mem: &dyn PtMem) -> Option<Leaf> {
+    let Sv39Va { vpn2, vpn1, vpn0, .. } = split_va(va);
+    let mid_pa = walk_existing(root_pa, vpn2, mem).ok()?;
+    let leaf_table_pa = walk_existing(mid_pa, vpn1, mem).ok()?;
+    let pte = mem.read_entry(leaf_table_pa, vpn0);
+    pte.is_leaf().then(|| Leaf { pa: pte.leaf_pa(), perms: pte.perms() })
+}
+
+/// Why a cross-address-space copy was refused — surfaced before any bytes move
+/// (the copy is validated end-to-end first, so a refusal never half-copies).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CopyError {
+    /// `(va, len)` failed the user-buffer bounds check (null, over the
+    /// per-copy cap, address overflow, or outside the user half).
+    BadRange,
+    /// A page in the range is unmapped (or covered by a huge page).
+    Unmapped,
+    /// A page lacks a required permission (`R`/`W` or `U`).
+    Perms,
+}
+
+/// Copy `len` bytes from `src_va` (in `src_root`) to `dst_va` (in `dst_root`),
+/// invoking `copy(src_pa, dst_pa, n)` for each maximal run that stays within a
+/// single page on *both* sides. The two address spaces share one physical
+/// memory (`mem` reads both roots' tables); the caller's `copy` callback does
+/// the actual byte move through the resolved physical addresses (the kernel's
+/// linear map; a mock in tests) — keeping this logic pure and host-testable.
+///
+/// Both ranges are bounds-checked (`user_range_ok`); each page is checked as it
+/// is reached — source must grant `R|U`, destination `W|U` — and the copy
+/// proceeds page-by-page. A refusal on a later page may leave **leading bytes
+/// already copied**, so callers treat a failed copy as a discarded transfer
+/// (the FS's scratch / client buffers are thrown away on an error reply).
+/// `len == 0` is a no-op success.
+pub fn copy_across(
+    src_root: usize,
+    src_va: usize,
+    dst_root: usize,
+    dst_va: usize,
+    len: usize,
+    mem: &dyn PtMem,
+    copy: &mut dyn FnMut(usize, usize, usize),
+) -> Result<(), CopyError> {
+    if !user_range_ok(src_va, len) || !user_range_ok(dst_va, len) {
+        return Err(CopyError::BadRange);
+    }
+
+    let mut done = 0;
+    while done < len {
+        let src = translate(src_root, src_va + done, mem).ok_or(CopyError::Unmapped)?;
+        let dst = translate(dst_root, dst_va + done, mem).ok_or(CopyError::Unmapped)?;
+        if !src.perms.contains(PtePerms::R.union(PtePerms::U))
+            || !dst.perms.contains(PtePerms::W.union(PtePerms::U))
+        {
+            return Err(CopyError::Perms);
+        }
+        let src_off = (src_va + done) & (PAGE_SIZE - 1);
+        let dst_off = (dst_va + done) & (PAGE_SIZE - 1);
+        let chunk = core::cmp::min(
+            core::cmp::min(PAGE_SIZE - src_off, PAGE_SIZE - dst_off),
+            len - done,
+        );
+        copy(src.pa + src_off, dst.pa + dst_off, chunk);
+        done += chunk;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -986,5 +1087,199 @@ mod tests {
         assert_eq!(root.entry(2), Pte::branch(mid_pa));
         assert_eq!(mid.entry(1), Pte::leaf(0x80200000, PtePerms::rwxg()));
         assert_eq!(mid.entry(2), Pte::leaf(0x80400000, PtePerms::rwxg()));
+    }
+
+    // ---- cross-address-space copy: translate + copy_across ----
+
+    /// Allocate a second address-space root inside the same mock physical
+    /// memory (both page tables live in one `PtMem`, as in the real kernel).
+    fn fresh_root(mem: &mut MockPtMem) -> usize {
+        mem.alloc_zeroed_table().expect("a frame for a second root table")
+    }
+
+    fn ru() -> PtePerms {
+        PtePerms::R.union(PtePerms::U)
+    }
+    fn wu() -> PtePerms {
+        PtePerms::W.union(PtePerms::U)
+    }
+
+    /// Run `copy_across` recording the `(src_pa, dst_pa, len)` chunks it emits.
+    fn record(
+        mem: &MockPtMem,
+        src_root: usize,
+        src_va: usize,
+        dst_root: usize,
+        dst_va: usize,
+        len: usize,
+    ) -> Result<std::vec::Vec<(usize, usize, usize)>, CopyError> {
+        let mut chunks = std::vec::Vec::new();
+        copy_across(src_root, src_va, dst_root, dst_va, len, mem, &mut |s, d, n| {
+            chunks.push((s, d, n));
+        })?;
+        Ok(chunks)
+    }
+
+    #[test]
+    fn translate_returns_the_leaf_pa_and_perms() {
+        let mut mem = MockPtMem::new(16);
+        let root = mem.root_pa();
+        map(root, 0x40201000, 0x8000_0000, ru(), &mut mem).unwrap();
+
+        let leaf = translate(root, 0x40201000, &mem).expect("mapped VA translates");
+        assert_eq!(leaf.pa, 0x8000_0000);
+        // Exact perms (not just `contains`): a leaf mapped R|U reads back as
+        // exactly R|U — pins the `perms()` mask, not just "≥ R|U".
+        assert_eq!(leaf.perms, ru());
+    }
+
+    #[test]
+    fn pteperms_contains_is_superset_membership() {
+        let rwu = PtePerms::R.union(PtePerms::W).union(PtePerms::U);
+        assert!(rwu.contains(ru())); // superset grants the subset
+        assert!(rwu.contains(PtePerms::W));
+        assert!(!ru().contains(PtePerms::W)); // R|U does not grant W
+        assert!(!ru().contains(rwu)); // subset does not grant the superset
+    }
+
+    #[test]
+    fn translate_of_an_unmapped_va_is_none() {
+        let mem = MockPtMem::new(16);
+        assert_eq!(translate(mem.root_pa(), 0x40201000, &mem), None);
+    }
+
+    #[test]
+    fn a_within_page_copy_is_a_single_chunk() {
+        let mut mem = MockPtMem::new(32);
+        let src_root = mem.root_pa();
+        let dst_root = fresh_root(&mut mem);
+        map(src_root, 0x10000, 0xA000_0000, ru(), &mut mem).unwrap();
+        map(dst_root, 0x20000, 0xB000_0000, wu(), &mut mem).unwrap();
+
+        let chunks = record(&mem, src_root, 0x10000, dst_root, 0x20000, 64).unwrap();
+        assert_eq!(chunks, std::vec![(0xA000_0000, 0xB000_0000, 64)]);
+    }
+
+    #[test]
+    fn a_copy_spanning_a_page_splits_at_the_source_boundary() {
+        let mut mem = MockPtMem::new(32);
+        let src_root = mem.root_pa();
+        let dst_root = fresh_root(&mut mem);
+        // Source starts 16 bytes before its page end; dest at a page base.
+        map(src_root, 0x10000, 0xA000_0000, ru(), &mut mem).unwrap();
+        map(src_root, 0x11000, 0xA000_1000, ru(), &mut mem).unwrap();
+        map(dst_root, 0x20000, 0xB000_0000, wu(), &mut mem).unwrap();
+
+        let chunks = record(&mem, src_root, 0x10000 + 0x1000 - 16, dst_root, 0x20000, 64).unwrap();
+        assert_eq!(
+            chunks,
+            std::vec![(0xA000_0000 + 0xff0, 0xB000_0000, 16), (0xA000_1000, 0xB000_0000 + 16, 48)],
+        );
+    }
+
+    #[test]
+    fn a_copy_spanning_a_page_splits_at_the_destination_boundary() {
+        let mut mem = MockPtMem::new(32);
+        let src_root = mem.root_pa();
+        let dst_root = fresh_root(&mut mem);
+        map(src_root, 0x10000, 0xA000_0000, ru(), &mut mem).unwrap();
+        map(dst_root, 0x20000, 0xB000_0000, wu(), &mut mem).unwrap();
+        map(dst_root, 0x21000, 0xB000_1000, wu(), &mut mem).unwrap();
+
+        let chunks = record(&mem, src_root, 0x10000, dst_root, 0x20000 + 0x1000 - 16, 64).unwrap();
+        assert_eq!(
+            chunks,
+            std::vec![(0xA000_0000, 0xB000_0000 + 0xff0, 16), (0xA000_0000 + 16, 0xB000_1000, 48)],
+        );
+    }
+
+    #[test]
+    fn copy_refuses_an_unmapped_source_page() {
+        let mut mem = MockPtMem::new(32);
+        let src_root = mem.root_pa();
+        let dst_root = fresh_root(&mut mem);
+        map(dst_root, 0x20000, 0xB000_0000, wu(), &mut mem).unwrap();
+
+        assert_eq!(record(&mem, src_root, 0x10000, dst_root, 0x20000, 32), Err(CopyError::Unmapped));
+    }
+
+    #[test]
+    fn copy_refuses_an_unmapped_destination_page() {
+        let mut mem = MockPtMem::new(32);
+        let src_root = mem.root_pa();
+        let dst_root = fresh_root(&mut mem);
+        map(src_root, 0x10000, 0xA000_0000, ru(), &mut mem).unwrap();
+
+        assert_eq!(record(&mem, src_root, 0x10000, dst_root, 0x20000, 32), Err(CopyError::Unmapped));
+    }
+
+    #[test]
+    fn copy_refuses_a_range_outside_the_user_half() {
+        let mem = MockPtMem::new(4);
+        let root = mem.root_pa();
+        assert_eq!(record(&mem, root, USER_VA_END, root, 0x20000, 16), Err(CopyError::BadRange));
+    }
+
+    #[test]
+    fn copy_refuses_an_over_long_range() {
+        let mem = MockPtMem::new(4);
+        let root = mem.root_pa();
+        assert_eq!(
+            record(&mem, root, 0x10000, root, 0x20000, MAX_USER_STR_LEN + 1),
+            Err(CopyError::BadRange),
+        );
+    }
+
+    #[test]
+    fn copy_refuses_a_source_without_read_permission() {
+        let mut mem = MockPtMem::new(32);
+        let src_root = mem.root_pa();
+        let dst_root = fresh_root(&mut mem);
+        // Write-only-ish page: a valid leaf (W set) that nonetheless lacks R.
+        map(src_root, 0x10000, 0xA000_0000, wu(), &mut mem).unwrap(); // no R
+        map(dst_root, 0x20000, 0xB000_0000, wu(), &mut mem).unwrap();
+
+        assert_eq!(record(&mem, src_root, 0x10000, dst_root, 0x20000, 32), Err(CopyError::Perms));
+    }
+
+    #[test]
+    fn copy_refuses_a_destination_without_write_permission() {
+        let mut mem = MockPtMem::new(32);
+        let src_root = mem.root_pa();
+        let dst_root = fresh_root(&mut mem);
+        map(src_root, 0x10000, 0xA000_0000, ru(), &mut mem).unwrap();
+        map(dst_root, 0x20000, 0xB000_0000, ru(), &mut mem).unwrap(); // no W
+
+        assert_eq!(record(&mem, src_root, 0x10000, dst_root, 0x20000, 32), Err(CopyError::Perms));
+    }
+
+    #[test]
+    fn copy_moves_the_bytes_through_the_resolved_frames() {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+
+        let mut mem = MockPtMem::new(32);
+        let src_root = mem.root_pa();
+        let dst_root = fresh_root(&mut mem);
+        map(src_root, 0x10000, 0xA000_0000, ru(), &mut mem).unwrap();
+        map(dst_root, 0x20000, 0xB000_0000, wu(), &mut mem).unwrap();
+
+        let store: RefCell<HashMap<usize, u8>> = RefCell::new(HashMap::new());
+        for i in 0..8usize {
+            store.borrow_mut().insert(0xA000_0000 + i, (i + 1) as u8);
+        }
+        copy_across(src_root, 0x10000, dst_root, 0x20000, 8, &mem, &mut |s, d, n| {
+            let mut m = store.borrow_mut();
+            for k in 0..n {
+                let b = *m.get(&(s + k)).unwrap_or(&0);
+                m.insert(d + k, b);
+            }
+        })
+        .unwrap();
+
+        let m = store.borrow();
+        for i in 0..8usize {
+            assert_eq!(m.get(&(0xB000_0000 + i)), Some(&((i + 1) as u8)));
+        }
     }
 }
