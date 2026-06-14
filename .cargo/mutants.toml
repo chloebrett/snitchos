@@ -28,6 +28,13 @@ exclude_re = [
   "replace on_send ->",
   "replace on_receive ->",
   "replace drain_front ->",
+  # Equivalent mutant in fs-proto Badge::pack: inode occupies bits [0..32)
+  # and rights [32..48) — disjoint by construction, so | and ^ are identical.
+  "replace \\| with \\^ in Badge::pack",
+  # Equivalent mutant in ramfs write: the `if file.len() < end` guard avoids
+  # truncation before `resize(end, 0)`. At len == end, resize is a no-op, so
+  # `<` and `<=` are behaviourally identical.
+  "replace < with <= in <impl Filesystem for RamFs>::write",
   # Non-deterministic: random_trace_id uses fastrand and its output cannot
   # be asserted. The linter rewrites #[mutants::skip] to
   # #[cfg_attr(test, mutants::skip)] which cargo-mutants doesn't see, so

@@ -347,6 +347,13 @@ name = "fs-core"
 version = "0.0.1"
 
 [[package]]
+name = "fs-proto"
+version = "0.0.1"
+dependencies = [
+ "fs-core",
+]
+
+[[package]]
 name = "generator"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
