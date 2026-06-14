@@ -280,11 +280,11 @@ repeat(attempt) |> first(\r -> r.ok)                            // retry until s
 The front-end (lexer + parser) is otherwise complete — it parses essentially all of `samples.st`. These are the remaining known gaps; none block the evaluator. (Some are cross-referenced from their sections above.)
 
 - **`uses` effects clause** on functions/methods (`report(r) uses Telemetry { … }`) — parsed nowhere yet; arrives with the capability design.
-- **Open-ended ranges** `n..` / `..n` — range is a binary operator needing both operands; open ranges need unary/postfix handling.
 - **Non-associativity not enforced** — comparisons, ranges, and the `=> |` conditional are parsed left-/right-associatively; chaining them should be a parse error, and a chained conditional should say **"use `match`"** (see §2 note).
 - **Statement separation is maximal-munch** — no newline-significance, so the ASI hazard stands (`a` ⏎ `-b` is `a - b`); see §1. A `Newline`-token soft separator is the eventual fix if it bites.
 
 **Closed (front-end complete for these):**
+- **Open-ended ranges** `n..` / `..n` / `..=n` / `..` — a dedicated `Expr::Range { start, end, inclusive }` node (closed ranges migrated to it too); open-from detected by whether an operand follows the `..`, open-to by a prefix `..`. Spread (`..base`) stays position-disambiguated in call args.
 - **Subjectless `match { cond => … }`** — parsed and desugared into nested `cond => then | els` conditionals (the N-ary form of the binary conditional); must end in a `_ => …` catch-all.
 - **Float & string literal *patterns*** in match arms — `Float`/`Str` patterns parse; interpolated string patterns are a parse error.
 - **Top-level `let` constants** — `Item::Const`; `let mut?` at module scope.
