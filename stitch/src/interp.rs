@@ -222,7 +222,22 @@ fn try_match(pattern: &Pattern, value: &Value, env: &Env) -> Option<Env> {
         Pattern::Int(n) => (*value == Value::Int(*n)).then(|| env.clone()),
         Pattern::Float(f) => (*value == Value::Float(*f)).then(|| env.clone()),
         Pattern::Bool(b) => (*value == Value::Bool(*b)).then(|| env.clone()),
-        Pattern::Str(_) | Pattern::Constructor { .. } | Pattern::Tuple(_) | Pattern::Or(_) => None,
+        // Match a `prod`/variant by name and arity, then recurse into each
+        // field, threading the bindings through (a sub-match feeds the next).
+        Pattern::Constructor { name, args } => {
+            let Value::Data(data) = value else {
+                return None;
+            };
+            if data.variant != *name || data.fields.len() != args.len() {
+                return None;
+            }
+            let mut bound = env.clone();
+            for (subpattern, (_, field)) in args.iter().zip(&data.fields) {
+                bound = try_match(subpattern, field, &bound)?;
+            }
+            Some(bound)
+        }
+        Pattern::Str(_) | Pattern::Tuple(_) | Pattern::Or(_) => None,
     }
 }
 
@@ -817,5 +832,44 @@ mod tests {
     #[test]
     fn no_matching_arm_is_an_error() {
         assert_eq!(run_err("match 5 { 0 => 1  1 => 2 }"), "no match arm matched");
+    }
+
+    #[test]
+    fn matches_and_destructures_a_sum_variant() {
+        assert_eq!(
+            run_program("sum Opt = Just(Int) | Nothing  main() = match Just(5) { Just(x) => x  Nothing => 0 }"),
+            Value::Int(5)
+        );
+        assert_eq!(
+            run_program("sum Opt = Just(Int) | Nothing  main() = match Nothing { Just(x) => x  Nothing => 0 }"),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn destructures_a_named_field_variant_positionally() {
+        assert_eq!(
+            run_program(
+                "sum Shape = Circle(radius: Int) | Rect(w: Int, h: Int)  \
+                 main() = match Rect(3, 4) { Circle(r) => r  Rect(w, h) => w * h }"
+            ),
+            Value::Int(12)
+        );
+    }
+
+    #[test]
+    fn a_constructor_pattern_does_not_match_a_different_value() {
+        assert_eq!(
+            run_program("sum Opt = Just(Int) | Nothing  main() = match 5 { Just(x) => x  _ => 99 }"),
+            Value::Int(99)
+        );
+    }
+
+    #[test]
+    fn nested_constructor_patterns_destructure_deeply() {
+        assert_eq!(
+            run_program("sum Opt = Just(Int) | Nothing  main() = match Just(Just(7)) { Just(Just(n)) => n  _ => 0 }"),
+            Value::Int(7)
+        );
     }
 }
