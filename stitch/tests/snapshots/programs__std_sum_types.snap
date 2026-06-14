@@ -1,0 +1,101 @@
+---
+source: stitch/tests/programs.rs
+expression: "prog(\"sum Maybe<T> = Some(T) | None  \\\n         sum Result<T, E> = Ok(T) | Err(E)  \\\n         sum Either<A, B> = Left(A) | Right(B)\")"
+---
+[
+    Sum {
+        name: "Maybe",
+        generics: [
+            "T",
+        ],
+        variants: [
+            Variant {
+                name: "Some",
+                fields: [
+                    Field {
+                        name: None,
+                        mutable: false,
+                        ty: Name {
+                            name: "T",
+                            args: [],
+                        },
+                    },
+                ],
+            },
+            Variant {
+                name: "None",
+                fields: [],
+            },
+        ],
+    },
+    Sum {
+        name: "Result",
+        generics: [
+            "T",
+            "E",
+        ],
+        variants: [
+            Variant {
+                name: "Ok",
+                fields: [
+                    Field {
+                        name: None,
+                        mutable: false,
+                        ty: Name {
+                            name: "T",
+                            args: [],
+                        },
+                    },
+                ],
+            },
+            Variant {
+                name: "Err",
+                fields: [
+                    Field {
+                        name: None,
+                        mutable: false,
+                        ty: Name {
+                            name: "E",
+                            args: [],
+                        },
+                    },
+                ],
+            },
+        ],
+    },
+    Sum {
+        name: "Either",
+        generics: [
+            "A",
+            "B",
+        ],
+        variants: [
+            Variant {
+                name: "Left",
+                fields: [
+                    Field {
+                        name: None,
+                        mutable: false,
+                        ty: Name {
+                            name: "A",
+                            args: [],
+                        },
+                    },
+                ],
+            },
+            Variant {
+                name: "Right",
+                fields: [
+                    Field {
+                        name: None,
+                        mutable: false,
+                        ty: Name {
+                            name: "B",
+                            args: [],
+                        },
+                    },
+                ],
+            },
+        ],
+    },
+]

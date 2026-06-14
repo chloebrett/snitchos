@@ -1,5 +1,47 @@
 //! Abstract syntax tree. Grows one node per parser increment.
 
+/// A top-level declaration in a program.
+#[derive(Debug, PartialEq)]
+pub enum Item {
+    /// `prod Name<generics>(fields)` — a product type.
+    Prod {
+        name: String,
+        generics: Vec<String>,
+        fields: Vec<Field>,
+    },
+    /// `sum Name<generics> = variant | …` — a sum type.
+    Sum {
+        name: String,
+        generics: Vec<String>,
+        variants: Vec<Variant>,
+    },
+}
+
+/// A field of a product or a variant. `name` is `None` for positional fields
+/// (`Celsius(Int)`, `Some(T)`); `Some` for named fields (`Point(x: Int)`).
+#[derive(Debug, PartialEq)]
+pub struct Field {
+    pub name: Option<String>,
+    pub mutable: bool,
+    pub ty: Type,
+}
+
+/// A sum variant: a name and zero or more fields.
+#[derive(Debug, PartialEq)]
+pub struct Variant {
+    pub name: String,
+    pub fields: Vec<Field>,
+}
+
+/// A type annotation. Parsed but not checked in v0.
+#[derive(Debug, PartialEq)]
+pub enum Type {
+    /// `Int`, `List<Int>`, `Maybe<T>`, `Result<T, E>`.
+    Name { name: String, args: Vec<Type> },
+    /// `A -> B` (right-associative). Multi-param/tuple types are deferred.
+    Func { param: Box<Type>, ret: Box<Type> },
+}
+
 /// An expression.
 #[derive(Debug, PartialEq)]
 pub enum Expr {

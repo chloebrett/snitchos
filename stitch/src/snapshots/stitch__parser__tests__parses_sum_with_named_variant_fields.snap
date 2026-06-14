@@ -1,0 +1,52 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"sum Shape = Circle(radius: Int) | Rect(w: Int, h: Int)\")"
+---
+[
+    Sum {
+        name: "Shape",
+        generics: [],
+        variants: [
+            Variant {
+                name: "Circle",
+                fields: [
+                    Field {
+                        name: Some(
+                            "radius",
+                        ),
+                        mutable: false,
+                        ty: Name {
+                            name: "Int",
+                            args: [],
+                        },
+                    },
+                ],
+            },
+            Variant {
+                name: "Rect",
+                fields: [
+                    Field {
+                        name: Some(
+                            "w",
+                        ),
+                        mutable: false,
+                        ty: Name {
+                            name: "Int",
+                            args: [],
+                        },
+                    },
+                    Field {
+                        name: Some(
+                            "h",
+                        ),
+                        mutable: false,
+                        ty: Name {
+                            name: "Int",
+                            args: [],
+                        },
+                    },
+                ],
+            },
+        ],
+    },
+]

@@ -1,0 +1,78 @@
+---
+source: stitch/tests/programs.rs
+expression: "prog(\"prod Reading(sensor: Str, mut celsius: Float)  \\\n         sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)\")"
+---
+[
+    Prod {
+        name: "Reading",
+        generics: [],
+        fields: [
+            Field {
+                name: Some(
+                    "sensor",
+                ),
+                mutable: false,
+                ty: Name {
+                    name: "Str",
+                    args: [],
+                },
+            },
+            Field {
+                name: Some(
+                    "celsius",
+                ),
+                mutable: true,
+                ty: Name {
+                    name: "Float",
+                    args: [],
+                },
+            },
+        ],
+    },
+    Sum {
+        name: "Shape",
+        generics: [],
+        variants: [
+            Variant {
+                name: "Circle",
+                fields: [
+                    Field {
+                        name: Some(
+                            "radius",
+                        ),
+                        mutable: false,
+                        ty: Name {
+                            name: "Float",
+                            args: [],
+                        },
+                    },
+                ],
+            },
+            Variant {
+                name: "Rect",
+                fields: [
+                    Field {
+                        name: Some(
+                            "w",
+                        ),
+                        mutable: false,
+                        ty: Name {
+                            name: "Float",
+                            args: [],
+                        },
+                    },
+                    Field {
+                        name: Some(
+                            "h",
+                        ),
+                        mutable: false,
+                        ty: Name {
+                            name: "Float",
+                            args: [],
+                        },
+                    },
+                ],
+            },
+        ],
+    },
+]

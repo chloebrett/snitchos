@@ -1,0 +1,31 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"sum Maybe<T> = Some(T) | None\")"
+---
+[
+    Sum {
+        name: "Maybe",
+        generics: [
+            "T",
+        ],
+        variants: [
+            Variant {
+                name: "Some",
+                fields: [
+                    Field {
+                        name: None,
+                        mutable: false,
+                        ty: Name {
+                            name: "T",
+                            args: [],
+                        },
+                    },
+                ],
+            },
+            Variant {
+                name: "None",
+                fields: [],
+            },
+        ],
+    },
+]

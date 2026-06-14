@@ -1,0 +1,46 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"prod Bag(items: List<Int>, lookup: Map<Str, Int>)\")"
+---
+[
+    Prod {
+        name: "Bag",
+        generics: [],
+        fields: [
+            Field {
+                name: Some(
+                    "items",
+                ),
+                mutable: false,
+                ty: Name {
+                    name: "List",
+                    args: [
+                        Name {
+                            name: "Int",
+                            args: [],
+                        },
+                    ],
+                },
+            },
+            Field {
+                name: Some(
+                    "lookup",
+                ),
+                mutable: false,
+                ty: Name {
+                    name: "Map",
+                    args: [
+                        Name {
+                            name: "Str",
+                            args: [],
+                        },
+                        Name {
+                            name: "Int",
+                            args: [],
+                        },
+                    ],
+                },
+            },
+        ],
+    },
+]

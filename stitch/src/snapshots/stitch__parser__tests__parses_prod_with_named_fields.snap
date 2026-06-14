@@ -1,0 +1,32 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"prod Point(x: Int, y: Int)\")"
+---
+[
+    Prod {
+        name: "Point",
+        generics: [],
+        fields: [
+            Field {
+                name: Some(
+                    "x",
+                ),
+                mutable: false,
+                ty: Name {
+                    name: "Int",
+                    args: [],
+                },
+            },
+            Field {
+                name: Some(
+                    "y",
+                ),
+                mutable: false,
+                ty: Name {
+                    name: "Int",
+                    args: [],
+                },
+            },
+        ],
+    },
+]

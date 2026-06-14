@@ -1,0 +1,46 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"prod Point(x: Int, y: Int)  sum Dir = North | South\")"
+---
+[
+    Prod {
+        name: "Point",
+        generics: [],
+        fields: [
+            Field {
+                name: Some(
+                    "x",
+                ),
+                mutable: false,
+                ty: Name {
+                    name: "Int",
+                    args: [],
+                },
+            },
+            Field {
+                name: Some(
+                    "y",
+                ),
+                mutable: false,
+                ty: Name {
+                    name: "Int",
+                    args: [],
+                },
+            },
+        ],
+    },
+    Sum {
+        name: "Dir",
+        generics: [],
+        variants: [
+            Variant {
+                name: "North",
+                fields: [],
+            },
+            Variant {
+                name: "South",
+                fields: [],
+            },
+        ],
+    },
+]

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::{BinOp, Expr, MatchArm, Pattern, Stmt, StrSegment, UnOp};
+use crate::ast::{BinOp, Expr, Field, Item, MatchArm, Pattern, Stmt, StrSegment, Type, UnOp, Variant};
 use crate::lexer::{StrPart, Token, lex};
 
 /// A parse error. Carries a human-readable message; source positions are a
@@ -32,6 +32,19 @@ pub fn parse(src: &str) -> Result<Expr, ParseError> {
     let expr = parser.parse_expr(0)?;
     parser.expect(&Token::Eof, "end of input")?;
     Ok(expr)
+}
+
+/// Parse a Stitch program — a sequence of top-level declarations.
+///
+/// # Errors
+/// Returns `Err` on a malformed declaration.
+pub fn parse_program(src: &str) -> Result<Vec<Item>, ParseError> {
+    let mut parser = Parser::new(src);
+    let mut items = Vec::new();
+    while !matches!(parser.peek(), Token::Eof) {
+        items.push(parser.parse_item()?);
+    }
+    Ok(items)
 }
 
 /// Rewrite `Placeholder` nodes in `expr` into `Var("$x")`, collecting the
@@ -481,6 +494,156 @@ impl Parser {
         })
     }
 
+    /// Parse one top-level declaration.
+    fn parse_item(&mut self) -> Result<Item, ParseError> {
+        match self.peek() {
+            Token::Prod => self.parse_prod(),
+            Token::Sum => self.parse_sum(),
+            other => Err(ParseError::new(format!(
+                "expected a declaration, found {other:?}"
+            ))),
+        }
+    }
+
+    /// `prod Name<generics>(fields)`.
+    fn parse_prod(&mut self) -> Result<Item, ParseError> {
+        self.bump(); // 'prod'
+        let name = self.expect_ident("product type name")?;
+        let generics = self.parse_generics()?;
+        self.expect(&Token::LParen, "'(' after product name")?;
+        let fields = self.parse_fields()?;
+        Ok(Item::Prod {
+            name,
+            generics,
+            fields,
+        })
+    }
+
+    /// `sum Name<generics> = variant | variant | …`.
+    fn parse_sum(&mut self) -> Result<Item, ParseError> {
+        self.bump(); // 'sum'
+        let name = self.expect_ident("sum type name")?;
+        let generics = self.parse_generics()?;
+        self.expect(&Token::Eq, "'=' in sum declaration")?;
+        if matches!(self.peek(), Token::Bar) {
+            self.bump(); // optional leading '|'
+        }
+        let mut variants = vec![self.parse_variant()?];
+        while matches!(self.peek(), Token::Bar) {
+            self.bump();
+            variants.push(self.parse_variant()?);
+        }
+        Ok(Item::Sum {
+            name,
+            generics,
+            variants,
+        })
+    }
+
+    /// A sum variant: `Name` or `Name(fields)`.
+    fn parse_variant(&mut self) -> Result<Variant, ParseError> {
+        let name = self.expect_ident("variant name")?;
+        let fields = if matches!(self.peek(), Token::LParen) {
+            self.bump(); // '('
+            self.parse_fields()?
+        } else {
+            Vec::new()
+        };
+        Ok(Variant { name, fields })
+    }
+
+    /// Optional `<T, U, …>` generic parameters.
+    fn parse_generics(&mut self) -> Result<Vec<String>, ParseError> {
+        if !matches!(self.peek(), Token::Lt) {
+            return Ok(Vec::new());
+        }
+        self.bump(); // '<'
+        let mut params = vec![self.expect_ident("type parameter")?];
+        while matches!(self.peek(), Token::Comma) {
+            self.bump();
+            params.push(self.expect_ident("type parameter")?);
+        }
+        self.expect(&Token::Gt, "'>' to close type parameters")?;
+        Ok(params)
+    }
+
+    /// A comma-separated field list up to and including `)`. The `(` is
+    /// already consumed.
+    fn parse_fields(&mut self) -> Result<Vec<Field>, ParseError> {
+        let mut fields = Vec::new();
+        if !matches!(self.peek(), Token::RParen) {
+            loop {
+                fields.push(self.parse_field()?);
+                if matches!(self.peek(), Token::Comma) {
+                    self.bump();
+                    if matches!(self.peek(), Token::RParen) {
+                        break; // trailing comma
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RParen, "')' after fields")?;
+        Ok(fields)
+    }
+
+    /// One field: `mut? name: Type` (named) or `Type` (positional).
+    fn parse_field(&mut self) -> Result<Field, ParseError> {
+        let mutable = matches!(self.peek(), Token::Mut);
+        if mutable {
+            self.bump();
+        }
+        if matches!(self.peek(), Token::Ident(_)) && matches!(self.peek_at(1), Token::Colon) {
+            let name = self.expect_ident("field name")?;
+            self.bump(); // ':'
+            let ty = self.parse_type()?;
+            return Ok(Field {
+                name: Some(name),
+                mutable,
+                ty,
+            });
+        }
+        let ty = self.parse_type()?;
+        Ok(Field {
+            name: None,
+            mutable,
+            ty,
+        })
+    }
+
+    /// A type: a name with optional `<…>` args, then an optional `-> ret`
+    /// (right-associative). Tuple / multi-param function types are deferred.
+    fn parse_type(&mut self) -> Result<Type, ParseError> {
+        let atom = self.parse_type_name()?;
+        if matches!(self.peek(), Token::Arrow) {
+            self.bump();
+            Ok(Type::Func {
+                param: Box::new(atom),
+                ret: Box::new(self.parse_type()?),
+            })
+        } else {
+            Ok(atom)
+        }
+    }
+
+    fn parse_type_name(&mut self) -> Result<Type, ParseError> {
+        let name = self.expect_ident("type name")?;
+        let args = if matches!(self.peek(), Token::Lt) {
+            self.bump(); // '<'
+            let mut args = vec![self.parse_type()?];
+            while matches!(self.peek(), Token::Comma) {
+                self.bump();
+                args.push(self.parse_type()?);
+            }
+            self.expect(&Token::Gt, "'>' to close type arguments")?;
+            args
+        } else {
+            Vec::new()
+        };
+        Ok(Type::Name { name, args })
+    }
+
     /// Parse `match subject { arm* }`. The `match` keyword is already consumed.
     fn parse_match(&mut self) -> Result<Expr, ParseError> {
         if matches!(self.peek(), Token::LBrace) {
@@ -619,12 +782,17 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::Expr;
-    use crate::parser::parse;
+    use crate::ast::{Expr, Item};
+    use crate::parser::{parse, parse_program};
 
-    /// Parse, unwrapping — for the many tests whose input is valid Stitch.
+    /// Parse an expression, unwrapping — for tests with valid Stitch input.
     fn p(src: &str) -> Expr {
         parse(src).expect("test input should parse")
+    }
+
+    /// Parse a program (declarations), unwrapping.
+    fn prog(src: &str) -> Vec<Item> {
+        parse_program(src).expect("test program should parse")
     }
 
     #[test]
@@ -960,5 +1128,47 @@ mod tests {
     #[test]
     fn parses_tuple_pattern() {
         insta::assert_debug_snapshot!(p("match pair { (a, b) => a + b }"));
+    }
+
+    #[test]
+    fn parses_prod_with_named_fields() {
+        insta::assert_debug_snapshot!(prog("prod Point(x: Int, y: Int)"));
+    }
+
+    #[test]
+    fn parses_prod_with_mut_field() {
+        insta::assert_debug_snapshot!(prog("prod Counter(mut n: Int)"));
+    }
+
+    #[test]
+    fn parses_newtype_prod_positional_field() {
+        insta::assert_debug_snapshot!(prog("prod Celsius(Int)"));
+    }
+
+    #[test]
+    fn parses_sum_with_named_variant_fields() {
+        insta::assert_debug_snapshot!(prog(
+            "sum Shape = Circle(radius: Int) | Rect(w: Int, h: Int)"
+        ));
+    }
+
+    #[test]
+    fn parses_generic_sum_positional_and_nullary() {
+        insta::assert_debug_snapshot!(prog("sum Maybe<T> = Some(T) | None"));
+    }
+
+    #[test]
+    fn parses_sum_with_leading_bar() {
+        insta::assert_debug_snapshot!(prog("sum Color = | Red | Green | Blue"));
+    }
+
+    #[test]
+    fn parses_multiple_items() {
+        insta::assert_debug_snapshot!(prog("prod Point(x: Int, y: Int)  sum Dir = North | South"));
+    }
+
+    #[test]
+    fn parses_generic_field_type() {
+        insta::assert_debug_snapshot!(prog("prod Bag(items: List<Int>, lookup: Map<Str, Int>)"));
     }
 }

@@ -1,0 +1,22 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"prod Counter(mut n: Int)\")"
+---
+[
+    Prod {
+        name: "Counter",
+        generics: [],
+        fields: [
+            Field {
+                name: Some(
+                    "n",
+                ),
+                mutable: true,
+                ty: Name {
+                    name: "Int",
+                    args: [],
+                },
+            },
+        ],
+    },
+]

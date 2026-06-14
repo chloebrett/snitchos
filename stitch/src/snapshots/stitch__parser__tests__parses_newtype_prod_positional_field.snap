@@ -1,0 +1,20 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"prod Celsius(Int)\")"
+---
+[
+    Prod {
+        name: "Celsius",
+        generics: [],
+        fields: [
+            Field {
+                name: None,
+                mutable: false,
+                ty: Name {
+                    name: "Int",
+                    args: [],
+                },
+            },
+        ],
+    },
+]
