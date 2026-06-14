@@ -35,6 +35,25 @@ pub fn eval_program(items: &[Item]) -> Result<Value, RuntimeError> {
                 }));
                 globals.insert(name.clone(), ctor);
             }
+            Item::Sum { name, variants, .. } => {
+                for variant in variants {
+                    let value = if variant.fields.is_empty() {
+                        // Nullary variant (`None`, `Red`) — a bare singleton value.
+                        Value::Data(Rc::new(DataValue {
+                            type_name: name.clone(),
+                            variant: variant.name.clone(),
+                            fields: Vec::new(),
+                        }))
+                    } else {
+                        Value::Constructor(Rc::new(Constructor {
+                            type_name: name.clone(),
+                            variant: variant.name.clone(),
+                            field_names: variant.fields.iter().map(|f| f.name.clone()).collect(),
+                        }))
+                    };
+                    globals.insert(variant.name.clone(), value);
+                }
+            }
             _ => {}
         }
     }
@@ -708,6 +727,38 @@ mod tests {
         );
         assert_eq!(
             run_program("prod Point(x: Int, y: Int)  main() = Point(1, 2) == Point(1, 9)"),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn constructs_a_sum_variant_with_a_named_field() {
+        assert_eq!(
+            run_program("sum Shape = Circle(radius: Int) | Rect(w: Int, h: Int)  main() = Circle(5).radius"),
+            Value::Int(5)
+        );
+    }
+
+    #[test]
+    fn nullary_variants_are_bare_values() {
+        assert_eq!(
+            run_program("sum Color = Red | Green | Blue  main() = Red == Red"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program("sum Color = Red | Green | Blue  main() = Red == Green"),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn variants_of_one_sum_are_distinguished_structurally() {
+        assert_eq!(
+            run_program("sum Opt = Just(Int) | Nothing  main() = Just(1) == Just(1)"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program("sum Opt = Just(Int) | Nothing  main() = Just(1) == Nothing"),
             Value::Bool(false)
         );
     }
