@@ -1,7 +1,7 @@
 //! Abstract syntax tree. Grows one node per parser increment.
 
 /// A top-level declaration in a program.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Item {
     /// `prod Name<generics>(fields)` — a product type.
     Prod {
@@ -48,7 +48,7 @@ pub enum Item {
 /// A method, shared by `contract` signatures and (later) `on` blocks.
 /// `body` is `None` for an abstract contract signature, `Some` for a default
 /// or concrete method.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Method {
     pub name: String,
     pub modifier: MethodModifier,
@@ -58,7 +58,7 @@ pub struct Method {
 }
 
 /// A method's relationship to the receiver `@`.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum MethodModifier {
     /// Bare: an instance method with an immutable `@`.
     Instance,
@@ -69,14 +69,14 @@ pub enum MethodModifier {
 }
 
 /// A function parameter: `name` or `name: Type` (type optional in v0).
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Param {
     pub name: String,
     pub ty: Option<Type>,
 }
 
 /// A call argument: a value, optionally with a `label:` (Swift-style).
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Arg {
     pub label: Option<String>,
     pub value: Expr,
@@ -84,7 +84,7 @@ pub struct Arg {
 
 /// A field of a product or a variant. `name` is `None` for positional fields
 /// (`Celsius(Int)`, `Some(T)`); `Some` for named fields (`Point(x: Int)`).
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Field {
     pub name: Option<String>,
     pub mutable: bool,
@@ -92,14 +92,14 @@ pub struct Field {
 }
 
 /// A sum variant: a name and zero or more fields.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Variant {
     pub name: String,
     pub fields: Vec<Field>,
 }
 
 /// A type annotation. Parsed but not checked in v0.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Type {
     /// `Int`, `List<Int>`, `Maybe<T>`, `Result<T, E>`.
     Name { name: String, args: Vec<Type> },
@@ -111,7 +111,7 @@ pub enum Type {
 }
 
 /// An expression.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Expr {
     Int(i64),
     Float(f64),
@@ -202,7 +202,7 @@ pub enum Expr {
 }
 
 /// One arm of a `match`: `pattern (if guard)? => body`.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct MatchArm {
     pub pattern: Pattern,
     pub guard: Option<Expr>,
@@ -210,7 +210,7 @@ pub struct MatchArm {
 }
 
 /// A match pattern.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Pattern {
     /// `_` — matches anything, binds nothing.
     Wildcard,
@@ -231,7 +231,7 @@ pub enum Pattern {
 }
 
 /// A statement inside a block.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Stmt {
     /// `let name = value` / `let mut name = value` (type annotations later).
     Let {
@@ -250,7 +250,7 @@ pub enum Stmt {
 }
 
 /// One piece of a string literal in the AST.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum StrSegment {
     Lit(String),
     Interp(Box<Expr>),

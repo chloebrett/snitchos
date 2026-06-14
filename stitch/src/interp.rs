@@ -2,10 +2,11 @@
 //! *is* the program — no compilation. v0 is dynamically typed; see `value.rs`.
 
 use std::cmp::Ordering;
+use std::rc::Rc;
 
-use crate::ast::{BinOp, Expr, Stmt, UnOp};
+use crate::ast::{Arg, BinOp, Expr, Stmt, UnOp};
 use crate::env::Env;
-use crate::value::{RuntimeError, Value};
+use crate::value::{ClosureData, RuntimeError, Value};
 
 /// Evaluate an expression to a value in environment `env`.
 ///
@@ -31,8 +32,36 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             .lookup(name)
             .ok_or_else(|| RuntimeError::new(format!("unbound variable `{name}`"))),
         Expr::Block { stmts, result } => eval_block(stmts, result.as_deref(), env),
+        Expr::Lambda { params, body } => Ok(Value::Closure(Rc::new(ClosureData {
+            params: params.clone(),
+            body: (**body).clone(),
+            env: env.clone(),
+        }))),
+        Expr::Call { callee, args } => eval_call(&eval(callee, env)?, args, env),
         _ => Err(RuntimeError::new("evaluation not yet implemented for this expression")),
     }
+}
+
+/// Apply `callee` to `args`. The arguments are evaluated in the caller's
+/// environment, then bound to the closure's parameters on top of the
+/// environment the closure captured — that captured env is what makes it a
+/// closure rather than a plain function.
+fn eval_call(callee: &Value, args: &[Arg], env: &Env) -> Result<Value, RuntimeError> {
+    let Value::Closure(closure) = callee else {
+        return Err(RuntimeError::new(format!("cannot call a {}", callee.kind())));
+    };
+    if args.len() != closure.params.len() {
+        return Err(RuntimeError::new(format!(
+            "function expects {} argument(s), got {}",
+            closure.params.len(),
+            args.len()
+        )));
+    }
+    let mut call_env = closure.env.clone();
+    for (param, arg) in closure.params.iter().zip(args) {
+        call_env = call_env.extend(param.clone(), eval(&arg.value, env)?);
+    }
+    eval(&closure.body, &call_env)
 }
 
 /// Evaluate a block: thread an environment through the statements (each `let`
@@ -367,5 +396,58 @@ mod tests {
     #[test]
     fn an_unbound_variable_is_an_error() {
         assert_eq!(run_err("nope"), "unbound variable `nope`");
+    }
+
+    #[test]
+    fn applies_a_lambda_to_an_argument() {
+        assert_eq!(run("(x -> x + 1)(5)"), Value::Int(6));
+    }
+
+    #[test]
+    fn applies_a_multi_parameter_lambda() {
+        assert_eq!(run("((a, b) -> a + b)(3, 4)"), Value::Int(7));
+    }
+
+    #[test]
+    fn a_closure_captures_its_defining_environment() {
+        assert_eq!(run("{ let n = 10  let add = x -> x + n  add(5) }"), Value::Int(15));
+    }
+
+    #[test]
+    fn closures_capture_lexically_not_dynamically() {
+        // `f` closes over the outer `n` (10); the inner block's `n` (99) is a
+        // different binding and must not affect the captured value.
+        assert_eq!(
+            run("{ let n = 10  let f = () -> n  { let n = 99  f() } }"),
+            Value::Int(10)
+        );
+    }
+
+    #[test]
+    fn higher_order_function_returns_a_closure() {
+        assert_eq!(
+            run("{ let twice = f -> (x -> f(f(x)))  let inc = n -> n + 1  twice(inc)(10) }"),
+            Value::Int(12)
+        );
+    }
+
+    #[test]
+    fn a_placeholder_argument_becomes_a_callable_closure() {
+        // `($ + 1)` desugars (at parse time) to `$a -> $a + 1`, then `apply`
+        // calls it with 10.
+        assert_eq!(run("{ let apply = g -> g(10)  apply($ + 1) }"), Value::Int(11));
+    }
+
+    #[test]
+    fn calling_a_non_function_is_an_error() {
+        assert_eq!(run_err("5(3)"), "cannot call a Int");
+    }
+
+    #[test]
+    fn an_arity_mismatch_is_an_error() {
+        assert_eq!(
+            run_err("(x -> x)(1, 2)"),
+            "function expects 1 argument(s), got 2"
+        );
     }
 }
