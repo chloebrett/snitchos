@@ -12,7 +12,7 @@
 # Road to v1.0
 The v1.0 story: *a capability-secured microkernel running a real workload, where every operation is observable end-to-end.* Audio, networking, WASM, and FS-deepening are deliberately post-v1.0 — v1.0 is already a complete story without them.
 
-**Status legend:** ✅ shipped (code + post) · 🚧 in progress · (unmarked) not started. As of 2026-06-13: v0.1→v0.7b shipped (posts 1–26), v0.8 in progress. Capabilities (v0.7b) and the full userspace runtime exist *today* — see `kernel-core/src/cap.rs`, `user/`. Don't read the future-tense prose below as "not yet built"; trust the marker.
+**Status legend:** ✅ shipped (code + post) · 🚧 in progress · (unmarked) not started. As of 2026-06-14: v0.1→v0.8 shipped, v0.9 (IPC) almost done. Capabilities (v0.7b), the full userspace runtime, preemption (v0.8), and capability-based IPC (v0.9, landing) exist *today* — see `kernel-core/src/cap.rs`, `user/`. Don't read the future-tense prose below as "not yet built"; trust the marker.
 
 ## v0.1 — Hello, traced world ✅
 Smallest kernel that boots on RISC-V in QEMU and emits boot-phase spans + a heartbeat loop as postcard frames over a dedicated serial channel. Host-side reader pretty-prints a live span tree to stdout. No userspace, no allocator, no interrupts.
@@ -56,14 +56,14 @@ Introduce capabilities as the only access path. Refactor v0.7a's syscall to be c
 
 **Post angle:** "Why I rewrote the syscall layer: ambient authority vs. capabilities." The project's identity crystallizes here — a strong essay milestone.
 
-## v0.8 — Preemption, priorities, time-sliced scheduler 🚧
+## v0.8 — Preemption, priorities, time-sliced scheduler ✅
 Cooperative becomes preemptive. Timer-driven preemption with full-trap-frame context switch (today's cooperative `switch` elides caller-saved regs per SysV ABI and can't survive mid-instruction interrupts). The `kernel::sync` chokepoint absorbs preempt-disable hooks in one file. Static priorities and time slicing layer on top. Borg-style two-tier (latency-sensitive + batch) is deferred further out.
 
 **Why before IPC:** the two milestones are mutually unblocked — IPC's blocking paths go through voluntary `yield_now` (a normal call; caller-saved regs already dead per SysV ABI), so the full-trap-frame switch never invalidates them, and preemption needs nothing from IPC. Doing preemption first means IPC's eventual block/wake is born on the preemptive scheduler (the better substrate) rather than retrofitted onto it, and preemption's races land on a single-process system instead of colliding with brand-new endpoint state. (Swapped with v0.9 — was IPC-first.)
 
 **Post angle:** "Making the scheduler take the CPU back."
 
-## v0.9 — IPC over capabilities
+## v0.9 — IPC over capabilities 🚧
 Synchronous capability-based channels. First two-process workload. IPC paths fully traced — spans cross the process boundary. Notifications as a separate primitive (roughly the Zircon model). Endpoint state designed multi-hart-correct from day one. Block/wake sits on the v0.8 preemptive scheduler.
 
 **Post angle:** "Two processes talking, and watching every word."
