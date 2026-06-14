@@ -74,7 +74,14 @@ pub enum Object {
     /// A synchronous IPC endpoint (v0.9). The cap names *which* endpoint by
     /// [`EndpointId`]; `Rights::SEND` / `Rights::RECV` decide which end the
     /// holder may use. The rendezvous itself lives in `crate::ipc`.
-    Endpoint { id: EndpointId },
+    ///
+    /// `badge` (v0.9c) is a server-chosen, kernel-opaque value the kernel
+    /// delivers to the receiver on every message, so one endpoint can demux
+    /// many objects/clients by capability rather than by sender identity.
+    /// `badge == 0` is the *bare* endpoint (the owner/`RECV` cap, as before);
+    /// a nonzero badge marks a derived `SEND` cap. The kernel never reads it
+    /// beyond carrying it — all meaning is the server's.
+    Endpoint { id: EndpointId, badge: u64 },
     /// A one-shot authority to **reply** to a blocked `call`er (v0.9b). Names
     /// the specific caller to wake. Minted by the kernel into the server at the
     /// `call` rendezvous and granted [`Multiplicity::Once`] — holding it *is*
@@ -237,7 +244,7 @@ pub fn invoke_send(table: &CapTable, handle: Handle) -> Result<EndpointId, Denie
     if !cap.rights.contains(Rights::SEND) {
         return Err(Denied::MissingRight);
     }
-    let Object::Endpoint { id } = cap.object else {
+    let Object::Endpoint { id, .. } = cap.object else {
         return Err(Denied::WrongObject);
     };
     Ok(id)
@@ -250,7 +257,7 @@ pub fn invoke_recv(table: &CapTable, handle: Handle) -> Result<EndpointId, Denie
     if !cap.rights.contains(Rights::RECV) {
         return Err(Denied::MissingRight);
     }
-    let Object::Endpoint { id } = cap.object else {
+    let Object::Endpoint { id, .. } = cap.object else {
         return Err(Denied::WrongObject);
     };
     Ok(id)
@@ -422,7 +429,28 @@ mod tests {
     fn invoke_send_accepts_an_endpoint_with_the_send_right() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::Endpoint { id: EndpointId(5) },
+            object: Object::Endpoint { id: EndpointId(5), badge: 0 },
+            rights: Rights::SEND,
+        });
+        assert_eq!(invoke_send(&table, h), Ok(EndpointId(5)));
+    }
+
+    #[test]
+    fn resolve_carries_the_badge_on_an_endpoint_cap() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::Endpoint { id: EndpointId(5), badge: 0xBEEF },
+            rights: Rights::SEND,
+        });
+        let cap = table.resolve(h).expect("freshly inserted cap resolves");
+        assert_eq!(cap.object, Object::Endpoint { id: EndpointId(5), badge: 0xBEEF });
+    }
+
+    #[test]
+    fn invoke_send_accepts_a_nonzero_badged_endpoint() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::Endpoint { id: EndpointId(5), badge: 0xBEEF },
             rights: Rights::SEND,
         });
         assert_eq!(invoke_send(&table, h), Ok(EndpointId(5)));
@@ -432,7 +460,7 @@ mod tests {
     fn invoke_send_refuses_an_endpoint_lacking_the_send_right() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::Endpoint { id: EndpointId(5) },
+            object: Object::Endpoint { id: EndpointId(5), badge: 0 },
             rights: Rights::RECV,
         });
         assert_eq!(invoke_send(&table, h), Err(Denied::MissingRight));
@@ -458,7 +486,7 @@ mod tests {
     fn invoke_recv_accepts_an_endpoint_with_the_recv_right() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::Endpoint { id: EndpointId(8) },
+            object: Object::Endpoint { id: EndpointId(8), badge: 0 },
             rights: Rights::RECV,
         });
         assert_eq!(invoke_recv(&table, h), Ok(EndpointId(8)));
@@ -468,7 +496,7 @@ mod tests {
     fn invoke_recv_refuses_an_endpoint_lacking_the_recv_right() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::Endpoint { id: EndpointId(8) },
+            object: Object::Endpoint { id: EndpointId(8), badge: 0 },
             rights: Rights::SEND,
         });
         assert_eq!(invoke_recv(&table, h), Err(Denied::MissingRight));

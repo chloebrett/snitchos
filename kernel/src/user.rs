@@ -277,7 +277,7 @@ fn run_ipc(image: &'static [u8], endpoint: kernel_core::ipc::EndpointId, rights:
 
     // Grant the IPC endpoint capability on top of the bootstrap pair.
     let endpoint_handle =
-        process.caps.lock().insert(Capability { object: Object::Endpoint { id: endpoint }, rights });
+        process.caps.lock().insert(Capability { object: Object::Endpoint { id: endpoint, badge: 0 }, rights });
 
     // Snitch every grant (counter + rich CapEvent), as `run` does — now three:
     // the two bootstrap authorities plus this endpoint cap.
