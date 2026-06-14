@@ -274,3 +274,18 @@ repeat(attempt) |> first(\r -> r.ok)                            // retry until s
 2. **Int literals: decimal only in v0** — hex/binary deferred (additive later). Bitwise `&`/`|` also deferred; since `|` already means alternation, bitwise ops — if ever needed — would be **library functions** (`bitAnd`/`bitOr`), never operators.
 3. **Pipe inserts the left operand as the first argument** (Elixir-style) — confirmed. Load-bearing: stdlib is declared subject-first (`filter(list, pred)`, `map(list, f)`, `fold(list, init, f)`).
 4. **Crate layout: single `lang` host crate to start**, split into lexer/parser/interp if it grows — detail for the `02-*` plan.
+
+## 8. Deferred parser gaps (TODO)
+
+The front-end (lexer + parser) is otherwise complete — it parses essentially all of `samples.st`. These are the known gaps, all deliberately deferred; none block the evaluator. (Some are cross-referenced from their sections above.)
+
+- **`uses` effects clause** on functions/methods (`report(r) uses Telemetry { … }`) — parsed nowhere yet; arrives with the capability design.
+- **Subjectless `match { cond => … }`** (the condition-table form) — currently a clear error; the subject form is done. Its arm grammar is `cond => body`, distinct from `pattern => body`.
+- **Float & string literal *patterns*** in match arms — only `Int`/`Bool` literal patterns parse today.
+- **Top-level `let` constants** — `let` only works as a block statement; module-level constants aren't an item yet.
+- **Open-ended ranges** `n..` / `..n` — range is a binary operator needing both operands; open ranges need unary/postfix handling.
+- **Tuple / multi-param function *types*** — `(A, B) -> C` and tuple types `(A, B)` in annotations. The type parser does `Name<args>` and curried `A -> B` only. (Parsed-not-checked regardless.)
+- **Non-associativity not enforced** — comparisons, ranges, and the `=> |` conditional are parsed left-/right-associatively; chaining them should be a parse error, and a chained conditional should say **"use `match`"** (see §2 note).
+- **Statement separation is maximal-munch** — no newline-significance, so the ASI hazard stands (`a` ⏎ `-b` is `a - b`); see §1. A `Newline`-token soft separator is the eventual fix if it bites.
+- **Interpolation error context** — a parse error inside `{…}` propagates the inner message with no "in string interpolation" wrapper.
+- **Stray `;`** — lexed (`Token::Semicolon`) but no grammar uses it; would just error. The language has no semicolons.
