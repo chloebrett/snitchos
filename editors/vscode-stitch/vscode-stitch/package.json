@@ -1,0 +1,35 @@
+{
+  "name": "stitch-syntax",
+  "displayName": "Stitch (syntax)",
+  "description": "Syntax highlighting for the Stitch (.st) language. TextMate grammar only — no language server.",
+  "version": "0.0.1",
+  "publisher": "snitchos",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "stitch",
+        "aliases": [
+          "Stitch",
+          "stitch"
+        ],
+        "extensions": [
+          ".st"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "stitch",
+        "scopeName": "source.stitch",
+        "path": "./syntaxes/stitch.tmLanguage.json"
+      }
+    ]
+  }
+}
