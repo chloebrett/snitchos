@@ -308,12 +308,12 @@ The post angle (v0.5): "following a trace across a context switch." Tempo's trac
 
 ### Capabilities & userspace (v0.7) — SHIPPED
 
-User mode, capability-mediated syscalls, and a userspace runtime exist today — don't read the roadmap's future-tense v0.7/v0.10 prose as "not built"; check the marker. **IPC (v0.9) is the next unbuilt boundary; v0.8 preemption is in progress.**
+User mode, capability-mediated syscalls, and a userspace runtime exist today — don't read the roadmap's future-tense v0.7/v0.10 prose as "not built"; check the marker. **v0.8 preemption shipped; v0.9 IPC is almost done. The v0.10 RAMfs is being scaffolded now: `fs-core` (the `Filesystem` trait + types, the locked deliverable) and `ramfs` (first impl) — both host-testable, no cap/IPC types.**
 
 - **Caps** (`kernel-core/src/cap.rs`, host-tested): `Capability { object, rights }` named by an opaque `Handle` (slot+generation `u32`), validated against the calling process's `CapTable`. `Object` = `TelemetrySink | SpanSink`; `Endpoint`/`File`/`MemoryRegion` are documented growth points (add a variant + rights bit). `generation` is the revocation hook (dead-weight at 0 for now).
 - **Syscalls** (`abi::Syscall`, dispatch in `kernel/src/trap.rs`): `Invoke`/`SpanOpen` are cap-mediated; `Exit`/`Yield`/`SpanClose`/`MapAnon`/`DebugWrite` are ambient. Refusals snitch (`SyscallRefused` frame + counter), never silent.
 - **Userspace** (`user/`): `runtime` (crt0, syscall bindings, `talc` heap), `std` (`println!`/`Vec` facade), `macros` (`#[entry]`), `hello` (demo bins). Startup caps arrive in `a0`/`a1`.
-- **IPC NOT built** (v0.9, `docs/ipc-design.md`). The v0.10 RAMfs rides on it as a *userspace* component, so its `Filesystem` trait stays capability-agnostic + host-testable; the cap mediates the *endpoint*.
+- **IPC almost done** (v0.9, `docs/ipc-design.md`). The v0.10 RAMfs rides on it as a *userspace* component, so its `Filesystem` trait (`fs-core`) stays capability-agnostic + host-testable; the cap mediates the *endpoint*. The badge→inode demux + cap minting on `lookup` lives in the FS IPC front-end (`user/fs`, not yet built), *above* the cap-agnostic trait.
 
 ### Memory layout, post v0.4 step 4
 
