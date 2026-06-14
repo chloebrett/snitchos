@@ -65,6 +65,35 @@ pub struct ClosureData {
 }
 
 impl Value {
+    /// User-facing text for the value, as produced by string interpolation
+    /// (and, later, `emit`/print). Distinct from `Debug`: strings render
+    /// without quotes, data renders as `Variant(field, …)`. (A user-overridable
+    /// `Show` contract is the eventual home for this.)
+    pub fn display(&self) -> String {
+        match self {
+            Value::Int(n) => n.to_string(),
+            Value::Float(x) => x.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Str(s) => s.to_string(),
+            Value::Unit => "()".to_string(),
+            Value::Closure(_) => "<function>".to_string(),
+            Value::Constructor(_) => "<constructor>".to_string(),
+            Value::Data(d) if d.fields.is_empty() => d.variant.clone(),
+            Value::Data(d) => {
+                let fields = d
+                    .fields
+                    .iter()
+                    .map(|(name, value)| match name {
+                        Some(name) => format!("{name}: {}", value.display()),
+                        None => value.display(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{}({fields})", d.variant)
+            }
+        }
+    }
+
     /// The kind name, for error messages (`"Int"`, `"Function"`, …).
     pub fn kind(&self) -> &'static str {
         match self {

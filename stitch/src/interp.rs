@@ -73,7 +73,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         Expr::Int(n) => Ok(Value::Int(*n)),
         Expr::Float(f) => Ok(Value::Float(*f)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
-        Expr::Str(segments) => eval_string(segments),
+        Expr::Str(segments) => eval_string(segments, env),
         // `and`/`or` short-circuit, so they can't pre-evaluate both operands.
         Expr::Binary { op: BinOp::And, left, right } => Ok(Value::Bool(
             as_bool(&eval(left, env)?, "`and`")? && as_bool(&eval(right, env)?, "`and`")?,
@@ -194,18 +194,14 @@ fn construct(ctor: &Constructor, args: &[Arg], env: &Env) -> Result<Value, Runti
     })))
 }
 
-/// Evaluate a string literal. v0 handles plain (literal) strings only; an
-/// interpolation segment (`{expr}`) is a deferred increment.
-fn eval_string(segments: &[StrSegment]) -> Result<Value, RuntimeError> {
+/// Evaluate a string literal: concatenate literal segments and the displayed
+/// value of each `{expr}` interpolation.
+fn eval_string(segments: &[StrSegment], env: &Env) -> Result<Value, RuntimeError> {
     let mut text = String::new();
     for segment in segments {
         match segment {
             StrSegment::Lit(literal) => text.push_str(literal),
-            StrSegment::Interp(_) => {
-                return Err(RuntimeError::new(
-                    "string interpolation is not yet implemented",
-                ));
-            }
+            StrSegment::Interp(expr) => text.push_str(&eval(expr, env)?.display()),
         }
     }
     Ok(Value::Str(text.into()))
@@ -931,10 +927,37 @@ mod tests {
     }
 
     #[test]
-    fn string_interpolation_is_not_yet_implemented() {
+    fn interpolates_an_expression() {
+        assert_eq!(run(r#""n is {1 + 2}""#), Value::Str("n is 3".into()));
+    }
+
+    #[test]
+    fn interpolates_several_holes_and_literals() {
+        assert_eq!(run(r#""{1}-{2}-{3}""#), Value::Str("1-2-3".into()));
+    }
+
+    #[test]
+    fn interpolates_a_string_without_adding_quotes() {
         assert_eq!(
-            run_err(r#""hi {name}""#),
-            "string interpolation is not yet implemented"
+            run(r#"{ let name = "Bo"  "hi {name}!" }"#),
+            Value::Str("hi Bo!".into())
+        );
+    }
+
+    #[test]
+    fn interpolation_renders_a_bool() {
+        assert_eq!(run(r#""{true}""#), Value::Str("true".into()));
+    }
+
+    #[test]
+    fn interpolation_renders_a_data_value() {
+        assert_eq!(
+            run_program(r#"sum Color = Red | Green | Blue  main() = "it is {Green}""#),
+            Value::Str("it is Green".into())
+        );
+        assert_eq!(
+            run_program(r#"prod Point(x: Int, y: Int)  main() = "{Point(1, 2)}""#),
+            Value::Str("Point(x: 1, y: 2)".into())
         );
     }
 }
