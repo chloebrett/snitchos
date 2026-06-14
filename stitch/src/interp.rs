@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::ast::{Arg, BinOp, Expr, Item, Stmt, UnOp};
+use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Pattern, Stmt, UnOp};
 use crate::env::Env;
 use crate::value::{ClosureData, Constructor, DataValue, RuntimeError, Value};
 
@@ -96,6 +96,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             }
         }
         Expr::Block { stmts, result } => eval_block(stmts, result.as_deref(), env),
+        Expr::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env),
         Expr::Lambda { params, body } => Ok(Value::Closure(Rc::new(ClosureData {
             params: params.clone(),
             body: (**body).clone(),
@@ -190,6 +191,39 @@ fn construct(ctor: &Constructor, args: &[Arg], env: &Env) -> Result<Value, Runti
         variant: ctor.variant.clone(),
         fields,
     })))
+}
+
+/// Evaluate a `match`: try each arm's pattern against `subject` in order; the
+/// first that matches (and whose guard, if any, holds) wins. No arm matching is
+/// a runtime error (v0 has no static exhaustiveness check yet).
+fn eval_match(subject: &Value, arms: &[MatchArm], env: &Env) -> Result<Value, RuntimeError> {
+    for arm in arms {
+        let Some(bound) = try_match(&arm.pattern, subject, env) else {
+            continue;
+        };
+        let guard_holds = match &arm.guard {
+            Some(guard) => as_bool(&eval(guard, &bound)?, "match guard")?,
+            None => true,
+        };
+        if guard_holds {
+            return eval(&arm.body, &bound);
+        }
+    }
+    Err(RuntimeError::new("no match arm matched"))
+}
+
+/// Try to match `pattern` against `value`. On success, return `env` extended
+/// with the pattern's bindings; on failure, `None`. Each pattern kind is one
+/// arm — constructor/or/tuple patterns arrive in later slices.
+fn try_match(pattern: &Pattern, value: &Value, env: &Env) -> Option<Env> {
+    match pattern {
+        Pattern::Wildcard => Some(env.clone()),
+        Pattern::Binding(name) => Some(env.extend(name.clone(), value.clone())),
+        Pattern::Int(n) => (*value == Value::Int(*n)).then(|| env.clone()),
+        Pattern::Float(f) => (*value == Value::Float(*f)).then(|| env.clone()),
+        Pattern::Bool(b) => (*value == Value::Bool(*b)).then(|| env.clone()),
+        Pattern::Str(_) | Pattern::Constructor { .. } | Pattern::Tuple(_) | Pattern::Or(_) => None,
+    }
 }
 
 /// Read field `name` from a `Data` value.
@@ -761,5 +795,27 @@ mod tests {
             run_program("sum Opt = Just(Int) | Nothing  main() = Just(1) == Nothing"),
             Value::Bool(false)
         );
+    }
+
+    #[test]
+    fn matches_a_literal_arm_else_the_wildcard() {
+        assert_eq!(run("match 0 { 0 => 1  _ => 2 }"), Value::Int(1));
+        assert_eq!(run("match 5 { 0 => 1  _ => 2 }"), Value::Int(2));
+    }
+
+    #[test]
+    fn a_binding_pattern_binds_the_subject() {
+        assert_eq!(run("match 7 { x => x + 1 }"), Value::Int(8));
+    }
+
+    #[test]
+    fn a_guard_can_reject_an_arm_and_fall_through() {
+        assert_eq!(run("match 5 { x if x > 10 => 1  _ => 2 }"), Value::Int(2));
+        assert_eq!(run("match 5 { x if x > 0 => 1  _ => 2 }"), Value::Int(1));
+    }
+
+    #[test]
+    fn no_matching_arm_is_an_error() {
+        assert_eq!(run_err("match 5 { 0 => 1  1 => 2 }"), "no match arm matched");
     }
 }
