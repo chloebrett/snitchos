@@ -166,6 +166,13 @@ pub enum Expr {
         params: Vec<String>,
         body: Box<Expr>,
     },
+    /// A range `start..end` / `start..=end`, lazy (`Seq<Int>`). Either end may
+    /// be absent: `n..` (open from), `..n` / `..=n` (open to), `..` (full).
+    Range {
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        inclusive: bool,
+    },
     /// The inline conditional `cond => then | els`.
     If {
         cond: Box<Expr>,

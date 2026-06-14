@@ -1,0 +1,17 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"1..10\")"
+---
+Range {
+    start: Some(
+        Int(
+            1,
+        ),
+    ),
+    end: Some(
+        Int(
+            10,
+        ),
+    ),
+    inclusive: false,
+}

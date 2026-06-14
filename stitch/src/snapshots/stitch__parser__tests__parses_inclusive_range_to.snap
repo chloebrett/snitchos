@@ -1,0 +1,13 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"..=n\")"
+---
+Range {
+    start: None,
+    end: Some(
+        Var(
+            "n",
+        ),
+    ),
+    inclusive: true,
+}

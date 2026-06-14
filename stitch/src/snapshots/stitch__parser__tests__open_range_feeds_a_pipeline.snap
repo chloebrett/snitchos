@@ -1,0 +1,29 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"n.. |> take(5)\")"
+---
+Binary {
+    op: Pipe,
+    left: Range {
+        start: Some(
+            Var(
+                "n",
+            ),
+        ),
+        end: None,
+        inclusive: false,
+    },
+    right: Call {
+        callee: Var(
+            "take",
+        ),
+        args: [
+            Arg {
+                label: None,
+                value: Int(
+                    5,
+                ),
+            },
+        ],
+    },
+}

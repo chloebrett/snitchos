@@ -6,14 +6,18 @@ Binary {
     op: Pipe,
     left: Binary {
         op: Pipe,
-        left: Binary {
-            op: Range,
-            left: Int(
-                0,
+        left: Range {
+            start: Some(
+                Int(
+                    0,
+                ),
             ),
-            right: Var(
-                "count",
+            end: Some(
+                Var(
+                    "count",
+                ),
             ),
+            inclusive: false,
         },
         right: Call {
             callee: Var(

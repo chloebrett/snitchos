@@ -87,6 +87,14 @@ fn collect_placeholders(expr: &mut Expr, params: &mut BTreeSet<String>) {
             collect_placeholders(object, params);
             collect_placeholders(index, params);
         }
+        Expr::Range { start, end, .. } => {
+            if let Some(start) = start {
+                collect_placeholders(start, params);
+            }
+            if let Some(end) = end {
+                collect_placeholders(end, params);
+            }
+        }
         Expr::If { cond, then, els } => {
             collect_placeholders(cond, params);
             collect_placeholders(then, params);
@@ -164,6 +172,15 @@ fn infix_op(tok: &Token) -> Option<BinOp> {
     })
 }
 
+/// If `op` is a range operator, return whether it's inclusive (`..=` vs `..`).
+fn range_kind(op: BinOp) -> Option<bool> {
+    match op {
+        BinOp::Range => Some(false),
+        BinOp::RangeIncl => Some(true),
+        _ => None,
+    }
+}
+
 /// `(left, right)` binding powers (§2 precedence table). Loosest = lowest;
 /// left < right gives left-associativity.
 fn binding_power(op: BinOp) -> (u8, u8) {
@@ -224,11 +241,20 @@ impl Parser {
                 break;
             }
             self.bump(); // consume the operator
-            let right = self.parse_expr(r_bp)?;
-            left = Expr::Binary {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
+            left = if let Some(inclusive) = range_kind(op) {
+                // `start..` is open-ended when no operand follows the `..`.
+                let end = self.starts_expr().then(|| self.parse_expr(r_bp)).transpose()?;
+                Expr::Range {
+                    start: Some(Box::new(left)),
+                    end: end.map(Box::new),
+                    inclusive,
+                }
+            } else {
+                Expr::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(self.parse_expr(r_bp)?),
+                }
             };
         }
         // The `cond => then | els` conditional binds looser than any binary
@@ -310,8 +336,21 @@ impl Parser {
         Ok(params)
     }
 
-    /// Prefix unary operators (`-`, `not`), binding tighter than any infix.
+    /// Prefix unary operators (`-`, `not`) and the open-from-start range forms
+    /// (`..n`, `..=n`, bare `..`), binding tighter than any infix. (In call-arg
+    /// position a leading `..` is a spread, handled earlier in `parse_arg`.)
     fn parse_prefix(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek(), Token::DotDot | Token::DotDotEq) {
+            let inclusive = matches!(self.peek(), Token::DotDotEq);
+            let (_, r_bp) = binding_power(BinOp::Range);
+            self.bump(); // '..' / '..='
+            let end = self.starts_expr().then(|| self.parse_expr(r_bp)).transpose()?;
+            return Ok(Expr::Range {
+                start: None,
+                end: end.map(Box::new),
+                inclusive,
+            });
+        }
         let op = match self.peek() {
             Token::Minus => UnOp::Neg,
             Token::Not => UnOp::Not,
@@ -322,6 +361,27 @@ impl Parser {
             op,
             operand: Box::new(self.parse_prefix()?),
         })
+    }
+
+    /// Can the current token begin an expression atom? Used to tell an
+    /// open-ended range (`n..`) from one with an end operand (`n..m`).
+    fn starts_expr(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::Int(_)
+                | Token::Float(_)
+                | Token::Bool(_)
+                | Token::Ident(_)
+                | Token::Str(_)
+                | Token::Placeholder(_)
+                | Token::LParen
+                | Token::LBracket
+                | Token::LBrace
+                | Token::At
+                | Token::Match
+                | Token::Minus
+                | Token::Not
+        )
     }
 
     /// Postfix operators (call, field, `?.`, `?`, index) — the tightest layer,
@@ -1703,6 +1763,36 @@ mod tests {
     #[test]
     fn parses_multi_param_function_type() {
         insta::assert_debug_snapshot!(prog("prod Handler(cb: (Int, Str) -> Bool)"));
+    }
+
+    #[test]
+    fn parses_closed_range() {
+        insta::assert_debug_snapshot!(p("1..10"));
+    }
+
+    #[test]
+    fn parses_inclusive_range() {
+        insta::assert_debug_snapshot!(p("0..=n"));
+    }
+
+    #[test]
+    fn parses_open_ended_range_from() {
+        insta::assert_debug_snapshot!(p("n.."));
+    }
+
+    #[test]
+    fn parses_range_to() {
+        insta::assert_debug_snapshot!(p("..n"));
+    }
+
+    #[test]
+    fn parses_inclusive_range_to() {
+        insta::assert_debug_snapshot!(p("..=n"));
+    }
+
+    #[test]
+    fn open_range_feeds_a_pipeline() {
+        insta::assert_debug_snapshot!(p("n.. |> take(5)"));
     }
 
     #[test]
