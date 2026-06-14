@@ -6,5 +6,7 @@
 //! `plans/lang/02-walking-skeleton.md`.
 
 pub mod ast;
+pub mod interp;
 pub mod lexer;
 pub mod parser;
+pub mod value;
