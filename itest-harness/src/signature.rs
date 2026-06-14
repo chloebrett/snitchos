@@ -206,9 +206,13 @@ pub enum CaptureLevel {
     /// Summary record only — no frame transcript.
     Summary,
     /// Summary + the tail of recent frames (the bounded ring).
-    #[default]
     Tail,
-    /// Summary + every frame observed during the iteration.
+    /// Summary + every non-`ContextSwitch` frame, unbounded (the **default**):
+    /// the full story of a failing run without the scheduler-switch noise that
+    /// is ~99% of frames. Readable in one pass; the signal you actually debug on.
+    #[default]
+    Signal,
+    /// Summary + every frame observed, including `ContextSwitch` (heavy).
     Full,
 }
 
@@ -218,9 +222,10 @@ impl std::str::FromStr for CaptureLevel {
         match s.to_ascii_lowercase().as_str() {
             "summary" => Ok(Self::Summary),
             "tail" => Ok(Self::Tail),
+            "signal" => Ok(Self::Signal),
             "full" => Ok(Self::Full),
             other => Err(format!(
-                "unknown capture level {other:?} (expected summary|tail|full)"
+                "unknown capture level {other:?} (expected summary|tail|signal|full)"
             )),
         }
     }
@@ -459,13 +464,20 @@ mod tests {
     }
 
     #[test]
-    fn capture_level_parses_case_insensitively_and_defaults_to_tail() {
+    fn capture_level_parses_case_insensitively_and_defaults_to_signal() {
         use std::str::FromStr;
+        // Canonical (lowercase) names parse to their variants.
         assert_eq!(CaptureLevel::from_str("summary").unwrap(), CaptureLevel::Summary);
-        assert_eq!(CaptureLevel::from_str("Tail").unwrap(), CaptureLevel::Tail);
+        assert_eq!(CaptureLevel::from_str("tail").unwrap(), CaptureLevel::Tail);
+        assert_eq!(CaptureLevel::from_str("signal").unwrap(), CaptureLevel::Signal);
+        assert_eq!(CaptureLevel::from_str("full").unwrap(), CaptureLevel::Full);
+        // Parsing is case-insensitive.
         assert_eq!(CaptureLevel::from_str("FULL").unwrap(), CaptureLevel::Full);
+        assert_eq!(CaptureLevel::from_str("Signal").unwrap(), CaptureLevel::Signal);
         assert!(CaptureLevel::from_str("everything").is_err());
-        assert_eq!(CaptureLevel::default(), CaptureLevel::Tail);
+        // Signal (full stream minus ContextSwitch noise) is the default — every
+        // failure is debuggable without remembering a flag.
+        assert_eq!(CaptureLevel::default(), CaptureLevel::Signal);
     }
 
     #[test]

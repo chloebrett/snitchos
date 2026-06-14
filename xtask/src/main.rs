@@ -209,7 +209,7 @@ enum Cmd {
         /// from the iteration. The summary record itself (outcome, frame
         /// counts, per-hart timestamps, histogram) is always captured
         /// regardless of level.
-        #[arg(long, value_name = "LEVEL", default_value_t = CaptureArg::Tail)]
+        #[arg(long, value_name = "LEVEL", default_value_t = CaptureArg::Signal)]
         capture: CaptureArg,
         /// Scenario name(s) to exclude from the run. Repeatable and/or
         /// comma-separated: `--skip a --skip b` or `--skip a,b`. Applied
@@ -280,9 +280,12 @@ enum Cmd {
 enum CaptureArg {
     /// Summary record only — no frame transcript.
     Summary,
-    /// Summary + the last ~64 frames (default).
+    /// Summary + the last ~64 frames.
     Tail,
-    /// Summary + every frame from the iteration.
+    /// Summary + every non-ContextSwitch frame (default) — the full story
+    /// without the scheduler-switch noise.
+    Signal,
+    /// Summary + every frame, including ContextSwitch (heavy).
     Full,
 }
 
@@ -291,6 +294,7 @@ impl std::fmt::Display for CaptureArg {
         let s = match self {
             CaptureArg::Summary => "summary",
             CaptureArg::Tail => "tail",
+            CaptureArg::Signal => "signal",
             CaptureArg::Full => "full",
         };
         f.write_str(s)
@@ -302,6 +306,7 @@ impl From<CaptureArg> for itest_harness::CaptureLevel {
         match arg {
             CaptureArg::Summary => itest_harness::CaptureLevel::Summary,
             CaptureArg::Tail => itest_harness::CaptureLevel::Tail,
+            CaptureArg::Signal => itest_harness::CaptureLevel::Signal,
             CaptureArg::Full => itest_harness::CaptureLevel::Full,
         }
     }
