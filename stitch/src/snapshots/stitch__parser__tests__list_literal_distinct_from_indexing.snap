@@ -1,0 +1,24 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"[xs[0], ys[1]]\")"
+---
+List(
+    [
+        Index {
+            object: Var(
+                "xs",
+            ),
+            index: Int(
+                0,
+            ),
+        },
+        Index {
+            object: Var(
+                "ys",
+            ),
+            index: Int(
+                1,
+            ),
+        },
+    ],
+)

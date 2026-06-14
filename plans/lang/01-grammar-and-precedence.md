@@ -75,6 +75,8 @@ Tightest (binds first) → loosest (binds last). This is the table the Pratt/pre
 
 Mixing `|>` or `..` with `and`/`or`/comparison requires parens — rare in practice, so not worth special levels.
 
+> **Deferred parser checks (TODO):** comparisons and ranges are non-associative, and the `=> |` conditional is non-associative too — chaining it (`c1 => a | c2 => b | c`) should be a **parse error that points the user at `match`** ("chained conditionals aren't allowed — use `match`"). None of these are enforced yet; the parser currently accepts them leniently.
+
 Type-level `->` (function types `A -> B -> C`) is **right-associative** = `A -> (B -> C)`.
 
 ---

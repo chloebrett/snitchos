@@ -1,0 +1,7 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"[:]\")"
+---
+Map(
+    [],
+)

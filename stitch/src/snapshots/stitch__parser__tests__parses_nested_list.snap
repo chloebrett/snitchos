@@ -1,0 +1,25 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"[[1], [2, 3]]\")"
+---
+List(
+    [
+        List(
+            [
+                Int(
+                    1,
+                ),
+            ],
+        ),
+        List(
+            [
+                Int(
+                    2,
+                ),
+                Int(
+                    3,
+                ),
+            ],
+        ),
+    ],
+)

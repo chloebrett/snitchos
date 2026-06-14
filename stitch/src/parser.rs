@@ -68,6 +68,17 @@ fn collect_placeholders(expr: &mut Expr, params: &mut BTreeSet<String>) {
             collect_placeholders(then, params);
             collect_placeholders(els, params);
         }
+        Expr::List(items) => {
+            for item in items {
+                collect_placeholders(item, params);
+            }
+        }
+        Expr::Map(entries) => {
+            for (key, value) in entries {
+                collect_placeholders(key, params);
+                collect_placeholders(value, params);
+            }
+        }
         // Atoms with no sub-expressions, and explicit lambdas (their body's
         // placeholders, if any, belong to that lambda — left for a later check).
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Var(_) | Expr::Lambda { .. } => {}
@@ -358,6 +369,50 @@ impl Parser {
         }
     }
 
+    /// Parse a `[…]` collection literal — a list `[a, b]` or a map `[k: v, …]`
+    /// (empty list `[]`, empty map `[:]`). The opening `[` is already consumed;
+    /// list vs. map is decided by whether the first element is followed by `:`.
+    fn parse_collection(&mut self) -> Result<Expr, ParseError> {
+        if matches!(self.peek(), Token::RBracket) {
+            self.bump();
+            return Ok(Expr::List(Vec::new()));
+        }
+        if matches!(self.peek(), Token::Colon) && matches!(self.peek_at(1), Token::RBracket) {
+            self.bump(); // :
+            self.bump(); // ]
+            return Ok(Expr::Map(Vec::new()));
+        }
+        let first = self.parse_expr(0)?;
+        if matches!(self.peek(), Token::Colon) {
+            // map: `first` was a key
+            self.bump(); // :
+            let value = self.parse_expr(0)?;
+            let mut entries = vec![(first, value)];
+            while matches!(self.peek(), Token::Comma) {
+                self.bump();
+                if matches!(self.peek(), Token::RBracket) {
+                    break; // trailing comma
+                }
+                let key = self.parse_expr(0)?;
+                self.expect(&Token::Colon, "':' in map entry")?;
+                entries.push((key, self.parse_expr(0)?));
+            }
+            self.expect(&Token::RBracket, "']'")?;
+            Ok(Expr::Map(entries))
+        } else {
+            let mut items = vec![first];
+            while matches!(self.peek(), Token::Comma) {
+                self.bump();
+                if matches!(self.peek(), Token::RBracket) {
+                    break; // trailing comma
+                }
+                items.push(self.parse_expr(0)?);
+            }
+            self.expect(&Token::RBracket, "']'")?;
+            Ok(Expr::List(items))
+        }
+    }
+
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
         // Clone the leading token so its borrow ends before we recurse.
         Ok(match self.bump().clone() {
@@ -371,6 +426,7 @@ impl Parser {
                 self.expect(&Token::RParen, "')'")?;
                 inner
             }
+            Token::LBracket => self.parse_collection()?,
             other => return Err(ParseError::new(format!("unexpected token: {other:?}"))),
         })
     }
@@ -609,5 +665,35 @@ mod tests {
     #[test]
     fn conditional_without_else_is_an_error() {
         insta::assert_debug_snapshot!(parse("x => a"));
+    }
+
+    #[test]
+    fn parses_empty_list() {
+        insta::assert_debug_snapshot!(p("[]"));
+    }
+
+    #[test]
+    fn parses_list_literal() {
+        insta::assert_debug_snapshot!(p("[1, 2, 3]"));
+    }
+
+    #[test]
+    fn parses_empty_map() {
+        insta::assert_debug_snapshot!(p("[:]"));
+    }
+
+    #[test]
+    fn parses_map_literal() {
+        insta::assert_debug_snapshot!(p("[a: 1, b: 2]"));
+    }
+
+    #[test]
+    fn parses_nested_list() {
+        insta::assert_debug_snapshot!(p("[[1], [2, 3]]"));
+    }
+
+    #[test]
+    fn list_literal_distinct_from_indexing() {
+        insta::assert_debug_snapshot!(p("[xs[0], ys[1]]"));
     }
 }

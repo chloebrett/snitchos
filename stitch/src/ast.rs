@@ -57,6 +57,10 @@ pub enum Expr {
         then: Box<Expr>,
         els: Box<Expr>,
     },
+    /// An eager list literal: `[a, b, c]`.
+    List(Vec<Expr>),
+    /// An eager map literal: `[k: v, …]` (empty is `[:]`).
+    Map(Vec<(Expr, Expr)>),
 }
 
 /// Prefix unary operators.
