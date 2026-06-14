@@ -60,6 +60,15 @@ impl Rights {
     pub const fn bits(self) -> u32 {
         self.0
     }
+
+    /// Rebuild a rights set from the raw bits a syscall delivered in a register
+    /// (the `MintBadged` requested rights). The inverse of [`bits`](Self::bits).
+    /// A `MINT`-holder sets a minted cap's rights freely, so this wraps the
+    /// value verbatim — the kernel does not curate the bits.
+    #[must_use]
+    pub const fn from_bits(bits: u32) -> Rights {
+        Rights(bits)
+    }
 }
 
 impl core::ops::BitOr for Rights {
@@ -557,6 +566,15 @@ mod tests {
         assert!(combined.contains(Rights::RECV));
         assert!(combined.contains(Rights::MINT));
         assert!(!combined.contains(Rights::SEND));
+    }
+
+    #[test]
+    fn rights_from_bits_round_trips_through_bits() {
+        // The MintBadged syscall carries the requested rights as a raw u32
+        // register; `from_bits` rebuilds the set the minter asked for.
+        let r = Rights::from_bits(Rights::SEND.bits());
+        assert_eq!(r, Rights::SEND);
+        assert_eq!(Rights::from_bits((Rights::RECV | Rights::MINT).bits()), Rights::RECV | Rights::MINT);
     }
 
     #[test]

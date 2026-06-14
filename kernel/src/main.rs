@@ -363,7 +363,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::UserHog)
         | Some(WorkloadKind::Priorities)
         | Some(WorkloadKind::Ipc)
-        | Some(WorkloadKind::IpcRpc) => {}
+        | Some(WorkloadKind::IpcRpc)
+        | Some(WorkloadKind::BadgeMint) => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -417,6 +418,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::BlockWake
                     | WorkloadKind::Ipc
                     | WorkloadKind::IpcRpc
+                    | WorkloadKind::BadgeMint
             )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
@@ -512,6 +514,15 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
             let _ = sched::spawn_on(1, "rpc_server", user::rpc_server_main_entry);
             let _ = sched::spawn_on(1, "rpc_client", user::rpc_client_main_entry);
+        }
+        // v0.9c badged endpoints: a RECV|MINT minter + a SEND-only client share
+        // one endpoint. The minter mints a badged cap; the client's mint is
+        // refused. Same binary, outcome decided by capability.
+        Some(WorkloadKind::BadgeMint) => {
+            user::init_metric();
+            crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
+            let _ = sched::spawn_on(1, "badge_minter", user::badge_minter_main_entry);
+            let _ = sched::spawn_on(1, "badge_client", user::badge_mint_client_main_entry);
         }
         _ => {}
     }

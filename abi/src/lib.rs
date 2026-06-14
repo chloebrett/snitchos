@@ -97,6 +97,14 @@ pub enum Syscall {
     /// request words in `a1..=a4`, and its reply handle in `a5`. One trap
     /// instead of two per request.
     ReplyRecv = 11,
+    /// Mint a badged `SEND` capability for an endpoint the caller owns (v0.9c).
+    /// `a0` = endpoint handle (needs `MINT`), `a1` = the server-chosen `badge`
+    /// (u64), `a2` = the requested rights bits. The kernel derives a child cap
+    /// naming the same endpoint, stamped with the badge + rights, and inserts it
+    /// into the caller's own table. Returns the new handle in `a0`, or
+    /// `usize::MAX` if refused (handle lacks `MINT` / names no endpoint). The
+    /// minted cap is handed to a client via cap-transfer (a later step).
+    MintBadged = 12,
 }
 
 impl Syscall {
@@ -118,6 +126,7 @@ impl Syscall {
             9 => Some(Self::Call),
             10 => Some(Self::Reply),
             11 => Some(Self::ReplyRecv),
+            12 => Some(Self::MintBadged),
             _ => None,
         }
     }
@@ -141,6 +150,7 @@ mod tests {
         assert_eq!(Syscall::Call as usize, 9);
         assert_eq!(Syscall::Reply as usize, 10);
         assert_eq!(Syscall::ReplyRecv as usize, 11);
+        assert_eq!(Syscall::MintBadged as usize, 12);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
@@ -154,6 +164,7 @@ mod tests {
         assert_eq!(Syscall::from_usize(9), Some(Syscall::Call));
         assert_eq!(Syscall::from_usize(10), Some(Syscall::Reply));
         assert_eq!(Syscall::from_usize(11), Some(Syscall::ReplyRecv));
-        assert_eq!(Syscall::from_usize(12), None);
+        assert_eq!(Syscall::from_usize(12), Some(Syscall::MintBadged));
+        assert_eq!(Syscall::from_usize(13), None);
     }
 }

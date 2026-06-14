@@ -142,6 +142,7 @@ catalog! {
     wfi "rpc-trace-nests"                 scenarios::rpc_trace_nests                [userspace, ipc] {"ipc-rpc"};
     wfi "rpc-telemetry"                   scenarios::rpc_telemetry                  [userspace, ipc] {"ipc-rpc"};
     wfi "rpc-reply-recv"                  scenarios::rpc_reply_recv                 [userspace, ipc] {"ipc-rpc"};
+    wfi "badge-mint-mints-and-refuses"    scenarios::badge_mint_mints_and_refuses   [userspace, ipc] {"badge-mint"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back

@@ -272,7 +272,7 @@ pub fn emit_cap_granted(cap_id: u64, holder: u32, object: protocol::CapObject, r
 /// to another (v0.9b): the kernel minting a one-shot reply cap into the server
 /// `holder` at a `call` rendezvous. `parent_cap_id` is `0` for now (a precise
 /// derivation edge to the originating `call` is a later refinement).
-pub fn emit_cap_transferred(cap_id: u64, holder: u32, object: protocol::CapObject, rights: u32) {
+pub fn emit_cap_transferred(cap_id: u64, holder: u32, object: protocol::CapObject, rights: u32, badge: u64) {
     emit_frame(&Frame::CapEvent {
         kind: protocol::CapEventKind::Transferred,
         cap_id,
@@ -280,8 +280,7 @@ pub fn emit_cap_transferred(cap_id: u64, holder: u32, object: protocol::CapObjec
         holder,
         object,
         rights,
-        // Reply caps carry no badge; Step 5 adds a badge param for badged mints.
-        badge: 0,
+        badge,
         t: timestamp(),
         hart_id: crate::percpu::current_hartid() as u8,
     });

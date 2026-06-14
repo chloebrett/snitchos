@@ -317,6 +317,11 @@ pub const MSG_WORDS: usize = 4;
 /// rendezvous operations — each blocks until a peer arrives. Which ops are
 /// permitted depends on the rights the kernel granted (`SEND`/`RECV`); holding
 /// the integer is not authority, the kernel validates on every call.
+/// The `SEND` rights bit — what a server stamps on the client caps it mints
+/// via [`Endpoint::mint_badged`]. Mirror of `kernel_core::cap::Rights::SEND`;
+/// part of the user/kernel ABI contract, keep in sync.
+pub const RIGHT_SEND: u32 = 0b0010;
+
 #[derive(Clone, Copy)]
 pub struct Endpoint {
     handle: usize,
@@ -349,6 +354,29 @@ impl Endpoint {
             );
         }
         if ret == 0 { Ok(()) } else { Err(Denied) }
+    }
+
+    /// Mint a badged `SEND` capability for this endpoint, returning its raw
+    /// handle. Requires this endpoint cap to carry `MINT` (a server owner cap);
+    /// `Err(Denied)` if the kernel refused. The minted cap names the same
+    /// endpoint, stamped with `badge` (the server's demux value) + `rights`
+    /// (e.g. [`RIGHT_SEND`]) — hand it to a client so its messages arrive
+    /// badged. The cap lands in *this* process's table for now.
+    pub fn mint_badged(self, badge: u64, rights: u32) -> Result<usize, Denied> {
+        let ret: usize;
+        // SAFETY: `ecall` traps to the kernel, which validates `MINT` on the
+        // handle, derives the badged child, inserts it into our table, and
+        // returns its handle in a0 (or usize::MAX if refused).
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::MintBadged as usize,
+                inlateout("a0") self.handle => ret,
+                in("a1") badge,
+                in("a2") rights as usize,
+            );
+        }
+        if ret == usize::MAX { Err(Denied) } else { Ok(ret) }
     }
 
     /// Receive an inline message, blocking until a sender rendezvouses.

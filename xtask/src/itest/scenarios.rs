@@ -1358,6 +1358,33 @@ pub fn rpc_reply_recv(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.9c badged endpoints: a `RECV | MINT` minter and a `SEND`-only client run
+/// the *same* binary, each calling `mint_badged`. The minter succeeds — a
+/// `CapEvent::Transferred{Endpoint}` carrying the badge appears on the wire; the
+/// client is refused — a `SyscallRefused{MintBadged}`. Proves the demux value is
+/// server-minted and the `MINT` gate holds, with the outcome decided by the
+/// capability, not the code.
+pub fn badge_mint_mints_and_refuses(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+
+    h.wait_for(SEC * 30, |f, _| {
+        matches!(f, OwnedFrame::CapEvent { kind: CapEventKind::Transferred, object: CapObject::Endpoint, badge, .. }
+            if *badge == 0xF00D)
+    })
+    .ok_or(
+        "no CapEvent::Transferred{Endpoint, badge=0xF00D} within 30s — the RECV|MINT \
+         minter didn't mint a badged cap",
+    )?;
+
+    // 12 == snitchos_abi::Syscall::MintBadged (xtask has no abi dep — inlined).
+    h.wait_for(SEC * 30, |f, _| matches!(f, OwnedFrame::SyscallRefused { syscall: 12, .. }))
+        .ok_or(
+            "no SyscallRefused{MintBadged} within 30s — the SEND-only client's mint \
+             wasn't refused (the MINT gate didn't hold)",
+        )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

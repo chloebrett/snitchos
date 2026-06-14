@@ -101,6 +101,12 @@ pub enum WorkloadKind {
     /// server `receive`s, does work, and `reply`s through a one-shot reply cap.
     /// The client blocks across the round-trip (nested-span trace). One hart.
     IpcRpc,
+    /// v0.9c badged endpoints: two processes share one endpoint. A `minter`
+    /// holds `RECV | MINT` and mints a badged `SEND` cap (observed as a
+    /// `CapEvent::Transferred` carrying the badge); a `client` holds `SEND` only
+    /// and is refused when it tries to mint (`SyscallRefused`). Same binary,
+    /// outcome differs by capability. One hart.
+    BadgeMint,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -164,6 +170,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "block-wake" => Some(WorkloadKind::BlockWake),
             "ipc" => Some(WorkloadKind::Ipc),
             "ipc-rpc" => Some(WorkloadKind::IpcRpc),
+            "badge-mint" => Some(WorkloadKind::BadgeMint),
             _ => None,
         })
 }
@@ -279,6 +286,13 @@ mod tests {
         assert_eq!(select("workload=ipc-rpc"), Some(WorkloadKind::IpcRpc));
         // Must not be mis-parsed as the one-way `ipc` workload.
         assert_ne!(select("workload=ipc-rpc"), Some(WorkloadKind::Ipc));
+    }
+
+    #[test]
+    fn selects_badge_mint() {
+        assert_eq!(select("workload=badge-mint"), Some(WorkloadKind::BadgeMint));
+        // Must not be mis-parsed as the RPC workload.
+        assert_ne!(select("workload=badge-mint"), Some(WorkloadKind::IpcRpc));
     }
 
     #[test]

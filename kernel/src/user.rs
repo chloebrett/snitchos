@@ -60,6 +60,10 @@ pub static IPC_RECEIVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_IPC_RECEIVER_
 pub static RPC_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_RPC_CLIENT_ELF"));
 pub static RPC_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_RPC_SERVER_ELF"));
 
+/// The `workload=badge-mint` program (v0.9c): one binary, two roles by rights —
+/// a `RECV | MINT` minter and a `SEND`-only client that's refused.
+pub static BADGE_MINT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE_MINT_ELF"));
+
 /// The counter the `EmitMetric` syscall bumps. Registered once on hart 0
 /// (`init_metric`) so the `MetricRegister` frame isn't emitted from inside
 /// the trap handler; the handler (on hart 1) reads it via [`user_metric_id`].
@@ -202,6 +206,21 @@ pub extern "C" fn rpc_client_main_entry() -> ! {
 pub extern "C" fn rpc_server_main_entry() -> ! {
     let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before rpc server runs");
     run_ipc(RPC_SERVER_ELF, ep, kernel_core::cap::Rights::RECV)
+}
+
+/// Entry for `workload=badge-mint`: the minter, granted `RECV | MINT` — it
+/// mints a badged `SEND` cap (a `CapEvent::Transferred` on the wire).
+pub extern "C" fn badge_minter_main_entry() -> ! {
+    use kernel_core::cap::Rights;
+    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before badge minter runs");
+    run_ipc(BADGE_MINT_ELF, ep, Rights::RECV | Rights::MINT)
+}
+
+/// Entry for `workload=badge-mint`: the client, granted `SEND` only — its mint
+/// attempt is refused (a `SyscallRefused` on the wire). Same binary as the minter.
+pub extern "C" fn badge_mint_client_main_entry() -> ! {
+    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before badge client runs");
+    run_ipc(BADGE_MINT_ELF, ep, kernel_core::cap::Rights::SEND)
 }
 
 /// Build a fresh address space, grant the process its bootstrap

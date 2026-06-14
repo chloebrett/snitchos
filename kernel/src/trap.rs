@@ -196,6 +196,7 @@ fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::Call) => handle_call(frame),
         Some(Syscall::Reply) => handle_reply(frame),
         Some(Syscall::ReplyRecv) => handle_reply_recv(frame),
+        Some(Syscall::MintBadged) => handle_mint_badged(frame),
         None => {
             let n = frame.a7 as u8;
             refuse(frame, n, protocol::RefusalReason::UnknownSyscall);
@@ -257,6 +258,56 @@ fn handle_invoke(frame: &mut TrapFrame) {
                 crate::tracing::emit_metric(id, 1);
             }
             refuse(frame, sc, refusal_for(denied)); // emits SyscallRefused + sets a0
+        }
+    }
+}
+
+/// Mint a badged `SEND` capability for an endpoint the caller owns (v0.9c).
+/// `a0` = endpoint handle (needs `MINT`), `a1` = the server-chosen `badge`,
+/// `a2` = requested rights. Resolve the parent against the running process's
+/// table, derive the child via the pure host-tested
+/// [`kernel_core::cap::mint_badged`], insert it into the caller's *own* table,
+/// and return its handle in `a0` (or refuse with `a0 = u64::MAX`). Snitched as
+/// `CapEvent::Transferred` carrying the badge. Handing the cap to a client is a
+/// later step; here it lands in the minter's table.
+fn handle_mint_badged(frame: &mut TrapFrame) {
+    use kernel_core::cap::{mint_badged, Denied, Handle, Rights};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::MintBadged as u8;
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    let handle = Handle::from_raw(frame.a0 as u32);
+    let badge = frame.a1;
+    let rights = Rights::from_bits(frame.a2 as u32);
+
+    // Resolve the parent (copy it out to release the borrow), derive the pure
+    // child cap, then insert it. No lock held across a switch — minting cannot
+    // block.
+    let minted = {
+        let mut caps = proc.caps.lock();
+        let parent = caps.resolve(handle).copied().map_err(|_| Denied::NoSuchCapability);
+        parent.and_then(|p| mint_badged(p, badge, rights)).map(|child| caps.insert(child))
+    };
+
+    match minted {
+        Ok(h) => {
+            crate::tracing::emit_cap_transferred(
+                crate::process::next_cap_id(),
+                crate::sched::current_task_id().0,
+                protocol::CapObject::Endpoint,
+                rights.bits(),
+                badge,
+            );
+            frame.a0 = u64::from(h.raw());
+        }
+        Err(denied) => {
+            if let Some(id) = crate::user::cap_denied_metric_id() {
+                crate::tracing::emit_metric(id, 1);
+            }
+            refuse(frame, sc, refusal_for(denied));
         }
     }
 }
@@ -409,6 +460,7 @@ fn reply_handle_for(
         holder.0,
         protocol::CapObject::Reply,
         Rights::NONE.bits(),
+        0, // reply caps carry no badge
     );
     u64::from(handle.raw())
 }
