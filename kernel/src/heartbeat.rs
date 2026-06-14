@@ -110,6 +110,8 @@ define_metrics! {
     counter   sched_wake_resumed        = "snitchos.sched.wake_resumed";
     counter   ipc_messages_total        = "snitchos.ipc.messages_total";
     counter   ipc_blocks_total          = "snitchos.ipc.blocks_total";
+    counter   ipc_calls_total           = "snitchos.ipc.calls_total";
+    counter   ipc_replies_total         = "snitchos.ipc.replies_total";
     counter   sched_context_switches    = "snitchos.sched.context_switches_total";
     counter   sched_preemptions         = "snitchos.sched.preemptions_total";
     gauge     sched_runqueue_depth      = "snitchos.sched.runqueue_depth";
@@ -308,6 +310,8 @@ fn emit_sched_metrics(m: &Metrics) {
     emit!(m, sched_wake_resumed      = sched::WAKE_RESUMED.load(Ordering::Relaxed));
     emit!(m, ipc_messages_total      = crate::ipc::MESSAGES_TOTAL.load(Ordering::Relaxed));
     emit!(m, ipc_blocks_total        = crate::ipc::BLOCKS_TOTAL.load(Ordering::Relaxed));
+    emit!(m, ipc_calls_total         = crate::ipc::CALLS_TOTAL.load(Ordering::Relaxed));
+    emit!(m, ipc_replies_total       = crate::ipc::REPLIES_TOTAL.load(Ordering::Relaxed));
     emit!(m, sched_context_switches  = sched::CONTEXT_SWITCHES.load(Ordering::Relaxed));
     emit!(m, sched_preemptions       = sched::PREEMPTIONS.load(Ordering::Relaxed));
     let sched_snap = sched::stats();

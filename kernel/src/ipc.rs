@@ -32,6 +32,14 @@ pub static MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// want of a peer. Drained as `snitchos.ipc.blocks_total`. `Relaxed`: counter.
 pub static BLOCKS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+/// RPC `call` count: bumped once per accepted `call`. Drained as
+/// `snitchos.ipc.calls_total`. `Relaxed`: counter.
+pub static CALLS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// RPC `reply` count: bumped once per successful `reply` (a consumed reply cap).
+/// Drained as `snitchos.ipc.replies_total`. `Relaxed`: counter.
+pub static REPLIES_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 /// Inline message size: the four words carried in `a1..=a4`.
 pub const MSG_WORDS: usize = 4;
 /// An inline IPC message — the words copied sender→receiver.

@@ -424,6 +424,7 @@ fn handle_call(frame: &mut TrapFrame) {
         }
     };
 
+    crate::ipc::CALLS_TOTAL.fetch_add(1, Ordering::Relaxed);
     let me = crate::sched::current_task_id();
     let req = [frame.a1, frame.a2, frame.a3, frame.a4];
     let parent = crate::tracing::current_span_id();
@@ -483,6 +484,7 @@ fn handle_reply(frame: &mut TrapFrame) {
     let resp = [frame.a1, frame.a2, frame.a3, frame.a4];
     crate::ipc::stash_reply(caller, resp);
     crate::sched::wake(caller);
+    crate::ipc::REPLIES_TOTAL.fetch_add(1, Ordering::Relaxed);
     frame.a0 = 0;
 }
 

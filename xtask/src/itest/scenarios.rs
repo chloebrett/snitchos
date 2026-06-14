@@ -1317,6 +1317,27 @@ pub fn rpc_trace_nests(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.9b RPC telemetry (`workload=ipc-rpc`): the round-trip is counted. Asserts
+/// `snitchos.ipc.calls_total` and `snitchos.ipc.replies_total` both reach ≥1 —
+/// deferred-emission counters bumped in the `call`/`reply` handlers and drained
+/// in the heartbeat (never a frame from the rendezvous itself).
+pub fn rpc_telemetry(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.ipc.calls_total")
+                && *value >= 1)
+    })
+    .ok_or("no snitchos.ipc.calls_total >= 1 within 30s")?;
+
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.ipc.replies_total")
+                && *value >= 1)
+    })
+    .ok_or("no snitchos.ipc.replies_total >= 1 within 30s — server never replied")?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside
