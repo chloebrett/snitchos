@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Pattern, Stmt, StrSegment, UnOp};
 use crate::env::{AssignError, Env};
+use crate::parser::parse_program;
 use crate::value::{
     ClosureData, Constructor, DataValue, NativeFn, RuntimeError, TelemetryEvent, Value,
 };
@@ -31,46 +32,10 @@ pub fn eval_program_with_telemetry(
         globals.insert(native.name.to_string(), Value::Native(*native));
     }
     register_builtin_types(&mut globals);
-    for item in items {
-        match item {
-            Item::Func { name, params, body, .. } => {
-                let closure = Value::Closure(Rc::new(ClosureData {
-                    params: params.iter().map(|param| param.name.clone()).collect(),
-                    body: body.clone(),
-                    env: env.clone(),
-                }));
-                globals.insert(name.clone(), closure);
-            }
-            Item::Prod { name, fields, .. } => {
-                let ctor = Value::Constructor(Rc::new(Constructor {
-                    type_name: name.clone(),
-                    variant: name.clone(),
-                    field_names: fields.iter().map(|field| field.name.clone()).collect(),
-                }));
-                globals.insert(name.clone(), ctor);
-            }
-            Item::Sum { name, variants, .. } => {
-                for variant in variants {
-                    let value = if variant.fields.is_empty() {
-                        // Nullary variant (`None`, `Red`) — a bare singleton value.
-                        Value::Data(Rc::new(DataValue {
-                            type_name: name.clone(),
-                            variant: variant.name.clone(),
-                            fields: Vec::new(),
-                        }))
-                    } else {
-                        Value::Constructor(Rc::new(Constructor {
-                            type_name: name.clone(),
-                            variant: variant.name.clone(),
-                            field_names: variant.fields.iter().map(|f| f.name.clone()).collect(),
-                        }))
-                    };
-                    globals.insert(variant.name.clone(), value);
-                }
-            }
-            _ => {}
-        }
-    }
+    // The Stitch-source prelude loads first; user items can shadow it.
+    let prelude = parse_program(PRELUDE).expect("the prelude must parse");
+    register_items(&prelude, &env, &mut globals);
+    register_items(items, &env, &mut globals);
     env.set_globals(globals);
     let result = match env.lookup("main") {
         Some(main) => eval_call(&main, &[], &env),
@@ -246,6 +211,54 @@ fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<Value, Runt
         }
         Value::Constructor(ctor) => make_data(ctor, args),
         _ => Err(RuntimeError::new(format!("cannot call a {}", callee.kind()))),
+    }
+}
+
+/// The Stitch-source prelude, compiled into the binary and loaded before user code.
+const PRELUDE: &str = include_str!("prelude.st");
+
+/// Register each top-level item (function, prod, sum) into `globals`. Functions
+/// and constructors capture `env` so they share the (not-yet-filled) globals.
+fn register_items(items: &[Item], env: &Env, globals: &mut HashMap<String, Value>) {
+    for item in items {
+        match item {
+            Item::Func { name, params, body, .. } => {
+                let closure = Value::Closure(Rc::new(ClosureData {
+                    params: params.iter().map(|param| param.name.clone()).collect(),
+                    body: body.clone(),
+                    env: env.clone(),
+                }));
+                globals.insert(name.clone(), closure);
+            }
+            Item::Prod { name, fields, .. } => {
+                let ctor = Value::Constructor(Rc::new(Constructor {
+                    type_name: name.clone(),
+                    variant: name.clone(),
+                    field_names: fields.iter().map(|field| field.name.clone()).collect(),
+                }));
+                globals.insert(name.clone(), ctor);
+            }
+            Item::Sum { name, variants, .. } => {
+                for variant in variants {
+                    let value = if variant.fields.is_empty() {
+                        // Nullary variant (`None`, `Red`) — a bare singleton value.
+                        Value::Data(Rc::new(DataValue {
+                            type_name: name.clone(),
+                            variant: variant.name.clone(),
+                            fields: Vec::new(),
+                        }))
+                    } else {
+                        Value::Constructor(Rc::new(Constructor {
+                            type_name: name.clone(),
+                            variant: variant.name.clone(),
+                            field_names: variant.fields.iter().map(|f| f.name.clone()).collect(),
+                        }))
+                    };
+                    globals.insert(variant.name.clone(), value);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1787,6 +1800,54 @@ mod tests {
             run_program_err("main() = 5?.x"),
             "`?.` expects a Maybe or Result, got Int"
         );
+    }
+
+    #[test]
+    fn prelude_count_and_total() {
+        assert_eq!(run_program("main() = count([1, 2, 3])"), Value::Int(3));
+        assert_eq!(run_program("main() = total([1, 2, 3, 4])"), Value::Int(10));
+    }
+
+    #[test]
+    fn prelude_any_all_contains() {
+        assert_eq!(run_program("main() = any([1, 2, 3], x -> x > 2)"), Value::Bool(true));
+        assert_eq!(run_program("main() = all([1, 2, 3], x -> x > 2)"), Value::Bool(false));
+        assert_eq!(run_program("main() = contains([1, 2, 3], 2)"), Value::Bool(true));
+    }
+
+    #[test]
+    fn prelude_find_returns_first_match() {
+        assert_eq!(
+            run_program("main() = match find([1, 2, 3, 4], x -> x > 2) { Some(v) => v  None => 0 }"),
+            Value::Int(3)
+        );
+    }
+
+    #[test]
+    fn prelude_each_runs_for_effect() {
+        assert_eq!(
+            run_program_events(r#"main() = each([1, 2, 3], x -> emit("n", x))"#),
+            vec![
+                TelemetryEvent::Emit { name: "n".to_string(), value: Value::Int(1) },
+                TelemetryEvent::Emit { name: "n".to_string(), value: Value::Int(2) },
+                TelemetryEvent::Emit { name: "n".to_string(), value: Value::Int(3) },
+            ]
+        );
+    }
+
+    #[test]
+    fn prelude_maybe_helpers() {
+        assert_eq!(run_program("main() = unwrapOr(None, 99)"), Value::Int(99));
+        assert_eq!(run_program("main() = unwrapOr(Some(7), 99)"), Value::Int(7));
+        assert_eq!(
+            run_program("main() = match andThen(Some(5), x -> Some(x + 1)) { Some(v) => v  None => 0 }"),
+            Value::Int(6)
+        );
+    }
+
+    #[test]
+    fn a_user_definition_shadows_the_prelude() {
+        assert_eq!(run_program("count(xs) = 999  main() = count([1, 2, 3])"), Value::Int(999));
     }
 
     #[test]
