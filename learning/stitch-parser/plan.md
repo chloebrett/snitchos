@@ -12,7 +12,7 @@
 3. **The AST shapes the evaluator walks** — esp. `Call{callee: Field{..}}` for `obj.m()` and `@`/`SelfRef`. This is the bridge to dispatch.
 
 ## Session outline (spiral; revisit shapes at increasing depth)
-- [ ] **S1 — Lexer & tokens.** Source → `Token`s as a state machine. Novel bit: string-interpolation lexing (a string is a template, not an atom).
+- [x] **S1 — Lexer & tokens.** Source → `Token`s as a state machine. Novel bit: string-interpolation lexing (a string is a template, not an atom). ✓ landed the re-entrant `parse(&raw)` mechanism + recursion.
 - [ ] **S2 — The AST as the target.** `ast.rs`: Expr vs Item vs Stmt vs Pattern. Frame everything as "the parser builds these." Flag the dispatch-relevant shapes early.
 - [ ] **S3 — Pratt / precedence climbing.** Binding powers, the loop, associativity. Trace `1 + 2 * 3` and `a + b |> f`.
 - [ ] **S4 — Lookahead & the tricky cases.** lambda-vs-tuple, placeholder→lambda desugaring, the guard `=>` collision. Lookahead vs backtracking, made precise.
@@ -22,4 +22,4 @@
 
 ## Progress
 - Session log: `session-log.md`. Cheat sheet: `cheat-sheet.md` (built as we go).
-- Status: **S1 in progress.**
+- Status: **S1 done. S2 (the AST) next.**
