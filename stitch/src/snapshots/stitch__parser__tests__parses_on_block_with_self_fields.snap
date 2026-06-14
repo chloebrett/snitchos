@@ -1,0 +1,48 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"on Point { dist() = @x * @x + @y * @y }\")"
+---
+[
+    On {
+        target: Name {
+            name: "Point",
+            args: [],
+        },
+        contract: None,
+        methods: [
+            Method {
+                name: "dist",
+                modifier: Instance,
+                params: [],
+                ret: None,
+                body: Some(
+                    Binary {
+                        op: Add,
+                        left: Binary {
+                            op: Mul,
+                            left: Field {
+                                object: SelfRef,
+                                name: "x",
+                            },
+                            right: Field {
+                                object: SelfRef,
+                                name: "x",
+                            },
+                        },
+                        right: Binary {
+                            op: Mul,
+                            left: Field {
+                                object: SelfRef,
+                                name: "y",
+                            },
+                            right: Field {
+                                object: SelfRef,
+                                name: "y",
+                            },
+                        },
+                    },
+                ),
+            },
+        ],
+    },
+]

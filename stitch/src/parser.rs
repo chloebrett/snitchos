@@ -102,6 +102,7 @@ fn collect_placeholders(expr: &mut Expr, params: &mut BTreeSet<String>) {
         | Expr::Float(_)
         | Expr::Bool(_)
         | Expr::Var(_)
+        | Expr::SelfRef
         | Expr::Str(_)
         | Expr::Lambda { .. }
         | Expr::Block { .. }
@@ -503,11 +504,38 @@ impl Parser {
             Token::Prod => self.parse_prod(),
             Token::Sum => self.parse_sum(),
             Token::Contract => self.parse_contract(),
+            Token::On => self.parse_on(),
             Token::Ident(_) => self.parse_func(),
             other => Err(ParseError::new(format!(
                 "expected a declaration, found {other:?}"
             ))),
         }
+    }
+
+    /// `on Type { methods }` or `on Type : Contract { methods }`.
+    fn parse_on(&mut self) -> Result<Item, ParseError> {
+        self.bump(); // 'on'
+        let target = self.parse_type()?;
+        let contract = if matches!(self.peek(), Token::Colon) {
+            self.bump();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.expect(&Token::LBrace, "'{' after on target")?;
+        let mut methods = Vec::new();
+        while !matches!(self.peek(), Token::RBrace) {
+            if matches!(self.peek(), Token::Eof) {
+                return Err(ParseError::new("unterminated `on` block: expected '}'"));
+            }
+            methods.push(self.parse_method(true)?); // on-methods require a body
+        }
+        self.bump(); // '}'
+        Ok(Item::On {
+            target,
+            contract,
+            methods,
+        })
     }
 
     /// `contract Name<generics> { method-signatures }`.
@@ -891,6 +919,12 @@ impl Parser {
             Token::Bool(b) => Expr::Bool(b),
             Token::Ident(name) => Expr::Var(name),
             Token::Placeholder(name) => Expr::Placeholder(name),
+            // `@x` is field `x` on the receiver; bare `@` is the receiver.
+            Token::At if matches!(self.peek(), Token::Ident(_)) => Expr::Field {
+                object: Box::new(Expr::SelfRef),
+                name: self.expect_ident("field name after '@'")?,
+            },
+            Token::At => Expr::SelfRef,
             Token::Str(parts) => Expr::Str(parse_str_segments(parts)?),
             Token::LParen => {
                 let inner = self.parse_expr(0)?;
@@ -1345,5 +1379,27 @@ mod tests {
     #[test]
     fn parses_generic_contract() {
         insta::assert_debug_snapshot!(prog("contract Container<T> { get() -> T }"));
+    }
+
+    #[test]
+    fn parses_on_block_with_self_fields() {
+        insta::assert_debug_snapshot!(prog("on Point { dist() = @x * @x + @y * @y }"));
+    }
+
+    #[test]
+    fn parses_on_block_implementing_a_contract() {
+        insta::assert_debug_snapshot!(prog(r#"on Point : Show { show() = "point" }"#));
+    }
+
+    #[test]
+    fn parses_on_block_with_modifiers() {
+        insta::assert_debug_snapshot!(prog(
+            "on Counter { free make() -> Counter = new()  current() -> Int = @n }"
+        ));
+    }
+
+    #[test]
+    fn parses_bare_self_reference() {
+        insta::assert_debug_snapshot!(prog("on Box { get() = @ }"));
     }
 }

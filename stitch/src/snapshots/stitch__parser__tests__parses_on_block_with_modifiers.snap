@@ -1,0 +1,51 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"on Counter { free make() -> Counter = new()  current() -> Int = @n }\")"
+---
+[
+    On {
+        target: Name {
+            name: "Counter",
+            args: [],
+        },
+        contract: None,
+        methods: [
+            Method {
+                name: "make",
+                modifier: Free,
+                params: [],
+                ret: Some(
+                    Name {
+                        name: "Counter",
+                        args: [],
+                    },
+                ),
+                body: Some(
+                    Call {
+                        callee: Var(
+                            "new",
+                        ),
+                        args: [],
+                    },
+                ),
+            },
+            Method {
+                name: "current",
+                modifier: Instance,
+                params: [],
+                ret: Some(
+                    Name {
+                        name: "Int",
+                        args: [],
+                    },
+                ),
+                body: Some(
+                    Field {
+                        object: SelfRef,
+                        name: "n",
+                    },
+                ),
+            },
+        ],
+    },
+]

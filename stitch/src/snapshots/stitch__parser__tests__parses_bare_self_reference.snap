@@ -1,0 +1,24 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"on Box { get() = @ }\")"
+---
+[
+    On {
+        target: Name {
+            name: "Box",
+            args: [],
+        },
+        contract: None,
+        methods: [
+            Method {
+                name: "get",
+                modifier: Instance,
+                params: [],
+                ret: None,
+                body: Some(
+                    SelfRef,
+                ),
+            },
+        ],
+    },
+]

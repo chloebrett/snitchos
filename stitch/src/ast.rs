@@ -29,6 +29,13 @@ pub enum Item {
         generics: Vec<String>,
         methods: Vec<Method>,
     },
+    /// `on Type { … }` or `on Type : Contract { … }` — methods on a type,
+    /// optionally declaring conformance to a contract.
+    On {
+        target: Type,
+        contract: Option<Type>,
+        methods: Vec<Method>,
+    },
 }
 
 /// A method, shared by `contract` signatures and (later) `on` blocks.
@@ -94,6 +101,8 @@ pub enum Expr {
     Bool(bool),
     /// A name in expression position — a variable reference.
     Var(String),
+    /// The method receiver `@` (self).
+    SelfRef,
     /// A lambda placeholder before desugaring: `None` is bare `$`, `Some("a")`
     /// is `$a`. The parser rewrites these into a `Lambda` at the call argument
     /// that encloses them; a `Placeholder` surviving into a final AST is a bug.

@@ -1,0 +1,35 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(r#\"on Point : Show { show() = \"point\" }\"#)"
+---
+[
+    On {
+        target: Name {
+            name: "Point",
+            args: [],
+        },
+        contract: Some(
+            Name {
+                name: "Show",
+                args: [],
+            },
+        ),
+        methods: [
+            Method {
+                name: "show",
+                modifier: Instance,
+                params: [],
+                ret: None,
+                body: Some(
+                    Str(
+                        [
+                            Lit(
+                                "point",
+                            ),
+                        ],
+                    ),
+                ),
+            },
+        ],
+    },
+]
