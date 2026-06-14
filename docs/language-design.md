@@ -160,6 +160,15 @@ General form `use x <- f(...)` ≡ `f(x -> { rest })`. This makes spans, resourc
 
 - `"temp is {avg}°C"` — interpolate with `{expr}`; literal braces are `{{` / `}}` (format-string style). `\` stays plain string escapes (`\n`, `\"`) and `$` stays a lambda placeholder — three distinct roles inside a string, no overload.
 
+## Building strings
+
+Strings are immutable values, so they're built by **templating and folding**, not in-place mutation — the same grain as the rest of the data model:
+
+- **Interpolation** (above) is the common case — most assembly is really templating.
+- **`join(sep)`** is the canonical "concatenate N pieces" — a string-specialised fold, defined on `List`/`Seq` (`items |> map($.name) |> join(", ")`). It lives with the other combinators, not as bespoke string syntax.
+- **`+` concatenates two strings** (`"a" + "b"`). Overloading `+` is unambiguous because v0 is strict — `1 + "x"` is a type error, not coercion — so `+` on two strings can only mean concatenation. (No separate `<>` operator; one way.)
+- **Deferred escape hatch:** a `StringBuilder` with a `mut` buffer would be a *library type* (the explicit-mutable-cell case), reached for only if a hot loop ever proves interpolation + `join` insufficient — not a language feature.
+
 # Type system
 
 _Same status as Surface syntax: worked out, pre-implementation, strong leanings._
