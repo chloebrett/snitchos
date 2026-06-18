@@ -56,6 +56,32 @@ pub fn parse_program(src: &str) -> Result<Vec<Item>, ParseError> {
     Ok(items)
 }
 
+/// Turn the set of referenced placeholder names (`{"$a", "$c"}`) into a
+/// positional lambda parameter list. The letter *is* the index (`$a`=0, `$b`=1,
+/// …), so arity is the highest letter referenced and any unreferenced lower slot
+/// becomes a `_` hole — letting a placeholder *select* a positional argument
+/// (`$b` alone ⇒ `(_, $b)`). Returns `None` when no placeholder was referenced
+/// (the argument is an ordinary value, not a lambda).
+fn positional_params(referenced: &BTreeSet<String>) -> Option<Vec<String>> {
+    let max = referenced
+        .iter()
+        .filter_map(|name| name.strip_prefix('$').and_then(|s| s.chars().next()))
+        .map(|letter| (letter as usize) - ('a' as usize))
+        .max()?;
+    let params = (0..=max)
+        .map(|index| {
+            let letter = (b'a' + index as u8) as char;
+            let name = format!("${letter}");
+            if referenced.contains(&name) {
+                name
+            } else {
+                "_".to_string()
+            }
+        })
+        .collect();
+    Some(params)
+}
+
 /// Rewrite `Placeholder` nodes in `expr` into `Var("$x")`, collecting the
 /// `$x` parameter names used. Stops at explicit `Lambda` boundaries (a
 /// placeholder inside a written-out lambda isn't ours to capture). Used to
@@ -510,11 +536,11 @@ impl Parser {
             None
         };
         let mut value = self.parse_expr(0)?;
-        let mut params = BTreeSet::new();
-        collect_placeholders(&mut value, &mut params);
-        if !params.is_empty() {
+        let mut referenced = BTreeSet::new();
+        collect_placeholders(&mut value, &mut referenced);
+        if let Some(params) = positional_params(&referenced) {
             value = Expr::Lambda {
-                params: params.into_iter().collect(),
+                params,
                 body: Box::new(value),
             };
         }
@@ -1423,6 +1449,11 @@ mod tests {
     #[test]
     fn placeholder_with_field_access() {
         insta::assert_debug_snapshot!(p("map($.celsius)"));
+    }
+
+    #[test]
+    fn placeholder_gap_becomes_an_ignored_param() {
+        insta::assert_debug_snapshot!(p("f($a + $c)"));
     }
 
     #[test]

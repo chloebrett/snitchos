@@ -1,0 +1,30 @@
+---
+source: stitch/src/parser.rs
+expression: "p(\"f($a + $c)\")"
+---
+Call {
+    callee: Var(
+        "f",
+    ),
+    args: [
+        Arg {
+            label: None,
+            value: Lambda {
+                params: [
+                    "$a",
+                    "_",
+                    "$c",
+                ],
+                body: Binary {
+                    op: Add,
+                    left: Var(
+                        "$a",
+                    ),
+                    right: Var(
+                        "$c",
+                    ),
+                },
+            },
+        },
+    ],
+}

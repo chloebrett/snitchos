@@ -1173,6 +1173,13 @@ mod tests {
     }
 
     #[test]
+    fn a_placeholder_gap_ignores_the_skipped_argument() {
+        // `($b)` references only the second positional slot, so it desugars to
+        // `(_, $b) -> $b` — a two-arg lambda that drops the first argument.
+        assert_eq!(run("{ let apply = g -> g(10, 20)  apply($b) }"), Value::Int(20));
+    }
+
+    #[test]
     fn calling_a_non_function_is_an_error() {
         assert_eq!(run_err("5(3)"), "cannot call a Int");
     }

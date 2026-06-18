@@ -53,3 +53,31 @@
 **Bloom's reached:** Apply→Analyze on the climbing loop (independent traces); Evaluate on the non-assoc design rationale and the recursive-vs-explicit-stack tradeoff.
 
 **Next:** S4 — Lookahead & the tricky cases. lambda-vs-tuple (`parens_then_arrow`), placeholder→lambda desugaring (`$a`/`$`), the guard `=>` binding-power collision (already glimpsed: the `min_bp == 0` gate + branches parsed at `min_bp=1`). Lookahead vs backtracking made precise.
+
+## S4 — Lookahead & the tricky cases (~35 min, turned into a code change)
+
+**Review (S1–S3 spaced, interleaved):** 3/3. `a or b and c` associativity traced via the `l_bp < min_bp` break; `Call{Field}` 3-deep nesting; no `Newline` token (greedy/maximal-munch separates statements). Caught and corrected my sloppy framing on statement separation: maximal munch is strictly a *lexer* term (longest token); the parser reuses the same *greedy* principle at statement level. The call-then-`(` prelude gotcha is that greed biting.
+
+**Covered — the three genuinely-ambiguous constructs, all resolved without backtracking:**
+1. **lambda-vs-tuple** (`parens_then_arrow`): scan to the *matching* `)` (depth counter — `(x, (y, z)) -> …` is why a naive first-`)` scan breaks), check for a following `->`. Pure **lookahead**: iterates tokens, never bumps `self.pos`, never rewinds. Learner gave the depth-counter counterexample and the lookahead-vs-backtracking distinction cleanly (closes the stated S1 gap).
+2. **placeholder → lambda** (`collect_placeholders` + `parse_arg`): `$` desugars to a lambda *per call argument*; the traversal stops at `Expr::Lambda` so an inner explicit lambda keeps its own `$` (`map(xs, x -> filter(x, $.ok))` → `$.ok` is filter's). Learner self-corrected my botched `f($) + g($)` example (it's `f($a->$a) + g($a->$a)`, identity into each — they were right, I was wrong; acknowledged).
+3. **guard `=>` collision**: guard parsed at `parse_expr(1)` not `(0)` so the arm's `=>` separator isn't swallowed by the conditional handler (which only fires at `min_bp==0`). Learner nailed it unprompted: "start with 1 to never bind it."
+
+**Design detour → shipped a change.** Learner challenged the placeholder arity rule. Surfaced three candidate semantics (occurrence-order / position-by-letter / sort-by-name); learner argued for **position-by-letter** (their original intent). Decisive argument (mine, after they pushed): #2's gaps become *ignored params*, letting `$b` alone *select* the second positional arg (`(_, $b)`) — sort-by-name can't express that. **Found the impl had drifted from the spec:** `docs/language-design.md:119` already says "Arity = highest letter referenced" (#2), but `parser.rs` used a `BTreeSet` → sort-by-name (#3), silently. So this was a spec-conformance fix, not a new feature.
+
+**Implemented (TDD, learner directed "you do it"):**
+- Decision note added to `docs/language-design.md` (the three rules + why #2 + the mnemonic-names cost).
+- RED: parser snapshot test `placeholder_gap_becomes_an_ignored_param` (`f($a + $c)`) — was `["$a","$c"]`, want `["$a","_","$c"]`.
+- GREEN: new `positional_params(&BTreeSet) -> Option<Vec<String>>` — letter = index, arity = max letter, unreferenced lower slots → `"_"`. `parse_arg` calls it.
+- Added runtime behavior test `a_placeholder_gap_ignores_the_skipped_argument` (`apply($b)` over `g(10,20)` → 20) — covers the distinct eval path (the `_` hole binds-and-ignores).
+- 288 + 11 + 3 green; clippy clean. Non-gap (contiguous) cases unchanged — purely additive.
+
+**Performance:** excellent. Two independent correct challenges to *my* explanations (the `f($)+g($)` desugaring; pushing on arity semantics until it became a real design decision). This is Evaluate/Create level — driving language design, not just reading the parser.
+
+**Open language question parked:** whether #2's "a letter IS its index" (so `$x` = arg 24, mnemonic names meaningless, needs an arity cap) is the final rule, vs. keeping a small alphabet. Noted in the design doc.
+
+**Bloom's reached:** Evaluate→Create (drove a spec-conformance change + design rationale). Lookahead-vs-backtracking gap from S1 closed.
+
+**Confidence calibration:** not formally rated (session ran into implementation). Performance suggests high on lookahead + placeholder mechanics.
+
+**Next:** S5 — Declarations (`prod`/`sum`/`func`/`contract`/`on` → AST). The direct dispatch prerequisites: how `on Type { … }` and `on Type : Contract { … }` and `contract` parse into `Item::On`/`Item::Contract`. Then S6 patterns, S7 the dispatch implementation.

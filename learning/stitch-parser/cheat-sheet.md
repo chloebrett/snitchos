@@ -93,3 +93,20 @@ Binding-power table (tightest at bottom):
 **Layering:** `parse_atom` (tightest) < `parse_prefix` (unary `-`/`not`, open-from ranges) < `parse_expr` (infix loop). Lambda lookahead (`at_lambda`) short-circuits at the top of `parse_expr`.
 
 **Equivalent forms:** recursive Pratt ≡ explicit two-stack shunting-yard. recursion depth ↔ operator-stack height; `min_bp` param ↔ top-of-stack precedence; `break` ↔ stop-popping. Recursive = less bookkeeping + composes with recursive descent; explicit stack = when you can't recurse (overflow / VM).
+
+## S4 — Lookahead & the tricky cases
+
+**Lookahead vs backtracking:**
+- **Lookahead** — peek N tokens to *choose a rule*, then parse it once, consuming forward. Never un-consume. Stitch is lookahead.
+- **Backtracking** — speculatively parse, on failure *rewind the cursor* and try another rule. Can re-parse tokens. Stitch never does this.
+
+**Three ambiguities, all resolved by lookahead:**
+
+1. **lambda vs tuple** — `(a,b) -> …` vs `(a,b)`. `at_lambda` → `parens_then_arrow`: scan to the **matching** `)` (depth counter handles nested parens like `(x,(y,z)) -> …`), check if `->` follows. Iterates `self.tokens`, **never bumps `pos`** → pure lookahead. Cost = O(distance to matching paren), the price of never rewinding.
+
+2. **placeholder → lambda** (`collect_placeholders` + `parse_arg`) — `$` desugars to a lambda **per call argument** (the boundary). Traversal **stops at `Expr::Lambda`** so an inner explicit lambda keeps its own `$`: `map(xs, x -> filter(x, $.ok))` → `$.ok` is filter's. Nesting works free because inner calls parse bottom-up and seal their `$` into a `Lambda` before the outer traversal arrives.
+   - **Placeholder semantics = position-by-letter (rule #2):** the letter **is** the index (`$a`=0, `$b`=1…). Arity = highest letter referenced; **unreferenced lower slots → `_` holes**. So `$b` alone ⇒ `(_, $b) -> $b` — selects the 2nd arg. (`f($a + $c)` ⇒ `($a, _, $c) -> …`.) Cost: mnemonic names are out (`$x` = "arg 24"). Use `$a`/`$b`/`$c` contiguously. Impl: `positional_params(&BTreeSet<String>)` in `parser.rs`.
+
+3. **guard `=>` collision** — `Some(x) if x > 0 => body`. Guard parsed at **`parse_expr(1)`**, not `(0)`. The inline conditional `cond => t | e` is only handled at `min_bp == 0` (bottom of `parse_expr`), so starting the guard at 1 structurally refuses to swallow the arm's `=>` separator. Same trick in subjectless-match arm conditions.
+
+**`parse_postfix`** runs the postfix loop *above* `parse_atom`: `(` → call, `.` → `Field`, `?.` → `SafeField`, `?` → `Try`, `[` → `Index`. Left-to-right chaining, so `a.b().c` nests correctly.

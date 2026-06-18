@@ -126,6 +126,8 @@ sortBy($a.age < $b.age)
 map(_ -> 0)           // constant
 ```
 
+**Decision — placeholders are _positional_, not named.** Three rules were on the table: (1) position-by-occurrence (the _n_-th `$` in source order is arg _n_, names cosmetic); (2) **position-by-letter** (the letter _is_ the index: `$a`=arg 1, `$b`=arg 2, …); (3) sort-by-name (collect the distinct names, sort alphabetically, assign positions in that order). We take **(2)**. The deciding property is that **gaps become ignored params**, so a placeholder can _select_ a positional argument: `each(log($b))` ≡ `(_, $b) -> log($b)` — "ignore the first arg, use the second." Sort-by-name can't express that at all (`$b` alone would collapse to a 1-arg identity), and position-by-occurrence makes the same expression depend on textual order rather than the slot you mean. So: **arity = highest letter referenced; unreferenced lower slots are `_` holes.** The cost, accepted deliberately: a letter _is_ its index, so mnemonic names are out — `$x`/`$first` mean "arg 24"/"arg 6", not "the x one." Use `$a`/`$b`/`$c` contiguously. (Implementation: `parser.rs::collect_placeholders` gathers the referenced letters; `parse_arg` fills `0..=max` positionally, holes as `_`.)
+
 **Operators as functions** — a bare operator in argument position _is_ its binary function: `fold(0, +)`, `reduce(max)`, `sortBy(<)`. Haskell-style sections (`(* 2)`) are deliberately _omitted_ — `$` already covers partial application, and one way is enough.
 
 ## Errors & absence — the `?` family
