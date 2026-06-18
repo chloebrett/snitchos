@@ -13,8 +13,8 @@
 
 ## Session outline (spiral; revisit shapes at increasing depth)
 - [x] **S1 — Lexer & tokens.** Source → `Token`s as a state machine. Novel bit: string-interpolation lexing (a string is a template, not an atom). ✓ landed the re-entrant `parse(&raw)` mechanism + recursion.
-- [ ] **S2 — The AST as the target.** `ast.rs`: Expr vs Item vs Stmt vs Pattern. Frame everything as "the parser builds these." Flag the dispatch-relevant shapes early.
-- [ ] **S3 — Pratt / precedence climbing.** Binding powers, the loop, associativity. Trace `1 + 2 * 3` and `a + b |> f`.
+- [x] **S2 — The AST as the target.** `ast.rs`: Expr vs Item vs Stmt vs Pattern. Frame everything as "the parser builds these." Flag the dispatch-relevant shapes early. ✓ Nailed `Call{Field}` decomposition + parser→registry→evaluator synthesis. Surfaced the live `register_items` `_ => {}` gap; planted the S7 interception fork.
+- [x] **S3 — Pratt / precedence climbing.** Binding powers, the loop, associativity. Trace `1 + 2 * 3` and `a + b |> f`. ✓ All traces correct; derived associativity-from-pair independently; got non-assoc rationale + recursive-vs-shunting-yard equivalence. Conf 7/10 (debugger self-study assigned for the recursion gut-check).
 - [ ] **S4 — Lookahead & the tricky cases.** lambda-vs-tuple, placeholder→lambda desugaring, the guard `=>` collision. Lookahead vs backtracking, made precise.
 - [ ] **S5 — Declarations.** `prod`/`sum`/`func`/`contract`/`on` → AST. The dispatch prerequisites.
 - [ ] **S6 — Patterns.** match patterns; uppercase=constructor convention; how destructuring parses.
@@ -22,4 +22,4 @@
 
 ## Progress
 - Session log: `session-log.md`. Cheat sheet: `cheat-sheet.md` (built as we go).
-- Status: **S1 done. S2 (the AST) next.**
+- Status: **S1–S3 done. S4 (lookahead & the tricky cases) next.**

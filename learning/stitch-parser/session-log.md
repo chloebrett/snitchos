@@ -17,3 +17,39 @@
 **Bloom's reached:** Understand→Evaluate on lexer design; Apply on the recursion trace.
 
 **Next:** S2 — the AST as the target (`ast.rs`), flag dispatch-relevant shapes (`Call{Field}`, `SelfRef`).
+
+## S2 — The AST as the dispatch target (~20 min)
+
+**Review (S1 spaced):** 3/3. Maximal-munch *reason* (whitespace discarded → parser can't reconstruct `->`) recalled deeper than the textbook name. Re-entrant interpolation (lexer captures raw text → front-end re-parses it) re-tested and solid. `StrSegment` count predicted correctly (3: Lit/Interp/Lit). Interpolation deferral gap from S1 is **closed**.
+
+**Covered:** the four AST families (`Item`/`Stmt`/`Expr`/`Pattern`) and which is file-scope-exclusive (`Item`). The statement-vs-expression fork — got that Stitch makes conditionals *expressions* and gave the payoff one-liner (`x = (y > 5 => "big" | "small")`). Then the session's core: **a method call has no dedicated node** — `obj.m()` parses as `Call{ callee: Field{...} }`, identical `Field` shape to a plain field read; meaning decided at eval time. Traced both trees correctly (minor naming: `callee` not `object`, `Var` not bare string). `Item::On`/`Item::Contract` + `Method`/`MethodModifier` shapes. `Method.body: Option<Expr>` → `None` = abstract contract signature (+ default-method subtlety noted). `Free` modifier + `@`/`SelfRef` = bug.
+
+**Performance:** strong throughout — predicted the four families cold, nailed the `Call{Field}` decomposition (the plan's "20% that matters most" #3), and the closing Feynman synthesis traced parser→registry→evaluator completely and correctly *unprompted*. Honest about checking the code for the `None`-body question (good metacognition: recognized lookup vs recall).
+
+**Key gap surfaced (the live one):** `register_items` in `interp.rs` silently drops `Item::On`/`Item::Contract` via its trailing `_ => {}` — methods aren't even *collected* yet. Step one of the eventual implementation. And today's `eval_field` errors "X has no field `m`" because there's no method-lookup fallback.
+
+**Planted for S7:** the dispatch interception fork — special-case `Call` when callee is a `Field` (before evaluating the callee) vs. invent a "bound method" `Value`. Left unanswered deliberately.
+
+**Bloom's reached:** Understand→Analyze on AST families; Apply on the `Call{Field}` decomposition; Evaluate (light) on the stmt/expr fork. Bridge-to-dispatch mental model is in place ahead of schedule.
+
+**Confidence calibration:** 5/10 → 8/10. Well-calibrated — the 8 matches Apply/Analyze performance on the dispatch shapes, not inflated. (Fuzziest-part self-report: not given.)
+
+**Next:** S3 — Pratt / precedence climbing (binding powers, the climbing loop, associativity). Trace `1 + 2 * 3` and `a + b |> f`. (S2 left the dispatch *shapes* clear; S3–S4 are the parser mechanics, S5 the `on`/`contract` declarations, S7 the implementation.)
+
+## S3 — Pratt / precedence climbing (~25 min)
+
+**Review (S1+S2 spaced, interleaved):** 3/3. `Call` vs `Field` outermost-node distinction sharpened to the dispatch contrast (`total(readings)` = `Call{callee: Var}` vs `readings.total()` = `Call{callee: Field}`). `register_items` `_ => {}` gap recalled. Maximal munch (lexer owns `..=`) recalled.
+
+**Covered:** the tower-of-functions → single-loop+number upgrade. Binding-power *pairs* `(l_bp, r_bp)`; higher = tighter. The climbing loop + the `l_bp < min_bp` break. Hand-traced `2 + 3 * 4`, `2 * 3 + 4`, `8 - 2 - 1`, `a + b |> f` correctly. **Associativity from the pair asymmetry:** `(l, l+1)` → left-assoc; flip to `(l, l-1)` → right-assoc (lambdas get right-assoc structurally via `parse_expr(0)` body instead). Non-associativity (`a < b < c` rejected): the `(l,r)` numbers can't express it; `is_non_assoc(op)` + same-level-neighbor peek does. Closed on the recursive-vs-explicit-stack equivalence (shunting-yard mapping table).
+
+**Performance:** strong. Traced every example correctly; derived left-assoc-from-`(11,12)` independently ("forced by it being (11,12) not (12,11)"). #1 non-assoc *why* answer was excellent — connected `a<b : Bool` to the JS `false==0` footgun AND noted the parser guards it *because* the dynamic tree-walk has no type checker yet (same "preview the static discipline" theme as S2). Asked unprompted whether Pratt could use an explicit stack — genuine transfer/Analyze-level curiosity; got the shunting-yard connection.
+
+**Feynman:** captured the essence (call stack = implicit operand stack; one inequality threads precedence + associativity; no tower). Refined two vague bits: it's the recursion call stack (not a separate structure), and the decisive compare is *next op's `l_bp` vs current frame's `min_bp` (= enclosing op's `r_bp`)*.
+
+**Confidence calibration:** 7/10. Self-aware: "recursion is a trip, I'd need a debugger to hit 9." Honest and accurate — head-knowledge solid, gut-knowledge pending a stepped trace.
+
+**Self-study assigned:** `dbg!(min_bp, self.peek())` at top of `parse_expr`, run the `a + b |> f` test, read printed frames against the hand traces. Closes the recursion gap to ~9.
+
+**Bloom's reached:** Apply→Analyze on the climbing loop (independent traces); Evaluate on the non-assoc design rationale and the recursive-vs-explicit-stack tradeoff.
+
+**Next:** S4 — Lookahead & the tricky cases. lambda-vs-tuple (`parens_then_arrow`), placeholder→lambda desugaring (`$a`/`$`), the guard `=>` binding-power collision (already glimpsed: the `min_bp == 0` gate + branches parsed at `min_bp=1`). Lookahead vs backtracking made precise.
