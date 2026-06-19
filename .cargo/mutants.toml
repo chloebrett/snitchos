@@ -31,6 +31,9 @@ exclude_re = [
   # Equivalent mutant in fs-proto Badge::pack: inode occupies bits [0..32)
   # and rights [32..48) — disjoint by construction, so | and ^ are identical.
   "replace \\| with \\^ in Badge::pack",
+  # Equivalent mutant in fs-proto Denial::pack: same shape as Badge::pack —
+  # inode [0..32), attempted right [32..48), disjoint, so | and ^ are identical.
+  "replace \\| with \\^ in Denial::pack",
   # Equivalent mutant in ramfs write: the `if file.len() < end` guard avoids
   # truncation before `resize(end, 0)`. At len == end, resize is a no-op, so
   # `<` and `<=` are behaviourally identical.

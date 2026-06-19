@@ -122,6 +122,6 @@
 
 **Bloom's reached:** Apply→Analyze. Feynman terse but captured both load-bearing ideas (capitalization rule + recursion).
 
-**Confidence calibration:** (S6 rating + S7-readiness pending — asked at close).
+**Confidence calibration:** S6 7/10. Learner felt ready for S7 and **started wiring up the `On` block dispatch themselves** before the session formally opened — exactly the build-it-yourself goal of the whole track.
 
 **Next:** S7 — **learner implements dispatch.** Parser tour complete (S1–S6). The runtime algorithm is fully specified in the S5 log + cheat sheet: (1) `register_items` must stop dropping `Item::On`/`Item::Contract` (the `_ => {}`) and build a method registry keyed by `type_name`; (2) `eval_call`/`eval_field` gain a method-lookup fallback (`Call{callee: Field}` → find method by name on the value's type → contract-default fallback). TDD, learner-driven.

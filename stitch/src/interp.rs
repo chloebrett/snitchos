@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Pattern, Stmt, StrSegment, UnOp};
+use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Method, Pattern, Stmt, StrSegment, Type, UnOp};
 use crate::env::{AssignError, Env};
 use crate::parser::parse_program;
 use crate::value::{
@@ -28,14 +28,15 @@ pub fn eval_program_with_telemetry(
 ) -> (Result<Value, RuntimeError>, Vec<TelemetryEvent>) {
     let env = Env::new();
     let mut globals = HashMap::new();
+    let mut dispatch: HashMap<String, Vec<Method>> = HashMap::new();
     for native in NATIVES {
         globals.insert(native.name.to_string(), Value::Native(*native));
     }
     register_builtin_types(&mut globals);
     // The Stitch-source prelude loads first; user items can shadow it.
     let prelude = parse_program(PRELUDE).expect("the prelude must parse");
-    register_items(&prelude, &env, &mut globals);
-    register_items(items, &env, &mut globals);
+    register_items(&prelude, &env, &mut globals, &mut dispatch);
+    register_items(items, &env, &mut globals, &mut dispatch);
     env.set_globals(globals);
     let result = match env.lookup("main") {
         Some(main) => eval_call(&main, &[], &env),
@@ -55,17 +56,27 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::Str(segments) => eval_string(segments, env),
         // `and`/`or` short-circuit, so they can't pre-evaluate both operands.
-        Expr::Binary { op: BinOp::And, left, right } => Ok(Value::Bool(
+        Expr::Binary {
+            op: BinOp::And,
+            left,
+            right,
+        } => Ok(Value::Bool(
             as_bool(&eval(left, env)?, "`and`")? && as_bool(&eval(right, env)?, "`and`")?,
         )),
-        Expr::Binary { op: BinOp::Or, left, right } => Ok(Value::Bool(
+        Expr::Binary {
+            op: BinOp::Or,
+            left,
+            right,
+        } => Ok(Value::Bool(
             as_bool(&eval(left, env)?, "`or`")? || as_bool(&eval(right, env)?, "`or`")?,
         )),
         // `lhs |> f(a)` ≡ `f(lhs, a)`; `lhs |> f` ≡ `f(lhs)`.
-        Expr::Binary { op: BinOp::Pipe, left, right } => eval_pipe(left, right, env),
-        Expr::Binary { op, left, right } => {
-            eval_binary(*op, &eval(left, env)?, &eval(right, env)?)
-        }
+        Expr::Binary {
+            op: BinOp::Pipe,
+            left,
+            right,
+        } => eval_pipe(left, right, env),
+        Expr::Binary { op, left, right } => eval_binary(*op, &eval(left, env)?, &eval(right, env)?),
         Expr::Unary { op, operand } => eval_unary(*op, &eval(operand, env)?),
         Expr::Var(name) => env
             .lookup(name)
@@ -120,7 +131,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         Expr::Try(operand) => eval_try(eval(operand, env)?),
         Expr::SafeField { object, name } => eval_safe_field(eval(object, env)?, name),
         Expr::Index { object, index } => eval_index(&eval(object, env)?, &eval(index, env)?),
-        _ => Err(RuntimeError::new("evaluation not yet implemented for this expression")),
+        _ => Err(RuntimeError::new(
+            "evaluation not yet implemented for this expression",
+        )),
     }
 }
 
@@ -210,7 +223,10 @@ fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<Value, Runt
             (native.func)(args, env)
         }
         Value::Constructor(ctor) => make_data(ctor, args),
-        _ => Err(RuntimeError::new(format!("cannot call a {}", callee.kind()))),
+        _ => Err(RuntimeError::new(format!(
+            "cannot call a {}",
+            callee.kind()
+        ))),
     }
 }
 
@@ -219,10 +235,17 @@ const PRELUDE: &str = include_str!("prelude.st");
 
 /// Register each top-level item (function, prod, sum) into `globals`. Functions
 /// and constructors capture `env` so they share the (not-yet-filled) globals.
-fn register_items(items: &[Item], env: &Env, globals: &mut HashMap<String, Value>) {
+fn register_items(
+    items: &[Item],
+    env: &Env,
+    globals: &mut HashMap<String, Value>,
+    dispatch: &mut HashMap<String, Vec<Method>>,
+) {
     for item in items {
         match item {
-            Item::Func { name, params, body, .. } => {
+            Item::Func {
+                name, params, body, ..
+            } => {
                 let closure = Value::Closure(Rc::new(ClosureData {
                     params: params.iter().map(|param| param.name.clone()).collect(),
                     body: body.clone(),
@@ -257,6 +280,16 @@ fn register_items(items: &[Item], env: &Env, globals: &mut HashMap<String, Value
                     globals.insert(variant.name.clone(), value);
                 }
             }
+            Item::On {
+                target: Type::Name { name, .. },
+                methods,
+                ..
+            } => {
+                dispatch
+                    .entry(name.clone())
+                    .or_default()
+                    .extend(methods.iter().cloned());
+            }
             _ => {}
         }
     }
@@ -288,12 +321,36 @@ fn register_builtin_types(globals: &mut HashMap<String, Value>) {
 
 /// The built-in (native) functions, registered into every program's globals.
 const NATIVES: &[NativeFn] = &[
-    NativeFn { name: "map", arity: 2, func: native_map },
-    NativeFn { name: "filter", arity: 2, func: native_filter },
-    NativeFn { name: "fold", arity: 3, func: native_fold },
-    NativeFn { name: "join", arity: 2, func: native_join },
-    NativeFn { name: "emit", arity: 2, func: native_emit },
-    NativeFn { name: "span", arity: 2, func: native_span },
+    NativeFn {
+        name: "map",
+        arity: 2,
+        func: native_map,
+    },
+    NativeFn {
+        name: "filter",
+        arity: 2,
+        func: native_filter,
+    },
+    NativeFn {
+        name: "fold",
+        arity: 3,
+        func: native_fold,
+    },
+    NativeFn {
+        name: "join",
+        arity: 2,
+        func: native_join,
+    },
+    NativeFn {
+        name: "emit",
+        arity: 2,
+        func: native_emit,
+    },
+    NativeFn {
+        name: "span",
+        arity: 2,
+        func: native_span,
+    },
 ];
 
 /// `span(name, body)` — open a span, run the zero-argument `body` thunk, close
@@ -309,9 +366,13 @@ fn native_span(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
             name.kind()
         )));
     };
-    env.emit(TelemetryEvent::SpanOpen { name: name.to_string() });
+    env.emit(TelemetryEvent::SpanOpen {
+        name: name.to_string(),
+    });
     let result = apply_values(body, &[], env)?;
-    env.emit(TelemetryEvent::SpanClose { name: name.to_string() });
+    env.emit(TelemetryEvent::SpanClose {
+        name: name.to_string(),
+    });
     Ok(result)
 }
 
@@ -441,7 +502,10 @@ fn construct(ctor: &Constructor, args: &[Arg], env: &Env) -> Result<Value, Runti
         if let Expr::Spread(base) = &arg.value {
             let base = eval(base, env)?;
             let Value::Data(data) = &base else {
-                return Err(RuntimeError::new(format!("can only spread a record, not {}", base.kind())));
+                return Err(RuntimeError::new(format!(
+                    "can only spread a record, not {}",
+                    base.kind()
+                )));
             };
             if data.type_name != ctor.type_name {
                 return Err(RuntimeError::new(format!(
@@ -607,7 +671,10 @@ fn eval_index(object: &Value, index: &Value) -> Result<Value, RuntimeError> {
             let element = usize::try_from(*position).ok().and_then(|i| items.get(i));
             Ok(element.map_or_else(none, |value| some(value.clone())))
         }
-        other => Err(RuntimeError::new(format!("cannot index a {}", other.kind()))),
+        other => Err(RuntimeError::new(format!(
+            "cannot index a {}",
+            other.kind()
+        ))),
     }
 }
 
@@ -682,7 +749,11 @@ fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env) -> Result<Value,
     let mut scope = env.clone();
     for (index, stmt) in stmts.iter().enumerate() {
         match stmt {
-            Stmt::Let { name, mutable, value } => {
+            Stmt::Let {
+                name,
+                mutable,
+                value,
+            } => {
                 let bound = eval(value, &scope)?;
                 scope = if *mutable {
                     scope.extend_mut(name.clone(), bound)
@@ -1084,7 +1155,10 @@ mod tests {
 
     #[test]
     fn a_mut_binding_can_be_reassigned() {
-        assert_eq!(run("{ let mut n = 0  n = n + 1  n = n + 1  n }"), Value::Int(2));
+        assert_eq!(
+            run("{ let mut n = 0  n = n + 1  n = n + 1  n }"),
+            Value::Int(2)
+        );
     }
 
     #[test]
@@ -1106,7 +1180,10 @@ mod tests {
     #[test]
     fn a_closure_sees_a_later_mutation_of_a_captured_mut_local() {
         // Capture-by-reference: `f` shares `n`'s cell, so the `n = 99` is visible.
-        assert_eq!(run("{ let mut n = 0  let f = () -> n  n = 99  f() }"), Value::Int(99));
+        assert_eq!(
+            run("{ let mut n = 0  let f = () -> n  n = 99  f() }"),
+            Value::Int(99)
+        );
     }
 
     #[test]
@@ -1129,7 +1206,10 @@ mod tests {
 
     #[test]
     fn a_non_bool_condition_is_an_error() {
-        assert_eq!(run_err("1 => 10 | 20"), "condition requires a Bool, got Int");
+        assert_eq!(
+            run_err("1 => 10 | 20"),
+            "condition requires a Bool, got Int"
+        );
     }
 
     #[test]
@@ -1144,7 +1224,10 @@ mod tests {
 
     #[test]
     fn a_closure_captures_its_defining_environment() {
-        assert_eq!(run("{ let n = 10  let add = x -> x + n  add(5) }"), Value::Int(15));
+        assert_eq!(
+            run("{ let n = 10  let add = x -> x + n  add(5) }"),
+            Value::Int(15)
+        );
     }
 
     #[test]
@@ -1169,14 +1252,20 @@ mod tests {
     fn a_placeholder_argument_becomes_a_callable_closure() {
         // `($ + 1)` desugars (at parse time) to `$a -> $a + 1`, then `apply`
         // calls it with 10.
-        assert_eq!(run("{ let apply = g -> g(10)  apply($ + 1) }"), Value::Int(11));
+        assert_eq!(
+            run("{ let apply = g -> g(10)  apply($ + 1) }"),
+            Value::Int(11)
+        );
     }
 
     #[test]
     fn a_placeholder_gap_ignores_the_skipped_argument() {
         // `($b)` references only the second positional slot, so it desugars to
         // `(_, $b) -> $b` — a two-arg lambda that drops the first argument.
-        assert_eq!(run("{ let apply = g -> g(10, 20)  apply($b) }"), Value::Int(20));
+        assert_eq!(
+            run("{ let apply = g -> g(10, 20)  apply($b) }"),
+            Value::Int(20)
+        );
     }
 
     #[test]
@@ -1276,11 +1365,15 @@ mod tests {
     #[test]
     fn functional_update_copies_then_overrides() {
         assert_eq!(
-            run_program("prod Point(x: Int, y: Int)  main() = { let p = Point(1, 2)  Point(..p, x: 10).x }"),
+            run_program(
+                "prod Point(x: Int, y: Int)  main() = { let p = Point(1, 2)  Point(..p, x: 10).x }"
+            ),
             Value::Int(10)
         );
         assert_eq!(
-            run_program("prod Point(x: Int, y: Int)  main() = { let p = Point(1, 2)  Point(..p, x: 10).y }"),
+            run_program(
+                "prod Point(x: Int, y: Int)  main() = { let p = Point(1, 2)  Point(..p, x: 10).y }"
+            ),
             Value::Int(2)
         );
     }
@@ -1300,7 +1393,9 @@ mod tests {
     #[test]
     fn constructs_a_sum_variant_with_a_named_field() {
         assert_eq!(
-            run_program("sum Shape = Circle(radius: Int) | Rect(w: Int, h: Int)  main() = Circle(5).radius"),
+            run_program(
+                "sum Shape = Circle(radius: Int) | Rect(w: Int, h: Int)  main() = Circle(5).radius"
+            ),
             Value::Int(5)
         );
     }
@@ -1348,17 +1443,24 @@ mod tests {
 
     #[test]
     fn no_matching_arm_is_an_error() {
-        assert_eq!(run_err("match 5 { 0 => 1  1 => 2 }"), "no match arm matched");
+        assert_eq!(
+            run_err("match 5 { 0 => 1  1 => 2 }"),
+            "no match arm matched"
+        );
     }
 
     #[test]
     fn matches_and_destructures_a_sum_variant() {
         assert_eq!(
-            run_program("sum Opt = Just(Int) | Nothing  main() = match Just(5) { Just(x) => x  Nothing => 0 }"),
+            run_program(
+                "sum Opt = Just(Int) | Nothing  main() = match Just(5) { Just(x) => x  Nothing => 0 }"
+            ),
             Value::Int(5)
         );
         assert_eq!(
-            run_program("sum Opt = Just(Int) | Nothing  main() = match Nothing { Just(x) => x  Nothing => 0 }"),
+            run_program(
+                "sum Opt = Just(Int) | Nothing  main() = match Nothing { Just(x) => x  Nothing => 0 }"
+            ),
             Value::Int(0)
         );
     }
@@ -1377,7 +1479,9 @@ mod tests {
     #[test]
     fn a_constructor_pattern_does_not_match_a_different_value() {
         assert_eq!(
-            run_program("sum Opt = Just(Int) | Nothing  main() = match 5 { Just(x) => x  _ => 99 }"),
+            run_program(
+                "sum Opt = Just(Int) | Nothing  main() = match 5 { Just(x) => x  _ => 99 }"
+            ),
             Value::Int(99)
         );
     }
@@ -1385,7 +1489,9 @@ mod tests {
     #[test]
     fn nested_constructor_patterns_destructure_deeply() {
         assert_eq!(
-            run_program("sum Opt = Just(Int) | Nothing  main() = match Just(Just(7)) { Just(Just(n)) => n  _ => 0 }"),
+            run_program(
+                "sum Opt = Just(Int) | Nothing  main() = match Just(Just(7)) { Just(Just(n)) => n  _ => 0 }"
+            ),
             Value::Int(7)
         );
     }
@@ -1399,7 +1505,9 @@ mod tests {
     #[test]
     fn matches_an_or_pattern_of_variants() {
         assert_eq!(
-            run_program("sum Color = Red | Green | Blue  main() = match Green { Red | Green => 1  Blue => 2 }"),
+            run_program(
+                "sum Color = Red | Green | Blue  main() = match Green { Red | Green => 1  Blue => 2 }"
+            ),
             Value::Int(1)
         );
     }
@@ -1487,7 +1595,10 @@ mod tests {
 
     #[test]
     fn a_tuple_pattern_arity_must_match() {
-        assert_eq!(run("match (1, 2, 3) { (a, b) => 0  _ => 99 }"), Value::Int(99));
+        assert_eq!(
+            run("match (1, 2, 3) { (a, b) => 0  _ => 99 }"),
+            Value::Int(99)
+        );
     }
 
     #[test]
@@ -1527,7 +1638,10 @@ mod tests {
 
     #[test]
     fn maps_have_order_insensitive_structural_equality() {
-        assert_eq!(run(r#"["a": 1, "b": 2] == ["b": 2, "a": 1]"#), Value::Bool(true));
+        assert_eq!(
+            run(r#"["a": 1, "b": 2] == ["b": 2, "a": 1]"#),
+            Value::Bool(true)
+        );
         assert_eq!(run(r#"["a": 1] == ["a": 2]"#), Value::Bool(false));
         assert_eq!(run("[:] == [:]"), Value::Bool(true));
     }
@@ -1539,32 +1653,52 @@ mod tests {
 
     #[test]
     fn interpolation_renders_a_map() {
-        assert_eq!(run(r#""{["a": 1, "b": 2]}""#), Value::Str("[a: 1, b: 2]".into()));
+        assert_eq!(
+            run(r#""{["a": 1, "b": 2]}""#),
+            Value::Str("[a: 1, b: 2]".into())
+        );
         assert_eq!(run(r#""{[:]}""#), Value::Str("[:]".into()));
     }
 
     #[test]
     fn indexing_a_map_returns_some_or_none() {
-        assert_eq!(run(r#"match ["a": 1, "b": 2]["a"] { Some(v) => v  None => 0 }"#), Value::Int(1));
-        assert_eq!(run(r#"match ["a": 1, "b": 2]["z"] { Some(v) => v  None => 0 }"#), Value::Int(0));
+        assert_eq!(
+            run(r#"match ["a": 1, "b": 2]["a"] { Some(v) => v  None => 0 }"#),
+            Value::Int(1)
+        );
+        assert_eq!(
+            run(r#"match ["a": 1, "b": 2]["z"] { Some(v) => v  None => 0 }"#),
+            Value::Int(0)
+        );
     }
 
     #[test]
     fn maps_can_be_keyed_by_any_value() {
-        assert_eq!(run(r#"match [1: "x", 2: "y"][2] { Some(v) => v  None => "?" }"#), Value::Str("y".into()));
+        assert_eq!(
+            run(r#"match [1: "x", 2: "y"][2] { Some(v) => v  None => "?" }"#),
+            Value::Str("y".into())
+        );
     }
 
     #[test]
     fn indexing_a_list_returns_some_or_none() {
-        assert_eq!(run("match [10, 20, 30][1] { Some(v) => v  None => -1 }"), Value::Int(20));
-        assert_eq!(run("match [10, 20, 30][9] { Some(v) => v  None => -1 }"), Value::Int(-1));
+        assert_eq!(
+            run("match [10, 20, 30][1] { Some(v) => v  None => -1 }"),
+            Value::Int(20)
+        );
+        assert_eq!(
+            run("match [10, 20, 30][9] { Some(v) => v  None => -1 }"),
+            Value::Int(-1)
+        );
     }
 
     #[test]
     fn indexing_with_safe_nav_chains() {
         // `m[k]` is a Maybe, so `?.` flows straight on.
         assert_eq!(
-            run_program(r#"prod Pt(x: Int)  main() = match ["p": Pt(7)]["p"]?.x { Some(v) => v  None => 0 }"#),
+            run_program(
+                r#"prod Pt(x: Int)  main() = match ["p": Pt(7)]["p"]?.x { Some(v) => v  None => 0 }"#
+            ),
             Value::Int(7)
         );
     }
@@ -1576,7 +1710,10 @@ mod tests {
 
     #[test]
     fn a_non_int_list_index_is_an_error() {
-        assert_eq!(run_err(r#"[1, 2, 3]["x"]"#), "list index must be an Int, got Str");
+        assert_eq!(
+            run_err(r#"[1, 2, 3]["x"]"#),
+            "list index must be an Int, got Str"
+        );
     }
 
     #[test]
@@ -1643,7 +1780,9 @@ mod tests {
     #[test]
     fn pipes_chain_left_to_right() {
         assert_eq!(
-            run_program("main() = [1, 2, 3, 4] |> filter(x -> x > 2) |> map(x -> x * 10) == [30, 40]"),
+            run_program(
+                "main() = [1, 2, 3, 4] |> filter(x -> x > 2) |> map(x -> x * 10) == [30, 40]"
+            ),
             Value::Bool(true)
         );
     }
@@ -1661,7 +1800,10 @@ mod tests {
 
     #[test]
     fn span_runs_its_body_and_returns_its_value() {
-        assert_eq!(run_program(r#"main() = span("s", () -> 42)"#), Value::Int(42));
+        assert_eq!(
+            run_program(r#"main() = span("s", () -> 42)"#),
+            Value::Int(42)
+        );
     }
 
     #[test]
@@ -1669,9 +1811,16 @@ mod tests {
         assert_eq!(
             run_program_events(r#"main() = span("s", () -> emit("x", 1))"#),
             vec![
-                TelemetryEvent::SpanOpen { name: "s".to_string() },
-                TelemetryEvent::Emit { name: "x".to_string(), value: Value::Int(1) },
-                TelemetryEvent::SpanClose { name: "s".to_string() },
+                TelemetryEvent::SpanOpen {
+                    name: "s".to_string()
+                },
+                TelemetryEvent::Emit {
+                    name: "x".to_string(),
+                    value: Value::Int(1)
+                },
+                TelemetryEvent::SpanClose {
+                    name: "s".to_string()
+                },
             ]
         );
     }
@@ -1682,9 +1831,16 @@ mod tests {
         assert_eq!(
             run_program_events(r#"main() = { use <- span("report")  emit("x", 1) }"#),
             vec![
-                TelemetryEvent::SpanOpen { name: "report".to_string() },
-                TelemetryEvent::Emit { name: "x".to_string(), value: Value::Int(1) },
-                TelemetryEvent::SpanClose { name: "report".to_string() },
+                TelemetryEvent::SpanOpen {
+                    name: "report".to_string()
+                },
+                TelemetryEvent::Emit {
+                    name: "x".to_string(),
+                    value: Value::Int(1)
+                },
+                TelemetryEvent::SpanClose {
+                    name: "report".to_string()
+                },
             ]
         );
     }
@@ -1724,14 +1880,19 @@ mod tests {
 
     #[test]
     fn built_in_options_have_structural_equality() {
-        assert_eq!(run_program("main() = Some(1) == Some(1)"), Value::Bool(true));
+        assert_eq!(
+            run_program("main() = Some(1) == Some(1)"),
+            Value::Bool(true)
+        );
         assert_eq!(run_program("main() = Some(1) == None"), Value::Bool(false));
     }
 
     #[test]
     fn try_unwraps_a_present_value() {
         assert_eq!(
-            run_program("f(m) = { let x = m?  Some(x + 1) }  main() = match f(Some(10)) { Some(v) => v  None => 0 }"),
+            run_program(
+                "f(m) = { let x = m?  Some(x + 1) }  main() = match f(Some(10)) { Some(v) => v  None => 0 }"
+            ),
             Value::Int(11)
         );
     }
@@ -1740,7 +1901,9 @@ mod tests {
     fn try_short_circuits_on_none() {
         // `m?` on None returns None *from f* — so f(None) is None.
         assert_eq!(
-            run_program("f(m) = { let x = m?  Some(x + 1) }  main() = match f(None) { Some(v) => v  None => 0 }"),
+            run_program(
+                "f(m) = { let x = m?  Some(x + 1) }  main() = match f(None) { Some(v) => v  None => 0 }"
+            ),
             Value::Int(0)
         );
     }
@@ -1748,7 +1911,9 @@ mod tests {
     #[test]
     fn try_propagates_err() {
         assert_eq!(
-            run_program("f(r) = { let x = r?  Ok(x) }  main() = match f(Err(5)) { Ok(v) => v  Err(e) => e }"),
+            run_program(
+                "f(r) = { let x = r?  Ok(x) }  main() = match f(Err(5)) { Ok(v) => v  Err(e) => e }"
+            ),
             Value::Int(5)
         );
     }
@@ -1773,7 +1938,9 @@ mod tests {
     #[test]
     fn safe_nav_accesses_a_field_inside_some() {
         assert_eq!(
-            run_program(r#"prod User(name: Str)  main() = match Some(User("Bo"))?.name { Some(n) => n  None => "?" }"#),
+            run_program(
+                r#"prod User(name: Str)  main() = match Some(User("Bo"))?.name { Some(n) => n  None => "?" }"#
+            ),
             Value::Str("Bo".into())
         );
     }
@@ -1817,15 +1984,26 @@ mod tests {
 
     #[test]
     fn prelude_any_all_contains() {
-        assert_eq!(run_program("main() = any([1, 2, 3], x -> x > 2)"), Value::Bool(true));
-        assert_eq!(run_program("main() = all([1, 2, 3], x -> x > 2)"), Value::Bool(false));
-        assert_eq!(run_program("main() = contains([1, 2, 3], 2)"), Value::Bool(true));
+        assert_eq!(
+            run_program("main() = any([1, 2, 3], x -> x > 2)"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program("main() = all([1, 2, 3], x -> x > 2)"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            run_program("main() = contains([1, 2, 3], 2)"),
+            Value::Bool(true)
+        );
     }
 
     #[test]
     fn prelude_find_returns_first_match() {
         assert_eq!(
-            run_program("main() = match find([1, 2, 3, 4], x -> x > 2) { Some(v) => v  None => 0 }"),
+            run_program(
+                "main() = match find([1, 2, 3, 4], x -> x > 2) { Some(v) => v  None => 0 }"
+            ),
             Value::Int(3)
         );
     }
@@ -1835,9 +2013,18 @@ mod tests {
         assert_eq!(
             run_program_events(r#"main() = each([1, 2, 3], x -> emit("n", x))"#),
             vec![
-                TelemetryEvent::Emit { name: "n".to_string(), value: Value::Int(1) },
-                TelemetryEvent::Emit { name: "n".to_string(), value: Value::Int(2) },
-                TelemetryEvent::Emit { name: "n".to_string(), value: Value::Int(3) },
+                TelemetryEvent::Emit {
+                    name: "n".to_string(),
+                    value: Value::Int(1)
+                },
+                TelemetryEvent::Emit {
+                    name: "n".to_string(),
+                    value: Value::Int(2)
+                },
+                TelemetryEvent::Emit {
+                    name: "n".to_string(),
+                    value: Value::Int(3)
+                },
             ]
         );
     }
@@ -1847,14 +2034,19 @@ mod tests {
         assert_eq!(run_program("main() = unwrapOr(None, 99)"), Value::Int(99));
         assert_eq!(run_program("main() = unwrapOr(Some(7), 99)"), Value::Int(7));
         assert_eq!(
-            run_program("main() = match andThen(Some(5), x -> Some(x + 1)) { Some(v) => v  None => 0 }"),
+            run_program(
+                "main() = match andThen(Some(5), x -> Some(x + 1)) { Some(v) => v  None => 0 }"
+            ),
             Value::Int(6)
         );
     }
 
     #[test]
     fn a_user_definition_shadows_the_prelude() {
-        assert_eq!(run_program("count(xs) = 999  main() = count([1, 2, 3])"), Value::Int(999));
+        assert_eq!(
+            run_program("count(xs) = 999  main() = count([1, 2, 3])"),
+            Value::Int(999)
+        );
     }
 
     #[test]
@@ -1873,9 +2065,16 @@ mod tests {
         assert_eq!(
             run_program_events(src),
             vec![
-                TelemetryEvent::SpanOpen { name: "report".to_string() },
-                TelemetryEvent::Emit { name: "hot.count".to_string(), value: Value::Int(2) },
-                TelemetryEvent::SpanClose { name: "report".to_string() },
+                TelemetryEvent::SpanOpen {
+                    name: "report".to_string()
+                },
+                TelemetryEvent::Emit {
+                    name: "hot.count".to_string(),
+                    value: Value::Int(2)
+                },
+                TelemetryEvent::SpanClose {
+                    name: "report".to_string()
+                },
             ]
         );
     }

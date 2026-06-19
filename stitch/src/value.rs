@@ -205,9 +205,8 @@ impl PartialEq for Value {
             // Maps are unordered: equal iff same size and every entry matches.
             (Value::Map(a), Value::Map(b)) => {
                 a.len() == b.len()
-                    && a.iter().all(|(key, value)| {
-                        b.iter().any(|(k, v)| k == key && v == value)
-                    })
+                    && a.iter()
+                        .all(|(key, value)| b.iter().any(|(k, v)| k == key && v == value))
             }
             (Value::Unit, Value::Unit) => true,
             (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
