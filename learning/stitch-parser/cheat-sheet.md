@@ -146,3 +146,25 @@ For `x.foo()`:
 **Key architectural cut:** conformance checking (`: C` ⇒ does the type implement all of C? orphan/coherence) is a **static/compiler** concern. The dynamic tree-walker consults a `contract` **only** for default-method fallback (step 3) — otherwise contracts are ignored at eval time. Contracts out of scope = any the type never declared `: C` for (borrowing their defaults would be a coherence violation).
 
 **Current gap:** `interp.rs::register_items` drops `Item::On`/`Item::Contract` (`_ => {}`); step 1 of S7 is collecting them into a method registry keyed by `type_name`.
+
+## S6 — Patterns (`parser.rs::parse_pattern`)
+
+**The capitalization rule** (`parse_pattern_atom`): an identifier is a `Pattern::Constructor` iff `starts_uppercase`; otherwise `Pattern::Binding`. Why: **parsing precedes any symbol table**, so the parser can't look up whether `Circle` is a real variant — capitalization is a context-free, backtrack-free signal. Load-bearing convention (no lowercase variants / uppercase bindings). Same as Haskell/Elm/Erlang.
+
+`Pattern` nodes:
+
+| Pattern | Source | Matches |
+|---|---|---|
+| `Int/Float/Bool/Str` | `3`, `"hi"` | that exact value |
+| `Wildcard` | `_` | anything, **binds nothing** |
+| `Binding(name)` | lowercase `x` | anything, binds to `x` |
+| `Constructor{name, args}` | `Circle(r)` | the variant; recurse into args |
+| `Tuple(pats)` | `(a, b)` | a tuple, destructured |
+| `Or(alts)` | `a \| b` | any alternative |
+
+- **Nesting = recursion:** `Constructor.args: Vec<Pattern>` parsed by `parse_pattern` per element → `Ok(Some(x))` = Constructor→Constructor→`Binding("x")`. No special handling.
+- **Or-patterns one level up:** `parse_pattern` = atom, then `|`-collect into `Or` (outer wrapper). `parse_pattern_atom` never returns `Or`.
+- **Tuple vs grouping** (mirrors S4): `(x)` → single element ⇒ returned **unwrapped** (grouping); `(x, y)` → `Tuple`. Signal = the comma (list length). `()` → empty `Tuple` (unit).
+- `_` (Wildcard) vs `Binding("unused")`: `_` introduces **no** binding (can't be referenced; the canonical ignore-marker, = the placeholder hole from S4); a `Binding` binds even if unused.
+
+**Parser tour complete (S1–S6).** Next, S7: implement the dispatch algorithm above.

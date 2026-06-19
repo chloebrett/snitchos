@@ -17,9 +17,9 @@
 - [x] **S3 — Pratt / precedence climbing.** Binding powers, the loop, associativity. Trace `1 + 2 * 3` and `a + b |> f`. ✓ All traces correct; derived associativity-from-pair independently; got non-assoc rationale + recursive-vs-shunting-yard equivalence. Conf 7/10 (debugger self-study assigned for the recursion gut-check).
 - [x] **S4 — Lookahead & the tricky cases.** lambda-vs-tuple, placeholder→lambda desugaring, the guard `=>` collision. Lookahead vs backtracking, made precise. ✓ All three resolved-without-backtracking. Learner corrected two of my explanations; drove a placeholder-semantics design decision (#2 position-by-letter) and we **shipped the spec-conformance fix** (gaps → `_` holes; `positional_params` in `parser.rs`). Evaluate→Create level.
 - [x] **S5 — Declarations.** `prod`/`sum`/`func`/`contract`/`on` → AST. The dispatch prerequisites. ✓ Derived the full runtime dispatch algorithm (type→`On.target`→method-by-name→contract-default fallback) and independently separated static conformance from dynamic dispatch. The S7 algorithm is now fully specified. (Review miss: the two `Option`s — `On.contract` vs `Method.body` — re-test at S6.)
-- [ ] **S6 — Patterns.** match patterns; uppercase=constructor convention; how destructuring parses.
+- [x] **S6 — Patterns.** match patterns; uppercase=constructor convention; how destructuring parses. ✓ Nailed the no-symbol-table-yet rationale for capitalization; traced `Ok(Some(x))`; read tuple-vs-grouping off the code. Two-`Option`s review miss closed. Parser tour (S1–S6) complete.
 - [ ] **S7 — Bridge to dispatch.** Synthesize: how `Call{Field}`, `@`/SelfRef, and `on`/`contract` AST feed the dispatch you'll write. Then you implement.
 
 ## Progress
 - Session log: `session-log.md`. Cheat sheet: `cheat-sheet.md` (built as we go).
-- Status: **S1–S5 done. S6 (patterns) next, then S7 (implement dispatch — algorithm fully specified in S5 log).**
+- Status: **S1–S6 done (parser tour complete). S7 (learner implements dispatch) next — algorithm fully specified in S5 log + cheat sheet.**

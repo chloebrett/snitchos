@@ -103,3 +103,25 @@
 **Confidence calibration:** 8/10. Matches the Evaluate/Create performance — solid.
 
 **Next:** S6 — Patterns (`parse_pattern`): wildcard/literal/binding/constructor/tuple/or-patterns; the uppercase=constructor vs lowercase=binding convention; how destructuring parses. Re-test the two-`Option`s distinction. Then S7: learner implements dispatch (the algorithm is now fully specified above).
+
+## S6 — Patterns (~15 min) — completes the parser tour
+
+**Review:** skipped at learner's request (S1–S5). Two-`Option`s re-test folded into the close instead.
+
+**Covered:**
+- **The capitalization rule** (`parse_pattern_atom`): `Ident` + `starts_uppercase` → `Pattern::Constructor`; lowercase `Ident` → `Pattern::Binding`. Learner nailed the *why* immediately: **parsing happens before any symbol table exists**, so the parser can't ask "is `Circle` a known variant?" Capitalization is a purely syntactic, context-free, backtrack-free signal. Cost: convention is load-bearing (no lowercase variants / uppercase bindings). Same trick as Haskell/Elm/Erlang.
+- The `Pattern` node zoo: `Int/Float/Bool/Str` (literal), `Wildcard` (`_`), `Binding`, `Constructor{name, args}`, `Tuple`, `Or`.
+- **Nesting = recursion:** `Constructor.args: Vec<Pattern>` parsed via `parse_pattern` per element. Traced `Ok(Some(x))` → Constructor→Constructor→`Binding("x")` correctly (caught the leaf is a `Binding`, not the token `Ident`, after a nudge).
+- **Or-patterns one level up:** `parse_pattern` parses an atom, then collects `|`-separated alts into `Pattern::Or` — the outer wrapper, not bare-nested.
+- **Tuple-vs-grouping** (mirrors S4 lambda-vs-tuple): `(x)` → after `pats.pop()`, empty remainder ⇒ return the single pattern unwrapped (grouping); `(x, y)` ⇒ `Tuple`. Signal = "was there a comma" (list length). Learner read it straight off the code.
+- `@degrees` → `Field{object: SelfRef, name}` (expression side; method-body receiver access).
+
+**Review miss closed:** the two `Option`s, re-tested clean — `Item::On.contract: Option<Type>` is `None` for `on Celsius {}` / `Some(Show)` for `on Celsius : Show {}`; `Method.body: Option<Expr>` is `None` for an abstract contract signature. S5's confusion resolved.
+
+**Sharpened:** `_` (Wildcard) vs `Binding("unused")` — `_` introduces **no binding** (can't be referenced; the canonical "deliberately ignored" marker, = the hole the S4 placeholder fix emits); a `Binding` does bind, just goes unused.
+
+**Bloom's reached:** Apply→Analyze. Feynman terse but captured both load-bearing ideas (capitalization rule + recursion).
+
+**Confidence calibration:** (S6 rating + S7-readiness pending — asked at close).
+
+**Next:** S7 — **learner implements dispatch.** Parser tour complete (S1–S6). The runtime algorithm is fully specified in the S5 log + cheat sheet: (1) `register_items` must stop dropping `Item::On`/`Item::Contract` (the `_ => {}`) and build a method registry keyed by `type_name`; (2) `eval_call`/`eval_field` gain a method-lookup fallback (`Call{callee: Field}` → find method by name on the value's type → contract-default fallback). TDD, learner-driven.
