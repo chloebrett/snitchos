@@ -49,6 +49,34 @@ impl Badge {
     }
 }
 
+/// The structured payload of a rights-gate refusal: which inode was touched
+/// and which [`FileRights`] the cap was missing. The FS packs this into the
+/// `i64` value of its denial telemetry — refusals snitch, never silent — so the
+/// host decoder recovers `(inode, attempted)` the same way it unpacks a
+/// [`Badge`]. `MissingRight` is implicit in the denial metric's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Denial {
+    pub inode: InodeId,
+    pub attempted: FileRights,
+}
+
+impl Denial {
+    const RIGHT_SHIFT: u32 = 32;
+
+    #[must_use]
+    pub const fn pack(self) -> i64 {
+        (self.inode.as_u32() as i64) | ((self.attempted.bits() as i64) << Self::RIGHT_SHIFT)
+    }
+
+    #[must_use]
+    pub const fn unpack(raw: i64) -> Denial {
+        Denial {
+            inode: InodeId::new(raw as u32),
+            attempted: FileRights::from_bits((raw >> Self::RIGHT_SHIFT) as u16),
+        }
+    }
+}
+
 /// The FS request opcode — one per [`fs_core::Filesystem`] method (except
 /// `root`, which needs no request: the root File cap is handed to init at
 /// startup). Discriminants are the wire encoding: append-only, never
@@ -143,6 +171,39 @@ impl core::ops::BitOr for FileRights {
     }
 }
 
+impl core::ops::BitAnd for FileRights {
+    type Output = FileRights;
+    fn bitand(self, rhs: FileRights) -> FileRights {
+        FileRights(self.0 & rhs.0)
+    }
+}
+
+/// The file right an [`Op`] requires, or `None` if it is ungated. The flat
+/// core gates only the file data ops — `Read` needs `READ`, `Write` needs
+/// `WRITE`; the metadata/directory ops (`Stat`/`Lookup`/`Create`/`Remove`/
+/// `Readdir`) are ungated (directory rights are a deferred follow-on).
+#[must_use]
+pub const fn required_right(op: Op) -> Option<FileRights> {
+    match op {
+        Op::Read => Some(FileRights::READ),
+        Op::Write => Some(FileRights::WRITE),
+        Op::Stat | Op::Lookup | Op::Create | Op::Remove | Op::Readdir => None,
+    }
+}
+
+/// The rights gate, enforced by the FS per message. `Ok` if `held` grants what
+/// `op` requires; `Err(missing)` names the right the cap lacks — the *attempted
+/// right* the FS snitches alongside the inode on a refusal.
+///
+/// # Errors
+/// Returns the missing [`FileRights`] when a gated op's required right is absent.
+pub const fn check_rights(op: Op, held: FileRights) -> Result<(), FileRights> {
+    match required_right(op) {
+        Some(r) if !held.contains(r) => Err(r),
+        _ => Ok(()),
+    }
+}
+
 /// A `(ptr, len)` reference into the *caller's* address space — a filename or a
 /// data buffer the kernel copies across the boundary (option D). Carried as
 /// plain words on the wire; dereferenced only by the kernel copy primitive.
@@ -175,7 +236,7 @@ pub enum Request {
     Stat,
     Read { offset: u64, dst: UserBuf },
     Write { offset: u64, src: UserBuf },
-    Lookup { name: UserBuf },
+    Lookup { name: UserBuf, rights: FileRights },
     Create { name: UserBuf, kind: NodeKind },
     Remove { name: UserBuf },
     Readdir { index: u64, name_dst: UserBuf },
@@ -203,7 +264,8 @@ impl Request {
             Request::Stat => [op, 0, 0, 0],
             Request::Read { offset, dst } => [op, offset, dst.ptr, dst.len],
             Request::Write { offset, src } => [op, offset, src.ptr, src.len],
-            Request::Lookup { name } | Request::Remove { name } => [op, name.ptr, name.len, 0],
+            Request::Lookup { name, rights } => [op, name.ptr, name.len, u64::from(rights.bits())],
+            Request::Remove { name } => [op, name.ptr, name.len, 0],
             Request::Create { name, kind } => [op, name.ptr, name.len, kind_to_wire(kind)],
             Request::Readdir { index, name_dst } => [op, index, name_dst.ptr, name_dst.len],
         }
@@ -216,7 +278,10 @@ impl Request {
             Op::Stat => Request::Stat,
             Op::Read => Request::Read { offset: w1, dst: UserBuf { ptr: w2, len: w3 } },
             Op::Write => Request::Write { offset: w1, src: UserBuf { ptr: w2, len: w3 } },
-            Op::Lookup => Request::Lookup { name: UserBuf { ptr: w1, len: w2 } },
+            Op::Lookup => Request::Lookup {
+                name: UserBuf { ptr: w1, len: w2 },
+                rights: FileRights::from_bits(w3 as u16),
+            },
             Op::Create => Request::Create {
                 name: UserBuf { ptr: w1, len: w2 },
                 kind: kind_from_wire(w3)?,
@@ -302,6 +367,7 @@ const fn status_from_error(e: FsError) -> u64 {
         FsError::Exists => 4,
         FsError::Unsupported => 5,
         FsError::NameTooLong => 6,
+        FsError::Denied => 7,
     }
 }
 
@@ -313,6 +379,7 @@ const fn error_from_status(status: u64) -> Result<FsError, WireError> {
         4 => Ok(FsError::Exists),
         5 => Ok(FsError::Unsupported),
         6 => Ok(FsError::NameTooLong),
+        7 => Ok(FsError::Denied),
         other => Err(WireError::BadStatus(other)),
     }
 }
@@ -346,6 +413,17 @@ mod tests {
 
         assert!(still_rw.contains(FileRights::READ));
         assert!(still_rw.contains(FileRights::WRITE));
+    }
+
+    #[test]
+    fn intersection_keeps_only_rights_in_both() {
+        // The attenuation primitive: a minted child cap gets parent ∩ requested.
+        let rw = FileRights::READ | FileRights::WRITE;
+
+        assert_eq!(rw & FileRights::READ, FileRights::READ);
+        assert_eq!(rw & FileRights::WRITE, FileRights::WRITE);
+        assert_eq!(FileRights::READ & FileRights::WRITE, FileRights::NONE);
+        assert_eq!(rw & rw, rw);
     }
 
     #[test]
@@ -421,7 +499,7 @@ mod tests {
             Request::Stat,
             Request::Read { offset: 64, dst: buf(0x1000, 512) },
             Request::Write { offset: 8, src: buf(0x2000, 16) },
-            Request::Lookup { name: buf(0x3000, 7) },
+            Request::Lookup { name: buf(0x3000, 7), rights: FileRights::READ | FileRights::WRITE },
             Request::Create { name: buf(0x4000, 9), kind: NodeKind::File },
             Request::Remove { name: buf(0x5000, 5) },
             Request::Readdir { index: 3, name_dst: buf(0x6000, 256) },
@@ -430,6 +508,16 @@ mod tests {
         for req in reqs {
             assert_eq!(Request::decode(req.encode()), Ok(req));
         }
+    }
+
+    #[test]
+    fn lookup_carries_requested_rights_in_the_reserved_slot() {
+        // The client asks for the rights it wants on the child cap; the server
+        // mints parent ∩ requested. Rights ride w3 (previously a 0 pad).
+        let req = Request::Lookup { name: buf(0x3000, 7), rights: FileRights::READ };
+
+        assert_eq!(Request::decode(req.encode()), Ok(req));
+        assert_eq!(req.encode()[3], u64::from(FileRights::READ.bits()));
     }
 
     #[test]
@@ -498,6 +586,65 @@ mod tests {
         assert_eq!(Response::Err(FsError::Exists).encode()[0], 4);
         assert_eq!(Response::Err(FsError::Unsupported).encode()[0], 5);
         assert_eq!(Response::Err(FsError::NameTooLong).encode()[0], 6);
+    }
+
+    #[test]
+    fn denial_round_trips_inode_and_attempted_right() {
+        let d = Denial { inode: InodeId::new(7), attempted: FileRights::WRITE };
+
+        assert_eq!(Denial::unpack(d.pack()), d);
+    }
+
+    #[test]
+    fn denial_layout_mirrors_badge_inode_low_right_next() {
+        // The snitch value the host decoder reads off the denial metric:
+        // inode in [0..32), attempted right in [32..48) — same shape as Badge.
+        let d = Denial { inode: InodeId::new(0xABCD), attempted: FileRights::WRITE };
+
+        assert_eq!(d.pack(), 0x0000_0002_0000_ABCD);
+    }
+
+    #[test]
+    fn read_and_write_are_the_only_gated_ops() {
+        assert_eq!(required_right(Op::Read), Some(FileRights::READ));
+        assert_eq!(required_right(Op::Write), Some(FileRights::WRITE));
+        for op in [Op::Stat, Op::Lookup, Op::Create, Op::Remove, Op::Readdir] {
+            assert_eq!(required_right(op), None);
+        }
+    }
+
+    #[test]
+    fn gate_refuses_write_without_write_right_and_reports_it() {
+        assert_eq!(check_rights(Op::Write, FileRights::READ), Err(FileRights::WRITE));
+        assert_eq!(check_rights(Op::Write, FileRights::READ | FileRights::WRITE), Ok(()));
+    }
+
+    #[test]
+    fn gate_refuses_read_without_read_right_and_reports_it() {
+        assert_eq!(check_rights(Op::Read, FileRights::WRITE), Err(FileRights::READ));
+        assert_eq!(check_rights(Op::Read, FileRights::READ), Ok(()));
+    }
+
+    #[test]
+    fn gate_allows_ungated_ops_on_even_empty_rights() {
+        for op in [Op::Stat, Op::Lookup, Op::Create, Op::Remove, Op::Readdir] {
+            assert_eq!(check_rights(op, FileRights::NONE), Ok(()));
+        }
+    }
+
+    #[test]
+    fn denied_status_code_is_seven_appended() {
+        // The rights gate's refusal. Appended after NameTooLong(6); 1–6 never
+        // renumber.
+        assert_eq!(Response::Err(FsError::Denied).encode()[0], 7);
+    }
+
+    #[test]
+    fn denied_response_round_trips() {
+        assert_eq!(
+            Response::decode(Op::Write, Response::Err(FsError::Denied).encode()),
+            Ok(Response::Err(FsError::Denied))
+        );
     }
 
     #[test]

@@ -65,6 +65,10 @@ pub enum FsError {
     Exists,
     Unsupported,
     NameTooLong,
+    /// The caller's File cap lacks a right the op requires (the rights gate).
+    /// Enforced by the FS, never the kernel — the kernel carries the badge's
+    /// rights but never interprets them.
+    Denied,
 }
 
 /// Inode-addressed storage operations. No `open`/`close` — opening is a
