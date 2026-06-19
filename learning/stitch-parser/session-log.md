@@ -81,3 +81,25 @@
 **Confidence calibration:** not formally rated (session ran into implementation). Performance suggests high on lookahead + placeholder mechanics.
 
 **Next:** S5 — Declarations (`prod`/`sum`/`func`/`contract`/`on` → AST). The direct dispatch prerequisites: how `on Type { … }` and `on Type : Contract { … }` and `contract` parse into `Item::On`/`Item::Contract`. Then S6 patterns, S7 the dispatch implementation.
+
+## S5 — Declarations: the dispatch prerequisites (~20 min)
+
+**Review (S2–S4 spaced):** 2.5/3. `f($b)` → `(_, $b) -> $b`, 2 params (S4 solid). Guard-`=>` trace at `parse_expr(0)` → "expected `|`" error (S3/S4 solid). **Miss:** confused `Item::On.contract: Option<Type>` (conformance, `: C` clause) with `Method.body: Option<Expr>` (abstract method). Corrected — two distinct `Option`s, both central to dispatch. Worth re-testing at S6.
+
+**Covered:**
+- `parse_item` dispatch: 5 keyword arms + **function has no keyword** (`Token::Ident(_)` → `parse_func`). Learner got the payoff: top-level is declarations-only (no bare expressions — the S2 `Item`-is-file-scope-exclusive point), so `parse_func` can **commit** on an ident with no lookahead/backtrack.
+- `contract` (`require_body=false`) vs `on` (`require_body=true`) share `parse_method`. Edge cases: **method-with-body in a contract = default method** (named it); **method-without-body in an `on` = parse error** (nothing to dispatch to).
+- The data model: the sample (`prod Celsius` + `contract Show` + `on Celsius : Show`) → three `Item`s (`Prod`/`Contract`/`On`).
+
+**Keystone — derived the full runtime dispatch algorithm (the S7 target):**
+1. value → `type_name`; 2. find `On` items with `target == type_name`, scan `methods` by name → run `body`; 3. not found but block has `contract: Some(C)` → follow *that pointer* to `contract C`'s default `body`; 4. else "no method".
+
+**Standout insight (unprompted):** learner questioned whether the interpreter needs contracts at all — "only the compiler cares about conformance, not the interpreter?" Correct and architecturally deep: conformance checking (`: Show` ⇒ does Celsius implement all of Show? orphan/coherence) is **static**; the dynamic tree-walker consults a contract **only** for default-method fallback. That deletes a layer from the S7 impl.
+
+**Corrections applied:** (a) the two `Option`s mix-up (review). (b) Feynman step-3 "look at all contracts for defaults" — *I* misread "all" as global; learner clarified they meant "all contracts whose `on Abc` blocks were scanned," which is **correct and more precise than my "one pointer"**: a type can have *multiple* `on` blocks (`on Abc : Show`, `on Abc : Eq`), so the default-fallback set is the union of contracts named across all of Abc's `on` blocks. Only contracts that *no* `on Abc` block named are out of scope (coherence). (c) merged "find `on Abc`" and "find `on Abc : C`" — one lookup over `On` items by target; the `: C` clauses matter only for the fallback set.
+
+**Bloom's reached:** Evaluate→Create (derived the dispatch algorithm + independently separated static-conformance from dynamic-dispatch). Ahead of plan — this was scheduled for S7 synthesis.
+
+**Confidence calibration:** 8/10. Matches the Evaluate/Create performance — solid.
+
+**Next:** S6 — Patterns (`parse_pattern`): wildcard/literal/binding/constructor/tuple/or-patterns; the uppercase=constructor vs lowercase=binding convention; how destructuring parses. Re-test the two-`Option`s distinction. Then S7: learner implements dispatch (the algorithm is now fully specified above).

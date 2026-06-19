@@ -16,10 +16,10 @@
 - [x] **S2 — The AST as the target.** `ast.rs`: Expr vs Item vs Stmt vs Pattern. Frame everything as "the parser builds these." Flag the dispatch-relevant shapes early. ✓ Nailed `Call{Field}` decomposition + parser→registry→evaluator synthesis. Surfaced the live `register_items` `_ => {}` gap; planted the S7 interception fork.
 - [x] **S3 — Pratt / precedence climbing.** Binding powers, the loop, associativity. Trace `1 + 2 * 3` and `a + b |> f`. ✓ All traces correct; derived associativity-from-pair independently; got non-assoc rationale + recursive-vs-shunting-yard equivalence. Conf 7/10 (debugger self-study assigned for the recursion gut-check).
 - [x] **S4 — Lookahead & the tricky cases.** lambda-vs-tuple, placeholder→lambda desugaring, the guard `=>` collision. Lookahead vs backtracking, made precise. ✓ All three resolved-without-backtracking. Learner corrected two of my explanations; drove a placeholder-semantics design decision (#2 position-by-letter) and we **shipped the spec-conformance fix** (gaps → `_` holes; `positional_params` in `parser.rs`). Evaluate→Create level.
-- [ ] **S5 — Declarations.** `prod`/`sum`/`func`/`contract`/`on` → AST. The dispatch prerequisites.
+- [x] **S5 — Declarations.** `prod`/`sum`/`func`/`contract`/`on` → AST. The dispatch prerequisites. ✓ Derived the full runtime dispatch algorithm (type→`On.target`→method-by-name→contract-default fallback) and independently separated static conformance from dynamic dispatch. The S7 algorithm is now fully specified. (Review miss: the two `Option`s — `On.contract` vs `Method.body` — re-test at S6.)
 - [ ] **S6 — Patterns.** match patterns; uppercase=constructor convention; how destructuring parses.
 - [ ] **S7 — Bridge to dispatch.** Synthesize: how `Call{Field}`, `@`/SelfRef, and `on`/`contract` AST feed the dispatch you'll write. Then you implement.
 
 ## Progress
 - Session log: `session-log.md`. Cheat sheet: `cheat-sheet.md` (built as we go).
-- Status: **S1–S4 done. S5 (declarations: `prod`/`sum`/`func`/`contract`/`on`) next.**
+- Status: **S1–S5 done. S6 (patterns) next, then S7 (implement dispatch — algorithm fully specified in S5 log).**

@@ -110,3 +110,39 @@ Binding-power table (tightest at bottom):
 3. **guard `=>` collision** — `Some(x) if x > 0 => body`. Guard parsed at **`parse_expr(1)`**, not `(0)`. The inline conditional `cond => t | e` is only handled at `min_bp == 0` (bottom of `parse_expr`), so starting the guard at 1 structurally refuses to swallow the arm's `=>` separator. Same trick in subjectless-match arm conditions.
 
 **`parse_postfix`** runs the postfix loop *above* `parse_atom`: `(` → call, `.` → `Field`, `?.` → `SafeField`, `?` → `Try`, `[` → `Index`. Left-to-right chaining, so `a.b().c` nests correctly.
+
+## S5 — Declarations (`parser.rs::parse_item`)
+
+`parse_item` dispatches on the leading token → an `Item`:
+
+| Source | Item | Keyword? |
+|---|---|---|
+| `prod Name(fields)` | `Prod` | `prod` |
+| `sum Name = v \| …` | `Sum` | `sum` |
+| `contract Name { sigs }` | `Contract` | `contract` |
+| `on Type { … }` / `on Type : C { … }` | `On` | `on` |
+| `let name = v` | `Const` | `let` |
+| `name(params) = body` | `Func` | **none** (`Ident`) |
+
+- **Function has no keyword** → matched by `Token::Ident(_)`. Works because **top level is declarations-only** (no bare expressions — `Item` is file-scope-exclusive, S2). So `parse_func` *commits* on an ident: no lookahead/backtrack needed.
+
+**`contract` vs `on` — same `parse_method`, one flag:**
+- `parse_contract` → `parse_method(require_body=false)` → body optional.
+- `parse_on` → `parse_method(require_body=true)` → body mandatory.
+- `Method.body: Option<Expr>`: `None` = abstract contract signature; `Some` in a contract = **default method**; `Some` in an `on` = the implementation. Body-less method in an `on` = parse error (nothing to dispatch to).
+
+**Two `Option`s — don't conflate (both dispatch-central):**
+- `Item::On.contract: Option<Type>` — the `: C` **conformance** clause. `None` = inherent methods; `Some(C)` = declares the type conforms to contract C.
+- `Method.body: Option<Expr>` — presence of an implementation.
+
+### Runtime dispatch algorithm (the S7 target — derived in S5)
+
+For `x.foo()`:
+1. value `x` → its `type_name` (e.g. `Celsius`).
+2. find all `On` items with `target == type_name`; scan their `methods` for name `foo` → found ⇒ run that `body`.
+3. not found ⇒ collect the contracts named by those blocks' `contract: Some(C)` clauses (a type may have several `on` blocks); look for a **default** `foo` body there.
+4. else ⇒ "no method `foo` on `Celsius`".
+
+**Key architectural cut:** conformance checking (`: C` ⇒ does the type implement all of C? orphan/coherence) is a **static/compiler** concern. The dynamic tree-walker consults a `contract` **only** for default-method fallback (step 3) — otherwise contracts are ignored at eval time. Contracts out of scope = any the type never declared `: C` for (borrowing their defaults would be a coherence violation).
+
+**Current gap:** `interp.rs::register_items` drops `Item::On`/`Item::Contract` (`_ => {}`); step 1 of S7 is collecting them into a method registry keyed by `type_name`.
