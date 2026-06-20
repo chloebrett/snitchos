@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use fs_proto::markers;
 use protocol::stream::OwnedFrame;
 
 
@@ -1468,11 +1469,11 @@ pub fn fs_connect_mints_root(h: &mut View) -> Result<(), String> {
 /// — so this asserts the full request/response round-trip crossed the process
 /// boundary and carried the right data.
 pub fn fs_stat_root(h: &mut View) -> Result<(), String> {
-    // Client emits `0x57A7` iff `Stat(root) == Ok(Stat { kind: Dir, size: 0 })`.
+    // Client emits [`markers::STAT_ROOT_OK`] iff `Stat(root) == Ok(Stat { kind: Dir, size: 0 })`.
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
             if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
-                && *value == 0x57A7)
+                && *value == markers::STAT_ROOT_OK)
     })
     .ok_or(
         "client didn't confirm root stat (empty Dir) within 30s — the Stat request/response \
@@ -1491,7 +1492,7 @@ pub fn fs_create_then_stat(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
             if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
-                && *value == 0x5C7E)
+                && *value == markers::CREATE_STAT_OK)
     })
     .ok_or(
         "client didn't confirm create+stat (new empty File) within 30s — the create name-copy, \
@@ -1509,7 +1510,7 @@ pub fn fs_write_read_roundtrip(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
             if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
-                && *value == 0x317E)
+                && *value == markers::WRITE_READ_OK)
     })
     .ok_or(
         "client didn't confirm write→read round-trip within 30s — bytes didn't survive the \
@@ -1525,7 +1526,7 @@ pub fn fs_write_read_roundtrip(h: &mut View) -> Result<(), String> {
 /// the refusal**: it emits the `snitchos.fs.denied` gauge carrying the
 /// structured `(inode, attempted-right)` packed value. As a positive control,
 /// the client then `lookup`s requesting `READ|WRITE` and writes successfully,
-/// emitting `0x600D` — proving the gate refuses the under-authorized write
+/// emitting [`markers::WRITE_AUTHORIZED_OK`] — proving the gate refuses the under-authorized write
 /// without over-refusing the authorized one.
 pub fn fs_lookup_rights_gate(h: &mut View) -> Result<(), String> {
     // The created file is inode 1 (root is 0). The structured snitch packs
@@ -1546,7 +1547,7 @@ pub fn fs_lookup_rights_gate(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
             if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
-                && *value == 0x600D)
+                && *value == markers::WRITE_AUTHORIZED_OK)
     })
     .ok_or(
         "client didn't confirm an authorized write through a READ|WRITE lookup within 30s — \
@@ -1557,14 +1558,14 @@ pub fn fs_lookup_rights_gate(h: &mut View) -> Result<(), String> {
 
 /// v0.10 FS `remove` (`workload=fs`), step 4b: the client removes the file it
 /// created, then looks the name up again and confirms the FS now reports
-/// `NotFound`. The client emits `0xDE1E` only when `Remove` succeeds *and* the
+/// `NotFound`. The client emits [`markers::REMOVE_OK`] only when `Remove` succeeds *and* the
 /// follow-up `lookup` is refused — so this asserts the unlink actually took
 /// effect across the process boundary, not merely that the server replied.
 pub fn fs_remove_unlinks(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
             if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
-                && *value == 0xDE1E)
+                && *value == markers::REMOVE_OK)
     })
     .ok_or(
         "client didn't confirm remove→lookup-gone within 30s — the Remove name-copy or \
@@ -1640,7 +1641,7 @@ pub fn fs_workload_traces(h: &mut View) -> Result<(), String> {
 /// v0.10 FS `readdir` (`workload=fs`), step 4c: the client lists the root
 /// directory. Indexed `readdir(0)` returns the single entry (`"data"`, the file
 /// it created) — inode + kind inline, the name copied out via `CopyToCaller` —
-/// and `readdir(1)` reports `NotFound` (end of list). The client emits `0x5D14`
+/// and `readdir(1)` reports `NotFound` (end of list). The client emits [`markers::READDIR_OK`]
 /// only when the entry's inode, kind, and name all match *and* the next index
 /// is refused — asserting indexed listing and the name copy-out across the
 /// process boundary.
@@ -1648,7 +1649,7 @@ pub fn fs_readdir_lists_entries(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
             if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
-                && *value == 0x5D14)
+                && *value == markers::READDIR_OK)
     })
     .ok_or(
         "client didn't confirm readdir listing within 30s — the indexed readdir, the name \

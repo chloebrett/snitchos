@@ -3,24 +3,24 @@
 //! 1. **Connect:** `call` on the bare endpoint cap (`badge == 0` = "attach");
 //!    the server mints `pack(root, READ)` and returns it.
 //! 2. **Stat root:** confirm the root reads back as an empty `Dir` → emit
-//!    `0x57A7` (`fs-stat-root`).
+//!    [`markers::STAT_ROOT_OK`] (`fs-stat-root`).
 //! 3. **Create:** `call` `Request::Create` on the root cap — the filename rides
 //!    as a `UserBuf` the kernel copies across (option D) — and receive the
 //!    freshly-minted child File cap.
 //! 4. **Stat file:** confirm the new node reads back as an empty `File` → emit
-//!    `0x5C7E` (`fs-create-stat`).
-//! 5. **Write/read:** round-trip bytes across the boundary → emit `0x317E`
-//!    (`fs-write-read`).
+//!    [`markers::CREATE_STAT_OK`] (`fs-create-stat`).
+//! 5. **Write/read:** round-trip bytes across the boundary → emit
+//!    [`markers::WRITE_READ_OK`] (`fs-write-read`).
 //! 6. **Rights gate:** `lookup` the file asking READ-only and try to write
 //!    through that attenuated cap — the FS refuses + snitches `snitchos.fs.denied`;
-//!    a READ|WRITE lookup then writes successfully → emit `0x600D`
-//!    (`fs-lookup-rights-gate`).
+//!    a READ|WRITE lookup then writes successfully → emit
+//!    [`markers::WRITE_AUTHORIZED_OK`] (`fs-lookup-rights-gate`).
 
 #![no_std]
 #![no_main]
 
 use fs_core::{FsError, InodeId, NodeKind, Stat};
-use fs_proto::{FileRights, Op, Request, Response, UserBuf};
+use fs_proto::{markers, FileRights, Op, Request, Response, UserBuf};
 use snitchos_user::{Endpoint, endpoint, entry, telemetry, tracer};
 
 /// Stat `cap` and return the decoded `Stat`, or `None` on any failure. The
@@ -48,7 +48,7 @@ fn main() {
         && s.kind == NodeKind::Dir
         && s.size == 0
     {
-        let _ = telemetry().emit(0x57A7);
+        let _ = telemetry().emit(markers::STAT_ROOT_OK);
     }
 
     // Create "data" under the root → a child File cap in the reply.
@@ -74,7 +74,7 @@ fn main() {
         && s.kind == NodeKind::File
         && s.size == 0
     {
-        let _ = telemetry().emit(0x5C7E);
+        let _ = telemetry().emit(markers::CREATE_STAT_OK);
     }
 
     // Write "hi" (data rides in via CopyFromCaller), then read it back (out via
@@ -113,7 +113,7 @@ fn main() {
         && n == 2
         && buf == *b"hi"
     {
-        let _ = telemetry().emit(0x317E);
+        let _ = telemetry().emit(markers::WRITE_READ_OK);
     }
 
     // List the root directory: readdir(0) returns the one entry ("data"), its
@@ -142,7 +142,7 @@ fn main() {
                 Ok(Response::Err(FsError::NotFound))
             )
         {
-            let _ = telemetry().emit(0x5D14);
+            let _ = telemetry().emit(markers::READDIR_OK);
         }
     }
 
@@ -184,7 +184,7 @@ fn main() {
         if let Ok((words, _)) = Endpoint::from_raw_handle(rw).call(write_hi.encode())
             && matches!(Response::decode(Op::Write, words), Ok(Response::Count(_)))
         {
-            let _ = telemetry().emit(0x600D);
+            let _ = telemetry().emit(markers::WRITE_AUTHORIZED_OK);
         }
     }
 
@@ -204,7 +204,7 @@ fn main() {
         if let Ok((gone, _)) = gone
             && matches!(Response::decode(Op::Lookup, gone), Ok(Response::Err(FsError::NotFound)))
         {
-            let _ = telemetry().emit(0xDE1E);
+            let _ = telemetry().emit(markers::REMOVE_OK);
         }
     }
 }

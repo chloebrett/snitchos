@@ -1723,6 +1723,7 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "ctrlc",
+ "fs-proto",
  "itest-harness",
  "protocol",
  "snitchos-abi",

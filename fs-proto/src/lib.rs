@@ -14,6 +14,8 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod markers;
+
 use fs_core::{FsError, InodeId, NodeKind, Stat};
 
 /// The IPC message width, re-exported from the shared ABI — the wire layouts
