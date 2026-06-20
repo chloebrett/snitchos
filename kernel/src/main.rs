@@ -21,6 +21,7 @@ mod panic;
 mod sbi;
 mod sched;
 mod smp;
+mod syscall;
 mod trap;
 mod workloads;
 

@@ -7,8 +7,9 @@
 //! pointer to `trap_handler`, then restore everything and `sret`.
 //!
 //! The U-mode `ecall` surface — the syscall demux and every `handle_*`
-//! handler — lives in [`syscall`]; this module keeps the trap/IRQ entry
-//! machinery (timer, CSR setup, the `TrapFrame` layout, fault parking).
+//! handler — lives in [`crate::syscall`] (one module per call type); this
+//! module keeps the trap/IRQ entry machinery (timer, CSR setup, the
+//! `TrapFrame` layout, fault parking).
 
 core::arch::global_asm!(include_str!("trap.S"));
 
@@ -17,7 +18,6 @@ core::arch::global_asm!(include_str!("trap.S"));
 /// module. Re-exported at the crate root so call sites stay `crate::user`,
 /// `crate::ipc`.
 pub mod ipc;
-mod syscall;
 pub mod user;
 
 use core::arch::asm;
@@ -156,7 +156,7 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
             // SAFETY: `frame` points at the `TrapFrame` `trap_entry` just
             // built on this hart's kernel stack; we are its sole accessor
             // for the duration of the handler.
-            syscall::handle_user_ecall(unsafe { &mut *frame });
+            crate::syscall::handle_user_ecall(unsafe { &mut *frame });
         }
         // Instruction/load/store page fault (codes 12/13/15) from U-mode is
         // the isolation firewall catching userspace touching memory it has no
