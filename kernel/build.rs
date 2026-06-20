@@ -5,6 +5,31 @@ use std::process::{Command, Stdio};
 /// as the kernel (their own `user.ld` places them at a fixed low-half VA).
 const USER_TARGET: &str = "riscv64gc-unknown-none-elf";
 
+/// The embedded userspace programs: `(binary name, env var)`. The build embeds
+/// each freshly-built ELF under its env var, consumed by
+/// `include_bytes!(env!(...))` in `src/trap/user.rs`. One row per program — the
+/// single place the build enumerates them (the kernel-side registry pairs with
+/// this; see the workload-registry refactor).
+const USER_PROGRAMS: &[(&str, &str)] = &[
+    ("hello", "SNITCHOS_USER_ELF"),
+    ("faulter", "SNITCHOS_FAULTER_ELF"),
+    ("span-flood", "SNITCHOS_SPAN_FLOOD_ELF"),
+    ("worker_a", "SNITCHOS_WORKER_A_ELF"),
+    ("worker_b", "SNITCHOS_WORKER_B_ELF"),
+    ("heap-grow", "SNITCHOS_HEAP_GROW_ELF"),
+    ("user_hog", "SNITCHOS_USER_HOG_ELF"),
+    ("syscall_hog", "SNITCHOS_SYSCALL_HOG_ELF"),
+    ("ipc-sender", "SNITCHOS_IPC_SENDER_ELF"),
+    ("ipc-receiver", "SNITCHOS_IPC_RECEIVER_ELF"),
+    ("rpc-client", "SNITCHOS_RPC_CLIENT_ELF"),
+    ("rpc-server", "SNITCHOS_RPC_SERVER_ELF"),
+    ("badge-mint", "SNITCHOS_BADGE_MINT_ELF"),
+    ("badge-handout-server", "SNITCHOS_BADGE_HANDOUT_SERVER_ELF"),
+    ("badge-handout-client", "SNITCHOS_BADGE_HANDOUT_CLIENT_ELF"),
+    ("fs-server", "SNITCHOS_FS_SERVER_ELF"),
+    ("fs-client", "SNITCHOS_FS_CLIENT_ELF"),
+];
+
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     println!("cargo:rustc-link-arg=-T{dir}/linker.ld");
@@ -14,9 +39,9 @@ fn main() {
     build_and_embed_user(&dir);
 }
 
-/// Build the userspace programs (`hello` + `faulter`) for their bare U-mode
-/// target and embed the freshly-built ELFs via `rustc-env` (consumed by
-/// `include_bytes!(env!(...))` in `src/user.rs`).
+/// Build the userspace programs (the `hello` + `fs` crates' binaries) for their
+/// bare U-mode target and embed the freshly-built ELFs via `rustc-env` (consumed
+/// by `include_bytes!(env!(...))` in `src/trap/user.rs`), one per [`USER_PROGRAMS`] row.
 ///
 /// Self-contained on purpose: a plain `cargo build -p kernel --target
 /// riscv64gc-unknown-none-elf` produces a current embed with no `xtask`
@@ -69,23 +94,9 @@ fn build_and_embed_user(kernel_dir: &str) {
     );
 
     let bin_dir = format!("{user_target_dir}/{USER_TARGET}/{profile}");
-    embed(&format!("{bin_dir}/hello"), "SNITCHOS_USER_ELF");
-    embed(&format!("{bin_dir}/faulter"), "SNITCHOS_FAULTER_ELF");
-    embed(&format!("{bin_dir}/span-flood"), "SNITCHOS_SPAN_FLOOD_ELF");
-    embed(&format!("{bin_dir}/worker_a"), "SNITCHOS_WORKER_A_ELF");
-    embed(&format!("{bin_dir}/worker_b"), "SNITCHOS_WORKER_B_ELF");
-    embed(&format!("{bin_dir}/heap-grow"), "SNITCHOS_HEAP_GROW_ELF");
-    embed(&format!("{bin_dir}/user_hog"), "SNITCHOS_USER_HOG_ELF");
-    embed(&format!("{bin_dir}/syscall_hog"), "SNITCHOS_SYSCALL_HOG_ELF");
-    embed(&format!("{bin_dir}/ipc-sender"), "SNITCHOS_IPC_SENDER_ELF");
-    embed(&format!("{bin_dir}/ipc-receiver"), "SNITCHOS_IPC_RECEIVER_ELF");
-    embed(&format!("{bin_dir}/rpc-client"), "SNITCHOS_RPC_CLIENT_ELF");
-    embed(&format!("{bin_dir}/rpc-server"), "SNITCHOS_RPC_SERVER_ELF");
-    embed(&format!("{bin_dir}/badge-mint"), "SNITCHOS_BADGE_MINT_ELF");
-    embed(&format!("{bin_dir}/badge-handout-server"), "SNITCHOS_BADGE_HANDOUT_SERVER_ELF");
-    embed(&format!("{bin_dir}/badge-handout-client"), "SNITCHOS_BADGE_HANDOUT_CLIENT_ELF");
-    embed(&format!("{bin_dir}/fs-server"), "SNITCHOS_FS_SERVER_ELF");
-    embed(&format!("{bin_dir}/fs-client"), "SNITCHOS_FS_CLIENT_ELF");
+    for (bin, env_var) in USER_PROGRAMS {
+        embed(&format!("{bin_dir}/{bin}"), env_var);
+    }
 
     // Rebuild the embed whenever a user program — or its only dependency, the
     // `abi` crate — changes. Directory paths are watched recursively by cargo,
