@@ -182,10 +182,6 @@ pub fn cap_denied_metric_id() -> Option<StringId> {
     CAP_DENIED_METRIC.get().copied()
 }
 
-/// Hart-1 entry for `workload=userspace`: run the `hello` program.
-pub extern "C" fn user_main_entry() -> ! {
-    run(HELLO_ELF)
-}
 
 /// Hart-1 entry for `workload=userspace-fault`: run the isolation probe.
 pub extern "C" fn faulter_main_entry() -> ! {
@@ -280,23 +276,101 @@ pub extern "C" fn badge_handout_client_main_entry() -> ! {
     run_ipc(BADGE_HANDOUT_CLIENT_ELF, ep, kernel_core::cap::Rights::SEND)
 }
 
-/// Entry for `workload=fs`: the FS server, granted `RECV | MINT` — it mints a
-/// root File cap on connect and (step 2b) serves the filesystem.
-pub extern "C" fn fs_server_main_entry() -> ! {
-    use kernel_core::cap::Rights;
-    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before fs server runs");
-    // The FS server's *only* telemetry is its rights-gate snitch, so its one
-    // bootstrap sink is bound to the denial gauge rather than the shared user
-    // counter — the cap names where it writes (see `fs_denied_metric_id`).
-    let counter = fs_denied_metric_id().expect("fs denial gauge registered before fs server runs");
-    run_ipc_counter(FS_SERVER_ELF, ep, Rights::RECV | Rights::MINT, counter)
+// ---- Program registry --------------------------------------------------
+//
+// One `ProgramSpec` per userspace program describes everything that varied
+// across the old per-program entry functions (ELF, endpoint rights, telemetry
+// counter). [`spawn_program`] hands a spec's address to the task as its generic
+// `arg` word; the single [`program_entry`] reads it back and launches — so the
+// 18 near-identical `*_main_entry` functions collapse into this one. (Migrated
+// incrementally: `fs` first; the rest follow.)
+
+/// How a userspace program is launched, beyond its embedded ELF.
+enum Launch {
+    /// Ambient authorities only (telemetry + span sinks); no endpoint.
+    Plain,
+    /// Also granted an `Endpoint` cap over the shared `DEMO_ENDPOINT` with
+    /// `rights_bits`, its bootstrap telemetry sink bound to `counter`.
+    Ipc { rights_bits: u32, counter: CounterKind },
 }
 
-/// Entry for `workload=fs`: the FS client, granted `SEND` — it attaches and
-/// receives the root File cap.
-pub extern "C" fn fs_client_main_entry() -> ! {
-    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before fs client runs");
-    run_ipc(FS_CLIENT_ELF, ep, kernel_core::cap::Rights::SEND)
+/// Which pre-registered counter a program's bootstrap telemetry sink binds to.
+enum CounterKind {
+    /// The shared `snitchos.user.telemetry_total`.
+    User,
+    /// The FS rights-gate denial gauge `snitchos.fs.denied` (the FS server's
+    /// sole telemetry).
+    FsDenied,
+}
+
+/// A userspace program: its embedded ELF plus how to launch it. One `'static`
+/// per program; [`spawn_program`] hands its address to the task as the generic
+/// `arg` word and [`program_entry`] reads it back.
+pub struct ProgramSpec {
+    elf: &'static [u8],
+    launch: Launch,
+}
+
+/// `workload=userspace`: the `hello` demo — ambient telemetry only, no endpoint.
+pub static HELLO: ProgramSpec = ProgramSpec { elf: HELLO_ELF, launch: Launch::Plain };
+
+/// `workload=fs`: the FS server (`RECV | MINT`), telemetry bound to the denial
+/// gauge — its only telemetry (see [`fs_denied_metric_id`]).
+pub static FS_SERVER: ProgramSpec = ProgramSpec {
+    elf: FS_SERVER_ELF,
+    launch: Launch::Ipc {
+        rights_bits: kernel_core::cap::Rights::RECV.bits() | kernel_core::cap::Rights::MINT.bits(),
+        counter: CounterKind::FsDenied,
+    },
+};
+
+/// `workload=fs`: the FS client (`SEND`), default user telemetry.
+pub static FS_CLIENT: ProgramSpec = ProgramSpec {
+    elf: FS_CLIENT_ELF,
+    launch: Launch::Ipc { rights_bits: kernel_core::cap::Rights::SEND.bits(), counter: CounterKind::User },
+};
+
+/// The single entry function for every userspace program. The scheduler has
+/// switched us in and our `arg` word holds our [`ProgramSpec`] address (set by
+/// [`spawn_program`]); resolve it and launch. Never returns.
+pub extern "C" fn program_entry() -> ! {
+    let arg = crate::sched::current_task_arg();
+    // SAFETY: `arg` is the address of a `'static ProgramSpec` set by
+    // `spawn_program` at spawn time. A `'static` lives for the whole kernel
+    // lifetime and nothing mutates it, so dereferencing it here is sound.
+    let spec: &'static ProgramSpec = unsafe { &*(arg as *const ProgramSpec) };
+    match &spec.launch {
+        Launch::Plain => run(spec.elf),
+        Launch::Ipc { rights_bits, counter } => {
+            let ep = *crate::ipc::DEMO_ENDPOINT
+                .get()
+                .expect("ipc endpoint created before an IPC program runs");
+            let rights = kernel_core::cap::Rights::from_bits(*rights_bits);
+            let counter = match counter {
+                CounterKind::User => user_metric_id(),
+                CounterKind::FsDenied => fs_denied_metric_id(),
+            }
+            .expect("program telemetry counter registered before entry");
+            run_ipc_counter(spec.elf, ep, rights, counter)
+        }
+    }
+}
+
+/// Spawn `program` on `hart` as task `name`, stashing its [`ProgramSpec`]
+/// address in the task's `arg` word for [`program_entry`]. The userspace
+/// counterpart to [`crate::sched::spawn_on`].
+pub fn spawn_program(hart: usize, name: &str, program: &'static ProgramSpec) -> kernel_core::sched::TaskId {
+    spawn_program_with_priority(hart, name, program, kernel_core::sched::Priority::Normal)
+}
+
+/// Like [`spawn_program`] but at an explicit scheduling priority.
+pub fn spawn_program_with_priority(
+    hart: usize,
+    name: &str,
+    program: &'static ProgramSpec,
+    priority: kernel_core::sched::Priority,
+) -> kernel_core::sched::TaskId {
+    crate::sched::spawn_on_with_arg(hart, name, program_entry, core::ptr::from_ref(program) as usize, priority)
 }
 
 /// Build a fresh address space, grant the process its bootstrap

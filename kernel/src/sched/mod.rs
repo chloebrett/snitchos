@@ -160,6 +160,13 @@ pub struct Task {
     /// (The task's *wait clock* lives on the runqueue `Candidate`, not here — it
     /// changes per enqueue, so it belongs with the queue entry.)
     pub priority: Priority,
+    /// A generic per-task argument word, set at spawn and read by the task once
+    /// it runs (via [`current_task_arg`]). The scheduler treats it as opaque —
+    /// it carries no meaning here. Userspace program launch uses it as a program
+    /// selector (the spec address); `0` for tasks spawned without an arg. Plain
+    /// field: written once on the owned `Task` before it enters the table, then
+    /// read by the task itself.
+    pub arg: usize,
     /// Total time on-CPU in `time`-CSR ticks. Bumped on every yield
     /// out of this task; read by the heartbeat to emit
     /// `snitchos.task.<name>.cpu_time_ticks`. `Relaxed`: counter.
@@ -228,6 +235,7 @@ impl Task {
             address_space: AtomicUsize::new(0),
             process: AtomicPtr::new(core::ptr::null_mut()),
             priority: Priority::Normal,
+            arg: 0,
             cpu_time_ticks: AtomicU64::new(0),
             runs: AtomicU64::new(0),
             cpu_time_metric,
@@ -389,6 +397,16 @@ pub fn current_task_id() -> TaskId {
     TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed))
 }
 
+/// The generic `arg` word of the task running on this hart, or `0` if it was
+/// spawned without one. Set by [`spawn_on_with_arg`] and read once the task
+/// starts — userspace `program_entry` uses it as a program selector (a
+/// `ProgramSpec` address) so one generic entry serves every program.
+pub fn current_task_arg() -> usize {
+    let id = current_task_id();
+    let sched = SCHEDULER.lock();
+    sched.tasks.iter().find(|t| t.id == id).map_or(0, |t| t.arg)
+}
+
 /// Whether this hart's runqueue holds any `Ready` task (the caller, running, is
 /// off-queue). Idle loops check this before `wfi`: a hart must never sleep
 /// while it has runnable work, or a just-woken task (e.g. an IPC receiver the
@@ -541,6 +559,21 @@ pub fn spawn_on_with_priority(
     entry: extern "C" fn() -> !,
     priority: Priority,
 ) -> TaskId {
+    spawn_on_with_arg(hart, name, entry, 0, priority)
+}
+
+/// Like [`spawn_on_with_priority`] but also stashes a generic `arg` word on the
+/// task, readable once it runs via [`current_task_arg`]. The scheduler carries
+/// `arg` opaquely; userspace launch uses it as a program selector so one generic
+/// entry can serve every program. `arg = 0` is the no-argument default that the
+/// other `spawn*` helpers pass.
+pub fn spawn_on_with_arg(
+    hart: usize,
+    name: &str,
+    entry: extern "C" fn() -> !,
+    arg: usize,
+    priority: Priority,
+) -> TaskId {
     debug_assert!(hart < crate::percpu::MAX_HARTS);
     let id = alloc_task_id();
     let stack: Box<Stack> = Box::new(Stack::new_zeroed());
@@ -548,6 +581,7 @@ pub fn spawn_on_with_priority(
 
     let mut task = Box::new(Task::new_bare(id, String::from(name), TaskState::Ready));
     task.priority = priority;
+    task.arg = arg;
     // SAFETY: we have unique ownership of `task`; nothing else
     // references it yet.
     unsafe {

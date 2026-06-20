@@ -443,10 +443,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         }
         // v0.7a first userspace: register the ambient telemetry counter on
         // hart 0, then run the user program on hart 1 (hart 0 keeps
-        // heartbeating). `user_main_entry` loads + drops to U-mode.
+        // heartbeating). `program_entry` loads + drops to U-mode.
         Some(WorkloadKind::Userspace) => {
             user::init_metric();
-            let _ = sched::spawn_on(1, "user_main", user::user_main_entry);
+            let _ = user::spawn_program(1, "user_main", &user::HELLO);
         }
         // Isolation probe: the `faulter` program reads a kernel VA and the
         // kernel counts the U-fault. Same hart-1 placement as Userspace.
@@ -552,8 +552,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         Some(WorkloadKind::Fs) => {
             user::init_metric();
             crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
-            let _ = sched::spawn_on(1, "fs_server", user::fs_server_main_entry);
-            let _ = sched::spawn_on(1, "fs_client", user::fs_client_main_entry);
+            let _ = user::spawn_program(1, "fs_server", &user::FS_SERVER);
+            let _ = user::spawn_program(1, "fs_client", &user::FS_CLIENT);
         }
         _ => {}
     }
