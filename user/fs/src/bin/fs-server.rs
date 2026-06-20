@@ -99,8 +99,11 @@ fn main() {
                 };
                 let _ = reply(reply_handle, resp.encode());
             }
-            // Remaining ops (remove/readdir): Step 4b/4c.
-            Request::Remove { .. } | Request::Readdir { .. } => {
+            Request::Remove { name } => {
+                remove(&mut fs, reply_handle, badge, name);
+            }
+            // Remaining op (readdir): Step 4c.
+            Request::Readdir { .. } => {
                 let _ = reply(reply_handle, Response::Err(FsError::Unsupported).encode());
             }
         }
@@ -119,14 +122,24 @@ fn create(
     name: fs_proto::UserBuf,
     kind: fs_core::NodeKind,
 ) {
-    let mut buf = [0u8; NAME_CAP];
-    let created = copy_from_caller(reply_handle, name.ptr as usize, name.len as usize, buf.as_mut_ptr() as usize)
-        .ok()
-        .and_then(|n| core::str::from_utf8(&buf[..n]).ok())
-        .map_or(Err(FsError::NameTooLong), |s| fs.create(dir.inode, s, kind));
-
+    let created = with_name(reply_handle, name, |s| fs.create(dir.inode, s, kind));
     let child_rights = dir.rights & (FileRights::READ | FileRights::WRITE);
     reply_minted_child(reply_handle, created, child_rights);
+}
+
+/// Pull a filename from the caller (option-D copy) and hand it to `f`. The
+/// shared name-copy prologue of `create`/`lookup`/`remove`: on a copy failure
+/// or a non-UTF-8 name it yields `NameTooLong` without calling `f`.
+fn with_name<R>(
+    reply_handle: usize,
+    name: fs_proto::UserBuf,
+    f: impl FnOnce(&str) -> Result<R, FsError>,
+) -> Result<R, FsError> {
+    let mut buf = [0u8; NAME_CAP];
+    copy_from_caller(reply_handle, name.ptr as usize, name.len as usize, buf.as_mut_ptr() as usize)
+        .ok()
+        .and_then(|n| core::str::from_utf8(&buf[..n]).ok())
+        .map_or(Err(FsError::NameTooLong), f)
 }
 
 /// Handle `lookup`: pull the name across, resolve it to a child inode, and — on
@@ -140,14 +153,20 @@ fn lookup(
     name: fs_proto::UserBuf,
     requested: FileRights,
 ) {
-    let mut buf = [0u8; NAME_CAP];
-    let found = copy_from_caller(reply_handle, name.ptr as usize, name.len as usize, buf.as_mut_ptr() as usize)
-        .ok()
-        .and_then(|n| core::str::from_utf8(&buf[..n]).ok())
-        .map_or(Err(FsError::NameTooLong), |s| fs.lookup(dir.inode, s));
-
+    let found = with_name(reply_handle, name, |s| fs.lookup(dir.inode, s));
     let child_rights = dir.rights & requested;
     reply_minted_child(reply_handle, found, child_rights);
+}
+
+/// Handle `remove`: pull the name across, unlink it from the directory, and
+/// reply `Removed` (or the FS error). Ungated in the flat core — any cap to the
+/// directory may remove (directory rights are a deferred follow-on).
+fn remove(fs: &mut RamFs, reply_handle: usize, dir: Badge, name: fs_proto::UserBuf) {
+    let resp = match with_name(reply_handle, name, |s| fs.remove(dir.inode, s)) {
+        Ok(()) => Response::Removed,
+        Err(e) => Response::Err(e),
+    };
+    let _ = reply(reply_handle, resp.encode());
 }
 
 /// Reply to a `create`/`lookup`: on a resolved `child` inode, mint a File cap

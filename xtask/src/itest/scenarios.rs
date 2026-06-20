@@ -1555,6 +1555,24 @@ pub fn fs_lookup_rights_gate(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.10 FS `remove` (`workload=fs`), step 4b: the client removes the file it
+/// created, then looks the name up again and confirms the FS now reports
+/// `NotFound`. The client emits `0xDE1E` only when `Remove` succeeds *and* the
+/// follow-up `lookup` is refused — so this asserts the unlink actually took
+/// effect across the process boundary, not merely that the server replied.
+pub fn fs_remove_unlinks(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value == 0xDE1E)
+    })
+    .ok_or(
+        "client didn't confirm remove→lookup-gone within 30s — the Remove name-copy or \
+         RamFs::remove didn't unlink the file across the FS boundary",
+    )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside
