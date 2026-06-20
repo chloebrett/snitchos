@@ -1573,6 +1573,26 @@ pub fn fs_remove_unlinks(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.10 FS `readdir` (`workload=fs`), step 4c: the client lists the root
+/// directory. Indexed `readdir(0)` returns the single entry (`"data"`, the file
+/// it created) — inode + kind inline, the name copied out via `CopyToCaller` —
+/// and `readdir(1)` reports `NotFound` (end of list). The client emits `0x5D14`
+/// only when the entry's inode, kind, and name all match *and* the next index
+/// is refused — asserting indexed listing and the name copy-out across the
+/// process boundary.
+pub fn fs_readdir_lists_entries(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value == 0x5D14)
+    })
+    .ok_or(
+        "client didn't confirm readdir listing within 30s — the indexed readdir, the name \
+         copy-out, or the end-of-list NotFound didn't round-trip across the FS boundary",
+    )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

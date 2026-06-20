@@ -102,9 +102,8 @@ fn main() {
             Request::Remove { name } => {
                 remove(&mut fs, reply_handle, badge, name);
             }
-            // Remaining op (readdir): Step 4c.
-            Request::Readdir { .. } => {
-                let _ = reply(reply_handle, Response::Err(FsError::Unsupported).encode());
+            Request::Readdir { index, name_dst } => {
+                readdir(&mut fs, reply_handle, badge, index, name_dst);
             }
         }
     }
@@ -164,6 +163,28 @@ fn lookup(
 fn remove(fs: &mut RamFs, reply_handle: usize, dir: Badge, name: fs_proto::UserBuf) {
     let resp = match with_name(reply_handle, name, |s| fs.remove(dir.inode, s)) {
         Ok(()) => Response::Removed,
+        Err(e) => Response::Err(e),
+    };
+    let _ = reply(reply_handle, resp.encode());
+}
+
+/// Handle `readdir`: list the directory and return the entry at `index` — its
+/// inode + kind inline, its name copied out into the caller's `name_dst` buffer
+/// (option-D `CopyToCaller`). An `index` past the last entry replies `NotFound`,
+/// the client's end-of-list signal. Ungated (a metadata op).
+fn readdir(fs: &mut RamFs, reply_handle: usize, dir: Badge, index: u64, name_dst: fs_proto::UserBuf) {
+    let resp = match fs.readdir(dir.inode) {
+        Ok(entries) => match entries.get(index as usize) {
+            Some(entry) => {
+                let name = entry.name.as_bytes();
+                let n = name.len().min(name_dst.len as usize);
+                match copy_to_caller(reply_handle, name.as_ptr() as usize, n, name_dst.ptr as usize) {
+                    Ok(_) => Response::Entry { ino: entry.ino, kind: entry.kind, name_len: n as u64 },
+                    Err(_) => Response::Err(FsError::Unsupported),
+                }
+            }
+            None => Response::Err(FsError::NotFound),
+        },
         Err(e) => Response::Err(e),
     };
     let _ = reply(reply_handle, resp.encode());

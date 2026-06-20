@@ -19,7 +19,7 @@
 #![no_std]
 #![no_main]
 
-use fs_core::{FsError, NodeKind, Stat};
+use fs_core::{FsError, InodeId, NodeKind, Stat};
 use fs_proto::{FileRights, Op, Request, Response, UserBuf};
 use snitchos_user::{Endpoint, endpoint, entry, telemetry};
 
@@ -100,6 +100,33 @@ fn main() {
         && buf == *b"hi"
     {
         let _ = telemetry().emit(0x317E);
+    }
+
+    // List the root directory: readdir(0) returns the one entry ("data"), its
+    // name copied out via CopyToCaller; readdir(1) reports end-of-list. Runs
+    // while "data" still exists — the remove below empties the directory.
+    let mut entry_name = [0u8; 8];
+    let name_dst = UserBuf {
+        ptr: entry_name.as_mut_ptr() as u64,
+        len: entry_name.len() as u64,
+    };
+    if let Ok((e0, _)) = root.call(Request::Readdir { index: 0, name_dst }.encode())
+        && let Ok(Response::Entry {
+            ino,
+            kind,
+            name_len,
+        }) = Response::decode(Op::Readdir, e0)
+        && ino == InodeId::new(1)
+        && kind == NodeKind::File
+        && name_len == 4
+        && entry_name[..4] == *b"data"
+        && let Ok((e1, _)) = root.call(Request::Readdir { index: 1, name_dst }.encode())
+        && matches!(
+            Response::decode(Op::Readdir, e1),
+            Ok(Response::Err(FsError::NotFound))
+        )
+    {
+        let _ = telemetry().emit(0x5D14);
     }
 
     // Rights gate: look the file up asking for READ only — the server mints an
