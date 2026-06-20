@@ -372,67 +372,56 @@ fn emit_heap_smoke_metrics(m: &Metrics, count: i64) {
 #[cfg(feature = "itest-workloads")]
 fn emit_storm_metrics(m: &Metrics, count: i64) {
     use kernel_core::bootargs::WorkloadKind;
-    match boot_workload::selected() {
-        Some(WorkloadKind::SpawnStorm) => {
+    // Only the storm workloads emit here; every other selection (default /
+    // Smp* / OOM / userspace / IPC / FS) contributes no storm metrics.
+    // `WorkloadKind::is_storm` (host-tested in kernel-core) is the single
+    // source of truth, so a new *non-storm* workload needs no change here.
+    let Some(kind) = boot_workload::selected().filter(|k| k.is_storm()) else {
+        return;
+    };
+    match kind {
+        WorkloadKind::SpawnStorm => {
             if count == 1 {
                 crate::storms::spawn_storm::run();
             }
             emit!(m, spawn_storm_acks = crate::storms::spawn_storm::ACK_COUNTER.load(Ordering::Relaxed));
         }
-        Some(WorkloadKind::IpiPong) => {
+        WorkloadKind::IpiPong => {
             if count == 1 {
                 crate::storms::ipi_pong::run();
             }
             emit!(m, ipi_pong_sends = crate::storms::ipi_pong::SENDS.load(Ordering::Relaxed));
         }
-        Some(WorkloadKind::ShootdownStorm) => {
+        WorkloadKind::ShootdownStorm => {
             if count == 1 {
                 crate::storms::shootdown::run();
             }
             emit!(m, shootdown_storm_sends = crate::storms::shootdown::SENDS.load(Ordering::Relaxed));
         }
-        Some(WorkloadKind::MutexStorm) => {
+        WorkloadKind::MutexStorm => {
             emit!(m, mutex_storm_acquires_hart0 = crate::storms::mutex_storm::ACQUIRES_HART0.load(Ordering::Relaxed));
             emit!(m, mutex_storm_acquires_hart1 = crate::storms::mutex_storm::ACQUIRES_HART1.load(Ordering::Relaxed));
         }
-        Some(WorkloadKind::VirtioStorm) => {
+        WorkloadKind::VirtioStorm => {
             emit!(m, virtio_storm_hart0_emits      = crate::storms::virtio_storm::HART0_EMITS.load(Ordering::Relaxed));
             emit!(m, virtio_storm_hart1_iterations = crate::storms::virtio_storm::HART1_ITERATIONS.load(Ordering::Relaxed));
         }
-        Some(WorkloadKind::TlbShootdownVisible) => {
+        WorkloadKind::TlbShootdownVisible => {
             if count == 1 {
                 crate::storms::tlb_shootdown::run();
             }
             emit!(m, tlb_remap_rounds = crate::storms::tlb_shootdown::ROUNDS.load(Ordering::Relaxed));
             emit!(m, tlb_stale_reads  = crate::storms::tlb_shootdown::STALE_READS.load(Ordering::Relaxed));
         }
-        Some(WorkloadKind::PingPong) => {
+        WorkloadKind::PingPong => {
             if count == 1 {
                 crate::storms::ping_pong::run();
             }
             emit!(m, ping_turns = crate::storms::ping_pong::PING_TURNS.load(Ordering::Relaxed));
             emit!(m, pong_turns = crate::storms::ping_pong::PONG_TURNS.load(Ordering::Relaxed));
         }
-        // No storm selected (default / Smp* / OOM / userspace): nothing to emit.
-        None
-        | Some(WorkloadKind::Smp)
-        | Some(WorkloadKind::SmpSpsc)
-        | Some(WorkloadKind::SmpSpscBatch)
-        | Some(WorkloadKind::FrameOom)
-        | Some(WorkloadKind::HeapOom)
-        | Some(WorkloadKind::Userspace)
-        | Some(WorkloadKind::UserspaceFault)
-        | Some(WorkloadKind::UserspaceSpanFlood)
-        | Some(WorkloadKind::Workers)
-        | Some(WorkloadKind::HeapGrow)
-        | Some(WorkloadKind::UserHog)
-        | Some(WorkloadKind::SyscallHog)
-        | Some(WorkloadKind::Priorities)
-        | Some(WorkloadKind::BlockWake)
-        | Some(WorkloadKind::Ipc)
-        | Some(WorkloadKind::IpcRpc)
-        | Some(WorkloadKind::BadgeMint)
-        | Some(WorkloadKind::BadgeHandout)
-        | Some(WorkloadKind::Fs) => {}
+        // Only storms reach here (gated by `is_storm` above). A new storm
+        // variant without an arm trips this in debug builds (the itest profile).
+        _ => debug_assert!(false, "is_storm() but no emit_storm_metrics arm: {kind:?}"),
     }
 }
