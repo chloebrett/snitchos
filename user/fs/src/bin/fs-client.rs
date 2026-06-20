@@ -9,12 +9,18 @@
 //!    freshly-minted child File cap.
 //! 4. **Stat file:** confirm the new node reads back as an empty `File` → emit
 //!    `0x5C7E` (`fs-create-stat`).
+//! 5. **Write/read:** round-trip bytes across the boundary → emit `0x317E`
+//!    (`fs-write-read`).
+//! 6. **Rights gate:** `lookup` the file asking READ-only and try to write
+//!    through that attenuated cap — the FS refuses + snitches `snitchos.fs.denied`;
+//!    a READ|WRITE lookup then writes successfully → emit `0x600D`
+//!    (`fs-lookup-rights-gate`).
 
 #![no_std]
 #![no_main]
 
 use fs_core::{NodeKind, Stat};
-use fs_proto::{Op, Request, Response, UserBuf};
+use fs_proto::{FileRights, Op, Request, Response, UserBuf};
 use snitchos_user::{endpoint, entry, telemetry, Endpoint};
 
 /// Stat `cap` and return the decoded `Stat`, or `None` on any failure.
@@ -85,5 +91,33 @@ fn main() {
         && buf == *b"hi"
     {
         let _ = telemetry().emit(0x317E);
+    }
+
+    // Rights gate: look the file up asking for READ only — the server mints an
+    // attenuated `(file, READ)` cap — then try to write through it. The FS gate
+    // must refuse it and snitch `snitchos.fs.denied`; the client only triggers
+    // it (the refusal is observed server-side, not here).
+    let lookup_name = UserBuf { ptr: name.as_ptr() as u64, len: name.len() as u64 };
+    let write_hi = Request::Write {
+        offset: 0,
+        src: UserBuf { ptr: data.as_ptr() as u64, len: data.len() as u64 },
+    };
+    if let Ok((_l, Some(ro))) =
+        root.call(Request::Lookup { name: lookup_name, rights: FileRights::READ }.encode())
+    {
+        let _ = Endpoint::from_raw_handle(ro).call(write_hi.encode());
+    }
+
+    // Positive control: look the same file up asking for READ|WRITE; the write
+    // through *that* cap must succeed — proving the gate refuses only the
+    // under-authorized write, not every write.
+    if let Ok((_l, Some(rw))) = root
+        .call(Request::Lookup { name: lookup_name, rights: FileRights::READ | FileRights::WRITE }.encode())
+    {
+        if let Ok((words, _)) = Endpoint::from_raw_handle(rw).call(write_hi.encode())
+            && matches!(Response::decode(Op::Write, words), Ok(Response::Count(_)))
+        {
+            let _ = telemetry().emit(0x600D);
+        }
     }
 }

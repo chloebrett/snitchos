@@ -149,6 +149,7 @@ catalog! {
     wfi "fs-stat-root"                    scenarios::fs_stat_root                   [userspace, ipc] {"fs"};
     wfi "fs-create-stat"                  scenarios::fs_create_then_stat            [userspace, ipc] {"fs"};
     wfi "fs-write-read"                   scenarios::fs_write_read_roundtrip        [userspace, ipc] {"fs"};
+    wfi "fs-lookup-rights-gate"           scenarios::fs_lookup_rights_gate          [userspace, ipc] {"fs"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back

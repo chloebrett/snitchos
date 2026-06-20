@@ -109,6 +109,15 @@ static CAP_DENIED_METRIC: Once<StringId> = Once::new();
 /// here. Proves the process terminated cleanly rather than spinning.
 static USER_EXITS_METRIC: Once<StringId> = Once::new();
 
+/// The gauge the **FS server** emits when its rights gate refuses an op — the
+/// userspace filesystem snitching its own authority decision (the kernel only
+/// carries the badge rights, never interprets them). A *gauge*, not a counter:
+/// the value is the structured `fs_proto::Denial` (inode + attempted right)
+/// packed into an `i64`, so "the last denial" is the meaningful reading, not a
+/// rate. Bound into the FS server's bootstrap telemetry sink (its only one),
+/// read here via [`fs_denied_metric_id`].
+static FS_DENIED_METRIC: Once<StringId> = Once::new();
+
 /// A loaded program, ready to enter.
 pub struct Loaded {
     /// The entry-point VA (`e_entry`) to put in `sepc`.
@@ -136,6 +145,7 @@ pub fn init_metric() {
     CAP_GRANTS_METRIC.call_once(|| tracing::register_counter("snitchos.cap.grants_total"));
     CAP_DENIED_METRIC.call_once(|| tracing::register_counter("snitchos.cap.denied_total"));
     USER_EXITS_METRIC.call_once(|| tracing::register_counter("snitchos.user.exits_total"));
+    FS_DENIED_METRIC.call_once(|| tracing::register_gauge("snitchos.fs.denied"));
 }
 
 /// The `StringId` for the userspace telemetry counter (or `None` pre-init).
@@ -156,6 +166,11 @@ pub fn cap_grants_metric_id() -> Option<StringId> {
 /// The `StringId` for the process-exit counter (or `None` pre-init).
 pub fn user_exits_metric_id() -> Option<StringId> {
     USER_EXITS_METRIC.get().copied()
+}
+
+/// The `StringId` for the FS rights-gate denial gauge (or `None` pre-init).
+pub fn fs_denied_metric_id() -> Option<StringId> {
+    FS_DENIED_METRIC.get().copied()
 }
 
 /// The `StringId` for the denied-invocation counter (or `None` pre-init).
@@ -266,7 +281,11 @@ pub extern "C" fn badge_handout_client_main_entry() -> ! {
 pub extern "C" fn fs_server_main_entry() -> ! {
     use kernel_core::cap::Rights;
     let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before fs server runs");
-    run_ipc(FS_SERVER_ELF, ep, Rights::RECV | Rights::MINT)
+    // The FS server's *only* telemetry is its rights-gate snitch, so its one
+    // bootstrap sink is bound to the denial gauge rather than the shared user
+    // counter — the cap names where it writes (see `fs_denied_metric_id`).
+    let counter = fs_denied_metric_id().expect("fs denial gauge registered before fs server runs");
+    run_ipc_counter(FS_SERVER_ELF, ep, Rights::RECV | Rights::MINT, counter)
 }
 
 /// Entry for `workload=fs`: the FS client, granted `SEND` — it attaches and
@@ -341,10 +360,22 @@ fn run(image: &'static [u8]) -> ! {
 ///
 /// [`Endpoint`]: kernel_core::cap::Object::Endpoint
 fn run_ipc(image: &'static [u8], endpoint: kernel_core::ipc::EndpointId, rights: kernel_core::cap::Rights) -> ! {
+    let counter = user_metric_id().expect("userspace telemetry counter registered before entry");
+    run_ipc_counter(image, endpoint, rights, counter)
+}
+
+/// Like [`run_ipc`], but binds the process's bootstrap telemetry sink to an
+/// explicit `counter` rather than the default userspace counter. The FS server
+/// uses this to point its sole sink at the `snitchos.fs.denied` gauge.
+fn run_ipc_counter(
+    image: &'static [u8],
+    endpoint: kernel_core::ipc::EndpointId,
+    rights: kernel_core::cap::Rights,
+    counter: StringId,
+) -> ! {
     use kernel_core::cap::{Capability, Object};
 
     let root_pa = mmu::new_user_root().expect("ipc: no frame for user root page table");
-    let counter = user_metric_id().expect("userspace telemetry counter registered before entry");
     let (process, bootstrap_handle, span_handle) = Process::bootstrap(root_pa, counter);
 
     // Grant the IPC endpoint capability on top of the bootstrap pair.

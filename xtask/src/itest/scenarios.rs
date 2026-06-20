@@ -1443,9 +1443,10 @@ pub fn badge_demux_distinguishes_clients(h: &mut View) -> Result<(), String> {
 pub fn fs_connect_mints_root(h: &mut View) -> Result<(), String> {
     use protocol::{CapEventKind, CapObject};
 
-    // pack(InodeId(0), FileRights::READ): inode 0 in bits [0..32), READ (0b001)
-    // in the rights field at bits [32..48). See `fs_proto::Badge`.
-    let root_badge = 1u64 << 32;
+    // pack(InodeId(0), FileRights::READ|WRITE): inode 0 in bits [0..32),
+    // READ|WRITE (0b011) in the rights field at bits [32..48). The root cap is
+    // the ceiling lookup attenuates from, so it must carry WRITE. See `fs_proto::Badge`.
+    let root_badge = 0b011u64 << 32;
     h.wait_for(SEC * 30, |f, _| {
         matches!(
             f,
@@ -1513,6 +1514,43 @@ pub fn fs_write_read_roundtrip(h: &mut View) -> Result<(), String> {
     .ok_or(
         "client didn't confirm write→read round-trip within 30s — bytes didn't survive the \
          cross-AS copy both ways through the FS",
+    )?;
+    Ok(())
+}
+
+/// v0.10 FS rights gate (`workload=fs`), step 4a: the client `lookup`s the
+/// file it created, deliberately requesting **READ-only** — the server mints
+/// `parent ∩ requested = READ` — then attempts a `write` through that
+/// attenuated cap. The FS gate refuses (`Response::Err(Denied)`) and **snitches
+/// the refusal**: it emits the `snitchos.fs.denied` gauge carrying the
+/// structured `(inode, attempted-right)` packed value. As a positive control,
+/// the client then `lookup`s requesting `READ|WRITE` and writes successfully,
+/// emitting `0x600D` — proving the gate refuses the under-authorized write
+/// without over-refusing the authorized one.
+pub fn fs_lookup_rights_gate(h: &mut View) -> Result<(), String> {
+    // The created file is inode 1 (root is 0). The structured snitch packs
+    // `Denial { inode: 1, attempted: WRITE }`: inode 1 in bits [0..32), WRITE
+    // (0b010) in the attempted-right field at bits [32..48). See `fs_proto::Denial`.
+    let denied_value: i64 = (1) | (0b010 << 32);
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.fs.denied")
+                && *value == denied_value)
+    })
+    .ok_or(
+        "no snitchos.fs.denied{inode=1, attempted=WRITE} within 30s — the FS didn't refuse \
+         a WRITE on a READ-only File cap, or didn't snitch the refusal structurally",
+    )?;
+
+    // Positive control: a write through a READ|WRITE-looked-up cap succeeds.
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value == 0x600D)
+    })
+    .ok_or(
+        "client didn't confirm an authorized write through a READ|WRITE lookup within 30s — \
+         the gate may be over-refusing writes that carry the WRITE right",
     )?;
     Ok(())
 }
