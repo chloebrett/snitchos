@@ -1,0 +1,743 @@
+//! U-mode `ecall` dispatch and the syscall handlers.
+//!
+//! [`handle_user_ecall`] is the syscall demux reached from the trap dispatcher
+//! in [`super`]: `a7` selects the syscall, the `handle_*` functions below each
+//! implement one. The authority decisions themselves are the pure, host-tested
+//! `kernel_core::cap` functions; these handlers only marshal the [`TrapFrame`]
+//! registers and act on the result. The trap/IRQ entry machinery (timer, CSR
+//! setup, `TrapFrame` layout) lives in [`super`].
+
+use core::arch::asm;
+use core::sync::atomic::Ordering;
+
+use super::TrapFrame;
+
+/// Handle an `ecall` from U-mode. The v0.7b kernel surface is **invoke a
+/// capability**: `a7` selects the syscall (`Invoke`), `a0` is the handle
+/// into the *calling process's* `CapTable`, `a1` the argument. We resolve
+/// and rights-check against that table (no ambient authority), then advance
+/// `sepc` past the `ecall`.
+pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
+    use snitchos_abi::Syscall;
+    match Syscall::from_usize(frame.a7 as usize) {
+        Some(Syscall::Invoke) => handle_invoke(frame),
+        Some(Syscall::Exit) => handle_exit(), // does not return
+        Some(Syscall::Yield) => crate::sched::yield_now(),
+        Some(Syscall::SpanOpen) => handle_span_open(frame),
+        Some(Syscall::SpanClose) => handle_span_close(frame),
+        Some(Syscall::MapAnon) => handle_map_anon(frame),
+        Some(Syscall::DebugWrite) => handle_debug_write(frame),
+        Some(Syscall::Send) => handle_send(frame),
+        Some(Syscall::Receive) => handle_receive(frame),
+        Some(Syscall::Call) => handle_call(frame),
+        Some(Syscall::Reply) => handle_reply(frame),
+        Some(Syscall::ReplyRecv) => handle_reply_recv(frame),
+        Some(Syscall::MintBadged) => handle_mint_badged(frame),
+        Some(Syscall::CopyFromCaller) => handle_copy_from_caller(frame),
+        Some(Syscall::CopyToCaller) => handle_copy_to_caller(frame),
+        None => {
+            let n = frame.a7 as u8;
+            refuse(frame, n, protocol::RefusalReason::UnknownSyscall);
+        }
+    }
+    // `ecall` is a 4-byte instruction; without advancing past it, `sret`
+    // would re-execute it and we'd trap on it forever. (Not reached for
+    // `Exit` — `handle_exit` never returns.)
+    frame.sepc = frame.sepc.wrapping_add(4);
+}
+
+/// Terminate the calling user process. Snitches `snitchos.user.exits_total`,
+/// clears this hart's current-process pointer (the process is gone), then
+/// hands the hart to its next ready task via `sched::exit_now` — which never
+/// returns. On the userspace workload that next task is `hart_1_main`, whose
+/// idle loop `wfi`s, so the hart goes truly idle rather than busy-spinning.
+/// v0.7b leaks the address space + caps; reclamation is a later milestone.
+fn handle_exit() -> ! {
+    if let Some(id) = crate::user::user_exits_metric_id() {
+        crate::tracing::emit_metric(id, 1);
+    }
+    crate::process::CURRENT_PROCESS
+        .this_cpu()
+        .store(core::ptr::null_mut(), Ordering::Relaxed);
+    crate::sched::exit_now()
+}
+
+/// Capability invocation. Resolve `a0` against the running process's
+/// `CapTable`; on success perform the authorized operation (emit `a1` to
+/// the `TelemetrySink`'s bound counter), else refuse with a nonzero `a0`.
+/// The authority decision itself is the pure, host-tested
+/// [`kernel_core::cap::invoke_telemetry`]; here we only act on its result.
+fn handle_invoke(frame: &mut TrapFrame) {
+    use kernel_core::cap::{Handle, invoke_telemetry};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::Invoke as u8;
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    let handle = Handle::from_raw(frame.a0 as u32);
+    // Resolve under the lock, copy out the counter, drop the lock before
+    // emitting — never hold a Mutex across telemetry emission.
+    let outcome = invoke_telemetry(&proc.caps.lock(), handle);
+    match outcome {
+        Ok(counter) => {
+            crate::tracing::emit_metric(counter, frame.a1 as i64);
+            frame.a0 = 0; // success
+        }
+        Err(denied) => {
+            // Snitch the refused authority decision two ways: the pre-
+            // registered `cap_denied_total` counter (a rate) and a
+            // `SyscallRefused` event carrying the *reason* (self-describing,
+            // so a denial is never a silent missing-result). Counter is pre-
+            // registered (`user::init_metric`) to avoid interning in trap
+            // context.
+            if let Some(id) = crate::user::cap_denied_metric_id() {
+                crate::tracing::emit_metric(id, 1);
+            }
+            refuse(frame, sc, refusal_for(denied)); // emits SyscallRefused + sets a0
+        }
+    }
+}
+
+/// Mint a badged `SEND` capability for an endpoint the caller owns (v0.9c).
+/// `a0` = endpoint handle (needs `MINT`), `a1` = the server-chosen `badge`,
+/// `a2` = requested rights. Resolve the parent against the running process's
+/// table, derive the child via the pure host-tested
+/// [`kernel_core::cap::mint_badged`], insert it into the caller's *own* table,
+/// and return its handle in `a0` (or refuse with `a0 = u64::MAX`). Snitched as
+/// `CapEvent::Transferred` carrying the badge. Handing the cap to a client is a
+/// later step; here it lands in the minter's table.
+fn handle_mint_badged(frame: &mut TrapFrame) {
+    use kernel_core::cap::{mint_badged, Denied, Handle, Rights};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::MintBadged as u8;
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    let handle = Handle::from_raw(frame.a0 as u32);
+    let badge = frame.a1;
+    let rights = Rights::from_bits(frame.a2 as u32);
+
+    // Resolve the parent (copy it out to release the borrow), derive the pure
+    // child cap, then insert it. No lock held across a switch — minting cannot
+    // block.
+    let minted = {
+        let mut caps = proc.caps.lock();
+        let parent = caps.resolve(handle).copied().map_err(|_| Denied::NoSuchCapability);
+        parent.and_then(|p| mint_badged(p, badge, rights)).map(|child| caps.insert(child))
+    };
+
+    match minted {
+        Ok(h) => {
+            crate::tracing::emit_cap_transferred(
+                crate::process::next_cap_id(),
+                crate::sched::current_task_id().0,
+                protocol::CapObject::Endpoint,
+                rights.bits(),
+                badge,
+            );
+            frame.a0 = u64::from(h.raw());
+        }
+        Err(denied) => {
+            if let Some(id) = crate::user::cap_denied_metric_id() {
+                crate::tracing::emit_metric(id, 1);
+            }
+            refuse(frame, sc, refusal_for(denied));
+        }
+    }
+}
+
+/// Resolve a reply-cap handle in `proc`'s table to the address-space root of the
+/// blocked caller it names — **without consuming** the cap (the server may copy
+/// before it replies). `None` if the handle isn't a live `Reply` cap or the
+/// caller has no user space. The authority check for the cross-AS copy: a server
+/// may only touch a caller that is awaiting *its* reply.
+fn caller_root_from_reply(proc: &crate::process::Process, handle: kernel_core::cap::Handle) -> Option<usize> {
+    use kernel_core::cap::Object;
+    let caller = {
+        let caps = proc.caps.lock();
+        match caps.resolve(handle).map(|cap| cap.object) {
+            Ok(Object::Reply { caller }) => caller,
+            _ => return None,
+        }
+    };
+    crate::sched::address_space_of(caller)
+}
+
+/// Copy bytes from a blocked caller's address space into the server's own
+/// (v0.10 option D). `a0` = a reply-cap handle the server holds (names the
+/// blocked caller — the authority; **borrowed, not consumed**), `a1` = source
+/// VA in the caller's space, `a2` = length, `a3` = destination VA in the
+/// server's space. Returns bytes copied in `a0`, or snitches a refusal
+/// (`a0 = usize::MAX`) on a bad cap / pointer / range. The `write`/`create` half.
+fn handle_copy_from_caller(frame: &mut TrapFrame) {
+    use kernel_core::cap::Handle;
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::CopyFromCaller as u8;
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+    let Some(caller_root) = caller_root_from_reply(proc, Handle::from_raw(frame.a0 as u32)) else {
+        refuse(frame, sc, protocol::RefusalReason::CapWrongObject);
+        return;
+    };
+    // src = caller's `a1`, dst = this server's `a3`.
+    match crate::mmu::copy_across(caller_root, frame.a1 as usize, proc.root_pa, frame.a3 as usize, frame.a2 as usize) {
+        Ok(n) => frame.a0 = n as u64,
+        Err(_) => refuse(frame, sc, protocol::RefusalReason::BadUserRange),
+    }
+}
+
+/// Copy bytes from the server's address space into a blocked caller's (v0.10
+/// option D) — the mirror of [`handle_copy_from_caller`]. `a1` = source VA in
+/// the server's space, `a3` = destination VA in the caller's. The `read` half.
+fn handle_copy_to_caller(frame: &mut TrapFrame) {
+    use kernel_core::cap::Handle;
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::CopyToCaller as u8;
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+    let Some(caller_root) = caller_root_from_reply(proc, Handle::from_raw(frame.a0 as u32)) else {
+        refuse(frame, sc, protocol::RefusalReason::CapWrongObject);
+        return;
+    };
+    // src = this server's `a1`, dst = caller's `a3`.
+    match crate::mmu::copy_across(proc.root_pa, frame.a1 as usize, caller_root, frame.a3 as usize, frame.a2 as usize) {
+        Ok(n) => frame.a0 = n as u64,
+        Err(_) => refuse(frame, sc, protocol::RefusalReason::BadUserRange),
+    }
+}
+
+/// Send an inline message over an IPC endpoint. `a0` = `Endpoint` handle
+/// (needs `SEND`), `a1..=a4` = the message words. Resolve the cap against the
+/// running process's table; on success drive the rendezvous: either deliver
+/// to a waiting receiver and wake it, or block until one arrives. The endpoint
+/// lock is dropped inside `ipc::send_begin` before we block/wake (never hold a
+/// lock across the switch). Returns `0` on success, the error sentinel if the
+/// capability is refused.
+fn handle_send(frame: &mut TrapFrame) {
+    use kernel_core::cap::{invoke_send, Handle};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::Send as u8;
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    let ep = {
+        let caps = proc.caps.lock();
+        invoke_send(&caps, Handle::from_raw(frame.a0 as u32))
+    };
+    let (ep, badge) = match ep {
+        Ok(pair) => pair,
+        Err(denied) => {
+            refuse(frame, sc, refusal_for(denied));
+            return;
+        }
+    };
+
+    let me = crate::sched::current_task_id();
+    let msg = [frame.a1, frame.a2, frame.a3, frame.a4];
+    // Carry the sender's trace context: its innermost open span becomes the
+    // parent of the receiver's handling span (kernel-populated — userspace can
+    // neither forge nor forget it).
+    let parent = crate::tracing::current_span_id();
+    match crate::ipc::send_begin(ep, me, msg, parent, badge) {
+        crate::ipc::SendStep::Deliver { wake } => crate::sched::wake(wake),
+        crate::ipc::SendStep::Block => {
+            crate::ipc::BLOCKS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            crate::sched::block_current();
+        }
+    }
+    // Either path completes the rendezvous: the message was (or will be) taken
+    // by the receiver. Report success.
+    frame.a0 = 0;
+}
+
+/// Receive an inline message from an IPC endpoint. `a0` = `Endpoint` handle
+/// (needs `RECV`). Drive the rendezvous: take a waiting sender's message (and
+/// wake it), or block until one arrives and take the message delivered to us.
+/// Writes the words into `a1..=a4` and `0` into `a0`; refuses with the error
+/// sentinel if the capability is refused.
+fn handle_receive(frame: &mut TrapFrame) {
+    use kernel_core::cap::{invoke_recv, Handle};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::Receive as u8;
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    let ep = {
+        let caps = proc.caps.lock();
+        invoke_recv(&caps, Handle::from_raw(frame.a0 as u32))
+    };
+    let ep = match ep {
+        Ok(ep) => ep,
+        Err(denied) => {
+            refuse(frame, sc, refusal_for(denied));
+            return;
+        }
+    };
+
+    receive_into_frame(proc, frame, ep);
+}
+
+/// The receive half of `receive`/`reply_recv`: rendezvous on `ep`, mint a
+/// reply cap for a `call` (handle into `a5`; `0` for a one-way `send`), seed the
+/// sender's trace context, and write the message + status into `frame`. Counts
+/// the crossing and snitches the `Message` frame.
+fn receive_into_frame(
+    proc: &crate::process::Process,
+    frame: &mut TrapFrame,
+    ep: kernel_core::ipc::EndpointId,
+) {
+    let me = crate::sched::current_task_id();
+    let delivered = match crate::ipc::receive_begin(ep, me) {
+        crate::ipc::RecvStep::Deliver { delivered, wake } => {
+            // Wake the sender only for a one-way `send`. For a `call` the caller
+            // is parked awaiting its reply — we mint it a reply cap instead.
+            if delivered.reply_to.is_none() {
+                crate::sched::wake(wake);
+            }
+            delivered
+        }
+        crate::ipc::RecvStep::Block => {
+            crate::ipc::BLOCKS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            crate::sched::block_current();
+            // Resumed: a sender stashed our message under our id at rendezvous.
+            crate::ipc::take_delivered(ep, me)
+        }
+    };
+
+    // If this was a `call`, mint a one-shot reply cap into *this* (server)
+    // process naming the caller, and hand its handle back in `a5`; a one-way
+    // `send` yields `a5 = 0`.
+    frame.a5 = reply_handle_for(proc, me, delivered.reply_to);
+
+    // Deliver the sender cap's badge in `a6` (v0.9c) — the unforgeable demux
+    // value the receiver uses to tell its objects/clients apart. `0` for a bare
+    // (unbadged) cap.
+    frame.a6 = delivered.badge;
+
+    // The message crossed. Count it, and record the topology + trace link on
+    // the wire — both at delivery, outside the endpoint critical section.
+    crate::ipc::MESSAGES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    crate::tracing::emit_message(ep.0, delivered.from.0, me.0, delivered.parent);
+    // Seed the sender's span as our incoming parent — the next span this task
+    // opens (its handling span) becomes a child, so the trace continues across
+    // the process boundary.
+    crate::tracing::set_current_parent(delivered.parent);
+    frame.a1 = delivered.msg[0];
+    frame.a2 = delivered.msg[1];
+    frame.a3 = delivered.msg[2];
+    frame.a4 = delivered.msg[3];
+    frame.a0 = 0;
+}
+
+/// Mint a one-shot reply cap into `proc` (the receiving server) naming the
+/// blocked `caller`, snitch it as `CapEvent::Transferred`, and return its raw
+/// handle for `receive`'s `a5`. Returns `0` when `reply_to` is `None` (a
+/// one-way `send` — no reply expected). The first cross-process cap insertion:
+/// the kernel grants the server authority to answer exactly this caller once.
+fn reply_handle_for(
+    proc: &crate::process::Process,
+    holder: kernel_core::sched::TaskId,
+    reply_to: Option<kernel_core::sched::TaskId>,
+) -> u64 {
+    use kernel_core::cap::{Capability, Object, Rights};
+
+    let Some(caller) = reply_to else {
+        return 0;
+    };
+    let handle = proc
+        .caps
+        .lock()
+        .insert_once(Capability { object: Object::Reply { caller }, rights: Rights::NONE });
+    crate::tracing::emit_cap_transferred(
+        crate::process::next_cap_id(),
+        holder.0,
+        protocol::CapObject::Reply,
+        Rights::NONE.bits(),
+        0, // reply caps carry no badge
+    );
+    u64::from(handle.raw())
+}
+
+/// RPC `call`: `a0` = `Endpoint` handle (needs `SEND`), `a1..=a4` = request
+/// words. Delivers the request (marked as a call so the receiver mints a reply
+/// cap), then parks the caller until `reply` wakes it — at which point the
+/// response words are written into `a1..=a4`. The caller's span stays open
+/// across the round-trip, so the server's handling span nests under it.
+fn handle_call(frame: &mut TrapFrame) {
+    use kernel_core::cap::{invoke_send, Handle};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::Call as u8;
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    let ep = {
+        let caps = proc.caps.lock();
+        invoke_send(&caps, Handle::from_raw(frame.a0 as u32))
+    };
+    let (ep, badge) = match ep {
+        Ok(pair) => pair,
+        Err(denied) => {
+            refuse(frame, sc, refusal_for(denied));
+            return;
+        }
+    };
+
+    crate::ipc::CALLS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    let me = crate::sched::current_task_id();
+    let req = [frame.a1, frame.a2, frame.a3, frame.a4];
+    let parent = crate::tracing::current_span_id();
+    match crate::ipc::call_begin(ep, me, req, parent, badge) {
+        crate::ipc::SendStep::Deliver { wake } => crate::sched::wake(wake),
+        crate::ipc::SendStep::Block => {}
+    }
+    // The caller always parks awaiting the reply — woken by `reply`, never by
+    // the request rendezvous (a receiver taking a call mints a reply cap
+    // instead of waking us).
+    crate::ipc::BLOCKS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    crate::sched::block_current();
+
+    // Resumed by `reply`: deliver the response words and, if the server handed
+    // us a capability, insert it into *our* table (we're the current process
+    // again) and return its handle in `a5` (`0` = no cap). v0.9c.
+    let reply = crate::ipc::take_reply(me);
+    frame.a1 = reply.msg[0];
+    frame.a2 = reply.msg[1];
+    frame.a3 = reply.msg[2];
+    frame.a4 = reply.msg[3];
+    frame.a5 = match reply.cap {
+        Some(cap) => {
+            let handle = proc.caps.lock().insert(cap);
+            let badge = match cap.object {
+                kernel_core::cap::Object::Endpoint { badge, .. } => badge,
+                _ => 0,
+            };
+            crate::tracing::emit_cap_transferred(
+                crate::process::next_cap_id(),
+                me.0,
+                protocol::CapObject::Endpoint,
+                cap.rights.bits(),
+                badge,
+            );
+            u64::from(handle.raw())
+        }
+        None => 0,
+    };
+    frame.a0 = 0;
+}
+
+/// RPC `reply`: `a0` = reply-cap handle (from `receive`'s `a5`), `a1..=a4` =
+/// response words. Resolves + **consumes** the one-shot reply cap (a second
+/// `reply` is refused), stashes the response for the blocked caller, and wakes
+/// it. The reply is point-to-point (server→caller), not endpoint-mediated.
+fn handle_reply(frame: &mut TrapFrame) {
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::Reply as u8;
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+    let raw_handle = frame.a0 as u32;
+    let resp = [frame.a1, frame.a2, frame.a3, frame.a4];
+    // `a6` (v0.9c): a cap handle to transfer to the caller, `0` = none.
+    let transfer = (frame.a6 != 0).then(|| kernel_core::cap::Handle::from_raw(frame.a6 as u32));
+    if reply_via_cap(proc, frame, sc, raw_handle, resp, transfer).is_ok() {
+        frame.a0 = 0;
+    }
+}
+
+/// The reply half of `reply`/`reply_recv`: resolve + **consume** the one-shot
+/// reply cap `raw_handle` against `proc`, stash `resp` for the named caller, and
+/// wake it. `Err(())` (with `refuse` already emitted) if the handle is not a
+/// live reply cap. Resolve+consume under the caps lock; drop it before waking
+/// (never hold a `Mutex` across the path that may switch).
+fn reply_via_cap(
+    proc: &crate::process::Process,
+    frame: &mut TrapFrame,
+    sc: u8,
+    raw_handle: u32,
+    resp: crate::ipc::Message,
+    transfer: Option<kernel_core::cap::Handle>,
+) -> Result<(), ()> {
+    use kernel_core::cap::{invoke_reply, Handle};
+
+    let handle = Handle::from_raw(raw_handle);
+    // Resolve + consume the reply cap and, if the server is handing a cap to the
+    // caller, *move* it out of the server's table (resolve, copy out, consume) —
+    // all under one lock, dropped before the wake. A transfer handle that names
+    // no cap is silently no-op (the caller simply receives no cap).
+    let resolved = {
+        let mut caps = proc.caps.lock();
+        match invoke_reply(&caps, handle) {
+            Err(denied) => Err(denied),
+            Ok(caller) => {
+                caps.consume(handle);
+                let cap = match transfer {
+                    Some(h) => {
+                        let c = caps.resolve(h).copied().ok();
+                        if c.is_some() {
+                            caps.consume(h);
+                        }
+                        c
+                    }
+                    None => None,
+                };
+                Ok((caller, cap))
+            }
+        }
+    };
+    let (caller, cap) = match resolved {
+        Ok(pair) => pair,
+        Err(denied) => {
+            refuse(frame, sc, refusal_for(denied));
+            return Err(());
+        }
+    };
+    crate::ipc::stash_reply(caller, crate::ipc::StashedReply { msg: resp, cap });
+    crate::sched::wake(caller);
+    crate::ipc::REPLIES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Fused `reply`-then-`receive` (the RPC server hot path): `a0` = `Endpoint`
+/// handle, `a5` = the previous request's reply handle (`0` = none, first
+/// iteration), `a1..=a4` = the response to it. Replies the previous caller (if
+/// any), then runs a normal receive into `frame` for the next request. One trap
+/// instead of two; reuses [`reply_via_cap`] + [`receive_into_frame`].
+fn handle_reply_recv(frame: &mut TrapFrame) {
+    use kernel_core::cap::{invoke_recv, Handle};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::ReplyRecv as u8;
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    // Reply half — skipped on the first iteration (no previous request).
+    let prev_reply = frame.a5 as u32;
+    if prev_reply != 0 {
+        let resp = [frame.a1, frame.a2, frame.a3, frame.a4];
+        // reply_recv does not carry a transferred cap in v0.9c (the plain `reply`
+        // path does); pass `None`. Fusing cap-transfer into the hot path is a
+        // deferred additive step.
+        if reply_via_cap(proc, frame, sc, prev_reply, resp, None).is_err() {
+            return; // refused — `a0` already set, don't receive
+        }
+    }
+
+    // Receive half — block for the next request on the endpoint in `a0`.
+    let ep = {
+        let caps = proc.caps.lock();
+        invoke_recv(&caps, Handle::from_raw(frame.a0 as u32))
+    };
+    let ep = match ep {
+        Ok(ep) => ep,
+        Err(denied) => {
+            refuse(frame, sc, refusal_for(denied));
+            return;
+        }
+    };
+    receive_into_frame(proc, frame, ep);
+}
+
+/// Open a span on behalf of U-mode. `a0` = `SpanSink` handle, `a1` = name
+/// pointer, `a2` = name length. Validates the capability, copies + interns the
+/// name, opens a span on the calling task's cursor, and returns the span id in
+/// `a0` (or `u64::MAX` on refusal).
+fn handle_span_open(frame: &mut TrapFrame) {
+    use kernel_core::cap::{Handle, invoke_span};
+    use kernel_core::mmu::MAX_USER_STR_LEN;
+    use protocol::RefusalReason;
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::SpanOpen as u8;
+
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    // Authority: the caller must hold a `SpanSink` cap at handle `a0`. Resolve
+    // under the lock, then drop it before the intern/emit path.
+    let denied = {
+        let caps = proc.caps.lock();
+        invoke_span(&caps, Handle::from_raw(frame.a0 as u32)).err()
+    };
+    if let Some(d) = denied {
+        refuse(frame, sc, refusal_for(d));
+        return;
+    }
+
+    // Copy the span name out of user memory (range-validated, SUM-guarded).
+    let mut buf = [0u8; MAX_USER_STR_LEN];
+    let Some(bytes) = crate::user::copy_from_user(frame.a1 as usize, frame.a2 as usize, &mut buf)
+    else {
+        refuse(frame, sc, RefusalReason::BadUserRange);
+        return;
+    };
+    let Ok(name) = core::str::from_utf8(bytes) else {
+        refuse(frame, sc, RefusalReason::BadUtf8);
+        return;
+    };
+
+    // Intern on demand (quota-gated) + open a span on this task's cursor; hand
+    // back the `{id, parent}` close token (id in a0, parent in a1). A new name
+    // past the per-process quota is refused without registering.
+    let Some(opened) = crate::tracing::span_open_bounded(
+        name,
+        &proc.span_names_registered,
+        crate::process::Process::MAX_SPAN_NAMES,
+    ) else {
+        refuse(frame, sc, RefusalReason::Quota);
+        return;
+    };
+    frame.a0 = opened.id.0;
+    frame.a1 = opened.parent.0;
+}
+
+/// Close a span on behalf of U-mode. `a0` = span id, `a1` = parent id (the
+/// token `SpanOpen` returned). The kernel validates the id is the caller's
+/// innermost open span (cursor top), refusing an out-of-order/forged close.
+fn handle_span_close(frame: &mut TrapFrame) {
+    use protocol::{RefusalReason, SpanId};
+    use snitchos_abi::Syscall;
+
+    let id = SpanId(frame.a0);
+    let parent = SpanId(frame.a1);
+    if crate::tracing::span_close_checked(id, parent) {
+        frame.a0 = 0; // success
+    } else {
+        refuse(frame, Syscall::SpanClose as u8, RefusalReason::BadSpanId);
+    }
+}
+
+/// Map a fresh anonymous memory region for U-mode. `a0` = bytes requested (the
+/// runtime page-aligns). Maps that many zeroed frames into the process's heap
+/// region and returns the region's **base** VA in `a0` (or `u64::MAX` if
+/// refused — out of frames, or past the per-process memory cap). mmap-shaped:
+/// the runtime allocator `claim`s the returned region. Placement is a simple
+/// bump pointer (`heap_top`) for now; the allocator doesn't assume regions
+/// abut, so disjoint placement + unmap can land later without an ABI change.
+fn handle_map_anon(frame: &mut TrapFrame) {
+    use kernel_core::mmu::PtePerms;
+    use protocol::RefusalReason;
+    use snitchos_abi::Syscall;
+
+    use crate::frame::FRAME_SIZE;
+    use crate::process::Process;
+
+    let sc = Syscall::MapAnon as u8;
+    let Some(proc) = current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    let bytes = (frame.a0 as usize).next_multiple_of(FRAME_SIZE);
+    let base = proc.heap_top.load(Ordering::Relaxed);
+    let end = base.saturating_add(bytes);
+    if bytes == 0 || end > Process::HEAP_BASE + Process::HEAP_MAX {
+        refuse(frame, sc, RefusalReason::OutOfMemory);
+        return;
+    }
+
+    let perms = PtePerms::U.union(PtePerms::R).union(PtePerms::W);
+    let mut va = base;
+    while va < end {
+        let Some(f) = crate::frame::alloc_zeroed() else {
+            // Out of frames mid-map: the already-mapped pages leak until process
+            // teardown (none in v0.7), and `heap_top` isn't advanced, so the
+            // runtime never `claim`s a partial region.
+            refuse(frame, sc, RefusalReason::OutOfMemory);
+            return;
+        };
+        if crate::mmu::map_in(proc.root_pa, va, f.addr(), perms).is_err() {
+            refuse(frame, sc, RefusalReason::OutOfMemory);
+            return;
+        }
+        va += FRAME_SIZE;
+    }
+    // Make the new pages visible on this hart. SAFETY: flush stale (negative)
+    // TLB entries for the freshly-mapped VAs; new mappings, so a local sfence
+    // suffices — nothing on another hart cached them.
+    unsafe { asm!("sfence.vma", options(nostack, nomem)) };
+
+    proc.heap_top.store(end, Ordering::Relaxed);
+    frame.a0 = base as u64;
+}
+
+/// Write bytes to the debug/stdout channel for U-mode. `a0` = pointer, `a1` =
+/// length. Copies the bytes out (range-validated, SUM-guarded) and emits a
+/// snitched `Log` frame attributed to the caller. Returns bytes written in
+/// `a0` (or `u64::MAX` on a bad pointer). Ungated — writing to the debug log is
+/// not an authority, like `Yield`. The runtime chunks writes to fit
+/// `MAX_USER_STR_LEN`; a longer write becomes several `Log` frames.
+fn handle_debug_write(frame: &mut TrapFrame) {
+    use kernel_core::mmu::MAX_USER_STR_LEN;
+    use protocol::RefusalReason;
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::DebugWrite as u8;
+    let mut buf = [0u8; MAX_USER_STR_LEN];
+    let Some(bytes) = crate::user::copy_from_user(frame.a0 as usize, frame.a1 as usize, &mut buf)
+    else {
+        refuse(frame, sc, RefusalReason::BadUserRange);
+        return;
+    };
+    let Ok(msg) = core::str::from_utf8(bytes) else {
+        refuse(frame, sc, RefusalReason::BadUtf8);
+        return;
+    };
+    crate::tracing::emit_log(msg);
+    frame.a0 = bytes.len() as u64;
+}
+
+/// Refuse a syscall: snitch a `SyscallRefused` event (so the denial is never
+/// silent) and return the error sentinel in `a0`.
+fn refuse(frame: &mut TrapFrame, syscall: u8, reason: protocol::RefusalReason) {
+    crate::tracing::emit_syscall_refused(syscall, reason);
+    frame.a0 = u64::MAX;
+}
+
+/// Map a capability-invocation denial to its wire refusal reason.
+fn refusal_for(denied: kernel_core::cap::Denied) -> protocol::RefusalReason {
+    use kernel_core::cap::Denied;
+    use protocol::RefusalReason;
+    match denied {
+        Denied::NoSuchCapability => RefusalReason::CapNotFound,
+        Denied::MissingRight => RefusalReason::CapWrongRights,
+        Denied::WrongObject => RefusalReason::CapWrongObject,
+    }
+}
+
+/// Resolve the user process running on this hart, or — if none — snitch a
+/// `NoProcess` refusal (setting the error sentinel in `a0`) and return `None`
+/// for the caller to early-return. Every capability syscall opens with this:
+/// it needs the calling process's `CapTable`.
+fn current_process_or_refuse(
+    frame: &mut TrapFrame,
+    syscall: u8,
+) -> Option<&'static crate::process::Process> {
+    let proc = crate::process::CURRENT_PROCESS.this_cpu().load(Ordering::Relaxed);
+    // SAFETY: set by `user::run` on this hart before `sret`; the `Process` lives
+    // in that never-returning frame, so a non-null pointer is valid for the
+    // life of the kernel. Null only if no user process runs here — which then
+    // could not have issued this U-mode `ecall`.
+    match unsafe { proc.as_ref() } {
+        Some(proc) => Some(proc),
+        None => {
+            refuse(frame, syscall, protocol::RefusalReason::NoProcess);
+            None
+        }
+    }
+}
