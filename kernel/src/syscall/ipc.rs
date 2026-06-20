@@ -1,7 +1,8 @@
 //! IPC syscalls: the synchronous rendezvous surface — one-way `Send`/`Receive`
 //! and the RPC `Call`/`Reply`/`ReplyRecv` round-trip. The endpoint state machine
-//! itself lives in [`crate::ipc`] (`crate::trap::ipc`); these handlers drive it
-//! from the `TrapFrame` and own the reply-cap minting + trace-context seeding.
+//! itself lives in [`crate::ipc`] (the re-export of `crate::trap::ipc`); these
+//! handlers — `crate::syscall::ipc` — drive it from the `TrapFrame` and own the
+//! reply-cap minting + trace-context seeding.
 
 use core::sync::atomic::Ordering;
 

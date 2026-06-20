@@ -82,9 +82,12 @@ pub static BADGE_HANDOUT_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE
 pub static FS_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_ELF"));
 pub static FS_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_CLIENT_ELF"));
 
-/// The counter the `EmitMetric` syscall bumps. Registered once on hart 0
-/// (`init_metric`) so the `MetricRegister` frame isn't emitted from inside
-/// the trap handler; the handler (on hart 1) reads it via [`user_metric_id`].
+/// The metric every userspace process emits to through its bootstrap
+/// `TelemetrySink` (`snitchos.user.telemetry_total`): the `Invoke` syscall
+/// resolves the sink to this `StringId` and emits `a1` to it. Registered once
+/// on hart 0 (`init_metric`) so first use doesn't intern (and emit a
+/// `StringRegister` frame) in trap context; bound into the cap at process
+/// setup via [`user_metric_id`] (see `run` / `run_ipc`).
 static USER_METRIC: Once<StringId> = Once::new();
 
 /// The counter a U-mode page fault bumps — the isolation firewall doing its
@@ -92,10 +95,11 @@ static USER_METRIC: Once<StringId> = Once::new();
 static USER_FAULT_METRIC: Once<StringId> = Once::new();
 
 /// The counter the kernel bumps each time it **grants** a capability —
-/// authority being created. v0.7b grants exactly once (the bootstrap
-/// `TelemetrySink`), so this reaches 1; the richer `CapEvent` frame is the
-/// sequenced follow-on. Registered alongside the others so the grant site
-/// emits without interning.
+/// authority being created. Bumped once per bootstrap grant: the
+/// `TelemetrySink` + `SpanSink` pair every process gets (`run`), plus the
+/// `Endpoint` cap for IPC processes (`run_ipc`) — so 2 or 3 per process. The
+/// richer `CapEvent` frame is the sequenced follow-on. Registered alongside the
+/// others so the grant site emits without interning.
 static CAP_GRANTS_METRIC: Once<StringId> = Once::new();
 
 /// The counter the kernel bumps when it **refuses** a capability
