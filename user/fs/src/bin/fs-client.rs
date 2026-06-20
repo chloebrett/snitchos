@@ -21,10 +21,13 @@
 
 use fs_core::{FsError, InodeId, NodeKind, Stat};
 use fs_proto::{FileRights, Op, Request, Response, UserBuf};
-use snitchos_user::{Endpoint, endpoint, entry, telemetry};
+use snitchos_user::{Endpoint, endpoint, entry, telemetry, tracer};
 
-/// Stat `cap` and return the decoded `Stat`, or `None` on any failure.
+/// Stat `cap` and return the decoded `Stat`, or `None` on any failure. The
+/// `fs.stat` span stays open across the `call`, so the server's handling nests
+/// under it across the process boundary.
 fn stat(cap: Endpoint) -> Option<Stat> {
+    let _s = tracer().span("fs.stat");
     let (words, _) = cap.call(Request::Stat.encode()).ok()?;
     match Response::decode(Op::Stat, words) {
         Ok(Response::Stat(s)) => Some(s),
@@ -57,8 +60,12 @@ fn main() {
         },
         kind: NodeKind::File,
     };
-    let Ok((_c, Some(file_cap))) = root.call(create.encode()) else {
-        return;
+    let file_cap = {
+        let _s = tracer().span("fs.create");
+        let Ok((_c, Some(cap))) = root.call(create.encode()) else {
+            return;
+        };
+        cap
     };
     let file = Endpoint::from_raw_handle(file_cap);
 
@@ -80,9 +87,12 @@ fn main() {
             len: data.len() as u64,
         },
     };
-    let Ok((_w, _)) = file.call(write.encode()) else {
-        return;
-    };
+    {
+        let _s = tracer().span("fs.write");
+        let Ok((_w, _)) = file.call(write.encode()) else {
+            return;
+        };
+    }
 
     let mut buf = [0u8; 2];
     let read = Request::Read {
@@ -92,8 +102,12 @@ fn main() {
             len: buf.len() as u64,
         },
     };
-    let Ok((words, _)) = file.call(read.encode()) else {
-        return;
+    let words = {
+        let _s = tracer().span("fs.read");
+        let Ok((words, _)) = file.call(read.encode()) else {
+            return;
+        };
+        words
     };
     if let Ok(Response::Count(n)) = Response::decode(Op::Read, words)
         && n == 2
@@ -110,23 +124,26 @@ fn main() {
         ptr: entry_name.as_mut_ptr() as u64,
         len: entry_name.len() as u64,
     };
-    if let Ok((e0, _)) = root.call(Request::Readdir { index: 0, name_dst }.encode())
-        && let Ok(Response::Entry {
-            ino,
-            kind,
-            name_len,
-        }) = Response::decode(Op::Readdir, e0)
-        && ino == InodeId::new(1)
-        && kind == NodeKind::File
-        && name_len == 4
-        && entry_name[..4] == *b"data"
-        && let Ok((e1, _)) = root.call(Request::Readdir { index: 1, name_dst }.encode())
-        && matches!(
-            Response::decode(Op::Readdir, e1),
-            Ok(Response::Err(FsError::NotFound))
-        )
     {
-        let _ = telemetry().emit(0x5D14);
+        let _s = tracer().span("fs.readdir");
+        if let Ok((e0, _)) = root.call(Request::Readdir { index: 0, name_dst }.encode())
+            && let Ok(Response::Entry {
+                ino,
+                kind,
+                name_len,
+            }) = Response::decode(Op::Readdir, e0)
+            && ino == InodeId::new(1)
+            && kind == NodeKind::File
+            && name_len == 4
+            && entry_name[..4] == *b"data"
+            && let Ok((e1, _)) = root.call(Request::Readdir { index: 1, name_dst }.encode())
+            && matches!(
+                Response::decode(Op::Readdir, e1),
+                Ok(Response::Err(FsError::NotFound))
+            )
+        {
+            let _ = telemetry().emit(0x5D14);
+        }
     }
 
     // Rights gate: look the file up asking for READ only — the server mints an
@@ -144,26 +161,26 @@ fn main() {
             len: data.len() as u64,
         },
     };
-    if let Ok((_l, Some(ro))) = root.call(
-        Request::Lookup {
-            name: lookup_name,
-            rights: FileRights::READ,
-        }
-        .encode(),
-    ) {
+    let ro = {
+        let _s = tracer().span("fs.lookup");
+        root.call(Request::Lookup { name: lookup_name, rights: FileRights::READ }.encode())
+    };
+    if let Ok((_l, Some(ro))) = ro {
+        let _s = tracer().span("fs.write");
         let _ = Endpoint::from_raw_handle(ro).call(write_hi.encode());
     }
 
     // Positive control: look the same file up asking for READ|WRITE; the write
     // through *that* cap must succeed — proving the gate refuses only the
     // under-authorized write, not every write.
-    if let Ok((_l, Some(rw))) = root.call(
-        Request::Lookup {
-            name: lookup_name,
-            rights: FileRights::READ | FileRights::WRITE,
-        }
-        .encode(),
-    ) {
+    let rw = {
+        let _s = tracer().span("fs.lookup");
+        root.call(
+            Request::Lookup { name: lookup_name, rights: FileRights::READ | FileRights::WRITE }.encode(),
+        )
+    };
+    if let Ok((_l, Some(rw))) = rw {
+        let _s = tracer().span("fs.write");
         if let Ok((words, _)) = Endpoint::from_raw_handle(rw).call(write_hi.encode())
             && matches!(Response::decode(Op::Write, words), Ok(Response::Count(_)))
         {
@@ -173,20 +190,21 @@ fn main() {
 
     // Remove the file, then confirm the name no longer resolves — proving the
     // unlink took effect across the boundary, not just that the server replied.
-    if let Ok((rm, _)) = root.call(Request::Remove { name: lookup_name }.encode())
+    let rm = {
+        let _s = tracer().span("fs.remove");
+        root.call(Request::Remove { name: lookup_name }.encode())
+    };
+    if let Ok((rm, _)) = rm
         && matches!(Response::decode(Op::Remove, rm), Ok(Response::Removed))
-        && let Ok((gone, _)) = root.call(
-            Request::Lookup {
-                name: lookup_name,
-                rights: FileRights::READ,
-            }
-            .encode(),
-        )
-        && matches!(
-            Response::decode(Op::Lookup, gone),
-            Ok(Response::Err(FsError::NotFound))
-        )
     {
-        let _ = telemetry().emit(0xDE1E);
+        let gone = {
+            let _s = tracer().span("fs.lookup");
+            root.call(Request::Lookup { name: lookup_name, rights: FileRights::READ }.encode())
+        };
+        if let Ok((gone, _)) = gone
+            && matches!(Response::decode(Op::Lookup, gone), Ok(Response::Err(FsError::NotFound)))
+        {
+            let _ = telemetry().emit(0xDE1E);
+        }
     }
 }

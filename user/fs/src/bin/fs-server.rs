@@ -16,7 +16,7 @@
 use fs_core::{Filesystem, FsError, InodeId};
 use fs_proto::{check_rights, Badge, Denial, FileRights, Request, Response};
 use ramfs::RamFs;
-use snitchos_user::{copy_from_caller, copy_to_caller, endpoint, entry, reply, reply_with_cap, rights, telemetry};
+use snitchos_user::{copy_from_caller, copy_to_caller, endpoint, entry, reply, reply_with_cap, rights, telemetry, tracer};
 
 /// Largest filename the server will pull across in one `create` (≤ the kernel's
 /// per-copy cap). Names longer than this are refused.
@@ -52,6 +52,10 @@ fn main() {
             let _ = reply(reply_handle, Response::Err(FsError::Unsupported).encode());
             continue;
         };
+        // Each request is a span. The kernel seeded our span cursor with the
+        // caller's open op span on `receive`, so this nests *under* the client's
+        // `fs.<op>` — the trace crosses the process boundary for free.
+        let _serve = tracer().span("fs.serve");
         // The gate the kernel cannot run: it carries the badge's file rights but
         // never interprets them. On refusal, snitch the structured `(inode,
         // attempted)` to the denial gauge, then reply `Denied` — never silent.

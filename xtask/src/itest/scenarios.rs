@@ -1573,6 +1573,70 @@ pub fn fs_remove_unlinks(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.10 FS workload trace (`workload=fs`), step 5: each FS op is a span. The
+/// client opens `fs.create` and stays in it across the `call`; the server,
+/// seeded with that span as its parent on `receive`, opens `fs.serve` — so the
+/// server's handling nests **under** the client's op, attributed across the
+/// process boundary. Asserts the parent linkage + temporal containment, the
+/// same shape `rpc_trace_nests` proves for RPC — "a filesystem you can watch."
+pub fn fs_workload_traces(h: &mut View) -> Result<(), String> {
+    use protocol::SpanId;
+
+    let call = h
+        .wait_for(SEC * 30, |f, strings| {
+            matches!(f, OwnedFrame::SpanStart { name_id, .. }
+                if strings.get(name_id).map(String::as_str) == Some("fs.create"))
+        })
+        .ok_or("no SpanStart for 'fs.create' within 30s — the client didn't span the op")?;
+    let (call_id, call_start) = match call {
+        OwnedFrame::SpanStart { id, t, .. } => (id, t),
+        _ => return Err("matched non-SpanStart (impossible)".to_string()),
+    };
+    if call_id == SpanId(0) {
+        return Err("fs.create span id is 0 (root sentinel)".to_string());
+    }
+
+    // The server's handling span: a SpanStart parented to the client's
+    // fs.create — the cross-process nesting the kernel seeds on `receive`.
+    let serve = h
+        .wait_for(SEC * 30, |f, _| {
+            matches!(f, OwnedFrame::SpanStart { parent, .. } if *parent == call_id)
+        })
+        .ok_or(
+            "no server SpanStart parented to fs.create within 30s — the trace didn't cross \
+             the process boundary (server span not nested under the client's op)",
+        )?;
+    let (serve_id, serve_start) = match serve {
+        OwnedFrame::SpanStart { id, t, .. } => (id, t),
+        _ => return Err("matched non-SpanStart (impossible)".to_string()),
+    };
+
+    let serve_end = h
+        .wait_for(SEC * 30, |f, _| matches!(f, OwnedFrame::SpanEnd { id, .. } if *id == serve_id))
+        .ok_or("no SpanEnd for the server span within 30s")?;
+    let serve_end = match serve_end {
+        OwnedFrame::SpanEnd { t, .. } => t,
+        _ => return Err("matched non-SpanEnd (impossible)".to_string()),
+    };
+
+    let call_end = h
+        .wait_for(SEC * 30, |f, _| matches!(f, OwnedFrame::SpanEnd { id, .. } if *id == call_id))
+        .ok_or("no SpanEnd for fs.create within 30s")?;
+    let call_end = match call_end {
+        OwnedFrame::SpanEnd { t, .. } => t,
+        _ => return Err("matched non-SpanEnd (impossible)".to_string()),
+    };
+
+    if !(call_start <= serve_start && serve_end <= call_end) {
+        return Err(format!(
+            "server span [{serve_start}, {serve_end}] not contained in fs.create \
+             [{call_start}, {call_end}] — the client's op span didn't stay open across \
+             the server's handling"
+        ));
+    }
+    Ok(())
+}
+
 /// v0.10 FS `readdir` (`workload=fs`), step 4c: the client lists the root
 /// directory. Indexed `readdir(0)` returns the single entry (`"data"`, the file
 /// it created) — inode + kind inline, the name copied out via `CopyToCaller` —
