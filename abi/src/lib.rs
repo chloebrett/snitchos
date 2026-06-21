@@ -31,10 +31,11 @@ pub enum Syscall {
     /// counter. The single kernel surface; "syscalls" are messages to
     /// capabilities.
     Invoke = 0,
-    /// Terminate the calling process. Does not return — the kernel marks
-    /// the user task `Exited` and switches the hart to its next ready task.
-    /// (Not capability-mediated: a process can always end itself. v0.7b
-    /// leaks the address space + caps on exit; reclamation is later.)
+    /// Terminate the calling process with exit status `a0` (an `i32`). Does not
+    /// return — the kernel records the status (reaping bookkeeping, v0.12), wakes
+    /// any parent blocked in [`Self::Wait`] on this task, and switches the hart to
+    /// its next ready task. (Not capability-mediated: a process can always end
+    /// itself. v0.7b leaks the address space + caps on exit; reclamation is later.)
     Exit = 1,
     /// Voluntarily yield the CPU. The kernel runs `yield_now()` on the
     /// caller's behalf — switching to the next ready task — then returns
@@ -158,6 +159,13 @@ pub enum Syscall {
     /// issuing table. No cap argument: the registration was already cap-gated,
     /// so the hot emit path is a bare table lookup.
     EmitMetric = 18,
+    /// Wait for a child to exit and collect its status (v0.12). `a0` = the child's
+    /// task id (as returned by [`Self::Spawn`]). Blocks until that task `Exit`s,
+    /// then returns its exit status in `a0`; if the child had already exited, the
+    /// status is returned immediately (the zombie is reaped). Same-hart in v0.12
+    /// (a parent waits on a child it spawned on its own hart); cross-hart wait is
+    /// a deferred follow-on.
+    Wait = 19,
 }
 
 impl Syscall {
@@ -186,6 +194,7 @@ impl Syscall {
             16 => Some(Self::Spawn),
             17 => Some(Self::RegisterMetric),
             18 => Some(Self::EmitMetric),
+            19 => Some(Self::Wait),
             _ => None,
         }
     }
@@ -238,6 +247,7 @@ mod tests {
         assert_eq!(Syscall::Spawn as usize, 16);
         assert_eq!(Syscall::RegisterMetric as usize, 17);
         assert_eq!(Syscall::EmitMetric as usize, 18);
+        assert_eq!(Syscall::Wait as usize, 19);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
@@ -258,6 +268,7 @@ mod tests {
         assert_eq!(Syscall::from_usize(16), Some(Syscall::Spawn));
         assert_eq!(Syscall::from_usize(17), Some(Syscall::RegisterMetric));
         assert_eq!(Syscall::from_usize(18), Some(Syscall::EmitMetric));
-        assert_eq!(Syscall::from_usize(19), None);
+        assert_eq!(Syscall::from_usize(19), Some(Syscall::Wait));
+        assert_eq!(Syscall::from_usize(20), None);
     }
 }

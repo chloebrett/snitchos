@@ -934,3 +934,22 @@ pub fn wake(id: TaskId) {
         sched.runqueues[me].push_back(Candidate { id, base, enqueued_tick: now });
     }
 }
+
+/// Wait/exit reaping table (v0.12) — zombies + parents blocked in `Wait`. Behind
+/// the same `Mutex` discipline as the runqueue: locked only inside [`wait_for`] /
+/// [`note_exit`], never held across a `block_current`/`switch`.
+static REAP: crate::sync::Mutex<kernel_core::reap::ReapTable> =
+    crate::sync::Mutex::new(kernel_core::reap::ReapTable::new());
+
+/// `parent` waits on `child`: reap the zombie (return its status) if it already
+/// exited, else record the waiter and tell the caller to block. The pure
+/// decision is [`kernel_core::reap::ReapTable::on_wait`].
+pub fn wait_for(parent: TaskId, child: TaskId) -> kernel_core::reap::WaitStep {
+    REAP.lock().on_wait(parent, child)
+}
+
+/// Record that `child` exited with `status` and return the parent (if any)
+/// blocked on it, for the caller to [`wake`]. [`kernel_core::reap::ReapTable::on_exit`].
+pub fn note_exit(child: TaskId, status: i32) -> Option<TaskId> {
+    REAP.lock().on_exit(child, status)
+}

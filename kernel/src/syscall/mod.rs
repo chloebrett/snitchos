@@ -32,7 +32,7 @@ pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
     use snitchos_abi::Syscall;
     match Syscall::from_usize(frame.a7 as usize) {
         Some(Syscall::Invoke) => cap::handle_invoke(frame),
-        Some(Syscall::Exit) => process::handle_exit(), // does not return
+        Some(Syscall::Exit) => process::handle_exit(frame), // does not return
         Some(Syscall::Yield) => crate::sched::yield_now(),
         Some(Syscall::SpanOpen) => span::handle_span_open(frame),
         Some(Syscall::SpanClose) => span::handle_span_close(frame),
@@ -48,6 +48,7 @@ pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::CopyToCaller) => transfer::handle_copy_to_caller(frame),
         Some(Syscall::ConsoleRead) => console::handle_console_read(frame),
         Some(Syscall::Spawn) => process::handle_spawn(frame),
+        Some(Syscall::Wait) => process::handle_wait(frame),
         Some(Syscall::RegisterMetric) => metric::handle_register_metric(frame),
         Some(Syscall::EmitMetric) => metric::handle_emit_metric(frame),
         None => {

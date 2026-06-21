@@ -223,13 +223,41 @@ fn invoke(handle: usize, arg: usize) -> Result<(), Denied> {
     if ret == 0 { Ok(()) } else { Err(Denied) }
 }
 
-/// Terminate this process. The kernel marks us exited and switches the hart
-/// to its next task; never returns.
+/// Terminate this process with exit status `0`. Never returns.
 pub fn exit() -> ! {
+    exit_with(0)
+}
+
+/// Terminate this process with exit status `code` (collected by a parent's
+/// [`wait`]). The kernel records the status, wakes any waiting parent, and
+/// switches the hart away; never returns.
+pub fn exit_with(code: i32) -> ! {
     // SAFETY: `Exit` never returns to us — the kernel switches the hart away.
     unsafe {
-        asm!("ecall", in("a7") Syscall::Exit as usize, options(noreturn));
+        asm!(
+            "ecall",
+            in("a7") Syscall::Exit as usize,
+            in("a0") code as usize,
+            options(noreturn),
+        );
     }
+}
+
+/// Block until child task `child` (a [`spawn`] return value) exits, and return
+/// its exit status. If the child already exited, returns its status immediately.
+#[must_use]
+pub fn wait(child: u32) -> i32 {
+    let ret: usize;
+    // SAFETY: `ecall`; the kernel blocks us until the child exits, then returns
+    // its status in `a0` (resuming us right here on a later reschedule).
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::Wait as usize,
+            inlateout("a0") child as usize => ret,
+        );
+    }
+    ret as i32
 }
 
 /// Voluntarily yield the CPU. We can't call the kernel's `yield_now` directly

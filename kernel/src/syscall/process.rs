@@ -1,23 +1,58 @@
-//! Process-lifecycle syscalls: `Exit` and `Spawn`.
+//! Process-lifecycle syscalls: `Exit`, `Wait`, and `Spawn`.
 
 use core::sync::atomic::Ordering;
 
 use crate::trap::TrapFrame;
 
-/// Terminate the calling user process. Snitches `snitchos.user.exits_total`,
-/// clears this hart's current-process pointer (the process is gone), then
-/// hands the hart to its next ready task via `sched::exit_now` — which never
-/// returns. On the userspace workload that next task is `hart_1_main`, whose
-/// idle loop `wfi`s, so the hart goes truly idle rather than busy-spinning.
-/// v0.7b leaks the address space + caps; reclamation is a later milestone.
-pub(super) fn handle_exit() -> ! {
+/// Terminate the calling user process with exit status `a0` (v0.12). Snitches
+/// `snitchos.user.exits_total`, clears this hart's current-process pointer,
+/// records the exit status + wakes any parent blocked in `Wait` on this task
+/// (the reaping bookkeeping), then hands the hart to its next ready task via
+/// `sched::exit_now` — which never returns. v0.7b leaks the address space + caps;
+/// reclamation is a later milestone.
+pub(super) fn handle_exit(frame: &TrapFrame) -> ! {
+    let status = frame.a0 as i32;
+    let me = crate::sched::current_task_id();
+
     if let Some(id) = crate::user::user_exits_metric_id() {
         crate::tracing::emit_metric(id, 1);
     }
     crate::process::CURRENT_PROCESS
         .this_cpu()
         .store(core::ptr::null_mut(), Ordering::Relaxed);
+
+    // Record the zombie + wake any parent blocked in `Wait` on us. Must happen
+    // before `exit_now` (which never returns). `wake` only re-enqueues a blocked
+    // task, so a not-yet-blocked parent (cross-hart racing) is a no-op — fine, as
+    // v0.12 `Wait` is same-hart and the parent is already blocked by here.
+    if let Some(parent) = crate::sched::note_exit(me, status) {
+        crate::sched::wake(parent);
+    }
+
     crate::sched::exit_now()
+}
+
+/// Wait for a child to exit and return its status (v0.12). `a0` = the child's
+/// task id; returns its exit status in `a0`. Blocks until the child `Exit`s
+/// (re-checking on each wake), or returns immediately if it already exited
+/// (reaping the zombie). Same-hart in v0.12.
+pub(super) fn handle_wait(frame: &mut TrapFrame) {
+    use kernel_core::reap::WaitStep;
+    use kernel_core::sched::TaskId;
+
+    let me = crate::sched::current_task_id();
+    let child = TaskId(frame.a0 as u32);
+    loop {
+        match crate::sched::wait_for(me, child) {
+            WaitStep::Ready(status) => {
+                frame.a0 = status as u64;
+                return;
+            }
+            // Recorded as the waiter; block until the child's `Exit` wakes us,
+            // then loop to re-check (it'll find the zombie and reap it).
+            WaitStep::Block => crate::sched::block_current(),
+        }
+    }
 }
 
 /// Spawn a new userspace process, delegating a subset of the caller's caps to it

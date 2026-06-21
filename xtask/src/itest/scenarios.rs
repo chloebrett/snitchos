@@ -2420,6 +2420,18 @@ pub fn spawn_delegates_to_child(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 20, is_span_start_named("spawnee.via_delegated"))
         .ok_or("no 'spawnee.via_delegated' span — the child couldn't use the delegated cap")?;
 
+    // v0.12: the parent `Wait`ed for the child and collected its exit status (42),
+    // which it re-emits as telemetry. Proves Exit→Wait round-trips the status and
+    // the parent runs *after* the child (the reap ordering).
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value == 42
+        }
+        _ => false,
+    })
+    .ok_or("parent never reported child exit status 42 — Wait didn't reap the child's status")?;
+
     Ok(())
 }
 
