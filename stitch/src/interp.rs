@@ -144,7 +144,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         },
         Expr::Field { object, name } => eval_field(&eval(object, env)?, name),
         Expr::Try(operand) => eval_try(eval(operand, env)?, env),
-        Expr::SafeField { object, name } => eval_safe_field(eval(object, env)?, name),
+        Expr::SafeField { object, name } => eval_safe_field(&eval(object, env)?, name, env),
         Expr::Index { object, index } => eval_index(&eval(object, env)?, &eval(index, env)?),
         _ => Err(RuntimeError::new(
             "evaluation not yet implemented for this expression",
@@ -504,14 +504,16 @@ fn eval_index(object: &Value, index: &Value) -> Result<Value, RuntimeError> {
     }
 }
 
-/// Dispatch a zero-argument instance method on an already-evaluated value,
-/// binding it as `@` and running the body in global scope (like `eval_method_call`,
-/// minus the call-site machinery). Returns `Ok(None)` when the value's type has
-/// no such method, so a caller can report a contract-specific error. Used by the
-/// operators that desugar to method calls (`?` → the `Try` contract).
+/// Dispatch an instance method on an already-evaluated value, binding it as `@`
+/// and `args` to the parameters, running the body in global scope (like
+/// `eval_method_call`, minus the call-site machinery). Returns `Ok(None)` when
+/// the value's type has no such method, so a caller can report a contract-specific
+/// error. Used by the operators that desugar to method calls (`?` → `Try`,
+/// `?.` → `Functor`).
 fn call_instance_method(
     receiver: &Value,
     name: &str,
+    args: &[Value],
     env: &Env,
 ) -> Result<Option<Value>, RuntimeError> {
     let Value::Data(data) = receiver else {
@@ -523,7 +525,10 @@ fn call_instance_method(
     let Some(body) = method.body.as_ref() else {
         return Ok(None);
     };
-    let method_env = env.globals_only().extend("@".to_string(), receiver.clone());
+    let mut method_env = env.globals_only().extend("@".to_string(), receiver.clone());
+    for (param, arg) in method.params.iter().zip(args) {
+        method_env = method_env.extend(param.name.clone(), arg.clone());
+    }
     // A method is a call boundary, so a `?` inside it stops here.
     let result = match eval(body, &method_env) {
         Err(RuntimeError::Return(value)) => value,
@@ -539,7 +544,7 @@ fn call_instance_method(
 /// implements `Try` for Maybe (failure = `None`) and Result (failure = `Err`) in
 /// the prelude; any user type with a success/failure split can opt in.
 fn eval_try(value: Value, env: &Env) -> Result<Value, RuntimeError> {
-    let Some(is_failure) = call_instance_method(&value, "isFailure", env)? else {
+    let Some(is_failure) = call_instance_method(&value, "isFailure", &[], env)? else {
         return Err(RuntimeError::new(format!(
             "`?` expects a value implementing `Try` (e.g. Maybe/Result), got {}",
             value.kind()
@@ -547,7 +552,7 @@ fn eval_try(value: Value, env: &Env) -> Result<Value, RuntimeError> {
     };
     match is_failure {
         Value::Bool(true) => Err(RuntimeError::early_return(value)),
-        Value::Bool(false) => call_instance_method(&value, "unwrap", env)?
+        Value::Bool(false) => call_instance_method(&value, "unwrap", &[], env)?
             .ok_or_else(|| RuntimeError::new("`Try` value implements isFailure but not unwrap")),
         other => Err(RuntimeError::new(format!(
             "`Try.isFailure` must return a Bool, got {}",
@@ -556,31 +561,28 @@ fn eval_try(value: Value, env: &Env) -> Result<Value, RuntimeError> {
     }
 }
 
-/// The `?.` safe-navigation operator: map a field access *inside* a `Maybe`/
-/// `Result`. `Some(v)?.y` → `Some(v.y)`, `None?.y` → `None` (and likewise for
-/// `Ok`/`Err`) — so a chain stays wrapped and short-circuits on the empty case.
-fn eval_safe_field(object: Value, name: &str) -> Result<Value, RuntimeError> {
-    if let Value::Data(data) = &object {
-        match (data.type_name.as_str(), data.variant.as_str()) {
-            // Empty/failure case: pass straight through, unchanged.
-            ("Maybe", "None") | ("Result", "Err") => return Ok(object),
-            // Present case: access the field, re-wrap in the same variant.
-            ("Maybe", "Some") | ("Result", "Ok") => {
-                let inner = data.fields.first().map_or(Value::Unit, |(_, v)| v.clone());
-                let field = eval_field(&inner, name)?;
-                return Ok(Value::Data(Rc::new(DataValue {
-                    type_name: data.type_name.clone(),
-                    variant: data.variant.clone(),
-                    fields: vec![(None, field)],
-                })));
-            }
-            _ => {}
-        }
-    }
-    Err(RuntimeError::new(format!(
-        "`?.` expects a Maybe or Result, got {}",
-        object.kind()
-    )))
+/// The `?.` safe-navigation operator, desugared over the `Functor` contract:
+/// `x?.field` ≡ `x.map(v -> v.field)`. Unlike `?` (which unwraps), `?.` *re-wraps*
+/// — `map` keeps the container shape, so `Some(v)?.y` → `Some(v.y)` and
+/// `None?.y` → `None`. Std implements `Functor` for `Maybe`/`Result` in the
+/// prelude; a user container opts in by implementing `map`.
+fn eval_safe_field(object: &Value, name: &str, env: &Env) -> Result<Value, RuntimeError> {
+    // The accessor `v -> v.field`, handed to `map` as the function to apply
+    // inside the container.
+    let accessor = Value::Closure(Rc::new(ClosureData {
+        params: vec!["v".to_string()],
+        body: Expr::Field {
+            object: Box::new(Expr::Var("v".to_string())),
+            name: name.to_string(),
+        },
+        env: env.clone(),
+    }));
+    call_instance_method(object, "map", std::slice::from_ref(&accessor), env)?.ok_or_else(|| {
+        RuntimeError::new(format!(
+            "`?.` expects a value implementing `Functor` (e.g. Maybe/Result), got {}",
+            object.kind()
+        ))
+    })
 }
 
 /// Read field `name` from a `Data` value.
@@ -1507,8 +1509,18 @@ mod tests {
     fn safe_nav_on_a_non_option_is_an_error() {
         assert_eq!(
             run_program_err("main() = 5?.x"),
-            "`?.` expects a Maybe or Result, got Int"
+            "`?.` expects a value implementing `Functor` (e.g. Maybe/Result), got Int"
         );
+    }
+
+    #[test]
+    fn safe_nav_works_on_a_user_type_implementing_functor() {
+        // The payoff of `?.` being a contract: a user container that implements
+        // `map` gets safe-navigation. `Box(p)?.x` maps `.x` inside the Box.
+        let src = "prod Pt(x: Int)  sum Box = Full(Pt) | Empty  \
+                   on Box : Functor { map(f) = match @ { Full(v) => Full(f(v))  Empty => Empty } }  \
+                   main() = match Full(Pt(7))?.x { Full(n) => n  Empty => 0 }";
+        assert_eq!(run_program(src), Value::Int(7));
     }
 
     #[test]

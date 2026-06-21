@@ -976,6 +976,13 @@ impl Parser {
     /// A type atom: a parenthesized form (`()` unit, `(A)` grouping, `(A, B)`
     /// tuple) or a named type with optional `<…>` arguments.
     fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
+        // `@` in type position is the self-type (the receiver's own type). v0
+        // parses it (and ignores it, like every type annotation); the type
+        // system will give it meaning and restrict it to method signatures.
+        if matches!(self.peek(), Token::At) {
+            self.bump();
+            return Ok(Type::SelfType);
+        }
         if !matches!(self.peek(), Token::LParen) {
             return self.parse_type_name();
         }
@@ -1706,6 +1713,14 @@ mod tests {
     #[test]
     fn parses_generic_contract() {
         insta::assert_debug_snapshot!(prog("contract Container<T> { get() -> T }"));
+    }
+
+    #[test]
+    fn parses_self_type_in_a_method_signature() {
+        // `@` in type position is the self-type — `unwrap() -> @` returns the
+        // receiver's own type. Parsed (and ignored) in v0; meaning arrives with
+        // the type system.
+        insta::assert_debug_snapshot!(prog("contract Try { unwrap() -> @ }"));
     }
 
     #[test]

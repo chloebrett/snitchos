@@ -108,6 +108,10 @@ pub enum Type {
     Func { param: Box<Type>, ret: Box<Type> },
     /// `(A, B, …)` — a tuple type. `()` is the unit type (empty tuple).
     Tuple(Vec<Type>),
+    /// `@` — the self-type, the receiver's own type. Only meaningful inside an
+    /// `on`/`contract` method signature (`unwrap() -> @`). Parsed but not checked
+    /// in v0; gating + meaning arrive with the type system.
+    SelfType,
 }
 
 /// An expression.

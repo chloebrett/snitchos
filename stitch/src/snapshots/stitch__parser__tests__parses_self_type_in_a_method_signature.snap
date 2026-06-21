@@ -1,0 +1,21 @@
+---
+source: stitch/src/parser.rs
+expression: "prog(\"contract Try { unwrap() -> @ }\")"
+---
+[
+    Contract {
+        name: "Try",
+        generics: [],
+        methods: [
+            Method {
+                name: "unwrap",
+                modifier: Instance,
+                params: [],
+                ret: Some(
+                    SelfType,
+                ),
+                body: None,
+            },
+        ],
+    },
+]

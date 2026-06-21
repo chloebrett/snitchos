@@ -32,7 +32,7 @@ find(xs, pred) =
 
 contract Try {
     isFailure() -> Bool
-    unwrap()
+    unwrap() -> @
 }
 
 on Maybe : Try {
@@ -43,6 +43,23 @@ on Maybe : Try {
 on Result : Try {
     isFailure() = match @ { Err(_) => true  Ok(_) => false }
     unwrap() = match @ { Ok(v) => v  Err(_) => @ }
+}
+
+// --- the Functor contract: `?.` maps a field access inside a container ---
+// `x?.field` desugars to `x.map(v -> v.field)`. Unlike `?` (which unwraps), `map`
+// re-wraps: it keeps the container shape, so the chain stays wrapped and
+// short-circuits on the empty/failure case.
+
+contract Functor {
+    map(f) -> @
+}
+
+on Maybe : Functor {
+    map(f) = match @ { Some(v) => Some(f(v))  None => None }
+}
+
+on Result : Functor {
+    map(f) = match @ { Ok(v) => Ok(f(v))  Err(e) => Err(e) }
 }
 
 // --- Maybe helpers ---
