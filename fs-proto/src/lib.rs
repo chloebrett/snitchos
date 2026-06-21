@@ -370,6 +370,7 @@ const fn status_from_error(e: FsError) -> u64 {
         FsError::Unsupported => 5,
         FsError::NameTooLong => 6,
         FsError::Denied => 7,
+        FsError::Internal => 8,
     }
 }
 
@@ -382,6 +383,7 @@ const fn error_from_status(status: u64) -> Result<FsError, WireError> {
         5 => Ok(FsError::Unsupported),
         6 => Ok(FsError::NameTooLong),
         7 => Ok(FsError::Denied),
+        8 => Ok(FsError::Internal),
         other => Err(WireError::BadStatus(other)),
     }
 }
@@ -572,6 +574,8 @@ mod tests {
             FsError::Exists,
             FsError::Unsupported,
             FsError::NameTooLong,
+            FsError::Denied,
+            FsError::Internal,
         ];
 
         for e in errors {
@@ -588,6 +592,8 @@ mod tests {
         assert_eq!(Response::Err(FsError::Exists).encode()[0], 4);
         assert_eq!(Response::Err(FsError::Unsupported).encode()[0], 5);
         assert_eq!(Response::Err(FsError::NameTooLong).encode()[0], 6);
+        assert_eq!(Response::Err(FsError::Denied).encode()[0], 7);
+        assert_eq!(Response::Err(FsError::Internal).encode()[0], 8);
     }
 
     #[test]
@@ -646,6 +652,22 @@ mod tests {
         assert_eq!(
             Response::decode(Op::Write, Response::Err(FsError::Denied).encode()),
             Ok(Response::Err(FsError::Denied))
+        );
+    }
+
+    #[test]
+    fn internal_status_code_is_eight_appended() {
+        // The FS server's "I couldn't complete this" — a copy/mint/decode
+        // failure, distinct from `Unsupported` (the op isn't implemented).
+        // Appended after Denied(7); 1–7 never renumber.
+        assert_eq!(Response::Err(FsError::Internal).encode()[0], 8);
+    }
+
+    #[test]
+    fn internal_response_round_trips() {
+        assert_eq!(
+            Response::decode(Op::Read, Response::Err(FsError::Internal).encode()),
+            Ok(Response::Err(FsError::Internal))
         );
     }
 

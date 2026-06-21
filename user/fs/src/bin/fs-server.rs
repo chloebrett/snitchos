@@ -49,7 +49,7 @@ fn main() {
         // it. Decode the request, then run the rights gate — refusals snitch.
         let badge = Badge::unpack(r.badge);
         let Ok(req) = Request::decode(r.msg) else {
-            let _ = reply(reply_handle, Response::Err(FsError::Unsupported).encode());
+            let _ = reply(reply_handle, Response::Err(FsError::Internal).encode());
             continue;
         };
         // Each request is a span. The kernel seeded our span cursor with the
@@ -86,7 +86,7 @@ fn main() {
                         Ok(written) => Response::Count(written as u64),
                         Err(e) => Response::Err(e),
                     },
-                    Err(_) => Response::Err(FsError::Unsupported),
+                    Err(_) => Response::Err(FsError::Internal),
                 };
                 let _ = reply(reply_handle, resp.encode());
             }
@@ -97,7 +97,7 @@ fn main() {
                 let resp = match fs.read(badge.inode, offset, &mut scratch[..want]) {
                     Ok(n) => match copy_to_caller(reply_handle, scratch.as_ptr() as usize, n, dst.ptr as usize) {
                         Ok(_) => Response::Count(n as u64),
-                        Err(_) => Response::Err(FsError::Unsupported),
+                        Err(_) => Response::Err(FsError::Internal),
                     },
                     Err(e) => Response::Err(e),
                 };
@@ -184,7 +184,7 @@ fn readdir(fs: &mut RamFs, reply_handle: usize, dir: Badge, index: u64, name_dst
                 let n = name.len().min(name_dst.len as usize);
                 match copy_to_caller(reply_handle, name.as_ptr() as usize, n, name_dst.ptr as usize) {
                     Ok(_) => Response::Entry { ino: entry.ino, kind: entry.kind, name_len: n as u64 },
-                    Err(_) => Response::Err(FsError::Unsupported),
+                    Err(_) => Response::Err(FsError::Internal),
                 }
             }
             None => Response::Err(FsError::NotFound),
@@ -206,7 +206,7 @@ fn reply_minted_child(reply_handle: usize, child: Result<InodeId, FsError>, chil
                     let _ = reply_with_cap(reply_handle, Response::Inode(child).encode(), cap);
                 }
                 Err(_) => {
-                    let _ = reply(reply_handle, Response::Err(FsError::Unsupported).encode());
+                    let _ = reply(reply_handle, Response::Err(FsError::Internal).encode());
                 }
             }
         }

@@ -69,6 +69,11 @@ pub enum FsError {
     /// Enforced by the FS, never the kernel — the kernel carries the badge's
     /// rights but never interprets them.
     Denied,
+    /// The server couldn't complete the op for an internal/transport reason —
+    /// a cross-AS copy failed, a cap mint failed, or the request didn't decode.
+    /// Distinct from [`Unsupported`](Self::Unsupported), which means the op
+    /// itself isn't implemented for that inode.
+    Internal,
 }
 
 /// Inode-addressed storage operations. No `open`/`close` — opening is a
