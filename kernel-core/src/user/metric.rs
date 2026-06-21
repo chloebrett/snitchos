@@ -69,12 +69,22 @@ impl MetricTable {
     /// table is already at [`MAX_METRIC_NAMES`](Self::MAX_METRIC_NAMES). The
     /// handle is the slot index — distinct per registration.
     pub fn register(&mut self, name: StringId) -> Option<MetricHandle> {
-        if self.names.len() >= Self::MAX_METRIC_NAMES {
+        if self.is_full() {
             return None;
         }
         let index = self.names.len() as u32;
         self.names.push(name);
         Some(MetricHandle(index))
+    }
+
+    /// Whether the table is at its [`MAX_METRIC_NAMES`](Self::MAX_METRIC_NAMES)
+    /// quota — the next [`register`](Self::register) would return `None`. The
+    /// register syscall checks this *before* leaking + interning the metric
+    /// name, so a quota-refused registration commits no permanent `'static`
+    /// string.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.names.len() >= Self::MAX_METRIC_NAMES
     }
 
     /// Resolve a handle to the [`StringId`] it names, validating it against
@@ -126,6 +136,19 @@ mod tests {
             None,
             "one past the cap is refused"
         );
+    }
+
+    #[test]
+    fn a_fresh_table_is_not_full_and_a_capped_table_is() {
+        // The register syscall checks `is_full` *before* leaking + interning a
+        // name, so a refused-for-quota registration commits no `'static` string.
+        let mut table = MetricTable::new();
+        assert!(!table.is_full(), "an empty table has room");
+        for i in 0..MetricTable::MAX_METRIC_NAMES {
+            assert!(!table.is_full(), "the table has room before registration {i}");
+            table.register(StringId(i as u32)).expect("under the cap");
+        }
+        assert!(table.is_full(), "the table is full at the cap");
     }
 
     #[test]
