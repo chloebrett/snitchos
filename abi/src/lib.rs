@@ -135,6 +135,29 @@ pub enum Syscall {
     /// those caps plus its own bootstrap telemetry/span, and returns the child's
     /// task id in `a0` (or `usize::MAX` on refusal).
     Spawn = 16,
+    /// Register a userspace-named metric (debt #2). `a0` = `TelemetrySink`
+    /// capability handle (the gate — needs `EMIT`; holding it is the authority
+    /// to name metrics), `a1` = pointer to the metric name in user memory, `a2`
+    /// = its length, `a3` = the metric kind (`0` = Counter, `1` = Gauge, `2` =
+    /// Histogram — the `protocol::MetricKind` discriminant order). The kernel
+    /// copies + interns the name into a **fresh** id (no cross-process dedup —
+    /// each emitter gets its own `StringId`), stores it in the *caller's*
+    /// per-process metric table, and returns an opaque metric handle (an index
+    /// into that table) in `a0`. Refused with `usize::MAX` on a bad cap, bad
+    /// user range, bad UTF-8, or once the table is at its `MAX_METRIC_NAMES`
+    /// quota. The handle — not the name — is what [`Self::EmitMetric`] presents,
+    /// so the string crosses the boundary exactly once.
+    RegisterMetric = 17,
+    /// Emit a sample to a metric this process registered (debt #2). `a0` = the
+    /// metric handle [`Self::RegisterMetric`] returned, `a1` = the value
+    /// (`i64`). The kernel resolves the handle against the *caller's own* metric
+    /// table → the bound `StringId` and emits the sample. A handle the caller
+    /// never registered (out of range) is **refused** (`usize::MAX`, snitched as
+    /// `SyscallRefused`), never silently emitted — possession of a valid handle
+    /// is the authority, and a handle is unforgeable as an index into the
+    /// issuing table. No cap argument: the registration was already cap-gated,
+    /// so the hot emit path is a bare table lookup.
+    EmitMetric = 18,
 }
 
 impl Syscall {
@@ -161,6 +184,8 @@ impl Syscall {
             14 => Some(Self::CopyToCaller),
             15 => Some(Self::ConsoleRead),
             16 => Some(Self::Spawn),
+            17 => Some(Self::RegisterMetric),
+            18 => Some(Self::EmitMetric),
             _ => None,
         }
     }
@@ -211,6 +236,8 @@ mod tests {
         assert_eq!(Syscall::CopyToCaller as usize, 14);
         assert_eq!(Syscall::ConsoleRead as usize, 15);
         assert_eq!(Syscall::Spawn as usize, 16);
+        assert_eq!(Syscall::RegisterMetric as usize, 17);
+        assert_eq!(Syscall::EmitMetric as usize, 18);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
@@ -229,6 +256,8 @@ mod tests {
         assert_eq!(Syscall::from_usize(14), Some(Syscall::CopyToCaller));
         assert_eq!(Syscall::from_usize(15), Some(Syscall::ConsoleRead));
         assert_eq!(Syscall::from_usize(16), Some(Syscall::Spawn));
-        assert_eq!(Syscall::from_usize(17), None);
+        assert_eq!(Syscall::from_usize(17), Some(Syscall::RegisterMetric));
+        assert_eq!(Syscall::from_usize(18), Some(Syscall::EmitMetric));
+        assert_eq!(Syscall::from_usize(19), None);
     }
 }

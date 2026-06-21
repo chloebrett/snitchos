@@ -364,6 +364,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::UserHog)
         | Some(WorkloadKind::SyscallHog)
         | Some(WorkloadKind::ConsoleEcho)
+        | Some(WorkloadKind::Probe)
+        | Some(WorkloadKind::SpawnDemo)
         | Some(WorkloadKind::Priorities)
         | Some(WorkloadKind::Ipc)
         | Some(WorkloadKind::IpcRpc)
@@ -420,6 +422,9 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::HeapGrow
                     | WorkloadKind::UserHog
                     | WorkloadKind::SyscallHog
+                    | WorkloadKind::ConsoleEcho
+                    | WorkloadKind::SpawnDemo
+                    | WorkloadKind::UserspaceBadPtr
                     | WorkloadKind::Priorities
                     | WorkloadKind::BlockWake
                     | WorkloadKind::Ipc

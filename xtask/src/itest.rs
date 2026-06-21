@@ -53,6 +53,78 @@ fn install_ctrlc_handler() {
     });
 }
 
+/// Print a failed itest capture's frame transcript (`.itest-runs/`), so a
+/// capture can be inspected without hand-parsing JSON. Defaults to the latest
+/// run and the first capture in it; `--scenario`/`--tail`/`--grep` narrow it.
+pub fn show(run: Option<&str>, scenario: Option<&str>, tail: Option<usize>, grep: Option<&str>) -> ExitCode {
+    let dir = match run {
+        Some(r) => PathBuf::from(HISTORY_ROOT).join(r),
+        None => match latest_run_dir() {
+            Some(d) => d,
+            None => {
+                eprintln!("no runs under {HISTORY_ROOT}/");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let Some(cap_path) = find_capture(&dir, scenario) else {
+        eprintln!("no .capture.json in {}", dir.display());
+        return ExitCode::FAILURE;
+    };
+    let capture = match itest_harness::load_capture(&cap_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("load {}: {e}", cap_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!(
+        "# {} — outcome={:?}, frames_seen={}",
+        cap_path.display(),
+        capture.outcome,
+        capture.frames_seen
+    );
+    let frames: Vec<&String> = capture
+        .transcript
+        .iter()
+        .filter(|f| grep.is_none_or(|g| f.contains(g)))
+        .collect();
+    let start = tail.map_or(0, |n| frames.len().saturating_sub(n));
+    for f in &frames[start..] {
+        println!("{f}");
+    }
+    ExitCode::SUCCESS
+}
+
+/// The most recent run directory under [`HISTORY_ROOT`] — timestamp names sort
+/// lexicographically, so the max is the latest. `None` if there are no runs.
+fn latest_run_dir() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(HISTORY_ROOT)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    dirs.pop()
+}
+
+/// The first `*.capture.json` in `dir` (optionally filtered to a scenario name).
+fn find_capture(dir: &Path, scenario: Option<&str>) -> Option<PathBuf> {
+    let mut caps: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".capture.json") && scenario.is_none_or(|s| n.contains(s)))
+        })
+        .collect();
+    caps.sort();
+    caps.into_iter().next()
+}
+
 pub(crate) mod baseline;
 mod harness;
 mod matchers;
@@ -154,6 +226,7 @@ catalog! {
     wfi "fs-readdir"                      scenarios::fs_readdir_lists_entries       [userspace, ipc] {"fs"};
     wfi "fs-workload"                     scenarios::fs_workload_traces             [userspace, ipc] {"fs"};
     wfi "userspace-bad-ptr"               scenarios::userspace_bad_ptr_refused      [userspace]      {"userspace-bad-ptr"};
+    wfi "userspace-custom-metric"         scenarios::userspace_custom_metric        [userspace]      {"probe"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back
@@ -181,6 +254,7 @@ catalog! {
     cpu "preemption-telemetry"            scenarios::preemption_telemetry           [userspace]  {"user-hog"};
     cpu "syscall-hog-still-preempted"     scenarios::syscall_hog_still_preempted    [userspace]  {"syscall-hog"};
     cpu "console-echo-round-trips"        scenarios::console_echo_round_trips       [userspace]  {"console-echo"};
+    cpu "spawn-delegates-to-child"        scenarios::spawn_delegates_to_child       [userspace]  {"spawn-demo"};
     cpu "priorities-ordered-but-fair"     scenarios::priorities_ordered_but_fair    [userspace]  {"priorities"};
 }
 

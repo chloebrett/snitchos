@@ -230,6 +230,13 @@ pub enum RefusalReason {
   OutOfMemory,
   /// A `Spawn` named a program id that is not in the spawnable registry.
   UnknownProgram,
+  /// An `EmitMetric` named a metric handle the calling process never
+  /// registered (out of range in its per-process metric table) — the
+  /// userspace-defined-metrics forgery boundary.
+  BadMetricHandle,
+  /// A `RegisterMetric` carried a metric-kind selector that names no
+  /// `MetricKind` (not Counter/Gauge/Histogram).
+  BadMetricKind,
 }
 
 #[cfg(test)]
@@ -677,6 +684,9 @@ mod tests {
       RefusalReason::Quota,
       RefusalReason::BadSpanId,
       RefusalReason::OutOfMemory,
+      RefusalReason::UnknownProgram,
+      RefusalReason::BadMetricHandle,
+      RefusalReason::BadMetricKind,
     ] {
       let frame = Frame::SyscallRefused {
         syscall: 3,

@@ -1701,6 +1701,66 @@ pub fn userspace_bad_ptr_refused(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Userspace-defined metrics (`workload=probe`, debt #2): a `probe` program
+/// registers its *own* metric (`snitchos.probe.custom`, a gauge) through its
+/// bootstrap `TelemetrySink` cap — the kernel doesn't know the name ahead of
+/// time — and emits `42` to it via the handle it got back. Then it emits through
+/// a handle it never registered, which the kernel must refuse.
+///
+/// Asserts, in order: the name is declared on the wire as a Gauge
+/// (`MetricRegister`), a sample of `42` lands under it (`Metric`), and emitting
+/// the unregistered handle is **refused** (`SyscallRefused{BadMetricHandle}`)
+/// rather than silently emitted — the per-process metric table is the forgery
+/// boundary.
+pub fn userspace_custom_metric(h: &mut View) -> Result<(), String> {
+    let probe_id = match h
+        .wait_for(SEC * 20, is_thread_register_named("probe"))
+        .ok_or("no ThreadRegister for 'probe' within 20s — the probe program never ran")?
+    {
+        OwnedFrame::ThreadRegister { id, .. } => id,
+        _ => return Err("matched non-ThreadRegister (impossible)".to_string()),
+    };
+
+    // The process named its own metric: the kernel interned it and declared it
+    // on the wire as a Gauge (no kernel-side foreknowledge of the name).
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::MetricRegister { name_id, kind }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.probe.custom")
+                && matches!(kind, protocol::MetricKind::Gauge))
+    })
+    .ok_or(
+        "no MetricRegister{snitchos.probe.custom, Gauge} within 30s — RegisterMetric didn't \
+         intern the userspace-named metric",
+    )?;
+
+    // The sample emitted through the returned handle lands under that name.
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.probe.custom")
+                && *value == 42)
+    })
+    .ok_or(
+        "no Metric{snitchos.probe.custom == 42} within 30s — EmitMetric didn't resolve the \
+         registered handle to its bound name",
+    )?;
+
+    // Emitting through an unregistered handle is refused, not silently emitted —
+    // the security boundary. Scoped to the probe task so it's unambiguously ours.
+    let emit_metric = snitchos_abi::Syscall::EmitMetric as u8;
+    h.wait_for(SEC * 10, move |f, _| {
+        matches!(f, OwnedFrame::SyscallRefused { syscall, reason, task_id, .. }
+            if *syscall == emit_metric
+                && matches!(reason, protocol::RefusalReason::BadMetricHandle)
+                && *task_id == probe_id)
+    })
+    .ok_or(
+        "no SyscallRefused{EmitMetric, BadMetricHandle} from the probe within 10s — emitting an \
+         unregistered metric handle was silently accepted (the forgery boundary broke)",
+    )?;
+
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside
@@ -2332,6 +2392,33 @@ pub fn console_echo_round_trips(h: &mut View) -> Result<(), String> {
         matches!(f, OwnedFrame::Log { msg, .. } if msg.contains("snitch"))
     })
     .ok_or("no Log echo of injected 'snitch' within 20s — console input didn't round-trip")?;
+
+    Ok(())
+}
+
+/// v0.11 spawn-with-caps (`workload=spawn-demo`): a parent `Spawn`s a child,
+/// delegating its `SpanSink` cap, and the child *uses* that delegated cap. Proves
+/// the whole path: `Spawn` creates a process holding exactly the delegated caps,
+/// and the child can exercise them. See `plans/spawn-shell-and-console.md`.
+pub fn spawn_delegates_to_child(h: &mut View) -> Result<(), String> {
+    // NB: `wait_for` advances one forward cursor, so these must be asserted in
+    // wire-emission order. The kernel registers the child *inside* `handle_spawn`
+    // (during the parent's `spawn()` syscall), so the spawnee `ThreadRegister`
+    // arrives *before* the parent returns and emits `spawner.spawned`.
+
+    // The child was created and registered as a task (emitted during handle_spawn).
+    h.wait_for(SEC * 20, is_thread_register_named("spawnee"))
+        .ok_or("no ThreadRegister for 'spawnee' — Spawn didn't create the child")?;
+
+    // The parent's Spawn returned Ok (it emits `spawner.refused` otherwise).
+    h.wait_for(SEC * 20, is_span_start_named("spawner.spawned"))
+        .ok_or("spawner's Spawn was refused or never ran (no 'spawner.spawned' within 20s)")?;
+
+    // The child opened a span through the *delegated* cap (handle 2). If the cap
+    // hadn't been delegated, `SpanOpen` on handle 2 would be refused and this span
+    // would never appear — so its presence proves delegation end to end.
+    h.wait_for(SEC * 20, is_span_start_named("spawnee.via_delegated"))
+        .ok_or("no 'spawnee.via_delegated' span — the child couldn't use the delegated cap")?;
 
     Ok(())
 }

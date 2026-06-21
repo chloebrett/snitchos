@@ -102,6 +102,11 @@ pub enum WorkloadKind {
     /// `ConsoleRead` → userspace) end to end. See
     /// `plans/console-tier0-polled-rx.md`.
     ConsoleEcho,
+    /// v0.11 spawn-with-caps demo: a `spawner` parent that `Spawn`s a `spawnee`
+    /// child at runtime, delegating its span cap. Proves the `Spawn` syscall
+    /// carries delegated authority into a freshly-created process. See
+    /// `plans/spawn-shell-and-console.md`.
+    SpawnDemo,
     /// v0.8b priority demo: a `High`-priority and a `Low`-priority cooperative
     /// worker share one hart. The High worker runs far more often (priority
     /// respected), but the Low worker still makes progress (aging prevents
@@ -132,6 +137,14 @@ pub enum WorkloadKind {
     /// a `badge-handout-client` `call`s, receives the badged cap, and signals
     /// success. Proves a server can return capabilities to a client. One hart.
     BadgeHandout,
+    /// Userspace-defined-metrics demo (debt #2): a `probe` program registers
+    /// its own metric (`snitchos.probe.custom`, a gauge) through its bootstrap
+    /// `TelemetrySink` cap and emits to it via the handle the kernel hands back —
+    /// then deliberately emits through an *unregistered* handle, which the kernel
+    /// must refuse (`SyscallRefused`), not silently emit. Proves a process names
+    /// its own metrics without the kernel knowing them ahead of time, and that
+    /// the per-process metric table is the forgery boundary. Not a storm.
+    Probe,
     /// v0.10 `RAMfs`: an `fs` server (`RECV | MINT`) serves a flat in-memory
     /// filesystem to an `fs-client` over one endpoint. The client connects
     /// (badge 0) to be minted a root File cap (`pack(root, READ)`), then issues
@@ -200,6 +213,8 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "user-hog" => Some(WorkloadKind::UserHog),
             "syscall-hog" => Some(WorkloadKind::SyscallHog),
             "console-echo" => Some(WorkloadKind::ConsoleEcho),
+            "probe" => Some(WorkloadKind::Probe),
+            "spawn-demo" => Some(WorkloadKind::SpawnDemo),
             "priorities" => Some(WorkloadKind::Priorities),
             "block-wake" => Some(WorkloadKind::BlockWake),
             "ipc" => Some(WorkloadKind::Ipc),
@@ -325,6 +340,17 @@ mod tests {
     #[test]
     fn selects_console_echo() {
         assert_eq!(select("workload=console-echo"), Some(WorkloadKind::ConsoleEcho));
+    }
+
+    #[test]
+    fn selects_probe() {
+        assert_eq!(select("workload=probe"), Some(WorkloadKind::Probe));
+        assert!(!WorkloadKind::Probe.is_storm());
+    }
+
+    #[test]
+    fn selects_spawn_demo() {
+        assert_eq!(select("workload=spawn-demo"), Some(WorkloadKind::SpawnDemo));
     }
 
     #[test]

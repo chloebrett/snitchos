@@ -63,6 +63,20 @@ pub static SYSCALL_HOG_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SYSCALL_HOG_EL
 /// echoing typed UART input — the Tier-0 polled-console-input demo.
 pub static CONSOLE_ECHO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_CONSOLE_ECHO_ELF"));
 
+/// The `workload=probe` program: registers its own metric (`snitchos.probe.custom`)
+/// through its bootstrap `TelemetrySink` cap and emits to it — the
+/// userspace-defined-metrics demo (debt #2).
+pub static PROBE_ELF: &[u8] = include_bytes!(env!("SNITCHOS_PROBE_ELF"));
+
+/// The `workload=spawn-demo` parent: delegates its span cap and `Spawn`s the
+/// `spawnee` child — the spawn-with-caps demo.
+pub static SPAWNER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAWNER_ELF"));
+
+/// The `spawnee` child (spawnable id 0): opens a span through its delegated cap.
+/// Launched at runtime via `Spawn`, not at boot, so it has no `LAYOUTS` entry —
+/// only a [`SPAWNABLE`] registry row.
+pub static SPAWNEE_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAWNEE_ELF"));
+
 /// The `workload=ipc` programs: `ipc-sender` holds a `SEND` cap and sends one
 /// inline message; `ipc-receiver` holds a `RECV` cap, receives it, and
 /// re-emits the payload. They rendezvous over one kernel-brokered endpoint.
@@ -259,6 +273,15 @@ pub static SYSCALL_HOG: ProgramSpec = ProgramSpec { elf: SYSCALL_HOG_ELF, launch
 /// and `DebugWrite` need no caps).
 pub static CONSOLE_ECHO: ProgramSpec = ProgramSpec { elf: CONSOLE_ECHO_ELF, launch: Launch::Plain };
 
+/// `workload=probe`: the userspace-defined-metrics demo. Ambient launch — it
+/// registers + emits through its bootstrap `TelemetrySink` cap, which it
+/// receives at startup like every other program (no endpoint).
+pub static PROBE: ProgramSpec = ProgramSpec { elf: PROBE_ELF, launch: Launch::Plain };
+
+/// `workload=spawn-demo`: the spawn-with-caps parent (ambient — `Spawn` needs no
+/// cap, and it delegates from its own bootstrap caps).
+pub static SPAWNER: ProgramSpec = ProgramSpec { elf: SPAWNER_ELF, launch: Launch::Plain };
+
 /// An IPC program on the shared `DEMO_ENDPOINT` with `rights_bits` and default
 /// user telemetry — the common case (the FS server is the lone exception, with
 /// its own counter).
@@ -392,7 +415,7 @@ pub fn spawn_process_with_caps(
 /// embedded, indexed). The shell's command set will live here; seeded with
 /// `hello` until those programs land. Phase 1b swaps the id for an executable
 /// File cap read from the FS.
-static SPAWNABLE: &[(&str, &[u8])] = &[("hello", HELLO_ELF)];
+static SPAWNABLE: &[(&str, &[u8])] = &[("spawnee", SPAWNEE_ELF)];
 
 /// Resolve a `Spawn` program id to its `(name, image)`, or `None` if out of range.
 #[must_use]
@@ -475,6 +498,18 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::ConsoleEcho, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "console_echo", program: &CONSOLE_ECHO, priority: Priority::Normal }],
+    }),
+    // Userspace-defined metrics: a single probe that names + emits its own metric.
+    (WorkloadKind::Probe, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "probe", program: &PROBE, priority: Priority::Normal }],
+    }),
+    // v0.11 spawn-with-caps demo: the `spawner` parent boots and `Spawn`s the
+    // `spawnee` child at runtime (delegating its span cap) — so only the parent
+    // is in the layout; the child comes from the SPAWNABLE registry.
+    (WorkloadKind::SpawnDemo, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "spawner", program: &SPAWNER, priority: Priority::Normal }],
     }),
     // v0.8b priority demo: a High CPU-bound `greedy` (the hog) vs a Low
     // cooperative worker — priority respected, aging keeps Low fed.

@@ -179,6 +179,14 @@ pub(crate) fn write_capture_sidecar(
     Ok(name)
 }
 
+/// Load a `FailureCapture` sidecar written by [`write_capture_sidecar`]. The
+/// read counterpart, so capture viewers (e.g. `cargo xtask itest show`) reuse
+/// the canonical type + JSON format rather than re-parsing by hand.
+pub fn load_capture(path: &Path) -> io::Result<crate::signature::FailureCapture> {
+    let json = std::fs::read_to_string(path)?;
+    serde_json::from_str(&json).map_err(io::Error::other)
+}
+
 /// Best-effort hostname read: checks `HOSTNAME` env var, returns
 /// `None` if unset.
 pub(crate) fn current_hostname() -> Option<String> {

@@ -32,7 +32,7 @@ mod verdict;
 // path, not re-exported here — keeping the public surface == the actual
 // contract. (crate-audit finding #1.)
 pub use baseline::{BaselineFile, SummaryOptions};
-pub use history::{aggregate_run_dir, prune_runs};
+pub use history::{aggregate_run_dir, load_capture, prune_runs};
 pub use lock::{ItestLock, LockError};
 pub use otlp::{push as push_otlp, push_with_timeout as push_otlp_with_timeout};
 pub use prom::{render_prometheus, write_atomic};

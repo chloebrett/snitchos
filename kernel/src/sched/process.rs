@@ -11,6 +11,7 @@
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use kernel_core::cap::{CapTable, Handle};
+use kernel_core::metric::MetricTable;
 use protocol::StringId;
 
 use crate::percpu::{MAX_HARTS, PerCpu};
@@ -64,6 +65,20 @@ pub struct Process {
     /// intern lock at the registration site, so the check-and-bump is precise.
     pub span_names_registered: AtomicU32,
 
+    /// The metrics this process has named for itself (debt #2). A
+    /// [`RegisterMetric`] syscall interns a fresh `StringId` and stores it
+    /// here, returning the slot as an opaque handle; [`EmitMetric`] resolves a
+    /// handle against *this* table alone. The per-process scoping is the
+    /// security boundary — a process can only emit to metrics it registered,
+    /// never forge another's or the kernel's own. Behind the same [`Mutex`] as
+    /// `caps`, for the same reason, and never held across `sret`/`yield_now`.
+    /// Bounded by [`MetricTable::MAX_METRIC_NAMES`] — the capacity *is* the
+    /// quota.
+    ///
+    /// [`RegisterMetric`]: snitchos_abi::Syscall::RegisterMetric
+    /// [`EmitMetric`]: snitchos_abi::Syscall::EmitMetric
+    pub metrics: Mutex<MetricTable>,
+
     /// Top of this process's growable heap region (the next VA the `Sbrk`
     /// syscall will map). Starts at [`Process::HEAP_BASE`]; the runtime's
     /// allocator grows it on demand, capped at `HEAP_BASE + HEAP_MAX`. The
@@ -103,6 +118,7 @@ impl Process {
             root_pa,
             caps: Mutex::new(table),
             span_names_registered: AtomicU32::new(0),
+            metrics: Mutex::new(MetricTable::new()),
             heap_top: AtomicUsize::new(Self::HEAP_BASE),
         };
         (process, telemetry, span)

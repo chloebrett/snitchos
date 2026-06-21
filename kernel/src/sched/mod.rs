@@ -116,9 +116,6 @@ pub const STACK_SIZE: usize = 16384;
 pub struct Stack([u8; STACK_SIZE]);
 
 impl Stack {
-    pub const fn new_zeroed() -> Self {
-        Self([0u8; STACK_SIZE])
-    }
     pub fn top_addr(&self) -> u64 {
         (self as *const _ as u64) + STACK_SIZE as u64
     }
@@ -577,7 +574,14 @@ pub fn spawn_on_with_arg(
 ) -> TaskId {
     debug_assert!(hart < crate::percpu::MAX_HARTS);
     let id = alloc_task_id();
-    let stack: Box<Stack> = Box::new(Stack::new_zeroed());
+    // Allocate the 16 KiB stack *directly on the heap*. Constructing a `Stack`
+    // by value and then boxing it (`Box::new(Stack(...))`) would materialize the
+    // whole 16 KiB on the *caller's* stack first, which overflows when spawning
+    // down a deep call chain on a 16 KiB kernel stack (e.g. the userspace `Spawn`
+    // syscall: trap_entry → … → spawn_on_with_arg).
+    // SAFETY: `Stack` is `[u8; STACK_SIZE]`, for which all-zero bytes are a valid
+    // value, so `new_zeroed().assume_init()` is sound.
+    let stack: Box<Stack> = unsafe { Box::<Stack>::new_zeroed().assume_init() };
     let sp = stack.top_addr();
 
     let mut task = Box::new(Task::new_bare(id, String::from(name), TaskState::Ready));

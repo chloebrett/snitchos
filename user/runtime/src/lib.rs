@@ -111,6 +111,54 @@ pub fn endpoint() -> Endpoint {
     Endpoint::from_raw_handle(STARTUP_ENDPOINT.load(Ordering::Relaxed))
 }
 
+/// The raw handle of this process's startup `TelemetrySink` cap — for delegating
+/// it to a child via [`spawn`]. (`telemetry()` wraps the same handle.)
+#[must_use]
+pub fn telemetry_handle() -> u32 {
+    STARTUP_TELEMETRY.load(Ordering::Relaxed) as u32
+}
+
+/// The raw handle of this process's startup `SpanSink` cap — for delegating it to
+/// a child via [`spawn`].
+#[must_use]
+pub fn span_handle() -> u32 {
+    STARTUP_SPAN.load(Ordering::Relaxed) as u32
+}
+
+/// The handle at which a spawned child's `i`th delegated capability lands — the
+/// startup-cap ABI (v0.11). A child is born with its two bootstrap caps at
+/// handles 0 (telemetry) and 1 (span), then the parent-delegated caps in order
+/// from handle 2. A spawnee reads a delegated cap via, e.g.,
+/// `Tracer::from_raw_handle(delegated_handle(0))`.
+#[must_use]
+pub const fn delegated_handle(i: usize) -> usize {
+    2 + i
+}
+
+/// Spawn program `program_id` (an index into the kernel's spawnable registry) as
+/// a new process, delegating the capabilities named by `handles` (raw handle
+/// values from this process's own table). Returns the child's task id, or `None`
+/// if refused (unknown program, an unheld handle, or a bad pointer). The child is
+/// born with bootstrap telemetry/span plus the delegated caps at handles `2..`
+/// (see [`delegated_handle`]).
+#[must_use]
+pub fn spawn(program_id: usize, handles: &[u32]) -> Option<u32> {
+    let ret: usize;
+    // SAFETY: `ecall`; the kernel resolves the program + every handle against this
+    // process's table (refusing the whole spawn on any miss) and returns the child
+    // task id, or `usize::MAX` on refusal. `handles` is range-validated kernel-side.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::Spawn as usize,
+            inlateout("a0") program_id => ret,
+            in("a1") handles.as_ptr() as usize,
+            in("a2") handles.len(),
+        );
+    }
+    if ret == usize::MAX { None } else { Some(ret as u32) }
+}
+
 unsafe extern "C" {
     /// The program entry, provided by each binary's `#[entry] fn main` (the
     /// macro emits the `#[unsafe(no_mangle)] extern "C"` symbol). Returns `()` — the runtime
@@ -273,6 +321,86 @@ impl TelemetrySink {
     /// `Err(Denied)` if it refused the invocation.
     pub fn emit(self, value: i64) -> Result<(), Denied> {
         invoke(self.handle, value as usize)
+    }
+
+    /// Register a userspace-named metric, returning a [`Metric`] handle to emit
+    /// through — or `None` if the kernel refused (this `TelemetrySink` cap is
+    /// invalid, the name pointer is bad, or the per-process metric quota is
+    /// full). The name crosses the kernel boundary *once*, here: the kernel
+    /// interns it into a fresh id and binds it to a handle in this process's own
+    /// metric table. [`Metric::emit`] then carries only the handle + value, so
+    /// the hot path ships no string. The process names its own metrics; the
+    /// kernel learns them at registration, never ahead of time.
+    pub fn register_metric(self, name: &str, kind: MetricKind) -> Option<Metric> {
+        let handle: usize;
+        // SAFETY: `ecall`; the kernel validates this `TelemetrySink` handle,
+        // copies `name` under `user_range_ok`, interns it, stores it in our
+        // metric table, and returns the metric handle in a0 (`usize::MAX` on
+        // refusal). `name` is never dereferenced in U-mode.
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::RegisterMetric as usize,
+                inlateout("a0") self.handle => handle,
+                in("a1") name.as_ptr() as usize,
+                in("a2") name.len(),
+                in("a3") kind as usize,
+            );
+        }
+        (handle != usize::MAX).then_some(Metric { handle })
+    }
+}
+
+/// The kind of a userspace-registered metric, as the `RegisterMetric` syscall
+/// carries it in `a3`. The discriminants match `protocol::MetricKind`'s order —
+/// the single fact both sides agree on (the runtime stays ABI-only, with no
+/// dependency on `protocol`).
+#[derive(Clone, Copy)]
+pub enum MetricKind {
+    /// A monotonically increasing total.
+    Counter = 0,
+    /// A snapshot value that can go up or down.
+    Gauge = 1,
+    /// A distribution of samples.
+    Histogram = 2,
+}
+
+/// A capability-shaped handle to a metric *this process registered* (via
+/// [`TelemetrySink::register_metric`]). Emitting carries only the handle + value
+/// — the kernel resolves it against this process's own metric table, so a
+/// process can only emit to metrics it named, never forge another's. Holding an
+/// integer is not authority: an unregistered handle is refused.
+#[derive(Clone, Copy)]
+pub struct Metric {
+    handle: usize,
+}
+
+impl Metric {
+    /// Wrap an arbitrary raw metric handle. Naming one is free; *emitting*
+    /// through it is what the kernel validates — so this is how a program
+    /// reaches for a metric it may never have registered (and is refused).
+    #[must_use]
+    pub const fn from_raw_handle(handle: usize) -> Self {
+        Self { handle }
+    }
+
+    /// Emit `value` to this metric. `Ok` if the kernel accepted it,
+    /// `Err(Denied)` if it refused (the handle names no metric this process
+    /// registered).
+    pub fn emit(self, value: i64) -> Result<(), Denied> {
+        let ret: usize;
+        // SAFETY: `ecall`; the kernel resolves the handle against our metric
+        // table and emits the sample, returning 0 in a0 (or `usize::MAX` if the
+        // handle names nothing we registered).
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::EmitMetric as usize,
+                inlateout("a0") self.handle => ret,
+                in("a1") value as usize,
+            );
+        }
+        if ret == 0 { Ok(()) } else { Err(Denied) }
     }
 }
 

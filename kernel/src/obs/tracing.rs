@@ -216,6 +216,20 @@ pub fn register_histogram(name: &'static str) -> StringId {
         .register_metric(name, MetricKind::Histogram, &mut KernelSink)
 }
 
+/// Register a **userspace-named** metric of `kind` from a runtime-copied name,
+/// returning its `StringId`. Leaks `name` into `'static` (the intern table holds
+/// `&'static str`), so every call allocates a *fresh* id — there is **no**
+/// content dedup, by design: each process's metric is its own `StringId`, so one
+/// process can't forge another's (or the kernel's own) telemetry. The leak is
+/// bounded by the caller's per-process `MetricTable` quota, checked *before* this
+/// runs. Backs the `RegisterMetric` syscall.
+pub fn register_user_metric(name: &str, kind: MetricKind) -> StringId {
+    let leaked: &'static str = alloc::boxed::Box::leak(alloc::boxed::Box::<str>::from(name));
+    INTERN_TABLE
+        .lock()
+        .register_metric(leaked, kind, &mut KernelSink)
+}
+
 /// Emit a metric sample. The name must have been registered first via
 /// `register_counter` / `register_gauge` / `register_histogram`.
 pub fn emit_metric(name_id: StringId, value: i64) {

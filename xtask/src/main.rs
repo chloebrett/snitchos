@@ -272,6 +272,24 @@ enum Cmd {
         #[arg(long, default_value = "")]
         features: String,
     },
+    /// Print a failed itest capture's frame transcript from `.itest-runs/`, so a
+    /// capture can be inspected without hand-parsing JSON. Defaults to the most
+    /// recent run.
+    #[command(name = "itest-show")]
+    ItestShow {
+        /// Run directory under `.itest-runs/` (a timestamp); omit for the latest.
+        #[arg(long)]
+        run: Option<String>,
+        /// Only the capture for this scenario (matches `fail-<scenario>-*`).
+        #[arg(long)]
+        scenario: Option<String>,
+        /// Print only the last N transcript frames.
+        #[arg(long)]
+        tail: Option<usize>,
+        /// Print only frames containing this substring.
+        #[arg(long)]
+        grep: Option<String>,
+    },
 }
 
 /// Failure-capture transcript depth for `cargo xtask itest --capture`.
@@ -452,6 +470,9 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
+        Cmd::ItestShow { run, scenario, tail, grep } => {
+            itest::show(run.as_deref(), scenario.as_deref(), tail, grep.as_deref())
+        }
         Cmd::Itest {
             scenario,
             repeat,

@@ -1,7 +1,7 @@
 # Plan: Userspace-defined metrics (debt #2)
 
 **Work lands on:** `main` (no feature branches — see CLAUDE.md). User handles commits.
-**Status:** Step 1 SHIPPED (`kernel_core::metric::MetricTable` — host-tested, mutants all caught). Next: Step 2 (`RegisterMetric` + `EmitMetric` syscalls).
+**Status:** Steps 1 & 2 SHIPPED. Step 1: `kernel_core::metric::MetricTable` (host-tested, mutants all caught). Step 2: `RegisterMetric`/`EmitMetric` syscalls + runtime bindings + `userspace-custom-metric` itest (10/10). Next: Step 3 (FS denial gauge self-registers — removes the `run_ipc_counter` hack).
 
 ## Goal
 
@@ -142,7 +142,22 @@ an out-of-range handle returns `None`.
 **MUTATE:** `cargo mutants` (the `<`/`==` capacity boundary, the bounds check).
 > **PR boundary** — pure data structure, independently mergeable.
 
-### Step 2 — `RegisterMetric` + `EmitMetric` syscalls + runtime bindings
+### Step 2 — `RegisterMetric` + `EmitMetric` syscalls + runtime bindings ✅ SHIPPED
+
+> Landed. `abi::Syscall::{RegisterMetric = 17, EmitMetric = 18}` (round-trip test).
+> Kernel handlers in `kernel/src/syscall/metric.rs`: `RegisterMetric` gated by
+> `invoke_telemetry` (a `TelemetrySink` with `EMIT`), quota-checked via
+> `MetricTable::is_full` *before* leaking the name, interns a fresh id
+> (`tracing::register_user_metric` → no content dedup → distinct `StringId` per
+> emitter), stores it in `Process.metrics: Mutex<MetricTable>`, returns the handle
+> in `a0`. `EmitMetric` resolves the handle against the caller's own table →
+> `emit_metric`; unregistered → `SyscallRefused{BadMetricHandle}`. Runtime:
+> `snitchos_user::{MetricKind, Metric, TelemetrySink::register_metric}` (name
+> crosses once; emit ships only the handle). Demo: `user/hello/src/bin/probe.rs` +
+> `workload=probe` (`WorkloadKind::Probe`). Wire vocab: appended
+> `RefusalReason::{BadMetricHandle, BadMetricKind}`. Itest `userspace-custom-metric`
+> asserts `MetricRegister{…, Gauge}` + `Metric{42}` + the refusal — 10/10 on
+> `--repeat 10`; `metric.rs` mutants all caught; clippy clean.
 
 **Acceptance criteria:** `abi::Syscall` gains the two syscalls (gated by the sink
 cap). `RegisterMetric` copies the name (`copy_from_user`), interns it (fresh id +
