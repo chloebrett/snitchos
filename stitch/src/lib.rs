@@ -10,7 +10,9 @@ pub mod env;
 pub mod interp;
 pub mod lexer;
 pub mod natives;
+pub mod ops;
 pub mod parser;
+pub mod pattern;
 pub mod runner;
 pub mod value;
 
