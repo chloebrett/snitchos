@@ -119,6 +119,13 @@ pub enum Syscall {
     /// handle, `a1` = source VA in the *server's* space, `a2` = length, `a3` =
     /// destination VA in the *caller's* space. The `read` half.
     CopyToCaller = 14,
+    /// Drain buffered console (UART) input into the caller's buffer (v0.11
+    /// Tier-0). `a0` = destination pointer in the caller's space, `a1` = max
+    /// length. The kernel copies up to that many buffered input bytes in and
+    /// returns the count in `a0` (0 if nothing is buffered — non-blocking), or
+    /// `usize::MAX` on a bad/unwritable range. Ambient, like `DebugWrite`: the
+    /// console terminal is not a capability (cap-mediated input is Tier-1).
+    ConsoleRead = 15,
 }
 
 impl Syscall {
@@ -143,6 +150,7 @@ impl Syscall {
             12 => Some(Self::MintBadged),
             13 => Some(Self::CopyFromCaller),
             14 => Some(Self::CopyToCaller),
+            15 => Some(Self::ConsoleRead),
             _ => None,
         }
     }
@@ -191,6 +199,7 @@ mod tests {
         assert_eq!(Syscall::MintBadged as usize, 12);
         assert_eq!(Syscall::CopyFromCaller as usize, 13);
         assert_eq!(Syscall::CopyToCaller as usize, 14);
+        assert_eq!(Syscall::ConsoleRead as usize, 15);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
@@ -207,6 +216,7 @@ mod tests {
         assert_eq!(Syscall::from_usize(12), Some(Syscall::MintBadged));
         assert_eq!(Syscall::from_usize(13), Some(Syscall::CopyFromCaller));
         assert_eq!(Syscall::from_usize(14), Some(Syscall::CopyToCaller));
-        assert_eq!(Syscall::from_usize(15), None);
+        assert_eq!(Syscall::from_usize(15), Some(Syscall::ConsoleRead));
+        assert_eq!(Syscall::from_usize(16), None);
     }
 }

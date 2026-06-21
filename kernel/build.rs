@@ -13,6 +13,7 @@ const USER_TARGET: &str = "riscv64gc-unknown-none-elf";
 const USER_PROGRAMS: &[(&str, &str)] = &[
     ("hello", "SNITCHOS_USER_ELF"),
     ("faulter", "SNITCHOS_FAULTER_ELF"),
+    ("bad-ptr", "SNITCHOS_BAD_PTR_ELF"),
     ("span-flood", "SNITCHOS_SPAN_FLOOD_ELF"),
     ("worker_a", "SNITCHOS_WORKER_A_ELF"),
     ("worker_b", "SNITCHOS_WORKER_B_ELF"),

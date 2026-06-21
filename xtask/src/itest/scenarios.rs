@@ -1658,6 +1658,35 @@ pub fn fs_readdir_lists_entries(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// User-pointer validation (`workload=userspace-bad-ptr`): the `bad-ptr` program
+/// passes an in-range but **unmapped** user VA to `DebugWrite`. The kernel's
+/// `copy_from_user` walks the page table and refuses
+/// (`SyscallRefused{DebugWrite, BadUserRange}`) rather than faulting to S-mode —
+/// so the process survives and emits `0x0BAD`. Asserts both the labelled refusal
+/// *and* the survival marker — the "panic on an unmapped pointer is gone" proof.
+pub fn userspace_bad_ptr_refused(h: &mut View) -> Result<(), String> {
+    let debug_write = snitchos_abi::Syscall::DebugWrite as u8;
+    h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::SyscallRefused { syscall, reason, .. }
+            if *syscall == debug_write && matches!(reason, protocol::RefusalReason::BadUserRange))
+    })
+    .ok_or(
+        "no SyscallRefused{DebugWrite, BadUserRange} within 10s — the kernel didn't refuse the \
+         unmapped user pointer (it may have faulted on the SUM deref instead)",
+    )?;
+
+    h.wait_for(SEC * 10, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+                && *value == 0x0BAD)
+    })
+    .ok_or(
+        "bad-ptr didn't emit its survival marker (0x0BAD) within 10s — the kernel may have \
+         panicked on the bad pointer rather than refusing it gracefully",
+    )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

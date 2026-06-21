@@ -357,6 +357,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // hart 1 after SECONDARY_READY.
         | Some(WorkloadKind::Userspace)
         | Some(WorkloadKind::UserspaceFault)
+        | Some(WorkloadKind::UserspaceBadPtr)
         | Some(WorkloadKind::UserspaceSpanFlood)
         | Some(WorkloadKind::Workers)
         | Some(WorkloadKind::HeapGrow)

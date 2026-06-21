@@ -153,6 +153,7 @@ catalog! {
     wfi "fs-remove"                       scenarios::fs_remove_unlinks              [userspace, ipc] {"fs"};
     wfi "fs-readdir"                      scenarios::fs_readdir_lists_entries       [userspace, ipc] {"fs"};
     wfi "fs-workload"                     scenarios::fs_workload_traces             [userspace, ipc] {"fs"};
+    wfi "userspace-bad-ptr"               scenarios::userspace_bad_ptr_refused      [userspace]      {"userspace-bad-ptr"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back

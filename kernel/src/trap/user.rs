@@ -32,6 +32,7 @@ pub static HELLO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_USER_ELF"));
 /// The `workload=userspace-fault` program: emits a marker, then reads a
 /// kernel VA to prove the `U`-bit firewall faults it.
 pub static FAULTER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FAULTER_ELF"));
+pub static BAD_PTR_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BAD_PTR_ELF"));
 
 /// The `workload=userspace-span-flood` program: opens spans with many distinct
 /// names to exceed the per-process span-name quota.
@@ -228,6 +229,10 @@ pub static HELLO: ProgramSpec = ProgramSpec { elf: HELLO_ELF, launch: Launch::Pl
 /// `workload=userspace-fault`: the isolation probe (reads a kernel VA — must fault).
 pub static FAULTER: ProgramSpec = ProgramSpec { elf: FAULTER_ELF, launch: Launch::Plain };
 
+/// `workload=userspace-bad-ptr`: the user-pointer validation probe (passes an
+/// unmapped user VA to `DebugWrite` — the kernel must refuse, not fault).
+pub static BAD_PTR: ProgramSpec = ProgramSpec { elf: BAD_PTR_ELF, launch: Launch::Plain };
+
 /// `workload=userspace-span-flood`: the span-quota probe.
 pub static SPAN_FLOOD: ProgramSpec = ProgramSpec { elf: SPAN_FLOOD_ELF, launch: Launch::Plain };
 
@@ -360,6 +365,10 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::Userspace, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "user_main", program: &HELLO, priority: Priority::Normal }],
+    }),
+    (WorkloadKind::UserspaceBadPtr, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "bad_ptr", program: &BAD_PTR, priority: Priority::Normal }],
     }),
     (WorkloadKind::UserspaceFault, UserLayout {
         needs_endpoint: false,
@@ -668,6 +677,23 @@ pub fn copy_from_user(ptr: usize, len: usize, dst: &mut [u8]) -> Option<&[u8]> {
         core::arch::asm!("csrc sstatus, {}", in(reg) SUM);
     }
     Some(&dst[..len])
+}
+
+/// Copy `src` from kernel memory into the user buffer at `ptr` in the **current**
+/// address space, returning the number of bytes written, or `None` if
+/// `(ptr, src.len())` is not a valid *writable* user range.
+///
+/// The write mirror of [`copy_from_user`]: validate the range is wholly user-half
+/// and every page mapped `W|U` (via [`crate::mmu::user_range_writable`]), briefly
+/// set `sstatus.SUM` to permit the kernel write, copy, then clear `SUM` again.
+/// Used by the `ConsoleRead` syscall to deliver buffered input into the caller's
+/// buffer. The copy must complete before `SUM` drops.
+pub fn copy_to_user(ptr: usize, src: &[u8]) -> Option<usize> {
+    todo!(
+        "mirror copy_from_user: if !user_range_writable(ptr, src.len()) return None; \
+         else SUM-guard a copy_nonoverlapping(src.as_ptr() -> ptr as *mut u8, src.len()), \
+         return Some(src.len())"
+    )
 }
 
 /// Switch to the process's address space (`root_pa`) and drop to U-mode at

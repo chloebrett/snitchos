@@ -471,6 +471,22 @@ pub fn user_range_readable(ptr: usize, len: usize) -> bool {
     )
 }
 
+/// Whether the user range `[ptr, ptr+len)` is mapped writable (`W|U`) in the
+/// **current** address space — the write mirror of [`user_range_readable`]. The
+/// pre-check `copy_to_user` runs (and the `ConsoleRead` handler runs *before*
+/// draining its ring, so a bad pointer doesn't consume buffered input).
+#[must_use]
+pub fn user_range_writable(ptr: usize, len: usize) -> bool {
+    let mem = KernelPtMem;
+    core_mmu::range_mapped(
+        current_satp_root(),
+        ptr,
+        len,
+        core_mmu::PtePerms::W.union(core_mmu::PtePerms::U),
+        &mem,
+    )
+}
+
 /// Activate the address space rooted at `root_pa` on this hart: write
 /// `satp` (Sv39 mode + PPN) and `sfence.vma` to flush stale translations.
 /// Used by the scheduler to switch address spaces when it switches into a

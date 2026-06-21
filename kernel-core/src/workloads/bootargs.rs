@@ -64,6 +64,11 @@ pub enum WorkloadKind {
     /// the `faulter` program, which reads a kernel VA from U-mode — the
     /// `U`-bit firewall must fault it. Not a storm.
     UserspaceFault,
+    /// User-pointer validation probe: runs the `bad-ptr` program, which passes
+    /// an in-range but **unmapped** user VA to `DebugWrite`. The kernel's
+    /// `copy_from_user` must *refuse* it (`BadUserRange`) rather than fault —
+    /// `bad-ptr` survives and emits a marker. Not a storm.
+    UserspaceBadPtr,
     /// Span-quota probe: runs the `span-flood` program, which opens spans with
     /// many distinct names to exceed `Process::MAX_SPAN_NAMES` — the kernel
     /// must refuse the surplus (`SyscallRefused{Quota}`) without panicking.
@@ -182,6 +187,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "ping-pong" => Some(WorkloadKind::PingPong),
             "userspace" => Some(WorkloadKind::Userspace),
             "userspace-fault" => Some(WorkloadKind::UserspaceFault),
+            "userspace-bad-ptr" => Some(WorkloadKind::UserspaceBadPtr),
             "userspace-span-flood" => Some(WorkloadKind::UserspaceSpanFlood),
             "workers" => Some(WorkloadKind::Workers),
             "heap-grow" => Some(WorkloadKind::HeapGrow),
@@ -357,6 +363,12 @@ mod tests {
     fn userspace_workloads_are_not_storms() {
         assert!(!WorkloadKind::Userspace.is_storm());
         assert!(!WorkloadKind::UserspaceFault.is_storm());
+    }
+
+    #[test]
+    fn selects_userspace_bad_ptr() {
+        assert_eq!(select("workload=userspace-bad-ptr"), Some(WorkloadKind::UserspaceBadPtr));
+        assert!(!WorkloadKind::UserspaceBadPtr.is_storm());
     }
 
     #[test]

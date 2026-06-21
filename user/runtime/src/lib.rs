@@ -206,16 +206,51 @@ pub const DEBUG_WRITE_MAX: usize = 256;
 /// `DebugWrite` syscall). The kernel copies them out and emits a `Log` frame.
 /// Backs `snitchos_std::println!`.
 pub fn debug_write(bytes: &[u8]) {
-    // SAFETY: `ecall`; the kernel copies `bytes` (range-validated on its side)
-    // and emits a `Log` frame. a0 returns the count, which we ignore.
+    let _ = debug_write_raw(bytes.as_ptr() as usize, bytes.len());
+}
+
+/// Raw [`debug_write`]: issue the `DebugWrite` syscall on an arbitrary
+/// `(ptr, len)` and return the kernel's status word — bytes written, or
+/// `usize::MAX` if refused (e.g. a bad/unmapped pointer). Unlike [`debug_write`]
+/// this takes no `&[u8]`, so it can probe the kernel's user-pointer validation
+/// with a pointer that doesn't back a valid slice. Safe: the kernel validates
+/// `(ptr, len)` and refuses a bad range — the bytes are never dereferenced in
+/// U-mode.
+#[must_use]
+pub fn debug_write_raw(ptr: usize, len: usize) -> usize {
+    let ret: usize;
+    // SAFETY: `ecall`; the kernel range-validates `(ptr, len)` and either copies
+    // + emits a `Log` frame or refuses (a0 = usize::MAX). `ptr` is never
+    // dereferenced here.
     unsafe {
         asm!(
             "ecall",
             in("a7") Syscall::DebugWrite as usize,
-            inlateout("a0") bytes.as_ptr() as usize => _,
-            in("a1") bytes.len(),
+            inlateout("a0") ptr => ret,
+            in("a1") len,
         );
     }
+    ret
+}
+
+/// Read up to `dst.len()` buffered console-input bytes into `dst`; returns how
+/// many were read (`0` if nothing is buffered — non-blocking). The input mirror
+/// of [`debug_write`] (the `ConsoleRead` syscall). A caller wanting a full line
+/// loops, yielding between empty reads.
+#[must_use]
+pub fn console_read(dst: &mut [u8]) -> usize {
+    let ret: usize;
+    // SAFETY: `ecall`; the kernel validates the writable range and copies up to
+    // `dst.len()` bytes in, returning the count (or usize::MAX on a bad range).
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::ConsoleRead as usize,
+            inlateout("a0") dst.as_mut_ptr() as usize => ret,
+            in("a1") dst.len(),
+        );
+    }
+    if ret == usize::MAX { 0 } else { ret }
 }
 
 /// A capability to emit telemetry — an unforgeable handle the kernel checks

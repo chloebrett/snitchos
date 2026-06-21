@@ -57,14 +57,17 @@ the `project_userspace_defined_metrics` memory.
 
 ---
 
+## Done (cont.)
+
+- **#6 — Fault-safe user-copy.** `copy_from_user` only bounds-checked the user
+  range (`user_range_ok`), so an in-range-but-unmapped pointer faulted the kernel
+  on the `SUM` deref. Added `kernel_core::mmu::range_mapped` (host-tested page-walk,
+  reusing `translate`) + the `kernel::mmu::user_range_readable` wrapper; the copy
+  now refuses (`BadUserRange`) instead of faulting. Proven end-to-end by the
+  `userspace-bad-ptr` itest (a new `bad-ptr` probe program passes an unmapped VA
+  to `DebugWrite`; the kernel refuses and the process survives).
+
 ## Deferred placeholders (Tier 3)
-
-### #6 — Fault-safe user-copy *(correctness-adjacent)*
-
-An unmapped user pointer passed to a syscall currently **panics the kernel**
-(noted at the copy site in `kernel/src/trap/user.rs`) instead of refusing the
-syscall gracefully (`BadUserRange`). The cross-AS copy primitive validates; the
-older single-AS `copy_from_user` path is the gap.
 
 ### #7 — Capability generation / revocation
 
