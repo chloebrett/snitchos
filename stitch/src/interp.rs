@@ -209,9 +209,23 @@ fn eval_method_call(
             )));
         }
     };
-    let method = env
-        .lookup_method(type_name, name)
-        .ok_or_else(|| RuntimeError::new(format!("{type_name} has no method `{name}`")))?;
+    let Some(method) = env.lookup_method(type_name, name) else {
+        // No method by that name. If the receiver is a record with a field of
+        // that name, this is a *field call* — read the field and apply it (a
+        // record may hold a closure). Methods take precedence; this fallback
+        // only runs when no method shadows the field. (`eval_field` errors for a
+        // non-record receiver, so the type-receiver case falls through.)
+        if let Ok(field_value) = eval_field(&receiver, name) {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                values.push(eval(&arg.value, env)?);
+            }
+            return apply_values(&field_value, &values, env);
+        }
+        return Err(RuntimeError::new(format!(
+            "{type_name} has no method `{name}`"
+        )));
+    };
 
     // The modifier must match how the method was reached: `free` on the type, an
     // instance method on a value.
@@ -2584,9 +2598,6 @@ mod tests {
     // --- adversarial probes: dispatch/field interactions (may surface gaps) ---
 
     #[test]
-    #[ignore = "GAP: Call{Field} always dispatches as a method; a callable field \
-                can't be invoked as obj.f(args) — needs a no-such-method fallback \
-                to read-field-then-call"]
     fn calling_a_field_that_holds_a_function() {
         // `b.f(10)` where `f` is a field holding a closure. Intuitively this
         // reads the field and calls it. Does method-dispatch interception break
