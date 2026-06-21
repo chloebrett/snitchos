@@ -2311,6 +2311,31 @@ pub fn syscall_hog_still_preempted(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.11 Tier-0 console input (`workload=console-echo`): a byte typed at the UART
+/// round-trips host → kernel → userspace. The harness injects bytes into the
+/// guest UART (QEMU stdin); the `console_echo` program drains them via
+/// `ConsoleRead` and echoes them back via `DebugWrite`, observed here as a `Log`
+/// frame. Proves the whole polled-RX path: UART → timer drain → ring →
+/// `ConsoleRead` → `copy_to_user` → userspace. See `plans/console-tier0-polled-rx.md`.
+pub fn console_echo_round_trips(h: &mut View) -> Result<(), String> {
+    // Wait until the echo program is up and reading, so injected bytes aren't
+    // dropped before it starts polling.
+    h.wait_for(SEC * 20, is_span_start_named("console_echo.alive"))
+        .ok_or("console_echo never reached U-mode (no alive marker within 20s)")?;
+
+    // Inject the token in one write+flush: it lands in the UART RX FIFO together,
+    // so the next timer drain rings all of it and one `console_read` returns it —
+    // a single `Log` echo.
+    h.send_input(b"snitch\n").map_err(|e| format!("inject UART input: {e}"))?;
+
+    h.wait_for(SEC * 20, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. } if msg.contains("snitch"))
+    })
+    .ok_or("no Log echo of injected 'snitch' within 20s — console input didn't round-trip")?;
+
+    Ok(())
+}
+
 /// v0.8b priority scheduling — *ordered, but fair* (`workload=priorities`). A
 /// High-priority CPU-bound `greedy` task and a Low-priority cooperative
 /// `worker_b` share hart 1. The scheduler must (a) **respect priority** —

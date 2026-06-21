@@ -15,9 +15,10 @@
 //! into a `ScenarioReport`.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::{Child, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -134,6 +135,10 @@ pub struct Boot {
     /// The runtime workload this boot selected (`-append workload=<name>`),
     /// or `None` for the default demo. Copied into each `View` for capture.
     workload: Option<String>,
+    /// Write end of QEMU's stdin (the `-nographic` serial console), shared so
+    /// each `View` over this boot can inject UART input via
+    /// [`View::send_input`]. `None` only if QEMU gave us no stdin pipe.
+    input: Arc<Mutex<Option<ChildStdin>>>,
 }
 
 /// One scenario's read-cursor over a `Boot`'s recorded frame stream, plus
@@ -182,6 +187,8 @@ pub struct View {
     /// `assert_absent` and drained by the executor (`take_capture`) into
     /// the scenario's `ScenarioReport`. Replaces the old thread-local.
     captured: Option<FailureCapture>,
+    /// Shared write end of QEMU's stdin, for [`send_input`](Self::send_input).
+    input: Arc<Mutex<Option<ChildStdin>>>,
 }
 
 impl Boot {
@@ -225,12 +232,18 @@ impl Boot {
             // runtime workload.
             qemu_cmd.args(["-append", &format!("workload={workload}")]);
         }
-        let qemu = qemu_cmd
+        let mut qemu = qemu_cmd
             .stdout(Stdio::from(stdout_log))
             .stderr(Stdio::from(stderr_log))
-            .stdin(Stdio::null())
+            // Pipe stdin so a scenario can inject bytes into the guest UART (the
+            // `-nographic` serial console). Plain bytes reach the serial, not the
+            // QEMU monitor (which needs a Ctrl-A escape).
+            .stdin(Stdio::piped())
             .spawn()
             .map_err(|e| format!("spawn qemu: {e}"))?;
+        // Take the write end of QEMU's stdin for `View::send_input`, shared via
+        // `Arc` so every `View` over this boot can inject.
+        let input = Arc::new(Mutex::new(qemu.stdin.take()));
 
         // Wait for QEMU to create the socket, then connect.
         let stream = connect_with_deadline(&socket_path, Duration::from_secs(10))?;
@@ -254,6 +267,7 @@ impl Boot {
             recorder,
             log_path,
             workload: workload.map(str::to_string),
+            input,
         })
     }
 
@@ -275,6 +289,7 @@ impl Boot {
             last_t_per_hart: BTreeMap::new(),
             workload: self.workload.clone(),
             captured: None,
+            input: Arc::clone(&self.input),
         }
     }
 
@@ -286,6 +301,19 @@ impl Boot {
 }
 
 impl View {
+    /// Inject `bytes` into the guest's UART by writing to QEMU's stdin (the
+    /// `-nographic` serial console). The bytes land in the kernel's UART RX
+    /// FIFO; the timer-driven drain rings them and a userspace reader sees them
+    /// via `ConsoleRead`. Used by console-input scenarios; wait for the program
+    /// to be reading (e.g. an "alive" marker) before injecting, or early bytes
+    /// can be dropped.
+    pub fn send_input(&self, bytes: &[u8]) -> Result<(), String> {
+        let mut guard = self.input.lock().map_err(|_| "input mutex poisoned".to_string())?;
+        let stdin = guard.as_mut().ok_or("QEMU stdin was not piped")?;
+        stdin.write_all(bytes).map_err(|e| format!("write to QEMU stdin: {e}"))?;
+        stdin.flush().map_err(|e| format!("flush QEMU stdin: {e}"))
+    }
+
     /// Block up to `budget` for a frame matching `pred`. Returns the
     /// matching frame, or `None` on deadline. Every frame consumed
     /// along the way updates the internal string table — later

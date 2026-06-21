@@ -91,11 +91,22 @@ type a key → UART RX FIFO (≤16B hw) → [handle_timer drains, hart 0] → ke
      embed; `CONSOLE_ECHO` `ProgramSpec` + `LAYOUTS` entry; `main.rs` match arm.
      Builds + clippy-clean. **Manually verifiable:** `cargo xtask boot --workload
      console-echo` + type (echo appears as `Log` frames via `cargo xtask reader`).
-   - **6b — harness injection + scenario — TODO.** Needs a `View`→`Boot` stdin
-     channel (`Arc<Mutex<ChildStdin>>` shared into each `View`, `View::send_input`;
-     spawn with `stdin(piped())`). Then scenario `console-echo-round-trips`: wait
-     `console_echo.alive` → `send_input(b"hi\n")` → assert a `Log` echo. This is a
-     deliberate harness change (scenarios currently only *read* via `View`).
+   - **6b — harness injection + scenario ✅ DONE (2026-06-21).** Harness spawns
+     QEMU with `stdin(piped())`; the write end is shared `Arc<Mutex<Option<ChildStdin>>>`
+     from `Boot` into each `View`, exposed as `View::send_input(&[u8])`. Scenario
+     `console-echo-round-trips` (registered, `workload=console-echo`): wait
+     `console_echo.alive` → `send_input(b"snitch\n")` → assert a `Log` frame
+     containing the echo. **10/10 under `--repeat`, ~1.1s, clippy-clean.**
+
+## STATUS: Tier-0 polled console input COMPLETE (2026-06-21)
+
+All six steps done and regression-locked. A byte typed at the UART flows
+UART → `read_byte` → timer `drain_rx` (hart 0) → `CONSOLE_RX` ring → `ConsoleRead`
+syscall → `copy_to_user` → userspace `console_read`, proven both manually
+(`cargo xtask boot --workload console-echo`) and automatically
+(`console-echo-round-trips`). Deferred (unchanged): blocking read (v1.1, reuses
+`block_current`/`wake`); line discipline (userspace, with the shell); Tier-1
+(interrupt-driven userspace virtio console driver).
 
 ## The test-infra wrinkle (§E flagged — real work)
 

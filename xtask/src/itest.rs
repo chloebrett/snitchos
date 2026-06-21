@@ -180,6 +180,7 @@ catalog! {
     cpu "preempt-runaway-user-task"       scenarios::preempt_runaway_user_task      [userspace]  {"user-hog"};
     cpu "preemption-telemetry"            scenarios::preemption_telemetry           [userspace]  {"user-hog"};
     cpu "syscall-hog-still-preempted"     scenarios::syscall_hog_still_preempted    [userspace]  {"syscall-hog"};
+    cpu "console-echo-round-trips"        scenarios::console_echo_round_trips       [userspace]  {"console-echo"};
     cpu "priorities-ordered-but-fair"     scenarios::priorities_ordered_but_fair    [userspace]  {"priorities"};
 }
 
