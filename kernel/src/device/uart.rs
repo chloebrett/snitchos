@@ -25,45 +25,70 @@ use core::fmt::Write;
 ///   state to race over, but the *device* does, and `&self` doesn't help
 ///   there. Serialization is provided externally via `kernel::sync::Mutex<Uart16550>`.
 pub struct Uart16550 {
-  base: usize,
+    base: usize,
 }
 
 impl Uart16550 {
-  /// Construct a driver for a UART at the given MMIO base address.
-  ///
-  /// # Safety
-  ///
-  /// `base` must be the MMIO base of a real NS16550A-compatible UART, and
-  /// the caller must ensure that any other code touching the same registers
-  /// either coordinates through this driver (e.g. via a shared `Mutex`) or
-  /// doesn't conflict. Constructing two `Uart16550`s pointing at the same
-  /// region without external coordination is undefined behavior at the
-  /// device-state level (the type system can't see it).
-  pub const unsafe fn new(base: usize) -> Self { Uart16550 { base } }
-
-  /// Block until the transmit holding register is empty, then send one byte.
-  ///
-  /// Spins on LSR bit 5 (THRE — Transmit Holding Register Empty). At 115200
-  /// baud each byte takes ~87 microseconds on the wire; the CPU spins
-  /// millions of times faster, so this loop dominates transmit time.
-  pub fn putchar(&self, c: u8) {
-    let thr_addr = self.base as *mut u8;
-    let lsr_addr = (self.base + 5) as *const u8;
-    unsafe {
-      while lsr_addr.read_volatile() & 0b00100000 == 0 {}
-      thr_addr.write_volatile(c);
+    /// Construct a driver for a UART at the given MMIO base address.
+    ///
+    /// # Safety
+    ///
+    /// `base` must be the MMIO base of a real NS16550A-compatible UART, and
+    /// the caller must ensure that any other code touching the same registers
+    /// either coordinates through this driver (e.g. via a shared `Mutex`) or
+    /// doesn't conflict. Constructing two `Uart16550`s pointing at the same
+    /// region without external coordination is undefined behavior at the
+    /// device-state level (the type system can't see it).
+    pub const unsafe fn new(base: usize) -> Self {
+        Uart16550 { base }
     }
-  }
+
+    /// Block until the transmit holding register is empty, then send one byte.
+    ///
+    /// Spins on LSR bit 5 (THRE — Transmit Holding Register Empty). At 115200
+    /// baud each byte takes ~87 microseconds on the wire; the CPU spins
+    /// millions of times faster, so this loop dominates transmit time.
+    pub fn putchar(&self, c: u8) {
+        let thr_addr = self.base as *mut u8;
+        let lsr_addr = (self.base + 5) as *const u8;
+        unsafe {
+            while lsr_addr.read_volatile() & 0b0010_0000 == 0 {}
+            thr_addr.write_volatile(c);
+        }
+    }
+
+    /// Read one byte if the receiver has data waiting, else `None`.
+    ///
+    /// Polled RX — the mirror of [`putchar`](Self::putchar). Check `LSR`
+    /// (`base + 5`) bit 0 (DR — Data Ready); if set, read the waiting byte from
+    /// `RBR`, the *read* side of `base + 0` (the same address `putchar` writes
+    /// `THR` to). Non-blocking: returns `None` when nothing is buffered, so the
+    /// timer-driven drain never spins on the hardware.
+    ///
+    /// Like `putchar`, this does volatile MMIO on `base`; the one-coordinated-owner
+    /// contract on `Uart16550` is what keeps it sound.
+    pub fn read_byte(&self) -> Option<u8> {
+        let lsr_addr = (self.base + 5) as *const u8;
+        let rbr_addr = self.base as *const u8;
+
+        unsafe {
+            if lsr_addr.read_volatile() & 0b0000_0001 != 0 {
+                return Some(rbr_addr.read_volatile());
+            }
+        }
+
+        None
+    }
 }
 
 /// `core::fmt::Write` impl so the UART can back the `print!`/`println!`
 /// macros. `write_str` needs `&mut self` per trait contract; we delegate to
 /// `&self` `putchar` because the struct itself has no state to mutate.
 impl Write for Uart16550 {
-  fn write_str(&mut self, s: &str) -> core::fmt::Result {
-    for byte in s.bytes() {
-      self.putchar(byte);
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for byte in s.bytes() {
+            self.putchar(byte);
+        }
+        Ok(())
     }
-    Ok(())
-  }
 }
