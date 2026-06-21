@@ -143,7 +143,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             _ => eval_call(&eval(callee, env)?, args, env),
         },
         Expr::Field { object, name } => eval_field(&eval(object, env)?, name),
-        Expr::Try(operand) => eval_try(eval(operand, env)?),
+        Expr::Try(operand) => eval_try(eval(operand, env)?, env),
         Expr::SafeField { object, name } => eval_safe_field(eval(object, env)?, name),
         Expr::Index { object, index } => eval_index(&eval(object, env)?, &eval(index, env)?),
         _ => Err(RuntimeError::new(
@@ -504,25 +504,56 @@ fn eval_index(object: &Value, index: &Value) -> Result<Value, RuntimeError> {
     }
 }
 
-/// The `?` try operator: unwrap a present value (`Some`/`Ok`), or short-circuit
-/// the enclosing function by returning the failure (`None`/`Err`) — signalled
-/// via `RuntimeError::Return`, caught at the closure boundary in `apply_values`.
-fn eval_try(value: Value) -> Result<Value, RuntimeError> {
-    if let Value::Data(data) = &value {
-        match (data.type_name.as_str(), data.variant.as_str()) {
-            ("Maybe", "Some") | ("Result", "Ok") => {
-                return Ok(data.fields.first().map_or(Value::Unit, |(_, v)| v.clone()));
-            }
-            ("Maybe", "None") | ("Result", "Err") => {
-                return Err(RuntimeError::early_return(value));
-            }
-            _ => {}
-        }
+/// Dispatch a zero-argument instance method on an already-evaluated value,
+/// binding it as `@` and running the body in global scope (like `eval_method_call`,
+/// minus the call-site machinery). Returns `Ok(None)` when the value's type has
+/// no such method, so a caller can report a contract-specific error. Used by the
+/// operators that desugar to method calls (`?` → the `Try` contract).
+fn call_instance_method(
+    receiver: &Value,
+    name: &str,
+    env: &Env,
+) -> Result<Option<Value>, RuntimeError> {
+    let Value::Data(data) = receiver else {
+        return Ok(None);
+    };
+    let Some(method) = env.lookup_method(&data.type_name, name) else {
+        return Ok(None);
+    };
+    let Some(body) = method.body.as_ref() else {
+        return Ok(None);
+    };
+    let method_env = env.globals_only().extend("@".to_string(), receiver.clone());
+    // A method is a call boundary, so a `?` inside it stops here.
+    let result = match eval(body, &method_env) {
+        Err(RuntimeError::Return(value)) => value,
+        other => other?,
+    };
+    Ok(Some(result))
+}
+
+/// The `?` try operator, desugared over the `Try` contract: ask the value if it
+/// is the failure case (`isFailure`); if so, short-circuit the enclosing function
+/// by returning it unchanged (via `RuntimeError::Return`, caught at the closure
+/// boundary in `apply_values`); otherwise `unwrap` the success payload. Std
+/// implements `Try` for Maybe (failure = `None`) and Result (failure = `Err`) in
+/// the prelude; any user type with a success/failure split can opt in.
+fn eval_try(value: Value, env: &Env) -> Result<Value, RuntimeError> {
+    let Some(is_failure) = call_instance_method(&value, "isFailure", env)? else {
+        return Err(RuntimeError::new(format!(
+            "`?` expects a value implementing `Try` (e.g. Maybe/Result), got {}",
+            value.kind()
+        )));
+    };
+    match is_failure {
+        Value::Bool(true) => Err(RuntimeError::early_return(value)),
+        Value::Bool(false) => call_instance_method(&value, "unwrap", env)?
+            .ok_or_else(|| RuntimeError::new("`Try` value implements isFailure but not unwrap")),
+        other => Err(RuntimeError::new(format!(
+            "`Try.isFailure` must return a Bool, got {}",
+            other.kind()
+        ))),
     }
-    Err(RuntimeError::new(format!(
-        "`?` expects a Maybe or Result, got {}",
-        value.kind()
-    )))
 }
 
 /// The `?.` safe-navigation operator: map a field access *inside* a `Maybe`/
@@ -1408,8 +1439,35 @@ mod tests {
     fn try_on_a_non_option_is_an_error() {
         assert_eq!(
             run_program_err("main() = { let x = 5?  x }"),
-            "`?` expects a Maybe or Result, got Int"
+            "`?` expects a value implementing `Try` (e.g. Maybe/Result), got Int"
         );
+    }
+
+    #[test]
+    fn try_works_on_a_user_type_implementing_the_try_contract() {
+        // The payoff of `?` being a contract: a domain type with a
+        // success/failure split opts into short-circuiting by implementing
+        // `isFailure`/`unwrap` — `?` bails on `Denied`, unwraps `Granted`.
+        let src = "sum Perm = Granted(Int) | Denied  \
+                   on Perm : Try { \
+                       isFailure() = match @ { Denied => true  Granted(_) => false } \
+                       unwrap() = match @ { Granted(n) => n  Denied => 0 } \
+                   }  \
+                   check(p) = { let n = p?  Granted(n + 1) }  \
+                   main() = match check(Granted(10)) { Granted(n) => n  Denied => -1 }";
+        assert_eq!(run_program(src), Value::Int(11));
+    }
+
+    #[test]
+    fn try_short_circuits_on_a_user_failure_case() {
+        let src = "sum Perm = Granted(Int) | Denied  \
+                   on Perm : Try { \
+                       isFailure() = match @ { Denied => true  Granted(_) => false } \
+                       unwrap() = match @ { Granted(n) => n  Denied => 0 } \
+                   }  \
+                   check(p) = { let n = p?  Granted(n + 1) }  \
+                   main() = match check(Denied) { Granted(n) => n  Denied => -1 }";
+        assert_eq!(run_program(src), Value::Int(-1));
     }
 
     #[test]

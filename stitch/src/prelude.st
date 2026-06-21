@@ -25,6 +25,26 @@ find(xs, pred) =
             None => pred(x) => Some(x) | None
         })
 
+// --- the Try contract: `?` short-circuits on the failure case ---
+// `x?` desugars to `x.isFailure() => return x | x.unwrap()`. Std implements it
+// for the built-in Maybe/Result; a user type with a success/failure split can
+// implement the same two methods to make `?` work on it.
+
+contract Try {
+    isFailure() -> Bool
+    unwrap()
+}
+
+on Maybe : Try {
+    isFailure() = match @ { None => true  Some(_) => false }
+    unwrap() = match @ { Some(v) => v  None => @ }
+}
+
+on Result : Try {
+    isFailure() = match @ { Err(_) => true  Ok(_) => false }
+    unwrap() = match @ { Ok(v) => v  Err(_) => @ }
+}
+
 // --- Maybe helpers ---
 
 isSome(m) = match m { Some(_) => true  None => false }

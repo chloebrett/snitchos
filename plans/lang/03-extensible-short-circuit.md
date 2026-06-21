@@ -4,8 +4,9 @@ _Design note. Captures the intended generalization of the short-circuit operator
 
 ## Status
 
-- **v0 (built):** `?` and `?.` are **hardcoded** for the built-in `Maybe`/`Result` (`interp.rs::eval_try` / `eval_safe_field`). Success = `Some`/`Ok`; failure = `None`/`Err`.
-- **Intended (this note):** `?`/`?.` become **sugar over a contract**, so user types with a success/failure split opt in. This is the design's stated intent — see `docs/language-design.md` ("one trait that std implements for `Maybe`/`Result` and users can implement for their own types").
+- **`?` → `Try` contract: SHIPPED.** `eval_try` now desugars to `value.isFailure() => return value | value.unwrap()`, dispatched through the method registry. Std implements `Try` for `Maybe`/`Result` in `prelude.st` (`on Maybe : Try` / `on Result : Try`); any user type with a success/failure split opts in by implementing the two methods (tested: a `sum Perm = Granted(Int) | Denied` short-circuits on `Denied`). The dynamic `?` returns the failure value **unchanged** — no `from_residual`, no cross-type conversion, as designed below.
+- **`?.` still hardcoded** for `Maybe`/`Result` (`interp.rs::eval_safe_field`). It rides a *different* (functor-map) contract — see "`?.` is a different contract" below — deferred as its own piece.
+- **History:** v0 had both `?` and `?.` hardcoded for `Maybe`/`Result`; the `?` half is now the open mechanism.
 
 ## Mechanism
 
