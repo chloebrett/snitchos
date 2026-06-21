@@ -10,7 +10,9 @@ use crate::ops::{as_bool, eval_binary, eval_unary};
 use crate::parser::parse_program;
 use crate::pattern::eval_match;
 use crate::registry::{Registration, bake_contract_defaults, register_builtin_types, register_items};
-use crate::value::{ClosureData, Constructor, DataValue, RuntimeError, TelemetryEvent, Value};
+use crate::value::{
+    ClosureData, Constructor, DataValue, LazySeq, RuntimeError, Step, TelemetryEvent, Value,
+};
 
 /// Run a program: bind every top-level function into one shared global
 /// environment (so they are mutually visible — letrec), then call `main()`.
@@ -146,6 +148,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         Expr::Try(operand) => eval_try(eval(operand, env)?, env),
         Expr::SafeField { object, name } => eval_safe_field(&eval(object, env)?, name, env),
         Expr::Index { object, index } => eval_index(&eval(object, env)?, &eval(index, env)?),
+        Expr::Range { start, end, inclusive } => {
+            eval_range(start.as_deref(), end.as_deref(), *inclusive, env)
+        }
         _ => Err(RuntimeError::new(
             "evaluation not yet implemented for this expression",
         )),
@@ -545,6 +550,52 @@ fn call_instance_method(
         other => other?,
     };
     Ok(Some(result))
+}
+
+/// Evaluate a range literal to a lazy `Seq` of integers. A range needs a start
+/// to be a sequence (`..n` has no first element); the end may be absent, giving
+/// an endless sequence (`n..`).
+fn eval_range(
+    start: Option<&Expr>,
+    end: Option<&Expr>,
+    inclusive: bool,
+    env: &Env,
+) -> Result<Value, RuntimeError> {
+    let Some(start) = start else {
+        return Err(RuntimeError::new("a range needs a start to be a sequence"));
+    };
+    let start = eval_int(start, env, "range start")?;
+    let end = end.map(|e| eval_int(e, env, "range end")).transpose()?;
+    Ok(range_seq(start, end, inclusive))
+}
+
+/// Evaluate `expr` to an `Int`, or a type error tagged with `what`.
+fn eval_int(expr: &Expr, env: &Env, what: &str) -> Result<i64, RuntimeError> {
+    match eval(expr, env)? {
+        Value::Int(n) => Ok(n),
+        other => Err(RuntimeError::new(format!(
+            "{what} must be an Int, got {}",
+            other.kind()
+        ))),
+    }
+}
+
+/// A lazy integer sequence from `current`, ending at `end` (exclusive, or
+/// inclusive when `inclusive`); `None` end is endless. Each forced step yields
+/// one integer and a thunk for the rest.
+fn range_seq(current: i64, end: Option<i64>, inclusive: bool) -> Value {
+    Value::Seq(LazySeq::new(move || {
+        let past_end = match end {
+            Some(e) if inclusive => current > e,
+            Some(e) => current >= e,
+            None => false,
+        };
+        if past_end {
+            Ok(Step::Nil)
+        } else {
+            Ok(Step::Cons(Value::Int(current), range_seq(current + 1, end, inclusive)))
+        }
+    }))
 }
 
 /// The `?` try operator, desugared over the `Try` contract: ask the value if it

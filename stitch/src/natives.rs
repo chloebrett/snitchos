@@ -5,7 +5,7 @@
 
 use crate::env::Env;
 use crate::interp::apply_values;
-use crate::value::{NativeFn, RuntimeError, TelemetryEvent, Value};
+use crate::value::{LazySeq, NativeFn, RuntimeError, Step, TelemetryEvent, Value};
 
 /// The native functions, registered into every program's globals.
 pub(crate) const NATIVES: &[NativeFn] = &[
@@ -39,7 +39,83 @@ pub(crate) const NATIVES: &[NativeFn] = &[
         arity: 2,
         func: native_span,
     },
+    NativeFn {
+        name: "toList",
+        arity: 1,
+        func: native_to_list,
+    },
+    NativeFn {
+        name: "take",
+        arity: 2,
+        func: native_take,
+    },
 ];
+
+/// `take(n, seq)` — a lazy `Seq` of at most the first `n` elements of `seq`.
+/// Lazy, so it works on an infinite sequence.
+fn native_take(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [count, seq] = args else {
+        return Err(RuntimeError::new("take expects (count, seq)"));
+    };
+    let Value::Int(count) = count else {
+        return Err(RuntimeError::new(format!(
+            "take count must be an Int, got {}",
+            count.kind()
+        )));
+    };
+    if !matches!(seq, Value::Seq(_)) {
+        return Err(RuntimeError::new(format!(
+            "take expects a Seq, got {}",
+            seq.kind()
+        )));
+    }
+    Ok(take_seq(*count, seq.clone()))
+}
+
+/// A lazy `Seq` yielding at most `n` elements of `seq`. Each forced step takes
+/// one element and defers the rest (with `n - 1`).
+fn take_seq(n: i64, seq: Value) -> Value {
+    Value::Seq(LazySeq::new(move || {
+        if n <= 0 {
+            return Ok(Step::Nil);
+        }
+        let Value::Seq(lazy) = &seq else {
+            // `seq` is always a Seq: validated by `take`, and forced tails are
+            // Seqs by construction.
+            return Ok(Step::Nil);
+        };
+        match lazy.force()? {
+            Step::Nil => Ok(Step::Nil),
+            Step::Cons(head, tail) => Ok(Step::Cons(head, take_seq(n - 1, tail))),
+        }
+    }))
+}
+
+/// `toList(seq)` — drain a lazy `Seq` into an eager `List` by forcing it to the
+/// end. Diverges on an infinite sequence (force it through `take` first).
+fn native_to_list(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [seq] = args else {
+        return Err(RuntimeError::new("toList expects (seq)"));
+    };
+    let mut items = Vec::new();
+    let mut current = seq.clone();
+    loop {
+        let Value::Seq(lazy) = &current else {
+            return Err(RuntimeError::new(format!(
+                "toList expects a Seq, got {}",
+                current.kind()
+            )));
+        };
+        match lazy.force()? {
+            Step::Nil => break,
+            Step::Cons(head, tail) => {
+                items.push(head);
+                current = tail;
+            }
+        }
+    }
+    Ok(Value::List(items.into()))
+}
 
 /// `span(name, body)` — open a span, run the zero-argument `body` thunk, close
 /// the span, and return the body's value. The `use <- span(name)` sugar makes
@@ -165,6 +241,48 @@ mod tests {
     fn map_applies_a_function_to_each_element() {
         assert_eq!(
             run_program("main() = map([1, 2, 3], x -> x * 2) == [2, 4, 6]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn a_finite_range_drains_to_a_list() {
+        assert_eq!(
+            run_program("main() = (1..4) |> toList == [1, 2, 3]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn an_inclusive_range_includes_its_end() {
+        assert_eq!(
+            run_program("main() = (1..=3) |> toList == [1, 2, 3]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn take_draws_a_prefix_of_an_infinite_range() {
+        // `1..` is endless; `take` proves laziness by draining only a prefix
+        // (an eager range would hang building the whole thing).
+        assert_eq!(
+            run_program("main() = take(3, 1..) |> toList == [1, 2, 3]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn take_zero_is_empty() {
+        assert_eq!(
+            run_program("main() = take(0, 1..) |> toList == []"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn take_more_than_available_stops_at_the_end() {
+        assert_eq!(
+            run_program("main() = take(5, 1..3) |> toList == [1, 2]"),
             Value::Bool(true)
         );
     }

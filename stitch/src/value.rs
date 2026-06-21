@@ -42,6 +42,59 @@ pub enum Value {
     /// A built-in (native) function — the stdlib combinators (`map`, `filter`,
     /// …) implemented in Rust rather than in Stitch.
     Native(NativeFn),
+    /// A lazy sequence — possibly infinite. A shared, memoizing cell that forces
+    /// on demand to nil or head + lazy tail. The lazy counterpart to `List`.
+    Seq(Rc<LazySeq>),
+}
+
+/// A lazy sequence cell: forced on demand, then memoized. Cloning a
+/// `Value::Seq` shares the cell (`Rc`), so forcing through one clone is visible
+/// through all — a forced step is computed at most once.
+pub struct LazySeq {
+    cell: std::cell::RefCell<SeqState>,
+}
+
+enum SeqState {
+    /// Not yet forced: run this thunk to produce the next step. The thunk holds
+    /// Rust logic (it may call back into the interpreter for Stitch closures),
+    /// so it is a boxed `Fn`, not a Stitch closure.
+    Unforced(ForceFn),
+    /// Forced and memoized.
+    Forced(Step),
+}
+
+/// The thunk that produces a sequence's next step. `Rc<dyn Fn>` so a `LazySeq`
+/// (and thus a `Value`) stays `Clone`.
+type ForceFn = Rc<dyn Fn() -> Result<Step, RuntimeError>>;
+
+/// One forced step of a sequence: the end, or a head plus the lazy tail (itself
+/// a `Value::Seq`).
+#[derive(Clone)]
+pub enum Step {
+    Nil,
+    Cons(Value, Value),
+}
+
+impl LazySeq {
+    /// A lazy cell whose first force runs `thunk`.
+    pub fn new(thunk: impl Fn() -> Result<Step, RuntimeError> + 'static) -> Rc<Self> {
+        Rc::new(LazySeq {
+            cell: std::cell::RefCell::new(SeqState::Unforced(Rc::new(thunk))),
+        })
+    }
+
+    /// Force the next step, computing it once and caching the result.
+    pub fn force(&self) -> Result<Step, RuntimeError> {
+        // Pull the thunk out (cloning the `Rc`) before calling it, so the cell
+        // isn't borrowed while the thunk runs (it may force other sequences).
+        let thunk = match &*self.cell.borrow() {
+            SeqState::Forced(step) => return Ok(step.clone()),
+            SeqState::Unforced(thunk) => Rc::clone(thunk),
+        };
+        let step = thunk()?;
+        *self.cell.borrow_mut() = SeqState::Forced(step.clone());
+        Ok(step)
+    }
 }
 
 /// A built-in function: its name, arity, and the Rust implementation. The
@@ -139,6 +192,8 @@ impl Value {
             Value::Closure(_) => "<function>".to_string(),
             Value::Constructor(_) => "<constructor>".to_string(),
             Value::Native(n) => format!("<builtin {}>", n.name),
+            // Don't force — a Seq may be infinite.
+            Value::Seq(_) => "<seq>".to_string(),
             Value::Data(d) if d.fields.is_empty() => d.variant.clone(),
             Value::Data(d) => {
                 let fields = d
@@ -168,6 +223,7 @@ impl Value {
             Value::Unit => "Unit",
             Value::Closure(_) | Value::Constructor(_) | Value::Native(_) => "Function",
             Value::Data(_) => "a record",
+            Value::Seq(_) => "Seq",
         }
     }
 }
@@ -187,6 +243,7 @@ impl fmt::Debug for Value {
             Value::Constructor(c) => write!(f, "Constructor({})", c.variant),
             Value::Data(d) => write!(f, "{}{:?}", d.variant, d.fields),
             Value::Native(n) => write!(f, "Native({})", n.name),
+            Value::Seq(_) => write!(f, "Seq"),
         }
     }
 }
@@ -212,6 +269,8 @@ impl PartialEq for Value {
             (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
             (Value::Constructor(a), Value::Constructor(b)) => Rc::ptr_eq(a, b),
             (Value::Native(a), Value::Native(b)) => a.name == b.name,
+            // Sequences are lazy/opaque — identity, like functions (no forcing).
+            (Value::Seq(a), Value::Seq(b)) => Rc::ptr_eq(a, b),
             // Structural equality (decision D): same type, variant, and fields.
             (Value::Data(a), Value::Data(b)) => {
                 a.type_name == b.type_name && a.variant == b.variant && a.fields == b.fields
