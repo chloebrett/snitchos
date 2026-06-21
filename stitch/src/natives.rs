@@ -49,7 +49,122 @@ pub(crate) const NATIVES: &[NativeFn] = &[
         arity: 2,
         func: native_take,
     },
+    NativeFn {
+        name: "iterate",
+        arity: 2,
+        func: native_iterate,
+    },
+    NativeFn {
+        name: "repeat",
+        arity: 1,
+        func: native_repeat,
+    },
+    NativeFn {
+        name: "takeWhile",
+        arity: 2,
+        func: native_take_while,
+    },
+    NativeFn {
+        name: "foldWhile",
+        arity: 3,
+        func: native_fold_while,
+    },
 ];
+
+/// `foldWhile(coll, init, f)` — reduce left-to-right with an early stop. `f(acc,
+/// elem)` returns `Some(newAcc)` to continue or `None` to stop (the result is
+/// the accumulator from *before* the stopping step). The accumulator-aware
+/// terminator: unlike `takeWhile`, the stop decision can depend on `acc`, so it
+/// can consume an infinite sequence. Works on a `List` or a `Seq`.
+fn native_fold_while(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [collection, init, function] = args else {
+        return Err(RuntimeError::new("foldWhile expects (collection, init, function)"));
+    };
+    let mut acc = init.clone();
+    if let Value::Seq(_) = collection {
+        let mut current = collection.clone();
+        while let Step::Cons(head, tail) = force_seq(&current)? {
+            match fold_while_step(function, &acc, &head, env)? {
+                Some(next) => acc = next,
+                None => return Ok(acc),
+            }
+            current = tail;
+        }
+        return Ok(acc);
+    }
+    for item in expect_list("foldWhile", collection)? {
+        match fold_while_step(function, &acc, item, env)? {
+            Some(next) => acc = next,
+            None => return Ok(acc),
+        }
+    }
+    Ok(acc)
+}
+
+/// Run one `foldWhile` step: `Some(acc)` to continue, `None` to stop.
+fn fold_while_step(
+    f: &Value,
+    acc: &Value,
+    elem: &Value,
+    env: &Env,
+) -> Result<Option<Value>, RuntimeError> {
+    match apply_values(f, &[acc.clone(), elem.clone()], env)? {
+        Value::Data(d) if d.type_name == "Maybe" && d.variant == "Some" => {
+            Ok(Some(d.fields.first().map_or(Value::Unit, |(_, v)| v.clone())))
+        }
+        Value::Data(d) if d.type_name == "Maybe" && d.variant == "None" => Ok(None),
+        other => Err(RuntimeError::new(format!(
+            "foldWhile step must return a Maybe (Some to continue, None to stop), got {}",
+            other.kind()
+        ))),
+    }
+}
+
+/// Force a value that must be a `Seq` to its next step.
+fn force_seq(value: &Value) -> Result<Step, RuntimeError> {
+    match value {
+        Value::Seq(lazy) => lazy.force(),
+        other => Err(RuntimeError::new(format!(
+            "expected a Seq, got {}",
+            other.kind()
+        ))),
+    }
+}
+
+/// `iterate(seed, f)` — the infinite `Seq` `seed, f(seed), f(f(seed)), …`.
+fn native_iterate(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [seed, f] = args else {
+        return Err(RuntimeError::new("iterate expects (seed, function)"));
+    };
+    Ok(iterate_seq(seed.clone(), f.clone(), env.clone()))
+}
+
+fn iterate_seq(current: Value, f: Value, env: Env) -> Value {
+    Value::Seq(LazySeq::new(move || {
+        // The head is `current`; the tail defers `f(current)` until it is forced,
+        // so `f` runs once per element actually demanded — never one ahead.
+        let (f, env, current_for_tail) = (f.clone(), env.clone(), current.clone());
+        let tail = Value::Seq(LazySeq::new(move || {
+            let next = apply_values(&f, std::slice::from_ref(&current_for_tail), &env)?;
+            force_seq(&iterate_seq(next, f.clone(), env.clone()))
+        }));
+        Ok(Step::Cons(current.clone(), tail))
+    }))
+}
+
+/// `repeat(x)` — the infinite `Seq` `x, x, x, …`.
+fn native_repeat(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [x] = args else {
+        return Err(RuntimeError::new("repeat expects (value)"));
+    };
+    Ok(repeat_seq(x.clone()))
+}
+
+fn repeat_seq(x: Value) -> Value {
+    Value::Seq(LazySeq::new(move || {
+        Ok(Step::Cons(x.clone(), repeat_seq(x.clone())))
+    }))
+}
 
 /// `take(n, seq)` — a lazy `Seq` of at most the first `n` elements of `seq`.
 /// Lazy, so it works on an infinite sequence.
@@ -169,46 +284,128 @@ fn expect_list<'a>(name: &str, value: &'a Value) -> Result<&'a [Value], RuntimeE
     }
 }
 
-/// `map(list, f)` — a new list with `f` applied to each element.
+/// `map(coll, f)` — `f` applied to each element. Polymorphic over the receiver:
+/// a `List` maps eagerly to a new `List`; a `Seq` maps lazily to a new `Seq`.
 fn native_map(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
-    let [list, function] = args else {
-        return Err(RuntimeError::new("map expects (list, function)"));
+    let [collection, function] = args else {
+        return Err(RuntimeError::new("map expects (collection, function)"));
     };
-    let mapped = expect_list("map", list)?
+    if let Value::Seq(_) = collection {
+        return Ok(map_seq(collection.clone(), function.clone(), env.clone()));
+    }
+    let mapped = expect_list("map", collection)?
         .iter()
         .map(|item| apply_values(function, std::slice::from_ref(item), env))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Value::List(mapped.into()))
 }
 
-/// `filter(list, pred)` — the elements for which `pred` returns `true`.
+/// A lazy `Seq` applying `f` to each element of `seq` on demand.
+fn map_seq(seq: Value, f: Value, env: Env) -> Value {
+    Value::Seq(LazySeq::new(move || match force_seq(&seq)? {
+        Step::Nil => Ok(Step::Nil),
+        Step::Cons(head, tail) => {
+            let mapped = apply_values(&f, std::slice::from_ref(&head), &env)?;
+            Ok(Step::Cons(mapped, map_seq(tail, f.clone(), env.clone())))
+        }
+    }))
+}
+
+/// `filter(coll, pred)` — the elements for which `pred` is true. Eager on a
+/// `List`, lazy on a `Seq`.
 fn native_filter(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
-    let [list, predicate] = args else {
-        return Err(RuntimeError::new("filter expects (list, predicate)"));
+    let [collection, predicate] = args else {
+        return Err(RuntimeError::new("filter expects (collection, predicate)"));
     };
+    if let Value::Seq(_) = collection {
+        return Ok(filter_seq(collection.clone(), predicate.clone(), env.clone()));
+    }
     let mut kept = Vec::new();
-    for item in expect_list("filter", list)? {
-        match apply_values(predicate, std::slice::from_ref(item), env)? {
-            Value::Bool(true) => kept.push(item.clone()),
-            Value::Bool(false) => {}
-            other => {
-                return Err(RuntimeError::new(format!(
-                    "filter predicate must return a Bool, got {}",
-                    other.kind()
-                )));
-            }
+    for item in expect_list("filter", collection)? {
+        if keeps(predicate, item, env)? {
+            kept.push(item.clone());
         }
     }
     Ok(Value::List(kept.into()))
 }
 
-/// `fold(list, init, f)` — reduce left-to-right, `f(acc, element)`.
+/// A lazy `Seq` of the elements of `seq` for which `pred` holds. Forcing scans
+/// past rejected elements until the next match (so it diverges on an infinite
+/// sequence with no further matches — inherent to filtering).
+fn filter_seq(seq: Value, pred: Value, env: Env) -> Value {
+    Value::Seq(LazySeq::new(move || {
+        let mut current = seq.clone();
+        loop {
+            match force_seq(&current)? {
+                Step::Nil => return Ok(Step::Nil),
+                Step::Cons(head, tail) => {
+                    if keeps(&pred, &head, &env)? {
+                        return Ok(Step::Cons(head, filter_seq(tail, pred.clone(), env.clone())));
+                    }
+                    current = tail;
+                }
+            }
+        }
+    }))
+}
+
+/// Apply a predicate to one element, requiring a `Bool` result. Shared by
+/// `filter` and `takeWhile`.
+fn keeps(predicate: &Value, item: &Value, env: &Env) -> Result<bool, RuntimeError> {
+    match apply_values(predicate, std::slice::from_ref(item), env)? {
+        Value::Bool(keep) => Ok(keep),
+        other => Err(RuntimeError::new(format!(
+            "predicate must return a Bool, got {}",
+            other.kind()
+        ))),
+    }
+}
+
+/// `takeWhile(seq, pred)` — a lazy `Seq` of the leading elements for which
+/// `pred` holds, stopping at (and excluding) the first failure. The terminating
+/// consumer for infinite sequences.
+fn native_take_while(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [seq, predicate] = args else {
+        return Err(RuntimeError::new("takeWhile expects (seq, predicate)"));
+    };
+    if !matches!(seq, Value::Seq(_)) {
+        return Err(RuntimeError::new(format!(
+            "takeWhile expects a Seq, got {}",
+            seq.kind()
+        )));
+    }
+    Ok(take_while_seq(seq.clone(), predicate.clone(), env.clone()))
+}
+
+fn take_while_seq(seq: Value, pred: Value, env: Env) -> Value {
+    Value::Seq(LazySeq::new(move || match force_seq(&seq)? {
+        Step::Nil => Ok(Step::Nil),
+        Step::Cons(head, tail) => {
+            if keeps(&pred, &head, &env)? {
+                Ok(Step::Cons(head, take_while_seq(tail, pred.clone(), env.clone())))
+            } else {
+                Ok(Step::Nil)
+            }
+        }
+    }))
+}
+
+/// `fold(coll, init, f)` — reduce left-to-right, `f(acc, element)`. Forces a
+/// `Seq` to the end (diverges on an infinite one — use `foldWhile` to stop).
 fn native_fold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
-    let [list, init, function] = args else {
-        return Err(RuntimeError::new("fold expects (list, init, function)"));
+    let [collection, init, function] = args else {
+        return Err(RuntimeError::new("fold expects (collection, init, function)"));
     };
     let mut acc = init.clone();
-    for item in expect_list("fold", list)? {
+    if let Value::Seq(_) = collection {
+        let mut current = collection.clone();
+        while let Step::Cons(head, tail) = force_seq(&current)? {
+            acc = apply_values(function, &[acc, head], env)?;
+            current = tail;
+        }
+        return Ok(acc);
+    }
+    for item in expect_list("fold", collection)? {
         acc = apply_values(function, &[acc, item.clone()], env)?;
     }
     Ok(acc)
@@ -284,6 +481,110 @@ mod tests {
         assert_eq!(
             run_program("main() = take(5, 1..3) |> toList == [1, 2]"),
             Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn iterate_builds_a_sequence_by_repeated_application() {
+        assert_eq!(
+            run_program("main() = take(4, iterate(1, x -> x * 2)) |> toList == [1, 2, 4, 8]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn repeat_repeats_a_value() {
+        assert_eq!(
+            run_program("main() = take(3, repeat(7)) |> toList == [7, 7, 7]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn map_over_a_seq_is_lazy() {
+        assert_eq!(
+            run_program("main() = (1..4) |> map(x -> x * 10) |> toList == [10, 20, 30]"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program("main() = take(3, map(1.., x -> x * 10)) |> toList == [10, 20, 30]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn filter_over_a_seq_is_lazy() {
+        assert_eq!(
+            run_program("main() = (1..6) |> filter(x -> x > 3) |> toList == [4, 5]"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program("main() = take(2, filter(1.., x -> x % 2 == 0)) |> toList == [2, 4]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn fold_over_a_finite_seq_reduces_it() {
+        assert_eq!(
+            run_program("main() = fold(1..5, 0, (a, b) -> a + b)"),
+            Value::Int(10)
+        );
+    }
+
+    #[test]
+    fn fold_while_stops_when_the_step_returns_none() {
+        // Sum 1.. while the running total stays ≤ 6; `None` stops, keeping the
+        // accumulator from before the stopping step. Terminates over an infinite
+        // sequence because the step decides to stop.
+        assert_eq!(
+            run_program(
+                "main() = foldWhile(1.., 0, (acc, x) -> { let next = acc + x  next > 6 => None | Some(next) })"
+            ),
+            Value::Int(6)
+        );
+    }
+
+    #[test]
+    fn fold_while_that_never_stops_folds_the_whole_finite_seq() {
+        assert_eq!(
+            run_program("main() = foldWhile(1..4, 0, (acc, x) -> Some(acc + x))"),
+            Value::Int(6)
+        );
+    }
+
+    #[test]
+    fn take_while_stops_at_the_first_failure() {
+        // On an infinite range — terminates because `takeWhile` stops.
+        assert_eq!(
+            run_program("main() = (1..) |> takeWhile(x -> x < 4) |> toList == [1, 2, 3]"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program("main() = (1..6) |> takeWhile(x -> x < 3) |> toList == [1, 2]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn iterate_applies_its_function_lazily() {
+        // `take(3, iterate(0, f))` is `[0, f(0), f(f(0))]` — `f` runs exactly
+        // twice (for elements 1 and 2). A non-lazy iterate would apply `f` an
+        // extra time; the emit count proves it doesn't.
+        assert_eq!(
+            run_program_events(
+                "main() = take(3, iterate(0, x -> { emit(\"s\", x)  x + 1 })) |> toList"
+            ),
+            vec![
+                TelemetryEvent::Emit {
+                    name: "s".to_string(),
+                    value: Value::Int(0)
+                },
+                TelemetryEvent::Emit {
+                    name: "s".to_string(),
+                    value: Value::Int(1)
+                },
+            ]
         );
     }
 
