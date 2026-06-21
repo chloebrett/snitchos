@@ -168,3 +168,33 @@ For `x.foo()`:
 - `_` (Wildcard) vs `Binding("unused")`: `_` introduces **no** binding (can't be referenced; the canonical ignore-marker, = the placeholder hole from S4); a `Binding` binds even if unused.
 
 **Parser tour complete (S1–S6).** Next, S7: implement the dispatch algorithm above.
+
+## S7 — Contract dispatch, implemented (`interp.rs` + `env.rs`)
+
+Basic `on X` method dispatch, end to end. (`on X : C` contract conformance / default methods deferred.)
+
+**Registry** (`register_items`): `Item::On` accumulates into a `HashMap<String, Vec<Method>>` keyed by `type_name`:
+```rust
+dispatch.entry(name.clone()).or_default().extend(methods.iter().cloned());
+```
+`entry().or_default()` is the idiom for get-or-insert-then-mutate — never `get_mut` + `insert`. Multiple `on` blocks per type accumulate.
+
+**Env bridge** (`env.rs`): the registry rides the same `Rc<OnceCell<…>>` machinery as `globals` (write-once, shared, letrec):
+- field `methods: Rc<OnceCell<HashMap<String, Vec<Method>>>>`, cloned in `bind`, installed by `set_methods` (after `set_globals`).
+- `lookup_method(type, name) -> Option<Method>` — two-key, hash by type then `.iter().find` by name, returns a clone.
+- `globals_only()` — an env with the shared globals/methods/sink but `locals: None`. Method bodies run here so they see top-level defs but **not the caller's locals** (closure-hygiene applied to methods).
+
+**Dispatch** (`eval`): `receiver.m(args)` has no method-call node — it's `Call { callee: Field }`. Intercept that shape *before* evaluating the callee:
+```rust
+Expr::Call { callee, args } => match callee.as_ref() {
+    Expr::Field { object, name } => eval_method_call(object, name, args, env),
+    _ => eval_call(&eval(callee, env)?, args, env),
+}
+```
+`eval_method_call`: eval object → receiver; require `Value::Data` (else error — primitives have no methods); `lookup_method` (else "no method" error); arity-check; build `env.globals_only().extend("@", receiver)` + bind params; eval `method.body`.
+
+**`@`** (`Expr::SelfRef`): the receiver is bound under reserved name `"@"`; the `SelfRef` arm is `env.lookup("@")`. `@field` = `Field { object: SelfRef, .. }`, so it flows through the existing `Field` arm for free.
+
+**vs a Java vtable:** same goal (type-directed dispatch, implicit receiver), opposite end of the static/dynamic axis. Java resolves the name to a fixed **slot index** at compile time → O(1) array index, per-class table, needs static types + single-inheritance layout. Stitch resolves the name by **string lookup every call** (hash type → scan methods) → flexible, no types needed, slower. A vtable is the *optimization* Stitch could adopt once it has static types (the jlox→clox arc). Contracts, when added, are closer to Java *interfaces* (itables / hashed lookup) than class vtables — no single linear layout, which is exactly the multi-`on`-block shape.
+
+**Deferred:** `on X : C` conformance + default-method fallback (`Item::Contract` still dropped; `On.contract` captured-but-unused); `mut`/`free` modifiers at eval.

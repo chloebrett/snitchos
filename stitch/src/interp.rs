@@ -27,18 +27,20 @@ pub fn eval_program_with_telemetry(
     items: &[Item],
 ) -> (Result<Value, RuntimeError>, Vec<TelemetryEvent>) {
     let env = Env::new();
-    let mut globals = HashMap::new();
-    let mut dispatch: HashMap<String, Vec<Method>> = HashMap::new();
+    let mut reg = Registration::default();
     for native in NATIVES {
-        globals.insert(native.name.to_string(), Value::Native(*native));
+        reg.globals.insert(native.name.to_string(), Value::Native(*native));
     }
-    register_builtin_types(&mut globals);
+    register_builtin_types(&mut reg.globals);
     // The Stitch-source prelude loads first; user items can shadow it.
     let prelude = parse_program(PRELUDE).expect("the prelude must parse");
-    register_items(&prelude, &env, &mut globals, &mut dispatch);
-    register_items(items, &env, &mut globals, &mut dispatch);
-    env.set_globals(globals);
-    env.set_methods(dispatch);
+    register_items(&prelude, &env, &mut reg);
+    register_items(items, &env, &mut reg);
+    // After every `on`/`contract` is collected, fold contract default methods
+    // into the types that conform — a concrete impl already present wins.
+    bake_contract_defaults(&mut reg);
+    env.set_globals(reg.globals);
+    env.set_methods(reg.methods);
     let result = match env.lookup("main") {
         Some(main) => eval_call(&main, &[], &env),
         None => Err(RuntimeError::new("no `main` function")),
@@ -293,14 +295,25 @@ fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<Value, Runt
 /// The Stitch-source prelude, compiled into the binary and loaded before user code.
 const PRELUDE: &str = include_str!("prelude.st");
 
-/// Register each top-level item (function, prod, sum) into `globals`. Functions
-/// and constructors capture `env` so they share the (not-yet-filled) globals.
-fn register_items(
-    items: &[Item],
-    env: &Env,
-    globals: &mut HashMap<String, Value>,
-    dispatch: &mut HashMap<String, Vec<Method>>,
-) {
+/// The top-level definitions collected from a program before they're installed
+/// into the environment. Method dispatch needs more than the value `globals`:
+/// per-type method lists, the contracts' own method tables (for default-method
+/// bodies), and which contracts each type declares conformance to.
+#[derive(Default)]
+struct Registration {
+    /// Value bindings: functions, constructors, top-level constants.
+    globals: HashMap<String, Value>,
+    /// Type name → its methods, gathered from every `on Type` block.
+    methods: HashMap<String, Vec<Method>>,
+    /// Contract name → its methods (abstract signatures and default bodies).
+    contracts: HashMap<String, Vec<Method>>,
+    /// Type name → the contracts it declares conformance to (`on Type : C`).
+    conformances: HashMap<String, Vec<String>>,
+}
+
+/// Register each top-level item into `reg`. Functions and constructors capture
+/// `env` so they share the (not-yet-filled) globals.
+fn register_items(items: &[Item], env: &Env, reg: &mut Registration) {
     for item in items {
         match item {
             Item::Func {
@@ -311,7 +324,7 @@ fn register_items(
                     body: body.clone(),
                     env: env.clone(),
                 }));
-                globals.insert(name.clone(), closure);
+                reg.globals.insert(name.clone(), closure);
             }
             Item::Prod { name, fields, .. } => {
                 let ctor = Value::Constructor(Rc::new(Constructor {
@@ -319,7 +332,7 @@ fn register_items(
                     variant: name.clone(),
                     field_names: fields.iter().map(|field| field.name.clone()).collect(),
                 }));
-                globals.insert(name.clone(), ctor);
+                reg.globals.insert(name.clone(), ctor);
             }
             Item::Sum { name, variants, .. } => {
                 for variant in variants {
@@ -337,21 +350,71 @@ fn register_items(
                             field_names: variant.fields.iter().map(|f| f.name.clone()).collect(),
                         }))
                     };
-                    globals.insert(variant.name.clone(), value);
+                    reg.globals.insert(variant.name.clone(), value);
                 }
             }
             Item::On {
                 target: Type::Name { name, .. },
+                contract,
                 methods,
-                ..
             } => {
-                dispatch
+                reg.methods
                     .entry(name.clone())
                     .or_default()
                     .extend(methods.iter().cloned());
+                // `on Type : Contract` records conformance, so the contract's
+                // default methods can be folded in by `bake_contract_defaults`.
+                if let Some(Type::Name { name: contract_name, .. }) = contract {
+                    reg.conformances
+                        .entry(name.clone())
+                        .or_default()
+                        .push(contract_name.clone());
+                }
+            }
+            Item::Contract { name, methods, .. } => {
+                reg.contracts.insert(name.clone(), methods.clone());
             }
             _ => {}
         }
+    }
+}
+
+/// Fold each contract's default methods (those with a body) into every type that
+/// declares conformance to it — unless the type already defines a method of that
+/// name, in which case the concrete impl wins. Doing this once at registration
+/// keeps `lookup_method` a single flat lookup; it's the same semantics as a
+/// "method not found on the type → use the contract default" fallback at call
+/// time. Abstract signatures (no body) are skipped — there's nothing to inherit.
+fn bake_contract_defaults(reg: &mut Registration) {
+    // Collect first, then apply: we can't mutate `reg.methods` while iterating
+    // `reg.conformances`/`reg.contracts`.
+    let mut additions: Vec<(String, Method)> = Vec::new();
+    for (type_name, contract_names) in &reg.conformances {
+        for contract_name in contract_names {
+            let Some(contract_methods) = reg.contracts.get(contract_name) else {
+                continue;
+            };
+            for method in contract_methods {
+                if method.body.is_none() {
+                    continue;
+                }
+                let defined_by_type = reg
+                    .methods
+                    .get(type_name)
+                    .is_some_and(|ms| ms.iter().any(|m| m.name == method.name));
+                // First contract to supply a given default wins (a later one with
+                // the same method name is ignored once it's queued).
+                let already_queued = additions
+                    .iter()
+                    .any(|(t, m)| t == type_name && m.name == method.name);
+                if !defined_by_type && !already_queued {
+                    additions.push((type_name.clone(), method.clone()));
+                }
+            }
+        }
+    }
+    for (type_name, method) in additions {
+        reg.methods.entry(type_name).or_default().push(method);
     }
 }
 
@@ -2170,6 +2233,48 @@ mod tests {
         assert_eq!(
             run_program("prod Box(n: Int)  on Box { plus(k) = @n + k }  main() = Box(7).plus(3)"),
             Value::Int(10)
+        );
+    }
+
+    #[test]
+    fn a_contract_default_method_is_inherited() {
+        // `describe` has a default body in the contract; Box conforms via
+        // `on Box : Show` but doesn't override it, so the default runs.
+        assert_eq!(
+            run_program(
+                "contract Show { show() -> Str  describe() = \"a thing\" }  \
+                 prod Box(n: Int)  on Box : Show { show() = \"box\" }  \
+                 main() = Box(1).describe()"
+            ),
+            Value::Str("a thing".into())
+        );
+    }
+
+    #[test]
+    fn a_contract_default_dispatches_self_calls_to_the_concrete_type() {
+        // `loud` is a default that calls `@speak()`. Dog implements `speak`; the
+        // default's `@speak()` must dispatch to Dog's impl — late binding / open
+        // recursion (the template-method pattern).
+        assert_eq!(
+            run_program(
+                "contract Voice { speak() -> Str  loud() = \"{@speak()}!\" }  \
+                 prod Dog(x: Int)  on Dog : Voice { speak() = \"woof\" }  \
+                 main() = Dog(1).loud()"
+            ),
+            Value::Str("woof!".into())
+        );
+    }
+
+    #[test]
+    fn a_concrete_method_overrides_a_contract_default() {
+        // Box defines `hi`, so its impl wins over the contract's default body.
+        assert_eq!(
+            run_program(
+                "contract Greet { hi() = \"default\" }  \
+                 prod Box(n: Int)  on Box : Greet { hi() = \"box hi\" }  \
+                 main() = Box(1).hi()"
+            ),
+            Value::Str("box hi".into())
         );
     }
 
