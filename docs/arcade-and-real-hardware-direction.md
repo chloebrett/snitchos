@@ -1,10 +1,11 @@
 # 🕹️ Direction: the arcade as SnitchOS's observability showpiece (+ real hardware)
 
-> **Status: exploratory.** This captures a design conversation about where SnitchOS could go
-> next — a physical arcade demo on real RISC-V hardware. It is *not* yet committed to
-> [roadmap-and-milestones.md](roadmap-and-milestones.md); it's the reasoning and the
-> recommended shape, to be folded into the roadmap once decided. Hedges are deliberate:
-> prices, perf numbers, and tooling maturity are ballparks with wide error bars.
+> **Status: committed as the post-v1.0 north-star** (2026-06-21) — the arcade is now the
+> headline post-v1.0 real-time workload in [roadmap-and-milestones.md](roadmap-and-milestones.md).
+> This doc remains the full reasoning + recommended shape (sequencing, hardware, the novel
+> capability-OS game primitives). Hedges are deliberate: prices, perf numbers, and tooling
+> maturity are ballparks with wide error bars. The v1.0 line itself is the interactive
+> shell + a basic editor; the arcade rides *after* it.
 
 **One-line thesis:** build a small physical arcade machine (display + controller + sound,
 running a Tetris clone and eventually a simple software-rendered Minecraft, eventually

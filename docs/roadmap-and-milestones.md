@@ -1,102 +1,93 @@
 # 🗺️ Roadmap & milestones
 
-*Milestones are narrative arcs, not time boxes. Each one ships code, a blog post, and a companion video.*
+*Rewritten 2026-06-21 from the current vantage point. The v0.6-era roadmap is
+preserved at [roadmap-historical-through-v0.11.md](roadmap-historical-through-v0.11.md)
+— useful for seeing how the plan evolved (the original v0.11 "metrics-ingestion
+workload" never happened; the shell/console arc was pulled forward and v1.0
+re-anchored on an interactive capability shell).*
+
+*Milestones are narrative arcs, not time boxes. Each ships code + a devlog post (and, where it earns one, a companion video).*
 
 # Principles
-- **Granular milestones.** ~20 small milestones beats 9 big ones. Each milestone is one coherent thing to build, understand, and explain. If a milestone needs two screenshots to explain, it should probably be two milestones.
-- **Each milestone produces content.** A devlog+essay blog post and a companion video (No Boilerplate / ThePrimeagen style — tight script, slideshow + voiceover, Excalidraw diagrams). Content can pipeline up to ~1 milestone behind code, no further.
-- **Interface before implementation.** Interfaces are expensive to change; implementations are cheap. Ship the trait first with a trivial implementation; richer implementations are additive later.
-- **Effort-bounded, not calendar-bounded.** No deadlines. Measure and adjust. Scope cuts are always acceptable.
-- **Speed is not the constraint; understanding is.** Reference point: a 15k-line well-factored tested Slay the Spire clone built in one week with agent collaboration. SnitchOS is harder (compounding decisions, slow QEMU iteration loop, less-trodden terrain for the agent) but the same throughput applies once past the v0.1–v0.3 infrastructure tax. The risk is running ahead of understanding — use agent thinking time to learn the code, not just to produce more of it.
+- **Granular milestones.** One coherent thing to build, understand, and explain. If it needs two screenshots to explain, it's probably two milestones.
+- **Interface before implementation.** Ship the trait first with a trivial impl; richer impls are additive. (The `Filesystem` trait, the `Clock`/`FrameSink` traits, the device-class HAL traits all follow this.)
+- **Effort-bounded, not calendar-bounded.** No deadlines; measure and adjust; scope cuts always acceptable.
+- **Understanding is the constraint, not speed.** Use agent thinking time to learn the code, not just produce more of it.
+- **Everything observable — even the cheats.** Each milestone earns a "post angle": the thing you can now *watch* in a trace.
 
-# Road to v1.0
-The v1.0 story: *a capability-secured microkernel running a real workload, where every operation is observable end-to-end.* Audio, networking, WASM, and FS-deepening are deliberately post-v1.0 — v1.0 is already a complete story without them.
+# What "v1.0" means
+v1.0 = **demoable**: a capability-secured microkernel you can actually *drive* — boot it, get a shell, run commands and edit a file over a real filesystem, with every operation observable end-to-end. It is **not** a finish line; work continues incrementally afterward. (This supersedes the old "real workload = metrics-ingestion server" framing — the interactive **shell + editor** is the nearer, more tangible "it's a real OS" moment, and the **arcade/game** is the post-v1.0 north-star real-time workload.)
 
-**Status legend:** ✅ shipped (code + post) · 🚧 in progress · (unmarked) not started. As of 2026-06-14: v0.1→v0.8 shipped, v0.9 (IPC) almost done. Capabilities (v0.7b), the full userspace runtime, preemption (v0.8), and capability-based IPC (v0.9, landing) exist *today* — see `kernel-core/src/cap.rs`, `user/`. Don't read the future-tense prose below as "not yet built"; trust the marker.
+# Shipped (v0.1 → v0.11)
+Condensed — full detail in the [historical roadmap](roadmap-historical-through-v0.11.md) and the [README](../README.md).
 
-## v0.1 — Hello, traced world ✅
-Smallest kernel that boots on RISC-V in QEMU and emits boot-phase spans + a heartbeat loop as postcard frames over a dedicated serial channel. Host-side reader pretty-prints a live span tree to stdout. No userspace, no allocator, no interrupts.
+- **v0.1–v0.3 ✅** — traced boot (postcard frames over virtio-console) → Grafana stack (Tempo/Prometheus/Grafana) → interrupts + SSTC timer + `Clock` trait.
+- **v0.4 ✅ Memory** — Sv39 paging, higher-half kernel, bitmap frame allocator, growable kernel heap; every allocator instrumented.
+- **v0.5 ✅ Threading** — cooperative round-robin scheduler; spans survive context switches (per-task `SpanCursor`); `ThreadRegister`/`ContextSwitch` frames.
+- **v0.6 ✅ Cooperative SMP** — hart 1 online, per-CPU discipline, TLB-shootdown IPIs, `hart_id` on the wire; producer/consumer workload across the boundary.
+- **v0.7 ✅ Userspace & capabilities** — v0.7a first userspace process (ambient, on purpose); v0.7b the capability rewrite (`CapTable`, handles, no ambient authority, `U`-bit isolation, snitched refusals).
+- **v0.8 ✅ Preemption & priorities** — timer-driven preemption of userspace (`SPP==User` gate); static priorities + aging.
+- **v0.9 ✅ IPC over capabilities** — synchronous endpoints, `call`/`reply` (one-shot reply caps), badged endpoints; trace context crosses the process boundary.
+- **v0.10 ✅ RAMfs** — the `Filesystem` trait (`fs-core`) + `ramfs` + `fs-proto`; a File cap *is* a badged endpoint cap; bulk bytes via a kernel cross-address-space copy.
+- **v0.11 🚧 Console input & spawn** — Tier-0 polled UART RX (`ConsoleRead`/`console_read`); spawn-with-caps (`Spawn` delegates exactly the caps the parent chooses). The substrate the shell stands on.
 
-**Post angle:** "Hello world, but the world snitches." Screen recording of the live span tree.
+# The road to v1.0
 
-## v0.2 — Grafana arrives ✅
-Replace the stdout reader with a real collector daemon. docker-compose stack: Tempo (traces), Prometheus (metrics), Grafana, optionally Loki. Add structured metrics (counters, gauges) alongside spans. Same heartbeat workload.
+## v0.12 — Process lifecycle: Exit / Wait (+ notifications)
+The shell's blocker: a parent must launch a child and *reap* it before reading the next line. `Exit` notifies the parent; `Wait(child)` blocks until the child exits. Built on the existing `block_current`/`wake`. Introduces the **notification primitive** (async kernel→user signal) — child-exit is its first consumer, devices reuse it later. Address-space teardown/reclaim (stop leaking on exit) folds in here, or stays tax if it bloats the milestone.
 
-**Post angle:** "From printf to a real observability stack." First dashboard screenshot — the "this looks like a product" reveal.
+**Post angle:** "the kernel learns to reap its children."
 
-## v0.3 — Interrupts & clock ✅
-Trap handler, timer interrupts, a monotonic clock behind a `Clock` trait. The heartbeat becomes timer-driven instead of a busy loop. Trap entry/exit traced.
+## v0.13 — The explicit-authority shell
+`init` grants the shell its starting world; `user/shell` reads a line, resolves it, delegates **exactly** the caps each program needs, spawns it, waits. Commands run over the RAMfs with delegated file caps — and we invent **our own command vocabulary**, not a `cat`/`ls` clone (an identity choice: this isn't a Linux cosplay). Every delegation is an observable `CapEvent` — "watch least-authority happen." (The shell is the FS's first real consumer, so the `fs-*` end-to-end scenarios get verified here.)
 
-**Post angle:** "Teaching the kernel what time it is." Trace view showing periodic timer-driven spans.
+**Post angle:** "a shell where you can see exactly what each command is allowed to touch."
 
-## v0.4 — Memory ✅
-Page table setup, higher-half kernel layout, physical frame allocator, kernel heap. All allocators instrumented — allocation/free as metrics, heap pressure visible in Grafana.
+## v0.14 — A basic text editor
+A small userspace editor: open a file (FS read cap), edit a buffer (console input), write it back (FS write cap). The first interactive *app* — proves the full loop input → app → FS, capability-confined and fully traced.
 
-**Post angle:** "Bootstrapping allocators before allocators exist." Grafana panel of live heap usage.
+**Post angle:** "editing a file on a capability OS — and watching the bytes flow."
 
-## v0.5 — Threading & round-robin scheduler ✅
-Multiple kernel threads, context switching, the simplest possible scheduler (round-robin, single queue, single CPU). Span context propagates across context switches — the first genuinely hard observability problem. Scheduler decisions traced.
+## v1.0 — Demoable
+The story stands on its own: boot → shell → run commands + edit a file over a real FS, capability-secured, every operation observable. Polish, a coherent demo, a series wrap — then keep building.
 
-**Post angle:** "Following a trace across a context switch." Multi-thread trace view.
+**Post angle:** "SnitchOS v1.0 — a capability OS you can actually drive, that snitches on itself."
 
-## v0.6 — SMP (cooperative) ✅
-Second hart online, per-CPU discipline made real, page-table mutation extended with TLB-shootdown IPIs, wire format carries `hart_id`. **Cooperative**, not preemptive — each hart runs its own runqueue, tasks `yield_now()` voluntarily, idle harts `wfi` and wake on IPI. Headline workload: a producer/consumer histogram that first runs cooperative single-core (baseline post), then on two harts with `Mutex<VecDeque>` (the chokepoint shows its cost), then with `heapless::spsc` (the chokepoint goes away).
+# Post-v1.0 — the north-stars (loosely sequenced)
 
-**Why here, not later:** late SMP is an *unbounded audit* across every global and every "no-one-else-is-here" assumption — silent bugs under weak memory ordering. Late capabilities, by contrast, is a *scoped refactor* (rewrite the syscall layer). The v0.5 sync/percpu prefactor positioned this exactly; the audit surface is still small and enumerable today. Capabilities and IPC are the first concurrency-shaped subsystems — designing them post-SMP means they're born multi-hart-correct.
+## The arcade — the observable real-time workload
+The headline post-v1.0 arc; full design in [arcade-and-real-hardware-direction.md](arcade-and-real-hardware-direction.md). A game is the *best* observability workload — frame deadlines, input→photon latency, audio underruns, netcode jitter are legible real-time requirements a CRUD server lacks. **Guardrail:** the arcade is the *showpiece workload for the observable OS*, not a pivot to building a game console. Sequence:
+- `Framebuffer` + `Input` device-class traits (virtio-gpu-2D / ramfb + console input) + a fixed-timestep game loop.
+- **Tetris** (zero art — the platform-prover): frame-time + input-latency spans in Grafana.
+- **Slay-the-Spire port** (first real userspace *app*; sprite/atlas pipeline; OS-owned RNG/time → deterministic, tamper-evident replay).
+- **Software-3D Minecraft** (CPU rasterizer / voxel — the one genuinely novel subsystem).
+- Novel capability-OS game primitives: sessions-as-caps, observable multi-tenancy / dynamic split-screen, untrusted-games-run-safely, record-and-replay leaderboards, debug-vision overlay, synesthetic kernel.
 
-**Post angle:** three posts from one milestone — "two heartbeats on two harts," "what the chokepoint cost me," "what removing it bought me." See `plans/legacy/v0.6-smp-cooperative.md`.
+## Real hardware — VisionFive 2 (RISC-V, no arch port)
+Stay RV64GC — the decisive lever is **not** porting to aarch64. HAL device-class traits + DTB discovery hardened in QEMU first; the board is an additive driver-port phase (SPI panel + GPIO/bridge input). See the arcade doc §2–3.
 
-## v0.7a — First userspace process (built deliberately wrong) ✅
-User-mode entry, the first userspace process, exactly one syscall — with ambient authority, no capability discipline. Built intentionally the "Unix way" so the next milestone can feel the pain.
+## Networking — smoltcp over virtio-net / dwmac
+The IP stack reuses cleanly (smoltcp, no_std); a raw-TCP "network REPL" is the cheap interaction path; multiplayer rides this. (No SSH — it overshoots into std+tokio.)
 
-**Post angle:** "The first userspace process — and why I built it wrong on purpose."
+## WASM — SnitchOS in a browser tab
+The portability payoff: the unmodified kernel in a wasm RISC-V emulator (ports the *guarantees*) and/or the portable upper half compiled to `wasm32` (ports the *experience*); shared sessions over a relay. "Click → SnitchOS boots in your tab," and the portfolio-homepage showpiece.
 
-## v0.7b — Capability system ✅
-Introduce capabilities as the only access path. Refactor v0.7a's syscall to be capability-mediated. Per-process capability tables, capabilities as kernel objects, root caps to init only. Kernel begins adopting caps internally where it makes sense. Designed against the v0.6 multi-hart substrate from the start — no SMP retrofit later.
+## Stitch — a managed language on the capability OS
+[Stitch](language-design.md) (Java-shaped, tree-walk → bytecode VM, generational GC, caps + telemetry as the novelty) running as a SnitchOS userspace component. A post-v1.0 milestone; currently progressing as a parallel side-project.
 
-**Post angle:** "Why I rewrote the syscall layer: ambient authority vs. capabilities." The project's identity crystallizes here — a strong essay milestone.
+## FS deepening · audio · two-tier scheduler · WASM-userspace
+CoW + snapshots → content-addressed + Merkle ("filesystem-as-Git"), additive behind the v0.10 trait. Over-engineered audio (RT deadlines, XRun forensics). Borg-style two-tier scheduler. WASM-*userspace* — SnitchOS *hosts* wasm apps (the inverse of "SnitchOS in a tab").
 
-## v0.8 — Preemption, priorities, time-sliced scheduler ✅
-Cooperative becomes preemptive. Timer-driven preemption with full-trap-frame context switch (today's cooperative `switch` elides caller-saved regs per SysV ABI and can't survive mid-instruction interrupts). The `kernel::sync` chokepoint absorbs preempt-disable hooks in one file. Static priorities and time slicing layer on top. Borg-style two-tier (latency-sensitive + batch) is deferred further out.
-
-**Why before IPC:** the two milestones are mutually unblocked — IPC's blocking paths go through voluntary `yield_now` (a normal call; caller-saved regs already dead per SysV ABI), so the full-trap-frame switch never invalidates them, and preemption needs nothing from IPC. Doing preemption first means IPC's eventual block/wake is born on the preemptive scheduler (the better substrate) rather than retrofitted onto it, and preemption's races land on a single-process system instead of colliding with brand-new endpoint state. (Swapped with v0.9 — was IPC-first.)
-
-**Post angle:** "Making the scheduler take the CPU back."
-
-## v0.9 — IPC over capabilities 🚧
-Synchronous capability-based channels. First two-process workload. IPC paths fully traced — spans cross the process boundary. Notifications as a separate primitive (roughly the Zircon model). Endpoint state designed multi-hart-correct from day one. Block/wake sits on the v0.8 preemptive scheduler.
-
-**Post angle:** "Two processes talking, and watching every word."
-
-## v0.10 — Minimal RAMfs behind a stable Filesystem trait
-A RAM-backed filesystem as a userspace component, accessed via capabilities. **The `Filesystem` trait is the deliverable** — `open / read / write / stat` etc. — with a trivial in-memory implementation behind it. Not persistent, no snapshots. CoW and content-addressing are additive later behind this same trait.
-
-**Post angle:** "A filesystem in userspace — and the interface that lets it grow."
-
-## v0.11 — Metrics-ingestion workload, end-to-end
-The first real workload: a personal metrics ingestion server running as a userspace SnitchOS component. Laptop/phone push metrics in; SnitchOS stores them; they're served back out to Grafana. Network ingress via the host-bridge cheat (host shim forwards data in over the existing channel — no in-kernel network stack yet). The "OS is real" moment: observability now observes something real instead of trivia.
-
-**Post angle:** "SnitchOS does an actual job now." End-to-end demo: real data flowing through a traced, capability-secured microkernel.
-
-## v1.0 — Story complete
-Polish, hardening, a coherent demo, and a wrap-up of the blog/video series. The complete v1.0 story stands on its own: capability-secured microkernel, real workload, total observability.
-
-**Post angle:** "SnitchOS v1.0 — what it is, what I learned, what's next."
-
-# Post-v1.0 (sequenced loosely)
-- **v1.1 — Audio.** Over-engineered audio subsystem: sub-millisecond deadlines as a first-class concern, RT scheduling, audio-specific observability (per-buffer traces, XRun forensics, latency histograms). Its own multi-post arc. Optimize hard for demo interestingness here.
-- **v1.2 — Real network stack.** smoltcp as a capability-isolated userspace component over virtio-net. Replaces the host-bridge cheat. Every packet a span; watch TCP slow-start in Grafana.
-- **virtio RX → kernel shell → telemetry control plane.** Build the device-*writeable* receive path on the virtio-console: pre-posted buffers, `DESC_F_WRITE`, and **interrupt-driven** completion — the RX dual of today's polled TX (retires `transmit`'s "polling, not interrupt-driven" weakness). First consumer is a minimal kernel REPL (`ps`, `meminfo`, `tasks`) over the console; then a host→kernel `Frame` control plane reusing the *same* command dispatch — the collector pushes runtime knobs (trace verbosity, workload select, heartbeat interval). One dispatch table, two front-ends: a human line-parser and a `Frame` decoder. The hard part (RX + IRQ virtqueue) is shared; REPL vs control-plane is just what sits on top. Strong candidate to pull in pre-v1.0 — the interactive shell is a cheap, demoable first consumer, and the control plane is squarely on the observability thesis. Post-caps, the control plane becomes a capability-mediated surface. **Post angle:** "the kernel starts taking orders from its observer."
-- **FS deepening — CoW + snapshots, then content-addressed + Merkle.** Additive behind the v0.9 `Filesystem` trait. Filesystem-as-Git. "The day SnitchOS learned to remember things."
-- **Borg-style two-tier scheduler.** Latency-sensitive + batch tiers, SLO-driven scheduling, counterfactual analysis.
-- **WASM userspace.** WASM as a universal portable runtime; capabilities map onto WASM imports.
-- **aarch64 port.** Forces the HAL to actually be correct. "SnitchOS now runs on a Raspberry Pi." Timing unscheduled — slot when the HAL is mature.
-
-# Numbering note
-Milestone numbers are contiguous (v0.1…v0.11, v1.0). Punted/unscheduled work lives in the post-v1.0 list rather than holding reserved version numbers. If a milestone turns out too big mid-flight, split it and renumber forward — as happened when SMP was inserted at v0.6 (pushing the original v0.6a/v0.6b → v0.7a/v0.7b and everything downstream forward by one).
+# Hardening (some milestones, some tax)
+- **Notifications primitive** — milestone-worthy; folded into v0.12 (child-exit/wait is its first consumer; devices reuse it).
+- **Kernel stack guard pages** — its own small hardening item: Tier A (canary + high-water gauge) is cheap; guard pages are the real fault-on-overflow fix. Motivated by the v0.11 spawn stack overflow. See [plans/kernel-stack-guard-pages.md](plans/kernel-stack-guard-pages.md).
+- **FS end-to-end verification** and **Exit/teardown reclaim** — tax within v0.12/v0.13, not milestones.
 
 # Open questions
-- Exact audio insertion point — v1.1 is the current plan, but there are factors pushing it both earlier and later. Tracked on the Audio sub-page.
-- Whether to pull the **virtio RX → kernel shell → control plane** work in pre-v1.0 (currently in the post-v1.0 list). The RX+IRQ virtqueue path is useful infrastructure regardless, the REPL is a tangible demo, and the control plane is on-thesis — but a host→kernel command surface arguably wants the v0.7b capability layer underneath it first.
-- Whether to interleave a non-FS milestone between v0.9 and the FS-deepening work to avoid an FS-heavy stretch.
-- aarch64 timing.
+- The v1.0 boundary (shell + editor is the current call). A compelling Tetris demo could tempt the arcade earlier, but the metal/3D risk argues for keeping it post-v1.0.
+- Whether the host→kernel **control plane** (runtime knobs as `Frame` commands) shares the shell's dispatch — it should: one dispatch table, two front-ends (a human line-parser and a `Frame` decoder).
+- Numbering kept contiguous (v0.12 lifecycle → v0.13 shell → v0.14 editor → v1.0); split + renumber forward if a milestone proves too big (as SMP did at v0.6).
+- aarch64: deliberately **not** — staying RISC-V is the lever that keeps real hardware cheap.
+
+# Numbering note
+Milestone numbers are contiguous. Punted/unscheduled work lives in the post-v1.0 list rather than holding reserved version numbers.
