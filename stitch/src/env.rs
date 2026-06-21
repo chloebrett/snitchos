@@ -10,10 +10,12 @@
 //! end up sharing one fully-populated table — that shared table is what makes
 //! recursion and mutual recursion work (letrec at the top level).
 
+use core::str;
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::ast::Method;
 use crate::value::{TelemetryEvent, Value};
 
 /// Why an assignment failed — formatted into a message by the interpreter.
@@ -28,6 +30,7 @@ pub enum AssignError {
 pub struct Env {
     locals: Option<Rc<Scope>>,
     globals: Rc<OnceCell<HashMap<String, Value>>>,
+    methods: Rc<OnceCell<HashMap<String, Vec<Method>>>>,
     /// Telemetry recorded by `emit`/`span`, shared across the whole program run
     /// (every scope and closure points at the same sink).
     sink: Rc<RefCell<Vec<TelemetryEvent>>>,
@@ -48,6 +51,22 @@ impl Env {
     /// The empty environment.
     pub fn new() -> Self {
         Env::default()
+    }
+
+    /// An environment sharing this one's globals, methods, and telemetry sink
+    /// but with **no locals**. Used to run a top-level definition's body (a
+    /// method, say) in global scope rather than the caller's lexical scope — the
+    /// same hygiene a closure gets by capturing its own defining env instead of
+    /// the caller's. Globals/methods stay reachable; the caller's locals don't
+    /// leak in.
+    #[must_use]
+    pub fn globals_only(&self) -> Env {
+        Env {
+            locals: None,
+            globals: Rc::clone(&self.globals),
+            methods: Rc::clone(&self.methods),
+            sink: Rc::clone(&self.sink),
+        }
     }
 
     /// A new environment with an immutable `name` binding, shadowing any
@@ -72,6 +91,7 @@ impl Env {
                 parent: self.locals.clone(),
             })),
             globals: Rc::clone(&self.globals),
+            methods: Rc::clone(&self.methods),
             sink: Rc::clone(&self.sink),
         }
     }
@@ -116,7 +136,20 @@ impl Env {
             }
             current = &scope.parent;
         }
-        self.globals.get().and_then(|globals| globals.get(name).cloned())
+        self.globals
+            .get()
+            .and_then(|globals| globals.get(name).cloned())
+    }
+
+    pub fn lookup_method(&self, type_name: &str, method_name: &str) -> Option<Method> {
+        self.methods
+            .get()
+            .and_then(|methods| {
+                methods
+                    .get(type_name)
+                    .and_then(|for_type| for_type.iter().find(|method| method.name == method_name))
+            })
+            .cloned()
     }
 
     /// Install the program's top-level definitions into the shared table. Call
@@ -126,6 +159,13 @@ impl Env {
         assert!(
             self.globals.set(globals).is_ok(),
             "globals must be installed exactly once"
+        );
+    }
+
+    pub fn set_methods(&self, methods: HashMap<String, Vec<Method>>) {
+        assert!(
+            self.methods.set(methods).is_ok(),
+            "methods must be installed exactly once"
         );
     }
 }

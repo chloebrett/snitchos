@@ -38,6 +38,7 @@ pub fn eval_program_with_telemetry(
     register_items(&prelude, &env, &mut globals, &mut dispatch);
     register_items(items, &env, &mut globals, &mut dispatch);
     env.set_globals(globals);
+    env.set_methods(dispatch);
     let result = match env.lookup("main") {
         Some(main) => eval_call(&main, &[], &env),
         None => Err(RuntimeError::new("no `main` function")),
@@ -81,6 +82,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         Expr::Var(name) => env
             .lookup(name)
             .ok_or_else(|| RuntimeError::new(format!("unbound variable `{name}`"))),
+        Expr::SelfRef => env
+            .lookup("@")
+            .ok_or_else(|| RuntimeError::new("`@` is only valid inside a method body")),
         // Only the taken branch is evaluated.
         Expr::If { cond, then, els } => {
             if as_bool(&eval(cond, env)?, "condition")? {
@@ -126,6 +130,32 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             body: (**body).clone(),
             env: env.clone(),
         }))),
+        Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Field { .. }) => {
+            let Expr::Field { object, name } = callee.as_ref() else {
+                unreachable!("guard guarantees a Field")
+            };
+            let receiver = eval(object, env)?;
+            let Value::Data(data_value) = receiver else {
+                return Err(RuntimeError::new(format!("Receiver must be a DataValue")));
+            };
+            let method = env
+                .lookup_method(data_value.type_name.as_str(), name)
+                .ok_or_else(|| {
+                    RuntimeError::new(format!("no method {name} on {}", data_value.type_name))
+                })?;
+            let mut arg_values: Vec<Value> = Vec::new();
+            for arg in args {
+                let arg_value = eval(&arg.value, env)?;
+                arg_values.push(arg_value);
+            }
+            let mut method_env = env.globals_only();
+            method_env = method_env.extend("@".to_string(), Value::Data(data_value.clone()));
+            for (param, arg) in method.params.iter().zip(&arg_values) {
+                method_env = method_env.extend(param.name.clone(), arg.clone());
+            }
+            let body = method.body.expect("`On` methods always have a body");
+            eval(&body, &method_env)
+        }
         Expr::Call { callee, args } => eval_call(&eval(callee, env)?, args, env),
         Expr::Field { object, name } => eval_field(&eval(object, env)?, name),
         Expr::Try(operand) => eval_try(eval(operand, env)?),
