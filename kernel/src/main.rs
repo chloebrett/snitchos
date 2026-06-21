@@ -452,13 +452,13 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // kernel counts the U-fault. Same hart-1 placement as Userspace.
         Some(WorkloadKind::UserspaceFault) => {
             user::init_metric();
-            let _ = sched::spawn_on(1, "user_fault", user::faulter_main_entry);
+            let _ = user::spawn_program(1, "user_fault", &user::FAULTER);
         }
         // Span-quota probe: `span-flood` opens many distinctly-named spans; the
         // kernel refuses the surplus past `Process::MAX_SPAN_NAMES`.
         Some(WorkloadKind::UserspaceSpanFlood) => {
             user::init_metric();
-            let _ = sched::spawn_on(1, "user_span_flood", user::span_flood_main_entry);
+            let _ = user::spawn_program(1, "user_span_flood", &user::SPAN_FLOOD);
         }
         // Demo workers: two cooperative userspace processes sharing hart 1,
         // each looping {span, progress, yield} — the userspace successor to
@@ -466,14 +466,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // address-space-aware scheduler switch carries both roots on one hart.
         Some(WorkloadKind::Workers) => {
             user::init_metric();
-            let _ = sched::spawn_on(1, "worker_a", user::worker_a_main_entry);
-            let _ = sched::spawn_on(1, "worker_b", user::worker_b_main_entry);
+            let _ = user::spawn_program(1, "worker_a", &user::WORKER_A);
+            let _ = user::spawn_program(1, "worker_b", &user::WORKER_B);
         }
         // Heap-growth probe: a userspace program allocates past one region,
         // forcing the runtime to `map_anon` more frames from the kernel.
         Some(WorkloadKind::HeapGrow) => {
             user::init_metric();
-            let _ = sched::spawn_on(1, "heap_grow", user::heap_grow_main_entry);
+            let _ = user::spawn_program(1, "heap_grow", &user::HEAP_GROW);
         }
         // Preemption fixture: an uncooperative `user_hog` (tight U-mode loop)
         // co-located on hart 1 with a cooperative `worker_a` peer. The hog is
@@ -481,8 +481,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // starves until timer preemption (Step 4) takes the CPU back.
         Some(WorkloadKind::UserHog) => {
             user::init_metric();
-            let _ = sched::spawn_on(1, "user_hog", user::user_hog_main_entry);
-            let _ = sched::spawn_on(1, "worker_a", user::worker_a_main_entry);
+            let _ = user::spawn_program(1, "user_hog", &user::USER_HOG);
+            let _ = user::spawn_program(1, "worker_a", &user::WORKER_A);
         }
         // Preemption guard: a `syscall_hog` that spams a cheap ambient syscall
         // (spending most of its time in interrupt-masked S-mode) co-located on
@@ -490,8 +490,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // (it can't fire mid-syscall, so it fires on the `sret` back to U-mode).
         Some(WorkloadKind::SyscallHog) => {
             user::init_metric();
-            let _ = sched::spawn_on(1, "syscall_hog", user::syscall_hog_main_entry);
-            let _ = sched::spawn_on(1, "worker_a", user::worker_a_main_entry);
+            let _ = user::spawn_program(1, "syscall_hog", &user::SYSCALL_HOG);
+            let _ = user::spawn_program(1, "worker_a", &user::WORKER_A);
         }
         // Priority demo (v0.8b): a High-priority CPU-bound `greedy` task (the
         // `user_hog` tight loop — never yields) and a Low-priority cooperative
@@ -503,10 +503,8 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         Some(WorkloadKind::Priorities) => {
             use kernel_core::sched::Priority;
             user::init_metric();
-            let _ =
-                sched::spawn_on_with_priority(1, "greedy", user::user_hog_main_entry, Priority::High);
-            let _ =
-                sched::spawn_on_with_priority(1, "worker_b", user::worker_b_main_entry, Priority::Low);
+            let _ = user::spawn_program_with_priority(1, "greedy", &user::USER_HOG, Priority::High);
+            let _ = user::spawn_program_with_priority(1, "worker_b", &user::WORKER_B, Priority::Low);
         }
         // v0.9 IPC: a kernel-brokered endpoint shared by two userspace
         // processes on hart 1. Create the endpoint first, then spawn the
@@ -515,16 +513,16 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         Some(WorkloadKind::Ipc) => {
             user::init_metric();
             crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
-            let _ = sched::spawn_on(1, "ipc_receiver", user::ipc_receiver_main_entry);
-            let _ = sched::spawn_on(1, "ipc_sender", user::ipc_sender_main_entry);
+            let _ = user::spawn_program(1, "ipc_receiver", &user::IPC_RECEIVER);
+            let _ = user::spawn_program(1, "ipc_sender", &user::IPC_SENDER);
         }
         // v0.9b RPC: client + server on hart 1 over the shared endpoint. Server
         // spawned first so it can be waiting (or the client blocks until it is).
         Some(WorkloadKind::IpcRpc) => {
             user::init_metric();
             crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
-            let _ = sched::spawn_on(1, "rpc_server", user::rpc_server_main_entry);
-            let _ = sched::spawn_on(1, "rpc_client", user::rpc_client_main_entry);
+            let _ = user::spawn_program(1, "rpc_server", &user::RPC_SERVER);
+            let _ = user::spawn_program(1, "rpc_client", &user::RPC_CLIENT);
         }
         // v0.9c badged endpoints: a RECV|MINT minter + a SEND-only client share
         // one endpoint. The minter mints a badged cap; the client's mint is
@@ -532,19 +530,19 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         Some(WorkloadKind::BadgeMint) => {
             user::init_metric();
             crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
-            let _ = sched::spawn_on(1, "badge_minter", user::badge_minter_main_entry);
-            let _ = sched::spawn_on(1, "badge_client", user::badge_mint_client_main_entry);
+            let _ = user::spawn_program(1, "badge_minter", &user::BADGE_MINTER);
+            let _ = user::spawn_program(1, "badge_client", &user::BADGE_MINT_CLIENT);
         }
         // v0.9c cap-transfer-in-reply: server (RECV|MINT) hands a badged cap back
         // to a calling client. Server first so it's receiving when the client calls.
         Some(WorkloadKind::BadgeHandout) => {
             user::init_metric();
             crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
-            let _ = sched::spawn_on(1, "badge_handout_server", user::badge_handout_server_main_entry);
+            let _ = user::spawn_program(1, "badge_handout_server", &user::BADGE_HANDOUT_SERVER);
             // Two clients over the *one* endpoint — each gets a distinct
             // server-assigned badge, proving the demux tells them apart.
-            let _ = sched::spawn_on(1, "badge_handout_client_a", user::badge_handout_client_main_entry);
-            let _ = sched::spawn_on(1, "badge_handout_client_b", user::badge_handout_client_main_entry);
+            let _ = user::spawn_program(1, "badge_handout_client_a", &user::BADGE_HANDOUT_CLIENT);
+            let _ = user::spawn_program(1, "badge_handout_client_b", &user::BADGE_HANDOUT_CLIENT);
         }
         // v0.10 RAMfs: an FS server (RECV|MINT) + a client (SEND) over one
         // endpoint. Server first so it's receiving when the client attaches;

@@ -1,11 +1,11 @@
-//! Userspace program embedding and loading (v0.7a).
+//! Userspace program embedding and loading (v0.7a+).
 //!
-//! Two programs are baked into the kernel image at build time: `user/hello`
-//! (the `workload=userspace` demo — emits one telemetry syscall) and
-//! `faulter` (the `workload=userspace-fault` isolation probe — reads a
-//! kernel VA, which must fault). `build.rs` resolves each path: the
-//! freshly-built artifact when building via `cargo xtask build`, else the
-//! committed fixture under `kernel-core/fixtures/`.
+//! Each userspace program (`user/hello`'s binaries + `user/fs`'s) is baked into
+//! the kernel image at build time — one `include_bytes!(env!(...))` static per
+//! `USER_PROGRAMS` row in `build.rs` — and described by a [`ProgramSpec`] in the
+//! program registry below. [`spawn_program`] launches one via the single
+//! generic [`program_entry`], which carries the spec through the task's `arg`
+//! word; `kmain` selects which to spawn per workload.
 //!
 //! [`load`] parses an embedded ELF with [`kernel_core::elf`] and maps its
 //! segments into a fresh per-process root page table (kernel high-half
@@ -14,6 +14,7 @@
 
 use alloc::collections::BTreeMap;
 
+use kernel_core::cap::Rights;
 use kernel_core::elf::{self, LoadSegment, SegmentPerms};
 use kernel_core::mmu::{MapError, PtePerms};
 use protocol::StringId;
@@ -183,98 +184,6 @@ pub fn cap_denied_metric_id() -> Option<StringId> {
 }
 
 
-/// Hart-1 entry for `workload=userspace-fault`: run the isolation probe.
-pub extern "C" fn faulter_main_entry() -> ! {
-    run(FAULTER_ELF)
-}
-
-/// Hart-1 entry for `workload=userspace-span-flood`: run the span-quota probe.
-pub extern "C" fn span_flood_main_entry() -> ! {
-    run(SPAN_FLOOD_ELF)
-}
-
-/// Hart-1 entry for `workload=workers`: run cooperative demo worker A.
-pub extern "C" fn worker_a_main_entry() -> ! {
-    run(WORKER_A_ELF)
-}
-
-/// Hart-1 entry for `workload=workers`: run cooperative demo worker B (the
-/// twin process sharing the hart with worker A).
-pub extern "C" fn worker_b_main_entry() -> ! {
-    run(WORKER_B_ELF)
-}
-
-/// Hart-1 entry for `workload=heap-grow`: run the heap-growth probe.
-pub extern "C" fn heap_grow_main_entry() -> ! {
-    run(HEAP_GROW_ELF)
-}
-
-/// Hart-1 entry for `workload=user-hog`: run the uncooperative CPU hog.
-pub extern "C" fn user_hog_main_entry() -> ! {
-    run(USER_HOG_ELF)
-}
-
-/// Hart-1 entry for `workload=syscall-hog`: run the syscall-spamming hog.
-pub extern "C" fn syscall_hog_main_entry() -> ! {
-    run(SYSCALL_HOG_ELF)
-}
-
-/// Entry for `workload=ipc`: run the IPC demo sender, granted a `SEND` cap to
-/// the shared kernel-brokered endpoint.
-pub extern "C" fn ipc_sender_main_entry() -> ! {
-    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before sender runs");
-    run_ipc(IPC_SENDER_ELF, ep, kernel_core::cap::Rights::SEND)
-}
-
-/// Entry for `workload=ipc`: run the IPC demo receiver, granted a `RECV` cap to
-/// the shared kernel-brokered endpoint.
-pub extern "C" fn ipc_receiver_main_entry() -> ! {
-    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before receiver runs");
-    run_ipc(IPC_RECEIVER_ELF, ep, kernel_core::cap::Rights::RECV)
-}
-
-/// Entry for `workload=ipc-rpc`: run the RPC client, granted a `SEND` cap (it
-/// `call`s through the endpoint; the kernel mints its reply cap into the server).
-pub extern "C" fn rpc_client_main_entry() -> ! {
-    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before rpc client runs");
-    run_ipc(RPC_CLIENT_ELF, ep, kernel_core::cap::Rights::SEND)
-}
-
-/// Entry for `workload=ipc-rpc`: run the RPC server, granted a `RECV` cap.
-pub extern "C" fn rpc_server_main_entry() -> ! {
-    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before rpc server runs");
-    run_ipc(RPC_SERVER_ELF, ep, kernel_core::cap::Rights::RECV)
-}
-
-/// Entry for `workload=badge-mint`: the minter, granted `RECV | MINT` — it
-/// mints a badged `SEND` cap (a `CapEvent::Transferred` on the wire).
-pub extern "C" fn badge_minter_main_entry() -> ! {
-    use kernel_core::cap::Rights;
-    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before badge minter runs");
-    run_ipc(BADGE_MINT_ELF, ep, Rights::RECV | Rights::MINT)
-}
-
-/// Entry for `workload=badge-mint`: the client, granted `SEND` only — its mint
-/// attempt is refused (a `SyscallRefused` on the wire). Same binary as the minter.
-pub extern "C" fn badge_mint_client_main_entry() -> ! {
-    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before badge client runs");
-    run_ipc(BADGE_MINT_ELF, ep, kernel_core::cap::Rights::SEND)
-}
-
-/// Entry for `workload=badge-handout`: the server, granted `RECV | MINT` — it
-/// mints a badged cap per request and hands it back in the reply.
-pub extern "C" fn badge_handout_server_main_entry() -> ! {
-    use kernel_core::cap::Rights;
-    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before badge handout server runs");
-    run_ipc(BADGE_HANDOUT_SERVER_ELF, ep, Rights::RECV | Rights::MINT)
-}
-
-/// Entry for `workload=badge-handout`: the client, granted `SEND` — it `call`s
-/// the server and receives the transferred badged cap.
-pub extern "C" fn badge_handout_client_main_entry() -> ! {
-    let ep = *crate::ipc::DEMO_ENDPOINT.get().expect("ipc endpoint created before badge handout client runs");
-    run_ipc(BADGE_HANDOUT_CLIENT_ELF, ep, kernel_core::cap::Rights::SEND)
-}
 
 // ---- Program registry --------------------------------------------------
 //
@@ -282,8 +191,8 @@ pub extern "C" fn badge_handout_client_main_entry() -> ! {
 // across the old per-program entry functions (ELF, endpoint rights, telemetry
 // counter). [`spawn_program`] hands a spec's address to the task as its generic
 // `arg` word; the single [`program_entry`] reads it back and launches — so the
-// 18 near-identical `*_main_entry` functions collapse into this one. (Migrated
-// incrementally: `fs` first; the rest follow.)
+// 18 near-identical `*_main_entry` functions collapsed into this one entry plus
+// a `ProgramSpec` table (one `pub static` per program, below).
 
 /// How a userspace program is launched, beyond its embedded ELF.
 enum Launch {
@@ -314,21 +223,71 @@ pub struct ProgramSpec {
 /// `workload=userspace`: the `hello` demo — ambient telemetry only, no endpoint.
 pub static HELLO: ProgramSpec = ProgramSpec { elf: HELLO_ELF, launch: Launch::Plain };
 
+/// `workload=userspace-fault`: the isolation probe (reads a kernel VA — must fault).
+pub static FAULTER: ProgramSpec = ProgramSpec { elf: FAULTER_ELF, launch: Launch::Plain };
+
+/// `workload=userspace-span-flood`: the span-quota probe.
+pub static SPAN_FLOOD: ProgramSpec = ProgramSpec { elf: SPAN_FLOOD_ELF, launch: Launch::Plain };
+
+/// `workload=workers` / preemption-peer: cooperative demo worker A.
+pub static WORKER_A: ProgramSpec = ProgramSpec { elf: WORKER_A_ELF, launch: Launch::Plain };
+
+/// `workload=workers` / priority-demo low: cooperative demo worker B.
+pub static WORKER_B: ProgramSpec = ProgramSpec { elf: WORKER_B_ELF, launch: Launch::Plain };
+
+/// `workload=heap-grow`: the heap-growth probe.
+pub static HEAP_GROW: ProgramSpec = ProgramSpec { elf: HEAP_GROW_ELF, launch: Launch::Plain };
+
+/// `workload=user-hog`: the uncooperative CPU hog (tight U-mode loop, no syscalls).
+pub static USER_HOG: ProgramSpec = ProgramSpec { elf: USER_HOG_ELF, launch: Launch::Plain };
+
+/// `workload=syscall-hog`: the syscall-spamming hog.
+pub static SYSCALL_HOG: ProgramSpec = ProgramSpec { elf: SYSCALL_HOG_ELF, launch: Launch::Plain };
+
+/// An IPC program on the shared `DEMO_ENDPOINT` with `rights_bits` and default
+/// user telemetry — the common case (the FS server is the lone exception, with
+/// its own counter).
+const fn ipc_user(elf: &'static [u8], rights_bits: u32) -> ProgramSpec {
+    ProgramSpec { elf, launch: Launch::Ipc { rights_bits, counter: CounterKind::User } }
+}
+
+/// `workload=ipc`: the demo sender (`SEND`).
+pub static IPC_SENDER: ProgramSpec = ipc_user(IPC_SENDER_ELF, Rights::SEND.bits());
+
+/// `workload=ipc`: the demo receiver (`RECV`).
+pub static IPC_RECEIVER: ProgramSpec = ipc_user(IPC_RECEIVER_ELF, Rights::RECV.bits());
+
+/// `workload=ipc-rpc`: the RPC client (`SEND`).
+pub static RPC_CLIENT: ProgramSpec = ipc_user(RPC_CLIENT_ELF, Rights::SEND.bits());
+
+/// `workload=ipc-rpc`: the RPC server (`RECV`).
+pub static RPC_SERVER: ProgramSpec = ipc_user(RPC_SERVER_ELF, Rights::RECV.bits());
+
+/// `workload=badge-mint`: the minter (`RECV | MINT`). Same ELF as the client.
+pub static BADGE_MINTER: ProgramSpec = ipc_user(BADGE_MINT_ELF, Rights::RECV.bits() | Rights::MINT.bits());
+
+/// `workload=badge-mint`: the client (`SEND` only — its mint attempt is refused).
+pub static BADGE_MINT_CLIENT: ProgramSpec = ipc_user(BADGE_MINT_ELF, Rights::SEND.bits());
+
+/// `workload=badge-handout`: the server (`RECV | MINT`).
+pub static BADGE_HANDOUT_SERVER: ProgramSpec =
+    ipc_user(BADGE_HANDOUT_SERVER_ELF, Rights::RECV.bits() | Rights::MINT.bits());
+
+/// `workload=badge-handout`: the client (`SEND`).
+pub static BADGE_HANDOUT_CLIENT: ProgramSpec = ipc_user(BADGE_HANDOUT_CLIENT_ELF, Rights::SEND.bits());
+
 /// `workload=fs`: the FS server (`RECV | MINT`), telemetry bound to the denial
 /// gauge — its only telemetry (see [`fs_denied_metric_id`]).
 pub static FS_SERVER: ProgramSpec = ProgramSpec {
     elf: FS_SERVER_ELF,
     launch: Launch::Ipc {
-        rights_bits: kernel_core::cap::Rights::RECV.bits() | kernel_core::cap::Rights::MINT.bits(),
+        rights_bits: Rights::RECV.bits() | Rights::MINT.bits(),
         counter: CounterKind::FsDenied,
     },
 };
 
 /// `workload=fs`: the FS client (`SEND`), default user telemetry.
-pub static FS_CLIENT: ProgramSpec = ProgramSpec {
-    elf: FS_CLIENT_ELF,
-    launch: Launch::Ipc { rights_bits: kernel_core::cap::Rights::SEND.bits(), counter: CounterKind::User },
-};
+pub static FS_CLIENT: ProgramSpec = ipc_user(FS_CLIENT_ELF, Rights::SEND.bits());
 
 /// The single entry function for every userspace program. The scheduler has
 /// switched us in and our `arg` word holds our [`ProgramSpec`] address (set by
@@ -345,7 +304,7 @@ pub extern "C" fn program_entry() -> ! {
             let ep = *crate::ipc::DEMO_ENDPOINT
                 .get()
                 .expect("ipc endpoint created before an IPC program runs");
-            let rights = kernel_core::cap::Rights::from_bits(*rights_bits);
+            let rights = Rights::from_bits(*rights_bits);
             let counter = match counter {
                 CounterKind::User => user_metric_id(),
                 CounterKind::FsDenied => fs_denied_metric_id(),
@@ -432,19 +391,13 @@ fn run(image: &'static [u8]) -> ! {
 }
 
 /// Like [`run`], but additionally grants the process an [`Endpoint`] capability
-/// over `endpoint` with `rights` (`SEND` or `RECV`) — the kernel-brokered IPC
-/// cap — and delivers its handle as the third startup register (`a2`). Used by
-/// the `workload=ipc` sender/receiver. Never returns.
+/// over `endpoint` with `rights` (`SEND`/`RECV`/`MINT`) — the kernel-brokered
+/// IPC cap, handle delivered in the third startup register (`a2`) — and binds
+/// the bootstrap telemetry sink to `counter` (the default user counter for most
+/// programs; the FS server points its sole sink at `snitchos.fs.denied`). Never
+/// returns.
 ///
 /// [`Endpoint`]: kernel_core::cap::Object::Endpoint
-fn run_ipc(image: &'static [u8], endpoint: kernel_core::ipc::EndpointId, rights: kernel_core::cap::Rights) -> ! {
-    let counter = user_metric_id().expect("userspace telemetry counter registered before entry");
-    run_ipc_counter(image, endpoint, rights, counter)
-}
-
-/// Like [`run_ipc`], but binds the process's bootstrap telemetry sink to an
-/// explicit `counter` rather than the default userspace counter. The FS server
-/// uses this to point its sole sink at the `snitchos.fs.denied` gauge.
 fn run_ipc_counter(
     image: &'static [u8],
     endpoint: kernel_core::ipc::EndpointId,
