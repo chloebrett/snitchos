@@ -43,6 +43,7 @@ pub fn eval_program_with_telemetry(
     bake_contract_defaults(&mut reg);
     env.set_globals(reg.globals);
     env.set_methods(reg.methods);
+    env.set_field_mut(reg.field_mut);
     let result = match env.lookup("main") {
         Some(main) => eval_call(&main, &[], &env),
         None => Err(RuntimeError::new("no `main` function")),
@@ -367,6 +368,21 @@ struct Registration {
     contracts: HashMap<String, Vec<Method>>,
     /// Type name → the contracts it declares conformance to (`on Type : C`).
     conformances: HashMap<String, Vec<String>>,
+    /// Variant name → field name → whether the field is declared `mut`. (Keyed
+    /// by variant so each sum variant is independent; for a `prod` the variant
+    /// name is the type name.)
+    field_mut: HashMap<String, HashMap<String, bool>>,
+}
+
+/// Record the `mut` flag of each named field of `variant` into the registry.
+/// Positional (unnamed) fields can't be assigned by name, so they're skipped.
+fn register_field_mut(reg: &mut Registration, variant: &str, fields: &[crate::ast::Field]) {
+    let entry = reg.field_mut.entry(variant.to_string()).or_default();
+    for field in fields {
+        if let Some(name) = &field.name {
+            entry.insert(name.clone(), field.mutable);
+        }
+    }
 }
 
 /// Register each top-level item into `reg`. Functions and constructors capture
@@ -391,6 +407,7 @@ fn register_items(items: &[Item], env: &Env, reg: &mut Registration) {
                     field_names: fields.iter().map(|field| field.name.clone()).collect(),
                 }));
                 reg.globals.insert(name.clone(), ctor);
+                register_field_mut(reg, name, fields);
             }
             Item::Sum { name, variants, .. } => {
                 for variant in variants {
@@ -409,6 +426,7 @@ fn register_items(items: &[Item], env: &Env, reg: &mut Registration) {
                         }))
                     };
                     reg.globals.insert(variant.name.clone(), value);
+                    register_field_mut(reg, &variant.name, &variant.fields);
                 }
             }
             Item::On {
@@ -939,6 +957,23 @@ fn assign_place(place: &Expr, value: Value, scope: &Env) -> Result<(), RuntimeEr
                     current.kind()
                 )));
             };
+            // The field-mutability table doubles as the existence check: an
+            // unknown field has no entry; a known-but-immutable one is `false`.
+            match scope.field_mutability(&data.variant, name) {
+                None => {
+                    return Err(RuntimeError::new(format!(
+                        "{} has no field `{name}`",
+                        data.type_name
+                    )));
+                }
+                Some(false) => {
+                    return Err(RuntimeError::new(format!(
+                        "cannot assign to immutable field `{name}` of `{}` (declare it `mut`)",
+                        data.type_name
+                    )));
+                }
+                Some(true) => {}
+            }
             assign_place(object, rebuild_with_field(data, name, value)?, scope)
         }
         _ => Err(RuntimeError::new("invalid assignment target")),
@@ -1406,10 +1441,23 @@ mod tests {
     }
 
     #[test]
+    fn assigning_a_non_mut_field_is_an_error() {
+        // `x` isn't declared `mut`, so it can't be assigned even on a `mut`
+        // binding — per-field mutability, like the `mut balance` in the design.
+        assert_eq!(
+            run_program_err(
+                "prod Point(x: Int, mut y: Int)  \
+                 main() = { let mut p = Point(1, 2)  p.x = 10  p.x }"
+            ),
+            "cannot assign to immutable field `x` of `Point` (declare it `mut`)"
+        );
+    }
+
+    #[test]
     fn a_field_can_be_assigned_on_a_mut_binding() {
         assert_eq!(
             run_program(
-                "prod Point(x: Int, y: Int)  \
+                "prod Point(mut x: Int, mut y: Int)  \
                  main() = { let mut p = Point(1, 2)  p.x = 10  p.x }"
             ),
             Value::Int(10)
@@ -1420,7 +1468,7 @@ mod tests {
     fn assigning_a_field_leaves_other_fields_unchanged() {
         assert_eq!(
             run_program(
-                "prod Point(x: Int, y: Int)  \
+                "prod Point(mut x: Int, mut y: Int)  \
                  main() = { let mut p = Point(1, 2)  p.x = 10  p.y }"
             ),
             Value::Int(2)
@@ -1431,7 +1479,7 @@ mod tests {
     fn assigning_a_field_on_an_immutable_binding_is_an_error() {
         assert_eq!(
             run_program_err(
-                "prod Point(x: Int, y: Int)  main() = { let p = Point(1, 2)  p.x = 10  p.x }"
+                "prod Point(mut x: Int, y: Int)  main() = { let p = Point(1, 2)  p.x = 10  p.x }"
             ),
             "cannot assign to immutable `p` (declare it with `let mut`)"
         );

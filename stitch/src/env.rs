@@ -31,6 +31,11 @@ pub struct Env {
     locals: Option<Rc<Scope>>,
     globals: Rc<OnceCell<HashMap<String, Value>>>,
     methods: Rc<OnceCell<HashMap<String, Vec<Method>>>>,
+    /// Per-variant field mutability: variant name → field name → is `mut`. The
+    /// source of truth for whether a field may be assigned. (Keyed by variant so
+    /// each sum variant's fields are tracked independently; for a `prod` the
+    /// variant name is the type name.)
+    field_mut: Rc<OnceCell<HashMap<String, HashMap<String, bool>>>>,
     /// Telemetry recorded by `emit`/`span`, shared across the whole program run
     /// (every scope and closure points at the same sink).
     sink: Rc<RefCell<Vec<TelemetryEvent>>>,
@@ -65,6 +70,7 @@ impl Env {
             locals: None,
             globals: Rc::clone(&self.globals),
             methods: Rc::clone(&self.methods),
+            field_mut: Rc::clone(&self.field_mut),
             sink: Rc::clone(&self.sink),
         }
     }
@@ -92,6 +98,7 @@ impl Env {
             })),
             globals: Rc::clone(&self.globals),
             methods: Rc::clone(&self.methods),
+            field_mut: Rc::clone(&self.field_mut),
             sink: Rc::clone(&self.sink),
         }
     }
@@ -152,6 +159,16 @@ impl Env {
             .cloned()
     }
 
+    /// Whether `field` of `variant` is declared `mut` — `None` if the variant
+    /// has no such field. The source of truth for field-assignment legality.
+    pub fn field_mutability(&self, variant: &str, field: &str) -> Option<bool> {
+        self.field_mut
+            .get()
+            .and_then(|table| table.get(variant))
+            .and_then(|fields| fields.get(field))
+            .copied()
+    }
+
     /// Install the program's top-level definitions into the shared table. Call
     /// exactly once, after building the closures that capture this env — they
     /// share the table, so each then sees every top-level definition.
@@ -166,6 +183,13 @@ impl Env {
         assert!(
             self.methods.set(methods).is_ok(),
             "methods must be installed exactly once"
+        );
+    }
+
+    pub fn set_field_mut(&self, field_mut: HashMap<String, HashMap<String, bool>>) {
+        assert!(
+            self.field_mut.set(field_mut).is_ok(),
+            "field mutability must be installed exactly once"
         );
     }
 }
