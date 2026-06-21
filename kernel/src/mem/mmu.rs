@@ -434,6 +434,23 @@ pub fn new_user_root() -> Option<usize> {
     Some(root_pa)
 }
 
+/// Reclaim every frame owned by the **user half** of the address space rooted at
+/// `root_pa` — all mapped 4 KiB pages, the L0/L1 page tables beneath user root
+/// slots, and the root table itself — returning each to the frame allocator. The
+/// shared kernel high half (root slots `256..512`, the entries [`new_user_root`]
+/// copied in) is left untouched, since those tables are aliased by every process.
+///
+/// The caller **must not** have `root_pa` active in `satp` (it's being freed):
+/// reclaim runs in the *reaper's* address space, never the exiting child's. Walk
+/// logic is the host-tested [`core_mmu::free_user_tree`]; this binds it to
+/// `KernelPtMem` (table reads through the linear map) and `frame::free`.
+pub fn free_user_root(root_pa: usize) {
+    let mem = KernelPtMem;
+    core_mmu::free_user_tree(root_pa, &mem, &mut |pa| {
+        crate::frame::free(crate::frame::PhysFrame::from_addr(pa));
+    });
+}
+
 /// The `satp` value (Sv39 mode + root PPN) that activates the address
 /// space rooted at `root_pa`. Written with `csrw satp` + `sfence.vma`.
 pub fn satp_for(root_pa: usize) -> u64 {

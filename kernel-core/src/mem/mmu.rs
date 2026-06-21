@@ -539,6 +539,45 @@ pub fn range_mapped(root_pa: usize, va: usize, len: usize, required: PtePerms, m
     true
 }
 
+/// Enumerate every frame owned by the **user half** of the address space rooted
+/// at `root_pa` — each 4 KiB leaf page, the L0/L1 page tables under user root
+/// slots, and the root table itself — invoking `free(pa)` for each. The kernel's
+/// shared high half (root slots `256..512`) is **never** touched. Used to reclaim
+/// a process's address space on exit: pure + host-tested here; the kernel's
+/// `free` returns each frame to the allocator.
+///
+/// Huge-page leaves in the user half are skipped, not freed — `SnitchOS` user
+/// mappings are all 4 KiB, so a huge leaf is not a single allocator frame. No
+/// dedup: assumes no aliased user mappings (true in v0.12 — no user-user sharing).
+pub fn free_user_tree(root_pa: usize, mem: &dyn PtMem, free: &mut dyn FnMut(usize)) {
+    /// Root slots `0..USER_ROOT_SLOTS` are the user half; the rest is the shared
+    /// kernel high half and must never be freed.
+    const USER_ROOT_SLOTS: usize = 256;
+    for vpn2 in 0..USER_ROOT_SLOTS {
+        let e2 = mem.read_entry(root_pa, vpn2);
+        if !e2.is_branch() {
+            continue; // empty slot, or a (skipped) huge leaf
+        }
+        let mid_pa = e2.child_pa();
+        for vpn1 in 0..512 {
+            let e1 = mem.read_entry(mid_pa, vpn1);
+            if !e1.is_branch() {
+                continue;
+            }
+            let leaf_table_pa = e1.child_pa();
+            for vpn0 in 0..512 {
+                let e0 = mem.read_entry(leaf_table_pa, vpn0);
+                if e0.is_leaf() {
+                    free(e0.leaf_pa()); // a mapped 4 KiB user page
+                }
+            }
+            free(leaf_table_pa); // the L0 table
+        }
+        free(mid_pa); // the L1 table
+    }
+    free(root_pa); // the per-process root table
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1362,5 +1401,58 @@ mod tests {
         for i in 0..8usize {
             assert_eq!(m.get(&(0xB000_0000 + i)), Some(&((i + 1) as u8)));
         }
+    }
+
+    #[test]
+    fn free_user_tree_frees_every_user_leaf_table_and_the_root() {
+        let mut mem = MockPtMem::new(16);
+        let root = mem.root_pa();
+        // Two user pages sharing one L1+L0 table chain.
+        map(root, 0x1000, 0x80000000, PtePerms::R, &mut mem).unwrap();
+        map(root, 0x2000, 0x80001000, PtePerms::R, &mut mem).unwrap();
+
+        let mut freed = Vec::new();
+        free_user_tree(root, &mem, &mut |pa| freed.push(pa));
+
+        // Both leaf pages, the shared L0 + L1 tables, and the root — five frames.
+        assert!(freed.contains(&0x80000000), "leaf page 1 not freed: {freed:?}");
+        assert!(freed.contains(&0x80001000), "leaf page 2 not freed: {freed:?}");
+        assert!(freed.contains(&root), "root table not freed: {freed:?}");
+        assert_eq!(freed.len(), 5, "expected 2 leaves + L0 + L1 + root: {freed:?}");
+        // Children freed before parents — the root is reclaimed last.
+        assert_eq!(*freed.last().unwrap(), root);
+    }
+
+    #[test]
+    fn free_user_tree_never_follows_the_shared_kernel_high_half() {
+        let mut mem = MockPtMem::new(16);
+        let root = mem.root_pa();
+        map(root, 0x1000, 0x80000000, PtePerms::R, &mut mem).unwrap();
+        // Plant a branch into a kernel-half root slot (>= 256) — the shared
+        // mappings every process points at. Reclaim must never follow it.
+        let kernel_mid_pa = 0x0dead000;
+        mem.write_entry(root, 256, Pte::branch(kernel_mid_pa));
+
+        let mut freed = Vec::new();
+        free_user_tree(root, &mem, &mut |pa| freed.push(pa));
+
+        assert!(!freed.contains(&kernel_mid_pa), "freed a kernel-half table: {freed:?}");
+    }
+
+    #[test]
+    fn free_user_tree_skips_user_half_huge_leaves() {
+        let mut mem = MockPtMem::new(16);
+        let root = mem.root_pa();
+        // A 1 GiB huge-page leaf directly at a user-half root slot (vpn2=1) is
+        // not a single allocator frame, so it must be skipped — only the root
+        // table itself gets freed.
+        let huge_pa = 0x4000_0000;
+        mem.write_entry(root, 1, Pte::leaf(huge_pa, PtePerms::rwxg()));
+
+        let mut freed = Vec::new();
+        free_user_tree(root, &mem, &mut |pa| freed.push(pa));
+
+        assert!(!freed.contains(&huge_pa), "freed a huge leaf as a frame: {freed:?}");
+        assert_eq!(freed, std::vec![root]);
     }
 }

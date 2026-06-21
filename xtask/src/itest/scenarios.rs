@@ -2435,6 +2435,44 @@ pub fn spawn_delegates_to_child(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.12 process teardown — Exit **reclaims** the child's address space
+/// (`workload=spawn-reap`). The `reaper` parent spawns + `Wait`s a `memhog`
+/// child 30 times; each child allocates + touches ~4 MiB (~1024 user frames)
+/// then exits.
+///
+/// The discriminator is `snitchos.frames.freed_total`. WITH reclaim-on-reap each
+/// child's frames are returned, so the counter rockets past 5000 within a few
+/// children AND the kernel never OOMs (the `reaper.done` marker fires). WITHOUT
+/// it, 30 × 4 MiB ≈ 120 MiB leaks past available RAM → the kernel OOM-panics
+/// before either signal appears (`freed_total` otherwise only creeps at ~1/tick
+/// from the heartbeat's frame smoke, far below 5000 inside the budget). So this
+/// passes iff Exit actually frees the child's user page table + mapped frames.
+pub fn spawn_reclaims_memory(h: &mut View) -> Result<(), String> {
+    // NB: `wait_for` advances one forward cursor, so assert in wire-emission
+    // order. The reaper finishes its 30 spawn/wait cycles in well under a second
+    // and emits `reaper.done` *then*; `freed_total` is only put on the wire by the
+    // ~1 Hz heartbeat, so the first sample ≥ 5000 arrives *after* `reaper.done`.
+
+    // The loop ran to completion without exhausting RAM — every child was reaped,
+    // so 30 × 4 MiB never accumulated. Never appears in the leak case (OOM stall).
+    h.wait_for(SEC * 30, is_span_start_named("reaper.done"))
+        .ok_or("reaper never reached 'reaper.done' — the spawn/wait loop OOMed before finishing")?;
+
+    // And the reclaimed frames actually went back to the allocator: `freed_total`
+    // climbs into the thousands (≈1024 frames per reaped child). Without reclaim it
+    // only creeps at ~1/tick from the heartbeat frame smoke, far below 5000.
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.frames.freed_total")
+                && *value >= 5000
+        }
+        _ => false,
+    })
+    .ok_or("snitchos.frames.freed_total never reached 5000 — Exit didn't return the child frames")?;
+
+    Ok(())
+}
+
 /// v0.8b priority scheduling — *ordered, but fair* (`workload=priorities`). A
 /// High-priority CPU-bound `greedy` task and a Low-priority cooperative
 /// `worker_b` share hart 1. The scheduler must (a) **respect priority** —

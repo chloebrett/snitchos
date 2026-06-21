@@ -77,6 +77,15 @@ pub static SPAWNER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAWNER_ELF"));
 /// only a [`SPAWNABLE`] registry row.
 pub static SPAWNEE_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAWNEE_ELF"));
 
+/// The `workload=spawn-reap` parent: spawns + `Wait`s a memory-hungry `memhog`
+/// child 30 times. Drives the reclaim integration test — leaks (and OOMs)
+/// without per-process teardown on Exit.
+pub static REAPER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_REAPER_ELF"));
+
+/// The `memhog` child (spawnable id 1): allocates + touches ~4 MiB then exits.
+/// Launched at runtime via `Spawn`, so it has only a [`SPAWNABLE`] registry row.
+pub static MEMHOG_ELF: &[u8] = include_bytes!(env!("SNITCHOS_MEMHOG_ELF"));
+
 /// The `workload=ipc` programs: `ipc-sender` holds a `SEND` cap and sends one
 /// inline message; `ipc-receiver` holds a `RECV` cap, receives it, and
 /// re-emits the payload. They rendezvous over one kernel-brokered endpoint.
@@ -261,6 +270,10 @@ pub static PROBE: ProgramSpec = ProgramSpec { elf: PROBE_ELF, launch: Launch::Pl
 /// cap, and it delegates from its own bootstrap caps).
 pub static SPAWNER: ProgramSpec = ProgramSpec { elf: SPAWNER_ELF, launch: Launch::Plain };
 
+/// `workload=spawn-reap`: the reclaim-test parent (ambient — `Spawn`/`Wait` need
+/// no cap; the `memhog` children it spawns inherit no delegated authority).
+pub static REAPER: ProgramSpec = ProgramSpec { elf: REAPER_ELF, launch: Launch::Plain };
+
 /// An IPC program on the shared `DEMO_ENDPOINT` with `rights_bits` and the
 /// default user telemetry sink — now the *only* IPC launch shape (the FS server
 /// registers its own denial metric at runtime rather than binding a special
@@ -386,7 +399,7 @@ pub fn spawn_process_with_caps(
 /// embedded, indexed). The shell's command set will live here; seeded with
 /// `hello` until those programs land. Phase 1b swaps the id for an executable
 /// File cap read from the FS.
-static SPAWNABLE: &[(&str, &[u8])] = &[("spawnee", SPAWNEE_ELF)];
+static SPAWNABLE: &[(&str, &[u8])] = &[("spawnee", SPAWNEE_ELF), ("memhog", MEMHOG_ELF)];
 
 /// Resolve a `Spawn` program id to its `(name, image)`, or `None` if out of range.
 #[must_use]
@@ -481,6 +494,13 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::SpawnDemo, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "spawner", program: &SPAWNER, priority: Priority::Normal }],
+    }),
+    // v0.12 reclaim test: the `reaper` parent spawns + `Wait`s a `memhog` child
+    // 30×; the child (SPAWNABLE id 1) is created at runtime, so only the parent
+    // is in the layout. Proves Exit reclaims the child's address space (no OOM).
+    (WorkloadKind::SpawnReap, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "reaper", program: &REAPER, priority: Priority::Normal }],
     }),
     // v0.8b priority demo: a High CPU-bound `greedy` (the hog) vs a Low
     // cooperative worker — priority respected, aging keeps Low fed.

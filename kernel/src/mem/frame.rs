@@ -88,6 +88,14 @@ impl PhysFrame {
         self.0
     }
 
+    /// Reconstruct a frame handle from a page-aligned physical address. Used by
+    /// address-space reclaim (`mmu::free_user_root`), which recovers frame PAs by
+    /// walking a page table rather than holding the original [`PhysFrame`]s. The
+    /// caller guarantees `pa` is a real, frame-aligned allocator frame.
+    pub(crate) fn from_addr(pa: usize) -> Self {
+        PhysFrame(pa)
+    }
+
     /// Kernel-reachable VA via the linear map (`mmu::pa_to_kernel_va`).
     /// Dereferenceable as long as the linear map is installed (which
     /// it is from `mmu::enable` onward).

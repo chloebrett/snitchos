@@ -45,6 +45,10 @@ pub(super) fn handle_wait(frame: &mut TrapFrame) {
     loop {
         match crate::sched::wait_for(me, child) {
             WaitStep::Ready(status) => {
+                // The child is fully `Exited` and we run in our own address space,
+                // so it's safe to reclaim its resources now (frees the child's user
+                // AS, `Process`, and kernel stack — see `sched::reap_task`).
+                crate::sched::reap_task(child);
                 frame.a0 = status as u64;
                 return;
             }

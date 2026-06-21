@@ -107,6 +107,10 @@ pub enum WorkloadKind {
     /// carries delegated authority into a freshly-created process. See
     /// `plans/spawn-shell-and-console.md`.
     SpawnDemo,
+    /// v0.12 reclaim test: a `reaper` parent that `Spawn`s + `Wait`s a
+    /// memory-hungry `memhog` child 30×. Proves Exit reclaims the child's user
+    /// address space — without teardown the leak OOMs the kernel.
+    SpawnReap,
     /// v0.8b priority demo: a `High`-priority and a `Low`-priority cooperative
     /// worker share one hart. The High worker runs far more often (priority
     /// respected), but the Low worker still makes progress (aging prevents
@@ -215,6 +219,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "console-echo" => Some(WorkloadKind::ConsoleEcho),
             "probe" => Some(WorkloadKind::Probe),
             "spawn-demo" => Some(WorkloadKind::SpawnDemo),
+            "spawn-reap" => Some(WorkloadKind::SpawnReap),
             "priorities" => Some(WorkloadKind::Priorities),
             "block-wake" => Some(WorkloadKind::BlockWake),
             "ipc" => Some(WorkloadKind::Ipc),
@@ -351,6 +356,11 @@ mod tests {
     #[test]
     fn selects_spawn_demo() {
         assert_eq!(select("workload=spawn-demo"), Some(WorkloadKind::SpawnDemo));
+    }
+
+    #[test]
+    fn selects_spawn_reap() {
+        assert_eq!(select("workload=spawn-reap"), Some(WorkloadKind::SpawnReap));
     }
 
     #[test]

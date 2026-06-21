@@ -953,3 +953,45 @@ pub fn wait_for(parent: TaskId, child: TaskId) -> kernel_core::reap::WaitStep {
 pub fn note_exit(child: TaskId, status: i32) -> Option<TaskId> {
     REAP.lock().on_exit(child, status)
 }
+
+/// Reclaim a fully-`Exited` child's resources once its parent has `Wait`ed on it.
+/// Frees, in dependency order: the child's user address space (page table + every
+/// mapped frame, via [`crate::mmu::free_user_root`]), the child's [`Process`]
+/// (running its `Drop` to release the cap-table + per-process metric heap), and
+/// finally the `Box<Task>` itself (freeing the 16 KiB kernel stack). No-op for an
+/// unknown id (already reaped) or a kernel task (no user address space).
+///
+/// **Must run in the parent's address space, not the child's** — it frees the
+/// child's root page table, which would pull the ground out from under a still-
+/// active `satp`. The child has already switched away (via [`exit_now`]) by the
+/// time its parent's `Wait` calls this, so that holds.
+pub fn reap_task(child: TaskId) {
+    // Take the child's `Box<Task>` out of the table under the lock, then release
+    // it before touching the frame allocator / global allocator (lock discipline:
+    // never nest SCHEDULER under FRAME_ALLOC).
+    let task = {
+        let mut sched = SCHEDULER.lock();
+        let Some(idx) = sched.tasks.iter().position(|t| t.id == child) else {
+            return;
+        };
+        sched.tasks.swap_remove(idx)
+    };
+
+    let root_pa = task.address_space.load(Ordering::Relaxed);
+    if root_pa != 0 {
+        crate::mmu::free_user_root(root_pa);
+    }
+
+    let process = task.process.load(Ordering::Relaxed);
+    if !process.is_null() {
+        // SAFETY: `process` points at the child's `Process`, which lived in the
+        // child's kernel-stack frame (`run_with_caps`/`spawned_entry` locals) and
+        // so is owned by `task._stack`, still alive here. The child has `Exited`,
+        // nothing else references it, and the pointer is dropped exactly once.
+        // Running `Drop` now (before the backing stack is freed below) releases the
+        // cap-table `Vec` + metric `BTreeMap` heap that the stack frame can't.
+        unsafe { core::ptr::drop_in_place(process) };
+    }
+
+    drop(task); // frees the Box<Task> and its 16 KiB Box<Stack>
+}
