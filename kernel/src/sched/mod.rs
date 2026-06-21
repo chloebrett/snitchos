@@ -29,6 +29,7 @@ use kernel_core::sched::{
 };
 use kernel_core::span::SpanCursor;
 
+use crate::counter::DeferredCounter;
 use crate::process::Process;
 
 use crate::percpu::{PerCpu, MAX_HARTS};
@@ -314,14 +315,14 @@ pub static SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 /// Cumulative count of context switches the scheduler has performed.
 /// Bumped per `yield_now` that actually switched (no-op yields when
 /// the runqueue was empty don't count). `Relaxed`: pure counter.
-pub static CONTEXT_SWITCHES: AtomicU64 = AtomicU64::new(0);
+pub static CONTEXT_SWITCHES: DeferredCounter = DeferredCounter::new("snitchos.sched.context_switches_total");
 
 /// Cumulative count of **preemptions** — context switches the timer forced
 /// because a userspace task overran its quantum (`reschedule(Preempt)` that
 /// actually switched). A subset of `CONTEXT_SWITCHES`. Bumped in the reschedule
 /// path (an atomic, never a frame from the timer handler) and drained by the
 /// heartbeat as `snitchos.sched.preemptions_total`. `Relaxed`: pure counter.
-pub static PREEMPTIONS: AtomicU64 = AtomicU64::new(0);
+pub static PREEMPTIONS: DeferredCounter = DeferredCounter::new("snitchos.sched.preemptions_total");
 
 /// Time spent in `yield_now`'s bookkeeping (everything from function
 /// entry up to but not including the `switch` asm). Captures the
@@ -743,9 +744,9 @@ fn prepare_switch(
 
     switch_address_space(next_root, next_proc);
 
-    CONTEXT_SWITCHES.fetch_add(1, Ordering::Relaxed);
+    CONTEXT_SWITCHES.inc();
     if matches!(reason, SwitchReason::Preempt) {
-        PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
+        PREEMPTIONS.inc();
     }
     crate::tracing::emit_context_switch(current_id, next_id, reason);
 

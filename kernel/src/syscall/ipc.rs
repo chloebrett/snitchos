@@ -4,8 +4,6 @@
 //! handlers — `crate::syscall::ipc` — drive it from the `TrapFrame` and own the
 //! reply-cap minting + trace-context seeding.
 
-use core::sync::atomic::Ordering;
-
 use crate::trap::TrapFrame;
 
 /// Send an inline message over an IPC endpoint. `a0` = `Endpoint` handle
@@ -45,7 +43,7 @@ pub(super) fn handle_send(frame: &mut TrapFrame) {
     match crate::ipc::send_begin(ep, me, msg, parent, badge) {
         crate::ipc::SendStep::Deliver { wake } => crate::sched::wake(wake),
         crate::ipc::SendStep::Block => {
-            crate::ipc::BLOCKS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            crate::ipc::BLOCKS_TOTAL.inc();
             crate::sched::block_current();
         }
     }
@@ -103,7 +101,7 @@ fn receive_into_frame(
             delivered
         }
         crate::ipc::RecvStep::Block => {
-            crate::ipc::BLOCKS_TOTAL.fetch_add(1, Ordering::Relaxed);
+            crate::ipc::BLOCKS_TOTAL.inc();
             crate::sched::block_current();
             // Resumed: a sender stashed our message under our id at rendezvous.
             crate::ipc::take_delivered(ep, me)
@@ -122,7 +120,7 @@ fn receive_into_frame(
 
     // The message crossed. Count it, and record the topology + trace link on
     // the wire — both at delivery, outside the endpoint critical section.
-    crate::ipc::MESSAGES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    crate::ipc::MESSAGES_TOTAL.inc();
     crate::tracing::emit_message(ep.0, delivered.from.0, me.0, delivered.parent);
     // Seed the sender's span as our incoming parent — the next span this task
     // opens (its handling span) becomes a child, so the trace continues across
@@ -190,7 +188,7 @@ pub(super) fn handle_call(frame: &mut TrapFrame) {
         }
     };
 
-    crate::ipc::CALLS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    crate::ipc::CALLS_TOTAL.inc();
     let me = crate::sched::current_task_id();
     let req = [frame.a1, frame.a2, frame.a3, frame.a4];
     let parent = crate::tracing::current_span_id();
@@ -201,7 +199,7 @@ pub(super) fn handle_call(frame: &mut TrapFrame) {
     // The caller always parks awaiting the reply — woken by `reply`, never by
     // the request rendezvous (a receiver taking a call mints a reply cap
     // instead of waking us).
-    crate::ipc::BLOCKS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    crate::ipc::BLOCKS_TOTAL.inc();
     crate::sched::block_current();
 
     // Resumed by `reply`: deliver the response words and, if the server handed
@@ -302,7 +300,7 @@ fn reply_via_cap(
     };
     crate::ipc::stash_reply(caller, crate::ipc::StashedReply { msg: resp, cap });
     crate::sched::wake(caller);
-    crate::ipc::REPLIES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    crate::ipc::REPLIES_TOTAL.inc();
     Ok(())
 }
 

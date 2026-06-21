@@ -17,7 +17,9 @@
 //! spawning lands in step 10.
 
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::counter::DeferredCounter;
 
 use crate::mmu;
 use crate::percpu;
@@ -64,13 +66,13 @@ pub static SECONDARY_READY: AtomicBool = AtomicBool::new(false);
 /// Cumulative count of `wfi`s on the secondary hart. Bumped each
 /// time the idle loop completes a sleep. Useful as a "hart 1 is
 /// alive" signal in dashboards. `Relaxed`: per-hart counter.
-pub static SECONDARY_WFI_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static SECONDARY_WFI_COUNT: DeferredCounter = DeferredCounter::new("snitchos.smp.secondary_wfi_total");
 
 /// Bumped by `probe_entry` each loop. Used by the
 /// `smp-spawn-on-hart-1-runs` integration scenario to prove that a
 /// task spawned cross-hart actually executes on the target.
 /// `Relaxed`: counter.
-pub static PROBE_TICKS: AtomicU64 = AtomicU64::new(0);
+pub static PROBE_TICKS: DeferredCounter = DeferredCounter::new("snitchos.smp.hart_1_probe_ticks_total");
 
 /// Demo task spawned via `spawn_on(1, "hart_1_probe", probe_entry)`
 /// from kmain. Increments `PROBE_TICKS` and yields. Existence on
@@ -85,7 +87,7 @@ pub extern "C" fn probe_entry() -> ! {
         // `smp-ipi-wakes-idle-hart`. RAII: closes at the end of the
         // loop body.
         crate::span!("hart1.probe");
-        PROBE_TICKS.fetch_add(1, Ordering::Relaxed);
+        PROBE_TICKS.inc();
         crate::sched::yield_now();
     }
 }
@@ -204,7 +206,7 @@ pub extern "C" fn secondary_main(_mhartid: usize, hartid: usize) -> ! {
         crate::sched::yield_now();
         if !crate::sched::has_ready_tasks() {
             unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)); }
-            SECONDARY_WFI_COUNT.fetch_add(1, Ordering::Relaxed);
+            SECONDARY_WFI_COUNT.inc();
         }
     }
 }

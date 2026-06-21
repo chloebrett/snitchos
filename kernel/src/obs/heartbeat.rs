@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use protocol::StringId;
 
-use crate::{boot_workload, frame, heap, heap_smoke, ipi, mmu, percpu, sched, secondary, span, tracing, trap, workload};
+use crate::{boot_workload, frame, heap, heap_smoke, percpu, sched, span, tracing, trap, workload};
 
 /// Declarative metric set. Each line names a kind (`counter`,
 /// `gauge`, `histogram`), a struct field, and the wire path. The
@@ -91,47 +91,27 @@ define_metrics! {
     // `DeferredCounter`s drained via `counter::drain_all`)
     gauge     frames_in_use             = "snitchos.frames.in_use";
     gauge     frames_free               = "snitchos.frames.free";
-    // kernel heap
-    counter   heap_alloc_total          = "snitchos.heap.alloc_total";
-    counter   heap_dealloc_total        = "snitchos.heap.dealloc_total";
-    counter   heap_alloc_failed         = "snitchos.heap.alloc_failed_total";
+    // kernel heap — alloc/dealloc/alloc_failed/grow/grow_failed counters live
+    // in the `DeferredCounter` registry now; these are the sampled gauges.
     gauge     heap_bytes_capacity       = "snitchos.heap.bytes_capacity";
     gauge     heap_bytes_used           = "snitchos.heap.bytes_used";
     gauge     heap_bytes_free           = "snitchos.heap.bytes_free";
-    counter   heap_grow_total           = "snitchos.heap.grow_total";
-    counter   heap_grow_failed          = "snitchos.heap.grow_failed_total";
     gauge     heap_free_blocks          = "snitchos.heap.free_blocks";
     gauge     heap_largest_free_block   = "snitchos.heap.largest_free_block_bytes";
-    // scheduler
-    counter   sched_smoke_marker_hits   = "snitchos.sched.smoke_marker_hits";
-    counter   sched_exit_smoke_hits     = "snitchos.sched.exit_smoke_hits";
-    counter   sched_wake_resumed        = "snitchos.sched.wake_resumed";
-    counter   ipc_messages_total        = "snitchos.ipc.messages_total";
-    counter   ipc_blocks_total          = "snitchos.ipc.blocks_total";
-    counter   ipc_calls_total           = "snitchos.ipc.calls_total";
-    counter   ipc_replies_total         = "snitchos.ipc.replies_total";
-    counter   sched_context_switches    = "snitchos.sched.context_switches_total";
-    counter   sched_preemptions         = "snitchos.sched.preemptions_total";
+    // scheduler — smoke/exit/wake/context_switches/preemptions (+ ipc + task
+    // loops) are registry counters now; these are the sampled gauges/histogram.
     gauge     sched_runqueue_depth      = "snitchos.sched.runqueue_depth";
     gauge     sched_tasks_total         = "snitchos.sched.tasks_total";
     histogram sched_yield_overhead      = "snitchos.sched.yield_overhead_ticks";
-    // demo tasks
-    counter   task_a_loops              = "snitchos.task_a.loops";
-    counter   task_b_loops              = "snitchos.task_b.loops";
-    // workload
-    counter   workload_produced         = "snitchos.workload.samples_produced_total";
+    // workload — produced/lock_wait are registry counters; `consumed` stays
+    // bespoke (its drain needs an `Acquire` load — the cross-hart oracle).
     counter   workload_consumed         = "snitchos.workload.samples_consumed_total";
     gauge     workload_histogram_sum    = "snitchos.workload.histogram_sum";
-    counter   workload_lock_wait        = "snitchos.workload.lock_wait_ticks_total";
     gauge     workload_queue_depth      = "snitchos.workload.queue_depth";
-    // SMP / IPI
-    counter   ipi_received              = "snitchos.ipi.received_total";
+    // SMP / IPI / MMU — received/secondary_wfi/shootdowns/probe_ticks are
+    // registry counters now; these are the sampled gauges.
     gauge     smp_harts_total           = "snitchos.smp.harts_total";
     gauge     smp_boot_hart_id          = "snitchos.smp.boot_hart_id";
-    counter   smp_secondary_wfi         = "snitchos.smp.secondary_wfi_total";
-    counter   mmu_shootdowns_received   = "snitchos.mmu.shootdowns_received_total";
-    counter   mmu_shootdowns_sent       = "snitchos.mmu.shootdowns_sent_total";
-    counter   smp_probe_ticks           = "snitchos.smp.hart_1_probe_ticks_total";
     // SMOKE TEST metrics — remove with heap_smoke module
     gauge     smoke_entries             = "snitchos.heap_smoke.entries";
     gauge     smoke_primes              = "snitchos.heap_smoke.primes";
@@ -283,9 +263,6 @@ fn emit_frame_metrics(m: &Metrics) {
 /// and keep going — the next alloc fails with `alloc_failed_total`
 /// as today.
 fn emit_heap_metrics(m: &Metrics) {
-    emit!(m, heap_alloc_total   = heap::ALLOC_COUNT.load(Ordering::Relaxed));
-    emit!(m, heap_dealloc_total = heap::DEALLOC_COUNT.load(Ordering::Relaxed));
-    emit!(m, heap_alloc_failed  = heap::ALLOC_FAIL_COUNT.load(Ordering::Relaxed));
     if let Some(hstats) = heap::stats() {
         emit!(m, heap_bytes_capacity     = hstats.capacity);
         emit!(m, heap_bytes_used         = hstats.used);
@@ -296,20 +273,9 @@ fn emit_heap_metrics(m: &Metrics) {
             let _ = heap::extend(frames);
         }
     }
-    emit!(m, heap_grow_total  = heap::GROW_COUNT.load(Ordering::Relaxed));
-    emit!(m, heap_grow_failed = heap::GROW_FAIL_COUNT.load(Ordering::Relaxed));
 }
 
 fn emit_sched_metrics(m: &Metrics) {
-    emit!(m, sched_smoke_marker_hits = sched::SMOKE_MARKER_HITS.load(Ordering::Relaxed));
-    emit!(m, sched_exit_smoke_hits   = sched::EXIT_SMOKE_HITS.load(Ordering::Relaxed));
-    emit!(m, sched_wake_resumed      = sched::WAKE_RESUMED.load(Ordering::Relaxed));
-    emit!(m, ipc_messages_total      = crate::ipc::MESSAGES_TOTAL.load(Ordering::Relaxed));
-    emit!(m, ipc_blocks_total        = crate::ipc::BLOCKS_TOTAL.load(Ordering::Relaxed));
-    emit!(m, ipc_calls_total         = crate::ipc::CALLS_TOTAL.load(Ordering::Relaxed));
-    emit!(m, ipc_replies_total       = crate::ipc::REPLIES_TOTAL.load(Ordering::Relaxed));
-    emit!(m, sched_context_switches  = sched::CONTEXT_SWITCHES.load(Ordering::Relaxed));
-    emit!(m, sched_preemptions       = sched::PREEMPTIONS.load(Ordering::Relaxed));
     let sched_snap = sched::stats();
     emit!(m, sched_runqueue_depth = sched_snap.runqueue_depth);
     emit!(m, sched_tasks_total    = sched_snap.tasks_total);
@@ -323,31 +289,23 @@ fn emit_sched_metrics(m: &Metrics) {
             tracing::emit_metric(snap.runs_metric, snap.runs as i64);
         }
     }
-    emit!(m, task_a_loops = crate::demo_tasks::TASK_A_LOOPS.load(Ordering::Relaxed));
-    emit!(m, task_b_loops = crate::demo_tasks::TASK_B_LOOPS.load(Ordering::Relaxed));
 }
 
 fn emit_workload_metrics(m: &Metrics) {
-    emit!(m, workload_produced      = workload::SAMPLES_PRODUCED.load(Ordering::Relaxed));
     // Acquire, and read *before* histogram_sum(): pairs with the
     // consumer's Release on SAMPLES_CONSUMED (possibly on hart 1 under
     // the `workload=smp` selection). Observing consumed=V here guarantees the
     // subsequent histogram read sees every bin write that produced V,
-    // so the emitted `histogram_sum >= consumed` oracle holds.
+    // so the emitted `histogram_sum >= consumed` oracle holds. (This is why
+    // `samples_consumed` stays bespoke rather than a `DeferredCounter`.)
     emit!(m, workload_consumed      = workload::SAMPLES_CONSUMED.load(Ordering::Acquire));
     emit!(m, workload_histogram_sum = workload::histogram_sum());
-    emit!(m, workload_lock_wait     = workload::LOCK_WAIT_TICKS_TOTAL.load(Ordering::Relaxed));
     emit!(m, workload_queue_depth   = workload::queue_depth());
 }
 
 fn emit_smp_metrics(m: &Metrics) {
-    emit!(m, ipi_received            = ipi::RECEIVED_TOTAL.load(Ordering::Relaxed));
-    emit!(m, smp_harts_total         = percpu::MAX_HARTS);
-    emit!(m, smp_boot_hart_id        = BOOT_MHARTID.load(Ordering::Relaxed));
-    emit!(m, smp_secondary_wfi       = secondary::SECONDARY_WFI_COUNT.load(Ordering::Relaxed));
-    emit!(m, mmu_shootdowns_received = ipi::SHOOTDOWNS_RECEIVED_TOTAL.load(Ordering::Relaxed));
-    emit!(m, mmu_shootdowns_sent     = mmu::SHOOTDOWNS_SENT_TOTAL.load(Ordering::Relaxed));
-    emit!(m, smp_probe_ticks         = secondary::PROBE_TICKS.load(Ordering::Relaxed));
+    emit!(m, smp_harts_total  = percpu::MAX_HARTS);
+    emit!(m, smp_boot_hart_id = BOOT_MHARTID.load(Ordering::Relaxed));
 }
 
 /// SMOKE TEST — remove with heap_smoke module.

@@ -10,9 +10,11 @@
 //! `sched::smoke()`, `sched::exit_smoke_entry`, etc.
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use kernel_core::sched::TaskId;
+
+use crate::counter::DeferredCounter;
 
 use super::{
     block_current, current_task_id, exit_now, switch, wake, yield_now, TaskContext, STACK_SIZE,
@@ -23,25 +25,25 @@ use super::{
 /// Bumped each time the smoke marker function runs. The heartbeat
 /// emits this as `snitchos.sched.smoke_marker_hits`; the integration
 /// scenario asserts it's > 0 after boot. `Relaxed`: counter.
-pub static SMOKE_MARKER_HITS: AtomicU64 = AtomicU64::new(0);
+pub static SMOKE_MARKER_HITS: DeferredCounter = DeferredCounter::new("snitchos.sched.smoke_marker_hits");
 
 /// Bumped by the `exit_smoke_entry` task body. Heartbeat emits as
 /// `snitchos.sched.exit_smoke_hits`; the `sched-task-exits-cleanly`
 /// scenario asserts it reaches 1 — proves a spawned task can call
 /// `exit_now()` without taking the kernel down. `Relaxed`: counter.
-pub static EXIT_SMOKE_HITS: AtomicU64 = AtomicU64::new(0);
+pub static EXIT_SMOKE_HITS: DeferredCounter = DeferredCounter::new("snitchos.sched.exit_smoke_hits");
 
 /// Task body for the exit smoke. Bumps `EXIT_SMOKE_HITS` then
 /// terminates via `exit_now`. Spawned once at boot from `kmain`.
 pub extern "C" fn exit_smoke_entry() -> ! {
-    EXIT_SMOKE_HITS.fetch_add(1, Ordering::Relaxed);
+    EXIT_SMOKE_HITS.inc();
     exit_now()
 }
 
 /// Bumped once when the `block-wake` smoke's blocker resumes after being
 /// woken. Heartbeat emits `snitchos.sched.wake_resumed`; the
 /// `block-wake-smoke` scenario asserts it reaches 1. `Relaxed`: counter.
-pub static WAKE_RESUMED: AtomicU64 = AtomicU64::new(0);
+pub static WAKE_RESUMED: DeferredCounter = DeferredCounter::new("snitchos.sched.wake_resumed");
 
 /// Set by the blocker immediately before it blocks. The waker spins yielding
 /// until it observes this — so it only ever wakes a task that has already
@@ -59,7 +61,7 @@ pub extern "C" fn block_wake_blocker_entry() -> ! {
     BLOCK_WAKE_BLOCKER_ID.store(current_task_id().0, Ordering::Relaxed);
     BLOCK_WAKE_ARMED.store(1, Ordering::Relaxed);
     block_current();
-    WAKE_RESUMED.fetch_add(1, Ordering::Relaxed);
+    WAKE_RESUMED.inc();
     exit_now()
 }
 
@@ -135,7 +137,7 @@ pub unsafe fn smoke() {
 }
 
 extern "C" fn smoke_marker_entry() -> ! {
-    SMOKE_MARKER_HITS.fetch_add(1, Ordering::Relaxed);
+    SMOKE_MARKER_HITS.inc();
     // SAFETY: SMOKE_MAIN_CTX was populated by the asm in `smoke()`
     // before this function ran. Switching into it resumes that call
     // site; this function never returns through its own bottom.

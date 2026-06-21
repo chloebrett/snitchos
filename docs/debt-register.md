@@ -22,6 +22,14 @@ a plan — see `plans/` for active implementation tracks.
 - **#5 — `FsError::Unsupported` overloading.** `fs-server` mapped copy / mint /
   decode failures to `Unsupported` (which means "op not implemented"). Added
   `FsError::Internal` (wire status 8) for genuine internal/transport failures.
+- **#3 — Deferred-counter abstraction.** Introduced `kernel::counter::DeferredCounter`
+  (atomic + wire name + interned `StringId`) and a `COUNTERS` registry. Converted
+  26 counters across 9 subsystems (frame/heap/sched/ipc/demo_tasks/workload/ipi/
+  mmu/secondary) from bare `AtomicU64` to `DeferredCounter`; the heartbeat's 5
+  counter-draining functions collapsed into one `counter::drain_all()` call. Gauges
+  (sampled state), histograms, the `Acquire`-ordered `workload.samples_consumed`
+  oracle, and the storm counters stay bespoke. Adding a counter is now a
+  `DeferredCounter` declaration + a registry row.
 
 ---
 
@@ -46,23 +54,6 @@ nothing of names or kinds. The v0.10 FS denial gauge had to be kernel-registered
 (`snitchos.fs.denied`) precisely because this doesn't exist yet — that's the
 motivating example. Protocol-level change; a milestone, not an afternoon. See
 the `project_userspace_defined_metrics` memory.
-
-### #3 — Deferred-counter abstraction *(elegance, medium)*
-
-The "bump an atomic in a hot path, drain it in the heartbeat" pattern is
-copy-pasted across **8 subsystems**, feeding **9 separate drain functions** in
-the heartbeat:
-
-- `kernel/src/mem/frame.rs` (alloc/free/fail), `mem/heap.rs` (5 counters),
-  `trap/ipc.rs` (messages/blocks/calls/replies), `sched/mod.rs` (context
-  switches, preemptions, …), `workloads/workload.rs`, `smp/ipi.rs`,
-  `mem/mmu.rs` (shootdowns), `smp/secondary.rs` (wfi count).
-- Drains live in `kernel/src/obs/heartbeat.rs` (`emit_frame_metrics`,
-  `emit_heap_metrics`, …).
-
-A `DeferredCounter` that self-registers (name + drain) collapses the 9 drain
-fns into one loop, and folds in the re-entry footgun each site re-derives (never
-emit telemetry from inside `GlobalAlloc`/IRQ — bump-and-drain is *why*).
 
 ---
 

@@ -23,6 +23,7 @@ use heapless::spsc::{Consumer, Producer, Queue};
 use kernel_core::batch_ring::BatchRing;
 use kernel_core::workload::{bin_of, Lcg, BUCKETS};
 
+use crate::counter::DeferredCounter;
 use crate::sched;
 use crate::sync::Mutex;
 use crate::tracing;
@@ -70,7 +71,7 @@ static QUEUE: Mutex<Option<VecDeque<u64>>> = Mutex::new(None);
 // ordering discipline.
 static HISTOGRAM: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
 
-pub static SAMPLES_PRODUCED: AtomicU64 = AtomicU64::new(0);
+pub static SAMPLES_PRODUCED: DeferredCounter = DeferredCounter::new("snitchos.workload.samples_produced_total");
 pub static SAMPLES_CONSUMED: AtomicU64 = AtomicU64::new(0);
 
 /// Cumulative ticks spent waiting to acquire `QUEUE` across all
@@ -79,7 +80,7 @@ pub static SAMPLES_CONSUMED: AtomicU64 = AtomicU64::new(0);
 /// trying to lock); the value will become interesting in v0.6 step 11
 /// when producer + consumer run on different harts and the lock
 /// cacheline starts ping-ponging.
-pub static LOCK_WAIT_TICKS_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static LOCK_WAIT_TICKS_TOTAL: DeferredCounter = DeferredCounter::new("snitchos.workload.lock_wait_ticks_total");
 
 /// Sum across all histogram bins at the moment of the call. The
 /// individual `fetch_add` operations are `Relaxed` (each bin is its own
@@ -99,7 +100,7 @@ pub fn histogram_sum() -> u64 {
 /// the `Mutex` queue (which would inflate the very lock-wait we're
 /// measuring). Bounded by `QUEUE_CAP`.
 pub fn queue_depth() -> usize {
-    let produced = SAMPLES_PRODUCED.load(Ordering::Relaxed);
+    let produced = SAMPLES_PRODUCED.load();
     let consumed = SAMPLES_CONSUMED.load(Ordering::Relaxed);
     usize::try_from(produced.saturating_sub(consumed)).unwrap_or(usize::MAX)
 }
@@ -123,7 +124,7 @@ pub extern "C" fn producer_entry() -> ! {
             let pushed = {
                 let mut guard = QUEUE.lock();
                 let wait = tracing::timestamp().saturating_sub(t_lock_start);
-                LOCK_WAIT_TICKS_TOTAL.fetch_add(wait, Ordering::Relaxed);
+                LOCK_WAIT_TICKS_TOTAL.add(wait);
                 let q = guard.get_or_insert_with(VecDeque::new);
                 let room = QUEUE_CAP.saturating_sub(q.len());
                 let take = BATCH.min(room);
@@ -132,7 +133,7 @@ pub extern "C" fn producer_entry() -> ! {
                 }
                 take
             };
-            SAMPLES_PRODUCED.fetch_add(pushed as u64, Ordering::Relaxed);
+            SAMPLES_PRODUCED.add(pushed as u64);
         }
         sched::yield_now();
     }
@@ -149,7 +150,7 @@ pub extern "C" fn consumer_entry() -> ! {
             let n = {
                 let mut guard = QUEUE.lock();
                 let wait = tracing::timestamp().saturating_sub(t_lock_start);
-                LOCK_WAIT_TICKS_TOTAL.fetch_add(wait, Ordering::Relaxed);
+                LOCK_WAIT_TICKS_TOTAL.add(wait);
                 let q = guard.get_or_insert_with(VecDeque::new);
                 let n = q.len().min(BATCH);
                 for slot in buf.iter_mut().take(n) {
@@ -234,7 +235,7 @@ pub extern "C" fn spsc_producer_entry() -> ! {
                     pushed += 1;
                 }
             }
-            SAMPLES_PRODUCED.fetch_add(pushed, Ordering::Relaxed);
+            SAMPLES_PRODUCED.add(pushed);
         }
         sched::yield_now();
     }
@@ -288,7 +289,7 @@ pub extern "C" fn spsc_batch_producer_entry() -> ! {
             }
             // One Release publishes the whole 64-item batch.
             let pushed = BATCH_RING.enqueue_batch(&batch) as u64;
-            SAMPLES_PRODUCED.fetch_add(pushed, Ordering::Relaxed);
+            SAMPLES_PRODUCED.add(pushed);
         }
         sched::yield_now();
     }

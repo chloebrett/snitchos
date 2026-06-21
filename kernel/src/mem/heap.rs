@@ -14,10 +14,11 @@
 //! via an allocation.
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use linked_list_allocator::Heap;
 
+use crate::counter::DeferredCounter;
 use crate::{frame, mmu};
 use kernel_core::mmu::{HEAP_VA_BASE, PtePerms};
 
@@ -52,15 +53,14 @@ pub const MAX_HEAP_SIZE: usize = MAX_HEAP_FRAMES * frame::FRAME_SIZE;
 /// of how much of the region is unavailable.
 /// `Relaxed` everywhere: pure tallies. See `kernel::percpu` for the
 /// kernel-wide ordering discipline.
-pub static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
-pub static DEALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
-pub static ALLOC_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static ALLOC_COUNT: DeferredCounter = DeferredCounter::new("snitchos.heap.alloc_total");
+pub static DEALLOC_COUNT: DeferredCounter = DeferredCounter::new("snitchos.heap.dealloc_total");
+pub static ALLOC_FAIL_COUNT: DeferredCounter = DeferredCounter::new("snitchos.heap.alloc_failed_total");
 
 /// Counters for grow attempts — bumped from `extend` (heartbeat path,
 /// so it's safe to take the allocator lock when emitting metrics).
-/// `Relaxed`: tallies, no payload.
-pub static GROW_COUNT: AtomicU64 = AtomicU64::new(0);
-pub static GROW_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static GROW_COUNT: DeferredCounter = DeferredCounter::new("snitchos.heap.grow_total");
+pub static GROW_FAIL_COUNT: DeferredCounter = DeferredCounter::new("snitchos.heap.grow_failed_total");
 
 /// Highest VA currently mapped + 1. Bumped by `init` and `extend`.
 /// Single-writer (boot, then heartbeat); reads in the same context.
@@ -90,11 +90,11 @@ unsafe impl GlobalAlloc for KernelHeap {
         let result = self.inner.lock().allocate_first_fit(layout);
         match result {
             Ok(nn) => {
-                ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+                ALLOC_COUNT.inc();
                 nn.as_ptr()
             }
             Err(_) => {
-                ALLOC_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+                ALLOC_FAIL_COUNT.inc();
                 core::ptr::null_mut()
             }
         }
@@ -108,7 +108,7 @@ unsafe impl GlobalAlloc for KernelHeap {
                 .lock()
                 .deallocate(core::ptr::NonNull::new_unchecked(ptr), layout);
         }
-        DEALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        DEALLOC_COUNT.inc();
     }
 }
 
@@ -167,11 +167,11 @@ pub fn extend(extra_frames: usize) -> Result<(), ()> {
             // the existing heap top. `linked_list_allocator::extend`
             // requires exactly that.
             unsafe { HEAP.inner.lock().extend(extra_bytes) };
-            GROW_COUNT.fetch_add(1, Ordering::Relaxed);
+            GROW_COUNT.inc();
             Ok(())
         }
         Err(()) => {
-            GROW_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+            GROW_FAIL_COUNT.inc();
             Err(())
         }
     }

@@ -14,31 +14,30 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use core::sync::atomic::AtomicU64;
-
 use kernel_core::ipc::{on_receive, on_send, EndpointId, EndpointState, RendezvousAction};
 use kernel_core::sched::TaskId;
 use protocol::SpanId;
 
+use crate::counter::DeferredCounter;
 use crate::sync::{Mutex, Once};
 
 /// Rendezvous count: bumped once per message delivered (the receiver side of a
 /// crossing). Drained as `snitchos.ipc.messages_total` in the heartbeat —
 /// deferred-emission, never a frame from the rendezvous itself. `Relaxed`: a
 /// counter.
-pub static MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static MESSAGES_TOTAL: DeferredCounter = DeferredCounter::new("snitchos.ipc.messages_total");
 
 /// Block count: bumped once each time a `send`/`receive` parks its caller for
 /// want of a peer. Drained as `snitchos.ipc.blocks_total`. `Relaxed`: counter.
-pub static BLOCKS_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static BLOCKS_TOTAL: DeferredCounter = DeferredCounter::new("snitchos.ipc.blocks_total");
 
 /// RPC `call` count: bumped once per accepted `call`. Drained as
 /// `snitchos.ipc.calls_total`. `Relaxed`: counter.
-pub static CALLS_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static CALLS_TOTAL: DeferredCounter = DeferredCounter::new("snitchos.ipc.calls_total");
 
 /// RPC `reply` count: bumped once per successful `reply` (a consumed reply cap).
 /// Drained as `snitchos.ipc.replies_total`. `Relaxed`: counter.
-pub static REPLIES_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static REPLIES_TOTAL: DeferredCounter = DeferredCounter::new("snitchos.ipc.replies_total");
 
 /// Inline message size: the four words carried in `a1..=a4`. Re-exported from
 /// `snitchos_abi`, the single source of truth shared with userspace + `fs-proto`.

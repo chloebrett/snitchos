@@ -516,8 +516,8 @@ pub fn remap(va: usize, new_pa: usize, perms: PtePerms) -> Result<(), MapError> 
 /// sender (i.e. how many `mmu::map`/`unmap` calls actually fired).
 /// Drained by the heartbeat as
 /// `snitchos.mmu.shootdowns_sent_total`. `Relaxed`: counter.
-pub static SHOOTDOWNS_SENT_TOTAL: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+pub static SHOOTDOWNS_SENT_TOTAL: crate::counter::DeferredCounter =
+    crate::counter::DeferredCounter::new("snitchos.mmu.shootdowns_sent_total");
 
 /// Invalidate the TLB entry for `va` on this hart locally, then ensure
 /// every other online hart does the same before returning.
@@ -590,5 +590,5 @@ pub fn shootdown(va: usize) {
         }
     }
 
-    SHOOTDOWNS_SENT_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    SHOOTDOWNS_SENT_TOTAL.inc();
 }

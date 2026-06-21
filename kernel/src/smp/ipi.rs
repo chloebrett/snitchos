@@ -27,6 +27,7 @@
 
 use core::sync::atomic::Ordering;
 
+use crate::counter::DeferredCounter;
 use crate::percpu::{self, PER_HART_DATA};
 use crate::sbi;
 
@@ -44,14 +45,13 @@ pub const IPI_TLB_SHOOTDOWN: u32 = 1 << 1;
 /// Cumulative count of software interrupts dispatched by this
 /// kernel. Drained by the heartbeat as
 /// `snitchos.ipi.received_total`. `Relaxed`: counter.
-pub static RECEIVED_TOTAL: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+pub static RECEIVED_TOTAL: DeferredCounter = DeferredCounter::new("snitchos.ipi.received_total");
 
 /// Cumulative count of TLB shootdown requests this kernel has serviced
 /// as a receiver. Drained by the heartbeat as
 /// `snitchos.mmu.shootdowns_received_total`. `Relaxed`: counter.
-pub static SHOOTDOWNS_RECEIVED_TOTAL: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+pub static SHOOTDOWNS_RECEIVED_TOTAL: DeferredCounter =
+    DeferredCounter::new("snitchos.mmu.shootdowns_received_total");
 
 /// Send `msg` to `target_hart`. Sets the pending bit *before*
 /// raising the IPI so the target observes the bit when it processes
@@ -126,8 +126,8 @@ pub fn handle_pending() {
         // sfence above has happened-before that observation.
         percpu::this_cpu().shootdown_ack.fetch_add(1, Ordering::Release);
 
-        SHOOTDOWNS_RECEIVED_TOTAL.fetch_add(1, Ordering::Relaxed);
+        SHOOTDOWNS_RECEIVED_TOTAL.inc();
     }
 
-    RECEIVED_TOTAL.fetch_add(1, Ordering::Relaxed);
+    RECEIVED_TOTAL.inc();
 }

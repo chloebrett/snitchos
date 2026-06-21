@@ -66,9 +66,39 @@ impl DeferredCounter {
 /// Every [`DeferredCounter`] the heartbeat drains — the single place they're
 /// enumerated for draining; each counter itself lives in its own subsystem.
 static COUNTERS: &[&DeferredCounter] = &[
+    // frame allocator
     &crate::frame::ALLOC_COUNT,
     &crate::frame::FREE_COUNT,
     &crate::frame::ALLOC_FAIL_COUNT,
+    // kernel heap
+    &crate::heap::ALLOC_COUNT,
+    &crate::heap::DEALLOC_COUNT,
+    &crate::heap::ALLOC_FAIL_COUNT,
+    &crate::heap::GROW_COUNT,
+    &crate::heap::GROW_FAIL_COUNT,
+    // scheduler
+    &crate::sched::CONTEXT_SWITCHES,
+    &crate::sched::PREEMPTIONS,
+    &crate::sched::SMOKE_MARKER_HITS,
+    &crate::sched::EXIT_SMOKE_HITS,
+    &crate::sched::WAKE_RESUMED,
+    // IPC
+    &crate::ipc::MESSAGES_TOTAL,
+    &crate::ipc::BLOCKS_TOTAL,
+    &crate::ipc::CALLS_TOTAL,
+    &crate::ipc::REPLIES_TOTAL,
+    // demo tasks
+    &crate::demo_tasks::TASK_A_LOOPS,
+    &crate::demo_tasks::TASK_B_LOOPS,
+    // workload (samples_consumed stays bespoke — Acquire-ordered oracle)
+    &crate::workload::SAMPLES_PRODUCED,
+    &crate::workload::LOCK_WAIT_TICKS_TOTAL,
+    // SMP / IPI / MMU
+    &crate::ipi::RECEIVED_TOTAL,
+    &crate::ipi::SHOOTDOWNS_RECEIVED_TOTAL,
+    &crate::mmu::SHOOTDOWNS_SENT_TOTAL,
+    &crate::secondary::SECONDARY_WFI_COUNT,
+    &crate::secondary::PROBE_TICKS,
 ];
 
 /// Intern every registered counter's name. Call once at boot, before the

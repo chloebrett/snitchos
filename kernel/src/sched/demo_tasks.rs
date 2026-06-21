@@ -16,15 +16,13 @@
 //! or a storm) instead.
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::counter::DeferredCounter;
 use crate::sched;
 use crate::span;
 
-/// `Relaxed`: pure tallies. See `kernel::percpu` for the kernel-wide
-/// ordering discipline.
-pub static TASK_A_LOOPS: AtomicU64 = AtomicU64::new(0);
-pub static TASK_B_LOOPS: AtomicU64 = AtomicU64::new(0);
+pub static TASK_A_LOOPS: DeferredCounter = DeferredCounter::new("snitchos.task_a.loops");
+pub static TASK_B_LOOPS: DeferredCounter = DeferredCounter::new("snitchos.task_b.loops");
 
 /// Idle thread. The "what runs when nothing else wants the CPU" task. Only
 /// `wfi` when the runqueue is genuinely empty — if a task is `Ready` (idle was
@@ -64,7 +62,7 @@ pub extern "C" fn task_a_entry() -> ! {
             burn_lcg(150_000);
             sched::yield_now();
             burn_lcg(150_000);
-            TASK_A_LOOPS.fetch_add(1, Ordering::Relaxed);
+            TASK_A_LOOPS.inc();
         }
         sched::yield_now();
     }
@@ -75,7 +73,7 @@ pub extern "C" fn task_b_entry() -> ! {
         {
             span!("task_b.tick");
             burn_lcg(900_000);
-            TASK_B_LOOPS.fetch_add(1, Ordering::Relaxed);
+            TASK_B_LOOPS.inc();
         }
         sched::yield_now();
     }
