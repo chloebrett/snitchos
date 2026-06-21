@@ -60,14 +60,23 @@ type a key → UART RX FIFO (≤16B hw) → [handle_timer drains, hart 0] → ke
 
 ## TDD steps (RED first; each leaves a working state)
 
-1. **RX ring — `kernel-core` (host-TDD, UNBLOCKED NOW).** A pure SPSC byte ring
-   (push/pop/len/is_empty/is_full/wraparound, drop-on-full). Failing tests first,
-   then impl. Pure logic, like `frame::Bitmap` / `sched::Runqueue` / `ipc` state.
-   _(Good candidate to implement yourself — it's the algorithmic core.)_
-2. **UART RX in `device/uart.rs`.** `read_byte() -> Option<u8>` (read `RBR` iff
-   `LSR & DR`); optional `init_rx_fifo()` via `FCR`. Covered by the itest.
-3. **Timer-drain producer.** In `handle_timer`, hart-0-gated, drain `RBR`→ring
-   (lock-free push). Static ring instance lives in `kernel/` (statics rule).
+1. **RX ring — `kernel-core` ✅ DONE (2026-06-21).** `ConsoleRing<const N>` in
+   `kernel-core/src/console.rs`: push/pop/len/is_empty/is_full, `% N` wraparound,
+   drop-on-full, explicit `len` (no full-vs-empty ambiguity). 6 host tests green;
+   `cargo xtask mutants --file kernel-core/src/console.rs` = 25/25 caught.
+   `push`/`pop` implemented by Chloe.
+2. **UART RX in `device/uart.rs` ✅ DONE (2026-06-21).** `Uart16550::read_byte()
+   -> Option<u8>` — reads `RBR` iff `LSR & DR` (bit 0). Written by Chloe;
+   clippy-clean. (FIFO `FCR` init not needed — relying on OpenSBI's config.)
+3. **Timer-drain producer ✅ DONE (2026-06-21).** `CONSOLE_RX: Mutex<ConsoleRing<256>>`
+   + `drain_rx()` + `read_into()` (consumer half, for Step 4) in
+   `kernel/src/device/console.rs`; `handle_timer` calls `drain_rx()` gated on
+   `current_hartid() == 0`, before `maybe_preempt`. **Deadlock avoided:** the
+   drain does NOT lock the println `UART` mutex (would deadlock vs a task holding
+   it mid-`print!` with `SIE==1`); it uses a separate RX-only `Uart16550` handle.
+   The `CONSOLE_RX` lock IS safe in the timer handler (leaf lock, drain+ConsoleRead
+   only, both `SIE==0`, no alloc/emit). Verified: `boot-reaches-heartbeat` green
+   with the drain in the hot path.
 4. **`ConsoleRead` syscall.** `abi::Syscall::ConsoleRead = 15` + a trap handler
    that drains ring→`copy_to_user`→returns count.
 5. **Userspace binding.** `console_read(&mut [u8]) -> usize` in `user/runtime`

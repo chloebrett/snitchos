@@ -202,6 +202,16 @@ fn handle_timer(frame: &TrapFrame) {
         .this_cpu()
         .store(end.wrapping_sub(start), Ordering::Relaxed);
 
+    // Drain the UART RX FIFO into the console ring — hart 0 only (single
+    // producer). Locking CONSOLE_RX here is the *exception* to "no locks in the
+    // timer handler": it's a leaf lock taken only by this drain and ConsoleRead,
+    // both run with SIE==0 (can't nest on one hart), and neither allocates nor
+    // emits — unlike the virtio/println locks. Must precede maybe_preempt, which
+    // may switch away and not return on this pass.
+    if crate::percpu::current_hartid() == 0 {
+        crate::console::drain_rx();
+    }
+
     // v0.8 preemption: if this timer interrupted a *userspace* task that has
     // overrun its quantum, deschedule it now. `SPP == 0` means the trap came
     // from U-mode; kernel code (`SPP == 1`) is never preempted, keeping the

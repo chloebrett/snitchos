@@ -2,6 +2,7 @@
 //! macros that write to it.
 
 use crate::uart::Uart16550;
+use kernel_core::console::ConsoleRing;
 
 /// The kernel's console UART, initialized lazily from the DTB at boot.
 ///
@@ -77,6 +78,57 @@ pub fn emergency_uart_base() -> usize {
   } else {
     QEMU_VIRT_UART_BASE
   }
+}
+
+/// Capacity of the console RX ring — bytes buffered between the timer-driven
+/// drain and `ConsoleRead`. 256 comfortably absorbs a typed line between
+/// sub-second drains; overflow drops the newest bytes (see [`ConsoleRing`]).
+const RX_RING_CAP: usize = 256;
+
+/// Buffered console input. The timer drain (producer, hart 0) pushes raw bytes
+/// from the UART RX FIFO; the `ConsoleRead` syscall (consumer) pops them.
+///
+/// Its `Mutex` is safe to take in the timer handler — unlike the println
+/// [`UART`] mutex — because it's held only by [`drain_rx`] and `ConsoleRead`,
+/// both of which run with `sstatus.SIE == 0` (so they can't nest on one hart),
+/// and neither allocates nor emits telemetry. See `kernel_core::console`.
+static CONSOLE_RX: crate::sync::Mutex<ConsoleRing<RX_RING_CAP>> =
+  crate::sync::Mutex::new(ConsoleRing::new());
+
+/// Drain the UART receive FIFO into [`CONSOLE_RX`]. Called from the timer
+/// handler, **hart 0 only** (single producer — the gate lives at the call site).
+///
+/// Deliberately does **not** lock the println [`UART`] mutex. A kernel task can
+/// hold that mutex for `print!`/`println!` with interrupts enabled; locking it
+/// here would deadlock the instant the timer fires mid-print. RX register access
+/// (poll `LSR`, pop `RBR`) touches device state disjoint from the TX path's
+/// `THR` writes, so a separate, unsynchronized RX handle is sound.
+pub fn drain_rx() {
+  // SAFETY: RX-only access (LSR/RBR), disjoint from the `UART`-mutex-guarded TX
+  // path's THR writes; see the fn doc for why this needs no coordination.
+  let uart = unsafe { Uart16550::new(emergency_uart_base()) };
+  let mut ring = CONSOLE_RX.lock();
+  while let Some(byte) = uart.read_byte() {
+    ring.push(byte); // drop-on-full is handled inside the ring
+  }
+}
+
+/// Pop up to `dst.len()` buffered input bytes into `dst`; returns how many.
+/// The `ConsoleRead` syscall's drain side (consumer). Non-blocking: returns `0`
+/// when nothing is buffered.
+pub fn read_into(dst: &mut [u8]) -> usize {
+  let mut ring = CONSOLE_RX.lock();
+  let mut n = 0;
+  while n < dst.len() {
+    match ring.pop() {
+      Some(byte) => {
+        dst[n] = byte;
+        n += 1;
+      }
+      None => break,
+    }
+  }
+  n
 }
 
 /// Print formatted output to the kernel console (no trailing newline).
