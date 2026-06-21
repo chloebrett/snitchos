@@ -1,0 +1,103 @@
+# Technical / architectural debt register
+
+A living backlog of elegance / architectural debt surfaced during the v0.10
+work. Each item is independently actionable. Ordered by leverage, not urgency.
+
+Delete an item when it's done; add one when you find it. This is a register, not
+a plan — see `plans/` for active implementation tracks.
+
+---
+
+## Done
+
+- **#1 — Program/workload registry.** The six parallel enumerations of
+  userspace programs (build.rs embeds, ELF statics, 18 `*_main_entry` fns,
+  the spawn match, the heartbeat no-storm arm) collapsed into: a `USER_PROGRAMS`
+  manifest loop in `build.rs`, a `ProgramSpec` table + one generic
+  `program_entry` (carried via a new per-task scheduler `arg` word), a
+  `WorkloadKind → LAYOUTS` table, and the `is_storm()` heartbeat guard. Adding a
+  program is now a manifest row + an ELF static + a spec + a layout row.
+- **#4 — Shared FS test markers.** The `0x57A7`-style sentinels duplicated
+  between `user/fs` and the itest scenarios moved into `fs_proto::markers`.
+- **#5 — `FsError::Unsupported` overloading.** `fs-server` mapped copy / mint /
+  decode failures to `Unsupported` (which means "op not implemented"). Added
+  `FsError::Internal` (wire status 8) for genuine internal/transport failures.
+
+---
+
+## High-leverage
+
+### #2 — Push the observability vocabulary out of the kernel *(architectural, large)*
+
+The kernel still owns the *names* of metrics — a layering inversion (it's the
+one place "mechanism in the kernel, meaning in userspace" isn't applied).
+
+- ~60 metric names are hardcoded in `kernel/src/obs/heartbeat.rs` (the
+  `define_metrics!` block).
+- The **intern table lives in kernel memory** (`kernel/src/obs/tracing.rs`) and
+  hosts *userspace-defined* span/metric names. The `Process::MAX_SPAN_NAMES`
+  quota is a band-aid on that — userspace can pressure a kernel resource.
+
+**End-state:** userspace names its own metrics via a `RegisterMetric` syscall
+that copies a name from user memory and interns it — the kernel **already does
+exactly this for span names** (`SpanOpen` under `user_range_ok`), so it's a copy
+of an existing path. The kernel then transports opaque metric frames and knows
+nothing of names or kinds. The v0.10 FS denial gauge had to be kernel-registered
+(`snitchos.fs.denied`) precisely because this doesn't exist yet — that's the
+motivating example. Protocol-level change; a milestone, not an afternoon. See
+the `project_userspace_defined_metrics` memory.
+
+### #3 — Deferred-counter abstraction *(elegance, medium)*
+
+The "bump an atomic in a hot path, drain it in the heartbeat" pattern is
+copy-pasted across **8 subsystems**, feeding **9 separate drain functions** in
+the heartbeat:
+
+- `kernel/src/mem/frame.rs` (alloc/free/fail), `mem/heap.rs` (5 counters),
+  `trap/ipc.rs` (messages/blocks/calls/replies), `sched/mod.rs` (context
+  switches, preemptions, …), `workloads/workload.rs`, `smp/ipi.rs`,
+  `mem/mmu.rs` (shootdowns), `smp/secondary.rs` (wfi count).
+- Drains live in `kernel/src/obs/heartbeat.rs` (`emit_frame_metrics`,
+  `emit_heap_metrics`, …).
+
+A `DeferredCounter` that self-registers (name + drain) collapses the 9 drain
+fns into one loop, and folds in the re-entry footgun each site re-derives (never
+emit telemetry from inside `GlobalAlloc`/IRQ — bump-and-drain is *why*).
+
+---
+
+## Deferred placeholders (Tier 3)
+
+### #6 — Fault-safe user-copy *(correctness-adjacent)*
+
+An unmapped user pointer passed to a syscall currently **panics the kernel**
+(noted at the copy site in `kernel/src/trap/user.rs`) instead of refusing the
+syscall gracefully (`BadUserRange`). The cross-AS copy primitive validates; the
+older single-AS `copy_from_user` path is the gap.
+
+### #7 — Capability generation / revocation
+
+`Capability.generation` exists as the revocation hook but is dead-weight at 0
+(`kernel-core/src/user/cap.rs`); `Stale`-on-revoke is unbuilt.
+
+### #8 — `kernel::sync` is one-flavor
+
+No `lock` vs `lock_irqsave` split (`kernel/src/smp/sync.rs`); deferred until a
+hot path proves it needs the distinction.
+
+### #9 — `TX_STAGING` virtio staging hack
+
+`virtio_console::send` stages frame bytes through a static buffer only because
+`mmu::va_to_pa` handles a single VA range (`KERNEL_OFFSET`); a general
+DMA-address translation would remove the staging.
+
+### #10 — Hardcoded QEMU-`virt` MMIO + parked DTB walk
+
+MMIO regions are hardcoded for QEMU `virt` in `kmain`; the DTB-driven
+`collect_mmio_regions` is parked behind `#[expect(dead_code)]` (the pre-MMU DTB
+crash under the higher-half link was never isolated).
+
+### #11 — `Exit` vs `Yield` wire distinction
+
+Tasks exit, but the wire only carries `Yield`-shaped context-switch frames
+(noted in `kernel/src/sched/mod.rs`); a dedicated `Exit` reason is deferred.
