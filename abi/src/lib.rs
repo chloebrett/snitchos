@@ -126,6 +126,15 @@ pub enum Syscall {
     /// `usize::MAX` on a bad/unwritable range. Ambient, like `DebugWrite`: the
     /// console terminal is not a capability (cap-mediated input is Tier-1).
     ConsoleRead = 15,
+    /// Spawn a new userspace process, delegating a chosen subset of the caller's
+    /// own capabilities to it (v0.11 — `spawn(program, caps)`). `a0` = program
+    /// selector (an embedded-program id), `a1` = pointer in the caller's space to
+    /// a `[u32; N]` array of cap handles to delegate, `a2` = `N`. The kernel
+    /// resolves every handle in the *caller's* table (refusing the whole spawn if
+    /// any is unheld — no forging, no partial delegation), builds the child with
+    /// those caps plus its own bootstrap telemetry/span, and returns the child's
+    /// task id in `a0` (or `usize::MAX` on refusal).
+    Spawn = 16,
 }
 
 impl Syscall {
@@ -151,6 +160,7 @@ impl Syscall {
             13 => Some(Self::CopyFromCaller),
             14 => Some(Self::CopyToCaller),
             15 => Some(Self::ConsoleRead),
+            16 => Some(Self::Spawn),
             _ => None,
         }
     }
@@ -200,6 +210,7 @@ mod tests {
         assert_eq!(Syscall::CopyFromCaller as usize, 13);
         assert_eq!(Syscall::CopyToCaller as usize, 14);
         assert_eq!(Syscall::ConsoleRead as usize, 15);
+        assert_eq!(Syscall::Spawn as usize, 16);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
@@ -217,6 +228,7 @@ mod tests {
         assert_eq!(Syscall::from_usize(13), Some(Syscall::CopyFromCaller));
         assert_eq!(Syscall::from_usize(14), Some(Syscall::CopyToCaller));
         assert_eq!(Syscall::from_usize(15), Some(Syscall::ConsoleRead));
-        assert_eq!(Syscall::from_usize(16), None);
+        assert_eq!(Syscall::from_usize(16), Some(Syscall::Spawn));
+        assert_eq!(Syscall::from_usize(17), None);
     }
 }

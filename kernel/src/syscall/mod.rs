@@ -46,6 +46,7 @@ pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::CopyFromCaller) => transfer::handle_copy_from_caller(frame),
         Some(Syscall::CopyToCaller) => transfer::handle_copy_to_caller(frame),
         Some(Syscall::ConsoleRead) => console::handle_console_read(frame),
+        Some(Syscall::Spawn) => process::handle_spawn(frame),
         None => {
             let n = frame.a7 as u8;
             refuse(frame, n, protocol::RefusalReason::UnknownSyscall);

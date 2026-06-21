@@ -342,6 +342,64 @@ pub fn spawn_program(
     crate::sched::spawn_on_with_arg(hart, name, program_entry, core::ptr::from_ref(program) as usize, priority)
 }
 
+/// Map a kernel capability object to its wire [`protocol::CapObject`] kind, for
+/// snitching a `CapEvent` on a delegated grant.
+fn cap_object_kind(object: kernel_core::cap::Object) -> protocol::CapObject {
+    use kernel_core::cap::Object;
+    match object {
+        Object::TelemetrySink { .. } => protocol::CapObject::TelemetrySink,
+        Object::SpanSink => protocol::CapObject::SpanSink,
+        Object::Endpoint { .. } => protocol::CapObject::Endpoint,
+        Object::Reply { .. } => protocol::CapObject::Reply,
+    }
+}
+
+/// A pending `Spawn`: the program image plus the caps the parent delegated.
+/// Heap-allocated by [`spawn_process_with_caps`], its pointer stashed in the
+/// child task's arg, and reclaimed by [`spawned_entry`] when the child first runs.
+struct SpawnRequest {
+    image: &'static [u8],
+    delegated: alloc::vec::Vec<kernel_core::cap::Capability>,
+}
+
+/// Task entry for a `Spawn`-created child: reclaim its [`SpawnRequest`] from the
+/// task arg, then build + enter the process with bootstrap + delegated caps.
+pub extern "C" fn spawned_entry() -> ! {
+    let arg = crate::sched::current_task_arg();
+    // SAFETY: `arg` is the raw pointer of a `Box<SpawnRequest>` leaked by
+    // `spawn_process_with_caps` for exactly this task; reclaimed once here.
+    let req = unsafe { alloc::boxed::Box::from_raw(arg as *mut SpawnRequest) };
+    run_with_caps(req.image, req.delegated)
+}
+
+/// Spawn a child task running `image` with `delegated` caps, on `hart` at
+/// `priority`. The userspace-`Spawn` counterpart to [`spawn_program`]: it boxes a
+/// [`SpawnRequest`] and stashes its pointer in the task arg for [`spawned_entry`]
+/// to pick up and reclaim.
+pub fn spawn_process_with_caps(
+    hart: usize,
+    name: &str,
+    image: &'static [u8],
+    delegated: alloc::vec::Vec<kernel_core::cap::Capability>,
+    priority: kernel_core::sched::Priority,
+) -> kernel_core::sched::TaskId {
+    let req = alloc::boxed::Box::new(SpawnRequest { image, delegated });
+    let arg = alloc::boxed::Box::into_raw(req) as usize;
+    crate::sched::spawn_on_with_arg(hart, name, spawned_entry, arg, priority)
+}
+
+/// Programs a `Spawn` syscall can launch, selected by id (v0.11 Phase 1a:
+/// embedded, indexed). The shell's command set will live here; seeded with
+/// `hello` until those programs land. Phase 1b swaps the id for an executable
+/// File cap read from the FS.
+static SPAWNABLE: &[(&str, &[u8])] = &[("hello", HELLO_ELF)];
+
+/// Resolve a `Spawn` program id to its `(name, image)`, or `None` if out of range.
+#[must_use]
+pub fn spawnable_program(id: usize) -> Option<(&'static str, &'static [u8])> {
+    SPAWNABLE.get(id).copied()
+}
+
 /// One program a userspace workload spawns: task name, spec, and priority.
 pub struct ProgramSpawn {
     pub name: &'static str,
@@ -471,6 +529,17 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
 /// capability, load `image` into it, and drop to U-mode. Never returns —
 /// the hart runs userspace from here.
 fn run(image: &'static [u8]) -> ! {
+    run_with_caps(image, alloc::vec::Vec::new())
+}
+
+/// Like [`run`] but also grants the child each capability in `delegated` — a
+/// `Spawn`'s parent-delegated caps — inserted after the bootstrap telemetry/span
+/// pair (Q-A: a child is always born observable; the delegated caps occupy
+/// handles `2..` in order). Never returns.
+fn run_with_caps(
+    image: &'static [u8],
+    delegated: alloc::vec::Vec<kernel_core::cap::Capability>,
+) -> ! {
     // Each process gets its own root page table (kernel high-half shared in).
     let root_pa = mmu::new_user_root().expect("userspace: no frame for user root page table");
 
@@ -493,6 +562,21 @@ fn run(image: &'static [u8]) -> ! {
             holder,
             object,
             kernel_core::cap::Rights::EMIT.bits(),
+        );
+    }
+
+    // Grant the parent-delegated caps (a `Spawn`'s payload) on top of bootstrap.
+    // They land at handles 2.. in order; each grant is snitched like the others.
+    for cap in &delegated {
+        let _ = process.caps.lock().insert(*cap);
+        if let Some(id) = cap_grants_metric_id() {
+            tracing::emit_metric(id, 1);
+        }
+        tracing::emit_cap_granted(
+            crate::process::next_cap_id(),
+            holder,
+            cap_object_kind(cap.object),
+            cap.rights.bits(),
         );
     }
 

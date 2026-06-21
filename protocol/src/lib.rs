@@ -228,6 +228,8 @@ pub enum RefusalReason {
   /// A memory request could not be satisfied — out of physical frames, or
   /// past the per-process memory cap.
   OutOfMemory,
+  /// A `Spawn` named a program id that is not in the spawnable registry.
+  UnknownProgram,
 }
 
 #[cfg(test)]
