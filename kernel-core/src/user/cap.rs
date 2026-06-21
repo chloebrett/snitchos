@@ -333,6 +333,23 @@ pub fn mint_badged(parent: Capability, badge: u64, rights: Rights) -> Result<Cap
     })
 }
 
+/// Resolve `handles` against `table` into the capabilities to delegate to a
+/// freshly-spawned child — the v0.11 `Spawn`-with-caps core.
+///
+/// **All-or-nothing**: if any handle fails to resolve (out of bounds / stale),
+/// no caps are returned and that error propagates. There is no partial
+/// delegation, and a process can only delegate caps it *holds* — the kernel
+/// forges nothing. **Copy** semantics: resolving doesn't disturb `table`, so the
+/// parent keeps its caps (attenuation is mint-then-delegate, not a move). The
+/// kernel inserts the returned caps into the child's new table alongside its
+/// bootstrap authorities.
+pub fn delegate(table: &CapTable, handles: &[Handle]) -> Result<Vec<Capability>, CapError> {
+    handles
+        .iter()
+        .map(|handle| table.resolve(*handle).copied())
+        .collect()
+}
+
 /// A process's capability table: opaque [`Handle`]s in, [`Capability`]
 /// references out, validated against this table alone. Slots are never
 /// emptied in v0.7b (no revocation), so a present index always holds a
@@ -1050,5 +1067,69 @@ mod tests {
         let h = table.insert_once(reply_cap(7));
         assert!(table.consume(h));
         assert_eq!(invoke_reply(&table, h), Err(Denied::NoSuchCapability));
+    }
+
+    // --- v0.11: spawn-with-caps delegation ---
+
+    #[test]
+    fn delegate_with_no_handles_yields_no_caps() {
+        let table = CapTable::new();
+        assert_eq!(delegate(&table, &[]), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn delegate_resolves_held_handles_in_order() {
+        let mut table = CapTable::new();
+        let a = table.insert(emit_sink());
+        let b = table.insert(Capability {
+            object: Object::SpanSink,
+            rights: Rights::EMIT,
+        });
+        assert_eq!(
+            delegate(&table, &[a, b]),
+            Ok(Vec::from([
+                Capability {
+                    object: Object::TelemetrySink {
+                        counter: StringId(1)
+                    },
+                    rights: Rights::EMIT
+                },
+                Capability {
+                    object: Object::SpanSink,
+                    rights: Rights::EMIT
+                },
+            ]))
+        );
+    }
+
+    #[test]
+    fn delegate_is_all_or_nothing_when_any_handle_is_unheld() {
+        // A bogus handle alongside a valid one fails the whole delegation — no
+        // partial child cap set, and you can't conjure a cap you don't hold.
+        let mut table = CapTable::new();
+        let valid = table.insert(emit_sink());
+        let bogus = Handle::from_raw(999);
+        assert_eq!(
+            delegate(&table, &[valid, bogus]),
+            Err(CapError::OutOfBounds)
+        );
+    }
+
+    #[test]
+    fn delegate_rejects_a_stale_handle() {
+        let mut table = CapTable::new();
+        let h = table.insert_once(emit_sink());
+        assert!(table.consume(h));
+        assert_eq!(delegate(&table, &[h]), Err(CapError::Stale));
+    }
+
+    #[test]
+    fn delegate_copies_leaving_the_parents_caps_intact() {
+        // Copy, not move: the parent still holds the cap after delegating it
+        // (attenuation is mint-then-delegate, never a move of the original).
+        let mut table = CapTable::new();
+        let h = table.insert(emit_sink());
+        let _ = delegate(&table, &[h]).expect("a held handle delegates");
+        assert!(table.resolve(h).is_ok());
     }
 }
