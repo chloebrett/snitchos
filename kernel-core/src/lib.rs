@@ -16,6 +16,7 @@ extern crate alloc;
 // `kernel_core::cap`, etc. — the physical nesting doesn't change the paths.
 // Single-module concerns (`clock`, `sched`, `trap`, `virtio`) stay at the root.
 pub mod clock;
+pub mod console;
 pub mod sched;
 pub mod trap;
 pub mod virtio;
