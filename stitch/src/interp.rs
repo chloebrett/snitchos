@@ -2078,4 +2078,52 @@ mod tests {
             ]
         );
     }
+
+    // --- method dispatch via `on` blocks (basic `on X`, no contract) ---
+    // RED until the dispatch lookup is wired into eval. The registry that
+    // `register_items` builds is populated but not yet consulted, so these
+    // exercise the path that turns `value.method(args)` into the right
+    // `on`-block method call.
+
+    #[test]
+    fn dispatches_an_inherent_method() {
+        // Pure dispatch: the method ignores the receiver, so this isolates
+        // "find the method on the value's type and call it" with nothing else.
+        assert_eq!(
+            run_program("prod Box(n: Int)  on Box { label() = 42 }  main() = Box(7).label()"),
+            Value::Int(42)
+        );
+    }
+
+    #[test]
+    fn a_method_reads_a_receiver_field() {
+        // Adds receiver binding: `@n` must resolve to the called value's field.
+        assert_eq!(
+            run_program("prod Box(n: Int)  on Box { get() = @n }  main() = Box(7).get()"),
+            Value::Int(7)
+        );
+    }
+
+    #[test]
+    fn a_method_takes_an_argument() {
+        // Adds parameter passing alongside the receiver.
+        assert_eq!(
+            run_program("prod Box(n: Int)  on Box { plus(k) = @n + k }  main() = Box(7).plus(3)"),
+            Value::Int(10)
+        );
+    }
+
+    #[test]
+    fn methods_accumulate_across_multiple_on_blocks() {
+        // The S5 insight: a type may have several `on` blocks; the registry
+        // accumulates their methods rather than the later block clobbering the
+        // earlier one. Both `get` and `double` must dispatch.
+        assert_eq!(
+            run_program(
+                "prod Box(n: Int)  on Box { get() = @n }  on Box { double() = @n * 2 }  \
+                 main() = Box(5).get() + Box(5).double()"
+            ),
+            Value::Int(15)
+        );
+    }
 }
