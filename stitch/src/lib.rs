@@ -13,6 +13,7 @@ pub mod natives;
 pub mod ops;
 pub mod parser;
 pub mod pattern;
+pub mod registry;
 pub mod runner;
 pub mod value;
 
