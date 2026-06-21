@@ -197,4 +197,9 @@ Expr::Call { callee, args } => match callee.as_ref() {
 
 **vs a Java vtable:** same goal (type-directed dispatch, implicit receiver), opposite end of the static/dynamic axis. Java resolves the name to a fixed **slot index** at compile time → O(1) array index, per-class table, needs static types + single-inheritance layout. Stitch resolves the name by **string lookup every call** (hash type → scan methods) → flexible, no types needed, slower. A vtable is the *optimization* Stitch could adopt once it has static types (the jlox→clox arc). Contracts, when added, are closer to Java *interfaces* (itables / hashed lookup) than class vtables — no single linear layout, which is exactly the multi-`on`-block shape.
 
-**Deferred:** `on X : C` conformance + default-method fallback (`Item::Contract` still dropped; `On.contract` captured-but-unused); `mut`/`free` modifiers at eval.
+**Contract default methods (`on X : C`) — done.** `register_items` collects `Item::Contract` (name → methods) and conformances (`on X : C` → type→[contracts]) into a `Registration` struct; `bake_contract_defaults` folds each contract's *default* methods (body `Some`) into conforming types, unless the type already defines that name (concrete wins; first contract wins on dup-name). Baking at registration = same semantics as a not-found-→-contract-default lookup fallback, but keeps `lookup_method` a flat lookup.
+- **Late binding works for free:** a default body calling `@m()` re-enters `eval_method_call` with `@` still the concrete receiver → dispatches to the type's impl (open recursion / template-method pattern). The receiver carries its concrete type all the way down.
+- **Decision — receiver never implicit:** sibling calls are `@m()`, never bare `m()` (bare = lexical/global only). One flat name-resolution rule; locked by `a_bare_sibling_call_does_not_resolve_to_a_method`. See design doc `## on`.
+- **Not validated (deliberate, per S5 static/dynamic cut):** `on X : C` isn't checked to actually implement C's abstract methods — a missing one errors only when called.
+
+**Deferred:** `mut`/`free` method modifiers at eval.

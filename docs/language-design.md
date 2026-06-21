@@ -226,6 +226,7 @@ on Counter : Drawable {            // `: Contract` declares conformance
 
 - `mut` methods may write `@`; calling one **requires a `mut` receiver binding** (Rust's `&mut self` discipline, no lifetimes).
 - `free` is the only modifier that appears _inside_ `on` but not at module scope (every module function is already receiver-free).
+- **The receiver is never implicit.** A method body calls a sibling method as `@other()`, never bare `other()` — a bare name is always a local/global, never a method on `@`. (Decided when contract default methods landed: a default that calls another method writes `@speak()`, which dynamically dispatches to the concrete type — late binding / open recursion, the template-method pattern.) This keeps name resolution one flat rule (bare = lexical/global, `@`-prefixed = receiver) and avoids the "is this a field, a local, or a method?" ambiguity an implicit `self` reintroduces. Consistent with `@field` access never being implicit either.
 
 ## contract — the only polymorphism
 

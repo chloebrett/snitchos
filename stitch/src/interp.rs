@@ -2279,6 +2279,20 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_sibling_call_does_not_resolve_to_a_method() {
+        // The receiver is never implicit: a method reaches a sibling via
+        // `@speak()`, not bare `speak()`. Bare names stay lexical/global, so a
+        // method body that writes `speak()` finds no such binding.
+        assert_eq!(
+            run_program_err(
+                "prod Dog(x: Int)  on Dog { speak() = \"woof\"  loud() = \"{speak()}!\" }  \
+                 main() = Dog(1).loud()"
+            ),
+            "unbound variable `speak`"
+        );
+    }
+
+    #[test]
     fn calling_a_method_with_the_wrong_arity_is_an_error() {
         assert_eq!(
             run_program_err(
