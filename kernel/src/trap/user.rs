@@ -135,15 +135,6 @@ static CAP_DENIED_METRIC: Once<StringId> = Once::new();
 /// here. Proves the process terminated cleanly rather than spinning.
 static USER_EXITS_METRIC: Once<StringId> = Once::new();
 
-/// The gauge the **FS server** emits when its rights gate refuses an op — the
-/// userspace filesystem snitching its own authority decision (the kernel only
-/// carries the badge rights, never interprets them). A *gauge*, not a counter:
-/// the value is the structured `fs_proto::Denial` (inode + attempted right)
-/// packed into an `i64`, so "the last denial" is the meaningful reading, not a
-/// rate. Bound into the FS server's bootstrap telemetry sink (its only one),
-/// read here via [`fs_denied_metric_id`].
-static FS_DENIED_METRIC: Once<StringId> = Once::new();
-
 /// A loaded program, ready to enter.
 pub struct Loaded {
     /// The entry-point VA (`e_entry`) to put in `sepc`.
@@ -171,7 +162,6 @@ pub fn init_metric() {
     CAP_GRANTS_METRIC.call_once(|| tracing::register_counter("snitchos.cap.grants_total"));
     CAP_DENIED_METRIC.call_once(|| tracing::register_counter("snitchos.cap.denied_total"));
     USER_EXITS_METRIC.call_once(|| tracing::register_counter("snitchos.user.exits_total"));
-    FS_DENIED_METRIC.call_once(|| tracing::register_gauge("snitchos.fs.denied"));
 }
 
 /// The `StringId` for the userspace telemetry counter (or `None` pre-init).
@@ -192,11 +182,6 @@ pub fn cap_grants_metric_id() -> Option<StringId> {
 /// The `StringId` for the process-exit counter (or `None` pre-init).
 pub fn user_exits_metric_id() -> Option<StringId> {
     USER_EXITS_METRIC.get().copied()
-}
-
-/// The `StringId` for the FS rights-gate denial gauge (or `None` pre-init).
-pub fn fs_denied_metric_id() -> Option<StringId> {
-    FS_DENIED_METRIC.get().copied()
 }
 
 /// The `StringId` for the denied-invocation counter (or `None` pre-init).
@@ -220,17 +205,11 @@ enum Launch {
     /// Ambient authorities only (telemetry + span sinks); no endpoint.
     Plain,
     /// Also granted an `Endpoint` cap over the shared `DEMO_ENDPOINT` with
-    /// `rights_bits`, its bootstrap telemetry sink bound to `counter`.
-    Ipc { rights_bits: u32, counter: CounterKind },
-}
-
-/// Which pre-registered counter a program's bootstrap telemetry sink binds to.
-enum CounterKind {
-    /// The shared `snitchos.user.telemetry_total`.
-    User,
-    /// The FS rights-gate denial gauge `snitchos.fs.denied` (the FS server's
-    /// sole telemetry).
-    FsDenied,
+    /// `rights_bits`. Every IPC program gets the same plain bootstrap telemetry
+    /// sink (bound to `snitchos.user.telemetry_total`); a program that wants its
+    /// own metric registers it at runtime (debt #2, the FS server's denial
+    /// gauge being the first such consumer).
+    Ipc { rights_bits: u32 },
 }
 
 /// A userspace program: its embedded ELF plus how to launch it. One `'static`
@@ -282,11 +261,12 @@ pub static PROBE: ProgramSpec = ProgramSpec { elf: PROBE_ELF, launch: Launch::Pl
 /// cap, and it delegates from its own bootstrap caps).
 pub static SPAWNER: ProgramSpec = ProgramSpec { elf: SPAWNER_ELF, launch: Launch::Plain };
 
-/// An IPC program on the shared `DEMO_ENDPOINT` with `rights_bits` and default
-/// user telemetry — the common case (the FS server is the lone exception, with
-/// its own counter).
+/// An IPC program on the shared `DEMO_ENDPOINT` with `rights_bits` and the
+/// default user telemetry sink — now the *only* IPC launch shape (the FS server
+/// registers its own denial metric at runtime rather than binding a special
+/// kernel-pre-registered counter; debt #2).
 const fn ipc_user(elf: &'static [u8], rights_bits: u32) -> ProgramSpec {
-    ProgramSpec { elf, launch: Launch::Ipc { rights_bits, counter: CounterKind::User } }
+    ProgramSpec { elf, launch: Launch::Ipc { rights_bits } }
 }
 
 /// `workload=ipc`: the demo sender (`SEND`).
@@ -314,15 +294,11 @@ pub static BADGE_HANDOUT_SERVER: ProgramSpec =
 /// `workload=badge-handout`: the client (`SEND`).
 pub static BADGE_HANDOUT_CLIENT: ProgramSpec = ipc_user(BADGE_HANDOUT_CLIENT_ELF, Rights::SEND.bits());
 
-/// `workload=fs`: the FS server (`RECV | MINT`), telemetry bound to the denial
-/// gauge — its only telemetry (see [`fs_denied_metric_id`]).
-pub static FS_SERVER: ProgramSpec = ProgramSpec {
-    elf: FS_SERVER_ELF,
-    launch: Launch::Ipc {
-        rights_bits: Rights::RECV.bits() | Rights::MINT.bits(),
-        counter: CounterKind::FsDenied,
-    },
-};
+/// `workload=fs`: the FS server (`RECV | MINT`). A plain bootstrap sink like
+/// every other IPC program — it registers its own `snitchos.fs.denied` gauge at
+/// runtime (debt #2), so the kernel no longer special-cases its telemetry.
+pub static FS_SERVER: ProgramSpec =
+    ipc_user(FS_SERVER_ELF, Rights::RECV.bits() | Rights::MINT.bits());
 
 /// `workload=fs`: the FS client (`SEND`), default user telemetry.
 pub static FS_CLIENT: ProgramSpec = ipc_user(FS_CLIENT_ELF, Rights::SEND.bits());
@@ -338,17 +314,12 @@ pub extern "C" fn program_entry() -> ! {
     let spec: &'static ProgramSpec = unsafe { &*(arg as *const ProgramSpec) };
     match &spec.launch {
         Launch::Plain => run(spec.elf),
-        Launch::Ipc { rights_bits, counter } => {
+        Launch::Ipc { rights_bits } => {
             let ep = *crate::ipc::DEMO_ENDPOINT
                 .get()
                 .expect("ipc endpoint created before an IPC program runs");
             let rights = Rights::from_bits(*rights_bits);
-            let counter = match counter {
-                CounterKind::User => user_metric_id(),
-                CounterKind::FsDenied => fs_denied_metric_id(),
-            }
-            .expect("program telemetry counter registered before entry");
-            run_ipc_counter(spec.elf, ep, rights, counter)
+            run_ipc(spec.elf, ep, rights)
         }
     }
 }
@@ -646,20 +617,20 @@ fn run_with_caps(
 
 /// Like [`run`], but additionally grants the process an [`Endpoint`] capability
 /// over `endpoint` with `rights` (`SEND`/`RECV`/`MINT`) — the kernel-brokered
-/// IPC cap, handle delivered in the third startup register (`a2`) — and binds
-/// the bootstrap telemetry sink to `counter` (the default user counter for most
-/// programs; the FS server points its sole sink at `snitchos.fs.denied`). Never
-/// returns.
+/// IPC cap, handle delivered in the third startup register (`a2`). Its bootstrap
+/// telemetry sink is the plain `snitchos.user.telemetry_total`, same as every
+/// IPC program: a program wanting its own metric registers it at runtime (debt
+/// #2). Never returns.
 ///
 /// [`Endpoint`]: kernel_core::cap::Object::Endpoint
-fn run_ipc_counter(
+fn run_ipc(
     image: &'static [u8],
     endpoint: kernel_core::ipc::EndpointId,
     rights: kernel_core::cap::Rights,
-    counter: StringId,
 ) -> ! {
     use kernel_core::cap::{Capability, Object};
 
+    let counter = user_metric_id().expect("userspace telemetry counter registered before entry");
     let root_pa = mmu::new_user_root().expect("ipc: no frame for user root page table");
     let (process, bootstrap_handle, span_handle) = Process::bootstrap(root_pa, counter);
 

@@ -16,7 +16,7 @@
 use fs_core::{Filesystem, FsError, InodeId};
 use fs_proto::{check_rights, Badge, Denial, FileRights, Request, Response};
 use ramfs::RamFs;
-use snitchos_user::{copy_from_caller, copy_to_caller, endpoint, entry, reply, reply_with_cap, rights, telemetry, tracer};
+use snitchos_user::{copy_from_caller, copy_to_caller, endpoint, entry, reply, reply_with_cap, rights, telemetry, tracer, Metric, MetricKind};
 
 /// Largest filename the server will pull across in one `create` (≤ the kernel's
 /// per-copy cap). Names longer than this are refused.
@@ -29,6 +29,12 @@ const DATA_CAP: usize = 256;
 #[entry]
 fn main() {
     let mut fs = RamFs::new();
+    // The FS names its own denial metric (debt #2): the kernel no longer knows
+    // `snitchos.fs.denied` ahead of time — the server registers it through its
+    // bootstrap `TelemetrySink` cap and emits the structured denial through the
+    // returned handle. `None` only if registration was refused (it isn't here);
+    // a refused registration would just silence the snitch, never crash.
+    let denied: Option<Metric> = telemetry().register_metric("snitchos.fs.denied", MetricKind::Gauge);
     loop {
         let Ok(r) = endpoint().receive_with_reply() else {
             continue;
@@ -60,7 +66,9 @@ fn main() {
         // never interprets them. On refusal, snitch the structured `(inode,
         // attempted)` to the denial gauge, then reply `Denied` — never silent.
         if let Err(attempted) = check_rights(req.op(), badge.rights) {
-            let _ = telemetry().emit(Denial { inode: badge.inode, attempted }.pack());
+            if let Some(denied) = denied {
+                let _ = denied.emit(Denial { inode: badge.inode, attempted }.pack());
+            }
             let _ = reply(reply_handle, Response::Err(FsError::Denied).encode());
             continue;
         }

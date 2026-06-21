@@ -1,7 +1,7 @@
 # Plan: Userspace-defined metrics (debt #2)
 
 **Work lands on:** `main` (no feature branches — see CLAUDE.md). User handles commits.
-**Status:** Steps 1 & 2 SHIPPED. Step 1: `kernel_core::metric::MetricTable` (host-tested, mutants all caught). Step 2: `RegisterMetric`/`EmitMetric` syscalls + runtime bindings + `userspace-custom-metric` itest (10/10). Next: Step 3 (FS denial gauge self-registers — removes the `run_ipc_counter` hack).
+**Status:** Steps 1–3 SHIPPED. Step 1: `kernel_core::metric::MetricTable` (host-tested, mutants all caught). Step 2: `RegisterMetric`/`EmitMetric` syscalls + runtime bindings + `userspace-custom-metric` itest (10/10). Step 3: FS server self-registers `snitchos.fs.denied`; kernel special-casing (`FS_DENIED_METRIC`, `CounterKind`, `run_ipc_counter`) deleted; all 8 `fs-*` scenarios 10/10. Only Step 4 (optional ergonomics) remains.
 
 ## Goal
 
@@ -172,7 +172,18 @@ unregistered handle is refused.
 > **PR boundary** — the syscall surface + runtime API + the per-process table wired
 > onto `Process`.
 
-### Step 3 — First consumer: FS denial gauge self-registers (removes the `run_ipc_counter` hack)
+### Step 3 — First consumer: FS denial gauge self-registers (removes the `run_ipc_counter` hack) ✅ SHIPPED
+
+> Landed. `user/fs/src/bin/fs-server.rs` registers `snitchos.fs.denied` (Gauge)
+> at startup via `telemetry().register_metric(...)` and emits the packed `Denial`
+> through the returned `Metric` handle. Kernel special-casing deleted from
+> `kernel/src/trap/user.rs`: the `FS_DENIED_METRIC` static, `fs_denied_metric_id()`,
+> its `register_gauge` line in `init_metric`, the `CounterKind` enum, and the
+> per-program counter on `Launch::Ipc` — `run_ipc_counter` collapsed to `run_ipc`
+> (every IPC program now bootstraps with the plain `snitchos.user.telemetry_total`
+> sink). `fs-lookup-rights-gate` resolves the gauge by name+value, so the migration
+> is transparent: all 8 `fs-*` scenarios 10/10; ipc/rpc/badge families green;
+> default + itest builds + clippy clean.
 
 **Acceptance criteria:** the FS server registers `"snitchos.fs.denied"` (gauge)
 itself and emits via the new path; the kernel-side `FS_DENIED_METRIC` registration
