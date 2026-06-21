@@ -860,9 +860,10 @@ pub fn maybe_preempt(from_user: bool) {
 pub fn exit_now() -> ! {
     // `empty_ok = false`: a terminating task has nowhere to fall back to, so an
     // empty runqueue is fatal (prepare_switch panics rather than returning).
-    // Re-use `Yield` on the wire — a dedicated `Exit` reason is deferred until a
-    // host consumer needs to distinguish it.
-    let (_current_ctx, next_ctx) = prepare_switch(CurrentDisposition::Exit, SwitchReason::Yield, false)
+    // The switch carries `SwitchReason::Exit` so an exit is distinguishable from
+    // a voluntary `Yield` on the wire (the collector ignores the reason today,
+    // but the frame is the contract — an exit is not a yield).
+    let (_current_ctx, next_ctx) = prepare_switch(CurrentDisposition::Exit, SwitchReason::Exit, false)
         .expect("prepare_switch with empty_ok=false returns Some or panics");
 
     // SAFETY: `next_ctx` points at the `UnsafeCell<TaskContext>` of a live

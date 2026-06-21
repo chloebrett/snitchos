@@ -59,6 +59,10 @@ pub static USER_HOG_ELF: &[u8] = include_bytes!(env!("SNITCHOS_USER_HOG_ELF"));
 /// interrupt-masked S-mode.
 pub static SYSCALL_HOG_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SYSCALL_HOG_ELF"));
 
+/// The `workload=console-echo` program: loops `ConsoleRead` → `DebugWrite`,
+/// echoing typed UART input — the Tier-0 polled-console-input demo.
+pub static CONSOLE_ECHO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_CONSOLE_ECHO_ELF"));
+
 /// The `workload=ipc` programs: `ipc-sender` holds a `SEND` cap and sends one
 /// inline message; `ipc-receiver` holds a `RECV` cap, receives it, and
 /// re-emits the payload. They rendezvous over one kernel-brokered endpoint.
@@ -251,6 +255,10 @@ pub static USER_HOG: ProgramSpec = ProgramSpec { elf: USER_HOG_ELF, launch: Laun
 /// `workload=syscall-hog`: the syscall-spamming hog.
 pub static SYSCALL_HOG: ProgramSpec = ProgramSpec { elf: SYSCALL_HOG_ELF, launch: Launch::Plain };
 
+/// `workload=console-echo`: the Tier-0 console echo loop (ambient — `ConsoleRead`
+/// and `DebugWrite` need no caps).
+pub static CONSOLE_ECHO: ProgramSpec = ProgramSpec { elf: CONSOLE_ECHO_ELF, launch: Launch::Plain };
+
 /// An IPC program on the shared `DEMO_ENDPOINT` with `rights_bits` and default
 /// user telemetry — the common case (the FS server is the lone exception, with
 /// its own counter).
@@ -404,6 +412,11 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
             ProgramSpawn { name: "syscall_hog", program: &SYSCALL_HOG, priority: Priority::Normal },
             ProgramSpawn { name: "worker_a", program: &WORKER_A, priority: Priority::Normal },
         ],
+    }),
+    // v0.11 Tier-0 console input: a single echo program reading typed UART input.
+    (WorkloadKind::ConsoleEcho, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "console_echo", program: &CONSOLE_ECHO, priority: Priority::Normal }],
     }),
     // v0.8b priority demo: a High CPU-bound `greedy` (the hog) vs a Low
     // cooperative worker — priority respected, aging keeps Low fed.
@@ -689,11 +702,19 @@ pub fn copy_from_user(ptr: usize, len: usize, dst: &mut [u8]) -> Option<&[u8]> {
 /// Used by the `ConsoleRead` syscall to deliver buffered input into the caller's
 /// buffer. The copy must complete before `SUM` drops.
 pub fn copy_to_user(ptr: usize, src: &[u8]) -> Option<usize> {
-    todo!(
-        "mirror copy_from_user: if !user_range_writable(ptr, src.len()) return None; \
-         else SUM-guard a copy_nonoverlapping(src.as_ptr() -> ptr as *mut u8, src.len()), \
-         return Some(src.len())"
-    )
+    if !crate::mmu::user_range_writable(ptr, src.len()) {
+        return None;
+    }
+    // SAFETY: every page in the range was just validated mapped `W|U` in the
+    // active address space. `SUM` is set only across the copy and cleared
+    // immediately after; the kernel writes into the user pointer, never derefs it
+    // for reads. The source is a kernel slice, valid for `src.len()` bytes.
+    unsafe {
+        core::arch::asm!("csrs sstatus, {}", in(reg) SUM);
+        core::ptr::copy_nonoverlapping(src.as_ptr(), ptr as *mut u8, src.len());
+        core::arch::asm!("csrc sstatus, {}", in(reg) SUM);
+    }
+    Some(src.len())
 }
 
 /// Switch to the process's address space (`root_pa`) and drop to U-mode at

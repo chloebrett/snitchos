@@ -20,6 +20,7 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("heap-grow", "SNITCHOS_HEAP_GROW_ELF"),
     ("user_hog", "SNITCHOS_USER_HOG_ELF"),
     ("syscall_hog", "SNITCHOS_SYSCALL_HOG_ELF"),
+    ("console_echo", "SNITCHOS_CONSOLE_ECHO_ELF"),
     ("ipc-sender", "SNITCHOS_IPC_SENDER_ELF"),
     ("ipc-receiver", "SNITCHOS_IPC_RECEIVER_ELF"),
     ("rpc-client", "SNITCHOS_RPC_CLIENT_ELF"),

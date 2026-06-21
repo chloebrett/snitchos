@@ -96,6 +96,12 @@ pub enum WorkloadKind {
     /// against a regression that re-enables interrupts inside long syscalls
     /// without a `need_resched` drain. See `plans/v0.8c-need-resched-on-syscall-return.md`.
     SyscallHog,
+    /// v0.11 Tier-0 console input: a `console-echo` program that loops
+    /// `ConsoleRead` → `DebugWrite`, echoing typed UART input back as `Log`
+    /// frames. Proves the polled-RX path (UART → timer drain → ring →
+    /// `ConsoleRead` → userspace) end to end. See
+    /// `plans/console-tier0-polled-rx.md`.
+    ConsoleEcho,
     /// v0.8b priority demo: a `High`-priority and a `Low`-priority cooperative
     /// worker share one hart. The High worker runs far more often (priority
     /// respected), but the Low worker still makes progress (aging prevents
@@ -193,6 +199,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "heap-grow" => Some(WorkloadKind::HeapGrow),
             "user-hog" => Some(WorkloadKind::UserHog),
             "syscall-hog" => Some(WorkloadKind::SyscallHog),
+            "console-echo" => Some(WorkloadKind::ConsoleEcho),
             "priorities" => Some(WorkloadKind::Priorities),
             "block-wake" => Some(WorkloadKind::BlockWake),
             "ipc" => Some(WorkloadKind::Ipc),
@@ -313,6 +320,11 @@ mod tests {
     #[test]
     fn syscall_hog_is_not_a_storm() {
         assert!(!WorkloadKind::SyscallHog.is_storm());
+    }
+
+    #[test]
+    fn selects_console_echo() {
+        assert_eq!(select("workload=console-echo"), Some(WorkloadKind::ConsoleEcho));
     }
 
     #[test]

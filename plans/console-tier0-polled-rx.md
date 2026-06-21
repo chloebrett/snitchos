@@ -77,13 +77,25 @@ type a key → UART RX FIFO (≤16B hw) → [handle_timer drains, hart 0] → ke
    The `CONSOLE_RX` lock IS safe in the timer handler (leaf lock, drain+ConsoleRead
    only, both `SIE==0`, no alloc/emit). Verified: `boot-reaches-heartbeat` green
    with the drain in the hot path.
-4. **`ConsoleRead` syscall.** `abi::Syscall::ConsoleRead = 15` + a trap handler
-   that drains ring→`copy_to_user`→returns count.
-5. **Userspace binding.** `console_read(&mut [u8]) -> usize` in `user/runtime`
-   (mirror `debug_write`).
-6. **Demo + itest.** `workload=console-echo`: a program looping
-   `n = console_read(buf); if n>0 { debug_write(&buf[..n]) }`. Scenario types bytes
-   and asserts they come back as a `Log` frame.
+4. **`ConsoleRead` syscall ✅ DONE (2026-06-21).** `abi::Syscall::ConsoleRead = 15`
+   (+`from_usize`+tests); dispatch in `syscall/mod.rs` → `syscall/console.rs::
+   handle_console_read` (validate writable range → `console::read_into` →
+   `copy_to_user` → return count). Added `mmu::user_range_writable` + `trap::user::
+   copy_to_user` (the `copy_from_user` write mirror). Clippy-clean.
+5. **Userspace binding ✅ DONE (2026-06-21).** `console_read(&mut [u8]) -> usize`
+   in `user/runtime` (mirrors `debug_write`).
+6. **Demo + itest.** Split:
+   - **6a — `console-echo` workload ✅ DONE (2026-06-21), bootable.** `bootargs`
+     `ConsoleEcho` variant (+test); `user/hello/src/bin/console_echo.rs` (loops
+     `console_read`→`debug_write`, emits a `console_echo.alive` marker span); ELF
+     embed; `CONSOLE_ECHO` `ProgramSpec` + `LAYOUTS` entry; `main.rs` match arm.
+     Builds + clippy-clean. **Manually verifiable:** `cargo xtask boot --workload
+     console-echo` + type (echo appears as `Log` frames via `cargo xtask reader`).
+   - **6b — harness injection + scenario — TODO.** Needs a `View`→`Boot` stdin
+     channel (`Arc<Mutex<ChildStdin>>` shared into each `View`, `View::send_input`;
+     spawn with `stdin(piped())`). Then scenario `console-echo-round-trips`: wait
+     `console_echo.alive` → `send_input(b"hi\n")` → assert a `Log` echo. This is a
+     deliberate harness change (scenarios currently only *read* via `View`).
 
 ## The test-infra wrinkle (§E flagged — real work)
 

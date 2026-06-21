@@ -363,6 +363,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::HeapGrow)
         | Some(WorkloadKind::UserHog)
         | Some(WorkloadKind::SyscallHog)
+        | Some(WorkloadKind::ConsoleEcho)
         | Some(WorkloadKind::Priorities)
         | Some(WorkloadKind::Ipc)
         | Some(WorkloadKind::IpcRpc)

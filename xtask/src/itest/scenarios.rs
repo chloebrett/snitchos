@@ -1033,6 +1033,20 @@ pub fn smp_ping_pong_cadence(h: &mut View) -> Result<(), String> {
 /// asm `switch_into` correctness, and the exiting task's stack being
 /// abandoned cleanly (no scribble, no fault).
 pub fn sched_task_exits_cleanly(h: &mut View) -> Result<(), String> {
+    // The exit's context switch carries `SwitchReason::Exit` on the wire — an
+    // exit is distinguishable from a voluntary yield. `exit_smoke` is the only
+    // task that exits in this boot, so any `ContextSwitch{Exit}` is its. Asserted
+    // first: it's emitted *at* the exit, before the heartbeat later drains the
+    // `exit_smoke_hits` metric below.
+    h.wait_for(SEC * 30, |f, _| {
+        matches!(f, OwnedFrame::ContextSwitch { reason, .. }
+            if matches!(reason, protocol::SwitchReason::Exit))
+    })
+    .ok_or(
+        "no ContextSwitch{Exit} within 30s — `exit_now` didn't label the exit switch \
+         distinctly from a yield on the wire (or the exit task never ran)",
+    )?;
+
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
             strings.get(name_id).map(String::as_str)
