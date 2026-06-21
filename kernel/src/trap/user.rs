@@ -645,21 +645,23 @@ const SIE: usize = 1 << 1; // Interrupt Enable (live): clear before arming sscra
 /// Copy a byte buffer from user memory into `dst`, returning the copied slice,
 /// or `None` if `(ptr, len)` is not a valid user range (or doesn't fit `dst`).
 ///
-/// The user pages are mapped — the trap kept the process's `satp` — but `SUM`
-/// is cleared while in U-mode, so a bare kernel deref of a user pointer would
-/// fault. We range-check with `user_range_ok`, then briefly set `sstatus.SUM`
-/// to permit the read, copy into the kernel buffer, and clear it again. The
-/// copy must complete before `SUM` drops: the caller dereferences `dst`, never
-/// the user pointer. Fault-graceful copy (an in-range but unmapped pointer) is
-/// a deferred refinement; today such a pointer faults to S-mode (kernel bug
-/// panic) rather than refusing — userspace can only pass mapped names.
+/// The user pages are mapped under the process's `satp` (the trap kept it), but
+/// `SUM` is cleared while in U-mode, so a bare kernel deref of a user pointer
+/// would fault. We validate the range with [`crate::mmu::user_range_readable`]
+/// — both that it's wholly in the user half *and* that every page is mapped
+/// `R|U` — then briefly set `sstatus.SUM` to permit the read, copy into the
+/// kernel buffer, and clear it again. The copy must complete before `SUM`
+/// drops: the caller dereferences `dst`, never the user pointer.
+///
+/// An in-range but **unmapped** pointer is now refused (`None`) rather than
+/// faulting the kernel — the page-table walk catches it before the `SUM` deref.
 pub fn copy_from_user(ptr: usize, len: usize, dst: &mut [u8]) -> Option<&[u8]> {
-    if !kernel_core::mmu::user_range_ok(ptr, len) || len > dst.len() {
+    if len > dst.len() || !crate::mmu::user_range_readable(ptr, len) {
         return None;
     }
-    // SAFETY: range validated wholly within the user half and `<= dst.len()`;
-    // the process page table is active so the bytes are mapped. `SUM` is set
-    // only across the copy and cleared immediately after.
+    // SAFETY: every page in the range was just validated mapped `R|U` in the
+    // active address space and the length fits `dst`. `SUM` is set only across
+    // the copy and cleared immediately after.
     unsafe {
         core::arch::asm!("csrs sstatus, {}", in(reg) SUM);
         core::ptr::copy_nonoverlapping(ptr as *const u8, dst.as_mut_ptr(), len);

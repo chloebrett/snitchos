@@ -453,6 +453,24 @@ pub fn current_satp_root() -> usize {
     (satp & PPN_MASK) << 12
 }
 
+/// Whether the user range `[ptr, ptr+len)` is mapped readable (`R|U`) in the
+/// **current** address space — the pre-check `copy_from_user` runs so an
+/// in-range-but-unmapped pointer is refused rather than faulting the kernel on
+/// the `SUM` deref. Walks the active page table (`current_satp_root`) via
+/// `KernelPtMem` using the host-tested [`core_mmu::range_mapped`]; subsumes the
+/// user-half bounds check.
+#[must_use]
+pub fn user_range_readable(ptr: usize, len: usize) -> bool {
+    let mem = KernelPtMem;
+    core_mmu::range_mapped(
+        current_satp_root(),
+        ptr,
+        len,
+        core_mmu::PtePerms::R.union(core_mmu::PtePerms::U),
+        &mem,
+    )
+}
+
 /// Activate the address space rooted at `root_pa` on this hart: write
 /// `satp` (Sv39 mode + PPN) and `sfence.vma` to flush stale translations.
 /// Used by the scheduler to switch address spaces when it switches into a

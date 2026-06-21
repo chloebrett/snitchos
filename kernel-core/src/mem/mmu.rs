@@ -512,6 +512,33 @@ pub fn copy_across(
     Ok(())
 }
 
+/// Whether every page in the user range `[va, va+len)` (in the address space
+/// rooted at `root_pa`) is mapped with at least `required` permissions. The
+/// read-only pre-check `copy_from_user` runs so an in-range-but-**unmapped**
+/// pointer is *refused* rather than faulting the kernel on the `SUM` deref —
+/// the same `translate` walk `copy_across` uses, without moving any bytes.
+/// Subsumes [`user_range_ok`] (a range outside the user half is `false`);
+/// `len == 0` is vacuously `true`.
+#[must_use]
+pub fn range_mapped(root_pa: usize, va: usize, len: usize, required: PtePerms, mem: &dyn PtMem) -> bool {
+    if len == 0 {
+        return true;
+    }
+    if !user_range_ok(va, len) {
+        return false;
+    }
+    let mut done = 0;
+    while done < len {
+        match translate(root_pa, va + done, mem) {
+            Some(leaf) if leaf.perms.contains(required) => {}
+            _ => return false,
+        }
+        let off = (va + done) & (PAGE_SIZE - 1);
+        done += core::cmp::min(PAGE_SIZE - off, len - done);
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1146,6 +1173,60 @@ mod tests {
     fn translate_of_an_unmapped_va_is_none() {
         let mem = MockPtMem::new(16);
         assert_eq!(translate(mem.root_pa(), 0x40201000, &mem), None);
+    }
+
+    #[test]
+    fn range_mapped_true_for_a_mapped_in_page_range() {
+        let mut mem = MockPtMem::new(16);
+        let root = mem.root_pa();
+        map(root, 0x40201000, 0x8000_0000, ru(), &mut mem).unwrap();
+        assert!(range_mapped(root, 0x40201010, 16, ru(), &mem));
+    }
+
+    #[test]
+    fn range_mapped_false_for_an_unmapped_page() {
+        let mem = MockPtMem::new(16);
+        assert!(!range_mapped(mem.root_pa(), 0x40201000, 16, ru(), &mem));
+    }
+
+    #[test]
+    fn range_mapped_false_when_a_spanned_page_is_unmapped() {
+        // The range straddles two pages; only the first is mapped → refuse.
+        let mut mem = MockPtMem::new(16);
+        let root = mem.root_pa();
+        map(root, 0x40201000, 0x8000_0000, ru(), &mut mem).unwrap();
+        assert!(!range_mapped(root, 0x40201ff8, 16, ru(), &mem));
+    }
+
+    #[test]
+    fn range_mapped_true_across_two_mapped_pages() {
+        let mut mem = MockPtMem::new(16);
+        let root = mem.root_pa();
+        map(root, 0x40201000, 0x8000_0000, ru(), &mut mem).unwrap();
+        map(root, 0x40202000, 0x8000_1000, ru(), &mut mem).unwrap();
+        assert!(range_mapped(root, 0x40201ff8, 16, ru(), &mem));
+    }
+
+    #[test]
+    fn range_mapped_false_when_perms_insufficient() {
+        // Page mapped W|U, but the required R|U isn't granted (no R bit).
+        let mut mem = MockPtMem::new(16);
+        let root = mem.root_pa();
+        map(root, 0x40201000, 0x8000_0000, wu(), &mut mem).unwrap();
+        assert!(!range_mapped(root, 0x40201000, 16, ru(), &mem));
+    }
+
+    #[test]
+    fn range_mapped_true_for_zero_len() {
+        let mem = MockPtMem::new(16);
+        assert!(range_mapped(mem.root_pa(), 0x40201000, 0, ru(), &mem));
+    }
+
+    #[test]
+    fn range_mapped_false_outside_the_user_half() {
+        // Subsumes `user_range_ok`: a kernel-half VA is refused regardless.
+        let mem = MockPtMem::new(16);
+        assert!(!range_mapped(mem.root_pa(), KERNEL_OFFSET, 16, ru(), &mem));
     }
 
     #[test]
