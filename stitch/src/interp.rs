@@ -892,6 +892,68 @@ fn eval_field(object: &Value, name: &str) -> Result<Value, RuntimeError> {
         .ok_or_else(|| RuntimeError::new(format!("{} has no field `{name}`", data.type_name)))
 }
 
+/// Assign `value` to a place expression (an lvalue): a variable, the receiver
+/// `@`, or a field path rooted at one of those. Records are immutable, so a
+/// field assignment doesn't mutate in place — it rebuilds the containing record
+/// with the field replaced and reassigns the *root binding* (value semantics).
+/// A nested path (`a.b.x = v`) recurses: rebuild `b`, then assign `a.b`.
+fn assign_place(place: &Expr, value: Value, scope: &Env) -> Result<(), RuntimeError> {
+    match place {
+        Expr::Var(name) => assign_binding(name, value, scope),
+        Expr::SelfRef => assign_binding("@", value, scope),
+        Expr::Field { object, name } => {
+            let current = eval(object, scope)?;
+            let Value::Data(data) = &current else {
+                return Err(RuntimeError::new(format!(
+                    "cannot assign field `{name}` on {}",
+                    current.kind()
+                )));
+            };
+            assign_place(object, rebuild_with_field(data, name, value)?, scope)
+        }
+        _ => Err(RuntimeError::new("invalid assignment target")),
+    }
+}
+
+/// Reassign a named binding (or the receiver `@`), mapping the env's assignment
+/// errors to messages.
+fn assign_binding(name: &str, value: Value, scope: &Env) -> Result<(), RuntimeError> {
+    match scope.assign(name, value) {
+        Ok(()) => Ok(()),
+        Err(AssignError::Unbound) => Err(RuntimeError::new(format!(
+            "cannot assign to undefined variable `{name}`"
+        ))),
+        Err(AssignError::Immutable) => Err(RuntimeError::new(format!(
+            "cannot assign to immutable `{name}` (declare it with `let mut`)"
+        ))),
+    }
+}
+
+/// A copy of `data` with field `name` replaced by `value`. Errors if the record
+/// has no such field.
+fn rebuild_with_field(
+    data: &DataValue,
+    name: &str,
+    value: Value,
+) -> Result<Value, RuntimeError> {
+    let mut fields = data.fields.clone();
+    let slot = fields
+        .iter_mut()
+        .find(|(field_name, _)| field_name.as_deref() == Some(name));
+    let Some((_, old)) = slot else {
+        return Err(RuntimeError::new(format!(
+            "{} has no field `{name}`",
+            data.type_name
+        )));
+    };
+    *old = value;
+    Ok(Value::Data(Rc::new(DataValue {
+        type_name: data.type_name.clone(),
+        variant: data.variant.clone(),
+        fields,
+    })))
+}
+
 /// Evaluate a block: thread an environment through the statements (each `let`
 /// extends a fresh child scope, so bindings are visible to later statements but
 /// not outside the block), then evaluate the trailing expression — or `Unit`
@@ -930,25 +992,8 @@ fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env) -> Result<Value,
                 return apply_use(call, callback, &scope);
             }
             Stmt::Assign { target, value } => {
-                let Expr::Var(name) = target else {
-                    return Err(RuntimeError::new(
-                        "only a variable can be assigned (field assignment needs methods)",
-                    ));
-                };
                 let new_value = eval(value, &scope)?;
-                match scope.assign(name, new_value) {
-                    Ok(()) => {}
-                    Err(AssignError::Unbound) => {
-                        return Err(RuntimeError::new(format!(
-                            "cannot assign to undefined variable `{name}`"
-                        )));
-                    }
-                    Err(AssignError::Immutable) => {
-                        return Err(RuntimeError::new(format!(
-                            "cannot assign to immutable `{name}` (declare it with `let mut`)"
-                        )));
-                    }
-                }
+                assign_place(target, new_value, &scope)?;
             }
         }
     }
@@ -1317,6 +1362,48 @@ mod tests {
         assert_eq!(
             run_err("{ let x = 1  x = 2  x }"),
             "cannot assign to immutable `x` (declare it with `let mut`)"
+        );
+    }
+
+    #[test]
+    fn a_field_can_be_assigned_on_a_mut_binding() {
+        assert_eq!(
+            run_program(
+                "prod Point(x: Int, y: Int)  \
+                 main() = { let mut p = Point(1, 2)  p.x = 10  p.x }"
+            ),
+            Value::Int(10)
+        );
+    }
+
+    #[test]
+    fn assigning_a_field_leaves_other_fields_unchanged() {
+        assert_eq!(
+            run_program(
+                "prod Point(x: Int, y: Int)  \
+                 main() = { let mut p = Point(1, 2)  p.x = 10  p.y }"
+            ),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn assigning_a_field_on_an_immutable_binding_is_an_error() {
+        assert_eq!(
+            run_program_err(
+                "prod Point(x: Int, y: Int)  main() = { let p = Point(1, 2)  p.x = 10  p.x }"
+            ),
+            "cannot assign to immutable `p` (declare it with `let mut`)"
+        );
+    }
+
+    #[test]
+    fn assigning_an_unknown_field_is_an_error() {
+        assert_eq!(
+            run_program_err(
+                "prod Point(x: Int, y: Int)  main() = { let mut p = Point(1, 2)  p.z = 10  p.x }"
+            ),
+            "Point has no field `z`"
         );
     }
 
