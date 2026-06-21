@@ -27,7 +27,7 @@ mod workloads;
 
 pub(crate) use device::{console, uart, virtio_console};
 pub(crate) use mem::{frame, heap, heap_smoke, mmu};
-pub(crate) use obs::{heartbeat, tracing};
+pub(crate) use obs::{counter, heartbeat, tracing};
 pub(crate) use sched::{demo_tasks, process};
 pub(crate) use smp::{ipi, percpu, secondary, sync};
 pub(crate) use trap::{ipc, user};
@@ -203,6 +203,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // registered `Metrics` is held until `heartbeat::run` consumes
     // it at the end of kmain.
     let metrics = heartbeat::Metrics::register();
+    // Intern the `DeferredCounter` registry's names too, at boot — same
+    // rationale as `Metrics::register` (keep the `StringRegister` sends off the
+    // task-time path). The heartbeat then drains them via `counter::drain_all`.
+    counter::register_all();
 
     // Arm the periodic timer and enable interrupts. From here on, the
     // CPU wakes us via timer IRQ instead of us spinning on the cycle

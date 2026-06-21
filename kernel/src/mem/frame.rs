@@ -6,11 +6,11 @@
 //! the allocator never calls into the tracing path while holding its
 //! own lock (would deadlock — same constraint as the IRQ handler).
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
 use fdt::Fdt;
 use kernel_core::frame::Bitmap;
 use kernel_core::mmu::{pa_to_kernel_va, va_to_pa};
+
+use crate::counter::DeferredCounter;
 
 pub const FRAME_SIZE: usize = 4096;
 
@@ -32,12 +32,14 @@ static mut FRAME_BITS: [u64; BITMAP_WORDS] = [0u64; BITMAP_WORDS];
 /// The global frame allocator. Populated by `init_from_dtb`.
 static FRAME_ALLOC: crate::sync::Once<crate::sync::Mutex<Allocator>> = crate::sync::Once::new();
 
-/// Counters drained by the heartbeat thread. Updated outside the
-/// allocator lock to keep emission off the critical path.
-/// `Relaxed` everywhere: pure tallies, no payload to publish.
-pub static ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
-pub static FREE_COUNT: AtomicU64 = AtomicU64::new(0);
-pub static ALLOC_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Counters drained by the heartbeat thread. Bumped outside the allocator lock
+/// to keep emission off the critical path; the [`DeferredCounter`] registry
+/// owns the name + drain.
+///
+/// [`DeferredCounter`]: crate::counter::DeferredCounter
+pub static ALLOC_COUNT: DeferredCounter = DeferredCounter::new("snitchos.frames.allocated_total");
+pub static FREE_COUNT: DeferredCounter = DeferredCounter::new("snitchos.frames.freed_total");
+pub static ALLOC_FAIL_COUNT: DeferredCounter = DeferredCounter::new("snitchos.frames.alloc_failed_total");
 
 #[derive(Debug)]
 pub enum InitError {
@@ -157,11 +159,11 @@ pub fn alloc() -> Option<PhysFrame> {
     let result = alloc.lock().alloc();
     match result {
         Some(frame) => {
-            ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+            ALLOC_COUNT.inc();
             Some(frame)
         }
         None => {
-            ALLOC_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+            ALLOC_FAIL_COUNT.inc();
             None
         }
     }
@@ -185,7 +187,7 @@ pub fn alloc_zeroed() -> Option<PhysFrame> {
 pub fn free(frame: PhysFrame) {
     if let Some(alloc) = FRAME_ALLOC.get() {
         alloc.lock().free(frame);
-        FREE_COUNT.fetch_add(1, Ordering::Relaxed);
+        FREE_COUNT.inc();
     }
 }
 

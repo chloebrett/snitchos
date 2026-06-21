@@ -87,10 +87,8 @@ define_metrics! {
     gauge     intern_used               = "snitchos.intern.strings_used";
     gauge     time_ticks                = "snitchos.time.ticks";
     histogram irq_duration              = "snitchos.irq.timer.duration_ticks";
-    // frame allocator
-    counter   frames_allocated          = "snitchos.frames.allocated_total";
-    counter   frames_freed              = "snitchos.frames.freed_total";
-    counter   frames_alloc_failed       = "snitchos.frames.alloc_failed_total";
+    // frame allocator (the allocated/freed/alloc_failed counters are now
+    // `DeferredCounter`s drained via `counter::drain_all`)
     gauge     frames_in_use             = "snitchos.frames.in_use";
     gauge     frames_free               = "snitchos.frames.free";
     // kernel heap
@@ -187,6 +185,7 @@ pub fn run(metrics: Metrics) -> ! {
             frame_smoke();
             heap_smoke_pattern(count);
             emit_core(&metrics, count);
+            crate::counter::drain_all();
             emit_frame_metrics(&metrics);
             emit_heap_metrics(&metrics);
             emit_sched_metrics(&metrics);
@@ -263,9 +262,6 @@ fn emit_core(m: &Metrics, count: i64) {
 /// briefly take the allocator lock (heartbeat is single-threaded so
 /// no contention).
 fn emit_frame_metrics(m: &Metrics) {
-    emit!(m, frames_allocated    = frame::ALLOC_COUNT.load(Ordering::Relaxed));
-    emit!(m, frames_freed        = frame::FREE_COUNT.load(Ordering::Relaxed));
-    emit!(m, frames_alloc_failed = frame::ALLOC_FAIL_COUNT.load(Ordering::Relaxed));
     if let Some(stats) = frame::stats() {
         emit!(m, frames_in_use = stats.in_use);
         emit!(m, frames_free   = stats.free);
