@@ -14,9 +14,11 @@
 
 use alloc::collections::BTreeMap;
 
+use kernel_core::bootargs::WorkloadKind;
 use kernel_core::cap::Rights;
 use kernel_core::elf::{self, LoadSegment, SegmentPerms};
 use kernel_core::mmu::{MapError, PtePerms};
+use kernel_core::sched::Priority;
 use protocol::StringId;
 
 use crate::frame::{self, FRAME_SIZE};
@@ -315,22 +317,133 @@ pub extern "C" fn program_entry() -> ! {
     }
 }
 
-/// Spawn `program` on `hart` as task `name`, stashing its [`ProgramSpec`]
-/// address in the task's `arg` word for [`program_entry`]. The userspace
-/// counterpart to [`crate::sched::spawn_on`].
-pub fn spawn_program(hart: usize, name: &str, program: &'static ProgramSpec) -> kernel_core::sched::TaskId {
-    spawn_program_with_priority(hart, name, program, kernel_core::sched::Priority::Normal)
-}
-
-/// Like [`spawn_program`] but at an explicit scheduling priority.
-pub fn spawn_program_with_priority(
+/// Spawn `program` on `hart` as task `name` at `priority`, stashing its
+/// [`ProgramSpec`] address in the task's `arg` word for [`program_entry`] to
+/// read back. The userspace counterpart to [`crate::sched::spawn_on`].
+pub fn spawn_program(
     hart: usize,
     name: &str,
     program: &'static ProgramSpec,
-    priority: kernel_core::sched::Priority,
+    priority: Priority,
 ) -> kernel_core::sched::TaskId {
     crate::sched::spawn_on_with_arg(hart, name, program_entry, core::ptr::from_ref(program) as usize, priority)
 }
+
+/// One program a userspace workload spawns: task name, spec, and priority.
+pub struct ProgramSpawn {
+    pub name: &'static str,
+    pub program: &'static ProgramSpec,
+    pub priority: kernel_core::sched::Priority,
+}
+
+/// A userspace workload's spawn layout: whether it needs the shared IPC
+/// endpoint created first, and the programs to spawn (in order — servers
+/// before clients).
+pub struct UserLayout {
+    pub needs_endpoint: bool,
+    pub programs: &'static [ProgramSpawn],
+}
+
+/// The spawn layout for a *userspace* workload, or `None` for kernel-mode /
+/// storm / default selections (which `kmain` dispatches itself). A lookup into
+/// [`LAYOUTS`].
+pub fn user_layout(kind: WorkloadKind) -> Option<&'static UserLayout> {
+    LAYOUTS.iter().find(|(k, _)| *k == kind).map(|(_, layout)| layout)
+}
+
+/// The userspace workload → spawn-layout table: the single place each userspace
+/// workload's program set + endpoint need is declared. `kmain` loops over the
+/// selected entry rather than carrying a per-workload spawn arm. In a `static`
+/// so the nested program slices and `&SPEC` references live for the whole kernel.
+/// Spawn order within a workload is significant — servers/receivers first.
+static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
+    (WorkloadKind::Userspace, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "user_main", program: &HELLO, priority: Priority::Normal }],
+    }),
+    (WorkloadKind::UserspaceFault, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "user_fault", program: &FAULTER, priority: Priority::Normal }],
+    }),
+    (WorkloadKind::UserspaceSpanFlood, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "user_span_flood", program: &SPAN_FLOOD, priority: Priority::Normal }],
+    }),
+    (WorkloadKind::Workers, UserLayout {
+        needs_endpoint: false,
+        programs: &[
+            ProgramSpawn { name: "worker_a", program: &WORKER_A, priority: Priority::Normal },
+            ProgramSpawn { name: "worker_b", program: &WORKER_B, priority: Priority::Normal },
+        ],
+    }),
+    (WorkloadKind::HeapGrow, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "heap_grow", program: &HEAP_GROW, priority: Priority::Normal }],
+    }),
+    // Hog spawned first (runs first, never yields); the cooperative peer starves
+    // until timer preemption takes the CPU back.
+    (WorkloadKind::UserHog, UserLayout {
+        needs_endpoint: false,
+        programs: &[
+            ProgramSpawn { name: "user_hog", program: &USER_HOG, priority: Priority::Normal },
+            ProgramSpawn { name: "worker_a", program: &WORKER_A, priority: Priority::Normal },
+        ],
+    }),
+    (WorkloadKind::SyscallHog, UserLayout {
+        needs_endpoint: false,
+        programs: &[
+            ProgramSpawn { name: "syscall_hog", program: &SYSCALL_HOG, priority: Priority::Normal },
+            ProgramSpawn { name: "worker_a", program: &WORKER_A, priority: Priority::Normal },
+        ],
+    }),
+    // v0.8b priority demo: a High CPU-bound `greedy` (the hog) vs a Low
+    // cooperative worker — priority respected, aging keeps Low fed.
+    (WorkloadKind::Priorities, UserLayout {
+        needs_endpoint: false,
+        programs: &[
+            ProgramSpawn { name: "greedy", program: &USER_HOG, priority: Priority::High },
+            ProgramSpawn { name: "worker_b", program: &WORKER_B, priority: Priority::Low },
+        ],
+    }),
+    // IPC-family: server/receiver first so it's waiting when the peer sends.
+    (WorkloadKind::Ipc, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "ipc_receiver", program: &IPC_RECEIVER, priority: Priority::Normal },
+            ProgramSpawn { name: "ipc_sender", program: &IPC_SENDER, priority: Priority::Normal },
+        ],
+    }),
+    (WorkloadKind::IpcRpc, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "rpc_server", program: &RPC_SERVER, priority: Priority::Normal },
+            ProgramSpawn { name: "rpc_client", program: &RPC_CLIENT, priority: Priority::Normal },
+        ],
+    }),
+    (WorkloadKind::BadgeMint, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "badge_minter", program: &BADGE_MINTER, priority: Priority::Normal },
+            ProgramSpawn { name: "badge_client", program: &BADGE_MINT_CLIENT, priority: Priority::Normal },
+        ],
+    }),
+    // Two clients over the *one* endpoint — each gets a distinct badge.
+    (WorkloadKind::BadgeHandout, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "badge_handout_server", program: &BADGE_HANDOUT_SERVER, priority: Priority::Normal },
+            ProgramSpawn { name: "badge_handout_client_a", program: &BADGE_HANDOUT_CLIENT, priority: Priority::Normal },
+            ProgramSpawn { name: "badge_handout_client_b", program: &BADGE_HANDOUT_CLIENT, priority: Priority::Normal },
+        ],
+    }),
+    (WorkloadKind::Fs, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "fs_server", program: &FS_SERVER, priority: Priority::Normal },
+            ProgramSpawn { name: "fs_client", program: &FS_CLIENT, priority: Priority::Normal },
+        ],
+    }),
+];
 
 /// Build a fresh address space, grant the process its bootstrap
 /// capability, load `image` into it, and drop to U-mode. Never returns —
