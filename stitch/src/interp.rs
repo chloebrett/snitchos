@@ -130,33 +130,15 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             body: (**body).clone(),
             env: env.clone(),
         }))),
-        Expr::Call { callee, args } if matches!(callee.as_ref(), Expr::Field { .. }) => {
-            let Expr::Field { object, name } = callee.as_ref() else {
-                unreachable!("guard guarantees a Field")
-            };
-            let receiver = eval(object, env)?;
-            let Value::Data(data_value) = receiver else {
-                return Err(RuntimeError::new(format!("Receiver must be a DataValue")));
-            };
-            let method = env
-                .lookup_method(data_value.type_name.as_str(), name)
-                .ok_or_else(|| {
-                    RuntimeError::new(format!("no method {name} on {}", data_value.type_name))
-                })?;
-            let mut arg_values: Vec<Value> = Vec::new();
-            for arg in args {
-                let arg_value = eval(&arg.value, env)?;
-                arg_values.push(arg_value);
-            }
-            let mut method_env = env.globals_only();
-            method_env = method_env.extend("@".to_string(), Value::Data(data_value.clone()));
-            for (param, arg) in method.params.iter().zip(&arg_values) {
-                method_env = method_env.extend(param.name.clone(), arg.clone());
-            }
-            let body = method.body.expect("`On` methods always have a body");
-            eval(&body, &method_env)
-        }
-        Expr::Call { callee, args } => eval_call(&eval(callee, env)?, args, env),
+        // `receiver.method(args)` parses as a call whose callee is a field
+        // access (there is no dedicated method-call node). Intercept that shape
+        // *before* evaluating the callee — `receiver.method` isn't a value on
+        // its own; the receiver and the name must be resolved together against
+        // the method registry. Any other call falls through to `eval_call`.
+        Expr::Call { callee, args } => match callee.as_ref() {
+            Expr::Field { object, name } => eval_method_call(object, name, args, env),
+            _ => eval_call(&eval(callee, env)?, args, env),
+        },
         Expr::Field { object, name } => eval_field(&eval(object, env)?, name),
         Expr::Try(operand) => eval_try(eval(operand, env)?),
         Expr::SafeField { object, name } => eval_safe_field(eval(object, env)?, name),
@@ -191,6 +173,54 @@ fn eval_call(callee: &Value, args: &[Arg], env: &Env) -> Result<Value, RuntimeEr
         values.push(eval(&arg.value, env)?);
     }
     apply_values(callee, &values, env)
+}
+
+/// Dispatch a method call `object.name(args)`. There is no method-call AST node,
+/// so this is reached from the `Call { callee: Field }` interception in `eval`.
+///
+/// The lookup is type-directed (not lexical): evaluate the receiver, find the
+/// method registered for its type, then run the method's body in a fresh global
+/// scope — globals and other methods are reachable, but the *caller's* locals
+/// are not, the same hygiene a closure gets from its captured env. The receiver
+/// is bound as `@` and the arguments to the method's parameters.
+fn eval_method_call(
+    object: &Expr,
+    name: &str,
+    args: &[Arg],
+    env: &Env,
+) -> Result<Value, RuntimeError> {
+    let receiver = eval(object, env)?;
+    // Methods attach to `prod`/`sum` instances; only those carry a type name to
+    // dispatch on. A primitive (`5.foo()`) has no method table.
+    let Value::Data(data) = &receiver else {
+        return Err(RuntimeError::new(format!(
+            "cannot call method `{name}` on {}",
+            receiver.kind()
+        )));
+    };
+    let method = env
+        .lookup_method(&data.type_name, name)
+        .ok_or_else(|| RuntimeError::new(format!("{} has no method `{name}`", data.type_name)))?;
+
+    if args.len() != method.params.len() {
+        return Err(RuntimeError::new(format!(
+            "method `{name}` expects {} argument(s), got {}",
+            method.params.len(),
+            args.len()
+        )));
+    }
+
+    // Arguments evaluate in the caller's scope; the body runs in global scope.
+    let mut method_env = env.globals_only().extend("@".to_string(), receiver.clone());
+    for (param, arg) in method.params.iter().zip(args) {
+        method_env = method_env.extend(param.name.clone(), eval(&arg.value, env)?);
+    }
+
+    let body = method
+        .body
+        .as_ref()
+        .expect("an `on`-block method always has a body (parser-enforced)");
+    eval(body, &method_env)
 }
 
 /// Evaluate a pipe `left |> right`. If `right` is a call `f(a, …)`, insert
@@ -2140,6 +2170,24 @@ mod tests {
         assert_eq!(
             run_program("prod Box(n: Int)  on Box { plus(k) = @n + k }  main() = Box(7).plus(3)"),
             Value::Int(10)
+        );
+    }
+
+    #[test]
+    fn calling_a_method_with_the_wrong_arity_is_an_error() {
+        assert_eq!(
+            run_program_err(
+                "prod Box(n: Int)  on Box { plus(k) = @n + k }  main() = Box(7).plus(1, 2)"
+            ),
+            "method `plus` expects 1 argument(s), got 2"
+        );
+    }
+
+    #[test]
+    fn calling_an_unknown_method_is_an_error() {
+        assert_eq!(
+            run_program_err("prod Box(n: Int)  on Box { get() = @n }  main() = Box(7).missing()"),
+            "Box has no method `missing`"
         );
     }
 

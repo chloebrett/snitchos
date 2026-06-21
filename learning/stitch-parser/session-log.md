@@ -125,3 +125,25 @@
 **Confidence calibration:** S6 7/10. Learner felt ready for S7 and **started wiring up the `On` block dispatch themselves** before the session formally opened — exactly the build-it-yourself goal of the whole track.
 
 **Next:** S7 — **learner implements dispatch.** Parser tour complete (S1–S6). The runtime algorithm is fully specified in the S5 log + cheat sheet: (1) `register_items` must stop dropping `Item::On`/`Item::Contract` (the `_ => {}`) and build a method registry keyed by `type_name`; (2) `eval_call`/`eval_field` gain a method-lookup fallback (`Call{callee: Field}` → find method by name on the value's type → contract-default fallback). TDD, learner-driven.
+
+## S7 — Learner implements dispatch (basic `on X`) — THE PAYOFF ✓
+
+The whole track's destination. Learner drove the implementation; I reviewed/guided each step and wrote the red test staircase + two helpers on request. **Scope: basic `on X` (inherent methods) only; `on X : C` contract default-method fallback explicitly deferred.**
+
+**What shipped (all green: 292 + 11 + 3, clippy clean modulo one no-arg `format!` to drop):**
+- **Registry** — `register_items` now handles `Item::On`, accumulating methods into `HashMap<String, Vec<Method>>` keyed by `type_name` via the `entry().or_default().extend(...)` idiom (after a first pass fought `get_mut`+`insert` and `Copy`-on-`Vec`). Multiple `on` blocks per type accumulate (S5 insight, test-locked).
+- **Env bridge** — added a `methods: Rc<OnceCell<HashMap<String, Vec<Method>>>>` field (mirroring `globals`, same letrec rationale), propagated in `bind`, `set_methods` setter, `lookup_method(type, name) -> Option<Method>` reader (two-key, find-by-name, clone-out), and a `globals_only()` hygiene helper (shared Rcs, `locals: None`) so method bodies run in global scope, not the caller's locals — the closure-hygiene principle applied to methods.
+- **Dispatch** — new guarded `eval` arm `Expr::Call { callee, args } if callee is Field`, placed *before* the generic call arm (the S2 interception fork: split the Field, eval object→receiver, get `Data.type_name`, `lookup_method`, arity-check, bind params + receiver-as-`@` on a `globals_only` env, eval `method.body`).
+- **`@`** — new `Expr::SelfRef` arm resolving the receiver bound under reserved name `"@"`; `@field` flows through the existing `Field` arm for free.
+
+**Teaching arc that worked:** the red-test staircase (each test isolating one concern) drove incremental wiring — `dispatches_an_inherent_method` (`@`-free) went green on dispatch alone, then `SelfRef` + receiver-binding lit up the other three in one step. Diagnosed exactly as predicted.
+
+**Gotchas surfaced (learner-corrected with guidance):** `matches!` binds nothing (re-destructure in body); rust-analyzer auto-imported `std::intrinsics::unreachable` (the *function*) instead of the prelude macro → `core_intrinsics` E0658; `?` on `Option` in a `Result` fn (→ `ok_or_else`); `let Some(Value::Data(..)) = value` (value isn't an `Option`); `unreachable!` on a non-`Data` receiver is a real error path, not unreachable; `.or_else(|_| Err(new))` discards the informative original error.
+
+**Concepts taught alongside:** what a `Value` is (Token→Expr→Value progression; runtime tag = the type; Rc payloads; Method-is-a-recipe-not-a-Value); why `OnceCell` (capture-before-fill / letrec); what `letrec` is and its etymology (`let` + `rec`; introduce-then-fill; vs `let`/`let*`); the `entry` API vs get_mut+insert.
+
+**Deferred (next session candidates):** `on X : C` contract conformance + default-method fallback (the `contract: Option<Type>` field is captured but unused; `Item::Contract` still dropped); method-not-found error wording test; the no-arg `format!` clippy cleanup; `mut`/`free` method modifiers at eval time.
+
+**Bloom's reached:** Create — learner built a working language feature from a self-derived spec, debugging real compiler errors. Track destination reached.
+
+**Confidence calibration:** (not formally rated — implementation flow; demonstrated competence by driving the impl with only spot guidance).
