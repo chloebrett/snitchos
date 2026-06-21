@@ -163,6 +163,68 @@ Spawn + the shell, motivated by "drivers in userspace," not by the shell.
 
 ---
 
+## Component inventory + critical path
+
+Every architectural piece, grouped by subsystem. **[CP]** = on the critical path to
+the first demo (_shell spawns `cat` with a delegated file cap; the trace proves
+`cat` could only touch that one file_). **[D]** = deferred (needed eventually, not
+for the minimal milestone). Note: **polled UART RX is [D]** — a leaf on the deferred
+console branch, not load-bearing for the demo.
+
+### A. Process creation & delegation (the heart — all CP)
+
+1. **Spawn syscall** `[CP]` — generalize the boot path (`new_user_root → Process → load → enter`) to a userspace-invokable syscall.
+2. **Cap-delegation / transplant** `[CP]` — resolve the caller's handles, insert copies into the child's `CapTable`. Prior art: `reply_with_cap` (v0.9c) already moves a cap between tables; this is the N-cap, new-table version.
+3. **Startup-cap convention** `[CP, underestimated]` — how a spawned program _finds_ its delegated caps. Today hardcoded (`a0`=telemetry, `a2`=endpoint); delegated caps need a defined startup layout (known handle ordering or a cap-array the runtime exposes). Small but foundational — every spawned program's ABI.
+4. **Program source** `[CP→D]` — 1a: an embedded-program registry selected by id (ELFs already embedded). 1b: load the ELF from the FS via a File cap + `EXEC` (needs `user/fs`).
+
+### B. Process lifecycle (CP for a _usable_ shell)
+
+5. **Exit + teardown** `[CP, underestimated / gnarliest]` — `Exit` (syscall 1) must reclaim the user page table + frames + `CapTable` + `Box<Task>` + scheduler slot. Tasks are `-> !` today with zero teardown. Reclaiming a live address space leak-free is the fiddliest single item.
+6. **Wait / join** `[CP]` — parent blocks until child exits, woken on exit. This is what makes the shell _loop_.
+
+### C. Notifications (the gateway — CP, but for processes, not devices)
+
+7. **Async notification primitive** `[CP]` — wake a blocked task without a full message rendezvous. **First consumer is Wait (B6), not devices** — which is why it floats to the top of the sequence. Forks: payload-free vs valued; one-shot vs latching; a Notification object/cap vs a plain blocking `Wait(child)` syscall. (Child-exit alone may only need a blocking `Wait`; the general Notification object is what Tier-1 devices later need.)
+
+### D. The shell & its world (CP)
+
+8. **init / first-process bootstrap** `[CP]` — a real `init` holding root caps that spawns the shell and grants it its **session caps** (dir/file caps = its "world", a console path, the ability to Spawn). The root of the delegation graph; generalizes today's hardcoded per-workload `kmain` spawns.
+9. **The shell program** (`user/shell`) `[CP]` — read → parse → resolve → delegate → spawn → wait.
+10. **The programs it runs** (`cat`, `ls`, …) `[CP]` — small bins that take authority from delegated caps; depend on (3).
+
+### E. Console input — Tier 0 scaffold (D, smaller than it looks)
+
+11. **Polled UART RX** `[D]` — read `RBR` when `LSR` data-ready.
+12. **ConsoleRead syscall** `[D]` — ambient, mirrors `DebugWrite`.
+13. **Who polls, and when?** `[D, wrinkle]` — with no interrupt, bytes typed while the kernel isn't looking are lost unless something drains `RBR` periodically. Needs either a busy-wait in `ConsoleRead` (blocks the hart — bad) or a **periodic kernel poll** (piggyback the heartbeat) draining into a small **RX ring**. The ring + poller is the real Tier-0 work, not the register read.
+14. **Line discipline** `[D]` — echo / backspace / enter → lines; lives in userspace.
+
+### F. Console input — Tier 1 principled (D — its own milestone)
+
+15. **PLIC + external-interrupt path** (scause 9, claim/complete) `[D]`
+16. **IRQ→notification binding** (IRQHandler cap) `[D]` — _here_ the Notification object (C7) earns its general form.
+17. **Userspace MMIO mapping** (device-memory cap / `MapDevice`) `[D]`
+18. **DMA buffer primitive** (device-visible physical memory — the `TX_STAGING` problem in userspace) `[D]`
+19. **Userspace virtio driver + console server** `[D]` — with the IOMMU non-goal caveat (above).
+
+### G. Cross-cutting (D)
+
+20. **Resource quota** (spawn/memory) — the resource axis; deferred.
+21. **Spawn/Exit telemetry** — likely a `Spawn`/`Exit` frame + reuse of `CapEvent`/`ThreadRegister`; mostly free.
+
+### The critical-path core is smaller than the inventory
+
+The leanest demo needs only **1, 2, 3, 5, 6, 7, 8, 9, 10** + the FS read path. It can be shaved further for a _first_ milestone:
+
+- **Skip FS lookup-minting:** `init` hands the shell a ready `(foo, READ)` File cap; the shell just _delegates_ it to `cat`. Demonstrates the whole delegation story without `lookup`-mints-a-cap yet.
+- **Skip interactive input entirely:** drive the shell from a hardcoded command first — **all of E and F vanish** from the first milestone.
+- **Possibly skip Wait at first:** a one-shot "spawn `cat`, see the `CapEvent`" demo doesn't strictly need join; a _looping_ shell does.
+
+Irreducible core: **Spawn + cap-transplant + startup-cap ABI + Exit/teardown + (Wait→notification) + an init that grants the shell its world.** Everything console is genuinely off the critical path.
+
+---
+
 ## Sequencing
 
 ```
