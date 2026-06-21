@@ -11,7 +11,7 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{Metric, MetricKind, entry, telemetry};
+use snitchos_user::{Metric, entry, register_gauge};
 
 /// The value emitted to the registered metric — a recognisable sentinel the
 /// integration test asserts on the wire.
@@ -26,11 +26,9 @@ const UNREGISTERED_HANDLE: usize = 7;
 fn main() {
     // Register a process-named gauge and emit to it through the returned handle.
     // The name crosses the kernel boundary once, here.
-    if let Some(metric) = telemetry().register_metric("snitchos.probe.custom", MetricKind::Gauge) {
-        let _ = metric.emit(SAMPLE);
-    }
+    register_gauge("snitchos.probe.custom").emit(SAMPLE);
 
     // Reach for a metric we never registered — the kernel refuses (the snitch is
     // the point), and no sample is emitted.
-    let _ = Metric::from_raw_handle(UNREGISTERED_HANDLE).emit(99);
+    Metric::from_raw_handle(UNREGISTERED_HANDLE).emit(99);
 }

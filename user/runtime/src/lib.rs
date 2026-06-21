@@ -323,15 +323,21 @@ impl TelemetrySink {
         invoke(self.handle, value as usize)
     }
 
-    /// Register a userspace-named metric, returning a [`Metric`] handle to emit
-    /// through — or `None` if the kernel refused (this `TelemetrySink` cap is
-    /// invalid, the name pointer is bad, or the per-process metric quota is
-    /// full). The name crosses the kernel boundary *once*, here: the kernel
-    /// interns it into a fresh id and binds it to a handle in this process's own
-    /// metric table. [`Metric::emit`] then carries only the handle + value, so
-    /// the hot path ships no string. The process names its own metrics; the
-    /// kernel learns them at registration, never ahead of time.
-    pub fn register_metric(self, name: &str, kind: MetricKind) -> Option<Metric> {
+    /// Register a userspace-named metric, returning a [`Metric`] to emit through.
+    /// The name crosses the kernel boundary *once*, here: the kernel interns it
+    /// into a fresh id and binds it to a handle in this process's own metric
+    /// table. [`Metric::emit`] then carries only the handle + value, so the hot
+    /// path ships no string. The process names its own metrics; the kernel learns
+    /// them at registration, never ahead of time.
+    ///
+    /// On refusal (this `TelemetrySink` cap is invalid, the name pointer is bad,
+    /// or the per-process metric quota is full) the returned `Metric` is a
+    /// **no-op** — its `emit` does nothing — mirroring how [`Tracer::span`]
+    /// yields an inert [`Span`]. The kernel snitches the refusal, so userspace
+    /// need not branch. Most callers want the free [`register_counter`] /
+    /// [`register_gauge`] / [`register_histogram`] functions, which read this
+    /// process's startup `TelemetrySink` for you.
+    pub fn register_metric(self, name: &str, kind: MetricKind) -> Metric {
         let handle: usize;
         // SAFETY: `ecall`; the kernel validates this `TelemetrySink` handle,
         // copies `name` under `user_range_ok`, interns it, stores it in our
@@ -347,8 +353,32 @@ impl TelemetrySink {
                 in("a3") kind as usize,
             );
         }
-        (handle != usize::MAX).then_some(Metric { handle })
+        Metric {
+            handle: (handle != usize::MAX).then_some(handle),
+        }
     }
+}
+
+/// Register a process-named counter through this process's startup
+/// `TelemetrySink`, returning a [`Metric`] to [`emit`](Metric::emit) through.
+/// The ergonomic front door to [`TelemetrySink::register_metric`]: no cap or
+/// kind to name. A refused registration yields an inert `Metric` (the kernel
+/// snitches it), so the call site stays a one-liner.
+#[must_use]
+pub fn register_counter(name: &str) -> Metric {
+    telemetry().register_metric(name, MetricKind::Counter)
+}
+
+/// Register a process-named gauge — a snapshot value. See [`register_counter`].
+#[must_use]
+pub fn register_gauge(name: &str) -> Metric {
+    telemetry().register_metric(name, MetricKind::Gauge)
+}
+
+/// Register a process-named histogram — a sample distribution. See [`register_counter`].
+#[must_use]
+pub fn register_histogram(name: &str) -> Metric {
+    telemetry().register_metric(name, MetricKind::Histogram)
 }
 
 /// The kind of a userspace-registered metric, as the `RegisterMetric` syscall
@@ -366,13 +396,18 @@ pub enum MetricKind {
 }
 
 /// A capability-shaped handle to a metric *this process registered* (via
+/// [`register_counter`] / [`register_gauge`] / [`register_histogram`] or
 /// [`TelemetrySink::register_metric`]). Emitting carries only the handle + value
 /// — the kernel resolves it against this process's own metric table, so a
 /// process can only emit to metrics it named, never forge another's. Holding an
 /// integer is not authority: an unregistered handle is refused.
+///
+/// An inert `Metric` (`handle == None`) is what a refused registration returns;
+/// its `emit` is a no-op, mirroring an inert [`Span`]. Cheap to hold and emit
+/// through unconditionally — no `if let` at the call site.
 #[derive(Clone, Copy)]
 pub struct Metric {
-    handle: usize,
+    handle: Option<usize>,
 }
 
 impl Metric {
@@ -381,26 +416,27 @@ impl Metric {
     /// reaches for a metric it may never have registered (and is refused).
     #[must_use]
     pub const fn from_raw_handle(handle: usize) -> Self {
-        Self { handle }
+        Self { handle: Some(handle) }
     }
 
-    /// Emit `value` to this metric. `Ok` if the kernel accepted it,
-    /// `Err(Denied)` if it refused (the handle names no metric this process
-    /// registered).
-    pub fn emit(self, value: i64) -> Result<(), Denied> {
-        let ret: usize;
+    /// Emit `value` to this metric. A no-op on an inert `Metric` (a refused
+    /// registration) — nothing to emit to. Otherwise fire-and-forget: the kernel
+    /// resolves the handle and emits, or snitches a `SyscallRefused` if the
+    /// handle names no metric this process registered (telemetry never makes the
+    /// caller handle its own refusal).
+    pub fn emit(self, value: i64) {
+        let Some(handle) = self.handle else { return };
         // SAFETY: `ecall`; the kernel resolves the handle against our metric
-        // table and emits the sample, returning 0 in a0 (or `usize::MAX` if the
-        // handle names nothing we registered).
+        // table and emits the sample. a0 returns a status we ignore — a refused
+        // emit is snitched kernel-side, not surfaced here.
         unsafe {
             asm!(
                 "ecall",
                 in("a7") Syscall::EmitMetric as usize,
-                inlateout("a0") self.handle => ret,
+                inlateout("a0") handle => _,
                 in("a1") value as usize,
             );
         }
-        if ret == 0 { Ok(()) } else { Err(Denied) }
     }
 }
 

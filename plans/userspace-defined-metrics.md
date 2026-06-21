@@ -1,7 +1,7 @@
 # Plan: Userspace-defined metrics (debt #2)
 
 **Work lands on:** `main` (no feature branches — see CLAUDE.md). User handles commits.
-**Status:** Steps 1–3 SHIPPED. Step 1: `kernel_core::metric::MetricTable` (host-tested, mutants all caught). Step 2: `RegisterMetric`/`EmitMetric` syscalls + runtime bindings + `userspace-custom-metric` itest (10/10). Step 3: FS server self-registers `snitchos.fs.denied`; kernel special-casing (`FS_DENIED_METRIC`, `CounterKind`, `run_ipc_counter`) deleted; all 8 `fs-*` scenarios 10/10. Only Step 4 (optional ergonomics) remains.
+**Status:** Steps 1–4 SHIPPED. Step 1: `kernel_core::metric::MetricTable` (host-tested, mutants all caught). Step 2: `RegisterMetric`/`EmitMetric` syscalls + runtime bindings + `userspace-custom-metric` itest. Step 3: FS server self-registers `snitchos.fs.denied`; kernel special-casing (`FS_DENIED_METRIC`, `CounterKind`, `run_ipc_counter`) deleted. Step 4: ergonomic `register_counter/gauge/histogram(name) -> Metric` free fns + inert-`Metric` no-op-on-refusal; `telemetry_total` stays pre-registered. **Only Step 5 (the deferred prefactor — retire the legacy `Invoke`/fixed-counter path, drop `{ counter }` from `TelemetrySink`, migrate `telemetry_total`) remains.**
 
 ## Goal
 
@@ -195,7 +195,22 @@ plain bootstrap sink like every other IPC process. The existing
 **GREEN:** FS server change + delete the kernel special-casing.
 > **PR boundary** — the migration; pays down the FS-era debt.
 
-### Step 4 (optional) — runtime ergonomics + telemetry_total migration
+### Step 4 (optional) — runtime ergonomics + telemetry_total migration ✅ SHIPPED
+
+> Landed. Clean `snitchos_user` API: free `register_counter` / `register_gauge` /
+> `register_histogram(name) -> Metric` (read the startup `TelemetrySink`
+> implicitly — no cap or kind at the call site), and `Metric::emit(value)` is now
+> fire-and-forget (`-> ()`). A refused registration returns an **inert `Metric`**
+> whose `emit` is a no-op, mirroring an inert `Span` — so call sites drop the
+> `if let Some(...)`. Adopted in `probe.rs` and `fs-server.rs` (the latter:
+> `let denied = register_gauge("snitchos.fs.denied"); … denied.emit(…)`).
+> `TelemetrySink::register_metric(name, kind)` kept as the explicit-cap primitive
+> the free fns delegate to. **`telemetry_total` decision: stays kernel-pre-registered**
+> — it's the legacy `Invoke` path's shared, genuinely-system-wide rate (the one
+> metric where global registration is *correct*, not the poisonable-snitch
+> anti-pattern); its migration onto the register path is Step 5's job, not churn
+> here. `userspace-custom-metric` + all `fs-*` scenarios green (20/20 on the two
+> API consumers); clippy clean.
 
 **Acceptance criteria:** a clean `snitchos_user` API (`register_counter(name) ->
 Metric`, `Metric::emit(value)`); decide whether bootstrap `telemetry_total` stays
