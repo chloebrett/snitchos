@@ -36,6 +36,16 @@ See [posts/post-9-moving-the-kernel-without-breaking-it.md](posts/post-9-moving-
 - **Step 12 (`Mutex<VecDeque>` → `heapless::spsc::Queue`)** — _complete_. The lock-free SPSC queue retires the chokepoint; the counter-intuitive result ("lock-free made it slower" at low contention) is [post 19](posts/post-19-lock-free-made-it-slower.md).
 - **Steps 13–14 (integration suite + closeout)** — _complete_. SMP scenarios: `smp-producer-consumer-correctness`, `smp-spans-carry-hart-id`, `smp-tlb-shootdown-visible` (added `mmu::remap` + a counterfactual-verified stale-TLB oracle), plus the ping-pong alternation oracle (which surfaced a real lost-wakeup, documented in `plans/scaling-corners.md`). Collector cashes the wire's `hart_id` into a `host.cpu_id` OTLP span attribute so Tempo can slice traces by CPU. See [post 21](posts/post-21-make-it-fail-first.md).
 
+**v0.7 "Userspace & capabilities"** — _complete_. Two steps. **v0.7a** drops the first userspace process to U-mode (the `user/` crates: a `runtime` with crt0 + syscall bindings + a `talc` heap, a `std` facade, an `#[entry]` macro, demo programs) behind one deliberately-*ambient* syscall — built the "Unix way" so the rewrite could feel the pain. **v0.7b** replaces ambient authority with **capabilities**: `kernel_core::cap` defines a `Capability { object, rights }` named by an opaque `Handle` and validated against the *calling* process's own `CapTable` — no ambient authority, every invocation checked. Per-process Sv39 page tables + the `U`-bit isolation firewall; `copy_from_user` validates a user range under a transient `SUM`; every refusal snitches a `SyscallRefused` frame. See [docs/capability-system-design.md](docs/capability-system-design.md).
+
+**v0.8 "Preemption & priorities"** — _complete_. Timer-driven preemption of **userspace** (the `SPP == User` gate; kernel code stays cooperative), layered on the v0.5 cooperative switch — the preempted task's full `TrapFrame` parks on its kernel stack while the scheduler swaps only the callee-saved registers. `ContextSwitch{Preempt}` + `snitchos.sched.preemptions_total`. **v0.8b** adds static priorities (Low/Normal/High) with **aging** anti-starvation: `pick_next` takes the highest *effective* priority, ties broken by longest wait — "ordered, but fair."
+
+**v0.9 "IPC over capabilities"** — _complete_. Synchronous **endpoints** (a pure rendezvous state machine in `kernel-core`): `send`/`receive` of an inline `[u64; 4]` message, blocking until a peer arrives. **v0.9b** `call`/`reply` RPC over a one-shot, kernel-minted **reply capability** (possession is authority; consumed on use). **v0.9c** **badged endpoints**: a `MINT`-holder derives badged `SEND` caps (`MintBadged`) and the kernel delivers the *unforgeable* badge to the receiver, so one endpoint demuxes many clients by capability — plus cap-transfer-in-reply. Trace context crosses the boundary (the sender's span parents the receiver's); new `Message` + `CapEvent` wire frames. See [docs/ipc-design.md](docs/ipc-design.md).
+
+**v0.10 "RAMfs"** — _complete_ (cap-agnostic core + protocol; front-end wired). The deliverable is the **`Filesystem` trait** (`fs-core` — inode-addressed, host-testable, imports no cap/IPC types) with a flat in-memory impl (`ramfs`) behind it, and `fs-proto` (the `Badge` packing `(inode, file_rights)`, opcodes, wire `Request`/`Response`). A **File cap is a badged endpoint cap**: the FS owns `MINT` and attenuates on `lookup`. Bulk bytes cross via a kernel **cross-address-space copy** (`CopyFromCaller`/`CopyToCaller` — message-passing, not shared memory). The `user/fs` front-end (`fs-server`/`fs-client`) does the badge→inode demux above the cap-agnostic trait. See [docs/filesystem-design.md](docs/filesystem-design.md).
+
+**v0.11 "Console input & spawn"** — _in progress_. **Tier-0 polled console input**: a host-tested `ConsoleRing`, drained from the UART in the timer handler (hart 0) into a `ConsoleRead` syscall and a userspace `console_read` — a typed key round-trips host → kernel → userspace. **Spawn-with-caps**: a `Spawn` syscall that creates a userspace process holding **exactly** the capabilities the parent delegates (`spawn(program, caps)`), with `cap::delegate` the host-tested, all-or-nothing core. The road to an **explicit-authority shell** where every grant is an observable `CapEvent`. See [plans/spawn-shell-and-console.md](plans/spawn-shell-and-console.md).
+
 Working:
 
 - no_std kernel; handwritten boot stub + linker script; ns16550a UART driver
@@ -59,7 +69,7 @@ Working:
 - SMP-shaped sync primitives: every kernel lock goes through `kernel::sync::{Mutex, Once}`, a single chokepoint with no-op preempt/IRQ hooks today. `kernel::percpu::PerCpu<T>` + `current_hartid()` stub the per-CPU access pattern. Workspace `disallowed_types` clippy lint blocks raw `spin::Mutex` outside `kernel::sync`. Sets v0.5 threading up so preempt-disable + SMP IRQ-disable land in one file
 - cooperative round-robin kernel-thread scheduler: `Task` struct + `Scheduler` + asm context switch (`kernel::sched::switch`); 4 threads at boot (main, idle, task_a, task_b); `spawn(name, entry)` + `yield_now()` API; cumulative `context_switches_total`, per-task `cpu_time_ticks` + `runs_total` metrics; per-task `SpanCursor` swapped on context switch so spans can survive yields. Wire format additions: `ThreadRegister`, `ContextSwitch{reason}`, `task_id` on `SpanStart`. Collector populates OTLP `thread.id`, `thread.name`, and (v0.6) `host.cpu_id` attributes per span — Tempo trace view shows scheduler decisions inline and traces can be sliced by the hart they ran on.
 
-Up next: **v0.7a** — the first userspace process, built deliberately the "Unix way" (one syscall, ambient authority) so v0.7b's capability rewrite can feel the pain. Then **v0.7b** (capabilities) and **v0.8** (IPC over capabilities) — the project's identity arc.
+Up next: an **explicit-authority shell** — the remaining critical-path pieces in [plans/spawn-shell-and-console.md](plans/spawn-shell-and-console.md): `Exit`/`Wait` (a parent reaps its spawned children), an `init` that grants the shell its starting world, then `user/shell` itself (read line → resolve → delegate → `spawn`). The payoff: `cat /foo` launches `cat` holding one read-only file cap and nothing else — and the delegation shows up live in the trace.
 
 See [posts/](posts/) for the per-milestone devlog.
 
@@ -109,7 +119,12 @@ cargo xtask itest <scenario>   # run one scenario by name
 cargo xtask itest --tag userspace  # run all scenarios carrying a tag
 cargo xtask itest --shared     # group scenarios by workload; one kernel boot per group (faster)
 cargo xtask itest --repeat N   # run the suite N times back-to-back; aggregate flake report
+cargo xtask itest-show         # print a failed capture's frame transcript (.itest-runs/); --scenario/--tail/--grep
 cargo xtask baseline show      # inspect the flake baseline (also: promote/discard/recover/adopt/prune/export/push)
+cargo xtask mutants            # mutation-test the host crates (cargo-mutants)
+cargo xtask clippy             # clippy the WHOLE workspace correctly (kernel for riscv, host crates for host)
+cargo xtask measure <workload> # benchmark a runtime workload (timed sampling)
+cargo xtask audit <crate>      # crate-audit evidence (per-pub-symbol callers, dead-code candidates)
 cargo xtask debug              # build kernel + run QEMU paused with GDB stub on :1234
 cargo xtask loc                # lines of code by crate + production/test split
 cargo xtask --help
@@ -136,15 +151,20 @@ killed at suite start by default (`--keep-existing-qemus` to disable).
 The suite builds **one** `itest-workloads` kernel and selects per-scenario
 via the `workload=<name>` bootarg (no per-scenario rebuilds; see
 [docs/runtime-workload-selection-design.md](docs/runtime-workload-selection-design.md)).
-Scenarios (25):
+~71 scenarios across these families:
 
 - **Boot + telemetry**: `boot-reaches-heartbeat`, `heartbeat-cadence`, `pre-init-order`, `kernel-runs-at-higher-half`.
-- **Frame allocator**: `frame-allocator-metrics`, `frame-allocator-oom` (`workload=frame-oom`).
-- **Kernel heap**: `kernel-heap-metrics`, `heap-oom` (`workload=heap-oom`).
-- **Scheduler (v0.5)**: `sched-context-switch-smoke`, `sched-spawn-registers-thread`, `sched-yield-round-trips`, `sched-spans-carry-task-id`, `sched-context-switches-on-wire`, `sched-span-survives-yield`, `sched-task-exits-cleanly`.
-- **Workload (v0.6)**: `workload-cooperative-baseline` (single-hart) and `smp-producer-consumer-correctness` (`workload=smp`, producer hart 0 / consumer hart 1) — producer/consumer histogram correctness invariant holds (`histogram_sum >= samples_consumed`), the latter across the hart boundary.
-- **SMP (v0.6 steps 7–10)**: `ipi-self-wakeup`, `smp-secondary-hart-boots`, `smp-spawn-on-hart-1-runs`.
-- **Stress storms**: `spawn-storm`, `ipi-pong`, `shootdown-storm`, `mutex-storm`, `virtio-storm` — cross-hart regression guards, each `workload=<name>`.
+- **Frame allocator / heap**: `frame-allocator-metrics`, `frame-allocator-oom`, `kernel-heap-metrics`, `heap-oom`, `heap-grows-on-demand`.
+- **Scheduler (v0.5)**: context-switch smoke, spawn/register, yield round-trips, spans carry task id, span survives yield, clean exit.
+- **SMP + workload (v0.6)**: cooperative baseline, cross-hart producer/consumer correctness (`histogram_sum >= samples_consumed` across the boundary), secondary-hart boot, IPI wakeup, TLB shootdown visibility, ping-pong cadence.
+- **Userspace + capabilities (v0.7)**: runs to U-mode, the `U`-bit fault firewall, bad-user-pointer refusal, span-quota refusal, two cooperative workers.
+- **Preemption + priorities (v0.8)**: runaway-user-task preempted, preemption telemetry, `syscall-hog-still-preempted`, `priorities-ordered-but-fair`.
+- **IPC (v0.9)**: message + trace cross the endpoint, prompt wakeup, RPC round-trips/nesting/`reply_recv`, badge mint+refuse, badge handout + per-client demux.
+- **Filesystem (v0.10)**: connect-mints-root, stat/create/write-read, lookup rights-gate, remove, readdir, cross-process span nesting.
+- **Console + spawn (v0.11)**: `console-echo-round-trips` (injected UART byte echoes back), `spawn-delegates-to-child` (parent delegates a cap; child uses it).
+- **Stress storms**: `spawn-storm`, `ipi-pong`, `shootdown-storm`, `mutex-storm`, `virtio-storm` — cross-hart regression guards.
+
+Tags for `--tag`: `boot`, `frame`, `heap`, `oom`, `sched`, `smp`, `ipi`, `workload`, `userspace`, `ipc`, `stress` (set per-row in the `catalog!` table in `xtask/src/itest.rs`).
 
 Useful flags:
 
@@ -160,13 +180,18 @@ lines of the scenario's QEMU log (kernel UART + QEMU stderr) are
 dumped inline — captures panic messages without anyone re-running
 under a debugger.
 
-A clean `cargo xtask itest` run is ~50 seconds wallclock (mostly
-QEMU boot times; two feature-flag rebuilds between default and OOM
-scenarios).
+Runtime is dominated by per-scenario QEMU boots (the suite builds
+**one** `itest-workloads` kernel up front and selects workloads at
+runtime, so there are no per-scenario rebuilds). `--shared` groups
+scenarios by workload to cut total boots substantially.
 
 ## Reading
 
 - [docs/README.md](docs/README.md) — design overview (the three pillars: observability, capabilities, microkernel).
+- [docs/capability-system-design.md](docs/capability-system-design.md) — the v0.7b capability model (handles, CapTable, rights, no ambient authority).
+- [docs/ipc-design.md](docs/ipc-design.md) — v0.9 endpoints, reply caps, badges.
+- [docs/filesystem-design.md](docs/filesystem-design.md) — v0.10 RAMfs: the `Filesystem` trait, File caps as badged endpoints, option-D copy.
+- [plans/spawn-shell-and-console.md](plans/spawn-shell-and-console.md) — the v0.11 explicit-authority shell: component inventory + critical path.
 - [docs/v0.1-hello-traced-world.md](docs/v0.1-hello-traced-world.md) — v0.1 milestone plan.
 - [plans/legacy/v0.2-grafana.md](plans/legacy/v0.2-grafana.md) — v0.2 implementation plan.
 - [plans/legacy/virtio-console.md](plans/legacy/virtio-console.md) — virtio-console implementation plan.
@@ -188,15 +213,25 @@ scenarios).
 ## Workspace layout
 
 ```
-kernel/         no_std RISC-V S-mode kernel; entry.S, linker.ld, drivers
+kernel/         no_std RISC-V S-mode kernel; entry.S, linker.ld, drivers, scheduler
 kernel-core/    host-buildable no_std lib: pure data + bookkeeping, unit-tested
+                (intern table, MMU/frame/heap logic, sched, cap, ipc, console ring)
 protocol/       postcard-encoded telemetry Frame enum (no_std); std-gated stream decoder
+abi/            kernel↔userspace syscall ABI (numbers, rights bits) — shared, no_std
 collector/      host-side: decode frames; export OTLP; serve /metrics
+fs-core/        the `Filesystem` trait + types (cap-agnostic, host-tested)
+ramfs/          flat in-memory `Filesystem` impl
+fs-proto/       FS IPC wire protocol: Badge packing, opcodes, Request/Response
+user/           userspace: runtime (crt0/syscalls/heap), std facade, macros,
+                and programs (hello, fs, shell-to-be)
+itest-harness/  the integration-test runner: scenarios, captures, flake baseline
 xtask/          orchestration commands (this file's "Quick start")
 stack/          docker-compose: Tempo + Prometheus + Grafana + provisioning
+stitch/         "Stitch" — a managed language for SnitchOS (side project)
 docs/           project design + milestone plans
 plans/          in-progress implementation plans
 posts/          devlog notes
+learning/       standalone "toy" crates for understanding concepts (separate workspace)
 ```
 
 ## QEMU controls
