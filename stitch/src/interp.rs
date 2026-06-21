@@ -236,11 +236,28 @@ fn eval_method_call(
         )));
     }
 
+    // A `mut` method writes its receiver back, so the receiver must be an
+    // assignable place — reject a temporary up front (before any side effects),
+    // rather than letting the write-back fail with a confusing message.
+    let is_mut = matches!(method.modifier, MethodModifier::Mut);
+    if is_mut && !is_assignable_place(object) {
+        return Err(RuntimeError::new(format!(
+            "cannot call mut method `{name}` on a temporary — it has no place to write back to"
+        )));
+    }
+
     // Arguments evaluate in the caller's scope; the body runs in global scope.
-    // An instance method also binds the receiver as `@`; a `free` method doesn't.
+    // An instance method binds the receiver as `@`; a `free` method doesn't. A
+    // `mut` method binds `@` mutably so its body can reassign `@`/`@field`, and
+    // the result is written back to the caller afterwards (value semantics, so
+    // mutation isn't shared until we reassign the caller's place).
     let mut method_env = env.globals_only();
     if let Some(receiver) = self_value {
-        method_env = method_env.extend("@".to_string(), receiver.clone());
+        method_env = if is_mut {
+            method_env.extend_mut("@".to_string(), receiver.clone())
+        } else {
+            method_env.extend("@".to_string(), receiver.clone())
+        };
     }
     for (param, arg) in method.params.iter().zip(args) {
         method_env = method_env.extend(param.name.clone(), eval(&arg.value, env)?);
@@ -250,7 +267,20 @@ fn eval_method_call(
         .body
         .as_ref()
         .expect("an `on`-block method always has a body (parser-enforced)");
-    eval(body, &method_env)
+    // A method is a call boundary, so a `?` early-return stops here (like a
+    // closure call) rather than escaping the method.
+    let result = match eval(body, &method_env) {
+        Err(RuntimeError::Return(value)) => value,
+        other => other?,
+    };
+
+    if is_mut {
+        let mutated = method_env
+            .lookup("@")
+            .expect("a mut method binds `@` for its (instance) receiver");
+        assign_place(object, mutated, env)?;
+    }
+    Ok(result)
 }
 
 /// Evaluate a pipe `left |> right`. If `right` is a call `f(a, …)`, insert
@@ -912,6 +942,16 @@ fn assign_place(place: &Expr, value: Value, scope: &Env) -> Result<(), RuntimeEr
             assign_place(object, rebuild_with_field(data, name, value)?, scope)
         }
         _ => Err(RuntimeError::new("invalid assignment target")),
+    }
+}
+
+/// Whether `expr` is an assignable place: a variable, `@`, or a field path
+/// rooted at one. (A temporary like `Counter(0)` or a literal is not.)
+fn is_assignable_place(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(_) | Expr::SelfRef => true,
+        Expr::Field { object, .. } => is_assignable_place(object),
+        _ => false,
     }
 }
 
@@ -2348,6 +2388,56 @@ mod tests {
         assert_eq!(
             run_program("prod Box(n: Int)  on Box { plus(k) = @n + k }  main() = Box(7).plus(3)"),
             Value::Int(10)
+        );
+    }
+
+    #[test]
+    fn a_mut_method_mutates_the_receiver() {
+        // `bump` writes `@n`; the change must persist back to the caller's `c`.
+        assert_eq!(
+            run_program(
+                "prod Counter(mut n: Int)  on Counter { mut bump() { @n = @n + 1 } }  \
+                 main() = { let mut c = Counter(0)  c.bump()  c.bump()  c.n }"
+            ),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn a_mut_method_can_early_return_via_try() {
+        // A `mut` body may use `?`; the early return stops at the method boundary
+        // and mutations made before it still persist.
+        assert_eq!(
+            run_program(
+                "prod Acct(mut bal: Int)  \
+                 on Acct { mut withdraw(amount: Int) -> Result<(), Str> = { \
+                   @bal = @bal - amount  Ok(()) } }  \
+                 main() = { let mut a = Acct(100)  a.withdraw(30)  a.bal }"
+            ),
+            Value::Int(70)
+        );
+    }
+
+    #[test]
+    fn a_mut_method_on_a_temporary_is_an_error() {
+        // No place to write the mutation back to.
+        assert_eq!(
+            run_program_err(
+                "prod Counter(mut n: Int)  on Counter { mut bump() { @n = @n + 1 } }  \
+                 main() = Counter(0).bump()"
+            ),
+            "cannot call mut method `bump` on a temporary — it has no place to write back to"
+        );
+    }
+
+    #[test]
+    fn a_mut_method_on_an_immutable_binding_is_an_error() {
+        assert_eq!(
+            run_program_err(
+                "prod Counter(mut n: Int)  on Counter { mut bump() { @n = @n + 1 } }  \
+                 main() = { let c = Counter(0)  c.bump()  c.n }"
+            ),
+            "cannot assign to immutable `c` (declare it with `let mut`)"
         );
     }
 

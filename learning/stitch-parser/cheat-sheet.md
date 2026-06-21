@@ -202,4 +202,10 @@ Expr::Call { callee, args } => match callee.as_ref() {
 - **Decision — receiver never implicit:** sibling calls are `@m()`, never bare `m()` (bare = lexical/global only). One flat name-resolution rule; locked by `a_bare_sibling_call_does_not_resolve_to_a_method`. See design doc `## on`.
 - **Not validated (deliberate, per S5 static/dynamic cut):** `on X : C` isn't checked to actually implement C's abstract methods — a missing one errors only when called.
 
-**Deferred:** `mut`/`free` method modifiers at eval.
+**Method modifiers (`free`/`mut`) — done.** `eval_method_call` branches on the receiver: `Value::Data` = instance (binds `@`), `Value::Constructor` = the type itself (for `free`/associated methods, no `@`). The modifier must match how it was reached (`free` on the type, instance/`mut` on a value), else an error.
+- **`free`** — `Type.method()`, resolved via the type's constructor value; no `@` bound.
+- **`mut`** — binds `@` *mutably*, runs the body (which can `@field = …`), then **writes the mutated `@` back** to the caller's receiver place via `assign_place`. Value semantics: mutation isn't shared until the write-back reassigns the caller's binding. The receiver must be an assignable place (`is_assignable_place`) — a temporary (`Counter(0).bump()`) is rejected up front; an immutable binding is rejected at write-back.
+- **Field assignment** (`obj.f = v`, `@f = v`): `assign_place` rebuilds the record with the field replaced and reassigns the *root* binding, recursing up a nested path (`a.b.x = v`). Records are immutable `Rc`s, so "mutate" = rebuild-then-reassign.
+- **Bonus fix:** method bodies now catch `?`'s early-return at the method boundary (like closures) — a latent bug from the S7 dispatch.
+
+**Deferred:** per-field `mut` enforcement — `prod Account(owner, mut balance)` declares only `balance` mutable, but `DataValue`/`Constructor` don't carry per-field mutability yet, so any field on a `mut` binding is assignable. Needs mutability tracked into the runtime value.
