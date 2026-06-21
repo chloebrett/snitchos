@@ -2,6 +2,7 @@
 //! typed: a `Value` carries its own kind, and operations check kinds at runtime
 //! (no implicit Int/Float coercion — that previews the eventual static types).
 
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -45,6 +46,26 @@ pub enum Value {
     /// A lazy sequence — possibly infinite. A shared, memoizing cell that forces
     /// on demand to nil or head + lazy tail. The lazy counterpart to `List`.
     Seq(Rc<LazySeq>),
+    /// A module: a named namespace of exported bindings, reached by path
+    /// (`Module.member`). A first-class value so `import M` can bind `M` and
+    /// `M.x` reuses the ordinary `.`-access dispatch. (Iteration 1 exports every
+    /// top-level item; `pub` filtering arrives next.)
+    Module(Rc<ModuleHandle>),
+}
+
+/// A module's exported bindings, keyed by name. Cloning a `Value::Module` shares
+/// the handle (`Rc`); two module values are equal only if they are the same
+/// module (identity, like a closure).
+pub struct ModuleHandle {
+    pub name: String,
+    pub exports: HashMap<String, Value>,
+}
+
+impl ModuleHandle {
+    /// The exported member named `name`, if any.
+    pub fn member(&self, name: &str) -> Option<Value> {
+        self.exports.get(name).cloned()
+    }
 }
 
 /// A lazy sequence cell: forced on demand, then memoized. Cloning a
@@ -194,6 +215,7 @@ impl Value {
             Value::Native(n) => format!("<builtin {}>", n.name),
             // Don't force — a Seq may be infinite.
             Value::Seq(_) => "<seq>".to_string(),
+            Value::Module(m) => format!("<module {}>", m.name),
             Value::Data(d) if d.fields.is_empty() => d.variant.clone(),
             Value::Data(d) => {
                 let fields = d
@@ -224,6 +246,7 @@ impl Value {
             Value::Closure(_) | Value::Constructor(_) | Value::Native(_) => "Function",
             Value::Data(_) => "a record",
             Value::Seq(_) => "Seq",
+            Value::Module(_) => "Module",
         }
     }
 }
@@ -244,6 +267,7 @@ impl fmt::Debug for Value {
             Value::Data(d) => write!(f, "{}{:?}", d.variant, d.fields),
             Value::Native(n) => write!(f, "Native({})", n.name),
             Value::Seq(_) => write!(f, "Seq"),
+            Value::Module(m) => write!(f, "Module({})", m.name),
         }
     }
 }
@@ -271,6 +295,8 @@ impl PartialEq for Value {
             (Value::Native(a), Value::Native(b)) => a.name == b.name,
             // Sequences are lazy/opaque — identity, like functions (no forcing).
             (Value::Seq(a), Value::Seq(b)) => Rc::ptr_eq(a, b),
+            // A module is a namespace, not data — identity equality.
+            (Value::Module(a), Value::Module(b)) => Rc::ptr_eq(a, b),
             // Structural equality (decision D): same type, variant, and fields.
             (Value::Data(a), Value::Data(b)) => {
                 a.type_name == b.type_name && a.variant == b.variant && a.fields == b.fields

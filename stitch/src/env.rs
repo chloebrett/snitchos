@@ -75,6 +75,22 @@ impl Env {
         }
     }
 
+    /// A sibling environment for another module: its own (fresh, not-yet-set)
+    /// globals slot, but **sharing** this one's method/field-mutability tables and
+    /// telemetry sink. Method dispatch is by runtime type name into one
+    /// program-wide table, and telemetry is program-wide, so those are shared
+    /// across every module; only the value namespace (`globals`) is per-module.
+    #[must_use]
+    pub fn sibling_module(&self) -> Env {
+        Env {
+            locals: None,
+            globals: Rc::new(OnceCell::new()),
+            methods: Rc::clone(&self.methods),
+            field_mut: Rc::clone(&self.field_mut),
+            sink: Rc::clone(&self.sink),
+        }
+    }
+
     /// A new environment with an immutable `name` binding, shadowing any
     /// existing binding and sharing the same globals + sink.
     #[must_use]

@@ -94,10 +94,20 @@ The orphan rule the design doc already gestures at, now enforceable because
 
 ## Phasing (TDD increments, green between each)
 
-1. **Module set + path access.** Runner accepts a module set; `Value::Module`;
-   `M.member` resolves a public member of another module. Cross-module *call*
-   works (`other.helper(x)`). Privacy not yet enforced (everything public) —
-   smallest step that proves the namespace + resolution wiring.
+1. ✅ **Module set + path access.** `eval_modules(modules, entry)` takes a module
+   set (`Module { name, items }`); `Value::Module(Rc<ModuleHandle>)`; `M.member`
+   resolves an export via the existing `.`-dispatch (a module arm in both
+   `eval_field` and `eval_method_call`). Cross-module *call* works
+   (`other.helper(x)`); each module evaluates in its own namespace (closures
+   capture their module env), sharing one program-wide method/field-mut table +
+   telemetry sink via `Env::sibling_module`. Two-phase registration: declare all
+   module globals (seeded from a once-registered prelude base), then link sibling
+   module values in. Privacy not enforced yet (everything exported); sibling
+   modules auto-visible by name. Errors: unknown member, unknown entry module.
+   *Deferred to a later refactor:* unify `eval_program` (single flat module) onto
+   `eval_modules` to drop the duplicated natives/prelude bootstrap. *Noted gap:*
+   top-level `let` consts parse but aren't registered as globals yet — orthogonal
+   to modules, surfaced while testing path access.
 2. **`pub` + privacy.** Parse `pub` on items; default-private. Path access and
    select-import of a private member error. The `pub`-less corpus still runs
    (single-module programs see their own privates).

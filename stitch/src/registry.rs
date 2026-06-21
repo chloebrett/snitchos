@@ -30,6 +30,44 @@ pub(crate) struct Registration {
     pub(crate) field_mut: HashMap<String, HashMap<String, bool>>,
 }
 
+impl Registration {
+    /// A registration whose value namespace starts from `globals` (a shared base
+    /// of natives + built-ins + prelude), ready to take a module's own items.
+    pub(crate) fn seeded(globals: HashMap<String, Value>) -> Self {
+        Registration { globals, ..Self::default() }
+    }
+
+    /// Fold another registration's *type-level* declarations — method lists,
+    /// field mutability, contracts, and conformances — into this one, leaving its
+    /// per-module `globals` untouched. Method dispatch, field mutability, and
+    /// contract coherence are program-wide, so every module's type declarations
+    /// merge into one registration that's baked once and installed into every
+    /// module's env.
+    pub(crate) fn absorb_types(&mut self, other: &Registration) {
+        for (type_name, methods) in &other.methods {
+            self.methods
+                .entry(type_name.clone())
+                .or_default()
+                .extend(methods.iter().cloned());
+        }
+        for (variant, fields) in &other.field_mut {
+            self.field_mut
+                .entry(variant.clone())
+                .or_default()
+                .extend(fields.iter().map(|(name, mutable)| (name.clone(), *mutable)));
+        }
+        for (name, methods) in &other.contracts {
+            self.contracts.insert(name.clone(), methods.clone());
+        }
+        for (type_name, contract_names) in &other.conformances {
+            self.conformances
+                .entry(type_name.clone())
+                .or_default()
+                .extend(contract_names.iter().cloned());
+        }
+    }
+}
+
 /// Record the `mut` flag of each named field of `variant` into the registry.
 /// Positional (unnamed) fields can't be assigned by name, so they're skipped.
 fn register_field_mut(reg: &mut Registration, variant: &str, fields: &[Field]) {
@@ -148,6 +186,42 @@ pub(crate) fn bake_contract_defaults(reg: &mut Registration) {
     for (type_name, method) in additions {
         reg.methods.entry(type_name).or_default().push(method);
     }
+}
+
+/// The names a module exports to other modules: the value-introducing top-level
+/// items it *declares* — functions, products, sum variants, and constants — but
+/// not the prelude or sibling modules also present in its globals. (`on`/
+/// `contract` introduce no value binding.) Iteration 1 exports every declared
+/// item; `pub` filtering arrives next. Paired with the module's globals by
+/// `collect_exports`.
+fn declared_names(items: &[Item]) -> Vec<String> {
+    let mut names = Vec::new();
+    for item in items {
+        match item {
+            Item::Func { name, .. } | Item::Prod { name, .. } | Item::Const { name, .. } => {
+                names.push(name.clone());
+            }
+            Item::Sum { variants, .. } => {
+                names.extend(variants.iter().map(|variant| variant.name.clone()));
+            }
+            Item::On { .. } | Item::Contract { .. } => {}
+        }
+    }
+    names
+}
+
+/// Build a module's export table: each name it declares paired with the value
+/// already registered for it in `globals`. Restricting to declared names keeps
+/// the prelude and sibling-module bindings (also in `globals`) out of the
+/// module's public surface.
+pub(crate) fn collect_exports(
+    items: &[Item],
+    globals: &HashMap<String, Value>,
+) -> HashMap<String, Value> {
+    declared_names(items)
+        .into_iter()
+        .filter_map(|name| globals.get(&name).map(|value| (name.clone(), value.clone())))
+        .collect()
 }
 
 /// Register the built-in `Maybe`/`Result` constructors: `Some`/`Ok`/`Err` take

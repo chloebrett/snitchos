@@ -9,9 +9,12 @@ use crate::natives::NATIVES;
 use crate::ops::{as_bool, eval_binary, eval_unary};
 use crate::parser::parse_program;
 use crate::pattern::eval_match;
-use crate::registry::{Registration, bake_contract_defaults, register_builtin_types, register_items};
+use crate::registry::{
+    Registration, bake_contract_defaults, collect_exports, register_builtin_types, register_items,
+};
 use crate::value::{
-    ClosureData, Constructor, DataValue, LazySeq, RuntimeError, Step, TelemetryEvent, Value,
+    ClosureData, Constructor, DataValue, LazySeq, ModuleHandle, RuntimeError, Step, TelemetryEvent,
+    Value,
 };
 
 /// Run a program: bind every top-level function into one shared global
@@ -49,6 +52,107 @@ pub fn eval_program_with_telemetry(
         None => Err(RuntimeError::new("no `main` function")),
     };
     (result, env.telemetry())
+}
+
+/// One module of a Stitch program: a name and its parsed top-level items. The
+/// loadable unit is a *set* of these — built in-memory by tests, read from `.st`
+/// files by the CLI.
+pub struct Module {
+    pub name: String,
+    pub items: Vec<Item>,
+}
+
+/// Run a multi-module program: register every module into its own value
+/// namespace (all sharing one program-wide method/dispatch table), then call the
+/// entry module's `main`. In iteration 1 sibling modules are mutually visible by
+/// name, reached by path (`other.helper(x)`); `pub`/`import` arrive next.
+///
+/// # Errors
+/// Returns `Err` if the entry module is unknown or has no `main`, or on any
+/// runtime fault.
+pub fn eval_modules(modules: &[Module], entry: &str) -> Result<Value, RuntimeError> {
+    eval_modules_with_telemetry(modules, entry).0
+}
+
+/// Like [`eval_modules`], but also returns the telemetry recorded during the run.
+pub fn eval_modules_with_telemetry(
+    modules: &[Module],
+    entry: &str,
+) -> (Result<Value, RuntimeError>, Vec<TelemetryEvent>) {
+    let base = Env::new();
+
+    // The natives + built-in types + prelude form a shared base namespace every
+    // module starts from. Registered once (capturing `base`), so the prelude's
+    // own `on`/`contract` declarations are merged once, not once per module.
+    let mut base_reg = Registration::default();
+    for native in NATIVES {
+        base_reg.globals.insert(native.name.to_string(), Value::Native(*native));
+    }
+    register_builtin_types(&mut base_reg.globals);
+    let prelude = parse_program(PRELUDE).expect("the prelude must parse");
+    register_items(&prelude, &base, &mut base_reg);
+
+    // One env per module, each sharing `base`'s method/field-mut tables + sink
+    // but with its own value namespace.
+    let envs = modules.iter().map(|_| base.sibling_module()).collect::<Vec<_>>();
+
+    // Phase 1 — declare. Each module's globals start from the shared base, then
+    // gain its own items (capturing that module's env). Type declarations from
+    // the prelude and every module merge into one program-wide registration.
+    let mut combined = Registration::default();
+    combined.absorb_types(&base_reg);
+    let mut per_module = Vec::with_capacity(modules.len());
+    for (module, env) in modules.iter().zip(&envs) {
+        let mut reg = Registration::seeded(base_reg.globals.clone());
+        register_items(&module.items, env, &mut reg);
+        combined.absorb_types(&reg);
+        per_module.push(reg);
+    }
+
+    // Bake contract defaults across the whole program, then install the shared
+    // dispatch tables. Every module env shares these slots, so set once (via
+    // `base`); `base`'s own globals back the prelude closures that captured it.
+    bake_contract_defaults(&mut combined);
+    base.set_globals(base_reg.globals.clone());
+    base.set_methods(combined.methods);
+    base.set_field_mut(combined.field_mut);
+
+    // Phase 2 — link. Each module exports its declared items; bind every module
+    // as a value in every *other* module's globals (iteration 1: all siblings
+    // visible by name), then install each module's globals.
+    let module_values = modules
+        .iter()
+        .zip(&per_module)
+        .map(|(module, reg)| {
+            Value::Module(Rc::new(ModuleHandle {
+                name: module.name.clone(),
+                exports: collect_exports(&module.items, &reg.globals),
+            }))
+        })
+        .collect::<Vec<_>>();
+    for (index, reg) in per_module.iter_mut().enumerate() {
+        for (other, value) in modules.iter().zip(&module_values) {
+            if other.name != modules[index].name {
+                reg.globals.insert(other.name.clone(), value.clone());
+            }
+        }
+    }
+    for (env, reg) in envs.iter().zip(per_module) {
+        env.set_globals(reg.globals);
+    }
+
+    let Some(entry_index) = modules.iter().position(|module| module.name == entry) else {
+        let error = RuntimeError::new(format!("no module named `{entry}`"));
+        return (Err(error), base.telemetry());
+    };
+    let env = &envs[entry_index];
+    let result = match env.lookup("main") {
+        Some(main) => eval_call(&main, &[], env),
+        None => Err(RuntimeError::new(format!(
+            "module `{entry}` has no `main` function"
+        ))),
+    };
+    (result, base.telemetry())
 }
 
 /// Evaluate an expression to a value in environment `env`.
@@ -211,6 +315,17 @@ fn eval_method_call(
             match receiver {
                 Value::Data(ref data) => (data.type_name.clone(), Some(receiver.clone())),
                 Value::Constructor(ref ctor) => (ctor.type_name.clone(), None),
+                // A module path call (`M.func(args)`): resolve the member in the
+                // module's exports and apply it — not a type-directed method.
+                Value::Module(ref module) => {
+                    let member = module.member(name).ok_or_else(|| {
+                        RuntimeError::new(format!(
+                            "module `{}` has no member `{name}`",
+                            module.name
+                        ))
+                    })?;
+                    return eval_call(&member, args, env);
+                }
                 other => {
                     return Err(RuntimeError::new(format!(
                         "cannot call method `{name}` on {}",
@@ -648,6 +763,13 @@ fn eval_safe_field(object: &Value, name: &str, env: &Env) -> Result<Value, Runti
 
 /// Read field `name` from a `Data` value.
 fn eval_field(object: &Value, name: &str) -> Result<Value, RuntimeError> {
+    // A module path (`M.member`) reuses `.`-access: resolve the member in the
+    // module's exports rather than reading a record field.
+    if let Value::Module(module) = object {
+        return module.member(name).ok_or_else(|| {
+            RuntimeError::new(format!("module `{}` has no member `{name}`", module.name))
+        });
+    }
     let Value::Data(data) = object else {
         return Err(RuntimeError::new(format!(
             "cannot read field `{name}` on {}",
@@ -822,10 +944,86 @@ fn apply_use(call: &Expr, callback: Value, env: &Env) -> Result<Value, RuntimeEr
 
 #[cfg(test)]
 mod tests {
-    use crate::interp::eval_program;
+    use crate::interp::{Module, eval_modules, eval_program};
     use crate::parser::parse_program;
-    use crate::test_support::{run, run_err, run_program, run_program_err, run_program_events};
+    use crate::test_support::{
+        run, run_err, run_modules, run_program, run_program_err, run_program_events,
+    };
     use crate::value::{TelemetryEvent, Value};
+
+    #[test]
+    fn a_module_can_call_a_function_in_another_module() {
+        // `main` reaches a function in module `math` by path. No privacy or
+        // imports yet — in iteration 1 sibling modules are mutually visible by
+        // name, and a path access resolves a member of the named module.
+        let result = run_modules(
+            &[
+                ("math", "double(x) = x * 2"),
+                ("main", "main() = math.double(21)"),
+            ],
+            "main",
+        );
+        assert_eq!(result, Value::Int(42));
+    }
+
+    #[test]
+    fn a_module_member_can_be_taken_by_path_then_applied() {
+        // Binding `math.double` (a bare path access, not a call) yields the
+        // function value itself — exercises the module arm of *field* access,
+        // distinct from the method-call path.
+        let result = run_modules(
+            &[
+                ("math", "double(x) = x * 2"),
+                ("main", "main() = { let f = math.double  f(21) }"),
+            ],
+            "main",
+        );
+        assert_eq!(result, Value::Int(42));
+    }
+
+    #[test]
+    fn calling_a_missing_module_member_is_an_error() {
+        let modules = [
+            Module {
+                name: "math".to_string(),
+                items: parse_program("double(x) = x * 2").expect("module should parse"),
+            },
+            Module {
+                name: "main".to_string(),
+                items: parse_program("main() = math.triple(3)").expect("module should parse"),
+            },
+        ];
+        let error = eval_modules(&modules, "main").expect_err("call should fail");
+        assert_eq!(error.message(), "module `math` has no member `triple`");
+    }
+
+    #[test]
+    fn an_unknown_entry_module_is_an_error() {
+        let modules = [Module {
+            name: "main".to_string(),
+            items: parse_program("main() = 1").expect("module should parse"),
+        }];
+        let error = eval_modules(&modules, "nope").expect_err("entry should be unknown");
+        assert_eq!(error.message(), "no module named `nope`");
+    }
+
+    #[test]
+    fn a_module_function_resolves_its_own_globals_not_the_callers() {
+        // `greet` calls a sibling `prefix` in *its own* module, even though the
+        // entry module has no `prefix` — each module evaluates in its own
+        // namespace (closures capture their defining module's env).
+        let result = run_modules(
+            &[
+                (
+                    "lib",
+                    "prefix() = 100  greet(x) = prefix() + x",
+                ),
+                ("main", "main() = lib.greet(23)"),
+            ],
+            "main",
+        );
+        assert_eq!(result, Value::Int(123));
+    }
 
     #[test]
     fn evaluates_an_integer_literal() {

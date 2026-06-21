@@ -2,7 +2,7 @@
 //! that split out of `interp` (`natives`, …). All drive the public API.
 
 use crate::env::Env;
-use crate::interp::{eval, eval_program, eval_program_with_telemetry};
+use crate::interp::{Module, eval, eval_modules, eval_program, eval_program_with_telemetry};
 use crate::parser::{parse, parse_program};
 use crate::value::{TelemetryEvent, Value};
 
@@ -32,6 +32,20 @@ pub(crate) fn run_program_err(src: &str) -> String {
     eval_program(&items)
         .expect_err("test program should fail at runtime")
         .message()
+}
+
+/// Parse a set of named modules (`(name, source)`) and run the entry module's
+/// `main`. The module set is the loadable unit — built in-memory here, from the
+/// filesystem in the CLI.
+pub(crate) fn run_modules(sources: &[(&str, &str)], entry: &str) -> Value {
+    let modules = sources
+        .iter()
+        .map(|(name, src)| Module {
+            name: (*name).to_string(),
+            items: parse_program(src).expect("test module should parse"),
+        })
+        .collect::<Vec<_>>();
+    eval_modules(&modules, entry).expect("test modules should evaluate")
 }
 
 /// Parse and run a program, returning the telemetry it emitted.
