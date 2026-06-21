@@ -192,28 +192,38 @@ fn eval_method_call(
     args: &[Arg],
     env: &Env,
 ) -> Result<Value, RuntimeError> {
-    let receiver = eval(object, env)?;
-    // The "receiver" expression is either an instance (`value.method()` → a
-    // `Data`, which binds `@`) or the type itself (`Type.method()` → the type's
-    // `Constructor`, for a `free`/associated method with no `@`). Both carry the
-    // type name to dispatch on; anything else has no method table.
-    let (type_name, self_value) = match &receiver {
-        Value::Data(data) => (data.type_name.as_str(), Some(&receiver)),
-        Value::Constructor(ctor) => (ctor.type_name.as_str(), None),
+    // Resolve what we're dispatching on. The object is usually evaluated to a
+    // value — a `Data` instance binds `@`; a `Constructor` is the type itself
+    // (for a `free` method, no `@`). Special case (Java-style type path): a bare
+    // name with no value that names a type with methods (a `sum`'s type name has
+    // no value, only its variants do) is resolved *as a type*, not evaluated.
+    let (type_name, self_value): (String, Option<Value>) = match object {
+        Expr::Var(type_path) if env.lookup(type_path).is_none() && env.has_methods(type_path) => {
+            (type_path.clone(), None)
+        }
         _ => {
-            return Err(RuntimeError::new(format!(
-                "cannot call method `{name}` on {}",
-                receiver.kind()
-            )));
+            let receiver = eval(object, env)?;
+            match receiver {
+                Value::Data(ref data) => (data.type_name.clone(), Some(receiver.clone())),
+                Value::Constructor(ref ctor) => (ctor.type_name.clone(), None),
+                other => {
+                    return Err(RuntimeError::new(format!(
+                        "cannot call method `{name}` on {}",
+                        other.kind()
+                    )));
+                }
+            }
         }
     };
-    let Some(method) = env.lookup_method(type_name, name) else {
+    let Some(method) = env.lookup_method(&type_name, name) else {
         // No method by that name. If the receiver is a record with a field of
         // that name, this is a *field call* — read the field and apply it (a
         // record may hold a closure). Methods take precedence; this fallback
-        // only runs when no method shadows the field. (`eval_field` errors for a
-        // non-record receiver, so the type-receiver case falls through.)
-        if let Ok(field_value) = eval_field(&receiver, name) {
+        // only runs when no method shadows the field. (Only an instance receiver
+        // has fields; a type-path/`Constructor` receiver falls through.)
+        if let Some(receiver) = &self_value
+            && let Ok(field_value) = eval_field(receiver, name)
+        {
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
                 values.push(eval(&arg.value, env)?);
@@ -267,9 +277,9 @@ fn eval_method_call(
     let mut method_env = env.globals_only();
     if let Some(receiver) = self_value {
         method_env = if is_mut {
-            method_env.extend_mut("@".to_string(), receiver.clone())
+            method_env.extend_mut("@".to_string(), receiver)
         } else {
-            method_env.extend("@".to_string(), receiver.clone())
+            method_env.extend("@".to_string(), receiver)
         };
     }
     for (param, arg) in method.params.iter().zip(args) {
@@ -1839,12 +1849,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "GAP: free methods resolve the receiver via the type's value, but \
-                a sum's type name isn't bound (only its variants are), so \
-                SumType.free_method() is unbound"]
     fn a_free_method_on_a_sum_type() {
-        // `free` methods are reached via the type name; a sum's type name isn't
-        // a value (only its variants are). Does `Maybe2.make()` work?
+        // `free` methods are reached via the type name. A sum's type name isn't a
+        // value (only its variants are), so `Maybe2.make()` resolves as a
+        // type-path call (Java-style): the name is looked up as a type, not
+        // evaluated as a value.
         assert_eq!(
             run_program(
                 "sum Maybe2 = Yes(Int) | No  on Maybe2 { free make() -> Maybe2 = No }  \

@@ -159,6 +159,15 @@ impl Env {
             .cloned()
     }
 
+    /// Whether any methods are registered for `type_name` — i.e. the name refers
+    /// to a type with an `on` block. Lets a bare type name be recognised as a
+    /// type-path receiver (`SumType.free_method()`) without it being a value.
+    pub fn has_methods(&self, type_name: &str) -> bool {
+        self.methods
+            .get()
+            .is_some_and(|methods| methods.contains_key(type_name))
+    }
+
     /// Whether `field` of `variant` is declared `mut` — `None` if the variant
     /// has no such field. The source of truth for field-assignment legality.
     pub fn field_mutability(&self, variant: &str, field: &str) -> Option<bool> {
