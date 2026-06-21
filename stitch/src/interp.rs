@@ -2581,6 +2581,158 @@ mod tests {
         );
     }
 
+    // --- adversarial probes: dispatch/field interactions (may surface gaps) ---
+
+    #[test]
+    #[ignore = "GAP: Call{Field} always dispatches as a method; a callable field \
+                can't be invoked as obj.f(args) — needs a no-such-method fallback \
+                to read-field-then-call"]
+    fn calling_a_field_that_holds_a_function() {
+        // `b.f(10)` where `f` is a field holding a closure. Intuitively this
+        // reads the field and calls it. Does method-dispatch interception break
+        // it (no method `f` exists)?
+        assert_eq!(
+            run_program(
+                "prod Box(f: Int)  main() = { let b = Box(x -> x + 1)  b.f(10) }"
+            ),
+            Value::Int(11)
+        );
+    }
+
+    #[test]
+    fn a_field_and_a_method_can_share_a_name() {
+        // `n` is both a field and a (zero-arg) method. `b.n` should read the
+        // field; `b.n()` should call the method.
+        assert_eq!(
+            run_program(
+                "prod Box(n: Int)  on Box { n() = 42 }  \
+                 main() = { let b = Box(1)  b.n + b.n() }"
+            ),
+            Value::Int(43)
+        );
+    }
+
+    #[test]
+    fn self_reference_outside_a_method_is_an_error() {
+        assert_eq!(
+            run_program_err("main() = @"),
+            "`@` is only valid inside a method body"
+        );
+    }
+
+    #[test]
+    #[ignore = "GAP: free methods resolve the receiver via the type's value, but \
+                a sum's type name isn't bound (only its variants are), so \
+                SumType.free_method() is unbound"]
+    fn a_free_method_on_a_sum_type() {
+        // `free` methods are reached via the type name; a sum's type name isn't
+        // a value (only its variants are). Does `Maybe2.make()` work?
+        assert_eq!(
+            run_program(
+                "sum Maybe2 = Yes(Int) | No  on Maybe2 { free make() -> Maybe2 = No }  \
+                 main() = match Maybe2.make() { Yes(n) => n  No => 0 }"
+            ),
+            Value::Int(0)
+        );
+    }
+
+    // --- edge-case probes (value semantics, nesting, sum dispatch, defaults) ---
+
+    #[test]
+    fn field_assignment_does_not_alias_a_copy() {
+        // `b = a` copies (value semantics); mutating `b.x` must leave `a` alone.
+        assert_eq!(
+            run_program(
+                "prod Point(mut x: Int, mut y: Int)  \
+                 main() = { let mut a = Point(1, 2)  let mut b = a  b.x = 9  a.x }"
+            ),
+            Value::Int(1)
+        );
+    }
+
+    #[test]
+    fn a_mut_method_does_not_alias_a_copy() {
+        // Same, through a mut method: bumping `b` must not touch `a`.
+        assert_eq!(
+            run_program(
+                "prod Counter(mut n: Int)  on Counter { mut bump() { @n = @n + 1 } }  \
+                 main() = { let mut a = Counter(0)  let mut b = a  b.bump()  a.n }"
+            ),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn a_nested_field_can_be_assigned() {
+        assert_eq!(
+            run_program(
+                "prod Inner(mut v: Int)  prod Outer(mut inner: Inner)  \
+                 main() = { let mut o = Outer(Inner(1))  o.inner.v = 5  o.inner.v }"
+            ),
+            Value::Int(5)
+        );
+    }
+
+    #[test]
+    fn a_nested_assignment_through_an_immutable_field_is_an_error() {
+        // `inner` isn't `mut`, so writing `o.inner.v` (which must rewrite
+        // `o.inner`) is rejected even though `v` itself is `mut`.
+        assert_eq!(
+            run_program_err(
+                "prod Inner(mut v: Int)  prod Outer(inner: Inner)  \
+                 main() = { let mut o = Outer(Inner(1))  o.inner.v = 5  o.inner.v }"
+            ),
+            "cannot assign to immutable field `inner` of `Outer` (declare it `mut`)"
+        );
+    }
+
+    #[test]
+    fn a_mut_method_can_call_another_mut_method_on_self() {
+        assert_eq!(
+            run_program(
+                "prod Counter(mut n: Int)  \
+                 on Counter { mut bump() { @n = @n + 1 }  mut bumpTwice() { @bump()  @bump() } }  \
+                 main() = { let mut c = Counter(0)  c.bumpTwice()  c.n }"
+            ),
+            Value::Int(2)
+        );
+    }
+
+    #[test]
+    fn a_method_dispatches_on_a_sum_variant() {
+        assert_eq!(
+            run_program(
+                "sum Shape = Circle(r: Int) | Square(s: Int)  \
+                 on Shape { name() -> Str = \"shape\" }  \
+                 main() = Circle(5).name()"
+            ),
+            Value::Str("shape".into())
+        );
+    }
+
+    #[test]
+    fn an_inherent_method_beats_a_contract_default_in_a_separate_block() {
+        assert_eq!(
+            run_program(
+                "contract Greet { hi() = \"default\" }  prod Box(n: Int)  \
+                 on Box { hi() = \"inherent\" }  on Box : Greet { }  \
+                 main() = Box(1).hi()"
+            ),
+            Value::Str("inherent".into())
+        );
+    }
+
+    #[test]
+    fn the_first_conforming_contract_supplies_a_clashing_default() {
+        assert_eq!(
+            run_program(
+                "contract A { tag() = \"a\" }  contract B { tag() = \"b\" }  prod Box(n: Int)  \
+                 on Box : A { }  on Box : B { }  main() = Box(1).tag()"
+            ),
+            Value::Str("a".into())
+        );
+    }
+
     #[test]
     fn calling_a_method_with_the_wrong_arity_is_an_error() {
         assert_eq!(
