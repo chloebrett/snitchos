@@ -5,7 +5,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Method, Pattern, Stmt, StrSegment, Type, UnOp};
+use crate::ast::{
+    Arg, BinOp, Expr, Item, MatchArm, Method, MethodModifier, Pattern, Stmt, StrSegment, Type, UnOp,
+};
 use crate::env::{AssignError, Env};
 use crate::parser::parse_program;
 use crate::value::{
@@ -192,17 +194,39 @@ fn eval_method_call(
     env: &Env,
 ) -> Result<Value, RuntimeError> {
     let receiver = eval(object, env)?;
-    // Methods attach to `prod`/`sum` instances; only those carry a type name to
-    // dispatch on. A primitive (`5.foo()`) has no method table.
-    let Value::Data(data) = &receiver else {
-        return Err(RuntimeError::new(format!(
-            "cannot call method `{name}` on {}",
-            receiver.kind()
-        )));
+    // The "receiver" expression is either an instance (`value.method()` → a
+    // `Data`, which binds `@`) or the type itself (`Type.method()` → the type's
+    // `Constructor`, for a `free`/associated method with no `@`). Both carry the
+    // type name to dispatch on; anything else has no method table.
+    let (type_name, self_value) = match &receiver {
+        Value::Data(data) => (data.type_name.as_str(), Some(&receiver)),
+        Value::Constructor(ctor) => (ctor.type_name.as_str(), None),
+        _ => {
+            return Err(RuntimeError::new(format!(
+                "cannot call method `{name}` on {}",
+                receiver.kind()
+            )));
+        }
     };
     let method = env
-        .lookup_method(&data.type_name, name)
-        .ok_or_else(|| RuntimeError::new(format!("{} has no method `{name}`", data.type_name)))?;
+        .lookup_method(type_name, name)
+        .ok_or_else(|| RuntimeError::new(format!("{type_name} has no method `{name}`")))?;
+
+    // The modifier must match how the method was reached: `free` on the type, an
+    // instance method on a value.
+    match method.modifier {
+        MethodModifier::Free if self_value.is_some() => {
+            return Err(RuntimeError::new(format!(
+                "free method `{name}` is called on the type `{type_name}`, not an instance"
+            )));
+        }
+        MethodModifier::Instance | MethodModifier::Mut if self_value.is_none() => {
+            return Err(RuntimeError::new(format!(
+                "method `{name}` needs an instance receiver — call it on a value"
+            )));
+        }
+        _ => {}
+    }
 
     if args.len() != method.params.len() {
         return Err(RuntimeError::new(format!(
@@ -213,7 +237,11 @@ fn eval_method_call(
     }
 
     // Arguments evaluate in the caller's scope; the body runs in global scope.
-    let mut method_env = env.globals_only().extend("@".to_string(), receiver.clone());
+    // An instance method also binds the receiver as `@`; a `free` method doesn't.
+    let mut method_env = env.globals_only();
+    if let Some(receiver) = self_value {
+        method_env = method_env.extend("@".to_string(), receiver.clone());
+    }
     for (param, arg) in method.params.iter().zip(args) {
         method_env = method_env.extend(param.name.clone(), eval(&arg.value, env)?);
     }
@@ -2275,6 +2303,42 @@ mod tests {
                  main() = Box(1).hi()"
             ),
             Value::Str("box hi".into())
+        );
+    }
+
+    #[test]
+    fn a_free_method_is_called_on_the_type() {
+        // `free` methods take no receiver — call them on the type itself
+        // (`Counter.zero()`), which resolves through the type's constructor.
+        assert_eq!(
+            run_program(
+                "prod Counter(n: Int)  on Counter { free zero() -> Counter = Counter(0) }  \
+                 main() = Counter.zero().n"
+            ),
+            Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn an_instance_method_called_on_the_type_is_an_error() {
+        // `get` needs a receiver; calling it on the type has no `@` to bind.
+        assert_eq!(
+            run_program_err(
+                "prod Counter(n: Int)  on Counter { get() = @n }  main() = Counter.get()"
+            ),
+            "method `get` needs an instance receiver — call it on a value"
+        );
+    }
+
+    #[test]
+    fn a_free_method_called_on_an_instance_is_an_error() {
+        // `free zero` belongs to the type, not an instance.
+        assert_eq!(
+            run_program_err(
+                "prod Counter(n: Int)  on Counter { free zero() -> Counter = Counter(0) }  \
+                 main() = Counter(5).zero()"
+            ),
+            "free method `zero` is called on the type `Counter`, not an instance"
         );
     }
 
