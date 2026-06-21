@@ -9,6 +9,10 @@ pub mod ast;
 pub mod env;
 pub mod interp;
 pub mod lexer;
+pub mod natives;
 pub mod parser;
 pub mod runner;
 pub mod value;
+
+#[cfg(test)]
+mod test_support;
