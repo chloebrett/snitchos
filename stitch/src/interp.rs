@@ -1,10 +1,10 @@
 //! Tree-walk interpreter: recursively evaluate an `Expr` to a `Value`. The AST
 //! *is* the program — no compilation. v0 is dynamically typed; see `value.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::ast::{Arg, BinOp, Expr, Item, MethodModifier, Stmt, StrSegment};
+use crate::ast::{Arg, BinOp, Expr, Item, MethodModifier, Stmt, StrSegment, Type};
 use crate::env::{AssignError, Env};
 use crate::natives::NATIVES;
 use crate::ops::{as_bool, eval_binary, eval_unary};
@@ -82,6 +82,11 @@ pub fn eval_modules_with_telemetry(
 ) -> (Result<Value, RuntimeError>, Vec<TelemetryEvent>) {
     let base = Env::new();
 
+    // Static check before any work: reject orphan `on` blocks (coherence).
+    if let Err(error) = check_coherence(modules) {
+        return (Err(error), base.telemetry());
+    }
+
     // The natives + built-in types + prelude form a shared base namespace every
     // module starts from. Registered once (capturing `base`), so the prelude's
     // own `on`/`contract` declarations are merged once, not once per module.
@@ -121,7 +126,7 @@ pub fn eval_modules_with_telemetry(
     // Each module's public surface, as a `Value::Module`. Built for *all*
     // modules before any `use` is resolved, which is what makes import cycles
     // free: by link time every export table already exists (no eager recursion).
-    let modules_by_name = modules
+    let mut modules_by_name = modules
         .iter()
         .zip(&per_module)
         .map(|(module, reg)| {
@@ -134,6 +139,11 @@ pub fn eval_modules_with_telemetry(
             (module.name.clone(), handle)
         })
         .collect::<HashMap<_, _>>();
+    // Built-in stdlib modules are resolvable by `use` too; a user module of the
+    // same name wins (these only fill names the program didn't define).
+    for (name, handle) in builtin_modules(&base_reg.globals) {
+        modules_by_name.entry(name).or_insert(handle);
+    }
 
     // Phase 2 — link. Process each module's `use` imports: a whole-module import
     // binds the module value by name; a selection binds the named exports
@@ -159,6 +169,81 @@ pub fn eval_modules_with_telemetry(
         ))),
     };
     (result, base.telemetry())
+}
+
+/// Coherence — the orphan rule, enforceable now that "module" exists. An `on`
+/// block may only live in a module that *owns* what it attaches to: an inherent
+/// `on Type` requires `Type` declared locally; a conformance `on Type : Contract`
+/// requires *either* the type or the contract local (Rust's rule). This keeps a
+/// type's behaviour findable with the type and prevents conflicting impls from
+/// afar. Checked per user module against its own declarations (the trusted
+/// prelude's conformances aren't user modules, so they're not re-checked).
+fn check_coherence(modules: &[Module]) -> Result<(), RuntimeError> {
+    for module in modules {
+        let declares_type = |name: &str| {
+            module.items.iter().any(|item| {
+                matches!(item, Item::Prod { name: n, .. } | Item::Sum { name: n, .. } if n == name)
+            })
+        };
+        let declares_contract = |name: &str| {
+            module
+                .items
+                .iter()
+                .any(|item| matches!(item, Item::Contract { name: n, .. } if n == name))
+        };
+        for item in &module.items {
+            let Item::On { target, contract, .. } = item else {
+                continue;
+            };
+            let Type::Name { name: type_name, .. } = target else {
+                continue;
+            };
+            match contract {
+                None if !declares_type(type_name) => {
+                    return Err(RuntimeError::new(format!(
+                        "cannot define methods on `{type_name}` in module `{}` — an inherent `on` block must live in the type's own module",
+                        module.name
+                    )));
+                }
+                Some(Type::Name { name: contract_name, .. })
+                    if !declares_type(type_name) && !declares_contract(contract_name) =>
+                {
+                    return Err(RuntimeError::new(format!(
+                        "cannot implement `{contract_name}` for `{type_name}` in module `{}` — a conformance must live in the module defining the type or the contract",
+                        module.name
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The built-in standard-library modules: namespaced *views* onto existing
+/// native functions — no relocation, the flat names stay in scope too. `Seq`
+/// groups the lazy producers; `Str` the string operations. (`List` waits until it
+/// has genuinely list-specific members: the eager constructors are literals, and
+/// the polymorphic combinators deliberately stay unqualified — one name over both
+/// List and Seq, never split into `List.map`/`Seq.map`.)
+fn builtin_modules(base_globals: &HashMap<String, Value>) -> Vec<(String, Rc<ModuleHandle>)> {
+    let view = |name: &str, members: &[&str]| {
+        let exports = members
+            .iter()
+            .filter_map(|member| {
+                base_globals
+                    .get(*member)
+                    .map(|value| ((*member).to_string(), value.clone()))
+            })
+            .collect();
+        let handle = ModuleHandle {
+            name: name.to_string(),
+            exports,
+            private: HashSet::new(),
+        };
+        (name.to_string(), Rc::new(handle))
+    };
+    vec![view("Seq", &["iterate", "repeat"]), view("Str", &["join"])]
 }
 
 /// Apply a module's `use` imports to its globals: a whole-module import binds
@@ -1183,6 +1268,125 @@ mod tests {
             error.message(),
             "member `secret` of module `math` is private"
         );
+    }
+
+    #[test]
+    fn the_seq_stdlib_module_is_importable_and_reached_by_path() {
+        // `Seq` is a built-in module exposing the lazy producers under a
+        // namespace; `Seq.iterate` resolves the same native as the flat `iterate`.
+        let result = run_modules(
+            &[(
+                "main",
+                "use Seq  main() = take(3, Seq.iterate(1, x -> x * 2)) |> toList",
+            )],
+            "main",
+        );
+        let expected: Vec<Value> = vec![Value::Int(1), Value::Int(2), Value::Int(4)];
+        assert_eq!(result, Value::List(expected.into()));
+    }
+
+    #[test]
+    fn the_str_stdlib_module_is_importable() {
+        let result = run_modules(
+            &[("main", r#"use Str  main() = Str.join(["a", "b", "c"], "-")"#)],
+            "main",
+        );
+        assert_eq!(result, Value::Str("a-b-c".into()));
+    }
+
+    #[test]
+    fn a_builtin_module_still_requires_importing() {
+        // Built-in modules aren't auto-imported either — `Seq` is unbound until
+        // `use`d, the same rule as user modules. (The flat `iterate` stays in
+        // scope; only the `Seq` namespace needs the import.)
+        let modules = [Module {
+            name: "main".to_string(),
+            items: parse_program("main() = Seq.iterate(1, x -> x)").expect("module should parse"),
+        }];
+        let error = eval_modules(&modules, "main").expect_err("Seq should be unbound");
+        assert_eq!(error.message(), "unbound variable `Seq`");
+    }
+
+    #[test]
+    fn an_inherent_on_block_must_live_in_the_types_module() {
+        // `Circle` is declared in `types`; `rogue` may not bolt inherent methods
+        // onto it from afar (no contract involved → the type must be local).
+        let modules = [
+            Module {
+                name: "types".to_string(),
+                items: parse_program("ext prod Circle(r: Int)").expect("module should parse"),
+            },
+            Module {
+                name: "rogue".to_string(),
+                items: parse_program("on Circle { area() = 1 }").expect("module should parse"),
+            },
+            Module {
+                name: "main".to_string(),
+                items: parse_program("main() = 1").expect("module should parse"),
+            },
+        ];
+        let error = eval_modules(&modules, "main").expect_err("orphan inherent on should fail");
+        assert_eq!(
+            error.message(),
+            "cannot define methods on `Circle` in module `rogue` — an inherent `on` block must live in the type's own module"
+        );
+    }
+
+    #[test]
+    fn an_on_conformance_with_neither_type_nor_contract_local_is_rejected() {
+        // `Circle` lives in `types`, `Drawable` in `art`; `rogue` owns neither, so
+        // implementing the conformance there is the orphan-rule violation.
+        let modules = [
+            Module {
+                name: "types".to_string(),
+                items: parse_program("ext prod Circle(r: Int)").expect("module should parse"),
+            },
+            Module {
+                name: "art".to_string(),
+                items: parse_program("contract Drawable { draw() -> Int }")
+                    .expect("module should parse"),
+            },
+            Module {
+                name: "rogue".to_string(),
+                items: parse_program("on Circle : Drawable { draw() = 1 }")
+                    .expect("module should parse"),
+            },
+            Module {
+                name: "main".to_string(),
+                items: parse_program("main() = 1").expect("module should parse"),
+            },
+        ];
+        let error = eval_modules(&modules, "main").expect_err("orphan conformance should fail");
+        assert_eq!(
+            error.message(),
+            "cannot implement `Drawable` for `Circle` in module `rogue` — a conformance must live in the module defining the type or the contract"
+        );
+    }
+
+    #[test]
+    fn a_conformance_is_allowed_where_the_contract_is_local() {
+        // `Drawable` is declared in `art`; `Circle` is foreign, but the contract is
+        // local, so the conformance is coherent (Rust's either-side-local rule).
+        let modules = [
+            Module {
+                name: "types".to_string(),
+                items: parse_program("ext prod Circle(r: Int)").expect("module should parse"),
+            },
+            Module {
+                name: "art".to_string(),
+                items: parse_program(
+                    "contract Drawable { draw() -> Int }  on Circle : Drawable { draw() = 7 }",
+                )
+                .expect("module should parse"),
+            },
+            Module {
+                name: "main".to_string(),
+                items: parse_program("use types  main() = types.Circle(2).draw()")
+                    .expect("module should parse"),
+            },
+        ];
+        let result = eval_modules(&modules, "main").expect("local-contract conformance is allowed");
+        assert_eq!(result, Value::Int(7));
     }
 
     #[test]
