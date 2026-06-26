@@ -1,7 +1,7 @@
 # Plan: Userspace-defined metrics (debt #2)
 
 **Work lands on:** `main` (no feature branches — see CLAUDE.md). User handles commits.
-**Status:** Steps 1–4 SHIPPED. Step 1: `kernel_core::metric::MetricTable` (host-tested, mutants all caught). Step 2: `RegisterMetric`/`EmitMetric` syscalls + runtime bindings + `userspace-custom-metric` itest. Step 3: FS server self-registers `snitchos.fs.denied`; kernel special-casing (`FS_DENIED_METRIC`, `CounterKind`, `run_ipc_counter`) deleted. Step 4: ergonomic `register_counter/gauge/histogram(name) -> Metric` free fns + inert-`Metric` no-op-on-refusal; `telemetry_total` stays pre-registered. **Only Step 5 (the deferred prefactor — retire the legacy `Invoke`/fixed-counter path, drop `{ counter }` from `TelemetrySink`, migrate `telemetry_total`) remains.**
+**Status:** Steps 1–4 SHIPPED. Step 1: `kernel_core::metric::MetricTable` (host-tested, mutants all caught). Step 2: `RegisterMetric`/`EmitMetric` syscalls + runtime bindings + `userspace-custom-metric` itest. Step 3: FS server self-registers `snitchos.fs.denied`; kernel special-casing (`FS_DENIED_METRIC`, `CounterKind`, `run_ipc_counter`) deleted. Step 4: ergonomic `register_counter/gauge/histogram(name) -> Metric` free fns + inert-`Metric` no-op-on-refusal; `telemetry_total` stays pre-registered. **Only Step 5 remains — the deferred prefactor, now scoped as option C: retire the legacy `Invoke`/fixed-counter path, make `TelemetrySink` authority-only, and *delete* `telemetry_total` (a misnamed test-signal bus) in favour of per-process `snitchos.<task>.marker` metrics. Breakdown in the Step 5 section (5a host-tested + mergeable alone; 5b–5e a single suite-verified landing).**
 
 ## Goal
 
@@ -110,10 +110,85 @@ Principle: **refactor toward a validated target, not a hoped-for one.**
 
 ### Step 5 (was 4) — unify + retire legacy (the deferred prefactor)
 
+**Decision (option C): retire `telemetry_total` entirely; markers become
+per-process custom metrics.** Investigation (2026-06): `snitchos.user.telemetry_total`
+is the counter bound to every process's bootstrap `TelemetrySink`, written by the
+legacy `Invoke` syscall. But despite the name **nothing uses it as a total/rate** —
+all ~15 scenarios assert a *specific value* (`STAT_ROOT_OK`, `42`, `524288`, an
+echoed RPC result…). It's a v0.7a **test-signal bus mislabeled as a counter**. So
+we don't keep a shared `telemetry_total`: each program registers its **own** marker
+metric on the Step-2 path and emits through the handle. This retires `Invoke` with
+no shared-counter carve-out, deletes a misleading metric, and **sidesteps the
+collector-emitter-dimension collision** (no shared name → no multi-series problem),
+which is why it's preferred over keeping `telemetry_total` per-process.
+
+`Invoke` is purely the telemetry path (`handle_invoke` → `invoke_telemetry` →
+`emit_metric` to the bound counter), so retiring telemetry-via-`Invoke` retires
+`Invoke` wholesale. `handle_invoke` and `worker`'s `sink.emit(progress)` are
+included (a computed value migrates identically to a sentinel).
+
+**Naming convention:** one counter per program, `snitchos.<task>.marker`,
+registered once at startup; markers emit through its handle (a program emitting
+several distinct sentinels uses one metric, many values — exactly as today).
+Mapping: `hello`→`snitchos.hello.marker`, `faulter`→`snitchos.faulter.marker`,
+`bad_ptr`→`snitchos.bad_ptr.marker`, `span_flood`→`snitchos.span_flood.marker`,
+`heap_grow`→`snitchos.heap_grow.marker`, `spawner`→`snitchos.spawner.marker`,
+`ipc_receiver`→`snitchos.ipc_receiver.marker`, `rpc_client`→`snitchos.rpc_client.marker`,
+`badge_handout_server`→`snitchos.badge_handout.marker`,
+`worker_a`/`worker_b`→`snitchos.worker_a.marker`/`…worker_b.marker`,
+`fs_client`→`snitchos.fs_client.marker`. (Counter, for parity; Gauge is also
+defensible since the value is "last marker," not a sum — impl call.)
+
 **Acceptance criteria:** legacy `Invoke`/fused-counter path retired; `TelemetrySink`
-becomes authority-only (`{ counter }` dropped, mirroring `SpanSink`);
-`telemetry_total` migrated onto the register path; existing marker-emitting
-scenarios stay green. **Done last**, after the new path is proven in Steps 2–3.
+becomes authority-only (`Object::TelemetrySink { counter }` → unit, mirroring
+`SpanSink`); no `snitchos.user.telemetry_total`; every former marker emitter uses a
+per-process metric on the register path; all affected scenarios stay green.
+
+#### Sub-steps
+
+**5a — cap layer authority-only (host-tested; independently mergeable).**
+`kernel_core::cap`: `Object::TelemetrySink { counter }` → unit variant;
+`CapTable::bootstrap(counter)` → `bootstrap()` (bare telemetry + span caps);
+replace `invoke_telemetry(table, handle) -> Result<StringId, Denied>` with
+`authorize_telemetry(table, handle) -> Result<(), Denied>` (checks `EMIT` + the
+`TelemetrySink` object, returns nothing). **RED:** update the cap.rs host tests
+(`bootstrap`, the `TelemetrySink { counter }` constructions, `invoke_telemetry`
+cases) to the new shapes. **GREEN:** the cap changes. **MUTATE:** cap.rs.
+> PR boundary: pure data structure — lands alone, kernel catches up in 5b.
+
+**5b — kernel un-thread the counter + retire `Invoke`.**
+`trap/user.rs`: delete `USER_METRIC` + `user_metric_id()` + its `init_metric`
+registration; `Process::bootstrap()` drops the `telemetry_counter` param; `run` /
+`run_ipc` stop resolving a counter. `syscall/cap.rs`: delete `handle_invoke`.
+`syscall/metric.rs`: gate `RegisterMetric` via `authorize_telemetry`. `syscall/mod.rs`:
+dispatch `Some(Syscall::Invoke)` → `refuse(…, UnknownSyscall)` (the ABI variant
+`Invoke = 0` is **retained, never renumbered**, but documented retired in `abi`).
+Kernel builds.
+
+**5c — runtime drop the legacy emit.**
+`snitchos_user`: remove `TelemetrySink::emit` and the private `invoke()` helper
+(only `emit` used it); `telemetry()` now yields a register-only authority. `Denied`
+stays (IPC uses it).
+
+**5d — migrate the marker emitters (~12 programs).**
+Each program currently calling `telemetry().emit(…)` / `sink.emit(…)` registers its
+`snitchos.<task>.marker` counter once at startup (`register_counter`) and emits
+markers through the handle. Programs: `hello`, `faulter`, `bad-ptr`, `span-flood`,
+`heap-grow`, `spawner`, `ipc-receiver`, `rpc-client`, `badge-handout-server`,
+`worker_a`, `worker_b`, `fs-client`.
+
+**5e — repoint scenarios + verify (the integration RED/GREEN).**
+~15 scenarios swap the asserted name `snitchos.user.telemetry_total` → the emitting
+program's `snitchos.<task>.marker` (value assertions unchanged). **RED:** suite fails
+where a program/scenario pair is half-migrated. **GREEN:** all green. Gate:
+`cargo xtask itest --repeat 10` over the affected scenarios (userspace/ipc/rpc/fs/
+badge/heap/spawn families); `cargo xtask clippy`; wire-stability check (no renumbered
+`Syscall`).
+
+> **PR boundary** — 5a lands alone (host-tested); **5b–5e land together** (removing
+> `TelemetrySink::emit` breaks every marker emitter at once, so the migration is one
+> coherent, suite-verified change). **Done last**, after the new path is proven in
+> Steps 2–4.
 
 ## Steps
 
@@ -223,7 +298,9 @@ pre-registered (for existing markers) or becomes runtime-registered. Additive.
   naming a metric the same become two `StringId`s both labelled that name. A
   `task_id`/process label keeps them distinct in Prometheus. *Deferred*: no
   collision today (kernel per-task metrics already embed the task in the name; the
-  FS gauge has a single emitter). Add when a real two-process-same-name case lands.
+  FS gauge has a single emitter; Step 5's per-process markers use distinct
+  `snitchos.<task>.marker` names by construction, so they don't trip this either).
+  Add when a real two-process-same-name case lands.
 - **Span-name path** has the same global-dedup disclosure/poisoning issue — its
   own follow-on plan (apply per-process scoping there too).
 - **Relocating the kernel intern table / a content-hash id scheme** — the maximal
