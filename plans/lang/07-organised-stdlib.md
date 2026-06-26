@@ -68,13 +68,11 @@ each:
 - **bonus:** extended `<`/`>`/`<=`/`>=` to **strings** (lexicographic, via a
   shared `ops::value_order`), so sort/min/max work on text, not just numbers.
 
-**Finding — `take`'s arg order is the odd one out.** `take(count, seq)` is
-count-first, so it does *not* pipe (`seq |> take(10)` feeds the seq as the
-count) — inconsistent with `takeWhile`/`map`/`filter`/`fold` and the new
-`drop`/`dropWhile`, which are all collection-first. The post-4 example
-`… |> take(10) |> fold(…)` doesn't actually run as written. **Candidate fix:**
-flip `take` to `(seq, count)`; low-risk (no test pipes into it today), but it's a
-public-API change so left as a deliberate follow-up.
+**`take` arg order — FIXED.** `take` was `(count, seq)` (count-first), so it
+didn't pipe — inconsistent with `takeWhile`/`map`/`filter`/`fold`/`drop`. Flipped
+to **`take(seq, count)`** (collection-first), all call sites moved to the pipe
+form (`seq |> take(3)`), and the post-4 example `… |> take(10) |> fold(…)` now
+actually runs as written. One TDD increment.
 
 ## Deferred follow-ons
 

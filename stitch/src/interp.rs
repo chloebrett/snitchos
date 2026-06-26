@@ -1315,7 +1315,7 @@ mod tests {
         let result = run_modules(
             &[(
                 "main",
-                "use Seq  main() = take(3, Seq.iterate(1, x -> x * 2)) |> toList",
+                "use Seq  main() = Seq.iterate(1, x -> x * 2) |> take(3) |> toList",
             )],
             "main",
         );

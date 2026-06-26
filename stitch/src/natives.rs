@@ -242,11 +242,12 @@ fn repeat_seq(x: Value) -> Value {
     }))
 }
 
-/// `take(n, seq)` — a lazy `Seq` of at most the first `n` elements of `seq`.
-/// Lazy, so it works on an infinite sequence.
+/// `take(seq, n)` — a lazy `Seq` of at most the first `n` elements of `seq`.
+/// Lazy, so it works on an infinite sequence. Collection-first (so it pipes:
+/// `seq |> take(3)`), matching `drop`/`takeWhile`/`map`/`filter`.
 fn native_take(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
-    let [count, seq] = args else {
-        return Err(RuntimeError::new("take expects (count, seq)"));
+    let [seq, count] = args else {
+        return Err(RuntimeError::new("take expects (seq, count)"));
     };
     let Value::Int(count) = count else {
         return Err(RuntimeError::new(format!(
@@ -762,7 +763,7 @@ mod tests {
     fn drop_skips_a_prefix_of_a_seq() {
         // Collection-first, so it pipes: `1.. |> drop(2)`.
         assert_eq!(
-            run_program("main() = toList(take(3, 1.. |> drop(2))) == [3, 4, 5]"),
+            run_program("main() = 1.. |> drop(2) |> take(3) |> toList == [3, 4, 5]"),
             Value::Bool(true)
         );
         assert_eq!(
@@ -774,7 +775,7 @@ mod tests {
     #[test]
     fn drop_while_skips_the_leading_run() {
         assert_eq!(
-            run_program("main() = toList(take(3, 1.. |> dropWhile(x -> x < 4))) == [4, 5, 6]"),
+            run_program("main() = 1.. |> dropWhile(x -> x < 4) |> take(3) |> toList == [4, 5, 6]"),
             Value::Bool(true)
         );
     }
@@ -941,7 +942,17 @@ mod tests {
         // `1..` is endless; `take` proves laziness by draining only a prefix
         // (an eager range would hang building the whole thing).
         assert_eq!(
-            run_program("main() = take(3, 1..) |> toList == [1, 2, 3]"),
+            run_program("main() = 1.. |> take(3) |> toList == [1, 2, 3]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn take_is_collection_first_so_it_pipes() {
+        // `take(seq, count)` — collection-first, matching `drop`/`takeWhile`/
+        // `map`/`filter`, so it reads forward in a pipeline.
+        assert_eq!(
+            run_program("main() = 1.. |> take(3) |> toList == [1, 2, 3]"),
             Value::Bool(true)
         );
     }
@@ -949,7 +960,7 @@ mod tests {
     #[test]
     fn take_zero_is_empty() {
         assert_eq!(
-            run_program("main() = take(0, 1..) |> toList == []"),
+            run_program("main() = 1.. |> take(0) |> toList == []"),
             Value::Bool(true)
         );
     }
@@ -957,7 +968,7 @@ mod tests {
     #[test]
     fn take_more_than_available_stops_at_the_end() {
         assert_eq!(
-            run_program("main() = take(5, 1..3) |> toList == [1, 2]"),
+            run_program("main() = 1..3 |> take(5) |> toList == [1, 2]"),
             Value::Bool(true)
         );
     }
@@ -965,7 +976,7 @@ mod tests {
     #[test]
     fn iterate_builds_a_sequence_by_repeated_application() {
         assert_eq!(
-            run_program("main() = take(4, iterate(1, x -> x * 2)) |> toList == [1, 2, 4, 8]"),
+            run_program("main() = iterate(1, x -> x * 2) |> take(4) |> toList == [1, 2, 4, 8]"),
             Value::Bool(true)
         );
     }
@@ -973,7 +984,7 @@ mod tests {
     #[test]
     fn repeat_repeats_a_value() {
         assert_eq!(
-            run_program("main() = take(3, repeat(7)) |> toList == [7, 7, 7]"),
+            run_program("main() = repeat(7) |> take(3) |> toList == [7, 7, 7]"),
             Value::Bool(true)
         );
     }
@@ -985,7 +996,7 @@ mod tests {
             Value::Bool(true)
         );
         assert_eq!(
-            run_program("main() = take(3, map(1.., x -> x * 10)) |> toList == [10, 20, 30]"),
+            run_program("main() = map(1.., x -> x * 10) |> take(3) |> toList == [10, 20, 30]"),
             Value::Bool(true)
         );
     }
@@ -997,7 +1008,7 @@ mod tests {
             Value::Bool(true)
         );
         assert_eq!(
-            run_program("main() = take(2, filter(1.., x -> x % 2 == 0)) |> toList == [2, 4]"),
+            run_program("main() = filter(1.., x -> x % 2 == 0) |> take(2) |> toList == [2, 4]"),
             Value::Bool(true)
         );
     }
@@ -1051,7 +1062,7 @@ mod tests {
         // extra time; the emit count proves it doesn't.
         assert_eq!(
             run_program_events(
-                "main() = take(3, iterate(0, x -> { emit(\"s\", x)  x + 1 })) |> toList"
+                "main() = iterate(0, x -> { emit(\"s\", x)  x + 1 }) |> take(3) |> toList"
             ),
             vec![
                 TelemetryEvent::Emit {
