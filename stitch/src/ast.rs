@@ -96,11 +96,15 @@ pub struct Arg {
 
 /// A field of a product or a variant. `name` is `None` for positional fields
 /// (`Celsius(Int)`, `Some(T)`); `Some` for named fields (`Point(x: Int)`).
+/// `public` is the per-field `ext` mark: on an exported type, fields are private
+/// (the representation is hidden) unless marked — a fully transparent type marks
+/// every field, an opaque one marks none.
 #[derive(Debug, PartialEq, Clone)]
 pub struct Field {
     pub name: Option<String>,
     pub mutable: bool,
     pub ty: Type,
+    pub public: bool,
 }
 
 /// A sum variant: a name and zero or more fields.

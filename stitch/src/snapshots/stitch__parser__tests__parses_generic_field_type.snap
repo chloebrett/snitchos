@@ -21,6 +21,7 @@ expression: "prog(\"prod Bag(items: List<Int>, lookup: Map<Str, Int>)\")"
                         },
                     ],
                 },
+                public: false,
             },
             Field {
                 name: Some(
@@ -40,6 +41,7 @@ expression: "prog(\"prod Bag(items: List<Int>, lookup: Map<Str, Int>)\")"
                         },
                     ],
                 },
+                public: false,
             },
         ],
         public: false,

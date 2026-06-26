@@ -983,8 +983,15 @@ impl Parser {
         Ok(fields)
     }
 
-    /// One field: `mut? name: Type` (named) or `Type` (positional).
+    /// One field: `ext? mut? name: Type` (named) or `ext? mut? Type` (positional).
+    /// `ext` marks the field exposed on an exported type (`mut` marks it mutable);
+    /// both default off, and `ext` precedes `mut` (visibility outermost, as for
+    /// items).
     fn parse_field(&mut self) -> Result<Field, ParseError> {
+        let public = matches!(self.peek(), Token::Ext);
+        if public {
+            self.bump();
+        }
         let mutable = matches!(self.peek(), Token::Mut);
         if mutable {
             self.bump();
@@ -997,6 +1004,7 @@ impl Parser {
                 name: Some(name),
                 mutable,
                 ty,
+                public,
             });
         }
         let ty = self.parse_type()?;
@@ -1004,6 +1012,7 @@ impl Parser {
             name: None,
             mutable,
             ty,
+            public,
         })
     }
 

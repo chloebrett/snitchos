@@ -197,9 +197,19 @@ fn declared_names(items: &[Item]) -> Vec<(String, bool)> {
     let mut names = Vec::new();
     for item in items {
         match item {
-            Item::Func { name, public, .. }
-            | Item::Prod { name, public, .. }
-            | Item::Const { name, public, .. } => names.push((name.clone(), *public)),
+            Item::Func { name, public, .. } | Item::Const { name, public, .. } => {
+                names.push((name.clone(), *public));
+            }
+            // A product's *constructor* is exported only when the type is `ext`
+            // and every field is too (fully transparent). An `ext` product with
+            // any private field is opaque: the type is conceptually visible, but
+            // the constructor isn't — others can hold a value, not build one.
+            Item::Prod { name, public, fields, .. } => {
+                let transparent = *public && fields.iter().all(|field| field.public);
+                names.push((name.clone(), transparent));
+            }
+            // Sum-variant field opacity is deferred; an `ext` sum exports its
+            // variants wholesale.
             Item::Sum { variants, public, .. } => {
                 names.extend(variants.iter().map(|variant| (variant.name.clone(), *public)));
             }

@@ -21,6 +21,7 @@ expression: "prog(\"prod Lazy(run: () -> Int)\")"
                         args: [],
                     },
                 },
+                public: false,
             },
         ],
         public: false,

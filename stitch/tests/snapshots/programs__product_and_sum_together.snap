@@ -16,6 +16,7 @@ expression: "prog(\"prod Reading(sensor: Str, mut celsius: Float)  \\\n         
                     name: "Str",
                     args: [],
                 },
+                public: false,
             },
             Field {
                 name: Some(
@@ -26,6 +27,7 @@ expression: "prog(\"prod Reading(sensor: Str, mut celsius: Float)  \\\n         
                     name: "Float",
                     args: [],
                 },
+                public: false,
             },
         ],
         public: false,
@@ -46,6 +48,7 @@ expression: "prog(\"prod Reading(sensor: Str, mut celsius: Float)  \\\n         
                             name: "Float",
                             args: [],
                         },
+                        public: false,
                     },
                 ],
             },
@@ -61,6 +64,7 @@ expression: "prog(\"prod Reading(sensor: Str, mut celsius: Float)  \\\n         
                             name: "Float",
                             args: [],
                         },
+                        public: false,
                     },
                     Field {
                         name: Some(
@@ -71,6 +75,7 @@ expression: "prog(\"prod Reading(sensor: Str, mut celsius: Float)  \\\n         
                             name: "Float",
                             args: [],
                         },
+                        public: false,
                     },
                 ],
             },

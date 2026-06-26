@@ -16,6 +16,7 @@ expression: "prog(\"prod Wrap(x: (Int))\")"
                     name: "Int",
                     args: [],
                 },
+                public: false,
             },
         ],
         public: false,

@@ -30,6 +30,7 @@ expression: "prog(\"prod Handler(cb: (Int, Str) -> Bool)\")"
                         args: [],
                     },
                 },
+                public: false,
             },
         ],
         public: false,

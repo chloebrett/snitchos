@@ -1331,7 +1331,7 @@ mod tests {
         let modules = [
             Module {
                 name: "types".to_string(),
-                items: parse_program("ext prod Circle(r: Int)").expect("module should parse"),
+                items: parse_program("ext prod Circle(ext r: Int)").expect("module should parse"),
             },
             Module {
                 name: "rogue".to_string(),
@@ -1356,7 +1356,7 @@ mod tests {
         let modules = [
             Module {
                 name: "types".to_string(),
-                items: parse_program("ext prod Circle(r: Int)").expect("module should parse"),
+                items: parse_program("ext prod Circle(ext r: Int)").expect("module should parse"),
             },
             Module {
                 name: "art".to_string(),
@@ -1387,7 +1387,7 @@ mod tests {
         let modules = [
             Module {
                 name: "types".to_string(),
-                items: parse_program("ext prod Circle(r: Int)").expect("module should parse"),
+                items: parse_program("ext prod Circle(ext r: Int)").expect("module should parse"),
             },
             Module {
                 name: "art".to_string(),
@@ -1404,6 +1404,58 @@ mod tests {
         ];
         let result = eval_modules(&modules, "main").expect("local-contract conformance is allowed");
         assert_eq!(result, Value::Int(7));
+    }
+
+    #[test]
+    fn an_opaque_types_constructor_is_not_exported() {
+        // `n` is unmarked → private, so `UserId` is opaque: another module can't
+        // construct one (the constructor isn't exported — unforgeable).
+        let modules = [
+            Module {
+                name: "types".to_string(),
+                items: parse_program("ext prod UserId(n: Int)").expect("module should parse"),
+            },
+            Module {
+                name: "main".to_string(),
+                items: parse_program("use types  main() = types.UserId(5)")
+                    .expect("module should parse"),
+            },
+        ];
+        let error = eval_modules(&modules, "main").expect_err("opaque construction should fail");
+        assert_eq!(
+            error.message(),
+            "member `UserId` of module `types` is private"
+        );
+    }
+
+    #[test]
+    fn a_fully_exposed_type_can_be_constructed_across_modules() {
+        // Every field marked `ext` → transparent: the constructor is exported.
+        let result = run_modules(
+            &[
+                ("types", "ext prod Point(ext x: Int, ext y: Int)"),
+                ("main", "use types  main() = types.Point(1, 2).x"),
+            ],
+            "main",
+        );
+        assert_eq!(result, Value::Int(1));
+    }
+
+    #[test]
+    fn an_opaque_type_round_trips_through_its_modules_functions() {
+        // The ADT pattern: an opaque `UserId`, with the owning module exposing an
+        // `ext` constructor and accessor. `main` never names `UserId` directly.
+        let result = run_modules(
+            &[
+                (
+                    "ids",
+                    "ext prod UserId(n: Int)  ext mkUser(v) = UserId(v)  ext idOf(u) = u.n",
+                ),
+                ("main", "use ids  main() = ids.idOf(ids.mkUser(5))"),
+            ],
+            "main",
+        );
+        assert_eq!(result, Value::Int(5));
     }
 
     #[test]

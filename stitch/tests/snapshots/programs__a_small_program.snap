@@ -19,6 +19,7 @@ expression: "prog(\"sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)
                             name: "Float",
                             args: [],
                         },
+                        public: false,
                     },
                 ],
             },
@@ -34,6 +35,7 @@ expression: "prog(\"sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)
                             name: "Float",
                             args: [],
                         },
+                        public: false,
                     },
                     Field {
                         name: Some(
@@ -44,6 +46,7 @@ expression: "prog(\"sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)
                             name: "Float",
                             args: [],
                         },
+                        public: false,
                     },
                 ],
             },

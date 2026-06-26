@@ -16,6 +16,7 @@ expression: "prog(\"prod P(x: Int)  area(p) = p.x * 2\")"
                     name: "Int",
                     args: [],
                 },
+                public: false,
             },
         ],
         public: false,

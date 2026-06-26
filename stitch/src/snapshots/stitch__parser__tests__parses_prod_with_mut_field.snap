@@ -16,6 +16,7 @@ expression: "prog(\"prod Counter(mut n: Int)\")"
                     name: "Int",
                     args: [],
                 },
+                public: false,
             },
         ],
         public: false,
