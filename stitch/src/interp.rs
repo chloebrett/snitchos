@@ -229,8 +229,29 @@ fn check_coherence(modules: &[Module]) -> Result<(), RuntimeError> {
 /// string operations. (`List` waits until it has genuinely list-specific members:
 /// eager constructors are literals, and the polymorphic combinators deliberately
 /// stay unqualified — one name over both List and Seq, never split.)
-const BUILTIN_MODULE_SPECS: &[(&str, &[&str])] =
-    &[("Seq", &["iterate", "repeat"]), ("Str", &["join"])];
+/// Each member is `(exported_name, source_native)`: the name the module exposes,
+/// and the flat native it resolves to. They differ when a clean module name would
+/// collide in the flat namespace — `Str.contains` (substring) is sourced from
+/// `strContains` so it doesn't clash with the prelude's flat `contains` (element
+/// membership). String ops are `str`-prefixed natively so generic names stay out
+/// of the flat namespace and live only under `Str`.
+const BUILTIN_MODULE_SPECS: &[(&str, &[(&str, &str)])] = &[
+    ("Seq", &[("iterate", "iterate"), ("repeat", "repeat")]),
+    (
+        "Str",
+        &[
+            ("join", "join"),
+            ("upper", "strUpper"),
+            ("lower", "strLower"),
+            ("length", "strLength"),
+            ("trim", "strTrim"),
+            ("contains", "strContains"),
+            ("startsWith", "strStartsWith"),
+            ("split", "strSplit"),
+            ("replace", "strReplace"),
+        ],
+    ),
+];
 
 /// Whether `name` is a built-in stdlib module (provided by the runtime, not read
 /// from a `.st` file) — the module loader skips these.
@@ -247,10 +268,10 @@ fn builtin_modules(base_globals: &HashMap<String, Value>) -> Vec<(String, Rc<Mod
         .map(|(name, members)| {
             let exports = members
                 .iter()
-                .filter_map(|member| {
+                .filter_map(|(export, source)| {
                     base_globals
-                        .get(*member)
-                        .map(|value| ((*member).to_string(), value.clone()))
+                        .get(*source)
+                        .map(|value| ((*export).to_string(), value.clone()))
                 })
                 .collect();
             let handle = ModuleHandle {

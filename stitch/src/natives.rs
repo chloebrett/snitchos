@@ -69,6 +69,48 @@ pub(crate) const NATIVES: &[NativeFn] = &[
         arity: 3,
         func: native_fold_while,
     },
+    // --- string operations (exposed under the `Str` module; `str`-prefixed
+    //     internally so generic names don't clutter the flat namespace) ---
+    NativeFn {
+        name: "strUpper",
+        arity: 1,
+        func: native_upper,
+    },
+    NativeFn {
+        name: "strLower",
+        arity: 1,
+        func: native_lower,
+    },
+    NativeFn {
+        name: "strLength",
+        arity: 1,
+        func: native_length,
+    },
+    NativeFn {
+        name: "strTrim",
+        arity: 1,
+        func: native_trim,
+    },
+    NativeFn {
+        name: "strContains",
+        arity: 2,
+        func: native_str_contains,
+    },
+    NativeFn {
+        name: "strStartsWith",
+        arity: 2,
+        func: native_starts_with,
+    },
+    NativeFn {
+        name: "strSplit",
+        arity: 2,
+        func: native_split,
+    },
+    NativeFn {
+        name: "strReplace",
+        arity: 3,
+        func: native_replace,
+    },
 ];
 
 /// `foldWhile(coll, init, f)` — reduce left-to-right with an early stop. `f(acc,
@@ -274,6 +316,95 @@ fn native_emit(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
 }
 
 /// Require a list argument, with an error tagged by the combinator `name`.
+/// Extract the `&str` from a `Value::Str`, or a typed error naming the builtin.
+fn expect_str<'a>(name: &str, value: &'a Value) -> Result<&'a str, RuntimeError> {
+    match value {
+        Value::Str(text) => Ok(text),
+        other => Err(RuntimeError::new(format!(
+            "{name} expects a Str, got {}",
+            other.kind()
+        ))),
+    }
+}
+
+/// `Str.upper(s)` — `s` uppercased.
+fn native_upper(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [s] = args else {
+        return Err(RuntimeError::new("Str.upper expects (s)"));
+    };
+    Ok(Value::Str(expect_str("Str.upper", s)?.to_uppercase().into()))
+}
+
+/// `Str.lower(s)` — `s` lowercased.
+fn native_lower(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [s] = args else {
+        return Err(RuntimeError::new("Str.lower expects (s)"));
+    };
+    Ok(Value::Str(expect_str("Str.lower", s)?.to_lowercase().into()))
+}
+
+/// `Str.length(s)` — the number of Unicode scalar values (chars) in `s`.
+fn native_length(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [s] = args else {
+        return Err(RuntimeError::new("Str.length expects (s)"));
+    };
+    let count = expect_str("Str.length", s)?.chars().count();
+    Ok(Value::Int(i64::try_from(count).unwrap_or(i64::MAX)))
+}
+
+/// `Str.trim(s)` — `s` with surrounding whitespace removed.
+fn native_trim(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [s] = args else {
+        return Err(RuntimeError::new("Str.trim expects (s)"));
+    };
+    Ok(Value::Str(expect_str("Str.trim", s)?.trim().into()))
+}
+
+/// `Str.contains(s, sub)` — whether `sub` occurs in `s` (substring, not element).
+fn native_str_contains(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [s, sub] = args else {
+        return Err(RuntimeError::new("Str.contains expects (s, sub)"));
+    };
+    let haystack = expect_str("Str.contains", s)?;
+    let needle = expect_str("Str.contains", sub)?;
+    Ok(Value::Bool(haystack.contains(needle)))
+}
+
+/// `Str.startsWith(s, prefix)` — whether `s` begins with `prefix`.
+fn native_starts_with(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [s, prefix] = args else {
+        return Err(RuntimeError::new("Str.startsWith expects (s, prefix)"));
+    };
+    let text = expect_str("Str.startsWith", s)?;
+    let prefix = expect_str("Str.startsWith", prefix)?;
+    Ok(Value::Bool(text.starts_with(prefix)))
+}
+
+/// `Str.split(s, sep)` — split `s` on each occurrence of `sep` into a `List<Str>`.
+fn native_split(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [s, sep] = args else {
+        return Err(RuntimeError::new("Str.split expects (s, sep)"));
+    };
+    let text = expect_str("Str.split", s)?;
+    let sep = expect_str("Str.split", sep)?;
+    let parts = text
+        .split(sep)
+        .map(|piece| Value::Str(piece.into()))
+        .collect::<Vec<_>>();
+    Ok(Value::List(parts.into()))
+}
+
+/// `Str.replace(s, from, to)` — `s` with every `from` replaced by `to`.
+fn native_replace(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [s, from, to] = args else {
+        return Err(RuntimeError::new("Str.replace expects (s, from, to)"));
+    };
+    let text = expect_str("Str.replace", s)?;
+    let from = expect_str("Str.replace", from)?;
+    let to = expect_str("Str.replace", to)?;
+    Ok(Value::Str(text.replace(from, to).into()))
+}
+
 fn expect_list<'a>(name: &str, value: &'a Value) -> Result<&'a [Value], RuntimeError> {
     match value {
         Value::List(items) => Ok(items),
@@ -431,8 +562,87 @@ fn native_join(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{run_program, run_program_err, run_program_events};
+    use crate::test_support::{run_modules, run_program, run_program_err, run_program_events};
     use crate::value::{TelemetryEvent, Value};
+
+    /// Run a one-liner that uses the `Str` module, returning `main`'s value.
+    fn run_str(body: &str) -> Value {
+        let source = format!("use Str  main() = {body}");
+        run_modules(&[("main", source.as_str())], "main")
+    }
+
+    #[test]
+    fn str_upper_and_lower_change_case() {
+        assert_eq!(run_str(r#"Str.upper("Hi")"#), Value::Str("HI".into()));
+        assert_eq!(run_str(r#"Str.lower("Hi")"#), Value::Str("hi".into()));
+    }
+
+    #[test]
+    fn str_length_counts_chars() {
+        assert_eq!(run_str(r#"Str.length("hello")"#), Value::Int(5));
+        assert_eq!(run_str(r#"Str.length("")"#), Value::Int(0));
+    }
+
+    #[test]
+    fn str_trim_strips_surrounding_whitespace() {
+        assert_eq!(run_str(r#"Str.trim("  hi  ")"#), Value::Str("hi".into()));
+        assert_eq!(run_str(r#"Str.trim("hi")"#), Value::Str("hi".into()));
+    }
+
+    #[test]
+    fn str_contains_is_a_substring_test() {
+        assert_eq!(run_str(r#"Str.contains("hello", "ell")"#), Value::Bool(true));
+        assert_eq!(run_str(r#"Str.contains("hello", "xyz")"#), Value::Bool(false));
+    }
+
+    #[test]
+    fn str_contains_coexists_with_the_flat_element_contains() {
+        // The payoff of namespacing: `Str.contains` (substring) and the flat
+        // `contains` (element membership) are different functions, same name.
+        let modules = [(
+            "main",
+            r#"use Str  main() = [Str.contains("abc", "b"), contains([1, 2, 3], 2)]"#,
+        )];
+        assert_eq!(
+            run_modules(&modules, "main"),
+            Value::List(vec![Value::Bool(true), Value::Bool(true)].into())
+        );
+    }
+
+    #[test]
+    fn str_starts_with_tests_a_prefix() {
+        assert_eq!(
+            run_str(r#"Str.startsWith("hello", "he")"#),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_str(r#"Str.startsWith("hello", "lo")"#),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn str_split_breaks_on_a_separator() {
+        assert_eq!(
+            run_str(r#"Str.split("a,b,c", ",")"#),
+            Value::List(
+                vec![
+                    Value::Str("a".into()),
+                    Value::Str("b".into()),
+                    Value::Str("c".into()),
+                ]
+                .into()
+            )
+        );
+    }
+
+    #[test]
+    fn str_replace_substitutes_every_occurrence() {
+        assert_eq!(
+            run_str(r#"Str.replace("a.b.c", ".", "-")"#),
+            Value::Str("a-b-c".into())
+        );
+    }
 
     #[test]
     fn map_applies_a_function_to_each_element() {

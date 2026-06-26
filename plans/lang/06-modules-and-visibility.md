@@ -188,8 +188,18 @@ The orphan rule the design doc already gestures at, now enforceable because
 ## Deferred (explicitly out of iteration 1)
 
 - **In-file `module { }` blocks** (nested namespaces in one file).
-- **Opaque types** — `ext` on fields/constructors/variants; a public type with a
-  private constructor. The expressive encapsulation case.
+- **Opaque types — step 1 (unforgeable) SHIPPED; step 2 (sealing) deferred to the
+  type system.** `Field.public` (the per-field `ext` mark) parses; a `prod`'s
+  constructor is exported only when the type is `ext` *and* every field is
+  (transparent). Any private field → the constructor stays private → other
+  modules can hold a value but can't construct one (proven by tests). This is the
+  *unforgeable* property — a value's existence proves it went through the owning
+  module's checks, the capability-shaped half. **Not yet sealed:** reading a
+  private field (`u.n`) or pattern-matching it from outside still works — those
+  need current-module threading + a `Result`-threaded matcher at runtime, and are
+  far cleaner as a *static* check once the type system lands (you know `u`'s type
+  at compile time). Sum-variant field opacity also deferred. So opaque types are
+  *unforgeable now, fully sealed with types.*
 - **Re-export / `ext use`**, import aliasing (`use Seq as S`), glob import.
 - **Module-path *types*** (`other.Shape` in a type annotation) — types are still
   parse-and-ignore in v0, so cross-module type references need nothing yet.
