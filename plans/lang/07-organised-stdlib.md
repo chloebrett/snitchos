@@ -50,12 +50,37 @@ under clean names in `Str`, keeping generic names out of the flat namespace and
 letting `Str.contains` source `strContains`. The clash *was* the payoff demo —
 two `contains`, one namespaced, both correct.
 
+## Iteration B — flat combinators ✅ SHIPPED
+
+Everyday combinators that join the flat / auto-in-scope core. TDD, green between
+each:
+
+- `reverse(xs)` — native, List, eager.
+- `drop(seq, n)` / `dropWhile(seq, pred)` — native, Seq-only lazy, **collection-
+  first** so they pipe (`seq |> drop(2)`).
+- `flatMap(xs, f)` — native, List, eager.
+- `min(xs)` / `max(xs)` — **prelude** (derived from `fold`, returns `Maybe`), the
+  dogfooding showcase. Works on Int/Float/Str.
+- `sort(xs)` / `sortBy(xs, key)` — native, List, stable. **`sortBy` is
+  key-based** (`sortBy(xs, $.age)`) — chosen over the design doc's predicate
+  sketch (`sortBy($a.age < $b.age)`): computes the key once per element, avoids a
+  fallible comparator, matches Kotlin/Python. Errors on incomparable elements.
+- **bonus:** extended `<`/`>`/`<=`/`>=` to **strings** (lexicographic, via a
+  shared `ops::value_order`), so sort/min/max work on text, not just numbers.
+
+**Finding — `take`'s arg order is the odd one out.** `take(count, seq)` is
+count-first, so it does *not* pipe (`seq |> take(10)` feeds the seq as the
+count) — inconsistent with `takeWhile`/`map`/`filter`/`fold` and the new
+`drop`/`dropWhile`, which are all collection-first. The post-4 example
+`… |> take(10) |> fold(…)` doesn't actually run as written. **Candidate fix:**
+flip `take` to `(seq, count)`; low-risk (no test pipes into it today), but it's a
+public-API change so left as a deliberate follow-up.
+
 ## Deferred follow-ons
 
-- **Flat polymorphic combinators** — `reverse`, `sortBy`/`sort`, `zip`,
-  `flatMap`, `enumerate`, `drop`/`dropWhile`, `first`/`last`, `min`/`max`.
-  Written in Stitch where derivable from `fold`; native where they need new
-  primitives (cons/concat/index).
+- **More flat combinators** — `zip`, `enumerate`, `first`/`last`, lazy `Seq`
+  `flatMap`. Written in Stitch where derivable from `fold`; native where they need
+  new primitives (cons/concat/index).
 - **More `Seq` producers** — `cycle`, `unfold`.
 - **`Str` extras** — `endsWith`, `chars`, `words`, `lines`, `padLeft`.
 - **Embedded-source stdlib modules** — when a stdlib fn is written in Stitch

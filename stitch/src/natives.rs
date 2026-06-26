@@ -3,8 +3,11 @@
 //! plus the telemetry stubs `emit`/`span`). Everything else in the stdlib is the
 //! Stitch-source prelude, layered on top of these.
 
+use std::cmp::Ordering;
+
 use crate::env::Env;
 use crate::interp::apply_values;
+use crate::ops::value_order;
 use crate::value::{LazySeq, NativeFn, RuntimeError, Step, TelemetryEvent, Value};
 
 /// The native functions, registered into every program's globals.
@@ -68,6 +71,37 @@ pub(crate) const NATIVES: &[NativeFn] = &[
         name: "foldWhile",
         arity: 3,
         func: native_fold_while,
+    },
+    // --- more list combinators (flat / polymorphic, auto-in-scope) ---
+    NativeFn {
+        name: "reverse",
+        arity: 1,
+        func: native_reverse,
+    },
+    NativeFn {
+        name: "drop",
+        arity: 2,
+        func: native_drop,
+    },
+    NativeFn {
+        name: "dropWhile",
+        arity: 2,
+        func: native_drop_while,
+    },
+    NativeFn {
+        name: "flatMap",
+        arity: 2,
+        func: native_flat_map,
+    },
+    NativeFn {
+        name: "sort",
+        arity: 1,
+        func: native_sort,
+    },
+    NativeFn {
+        name: "sortBy",
+        arity: 2,
+        func: native_sort_by,
     },
     // --- string operations (exposed under the `Str` module; `str`-prefixed
     //     internally so generic names don't clutter the flat namespace) ---
@@ -405,6 +439,150 @@ fn native_replace(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     Ok(Value::Str(text.replace(from, to).into()))
 }
 
+/// `drop(seq, n)` — a lazy `Seq` of `seq` with its first `n` elements skipped.
+/// Seq-only. Collection-first (so it pipes: `seq |> drop(2)`), matching
+/// `takeWhile`/`map`/`filter`; forcing forces past the skipped prefix.
+fn native_drop(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [seq, count] = args else {
+        return Err(RuntimeError::new("drop expects (seq, count)"));
+    };
+    let Value::Int(count) = count else {
+        return Err(RuntimeError::new(format!(
+            "drop count must be an Int, got {}",
+            count.kind()
+        )));
+    };
+    if !matches!(seq, Value::Seq(_)) {
+        return Err(RuntimeError::new(format!(
+            "drop expects a Seq, got {}",
+            seq.kind()
+        )));
+    }
+    Ok(drop_seq(*count, seq.clone()))
+}
+
+fn drop_seq(n: i64, seq: Value) -> Value {
+    Value::Seq(LazySeq::new(move || {
+        let mut current = seq.clone();
+        let mut remaining = n;
+        while remaining > 0 {
+            match force_seq(&current)? {
+                Step::Nil => return Ok(Step::Nil),
+                Step::Cons(_, tail) => current = tail,
+            }
+            remaining -= 1;
+        }
+        force_seq(&current)
+    }))
+}
+
+/// `dropWhile(seq, pred)` — a lazy `Seq` of `seq` with its leading run of
+/// `pred`-passing elements skipped, starting at the first failure. Seq-only,
+/// mirroring `takeWhile`.
+fn native_drop_while(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [seq, predicate] = args else {
+        return Err(RuntimeError::new("dropWhile expects (seq, predicate)"));
+    };
+    if !matches!(seq, Value::Seq(_)) {
+        return Err(RuntimeError::new(format!(
+            "dropWhile expects a Seq, got {}",
+            seq.kind()
+        )));
+    }
+    Ok(drop_while_seq(seq.clone(), predicate.clone(), env.clone()))
+}
+
+fn drop_while_seq(seq: Value, pred: Value, env: Env) -> Value {
+    Value::Seq(LazySeq::new(move || {
+        let mut current = seq.clone();
+        loop {
+            match force_seq(&current)? {
+                Step::Nil => return Ok(Step::Nil),
+                Step::Cons(head, tail) => {
+                    if keeps(&pred, &head, &env)? {
+                        current = tail;
+                    } else {
+                        return Ok(Step::Cons(head, tail));
+                    }
+                }
+            }
+        }
+    }))
+}
+
+/// `sort(xs)` — the list ordered by natural order (Int/Float/Str). Eager; a
+/// stable sort. Errors if the elements aren't a single comparable kind.
+fn native_sort(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [list] = args else {
+        return Err(RuntimeError::new("sort expects (list)"));
+    };
+    let mut items = expect_list("sort", list)?.to_vec();
+    let mut incomparable = false;
+    items.sort_by(|a, b| {
+        value_order(a, b).unwrap_or_else(|| {
+            incomparable = true;
+            Ordering::Equal
+        })
+    });
+    if incomparable {
+        return Err(RuntimeError::new(
+            "sort: elements are not comparable (need all Int, all Float, or all Str)",
+        ));
+    }
+    Ok(Value::List(items.into()))
+}
+
+/// `sortBy(xs, key)` — the list ordered by `key(element)`'s natural order. Eager,
+/// stable. The key is computed once per element. (Key-based, not a `<` predicate.)
+fn native_sort_by(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [list, key] = args else {
+        return Err(RuntimeError::new("sortBy expects (list, key)"));
+    };
+    let mut keyed = Vec::new();
+    for item in expect_list("sortBy", list)? {
+        let k = apply_values(key, std::slice::from_ref(item), env)?;
+        keyed.push((k, item.clone()));
+    }
+    let mut incomparable = false;
+    keyed.sort_by(|(a, _), (b, _)| {
+        value_order(a, b).unwrap_or_else(|| {
+            incomparable = true;
+            Ordering::Equal
+        })
+    });
+    if incomparable {
+        return Err(RuntimeError::new(
+            "sortBy: keys are not comparable (need all Int, all Float, or all Str)",
+        ));
+    }
+    Ok(Value::List(keyed.into_iter().map(|(_, item)| item).collect::<Vec<_>>().into()))
+}
+
+/// `flatMap(xs, f)` — map each element to a `List` and concatenate the results.
+/// Eager (List). `f` must return a `List`.
+fn native_flat_map(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [list, function] = args else {
+        return Err(RuntimeError::new("flatMap expects (list, function)"));
+    };
+    let mut out = Vec::new();
+    for item in expect_list("flatMap", list)? {
+        let mapped = apply_values(function, std::slice::from_ref(item), env)?;
+        out.extend(expect_list("flatMap", &mapped)?.iter().cloned());
+    }
+    Ok(Value::List(out.into()))
+}
+
+/// `reverse(xs)` — the list with its elements in reverse order. Eager (List
+/// only); reversing requires consuming the whole collection.
+fn native_reverse(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [list] = args else {
+        return Err(RuntimeError::new("reverse expects (list)"));
+    };
+    let mut items = expect_list("reverse", list)?.to_vec();
+    items.reverse();
+    Ok(Value::List(items.into()))
+}
+
 fn expect_list<'a>(name: &str, value: &'a Value) -> Result<&'a [Value], RuntimeError> {
     match value {
         Value::List(items) => Ok(items),
@@ -569,6 +747,96 @@ mod tests {
     fn run_str(body: &str) -> Value {
         let source = format!("use Str  main() = {body}");
         run_modules(&[("main", source.as_str())], "main")
+    }
+
+    #[test]
+    fn reverse_reverses_a_list() {
+        assert_eq!(
+            run_program("main() = reverse([1, 2, 3]) == [3, 2, 1]"),
+            Value::Bool(true)
+        );
+        assert_eq!(run_program("main() = reverse([]) == []"), Value::Bool(true));
+    }
+
+    #[test]
+    fn drop_skips_a_prefix_of_a_seq() {
+        // Collection-first, so it pipes: `1.. |> drop(2)`.
+        assert_eq!(
+            run_program("main() = toList(take(3, 1.. |> drop(2))) == [3, 4, 5]"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program("main() = toList(1..3 |> drop(5)) == []"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn drop_while_skips_the_leading_run() {
+        assert_eq!(
+            run_program("main() = toList(take(3, 1.. |> dropWhile(x -> x < 4))) == [4, 5, 6]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn sort_orders_a_list_by_natural_order() {
+        assert_eq!(
+            run_program("main() = sort([3, 1, 2]) == [1, 2, 3]"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program(r#"main() = sort(["c", "a", "b"]) == ["a", "b", "c"]"#),
+            Value::Bool(true)
+        );
+        assert_eq!(run_program("main() = sort([]) == []"), Value::Bool(true));
+    }
+
+    #[test]
+    fn sort_by_orders_by_a_derived_key() {
+        // key = -x → ascending by -x is descending by x
+        assert_eq!(
+            run_program("main() = sortBy([1, 2, 3], x -> 0 - x) == [3, 2, 1]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn sorting_incomparable_elements_is_an_error() {
+        assert!(
+            run_program_err("main() = sort([1, \"a\"])").contains("comparable"),
+            "expected an incomparable-elements error"
+        );
+    }
+
+    #[test]
+    fn min_and_max_find_the_extremes_as_maybe() {
+        assert_eq!(
+            run_program("main() = min([3, 1, 2]) == Some(1)"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program("main() = max([3, 1, 2]) == Some(3)"),
+            Value::Bool(true)
+        );
+        assert_eq!(run_program("main() = min([]) == None"), Value::Bool(true));
+        // works on strings too, now that `<` is lexicographic
+        assert_eq!(
+            run_program(r#"main() = min(["b", "a", "c"]) == Some("a")"#),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn flat_map_maps_then_flattens() {
+        assert_eq!(
+            run_program("main() = flatMap([1, 2, 3], x -> [x, x]) == [1, 1, 2, 2, 3, 3]"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program("main() = flatMap([], x -> [x]) == []"),
+            Value::Bool(true)
+        );
     }
 
     #[test]

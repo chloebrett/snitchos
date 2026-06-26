@@ -71,15 +71,33 @@ fn equality(op: BinOp, left: &Value, right: &Value) -> Result<Value, RuntimeErro
     Ok(Value::Bool(if op == BinOp::Ne { !equal } else { equal }))
 }
 
-/// `<` / `<=` / `>` / `>=`: ordering on two Ints or two Floats. A NaN operand
-/// makes every comparison `false` (IEEE 754); other kinds are a type error.
-fn ordering(op: BinOp, left: &Value, right: &Value) -> Result<Value, RuntimeError> {
-    let order = match (left, right) {
+/// A total-ish order over comparable values — two Ints, two Floats, or two Strs
+/// (lexicographic). `None` for incomparable kinds (or a NaN float operand).
+/// Shared by the comparison operators and `sort`.
+pub(crate) fn value_order(left: &Value, right: &Value) -> Option<Ordering> {
+    match (left, right) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
         (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
-        _ => return Err(type_mismatch(op, left, right)),
-    };
-    let holds = order.is_some_and(|o| match op {
+        (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
+        _ => None,
+    }
+}
+
+/// `<` / `<=` / `>` / `>=`: ordering on two Ints, two Floats, or two Strs. A NaN
+/// operand makes every comparison `false` (IEEE 754); other kinds are a type
+/// error.
+fn ordering(op: BinOp, left: &Value, right: &Value) -> Result<Value, RuntimeError> {
+    let comparable = matches!(
+        (left, right),
+        (Value::Int(_), Value::Int(_))
+            | (Value::Float(_), Value::Float(_))
+            | (Value::Str(_), Value::Str(_))
+    );
+    if !comparable {
+        return Err(type_mismatch(op, left, right));
+    }
+    // `value_order` is `None` only for a NaN float here → every comparison false.
+    let holds = value_order(left, right).is_some_and(|o| match op {
         BinOp::Lt => o == Ordering::Less,
         BinOp::Le => o != Ordering::Greater,
         BinOp::Gt => o == Ordering::Greater,
@@ -173,6 +191,13 @@ mod tests {
         assert_eq!(run("1.5 < 2.5"), Value::Bool(true));
         assert_eq!(run("2.5 == 2.5"), Value::Bool(true));
         assert_eq!(run("2.5 >= 3.5"), Value::Bool(false));
+    }
+
+    #[test]
+    fn compares_strings_lexicographically() {
+        assert_eq!(run(r#""a" < "b""#), Value::Bool(true));
+        assert_eq!(run(r#""apple" < "apply""#), Value::Bool(true));
+        assert_eq!(run(r#""b" <= "a""#), Value::Bool(false));
     }
 
     #[test]

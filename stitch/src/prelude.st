@@ -25,6 +25,23 @@ find(xs, pred) =
             None => pred(x) => Some(x) | None
         })
 
+// min/max fold to the extreme element, as a Maybe (None for an empty list).
+// Comparable elements only (Int/Float/Str) — `<`/`>` are numeric+lexicographic.
+
+min(xs) =
+    fold(xs, None, (acc, x) ->
+        match acc {
+            None => Some(x)
+            Some(m) => x < m => Some(x) | acc
+        })
+
+max(xs) =
+    fold(xs, None, (acc, x) ->
+        match acc {
+            None => Some(x)
+            Some(m) => x > m => Some(x) | acc
+        })
+
 // --- the Try contract: `?` short-circuits on the failure case ---
 // `x?` desugars to `x.isFailure() => return x | x.unwrap()`. Std implements it
 // for the built-in Maybe/Result; a user type with a success/failure split can
