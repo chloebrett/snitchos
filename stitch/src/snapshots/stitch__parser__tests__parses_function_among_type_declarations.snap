@@ -18,6 +18,7 @@ expression: "prog(\"prod P(x: Int)  area(p) = p.x * 2\")"
                 },
             },
         ],
+        public: false,
     },
     Func {
         name: "area",
@@ -40,5 +41,6 @@ expression: "prog(\"prod P(x: Int)  area(p) = p.x * 2\")"
                 2,
             ),
         },
+        public: false,
     },
 ]

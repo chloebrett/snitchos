@@ -9,5 +9,6 @@ expression: "prog(\"let mut counter = 0\")"
         value: Int(
             0,
         ),
+        public: false,
     },
 ]

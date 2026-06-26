@@ -28,5 +28,6 @@ expression: "prog(\"prod Point(x: Int, y: Int)\")"
                 },
             },
         ],
+        public: false,
     },
 ]

@@ -3,7 +3,7 @@
 //! constructors, constants), per-type method lists, contract method tables, and
 //! per-field mutability — then folds contract default methods into conformers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{Field, Item, Method, Type};
@@ -188,40 +188,48 @@ pub(crate) fn bake_contract_defaults(reg: &mut Registration) {
     }
 }
 
-/// The names a module exports to other modules: the value-introducing top-level
-/// items it *declares* — functions, products, sum variants, and constants — but
-/// not the prelude or sibling modules also present in its globals. (`on`/
-/// `contract` introduce no value binding.) Iteration 1 exports every declared
-/// item; `pub` filtering arrives next. Paired with the module's globals by
-/// `collect_exports`.
-fn declared_names(items: &[Item]) -> Vec<String> {
+/// The value-introducing names a module *declares* — functions, products, sum
+/// variants, and constants — each paired with whether it is `pub`. Not the
+/// prelude or sibling modules also present in its globals. (`on`/`contract`
+/// introduce no value binding.) A sum variant inherits the sum's visibility.
+/// Paired with the module's globals by `collect_exports`.
+fn declared_names(items: &[Item]) -> Vec<(String, bool)> {
     let mut names = Vec::new();
     for item in items {
         match item {
-            Item::Func { name, .. } | Item::Prod { name, .. } | Item::Const { name, .. } => {
-                names.push(name.clone());
+            Item::Func { name, public, .. }
+            | Item::Prod { name, public, .. }
+            | Item::Const { name, public, .. } => names.push((name.clone(), *public)),
+            Item::Sum { variants, public, .. } => {
+                names.extend(variants.iter().map(|variant| (variant.name.clone(), *public)));
             }
-            Item::Sum { variants, .. } => {
-                names.extend(variants.iter().map(|variant| variant.name.clone()));
-            }
-            Item::On { .. } | Item::Contract { .. } => {}
+            Item::On { .. } | Item::Contract { .. } | Item::Use { .. } => {}
         }
     }
     names
 }
 
-/// Build a module's export table: each name it declares paired with the value
-/// already registered for it in `globals`. Restricting to declared names keeps
-/// the prelude and sibling-module bindings (also in `globals`) out of the
-/// module's public surface.
+/// A module's public surface: the `exports` table (each `pub` declared name
+/// paired with its value from `globals`) and the set of `private` declared names
+/// (so a refused access can distinguish "private" from "no such member").
+/// Restricting to declared names keeps the prelude and sibling-module bindings
+/// (also in `globals`) out of the public surface.
 pub(crate) fn collect_exports(
     items: &[Item],
     globals: &HashMap<String, Value>,
-) -> HashMap<String, Value> {
-    declared_names(items)
-        .into_iter()
-        .filter_map(|name| globals.get(&name).map(|value| (name.clone(), value.clone())))
-        .collect()
+) -> (HashMap<String, Value>, HashSet<String>) {
+    let mut exports = HashMap::new();
+    let mut private = HashSet::new();
+    for (name, public) in declared_names(items) {
+        if public {
+            if let Some(value) = globals.get(&name) {
+                exports.insert(name, value.clone());
+            }
+        } else {
+            private.insert(name);
+        }
+    }
+    (exports, private)
 }
 
 /// Register the built-in `Maybe`/`Result` constructors: `Some`/`Ok`/`Err` take

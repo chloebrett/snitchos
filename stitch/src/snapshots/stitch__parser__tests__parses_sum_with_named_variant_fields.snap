@@ -48,5 +48,6 @@ expression: "prog(\"sum Shape = Circle(radius: Int) | Rect(w: Int, h: Int)\")"
                 ],
             },
         ],
+        public: false,
     },
 ]

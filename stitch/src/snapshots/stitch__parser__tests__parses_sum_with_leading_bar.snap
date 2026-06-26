@@ -20,5 +20,6 @@ expression: "prog(\"sum Color = | Red | Green | Blue\")"
                 fields: [],
             },
         ],
+        public: false,
     },
 ]

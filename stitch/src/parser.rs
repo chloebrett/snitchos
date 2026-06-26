@@ -684,24 +684,71 @@ impl Parser {
 
     /// Parse one top-level declaration.
     fn parse_item(&mut self) -> Result<Item, ParseError> {
+        // Optional `ext` exports the item; items are private to their module by
+        // default. It precedes the value-introducing declarations only — `ext`
+        // on a `contract` (cross-module conformance) or an `on` block isn't
+        // meaningful yet.
+        let public = if matches!(self.peek(), Token::Ext) {
+            self.bump();
+            true
+        } else {
+            false
+        };
+        if matches!(self.peek(), Token::Use) {
+            if public {
+                return Err(ParseError::new(
+                    "`ext` applies to declarations, not a `use` import",
+                ));
+            }
+            return self.parse_use_import();
+        }
         match self.peek() {
-            Token::Prod => self.parse_prod(),
-            Token::Sum => self.parse_sum(),
-            Token::Contract => self.parse_contract(),
-            Token::On => self.parse_on(),
+            Token::Prod => self.parse_prod(public),
+            Token::Sum => self.parse_sum(public),
             Token::Let => {
                 let (name, mutable, value) = self.parse_binding()?;
                 Ok(Item::Const {
                     name,
                     mutable,
                     value,
+                    public,
                 })
             }
-            Token::Ident(_) => self.parse_func(),
+            Token::Ident(_) => self.parse_func(public),
+            Token::Contract | Token::On if public => Err(ParseError::new(
+                "`ext` applies to functions, types, and constants — not `contract`/`on`",
+            )),
+            Token::Contract => self.parse_contract(),
+            Token::On => self.parse_on(),
             other => Err(ParseError::new(format!(
                 "expected a declaration, found {other:?}"
             ))),
         }
+    }
+
+    /// `use M` (whole-module import) or `use M.{ a, b }` (selective import). The
+    /// `.{` after the module name signals a selection list.
+    fn parse_use_import(&mut self) -> Result<Item, ParseError> {
+        self.bump(); // 'use'
+        let module = self.expect_ident("module name after `use`")?;
+        let names = if matches!(self.peek(), Token::Dot) {
+            self.bump(); // '.'
+            self.expect(&Token::LBrace, "'{' for a selective import `use M.{ a, b }`")?;
+            let mut names = Vec::new();
+            while !matches!(self.peek(), Token::RBrace) {
+                names.push(self.expect_ident("imported member name")?);
+                if matches!(self.peek(), Token::Comma) {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            self.expect(&Token::RBrace, "'}' to close the import selection")?;
+            Some(names)
+        } else {
+            None
+        };
+        Ok(Item::Use { module, names })
     }
 
     /// `on Type { methods }` or `on Type : Contract { methods }`.
@@ -790,7 +837,7 @@ impl Parser {
     }
 
     /// A function: `name(params) -> Ret? (= expr | { block })`.
-    fn parse_func(&mut self) -> Result<Item, ParseError> {
+    fn parse_func(&mut self, public: bool) -> Result<Item, ParseError> {
         let name = self.expect_ident("function name")?;
         self.expect(&Token::LParen, "'(' after function name")?;
         let params = self.parse_params()?;
@@ -806,6 +853,7 @@ impl Parser {
             params,
             ret,
             body,
+            public,
         })
     }
 
@@ -851,7 +899,7 @@ impl Parser {
     }
 
     /// `prod Name<generics>(fields)`.
-    fn parse_prod(&mut self) -> Result<Item, ParseError> {
+    fn parse_prod(&mut self, public: bool) -> Result<Item, ParseError> {
         self.bump(); // 'prod'
         let name = self.expect_ident("product type name")?;
         let generics = self.parse_generics()?;
@@ -861,11 +909,12 @@ impl Parser {
             name,
             generics,
             fields,
+            public,
         })
     }
 
     /// `sum Name<generics> = variant | variant | …`.
-    fn parse_sum(&mut self) -> Result<Item, ParseError> {
+    fn parse_sum(&mut self, public: bool) -> Result<Item, ParseError> {
         self.bump(); // 'sum'
         let name = self.expect_ident("sum type name")?;
         let generics = self.parse_generics()?;
@@ -882,6 +931,7 @@ impl Parser {
             name,
             generics,
             variants,
+            public,
         })
     }
 
@@ -1843,6 +1893,40 @@ mod tests {
     #[test]
     fn parses_constant_among_declarations() {
         insta::assert_debug_snapshot!(prog("let limit = 100  area(p) = p.x * limit"));
+    }
+
+    #[test]
+    fn parses_whole_module_and_selective_imports() {
+        let whole = prog("use math");
+        assert!(matches!(&whole[0], Item::Use { module, names: None } if module == "math"));
+        let selective = prog("use math.{double, area}");
+        let Item::Use { module, names: Some(names) } = &selective[0] else {
+            panic!("expected a selective import");
+        };
+        assert_eq!(module, "math");
+        assert_eq!(names.as_slice(), ["double".to_string(), "area".to_string()]);
+    }
+
+    #[test]
+    fn ext_marks_an_item_as_exported() {
+        // Items are private by default; `ext` flips the flag the export table reads.
+        let private = prog("area(p) = p.x");
+        assert!(matches!(&private[0], Item::Func { public: false, .. }));
+        let exported = prog("ext area(p) = p.x");
+        assert!(matches!(&exported[0], Item::Func { public: true, .. }));
+    }
+
+    #[test]
+    fn ext_on_a_contract_is_a_parse_error() {
+        // `ext` is for value-introducing items; contract/`on` visibility isn't
+        // meaningful yet, so it's rejected rather than silently ignored.
+        let error = parse_program("ext contract Show { show() -> Str }")
+            .expect_err("`ext contract` should be rejected");
+        assert!(
+            error.message.contains("`ext` applies to"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

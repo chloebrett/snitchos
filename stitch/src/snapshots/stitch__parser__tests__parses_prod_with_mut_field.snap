@@ -18,5 +18,6 @@ expression: "prog(\"prod Counter(mut n: Int)\")"
                 },
             },
         ],
+        public: false,
     },
 ]

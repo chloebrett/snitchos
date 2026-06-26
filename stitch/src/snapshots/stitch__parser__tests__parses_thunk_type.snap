@@ -23,5 +23,6 @@ expression: "prog(\"prod Lazy(run: () -> Int)\")"
                 },
             },
         ],
+        public: false,
     },
 ]

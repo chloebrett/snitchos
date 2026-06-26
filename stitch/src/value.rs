@@ -2,7 +2,7 @@
 //! typed: a `Value` carries its own kind, and operations check kinds at runtime
 //! (no implicit Int/Float coercion — that previews the eventual static types).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 
@@ -55,16 +55,32 @@ pub enum Value {
 
 /// A module's exported bindings, keyed by name. Cloning a `Value::Module` shares
 /// the handle (`Rc`); two module values are equal only if they are the same
-/// module (identity, like a closure).
+/// module (identity, like a closure). `private` records names the module
+/// *declares but does not export*, so a refused access can say "private" rather
+/// than "no such member".
 pub struct ModuleHandle {
     pub name: String,
     pub exports: HashMap<String, Value>,
+    pub private: HashSet<String>,
 }
 
 impl ModuleHandle {
     /// The exported member named `name`, if any.
     pub fn member(&self, name: &str) -> Option<Value> {
         self.exports.get(name).cloned()
+    }
+
+    /// The error for an access that didn't resolve: a member declared but not
+    /// exported is *private*; anything else simply doesn't exist.
+    pub fn access_error(&self, name: &str) -> RuntimeError {
+        if self.private.contains(name) {
+            RuntimeError::new(format!(
+                "member `{name}` of module `{}` is private",
+                self.name
+            ))
+        } else {
+            RuntimeError::new(format!("module `{}` has no member `{name}`", self.name))
+        }
     }
 }
 

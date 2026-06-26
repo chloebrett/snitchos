@@ -48,6 +48,7 @@ expression: "prog(\"sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)
                 ],
             },
         ],
+        public: false,
     },
     Func {
         name: "area",
@@ -114,6 +115,7 @@ expression: "prog(\"sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)
                 },
             ],
         },
+        public: false,
     },
     Func {
         name: "hot",
@@ -185,5 +187,6 @@ expression: "prog(\"sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)
                 ],
             },
         },
+        public: false,
     },
 ]

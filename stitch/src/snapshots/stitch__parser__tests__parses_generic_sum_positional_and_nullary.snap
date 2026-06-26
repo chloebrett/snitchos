@@ -27,5 +27,6 @@ expression: "prog(\"sum Maybe<T> = Some(T) | None\")"
                 fields: [],
             },
         ],
+        public: false,
     },
 ]

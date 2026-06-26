@@ -27,6 +27,7 @@ expression: "prog(\"sum Maybe<T> = Some(T) | None  \\\n         sum Result<T, E>
                 fields: [],
             },
         ],
+        public: false,
     },
     Sum {
         name: "Result",
@@ -62,6 +63,7 @@ expression: "prog(\"sum Maybe<T> = Some(T) | None  \\\n         sum Result<T, E>
                 ],
             },
         ],
+        public: false,
     },
     Sum {
         name: "Either",
@@ -97,5 +99,6 @@ expression: "prog(\"sum Maybe<T> = Some(T) | None  \\\n         sum Result<T, E>
                 ],
             },
         ],
+        public: false,
     },
 ]

@@ -29,5 +29,6 @@ expression: "prog(\"run() { let x = 1  x + 1 }\")"
                 },
             ),
         },
+        public: false,
     },
 ]

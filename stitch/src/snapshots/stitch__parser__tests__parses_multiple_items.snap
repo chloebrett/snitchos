@@ -28,6 +28,7 @@ expression: "prog(\"prod Point(x: Int, y: Int)  sum Dir = North | South\")"
                 },
             },
         ],
+        public: false,
     },
     Sum {
         name: "Dir",
@@ -42,5 +43,6 @@ expression: "prog(\"prod Point(x: Int, y: Int)  sum Dir = North | South\")"
                 fields: [],
             },
         ],
+        public: false,
     },
 ]

@@ -1,6 +1,7 @@
 //! Tree-walk interpreter: recursively evaluate an `Expr` to a `Value`. The AST
 //! *is* the program — no compilation. v0 is dynamically typed; see `value.rs`.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::{Arg, BinOp, Expr, Item, MethodModifier, Stmt, StrSegment};
@@ -117,24 +118,29 @@ pub fn eval_modules_with_telemetry(
     base.set_methods(combined.methods);
     base.set_field_mut(combined.field_mut);
 
-    // Phase 2 — link. Each module exports its declared items; bind every module
-    // as a value in every *other* module's globals (iteration 1: all siblings
-    // visible by name), then install each module's globals.
-    let module_values = modules
+    // Each module's public surface, as a `Value::Module`. Built for *all*
+    // modules before any `use` is resolved, which is what makes import cycles
+    // free: by link time every export table already exists (no eager recursion).
+    let modules_by_name = modules
         .iter()
         .zip(&per_module)
         .map(|(module, reg)| {
-            Value::Module(Rc::new(ModuleHandle {
+            let (exports, private) = collect_exports(&module.items, &reg.globals);
+            let handle = Rc::new(ModuleHandle {
                 name: module.name.clone(),
-                exports: collect_exports(&module.items, &reg.globals),
-            }))
+                exports,
+                private,
+            });
+            (module.name.clone(), handle)
         })
-        .collect::<Vec<_>>();
-    for (index, reg) in per_module.iter_mut().enumerate() {
-        for (other, value) in modules.iter().zip(&module_values) {
-            if other.name != modules[index].name {
-                reg.globals.insert(other.name.clone(), value.clone());
-            }
+        .collect::<HashMap<_, _>>();
+
+    // Phase 2 — link. Process each module's `use` imports: a whole-module import
+    // binds the module value by name; a selection binds the named exports
+    // directly. A module is invisible until imported (no implicit siblings).
+    for (module, reg) in modules.iter().zip(per_module.iter_mut()) {
+        if let Err(error) = link_imports(&module.items, &mut reg.globals, &modules_by_name) {
+            return (Err(error), base.telemetry());
         }
     }
     for (env, reg) in envs.iter().zip(per_module) {
@@ -153,6 +159,37 @@ pub fn eval_modules_with_telemetry(
         ))),
     };
     (result, base.telemetry())
+}
+
+/// Apply a module's `use` imports to its globals: a whole-module import binds
+/// the module value under its name; a selection binds each named export directly
+/// (so it's reachable unqualified). Errors on an unknown module or a
+/// missing/private selected member.
+fn link_imports(
+    items: &[Item],
+    globals: &mut HashMap<String, Value>,
+    modules_by_name: &HashMap<String, Rc<ModuleHandle>>,
+) -> Result<(), RuntimeError> {
+    for item in items {
+        let Item::Use { module, names } = item else {
+            continue;
+        };
+        let Some(handle) = modules_by_name.get(module) else {
+            return Err(RuntimeError::new(format!("no module named `{module}`")));
+        };
+        match names {
+            None => {
+                globals.insert(module.clone(), Value::Module(Rc::clone(handle)));
+            }
+            Some(names) => {
+                for name in names {
+                    let value = handle.member(name).ok_or_else(|| handle.access_error(name))?;
+                    globals.insert(name.clone(), value);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Evaluate an expression to a value in environment `env`.
@@ -318,12 +355,7 @@ fn eval_method_call(
                 // A module path call (`M.func(args)`): resolve the member in the
                 // module's exports and apply it — not a type-directed method.
                 Value::Module(ref module) => {
-                    let member = module.member(name).ok_or_else(|| {
-                        RuntimeError::new(format!(
-                            "module `{}` has no member `{name}`",
-                            module.name
-                        ))
-                    })?;
+                    let member = module.member(name).ok_or_else(|| module.access_error(name))?;
                     return eval_call(&member, args, env);
                 }
                 other => {
@@ -766,9 +798,7 @@ fn eval_field(object: &Value, name: &str) -> Result<Value, RuntimeError> {
     // A module path (`M.member`) reuses `.`-access: resolve the member in the
     // module's exports rather than reading a record field.
     if let Value::Module(module) = object {
-        return module.member(name).ok_or_else(|| {
-            RuntimeError::new(format!("module `{}` has no member `{name}`", module.name))
-        });
+        return module.member(name).ok_or_else(|| module.access_error(name));
     }
     let Value::Data(data) = object else {
         return Err(RuntimeError::new(format!(
@@ -958,8 +988,57 @@ mod tests {
         // name, and a path access resolves a member of the named module.
         let result = run_modules(
             &[
-                ("math", "double(x) = x * 2"),
-                ("main", "main() = math.double(21)"),
+                ("math", "ext double(x) = x * 2"),
+                ("main", "use math  main() = math.double(21)"),
+            ],
+            "main",
+        );
+        assert_eq!(result, Value::Int(42));
+    }
+
+    #[test]
+    fn an_exported_member_is_reachable_across_modules() {
+        // `out` marks a member as exported; the path access then resolves it.
+        let result = run_modules(
+            &[
+                ("math", "ext double(x) = x * 2"),
+                ("main", "use math  main() = math.double(21)"),
+            ],
+            "main",
+        );
+        assert_eq!(result, Value::Int(42));
+    }
+
+    #[test]
+    fn a_private_member_is_not_reachable_across_modules() {
+        // Items are private by default — no `pub`, so `secret` isn't exported and
+        // the path access is refused (and says so, rather than "no such member").
+        let modules = [
+            Module {
+                name: "math".to_string(),
+                items: parse_program("secret(x) = x * 2").expect("module should parse"),
+            },
+            Module {
+                name: "main".to_string(),
+                items: parse_program("use math  main() = math.secret(21)")
+                    .expect("module should parse"),
+            },
+        ];
+        let error = eval_modules(&modules, "main").expect_err("private access should fail");
+        assert_eq!(
+            error.message(),
+            "member `secret` of module `math` is private"
+        );
+    }
+
+    #[test]
+    fn a_private_member_is_still_callable_within_its_own_module() {
+        // Default-private gates only *cross-module* access. `helper` (private) is
+        // freely called by `run` (exported) in the same module.
+        let result = run_modules(
+            &[
+                ("lib", "helper() = 7  ext run() = helper() * 6"),
+                ("main", "use lib  main() = lib.run()"),
             ],
             "main",
         );
@@ -973,8 +1052,8 @@ mod tests {
         // distinct from the method-call path.
         let result = run_modules(
             &[
-                ("math", "double(x) = x * 2"),
-                ("main", "main() = { let f = math.double  f(21) }"),
+                ("math", "ext double(x) = x * 2"),
+                ("main", "use math  main() = { let f = math.double  f(21) }"),
             ],
             "main",
         );
@@ -990,11 +1069,120 @@ mod tests {
             },
             Module {
                 name: "main".to_string(),
-                items: parse_program("main() = math.triple(3)").expect("module should parse"),
+                items: parse_program("use math  main() = math.triple(3)")
+                    .expect("module should parse"),
             },
         ];
         let error = eval_modules(&modules, "main").expect_err("call should fail");
         assert_eq!(error.message(), "module `math` has no member `triple`");
+    }
+
+    #[test]
+    fn use_imports_a_module_then_reaches_it_by_path() {
+        let result = run_modules(
+            &[
+                ("math", "ext double(x) = x * 2"),
+                ("main", "use math  main() = math.double(21)"),
+            ],
+            "main",
+        );
+        assert_eq!(result, Value::Int(42));
+    }
+
+    #[test]
+    fn a_module_is_invisible_until_imported() {
+        // No `use math` — the module name isn't in scope, so the path access has
+        // no module to resolve against. (Imports are now required; the iteration-1
+        // auto-visibility is gone.)
+        let modules = [
+            Module {
+                name: "math".to_string(),
+                items: parse_program("ext double(x) = x * 2").expect("module should parse"),
+            },
+            Module {
+                name: "main".to_string(),
+                items: parse_program("main() = math.double(21)").expect("module should parse"),
+            },
+        ];
+        let error = eval_modules(&modules, "main").expect_err("math should be unbound");
+        assert_eq!(error.message(), "unbound variable `math`");
+    }
+
+    #[test]
+    fn use_with_a_selection_binds_members_unqualified() {
+        // `use math.{double}` brings `double` into scope directly, so it can be
+        // called (and piped) without the `math.` prefix.
+        let result = run_modules(
+            &[
+                ("math", "ext double(x) = x * 2  ext triple(x) = x * 3"),
+                ("main", "use math.{double, triple}  main() = double(triple(7))"),
+            ],
+            "main",
+        );
+        assert_eq!(result, Value::Int(42));
+    }
+
+    #[test]
+    fn import_cycles_are_allowed() {
+        // `a` uses `b` and `b` uses `a`. Because every module's export table is
+        // built before any `use` is linked (and names resolve lazily at call
+        // time), a cycle needs no special handling — the two-phase link just works.
+        let result = run_modules(
+            &[
+                ("a", "use b  ext ping(n) = b.pong(n)  ext base() = 10"),
+                ("b", "use a  ext pong(n) = a.base() + n"),
+                ("main", "use a  main() = a.ping(5)"),
+            ],
+            "main",
+        );
+        assert_eq!(result, Value::Int(15));
+    }
+
+    #[test]
+    fn importing_a_missing_member_by_selection_is_an_error() {
+        let modules = [
+            Module {
+                name: "math".to_string(),
+                items: parse_program("ext double(x) = x * 2").expect("module should parse"),
+            },
+            Module {
+                name: "main".to_string(),
+                items: parse_program("use math.{triple}  main() = triple(1)")
+                    .expect("module should parse"),
+            },
+        ];
+        let error = eval_modules(&modules, "main").expect_err("missing import should fail");
+        assert_eq!(error.message(), "module `math` has no member `triple`");
+    }
+
+    #[test]
+    fn importing_an_unknown_module_is_an_error() {
+        let modules = [Module {
+            name: "main".to_string(),
+            items: parse_program("use nope  main() = 1").expect("module should parse"),
+        }];
+        let error = eval_modules(&modules, "main").expect_err("import should fail");
+        assert_eq!(error.message(), "no module named `nope`");
+    }
+
+    #[test]
+    fn importing_a_private_member_by_selection_is_refused() {
+        let modules = [
+            Module {
+                name: "math".to_string(),
+                items: parse_program("secret(x) = x * 2").expect("module should parse"),
+            },
+            Module {
+                name: "main".to_string(),
+                items: parse_program("use math.{secret}  main() = secret(1)")
+                    .expect("module should parse"),
+            },
+        ];
+        let error = eval_modules(&modules, "main").expect_err("private import should fail");
+        assert_eq!(
+            error.message(),
+            "member `secret` of module `math` is private"
+        );
     }
 
     #[test]
@@ -1014,11 +1202,8 @@ mod tests {
         // namespace (closures capture their defining module's env).
         let result = run_modules(
             &[
-                (
-                    "lib",
-                    "prefix() = 100  greet(x) = prefix() + x",
-                ),
-                ("main", "main() = lib.greet(23)"),
+                ("lib", "prefix() = 100  ext greet(x) = prefix() + x"),
+                ("main", "use lib  main() = lib.greet(23)"),
             ],
             "main",
         );

@@ -21,5 +21,6 @@ expression: "prog(\"double(x) = x * 2\")"
                 2,
             ),
         },
+        public: false,
     },
 ]

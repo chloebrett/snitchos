@@ -8,22 +8,39 @@ decisions below are first-cut, not the final module system._
 ## Decisions for iteration 1 (locked)
 
 1. **A module is a file.** Each `.st` file is one module; its name is the file
-   stem (case-sensitive). `import seq` resolves to `seq.st`; the stdlib ships as
+   stem (case-sensitive). `use seq` resolves to `seq.st`; the stdlib ships as
    built-in modules `Seq` / `List` / `Str` (PascalCase stems, so `Seq.map` reads
    right). **No in-file `module { }` blocks this iteration** — one file, one
    module.
 2. **Stdlib namespaces are modules, not types.** `Seq` is a *module* holding free
    functions; `Seq.map(xs, f)` is a module-path access. The combinators stay
    plain functions, just grouped. Pipe is unaffected: `xs |> Seq.map(f)`.
-3. **`import` brings names into scope.** `import Seq` binds the module; access its
-   public members by path (`Seq.map`). `import Seq.{map, take}` binds the named
-   public members unqualified. `use`/`uses` were unavailable (block-sugar and the
-   capability row), so the keyword is **`import`**.
-4. **`pub` is item-level only.** Top-level items (functions, `prod`/`sum`,
-   `contract`, `const`) are **private by default**; `pub` exports them. A public
+3. **`use` brings names into scope.** `use Seq` binds the module; access its
+   exported members by path (`Seq.map`). `use Seq.{map, take}` binds the named
+   members unqualified. The keyword is **`use`** — Rust's exact word, and apt
+   ("bring names in *to use* them"). It overloads the existing `use <-` block
+   sugar, but the two never share a position (imports are top-level, `use <-` only
+   appears inside a block), so it parses cleanly; the through-line is `use` =
+   "bring into scope" (a module's names, or a callback's binding). A deliberate,
+   position-disambiguated bend of "one token, one job."
+4. **`ext` is item-level only.** Top-level value items (functions, `prod`/`sum`,
+   `const`) are **private by default**; the `ext` modifier exports them. A public
    type exposes its constructor and fields wholesale — **opaque types
    (field/constructor visibility) are deferred.** Mirrors the language's
-   "exposure is the marked form" grain, the twin of `mut`.
+   "exposure is the marked form" grain, the twin of `mut`/`uses` (mark the
+   escalation, not the safe default).
+
+   *Keyword decision (`ext`, after `pub`→`out`→`ext`):* a sigil (`+`/`*`) was
+   rejected — it double-duties an arithmetic token, the one thing the language's
+   "no token does two jobs" spine forbids. Public-by-default was rejected — it
+   inverts the grain (exposure becomes the *unmarked* thing; the Java footgun).
+   `ext` is a word modifier that sits uniformly beside `mut`/`free`/`uses`
+   (`ext mut insert(x)`), reads "external / exported," and never misreads as an
+   identifier. (`out` was the prior pick; `ext` won for reading the same in every
+   slot, and pairs with `use` as Rust's `pub`/`use` do — unrelated words, each the
+   best fit for its slot, not a forced symmetric pair like `in`/`out` or
+   `push`/`pull`.) `contract`/`on` carry no `ext` (cross-module conformance/typing
+   is deferred) — `ext contract` is a parse error, not a silent no-op.
 
 ## The testability seam — modules are a name→source map, not a directory
 
@@ -108,12 +125,27 @@ The orphan rule the design doc already gestures at, now enforceable because
    `eval_modules` to drop the duplicated natives/prelude bootstrap. *Noted gap:*
    top-level `let` consts parse but aren't registered as globals yet — orthogonal
    to modules, surfaced while testing path access.
-2. **`pub` + privacy.** Parse `pub` on items; default-private. Path access and
-   select-import of a private member error. The `pub`-less corpus still runs
-   (single-module programs see their own privates).
-3. **`import` forms.** `import M` (bind module) and `import M.{a, b}` (bind
-   members). Missing module / missing export errors. Unqualified use of an
-   imported name works in a pipe.
+2. ✅ **`ext` + privacy.** `ext` modifier parsed on `Func`/`Prod`/`Sum`/`Const`
+   (an `Item.public` flag); items default-private. `collect_exports` now returns
+   `(public map, private name-set)`; the module-access arms resolve only exports
+   and distinguish a refused **private** member ("member `x` of module `m` is
+   private") from a missing one. Privacy gates *cross-module* path access only —
+   intra-module calls and the whole single-module (`eval_program`) corpus are
+   unaffected, since `ext` only feeds the export table. Adding `Item.public`
+   churned 23 parser AST snapshots (one `public:` field each), regenerated via
+   `INSTA_UPDATE=always` after confirming the diffs were field-only. Deferred:
+   `ext` on `contract`/`on` (rejected as a parse error for now); field/variant
+   visibility (opaque types). (Keyword landed as `out` then renamed to `ext`.)
+3. ✅ **`use` imports.** `Item::Use { module, names }` parsed at top level:
+   `use M` (whole module) and `use M.{a, b}` (selection). The iteration-1 *auto*
+   sibling-visibility is **removed** — a module is invisible until imported. Link
+   step (`link_imports`): a whole-module import binds the `Value::Module` under
+   its name; a selection binds each named export directly (reachable unqualified,
+   pipes included). Errors: unknown module, missing/private selected member (reuses
+   `access_error`). **Import cycles are free** — every module's export table is
+   built before any `use` is linked, and names resolve lazily at call time, so
+   `a`↔`b` mutual imports just work (proved by a cycle test). The 7 cross-module
+   tests from increments 1–2 gained an explicit `use` (the finalized semantics).
 4. **Built-in stdlib modules.** Re-home the prelude combinators into embedded
    `Seq` / `List` / `Str` module sources; `Seq.map` etc. resolve. Keep the most
    common names auto-in-scope via the prelude so everyday code (`xs |> map(f)`)
@@ -125,9 +157,9 @@ The orphan rule the design doc already gestures at, now enforceable because
 ## Deferred (explicitly out of iteration 1)
 
 - **In-file `module { }` blocks** (nested namespaces in one file).
-- **Opaque types** — `pub` on fields/constructors/variants; a public type with a
+- **Opaque types** — `ext` on fields/constructors/variants; a public type with a
   private constructor. The expressive encapsulation case.
-- **Re-export / `pub import`**, import aliasing (`import Seq as S`), glob import.
+- **Re-export / `ext use`**, import aliasing (`use Seq as S`), glob import.
 - **Module-path *types*** (`other.Shape` in a type annotation) — types are still
   parse-and-ignore in v0, so cross-module type references need nothing yet.
 - **Filesystem niceties**: nested directories / package roots / a manifest.

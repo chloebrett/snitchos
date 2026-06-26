@@ -28,6 +28,7 @@ expression: "prog(\"prod Reading(sensor: Str, mut celsius: Float)  \\\n         
                 },
             },
         ],
+        public: false,
     },
     Sum {
         name: "Shape",
@@ -74,5 +75,6 @@ expression: "prog(\"prod Reading(sensor: Str, mut celsius: Float)  \\\n         
                 ],
             },
         ],
+        public: false,
     },
 ]

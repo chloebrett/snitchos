@@ -9,6 +9,7 @@ expression: "prog(\"let limit = 100  area(p) = p.x * limit\")"
         value: Int(
             100,
         ),
+        public: false,
     },
     Func {
         name: "area",
@@ -31,5 +32,6 @@ expression: "prog(\"let limit = 100  area(p) = p.x * limit\")"
                 "limit",
             ),
         },
+        public: false,
     },
 ]

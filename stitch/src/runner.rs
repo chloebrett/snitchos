@@ -76,6 +76,7 @@ pub fn run_repl_line(defs: &mut Vec<Item>, line: &str) -> String {
         params: Vec::new(),
         ret: None,
         body: expr,
+        public: false,
     });
     let (result, events) = eval_program_with_telemetry(&program);
     let mut out = render_telemetry(&events);

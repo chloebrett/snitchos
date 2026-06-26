@@ -9,5 +9,6 @@ expression: "prog(\"let pi = 3.14\")"
         value: Float(
             3.14,
         ),
+        public: false,
     },
 ]

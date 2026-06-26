@@ -35,5 +35,6 @@ expression: "prog(\"fetch(url: Str) -> Response = get(url)\")"
                 },
             ],
         },
+        public: false,
     },
 ]

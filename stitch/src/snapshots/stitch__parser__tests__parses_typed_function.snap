@@ -40,5 +40,6 @@ expression: "prog(\"add(a: Int, b: Int) -> Int = a + b\")"
                 "b",
             ),
         },
+        public: false,
     },
 ]

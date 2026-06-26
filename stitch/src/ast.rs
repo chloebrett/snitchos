@@ -3,17 +3,20 @@
 /// A top-level declaration in a program.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Item {
-    /// `prod Name<generics>(fields)` — a product type.
+    /// `prod Name<generics>(fields)` — a product type. `public` is the `pub`
+    /// marker: items are private to their module unless exported.
     Prod {
         name: String,
         generics: Vec<String>,
         fields: Vec<Field>,
+        public: bool,
     },
     /// `sum Name<generics> = variant | …` — a sum type.
     Sum {
         name: String,
         generics: Vec<String>,
         variants: Vec<Variant>,
+        public: bool,
     },
     /// A function: `name(params) -> Ret? body`. (No `fn` keyword; the `uses`
     /// effects clause is deferred.)
@@ -22,6 +25,7 @@ pub enum Item {
         params: Vec<Param>,
         ret: Option<Type>,
         body: Expr,
+        public: bool,
     },
     /// `contract Name<generics> { method-signatures }` — a behavior contract.
     Contract {
@@ -42,6 +46,14 @@ pub enum Item {
         name: String,
         mutable: bool,
         value: Expr,
+        public: bool,
+    },
+    /// `use M` brings module `M` into scope (reach members by path, `M.member`);
+    /// `use M.{a, b}` binds the named exported members unqualified. `names` is
+    /// `None` for a whole-module import, `Some` for a selection.
+    Use {
+        module: String,
+        names: Option<Vec<String>>,
     },
 }
 

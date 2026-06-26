@@ -26,5 +26,6 @@ expression: "prog(\"prod Pair(items: (Int, Str))\")"
                 ),
             },
         ],
+        public: false,
     },
 ]

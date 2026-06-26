@@ -16,5 +16,6 @@ expression: "prog(\"prod Celsius(Int)\")"
                 },
             },
         ],
+        public: false,
     },
 ]
