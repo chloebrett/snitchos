@@ -205,24 +205,6 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Denied;
 
-/// Invoke a capability by raw handle. `Ok` if the kernel performed the
-/// operation, `Err(Denied)` if it refused.
-fn invoke(handle: usize, arg: usize) -> Result<(), Denied> {
-    let ret: usize;
-    // SAFETY: `ecall` traps to the kernel, which reads a7/a0/a1, validates
-    // the handle against our `CapTable`, performs the op, and returns the
-    // result in a0 (0 = ok).
-    unsafe {
-        asm!(
-            "ecall",
-            in("a7") Syscall::Invoke as usize,
-            inlateout("a0") handle => ret,
-            in("a1") arg,
-        );
-    }
-    if ret == 0 { Ok(()) } else { Err(Denied) }
-}
-
 /// Terminate this process with exit status `0`. Never returns.
 pub fn exit() -> ! {
     exit_with(0)
@@ -329,8 +311,12 @@ pub fn console_read(dst: &mut [u8]) -> usize {
     if ret == usize::MAX { 0 } else { ret }
 }
 
-/// A capability to emit telemetry — an unforgeable handle the kernel checks
-/// against this process's table. Holding the integer is not authority.
+/// A capability to register + emit named metrics — an unforgeable handle the
+/// kernel checks against this process's table. Holding the integer is not
+/// authority. The sink itself emits nothing; it is the gate for
+/// [`register_metric`](Self::register_metric) (and the free [`register_counter`]
+/// / [`register_gauge`] / [`register_histogram`]), which hand back a [`Metric`]
+/// to emit through.
 #[derive(Clone, Copy)]
 pub struct TelemetrySink {
     handle: usize,
@@ -343,12 +329,6 @@ impl TelemetrySink {
     #[must_use]
     pub const fn from_raw_handle(handle: usize) -> Self {
         Self { handle }
-    }
-
-    /// Emit `value` to the sink. `Ok` if the kernel accepted it,
-    /// `Err(Denied)` if it refused the invocation.
-    pub fn emit(self, value: i64) -> Result<(), Denied> {
-        invoke(self.handle, value as usize)
     }
 
     /// Register a userspace-named metric, returning a [`Metric`] to emit through.

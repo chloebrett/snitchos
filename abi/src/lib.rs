@@ -4,54 +4,49 @@
 //! `ecall` site) so neither side hard-codes a magic number. `no_std`,
 //! no dependencies — just the contract.
 //!
-//! v0.7b: the kernel surface is **invoke a capability**. A program names a
-//! capability by an opaque handle (an index into *its own* `CapTable`) and
-//! the kernel validates every invocation against that table — no ambient
-//! authority. (v0.7a's `EmitMetric` was the deliberately-wrong ambient
-//! version this replaces.) See `docs/capability-system-design.md`.
+//! The kernel surface is capability-mediated: a program names a capability by an
+//! opaque handle (an index into *its own* `CapTable`) and the kernel validates
+//! every use against that table — no ambient authority. See
+//! `docs/capability-system-design.md`.
 //!
 //! Calling convention (RISC-V, Linux/SBI-style): syscall number in `a7`,
-//! arguments in `a0..`, result in `a0`. For `Invoke`: `a0` = capability
-//! handle, `a1` = the operation's argument; `a0` on return is `0` on
-//! success or nonzero on a denied/unknown invocation.
+//! arguments in `a0..`, result in `a0`. By convention `a0` on return is `0` (or
+//! a useful value) on success and `usize::MAX` on a refused/denied call.
 
 #![no_std]
 
 /// Syscall numbers, passed in register `a7` at the `ecall`.
 ///
-/// Postcard-free, plain integers — this is a register ABI, not a wire
-/// format. New syscalls append; never renumber an existing one.
+/// Postcard-free, plain integers — this is a register ABI, not a wire format,
+/// so the numbers are **not** frozen the way the postcard `Frame` discriminants
+/// are: the kernel and userspace rebuild from this crate together (the user ELFs
+/// are embedded into the kernel image at build time) and nothing persists a
+/// syscall number. New calls normally append, but a removed call may be deleted
+/// and the survivors renumbered — as `Invoke` was (debt #2 Step 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Syscall {
-    /// Invoke a capability. `a0` = handle (into the caller's `CapTable`),
-    /// `a1` = argument. The kernel resolves the handle against the caller's
-    /// table, checks the capability's rights, and performs the authorized
-    /// operation — for a `TelemetrySink`, emitting `a1` to the bound
-    /// counter. The single kernel surface; "syscalls" are messages to
-    /// capabilities.
-    Invoke = 0,
     /// Terminate the calling process with exit status `a0` (an `i32`). Does not
     /// return — the kernel records the status (reaping bookkeeping, v0.12), wakes
     /// any parent blocked in [`Self::Wait`] on this task, and switches the hart to
     /// its next ready task. (Not capability-mediated: a process can always end
     /// itself. v0.7b leaks the address space + caps on exit; reclamation is later.)
-    Exit = 1,
+    Exit = 0,
     /// Voluntarily yield the CPU. The kernel runs `yield_now()` on the
     /// caller's behalf — switching to the next ready task — then returns
     /// here on a later reschedule, so control resumes after the `ecall`.
     /// Not capability-mediated: yielding grants no authority, it only
     /// relinquishes the CPU. The cooperative path; preemption (v0.8) is
     /// the involuntary counterpart.
-    Yield = 2,
+    Yield = 1,
     /// Open a span. `a0` = `SpanSink` capability handle, `a1` = pointer to
     /// the span name in user memory, `a2` = its length. The kernel copies
     /// and interns the name, opens a span on the caller's task cursor, and
     /// returns an opaque span id in `a0` (or an error sentinel if refused).
-    SpanOpen = 3,
+    SpanOpen = 2,
     /// Close a span previously opened with [`Self::SpanOpen`]. `a0` = the
     /// span id the open returned. Emits the matching `SpanEnd`.
-    SpanClose = 4,
+    SpanClose = 3,
     /// Map a fresh anonymous memory region. `a0` = bytes requested
     /// (page-aligned by the runtime). The kernel maps that many bytes of fresh
     /// zeroed frames into the process's address space and returns the region's
@@ -60,36 +55,36 @@ pub enum Syscall {
     /// returned (individually unmappable later, and a `MemoryRegion` capability
     /// eventually), and the runtime allocator (`talc`) `claim`s each one — it
     /// does not assume regions abut, so the kernel may place them disjointly.
-    MapAnon = 5,
+    MapAnon = 4,
     /// Write bytes to the debug/stdout channel. `a0` = pointer to the bytes,
     /// `a1` = length. The kernel copies them out and emits a snitched `Log`
     /// wire frame (so stdout is observable). Returns bytes written in `a0`, or
     /// `usize::MAX` if refused (bad pointer). Backs `println!`.
-    DebugWrite = 6,
+    DebugWrite = 5,
     /// Send an inline message over a synchronous IPC endpoint (v0.9). `a0` =
     /// `Endpoint` capability handle (needs `SEND`), `a1..=a4` = the four
     /// message words. Rendezvous semantics: if a receiver is waiting the
     /// message is delivered and both proceed; otherwise the sender blocks until
     /// one arrives. Returns `0` in `a0` on success, `usize::MAX` if refused
     /// (bad/again wrong-rights/wrong-object handle).
-    Send = 7,
+    Send = 6,
     /// Receive an inline message from a synchronous IPC endpoint (v0.9). `a0` =
     /// `Endpoint` capability handle (needs `RECV`). Blocks until a sender
     /// rendezvouses; returns `0` in `a0` and the four message words in
     /// `a1..=a4`, or `usize::MAX` in `a0` if refused. For an RPC `call`, the
     /// reply-cap handle is returned in `a5` (`0` for a one-way `send`).
-    Receive = 8,
+    Receive = 7,
     /// RPC `call` over a synchronous endpoint (v0.9b): send a request **and**
     /// block for a reply. `a0`=`Endpoint` handle (needs `SEND`), `a1..=a4`=
     /// request words. The kernel mints a one-shot reply cap into the receiver
     /// at the rendezvous; the caller parks until `reply`. Returns `0` in `a0`
     /// and the reply words in `a1..=a4` (or `usize::MAX` if refused).
-    Call = 9,
+    Call = 8,
     /// Answer an RPC (v0.9b). `a0`=reply-cap handle (from `receive`'s `a5`),
     /// `a1..=a4`=response words. Wakes the blocked caller and **consumes** the
     /// one-shot reply cap (a second `reply` is refused). Returns `0`, or
     /// `usize::MAX` if the handle is not a live reply cap.
-    Reply = 10,
+    Reply = 9,
     /// Fused `reply`-then-`receive` (v0.9b) — the server hot path. `a0` =
     /// `Endpoint` handle (needs `RECV`), `a5` = the previous request's reply
     /// handle (`0` on the first iteration — no prior reply), `a1..=a4` = the
@@ -97,7 +92,7 @@ pub enum Syscall {
     /// then blocks receiving the next request: returns `0` in `a0`, the next
     /// request words in `a1..=a4`, and its reply handle in `a5`. One trap
     /// instead of two per request.
-    ReplyRecv = 11,
+    ReplyRecv = 10,
     /// Mint a badged `SEND` capability for an endpoint the caller owns (v0.9c).
     /// `a0` = endpoint handle (needs `MINT`), `a1` = the server-chosen `badge`
     /// (u64), `a2` = the requested rights bits. The kernel derives a child cap
@@ -105,7 +100,7 @@ pub enum Syscall {
     /// into the caller's own table. Returns the new handle in `a0`, or
     /// `usize::MAX` if refused (handle lacks `MINT` / names no endpoint). The
     /// minted cap is handed to a client via cap-transfer (a later step).
-    MintBadged = 12,
+    MintBadged = 11,
     /// Copy bytes **from a blocked caller's** address space into the server's
     /// own (v0.10, option D). `a0` = a one-shot reply-cap handle the server
     /// holds (names the blocked caller — authorizes the access; **not**
@@ -114,19 +109,19 @@ pub enum Syscall {
     /// page table, validates both ranges (user-half, mapped, `R|U` source /
     /// `W|U` dest), and copies through the linear map. Returns bytes copied in
     /// `a0`, or `usize::MAX` if refused. The `write`/`create`-name half.
-    CopyFromCaller = 13,
+    CopyFromCaller = 12,
     /// Copy bytes **to a blocked caller's** address space from the server's own
     /// (v0.10, option D). The mirror of [`Self::CopyFromCaller`]: `a0` = reply
     /// handle, `a1` = source VA in the *server's* space, `a2` = length, `a3` =
     /// destination VA in the *caller's* space. The `read` half.
-    CopyToCaller = 14,
+    CopyToCaller = 13,
     /// Drain buffered console (UART) input into the caller's buffer (v0.11
     /// Tier-0). `a0` = destination pointer in the caller's space, `a1` = max
     /// length. The kernel copies up to that many buffered input bytes in and
     /// returns the count in `a0` (0 if nothing is buffered — non-blocking), or
     /// `usize::MAX` on a bad/unwritable range. Ambient, like `DebugWrite`: the
     /// console terminal is not a capability (cap-mediated input is Tier-1).
-    ConsoleRead = 15,
+    ConsoleRead = 14,
     /// Spawn a new userspace process, delegating a chosen subset of the caller's
     /// own capabilities to it (v0.11 — `spawn(program, caps)`). `a0` = program
     /// selector (an embedded-program id), `a1` = pointer in the caller's space to
@@ -135,7 +130,7 @@ pub enum Syscall {
     /// any is unheld — no forging, no partial delegation), builds the child with
     /// those caps plus its own bootstrap telemetry/span, and returns the child's
     /// task id in `a0` (or `usize::MAX` on refusal).
-    Spawn = 16,
+    Spawn = 15,
     /// Register a userspace-named metric (debt #2). `a0` = `TelemetrySink`
     /// capability handle (the gate — needs `EMIT`; holding it is the authority
     /// to name metrics), `a1` = pointer to the metric name in user memory, `a2`
@@ -148,7 +143,7 @@ pub enum Syscall {
     /// user range, bad UTF-8, or once the table is at its `MAX_METRIC_NAMES`
     /// quota. The handle — not the name — is what [`Self::EmitMetric`] presents,
     /// so the string crosses the boundary exactly once.
-    RegisterMetric = 17,
+    RegisterMetric = 16,
     /// Emit a sample to a metric this process registered (debt #2). `a0` = the
     /// metric handle [`Self::RegisterMetric`] returned, `a1` = the value
     /// (`i64`). The kernel resolves the handle against the *caller's own* metric
@@ -158,14 +153,14 @@ pub enum Syscall {
     /// is the authority, and a handle is unforgeable as an index into the
     /// issuing table. No cap argument: the registration was already cap-gated,
     /// so the hot emit path is a bare table lookup.
-    EmitMetric = 18,
+    EmitMetric = 17,
     /// Wait for a child to exit and collect its status (v0.12). `a0` = the child's
     /// task id (as returned by [`Self::Spawn`]). Blocks until that task `Exit`s,
     /// then returns its exit status in `a0`; if the child had already exited, the
     /// status is returned immediately (the zombie is reaped). Same-hart in v0.12
     /// (a parent waits on a child it spawned on its own hart); cross-hart wait is
     /// a deferred follow-on.
-    Wait = 19,
+    Wait = 18,
 }
 
 impl Syscall {
@@ -175,26 +170,25 @@ impl Syscall {
     #[must_use]
     pub const fn from_usize(n: usize) -> Option<Self> {
         match n {
-            0 => Some(Self::Invoke),
-            1 => Some(Self::Exit),
-            2 => Some(Self::Yield),
-            3 => Some(Self::SpanOpen),
-            4 => Some(Self::SpanClose),
-            5 => Some(Self::MapAnon),
-            6 => Some(Self::DebugWrite),
-            7 => Some(Self::Send),
-            8 => Some(Self::Receive),
-            9 => Some(Self::Call),
-            10 => Some(Self::Reply),
-            11 => Some(Self::ReplyRecv),
-            12 => Some(Self::MintBadged),
-            13 => Some(Self::CopyFromCaller),
-            14 => Some(Self::CopyToCaller),
-            15 => Some(Self::ConsoleRead),
-            16 => Some(Self::Spawn),
-            17 => Some(Self::RegisterMetric),
-            18 => Some(Self::EmitMetric),
-            19 => Some(Self::Wait),
+            0 => Some(Self::Exit),
+            1 => Some(Self::Yield),
+            2 => Some(Self::SpanOpen),
+            3 => Some(Self::SpanClose),
+            4 => Some(Self::MapAnon),
+            5 => Some(Self::DebugWrite),
+            6 => Some(Self::Send),
+            7 => Some(Self::Receive),
+            8 => Some(Self::Call),
+            9 => Some(Self::Reply),
+            10 => Some(Self::ReplyRecv),
+            11 => Some(Self::MintBadged),
+            12 => Some(Self::CopyFromCaller),
+            13 => Some(Self::CopyToCaller),
+            14 => Some(Self::ConsoleRead),
+            15 => Some(Self::Spawn),
+            16 => Some(Self::RegisterMetric),
+            17 => Some(Self::EmitMetric),
+            18 => Some(Self::Wait),
             _ => None,
         }
     }
@@ -228,47 +222,45 @@ mod tests {
 
     #[test]
     fn syscall_numbers_round_trip() {
-        assert_eq!(Syscall::Invoke as usize, 0);
-        assert_eq!(Syscall::Exit as usize, 1);
-        assert_eq!(Syscall::Yield as usize, 2);
-        assert_eq!(Syscall::SpanOpen as usize, 3);
-        assert_eq!(Syscall::SpanClose as usize, 4);
-        assert_eq!(Syscall::MapAnon as usize, 5);
-        assert_eq!(Syscall::DebugWrite as usize, 6);
-        assert_eq!(Syscall::Send as usize, 7);
-        assert_eq!(Syscall::Receive as usize, 8);
-        assert_eq!(Syscall::Call as usize, 9);
-        assert_eq!(Syscall::Reply as usize, 10);
-        assert_eq!(Syscall::ReplyRecv as usize, 11);
-        assert_eq!(Syscall::MintBadged as usize, 12);
-        assert_eq!(Syscall::CopyFromCaller as usize, 13);
-        assert_eq!(Syscall::CopyToCaller as usize, 14);
-        assert_eq!(Syscall::ConsoleRead as usize, 15);
-        assert_eq!(Syscall::Spawn as usize, 16);
-        assert_eq!(Syscall::RegisterMetric as usize, 17);
-        assert_eq!(Syscall::EmitMetric as usize, 18);
-        assert_eq!(Syscall::Wait as usize, 19);
+        assert_eq!(Syscall::Exit as usize, 0);
+        assert_eq!(Syscall::Yield as usize, 1);
+        assert_eq!(Syscall::SpanOpen as usize, 2);
+        assert_eq!(Syscall::SpanClose as usize, 3);
+        assert_eq!(Syscall::MapAnon as usize, 4);
+        assert_eq!(Syscall::DebugWrite as usize, 5);
+        assert_eq!(Syscall::Send as usize, 6);
+        assert_eq!(Syscall::Receive as usize, 7);
+        assert_eq!(Syscall::Call as usize, 8);
+        assert_eq!(Syscall::Reply as usize, 9);
+        assert_eq!(Syscall::ReplyRecv as usize, 10);
+        assert_eq!(Syscall::MintBadged as usize, 11);
+        assert_eq!(Syscall::CopyFromCaller as usize, 12);
+        assert_eq!(Syscall::CopyToCaller as usize, 13);
+        assert_eq!(Syscall::ConsoleRead as usize, 14);
+        assert_eq!(Syscall::Spawn as usize, 15);
+        assert_eq!(Syscall::RegisterMetric as usize, 16);
+        assert_eq!(Syscall::EmitMetric as usize, 17);
+        assert_eq!(Syscall::Wait as usize, 18);
 
-        assert_eq!(Syscall::from_usize(0), Some(Syscall::Invoke));
-        assert_eq!(Syscall::from_usize(1), Some(Syscall::Exit));
-        assert_eq!(Syscall::from_usize(2), Some(Syscall::Yield));
-        assert_eq!(Syscall::from_usize(3), Some(Syscall::SpanOpen));
-        assert_eq!(Syscall::from_usize(4), Some(Syscall::SpanClose));
-        assert_eq!(Syscall::from_usize(5), Some(Syscall::MapAnon));
-        assert_eq!(Syscall::from_usize(6), Some(Syscall::DebugWrite));
-        assert_eq!(Syscall::from_usize(7), Some(Syscall::Send));
-        assert_eq!(Syscall::from_usize(8), Some(Syscall::Receive));
-        assert_eq!(Syscall::from_usize(9), Some(Syscall::Call));
-        assert_eq!(Syscall::from_usize(10), Some(Syscall::Reply));
-        assert_eq!(Syscall::from_usize(11), Some(Syscall::ReplyRecv));
-        assert_eq!(Syscall::from_usize(12), Some(Syscall::MintBadged));
-        assert_eq!(Syscall::from_usize(13), Some(Syscall::CopyFromCaller));
-        assert_eq!(Syscall::from_usize(14), Some(Syscall::CopyToCaller));
-        assert_eq!(Syscall::from_usize(15), Some(Syscall::ConsoleRead));
-        assert_eq!(Syscall::from_usize(16), Some(Syscall::Spawn));
-        assert_eq!(Syscall::from_usize(17), Some(Syscall::RegisterMetric));
-        assert_eq!(Syscall::from_usize(18), Some(Syscall::EmitMetric));
-        assert_eq!(Syscall::from_usize(19), Some(Syscall::Wait));
-        assert_eq!(Syscall::from_usize(20), None);
+        assert_eq!(Syscall::from_usize(0), Some(Syscall::Exit));
+        assert_eq!(Syscall::from_usize(1), Some(Syscall::Yield));
+        assert_eq!(Syscall::from_usize(2), Some(Syscall::SpanOpen));
+        assert_eq!(Syscall::from_usize(3), Some(Syscall::SpanClose));
+        assert_eq!(Syscall::from_usize(4), Some(Syscall::MapAnon));
+        assert_eq!(Syscall::from_usize(5), Some(Syscall::DebugWrite));
+        assert_eq!(Syscall::from_usize(6), Some(Syscall::Send));
+        assert_eq!(Syscall::from_usize(7), Some(Syscall::Receive));
+        assert_eq!(Syscall::from_usize(8), Some(Syscall::Call));
+        assert_eq!(Syscall::from_usize(9), Some(Syscall::Reply));
+        assert_eq!(Syscall::from_usize(10), Some(Syscall::ReplyRecv));
+        assert_eq!(Syscall::from_usize(11), Some(Syscall::MintBadged));
+        assert_eq!(Syscall::from_usize(12), Some(Syscall::CopyFromCaller));
+        assert_eq!(Syscall::from_usize(13), Some(Syscall::CopyToCaller));
+        assert_eq!(Syscall::from_usize(14), Some(Syscall::ConsoleRead));
+        assert_eq!(Syscall::from_usize(15), Some(Syscall::Spawn));
+        assert_eq!(Syscall::from_usize(16), Some(Syscall::RegisterMetric));
+        assert_eq!(Syscall::from_usize(17), Some(Syscall::EmitMetric));
+        assert_eq!(Syscall::from_usize(18), Some(Syscall::Wait));
+        assert_eq!(Syscall::from_usize(19), None);
     }
 }

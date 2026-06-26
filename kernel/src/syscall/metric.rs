@@ -5,10 +5,9 @@
 //! per-process table is the forgery boundary — a process can only emit to a
 //! metric it registered, never another's or the kernel's own telemetry.
 //!
-//! The authority gate reuses the host-tested `kernel_core::cap::invoke_telemetry`
-//! decision (a `TelemetrySink` with `EMIT`); the bound counter is irrelevant
-//! here — registering a *named* metric is a distinct authority from emitting to
-//! the fixed sink, but the same capability grants both.
+//! The authority gate is the host-tested `kernel_core::cap::authorize_telemetry`
+//! decision (a `TelemetrySink` with `EMIT`) — the sink is pure authority, so
+//! there is nothing to hand back beyond "permitted."
 
 use crate::trap::TrapFrame;
 
@@ -30,7 +29,7 @@ fn metric_kind_from_usize(n: usize) -> Option<protocol::MetricKind> {
 /// name, interns it into a fresh id, stores it in the caller's table, and
 /// returns the metric handle in `a0` (or `u64::MAX` on refusal).
 pub(super) fn handle_register_metric(frame: &mut TrapFrame) {
-    use kernel_core::cap::{Handle, invoke_telemetry};
+    use kernel_core::cap::{Handle, authorize_telemetry};
     use kernel_core::mmu::MAX_USER_STR_LEN;
     use protocol::RefusalReason;
     use snitchos_abi::Syscall;
@@ -45,9 +44,16 @@ pub(super) fn handle_register_metric(frame: &mut TrapFrame) {
     // handle in `a0`. Resolve under the lock, then drop it before interning.
     let denied = {
         let caps = proc.caps.lock();
-        invoke_telemetry(&caps, Handle::from_raw(frame.a0 as u32)).err()
+        authorize_telemetry(&caps, Handle::from_raw(frame.a0 as u32)).err()
     };
     if let Some(d) = denied {
+        // A failed cap gate is a capability denial — snitch the rate
+        // (`cap.denied_total`) as well as the per-call `SyscallRefused`, exactly
+        // as `Invoke`/`MintBadged` do. (The non-cap refusals below — quota, bad
+        // range/UTF-8/kind — are not capability denials, so they don't bump it.)
+        if let Some(id) = crate::user::cap_denied_metric_id() {
+            crate::tracing::emit_metric(id, 1);
+        }
         super::refuse(frame, sc, super::refusal_for(d));
         return;
     }

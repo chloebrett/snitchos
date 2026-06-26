@@ -113,16 +113,9 @@ pub static BADGE_HANDOUT_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE
 pub static FS_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_ELF"));
 pub static FS_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_CLIENT_ELF"));
 
-/// The metric every userspace process emits to through its bootstrap
-/// `TelemetrySink` (`snitchos.user.telemetry_total`): the `Invoke` syscall
-/// resolves the sink to this `StringId` and emits `a1` to it. Registered once
-/// on hart 0 (`init_metric`) so first use doesn't intern (and emit a
-/// `StringRegister` frame) in trap context; bound into the cap at process
-/// setup via [`user_metric_id`] (see `run` / `run_ipc`).
-static USER_METRIC: Once<StringId> = Once::new();
-
 /// The counter a U-mode page fault bumps — the isolation firewall doing its
-/// job. Registered alongside [`USER_METRIC`]; read by the fault handler.
+/// job. Registered alongside the other userspace counters in [`init_metric`];
+/// read by the fault handler.
 static USER_FAULT_METRIC: Once<StringId> = Once::new();
 
 /// The counter the kernel bumps each time it **grants** a capability —
@@ -166,16 +159,10 @@ pub enum LoadError {
 /// U-mode, so the syscall/fault handlers can emit without interning in trap
 /// context.
 pub fn init_metric() {
-    USER_METRIC.call_once(|| tracing::register_counter("snitchos.user.telemetry_total"));
     USER_FAULT_METRIC.call_once(|| tracing::register_counter("snitchos.user.faults_total"));
     CAP_GRANTS_METRIC.call_once(|| tracing::register_counter("snitchos.cap.grants_total"));
     CAP_DENIED_METRIC.call_once(|| tracing::register_counter("snitchos.cap.denied_total"));
     USER_EXITS_METRIC.call_once(|| tracing::register_counter("snitchos.user.exits_total"));
-}
-
-/// The `StringId` for the userspace telemetry counter (or `None` pre-init).
-pub fn user_metric_id() -> Option<StringId> {
-    USER_METRIC.get().copied()
 }
 
 /// The `StringId` for the U-mode fault counter (or `None` pre-init).
@@ -214,10 +201,8 @@ enum Launch {
     /// Ambient authorities only (telemetry + span sinks); no endpoint.
     Plain,
     /// Also granted an `Endpoint` cap over the shared `DEMO_ENDPOINT` with
-    /// `rights_bits`. Every IPC program gets the same plain bootstrap telemetry
-    /// sink (bound to `snitchos.user.telemetry_total`); a program that wants its
-    /// own metric registers it at runtime (debt #2, the FS server's denial
-    /// gauge being the first such consumer).
+    /// `rights_bits`. Its `TelemetrySink` is bare authority like every program's;
+    /// any metric it wants it registers at runtime (debt #2).
     Ipc { rights_bits: u32 },
 }
 
@@ -354,7 +339,7 @@ pub fn spawn_program(
 fn cap_object_kind(object: kernel_core::cap::Object) -> protocol::CapObject {
     use kernel_core::cap::Object;
     match object {
-        Object::TelemetrySink { .. } => protocol::CapObject::TelemetrySink,
+        Object::TelemetrySink => protocol::CapObject::TelemetrySink,
         Object::SpanSink => protocol::CapObject::SpanSink,
         Object::Endpoint { .. } => protocol::CapObject::Endpoint,
         Object::Reply { .. } => protocol::CapObject::Reply,
@@ -569,11 +554,10 @@ fn run_with_caps(
     // Each process gets its own root page table (kernel high-half shared in).
     let root_pa = mmu::new_user_root().expect("userspace: no frame for user root page table");
 
-    // Grant the bootstrap capability: one `TelemetrySink` bound to the
-    // userspace telemetry counter. The cap *names* the sink, so the syscall
-    // (Step 5) needs no string from U-mode. The kernel snitches the grant.
-    let counter = user_metric_id().expect("userspace telemetry counter registered before entry");
-    let (process, bootstrap_handle, span_handle) = Process::bootstrap(root_pa, counter);
+    // Grant the bootstrap capabilities: a bare `TelemetrySink` (authority to
+    // register + emit named metrics) and a `SpanSink`. The kernel snitches each
+    // grant.
+    let (process, bootstrap_handle, span_handle) = Process::bootstrap(root_pa);
     // The kernel snitches each grant two ways: the `cap.grants_total` counter
     // (a rate) and a rich `CapEvent::Granted` (an attributed fact carrying the
     // global cap id, holder, object, and rights — the derivation-tree seed).
@@ -638,9 +622,8 @@ fn run_with_caps(
 /// Like [`run`], but additionally grants the process an [`Endpoint`] capability
 /// over `endpoint` with `rights` (`SEND`/`RECV`/`MINT`) — the kernel-brokered
 /// IPC cap, handle delivered in the third startup register (`a2`). Its bootstrap
-/// telemetry sink is the plain `snitchos.user.telemetry_total`, same as every
-/// IPC program: a program wanting its own metric registers it at runtime (debt
-/// #2). Never returns.
+/// `TelemetrySink` is bare authority, same as every program: any metric it wants
+/// it registers at runtime (debt #2). Never returns.
 ///
 /// [`Endpoint`]: kernel_core::cap::Object::Endpoint
 fn run_ipc(
@@ -650,9 +633,8 @@ fn run_ipc(
 ) -> ! {
     use kernel_core::cap::{Capability, Object};
 
-    let counter = user_metric_id().expect("userspace telemetry counter registered before entry");
     let root_pa = mmu::new_user_root().expect("ipc: no frame for user root page table");
-    let (process, bootstrap_handle, span_handle) = Process::bootstrap(root_pa, counter);
+    let (process, bootstrap_handle, span_handle) = Process::bootstrap(root_pa);
 
     // Grant the IPC endpoint capability on top of the bootstrap pair.
     let endpoint_handle =

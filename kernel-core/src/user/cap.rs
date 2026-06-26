@@ -14,10 +14,10 @@
 
 use alloc::vec::Vec;
 
-use protocol::StringId;
-
 use crate::ipc::EndpointId;
 use crate::sched::TaskId;
+// `StringId` was the `TelemetrySink { counter }` payload; the sink is now pure
+// authority (Step 5), so no `protocol` type is named here.
 
 /// The rights a capability grants, as a bitmask. v0.7b defines exactly
 /// one bit (`EMIT`); the type is the extension point so later objects
@@ -84,11 +84,14 @@ impl core::ops::BitOr for Rights {
 /// extension point for the object zoo (`Endpoint`, `MemoryRegion`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Object {
-    /// Permission to emit telemetry, bound at creation to a specific
-    /// kernel-registered counter. The userspace caller passes only a
-    /// value; identity is kernel-stamped and the counter is named by the
-    /// capability, so no string crosses the syscall boundary.
-    TelemetrySink { counter: StringId },
+    /// Permission to register + emit named metrics (debt #2). Carries no
+    /// payload — it is pure authority, exactly like [`SpanSink`](Self::SpanSink):
+    /// the holder names its own metrics through `RegisterMetric` (the kernel
+    /// interns each into the holder's per-process metric table) and emits through
+    /// the returned handle. The legacy `Invoke`-to-a-bound-counter shape (a
+    /// `{ counter }` field) was retired once every emitter moved to the register
+    /// path.
+    TelemetrySink,
     /// Permission to open and close spans on the holder's per-task span
     /// cursor. Carries no payload: the span *name* arrives per-call from
     /// userspace (interned kernel-side on demand), while the parent span and
@@ -223,33 +226,33 @@ pub enum Denied {
     WrongObject,
 }
 
-/// Resolve a `TelemetrySink` invocation: `handle` must name a capability
-/// in `table` carrying [`Rights::EMIT`] over an [`Object::TelemetrySink`].
-/// Returns the bound counter the kernel should emit to, or why the
-/// invocation is refused.
+/// Authorize a `TelemetrySink` use: `handle` must name a capability in `table`
+/// carrying [`Rights::EMIT`] over an [`Object::TelemetrySink`]. Returns `Ok(())`
+/// when the holder may register/emit named metrics, or why it is refused — the
+/// `TelemetrySink` twin of [`invoke_span`], now that the sink is pure authority
+/// (no bound counter to hand back). `RegisterMetric` gates on this; `EmitMetric`
+/// then validates the per-process metric handle, not the cap.
 ///
-/// This is the v0.7b authority decision, pure and host-tested. The kernel
-/// side only acts on the result: emit on `Ok`, snitch + return an error
-/// code on `Err`. (One object type today, so the object match is
-/// irrefutable; it becomes a real discriminator when the object zoo grows.)
-pub fn invoke_telemetry(table: &CapTable, handle: Handle) -> Result<StringId, Denied> {
+/// Pure and host-tested. The kernel side only acts on the result: proceed on
+/// `Ok`, snitch + return an error code on `Err`.
+pub fn authorize_telemetry(table: &CapTable, handle: Handle) -> Result<(), Denied> {
     let cap = table
         .resolve(handle)
         .map_err(|_| Denied::NoSuchCapability)?;
     if !cap.rights.contains(Rights::EMIT) {
         return Err(Denied::MissingRight);
     }
-    let Object::TelemetrySink { counter } = cap.object else {
+    let Object::TelemetrySink = cap.object else {
         return Err(Denied::WrongObject);
     };
-    Ok(counter)
+    Ok(())
 }
 
 /// Resolve a `SpanSink` invocation: `handle` must name a capability in
 /// `table` carrying [`Rights::EMIT`] over an [`Object::SpanSink`]. Returns
 /// `Ok(())` when the holder is authorized to open a span — name, parent, and
 /// task id are all supplied kernel-side, so there is nothing to hand back.
-/// Pure and host-tested, the span twin of [`invoke_telemetry`].
+/// Pure and host-tested, the span twin of [`authorize_telemetry`].
 pub fn invoke_span(table: &CapTable, handle: Handle) -> Result<(), Denied> {
     let cap = table
         .resolve(handle)
@@ -267,7 +270,7 @@ pub fn invoke_span(table: &CapTable, handle: Handle) -> Result<(), Denied> {
 /// in `table` carrying [`Rights::SEND`]. Returns the target [`EndpointId`]
 /// **and the cap's `badge`** — the kernel delivers the badge to the receiver
 /// so it can demux the sender's object (v0.9c). The `recv` twin is
-/// [`invoke_recv`]; both mirror [`invoke_telemetry`].
+/// [`invoke_recv`]; both mirror [`authorize_telemetry`].
 pub fn invoke_send(table: &CapTable, handle: Handle) -> Result<(EndpointId, u64), Denied> {
     let cap = table
         .resolve(handle)
@@ -367,17 +370,17 @@ impl CapTable {
     }
 
     /// Build the initial capability table for the `init` process: the two
-    /// bootstrap authorities, each with `EMIT` over its own object — a
-    /// [`Object::TelemetrySink`] bound to `counter`, then an
-    /// [`Object::SpanSink`]. Returns the table and the two handles, in grant
-    /// order (telemetry in slot 0, span in slot 1). This is the "root caps to
-    /// init only" policy — the *only* authority a userspace process is born
+    /// bootstrap authorities, each with `EMIT` over its own object — an
+    /// [`Object::TelemetrySink`] (authority to register + emit named metrics),
+    /// then an [`Object::SpanSink`]. Returns the table and the two handles, in
+    /// grant order (telemetry in slot 0, span in slot 1). This is the "root caps
+    /// to init only" policy — the *only* authority a userspace process is born
     /// with.
     #[must_use]
-    pub fn bootstrap(counter: StringId) -> (Self, Handle, Handle) {
+    pub fn bootstrap() -> (Self, Handle, Handle) {
         let mut table = Self::new();
         let telemetry = table.insert(Capability {
-            object: Object::TelemetrySink { counter },
+            object: Object::TelemetrySink,
             rights: Rights::EMIT,
         });
         let span = table.insert(Capability {
@@ -509,9 +512,7 @@ mod tests {
     fn invoke_span_refuses_telemetry_sink_as_wrong_object() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::TelemetrySink {
-                counter: StringId(1),
-            },
+            object: Object::TelemetrySink,
             rights: Rights::EMIT,
         });
         assert_eq!(invoke_span(&table, h), Err(Denied::WrongObject));
@@ -589,9 +590,7 @@ mod tests {
     fn invoke_send_refuses_a_telemetry_sink_as_wrong_object() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
-            object: Object::TelemetrySink {
-                counter: StringId(1),
-            },
+            object: Object::TelemetrySink,
             rights: Rights::SEND,
         });
         assert_eq!(invoke_send(&table, h), Err(Denied::WrongObject));
@@ -711,9 +710,7 @@ mod tests {
     #[test]
     fn mint_badged_refuses_a_non_endpoint_parent() {
         let parent = Capability {
-            object: Object::TelemetrySink {
-                counter: StringId(1),
-            },
+            object: Object::TelemetrySink,
             rights: Rights::MINT,
         };
         assert_eq!(
@@ -723,23 +720,20 @@ mod tests {
     }
 
     #[test]
-    fn invoke_telemetry_refuses_spansink_as_wrong_object() {
+    fn authorize_telemetry_refuses_spansink_as_wrong_object() {
         let mut table = CapTable::new();
         let h = table.insert(Capability {
             object: Object::SpanSink,
             rights: Rights::EMIT,
         });
-        assert_eq!(invoke_telemetry(&table, h), Err(Denied::WrongObject));
+        assert_eq!(authorize_telemetry(&table, h), Err(Denied::WrongObject));
     }
-    use protocol::StringId;
 
     #[test]
     fn a_resolved_handle_returns_the_capability_that_was_inserted() {
         let mut table = CapTable::new();
         let handle = table.insert(Capability {
-            object: Object::TelemetrySink {
-                counter: StringId(7),
-            },
+            object: Object::TelemetrySink,
             rights: Rights::EMIT,
         });
 
@@ -748,17 +742,12 @@ mod tests {
             .expect("a freshly inserted handle resolves");
 
         assert!(cap.rights.contains(Rights::EMIT));
-        let Object::TelemetrySink { counter } = cap.object else {
-            panic!("bootstrap granted a non-TelemetrySink object");
-        };
-        assert_eq!(counter, StringId(7));
+        assert_eq!(cap.object, Object::TelemetrySink);
     }
 
     fn emit_sink() -> Capability {
         Capability {
-            object: Object::TelemetrySink {
-                counter: StringId(1),
-            },
+            object: Object::TelemetrySink,
             rights: Rights::EMIT,
         }
     }
@@ -774,25 +763,13 @@ mod tests {
         let mut table = CapTable::new();
         let first = table.insert(emit_sink());
         let second = table.insert(Capability {
-            object: Object::TelemetrySink {
-                counter: StringId(2),
-            },
+            object: Object::TelemetrySink,
             rights: Rights::EMIT,
         });
 
         assert_ne!(first, second);
-        assert_eq!(
-            table.resolve(first).unwrap().object,
-            Object::TelemetrySink {
-                counter: StringId(1)
-            }
-        );
-        assert_eq!(
-            table.resolve(second).unwrap().object,
-            Object::TelemetrySink {
-                counter: StringId(2)
-            }
-        );
+        assert_eq!(table.resolve(first).unwrap().object, Object::TelemetrySink);
+        assert_eq!(table.resolve(second).unwrap().object, Object::TelemetrySink);
     }
 
     #[test]
@@ -806,51 +783,48 @@ mod tests {
     #[test]
     fn a_capability_without_emit_does_not_pass_the_emit_check() {
         let cap = Capability {
-            object: Object::TelemetrySink {
-                counter: StringId(1),
-            },
+            object: Object::TelemetrySink,
             rights: Rights::NONE,
         };
         assert!(!cap.rights.contains(Rights::EMIT));
     }
 
     #[test]
-    fn invoking_a_granted_telemetry_sink_yields_its_bound_counter() {
-        let counter = StringId(99);
-        let (table, handle, _span) = CapTable::bootstrap(counter);
+    fn authorizing_a_granted_telemetry_sink_succeeds() {
+        // The sink is pure authority now — a granted `TelemetrySink` with `EMIT`
+        // authorizes register/emit; there is no bound counter to hand back.
+        let (table, handle, _span) = CapTable::bootstrap();
 
-        assert_eq!(invoke_telemetry(&table, handle), Ok(counter));
+        assert_eq!(authorize_telemetry(&table, handle), Ok(()));
     }
 
     #[test]
-    fn invoking_an_unknown_handle_is_denied_as_no_such_capability() {
+    fn authorizing_an_unknown_handle_is_denied_as_no_such_capability() {
         let table = CapTable::new();
         assert_eq!(
-            invoke_telemetry(&table, Handle::from_raw(0)),
+            authorize_telemetry(&table, Handle::from_raw(0)),
             Err(Denied::NoSuchCapability)
         );
     }
 
     #[test]
-    fn invoking_a_stale_handle_is_denied_as_no_such_capability() {
-        let (table, handle, _span) = CapTable::bootstrap(StringId(1));
+    fn authorizing_a_stale_handle_is_denied_as_no_such_capability() {
+        let (table, handle, _span) = CapTable::bootstrap();
         let stale = Handle::new(handle.index(), handle.generation() + 1);
         assert_eq!(
-            invoke_telemetry(&table, stale),
+            authorize_telemetry(&table, stale),
             Err(Denied::NoSuchCapability)
         );
     }
 
     #[test]
-    fn invoking_a_capability_that_lacks_emit_is_denied_for_the_missing_right() {
+    fn authorizing_a_capability_that_lacks_emit_is_denied_for_the_missing_right() {
         let mut table = CapTable::new();
         let handle = table.insert(Capability {
-            object: Object::TelemetrySink {
-                counter: StringId(1),
-            },
+            object: Object::TelemetrySink,
             rights: Rights::NONE,
         });
-        assert_eq!(invoke_telemetry(&table, handle), Err(Denied::MissingRight));
+        assert_eq!(authorize_telemetry(&table, handle), Err(Denied::MissingRight));
     }
 
     #[test]
@@ -859,13 +833,12 @@ mod tests {
         // exactly two authorities — emit telemetry and open spans — each with
         // EMIT over its own object. Granting the wrong rights or object here
         // is a privilege bug, so it's host-tested, not left to the itest.
-        let counter = StringId(42);
-        let (table, telemetry, span) = CapTable::bootstrap(counter);
+        let (table, telemetry, span) = CapTable::bootstrap();
 
         let tcap = table
             .resolve(telemetry)
             .expect("the telemetry handle resolves");
-        assert_eq!(tcap.object, Object::TelemetrySink { counter });
+        assert_eq!(tcap.object, Object::TelemetrySink);
         assert!(tcap.rights.contains(Rights::EMIT));
         // Telemetry lands in the first (empty) slot; the kernel hands it to
         // the process at startup. The deterministic slot makes this meaningful.
@@ -899,9 +872,7 @@ mod tests {
         let mut table = CapTable::new();
         table.insert(emit_sink()); // occupy slot 0 so the handle under test isn't `raw == 0`
         let handle = table.insert(Capability {
-            object: Object::TelemetrySink {
-                counter: StringId(2),
-            },
+            object: Object::TelemetrySink,
             rights: Rights::EMIT,
         });
         // Guard: a zero raw value would let a stubbed `raw()` pass vacuously.
@@ -933,9 +904,7 @@ mod tests {
         let mut table = CapTable::new();
         let full = table.insert(emit_sink());
         let attenuated = table.insert(Capability {
-            object: Object::TelemetrySink {
-                counter: StringId(1),
-            },
+            object: Object::TelemetrySink,
             rights: Rights::NONE,
         });
 
@@ -1089,9 +1058,7 @@ mod tests {
             delegate(&table, &[a, b]),
             Ok(Vec::from([
                 Capability {
-                    object: Object::TelemetrySink {
-                        counter: StringId(1)
-                    },
+                    object: Object::TelemetrySink,
                     rights: Rights::EMIT
                 },
                 Capability {

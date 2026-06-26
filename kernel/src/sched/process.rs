@@ -12,7 +12,6 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 
 use kernel_core::cap::{CapTable, Handle};
 use kernel_core::metric::MetricTable;
-use protocol::StringId;
 
 use crate::percpu::{MAX_HARTS, PerCpu};
 use crate::sync::Mutex;
@@ -105,15 +104,16 @@ impl Process {
     pub const HEAP_MAX: usize = 16 * 1024 * 1024;
 
     /// Build the process for `root_pa` and grant it its bootstrap
-    /// capabilities: a `TelemetrySink` bound to `telemetry_counter` and a
-    /// `SpanSink`, each with `EMIT` — the "root caps to init only" policy.
-    /// Returns the process and the two well-known [`Handle`]s (telemetry,
-    /// span) the sinks landed at, which the kernel hands to the program.
+    /// capabilities: a `TelemetrySink` (authority to register + emit named
+    /// metrics) and a `SpanSink`, each with `EMIT` — the "root caps to init
+    /// only" policy. Returns the process and the two well-known [`Handle`]s
+    /// (telemetry, span) the sinks landed at, which the kernel hands to the
+    /// program.
     ///
     /// These grants are the only authority a userspace process is born with;
     /// the caller snitches each (`cap.grants_total` + a `CapEvent`).
-    pub fn bootstrap(root_pa: usize, telemetry_counter: StringId) -> (Self, Handle, Handle) {
-        let (table, telemetry, span) = CapTable::bootstrap(telemetry_counter);
+    pub fn bootstrap(root_pa: usize) -> (Self, Handle, Handle) {
+        let (table, telemetry, span) = CapTable::bootstrap();
         let process = Self {
             root_pa,
             caps: Mutex::new(table),

@@ -12,7 +12,7 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{debug_write_raw, entry, telemetry};
+use snitchos_user::{debug_write_raw, entry, register_counter};
 
 /// A VA in the user half (`< USER_VA_END = 1 << 38`) that the program never
 /// maps — well above its image (`0x1000_0000`), stack, and heap. `copy_from_user`
@@ -27,6 +27,6 @@ const REFUSED_AND_SURVIVED: i64 = 0x0BAD;
 fn main() {
     let status = debug_write_raw(UNMAPPED_USER_VA, 8);
     if status == usize::MAX {
-        let _ = telemetry().emit(REFUSED_AND_SURVIVED);
+        register_counter("snitchos.bad_ptr.marker").emit(REFUSED_AND_SURVIVED);
     }
 }

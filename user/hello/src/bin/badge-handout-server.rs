@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{endpoint, entry, reply_with_cap, rights, telemetry};
+use snitchos_user::{endpoint, entry, register_counter, reply_with_cap, rights};
 
 // v0.9c headline server. Holds `RECV | MINT` on one endpoint and serves many
 // clients over it:
@@ -14,6 +14,7 @@ use snitchos_user::{endpoint, entry, reply_with_cap, rights, telemetry};
 #[entry]
 fn main() {
     let mut next: u64 = 0xBEE1;
+    let received_badge = register_counter("snitchos.badge_handout.marker");
     loop {
         let Ok(r) = endpoint().receive_with_reply() else {
             continue;
@@ -26,7 +27,7 @@ fn main() {
                 }
             }
             None => {
-                let _ = telemetry().emit(r.badge as i64);
+                received_badge.emit(r.badge as i64);
             }
         }
     }

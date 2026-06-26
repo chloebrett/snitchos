@@ -9,17 +9,17 @@
 #![no_main]
 
 use snitchos_std::thread;
-use snitchos_user::{entry, telemetry, tracer};
+use snitchos_user::{entry, register_counter, tracer};
 
 #[entry]
 fn main() {
     let tracer = tracer();
-    let sink = telemetry();
+    let progress_metric = register_counter("snitchos.worker_b.marker");
     let mut progress: i64 = 0;
     loop {
         let _span = tracer.span("worker_b.tick");
         progress += 1;
-        let _ = sink.emit(progress);
+        progress_metric.emit(progress);
         // The cooperative yield, via the std-shaped facade (→ `Yield` syscall).
         thread::yield_now();
     }

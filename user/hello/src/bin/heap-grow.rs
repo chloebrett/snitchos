@@ -13,7 +13,7 @@ extern crate alloc;
 
 use alloc::vec;
 
-use snitchos_user::{entry, telemetry};
+use snitchos_user::{entry, register_counter};
 
 /// 512 KiB — well past the 64 KiB minimum map, so the heap must grow.
 const SIZE: usize = 512 * 1024;
@@ -25,5 +25,5 @@ fn main() {
     let buf = vec![1u8; SIZE];
     let sum: i64 = buf.iter().map(|&b| i64::from(b)).sum();
     // sum == SIZE (524288) iff every byte was allocated, written, and readable.
-    let _ = telemetry().emit(sum);
+    register_counter("snitchos.heap_grow.marker").emit(sum);
 }

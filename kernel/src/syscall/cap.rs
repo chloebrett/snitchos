@@ -1,46 +1,12 @@
-//! Capability syscalls: `Invoke` (use an authority) and `MintBadged` (derive a
-//! narrower one). Both resolve a handle against the calling process's
-//! `CapTable` and act on the pure, host-tested `kernel_core::cap` decision.
+//! Capability syscalls: `MintBadged` — derive a narrower (badged) capability.
+//! Resolves a handle against the calling process's `CapTable` and acts on the
+//! pure, host-tested `kernel_core::cap` decision.
+//!
+//! (The legacy `Invoke` syscall — emit to a `TelemetrySink`'s bound counter —
+//! was retired in debt #2's Step 5: telemetry now flows through
+//! `RegisterMetric`/`EmitMetric`, and its ABI number was removed/renumbered.)
 
 use crate::trap::TrapFrame;
-
-/// Capability invocation. Resolve `a0` against the running process's
-/// `CapTable`; on success perform the authorized operation (emit `a1` to
-/// the `TelemetrySink`'s bound counter), else refuse with a nonzero `a0`.
-/// The authority decision itself is the pure, host-tested
-/// [`kernel_core::cap::invoke_telemetry`]; here we only act on its result.
-pub(super) fn handle_invoke(frame: &mut TrapFrame) {
-    use kernel_core::cap::{Handle, invoke_telemetry};
-    use snitchos_abi::Syscall;
-
-    let sc = Syscall::Invoke as u8;
-    let Some(proc) = super::current_process_or_refuse(frame, sc) else {
-        return;
-    };
-
-    let handle = Handle::from_raw(frame.a0 as u32);
-    // Resolve under the lock, copy out the counter, drop the lock before
-    // emitting — never hold a Mutex across telemetry emission.
-    let outcome = invoke_telemetry(&proc.caps.lock(), handle);
-    match outcome {
-        Ok(counter) => {
-            crate::tracing::emit_metric(counter, frame.a1 as i64);
-            frame.a0 = 0; // success
-        }
-        Err(denied) => {
-            // Snitch the refused authority decision two ways: the pre-
-            // registered `cap_denied_total` counter (a rate) and a
-            // `SyscallRefused` event carrying the *reason* (self-describing,
-            // so a denial is never a silent missing-result). Counter is pre-
-            // registered (`user::init_metric`) to avoid interning in trap
-            // context.
-            if let Some(id) = crate::user::cap_denied_metric_id() {
-                crate::tracing::emit_metric(id, 1);
-            }
-            super::refuse(frame, sc, super::refusal_for(denied)); // emits SyscallRefused + sets a0
-        }
-    }
-}
 
 /// Mint a badged `SEND` capability for an endpoint the caller owns (v0.9c).
 /// `a0` = endpoint handle (needs `MINT`), `a1` = the server-chosen `badge`,

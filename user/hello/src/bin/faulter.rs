@@ -10,7 +10,7 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{entry, telemetry};
+use snitchos_user::{entry, register_counter};
 
 /// A kernel high-half VA that is always mapped (the kernel image base, per
 /// `kernel/linker.ld`) but carries no `U` bit. A U-mode load here faults.
@@ -19,7 +19,7 @@ const KERNEL_PROBE_VA: usize = 0xffff_ffff_8020_0000;
 #[entry]
 fn main() {
     // Prove we reached U-mode and the syscall path works from here too.
-    let _ = telemetry().emit(99);
+    register_counter("snitchos.faulter.marker").emit(99);
 
     // The probe: a U-mode load of a kernel VA. Mapped but not `U`, so this
     // faults to S-mode and never returns here — the kernel counts the fault

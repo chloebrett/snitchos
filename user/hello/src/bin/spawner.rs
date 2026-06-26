@@ -8,7 +8,7 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{entry, exit, spawn, span_handle, telemetry, tracer, wait};
+use snitchos_user::{entry, exit, register_counter, spawn, span_handle, tracer, wait};
 
 #[entry]
 fn main() {
@@ -22,6 +22,6 @@ fn main() {
     // Reap the child and report the status we collected — proves Wait round-trips
     // the child's exit code (v0.12). The child exits with 42.
     let status = wait(child);
-    let _ = telemetry().emit(status as i64);
+    register_counter("snitchos.spawner.marker").emit(status as i64);
     exit();
 }

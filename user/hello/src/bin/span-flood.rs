@@ -8,7 +8,7 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{entry, telemetry, tracer};
+use snitchos_user::{entry, register_counter, tracer};
 
 /// Twenty distinct names — four past the 16-name quota, so the last four opens
 /// must be refused. Static literals (no need to allocate distinct names).
@@ -28,5 +28,5 @@ fn main() {
         let _ = tracer.span(name);
     }
     // Marker so the test can confirm the program ran the whole flood.
-    let _ = telemetry().emit(1);
+    register_counter("snitchos.span_flood.marker").emit(1);
 }

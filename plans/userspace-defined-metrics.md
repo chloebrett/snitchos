@@ -1,7 +1,7 @@
 # Plan: Userspace-defined metrics (debt #2)
 
 **Work lands on:** `main` (no feature branches — see CLAUDE.md). User handles commits.
-**Status:** Steps 1–4 SHIPPED. Step 1: `kernel_core::metric::MetricTable` (host-tested, mutants all caught). Step 2: `RegisterMetric`/`EmitMetric` syscalls + runtime bindings + `userspace-custom-metric` itest. Step 3: FS server self-registers `snitchos.fs.denied`; kernel special-casing (`FS_DENIED_METRIC`, `CounterKind`, `run_ipc_counter`) deleted. Step 4: ergonomic `register_counter/gauge/histogram(name) -> Metric` free fns + inert-`Metric` no-op-on-refusal; `telemetry_total` stays pre-registered. **Only Step 5 remains — the deferred prefactor, now scoped as option C: retire the legacy `Invoke`/fixed-counter path, make `TelemetrySink` authority-only, and *delete* `telemetry_total` (a misnamed test-signal bus) in favour of per-process `snitchos.<task>.marker` metrics. Breakdown in the Step 5 section (5a host-tested + mergeable alone; 5b–5e a single suite-verified landing).**
+**Status:** Steps 1–4 SHIPPED. Step 1: `kernel_core::metric::MetricTable` (host-tested, mutants all caught). Step 2: `RegisterMetric`/`EmitMetric` syscalls + runtime bindings + `userspace-custom-metric` itest. Step 3: FS server self-registers `snitchos.fs.denied`; kernel special-casing (`FS_DENIED_METRIC`, `CounterKind`, `run_ipc_counter`) deleted. Step 4: ergonomic `register_counter/gauge/histogram(name) -> Metric` free fns + inert-`Metric` no-op-on-refusal; `telemetry_total` stays pre-registered. **Step 5 SHIPPED (option C): `Invoke` removed + ABI renumbered (`Exit = 0` … `Wait = 18`); `TelemetrySink` is authority-only (`{ counter }` dropped); `telemetry_total` deleted in favour of per-process `snitchos.<task>.marker` metrics (12 programs + 14 scenarios migrated). Full suite 72/0; migrated scenarios 150/150 on `--repeat 10`. ALL FIVE STEPS DONE — debt #2 paid. This file can be deleted once committed.**
 
 ## Goal
 
@@ -146,7 +146,12 @@ per-process metric on the register path; all affected scenarios stay green.
 
 #### Sub-steps
 
-**5a — cap layer authority-only (host-tested; independently mergeable).**
+> **Correction (sequencing):** 5a is host-test-green but **not** a green-tree
+> checkpoint — dropping `{ counter }` breaks the kernel build until 5b. So 5a is
+> not independently mergeable; all of 5a–5e land as one commit. The only
+> full-green points are after 5a (kernel-core tests) and after 5e (build + suite).
+
+**5a — cap layer authority-only (host-tested). ✅ DONE.**
 `kernel_core::cap`: `Object::TelemetrySink { counter }` → unit variant;
 `CapTable::bootstrap(counter)` → `bootstrap()` (bare telemetry + span caps);
 replace `invoke_telemetry(table, handle) -> Result<StringId, Denied>` with
@@ -155,40 +160,50 @@ replace `invoke_telemetry(table, handle) -> Result<StringId, Denied>` with
 (`bootstrap`, the `TelemetrySink { counter }` constructions, `invoke_telemetry`
 cases) to the new shapes. **GREEN:** the cap changes. **MUTATE:** cap.rs.
 > PR boundary: pure data structure — lands alone, kernel catches up in 5b.
+> **Landed:** 49 cap tests green (365 kernel-core total), clippy clean, mutants
+> 34 caught / 16 unviable / **0 missed**. The `StringId` import is gone (sink
+> carries no `protocol` type). Kernel build is intentionally red until 5b
+> (callers still name `invoke_telemetry` / `bootstrap(counter)` / `{ counter }`).
 
-**5b — kernel un-thread the counter + retire `Invoke`.**
-`trap/user.rs`: delete `USER_METRIC` + `user_metric_id()` + its `init_metric`
+**5b — kernel un-thread the counter + retire `Invoke`. ✅ DONE.**
+`trap/user.rs`: deleted `USER_METRIC` + `user_metric_id()` + its `init_metric`
 registration; `Process::bootstrap()` drops the `telemetry_counter` param; `run` /
-`run_ipc` stop resolving a counter. `syscall/cap.rs`: delete `handle_invoke`.
-`syscall/metric.rs`: gate `RegisterMetric` via `authorize_telemetry`. `syscall/mod.rs`:
-dispatch `Some(Syscall::Invoke)` → `refuse(…, UnknownSyscall)` (the ABI variant
-`Invoke = 0` is **retained, never renumbered**, but documented retired in `abi`).
-Kernel builds.
+`run_ipc` stop resolving a counter. `syscall/cap.rs`: deleted `handle_invoke`;
+`RegisterMetric`'s cap-gate failure now bumps `cap.denied_total` (parity with
+`MintBadged` — needed because `hello`'s adversarial probe moved off `Invoke`).
+`syscall/metric.rs`: gates `RegisterMetric` via `authorize_telemetry`.
+**`Invoke` was removed outright and the ABI renumbered** (`Exit = 0` … `Wait = 18`):
+syscall numbers are a build-time register ABI — kernel + userspace rebuild from
+`abi` together and nothing persists a number (the collector ignores the
+`SyscallRefused` syscall byte), so renumbering on removal is safe, unlike the
+postcard `Frame` discriminants. `from_usize` + the round-trip test updated.
 
-**5c — runtime drop the legacy emit.**
-`snitchos_user`: remove `TelemetrySink::emit` and the private `invoke()` helper
+**5c — runtime drop the legacy emit. ✅ DONE.**
+`snitchos_user`: removed `TelemetrySink::emit` and the private `invoke()` helper
 (only `emit` used it); `telemetry()` now yields a register-only authority. `Denied`
 stays (IPC uses it).
 
-**5d — migrate the marker emitters (~12 programs).**
-Each program currently calling `telemetry().emit(…)` / `sink.emit(…)` registers its
-`snitchos.<task>.marker` counter once at startup (`register_counter`) and emits
-markers through the handle. Programs: `hello`, `faulter`, `bad-ptr`, `span-flood`,
-`heap-grow`, `spawner`, `ipc-receiver`, `rpc-client`, `badge-handout-server`,
-`worker_a`, `worker_b`, `fs-client`.
+**5d — migrate the marker emitters (12 programs). ✅ DONE.**
+Each program calling `telemetry().emit(…)` / `sink.emit(…)` now `register_counter`s
+its `snitchos.<task>.marker` once at startup and emits through the handle: `hello`,
+`faulter`, `bad-ptr`, `span-flood`, `heap-grow`, `spawner`, `ipc-receiver`,
+`rpc-client`, `badge-handout-server`, `worker_a`, `worker_b`, `fs-client`. `hello`'s
+adversarial wrong-object probe moved from `TelemetrySink::emit` to
+`TelemetrySink::from_raw_handle(1).register_metric(…)` (same `CapWrongObject` snitch).
 
-**5e — repoint scenarios + verify (the integration RED/GREEN).**
-~15 scenarios swap the asserted name `snitchos.user.telemetry_total` → the emitting
-program's `snitchos.<task>.marker` (value assertions unchanged). **RED:** suite fails
-where a program/scenario pair is half-migrated. **GREEN:** all green. Gate:
-`cargo xtask itest --repeat 10` over the affected scenarios (userspace/ipc/rpc/fs/
-badge/heap/spawn families); `cargo xtask clippy`; wire-stability check (no renumbered
-`Syscall`).
+**5e — repoint scenarios + verify. ✅ DONE.**
+14 scenario assertions swapped `snitchos.user.telemetry_total` → the emitting
+program's `snitchos.<task>.marker` (values unchanged): ipc-message-crosses,
+rpc-round-trips, rpc-reply-recv, badge-demux, fs-{stat,create,write,lookup,remove,
+readdir}, userspace-bad-ptr, userspace-emits-telemetry, heap-grows-on-demand,
+spawn-delegates-to-child. **GREEN: full suite 72/0; the 15 migrated scenarios
+150/150 on `--repeat 10`; clippy clean; host tests (kernel-core 365, abi, protocol)
+green.**
 
-> **PR boundary** — 5a lands alone (host-tested); **5b–5e land together** (removing
-> `TelemetrySink::emit` breaks every marker emitter at once, so the migration is one
-> coherent, suite-verified change). **Done last**, after the new path is proven in
-> Steps 2–4.
+> **PR boundary** — all of 5a–5e land as **one commit** (5a's `{ counter }` drop
+> breaks the kernel build until 5b; removing `TelemetrySink::emit` breaks every
+> marker emitter until 5d). Suite-verified. **Done last**, after Steps 2–4 proved
+> the new path.
 
 ## Steps
 

@@ -21,7 +21,7 @@
 
 use fs_core::{FsError, InodeId, NodeKind, Stat};
 use fs_proto::{markers, FileRights, Op, Request, Response, UserBuf};
-use snitchos_user::{Endpoint, endpoint, entry, telemetry, tracer};
+use snitchos_user::{Endpoint, Metric, endpoint, entry, register_counter, tracer};
 
 /// Stat `cap` and return the decoded `Stat`, or `None` on any failure. The
 /// `fs.stat` span stays open across the `call`, so the server's handling nests
@@ -37,6 +37,11 @@ fn stat(cap: Endpoint) -> Option<Stat> {
 
 #[entry]
 fn main() {
+    // The client names its own checkpoint metric; each step emits its marker
+    // value through this handle (one counter, many values — as before, but
+    // process-named rather than the shared `telemetry_total`).
+    let marker: Metric = register_counter("snitchos.fs_client.marker");
+
     // Connect → root directory File cap.
     let Ok((_r, Some(root_cap))) = endpoint().call([0, 0, 0, 0]) else {
         return;
@@ -48,7 +53,7 @@ fn main() {
         && s.kind == NodeKind::Dir
         && s.size == 0
     {
-        let _ = telemetry().emit(markers::STAT_ROOT_OK);
+        marker.emit(markers::STAT_ROOT_OK);
     }
 
     // Create "data" under the root → a child File cap in the reply.
@@ -74,7 +79,7 @@ fn main() {
         && s.kind == NodeKind::File
         && s.size == 0
     {
-        let _ = telemetry().emit(markers::CREATE_STAT_OK);
+        marker.emit(markers::CREATE_STAT_OK);
     }
 
     // Write "hi" (data rides in via CopyFromCaller), then read it back (out via
@@ -113,7 +118,7 @@ fn main() {
         && n == 2
         && buf == *b"hi"
     {
-        let _ = telemetry().emit(markers::WRITE_READ_OK);
+        marker.emit(markers::WRITE_READ_OK);
     }
 
     // List the root directory: readdir(0) returns the one entry ("data"), its
@@ -142,7 +147,7 @@ fn main() {
                 Ok(Response::Err(FsError::NotFound))
             )
         {
-            let _ = telemetry().emit(markers::READDIR_OK);
+            marker.emit(markers::READDIR_OK);
         }
     }
 
@@ -184,7 +189,7 @@ fn main() {
         if let Ok((words, _)) = Endpoint::from_raw_handle(rw).call(write_hi.encode())
             && matches!(Response::decode(Op::Write, words), Ok(Response::Count(_)))
         {
-            let _ = telemetry().emit(markers::WRITE_AUTHORIZED_OK);
+            marker.emit(markers::WRITE_AUTHORIZED_OK);
         }
     }
 
@@ -204,7 +209,7 @@ fn main() {
         if let Ok((gone, _)) = gone
             && matches!(Response::decode(Op::Lookup, gone), Ok(Response::Err(FsError::NotFound)))
         {
-            let _ = telemetry().emit(markers::REMOVE_OK);
+            marker.emit(markers::REMOVE_OK);
         }
     }
 }

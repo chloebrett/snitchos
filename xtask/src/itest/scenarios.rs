@@ -1103,20 +1103,20 @@ pub fn block_wake_smoke(h: &mut View) -> Result<(), String> {
 /// a `SEND` cap) sends the inline message `[42, 0, 0, 0]` over a kernel-brokered
 /// endpoint; process B (`ipc-receiver`, holding a `RECV` cap) receives it and
 /// re-emits word0 through its `TelemetrySink`. Asserting
-/// `snitchos.user.telemetry_total == 42` proves the *exact* payload crossed the
+/// `snitchos.ipc_receiver.marker == 42` proves the *exact* payload crossed the
 /// process boundary through the synchronous rendezvous (block → switch → wake →
 /// deliver). A hang (lost wakeup, or the message never copied) trips the
 /// timeout; a wrong value catches a mis-copied word.
 pub fn ipc_message_crosses(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
-            strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            strings.get(name_id).map(String::as_str) == Some("snitchos.ipc_receiver.marker")
                 && *value == 42
         }
         _ => false,
     })
     .ok_or(
-        "no snitchos.user.telemetry_total == 42 within 30s — the message didn't \
+        "no snitchos.ipc_receiver.marker == 42 within 30s — the message didn't \
          cross: receiver never received the payload, the words were mis-copied, \
          or the rendezvous hung (lost wakeup / message not staged)",
     )?;
@@ -1247,18 +1247,18 @@ pub fn ipc_wakeup_is_prompt(h: &mut View) -> Result<(), String> {
 /// v0.9b RPC round-trip (`workload=ipc-rpc`): the client `call`s with request
 /// 21 and blocks; the server `receive`s it with a one-shot reply cap, computes
 /// `21 * 2`, and `reply`s; the client's `call` returns 42 and re-emits it.
-/// Asserting `snitchos.user.telemetry_total == 42` proves the whole round-trip:
+/// Asserting `snitchos.rpc_client.marker == 42` proves the whole round-trip:
 /// request crossed (server saw 21), server computed, reply crossed back via the
 /// minted reply cap (client got 42). A hang (no reply / lost wakeup) trips the
 /// timeout.
 pub fn rpc_round_trips(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
-            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.rpc_client.marker")
                 && *value == 42)
     })
     .ok_or(
-        "no snitchos.user.telemetry_total == 42 within 30s — the RPC round-trip didn't \
+        "no snitchos.rpc_client.marker == 42 within 30s — the RPC round-trip didn't \
          complete (request didn't cross, server didn't reply, or the response didn't \
          return to the client)",
     )?;
@@ -1357,16 +1357,16 @@ pub fn rpc_telemetry(h: &mut View) -> Result<(), String> {
 /// receive loop serves **two** requests from the client (21→42, 50→100). The
 /// second round-trip completing proves the loop iterated *and* that the second
 /// reply cap reused the first's freed `CapTable` slot (generation-bumped, so no
-/// aliasing). Asserting `snitchos.user.telemetry_total == 100` — the second
+/// aliasing). Asserting `snitchos.rpc_client.marker == 100` — the second
 /// response — is the end-to-end witness of the fused path + slot reuse.
 pub fn rpc_reply_recv(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
-            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.rpc_client.marker")
                 && *value == 100)
     })
     .ok_or(
-        "no snitchos.user.telemetry_total == 100 within 30s — the second RPC didn't \
+        "no snitchos.rpc_client.marker == 100 within 30s — the second RPC didn't \
          complete (reply_recv loop didn't serve a second request, or the reused reply \
          cap aliased / failed)",
     )?;
@@ -1432,7 +1432,7 @@ pub fn badge_demux_distinguishes_clients(h: &mut View) -> Result<(), String> {
     let seen_b = Cell::new(false);
     h.wait_for(SEC * 30, |f, strings| {
         if let OwnedFrame::Metric { name_id, value, .. } = f
-            && strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            && strings.get(name_id).map(String::as_str) == Some("snitchos.badge_handout.marker")
         {
             if *value == 0xBEE1 {
                 seen_a.set(true);
@@ -1486,7 +1486,7 @@ pub fn fs_stat_root(h: &mut View) -> Result<(), String> {
     // Client emits [`markers::STAT_ROOT_OK`] iff `Stat(root) == Ok(Stat { kind: Dir, size: 0 })`.
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
-            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.fs_client.marker")
                 && *value == markers::STAT_ROOT_OK)
     })
     .ok_or(
@@ -1505,7 +1505,7 @@ pub fn fs_stat_root(h: &mut View) -> Result<(), String> {
 pub fn fs_create_then_stat(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
-            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.fs_client.marker")
                 && *value == markers::CREATE_STAT_OK)
     })
     .ok_or(
@@ -1523,7 +1523,7 @@ pub fn fs_create_then_stat(h: &mut View) -> Result<(), String> {
 pub fn fs_write_read_roundtrip(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
-            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.fs_client.marker")
                 && *value == markers::WRITE_READ_OK)
     })
     .ok_or(
@@ -1560,7 +1560,7 @@ pub fn fs_lookup_rights_gate(h: &mut View) -> Result<(), String> {
     // Positive control: a write through a READ|WRITE-looked-up cap succeeds.
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
-            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.fs_client.marker")
                 && *value == markers::WRITE_AUTHORIZED_OK)
     })
     .ok_or(
@@ -1578,7 +1578,7 @@ pub fn fs_lookup_rights_gate(h: &mut View) -> Result<(), String> {
 pub fn fs_remove_unlinks(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
-            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.fs_client.marker")
                 && *value == markers::REMOVE_OK)
     })
     .ok_or(
@@ -1662,7 +1662,7 @@ pub fn fs_workload_traces(h: &mut View) -> Result<(), String> {
 pub fn fs_readdir_lists_entries(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
-            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.fs_client.marker")
                 && *value == markers::READDIR_OK)
     })
     .ok_or(
@@ -1691,7 +1691,7 @@ pub fn userspace_bad_ptr_refused(h: &mut View) -> Result<(), String> {
 
     h.wait_for(SEC * 10, |f, strings| {
         matches!(f, OwnedFrame::Metric { name_id, value, .. }
-            if strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.bad_ptr.marker")
                 && *value == 0x0BAD)
     })
     .ok_or(
@@ -1839,18 +1839,18 @@ pub fn virtio_storm(h: &mut View) -> Result<(), String> {
 /// is loaded into the boot table's low half, the kernel drops to U-mode on
 /// hart 1, and the program issues one ambient `EmitMetric` syscall. We assert:
 ///
-///   1. `snitchos.user.telemetry_total` appears — proving the whole chain:
-///      ELF load + per-segment map with the `U` bit + sret-to-U + U-mode
-///      executes + the `ecall` traps back + the handler emits on its behalf.
-///   2. Its value is 42 — the argument `hello` passes in `a0` crossed the
+///   1. `snitchos.hello.marker` appears — proving the whole chain: ELF load +
+///      per-segment map with the `U` bit + sret-to-U + U-mode executes + the
+///      `RegisterMetric`/`EmitMetric` ecalls trap back + the handler emits.
+///   2. Its value is 42 — the argument `hello` passes in `a1` crossed the
 ///      U→S boundary intact.
 ///   3. A `kernel.heartbeat` arrives after — hart 0 kept ticking while
 ///      hart 1 ran userspace.
 pub fn userspace_emits_telemetry(h: &mut View) -> Result<(), String> {
     let frame = h
-        .wait_for(SEC * 10, is_metric_named("snitchos.user.telemetry_total"))
+        .wait_for(SEC * 10, is_metric_named("snitchos.hello.marker"))
         .ok_or(
-            "no snitchos.user.telemetry_total within 10s — userspace never \
+            "no snitchos.hello.marker within 10s — userspace never \
              reached the syscall (ELF load / map(U) / sret-to-U / ecall path broke?)",
         )?;
     let value = match frame {
@@ -2237,13 +2237,13 @@ pub fn two_userspace_workers_round_robin(h: &mut View) -> Result<(), String> {
 pub fn heap_grows_on_demand(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 10, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
-            strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            strings.get(name_id).map(String::as_str) == Some("snitchos.heap_grow.marker")
                 && *value == 512 * 1024
         }
         _ => false,
     })
     .ok_or(
-        "no telemetry_total == 524288 within 10s — the 512 KiB allocation failed (heap didn't \
+        "no snitchos.heap_grow.marker == 524288 within 10s — the 512 KiB allocation failed (heap didn't \
          grow via MapAnon, or the mapped frames weren't writable)",
     )?;
 
@@ -2425,7 +2425,7 @@ pub fn spawn_delegates_to_child(h: &mut View) -> Result<(), String> {
     // the parent runs *after* the child (the reap ordering).
     h.wait_for(SEC * 20, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
-            strings.get(name_id).map(String::as_str) == Some("snitchos.user.telemetry_total")
+            strings.get(name_id).map(String::as_str) == Some("snitchos.spawner.marker")
                 && *value == 42
         }
         _ => false,

@@ -9,7 +9,7 @@
 
 extern crate alloc;
 
-use snitchos_user::{TelemetrySink, entry, telemetry, tracer, yield_now};
+use snitchos_user::{MetricKind, TelemetrySink, entry, register_counter, tracer, yield_now};
 
 // The program entry: a plain `main`. `#[entry]` supplies the
 // `#[unsafe(no_mangle)] extern "C"` decoration the runtime links against, so
@@ -18,8 +18,9 @@ use snitchos_user::{TelemetrySink, entry, telemetry, tracer, yield_now};
 // accessors — and `exit()`s after we return.
 #[entry]
 fn main() {
-    // Emit through the capability the kernel handed us at startup.
-    let _ = telemetry().emit(42);
+    // Register our own marker metric through the startup `TelemetrySink` and
+    // emit a recognisable value through the returned handle.
+    register_counter("snitchos.hello.marker").emit(42);
 
     // A std-shaped `println!` — goes through the facade → `DebugWrite` syscall
     // → a snitched `Log` frame on the wire.
@@ -33,10 +34,11 @@ fn main() {
     let name = alloc::format!("hello.{}", "work");
     let _span = tracer().span(&name);
 
-    // Reach for authority we were never granted: handle 1 (the `SpanSink`)
-    // invoked as a telemetry sink → wrong object. The kernel refuses and
-    // snitches the denial — holding the integer isn't authority.
-    let _ = TelemetrySink::from_raw_handle(1).emit(42);
+    // Reach for authority we were never granted: handle 1 (the `SpanSink`) used
+    // as a telemetry sink to register a metric → wrong object. The kernel refuses
+    // and snitches the denial — holding the integer isn't authority. The returned
+    // `Metric` is inert; we never emit through it.
+    let _ = TelemetrySink::from_raw_handle(1).register_metric("snitchos.hello.denied", MetricKind::Gauge);
 
     // Voluntarily yield, mid-span. Control returns here on a later turn; the
     // span is still open, and closes when we return below.
