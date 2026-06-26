@@ -1724,9 +1724,12 @@ pub fn userspace_custom_metric(h: &mut View) -> Result<(), String> {
     // The process named its own metric: the kernel interned it and declared it
     // on the wire as a Gauge (no kernel-side foreknowledge of the name).
     h.wait_for(SEC * 30, |f, strings| {
-        matches!(f, OwnedFrame::MetricRegister { name_id, kind }
+        matches!(f, OwnedFrame::MetricRegister { name_id, kind, task_id }
             if strings.get(name_id).map(String::as_str) == Some("snitchos.probe.custom")
-                && matches!(kind, protocol::MetricKind::Gauge))
+                && matches!(kind, protocol::MetricKind::Gauge)
+                // The emitter dimension: a userspace-registered metric carries a
+                // real registering task, not the kernel-global sentinel.
+                && *task_id != protocol::NO_EMITTER)
     })
     .ok_or(
         "no MetricRegister{snitchos.probe.custom, Gauge} within 30s — RegisterMetric didn't \

@@ -28,7 +28,17 @@ pub mod stream;
 ///   - 3: v0.6 closeout — added `hart_id` to `Metric` so the collector
 ///     keys metric state by `(name_id, hart_id)` instead of letting
 ///     same-named counters from different harts clobber each other.
-pub const PROTOCOL_VERSION: u8 = 3;
+///   - 4: added `task_id` to `MetricRegister` (the emitter dimension) so two
+///     processes that register a metric with the same name stay distinct
+///     Prometheus series rather than colliding into one family.
+pub const PROTOCOL_VERSION: u8 = 4;
+
+/// `MetricRegister.task_id` sentinel for a **kernel-global** metric — one
+/// registered by the kernel itself (the `&'static` `register_counter`/`gauge`/
+/// `histogram` path), not by a userspace process. The collector attaches no
+/// emitter label to these, preserving their existing series. A real task id is
+/// never `u32::MAX` (ids are small and dense), so the sentinel can't collide.
+pub const NO_EMITTER: u32 = u32::MAX;
 
 /// Identifier of a string in the runtime intern table. `StringRegister`
 /// frames populate the table; every `*_name_id` field references it.
@@ -105,7 +115,13 @@ pub enum Frame<'a> {
   Metric { name_id: StringId, value: i64, t: u64, hart_id: u8 },
   Dropped { count: u32 },
   StringRegister { id: StringId, value: &'a str },
-  MetricRegister { name_id: StringId, kind: MetricKind },
+  /// Declares a metric's [`MetricKind`] and **emitter** once per name. `task_id`
+  /// is the task that registered it — the dimension that keeps two processes
+  /// which named a metric identically (distinct `StringId`s, same string) as
+  /// distinct Prometheus series; [`NO_EMITTER`] marks a kernel-global metric
+  /// (no emitter label). Appended at the END of the struct so postcard's
+  /// positional encoding stays wire-compatible (cf. `ThreadRegister.priority`).
+  MetricRegister { name_id: StringId, kind: MetricKind, task_id: u32 },
   /// One emitted per `spawn()`. Lets the collector resolve numeric
   /// task ids in subsequent frames to human-readable names. `priority`
   /// is the task's static scheduling level (0 = Low, 1 = Normal, 2 = High)
@@ -635,22 +651,26 @@ mod tests {
     }
   }
 
-  /// Roundtrip a `Frame::MetricRegister` for each `MetricKind`.
-  /// Declares metric type once per name; subsequent `Metric` frames
-  /// look up the kind by `name_id`.
+  /// Roundtrip a `Frame::MetricRegister` for each `MetricKind`, carrying the
+  /// registering task (the emitter dimension) — a real task id and the
+  /// `NO_EMITTER` sentinel (a kernel-global metric). Declares metric type +
+  /// emitter once per name; subsequent `Metric` frames look up both by `name_id`.
   #[test]
   fn metric_register_roundtrips() {
     for kind in [MetricKind::Counter, MetricKind::Gauge, MetricKind::Histogram] {
-      let frame = Frame::MetricRegister {
-        name_id: StringId(7),
-        kind,
-      };
+      for task_id in [4u32, NO_EMITTER] {
+        let frame = Frame::MetricRegister {
+          name_id: StringId(7),
+          kind,
+          task_id,
+        };
 
-      let mut buf = [0u8; 64];
-      let used = postcard::to_slice(&frame, &mut buf).unwrap();
-      let decoded: Frame = postcard::from_bytes(used).unwrap();
+        let mut buf = [0u8; 64];
+        let used = postcard::to_slice(&frame, &mut buf).unwrap();
+        let decoded: Frame = postcard::from_bytes(used).unwrap();
 
-      assert_eq!(frame, decoded);
+        assert_eq!(frame, decoded);
+      }
     }
   }
 

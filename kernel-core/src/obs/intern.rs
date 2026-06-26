@@ -161,16 +161,18 @@ impl InternTable {
         None
     }
 
-    /// Register `name` as a metric with `kind`. Emits `StringRegister`
-    /// if the name is new, then `MetricRegister` if the name wasn't
-    /// previously declared as a metric. Calling twice with different
-    /// kinds is a programmer error — the second call sees
-    /// `metric_registered: true` and skips emit, so the host's first-seen
-    /// kind wins.
+    /// Register `name` as a metric with `kind`, registered by `task_id` (the
+    /// emitter dimension — `protocol::NO_EMITTER` for a kernel-global metric).
+    /// Emits `StringRegister` if the name is new, then `MetricRegister` (carrying
+    /// the kind + emitter) if the name wasn't previously declared as a metric.
+    /// Calling twice with different kinds is a programmer error — the second call
+    /// sees `metric_registered: true` and skips emit, so the host's first-seen
+    /// kind + emitter win.
     pub fn register_metric<S: FrameSink>(
         &mut self,
         name: &'static str,
         kind: MetricKind,
+        task_id: u32,
         sink: &mut S,
     ) -> StringId {
         let (id, is_new) = self.lookup_or_insert(name);
@@ -182,7 +184,7 @@ impl InternTable {
             .expect("lookup_or_insert guarantees the slot is populated");
         if !entry.metric_registered {
             entry.metric_registered = true;
-            sink.emit(&Frame::MetricRegister { name_id: id, kind });
+            sink.emit(&Frame::MetricRegister { name_id: id, kind, task_id });
         }
         id
     }
@@ -315,13 +317,28 @@ mod tests {
         let m: &'static str = Box::leak(Box::<str>::from("overflow.metric"));
         let before = sink.len();
 
-        let id1 = table.register_metric(m, MetricKind::Counter, &mut sink);
+        let id1 = table.register_metric(m, MetricKind::Counter, 0, &mut sink);
         assert!(id1.0 as usize >= INLINE_CAP, "name must land in overflow");
         assert_eq!(sink.len(), before + 2, "first: StringRegister + MetricRegister");
 
-        let id2 = table.register_metric(m, MetricKind::Counter, &mut sink);
+        let id2 = table.register_metric(m, MetricKind::Counter, 0, &mut sink);
         assert_eq!(id1, id2);
         assert_eq!(sink.len(), before + 2, "second call must re-find the entry, not re-emit");
+    }
+
+    #[test]
+    fn register_metric_stamps_the_registering_task_on_the_frame() {
+        // The emitter dimension: the `MetricRegister` carries the task that
+        // registered the metric, so the collector can keep two same-named metrics
+        // from different processes as distinct series.
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+        table.register_metric("m", MetricKind::Gauge, 42, &mut sink);
+        // [0] = StringRegister (new name), [1] = MetricRegister (first declaration).
+        assert!(matches!(
+            decode(&sink.raw()[1]),
+            Frame::MetricRegister { kind: MetricKind::Gauge, task_id: 42, .. }
+        ));
     }
 
     #[test]
@@ -333,8 +350,8 @@ mod tests {
         let mut table = InternTable::new();
         let mut sink = CapturingSink::new();
 
-        table.register_metric("m", MetricKind::Counter, &mut sink);
-        table.register_metric("m", MetricKind::Gauge, &mut sink);
+        table.register_metric("m", MetricKind::Counter, 0, &mut sink);
+        table.register_metric("m", MetricKind::Gauge, 0, &mut sink);
 
         // Exactly: StringRegister + MetricRegister(Counter). Nothing else.
         assert_eq!(sink.len(), 2);
@@ -353,7 +370,7 @@ mod tests {
         let mut sink = CapturingSink::new();
 
         table.register_or_lookup("m", &mut sink);
-        table.register_metric("m", MetricKind::Counter, &mut sink);
+        table.register_metric("m", MetricKind::Counter, 0, &mut sink);
 
         assert_eq!(sink.len(), 2);
         assert!(matches!(decode(&sink.raw()[0]), Frame::StringRegister { .. }));

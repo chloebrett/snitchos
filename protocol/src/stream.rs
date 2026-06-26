@@ -29,7 +29,7 @@ pub enum OwnedFrame {
     Metric { name_id: StringId, value: i64, t: u64, hart_id: u8 },
     Dropped { count: u32 },
     StringRegister { id: StringId, value: String },
-    MetricRegister { name_id: StringId, kind: MetricKind },
+    MetricRegister { name_id: StringId, kind: MetricKind, task_id: u32 },
     ThreadRegister { id: u32, name: String, priority: u8 },
     ContextSwitch { from: u32, to: u32, t: u64, reason: SwitchReason, hart_id: u8 },
     HartRegister { id: u8, mhartid: u64, role: HartRole },
@@ -69,8 +69,8 @@ impl OwnedFrame {
             Frame::StringRegister { id, value } => {
                 OwnedFrame::StringRegister { id, value: value.to_string() }
             }
-            Frame::MetricRegister { name_id, kind } => {
-                OwnedFrame::MetricRegister { name_id, kind }
+            Frame::MetricRegister { name_id, kind, task_id } => {
+                OwnedFrame::MetricRegister { name_id, kind, task_id }
             }
             Frame::ThreadRegister { id, name, priority } => {
                 OwnedFrame::ThreadRegister { id, name: name.to_string(), priority }
@@ -229,7 +229,7 @@ mod tests {
             Frame::Metric { name_id: StringId(0), value: 5, t: 4, hart_id: 0 },
             Frame::Dropped { count: 7 },
             Frame::StringRegister { id: StringId(0), value: "x" },
-            Frame::MetricRegister { name_id: StringId(0), kind: MetricKind::Counter },
+            Frame::MetricRegister { name_id: StringId(0), kind: MetricKind::Counter, task_id: 0 },
             Frame::HartRegister { id: 0, mhartid: 0, role: crate::HartRole::Boot },
             Frame::Message { endpoint: 1, from: 2, to: 3, parent_span: SpanId(4), t: 5, hart_id: 0 },
             Frame::CapEvent { kind: CapEventKind::Granted, cap_id: 1, parent_cap_id: 0, holder: 1, object: CapObject::Endpoint, rights: 0b0010, badge: 0, t: 1, hart_id: 0 },
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn decode_stream_handles_partial_reads() {
-        let frame = Frame::MetricRegister { name_id: StringId(7), kind: MetricKind::Counter };
+        let frame = Frame::MetricRegister { name_id: StringId(7), kind: MetricKind::Counter, task_id: 9 };
         let mut scratch = [0u8; 64];
         let encoded = postcard::to_slice(&frame, &mut scratch).unwrap();
         let reader = ChunkedReader { data: encoded.to_vec(), pos: 0, chunk_size: 1 };

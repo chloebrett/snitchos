@@ -1,7 +1,7 @@
 # Plan: Span-name per-process scoping + metric emitter dimension
 
 **Work lands on:** `main` (no feature branches — see CLAUDE.md). User handles commits.
-**Status:** Part A SHIPPED. Part B remains (collector emitter dimension). Parts are independent.
+**Status:** Parts A & B SHIPPED — plan complete. Both observability follow-ons closed; this file can be deleted once committed.
 
 ## Goal
 
@@ -148,7 +148,20 @@ id, and the program's `SpanStart` carries *that* id (not the kernel's). Existing
 
 ---
 
-## Part B — collector emitter dimension for metrics (wire + collector)
+## Part B — collector emitter dimension for metrics (wire + collector) ✅ SHIPPED
+
+> **Landed.** `Frame::MetricRegister` gained `task_id: u32` (appended; `PROTOCOL_VERSION`
+> 3→4) + `protocol::NO_EMITTER = u32::MAX`. `InternTable::register_metric` threads
+> the emitter; `register_user_metric` stamps `current_task_id()`, the kernel
+> `register_counter/gauge/histogram` stamp `NO_EMITTER`. Collector: `metric_emitters`
+> map + `metric_emitter_label` accessor; `format_metrics` rewritten to **group by
+> name string** (one `# TYPE`/`# HELP` per name) with a per-series `task="…"` label
+> (omitted for `NO_EMITTER`, numeric-id fallback when the emitter isn't yet named).
+> 3 new collector tests (collision → one family/two series; kernel metric → no label;
+> unnamed emitter → numeric id); `userspace-custom-metric` strengthened to assert a
+> real emitter on the wire. Host tests green (collector 57, protocol 34, kernel-core
+> 371); full itest **73/0**, metric scenarios **50/50** on `--repeat 10`; mutants
+> **78 caught / 12 unviable / 0 missed** across `prom`/`state`/`intern`; clippy clean.
 
 ### B1 — `MetricRegister.task_id` (protocol; host-tested)
 

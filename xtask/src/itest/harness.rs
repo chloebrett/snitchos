@@ -549,9 +549,9 @@ impl View {
                 format!("Hello {{ timebase_hz={timebase_hz}, protocol_version={protocol_version} }}"),
             OwnedFrame::StringRegister { id, value } =>
                 format!("StringRegister {{ {id:?} = {value:?} }}"),
-            OwnedFrame::MetricRegister { name_id, kind } => {
+            OwnedFrame::MetricRegister { name_id, kind, task_id } => {
                 let name = self.strings.get(name_id).map_or("?", String::as_str);
-                format!("MetricRegister {{ {name:?} kind={kind:?} }}")
+                format!("MetricRegister {{ {name:?} kind={kind:?} task_id={task_id} }}")
             }
             OwnedFrame::SpanStart { id, parent, name_id, t, task_id, hart_id } => {
                 let name = self.strings.get(name_id).map_or("?", String::as_str);

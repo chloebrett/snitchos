@@ -127,6 +127,12 @@ pub struct State {
     anchor: Option<SessionAnchor>,
     strings: HashMap<u32, String>,
     metric_kinds: HashMap<u32, MetricKind>,
+    /// `name_id` → the task that registered the metric (the emitter
+    /// dimension, from `MetricRegister.task_id`). Lets the Prometheus export
+    /// keep two processes that named a metric identically (distinct `name_id`s,
+    /// same string) as distinct labelled series. `NO_EMITTER` (kernel-global) is
+    /// stored verbatim and resolves to *no* label.
+    metric_emitters: HashMap<u32, u32>,
     open_spans: HashMap<u64, OpenSpan>,
     /// `task_id` → human-readable thread name. Populated by
     /// `ThreadRegister`; consulted at `SpanEnd` to tag the completed
@@ -155,6 +161,7 @@ impl State {
             anchor: None,
             strings: HashMap::new(),
             metric_kinds: HashMap::new(),
+            metric_emitters: HashMap::new(),
             open_spans: HashMap::new(),
             thread_names: HashMap::new(),
             thread_priorities: HashMap::new(),
@@ -211,8 +218,9 @@ impl State {
                 self.strings.insert(id.0, (*value).to_string());
                 None
             }
-            Frame::MetricRegister { name_id, kind } => {
+            Frame::MetricRegister { name_id, kind, task_id } => {
                 self.metric_kinds.insert(name_id.0, *kind);
+                self.metric_emitters.insert(name_id.0, *task_id);
                 None
             }
             Frame::SpanStart {
@@ -355,9 +363,29 @@ impl State {
         self.strings.get(&id).map(String::as_str)
     }
 
+    /// The emitter label for a metric `name_id`, or `None` for no label — when
+    /// the metric is kernel-global (`NO_EMITTER`) or not yet registered.
+    /// Otherwise the registering task's resolved `thread.name`, falling back to
+    /// its numeric id if no `ThreadRegister` has named it yet. This is what keeps
+    /// two processes that named a metric identically as distinct Prometheus
+    /// series (`task="a"` vs `task="b"`).
+    pub fn metric_emitter_label(&self, name_id: u32) -> Option<String> {
+        let task_id = self.metric_emitters.get(&name_id).copied()?;
+        if task_id == protocol::NO_EMITTER {
+            return None;
+        }
+        Some(
+            self.thread_names
+                .get(&task_id)
+                .cloned()
+                .unwrap_or_else(|| task_id.to_string()),
+        )
+    }
+
     fn reset_session(&mut self) {
         self.strings.clear();
         self.metric_kinds.clear();
+        self.metric_emitters.clear();
         self.open_spans.clear();
         self.metric_values.clear();
         self.histograms.clear();
@@ -436,6 +464,7 @@ mod tests {
         s.handle(&Frame::MetricRegister {
             name_id: StringId(7),
             kind: MetricKind::Counter,
+            task_id: protocol::NO_EMITTER,
         });
         assert_eq!(s.metric_kind(7), Some(MetricKind::Counter));
     }
@@ -546,6 +575,7 @@ mod tests {
         s.handle(&Frame::MetricRegister {
             name_id: StringId(5),
             kind: MetricKind::Counter,
+            task_id: protocol::NO_EMITTER,
         });
         s.handle(&Frame::Metric {
             name_id: StringId(5),
@@ -569,6 +599,7 @@ mod tests {
         s.handle(&Frame::MetricRegister {
             name_id: StringId(5),
             kind: MetricKind::Counter,
+            task_id: protocol::NO_EMITTER,
         });
         s.handle(&Frame::Metric { name_id: StringId(5), value: 42, t: 100, hart_id: 0 });
         s.handle(&Frame::Metric { name_id: StringId(5), value: 99, t: 100, hart_id: 1 });
@@ -581,7 +612,7 @@ mod tests {
         let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
         s.handle(&Frame::StringRegister { id: StringId(1), value: "x" });
-        s.handle(&Frame::MetricRegister { name_id: StringId(2), kind: MetricKind::Counter });
+        s.handle(&Frame::MetricRegister { name_id: StringId(2), kind: MetricKind::Counter, task_id: protocol::NO_EMITTER });
         s.handle(&Frame::Metric { name_id: StringId(2), value: 42, t: 100, hart_id: 0 });
 
         // Kernel restarts — second Hello must clear all per-session state.
@@ -690,7 +721,7 @@ mod tests {
     fn histogram_metric_routes_to_histogram_table_not_values() {
         let mut s = State::new(FakeWallClock(0));
         s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
-        s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Histogram });
+        s.handle(&Frame::MetricRegister { name_id: StringId(1), kind: MetricKind::Histogram, task_id: protocol::NO_EMITTER });
         s.handle(&Frame::Metric { name_id: StringId(1), value: 50, t: 100, hart_id: 0 });
         assert!(!s.metric_values.contains_key(&(1, 0)));
         assert!(s.histograms.contains_key(&(1, 0)));

@@ -189,7 +189,7 @@ pub fn intern_count() -> u32 {
 pub fn register_counter(name: &'static str) -> StringId {
     INTERN_TABLE
         .lock()
-        .register_metric(name, MetricKind::Counter, &mut KernelSink)
+        .register_metric(name, MetricKind::Counter, protocol::NO_EMITTER, &mut KernelSink)
 }
 
 /// Like `register_counter` but takes an owned `String` — the kernel
@@ -206,14 +206,14 @@ pub fn register_counter_owned(name: alloc::string::String) -> StringId {
 pub fn register_gauge(name: &'static str) -> StringId {
     INTERN_TABLE
         .lock()
-        .register_metric(name, MetricKind::Gauge, &mut KernelSink)
+        .register_metric(name, MetricKind::Gauge, protocol::NO_EMITTER, &mut KernelSink)
 }
 
 /// Register `name` as a Histogram metric.
 pub fn register_histogram(name: &'static str) -> StringId {
     INTERN_TABLE
         .lock()
-        .register_metric(name, MetricKind::Histogram, &mut KernelSink)
+        .register_metric(name, MetricKind::Histogram, protocol::NO_EMITTER, &mut KernelSink)
 }
 
 /// Register a **userspace-named** metric of `kind` from a runtime-copied name,
@@ -222,12 +222,15 @@ pub fn register_histogram(name: &'static str) -> StringId {
 /// content dedup, by design: each process's metric is its own `StringId`, so one
 /// process can't forge another's (or the kernel's own) telemetry. The leak is
 /// bounded by the caller's per-process `MetricTable` quota, checked *before* this
-/// runs. Backs the `RegisterMetric` syscall.
+/// runs. Backs the `RegisterMetric` syscall. The registering task is stamped on
+/// the `MetricRegister` (the emitter dimension), so the collector keeps two
+/// processes that name a metric identically as distinct Prometheus series.
 pub fn register_user_metric(name: &str, kind: MetricKind) -> StringId {
     let leaked: &'static str = alloc::boxed::Box::leak(alloc::boxed::Box::<str>::from(name));
+    let task_id = crate::sched::current_task_id().0;
     INTERN_TABLE
         .lock()
-        .register_metric(leaked, kind, &mut KernelSink)
+        .register_metric(leaked, kind, task_id, &mut KernelSink)
 }
 
 /// Emit a metric sample. The name must have been registered first via
