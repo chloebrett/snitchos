@@ -58,6 +58,7 @@ pub fn eval_program_with_telemetry(
 /// One module of a Stitch program: a name and its parsed top-level items. The
 /// loadable unit is a *set* of these — built in-memory by tests, read from `.st`
 /// files by the CLI.
+#[derive(Debug)]
 pub struct Module {
     pub name: String,
     pub items: Vec<Item>,
@@ -220,30 +221,46 @@ fn check_coherence(modules: &[Module]) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-/// The built-in standard-library modules: namespaced *views* onto existing
-/// native functions — no relocation, the flat names stay in scope too. `Seq`
-/// groups the lazy producers; `Str` the string operations. (`List` waits until it
-/// has genuinely list-specific members: the eager constructors are literals, and
-/// the polymorphic combinators deliberately stay unqualified — one name over both
-/// List and Seq, never split into `List.map`/`Seq.map`.)
+/// The built-in standard-library modules and the members each exposes — the
+/// single source of truth for both [`builtin_modules`] (the runtime handles) and
+/// [`is_builtin_module`] (the loader's "don't read a file for this" check).
+/// They're namespaced *views* onto existing native functions (no relocation, the
+/// flat names stay in scope too): `Seq` groups the lazy producers, `Str` the
+/// string operations. (`List` waits until it has genuinely list-specific members:
+/// eager constructors are literals, and the polymorphic combinators deliberately
+/// stay unqualified — one name over both List and Seq, never split.)
+const BUILTIN_MODULE_SPECS: &[(&str, &[&str])] =
+    &[("Seq", &["iterate", "repeat"]), ("Str", &["join"])];
+
+/// Whether `name` is a built-in stdlib module (provided by the runtime, not read
+/// from a `.st` file) — the module loader skips these.
+#[must_use]
+pub fn is_builtin_module(name: &str) -> bool {
+    BUILTIN_MODULE_SPECS.iter().any(|(module, _)| *module == name)
+}
+
+/// Assemble the built-in module handles, resolving each spec's members against
+/// the shared base globals (where the natives live).
 fn builtin_modules(base_globals: &HashMap<String, Value>) -> Vec<(String, Rc<ModuleHandle>)> {
-    let view = |name: &str, members: &[&str]| {
-        let exports = members
-            .iter()
-            .filter_map(|member| {
-                base_globals
-                    .get(*member)
-                    .map(|value| ((*member).to_string(), value.clone()))
-            })
-            .collect();
-        let handle = ModuleHandle {
-            name: name.to_string(),
-            exports,
-            private: HashSet::new(),
-        };
-        (name.to_string(), Rc::new(handle))
-    };
-    vec![view("Seq", &["iterate", "repeat"]), view("Str", &["join"])]
+    BUILTIN_MODULE_SPECS
+        .iter()
+        .map(|(name, members)| {
+            let exports = members
+                .iter()
+                .filter_map(|member| {
+                    base_globals
+                        .get(*member)
+                        .map(|value| ((*member).to_string(), value.clone()))
+                })
+                .collect();
+            let handle = ModuleHandle {
+                name: (*name).to_string(),
+                exports,
+                private: HashSet::new(),
+            };
+            ((*name).to_string(), Rc::new(handle))
+        })
+        .collect()
 }
 
 /// Apply a module's `use` imports to its globals: a whole-module import binds

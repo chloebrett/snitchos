@@ -146,13 +146,44 @@ The orphan rule the design doc already gestures at, now enforceable because
    built before any `use` is linked, and names resolve lazily at call time, so
    `a`↔`b` mutual imports just work (proved by a cycle test). The 7 cross-module
    tests from increments 1–2 gained an explicit `use` (the finalized semantics).
-4. **Built-in stdlib modules.** Re-home the prelude combinators into embedded
-   `Seq` / `List` / `Str` module sources; `Seq.map` etc. resolve. Keep the most
-   common names auto-in-scope via the prelude so everyday code (`xs |> map(f)`)
-   is unbroken. (Exact split of "auto-prelude vs must-import" is a sub-decision
-   for this step.)
-5. **Coherence check.** Reject an `on` block whose target and contract are both
-   foreign to the module.
+4. ✅ **Built-in stdlib modules (additive).** `Seq` and `Str` are built-in
+   modules — namespaced *views* assembled in Rust (`builtin_modules`) onto the
+   existing natives, merged into `modules_by_name` so `use Seq` / `use Str`
+   resolve and `Seq.iterate` / `Str.join` work. **Additive, not a relocation:**
+   the flat names stay auto-in-scope, so `eval_program` (single-module) and the
+   whole existing corpus are untouched. A user module of the same name wins
+   (built-ins only fill undefined names). Built-ins still require `use` (no
+   auto-import). *Split decision settled by a constraint, not taste:* the
+   polymorphic core (`map`/`filter`/`fold`/`take`/`takeWhile`/`foldWhile`/
+   `toList`) stays flat — one name over List **and** Seq, never split into
+   `List.map`/`Seq.map`; only type-specific producers (`iterate`/`repeat` → `Seq`)
+   and string ops (`join` → `Str`) namespace. `List` is deferred until it has
+   genuinely list-specific members. *Two follow-ons noted:* (a) **embedded-source**
+   stdlib modules (vs. the Rust-assembled views here) arrive when a stdlib fn is
+   written in Stitch; (b) making single-file programs reach `use Seq` needs the
+   `eval_program`→`eval_modules` unification (deferred since increment 1) — only
+   the multi-module path has built-ins today.
+5. ✅ **Coherence check (orphan rule).** `check_coherence` runs first in
+   `eval_modules`: an inherent `on Type` requires `Type` declared in the same
+   module; a conformance `on Type : Contract` requires *either* the type or the
+   contract local (Rust's either-side rule). Checked syntactically against each
+   user module's own declarations — no cross-module type resolution needed, and
+   the trusted prelude's conformances (not user modules) aren't re-checked. Clear
+   errors name the type/contract/module. Enforced in the multi-module path only;
+   `eval_program` (single flat module, no boundary to violate) is unaffected. The
+   positive test doubles as proof cross-module dispatch works: a `Circle` from
+   `types`, its `Drawable` impl in `art`, called from `main`.
+6. ✅ **Multi-file loading (CLI).** `discover_modules(entry, fetch)` walks `use`
+   imports transitively from the entry module, fetching+parsing each reachable
+   module once (built-ins skipped, cycles terminate via a `seen` set), into the
+   module set. The filesystem is isolated behind the injected `fetch` closure, so
+   resolution is host-tested with an in-memory fake fs — no temp files.
+   `run_module_files` ties discover → `eval_modules` → shared render; `main.rs`
+   resolves `use M` to `<dir>/M.st` beside the entry file. **This makes `run_file`
+   route through `eval_modules`** (the deferred unification, for the *file* path):
+   a single no-import file gets the prelude *and* can `use Seq`; multi-file
+   programs just work. The REPL + `run_program_source` stay on `eval_program`
+   (single-module, no files). Verified end-to-end against real `.st` files.
 
 ## Deferred (explicitly out of iteration 1)
 

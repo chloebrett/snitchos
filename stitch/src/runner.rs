@@ -2,12 +2,15 @@
 //! result and telemetry into stdout/stderr text + an exit code. The logic lives
 //! here (host-testable); `main.rs` is a thin wiring layer over it.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use crate::ast::Item;
-use crate::interp::eval_program_with_telemetry;
+use crate::interp::{
+    Module, eval_modules_with_telemetry, eval_program_with_telemetry, is_builtin_module,
+};
 use crate::parser::{parse, parse_program};
-use crate::value::{TelemetryEvent, Value};
+use crate::value::{RuntimeError, TelemetryEvent, Value};
 
 /// Writing to a `String` never fails; this names that contract at each `write!`.
 const INFALLIBLE: &str = "writing to a String is infallible";
@@ -20,8 +23,9 @@ pub struct RunResult {
     pub exit_code: i32,
 }
 
-/// Parse and run a Stitch program. Telemetry (and `main`'s non-unit result) go
-/// to stdout; a parse error (exit 2) or runtime error (exit 1) goes to stderr.
+/// Parse and run a single-module Stitch program (no imports — the REPL and
+/// `eval_program` path). Telemetry (and `main`'s non-unit result) go to stdout; a
+/// parse error (exit 2) or runtime error (exit 1) goes to stderr.
 pub fn run_program_source(src: &str) -> RunResult {
     let items = match parse_program(src) {
         Ok(items) => items,
@@ -33,7 +37,65 @@ pub fn run_program_source(src: &str) -> RunResult {
             };
         }
     };
-    let (result, events) = eval_program_with_telemetry(&items);
+    finish(eval_program_with_telemetry(&items))
+}
+
+/// Discover, load, and run a multi-file program rooted at the `entry` module,
+/// fetching each imported module's source by name via `fetch` (the filesystem in
+/// the CLI, an in-memory map in tests). A load error (missing module / parse
+/// error in any module) goes to stderr with exit 2.
+pub fn run_module_files(
+    entry: &str,
+    fetch: impl Fn(&str) -> Result<String, String>,
+) -> RunResult {
+    let modules = match discover_modules(entry, fetch) {
+        Ok(modules) => modules,
+        Err(message) => {
+            return RunResult {
+                stdout: String::new(),
+                stderr: format!("load error: {message}\n"),
+                exit_code: 2,
+            };
+        }
+    };
+    finish(eval_modules_with_telemetry(&modules, entry))
+}
+
+/// Walk a program's `use` imports from `entry`, fetching and parsing each
+/// reachable module exactly once, into the module set `eval_modules` consumes.
+/// Built-in stdlib modules (`Seq`/`Str`) are runtime-provided, so they're skipped
+/// (never fetched). Import cycles terminate — a module is loaded at most once.
+///
+/// # Errors
+/// A module that can't be fetched, or whose source fails to parse, aborts the
+/// load with a message naming the module.
+pub fn discover_modules(
+    entry: &str,
+    fetch: impl Fn(&str) -> Result<String, String>,
+) -> Result<Vec<Module>, String> {
+    let mut seen = HashSet::new();
+    let mut pending = vec![entry.to_string()];
+    let mut modules = Vec::new();
+    while let Some(name) = pending.pop() {
+        if is_builtin_module(&name) || !seen.insert(name.clone()) {
+            continue;
+        }
+        let source = fetch(&name)?;
+        let items = parse_program(&source)
+            .map_err(|error| format!("in module `{name}`: {}", error.message))?;
+        for item in &items {
+            if let Item::Use { module, .. } = item {
+                pending.push(module.clone());
+            }
+        }
+        modules.push(Module { name, items });
+    }
+    Ok(modules)
+}
+
+/// Render an evaluation outcome (result + telemetry) into stdout/stderr + an exit
+/// code — shared by the single-module and multi-file paths.
+fn finish((result, events): (Result<Value, RuntimeError>, Vec<TelemetryEvent>)) -> RunResult {
     let mut stdout = render_telemetry(&events);
     match result {
         Ok(value) => {
@@ -115,7 +177,85 @@ fn render_telemetry(events: &[TelemetryEvent]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::runner::run_program_source;
+    use std::collections::HashMap;
+
+    use crate::runner::{discover_modules, run_module_files, run_program_source};
+
+    /// A fake filesystem: fetch a module's source by name from an in-memory map
+    /// the closure owns (so it borrows nothing).
+    fn fake_fs(sources: &[(&str, &str)]) -> impl Fn(&str) -> Result<String, String> {
+        let map: HashMap<String, String> = sources
+            .iter()
+            .map(|(name, src)| ((*name).to_string(), (*src).to_string()))
+            .collect();
+        move |name: &str| {
+            map.get(name)
+                .cloned()
+                .ok_or_else(|| format!("cannot find module `{name}`"))
+        }
+    }
+
+    #[test]
+    fn discovers_imported_modules_transitively() {
+        let modules = discover_modules(
+            "main",
+            fake_fs(&[
+                ("main", "use a  main() = a.f()"),
+                ("a", "use b  ext f() = b.g()"),
+                ("b", "ext g() = 1"),
+            ]),
+        )
+        .expect("should discover the transitive set");
+        let mut names = modules.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["a", "b", "main"]);
+    }
+
+    #[test]
+    fn the_loader_skips_builtin_modules() {
+        // `Seq` is runtime-provided, not a file — the loader must not try to read it.
+        let modules = discover_modules("main", fake_fs(&[("main", "use Seq  main() = 1")]))
+            .expect("Seq is built-in, not loaded from disk");
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].name, "main");
+    }
+
+    #[test]
+    fn a_missing_imported_module_is_a_load_error() {
+        let error = discover_modules("main", fake_fs(&[("main", "use gone  main() = 1")]))
+            .expect_err("the missing import should fail discovery");
+        assert!(error.contains("gone"), "{error}");
+    }
+
+    #[test]
+    fn import_cycles_terminate_during_discovery() {
+        let modules = discover_modules(
+            "main",
+            fake_fs(&[("main", "use a  main() = 1"), ("a", "use main  ext f() = 1")]),
+        )
+        .expect("a cycle must not hang the loader");
+        assert_eq!(modules.len(), 2);
+    }
+
+    #[test]
+    fn run_module_files_runs_a_multi_file_program() {
+        let result = run_module_files(
+            "main",
+            fake_fs(&[
+                ("main", "use math  main() = math.double(21)"),
+                ("math", "ext double(x) = x * 2"),
+            ]),
+        );
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "=> 42\n");
+    }
+
+    #[test]
+    fn run_module_files_reports_a_load_error_on_stderr() {
+        let result = run_module_files("main", fake_fs(&[("main", "use gone  main() = 1")]));
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.contains("gone"), "{}", result.stderr);
+    }
 
     #[test]
     fn runs_a_program_and_prints_its_result() {
