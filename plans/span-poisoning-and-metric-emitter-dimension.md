@@ -1,7 +1,7 @@
 # Plan: Span-name per-process scoping + metric emitter dimension
 
 **Work lands on:** `main` (no feature branches — see CLAUDE.md). User handles commits.
-**Status:** Design locked, ready for Part A Step 1. Two independent parts; either can land first.
+**Status:** Part A SHIPPED. Part B remains (collector emitter dimension). Parts are independent.
 
 ## Goal
 
@@ -88,7 +88,21 @@ because `SpanStart.task_id` + `ThreadRegister{id,name}` give the collector a
 
 ---
 
-## Part A — per-process span-name scoping (kernel-only)
+## Part A — per-process span-name scoping (kernel-only) ✅ SHIPPED
+
+> **Landed.** `kernel_core::span_name::SpanNameTable` (content-keyed, bounded;
+> 6 host tests, mutants 6 caught / 1 unviable / **0 missed**). `Process` now holds
+> `span_names: Mutex<SpanNameTable>` (replacing the `AtomicU32` counter + the
+> `Process::MAX_SPAN_NAMES` const, now on the table). `span_open_bounded` resolves
+> against the caller's own table — a new name (even one the kernel uses) leaks a
+> *fresh* id. New itest `span-name-not-poisonable` (probe opens `"kernel.heartbeat"`,
+> asserts a second distinct `StringRegister`); full suite **73/0**, span scenarios
+> **40/40** on `--repeat 10`; clippy clean.
+>
+> **Deviation from plan:** kept `InternTable::lookup_by_content` (added a hazard
+> doc note) rather than deleting it — the overflow-spill test uses it as a
+> cross-region scan oracle (distinct-path coverage). The fix is that
+> `span_open_bounded` no longer *calls* it; deleting the method is deferred cleanup.
 
 ### A1 — `SpanNameTable` (host-tested; pure data structure)
 

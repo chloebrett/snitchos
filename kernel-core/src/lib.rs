@@ -29,5 +29,5 @@ mod workloads;
 
 pub use mem::{frame, heap, heap_smoke, mmu};
 pub use obs::{batch_ring, intern, preinit, sink, span};
-pub use user::{cap, elf, ipc, metric};
+pub use user::{cap, elf, ipc, metric, span_name};
 pub use workloads::{bootargs, workload};

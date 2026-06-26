@@ -119,31 +119,31 @@ pub fn emit_log(msg: &str) {
 /// [`span_start`]: the matching `SpanEnd` comes from a later
 /// [`span_close_checked`].
 ///
-/// A genuinely **new** name is gated by a per-process quota: `registered`
-/// counts distinct names this process has introduced; if it has reached `max`,
-/// a new name is **refused** (returns `None`) without registering — bounding
-/// the permanent `Box::leak` and the table's growth. Repeats and names another
-/// process already registered always succeed and cost nothing (content-deduped
-/// via `lookup_by_content`). The lookup, quota check, registration, and
-/// counter bump all run under the intern lock, so the decision is precise — no
-/// check-then-register race.
+/// Names are scoped **per process** via `span_names` (the caller's own
+/// [`SpanNameTable`]): a name the process has used before resolves to the
+/// `StringId` it already leaked (no re-leak); a genuinely new name leaks a fresh
+/// id — including a name the kernel or another process also uses, so the process
+/// gets its *own* distinct id and cannot emit under another's span name nor probe
+/// the global name set. A new name past the table's quota is **refused** (returns
+/// `None`) without leaking. The resolve, quota check, and registration all run
+/// under the per-process span-name lock, so the decision is precise.
+///
+/// [`SpanNameTable`]: kernel_core::span_name::SpanNameTable
 pub fn span_open_bounded(
     name: &str,
-    registered: &core::sync::atomic::AtomicU32,
-    max: u32,
+    span_names: &crate::sync::Mutex<kernel_core::span_name::SpanNameTable>,
 ) -> Option<span::SpanOpen> {
-    use core::sync::atomic::Ordering;
     let name_id = {
-        let mut table = INTERN_TABLE.lock();
-        if let Some(id) = table.lookup_by_content(name) {
+        let mut names = span_names.lock();
+        if let Some(id) = names.resolve(name) {
             id
-        } else if registered.load(Ordering::Relaxed) >= max {
+        } else if names.is_full() {
             return None;
         } else {
             let leaked: &'static str =
                 alloc::boxed::Box::leak(alloc::boxed::Box::<str>::from(name));
-            let id = table.register_or_lookup(leaked, &mut KernelSink);
-            registered.fetch_add(1, Ordering::Relaxed);
+            let id = INTERN_TABLE.lock().register_or_lookup(leaked, &mut KernelSink);
+            names.insert(leaked, id);
             id
         }
     };

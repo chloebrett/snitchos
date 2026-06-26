@@ -8,10 +8,11 @@
 //! [`kernel_core::cap`]; this module only decides *where the table lives*
 //! and grants the bootstrap capability. See `plans/v0.7b-capabilities.md`.
 
-use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use kernel_core::cap::{CapTable, Handle};
 use kernel_core::metric::MetricTable;
+use kernel_core::span_name::SpanNameTable;
 
 use crate::percpu::{MAX_HARTS, PerCpu};
 use crate::sync::Mutex;
@@ -55,14 +56,16 @@ pub struct Process {
     /// [`CURRENT_PROCESS`] to validate a capability invocation.
     pub caps: Mutex<CapTable>,
 
-    /// Count of **distinct span names this process has introduced** into the
-    /// global intern table. Bounds the per-process contribution to the
-    /// permanent `Box::leak` of each new span name (and the table's growth):
-    /// once it reaches [`Process::MAX_SPAN_NAMES`] a span-open with a new name
-    /// is refused. Repeats and names another process already registered cost
-    /// nothing (they resolve via `lookup_by_content`). Incremented under the
-    /// intern lock at the registration site, so the check-and-bump is precise.
-    pub span_names_registered: AtomicU32,
+    /// The span names this process has introduced, each paired with the
+    /// `StringId` it leaked. A `SpanOpen` resolves the name against *this* table
+    /// alone: a name the process used before reuses its own id (no re-leak); a
+    /// genuinely new name (under [`SpanNameTable::MAX_SPAN_NAMES`]) leaks a fresh
+    /// id. The per-process scoping is the security boundary — a process gets its
+    /// own id for *any* name, so it cannot emit a span under the kernel's (or
+    /// another process's) name, nor probe which names exist by observing quota
+    /// cost. Behind the same [`Mutex`] as `caps`/`metrics`, never held across
+    /// `sret`/`yield_now`. The capacity *is* the quota.
+    pub span_names: Mutex<SpanNameTable>,
 
     /// The metrics this process has named for itself (debt #2). A
     /// [`RegisterMetric`] syscall interns a fresh `StringId` and stores it
@@ -87,12 +90,6 @@ pub struct Process {
 }
 
 impl Process {
-    /// Cap on distinct span names a single process may introduce. Generous
-    /// for a real program (a handful of `worker.tick`-style names), small
-    /// enough that a misbehaving program can't leak unbounded `'static`
-    /// strings or grow the intern table without limit.
-    pub const MAX_SPAN_NAMES: u32 = 16;
-
     /// Base VA of the per-process growable heap region. Well clear of the
     /// program image (linked at `0x1000_0000`, 16 MiB) and the kernel
     /// high-half; in the Sv39 user half. The `Sbrk` syscall maps frames here
@@ -117,7 +114,7 @@ impl Process {
         let process = Self {
             root_pa,
             caps: Mutex::new(table),
-            span_names_registered: AtomicU32::new(0),
+            span_names: Mutex::new(SpanNameTable::new()),
             metrics: Mutex::new(MetricTable::new()),
             heap_top: AtomicUsize::new(Self::HEAP_BASE),
         };

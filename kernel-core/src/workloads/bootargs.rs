@@ -70,8 +70,8 @@ pub enum WorkloadKind {
     /// `bad-ptr` survives and emits a marker. Not a storm.
     UserspaceBadPtr,
     /// Span-quota probe: runs the `span-flood` program, which opens spans with
-    /// many distinct names to exceed `Process::MAX_SPAN_NAMES` — the kernel
-    /// must refuse the surplus (`SyscallRefused{Quota}`) without panicking.
+    /// many distinct names to exceed the per-process `SpanNameTable` quota — the
+    /// kernel must refuse the surplus (`SyscallRefused{Quota}`) without panicking.
     UserspaceSpanFlood,
     /// Userspace demo workers: cooperative `worker` processes that loop
     /// {open a span, bump progress, `yield`}, the userspace successors to the

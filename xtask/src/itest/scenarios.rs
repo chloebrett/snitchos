@@ -1761,6 +1761,39 @@ pub fn userspace_custom_metric(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Span-name per-process scoping (`workload=probe`): the probe opens a span named
+/// `"kernel.heartbeat"` — a name the *kernel* also uses. With per-process span-name
+/// scoping the kernel interns a **fresh** `StringId` for the probe's span rather
+/// than resolving it to the kernel's existing id (the span-name poisoning hole).
+///
+/// Asserts **two distinct** `StringRegister`s for `"kernel.heartbeat"` appear: the
+/// kernel's (from its own heartbeat) and the probe's. One id only would mean the
+/// probe's open content-deduped onto the kernel's id — poisoning unfixed. (The
+/// `task_id` on each `SpanStart` already disambiguates the emitter, so this is
+/// purely the *naming* fix.)
+pub fn span_name_not_poisonable(h: &mut View) -> Result<(), String> {
+    use std::cell::Cell;
+
+    let first_id: Cell<Option<u32>> = Cell::new(None);
+    h.wait_for(SEC * 20, |f, _| {
+        if let OwnedFrame::StringRegister { id, value } = f
+            && value == "kernel.heartbeat"
+        {
+            match first_id.get() {
+                None => first_id.set(Some(id.0)),
+                Some(prev) => return id.0 != prev,
+            }
+        }
+        false
+    })
+    .ok_or(
+        "didn't see a second, distinct StringRegister for \"kernel.heartbeat\" within 20s — \
+         the probe's span open resolved to the kernel's id (cross-process content dedup not \
+         scoped per-process), or the probe never ran",
+    )?;
+    Ok(())
+}
+
 /// Mutex-contention storm: both harts run a long-running task that
 /// takes and releases the same `kernel::sync::Mutex<()>` N=100 000
 /// times. Tests revised-H7 — is the cross-hart bug inside

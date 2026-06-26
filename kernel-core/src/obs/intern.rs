@@ -140,12 +140,17 @@ impl InternTable {
     }
 
     /// Find `name` by **content** (not pointer), returning its id if some
-    /// same-valued name is already registered. Unlike [`register_or_lookup`]'s
-    /// pointer equality, this lets a runtime-built string — e.g. a userspace
-    /// span name copied in per-syscall — resolve to an existing id, so the
-    /// caller leaks-and-registers only on a genuine first sighting rather than
-    /// on every repeated call (which would overflow the table). O(n) over the
-    /// table; the table is small.
+    /// same-valued name is already registered. O(n) over the table; the table is
+    /// small.
+    ///
+    /// **Do NOT use this for per-process name resolution** (span or metric
+    /// names). It deduplicates across the *whole* table — every process and the
+    /// kernel — so resolving a userspace name through it would let a process
+    /// alias another's (or the kernel's) `StringId`: the span-name poisoning hole
+    /// fixed by per-process [`SpanNameTable`](crate::span_name::SpanNameTable) /
+    /// [`MetricTable`](crate::metric::MetricTable) scoping. Kept for content
+    /// lookups that are legitimately global (and as a test oracle for the
+    /// inline→overflow scan).
     #[must_use]
     pub fn lookup_by_content(&self, name: &str) -> Option<StringId> {
         for (id, e) in self.iter() {
