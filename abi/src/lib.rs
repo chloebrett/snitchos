@@ -218,6 +218,11 @@ pub mod rights {
     pub const RECV: u32 = 0b0100;
     /// May mint badged `SEND` caps for an `Endpoint` the holder owns (v0.9c).
     pub const MINT: u32 = 0b1000;
+    /// May `signal` a `Notification` — the producer end (v0.12).
+    pub const SIGNAL: u32 = 0b1_0000;
+    /// May `wait` on a `Notification` — the consumer end (v0.12). Disjoint from
+    /// `SIGNAL` so a cap can grant either end or both.
+    pub const WAIT: u32 = 0b10_0000;
 }
 
 /// The number of inline `u64` words a single IPC message carries. The single

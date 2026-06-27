@@ -49,6 +49,14 @@ impl Rights {
     /// so they cannot mint (re-delegation is a deferred follow-on).
     pub const MINT: Rights = Rights(snitchos_abi::rights::MINT);
 
+    /// May `signal` a `Notification` — the producer end (v0.12). Disjoint from
+    /// [`WAIT`](Self::WAIT) so a cap can grant either notification end or both,
+    /// the same split as [`SEND`](Self::SEND)/[`RECV`](Self::RECV).
+    pub const SIGNAL: Rights = Rights(snitchos_abi::rights::SIGNAL);
+
+    /// May `wait` on a `Notification` — the consumer end (v0.12).
+    pub const WAIT: Rights = Rights(snitchos_abi::rights::WAIT);
+
     /// Whether `self` grants every right in `other`.
     #[must_use]
     pub const fn contains(self, other: Rights) -> bool {
@@ -643,6 +651,19 @@ mod tests {
         assert_ne!(Rights::MINT.bits(), Rights::EMIT.bits());
         assert_ne!(Rights::MINT.bits(), Rights::SEND.bits());
         assert_ne!(Rights::MINT.bits(), Rights::RECV.bits());
+    }
+
+    #[test]
+    fn the_signal_and_wait_rights_are_distinct_disjoint_bits() {
+        // The producer (`SIGNAL`) and consumer (`WAIT`) ends of a notification —
+        // disjoint so one cap can grant either end or both, like SEND/RECV.
+        assert_ne!(Rights::SIGNAL.bits(), Rights::WAIT.bits());
+        assert!(!Rights::SIGNAL.contains(Rights::WAIT));
+        assert!(!Rights::WAIT.contains(Rights::SIGNAL));
+        for other in [Rights::EMIT, Rights::SEND, Rights::RECV, Rights::MINT] {
+            assert_ne!(Rights::SIGNAL.bits(), other.bits());
+            assert_ne!(Rights::WAIT.bits(), other.bits());
+        }
     }
 
     #[test]
