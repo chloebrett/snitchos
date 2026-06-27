@@ -2556,6 +2556,50 @@ pub fn spawn_reclaims_memory(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.12 notification primitive (`workload=notify-smoke`): the async kernel→user
+/// wake crosses a task boundary. A `notify-waiter` parent creates a notification,
+/// `Spawn`s a `notify-signaller` child delegating the cap, then `WaitNotify`s on
+/// it; the child `Signal`s the mask `0b101`. We assert the full edge on the wire —
+/// the signal, the wake carrying the same bits, and the parent's own confirmation
+/// that its `WaitNotify` syscall returned those bits. The dependency arrow a
+/// synchronous trace can't draw.
+pub fn notify_signal_wakes_waiter(h: &mut View) -> Result<(), String> {
+    // The signaller child was created (registered during the parent's `spawn()`).
+    h.wait_for(SEC * 20, is_thread_register_named("notify-signaller"))
+        .ok_or("no ThreadRegister for 'notify-signaller' — Spawn didn't create the child")?;
+
+    // The child signalled: a NotifySignal frame carrying the chosen mask. If the
+    // notification cap hadn't been delegated, `Signal` would be refused and none
+    // would appear (and the parent would block forever).
+    h.wait_for(SEC * 20, |f, _| match f {
+        OwnedFrame::NotifySignal { mask, .. } => *mask == 0b101,
+        _ => false,
+    })
+    .ok_or("no NotifySignal{mask=0b101} — the child couldn't signal the delegated notification")?;
+
+    // The parent woke: a NotifyWait frame carrying the same bits. With exactly one
+    // notification in this workload, matching bits ties the wake to that signal —
+    // the out-of-band edge made visible.
+    h.wait_for(SEC * 20, |f, _| match f {
+        OwnedFrame::NotifyWait { bits, .. } => *bits == 0b101,
+        _ => false,
+    })
+    .ok_or("no NotifyWait{bits=0b101} — the parked waiter never woke with the signalled bits")?;
+
+    // And the parent's `WaitNotify` syscall itself returned those bits (it emits
+    // them as `snitchos.notify.bits`) — proving the wake delivered the value to
+    // userspace, not just onto the wire. `0b101 == 5`.
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.notify.bits") && *value == 5
+        }
+        _ => false,
+    })
+    .ok_or("parent never reported bits=5 — WaitNotify didn't deliver the signalled bits to userspace")?;
+
+    Ok(())
+}
+
 /// v0.8b priority scheduling — *ordered, but fair* (`workload=priorities`). A
 /// High-priority CPU-bound `greedy` task and a Low-priority cooperative
 /// `worker_b` share hart 1. The scheduler must (a) **respect priority** —

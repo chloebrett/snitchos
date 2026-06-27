@@ -259,6 +259,7 @@ catalog! {
     cpu "console-echo-round-trips"        scenarios::console_echo_round_trips       [userspace]  {"console-echo"};
     cpu "spawn-delegates-to-child"        scenarios::spawn_delegates_to_child       [userspace]  {"spawn-demo"};
     cpu "spawn-reclaims-memory"           scenarios::spawn_reclaims_memory          [userspace]  {"spawn-reap"};
+    cpu "notify-signal-wakes-waiter"      scenarios::notify_signal_wakes_waiter     [userspace]  {"notify-smoke"};
     cpu "priorities-ordered-but-fair"     scenarios::priorities_ordered_but_fair    [userspace]  {"priorities"};
 }
 

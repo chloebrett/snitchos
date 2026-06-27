@@ -87,6 +87,14 @@ pub static REAPER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_REAPER_ELF"));
 /// Launched at runtime via `Spawn`, so it has only a [`SPAWNABLE`] registry row.
 pub static MEMHOG_ELF: &[u8] = include_bytes!(env!("SNITCHOS_MEMHOG_ELF"));
 
+/// The `workload=notify-smoke` parent: creates a notification, `Spawn`s the
+/// `notify-signaller` child (delegating the cap), then `WaitNotify`s on it.
+pub static NOTIFY_WAITER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_NOTIFY_WAITER_ELF"));
+
+/// The `notify-signaller` child (spawnable id 2): `Signal`s its delegated
+/// notification cap, waking the parent, then exits. SPAWNABLE-only.
+pub static NOTIFY_SIGNALLER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_NOTIFY_SIGNALLER_ELF"));
+
 /// The `workload=ipc` programs: `ipc-sender` holds a `SEND` cap and sends one
 /// inline message; `ipc-receiver` holds a `RECV` cap, receives it, and
 /// re-emits the payload. They rendezvous over one kernel-brokered endpoint.
@@ -264,6 +272,10 @@ pub static SPAWNER: ProgramSpec = ProgramSpec { elf: SPAWNER_ELF, launch: Launch
 /// no cap; the `memhog` children it spawns inherit no delegated authority).
 pub static REAPER: ProgramSpec = ProgramSpec { elf: REAPER_ELF, launch: Launch::Plain };
 
+/// `workload=notify-smoke`: the notification-demo parent (ambient — `NotifyCreate`
+/// needs no cap; it delegates the created notification cap to its child).
+pub static NOTIFY_WAITER: ProgramSpec = ProgramSpec { elf: NOTIFY_WAITER_ELF, launch: Launch::Plain };
+
 /// An IPC program on the shared `DEMO_ENDPOINT` with `rights_bits` and the
 /// default user telemetry sink — now the *only* IPC launch shape (the FS server
 /// registers its own denial metric at runtime rather than binding a special
@@ -390,7 +402,11 @@ pub fn spawn_process_with_caps(
 /// embedded, indexed). The shell's command set will live here; seeded with
 /// `hello` until those programs land. Phase 1b swaps the id for an executable
 /// File cap read from the FS.
-static SPAWNABLE: &[(&str, &[u8])] = &[("spawnee", SPAWNEE_ELF), ("memhog", MEMHOG_ELF)];
+static SPAWNABLE: &[(&str, &[u8])] = &[
+    ("spawnee", SPAWNEE_ELF),
+    ("memhog", MEMHOG_ELF),
+    ("notify-signaller", NOTIFY_SIGNALLER_ELF),
+];
 
 /// Resolve a `Spawn` program id to its `(name, image)`, or `None` if out of range.
 #[must_use]
@@ -498,6 +514,13 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::SpawnReap, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "reaper", program: &REAPER, priority: Priority::Normal }],
+    }),
+    // v0.12 notification smoke: the `notify-waiter` parent boots and `Spawn`s the
+    // `notify-signaller` child (SPAWNABLE id 2) at runtime, delegating the
+    // notification cap — so only the parent is in the layout.
+    (WorkloadKind::NotifySmoke, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "notify_waiter", program: &NOTIFY_WAITER, priority: Priority::Normal }],
     }),
     // v0.8b priority demo: a High CPU-bound `greedy` (the hog) vs a Low
     // cooperative worker — priority respected, aging keeps Low fed.

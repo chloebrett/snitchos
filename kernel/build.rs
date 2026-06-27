@@ -36,6 +36,8 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("badge-handout-client", "SNITCHOS_BADGE_HANDOUT_CLIENT_ELF"),
     ("fs-server", "SNITCHOS_FS_SERVER_ELF"),
     ("fs-client", "SNITCHOS_FS_CLIENT_ELF"),
+    ("notify_waiter", "SNITCHOS_NOTIFY_WAITER_ELF"),
+    ("notify_signaller", "SNITCHOS_NOTIFY_SIGNALLER_ELF"),
 ];
 
 fn main() {

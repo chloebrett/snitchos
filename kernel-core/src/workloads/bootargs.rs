@@ -165,6 +165,12 @@ pub enum WorkloadKind {
     /// FS requests against it; the server demuxes inode + rights by badge. One
     /// hart.
     Fs,
+    /// v0.12 notification smoke: a `notify-waiter` parent creates a notification,
+    /// `Spawn`s a `notify-signaller` child delegating the cap, then `WaitNotify`s
+    /// on it; the child `Signal`s a known bit mask. Proves the async kernel→user
+    /// wake crosses the task boundary — a `NotifySignal`→`NotifyWait` edge on the
+    /// wire. One hart.
+    NotifySmoke,
 }
 
 /// Look up a `key=<usize>` parameter in the bootargs string (e.g.
@@ -239,6 +245,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "badge-mint" => Some(WorkloadKind::BadgeMint),
             "badge-handout" => Some(WorkloadKind::BadgeHandout),
             "fs" => Some(WorkloadKind::Fs),
+            "notify-smoke" => Some(WorkloadKind::NotifySmoke),
             _ => None,
         })
 }
@@ -269,6 +276,11 @@ mod tests {
     #[test]
     fn selects_frame_oom() {
         assert_eq!(select("workload=frame-oom"), Some(WorkloadKind::FrameOom));
+    }
+
+    #[test]
+    fn selects_notify_smoke() {
+        assert_eq!(select("workload=notify-smoke"), Some(WorkloadKind::NotifySmoke));
     }
 
     #[test]

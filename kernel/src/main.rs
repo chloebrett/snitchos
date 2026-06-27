@@ -372,6 +372,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::StackCanary)
         | Some(WorkloadKind::SpawnDemo)
         | Some(WorkloadKind::SpawnReap)
+        | Some(WorkloadKind::NotifySmoke)
         | Some(WorkloadKind::Priorities)
         | Some(WorkloadKind::Ipc)
         | Some(WorkloadKind::IpcRpc)
