@@ -28,6 +28,7 @@ pub mod ast;
 pub mod env;
 pub mod interp;
 pub mod lexer;
+pub mod line_edit;
 pub mod natives;
 pub mod ops;
 pub mod parser;
