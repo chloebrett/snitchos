@@ -215,6 +215,10 @@ pub enum CapObject {
   /// A one-shot reply authority (v0.9b) — the cap the kernel mints into a
   /// server so it can answer a blocked `call`er exactly once.
   Reply,
+  /// A notification — the general async kernel→user signal (v0.12). The bound
+  /// notification id lives kernel-side; this wire tag attributes the grant to
+  /// the notification kind.
+  Notification,
 }
 
 /// Why the kernel refused a syscall (the `reason` in [`Frame::SyscallRefused`]).
@@ -397,6 +401,30 @@ mod tests {
       badge: 0,
       t: 3456,
       hart_id: 1,
+    };
+
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+
+    assert_eq!(frame, decoded);
+  }
+
+  /// Roundtrip a `Frame::CapEvent` carrying the `Notification` object — the
+  /// v0.12 notification-cap grant. Appended at the end of `CapObject`, so its
+  /// postcard discriminant must not disturb the earlier kinds.
+  #[test]
+  fn cap_event_granted_notification_roundtrips() {
+    let frame = Frame::CapEvent {
+      kind: CapEventKind::Granted,
+      cap_id: 6,
+      parent_cap_id: 0,
+      holder: 2,
+      object: CapObject::Notification,
+      rights: 0b11_0000,
+      badge: 0,
+      t: 7890,
+      hart_id: 0,
     };
 
     let mut buf = [0u8; 64];

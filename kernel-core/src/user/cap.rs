@@ -15,6 +15,7 @@
 use alloc::vec::Vec;
 
 use crate::ipc::EndpointId;
+use crate::notify::NotificationId;
 use crate::sched::TaskId;
 // `StringId` was the `TelemetrySink { counter }` payload; the sink is now pure
 // authority (Step 5), so no `protocol` type is named here.
@@ -122,6 +123,13 @@ pub enum Object {
     /// `call` rendezvous and granted [`Multiplicity::Once`] — holding it *is*
     /// the authority (no rights bit), and answering consumes it.
     Reply { caller: TaskId },
+    /// A notification — the general async kernel→user signal (v0.12). The cap
+    /// names *which* notification by [`NotificationId`]; [`Rights::SIGNAL`] /
+    /// [`Rights::WAIT`] decide which end the holder may use (producer / consumer),
+    /// the same split as [`Endpoint`](Self::Endpoint)'s `SEND`/`RECV`. The signal
+    /// payload is one userspace-defined bit mask the kernel only carries. The
+    /// object + semantics live in [`crate::notify`].
+    Notification { id: NotificationId },
 }
 
 /// An unforgeable `{ object, rights }` pair.
@@ -937,6 +945,25 @@ mod tests {
                 .rights
                 .contains(Rights::EMIT)
         );
+    }
+
+    #[test]
+    fn a_notification_cap_is_held_and_resolved() {
+        // The v0.12 notification object: named by a NotificationId, gated by the
+        // SIGNAL/WAIT rights. Resolving returns the same object distinct from an
+        // endpoint sharing the raw id (the variant, not the number, is identity).
+        let mut table = CapTable::new();
+        let id = crate::notify::NotificationId(3);
+        let handle = table.insert(Capability {
+            object: Object::Notification { id },
+            rights: Rights::SIGNAL | Rights::WAIT,
+        });
+
+        let cap = table.resolve(handle).unwrap();
+        assert_eq!(cap.object, Object::Notification { id });
+        assert!(cap.rights.contains(Rights::SIGNAL));
+        assert!(cap.rights.contains(Rights::WAIT));
+        assert_ne!(cap.object, Object::Endpoint { id: EndpointId(3), badge: 0 });
     }
 
     // --- v0.9b: single-use (`Once`) capabilities ---

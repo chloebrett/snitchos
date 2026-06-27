@@ -27,6 +27,13 @@
 
 use crate::sched::TaskId;
 
+/// Names a [`Notification`] within the kernel's live table — the value a
+/// [`crate::cap::Object::Notification`] capability carries. An opaque `u32`,
+/// like [`crate::ipc::EndpointId`]; the kernel allocates it on
+/// `NotifyCreate` and never interprets it beyond table lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NotificationId(pub u32);
+
 /// What a [`Notification::signal`] caller must do next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalStep {
