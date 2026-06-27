@@ -133,6 +133,13 @@ first consumer of "async kernel→user signal," independent of devices.
 
 ## Phase 2 — the shell program (`user/shell`)
 
+> **The shell's _surface_ — its grammar, the `hold`/`view`/`watch` reframing of
+> `ls`/`cat`/`ps`, the powerbox/observe identity, and the ANSI-escape TUI plan
+> (host-testable rendering lib; Tier 0→2; the shell as a Stitch program with Rust
+> natives) — is designed in
+> [docs/shell-surface-and-tui-design.md](../docs/shell-surface-and-tui-design.md).**
+> This section is the _mechanism_ (the spawn/delegate/wait loop).
+
 A userspace process init spawns, holding: its **session File/dir caps** (its
 "world", granted by init), a **console-input** path (scaffold or cap, see below),
 and the ability to `Spawn`. Loop:

@@ -1,5 +1,11 @@
 # 🔔 Notification design
 
+> **Status: SHIPPED (v0.12).** Built as designed (Option A). Implementation notes,
+> what-shipped-vs-planned, and the verification record live in
+> [plans/v0.12-notifications.md](../plans/v0.12-notifications.md). A couple of
+> details settled differently in the build (syscall numbers 21/22/23 not 19/21;
+> frames emit per-signal rather than only on empty→nonempty) — flagged inline below.
+
 *The async kernel→user signal, stripped to the bone. Mechanism in the kernel, meaning in userspace. Capability-gated. Every signal traced.*
 
 Scoped for **v0.12**. Child-exit is the first consumer (a parent `Wait`ing on a child); the reason it earns its own object — rather than staying the bespoke reap path it is today — is that **device interrupts reuse the exact same path**: "wake userspace when something happened" reaps a zombie now and delivers a keystroke later. Build it once, generically, where the kernel never learns what the something *means*.
@@ -80,13 +86,13 @@ Creation: a `NotifyCreate` syscall mints a fresh `Notification { id }` cap with 
 
 # Syscall surface
 
-Three new numbers appended past `Wait = 18` (next free are 19–21). Syscall numbers are **not frozen** — kernel and all userspace compile from one build (the user ELFs embed into the kernel image), so appending is free; only the postcard *frame* format is frozen. (Established in post 33 when `Invoke` was renumbered out.)
+Three new numbers appended at the end of `abi::Syscall`. Syscall numbers are **not frozen** — kernel and all userspace compile from one build (the user ELFs embed into the kernel image), so appending is free; only the postcard *frame* format is frozen. (Established in post 33 when `Invoke` was renumbered out.) *As built they are 21/22/23 — `ConsoleWrite = 19` / `ClockNow = 20` landed between this design and the implementation, so the three appended past `ClockNow`.*
 
 | `a7` | name | args | returns | rights |
 |---|---|---|---|---|
-| 19 | `NotifyCreate` | — | `a0` = handle to a fresh `SIGNAL\|WAIT` cap | (ambient: making your own notification) |
-| 20 | `Signal` | `a0` = handle, `a1` = bit mask | `a0` = 0 / refused | `SIGNAL` |
-| 21 | `WaitNotify` | `a0` = handle | `a0` = bits that were pending (read-and-cleared) | `WAIT` |
+| 21 | `NotifyCreate` | — | `a0` = handle to a fresh `SIGNAL\|WAIT` cap | (ambient: making your own notification) |
+| 22 | `Signal` | `a0` = handle, `a1` = bit mask | `a0` = 0 / refused | `SIGNAL` |
+| 23 | `WaitNotify` | `a0` = handle | `a0` = bits that were pending (read-and-cleared) | `WAIT` |
 
 - `Signal` resolves the cap, checks `SIGNAL`, OR-s the mask, wakes any parked waiter, returns. Never blocks.
 - `WaitNotify` resolves the cap, checks `WAIT`; nonzero pending → return-and-clear; else `block_current()`, and on wake return the (now-cleared) bits.
@@ -129,7 +135,7 @@ Two new frames (appended — never reorder):
 
 In Tempo these let you *see the edge*: task X signals at t₀, task Y was parked, Y wakes at t₁ carrying the same notification id — a dependency arrow that isn't a call stack. For the device case it's the headline: an IRQ frame, then the driver task waking on the bound notification, then the driver's handling span — *"watch an interrupt become a userspace wake."* The snitch narrates the one control-transfer that's normally invisible.
 
-(Frame budget note: `NotifySignal` on a hot IRQ source could flood the wire. The mitigation is the same coalescing the object already does — emit on the *signal that actually transitions empty→nonempty* and on each wake, not on every redundant OR into an already-set bit. Decide at implementation; flag if a high-rate source makes it matter.)
+(Frame budget note: `NotifySignal` on a hot IRQ source could flood the wire. The mitigation is the same coalescing the object already does — emit on the *signal that actually transitions empty→nonempty* and on each wake, not on every redundant OR into an already-set bit. **As built, v0.12 emits per `Signal` syscall** — simpler, and correct for the single low-rate consumer that exists; the empty→nonempty optimization waits for a high-rate IRQ source to make it matter. The rationale is in the `NotifySignal` doc comment.)
 
 ---
 
