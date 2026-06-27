@@ -231,6 +231,7 @@ catalog! {
     wfi "userspace-custom-metric"         scenarios::userspace_custom_metric        [userspace]      {"probe"};
     wfi "span-name-not-poisonable"        scenarios::span_name_not_poisonable       [userspace]      {"probe"};
     wfi "stitch-telemetry-on-the-wire"    scenarios::stitch_telemetry_on_the_wire   [userspace, stitch] {"stitch-repl"};
+    wfi "stitch-fs-loads-and-runs"        scenarios::stitch_fs_loads_and_runs       [userspace, stitch, fs] {"stitch-fs"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back
@@ -262,6 +263,7 @@ catalog! {
     cpu "spawn-transfer-links-to-parent"  scenarios::spawn_transfer_links_to_parent [userspace]  {"spawn-demo"};
     cpu "spawn-reclaims-memory"           scenarios::spawn_reclaims_memory          [userspace]  {"spawn-reap"};
     cpu "wait-any-reaps-exiting-child"    scenarios::wait_any_reaps_the_exiting_child [userspace] {"wait-any"};
+    cpu "init-supervises-a-child"         scenarios::init_supervises_a_child        [userspace]  {"init"};
     cpu "notify-signal-wakes-waiter"      scenarios::notify_signal_wakes_waiter     [userspace]  {"notify-smoke"};
     cpu "priorities-ordered-but-fair"     scenarios::priorities_ordered_but_fair    [userspace]  {"priorities"};
 }

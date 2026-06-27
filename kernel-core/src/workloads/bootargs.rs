@@ -106,6 +106,10 @@ pub enum WorkloadKind {
     /// boots a self-test (`1 + 2`), then loops `ConsoleRead` → evaluate →
     /// `ConsoleWrite`. First on-target run of the ported `no_std` interpreter.
     StitchRepl,
+    /// The Stitch REPL with a filesystem: a seeded FS server plus the REPL
+    /// holding the FS endpoint cap, so `:load <name>` reads a baked-in `.st`
+    /// file off the ramfs and runs it.
+    StitchFs,
     /// v0.11 spawn-with-caps demo: a `spawner` parent that `Spawn`s a `spawnee`
     /// child at runtime, delegating its span cap. Proves the `Spawn` syscall
     /// carries delegated authority into a freshly-created process. See
@@ -119,6 +123,10 @@ pub enum WorkloadKind {
     /// `spinner` + an exiting `spawnee`, then `WaitAny`s for whichever exits.
     /// Proves a supervising parent reaps any child without naming it.
     WaitAny,
+    /// v0.13 the supervising root: an `init` process that `Spawn`s a child
+    /// (delegating its span cap) and reaps it via `WaitAny` — the root of the
+    /// capability delegation graph. The first userspace process's eventual shape.
+    Init,
     /// v0.8b priority demo: a `High`-priority and a `Low`-priority cooperative
     /// worker share one hart. The High worker runs far more often (priority
     /// respected), but the Low worker still makes progress (aging prevents
@@ -238,11 +246,13 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "syscall-hog" => Some(WorkloadKind::SyscallHog),
             "console-echo" => Some(WorkloadKind::ConsoleEcho),
             "stitch-repl" => Some(WorkloadKind::StitchRepl),
+            "stitch-fs" => Some(WorkloadKind::StitchFs),
             "probe" => Some(WorkloadKind::Probe),
             "stack-canary" => Some(WorkloadKind::StackCanary),
             "spawn-demo" => Some(WorkloadKind::SpawnDemo),
             "spawn-reap" => Some(WorkloadKind::SpawnReap),
             "wait-any" => Some(WorkloadKind::WaitAny),
+            "init" => Some(WorkloadKind::Init),
             "priorities" => Some(WorkloadKind::Priorities),
             "block-wake" => Some(WorkloadKind::BlockWake),
             "ipc" => Some(WorkloadKind::Ipc),
@@ -379,6 +389,11 @@ mod tests {
     #[test]
     fn selects_stitch_repl() {
         assert_eq!(select("workload=stitch-repl"), Some(WorkloadKind::StitchRepl));
+    }
+
+    #[test]
+    fn selects_stitch_fs() {
+        assert_eq!(select("workload=stitch-fs"), Some(WorkloadKind::StitchFs));
     }
 
     #[test]

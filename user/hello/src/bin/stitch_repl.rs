@@ -21,10 +21,55 @@ extern crate alloc;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
+use alloc::vec::Vec;
 
-use snitchos_user::{Tracer, clock_now, console_read, console_write, entry, tracer, yield_now};
+use fs_proto::{FileRights, Op, Request, Response, UserBuf};
+use snitchos_user::{
+    Endpoint, Tracer, clock_now, console_read, console_write, endpoint, entry, tracer, yield_now,
+};
 use stitch::runner::Repl;
 use stitch::telemetry::RuntimeTelemetry;
+
+/// Read a whole file off the FS endpoint (the `stitch-fs` workload's seeded
+/// server): attach for the root cap, `Lookup` the name (READ), then `Read` it in
+/// ≤256-byte chunks (the server's per-copy cap) into a `String`. `None` if there
+/// is no fs endpoint, the file doesn't exist, or the bytes aren't UTF-8.
+fn read_file(name: &str) -> Option<String> {
+    let (_r, root_cap) = endpoint().call([0, 0, 0, 0]).ok()?;
+    let root = Endpoint::from_raw_handle(root_cap?);
+
+    let nb = name.as_bytes();
+    let lookup = Request::Lookup {
+        name: UserBuf { ptr: nb.as_ptr() as u64, len: nb.len() as u64 },
+        rights: FileRights::READ,
+    };
+    let (_l, file_cap) = root.call(lookup.encode()).ok()?;
+    let file = Endpoint::from_raw_handle(file_cap?);
+
+    let mut bytes = Vec::new();
+    let mut offset = 0u64;
+    let mut chunk = [0u8; 256];
+    loop {
+        let read = Request::Read {
+            offset,
+            dst: UserBuf { ptr: chunk.as_mut_ptr() as u64, len: chunk.len() as u64 },
+        };
+        let (words, _) = file.call(read.encode()).ok()?;
+        let n = match Response::decode(Op::Read, words) {
+            Ok(Response::Count(n)) => n as usize,
+            _ => break,
+        };
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+        offset += n as u64;
+        if n < chunk.len() {
+            break;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
 
 const PROMPT: &[u8] = b"stitch> ";
 
@@ -90,7 +135,16 @@ fn main() {
             match byte {
                 b'\r' | b'\n' => {
                     console_write(b"\n");
-                    if !line.trim().is_empty() {
+                    let trimmed = line.trim();
+                    if let Some(name) = trimmed.strip_prefix(":load ") {
+                        // Read the file off the filesystem and register its defs.
+                        let name = name.trim();
+                        let msg = match read_file(name) {
+                            Some(src) => repl.load_source(&src),
+                            None => format!("load error: cannot read `{name}` from fs\n"),
+                        };
+                        console_write(msg.as_bytes());
+                    } else if !trimmed.is_empty() {
                         let (out, dt) = timed(&mut repl, tr, &line);
                         console_write(out.as_bytes());
                         let timing = format!("  ({dt} ticks, ~{} ms)\n", dt / TICKS_PER_MS);

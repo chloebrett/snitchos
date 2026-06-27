@@ -2503,6 +2503,44 @@ pub fn console_echo_round_trips(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// `workload=stitch-fs`: a Stitch program is loaded *off the filesystem* and run.
+/// The seeded FS server holds `primes.st` (baked from the build-time fs-image);
+/// the REPL `:load`s it over its FS endpoint cap, then `primes(10)` runs it — the
+/// loaded program's `primes.compute` span and `primes.count`/`primes.largest`
+/// gauges cross the wire. End-to-end: fs-image seed → cap-mediated fs read →
+/// interpret → telemetry, all on the metal.
+pub fn stitch_fs_loads_and_runs(h: &mut View) -> Result<(), String> {
+    // The boot self-test span confirms the REPL is up and its telemetry flows;
+    // by now it's polling the console, so injected input won't be dropped.
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+
+    h.send_input(b":load primes.st\nprimes(10)\n")
+        .map_err(|e| format!("inject REPL input: {e}"))?;
+
+    h.wait_for(SEC * 30, is_span_start_named("primes.compute")).ok_or(
+        "no 'primes.compute' span within 30s — :load (fs read) or the eval of the loaded program failed",
+    )?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("primes.count") && *value == 10
+        }
+        _ => false,
+    })
+    .ok_or("no 'primes.count'=10 metric — the loaded program didn't compute the first 10 primes")?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("primes.largest") && *value == 29
+        }
+        _ => false,
+    })
+    .ok_or("no 'primes.largest'=29 metric — the 10th prime should be 29")?;
+
+    Ok(())
+}
+
 /// v0.11 spawn-with-caps (`workload=spawn-demo`): a parent `Spawn`s a child,
 /// delegating its `SpanSink` cap, and the child *uses* that delegated cap. Proves
 /// the whole path: `Spawn` creates a process holding exactly the delegated caps,
@@ -2629,6 +2667,49 @@ pub fn wait_any_reaps_the_exiting_child(h: &mut View) -> Result<(), String> {
         _ => false,
     })
     .ok_or("supervisor.any_child != the spawnee's task id — WaitAny returned the wrong child")?;
+
+    Ok(())
+}
+
+/// v0.13 the supervising root — `workload=init` boots an `init` process that
+/// `Spawn`s a child (delegating its span cap) and reaps it via `WaitAny`. Proves
+/// `init` can be the delegation-graph root: it spawns with delegated authority,
+/// the child runs, and `init` reaps its exit — all from one userspace process
+/// holding only its bootstrap caps.
+pub fn init_supervises_a_child(h: &mut View) -> Result<(), String> {
+    // `init` spawned the child, which registers as a task — capture its id.
+    let tr = h
+        .wait_for(SEC * 20, is_thread_register_named("spawnee"))
+        .ok_or("no ThreadRegister for 'spawnee' — init didn't spawn a child")?;
+    let child_id = match tr {
+        OwnedFrame::ThreadRegister { id, .. } => id,
+        _ => unreachable!("matched a ThreadRegister above"),
+    };
+
+    // The child used init's *delegated* span cap (handle 2) — proof the delegation
+    // arrived; if it hadn't, this span would be refused and never appear.
+    h.wait_for(SEC * 20, is_span_start_named("spawnee.via_delegated"))
+        .ok_or("no 'spawnee.via_delegated' span — init's cap delegation didn't reach the child")?;
+
+    // `init` reaped the child via `wait_any` (it never named it), collecting the
+    // exit status (42) and the child's id.
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.init.reaped_status")
+                && *value == 42
+        }
+        _ => false,
+    })
+    .ok_or("init.reaped_status != 42 — init didn't reap its child via WaitAny")?;
+
+    h.wait_for(SEC * 20, move |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.init.reaped_child")
+                && *value == i64::from(child_id)
+        }
+        _ => false,
+    })
+    .ok_or("init.reaped_child != the spawned child's id — init reaped the wrong child")?;
 
     Ok(())
 }

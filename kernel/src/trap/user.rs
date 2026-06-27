@@ -86,6 +86,10 @@ pub static SUPERVISOR_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SUPERVISOR_ELF"
 /// sibling so `WaitAny` deterministically returns the *other* child.
 pub static SPINNER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPINNER_ELF"));
 
+/// The `workload=init` supervising root: spawns a child (delegating its span cap)
+/// and reaps it via `WaitAny` — the delegation-graph root (v0.13).
+pub static INIT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_INIT_ELF"));
+
 /// The `workload=spawn-reap` parent: spawns + `Wait`s a memory-hungry `memhog`
 /// child 30 times. Drives the reclaim integration test — leaks (and OOMs)
 /// without per-process teardown on Exit.
@@ -128,6 +132,7 @@ pub static BADGE_HANDOUT_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE
 /// that mints a root File cap on connect and serves the filesystem, and an
 /// `fs-client` (`SEND`) that attaches and issues requests.
 pub static FS_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_ELF"));
+pub static FS_SERVER_SEEDED_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_SEEDED_ELF"));
 pub static FS_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_CLIENT_ELF"));
 
 /// The counter a U-mode page fault bumps — the isolation firewall doing its
@@ -267,6 +272,11 @@ pub static CONSOLE_ECHO: ProgramSpec = ProgramSpec { elf: CONSOLE_ECHO_ELF, laun
 /// `ConsoleRead`/`ConsoleWrite` need no caps.
 pub static STITCH_REPL: ProgramSpec = ProgramSpec { elf: STITCH_REPL_ELF, launch: Launch::Plain };
 
+/// `workload=stitch-fs`: the same REPL ELF, but IPC-launched with a `SEND` cap
+/// on the FS endpoint (delivered at `a2`) so it can read files off the
+/// filesystem. The plain `stitch-repl` workload uses [`STITCH_REPL`] (no fs).
+pub static STITCH_REPL_IPC: ProgramSpec = ipc_user(STITCH_REPL_ELF, Rights::SEND.bits());
+
 /// `workload=probe`: the userspace-defined-metrics demo. Ambient launch — it
 /// registers + emits through its bootstrap `TelemetrySink` cap, which it
 /// receives at startup like every other program (no endpoint).
@@ -279,6 +289,10 @@ pub static SPAWNER: ProgramSpec = ProgramSpec { elf: SPAWNER_ELF, launch: Launch
 /// `workload=wait-any`: the supervising parent (ambient — `Spawn`/`WaitAny` need
 /// no cap; it delegates its span cap to the exiting child).
 pub static SUPERVISOR: ProgramSpec = ProgramSpec { elf: SUPERVISOR_ELF, launch: Launch::Plain };
+
+/// `workload=init`: the supervising root — spawns + `WaitAny`-reaps a child,
+/// delegating its span cap downward. Holds only its bootstrap caps (Launch::Plain).
+pub static INIT: ProgramSpec = ProgramSpec { elf: INIT_ELF, launch: Launch::Plain };
 
 /// `workload=spawn-reap`: the reclaim-test parent (ambient — `Spawn`/`Wait` need
 /// no cap; the `memhog` children it spawns inherit no delegated authority).
@@ -329,6 +343,12 @@ pub static FS_SERVER: ProgramSpec =
 
 /// `workload=fs`: the FS client (`SEND`), default user telemetry.
 pub static FS_CLIENT: ProgramSpec = ipc_user(FS_CLIENT_ELF, Rights::SEND.bits());
+
+/// `workload=stitch-fs`: the FS server seeded from the build-time fs-image
+/// (`RECV | MINT`). Same serve loop as [`FS_SERVER`] but its `RamFs` starts
+/// pre-populated, so the Stitch REPL can `:load` a file that already exists.
+pub static FS_SERVER_SEEDED: ProgramSpec =
+    ipc_user(FS_SERVER_SEEDED_ELF, Rights::RECV.bits() | Rights::MINT.bits());
 
 /// The single entry function for every userspace program. The scheduler has
 /// switched us in and our `arg` word holds our [`ProgramSpec`] address (set by
@@ -511,6 +531,16 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "stitch_repl", program: &STITCH_REPL, priority: Priority::Normal }],
     }),
+    // Stitch REPL with a filesystem: the seeded FS server plus the REPL holding
+    // the FS endpoint cap (`SEND`), so `:load <name>` reads a baked-in `.st`
+    // file off the ramfs and runs it — telemetry crosses the wire as usual.
+    (WorkloadKind::StitchFs, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "fs_server", program: &FS_SERVER_SEEDED, priority: Priority::Normal },
+            ProgramSpawn { name: "stitch_repl", program: &STITCH_REPL_IPC, priority: Priority::Normal },
+        ],
+    }),
     // Userspace-defined metrics: a single probe that names + emits its own metric.
     (WorkloadKind::Probe, UserLayout {
         needs_endpoint: false,
@@ -535,6 +565,12 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::WaitAny, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "supervisor", program: &SUPERVISOR, priority: Priority::Normal }],
+    }),
+    // v0.13 the supervising root: `init` spawns + `WaitAny`-reaps a child. Only
+    // `init` is in the layout; the child comes from the SPAWNABLE registry.
+    (WorkloadKind::Init, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "init", program: &INIT, priority: Priority::Normal }],
     }),
     // v0.12 notification smoke: the `notify-waiter` parent boots and `Spawn`s the
     // `notify-signaller` child (SPAWNABLE id 2) at runtime, delegating the

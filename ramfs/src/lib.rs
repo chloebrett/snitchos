@@ -40,6 +40,23 @@ impl RamFs {
         Self::default()
     }
 
+    /// A filesystem pre-populated with `files` (name → bytes) in the root — the
+    /// landing point for the build-time fs-image seed. Each entry is created and
+    /// written through the ordinary trait ops.
+    #[must_use]
+    pub fn seeded(files: &[(&str, &[u8])]) -> Self {
+        let mut fs = Self::new();
+        let root = fs.root();
+        for (name, bytes) in files {
+            let ino = fs
+                .create(root, name, NodeKind::File)
+                .expect("seed: create on a fresh ramfs root cannot fail");
+            fs.write(ino, 0, bytes)
+                .expect("seed: write to a just-created file cannot fail");
+        }
+        fs
+    }
+
     fn node(&self, ino: InodeId) -> Result<&Node, FsError> {
         self.nodes
             .get(ino.as_u32() as usize)
@@ -142,6 +159,18 @@ impl Filesystem for RamFs {
 mod tests {
     use super::*;
     use fs_core::{Filesystem, NodeKind};
+
+    #[test]
+    fn seeded_prepopulates_files_readable_from_the_root() {
+        let fs = RamFs::seeded(&[("primes.st", b"isPrime"), ("notes.txt", b"hello")]);
+        let root = fs.root();
+
+        let ino = fs.lookup(root, "primes.st").unwrap();
+        let mut buf = [0u8; 7];
+        assert_eq!(fs.read(ino, 0, &mut buf).unwrap(), 7);
+        assert_eq!(&buf, b"isPrime");
+        assert_eq!(fs.readdir(root).unwrap().len(), 2);
+    }
 
     #[test]
     fn fresh_fs_root_is_an_empty_directory() {
