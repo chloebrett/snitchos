@@ -40,7 +40,8 @@ fn run_file(path: &str) -> ExitCode {
     ExitCode::from(result.exit_code as u8)
 }
 
-/// A line-at-a-time REPL: definitions accumulate, expressions are evaluated.
+/// A line-at-a-time REPL: definitions accumulate, expressions are evaluated, and
+/// `:load <path>` reads a `.st` file from disk and registers its definitions.
 fn repl() -> ExitCode {
     let mut repl = Repl::new();
     let stdin = io::stdin();
@@ -48,10 +49,22 @@ fn repl() -> ExitCode {
     let _ = io::stdout().flush();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
-        print!("{}", repl.eval_line(&line));
+        match line.trim().strip_prefix(":load ") {
+            Some(path) => print!("{}", load_file(&mut repl, path.trim())),
+            None => print!("{}", repl.eval_line(&line)),
+        }
         print!("stitch> ");
         let _ = io::stdout().flush();
     }
     println!();
     ExitCode::SUCCESS
+}
+
+/// Read a `.st` file from disk and register its definitions into the REPL
+/// session. The host filesystem here stands in for the on-target fs endpoint.
+fn load_file(repl: &mut Repl, path: &str) -> String {
+    match std::fs::read_to_string(path) {
+        Ok(src) => repl.load_source(&src),
+        Err(error) => format!("load error: cannot read `{path}`: {error}\n"),
+    }
 }

@@ -163,6 +163,25 @@ impl Repl {
         Repl { prelude: prelude_items(), defs: Vec::new(), env: None, telemetry }
     }
 
+    /// Load a whole `.st` source: parse it and accumulate its declarations into
+    /// the session (invalidating the cached env), so its functions and types are
+    /// callable at the prompt afterward. The fetching — disk on the host, the
+    /// filesystem endpoint on the metal — is the caller's job; this is the
+    /// backend-agnostic core. Returns a one-line summary, or a `load error:`
+    /// message that leaves the session untouched.
+    pub fn load_source(&mut self, src: &str) -> String {
+        match parse_program(src) {
+            Ok(items) if items.is_empty() => "loaded nothing (empty source)\n".to_string(),
+            Ok(items) => {
+                let count = items.len();
+                self.defs.extend(items);
+                self.env = None;
+                format!("loaded {count} definition(s)\n")
+            }
+            Err(error) => format!("load error: {}\n", error.message),
+        }
+    }
+
     /// Evaluate one line. A line that parses as declarations is accumulated
     /// (invalidating the cached env) and produces no output; otherwise it's run as
     /// an expression against the cached env, and its telemetry + result (or error)
@@ -234,6 +253,24 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::runner::{discover_modules, run_module_files, run_program_source};
+
+    #[test]
+    fn loading_source_registers_definitions_for_later_calls() {
+        let mut repl = super::Repl::new();
+        let summary = repl.load_source("double(x) = x * 2\ntriple(x) = x * 3");
+        assert!(summary.contains('2'), "summary should report 2 defs: {summary}");
+        assert_eq!(repl.eval_line("double(21)").trim(), "=> 42");
+        assert_eq!(repl.eval_line("triple(14)").trim(), "=> 42");
+    }
+
+    #[test]
+    fn loading_invalid_source_reports_an_error_and_keeps_the_session() {
+        let mut repl = super::Repl::new();
+        let summary = repl.load_source("prod (((");
+        assert!(summary.to_lowercase().contains("error"), "expected an error: {summary}");
+        // The bad load must not poison the session — the REPL stays usable.
+        assert_eq!(repl.eval_line("1 + 1").trim(), "=> 2");
+    }
 
     /// A fake filesystem: fetch a module's source by name from an in-memory map
     /// the closure owns (so it borrows nothing).
