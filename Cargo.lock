@@ -450,6 +450,7 @@ version = "0.0.1"
 dependencies = [
  "snitchos-std",
  "snitchos-user",
+ "stitch",
 ]
 
 [[package]]

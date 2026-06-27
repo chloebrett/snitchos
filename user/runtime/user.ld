@@ -37,7 +37,10 @@ SECTIONS {
      * PT_LOAD — the stack would be unmapped and sp would fault. */
     . = ALIGN(16);
     __stack_bottom = .;
-    . += 0x4000;             /* 16 KiB user stack */
+    . += 0x80000;            /* 512 KiB user stack — the Stitch tree-walk
+                              * interpreter is deeply recursive (recursive-descent
+                              * parse + recursive eval over the whole prelude); 16
+                              * KiB silently overflowed it. */
     __stack_top = .;
     __bss_end = .;
   } > ram

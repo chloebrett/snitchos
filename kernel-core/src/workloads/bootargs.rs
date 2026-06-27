@@ -102,6 +102,10 @@ pub enum WorkloadKind {
     /// `ConsoleRead` → userspace) end to end. See
     /// `plans/console-tier0-polled-rx.md`.
     ConsoleEcho,
+    /// The Stitch tree-walk interpreter running as a userspace REPL on the metal:
+    /// boots a self-test (`1 + 2`), then loops `ConsoleRead` → evaluate →
+    /// `ConsoleWrite`. First on-target run of the ported `no_std` interpreter.
+    StitchRepl,
     /// v0.11 spawn-with-caps demo: a `spawner` parent that `Spawn`s a `spawnee`
     /// child at runtime, delegating its span cap. Proves the `Spawn` syscall
     /// carries delegated authority into a freshly-created process. See
@@ -223,6 +227,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "user-hog" => Some(WorkloadKind::UserHog),
             "syscall-hog" => Some(WorkloadKind::SyscallHog),
             "console-echo" => Some(WorkloadKind::ConsoleEcho),
+            "stitch-repl" => Some(WorkloadKind::StitchRepl),
             "probe" => Some(WorkloadKind::Probe),
             "stack-canary" => Some(WorkloadKind::StackCanary),
             "spawn-demo" => Some(WorkloadKind::SpawnDemo),
@@ -352,6 +357,11 @@ mod tests {
     #[test]
     fn selects_console_echo() {
         assert_eq!(select("workload=console-echo"), Some(WorkloadKind::ConsoleEcho));
+    }
+
+    #[test]
+    fn selects_stitch_repl() {
+        assert_eq!(select("workload=stitch-repl"), Some(WorkloadKind::StitchRepl));
     }
 
     #[test]

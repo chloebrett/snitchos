@@ -13,6 +13,9 @@ publish = false
 # API all come from the shared `snitchos-user` runtime.
 [dependencies]
 snitchos-user = { path = "../runtime" }
+# The Stitch interpreter (no_std + alloc) — the `stitch_repl` bin runs it on the
+# metal. Only that bin links it; other bins don't reference it.
+stitch = { path = "../../stitch" }
 # The std-shaped facade — programs can use std-idiomatic APIs (e.g.
 # `snitchos_std::thread::yield_now`) where they're wired.
 snitchos-std = { path = "../std" }

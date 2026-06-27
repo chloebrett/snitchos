@@ -62,6 +62,7 @@ pub static SYSCALL_HOG_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SYSCALL_HOG_EL
 /// The `workload=console-echo` program: loops `ConsoleRead` → `DebugWrite`,
 /// echoing typed UART input — the Tier-0 polled-console-input demo.
 pub static CONSOLE_ECHO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_CONSOLE_ECHO_ELF"));
+pub static STITCH_REPL_ELF: &[u8] = include_bytes!(env!("SNITCHOS_STITCH_REPL_ELF"));
 
 /// The `workload=probe` program: registers its own metric (`snitchos.probe.custom`)
 /// through its bootstrap `TelemetrySink` cap and emits to it — the
@@ -245,6 +246,10 @@ pub static SYSCALL_HOG: ProgramSpec = ProgramSpec { elf: SYSCALL_HOG_ELF, launch
 /// `workload=console-echo`: the Tier-0 console echo loop (ambient — `ConsoleRead`
 /// and `DebugWrite` need no caps).
 pub static CONSOLE_ECHO: ProgramSpec = ProgramSpec { elf: CONSOLE_ECHO_ELF, launch: Launch::Plain };
+
+/// `workload=stitch-repl`: the Stitch interpreter as a userspace REPL. Ambient —
+/// `ConsoleRead`/`ConsoleWrite` need no caps.
+pub static STITCH_REPL: ProgramSpec = ProgramSpec { elf: STITCH_REPL_ELF, launch: Launch::Plain };
 
 /// `workload=probe`: the userspace-defined-metrics demo. Ambient launch — it
 /// registers + emits through its bootstrap `TelemetrySink` cap, which it
@@ -467,6 +472,12 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::ConsoleEcho, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "console_echo", program: &CONSOLE_ECHO, priority: Priority::Normal }],
+    }),
+    // The Stitch interpreter as a userspace REPL — first on-target run of the
+    // ported no_std tree-walker.
+    (WorkloadKind::StitchRepl, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "stitch_repl", program: &STITCH_REPL, priority: Priority::Normal }],
     }),
     // Userspace-defined metrics: a single probe that names + emits its own metric.
     (WorkloadKind::Probe, UserLayout {

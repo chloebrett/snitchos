@@ -364,6 +364,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::UserHog)
         | Some(WorkloadKind::SyscallHog)
         | Some(WorkloadKind::ConsoleEcho)
+        | Some(WorkloadKind::StitchRepl)
         | Some(WorkloadKind::Probe)
         | Some(WorkloadKind::StackCanary)
         | Some(WorkloadKind::SpawnDemo)
@@ -425,6 +426,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::UserHog
                     | WorkloadKind::SyscallHog
                     | WorkloadKind::ConsoleEcho
+                    | WorkloadKind::StitchRepl
                     | WorkloadKind::SpawnDemo
                     | WorkloadKind::SpawnReap
                     | WorkloadKind::UserspaceBadPtr

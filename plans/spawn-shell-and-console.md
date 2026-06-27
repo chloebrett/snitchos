@@ -293,7 +293,12 @@ What's left, in build order:
    kernel `print!` UART path (shell shares the one terminal with the kernel log,
    distinct from the `DebugWrite` telemetry channel); runtime `console_write`
    chunks to `DEBUG_WRITE_MAX` (the kernel refuses an over-long single write).
-   Builds for riscv, clippy clean. Live exercise comes with the REPL (next).
+   **Exercised live by `workload=stitch-repl`** (`user/hello/src/bin/stitch_repl.rs`):
+   the ported no_std Stitch interpreter runs as a userspace REPL, printing its
+   banner + self-test (`1 + 2 => 3`) + `stitch>` prompt out the UART via
+   `ConsoleWrite`, reading input via `ConsoleRead`. Both console primitives now
+   proven on the metal. (Gotcha found: the 16 KiB user stack silently overflowed
+   the recursive interpreter — bumped `user/runtime/user.ld` to 512 KiB.)
 2. **`init` (first-process bootstrap)** `[CP]` — a real first process that holds
    root caps, `Spawn`s the FS server, holds the FS endpoint cap, and `Spawn`s the
    shell granting it its **session caps** (the FS cap, console access). Generalizes
