@@ -170,6 +170,13 @@ pub enum Syscall {
     /// shell is the trusted session root and writes its own terminal directly;
     /// capability-mediated console output is the Tier-1 server story.
     ConsoleWrite = 19,
+    /// Read the monotonic clock — the kernel `time` CSR tick count (the same
+    /// source spans are timestamped from). No arguments; returns the current tick
+    /// count in `a0`. Ambient (reading a clock is not an authority). Ticks are at
+    /// the platform timebase (10 MHz on QEMU `virt` → 1 tick = 0.1 µs). Lets
+    /// userspace time its own work without a span round-trip; the stdlib
+    /// `Instant::now()` rides on it.
+    ClockNow = 20,
 }
 
 impl Syscall {
@@ -199,6 +206,7 @@ impl Syscall {
             17 => Some(Self::EmitMetric),
             18 => Some(Self::Wait),
             19 => Some(Self::ConsoleWrite),
+            20 => Some(Self::ClockNow),
             _ => None,
         }
     }
@@ -257,6 +265,7 @@ mod tests {
         assert_eq!(Syscall::EmitMetric as usize, 17);
         assert_eq!(Syscall::Wait as usize, 18);
         assert_eq!(Syscall::ConsoleWrite as usize, 19);
+        assert_eq!(Syscall::ClockNow as usize, 20);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Exit));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Yield));
@@ -278,6 +287,7 @@ mod tests {
         assert_eq!(Syscall::from_usize(17), Some(Syscall::EmitMetric));
         assert_eq!(Syscall::from_usize(18), Some(Syscall::Wait));
         assert_eq!(Syscall::from_usize(19), Some(Syscall::ConsoleWrite));
-        assert_eq!(Syscall::from_usize(20), None);
+        assert_eq!(Syscall::from_usize(20), Some(Syscall::ClockNow));
+        assert_eq!(Syscall::from_usize(21), None);
     }
 }

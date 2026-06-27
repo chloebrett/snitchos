@@ -9,6 +9,7 @@
 //! machinery (`TrapFrame` layout, timer, CSR setup) lives in [`crate::trap`].
 
 mod cap;
+mod clock;
 mod console;
 mod debug;
 mod ipc;
@@ -47,6 +48,7 @@ pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::CopyToCaller) => transfer::handle_copy_to_caller(frame),
         Some(Syscall::ConsoleRead) => console::handle_console_read(frame),
         Some(Syscall::ConsoleWrite) => console::handle_console_write(frame),
+        Some(Syscall::ClockNow) => clock::handle_clock_now(frame),
         Some(Syscall::Spawn) => process::handle_spawn(frame),
         Some(Syscall::Wait) => process::handle_wait(frame),
         Some(Syscall::RegisterMetric) => metric::handle_register_metric(frame),

@@ -112,6 +112,13 @@ impl Clock for SstcClock {
 /// in an IRQ is silly when we only ever have one impl).
 pub const CLOCK: SstcClock = SstcClock;
 
+/// The current monotonic clock tick count — the timestamp source spans use.
+/// Exposed for the `ClockNow` syscall (the `Clock` trait is already in scope here).
+#[must_use]
+pub fn now_ticks() -> u64 {
+    CLOCK.now()
+}
+
 /// Saved register state at trap entry. The assembly stores into these
 /// fields in this order; the Rust dispatcher reads them by name.
 ///

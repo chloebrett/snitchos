@@ -18,25 +18,47 @@
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::String;
 
-use snitchos_user::{console_read, console_write, entry, yield_now};
+use snitchos_user::{Tracer, clock_now, console_read, console_write, entry, tracer, yield_now};
 use stitch::runner::Repl;
 
 const PROMPT: &[u8] = b"stitch> ";
+
+/// Timebase is 10 MHz on QEMU `virt` → 10_000 ticks per millisecond.
+const TICKS_PER_MS: u64 = 10_000;
+
+/// Evaluate `src`, timing it with the monotonic clock and bracketing it in a
+/// real SnitchOS span, then print the result + how long the interpreter took.
+/// `label` distinguishes the env-build (first) eval from the cheap cached ones.
+fn bench(repl: &mut Repl, tr: Tracer, label: &str, src: &str) {
+    let (out, dt) = {
+        let _span = tr.span("stitch.eval");
+        let start = clock_now();
+        let out = repl.eval_line(src);
+        (out, clock_now() - start)
+    };
+    let line = format!(
+        "  [{label:>8}] {dt:>9} ticks (~{} ms)   {src}  {out}",
+        dt / TICKS_PER_MS
+    );
+    console_write(line.as_bytes());
+}
 
 #[entry]
 fn main() {
     // One env, built once (prelude registered a single time) and reused for every
     // line — no per-line prelude rebuild.
     let mut repl = Repl::new();
+    let tr = tracer();
 
     console_write(b"\nStitch on SnitchOS \xE2\x80\x94 the tree-walker runs on the metal.\n");
-    // Boot self-test: evaluate one line before any input, so booting alone proves
-    // the interpreter works end to end (parse -> eval -> ConsoleWrite).
-    console_write(b"  1 + 2  ");
-    console_write(repl.eval_line("1 + 2").as_bytes());
-    console_write(b"\n");
+    // Boot self-tests, timed: the FIRST eval also builds the env (registers the
+    // whole prelude once) so it's the expensive one; the rest reuse the cached env.
+    bench(&mut repl, tr, "buildenv", "1 + 2");
+    bench(&mut repl, tr, "cached", "3 * 4");
+    bench(&mut repl, tr, "pipeline", "1.. |> map($ * $) |> take(5) |> toList");
     console_write(PROMPT);
 
     let mut line = String::new();

@@ -339,6 +339,24 @@ pub fn console_write(bytes: &[u8]) -> usize {
     written
 }
 
+/// Read the monotonic clock — the kernel tick counter (the `ClockNow` syscall),
+/// at the platform timebase (10 MHz on QEMU `virt` → 1 tick = 0.1 µs). Lets a
+/// program time its own work; subtract two reads for an elapsed-tick duration.
+#[must_use]
+pub fn clock_now() -> u64 {
+    let ret: u64;
+    // SAFETY: `ecall`; `ClockNow` takes no arguments and returns the tick count
+    // in `a0`. No memory is touched.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::ClockNow as usize,
+            out("a0") ret,
+        );
+    }
+    ret
+}
+
 /// A capability to register + emit named metrics — an unforgeable handle the
 /// kernel checks against this process's table. Holding the integer is not
 /// authority. The sink itself emits nothing; it is the gate for
