@@ -119,6 +119,31 @@ impl Stack {
     pub fn top_addr(&self) -> u64 {
         (self as *const _ as u64) + STACK_SIZE as u64
     }
+
+    /// Fill the whole stack with the overflow-detection [`SENTINEL`] at creation
+    /// (guard-pages Tier A). The task overwrites it from the top down as it runs;
+    /// the untouched prefix is what [`canary_intact`] and [`high_water_bytes`]
+    /// read back.
+    ///
+    /// [`SENTINEL`]: kernel_core::stack::SENTINEL
+    /// [`canary_intact`]: Stack::canary_intact
+    /// [`high_water_bytes`]: Stack::high_water_bytes
+    fn fill_sentinel(&mut self) {
+        self.0.fill(kernel_core::stack::SENTINEL);
+    }
+
+    /// Whether the bottom canary is intact — `false` means the stack grew down
+    /// into its lowest bytes, i.e. overflowed. Cheap (one cache line); checked on
+    /// every context switch.
+    fn canary_intact(&self) -> bool {
+        kernel_core::stack::canary_intact(&self.0[..kernel_core::stack::CANARY_BYTES])
+    }
+
+    /// Bytes ever used by this stack (high-water). Scans the stack; called from
+    /// the heartbeat for the per-task gauge.
+    fn high_water_bytes(&self) -> usize {
+        kernel_core::stack::high_water_bytes(&self.0)
+    }
 }
 
 /// One kernel thread. The `context` field holds the saved
@@ -179,16 +204,20 @@ pub struct Task {
     /// skipped.
     pub cpu_time_metric: protocol::StringId,
     pub runs_metric: protocol::StringId,
+    /// Pre-registered id for the `snitchos.task.<name>.stack_high_water_bytes`
+    /// gauge (Tier-A overflow visibility). Sentinel `StringId(0)` under the
+    /// spawn-storm selection, like the other per-task metrics.
+    pub stack_high_water_metric: protocol::StringId,
     /// Saved register state while off-CPU. `UnsafeCell` because the
     /// asm needs `*mut` access while the `Task` is borrowed `&` from
     /// the scheduler's `Vec`. The mutex around the scheduler
     /// serialises any access to `Task`; the asm holds exclusive
     /// access through the `*mut` for the duration of the switch.
     pub context: UnsafeCell<TaskContext>,
-    /// Backing storage for the task's stack. `None` for task 0
-    /// which inherits the boot stack. Field is read by no one
-    /// directly; it's here for `Drop` to free the stack when the
-    /// task is reaped.
+    /// Backing storage for the task's stack. `None` for task 0 which inherits
+    /// the boot stack (and so has no canary). Read by the Tier-A overflow checks
+    /// (`canary_intact` on switch, `high_water_bytes` on the heartbeat); also kept
+    /// alive so `Drop` frees the stack when the task is reaped.
     _stack: Option<Box<Stack>>,
 }
 
@@ -211,20 +240,24 @@ impl Task {
         // heartbeat's per-task metric emit loop is also skipped under that
         // workload, so a sentinel StringId is fine. (`boot_workload::selected()`
         // is set in `kmain` before any task is created.)
-        let (cpu_time_metric, runs_metric) = if crate::boot_workload::selected()
-            == Some(kernel_core::bootargs::WorkloadKind::SpawnStorm)
-        {
-            (protocol::StringId(0), protocol::StringId(0))
-        } else {
-            (
-                crate::tracing::register_counter_owned(alloc::format!(
-                    "snitchos.task.{name}.cpu_time_ticks"
-                )),
-                crate::tracing::register_counter_owned(alloc::format!(
-                    "snitchos.task.{name}.runs_total"
-                )),
-            )
-        };
+        let (cpu_time_metric, runs_metric, stack_high_water_metric) =
+            if crate::boot_workload::selected()
+                == Some(kernel_core::bootargs::WorkloadKind::SpawnStorm)
+            {
+                (protocol::StringId(0), protocol::StringId(0), protocol::StringId(0))
+            } else {
+                (
+                    crate::tracing::register_counter_owned(alloc::format!(
+                        "snitchos.task.{name}.cpu_time_ticks"
+                    )),
+                    crate::tracing::register_counter_owned(alloc::format!(
+                        "snitchos.task.{name}.runs_total"
+                    )),
+                    crate::tracing::register_gauge_owned(alloc::format!(
+                        "snitchos.task.{name}.stack_high_water_bytes"
+                    )),
+                )
+            };
         Self {
             id,
             name,
@@ -238,6 +271,7 @@ impl Task {
             runs: AtomicU64::new(0),
             cpu_time_metric,
             runs_metric,
+            stack_high_water_metric,
             context: UnsafeCell::new(TaskContext::default()),
             _stack: None,
         }
@@ -367,8 +401,13 @@ pub fn stats() -> SchedStats {
 pub struct TaskSnapshot {
     pub cpu_time_metric: protocol::StringId,
     pub runs_metric: protocol::StringId,
+    pub stack_high_water_metric: protocol::StringId,
     pub cpu_time_ticks: u64,
     pub runs: u64,
+    /// Bytes the task's stack has ever used (Tier-A high-water). `0` for task 0
+    /// (no owned stack / canary). Scanned under the lock so the caller emits
+    /// outside it.
+    pub stack_high_water_bytes: usize,
 }
 
 pub fn task_snapshots() -> Vec<TaskSnapshot> {
@@ -380,8 +419,10 @@ pub fn task_snapshots() -> Vec<TaskSnapshot> {
         .map(|t| TaskSnapshot {
             cpu_time_metric: t.cpu_time_metric,
             runs_metric: t.runs_metric,
+            stack_high_water_metric: t.stack_high_water_metric,
             cpu_time_ticks: t.cpu_time_ticks.load(Ordering::Relaxed),
             runs: t.runs.load(Ordering::Relaxed),
+            stack_high_water_bytes: t._stack.as_ref().map_or(0, |s| s.high_water_bytes()),
         })
         .collect()
 }
@@ -581,7 +622,11 @@ pub fn spawn_on_with_arg(
     // syscall: trap_entry → … → spawn_on_with_arg).
     // SAFETY: `Stack` is `[u8; STACK_SIZE]`, for which all-zero bytes are a valid
     // value, so `new_zeroed().assume_init()` is sound.
-    let stack: Box<Stack> = unsafe { Box::<Stack>::new_zeroed().assume_init() };
+    let mut stack: Box<Stack> = unsafe { Box::<Stack>::new_zeroed().assume_init() };
+    // Tier-A overflow detection: fill with the sentinel so the canary + high-water
+    // checks have something to read back. Writes the *new* heap stack, not the
+    // caller's — no overflow risk on the spawn path.
+    stack.fill_sentinel();
     let sp = stack.top_addr();
 
     let mut task = Box::new(Task::new_bare(id, String::from(name), TaskState::Ready));
@@ -717,6 +762,19 @@ fn prepare_switch(
                 task.cpu_time_ticks.fetch_add(cpu_delta, Ordering::Relaxed);
                 if let Some(state) = disposition.next_state() {
                     task.state = state;
+                }
+                // Tier-A overflow detection: the outgoing task just finished using
+                // its stack. A clobbered bottom canary means it grew down into its
+                // lowest bytes — panic *naming the task* rather than letting the
+                // corruption surface later at an unrelated victim (task 0 inherits
+                // the boot stack and has no canary). See `kernel_core::stack`.
+                if let Some(stack) = &task._stack
+                    && !stack.canary_intact()
+                {
+                    panic!(
+                        "kernel stack overflow: task {} ({}) clobbered its stack canary",
+                        task.id.0, task.name
+                    );
                 }
             }
             if task.id == next_id {

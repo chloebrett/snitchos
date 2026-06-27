@@ -1,6 +1,11 @@
 # Kernel stack guard pages (fault-on-overflow)
 
-**Status:** Plan / not started (2026-06-21). Motivated by the v0.11 spawn-with-caps
+**Status:** **Tier A SHIPPED (2026-06-26)** — see below. **Tier B remains**, deferred
+to the v0.12 Exit/teardown reclaim milestone (shared stack-lifecycle machinery).
+The specific v0.11 bug is already prevention-fixed (heap-direct
+`Box::<Stack>::new_zeroed()` at `kernel/src/sched/mod.rs`), so Tier B is not urgent
+— Tier A is the cheap insurance; Tier B is the real fault-on-overflow fix.
+Motivated by the v0.11 spawn-with-caps
 stack overflow: `Box::new(Stack::new_zeroed())` built a 16 KiB stack temporary on
 the spawner's own 16 KiB kernel stack (deep userspace-`Spawn` syscall path),
 overflowing into adjacent heap/task memory. It manifested as *unrelated* crashes
@@ -22,6 +27,19 @@ An overflow should **fault at the overflowing store** (exact PC), not corrupt a
 neighbour. Plus cheap always-on detection so an overflow is named, not guessed.
 
 ## Options (cheapest → strongest)
+
+### Tier A — stack canary + high-water gauge ✅ SHIPPED
+
+> **Landed.** Pure checks in host-tested `kernel_core::stack` (`canary_intact`,
+> `high_water_bytes`, `SENTINEL`, `CANARY_BYTES`; 6 tests, mutants 8/8 caught).
+> Each `Box<Stack>` is sentinel-filled at spawn. `prepare_switch` checks the
+> outgoing task's bottom canary on **every switch** → panics *naming the task* on
+> breach (task 0 / boot stack has no canary). The heartbeat emits
+> `snitchos.task.<name>.stack_high_water_bytes` (a `NO_EMITTER` gauge) from a
+> bottom-up scan via `task_snapshots`. Itest `task-stack-high-water` asserts a
+> plausible value (0 < bytes < 16384); full suite **74/0** (no false-positive
+> panics — every task hits the per-switch check), 10/10 on `--repeat 10`; clippy
+> clean. Remaining gap: the boot stack (task 0) is unguarded — Tier B covers it.
 
 ### Tier A — stack canary + high-water gauge (cheap, ~afternoon)
 - Write a sentinel (e.g. `0xC0DE…`) in the bottom N bytes of each `Box<Stack>` at

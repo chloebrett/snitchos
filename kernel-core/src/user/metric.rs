@@ -11,8 +11,11 @@
 //! security fix from Post 31 — the "poisonable snitch" finding.
 //!
 //! The table is bounded by [`MetricTable::MAX_METRIC_NAMES`]: the capacity *is*
-//! the quota (Q4), mirroring `Process::MAX_SPAN_NAMES`, so a misbehaving
-//! program can't pin unbounded interned names.
+//! the quota (Q4), mirroring [`SpanNameTable`](super::span_name::SpanNameTable),
+//! so a misbehaving program can't pin unbounded interned names *per process*.
+//! Across process lifetimes the leaked names are **not** reclaimed today, and
+//! (no cross-process dedup) each spawn re-leaks — accepted for now, reclaim-on-exit
+//! deferred to the v0.12 teardown milestone. See `plans/span-and-metric-name-gc.md`.
 //!
 //! Pure data + bookkeeping: no `unsafe`, no MMIO, no CSRs. Host-tested here;
 //! the `kernel` side only decides *where the table lives* (the process struct)

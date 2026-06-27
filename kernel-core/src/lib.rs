@@ -19,6 +19,7 @@ pub mod clock;
 pub mod console;
 pub mod reap;
 pub mod sched;
+pub mod stack;
 pub mod trap;
 pub mod virtio;
 

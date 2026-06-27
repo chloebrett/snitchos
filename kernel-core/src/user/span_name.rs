@@ -13,7 +13,12 @@
 //! table — the span-name poisoning + disclosure hole.
 //!
 //! The table is bounded by [`MAX_SPAN_NAMES`](SpanNameTable::MAX_SPAN_NAMES): the
-//! capacity *is* the quota, bounding the permanent `Box::leak` of each new name.
+//! capacity *is* the quota, bounding the permanent `Box::leak` *per process*.
+//! Across process lifetimes the leak is **not** reclaimed today — and because
+//! per-process scoping removed cross-process name dedup, each spawn re-leaks its
+//! span names, so a long-running spawner (the v0.13 shell) grows it by
+//! O(spawns × names-per-program). Accepted for now (Option A); reclaim-on-exit is
+//! deferred to the v0.12 teardown milestone. See `plans/span-and-metric-name-gc.md`.
 //!
 //! Pure data + bookkeeping: no `unsafe`, no MMIO, no CSRs. Host-tested here; the
 //! `kernel` side leaks the name into `'static`, allocates the global `StringId`

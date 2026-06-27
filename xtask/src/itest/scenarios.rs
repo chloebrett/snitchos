@@ -1063,6 +1063,31 @@ pub fn sched_task_exits_cleanly(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Kernel-stack overflow detection, Tier A (default demo): each spawned task's
+/// stack is sentinel-filled and the heartbeat emits a
+/// `snitchos.task.<name>.stack_high_water_bytes` gauge from a bottom-up scan.
+/// Asserts the demo `task_a` reports a **plausible** high-water — strictly
+/// between 0 (it ran, so it used *some* stack) and the 16 KiB `STACK_SIZE` (it
+/// did not overflow). A `0`, a value ≥ 16384, or no gauge at all would mean the
+/// fill/scan wiring is wrong. (The canary→panic path can't be exercised without a
+/// deliberately-overflowing task; its logic is unit-tested in `kernel_core::stack`,
+/// and the whole suite staying green proves no false-positive panics.)
+pub fn task_stack_high_water_reported(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str)
+                == Some("snitchos.task.task_a.stack_high_water_bytes")
+                && *value > 0
+                && *value < 16384)
+    })
+    .ok_or(
+        "no plausible snitchos.task.task_a.stack_high_water_bytes (0 < bytes < 16384) within 30s — \
+         the Tier-A high-water gauge isn't emitted, or the value is implausible (a 0 fill/scan bug, \
+         or ≥16384 overflow)",
+    )?;
+    Ok(())
+}
+
 /// v0.9 block/wake smoke (`workload=block-wake`): a `blocker` kernel task
 /// stores its id, arms a flag, and calls `block_current` — leaving the CPU
 /// *off* the runqueue (not re-enqueued, unlike `yield_now`). A `waker` peer

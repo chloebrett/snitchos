@@ -287,6 +287,7 @@ fn emit_sched_metrics(m: &Metrics) {
         for snap in sched::task_snapshots() {
             tracing::emit_metric(snap.cpu_time_metric, snap.cpu_time_ticks as i64);
             tracing::emit_metric(snap.runs_metric, snap.runs as i64);
+            tracing::emit_metric(snap.stack_high_water_metric, snap.stack_high_water_bytes as i64);
         }
     }
 }
