@@ -1,0 +1,45 @@
+# Post 35 — The first process gives it all away
+
+- for thirteen milestones the kernel has been the source of all authority. every process was born from `kmain` with caps the kernel handed it; the one IPC endpoint was a kernel static both ends were wired to at boot; the very first thing that ran in userspace was whatever the kernel decided to spawn. the kernel wasn't just the trusted root — it was the *only* root, and it knew everything: which programs exist, which endpoint the filesystem talks over, who gets what. this is the post where that stops. the OS's first act is now a **userspace** process — `init` — that holds almost nothing, **builds its own world by giving slices of it away**, and (the part that's actually SnitchOS) lets you *watch* every grant.
+
+- the milestone is small to describe and was large to get right: a process that creates its own endpoint, spawns the filesystem server holding exactly `receive`+`mint`, spawns a client holding exactly `send`, supervises both, and reaps whichever dies — all from a program the kernel handed nothing but a telemetry sink. but the interesting work wasn't `init` itself. it was discovering that the delegation graph the whole project is *about* didn't actually exist on the wire yet — and making it exist.
+
+## the root that owns nothing
+
+- `init` boots holding two capabilities: a telemetry sink and a span sink. that's it. no filesystem, no endpoint, no authority over anything but its own ability to be observed. everything else it *makes*. it calls a new syscall, `EndpointCreate`, and gets back an IPC endpoint it owns — and the important thing is what the kernel now *doesn't* know. before, the FS endpoint was a kernel global; the kernel knew "there is a filesystem and it lives here." now the kernel allocates an anonymous endpoint, hands `init` a capability to it, and forgets. the topology — who talks to whom — lives entirely in userspace. the kernel went from knowing the wiring to not knowing there is wiring. same move this project keeps making: the kernel knowing *less*.
+
+- then `init` hands the endpoint down, attenuated per child. the filesystem server gets a cap with `receive` and `mint` — it may answer requests and hand out file capabilities. the client gets a `send` cap minted from the same endpoint — it may only call. two children, one endpoint, **different rights, neither holding more than its job needs**, and `init` keeping only what it needs to supervise. this is least authority not as a policy enforced at every access, but as a *shape*: a child is simply born unable to do more than it was given. there's no sandbox, no permission check on the hot path. there's just a program that didn't hand out power it didn't have to.
+
+## the tree that wasn't on the wire
+
+- here's what I didn't expect to find. SnitchOS has emitted a `CapEvent` for every capability grant and transfer for several milestones. i thought the delegation graph was already observable. it wasn't — not really. every one of those events carried `parent_cap_id: 0`. the kernel was announcing "a capability was transferred to this process" but never "*derived from which one*." it was emitting the nodes of the tree and none of the edges. you could see that authority moved; you could not see the path it took.
+
+- the reason is mundane and the fix is the actual content of this milestone. a capability in the kernel is `{ object, rights }` — it carries no identity. when one process delegates to another, the child's table gets a *copy*; there was nothing to point back to, because the parent's holding had no name. so the edge couldn't be drawn: the kernel didn't know what to write in `parent_cap_id` because the parent wasn't anything in particular. to draw the tree you have to first decide that a *holding* — a slot in a process's capability table — has an identity, distinct from the object it names and from the integer handle that addresses it. so that's the change: every holding now carries a stable global id, minted when the capability enters a table. a delegation reads the source holding's id and stamps it as the child's parent. the list of grants became a tree.
+
+- and the tree immediately earned its keep by catching a bug i'd have missed. the first run of the full demo, the client's `send` cap came across with `parent_cap_id: 0` — an orphan, when it should have pointed at `init`'s endpoint. the trace *looked wrong*, and it was: minting a badged capability still inserted it the old way, without an id, so when `init` then delegated that minted cap the link dropped to zero. i hadn't built minting into the spine. the capture showed me the missing edge before any assertion did — which is the whole pitch of this project pointed back at itself. the thing that makes authority visible made a hole in the authority graph visible.
+
+## watch least authority happen
+
+- so the demo, the one this entire arc has been walking toward: `init` creates an endpoint, hands the filesystem server `receive`+`mint`, mints a `send` cap and hands it to a client, and the client does a real round-trip — connect, create a file, write it, read it back — across `init`'s own endpoint. and in Tempo it is not a pile of events. it is a graph rooted at one node: `init`'s endpoint capability, with two children of different rights branching off it, and the file capabilities the server mints hanging further down. you can point at the client and say, out loud, *this process can send on one endpoint and do nothing else, and here is the exact grant that gave it that, and here is the thing that grant came from, all the way up to a process that started with nothing.*
+
+- that's the sentence i've wanted since the capability work began: **i didn't build sandboxing. i stopped handing out authority — and here's the tree proving each thing could only ever touch what it was given.** no other microkernel snitches its own delegations as a graph. it falls out for free here because the project's one stubborn habit — emit the thing that's normally invisible — finally got applied to the structure of authority itself.
+
+## the default is a delegation now
+
+- the last step was the one with teeth, because it changes what the machine *is* on boot. for thirteen milestones the default boot ran a kernel scheduler demo — `task_a`, `task_b`, two cooperative tasks taking turns to prove the scheduler worked. useful, and about sixteen integration tests leaned on it. flipping the default to `init` meant demoting that demo to a named workload and re-pointing every test that depended on it. tedious, and worth it: the no-argument boot of this OS is now *a userspace process building a world out of nothing and giving it away*, not the kernel showing off its task switching. the first thing that happens is delegation. the demo's still there — `--workload demo` — it just isn't who the OS is anymore.
+
+## what i learned
+
+- **a graph needs its edges to be a graph.** i'd been emitting capability grants for milestones and assumed i had a delegation tree. i had a bag of nodes. the edge is `parent_cap_id`, and you can't fill it in until a *holding* has an identity of its own — separate from the object and from the handle. the missing 20% (the edges) was carrying 100% of the meaning.
+
+- **the kernel knowing less is a feature you can keep buying.** `EndpointCreate` moved IPC topology out of the kernel and into the process that owns it. every time i take knowledge *out* of the kernel — metric names, span names, badges, now wiring — the kernel gets smaller and the userspace gets more honest. there's almost always another thing the kernel doesn't actually need to know.
+
+- **the observability caught my own bug, again.** the orphaned `send` cap showed up as a wrong-looking edge in the trace before any test failed. building the system that makes authority visible meant the gap in authority was visible too. the tool keeps paying for itself by debugging the tool.
+
+- **least authority is a shape, not a check.** the win isn't a permission test on every access — it's that a child is *born* unable to exceed its grant. the policy point (`init`) is consulted once, at spawn, and never again. that's the whole difference between capabilities and the ambient-authority world i grew up in.
+
+## what's next
+
+- the **shell**, and now nothing's in the way. `init` is the root of the delegation graph; the graph is finally drawable; the primitives — spawn with chosen caps, wait, create endpoints, introspect — are all here bar one (`hold`: let a process see its own capability table). a shell on this OS isn't a file-munger like Unix's; it's a **powerbox you can see through** — you grant authority and watch what each program did with what you gave it. and it'll be a Stitch program, because the language already runs on the metal and "the platform provides the effects" is exactly what a capability shell is. the two side projects converge there.
+
+- but the root is planted. the first thing this operating system does, given no instructions at all, is start a process that owns almost nothing and hand its world out a slice at a time — and you can watch every slice go.
