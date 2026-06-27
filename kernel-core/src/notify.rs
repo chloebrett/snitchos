@@ -25,6 +25,8 @@
 //! See [docs/notification-design.md](../../../docs/notification-design.md) and
 //! `plans/v0.12-notifications.md`.
 
+use alloc::collections::BTreeMap;
+
 use crate::sched::TaskId;
 
 /// Names a [`Notification`] within the kernel's live table — the value a
@@ -104,6 +106,49 @@ impl Notification {
     }
 }
 
+/// The live registry of notifications the kernel owns behind a `Mutex`,
+/// keyed by [`NotificationId`]. Pure data + bookkeeping, host-tested like
+/// [`crate::reap::ReapTable`]; the kernel binds [`signal`](Self::signal) /
+/// [`wait`](Self::wait) to the `block_current`/`wake` primitives.
+#[derive(Debug, Default)]
+pub struct NotifyTable {
+    notifications: BTreeMap<NotificationId, Notification>,
+    next_id: u32,
+}
+
+impl NotifyTable {
+    /// An empty registry.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            notifications: BTreeMap::new(),
+            next_id: 0,
+        }
+    }
+
+    /// Allocate a fresh, empty notification and return its id. Ids are handed
+    /// out monotonically — never reused in v0.12 (no notification destruction).
+    pub fn create(&mut self) -> NotificationId {
+        let id = NotificationId(self.next_id);
+        self.next_id += 1;
+        self.notifications.insert(id, Notification::new());
+        id
+    }
+
+    /// [`Notification::signal`] the notification named by `id`, or `None` if no
+    /// such notification exists (the cap guaranteed it once, so `None` is a
+    /// kernel-side bug the caller refuses rather than trusts).
+    pub fn signal(&mut self, id: NotificationId, mask: u64) -> Option<SignalStep> {
+        self.notifications.get_mut(&id).map(|n| n.signal(mask))
+    }
+
+    /// [`Notification::wait`] on the notification named by `id`, or `None` if no
+    /// such notification exists.
+    pub fn wait(&mut self, id: NotificationId, caller: TaskId) -> Option<WaitStep> {
+        self.notifications.get_mut(&id).map(|n| n.wait(caller))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +213,54 @@ mod tests {
         assert_eq!(n.wait(TaskId(2)), WaitStep::Busy);
         // The original waiter is intact: a signal still wakes task 1.
         assert_eq!(n.signal(0b1), SignalStep::Woke(TaskId(1)));
+    }
+
+    // --- NotifyTable: the live registry the kernel owns behind a Mutex ---
+
+    #[test]
+    fn create_allocates_distinct_ids() {
+        let mut t = NotifyTable::new();
+        let a = t.create();
+        let b = t.create();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn signal_then_wait_through_the_table() {
+        let mut t = NotifyTable::new();
+        let id = t.create();
+        assert_eq!(t.signal(id, 0b10), Some(SignalStep::NoWaiter));
+        assert_eq!(t.wait(id, TaskId(1)), Some(WaitStep::Ready(0b10)));
+    }
+
+    #[test]
+    fn wait_on_a_fresh_notification_blocks_then_signal_wakes_through_the_table() {
+        let mut t = NotifyTable::new();
+        let id = t.create();
+        assert_eq!(t.wait(id, TaskId(7)), Some(WaitStep::Block));
+        assert_eq!(t.signal(id, 0b1), Some(SignalStep::Woke(TaskId(7))));
+    }
+
+    #[test]
+    fn two_notifications_are_independent() {
+        // Signalling one must not leak bits into the other — the id selects the
+        // right Notification, it is not one shared word.
+        let mut t = NotifyTable::new();
+        let a = t.create();
+        let b = t.create();
+        let _ = t.signal(a, 0b1);
+        assert_eq!(t.wait(b, TaskId(1)), Some(WaitStep::Block));
+    }
+
+    #[test]
+    fn signal_on_an_unknown_id_is_none() {
+        let mut t = NotifyTable::new();
+        assert_eq!(t.signal(NotificationId(999), 0b1), None);
+    }
+
+    #[test]
+    fn wait_on_an_unknown_id_is_none() {
+        let mut t = NotifyTable::new();
+        assert_eq!(t.wait(NotificationId(999), TaskId(1)), None);
     }
 }
