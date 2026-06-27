@@ -29,20 +29,30 @@ pub fn eval_program(items: &[Item]) -> Result<Value, RuntimeError> {
     eval_program_with_telemetry(items).0
 }
 
-/// Like [`eval_program`], but also returns the telemetry (`emit`/`span`)
-/// recorded during the run — the observable output of the program.
-pub fn eval_program_with_telemetry(
-    items: &[Item],
-) -> (Result<Value, RuntimeError>, Vec<TelemetryEvent>) {
+/// The parsed Stitch-source prelude. Exposed so a REPL can parse it **once** and
+/// reuse the AST across lines instead of re-parsing the source each evaluation.
+#[must_use]
+pub fn prelude_items() -> Vec<Item> {
+    parse_program(PRELUDE).expect("the prelude must parse")
+}
+
+/// Build the global environment for `items` — register the natives, built-in
+/// types, and the items into one shared env (so top-level definitions are
+/// mutually visible — letrec), bake contract defaults, and install the dispatch
+/// tables. Returns the ready env **without** running `main`. The expensive setup
+/// (registering the whole prelude) happens here, so a REPL builds one env and
+/// reuses it rather than rebuilding the world on every line.
+///
+/// `items` must already include the prelude AST first (user items can shadow it);
+/// see [`prelude_items`].
+#[must_use]
+pub fn build_env(items: &[Item]) -> Env {
     let env = Env::new();
     let mut reg = Registration::default();
     for native in NATIVES {
         reg.globals.insert(native.name.to_string(), Value::Native(*native));
     }
     register_builtin_types(&mut reg.globals);
-    // The Stitch-source prelude loads first; user items can shadow it.
-    let prelude = parse_program(PRELUDE).expect("the prelude must parse");
-    register_items(&prelude, &env, &mut reg);
     register_items(items, &env, &mut reg);
     // After every `on`/`contract` is collected, fold contract default methods
     // into the types that conform — a concrete impl already present wins.
@@ -50,6 +60,18 @@ pub fn eval_program_with_telemetry(
     env.set_globals(reg.globals);
     env.set_methods(reg.methods);
     env.set_field_mut(reg.field_mut);
+    env
+}
+
+/// Like [`eval_program`], but also returns the telemetry (`emit`/`span`)
+/// recorded during the run — the observable output of the program.
+pub fn eval_program_with_telemetry(
+    items: &[Item],
+) -> (Result<Value, RuntimeError>, Vec<TelemetryEvent>) {
+    // The Stitch-source prelude loads first; user items can shadow it.
+    let mut all = prelude_items();
+    all.extend_from_slice(items);
+    let env = build_env(&all);
     let result = match env.lookup("main") {
         Some(main) => eval_call(&main, &[], &env),
         None => Err(RuntimeError::new("no `main` function")),

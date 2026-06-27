@@ -19,23 +19,23 @@
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 use snitchos_user::{console_read, console_write, entry, yield_now};
-use stitch::ast::Item;
-use stitch::runner::run_repl_line;
+use stitch::runner::Repl;
 
 const PROMPT: &[u8] = b"stitch> ";
 
 #[entry]
 fn main() {
-    let mut defs: Vec<Item> = Vec::new();
+    // One env, built once (prelude registered a single time) and reused for every
+    // line — no per-line prelude rebuild.
+    let mut repl = Repl::new();
 
     console_write(b"\nStitch on SnitchOS \xE2\x80\x94 the tree-walker runs on the metal.\n");
     // Boot self-test: evaluate one line before any input, so booting alone proves
     // the interpreter works end to end (parse -> eval -> ConsoleWrite).
     console_write(b"  1 + 2  ");
-    console_write(run_repl_line(&mut defs, "1 + 2").as_bytes());
+    console_write(repl.eval_line("1 + 2").as_bytes());
     console_write(b"\n");
     console_write(PROMPT);
 
@@ -51,7 +51,7 @@ fn main() {
             match byte {
                 b'\r' | b'\n' => {
                     console_write(b"\n");
-                    console_write(run_repl_line(&mut defs, &line).as_bytes());
+                    console_write(repl.eval_line(&line).as_bytes());
                     line.clear();
                     console_write(PROMPT);
                 }

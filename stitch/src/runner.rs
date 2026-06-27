@@ -10,8 +10,10 @@ use alloc::collections::BTreeSet;
 use crate::prelude::*;
 
 use crate::ast::Item;
+use crate::env::Env;
 use crate::interp::{
-    Module, eval_modules_with_telemetry, eval_program_with_telemetry, is_builtin_module,
+    Module, build_env, eval, eval_modules_with_telemetry, eval_program_with_telemetry,
+    is_builtin_module, prelude_items,
 };
 use crate::parser::{parse, parse_program};
 use crate::value::{RuntimeError, TelemetryEvent, Value};
@@ -116,44 +118,77 @@ fn finish((result, events): (Result<Value, RuntimeError>, Vec<TelemetryEvent>)) 
     }
 }
 
-/// Evaluate one REPL line against the accumulated definitions `defs`. A line
-/// that parses as declarations is appended to `defs` (and produces no output);
-/// otherwise it's run as an expression — `main() = <expr>` against the defs —
-/// and its telemetry, result, or error is returned as text.
-pub fn run_repl_line(defs: &mut Vec<Item>, line: &str) -> String {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return String::new();
+/// A read-eval-print loop that **builds its environment once and reuses it**.
+/// The prelude (and accumulated definitions) are registered into one shared env;
+/// every expression line evaluates against that cached env instead of rebuilding
+/// the world — the costly per-line prelude re-registration is gone. A new
+/// declaration invalidates the cache so the next eval picks it up.
+///
+/// (Expressions evaluate directly, not wrapped in `main()`, so a bare top-level
+/// `?` has no enclosing function — a non-issue at a prompt.)
+pub struct Repl {
+    /// The prelude AST, parsed once.
+    prelude: Vec<Item>,
+    /// Accumulated declarations (functions, types, consts) from prior lines.
+    defs: Vec<Item>,
+    /// The built environment, rebuilt lazily after a new declaration.
+    env: Option<Env>,
+}
+
+impl Default for Repl {
+    fn default() -> Self {
+        Self::new()
     }
-    // Declarations (`f(x) = …`, `prod …`) accumulate silently.
-    if let Ok(items) = parse_program(trimmed)
-        && !items.is_empty()
-    {
-        defs.extend(items);
-        return String::new();
+}
+
+impl Repl {
+    /// A fresh REPL with the prelude parsed (once) and no user definitions yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Repl { prelude: prelude_items(), defs: Vec::new(), env: None }
     }
-    let expr = match parse(trimmed) {
-        Ok(expr) => expr,
-        Err(error) => return format!("parse error: {}\n", error.message),
-    };
-    let mut program = defs.clone();
-    program.push(Item::Func {
-        name: "main".to_string(),
-        params: Vec::new(),
-        ret: None,
-        body: expr,
-        public: false,
-    });
-    let (result, events) = eval_program_with_telemetry(&program);
-    let mut out = render_telemetry(&events);
-    match result {
-        Ok(value) if value != Value::Unit => {
-            writeln!(out, "=> {}", value.display()).expect(INFALLIBLE);
+
+    /// Evaluate one line. A line that parses as declarations is accumulated
+    /// (invalidating the cached env) and produces no output; otherwise it's run as
+    /// an expression against the cached env, and its telemetry + result (or error)
+    /// is returned as text.
+    pub fn eval_line(&mut self, line: &str) -> String {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return String::new();
         }
-        Ok(_) => {}
-        Err(error) => writeln!(out, "runtime error: {}", error.message()).expect(INFALLIBLE),
+        // Declarations (`f(x) = …`, `prod …`) accumulate silently and drop the
+        // cached env so the next expression rebuilds with them in scope.
+        if let Ok(items) = parse_program(trimmed)
+            && !items.is_empty()
+        {
+            self.defs.extend(items);
+            self.env = None;
+            return String::new();
+        }
+        let expr = match parse(trimmed) {
+            Ok(expr) => expr,
+            Err(error) => return format!("parse error: {}\n", error.message),
+        };
+        // Build the env once (prelude + defs), then reuse it for every expression.
+        if self.env.is_none() {
+            let mut all = self.prelude.clone();
+            all.extend_from_slice(&self.defs);
+            self.env = Some(build_env(&all));
+        }
+        let env = self.env.as_ref().expect("env was just built above");
+        let result = eval(&expr, env);
+        // Drain only *this* line's telemetry from the long-lived sink.
+        let mut out = render_telemetry(&env.take_telemetry());
+        match result {
+            Ok(value) if value != Value::Unit => {
+                writeln!(out, "=> {}", value.display()).expect(INFALLIBLE);
+            }
+            Ok(_) => {}
+            Err(error) => writeln!(out, "runtime error: {}", error.message()).expect(INFALLIBLE),
+        }
+        out
     }
-    out
 }
 
 /// Render telemetry events as an indented tree: spans bracket their contents.
@@ -315,31 +350,49 @@ mod tests {
         assert!(result.stderr.contains("division by zero"));
     }
 
-    use crate::ast::Item;
-    use crate::runner::run_repl_line;
+    use crate::runner::Repl;
 
     #[test]
     fn the_repl_evaluates_a_bare_expression() {
-        let mut defs: Vec<Item> = Vec::new();
-        assert_eq!(run_repl_line(&mut defs, "1 + 2"), "=> 3\n");
+        assert_eq!(Repl::new().eval_line("1 + 2"), "=> 3\n");
     }
 
     #[test]
     fn the_repl_accumulates_definitions_then_uses_them() {
-        let mut defs: Vec<Item> = Vec::new();
-        assert_eq!(run_repl_line(&mut defs, "double(x) = x * 2"), "");
-        assert_eq!(run_repl_line(&mut defs, "double(21)"), "=> 42\n");
+        let mut repl = Repl::new();
+        assert_eq!(repl.eval_line("double(x) = x * 2"), "");
+        assert_eq!(repl.eval_line("double(21)"), "=> 42\n");
+    }
+
+    #[test]
+    fn the_repl_reuses_the_cached_env_across_many_expressions() {
+        // The whole point of the cache: a definition is built once, then many
+        // expressions evaluate against the same env (no per-line prelude rebuild).
+        let mut repl = Repl::new();
+        assert_eq!(repl.eval_line("sq(x) = x * x"), "");
+        assert_eq!(repl.eval_line("sq(3)"), "=> 9\n");
+        assert_eq!(repl.eval_line("sq(4)"), "=> 16\n");
+        assert_eq!(repl.eval_line("sq(5)"), "=> 25\n");
+    }
+
+    #[test]
+    fn the_repl_renders_only_this_lines_telemetry() {
+        // The env is long-lived, so its sink must be drained per line — line two's
+        // output must not carry line one's event.
+        let mut repl = Repl::new();
+        assert!(repl.eval_line(r#"emit("a", 1)"#).contains("emit a = 1"));
+        let second = repl.eval_line(r#"emit("b", 2)"#);
+        assert!(second.contains("emit b = 2"), "{second}");
+        assert!(!second.contains("emit a = 1"), "{second}");
     }
 
     #[test]
     fn the_repl_reports_a_runtime_error_inline() {
-        let mut defs: Vec<Item> = Vec::new();
-        assert!(run_repl_line(&mut defs, "1 / 0").contains("division by zero"));
+        assert!(Repl::new().eval_line("1 / 0").contains("division by zero"));
     }
 
     #[test]
     fn a_blank_repl_line_produces_nothing() {
-        let mut defs: Vec<Item> = Vec::new();
-        assert_eq!(run_repl_line(&mut defs, "   "), "");
+        assert_eq!(Repl::new().eval_line("   "), "");
     }
 }

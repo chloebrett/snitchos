@@ -5,8 +5,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use stitch::ast::Item;
-use stitch::runner::{run_module_files, run_repl_line};
+use stitch::runner::{Repl, run_module_files};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -43,13 +42,13 @@ fn run_file(path: &str) -> ExitCode {
 
 /// A line-at-a-time REPL: definitions accumulate, expressions are evaluated.
 fn repl() -> ExitCode {
-    let mut defs: Vec<Item> = Vec::new();
+    let mut repl = Repl::new();
     let stdin = io::stdin();
     print!("stitch> ");
     let _ = io::stdout().flush();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
-        print!("{}", run_repl_line(&mut defs, &line));
+        print!("{}", repl.eval_line(&line));
         print!("stitch> ");
         let _ = io::stdout().flush();
     }

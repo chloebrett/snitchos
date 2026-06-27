@@ -152,6 +152,13 @@ impl Env {
         self.sink.borrow().clone()
     }
 
+    /// Drain the telemetry sink: return everything recorded and clear it. Lets a
+    /// long-lived REPL env render just *this line's* events without the previous
+    /// lines' accumulating.
+    pub fn take_telemetry(&self) -> Vec<TelemetryEvent> {
+        core::mem::take(&mut *self.sink.borrow_mut())
+    }
+
     /// The value of the nearest local binding of `name`, else a global of that
     /// name, else `None`.
     pub fn lookup(&self, name: &str) -> Option<Value> {
