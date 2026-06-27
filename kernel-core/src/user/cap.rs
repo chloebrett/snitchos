@@ -224,6 +224,11 @@ struct Slot {
     generation: u32,
     multiplicity: Multiplicity,
     cap: Option<Capability>,
+    /// This holding's stable global capability id — the derivation-tree node
+    /// identity, minted kernel-side and recorded at grant. A transfer of this
+    /// cap names it as the child's `parent_cap_id`. `0` is the root/unassigned
+    /// sentinel (legacy `insert` without an id), matching the wire convention.
+    cap_id: u64,
 }
 
 /// Why a capability *invocation* was refused. Distinct from [`CapError`]
@@ -441,23 +446,38 @@ impl CapTable {
 
     /// Grant `cap` as a [`Multiplicity::Persistent`] capability and return the
     /// handle that names it. Used at bootstrap to grant a process its root
-    /// capabilities.
+    /// capabilities. The holding gets the root/unassigned cap id (`0`); use
+    /// [`insert_with_id`](Self::insert_with_id) to record a real derivation-tree id.
     pub fn insert(&mut self, cap: Capability) -> Handle {
-        self.grant(cap, Multiplicity::Persistent)
+        self.grant(cap, Multiplicity::Persistent, 0)
+    }
+
+    /// Grant `cap` as a [`Multiplicity::Persistent`] capability, stamping the
+    /// holding with the global `cap_id` (minted kernel-side via `next_cap_id`) —
+    /// the derivation-tree node identity a later transfer names as `parent_cap_id`.
+    pub fn insert_with_id(&mut self, cap: Capability, cap_id: u64) -> Handle {
+        self.grant(cap, Multiplicity::Persistent, cap_id)
     }
 
     /// Grant `cap` as a single-use [`Multiplicity::Once`] capability: the first
     /// successful invoke should [`consume`](Self::consume) it. v0.9b's reply
     /// cap is the first user.
     pub fn insert_once(&mut self, cap: Capability) -> Handle {
-        self.grant(cap, Multiplicity::Once)
+        self.grant(cap, Multiplicity::Once, 0)
     }
 
-    /// Place `cap` in the table with `multiplicity`, reusing a freed slot if
-    /// one exists (so a server consuming reply caps doesn't grow the table
-    /// unboundedly) — otherwise appending. A reused slot keeps its bumped
-    /// generation, so handles to its former occupant stay stale.
-    fn grant(&mut self, cap: Capability, multiplicity: Multiplicity) -> Handle {
+    /// Grant `cap` as a single-use [`Multiplicity::Once`] capability, stamping
+    /// the holding with the global `cap_id`. The id'd twin of [`insert_once`].
+    pub fn insert_once_with_id(&mut self, cap: Capability, cap_id: u64) -> Handle {
+        self.grant(cap, Multiplicity::Once, cap_id)
+    }
+
+    /// Place `cap` in the table with `multiplicity` and the global `cap_id`,
+    /// reusing a freed slot if one exists (so a server consuming reply caps
+    /// doesn't grow the table unboundedly) — otherwise appending. A reused slot
+    /// keeps its bumped generation, so handles to its former occupant stay stale;
+    /// its `cap_id` is overwritten with the new holding's.
+    fn grant(&mut self, cap: Capability, multiplicity: Multiplicity, cap_id: u64) -> Handle {
         if let Some((index, slot)) = self
             .slots
             .iter_mut()
@@ -466,6 +486,7 @@ impl CapTable {
         {
             slot.multiplicity = multiplicity;
             slot.cap = Some(cap);
+            slot.cap_id = cap_id;
             return Handle::new(index as u32, slot.generation);
         }
         let index = self.slots.len() as u32;
@@ -474,6 +495,7 @@ impl CapTable {
             generation,
             multiplicity,
             cap: Some(cap),
+            cap_id,
         });
         Handle::new(index, generation)
     }
@@ -531,11 +553,96 @@ impl CapTable {
         // hand back a stale reference.
         slot.cap.as_ref().ok_or(CapError::Stale)
     }
+
+    /// The stable global `cap_id` of the holding `handle` names — its identity
+    /// in the capability derivation tree. The kernel reads this at a transfer to
+    /// record the source as the child's `parent_cap_id`. Validated like
+    /// [`resolve`](Self::resolve): a bad/stale/freed handle is a [`CapError`].
+    pub fn cap_id_of(&self, handle: Handle) -> Result<u64, CapError> {
+        let slot = self
+            .slots
+            .get(handle.index() as usize)
+            .ok_or(CapError::OutOfBounds)?;
+        if slot.generation != handle.generation() {
+            return Err(CapError::Stale);
+        }
+        if slot.cap.is_none() {
+            return Err(CapError::Stale);
+        }
+        Ok(slot.cap_id)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_holding_carries_the_global_cap_id_it_was_inserted_with() {
+        // The derivation-tree spine: a capability *holding* (a table slot) is
+        // stamped with a stable global cap id at insert, minted kernel-side and
+        // passed in, so a later transfer can name it as a `parent_cap_id`.
+        let mut table = CapTable::new();
+        let handle = table.insert_with_id(
+            Capability {
+                object: Object::SpanSink,
+                rights: Rights::EMIT,
+            },
+            0x00C0_FFEE,
+        );
+        assert_eq!(table.cap_id_of(handle), Ok(0x00C0_FFEE));
+    }
+
+    #[test]
+    fn distinct_holdings_keep_their_distinct_cap_ids() {
+        // The id is per-holding, not a constant or the latest write.
+        let mut table = CapTable::new();
+        let span = Capability {
+            object: Object::SpanSink,
+            rights: Rights::EMIT,
+        };
+        let first = table.insert_with_id(span, 11);
+        let second = table.insert_with_id(span, 22);
+        assert_eq!(table.cap_id_of(first), Ok(11));
+        assert_eq!(table.cap_id_of(second), Ok(22));
+    }
+
+    #[test]
+    fn the_legacy_insert_leaves_a_holding_at_the_root_sentinel_id() {
+        // `insert` (no id) is the root/unassigned `0` — matching the wire's
+        // `parent_cap_id: 0` = root convention.
+        let mut table = CapTable::new();
+        let handle = table.insert(Capability {
+            object: Object::SpanSink,
+            rights: Rights::EMIT,
+        });
+        assert_eq!(table.cap_id_of(handle), Ok(0));
+    }
+
+    #[test]
+    fn cap_id_of_an_unknown_handle_is_an_error() {
+        let table = CapTable::new();
+        assert_eq!(
+            table.cap_id_of(Handle::from_raw(0)),
+            Err(CapError::OutOfBounds)
+        );
+    }
+
+    #[test]
+    fn cap_id_of_a_consumed_handle_is_stale() {
+        // A freed holding's id must not be readable through the old handle —
+        // the same trust-boundary guard as `resolve`.
+        let mut table = CapTable::new();
+        let handle = table.insert_once_with_id(
+            Capability {
+                object: Object::Reply { caller: TaskId(3) },
+                rights: Rights::NONE,
+            },
+            99,
+        );
+        assert!(table.consume(handle));
+        assert_eq!(table.cap_id_of(handle), Err(CapError::Stale));
+    }
 
     #[test]
     fn invoke_span_accepts_spansink_with_emit() {
