@@ -12,7 +12,7 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{entry, register_counter, span_handle, spawn, wait_any};
+use snitchos_user::{endpoint_create, entry, register_counter, span_handle, spawn, wait_any};
 
 #[entry]
 fn main() {
@@ -20,6 +20,13 @@ fn main() {
     // Hand it our span cap — the delegation is a visible `CapEvent::Transferred`
     // rooted at init's holding.
     let _ = spawn(0, &[span_handle()]);
+
+    // Manufacture our own IPC endpoint and bring up the FS server on it (Step 6).
+    // The kernel handed init no endpoint — it builds its own IPC world. Delegate
+    // the owning `RECV | MINT` cap to the server (program id 4 = `fs-server`); the
+    // grant is a `CapEvent::Transferred` rooted at init's endpoint holding.
+    let fs_endpoint = endpoint_create();
+    let _ = spawn(4, &[fs_endpoint.raw_handle() as u32]);
 
     // Supervise: reap whichever child exits, reporting its id + status. We never
     // named the child — `wait_any` is the supervising-parent primitive.

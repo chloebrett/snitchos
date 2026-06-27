@@ -334,6 +334,12 @@ pub fn stitch_telemetry_on_the_wire(h: &mut View) -> Result<(), String> {
         "no 'stitch.answer'=42 Metric within 30s — Stitch emit() didn't reach the wire via RuntimeTelemetry",
     )?;
 
+    // Runtime self-telemetry: the interpreter meters its own evals (not just the
+    // program's emits). The boot self-tests bump `stitch.eval.count`.
+    h.wait_for(SEC * 30, is_metric_named("stitch.eval.count")).ok_or(
+        "no 'stitch.eval.count' metric within 30s — the interpreter isn't emitting its own eval telemetry",
+    )?;
+
     Ok(())
 }
 
@@ -2731,6 +2737,57 @@ pub fn endpoint_create_yields_an_owning_cap(h: &mut View) -> Result<(), String> 
     .ok_or(
         "epmaker.minted != 1 — EndpointCreate didn't return a real owning endpoint \
          cap (minting a badged SEND on it was refused)",
+    )?;
+
+    Ok(())
+}
+
+/// v0.13 `init` brings up the FS server on its *own* manufactured endpoint
+/// (`workload=init`). `init` `EndpointCreate`s (a `Granted{Endpoint, RECV|MINT}`),
+/// then `Spawn`s the FS server delegating that cap — a `Transferred{Endpoint,
+/// RECV|MINT}` whose `parent_cap_id` links back to init's endpoint holding. Proves
+/// the FS server is parented to init's endpoint (not the kernel's `DEMO_ENDPOINT`),
+/// the delegation-graph root holding least authority and handing it down.
+pub fn init_brings_up_fs_server(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+    // RECV | MINT (snitchos_abi::rights) — the FS server owner cap.
+    const RECV_MINT: u32 = 0b0100 | 0b1000;
+
+    // init created its endpoint — capture that owning grant's cap_id.
+    let granted = h
+        .wait_for(SEC * 20, |f, _| {
+            matches!(
+                f,
+                OwnedFrame::CapEvent {
+                    kind: CapEventKind::Granted,
+                    object: CapObject::Endpoint,
+                    rights,
+                    ..
+                } if *rights == RECV_MINT
+            )
+        })
+        .ok_or("no CapEvent::Granted{Endpoint, RECV|MINT} — init didn't create its endpoint")?;
+    let endpoint_id = match granted {
+        OwnedFrame::CapEvent { cap_id, .. } => cap_id,
+        _ => unreachable!("matched a CapEvent above"),
+    };
+
+    // init delegated RECV|MINT to the FS server — a transfer linked to that endpoint.
+    h.wait_for(SEC * 20, move |f, _| {
+        matches!(
+            f,
+            OwnedFrame::CapEvent {
+                kind: CapEventKind::Transferred,
+                object: CapObject::Endpoint,
+                rights,
+                parent_cap_id,
+                ..
+            } if *rights == RECV_MINT && *parent_cap_id == endpoint_id
+        )
+    })
+    .ok_or(
+        "no CapEvent::Transferred{Endpoint, RECV|MINT} linked to init's endpoint — \
+         the FS server wasn't brought up on init's manufactured endpoint",
     )?;
 
     Ok(())

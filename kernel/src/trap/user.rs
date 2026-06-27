@@ -450,6 +450,7 @@ static SPAWNABLE: &[(&str, &[u8])] = &[
     ("memhog", MEMHOG_ELF),
     ("notify-signaller", NOTIFY_SIGNALLER_ELF),
     ("spinner", SPINNER_ELF),
+    ("fs-server", FS_SERVER_ELF),
 ];
 
 /// Resolve a `Spawn` program id to its `(name, image)`, or `None` if out of range.

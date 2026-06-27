@@ -638,6 +638,13 @@ impl Endpoint {
         Self { handle }
     }
 
+    /// This endpoint's raw cap handle — for delegating it to a child via [`spawn`]
+    /// (e.g. `init` handing the FS server `RECV | MINT` on its created endpoint).
+    #[must_use]
+    pub const fn raw_handle(self) -> usize {
+        self.handle
+    }
+
     /// Send an inline message, blocking until a receiver rendezvouses.
     /// `Err(Denied)` if the kernel refused the capability (no `SEND`, or not an
     /// endpoint handle).

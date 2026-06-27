@@ -17,9 +17,18 @@
 use fs_core::{Filesystem, FsError, InodeId};
 use fs_proto::{Badge, Denial, FileRights, Request, Response, check_rights};
 use snitchos_user::{
-    Metric, copy_from_caller, copy_to_caller, endpoint, register_gauge, reply, reply_with_cap,
-    rights, tracer,
+    Endpoint, Metric, copy_from_caller, copy_to_caller, delegated_handle, register_gauge, reply,
+    reply_with_cap, rights, tracer,
 };
+
+/// This server's FS endpoint, read as the first **delegated** cap (handle 2).
+/// Works whichever way the server was launched: the kernel `run_ipc` path puts
+/// the endpoint at handle 2 (after the two bootstrap caps), and an init-`Spawn`
+/// delegating the endpoint lands it at the same `delegated_handle(0)` — so the
+/// server no longer depends on the legacy `a2` startup-endpoint slot.
+fn fs_endpoint() -> Endpoint {
+    Endpoint::from_raw_handle(delegated_handle(0))
+}
 
 /// Largest filename the server will pull across in one `create` (≤ the kernel's
 /// per-copy cap). Names longer than this are refused.
@@ -39,7 +48,7 @@ pub fn serve<F: Filesystem>(mut fs: F) -> ! {
     // here); its `emit` is then a harmless no-op.
     let denied: Metric = register_gauge("snitchos.fs.denied");
     loop {
-        let Ok(r) = endpoint().receive_with_reply() else {
+        let Ok(r) = fs_endpoint().receive_with_reply() else {
             continue;
         };
         let Some(reply_handle) = r.reply else {
@@ -52,7 +61,7 @@ pub fn serve<F: Filesystem>(mut fs: F) -> ! {
                 rights: FileRights::READ | FileRights::WRITE,
             }
             .pack();
-            if let Ok(cap) = endpoint().mint_badged(badge, rights::SEND) {
+            if let Ok(cap) = fs_endpoint().mint_badged(badge, rights::SEND) {
                 let _ = reply_with_cap(reply_handle, [0, 0, 0, 0], cap);
             }
             continue;
@@ -213,7 +222,7 @@ fn reply_minted_child(reply_handle: usize, child: Result<InodeId, FsError>, chil
     match child {
         Ok(child) => {
             let badge = Badge { inode: child, rights: child_rights }.pack();
-            match endpoint().mint_badged(badge, rights::SEND) {
+            match fs_endpoint().mint_badged(badge, rights::SEND) {
                 Ok(cap) => {
                     let _ = reply_with_cap(reply_handle, Response::Inode(child).encode(), cap);
                 }
