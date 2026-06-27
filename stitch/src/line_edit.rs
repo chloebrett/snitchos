@@ -41,6 +41,11 @@ impl LineEditor {
                     echo.extend_from_slice(b"\r\n");
                     line = Some(core::mem::take(&mut self.buffer));
                 }
+                b'\x7f' => {
+                    if self.buffer.pop().is_some() {
+                        echo.extend_from_slice(b"\x08 \x08");
+                    }
+                }
                 _ => {
                     self.buffer.push(byte as char);
                     echo.push(byte);
@@ -63,5 +68,25 @@ mod tests {
 
         assert_eq!(edit.line.as_deref(), Some("hi"));
         assert_eq!(edit.echo, b"hi\r\n");
+    }
+
+    #[test]
+    fn backspace_erases_the_last_char() {
+        let mut editor = LineEditor::new();
+
+        let edit = editor.feed(b"ax\x7f\n");
+
+        assert_eq!(edit.line.as_deref(), Some("a"));
+        assert_eq!(edit.echo, b"ax\x08 \x08\r\n");
+    }
+
+    #[test]
+    fn backspace_on_an_empty_line_is_a_noop() {
+        let mut editor = LineEditor::new();
+
+        let edit = editor.feed(b"\x7f\n");
+
+        assert_eq!(edit.line.as_deref(), Some(""));
+        assert_eq!(edit.echo, b"\r\n");
     }
 }
