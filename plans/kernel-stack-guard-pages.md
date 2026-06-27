@@ -32,14 +32,22 @@ neighbour. Plus cheap always-on detection so an overflow is named, not guessed.
 
 > **Landed.** Pure checks in host-tested `kernel_core::stack` (`canary_intact`,
 > `high_water_bytes`, `SENTINEL`, `CANARY_BYTES`; 6 tests, mutants 8/8 caught).
-> Each `Box<Stack>` is sentinel-filled at spawn. `prepare_switch` checks the
-> outgoing task's bottom canary on **every switch** → panics *naming the task* on
-> breach (task 0 / boot stack has no canary). The heartbeat emits
-> `snitchos.task.<name>.stack_high_water_bytes` (a `NO_EMITTER` gauge) from a
-> bottom-up scan via `task_snapshots`. Itest `task-stack-high-water` asserts a
-> plausible value (0 < bytes < 16384); full suite **74/0** (no false-positive
-> panics — every task hits the per-switch check), 10/10 on `--repeat 10`; clippy
-> clean. Remaining gap: the boot stack (task 0) is unguarded — Tier B covers it.
+> Each `Box<Stack>` is sentinel-filled at spawn. **Detection has two paths**, both
+> via `report_stack_overflow` (snitch + panic): the *prompt* one — `prepare_switch`
+> checks the outgoing task's canary on every switch (runs on its possibly-damaged
+> stack) — and the *safe backstop* — `check_stack_canaries` on the heartbeat (runs
+> on the heartbeat's healthy stack, catches a task that hasn't switched out). On
+> breach the kernel **snitches an observable `Log`** ("kernel stack overflow:
+> task N (name) …") *then panics* — the failure is on the telemetry wire, named,
+> not just UART. Heartbeat also emits `snitchos.task.<name>.stack_high_water_bytes`
+> (a `NO_EMITTER` gauge). (Task 0 / boot stack has no canary — Tier B covers it.)
+>
+> **Verified end-to-end:** `workload=stack-canary` (`storms::stack_canary` +
+> `sched::clobber_current_stack_canary`, itest-workloads only) has a kernel task
+> controllably clobber its own canary; itest `stack-overflow-detected` asserts the
+> snitched `Log` names it (deterministic — controlled clobber, intact stack, no
+> corruption roulette). Plus `task-stack-high-water` for the gauge. Full suite
+> **75/0** (no false-positive detection), 20/20 on `--repeat 10`, clippy clean.
 
 ### Tier A — stack canary + high-water gauge (cheap, ~afternoon)
 - Write a sentinel (e.g. `0xC0DE…`) in the bottom N bytes of each `Box<Stack>` at

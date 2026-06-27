@@ -1088,6 +1088,28 @@ pub fn task_stack_high_water_reported(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Kernel-stack overflow *detection* end-to-end (`workload=stack-canary`): a
+/// kernel task (`stack_canary_smoke`) deliberately clobbers its own stack canary,
+/// then the per-switch check or the heartbeat backstop detects the breach,
+/// **snitches a `Log`** ("kernel stack overflow: task … (stack_canary_smoke) …"),
+/// and panics. Asserts that observable `Log` reaches the wire and names the task —
+/// proving the detect→name→halt path (not just the gauge / pure logic).
+///
+/// (This exercises a *controlled* canary clobber, so detection runs on an
+/// otherwise-intact stack and is deterministic; surviving a *real* overflow
+/// gracefully is Tier B's job — guard pages fault at the store.)
+pub fn stack_overflow_detected(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 20, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. }
+            if msg.contains("kernel stack overflow") && msg.contains("stack_canary_smoke"))
+    })
+    .ok_or(
+        "no Log naming a 'kernel stack overflow' for stack_canary_smoke within 20s — the canary \
+         breach wasn't detected + snitched (or the offending task name wasn't carried in the Log)",
+    )?;
+    Ok(())
+}
+
 /// v0.9 block/wake smoke (`workload=block-wake`): a `blocker` kernel task
 /// stores its id, arms a flag, and calls `block_current` — leaving the CPU
 /// *off* the runqueue (not re-enqueued, unlike `yield_now`). A `waker` peer

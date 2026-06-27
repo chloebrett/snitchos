@@ -427,6 +427,54 @@ pub fn task_snapshots() -> Vec<TaskSnapshot> {
         .collect()
 }
 
+/// Report a detected kernel-stack overflow and halt: snitch an observable `Log`
+/// (the named failure on the telemetry wire), then panic. Shared by the
+/// per-switch check ([`prepare_switch`]) and the heartbeat backstop
+/// ([`check_stack_canaries`]). Never returns.
+fn report_stack_overflow(id: u32, name: &str) -> ! {
+    crate::tracing::emit_log(&alloc::format!(
+        "kernel stack overflow: task {id} ({name}) clobbered its stack canary"
+    ));
+    panic!("kernel stack overflow: task {id} ({name}) clobbered its stack canary");
+}
+
+/// Heartbeat backstop for Tier-A overflow detection: walk the task table and, if
+/// any task's bottom canary is breached, [`report_stack_overflow`]. Runs on the
+/// heartbeat's own (healthy) stack — so unlike the per-switch check it can emit
+/// safely — and catches a task that overflowed but hasn't switched out. Captures
+/// the offender under the lock, then reports after dropping it.
+pub fn check_stack_canaries() {
+    let breached = {
+        let sched = SCHEDULER.lock();
+        sched
+            .tasks
+            .iter()
+            .filter(|t| t.state != TaskState::Exited)
+            .find(|t| t._stack.as_ref().is_some_and(|s| !s.canary_intact()))
+            .map(|t| (t.id.0, t.name.clone()))
+    };
+    if let Some((id, name)) = breached {
+        report_stack_overflow(id, &name);
+    }
+}
+
+/// Test-only: deliberately clobber the *current* task's stack canary (overwrite
+/// its lowest [`CANARY_BYTES`](kernel_core::stack::CANARY_BYTES)) **without**
+/// moving `sp` deep — so the next switch / heartbeat detects it deterministically
+/// while the rest of the stack stays intact. Exercises the Tier-A
+/// detect→snitch→panic path without real-overflow corruption roulette. Only
+/// compiled into `itest-workloads` builds.
+#[cfg(feature = "itest-workloads")]
+pub fn clobber_current_stack_canary() {
+    let id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
+    let mut sched = SCHEDULER.lock();
+    if let Some(task) = sched.tasks.iter_mut().find(|t| t.id == id)
+        && let Some(stack) = &mut task._stack
+    {
+        stack.0[..kernel_core::stack::CANARY_BYTES].fill(0x00);
+    }
+}
+
 /// Currently-running task. v0.5 step 4 stub: returns 0 (the boot /
 /// main task) unconditionally. Step 7 wires this to the real
 /// scheduler bookkeeping; until then `SpanStart` carries `task_id=0`
@@ -734,7 +782,7 @@ fn prepare_switch(
     let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
     let me = crate::percpu::current_hartid();
 
-    let (current_ctx, next_ctx, next_id, next_root, next_proc) = {
+    let (current_ctx, next_ctx, next_id, next_root, next_proc, overflowed) = {
         let mut sched = SCHEDULER.lock();
         let Some(next_id) = pick_next(sched.runqueues[me].iter(), t_entry, AGING_STEP_TICKS) else {
             assert!(empty_ok, "prepare_switch: runqueue empty on hart {me} with no fallback");
@@ -755,6 +803,10 @@ fn prepare_switch(
         let mut next_cursor: *mut SpanCursor = core::ptr::null_mut();
         let mut next_root: usize = 0;
         let mut next_proc: *mut Process = core::ptr::null_mut();
+        // Tier-A overflow detection: captured under the lock, acted on (snitch +
+        // panic) *after* dropping it so the telemetry emit isn't done with the
+        // scheduler lock held.
+        let mut overflowed: Option<(u32, alloc::string::String)> = None;
         for task in sched.tasks.iter_mut() {
             if task.id == current_id {
                 current_ctx = task.context.get();
@@ -763,18 +815,15 @@ fn prepare_switch(
                 if let Some(state) = disposition.next_state() {
                     task.state = state;
                 }
-                // Tier-A overflow detection: the outgoing task just finished using
-                // its stack. A clobbered bottom canary means it grew down into its
-                // lowest bytes — panic *naming the task* rather than letting the
-                // corruption surface later at an unrelated victim (task 0 inherits
-                // the boot stack and has no canary). See `kernel_core::stack`.
+                // The outgoing task just finished using its stack. A clobbered
+                // bottom canary means it grew down into its lowest bytes — capture
+                // it to snitch + panic *naming the task*, rather than let the
+                // corruption surface later at an unrelated victim. (Task 0 inherits
+                // the boot stack and has no canary.) See `kernel_core::stack`.
                 if let Some(stack) = &task._stack
                     && !stack.canary_intact()
                 {
-                    panic!(
-                        "kernel stack overflow: task {} ({}) clobbered its stack canary",
-                        task.id.0, task.name
-                    );
+                    overflowed = Some((task.id.0, task.name.clone()));
                 }
             }
             if task.id == next_id {
@@ -800,9 +849,17 @@ fn prepare_switch(
         CURRENT_TASK.this_cpu().store(next_id.0, Ordering::Relaxed);
         CURRENT_SPAN_CURSOR.this_cpu().store(next_cursor, Ordering::Relaxed);
 
-        (current_ctx, next_ctx, next_id, next_root, next_proc)
+        (current_ctx, next_ctx, next_id, next_root, next_proc, overflowed)
         // Lock dropped here. The asm runs without the scheduler lock.
     };
+
+    // A clobbered canary is fatal: report it (snitch + panic) outside the
+    // scheduler lock; the switch below never runs. This per-switch check is the
+    // *prompt* path (it runs on the outgoing task's own — possibly damaged —
+    // stack); the heartbeat's `check_stack_canaries` is the safe backstop.
+    if let Some((id, name)) = overflowed {
+        report_stack_overflow(id, &name);
+    }
 
     switch_address_space(next_root, next_proc);
 

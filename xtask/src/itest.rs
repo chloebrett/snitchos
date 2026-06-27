@@ -206,6 +206,7 @@ catalog! {
     cpu "smp-ping-pong-cadence"           scenarios::smp_ping_pong_cadence          [smp, ipi]      {"ping-pong"};
     wfi "sched-task-exits-cleanly"        scenarios::sched_task_exits_cleanly       [sched];
     wfi "task-stack-high-water"           scenarios::task_stack_high_water_reported [sched];
+    wfi "stack-overflow-detected"         scenarios::stack_overflow_detected        [sched]         {"stack-canary"};
     wfi "block-wake-smoke"                scenarios::block_wake_smoke               [sched]         {"block-wake"};
     wfi "ipc-message-crosses"             scenarios::ipc_message_crosses            [userspace, ipc] {"ipc"};
     wfi "ipc-trace-crosses"               scenarios::ipc_trace_crosses              [userspace, ipc] {"ipc"};

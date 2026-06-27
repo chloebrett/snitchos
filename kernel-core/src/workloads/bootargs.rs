@@ -149,6 +149,12 @@ pub enum WorkloadKind {
     /// its own metrics without the kernel knowing them ahead of time, and that
     /// the per-process metric table is the forgery boundary. Not a storm.
     Probe,
+    /// Kernel-stack guard Tier-A smoke: a kernel task deliberately clobbers its
+    /// own stack canary, then the next switch / heartbeat must detect it, snitch a
+    /// `Log` ("kernel stack overflow: task …"), and panic. Proves the
+    /// detect→name→halt path deterministically (no real-overflow corruption
+    /// roulette). `itest-workloads` only.
+    StackCanary,
     /// v0.10 `RAMfs`: an `fs` server (`RECV | MINT`) serves a flat in-memory
     /// filesystem to an `fs-client` over one endpoint. The client connects
     /// (badge 0) to be minted a root File cap (`pack(root, READ)`), then issues
@@ -218,6 +224,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "syscall-hog" => Some(WorkloadKind::SyscallHog),
             "console-echo" => Some(WorkloadKind::ConsoleEcho),
             "probe" => Some(WorkloadKind::Probe),
+            "stack-canary" => Some(WorkloadKind::StackCanary),
             "spawn-demo" => Some(WorkloadKind::SpawnDemo),
             "spawn-reap" => Some(WorkloadKind::SpawnReap),
             "priorities" => Some(WorkloadKind::Priorities),
@@ -351,6 +358,11 @@ mod tests {
     fn selects_probe() {
         assert_eq!(select("workload=probe"), Some(WorkloadKind::Probe));
         assert!(!WorkloadKind::Probe.is_storm());
+    }
+
+    #[test]
+    fn selects_stack_canary() {
+        assert_eq!(select("workload=stack-canary"), Some(WorkloadKind::StackCanary));
     }
 
     #[test]

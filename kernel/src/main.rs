@@ -365,6 +365,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::SyscallHog)
         | Some(WorkloadKind::ConsoleEcho)
         | Some(WorkloadKind::Probe)
+        | Some(WorkloadKind::StackCanary)
         | Some(WorkloadKind::SpawnDemo)
         | Some(WorkloadKind::SpawnReap)
         | Some(WorkloadKind::Priorities)
@@ -503,6 +504,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // flag in lockstep.
         Some(WorkloadKind::PingPong) => {
             let _ = sched::spawn_on(1, "pong", storms::ping_pong::pong_body);
+        }
+        // Tier-A overflow smoke: a kernel task clobbers its own stack canary on
+        // hart 0 (alongside the heartbeat + demo tasks); the per-switch check or
+        // the heartbeat backstop then snitches + panics. Names the task.
+        Some(WorkloadKind::StackCanary) => {
+            let _ = sched::spawn("stack_canary_smoke", storms::stack_canary::smoke_body);
         }
         _ => {}
     }

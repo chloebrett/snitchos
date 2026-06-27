@@ -32,6 +32,26 @@ fn fence_via_uart_lsr() {
     unsafe { core::ptr::read_volatile(lsr as *const u8) };
 }
 
+pub mod stack_canary {
+    //! Kernel-stack guard Tier-A smoke (`workload=stack-canary`): a kernel task
+    //! deliberately clobbers its *own* stack canary (a controlled write to its
+    //! lowest bytes, `sp` untouched), then yields/spins. The prompt per-switch
+    //! check (if a peer is ready) or the heartbeat backstop then detects the
+    //! breach, snitches `Log("kernel stack overflow: task …")`, and panics —
+    //! proving the detect→name→halt path deterministically, without the
+    //! corruption roulette of a real overflow.
+
+    /// Entry for the smoke task. Never returns: either the per-switch check
+    /// panics on the first `yield_now`, or it spins until the heartbeat backstop
+    /// halts the kernel.
+    pub extern "C" fn smoke_body() -> ! {
+        crate::sched::clobber_current_stack_canary();
+        loop {
+            crate::sched::yield_now();
+        }
+    }
+}
+
 pub mod virtio_storm {
     //! Validation experiment for H11-refined: is the cross-hart bug
     //! specifically in the virtio-console emission path
