@@ -311,6 +311,31 @@ pub fn emit_cap_transferred(cap_id: u64, holder: u32, object: protocol::CapObjec
     });
 }
 
+/// Emit a `NotifySignal` frame (v0.12): `from_task` signalled `notification`
+/// with `mask`. The producer half of the async kernel→user edge — paired with
+/// [`emit_notify_wait`] it makes the out-of-band wake visible in a trace.
+pub fn emit_notify_signal(notification: u32, mask: u64, from_task: u32) {
+    emit_frame(&Frame::NotifySignal {
+        notification,
+        mask,
+        from_task,
+        t: timestamp(),
+        hart_id: crate::percpu::current_hartid() as u8,
+    });
+}
+
+/// Emit a `NotifyWait` frame (v0.12): `to_task` woke on `notification` carrying
+/// `bits` (read-and-cleared). The consumer half of the async edge.
+pub fn emit_notify_wait(notification: u32, bits: u64, to_task: u32) {
+    emit_frame(&Frame::NotifyWait {
+        notification,
+        bits,
+        to_task,
+        t: timestamp(),
+        hart_id: crate::percpu::current_hartid() as u8,
+    });
+}
+
 /// Emit a `ContextSwitch` frame. Called by `sched::yield_now` on
 /// every actual switch. Makes scheduler decisions first-class
 /// traceable events.

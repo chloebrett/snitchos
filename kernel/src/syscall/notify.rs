@@ -54,6 +54,7 @@ pub(super) fn handle_signal(frame: &mut TrapFrame) {
     match resolved {
         Ok(id) => {
             crate::sched::notify_signal(id, mask);
+            crate::tracing::emit_notify_signal(id.0, mask, crate::sched::current_task_id().0);
             frame.a0 = 0;
         }
         Err(denied) => super::refuse(frame, sc, super::refusal_for(denied)),
@@ -88,6 +89,7 @@ pub(super) fn handle_wait_notify(frame: &mut TrapFrame) {
     loop {
         match crate::sched::notify_wait(id, me) {
             Some(WaitStep::Ready(bits)) => {
+                crate::tracing::emit_notify_wait(id.0, bits, me.0);
                 frame.a0 = bits;
                 return;
             }

@@ -583,6 +583,10 @@ impl View {
                 format!("Log {{ {msg:?} task={task_id} t={t} hart={hart_id} }}"),
             OwnedFrame::Message { endpoint, from, to, parent_span, t, hart_id } =>
                 format!("Message {{ endpoint={endpoint} from={from} to={to} parent={parent_span:?} t={t} hart={hart_id} }}"),
+            OwnedFrame::NotifySignal { notification, mask, from_task, t, hart_id } =>
+                format!("NotifySignal {{ notification={notification} mask={mask:#b} from={from_task} t={t} hart={hart_id} }}"),
+            OwnedFrame::NotifyWait { notification, bits, to_task, t, hart_id } =>
+                format!("NotifyWait {{ notification={notification} bits={bits:#b} to={to_task} t={t} hart={hart_id} }}"),
         }
     }
 }
@@ -691,6 +695,8 @@ fn variant_name(frame: &OwnedFrame) -> &'static str {
         OwnedFrame::SyscallRefused { .. } => "SyscallRefused",
         OwnedFrame::Log { .. } => "Log",
         OwnedFrame::Message { .. } => "Message",
+        OwnedFrame::NotifySignal { .. } => "NotifySignal",
+        OwnedFrame::NotifyWait { .. } => "NotifyWait",
     }
 }
 

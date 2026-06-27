@@ -47,6 +47,8 @@ pub enum OwnedFrame {
     SyscallRefused { syscall: u8, reason: RefusalReason, task_id: u32, t: u64, hart_id: u8 },
     Log { msg: String, task_id: u32, t: u64, hart_id: u8 },
     Message { endpoint: u32, from: u32, to: u32, parent_span: SpanId, t: u64, hart_id: u8 },
+    NotifySignal { notification: u32, mask: u64, from_task: u32, t: u64, hart_id: u8 },
+    NotifyWait { notification: u32, bits: u64, to_task: u32, t: u64, hart_id: u8 },
 }
 
 impl OwnedFrame {
@@ -92,6 +94,12 @@ impl OwnedFrame {
             }
             Frame::Message { endpoint, from, to, parent_span, t, hart_id } => {
                 OwnedFrame::Message { endpoint, from, to, parent_span, t, hart_id }
+            }
+            Frame::NotifySignal { notification, mask, from_task, t, hart_id } => {
+                OwnedFrame::NotifySignal { notification, mask, from_task, t, hart_id }
+            }
+            Frame::NotifyWait { notification, bits, to_task, t, hart_id } => {
+                OwnedFrame::NotifyWait { notification, bits, to_task, t, hart_id }
             }
         }
     }

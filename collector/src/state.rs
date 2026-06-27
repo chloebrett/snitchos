@@ -349,6 +349,14 @@ impl State {
                 self.advance_anchor(*t);
                 None
             }
+            Frame::NotifySignal { t, .. } | Frame::NotifyWait { t, .. } => {
+                // v0.12 async notification edge. On the wire (the itest reads it
+                // directly). Drawing the signal→wake dependency arrow in Tempo —
+                // the out-of-band wake a synchronous trace can't show — is the
+                // v0.12 headline, surfaced once span linking exists. Anchor for now.
+                self.advance_anchor(*t);
+                None
+            }
         }
     }
 

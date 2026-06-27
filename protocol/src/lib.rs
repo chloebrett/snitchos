@@ -185,6 +185,21 @@ pub enum Frame<'a> {
   /// across the process boundary. New variants go at the END — postcard
   /// encodes discriminants positionally.
   Message { endpoint: u32, from: u32, to: u32, parent_span: SpanId, t: u64, hart_id: u8 },
+  /// A **notification was signalled** (v0.12): `from_task` OR-ed `mask` into
+  /// `notification`'s pending bits — the producer end of the async kernel→user
+  /// signal. Paired with [`NotifyWait`](Self::NotifyWait), these make the
+  /// out-of-band wake visible: a signal at one time, a waiter waking at another,
+  /// linked by `notification` — a dependency arrow that is *not* a call stack.
+  /// To keep a high-rate source from flooding the wire, the kernel emits on the
+  /// empty→nonempty transition + each delivered wake, not every redundant OR.
+  /// New variants go at the END — postcard encodes discriminants positionally.
+  NotifySignal { notification: u32, mask: u64, from_task: u32, t: u64, hart_id: u8 },
+  /// A **notification waiter woke** (v0.12): `to_task` took `bits` from
+  /// `notification` (read-and-cleared), either immediately (bits were pending)
+  /// or after blocking until a [`NotifySignal`](Self::NotifySignal). The consumer
+  /// half of the async edge. New variants go at the END — postcard encodes
+  /// discriminants positionally.
+  NotifyWait { notification: u32, bits: u64, to_task: u32, t: u64, hart_id: u8 },
 }
 
 /// The lifecycle phase of a [`Frame::CapEvent`]. v0.7b emits only
@@ -753,5 +768,40 @@ mod tests {
       let decoded: Frame = postcard::from_bytes(used).unwrap();
       assert_eq!(frame, decoded);
     }
+  }
+
+  /// Roundtrip a `Frame::NotifySignal` — a producer signalled a notification
+  /// (v0.12). The async edge: `from_task` signals `notification` with `mask`.
+  #[test]
+  fn notify_signal_roundtrips() {
+    let frame = Frame::NotifySignal {
+      notification: 3,
+      mask: 0b101,
+      from_task: 7,
+      t: 4242,
+      hart_id: 1,
+    };
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+    assert_eq!(frame, decoded);
+  }
+
+  /// Roundtrip a `Frame::NotifyWait` — a consumer woke on a notification
+  /// (v0.12). `to_task` received `bits` from `notification`; paired with a
+  /// `NotifySignal`, these draw the async dependency arrow in Tempo.
+  #[test]
+  fn notify_wait_roundtrips() {
+    let frame = Frame::NotifyWait {
+      notification: 3,
+      bits: 0b101,
+      to_task: 9,
+      t: 4243,
+      hart_id: 1,
+    };
+    let mut buf = [0u8; 64];
+    let used = postcard::to_slice(&frame, &mut buf).unwrap();
+    let decoded: Frame = postcard::from_bytes(used).unwrap();
+    assert_eq!(frame, decoded);
   }
 }
