@@ -20,6 +20,7 @@ expression: "prog(r#\"on Point : Show { show() = \"point\" }\"#)"
                 modifier: Instance,
                 params: [],
                 ret: None,
+                uses: [],
                 body: Some(
                     Str(
                         [

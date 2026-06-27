@@ -862,6 +862,7 @@ impl Parser {
         } else {
             None
         };
+        let uses = self.parse_uses()?;
         let body = if matches!(self.peek(), Token::Eq | Token::LBrace) {
             Some(self.parse_body()?)
         } else if require_body {
@@ -874,6 +875,7 @@ impl Parser {
             modifier,
             params,
             ret,
+            uses,
             body,
         })
     }

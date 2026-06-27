@@ -17,6 +17,7 @@ expression: "prog(\"contract Show { show() -> Str }\")"
                         args: [],
                     },
                 ),
+                uses: [],
                 body: None,
             },
         ],

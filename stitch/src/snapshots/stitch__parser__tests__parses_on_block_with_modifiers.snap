@@ -20,6 +20,7 @@ expression: "prog(\"on Counter { free make() -> Counter = new()  current() -> In
                         args: [],
                     },
                 ),
+                uses: [],
                 body: Some(
                     Call {
                         callee: Var(
@@ -39,6 +40,7 @@ expression: "prog(\"on Counter { free make() -> Counter = new()  current() -> In
                         args: [],
                     },
                 ),
+                uses: [],
                 body: Some(
                     Field {
                         object: SelfRef,

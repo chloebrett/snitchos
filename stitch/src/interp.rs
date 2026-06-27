@@ -601,6 +601,9 @@ fn eval_method_call(
     for (param, arg) in method.params.iter().zip(args) {
         method_env = method_env.extend(param.name.clone(), eval(&arg.value, env)?);
     }
+    // A method, like a named function, runs with exactly its declared `uses` —
+    // authority does not inherit across the method boundary.
+    method_env = method_env.with_authority(method.uses.iter().cloned().collect());
 
     let body = method
         .body
@@ -861,6 +864,7 @@ fn call_instance_method(
     for (param, arg) in method.params.iter().zip(args) {
         method_env = method_env.extend(param.name.clone(), arg.clone());
     }
+    method_env = method_env.with_authority(method.uses.iter().cloned().collect());
     // A method is a call boundary, so a `?` inside it stops here.
     let result = match eval(body, &method_env) {
         Err(RuntimeError::Return(value)) => value,

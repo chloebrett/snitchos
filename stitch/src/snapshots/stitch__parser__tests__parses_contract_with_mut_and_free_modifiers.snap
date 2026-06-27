@@ -12,6 +12,7 @@ expression: "prog(\"contract Counter { mut bump()  free zero() -> Counter }\")"
                 modifier: Mut,
                 params: [],
                 ret: None,
+                uses: [],
                 body: None,
             },
             Method {
@@ -24,6 +25,7 @@ expression: "prog(\"contract Counter { mut bump()  free zero() -> Counter }\")"
                         args: [],
                     },
                 ),
+                uses: [],
                 body: None,
             },
         ],

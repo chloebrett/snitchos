@@ -17,6 +17,7 @@ expression: "prog(r#\"contract Greet { hello() -> Str = \"hi\" }\"#)"
                         args: [],
                     },
                 ),
+                uses: [],
                 body: Some(
                     Str(
                         [

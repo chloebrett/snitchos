@@ -15,6 +15,7 @@ expression: "prog(\"on Box { get() = @ }\")"
                 modifier: Instance,
                 params: [],
                 ret: None,
+                uses: [],
                 body: Some(
                     SelfRef,
                 ),

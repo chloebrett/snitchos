@@ -271,6 +271,26 @@ mod tests {
     }
 
     #[test]
+    fn a_method_emitting_without_uses_telemetry_is_refused() {
+        // A method gets exactly its declared `uses`, like a function — it does
+        // not inherit the caller's authority even though `main` holds Telemetry.
+        let r = run_program_source(
+            "prod Counter(n: Int)  on Counter { tick() = emit(\"c\", @n) }  main() uses Telemetry = Counter(5).tick()",
+        );
+        assert_eq!(r.exit_code, 1, "stdout={} stderr={}", r.stdout, r.stderr);
+        assert!(r.stderr.contains("uses Telemetry"), "{}", r.stderr);
+    }
+
+    #[test]
+    fn a_method_that_declares_uses_telemetry_may_emit() {
+        let r = run_program_source(
+            "prod Counter(n: Int)  on Counter { tick() uses Telemetry = emit(\"c\", @n) }  main() uses Telemetry = Counter(5).tick()",
+        );
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        assert!(r.stdout.contains("emit c = 5"), "{}", r.stdout);
+    }
+
+    #[test]
     fn loading_source_registers_definitions_for_later_calls() {
         let mut repl = super::Repl::new();
         let summary = repl.load_source("double(x) = x * 2\ntriple(x) = x * 3");

@@ -19,6 +19,7 @@ expression: "prog(\"contract Container<T> { get() -> T }\")"
                         args: [],
                     },
                 ),
+                uses: [],
                 body: None,
             },
         ],

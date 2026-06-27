@@ -12,6 +12,7 @@ expression: "prog(\"contract Drawable { draw()  bounds() -> Rect }\")"
                 modifier: Instance,
                 params: [],
                 ret: None,
+                uses: [],
                 body: None,
             },
             Method {
@@ -24,6 +25,7 @@ expression: "prog(\"contract Drawable { draw()  bounds() -> Rect }\")"
                         args: [],
                     },
                 ),
+                uses: [],
                 body: None,
             },
         ],

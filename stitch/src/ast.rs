@@ -72,6 +72,9 @@ pub struct Method {
     pub modifier: MethodModifier,
     pub params: Vec<Param>,
     pub ret: Option<Type>,
+    /// The capability/effects clause (`uses Telemetry`, …) — the authority the
+    /// method body may exercise. Empty when omitted; same gate as a function.
+    pub uses: Vec<String>,
     pub body: Option<Expr>,
 }
 
