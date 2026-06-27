@@ -201,6 +201,35 @@ fn infix_op(tok: &Token) -> Option<BinOp> {
     })
 }
 
+/// A bare binary operator usable as a *value* — the arithmetic, comparison, and
+/// logical operators. Excludes the pipe and range operators, which aren't binary
+/// value functions. Feeds the operator-as-function sugar in `parse_arg`.
+fn operator_fn(tok: &Token) -> Option<BinOp> {
+    match infix_op(tok)? {
+        BinOp::Pipe | BinOp::Range | BinOp::RangeIncl => None,
+        op => Some(op),
+    }
+}
+
+/// Desugar a bare operator in argument position to its function:
+/// `op` ⇒ `(lhs, rhs) -> lhs op rhs`.
+///
+/// **Limitation — always binary.** This produces a fixed two-parameter lambda, so
+/// it can't express a *unary* use (`-` desugars to subtraction, never negation)
+/// or any other arity. For those, write the explicit lambda (`x -> 0 - x`). The
+/// binary form covers the common cases the feature exists for: `fold(0, +)`,
+/// `fold(1, *)`, a comparison passed to a higher-order function, etc.
+fn operator_lambda(op: BinOp) -> Expr {
+    Expr::Lambda {
+        params: vec!["lhs".to_string(), "rhs".to_string()],
+        body: Box::new(Expr::Binary {
+            op,
+            left: Box::new(Expr::Var("lhs".to_string())),
+            right: Box::new(Expr::Var("rhs".to_string())),
+        }),
+    }
+}
+
 /// If `op` is a range operator, return whether it's inclusive (`..=` vs `..`).
 fn range_kind(op: BinOp) -> Option<bool> {
     match op {
@@ -538,6 +567,16 @@ impl Parser {
         } else {
             None
         };
+        // A bare binary operator in argument position is its function:
+        // `fold(0, +)` ≡ `fold(0, (lhs, rhs) -> lhs + rhs)`. Recognised when the
+        // operator is immediately followed by an argument terminator (`,` or `)`),
+        // which a real binary expression never is.
+        if let Some(op) = operator_fn(self.peek())
+            && matches!(self.peek_at(1), Token::Comma | Token::RParen)
+        {
+            self.bump(); // the operator
+            return Ok(Arg { label, value: operator_lambda(op) });
+        }
         let mut value = self.parse_expr(0)?;
         let mut referenced = BTreeSet::new();
         collect_placeholders(&mut value, &mut referenced);

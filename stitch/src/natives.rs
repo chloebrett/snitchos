@@ -810,6 +810,20 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_operator_is_its_binary_function() {
+        // `fold(0, +)` ≡ `fold(0, (a, b) -> a + b)` — an operator in argument
+        // position is its binary function.
+        assert_eq!(
+            run_program("main() = [1, 2, 3, 4] |> fold(0, +)"),
+            Value::Int(10)
+        );
+        assert_eq!(
+            run_program("main() = [1, 2, 3, 4] |> fold(1, *)"),
+            Value::Int(24)
+        );
+    }
+
+    #[test]
     fn reverse_reverses_a_list() {
         assert_eq!(
             run_program("main() = reverse([1, 2, 3]) == [3, 2, 1]"),
