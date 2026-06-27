@@ -28,6 +28,7 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("supervisor", "SNITCHOS_SUPERVISOR_ELF"),
     ("spinner", "SNITCHOS_SPINNER_ELF"),
     ("init", "SNITCHOS_INIT_ELF"),
+    ("ep_maker", "SNITCHOS_EP_MAKER_ELF"),
     ("reaper", "SNITCHOS_REAPER_ELF"),
     ("memhog", "SNITCHOS_MEMHOG_ELF"),
     ("ipc-sender", "SNITCHOS_IPC_SENDER_ELF"),

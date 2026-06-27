@@ -2714,6 +2714,28 @@ pub fn init_supervises_a_child(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.13 `EndpointCreate` — a process manufactures its own IPC endpoint and gets
+/// back a real *owning* capability (`workload=endpoint-create`). `ep_maker`
+/// creates an endpoint, then mints a badged `SEND` cap on it; minting requires the
+/// returned cap to name a real endpoint *and* carry `MINT`, so a success proves
+/// `EndpointCreate` delivered the owning `RECV | MINT` cap (not a kernel-created
+/// one). Asserts the `minted` marker is 1.
+pub fn endpoint_create_yields_an_owning_cap(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.epmaker.minted")
+                && *value == 1
+        }
+        _ => false,
+    })
+    .ok_or(
+        "epmaker.minted != 1 — EndpointCreate didn't return a real owning endpoint \
+         cap (minting a badged SEND on it was refused)",
+    )?;
+
+    Ok(())
+}
+
 /// v0.12 process teardown — Exit **reclaims** the child's address space
 /// (`workload=spawn-reap`). The `reaper` parent spawns + `Wait`s a `memhog`
 /// child 30 times; each child allocates + touches ~4 MiB (~1024 user frames)

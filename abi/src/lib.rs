@@ -203,6 +203,14 @@ pub enum Syscall {
     /// `a1`; the zombie is reaped. Used by `init` to supervise children whose ids
     /// it needn't track and that exit in any order. Same-hart in v0.13.
     WaitAny = 24,
+    /// Create a fresh IPC endpoint and return an owning capability to it (v0.13).
+    /// No arguments; returns in `a0` a handle to a new `Endpoint` cap the caller
+    /// holds with `RECV | MINT` — it owns the endpoint (may receive, and mint
+    /// badged `SEND` caps for clients). Ambient, like [`Self::NotifyCreate`]:
+    /// manufacturing your own endpoint needs no prior authority; delegating
+    /// `SEND`/`RECV` ends is where the authority split happens. Lets a process
+    /// (e.g. `init`) build its own IPC world instead of the kernel pre-creating it.
+    EndpointCreate = 25,
 }
 
 impl Syscall {
@@ -237,6 +245,7 @@ impl Syscall {
             22 => Some(Self::Signal),
             23 => Some(Self::WaitNotify),
             24 => Some(Self::WaitAny),
+            25 => Some(Self::EndpointCreate),
             _ => None,
         }
     }
@@ -300,6 +309,7 @@ mod tests {
         assert_eq!(Syscall::Signal as usize, 22);
         assert_eq!(Syscall::WaitNotify as usize, 23);
         assert_eq!(Syscall::WaitAny as usize, 24);
+        assert_eq!(Syscall::EndpointCreate as usize, 25);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Exit));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Yield));
@@ -326,6 +336,7 @@ mod tests {
         assert_eq!(Syscall::from_usize(22), Some(Syscall::Signal));
         assert_eq!(Syscall::from_usize(23), Some(Syscall::WaitNotify));
         assert_eq!(Syscall::from_usize(24), Some(Syscall::WaitAny));
-        assert_eq!(Syscall::from_usize(25), None);
+        assert_eq!(Syscall::from_usize(25), Some(Syscall::EndpointCreate));
+        assert_eq!(Syscall::from_usize(26), None);
     }
 }

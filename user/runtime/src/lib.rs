@@ -159,6 +159,26 @@ pub fn spawn(program_id: usize, handles: &[u32]) -> Option<u32> {
     if ret == usize::MAX { None } else { Some(ret as u32) }
 }
 
+/// Create a fresh IPC endpoint, returning an owning [`Endpoint`] capability the
+/// caller holds with `RECV | MINT` (`EndpointCreate` syscall). Ambient — making
+/// your own endpoint needs no prior cap; mint badged `SEND` caps from it for
+/// clients and delegate the ends you want. Lets a process build its own IPC world
+/// (e.g. `init` bringing up a server) instead of relying on a kernel-created one.
+#[must_use]
+pub fn endpoint_create() -> Endpoint {
+    let handle: usize;
+    // SAFETY: `ecall`; the kernel allocates an endpoint, inserts a RECV|MINT cap
+    // into our table, and returns its handle in a0.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::EndpointCreate as usize,
+            out("a0") handle,
+        );
+    }
+    Endpoint::from_raw_handle(handle)
+}
+
 unsafe extern "C" {
     /// The program entry, provided by each binary's `#[entry] fn main` (the
     /// macro emits the `#[unsafe(no_mangle)] extern "C"` symbol). Returns `()` — the runtime

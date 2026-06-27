@@ -90,6 +90,11 @@ pub static SPINNER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPINNER_ELF"));
 /// and reaps it via `WaitAny` — the delegation-graph root (v0.13).
 pub static INIT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_INIT_ELF"));
 
+/// The `workload=endpoint-create` program: manufactures its own endpoint via
+/// `EndpointCreate` and mints a badged `SEND` cap on it — proves the syscall hands
+/// back a real owning `RECV | MINT` cap (v0.13).
+pub static EP_MAKER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_EP_MAKER_ELF"));
+
 /// The `workload=spawn-reap` parent: spawns + `Wait`s a memory-hungry `memhog`
 /// child 30 times. Drives the reclaim integration test — leaks (and OOMs)
 /// without per-process teardown on Exit.
@@ -293,6 +298,10 @@ pub static SUPERVISOR: ProgramSpec = ProgramSpec { elf: SUPERVISOR_ELF, launch: 
 /// `workload=init`: the supervising root — spawns + `WaitAny`-reaps a child,
 /// delegating its span cap downward. Holds only its bootstrap caps (Launch::Plain).
 pub static INIT: ProgramSpec = ProgramSpec { elf: INIT_ELF, launch: Launch::Plain };
+
+/// `workload=endpoint-create`: manufactures its own endpoint via `EndpointCreate`
+/// (ambient — no kernel-created endpoint, Launch::Plain) and proves it by minting.
+pub static EP_MAKER: ProgramSpec = ProgramSpec { elf: EP_MAKER_ELF, launch: Launch::Plain };
 
 /// `workload=spawn-reap`: the reclaim-test parent (ambient — `Spawn`/`Wait` need
 /// no cap; the `memhog` children it spawns inherit no delegated authority).
@@ -571,6 +580,12 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::Init, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "init", program: &INIT, priority: Priority::Normal }],
+    }),
+    // v0.13 EndpointCreate: a single program manufactures its own endpoint and
+    // proves it by minting — no kernel-created endpoint (`needs_endpoint: false`).
+    (WorkloadKind::EndpointCreate, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "ep_maker", program: &EP_MAKER, priority: Priority::Normal }],
     }),
     // v0.12 notification smoke: the `notify-waiter` parent boots and `Spawn`s the
     // `notify-signaller` child (SPAWNABLE id 2) at runtime, delegating the

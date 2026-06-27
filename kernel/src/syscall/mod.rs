@@ -58,6 +58,7 @@ pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::NotifyCreate) => notify::handle_notify_create(frame),
         Some(Syscall::Signal) => notify::handle_signal(frame),
         Some(Syscall::WaitNotify) => notify::handle_wait_notify(frame),
+        Some(Syscall::EndpointCreate) => ipc::handle_endpoint_create(frame),
         None => {
             let n = frame.a7 as u8;
             refuse(frame, n, protocol::RefusalReason::UnknownSyscall);

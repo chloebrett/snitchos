@@ -127,6 +127,10 @@ pub enum WorkloadKind {
     /// (delegating its span cap) and reaps it via `WaitAny` — the root of the
     /// capability delegation graph. The first userspace process's eventual shape.
     Init,
+    /// v0.13 EndpointCreate: a single program manufactures its own IPC endpoint
+    /// via the `EndpointCreate` syscall and proves the returned cap is a real
+    /// owning `RECV | MINT` by minting a badged `SEND` on it.
+    EndpointCreate,
     /// v0.8b priority demo: a `High`-priority and a `Low`-priority cooperative
     /// worker share one hart. The High worker runs far more often (priority
     /// respected), but the Low worker still makes progress (aging prevents
@@ -253,6 +257,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "spawn-reap" => Some(WorkloadKind::SpawnReap),
             "wait-any" => Some(WorkloadKind::WaitAny),
             "init" => Some(WorkloadKind::Init),
+            "endpoint-create" => Some(WorkloadKind::EndpointCreate),
             "priorities" => Some(WorkloadKind::Priorities),
             "block-wake" => Some(WorkloadKind::BlockWake),
             "ipc" => Some(WorkloadKind::Ipc),

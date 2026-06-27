@@ -346,3 +346,37 @@ pub(super) fn handle_reply_recv(frame: &mut TrapFrame) {
     };
     receive_into_frame(proc, frame, ep);
 }
+
+/// Create a fresh IPC endpoint and hand the caller an owning capability (v0.13).
+/// No args; returns the new `Endpoint` cap's handle in `a0`. The cap carries
+/// `RECV | MINT` — the caller owns the endpoint (may receive, and mint badged
+/// `SEND` caps for clients). Ambient, the endpoint mirror of `NotifyCreate`: a
+/// process manufactures its own IPC world (e.g. `init` bringing up the FS server)
+/// instead of the kernel pre-creating it.
+pub(super) fn handle_endpoint_create(frame: &mut TrapFrame) {
+    use kernel_core::cap::{Capability, Object, Rights};
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::EndpointCreate as u8;
+    let Some(proc) = super::current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    let id = crate::ipc::create();
+    let rights = Rights::RECV | Rights::MINT;
+    // Stamp the holding with its global cap id — the derivation-tree root for this
+    // endpoint — so the wire `cap_id` matches and a later delegation links to it.
+    let cap_id = crate::process::next_cap_id();
+    let handle = proc.caps.lock().insert_with_id(
+        Capability { object: Object::Endpoint { id, badge: 0 }, rights },
+        cap_id,
+    );
+
+    crate::tracing::emit_cap_granted(
+        cap_id,
+        crate::sched::current_task_id().0,
+        protocol::CapObject::Endpoint,
+        rights.bits(),
+    );
+    frame.a0 = u64::from(handle.raw());
+}
