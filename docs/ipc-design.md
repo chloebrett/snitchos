@@ -2,9 +2,9 @@
 
 *Mechanism in the kernel, policy in userspace. Synchronous by default. Capability-gated. Every message traced.*
 
-Not built until v0.9. Designed now because the IPC message format and the trace-context commitment shape the observability protocol and the kernel boundary.
+**Status: shipped.** Synchronous endpoints landed at **v0.9**, badged endpoints + cap-transfer at **v0.9c**, and notifications (the async primitive) at **v0.12**. This page is the design rationale; it predates some of that numbering, so trust the per-section ✅ markers and `docs/roadmap-and-milestones.md` for what's actually built.
 
-> **Numbering note:** this page predates two insertions — SMP at v0.6 and preemption at v0.8 — which pushed everything downstream forward. IPC (synchronous endpoints + notifications) now lands at **v0.9**; userspace + capabilities are the shipped **v0.7a/v0.7b**, with **v0.8 preemption** in between. See `docs/roadmap-and-milestones.md` for the current sequence.
+> **Numbering note:** this page was written before SMP (v0.6) and preemption (v0.8) were inserted, which pushed everything downstream. The plan-era "IPC at v0.9" became: synchronous endpoints + `call`/`reply` at **v0.9/v0.9b**, badged endpoints at **v0.9c**, and the async **notification** primitive at **v0.12** (it was never a "v0.9d" — the roadmap went v0.9→v0.10 FS→v0.11 console/spawn→v0.12 exit/wait+notifications). userspace + capabilities are **v0.7a/v0.7b**.
 
 # Stated philosophy: "don't communicate by sharing memory" — at the OS level
 Go's slogan — *don't communicate by sharing memory; share memory by communicating* — is the guiding philosophy, but it reframes at the OS level.
@@ -32,8 +32,17 @@ Why this is the default for SnitchOS specifically:
 
 Accepted costs: deadlock is possible (A calls B, B calls A) — requires acyclic call-graph discipline and/or abortable/timeout sends. Servers must have a specific loop shape (loop on receive). Both are well-understood and both are good blog content.
 
-## Notifications — the async primitive
-The physical world is asynchronous — interrupts happen whether or not anyone is ready to receive. So an async primitive is mandatory. But it does not have to be buffered channels; it is a **notification**: async signalling stripped to the bone. Essentially a per-object set of bits. Signalling sets a bit and wakes any waiter; it carries no payload (or one word at most). No arbitrary-message buffer, so no buffering problem. Models interrupts arriving and readiness signals ("data is ready, come do a synchronous receive").
+## Notifications — the async primitive ✅ (v0.12)
+The physical world is asynchronous — interrupts happen whether or not anyone is ready to receive. So an async primitive is mandatory. But it does not have to be buffered channels; it is a **notification**: async signalling stripped to the bone. A per-object word of bits; signalling sets bits and wakes any waiter; it carries no payload. No arbitrary-message buffer, so no buffering problem. Models interrupts arriving and readiness signals ("data is ready, come do a synchronous receive").
+
+It is the **async dual of the synchronous endpoint**: a `send`/`call` *rendezvouses* (the initiator can block, a message crosses); a `signal` is *fire-and-forget* (the signaller never blocks, no data, signals **coalesce**). What shipped (plan: [plans/v0.12-notifications.md](../plans/v0.12-notifications.md); pure core `kernel-core/src/notify.rs`):
+
+- `Object::Notification { id }` with `SIGNAL` / `WAIT` rights (the producer/consumer split, like the endpoint's `SEND`/`RECV`). Created by `NotifyCreate` (returns a `SIGNAL | WAIT` cap); ends handed out via cap-transfer.
+- `Signal(notif, mask)` ORs `mask` into the pending bits and wakes a waiter — **never blocks, never fails for resources**. Repeated signals before a wait coalesce (it's a bitset OR, not a queue).
+- `WaitNotify(notif)` returns the pending bits **and clears them** (drain), or blocks until signalled. **One waiter** per notification (a second is refused, `NotificationBusy`) — multi-waiter wake is a deferred generalization.
+- Observable: `NotifySignal` / `NotifyWait` wire frames.
+
+> **Notifications are one leg of userspace device drivers** (the roadmap's v1.2 smoltcp-over-virtio-net goal). A driver needs three things: (1) **interrupts delivered as notifications** — the kernel's IRQ handler `signal`s, the driver thread `wait`s — *this primitive*; (2) **MMIO register access** granted as a device-memory capability; (3) **DMA buffers** the device addresses physically. Notification is necessary but not sufficient. (The virtio-*console* stays in-kernel regardless — it's the boot-time telemetry lifeline, so it can't depend on a userspace process that doesn't exist yet.)
 
 # Message payload: inline words, bulk copy, shared regions
 Three tiers, by size and synchrony:
@@ -136,7 +145,7 @@ Mild gravitational pull worth noting: the software that runs well on SnitchOS is
 *"Don't communicate by sharing memory" — at the OS level.* Most readers meet the slogan as Go advice; showing how it reframes when isolation is the default instead of sharing is a fresh angle that ties the IPC design to an idea readers already have opinions about.
 
 # Decisions locked
-- Two primitives: synchronous endpoints (workhorse) + notifications (async, payload-free).
+- Two primitives: synchronous endpoints (workhorse, ✅ v0.9) + notifications (async, payload-free, ✅ v0.12).
 - Synchronous is the default IPC primitive; direct context switch on the hot path.
 - Payload: small messages copied inline via message registers; large payloads via `MemoryRegion` capability transfer. A message is inline words + capabilities.
 - ✅ **(v0.9c)** Endpoint caps carry an immutable, server-chosen **badge** delivered unforgeably to the receiver in `a6`; one endpoint demuxes many objects/clients by badge.
