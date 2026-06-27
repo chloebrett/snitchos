@@ -42,6 +42,15 @@ max(xs) =
             Some(m) => x > m => Some(x) | acc
         })
 
+// first/last as a Maybe (None for an empty list). Derived from fold, so for a
+// List (eager); a Seq would diverge — force a prefix first.
+first(xs) = fold(xs, None, (acc, x) -> match acc { None => Some(x)  Some(_) => acc })
+
+last(xs) = fold(xs, None, (_, x) -> Some(x))
+
+// flatten a List of Lists by concatenating — flatMap with the identity.
+flatten(xss) = flatMap(xss, xs -> xs)
+
 // --- the Try contract: `?` short-circuits on the failure case ---
 // `x?` desugars to `x.isFailure() => return x | x.unwrap()`. Std implements it
 // for the built-in Maybe/Result; a user type with a success/failure split can

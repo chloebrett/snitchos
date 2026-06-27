@@ -74,11 +74,20 @@ to **`take(seq, count)`** (collection-first), all call sites moved to the pipe
 form (`seq |> take(3)`), and the post-4 example `… |> take(10) |> fold(…)` now
 actually runs as written. One TDD increment.
 
+## Iteration C — pairing & joining ✅ SHIPPED
+
+- `first(xs)` / `last(xs)` → `Maybe` — **prelude** (fold-derived), List/finite.
+- `flatten(xss)` — **prelude** (`flatMap` with the identity), now that `flatMap`
+  and `concat` exist — the dogfooding paying off (a stdlib fn built from another).
+- `concat(xs, ys)` — native, List append (also the primitive `flatten` rides on).
+- `zip(xs, ys)` — native, `List` of 2-tuples, stops at the shorter.
+- `enumerate(xs)` — native, `List` of `(index, element)` tuples.
+
 ## Deferred follow-ons
 
-- **More flat combinators** — `zip`, `enumerate`, `first`/`last`, lazy `Seq`
-  `flatMap`. Written in Stitch where derivable from `fold`; native where they need
-  new primitives (cons/concat/index).
+- **More flat combinators** — `zipWith`, `unique`/`distinct`, `indexOf`, lazy
+  `Seq` `flatMap`/`zip`. Stitch where derivable from `fold`/`flatMap`/`concat`;
+  native where they need new primitives.
 - **More `Seq` producers** — `cycle`, `unfold`.
 - **`Str` extras** — `endsWith`, `chars`, `words`, `lines`, `padLeft`.
 - **Embedded-source stdlib modules** — when a stdlib fn is written in Stitch

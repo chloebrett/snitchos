@@ -103,6 +103,21 @@ pub(crate) const NATIVES: &[NativeFn] = &[
         arity: 2,
         func: native_sort_by,
     },
+    NativeFn {
+        name: "concat",
+        arity: 2,
+        func: native_concat,
+    },
+    NativeFn {
+        name: "zip",
+        arity: 2,
+        func: native_zip,
+    },
+    NativeFn {
+        name: "enumerate",
+        arity: 1,
+        func: native_enumerate,
+    },
     // --- string operations (exposed under the `Str` module; `str`-prefixed
     //     internally so generic names don't clutter the flat namespace) ---
     NativeFn {
@@ -559,6 +574,47 @@ fn native_sort_by(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     Ok(Value::List(keyed.into_iter().map(|(_, item)| item).collect::<Vec<_>>().into()))
 }
 
+/// `concat(xs, ys)` — the two lists appended into one. Eager (List).
+fn native_concat(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [xs, ys] = args else {
+        return Err(RuntimeError::new("concat expects (xs, ys)"));
+    };
+    let mut out = expect_list("concat", xs)?.to_vec();
+    out.extend(expect_list("concat", ys)?.iter().cloned());
+    Ok(Value::List(out.into()))
+}
+
+/// `zip(xs, ys)` — pair up elements positionally into a `List` of 2-tuples,
+/// stopping at the shorter list. Eager (List).
+fn native_zip(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [xs, ys] = args else {
+        return Err(RuntimeError::new("zip expects (xs, ys)"));
+    };
+    let pairs = expect_list("zip", xs)?
+        .iter()
+        .zip(expect_list("zip", ys)?.iter())
+        .map(|(x, y)| Value::Tuple(vec![x.clone(), y.clone()].into()))
+        .collect::<Vec<_>>();
+    Ok(Value::List(pairs.into()))
+}
+
+/// `enumerate(xs)` — pair each element with its index into a `List` of
+/// `(index, element)` tuples. Eager (List).
+fn native_enumerate(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [list] = args else {
+        return Err(RuntimeError::new("enumerate expects (list)"));
+    };
+    let pairs = expect_list("enumerate", list)?
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let index = i64::try_from(index).unwrap_or(i64::MAX);
+            Value::Tuple(vec![Value::Int(index), item.clone()].into())
+        })
+        .collect::<Vec<_>>();
+    Ok(Value::List(pairs.into()))
+}
+
 /// `flatMap(xs, f)` — map each element to a `List` and concatenate the results.
 /// Eager (List). `f` must return a `List`.
 fn native_flat_map(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
@@ -811,6 +867,27 @@ mod tests {
     }
 
     #[test]
+    fn first_and_last_return_the_ends_as_maybe() {
+        assert_eq!(
+            run_program("main() = first([10, 20, 30]) == Some(10)"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program("main() = last([10, 20, 30]) == Some(30)"),
+            Value::Bool(true)
+        );
+        assert_eq!(run_program("main() = first([]) == None"), Value::Bool(true));
+    }
+
+    #[test]
+    fn flatten_concatenates_a_list_of_lists() {
+        assert_eq!(
+            run_program("main() = flatten([[1, 2], [3], [4, 5]]) == [1, 2, 3, 4, 5]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
     fn min_and_max_find_the_extremes_as_maybe() {
         assert_eq!(
             run_program("main() = min([3, 1, 2]) == Some(1)"),
@@ -824,6 +901,34 @@ mod tests {
         // works on strings too, now that `<` is lexicographic
         assert_eq!(
             run_program(r#"main() = min(["b", "a", "c"]) == Some("a")"#),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn concat_appends_two_lists() {
+        assert_eq!(
+            run_program("main() = concat([1, 2], [3, 4]) == [1, 2, 3, 4]"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run_program("main() = concat([], [1]) == [1]"),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn zip_pairs_two_lists_stopping_at_the_shorter() {
+        assert_eq!(
+            run_program(r#"main() = zip([1, 2, 3], ["a", "b"]) == [(1, "a"), (2, "b")]"#),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn enumerate_pairs_each_element_with_its_index() {
+        assert_eq!(
+            run_program(r#"main() = enumerate(["a", "b", "c"]) == [(0, "a"), (1, "b"), (2, "c")]"#),
             Value::Bool(true)
         );
     }
