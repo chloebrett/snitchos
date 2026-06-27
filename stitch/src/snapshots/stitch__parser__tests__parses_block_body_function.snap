@@ -7,6 +7,7 @@ expression: "prog(\"run() { let x = 1  x + 1 }\")"
         name: "run",
         params: [],
         ret: None,
+        uses: [],
         body: Block {
             stmts: [
                 Let {

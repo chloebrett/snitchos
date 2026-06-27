@@ -30,6 +30,7 @@ expression: "prog(\"prod P(x: Int)  area(p) = p.x * 2\")"
             },
         ],
         ret: None,
+        uses: [],
         body: Binary {
             op: Mul,
             left: Field {

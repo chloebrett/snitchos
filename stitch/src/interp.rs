@@ -60,6 +60,10 @@ pub fn build_env_with_telemetry(telemetry: Rc<dyn Telemetry>, items: &[Item]) ->
 }
 
 fn build_env_in(env: Env, items: &[Item]) -> Env {
+    // The program entry / REPL prompt holds the process's ambient capabilities —
+    // it *was* handed a `TelemetrySink` cap. Authority threads down from here;
+    // named functions then narrow it to their declared `uses`.
+    let env = env.with_authority(BTreeSet::from(["Telemetry".to_string()]));
     let mut reg = Registration::default();
     for native in NATIVES {
         reg.globals.insert(native.name.to_string(), Value::Native(*native));
@@ -434,6 +438,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             params: params.clone(),
             body: (**body).clone(),
             env: env.clone(),
+            uses: None,
         }))),
         // `receiver.method(args)` parses as a call whose callee is a field
         // access (there is no dedicated method-call node). Intercept that shape
@@ -657,6 +662,12 @@ pub(crate) fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<
             let mut call_env = closure.env.clone();
             for (param, arg) in closure.params.iter().zip(args) {
                 call_env = call_env.extend(param.clone(), arg.clone());
+            }
+            // A named function runs with *exactly* its declared `uses` — authority
+            // does not inherit across the boundary (least privilege). A lambda
+            // (`uses: None`) keeps the authority of its defining env.
+            if let Some(uses) = &closure.uses {
+                call_env = call_env.with_authority(uses.iter().cloned().collect());
             }
             // This is a function boundary, so `?`'s early-return stops here and
             // becomes the call's value.
@@ -943,6 +954,7 @@ fn eval_safe_field(object: &Value, name: &str, env: &Env) -> Result<Value, Runti
             name: name.to_string(),
         },
         env: env.clone(),
+        uses: None,
     }));
     call_instance_method(object, "map", core::slice::from_ref(&accessor), env)?.ok_or_else(|| {
         RuntimeError::new(format!(
@@ -1095,6 +1107,7 @@ fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env) -> Result<Value,
                     params: binding.iter().cloned().collect(),
                     body: rest,
                     env: scope.clone(),
+                    uses: None,
                 }));
                 return apply_use(call, callback, &scope);
             }
@@ -2113,7 +2126,7 @@ mod tests {
     fn use_makes_the_rest_of_the_block_the_callback() {
         // `use <- span("report")` ≡ `span("report", () -> { emit(...) })`
         assert_eq!(
-            run_program_events(r#"main() = { use <- span("report")  emit("x", 1) }"#),
+            run_program_events(r#"main() uses Telemetry = { use <- span("report")  emit("x", 1) }"#),
             vec![
                 TelemetryEvent::SpanOpen {
                     name: "report".to_string()
@@ -2332,7 +2345,7 @@ mod tests {
     #[test]
     fn prelude_each_runs_for_effect() {
         assert_eq!(
-            run_program_events(r#"main() = each([1, 2, 3], x -> emit("n", x))"#),
+            run_program_events(r#"main() uses Telemetry = each([1, 2, 3], x -> emit("n", x))"#),
             vec![
                 TelemetryEvent::Emit {
                     name: "n".to_string(),
@@ -2376,7 +2389,7 @@ mod tests {
         // `use <- span` + `emit`, together — the shape of the canonical sample.
         let src = r#"
             prod Reading(sensor: Str, celsius: Int)
-            report(readings) = {
+            report(readings) uses Telemetry = {
                 use <- span("report")
                 let hot = readings |> filter($.celsius > 30) |> map($.celsius)
                 emit("hot.count", fold(hot, 0, (acc, _) -> acc + 1))

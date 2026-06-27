@@ -22,6 +22,7 @@ expression: "prog(\"fetch(url: Str) -> Response = get(url)\")"
                 args: [],
             },
         ),
+        uses: [],
         body: Call {
             callee: Var(
                 "get",

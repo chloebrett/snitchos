@@ -62,6 +62,7 @@ expression: "prog(\"sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)
             },
         ],
         ret: None,
+        uses: [],
         body: Match {
             subject: Var(
                 "s",
@@ -133,6 +134,7 @@ expression: "prog(\"sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)
             },
         ],
         ret: None,
+        uses: [],
         body: Binary {
             op: Pipe,
             left: Binary {

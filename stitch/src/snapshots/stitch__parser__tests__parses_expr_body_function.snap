@@ -12,6 +12,7 @@ expression: "prog(\"double(x) = x * 2\")"
             },
         ],
         ret: None,
+        uses: [],
         body: Binary {
             op: Mul,
             left: Var(

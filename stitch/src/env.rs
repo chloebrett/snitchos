@@ -13,7 +13,7 @@
 use core::str;
 use core::cell::{OnceCell, RefCell};
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
@@ -45,6 +45,12 @@ pub struct Env {
     /// [`RecordingTelemetry`]; the on-target build installs a syscall-backed one
     /// via [`Env::with_telemetry`].
     telemetry: Rc<dyn Telemetry>,
+    /// The capabilities in scope — the authority the running code may exercise
+    /// (e.g. `Telemetry` to call `emit`/`span`). A named function's body runs
+    /// with exactly its declared `uses` (set via [`Env::with_authority`] at the
+    /// call boundary); lambdas and inner scopes inherit through `extend`. The
+    /// program entry / REPL prompt is seeded with the process's ambient caps.
+    authority: Rc<BTreeSet<String>>,
 }
 
 impl Default for Env {
@@ -81,7 +87,23 @@ impl Env {
             methods: Rc::new(OnceCell::new()),
             field_mut: Rc::new(OnceCell::new()),
             telemetry,
+            authority: Rc::new(BTreeSet::new()),
         }
+    }
+
+    /// A clone of this environment carrying `authority` as its capability set —
+    /// the call-boundary primitive for a named function (its body runs with
+    /// exactly its declared `uses`, replacing the caller's). Inner scopes inherit
+    /// it via [`extend`](Self::extend).
+    #[must_use]
+    pub fn with_authority(self, authority: BTreeSet<String>) -> Env {
+        Env { authority: Rc::new(authority), ..self }
+    }
+
+    /// Whether capability `cap` is in scope — the gate `emit`/`span` consult.
+    #[must_use]
+    pub fn has_authority(&self, cap: &str) -> bool {
+        self.authority.contains(cap)
     }
 
     /// An environment sharing this one's globals, methods, and telemetry sink
@@ -98,6 +120,7 @@ impl Env {
             methods: Rc::clone(&self.methods),
             field_mut: Rc::clone(&self.field_mut),
             telemetry: Rc::clone(&self.telemetry),
+            authority: Rc::clone(&self.authority),
         }
     }
 
@@ -114,6 +137,7 @@ impl Env {
             methods: Rc::clone(&self.methods),
             field_mut: Rc::clone(&self.field_mut),
             telemetry: Rc::clone(&self.telemetry),
+            authority: Rc::clone(&self.authority),
         }
     }
 
@@ -142,6 +166,7 @@ impl Env {
             methods: Rc::clone(&self.methods),
             field_mut: Rc::clone(&self.field_mut),
             telemetry: Rc::clone(&self.telemetry),
+            authority: Rc::clone(&self.authority),
         }
     }
 

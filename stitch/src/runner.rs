@@ -255,6 +255,22 @@ mod tests {
     use crate::runner::{discover_modules, run_module_files, run_program_source};
 
     #[test]
+    fn emitting_from_a_function_without_uses_telemetry_is_refused() {
+        // `speak` calls emit but declares no `uses` — even though `main` holds
+        // Telemetry, authority does not inherit across the named-function boundary.
+        let r = run_program_source("speak() = emit(\"x\", 1)  main() uses Telemetry = speak()");
+        assert_eq!(r.exit_code, 1, "stdout={} stderr={}", r.stdout, r.stderr);
+        assert!(r.stderr.contains("uses Telemetry"), "{}", r.stderr);
+    }
+
+    #[test]
+    fn emitting_from_a_function_that_declares_uses_telemetry_is_allowed() {
+        let r = run_program_source("main() uses Telemetry = emit(\"hits\", 7)");
+        assert_eq!(r.exit_code, 0, "stderr={}", r.stderr);
+        assert!(r.stdout.contains("emit hits = 7"), "{}", r.stdout);
+    }
+
+    #[test]
     fn loading_source_registers_definitions_for_later_calls() {
         let mut repl = super::Repl::new();
         let summary = repl.load_source("double(x) = x * 2\ntriple(x) = x * 3");
@@ -358,14 +374,14 @@ mod tests {
 
     #[test]
     fn a_unit_result_prints_no_result_line() {
-        let result = run_program_source(r#"main() = emit("x", 1)"#);
+        let result = run_program_source(r#"main() uses Telemetry = emit("x", 1)"#);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "emit x = 1\n");
     }
 
     #[test]
     fn renders_telemetry_with_span_nesting() {
-        let src = r#"main() = span("report", () -> emit("hot.count", 2))"#;
+        let src = r#"main() uses Telemetry = span("report", () -> emit("hot.count", 2))"#;
         let result = run_program_source(src);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "span report {\n  emit hot.count = 2\n}\n");
@@ -394,7 +410,7 @@ mod tests {
     fn telemetry_emitted_before_a_runtime_error_is_still_shown() {
         let src = r#"
             boom() = 1 / 0
-            main() = { emit("before", 1)  boom() }
+            main() uses Telemetry = { emit("before", 1)  boom() }
         "#;
         let result = run_program_source(src);
         assert_eq!(result.exit_code, 1);

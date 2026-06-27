@@ -13,7 +13,7 @@ isPrime(n: Int) -> Bool =
 
 // The first `n` primes, as a List. The whole search is one `primes.compute`
 // span; it reports how many it found and the largest.
-primes(n: Int) -> List<Int> {
+primes(n: Int) -> List<Int> uses Telemetry {
     use <- span("primes.compute")
     let found = 1.. |> filter(isPrime) |> take(n) |> toList
     emit("primes.count", found |> count)
@@ -23,7 +23,7 @@ primes(n: Int) -> List<Int> {
 
 // Summary statistics over a list you supply. Spans the work, emits each stat as
 // its own gauge, and returns the sum.
-analyze(xs: List<Int>) -> Int {
+analyze(xs: List<Int>) -> Int uses Telemetry {
     use <- span("analyze")
     emit("analyze.count", xs |> count)
     emit("analyze.sum", xs |> total)

@@ -89,4 +89,27 @@ mod tests {
         assert_eq!(edit.line.as_deref(), Some(""));
         assert_eq!(edit.echo, b"\r\n");
     }
+
+    #[test]
+    fn drops_control_and_non_ascii_bytes() {
+        let mut editor = LineEditor::new();
+
+        let edit = editor.feed(b"a\tb\xc3\xa9\n");
+
+        assert_eq!(edit.line.as_deref(), Some("ab"));
+        assert_eq!(edit.echo, b"ab\r\n");
+    }
+
+    #[test]
+    fn retains_a_partial_line_across_reads() {
+        let mut editor = LineEditor::new();
+
+        let first = editor.feed(b"hi");
+        assert_eq!(first.line, None);
+        assert_eq!(first.echo, b"hi");
+
+        let second = editor.feed(b"\n");
+        assert_eq!(second.line.as_deref(), Some("hi"));
+        assert_eq!(second.echo, b"\r\n");
+    }
 }

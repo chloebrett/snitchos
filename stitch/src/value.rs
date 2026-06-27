@@ -190,6 +190,10 @@ pub struct ClosureData {
     pub params: Vec<String>,
     pub body: Expr,
     pub env: Env,
+    /// The capability/effects clause for a *named function* (`Some`, possibly
+    /// empty) — its body runs with exactly these authorities, not the caller's.
+    /// `None` for a lambda, which inherits the authority of where it was defined.
+    pub uses: Option<Vec<String>>,
 }
 
 impl Value {

@@ -31,6 +31,7 @@ expression: "prog(\"add(a: Int, b: Int) -> Int = a + b\")"
                 args: [],
             },
         ),
+        uses: [],
         body: Binary {
             op: Add,
             left: Var(

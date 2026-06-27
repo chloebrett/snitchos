@@ -889,14 +889,35 @@ impl Parser {
         } else {
             None
         };
+        let uses = self.parse_uses()?;
         let body = self.parse_body()?;
         Ok(Item::Func {
             name,
             params,
             ret,
+            uses,
             body,
             public,
         })
+    }
+
+    /// An optional `uses Cap1, Cap2, …` effects clause, after the return type
+    /// and before the body. Empty when absent. Each capability is a bare name.
+    fn parse_uses(&mut self) -> Result<Vec<String>, ParseError> {
+        if !matches!(self.peek(), Token::Uses) {
+            return Ok(Vec::new());
+        }
+        self.bump();
+        let mut caps = Vec::new();
+        loop {
+            caps.push(self.expect_ident("capability name after `uses`")?);
+            if matches!(self.peek(), Token::Comma) {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        Ok(caps)
     }
 
     /// A comma-separated parameter list up to and including `)`. The `(` is
@@ -1956,6 +1977,21 @@ mod tests {
         };
         assert_eq!(module, "math");
         assert_eq!(names.as_slice(), ["double".to_string(), "area".to_string()]);
+    }
+
+    #[test]
+    fn parses_a_uses_effects_clause() {
+        let one = prog("emitIt() uses Telemetry = 1");
+        let Item::Func { uses, .. } = &one[0] else { panic!("expected a function") };
+        assert_eq!(uses.as_slice(), ["Telemetry".to_string()]);
+
+        let many = prog("act() uses Net, Tasks { 1 }");
+        let Item::Func { uses, .. } = &many[0] else { panic!("expected a function") };
+        assert_eq!(uses.as_slice(), ["Net".to_string(), "Tasks".to_string()]);
+
+        let none = prog("pure(x) = x");
+        let Item::Func { uses, .. } = &none[0] else { panic!("expected a function") };
+        assert!(uses.is_empty(), "a function with no clause has no effects");
     }
 
     #[test]

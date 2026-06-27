@@ -20,6 +20,7 @@ expression: "prog(\"let limit = 100  area(p) = p.x * limit\")"
             },
         ],
         ret: None,
+        uses: [],
         body: Binary {
             op: Mul,
             left: Field {

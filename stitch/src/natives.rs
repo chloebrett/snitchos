@@ -340,6 +340,9 @@ fn native_span(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
             name.kind()
         )));
     };
+    if !env.has_authority("Telemetry") {
+        return Err(RuntimeError::new("span requires `uses Telemetry`"));
+    }
     env.span_open(name);
     let result = apply_values(body, &[], env)?;
     env.span_close(name);
@@ -357,6 +360,9 @@ fn native_emit(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
             name.kind()
         )));
     };
+    if !env.has_authority("Telemetry") {
+        return Err(RuntimeError::new("emit requires `uses Telemetry`"));
+    }
     env.emit_metric(name, value);
     Ok(Value::Unit)
 }
@@ -1177,7 +1183,7 @@ mod tests {
         // extra time; the emit count proves it doesn't.
         assert_eq!(
             run_program_events(
-                "main() = iterate(0, x -> { emit(\"s\", x)  x + 1 }) |> take(3) |> toList"
+                "main() uses Telemetry = iterate(0, x -> { emit(\"s\", x)  x + 1 }) |> take(3) |> toList"
             ),
             vec![
                 TelemetryEvent::Emit {
@@ -1231,7 +1237,7 @@ mod tests {
     #[test]
     fn emit_records_a_metric() {
         assert_eq!(
-            run_program_events(r#"main() = emit("temp", 42)"#),
+            run_program_events(r#"main() uses Telemetry = emit("temp", 42)"#),
             vec![TelemetryEvent::Emit {
                 name: "temp".to_string(),
                 value: Value::Int(42)
@@ -1242,7 +1248,7 @@ mod tests {
     #[test]
     fn span_runs_its_body_and_returns_its_value() {
         assert_eq!(
-            run_program(r#"main() = span("s", () -> 42)"#),
+            run_program(r#"main() uses Telemetry = span("s", () -> 42)"#),
             Value::Int(42)
         );
     }
@@ -1250,7 +1256,7 @@ mod tests {
     #[test]
     fn span_brackets_its_body_with_open_and_close() {
         assert_eq!(
-            run_program_events(r#"main() = span("s", () -> emit("x", 1))"#),
+            run_program_events(r#"main() uses Telemetry = span("s", () -> emit("x", 1))"#),
             vec![
                 TelemetryEvent::SpanOpen {
                     name: "s".to_string()

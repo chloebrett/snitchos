@@ -87,12 +87,13 @@ pub(crate) fn register_items(items: &[Item], env: &Env, reg: &mut Registration) 
     for item in items {
         match item {
             Item::Func {
-                name, params, body, ..
+                name, params, uses, body, ..
             } => {
                 let closure = Value::Closure(Rc::new(ClosureData {
                     params: params.iter().map(|param| param.name.clone()).collect(),
                     body: body.clone(),
                     env: env.clone(),
+                    uses: Some(uses.clone()),
                 }));
                 reg.globals.insert(name.clone(), closure);
             }

@@ -21,12 +21,15 @@ pub enum Item {
         variants: Vec<Variant>,
         public: bool,
     },
-    /// A function: `name(params) -> Ret? body`. (No `fn` keyword; the `uses`
-    /// effects clause is deferred.)
+    /// A function: `name(params) -> Ret? (uses Cap, …)? body`. `uses` is the
+    /// capability/effects clause — the authority the body is permitted to
+    /// exercise (e.g. `uses Telemetry` to call `emit`/`span`). Empty when
+    /// omitted.
     Func {
         name: String,
         params: Vec<Param>,
         ret: Option<Type>,
+        uses: Vec<String>,
         body: Expr,
         public: bool,
     },
