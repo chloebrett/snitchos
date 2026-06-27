@@ -3,7 +3,10 @@
 //! literals, variables, unary/binary operators, grouping, and the postfix
 //! layer (calls, field access, `?.`, `?`, indexing).
 
-use std::collections::BTreeSet;
+use alloc::collections::BTreeSet;
+
+#[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
+use crate::prelude::*;
 
 use crate::ast::{
     Arg, BinOp, Expr, Field, Item, MatchArm, Method, MethodModifier, Param, Pattern, Stmt,

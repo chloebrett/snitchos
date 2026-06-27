@@ -1,5 +1,8 @@
 //! Abstract syntax tree. Grows one node per parser increment.
 
+#[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
+use crate::prelude::*;
+
 /// A top-level declaration in a program.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Item {

@@ -1,8 +1,10 @@
 //! Tree-walk interpreter: recursively evaluate an `Expr` to a `Value`. The AST
 //! *is* the program — no compilation. v0 is dynamically typed; see `value.rs`.
 
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use alloc::collections::{BTreeMap, BTreeSet};
+
+#[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
+use crate::prelude::*;
 
 use crate::ast::{Arg, BinOp, Expr, Item, MethodModifier, Stmt, StrSegment, Type};
 use crate::env::{AssignError, Env};
@@ -139,7 +141,7 @@ pub fn eval_modules_with_telemetry(
             });
             (module.name.clone(), handle)
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
     // Built-in stdlib modules are resolvable by `use` too; a user module of the
     // same name wins (these only fill names the program didn't define).
     for (name, handle) in builtin_modules(&base_reg.globals) {
@@ -262,7 +264,7 @@ pub fn is_builtin_module(name: &str) -> bool {
 
 /// Assemble the built-in module handles, resolving each spec's members against
 /// the shared base globals (where the natives live).
-fn builtin_modules(base_globals: &HashMap<String, Value>) -> Vec<(String, Rc<ModuleHandle>)> {
+fn builtin_modules(base_globals: &BTreeMap<String, Value>) -> Vec<(String, Rc<ModuleHandle>)> {
     BUILTIN_MODULE_SPECS
         .iter()
         .map(|(name, members)| {
@@ -277,7 +279,7 @@ fn builtin_modules(base_globals: &HashMap<String, Value>) -> Vec<(String, Rc<Mod
             let handle = ModuleHandle {
                 name: (*name).to_string(),
                 exports,
-                private: HashSet::new(),
+                private: BTreeSet::new(),
             };
             ((*name).to_string(), Rc::new(handle))
         })
@@ -290,8 +292,8 @@ fn builtin_modules(base_globals: &HashMap<String, Value>) -> Vec<(String, Rc<Mod
 /// missing/private selected member.
 fn link_imports(
     items: &[Item],
-    globals: &mut HashMap<String, Value>,
-    modules_by_name: &HashMap<String, Rc<ModuleHandle>>,
+    globals: &mut BTreeMap<String, Value>,
+    modules_by_name: &BTreeMap<String, Rc<ModuleHandle>>,
 ) -> Result<(), RuntimeError> {
     for item in items {
         let Item::Use { module, names } = item else {
@@ -908,7 +910,7 @@ fn eval_safe_field(object: &Value, name: &str, env: &Env) -> Result<Value, Runti
         },
         env: env.clone(),
     }));
-    call_instance_method(object, "map", std::slice::from_ref(&accessor), env)?.ok_or_else(|| {
+    call_instance_method(object, "map", core::slice::from_ref(&accessor), env)?.ok_or_else(|| {
         RuntimeError::new(format!(
             "`?.` expects a value implementing `Functor` (e.g. Maybe/Result), got {}",
             object.kind()

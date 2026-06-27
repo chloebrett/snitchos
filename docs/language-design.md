@@ -33,6 +33,8 @@ The runtime is **staged**, because the two stages teach two different things:
 
 The front end (lexer/parser/AST) is shared; only the back end is swapped. Mirrors the kernel's own `kernel-core` (pure, host-tested) vs `kernel` (target-only) split: the runtime core is host-testable Rust; only the syscall bridge is target-only. TDD discipline carries straight over.
 
+> **Update (2026-06-27): the tree-walk interpreter now also runs _on the target_.** The `stitch` library was ported to `no_std` + `alloc` (`BTreeMap` instead of `HashMap` — zero new deps; `#![cfg_attr(not(test), no_std)]` so tests keep `std`; `main.rs` stays a separate `std` bin) and **builds for `riscv64gc-unknown-none-elf`**. This is a deliberate **stepping stone** chosen over building the VM first (see `plans/spawn-shell-and-console.md`): it gets Stitch running in a SnitchOS userspace process — a **Stitch REPL/shell on the metal** — months before the bytecode VM. The original "tree-walk = host only, VM = on-target" split below still describes the *end state*; the no_std tree-walker is the interim runtime. Its known cost is the leak (it has no GC — `Rc` cycles from closures accumulate over a long session), which is exactly what the VM's collector later fixes.
+
 ## Memory: generational GC, grown from a simple collector
 
 "Implicit allocation" means managed memory. The target is a **generational tracing GC** — young/old generations, collect the young generation frequently and cheaply (most objects die young). This is what Java's collectors are, so it's the right target for the stated goal.

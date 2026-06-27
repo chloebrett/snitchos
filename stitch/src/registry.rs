@@ -3,8 +3,10 @@
 //! constructors, constants), per-type method lists, contract method tables, and
 //! per-field mutability — then folds contract default methods into conformers.
 
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use alloc::collections::{BTreeMap, BTreeSet};
+
+#[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
+use crate::prelude::*;
 
 use crate::ast::{Field, Item, Method, Type};
 use crate::env::Env;
@@ -17,23 +19,23 @@ use crate::value::{ClosureData, Constructor, DataValue, Value};
 #[derive(Default)]
 pub(crate) struct Registration {
     /// Value bindings: functions, constructors, top-level constants.
-    pub(crate) globals: HashMap<String, Value>,
+    pub(crate) globals: BTreeMap<String, Value>,
     /// Type name → its methods, gathered from every `on Type` block.
-    pub(crate) methods: HashMap<String, Vec<Method>>,
+    pub(crate) methods: BTreeMap<String, Vec<Method>>,
     /// Contract name → its methods (abstract signatures and default bodies).
-    contracts: HashMap<String, Vec<Method>>,
+    contracts: BTreeMap<String, Vec<Method>>,
     /// Type name → the contracts it declares conformance to (`on Type : C`).
-    conformances: HashMap<String, Vec<String>>,
+    conformances: BTreeMap<String, Vec<String>>,
     /// Variant name → field name → whether the field is declared `mut`. (Keyed
     /// by variant so each sum variant is independent; for a `prod` the variant
     /// name is the type name.)
-    pub(crate) field_mut: HashMap<String, HashMap<String, bool>>,
+    pub(crate) field_mut: BTreeMap<String, BTreeMap<String, bool>>,
 }
 
 impl Registration {
     /// A registration whose value namespace starts from `globals` (a shared base
     /// of natives + built-ins + prelude), ready to take a module's own items.
-    pub(crate) fn seeded(globals: HashMap<String, Value>) -> Self {
+    pub(crate) fn seeded(globals: BTreeMap<String, Value>) -> Self {
         Registration { globals, ..Self::default() }
     }
 
@@ -226,10 +228,10 @@ fn declared_names(items: &[Item]) -> Vec<(String, bool)> {
 /// (also in `globals`) out of the public surface.
 pub(crate) fn collect_exports(
     items: &[Item],
-    globals: &HashMap<String, Value>,
-) -> (HashMap<String, Value>, HashSet<String>) {
-    let mut exports = HashMap::new();
-    let mut private = HashSet::new();
+    globals: &BTreeMap<String, Value>,
+) -> (BTreeMap<String, Value>, BTreeSet<String>) {
+    let mut exports = BTreeMap::new();
+    let mut private = BTreeSet::new();
     for (name, public) in declared_names(items) {
         if public {
             if let Some(value) = globals.get(&name) {
@@ -245,7 +247,7 @@ pub(crate) fn collect_exports(
 /// Register the built-in `Maybe`/`Result` constructors: `Some`/`Ok`/`Err` take
 /// one positional field; `None` is a bare singleton value. (User declarations
 /// can still shadow these.)
-pub(crate) fn register_builtin_types(globals: &mut HashMap<String, Value>) {
+pub(crate) fn register_builtin_types(globals: &mut BTreeMap<String, Value>) {
     let single_field = |type_name: &str, variant: &str| {
         Value::Constructor(Rc::new(Constructor {
             type_name: type_name.to_string(),

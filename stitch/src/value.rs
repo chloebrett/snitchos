@@ -2,9 +2,12 @@
 //! typed: a `Value` carries its own kind, and operations check kinds at runtime
 //! (no implicit Int/Float coercion — that previews the eventual static types).
 
-use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::rc::Rc;
+use core::fmt;
+
+use alloc::collections::{BTreeMap, BTreeSet};
+
+#[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
+use crate::prelude::*;
 
 use crate::ast::Expr;
 use crate::env::Env;
@@ -60,8 +63,8 @@ pub enum Value {
 /// than "no such member".
 pub struct ModuleHandle {
     pub name: String,
-    pub exports: HashMap<String, Value>,
-    pub private: HashSet<String>,
+    pub exports: BTreeMap<String, Value>,
+    pub private: BTreeSet<String>,
 }
 
 impl ModuleHandle {
@@ -88,7 +91,7 @@ impl ModuleHandle {
 /// `Value::Seq` shares the cell (`Rc`), so forcing through one clone is visible
 /// through all — a forced step is computed at most once.
 pub struct LazySeq {
-    cell: std::cell::RefCell<SeqState>,
+    cell: core::cell::RefCell<SeqState>,
 }
 
 enum SeqState {
@@ -116,7 +119,7 @@ impl LazySeq {
     /// A lazy cell whose first force runs `thunk`.
     pub fn new(thunk: impl Fn() -> Result<Step, RuntimeError> + 'static) -> Rc<Self> {
         Rc::new(LazySeq {
-            cell: std::cell::RefCell::new(SeqState::Unforced(Rc::new(thunk))),
+            cell: core::cell::RefCell::new(SeqState::Unforced(Rc::new(thunk))),
         })
     }
 

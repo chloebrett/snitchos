@@ -2,8 +2,12 @@
 //! result and telemetry into stdout/stderr text + an exit code. The logic lives
 //! here (host-testable); `main.rs` is a thin wiring layer over it.
 
-use std::collections::HashSet;
-use std::fmt::Write as _;
+use core::fmt::Write as _;
+
+use alloc::collections::BTreeSet;
+
+#[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
+use crate::prelude::*;
 
 use crate::ast::Item;
 use crate::interp::{
@@ -73,7 +77,7 @@ pub fn discover_modules(
     entry: &str,
     fetch: impl Fn(&str) -> Result<String, String>,
 ) -> Result<Vec<Module>, String> {
-    let mut seen = HashSet::new();
+    let mut seen = BTreeSet::new();
     let mut pending = vec![entry.to_string()];
     let mut modules = Vec::new();
     while let Some(name) = pending.pop() {

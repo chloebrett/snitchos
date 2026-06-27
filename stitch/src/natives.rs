@@ -3,7 +3,10 @@
 //! plus the telemetry stubs `emit`/`span`). Everything else in the stdlib is the
 //! Stitch-source prelude, layered on top of these.
 
-use std::cmp::Ordering;
+use core::cmp::Ordering;
+
+#[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
+use crate::prelude::*;
 
 use crate::env::Env;
 use crate::interp::apply_values;
@@ -236,7 +239,7 @@ fn iterate_seq(current: Value, f: Value, env: Env) -> Value {
         // so `f` runs once per element actually demanded — never one ahead.
         let (f, env, current_for_tail) = (f.clone(), env.clone(), current.clone());
         let tail = Value::Seq(LazySeq::new(move || {
-            let next = apply_values(&f, std::slice::from_ref(&current_for_tail), &env)?;
+            let next = apply_values(&f, core::slice::from_ref(&current_for_tail), &env)?;
             force_seq(&iterate_seq(next, f.clone(), env.clone()))
         }));
         Ok(Step::Cons(current.clone(), tail))
@@ -556,7 +559,7 @@ fn native_sort_by(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     };
     let mut keyed = Vec::new();
     for item in expect_list("sortBy", list)? {
-        let k = apply_values(key, std::slice::from_ref(item), env)?;
+        let k = apply_values(key, core::slice::from_ref(item), env)?;
         keyed.push((k, item.clone()));
     }
     let mut incomparable = false;
@@ -623,7 +626,7 @@ fn native_flat_map(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     };
     let mut out = Vec::new();
     for item in expect_list("flatMap", list)? {
-        let mapped = apply_values(function, std::slice::from_ref(item), env)?;
+        let mapped = apply_values(function, core::slice::from_ref(item), env)?;
         out.extend(expect_list("flatMap", &mapped)?.iter().cloned());
     }
     Ok(Value::List(out.into()))
@@ -661,7 +664,7 @@ fn native_map(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     }
     let mapped = expect_list("map", collection)?
         .iter()
-        .map(|item| apply_values(function, std::slice::from_ref(item), env))
+        .map(|item| apply_values(function, core::slice::from_ref(item), env))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Value::List(mapped.into()))
 }
@@ -671,7 +674,7 @@ fn map_seq(seq: Value, f: Value, env: Env) -> Value {
     Value::Seq(LazySeq::new(move || match force_seq(&seq)? {
         Step::Nil => Ok(Step::Nil),
         Step::Cons(head, tail) => {
-            let mapped = apply_values(&f, std::slice::from_ref(&head), &env)?;
+            let mapped = apply_values(&f, core::slice::from_ref(&head), &env)?;
             Ok(Step::Cons(mapped, map_seq(tail, f.clone(), env.clone())))
         }
     }))
@@ -718,7 +721,7 @@ fn filter_seq(seq: Value, pred: Value, env: Env) -> Value {
 /// Apply a predicate to one element, requiring a `Bool` result. Shared by
 /// `filter` and `takeWhile`.
 fn keeps(predicate: &Value, item: &Value, env: &Env) -> Result<bool, RuntimeError> {
-    match apply_values(predicate, std::slice::from_ref(item), env)? {
+    match apply_values(predicate, core::slice::from_ref(item), env)? {
         Value::Bool(keep) => Ok(keep),
         other => Err(RuntimeError::new(format!(
             "predicate must return a Bool, got {}",

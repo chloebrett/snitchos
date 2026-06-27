@@ -11,9 +11,12 @@
 //! recursion and mutual recursion work (letrec at the top level).
 
 use core::str;
-use std::cell::{OnceCell, RefCell};
-use std::collections::HashMap;
-use std::rc::Rc;
+use core::cell::{OnceCell, RefCell};
+
+use alloc::collections::BTreeMap;
+
+#[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
+use crate::prelude::*;
 
 use crate::ast::Method;
 use crate::value::{TelemetryEvent, Value};
@@ -29,13 +32,13 @@ pub enum AssignError {
 #[derive(Clone, Default)]
 pub struct Env {
     locals: Option<Rc<Scope>>,
-    globals: Rc<OnceCell<HashMap<String, Value>>>,
-    methods: Rc<OnceCell<HashMap<String, Vec<Method>>>>,
+    globals: Rc<OnceCell<BTreeMap<String, Value>>>,
+    methods: Rc<OnceCell<BTreeMap<String, Vec<Method>>>>,
     /// Per-variant field mutability: variant name → field name → is `mut`. The
     /// source of truth for whether a field may be assigned. (Keyed by variant so
     /// each sum variant's fields are tracked independently; for a `prod` the
     /// variant name is the type name.)
-    field_mut: Rc<OnceCell<HashMap<String, HashMap<String, bool>>>>,
+    field_mut: Rc<OnceCell<BTreeMap<String, BTreeMap<String, bool>>>>,
     /// Telemetry recorded by `emit`/`span`, shared across the whole program run
     /// (every scope and closure points at the same sink).
     sink: Rc<RefCell<Vec<TelemetryEvent>>>,
@@ -197,21 +200,21 @@ impl Env {
     /// Install the program's top-level definitions into the shared table. Call
     /// exactly once, after building the closures that capture this env — they
     /// share the table, so each then sees every top-level definition.
-    pub fn set_globals(&self, globals: HashMap<String, Value>) {
+    pub fn set_globals(&self, globals: BTreeMap<String, Value>) {
         assert!(
             self.globals.set(globals).is_ok(),
             "globals must be installed exactly once"
         );
     }
 
-    pub fn set_methods(&self, methods: HashMap<String, Vec<Method>>) {
+    pub fn set_methods(&self, methods: BTreeMap<String, Vec<Method>>) {
         assert!(
             self.methods.set(methods).is_ok(),
             "methods must be installed exactly once"
         );
     }
 
-    pub fn set_field_mut(&self, field_mut: HashMap<String, HashMap<String, bool>>) {
+    pub fn set_field_mut(&self, field_mut: BTreeMap<String, BTreeMap<String, bool>>) {
         assert!(
             self.field_mut.set(field_mut).is_ok(),
             "field mutability must be installed exactly once"

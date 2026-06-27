@@ -1,8 +1,33 @@
 # Spawn, the explicit-authority shell, and console input — design
 
-**Status:** **Design / plan only (2026-06-18).** No code yet. Captures the
-architecture and a phased build order. Builds on v0.9 IPC + v0.9c badges and the
-v0.10 FS (`fs-core`/`ramfs`/`fs-proto` shipped; `user/fs` front-end in progress).
+**Status:** **Reconciled 2026-06-27 — most of the critical path has SHIPPED; this
+revision re-plans from the current state toward a _terminal_ shell.** The original
+design (2026-06-18) said "no code yet"; since then `Spawn`, `Exit`+`Wait`, the
+blocking-wait primitive, `ConsoleRead` + polled UART RX, and the FS-over-IPC stack
+have all landed. The remaining work for an interactive terminal shell is small and
+named below.
+
+**What shipped since this was written (verified 2026-06-27):**
+
+- **`Spawn` (syscall 15)** — `kernel/src/syscall/process.rs:69`. All-or-nothing
+  delegation of a subset of the caller's caps (copy semantics, `kernel_core::cap::delegate`),
+  child auto-granted bootstrap telemetry/span (Q-A lean taken), ambient (Q-B lean
+  taken). Phase 1a embedded-id done; the registry is `SPAWNABLE` at
+  `kernel/src/trap/user.rs:387` (today: `spawnee`, `memhog`) — the extension point
+  for new programs.
+- **`Exit`/`Wait` (1, 18)** — `kernel/src/syscall/process.rs:13,39`. The exit/wait
+  gap is **closed**: `Exit` records the zombie + wakes a blocked parent; `Wait`
+  blocks (`block_current`/`wake`), then `reap_task` frees the child's AS, `Process`,
+  and kernel stack. v0.12 same-hart. (The design's "notification vs blocking Wait"
+  fork resolved to **blocking `Wait`**; a general Notification object is still
+  deferred to Tier-1 devices.)
+- **`ConsoleRead` (14) + polled UART RX** — `kernel/src/syscall/console.rs`,
+  `kernel/src/device/console.rs`. The timer drains `RBR`→`CONSOLE_RX` ring;
+  `ConsoleRead` is ambient, non-blocking. **Tier-0 console input is done** (was
+  `[D]`); the `console_echo` demo proves it. Line discipline still lives in userspace.
+- **Cross-AS copy** `CopyFromCaller`/`CopyToCaller`, **IPC** (Send/Recv/Call/Reply/
+  ReplyRecv/MintBadged), and the **FS-over-IPC** stack (`fs-core`/`ramfs`/`fs-proto`
+  + `user/fs` server+client, 7 itests) — all shipped and tested.
 
 **The vision:** a shell where authority is explicit — it reads a command, and
 launches each program holding **exactly** the capabilities that program needs,
@@ -20,22 +45,31 @@ how it reads keystrokes. So the build order is **Spawn-with-caps first, console
 input later** (chosen 2026-06-18). The two are orthogonal; console work does not
 block Spawn.
 
-## Current state (verified 2026-06-14)
+## Current state (verified 2026-06-27)
 
 | Piece                                    | State                                                                                                 |
 | ---------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| Userspace spawn                          | ❌ none. Processes created only at boot via hardcoded `sched::spawn_on` + `user::run(ELF)`.           |
-| Cross-AS copy                            | ✅ `CopyFromCaller`/`CopyToCaller` (syscalls 13/14) exist — option-D primitive landed.                |
-| Process exit / wait / join               | ❌ tasks are `-> !` (v0.5); no exit-to-parent, no join.                                               |
-| Console input                            | ❌ UART is TX-only; virtio-console RX is dead weight + dedicated to telemetry; no input syscall.      |
-| External interrupts (PLIC)               | ❌ unwired — an external interrupt currently `panic!`s. Only timer (sstc) + IPI (software).           |
-| Notifications (async kernel→user signal) | ❌ none (the deferred v0.9d item).                                                                    |
-| Device capabilities / userspace MMIO     | ❌ none — all devices are ambient kernel-driven.                                                      |
-| Process caps at creation                 | hardcoded per workload in `Process::bootstrap` (telemetry + span; IPC workloads add an endpoint cap). |
+| Userspace spawn (with cap delegation)    | ✅ `Spawn` (15), all-or-nothing delegation, `SPAWNABLE` registry (2 programs).                        |
+| Process exit / wait / reap               | ✅ `Exit` tears down + wakes parent; `Wait` (18) blocks + `reap_task` frees AS/Process/stack.         |
+| Cross-AS copy                            | ✅ `CopyFromCaller`/`CopyToCaller`.                                                                    |
+| Console **input**                        | ✅ polled UART RX ring (timer-drained) + ambient `ConsoleRead` (14), non-blocking. Tier-0 done.       |
+| Console **output to the terminal**       | ❌ userspace output is `DebugWrite`→telemetry only. No userspace→UART write. **The terminal gap.**    |
+| `init` / first-process bootstrap         | ❌ no init; programs are per-workload `kmain` spawns + a 2-row `SPAWNABLE` registry.                  |
+| Cap-delegation observability             | ❌ `Spawn` delegates but emits no `CapEvent::Transferred` — the "watch least-authority" trace.        |
+| External interrupts (PLIC)               | ❌ unwired (only needed for Tier-1 virtio console — a later, separate milestone).                    |
+| Notifications (general async signal)     | ◐ child-exit covered by blocking `Wait`; general Notification object deferred (Tier-1 devices).      |
+| Device capabilities / userspace MMIO     | ❌ none (Tier-1 only).                                                                                 |
 
 ---
 
-## Phase 1 — `Spawn`-with-caps (the milestone heart)
+## Phase 1 — `Spawn`-with-caps (the milestone heart) ✅ SHIPPED
+
+_Implemented as `Spawn` (15) — `kernel/src/syscall/process.rs:69`. The design below
+is now documentation of what was built; the leans on Q-A/Q-B/Q-C were all taken
+(auto-grant telemetry/span, ambient, copy semantics). The exit/wait gap is closed
+(`Exit`/`Wait`/`reap_task`). What remains for a usable terminal shell is the
+terminal-output primitive, `init`, the shell program, and the delegation trace —
+see "Remaining work" and "Sequencing" below._
 
 Generalize the boot-only creation path (`new_user_root` → `Process::bootstrap` →
 `load` → `enter`) into a userspace-invokable syscall that **delegates a chosen
@@ -165,6 +199,12 @@ Spawn + the shell, motivated by "drivers in userspace," not by the shell.
 
 ## Component inventory + critical path
 
+_Status (2026-06-27): groups **A** (Spawn + cap-transplant + startup-cap ABI), **B**
+(Exit + Wait), and **C** (the wait primitive) are **SHIPPED**. Group **D** (init,
+shell, cat/ls) and group **E** (now reframed — input is done; output via
+`ConsoleWrite` is the remaining terminal primitive) are what's left. See "Remaining
+work" above for the actionable list; the inventory below is kept for the full map._
+
 Every architectural piece, grouped by subsystem. **[CP]** = on the critical path to
 the first demo (_shell spawns `cat` with a delegated file cap; the trace proves
 `cat` could only touch that one file_). **[D]** = deferred (needed eventually, not
@@ -225,19 +265,62 @@ Irreducible core: **Spawn + cap-transplant + startup-cap ABI + Exit/teardown + (
 
 ---
 
-## Sequencing
+## Terminal output — `ConsoleWrite` (decided 2026-06-27)
+
+The original design routed userspace output to telemetry (`DebugWrite`→`Log` frame)
+and never gave userspace the UART. For a **terminal shell** that's wrong: you'd
+type in the QEMU console but read the prompt/output in the collector. **Decision: a
+terminal shell, so add a `ConsoleWrite` syscall** — the mirror of `ConsoleRead`,
+writing user bytes to the UART `THR`. The kernel already owns the TX path (the
+`UART` mutex behind `println!`, `kernel/src/device/console.rs`); `ConsoleWrite` just
+exposes it. Ambient like `ConsoleRead` (Tier-0 convention: "UART = the human
+channel; the shell is the trusted session root, so it holds its own terminal
+directly — the interesting delegation is _downward_ to children"). Could become a
+console **cap** in Tier-1; ambient for now.
+
+This keeps the two human-facing channels clean: **UART = interactive terminal**
+(shell I/O), **virtio-console = the postcard telemetry stream** (don't mix typed
+input/echo into the decoded frame channel).
+
+## Remaining work for the terminal shell (the from-here plan)
+
+The heavy lifting (Spawn / Exit / Wait / ConsoleRead / cap-transplant) is **done**.
+What's left, in build order:
+
+1. **`ConsoleWrite` syscall** `[CP]` — expose the kernel UART TX as an ambient
+   user syscall (mirror of `ConsoleRead`). Small. Unblocks the terminal UX.
+2. **`init` (first-process bootstrap)** `[CP]` — a real first process that holds
+   root caps, `Spawn`s the FS server, holds the FS endpoint cap, and `Spawn`s the
+   shell granting it its **session caps** (the FS cap, console access). Generalizes
+   today's per-workload `kmain` spawns; root of the delegation graph. Add the new
+   programs (`init`, `shell`, `cat`, `ls`) to the `SPAWNABLE` registry.
+3. **`user/shell`** `[CP]` — the loop: `ConsoleRead`-poll a line (line discipline —
+   echo via `ConsoleWrite`, backspace, enter — in userspace) → parse → dispatch →
+   `Wait`. **Milestone A:** builtins only (`help`, `echo`, and `ls`/`cat` by the
+   shell itself talking to the FS server over IPC) — a breathing terminal shell.
+   **Milestone B:** the capability demo — `cat <file>` mints a narrowed `(inode, READ)`
+   File cap and `Spawn`s a separate `cat` holding _only_ that.
+4. **`cat` / `ls` programs** `[CP for Milestone B]` — small bins that take a File
+   cap and read through it; rely on the startup-cap ABI (handles 2.. = delegated).
+5. **Cap-delegation trace** `[CP for the payoff]` — emit `CapEvent::Transferred` per
+   delegated cap in `Spawn`, so `cat /foo` produces the visible "shell minted
+   `(foo, READ)` → granted to `cat` → `cat` read → exited" chain. _That trace is the
+   demo._ (Item 21; "mostly free.")
+
+Deferred (unchanged): Spawn **Phase 1b** (load ELF from the FS via a File cap +
+`EXEC`); the **Tier-1** userspace virtio console driver (PLIC + MMIO + DMA caps),
+its own milestone; resource quotas (Q-D).
+
+## Sequencing (original, mostly DONE — kept for the record)
 
 ```
-1. Notification primitive (v0.9d)        ← gateway; first consumer = child-exit/wait, NOT devices
-2. Exit + Wait/join                       ← makes the shell usable
-3. Spawn-with-caps (Phase 1a, embedded)   ← the heart; the explicit-authority demo
-4. Shell program (hardcoded command first, then Tier-0 UART input)
-5. Spawn Phase 1b (load ELF from the FS via a File cap + EXEC)   ← needs user/fs front-end
-6. (separate milestone) Tier-1 userspace virtio console driver: PLIC + MMIO caps + DMA
+1. Notification primitive (v0.9d)        ✅ resolved as blocking Wait
+2. Exit + Wait/join                       ✅ shipped
+3. Spawn-with-caps (Phase 1a, embedded)   ✅ shipped
+4. Shell program                          ← NEXT (see "Remaining work" above)
+5. Spawn Phase 1b (ELF from FS + EXEC)    ← deferred
+6. Tier-1 userspace virtio console driver ← deferred (separate milestone)
 ```
-
-Notifications float to the top not for devices but because **child-exit/wait needs
-the same async-signal primitive** — and that's the shell's real blocker, not input.
 
 ## Observability angle (the post)
 

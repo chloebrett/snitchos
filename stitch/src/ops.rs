@@ -2,7 +2,10 @@
 //! already-evaluated `Value`s. v0 is strict — no Int/Float coercion, so a kind
 //! mismatch is a runtime error rather than a silent widening or `false`.
 
-use std::cmp::Ordering;
+use core::cmp::Ordering;
+
+#[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
+use crate::prelude::*;
 
 use crate::ast::{BinOp, UnOp};
 use crate::value::{RuntimeError, Value};
@@ -64,7 +67,7 @@ pub(crate) fn eval_binary(op: BinOp, left: &Value, right: &Value) -> Result<Valu
 /// — so we gate on the value kind, then defer to `Value`'s structural equality
 /// (which compares `prod`/`sum` data by type, variant, and fields — decision D).
 fn equality(op: BinOp, left: &Value, right: &Value) -> Result<Value, RuntimeError> {
-    if std::mem::discriminant(left) != std::mem::discriminant(right) {
+    if core::mem::discriminant(left) != core::mem::discriminant(right) {
         return Err(type_mismatch(op, left, right));
     }
     let equal = left == right;

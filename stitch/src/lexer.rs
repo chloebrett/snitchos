@@ -1,7 +1,10 @@
 //! Lexer: source text → `Token`s.
 
-use std::iter::Peekable;
-use std::str::Chars;
+use core::iter::Peekable;
+use core::str::Chars;
+
+#[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
+use crate::prelude::*;
 
 /// The lexer's input cursor — a peekable stream of source chars.
 type Cursor<'a> = Peekable<Chars<'a>>;
@@ -209,7 +212,7 @@ fn lex_string(chars: &mut Cursor<'_>) -> Token {
             }
             Some('{') => {
                 if !lit.is_empty() {
-                    parts.push(StrPart::Lit(std::mem::take(&mut lit)));
+                    parts.push(StrPart::Lit(core::mem::take(&mut lit)));
                 }
                 parts.push(StrPart::Expr(read_interpolation(chars)));
             }
