@@ -30,15 +30,19 @@ const PROMPT: &[u8] = b"stitch> ";
 const TICKS_PER_MS: u64 = 10_000;
 
 /// Evaluate `src`, timing it with the monotonic clock and bracketing it in a
-/// real SnitchOS span, then print the result + how long the interpreter took.
-/// `label` distinguishes the env-build (first) eval from the cheap cached ones.
+/// real SnitchOS span. Returns the rendered output and the elapsed ticks.
+fn timed(repl: &mut Repl, tr: Tracer, src: &str) -> (String, u64) {
+    let _span = tr.span("stitch.eval");
+    let start = clock_now();
+    let out = repl.eval_line(src);
+    (out, clock_now() - start)
+}
+
+/// A labelled boot self-test: time `src` and print the result + how long the
+/// interpreter took. `label` distinguishes the env-build (first) eval from the
+/// cheap cached ones.
 fn bench(repl: &mut Repl, tr: Tracer, label: &str, src: &str) {
-    let (out, dt) = {
-        let _span = tr.span("stitch.eval");
-        let start = clock_now();
-        let out = repl.eval_line(src);
-        (out, clock_now() - start)
-    };
+    let (out, dt) = timed(repl, tr, src);
     let line = format!(
         "  [{label:>8}] {dt:>9} ticks (~{} ms)   {src}  {out}",
         dt / TICKS_PER_MS
@@ -73,7 +77,12 @@ fn main() {
             match byte {
                 b'\r' | b'\n' => {
                     console_write(b"\n");
-                    console_write(repl.eval_line(&line).as_bytes());
+                    if !line.trim().is_empty() {
+                        let (out, dt) = timed(&mut repl, tr, &line);
+                        console_write(out.as_bytes());
+                        let timing = format!("  ({dt} ticks, ~{} ms)\n", dt / TICKS_PER_MS);
+                        console_write(timing.as_bytes());
+                    }
                     line.clear();
                     console_write(PROMPT);
                 }
