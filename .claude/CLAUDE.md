@@ -191,7 +191,8 @@ posts/        Devlog notes per milestone.
 ### Running
 
 ```
-cargo xtask boot              # build kernel + run in QEMU (telemetry chardev waits for a client)
+cargo xtask boot              # build kernel + run in QEMU; no bootarg now boots `init` (the userspace root, v0.13)
+cargo xtask boot --workload demo  # the former default: kernel scheduler demo (task_a/task_b + producer/consumer)
 cargo xtask boot --workload smp   # boot a runtime-selected workload (implies itest-workloads); see "Runtime workloads"
 cargo xtask collect           # build + run collector (OTLP + Prometheus)
 cargo xtask reader            # collector in text-only mode (no docker stack)
@@ -249,7 +250,7 @@ Add a scenario: implement a `Result<(), String>` function in `scenarios.rs`, reg
 
 ### Runtime workloads
 
-Non-default boot behaviours (the SMP cross-hart workload, the OOM leaks, the stress storms) are **selected at runtime**, not compiled in per-build. One `itest-workloads` kernel binary holds the whole registry; the `workload=<name>` kernel bootarg (QEMU `-append`) picks one. With no bootarg the kernel runs the exact default demo, so the registry is **purely additive** — production builds leave `itest-workloads` off and compile none of it. Full design + rationale: [docs/runtime-workload-selection-design.md](../docs/runtime-workload-selection-design.md).
+Non-default boot behaviours (the SMP cross-hart workload, the OOM leaks, the stress storms) are **selected at runtime**, not compiled in per-build. One `itest-workloads` kernel binary holds the whole registry; the `workload=<name>` kernel bootarg (QEMU `-append`) picks one. With no bootarg the kernel boots `init` (v0.13; the former kernel scheduler demo is `workload=demo`), so the registry is **purely additive** — production builds leave `itest-workloads` off and compile none of it. Full design + rationale: [docs/runtime-workload-selection-design.md](../docs/runtime-workload-selection-design.md).
 
 - **From a scenario:** `Harness::spawn_with_workload(label, "smp")` — boots the shared `itest-workloads` build with `-append workload=smp`. `Harness::spawn(label)` boots the same build with no bootarg (default demo). Neither rebuilds; the suite builds once.
 - **Live (measurement / demo):** `cargo xtask boot --workload smp` then `cargo xtask reader` (or `collect` → Grafana). No rebuild to switch workloads.
@@ -306,14 +307,21 @@ Per-task observability:
 
 The post angle (v0.5): "following a trace across a context switch." Tempo's trace view shows `task_a.tick` opened, then ContextSwitch frames, then SpanEnd — all attributable via the `thread.name` OTLP attribute populated from `ThreadRegister`.
 
-### Capabilities & userspace (v0.7) — SHIPPED
+### Capabilities & userspace — SHIPPED through v0.13
 
-User mode, capability-mediated syscalls, and a userspace runtime exist today — don't read the roadmap's future-tense v0.7/v0.10 prose as "not built"; check the marker. **v0.8 preemption shipped; v0.9 IPC is almost done. The v0.10 RAMfs is being scaffolded now: `fs-core` (the `Filesystem` trait + types, the locked deliverable) and `ramfs` (first impl) — both host-testable, no cap/IPC types.**
+User mode, capability-mediated syscalls, IPC, a RAMfs over IPC, and a userspace
+`init` root all exist today. **v0.8 preemption, v0.9 IPC, v0.10 RAMfs, v0.11
+Spawn-with-caps, v0.12 Exit/Wait/reap + the Notification primitive, and v0.13 the
+`init` bootstrap are all shipped.** The default boot (no `workload=` bootarg) now
+boots **`init`** (the userspace delegation-graph root); the former kernel scheduler
+demo (`task_a`/`task_b` + producer/consumer + cross-hart probe) is `workload=demo`.
 
-- **Caps** (`kernel-core/src/cap.rs`, host-tested): `Capability { object, rights }` named by an opaque `Handle` (slot+generation `u32`), validated against the calling process's `CapTable`. `Object` = `TelemetrySink | SpanSink`; `Endpoint`/`File`/`MemoryRegion` are documented growth points (add a variant + rights bit). `generation` is the revocation hook (dead-weight at 0 for now).
-- **Syscalls** (`abi::Syscall`, dispatch in `kernel/src/trap.rs`): `Invoke`/`SpanOpen` are cap-mediated; `Exit`/`Yield`/`SpanClose`/`MapAnon`/`DebugWrite` are ambient. Refusals snitch (`SyscallRefused` frame + counter), never silent.
-- **Userspace** (`user/`): `runtime` (crt0, syscall bindings, `talc` heap), `std` (`println!`/`Vec` facade), `macros` (`#[entry]`), `hello` (demo bins). Startup caps arrive in `a0`/`a1`.
-- **IPC almost done** (v0.9, `docs/ipc-design.md`). The v0.10 RAMfs rides on it as a *userspace* component, so its `Filesystem` trait (`fs-core`) stays capability-agnostic + host-testable; the cap mediates the *endpoint*. The badge→inode demux + cap minting on `lookup` lives in the FS IPC front-end (`user/fs`, not yet built), *above* the cap-agnostic trait.
+- **Caps** (`kernel-core/src/user/cap.rs`, host-tested): `Capability { object, rights }` named by an opaque `Handle` (slot+generation `u32`), validated against the calling process's `CapTable`. `Object` = `TelemetrySink | SpanSink | Endpoint{id,badge} | Reply{caller} | Notification{id}` (no separate `File` object — FS files are *badged* `Endpoint` caps the FS server mints). `generation` is the revocation hook (dead-weight at 0).
+- **Cap-id spine (v0.13)**: every *holding* (a `CapTable` slot) carries a stable global `cap_id` (`Slot.cap_id`, set via `insert_with_id`/`bootstrap_with_ids`, read via `cap_id_of`), minted kernel-side (`next_cap_id`). A transfer records the **source holding's** id as the child's `parent_cap_id` — so `CapEvent::Transferred` frames reconstruct the derivation tree. Wire `cap_id` == stored id at every grant/transfer site (`run_with_caps`, `run_ipc`, `handle_mint_badged`, `NotifyCreate`, `EndpointCreate`). Only genuinely-root grants (and the not-yet-linked reply-cap mint) keep `parent_cap_id: 0`.
+- **Syscalls** (`abi::Syscall` 0–25, dispatch `kernel/src/syscall/mod.rs`): cap-mediated — `SpanOpen`/`Send`/`Receive`/`Call`/`Reply`/`ReplyRecv`/`MintBadged`/`Signal`/`WaitNotify`/`EmitMetric`/`RegisterMetric`. Ambient — `Exit`/`Yield`/`SpanClose`/`MapAnon`/`DebugWrite`/`ConsoleRead`/`ConsoleWrite`/`ClockNow`/`Spawn`/`Wait`/`WaitAny`/`NotifyCreate`/`EndpointCreate`. Refusals snitch (`SyscallRefused` frame + counter), never silent.
+- **Startup-cap ABI**: a spawned child is born with bootstrap telemetry@handle 0, span@1, then parent-**delegated** caps at handles `2..` (`delegated_handle(i) = 2 + i`). `Spawn`'s `a1`=`[u32;N]` handle array delegates from the caller's table (copy semantics, all-or-nothing). **An endpoint lands at handle 2 in *both* launch paths** — `run_ipc` (after the two bootstrap caps) and an init-`Spawn` delegating it (delegated[0]) — so IPC programs read their endpoint via `delegated_handle(0)`, not the legacy `a2` startup slot.
+- **`init` (v0.13, `user/hello/src/bin/init.rs`)**: the first userspace process, holding only telemetry+span. It `EndpointCreate`s its own IPC endpoint (kernel knows no IPC topology), `Spawn`s the FS server delegating `RECV|MINT` + a client with a *minted* bare `SEND`, and supervises via `WaitAny` (reap any child). Children come from the `SPAWNABLE` registry (`kernel/src/trap/user.rs`); kernel-launched workloads use `LAYOUTS` + `run`/`run_ipc`. Caveat: copy-semantics delegation means init over-holds `RECV` on the endpoint it gave the server (revocation deferred).
+- **Userspace** (`user/`): `runtime` (crt0, syscall bindings, `talc` heap), `std`, `macros` (`#[entry]`), `hello` (bins incl. `init`/`spawnee`/`supervisor`/`spinner`/`ep_maker`), `fs` (`fs::serve` + `fs-client`). IPC + RAMfs designs: `docs/ipc-design.md`, `docs/filesystem-design.md`.
 
 ### Memory layout, post v0.4 step 4
 
