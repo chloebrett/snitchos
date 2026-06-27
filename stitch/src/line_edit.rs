@@ -3,6 +3,11 @@
 //! helper that sits *below* the `Platform` trait — the on-target `read_line`
 //! drives it; the trait deals only in finished lines. See
 //! `docs/stitch-test-library-design.md`.
+//!
+//! **Limitation: ASCII-only.** Only printable ASCII (`0x20..=0x7e`) enters a
+//! line; control bytes and any byte `>= 0x80` are dropped, so non-ASCII input
+//! (multibyte UTF-8) is silently discarded rather than accumulated. Sufficient
+//! for the v1 shell; proper UTF-8 sequence handling is deferred.
 
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
@@ -29,9 +34,11 @@ impl LineEditor {
         Self::default()
     }
 
-    /// Process a chunk of raw input. Printable bytes append to the buffer and
-    /// echo as typed; Enter (`\n` or `\r`) completes the line, echoes CRLF, and
-    /// resets the buffer.
+    /// Process a chunk of raw input. Printable ASCII bytes append to the buffer
+    /// and echo as typed; Enter (`\n` or `\r`) completes the line, echoes CRLF,
+    /// and resets the buffer; backspace (`0x7f`) erases the last char. All other
+    /// bytes (control, `>= 0x80`) are dropped — see the module-level ASCII-only
+    /// limitation.
     pub fn feed(&mut self, bytes: &[u8]) -> Edit {
         let mut echo = Vec::new();
         let mut line = None;
@@ -46,10 +53,12 @@ impl LineEditor {
                         echo.extend_from_slice(b"\x08 \x08");
                     }
                 }
-                _ => {
+                0x20..=0x7e => {
                     self.buffer.push(byte as char);
                     echo.push(byte);
                 }
+                _ => {}
+
             }
         }
         Edit { line, echo }
