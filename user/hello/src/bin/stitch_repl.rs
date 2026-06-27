@@ -19,10 +19,12 @@
 extern crate alloc;
 
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::String;
 
 use snitchos_user::{Tracer, clock_now, console_read, console_write, entry, tracer, yield_now};
 use stitch::runner::Repl;
+use stitch::telemetry::RuntimeTelemetry;
 
 const PROMPT: &[u8] = b"stitch> ";
 
@@ -53,8 +55,10 @@ fn bench(repl: &mut Repl, tr: Tracer, label: &str, src: &str) {
 #[entry]
 fn main() {
     // One env, built once (prelude registered a single time) and reused for every
-    // line — no per-line prelude rebuild.
-    let mut repl = Repl::new();
+    // line — no per-line prelude rebuild. Telemetry routes through the process's
+    // capability-backed backend, so a Stitch program's own `span`/`emit` become
+    // real frames on the wire (interned + timestamped + attributed kernel-side).
+    let mut repl = Repl::with_telemetry(Rc::new(RuntimeTelemetry::default()));
     let tr = tracer();
 
     console_write(b"\nStitch on SnitchOS \xE2\x80\x94 the tree-walker runs on the metal.\n");
@@ -63,6 +67,15 @@ fn main() {
     bench(&mut repl, tr, "buildenv", "1 + 2");
     bench(&mut repl, tr, "cached", "3 * 4");
     bench(&mut repl, tr, "pipeline", "1.. |> map($ * $) |> take(5) |> toList");
+    // A Stitch program's own `span`/`emit` — routed through the capability-backed
+    // RuntimeTelemetry, so they cross the wire as real frames (a "stitch.demo"
+    // span bracketing a "stitch.answer" gauge), attributed to this process.
+    bench(
+        &mut repl,
+        tr,
+        "telemetry",
+        "span(\"stitch.demo\", () -> emit(\"stitch.answer\", 42))",
+    );
     console_write(PROMPT);
 
     let mut line = String::new();

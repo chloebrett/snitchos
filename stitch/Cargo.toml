@@ -7,6 +7,13 @@ publish = false
 [dependencies]
 protocol = { path = "../protocol" }
 
+# The userspace runtime — only on the SnitchOS target (riscv `target_os =
+# "none"`). Backs the on-target `RuntimeTelemetry`, which routes Stitch's
+# `emit`/`span` through capability-mediated syscalls. Excluded from host/test
+# builds (its `ecall` asm + crt0 don't compile for the host).
+[target.'cfg(target_os = "none")'.dependencies]
+snitchos-user = { path = "../user/runtime" }
+
 [dev-dependencies]
 insta = "1"
 # `std` here only unions into the test build, giving tests `OwnedFrame` for

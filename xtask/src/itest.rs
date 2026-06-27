@@ -230,6 +230,7 @@ catalog! {
     wfi "userspace-bad-ptr"               scenarios::userspace_bad_ptr_refused      [userspace]      {"userspace-bad-ptr"};
     wfi "userspace-custom-metric"         scenarios::userspace_custom_metric        [userspace]      {"probe"};
     wfi "span-name-not-poisonable"        scenarios::span_name_not_poisonable       [userspace]      {"probe"};
+    wfi "stitch-telemetry-on-the-wire"    scenarios::stitch_telemetry_on_the_wire   [userspace, stitch] {"stitch-repl"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back

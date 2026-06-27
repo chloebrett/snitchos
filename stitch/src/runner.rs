@@ -12,10 +12,11 @@ use crate::prelude::*;
 use crate::ast::Item;
 use crate::env::Env;
 use crate::interp::{
-    Module, build_env, eval, eval_modules_with_telemetry, eval_program_with_telemetry,
-    is_builtin_module, prelude_items,
+    Module, build_env_with_telemetry, eval, eval_modules_with_telemetry,
+    eval_program_with_telemetry, is_builtin_module, prelude_items,
 };
 use crate::parser::{parse, parse_program};
+use crate::telemetry::{RecordingTelemetry, Telemetry};
 use crate::value::{RuntimeError, TelemetryEvent, Value};
 
 /// Writing to a `String` never fails; this names that contract at each `write!`.
@@ -133,6 +134,11 @@ pub struct Repl {
     defs: Vec<Item>,
     /// The built environment, rebuilt lazily after a new declaration.
     env: Option<Env>,
+    /// The telemetry backend every rebuilt env shares — the in-memory recorder
+    /// by default, or the on-target capability-backed one via
+    /// [`Repl::with_telemetry`]. Held here so it survives env rebuilds (so e.g.
+    /// the on-target metric registrations persist across new declarations).
+    telemetry: Rc<dyn Telemetry>,
 }
 
 impl Default for Repl {
@@ -143,9 +149,18 @@ impl Default for Repl {
 
 impl Repl {
     /// A fresh REPL with the prelude parsed (once) and no user definitions yet.
+    /// Telemetry is recorded in memory (rendered per line).
     #[must_use]
     pub fn new() -> Self {
-        Repl { prelude: prelude_items(), defs: Vec::new(), env: None }
+        Repl::with_telemetry(Rc::new(RecordingTelemetry::default()))
+    }
+
+    /// A fresh REPL whose evaluated lines route `emit`/`span` through
+    /// `telemetry`. The on-target REPL passes a `RuntimeTelemetry` so a Stitch
+    /// program's spans and metrics become real frames on the wire.
+    #[must_use]
+    pub fn with_telemetry(telemetry: Rc<dyn Telemetry>) -> Self {
+        Repl { prelude: prelude_items(), defs: Vec::new(), env: None, telemetry }
     }
 
     /// Evaluate one line. A line that parses as declarations is accumulated
@@ -174,7 +189,7 @@ impl Repl {
         if self.env.is_none() {
             let mut all = self.prelude.clone();
             all.extend_from_slice(&self.defs);
-            self.env = Some(build_env(&all));
+            self.env = Some(build_env_with_telemetry(Rc::clone(&self.telemetry), &all));
         }
         let env = self.env.as_ref().expect("env was just built above");
         let result = eval(&expr, env);

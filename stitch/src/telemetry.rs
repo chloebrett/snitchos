@@ -78,6 +78,77 @@ impl Telemetry for RecordingTelemetry {
     }
 }
 
+/// The on-target backend: route `emit`/`span` straight through `snitchos-user`'s
+/// capability-mediated syscalls, so a Stitch process on `SnitchOS` produces real
+/// wire frames through the kernel — interning, span ids, `task_id`/`hart_id`, and
+/// real `ClockNow` timestamps are all assigned kernel-side.
+///
+/// Edge code: every method does an `ecall`, so it's only built for the target
+/// (`target_os = "none"`) and exercised by the on-target itest, not host unit
+/// tests — the same discipline the kernel's MMIO drivers follow. The testable
+/// logic (recording, lowering, coercion) lives behind the `Telemetry` trait and
+/// in `wire`, both host-tested.
+#[cfg(target_os = "none")]
+mod on_target {
+    use super::{Telemetry, Value};
+    use crate::wire::coerce_i64;
+
+    use core::cell::RefCell;
+
+    use alloc::collections::BTreeMap;
+    #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
+    use crate::prelude::*;
+
+    use snitchos_user::{Metric, Span, Tracer, register_gauge, tracer};
+
+    pub struct RuntimeTelemetry {
+        tracer: Tracer,
+        /// Open span guards, innermost last. `span_close` pops and drops one,
+        /// and dropping a [`Span`] is what emits its `SpanEnd`. Stitch spans are
+        /// well nested, so LIFO recovers the right pairing.
+        spans: RefCell<Vec<Span>>,
+        /// `name → Metric`, registered once per name (each registration is a
+        /// syscall). `Metric` is `Copy`, so a stored handle re-emits freely.
+        metrics: RefCell<BTreeMap<String, Metric>>,
+    }
+
+    impl Default for RuntimeTelemetry {
+        fn default() -> Self {
+            Self {
+                tracer: tracer(),
+                spans: RefCell::new(Vec::new()),
+                metrics: RefCell::new(BTreeMap::new()),
+            }
+        }
+    }
+
+    impl Telemetry for RuntimeTelemetry {
+        fn span_open(&self, name: &str) {
+            self.spans.borrow_mut().push(self.tracer.span(name));
+        }
+
+        fn span_close(&self, _name: &str) {
+            self.spans.borrow_mut().pop();
+        }
+
+        fn emit(&self, name: &str, value: &Value) {
+            let Some(value) = coerce_i64(value) else {
+                return;
+            };
+            if let Some(metric) = self.metrics.borrow().get(name).copied() {
+                metric.emit(value);
+                return;
+            }
+            let metric = register_gauge(name);
+            self.metrics.borrow_mut().insert(name.into(), metric);
+            metric.emit(value);
+        }
+    }
+}
+
+#[cfg(target_os = "none")]
+pub use on_target::RuntimeTelemetry;
+
 #[cfg(test)]
 mod tests {
     use super::*;

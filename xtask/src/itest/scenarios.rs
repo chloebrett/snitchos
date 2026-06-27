@@ -313,6 +313,30 @@ pub fn sched_spans_carry_task_id(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// `workload=stitch-repl`: a Stitch *program's own* `span`/`emit` reach the wire.
+/// The on-target REPL runs `span("stitch.demo", () -> emit("stitch.answer", 42))`
+/// as a boot self-test; routed through the capability-backed `RuntimeTelemetry`,
+/// the kernel emits a real "stitch.demo" `SpanStart` bracketing a "stitch.answer"
+/// `Metric` of 42. The end-to-end proof the telemetry loop closes from Stitch
+/// source, through the userspace caps, to decoded frames on the wire.
+pub fn stitch_telemetry_on_the_wire(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo")).ok_or(
+        "no 'stitch.demo' SpanStart within 30s — Stitch span() didn't reach the wire via RuntimeTelemetry",
+    )?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("stitch.answer") && *value == 42
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no 'stitch.answer'=42 Metric within 30s — Stitch emit() didn't reach the wire via RuntimeTelemetry",
+    )?;
+
+    Ok(())
+}
+
 pub fn heap_oom(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {

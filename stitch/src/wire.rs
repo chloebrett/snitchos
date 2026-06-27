@@ -128,7 +128,9 @@ impl Lowerer {
 /// Coerce a Stitch metric value to the wire's `i64`. `Int` is exact; `Bool`
 /// becomes 0/1; `Float` truncates (the wire metric is integral). Any other
 /// value isn't a number and is dropped — the caller emits no metric for it.
-fn coerce_i64(value: &Value) -> Option<i64> {
+/// Shared with the on-target backend ([`crate::telemetry`]) so host and metal
+/// coerce identically.
+pub(crate) fn coerce_i64(value: &Value) -> Option<i64> {
     match value {
         Value::Int(n) => Some(*n),
         Value::Bool(b) => Some(i64::from(*b)),

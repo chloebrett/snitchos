@@ -12,6 +12,7 @@ use crate::natives::NATIVES;
 use crate::ops::{as_bool, eval_binary, eval_unary};
 use crate::parser::parse_program;
 use crate::pattern::eval_match;
+use crate::telemetry::Telemetry;
 use crate::registry::{
     Registration, bake_contract_defaults, collect_exports, register_builtin_types, register_items,
 };
@@ -47,7 +48,18 @@ pub fn prelude_items() -> Vec<Item> {
 /// see [`prelude_items`].
 #[must_use]
 pub fn build_env(items: &[Item]) -> Env {
-    let env = Env::new();
+    build_env_in(Env::new(), items)
+}
+
+/// Like [`build_env`], but the resulting program records telemetry through
+/// `telemetry` instead of the default in-memory recorder — the seam the
+/// on-target REPL uses to route `emit`/`span` through capability syscalls.
+#[must_use]
+pub fn build_env_with_telemetry(telemetry: Rc<dyn Telemetry>, items: &[Item]) -> Env {
+    build_env_in(Env::with_telemetry(telemetry), items)
+}
+
+fn build_env_in(env: Env, items: &[Item]) -> Env {
     let mut reg = Registration::default();
     for native in NATIVES {
         reg.globals.insert(native.name.to_string(), Value::Native(*native));
