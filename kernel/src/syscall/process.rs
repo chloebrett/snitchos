@@ -106,10 +106,19 @@ pub(super) fn handle_spawn(frame: &mut TrapFrame) {
     }
 
     // Delegate against the caller's table — all-or-nothing (lock released before
-    // we spawn, so the child build never contends on the parent's table).
+    // we spawn, so the child build never contends on the parent's table). Pair
+    // each delegated cap with its **source holding's** global cap id, so the
+    // child's `CapEvent::Transferred` can name it as `parent_cap_id` (the
+    // derivation edge). `cap_id_of` resolves for every handle `delegate` accepted.
     let result = {
         let caps = proc.caps.lock();
-        kernel_core::cap::delegate(&caps, &handles)
+        kernel_core::cap::delegate(&caps, &handles).map(|caps_vec| {
+            handles
+                .iter()
+                .zip(caps_vec)
+                .map(|(handle, cap)| (cap, caps.cap_id_of(*handle).unwrap_or(0)))
+                .collect::<alloc::vec::Vec<_>>()
+        })
     };
     let Ok(delegated) = result else {
         super::refuse(frame, sc, RefusalReason::CapNotFound);

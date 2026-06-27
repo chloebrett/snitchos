@@ -22,13 +22,20 @@ pub(super) fn handle_notify_create(frame: &mut TrapFrame) {
 
     let id = crate::sched::notify_create();
     let rights = Rights::SIGNAL | Rights::WAIT;
-    let handle = proc.caps.lock().insert(Capability {
-        object: Object::Notification { id },
-        rights,
-    });
+    // Stamp the holding with its global cap id so a later delegation of an end
+    // (e.g. `notify-waiter` handing the `SIGNAL` end to its child) can name it as
+    // `parent_cap_id` — the stored id must equal the one this `Granted` reports.
+    let cap_id = crate::process::next_cap_id();
+    let handle = proc.caps.lock().insert_with_id(
+        Capability {
+            object: Object::Notification { id },
+            rights,
+        },
+        cap_id,
+    );
 
     crate::tracing::emit_cap_granted(
-        crate::process::next_cap_id(),
+        cap_id,
         crate::sched::current_task_id().0,
         protocol::CapObject::Notification,
         rights.bits(),

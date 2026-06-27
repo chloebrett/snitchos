@@ -42,6 +42,7 @@ pub(super) fn handle_mint_badged(frame: &mut TrapFrame) {
         Ok(h) => {
             crate::tracing::emit_cap_transferred(
                 crate::process::next_cap_id(),
+                0, // TODO(v0.13 Step 7): link to the parent endpoint cap's id
                 crate::sched::current_task_id().0,
                 protocol::CapObject::Endpoint,
                 rights.bits(),

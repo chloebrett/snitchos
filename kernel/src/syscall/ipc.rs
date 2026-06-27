@@ -154,6 +154,7 @@ fn reply_handle_for(
         .insert_once(Capability { object: Object::Reply { caller }, rights: Rights::NONE });
     crate::tracing::emit_cap_transferred(
         crate::process::next_cap_id(),
+        0, // reply-cap derivation edge to the originating `call` not tracked yet
         holder.0,
         protocol::CapObject::Reply,
         Rights::NONE.bits(),
@@ -219,6 +220,7 @@ pub(super) fn handle_call(frame: &mut TrapFrame) {
             };
             crate::tracing::emit_cap_transferred(
                 crate::process::next_cap_id(),
+                0, // cap-in-reply derivation edge not tracked yet
                 me.0,
                 protocol::CapObject::Endpoint,
                 cap.rights.bits(),

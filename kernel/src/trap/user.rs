@@ -369,7 +369,9 @@ fn cap_object_kind(object: kernel_core::cap::Object) -> protocol::CapObject {
 /// child task's arg, and reclaimed by [`spawned_entry`] when the child first runs.
 struct SpawnRequest {
     image: &'static [u8],
-    delegated: alloc::vec::Vec<kernel_core::cap::Capability>,
+    /// Each delegated cap paired with its source holding's global cap id (the
+    /// `parent_cap_id` for the child's `CapEvent::Transferred`).
+    delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
 }
 
 /// Task entry for a `Spawn`-created child: reclaim its [`SpawnRequest`] from the
@@ -390,7 +392,7 @@ pub fn spawn_process_with_caps(
     hart: usize,
     name: &str,
     image: &'static [u8],
-    delegated: alloc::vec::Vec<kernel_core::cap::Capability>,
+    delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
     priority: kernel_core::sched::Priority,
 ) -> kernel_core::sched::TaskId {
     let req = alloc::boxed::Box::new(SpawnRequest { image, delegated });
@@ -584,7 +586,7 @@ fn run(image: &'static [u8]) -> ! {
 /// handles `2..` in order). Never returns.
 fn run_with_caps(
     image: &'static [u8],
-    delegated: alloc::vec::Vec<kernel_core::cap::Capability>,
+    delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
 ) -> ! {
     // Each process gets its own root page table (kernel high-half shared in).
     let root_pa = mmu::new_user_root().expect("userspace: no frame for user root page table");
@@ -598,30 +600,39 @@ fn run_with_caps(
     // global cap id, holder, object, and rights — the derivation-tree seed).
     // Both bootstrap caps carry `EMIT`; they differ only in object kind.
     let holder = crate::sched::current_task_id().0;
-    for object in [protocol::CapObject::TelemetrySink, protocol::CapObject::SpanSink] {
+    // Snitch each bootstrap grant with the *stored* holding cap id (set by
+    // `Process::bootstrap`), so a later delegation can name it as `parent_cap_id`.
+    for (handle, object) in [
+        (bootstrap_handle, protocol::CapObject::TelemetrySink),
+        (span_handle, protocol::CapObject::SpanSink),
+    ] {
         if let Some(id) = cap_grants_metric_id() {
             tracing::emit_metric(id, 1);
         }
-        tracing::emit_cap_granted(
-            crate::process::next_cap_id(),
-            holder,
-            object,
-            kernel_core::cap::Rights::EMIT.bits(),
-        );
+        let cap_id = process.caps.lock().cap_id_of(handle).unwrap_or(0);
+        tracing::emit_cap_granted(cap_id, holder, object, kernel_core::cap::Rights::EMIT.bits());
     }
 
     // Grant the parent-delegated caps (a `Spawn`'s payload) on top of bootstrap.
-    // They land at handles 2.. in order; each grant is snitched like the others.
-    for cap in &delegated {
-        let _ = process.caps.lock().insert(*cap);
+    // They land at handles 2.. in order; each is snitched as a `Transferred`
+    // linking to the parent holding it derived from (the derivation edge).
+    for (cap, parent_cap_id) in &delegated {
+        let cap_id = crate::process::next_cap_id();
+        let _ = process.caps.lock().insert_with_id(*cap, cap_id);
         if let Some(id) = cap_grants_metric_id() {
             tracing::emit_metric(id, 1);
         }
-        tracing::emit_cap_granted(
-            crate::process::next_cap_id(),
+        let badge = match cap.object {
+            kernel_core::cap::Object::Endpoint { badge, .. } => badge,
+            _ => 0,
+        };
+        tracing::emit_cap_transferred(
+            cap_id,
+            *parent_cap_id,
             holder,
             cap_object_kind(cap.object),
             cap.rights.bits(),
+            badge,
         );
     }
 
@@ -671,23 +682,28 @@ fn run_ipc(
     let root_pa = mmu::new_user_root().expect("ipc: no frame for user root page table");
     let (process, bootstrap_handle, span_handle) = Process::bootstrap(root_pa);
 
-    // Grant the IPC endpoint capability on top of the bootstrap pair.
-    let endpoint_handle =
-        process.caps.lock().insert(Capability { object: Object::Endpoint { id: endpoint, badge: 0 }, rights });
+    // Grant the IPC endpoint capability on top of the bootstrap pair, stamped
+    // with its own global cap id — a kernel-minted root grant (the ur-source of
+    // this endpoint's derivation tree).
+    let endpoint_handle = process.caps.lock().insert_with_id(
+        Capability { object: Object::Endpoint { id: endpoint, badge: 0 }, rights },
+        crate::process::next_cap_id(),
+    );
 
-    // Snitch every grant (counter + rich CapEvent), as `run` does — now three:
-    // the two bootstrap authorities plus this endpoint cap.
+    // Snitch every grant (counter + rich CapEvent) with its *stored* cap id, as
+    // `run` does — now three: the two bootstrap authorities plus this endpoint.
     let holder = crate::sched::current_task_id().0;
     let grants = [
-        (protocol::CapObject::TelemetrySink, kernel_core::cap::Rights::EMIT.bits()),
-        (protocol::CapObject::SpanSink, kernel_core::cap::Rights::EMIT.bits()),
-        (protocol::CapObject::Endpoint, rights.bits()),
+        (bootstrap_handle, protocol::CapObject::TelemetrySink, kernel_core::cap::Rights::EMIT.bits()),
+        (span_handle, protocol::CapObject::SpanSink, kernel_core::cap::Rights::EMIT.bits()),
+        (endpoint_handle, protocol::CapObject::Endpoint, rights.bits()),
     ];
-    for (object, rights_bits) in grants {
+    for (handle, object, rights_bits) in grants {
         if let Some(id) = cap_grants_metric_id() {
             tracing::emit_metric(id, 1);
         }
-        tracing::emit_cap_granted(crate::process::next_cap_id(), holder, object, rights_bits);
+        let cap_id = process.caps.lock().cap_id_of(handle).unwrap_or(0);
+        tracing::emit_cap_granted(cap_id, holder, object, rights_bits);
     }
 
     let process_ptr = core::ptr::addr_of!(process).cast_mut();

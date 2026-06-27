@@ -432,15 +432,31 @@ impl CapTable {
     /// with.
     #[must_use]
     pub fn bootstrap() -> (Self, Handle, Handle) {
+        Self::bootstrap_with_ids(0, 0)
+    }
+
+    /// As [`bootstrap`](Self::bootstrap), but stamps the two holdings with the
+    /// global `cap_id`s minted by the kernel — so each bootstrap grant has a
+    /// stable derivation-tree identity its `CapEvent::Granted` reports and a
+    /// later delegation can name as `parent_cap_id`. The plain `bootstrap` uses
+    /// the root sentinel `0` for both (host tests that don't trace ids).
+    #[must_use]
+    pub fn bootstrap_with_ids(telemetry_id: u64, span_id: u64) -> (Self, Handle, Handle) {
         let mut table = Self::new();
-        let telemetry = table.insert(Capability {
-            object: Object::TelemetrySink,
-            rights: Rights::EMIT,
-        });
-        let span = table.insert(Capability {
-            object: Object::SpanSink,
-            rights: Rights::EMIT,
-        });
+        let telemetry = table.insert_with_id(
+            Capability {
+                object: Object::TelemetrySink,
+                rights: Rights::EMIT,
+            },
+            telemetry_id,
+        );
+        let span = table.insert_with_id(
+            Capability {
+                object: Object::SpanSink,
+                rights: Rights::EMIT,
+            },
+            span_id,
+        );
         (table, telemetry, span)
     }
 
@@ -617,6 +633,14 @@ mod tests {
             rights: Rights::EMIT,
         });
         assert_eq!(table.cap_id_of(handle), Ok(0));
+    }
+
+    #[test]
+    fn bootstrap_with_ids_stamps_each_sink_with_its_own_id() {
+        // The telemetry id lands on telemetry, the span id on span — not swapped.
+        let (table, telemetry, span) = CapTable::bootstrap_with_ids(7, 9);
+        assert_eq!(table.cap_id_of(telemetry), Ok(7));
+        assert_eq!(table.cap_id_of(span), Ok(9));
     }
 
     #[test]

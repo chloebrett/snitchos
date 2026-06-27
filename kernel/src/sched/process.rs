@@ -110,7 +110,11 @@ impl Process {
     /// These grants are the only authority a userspace process is born with;
     /// the caller snitches each (`cap.grants_total` + a `CapEvent`).
     pub fn bootstrap(root_pa: usize) -> (Self, Handle, Handle) {
-        let (table, telemetry, span) = CapTable::bootstrap();
+        // Stamp each bootstrap holding with a stable global cap id so its
+        // `CapEvent::Granted` reports it and a later delegation can name it as a
+        // `parent_cap_id` (the derivation-tree spine).
+        let (table, telemetry, span) =
+            CapTable::bootstrap_with_ids(next_cap_id(), next_cap_id());
         let process = Self {
             root_pa,
             caps: Mutex::new(table),

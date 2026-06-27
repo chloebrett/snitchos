@@ -294,14 +294,22 @@ pub fn emit_cap_granted(cap_id: u64, holder: u32, object: protocol::CapObject, r
 }
 
 /// Emit a `CapEvent::Transferred` frame — a capability handed from one holder
-/// to another (v0.9b): the kernel minting a one-shot reply cap into the server
-/// `holder` at a `call` rendezvous. `parent_cap_id` is `0` for now (a precise
-/// derivation edge to the originating `call` is a later refinement).
-pub fn emit_cap_transferred(cap_id: u64, holder: u32, object: protocol::CapObject, rights: u32, badge: u64) {
+/// to another. `parent_cap_id` names the **source holding** the transferred cap
+/// derived from (the derivation edge), or `0` where no precise parent is tracked
+/// yet (e.g. the kernel minting a one-shot reply cap at a `call` rendezvous —
+/// linking that to the originating `call` is a later refinement).
+pub fn emit_cap_transferred(
+    cap_id: u64,
+    parent_cap_id: u64,
+    holder: u32,
+    object: protocol::CapObject,
+    rights: u32,
+    badge: u64,
+) {
     emit_frame(&Frame::CapEvent {
         kind: protocol::CapEventKind::Transferred,
         cap_id,
-        parent_cap_id: 0,
+        parent_cap_id,
         holder,
         object,
         rights,
