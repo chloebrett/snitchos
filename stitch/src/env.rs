@@ -19,6 +19,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use crate::prelude::*;
 
 use crate::ast::Method;
+use crate::platform::{NullPlatform, Platform};
 use crate::telemetry::{RecordingTelemetry, Telemetry};
 use crate::value::{TelemetryEvent, Value};
 
@@ -45,6 +46,11 @@ pub struct Env {
     /// [`RecordingTelemetry`]; the on-target build installs a syscall-backed one
     /// via [`Env::with_telemetry`].
     telemetry: Rc<dyn Telemetry>,
+    /// Where console / capability / process / filesystem effects go, shared
+    /// across the whole run like [`telemetry`](Self::telemetry). Defaults to
+    /// [`NullPlatform`] (discards output, reads nothing); the on-target build
+    /// installs a syscall-backed one via [`Env::with_platform`].
+    platform: Rc<dyn Platform>,
     /// The capabilities in scope — the authority the running code may exercise
     /// (e.g. `Telemetry` to call `emit`/`span`). A named function's body runs
     /// with exactly its declared `uses` (set via [`Env::with_authority`] at the
@@ -87,8 +93,25 @@ impl Env {
             methods: Rc::new(OnceCell::new()),
             field_mut: Rc::new(OnceCell::new()),
             telemetry,
+            platform: Rc::new(NullPlatform),
             authority: Rc::new(BTreeSet::new()),
         }
+    }
+
+    /// A clone of this environment whose console / capability / process / FS
+    /// effects route to `platform` — the seam for swapping the no-op default for
+    /// the on-target, syscall-backed backend (or a host fake) without the
+    /// interpreter knowing which it has. Inner scopes inherit it.
+    #[must_use]
+    pub fn with_platform(self, platform: Rc<dyn Platform>) -> Env {
+        Env { platform, ..self }
+    }
+
+    /// The installed effect backend — what the console / cap / proc / FS natives
+    /// call through.
+    #[must_use]
+    pub fn platform(&self) -> &dyn Platform {
+        self.platform.as_ref()
     }
 
     /// A clone of this environment carrying `authority` as its capability set —
@@ -120,6 +143,7 @@ impl Env {
             methods: Rc::clone(&self.methods),
             field_mut: Rc::clone(&self.field_mut),
             telemetry: Rc::clone(&self.telemetry),
+            platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
         }
     }
@@ -137,6 +161,7 @@ impl Env {
             methods: Rc::clone(&self.methods),
             field_mut: Rc::clone(&self.field_mut),
             telemetry: Rc::clone(&self.telemetry),
+            platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
         }
     }
@@ -166,6 +191,7 @@ impl Env {
             methods: Rc::clone(&self.methods),
             field_mut: Rc::clone(&self.field_mut),
             telemetry: Rc::clone(&self.telemetry),
+            platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
         }
     }

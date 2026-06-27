@@ -63,7 +63,12 @@ fn build_env_in(env: Env, items: &[Item]) -> Env {
     // The program entry / REPL prompt holds the process's ambient capabilities —
     // it *was* handed a `TelemetrySink` cap. Authority threads down from here;
     // named functions then narrow it to their declared `uses`.
-    let env = env.with_authority(BTreeSet::from(["Telemetry".to_string()]));
+    let env = env.with_authority(
+        ["Telemetry", "ConsoleOut", "ConsoleIn"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+    );
     let mut reg = Registration::default();
     for native in NATIVES {
         reg.globals.insert(native.name.to_string(), Value::Native(*native));
@@ -797,7 +802,7 @@ fn eval_string(segments: &[StrSegment], env: &Env) -> Result<Value, RuntimeError
 }
 
 /// Build a `Maybe`: `Some(value)`.
-fn some(value: Value) -> Value {
+pub(crate) fn some(value: Value) -> Value {
     Value::Data(Rc::new(DataValue {
         type_name: "Maybe".to_string(),
         variant: "Some".to_string(),
@@ -806,7 +811,7 @@ fn some(value: Value) -> Value {
 }
 
 /// Build a `Maybe`: `None`.
-fn none() -> Value {
+pub(crate) fn none() -> Value {
     Value::Data(Rc::new(DataValue {
         type_name: "Maybe".to_string(),
         variant: "None".to_string(),
