@@ -372,6 +372,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::StackCanary)
         | Some(WorkloadKind::SpawnDemo)
         | Some(WorkloadKind::SpawnReap)
+        | Some(WorkloadKind::WaitAny)
         | Some(WorkloadKind::NotifySmoke)
         | Some(WorkloadKind::Priorities)
         | Some(WorkloadKind::Ipc)
@@ -433,6 +434,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::StitchRepl
                     | WorkloadKind::SpawnDemo
                     | WorkloadKind::SpawnReap
+                    | WorkloadKind::WaitAny
                     | WorkloadKind::UserspaceBadPtr
                     | WorkloadKind::Priorities
                     | WorkloadKind::BlockWake

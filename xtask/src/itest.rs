@@ -261,6 +261,7 @@ catalog! {
     cpu "spawn-delegates-to-child"        scenarios::spawn_delegates_to_child       [userspace]  {"spawn-demo"};
     cpu "spawn-transfer-links-to-parent"  scenarios::spawn_transfer_links_to_parent [userspace]  {"spawn-demo"};
     cpu "spawn-reclaims-memory"           scenarios::spawn_reclaims_memory          [userspace]  {"spawn-reap"};
+    cpu "wait-any-reaps-exiting-child"    scenarios::wait_any_reaps_the_exiting_child [userspace] {"wait-any"};
     cpu "notify-signal-wakes-waiter"      scenarios::notify_signal_wakes_waiter     [userspace]  {"notify-smoke"};
     cpu "priorities-ordered-but-fair"     scenarios::priorities_ordered_but_fair    [userspace]  {"priorities"};
 }

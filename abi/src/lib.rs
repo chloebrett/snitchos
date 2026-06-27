@@ -196,6 +196,13 @@ pub enum Syscall {
     /// returns the bits. `usize::MAX` if refused (bad handle / lacks `WAIT` / wrong
     /// object / another task already waiting — one waiter per notification).
     WaitNotify = 23,
+    /// Wait for **any** child to exit and collect its id + status (v0.13) — the
+    /// supervising-parent variant of [`Self::Wait`]. No arguments. Blocks until
+    /// any task this caller spawned `Exit`s (returning immediately if one already
+    /// has), then returns the exited child's status in `a0` and its task id in
+    /// `a1`; the zombie is reaped. Used by `init` to supervise children whose ids
+    /// it needn't track and that exit in any order. Same-hart in v0.13.
+    WaitAny = 24,
 }
 
 impl Syscall {
@@ -229,6 +236,7 @@ impl Syscall {
             21 => Some(Self::NotifyCreate),
             22 => Some(Self::Signal),
             23 => Some(Self::WaitNotify),
+            24 => Some(Self::WaitAny),
             _ => None,
         }
     }
@@ -291,6 +299,7 @@ mod tests {
         assert_eq!(Syscall::NotifyCreate as usize, 21);
         assert_eq!(Syscall::Signal as usize, 22);
         assert_eq!(Syscall::WaitNotify as usize, 23);
+        assert_eq!(Syscall::WaitAny as usize, 24);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Exit));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Yield));
@@ -316,6 +325,7 @@ mod tests {
         assert_eq!(Syscall::from_usize(21), Some(Syscall::NotifyCreate));
         assert_eq!(Syscall::from_usize(22), Some(Syscall::Signal));
         assert_eq!(Syscall::from_usize(23), Some(Syscall::WaitNotify));
-        assert_eq!(Syscall::from_usize(24), None);
+        assert_eq!(Syscall::from_usize(24), Some(Syscall::WaitAny));
+        assert_eq!(Syscall::from_usize(25), None);
     }
 }

@@ -1063,8 +1063,22 @@ pub fn wait_for(parent: TaskId, child: TaskId) -> kernel_core::reap::WaitStep {
     REAP.lock().on_wait(parent, child)
 }
 
+/// `parent` waits for *any* of its children: reap whichever zombie exists (return
+/// its id + status), else record the any-waiter and tell the caller to block. The
+/// pure decision is [`kernel_core::reap::ReapTable::on_wait_any`].
+pub fn wait_for_any(parent: TaskId) -> kernel_core::reap::WaitAnyStep {
+    REAP.lock().on_wait_any(parent)
+}
+
+/// Record `parent → child` parentage for a freshly spawned `child`, so a later
+/// [`wait_for_any`] can match the child's exit. [`kernel_core::reap::ReapTable::on_spawn`].
+pub fn note_spawn(parent: TaskId, child: TaskId) {
+    REAP.lock().on_spawn(parent, child);
+}
+
 /// Record that `child` exited with `status` and return the parent (if any)
-/// blocked on it, for the caller to [`wake`]. [`kernel_core::reap::ReapTable::on_exit`].
+/// blocked on it — a specific [`wait_for`] waiter or an any-waiting parent — for
+/// the caller to [`wake`]. [`kernel_core::reap::ReapTable::on_exit`].
 pub fn note_exit(child: TaskId, status: i32) -> Option<TaskId> {
     REAP.lock().on_exit(child, status)
 }

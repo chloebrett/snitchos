@@ -78,6 +78,14 @@ pub static SPAWNER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAWNER_ELF"));
 /// only a [`SPAWNABLE`] registry row.
 pub static SPAWNEE_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAWNEE_ELF"));
 
+/// The `workload=wait-any` parent: spawns a never-exiting `spinner` + an exiting
+/// `spawnee`, then `WaitAny`s for whichever exits — the supervising-parent demo.
+pub static SUPERVISOR_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SUPERVISOR_ELF"));
+
+/// The `spinner` child (spawnable id 3): loops forever, never exits. A long-lived
+/// sibling so `WaitAny` deterministically returns the *other* child.
+pub static SPINNER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPINNER_ELF"));
+
 /// The `workload=spawn-reap` parent: spawns + `Wait`s a memory-hungry `memhog`
 /// child 30 times. Drives the reclaim integration test — leaks (and OOMs)
 /// without per-process teardown on Exit.
@@ -268,6 +276,10 @@ pub static PROBE: ProgramSpec = ProgramSpec { elf: PROBE_ELF, launch: Launch::Pl
 /// cap, and it delegates from its own bootstrap caps).
 pub static SPAWNER: ProgramSpec = ProgramSpec { elf: SPAWNER_ELF, launch: Launch::Plain };
 
+/// `workload=wait-any`: the supervising parent (ambient — `Spawn`/`WaitAny` need
+/// no cap; it delegates its span cap to the exiting child).
+pub static SUPERVISOR: ProgramSpec = ProgramSpec { elf: SUPERVISOR_ELF, launch: Launch::Plain };
+
 /// `workload=spawn-reap`: the reclaim-test parent (ambient — `Spawn`/`Wait` need
 /// no cap; the `memhog` children it spawns inherit no delegated authority).
 pub static REAPER: ProgramSpec = ProgramSpec { elf: REAPER_ELF, launch: Launch::Plain };
@@ -408,6 +420,7 @@ static SPAWNABLE: &[(&str, &[u8])] = &[
     ("spawnee", SPAWNEE_ELF),
     ("memhog", MEMHOG_ELF),
     ("notify-signaller", NOTIFY_SIGNALLER_ELF),
+    ("spinner", SPINNER_ELF),
 ];
 
 /// Resolve a `Spawn` program id to its `(name, image)`, or `None` if out of range.
@@ -516,6 +529,12 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::SpawnReap, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "reaper", program: &REAPER, priority: Priority::Normal }],
+    }),
+    // v0.13 wait-for-any: the `supervisor` parent spawns a `spinner` + `spawnee`
+    // at runtime (SPAWNABLE ids), then `WaitAny`s — so only the parent is here.
+    (WorkloadKind::WaitAny, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "supervisor", program: &SUPERVISOR, priority: Priority::Normal }],
     }),
     // v0.12 notification smoke: the `notify-waiter` parent boots and `Spawn`s the
     // `notify-signaller` child (SPAWNABLE id 2) at runtime, delegating the

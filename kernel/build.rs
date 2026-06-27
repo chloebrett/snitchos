@@ -25,6 +25,8 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("probe", "SNITCHOS_PROBE_ELF"),
     ("spawner", "SNITCHOS_SPAWNER_ELF"),
     ("spawnee", "SNITCHOS_SPAWNEE_ELF"),
+    ("supervisor", "SNITCHOS_SUPERVISOR_ELF"),
+    ("spinner", "SNITCHOS_SPINNER_ELF"),
     ("reaper", "SNITCHOS_REAPER_ELF"),
     ("memhog", "SNITCHOS_MEMHOG_ELF"),
     ("ipc-sender", "SNITCHOS_IPC_SENDER_ELF"),

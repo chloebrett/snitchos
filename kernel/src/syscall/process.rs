@@ -59,6 +59,32 @@ pub(super) fn handle_wait(frame: &mut TrapFrame) {
     }
 }
 
+/// Wait for *any* child to exit and return its status + id (v0.13). No args;
+/// returns the exited child's status in `a0` and its task id in `a1`. Blocks until
+/// any child this caller spawned `Exit`s (re-checking on each wake), or returns
+/// immediately if one already exited (reaping the zombie). The supervising-parent
+/// variant of [`handle_wait`]; same-hart in v0.13.
+pub(super) fn handle_wait_any(frame: &mut TrapFrame) {
+    use kernel_core::reap::WaitAnyStep;
+
+    let me = crate::sched::current_task_id();
+    loop {
+        match crate::sched::wait_for_any(me) {
+            WaitAnyStep::Ready { child, status } => {
+                // The child is fully `Exited` and we run in our own address space,
+                // so it's safe to reclaim its resources now (see `reap_task`).
+                crate::sched::reap_task(child);
+                frame.a0 = status as u64;
+                frame.a1 = u64::from(child.0);
+                return;
+            }
+            // Recorded as an any-waiter; block until a child's `Exit` wakes us,
+            // then loop to re-check (it'll find the zombie and reap it).
+            WaitAnyStep::Block => crate::sched::block_current(),
+        }
+    }
+}
+
 /// Spawn a new userspace process, delegating a subset of the caller's caps to it
 /// (v0.11). `a0` = program id, `a1` = pointer to a `[u32; N]` handle array in the
 /// caller's space, `a2` = `N`. Resolves the program, delegates the named caps —
@@ -133,5 +159,8 @@ pub(super) fn handle_spawn(frame: &mut TrapFrame) {
         delegated,
         kernel_core::sched::Priority::Normal,
     );
+    // Record parentage so the caller can later `WaitAny` and have this child's
+    // exit matched to it.
+    crate::sched::note_spawn(crate::sched::current_task_id(), child);
     frame.a0 = u64::from(child.0);
 }

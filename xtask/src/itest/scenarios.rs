@@ -2593,6 +2593,46 @@ pub fn spawn_transfer_links_to_parent(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.13 supervising parent — `WaitAny` reaps *whichever* child exits, without
+/// the parent naming it (`workload=wait-any`). The `supervisor` spawns a
+/// never-exiting `spinner` and an exiting `spawnee`, then `wait_any()`s. Asserts
+/// the parent reports the spawnee's status (42) *and* its task id — proving
+/// `WaitAny` woke on the exiting child (not blocked forever on the spinner) and
+/// returned the right `(id, status)`.
+pub fn wait_any_reaps_the_exiting_child(h: &mut View) -> Result<(), String> {
+    // The exiting child registers as a task — capture its id.
+    let tr = h
+        .wait_for(SEC * 20, is_thread_register_named("spawnee"))
+        .ok_or("no ThreadRegister for 'spawnee' — the exiting child wasn't spawned")?;
+    let child_id = match tr {
+        OwnedFrame::ThreadRegister { id, .. } => id,
+        _ => unreachable!("matched a ThreadRegister above"),
+    };
+
+    // The supervisor's `wait_any()` returned the spawnee's exit status (42)...
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.supervisor.any_status")
+                && *value == 42
+        }
+        _ => false,
+    })
+    .ok_or("supervisor.any_status != 42 — WaitAny didn't return the exiting child's status")?;
+
+    // ...and that child's task id, proving it reaped the spawnee specifically and
+    // didn't block forever on the never-exiting spinner.
+    h.wait_for(SEC * 20, move |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.supervisor.any_child")
+                && *value == i64::from(child_id)
+        }
+        _ => false,
+    })
+    .ok_or("supervisor.any_child != the spawnee's task id — WaitAny returned the wrong child")?;
+
+    Ok(())
+}
+
 /// v0.12 process teardown — Exit **reclaims** the child's address space
 /// (`workload=spawn-reap`). The `reaper` parent spawns + `Wait`s a `memhog`
 /// child 30 times; each child allocates + touches ~4 MiB (~1024 user frames)

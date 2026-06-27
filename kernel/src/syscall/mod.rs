@@ -52,6 +52,7 @@ pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::ClockNow) => clock::handle_clock_now(frame),
         Some(Syscall::Spawn) => process::handle_spawn(frame),
         Some(Syscall::Wait) => process::handle_wait(frame),
+        Some(Syscall::WaitAny) => process::handle_wait_any(frame),
         Some(Syscall::RegisterMetric) => metric::handle_register_metric(frame),
         Some(Syscall::EmitMetric) => metric::handle_emit_metric(frame),
         Some(Syscall::NotifyCreate) => notify::handle_notify_create(frame),

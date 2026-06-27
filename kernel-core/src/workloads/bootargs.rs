@@ -115,6 +115,10 @@ pub enum WorkloadKind {
     /// memory-hungry `memhog` child 30×. Proves Exit reclaims the child's user
     /// address space — without teardown the leak OOMs the kernel.
     SpawnReap,
+    /// v0.13 wait-for-any: a `supervisor` parent that `Spawn`s a never-exiting
+    /// `spinner` + an exiting `spawnee`, then `WaitAny`s for whichever exits.
+    /// Proves a supervising parent reaps any child without naming it.
+    WaitAny,
     /// v0.8b priority demo: a `High`-priority and a `Low`-priority cooperative
     /// worker share one hart. The High worker runs far more often (priority
     /// respected), but the Low worker still makes progress (aging prevents
@@ -238,6 +242,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "stack-canary" => Some(WorkloadKind::StackCanary),
             "spawn-demo" => Some(WorkloadKind::SpawnDemo),
             "spawn-reap" => Some(WorkloadKind::SpawnReap),
+            "wait-any" => Some(WorkloadKind::WaitAny),
             "priorities" => Some(WorkloadKind::Priorities),
             "block-wake" => Some(WorkloadKind::BlockWake),
             "ipc" => Some(WorkloadKind::Ipc),

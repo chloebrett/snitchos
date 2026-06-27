@@ -242,6 +242,27 @@ pub fn wait(child: u32) -> i32 {
     ret as i32
 }
 
+/// Block until **any** child this process spawned exits, returning its exit
+/// status and task id (`(status, child)`). The supervising-parent variant of
+/// [`wait`]: the caller needn't name a child, and children may exit in any order.
+/// If one has already exited, returns immediately (reaping the zombie).
+#[must_use]
+pub fn wait_any() -> (i32, u32) {
+    let status: usize;
+    let child: usize;
+    // SAFETY: `ecall`; the kernel blocks us until any child exits, then returns
+    // its status in a0 and its task id in a1 (resuming us here on a reschedule).
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::WaitAny as usize,
+            out("a0") status,
+            out("a1") child,
+        );
+    }
+    (status as i32, child as u32)
+}
+
 /// Voluntarily yield the CPU. We can't call the kernel's `yield_now` directly
 /// (it runs on kernel stacks); instead we `ecall` `Yield` and the kernel
 /// yields on our behalf, returning here on a later reschedule. The kernel
