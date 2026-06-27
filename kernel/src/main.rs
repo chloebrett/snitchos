@@ -332,9 +332,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             // Lock-free ring that fences per-batch (shared static, no split).
             let _ = sched::spawn("workload_producer", workload::spsc_batch_producer_entry);
         }
-        // Default demo: `None`, and the OOM workloads, which keep the
-        // standard tasks and only change the heartbeat.
-        None | Some(WorkloadKind::FrameOom) | Some(WorkloadKind::HeapOom) => {
+        // The kernel scheduler demo (`workload=demo`, the former default) and the
+        // OOM workloads, which keep the standard tasks and only change the
+        // heartbeat. The no-bootarg default (`None`) now boots `init` instead —
+        // it spawns no hart-0 demo tasks here; init is realised post-secondary via
+        // the userspace layout (see below).
+        Some(WorkloadKind::Demo) | Some(WorkloadKind::FrameOom) | Some(WorkloadKind::HeapOom) => {
             let _ = sched::spawn("task_a", demo_tasks::task_a_entry);
             let _ = sched::spawn("task_b", demo_tasks::task_b_entry);
             let _ = sched::spawn("workload_producer", workload::producer_entry);
@@ -382,7 +385,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::IpcRpc)
         | Some(WorkloadKind::BadgeMint)
         | Some(WorkloadKind::BadgeHandout)
-        | Some(WorkloadKind::Fs) => {}
+        | Some(WorkloadKind::Fs)
+        // The no-bootarg default boots `init` (userspace, placed on hart 1 via the
+        // layout below) — nothing to spawn on hart 0 here.
+        | None => {}
     }
 
     // DTB physical region lives in the identity gigapage we're about
@@ -419,10 +425,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     }
     // v0.6 step 10: cross-hart spawn smoke. Probe lands on hart 1's
     // runqueue + IPI wakeup nudges hart 1 to pick it. Skipped for the
-    // storm workloads, which drive hart 1 themselves (or keep it idle
-    // so a heartbeat-driven storm can poke it with maximum "fresh
-    // trap" race exposure).
-    if !selected.is_some_and(|w| {
+    // storm workloads (which drive hart 1 themselves), the userspace
+    // workloads (which place their program on hart 1), and the no-bootarg
+    // default (`None` → `init`, also a hart-1 userspace program) — hence
+    // `map_or(true, …)`: `None` skips the probe just like a userspace workload.
+    if !selected.map_or(true, |w| {
         w.is_storm()
             || matches!(
                 w,
@@ -477,7 +484,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // the telemetry counter, create the shared endpoint if needed, and spawn
     // each program on hart 1 (hart 0 keeps heartbeating). Adding a userspace
     // workload is a `ProgramSpec` + a `user_layout` row — no spawn arm here.
-    if let Some(layout) = selected.and_then(user::user_layout) {
+    // The no-bootarg default boots `init` — resolve `None` to its layout so the
+    // default boot realises the userspace root. Named userspace workloads use their
+    // own layout; non-userspace selections (demo, SMP, storms) have none.
+    if let Some(layout) = user::user_layout(selected.unwrap_or(WorkloadKind::Init)) {
         user::init_metric();
         if layout.needs_endpoint {
             crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);

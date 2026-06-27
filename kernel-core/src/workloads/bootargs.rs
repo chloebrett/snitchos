@@ -6,10 +6,11 @@
 //! DTB and feeds it in. See `docs/runtime-workload-selection-design.md`.
 
 /// Which boot workload to run. `kmain` maps each variant to a set of
-/// task spawns (and, for some, heartbeat behaviour). The *default*
-/// demo is the absence of a selection (`select` returns `None`), so it
-/// is deliberately not a variant here — adding a variant must mean
-/// "an alternate workload," never "the default."
+/// task spawns (and, for some, heartbeat behaviour). The *default* (no
+/// selection, `select` returns `None`) boots **`init`** — the userspace
+/// delegation-graph root (v0.13). The former default — the kernel scheduler
+/// demo (`task_a`/`task_b` + producer/consumer + the cross-hart probe) — is
+/// kept as the explicit [`Demo`](Self::Demo) workload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkloadKind {
     /// Cross-hart producer/consumer over `Mutex<VecDeque>`: producer on
@@ -131,6 +132,12 @@ pub enum WorkloadKind {
     /// via the `EndpointCreate` syscall and proves the returned cap is a real
     /// owning `RECV | MINT` by minting a badged `SEND` on it.
     EndpointCreate,
+    /// The former default boot: the kernel scheduler demo — `task_a`/`task_b`
+    /// cooperative tasks + the producer/consumer pair + the cross-hart spawn
+    /// probe. Kept as an explicit workload now that the no-bootarg default boots
+    /// `init` (v0.13). Exercises the scheduler (context switch, yield, per-task
+    /// spans) and SMP bring-up — the `sched-*`/`smp-*` scenarios run here.
+    Demo,
     /// v0.8b priority demo: a `High`-priority and a `Low`-priority cooperative
     /// worker share one hart. The High worker runs far more often (priority
     /// respected), but the Low worker still makes progress (aging prevents
@@ -258,6 +265,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "wait-any" => Some(WorkloadKind::WaitAny),
             "init" => Some(WorkloadKind::Init),
             "endpoint-create" => Some(WorkloadKind::EndpointCreate),
+            "demo" => Some(WorkloadKind::Demo),
             "priorities" => Some(WorkloadKind::Priorities),
             "block-wake" => Some(WorkloadKind::BlockWake),
             "ipc" => Some(WorkloadKind::Ipc),

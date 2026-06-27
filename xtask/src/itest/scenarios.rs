@@ -2861,6 +2861,35 @@ pub fn init_runs_fs_client(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.13 the end-state — the **no-bootarg default boot** starts `init` as the
+/// first userspace process. Asserts the kernel boots healthily (reaches its
+/// heartbeat) *and* `init` ran: it spawned + supervised a child and reaped its
+/// exit (42) via `WaitAny`. The former default (the kernel scheduler demo) now
+/// lives behind `workload=demo`; this proves the flip.
+pub fn default_boot_starts_init(h: &mut View) -> Result<(), String> {
+    // The default first userspace process is `init`: it spawned a child and reaped
+    // its exit status (42) via WaitAny — the supervising root, running by default.
+    // (Asserted first: init runs right after boot, before the 1 Hz heartbeat — the
+    // forward cursor must see the reap before advancing to a heartbeat.)
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.init.reaped_status")
+                && *value == 42
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no init.reaped_status=42 — the no-bootarg default boot didn't run init as \
+         the first userspace process",
+    )?;
+
+    // The kernel keeps heartbeating after init ran — default boot is healthy.
+    h.wait_for(SEC * 20, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no kernel.heartbeat after init ran — default boot isn't healthy")?;
+
+    Ok(())
+}
+
 /// v0.12 process teardown — Exit **reclaims** the child's address space
 /// (`workload=spawn-reap`). The `reaper` parent spawns + `Wait`s a `memhog`
 /// child 30 times; each child allocates + touches ~4 MiB (~1024 user frames)
