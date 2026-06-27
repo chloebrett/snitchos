@@ -15,6 +15,7 @@ mod debug;
 mod ipc;
 mod mem;
 mod metric;
+mod notify;
 mod process;
 mod span;
 mod transfer;
@@ -53,6 +54,9 @@ pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::Wait) => process::handle_wait(frame),
         Some(Syscall::RegisterMetric) => metric::handle_register_metric(frame),
         Some(Syscall::EmitMetric) => metric::handle_emit_metric(frame),
+        Some(Syscall::NotifyCreate) => notify::handle_notify_create(frame),
+        Some(Syscall::Signal) => notify::handle_signal(frame),
+        Some(Syscall::WaitNotify) => notify::handle_wait_notify(frame),
         None => {
             let n = frame.a7 as u8;
             refuse(frame, n, protocol::RefusalReason::UnknownSyscall);

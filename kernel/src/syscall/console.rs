@@ -28,6 +28,15 @@ pub(super) fn handle_console_read(frame: &mut TrapFrame) {
         return;
     }
 
+    // Drain the UART RX FIFO into the ring *here*, not only on the ~50 ms timer
+    // tick — so an actively-reading program pulls bytes straight from the device
+    // every poll. Hardens against input bursts (a fast paste can fill the 16-byte
+    // hardware FIFO between timer drains; the reader keeps it clear, and QEMU's
+    // 16550 flow-controls while *someone* drains) and trims read latency. Safe
+    // from any hart: `drain_rx` holds the ring mutex across the RBR reads, so
+    // concurrent drainers serialize.
+    crate::console::drain_rx();
+
     let mut buf = [0u8; MAX_READ];
     let n = crate::console::read_into(&mut buf[..len]);
     // `n <= len`, and `[ptr, len)` was just validated writable, so this can't

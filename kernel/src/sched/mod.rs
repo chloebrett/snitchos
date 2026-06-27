@@ -1069,6 +1069,43 @@ pub fn note_exit(child: TaskId, status: i32) -> Option<TaskId> {
     REAP.lock().on_exit(child, status)
 }
 
+/// The live notification registry (v0.12) — the general async kernel→user signal.
+/// Same `Mutex` discipline as [`REAP`]: locked only inside the helpers below, the
+/// lock dropped before any `wake`/`block_current`. The pure table is
+/// [`kernel_core::notify::NotifyTable`].
+static NOTIFY: crate::sync::Mutex<kernel_core::notify::NotifyTable> =
+    crate::sync::Mutex::new(kernel_core::notify::NotifyTable::new());
+
+/// Allocate a fresh notification and return its id (backs `NotifyCreate`).
+pub fn notify_create() -> kernel_core::notify::NotificationId {
+    NOTIFY.lock().create()
+}
+
+/// Signal the notification `id` with `mask` (backs `Signal`). OR-s the bits and,
+/// if a waiter is parked, [`wake`]s it (the lock is released before the wake).
+/// `None` if `id` names no notification — a kernel-side bug, since the cap
+/// guaranteed it; the caller treats it as a refusal.
+pub fn notify_signal(id: kernel_core::notify::NotificationId, mask: u64) -> Option<()> {
+    use kernel_core::notify::SignalStep;
+    let step = NOTIFY.lock().signal(id, mask)?;
+    if let SignalStep::Woke(waiter) = step {
+        wake(waiter);
+    }
+    Some(())
+}
+
+/// Decide a `wait` on notification `id` for `caller` (backs `WaitNotify`): take
+/// pending bits, park, or refuse a second waiter. Returns the pure
+/// [`kernel_core::notify::WaitStep`] for the syscall handler to act on (it owns
+/// the `block_current` loop), or `None` if `id` names no notification. The lock
+/// is dropped on return, never held across `block_current`.
+pub fn notify_wait(
+    id: kernel_core::notify::NotificationId,
+    caller: TaskId,
+) -> Option<kernel_core::notify::WaitStep> {
+    NOTIFY.lock().wait(id, caller)
+}
+
 /// Reclaim a fully-`Exited` child's resources once its parent has `Wait`ed on it.
 /// Frees, in dependency order: the child's user address space (page table + every
 /// mapped frame, via [`crate::mmu::free_user_root`]), the child's [`Process`]

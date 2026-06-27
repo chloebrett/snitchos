@@ -820,6 +820,86 @@ fn reply_inner(reply_handle: usize, msg: [u64; MSG_WORDS], transfer: usize) -> R
     if ret == 0 { Ok(()) } else { Err(Denied) }
 }
 
+/// A notification capability — the general async kernel→user signal (v0.12).
+/// One end signals (the producer), the other waits (the consumer); the kernel
+/// carries one userspace-defined bit mask, coalescing repeated signals. Wraps a
+/// raw cap handle, like [`Endpoint`].
+#[derive(Debug, Clone, Copy)]
+pub struct Notification {
+    handle: usize,
+}
+
+impl Notification {
+    /// Wrap a raw notification cap handle (e.g. one delegated to this process).
+    #[must_use]
+    pub const fn from_raw_handle(handle: usize) -> Self {
+        Self { handle }
+    }
+
+    /// This notification's raw cap handle — for delegating an end to another
+    /// process (e.g. handing a child the `SIGNAL` end via [`spawn`]).
+    #[must_use]
+    pub const fn raw_handle(self) -> usize {
+        self.handle
+    }
+
+    /// Signal the notification: OR `mask` into its pending bits and wake any
+    /// waiter. Never blocks. `Err(Denied)` if the kernel refused (cap lacks
+    /// `SIGNAL`, or is not a notification handle).
+    pub fn signal(self, mask: u64) -> Result<(), Denied> {
+        let ret: usize;
+        // SAFETY: `ecall`; the kernel validates the handle (needs `SIGNAL`),
+        // OR-s the mask, wakes any waiter, and returns 0 in a0 (usize::MAX if
+        // refused).
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::Signal as usize,
+                inlateout("a0") self.handle => ret,
+                in("a1") mask,
+            );
+        }
+        if ret == usize::MAX { Err(Denied) } else { Ok(()) }
+    }
+
+    /// Wait for the notification: return its pending bits (read-and-cleared),
+    /// blocking until a [`signal`](Self::signal) arrives if none are pending.
+    /// `Err(Denied)` if the kernel refused (cap lacks `WAIT`, not a notification
+    /// handle, or another task is already waiting — one waiter per notification).
+    pub fn wait(self) -> Result<u64, Denied> {
+        let ret: usize;
+        // SAFETY: `ecall`; the kernel validates the handle (needs `WAIT`), and
+        // either returns pending bits in a0 or blocks us until a signal arrives,
+        // then resumes us here with the bits in a0 (usize::MAX if refused).
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::WaitNotify as usize,
+                inlateout("a0") self.handle => ret,
+            );
+        }
+        if ret == usize::MAX { Err(Denied) } else { Ok(ret as u64) }
+    }
+}
+
+/// Create a fresh notification, returning a handle that holds both the `SIGNAL`
+/// and `WAIT` ends. Ambient — making your own notification needs no prior cap;
+/// delegate an end to split producer from consumer.
+#[must_use]
+pub fn notify_create() -> Notification {
+    let handle: usize;
+    // SAFETY: `ecall`; the kernel allocates a notification, inserts a
+    // SIGNAL|WAIT cap into our table, and returns its handle in a0.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::NotifyCreate as usize,
+            out("a0") handle,
+        );
+    }
+    Notification::from_raw_handle(handle)
+}
+
 /// Copy `len` bytes from a blocked caller's memory (`src_va`, in *their* address
 /// space) into this server's buffer at `dst_va` (option D, v0.10). `reply_handle`
 /// is the one-shot reply cap naming the caller — borrowed (not consumed), so the

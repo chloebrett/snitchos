@@ -177,6 +177,25 @@ pub enum Syscall {
     /// userspace time its own work without a span round-trip; the stdlib
     /// `Instant::now()` rides on it.
     ClockNow = 20,
+    /// Create a fresh notification and return a capability handle to it (v0.12).
+    /// No arguments; returns in `a0` a handle to a new `Notification` cap the
+    /// caller holds with both `SIGNAL` and `WAIT` rights (the caller then
+    /// attenuates + delegates the end(s) it wants). Ambient, like [`Self::MapAnon`]:
+    /// making your own notification needs no prior authority; delegating the ends
+    /// is where the authority split happens.
+    NotifyCreate = 21,
+    /// Signal a notification — the producer end (v0.12). `a0` = a `Notification`
+    /// capability handle (needs `SIGNAL`), `a1` = a userspace-defined bit mask.
+    /// OR-s the mask into the notification's pending bits and wakes any parked
+    /// waiter; never blocks. Returns `0` in `a0`, or `usize::MAX` if refused
+    /// (bad handle / lacks `SIGNAL` / wrong object).
+    Signal = 22,
+    /// Wait on a notification — the consumer end (v0.12). `a0` = a `Notification`
+    /// capability handle (needs `WAIT`). If bits are pending, returns them in `a0`
+    /// (read-and-cleared); otherwise blocks until a [`Self::Signal`] arrives, then
+    /// returns the bits. `usize::MAX` if refused (bad handle / lacks `WAIT` / wrong
+    /// object / another task already waiting — one waiter per notification).
+    WaitNotify = 23,
 }
 
 impl Syscall {
@@ -207,6 +226,9 @@ impl Syscall {
             18 => Some(Self::Wait),
             19 => Some(Self::ConsoleWrite),
             20 => Some(Self::ClockNow),
+            21 => Some(Self::NotifyCreate),
+            22 => Some(Self::Signal),
+            23 => Some(Self::WaitNotify),
             _ => None,
         }
     }
@@ -266,6 +288,9 @@ mod tests {
         assert_eq!(Syscall::Wait as usize, 18);
         assert_eq!(Syscall::ConsoleWrite as usize, 19);
         assert_eq!(Syscall::ClockNow as usize, 20);
+        assert_eq!(Syscall::NotifyCreate as usize, 21);
+        assert_eq!(Syscall::Signal as usize, 22);
+        assert_eq!(Syscall::WaitNotify as usize, 23);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Exit));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Yield));
@@ -288,6 +313,9 @@ mod tests {
         assert_eq!(Syscall::from_usize(18), Some(Syscall::Wait));
         assert_eq!(Syscall::from_usize(19), Some(Syscall::ConsoleWrite));
         assert_eq!(Syscall::from_usize(20), Some(Syscall::ClockNow));
-        assert_eq!(Syscall::from_usize(21), None);
+        assert_eq!(Syscall::from_usize(21), Some(Syscall::NotifyCreate));
+        assert_eq!(Syscall::from_usize(22), Some(Syscall::Signal));
+        assert_eq!(Syscall::from_usize(23), Some(Syscall::WaitNotify));
+        assert_eq!(Syscall::from_usize(24), None);
     }
 }

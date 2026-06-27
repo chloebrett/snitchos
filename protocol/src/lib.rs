@@ -257,6 +257,10 @@ pub enum RefusalReason {
   /// A `RegisterMetric` carried a metric-kind selector that names no
   /// `MetricKind` (not Counter/Gauge/Histogram).
   BadMetricKind,
+  /// A `WaitNotify` targeted a notification that already has a parked waiter —
+  /// one waiter per notification in v0.12 (the second waiter is refused, never
+  /// silently dropped, so the first parker can't be stranded).
+  NotificationBusy,
 }
 
 #[cfg(test)]
@@ -735,6 +739,7 @@ mod tests {
       RefusalReason::UnknownProgram,
       RefusalReason::BadMetricHandle,
       RefusalReason::BadMetricKind,
+      RefusalReason::NotificationBusy,
     ] {
       let frame = Frame::SyscallRefused {
         syscall: 3,

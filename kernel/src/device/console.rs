@@ -95,14 +95,18 @@ const RX_RING_CAP: usize = 256;
 static CONSOLE_RX: crate::sync::Mutex<ConsoleRing<RX_RING_CAP>> =
   crate::sync::Mutex::new(ConsoleRing::new());
 
-/// Drain the UART receive FIFO into [`CONSOLE_RX`]. Called from the timer
-/// handler, **hart 0 only** (single producer — the gate lives at the call site).
+/// Drain the UART receive FIFO into [`CONSOLE_RX`]. Called from the timer handler
+/// (hart 0, ~every tick) **and** from the `ConsoleRead` syscall (any hart) so an
+/// actively-reading program empties the FIFO between ticks (burst hardening). The
+/// `RBR` reads happen **under the [`CONSOLE_RX`] lock**, so concurrent drainers
+/// serialize on it — multi-producer is safe even though each drain uses its own
+/// unsynchronized RX handle.
 ///
 /// Deliberately does **not** lock the println [`UART`] mutex. A kernel task can
 /// hold that mutex for `print!`/`println!` with interrupts enabled; locking it
 /// here would deadlock the instant the timer fires mid-print. RX register access
 /// (poll `LSR`, pop `RBR`) touches device state disjoint from the TX path's
-/// `THR` writes, so a separate, unsynchronized RX handle is sound.
+/// `THR` writes, so a separate RX handle is sound.
 pub fn drain_rx() {
   // SAFETY: RX-only access (LSR/RBR), disjoint from the `UART`-mutex-guarded TX
   // path's THR writes; see the fn doc for why this needs no coordination.

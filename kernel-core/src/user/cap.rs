@@ -315,6 +315,39 @@ pub fn invoke_recv(table: &CapTable, handle: Handle) -> Result<EndpointId, Denie
     Ok(id)
 }
 
+/// Resolve a `signal` invocation (v0.12): `handle` must name an
+/// [`Object::Notification`] in `table` carrying [`Rights::SIGNAL`] — the
+/// producer end. Returns the [`NotificationId`] to signal. The `wait` twin is
+/// [`invoke_wait`]; both mirror [`invoke_send`]/[`invoke_recv`].
+pub fn invoke_signal(table: &CapTable, handle: Handle) -> Result<NotificationId, Denied> {
+    let cap = table
+        .resolve(handle)
+        .map_err(|_| Denied::NoSuchCapability)?;
+    if !cap.rights.contains(Rights::SIGNAL) {
+        return Err(Denied::MissingRight);
+    }
+    let Object::Notification { id } = cap.object else {
+        return Err(Denied::WrongObject);
+    };
+    Ok(id)
+}
+
+/// Resolve a `wait` invocation (v0.12): `handle` must name an
+/// [`Object::Notification`] in `table` carrying [`Rights::WAIT`] — the consumer
+/// end. The mirror of [`invoke_signal`].
+pub fn invoke_wait(table: &CapTable, handle: Handle) -> Result<NotificationId, Denied> {
+    let cap = table
+        .resolve(handle)
+        .map_err(|_| Denied::NoSuchCapability)?;
+    if !cap.rights.contains(Rights::WAIT) {
+        return Err(Denied::MissingRight);
+    }
+    let Object::Notification { id } = cap.object else {
+        return Err(Denied::WrongObject);
+    };
+    Ok(id)
+}
+
 /// Resolve a `reply` invocation: `handle` must name an [`Object::Reply`] in
 /// `table`. Returns the [`TaskId`] of the blocked `call`er to wake. No rights
 /// check — possession of the reply cap is the authority. The cap is granted
@@ -645,6 +678,64 @@ mod tests {
             rights: Rights::SEND,
         });
         assert_eq!(invoke_recv(&table, h), Err(Denied::MissingRight));
+    }
+
+    fn notification_cap(id: u32, rights: Rights) -> Capability {
+        Capability {
+            object: Object::Notification {
+                id: crate::notify::NotificationId(id),
+            },
+            rights,
+        }
+    }
+
+    #[test]
+    fn invoke_signal_accepts_a_notification_with_the_signal_right() {
+        let mut table = CapTable::new();
+        let h = table.insert(notification_cap(5, Rights::SIGNAL));
+        assert_eq!(invoke_signal(&table, h), Ok(crate::notify::NotificationId(5)));
+    }
+
+    #[test]
+    fn invoke_signal_refuses_a_notification_lacking_the_signal_right() {
+        // Holding only the WAIT (consumer) end must not let you signal.
+        let mut table = CapTable::new();
+        let h = table.insert(notification_cap(5, Rights::WAIT));
+        assert_eq!(invoke_signal(&table, h), Err(Denied::MissingRight));
+    }
+
+    #[test]
+    fn invoke_signal_refuses_an_endpoint_as_wrong_object() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::Endpoint { id: EndpointId(5), badge: 0 },
+            rights: Rights::SIGNAL,
+        });
+        assert_eq!(invoke_signal(&table, h), Err(Denied::WrongObject));
+    }
+
+    #[test]
+    fn invoke_signal_refuses_an_unknown_handle() {
+        let table = CapTable::new();
+        assert_eq!(
+            invoke_signal(&table, Handle::from_raw(0)),
+            Err(Denied::NoSuchCapability)
+        );
+    }
+
+    #[test]
+    fn invoke_wait_accepts_a_notification_with_the_wait_right() {
+        let mut table = CapTable::new();
+        let h = table.insert(notification_cap(8, Rights::WAIT));
+        assert_eq!(invoke_wait(&table, h), Ok(crate::notify::NotificationId(8)));
+    }
+
+    #[test]
+    fn invoke_wait_refuses_a_notification_lacking_the_wait_right() {
+        // Holding only the SIGNAL (producer) end must not let you wait.
+        let mut table = CapTable::new();
+        let h = table.insert(notification_cap(8, Rights::SIGNAL));
+        assert_eq!(invoke_wait(&table, h), Err(Denied::MissingRight));
     }
 
     #[test]
