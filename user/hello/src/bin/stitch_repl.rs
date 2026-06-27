@@ -25,10 +25,40 @@ use alloc::vec::Vec;
 
 use fs_proto::{FileRights, Op, Request, Response, UserBuf};
 use snitchos_user::{
-    Endpoint, Tracer, clock_now, console_read, console_write, endpoint, entry, tracer, yield_now,
+    Endpoint, Metric, Tracer, clock_now, console_read, console_write, endpoint, entry,
+    register_counter, register_histogram, tracer, yield_now,
 };
 use stitch::runner::Repl;
 use stitch::telemetry::RuntimeTelemetry;
+
+/// The interpreter narrating *itself* — per-eval duration and a running eval
+/// count, emitted as real metrics (not just printed). Program-independent: these
+/// describe the Stitch runtime, whatever `.st` it happens to be running. The
+/// tree-walk down payment on the VM's eventual GC/dispatch self-telemetry.
+struct EvalMetrics {
+    /// `stitch.eval.duration_ticks` — a histogram of per-line eval cost.
+    duration_ticks: Metric,
+    /// `stitch.eval.count` — cumulative evals (a counter; we hold the running
+    /// total and emit it, since the wire metric carries an absolute value).
+    count: Metric,
+    n: u64,
+}
+
+impl EvalMetrics {
+    fn new() -> Self {
+        Self {
+            duration_ticks: register_histogram("stitch.eval.duration_ticks"),
+            count: register_counter("stitch.eval.count"),
+            n: 0,
+        }
+    }
+
+    fn record(&mut self, dt: u64) {
+        self.duration_ticks.emit(dt as i64);
+        self.n += 1;
+        self.count.emit(self.n as i64);
+    }
+}
 
 /// Read a whole file off the FS endpoint (the `stitch-fs` workload's seeded
 /// server): attach for the root cap, `Lookup` the name (READ), then `Read` it in
@@ -78,18 +108,20 @@ const TICKS_PER_MS: u64 = 10_000;
 
 /// Evaluate `src`, timing it with the monotonic clock and bracketing it in a
 /// real SnitchOS span. Returns the rendered output and the elapsed ticks.
-fn timed(repl: &mut Repl, tr: Tracer, src: &str) -> (String, u64) {
+fn timed(repl: &mut Repl, tr: Tracer, metrics: &mut EvalMetrics, src: &str) -> (String, u64) {
     let _span = tr.span("stitch.eval");
     let start = clock_now();
     let out = repl.eval_line(src);
-    (out, clock_now() - start)
+    let dt = clock_now() - start;
+    metrics.record(dt);
+    (out, dt)
 }
 
 /// A labelled boot self-test: time `src` and print the result + how long the
 /// interpreter took. `label` distinguishes the env-build (first) eval from the
 /// cheap cached ones.
-fn bench(repl: &mut Repl, tr: Tracer, label: &str, src: &str) {
-    let (out, dt) = timed(repl, tr, src);
+fn bench(repl: &mut Repl, tr: Tracer, metrics: &mut EvalMetrics, label: &str, src: &str) {
+    let (out, dt) = timed(repl, tr, metrics, src);
     let line = format!(
         "  [{label:>8}] {dt:>9} ticks (~{} ms)   {src}  {out}",
         dt / TICKS_PER_MS
@@ -105,19 +137,25 @@ fn main() {
     // real frames on the wire (interned + timestamped + attributed kernel-side).
     let mut repl = Repl::with_telemetry(Rc::new(RuntimeTelemetry::default()));
     let tr = tracer();
+    // The interpreter's own metrics (independent of any loaded program), plus a
+    // counter of `:load`s served off the filesystem.
+    let mut metrics = EvalMetrics::new();
+    let loads = register_counter("stitch.loads.count");
+    let mut loads_n = 0u64;
 
     console_write(b"\nStitch on SnitchOS \xE2\x80\x94 the tree-walker runs on the metal.\n");
     // Boot self-tests, timed: the FIRST eval also builds the env (registers the
     // whole prelude once) so it's the expensive one; the rest reuse the cached env.
-    bench(&mut repl, tr, "buildenv", "1 + 2");
-    bench(&mut repl, tr, "cached", "3 * 4");
-    bench(&mut repl, tr, "pipeline", "1.. |> map($ * $) |> take(5) |> toList");
+    bench(&mut repl, tr, &mut metrics, "buildenv", "1 + 2");
+    bench(&mut repl, tr, &mut metrics, "cached", "3 * 4");
+    bench(&mut repl, tr, &mut metrics, "pipeline", "1.. |> map($ * $) |> take(5) |> toList");
     // A Stitch program's own `span`/`emit` — routed through the capability-backed
     // RuntimeTelemetry, so they cross the wire as real frames (a "stitch.demo"
     // span bracketing a "stitch.answer" gauge), attributed to this process.
     bench(
         &mut repl,
         tr,
+        &mut metrics,
         "telemetry",
         "span(\"stitch.demo\", () -> emit(\"stitch.answer\", 42))",
     );
@@ -140,12 +178,16 @@ fn main() {
                         // Read the file off the filesystem and register its defs.
                         let name = name.trim();
                         let msg = match read_file(name) {
-                            Some(src) => repl.load_source(&src),
+                            Some(src) => {
+                                loads_n += 1;
+                                loads.emit(loads_n as i64);
+                                repl.load_source(&src)
+                            }
                             None => format!("load error: cannot read `{name}` from fs\n"),
                         };
                         console_write(msg.as_bytes());
                     } else if !trimmed.is_empty() {
-                        let (out, dt) = timed(&mut repl, tr, &line);
+                        let (out, dt) = timed(&mut repl, tr, &mut metrics, &line);
                         console_write(out.as_bytes());
                         let timing = format!("  ({dt} ticks, ~{} ms)\n", dt / TICKS_PER_MS);
                         console_write(timing.as_bytes());
