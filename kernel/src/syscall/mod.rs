@@ -46,6 +46,7 @@ pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::CopyFromCaller) => transfer::handle_copy_from_caller(frame),
         Some(Syscall::CopyToCaller) => transfer::handle_copy_to_caller(frame),
         Some(Syscall::ConsoleRead) => console::handle_console_read(frame),
+        Some(Syscall::ConsoleWrite) => console::handle_console_write(frame),
         Some(Syscall::Spawn) => process::handle_spawn(frame),
         Some(Syscall::Wait) => process::handle_wait(frame),
         Some(Syscall::RegisterMetric) => metric::handle_register_metric(frame),

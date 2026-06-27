@@ -311,6 +311,34 @@ pub fn console_read(dst: &mut [u8]) -> usize {
     if ret == usize::MAX { 0 } else { ret }
 }
 
+/// Write all of `bytes` to the UART terminal (the `ConsoleWrite` syscall) — the
+/// output mirror of [`console_read`], sharing the one console the kernel
+/// `print!`s to. The kernel refuses a single write longer than `MAX_USER_STR_LEN`,
+/// so this chunks to [`DEBUG_WRITE_MAX`]. Returns the total bytes written; stops
+/// early if a chunk is refused (e.g. a bad pointer). No trailing newline — the
+/// caller controls layout (prompts, escape sequences).
+pub fn console_write(bytes: &[u8]) -> usize {
+    let mut written = 0;
+    for chunk in bytes.chunks(DEBUG_WRITE_MAX) {
+        let ret: usize;
+        // SAFETY: `ecall`; the kernel range-validates `(ptr, len)`, copies the
+        // bytes to the UART or refuses (a0 = usize::MAX). `ptr` isn't deref'd here.
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::ConsoleWrite as usize,
+                inlateout("a0") chunk.as_ptr() as usize => ret,
+                in("a1") chunk.len(),
+            );
+        }
+        if ret == usize::MAX {
+            break;
+        }
+        written += ret;
+    }
+    written
+}
+
 /// A capability to register + emit named metrics — an unforgeable handle the
 /// kernel checks against this process's table. Holding the integer is not
 /// authority. The sink itself emits nothing; it is the gate for

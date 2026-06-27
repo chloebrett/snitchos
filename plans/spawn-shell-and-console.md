@@ -287,8 +287,13 @@ input/echo into the decoded frame channel).
 The heavy lifting (Spawn / Exit / Wait / ConsoleRead / cap-transplant) is **done**.
 What's left, in build order:
 
-1. **`ConsoleWrite` syscall** `[CP]` — expose the kernel UART TX as an ambient
-   user syscall (mirror of `ConsoleRead`). Small. Unblocks the terminal UX.
+1. ✅ **`ConsoleWrite` syscall (19)** — ambient, mirror of `ConsoleRead`.
+   `abi` variant + `from_usize` (host-tested); `kernel/src/syscall/console.rs::
+   handle_console_write` copies user bytes (range-validated, UTF-8) and reuses the
+   kernel `print!` UART path (shell shares the one terminal with the kernel log,
+   distinct from the `DebugWrite` telemetry channel); runtime `console_write`
+   chunks to `DEBUG_WRITE_MAX` (the kernel refuses an over-long single write).
+   Builds for riscv, clippy clean. Live exercise comes with the REPL (next).
 2. **`init` (first-process bootstrap)** `[CP]` — a real first process that holds
    root caps, `Spawn`s the FS server, holds the FS endpoint cap, and `Spawn`s the
    shell granting it its **session caps** (the FS cap, console access). Generalizes

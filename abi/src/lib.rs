@@ -161,6 +161,15 @@ pub enum Syscall {
     /// (a parent waits on a child it spawned on its own hart); cross-hart wait is
     /// a deferred follow-on.
     Wait = 18,
+    /// Write bytes to the interactive console (UART TX) for U-mode. `a0` =
+    /// pointer, `a1` = length. Copies the bytes out (range-validated,
+    /// SUM-guarded), validates UTF-8, and writes them to the same UART the kernel
+    /// `print!`s to — the human terminal, distinct from the `DebugWrite`
+    /// telemetry channel. Returns bytes written in `a0` (or `u64::MAX` on a bad
+    /// pointer / non-UTF-8). Ambient, the mirror of [`Self::ConsoleRead`] — the
+    /// shell is the trusted session root and writes its own terminal directly;
+    /// capability-mediated console output is the Tier-1 server story.
+    ConsoleWrite = 19,
 }
 
 impl Syscall {
@@ -189,6 +198,7 @@ impl Syscall {
             16 => Some(Self::RegisterMetric),
             17 => Some(Self::EmitMetric),
             18 => Some(Self::Wait),
+            19 => Some(Self::ConsoleWrite),
             _ => None,
         }
     }
@@ -241,6 +251,7 @@ mod tests {
         assert_eq!(Syscall::RegisterMetric as usize, 16);
         assert_eq!(Syscall::EmitMetric as usize, 17);
         assert_eq!(Syscall::Wait as usize, 18);
+        assert_eq!(Syscall::ConsoleWrite as usize, 19);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Exit));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Yield));
@@ -261,6 +272,7 @@ mod tests {
         assert_eq!(Syscall::from_usize(16), Some(Syscall::RegisterMetric));
         assert_eq!(Syscall::from_usize(17), Some(Syscall::EmitMetric));
         assert_eq!(Syscall::from_usize(18), Some(Syscall::Wait));
-        assert_eq!(Syscall::from_usize(19), None);
+        assert_eq!(Syscall::from_usize(19), Some(Syscall::ConsoleWrite));
+        assert_eq!(Syscall::from_usize(20), None);
     }
 }
