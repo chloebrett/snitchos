@@ -19,6 +19,7 @@ use alloc::collections::BTreeMap;
 use crate::prelude::*;
 
 use crate::ast::Method;
+use crate::telemetry::{RecordingTelemetry, Telemetry};
 use crate::value::{TelemetryEvent, Value};
 
 /// Why an assignment failed — formatted into a message by the interpreter.
@@ -29,7 +30,7 @@ pub enum AssignError {
     Immutable,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Env {
     locals: Option<Rc<Scope>>,
     globals: Rc<OnceCell<BTreeMap<String, Value>>>,
@@ -39,9 +40,17 @@ pub struct Env {
     /// each sum variant's fields are tracked independently; for a `prod` the
     /// variant name is the type name.)
     field_mut: Rc<OnceCell<BTreeMap<String, BTreeMap<String, bool>>>>,
-    /// Telemetry recorded by `emit`/`span`, shared across the whole program run
-    /// (every scope and closure points at the same sink).
-    sink: Rc<RefCell<Vec<TelemetryEvent>>>,
+    /// Where `emit`/`span` send their telemetry, shared across the whole program
+    /// run (every scope and closure points at the same backend). Defaults to
+    /// [`RecordingTelemetry`]; the on-target build installs a syscall-backed one
+    /// via [`Env::with_telemetry`].
+    telemetry: Rc<dyn Telemetry>,
+}
+
+impl Default for Env {
+    fn default() -> Self {
+        Env::with_telemetry(Rc::new(RecordingTelemetry::default()))
+    }
 }
 
 struct Scope {
@@ -56,9 +65,23 @@ struct Scope {
 }
 
 impl Env {
-    /// The empty environment.
+    /// The empty environment, recording telemetry in memory.
     pub fn new() -> Self {
         Env::default()
+    }
+
+    /// An empty environment whose `emit`/`span` route to `telemetry`. The seam
+    /// for swapping the in-memory recorder for the on-target, syscall-backed
+    /// backend without the interpreter knowing which it has.
+    #[must_use]
+    pub fn with_telemetry(telemetry: Rc<dyn Telemetry>) -> Env {
+        Env {
+            locals: None,
+            globals: Rc::new(OnceCell::new()),
+            methods: Rc::new(OnceCell::new()),
+            field_mut: Rc::new(OnceCell::new()),
+            telemetry,
+        }
     }
 
     /// An environment sharing this one's globals, methods, and telemetry sink
@@ -74,7 +97,7 @@ impl Env {
             globals: Rc::clone(&self.globals),
             methods: Rc::clone(&self.methods),
             field_mut: Rc::clone(&self.field_mut),
-            sink: Rc::clone(&self.sink),
+            telemetry: Rc::clone(&self.telemetry),
         }
     }
 
@@ -90,7 +113,7 @@ impl Env {
             globals: Rc::new(OnceCell::new()),
             methods: Rc::clone(&self.methods),
             field_mut: Rc::clone(&self.field_mut),
-            sink: Rc::clone(&self.sink),
+            telemetry: Rc::clone(&self.telemetry),
         }
     }
 
@@ -118,7 +141,7 @@ impl Env {
             globals: Rc::clone(&self.globals),
             methods: Rc::clone(&self.methods),
             field_mut: Rc::clone(&self.field_mut),
-            sink: Rc::clone(&self.sink),
+            telemetry: Rc::clone(&self.telemetry),
         }
     }
 
@@ -142,21 +165,32 @@ impl Env {
         Err(AssignError::Unbound)
     }
 
-    /// Record a telemetry event.
-    pub fn emit(&self, event: TelemetryEvent) {
-        self.sink.borrow_mut().push(event);
+    /// Open a span on the installed telemetry backend.
+    pub fn span_open(&self, name: &str) {
+        self.telemetry.span_open(name);
     }
 
-    /// A snapshot of all telemetry recorded so far.
+    /// Close the most recently opened span on the installed backend.
+    pub fn span_close(&self, name: &str) {
+        self.telemetry.span_close(name);
+    }
+
+    /// Emit a metric sample on the installed backend.
+    pub fn emit_metric(&self, name: &str, value: &Value) {
+        self.telemetry.emit(name, value);
+    }
+
+    /// A snapshot of all telemetry recorded so far (empty for non-recording
+    /// backends).
     pub fn telemetry(&self) -> Vec<TelemetryEvent> {
-        self.sink.borrow().clone()
+        self.telemetry.snapshot()
     }
 
-    /// Drain the telemetry sink: return everything recorded and clear it. Lets a
+    /// Drain the recorded telemetry: return everything and clear it. Lets a
     /// long-lived REPL env render just *this line's* events without the previous
-    /// lines' accumulating.
+    /// lines' accumulating. Empty for non-recording backends.
     pub fn take_telemetry(&self) -> Vec<TelemetryEvent> {
-        core::mem::take(&mut *self.sink.borrow_mut())
+        self.telemetry.drain()
     }
 
     /// The value of the nearest local binding of `name`, else a global of that

@@ -258,6 +258,7 @@ catalog! {
     cpu "syscall-hog-still-preempted"     scenarios::syscall_hog_still_preempted    [userspace]  {"syscall-hog"};
     cpu "console-echo-round-trips"        scenarios::console_echo_round_trips       [userspace]  {"console-echo"};
     cpu "spawn-delegates-to-child"        scenarios::spawn_delegates_to_child       [userspace]  {"spawn-demo"};
+    cpu "spawn-transfer-links-to-parent"  scenarios::spawn_transfer_links_to_parent [userspace]  {"spawn-demo"};
     cpu "spawn-reclaims-memory"           scenarios::spawn_reclaims_memory          [userspace]  {"spawn-reap"};
     cpu "notify-signal-wakes-waiter"      scenarios::notify_signal_wakes_waiter     [userspace]  {"notify-smoke"};
     cpu "priorities-ordered-but-fair"     scenarios::priorities_ordered_but_fair    [userspace]  {"priorities"};

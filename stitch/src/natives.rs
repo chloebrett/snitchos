@@ -11,7 +11,7 @@ use crate::prelude::*;
 use crate::env::Env;
 use crate::interp::apply_values;
 use crate::ops::value_order;
-use crate::value::{LazySeq, NativeFn, RuntimeError, Step, TelemetryEvent, Value};
+use crate::value::{LazySeq, NativeFn, RuntimeError, Step, Value};
 
 /// The native functions, registered into every program's globals.
 pub(crate) const NATIVES: &[NativeFn] = &[
@@ -340,13 +340,9 @@ fn native_span(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
             name.kind()
         )));
     };
-    env.emit(TelemetryEvent::SpanOpen {
-        name: name.to_string(),
-    });
+    env.span_open(name);
     let result = apply_values(body, &[], env)?;
-    env.emit(TelemetryEvent::SpanClose {
-        name: name.to_string(),
-    });
+    env.span_close(name);
     Ok(result)
 }
 
@@ -361,10 +357,7 @@ fn native_emit(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
             name.kind()
         )));
     };
-    env.emit(TelemetryEvent::Emit {
-        name: name.to_string(),
-        value: value.clone(),
-    });
+    env.emit_metric(name, value);
     Ok(Value::Unit)
 }
 

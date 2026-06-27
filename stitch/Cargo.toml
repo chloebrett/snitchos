@@ -4,8 +4,14 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
+[dependencies]
+protocol = { path = "../protocol" }
+
 [dev-dependencies]
 insta = "1"
+# `std` here only unions into the test build, giving tests `OwnedFrame` for
+# borrow-free assertions; normal/no_std builds get plain `protocol`.
+protocol = { path = "../protocol", features = ["std"] }
 
 [lints]
 workspace = true

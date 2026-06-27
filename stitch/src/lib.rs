@@ -34,7 +34,9 @@ pub mod parser;
 pub mod pattern;
 pub mod registry;
 pub mod runner;
+pub mod telemetry;
 pub mod value;
+pub mod wire;
 
 #[cfg(test)]
 mod test_support;

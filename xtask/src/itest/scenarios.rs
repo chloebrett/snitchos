@@ -2518,6 +2518,57 @@ pub fn spawn_delegates_to_child(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.13 cap-derivation spine — the spawner delegating its `SpanSink` to the
+/// `spawnee` is snitched as a **linked** `CapEvent::Transferred`, whose
+/// `parent_cap_id` names the spawner's own `SpanSink` holding (the derivation
+/// edge), not a bare `Granted`. Proves a transfer records *what it derived from*,
+/// the prerequisite for "watch least-authority happen" in the trace.
+pub fn spawn_transfer_links_to_parent(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+
+    // The spawner's bootstrap `SpanSink` grant — capture its global cap_id. It is
+    // the first `SpanSink` grant on the wire (the spawner enters before it can
+    // spawn the child).
+    let granted = h
+        .wait_for(SEC * 20, |f, _| {
+            matches!(
+                f,
+                OwnedFrame::CapEvent {
+                    kind: CapEventKind::Granted,
+                    object: CapObject::SpanSink,
+                    ..
+                }
+            )
+        })
+        .ok_or("no CapEvent::Granted{SpanSink} from the spawner within 20s")?;
+    let parent_id = match granted {
+        OwnedFrame::CapEvent { cap_id, .. } => cap_id,
+        _ => unreachable!("matched a CapEvent above"),
+    };
+
+    // The delegation to the child must arrive as a `Transferred{SpanSink}` whose
+    // `parent_cap_id` links back to that grant — the derivation edge. Today the
+    // delegated cap is emitted as a bare `Granted` (parent 0), so this fails until
+    // the spine wires the link.
+    h.wait_for(SEC * 20, move |f, _| {
+        matches!(
+            f,
+            OwnedFrame::CapEvent {
+                kind: CapEventKind::Transferred,
+                object: CapObject::SpanSink,
+                parent_cap_id,
+                ..
+            } if *parent_cap_id == parent_id && parent_id != 0
+        )
+    })
+    .ok_or(
+        "no CapEvent::Transferred{SpanSink} linked to the spawner's grant — the \
+         delegated cap wasn't snitched as a linked transfer",
+    )?;
+
+    Ok(())
+}
+
 /// v0.12 process teardown — Exit **reclaims** the child's address space
 /// (`workload=spawn-reap`). The `reaper` parent spawns + `Wait`s a `memhog`
 /// child 30 times; each child allocates + touches ~4 MiB (~1024 user frames)
