@@ -213,8 +213,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // counter.
     //
     // SAFETY: trap vector was installed at the top of kmain; the
-    // handler is ready.
-    unsafe { trap::init_timer(timebase_hz) };
+    // handler is ready. The interval is the *fast tick* (heartbeat period ÷
+    // `TICKS_PER_HEARTBEAT`): the timer fires often for responsive console-RX
+    // drain + preemption, while the heartbeat still runs at the per-second
+    // cadence (gated in the handler). One heartbeat period = `timebase_hz` ticks.
+    unsafe { trap::init_timer(timebase_hz / trap::TICKS_PER_HEARTBEAT) };
 
     // v0.6 step 7: enable S-mode software interrupts (the IPI
     // channel). Trap vector + handler are already installed; the

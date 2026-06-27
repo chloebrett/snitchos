@@ -55,8 +55,23 @@ use crate::percpu::PerCpu;
 /// `Relaxed`: init-once, then read forever — no payload to publish.
 pub static TIMER_INTERVAL_TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// Set by the timer IRQ handler; the main/idle loop polls + clears.
-/// One cell per hart — see block comment above.
+/// Timer ticks per heartbeat. The timer fires fast (so console RX is drained and
+/// preemption is checked promptly — responsive interactive input), but the
+/// *heartbeat* (telemetry, smoke patterns) stays at its original cadence by
+/// firing only every `TICKS_PER_HEARTBEAT`-th tick. `init_timer` is given the
+/// fast interval (heartbeat period ÷ this), so the heartbeat's wall-clock cadence
+/// is unchanged while input latency drops by this factor. Decouples the RX drain
+/// from the 1 Hz heartbeat.
+pub const TICKS_PER_HEARTBEAT: u64 = 20;
+
+/// Per-hart timer-tick counter, used to flip [`TICK_PENDING`] only once every
+/// [`TICKS_PER_HEARTBEAT`] ticks (the heartbeat), while the handler drains RX and
+/// checks preemption on *every* tick.
+pub static TICK_COUNT: PerCpu<AtomicU64> =
+    PerCpu::new([AtomicU64::new(0), AtomicU64::new(0)]);
+
+/// Set by the timer IRQ handler once per heartbeat; the main/idle loop polls +
+/// clears. One cell per hart — see block comment above.
 /// `Relaxed`: same-CPU IRQ handoff — trap return sequences memory.
 pub static TICK_PENDING: PerCpu<AtomicBool> =
     PerCpu::new([AtomicBool::new(false), AtomicBool::new(false)]);
@@ -196,7 +211,13 @@ fn handle_timer(frame: &TrapFrame) {
     let start = CLOCK.now();
     let interval = TIMER_INTERVAL_TICKS.load(Ordering::Relaxed);
     CLOCK.arm(start + interval);
-    TICK_PENDING.this_cpu().store(true, Ordering::Relaxed);
+    // The timer fires fast for responsive RX drain + preemption, but the
+    // heartbeat runs only every `TICKS_PER_HEARTBEAT`-th tick (its wall-clock
+    // cadence unchanged) — so the typing-latency win doesn't flood telemetry.
+    let ticks = TICK_COUNT.this_cpu().fetch_add(1, Ordering::Relaxed) + 1;
+    if ticks.is_multiple_of(TICKS_PER_HEARTBEAT) {
+        TICK_PENDING.this_cpu().store(true, Ordering::Relaxed);
+    }
     let end = CLOCK.now();
     LAST_IRQ_DURATION
         .this_cpu()
