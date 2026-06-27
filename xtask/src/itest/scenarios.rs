@@ -2793,6 +2793,74 @@ pub fn init_brings_up_fs_server(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.13 the payoff — `init` runs a full FS round-trip on its own endpoint, with
+/// **two children holding different rights, both rooted at init** (`workload=init`).
+/// init `EndpointCreate`s, delegates `RECV|MINT` to the server (Step 6), then
+/// **mints** a bare `SEND` cap and delegates *that* to a client. Asserts: a
+/// `Transferred{Endpoint, SEND}` linked to init's endpoint (the client grant —
+/// different rights, same root), and the client's `WRITE_READ_OK` marker — proving
+/// the connect→create→write→read round-trip actually crossed init's endpoint.
+/// "I didn't build sandboxing; I stopped handing out authority — here's the trace."
+pub fn init_runs_fs_client(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+    const RECV_MINT: u32 = 0b0100 | 0b1000;
+    const SEND: u32 = 0b0010;
+
+    // init's owning endpoint grant — capture its cap_id (the delegation root).
+    let granted = h
+        .wait_for(SEC * 20, |f, _| {
+            matches!(
+                f,
+                OwnedFrame::CapEvent {
+                    kind: CapEventKind::Granted,
+                    object: CapObject::Endpoint,
+                    rights,
+                    ..
+                } if *rights == RECV_MINT
+            )
+        })
+        .ok_or("no CapEvent::Granted{Endpoint, RECV|MINT} — init didn't create its endpoint")?;
+    let endpoint_id = match granted {
+        OwnedFrame::CapEvent { cap_id, .. } => cap_id,
+        _ => unreachable!("matched a CapEvent above"),
+    };
+
+    // The client's `SEND` cap — minted from init's endpoint and delegated down.
+    // Different rights from the server's `RECV|MINT`, the same root: least-authority.
+    h.wait_for(SEC * 20, move |f, _| {
+        matches!(
+            f,
+            OwnedFrame::CapEvent {
+                kind: CapEventKind::Transferred,
+                object: CapObject::Endpoint,
+                rights,
+                parent_cap_id,
+                ..
+            } if *rights == SEND && *parent_cap_id == endpoint_id
+        )
+    })
+    .ok_or(
+        "no CapEvent::Transferred{Endpoint, SEND} linked to init's endpoint — init \
+         didn't mint + delegate a client SEND cap on its own endpoint",
+    )?;
+
+    // The round-trip ran over init's endpoint: the client connected, created a
+    // file, wrote + read it back. `WRITE_READ_OK` proves IPC actually crossed.
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.fs_client.marker")
+                && *value == markers::WRITE_READ_OK
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no fs_client WRITE_READ_OK marker — the FS round-trip didn't complete over \
+         init's manufactured endpoint",
+    )?;
+
+    Ok(())
+}
+
 /// v0.12 process teardown — Exit **reclaims** the child's address space
 /// (`workload=spawn-reap`). The `reaper` parent spawns + `Wait`s a `memhog`
 /// child 30 times; each child allocates + touches ~4 MiB (~1024 user frames)

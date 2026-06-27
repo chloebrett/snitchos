@@ -29,20 +29,28 @@ pub(super) fn handle_mint_badged(frame: &mut TrapFrame) {
     let badge = frame.a1;
     let rights = Rights::from_bits(frame.a2 as u32);
 
+    // The minted child gets its own global cap id (stamped on the holding, so a
+    // later delegation links to it); it derives from the parent endpoint cap, whose
+    // id becomes the child's `parent_cap_id` — the derivation edge.
+    let child_cap_id = crate::process::next_cap_id();
+
     // Resolve the parent (copy it out to release the borrow), derive the pure
     // child cap, then insert it. No lock held across a switch — minting cannot
     // block.
     let minted = {
         let mut caps = proc.caps.lock();
         let parent = caps.resolve(handle).copied().map_err(|_| Denied::NoSuchCapability);
-        parent.and_then(|p| mint_badged(p, badge, rights)).map(|child| caps.insert(child))
+        let parent_cap_id = caps.cap_id_of(handle).unwrap_or(0);
+        parent
+            .and_then(|p| mint_badged(p, badge, rights))
+            .map(|child| (caps.insert_with_id(child, child_cap_id), parent_cap_id))
     };
 
     match minted {
-        Ok(h) => {
+        Ok((h, parent_cap_id)) => {
             crate::tracing::emit_cap_transferred(
-                crate::process::next_cap_id(),
-                0, // TODO(v0.13 Step 7): link to the parent endpoint cap's id
+                child_cap_id,
+                parent_cap_id,
                 crate::sched::current_task_id().0,
                 protocol::CapObject::Endpoint,
                 rights.bits(),

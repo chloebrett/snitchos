@@ -21,7 +21,7 @@
 
 use fs_core::{FsError, InodeId, NodeKind, Stat};
 use fs_proto::{markers, FileRights, Op, Request, Response, UserBuf};
-use snitchos_user::{Endpoint, Metric, endpoint, entry, register_counter, tracer};
+use snitchos_user::{Endpoint, Metric, delegated_handle, entry, register_counter, tracer};
 
 /// Stat `cap` and return the decoded `Stat`, or `None` on any failure. The
 /// `fs.stat` span stays open across the `call`, so the server's handling nests
@@ -42,8 +42,11 @@ fn main() {
     // process-named rather than the shared `telemetry_total`).
     let marker: Metric = register_counter("snitchos.fs_client.marker");
 
-    // Connect → root directory File cap.
-    let Ok((_r, Some(root_cap))) = endpoint().call([0, 0, 0, 0]) else {
+    // Connect → root directory File cap. The FS endpoint is our first delegated
+    // cap (handle 2) — works whether launched by `run_ipc` (endpoint at handle 2)
+    // or by an init-`Spawn` delegating a bare `SEND` cap (delegated[0]).
+    let fs = Endpoint::from_raw_handle(delegated_handle(0));
+    let Ok((_r, Some(root_cap))) = fs.call([0, 0, 0, 0]) else {
         return;
     };
     let root = Endpoint::from_raw_handle(root_cap);

@@ -265,6 +265,7 @@ catalog! {
     cpu "wait-any-reaps-exiting-child"    scenarios::wait_any_reaps_the_exiting_child [userspace] {"wait-any"};
     cpu "init-supervises-a-child"         scenarios::init_supervises_a_child        [userspace]  {"init"};
     cpu "init-brings-up-fs-server"        scenarios::init_brings_up_fs_server       [userspace]  {"init"};
+    cpu "init-runs-fs-client"             scenarios::init_runs_fs_client            [userspace]  {"init"};
     cpu "endpoint-create-yields-owning-cap" scenarios::endpoint_create_yields_an_owning_cap [userspace] {"endpoint-create"};
     cpu "notify-signal-wakes-waiter"      scenarios::notify_signal_wakes_waiter     [userspace]  {"notify-smoke"};
     cpu "priorities-ordered-but-fair"     scenarios::priorities_ordered_but_fair    [userspace]  {"priorities"};

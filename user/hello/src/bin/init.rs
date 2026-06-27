@@ -12,7 +12,7 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{endpoint_create, entry, register_counter, span_handle, spawn, wait_any};
+use snitchos_user::{endpoint_create, entry, register_counter, rights, span_handle, spawn, wait_any};
 
 #[entry]
 fn main() {
@@ -27,6 +27,15 @@ fn main() {
     // grant is a `CapEvent::Transferred` rooted at init's endpoint holding.
     let fs_endpoint = endpoint_create();
     let _ = spawn(4, &[fs_endpoint.raw_handle() as u32]);
+
+    // Bring up an FS client on the *same* endpoint (Step 7). We hold `RECV | MINT`,
+    // so we **mint** a bare `SEND` cap (badge 0 = "attach") and delegate that to the
+    // client (program id 5 = `fs-client`). Two children now share one endpoint with
+    // *different* rights — server `RECV | MINT`, client `SEND` — both grants rooted
+    // at init's endpoint: least-authority, visible in the trace.
+    if let Ok(send_cap) = fs_endpoint.mint_badged(0, rights::SEND) {
+        let _ = spawn(5, &[send_cap as u32]);
+    }
 
     // Supervise: reap whichever child exits, reporting its id + status. We never
     // named the child — `wait_any` is the supervising-parent primitive.
