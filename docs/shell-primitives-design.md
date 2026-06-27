@@ -9,6 +9,11 @@ and [plans/spawn-shell-and-console.md](../plans/spawn-shell-and-console.md) is t
 question those two leave open: **what, exactly, are the primitives the first shell
 is built from, and how does each one bottom out in a shipped syscall?**
 
+**TDD substrate:** the shell is the first substantial Stitch program, so it is
+test-driven through the injectable-effect-seam library designed in
+[stitch-test-library-design.md](stitch-test-library-design.md) — build that first.
+The native surface below is deliberately shaped as that seam.
+
 ## The three decisions this iteration is built on
 
 1. **Both layers, vertically sliced.** Design the user-facing verbs *and* the
