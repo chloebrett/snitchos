@@ -24,6 +24,10 @@ struct Cli {
 enum Cmd {
     /// Build the kernel ELF.
     Build,
+    /// Boot the `minimal-boot` kernel under the snemu emulator and assert it
+    /// prints its greeting (throwaway M1 console-out smoke; superseded by
+    /// `itest`/`boot --snemu` once snemu models Sv39 + virtio in M2).
+    Snemu,
     /// Build the kernel and run it in QEMU.
     ///
     /// Use `--workload <name>` to boot a runtime-selected workload for
@@ -450,6 +454,7 @@ fn main() -> ExitCode {
     scrub_inherited_cargo_env();
     match Cli::parse().cmd {
         Cmd::Build => build(),
+        Cmd::Snemu => snemu(),
         Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
         Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {
             measure::measure(&workload, seconds, warmup, timebase_hz, burst, markdown)
@@ -569,6 +574,39 @@ fn build() -> ExitCode {
     if status.success() {
         ExitCode::SUCCESS
     } else {
+        ExitCode::from(1)
+    }
+}
+
+/// Throwaway snemu milestone-1 acceptance: build the `minimal-boot` kernel,
+/// run it under the snemu interpreter, and check the greeting reaches the
+/// emulated UART. Always rebuilds (no stale binary). Replaced by `--snemu` on
+/// `itest`/`boot` once snemu can run the full kernel + virtio (M2).
+fn snemu() -> ExitCode {
+    const GREETING: &str = "Hello from snemu (minimal-boot)";
+
+    // Overwrites the debug kernel ELF; boot/itest rebuild it (features differ).
+    let kernel = qemu::build_kernel(&["minimal-boot"]).expect("failed to invoke cargo");
+    if !kernel.success() {
+        eprintln!("snemu: minimal-boot kernel build failed");
+        return ExitCode::from(1);
+    }
+
+    // Build + run the emulator on the freshly-built ELF (cap the wfi spin).
+    let out = Command::new("cargo")
+        .args(["run", "-q", "-p", "snemu", "--", qemu::KERNEL_BIN, "100000"])
+        .output()
+        .expect("failed to invoke cargo run -p snemu");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.contains(GREETING) {
+        print!("{stdout}");
+        eprintln!("snemu: console-out OK");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("snemu: FAILED — greeting not found on the UART");
+        eprintln!("--- snemu stdout ---\n{stdout}");
+        eprintln!("--- snemu stderr ---\n{}", String::from_utf8_lossy(&out.stderr));
         ExitCode::from(1)
     }
 }
