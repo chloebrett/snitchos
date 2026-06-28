@@ -25,9 +25,10 @@ use alloc::vec::Vec;
 
 use fs_proto::{FileRights, Op, Request, Response, UserBuf};
 use snitchos_user::{
-    Endpoint, Metric, Tracer, clock_now, console_read, console_write, endpoint, entry,
-    register_counter, register_histogram, tracer, yield_now,
+    Endpoint, Metric, Tracer, clock_now, endpoint, entry, register_counter, register_histogram,
+    tracer,
 };
+use stitch::platform::{Platform, RuntimePlatform};
 use stitch::runner::Repl;
 use stitch::telemetry::RuntimeTelemetry;
 
@@ -101,7 +102,7 @@ fn read_file(name: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-const PROMPT: &[u8] = b"stitch> ";
+const PROMPT: &str = "stitch> ";
 
 /// Timebase is 10 MHz on QEMU `virt` → 10_000 ticks per millisecond.
 const TICKS_PER_MS: u64 = 10_000;
@@ -120,22 +121,31 @@ fn timed(repl: &mut Repl, tr: Tracer, metrics: &mut EvalMetrics, src: &str) -> (
 /// A labelled boot self-test: time `src` and print the result + how long the
 /// interpreter took. `label` distinguishes the env-build (first) eval from the
 /// cheap cached ones.
-fn bench(repl: &mut Repl, tr: Tracer, metrics: &mut EvalMetrics, label: &str, src: &str) {
+fn bench(
+    repl: &mut Repl,
+    tr: Tracer,
+    metrics: &mut EvalMetrics,
+    platform: &dyn Platform,
+    label: &str,
+    src: &str,
+) {
     let (out, dt) = timed(repl, tr, metrics, src);
-    let line = format!(
+    platform.write(&format!(
         "  [{label:>8}] {dt:>9} ticks (~{} ms)   {src}  {out}",
         dt / TICKS_PER_MS
-    );
-    console_write(line.as_bytes());
+    ));
 }
 
 #[entry]
 fn main() {
+    // One platform instance, shared between the REPL's own line I/O and any
+    // `print`/`readLine` a Stitch program runs — so both draw from one input
+    // stream (one `LineEditor`), and batched input can't deadlock.
+    let platform = Rc::new(RuntimePlatform::new());
     // One env, built once (prelude registered a single time) and reused for every
-    // line — no per-line prelude rebuild. Telemetry routes through the process's
-    // capability-backed backend, so a Stitch program's own `span`/`emit` become
-    // real frames on the wire (interned + timestamped + attributed kernel-side).
-    let mut repl = Repl::with_telemetry(Rc::new(RuntimeTelemetry::default()));
+    // line. Telemetry routes through the capability-backed backend (spans/metrics
+    // become real wire frames); console routes through the same `platform`.
+    let mut repl = Repl::with_backends(Rc::new(RuntimeTelemetry::default()), platform.clone());
     let tr = tracer();
     // The interpreter's own metrics (independent of any loaded program), plus a
     // counter of `:load`s served off the filesystem.
@@ -143,12 +153,12 @@ fn main() {
     let loads = register_counter("stitch.loads.count");
     let mut loads_n = 0u64;
 
-    console_write(b"\nStitch on SnitchOS \xE2\x80\x94 the tree-walker runs on the metal.\n");
+    platform.write("\nStitch on SnitchOS \u{2014} the tree-walker runs on the metal.\n");
     // Boot self-tests, timed: the FIRST eval also builds the env (registers the
     // whole prelude once) so it's the expensive one; the rest reuse the cached env.
-    bench(&mut repl, tr, &mut metrics, "buildenv", "1 + 2");
-    bench(&mut repl, tr, &mut metrics, "cached", "3 * 4");
-    bench(&mut repl, tr, &mut metrics, "pipeline", "1.. |> map($ * $) |> take(5) |> toList");
+    bench(&mut repl, tr, &mut metrics, &*platform, "buildenv", "1 + 2");
+    bench(&mut repl, tr, &mut metrics, &*platform, "cached", "3 * 4");
+    bench(&mut repl, tr, &mut metrics, &*platform, "pipeline", "1.. |> map($ * $) |> take(5) |> toList");
     // A Stitch program's own `span`/`emit` — routed through the capability-backed
     // RuntimeTelemetry, so they cross the wire as real frames (a "stitch.demo"
     // span bracketing a "stitch.answer" gauge), attributed to this process.
@@ -156,59 +166,33 @@ fn main() {
         &mut repl,
         tr,
         &mut metrics,
+        &*platform,
         "telemetry",
         "span(\"stitch.demo\", () -> emit(\"stitch.answer\", 42))",
     );
-    console_write(PROMPT);
+    platform.write(PROMPT);
 
-    let mut line = String::new();
-    let mut buf = [0u8; 64];
-    loop {
-        let n = console_read(&mut buf);
-        if n == 0 {
-            yield_now();
-            continue;
+    // The REPL loop reads each line *through the platform* — the same path a
+    // `readLine()` inside an evaluated line uses, so they share one input stream.
+    while let Some(line) = platform.read_line() {
+        let trimmed = line.trim();
+        if let Some(name) = trimmed.strip_prefix(":load ") {
+            // Read the file off the filesystem and register its defs.
+            let name = name.trim();
+            let msg = match read_file(name) {
+                Some(src) => {
+                    loads_n += 1;
+                    loads.emit(loads_n as i64);
+                    repl.load_source(&src)
+                }
+                None => format!("load error: cannot read `{name}` from fs\n"),
+            };
+            platform.write(&msg);
+        } else if !trimmed.is_empty() {
+            let (out, dt) = timed(&mut repl, tr, &mut metrics, &line);
+            platform.write(&out);
+            platform.write(&format!("  ({dt} ticks, ~{} ms)\n", dt / TICKS_PER_MS));
         }
-        for &byte in &buf[..n] {
-            match byte {
-                b'\r' | b'\n' => {
-                    console_write(b"\n");
-                    let trimmed = line.trim();
-                    if let Some(name) = trimmed.strip_prefix(":load ") {
-                        // Read the file off the filesystem and register its defs.
-                        let name = name.trim();
-                        let msg = match read_file(name) {
-                            Some(src) => {
-                                loads_n += 1;
-                                loads.emit(loads_n as i64);
-                                repl.load_source(&src)
-                            }
-                            None => format!("load error: cannot read `{name}` from fs\n"),
-                        };
-                        console_write(msg.as_bytes());
-                    } else if !trimmed.is_empty() {
-                        let (out, dt) = timed(&mut repl, tr, &mut metrics, &line);
-                        console_write(out.as_bytes());
-                        let timing = format!("  ({dt} ticks, ~{} ms)\n", dt / TICKS_PER_MS);
-                        console_write(timing.as_bytes());
-                    }
-                    line.clear();
-                    console_write(PROMPT);
-                }
-                // Backspace / delete: drop the last char and erase it on screen.
-                0x08 | 0x7f => {
-                    if line.pop().is_some() {
-                        console_write(b"\x08 \x08");
-                    }
-                }
-                // Printable ASCII: echo it and add it to the line.
-                0x20..=0x7e => {
-                    console_write(&[byte]);
-                    line.push(byte as char);
-                }
-                // Ignore other control bytes.
-                _ => {}
-            }
-        }
+        platform.write(PROMPT);
     }
 }

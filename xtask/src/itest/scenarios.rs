@@ -343,6 +343,31 @@ pub fn stitch_telemetry_on_the_wire(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// `workload=stitch-repl`: a Stitch program reads a console line **on the metal**
+/// via `readLine()` (the `RuntimePlatform` console backend + the `ConsoleIn`
+/// cap). At the prompt we send an expression that reads the *next* line and emits
+/// its length; the REPL and the evaluated expression share one input stream, so
+/// the expression consumes "hello" → emits `io.len`=5. Proves console *input*
+/// reaches a Stitch program end-to-end on-target (the write side is proven by the
+/// REPL rendering its own output through the same platform).
+pub fn stitch_reads_a_line(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+
+    h.send_input(b"emit(\"io.len\", strLength(unwrapOr(readLine(), \"\")))\nhello\n")
+        .map_err(|e| format!("inject REPL input: {e}"))?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("io.len") && *value == 5
+        }
+        _ => false,
+    })
+    .ok_or("no 'io.len'=5 metric within 30s — readLine didn't read the console line on the metal")?;
+
+    Ok(())
+}
+
 pub fn heap_oom(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {

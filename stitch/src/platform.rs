@@ -84,6 +84,60 @@ impl Platform for FakePlatform {
     }
 }
 
+/// The on-target backend: console I/O over the real `SnitchOS` syscalls. `write`
+/// is a `ConsoleWrite`; `read_line` drives the [`LineEditor`](crate::line_edit)
+/// over `ConsoleRead` chunks — echoing as it goes, yielding while no input is
+/// pending — and returns each finished line. Never reaches end-of-input (a UART
+/// has none), so `read_line` blocks until a line completes. Mirrors
+/// `RuntimeTelemetry`.
+#[cfg(target_os = "none")]
+pub use on_target::RuntimePlatform;
+
+#[cfg(target_os = "none")]
+mod on_target {
+    use super::Platform;
+    use crate::line_edit::LineEditor;
+
+    use core::cell::RefCell;
+    use alloc::string::String;
+
+    use snitchos_user::{console_read, console_write, yield_now};
+
+    #[derive(Default)]
+    pub struct RuntimePlatform {
+        editor: RefCell<LineEditor>,
+    }
+
+    impl RuntimePlatform {
+        #[must_use]
+        pub fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    impl Platform for RuntimePlatform {
+        fn read_line(&self) -> Option<String> {
+            let mut buf = [0u8; 64];
+            loop {
+                if let Some(line) = self.editor.borrow_mut().next_line() {
+                    return Some(line);
+                }
+                let n = console_read(&mut buf);
+                if n == 0 {
+                    yield_now();
+                    continue;
+                }
+                let echo = self.editor.borrow_mut().feed(&buf[..n]);
+                console_write(&echo);
+            }
+        }
+
+        fn write(&self, text: &str) {
+            console_write(text.as_bytes());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,5 +184,40 @@ mod tests {
         env.globals_only().platform().write("x");
 
         assert_eq!(backend.writes.get(), 1);
+    }
+
+    #[test]
+    fn fake_replays_scripted_input_line_by_line() {
+        let fake = FakePlatform::with_input("first\nsecond");
+
+        assert_eq!(fake.read_line().as_deref(), Some("first"));
+        assert_eq!(fake.read_line().as_deref(), Some("second"));
+        assert_eq!(fake.read_line(), None);
+    }
+
+    #[test]
+    fn fake_with_input_treats_a_trailing_newline_as_no_extra_line() {
+        let fake = FakePlatform::with_input("only\n");
+
+        assert_eq!(fake.read_line().as_deref(), Some("only"));
+        assert_eq!(fake.read_line(), None);
+    }
+
+    #[test]
+    fn fake_records_writes_in_order() {
+        let fake = FakePlatform::new();
+
+        fake.write("ab");
+        fake.write("cd");
+
+        assert_eq!(fake.output(), "abcd");
+    }
+
+    #[test]
+    fn a_fresh_fake_reads_nothing_and_has_no_output() {
+        let fake = FakePlatform::new();
+
+        assert_eq!(fake.read_line(), None);
+        assert_eq!(fake.output(), "");
     }
 }

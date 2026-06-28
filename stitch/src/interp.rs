@@ -60,6 +60,18 @@ pub fn build_env_with_telemetry(telemetry: Rc<dyn Telemetry>, items: &[Item]) ->
     build_env_in(Env::with_telemetry(telemetry), items)
 }
 
+/// Like [`build_env`], but installs both a telemetry backend and a platform —
+/// the path the REPL uses on the metal (`RuntimeTelemetry` + `RuntimePlatform`)
+/// and on the host CLI (recording telemetry + a real stdout/stdin platform).
+#[must_use]
+pub fn build_env_with_backends(
+    telemetry: Rc<dyn Telemetry>,
+    platform: Rc<dyn Platform>,
+    items: &[Item],
+) -> Env {
+    build_env_in(Env::with_telemetry(telemetry).with_platform(platform), items)
+}
+
 fn build_env_in(env: Env, items: &[Item]) -> Env {
     // The program entry / REPL prompt holds the process's ambient capabilities —
     // it *was* handed a `TelemetrySink` cap. Authority threads down from here;

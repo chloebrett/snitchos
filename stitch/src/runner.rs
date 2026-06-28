@@ -12,10 +12,11 @@ use crate::prelude::*;
 use crate::ast::Item;
 use crate::env::Env;
 use crate::interp::{
-    Module, build_env_with_telemetry, eval, eval_modules_with_telemetry,
+    Module, build_env_with_backends, eval, eval_modules_with_telemetry,
     eval_program_with_telemetry, is_builtin_module, prelude_items,
 };
 use crate::parser::{parse, parse_program};
+use crate::platform::{NullPlatform, Platform};
 use crate::telemetry::{RecordingTelemetry, Telemetry};
 use crate::value::{RuntimeError, TelemetryEvent, Value};
 
@@ -139,6 +140,11 @@ pub struct Repl {
     /// [`Repl::with_telemetry`]. Held here so it survives env rebuilds (so e.g.
     /// the on-target metric registrations persist across new declarations).
     telemetry: Rc<dyn Telemetry>,
+    /// The platform backend every rebuilt env shares — `NullPlatform` by default,
+    /// a real one (`RuntimePlatform` on metal, stdout/stdin on the host CLI) via
+    /// [`Repl::with_backends`]. Held here so `print`/`readLine` route consistently
+    /// across env rebuilds.
+    platform: Rc<dyn Platform>,
 }
 
 impl Default for Repl {
@@ -157,10 +163,20 @@ impl Repl {
 
     /// A fresh REPL whose evaluated lines route `emit`/`span` through
     /// `telemetry`. The on-target REPL passes a `RuntimeTelemetry` so a Stitch
-    /// program's spans and metrics become real frames on the wire.
+    /// program's spans and metrics become real frames on the wire. Console
+    /// (`print`/`readLine`) stays on `NullPlatform`.
     #[must_use]
     pub fn with_telemetry(telemetry: Rc<dyn Telemetry>) -> Self {
-        Repl { prelude: prelude_items(), defs: Vec::new(), env: None, telemetry }
+        Repl::with_backends(telemetry, Rc::new(NullPlatform))
+    }
+
+    /// A fresh REPL with both backends installed — telemetry *and* platform
+    /// (console / caps / fs). The REPL's own line I/O should be driven through the
+    /// **same** `platform` instance so a `readLine()` inside an evaluated line
+    /// shares the one input stream.
+    #[must_use]
+    pub fn with_backends(telemetry: Rc<dyn Telemetry>, platform: Rc<dyn Platform>) -> Self {
+        Repl { prelude: prelude_items(), defs: Vec::new(), env: None, telemetry, platform }
     }
 
     /// Load a whole `.st` source: parse it and accumulate its declarations into
@@ -208,7 +224,11 @@ impl Repl {
         if self.env.is_none() {
             let mut all = self.prelude.clone();
             all.extend_from_slice(&self.defs);
-            self.env = Some(build_env_with_telemetry(Rc::clone(&self.telemetry), &all));
+            self.env = Some(build_env_with_backends(
+                Rc::clone(&self.telemetry),
+                Rc::clone(&self.platform),
+                &all,
+            ));
         }
         let env = self.env.as_ref().expect("env was just built above");
         let result = eval(&expr, env);

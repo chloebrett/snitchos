@@ -43,4 +43,9 @@ exclude_re = [
   # #[cfg_attr(test, mutants::skip)] which cargo-mutants doesn't see, so
   # we exclude via pattern instead.
   "replace random_trace_id ->",
+  # Target-only edge code: stitch's RuntimePlatform is #[cfg(target_os =
+  # "none")] (console I/O over real syscalls), so it isn't compiled on the
+  # host and can't be mutation-tested there — same situation as the kernel
+  # crates and RuntimeTelemetry. Exercised by on-target itests instead.
+  "RuntimePlatform",
 ]

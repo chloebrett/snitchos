@@ -1,11 +1,33 @@
 //! The `stitch` CLI: `stitch <file.st>` runs a program; `stitch` with no args
 //! starts a REPL. All logic lives in `stitch::runner`; this is just wiring.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::rc::Rc;
 
+use stitch::platform::Platform;
 use stitch::runner::{Repl, run_module_files};
+use stitch::telemetry::RecordingTelemetry;
+
+/// The host CLI's console backend: real stdout/stdin, so `print`/`readLine` work
+/// at the prompt. The metal uses `RuntimePlatform`; tests use `FakePlatform`.
+struct StdPlatform;
+
+impl Platform for StdPlatform {
+    fn write(&self, text: &str) {
+        print!("{text}");
+        let _ = io::stdout().flush();
+    }
+
+    fn read_line(&self) -> Option<String> {
+        let mut line = String::new();
+        match io::stdin().read_line(&mut line) {
+            Ok(0) | Err(_) => None, // EOF or error ends the session
+            Ok(_) => Some(line.trim_end_matches(['\n', '\r']).to_string()),
+        }
+    }
+}
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -42,21 +64,21 @@ fn run_file(path: &str) -> ExitCode {
 
 /// A line-at-a-time REPL: definitions accumulate, expressions are evaluated, and
 /// `:load <path>` reads a `.st` file from disk and registers its definitions.
+/// Both the REPL's own line reading and a Stitch `readLine()` go through the one
+/// [`StdPlatform`], so they draw from a single stdin stream.
 fn repl() -> ExitCode {
-    let mut repl = Repl::new();
-    let stdin = io::stdin();
-    print!("stitch> ");
-    let _ = io::stdout().flush();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
-        match line.trim().strip_prefix(":load ") {
-            Some(path) => print!("{}", load_file(&mut repl, path.trim())),
-            None => print!("{}", repl.eval_line(&line)),
-        }
-        print!("stitch> ");
-        let _ = io::stdout().flush();
+    let platform = Rc::new(StdPlatform);
+    let mut repl = Repl::with_backends(Rc::new(RecordingTelemetry::default()), platform.clone());
+    platform.write("stitch> ");
+    while let Some(line) = platform.read_line() {
+        let out = match line.trim().strip_prefix(":load ") {
+            Some(path) => load_file(&mut repl, path.trim()),
+            None => repl.eval_line(&line),
+        };
+        platform.write(&out);
+        platform.write("stitch> ");
     }
-    println!();
+    platform.write("\n");
     ExitCode::SUCCESS
 }
 
