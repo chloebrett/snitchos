@@ -1,8 +1,10 @@
 # Span- and metric-name GC (reclaim per-process leaked names)
 
-**Status:** **Option B in progress** (2026-06-28). Option A (document the bound)
-shipped 2026-06-26. Now implementing reclaim-on-exit. Teardown (`reap_task`,
-address-space + caps) already landed in v0.12, so the lifecycle hook exists.
+**Status:** **Option B COMPLETE** (2026-06-28). Option A (document the bound)
+shipped 2026-06-26. Reclaim-on-exit now implemented across all 5 increments
+(below), host-tested + proven end-to-end by the `spawn-reclaims-names` itest
+(`strings_released_total ≥ 30` across the reaper's 30 reap cycles; stable 10/10).
+*This file can be deleted once the work is committed.*
 
 ## Increment chain (TDD, each RED→GREEN)
 
@@ -19,17 +21,16 @@ address-space + caps) already landed in v0.12, so the lifecycle hook exists.
    releases them before dropping the `Process` (ids collected first → no nested
    lock under `INTERN_TABLE`). Validated against existing reap + userspace-metric +
    span itests (all green).
-5. ⬜ **itest** — a dedicated end-to-end reclaim proof. See note below.
+5. ✅ **itest `spawn-reclaims-names`** — end-to-end reclaim proof. Added a
+   `snitchos.intern.strings_released_total` counter (`release` now returns whether
+   it freed a live entry; `release_names` sums the trues and bumps the counter,
+   drained by the heartbeat). `memhog` names one metric per spawn; the scenario
+   asserts the counter reaches ≥ 30 after `reaper.done` — reclaim fires on every
+   reap. A genuinely useful "watch reclamation happen" observable, not just a test.
 
-### Increment 5 — design note (not yet built)
-The mechanism is fully host-tested; this would prove the *wiring* on the wire.
-Tricky bits: `strings_used` is a live gauge (needs a baseline to assert "stayed
-bounded"), and max `StringId` always climbs (ids are never reused, by design), so
-neither is a clean signal. **Recommended shape:** add a
-`snitchos.intern.strings_released_total` counter (bumped in `release_names`) — a
-robust monotonic signal *and* a genuinely useful "watch reclamation happen"
-observable — make `memhog` register one name before exit, then assert the counter
-climbs across the reaper's 30 spawn/reap cycles.
+   *Why not assert on `strings_used` / max `StringId`:* the live gauge needs a
+   baseline to claim "stayed bounded," and max id always climbs (ids never reused,
+   by design). A dedicated released-total counter is the clean monotonic signal.
 
 **Fork (increment 2):** `SpanNameTable` stores its own `Box<str>` copy rather than
 coupling `resolve` to the intern table — keeps the two kernel-core tables
