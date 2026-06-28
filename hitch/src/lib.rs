@@ -49,6 +49,74 @@ pub enum Value {
     },
 }
 
+/// The *shape* of a [`Value`] — what `#[derive(Schema)]` emits for a Rust type
+/// and what the packed encoding decodes against. It mirrors [`Value`] at the
+/// type level, with one difference that matters: a [`Value::Sum`] instance names
+/// a *single* variant, whereas [`TypeSchema::Sum`] lists *every* variant the type
+/// admits.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeSchema {
+    Bool,
+    I64,
+    U64,
+    F64,
+    Str,
+    Bytes,
+    /// A homogeneous sequence of the inner shape.
+    Seq(Box<TypeSchema>),
+    /// A struct / record / `prod` — fields in declaration order, each optionally
+    /// named (`None` for positional fields).
+    Product {
+        type_name: String,
+        fields: Vec<(Option<String>, TypeSchema)>,
+    },
+    /// An enum / variant / `sum` — every variant the type can take.
+    Sum {
+        type_name: String,
+        variants: Vec<(String, TypeSchema)>,
+    },
+}
+
+impl TypeSchema {
+    /// Does `value` structurally conform to this shape?
+    ///
+    /// Conformance is **structural**: `type_name`s are display labels and play no
+    /// part, so a Rust `Table` and a Stitch `Table` of the same shape accept each
+    /// other — what cross-language `~>` needs. Field *names* and order, and
+    /// variant *names*, are part of the structure and must match. An empty
+    /// sequence conforms to any [`TypeSchema::Seq`].
+    #[must_use]
+    pub fn accepts(&self, value: &Value) -> bool {
+        match (self, value) {
+            (TypeSchema::Bool, Value::Bool(_))
+            | (TypeSchema::I64, Value::I64(_))
+            | (TypeSchema::U64, Value::U64(_))
+            | (TypeSchema::F64, Value::F64(_))
+            | (TypeSchema::Str, Value::Str(_))
+            | (TypeSchema::Bytes, Value::Bytes(_)) => true,
+            (TypeSchema::Seq(elem), Value::Seq(items)) => {
+                items.iter().all(|item| elem.accepts(item))
+            }
+            (
+                TypeSchema::Product { fields: schema, .. },
+                Value::Product { fields: actual, .. },
+            ) => {
+                schema.len() == actual.len()
+                    && schema.iter().zip(actual).all(|((sname, sshape), (vname, vvalue))| {
+                        sname == vname && sshape.accepts(vvalue)
+                    })
+            }
+            (
+                TypeSchema::Sum { variants, .. },
+                Value::Sum { variant, payload, .. },
+            ) => variants
+                .iter()
+                .any(|(name, shape)| name == variant && shape.accepts(payload)),
+            _ => false,
+        }
+    }
+}
+
 /// Decoding a hitch failed — the bytes were not a valid encoding of a [`Value`].
 /// Wraps the underlying codec error without exposing it in the public API.
 #[derive(Debug)]
