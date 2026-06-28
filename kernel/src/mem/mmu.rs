@@ -563,6 +563,23 @@ pub fn remap(va: usize, new_pa: usize, perms: PtePerms) -> Result<(), MapError> 
     result
 }
 
+/// Clear the 4 KiB leaf for `va` in the kernel root, returning the PA it mapped
+/// (for the caller to `frame::free`). Mirrors [`remap`]: walks only existing
+/// tables and, on success, does a cross-hart [`shootdown`] — the leaf was valid,
+/// so other harts may have it cached (and a kernel-stack VA is reachable in every
+/// address space via the shared high half). The unmapping primitive behind
+/// kernel-stack guard-page teardown; `Err(NotMapped)` if `va` isn't a 4 KiB leaf.
+pub fn unmap(va: usize) -> Result<usize, MapError> {
+    let root_pa = va_to_pa((&raw const BOOT_PT_ROOT) as usize);
+    let mut mem = KernelPtMem;
+    let result = core_mmu::unmap(root_pa, va, &mut mem);
+    if let Ok(freed_pa) = result {
+        shootdown(va);
+        return Ok(freed_pa);
+    }
+    result
+}
+
 /// Cumulative count of TLB shootdowns this hart has initiated as a
 /// sender (i.e. how many `mmu::map`/`unmap` calls actually fired).
 /// Drained by the heartbeat as

@@ -105,44 +105,144 @@ unsafe extern "C" {
     pub fn switch_into(to: *mut TaskContext) -> !;
 }
 
-/// Per-task stack size in bytes. 16 KiB is generous for kernel work
-/// (the call graphs we have today don't get deep); cheap on 128 MiB.
-pub const STACK_SIZE: usize = 16384;
+/// Per-task kernel stack size in bytes — the mapped region of a window slot.
+/// 16 KiB is generous for kernel work (our call graphs don't get deep).
+pub const STACK_SIZE: usize = kernel_core::stack::STACK_BYTES;
 
-/// Stack with 16-byte alignment so RISC-V's `extern "C"` ABI is
-/// satisfied on first entry. Used both by `spawn()`-built tasks and
-/// by the v0.5-step-5 smoke.
-#[repr(C, align(16))]
-pub struct Stack([u8; STACK_SIZE]);
+/// Window-slot allocator for guard-paged kernel stacks. Recycles freed slots, so
+/// repeated spawning (the shell) reuses slots rather than exhausting the 1 GiB
+/// window. Pure bookkeeping in `kernel_core::stack::SlotAllocator`.
+static STACK_SLOTS: Mutex<kernel_core::stack::SlotAllocator> =
+    Mutex::new(kernel_core::stack::SlotAllocator::new());
 
-impl Stack {
-    pub fn top_addr(&self) -> u64 {
-        (self as *const _ as u64) + STACK_SIZE as u64
+/// Install the kstack window's root-level page-table subtree (root PTE 257) in the
+/// kernel root **before any user address space is created**, so
+/// [`crate::mmu::new_user_root`]'s high-half copy captures it and every process
+/// sees kernel-stack mappings added later under the shared subtree (a task runs on
+/// its kernel stack while *its own* `satp` is loaded). Maps then unmaps a throwaway
+/// page — `unmap` keeps the intermediate tables, leaving the shared subtree in
+/// place. Call once in `kmain` after `heap::init`, before any spawn.
+pub fn init_stack_window() {
+    let va = kernel_core::stack::slot_stack_base_va(0);
+    let perms = kernel_core::mmu::PtePerms::R.union(kernel_core::mmu::PtePerms::W);
+    let frame = crate::frame::alloc_zeroed().expect("kstack window init: out of frames");
+    crate::mmu::map(va, frame.addr(), perms).expect("kstack window init: map");
+    // SAFETY of the unwrap: we just mapped `va`, so the leaf exists.
+    let pa = crate::mmu::unmap(va).expect("kstack window init: unmap");
+    crate::frame::free(crate::frame::PhysFrame::from_addr(pa));
+}
+
+/// A per-task kernel stack with a guard page (Tier B). `STACK_SIZE` of pages
+/// mapped in the dedicated kstack window, with an **unmapped guard page below**: a
+/// downward overflow store crosses into the hole and faults at the exact PC (named
+/// by the trap handler via [`kernel_core::stack::guard_slot_for`]), instead of
+/// silently corrupting a neighbour. Owns its window slot + backing frames; `Drop`
+/// unmaps the pages (freeing each frame) and releases the slot.
+///
+/// Building it never materializes a 16 KiB value on the caller's stack (it writes
+/// through the mapped VA), so it sidesteps the v0.11 `Box::new(Stack)` overflow.
+pub struct KernelStack {
+    slot: usize,
+}
+
+impl KernelStack {
+    /// Allocate a slot, map its stack pages (guard left unmapped), and
+    /// sentinel-fill them for the Tier-A canary/high-water checks. `None` if the
+    /// window or the frame allocator is exhausted; a partial mapping is rolled back.
+    fn new() -> Option<KernelStack> {
+        let slot = STACK_SLOTS.lock().alloc()?;
+        let base = kernel_core::stack::slot_stack_base_va(slot);
+        let perms = kernel_core::mmu::PtePerms::R.union(kernel_core::mmu::PtePerms::W);
+        for i in 0..kernel_core::stack::STACK_PAGES {
+            let va = base + i * kernel_core::mmu::PAGE_SIZE;
+            let Some(frame) = crate::frame::alloc_zeroed() else {
+                Self::teardown(slot, i);
+                return None;
+            };
+            if crate::mmu::map(va, frame.addr(), perms).is_err() {
+                crate::frame::free(crate::frame::PhysFrame::from_addr(frame.addr()));
+                Self::teardown(slot, i);
+                return None;
+            }
+        }
+        let mut stack = KernelStack { slot };
+        stack.fill_sentinel();
+        Some(stack)
     }
 
-    /// Fill the whole stack with the overflow-detection [`SENTINEL`] at creation
-    /// (guard-pages Tier A). The task overwrites it from the top down as it runs;
-    /// the untouched prefix is what [`canary_intact`] and [`high_water_bytes`]
-    /// read back.
-    ///
-    /// [`SENTINEL`]: kernel_core::stack::SENTINEL
-    /// [`canary_intact`]: Stack::canary_intact
-    /// [`high_water_bytes`]: Stack::high_water_bytes
+    /// Unmap the first `mapped` stack pages of `slot` (freeing each frame) and
+    /// release the slot. Rolls back a partial [`new`](Self::new); `Drop` calls it
+    /// with every page mapped.
+    fn teardown(slot: usize, mapped: usize) {
+        let base = kernel_core::stack::slot_stack_base_va(slot);
+        for i in 0..mapped {
+            let va = base + i * kernel_core::mmu::PAGE_SIZE;
+            if let Ok(pa) = crate::mmu::unmap(va) {
+                crate::frame::free(crate::frame::PhysFrame::from_addr(pa));
+            }
+        }
+        STACK_SLOTS.lock().free(slot);
+    }
+
+    /// Initial `sp`: one past the highest mapped stack byte (stacks grow down,
+    /// 16-byte aligned since `STACK_SIZE` is a page multiple).
+    fn top_addr(&self) -> u64 {
+        kernel_core::stack::slot_stack_top_va(self.slot) as u64
+    }
+
+    /// The mapped stack bytes, lowest address first (`[0]` is the bottom, nearest
+    /// the guard page).
+    fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `new` mapped `STACK_SIZE` contiguous bytes at this VA, and the
+        // slot is owned exclusively (`&self`); the region stays mapped until `Drop`.
+        unsafe {
+            core::slice::from_raw_parts(
+                kernel_core::stack::slot_stack_base_va(self.slot) as *const u8,
+                STACK_SIZE,
+            )
+        }
+    }
+
+    /// Mutable view of the mapped stack bytes (sentinel fill, test clobber).
+    fn as_bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: as [`as_bytes`](Self::as_bytes), with `&mut self` giving exclusive access.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                kernel_core::stack::slot_stack_base_va(self.slot) as *mut u8,
+                STACK_SIZE,
+            )
+        }
+    }
+
+    /// Fill the stack with the overflow [`SENTINEL`](kernel_core::stack::SENTINEL)
+    /// at creation; the task overwrites it top-down and the untouched prefix is
+    /// what the canary + high-water checks read back.
     fn fill_sentinel(&mut self) {
-        self.0.fill(kernel_core::stack::SENTINEL);
+        self.as_bytes_mut().fill(kernel_core::stack::SENTINEL);
     }
 
     /// Whether the bottom canary is intact — `false` means the stack grew down
-    /// into its lowest bytes, i.e. overflowed. Cheap (one cache line); checked on
-    /// every context switch.
+    /// into its lowest bytes, i.e. overflowed. Cheap; checked on every switch.
     fn canary_intact(&self) -> bool {
-        kernel_core::stack::canary_intact(&self.0[..kernel_core::stack::CANARY_BYTES])
+        kernel_core::stack::canary_intact(&self.as_bytes()[..kernel_core::stack::CANARY_BYTES])
     }
 
-    /// Bytes ever used by this stack (high-water). Scans the stack; called from
-    /// the heartbeat for the per-task gauge.
+    /// Bytes ever used by this stack (high-water); heartbeat per-task gauge.
     fn high_water_bytes(&self) -> usize {
-        kernel_core::stack::high_water_bytes(&self.0)
+        kernel_core::stack::high_water_bytes(self.as_bytes())
+    }
+
+    /// Test-only: overwrite the bottom canary in place (no `sp` movement), so the
+    /// next switch / heartbeat detects it without real-overflow corruption.
+    #[cfg(feature = "itest-workloads")]
+    fn clobber_canary(&mut self) {
+        self.as_bytes_mut()[..kernel_core::stack::CANARY_BYTES].fill(0x00);
+    }
+}
+
+impl Drop for KernelStack {
+    fn drop(&mut self) {
+        Self::teardown(self.slot, kernel_core::stack::STACK_PAGES);
     }
 }
 
@@ -218,7 +318,7 @@ pub struct Task {
     /// the boot stack (and so has no canary). Read by the Tier-A overflow checks
     /// (`canary_intact` on switch, `high_water_bytes` on the heartbeat); also kept
     /// alive so `Drop` frees the stack when the task is reaped.
-    _stack: Option<Box<Stack>>,
+    _stack: Option<KernelStack>,
 }
 
 // SAFETY: Task contains an UnsafeCell<TaskContext> (which is !Sync).
@@ -471,7 +571,7 @@ pub fn clobber_current_stack_canary() {
     if let Some(task) = sched.tasks.iter_mut().find(|t| t.id == id)
         && let Some(stack) = &mut task._stack
     {
-        stack.0[..kernel_core::stack::CANARY_BYTES].fill(0x00);
+        stack.clobber_canary();
     }
 }
 
@@ -663,18 +763,12 @@ pub fn spawn_on_with_arg(
 ) -> TaskId {
     debug_assert!(hart < crate::percpu::MAX_HARTS);
     let id = alloc_task_id();
-    // Allocate the 16 KiB stack *directly on the heap*. Constructing a `Stack`
-    // by value and then boxing it (`Box::new(Stack(...))`) would materialize the
-    // whole 16 KiB on the *caller's* stack first, which overflows when spawning
-    // down a deep call chain on a 16 KiB kernel stack (e.g. the userspace `Spawn`
-    // syscall: trap_entry → … → spawn_on_with_arg).
-    // SAFETY: `Stack` is `[u8; STACK_SIZE]`, for which all-zero bytes are a valid
-    // value, so `new_zeroed().assume_init()` is sound.
-    let mut stack: Box<Stack> = unsafe { Box::<Stack>::new_zeroed().assume_init() };
-    // Tier-A overflow detection: fill with the sentinel so the canary + high-water
-    // checks have something to read back. Writes the *new* heap stack, not the
-    // caller's — no overflow risk on the spawn path.
-    stack.fill_sentinel();
+    // Allocate a guard-paged kernel stack in the kstack window. `KernelStack::new`
+    // maps the pages and writes the sentinel *through the mapped VA* — it never
+    // materializes a 16 KiB value on the caller's stack, so the deep-spawn path
+    // (trap_entry → … → spawn_on_with_arg on a 16 KiB stack) can't overflow here.
+    // An overflow at *run* time hits the unmapped guard page below and faults.
+    let stack = KernelStack::new().expect("out of memory for kernel stack");
     let sp = stack.top_addr();
 
     let mut task = Box::new(Task::new_bare(id, String::from(name), TaskState::Ready));

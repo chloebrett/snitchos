@@ -1,7 +1,54 @@
 # Kernel stack guard pages (fault-on-overflow)
 
-**Status:** **Tier A SHIPPED (2026-06-26)** — see below. **Tier B remains**, deferred
-to the v0.12 Exit/teardown reclaim milestone (shared stack-lifecycle machinery).
+**Status:** **Tier A SHIPPED (2026-06-26).** **Tier B IN PROGRESS (2026-06-28)** —
+guard pages, fault-on-overflow. Increment chain below. (Teardown reclaim landed in
+v0.12, so the stack-lifecycle hook in `reap_task` already exists.)
+
+## Tier B increment chain (TDD, each RED→GREEN)
+
+1. **kernel-core `unmap`** — walk to the existing 4 KiB leaf, clear it (`Pte::INVALID`),
+   return the old PA so the caller frees the frame. `NotMapped` if absent/huge.
+   Host-tested via the `PtMem` mock, mirroring `map`/`remap`. *Foundation.*
+2. **kernel-core stack-window bookkeeping** — slot↔VA math (guard page below
+   `STACK_SIZE` mapped pages) + a slot allocator (alloc/free, recycle freed slots).
+   Pure, host-tested.
+3. **kernel `mmu::unmap`** — `KernelPtMem` wrapper + local `sfence` + cross-hart
+   `shootdown` (the leaf is being invalidated).
+4. **kernel `KernelStack`** — alloc slot + frames, `mmu::map` the stack pages (guard
+   left unmapped), sentinel-fill; `Drop` unmaps + frees frames + releases the slot.
+   Replace `Box<Stack>` in `Task`; rewire `spawn_on_with_arg` + `reap_task`. Tier A
+   canary/high-water read the mapped VA range.
+5. **trap handler** — a kernel (S-mode) load/store page fault with `stval` in a guard
+   region → snitch a **named** `Log` then panic (the observable Tier B proof).
+6. **workload + itest** — controlled overflow → guard fault → assert the named Log.
+
+**Decisions:** boot stack (task 0) stays unguarded *in this work* (future iteration
+below); slot stride = 5 pages (1 guard + 4 stack), no padding; window at root PTE
+257 (`0xffffffc0_40000000`, immediately above the heap's full 1 GiB slot).
+
+## Future iteration — guard the boot stack (task 0)
+
+The boot stack lives in the kernel image `.bss`, set up in `entry.S` before the
+MMU/heap exist, and the kernel image is mapped with **2 MiB huge-page leaves**
+(`kernel/src/mem/mmu.rs` `map_higher_kernel`, `PAGE_2MIB` stride). So neither the
+Tier A canary nor the Tier B window covers it today — a boot-stack overflow is
+silent. Two levels, both deferred (decided 2026-06-28):
+
+- **Level 1 — detection (cheap, no MMU): a boot-stack canary.** Give the boot stack
+  a linker-symbol bottom, sentinel-fill its lowest bytes early, and check it in the
+  heartbeat's `check_stack_canaries` → a *named* panic on overflow instead of silent
+  corruption. Small Tier-A-style extension; reuses `kernel_core::stack::canary_intact`.
+- **Level 2 — prevention (real fault-on-overflow): harder.** A 4 KiB guard page below
+  the boot stack is blocked by the 2 MiB huge leaf — `unmap` refuses a huge leaf, and
+  clearing the 2 MiB leaf unmaps too much. Needs *either* a huge-page **split** at the
+  boot-stack region (break the 2 MiB leaf into 4 KiB leaves, then `unmap` one) *or*
+  **relocating task 0** onto a window stack early in boot (can't relocate a running
+  stack trivially — would `switch` task 0 to a fresh window stack once the window is
+  up). Independent of the per-task guard pages.
+
+---
+
+(Original deferral note, retained for context:) Tier B was deferred
 The specific v0.11 bug is already prevention-fixed (heap-direct
 `Box::<Stack>::new_zeroed()` at `kernel/src/sched/mod.rs`), so Tier B is not urgent
 — Tier A is the cheap insurance; Tier B is the real fault-on-overflow fix.

@@ -256,6 +256,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // the linear map live (installed by `mmu::enable`).
     unsafe { heap::init() };
 
+    // Install the guard-paged kstack window's shared root subtree (root PTE 257)
+    // before any spawn or user address space, so every process sees kernel-stack
+    // mappings (a task runs on its kernel stack under its own `satp`). After
+    // `heap::init` (needs frames + the live linear map), before the first spawn.
+    sched::init_stack_window();
+
     // v0.5 step 5 smoke: build a marker task context, switch into
     // it, marker bumps a counter and switches back. Proves the
     // context-switch asm (`sched::switch`) round-trips correctly

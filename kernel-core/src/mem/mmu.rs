@@ -395,6 +395,29 @@ pub fn remap(
     Ok(())
 }
 
+/// Clear the existing 4 KiB leaf PTE for `va`, returning the PA it mapped so the
+/// caller can free that frame. Walks only *existing* tables (never allocates) and
+/// requires a valid 4 KiB leaf present; the caller is responsible for the TLB
+/// shootdown after a successful return (the cleared translation may be cached on
+/// other harts). Intermediate tables are left in place — they may still map
+/// sibling pages, and a per-window allocator reuses them.
+///
+/// Returns `Err(NotMapped)` if the VA is unmapped, an intermediate table is
+/// missing, or a huge-page leaf covers it (no 4 KiB granularity to clear). The
+/// inverse of [`map`]; the unmapping twin of [`remap`].
+pub fn unmap(root_pa: usize, va: usize, mem: &mut dyn PtMem) -> Result<usize, MapError> {
+    let Sv39Va { vpn2, vpn1, vpn0, .. } = split_va(va);
+    let mid_pa = walk_existing(root_pa, vpn2, mem)?;
+    let leaf_table_pa = walk_existing(mid_pa, vpn1, mem)?;
+    let existing = mem.read_entry(leaf_table_pa, vpn0);
+    if !existing.is_leaf() {
+        return Err(MapError::NotMapped);
+    }
+    let pa = existing.leaf_pa();
+    mem.write_entry(leaf_table_pa, vpn0, Pte::INVALID);
+    Ok(pa)
+}
+
 /// Descend one level through an *existing* branch PTE. Returns the
 /// child table PA. Errors `NotMapped` if the slot is empty (no table)
 /// or holds a leaf (huge page — no child table to descend into).
@@ -767,6 +790,35 @@ mod tests {
             0,
             "no tables allocated on early-fail",
         );
+    }
+
+    #[test]
+    fn unmap_clears_the_leaf_and_returns_its_pa() {
+        // Reclaiming a kernel-stack page on task exit: clearing the leaf returns
+        // the PA so the caller can free that frame, and the VA stops translating.
+        let mut mem = MockPtMem::new(8);
+        let va = 0x40201000;
+        let pa = 0x90000000;
+        map(mem.root_pa(), va, pa, PtePerms::R.union(PtePerms::W), &mut mem).unwrap();
+
+        assert_eq!(unmap(mem.root_pa(), va, &mut mem), Ok(pa));
+        assert_eq!(translate(mem.root_pa(), va, &mem), None, "the leaf is gone");
+    }
+
+    #[test]
+    fn unmap_returns_not_mapped_for_an_unmapped_va() {
+        let mut mem = MockPtMem::new(8);
+        assert_eq!(unmap(mem.root_pa(), 0x1000, &mut mem), Err(MapError::NotMapped));
+    }
+
+    #[test]
+    fn unmap_returns_not_mapped_for_a_huge_leaf() {
+        // A 1 GiB huge leaf has no 4 KiB granularity to clear — refuse rather than
+        // silently tear down a gigabyte (mirrors `remap`).
+        let mut mem = MockPtMem::new(8);
+        let root_pa = mem.root_pa();
+        mem.write_entry(root_pa, 1, Pte::leaf(0x80000000, PtePerms::rwxg()));
+        assert_eq!(unmap(root_pa, 0x40000000, &mut mem), Err(MapError::NotMapped));
     }
 
     #[test]
