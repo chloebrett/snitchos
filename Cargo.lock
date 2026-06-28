@@ -471,6 +471,7 @@ name = "hitch"
 version = "0.0.1"
 dependencies = [
  "hitch-derive",
+ "hitch-pod",
  "postcard",
  "serde",
 ]
@@ -482,6 +483,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "hitch-pod"
+version = "0.0.1"
+dependencies = [
+ "hitch-derive",
 ]
 
 [[package]]
@@ -662,6 +670,7 @@ version = "0.0.1"
 dependencies = [
  "fdt",
  "heapless",
+ "hitch-pod",
  "kernel-core",
  "linked_list_allocator",
  "postcard",
@@ -1133,6 +1142,9 @@ version = "0.0.1"
 [[package]]
 name = "snitchos-abi"
 version = "0.0.1"
+dependencies = [
+ "hitch-pod",
+]
 
 [[package]]
 name = "snitchos-std"

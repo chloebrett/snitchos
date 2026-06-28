@@ -1,0 +1,17 @@
+[package]
+name = "hitch-pod"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+# `#[derive(Pod)]`. The proc-macro is host-built, so it never reaches a target
+# binary; off by default keeps the dependency optional for the leanest consumers.
+derive = ["dep:hitch-derive"]
+
+[dependencies]
+hitch-derive = { path = "../hitch-derive", optional = true }
+
+[lints]
+workspace = true

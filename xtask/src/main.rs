@@ -28,6 +28,18 @@ enum Cmd {
     /// prints its greeting (throwaway M1 console-out smoke; superseded by
     /// `itest`/`boot --snemu` once snemu models Sv39 + virtio in M2).
     Snemu,
+    /// Build the *full* kernel (no `minimal-boot`) and run it under snemu,
+    /// streaming snemu's output. This is the meta-loop driver: it always
+    /// rebuilds the real boot path (so a prior `snemu` run's minimal-boot ELF
+    /// can't be run stale), then reports where snemu stops.
+    SnemuBoot {
+        /// Cargo features to enable on the kernel build, comma-separated.
+        #[arg(long, default_value = "")]
+        features: String,
+        /// Cap the run at N instruction steps (snemu's default is 50M).
+        #[arg(long)]
+        max_steps: Option<u64>,
+    },
     /// Build the kernel and run it in QEMU.
     ///
     /// Use `--workload <name>` to boot a runtime-selected workload for
@@ -455,6 +467,7 @@ fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Build => build(),
         Cmd::Snemu => snemu(),
+        Cmd::SnemuBoot { features, max_steps } => snemu_boot(&features, max_steps),
         Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
         Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {
             measure::measure(&workload, seconds, warmup, timebase_hz, burst, markdown)
@@ -607,6 +620,34 @@ fn snemu() -> ExitCode {
         eprintln!("snemu: FAILED — greeting not found on the UART");
         eprintln!("--- snemu stdout ---\n{stdout}");
         eprintln!("--- snemu stderr ---\n{}", String::from_utf8_lossy(&out.stderr));
+        ExitCode::from(1)
+    }
+}
+
+/// Build the full kernel and run it under snemu, inheriting stdio so snemu's
+/// UART output (stdout) and its stop reason (stderr) stream straight to the
+/// terminal. Always rebuilds without `minimal-boot`, so the meta-loop never
+/// runs a stale ELF left by `cargo xtask snemu`.
+fn snemu_boot(features: &str, max_steps: Option<u64>) -> ExitCode {
+    let features_vec: Vec<&str> = if features.is_empty() {
+        Vec::new()
+    } else {
+        features.split(',').collect()
+    };
+    let status = qemu::build_kernel(&features_vec).expect("failed to invoke cargo");
+    if !status.success() {
+        eprintln!("snemu-boot: kernel build failed");
+        return ExitCode::from(1);
+    }
+
+    let mut cmd = Command::new("cargo");
+    cmd.args(["run", "-q", "-p", "snemu", "--", qemu::KERNEL_BIN]);
+    if let Some(n) = max_steps {
+        cmd.arg(n.to_string());
+    }
+    if cmd.status().expect("failed to invoke cargo run -p snemu").success() {
+        ExitCode::SUCCESS
+    } else {
         ExitCode::from(1)
     }
 }
@@ -780,6 +821,8 @@ fn run_mutants(extra_args: &[String]) -> ExitCode {
             "kernel-core",
             "-p",
             "hitch",
+            "-p",
+            "hitch-pod",
             "--features",
             "protocol/std",
         ])

@@ -329,8 +329,11 @@ pub mod object_kind {
 /// endpoint, e.g. a file cap). `reserved` is `0` today — room for `cap_id` /
 /// multiplicity later. Userspace `unhitch`es a buffer of these into named
 /// records (the `hold` lift); the kernel and userspace agree on this layout.
+// `#[derive(Pod)]` compile-checks the padding-free + all-scalar + `repr(C)`
+// invariants the doc comment claims, so the byte cast in `CapList` is sound by
+// construction rather than by hand-audit.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, hitch_pod::Pod)]
 pub struct CapDesc {
     pub handle: u32,
     pub kind: u32,

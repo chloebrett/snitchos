@@ -4,5 +4,12 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
+[dependencies]
+# The alloc-free Pod primitive: `CapDesc` derives `Pod`, so structured syscall
+# returns cast to bytes through one audited place (`hitch_pod::pod_bytes`) with a
+# derive-checked no-padding guarantee — not a hand-rolled `from_raw_parts`. `Pod`
+# is a memory property *below* the ABI, so this is proper layering.
+hitch-pod = { path = "../hitch-pod", features = ["derive"] }
+
 [lints]
 workspace = true

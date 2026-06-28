@@ -9,19 +9,25 @@ default = ["derive"]
 # `#[derive(Schema)]`. On by default (the proc-macro is host-built, so it never
 # reaches a target binary); turn off with `default-features = false` to skip the
 # syn/quote build.
-derive = ["dep:hitch-derive"]
+derive = ["dep:hitch-derive", "hitch-pod/derive"]
 # Host-side conveniences (e.g. Frame/Value bridges, pretty-printing) that want
 # `std`. Off by default so userspace and the interpreter keep building no_std.
 std = []
 
 [dependencies]
 hitch-derive = { path = "../hitch-derive", optional = true }
+# The alloc-free Pod primitive (trait + `pod_bytes` + `#[derive(Pod)]`),
+# re-exported. `hitch` owns the value model that sits above it.
+hitch-pod = { path = "../hitch-pod", default-features = false }
 # The codec is postcard at two levels (see README): postcard the domain value
-# (packed) or postcard the self-describing `Value` (married to its schema).
-# Both are already in the workspace tree via `protocol`, so Hitch adds nothing
-# new to the kernel/userspace builds.
+# (packed) or postcard the self-describing `Value`. Both are already in the
+# workspace tree via `protocol`, so Hitch adds nothing new to target builds.
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+# Tests deriving `Pod` need to name `hitch_pod` (the path the derive emits).
+hitch-pod = { path = "../hitch-pod", features = ["derive"] }
 
 [lints]
 workspace = true

@@ -64,7 +64,7 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
     .into()
 }
 
-/// `#[derive(Pod)]` for [`hitch::Pod`]: generate the `unsafe impl` only when the
+/// `#[derive(Pod)]` for `hitch_pod::Pod`: generate the `unsafe impl` only when the
 /// type is provably safe to reinterpret as bytes. The generated code compile-time
 /// checks all three obligations, so the `unsafe` is gated, not trusted:
 ///
@@ -103,9 +103,9 @@ pub fn derive_pod(input: TokenStream) -> TokenStream {
     quote! {
         // SAFETY: the `const` block below proves repr(C), all-fields-Pod, and
         // no-padding at compile time; if any fails, this item does not compile.
-        unsafe impl hitch::Pod for #name {}
+        unsafe impl hitch_pod::Pod for #name {}
         const _: () = {
-            const fn __assert_pod<__T: hitch::Pod>() {}
+            const fn __assert_pod<__T: hitch_pod::Pod>() {}
             #( __assert_pod::<#field_types>(); )*
             ::core::assert!(
                 ::core::mem::size_of::<#name>()
