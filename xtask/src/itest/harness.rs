@@ -189,6 +189,10 @@ pub struct View {
     captured: Option<FailureCapture>,
     /// Shared write end of QEMU's stdin, for [`send_input`](Self::send_input).
     input: Arc<Mutex<Option<ChildStdin>>>,
+    /// This boot's QEMU log (kernel + userspace UART output), for
+    /// [`wait_for_log`](Self::wait_for_log) — the only way to assert on-target
+    /// `ConsoleWrite` output, which goes to the UART, not the telemetry stream.
+    log_path: PathBuf,
 }
 
 impl Boot {
@@ -290,6 +294,7 @@ impl Boot {
             workload: self.workload.clone(),
             captured: None,
             input: Arc::clone(&self.input),
+            log_path: self.log_path.clone(),
         }
     }
 
@@ -312,6 +317,21 @@ impl View {
         let stdin = guard.as_mut().ok_or("QEMU stdin was not piped")?;
         stdin.write_all(bytes).map_err(|e| format!("write to QEMU stdin: {e}"))?;
         stdin.flush().map_err(|e| format!("flush QEMU stdin: {e}"))
+    }
+
+    /// Block up to `budget` for the guest's UART log to contain `needle`. This is
+    /// how a scenario asserts on-target **console output** (`ConsoleWrite` →
+    /// UART), which — unlike `DebugWrite` — never becomes a telemetry frame, so
+    /// `wait_for` can't see it. Polls the log file QEMU writes concurrently.
+    pub fn wait_for_log(&self, budget: Duration, needle: &str) -> Result<(), String> {
+        if poll_file_for(&self.log_path, needle, Instant::now() + budget) {
+            Ok(())
+        } else {
+            Err(format!(
+                "UART log never contained {needle:?} within {budget:?} — \
+                 console output did not reach the terminal"
+            ))
+        }
     }
 
     /// Block up to `budget` for a frame matching `pred`. Returns the
@@ -729,6 +749,24 @@ fn log_path_for(label: &str) -> PathBuf {
     ))
 }
 
+/// Poll `path` for `needle`, returning `true` as soon as the file's contents
+/// contain it, or `false` at `deadline`. The file is QEMU's UART log, written
+/// concurrently — a missing or not-yet-UTF-8 read just retries. Factored out of
+/// [`View::wait_for_log`] so the poll logic is host-testable without a live QEMU.
+fn poll_file_for(path: &std::path::Path, needle: &str, deadline: Instant) -> bool {
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && contents.contains(needle)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn connect_with_deadline(
     path: &std::path::Path,
     budget: Duration,
@@ -742,6 +780,55 @@ fn connect_with_deadline(
             }
             Err(e) => return Err(format!("connect {}: {e}", path.display())),
         }
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    //! `poll_file_for` — the UART-log substring poll behind `View::wait_for_log`,
+    //! exercised against temp files (no live QEMU). UART output (`ConsoleWrite`)
+    //! lands in the log file, not the telemetry stream, so this is how a scenario
+    //! asserts on-target console *output*.
+    use super::poll_file_for;
+    use std::time::{Duration, Instant};
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("snitch-logtest-{}-{tag}", std::process::id()))
+    }
+
+    #[test]
+    fn finds_a_needle_already_in_the_file() {
+        let path = temp_path("present");
+        std::fs::write(&path, b"banner ZZMARKZZ prompt").unwrap();
+        let found = poll_file_for(&path, "ZZMARKZZ", Instant::now() + Duration::from_secs(1));
+        let _ = std::fs::remove_file(&path);
+        assert!(found);
+    }
+
+    #[test]
+    fn times_out_when_the_needle_is_absent() {
+        let path = temp_path("absent");
+        std::fs::write(&path, b"nothing here").unwrap();
+        let found = poll_file_for(&path, "ZZMARKZZ", Instant::now() + Duration::from_millis(100));
+        let _ = std::fs::remove_file(&path);
+        assert!(!found);
+    }
+
+    #[test]
+    fn finds_a_needle_written_after_polling_starts() {
+        // The real case: QEMU flushes the marker to the log *after* the scenario
+        // begins waiting, so a one-shot read would miss it — polling must catch it.
+        let path = temp_path("late");
+        std::fs::write(&path, b"prompt ").unwrap();
+        let writer_path = path.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            std::fs::write(&writer_path, b"prompt ZZMARKZZ").unwrap();
+        });
+        let found = poll_file_for(&path, "ZZMARKZZ", Instant::now() + Duration::from_secs(2));
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(found);
     }
 }
 

@@ -368,6 +368,27 @@ pub fn stitch_reads_a_line(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// `workload=stitch-repl`: a Stitch program's `print` reaches the **UART terminal**
+/// on the metal — the `RuntimePlatform` *write* side + the `ConsoleOut` cap. Unlike
+/// `emit`/`span` (which become telemetry frames), `print` output goes to the UART,
+/// not the virtio wire, so we assert on the QEMU UART log via `wait_for_log`.
+///
+/// The isolation trick: `read_line` echoes the injected source, so the literal
+/// keystrokes land in the log regardless of whether `print` works. We inject
+/// `print(strUpper("zzmarkzz"))` — the echo carries *lowercase* `zzmarkzz`, but
+/// only `print`'s own output produces *uppercase* `ZZMARKZZ`. Finding `ZZMARKZZ`
+/// therefore proves `RuntimePlatform::write` actually wrote, not just the echo.
+pub fn stitch_print_writes_to_console(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+
+    h.send_input(b"print(strUpper(\"zzmarkzz\"))\n")
+        .map_err(|e| format!("inject REPL input: {e}"))?;
+
+    h.wait_for_log(SEC * 30, "ZZMARKZZ")
+        .map_err(|e| format!("{e} — Stitch print() didn't reach the UART on the metal"))
+}
+
 pub fn heap_oom(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {

@@ -238,6 +238,7 @@ catalog! {
     wfi "stitch-telemetry-on-the-wire"    scenarios::stitch_telemetry_on_the_wire   [userspace, stitch] {"stitch-repl"};
     wfi "stitch-fs-loads-and-runs"        scenarios::stitch_fs_loads_and_runs       [userspace, stitch, fs] {"stitch-fs"};
     wfi "stitch-reads-a-line"             scenarios::stitch_reads_a_line            [userspace, stitch] {"stitch-repl"};
+    wfi "stitch-print-writes-to-console"  scenarios::stitch_print_writes_to_console [userspace, stitch] {"stitch-repl"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back
