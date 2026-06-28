@@ -15,8 +15,8 @@ std = []
 # (packed) or postcard the self-describing `Value` (married to its schema).
 # Both are already in the workspace tree via `protocol`, so Hitch adds nothing
 # new to the kernel/userspace builds.
-serde = { version = "1", default-features = false, features = ["derive"] }
-postcard = { version = "1", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 [lints]
 workspace = true
