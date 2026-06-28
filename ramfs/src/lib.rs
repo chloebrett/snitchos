@@ -40,19 +40,35 @@ impl RamFs {
         Self::default()
     }
 
-    /// A filesystem pre-populated with `files` (name → bytes) in the root — the
-    /// landing point for the build-time fs-image seed. Each entry is created and
-    /// written through the ordinary trait ops.
+    /// A filesystem pre-populated from the build-time fs-image seed. Each entry is
+    /// a `(path, bytes)` pair where `path` may contain `/` — intermediate
+    /// directories are created `mkdir -p` style (and shared across entries), so
+    /// `"bin/view"` lands a file `view` inside a directory `bin`. A path with no
+    /// `/` is just a root-level file.
     #[must_use]
     pub fn seeded(files: &[(&str, &[u8])]) -> Self {
         let mut fs = Self::new();
-        let root = fs.root();
-        for (name, bytes) in files {
-            let ino = fs
-                .create(root, name, NodeKind::File)
-                .expect("seed: create on a fresh ramfs root cannot fail");
-            fs.write(ino, 0, bytes)
-                .expect("seed: write to a just-created file cannot fail");
+        for (path, bytes) in files {
+            let mut dir = fs.root();
+            let mut parts = path.split('/').filter(|p| !p.is_empty()).peekable();
+            while let Some(part) = parts.next() {
+                if parts.peek().is_some() {
+                    // Intermediate component: reuse the dir if it exists, else mkdir.
+                    dir = match fs.lookup(dir, part) {
+                        Ok(existing) => existing,
+                        Err(_) => fs
+                            .create(dir, part, NodeKind::Dir)
+                            .expect("seed: mkdir on a fresh ramfs cannot fail"),
+                    };
+                } else {
+                    // Leaf component: the file itself.
+                    let ino = fs
+                        .create(dir, part, NodeKind::File)
+                        .expect("seed: create on a fresh ramfs cannot fail");
+                    fs.write(ino, 0, bytes)
+                        .expect("seed: write to a just-created file cannot fail");
+                }
+            }
         }
         fs
     }
@@ -119,11 +135,16 @@ impl Filesystem for RamFs {
     }
 
     fn create(&mut self, dir: InodeId, name: &str, kind: NodeKind) -> Result<InodeId, FsError> {
-        if kind == NodeKind::Dir {
-            return Err(FsError::Unsupported);
+        // The parent must be a directory — otherwise there's nothing to add to.
+        match self.node(dir)? {
+            Node::Dir(_) => {}
+            Node::File(_) => return Err(FsError::NotADir),
         }
         let ino = InodeId::new(self.nodes.len() as u32);
-        self.nodes.push(Node::File(Vec::new()));
+        self.nodes.push(match kind {
+            NodeKind::File => Node::File(Vec::new()),
+            NodeKind::Dir => Node::Dir(BTreeMap::new()),
+        });
         if let Some(Node::Dir(entries)) = self.nodes.get_mut(dir.as_u32() as usize) {
             entries.insert(name.into(), ino);
         }
@@ -141,14 +162,15 @@ impl Filesystem for RamFs {
     fn readdir(&self, dir: InodeId) -> Result<Vec<DirEntry>, FsError> {
         match self.node(dir)? {
             Node::File(_) => Err(FsError::NotADir),
-            // Flat FS: every directory entry is a file (subdirs are
-            // `Unsupported`). When hierarchy lands, resolve each entry's kind.
             Node::Dir(entries) => Ok(entries
                 .iter()
                 .map(|(name, &ino)| DirEntry {
                     name: name.clone(),
                     ino,
-                    kind: NodeKind::File,
+                    kind: match self.nodes.get(ino.as_u32() as usize) {
+                        Some(Node::Dir(_)) => NodeKind::Dir,
+                        _ => NodeKind::File,
+                    },
                 })
                 .collect()),
         }
@@ -158,7 +180,7 @@ impl Filesystem for RamFs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_core::{Filesystem, NodeKind};
+    use fs_core::{Filesystem, FsError, NodeKind};
 
     #[test]
     fn seeded_prepopulates_files_readable_from_the_root() {
@@ -170,6 +192,65 @@ mod tests {
         assert_eq!(fs.read(ino, 0, &mut buf).unwrap(), 7);
         assert_eq!(&buf, b"isPrime");
         assert_eq!(fs.readdir(root).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn seeded_creates_nested_paths_with_mkdir_p() {
+        let fs = RamFs::seeded(&[
+            ("bin/view", b"ELF1"),
+            ("bin/cat", b"ELF2"),
+            ("notes", b"hi"),
+        ]);
+        let root = fs.root();
+
+        // `bin` is a directory holding both programs (shared intermediate).
+        let bin = fs.lookup(root, "bin").unwrap();
+        assert_eq!(fs.stat(bin).unwrap().kind, NodeKind::Dir);
+        assert_eq!(fs.readdir(bin).unwrap().len(), 2);
+
+        // The leaf file is readable through the path.
+        let view = fs.lookup(bin, "view").unwrap();
+        let mut buf = [0u8; 4];
+        assert_eq!(fs.read(view, 0, &mut buf).unwrap(), 4);
+        assert_eq!(&buf, b"ELF1");
+
+        // A root-level (no-slash) entry still works alongside nested ones.
+        assert_eq!(fs.stat(fs.lookup(root, "notes").unwrap()).unwrap().kind, NodeKind::File);
+    }
+
+    #[test]
+    fn create_makes_a_subdirectory_that_nests() {
+        let mut fs = RamFs::new();
+        let root = fs.root();
+
+        let bin = fs.create(root, "bin", NodeKind::Dir).unwrap();
+        assert_eq!(fs.stat(bin).unwrap().kind, NodeKind::Dir);
+
+        // A file created inside the subdirectory resolves through it.
+        let view = fs.create(bin, "view", NodeKind::File).unwrap();
+        fs.write(view, 0, b"ELF").unwrap();
+        assert_eq!(fs.lookup(root, "bin").unwrap(), bin);
+        assert_eq!(fs.lookup(bin, "view").unwrap(), view);
+
+        // readdir lists each directory's own entries, not the whole tree.
+        let bin_entries = fs.readdir(bin).unwrap();
+        assert_eq!(bin_entries.len(), 1);
+        assert_eq!(bin_entries[0].name, "view");
+        assert_eq!(bin_entries[0].kind, NodeKind::File);
+
+        let root_entries = fs.readdir(root).unwrap();
+        assert_eq!(root_entries.len(), 1);
+        assert_eq!(root_entries[0].name, "bin");
+        assert_eq!(root_entries[0].kind, NodeKind::Dir);
+    }
+
+    #[test]
+    fn creating_inside_a_file_is_not_a_directory() {
+        let mut fs = RamFs::new();
+        let root = fs.root();
+        let f = fs.create(root, "f", NodeKind::File).unwrap();
+
+        assert_eq!(fs.create(f, "x", NodeKind::File), Err(FsError::NotADir));
     }
 
     #[test]
@@ -197,17 +278,6 @@ mod tests {
         assert_eq!(entries[0].kind, NodeKind::File);
     }
 
-    #[test]
-    fn creating_a_subdirectory_is_unsupported_while_flat() {
-        let mut fs = RamFs::new();
-        let root = fs.root();
-
-        assert_eq!(
-            fs.create(root, "sub", NodeKind::Dir),
-            Err(FsError::Unsupported)
-        );
-        assert!(fs.readdir(root).unwrap().is_empty());
-    }
 
     #[test]
     fn write_grows_the_file_and_read_returns_the_bytes() {
