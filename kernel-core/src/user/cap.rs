@@ -557,6 +557,36 @@ impl CapTable {
         true
     }
 
+    /// Revoke the live holding whose derivation-tree id is `cap_id`, if present in
+    /// this table: free its slot and bump the generation, so the handle (and any
+    /// same-table copy of it) now resolves [`CapError::Stale`]. Returns whether a
+    /// live holding was revoked. Unlike [`consume`](Self::consume) (which names a
+    /// holding by *handle*, the within-table path), this names it by global
+    /// `cap_id` — so a revoker can reclaim a grant in *another* process's table
+    /// (the kernel scans tables and calls this on each). `cap_id`s are globally
+    /// unique per live holding, so at most one slot matches.
+    ///
+    /// **Non-transitive:** revokes exactly the named holding, not its descendants
+    /// (delegated copies carry their own `cap_id`s). Transitive revocation (2T)
+    /// will drive a cross-table derivation-tree walk over `parent_cap_id` on top of
+    /// this primitive. The root/unassigned sentinel `0` is never a target —
+    /// revoking it would hit every legacy/root holding — so `cap_id == 0` is a no-op.
+    pub fn revoke_by_cap_id(&mut self, cap_id: u64) -> bool {
+        if cap_id == 0 {
+            return false;
+        }
+        let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|s| s.cap.is_some() && s.cap_id == cap_id)
+        else {
+            return false;
+        };
+        slot.cap = None;
+        slot.generation = slot.generation.wrapping_add(1);
+        true
+    }
+
     /// The [`Multiplicity`] of the grant `handle` names, or why it doesn't
     /// resolve. The invoke path reads this to decide whether a successful
     /// invoke must [`consume`](Self::consume) the cap.
@@ -683,6 +713,44 @@ mod tests {
         let mut table = CapTable::new();
         let h = table.insert(Capability { object: Object::SpanSink, rights: Rights::EMIT });
         assert_eq!(table.parent_cap_id_of(h), Ok(0));
+    }
+
+    #[test]
+    fn revoke_by_cap_id_invalidates_exactly_that_holding() {
+        // Revoke-by-id is the powerbox reclaim: name a holding by its derivation-tree
+        // id and invalidate it, leaving siblings untouched. The handle then resolves
+        // Stale (same as `consume`), and another holding with a different id survives.
+        let mut table = CapTable::new();
+        let cap = Capability { object: Object::SpanSink, rights: Rights::EMIT };
+        let victim = table.insert_with_id(cap, 42, 0);
+        let bystander = table.insert_with_id(cap, 43, 0);
+
+        assert!(table.revoke_by_cap_id(42), "a live holding with id 42 was revoked");
+
+        assert_eq!(table.cap_id_of(victim), Err(CapError::Stale), "victim handle now stale");
+        assert_eq!(table.cap_id_of(bystander), Ok(43), "the bystander is untouched");
+    }
+
+    #[test]
+    fn revoke_by_cap_id_is_a_no_op_for_an_absent_or_already_revoked_id() {
+        let mut table = CapTable::new();
+        let cap = Capability { object: Object::SpanSink, rights: Rights::EMIT };
+        table.insert_with_id(cap, 42, 0);
+
+        assert!(!table.revoke_by_cap_id(999), "no holding with id 999");
+        assert!(table.revoke_by_cap_id(42), "first revoke frees it");
+        assert!(!table.revoke_by_cap_id(42), "second revoke finds nothing live");
+    }
+
+    #[test]
+    fn revoke_by_cap_id_refuses_the_root_sentinel_zero() {
+        // cap_id 0 is the root/unassigned sentinel shared by every legacy/root
+        // holding — revoking "0" must NOT nuke them all. It's never a real target.
+        let mut table = CapTable::new();
+        let root = table.insert(Capability { object: Object::SpanSink, rights: Rights::EMIT });
+
+        assert!(!table.revoke_by_cap_id(0), "cap_id 0 is not a revocation target");
+        assert_eq!(table.cap_id_of(root), Ok(0), "the root holding survives");
     }
 
     #[test]

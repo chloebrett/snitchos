@@ -112,7 +112,12 @@ Level 2T is 2 made airtight against onward re-delegation.
      delegation; roots → 0: bootstrap, EndpointCreate, NotifyCreate, run_ipc). The
      kernel-side derivation tree is now walkable — the enabler for transitive (2T)
      revocation. kernel-core 434 green; `spawn-transfer-links-to-parent` still green.
-   - ⬜ Remaining: `revoke_by_cap_id` (+ ancestry/descendant helpers).
+   - ✅ **`revoke_by_cap_id` landed (2026-06-28):** per-table primitive — frees the
+     live slot whose `cap_id` matches + bumps generation (→ `Stale`), non-transitive,
+     `cap_id == 0` (root sentinel) is a no-op. 3 host tests (invalidates exactly that
+     holding; no-op for absent/already-revoked; refuses 0). kernel-core 437 green.
+   - ⬜ Remaining: descendant-walk helper (e.g. `children_cap_ids`) for the 2T
+     cross-table fixpoint.
 2. **protocol:** `CapEventKind::Revoked`; `OwnedFrame` arm; roundtrip test.
 3. **kernel:** `Revoke` syscall + cross-process scan + `CapEvent::Revoked` emit +
    `SyscallRefused` on a disallowed revoke. itest: a workload grants → revokes →
