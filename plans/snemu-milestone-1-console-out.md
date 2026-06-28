@@ -225,7 +225,11 @@ boundaries or emit explicit checks). Deliverable + post: measured delta
 
 ---
 
-*Horizon (not planned): JIT Tier 3 native codegen — host-only fork
-(W^X exec pages), off-host needs the SnitchOS `ExecMemory` capability.
-Gated on a measured compute-bound need that Tiers 1–2 + the interleaving
-scheduler don't solve. See `docs/snemu-design.md` Exploration notes.*
+*Horizon (not planned): JIT Tier 3 native codegen — the big-win backend
+(~10–50×). A separate native-codegen backend that coexists with the
+interpreter: runs on host via `MAP_JIT` and **nests** via a new SnitchOS
+`ExecMemory` capability (bounded to the outermost JITing layer; inner
+guests ride SMC handling). Not host-only, not precluded — gated on the
+scheduler/instrumentation tensions and a measured compute-bound need
+that Tiers 1–2 + the interleaving scheduler don't solve. See
+`docs/snemu-design.md` Exploration notes.*
