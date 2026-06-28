@@ -71,6 +71,23 @@ them where the harness can read them (stdout, or a socket the collector reads),
 then add an `--snemu` mode to `xtask itest` that boots scenarios under snemu and
 diffs the decoded frame sequence against QEMU.
 
+**Output sink — ✅ SHIPPED (2026-06-28).** `snemu/src/main.rs` decodes
+`Cpu::virtio_tx_output()` through `protocol::stream::decode_stream` and reports
+the frame count (`--frames` dumps each). The emulator core stays protocol-free;
+only the binary depends on `protocol` (feature `std`). `cargo xtask snemu-boot
+--frames` surfaces it. **Validated:** the captured 2102 bytes decode into **112
+real telemetry frames** — `Hello{protocol_version: 4}`, the `kernel.boot` /
+`console_init` / `telemetry_init` span tree, `Dropped{0}`, and the full metric
+registry — byte-perfectly. This conclusively confirms layers 1+2.
+
+**Differential oracle — TODO.** The remaining piece: `xtask itest --snemu` that
+runs scenarios under snemu and diffs frames against QEMU. Two real obstacles:
+(1) the itest scenarios read a live QEMU socket with timeouts — a snemu frame
+source is a harness-integration project; (2) snemu currently halts at the `stimecmp`
+timer CSR (`0x14d`), so only **boot-prefix** scenarios (e.g. `boot-reaches-heartbeat`,
+which asserts on exactly the frames snemu already emits) are diffable until the
+timer milestone lands. Full-boot scenarios need the timer first.
+
 ## Testing strategy
 
 - Layer 1/2 device logic: unit tests in the new `snemu/src/virtio.rs` (register
