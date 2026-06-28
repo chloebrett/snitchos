@@ -587,6 +587,25 @@ impl CapTable {
         true
     }
 
+    /// The `cap_id`s of the live holdings in this table whose parent is
+    /// `parent_cap_id` — its *direct* children in the derivation tree. Transitive
+    /// revocation (2T) calls this across every process table to expand the
+    /// to-revoke frontier: a revoked node's children are revoked too, then *their*
+    /// children, until the frontier stops growing. Returns empty for the root
+    /// sentinel `0` (every root holding has parent 0 — not a walkable node), so the
+    /// walk can never sweep the whole forest.
+    #[must_use]
+    pub fn children_cap_ids(&self, parent_cap_id: u64) -> Vec<u64> {
+        if parent_cap_id == 0 {
+            return Vec::new();
+        }
+        self.slots
+            .iter()
+            .filter(|s| s.cap.is_some() && s.parent_cap_id == parent_cap_id)
+            .map(|s| s.cap_id)
+            .collect()
+    }
+
     /// The [`Multiplicity`] of the grant `handle` names, or why it doesn't
     /// resolve. The invoke path reads this to decide whether a successful
     /// invoke must [`consume`](Self::consume) the cap.
@@ -740,6 +759,37 @@ mod tests {
         assert!(!table.revoke_by_cap_id(999), "no holding with id 999");
         assert!(table.revoke_by_cap_id(42), "first revoke frees it");
         assert!(!table.revoke_by_cap_id(42), "second revoke finds nothing live");
+    }
+
+    #[test]
+    fn children_cap_ids_lists_direct_children_only() {
+        // The 2T transitive walk: given a (revoked) parent, find the holdings that
+        // derived from it — its *direct* delegated children — so the frontier can
+        // expand. Grandchildren come from a later iteration on a child, not here.
+        let mut table = CapTable::new();
+        let cap = Capability { object: Object::SpanSink, rights: Rights::EMIT };
+        table.insert_with_id(cap, 10, 0); // root
+        table.insert_with_id(cap, 11, 10); // child of 10
+        table.insert_with_id(cap, 12, 10); // child of 10
+        table.insert_with_id(cap, 13, 11); // grandchild (child of 11)
+
+        let mut kids = table.children_cap_ids(10);
+        kids.sort_unstable();
+        assert_eq!(kids, alloc::vec![11, 12], "only the direct children of 10");
+        assert_eq!(table.children_cap_ids(11), alloc::vec![13], "13 is a child of 11");
+    }
+
+    #[test]
+    fn children_cap_ids_excludes_revoked_children_and_the_root_sentinel() {
+        let mut table = CapTable::new();
+        let cap = Capability { object: Object::SpanSink, rights: Rights::EMIT };
+        table.insert_with_id(cap, 10, 0); // root (parent 0)
+        table.insert_with_id(cap, 11, 10);
+        table.revoke_by_cap_id(11);
+
+        assert!(table.children_cap_ids(10).is_empty(), "a revoked child isn't walkable");
+        // Walking from the root sentinel must not sweep every root holding.
+        assert!(table.children_cap_ids(0).is_empty(), "root sentinel 0 has no walkable children");
     }
 
     #[test]

@@ -116,8 +116,12 @@ Level 2T is 2 made airtight against onward re-delegation.
      live slot whose `cap_id` matches + bumps generation (→ `Stale`), non-transitive,
      `cap_id == 0` (root sentinel) is a no-op. 3 host tests (invalidates exactly that
      holding; no-op for absent/already-revoked; refuses 0). kernel-core 437 green.
-   - ⬜ Remaining: descendant-walk helper (e.g. `children_cap_ids`) for the 2T
-     cross-table fixpoint.
+   - ✅ **`children_cap_ids` landed (2026-06-28):** per-table helper returning the
+     `cap_id`s of live holdings whose `parent_cap_id` matches — the 2T frontier
+     expander; root sentinel `0` → empty (never sweep the forest). 2 host tests
+     (direct children only; excludes revoked + the `0` sentinel). kernel-core 439 green.
+   - The 2T walk itself (cross-table fixpoint over `children_cap_ids` + per-table
+     `revoke_by_cap_id`) lives kernel-side in the `Revoke` syscall step.
 2. **protocol:** `CapEventKind::Revoked`; `OwnedFrame` arm; roundtrip test.
 3. **kernel:** `Revoke` syscall + cross-process scan + `CapEvent::Revoked` emit +
    `SyscallRefused` on a disallowed revoke. itest: a workload grants → revokes →
