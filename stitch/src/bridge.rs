@@ -4,6 +4,7 @@
 //! define. The orphan rule forbids implementing `From`/`TryFrom` *on*
 //! `hitch::Value` from this crate, so the conversions are free functions.
 
+use crate::ast::{Item, Type};
 use crate::prelude::*;
 use crate::value::{DataValue, RuntimeError, Value};
 
@@ -103,11 +104,161 @@ fn from_hitch_fields(
         .collect()
 }
 
+/// Bridge a Stitch type annotation into a [`hitch::TypeSchema`] — the type-level
+/// twin of [`to_hitch`]. A typed-process manifest's `in`/`out` schemas come from
+/// this (a stage's `main(x: T) -> U`). Scalars and `List<T>` map; user prod/sum
+/// types are a later increment (they need the type registry). `Func`, the
+/// self-type `@`, tuples, and unknown names are **not marshallable** across a
+/// process boundary — an `Err`, never a silent wrong shape.
+pub fn type_to_schema(ty: &Type) -> Result<hitch::TypeSchema, RuntimeError> {
+    use hitch::TypeSchema;
+    match ty {
+        Type::Name { name, args } => match (name.as_str(), args.as_slice()) {
+            ("Int", []) => Ok(TypeSchema::I64),
+            ("Float", []) => Ok(TypeSchema::F64),
+            ("Bool", []) => Ok(TypeSchema::Bool),
+            ("Str", []) => Ok(TypeSchema::Str),
+            ("List", [elem]) => Ok(TypeSchema::Seq(Box::new(type_to_schema(elem)?))),
+            _ => Err(RuntimeError::new(format!("type `{name}` is not marshallable"))),
+        },
+        Type::Func { .. } => {
+            Err(RuntimeError::new("a function type cannot cross a process boundary"))
+        }
+        Type::Tuple(_) => Err(RuntimeError::new("a tuple type is not yet marshallable")),
+        Type::SelfType => Err(RuntimeError::new("the self-type `@` cannot be marshalled")),
+    }
+}
+
+/// Derive a [`hitch::Manifest`] from a program's `main` — its typed-process
+/// interface `(in, out, uses)`. A stage's `main` is `main(x: T) -> U uses C`: the
+/// single parameter is the input (`None` for a zero-param **source**), the return
+/// type is the output, and `uses` the declared capabilities. This is the
+/// **parse-on-demand** producer: the shell runs it on the `.st` it's about to
+/// spawn, so no stored manifest is needed (phase 1 of the typed-processes plan).
+///
+/// # Errors
+/// No `main`; more than one input parameter; an untyped input; a missing return
+/// type; or an input/output type that is not marshallable ([`type_to_schema`]).
+pub fn manifest_of_main(items: &[Item]) -> Result<hitch::Manifest, RuntimeError> {
+    let (params, ret, uses) = items
+        .iter()
+        .find_map(|item| match item {
+            Item::Func { name, params, ret, uses, .. } if name == "main" => {
+                Some((params, ret, uses))
+            }
+            _ => None,
+        })
+        .ok_or_else(|| RuntimeError::new("no `main` function to derive a manifest from"))?;
+
+    let input = match params.as_slice() {
+        [] => None,
+        [param] => {
+            let ty = param
+                .ty
+                .as_ref()
+                .ok_or_else(|| RuntimeError::new("a stage `main`'s input parameter must be typed"))?;
+            Some(type_to_schema(ty)?)
+        }
+        _ => {
+            return Err(RuntimeError::new(
+                "a stage `main` takes at most one input (the upstream value)",
+            ));
+        }
+    };
+
+    let ret = ret
+        .as_ref()
+        .ok_or_else(|| RuntimeError::new("a stage `main` must declare its return type"))?;
+    let output = type_to_schema(ret)?;
+
+    Ok(hitch::Manifest { input, output, uses: uses.clone() })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{from_hitch, to_hitch};
+    use super::{from_hitch, to_hitch, type_to_schema};
+    use crate::ast::Type;
     use crate::prelude::*;
     use crate::value::{DataValue, Value};
+
+    fn named(name: &str, args: Vec<Type>) -> Type {
+        Type::Name { name: name.to_string(), args }
+    }
+
+    #[test]
+    fn scalar_types_bridge_to_their_hitch_shape() {
+        assert_eq!(type_to_schema(&named("Int", vec![])).unwrap(), hitch::TypeSchema::I64);
+        assert_eq!(type_to_schema(&named("Float", vec![])).unwrap(), hitch::TypeSchema::F64);
+        assert_eq!(type_to_schema(&named("Bool", vec![])).unwrap(), hitch::TypeSchema::Bool);
+        assert_eq!(type_to_schema(&named("Str", vec![])).unwrap(), hitch::TypeSchema::Str);
+    }
+
+    #[test]
+    fn a_list_type_bridges_to_a_seq_of_the_element_shape() {
+        let list = named("List", vec![named("Int", vec![])]);
+        assert_eq!(
+            type_to_schema(&list).unwrap(),
+            hitch::TypeSchema::Seq(Box::new(hitch::TypeSchema::I64))
+        );
+    }
+
+    #[test]
+    fn a_function_type_is_not_marshallable() {
+        let int = named("Int", vec![]);
+        let f = Type::Func { param: Box::new(int.clone()), ret: Box::new(int) };
+        assert!(type_to_schema(&f).is_err());
+    }
+
+    #[test]
+    fn an_unknown_type_name_is_not_marshallable_yet() {
+        assert!(type_to_schema(&named("Widget", vec![])).is_err());
+    }
+
+    fn manifest(src: &str) -> Result<hitch::Manifest, crate::value::RuntimeError> {
+        let items = crate::parser::parse_program(src).expect("test program parses");
+        super::manifest_of_main(&items)
+    }
+
+    #[test]
+    fn manifest_of_main_reads_input_output_and_uses() {
+        let m = manifest(r"main(x: Int) -> List<Str> uses FsRead, ConsoleOut = []").expect("manifest");
+        assert_eq!(m.input, Some(hitch::TypeSchema::I64));
+        assert_eq!(m.output, hitch::TypeSchema::Seq(Box::new(hitch::TypeSchema::Str)));
+        assert_eq!(m.uses, vec!["FsRead".to_string(), "ConsoleOut".to_string()]);
+    }
+
+    #[test]
+    fn a_zero_param_main_is_a_source_with_no_input() {
+        let m = manifest(r"main() -> Int = 0").expect("manifest");
+        assert_eq!(m.input, None);
+        assert_eq!(m.output, hitch::TypeSchema::I64);
+        assert!(m.uses.is_empty());
+    }
+
+    #[test]
+    fn a_stage_main_must_declare_a_return_type() {
+        assert!(manifest(r"main(x: Int) = x").is_err());
+    }
+
+    #[test]
+    fn a_typeless_input_param_is_not_a_stage() {
+        assert!(manifest(r"main(x) -> Int = 0").is_err());
+    }
+
+    #[test]
+    fn a_program_without_main_has_no_manifest() {
+        assert!(manifest(r"helper() = 1").is_err());
+    }
+
+    #[test]
+    fn the_manifest_is_mains_signature_not_another_functions() {
+        // `helper` comes first and would yield a *different* manifest; the extractor
+        // must pick `main`, not merely the first function.
+        let m = manifest(r#"helper(x: Bool) -> Bool = x  main(x: Int) -> Str = """#)
+            .expect("manifest");
+        assert_eq!(m.input, Some(hitch::TypeSchema::I64));
+        assert_eq!(m.output, hitch::TypeSchema::Str);
+    }
 
     fn data(type_name: &str, variant: &str, fields: Vec<(Option<String>, Value)>) -> Value {
         Value::Data(Rc::new(DataValue {
