@@ -32,6 +32,7 @@ pub(super) fn handle_notify_create(frame: &mut TrapFrame) {
             rights,
         },
         cap_id,
+        0, // self-created notification: a derivation-tree root
     );
 
     crate::tracing::emit_cap_granted(

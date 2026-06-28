@@ -229,6 +229,11 @@ struct Slot {
     /// cap names it as the child's `parent_cap_id`. `0` is the root/unassigned
     /// sentinel (legacy `insert` without an id), matching the wire convention.
     cap_id: u64,
+    /// The `cap_id` of the holding this one was derived from — its parent in the
+    /// capability derivation tree (`0` = root / self-created). Stored kernel-side
+    /// (not just emitted on the wire) so revocation can walk descendants
+    /// transitively. See `docs/cap-revocation-design.md`.
+    parent_cap_id: u64,
 }
 
 /// Why a capability *invocation* was refused. Distinct from [`CapError`]
@@ -443,12 +448,14 @@ impl CapTable {
     #[must_use]
     pub fn bootstrap_with_ids(telemetry_id: u64, span_id: u64) -> (Self, Handle, Handle) {
         let mut table = Self::new();
+        // Bootstrap caps are roots of the derivation tree → parent 0.
         let telemetry = table.insert_with_id(
             Capability {
                 object: Object::TelemetrySink,
                 rights: Rights::EMIT,
             },
             telemetry_id,
+            0,
         );
         let span = table.insert_with_id(
             Capability {
@@ -456,6 +463,7 @@ impl CapTable {
                 rights: Rights::EMIT,
             },
             span_id,
+            0,
         );
         (table, telemetry, span)
     }
@@ -465,27 +473,35 @@ impl CapTable {
     /// capabilities. The holding gets the root/unassigned cap id (`0`); use
     /// [`insert_with_id`](Self::insert_with_id) to record a real derivation-tree id.
     pub fn insert(&mut self, cap: Capability) -> Handle {
-        self.grant(cap, Multiplicity::Persistent, 0)
+        self.grant(cap, Multiplicity::Persistent, 0, 0)
     }
 
     /// Grant `cap` as a [`Multiplicity::Persistent`] capability, stamping the
     /// holding with the global `cap_id` (minted kernel-side via `next_cap_id`) —
-    /// the derivation-tree node identity a later transfer names as `parent_cap_id`.
-    pub fn insert_with_id(&mut self, cap: Capability, cap_id: u64) -> Handle {
-        self.grant(cap, Multiplicity::Persistent, cap_id)
+    /// the derivation-tree node identity a later transfer names as `parent_cap_id`
+    /// — and recording `parent_cap_id` (the holding this was derived from; `0` for
+    /// a root / self-created grant) so revocation can walk descendants.
+    pub fn insert_with_id(&mut self, cap: Capability, cap_id: u64, parent_cap_id: u64) -> Handle {
+        self.grant(cap, Multiplicity::Persistent, cap_id, parent_cap_id)
     }
 
     /// Grant `cap` as a single-use [`Multiplicity::Once`] capability: the first
     /// successful invoke should [`consume`](Self::consume) it. v0.9b's reply
     /// cap is the first user.
     pub fn insert_once(&mut self, cap: Capability) -> Handle {
-        self.grant(cap, Multiplicity::Once, 0)
+        self.grant(cap, Multiplicity::Once, 0, 0)
     }
 
     /// Grant `cap` as a single-use [`Multiplicity::Once`] capability, stamping
-    /// the holding with the global `cap_id`. The id'd twin of [`insert_once`].
-    pub fn insert_once_with_id(&mut self, cap: Capability, cap_id: u64) -> Handle {
-        self.grant(cap, Multiplicity::Once, cap_id)
+    /// the holding with the global `cap_id` + `parent_cap_id`. The id'd twin of
+    /// [`insert_once`].
+    pub fn insert_once_with_id(
+        &mut self,
+        cap: Capability,
+        cap_id: u64,
+        parent_cap_id: u64,
+    ) -> Handle {
+        self.grant(cap, Multiplicity::Once, cap_id, parent_cap_id)
     }
 
     /// Place `cap` in the table with `multiplicity` and the global `cap_id`,
@@ -493,7 +509,13 @@ impl CapTable {
     /// doesn't grow the table unboundedly) — otherwise appending. A reused slot
     /// keeps its bumped generation, so handles to its former occupant stay stale;
     /// its `cap_id` is overwritten with the new holding's.
-    fn grant(&mut self, cap: Capability, multiplicity: Multiplicity, cap_id: u64) -> Handle {
+    fn grant(
+        &mut self,
+        cap: Capability,
+        multiplicity: Multiplicity,
+        cap_id: u64,
+        parent_cap_id: u64,
+    ) -> Handle {
         if let Some((index, slot)) = self
             .slots
             .iter_mut()
@@ -503,6 +525,7 @@ impl CapTable {
             slot.multiplicity = multiplicity;
             slot.cap = Some(cap);
             slot.cap_id = cap_id;
+            slot.parent_cap_id = parent_cap_id;
             return Handle::new(index as u32, slot.generation);
         }
         let index = self.slots.len() as u32;
@@ -512,6 +535,7 @@ impl CapTable {
             multiplicity,
             cap: Some(cap),
             cap_id,
+            parent_cap_id,
         });
         Handle::new(index, generation)
     }
@@ -587,6 +611,23 @@ impl CapTable {
         }
         Ok(slot.cap_id)
     }
+
+    /// The `parent_cap_id` of the holding `handle` names — its parent in the
+    /// capability derivation tree (`0` = root / self-created). Revocation walks
+    /// these links to find descendants. Validated like [`cap_id_of`](Self::cap_id_of).
+    pub fn parent_cap_id_of(&self, handle: Handle) -> Result<u64, CapError> {
+        let slot = self
+            .slots
+            .get(handle.index() as usize)
+            .ok_or(CapError::OutOfBounds)?;
+        if slot.generation != handle.generation() {
+            return Err(CapError::Stale);
+        }
+        if slot.cap.is_none() {
+            return Err(CapError::Stale);
+        }
+        Ok(slot.parent_cap_id)
+    }
 }
 
 #[cfg(test)]
@@ -605,6 +646,7 @@ mod tests {
                 rights: Rights::EMIT,
             },
             0x00C0_FFEE,
+            0,
         );
         assert_eq!(table.cap_id_of(handle), Ok(0x00C0_FFEE));
     }
@@ -617,10 +659,30 @@ mod tests {
             object: Object::SpanSink,
             rights: Rights::EMIT,
         };
-        let first = table.insert_with_id(span, 11);
-        let second = table.insert_with_id(span, 22);
+        let first = table.insert_with_id(span, 11, 0);
+        let second = table.insert_with_id(span, 22, 0);
         assert_eq!(table.cap_id_of(first), Ok(11));
         assert_eq!(table.cap_id_of(second), Ok(22));
+    }
+
+    #[test]
+    fn a_holding_records_its_parent_cap_id_for_the_derivation_tree() {
+        // 2T prework: each holding stores its parent's `cap_id`, so revocation can
+        // walk the derivation tree (a delegated cap records the source holding it
+        // was derived from). The kernel only emitted this on the wire before.
+        let mut table = CapTable::new();
+        let cap = Capability { object: Object::TelemetrySink, rights: Rights::EMIT };
+        let child = table.insert_with_id(cap, 42, 7);
+        assert_eq!(table.cap_id_of(child), Ok(42), "own id");
+        assert_eq!(table.parent_cap_id_of(child), Ok(7), "parent id (derivation edge)");
+    }
+
+    #[test]
+    fn a_root_holding_has_parent_cap_id_zero() {
+        // Genuinely-root grants (bootstrap, self-created objects) carry parent 0.
+        let mut table = CapTable::new();
+        let h = table.insert(Capability { object: Object::SpanSink, rights: Rights::EMIT });
+        assert_eq!(table.parent_cap_id_of(h), Ok(0));
     }
 
     #[test]
@@ -663,6 +725,7 @@ mod tests {
                 rights: Rights::NONE,
             },
             99,
+            0,
         );
         assert!(table.consume(handle));
         assert_eq!(table.cap_id_of(handle), Err(CapError::Stale));

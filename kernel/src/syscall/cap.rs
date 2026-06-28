@@ -43,7 +43,7 @@ pub(super) fn handle_mint_badged(frame: &mut TrapFrame) {
         let parent_cap_id = caps.cap_id_of(handle).unwrap_or(0);
         parent
             .and_then(|p| mint_badged(p, badge, rights))
-            .map(|child| (caps.insert_with_id(child, child_cap_id), parent_cap_id))
+            .map(|child| (caps.insert_with_id(child, child_cap_id, parent_cap_id), parent_cap_id))
     };
 
     match minted {

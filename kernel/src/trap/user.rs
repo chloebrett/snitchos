@@ -740,7 +740,7 @@ fn run_loaded_with_caps(
     // linking to the parent holding it derived from (the derivation edge).
     for (cap, parent_cap_id) in &delegated {
         let cap_id = crate::process::next_cap_id();
-        let _ = process.caps.lock().insert_with_id(*cap, cap_id);
+        let _ = process.caps.lock().insert_with_id(*cap, cap_id, *parent_cap_id);
         if let Some(id) = cap_grants_metric_id() {
             tracing::emit_metric(id, 1);
         }
@@ -832,6 +832,7 @@ fn run_ipc(
     let endpoint_handle = process.caps.lock().insert_with_id(
         Capability { object: Object::Endpoint { id: endpoint, badge: 0 }, rights },
         crate::process::next_cap_id(),
+        0, // kernel-minted root grant: the ur-source of this endpoint's tree
     );
 
     // Snitch every grant (counter + rich CapEvent) with its *stored* cap id, as

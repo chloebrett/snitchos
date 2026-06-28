@@ -370,6 +370,7 @@ pub(super) fn handle_endpoint_create(frame: &mut TrapFrame) {
     let handle = proc.caps.lock().insert_with_id(
         Capability { object: Object::Endpoint { id, badge: 0 }, rights },
         cap_id,
+        0, // self-created endpoint: a derivation-tree root
     );
 
     crate::tracing::emit_cap_granted(
