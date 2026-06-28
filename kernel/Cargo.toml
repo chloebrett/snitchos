@@ -13,6 +13,11 @@ default = []
 # leave this off (no test/destructive workloads compiled in). See
 # `docs/runtime-workload-selection-design.md`.
 itest-workloads = []
+# Console-out smoke for the snemu emulator: `kmain` writes a fixed greeting
+# straight to the ns16550a UART and halts, before `mmu::enable` — so it runs
+# under an emulator that has no Sv39 yet (snemu milestone 1). Never in default
+# builds.
+minimal-boot = []
 
 [dependencies]
 fdt = "0.1.5"

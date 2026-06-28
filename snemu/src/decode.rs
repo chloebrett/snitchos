@@ -215,10 +215,14 @@ pub(crate) fn expand(half: u16) -> Option<u32> {
         (0b01, 0b000) => Some(expand_c_addi(half)),
         (0b01, 0b010) => Some(expand_c_li(half)),
         (0b01, 0b011) => expand_c_lui_addi16sp(half),
+        (0b01, 0b100) => expand_c_misc_alu(half),
         (0b01, 0b101) => Some(expand_c_j(half)),
+        (0b01, 0b110) => Some(expand_c_beqz(half)),
         (0b01, 0b111) => Some(expand_c_bnez(half)),
+        (0b10, 0b010) => Some(expand_c_lwsp(half)),
         (0b10, 0b011) => Some(expand_c_ldsp(half)),
         (0b10, 0b100) => Some(expand_cr(half)),
+        (0b10, 0b110) => Some(expand_c_swsp(half)),
         (0b10, 0b111) => Some(expand_c_sdsp(half)),
         _ => None,
     }
@@ -250,16 +254,16 @@ fn expand_cr(half: u16) -> u32 {
     let rd = u32::from((half >> 7) & 0x1f); // also rs1
     let rs2 = u32::from((half >> 2) & 0x1f);
     match (bit12, rd, rs2) {
-        (0, _, 0) => jalr_form(0, rd),      // c.jr rs1    -> jalr x0, rs1, 0
-        (0, _, _) => add_form(rd, 0, rs2),  // c.mv rd,rs2 -> add rd, x0, rs2
-        (_, 0, 0) => ebreak_form(),         // c.ebreak
-        (_, _, 0) => jalr_form(1, rd),      // c.jalr rs1  -> jalr x1, rs1, 0
-        (_, _, _) => add_form(rd, rd, rs2), // c.add rd,rs2 -> add rd, rd, rs2
+        (0, _, 0) => jalr_form(0, rd),                 // c.jr rs1    -> jalr x0, rs1, 0
+        (0, _, _) => reg_alu(funct3::ADD, rd, 0, rs2), // c.mv rd,rs2 -> add rd, x0, rs2
+        (_, 0, 0) => ebreak_form(),                    // c.ebreak
+        (_, _, 0) => jalr_form(1, rd),                 // c.jalr rs1  -> jalr x1, rs1, 0
+        (_, _, _) => reg_alu(funct3::ADD, rd, rd, rs2), // c.add rd,rs2 -> add rd, rd, rs2
     }
 }
 
-fn add_form(rd: u32, rs1: u32, rs2: u32) -> u32 {
-    (rs2 << 20) | (rs1 << 15) | (funct3::ADD << 12) | (rd << 7) | opcode::OP
+fn reg_alu(funct3: u32, rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode::OP
 }
 
 fn jalr_form(rd: u32, rs1: u32) -> u32 {
@@ -332,6 +336,13 @@ fn cj_offset(half: u16) -> u32 {
 
 /// `c.sdsp rs2, uimm(sp)` -> `sd rs2, uimm(x2)`. CSS unsigned offset:
 /// `uimm[5:3]` = inst[12:10], `uimm[8:6]` = inst[9:7] (already byte-scaled).
+fn expand_c_swsp(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rs2 = (h >> 2) & 0x1f;
+    let uimm = (((h >> 9) & 0xf) << 2) | (((h >> 7) & 0x3) << 6);
+    store_word(funct3::store::SW, 2, rs2, uimm)
+}
+
 fn expand_c_sdsp(half: u16) -> u32 {
     let h = u32::from(half);
     let rs2 = (h >> 2) & 0x1f;
@@ -341,6 +352,13 @@ fn expand_c_sdsp(half: u16) -> u32 {
 
 /// `c.ldsp rd, uimm(sp)` -> `ld rd, uimm(x2)`. CI unsigned offset:
 /// `uimm[5]`=inst[12], `uimm[4:3]`=inst[6:5], `uimm[8:6]`=inst[4:2].
+fn expand_c_lwsp(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rd = (h >> 7) & 0x1f;
+    let uimm = (((h >> 12) & 1) << 5) | (((h >> 4) & 0x7) << 2) | (((h >> 2) & 0x3) << 6);
+    load_word(funct3::load::LW, rd, 2, uimm)
+}
+
 fn expand_c_ldsp(half: u16) -> u32 {
     let h = u32::from(half);
     let rd = (h >> 7) & 0x1f;
@@ -381,6 +399,49 @@ fn store_word(funct3: u32, base: u32, src: u32, imm: u32) -> u32 {
         | (funct3 << 12)
         | ((imm & 0x1f) << 7)
         | opcode::STORE
+}
+
+/// Quadrant 01, funct3 100: the misc-ALU cluster, by bits[11:10]. Only the
+/// CA-format register ops (bits[11:10]=11) are modeled so far; the
+/// `c.srli`/`c.srai`/`c.andi` cases surface via the meta-loop when hit.
+fn expand_c_misc_alu(half: u16) -> Option<u32> {
+    match (u32::from(half) >> 10) & 0x3 {
+        0b00 => Some(expand_c_srli(half)),
+        0b11 => expand_c_ca(half),
+        _ => None, // c.srai (01), c.andi (10) not yet
+    }
+}
+
+/// `c.srli rd', shamt` -> `srli rd', rd', shamt` (6-bit shamt for RV64).
+fn expand_c_srli(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rd = creg(h >> 7);
+    let shamt = (((h >> 12) & 1) << 5) | ((h >> 2) & 0x1f);
+    shift_imm_word(funct3::SR, 0, rd, shamt)
+}
+
+/// Encode an OP-IMM shift `funct3 rd, rd, shamt` (`alt` is 0 or `ALT_OP_BIT`).
+fn shift_imm_word(funct3: u32, alt: u32, rd: u32, shamt: u32) -> u32 {
+    alt | (shamt << 20) | (rd << 15) | (funct3 << 12) | (rd << 7) | opcode::OP_IMM
+}
+
+/// CA-format register-register ops (`c.sub`/`c.xor`/`c.or`/`c.and`/`c.subw`/
+/// `c.addw`), by bit 12 and bits[6:5]. Only `c.and` is modeled so far.
+fn expand_c_ca(half: u16) -> Option<u32> {
+    let h = u32::from(half);
+    let rd = creg(h >> 7); // rd'/rs1'
+    let rs2 = creg(h >> 2);
+    match ((h >> 12) & 1, (h >> 5) & 0x3) {
+        (0, 0b00) => Some(reg_alu(funct3::ADD, rd, rd, rs2) | ALT_OP_BIT), // c.sub
+        (0, 0b11) => Some(reg_alu(funct3::AND, rd, rd, rs2)),             // c.and
+        _ => None,
+    }
+}
+
+/// `c.beqz rs1', offset` -> `beq rs1', x0, offset`.
+fn expand_c_beqz(half: u16) -> u32 {
+    let rs1 = creg(u32::from(half) >> 7);
+    branch_word(funct3::branch::BEQ, rs1, 0, cb_offset(half))
 }
 
 /// `c.bnez rs1', offset` -> `bne rs1', x0, offset`.

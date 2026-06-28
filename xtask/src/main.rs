@@ -86,9 +86,9 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Run mutation testing against the host-testable crates (collector +
-    /// protocol). Trailing args are forwarded to cargo-mutants, e.g.
-    /// `cargo xtask mutants -- -j 4`.
+    /// Run mutation testing against the host-testable crates (collector,
+    /// protocol, kernel-core, hitch). Trailing args are forwarded to
+    /// cargo-mutants, e.g. `cargo xtask mutants -- -j 4`.
     Mutants {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -740,6 +740,8 @@ fn run_mutants(extra_args: &[String]) -> ExitCode {
             "protocol",
             "-p",
             "kernel-core",
+            "-p",
+            "hitch",
             "--features",
             "protocol/std",
         ])

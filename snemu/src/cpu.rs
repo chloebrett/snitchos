@@ -1458,6 +1458,86 @@ mod tests {
     }
 
     #[test]
+    fn compressed_beqz_branches_when_zero() {
+        // c.beqz x10, +18 == 0xc909 (captured from the minimal-boot kernel)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE + 0x200, 0xc909).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_pc(RAM_BASE + 0x200); // x10 == 0
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 0x200 + 18); // taken
+
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE + 0x200, 0xc909).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_pc(RAM_BASE + 0x200);
+        cpu.set_reg(10, 1);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 0x200 + 2); // not taken
+    }
+
+    #[test]
+    fn compressed_and_combines_registers() {
+        // c.and x10, x12 == 0x8d71 (captured from the minimal-boot kernel)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x8d71).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(10, 0xff0f);
+        cpu.set_reg(12, 0x0ff0);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), 0xff0f & 0x0ff0);
+    }
+
+    #[test]
+    fn compressed_sub_subtracts_registers() {
+        // c.sub x11, x10 == 0x8d89 (captured from the minimal-boot kernel)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x8d89).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(11, 100);
+        cpu.set_reg(10, 30);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(11), 70);
+    }
+
+    #[test]
+    fn compressed_srli_shifts_right_logical() {
+        // c.srli x11, 2 == 0x8189 (captured from the minimal-boot kernel)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x8189).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(11, 0xff);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(11), 0xff >> 2);
+    }
+
+    #[test]
+    fn compressed_swsp_stores_word_sp_relative() {
+        // c.swsp x10, 44(sp) == 0xd62a (captured from the minimal-boot kernel)
+        let mut mem = Memory::new(0x2000);
+        mem.write_u16(RAM_BASE, 0xd62a).unwrap();
+        mem.write_u32(RAM_BASE + 2, lw(5, 2, 44)).unwrap(); // lw x5, 44(x2)
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(2, RAM_BASE + 0x100); // sp
+        cpu.set_reg(10, 0x0bcd_1234);
+        cpu.step().unwrap(); // c.swsp
+        cpu.step().unwrap(); // lw
+        assert_eq!(cpu.reg(5), 0x0bcd_1234);
+    }
+
+    #[test]
+    fn compressed_lwsp_loads_word_sp_relative() {
+        // c.lwsp x10, 44(sp) == 0x5532 (captured from the minimal-boot kernel)
+        let mut mem = Memory::new(0x2000);
+        mem.write_u16(RAM_BASE, 0x5532).unwrap();
+        mem.write_u32(RAM_BASE + 0x100 + 44, 0x0011_2233).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(2, RAM_BASE + 0x100); // sp
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), 0x0011_2233);
+    }
+
+    #[test]
     fn store_to_uart_produces_console_output() {
         let program = &[
             lui(2, 0x10000),               // x2 = 0x1000_0000 (UART base)
