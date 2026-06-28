@@ -268,6 +268,7 @@ catalog! {
     cpu "spawn-delegates-to-child"        scenarios::spawn_delegates_to_child       [userspace]  {"spawn-demo"};
     cpu "spawn-transfer-links-to-parent"  scenarios::spawn_transfer_links_to_parent [userspace]  {"spawn-demo"};
     cpu "spawn-reclaims-memory"           scenarios::spawn_reclaims_memory          [userspace]  {"spawn-reap"};
+    cpu "spawn-reclaims-names"            scenarios::spawn_reclaims_names           [userspace]  {"spawn-reap"};
     cpu "wait-any-reaps-exiting-child"    scenarios::wait_any_reaps_the_exiting_child [userspace] {"wait-any"};
     cpu "init-supervises-a-child"         scenarios::init_supervises_a_child        [userspace]  {"init"};
     cpu "init-brings-up-fs-server"        scenarios::init_brings_up_fs_server       [userspace]  {"init"};

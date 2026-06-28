@@ -154,19 +154,25 @@ impl InternTable {
     }
 
     /// Reclaim the name at `id`, dropping its owned bytes and **tombstoning** the
-    /// slot. The id is never reused: `push` only ever appends past the high-water
-    /// mark, so a freed id can't be re-minted to alias a different name (the wire
-    /// identity the collector keys its id→name map on). A released id resolves to
-    /// nothing and stops appearing in new frames. Out-of-range / already-released
-    /// ids are no-ops. Intended for `Owned` (per-process) names on process exit —
-    /// kernel `&'static` literals are permanent and never released.
-    pub fn release(&mut self, id: StringId) {
+    /// slot. Returns `true` if it freed a live entry, `false` for an out-of-range
+    /// or already-tombstoned id (so the reclaim counter can't be inflated by a bad
+    /// or repeated release). The id is never reused: `push` only ever appends past
+    /// the high-water mark, so a freed id can't be re-minted to alias a different
+    /// name (the wire identity the collector keys its id→name map on). A released
+    /// id resolves to nothing and stops appearing in new frames. Intended for
+    /// `Owned` (per-process) names on process exit — kernel `&'static` literals are
+    /// permanent and never released.
+    pub fn release(&mut self, id: StringId) -> bool {
         let i = id.0 as usize;
-        if i < INLINE_CAP {
-            self.inline[i] = None;
-        } else if let Some(slot) = self.overflow.get_mut(i - INLINE_CAP) {
-            *slot = None;
-        }
+        let slot = if i < INLINE_CAP {
+            &mut self.inline[i]
+        } else {
+            match self.overflow.get_mut(i - INLINE_CAP) {
+                Some(slot) => slot,
+                None => return false,
+            }
+        };
+        slot.take().is_some()
     }
 
     /// Scan + insert. Returns `(id, is_new)` so callers know whether to
@@ -528,6 +534,20 @@ mod tests {
 
         let fresh = table.register_owned(Box::<str>::from("fresh"), &mut sink);
         assert_ne!(fresh, gone, "a tombstoned id is never reused");
+    }
+
+    #[test]
+    fn release_reports_whether_it_freed_a_live_entry() {
+        // The return value feeds the `snitchos.intern.strings_released_total`
+        // counter: only a genuine free (a live slot → tombstone) counts, so a
+        // double-release or a bad id can't inflate the reclaim metric.
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+        let id = table.register_owned(Box::<str>::from("x"), &mut sink);
+
+        assert!(table.release(id), "first release frees the live entry");
+        assert!(!table.release(id), "releasing an already-tombstoned id frees nothing");
+        assert!(!table.release(StringId(9999)), "an out-of-range id frees nothing");
     }
 
     #[test]

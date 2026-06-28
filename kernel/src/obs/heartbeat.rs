@@ -85,6 +85,7 @@ pub static BOOT_MHARTID: AtomicU64 = AtomicU64::new(0);
 define_metrics! {
     counter   heartbeat_count           = "snitchos.heartbeat.count";
     gauge     intern_used               = "snitchos.intern.strings_used";
+    counter   intern_released           = "snitchos.intern.strings_released_total";
     gauge     time_ticks                = "snitchos.time.ticks";
     histogram irq_duration              = "snitchos.irq.timer.duration_ticks";
     // frame allocator (the allocated/freed/alloc_failed counters are now
@@ -232,6 +233,7 @@ fn heap_smoke_pattern(count: i64) {
 fn emit_core(m: &Metrics, count: i64) {
     emit!(m, heartbeat_count = count);
     emit!(m, intern_used     = tracing::intern_count());
+    emit!(m, intern_released = tracing::strings_released_total() as i64);
     emit!(m, time_ticks      = tracing::timestamp());
     // Histogram observation: how long the last IRQ took. The handler
     // measured rdtime delta; main thread emits.

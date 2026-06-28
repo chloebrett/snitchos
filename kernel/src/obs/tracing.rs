@@ -48,6 +48,14 @@ pub fn send_hello(timebase_hz: u32) {
 
 static INTERN_TABLE: crate::sync::Mutex<InternTable> = crate::sync::Mutex::new(InternTable::new());
 
+/// Running total of interned names reclaimed on process exit — bumped by
+/// [`release_names`], drained by the heartbeat as
+/// `snitchos.intern.strings_released_total`. The deferred-emission pattern (bump
+/// an atomic in the path, emit from the heartbeat) keeps `release_names` off the
+/// telemetry TX lock it would otherwise re-enter. Pairs with the live
+/// `strings_used` gauge: used drops, released climbs.
+static STRINGS_RELEASED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// The kernel's single `FrameSink`: encode the frame with postcard,
 /// then either ship to the virtio-console (if it's up) or append to
 /// the pre-init buffer for later flush.
@@ -196,9 +204,15 @@ pub fn intern_count() -> u32 {
 /// (or already-released ones) are harmless no-ops.
 pub fn release_names(ids: impl IntoIterator<Item = StringId>) {
     let mut table = INTERN_TABLE.lock();
-    for id in ids {
-        table.release(id);
-    }
+    let freed = ids.into_iter().filter(|&id| table.release(id)).count();
+    drop(table);
+    STRINGS_RELEASED.fetch_add(freed as u64, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Total interned names reclaimed on process exit so far. Exposed as the
+/// `snitchos.intern.strings_released_total` counter.
+pub fn strings_released_total() -> u64 {
+    STRINGS_RELEASED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Register `name` as a Counter metric. Returns its `StringId` for use

@@ -2953,6 +2953,37 @@ pub fn spawn_reclaims_memory(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// v0.12 name-GC reclaim (`workload=spawn-reap`): per-process span/metric names are
+/// reclaimed on process exit, not leaked forever. Each of the reaper's 30 `memhog`
+/// children names one metric (`snitchos.memhog.alive`), interning a fresh
+/// per-process `StringId`; when the child is reaped, `reap_task` releases it and
+/// bumps `snitchos.intern.strings_released_total`. We assert that counter climbs to
+/// ≥ 30 — proving reclaim fires on *every* reap, not once. Pre-GC the counter
+/// wouldn't exist (names leaked, never released); the only release source in this
+/// workload is the memhog reaps, so there is no noise floor.
+pub fn spawn_reclaims_names(h: &mut View) -> Result<(), String> {
+    // The reaper finished all 30 spawn/wait cycles (emits `reaper.done` after the
+    // loop). By now every memhog has been reaped, so the counter has reached 30;
+    // the next ~1 Hz heartbeat puts that value on the wire.
+    h.wait_for(SEC * 30, is_span_start_named("reaper.done"))
+        .ok_or("reaper never reached 'reaper.done' — the spawn/wait loop didn't finish")?;
+
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.intern.strings_released_total")
+                && *value >= 30
+        }
+        _ => false,
+    })
+    .ok_or(
+        "snitchos.intern.strings_released_total never reached 30 — \
+         per-process names weren't reclaimed on reap",
+    )?;
+
+    Ok(())
+}
+
 /// v0.12 notification primitive (`workload=notify-smoke`): the async kernel→user
 /// wake crosses a task boundary. A `notify-waiter` parent creates a notification,
 /// `Spawn`s a `notify-signaller` child delegating the cap, then `WaitNotify`s on
