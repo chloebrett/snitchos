@@ -1,6 +1,7 @@
 //! The hart: register file, program counter, instruction-count clock, and
 //! the fetch/decode/execute `step`. The single API everything tests through.
 
+use crate::bus::Bus;
 use crate::csr::{Csr, CsrError, addr, sstatus};
 use crate::decode::{Instr, expand, funct3, funct7, is_compressed, opcode, priv12, system};
 use crate::mem::{BusError, Memory, RAM_BASE};
@@ -117,7 +118,7 @@ pub struct Cpu {
     cur_ilen: u64,
     privilege: Privilege,
     csr: Csr,
-    mem: Memory,
+    bus: Bus,
 }
 
 impl Cpu {
@@ -132,13 +133,18 @@ impl Cpu {
             cur_ilen: ILEN_FULL,
             privilege: Privilege::Supervisor,
             csr: Csr::new(),
-            mem,
+            bus: Bus::new(mem),
         }
     }
 
     #[must_use]
     pub fn privilege(&self) -> Privilege {
         self.privilege
+    }
+
+    #[must_use]
+    pub fn uart_output(&self) -> &[u8] {
+        self.bus.uart_output()
     }
 
     #[must_use]
@@ -166,24 +172,15 @@ impl Cpu {
         self.instret
     }
 
-    #[must_use]
-    pub fn mem(&self) -> &Memory {
-        &self.mem
-    }
-
-    pub fn mem_mut(&mut self) -> &mut Memory {
-        &mut self.mem
-    }
-
     /// Fetch, decode, and execute one instruction (16- or 32-bit).
     pub fn step(&mut self) -> Result<(), StepError> {
-        let half = self.mem.read_u16(self.pc)?;
+        let half = self.bus.read_u16(self.pc)?;
         let raw = if is_compressed(half) {
             self.cur_ilen = ILEN_COMPRESSED;
             expand(half).ok_or_else(|| self.unimplemented(u32::from(half)))?
         } else {
             self.cur_ilen = ILEN_FULL;
-            self.mem.read_u32(self.pc)?
+            self.bus.read_u32(self.pc)?
         };
         self.execute(raw)?;
         self.instret += 1;
@@ -389,13 +386,13 @@ impl Cpu {
     fn load(&mut self, instr: Instr) -> Result<(), StepError> {
         let addr = self.x[instr.rs1()].wrapping_add(instr.i_imm());
         let value = match instr.funct3() {
-            funct3::load::LB => i64::from(self.mem.read_u8(addr)? as i8) as u64,
-            funct3::load::LH => i64::from(self.mem.read_u16(addr)? as i16) as u64,
-            funct3::load::LW => i64::from(self.mem.read_u32(addr)? as i32) as u64,
-            funct3::load::LD => self.mem.read_u64(addr)?,
-            funct3::load::LBU => u64::from(self.mem.read_u8(addr)?),
-            funct3::load::LHU => u64::from(self.mem.read_u16(addr)?),
-            funct3::load::LWU => u64::from(self.mem.read_u32(addr)?),
+            funct3::load::LB => i64::from(self.bus.read_u8(addr)? as i8) as u64,
+            funct3::load::LH => i64::from(self.bus.read_u16(addr)? as i16) as u64,
+            funct3::load::LW => i64::from(self.bus.read_u32(addr)? as i32) as u64,
+            funct3::load::LD => self.bus.read_u64(addr)?,
+            funct3::load::LBU => u64::from(self.bus.read_u8(addr)?),
+            funct3::load::LHU => u64::from(self.bus.read_u16(addr)?),
+            funct3::load::LWU => u64::from(self.bus.read_u32(addr)?),
             _ => return Err(self.unimplemented(instr.0)),
         };
         self.set_reg(instr.rd(), value);
@@ -408,10 +405,10 @@ impl Cpu {
         let addr = self.x[instr.rs1()].wrapping_add(instr.s_imm());
         let value = self.x[instr.rs2()];
         match instr.funct3() {
-            funct3::store::SB => self.mem.write_u8(addr, value as u8)?,
-            funct3::store::SH => self.mem.write_u16(addr, value as u16)?,
-            funct3::store::SW => self.mem.write_u32(addr, value as u32)?,
-            funct3::store::SD => self.mem.write_u64(addr, value)?,
+            funct3::store::SB => self.bus.write_u8(addr, value as u8)?,
+            funct3::store::SH => self.bus.write_u16(addr, value as u16)?,
+            funct3::store::SW => self.bus.write_u32(addr, value as u32)?,
+            funct3::store::SD => self.bus.write_u64(addr, value)?,
             _ => return Err(self.unimplemented(instr.0)),
         }
         self.advance();
@@ -1346,6 +1343,20 @@ mod tests {
         cpu.step().unwrap();
         assert_eq!(cpu.pc(), RAM_BASE + 0x40);
         assert_eq!(cpu.reg(1), RAM_BASE + 2); // link = pc + 2, not + 4
+    }
+
+    #[test]
+    fn store_to_uart_produces_console_output() {
+        let program = &[
+            lui(2, 0x10000),               // x2 = 0x1000_0000 (UART base)
+            addi(1, 0, i32::from(b'X')),   // x1 = 'X'
+            sb(1, 2, 0),                   // store 'X' to the UART THR
+        ];
+        let mut cpu = cpu_with(program);
+        for _ in 0..program.len() {
+            cpu.step().unwrap();
+        }
+        assert_eq!(cpu.uart_output(), b"X");
     }
 
     #[test]
