@@ -471,6 +471,10 @@ impl Cpu {
 
     /// Privileged SYSTEM ops (funct3 = 0), dispatched by funct12.
     fn priv_op(&mut self, instr: Instr) -> Result<(), StepError> {
+        if instr.funct7() == funct7::SFENCE_VMA {
+            self.advance(); // no TLB to flush — translation walks every access
+            return Ok(());
+        }
         match instr.funct12() {
             priv12::ECALL => {
                 let cause = match self.privilege {
@@ -1574,6 +1578,107 @@ mod tests {
 
         cpu.step().unwrap();
         assert_eq!(cpu.reg(1), 42);
+    }
+
+    #[test]
+    fn compressed_or_combines_registers() {
+        // c.or x11, x12 == 0x8dd1 (captured from the kernel boot)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x8dd1).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(11, 0xf0);
+        cpu.set_reg(12, 0x0f);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(11), 0xff);
+    }
+
+    #[test]
+    fn compressed_slli_shifts_left() {
+        // c.slli x10, 8 == 0x0522 (captured from the kernel boot)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x0522).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(10, 0xab);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), 0xab << 8);
+    }
+
+    #[test]
+    fn compressed_andi_masks_register() {
+        // c.andi x10, 1 == 0x8905 (captured from the kernel boot)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x8905).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(10, 0xff);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), 0xff & 1);
+    }
+
+    #[test]
+    fn compressed_lui_loads_upper_immediate() {
+        // c.lui x14, 0x10 == 0x6741 (captured from the kernel boot)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x6741).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(14), 0x10000);
+    }
+
+    #[test]
+    fn compressed_sw_stores_word_register_relative() {
+        // c.sw x10, 0(x11) == 0xc188 (captured from the kernel boot)
+        let mut mem = Memory::new(0x2000);
+        mem.write_u16(RAM_BASE, 0xc188).unwrap();
+        mem.write_u32(RAM_BASE + 2, lw(5, 11, 0)).unwrap(); // lw x5, 0(x11)
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(11, RAM_BASE + 0x200);
+        cpu.set_reg(10, 0x0bad_f00d);
+        cpu.step().unwrap(); // c.sw
+        cpu.step().unwrap(); // lw
+        assert_eq!(cpu.reg(5), 0x0bad_f00d);
+    }
+
+    #[test]
+    fn compressed_lw_loads_word_register_relative() {
+        // c.lw x14, 0(x14) == 0x4318 (captured from the kernel boot)
+        let mut mem = Memory::new(0x2000);
+        mem.write_u16(RAM_BASE, 0x4318).unwrap();
+        mem.write_u32(RAM_BASE + 0x200, 0x0102_0304).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(14, RAM_BASE + 0x200);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(14), 0x0102_0304);
+    }
+
+    #[test]
+    fn compressed_addiw_sign_extends_word() {
+        // c.addiw x10, 0 == 0x2501 (captured from the kernel boot; sext.w idiom)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x2501).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(10, 0x1_8000_0000);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), 0xffff_ffff_8000_0000);
+    }
+
+    #[test]
+    fn compressed_xor_combines_registers() {
+        // c.xor x10, x11 == 0x8d2d (captured from the kernel boot)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x8d2d).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(10, 0xff00);
+        cpu.set_reg(11, 0x0ff0);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), 0xff00 ^ 0x0ff0);
+    }
+
+    #[test]
+    fn sfence_vma_is_a_nop() {
+        // sfence.vma x0, x0 == 0x12000073 (no TLB in snemu)
+        let mut cpu = cpu_with(&[0x1200_0073]);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 4);
     }
 
     #[test]

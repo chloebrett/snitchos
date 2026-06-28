@@ -76,6 +76,8 @@ pub(crate) mod funct3 {
 pub(crate) mod funct7 {
     /// Marks an OP / OP-32 instruction as belonging to the M extension.
     pub const MULDIV: u32 = 0x01;
+    /// `sfence.vma` (SYSTEM, funct3 0) — identified by funct7, not funct12.
+    pub const SFENCE_VMA: u32 = 0x09;
 }
 
 /// funct3 selectors for the SYSTEM opcode.
@@ -210,15 +212,19 @@ pub(crate) fn expand(half: u16) -> Option<u32> {
     let funct3 = (half >> 13) & 0b111;
     match (quadrant, funct3) {
         (0b00, 0b000) => Some(expand_c_addi4spn(half)),
+        (0b00, 0b010) => Some(expand_c_lw(half)),
         (0b00, 0b011) => Some(expand_c_ld(half)),
+        (0b00, 0b110) => Some(expand_c_sw(half)),
         (0b00, 0b111) => Some(expand_c_sd(half)),
         (0b01, 0b000) => Some(expand_c_addi(half)),
+        (0b01, 0b001) => Some(expand_c_addiw(half)),
         (0b01, 0b010) => Some(expand_c_li(half)),
-        (0b01, 0b011) => expand_c_lui_addi16sp(half),
+        (0b01, 0b011) => Some(expand_c_lui_addi16sp(half)),
         (0b01, 0b100) => expand_c_misc_alu(half),
         (0b01, 0b101) => Some(expand_c_j(half)),
         (0b01, 0b110) => Some(expand_c_beqz(half)),
         (0b01, 0b111) => Some(expand_c_bnez(half)),
+        (0b10, 0b000) => Some(expand_c_slli(half)),
         (0b10, 0b010) => Some(expand_c_lwsp(half)),
         (0b10, 0b011) => Some(expand_c_ldsp(half)),
         (0b10, 0b100) => Some(expand_cr(half)),
@@ -239,6 +245,12 @@ fn expand_c_addi(half: u16) -> u32 {
 fn ci_imm6(half: u16) -> u32 {
     let raw = (u32::from((half >> 12) & 1) << 5) | u32::from((half >> 2) & 0x1f);
     (sign_extend(raw, 6) as u32) & 0xfff
+}
+
+/// `c.addiw rd, imm` -> `addiw rd, rd, imm` (sign-extended 6-bit immediate).
+fn expand_c_addiw(half: u16) -> u32 {
+    let rd = (u32::from(half) >> 7) & 0x1f;
+    (ci_imm6(half) << 20) | (rd << 15) | (rd << 7) | opcode::OP_IMM_32
 }
 
 /// `c.li rd, imm` -> `addi rd, x0, imm`.
@@ -298,9 +310,22 @@ fn expand_c_addi4spn(half: u16) -> u32 {
 
 /// Quadrant 01, funct3 011: `c.addi16sp` when rd == 2, else `c.lui`
 /// (the latter not yet modeled — surfaces via the meta-loop when hit).
-fn expand_c_lui_addi16sp(half: u16) -> Option<u32> {
+fn expand_c_lui_addi16sp(half: u16) -> u32 {
     let rd = (u32::from(half) >> 7) & 0x1f;
-    (rd == 2).then(|| expand_c_addi16sp(half))
+    if rd == 2 {
+        expand_c_addi16sp(half)
+    } else {
+        expand_c_lui(half) // rd==0 is a reserved hint; treat as lui x0 (nop)
+    }
+}
+
+/// `c.lui rd, nzimm` -> `lui rd, nzimm` (6-bit immediate in bits 17:12, signed).
+fn expand_c_lui(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rd = (h >> 7) & 0x1f;
+    let nzimm6 = (((h >> 12) & 1) << 5) | ((h >> 2) & 0x1f);
+    let imm20 = (sign_extend(nzimm6, 6) as u32) & 0xf_ffff;
+    (imm20 << 12) | (rd << 7) | opcode::LUI
 }
 
 /// `c.addi16sp sp, nzimm` -> `addi x2, x2, nzimm`. Scaled signed offset:
@@ -371,6 +396,16 @@ fn load_word(funct3: u32, rd: u32, base: u32, imm: u32) -> u32 {
     ((imm & 0xfff) << 20) | (base << 15) | (funct3 << 12) | (rd << 7) | opcode::LOAD
 }
 
+/// `c.lw rd', uimm(rs1')` -> `lw rd', uimm(rs1')`. CL word offset:
+/// `uimm[5:3]`=inst[12:10], `uimm[2]`=inst[6], `uimm[6]`=inst[5].
+fn expand_c_lw(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rs1 = creg(h >> 7);
+    let rd = creg(h >> 2);
+    let uimm = (((h >> 10) & 0x7) << 3) | (((h >> 6) & 1) << 2) | (((h >> 5) & 1) << 6);
+    load_word(funct3::load::LW, rd, rs1, uimm)
+}
+
 /// `c.ld rd', uimm(rs1')` -> `ld rd', uimm(rs1')`. CL unsigned offset:
 /// `uimm[5:3]`=inst[12:10], `uimm[7:6]`=inst[6:5].
 fn expand_c_ld(half: u16) -> u32 {
@@ -379,6 +414,16 @@ fn expand_c_ld(half: u16) -> u32 {
     let rd = creg(h >> 2);
     let uimm = (((h >> 10) & 0x7) << 3) | (((h >> 5) & 0x3) << 6);
     load_word(funct3::load::LD, rd, rs1, uimm)
+}
+
+/// `c.sw rs2', uimm(rs1')` -> `sw rs2', uimm(rs1')`. CS word offset:
+/// `uimm[5:3]`=inst[12:10], `uimm[2]`=inst[6], `uimm[6]`=inst[5].
+fn expand_c_sw(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rs1 = creg(h >> 7);
+    let rs2 = creg(h >> 2);
+    let uimm = (((h >> 10) & 0x7) << 3) | (((h >> 6) & 1) << 2) | (((h >> 5) & 1) << 6);
+    store_word(funct3::store::SW, rs1, rs2, uimm)
 }
 
 /// `c.sd rs2', uimm(rs1')` -> `sd rs2', uimm(rs1')`. CS unsigned offset:
@@ -407,9 +452,24 @@ fn store_word(funct3: u32, base: u32, src: u32, imm: u32) -> u32 {
 fn expand_c_misc_alu(half: u16) -> Option<u32> {
     match (u32::from(half) >> 10) & 0x3 {
         0b00 => Some(expand_c_srli(half)),
+        0b10 => Some(expand_c_andi(half)),
         0b11 => expand_c_ca(half),
-        _ => None, // c.srai (01), c.andi (10) not yet
+        _ => None, // c.srai (01) not yet
     }
+}
+
+/// `c.andi rd', imm` -> `andi rd', rd', imm` (sign-extended 6-bit immediate).
+fn expand_c_andi(half: u16) -> u32 {
+    let rd = creg(u32::from(half) >> 7);
+    (ci_imm6(half) << 20) | (rd << 15) | (funct3::AND << 12) | (rd << 7) | opcode::OP_IMM
+}
+
+/// `c.slli rd, shamt` -> `slli rd, rd, shamt` (6-bit shamt for RV64).
+fn expand_c_slli(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rd = (h >> 7) & 0x1f;
+    let shamt = (((h >> 12) & 1) << 5) | ((h >> 2) & 0x1f);
+    shift_imm_word(funct3::SLL, 0, rd, shamt)
 }
 
 /// `c.srli rd', shamt` -> `srli rd', rd', shamt` (6-bit shamt for RV64).
@@ -433,6 +493,8 @@ fn expand_c_ca(half: u16) -> Option<u32> {
     let rs2 = creg(h >> 2);
     match ((h >> 12) & 1, (h >> 5) & 0x3) {
         (0, 0b00) => Some(reg_alu(funct3::ADD, rd, rd, rs2) | ALT_OP_BIT), // c.sub
+        (0, 0b01) => Some(reg_alu(funct3::XOR, rd, rd, rs2)),             // c.xor
+        (0, 0b10) => Some(reg_alu(funct3::OR, rd, rd, rs2)),              // c.or
         (0, 0b11) => Some(reg_alu(funct3::AND, rd, rd, rs2)),             // c.and
         _ => None,
     }

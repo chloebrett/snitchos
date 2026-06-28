@@ -11,6 +11,11 @@ use snemu::cpu::StepError;
 const RAM_SIZE: usize = 128 * 1024 * 1024;
 const DEFAULT_MAX_STEPS: u64 = 50_000_000;
 
+/// Device tree the guest sees, dumped from QEMU's `virt` machine:
+/// `qemu-system-riscv64 -machine virt,dumpdtb=snemu/virt.dtb -smp 1 -m 128M`.
+/// (`-smp 1` so the kernel boots uniprocessor — snemu is single-hart for now.)
+const DTB: &[u8] = include_bytes!("../virt.dtb");
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let Some(path) = args.next() else {
@@ -30,7 +35,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut cpu = match snemu::loader::load(&image, RAM_SIZE) {
+    let mut cpu = match snemu::loader::load(&image, RAM_SIZE, Some(DTB)) {
         Ok(cpu) => cpu,
         Err(e) => {
             eprintln!("snemu: load failed: {e:?}");

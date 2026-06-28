@@ -3,7 +3,11 @@
 //! entry point (a0 = hartid 0, a1 = null DTB — both the register defaults).
 
 use crate::cpu::Cpu;
-use crate::mem::Memory;
+use crate::mem::{Memory, RAM_BASE};
+
+/// Where snemu places the device tree blob in RAM (high, clear of the kernel
+/// image + heap). The kernel reads its address from `a1` and reserves it.
+const DTB_ADDR: u64 = RAM_BASE + 0x0700_0000;
 
 const ELF64_HEADER_SIZE: usize = 64;
 const ELFCLASS64: u8 = 2;
@@ -74,8 +78,9 @@ fn validate_header(image: &[u8]) -> Result<(), ElfError> {
 }
 
 /// Load an ELF64 RISC-V `image` into a fresh `ram_size`-byte machine and return
-/// a `Cpu` positioned at the entry point.
-pub fn load(image: &[u8], ram_size: usize) -> Result<Cpu, ElfError> {
+/// a `Cpu` positioned at the entry point. If a `dtb` is given, it's placed in
+/// RAM and its address handed to the kernel in `a1` (as firmware would).
+pub fn load(image: &[u8], ram_size: usize, dtb: Option<&[u8]>) -> Result<Cpu, ElfError> {
     validate_header(image)?;
     let entry = u64_at(image, off::E_ENTRY)?;
     let phoff = u64_at(image, off::E_PHOFF)?;
@@ -103,11 +108,20 @@ pub fn load(image: &[u8], ram_size: usize) -> Result<Cpu, ElfError> {
         }
     }
 
+    if let Some(dtb) = dtb {
+        mem.write_bytes(DTB_ADDR, dtb)
+            .map_err(|_| ElfError::SegmentOutOfRange)?;
+    }
+
     let mut cpu = Cpu::new(mem);
     // The kernel is linked at higher-half VAs but boots at physical PC, so
     // translate the entry through its segment's vaddr->paddr mapping. Falls
     // back to the entry verbatim if no PT_LOAD covers it.
     cpu.set_pc(entry_pa.unwrap_or(entry));
+    // Firmware handoff: a0 = hartid (0, the register default), a1 = DTB address.
+    if dtb.is_some() {
+        cpu.set_reg(11, DTB_ADDR);
+    }
     Ok(cpu)
 }
 
@@ -147,7 +161,7 @@ mod tests {
         let segment = 0x02a0_0093_u32.to_le_bytes(); // addi x1, x0, 42
         let img = tiny_elf(entry, entry, entry, &segment);
 
-        let mut cpu = load(&img, 0x1000).unwrap();
+        let mut cpu = load(&img, 0x1000, None).unwrap();
         assert_eq!(cpu.pc(), entry);
 
         cpu.step().unwrap();
@@ -162,7 +176,7 @@ mod tests {
         let segment = 0x02a0_0093_u32.to_le_bytes(); // addi x1, x0, 42
         let img = tiny_elf(vaddr, vaddr, paddr, &segment);
 
-        let mut cpu = load(&img, 0x1000).unwrap();
+        let mut cpu = load(&img, 0x1000, None).unwrap();
         assert_eq!(cpu.pc(), paddr); // started at the physical entry
         cpu.step().unwrap();
         assert_eq!(cpu.reg(1), 42);
@@ -170,13 +184,13 @@ mod tests {
 
     #[test]
     fn rejects_a_non_elf_image() {
-        assert!(matches!(load(&[0, 1, 2, 3], 0x1000), Err(ElfError::BadMagic)));
+        assert!(matches!(load(&[0, 1, 2, 3], 0x1000, None), Err(ElfError::BadMagic)));
     }
 
     #[test]
     fn rejects_a_non_riscv_elf() {
         let mut img = tiny_elf(RAM_BASE, RAM_BASE, RAM_BASE, &[0; 4]);
         img[0x12..0x14].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
-        assert!(matches!(load(&img, 0x1000), Err(ElfError::Unsupported)));
+        assert!(matches!(load(&img, 0x1000, None), Err(ElfError::Unsupported)));
     }
 }
