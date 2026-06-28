@@ -1,4 +1,4 @@
-//! The `Filesystem` trait — the v0.10 deliverable.
+//! The `Filesystem` trait (shipped in v0.10).
 //!
 //! Cap-agnostic and host-testable: this crate imports **no** capability or
 //! IPC types, so it compiles and unit-tests on the host like `kernel-core`.

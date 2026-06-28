@@ -1,8 +1,11 @@
 //! virtio-console (DeviceID 3 over virtio-mmio). Telemetry channel —
 //! separate from the NS16550A used for `println!` text.
 //!
-//! v0.1 scope: discovery only. The handshake, virtqueue setup, and
-//! transmit path land in subsequent steps (see plans/virtio-console.md).
+//! Discovers the device by walking the DTB, drives the full virtio
+//! handshake + virtqueue setup, and transmits telemetry frames on the TX
+//! queue. Frame bytes are staged through a static `TX_STAGING` buffer so
+//! the descriptor carries a `KERNEL_OFFSET`-range PA that `va_to_pa` can
+//! translate (heap VAs can't — see the `send` staging note).
 
 use fdt::Fdt;
 

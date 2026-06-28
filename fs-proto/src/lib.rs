@@ -130,8 +130,8 @@ impl Op {
 /// FS-defined file rights, gated per message by the FS. Distinct from the
 /// kernel's endpoint `Rights` (`SEND`/`RECV`/`MINT`): the kernel carries
 /// these bits in the badge but never interprets them. First cut is
-/// `READ`/`WRITE`; `EXEC` is reserved (not enforced until executables,
-/// ~v0.11); directory rights (`LOOKUP`/`LIST`/`CREATE`/`REMOVE`) are
+/// `READ`/`WRITE`; `EXEC` is reserved (the bit exists but no op enforces
+/// it yet); directory rights (`LOOKUP`/`LIST`/`CREATE`/`REMOVE`) are
 /// additive bits with no trait change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileRights(u16);
@@ -143,7 +143,7 @@ impl FileRights {
     pub const READ: FileRights = FileRights(0b001);
     /// May `write` a file inode.
     pub const WRITE: FileRights = FileRights(0b010);
-    /// Reserved for executables (~v0.11); the bit exists now so badges that
+    /// Reserved for executables; the bit exists now so badges that
     /// pack it stay stable, but no op enforces it yet.
     pub const EXEC: FileRights = FileRights(0b100);
 
