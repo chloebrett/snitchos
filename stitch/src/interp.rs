@@ -418,9 +418,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         } => Ok(Value::Bool(
             as_bool(&eval(left, env)?, "`or`")? || as_bool(&eval(right, env)?, "`or`")?,
         )),
-        // `lhs |> f(a)` ≡ `f(lhs, a)`; `lhs |> f` ≡ `f(lhs)`.
+        // `lhs |> f(a)` ≡ `f(lhs, a)`; `lhs |> f` ≡ `f(lhs)`. `~>` (the cross-process
+        // pipe) parses as a distinct op but, until the spawn/marshal lowering
+        // milestone, evaluates in-process exactly like `|>` — a placeholder, not its
+        // final semantics (see docs/typed-processes-and-the-data-model-design.md).
         Expr::Binary {
-            op: BinOp::Pipe,
+            op: BinOp::Pipe | BinOp::CrossPipe,
             left,
             right,
         } => eval_pipe(left, right, env),

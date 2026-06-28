@@ -195,6 +195,7 @@ fn infix_op(tok: &Token) -> Option<BinOp> {
         Token::And => BinOp::And,
         Token::Or => BinOp::Or,
         Token::Pipe => BinOp::Pipe,
+        Token::CrossPipe => BinOp::CrossPipe,
         Token::DotDot => BinOp::Range,
         Token::DotDotEq => BinOp::RangeIncl,
         _ => return None,
@@ -206,7 +207,7 @@ fn infix_op(tok: &Token) -> Option<BinOp> {
 /// value functions. Feeds the operator-as-function sugar in `parse_arg`.
 fn operator_fn(tok: &Token) -> Option<BinOp> {
     match infix_op(tok)? {
-        BinOp::Pipe | BinOp::Range | BinOp::RangeIncl => None,
+        BinOp::Pipe | BinOp::CrossPipe | BinOp::Range | BinOp::RangeIncl => None,
         op => Some(op),
     }
 }
@@ -271,7 +272,7 @@ fn binding_power(op: BinOp) -> (u8, u8) {
         BinOp::Or => (1, 2),
         BinOp::And => (3, 4),
         BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => (5, 6),
-        BinOp::Pipe => (7, 8),
+        BinOp::Pipe | BinOp::CrossPipe => (7, 8),
         BinOp::Range | BinOp::RangeIncl => (9, 10),
         BinOp::Add | BinOp::Sub => (11, 12),
         BinOp::Mul | BinOp::Div | BinOp::Rem => (13, 14),
@@ -1440,6 +1441,32 @@ mod tests {
     #[test]
     fn pipe_binds_tighter_than_comparison() {
         insta::assert_debug_snapshot!(p("x |> f == y"));
+    }
+
+    #[test]
+    fn parses_the_cross_pipe_as_a_binary_op() {
+        use crate::ast::BinOp;
+        assert!(matches!(p("a ~> b"), Expr::Binary { op: BinOp::CrossPipe, .. }));
+    }
+
+    #[test]
+    fn the_cross_pipe_is_left_associative() {
+        use crate::ast::BinOp;
+        // `a ~> b ~> c` parses as `(a ~> b) ~> c`.
+        let Expr::Binary { op: BinOp::CrossPipe, left, .. } = p("a ~> b ~> c") else {
+            panic!("expected a cross-pipe");
+        };
+        assert!(matches!(*left, Expr::Binary { op: BinOp::CrossPipe, .. }));
+    }
+
+    #[test]
+    fn arithmetic_binds_tighter_than_the_cross_pipe() {
+        use crate::ast::BinOp;
+        // `a + b ~> f` parses as `(a + b) ~> f`, same precedence as `|>`.
+        let Expr::Binary { op: BinOp::CrossPipe, left, .. } = p("a + b ~> f") else {
+            panic!("expected a cross-pipe");
+        };
+        assert!(matches!(*left, Expr::Binary { op: BinOp::Add, .. }));
     }
 
     #[test]

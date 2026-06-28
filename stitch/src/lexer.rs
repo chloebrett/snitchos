@@ -62,6 +62,7 @@ pub enum Token {
     FatArrow,  // =>
     Bar,       // |
     Pipe,      // |>
+    CrossPipe, // ~>  (the cross-process pipe)
     Question,  // ?
     QuestionDot, // ?.
     Dot,       // .
@@ -315,6 +316,7 @@ fn lex_operator(chars: &mut Cursor<'_>) -> Option<Token> {
         '>' => Token::Gt,
         '|' if eat('>') => Token::Pipe,
         '|' => Token::Bar,
+        '~' if eat('>') => Token::CrossPipe,
         '?' if eat('.') => Token::QuestionDot,
         '?' => Token::Question,
         '.' if eat('.') => {
@@ -421,6 +423,13 @@ mod tests {
     fn lexes_the_dot_family() {
         use Token::{Dot, DotDot, DotDotEq, Eof};
         assert_eq!(lex(". .. ..="), vec![Dot, DotDot, DotDotEq, Eof]);
+    }
+
+    #[test]
+    fn lexes_the_cross_pipe() {
+        use Token::{CrossPipe, Eof, Pipe};
+        // `~>` is its own token, distinct from the in-process `|>`.
+        assert_eq!(lex("|> ~>"), vec![Pipe, CrossPipe, Eof]);
     }
 
     #[test]

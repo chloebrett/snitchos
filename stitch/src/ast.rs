@@ -309,6 +309,7 @@ pub enum BinOp {
     And,
     Or,
     Pipe,      // |>
+    CrossPipe, // ~> (cross-process pipe; same precedence as `|>`)
     Range,     // ..
     RangeIncl, // ..=
 }
