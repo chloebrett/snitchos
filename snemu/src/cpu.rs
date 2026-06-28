@@ -8,6 +8,7 @@ mod opcode {
     pub const LUI: u32 = 0x37;
     pub const AUIPC: u32 = 0x17;
     pub const OP_IMM: u32 = 0x13;
+    pub const OP: u32 = 0x33;
 }
 
 /// funct3 ALU-op selectors, `instr[14:12]` — shared by OP and OP-IMM.
@@ -56,6 +57,10 @@ impl Instr {
 
     fn rs1(self) -> usize {
         ((self.0 >> 15) & 0x1f) as usize
+    }
+
+    fn rs2(self) -> usize {
+        ((self.0 >> 20) & 0x1f) as usize
     }
 
     fn funct3(self) -> u32 {
@@ -157,8 +162,32 @@ impl Cpu {
                 Ok(())
             }
             opcode::OP_IMM => self.op_imm(instr),
+            opcode::OP => self.op(instr),
             _ => Err(self.unimplemented(raw)),
         }
+    }
+
+    /// OP: register-register integer ops (shift amount is `rs2 & 0x3f`).
+    fn op(&mut self, instr: Instr) -> Result<(), StepError> {
+        let a = self.x[instr.rs1()];
+        let b = self.x[instr.rs2()];
+        let shamt = (b & 0x3f) as u32;
+        let value = match instr.funct3() {
+            funct3::ADD if instr.is_alt_op() => a.wrapping_sub(b),           // sub
+            funct3::ADD => a.wrapping_add(b),                               // add
+            funct3::SLL => a << shamt,                                      // sll
+            funct3::SLT => u64::from((a as i64) < (b as i64)),             // slt
+            funct3::SLTU => u64::from(a < b),                              // sltu
+            funct3::XOR => a ^ b,                                          // xor
+            funct3::SR if instr.is_alt_op() => ((a as i64) >> shamt) as u64, // sra
+            funct3::SR => a >> shamt,                                      // srl
+            funct3::OR => a | b,                                           // or
+            funct3::AND => a & b,                                          // and
+            _ => return Err(self.unimplemented(instr.0)),
+        };
+        self.set_reg(instr.rd(), value);
+        self.pc = self.pc.wrapping_add(4);
+        Ok(())
     }
 
     /// OP-IMM: register-immediate integer ops.
@@ -248,6 +277,41 @@ mod tests {
         shift_imm(funct3::SR, ALT_OP_BIT, rd, rs1, shamt)
     }
 
+    /// Encode an R-type instruction (`alt` is 0 or `ALT_OP_BIT`).
+    fn r_type(funct3: u32, alt: u32, rd: u32, rs1: u32, rs2: u32) -> u32 {
+        alt | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode::OP
+    }
+    fn add(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        r_type(funct3::ADD, 0, rd, rs1, rs2)
+    }
+    fn sub(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        r_type(funct3::ADD, ALT_OP_BIT, rd, rs1, rs2)
+    }
+    fn sll(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        r_type(funct3::SLL, 0, rd, rs1, rs2)
+    }
+    fn slt(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        r_type(funct3::SLT, 0, rd, rs1, rs2)
+    }
+    fn sltu(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        r_type(funct3::SLTU, 0, rd, rs1, rs2)
+    }
+    fn xor(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        r_type(funct3::XOR, 0, rd, rs1, rs2)
+    }
+    fn srl(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        r_type(funct3::SR, 0, rd, rs1, rs2)
+    }
+    fn sra(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        r_type(funct3::SR, ALT_OP_BIT, rd, rs1, rs2)
+    }
+    fn or(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        r_type(funct3::OR, 0, rd, rs1, rs2)
+    }
+    fn and(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        r_type(funct3::AND, 0, rd, rs1, rs2)
+    }
+
     /// A `Cpu` with `program` loaded at the RAM base and pc pointing at it.
     fn cpu_with(program: &[u32]) -> Cpu {
         let mut mem = Memory::new(0x1000);
@@ -325,6 +389,40 @@ mod tests {
         assert_eq!(cpu.reg(8), 192);
         assert_eq!(cpu.reg(9), 3);
         assert_eq!(cpu.reg(11), (-4_i64) as u64);
+    }
+
+    #[test]
+    fn op_register_register_family() {
+        let program = &[
+            addi(1, 0, 12),   // x1  = 12
+            addi(2, 0, 5),    // x2  = 5
+            addi(12, 0, 2),   // x12 = 2  (shift amount source)
+            addi(13, 0, -16), // x13 = -16
+            add(3, 1, 2),     // 17
+            sub(4, 1, 2),     // 7
+            sll(5, 1, 12),    // 12 << 2 = 48
+            slt(6, 2, 1),     // (5 <s 12) = 1
+            sltu(7, 1, 2),    // (12 <u 5) = 0
+            xor(8, 1, 2),     // 12 ^ 5 = 9
+            or(9, 1, 2),      // 12 | 5 = 13
+            and(10, 1, 2),    // 12 & 5 = 4
+            srl(11, 1, 12),   // 12 >> 2 = 3
+            sra(14, 13, 12),  // -16 >>a 2 = -4
+        ];
+        let mut cpu = cpu_with(program);
+        for _ in 0..program.len() {
+            cpu.step().unwrap();
+        }
+        assert_eq!(cpu.reg(3), 17);
+        assert_eq!(cpu.reg(4), 7);
+        assert_eq!(cpu.reg(5), 48);
+        assert_eq!(cpu.reg(6), 1);
+        assert_eq!(cpu.reg(7), 0);
+        assert_eq!(cpu.reg(8), 9);
+        assert_eq!(cpu.reg(9), 13);
+        assert_eq!(cpu.reg(10), 4);
+        assert_eq!(cpu.reg(11), 3);
+        assert_eq!(cpu.reg(14), (-4_i64) as u64);
     }
 
     #[test]

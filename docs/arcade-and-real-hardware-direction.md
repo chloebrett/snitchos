@@ -623,3 +623,26 @@ one click away.*
 virtio-RX → kernel-shell → control-plane bullet + its insertion-point open question relate
 directly), [observability-design.md](observability-design.md), and the kernel-core extraction
 philosophy this whole direction leans on.*
+
+## See also: snemu (the emulator) and real-hardware bring-up
+
+The snemu design doc carries exploration notes directly relevant to this direction —
+[snemu-design.md](snemu-design.md), *Exploration notes*:
+
+- **Real-hardware bring-up** — deterministic device **fault injection** de-risks the
+  *protocol/logical* robustness of drivers (real devices break QEMU's happy-path
+  assumptions), but **not** the physical/timing/discovery layer (weak-memory reordering,
+  DMA coherence, DTB-driven discovery + real SBI). snemu as a **post-contact reproduction
+  lab**: observe on metal → model the fault → reproduce deterministically → debug with
+  rewind/watchpoints → regress.
+- **Tractability of hard devices** — the decisive axis is *"is there a spec you can
+  implement?"* USB (xHCI) and virtio-gpu are tractable and transfer to conforming silicon;
+  real discrete GPUs / undocumented SoC peripherals stay out of reach. A literal Raspberry
+  Pi is ARM (port) vs RISC-V (pick a real RISC-V SBC). **Ride standards.**
+- **Display: golden-image testing** — snemu's deterministic, host-GPU-independent
+  framebuffer makes the display stack testable (pixel-diff at a fixed instret) in a way
+  QEMU's real-time window can't — useful for the arcade's render path.
+- **Analog visualization (someday-demo)** — a scoped "watch the UART line's voltage wiggle
+  as bytes go out" toy: zero testing value, maximum *make-the-invisible-visible* pedagogy.
+  The literal home for that demo idea is this doc; the feasibility analysis is in snemu's
+  notes (the cheap scoped-viz version vs the huge faithful-co-sim version).
