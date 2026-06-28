@@ -201,11 +201,66 @@ impl Schema for f32 {
     }
 }
 
+/// A **P**lain **O**ld **D**ata type: its bytes *are* its value, so a `&[T]`
+/// reinterprets to/from `&[u8]` with no serialization.
+///
+/// # Safety
+/// Implementors must be `#[repr(C)]`, contain **no padding**, and have **every bit
+/// pattern valid**. The first two guarantee no uninitialized byte is exposed (a
+/// kernel info-leak if violated); the third guarantees any `&[u8]` of the right
+/// length is a valid `&[Self]`. Implement via [`macro@Schema`]'s sibling
+/// `#[derive(Pod)]`, which checks all three — a hand-written `impl` carries the
+/// proof itself. `bool`/`char` are deliberately **not** `Pod` (invalid patterns).
+pub unsafe trait Pod: Copy + 'static {}
+
+macro_rules! impl_pod {
+    ($($t:ty),*) => { $( // SAFETY: every bit pattern of a fixed-width integer or
+        // IEEE-754 float is a valid value; all are `repr`-stable with no padding.
+        unsafe impl Pod for $t {} )* };
+}
+impl_pod!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+
+/// The packed bytes of a POD slice, **zero-copy**: exactly its `repr(C)` image,
+/// and byte-identical to [`hitch_packed`] of the equivalent values. Because
+/// `T: Pod` has no padding, every byte is initialized — nothing uninitialized
+/// crosses the boundary.
+#[must_use]
+pub fn pod_bytes<T: Pod>(slice: &[T]) -> &[u8] {
+    // SAFETY: `T: Pod` is `repr(C)` with no padding, so all `size_of_val(slice)`
+    // bytes are initialized and any pattern is a valid `u8`. The result borrows
+    // `slice`, so it cannot outlive it.
+    unsafe {
+        core::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), core::mem::size_of_val(slice))
+    }
+}
+
+/// Copy `bytes` into a `Vec<T>` — the inverse of [`pod_bytes`]. Copies (so `bytes`
+/// needs no particular alignment). Fails if `bytes` is not a whole number of `T`s.
+pub fn from_pod_bytes<T: Pod>(bytes: &[u8]) -> Result<Vec<T>, Error> {
+    let size = core::mem::size_of::<T>();
+    if size == 0 || !bytes.len().is_multiple_of(size) {
+        return Err(Error::SchemaMismatch);
+    }
+    let mut out = Vec::with_capacity(bytes.len() / size);
+    for chunk in bytes.chunks_exact(size) {
+        // SAFETY: `chunk` is exactly `size_of::<T>()` bytes and `T: Pod` accepts
+        // any bit pattern; `read_unaligned` tolerates `bytes`' arbitrary alignment.
+        out.push(unsafe { chunk.as_ptr().cast::<T>().read_unaligned() });
+    }
+    Ok(out)
+}
+
 /// `#[derive(Schema)]` from the `hitch-derive` crate, re-exported so a consumer
 /// writes `#[derive(hitch::Schema)]` against this one dependency (the serde
 /// convention). Behind the default `derive` feature.
 #[cfg(feature = "derive")]
 pub use hitch_derive::Schema;
+
+/// `#[derive(Pod)]` — see [`Pod`]. Generates the `unsafe impl` only after
+/// compile-checking `#[repr(C)]`, all-fields-`Pod`, and no padding. Behind the
+/// default `derive` feature.
+#[cfg(feature = "derive")]
+pub use hitch_derive::Pod;
 
 /// Items the derived code references by absolute path, so generated code needs
 /// nothing in the consumer's scope. Not a stable API.

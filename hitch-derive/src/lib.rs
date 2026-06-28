@@ -14,7 +14,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use syn::{parse_macro_input, Attribute, Data, DeriveInput, Fields};
 
 #[proc_macro_derive(Schema)]
 pub fn derive_schema(input: TokenStream) -> TokenStream {
@@ -62,6 +62,80 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
         }
     }
     .into()
+}
+
+/// `#[derive(Pod)]` for [`hitch::Pod`]: generate the `unsafe impl` only when the
+/// type is provably safe to reinterpret as bytes. The generated code compile-time
+/// checks all three obligations, so the `unsafe` is gated, not trusted:
+///
+/// - **`#[repr(C)]`** (and not `packed`) — checked by reading the attribute;
+/// - **every field is `Pod`** — `__assert_pod::<FieldTy>()` fails to resolve for a
+///   pointer, reference, `String`, `bool`, etc.;
+/// - **no padding** — a `const` assertion that `size_of::<T>()` equals the sum of
+///   the field sizes (padding would make the whole larger).
+///
+/// Only non-generic structs qualify; enums and unions are rejected.
+#[proc_macro_derive(Pod)]
+pub fn derive_pod(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+
+    if let Some(param) = input.generics.params.first() {
+        return syn::Error::new_spanned(param, "#[derive(Pod)] does not support generics")
+            .to_compile_error()
+            .into();
+    }
+    let Data::Struct(data) = &input.data else {
+        return syn::Error::new_spanned(name, "#[derive(Pod)] supports only structs")
+            .to_compile_error()
+            .into();
+    };
+    if !is_repr_c(&input.attrs) {
+        return syn::Error::new_spanned(
+            name,
+            "#[derive(Pod)] requires #[repr(C)] (and not `packed`)",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let field_types = data.fields.iter().map(|field| &field.ty).collect::<Vec<_>>();
+    quote! {
+        // SAFETY: the `const` block below proves repr(C), all-fields-Pod, and
+        // no-padding at compile time; if any fails, this item does not compile.
+        unsafe impl hitch::Pod for #name {}
+        const _: () = {
+            const fn __assert_pod<__T: hitch::Pod>() {}
+            #( __assert_pod::<#field_types>(); )*
+            ::core::assert!(
+                ::core::mem::size_of::<#name>()
+                    == 0 #( + ::core::mem::size_of::<#field_types>() )*,
+                "#[derive(Pod)] requires a type with no padding",
+            );
+        };
+    }
+    .into()
+}
+
+/// Is `#[repr(C)]` present and `packed` absent? (`packed` would make field
+/// references unaligned, unsound to expose.)
+fn is_repr_c(attrs: &[Attribute]) -> bool {
+    let mut has_c = false;
+    let mut packed = false;
+    for attr in attrs {
+        if attr.path().is_ident("repr") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("C") {
+                    has_c = true;
+                }
+                if meta.path.is_ident("packed") {
+                    packed = true;
+                }
+                Ok(())
+            });
+        }
+    }
+    has_c && !packed
 }
 
 /// `hitch::TypeSchema::Product { type_name, fields }` for a set of fields.
