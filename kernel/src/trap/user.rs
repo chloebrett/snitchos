@@ -139,6 +139,7 @@ pub static BADGE_HANDOUT_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE
 pub static FS_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_ELF"));
 pub static FS_SERVER_SEEDED_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_SEEDED_ELF"));
 pub static FS_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_CLIENT_ELF"));
+pub static SPAWN_IMAGE_DEMO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAWN_IMAGE_DEMO_ELF"));
 
 /// The counter a U-mode page fault bumps — the isolation firewall doing its
 /// job. Registered alongside the other userspace counters in [`init_metric`];
@@ -359,6 +360,10 @@ pub static FS_CLIENT: ProgramSpec = ipc_user(FS_CLIENT_ELF, Rights::SEND.bits())
 pub static FS_SERVER_SEEDED: ProgramSpec =
     ipc_user(FS_SERVER_SEEDED_ELF, Rights::RECV.bits() | Rights::MINT.bits());
 
+/// `workload=spawn-image`: reads `/bin/spawnee` off the (seeded) filesystem and
+/// spawns it via `SpawnImage`. Holds `SEND` on the FS endpoint (to read the ELF).
+pub static SPAWN_IMAGE_DEMO: ProgramSpec = ipc_user(SPAWN_IMAGE_DEMO_ELF, Rights::SEND.bits());
+
 /// The single entry function for every userspace program. The scheduler has
 /// switched us in and our `arg` word holds our [`ProgramSpec`] address (set by
 /// [`spawn_program`]); resolve it and launch. Never returns.
@@ -405,24 +410,40 @@ fn cap_object_kind(object: kernel_core::cap::Object) -> protocol::CapObject {
     }
 }
 
-/// A pending `Spawn`: the program image plus the caps the parent delegated.
-/// Heap-allocated by [`spawn_process_with_caps`], its pointer stashed in the
-/// child task's arg, and reclaimed by [`spawned_entry`] when the child first runs.
+/// The image a spawned child runs: an embedded program (`&'static`, shared with
+/// `Spawn`) or a caller-supplied buffer copied in for `SpawnImage` (owned, freed
+/// after it's mapped).
+enum ProgramImage {
+    Embedded(&'static [u8]),
+    Owned(alloc::boxed::Box<[u8]>),
+}
+
+/// A pending spawn: the program image plus the caps the parent delegated.
+/// Heap-allocated by [`spawn_process_with_caps`]/[`spawn_image_with_caps`], its
+/// pointer stashed in the child task's arg, and reclaimed by [`spawned_entry`]
+/// when the child first runs.
 struct SpawnRequest {
-    image: &'static [u8],
+    image: ProgramImage,
     /// Each delegated cap paired with its source holding's global cap id (the
     /// `parent_cap_id` for the child's `CapEvent::Transferred`).
     delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
 }
 
-/// Task entry for a `Spawn`-created child: reclaim its [`SpawnRequest`] from the
-/// task arg, then build + enter the process with bootstrap + delegated caps.
+/// Task entry for a spawned child: reclaim its [`SpawnRequest`] from the task
+/// arg, then build + enter the process with bootstrap + delegated caps. The
+/// `Box<SpawnRequest>` (and any owned image inside it) is freed here — for an
+/// owned image, `run_image_with_caps` drops it right after the load.
 pub extern "C" fn spawned_entry() -> ! {
     let arg = crate::sched::current_task_arg();
     // SAFETY: `arg` is the raw pointer of a `Box<SpawnRequest>` leaked by
-    // `spawn_process_with_caps` for exactly this task; reclaimed once here.
+    // `spawn_process_with_caps`/`spawn_image_with_caps` for exactly this task;
+    // reclaimed once here.
     let req = unsafe { alloc::boxed::Box::from_raw(arg as *mut SpawnRequest) };
-    run_with_caps(req.image, req.delegated)
+    let SpawnRequest { image, delegated } = *req;
+    match image {
+        ProgramImage::Embedded(image) => run_with_caps(image, delegated),
+        ProgramImage::Owned(image) => run_image_with_caps(image, delegated),
+    }
 }
 
 /// Spawn a child task running `image` with `delegated` caps, on `hart` at
@@ -436,7 +457,23 @@ pub fn spawn_process_with_caps(
     delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
     priority: kernel_core::sched::Priority,
 ) -> kernel_core::sched::TaskId {
-    let req = alloc::boxed::Box::new(SpawnRequest { image, delegated });
+    let req = alloc::boxed::Box::new(SpawnRequest { image: ProgramImage::Embedded(image), delegated });
+    let arg = alloc::boxed::Box::into_raw(req) as usize;
+    crate::sched::spawn_on_with_arg(hart, name, spawned_entry, arg, priority)
+}
+
+/// Spawn a child task running a **caller-supplied ELF buffer** (`image`) with
+/// `delegated` caps — the `SpawnImage` counterpart to [`spawn_process_with_caps`].
+/// The owned buffer rides in the [`SpawnRequest`] and is freed once the child
+/// maps it (see [`run_image_with_caps`]).
+pub fn spawn_image_with_caps(
+    hart: usize,
+    name: &str,
+    image: alloc::boxed::Box<[u8]>,
+    delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
+    priority: kernel_core::sched::Priority,
+) -> kernel_core::sched::TaskId {
+    let req = alloc::boxed::Box::new(SpawnRequest { image: ProgramImage::Owned(image), delegated });
     let arg = alloc::boxed::Box::into_raw(req) as usize;
     crate::sched::spawn_on_with_arg(hart, name, spawned_entry, arg, priority)
 }
@@ -552,6 +589,15 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
             ProgramSpawn { name: "stitch_repl", program: &STITCH_REPL_IPC, priority: Priority::Normal },
         ],
     }),
+    // SpawnImage demo: the seeded FS server (holding `/bin/spawnee`) plus a client
+    // that reads that ELF off the filesystem and spawns it from the buffer.
+    (WorkloadKind::SpawnImage, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "fs_server", program: &FS_SERVER_SEEDED, priority: Priority::Normal },
+            ProgramSpawn { name: "spawn_image_demo", program: &SPAWN_IMAGE_DEMO, priority: Priority::Normal },
+        ],
+    }),
     // Userspace-defined metrics: a single probe that names + emits its own metric.
     (WorkloadKind::Probe, UserLayout {
         needs_endpoint: false,
@@ -656,9 +702,13 @@ fn run(image: &'static [u8]) -> ! {
 /// `Spawn`'s parent-delegated caps — inserted after the bootstrap telemetry/span
 /// pair (Q-A: a child is always born observable; the delegated caps occupy
 /// handles `2..` in order). Never returns.
-fn run_with_caps(
-    image: &'static [u8],
+/// Build a user process with bootstrap + `delegated` caps, then load its image
+/// via `load_image` and enter it. The image source is pluggable: an embedded
+/// `&'static` slice ([`run_with_caps`]) or a caller-supplied owned buffer that
+/// `load_image` frees once mapped ([`run_image_with_caps`]). Never returns.
+fn run_loaded_with_caps(
     delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
+    load_image: impl FnOnce(usize) -> Result<Loaded, LoadError>,
 ) -> ! {
     // Each process gets its own root page table (kernel high-half shared in).
     let root_pa = mmu::new_user_root().expect("userspace: no frame for user root page table");
@@ -725,7 +775,7 @@ fn run_with_caps(
     // Hand the process its bootstrap capability *by value*: the kernel sets
     // `a0` to the granted handle at entry, so the program receives its caps
     // instead of assuming a well-known handle. Neither side hardcodes a slot.
-    match load(process.root_pa, image) {
+    match load_image(process.root_pa) {
         Ok(loaded) => enter(
             loaded,
             root_pa,
@@ -735,6 +785,28 @@ fn run_with_caps(
         ),
         Err(e) => panic!("userspace load failed: {e:?}"),
     }
+}
+
+/// Run an embedded program image (the `Spawn` path) with `delegated` caps.
+fn run_with_caps(
+    image: &'static [u8],
+    delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
+) -> ! {
+    run_loaded_with_caps(delegated, |root_pa| load(root_pa, image))
+}
+
+/// Run a caller-supplied ELF buffer (the `SpawnImage` path) with `delegated`
+/// caps. The owned `image` is dropped the moment it's mapped — before entering
+/// U-mode — so a per-spawn ELF copy isn't leaked for the process's lifetime.
+fn run_image_with_caps(
+    image: alloc::boxed::Box<[u8]>,
+    delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
+) -> ! {
+    run_loaded_with_caps(delegated, move |root_pa| {
+        let loaded = load(root_pa, &image);
+        drop(image);
+        loaded
+    })
 }
 
 /// Like [`run`], but additionally grants the process an [`Endpoint`] capability

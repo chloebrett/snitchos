@@ -32,34 +32,14 @@ fn fence_via_uart_lsr() {
     unsafe { core::ptr::read_volatile(lsr as *const u8) };
 }
 
-pub mod stack_canary {
-    //! Kernel-stack guard Tier-A smoke (`workload=stack-canary`): a kernel task
-    //! deliberately clobbers its *own* stack canary (a controlled write to its
-    //! lowest bytes, `sp` untouched), then yields/spins. The prompt per-switch
-    //! check (if a peer is ready) or the heartbeat backstop then detects the
-    //! breach, snitches `Log("kernel stack overflow: task …")`, and panics —
-    //! proving the detect→name→halt path deterministically, without the
-    //! corruption roulette of a real overflow.
-
-    /// Entry for the smoke task. Never returns: either the per-switch check
-    /// panics on the first `yield_now`, or it spins until the heartbeat backstop
-    /// halts the kernel.
-    pub extern "C" fn smoke_body() -> ! {
-        crate::sched::clobber_current_stack_canary();
-        loop {
-            crate::sched::yield_now();
-        }
-    }
-}
-
 pub mod stack_guard {
     //! Kernel-stack guard Tier-B smoke (`workload=stack-guard`): a kernel task
     //! deliberately stores into its *own* unmapped guard page from a context with
     //! full stack headroom, faulting at the exact store. The trap handler
     //! recognizes the guard region, snitches `Log("kernel stack overflow: task …")`,
-    //! and panics — proving the fault→name→halt path deterministically (the Tier-B
-    //! analog of the stack-canary smoke), without the double-fault risk of a deep
-    //! real overflow.
+    //! and panics — proving the fault→name→halt path deterministically, without the
+    //! double-fault risk of a deep real overflow (which `stack-overflow-deep`
+    //! exercises).
 
     /// Entry for the smoke task. Never returns: the guard write faults and the
     /// trap handler halts the kernel (the spin is unreachable).

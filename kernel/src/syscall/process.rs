@@ -93,7 +93,6 @@ pub(super) fn handle_wait_any(frame: &mut TrapFrame) {
 /// child's task id in `a0` (or `usize::MAX` on refusal). Ambient like `Yield`,
 /// but a process can only delegate authority it already holds.
 pub(super) fn handle_spawn(frame: &mut TrapFrame) {
-    use kernel_core::cap::Handle;
     use protocol::RefusalReason;
     use snitchos_abi::Syscall;
 
@@ -110,45 +109,13 @@ pub(super) fn handle_spawn(frame: &mut TrapFrame) {
         return;
     };
 
-    // Read the caller's `[u32; N]` handle array (bounded).
-    const MAX_DELEGATE: usize = 16;
-    let n = frame.a2 as usize;
-    if n > MAX_DELEGATE {
-        super::refuse(frame, sc, RefusalReason::BadUserRange);
-        return;
-    }
-    let mut handles: alloc::vec::Vec<Handle> = alloc::vec::Vec::new();
-    if n > 0 {
-        let mut buf = [0u8; MAX_DELEGATE * core::mem::size_of::<u32>()];
-        let byte_len = n * core::mem::size_of::<u32>();
-        let Some(bytes) = crate::user::copy_from_user(frame.a1 as usize, byte_len, &mut buf) else {
-            super::refuse(frame, sc, RefusalReason::BadUserRange);
+    // Resolve + delegate the caller's `[u32; N]` handle array (a1 = ptr, a2 = N).
+    let delegated = match delegate_from_user(proc, frame.a1 as usize, frame.a2 as usize) {
+        Ok(d) => d,
+        Err(reason) => {
+            super::refuse(frame, sc, reason);
             return;
-        };
-        handles = bytes
-            .chunks_exact(core::mem::size_of::<u32>())
-            .map(|c| Handle::from_raw(u32::from_le_bytes([c[0], c[1], c[2], c[3]])))
-            .collect();
-    }
-
-    // Delegate against the caller's table — all-or-nothing (lock released before
-    // we spawn, so the child build never contends on the parent's table). Pair
-    // each delegated cap with its **source holding's** global cap id, so the
-    // child's `CapEvent::Transferred` can name it as `parent_cap_id` (the
-    // derivation edge). `cap_id_of` resolves for every handle `delegate` accepted.
-    let result = {
-        let caps = proc.caps.lock();
-        kernel_core::cap::delegate(&caps, &handles).map(|caps_vec| {
-            handles
-                .iter()
-                .zip(caps_vec)
-                .map(|(handle, cap)| (cap, caps.cap_id_of(*handle).unwrap_or(0)))
-                .collect::<alloc::vec::Vec<_>>()
-        })
-    };
-    let Ok(delegated) = result else {
-        super::refuse(frame, sc, RefusalReason::CapNotFound);
-        return;
+        }
     };
 
     // Build + queue the child on this hart; hand back its task id.
@@ -161,6 +128,117 @@ pub(super) fn handle_spawn(frame: &mut TrapFrame) {
     );
     // Record parentage so the caller can later `WaitAny` and have this child's
     // exit matched to it.
+    crate::sched::note_spawn(crate::sched::current_task_id(), child);
+    frame.a0 = u64::from(child.0);
+}
+
+/// Copy the caller's `[u32; N]` delegate-handle array (`ptr`/`n`) and resolve it
+/// against the caller's `CapTable` into `(cap, parent_cap_id)` pairs — the shared
+/// front half of `Spawn`/`SpawnImage`. **All-or-nothing**: an unheld handle
+/// refuses the whole set. Pairs each cap with its source holding's global cap id
+/// so the child's `CapEvent::Transferred` can name the derivation edge. `Err`
+/// carries the refusal reason (bad range, or an unheld handle).
+fn delegate_from_user(
+    proc: &crate::process::Process,
+    ptr: usize,
+    n: usize,
+) -> Result<alloc::vec::Vec<(kernel_core::cap::Capability, u64)>, protocol::RefusalReason> {
+    use kernel_core::cap::Handle;
+    use protocol::RefusalReason;
+
+    const MAX_DELEGATE: usize = 16;
+    if n > MAX_DELEGATE {
+        return Err(RefusalReason::BadUserRange);
+    }
+    let mut handles: alloc::vec::Vec<Handle> = alloc::vec::Vec::new();
+    if n > 0 {
+        let mut buf = [0u8; MAX_DELEGATE * core::mem::size_of::<u32>()];
+        let byte_len = n * core::mem::size_of::<u32>();
+        let bytes =
+            crate::user::copy_from_user(ptr, byte_len, &mut buf).ok_or(RefusalReason::BadUserRange)?;
+        handles = bytes
+            .chunks_exact(core::mem::size_of::<u32>())
+            .map(|c| Handle::from_raw(u32::from_le_bytes([c[0], c[1], c[2], c[3]])))
+            .collect();
+    }
+    // Lock released with the returned `Vec` built, so the child build never
+    // contends on the parent's table.
+    let caps = proc.caps.lock();
+    kernel_core::cap::delegate(&caps, &handles)
+        .map(|caps_vec| {
+            handles
+                .iter()
+                .zip(caps_vec)
+                .map(|(handle, cap)| (cap, caps.cap_id_of(*handle).unwrap_or(0)))
+                .collect()
+        })
+        .map_err(|_| RefusalReason::CapNotFound)
+}
+
+/// Spawn a userspace process from a **caller-supplied ELF image** (v0.13,
+/// `SpawnImage`) — the path for running an executable read out of the filesystem,
+/// vs [`handle_spawn`]'s kernel-embedded registry. `a0`/`a1` = the ELF bytes
+/// (ptr/len) in the caller's space, `a2`/`a3` = the delegate handle array
+/// (ptr/`N`). The kernel copies the image into an owned heap buffer (freed once
+/// loaded), delegates the named caps all-or-nothing, and spawns. Returns the
+/// child's task id in `a0` (or `usize::MAX` on refusal).
+pub(super) fn handle_spawn_image(frame: &mut TrapFrame) {
+    use protocol::RefusalReason;
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::SpawnImage as u8;
+
+    let Some(proc) = super::current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    // Copy the ELF image out of user memory into an owned kernel buffer. Bounded
+    // so a bad/huge length can't ask the kernel to allocate unboundedly.
+    const MAX_IMAGE: usize = 4 * 1024 * 1024;
+    let len = frame.a1 as usize;
+    if len == 0 || len > MAX_IMAGE {
+        super::refuse(frame, sc, RefusalReason::BadUserRange);
+        return;
+    }
+    // `copy_from_user` caps each copy at `MAX_USER_STR_LEN` (it was built for
+    // name-sized copies), so pull the ELF across in chunks.
+    let mut image = alloc::vec![0u8; len];
+    let mut off = 0;
+    while off < len {
+        let take = core::cmp::min(kernel_core::mmu::MAX_USER_STR_LEN, len - off);
+        if crate::user::copy_from_user(frame.a0 as usize + off, take, &mut image[off..off + take])
+            .is_none()
+        {
+            super::refuse(frame, sc, RefusalReason::BadUserRange);
+            return;
+        }
+        off += take;
+    }
+
+    // Validate the ELF *here*, synchronously, so a malformed user image refuses
+    // cleanly — the child's later `load` panics on a bad image, and a userspace
+    // program must not be able to panic the kernel. (`UnknownProgram` = no
+    // runnable program in this image.)
+    if kernel_core::elf::parse(&image).is_err() {
+        super::refuse(frame, sc, RefusalReason::UnknownProgram);
+        return;
+    }
+
+    let delegated = match delegate_from_user(proc, frame.a2 as usize, frame.a3 as usize) {
+        Ok(d) => d,
+        Err(reason) => {
+            super::refuse(frame, sc, reason);
+            return;
+        }
+    };
+
+    let child = crate::user::spawn_image_with_caps(
+        crate::percpu::current_hartid(),
+        "spawned-image",
+        image.into_boxed_slice(),
+        delegated,
+        kernel_core::sched::Priority::Normal,
+    );
     crate::sched::note_spawn(crate::sched::current_task_id(), child);
     frame.a0 = u64::from(child.0);
 }

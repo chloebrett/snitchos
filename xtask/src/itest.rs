@@ -211,7 +211,6 @@ catalog! {
     wfi "sched-task-exits-cleanly"        scenarios::sched_task_exits_cleanly       [sched]         {"demo"};
     wfi "task-stack-high-water"           scenarios::task_stack_high_water_reported [sched]         {"demo"};
     wfi "default-boot-starts-init"        scenarios::default_boot_starts_init       [boot];
-    wfi "stack-overflow-detected"         scenarios::stack_overflow_detected        [sched]         {"stack-canary"};
     wfi "stack-guard-fault-detected"      scenarios::stack_guard_fault_detected     [sched]         {"stack-guard"};
     wfi "deep-overflow-reports-cleanly"   scenarios::deep_overflow_reports_cleanly  [sched]         {"stack-overflow-deep"};
     wfi "block-wake-smoke"                scenarios::block_wake_smoke               [sched]         {"block-wake"};
@@ -240,6 +239,7 @@ catalog! {
     wfi "stitch-telemetry-on-the-wire"    scenarios::stitch_telemetry_on_the_wire   [userspace, stitch] {"stitch-repl"};
     wfi "stitch-fs-loads-and-runs"        scenarios::stitch_fs_loads_and_runs       [userspace, stitch, fs] {"stitch-fs"};
     wfi "stitch-fs-loads-nested"          scenarios::stitch_fs_loads_nested         [userspace, stitch, fs] {"stitch-fs"};
+    wfi "spawn-image-loads-from-fs"       scenarios::spawn_image_loads_from_fs      [userspace, spawn, fs] {"spawn-image"};
     wfi "stitch-reads-a-line"             scenarios::stitch_reads_a_line            [userspace, stitch] {"stitch-repl"};
     wfi "stitch-print-writes-to-console"  scenarios::stitch_print_writes_to_console [userspace, stitch] {"stitch-repl"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};

@@ -41,6 +41,7 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("fs-server", "SNITCHOS_FS_SERVER_ELF"),
     ("fs-server-seeded", "SNITCHOS_FS_SERVER_SEEDED_ELF"),
     ("fs-client", "SNITCHOS_FS_CLIENT_ELF"),
+    ("spawn-image-demo", "SNITCHOS_SPAWN_IMAGE_DEMO_ELF"),
     ("notify_waiter", "SNITCHOS_NOTIFY_WAITER_ELF"),
     ("notify_signaller", "SNITCHOS_NOTIFY_SIGNALLER_ELF"),
 ];
@@ -77,38 +78,46 @@ fn build_and_embed_user(kernel_dir: &str) {
     let user_target_dir = format!("{out_dir}/user-target");
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let mut cmd = Command::new(cargo);
-    cmd.current_dir(ws).args([
-        "build",
-        "-p",
-        "hello",
-        "-p",
-        "fs",
-        "--target",
-        USER_TARGET,
-        "--target-dir",
-        &user_target_dir,
-    ]);
-    if profile == "release" {
-        cmd.arg("--release");
-    }
-    // Don't leak the outer kernel build's flags into the user build — let it
-    // resolve config exactly like a standalone `cargo build -p hello`.
-    cmd.env_remove("CARGO_ENCODED_RUSTFLAGS").env_remove("RUSTFLAGS");
-    // Cargo prints human/compiler output to stderr (inherited → failures are
-    // visible); keep its stdout off OUR stdout, which cargo parses for the
-    // `cargo:` directive lines.
-    cmd.stdout(Stdio::null()).stderr(Stdio::inherit());
-
-    let status = cmd
-        .status()
-        .expect("failed to invoke cargo to build the userspace programs");
-    assert!(
-        status.success(),
-        "userspace program build failed (errors above) — refusing to embed a stale binary"
-    );
-
     let bin_dir = format!("{user_target_dir}/{USER_TARGET}/{profile}");
+
+    // Run a userspace cargo build for `packages`, sharing the target/flags. We
+    // build in two phases — `hello` first (it provides `spawnee`), then `fs` — so
+    // the `spawnee` ELF can be copied into the fs image *before* `fs-server-seeded`
+    // bakes its seed at compile time (otherwise the executable wouldn't be in the
+    // filesystem to run via `SpawnImage`).
+    let build = |packages: &[&str]| {
+        let mut cmd = Command::new(&cargo);
+        cmd.current_dir(ws).arg("build");
+        for p in packages {
+            cmd.args(["-p", p]);
+        }
+        cmd.args(["--target", USER_TARGET, "--target-dir", &user_target_dir]);
+        if profile == "release" {
+            cmd.arg("--release");
+        }
+        // Don't leak the outer kernel build's flags into the user build — let it
+        // resolve config exactly like a standalone `cargo build -p hello`.
+        cmd.env_remove("CARGO_ENCODED_RUSTFLAGS").env_remove("RUSTFLAGS");
+        // Cargo prints human/compiler output to stderr (inherited → failures are
+        // visible); keep its stdout off OUR stdout, which cargo parses for the
+        // `cargo:` directive lines.
+        cmd.stdout(Stdio::null()).stderr(Stdio::inherit());
+        let status = cmd
+            .status()
+            .expect("failed to invoke cargo to build the userspace programs");
+        assert!(
+            status.success(),
+            "userspace program build failed (errors above) — refusing to embed a stale binary"
+        );
+    };
+
+    build(&["hello"]);
+    // Publish `spawnee` into the fs image so it's runnable via `SpawnImage` (the
+    // shell/a client reads it from the filesystem and spawns the bytes). The
+    // build-time injection of a Rust executable into the seed.
+    copy_if_different(&format!("{bin_dir}/spawnee"), &ws.join("fs-image/bin/spawnee"));
+    build(&["fs"]);
+
     for (bin, env_var) in USER_PROGRAMS {
         embed(&format!("{bin_dir}/{bin}"), env_var);
     }
@@ -136,6 +145,20 @@ fn build_and_embed_user(kernel_dir: &str) {
     ] {
         println!("cargo:rerun-if-changed={}", ws.join(p).display());
     }
+}
+
+/// Copy `src` → `dst` only when the contents differ — so a rebuild that produces
+/// an identical ELF doesn't touch `dst`'s mtime (which would needlessly retrigger
+/// the `fs` seed rebuild that watches `fs-image/`). Creates `dst`'s parent dir.
+fn copy_if_different(src: &str, dst: &Path) {
+    let new = std::fs::read(src).unwrap_or_else(|e| panic!("read {src}: {e}"));
+    if std::fs::read(dst).ok().as_deref() == Some(new.as_slice()) {
+        return;
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).expect("create fs-image/bin");
+    }
+    std::fs::write(dst, &new).unwrap_or_else(|e| panic!("write {}: {e}", dst.display()));
 }
 
 fn embed(path: &str, env_var: &str) {

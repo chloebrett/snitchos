@@ -159,6 +159,33 @@ pub fn spawn(program_id: usize, handles: &[u32]) -> Option<u32> {
     if ret == usize::MAX { None } else { Some(ret as u32) }
 }
 
+/// Spawn a child process from a **caller-supplied ELF image** (`SpawnImage`) —
+/// the path for running an executable read out of the filesystem, vs [`spawn`]'s
+/// kernel-embedded registry. `image` is the ELF bytes; `handles` are caps to
+/// delegate from this process's own table. Returns the child's task id, or `None`
+/// if refused (bad range, oversized/malformed image, or an unheld handle). The
+/// child is born with bootstrap telemetry/span plus the delegated caps at handles
+/// `2..` (see [`delegated_handle`]).
+#[must_use]
+pub fn spawn_image(image: &[u8], handles: &[u32]) -> Option<u32> {
+    let ret: usize;
+    // SAFETY: `ecall`; the kernel copies `image` in (range-validated, bounded),
+    // loads it, resolves every handle against this process's table (refusing the
+    // whole spawn on any miss), and returns the child task id, or `usize::MAX` on
+    // refusal. Neither `image` nor `handles` is dereferenced in U-mode.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::SpawnImage as usize,
+            inlateout("a0") image.as_ptr() as usize => ret,
+            in("a1") image.len(),
+            in("a2") handles.as_ptr() as usize,
+            in("a3") handles.len(),
+        );
+    }
+    if ret == usize::MAX { None } else { Some(ret as u32) }
+}
+
 /// Create a fresh IPC endpoint, returning an owning [`Endpoint`] capability the
 /// caller holds with `RECV | MINT` (`EndpointCreate` syscall). Ambient — making
 /// your own endpoint needs no prior cap; mint badged `SEND` caps from it for

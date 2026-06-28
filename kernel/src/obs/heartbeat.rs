@@ -278,9 +278,6 @@ fn emit_heap_metrics(m: &Metrics) {
 }
 
 fn emit_sched_metrics(m: &Metrics) {
-    // Tier-A overflow backstop: detect any task whose stack canary was breached
-    // (the safe path — runs on the heartbeat's own stack). Snitches + halts if so.
-    sched::check_stack_canaries();
     let sched_snap = sched::stats();
     emit!(m, sched_runqueue_depth = sched_snap.runqueue_depth);
     emit!(m, sched_tasks_total    = sched_snap.tasks_total);

@@ -42,3 +42,8 @@ target
 # at-any-depth match unambiguous (a trailing-slash-only pattern
 # anchored unexpectedly here on git 2.50).
 .itest-runs
+
+# Built executables injected into the fs image at build time (kernel/build.rs
+# copies them here for SpawnImage). Source files in fs-image/ are committed; the
+# generated ELFs under fs-image/bin/ are not.
+fs-image/bin/

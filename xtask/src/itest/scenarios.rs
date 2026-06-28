@@ -1164,28 +1164,6 @@ pub fn task_stack_high_water_reported(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
-/// Kernel-stack overflow *detection* end-to-end (`workload=stack-canary`): a
-/// kernel task (`stack_canary_smoke`) deliberately clobbers its own stack canary,
-/// then the per-switch check or the heartbeat backstop detects the breach,
-/// **snitches a `Log`** ("kernel stack overflow: task … (stack_canary_smoke) …"),
-/// and panics. Asserts that observable `Log` reaches the wire and names the task —
-/// proving the detect→name→halt path (not just the gauge / pure logic).
-///
-/// (This exercises a *controlled* canary clobber, so detection runs on an
-/// otherwise-intact stack and is deterministic; surviving a *real* overflow
-/// gracefully is Tier B's job — guard pages fault at the store.)
-pub fn stack_overflow_detected(h: &mut View) -> Result<(), String> {
-    h.wait_for(SEC * 20, |f, _| {
-        matches!(f, OwnedFrame::Log { msg, .. }
-            if msg.contains("kernel stack overflow") && msg.contains("stack_canary_smoke"))
-    })
-    .ok_or(
-        "no Log naming a 'kernel stack overflow' for stack_canary_smoke within 20s — the canary \
-         breach wasn't detected + snitched (or the offending task name wasn't carried in the Log)",
-    )?;
-    Ok(())
-}
-
 /// Kernel-stack guard-page fault end-to-end (`workload=stack-guard`, Tier B): a
 /// kernel task (`stack_guard_smoke`) deliberately stores into its own *unmapped*
 /// guard page from a context with full stack headroom. The store page-faults at
@@ -2659,6 +2637,30 @@ pub fn stitch_fs_loads_nested(h: &mut View) -> Result<(), String> {
     })
     .ok_or(
         "no 'greeted'=1 metric within 30s — path-walking to /lib/greet.st (nested dir) didn't resolve",
+    )?;
+
+    Ok(())
+}
+
+/// `workload=spawn-image`: the `SpawnImage` syscall — run a program from a
+/// **caller-supplied ELF read off the filesystem** (vs the embedded `Spawn`
+/// registry). The `spawn-image-demo` client first passes a malformed image, which
+/// the kernel **refuses** (`SyscallRefused` for SpawnImage) instead of crashing;
+/// then it reads the real `spawnee` ELF from `/bin/spawnee` and spawns it from the
+/// buffer, delegating its span cap — so the child opens `spawnee.via_delegated`,
+/// proving the image loaded, ran, and the delegation arrived. The full chain:
+/// fs-image executable → fs read → SpawnImage → load + delegate + run.
+pub fn spawn_image_loads_from_fs(h: &mut View) -> Result<(), String> {
+    let spawn_image = snitchos_abi::Syscall::SpawnImage as u8;
+    h.wait_for(SEC * 30, |f, _| {
+        matches!(f, OwnedFrame::SyscallRefused { syscall, .. } if *syscall == spawn_image)
+    })
+    .ok_or(
+        "no SyscallRefused for SpawnImage within 30s — a malformed image wasn't rejected (the kernel may have crashed)",
+    )?;
+
+    h.wait_for(SEC * 30, is_span_start_named("spawnee.via_delegated")).ok_or(
+        "no 'spawnee.via_delegated' span within 30s — SpawnImage didn't load+run the fs ELF, or the delegated cap didn't arrive",
     )?;
 
     Ok(())

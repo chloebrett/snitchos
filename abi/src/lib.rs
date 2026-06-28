@@ -211,6 +211,16 @@ pub enum Syscall {
     /// `SEND`/`RECV` ends is where the authority split happens. Lets a process
     /// (e.g. `init`) build its own IPC world instead of the kernel pre-creating it.
     EndpointCreate = 25,
+    /// Spawn a new userspace process from a **caller-supplied ELF image** (vs
+    /// [`Self::Spawn`], which selects a kernel-embedded program by id) — the path
+    /// for running an executable read out of the filesystem. `a0` = pointer in
+    /// the caller's space to the ELF bytes, `a1` = their length, `a2` = pointer to
+    /// a `[u32; N]` array of cap handles to delegate, `a3` = `N`. The kernel
+    /// copies the image in, validates + loads it, delegates exactly those caps
+    /// (all-or-nothing, like `Spawn`) plus bootstrap telemetry/span, and returns
+    /// the child's task id in `a0` (or `usize::MAX` on refusal — bad range,
+    /// oversized image, malformed ELF, or an unheld handle).
+    SpawnImage = 26,
 }
 
 impl Syscall {
@@ -246,6 +256,7 @@ impl Syscall {
             23 => Some(Self::WaitNotify),
             24 => Some(Self::WaitAny),
             25 => Some(Self::EndpointCreate),
+            26 => Some(Self::SpawnImage),
             _ => None,
         }
     }
@@ -310,6 +321,7 @@ mod tests {
         assert_eq!(Syscall::WaitNotify as usize, 23);
         assert_eq!(Syscall::WaitAny as usize, 24);
         assert_eq!(Syscall::EndpointCreate as usize, 25);
+        assert_eq!(Syscall::SpawnImage as usize, 26);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Exit));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Yield));
@@ -337,6 +349,7 @@ mod tests {
         assert_eq!(Syscall::from_usize(23), Some(Syscall::WaitNotify));
         assert_eq!(Syscall::from_usize(24), Some(Syscall::WaitAny));
         assert_eq!(Syscall::from_usize(25), Some(Syscall::EndpointCreate));
-        assert_eq!(Syscall::from_usize(26), None);
+        assert_eq!(Syscall::from_usize(26), Some(Syscall::SpawnImage));
+        assert_eq!(Syscall::from_usize(27), None);
     }
 }

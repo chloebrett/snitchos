@@ -63,15 +63,18 @@ FULL itest suite + heavy `--repeat`, both harts (SMP scenarios), and a new
 **deep-overflow** itest (real recursion to the guard → clean named report — the
 capability the exception stack adds; without it this test hangs/double-faults).
 
-## Phase 2 — retire the per-task canary panic (keep the gauge)
+## Phase 2 — retire the per-task canary panic (keep the gauge) — ✅ SHIPPED (2026-06-28)
 
-Once the guard fault reports cleanly on its own, the canary-breach panic is
-redundant. Remove: the `prepare_switch` canary check, `check_stack_canaries`
-(heartbeat), `clobber_current_stack_canary`, the `stack-canary` workload + the
-`stack-overflow-detected` itest, and `kernel_core::stack::canary_intact` /
-`CANARY_BYTES` / sentinel-fill-for-canary. **Keep** `high_water_bytes` + the
-`snitchos.task.<name>.stack_high_water_bytes` gauge — it's independent proactive
-telemetry (the trend), not superseded by the binary guard page.
+**Done.** Removed: the `prepare_switch` canary check (+ the `overflowed` tuple
+plumbing), `report_stack_overflow`, `check_stack_canaries` + its heartbeat call,
+`clobber_current_stack_canary`, `KernelStack::{canary_intact,clobber_canary}`, the
+`stack-canary` workload (`WorkloadKind::StackCanary` + storm body + dispatch +
+parse + host test) and the `stack-overflow-detected` itest, and
+`kernel_core::stack::{canary_intact, CANARY_BYTES}` + their tests. **Kept**
+`SENTINEL` + `fill_sentinel` (the high-water scan needs the sentinel fill),
+`high_water_bytes`, and the `stack_high_water_bytes` gauge (verified by
+`task-stack-high-water`). Guard pages (Tier B) + the exception stack are now the
+sole overflow-detection mechanism. Full suite 90/0, clippy clean.
 
 ## Phase 3 — boot-stack guard page
 
