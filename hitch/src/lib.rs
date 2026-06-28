@@ -128,6 +128,31 @@ impl TypeSchema {
             _ => false,
         }
     }
+
+    /// Is a value produced against `self` (a stage's `out`) consumable against
+    /// `other` (the next stage's `in`)? The structural typecheck behind `~>`. v1 is
+    /// **structural equality modulo `type_name`**: like [`accepts`](Self::accepts),
+    /// field names/order and variant names/order are part of the shape, but the
+    /// `type_name` label is display-only — so a Rust `Table` and a Stitch `Table` of
+    /// the same shape are compatible (cross-language `~>`). Numeric widths are
+    /// distinct shapes: `U32` is not `U64`.
+    #[must_use]
+    pub fn compatible(&self, other: &TypeSchema) -> bool {
+        match (self, other) {
+            (TypeSchema::Seq(a), TypeSchema::Seq(b)) => a.compatible(b),
+            (TypeSchema::Product { fields: a, .. }, TypeSchema::Product { fields: b, .. }) => {
+                a.len() == b.len()
+                    && a.iter().zip(b).all(|((an, at), (bn, bt))| an == bn && at.compatible(bt))
+            }
+            (TypeSchema::Sum { variants: a, .. }, TypeSchema::Sum { variants: b, .. }) => {
+                a.len() == b.len()
+                    && a.iter().zip(b).all(|((an, at), (bn, bt))| an == bn && at.compatible(bt))
+            }
+            // Leaves (and mismatched kinds) carry no `type_name` and no nested
+            // schema, so structural equality is just value equality.
+            (a, b) => a == b,
+        }
+    }
 }
 
 /// A **typed-process interface**: the input/output shapes a program (a `~>` stage)
@@ -146,75 +171,126 @@ pub struct Manifest {
     pub uses: Vec<String>,
 }
 
-/// What shape does a Rust type take in the Hitch model? The static counterpart of
-/// a [`Value`]'s runtime shape: `<T as Schema>::schema()` is the [`TypeSchema`] a
-/// value of `T` conforms to. `#[derive(Schema)]` implements this for structs and
-/// enums by recursing into their fields, which bottom out at the primitive impls
-/// below.
+/// The const-constructible twin of [`TypeSchema`]: the same shape, but built from
+/// `&'static str` / `&'static [..]` so a type's shape can be an associated
+/// `const`. This is what `#[derive(Schema)]` emits, and what a manifest in a
+/// `#[link_section]` static (which must be const) is built from. [`TypeSchema`] is
+/// its runtime, allocating projection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConstSchema {
+    Bool,
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    F32,
+    F64,
+    Str,
+    Bytes,
+    Seq(&'static ConstSchema),
+    Product {
+        type_name: &'static str,
+        fields: &'static [(Option<&'static str>, ConstSchema)],
+    },
+    Sum {
+        type_name: &'static str,
+        variants: &'static [(&'static str, ConstSchema)],
+    },
+}
+
+impl ConstSchema {
+    /// Project to the runtime, allocating [`TypeSchema`].
+    #[must_use]
+    pub fn to_type_schema(&self) -> TypeSchema {
+        match self {
+            ConstSchema::Bool => TypeSchema::Bool,
+            ConstSchema::I8 => TypeSchema::I8,
+            ConstSchema::I16 => TypeSchema::I16,
+            ConstSchema::I32 => TypeSchema::I32,
+            ConstSchema::I64 => TypeSchema::I64,
+            ConstSchema::U8 => TypeSchema::U8,
+            ConstSchema::U16 => TypeSchema::U16,
+            ConstSchema::U32 => TypeSchema::U32,
+            ConstSchema::U64 => TypeSchema::U64,
+            ConstSchema::F32 => TypeSchema::F32,
+            ConstSchema::F64 => TypeSchema::F64,
+            ConstSchema::Str => TypeSchema::Str,
+            ConstSchema::Bytes => TypeSchema::Bytes,
+            ConstSchema::Seq(inner) => TypeSchema::Seq(Box::new(inner.to_type_schema())),
+            ConstSchema::Product { type_name, fields } => TypeSchema::Product {
+                type_name: (*type_name).into(),
+                fields: fields
+                    .iter()
+                    .map(|(name, schema)| (name.map(Into::into), schema.to_type_schema()))
+                    .collect(),
+            },
+            ConstSchema::Sum { type_name, variants } => TypeSchema::Sum {
+                type_name: (*type_name).into(),
+                variants: variants
+                    .iter()
+                    .map(|(name, schema)| ((*name).into(), schema.to_type_schema()))
+                    .collect(),
+            },
+        }
+    }
+}
+
+/// What shape does a Rust type take in the Hitch model? `<T as Schema>::SCHEMA` is
+/// the const [`ConstSchema`] a value of `T` conforms to; `T::schema()` is its
+/// runtime [`TypeSchema`] projection. `#[derive(Schema)]` supplies the const by
+/// recursing into a struct's/enum's fields, which bottom out at the primitive
+/// impls below.
 pub trait Schema {
-    /// This type's shape.
-    fn schema() -> TypeSchema;
+    /// This type's shape, as a `const`.
+    const SCHEMA: ConstSchema;
+
+    /// This type's shape as a runtime [`TypeSchema`] — the default projection of
+    /// [`SCHEMA`](Self::SCHEMA), so a derive need only supply the const.
+    #[must_use]
+    fn schema() -> TypeSchema {
+        Self::SCHEMA.to_type_schema()
+    }
 }
 
 impl Schema for bool {
-    fn schema() -> TypeSchema {
-        TypeSchema::Bool
-    }
-}
-impl Schema for i64 {
-    fn schema() -> TypeSchema {
-        TypeSchema::I64
-    }
-}
-impl Schema for u64 {
-    fn schema() -> TypeSchema {
-        TypeSchema::U64
-    }
-}
-impl Schema for f64 {
-    fn schema() -> TypeSchema {
-        TypeSchema::F64
-    }
-}
-impl Schema for String {
-    fn schema() -> TypeSchema {
-        TypeSchema::Str
-    }
+    const SCHEMA: ConstSchema = ConstSchema::Bool;
 }
 impl Schema for i8 {
-    fn schema() -> TypeSchema {
-        TypeSchema::I8
-    }
+    const SCHEMA: ConstSchema = ConstSchema::I8;
 }
 impl Schema for i16 {
-    fn schema() -> TypeSchema {
-        TypeSchema::I16
-    }
+    const SCHEMA: ConstSchema = ConstSchema::I16;
 }
 impl Schema for i32 {
-    fn schema() -> TypeSchema {
-        TypeSchema::I32
-    }
+    const SCHEMA: ConstSchema = ConstSchema::I32;
+}
+impl Schema for i64 {
+    const SCHEMA: ConstSchema = ConstSchema::I64;
 }
 impl Schema for u8 {
-    fn schema() -> TypeSchema {
-        TypeSchema::U8
-    }
+    const SCHEMA: ConstSchema = ConstSchema::U8;
 }
 impl Schema for u16 {
-    fn schema() -> TypeSchema {
-        TypeSchema::U16
-    }
+    const SCHEMA: ConstSchema = ConstSchema::U16;
 }
 impl Schema for u32 {
-    fn schema() -> TypeSchema {
-        TypeSchema::U32
-    }
+    const SCHEMA: ConstSchema = ConstSchema::U32;
+}
+impl Schema for u64 {
+    const SCHEMA: ConstSchema = ConstSchema::U64;
 }
 impl Schema for f32 {
-    fn schema() -> TypeSchema {
-        TypeSchema::F32
-    }
+    const SCHEMA: ConstSchema = ConstSchema::F32;
+}
+impl Schema for f64 {
+    const SCHEMA: ConstSchema = ConstSchema::F64;
+}
+impl Schema for String {
+    const SCHEMA: ConstSchema = ConstSchema::Str;
 }
 
 /// The Plain-Old-Data primitive: [`Pod`], the zero-copy [`pod_bytes`], and
@@ -244,14 +320,6 @@ pub fn from_pod_bytes<T: Pod>(bytes: &[u8]) -> Result<Vec<T>, Error> {
 /// convention). Behind the default `derive` feature.
 #[cfg(feature = "derive")]
 pub use hitch_derive::Schema;
-
-/// Items the derived code references by absolute path, so generated code needs
-/// nothing in the consumer's scope. Not a stable API.
-#[doc(hidden)]
-pub mod __private {
-    pub use alloc::boxed::Box;
-    pub use alloc::vec::Vec;
-}
 
 /// Something went wrong hitching or unhitching a value.
 #[derive(Debug)]

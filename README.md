@@ -109,6 +109,7 @@ cargo xtask build              # build the kernel ELF
 cargo xtask boot                 # build kernel + run in QEMU
 cargo xtask snemu-boot         # build full kernel + run under the snemu emulator (meta-loop driver)
 cargo xtask snemu-boot --max-steps 3000000  # cap the run at N instruction steps
+cargo xtask snemu-boot --frames  # also decode + dump the telemetry frames snemu captures off the virtio-console
 cargo xtask collect            # build + run collector (OTLP + Prometheus)
 cargo xtask collect -- --text  # also print decoded frames to stdout
 cargo xtask reader             # collector in text-only mode (no docker needed)
