@@ -12,6 +12,7 @@ use crate::natives::NATIVES;
 use crate::ops::{as_bool, eval_binary, eval_unary};
 use crate::parser::parse_program;
 use crate::pattern::eval_match;
+use crate::platform::Platform;
 use crate::telemetry::Telemetry;
 use crate::registry::{
     Registration, bake_contract_defaults, collect_exports, register_builtin_types, register_items,
@@ -98,6 +99,26 @@ pub fn eval_program_with_telemetry(
         None => Err(RuntimeError::new("no `main` function")),
     };
     (result, env.telemetry())
+}
+
+/// Like [`eval_program`], but runs against an installed [`Platform`] backend —
+/// the seam for testing a program's console / cap / proc / fs effects against a
+/// fake (and the eventual `run_shell` entry). Returns `main`'s result.
+///
+/// # Errors
+/// Propagates `main`'s runtime error (including a refused effect like an
+/// undeclared `print`), or reports a missing `main`.
+pub fn eval_program_with_platform(
+    items: &[Item],
+    platform: Rc<dyn Platform>,
+) -> Result<Value, RuntimeError> {
+    let mut all = prelude_items();
+    all.extend_from_slice(items);
+    let env = build_env_in(Env::new().with_platform(platform), &all);
+    match env.lookup("main") {
+        Some(main) => eval_call(&main, &[], &env),
+        None => Err(RuntimeError::new("no `main` function")),
+    }
 }
 
 /// One module of a Stitch program: a name and its parsed top-level items. The

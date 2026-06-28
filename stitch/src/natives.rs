@@ -9,7 +9,7 @@ use core::cmp::Ordering;
 use crate::prelude::*;
 
 use crate::env::Env;
-use crate::interp::apply_values;
+use crate::interp::{apply_values, none, some};
 use crate::ops::value_order;
 use crate::value::{LazySeq, NativeFn, RuntimeError, Step, Value};
 
@@ -34,6 +34,16 @@ pub(crate) const NATIVES: &[NativeFn] = &[
         name: "join",
         arity: 2,
         func: native_join,
+    },
+    NativeFn {
+        name: "print",
+        arity: 1,
+        func: native_print,
+    },
+    NativeFn {
+        name: "readLine",
+        arity: 0,
+        func: native_read_line,
     },
     NativeFn {
         name: "emit",
@@ -347,6 +357,36 @@ fn native_span(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     let result = apply_values(body, &[], env)?;
     env.span_close(name);
     Ok(result)
+}
+
+/// `print(x)` — write `x` (its display form) plus a newline to the console.
+/// Gated by the `ConsoleOut` capability; routes through the installed
+/// [`Platform`](crate::platform::Platform).
+fn native_print(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [value] = args else {
+        return Err(RuntimeError::new("print expects (value)"));
+    };
+    if !env.has_authority("ConsoleOut") {
+        return Err(RuntimeError::new("print requires `uses ConsoleOut`"));
+    }
+    env.platform().write(&format!("{}\n", value.display()));
+    Ok(Value::Unit)
+}
+
+/// `readLine()` — read one finished line of console input (no trailing newline)
+/// as `Some(Str)`, or `None` at end of input. Gated by the `ConsoleIn`
+/// capability — distinct from `ConsoleOut`, so read and write authority split.
+fn native_read_line(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [] = args else {
+        return Err(RuntimeError::new("readLine expects no arguments"));
+    };
+    if !env.has_authority("ConsoleIn") {
+        return Err(RuntimeError::new("readLine requires `uses ConsoleIn`"));
+    }
+    Ok(match env.platform().read_line() {
+        Some(line) => some(Value::Str(line.into())),
+        None => none(),
+    })
 }
 
 /// `emit(name, value)` — record a metric sample. v0 stub for the wire protocol.
@@ -799,8 +839,57 @@ fn native_join(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{run_modules, run_program, run_program_err, run_program_events};
+    use crate::test_support::{
+        run_modules, run_program, run_program_err, run_program_events, run_program_on,
+    };
     use crate::value::{TelemetryEvent, Value};
+
+    use alloc::rc::Rc;
+    use crate::platform::FakePlatform;
+
+    #[test]
+    fn print_without_console_out_is_refused() {
+        // `shout` prints but declares no `uses` — refused even though `main`
+        // holds ConsoleOut (no inheritance across the named-fn boundary).
+        let fake = Rc::new(FakePlatform::new());
+        let err = run_program_on(
+            r#"shout() = print("hi")  main() uses ConsoleOut = shout()"#,
+            fake,
+        )
+        .expect_err("undeclared print must be refused");
+        assert!(err.message().contains("ConsoleOut"), "{}", err.message());
+    }
+
+    #[test]
+    fn print_with_console_out_writes_through_the_platform() {
+        let fake = Rc::new(FakePlatform::new());
+        run_program_on(r#"main() uses ConsoleOut = print("hi")"#, fake.clone())
+            .expect("declared print should run");
+        assert_eq!(fake.output(), "hi\n");
+    }
+
+    #[test]
+    fn read_line_needs_console_in_not_console_out() {
+        // The split: a function holding ConsoleOut still can't read — `readLine`
+        // requires the distinct ConsoleIn capability.
+        let fake = Rc::new(FakePlatform::with_input("note\n"));
+        let err = run_program_on(r"main() uses ConsoleOut = readLine()", fake)
+            .expect_err("readLine needs ConsoleIn, not ConsoleOut");
+        assert!(err.message().contains("ConsoleIn"), "{}", err.message());
+    }
+
+    #[test]
+    fn read_line_with_console_in_returns_the_scripted_line() {
+        let fake = Rc::new(FakePlatform::with_input("note\n"));
+        let value = run_program_on(r"main() uses ConsoleIn = readLine()", fake)
+            .expect("declared readLine should run");
+        match value {
+            Value::Data(d) if d.variant == "Some" => {
+                assert_eq!(d.fields[0].1, Value::Str("note".into()));
+            }
+            other => panic!("expected Some(\"note\"), got {}", other.display()),
+        }
+    }
 
     /// Run a one-liner that uses the `Str` module, returning `main`'s value.
     fn run_str(body: &str) -> Value {
