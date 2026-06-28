@@ -580,6 +580,42 @@ pub fn unmap(va: usize) -> Result<usize, MapError> {
     result
 }
 
+/// Put a guard page below the boot stack (task 0's stack, which lives in the
+/// kernel image and so is covered by a 2 MiB leaf). Splits that leaf into 4 KiB
+/// leaves, then unmaps the `__boot_stack_guard` page — so a boot-stack overflow
+/// faults on it (the trap handler names it) instead of silently corrupting `.bss`.
+///
+/// Call once early in `kmain`, after the higher-half trampoline (the guard symbol
+/// is a higher-half VA) and on the boot hart only (single-hart: no shootdown peer
+/// yet). A split/unmap failure is non-fatal — the boot stack just stays unguarded,
+/// so it logs nothing and returns.
+pub fn guard_boot_stack() {
+    unsafe extern "C" {
+        static __boot_stack_guard: u8;
+    }
+    let guard_va = (&raw const __boot_stack_guard) as usize;
+    // Refine the 2 MiB kernel-image leaf to 4 KiB, then punch out the guard page.
+    if split_huge_leaf(guard_va).is_ok() {
+        let _ = unmap(guard_va);
+    }
+}
+
+/// Split the 2 MiB kernel-image leaf covering `va` into 4 KiB leaves (so a single
+/// page in it can be [`unmap`]ped). Walks the kernel root; the mapping is
+/// unchanged (same PA + perms per page), so only a local `sfence` is needed —
+/// existing translations stay valid. The walk is the host-tested
+/// [`core_mmu::split_huge_leaf`].
+pub fn split_huge_leaf(va: usize) -> Result<(), MapError> {
+    let root_pa = va_to_pa((&raw const BOOT_PT_ROOT) as usize);
+    let mut mem = KernelPtMem;
+    let result = core_mmu::split_huge_leaf(root_pa, va, &mut mem);
+    if result.is_ok() {
+        // SAFETY: single instruction, register operand; flushes `va` on this hart.
+        unsafe { asm!("sfence.vma {0}, zero", in(reg) va, options(nostack, nomem)) };
+    }
+    result
+}
+
 /// Cumulative count of TLB shootdowns this hart has initiated as a
 /// sender (i.e. how many `mmu::map`/`unmap` calls actually fired).
 /// Drained by the heartbeat as

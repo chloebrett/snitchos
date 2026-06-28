@@ -213,6 +213,7 @@ catalog! {
     wfi "default-boot-starts-init"        scenarios::default_boot_starts_init       [boot];
     wfi "stack-guard-fault-detected"      scenarios::stack_guard_fault_detected     [sched]         {"stack-guard"};
     wfi "deep-overflow-reports-cleanly"   scenarios::deep_overflow_reports_cleanly  [sched]         {"stack-overflow-deep"};
+    wfi "boot-stack-guard-fault-detected" scenarios::boot_stack_guard_fault_detected [sched]        {"boot-stack-guard"};
     wfi "block-wake-smoke"                scenarios::block_wake_smoke               [sched]         {"block-wake"};
     wfi "ipc-message-crosses"             scenarios::ipc_message_crosses            [userspace, ipc] {"ipc"};
     wfi "ipc-trace-crosses"               scenarios::ipc_trace_crosses              [userspace, ipc] {"ipc"};

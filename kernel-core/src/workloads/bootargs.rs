@@ -193,6 +193,12 @@ pub enum WorkloadKind {
     /// reports cleanly, where without it a deep overflow would double-fault on the
     /// overflowed stack. `itest-workloads` only.
     StackOverflowDeep,
+    /// Boot-stack (task 0) guard smoke: a kernel task stores into the boot stack's
+    /// unmapped guard page, faulting at the store; the trap handler recognizes the
+    /// boot guard region and snitches `Log("kernel stack overflow: boot stack …")`.
+    /// Proves `mmu::guard_boot_stack` unmapped the page + the handler names it.
+    /// `itest-workloads` only.
+    BootStackGuard,
     /// v0.10 `RAMfs`: an `fs` server (`RECV | MINT`) serves a flat in-memory
     /// filesystem to an `fs-client` over one endpoint. The client connects
     /// (badge 0) to be minted a root File cap (`pack(root, READ)`), then issues
@@ -273,6 +279,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "probe" => Some(WorkloadKind::Probe),
             "stack-guard" => Some(WorkloadKind::StackGuard),
             "stack-overflow-deep" => Some(WorkloadKind::StackOverflowDeep),
+            "boot-stack-guard" => Some(WorkloadKind::BootStackGuard),
             "spawn-demo" => Some(WorkloadKind::SpawnDemo),
             "spawn-reap" => Some(WorkloadKind::SpawnReap),
             "wait-any" => Some(WorkloadKind::WaitAny),
@@ -436,6 +443,14 @@ mod tests {
     #[test]
     fn selects_stack_guard() {
         assert_eq!(select("workload=stack-guard"), Some(WorkloadKind::StackGuard));
+    }
+
+    #[test]
+    fn selects_boot_stack_guard() {
+        assert_eq!(
+            select("workload=boot-stack-guard"),
+            Some(WorkloadKind::BootStackGuard)
+        );
     }
 
     #[test]

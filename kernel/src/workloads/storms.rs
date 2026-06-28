@@ -51,6 +51,23 @@ pub mod stack_guard {
     }
 }
 
+pub mod boot_stack_guard {
+    //! Boot-stack (task 0) guard smoke (`workload=boot-stack-guard`): a kernel task
+    //! stores into the boot stack's unmapped guard page (punched by
+    //! `mmu::guard_boot_stack`), faulting at the store. The trap handler recognizes
+    //! the boot guard region and snitches `Log("kernel stack overflow: boot stack
+    //! …")` before panicking — proving the boot guard is actually unmapped and named.
+
+    /// Entry for the smoke task. Never returns: the guard write faults and the
+    /// trap handler halts the kernel (the spin is unreachable).
+    pub extern "C" fn smoke_body() -> ! {
+        crate::sched::touch_boot_stack_guard();
+        loop {
+            crate::sched::yield_now();
+        }
+    }
+}
+
 pub mod stack_overflow_deep {
     //! Kernel-stack guard Tier-B *deep* smoke (`workload=stack-overflow-deep`): a
     //! kernel task recurses until it genuinely overflows its 16 KiB stack into the

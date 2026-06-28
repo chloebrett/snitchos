@@ -76,20 +76,22 @@ parse + host test) and the `stack-overflow-detected` itest, and
 `task-stack-high-water`). Guard pages (Tier B) + the exception stack are now the
 sole overflow-detection mechanism. Full suite 90/0, clippy clean.
 
-## Phase 3 — boot-stack guard page
+## Phase 3 — boot-stack guard page — ✅ SHIPPED (2026-06-28)
 
-- **Huge-leaf split**: `kernel_core::mmu::split_huge_leaf(root, va, mem)` — allocate
-  an L0 table, fill 512 4 KiB leaves replicating the 2 MiB leaf's PA+perms, replace
-  the huge leaf with a branch. Host-tested via the `PtMem` mock. Kernel wrapper +
-  shootdown.
-- **Linker**: page-align the boot stack with a reserved guard page below
-  (`__boot_stack_guard` / `__boot_stack` / `__boot_stack_top` symbols).
-- At boot, split the 2 MiB leaf covering the boot stack, then `mmu::unmap` the guard
-  page. Task 0 now faults on overflow; the exception stack (Phase 1) reports it.
-- itest: a boot-stack overflow → clean named report.
+**Done.** `kernel_core::mmu::split_huge_leaf(root, va, mem)` (host-tested, 2 tests)
+breaks the 2 MiB kernel-image leaf into 512 4 KiB leaves preserving the mapping;
+kernel `mmu::split_huge_leaf` wraps it. `linker.ld` page-aligns a `__boot_stack_guard`
+page below `__stack_bottom`. `mmu::guard_boot_stack()` (called in `kmain` after the
+frame allocator is up) splits the leaf covering the guard then `unmap`s it. The trap
+handler's S-mode-fault arm checks the boot guard page range (alongside the kstack
+window) → `sched::report_boot_stack_guard_fault` (lock-free named `Log` + panic).
+Proven by `boot-stack-guard-fault-detected` (`workload=boot-stack-guard`,
+`touch_boot_stack_guard` stores into the guard → named Log). 10/10 on `--repeat`.
 
-## Sequencing
+## Milestone complete
 
-Phase 1 first (keystone — also immediately upgrades the shipped per-task guard pages
-from "faults, maybe double-faults on report" to "always reports cleanly"). Then
-Phase 2 (cleanup enabled by Phase 1). Then Phase 3 (cheap once Phase 1 exists).
+All three phases shipped 2026-06-28. Overflow story is now uniform: per-task **and**
+boot stacks fault on a guard page; the per-hart exception stack reports cleanly
+(deep overflows included); the canary panic is retired; the high-water gauge stays.
+Full itest suite 92/0. (Sequencing was Phase 1 keystone → Phase 2 cleanup → Phase 3,
+as planned.)

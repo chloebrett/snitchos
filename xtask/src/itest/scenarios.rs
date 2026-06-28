@@ -1209,6 +1209,25 @@ pub fn deep_overflow_reports_cleanly(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Boot-stack (task 0) guard page end-to-end (`workload=boot-stack-guard`, Tier B
+/// Phase 3): a kernel task stores into the boot stack's unmapped guard page (punched
+/// by `mmu::guard_boot_stack`, which split the 2 MiB kernel-image leaf and unmapped
+/// one page). The store faults; the trap handler recognizes the boot guard region
+/// and **snitches a `Log`** ("kernel stack overflow: boot stack (task 0) …"). Asserts
+/// that `Log` reaches the wire — proving the boot guard is genuinely unmapped and
+/// named, the gap the per-task window pages didn't cover.
+pub fn boot_stack_guard_fault_detected(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 20, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. }
+            if msg.contains("kernel stack overflow") && msg.contains("boot stack"))
+    })
+    .ok_or(
+        "no Log naming a 'kernel stack overflow' boot-stack guard fault within 20s — the boot \
+         guard page wasn't unmapped (split/unmap at boot failed) or the handler didn't recognize it",
+    )?;
+    Ok(())
+}
+
 /// v0.9 block/wake smoke (`workload=block-wake`): a `blocker` kernel task
 /// stores its id, arms a flag, and calls `block_current` — leaving the CPU
 /// *off* the runqueue (not re-enqueued, unlike `yield_now`). A `waker` peer

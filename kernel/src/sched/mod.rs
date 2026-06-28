@@ -529,6 +529,18 @@ pub fn report_stack_guard_fault(slot: usize, va: usize) -> ! {
     panic!("kernel stack overflow: task {id} guard fault at {va:#x} (slot {slot})");
 }
 
+/// Report a **boot-stack** (task 0) guard-page fault and halt. The boot stack
+/// lives in the kernel image (not the kstack window), with a guard page punched
+/// below it by [`crate::mmu::guard_boot_stack`]; an overflow into it faults here.
+/// Snitch a named `Log`, then panic. Lock-free, like [`report_stack_guard_fault`].
+/// Never returns.
+pub fn report_boot_stack_guard_fault(va: usize) -> ! {
+    crate::tracing::emit_log(&alloc::format!(
+        "kernel stack overflow: boot stack (task 0) hit guard page at {va:#x}"
+    ));
+    panic!("kernel stack overflow: boot stack guard fault at {va:#x}");
+}
+
 /// Test-only: deliberately store into the *current* task's (unmapped) guard page
 /// (Tier B), faulting at the exact store. Looks up the guard VA under the lock,
 /// **drops the lock**, then does the faulting write from a context with full stack
@@ -555,6 +567,22 @@ pub fn touch_current_stack_guard() {
         // headroom here, so the fault path runs cleanly.
         unsafe { core::ptr::write_volatile(va as *mut u8, 0) };
     }
+}
+
+/// Test-only: deliberately store into the **boot stack's** (task 0) unmapped guard
+/// page, faulting at the exact store. Proves the boot guard is actually unmapped
+/// (`mmu::guard_boot_stack` ran) *and* that the trap handler recognizes the boot
+/// guard region. The running task isn't task 0, but the fault VA is the boot
+/// guard, which is what the handler keys on. Only compiled into `itest-workloads`.
+#[cfg(feature = "itest-workloads")]
+pub fn touch_boot_stack_guard() {
+    unsafe extern "C" {
+        static __boot_stack_guard: u8;
+    }
+    let va = (&raw const __boot_stack_guard) as usize;
+    // SAFETY: deliberate fault — the boot guard page is unmapped, so this store
+    // page-faults and the trap handler reports a named boot-stack overflow.
+    unsafe { core::ptr::write_volatile(va as *mut u8, 0) };
 }
 
 /// Currently-running task. v0.5 step 4 stub: returns 0 (the boot /

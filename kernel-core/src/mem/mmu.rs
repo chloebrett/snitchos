@@ -418,6 +418,34 @@ pub fn unmap(root_pa: usize, va: usize, mem: &mut dyn PtMem) -> Result<usize, Ma
     Ok(pa)
 }
 
+/// Split the 2 MiB (level-1) huge leaf covering `va` into 512 individual 4 KiB
+/// leaves, preserving the mapping (each new leaf maps `huge_pa + i*PAGE_SIZE` with
+/// the huge leaf's perms). Allocates one L0 table from `mem` and replaces the
+/// level-1 leaf with a branch to it; the caller does the TLB shootdown after.
+/// Afterwards the range has 4 KiB granularity, so a single page in it can be
+/// [`unmap`]ped — the prerequisite for putting a guard page below the boot stack,
+/// which lives in the kernel image's 2 MiB-leaf mapping.
+///
+/// Returns `Err(NotMapped)` if there is no level-1 huge leaf at `va` (the slot is
+/// absent, already a 4 KiB-granular branch, or `va`'s level-2 entry is itself a
+/// 1 GiB leaf), and `Err(OutOfFrames)` if the L0 table can't be allocated.
+pub fn split_huge_leaf(root_pa: usize, va: usize, mem: &mut dyn PtMem) -> Result<(), MapError> {
+    let Sv39Va { vpn2, vpn1, .. } = split_va(va);
+    let mid_pa = walk_existing(root_pa, vpn2, mem)?;
+    let mid_entry = mem.read_entry(mid_pa, vpn1);
+    if !mid_entry.is_leaf() {
+        return Err(MapError::NotMapped);
+    }
+    let huge_pa = mid_entry.leaf_pa();
+    let perms = mid_entry.perms();
+    let l0_pa = mem.alloc_zeroed_table().ok_or(MapError::OutOfFrames)?;
+    for i in 0..512 {
+        mem.write_entry(l0_pa, i, Pte::leaf(huge_pa + i * PAGE_SIZE, perms));
+    }
+    mem.write_entry(mid_pa, vpn1, Pte::branch(l0_pa));
+    Ok(())
+}
+
 /// Descend one level through an *existing* branch PTE. Returns the
 /// child table PA. Errors `NotMapped` if the slot is empty (no table)
 /// or holds a leaf (huge page — no child table to descend into).
@@ -789,6 +817,43 @@ mod tests {
             mem.intermediate_alloc_count(),
             0,
             "no tables allocated on early-fail",
+        );
+    }
+
+    #[test]
+    fn split_huge_leaf_replaces_a_2mib_leaf_with_512_4kib_leaves() {
+        // Splitting the boot stack's 2 MiB kernel-image leaf so a single 4 KiB
+        // guard page below the stack can be unmapped. The split must preserve the
+        // mapping (same PA + perms per page) and leave 4 KiB granularity behind.
+        let mut mem = MockPtMem::new(8);
+        let root_pa = mem.root_pa();
+        // A 4 KiB map elsewhere in the same 1 GiB creates root[0] -> mid.
+        map(root_pa, 0x1000, 0x80000000, PtePerms::R, &mut mem).unwrap();
+        // Install a 2 MiB huge leaf at mid[1] (covers VA [0x200000, 0x400000)).
+        let mid_pa = mem.read_entry(root_pa, 0).child_pa();
+        let huge_pa = 0x8020_0000;
+        let perms = PtePerms::R.union(PtePerms::W).union(PtePerms::G);
+        mem.write_entry(mid_pa, 1, Pte::leaf(huge_pa, perms));
+
+        // Split the leaf covering VA 0x205000 (vpn1=1, vpn0=5).
+        split_huge_leaf(root_pa, 0x205000, &mut mem).unwrap();
+
+        assert!(mem.read_entry(mid_pa, 1).is_branch(), "the huge leaf became a branch");
+        let leaf = translate(root_pa, 0x205000, &mem).expect("page 5 now resolves to a 4 KiB leaf");
+        assert_eq!(leaf.pa, huge_pa + 5 * PAGE_SIZE, "page 5 keeps its mapping");
+        assert_eq!(leaf.perms, perms, "perms preserved");
+        // The whole point: a 4 KiB leaf can now be unmapped (a guard hole).
+        assert!(unmap(root_pa, 0x205000, &mut mem).is_ok());
+    }
+
+    #[test]
+    fn split_huge_leaf_errors_when_there_is_no_huge_leaf() {
+        // A 4 KiB leaf (not huge) has nothing to split — refuse rather than corrupt.
+        let mut mem = MockPtMem::new(8);
+        map(mem.root_pa(), 0x1000, 0x80000000, PtePerms::R, &mut mem).unwrap();
+        assert_eq!(
+            split_huge_leaf(mem.root_pa(), 0x1000, &mut mem),
+            Err(MapError::NotMapped),
         );
     }
 

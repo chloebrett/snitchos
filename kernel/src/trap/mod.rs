@@ -211,8 +211,18 @@ fn handle_kernel_fault(scause: u64) -> ! {
     let stval: usize;
     // SAFETY: reads a CSR; no memory access, no side effects.
     unsafe { asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack)) };
+    // Per-task kernel-stack window guard.
     if let Some(slot) = kernel_core::stack::guard_slot_for(stval) {
         crate::sched::report_stack_guard_fault(slot, stval);
+    }
+    // Boot-stack (task 0) guard page — a single page below the boot stack, in the
+    // kernel image rather than the window (see `mmu::guard_boot_stack`).
+    unsafe extern "C" {
+        static __boot_stack_guard: u8;
+    }
+    let boot_guard = (&raw const __boot_stack_guard) as usize;
+    if (boot_guard..boot_guard + kernel_core::mmu::PAGE_SIZE).contains(&stval) {
+        crate::sched::report_boot_stack_guard_fault(stval);
     }
     panic!("kernel page fault: scause={scause:#x} stval={stval:#x}");
 }

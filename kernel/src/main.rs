@@ -262,6 +262,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // `heap::init` (needs frames + the live linear map), before the first spawn.
     sched::init_stack_window();
 
+    // Punch a guard page below the boot stack (task 0) — splits the 2 MiB
+    // kernel-image leaf and unmaps the guard so a boot-stack overflow faults
+    // instead of corrupting `.bss`. Boot hart only, after the frame allocator is
+    // up (the split needs a page-table frame).
+    mmu::guard_boot_stack();
+
     // v0.5 step 5 smoke: build a marker task context, switch into
     // it, marker bumps a counter and switches back. Proves the
     // context-switch asm (`sched::switch`) round-trips correctly
@@ -382,6 +388,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::Probe)
         | Some(WorkloadKind::StackGuard)
         | Some(WorkloadKind::StackOverflowDeep)
+        | Some(WorkloadKind::BootStackGuard)
         | Some(WorkloadKind::SpawnDemo)
         | Some(WorkloadKind::SpawnReap)
         | Some(WorkloadKind::WaitAny)
@@ -547,6 +554,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // the fault handler (on the per-hart exception stack) reports cleanly.
         Some(WorkloadKind::StackOverflowDeep) => {
             let _ = sched::spawn("stack_overflow_deep", storms::stack_overflow_deep::smoke_body);
+        }
+        // Boot-stack guard smoke: a kernel task stores into the boot stack's guard
+        // page; the trap handler recognizes the boot guard region, snitches + panics.
+        Some(WorkloadKind::BootStackGuard) => {
+            let _ = sched::spawn("boot_stack_guard", storms::boot_stack_guard::smoke_body);
         }
         _ => {}
     }

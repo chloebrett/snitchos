@@ -30,7 +30,13 @@ SECTIONS {
     *(.sbss .sbss*)
     __bss_end = .;
   } > ram
-  . = ALIGN(16);
+  /* Boot stack (task 0), with a 4 KiB guard page below it. The page is
+   * page-aligned so a single PTE covers it; after MMU enable the kernel splits
+   * the 2 MiB kernel-image leaf covering it and unmaps this page, so a boot-stack
+   * overflow faults here instead of corrupting .bss. See kernel-stack-hardening. */
+  . = ALIGN(4096);
+  __boot_stack_guard = .;
+  . += 0x1000;
   __stack_bottom = .;
   . += 0x10000;
   __stack_top = .;
