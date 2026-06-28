@@ -2,11 +2,12 @@
 //! the fetch/decode/execute `step`. The single API everything tests through.
 
 use crate::csr::{Csr, CsrError, addr, sstatus};
-use crate::decode::{Instr, funct3, funct7, opcode, priv12, system};
+use crate::decode::{Instr, expand, funct3, funct7, is_compressed, opcode, priv12, system};
 use crate::mem::{BusError, Memory, RAM_BASE};
 
-/// Size in bytes of a (non-compressed) instruction.
-const INSTR_SIZE: u64 = 4;
+/// Instruction lengths in bytes.
+const ILEN_FULL: u64 = 4;
+const ILEN_COMPRESSED: u64 = 2;
 
 /// The privilege mode the hart is executing in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +112,9 @@ pub struct Cpu {
     x: [u64; 32],
     pc: u64,
     instret: u64,
+    /// Length in bytes of the instruction currently executing (2 or 4); set by
+    /// `step` and used for pc advance and link addresses.
+    cur_ilen: u64,
     privilege: Privilege,
     csr: Csr,
     mem: Memory,
@@ -125,6 +129,7 @@ impl Cpu {
             x: [0; 32],
             pc: RAM_BASE,
             instret: 0,
+            cur_ilen: ILEN_FULL,
             privilege: Privilege::Supervisor,
             csr: Csr::new(),
             mem,
@@ -170,10 +175,17 @@ impl Cpu {
         &mut self.mem
     }
 
-    /// Fetch, decode, and execute one instruction.
+    /// Fetch, decode, and execute one instruction (16- or 32-bit).
     pub fn step(&mut self) -> Result<(), StepError> {
-        let instr = self.mem.read_u32(self.pc)?;
-        self.execute(instr)?;
+        let half = self.mem.read_u16(self.pc)?;
+        let raw = if is_compressed(half) {
+            self.cur_ilen = ILEN_COMPRESSED;
+            expand(half).ok_or_else(|| self.unimplemented(u32::from(half)))?
+        } else {
+            self.cur_ilen = ILEN_FULL;
+            self.mem.read_u32(self.pc)?
+        };
+        self.execute(raw)?;
         self.instret += 1;
         Ok(())
     }
@@ -355,21 +367,21 @@ impl Cpu {
         self.pc = if take {
             self.pc.wrapping_add(instr.b_imm())
         } else {
-            self.pc.wrapping_add(INSTR_SIZE)
+            self.pc.wrapping_add(self.cur_ilen)
         };
         Ok(())
     }
 
     /// JAL: link `pc+4` into rd, jump to `pc + offset`.
     fn jal(&mut self, instr: Instr) {
-        self.set_reg(instr.rd(), self.pc.wrapping_add(INSTR_SIZE));
+        self.set_reg(instr.rd(), self.pc.wrapping_add(self.cur_ilen));
         self.pc = self.pc.wrapping_add(instr.j_imm());
     }
 
     /// JALR: link `pc+4` into rd, jump to `(rs1 + offset) & !1`.
     fn jalr(&mut self, instr: Instr) {
         let target = self.x[instr.rs1()].wrapping_add(instr.i_imm()) & !1;
-        self.set_reg(instr.rd(), self.pc.wrapping_add(INSTR_SIZE));
+        self.set_reg(instr.rd(), self.pc.wrapping_add(self.cur_ilen));
         self.pc = target;
     }
 
@@ -470,7 +482,7 @@ impl Cpu {
 
     /// Move the program counter to the next sequential instruction.
     fn advance(&mut self) {
-        self.pc = self.pc.wrapping_add(INSTR_SIZE);
+        self.pc = self.pc.wrapping_add(self.cur_ilen);
     }
 
     /// Read a CSR that the trap machinery is guaranteed to model.
@@ -558,6 +570,34 @@ mod tests {
     }
     fn fence_i() -> u32 {
         (1 << 12) | opcode::MISC_MEM // funct3 = 1
+    }
+
+    /// Encode a `c.addi rd, imm` (CI format, quadrant 01, funct3 000).
+    fn c_addi(rd: u32, imm: i32) -> u16 {
+        let imm = imm as u32;
+        let w = (((imm >> 5) & 1) << 12) | (rd << 7) | ((imm & 0x1f) << 2) | 0b01;
+        w as u16
+    }
+    fn c_li(rd: u32, imm: i32) -> u16 {
+        let imm = imm as u32;
+        let w = (0b010 << 13) | (((imm >> 5) & 1) << 12) | (rd << 7) | ((imm & 0x1f) << 2) | 0b01;
+        w as u16
+    }
+    /// Encode a CR-format instruction (funct4 in bits 15:12, quadrant 10).
+    fn cr(funct4: u32, rd: u32, rs2: u32) -> u16 {
+        ((funct4 << 12) | (rd << 7) | (rs2 << 2) | 0b10) as u16
+    }
+    fn c_mv(rd: u32, rs2: u32) -> u16 {
+        cr(0b1000, rd, rs2)
+    }
+    fn c_add(rd: u32, rs2: u32) -> u16 {
+        cr(0b1001, rd, rs2)
+    }
+    fn c_jr(rs1: u32) -> u16 {
+        cr(0b1000, rs1, 0)
+    }
+    fn c_jalr(rs1: u32) -> u16 {
+        cr(0b1001, rs1, 0)
     }
 
     fn csr_reg(funct3: u32, rd: u32, rs1: u32, csr: u16) -> u32 {
@@ -1259,6 +1299,53 @@ mod tests {
         assert_ne!(s & sstatus::SIE, 0, "SIE restored from SPIE");
         assert_ne!(s & sstatus::SPIE, 0, "SPIE set to 1");
         assert_eq!(s & sstatus::SPP, 0, "SPP cleared to U");
+    }
+
+    #[test]
+    fn compressed_addi_executes_and_advances_by_two() {
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, c_addi(1, 5)).unwrap(); // c.addi x1, 5
+        let mut cpu = Cpu::new(mem);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(1), 5); // x1 = x1 + 5
+        assert_eq!(cpu.pc(), RAM_BASE + 2); // compressed -> advance by 2
+    }
+
+    #[test]
+    fn compressed_li_and_cr_arithmetic() {
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, c_li(1, -3)).unwrap(); // x1 = -3
+        mem.write_u16(RAM_BASE + 2, c_mv(2, 1)).unwrap(); // x2 = x1
+        mem.write_u16(RAM_BASE + 4, c_add(2, 1)).unwrap(); // x2 += x1
+        let mut cpu = Cpu::new(mem);
+        for _ in 0..3 {
+            cpu.step().unwrap();
+        }
+        assert_eq!(cpu.reg(1), (-3_i64) as u64);
+        assert_eq!(cpu.reg(2), (-6_i64) as u64);
+        assert_eq!(cpu.pc(), RAM_BASE + 6); // three compressed instructions
+    }
+
+    #[test]
+    fn compressed_jr_does_not_link() {
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, c_jr(5)).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(5, RAM_BASE + 0x40);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 0x40);
+        assert_eq!(cpu.reg(1), 0);
+    }
+
+    #[test]
+    fn compressed_jalr_links_with_compressed_length() {
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, c_jalr(5)).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(5, RAM_BASE + 0x40);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 0x40);
+        assert_eq!(cpu.reg(1), RAM_BASE + 2); // link = pc + 2, not + 4
     }
 
     #[test]

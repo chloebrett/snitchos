@@ -197,3 +197,67 @@ impl Instr {
         self.0 & ALT_OP_BIT != 0
     }
 }
+
+/// A 16-bit half-word is a compressed instruction unless its low two bits are 11.
+pub(crate) fn is_compressed(half: u16) -> bool {
+    half & 0b11 != 0b11
+}
+
+/// Expand a 16-bit compressed instruction to its canonical 32-bit form, or
+/// `None` if it isn't a compressed instruction snemu models yet (the meta-loop).
+pub(crate) fn expand(half: u16) -> Option<u32> {
+    let quadrant = half & 0b11;
+    let funct3 = (half >> 13) & 0b111;
+    match (quadrant, funct3) {
+        (0b01, 0b000) => Some(expand_c_addi(half)),
+        (0b01, 0b010) => Some(expand_c_li(half)),
+        (0b10, 0b100) => Some(expand_cr(half)),
+        _ => None,
+    }
+}
+
+/// `c.addi rd, nzimm` -> `addi rd, rd, nzimm`.
+fn expand_c_addi(half: u16) -> u32 {
+    let rd = u32::from((half >> 7) & 0x1f);
+    (ci_imm6(half) << 20) | (rd << 15) | (rd << 7) | opcode::OP_IMM
+}
+
+/// 12-bit I-type immediate field from a CI-format 6-bit immediate
+/// (`imm[5]` = bit 12, `imm[4:0]` = bits 6:2), sign-extended.
+fn ci_imm6(half: u16) -> u32 {
+    let raw = (u32::from((half >> 12) & 1) << 5) | u32::from((half >> 2) & 0x1f);
+    (sign_extend(raw, 6) as u32) & 0xfff
+}
+
+/// `c.li rd, imm` -> `addi rd, x0, imm`.
+fn expand_c_li(half: u16) -> u32 {
+    let rd = u32::from((half >> 7) & 0x1f);
+    (ci_imm6(half) << 20) | (rd << 7) | opcode::OP_IMM // rs1 = x0
+}
+
+/// The CR cluster (quadrant 10, funct3 100): `c.mv` / `c.add` / `c.jr` /
+/// `c.jalr` / `c.ebreak`, selected by bit 12 and whether rs2 is zero.
+fn expand_cr(half: u16) -> u32 {
+    let bit12 = (half >> 12) & 1;
+    let rd = u32::from((half >> 7) & 0x1f); // also rs1
+    let rs2 = u32::from((half >> 2) & 0x1f);
+    match (bit12, rd, rs2) {
+        (0, _, 0) => jalr_form(0, rd),      // c.jr rs1    -> jalr x0, rs1, 0
+        (0, _, _) => add_form(rd, 0, rs2),  // c.mv rd,rs2 -> add rd, x0, rs2
+        (_, 0, 0) => ebreak_form(),         // c.ebreak
+        (_, _, 0) => jalr_form(1, rd),      // c.jalr rs1  -> jalr x1, rs1, 0
+        (_, _, _) => add_form(rd, rd, rs2), // c.add rd,rs2 -> add rd, rd, rs2
+    }
+}
+
+fn add_form(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (funct3::ADD << 12) | (rd << 7) | opcode::OP
+}
+
+fn jalr_form(rd: u32, rs1: u32) -> u32 {
+    (rs1 << 15) | (rd << 7) | opcode::JALR // funct3 0, imm 0
+}
+
+fn ebreak_form() -> u32 {
+    (priv12::EBREAK << 20) | opcode::SYSTEM // funct3 0 (PRIV)
+}
