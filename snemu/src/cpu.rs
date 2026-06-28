@@ -3,7 +3,7 @@
 
 use crate::bus::Bus;
 use crate::csr::{Csr, CsrError, addr, sstatus};
-use crate::decode::{Instr, expand, funct3, funct7, is_compressed, opcode, priv12, system};
+use crate::decode::{Instr, amo_op, expand, funct3, funct7, is_compressed, opcode, priv12, system};
 use crate::mem::{BusError, Memory, RAM_BASE};
 use crate::mmu::{self, Access};
 
@@ -78,6 +78,39 @@ signed_div_rem!(div_s32, rem_s32, i32);
 unsigned_div_rem!(div_u, rem_u, u64);
 unsigned_div_rem!(div_u32, rem_u32, u32);
 
+/// Combine the old memory value with `rhs` per an AMO `funct5`. Single hart, so
+/// the read-modify-write is atomic for free. `None` for LR/SC (not arithmetic).
+fn amo_combine_u64(funct5: u32, old: u64, rhs: u64) -> Option<u64> {
+    Some(match funct5 {
+        amo_op::SWAP => rhs,
+        amo_op::ADD => old.wrapping_add(rhs),
+        amo_op::XOR => old ^ rhs,
+        amo_op::OR => old | rhs,
+        amo_op::AND => old & rhs,
+        amo_op::MIN => (old as i64).min(rhs as i64) as u64,
+        amo_op::MAX => (old as i64).max(rhs as i64) as u64,
+        amo_op::MINU => old.min(rhs),
+        amo_op::MAXU => old.max(rhs),
+        _ => return None,
+    })
+}
+
+/// The 32-bit `.w` form: arithmetic wraps within 32 bits, signed compares use i32.
+fn amo_combine_u32(funct5: u32, old: u32, rhs: u32) -> Option<u32> {
+    Some(match funct5 {
+        amo_op::SWAP => rhs,
+        amo_op::ADD => old.wrapping_add(rhs),
+        amo_op::XOR => old ^ rhs,
+        amo_op::OR => old | rhs,
+        amo_op::AND => old & rhs,
+        amo_op::MIN => (old as i32).min(rhs as i32) as u32,
+        amo_op::MAX => (old as i32).max(rhs as i32) as u32,
+        amo_op::MINU => old.min(rhs),
+        amo_op::MAXU => old.max(rhs),
+        _ => return None,
+    })
+}
+
 /// Why a `step` could not complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepError {
@@ -123,6 +156,10 @@ pub struct Cpu {
     privilege: Privilege,
     csr: Csr,
     bus: Bus,
+    /// Address reserved by the most recent `lr`, if still valid. `sc` succeeds
+    /// only while it holds; any store to that address breaks it. Single hart, so
+    /// this is the entire LR/SC story — no cross-hart invalidation to model.
+    reservation: Option<u64>,
 }
 
 impl Cpu {
@@ -138,6 +175,7 @@ impl Cpu {
             privilege: Privilege::Supervisor,
             csr: Csr::new(),
             bus: Bus::new(mem),
+            reservation: None,
         }
     }
 
@@ -232,6 +270,7 @@ impl Cpu {
             }
             opcode::LOAD => self.load(instr),
             opcode::STORE => self.store(instr),
+            opcode::AMO => self.amo(instr),
             opcode::SYSTEM => self.system(instr),
             opcode::MISC_MEM => {
                 // fence / fence.i: no caches or store buffers to order.
@@ -422,6 +461,9 @@ impl Cpu {
     fn store(&mut self, instr: Instr) -> Result<(), StepError> {
         let va = self.x[instr.rs1()].wrapping_add(instr.s_imm());
         let addr = self.translate(va, Access::Store)?;
+        if self.reservation == Some(addr) {
+            self.reservation = None; // a write to the reserved cell breaks lr/sc
+        }
         let value = self.x[instr.rs2()];
         match instr.funct3() {
             funct3::store::SB => self.bus.write_u8(addr, value as u8)?,
@@ -430,6 +472,71 @@ impl Cpu {
             funct3::store::SD => self.bus.write_u64(addr, value)?,
             _ => return Err(self.unimplemented(instr.0)),
         }
+        self.advance();
+        Ok(())
+    }
+
+    /// AMO: atomic read-modify-write. Reads the addressed word/doubleword,
+    /// combines it with rs2, stores the result, and returns the old value in rd.
+    /// Single hart, so the sequence is atomic with no reservation tracking; the
+    /// `aq`/`rl` ordering bits are no-ops. (LR/SC surface via the meta-loop.)
+    fn amo(&mut self, instr: Instr) -> Result<(), StepError> {
+        // AMOs touch a page that must be both readable and writable; the kernel's
+        // data mappings are R+W, so checking the store permission suffices.
+        let addr = self.translate(self.x[instr.rs1()], Access::Store)?;
+        let rs2 = self.x[instr.rs2()];
+        match instr.funct5() {
+            amo_op::LR => return self.load_reserved(instr, addr),
+            amo_op::SC => return self.store_conditional(instr, addr, rs2),
+            _ => {}
+        }
+        let old = match instr.funct3() {
+            funct3::amo::W => {
+                let old = self.bus.read_u32(addr)?;
+                let new =
+                    amo_combine_u32(instr.funct5(), old, rs2 as u32).ok_or(self.unimplemented(instr.0))?;
+                self.bus.write_u32(addr, new)?;
+                sext32(old)
+            }
+            funct3::amo::D => {
+                let old = self.bus.read_u64(addr)?;
+                let new =
+                    amo_combine_u64(instr.funct5(), old, rs2).ok_or(self.unimplemented(instr.0))?;
+                self.bus.write_u64(addr, new)?;
+                old
+            }
+            _ => return Err(self.unimplemented(instr.0)),
+        };
+        self.set_reg(instr.rd(), old);
+        self.advance();
+        Ok(())
+    }
+
+    /// `lr.w`/`lr.d`: load the addressed value into rd and reserve the address.
+    fn load_reserved(&mut self, instr: Instr, addr: u64) -> Result<(), StepError> {
+        let value = match instr.funct3() {
+            funct3::amo::W => sext32(self.bus.read_u32(addr)?),
+            funct3::amo::D => self.bus.read_u64(addr)?,
+            _ => return Err(self.unimplemented(instr.0)),
+        };
+        self.reservation = Some(addr);
+        self.set_reg(instr.rd(), value);
+        self.advance();
+        Ok(())
+    }
+
+    /// `sc.w`/`sc.d`: store rs2 iff the reservation still names this address,
+    /// writing 0 (success) or 1 (failure) to rd. The reservation clears either way.
+    fn store_conditional(&mut self, instr: Instr, addr: u64, rs2: u64) -> Result<(), StepError> {
+        let reserved = self.reservation.take() == Some(addr);
+        if reserved {
+            match instr.funct3() {
+                funct3::amo::W => self.bus.write_u32(addr, rs2 as u32)?,
+                funct3::amo::D => self.bus.write_u64(addr, rs2)?,
+                _ => return Err(self.unimplemented(instr.0)),
+            }
+        }
+        self.set_reg(instr.rd(), u64::from(!reserved));
         self.advance();
         Ok(())
     }
@@ -455,6 +562,13 @@ impl Cpu {
     fn csr_access(&mut self, instr: Instr, source: u64, op: CsrOp) -> Result<(), StepError> {
         let pc = self.pc;
         let csr = instr.csr();
+        if csr == addr::TIME {
+            // The `time` counter is read-only and computed, not stored: tie it to
+            // the retired-instruction count so the clock is deterministic.
+            self.set_reg(instr.rd(), self.instret);
+            self.advance();
+            return Ok(());
+        }
         let old = self.csr.read(csr).map_err(|e| csr_step_error(pc, e))?;
         let (new, do_write) = match op {
             CsrOp::Write => (source, true),
@@ -1705,5 +1819,164 @@ mod tests {
                 instr: 0xffff_ffff,
             })
         );
+    }
+
+    /// Encode an AMO (opcode 0x2f): `funct5`, width (`2`=`.w`, `3`=`.d`),
+    /// rd/rs1/rs2. aq/rl left zero — ordering is a no-op on a single hart.
+    fn amo(funct5: u32, width: u32, rd: u32, rs1: u32, rs2: u32) -> u32 {
+        (funct5 << 27) | (rs2 << 20) | (rs1 << 15) | (width << 12) | (rd << 7) | 0x2f
+    }
+
+    /// Run a single doubleword AMO against a seeded memory cell. Returns
+    /// `(rd, memory)` after the op: rd=3 holds the old value, x4 reloads the cell.
+    fn run_amo_d(funct5: u32, init: u64, rs2: u64) -> (u64, u64) {
+        let mut mem = Memory::new(0x2000);
+        mem.write_u32(RAM_BASE, amo(funct5, 3, 3, 1, 2)).unwrap();
+        mem.write_u32(RAM_BASE + 4, ld(4, 1, 0)).unwrap();
+        mem.write_u64(RAM_BASE + 0x200, init).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(1, RAM_BASE + 0x200);
+        cpu.set_reg(2, rs2);
+        cpu.step().unwrap(); // amo
+        cpu.step().unwrap(); // ld back
+        (cpu.reg(3), cpu.reg(4))
+    }
+
+    /// Run a single word AMO against a seeded 32-bit cell. Returns
+    /// `(rd, memory)`: rd=3 is the old value (sign-extended), x4 reloads the cell.
+    fn run_amo_w(funct5: u32, init: u32, rs2: u64) -> (u64, u32) {
+        let mut mem = Memory::new(0x2000);
+        mem.write_u32(RAM_BASE, amo(funct5, 2, 3, 1, 2)).unwrap();
+        mem.write_u32(RAM_BASE + 4, lwu(4, 1, 0)).unwrap();
+        mem.write_u32(RAM_BASE + 0x200, init).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(1, RAM_BASE + 0x200);
+        cpu.set_reg(2, rs2);
+        cpu.step().unwrap(); // amo
+        cpu.step().unwrap(); // lwu back
+        (cpu.reg(3), cpu.reg(4) as u32)
+    }
+
+    // funct5 selectors for the AMO family.
+    const AMO_LR: u32 = 0x02;
+    const AMO_SC: u32 = 0x03;
+    const AMO_ADD: u32 = 0x00;
+    const AMO_SWAP: u32 = 0x01;
+    const AMO_XOR: u32 = 0x04;
+    const AMO_OR: u32 = 0x08;
+    const AMO_AND: u32 = 0x0c;
+    const AMO_MIN: u32 = 0x10;
+    const AMO_MAX: u32 = 0x14;
+    const AMO_MINU: u32 = 0x18;
+    const AMO_MAXU: u32 = 0x1c;
+
+    #[test]
+    fn a_extension_amoor_d_captured() {
+        // amoor.d x10, x10, (x11) == 0x40a5b52f (captured from the kernel boot).
+        let mut mem = Memory::new(0x2000);
+        mem.write_u32(RAM_BASE, 0x40a5_b52f).unwrap();
+        mem.write_u32(RAM_BASE + 4, ld(5, 11, 0)).unwrap();
+        mem.write_u64(RAM_BASE + 0x200, 0x00ff).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(11, RAM_BASE + 0x200);
+        cpu.set_reg(10, 0xff00);
+        cpu.step().unwrap(); // amoor.d
+        cpu.step().unwrap(); // ld x5, 0(x11)
+        assert_eq!(cpu.reg(10), 0x00ff); // rd <- old value
+        assert_eq!(cpu.reg(5), 0xffff); // memory <- old | rs2
+    }
+
+    #[test]
+    fn a_extension_amo_doubleword_family() {
+        assert_eq!(run_amo_d(AMO_SWAP, 0x1111, 0x2222), (0x1111, 0x2222));
+        assert_eq!(run_amo_d(AMO_ADD, 5, 7), (5, 12));
+        assert_eq!(run_amo_d(AMO_XOR, 0xff, 0x0f), (0xff, 0xf0));
+        assert_eq!(run_amo_d(AMO_OR, 0xf0, 0x0f), (0xf0, 0xff));
+        assert_eq!(run_amo_d(AMO_AND, 0xf0, 0x3c), (0xf0, 0x30));
+        // signed min/max treat the operands as i64.
+        let neg5 = (-5_i64) as u64;
+        assert_eq!(run_amo_d(AMO_MIN, neg5, 3), (neg5, neg5));
+        assert_eq!(run_amo_d(AMO_MAX, neg5, 3), (neg5, 3));
+        // unsigned min/max treat neg5 as a huge magnitude.
+        assert_eq!(run_amo_d(AMO_MINU, neg5, 3), (neg5, 3));
+        assert_eq!(run_amo_d(AMO_MAXU, neg5, 3), (neg5, neg5));
+    }
+
+    /// `rdtime rd` == `csrrs rd, time, x0` (read the read-only `time` counter).
+    fn rdtime(rd: u32) -> u32 {
+        csrrs(rd, 0, addr::TIME)
+    }
+
+    #[test]
+    fn rdtime_reads_a_monotonic_counter_from_instret() {
+        let program = &[rdtime(1), addi(0, 0, 0), rdtime(2)];
+        let mut cpu = cpu_with(program);
+        for _ in 0..program.len() {
+            cpu.step().unwrap();
+        }
+        // First read sees zero completed instructions; the second sees two.
+        assert_eq!(cpu.reg(1), 0);
+        assert_eq!(cpu.reg(2), 2);
+        assert!(cpu.reg(2) > cpu.reg(1));
+    }
+
+    #[test]
+    fn a_extension_lr_sc_word_round_trips() {
+        // lr.w x12, (x15) == 0x1407a62f (captured from the kernel boot).
+        let mut mem = Memory::new(0x2000);
+        mem.write_u32(RAM_BASE, 0x1407_a62f).unwrap(); // lr.w x12, (x15)
+        mem.write_u32(RAM_BASE + 4, amo(AMO_SC, 2, 13, 15, 14)).unwrap(); // sc.w x13, x14, (x15)
+        mem.write_u32(RAM_BASE + 8, lwu(11, 15, 0)).unwrap(); // reload the cell
+        mem.write_u32(RAM_BASE + 0x200, 0x1234).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(15, RAM_BASE + 0x200);
+        cpu.set_reg(14, 0xbeef);
+        for _ in 0..3 {
+            cpu.step().unwrap();
+        }
+        assert_eq!(cpu.reg(12), 0x1234); // lr returned the old value
+        assert_eq!(cpu.reg(13), 0); // sc reported success
+        assert_eq!(cpu.reg(11), 0xbeef); // store landed
+    }
+
+    #[test]
+    fn a_extension_sc_without_reservation_fails() {
+        let mut mem = Memory::new(0x2000);
+        mem.write_u32(RAM_BASE, amo(AMO_SC, 3, 13, 15, 14)).unwrap(); // sc.d, no prior lr
+        mem.write_u32(RAM_BASE + 4, ld(11, 15, 0)).unwrap(); // reload the cell
+        mem.write_u64(RAM_BASE + 0x200, 0x1234).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(15, RAM_BASE + 0x200);
+        cpu.set_reg(14, 0xbeef);
+        cpu.step().unwrap(); // sc.d
+        cpu.step().unwrap(); // ld back
+        assert_eq!(cpu.reg(13), 1); // sc reported failure
+        assert_eq!(cpu.reg(11), 0x1234); // memory untouched
+    }
+
+    #[test]
+    fn a_extension_store_breaks_the_reservation() {
+        // lr.d, then a plain store to the reserved cell, then sc.d -> sc must fail.
+        let mut mem = Memory::new(0x2000);
+        mem.write_u32(RAM_BASE, amo(AMO_LR, 3, 12, 15, 0)).unwrap(); // lr.d x12, (x15)
+        mem.write_u32(RAM_BASE + 4, sd(14, 15, 0)).unwrap(); // sd x14, 0(x15)
+        mem.write_u32(RAM_BASE + 8, amo(AMO_SC, 3, 13, 15, 14)).unwrap(); // sc.d x13, x14, (x15)
+        mem.write_u64(RAM_BASE + 0x200, 0x1234).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(15, RAM_BASE + 0x200);
+        cpu.set_reg(14, 0xbeef);
+        for _ in 0..3 {
+            cpu.step().unwrap();
+        }
+        assert_eq!(cpu.reg(13), 1); // reservation broken by the intervening store
+    }
+
+    #[test]
+    fn a_extension_amo_word_sign_extends_old_value() {
+        // amoadd.w on 0x8000_0000: rd gets the sign-extended old value, the
+        // store wraps within 32 bits.
+        let (old, mem) = run_amo_w(AMO_ADD, 0x8000_0000, 1);
+        assert_eq!(old, 0xffff_ffff_8000_0000);
+        assert_eq!(mem, 0x8000_0001);
     }
 }

@@ -17,6 +17,7 @@ pub(crate) mod opcode {
     pub const STORE: u32 = 0x23;
     pub const SYSTEM: u32 = 0x73;
     pub const MISC_MEM: u32 = 0x0f;
+    pub const AMO: u32 = 0x2f;
 }
 
 /// funct3 ALU-op selectors, `instr[14:12]` — shared by OP and OP-IMM.
@@ -59,6 +60,12 @@ pub(crate) mod funct3 {
         pub const SD: u32 = 0x3;
     }
 
+    /// Width selectors for the AMO opcode (`instr[14:12]`).
+    pub mod amo {
+        pub const W: u32 = 0x2; // 32-bit
+        pub const D: u32 = 0x3; // 64-bit
+    }
+
     /// funct3 selectors for the M extension (OP / OP-32 with funct7 = MULDIV).
     pub mod m {
         pub const MUL: u32 = 0x0;
@@ -78,6 +85,22 @@ pub(crate) mod funct7 {
     pub const MULDIV: u32 = 0x01;
     /// `sfence.vma` (SYSTEM, funct3 0) — identified by funct7, not funct12.
     pub const SFENCE_VMA: u32 = 0x09;
+}
+
+/// AMO operation selectors, `instr[31:27]` (the funct5 field). `LR`/`SC` share
+/// the encoding space but are not arithmetic AMOs.
+pub(crate) mod amo_op {
+    pub const ADD: u32 = 0x00;
+    pub const SWAP: u32 = 0x01;
+    pub const LR: u32 = 0x02;
+    pub const SC: u32 = 0x03;
+    pub const XOR: u32 = 0x04;
+    pub const OR: u32 = 0x08;
+    pub const AND: u32 = 0x0c;
+    pub const MIN: u32 = 0x10;
+    pub const MAX: u32 = 0x14;
+    pub const MINU: u32 = 0x18;
+    pub const MAXU: u32 = 0x1c;
 }
 
 /// funct3 selectors for the SYSTEM opcode.
@@ -136,6 +159,11 @@ impl Instr {
 
     pub(crate) fn funct7(self) -> u32 {
         (self.0 >> 25) & 0x7f
+    }
+
+    /// AMO operation selector (bits 31:27); also the LR/SC discriminator.
+    pub(crate) fn funct5(self) -> u32 {
+        (self.0 >> 27) & 0x1f
     }
 
     /// CSR address for `csr*` instructions (bits 31:20).

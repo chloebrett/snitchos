@@ -9,6 +9,9 @@ use std::collections::BTreeMap;
 /// runs in S-mode, so these are the Supervisor trap CSRs. Extended as the
 /// kernel exercises more of them.
 pub(crate) mod addr {
+    /// Read-only `time` counter (user-level). Not stored — the CPU answers it
+    /// from the instruction-retire count so the clock stays deterministic.
+    pub const TIME: u16 = 0xc01;
     pub const SSTATUS: u16 = 0x100;
     pub const SIE: u16 = 0x104;
     pub const STVEC: u16 = 0x105;
