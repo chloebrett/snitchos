@@ -1,8 +1,8 @@
 //! The hart: register file, program counter, instruction-count clock, and
 //! the fetch/decode/execute `step`. The single API everything tests through.
 
-use crate::csr::{Csr, addr, sstatus};
-use crate::decode::{Instr, funct3, funct7, opcode};
+use crate::csr::{Csr, CsrError, addr, sstatus};
+use crate::decode::{Instr, funct3, funct7, opcode, priv12, system};
 use crate::mem::{BusError, Memory, RAM_BASE};
 
 /// Size in bytes of a (non-compressed) instruction.
@@ -18,6 +18,13 @@ pub enum Privilege {
 /// Set (`on`) or clear (`!on`) the bits of `mask` in `value`.
 fn with_bit(value: u64, mask: u64, on: bool) -> u64 {
     if on { value | mask } else { value & !mask }
+}
+
+/// Trap cause codes (`scause`, exceptions; interrupt bit clear).
+mod cause {
+    pub const BREAKPOINT: u64 = 3;
+    pub const ECALL_FROM_U: u64 = 8;
+    pub const ECALL_FROM_S: u64 = 9;
 }
 
 /// Sign-extend a 32-bit result to 64 bits (the `.w` instruction convention).
@@ -75,6 +82,22 @@ pub enum StepError {
     Bus(BusError),
     /// The decoder doesn't know this instruction yet (the meta-loop signal).
     Unimplemented { pc: u64, instr: u32 },
+    /// A `csr*` instruction named a CSR snemu doesn't model yet (meta-loop).
+    UnknownCsr { pc: u64, addr: u16 },
+}
+
+/// How a `csr*` instruction combines the source operand with the old value.
+#[derive(Clone, Copy)]
+enum CsrOp {
+    Write,
+    Set,
+    Clear,
+}
+
+fn csr_step_error(pc: u64, e: CsrError) -> StepError {
+    match e {
+        CsrError::Unknown(addr) => StepError::UnknownCsr { pc, addr },
+    }
 }
 
 impl From<BusError> for StepError {
@@ -183,6 +206,12 @@ impl Cpu {
             }
             opcode::LOAD => self.load(instr),
             opcode::STORE => self.store(instr),
+            opcode::SYSTEM => self.system(instr),
+            opcode::MISC_MEM => {
+                // fence / fence.i: no caches or store buffers to order.
+                self.advance();
+                Ok(())
+            }
             _ => Err(self.unimplemented(raw)),
         }
     }
@@ -377,6 +406,68 @@ impl Cpu {
         Ok(())
     }
 
+    /// SYSTEM: CSR instructions and privileged ops.
+    fn system(&mut self, instr: Instr) -> Result<(), StepError> {
+        let reg_source = self.x[instr.rs1()];
+        let imm_source = instr.rs1() as u64; // rs1 field is a 5-bit zero-extended uimm
+        match instr.funct3() {
+            system::PRIV => self.priv_op(instr),
+            system::CSRRW => self.csr_access(instr, reg_source, CsrOp::Write),
+            system::CSRRS => self.csr_access(instr, reg_source, CsrOp::Set),
+            system::CSRRC => self.csr_access(instr, reg_source, CsrOp::Clear),
+            system::CSRRWI => self.csr_access(instr, imm_source, CsrOp::Write),
+            system::CSRRSI => self.csr_access(instr, imm_source, CsrOp::Set),
+            system::CSRRCI => self.csr_access(instr, imm_source, CsrOp::Clear),
+            _ => Err(self.unimplemented(instr.0)),
+        }
+    }
+
+    /// Read-modify-write a CSR: old value into rd, combine the source per `op`.
+    /// `Set`/`Clear` skip the write when the source is zero (no spurious write).
+    fn csr_access(&mut self, instr: Instr, source: u64, op: CsrOp) -> Result<(), StepError> {
+        let pc = self.pc;
+        let csr = instr.csr();
+        let old = self.csr.read(csr).map_err(|e| csr_step_error(pc, e))?;
+        let (new, do_write) = match op {
+            CsrOp::Write => (source, true),
+            CsrOp::Set => (old | source, source != 0),
+            CsrOp::Clear => (old & !source, source != 0),
+        };
+        if do_write {
+            self.csr.write(csr, new).map_err(|e| csr_step_error(pc, e))?;
+        }
+        self.set_reg(instr.rd(), old);
+        self.advance();
+        Ok(())
+    }
+
+    /// Privileged SYSTEM ops (funct3 = 0), dispatched by funct12.
+    fn priv_op(&mut self, instr: Instr) -> Result<(), StepError> {
+        match instr.funct12() {
+            priv12::ECALL => {
+                let cause = match self.privilege {
+                    Privilege::User => cause::ECALL_FROM_U,
+                    Privilege::Supervisor => cause::ECALL_FROM_S,
+                };
+                self.take_trap(cause, 0);
+                Ok(())
+            }
+            priv12::EBREAK => {
+                self.take_trap(cause::BREAKPOINT, self.pc);
+                Ok(())
+            }
+            priv12::SRET => {
+                self.sret();
+                Ok(())
+            }
+            priv12::WFI => {
+                self.advance(); // no interrupts to wait for in the interpreter
+                Ok(())
+            }
+            _ => Err(self.unimplemented(instr.0)),
+        }
+    }
+
     /// Move the program counter to the next sequential instruction.
     fn advance(&mut self) {
         self.pc = self.pc.wrapping_add(INSTR_SIZE);
@@ -443,8 +534,56 @@ impl Cpu {
 mod tests {
     use super::*;
     use crate::csr::{addr, sstatus};
-    use crate::decode::{ALT_OP_BIT, funct3, funct7, opcode};
+    use crate::decode::{ALT_OP_BIT, funct3, funct7, opcode, priv12, system};
     use crate::mem::{Memory, RAM_BASE};
+
+    fn priv_instr(funct12: u32) -> u32 {
+        (funct12 << 20) | (system::PRIV << 12) | opcode::SYSTEM
+    }
+    fn ecall() -> u32 {
+        priv_instr(priv12::ECALL)
+    }
+    fn ebreak() -> u32 {
+        priv_instr(priv12::EBREAK)
+    }
+    fn sret() -> u32 {
+        priv_instr(priv12::SRET)
+    }
+    fn wfi() -> u32 {
+        priv_instr(priv12::WFI)
+    }
+
+    fn fence() -> u32 {
+        opcode::MISC_MEM // funct3 = 0
+    }
+    fn fence_i() -> u32 {
+        (1 << 12) | opcode::MISC_MEM // funct3 = 1
+    }
+
+    fn csr_reg(funct3: u32, rd: u32, rs1: u32, csr: u16) -> u32 {
+        (u32::from(csr) << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode::SYSTEM
+    }
+    fn csr_imm(funct3: u32, rd: u32, uimm: u32, csr: u16) -> u32 {
+        (u32::from(csr) << 20) | (uimm << 15) | (funct3 << 12) | (rd << 7) | opcode::SYSTEM
+    }
+    fn csrrw(rd: u32, rs1: u32, csr: u16) -> u32 {
+        csr_reg(system::CSRRW, rd, rs1, csr)
+    }
+    fn csrrs(rd: u32, rs1: u32, csr: u16) -> u32 {
+        csr_reg(system::CSRRS, rd, rs1, csr)
+    }
+    fn csrrc(rd: u32, rs1: u32, csr: u16) -> u32 {
+        csr_reg(system::CSRRC, rd, rs1, csr)
+    }
+    fn csrrwi(rd: u32, uimm: u32, csr: u16) -> u32 {
+        csr_imm(system::CSRRWI, rd, uimm, csr)
+    }
+    fn csrrsi(rd: u32, uimm: u32, csr: u16) -> u32 {
+        csr_imm(system::CSRRSI, rd, uimm, csr)
+    }
+    fn csrrci(rd: u32, uimm: u32, csr: u16) -> u32 {
+        csr_imm(system::CSRRCI, rd, uimm, csr)
+    }
 
     /// Run a single R-type op `enc(rd=3, rs1=1, rs2=2)` with x1=a, x2=b
     /// (operands set directly via the public API), and return x3.
@@ -990,6 +1129,95 @@ mod tests {
         assert_eq!(run_rrr(divuw, 5, 0), u64::MAX); // 0xffff_ffff sign-extended
         assert_eq!(run_rrr(remw, (-20_i64) as u64, 6), (-2_i64) as u64);
         assert_eq!(run_rrr(remuw, 20, 6), 2);
+    }
+
+    #[test]
+    fn csr_instructions_read_modify_write() {
+        let s = addr::SSCRATCH;
+        let program = &[
+            addi(1, 0, 0x12),    // x1 = 0x12
+            csrrw(2, 1, s),      // x2 = old(0); sscratch = 0x12
+            csrrs(3, 0, s),      // x3 = 0x12 (read; rs1=x0 -> no write)
+            addi(4, 0, 0x01),    // x4 = 1
+            csrrs(5, 4, s),      // x5 = 0x12 (old); sscratch = 0x13
+            addi(6, 0, 0x02),    // x6 = 2
+            csrrc(7, 6, s),      // x7 = 0x13 (old); sscratch = 0x11
+            csrrwi(8, 0x1f, s),  // x8 = 0x11 (old); sscratch = 0x1f
+            csrrsi(9, 0, s),     // x9 = 0x1f (read; uimm=0 -> no write)
+            csrrci(10, 0x0f, s), // x10 = 0x1f (old); sscratch = 0x10
+            csrrsi(11, 0x04, s), // x11 = 0x10 (old); sscratch = 0x14
+            csrrs(12, 0, s),     // x12 = 0x14 (final read)
+        ];
+        let mut cpu = cpu_with(program);
+        for _ in 0..program.len() {
+            cpu.step().unwrap();
+        }
+        assert_eq!(cpu.reg(2), 0);
+        assert_eq!(cpu.reg(3), 0x12);
+        assert_eq!(cpu.reg(5), 0x12);
+        assert_eq!(cpu.reg(7), 0x13);
+        assert_eq!(cpu.reg(8), 0x11);
+        assert_eq!(cpu.reg(9), 0x1f);
+        assert_eq!(cpu.reg(10), 0x1f);
+        assert_eq!(cpu.reg(11), 0x10);
+        assert_eq!(cpu.reg(12), 0x14);
+    }
+
+    #[test]
+    fn csr_access_to_unmodeled_register_reports_unknown() {
+        let mut cpu = cpu_with(&[csrrw(1, 0, 0xbc0)]); // 0xbc0 not modeled
+        assert_eq!(
+            cpu.step(),
+            Err(StepError::UnknownCsr {
+                pc: RAM_BASE,
+                addr: 0xbc0,
+            })
+        );
+    }
+
+    #[test]
+    fn ecall_traps_to_the_supervisor_handler() {
+        let mut cpu = cpu_with(&[ecall()]);
+        cpu.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 0x200);
+        assert_eq!(cpu.csr.read(addr::SEPC).unwrap(), RAM_BASE);
+        assert_eq!(cpu.csr.read(addr::SCAUSE).unwrap(), 9); // ECALL from S-mode
+    }
+
+    #[test]
+    fn ebreak_traps_with_the_breakpoint_cause() {
+        let mut cpu = cpu_with(&[ebreak()]);
+        cpu.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 0x200);
+        assert_eq!(cpu.csr.read(addr::SCAUSE).unwrap(), 3); // breakpoint
+    }
+
+    #[test]
+    fn sret_instruction_returns_to_sepc() {
+        let mut cpu = cpu_with(&[sret()]);
+        cpu.csr.write(addr::SEPC, RAM_BASE + 0x40).unwrap();
+        cpu.csr.write(addr::SSTATUS, sstatus::SPIE).unwrap(); // SPP=U, SPIE=1
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 0x40);
+        assert_eq!(cpu.privilege(), Privilege::User);
+    }
+
+    #[test]
+    fn wfi_is_a_nop_that_advances() {
+        let mut cpu = cpu_with(&[wfi()]);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 4);
+    }
+
+    #[test]
+    fn fence_instructions_are_noops() {
+        let mut cpu = cpu_with(&[fence(), fence_i()]);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 4);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 8);
     }
 
     #[test]

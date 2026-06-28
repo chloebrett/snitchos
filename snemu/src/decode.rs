@@ -15,6 +15,8 @@ pub(crate) mod opcode {
     pub const JALR: u32 = 0x67;
     pub const LOAD: u32 = 0x03;
     pub const STORE: u32 = 0x23;
+    pub const SYSTEM: u32 = 0x73;
+    pub const MISC_MEM: u32 = 0x0f;
 }
 
 /// funct3 ALU-op selectors, `instr[14:12]` — shared by OP and OP-IMM.
@@ -76,6 +78,25 @@ pub(crate) mod funct7 {
     pub const MULDIV: u32 = 0x01;
 }
 
+/// funct3 selectors for the SYSTEM opcode.
+pub(crate) mod system {
+    pub const PRIV: u32 = 0x0; // ecall / ebreak / sret / wfi (by funct12)
+    pub const CSRRW: u32 = 0x1;
+    pub const CSRRS: u32 = 0x2;
+    pub const CSRRC: u32 = 0x3;
+    pub const CSRRWI: u32 = 0x5;
+    pub const CSRRSI: u32 = 0x6;
+    pub const CSRRCI: u32 = 0x7;
+}
+
+/// funct12 codes for SYSTEM privileged instructions (`instr[31:20]`, funct3=0).
+pub(crate) mod priv12 {
+    pub const ECALL: u32 = 0x000;
+    pub const EBREAK: u32 = 0x001;
+    pub const SRET: u32 = 0x102;
+    pub const WFI: u32 = 0x105;
+}
+
 /// funct7 bit 5 (`instr[30]`): selects sub-vs-add and arithmetic-vs-logical shift.
 pub(crate) const ALT_OP_BIT: u32 = 0x4000_0000;
 
@@ -113,6 +134,16 @@ impl Instr {
 
     pub(crate) fn funct7(self) -> u32 {
         (self.0 >> 25) & 0x7f
+    }
+
+    /// CSR address for `csr*` instructions (bits 31:20).
+    pub(crate) fn csr(self) -> u16 {
+        ((self.0 >> 20) & 0xfff) as u16
+    }
+
+    /// funct12 field for SYSTEM privileged instructions (bits 31:20).
+    pub(crate) fn funct12(self) -> u32 {
+        (self.0 >> 20) & 0xfff
     }
 
     /// Sign-extended I-type immediate (bits 31:20).
