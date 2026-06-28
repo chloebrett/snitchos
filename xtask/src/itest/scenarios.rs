@@ -1186,6 +1186,30 @@ pub fn stack_overflow_detected(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Kernel-stack guard-page fault end-to-end (`workload=stack-guard`, Tier B): a
+/// kernel task (`stack_guard_smoke`) deliberately stores into its own *unmapped*
+/// guard page from a context with full stack headroom. The store page-faults at
+/// the exact PC; the trap handler recognizes the guard region and **snitches a
+/// `Log`** ("kernel stack overflow: task … hit guard page …") before panicking.
+/// Asserts that observable `Log` reaches the wire — proving the guard
+/// fault→recognize→name→halt path, not just the pure VA math.
+///
+/// (A *controlled* guard touch with stack headroom, so the report path runs
+/// cleanly; reliably reporting a *deep* overflow that creeps to the page boundary
+/// needs a per-hart exception stack — the documented Tier-B follow-up. The guard
+/// page converts silent corruption into a deterministic fault either way.)
+pub fn stack_guard_fault_detected(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 20, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. }
+            if msg.contains("kernel stack overflow") && msg.contains("guard page"))
+    })
+    .ok_or(
+        "no Log naming a 'kernel stack overflow' guard-page fault within 20s — the guard store \
+         didn't fault, or the trap handler didn't recognize the guard region + snitch",
+    )?;
+    Ok(())
+}
+
 /// v0.9 block/wake smoke (`workload=block-wake`): a `blocker` kernel task
 /// stores its id, arms a flag, and calls `block_current` — leaving the CPU
 /// *off* the runqueue (not re-enqueued, unlike `yield_now`). A `waker` peer

@@ -1,26 +1,36 @@
 # Kernel stack guard pages (fault-on-overflow)
 
-**Status:** **Tier A SHIPPED (2026-06-26).** **Tier B IN PROGRESS (2026-06-28)** —
-guard pages, fault-on-overflow. Increment chain below. (Teardown reclaim landed in
-v0.12, so the stack-lifecycle hook in `reap_task` already exists.)
+**Status:** **Tier A SHIPPED (2026-06-26).** **Tier B SHIPPED (2026-06-28)** —
+per-task guard pages, fault-on-overflow. All 6 increments below complete; full
+itest suite 89/0 (new `stack-guard-fault-detected` 10/10 on `--repeat`). Boot stack
+(task 0) deferred — see "Future iteration" below.
 
-## Tier B increment chain (TDD, each RED→GREEN)
+## Tier B increment chain — DONE
 
-1. **kernel-core `unmap`** — walk to the existing 4 KiB leaf, clear it (`Pte::INVALID`),
-   return the old PA so the caller frees the frame. `NotMapped` if absent/huge.
-   Host-tested via the `PtMem` mock, mirroring `map`/`remap`. *Foundation.*
-2. **kernel-core stack-window bookkeeping** — slot↔VA math (guard page below
-   `STACK_SIZE` mapped pages) + a slot allocator (alloc/free, recycle freed slots).
-   Pure, host-tested.
-3. **kernel `mmu::unmap`** — `KernelPtMem` wrapper + local `sfence` + cross-hart
-   `shootdown` (the leaf is being invalidated).
-4. **kernel `KernelStack`** — alloc slot + frames, `mmu::map` the stack pages (guard
-   left unmapped), sentinel-fill; `Drop` unmaps + frees frames + releases the slot.
-   Replace `Box<Stack>` in `Task`; rewire `spawn_on_with_arg` + `reap_task`. Tier A
-   canary/high-water read the mapped VA range.
-5. **trap handler** — a kernel (S-mode) load/store page fault with `stval` in a guard
-   region → snitch a **named** `Log` then panic (the observable Tier B proof).
-6. **workload + itest** — controlled overflow → guard fault → assert the named Log.
+1. ✅ **kernel-core `unmap`** — clears the 4 KiB leaf, returns the old PA, `NotMapped`
+   for unmapped/huge. Host-tested via `PtMem` mock (3 tests).
+2. ✅ **kernel-core stack-window** (`kernel_core::stack`) — `KSTACK_VA_BASE` (root PTE
+   257), slot↔VA math (guard page below `STACK_BYTES`), `guard_slot_for` (trap
+   handler uses it), `SlotAllocator` (recycles freed slots). Host-tested (7 tests).
+3. ✅ **kernel `mmu::unmap`** — `KernelPtMem` wrapper + cross-hart `shootdown`.
+4. ✅ **kernel `KernelStack`** — alloc slot + frames, map the stack pages (guard left
+   unmapped), sentinel-fill; `Drop` unmaps + frees + releases the slot. Replaced
+   `Box<Stack>` in `Task`; rewired `spawn_on_with_arg`. `init_stack_window()` in
+   `kmain` installs the shared root subtree before any user root (so a task runs on
+   its kernel stack under its *own* `satp`). Tier A canary/high-water read the
+   mapped VA.
+5. ✅ **trap handler** — S-mode page fault with `stval` in a guard region →
+   `sched::report_stack_guard_fault` (lock-free named `Log` + panic).
+6. ✅ **workload + itest** — `workload=stack-guard` (`touch_current_stack_guard`
+   stores into the current task's guard page with stack headroom) →
+   `stack-guard-fault-detected` asserts the named `Log`.
+
+**Known limitation (documented follow-up):** the trap handler runs on the faulting
+kernel stack (`sscratch==0` reuses it), so a *deep* overflow that creeps to the page
+boundary can double-fault while building the trap frame. Clean reporting of deep
+overflows needs a **per-hart exception stack** (the Linux double-fault stack). The
+guard page still converts silent corruption into a deterministic fault either way;
+the smoke uses a controlled touch with headroom so the report path runs cleanly.
 
 **Decisions:** boot stack (task 0) stays unguarded *in this work* (future iteration
 below); slot stride = 5 pages (1 guard + 4 stack), no padding; window at root PTE

@@ -72,7 +72,7 @@ pub const fn slot_stack_top_va(slot: usize) -> usize {
 /// or in a mapped stack region (a real fault elsewhere, not a guard hit).
 #[must_use]
 pub fn guard_slot_for(va: usize) -> Option<usize> {
-    if va < KSTACK_VA_BASE || va >= KSTACK_VA_BASE + KSTACK_WINDOW_BYTES {
+    if !(KSTACK_VA_BASE..KSTACK_VA_BASE + KSTACK_WINDOW_BYTES).contains(&va) {
         return None;
     }
     let off = va - KSTACK_VA_BASE;

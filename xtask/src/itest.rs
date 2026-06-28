@@ -212,6 +212,7 @@ catalog! {
     wfi "task-stack-high-water"           scenarios::task_stack_high_water_reported [sched]         {"demo"};
     wfi "default-boot-starts-init"        scenarios::default_boot_starts_init       [boot];
     wfi "stack-overflow-detected"         scenarios::stack_overflow_detected        [sched]         {"stack-canary"};
+    wfi "stack-guard-fault-detected"      scenarios::stack_guard_fault_detected     [sched]         {"stack-guard"};
     wfi "block-wake-smoke"                scenarios::block_wake_smoke               [sched]         {"block-wake"};
     wfi "ipc-message-crosses"             scenarios::ipc_message_crosses            [userspace, ipc] {"ipc"};
     wfi "ipc-trace-crosses"               scenarios::ipc_trace_crosses              [userspace, ipc] {"ipc"};

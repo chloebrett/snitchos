@@ -52,6 +52,25 @@ pub mod stack_canary {
     }
 }
 
+pub mod stack_guard {
+    //! Kernel-stack guard Tier-B smoke (`workload=stack-guard`): a kernel task
+    //! deliberately stores into its *own* unmapped guard page from a context with
+    //! full stack headroom, faulting at the exact store. The trap handler
+    //! recognizes the guard region, snitches `Log("kernel stack overflow: task …")`,
+    //! and panics — proving the fault→name→halt path deterministically (the Tier-B
+    //! analog of the stack-canary smoke), without the double-fault risk of a deep
+    //! real overflow.
+
+    /// Entry for the smoke task. Never returns: the guard write faults and the
+    /// trap handler halts the kernel (the spin is unreachable).
+    pub extern "C" fn smoke_body() -> ! {
+        crate::sched::touch_current_stack_guard();
+        loop {
+            crate::sched::yield_now();
+        }
+    }
+}
+
 pub mod virtio_storm {
     //! Validation experiment for H11-refined: is the cross-hart bug
     //! specifically in the virtio-console emission path

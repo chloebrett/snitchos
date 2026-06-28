@@ -538,6 +538,22 @@ fn report_stack_overflow(id: u32, name: &str) -> ! {
     panic!("kernel stack overflow: task {id} ({name}) clobbered its stack canary");
 }
 
+/// Report a kernel-stack **guard-page** fault (Tier B) and halt: an overflow store
+/// crossed into the unmapped guard below a stack and faulted at the exact PC.
+/// Snitch an observable named `Log`, then panic. `slot` is the window slot from
+/// [`guard_slot_for`](kernel_core::stack::guard_slot_for) and `va` the faulting
+/// address; the running task owns that slot. Lock-free on purpose — a fault
+/// handler can't assume the offending task wasn't mid-`SCHEDULER` lock — so it
+/// reports by id + slot rather than looking up the name under the lock. Never
+/// returns.
+pub fn report_stack_guard_fault(slot: usize, va: usize) -> ! {
+    let id = CURRENT_TASK.this_cpu().load(Ordering::Relaxed);
+    crate::tracing::emit_log(&alloc::format!(
+        "kernel stack overflow: task {id} hit guard page (slot {slot}, fault va {va:#x})"
+    ));
+    panic!("kernel stack overflow: task {id} guard fault at {va:#x} (slot {slot})");
+}
+
 /// Heartbeat backstop for Tier-A overflow detection: walk the task table and, if
 /// any task's bottom canary is breached, [`report_stack_overflow`]. Runs on the
 /// heartbeat's own (healthy) stack — so unlike the per-switch check it can emit
@@ -572,6 +588,34 @@ pub fn clobber_current_stack_canary() {
         && let Some(stack) = &mut task._stack
     {
         stack.clobber_canary();
+    }
+}
+
+/// Test-only: deliberately store into the *current* task's (unmapped) guard page
+/// (Tier B), faulting at the exact store. Looks up the guard VA under the lock,
+/// **drops the lock**, then does the faulting write from a context with full stack
+/// headroom — so the trap handler reports it cleanly (no double-fault, unlike a
+/// deep real overflow). The guard-page analog of [`clobber_current_stack_canary`].
+/// Only compiled into `itest-workloads` builds.
+#[cfg(feature = "itest-workloads")]
+pub fn touch_current_stack_guard() {
+    let id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
+    let guard_va = {
+        let sched = SCHEDULER.lock();
+        sched
+            .tasks
+            .iter()
+            .find(|t| t.id == id)
+            .and_then(|t| t._stack.as_ref())
+            .map(|s| kernel_core::stack::slot_base_va(s.slot))
+    };
+    if let Some(va) = guard_va {
+        // SAFETY: deliberate fault. `va` is the unmapped guard page below this
+        // task's stack, so the store page-faults — the trap handler recognizes the
+        // guard region and reports a named stack overflow. `write_volatile` so the
+        // dead store isn't elided. The lock is already dropped, and `sp` has full
+        // headroom here, so the fault path runs cleanly.
+        unsafe { core::ptr::write_volatile(va as *mut u8, 0) };
     }
 }
 

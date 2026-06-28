@@ -182,6 +182,13 @@ pub enum WorkloadKind {
     /// detect→name→halt path deterministically (no real-overflow corruption
     /// roulette). `itest-workloads` only.
     StackCanary,
+    /// Kernel-stack guard Tier-B smoke: a kernel task deliberately stores into its
+    /// own (unmapped) guard page from a context with full stack headroom, faulting
+    /// at the exact store; the trap handler recognizes the guard region, snitches a
+    /// `Log` ("kernel stack overflow: task …"), and panics. Proves the
+    /// fault→name→halt path deterministically (no deep-overflow double-fault).
+    /// `itest-workloads` only.
+    StackGuard,
     /// v0.10 `RAMfs`: an `fs` server (`RECV | MINT`) serves a flat in-memory
     /// filesystem to an `fs-client` over one endpoint. The client connects
     /// (badge 0) to be minted a root File cap (`pack(root, READ)`), then issues
@@ -260,6 +267,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "stitch-fs" => Some(WorkloadKind::StitchFs),
             "probe" => Some(WorkloadKind::Probe),
             "stack-canary" => Some(WorkloadKind::StackCanary),
+            "stack-guard" => Some(WorkloadKind::StackGuard),
             "spawn-demo" => Some(WorkloadKind::SpawnDemo),
             "spawn-reap" => Some(WorkloadKind::SpawnReap),
             "wait-any" => Some(WorkloadKind::WaitAny),
@@ -418,6 +426,11 @@ mod tests {
     #[test]
     fn selects_stack_canary() {
         assert_eq!(select("workload=stack-canary"), Some(WorkloadKind::StackCanary));
+    }
+
+    #[test]
+    fn selects_stack_guard() {
+        assert_eq!(select("workload=stack-guard"), Some(WorkloadKind::StackGuard));
     }
 
     #[test]

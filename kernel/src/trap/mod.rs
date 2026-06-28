@@ -189,8 +189,32 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
         {
             handle_user_fault();
         }
+        // The same fault from S-mode (SPP=1) is a kernel bug. If it landed in a
+        // kernel-stack guard page (Tier B), name it as a stack overflow — the
+        // exact-PC fault the guard page exists to produce — before panicking.
+        TrapCause::UnknownException(12 | 13 | 15) => handle_kernel_fault(scause),
         other => panic!("unhandled trap: {other:?} (scause={scause:#x})"),
     }
+}
+
+/// An S-mode (kernel) page fault. If `stval` lands in a kernel-stack guard page,
+/// report it as a named stack overflow ([`crate::sched::report_stack_guard_fault`]);
+/// otherwise it's an ordinary kernel bug — panic with the cause + address.
+///
+/// Caveat: the handler runs on the *faulting* kernel stack (in-kernel traps reuse
+/// the current stack — `sscratch == 0`), so a *deep* overflow that creeps to the
+/// page boundary can double-fault while building the trap frame. Robust reporting
+/// of deep overflows needs a per-hart exception stack (the Linux double-fault
+/// stack) — documented follow-up in `plans/kernel-stack-guard-pages.md`. The guard
+/// page still converts silent corruption into a deterministic fault either way.
+fn handle_kernel_fault(scause: u64) -> ! {
+    let stval: usize;
+    // SAFETY: reads a CSR; no memory access, no side effects.
+    unsafe { asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack)) };
+    if let Some(slot) = kernel_core::stack::guard_slot_for(stval) {
+        crate::sched::report_stack_guard_fault(slot, stval);
+    }
+    panic!("kernel page fault: scause={scause:#x} stval={stval:#x}");
 }
 
 /// `sstatus.SPP` (bit 8): the privilege the trap came from. 0 = User.

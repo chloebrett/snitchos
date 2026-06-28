@@ -380,6 +380,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::StitchFs)
         | Some(WorkloadKind::Probe)
         | Some(WorkloadKind::StackCanary)
+        | Some(WorkloadKind::StackGuard)
         | Some(WorkloadKind::SpawnDemo)
         | Some(WorkloadKind::SpawnReap)
         | Some(WorkloadKind::WaitAny)
@@ -540,6 +541,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // the heartbeat backstop then snitches + panics. Names the task.
         Some(WorkloadKind::StackCanary) => {
             let _ = sched::spawn("stack_canary_smoke", storms::stack_canary::smoke_body);
+        }
+        // Tier-B guard-page smoke: a kernel task stores into its own guard page on
+        // hart 0; the trap handler recognizes the guard region, snitches + panics.
+        Some(WorkloadKind::StackGuard) => {
+            let _ = sched::spawn("stack_guard_smoke", storms::stack_guard::smoke_body);
         }
         _ => {}
     }
