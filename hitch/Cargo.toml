@@ -18,5 +18,11 @@ std = []
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 
+[dev-dependencies]
+# The packed-encoding tests assert byte-identity with postcard of an equivalent
+# Rust struct — so they serialize one directly.
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+
 [lints]
 workspace = true

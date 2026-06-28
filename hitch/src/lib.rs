@@ -117,14 +117,25 @@ impl TypeSchema {
     }
 }
 
-/// Decoding a hitch failed — the bytes were not a valid encoding of a [`Value`].
-/// Wraps the underlying codec error without exposing it in the public API.
+/// Something went wrong hitching or unhitching a value.
 #[derive(Debug)]
-pub struct Error(postcard::Error);
+pub enum Error {
+    /// The bytes were not a valid encoding (truncated, malformed).
+    Codec(postcard::Error),
+    /// A value did not conform to the [`TypeSchema`] it was packed or unpacked
+    /// against — a wrong kind, field name, arity, or unknown variant.
+    SchemaMismatch,
+    /// A packed hitch decoded successfully but left bytes unconsumed.
+    TrailingBytes,
+}
 
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "invalid hitch encoding: {}", self.0)
+        match self {
+            Error::Codec(e) => write!(f, "invalid hitch encoding: {e}"),
+            Error::SchemaMismatch => f.write_str("hitch value does not conform to its schema"),
+            Error::TrailingBytes => f.write_str("trailing bytes after a packed hitch"),
+        }
     }
 }
 
@@ -145,5 +156,142 @@ pub fn hitch(value: &Value) -> Vec<u8> {
 /// Deserialize a self-describing hitch back into a [`Value`]. Fails with
 /// [`Error`] if `bytes` is not a valid encoding.
 pub fn unhitch(bytes: &[u8]) -> Result<Value, Error> {
-    postcard::from_bytes(bytes).map_err(Error)
+    postcard::from_bytes(bytes).map_err(Error::Codec)
+}
+
+/// Serialize a [`Value`] to its **packed** encoding against `schema`: positional
+/// bytes carrying only data — no names, variants, or tags, since `schema`
+/// supplies them. The result is byte-identical to postcard of the equivalent
+/// Rust type, so a Rust ELF stage and a Hitch value interoperate. Fails with
+/// [`Error::SchemaMismatch`] if `value` does not conform to `schema`.
+pub fn hitch_packed(value: &Value, schema: &TypeSchema) -> Result<Vec<u8>, Error> {
+    let mut buf = Vec::new();
+    pack(value, schema, &mut buf)?;
+    Ok(buf)
+}
+
+/// Deserialize a packed hitch back into a [`Value`], using `schema` to drive the
+/// positional decode and to restore the names and variant labels the bytes omit.
+/// Fails on malformed bytes, a schema mismatch, or trailing bytes.
+pub fn unhitch_packed(bytes: &[u8], schema: &TypeSchema) -> Result<Value, Error> {
+    let (value, rest) = unpack(schema, bytes)?;
+    if rest.is_empty() {
+        Ok(value)
+    } else {
+        Err(Error::TrailingBytes)
+    }
+}
+
+/// Append the postcard encoding of one leaf scalar to `buf`. postcard's per-type
+/// layout (varint ints, length-prefixed strings/bytes) is exactly what makes a
+/// packed product match postcard of the equivalent struct.
+fn push<T: Serialize>(value: &T, buf: &mut Vec<u8>) -> Result<(), Error> {
+    let bytes = postcard::to_allocvec(value).map_err(Error::Codec)?;
+    buf.extend_from_slice(&bytes);
+    Ok(())
+}
+
+/// Read one value of type `T` off the front of `bytes`, returning it and the
+/// remaining bytes — the positional decode primitive.
+fn take<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<(T, &'a [u8]), Error> {
+    postcard::take_from_bytes(bytes).map_err(Error::Codec)
+}
+
+fn pack(value: &Value, schema: &TypeSchema, buf: &mut Vec<u8>) -> Result<(), Error> {
+    match (schema, value) {
+        (TypeSchema::Bool, Value::Bool(b)) => push(b, buf),
+        (TypeSchema::I64, Value::I64(n)) => push(n, buf),
+        (TypeSchema::U64, Value::U64(n)) => push(n, buf),
+        (TypeSchema::F64, Value::F64(n)) => push(n, buf),
+        (TypeSchema::Str, Value::Str(s)) => push(s, buf),
+        (TypeSchema::Bytes, Value::Bytes(b)) => push(b, buf),
+        (TypeSchema::Seq(elem), Value::Seq(items)) => {
+            // Length first (postcard encodes a seq as varint(len) ++ elements),
+            // then each element against the element schema.
+            push(&(items.len() as u64), buf)?;
+            items.iter().try_for_each(|item| pack(item, elem, buf))
+        }
+        (
+            TypeSchema::Product { fields: schema_fields, .. },
+            Value::Product { fields: value_fields, .. },
+        ) => {
+            if schema_fields.len() != value_fields.len() {
+                return Err(Error::SchemaMismatch);
+            }
+            schema_fields.iter().zip(value_fields).try_for_each(
+                |((sname, sshape), (vname, vvalue))| {
+                    if sname == vname {
+                        pack(vvalue, sshape, buf)
+                    } else {
+                        Err(Error::SchemaMismatch)
+                    }
+                },
+            )
+        }
+        (
+            TypeSchema::Sum { variants, .. },
+            Value::Sum { variant, payload, .. },
+        ) => {
+            let idx = variants
+                .iter()
+                .position(|(name, _)| name == variant)
+                .ok_or(Error::SchemaMismatch)?;
+            // The variant index stands in for the name (postcard encodes an enum
+            // as varint(discriminant) ++ payload).
+            push(&(idx as u64), buf)?;
+            pack(payload, &variants[idx].1, buf)
+        }
+        _ => Err(Error::SchemaMismatch),
+    }
+}
+
+fn unpack<'a>(schema: &TypeSchema, bytes: &'a [u8]) -> Result<(Value, &'a [u8]), Error> {
+    match schema {
+        TypeSchema::Bool => take::<bool>(bytes).map(|(v, r)| (Value::Bool(v), r)),
+        TypeSchema::I64 => take::<i64>(bytes).map(|(v, r)| (Value::I64(v), r)),
+        TypeSchema::U64 => take::<u64>(bytes).map(|(v, r)| (Value::U64(v), r)),
+        TypeSchema::F64 => take::<f64>(bytes).map(|(v, r)| (Value::F64(v), r)),
+        TypeSchema::Str => take::<String>(bytes).map(|(v, r)| (Value::Str(v), r)),
+        TypeSchema::Bytes => take::<Vec<u8>>(bytes).map(|(v, r)| (Value::Bytes(v), r)),
+        TypeSchema::Seq(elem) => {
+            let (count, mut rest) = take::<u64>(bytes)?;
+            let mut items = Vec::new();
+            for _ in 0..count {
+                let (item, next) = unpack(elem, rest)?;
+                items.push(item);
+                rest = next;
+            }
+            Ok((Value::Seq(items), rest))
+        }
+        TypeSchema::Product { type_name, fields } => {
+            let mut rest = bytes;
+            let mut out = Vec::with_capacity(fields.len());
+            for (name, field_schema) in fields {
+                let (value, next) = unpack(field_schema, rest)?;
+                out.push((name.clone(), value));
+                rest = next;
+            }
+            Ok((
+                Value::Product {
+                    type_name: type_name.clone(),
+                    fields: out,
+                },
+                rest,
+            ))
+        }
+        TypeSchema::Sum { type_name, variants } => {
+            let (idx, rest) = take::<u64>(bytes)?;
+            let idx = usize::try_from(idx).map_err(|_| Error::SchemaMismatch)?;
+            let (name, variant_schema) = variants.get(idx).ok_or(Error::SchemaMismatch)?;
+            let (payload, rest) = unpack(variant_schema, rest)?;
+            Ok((
+                Value::Sum {
+                    type_name: type_name.clone(),
+                    variant: name.clone(),
+                    payload: Box::new(payload),
+                },
+                rest,
+            ))
+        }
+    }
 }

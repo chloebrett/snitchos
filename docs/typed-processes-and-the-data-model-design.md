@@ -88,6 +88,32 @@ registers) — so a gateway can *lift* syscall args/results into the self-descri
 model for tooling/observability, without the syscall path paying for it. Syscalls
 stay positional; their self-described form is *generated* from the ABI on demand.
 
+**The packed codec needs a POD fast-path (the structured-syscall-return case).**
+A structured syscall return — the v0.13 `CapList`/`hold` is the first; `readdir`,
+span-list, metric-list follow — is a *packed hitch*: the kernel writes records into
+a caller buffer against a known schema (the ABI struct). For a **fixed-size,
+padding-free, scalar-only** type (`CapDesc`), the packed encoding *is* the in-memory
+layout, so Hitch's packed codec should special-case it to a **zero-cost transmute**
+(`from_raw_parts` over `&[T]`), not a serialize pass. The payoff is not speed but
+**centralization + graceful degradation**:
+
+- The `unsafe` byte-cast moves out of each syscall handler into **one audited place**
+  (the codec), gated by `#[derive(Schema)]`.
+- "No uninitialized padding is copied to userspace" becomes a **derive-checked
+  guarantee** (the derive proves POD-ness / zeroes padding), not a hand-written
+  SAFETY comment per site. (`CapList`'s handler today hand-asserts this; the derive
+  should subsume it.)
+- The **same** codec handles the variable-length / sum-typed returns (`readdir`,
+  span-list) where a raw `from_raw_parts` would be *unsound* — there it degrades to a
+  real serialize. One mechanism from POD-free to complex, so the next structured
+  syscall reuses it instead of inventing a third byte-cast.
+
+Still *packed*, never self-describing at the syscall (the known-schema principle
+above): the self-describing form is materialized only on the userspace `unhitch`
+side. So `CapList`'s current hand-rolled `from_raw_parts` cast is the placeholder
+for `hitch_packed(&descs)` — deliberately shaped so the swap is mechanical once the
+codec + `Schema` derive exist.
+
 `Frame` stops being a hand-rolled special case — it becomes a value in this model
 (telemetry, IPC messages, and process I/O share one type language; routing stays
 split per the "two channels, don't confuse them" rule).
