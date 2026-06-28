@@ -19,6 +19,9 @@ hitch = { path = "../hitch" }
 # builds (its `ecall` asm + crt0 don't compile for the host).
 [target.'cfg(target_os = "none")'.dependencies]
 snitchos-user = { path = "../user/runtime" }
+# The FS-over-IPC request/response protocol — for `RuntimePlatform::fs_read`'s
+# lookup + read through the process's endpoint cap (backs `readFile`/`view`).
+fs-proto = { path = "../fs-proto" }
 
 [dev-dependencies]
 insta = "1"

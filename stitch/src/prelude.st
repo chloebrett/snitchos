@@ -99,3 +99,10 @@ unwrapOr(m, default) = match m { Some(v) => v  None => default }
 mapMaybe(m, f) = match m { Some(v) => Some(f(v))  None => None }
 
 andThen(m, f) = match m { Some(v) => f(v)  None => None }
+
+// --- shell verbs ---
+
+// `view f` — read file `f` and print its contents (or a not-found message). It
+// runs with exactly `FsRead` + `ConsoleOut`: it may read files and write the
+// console, nothing more — least authority, visible in the `uses` row.
+view(f) uses FsRead, ConsoleOut = print(unwrapOr(readFile(f), "view: cannot read file"))

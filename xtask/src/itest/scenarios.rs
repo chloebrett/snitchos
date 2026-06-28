@@ -408,6 +408,24 @@ pub fn stitch_hold_lists_caps(h: &mut View) -> Result<(), String> {
         .map_err(|e| format!("{e} — hold() didn't enumerate the process's caps on the metal"))
 }
 
+/// `workload=stitch-fs`: `view(f)` reads a file off the FS and prints it, on the
+/// metal — the function form of `view` (a `uses FsRead, ConsoleOut` stdlib fn).
+/// The chain: `readFile` native → `RuntimePlatform::fs_read` (lookup + read over
+/// the FS endpoint cap) → `print` → UART. We `view("primes.st")` (the seeded file)
+/// and look for "Trial division", a phrase from its *body* — the echo of the typed
+/// `view("primes.st")` can't contain it, so finding it proves `view` really read
+/// and printed the file's contents end-to-end.
+pub fn stitch_view_reads_a_file(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+
+    h.send_input(b"view(\"primes.st\")\n")
+        .map_err(|e| format!("inject REPL input: {e}"))?;
+
+    h.wait_for_log(SEC * 30, "Trial division")
+        .map_err(|e| format!("{e} — view() didn't read + print the file on the metal"))
+}
+
 pub fn heap_oom(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {

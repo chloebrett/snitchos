@@ -33,6 +33,12 @@ impl Platform for StdPlatform {
         // capabilities, so `hold` is empty here.
         Vec::new()
     }
+
+    fn fs_read(&self, name: &str) -> Option<String> {
+        // The host CLI reads real files off the host filesystem, so `view` works
+        // at the CLI prompt too (on the metal this is the FS-over-IPC path).
+        std::fs::read_to_string(name).ok()
+    }
 }
 
 fn main() -> ExitCode {

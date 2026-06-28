@@ -91,6 +91,12 @@ pub trait Platform {
     /// shell's `hold`. The on-target backend reads its own `CapTable` via the
     /// `CapList` syscall.
     fn hold(&self) -> alloc::vec::Vec<CapInfo>;
+
+    /// Read the named file's contents as a UTF-8 string, or `None` if it doesn't
+    /// exist, isn't valid UTF-8, or there is no filesystem. Backs `readFile`
+    /// (and so `view`). The on-target backend does an FS-over-IPC lookup + read
+    /// through its endpoint cap; gated in the language by the `FsRead` authority.
+    fn fs_read(&self, name: &str) -> Option<alloc::string::String>;
 }
 
 /// The default backend: a program with no platform installed. Reads nothing and
@@ -110,6 +116,10 @@ impl Platform for NullPlatform {
     fn hold(&self) -> alloc::vec::Vec<CapInfo> {
         alloc::vec::Vec::new()
     }
+
+    fn fs_read(&self, _name: &str) -> Option<alloc::string::String> {
+        None
+    }
 }
 
 /// A host test backend: scripted console input, recorded output — the fake the
@@ -121,6 +131,7 @@ pub struct FakePlatform {
     input: core::cell::RefCell<alloc::collections::VecDeque<alloc::string::String>>,
     output: core::cell::RefCell<alloc::string::String>,
     caps: alloc::vec::Vec<CapInfo>,
+    files: alloc::collections::BTreeMap<alloc::string::String, alloc::string::String>,
 }
 
 #[cfg(not(target_os = "none"))]
@@ -145,6 +156,15 @@ impl FakePlatform {
         Self { caps, ..Self::default() }
     }
 
+    /// Script the files `fs_read` (and so `view`) can read, as `(name, contents)`.
+    #[must_use]
+    pub fn with_files(files: &[(&str, &str)]) -> Self {
+        Self {
+            files: files.iter().map(|(n, c)| ((*n).into(), (*c).into())).collect(),
+            ..Self::default()
+        }
+    }
+
     /// Everything written through `write` so far.
     #[must_use]
     pub fn output(&self) -> alloc::string::String {
@@ -164,6 +184,10 @@ impl Platform for FakePlatform {
 
     fn hold(&self) -> alloc::vec::Vec<CapInfo> {
         self.caps.clone()
+    }
+
+    fn fs_read(&self, name: &str) -> Option<alloc::string::String> {
+        self.files.get(name).cloned()
     }
 }
 
@@ -241,6 +265,49 @@ mod on_target {
                 })
                 .collect()
         }
+
+        fn fs_read(&self, name: &str) -> Option<String> {
+            use fs_proto::{FileRights, Op, Request, Response, UserBuf};
+            use snitchos_user::{Endpoint, endpoint};
+
+            // Attach to the FS server (the startup endpoint) for the root dir cap,
+            // `Lookup` the name with READ, then `Read` it in ≤256-byte chunks.
+            // `None` if there's no FS endpoint, the file is missing, or non-UTF-8.
+            let (_r, root_cap) = endpoint().call([0, 0, 0, 0]).ok()?;
+            let root = Endpoint::from_raw_handle(root_cap?);
+
+            let nb = name.as_bytes();
+            let lookup = Request::Lookup {
+                name: UserBuf { ptr: nb.as_ptr() as u64, len: nb.len() as u64 },
+                rights: FileRights::READ,
+            };
+            let (_l, file_cap) = root.call(lookup.encode()).ok()?;
+            let file = Endpoint::from_raw_handle(file_cap?);
+
+            let mut bytes = Vec::new();
+            let mut offset = 0u64;
+            let mut chunk = [0u8; 256];
+            loop {
+                let read = Request::Read {
+                    offset,
+                    dst: UserBuf { ptr: chunk.as_mut_ptr() as u64, len: chunk.len() as u64 },
+                };
+                let (words, _) = file.call(read.encode()).ok()?;
+                let n = match Response::decode(Op::Read, words) {
+                    Ok(Response::Count(n)) => n as usize,
+                    _ => break,
+                };
+                if n == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..n]);
+                offset += n as u64;
+                if n < chunk.len() {
+                    break;
+                }
+            }
+            String::from_utf8(bytes).ok()
+        }
     }
 }
 
@@ -268,6 +335,9 @@ mod tests {
         fn hold(&self) -> Vec<CapInfo> {
             Vec::new()
         }
+        fn fs_read(&self, _name: &str) -> Option<String> {
+            None
+        }
     }
 
     #[test]
@@ -283,6 +353,7 @@ mod tests {
     #[test]
     fn null_platform_reads_nothing() {
         assert_eq!(NullPlatform.read_line(), None);
+        assert_eq!(NullPlatform.fs_read("anything"), None);
     }
 
     #[test]
@@ -340,6 +411,15 @@ mod tests {
         let fake = FakePlatform::with_caps(caps.clone());
 
         assert_eq!(fake.hold(), caps);
+    }
+
+    #[test]
+    fn fake_reads_a_scripted_file() {
+        let fake = FakePlatform::with_files(&[("notes", "buy milk\n"), ("empty", "")]);
+
+        assert_eq!(fake.fs_read("notes").as_deref(), Some("buy milk\n"));
+        assert_eq!(fake.fs_read("empty").as_deref(), Some(""));
+        assert_eq!(fake.fs_read("absent"), None);
     }
 
     #[test]

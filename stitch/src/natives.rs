@@ -51,6 +51,11 @@ pub(crate) const NATIVES: &[NativeFn] = &[
         func: native_hold,
     },
     NativeFn {
+        name: "readFile",
+        arity: 1,
+        func: native_read_file,
+    },
+    NativeFn {
         name: "emit",
         arity: 2,
         func: native_emit,
@@ -423,6 +428,30 @@ fn native_hold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         })
         .collect::<Vec<_>>();
     Ok(Value::List(rows.into()))
+}
+
+/// `readFile(name)` — read the named file's UTF-8 contents as `Some(Str)`, or
+/// `None` if it is missing / not valid UTF-8 / there is no filesystem. Gated by
+/// the `FsRead` capability (distinct from `ConsoleOut`, so reading files and
+/// writing the console are separately granted). Routes through the installed
+/// [`Platform`](crate::platform::Platform); backs the `view` stdlib function.
+fn native_read_file(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [name] = args else {
+        return Err(RuntimeError::new("readFile expects (name)"));
+    };
+    let Value::Str(name) = name else {
+        return Err(RuntimeError::new(format!(
+            "readFile name must be a Str, got {}",
+            name.kind()
+        )));
+    };
+    if !env.has_authority("FsRead") {
+        return Err(RuntimeError::new("readFile requires `uses FsRead`"));
+    }
+    Ok(match env.platform().fs_read(name) {
+        Some(contents) => some(Value::Str(contents.into())),
+        None => none(),
+    })
 }
 
 /// `emit(name, value)` — record a metric sample. v0 stub for the wire protocol.
@@ -966,6 +995,52 @@ mod tests {
         let fake = Rc::new(FakePlatform::new());
         let value = run_program_on("main() = hold()", fake).expect("hold should run");
         assert_eq!(value, Value::List(vec![].into()));
+    }
+
+    #[test]
+    fn read_file_returns_the_file_contents_as_some() {
+        let fake = Rc::new(FakePlatform::with_files(&[("notes", "buy milk\n")]));
+        let value = run_program_on(r#"main() uses FsRead = readFile("notes")"#, fake)
+            .expect("declared readFile should run");
+        match value {
+            Value::Data(d) if d.variant == "Some" => {
+                assert_eq!(d.fields[0].1, Value::Str("buy milk\n".into()));
+            }
+            other => panic!("expected Some(\"buy milk\\n\"), got {}", other.display()),
+        }
+    }
+
+    #[test]
+    fn read_file_of_a_missing_file_is_none() {
+        let fake = Rc::new(FakePlatform::new());
+        let value = run_program_on(r#"main() uses FsRead = readFile("absent")"#, fake)
+            .expect("declared readFile should run");
+        assert!(matches!(value, Value::Data(d) if d.variant == "None"), "expected None");
+    }
+
+    #[test]
+    fn read_file_without_fs_read_is_refused() {
+        // The FsRead/ConsoleOut split: holding ConsoleOut doesn't grant file reads.
+        let fake = Rc::new(FakePlatform::with_files(&[("notes", "x")]));
+        let err = run_program_on(r#"main() uses ConsoleOut = readFile("notes")"#, fake)
+            .expect_err("readFile needs FsRead");
+        assert!(err.message().contains("FsRead"), "{}", err.message());
+    }
+
+    #[test]
+    fn view_prints_a_file_through_fs_read_and_console() {
+        // `view` (a prelude fn) declares its own `uses FsRead, ConsoleOut`, so
+        // `main` needs none — the function runs with exactly that authority.
+        let fake = Rc::new(FakePlatform::with_files(&[("notes", "buy milk")]));
+        run_program_on(r#"main() = view("notes")"#, fake.clone()).expect("view should run");
+        assert_eq!(fake.output(), "buy milk\n");
+    }
+
+    #[test]
+    fn view_of_a_missing_file_prints_a_message() {
+        let fake = Rc::new(FakePlatform::new());
+        run_program_on(r#"main() = view("absent")"#, fake.clone()).expect("view should run");
+        assert!(fake.output().contains("cannot read"), "{}", fake.output());
     }
 
     /// Run a one-liner that uses the `Str` module, returning `main`'s value.
