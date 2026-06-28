@@ -470,8 +470,18 @@ dependencies = [
 name = "hitch"
 version = "0.0.1"
 dependencies = [
+ "hitch-derive",
  "postcard",
  "serde",
+]
+
+[[package]]
+name = "hitch-derive"
+version = "0.0.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -1168,6 +1178,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 name = "stitch"
 version = "0.0.1"
 dependencies = [
+ "fs-proto",
  "hitch",
  "insta",
  "protocol",

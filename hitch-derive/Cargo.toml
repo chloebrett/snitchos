@@ -1,0 +1,16 @@
+[package]
+name = "hitch-derive"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "2"
+quote = "1"
+proc-macro2 = "1"
+
+[lints]
+workspace = true

@@ -5,12 +5,17 @@ edition = "2024"
 publish = false
 
 [features]
-default = []
+default = ["derive"]
+# `#[derive(Schema)]`. On by default (the proc-macro is host-built, so it never
+# reaches a target binary); turn off with `default-features = false` to skip the
+# syn/quote build.
+derive = ["dep:hitch-derive"]
 # Host-side conveniences (e.g. Frame/Value bridges, pretty-printing) that want
 # `std`. Off by default so userspace and the interpreter keep building no_std.
 std = []
 
 [dependencies]
+hitch-derive = { path = "../hitch-derive", optional = true }
 # The codec is postcard at two levels (see README): postcard the domain value
 # (packed) or postcard the self-describing `Value` (married to its schema).
 # Both are already in the workspace tree via `protocol`, so Hitch adds nothing

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "kernel-core", "protocol", "collector", "stitch", "hitch", "xtask", "itest-harness", "abi", "fs-core", "ramfs", "fs-proto", "user/macros", "user/runtime", "user/std", "user/hello", "user/fs", "snemu"]
+members = ["kernel", "kernel-core", "protocol", "collector", "stitch", "hitch", "hitch-derive", "xtask", "itest-harness", "abi", "fs-core", "ramfs", "fs-proto", "user/macros", "user/runtime", "user/std", "user/hello", "user/fs", "snemu"]
 # `learning/` is a separate, host-targeted workspace of standalone "toy"
 # crates for understanding kernel concepts in isolation. Excluded so it
 # never participates in the no_std/riscv64 kernel build.

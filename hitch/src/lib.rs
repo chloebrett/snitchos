@@ -117,6 +117,56 @@ impl TypeSchema {
     }
 }
 
+/// What shape does a Rust type take in the Hitch model? The static counterpart of
+/// a [`Value`]'s runtime shape: `<T as Schema>::schema()` is the [`TypeSchema`] a
+/// value of `T` conforms to. `#[derive(Schema)]` implements this for structs and
+/// enums by recursing into their fields, which bottom out at the primitive impls
+/// below.
+pub trait Schema {
+    /// This type's shape.
+    fn schema() -> TypeSchema;
+}
+
+impl Schema for bool {
+    fn schema() -> TypeSchema {
+        TypeSchema::Bool
+    }
+}
+impl Schema for i64 {
+    fn schema() -> TypeSchema {
+        TypeSchema::I64
+    }
+}
+impl Schema for u64 {
+    fn schema() -> TypeSchema {
+        TypeSchema::U64
+    }
+}
+impl Schema for f64 {
+    fn schema() -> TypeSchema {
+        TypeSchema::F64
+    }
+}
+impl Schema for String {
+    fn schema() -> TypeSchema {
+        TypeSchema::Str
+    }
+}
+
+/// `#[derive(Schema)]` from the `hitch-derive` crate, re-exported so a consumer
+/// writes `#[derive(hitch::Schema)]` against this one dependency (the serde
+/// convention). Behind the default `derive` feature.
+#[cfg(feature = "derive")]
+pub use hitch_derive::Schema;
+
+/// Items the derived code references by absolute path, so generated code needs
+/// nothing in the consumer's scope. Not a stable API.
+#[doc(hidden)]
+pub mod __private {
+    pub use alloc::boxed::Box;
+    pub use alloc::vec::Vec;
+}
+
 /// Something went wrong hitching or unhitching a value.
 #[derive(Debug)]
 pub enum Error {
