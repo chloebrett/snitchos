@@ -118,13 +118,127 @@ So console-out is reachable with no page-table walker: load ELF at physical addr
 | **Keep QEMU only** | The status quo. Slow startup dominates the repeat gate; telemetry stops at the hardware boundary; no I/O ownership. The thing we're improving on. |
 | **Host-thread-per-hart, shared memory** | Only faithful for RVWMO *reordering* bugs, which we've barely hit; reintroduces nondeterminism; faithful modeling is research-grade. Rejected as the default; kept as a possible far-future fuzz mode. |
 | **Drive the guest with loom** | Wrong abstraction (RVWMO over bytes, not C11 over loom atomics) and wrong scale (exhaustive-on-tiny vs a booting kernel). loom stays on kernel-core; its *algorithm* inspires the guest scheduler. |
-| **JIT / dynamic translation** | Premature. Interpreter speed is already a huge win over QEMU startup, and a JIT fights determinism + instrumentation. Revisit only if interpreter throughput ever bottlenecks. |
+| **JIT / dynamic translation** | Not for the early milestones (the startup win is already large and a native JIT fights determinism + instrumentation + nesting), but explicitly a *later measured arc* — Tier 1/2 (data-not-code) translation, gated on measurement. Native codegen (Tier 3) is a host-only fork on the horizon. See *Exploration notes → JIT*. |
 | **Emulate full RV64 spec** | Unnecessary. We control the toolchain; the envelope is `riscv64gc`-user (finite) + our kernel's system slice. Whole extension families stay off the table. |
 
 ## Milestones
 
-Detailed plan for milestone 1: [plans/snemu-milestone-1-console-out.md](../plans/snemu-milestone-1-console-out.md). Later milestones are sketched there at low granularity and will be promoted to their own plans as they come up.
+Detailed plan for milestone 1: [plans/snemu-milestone-1-console-out.md](../plans/snemu-milestone-1-console-out.md) (M2/M3 sketched there); measurement spine: [plans/snemu-milestone-4-measurement.md](../plans/snemu-milestone-4-measurement.md). Later milestones promote to their own plans as they come up.
 
-1. **Console out (UART only)** — RV64IMC core + CSRs + traps + ns16550a, no paging, one hart. Acceptance: the kernel's first unformatted "Hello" appears on host stdout, validated against riscv-tests for the core.
-2. **Reaches heartbeat** — + Sv39 + CLINT + virtio-console. Acceptance: passes `boot-reaches-heartbeat` and `heartbeat-cadence` against the real kernel, with `Frame`s delivered in-process.
-3. **Functional parity + concurrency** — + second hart, the controllable interleaving scheduler, U-mode + syscalls. Acceptance: runs the userspace/`init` scenarios; the interleaving scheduler reproduces a known cross-hart interleaving bug deterministically from a seed.
+**Guiding principle — measure first, then tune what you measured.** An observability-first project building an emulator makes the emulator observe *itself* first, then optimizes against its own telemetry — the same way the kernel tunes its heap watermark against heap metrics. The measurement spine (M4) is the load-bearing artifact; every JIT tier after it is an *episode measured against it*. Cheap counters (instret, wall-clock) are baked in from M1 so measurement is never retrofitted. The whole arc is also a devlog series — one post per milestone.
+
+1. **Console out (UART only)** — RV64IMC core + CSRs + traps + ns16550a, no paging, one hart. + cheap counters from day one. Acceptance: the kernel's first unformatted "Hello" appears on host stdout, validated against riscv-tests for the core.
+2. **Reaches heartbeat** — + Sv39 + CLINT + virtio-console. Acceptance: passes `boot-reaches-heartbeat` and `heartbeat-cadence` against the real kernel, with `Frame`s delivered in-process. First end-to-end wall-clock vs QEMU.
+3. **Functional parity + concurrency** — + second hart, the controllable interleaving scheduler, U-mode + syscalls, A extension. Runs the itest suite end-to-end, *no JIT*. This is the "working end-to-end" line. Acceptance: runs the userspace/`init` scenarios; the interleaving scheduler reproduces a known cross-hart interleaving bug deterministically from a seed.
+4. **Measurement spine** — harden self-telemetry into the two modes (measurement / observability), build the benchmark harness + workload taxonomy, establish the QEMU baseline + Grafana dashboard, and stand up the **nested overhead-factor methodology**. Everything after this is measured against it. See *Exploration notes → Measurement* and the M4 plan.
+5. **JIT Tier 1 — decode cache.** Pre-decode + cache by PC; data, not code. Measured delta across the taxonomy. Works on host *and* nested (no exec memory needed).
+6. **JIT Tier 2 — block formation + dispatch elimination + chaining.** Threaded/closure translation, software block chaining; still data, not code. Measured delta.
+
+*Horizon (not in this arc):* **JIT Tier 3 — native codegen.** Host-only fork (needs W^X exec pages); off-host needs a new SnitchOS `ExecMemory` capability. Gated on whether M5/M6 + the interleaving scheduler leave us measurably compute-bound. The wall, not a plan. See *Exploration notes → JIT* and *→ Off-host JIT*.
+
+---
+
+# Exploration notes
+
+*Captured from design discussion. These are the "why" and the roads-not-yet-taken behind the milestone arc — kept so the reasoning survives even though the early milestones don't touch most of it.*
+
+## QEMU: what it actually does, and why startup costs a second
+
+QEMU has two engines. **KVM/HVF** (hardware virtualization) runs guest instructions natively and only works when guest arch == host arch — **unavailable** for riscv64-on-arm64 (Apple Silicon). So for SnitchOS-on-Mac, QEMU runs **TCG** (Tiny Code Generator): a *dynamic binary translator* that JITs blocks of guest RISC-V into host arm64, caches and chains them. So QEMU here is already **pure software emulation** — same category as snemu, just JIT'd where snemu interprets. snemu competes with **TCG, not KVM.**
+
+The ~1 s QEMU startup is almost entirely **fixed host-side setup, not guest execution**:
+- process + dynamic-linker startup (huge binary, dozens of dylibs; on macOS, code-signing / library-validation of the binary + every dylib is a real launch tax);
+- machine construction (instantiate every `virt` device, wire IRQ topology, **generate the DTB at runtime**, set up address spaces);
+- firmware (default `virt` runs **OpenSBI** first, then jumps to the kernel);
+- cold-JIT warm-up (early boot is all cold paths → TCG pays translation cost with no cache hits);
+- possible socket-wait (a `server` chardev without `nowait` *blocks until the harness connects* — a handshake mis-attributed to "boot").
+
+snemu's "boot" is: alloc RAM, parse ELF, set `pc`, go. Small static binary, trivial machine (no DTB generation — the kernel parks DTB parsing), no firmware, no JIT warm-up. **Milliseconds.** This is why the startup win is *structural* (snemu has almost no fixed setup) while any per-instruction loss is *per-instruction* (interpreter vs JIT). Net: snemu is much faster to start, slower to run, **net-faster exactly when startup dominates** — most smokes, few storms. The right end state is **hybrid**: snemu for the fast functional suite, QEMU retained for compute-heavy storms (and as the only true-RVWMO fuzzer). Determinism shifts the math further: a seeded snemu run replaces `--repeat 10`, so the comparison is "1 snemu run vs 10 QEMU runs," not 1-vs-1.
+
+## JIT: the tier ladder, the win, and the conflicts
+
+A JIT only helps **execution-bound** scenarios; smokes are startup-bound where snemu already wins. And the storms' purpose is race-finding, which the deterministic interleaving scheduler addresses better than raw speed. So: **measure whether a compute-bound problem even survives the interleaving scheduler before building any JIT.**
+
+The ladder (effort ↑, win ↑, portability/compatibility ↓):
+
+- **Tier 1 — decode cache.** Decode each instruction once into a struct, cache by PC, `match` on it. Kills re-decode cost. ~**2–4×**. Pure data; no exec memory; portable; no_std; deterministic; instrumentation-transparent; **nests**. A day or two.
+- **Tier 2 — block cache + software chaining (threaded/closure).** Group into basic blocks, cache decoded blocks by entry PC, link exits directly (software block chaining); optionally a `Vec` of handler fn-pointers. ~**3–6×**. Still data, not code; still portable; still **nests**. ~a week. The sweet spot for a planned milestone.
+- **Tier 3 — native codegen.** Emit host machine code per block. ~**10–50×** (TCG territory). Where all the complexity *and* the conflicts live.
+
+RISC-V makes Tier 3 *less* crazy than typical: fixed-width regular encoding (trivial decode), RISC→RISC is nearly a transliteration, and the **register-pinning gift** (arm64's 31 GPRs ≈ RV64's 31 real regs → pin hot guest regs to host regs). The genuinely hard parts aren't arithmetic — they're the **soft-MMU** (every load/store needs translation + checks; calling back to Rust per op kills the win, so fast JITs *inline* a TLB lookup — this is where much of TCG's complexity actually is), **exits out of generated code** (traps/interrupts/scheduler), and **macOS W^X** (`MAP_JIT` + `pthread_jit_write_protect_np`, JIT entitlement).
+
+**Tier 3 fights all four snemu pillars:**
+1. **Nesting** — native codegen needs exec pages, absent in no_std SnitchOS userspace → host-only fork; the nested story stays on the interpreter.
+2. **Interleaving scheduler** — block chaining *avoids* returning to the dispatcher, but the race-finder *wants* fine-grained yield points. Forces preemption only at block boundaries (or explicit emitted checks); instruction-granularity interleaving gets expensive. (This is exactly why TCG has a special deterministic `icount` mode.)
+3. **Instrumentation** — per-instruction telemetry is the whole pitch; a JIT has no natural per-instruction hook, so you must *emit* instrumentation into the code, which is more work *and* erodes the win. Goal and win partially cancel.
+4. **Determinism** — survives (same input → same code → same run), *if* (2) is handled.
+
+**Cranelift** is the pragmatic Rust backend for Tier 3 (it's what Wasmtime uses; designed for "many front ends, one backend"). But: heavy **std-only** dep (can't run in no_std SnitchOS userspace → useless for nesting / on-target), and **coarse control** over codegen (bad for inserting snemu's per-instruction instrumentation). Hand-rolling arm64 emission is more work but more control + no dep + teachable (fits the ethos). Verdict for snemu: **only Tiers 1–2 are plausible planned milestones** (keep snemu one coherent, nesting, instrumentable, deterministic engine); Tier 3 is a real fork justified only by *measured* compute-bound need that Tiers 1–2 + the scheduler don't solve — at which point "why not keep QEMU for those storms?" is the honest question.
+
+## Nesting: snemu inside SnitchOS
+
+If `snemu-core` is **no_std + alloc** with host I/O behind a `Platform`-style trait, snemu can run as a **SnitchOS userspace program** and boot a *guest* SnitchOS. Precedent in-repo: **Stitch's interpreter is already no_std+alloc and builds for the riscv64 target** — snemu follows the identical pattern, and the recent `Platform` trait (`write`/`read_line`) is the same seam.
+
+snemu's demands on a host are astonishingly thin — and that thinness is *why* it nests:
+- **allocator** (guest RAM is a `Vec<u8>`);
+- **a byte source for the guest ELF** (host: file; SnitchOS: RAMfs read over IPC);
+- **a byte sink for guest console** (host: stdout; SnitchOS: `ConsoleWrite`);
+- **no host threads** (single-threaded interpreter + scheduler);
+- **no host clock** (instruction-count clock → the nested guest is deterministic *regardless of how chaotically the outer SnitchOS preempts snemu*);
+- **no host FPU** if F/D is soft-floated (pure integer bit-twiddling) — then it nests even on an FP-less SnitchOS; choose host-`f64` and the layer below needs userspace FP (the `sstatus.FS` story).
+
+**The split this forces** mirrors `kernel`/`kernel-core` (and is worth doing even if we never nest, as design pressure for the `Platform` seam):
+- `snemu-core` — no_std+alloc: `Cpu`, `Memory`, decode, execute, devices over `Platform`. The machine.
+- host shell — std: xtask glue, riscv-tests harness, real file/socket I/O.
+- SnitchOS-userspace shell — links the `user/` runtime + talc, implements `Platform` over syscalls.
+
+**The turtle stack** (L0 real HW/QEMU → L1 SnitchOS kernel → L2 snemu process → L3 guest SnitchOS → L4 guest userspace). The **fixed point**: if snemu faithfully emulates QEMU `virt`, the L3 kernel ELF is *byte-identical* to the L1 one — SnitchOS booting an identical copy of itself.
+
+**The payoff is nested observability** (the on-brand part): snemu's own telemetry (guest instret, every MMIO, page faults) flows out through SnitchOS's telemetry channel as spans/metrics, while the guest's *own* `Frame`s (out its virtio-console) are captured by snemu's device and can be re-emitted as nested spans — a **trace-within-a-trace**: SnitchOS observing a guest SnitchOS observing itself.
+
+**Caveats:** RAM shrinks geometrically per level (shrink the guest, bump the outer `-m`; 1–2 levels fine, deep towers hit a RAM wall); needs M2+ to boot a *real* kernel; **speed compounds multiplicatively**, so nesting is a pedagogical/demo artifact, *not* an itest path — the practical wins (fast itests, telemetry) are all snemu-on-host.
+
+## Off-host JIT: data-not-code works free; native needs a capability
+
+"Can a nested snemu JIT off-host?" splits by whether the artifact is **data** or **executable memory**:
+- **Tiers 1–2 work off-host today, at any nesting depth, with zero kernel support** — the artifact is a `Vec`/internal bytecode (data); the handlers are already-compiled Rust. The no_std/no-exec-memory limit only ever blocked *native-code* JITs.
+- **Tier 3 native codegen off-host needs a new kernel capability.** The MMU primitive exists (`mmu::map` can set the X bit in Sv39 PTEs); what's missing is an *ABI* (userspace `MapAnon` hands out RW only). Two shapes: **(a)** a W^X-toggleable exec-memory mapping, or **(b)** kernel-mediated code submission (hand the kernel bytes, it maps them executable).
+
+**This is the maximally-SnitchOS feature.** The right to make memory executable is exactly the kind of authority that should be a **capability** — an `ExecMemory` object, explicitly granted, revocable, with every code-emission an observable `CapEvent`/span: literally *watch a JIT compile as a trace* (span per emitted block, metric for code-cache bytes, the W^X flip as an audited event). Neither QEMU nor Cranelift hands you that; it exists only because we own the kernel. (Relates to the explicit-authority-shell idea.)
+
+**The tower insight — depth doesn't multiply the requirement:** only the **outermost real-execution layer's** native JIT needs *real* exec memory (granted once by its immediate host). A guest *inside* snemu that JITs needs nothing new — it writes code into *guest RAM* and sets the X bit in *guest* page tables; that's the guest doing **self-modifying code**, which snemu just has to *emulate correctly* (detect writes to pages it has cached translations for, invalidate — classic SMC handling, what QEMU does by write-protecting translated pages). So inner JITs ride snemu's SMC handling for free; real executable memory is needed exactly once, at the top.
+
+## Syscalls (snemu's, two senses)
+
+1. **Nested host I/O → SnitchOS syscalls.** When snemu runs as a SnitchOS process, the `Platform` trait routes its host needs onto syscalls: guest-ELF bytes ← RAMfs (IPC), guest console ← `ConsoleWrite`, guest RAM ← `MapAnon`, time ← none needed (instruction-count clock). snemu's host surface is a *subset* of what Stitch already needed, plus a file read.
+2. **Guest syscalls (M3).** snemu must emulate the trap path the kernel implements: `ecall` from U-mode, `sstatus` SPP/SPIE transitions, the cap-mediated + ambient syscall dispatch — so guest userspace (`init`, FS server, clients) runs. This is "model the privilege machinery," not "implement a syscall ABI" — snemu runs the *kernel's* dispatch, it doesn't reimplement it.
+3. **New kernel syscall for off-host Tier 3:** the `ExecMemory` capability above. Not needed for Tiers 1–2.
+
+## Measurement: the spine the JIT arc stands on
+
+Determinism is what makes the JIT numbers *honest*: same workload + seed → **identical guest execution, identical instruction count** across every tier; only wall-clock varies. True apples-to-apples deltas — something QEMU can't give (nondeterministic, no fixed instret).
+
+**Two modes** (the observer effect is real — rich per-instruction telemetry perturbs what it measures):
+- **measurement mode** — cheap counters only (instret, wall-clock, cache stats); low perturbation; source of the speedup numbers.
+- **observability mode** — full per-instruction frames / MMIO traces / page-fault spans; for debugging + "watch a guest execute" demos; accepts the slowdown.
+
+**Metric set** (flows out as `Frame`s → Grafana): guest **MIPS** (instret/wall-clock, the headline); **wall-clock per itest scenario** (ties to the QEMU-startup motivation); **host-work-per-guest-instruction** (the overhead factor each tier attacks); **hot-block concentration** (predicts JIT payoff *before* building it; explains why a workload did/didn't speed up); **block-cache hit rate / dispatch counts**; **startup time** (keep visible so JIT work doesn't regress it); code-cache size + guest RAM.
+
+**Workload taxonomy** (so "various workloads" has texture and the diminishing-returns story is honest): **startup-bound** (boot-to-heartbeat — JIT barely helps, proves it's no panacea); **compute-bound tight loop** (storm / synthetic LCG burner — JIT helps most, the hero number); **memory-bound** (load/store heavy — soft-MMU dominates, shows why TLB inlining is the real Tier-3 lever and why Tiers 1–2 plateau); **trap/MMIO-heavy** (syscall-y — exits cap the win, explains the ceiling).
+
+### Nested overhead measurement (the elegant one)
+
+A process can't easily count its *own* retired host instructions (needs OS perf counters — platform-specific, sampled, nondeterministic, whole-process noise). **Nesting converts this un-self-measurable quantity into ordinary deterministic telemetry:**
+- **inner snemu** emulates the test guest, counts guest instructions `G` (its own instret);
+- **outer snemu** runs the inner one, counts `H` = every instruction the inner executed = the inner's host-instruction count;
+- **overhead factor = H / G**, from two ordinary instret readings — exact, deterministic, platform-independent, no `perf`.
+
+**Per-class breakdown** (what actually drives the JIT): run targeted microbenchmarks in the inner snemu, read the outer's instret **delta** — a loop of `add`s → host-instrs per ALU op (decode+dispatch); `ld`/`sd` → host-instrs per memory op (**the soft-MMU cost**); a trap/MMIO crossing → exit cost. Now you have a precise map of where host instructions go, telling each JIT tier what to attack and *proving* it did (decode-cache craters ALU-op cost, chaining craters dispatch, TLB-inlining craters memory-op cost).
+
+**Algorithmic vs wall-clock — keep both.** The nested factor measures *instruction count* (pure algorithmic overhead, microarch-noise-free — exactly what a JIT removes); host wall-clock MIPS measures real-silicon speed. Their **disagreement is itself a finding**: a tier that drops H/G but barely moves wall-clock traded instructions for cache misses / mispredicts — a sophisticated, honest post almost no hobby emulator can write.
+
+**Cost is a non-issue:** a slow interpreter under a slow interpreter is brutally slow, but you're measuring *counts, not time* — counts are exact no matter how slow. Run small bracketed microbenchmarks (a few million guest instructions, a few seconds), perfect numbers.
+
+**Plumbing it needs:** (1) a **measurement-marker channel** so the inner can bracket its measured region (magic MMIO write / recognizable nop pattern the outer watches for) → `H` excludes inner startup/IO; (2) **inner runs in measurement mode** so its own telemetry doesn't inflate `H`. The nested setup is the killer app for the two-mode split.
+
+Framing: *snemu measures snemu using nothing but snemu* — the observability emulator self-hosting its own benchmark.

@@ -34,6 +34,7 @@ the very next instruction stream is milestone 2's problem.
 | Memory | flat `Vec<u8>` at `0x8000_0000`; address-decode `match` (RAM vs UART) |
 | Devices | ns16550a only (`0x1000_0000`); THR write → host stdout |
 | Clock | instruction count; no CLINT yet |
+| Counters | **cheap counters from day one** — `instret` + wall-clock, low-perturbation. The "measurement mode" seed; measurement is never retrofitted (see M4 / design doc *Exploration notes → Measurement*) |
 | Harts | one; per-hart shape in place but trivial scheduler |
 | ELF | hand-rolled ELF64 program-header load (PT_LOAD → paddr) |
 | Unknown opcode/CSR | dump `pc` + raw word + decoded guess, halt (the meta-loop) |
@@ -55,7 +56,9 @@ its own; don't batch even when the pattern feels obvious.
 - No CPU yet.
 
 ### Step 2 — `Cpu` state + the raw-instruction test harness
-- `Cpu { x: [u64; 32], pc: u64, csr: …, mem }`. `x[0]` hard-wired zero.
+- `Cpu { x: [u64; 32], pc: u64, csr: …, instret: u64, mem }`. `x[0]`
+  hard-wired zero. `step()` bumps `instret` — the first (free) counter
+  of the measurement spine.
 - A test helper that loads hand-encoded words at `0x8000_0000`, sets
   registers, runs `step()` N times, asserts register/memory state. This
   helper is the bedrock loop — invest in its ergonomics.
@@ -194,3 +197,35 @@ Rough shape:
 - Acceptance: userspace/`init` scenarios pass; the scheduler replays a
   seeded interleaving that reproduces (e.g.) a `TX_STAGING`-class
   ordering bug on demand — Heisenbug → fixed-seed regression test.
+
+## Milestone 4 — measurement spine *(its own plan: [snemu-milestone-4-measurement.md](snemu-milestone-4-measurement.md))*
+
+The load-bearing artifact: snemu observing itself, the QEMU baseline,
+the workload taxonomy, and the nested overhead-factor methodology.
+Everything after this (the JIT tiers) is measured against it. M3 is the
+"working end-to-end, no JIT" line; M4 makes the measurement rigorous.
+
+## Milestone 5 — JIT Tier 1: decode cache *(low granularity)*
+
+Pre-decode each instruction into a struct, cache by guest PC, `match` on
+it; skip re-decode on re-execution. ~2–4×. Pure data, no exec memory —
+works on host *and* nested. Deterministic + instrumentation-transparent.
+Deliverable + post: measured delta across the M4 taxonomy + the nested
+per-class overhead profile (ALU-op cost should crater).
+
+## Milestone 6 — JIT Tier 2: block formation + chaining *(low granularity)*
+
+Group into basic blocks, cache decoded blocks by entry PC, link exits
+directly (software chaining); optionally a `Vec` of handler fn-pointers
+(threaded/closure). ~3–6×. Still data, not code; still nests. Watch the
+interaction with the interleaving scheduler (chaining removes the
+fine-grained yield points the race-finder wants — preempt at block
+boundaries or emit explicit checks). Deliverable + post: measured delta
+(dispatch cost should crater).
+
+---
+
+*Horizon (not planned): JIT Tier 3 native codegen — host-only fork
+(W^X exec pages), off-host needs the SnitchOS `ExecMemory` capability.
+Gated on a measured compute-bound need that Tiers 1–2 + the interleaving
+scheduler don't solve. See `docs/snemu-design.md` Exploration notes.*
