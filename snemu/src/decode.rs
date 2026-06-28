@@ -211,6 +211,7 @@ pub(crate) fn expand(half: u16) -> Option<u32> {
     match (quadrant, funct3) {
         (0b01, 0b000) => Some(expand_c_addi(half)),
         (0b01, 0b010) => Some(expand_c_li(half)),
+        (0b01, 0b101) => Some(expand_c_j(half)),
         (0b10, 0b100) => Some(expand_cr(half)),
         _ => None,
     }
@@ -260,4 +261,33 @@ fn jalr_form(rd: u32, rs1: u32) -> u32 {
 
 fn ebreak_form() -> u32 {
     (priv12::EBREAK << 20) | opcode::SYSTEM // funct3 0 (PRIV)
+}
+
+/// `c.j offset` -> `jal x0, offset`.
+fn expand_c_j(half: u16) -> u32 {
+    jal_word(0, cj_offset(half))
+}
+
+/// Sign-extended CJ-format jump offset (the spec's scrambled bit order).
+fn cj_offset(half: u16) -> u32 {
+    let h = u32::from(half);
+    let imm = (((h >> 12) & 1) << 11)
+        | (((h >> 11) & 1) << 4)
+        | (((h >> 9) & 3) << 8)
+        | (((h >> 8) & 1) << 10)
+        | (((h >> 7) & 1) << 6)
+        | (((h >> 6) & 1) << 7)
+        | (((h >> 3) & 7) << 1)
+        | (((h >> 2) & 1) << 5);
+    sign_extend(imm, 12) as u32
+}
+
+/// Encode `jal rd, imm` (J-type) from a sign-extended `imm`.
+fn jal_word(rd: u32, imm: u32) -> u32 {
+    (((imm >> 20) & 1) << 31)
+        | (((imm >> 1) & 0x3ff) << 21)
+        | (((imm >> 11) & 1) << 20)
+        | (((imm >> 12) & 0xff) << 12)
+        | (rd << 7)
+        | opcode::JAL
 }

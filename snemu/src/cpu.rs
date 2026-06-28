@@ -1346,6 +1346,24 @@ mod tests {
     }
 
     #[test]
+    fn compressed_j_jumps_forward_and_backward() {
+        // c.j +6 == 0xa019
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0xa019).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 6);
+
+        // c.j -10 == 0xbfdd (captured from the kernel boot)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE + 0x40, 0xbfdd).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_pc(RAM_BASE + 0x40);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 0x40 - 10);
+    }
+
+    #[test]
     fn store_to_uart_produces_console_output() {
         let program = &[
             lui(2, 0x10000),               // x2 = 0x1000_0000 (UART base)

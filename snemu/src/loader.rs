@@ -24,8 +24,10 @@ mod off {
 mod ph {
     pub const P_TYPE: usize = 0x00;
     pub const P_OFFSET: usize = 0x08;
+    pub const P_VADDR: usize = 0x10;
     pub const P_PADDR: usize = 0x18;
     pub const P_FILESZ: usize = 0x20;
+    pub const P_MEMSZ: usize = 0x28;
 }
 
 /// Why an image could not be loaded.
@@ -81,22 +83,31 @@ pub fn load(image: &[u8], ram_size: usize) -> Result<Cpu, ElfError> {
     let phnum = u64::from(u16_at(image, off::E_PHNUM)?);
 
     let mut mem = Memory::new(ram_size);
+    let mut entry_pa = None;
     for i in 0..phnum {
         let base = (phoff + i * phentsize) as usize;
         if u32_at(image, base + ph::P_TYPE)? != PT_LOAD {
             continue;
         }
         let offset = u64_at(image, base + ph::P_OFFSET)? as usize;
+        let vaddr = u64_at(image, base + ph::P_VADDR)?;
         let paddr = u64_at(image, base + ph::P_PADDR)?;
         let filesz = u64_at(image, base + ph::P_FILESZ)? as usize;
+        let memsz = u64_at(image, base + ph::P_MEMSZ)?;
         let end = offset.checked_add(filesz).ok_or(ElfError::Truncated)?;
         let bytes = image.get(offset..end).ok_or(ElfError::Truncated)?;
         mem.write_bytes(paddr, bytes)
             .map_err(|_| ElfError::SegmentOutOfRange)?;
+        if (vaddr..vaddr.wrapping_add(memsz)).contains(&entry) {
+            entry_pa = Some(entry - vaddr + paddr);
+        }
     }
 
     let mut cpu = Cpu::new(mem);
-    cpu.set_pc(entry);
+    // The kernel is linked at higher-half VAs but boots at physical PC, so
+    // translate the entry through its segment's vaddr->paddr mapping. Falls
+    // back to the entry verbatim if no PT_LOAD covers it.
+    cpu.set_pc(entry_pa.unwrap_or(entry));
     Ok(cpu)
 }
 
@@ -106,7 +117,7 @@ mod tests {
     use crate::mem::RAM_BASE;
 
     /// Build a minimal valid ELF64 with a single `PT_LOAD` segment.
-    fn tiny_elf(entry: u64, paddr: u64, segment: &[u8]) -> Vec<u8> {
+    fn tiny_elf(entry: u64, vaddr: u64, paddr: u64, segment: &[u8]) -> Vec<u8> {
         let mut img = vec![0u8; 64];
         img[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
         img[4] = 2; // ELFCLASS64
@@ -121,6 +132,7 @@ mod tests {
         let mut ph = vec![0u8; 56];
         ph[0..4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
         ph[0x08..0x10].copy_from_slice(&120u64.to_le_bytes()); // p_offset (64 + 56)
+        ph[0x10..0x18].copy_from_slice(&vaddr.to_le_bytes()); // p_vaddr
         ph[0x18..0x20].copy_from_slice(&paddr.to_le_bytes()); // p_paddr
         ph[0x20..0x28].copy_from_slice(&(segment.len() as u64).to_le_bytes()); // p_filesz
         ph[0x28..0x30].copy_from_slice(&(segment.len() as u64).to_le_bytes()); // p_memsz
@@ -133,11 +145,25 @@ mod tests {
     fn loads_segment_and_runs_from_entry() {
         let entry = RAM_BASE + 0x100;
         let segment = 0x02a0_0093_u32.to_le_bytes(); // addi x1, x0, 42
-        let img = tiny_elf(entry, entry, &segment);
+        let img = tiny_elf(entry, entry, entry, &segment);
 
         let mut cpu = load(&img, 0x1000).unwrap();
         assert_eq!(cpu.pc(), entry);
 
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(1), 42);
+    }
+
+    #[test]
+    fn higher_half_entry_is_translated_to_physical() {
+        // Linked at a higher-half VA, loaded at a physical paddr.
+        let vaddr = 0xffff_ffff_8000_0000 + 0x100;
+        let paddr = RAM_BASE + 0x100;
+        let segment = 0x02a0_0093_u32.to_le_bytes(); // addi x1, x0, 42
+        let img = tiny_elf(vaddr, vaddr, paddr, &segment);
+
+        let mut cpu = load(&img, 0x1000).unwrap();
+        assert_eq!(cpu.pc(), paddr); // started at the physical entry
         cpu.step().unwrap();
         assert_eq!(cpu.reg(1), 42);
     }
@@ -149,7 +175,7 @@ mod tests {
 
     #[test]
     fn rejects_a_non_riscv_elf() {
-        let mut img = tiny_elf(RAM_BASE, RAM_BASE, &[0; 4]);
+        let mut img = tiny_elf(RAM_BASE, RAM_BASE, RAM_BASE, &[0; 4]);
         img[0x12..0x14].copy_from_slice(&62u16.to_le_bytes()); // EM_X86_64
         assert!(matches!(load(&img, 0x1000), Err(ElfError::Unsupported)));
     }
