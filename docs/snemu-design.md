@@ -242,3 +242,81 @@ A process can't easily count its *own* retired host instructions (needs OS perf 
 **Plumbing it needs:** (1) a **measurement-marker channel** so the inner can bracket its measured region (magic MMIO write / recognizable nop pattern the outer watches for) → `H` excludes inner startup/IO; (2) **inner runs in measurement mode** so its own telemetry doesn't inflate `H`. The nested setup is the killer app for the two-mode split.
 
 Framing: *snemu measures snemu using nothing but snemu* — the observability emulator self-hosting its own benchmark.
+
+## Introspection & control — the no-hidden-state dividend
+
+A pile of capabilities fall out *for free* from snemu being a pure deterministic interpreter, and they're the same capabilities that are hard or fragile in QEMU — **for the same reason**: a pure interpreter has **no hidden state** (no JIT translation cache, no real-time coupling, no nondeterminism). The whole machine is a plain struct (`registers + pc + csrs + RAM Vec + device structs`) and "time" is `instret`. So:
+
+- **Time control** — fast-forward = run `step()` without rendering/telemetry; "clock speed" = change the `mtime`-per-`instret` ratio. The payoff is **deterministic timer/timeout testing**: fire a timer at *exactly* instret N and assert, instead of `sleep`-and-hope.
+- **Pause / snapshot / restore** — clone the state struct (only real cost is the RAM `Vec`; mitigable with dirty-page/COW). Easy *because* there's no hidden host state — the thing that makes QEMU snapshots finicky.
+- **Reverse execution (rr-style)** — determinism means rewind ≠ storing every state: keep **initial state + recorded external inputs** (console RX, scheduler seed) and "rewind to instret X" = restore nearest snapshot + replay forward. Step backwards from a crash to the instruction that first wrote the bad value. gdb+QEMU reverse-debug is slow/fragile; snemu does it natively + deterministically.
+- **Inject instructions / modify the kernel live** — kernel code is just bytes in guest RAM; patch the PA backing a higher-half VA (snemu owns the page tables, so VA→PA is easy) and it takes effect on next fetch (no I-cache/translation-cache until JIT — once JIT exists this needs SMC handling). From this fall out the classic debugger primitives: **breakpoints** (overwrite with `ebreak` → monitor → restore + step + reinsert), **live patch / A-B a function**, **fault injection** (force a trap to test handlers).
+- **Watchpoints that beat real hardware** — every memory access goes through software, so snemu has **unlimited, free data watchpoints** ("break/emit-a-span when *anyone* writes address X"), where real HW has a scarce handful of debug registers. A real corruption-hunting superpower, and on-brand (a watchpoint that emits telemetry).
+- **Device hot-plug / fault injection** — devices are structs in the address-decode `match`; add/remove at runtime, and (the valuable part) make them **misbehave deterministically**: "this virtio queue stalls after frame 100," "this device errors at instret X." Resilience testing that's near-impossible to do controllably in QEMU.
+
+**Strong idea — record/replay as the itest format.** A scenario = recorded input trace + expected output frames. Replay is deterministic → a perfect regression test *and* the same substrate as rewind. One mechanism, two payoffs.
+
+**The discipline this implies:** all of the above stay cheap only while the two enabling properties hold — **no hidden state, no nondeterminism.** Treat both as design *values*: anything that reintroduces them (real host threads, an un-recorded input source, a JIT translation cache) must justify itself, because it makes this entire list expensive. Mostly M4-and-later territory; the measurement/observability spine is the natural home for record/replay + watchpoints.
+
+## Real-hardware bring-up — what fault injection de-risks, and what it doesn't
+
+Fault injection + introspection meaningfully *ease* getting SnitchOS onto real hardware — but only the **protocol/logical** half of the problem, and it's worth being exact about the split (full real-HW direction lives in [arcade-and-real-hardware-direction.md](arcade-and-real-hardware-direction.md)).
+
+**What it de-risks (real, large):** the biggest reason a QEMU-only kernel falls over on metal is that **real devices break the happy-path assumptions QEMU smooths over** — fewer negotiated feature bits, garbage initial state, slow resets, NAKs, error status, spurious/coalesced interrupts, errata. Because snemu owns the device models, it can inject exactly that messiness **deterministically**, with rewind and free watchpoints attached. That converts a class of "mystery hang on the board" into "a test we wrote before the board arrived." This is squarely on-mission for an observability-first OS.
+
+**What it does *not* de-risk:**
+- **You only catch faults you can model** — fault injection hardens the *anticipated* failure space; metal's signature move is the fault you didn't model (errata, undocumented reset quirks).
+- **snemu can't catch a bug it shares** — it implements *your reading* of the spec; if kernel and snemu co-evolved the *same* wrong assumption, they're consistent with each other and both wrong vs silicon.
+- **The physical/timing/discovery layer** — weak-memory *reordering* (the hard SMP races snemu's determinism can't reproduce; that's QEMU-`thread=multi`/loom territory), DMA coherence (snemu "DMA" is a `memcpy`), MMIO posted-write ordering, real interrupt latency, and — concretely in *this* codebase — **DTB-driven discovery**: the kernel hardcodes the QEMU-`virt` map and parks `collect_mmio_regions` behind `#[expect(dead_code)]`; snemu hands a null DTB, so it actively *masks* the discovery work a real board forces. Plus real SBI/firmware.
+
+**The compounding value — snemu as a post-contact reproduction lab.** When the board misbehaves, the kernel's telemetry still streams out the UART; take what you observed, model it as an injected fault in snemu, reproduce it deterministically, and debug with rewind + unlimited watchpoints (none of which exist on the bare board). The loop: **observe on metal → model the fault → reproduce → debug with introspection → keep as a regression.** The OS's observability feeds snemu's injection; snemu's introspection feeds the fix.
+
+**Design advice if pursued:** build a **fault-policy seam** into device models from day one (a hook to make any device misbehave); make every fault a **recorded/replayable scenario**; model the **specific target board's datasheet/errata quirks** (transfer to metal scales with how closely injected faults mirror real behavior — generic faults are weak); and keep an explicit ledger of **snemu-verifiable vs only-metal-verifiable** properties so green-in-snemu never reads as "ready for metal." snemu is necessary, not sufficient.
+
+## Tractability of hard devices (USB, display, GPU, a real board)
+
+The decisive axis is **not** device complexity — it's **"is there a spec you can implement?"** snemu can only help with a device you can model, and you can only model a device you can spec.
+
+- **Standardized devices** (xHCI/USB, virtio-\*, NVMe, AHCI, PCIe-ECAM, simple-framebuffer): emulable in snemu, *and* real conforming hardware runs the same driver → snemu makes these **more tractable**.
+- **Proprietary/undocumented** (real discrete GPUs, Broadcom VideoCore, vendor SoC peripherals): not emulable without reverse-engineering, not drivable without docs → **out of reach**, and snemu can't help because the wall is *information*, not tooling.
+
+Per target:
+- **USB — the sweet spot.** Host controller is standardized (xHCI, public spec); the stack (enumeration, hubs, class drivers) is pure protocol complexity, which is snemu's strength. Build xHCI + a couple of emulated USB devices, develop the stack deterministically with per-TRB telemetry, transfer to conforming silicon.
+- **Display — tractable *above* the device.** A standard surface (virtio-gpu, or a firmware-provided framebuffer) makes the whole stack above it (compositor, text console, fonts, damage tracking) very develop-able. Raw mode-setting on specific GPU silicon stays hard — sidestep it via a firmware-set-up framebuffer initially.
+- **GPU — split.** virtio-gpu (with virgl/venus) is a real spec → tractable, gets you a GPU programming model + 3D stack. A real discrete GPU stays **out of reach** (proprietary command formats + firmware blobs; nouveau took years) — no emulator lowers that wall.
+- **Raspberry Pi — the awkward one.** (a) **ISA mismatch**: the Pi is ARM, SnitchOS is RISC-V → "run on a Pi" means an ARM *port* (big), or it means "a real SBC," i.e. pick a **RISC-V board** (VisionFive 2 / Milk-V). (b) Even on a RISC-V board, peripherals are board-specific and only as emulable as documented, and the board forces the parked DTB-discovery + real firmware work. Physical bring-up (clocks/PMIC/DDR — though firmware usually does DDR) stays real.
+
+**The path that maximizes reach:** ride standards — prefer standards-based devices at every choice point, emulate the standard in snemu, develop the stack against it, run on conforming hardware. (This is how real OSes get broad support cheaply: virtio in VMs; xHCI/NVMe/AHCI/PCIe-ECAM on metal.)
+
+**Honest cost + the pragmatic hybrid:** developing a driver in snemu means implementing the **device model too** — two implementations vs QEMU's one. Justified for *genuinely hard* stacks (you'd write the driver anyway; the device model becomes a permanent fault-injectable fixture; the introspection/determinism/host-window wins are real). But for devices QEMU already models well (xHCI, virtio-gpu), the pragmatic move is **hybrid**: develop against QEMU first, build the snemu device model only when you specifically need the introspection, fault injection, or host-window dev loop.
+
+## Display: what snemu adds over QEMU's window
+
+QEMU already renders guest framebuffers to a host window (`-display cocoa/gtk/sdl`), so **the window is table stakes** — not a snemu advantage. For casual *interactive* use, QEMU is fine/better (there already, fast, uses the host GPU). snemu's edge is the **test/debug/CI loop**, via the usual determinism + ownership + introspection + no-hidden-state, applied to pixels:
+
+- **Pixel-exact deterministic framebuffer at a defined instret → golden-image testing.** QEMU's display is real-time/nondeterministic; snemu's framebuffer at instret X is byte-for-byte identical every run, so you can hash/diff it against a known-good image *as a deterministic itest*. Moves graphics from "eyeball it" into the regression suite. **The killer one.**
+- **Reproducible across machines/CI** — QEMU's accelerated 3D (virgl/venus) runs through the **host GPU** (nondeterministic, machine-dependent); a software-rendered snemu framebuffer is host-GPU-independent.
+- **Full introspection** — the framebuffer is your memory: watchpoint "who wrote this pixel," attribute draws to the instruction/span that caused them, overlay damage rects.
+- **Visual record/replay/rewind** — capture the framebuffer per frame in the replay trace; step back to the frame *before* the corruption.
+- **Deterministic input + display-fault injection** — feed synthetic mouse/keyboard/touch as part of a replayable UI test; inject mode-set failures / scanout stalls deterministically.
+
+**Tradeoff:** for **3D**, QEMU's host-GPU path is fast-but-nondeterministic; a snemu software path is deterministic-but-slow (and software 3D is a big lift) — choose per goal. For 2D/framebuffer the win is clean. Synthesis: *QEMU gives a window to look at; snemu gives pixels you can assert on, diff, rewind, and attribute to code.*
+
+## Timing & analog fidelity — the abstraction spectrum
+
+"Timing" is a spectrum, and snemu is already on it: the instruction-count clock *is* a timing model — the simplest one, "1 unit/instruction, uniform." Everything below is refinement, descending the abstraction stack:
+
+1. **Non-uniform event costs** (this MMIO access costs 50, this device op 5000) — cheap, deterministic, a small step from today.
+2. **Discrete-event device latency** ("not-ready for N polls," "completion K units after the command") — models timing's *behavioral consequence* without continuous time.
+3. **Cycle-accurate digital** — clock-by-clock; possible but this is gem5/Verilator territory: needs a microarch model or RTL, runs orders of magnitude slower, and **trades away the speed + determinism + introspection that are snemu's whole point.** A different tool.
+4. **Continuous analog / electrical** — actual voltages, rise/fall, setup/hold, signal integrity, metastability. A *different paradigm* (SPICE / Verilog-AMS / mixed-signal co-sim) — snemu's functional core can't do it, but you *could couple* an analog solver to it. **Possible, not impossible** (earlier framing of "fundamentally cannot" was wrong).
+
+Two caveats that apply to all of 1–4:
+- **A timing model is only as true as its numbers** — real latencies are board/silicon-specific and often undocumented; a model built from first principles is fiction unless **calibrated against measured hardware** (back to the reproduction-lab loop). Same "garbage in" caveat for an analog waveform: it's a *synthesized* trace from parameters you chose, not measurement.
+- **You can catch the useful timing *bugs* without a timing *model*.** The bugs that bite drivers ("assumed the device was ready instantly") are catchable as **discrete device-state behavior** via the fault-injection seam — deterministic, cheap. True skew races overlap with the memory-ordering story, handled by the seeded interleaving scheduler, not a continuous clock.
+
+**If you ever want timing fidelity:** do it as an **opt-in layer** (like measurement/observability modes — never touches the fast default), **deterministic + seeded** for any variation (the scheduler trick keeps reproducibility), **calibrated against metal**, and **stop at discrete-event** (levels 1–2, maybe 3 for one device).
+
+**Level 4 is two different projects with opposite profiles:**
+- **(A) Faithful, broad analog co-sim** — huge work, *extremely* slow (stiff DEs, picosecond adaptive timesteps; SPICE simulates microseconds of a few nodes in minutes → guest-microseconds-in-hours, feasible only for tiny windows of tiny circuit portions), and near-zero OS-dev ROI (driver software can't fix analog; parameters need characterizing first). Don't chase it.
+- **(B) A scoped analog *visualization* toy** — pick **one signal** (UART TX), a **simple physical model** (RC / basic transmission-line, parameters you choose), drive it from the digital bit-stream the kernel already emits, and **render the waveform** (oscilloscope view / eye diagram). Weekend-sized *because* it's scoped to one line and short windows; zero testing value, enormous *understanding* value. Deeply on-brand: the full observable descent from "a span opened" all the way down to "electrons on a wire." Belongs in [arcade-and-real-hardware-direction.md](arcade-and-real-hardware-direction.md) as a someday-demo, opt-in, never near the itest/measurement spine — the one layer justified by *"because it's beautiful and it teaches,"* not by testing anything.
