@@ -8,5 +8,6 @@ pub mod cpu;
 mod csr;
 mod decode;
 pub mod loader;
+mod mmu;
 pub mod mem;
 mod uart;

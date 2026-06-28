@@ -43,11 +43,11 @@ fn main() -> ExitCode {
         match cpu.step() {
             Ok(()) => steps += 1,
             Err(StepError::Unimplemented { pc, instr }) => {
-                eprintln!("snemu: unimplemented instruction {instr:#010x} at pc {pc:#018x} (after {steps} steps)");
+                eprintln!("snemu: unimplemented instruction {instr:#010x} at pc {pc:#018x} (after {steps} steps, satp {:#x})", cpu.satp());
                 break;
             }
             Err(other) => {
-                eprintln!("snemu: halted with {other:?} (after {steps} steps)");
+                eprintln!("snemu: halted with {other:?} at pc {:#018x} (after {steps} steps, satp {:#x})", cpu.pc(), cpu.satp());
                 break;
             }
         }

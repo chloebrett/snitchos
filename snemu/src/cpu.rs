@@ -5,6 +5,7 @@ use crate::bus::Bus;
 use crate::csr::{Csr, CsrError, addr, sstatus};
 use crate::decode::{Instr, expand, funct3, funct7, is_compressed, opcode, priv12, system};
 use crate::mem::{BusError, Memory, RAM_BASE};
+use crate::mmu::{self, Access};
 
 /// Instruction lengths in bytes.
 const ILEN_FULL: u64 = 4;
@@ -86,6 +87,9 @@ pub enum StepError {
     Unimplemented { pc: u64, instr: u32 },
     /// A `csr*` instruction named a CSR snemu doesn't model yet (meta-loop).
     UnknownCsr { pc: u64, addr: u16 },
+    /// Sv39 translation failed for `va` (unmapped or permission-denied). A real
+    /// guest page-fault trap is future work; for now this halts the run.
+    PageFault { va: u64 },
 }
 
 /// How a `csr*` instruction combines the source operand with the old value.
@@ -147,6 +151,12 @@ impl Cpu {
         self.bus.uart_output()
     }
 
+    /// The current `satp` value (for diagnostics).
+    #[must_use]
+    pub fn satp(&self) -> u64 {
+        self.csr.read(addr::SATP).unwrap_or(0)
+    }
+
     #[must_use]
     pub fn reg(&self, i: usize) -> u64 {
         self.x[i]
@@ -172,15 +182,22 @@ impl Cpu {
         self.instret
     }
 
+    /// Translate a guest virtual address through `satp` (Sv39 or bare).
+    fn translate(&self, va: u64, access: Access) -> Result<u64, StepError> {
+        let satp = self.csr.read(addr::SATP).expect("satp is modeled");
+        mmu::translate(satp, va, access, self.bus.ram()).map_err(|_| StepError::PageFault { va })
+    }
+
     /// Fetch, decode, and execute one instruction (16- or 32-bit).
     pub fn step(&mut self) -> Result<(), StepError> {
-        let half = self.bus.read_u16(self.pc)?;
+        let pc_pa = self.translate(self.pc, Access::Fetch)?;
+        let half = self.bus.read_u16(pc_pa)?;
         let raw = if is_compressed(half) {
             self.cur_ilen = ILEN_COMPRESSED;
             expand(half).ok_or_else(|| self.unimplemented(u32::from(half)))?
         } else {
             self.cur_ilen = ILEN_FULL;
-            self.bus.read_u32(self.pc)?
+            self.bus.read_u32(pc_pa)?
         };
         self.execute(raw)?;
         self.instret += 1;
@@ -384,7 +401,8 @@ impl Cpu {
 
     /// LOAD: read memory at `rs1 + imm`, sign/zero-extend into rd.
     fn load(&mut self, instr: Instr) -> Result<(), StepError> {
-        let addr = self.x[instr.rs1()].wrapping_add(instr.i_imm());
+        let va = self.x[instr.rs1()].wrapping_add(instr.i_imm());
+        let addr = self.translate(va, Access::Load)?;
         let value = match instr.funct3() {
             funct3::load::LB => i64::from(self.bus.read_u8(addr)? as i8) as u64,
             funct3::load::LH => i64::from(self.bus.read_u16(addr)? as i16) as u64,
@@ -402,7 +420,8 @@ impl Cpu {
 
     /// STORE: write rs2 (truncated to the access width) to `rs1 + imm`.
     fn store(&mut self, instr: Instr) -> Result<(), StepError> {
-        let addr = self.x[instr.rs1()].wrapping_add(instr.s_imm());
+        let va = self.x[instr.rs1()].wrapping_add(instr.s_imm());
+        let addr = self.translate(va, Access::Store)?;
         let value = self.x[instr.rs2()];
         match instr.funct3() {
             funct3::store::SB => self.bus.write_u8(addr, value as u8)?,
@@ -545,6 +564,7 @@ mod tests {
     use crate::csr::{addr, sstatus};
     use crate::decode::{ALT_OP_BIT, funct3, funct7, opcode, priv12, system};
     use crate::mem::{Memory, RAM_BASE};
+    use crate::mmu::pte;
 
     fn priv_instr(funct12: u32) -> u32 {
         (funct12 << 20) | (system::PRIV << 12) | opcode::SYSTEM
@@ -1535,6 +1555,25 @@ mod tests {
         cpu.set_reg(2, RAM_BASE + 0x100); // sp
         cpu.step().unwrap();
         assert_eq!(cpu.reg(10), 0x0011_2233);
+    }
+
+    #[test]
+    fn executes_through_sv39_translation() {
+        let mut mem = Memory::new(0x10000);
+        // Instruction lives at physical RAM_BASE + 0x3000.
+        mem.write_u32(RAM_BASE + 0x3000, addi(1, 0, 42)).unwrap();
+        // Root page table at RAM_BASE + 0x8000; a 1 GiB leaf for VPN[2]=4 maps
+        // the whole 4..5 GiB VA range onto physical 0x8000_0000.
+        let root = RAM_BASE + 0x8000;
+        let leaf = ((0x8000_0000_u64 >> 12) << 10) | pte::V | pte::R | pte::W | pte::X;
+        mem.write_u64(root + 4 * 8, leaf).unwrap();
+
+        let mut cpu = Cpu::new(mem);
+        cpu.csr.write(addr::SATP, (8 << 60) | (root >> 12)).unwrap();
+        cpu.set_pc(0x1_0000_0000 | 0x3000); // VPN[2]=4, offset 0x3000
+
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(1), 42);
     }
 
     #[test]

@@ -33,6 +33,11 @@ impl Bus {
         self.uart.output()
     }
 
+    /// RAM, for the page-table walker (PTEs always live in physical memory).
+    pub(crate) fn ram(&self) -> &Memory {
+        &self.ram
+    }
+
     pub(crate) fn read_u8(&self, addr: u64) -> Result<u8, BusError> {
         match uart_offset(addr) {
             Some(off) => Ok(self.uart.read(off)),
