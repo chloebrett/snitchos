@@ -1788,6 +1788,17 @@ mod tests {
     }
 
     #[test]
+    fn compressed_srai_arithmetic_shifts_register() {
+        // c.srai x12, 32 == 0x9601 (captured from the kernel boot).
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x9601).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(12, 0xffff_ffff_0000_0000);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(12), 0xffff_ffff_ffff_ffff); // sign-propagating >> 32
+    }
+
+    #[test]
     fn sfence_vma_is_a_nop() {
         // sfence.vma x0, x0 == 0x12000073 (no TLB in snemu)
         let mut cpu = cpu_with(&[0x1200_0073]);

@@ -4,6 +4,7 @@
 
 use crate::mem::{BusError, Memory};
 use crate::uart::Uart;
+use crate::virtio::Virtio;
 
 /// ns16550a UART base on the QEMU `virt` machine, and its register window.
 const UART_BASE: u64 = 0x1000_0000;
@@ -19,6 +20,7 @@ fn uart_offset(addr: u64) -> Option<usize> {
 pub(crate) struct Bus {
     ram: Memory,
     uart: Uart,
+    virtio: Virtio,
 }
 
 impl Bus {
@@ -26,6 +28,7 @@ impl Bus {
         Self {
             ram,
             uart: Uart::new(),
+            virtio: Virtio::new(),
         }
     }
 
@@ -53,6 +56,9 @@ impl Bus {
     }
 
     pub(crate) fn read_u32(&self, addr: u64) -> Result<u32, BusError> {
+        if Virtio::in_window(addr) {
+            return Ok(self.virtio.read(addr));
+        }
         match uart_offset(addr) {
             Some(off) => Ok(u32::from(self.uart.read(off))),
             None => self.ram.read_u32(addr),
@@ -87,6 +93,10 @@ impl Bus {
     }
 
     pub(crate) fn write_u32(&mut self, addr: u64, value: u32) -> Result<(), BusError> {
+        if Virtio::in_window(addr) {
+            self.virtio.write(addr, value);
+            return Ok(());
+        }
         match uart_offset(addr) {
             Some(off) => {
                 self.uart.write(off, value as u8);

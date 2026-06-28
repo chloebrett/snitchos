@@ -480,9 +480,10 @@ fn store_word(funct3: u32, base: u32, src: u32, imm: u32) -> u32 {
 fn expand_c_misc_alu(half: u16) -> Option<u32> {
     match (u32::from(half) >> 10) & 0x3 {
         0b00 => Some(expand_c_srli(half)),
+        0b01 => Some(expand_c_srai(half)),
         0b10 => Some(expand_c_andi(half)),
         0b11 => expand_c_ca(half),
-        _ => None, // c.srai (01) not yet
+        _ => unreachable!("bits[11:10] is two bits"),
     }
 }
 
@@ -506,6 +507,14 @@ fn expand_c_srli(half: u16) -> u32 {
     let rd = creg(h >> 7);
     let shamt = (((h >> 12) & 1) << 5) | ((h >> 2) & 0x1f);
     shift_imm_word(funct3::SR, 0, rd, shamt)
+}
+
+/// `c.srai rd', shamt` -> `srai rd', rd', shamt` (arithmetic; 6-bit shamt for RV64).
+fn expand_c_srai(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rd = creg(h >> 7);
+    let shamt = (((h >> 12) & 1) << 5) | ((h >> 2) & 0x1f);
+    shift_imm_word(funct3::SR, ALT_OP_BIT, rd, shamt)
 }
 
 /// Encode an OP-IMM shift `funct3 rd, rd, shamt` (`alt` is 0 or `ALT_OP_BIT`).

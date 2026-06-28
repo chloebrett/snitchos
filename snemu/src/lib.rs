@@ -11,3 +11,4 @@ pub mod loader;
 mod mmu;
 pub mod mem;
 mod uart;
+mod virtio;
