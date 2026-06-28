@@ -39,6 +39,9 @@ enum Cmd {
         /// Cap the run at N instruction steps (snemu's default is 50M).
         #[arg(long)]
         max_steps: Option<u64>,
+        /// Dump every telemetry frame snemu decodes off the virtio-console.
+        #[arg(long)]
+        frames: bool,
     },
     /// Build the kernel and run it in QEMU.
     ///
@@ -467,7 +470,7 @@ fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Build => build(),
         Cmd::Snemu => snemu(),
-        Cmd::SnemuBoot { features, max_steps } => snemu_boot(&features, max_steps),
+        Cmd::SnemuBoot { features, max_steps, frames } => snemu_boot(&features, max_steps, frames),
         Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
         Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {
             measure::measure(&workload, seconds, warmup, timebase_hz, burst, markdown)
@@ -628,7 +631,7 @@ fn snemu() -> ExitCode {
 /// UART output (stdout) and its stop reason (stderr) stream straight to the
 /// terminal. Always rebuilds without `minimal-boot`, so the meta-loop never
 /// runs a stale ELF left by `cargo xtask snemu`.
-fn snemu_boot(features: &str, max_steps: Option<u64>) -> ExitCode {
+fn snemu_boot(features: &str, max_steps: Option<u64>, frames: bool) -> ExitCode {
     let features_vec: Vec<&str> = if features.is_empty() {
         Vec::new()
     } else {
@@ -641,7 +644,11 @@ fn snemu_boot(features: &str, max_steps: Option<u64>) -> ExitCode {
     }
 
     let mut cmd = Command::new("cargo");
-    cmd.args(["run", "-q", "-p", "snemu", "--", qemu::KERNEL_BIN]);
+    cmd.args(["run", "-q", "-p", "snemu", "--"]);
+    if frames {
+        cmd.arg("--frames");
+    }
+    cmd.arg(qemu::KERNEL_BIN);
     if let Some(n) = max_steps {
         cmd.arg(n.to_string());
     }

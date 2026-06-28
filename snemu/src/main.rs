@@ -1,10 +1,15 @@
-//! `snemu <kernel.elf> [max-steps]` — load an ELF64 RISC-V image, run it, and
-//! print whatever it writes to the UART. On the first instruction snemu doesn't
-//! implement, it halts and reports the program counter + raw word (the
+//! `snemu [--frames] <kernel.elf> [max-steps]` — load an ELF64 RISC-V image,
+//! run it, print whatever it writes to the UART, and decode the telemetry
+//! frames it transmits over the virtio-console. On the first instruction snemu
+//! doesn't implement, it halts and reports the program counter + raw word (the
 //! meta-loop signal): run, see what it hits, implement that, repeat.
+//!
+//! `--frames` dumps every decoded telemetry frame (otherwise just a count).
 
+use std::io::Cursor;
 use std::process::ExitCode;
 
+use protocol::stream::{OwnedFrame, decode_stream};
 use snemu::cpu::StepError;
 
 /// QEMU `virt` default RAM (128 MiB).
@@ -17,12 +22,22 @@ const DEFAULT_MAX_STEPS: u64 = 50_000_000;
 const DTB: &[u8] = include_bytes!("../virt.dtb");
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    let Some(path) = args.next() else {
-        eprintln!("usage: snemu <kernel.elf> [max-steps]");
+    let mut dump_frames = false;
+    let mut positional = Vec::new();
+    for arg in std::env::args().skip(1) {
+        if arg == "--frames" {
+            dump_frames = true;
+        } else {
+            positional.push(arg);
+        }
+    }
+
+    let mut positional = positional.into_iter();
+    let Some(path) = positional.next() else {
+        eprintln!("usage: snemu [--frames] <kernel.elf> [max-steps]");
         return ExitCode::FAILURE;
     };
-    let max_steps = args
+    let max_steps = positional
         .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MAX_STEPS);
@@ -62,9 +77,30 @@ fn main() -> ExitCode {
     }
 
     print!("{}", String::from_utf8_lossy(cpu.uart_output()));
-    eprintln!(
-        "snemu: virtio-console transmitted {} telemetry bytes",
-        cpu.virtio_tx_output().len()
-    );
+    report_frames(cpu.virtio_tx_output(), dump_frames);
     ExitCode::SUCCESS
+}
+
+/// Decode the bytes the kernel transmitted over the virtio-console back into
+/// telemetry frames and report them. A trailing partial frame (the kernel was
+/// mid-send when the run stopped) decodes cleanly as EOF; only genuinely
+/// malformed bytes error, and we keep whatever decoded before that.
+fn report_frames(bytes: &[u8], dump: bool) {
+    let mut frames = Vec::new();
+    let mut cursor = Cursor::new(bytes);
+    let result = decode_stream(&mut cursor, |f| frames.push(OwnedFrame::from_borrowed(f)));
+
+    eprintln!(
+        "snemu: virtio-console transmitted {} bytes, decoded {} telemetry frames",
+        bytes.len(),
+        frames.len()
+    );
+    if let Err(e) = result {
+        eprintln!("snemu: (telemetry stream ended with: {e})");
+    }
+    if dump {
+        for frame in &frames {
+            eprintln!("  {frame:?}");
+        }
+    }
 }

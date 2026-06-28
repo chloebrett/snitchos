@@ -4,5 +4,10 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
+[dependencies]
+# Host-side telemetry decode: the binary turns the bytes snemu pulls off the
+# virtio-console back into `Frame`s. The emulator core (`lib`) stays decoupled.
+protocol = { path = "../protocol", features = ["std"] }
+
 [lints]
 workspace = true
