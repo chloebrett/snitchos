@@ -62,20 +62,26 @@ impl EvalMetrics {
 }
 
 /// Read a whole file off the FS endpoint (the `stitch-fs` workload's seeded
-/// server): attach for the root cap, `Lookup` the name (READ), then `Read` it in
-/// ≤256-byte chunks (the server's per-copy cap) into a `String`. `None` if there
-/// is no fs endpoint, the file doesn't exist, or the bytes aren't UTF-8.
-fn read_file(name: &str) -> Option<String> {
+/// server): attach for the root cap, **path-walk** the `/`-separated components
+/// (each `Lookup` mints the next cap — descend-only, the cap-faithful
+/// resolution), then `Read` the leaf in ≤256-byte chunks (the server's per-copy
+/// cap) into a `String`. `None` if there is no fs endpoint, a component doesn't
+/// resolve, or the bytes aren't UTF-8.
+fn read_file(path: &str) -> Option<String> {
     let (_r, root_cap) = endpoint().call([0, 0, 0, 0]).ok()?;
-    let root = Endpoint::from_raw_handle(root_cap?);
+    let mut cap = Endpoint::from_raw_handle(root_cap?);
 
-    let nb = name.as_bytes();
-    let lookup = Request::Lookup {
-        name: UserBuf { ptr: nb.as_ptr() as u64, len: nb.len() as u64 },
-        rights: FileRights::READ,
-    };
-    let (_l, file_cap) = root.call(lookup.encode()).ok()?;
-    let file = Endpoint::from_raw_handle(file_cap?);
+    // Walk one component at a time; `cap` ends naming the leaf file.
+    for part in path.split('/').filter(|p| !p.is_empty()) {
+        let pb = part.as_bytes();
+        let lookup = Request::Lookup {
+            name: UserBuf { ptr: pb.as_ptr() as u64, len: pb.len() as u64 },
+            rights: FileRights::READ,
+        };
+        let (_l, next) = cap.call(lookup.encode()).ok()?;
+        cap = Endpoint::from_raw_handle(next?);
+    }
+    let file = cap;
 
     let mut bytes = Vec::new();
     let mut offset = 0u64;

@@ -189,6 +189,12 @@ pub enum WorkloadKind {
     /// fault→name→halt path deterministically (no deep-overflow double-fault).
     /// `itest-workloads` only.
     StackGuard,
+    /// Kernel-stack guard Tier-B *deep* smoke: a kernel task recurses until it
+    /// genuinely overflows its stack into the guard page. Proves the **per-hart
+    /// exception stack** — the fault handler builds its frame on a clean stack and
+    /// reports cleanly, where without it a deep overflow would double-fault on the
+    /// overflowed stack. `itest-workloads` only.
+    StackOverflowDeep,
     /// v0.10 `RAMfs`: an `fs` server (`RECV | MINT`) serves a flat in-memory
     /// filesystem to an `fs-client` over one endpoint. The client connects
     /// (badge 0) to be minted a root File cap (`pack(root, READ)`), then issues
@@ -268,6 +274,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "probe" => Some(WorkloadKind::Probe),
             "stack-canary" => Some(WorkloadKind::StackCanary),
             "stack-guard" => Some(WorkloadKind::StackGuard),
+            "stack-overflow-deep" => Some(WorkloadKind::StackOverflowDeep),
             "spawn-demo" => Some(WorkloadKind::SpawnDemo),
             "spawn-reap" => Some(WorkloadKind::SpawnReap),
             "wait-any" => Some(WorkloadKind::WaitAny),
@@ -431,6 +438,14 @@ mod tests {
     #[test]
     fn selects_stack_guard() {
         assert_eq!(select("workload=stack-guard"), Some(WorkloadKind::StackGuard));
+    }
+
+    #[test]
+    fn selects_stack_overflow_deep() {
+        assert_eq!(
+            select("workload=stack-overflow-deep"),
+            Some(WorkloadKind::StackOverflowDeep)
+        );
     }
 
     #[test]

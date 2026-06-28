@@ -71,7 +71,7 @@
 //! See `plans/v0.6-smp-cooperative.md`.
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicU32, AtomicU64};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
 
 /// Maximum harts supported. Bumped to 2 in v0.6 step 8 for the
 /// cooperative-SMP demo (one boot hart + one worker). Each hart
@@ -120,7 +120,35 @@ pub struct PerHartData {
     /// observed the new value (Release on bump pairs with Acquire
     /// on initiator's wait).
     pub shootdown_ack: AtomicU64,
+    /// Top of this hart's **exception stack** — the known-good per-hart stack
+    /// `trap.S` switches to on a trap taken *from S-mode* (so a kernel-stack
+    /// overflow's guard fault builds its frame here, not on the overflowed stack —
+    /// see `plans/kernel-stack-hardening.md`). Set once by [`init`]; read
+    /// `tp`-relative from asm at [`EXC_STACK_TOP_OFFSET`] (0 until `init`, which
+    /// the asm treats as "not ready, use the current stack"). `AtomicUsize` for a
+    /// plain set-once store; the asm load needs no atomic semantics.
+    pub exc_stack_top: AtomicUsize,
 }
+
+/// Byte offset of [`PerHartData::exc_stack_top`] — hardcoded in `trap.S`'s
+/// `ld …, EXC_STACK_TOP_OFFSET(tp)`. The `const` assert below fails the build if
+/// the struct layout ever drifts from this value.
+pub const EXC_STACK_TOP_OFFSET: usize = 24;
+const _: () = assert!(core::mem::offset_of!(PerHartData, exc_stack_top) == EXC_STACK_TOP_OFFSET);
+
+/// Per-hart exception-stack size. Generous for the deepest in-kernel trap handler
+/// call graph (fault → `report_stack_guard_fault` → `emit_log` → virtio send).
+const EXCEPTION_STACK_SIZE: usize = 16 * 1024;
+
+/// 16-byte aligned so the RISC-V ABI is satisfied for the trap handler's first
+/// frame.
+#[repr(C, align(16))]
+struct ExceptionStack([u8; EXCEPTION_STACK_SIZE]);
+
+/// One exception stack per hart. `trap.S` switches `sp` to `&EXCEPTION_STACKS[h] +
+/// EXCEPTION_STACK_SIZE` on a from-kernel trap. Only ever addressed, never moved.
+static mut EXCEPTION_STACKS: [ExceptionStack; MAX_HARTS] =
+    [const { ExceptionStack([0; EXCEPTION_STACK_SIZE]) }; MAX_HARTS];
 
 /// One slot per hart. Statically initialised to `hart_id = i` so a
 /// secondary hart starting cold (before its `init()` runs) at least
@@ -156,12 +184,14 @@ pub static PER_HART_DATA: [PerHartData; MAX_HARTS] = [
         ipi_pending: AtomicU32::new(0),
         shootdown_va: AtomicU64::new(0),
         shootdown_ack: AtomicU64::new(0),
+        exc_stack_top: AtomicUsize::new(0),
     },
     PerHartData {
         hart_id: 1,
         ipi_pending: AtomicU32::new(0),
         shootdown_va: AtomicU64::new(0),
         shootdown_ack: AtomicU64::new(0),
+        exc_stack_top: AtomicUsize::new(0),
     },
 ];
 
@@ -189,6 +219,17 @@ pub unsafe fn init(hartid: usize) {
     unsafe {
         asm!("mv tp, {}", in(reg) ptr, options(nostack, preserves_flags));
     }
+    // Publish this hart's exception-stack top so `trap.S` can switch onto it for
+    // from-kernel traps. Must precede any from-kernel trap (which it does — `init`
+    // runs in early `kmain`, before the scheduler/userspace); until set the asm
+    // sees 0 and falls back to the current stack.
+    let exc_top = {
+        // SAFETY: `EXCEPTION_STACKS[hartid]` is a valid static; we only take its
+        // address + size, never alias the bytes (the CPU uses them as a stack).
+        let base = unsafe { &raw const EXCEPTION_STACKS[hartid] } as usize;
+        base + EXCEPTION_STACK_SIZE
+    };
+    PER_HART_DATA[hartid].exc_stack_top.store(exc_top, core::sync::atomic::Ordering::Relaxed);
     // Announce we're online. Any initiator that observes our bit set
     // will start expecting shootdown acks from us.
     SMP_ONLINE_HARTS.fetch_or(1u64 << hartid, core::sync::atomic::Ordering::Relaxed);

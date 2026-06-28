@@ -71,6 +71,40 @@ pub mod stack_guard {
     }
 }
 
+pub mod stack_overflow_deep {
+    //! Kernel-stack guard Tier-B *deep* smoke (`workload=stack-overflow-deep`): a
+    //! kernel task recurses until it genuinely overflows its 16 KiB stack into the
+    //! unmapped guard page. The overflowing store faults; because the trap handler
+    //! now runs on the **per-hart exception stack**, it builds its frame on clean
+    //! memory and snitches `Log("kernel stack overflow: task … guard page …")`
+    //! before panicking — where *without* the exception stack a deep overflow would
+    //! double-fault on the overflowed stack and hang/reset. The capability proof
+    //! for `plans/kernel-stack-hardening.md` Phase 1.
+
+    /// Recurse with a ~1 KiB frame each call until the stack crosses into the guard
+    /// page. `#[inline(never)]` + work *after* the recursive call defeats tail-call
+    /// elimination, and `black_box` keeps the per-frame buffer live, so the stack
+    /// genuinely grows ~1 KiB per level.
+    #[inline(never)]
+    fn recurse(depth: usize) -> usize {
+        let mut buf = [0u8; 1024];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = (depth ^ i) as u8;
+        }
+        core::hint::black_box(&buf);
+        recurse(depth + 1).wrapping_add(buf[depth % buf.len()] as usize)
+    }
+
+    /// Entry for the smoke task. Never returns: the recursion overflows into the
+    /// guard page and the trap handler halts the kernel.
+    pub extern "C" fn smoke_body() -> ! {
+        let _ = recurse(0);
+        loop {
+            crate::sched::yield_now();
+        }
+    }
+}
+
 pub mod virtio_storm {
     //! Validation experiment for H11-refined: is the cross-hart bug
     //! specifically in the virtio-console emission path

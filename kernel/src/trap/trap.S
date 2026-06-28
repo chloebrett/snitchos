@@ -57,36 +57,47 @@ trap_entry:
     csrrw sp, sscratch, sp
     #   from user:   sscratch held kstk -> sp = kstk (good), sscratch = usp
     #   from kernel: sscratch held 0    -> sp = 0,           sscratch = ksp
-    # The swap is unconditional, so detect the from-kernel case (sp == 0)
-    # and undo it; the undo also restores sscratch = 0 (convention heals).
-    bnez sp, 1f              # sp != 0 -> came from user, skip the undo
-    csrrw sp, sscratch, sp   # from kernel: sp = ksp, sscratch back to 0
-    1:                       # sp is a valid kernel stack on both paths now
+    bnez sp, 1f              # sp != 0 -> came from user (normal path at 1:)
 
-    # Allocate the trap frame on the current stack.
+    # --- from kernel (sp == 0; sscratch holds the kernel sp) ---
+    # Run the handler on this hart's *exception stack*, not the kernel stack we
+    # trapped from, so a kernel-stack-overflow guard fault can build its trap
+    # frame on known-good memory instead of double-faulting on the overflowed
+    # stack. The original kernel sp is saved at frame offset 8, so the shared exit
+    # (`ld sp, 8(sp)`) returns onto it. See plans/kernel-stack-hardening.md.
+    csrrw sp, sscratch, sp   # sp = ksp, sscratch = 0 (heal the convention)
+    csrw sscratch, t0        # park t0 as the one scratch reg (ints masked here)
+    ld t0, 24(tp)            # t0 = this hart's exc_stack_top (percpu EXC_STACK_TOP_OFFSET)
+    beqz t0, 5f              # 0 = pre-init (tp not ready): fall back to current stack
+    addi t0, t0, -288        # exception-stack frame base
+    sd sp, 8(t0)             # caller sp (= ksp) -> frame offset 8 (sp still = ksp)
+    mv sp, t0                # switch onto the exception-stack frame
+    csrr t0, sscratch        # restore the trapped t0
+    csrw sscratch, zero      # re-heal sscratch == 0
+    sd ra,  0(sp)            # x1
+    sd gp, 16(sp)            # x3
+    sd tp, 24(sp)            # x4
+    sd t0, 32(sp)            # x5
+    j 3f                     # offset 8 already stored above
+5:                           # pre-init fallback: build the frame on the current stack
+    csrr t0, sscratch        # restore the trapped t0
+    csrw sscratch, zero      # re-heal sscratch == 0
     addi sp, sp, -288
+    sd ra,  0(sp)
+    sd gp, 16(sp)
+    sd tp, 24(sp)
+    sd t0, 32(sp)
+    addi t0, sp, 288         # caller sp = frame top (the kernel sp)
+    sd t0, 8(sp)
+    j 3f
 
-    # Save GPRs in order. Skip the sp slot (offset 8) for now — we'll
-    # compute the original sp once t0 is safely saved.
+1:  # --- from user (sp = kstk, sscratch = parked user sp) ---
+    addi sp, sp, -288
     sd ra,  0(sp)        # x1
     sd gp, 16(sp)        # x3
     sd tp, 24(sp)        # x4
     sd t0, 32(sp)        # x5 — t0 is safely saved now, use it as scratch
-
-    # Compute and save the caller's sp. Path-dependent now that traps
-    # can arrive from user mode (t0 is already saved above, free scratch):
-    #   from kernel (SPP=1): caller sp is just above our frame (sp + 288).
-    #   from user   (SPP=0): the entry swap parked the user's sp in
-    #                        sscratch; sp + 288 is the kernel stack top,
-    #                        not the caller's sp.
-    csrr t0, sstatus
-    andi t0, t0, 0x100   # isolate SPP (bit 8): 0 => trap came from user
-    bnez t0, 2f
-    csrr t0, sscratch    # from user: caller sp = parked user sp
-    sd t0, 8(sp)
-    j 3f
-2:
-    addi t0, sp, 288     # from kernel: caller sp = frame top
+    csrr t0, sscratch    # caller sp = parked user sp
     sd t0, 8(sp)
 3:
 

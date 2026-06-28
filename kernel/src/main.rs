@@ -381,6 +381,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::Probe)
         | Some(WorkloadKind::StackCanary)
         | Some(WorkloadKind::StackGuard)
+        | Some(WorkloadKind::StackOverflowDeep)
         | Some(WorkloadKind::SpawnDemo)
         | Some(WorkloadKind::SpawnReap)
         | Some(WorkloadKind::WaitAny)
@@ -546,6 +547,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // hart 0; the trap handler recognizes the guard region, snitches + panics.
         Some(WorkloadKind::StackGuard) => {
             let _ = sched::spawn("stack_guard_smoke", storms::stack_guard::smoke_body);
+        }
+        // Tier-B deep-overflow smoke: a kernel task recurses into its guard page;
+        // the fault handler (on the per-hart exception stack) reports cleanly.
+        Some(WorkloadKind::StackOverflowDeep) => {
+            let _ = sched::spawn("stack_overflow_deep", storms::stack_overflow_deep::smoke_body);
         }
         _ => {}
     }

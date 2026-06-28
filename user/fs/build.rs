@@ -22,20 +22,10 @@ fn generate_fs_image_seed() {
     let image_dir = Path::new(&manifest).join("../../fs-image");
     println!("cargo:rerun-if-changed={}", image_dir.display());
 
-    let mut files: Vec<(String, String)> = match std::fs::read_dir(&image_dir) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.is_file())
-            .filter_map(|p| {
-                let name = p.file_name()?.to_str()?.to_string();
-                let abs = p.canonicalize().ok()?.display().to_string();
-                println!("cargo:rerun-if-changed={}", p.display());
-                Some((name, abs))
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    // Recurse so subdirectories become `/`-joined seed paths (`bin/view`), which
+    // `RamFs::seeded` turns into nested directories via mkdir -p.
+    let mut files: Vec<(String, String)> = Vec::new();
+    collect(&image_dir, "", &mut files);
     // Deterministic order for reproducible builds.
     files.sort();
 
@@ -47,4 +37,29 @@ fn generate_fs_image_seed() {
 
     std::fs::write(Path::new(&out).join("fs_seed.rs"), body)
         .expect("write generated fs_seed.rs");
+}
+
+/// Walk `dir`, pushing `(relative-path, absolute-path)` for every file. `prefix`
+/// is the `/`-joined path of `dir` relative to the image root (empty at root).
+fn collect(dir: &Path, prefix: &str, files: &mut Vec<(String, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let rel = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if path.is_dir() {
+            collect(&path, &rel, files);
+        } else if let Ok(abs) = path.canonicalize() {
+            println!("cargo:rerun-if-changed={}", path.display());
+            files.push((rel, abs.display().to_string()));
+        }
+    }
 }

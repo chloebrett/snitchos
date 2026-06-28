@@ -1210,6 +1210,27 @@ pub fn stack_guard_fault_detected(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Kernel-stack *deep* overflow reported cleanly (`workload=stack-overflow-deep`,
+/// Tier B + per-hart exception stack): a kernel task (`stack_overflow_deep`)
+/// recurses until it genuinely overflows its stack into the unmapped guard page.
+/// The overflowing store faults; because the trap handler runs on the per-hart
+/// exception stack, it builds its frame on clean memory and **snitches a `Log`**
+/// ("kernel stack overflow: task … guard page …") before panicking. Asserts that
+/// `Log` reaches the wire — the capability the exception stack adds. *Without* it,
+/// a deep overflow would double-fault on the overflowed stack and the kernel would
+/// hang (no Log, scenario times out).
+pub fn deep_overflow_reports_cleanly(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 20, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. }
+            if msg.contains("kernel stack overflow") && msg.contains("guard page"))
+    })
+    .ok_or(
+        "no Log naming a 'kernel stack overflow' guard-page fault within 20s — a deep overflow \
+         didn't report cleanly (the exception-stack switch in trap.S may be double-faulting)",
+    )?;
+    Ok(())
+}
+
 /// v0.9 block/wake smoke (`workload=block-wake`): a `blocker` kernel task
 /// stores its id, arms a flag, and calls `block_current` — leaving the CPU
 /// *off* the runqueue (not re-enqueued, unlike `yield_now`). A `waker` peer
@@ -2613,6 +2634,32 @@ pub fn stitch_fs_loads_and_runs(h: &mut View) -> Result<(), String> {
         _ => false,
     })
     .ok_or("no 'primes.largest'=29 metric — the 10th prime should be 29")?;
+
+    Ok(())
+}
+
+/// `workload=stitch-fs`: a `.st` program in a **subdirectory** is loaded on the
+/// metal. The recursive fs-image seed places `fs-image/lib/greet.st` at
+/// `/lib/greet.st`; the REPL `:load lib/greet.st` **path-walks** (lookup `/lib`,
+/// then `greet.st` — descend-only, the cap-faithful resolution) to read it, and
+/// `greet()` emits `greeted`=1. Proves hierarchical dirs end-to-end: recursive
+/// seed → nested ramfs → per-component cap-walk → read.
+pub fn stitch_fs_loads_nested(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+
+    h.send_input(b":load lib/greet.st\ngreet()\n")
+        .map_err(|e| format!("inject REPL input: {e}"))?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("greeted") && *value == 1
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no 'greeted'=1 metric within 30s — path-walking to /lib/greet.st (nested dir) didn't resolve",
+    )?;
 
     Ok(())
 }
