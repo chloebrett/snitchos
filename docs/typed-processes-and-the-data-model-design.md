@@ -325,13 +325,30 @@ typechecks `~>`) before the reflection derive exists.
 **Build order (additive on shipped seams):**
 
 - Hitch (§2) value model + encoder/decoder (`hitch`/`unhitch`) + a `Schema` derive —
-  host-tested, pure.
-- `#[entry(in,out,uses)]` extension emitting the link section (`user/macros`).
-- Section→xattr extraction in `user/fs/build.rs`; `getxattr` surface in `ramfs`
-  (the FS doc notes xattrs are cheap to add "when needed" — this is the need).
-- Shell pre-spawn step: read `user.iface`, structurally typecheck the `~>` pipeline,
-  decide the `uses` grants — extends the cap-compatibility analysis userland §8
-  already wants.
+  host-tested, pure. ✅ shipped.
+
+**Manifest build order — DECIDED 2026-06-28: Stitch-first, parse-on-demand.** The
+manifest is `(in: TypeSchema, out: TypeSchema, uses)` = a program's `main`
+signature. Two phases that converge on the same `Manifest` + structural-compat
+check, so phase 1 is not throwaway:
+
+- **Phase 1 — Stitch, parse-on-demand (no FS/build plumbing).** The shell already
+  has the interpreter and is about to run the `.st`, so it maps `main`'s parsed
+  signature → a `Manifest` *in memory* — no xattr, no ELF note, no seed step. Needs:
+  a **type bridge** (`stitch::Type` AST → `hitch::TypeSchema`, the type-level twin of
+  the `Value` bridge), a `main`-signature → `Manifest` extractor, and
+  `hitch::TypeSchema` schema-vs-schema **`compatible`** (v1 = structural equality).
+  Unlocks typed `~>` between `.st` stages — the 90% case (shell coreutils are `.st`).
+  *A stage's interface IS `main`'s typed signature* (`main(x: T) -> U uses C`);
+  `Func`/`@`/generic types are not marshallable. v1 covers scalars + `List` +
+  monomorphic prod/sum.
+- **Phase 2 — the uniform `user.iface` surface + Rust stages.** `#[entry(in,out,uses)]`
+  → `.note.snitch.iface` link section → `user/fs/build.rs` extracts to the xattr;
+  Stitch manifests also extracted to the xattr at seed time; `getxattr` in `ramfs`.
+  Adds a second *source* (xattr, O(1), no parse) and a second *producer* (Rust macro)
+  for the identical artifact.
+- Shell pre-spawn step: get each stage's `Manifest`, structurally typecheck the
+  `~>` pipeline, decide `uses` grants — extends userland §8's cap analysis.
 
 ---
 
