@@ -11,6 +11,50 @@
 // `cargo test` the crate builds with `std`, where a `use` of a prelude item
 // would be flagged redundant; the path resolves in both `std` and `no_std`.
 
+/// A capability handle — an index into the calling process's own `CapTable`.
+pub type Handle = u32;
+
+/// A capability rights bitmask (`snitchos_abi::rights` bits).
+pub type Rights = u32;
+
+/// What kind of object a capability names — the human-facing tag `hold` shows.
+/// A userspace-facing mirror of the kernel's cap object kinds, kept here (not
+/// tied to kernel types) so it is host-constructable in tests.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ObjectKind {
+    TelemetrySink,
+    SpanSink,
+    Endpoint,
+    Notification,
+    File,
+    Unknown,
+}
+
+impl ObjectKind {
+    /// The display name `hold` reports for this kind.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ObjectKind::TelemetrySink => "TelemetrySink",
+            ObjectKind::SpanSink => "SpanSink",
+            ObjectKind::Endpoint => "Endpoint",
+            ObjectKind::Notification => "Notification",
+            ObjectKind::File => "File",
+            ObjectKind::Unknown => "Unknown",
+        }
+    }
+}
+
+/// One capability the calling process holds — what `hold` enumerates. Pure data
+/// (no kernel types), so a test can construct a cap table by hand.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CapInfo {
+    pub handle: Handle,
+    pub kind: ObjectKind,
+    pub rights: Rights,
+    pub badge: u64,
+}
+
 /// What happens when a Stitch program touches the outside world, decoupled from
 /// the natives that trigger it. Methods take `&self` (backends use interior
 /// mutability) so one backend is shared, via `Rc`, across every scope and
@@ -23,6 +67,12 @@ pub trait Platform {
 
     /// Write text to the console (the human terminal).
     fn write(&self, text: &str);
+
+    /// Enumerate the capabilities the calling process holds — introspection of
+    /// its own authority (no new authority is granted by looking). Backs the
+    /// shell's `hold`. The on-target backend reads its own `CapTable` via the
+    /// `CapList` syscall.
+    fn hold(&self) -> alloc::vec::Vec<CapInfo>;
 }
 
 /// The default backend: a program with no platform installed. Reads nothing and
@@ -38,6 +88,10 @@ impl Platform for NullPlatform {
     }
 
     fn write(&self, _text: &str) {}
+
+    fn hold(&self) -> alloc::vec::Vec<CapInfo> {
+        alloc::vec::Vec::new()
+    }
 }
 
 /// A host test backend: scripted console input, recorded output — the fake the
@@ -48,6 +102,7 @@ impl Platform for NullPlatform {
 pub struct FakePlatform {
     input: core::cell::RefCell<alloc::collections::VecDeque<alloc::string::String>>,
     output: core::cell::RefCell<alloc::string::String>,
+    caps: alloc::vec::Vec<CapInfo>,
 }
 
 #[cfg(not(target_os = "none"))]
@@ -62,8 +117,14 @@ impl FakePlatform {
     pub fn with_input(text: &str) -> Self {
         Self {
             input: core::cell::RefCell::new(text.lines().map(alloc::string::String::from).collect()),
-            output: core::cell::RefCell::new(alloc::string::String::new()),
+            ..Self::default()
         }
+    }
+
+    /// Script the capability table `hold` reports.
+    #[must_use]
+    pub fn with_caps(caps: alloc::vec::Vec<CapInfo>) -> Self {
+        Self { caps, ..Self::default() }
     }
 
     /// Everything written through `write` so far.
@@ -82,6 +143,10 @@ impl Platform for FakePlatform {
     fn write(&self, text: &str) {
         self.output.borrow_mut().push_str(text);
     }
+
+    fn hold(&self) -> alloc::vec::Vec<CapInfo> {
+        self.caps.clone()
+    }
 }
 
 /// The on-target backend: console I/O over the real `SnitchOS` syscalls. `write`
@@ -95,11 +160,12 @@ pub use on_target::RuntimePlatform;
 
 #[cfg(target_os = "none")]
 mod on_target {
-    use super::Platform;
+    use super::{CapInfo, Platform};
     use crate::line_edit::LineEditor;
 
     use core::cell::RefCell;
     use alloc::string::String;
+    use alloc::vec::Vec;
 
     use snitchos_user::{console_read, console_write, yield_now};
 
@@ -135,6 +201,13 @@ mod on_target {
         fn write(&self, text: &str) {
             console_write(text.as_bytes());
         }
+
+        fn hold(&self) -> Vec<CapInfo> {
+            // No-op until the `CapList` syscall + runtime wrapper land (the
+            // kernel side of `hold`); a process can't yet enumerate its own
+            // cap table. Returns empty so `hold` is callable on-target meanwhile.
+            Vec::new()
+        }
     }
 }
 
@@ -158,6 +231,9 @@ mod tests {
         }
         fn write(&self, _text: &str) {
             self.writes.set(self.writes.get() + 1);
+        }
+        fn hold(&self) -> Vec<CapInfo> {
+            Vec::new()
         }
     }
 
@@ -219,5 +295,21 @@ mod tests {
 
         assert_eq!(fake.read_line(), None);
         assert_eq!(fake.output(), "");
+    }
+
+    #[test]
+    fn fake_returns_its_scripted_caps() {
+        let caps = vec![
+            CapInfo { handle: 2, kind: ObjectKind::Endpoint, rights: 0b0110, badge: 0 },
+            CapInfo { handle: 3, kind: ObjectKind::File, rights: 0b0001, badge: 7 },
+        ];
+        let fake = FakePlatform::with_caps(caps.clone());
+
+        assert_eq!(fake.hold(), caps);
+    }
+
+    #[test]
+    fn a_fresh_fake_holds_no_caps() {
+        assert_eq!(FakePlatform::new().hold(), vec![]);
     }
 }

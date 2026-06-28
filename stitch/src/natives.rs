@@ -46,6 +46,11 @@ pub(crate) const NATIVES: &[NativeFn] = &[
         func: native_read_line,
     },
     NativeFn {
+        name: "hold",
+        arity: 0,
+        func: native_hold,
+    },
+    NativeFn {
         name: "emit",
         arity: 2,
         func: native_emit,
@@ -387,6 +392,34 @@ fn native_read_line(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         Some(line) => some(Value::Str(line.into())),
         None => none(),
     })
+}
+
+/// `hold()` — list the capabilities the calling process holds, as a `List` of
+/// `(handle, kind, rights, badge)` tuples. Introspection of one's own authority,
+/// so it is *ungated* (no `uses` clause): looking at what you already hold grants
+/// nothing, like reading the clock. Backs the shell's `hold` verb. The on-target
+/// backend reads its own `CapTable` via the `CapList` syscall.
+fn native_hold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [] = args else {
+        return Err(RuntimeError::new("hold expects no arguments"));
+    };
+    let rows = env
+        .platform()
+        .hold()
+        .into_iter()
+        .map(|cap| {
+            Value::Tuple(
+                vec![
+                    Value::Int(i64::from(cap.handle)),
+                    Value::Str(cap.kind.as_str().into()),
+                    Value::Int(i64::from(cap.rights)),
+                    Value::Int(i64::try_from(cap.badge).unwrap_or(i64::MAX)),
+                ]
+                .into(),
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(Value::List(rows.into()))
 }
 
 /// `emit(name, value)` — record a metric sample. v0 stub for the wire protocol.
@@ -845,7 +878,7 @@ mod tests {
     use crate::value::{TelemetryEvent, Value};
 
     use alloc::rc::Rc;
-    use crate::platform::FakePlatform;
+    use crate::platform::{CapInfo, FakePlatform, ObjectKind};
 
     #[test]
     fn print_without_console_out_is_refused() {
@@ -889,6 +922,50 @@ mod tests {
             }
             other => panic!("expected Some(\"note\"), got {}", other.display()),
         }
+    }
+
+    #[test]
+    fn hold_lists_the_held_caps_as_tuples() {
+        // `hold` is ungated (introspecting your own caps grants no authority),
+        // so `main` needs no `uses` clause.
+        let fake = Rc::new(FakePlatform::with_caps(vec![
+            CapInfo { handle: 2, kind: ObjectKind::Endpoint, rights: 0b0110, badge: 0 },
+            CapInfo { handle: 3, kind: ObjectKind::File, rights: 0b0001, badge: 7 },
+        ]));
+        let value = run_program_on("main() = hold()", fake).expect("hold should run");
+        assert_eq!(
+            value,
+            Value::List(
+                vec![
+                    Value::Tuple(
+                        vec![
+                            Value::Int(2),
+                            Value::Str("Endpoint".into()),
+                            Value::Int(6),
+                            Value::Int(0),
+                        ]
+                        .into()
+                    ),
+                    Value::Tuple(
+                        vec![
+                            Value::Int(3),
+                            Value::Str("File".into()),
+                            Value::Int(1),
+                            Value::Int(7),
+                        ]
+                        .into()
+                    ),
+                ]
+                .into()
+            )
+        );
+    }
+
+    #[test]
+    fn hold_is_an_empty_list_when_no_caps_are_held() {
+        let fake = Rc::new(FakePlatform::new());
+        let value = run_program_on("main() = hold()", fake).expect("hold should run");
+        assert_eq!(value, Value::List(vec![].into()));
     }
 
     /// Run a one-liner that uses the `Str` module, returning `main`'s value.

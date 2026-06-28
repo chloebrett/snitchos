@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
 
-use stitch::platform::Platform;
+use stitch::platform::{CapInfo, Platform};
 use stitch::runner::{Repl, run_module_files};
 use stitch::telemetry::RecordingTelemetry;
 
@@ -26,6 +26,12 @@ impl Platform for StdPlatform {
             Ok(0) | Err(_) => None, // EOF or error ends the session
             Ok(_) => Some(line.trim_end_matches(['\n', '\r']).to_string()),
         }
+    }
+
+    fn hold(&self) -> Vec<CapInfo> {
+        // The host CLI is a plain process, not a SnitchOS process — it holds no
+        // capabilities, so `hold` is empty here.
+        Vec::new()
     }
 }
 
