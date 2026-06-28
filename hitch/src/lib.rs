@@ -57,8 +57,15 @@ pub enum Value {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeSchema {
     Bool,
+    I8,
+    I16,
+    I32,
     I64,
+    U8,
+    U16,
+    U32,
     U64,
+    F32,
     F64,
     Str,
     Bytes,
@@ -89,11 +96,17 @@ impl TypeSchema {
     pub fn accepts(&self, value: &Value) -> bool {
         match (self, value) {
             (TypeSchema::Bool, Value::Bool(_))
-            | (TypeSchema::I64, Value::I64(_))
+            | (TypeSchema::F32 | TypeSchema::F64, Value::F64(_))
             | (TypeSchema::U64, Value::U64(_))
-            | (TypeSchema::F64, Value::F64(_))
+            | (TypeSchema::I64, Value::I64(_))
             | (TypeSchema::Str, Value::Str(_))
             | (TypeSchema::Bytes, Value::Bytes(_)) => true,
+            (TypeSchema::U8, Value::U64(n)) => uint_fits(*n, 1),
+            (TypeSchema::U16, Value::U64(n)) => uint_fits(*n, 2),
+            (TypeSchema::U32, Value::U64(n)) => uint_fits(*n, 4),
+            (TypeSchema::I8, Value::I64(n)) => int_fits(*n, 1),
+            (TypeSchema::I16, Value::I64(n)) => int_fits(*n, 2),
+            (TypeSchema::I32, Value::I64(n)) => int_fits(*n, 4),
             (TypeSchema::Seq(elem), Value::Seq(items)) => {
                 items.iter().all(|item| elem.accepts(item))
             }
@@ -150,6 +163,41 @@ impl Schema for f64 {
 impl Schema for String {
     fn schema() -> TypeSchema {
         TypeSchema::Str
+    }
+}
+impl Schema for i8 {
+    fn schema() -> TypeSchema {
+        TypeSchema::I8
+    }
+}
+impl Schema for i16 {
+    fn schema() -> TypeSchema {
+        TypeSchema::I16
+    }
+}
+impl Schema for i32 {
+    fn schema() -> TypeSchema {
+        TypeSchema::I32
+    }
+}
+impl Schema for u8 {
+    fn schema() -> TypeSchema {
+        TypeSchema::U8
+    }
+}
+impl Schema for u16 {
+    fn schema() -> TypeSchema {
+        TypeSchema::U16
+    }
+}
+impl Schema for u32 {
+    fn schema() -> TypeSchema {
+        TypeSchema::U32
+    }
+}
+impl Schema for f32 {
+    fn schema() -> TypeSchema {
+        TypeSchema::F32
     }
 }
 
@@ -247,18 +295,74 @@ fn push_u32(n: usize, buf: &mut Vec<u8>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Does `n` fit in `bytes` unsigned little-endian bytes? (`bytes` is 1/2/4/8.)
+fn uint_fits(n: u64, bytes: usize) -> bool {
+    bytes >= 8 || n < (1u64 << (bytes * 8))
+}
+
+/// Does `n` fit in `bytes` signed (two's-complement) bytes?
+fn int_fits(n: i64, bytes: usize) -> bool {
+    if bytes >= 8 {
+        return true;
+    }
+    let limit = 1i64 << (bytes * 8 - 1);
+    n >= -limit && n < limit
+}
+
+/// Write the low `bytes` little-endian bytes of `n`, erroring if it doesn't fit.
+/// A fitting unsigned value's low bytes are its correct narrow representation.
+fn push_uint(n: u64, bytes: usize, buf: &mut Vec<u8>) -> Result<(), Error> {
+    if !uint_fits(n, bytes) {
+        return Err(Error::SchemaMismatch);
+    }
+    buf.extend_from_slice(&n.to_le_bytes()[..bytes]);
+    Ok(())
+}
+
+/// Write the low `bytes` little-endian bytes of `n` as a narrow signed integer,
+/// erroring if it doesn't fit. The upper bytes a fitting value sheds are just sign
+/// extension, so the low bytes are its correct two's-complement.
+fn push_int(n: i64, bytes: usize, buf: &mut Vec<u8>) -> Result<(), Error> {
+    if !int_fits(n, bytes) {
+        return Err(Error::SchemaMismatch);
+    }
+    buf.extend_from_slice(&n.to_le_bytes()[..bytes]);
+    Ok(())
+}
+
+/// Read `bytes` little-endian bytes as an unsigned value, zero-extended to `u64`.
+fn read_uint(cur: &mut Cursor, bytes: usize) -> Result<u64, Error> {
+    let raw = cur.take(bytes)?;
+    let mut wide = [0u8; 8];
+    wide[..bytes].copy_from_slice(raw);
+    Ok(u64::from_le_bytes(wide))
+}
+
+/// Read `bytes` little-endian bytes as a signed value, sign-extended to `i64`.
+fn read_int(cur: &mut Cursor, bytes: usize) -> Result<i64, Error> {
+    let raw = cur.take(bytes)?;
+    let fill = if raw[bytes - 1] & 0x80 != 0 { 0xFF } else { 0x00 };
+    let mut wide = [fill; 8];
+    wide[..bytes].copy_from_slice(raw);
+    Ok(i64::from_le_bytes(wide))
+}
+
 fn pack(value: &Value, schema: &TypeSchema, buf: &mut Vec<u8>) -> Result<(), Error> {
     match (schema, value) {
         (TypeSchema::Bool, Value::Bool(b)) => {
             buf.push(u8::from(*b));
             Ok(())
         }
-        (TypeSchema::I64, Value::I64(n)) => {
-            buf.extend_from_slice(&n.to_le_bytes());
-            Ok(())
-        }
-        (TypeSchema::U64, Value::U64(n)) => {
-            buf.extend_from_slice(&n.to_le_bytes());
+        (TypeSchema::U8, Value::U64(n)) => push_uint(*n, 1, buf),
+        (TypeSchema::U16, Value::U64(n)) => push_uint(*n, 2, buf),
+        (TypeSchema::U32, Value::U64(n)) => push_uint(*n, 4, buf),
+        (TypeSchema::U64, Value::U64(n)) => push_uint(*n, 8, buf),
+        (TypeSchema::I8, Value::I64(n)) => push_int(*n, 1, buf),
+        (TypeSchema::I16, Value::I64(n)) => push_int(*n, 2, buf),
+        (TypeSchema::I32, Value::I64(n)) => push_int(*n, 4, buf),
+        (TypeSchema::I64, Value::I64(n)) => push_int(*n, 8, buf),
+        (TypeSchema::F32, Value::F64(n)) => {
+            buf.extend_from_slice(&(*n as f32).to_le_bytes());
             Ok(())
         }
         (TypeSchema::F64, Value::F64(n)) => {
@@ -345,8 +449,15 @@ fn unpack(schema: &TypeSchema, cur: &mut Cursor) -> Result<Value, Error> {
             1 => Ok(Value::Bool(true)),
             _ => Err(Error::SchemaMismatch),
         },
-        TypeSchema::I64 => Ok(Value::I64(i64::from_le_bytes(cur.array::<8>()?))),
-        TypeSchema::U64 => Ok(Value::U64(u64::from_le_bytes(cur.array::<8>()?))),
+        TypeSchema::U8 => Ok(Value::U64(read_uint(cur, 1)?)),
+        TypeSchema::U16 => Ok(Value::U64(read_uint(cur, 2)?)),
+        TypeSchema::U32 => Ok(Value::U64(read_uint(cur, 4)?)),
+        TypeSchema::U64 => Ok(Value::U64(read_uint(cur, 8)?)),
+        TypeSchema::I8 => Ok(Value::I64(read_int(cur, 1)?)),
+        TypeSchema::I16 => Ok(Value::I64(read_int(cur, 2)?)),
+        TypeSchema::I32 => Ok(Value::I64(read_int(cur, 4)?)),
+        TypeSchema::I64 => Ok(Value::I64(read_int(cur, 8)?)),
+        TypeSchema::F32 => Ok(Value::F64(f64::from(f32::from_le_bytes(cur.array::<4>()?)))),
         TypeSchema::F64 => Ok(Value::F64(f64::from_le_bytes(cur.array::<8>()?))),
         TypeSchema::Str => {
             let len = cur.u32()?;

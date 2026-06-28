@@ -28,6 +28,15 @@ Value ::= Scalar(Bool | I64 | U64 | F64 | Str | Bytes)
         | Sum     { type, variant, payload: Value }     # enums / variants / `sum`
 ```
 
+**`Value` is 64-bit; the schema carries the width.** A `Value` integer is always
+`I64`/`U64` (the dynamic carrier, like Stitch's `Int`) — but a `TypeSchema` has the
+full fixed-width set (`I8`/`I16`/`I32`/`I64`, `U8`…`U64`, `F32`/`F64`). The packed
+codec narrows on the way out and widens on the way in, so a `U64(7)` packs to 1/2/4/8
+bytes against a `U8`/`U16`/`U32`/`U64` schema. That width is what lets a packed value
+byte-match a real C-ABI struct (`CapDesc`'s `u32` fields), and it keeps the
+runtime/value side simple (and the Stitch bridge trivial: `Int → I64`, width is the
+schema's business). Conformance range-checks the value against the schema's width.
+
 `protocol::Frame` is a `Sum`; a Rust `struct` is a `Product`; Stitch's
 `DataValue { type_name, variant, fields: [(Option<String>, Value)] }` is already
 this shape. One model; **two encodings with different jobs and different
