@@ -16,5 +16,10 @@ fn main() {
     let ep = endpoint_create();
     let minted = ep.mint_badged(0xE9, rights::SEND).is_ok();
     register_counter("snitchos.epmaker.minted").emit(i64::from(minted));
+    // Reclaim: revoke the caps derived from this endpoint — the badged `SEND` we
+    // just minted — proving the `Revoke` syscall + the derivation-tree walk + the
+    // `CapEvent::Revoked` snitch end to end (the powerbox's grant→use→reclaim).
+    let revoked = ep.revoke_derived();
+    register_counter("snitchos.epmaker.revoked").emit(revoked as i64);
     exit();
 }

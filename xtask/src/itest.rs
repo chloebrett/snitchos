@@ -243,6 +243,7 @@ catalog! {
     wfi "spawn-image-loads-from-fs"       scenarios::spawn_image_loads_from_fs      [userspace, spawn, fs] {"spawn-image"};
     wfi "stitch-reads-a-line"             scenarios::stitch_reads_a_line            [userspace, stitch] {"stitch-repl"};
     wfi "stitch-print-writes-to-console"  scenarios::stitch_print_writes_to_console [userspace, stitch] {"stitch-repl"};
+    wfi "stitch-hold-lists-caps"          scenarios::stitch_hold_lists_caps         [userspace, stitch] {"stitch-repl"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back
@@ -279,6 +280,7 @@ catalog! {
     cpu "init-brings-up-fs-server"        scenarios::init_brings_up_fs_server       [userspace]  {"init"};
     cpu "init-runs-fs-client"             scenarios::init_runs_fs_client            [userspace]  {"init"};
     cpu "endpoint-create-yields-owning-cap" scenarios::endpoint_create_yields_an_owning_cap [userspace] {"endpoint-create"};
+    cpu "revoke-reclaims-a-minted-cap"    scenarios::revoke_reclaims_a_minted_cap   [userspace]  {"endpoint-create"};
     cpu "notify-signal-wakes-waiter"      scenarios::notify_signal_wakes_waiter     [userspace]  {"notify-smoke"};
     cpu "priorities-ordered-but-fair"     scenarios::priorities_ordered_but_fair    [userspace]  {"priorities"};
 }

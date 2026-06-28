@@ -11,7 +11,7 @@ use crate::prelude::*;
 use crate::env::Env;
 use crate::interp::{apply_values, none, some};
 use crate::ops::value_order;
-use crate::value::{LazySeq, NativeFn, RuntimeError, Step, Value};
+use crate::value::{DataValue, LazySeq, NativeFn, RuntimeError, Step, Value};
 
 /// The native functions, registered into every program's globals.
 pub(crate) const NATIVES: &[NativeFn] = &[
@@ -408,15 +408,18 @@ fn native_hold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         .hold()
         .into_iter()
         .map(|cap| {
-            Value::Tuple(
-                vec![
-                    Value::Int(i64::from(cap.handle)),
-                    Value::Str(cap.kind.as_str().into()),
-                    Value::Int(i64::from(cap.rights)),
-                    Value::Int(i64::try_from(cap.badge).unwrap_or(i64::MAX)),
-                ]
-                .into(),
-            )
+            // The unhitch lift: a packed `CapInfo` → a named `Cap` record, so a
+            // `Seq<record>` of these renders as a table (field names = columns).
+            Value::Data(Rc::new(DataValue {
+                type_name: "Cap".into(),
+                variant: "Cap".into(),
+                fields: alloc::vec![
+                    (Some("handle".into()), Value::Int(i64::from(cap.handle))),
+                    (Some("kind".into()), Value::Str(cap.kind.as_str().into())),
+                    (Some("rights".into()), Value::Int(i64::from(cap.rights))),
+                    (Some("badge".into()), Value::Int(i64::try_from(cap.badge).unwrap_or(i64::MAX))),
+                ],
+            }))
         })
         .collect::<Vec<_>>();
     Ok(Value::List(rows.into()))
@@ -924,39 +927,36 @@ mod tests {
         }
     }
 
+    /// The named `Cap` record `hold` lifts each capability into (the unhitch
+    /// shape the shell's shape-dispatched renderer tables).
+    fn cap_record(handle: i64, kind: &str, rights: i64, badge: i64) -> Value {
+        Value::Data(Rc::new(crate::value::DataValue {
+            type_name: "Cap".into(),
+            variant: "Cap".into(),
+            fields: vec![
+                (Some("handle".into()), Value::Int(handle)),
+                (Some("kind".into()), Value::Str(kind.into())),
+                (Some("rights".into()), Value::Int(rights)),
+                (Some("badge".into()), Value::Int(badge)),
+            ],
+        }))
+    }
+
     #[test]
-    fn hold_lists_the_held_caps_as_tuples() {
-        // `hold` is ungated (introspecting your own caps grants no authority),
-        // so `main` needs no `uses` clause.
+    fn hold_lists_the_held_caps_as_records() {
+        // `hold` is ungated (introspecting your own caps grants no authority), so
+        // `main` needs no `uses` clause. Each cap lifts into a named `Cap` record,
+        // not a tuple — so a `Seq<record>` of them renders as a table.
         let fake = Rc::new(FakePlatform::with_caps(vec![
             CapInfo { handle: 2, kind: ObjectKind::Endpoint, rights: 0b0110, badge: 0 },
-            CapInfo { handle: 3, kind: ObjectKind::File, rights: 0b0001, badge: 7 },
+            // A badged endpoint — a file cap (no distinct `File` kind).
+            CapInfo { handle: 3, kind: ObjectKind::Endpoint, rights: 0b0010, badge: 7 },
         ]));
         let value = run_program_on("main() = hold()", fake).expect("hold should run");
         assert_eq!(
             value,
             Value::List(
-                vec![
-                    Value::Tuple(
-                        vec![
-                            Value::Int(2),
-                            Value::Str("Endpoint".into()),
-                            Value::Int(6),
-                            Value::Int(0),
-                        ]
-                        .into()
-                    ),
-                    Value::Tuple(
-                        vec![
-                            Value::Int(3),
-                            Value::Str("File".into()),
-                            Value::Int(1),
-                            Value::Int(7),
-                        ]
-                        .into()
-                    ),
-                ]
-                .into()
+                vec![cap_record(2, "Endpoint", 6, 0), cap_record(3, "Endpoint", 2, 7)].into()
             )
         );
     }

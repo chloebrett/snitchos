@@ -230,6 +230,14 @@ pub enum Syscall {
     /// in `a0` (so a too-small buffer is detectable: returned `>` `N`), or
     /// `usize::MAX` on a bad/unwritable buffer range. Backs the shell's `hold`.
     CapList = 27,
+    /// Revoke the capabilities **derived from** the holding `a0` (a [`Handle`]) names
+    /// — its transitive descendants in the cap derivation tree, wherever they were
+    /// delegated. Authority is implicit: holding the handle *is* the right to reclaim
+    /// what you granted from it. The caller's own holding survives; each revoked
+    /// descendant's handle goes stale and emits a `CapEvent::Revoked`. Returns the
+    /// number revoked in `a0`, or `usize::MAX` if the handle resolves nothing. The
+    /// reclaim half of the shell powerbox's grant→use→reclaim. (`a0` = handle.)
+    Revoke = 28,
 }
 
 impl Syscall {
@@ -267,6 +275,7 @@ impl Syscall {
             25 => Some(Self::EndpointCreate),
             26 => Some(Self::SpawnImage),
             27 => Some(Self::CapList),
+            28 => Some(Self::Revoke),
             _ => None,
         }
     }
@@ -321,7 +330,7 @@ pub mod object_kind {
 /// multiplicity later. Userspace `unhitch`es a buffer of these into named
 /// records (the `hold` lift); the kernel and userspace agree on this layout.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CapDesc {
     pub handle: u32,
     pub kind: u32,
@@ -370,6 +379,7 @@ mod tests {
         assert_eq!(Syscall::EndpointCreate as usize, 25);
         assert_eq!(Syscall::SpawnImage as usize, 26);
         assert_eq!(Syscall::CapList as usize, 27);
+        assert_eq!(Syscall::Revoke as usize, 28);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Exit));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Yield));
@@ -399,7 +409,8 @@ mod tests {
         assert_eq!(Syscall::from_usize(25), Some(Syscall::EndpointCreate));
         assert_eq!(Syscall::from_usize(26), Some(Syscall::SpawnImage));
         assert_eq!(Syscall::from_usize(27), Some(Syscall::CapList));
-        assert_eq!(Syscall::from_usize(28), None);
+        assert_eq!(Syscall::from_usize(28), Some(Syscall::Revoke));
+        assert_eq!(Syscall::from_usize(29), None);
     }
 
     #[test]

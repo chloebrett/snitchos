@@ -389,6 +389,25 @@ pub fn stitch_print_writes_to_console(h: &mut View) -> Result<(), String> {
         .map_err(|e| format!("{e} — Stitch print() didn't reach the UART on the metal"))
 }
 
+/// `workload=stitch-repl`: a Stitch program reads its **own capability table** on
+/// the metal via `hold()` — the `CapList` syscall → `RuntimePlatform::hold`
+/// `unhitch` → a `Seq<Cap record>`, rendered to the UART. The REPL process holds a
+/// bootstrap `TelemetrySink` (it emits telemetry), so `hold()`'s output must name a
+/// `TelemetrySink` cap. The injected source is `hold()`, whose echo can't contain
+/// "TelemetrySink" — so finding it in the UART log proves the cap table was really
+/// enumerated end-to-end (kernel `describe` → packed copy-out → userspace lift →
+/// record → render), not faked by the input echo.
+pub fn stitch_hold_lists_caps(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+
+    h.send_input(b"hold()\n")
+        .map_err(|e| format!("inject REPL input: {e}"))?;
+
+    h.wait_for_log(SEC * 30, "TelemetrySink")
+        .map_err(|e| format!("{e} — hold() didn't enumerate the process's caps on the metal"))
+}
+
 pub fn heap_oom(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
@@ -2876,6 +2895,61 @@ pub fn endpoint_create_yields_an_owning_cap(h: &mut View) -> Result<(), String> 
         "epmaker.minted != 1 — EndpointCreate didn't return a real owning endpoint \
          cap (minting a badged SEND on it was refused)",
     )?;
+
+    Ok(())
+}
+
+/// Capability revocation end-to-end (`workload=endpoint-create`): `ep_maker` mints a
+/// badged `SEND` from its endpoint (a `Transferred` whose `parent_cap_id` is the
+/// endpoint's id), then calls `Revoke` on the endpoint — reclaiming the caps derived
+/// from it. Asserts a `CapEvent::Revoked` reaches the wire whose `parent_cap_id`
+/// links back to that endpoint (so it's the minted child being reclaimed) and that
+/// the `revoked` count is 1. The reclaim half of the powerbox grant→use→reclaim, and
+/// the first end-to-end exercise of the `Revoke` syscall + derivation-tree walk.
+pub fn revoke_reclaims_a_minted_cap(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+
+    // The endpoint's owning grant — capture its cap_id (the parent of the mint).
+    let granted = h
+        .wait_for(SEC * 20, |f, _| {
+            matches!(
+                f,
+                OwnedFrame::CapEvent { kind: CapEventKind::Granted, object: CapObject::Endpoint, .. }
+            )
+        })
+        .ok_or("no CapEvent::Granted{Endpoint} — ep_maker didn't create its endpoint")?;
+    let endpoint_id = match granted {
+        OwnedFrame::CapEvent { cap_id, .. } => cap_id,
+        _ => unreachable!("matched a CapEvent above"),
+    };
+
+    // The revoke: a Revoked event for a cap derived from that endpoint (the minted
+    // badged SEND). `parent_cap_id == endpoint_id` ties it to the right subtree.
+    h.wait_for(SEC * 20, move |f, _| {
+        matches!(
+            f,
+            OwnedFrame::CapEvent {
+                kind: CapEventKind::Revoked,
+                object: CapObject::Endpoint,
+                parent_cap_id,
+                ..
+            } if *parent_cap_id == endpoint_id
+        )
+    })
+    .ok_or(
+        "no CapEvent::Revoked linked to the endpoint — Revoke didn't reclaim the minted cap \
+         (the derivation-tree walk found nothing, or the frame wasn't snitched)",
+    )?;
+
+    // And the syscall reported reclaiming exactly the one minted descendant.
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.epmaker.revoked")
+                && *value == 1
+        }
+        _ => false,
+    })
+    .ok_or("epmaker.revoked != 1 — Revoke didn't report reclaiming the one minted cap")?;
 
     Ok(())
 }

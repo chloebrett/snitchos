@@ -109,3 +109,53 @@ pub(super) fn handle_cap_list(frame: &mut TrapFrame) {
         None => super::refuse(frame, sc, RefusalReason::BadUserRange),
     }
 }
+
+/// Revoke the capabilities **derived from** the holding `a0` (a [`Handle`]) names —
+/// the powerbox reclaim. Authority is implicit: resolving the handle in the
+/// caller's own table proves it holds the cap, which *is* the right to reclaim what
+/// was delegated from it (no separate ancestry check). The caller's own holding
+/// survives; each transitive descendant is invalidated across every process table
+/// (the 2T walk lives in [`crate::sched::revoke_descendants_of`]) and snitched as a
+/// `CapEvent::Revoked`. Returns the count revoked in `a0`, or refuses
+/// (`a0 = u64::MAX`) if the handle resolves nothing.
+pub(super) fn handle_revoke(frame: &mut TrapFrame) {
+    use kernel_core::cap::{Handle, Object};
+    use protocol::RefusalReason;
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::Revoke as u8;
+    let Some(proc) = super::current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    let handle = Handle::from_raw(frame.a0 as u32);
+    // Resolve the handle to its `cap_id` (the derivation-tree root to reclaim from),
+    // then drop the lock — the walk locks *every* process's caps, including this one.
+    let root_cap_id = {
+        let caps = proc.caps.lock();
+        match caps.cap_id_of(handle) {
+            Ok(id) => id,
+            Err(_) => {
+                super::refuse(frame, sc, RefusalReason::CapNotFound);
+                return;
+            }
+        }
+    };
+
+    let revoked = crate::sched::revoke_descendants_of(root_cap_id);
+    for (holder, cap_id, parent_cap_id, cap) in &revoked {
+        let badge = match cap.object {
+            Object::Endpoint { badge, .. } => badge,
+            _ => 0,
+        };
+        crate::tracing::emit_cap_revoked(
+            *cap_id,
+            *parent_cap_id,
+            *holder,
+            crate::user::cap_object_kind(cap.object),
+            cap.rights.bits(),
+            badge,
+        );
+    }
+    frame.a0 = revoked.len() as u64;
+}

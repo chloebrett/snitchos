@@ -1145,6 +1145,56 @@ pub fn wait_for(parent: TaskId, child: TaskId) -> kernel_core::reap::WaitStep {
     REAP.lock().on_wait(parent, child)
 }
 
+/// Revoke every capability transitively **derived from** `root_cap_id` — its
+/// descendants in the cap derivation tree, wherever they were delegated — across
+/// all live processes. Returns each revoked holding as `(holder_task_id, cap_id,
+/// parent_cap_id, cap)` so the caller can snitch a `CapEvent::Revoked` per one. The
+/// `root_cap_id` holding itself is **not** revoked (the revoker keeps its own cap).
+///
+/// The 2T cross-table fixpoint: pop a node, sweep its direct children
+/// ([`children_cap_ids`]) across every process table, revoke each
+/// ([`revoke_by_cap_id`]) and push it back as a new node, until the frontier drains.
+/// Terminates because a child's `cap_id` is always minted after (so greater than)
+/// its parent's — the tree has no cycles.
+///
+/// Holds `SCHEDULER` across the walk so the task table is stable and process
+/// pointers stay valid, locking each `Process.caps` under it (lock order
+/// `SCHEDULER` → `caps`). The caller must therefore **not** already hold any
+/// `caps` lock.
+///
+/// [`children_cap_ids`]: kernel_core::cap::CapTable::children_cap_ids
+/// [`revoke_by_cap_id`]: kernel_core::cap::CapTable::revoke_by_cap_id
+pub fn revoke_descendants_of(
+    root_cap_id: u64,
+) -> Vec<(u32, u64, u64, kernel_core::cap::Capability)> {
+    let mut revoked = Vec::new();
+    if root_cap_id == 0 {
+        return revoked;
+    }
+    let sched = SCHEDULER.lock();
+    let mut frontier = alloc::vec![root_cap_id];
+    while let Some(parent) = frontier.pop() {
+        for task in &sched.tasks {
+            let process = task.process.load(Ordering::Relaxed);
+            if process.is_null() {
+                continue;
+            }
+            // SAFETY: under the `SCHEDULER` lock the task table is stable and
+            // `process` points at a live `Process` owned by `task` (its `Box<Task>`
+            // keeps a stable address), valid for the duration of this lock.
+            let proc_ref = unsafe { &*process };
+            let mut caps = proc_ref.caps.lock();
+            for child in caps.children_cap_ids(parent) {
+                if let Some(cap) = caps.revoke_by_cap_id(child) {
+                    revoked.push((task.id.0, child, parent, cap));
+                    frontier.push(child);
+                }
+            }
+        }
+    }
+    revoked
+}
+
 /// `parent` waits for *any* of its children: reap whichever zombie exists (return
 /// its id + status), else record the any-waiter and tell the caller to block. The
 /// pure decision is [`kernel_core::reap::ReapTable::on_wait_any`].

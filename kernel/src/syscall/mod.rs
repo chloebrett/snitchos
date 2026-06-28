@@ -46,6 +46,7 @@ pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::ReplyRecv) => ipc::handle_reply_recv(frame),
         Some(Syscall::MintBadged) => cap::handle_mint_badged(frame),
         Some(Syscall::CapList) => cap::handle_cap_list(frame),
+        Some(Syscall::Revoke) => cap::handle_revoke(frame),
         Some(Syscall::CopyFromCaller) => transfer::handle_copy_from_caller(frame),
         Some(Syscall::CopyToCaller) => transfer::handle_copy_to_caller(frame),
         Some(Syscall::ConsoleRead) => console::handle_console_read(frame),

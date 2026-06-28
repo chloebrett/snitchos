@@ -593,32 +593,32 @@ impl CapTable {
 
     /// Revoke the live holding whose derivation-tree id is `cap_id`, if present in
     /// this table: free its slot and bump the generation, so the handle (and any
-    /// same-table copy of it) now resolves [`CapError::Stale`]. Returns whether a
-    /// live holding was revoked. Unlike [`consume`](Self::consume) (which names a
-    /// holding by *handle*, the within-table path), this names it by global
-    /// `cap_id` — so a revoker can reclaim a grant in *another* process's table
-    /// (the kernel scans tables and calls this on each). `cap_id`s are globally
-    /// unique per live holding, so at most one slot matches.
+    /// same-table copy of it) now resolves [`CapError::Stale`]. Unlike
+    /// [`consume`](Self::consume) (which names a holding by *handle*, the
+    /// within-table path), this names it by global `cap_id` — so a revoker can
+    /// reclaim a grant in *another* process's table (the kernel scans tables and
+    /// calls this on each). `cap_id`s are globally unique per live holding, so at
+    /// most one slot matches.
+    ///
+    /// Returns the [`Capability`] that was freed — so the caller can snitch a rich
+    /// `CapEvent::Revoked` describing what it held — or `None` if no live holding
+    /// matched.
     ///
     /// **Non-transitive:** revokes exactly the named holding, not its descendants
     /// (delegated copies carry their own `cap_id`s). Transitive revocation (2T)
-    /// will drive a cross-table derivation-tree walk over `parent_cap_id` on top of
+    /// drives a cross-table derivation-tree walk over `parent_cap_id` on top of
     /// this primitive. The root/unassigned sentinel `0` is never a target —
     /// revoking it would hit every legacy/root holding — so `cap_id == 0` is a no-op.
-    pub fn revoke_by_cap_id(&mut self, cap_id: u64) -> bool {
+    pub fn revoke_by_cap_id(&mut self, cap_id: u64) -> Option<Capability> {
         if cap_id == 0 {
-            return false;
+            return None;
         }
-        let Some(slot) = self
+        let slot = self
             .slots
             .iter_mut()
-            .find(|s| s.cap.is_some() && s.cap_id == cap_id)
-        else {
-            return false;
-        };
-        slot.cap = None;
+            .find(|s| s.cap.is_some() && s.cap_id == cap_id)?;
         slot.generation = slot.generation.wrapping_add(1);
-        true
+        slot.cap.take()
     }
 
     /// The `cap_id`s of the live holdings in this table whose parent is
@@ -778,7 +778,7 @@ mod tests {
         let victim = table.insert_with_id(cap, 42, 0);
         let bystander = table.insert_with_id(cap, 43, 0);
 
-        assert!(table.revoke_by_cap_id(42), "a live holding with id 42 was revoked");
+        assert!(table.revoke_by_cap_id(42).is_some(), "a live holding with id 42 was revoked");
 
         assert_eq!(table.cap_id_of(victim), Err(CapError::Stale), "victim handle now stale");
         assert_eq!(table.cap_id_of(bystander), Ok(43), "the bystander is untouched");
@@ -790,9 +790,9 @@ mod tests {
         let cap = Capability { object: Object::SpanSink, rights: Rights::EMIT };
         table.insert_with_id(cap, 42, 0);
 
-        assert!(!table.revoke_by_cap_id(999), "no holding with id 999");
-        assert!(table.revoke_by_cap_id(42), "first revoke frees it");
-        assert!(!table.revoke_by_cap_id(42), "second revoke finds nothing live");
+        assert!(table.revoke_by_cap_id(999).is_none(), "no holding with id 999");
+        assert!(table.revoke_by_cap_id(42).is_some(), "first revoke frees it");
+        assert!(table.revoke_by_cap_id(42).is_none(), "second revoke finds nothing live");
     }
 
     #[test]
@@ -833,7 +833,7 @@ mod tests {
         let mut table = CapTable::new();
         let root = table.insert(Capability { object: Object::SpanSink, rights: Rights::EMIT });
 
-        assert!(!table.revoke_by_cap_id(0), "cap_id 0 is not a revocation target");
+        assert!(table.revoke_by_cap_id(0).is_none(), "cap_id 0 is not a revocation target");
         assert_eq!(table.cap_id_of(root), Ok(0), "the root holding survives");
     }
 

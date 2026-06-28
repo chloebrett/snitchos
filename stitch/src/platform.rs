@@ -18,15 +18,17 @@ pub type Handle = u32;
 pub type Rights = u32;
 
 /// What kind of object a capability names — the human-facing tag `hold` shows.
-/// A userspace-facing mirror of the kernel's cap object kinds, kept here (not
-/// tied to kernel types) so it is host-constructable in tests.
+/// Mirrors the kernel's cap object kinds (`snitchos_abi::object_kind`), kept here
+/// (not tied to kernel types) so it is host-constructable in tests. There is no
+/// `File` kind: a file capability is a badged `Endpoint` (`badge != 0`). `Unknown`
+/// is the forward-compat catch-all for a discriminant this build doesn't know.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ObjectKind {
     TelemetrySink,
     SpanSink,
     Endpoint,
+    Reply,
     Notification,
-    File,
     Unknown,
 }
 
@@ -38,9 +40,25 @@ impl ObjectKind {
             ObjectKind::TelemetrySink => "TelemetrySink",
             ObjectKind::SpanSink => "SpanSink",
             ObjectKind::Endpoint => "Endpoint",
+            ObjectKind::Reply => "Reply",
             ObjectKind::Notification => "Notification",
-            ObjectKind::File => "File",
             ObjectKind::Unknown => "Unknown",
+        }
+    }
+
+    /// Map a packed `CapDesc.kind` discriminant (`snitchos_abi::object_kind`) to a
+    /// kind — the `unhitch` step for the kind field. An unrecognized discriminant
+    /// (a future kernel kind) becomes [`Unknown`](Self::Unknown).
+    #[must_use]
+    pub fn from_abi(kind: u32) -> ObjectKind {
+        use snitchos_abi::object_kind as k;
+        match kind {
+            k::TELEMETRY_SINK => ObjectKind::TelemetrySink,
+            k::SPAN_SINK => ObjectKind::SpanSink,
+            k::ENDPOINT => ObjectKind::Endpoint,
+            k::REPLY => ObjectKind::Reply,
+            k::NOTIFICATION => ObjectKind::Notification,
+            _ => ObjectKind::Unknown,
         }
     }
 }
@@ -203,10 +221,25 @@ mod on_target {
         }
 
         fn hold(&self) -> Vec<CapInfo> {
-            // No-op until the `CapList` syscall + runtime wrapper land (the
-            // kernel side of `hold`); a process can't yet enumerate its own
-            // cap table. Returns empty so `hold` is callable on-target meanwhile.
-            Vec::new()
+            use snitchos_abi::CapDesc;
+            // Read the process's own cap table via `CapList`; the syscall reports
+            // the total even when the buffer was too small, so grow + retry once.
+            let mut buf = alloc::vec![CapDesc::default(); 16];
+            let total = snitchos_user::cap_list(&mut buf);
+            if total > buf.len() {
+                buf = alloc::vec![CapDesc::default(); total];
+                let _ = snitchos_user::cap_list(&mut buf);
+            }
+            buf.truncate(total.min(buf.len()));
+            // `unhitch` each packed `CapDesc` into the typed `CapInfo`.
+            buf.into_iter()
+                .map(|d| CapInfo {
+                    handle: d.handle,
+                    kind: super::ObjectKind::from_abi(d.kind),
+                    rights: d.rights,
+                    badge: d.badge,
+                })
+                .collect()
         }
     }
 }
@@ -301,11 +334,27 @@ mod tests {
     fn fake_returns_its_scripted_caps() {
         let caps = vec![
             CapInfo { handle: 2, kind: ObjectKind::Endpoint, rights: 0b0110, badge: 0 },
-            CapInfo { handle: 3, kind: ObjectKind::File, rights: 0b0001, badge: 7 },
+            // A badged endpoint — what a file cap looks like (no `File` kind).
+            CapInfo { handle: 3, kind: ObjectKind::Endpoint, rights: 0b0010, badge: 7 },
         ];
         let fake = FakePlatform::with_caps(caps.clone());
 
         assert_eq!(fake.hold(), caps);
+    }
+
+    #[test]
+    fn object_kind_from_abi_maps_each_known_discriminant() {
+        use snitchos_abi::object_kind as k;
+        assert_eq!(ObjectKind::from_abi(k::TELEMETRY_SINK), ObjectKind::TelemetrySink);
+        assert_eq!(ObjectKind::from_abi(k::SPAN_SINK), ObjectKind::SpanSink);
+        assert_eq!(ObjectKind::from_abi(k::ENDPOINT), ObjectKind::Endpoint);
+        assert_eq!(ObjectKind::from_abi(k::REPLY), ObjectKind::Reply);
+        assert_eq!(ObjectKind::from_abi(k::NOTIFICATION), ObjectKind::Notification);
+    }
+
+    #[test]
+    fn object_kind_from_abi_unknown_discriminant_is_unknown() {
+        assert_eq!(ObjectKind::from_abi(999), ObjectKind::Unknown);
     }
 
     #[test]

@@ -407,6 +407,29 @@ pub fn console_write(bytes: &[u8]) -> usize {
     written
 }
 
+/// Enumerate the calling process's **own** capability table (the `CapList`
+/// syscall): write up to `dst.len()` packed [`snitchos_abi::CapDesc`] records into
+/// `dst` and return the **total** live count — which may exceed `dst.len()`, so a
+/// caller wanting them all grows the buffer to the returned total and retries.
+/// `0` on a bad/unwritable buffer. Introspection (a process may always see what it
+/// holds), so it is ambient like [`console_read`]; backs the shell's `hold`.
+#[must_use]
+pub fn cap_list(dst: &mut [snitchos_abi::CapDesc]) -> usize {
+    let ret: usize;
+    // SAFETY: `ecall`; the kernel range-validates the writable buffer, writes up to
+    // `dst.len()` packed `CapDesc`s into it, and returns the total live count (or
+    // usize::MAX on a bad range). `ptr` is never dereferenced in U-mode here.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::CapList as usize,
+            inlateout("a0") dst.as_mut_ptr() as usize => ret,
+            in("a1") dst.len(),
+        );
+    }
+    if ret == usize::MAX { 0 } else { ret }
+}
+
 /// Read the monotonic clock — the kernel tick counter (the `ClockNow` syscall),
 /// at the platform timebase (10 MHz on QEMU `virt` → 1 tick = 0.1 µs). Lets a
 /// program time its own work; subtract two reads for an elapsed-tick duration.
@@ -715,6 +738,28 @@ impl Endpoint {
             );
         }
         if ret == usize::MAX { Err(Denied) } else { Ok(ret) }
+    }
+
+    /// Revoke the capabilities **derived from** this endpoint cap — its descendants
+    /// in the derivation tree (e.g. badged `SEND` caps minted from it, wherever
+    /// delegated) — via the `Revoke` syscall. Returns the number revoked (`0` if the
+    /// handle resolves nothing). Authority is implicit: holding this cap *is* the
+    /// right to reclaim what was minted/delegated from it. This cap itself survives.
+    /// The reclaim half of the powerbox's grant→use→reclaim.
+    #[must_use]
+    pub fn revoke_derived(self) -> usize {
+        let ret: usize;
+        // SAFETY: `ecall`; the kernel resolves the handle, revokes every cap derived
+        // from it across all process tables, and returns the count (or usize::MAX if
+        // the handle resolves nothing). The handle is not dereferenced in U-mode.
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::Revoke as usize,
+                inlateout("a0") self.handle => ret,
+            );
+        }
+        if ret == usize::MAX { 0 } else { ret }
     }
 
     /// Receive an inline message, blocking until a sender rendezvouses.

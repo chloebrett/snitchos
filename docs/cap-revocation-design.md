@@ -129,11 +129,24 @@ Level 2T is 2 made airtight against onward re-delegation.
    test locks the discriminant. protocol 38 green; collector + itest-harness build.
    (Kernel build is currently blocked by an *unrelated* in-progress `Syscall::CapList`
    gap in the dispatch match — the `hold` work — to be fixed separately.)
-3. **kernel:** `Revoke` syscall + cross-process scan + `CapEvent::Revoked` emit +
-   `SyscallRefused` on a disallowed revoke. itest: a workload grants → revokes →
-   asserts the `Revoked` frame + the victim's next use refused.
-4. **(later, additive) 2T:** descendant walk; transitive-revoke itest.
-5. **(later) shell:** `revoke` verb wired to the syscall; the powerbox demo.
+3. ✅ **`Revoke` syscall landed (2026-06-28) — and it's transitive (2T) from day one,
+   since the prework was in place.** `Syscall::Revoke = 28` takes a **handle** (not a
+   raw cap_id): resolving it in the caller's table *is* the authority (holding the
+   cap = the right to reclaim what was derived from it; no separate ancestry check).
+   `sched::revoke_descendants_of(root_cap_id)` runs the cross-table fixpoint (pop
+   node → `children_cap_ids` across every `Process.caps` under the `SCHEDULER` lock →
+   `revoke_by_cap_id` each → push back; terminates because child cap_id > parent),
+   returning `(holder, cap_id, parent_cap_id, cap)` per revoked holding; the handler
+   emits a `CapEvent::Revoked` for each and returns the count. The caller's own
+   holding survives. Userspace binding: `Endpoint::revoke_derived()`. itest
+   `revoke-reclaims-a-minted-cap` (`ep_maker` mints a badged SEND then revokes it):
+   asserts a `Revoked` frame linked to the endpoint + `revoked == 1`; 10/10 on
+   `--repeat`. Full lower-stack green (kernel-core 441, protocol 38, abi).
+4. ⬜ **(later) shell:** `revoke` verb wired to the syscall; the powerbox demo.
+
+(Note: the planned Level-2-first / 2T-later split collapsed — doing the 2T prework
+first meant the syscall got transitivity for free. `DropCap` + object-level revoke
+remain deferred until a use case appears.)
 
 ## Decision needed
 

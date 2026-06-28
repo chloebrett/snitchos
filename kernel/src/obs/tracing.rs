@@ -353,6 +353,32 @@ pub fn emit_cap_transferred(
     });
 }
 
+/// Emit a `CapEvent::Revoked` frame — a capability *reclaimed*: the holding
+/// `cap_id` (in process `holder`) was invalidated by a `Revoke`. The reclaim half
+/// of the grant→use→reclaim lifecycle; a transitive revoke emits one per swept
+/// descendant. `parent_cap_id` names the holding it derived from (the edge being
+/// cut). Object/rights/badge describe what was held, for the host's tree.
+pub fn emit_cap_revoked(
+    cap_id: u64,
+    parent_cap_id: u64,
+    holder: u32,
+    object: protocol::CapObject,
+    rights: u32,
+    badge: u64,
+) {
+    emit_frame(&Frame::CapEvent {
+        kind: protocol::CapEventKind::Revoked,
+        cap_id,
+        parent_cap_id,
+        holder,
+        object,
+        rights,
+        badge,
+        t: timestamp(),
+        hart_id: crate::percpu::current_hartid() as u8,
+    });
+}
+
 /// Emit a `NotifySignal` frame (v0.12): `from_task` signalled `notification`
 /// with `mask`. The producer half of the async kernel→user edge — paired with
 /// [`emit_notify_wait`] it makes the out-of-band wake visible in a trace.

@@ -398,8 +398,8 @@ pub fn spawn_program(
 }
 
 /// Map a kernel capability object to its wire [`protocol::CapObject`] kind, for
-/// snitching a `CapEvent` on a delegated grant.
-fn cap_object_kind(object: kernel_core::cap::Object) -> protocol::CapObject {
+/// snitching a `CapEvent` on a delegated grant or revoke.
+pub(crate) fn cap_object_kind(object: kernel_core::cap::Object) -> protocol::CapObject {
     use kernel_core::cap::Object;
     match object {
         Object::TelemetrySink => protocol::CapObject::TelemetrySink,
