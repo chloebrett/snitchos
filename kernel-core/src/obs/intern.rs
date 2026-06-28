@@ -27,12 +27,12 @@ use crate::sink::FrameSink;
 /// `n` is bounded in practice — kernel strings are a known, modest set (~100),
 /// and the *userspace* contribution is bounded by a per-process span-name
 /// quota (`handle_span_open`), so a program cannot drive `n` to where the scan
-/// — or the permanent `Box::leak` of each new name — becomes a denial of
-/// service. A few
+/// — or the allocation of each new name — becomes a denial of service. A few
 /// hundred short `memcmp`s per lookup is tens of microseconds: not worth a
 /// hash index. (If thousands of names ever become real, add a
-/// `BTreeMap<&'static str, StringId>` index then — and revisit span-name GC,
-/// since leaked names are never reclaimed today.)
+/// `BTreeMap<&str, StringId>` index then.) Userspace names are `Owned` and
+/// reclaimed on process exit via [`InternTable::release`]; kernel `&'static`
+/// literals are a bounded, permanent set.
 pub const INLINE_CAP: usize = 64;
 
 /// An interned name. Kernel literals (`span!("kernel.boot")`, the `snitchos.*`
@@ -123,6 +123,34 @@ impl InternTable {
             self.overflow.push(Some(entry));
             id as u32
         }
+    }
+
+    /// The metric twin of [`register_owned`](Self::register_owned): intern a
+    /// heap-`Owned` metric name (the `RegisterMetric` syscall path), emitting its
+    /// `StringRegister` then a `MetricRegister` carrying `kind` and the registering
+    /// `task_id` (the emitter dimension). Always appends — no cross-process dedup,
+    /// so each process's metric is its own `StringId` and can't forge another's.
+    /// The name is reclaimable via [`release`](Self::release) on process exit.
+    pub fn register_metric_owned<S: FrameSink>(
+        &mut self,
+        name: Box<str>,
+        kind: MetricKind,
+        task_id: u32,
+        sink: &mut S,
+    ) -> StringId {
+        let id = self.push(InternEntry {
+            name: InternName::Owned(name),
+            metric_registered: true,
+        });
+        let entry = self
+            .entry_mut(id as usize)
+            .expect("the entry was just pushed");
+        sink.emit(&Frame::StringRegister {
+            id: StringId(id),
+            value: entry.name.as_str(),
+        });
+        sink.emit(&Frame::MetricRegister { name_id: StringId(id), kind, task_id });
+        StringId(id)
     }
 
     /// Reclaim the name at `id`, dropping its owned bytes and **tombstoning** the
@@ -457,6 +485,31 @@ mod tests {
             decode(&sink.raw()[0]),
             Frame::StringRegister { id, value: "proc.span" },
         );
+    }
+
+    #[test]
+    fn register_metric_owned_interns_a_reclaimable_metric_name() {
+        // The userspace-metric path: owns the name (reclaimable on exit), always
+        // appends (no cross-process dedup — the forgery boundary), and emits both
+        // StringRegister and the emitter-stamped MetricRegister.
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+
+        let id =
+            table.register_metric_owned(Box::<str>::from("proc.metric"), MetricKind::Counter, 5, &mut sink);
+
+        assert_eq!(sink.len(), 2);
+        assert_eq!(
+            decode(&sink.raw()[0]),
+            Frame::StringRegister { id, value: "proc.metric" },
+        );
+        assert!(matches!(
+            decode(&sink.raw()[1]),
+            Frame::MetricRegister { name_id, kind: MetricKind::Counter, task_id: 5 } if name_id == id,
+        ));
+
+        table.release(id);
+        assert_eq!(table.lookup_by_content("proc.metric"), None, "reclaimable on exit");
     }
 
     #[test]

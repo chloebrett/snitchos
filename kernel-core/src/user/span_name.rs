@@ -2,8 +2,8 @@
 //!
 //! A process names its own spans. When it opens a span (the `SpanOpen` syscall),
 //! the kernel resolves the name against *this process's own* table: a name the
-//! process has used before resolves to the [`StringId`] it already leaked; a
-//! genuinely new name (under the per-process quota) leaks a **fresh** id. There
+//! process has used before resolves to the [`StringId`] it already registered; a
+//! genuinely new name (under the per-process quota) registers a **fresh** id. There
 //! is **no cross-process content dedup** — a process opening `"kernel.heartbeat"`
 //! gets its own distinct id, never the kernel's, so it cannot emit a span under
 //! another process's (or the kernel's) name, nor probe which names exist
@@ -13,31 +13,32 @@
 //! table — the span-name poisoning + disclosure hole.
 //!
 //! The table is bounded by [`MAX_SPAN_NAMES`](SpanNameTable::MAX_SPAN_NAMES): the
-//! capacity *is* the quota, bounding the permanent `Box::leak` *per process*.
-//! Across process lifetimes the leak is **not** reclaimed today — and because
-//! per-process scoping removed cross-process name dedup, each spawn re-leaks its
-//! span names, so a long-running spawner (the v0.13 shell) grows it by
-//! O(spawns × names-per-program). Accepted for now (Option A); reclaim-on-exit is
-//! deferred to the v0.12 teardown milestone. See `plans/span-and-metric-name-gc.md`.
+//! capacity *is* the per-process quota. The names are **owned** (`Box<str>`) and
+//! **reclaimed on process exit** — `reap_task` walks [`ids`](SpanNameTable::ids)
+//! and releases each from the global intern table, then this table is dropped.
+//! (Per-process scoping removed cross-process dedup, so each spawn registers its
+//! own names; without reclaim a long-running spawner like the shell would grow the
+//! intern table by O(spawns × names). See `plans/span-and-metric-name-gc.md`.)
 //!
 //! Pure data + bookkeeping: no `unsafe`, no MMIO, no CSRs. Host-tested here; the
-//! `kernel` side leaks the name into `'static`, allocates the global `StringId`
-//! via the intern table, and stores the pair here.
+//! `kernel` side allocates the global `StringId` via the intern table (which owns
+//! its own copy of the name under that id) and stores `(name, id)` here.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use protocol::StringId;
 
-/// A process's span-name table: the `'static` span names it has introduced,
-/// each paired with the global [`StringId`] it was interned to. Names are
-/// append-only (no revocation) and bounded by
+/// A process's span-name table: the owned span names it has introduced, each
+/// paired with the global [`StringId`] it was interned to. Names are append-only
+/// for the process's lifetime (no revocation) and bounded by
 /// [`MAX_SPAN_NAMES`](Self::MAX_SPAN_NAMES) — the capacity *is* the per-process
 /// quota. Lookups are by content (O(n), n ≤ cap), so a process's repeated open
-/// of a name resolves to its own id without re-leaking, while a name another
-/// process used is invisible here.
+/// of a name resolves to its own id without re-registering, while a name another
+/// process used is invisible here. Dropped (and its ids released) on exit.
 #[derive(Debug, Default)]
 pub struct SpanNameTable {
-    names: Vec<(&'static str, StringId)>,
+    names: Vec<(Box<str>, StringId)>,
 }
 
 impl SpanNameTable {
@@ -59,7 +60,7 @@ impl SpanNameTable {
     pub fn resolve(&self, name: &str) -> Option<StringId> {
         self.names
             .iter()
-            .find(|(n, _)| *n == name)
+            .find(|(n, _)| n.as_ref() == name)
             .map(|(_, id)| *id)
     }
 
@@ -71,12 +72,21 @@ impl SpanNameTable {
         self.names.len() >= Self::MAX_SPAN_NAMES
     }
 
-    /// Record that this process interned `name` to `id`. The caller must have
-    /// confirmed [`resolve`](Self::resolve) missed and the table is not
+    /// Record that this process interned `name` to `id`, taking **ownership** of
+    /// the name so it can be dropped on process exit (the intern table owns its
+    /// own copy under the same `id`; both are reclaimed on teardown). The caller
+    /// must have confirmed [`resolve`](Self::resolve) missed and the table is not
     /// [`is_full`](Self::is_full) — this is the bookkeeping half of a fresh
     /// registration.
-    pub fn insert(&mut self, name: &'static str, id: StringId) {
+    pub fn insert(&mut self, name: Box<str>, id: StringId) {
         self.names.push((name, id));
+    }
+
+    /// Every [`StringId`] this process interned as a span name, for exit-time
+    /// reclaim: the kernel releases each from the intern table when the process
+    /// is reaped.
+    pub fn ids(&self) -> impl Iterator<Item = StringId> + '_ {
+        self.names.iter().map(|(_, id)| *id)
     }
 }
 
@@ -90,7 +100,7 @@ mod tests {
     #[test]
     fn a_registered_name_resolves_to_its_string_id() {
         let mut table = SpanNameTable::new();
-        table.insert("worker.tick", StringId(7));
+        table.insert(Box::from("worker.tick"), StringId(7));
         assert_eq!(table.resolve("worker.tick"), Some(StringId(7)));
     }
 
@@ -101,12 +111,22 @@ mod tests {
     }
 
     #[test]
+    fn ids_lists_every_interned_string_id_for_teardown() {
+        // On process exit the kernel walks these ids and releases each from the
+        // intern table, reclaiming the per-process span names.
+        let mut table = SpanNameTable::new();
+        table.insert(Box::from("a.tick"), StringId(3));
+        table.insert(Box::from("b.tick"), StringId(8));
+        assert_eq!(table.ids().collect::<std::vec::Vec<_>>(), std::vec![StringId(3), StringId(8)]);
+    }
+
+    #[test]
     fn resolve_matches_on_content_not_pointer() {
         // The kernel resolves a runtime string copied from U-mode against the
         // stored `'static` names — so the match must be by value, letting a
         // process's repeat open of a name reuse its own id (no re-leak).
         let mut table = SpanNameTable::new();
-        table.insert("worker.tick", StringId(3));
+        table.insert(Box::from("worker.tick"), StringId(3));
         let runtime_built = "worker.".to_string() + "tick";
         assert_eq!(table.resolve(&runtime_built), Some(StringId(3)));
     }
@@ -114,8 +134,8 @@ mod tests {
     #[test]
     fn distinct_names_resolve_to_their_own_ids() {
         let mut table = SpanNameTable::new();
-        table.insert("a.tick", StringId(1));
-        table.insert("b.tick", StringId(2));
+        table.insert(Box::from("a.tick"), StringId(1));
+        table.insert(Box::from("b.tick"), StringId(2));
         assert_eq!(table.resolve("a.tick"), Some(StringId(1)));
         assert_eq!(table.resolve("b.tick"), Some(StringId(2)));
         assert_eq!(table.resolve("c.tick"), None);
@@ -127,7 +147,7 @@ mod tests {
         assert!(!table.is_full(), "an empty table has room");
         for (i, &name) in NAMES.iter().enumerate() {
             assert!(!table.is_full(), "the table has room before insert {i}");
-            table.insert(name, StringId(i as u32));
+            table.insert(Box::from(name), StringId(i as u32));
         }
         assert!(table.is_full(), "the table is full at the cap");
     }

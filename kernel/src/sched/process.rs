@@ -57,14 +57,15 @@ pub struct Process {
     pub caps: Mutex<CapTable>,
 
     /// The span names this process has introduced, each paired with the
-    /// `StringId` it leaked. A `SpanOpen` resolves the name against *this* table
-    /// alone: a name the process used before reuses its own id (no re-leak); a
-    /// genuinely new name (under [`SpanNameTable::MAX_SPAN_NAMES`]) leaks a fresh
-    /// id. The per-process scoping is the security boundary — a process gets its
-    /// own id for *any* name, so it cannot emit a span under the kernel's (or
+    /// `StringId` it interned. A `SpanOpen` resolves the name against *this* table
+    /// alone: a name the process used before reuses its own id (no re-register); a
+    /// genuinely new name (under [`SpanNameTable::MAX_SPAN_NAMES`]) registers a
+    /// fresh id. The per-process scoping is the security boundary — a process gets
+    /// its own id for *any* name, so it cannot emit a span under the kernel's (or
     /// another process's) name, nor probe which names exist by observing quota
-    /// cost. Behind the same [`Mutex`] as `caps`/`metrics`, never held across
-    /// `sret`/`yield_now`. The capacity *is* the quota.
+    /// cost. The owned names + ids are reclaimed on exit (`reap_task`). Behind the
+    /// same [`Mutex`] as `caps`/`metrics`, never held across `sret`/`yield_now`.
+    /// The capacity *is* the quota.
     pub span_names: Mutex<SpanNameTable>,
 
     /// The metrics this process has named for itself (debt #2). A

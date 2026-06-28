@@ -1154,8 +1154,19 @@ pub fn reap_task(child: TaskId) {
         // child's kernel-stack frame (`run_with_caps`/`spawned_entry` locals) and
         // so is owned by `task._stack`, still alive here. The child has `Exited`,
         // nothing else references it, and the pointer is dropped exactly once.
-        // Running `Drop` now (before the backing stack is freed below) releases the
-        // cap-table `Vec` + metric `BTreeMap` heap that the stack frame can't.
+        let proc_ref = unsafe { &*process };
+        // Reclaim the process's interned span + metric names: drop their bytes and
+        // tombstone the ids in the global intern table. Collect the ids first so
+        // the per-process locks are released before `release_names` takes
+        // `INTERN_TABLE` (no nested locks; the count metric shrinks on exit).
+        let span_ids: alloc::vec::Vec<_> = proc_ref.span_names.lock().ids().collect();
+        let metric_ids = proc_ref.metrics.lock().ids().to_vec();
+        crate::tracing::release_names(span_ids);
+        crate::tracing::release_names(metric_ids);
+
+        // SAFETY: as above — running `Drop` now (before the backing stack is freed
+        // below) releases the cap-table `Vec` + the per-process span/metric tables
+        // that the stack frame can't.
         unsafe { core::ptr::drop_in_place(process) };
     }
 

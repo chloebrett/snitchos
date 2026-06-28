@@ -6,16 +6,30 @@ address-space + caps) already landed in v0.12, so the lifecycle hook exists.
 
 ## Increment chain (TDD, each RED→GREEN)
 
-1. **`intern.rs` foundation** — `register_owned(Box<str>)` (table owns the name)
-   + `release(StringId)` (tombstone the slot, drop the bytes, never reuse the id).
-   Inline + overflow both tombstonable; `push` stays monotonic. *Fork-independent.*
-2. **`span_name.rs` / `metric.rs`** — expose the `StringId`s a process owns so
-   teardown can release them. `MetricTable` already holds `Vec<StringId>`;
-   `SpanNameTable` keeps its own `Box<str>` copy (decision below) and exposes ids.
-3. **`tracing.rs`** — userspace names go through `register_owned`; kernel `&'static`
-   literals unchanged. Add `release_names(&[StringId])` (locks `INTERN_TABLE`).
-4. **`sched::reap_task`** — gather the exiting process's span + metric ids, release.
-5. **itest** — a spawn-storm no longer grows the intern table without bound.
+1. ✅ **`intern.rs` foundation** — `register_owned(Box<str>)` + `register_metric_owned`
+   (table owns the name) + `release(StringId)` (tombstone the slot, drop the bytes,
+   never reuse the id). Inline + overflow both tombstonable; `push` stays monotonic.
+   `count()` now reports *live* names. *Fork-independent.* (3 new host tests.)
+2. ✅ **`span_name.rs` / `metric.rs`** — `ids()` on both. `SpanNameTable` now owns
+   its name (`Box<str>`, the fork below). (2 new host tests + signature update.)
+3. ✅ **`tracing.rs`** — `span_open_bounded` / `register_user_metric` route through
+   the owned paths (no `Box::leak`); kernel `&'static` literals unchanged. Added
+   `release_names`.
+4. ✅ **`sched::reap_task`** — gathers the exiting process's span + metric ids and
+   releases them before dropping the `Process` (ids collected first → no nested
+   lock under `INTERN_TABLE`). Validated against existing reap + userspace-metric +
+   span itests (all green).
+5. ⬜ **itest** — a dedicated end-to-end reclaim proof. See note below.
+
+### Increment 5 — design note (not yet built)
+The mechanism is fully host-tested; this would prove the *wiring* on the wire.
+Tricky bits: `strings_used` is a live gauge (needs a baseline to assert "stayed
+bounded"), and max `StringId` always climbs (ids are never reused, by design), so
+neither is a clean signal. **Recommended shape:** add a
+`snitchos.intern.strings_released_total` counter (bumped in `release_names`) — a
+robust monotonic signal *and* a genuinely useful "watch reclamation happen"
+observable — make `memhog` register one name before exit, then assert the counter
+climbs across the reaper's 30 spawn/reap cycles.
 
 **Fork (increment 2):** `SpanNameTable` stores its own `Box<str>` copy rather than
 coupling `resolve` to the intern table — keeps the two kernel-core tables

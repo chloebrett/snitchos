@@ -121,12 +121,14 @@ pub fn emit_log(msg: &str) {
 ///
 /// Names are scoped **per process** via `span_names` (the caller's own
 /// [`SpanNameTable`]): a name the process has used before resolves to the
-/// `StringId` it already leaked (no re-leak); a genuinely new name leaks a fresh
-/// id — including a name the kernel or another process also uses, so the process
-/// gets its *own* distinct id and cannot emit under another's span name nor probe
-/// the global name set. A new name past the table's quota is **refused** (returns
-/// `None`) without leaking. The resolve, quota check, and registration all run
-/// under the per-process span-name lock, so the decision is precise.
+/// `StringId` it already registered (no re-register); a genuinely new name
+/// registers a fresh id — including a name the kernel or another process also
+/// uses, so the process gets its *own* distinct id and cannot emit under another's
+/// span name nor probe the global name set. A new name past the table's quota is
+/// **refused** (returns `None`) without allocating. The interned name is owned
+/// (not leaked) and reclaimed on process exit. The resolve, quota check, and
+/// registration all run under the per-process span-name lock, so the decision is
+/// precise.
 ///
 /// [`SpanNameTable`]: kernel_core::span_name::SpanNameTable
 pub fn span_open_bounded(
@@ -140,10 +142,14 @@ pub fn span_open_bounded(
         } else if names.is_full() {
             return None;
         } else {
-            let leaked: &'static str =
-                alloc::boxed::Box::leak(alloc::boxed::Box::<str>::from(name));
-            let id = INTERN_TABLE.lock().register_or_lookup(leaked, &mut KernelSink);
-            names.insert(leaked, id);
+            // Owned, not leaked: the intern table and this process's table each
+            // hold a copy under the same id, both reclaimed when the process is
+            // reaped (`release_names` walks `SpanNameTable::ids`). Pre-GC this
+            // `Box::leak`'d a fresh `&'static` per spawn — the bound this fixes.
+            let id = INTERN_TABLE
+                .lock()
+                .register_owned(alloc::boxed::Box::<str>::from(name), &mut KernelSink);
+            names.insert(alloc::boxed::Box::<str>::from(name), id);
             id
         }
     };
@@ -181,6 +187,18 @@ pub fn span_close_checked(id: SpanId, parent: SpanId) -> bool {
 /// as a metric (`snitchos.intern.strings_used`).
 pub fn intern_count() -> u32 {
     INTERN_TABLE.lock().count()
+}
+
+/// Reclaim a set of interned names by id — called from `reap_task` with the
+/// exiting process's span + metric ids (`SpanNameTable::ids` + `MetricTable::ids`).
+/// Each [`StringId`] is tombstoned in the intern table: its bytes are dropped and
+/// the id is never reused (wire-identity stability). Ids the process doesn't own
+/// (or already-released ones) are harmless no-ops.
+pub fn release_names(ids: impl IntoIterator<Item = StringId>) {
+    let mut table = INTERN_TABLE.lock();
+    for id in ids {
+        table.release(id);
+    }
 }
 
 /// Register `name` as a Counter metric. Returns its `StringId` for use
@@ -225,20 +243,22 @@ pub fn register_histogram(name: &'static str) -> StringId {
 }
 
 /// Register a **userspace-named** metric of `kind` from a runtime-copied name,
-/// returning its `StringId`. Leaks `name` into `'static` (the intern table holds
-/// `&'static str`), so every call allocates a *fresh* id — there is **no**
-/// content dedup, by design: each process's metric is its own `StringId`, so one
-/// process can't forge another's (or the kernel's own) telemetry. The leak is
-/// bounded by the caller's per-process `MetricTable` quota, checked *before* this
-/// runs. Backs the `RegisterMetric` syscall. The registering task is stamped on
-/// the `MetricRegister` (the emitter dimension), so the collector keeps two
-/// processes that name a metric identically as distinct Prometheus series.
+/// returning its `StringId`. The intern table *owns* `name` (reclaimed when the
+/// process is reaped — see [`release_names`]), and every call allocates a *fresh*
+/// id — there is **no** content dedup, by design: each process's metric is its
+/// own `StringId`, so one process can't forge another's (or the kernel's own)
+/// telemetry. Bounded by the caller's per-process `MetricTable` quota, checked
+/// *before* this runs. Backs the `RegisterMetric` syscall. The registering task is
+/// stamped on the `MetricRegister` (the emitter dimension), so the collector keeps
+/// two processes that name a metric identically as distinct Prometheus series.
 pub fn register_user_metric(name: &str, kind: MetricKind) -> StringId {
-    let leaked: &'static str = alloc::boxed::Box::leak(alloc::boxed::Box::<str>::from(name));
     let task_id = crate::sched::current_task_id().0;
-    INTERN_TABLE
-        .lock()
-        .register_metric(leaked, kind, task_id, &mut KernelSink)
+    INTERN_TABLE.lock().register_metric_owned(
+        alloc::boxed::Box::<str>::from(name),
+        kind,
+        task_id,
+        &mut KernelSink,
+    )
 }
 
 /// Emit a metric sample. The name must have been registered first via

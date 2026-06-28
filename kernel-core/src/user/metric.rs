@@ -12,10 +12,11 @@
 //!
 //! The table is bounded by [`MetricTable::MAX_METRIC_NAMES`]: the capacity *is*
 //! the quota (Q4), mirroring [`SpanNameTable`](super::span_name::SpanNameTable),
-//! so a misbehaving program can't pin unbounded interned names *per process*.
-//! Across process lifetimes the leaked names are **not** reclaimed today, and
-//! (no cross-process dedup) each spawn re-leaks — accepted for now, reclaim-on-exit
-//! deferred to the v0.12 teardown milestone. See `plans/span-and-metric-name-gc.md`.
+//! so a misbehaving program can't pin unbounded interned names *per process*. The
+//! interned names are **reclaimed on process exit** — `reap_task` walks
+//! [`ids`](MetricTable::ids) and releases each from the global intern table. (No
+//! cross-process dedup, so each spawn registers its own; reclaim is what keeps a
+//! long-running spawner bounded. See `plans/span-and-metric-name-gc.md`.)
 //!
 //! Pure data + bookkeeping: no `unsafe`, no MMIO, no CSRs. Host-tested here;
 //! the `kernel` side only decides *where the table lives* (the process struct)
@@ -98,6 +99,15 @@ impl MetricTable {
     pub fn resolve(&self, handle: MetricHandle) -> Option<StringId> {
         self.names.get(handle.0 as usize).copied()
     }
+
+    /// Every [`StringId`] this process registered as a metric, for exit-time
+    /// reclaim: the kernel releases each from the intern table when the process
+    /// is reaped. Append-only and never tombstoned in this table — the handle
+    /// indices that resolve to them must stay stable for the process's lifetime.
+    #[must_use]
+    pub fn ids(&self) -> &[StringId] {
+        &self.names
+    }
 }
 
 #[cfg(test)]
@@ -112,6 +122,16 @@ mod tests {
             .register(StringId(7))
             .expect("the first registration is under the cap");
         assert_eq!(table.resolve(h), Some(StringId(7)));
+    }
+
+    #[test]
+    fn ids_lists_every_registered_string_id_for_teardown() {
+        // On process exit the kernel walks these ids and releases each from the
+        // intern table, reclaiming the per-process metric names.
+        let mut table = MetricTable::new();
+        table.register(StringId(7)).expect("under the cap");
+        table.register(StringId(9)).expect("under the cap");
+        assert_eq!(table.ids(), &[StringId(7), StringId(9)]);
     }
 
     #[test]
