@@ -1,7 +1,7 @@
 //! The hart: register file, program counter, instruction-count clock, and
 //! the fetch/decode/execute `step`. The single API everything tests through.
 
-use crate::decode::{Instr, funct3, opcode};
+use crate::decode::{Instr, funct3, funct7, opcode};
 use crate::mem::{BusError, Memory, RAM_BASE};
 
 /// Size in bytes of a (non-compressed) instruction.
@@ -11,6 +11,49 @@ const INSTR_SIZE: u64 = 4;
 fn sext32(v: u32) -> u64 {
     i64::from(v as i32) as u64
 }
+
+/// Generates RISC-V signed `div`/`rem` for a width: div-by-zero yields all-ones
+/// (`-1`), and `MIN / -1` overflows back to the dividend (rem to 0).
+macro_rules! signed_div_rem {
+    ($div:ident, $rem:ident, $ty:ty) => {
+        fn $div(a: $ty, b: $ty) -> $ty {
+            if b == 0 {
+                -1
+            } else if a == <$ty>::MIN && b == -1 {
+                a
+            } else {
+                a.wrapping_div(b)
+            }
+        }
+        fn $rem(a: $ty, b: $ty) -> $ty {
+            if b == 0 {
+                a
+            } else if a == <$ty>::MIN && b == -1 {
+                0
+            } else {
+                a.wrapping_rem(b)
+            }
+        }
+    };
+}
+
+/// Generates RISC-V unsigned `div`/`rem`: div-by-zero yields all-ones, rem the
+/// dividend.
+macro_rules! unsigned_div_rem {
+    ($div:ident, $rem:ident, $ty:ty) => {
+        fn $div(a: $ty, b: $ty) -> $ty {
+            if b == 0 { <$ty>::MAX } else { a / b }
+        }
+        fn $rem(a: $ty, b: $ty) -> $ty {
+            if b == 0 { a } else { a % b }
+        }
+    };
+}
+
+signed_div_rem!(div_s, rem_s, i64);
+signed_div_rem!(div_s32, rem_s32, i32);
+unsigned_div_rem!(div_u, rem_u, u64);
+unsigned_div_rem!(div_u32, rem_u32, u32);
 
 /// Why a `step` could not complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +165,9 @@ impl Cpu {
 
     /// OP: register-register integer ops (shift amount is `rs2 & 0x3f`).
     fn op(&mut self, instr: Instr) -> Result<(), StepError> {
+        if instr.funct7() == funct7::MULDIV {
+            return self.op_m(instr);
+        }
         let a = self.x[instr.rs1()];
         let b = self.x[instr.rs2()];
         let shamt = (b & 0x3f) as u32;
@@ -184,6 +230,9 @@ impl Cpu {
 
     /// OP-32: 32-bit register-register ops, sign-extended to 64.
     fn op_32(&mut self, instr: Instr) -> Result<(), StepError> {
+        if instr.funct7() == funct7::MULDIV {
+            return self.op_m_32(instr);
+        }
         let a = self.x[instr.rs1()] as u32;
         let b = self.x[instr.rs2()] as u32;
         let shamt = b & 0x1f;
@@ -193,6 +242,43 @@ impl Cpu {
             funct3::SLL => sext32(a << shamt),                            // sllw
             funct3::SR if instr.is_alt_op() => sext32(((a as i32) >> shamt) as u32), // sraw
             funct3::SR => sext32(a >> shamt),                            // srlw
+            _ => return Err(self.unimplemented(instr.0)),
+        };
+        self.set_reg(instr.rd(), value);
+        self.advance();
+        Ok(())
+    }
+
+    /// M extension on OP: 64-bit multiply (low / high) and divide / remainder.
+    fn op_m(&mut self, instr: Instr) -> Result<(), StepError> {
+        let a = self.x[instr.rs1()];
+        let b = self.x[instr.rs2()];
+        let value = match instr.funct3() {
+            funct3::m::MUL => a.wrapping_mul(b),
+            funct3::m::MULH => ((i128::from(a as i64) * i128::from(b as i64)) >> 64) as u64,
+            funct3::m::MULHSU => ((i128::from(a as i64) * i128::from(b)) >> 64) as u64,
+            funct3::m::MULHU => ((u128::from(a) * u128::from(b)) >> 64) as u64,
+            funct3::m::DIV => div_s(a as i64, b as i64) as u64,
+            funct3::m::DIVU => div_u(a, b),
+            funct3::m::REM => rem_s(a as i64, b as i64) as u64,
+            funct3::m::REMU => rem_u(a, b),
+            _ => return Err(self.unimplemented(instr.0)),
+        };
+        self.set_reg(instr.rd(), value);
+        self.advance();
+        Ok(())
+    }
+
+    /// M extension on OP-32: 32-bit multiply low and divide / remainder, sign-extended.
+    fn op_m_32(&mut self, instr: Instr) -> Result<(), StepError> {
+        let a = self.x[instr.rs1()] as u32;
+        let b = self.x[instr.rs2()] as u32;
+        let value = match instr.funct3() {
+            funct3::m::MUL => sext32(a.wrapping_mul(b)),                  // mulw
+            funct3::m::DIV => sext32(div_s32(a as i32, b as i32) as u32), // divw
+            funct3::m::DIVU => sext32(div_u32(a, b)),                     // divuw
+            funct3::m::REM => sext32(rem_s32(a as i32, b as i32) as u32), // remw
+            funct3::m::REMU => sext32(rem_u32(a, b)),                     // remuw
             _ => return Err(self.unimplemented(instr.0)),
         };
         self.set_reg(instr.rd(), value);
@@ -283,8 +369,63 @@ impl Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decode::{ALT_OP_BIT, funct3, opcode};
+    use crate::decode::{ALT_OP_BIT, funct3, funct7, opcode};
     use crate::mem::{Memory, RAM_BASE};
+
+    /// Run a single R-type op `enc(rd=3, rs1=1, rs2=2)` with x1=a, x2=b
+    /// (operands set directly via the public API), and return x3.
+    fn run_rrr(enc: fn(u32, u32, u32) -> u32, a: u64, b: u64) -> u64 {
+        let mut mem = Memory::new(0x1000);
+        mem.write_u32(RAM_BASE, enc(3, 1, 2)).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(1, a);
+        cpu.set_reg(2, b);
+        cpu.step().unwrap();
+        cpu.reg(3)
+    }
+
+    fn m_op(opcode: u32, funct3: u32, rd: u32, rs1: u32, rs2: u32) -> u32 {
+        r_type(opcode, funct3, funct7::MULDIV << 25, rd, rs1, rs2)
+    }
+    fn mul(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP, funct3::m::MUL, rd, rs1, rs2)
+    }
+    fn mulh(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP, funct3::m::MULH, rd, rs1, rs2)
+    }
+    fn mulhsu(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP, funct3::m::MULHSU, rd, rs1, rs2)
+    }
+    fn mulhu(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP, funct3::m::MULHU, rd, rs1, rs2)
+    }
+    fn div(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP, funct3::m::DIV, rd, rs1, rs2)
+    }
+    fn divu(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP, funct3::m::DIVU, rd, rs1, rs2)
+    }
+    fn rem(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP, funct3::m::REM, rd, rs1, rs2)
+    }
+    fn remu(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP, funct3::m::REMU, rd, rs1, rs2)
+    }
+    fn mulw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP_32, funct3::m::MUL, rd, rs1, rs2)
+    }
+    fn divw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP_32, funct3::m::DIV, rd, rs1, rs2)
+    }
+    fn divuw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP_32, funct3::m::DIVU, rd, rs1, rs2)
+    }
+    fn remw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP_32, funct3::m::REM, rd, rs1, rs2)
+    }
+    fn remuw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+        m_op(opcode::OP_32, funct3::m::REMU, rd, rs1, rs2)
+    }
 
     fn addi(rd: u32, rs1: u32, imm: i32) -> u32 {
         i_type(opcode::OP_IMM, funct3::ADD, rd, rs1, imm)
@@ -736,6 +877,45 @@ mod tests {
         assert_eq!(cpu.reg(8), 0x8000_0000);
         assert_eq!(cpu.reg(11), u64::MAX);
         assert_eq!(cpu.reg(12), 65535);
+    }
+
+    #[test]
+    fn m_extension_multiply() {
+        assert_eq!(run_rrr(mul, 6, 7), 42);
+        assert_eq!(run_rrr(mulh, 1 << 62, 4), 1);
+        assert_eq!(run_rrr(mulhu, 1 << 62, 4), 1);
+        // (-1) signed * 2 unsigned -> high word all ones
+        assert_eq!(run_rrr(mulhsu, u64::MAX, 2), u64::MAX);
+        // low 32 of (0x10000 * 0x8000) = 0x8000_0000, sign-extended
+        assert_eq!(run_rrr(mulw, 0x10000, 0x8000), 0xffff_ffff_8000_0000);
+    }
+
+    #[test]
+    fn m_extension_divide_and_remainder_with_edge_cases() {
+        assert_eq!(run_rrr(div, 20, 6), 3);
+        assert_eq!(run_rrr(div, (-20_i64) as u64, 6), (-3_i64) as u64);
+        assert_eq!(run_rrr(div, 5, 0), u64::MAX); // div by zero -> -1
+        assert_eq!(run_rrr(div, 1 << 63, (-1_i64) as u64), 1 << 63); // MIN / -1 -> MIN
+        assert_eq!(run_rrr(divu, 20, 6), 3);
+        assert_eq!(run_rrr(divu, 5, 0), u64::MAX); // div by zero -> all ones
+        assert_eq!(run_rrr(rem, 20, 6), 2);
+        assert_eq!(run_rrr(rem, (-20_i64) as u64, 6), (-2_i64) as u64);
+        assert_eq!(run_rrr(rem, 5, 0), 5); // rem by zero -> dividend
+        assert_eq!(run_rrr(rem, 1 << 63, (-1_i64) as u64), 0); // MIN % -1 -> 0
+        assert_eq!(run_rrr(remu, 20, 6), 2);
+        assert_eq!(run_rrr(remu, 5, 0), 5); // rem by zero -> dividend
+    }
+
+    #[test]
+    fn m_extension_word_divide_and_remainder() {
+        assert_eq!(run_rrr(divw, (-20_i64) as u64, 6), (-3_i64) as u64);
+        assert_eq!(run_rrr(divw, 5, 0), u64::MAX); // -1 sign-extended
+        // 32-bit MIN / -1 -> 32-bit MIN, sign-extended
+        assert_eq!(run_rrr(divw, 1 << 31, (-1_i64) as u64), 0xffff_ffff_8000_0000);
+        assert_eq!(run_rrr(divuw, 20, 6), 3);
+        assert_eq!(run_rrr(divuw, 5, 0), u64::MAX); // 0xffff_ffff sign-extended
+        assert_eq!(run_rrr(remw, (-20_i64) as u64, 6), (-2_i64) as u64);
+        assert_eq!(run_rrr(remuw, 20, 6), 2);
     }
 
     #[test]

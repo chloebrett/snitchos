@@ -56,6 +56,24 @@ pub(crate) mod funct3 {
         pub const SW: u32 = 0x2;
         pub const SD: u32 = 0x3;
     }
+
+    /// funct3 selectors for the M extension (OP / OP-32 with funct7 = MULDIV).
+    pub mod m {
+        pub const MUL: u32 = 0x0;
+        pub const MULH: u32 = 0x1;
+        pub const MULHSU: u32 = 0x2;
+        pub const MULHU: u32 = 0x3;
+        pub const DIV: u32 = 0x4;
+        pub const DIVU: u32 = 0x5;
+        pub const REM: u32 = 0x6;
+        pub const REMU: u32 = 0x7;
+    }
+}
+
+/// funct7 selectors, `instr[31:25]`.
+pub(crate) mod funct7 {
+    /// Marks an OP / OP-32 instruction as belonging to the M extension.
+    pub const MULDIV: u32 = 0x01;
 }
 
 /// funct7 bit 5 (`instr[30]`): selects sub-vs-add and arithmetic-vs-logical shift.
@@ -91,6 +109,10 @@ impl Instr {
 
     pub(crate) fn funct3(self) -> u32 {
         (self.0 >> 12) & 0x7
+    }
+
+    pub(crate) fn funct7(self) -> u32 {
+        (self.0 >> 25) & 0x7f
     }
 
     /// Sign-extended I-type immediate (bits 31:20).
