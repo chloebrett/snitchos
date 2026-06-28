@@ -39,6 +39,13 @@ impl Memory {
         Self { ram: vec![0; size] }
     }
 
+    /// Copy `bytes` into RAM starting at `addr` (used by the ELF loader).
+    pub(crate) fn write_bytes(&mut self, addr: u64, bytes: &[u8]) -> Result<(), BusError> {
+        let span = self.span(addr, bytes.len())?;
+        self.ram[span].copy_from_slice(bytes);
+        Ok(())
+    }
+
     accessors!(read_u8, write_u8, u8, 1);
     accessors!(read_u16, write_u16, u16, 2);
     accessors!(read_u32, write_u32, u32, 4);
