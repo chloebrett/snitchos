@@ -4,5 +4,6 @@
 //! `plans/snemu-milestone-1-console-out.md` for the current milestone.
 
 pub mod cpu;
+mod csr;
 mod decode;
 pub mod mem;
