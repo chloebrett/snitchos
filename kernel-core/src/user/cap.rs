@@ -14,6 +14,8 @@
 
 use alloc::vec::Vec;
 
+use snitchos_abi::{object_kind, CapDesc};
+
 use crate::ipc::EndpointId;
 use crate::notify::NotificationId;
 use crate::sched::TaskId;
@@ -426,6 +428,38 @@ impl CapTable {
     #[must_use]
     pub const fn new() -> Self {
         Self { slots: Vec::new() }
+    }
+
+    /// Snapshot the live capabilities in this table as packed [`CapDesc`] records,
+    /// in slot order — the kernel-core half of the `CapList` syscall (`hold`). One
+    /// entry per live slot: its [`Handle`] (raw), the [`object_kind`] discriminant,
+    /// the raw [`Rights`] bits, and the endpoint badge (`0` for non-endpoints).
+    /// `reserved` is `0`. This is the "packed hitch" the syscall copies out;
+    /// userspace `unhitch`es it into named records. Pure (no kernel state), so it
+    /// is host-tested here rather than behind the syscall.
+    #[must_use]
+    pub fn describe(&self) -> Vec<CapDesc> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let cap = slot.cap.as_ref()?;
+                let (kind, badge) = match cap.object {
+                    Object::TelemetrySink => (object_kind::TELEMETRY_SINK, 0),
+                    Object::SpanSink => (object_kind::SPAN_SINK, 0),
+                    Object::Endpoint { badge, .. } => (object_kind::ENDPOINT, badge),
+                    Object::Reply { .. } => (object_kind::REPLY, 0),
+                    Object::Notification { .. } => (object_kind::NOTIFICATION, 0),
+                };
+                Some(CapDesc {
+                    handle: Handle::new(index as u32, slot.generation).raw(),
+                    kind,
+                    rights: cap.rights.bits(),
+                    reserved: 0,
+                    badge,
+                })
+            })
+            .collect()
     }
 
     /// Build the initial capability table for the `init` process: the two
@@ -1182,6 +1216,51 @@ mod tests {
             object: Object::TelemetrySink,
             rights: Rights::EMIT,
         }
+    }
+
+    #[test]
+    fn describe_lists_live_caps_as_packed_records() {
+        let mut table = CapTable::new();
+        let telemetry = table.insert(emit_sink());
+        let endpoint = table.insert(Capability {
+            object: Object::Endpoint { id: EndpointId(7), badge: 0xab },
+            rights: Rights::SEND | Rights::MINT,
+        });
+
+        let descs = table.describe();
+
+        assert_eq!(
+            descs,
+            alloc::vec![
+                CapDesc {
+                    handle: telemetry.raw(),
+                    kind: object_kind::TELEMETRY_SINK,
+                    rights: snitchos_abi::rights::EMIT,
+                    reserved: 0,
+                    badge: 0,
+                },
+                CapDesc {
+                    handle: endpoint.raw(),
+                    kind: object_kind::ENDPOINT,
+                    rights: snitchos_abi::rights::SEND | snitchos_abi::rights::MINT,
+                    reserved: 0,
+                    badge: 0xab,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn describe_skips_consumed_slots() {
+        let mut table = CapTable::new();
+        let first = table.insert(emit_sink());
+        let second = table.insert(emit_sink());
+        assert!(table.consume(first));
+
+        let descs = table.describe();
+
+        assert_eq!(descs.len(), 1);
+        assert_eq!(descs[0].handle, second.raw());
     }
 
     #[test]

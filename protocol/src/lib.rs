@@ -214,6 +214,12 @@ pub enum CapEventKind {
   /// minting a one-shot reply cap into the server at a `call` rendezvous is the
   /// first instance. `parent_cap_id` is the cap it derived from.
   Transferred,
+  /// A capability was revoked — its holding invalidated by `cap_id` (the powerbox
+  /// reclaim). `cap_id` is the revoked holding; `holder` is the process it was
+  /// taken from. A transitive revoke emits one `Revoked` per swept descendant. The
+  /// reclaim half of the grant→use→reclaim lifecycle. (Appended — postcard is
+  /// positional.) See `docs/cap-revocation-design.md`.
+  Revoked,
 }
 
 /// What a [`Frame::CapEvent`]'s capability points at. v0.7b has one object

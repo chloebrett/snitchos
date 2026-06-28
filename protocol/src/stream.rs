@@ -263,6 +263,33 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_a_revoked_cap_event_over_postcard() {
+        // The `Revoked` kind is the newest CapEventKind discriminant (appended
+        // after Granted/Transferred). Encode + decode over postcard so a future
+        // reorder — which would silently break the wire — fails this test.
+        let frame = Frame::CapEvent {
+            kind: CapEventKind::Revoked,
+            cap_id: 77,
+            parent_cap_id: 3,
+            holder: 4,
+            object: CapObject::Endpoint,
+            rights: 0b0010,
+            badge: 0,
+            t: 123,
+            hart_id: 0,
+        };
+        let mut buf = [0u8; 64];
+        let encoded_len = postcard::to_slice(&frame, &mut buf).unwrap().len();
+        let (decoded, _) = try_decode_frame(&buf[..encoded_len]).expect("decode should succeed");
+        assert_eq!(decoded, frame, "Revoked CapEvent survives the wire intact");
+        // And it converts to the owned form (the harness/collector path).
+        assert!(matches!(
+            OwnedFrame::from_borrowed(&frame),
+            OwnedFrame::CapEvent { kind: CapEventKind::Revoked, cap_id: 77, holder: 4, .. },
+        ));
+    }
+
+    #[test]
     fn truncated_returns_unexpected_end() {
         let frame = Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 };
         let mut buf = [0u8; 64];

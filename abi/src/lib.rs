@@ -221,6 +221,15 @@ pub enum Syscall {
     /// the child's task id in `a0` (or `usize::MAX` on refusal — bad range,
     /// oversized image, malformed ELF, or an unheld handle).
     SpawnImage = 26,
+    /// Enumerate the caller's **own** capability table — introspection, not new
+    /// authority (a process may always see what it already holds; ambient like
+    /// [`Self::ClockNow`]). `a0` = pointer in the caller's space to a `[CapDesc; N]`
+    /// buffer, `a1` = `N` (its capacity in entries). The kernel writes up to `N`
+    /// live capabilities as packed [`CapDesc`] records (a *packed hitch* — the
+    /// schema is this ABI, not shipped inline) and returns the **total** live count
+    /// in `a0` (so a too-small buffer is detectable: returned `>` `N`), or
+    /// `usize::MAX` on a bad/unwritable buffer range. Backs the shell's `hold`.
+    CapList = 27,
 }
 
 impl Syscall {
@@ -257,6 +266,7 @@ impl Syscall {
             24 => Some(Self::WaitAny),
             25 => Some(Self::EndpointCreate),
             26 => Some(Self::SpawnImage),
+            27 => Some(Self::CapList),
             _ => None,
         }
     }
@@ -281,6 +291,43 @@ pub mod rights {
     /// May `wait` on a `Notification` — the consumer end (v0.12). Disjoint from
     /// `SIGNAL` so a cap can grant either end or both.
     pub const WAIT: u32 = 0b10_0000;
+}
+
+/// Object-kind discriminants for a [`CapDesc`]'s `kind` field — what sort of
+/// object a capability names. These mirror the variant order of
+/// `protocol::CapObject` (the telemetry-wire encoding); both are positional, so
+/// keep them in step. Note there is no `File` kind: a file capability is a
+/// badged `Endpoint` (`ENDPOINT` with `badge != 0`).
+pub mod object_kind {
+    /// A `TelemetrySink` — may `emit`.
+    pub const TELEMETRY_SINK: u32 = 0;
+    /// A `SpanSink` — may open spans.
+    pub const SPAN_SINK: u32 = 1;
+    /// An IPC `Endpoint` (a badged one is a file or per-object cap).
+    pub const ENDPOINT: u32 = 2;
+    /// A one-shot `Reply` cap held by a server mid-RPC.
+    pub const REPLY: u32 = 3;
+    /// A `Notification`.
+    pub const NOTIFICATION: u32 = 4;
+}
+
+/// One capability in a process's own table, as written by [`Syscall::CapList`] —
+/// a **packed hitch**: positional, with the schema being *this struct* rather
+/// than shipped inline. Field order is deliberately padding-free (all four `u32`s
+/// before the `u64`), so the kernel never copies uninitialized bytes out to
+/// userspace. `kind` is an [`object_kind`] discriminant, `rights` a [`rights`]
+/// bitmask, and `badge` the endpoint badge (`0` unless this names a badged
+/// endpoint, e.g. a file cap). `reserved` is `0` today — room for `cap_id` /
+/// multiplicity later. Userspace `unhitch`es a buffer of these into named
+/// records (the `hold` lift); the kernel and userspace agree on this layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapDesc {
+    pub handle: u32,
+    pub kind: u32,
+    pub rights: u32,
+    pub reserved: u32,
+    pub badge: u64,
 }
 
 /// The number of inline `u64` words a single IPC message carries. The single
@@ -322,6 +369,7 @@ mod tests {
         assert_eq!(Syscall::WaitAny as usize, 24);
         assert_eq!(Syscall::EndpointCreate as usize, 25);
         assert_eq!(Syscall::SpawnImage as usize, 26);
+        assert_eq!(Syscall::CapList as usize, 27);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Exit));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Yield));
@@ -350,6 +398,26 @@ mod tests {
         assert_eq!(Syscall::from_usize(24), Some(Syscall::WaitAny));
         assert_eq!(Syscall::from_usize(25), Some(Syscall::EndpointCreate));
         assert_eq!(Syscall::from_usize(26), Some(Syscall::SpawnImage));
-        assert_eq!(Syscall::from_usize(27), None);
+        assert_eq!(Syscall::from_usize(27), Some(Syscall::CapList));
+        assert_eq!(Syscall::from_usize(28), None);
+    }
+
+    #[test]
+    fn object_kind_discriminants_are_stable() {
+        // Mirror `protocol::CapObject`'s variant order; both ends agree on these.
+        assert_eq!(object_kind::TELEMETRY_SINK, 0);
+        assert_eq!(object_kind::SPAN_SINK, 1);
+        assert_eq!(object_kind::ENDPOINT, 2);
+        assert_eq!(object_kind::REPLY, 3);
+        assert_eq!(object_kind::NOTIFICATION, 4);
+    }
+
+    #[test]
+    fn cap_desc_has_a_padding_free_layout() {
+        // A packed-hitch entry: kernel and userspace agree on this exact shape.
+        // Field order is chosen so there is no implicit padding (so no
+        // uninitialized kernel bytes are ever copied out).
+        assert_eq!(core::mem::size_of::<CapDesc>(), 24);
+        assert_eq!(core::mem::align_of::<CapDesc>(), 8);
     }
 }

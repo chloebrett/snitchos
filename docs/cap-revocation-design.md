@@ -122,7 +122,13 @@ Level 2T is 2 made airtight against onward re-delegation.
      (direct children only; excludes revoked + the `0` sentinel). kernel-core 439 green.
    - The 2T walk itself (cross-table fixpoint over `children_cap_ids` + per-table
      `revoke_by_cap_id`) lives kernel-side in the `Revoke` syscall step.
-2. **protocol:** `CapEventKind::Revoked`; `OwnedFrame` arm; roundtrip test.
+2. ✅ **protocol `CapEventKind::Revoked` landed (2026-06-28):** appended after
+   `Transferred` (positional discriminant = 2); carries the standard `CapEvent`
+   fields (`cap_id` = revoked holding, `holder` = process it was taken from). No
+   `OwnedFrame` arm needed (kind passes through). Postcard encode→decode roundtrip
+   test locks the discriminant. protocol 38 green; collector + itest-harness build.
+   (Kernel build is currently blocked by an *unrelated* in-progress `Syscall::CapList`
+   gap in the dispatch match — the `hold` work — to be fixed separately.)
 3. **kernel:** `Revoke` syscall + cross-process scan + `CapEvent::Revoked` emit +
    `SyscallRefused` on a disallowed revoke. itest: a workload grants → revokes →
    asserts the `Revoked` frame + the victim's next use refused.

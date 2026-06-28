@@ -66,3 +66,46 @@ pub(super) fn handle_mint_badged(frame: &mut TrapFrame) {
         }
     }
 }
+
+/// Enumerate the caller's **own** capability table (`hold`). `a0` = pointer to a
+/// `[CapDesc; N]` buffer in the caller's space, `a1` = `N` (capacity in entries).
+/// Snapshots the live caps via the pure host-tested [`kernel_core::cap::CapTable::describe`],
+/// writes up to `N` packed [`CapDesc`] records out, and returns the **total** live
+/// count in `a0` (so a too-small buffer is detectable: returned `>` `N`), or refuses
+/// with `a0 = u64::MAX` on a bad/unwritable range. Introspection, not authority — so
+/// it is ungated (no cap argument), like `ConsoleRead`/`ClockNow`.
+pub(super) fn handle_cap_list(frame: &mut TrapFrame) {
+    use core::mem::size_of;
+    use protocol::RefusalReason;
+    use snitchos_abi::{CapDesc, Syscall};
+
+    let sc = Syscall::CapList as u8;
+    let Some(proc) = super::current_process_or_refuse(frame, sc) else {
+        return;
+    };
+
+    let ptr = frame.a0 as usize;
+    let capacity = frame.a1 as usize;
+
+    // Snapshot to an owned Vec; the lock drops at the `;` (never held across the
+    // copy). `describe` is non-destructive, so validation can ride on
+    // `copy_to_user` rather than pre-checking.
+    let descs = proc.caps.lock().describe();
+    let total = descs.len();
+    let n = total.min(capacity);
+
+    // The packed-hitch payload: the first `n` entries' bytes. `CapDesc` is
+    // `#[repr(C)]` plain data laid out padding-free, so its byte image is exactly
+    // what userspace `unhitch`es — and no uninitialized padding is exposed.
+    // SAFETY: `descs` holds `total >= n` contiguous initialized `CapDesc`s; reading
+    // `n * size_of::<CapDesc>()` bytes from its start is in-bounds and well-defined
+    // for a `repr(C)` POD type. The slice borrows `descs`, which outlives the copy.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(descs.as_ptr().cast::<u8>(), n * size_of::<CapDesc>())
+    };
+
+    match crate::user::copy_to_user(ptr, bytes) {
+        Some(_) => frame.a0 = total as u64,
+        None => super::refuse(frame, sc, RefusalReason::BadUserRange),
+    }
+}
