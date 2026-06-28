@@ -209,10 +209,17 @@ pub(crate) fn expand(half: u16) -> Option<u32> {
     let quadrant = half & 0b11;
     let funct3 = (half >> 13) & 0b111;
     match (quadrant, funct3) {
+        (0b00, 0b000) => Some(expand_c_addi4spn(half)),
+        (0b00, 0b011) => Some(expand_c_ld(half)),
+        (0b00, 0b111) => Some(expand_c_sd(half)),
         (0b01, 0b000) => Some(expand_c_addi(half)),
         (0b01, 0b010) => Some(expand_c_li(half)),
+        (0b01, 0b011) => expand_c_lui_addi16sp(half),
         (0b01, 0b101) => Some(expand_c_j(half)),
+        (0b01, 0b111) => Some(expand_c_bnez(half)),
+        (0b10, 0b011) => Some(expand_c_ldsp(half)),
         (0b10, 0b100) => Some(expand_cr(half)),
+        (0b10, 0b111) => Some(expand_c_sdsp(half)),
         _ => None,
     }
 }
@@ -263,6 +270,47 @@ fn ebreak_form() -> u32 {
     (priv12::EBREAK << 20) | opcode::SYSTEM // funct3 0 (PRIV)
 }
 
+/// A compressed 3-bit register field (`rd'`/`rs'`) names `x8..x15`.
+fn creg(field: u32) -> u32 {
+    8 + (field & 0x7)
+}
+
+/// Encode `addi rd, rs1, imm` (low 12 bits of `imm` used).
+fn addi_word(rd: u32, rs1: u32, imm: u32) -> u32 {
+    ((imm & 0xfff) << 20) | (rs1 << 15) | (rd << 7) | opcode::OP_IMM
+}
+
+/// `c.addi4spn rd', uimm` -> `addi rd', x2, uimm`. CIW unsigned offset:
+/// `uimm[5:4]`=inst[12:11], `uimm[9:6]`=inst[10:7], `uimm[2]`=inst[6], `uimm[3]`=inst[5].
+fn expand_c_addi4spn(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rd = creg(h >> 2);
+    let uimm = (((h >> 11) & 0x3) << 4)
+        | (((h >> 7) & 0xf) << 6)
+        | (((h >> 6) & 0x1) << 2)
+        | (((h >> 5) & 0x1) << 3);
+    addi_word(rd, 2, uimm)
+}
+
+/// Quadrant 01, funct3 011: `c.addi16sp` when rd == 2, else `c.lui`
+/// (the latter not yet modeled — surfaces via the meta-loop when hit).
+fn expand_c_lui_addi16sp(half: u16) -> Option<u32> {
+    let rd = (u32::from(half) >> 7) & 0x1f;
+    (rd == 2).then(|| expand_c_addi16sp(half))
+}
+
+/// `c.addi16sp sp, nzimm` -> `addi x2, x2, nzimm`. Scaled signed offset:
+/// `nzimm[9]`=inst[12], `[8:7]`=inst[4:3], `[6]`=inst[5], `[5]`=inst[2], `[4]`=inst[6].
+fn expand_c_addi16sp(half: u16) -> u32 {
+    let h = u32::from(half);
+    let nzimm = (((h >> 12) & 1) << 9)
+        | (((h >> 3) & 3) << 7)
+        | (((h >> 5) & 1) << 6)
+        | (((h >> 2) & 1) << 5)
+        | (((h >> 6) & 1) << 4);
+    addi_word(2, 2, sign_extend(nzimm, 10) as u32)
+}
+
 /// `c.j offset` -> `jal x0, offset`.
 fn expand_c_j(half: u16) -> u32 {
     jal_word(0, cj_offset(half))
@@ -280,6 +328,89 @@ fn cj_offset(half: u16) -> u32 {
         | (((h >> 3) & 7) << 1)
         | (((h >> 2) & 1) << 5);
     sign_extend(imm, 12) as u32
+}
+
+/// `c.sdsp rs2, uimm(sp)` -> `sd rs2, uimm(x2)`. CSS unsigned offset:
+/// `uimm[5:3]` = inst[12:10], `uimm[8:6]` = inst[9:7] (already byte-scaled).
+fn expand_c_sdsp(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rs2 = (h >> 2) & 0x1f;
+    let uimm = (((h >> 10) & 0x7) << 3) | (((h >> 7) & 0x7) << 6);
+    store_word(funct3::store::SD, 2, rs2, uimm)
+}
+
+/// `c.ldsp rd, uimm(sp)` -> `ld rd, uimm(x2)`. CI unsigned offset:
+/// `uimm[5]`=inst[12], `uimm[4:3]`=inst[6:5], `uimm[8:6]`=inst[4:2].
+fn expand_c_ldsp(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rd = (h >> 7) & 0x1f;
+    let uimm = (((h >> 12) & 1) << 5) | (((h >> 5) & 3) << 3) | (((h >> 2) & 7) << 6);
+    load_word(funct3::load::LD, rd, 2, uimm)
+}
+
+/// Encode an I-type load `funct3 rd, imm(base)`.
+fn load_word(funct3: u32, rd: u32, base: u32, imm: u32) -> u32 {
+    ((imm & 0xfff) << 20) | (base << 15) | (funct3 << 12) | (rd << 7) | opcode::LOAD
+}
+
+/// `c.ld rd', uimm(rs1')` -> `ld rd', uimm(rs1')`. CL unsigned offset:
+/// `uimm[5:3]`=inst[12:10], `uimm[7:6]`=inst[6:5].
+fn expand_c_ld(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rs1 = creg(h >> 7);
+    let rd = creg(h >> 2);
+    let uimm = (((h >> 10) & 0x7) << 3) | (((h >> 5) & 0x3) << 6);
+    load_word(funct3::load::LD, rd, rs1, uimm)
+}
+
+/// `c.sd rs2', uimm(rs1')` -> `sd rs2', uimm(rs1')`. CS unsigned offset:
+/// `uimm[5:3]`=inst[12:10], `uimm[7:6]`=inst[6:5].
+fn expand_c_sd(half: u16) -> u32 {
+    let h = u32::from(half);
+    let rs1 = creg(h >> 7);
+    let rs2 = creg(h >> 2);
+    let uimm = (((h >> 10) & 0x7) << 3) | (((h >> 5) & 0x3) << 6);
+    store_word(funct3::store::SD, rs1, rs2, uimm)
+}
+
+/// Encode an S-type store `funct3 src, imm(base)`.
+fn store_word(funct3: u32, base: u32, src: u32, imm: u32) -> u32 {
+    (((imm >> 5) & 0x7f) << 25)
+        | (src << 20)
+        | (base << 15)
+        | (funct3 << 12)
+        | ((imm & 0x1f) << 7)
+        | opcode::STORE
+}
+
+/// `c.bnez rs1', offset` -> `bne rs1', x0, offset`.
+fn expand_c_bnez(half: u16) -> u32 {
+    let rs1 = creg(u32::from(half) >> 7);
+    branch_word(funct3::branch::BNE, rs1, 0, cb_offset(half))
+}
+
+/// Sign-extended CB-format branch offset: `offset[8]`=inst[12],
+/// `[4:3]`=inst[11:10], `[7:6]`=inst[6:5], `[2:1]`=inst[4:3], `[5]`=inst[2].
+fn cb_offset(half: u16) -> u32 {
+    let h = u32::from(half);
+    let imm = (((h >> 12) & 1) << 8)
+        | (((h >> 10) & 3) << 3)
+        | (((h >> 5) & 3) << 6)
+        | (((h >> 3) & 3) << 1)
+        | (((h >> 2) & 1) << 5);
+    sign_extend(imm, 9) as u32
+}
+
+/// Encode a B-type branch `funct3 rs1, rs2, imm` from a sign-extended `imm`.
+fn branch_word(funct3: u32, rs1: u32, rs2: u32, imm: u32) -> u32 {
+    (((imm >> 12) & 1) << 31)
+        | (((imm >> 5) & 0x3f) << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (funct3 << 12)
+        | (((imm >> 1) & 0xf) << 8)
+        | (((imm >> 11) & 1) << 7)
+        | opcode::BRANCH
 }
 
 /// Encode `jal rd, imm` (J-type) from a sign-extended `imm`.

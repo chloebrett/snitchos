@@ -1364,6 +1364,100 @@ mod tests {
     }
 
     #[test]
+    fn compressed_sdsp_stores_sp_relative() {
+        // c.sdsp x11, 272(sp) == 0xea2e (captured from the kernel boot)
+        let mut mem = Memory::new(0x2000);
+        mem.write_u16(RAM_BASE, 0xea2e).unwrap();
+        mem.write_u32(RAM_BASE + 2, ld(5, 2, 272)).unwrap(); // ld x5, 272(x2)
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(2, RAM_BASE + 0x100); // sp
+        cpu.set_reg(11, 0xdead_beef_cafe_babe);
+        cpu.step().unwrap(); // c.sdsp
+        cpu.step().unwrap(); // ld
+        assert_eq!(cpu.reg(5), 0xdead_beef_cafe_babe);
+    }
+
+    #[test]
+    fn compressed_addi4spn_computes_sp_offset() {
+        // c.addi4spn x10, sp, 344 == 0xaa8 (captured from the kernel boot)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0xaa8).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(2, 0x4000); // sp
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), 0x4000 + 344);
+        assert_eq!(cpu.pc(), RAM_BASE + 2);
+    }
+
+    #[test]
+    fn compressed_addi16sp_adjusts_sp() {
+        // c.addi16sp sp, -176 == 0x7171 (captured from the kernel boot)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x7171).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(2, 0x4000); // sp
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(2), 0x4000 - 176);
+    }
+
+    #[test]
+    fn compressed_ldsp_loads_sp_relative() {
+        // c.ldsp x10, 16(sp) == 0x6542 (captured from the kernel boot)
+        let mut mem = Memory::new(0x2000);
+        mem.write_u16(RAM_BASE, 0x6542).unwrap();
+        mem.write_u64(RAM_BASE + 0x100 + 16, 0x1122_3344_5566_7788)
+            .unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(2, RAM_BASE + 0x100); // sp
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), 0x1122_3344_5566_7788);
+    }
+
+    #[test]
+    fn compressed_bnez_branches_when_nonzero() {
+        // c.bnez x10, +206 == 0xe579 (captured from the kernel boot)
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0xe579).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(10, 1);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 206); // taken
+
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0xe579).unwrap();
+        let mut cpu = Cpu::new(mem); // x10 == 0
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 2); // not taken
+    }
+
+    #[test]
+    fn compressed_sd_stores_register_relative() {
+        // c.sd x10, 0(x11) == 0xe188 (captured from the kernel boot)
+        let mut mem = Memory::new(0x2000);
+        mem.write_u16(RAM_BASE, 0xe188).unwrap();
+        mem.write_u32(RAM_BASE + 2, ld(5, 11, 0)).unwrap(); // ld x5, 0(x11)
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(11, RAM_BASE + 0x200); // base
+        cpu.set_reg(10, 0xfeed_face_0000_1234);
+        cpu.step().unwrap(); // c.sd
+        cpu.step().unwrap(); // ld
+        assert_eq!(cpu.reg(5), 0xfeed_face_0000_1234);
+    }
+
+    #[test]
+    fn compressed_ld_loads_register_relative() {
+        // c.ld x10, 0(x10) == 0x6108 (captured from the kernel boot)
+        let mut mem = Memory::new(0x2000);
+        mem.write_u16(RAM_BASE, 0x6108).unwrap();
+        mem.write_u64(RAM_BASE + 0x200, 0x0102_0304_0506_0708)
+            .unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(10, RAM_BASE + 0x200);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), 0x0102_0304_0506_0708);
+    }
+
+    #[test]
     fn store_to_uart_produces_console_output() {
         let program = &[
             lui(2, 0x10000),               // x2 = 0x1000_0000 (UART base)
