@@ -3,6 +3,7 @@
 //! Frame emission for newly-registered names is delegated to a
 //! `FrameSink` so the kernel and tests share one code path.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use protocol::{Frame, MetricKind, StringId};
@@ -34,9 +35,25 @@ use crate::sink::FrameSink;
 /// since leaked names are never reclaimed today.)
 pub const INLINE_CAP: usize = 64;
 
-#[derive(Copy, Clone)]
+/// An interned name. Kernel literals (`span!("kernel.boot")`, the `snitchos.*`
+/// metrics) are a bounded, permanent set held as borrowed `&'static`; userspace
+/// names are heap-`Owned` so they can be dropped when their process exits.
+enum InternName {
+    Static(&'static str),
+    Owned(Box<str>),
+}
+
+impl InternName {
+    fn as_str(&self) -> &str {
+        match self {
+            InternName::Static(s) => s,
+            InternName::Owned(b) => b,
+        }
+    }
+}
+
 struct InternEntry {
-    name: &'static str,
+    name: InternName,
     metric_registered: bool,
 }
 
@@ -47,7 +64,7 @@ struct InternEntry {
 pub struct InternTable {
     inline: [Option<InternEntry>; INLINE_CAP],
     inline_len: usize,
-    overflow: Vec<InternEntry>,
+    overflow: Vec<Option<InternEntry>>,
 }
 
 impl Default for InternTable {
@@ -59,7 +76,9 @@ impl Default for InternTable {
 impl InternTable {
     pub const fn new() -> Self {
         Self {
-            inline: [None; INLINE_CAP],
+            // `InternEntry` is no longer `Copy` (it can own a `Box<str>`), so the
+            // `[None; N]` repeat-init won't elaborate; the inline-const form does.
+            inline: [const { None }; INLINE_CAP],
             inline_len: 0,
             overflow: Vec::new(),
         }
@@ -76,16 +95,17 @@ impl InternTable {
                 self.overflow
                     .iter()
                     .enumerate()
-                    .map(|(i, e)| ((INLINE_CAP + i) as u32, e)),
+                    .filter_map(|(i, e)| e.as_ref().map(|e| ((INLINE_CAP + i) as u32, e))),
             )
     }
 
     /// Mutable access to the entry with `id`, across the region boundary.
+    /// `None` for a tombstoned (released) slot as well as an out-of-range id.
     fn entry_mut(&mut self, id: usize) -> Option<&mut InternEntry> {
         if id < INLINE_CAP {
             self.inline[id].as_mut()
         } else {
-            self.overflow.get_mut(id - INLINE_CAP)
+            self.overflow.get_mut(id - INLINE_CAP).and_then(Option::as_mut)
         }
     }
 
@@ -100,8 +120,24 @@ impl InternTable {
             id as u32
         } else {
             let id = INLINE_CAP + self.overflow.len();
-            self.overflow.push(entry);
+            self.overflow.push(Some(entry));
             id as u32
+        }
+    }
+
+    /// Reclaim the name at `id`, dropping its owned bytes and **tombstoning** the
+    /// slot. The id is never reused: `push` only ever appends past the high-water
+    /// mark, so a freed id can't be re-minted to alias a different name (the wire
+    /// identity the collector keys its id→name map on). A released id resolves to
+    /// nothing and stops appearing in new frames. Out-of-range / already-released
+    /// ids are no-ops. Intended for `Owned` (per-process) names on process exit —
+    /// kernel `&'static` literals are permanent and never released.
+    pub fn release(&mut self, id: StringId) {
+        let i = id.0 as usize;
+        if i < INLINE_CAP {
+            self.inline[i] = None;
+        } else if let Some(slot) = self.overflow.get_mut(i - INLINE_CAP) {
+            *slot = None;
         }
     }
 
@@ -112,12 +148,37 @@ impl InternTable {
     /// is the path for runtime-built names (e.g. userspace span names).
     fn lookup_or_insert(&mut self, name: &'static str) -> (StringId, bool) {
         for (id, e) in self.iter() {
-            if e.name.as_ptr() == name.as_ptr() {
+            if e.name.as_str().as_ptr() == name.as_ptr() {
                 return (StringId(id), false);
             }
         }
-        let id = self.push(InternEntry { name, metric_registered: false });
+        let id = self.push(InternEntry {
+            name: InternName::Static(name),
+            metric_registered: false,
+        });
         (StringId(id), true)
+    }
+
+    /// Intern a heap-`Owned` name (a userspace span/metric name), emitting its
+    /// `StringRegister`, and return its id. Unlike [`register_or_lookup`] this
+    /// **always appends** — the caller (a per-process `SpanNameTable` /
+    /// `MetricTable`) has already deduped within its own scope, and the table
+    /// must *not* dedup across processes (that's the name-poisoning boundary).
+    /// The table takes ownership so the name can be dropped via [`release`] when
+    /// the process exits.
+    pub fn register_owned<S: FrameSink>(&mut self, name: Box<str>, sink: &mut S) -> StringId {
+        let id = self.push(InternEntry {
+            name: InternName::Owned(name),
+            metric_registered: false,
+        });
+        let entry = self
+            .entry_mut(id as usize)
+            .expect("the entry was just pushed");
+        sink.emit(&Frame::StringRegister {
+            id: StringId(id),
+            value: entry.name.as_str(),
+        });
+        StringId(id)
     }
 
     /// Look up `name`, allocating a slot + emitting `StringRegister`
@@ -154,7 +215,7 @@ impl InternTable {
     #[must_use]
     pub fn lookup_by_content(&self, name: &str) -> Option<StringId> {
         for (id, e) in self.iter() {
-            if e.name == name {
+            if e.name.as_str() == name {
                 return Some(StringId(id));
             }
         }
@@ -189,9 +250,12 @@ impl InternTable {
         id
     }
 
-    /// Number of distinct names currently held.
+    /// Number of distinct names currently *live* — tombstoned (released) slots
+    /// are excluded, so this drops when a process's names are reclaimed on exit.
+    /// O(n) over the table (n is small, bounded; called ~once per heartbeat for
+    /// the `snitchos.intern.strings_used` metric).
     pub fn count(&self) -> u32 {
-        (self.inline_len + self.overflow.len()) as u32
+        self.iter().count() as u32
     }
 }
 
@@ -375,6 +439,64 @@ mod tests {
         assert_eq!(sink.len(), 2);
         assert!(matches!(decode(&sink.raw()[0]), Frame::StringRegister { .. }));
         assert!(matches!(decode(&sink.raw()[1]), Frame::MetricRegister { .. }));
+    }
+
+    #[test]
+    fn register_owned_interns_a_heap_name_and_resolves_by_content() {
+        // Userspace names are reclaimable: the table *owns* them (`Box<str>`)
+        // rather than holding a `Box::leak`'d `&'static`, so they can later be
+        // dropped on process exit. The owned name registers + resolves exactly
+        // like a borrowed one.
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+
+        let id = table.register_owned(Box::<str>::from("proc.span"), &mut sink);
+
+        assert_eq!(table.lookup_by_content("proc.span"), Some(id));
+        assert_eq!(
+            decode(&sink.raw()[0]),
+            Frame::StringRegister { id, value: "proc.span" },
+        );
+    }
+
+    #[test]
+    fn releasing_a_name_frees_it_and_never_reuses_the_id() {
+        // Process exit reclaims its names. `release` drops the owned bytes and
+        // tombstones the slot — but the id is a wire identity (the collector maps
+        // id→name, frames cite ids), so it must NEVER be reused, or a new name
+        // would silently alias the freed one.
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+
+        let gone = table.register_owned(Box::<str>::from("ephemeral"), &mut sink);
+        table.release(gone);
+
+        assert_eq!(table.lookup_by_content("ephemeral"), None, "released name is gone");
+
+        let fresh = table.register_owned(Box::<str>::from("fresh"), &mut sink);
+        assert_ne!(fresh, gone, "a tombstoned id is never reused");
+    }
+
+    #[test]
+    fn releasing_a_spilled_overflow_name_frees_it_and_drops_the_count() {
+        // Exercises `release` across the region boundary (id >= INLINE_CAP): the
+        // tombstone must land in the heap overflow, not a mis-indexed slot, and
+        // `count` must reflect the freed name. The inline-id test above can't
+        // reach this path.
+        let mut table = InternTable::new();
+        let mut sink = CapturingSink::new();
+        for i in 0..INLINE_CAP {
+            let s: &'static str = Box::leak(format!("filler{i}").into_boxed_str());
+            table.register_or_lookup(s, &mut sink);
+        }
+        let spilled = table.register_owned(Box::<str>::from("spilled.name"), &mut sink);
+        assert!(spilled.0 as usize >= INLINE_CAP, "name must land in overflow");
+        let before = table.count();
+
+        table.release(spilled);
+
+        assert_eq!(table.lookup_by_content("spilled.name"), None);
+        assert_eq!(table.count(), before - 1, "the freed overflow name is uncounted");
     }
 
     #[test]

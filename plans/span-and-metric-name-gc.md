@@ -1,8 +1,26 @@
 # Span- and metric-name GC (reclaim per-process leaked names)
 
-**Status:** Decided (2026-06-26) — **Option A now** (accept + document the bound),
-**Option B later** (reclaim on process exit, folded into the v0.12 Exit/teardown
-reclaim milestone). Not started.
+**Status:** **Option B in progress** (2026-06-28). Option A (document the bound)
+shipped 2026-06-26. Now implementing reclaim-on-exit. Teardown (`reap_task`,
+address-space + caps) already landed in v0.12, so the lifecycle hook exists.
+
+## Increment chain (TDD, each RED→GREEN)
+
+1. **`intern.rs` foundation** — `register_owned(Box<str>)` (table owns the name)
+   + `release(StringId)` (tombstone the slot, drop the bytes, never reuse the id).
+   Inline + overflow both tombstonable; `push` stays monotonic. *Fork-independent.*
+2. **`span_name.rs` / `metric.rs`** — expose the `StringId`s a process owns so
+   teardown can release them. `MetricTable` already holds `Vec<StringId>`;
+   `SpanNameTable` keeps its own `Box<str>` copy (decision below) and exposes ids.
+3. **`tracing.rs`** — userspace names go through `register_owned`; kernel `&'static`
+   literals unchanged. Add `release_names(&[StringId])` (locks `INTERN_TABLE`).
+4. **`sched::reap_task`** — gather the exiting process's span + metric ids, release.
+5. **itest** — a spawn-storm no longer grows the intern table without bound.
+
+**Fork (increment 2):** `SpanNameTable` stores its own `Box<str>` copy rather than
+coupling `resolve` to the intern table — keeps the two kernel-core tables
+independently host-testable. Negligible space (≤16 names/process, both copies freed
+on exit).
 
 ## Why this exists now
 
