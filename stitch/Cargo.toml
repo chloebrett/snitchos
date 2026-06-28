@@ -9,6 +9,9 @@ protocol = { path = "../protocol" }
 # The kernel↔userspace ABI — for the cap object-kind discriminants the `hold`
 # lift (`ObjectKind::from_abi`) maps. `no_std`, no transitive deps; host + target.
 snitchos-abi = { path = "../abi" }
+# The `hitch` value model. `stitch` understands `hitch`, never the reverse:
+# `hitch` is a leaf, so `stitch` owns the `Value` <-> `hitch::Value` bridge.
+hitch = { path = "../hitch" }
 
 # The userspace runtime — only on the SnitchOS target (riscv `target_os =
 # "none"`). Backs the on-target `RuntimeTelemetry`, which routes Stitch's
