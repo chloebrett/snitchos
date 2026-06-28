@@ -28,7 +28,14 @@ mod cause {
     pub const BREAKPOINT: u64 = 3;
     pub const ECALL_FROM_U: u64 = 8;
     pub const ECALL_FROM_S: u64 = 9;
+    /// The top `scause` bit marks an interrupt (vs. an exception).
+    pub const INTERRUPT: u64 = 1 << 63;
+    /// Supervisor timer interrupt code (with [`INTERRUPT`] set).
+    pub const SUPERVISOR_TIMER: u64 = 5;
 }
+
+/// `sie.STIE` — supervisor timer interrupt enable (bit 5).
+const SIE_STIE: u64 = 1 << 5;
 
 /// Sign-extend a 32-bit result to 64 bits (the `.w` instruction convention).
 fn sext32(v: u32) -> u64 {
@@ -234,6 +241,12 @@ impl Cpu {
 
     /// Fetch, decode, and execute one instruction (16- or 32-bit).
     pub fn step(&mut self) -> Result<(), StepError> {
+        // Deliver a pending timer interrupt before fetching: `sepc` then points
+        // at the un-run instruction, so `sret` resumes exactly where we left off.
+        if self.timer_interrupt_pending() {
+            self.take_trap(cause::INTERRUPT | cause::SUPERVISOR_TIMER, 0);
+            return Ok(());
+        }
         let pc_pa = self.translate(self.pc, Access::Fetch)?;
         let half = self.bus.read_u16(pc_pa)?;
         let raw = if is_compressed(half) {
@@ -634,6 +647,25 @@ impl Cpu {
 
     fn csr_write(&mut self, addr: u16, value: u64) {
         self.csr.write(addr, value).expect("modeled trap CSR");
+    }
+
+    /// Whether a supervisor timer interrupt is pending and currently deliverable.
+    /// Sstc raises it once `time` (the retired-instruction clock) reaches
+    /// `stimecmp`; it's taken only when `sie.STIE` is set and either we're in
+    /// U-mode (lower privilege never masks an S-interrupt) or in S-mode with the
+    /// global `sstatus.SIE` enabled.
+    fn timer_interrupt_pending(&self) -> bool {
+        let stimecmp = self.csr.read(addr::STIMECMP).unwrap_or(u64::MAX);
+        if self.instret < stimecmp {
+            return false;
+        }
+        if self.csr_read(addr::SIE) & SIE_STIE == 0 {
+            return false;
+        }
+        match self.privilege {
+            Privilege::User => true,
+            Privilege::Supervisor => self.csr_read(addr::SSTATUS) & sstatus::SIE != 0,
+        }
     }
 
     /// Enter the S-mode trap handler: record the cause, save and mask the
@@ -1373,6 +1405,55 @@ mod tests {
         cpu.step().unwrap();
         assert_eq!(cpu.pc(), RAM_BASE + 0x200);
         assert_eq!(cpu.csr.read(addr::SCAUSE).unwrap(), 3); // breakpoint
+    }
+
+    /// sie.STIE — supervisor timer interrupt enable (bit 5).
+    const STIE: u64 = 1 << 5;
+
+    #[test]
+    fn timer_interrupt_fires_when_time_reaches_stimecmp() {
+        // jal x0, 0 — a self-loop, so without the timer the cpu would spin here.
+        let mut cpu = cpu_with(&[jal(0, 0)]);
+        cpu.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
+        cpu.csr.write(addr::STIMECMP, 0).unwrap(); // deadline 0; time >= 0 at once
+        cpu.csr.write(addr::SIE, STIE).unwrap();
+        cpu.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 0x200); // trapped to stvec
+        assert_eq!(cpu.csr.read(addr::SCAUSE).unwrap(), (1 << 63) | 5); // timer interrupt
+        assert_eq!(cpu.csr.read(addr::SEPC).unwrap(), RAM_BASE); // resume the un-run instr
+    }
+
+    #[test]
+    fn timer_interrupt_is_masked_when_sstatus_sie_clear() {
+        let mut cpu = cpu_with(&[addi(1, 0, 7)]);
+        cpu.csr.write(addr::STIMECMP, 0).unwrap();
+        cpu.csr.write(addr::SIE, STIE).unwrap();
+        // sstatus.SIE left clear: in S-mode the interrupt stays pending, not taken.
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(1), 7); // the instruction ran instead of trapping
+        assert_eq!(cpu.pc(), RAM_BASE + 4);
+    }
+
+    #[test]
+    fn timer_interrupt_needs_the_per_source_enable() {
+        let mut cpu = cpu_with(&[addi(1, 0, 7)]);
+        cpu.csr.write(addr::STIMECMP, 0).unwrap();
+        cpu.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
+        // sie.STIE left clear: the global enable alone doesn't deliver it.
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(1), 7);
+    }
+
+    #[test]
+    fn timer_interrupt_waits_for_the_deadline() {
+        let mut cpu = cpu_with(&[addi(1, 0, 7), addi(2, 0, 9)]);
+        cpu.csr.write(addr::STIMECMP, 5).unwrap(); // five ticks out
+        cpu.csr.write(addr::SIE, STIE).unwrap();
+        cpu.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
+        cpu.step().unwrap(); // instret 0 < 5: runs the instruction, no trap
+        assert_eq!(cpu.reg(1), 7);
+        assert_eq!(cpu.pc(), RAM_BASE + 4);
     }
 
     #[test]

@@ -21,6 +21,9 @@ pub(crate) mod addr {
     pub const STVAL: u16 = 0x143;
     pub const SIP: u16 = 0x144;
     pub const SATP: u16 = 0x180;
+    /// Supervisor timer-compare (Sstc). The hart raises a supervisor timer
+    /// interrupt once `time >= stimecmp`; the kernel arms it via `csrw 0x14d`.
+    pub const STIMECMP: u16 = 0x14d;
 }
 
 /// `sstatus` field masks (the S-mode view of the status register).
@@ -45,6 +48,7 @@ const SUPPORTED: &[u16] = &[
     addr::STVAL,
     addr::SIP,
     addr::SATP,
+    addr::STIMECMP,
 ];
 
 /// A CSR access named an address snemu doesn't model yet.
