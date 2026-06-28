@@ -3,10 +3,6 @@
 //! `CsrError::Unknown` (the meta-loop signal), so they're added on demand
 //! rather than silently reading as zero.
 
-// Built ahead of its consumers (trap entry and the `csr*` instructions — the
-// next slices of Step 5). This allow is removed once those wire the CSR file in.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 /// CSR addresses (`instr[31:20]`), named per the privileged spec. The kernel
@@ -22,6 +18,16 @@ pub(crate) mod addr {
     pub const STVAL: u16 = 0x143;
     pub const SIP: u16 = 0x144;
     pub const SATP: u16 = 0x180;
+}
+
+/// `sstatus` field masks (the S-mode view of the status register).
+pub(crate) mod sstatus {
+    /// Supervisor interrupt enable.
+    pub const SIE: u64 = 1 << 1;
+    /// Supervisor previous interrupt enable (holds SIE across a trap).
+    pub const SPIE: u64 = 1 << 5;
+    /// Supervisor previous privilege (0 = U, 1 = S).
+    pub const SPP: u64 = 1 << 8;
 }
 
 /// The CSR addresses snemu currently models (the S-mode trap set + satp).

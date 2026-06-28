@@ -1,11 +1,24 @@
 //! The hart: register file, program counter, instruction-count clock, and
 //! the fetch/decode/execute `step`. The single API everything tests through.
 
+use crate::csr::{Csr, addr, sstatus};
 use crate::decode::{Instr, funct3, funct7, opcode};
 use crate::mem::{BusError, Memory, RAM_BASE};
 
 /// Size in bytes of a (non-compressed) instruction.
 const INSTR_SIZE: u64 = 4;
+
+/// The privilege mode the hart is executing in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Privilege {
+    User,
+    Supervisor,
+}
+
+/// Set (`on`) or clear (`!on`) the bits of `mask` in `value`.
+fn with_bit(value: u64, mask: u64, on: bool) -> u64 {
+    if on { value | mask } else { value & !mask }
+}
 
 /// Sign-extend a 32-bit result to 64 bits (the `.w` instruction convention).
 fn sext32(v: u32) -> u64 {
@@ -75,18 +88,29 @@ pub struct Cpu {
     x: [u64; 32],
     pc: u64,
     instret: u64,
+    privilege: Privilege,
+    csr: Csr,
     mem: Memory,
 }
 
 impl Cpu {
+    /// A fresh hart, started in S-mode (the privilege the kernel boots in;
+    /// firmware/snemu has already dropped out of M-mode at reset).
     #[must_use]
     pub fn new(mem: Memory) -> Self {
         Self {
             x: [0; 32],
             pc: RAM_BASE,
             instret: 0,
+            privilege: Privilege::Supervisor,
+            csr: Csr::new(),
             mem,
         }
+    }
+
+    #[must_use]
+    pub fn privilege(&self) -> Privilege {
+        self.privilege
     }
 
     #[must_use]
@@ -358,6 +382,55 @@ impl Cpu {
         self.pc = self.pc.wrapping_add(INSTR_SIZE);
     }
 
+    /// Read a CSR that the trap machinery is guaranteed to model.
+    fn csr_read(&self, addr: u16) -> u64 {
+        // The S-mode trap CSRs are always in the supported set, so this read
+        // cannot fail.
+        self.csr.read(addr).expect("modeled trap CSR")
+    }
+
+    fn csr_write(&mut self, addr: u16, value: u64) {
+        self.csr.write(addr, value).expect("modeled trap CSR");
+    }
+
+    /// Enter the S-mode trap handler: record the cause, save and mask the
+    /// interrupt-enable state, record the interrupted privilege, and jump to
+    /// `stvec` (direct mode).
+    fn take_trap(&mut self, cause: u64, tval: u64) {
+        let sie = self.csr_read(addr::SSTATUS) & sstatus::SIE != 0;
+        let from_supervisor = self.privilege == Privilege::Supervisor;
+        let mut status = self.csr_read(addr::SSTATUS);
+        status = with_bit(status, sstatus::SPIE, sie); // SPIE <- SIE
+        status = with_bit(status, sstatus::SIE, false); // SIE <- 0
+        status = with_bit(status, sstatus::SPP, from_supervisor); // SPP <- prev mode
+        self.csr_write(addr::SSTATUS, status);
+
+        self.csr_write(addr::SEPC, self.pc);
+        self.csr_write(addr::SCAUSE, cause);
+        self.csr_write(addr::STVAL, tval);
+        self.privilege = Privilege::Supervisor;
+        self.pc = self.csr_read(addr::STVEC) & !0b11; // direct mode; ignore mode bits
+    }
+
+    /// Return from an S-mode trap: restore the interrupt-enable and privilege
+    /// from the `SPIE`/`SPP` fields and resume at `sepc`.
+    fn sret(&mut self) {
+        let spie = self.csr_read(addr::SSTATUS) & sstatus::SPIE != 0;
+        let to_supervisor = self.csr_read(addr::SSTATUS) & sstatus::SPP != 0;
+        let mut status = self.csr_read(addr::SSTATUS);
+        status = with_bit(status, sstatus::SIE, spie); // SIE <- SPIE
+        status = with_bit(status, sstatus::SPIE, true); // SPIE <- 1
+        status = with_bit(status, sstatus::SPP, false); // SPP <- U
+        self.csr_write(addr::SSTATUS, status);
+
+        self.privilege = if to_supervisor {
+            Privilege::Supervisor
+        } else {
+            Privilege::User
+        };
+        self.pc = self.csr_read(addr::SEPC);
+    }
+
     fn unimplemented(&self, instr: u32) -> StepError {
         StepError::Unimplemented {
             pc: self.pc,
@@ -369,6 +442,7 @@ impl Cpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::csr::{addr, sstatus};
     use crate::decode::{ALT_OP_BIT, funct3, funct7, opcode};
     use crate::mem::{Memory, RAM_BASE};
 
@@ -916,6 +990,47 @@ mod tests {
         assert_eq!(run_rrr(divuw, 5, 0), u64::MAX); // 0xffff_ffff sign-extended
         assert_eq!(run_rrr(remw, (-20_i64) as u64, 6), (-2_i64) as u64);
         assert_eq!(run_rrr(remuw, 20, 6), 2);
+    }
+
+    #[test]
+    fn take_trap_enters_the_supervisor_handler() {
+        const HANDLER: u64 = RAM_BASE + 0x100;
+        const TRAP_PC: u64 = RAM_BASE + 0x40;
+        const ILLEGAL_INSTRUCTION: u64 = 2;
+        let mut cpu = Cpu::new(Memory::new(0x1000));
+        cpu.csr.write(addr::STVEC, HANDLER).unwrap();
+        cpu.csr.write(addr::SSTATUS, sstatus::SIE).unwrap(); // interrupts enabled
+        cpu.set_pc(TRAP_PC);
+
+        cpu.take_trap(ILLEGAL_INSTRUCTION, 0xbad);
+
+        assert_eq!(cpu.pc(), HANDLER);
+        assert_eq!(cpu.csr.read(addr::SEPC).unwrap(), TRAP_PC);
+        assert_eq!(cpu.csr.read(addr::SCAUSE).unwrap(), ILLEGAL_INSTRUCTION);
+        assert_eq!(cpu.csr.read(addr::STVAL).unwrap(), 0xbad);
+        let s = cpu.csr.read(addr::SSTATUS).unwrap();
+        assert_eq!(s & sstatus::SIE, 0, "SIE cleared on trap");
+        assert_ne!(s & sstatus::SPIE, 0, "SPIE holds prior SIE");
+        assert_ne!(s & sstatus::SPP, 0, "SPP records the interrupted S-mode");
+        assert_eq!(cpu.privilege(), Privilege::Supervisor);
+    }
+
+    #[test]
+    fn sret_restores_state_and_returns() {
+        const RETURN_PC: u64 = RAM_BASE + 0x80;
+        let mut cpu = Cpu::new(Memory::new(0x1000));
+        cpu.csr.write(addr::SEPC, RETURN_PC).unwrap();
+        // Mid-trap state: SPIE=1, SPP=0 (trapped from U-mode), SIE=0.
+        cpu.csr.write(addr::SSTATUS, sstatus::SPIE).unwrap();
+
+        cpu.sret();
+
+        assert_eq!(cpu.pc(), RETURN_PC);
+        assert_eq!(cpu.privilege(), Privilege::User); // SPP was U
+        let s = cpu.csr.read(addr::SSTATUS).unwrap();
+        assert_ne!(s & sstatus::SIE, 0, "SIE restored from SPIE");
+        assert_ne!(s & sstatus::SPIE, 0, "SPIE set to 1");
+        assert_eq!(s & sstatus::SPP, 0, "SPP cleared to U");
     }
 
     #[test]
