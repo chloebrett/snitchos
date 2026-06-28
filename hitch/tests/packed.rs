@@ -1,9 +1,10 @@
-//! The **packed** encoding: positional bytes driven by a `TypeSchema`, carrying
-//! only data — no field names, no variant names, no type tags (the schema
-//! supplies all of those). It must round-trip against its schema, be smaller
-//! than the self-describing form, reject values that don't conform, and — the
-//! interop guarantee — produce byte-for-byte what postcard produces for the
-//! equivalent Rust type, so a Rust ELF stage and a Hitch value meet on the wire.
+//! The **packed** encoding: positional, fixed-width little-endian bytes driven by
+//! a `TypeSchema`, carrying only data — no field names, no variant names, no type
+//! tags (the schema supplies all of those). It must round-trip against its schema,
+//! be smaller than the self-describing form, reject values that don't conform,
+//! and — the interop guarantee — be byte-identical to the `repr(C)` in-memory
+//! image of the equivalent Rust type, which is what lets the POD fast-path
+//! transmute it.
 
 use hitch::{hitch, hitch_packed, unhitch_packed, TypeSchema, Value};
 
@@ -71,6 +72,7 @@ fn packed_is_smaller_than_self_describing() {
 fn each_scalar_packs_and_round_trips() {
     let cases = [
         (TypeSchema::Bool, Value::Bool(true)),
+        (TypeSchema::Bool, Value::Bool(false)),
         (TypeSchema::I64, Value::I64(-3)),
         (TypeSchema::U64, Value::U64(42)),
         (TypeSchema::F64, Value::F64(1.5)),
@@ -104,36 +106,28 @@ fn unpacking_rejects_trailing_bytes() {
 }
 
 #[test]
-fn packed_bytes_match_postcard_of_the_equivalent_rust_type() {
-    #[derive(serde::Serialize)]
-    struct Reading {
-        name: String,
-        count: i64,
-    }
-    let rust = postcard::to_allocvec(&Reading {
-        name: "hi".into(),
-        count: -3,
-    })
-    .expect("postcard serializes the struct");
-
+fn packed_is_the_fixed_width_c_abi_image() {
+    // An all-scalar, no-padding `repr(C)` struct's packed form is exactly its
+    // in-memory byte image: fields contiguous, each little-endian, no varint and
+    // no names. That equality is what makes the POD transmute fast-path sound.
     let schema = TypeSchema::Product {
-        type_name: "Reading".into(),
+        type_name: "Point".into(),
         fields: vec![
-            (Some("name".into()), TypeSchema::Str),
-            (Some("count".into()), TypeSchema::I64),
+            (Some("x".into()), TypeSchema::I64),
+            (Some("y".into()), TypeSchema::U64),
         ],
     };
     let value = Value::Product {
-        type_name: "Reading".into(),
+        type_name: "Point".into(),
         fields: vec![
-            (Some("name".into()), Value::Str("hi".into())),
-            (Some("count".into()), Value::I64(-3)),
+            (Some("x".into()), Value::I64(-3)),
+            (Some("y".into()), Value::U64(7)),
         ],
     };
 
-    assert_eq!(
-        hitch_packed(&value, &schema).expect("packs"),
-        rust,
-        "a packed Product must match postcard of the equivalent struct"
-    );
+    let mut image = Vec::new();
+    image.extend_from_slice(&(-3i64).to_le_bytes());
+    image.extend_from_slice(&7u64.to_le_bytes());
+
+    assert_eq!(hitch_packed(&value, &schema).expect("packs"), image);
 }

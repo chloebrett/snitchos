@@ -30,17 +30,22 @@ Value ::= Scalar(Bool | I64 | U64 | F64 | Str | Bytes)
 
 `protocol::Frame` is a `Sum`; a Rust `struct` is a `Product`; Stitch's
 `DataValue { type_name, variant, fields: [(Option<String>, Value)] }` is already
-this shape. One model; **two encodings, both just `postcard`:**
+this shape. One model; **two encodings with different jobs and different
+mechanisms:**
 
-- **self-describing** — postcard the `Value` itself (it carries names) → any
-  consumer can `unhitch` it into a named record. *Married to its schema.* Bigger.
-- **packed** — postcard the domain value positionally against a *known* schema
-  (the schema lives once, in the program's interface manifest). Small; needs the
-  schema to `unhitch`.
+- **self-describing** (`hitch`/`unhitch`) — postcard the `Value` itself (it carries
+  names) → any consumer can `unhitch` it into a named record with no prior schema.
+  *Married to its schema.* The dynamic / cross-process / renderer path. Bigger.
+- **packed** (`hitch_packed`/`unhitch_packed`) — positional, **fixed-width
+  little-endian** bytes against a *known* schema (the schema lives once, in the
+  program's interface manifest). Byte-identical to the `repr(C)` in-memory image of
+  the equivalent Rust type, so a no-padding **POD** struct can be *transmuted*, not
+  serialized — the syscall-return / same-machine path. Small; needs the schema.
 
-No new codec, no CBOR: it's postcard at two levels. (A bespoke encoding — to make
-capability handles and span context first-class scalar kinds — is a deliberate
-later fork, not a v1 requirement.)
+Self-describing rides postcard (convenience, never transmuted); packed is
+hand-rolled fixed-width C-ABI (transmutable, predictable size, language-neutral — a
+C or asm consumer reads a struct, where nobody outside Rust speaks postcard). See
+`docs/typed-processes-and-the-data-model-design.md` §2.
 
 ## Why Hitch is its own thing
 
@@ -60,10 +65,11 @@ that come together nowhere else justify it:
    process's typed I/O — and capability handles / span context are first-class (or
    reserved to become so). The format and the authority/trace model are one
    substrate.
-3. **One model, two encodings, picked by trust — both free.** Self-describing for
+3. **One model, two encodings, picked by job.** Self-describing (postcard) for
    generic/dynamic consumers (the table renderer, `frames`, a `.st` peer); packed
-   for statically-paired stages — and both are postcard, already in the tree (even
-   in the kernel via `protocol`), so Hitch adds nothing new to build.
+   (fixed-width C-ABI) for statically-paired stages and syscall returns, where a
+   no-padding POD type transmutes with zero copy and a caller can size its buffer
+   by element count.
 
 ## Similar to / different from
 
@@ -73,7 +79,7 @@ that come together nowhere else justify it:
 | **Cap'n Proto** | The closest relative: a schema-based canonical format from the **object-capability** lineage (promise pipelining). Same spirit — caps + typed messages. | Cap'n Proto is zero-copy/arena with its **own schema language + codegen**. Hitch derives schemas from the *native* Rust/Stitch types, targets `no_std`-tiny, and its capabilities are **kernel caps + the `uses` row**, not interface-embedded caps. |
 | **Protobuf** | Schema-driven; the *packed* encoding is positional/compact like proto; schema kept apart from data. | proto needs a separate **`.proto` IDL + codegen toolchain** and isn't self-describing on the wire (field numbers). Hitch has **no IDL** (schema = the program's own types) and a self-describing mode too. |
 | **Avro** | "Schema travels with the data" — Hitch's packed-payload + schema-in-the-manifest is Avro-shaped. | Avro ships the schema in the **data file header**. Hitch puts it in the **executable's interface manifest** (the typed process signature), binding the format to the process/capability model. |
-| **CBOR / MessagePack** | Self-describing binary; an algebraic-ish scalar/seq/map model — Hitch's self-describing mode is CBOR-like in spirit. | CBOR has no first-class **named products/sums with a declared schema**, no capability/telemetry scalar kinds, and no "schema in the program" story. Hitch is narrower and OS-specific (and v1 just uses postcard, not CBOR). |
+| **CBOR / MessagePack** | Self-describing binary; an algebraic-ish scalar/seq/map model — Hitch's self-describing mode is CBOR-like in spirit. | CBOR has no first-class **named products/sums with a declared schema**, no capability/telemetry scalar kinds, and no "schema in the program" story. Hitch is narrower and OS-specific (its self-describing mode rides postcard, not CBOR; packed is fixed-width C-ABI). |
 | **WASM component model / WIT** | A component declares typed imports/exports as an **interface in a file** — Hitch's typed-process manifest is WIT-shaped, and SnitchOS has a WASM direction it converges with. | WIT is an IDL + ABI for WASM components. Hitch is the **value model under SnitchOS's native processes** (Stitch programs *and* Rust ELFs) and adds **capabilities** to the interface (the `uses` row) — the thing WIT lacks. |
 | **JSON** | Self-describing; the mental model of "values carry their shape." | JSON loses type distinctions (no sums, no bytes, int/float ambiguity), is text/bloaty, and schema-less. Hitch is typed, binary, and schema-carrying. |
 
