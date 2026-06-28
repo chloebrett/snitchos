@@ -62,5 +62,9 @@ fn main() -> ExitCode {
     }
 
     print!("{}", String::from_utf8_lossy(cpu.uart_output()));
+    eprintln!(
+        "snemu: virtio-console transmitted {} telemetry bytes",
+        cpu.virtio_tx_output().len()
+    );
     ExitCode::SUCCESS
 }

@@ -36,6 +36,11 @@ impl Bus {
         self.uart.output()
     }
 
+    /// Bytes the virtio-console has transmitted (the telemetry frame stream).
+    pub(crate) fn virtio_tx_output(&self) -> &[u8] {
+        self.virtio.tx_output()
+    }
+
     /// RAM, for the page-table walker (PTEs always live in physical memory).
     pub(crate) fn ram(&self) -> &Memory {
         &self.ram
@@ -95,6 +100,11 @@ impl Bus {
     pub(crate) fn write_u32(&mut self, addr: u64, value: u32) -> Result<(), BusError> {
         if Virtio::in_window(addr) {
             self.virtio.write(addr, value);
+            if Virtio::is_notify(addr) {
+                // A queue notify hands the device control: drain the TX ring
+                // from guest RAM and publish the used ring back into it.
+                self.virtio.service_tx(&mut self.ram);
+            }
             return Ok(());
         }
         match uart_offset(addr) {

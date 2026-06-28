@@ -189,6 +189,12 @@ impl Cpu {
         self.bus.uart_output()
     }
 
+    /// Bytes the virtio-console has transmitted (the decoded telemetry stream).
+    #[must_use]
+    pub fn virtio_tx_output(&self) -> &[u8] {
+        self.bus.virtio_tx_output()
+    }
+
     /// The current `satp` value (for diagnostics).
     #[must_use]
     pub fn satp(&self) -> u64 {

@@ -4,7 +4,9 @@
 //! define. The orphan rule forbids implementing `From`/`TryFrom` *on*
 //! `hitch::Value` from this crate, so the conversions are free functions.
 
-use crate::ast::{Item, Type};
+use alloc::collections::{BTreeMap, BTreeSet};
+
+use crate::ast::{Field, Item, Type};
 use crate::prelude::*;
 use crate::value::{DataValue, RuntimeError, Value};
 
@@ -104,13 +106,43 @@ fn from_hitch_fields(
         .collect()
 }
 
+/// The `prod`/`sum` type declarations a program defines, indexed by name — what
+/// the type bridge resolves a named user type against. Parse-on-demand: built from
+/// the program's own `Item`s, not the eval-time registry.
+pub struct TypeDefs<'a> {
+    by_name: BTreeMap<&'a str, &'a Item>,
+}
+
+impl<'a> TypeDefs<'a> {
+    /// Index the `prod`/`sum` declarations among `items`.
+    #[must_use]
+    pub fn from_items(items: &'a [Item]) -> Self {
+        let by_name = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Prod { name, .. } | Item::Sum { name, .. } => Some((name.as_str(), item)),
+                _ => None,
+            })
+            .collect();
+        Self { by_name }
+    }
+}
+
 /// Bridge a Stitch type annotation into a [`hitch::TypeSchema`] — the type-level
 /// twin of [`to_hitch`]. A typed-process manifest's `in`/`out` schemas come from
-/// this (a stage's `main(x: T) -> U`). Scalars and `List<T>` map; user prod/sum
-/// types are a later increment (they need the type registry). `Func`, the
-/// self-type `@`, tuples, and unknown names are **not marshallable** across a
-/// process boundary — an `Err`, never a silent wrong shape.
-pub fn type_to_schema(ty: &Type) -> Result<hitch::TypeSchema, RuntimeError> {
+/// this (a stage's `main(x: T) -> U`). Maps scalars, `List<T>`, and the program's
+/// own monomorphic `prod`/`sum` types (resolved through `defs`). **Not
+/// marshallable** (an `Err`, never a silent wrong shape): `Func`, the self-type
+/// `@`, tuples, generic types, recursive types, and unknown names.
+pub fn type_to_schema(ty: &Type, defs: &TypeDefs) -> Result<hitch::TypeSchema, RuntimeError> {
+    schema_of(ty, defs, &mut BTreeSet::new())
+}
+
+fn schema_of(
+    ty: &Type,
+    defs: &TypeDefs,
+    visiting: &mut BTreeSet<String>,
+) -> Result<hitch::TypeSchema, RuntimeError> {
     use hitch::TypeSchema;
     match ty {
         Type::Name { name, args } => match (name.as_str(), args.as_slice()) {
@@ -118,7 +150,8 @@ pub fn type_to_schema(ty: &Type) -> Result<hitch::TypeSchema, RuntimeError> {
             ("Float", []) => Ok(TypeSchema::F64),
             ("Bool", []) => Ok(TypeSchema::Bool),
             ("Str", []) => Ok(TypeSchema::Str),
-            ("List", [elem]) => Ok(TypeSchema::Seq(Box::new(type_to_schema(elem)?))),
+            ("List", [elem]) => Ok(TypeSchema::Seq(Box::new(schema_of(elem, defs, visiting)?))),
+            (user, []) => user_schema(user, defs, visiting),
             _ => Err(RuntimeError::new(format!("type `{name}` is not marshallable"))),
         },
         Type::Func { .. } => {
@@ -127,6 +160,67 @@ pub fn type_to_schema(ty: &Type) -> Result<hitch::TypeSchema, RuntimeError> {
         Type::Tuple(_) => Err(RuntimeError::new("a tuple type is not yet marshallable")),
         Type::SelfType => Err(RuntimeError::new("the self-type `@` cannot be marshalled")),
     }
+}
+
+/// Resolve a named user type: a `prod` → a [`hitch::TypeSchema::Product`], a `sum`
+/// → a `Sum` (each variant a `Product` of its fields). Generic types are rejected
+/// (v1 is monomorphic); the `visiting` set breaks cycles so a recursive type
+/// errors rather than looping forever.
+fn user_schema(
+    name: &str,
+    defs: &TypeDefs,
+    visiting: &mut BTreeSet<String>,
+) -> Result<hitch::TypeSchema, RuntimeError> {
+    use hitch::TypeSchema;
+    let item = defs
+        .by_name
+        .get(name)
+        .copied()
+        .ok_or_else(|| RuntimeError::new(format!("type `{name}` is not marshallable")))?;
+    if !visiting.insert(name.into()) {
+        return Err(RuntimeError::new(format!(
+            "recursive type `{name}` is not marshallable"
+        )));
+    }
+    let schema = match item {
+        Item::Prod { name: tn, generics, fields, .. } if generics.is_empty() => {
+            Ok(TypeSchema::Product {
+                type_name: tn.clone(),
+                fields: fields_schema(fields, defs, visiting)?,
+            })
+        }
+        Item::Sum { name: tn, generics, variants, .. } if generics.is_empty() => {
+            let variants = variants
+                .iter()
+                .map(|variant| {
+                    Ok((
+                        variant.name.clone(),
+                        TypeSchema::Product {
+                            type_name: tn.clone(),
+                            fields: fields_schema(&variant.fields, defs, visiting)?,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>, RuntimeError>>()?;
+            Ok(TypeSchema::Sum { type_name: tn.clone(), variants })
+        }
+        _ => Err(RuntimeError::new(format!(
+            "generic type `{name}` is not marshallable"
+        ))),
+    };
+    visiting.remove(name);
+    schema
+}
+
+fn fields_schema(
+    fields: &[Field],
+    defs: &TypeDefs,
+    visiting: &mut BTreeSet<String>,
+) -> Result<Vec<(Option<String>, hitch::TypeSchema)>, RuntimeError> {
+    fields
+        .iter()
+        .map(|field| Ok((field.name.clone(), schema_of(&field.ty, defs, visiting)?)))
+        .collect()
 }
 
 /// Derive a [`hitch::Manifest`] from a program's `main` — its typed-process
@@ -150,6 +244,9 @@ pub fn manifest_of_main(items: &[Item]) -> Result<hitch::Manifest, RuntimeError>
         })
         .ok_or_else(|| RuntimeError::new("no `main` function to derive a manifest from"))?;
 
+    // Resolve `main`'s types against the program's own `prod`/`sum` declarations.
+    let defs = TypeDefs::from_items(items);
+
     let input = match params.as_slice() {
         [] => None,
         [param] => {
@@ -157,7 +254,7 @@ pub fn manifest_of_main(items: &[Item]) -> Result<hitch::Manifest, RuntimeError>
                 .ty
                 .as_ref()
                 .ok_or_else(|| RuntimeError::new("a stage `main`'s input parameter must be typed"))?;
-            Some(type_to_schema(ty)?)
+            Some(type_to_schema(ty, &defs)?)
         }
         _ => {
             return Err(RuntimeError::new(
@@ -169,14 +266,14 @@ pub fn manifest_of_main(items: &[Item]) -> Result<hitch::Manifest, RuntimeError>
     let ret = ret
         .as_ref()
         .ok_or_else(|| RuntimeError::new("a stage `main` must declare its return type"))?;
-    let output = type_to_schema(ret)?;
+    let output = type_to_schema(ret, &defs)?;
 
     Ok(hitch::Manifest { input, output, uses: uses.clone() })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{from_hitch, to_hitch, type_to_schema};
+    use super::{from_hitch, to_hitch, type_to_schema, TypeDefs};
     use crate::ast::Type;
     use crate::prelude::*;
     use crate::value::{DataValue, Value};
@@ -185,19 +282,30 @@ mod tests {
         Type::Name { name: name.to_string(), args }
     }
 
+    /// Bridge `ty` with no user types in scope (scalars / `List` / error cases).
+    fn schema(ty: &Type) -> Result<hitch::TypeSchema, crate::value::RuntimeError> {
+        type_to_schema(ty, &TypeDefs::from_items(&[]))
+    }
+
+    /// Bridge `ty` against the `prod`/`sum` declarations in `src`.
+    fn schema_in(src: &str, ty: &Type) -> Result<hitch::TypeSchema, crate::value::RuntimeError> {
+        let items = crate::parser::parse_program(src).expect("test program parses");
+        type_to_schema(ty, &TypeDefs::from_items(&items))
+    }
+
     #[test]
     fn scalar_types_bridge_to_their_hitch_shape() {
-        assert_eq!(type_to_schema(&named("Int", vec![])).unwrap(), hitch::TypeSchema::I64);
-        assert_eq!(type_to_schema(&named("Float", vec![])).unwrap(), hitch::TypeSchema::F64);
-        assert_eq!(type_to_schema(&named("Bool", vec![])).unwrap(), hitch::TypeSchema::Bool);
-        assert_eq!(type_to_schema(&named("Str", vec![])).unwrap(), hitch::TypeSchema::Str);
+        assert_eq!(schema(&named("Int", vec![])).unwrap(), hitch::TypeSchema::I64);
+        assert_eq!(schema(&named("Float", vec![])).unwrap(), hitch::TypeSchema::F64);
+        assert_eq!(schema(&named("Bool", vec![])).unwrap(), hitch::TypeSchema::Bool);
+        assert_eq!(schema(&named("Str", vec![])).unwrap(), hitch::TypeSchema::Str);
     }
 
     #[test]
     fn a_list_type_bridges_to_a_seq_of_the_element_shape() {
         let list = named("List", vec![named("Int", vec![])]);
         assert_eq!(
-            type_to_schema(&list).unwrap(),
+            schema(&list).unwrap(),
             hitch::TypeSchema::Seq(Box::new(hitch::TypeSchema::I64))
         );
     }
@@ -206,12 +314,70 @@ mod tests {
     fn a_function_type_is_not_marshallable() {
         let int = named("Int", vec![]);
         let f = Type::Func { param: Box::new(int.clone()), ret: Box::new(int) };
-        assert!(type_to_schema(&f).is_err());
+        assert!(schema(&f).is_err());
     }
 
     #[test]
     fn an_unknown_type_name_is_not_marshallable_yet() {
-        assert!(type_to_schema(&named("Widget", vec![])).is_err());
+        assert!(schema(&named("Widget", vec![])).is_err());
+    }
+
+    #[test]
+    fn a_prod_type_resolves_to_a_product_of_its_fields() {
+        let s = schema_in("prod Point(x: Int, y: Int)", &named("Point", vec![])).expect("schema");
+        assert_eq!(
+            s,
+            hitch::TypeSchema::Product {
+                type_name: "Point".into(),
+                fields: vec![
+                    (Some("x".into()), hitch::TypeSchema::I64),
+                    (Some("y".into()), hitch::TypeSchema::I64),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn a_sum_type_resolves_to_a_sum_of_variant_products() {
+        let s = schema_in("sum Shape = Circle(r: Int) | Empty", &named("Shape", vec![]))
+            .expect("schema");
+        assert_eq!(
+            s,
+            hitch::TypeSchema::Sum {
+                type_name: "Shape".into(),
+                variants: vec![
+                    (
+                        "Circle".into(),
+                        hitch::TypeSchema::Product {
+                            type_name: "Shape".into(),
+                            fields: vec![(Some("r".into()), hitch::TypeSchema::I64)],
+                        },
+                    ),
+                    (
+                        "Empty".into(),
+                        hitch::TypeSchema::Product { type_name: "Shape".into(), fields: vec![] },
+                    ),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn a_recursive_type_is_not_marshallable() {
+        assert!(schema_in("prod Node(next: Node)", &named("Node", vec![])).is_err());
+    }
+
+    #[test]
+    fn a_generic_prod_is_not_marshallable() {
+        // A *concrete* field, so the only reason to reject is the generic parameter
+        // (a generic field like `value: T` would fail to resolve anyway, not
+        // isolating the generics check).
+        assert!(schema_in("prod Box<T>(value: Int)", &named("Box", vec![])).is_err());
+    }
+
+    #[test]
+    fn a_generic_sum_is_not_marshallable() {
+        assert!(schema_in("sum Opt<T> = Has(v: Int) | Nope", &named("Opt", vec![])).is_err());
     }
 
     fn manifest(src: &str) -> Result<hitch::Manifest, crate::value::RuntimeError> {
@@ -258,6 +424,20 @@ mod tests {
             .expect("manifest");
         assert_eq!(m.input, Some(hitch::TypeSchema::I64));
         assert_eq!(m.output, hitch::TypeSchema::Str);
+    }
+
+    #[test]
+    fn the_manifest_resolves_a_user_type_declared_in_the_program() {
+        // `main`'s input is a `prod` the same program defines — the extractor must
+        // resolve it through the program's own declarations.
+        let m = manifest("prod Pt(x: Int)  main(p: Pt) -> Int = 0").expect("manifest");
+        assert_eq!(
+            m.input,
+            Some(hitch::TypeSchema::Product {
+                type_name: "Pt".into(),
+                fields: vec![(Some("x".into()), hitch::TypeSchema::I64)],
+            })
+        );
     }
 
     fn data(type_name: &str, variant: &str, fields: Vec<(Option<String>, Value)>) -> Value {

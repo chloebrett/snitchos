@@ -48,7 +48,7 @@ kernel submits its first TX frame and **spins polling `used.idx`** (which never
 advances without layer 2) — an infinite poll, i.e. snemu runs to the step limit
 rather than faulting. That hang is the layer-2 trigger.
 
-### Layer 2 — virtqueue / descriptor ring
+### Layer 2 — virtqueue / descriptor ring  ✅ SHIPPED (2026-06-28)
 
 On a `QUEUE_NOTIFY` write for the TX queue, walk the queue the driver
 configured: read `avail.idx` / `avail.ring` from guest RAM (the device reads DMA
@@ -56,6 +56,13 @@ memory directly through the bus), follow each descriptor chain (`addr`/`len`/
 `next`) to pull out the transmitted bytes, then advance `used.idx` / write a
 `used.ring` entry so the driver's poll (`used_advanced`) completes. The ring
 addresses are PAs the driver wrote during layer 1.
+
+Implemented in `snemu/src/virtio.rs` (`service_tx` + `drain_chain`, chain walk
+bounded by `qsize`); the bus calls `service_tx(&mut ram)` when `is_notify(addr)`.
+Captured bytes accumulate in `Virtio::output`, exposed via `Cpu::virtio_tx_output`
+and reported by `main`. Result: the kernel boots past the TX hang to its
+heartbeat and transmits **2102 telemetry bytes**; new stop is `stimecmp` (CSR
+`0x14d`, the sstc timer — `Clock::arm`), a separate timer/CLINT milestone.
 
 ### Layer 3 — output sink + differential oracle
 
