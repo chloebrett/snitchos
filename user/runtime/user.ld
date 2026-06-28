@@ -17,6 +17,13 @@ SECTIONS {
     *(.rodata .rodata*)
     *(.srodata .srodata*)
   } > ram
+  /* The `#[entry(in, out, uses)]` manifest note. KEEP so `--gc-sections` can't
+   * drop it; named outside `.note.*` so the discard below doesn't swallow it.
+   * The seed step reads these bytes from the ELF to populate the `user.iface`
+   * xattr. (Loadable today for simplicity; a non-alloc section is a refinement.) */
+  .snitch.iface : {
+    KEEP(*(.snitch.iface))
+  } > ram
   .data : {
     *(.data .data*)
     *(.sdata .sdata*)

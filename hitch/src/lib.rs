@@ -293,6 +293,208 @@ impl Schema for String {
     const SCHEMA: ConstSchema = ConstSchema::Str;
 }
 
+/// Fixed byte size of the `.note.snitch.iface` manifest note. A manifest larger
+/// than this is a **compile error** (the const encoder indexes past the buffer) —
+/// the right failure; bump this if a real interface needs more.
+pub const MANIFEST_BYTES: usize = 1024;
+
+/// The const-constructible form of a [`Manifest`]: built from [`ConstSchema`] +
+/// `&'static` data so it can be `const`-encoded into a `#[link_section]` static by
+/// [`encode_manifest`]. `#[entry(in, out, uses)]` builds one of these.
+pub struct ConstManifest {
+    pub input: Option<ConstSchema>,
+    pub output: ConstSchema,
+    pub uses: &'static [&'static str],
+}
+
+const fn put_tag(tag: u8, buf: &mut [u8], pos: usize) -> usize {
+    buf[pos] = tag;
+    pos + 1
+}
+
+const fn put_u32(n: u32, buf: &mut [u8], pos: usize) -> usize {
+    let b = n.to_le_bytes();
+    buf[pos] = b[0];
+    buf[pos + 1] = b[1];
+    buf[pos + 2] = b[2];
+    buf[pos + 3] = b[3];
+    pos + 4
+}
+
+const fn put_str(s: &str, buf: &mut [u8], pos: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut pos = put_u32(bytes.len() as u32, buf, pos);
+    let mut i = 0;
+    while i < bytes.len() {
+        buf[pos] = bytes[i];
+        pos += 1;
+        i += 1;
+    }
+    pos
+}
+
+const fn put_opt_str(name: Option<&str>, buf: &mut [u8], pos: usize) -> usize {
+    match name {
+        Some(s) => {
+            let pos = put_tag(1, buf, pos);
+            put_str(s, buf, pos)
+        }
+        None => put_tag(0, buf, pos),
+    }
+}
+
+const fn put_schema(schema: &ConstSchema, buf: &mut [u8], pos: usize) -> usize {
+    match schema {
+        ConstSchema::Bool => put_tag(0, buf, pos),
+        ConstSchema::I8 => put_tag(1, buf, pos),
+        ConstSchema::I16 => put_tag(2, buf, pos),
+        ConstSchema::I32 => put_tag(3, buf, pos),
+        ConstSchema::I64 => put_tag(4, buf, pos),
+        ConstSchema::U8 => put_tag(5, buf, pos),
+        ConstSchema::U16 => put_tag(6, buf, pos),
+        ConstSchema::U32 => put_tag(7, buf, pos),
+        ConstSchema::U64 => put_tag(8, buf, pos),
+        ConstSchema::F32 => put_tag(9, buf, pos),
+        ConstSchema::F64 => put_tag(10, buf, pos),
+        ConstSchema::Str => put_tag(11, buf, pos),
+        ConstSchema::Bytes => put_tag(12, buf, pos),
+        ConstSchema::Seq(inner) => {
+            let pos = put_tag(13, buf, pos);
+            put_schema(inner, buf, pos)
+        }
+        ConstSchema::Product { type_name, fields } => {
+            let pos = put_tag(14, buf, pos);
+            let mut pos = put_str(type_name, buf, pos);
+            pos = put_u32(fields.len() as u32, buf, pos);
+            let mut i = 0;
+            while i < fields.len() {
+                pos = put_opt_str(fields[i].0, buf, pos);
+                pos = put_schema(&fields[i].1, buf, pos);
+                i += 1;
+            }
+            pos
+        }
+        ConstSchema::Sum { type_name, variants } => {
+            let pos = put_tag(15, buf, pos);
+            let mut pos = put_str(type_name, buf, pos);
+            pos = put_u32(variants.len() as u32, buf, pos);
+            let mut i = 0;
+            while i < variants.len() {
+                pos = put_str(variants[i].0, buf, pos);
+                pos = put_schema(&variants[i].1, buf, pos);
+                i += 1;
+            }
+            pos
+        }
+    }
+}
+
+/// Encode a [`ConstManifest`] into the fixed-size note: a 4-byte little-endian
+/// payload length, the payload, then zero padding to [`MANIFEST_BYTES`]. `const`,
+/// so it can initialize a `#[link_section]` static directly.
+#[must_use]
+pub const fn encode_manifest(manifest: &ConstManifest) -> [u8; MANIFEST_BYTES] {
+    let mut buf = [0u8; MANIFEST_BYTES];
+    let mut pos = 4;
+    pos = match &manifest.input {
+        Some(schema) => {
+            let pos = put_tag(1, &mut buf, pos);
+            put_schema(schema, &mut buf, pos)
+        }
+        None => put_tag(0, &mut buf, pos),
+    };
+    pos = put_schema(&manifest.output, &mut buf, pos);
+    pos = put_u32(manifest.uses.len() as u32, &mut buf, pos);
+    let mut i = 0;
+    while i < manifest.uses.len() {
+        pos = put_str(manifest.uses[i], &mut buf, pos);
+        i += 1;
+    }
+    let prefix = ((pos - 4) as u32).to_le_bytes();
+    buf[0] = prefix[0];
+    buf[1] = prefix[1];
+    buf[2] = prefix[2];
+    buf[3] = prefix[3];
+    buf
+}
+
+fn read_manifest_str(cur: &mut Cursor) -> Result<String, Error> {
+    let len = cur.u32()?;
+    let bytes = cur.take(len)?;
+    core::str::from_utf8(bytes)
+        .map(Into::into)
+        .map_err(|_| Error::SchemaMismatch)
+}
+
+fn read_manifest_opt_str(cur: &mut Cursor) -> Result<Option<String>, Error> {
+    match cur.array::<1>()?[0] {
+        0 => Ok(None),
+        1 => Ok(Some(read_manifest_str(cur)?)),
+        _ => Err(Error::SchemaMismatch),
+    }
+}
+
+fn read_manifest_schema(cur: &mut Cursor) -> Result<TypeSchema, Error> {
+    let schema = match cur.array::<1>()?[0] {
+        0 => TypeSchema::Bool,
+        1 => TypeSchema::I8,
+        2 => TypeSchema::I16,
+        3 => TypeSchema::I32,
+        4 => TypeSchema::I64,
+        5 => TypeSchema::U8,
+        6 => TypeSchema::U16,
+        7 => TypeSchema::U32,
+        8 => TypeSchema::U64,
+        9 => TypeSchema::F32,
+        10 => TypeSchema::F64,
+        11 => TypeSchema::Str,
+        12 => TypeSchema::Bytes,
+        13 => TypeSchema::Seq(Box::new(read_manifest_schema(cur)?)),
+        14 => {
+            let type_name = read_manifest_str(cur)?;
+            let count = cur.u32()?;
+            let mut fields = Vec::new();
+            for _ in 0..count {
+                let name = read_manifest_opt_str(cur)?;
+                fields.push((name, read_manifest_schema(cur)?));
+            }
+            TypeSchema::Product { type_name, fields }
+        }
+        15 => {
+            let type_name = read_manifest_str(cur)?;
+            let count = cur.u32()?;
+            let mut variants = Vec::new();
+            for _ in 0..count {
+                let name = read_manifest_str(cur)?;
+                variants.push((name, read_manifest_schema(cur)?));
+            }
+            TypeSchema::Sum { type_name, variants }
+        }
+        _ => return Err(Error::SchemaMismatch),
+    };
+    Ok(schema)
+}
+
+/// Decode a `.note.snitch.iface` note (as written by [`encode_manifest`]) back
+/// into a runtime [`Manifest`] — what the host seed step does to populate the
+/// `user.iface` xattr. The trailing zero padding is ignored.
+pub fn decode_manifest(bytes: &[u8]) -> Result<Manifest, Error> {
+    let mut cur = Cursor { bytes };
+    cur.u32()?; // payload length: framing only — the body below is self-delimiting
+    let input = match cur.array::<1>()?[0] {
+        0 => None,
+        1 => Some(read_manifest_schema(&mut cur)?),
+        _ => return Err(Error::SchemaMismatch),
+    };
+    let output = read_manifest_schema(&mut cur)?;
+    let uses_count = cur.u32()?;
+    let mut uses = Vec::new();
+    for _ in 0..uses_count {
+        uses.push(read_manifest_str(&mut cur)?);
+    }
+    Ok(Manifest { input, output, uses })
+}
+
 /// The Plain-Old-Data primitive: [`Pod`], the zero-copy [`pod_bytes`], and
 /// `#[derive(Pod)]` all live in the alloc-free [`hitch_pod`] leaf (so the `abi`
 /// crate can use them without the value model). Re-exported here so `hitch` users

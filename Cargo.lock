@@ -461,6 +461,7 @@ name = "hello"
 version = "0.0.1"
 dependencies = [
  "fs-proto",
+ "hitch",
  "snitchos-std",
  "snitchos-user",
  "stitch",
