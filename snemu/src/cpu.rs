@@ -62,9 +62,18 @@ mod funct3 {
 /// funct7 bit 5 (`instr[30]`): selects sub-vs-add and arithmetic-vs-logical shift.
 const ALT_OP_BIT: u32 = 0x4000_0000;
 
+/// Size in bytes of a (non-compressed) instruction.
+const INSTR_SIZE: u64 = 4;
+
 /// Sign-extend a 32-bit result to 64 bits (the `.w` instruction convention).
 fn sext32(v: u32) -> u64 {
     i64::from(v as i32) as u64
+}
+
+/// Sign-extend the low `bits` of `value` to 64 bits.
+fn sign_extend(value: u32, bits: u32) -> u64 {
+    let shift = 32 - bits;
+    i64::from((value << shift) as i32 >> shift) as u64
 }
 
 /// Why a `step` could not complete.
@@ -135,7 +144,7 @@ impl Instr {
             | ((i >> 7) & 1) << 11
             | ((i >> 25) & 0x3f) << 5
             | ((i >> 8) & 0xf) << 1;
-        i64::from((imm as i32) << 19 >> 19) as u64
+        sign_extend(imm, 13)
     }
 
     /// Sign-extended J-type jump offset (bit 0 always 0).
@@ -145,14 +154,14 @@ impl Instr {
             | ((i >> 12) & 0xff) << 12
             | ((i >> 20) & 1) << 11
             | ((i >> 21) & 0x3ff) << 1;
-        i64::from((imm as i32) << 11 >> 11) as u64
+        sign_extend(imm, 21)
     }
 
     /// Sign-extended S-type store offset.
     fn s_imm(self) -> u64 {
         let i = self.0;
         let imm = ((i >> 25) & 0x7f) << 5 | ((i >> 7) & 0x1f);
-        i64::from((imm as i32) << 20 >> 20) as u64
+        sign_extend(imm, 12)
     }
 
     fn is_alt_op(self) -> bool {
@@ -226,12 +235,12 @@ impl Cpu {
         match instr.opcode() {
             opcode::LUI => {
                 self.set_reg(instr.rd(), instr.u_imm());
-                self.pc = self.pc.wrapping_add(4);
+                self.advance();
                 Ok(())
             }
             opcode::AUIPC => {
                 self.set_reg(instr.rd(), self.pc.wrapping_add(instr.u_imm()));
-                self.pc = self.pc.wrapping_add(4);
+                self.advance();
                 Ok(())
             }
             opcode::OP_IMM => self.op_imm(instr),
@@ -272,7 +281,7 @@ impl Cpu {
             _ => return Err(self.unimplemented(instr.0)),
         };
         self.set_reg(instr.rd(), value);
-        self.pc = self.pc.wrapping_add(4);
+        self.advance();
         Ok(())
     }
 
@@ -294,7 +303,7 @@ impl Cpu {
             _ => return Err(self.unimplemented(instr.0)),
         };
         self.set_reg(instr.rd(), value);
-        self.pc = self.pc.wrapping_add(4);
+        self.advance();
         Ok(())
     }
 
@@ -311,7 +320,7 @@ impl Cpu {
             _ => return Err(self.unimplemented(instr.0)),
         };
         self.set_reg(instr.rd(), value);
-        self.pc = self.pc.wrapping_add(4);
+        self.advance();
         Ok(())
     }
 
@@ -329,7 +338,7 @@ impl Cpu {
             _ => return Err(self.unimplemented(instr.0)),
         };
         self.set_reg(instr.rd(), value);
-        self.pc = self.pc.wrapping_add(4);
+        self.advance();
         Ok(())
     }
 
@@ -349,21 +358,21 @@ impl Cpu {
         self.pc = if take {
             self.pc.wrapping_add(instr.b_imm())
         } else {
-            self.pc.wrapping_add(4)
+            self.pc.wrapping_add(INSTR_SIZE)
         };
         Ok(())
     }
 
     /// JAL: link `pc+4` into rd, jump to `pc + offset`.
     fn jal(&mut self, instr: Instr) {
-        self.set_reg(instr.rd(), self.pc.wrapping_add(4));
+        self.set_reg(instr.rd(), self.pc.wrapping_add(INSTR_SIZE));
         self.pc = self.pc.wrapping_add(instr.j_imm());
     }
 
     /// JALR: link `pc+4` into rd, jump to `(rs1 + offset) & !1`.
     fn jalr(&mut self, instr: Instr) {
         let target = self.x[instr.rs1()].wrapping_add(instr.i_imm()) & !1;
-        self.set_reg(instr.rd(), self.pc.wrapping_add(4));
+        self.set_reg(instr.rd(), self.pc.wrapping_add(INSTR_SIZE));
         self.pc = target;
     }
 
@@ -381,7 +390,7 @@ impl Cpu {
             _ => return Err(self.unimplemented(instr.0)),
         };
         self.set_reg(instr.rd(), value);
-        self.pc = self.pc.wrapping_add(4);
+        self.advance();
         Ok(())
     }
 
@@ -396,8 +405,13 @@ impl Cpu {
             funct3::store::SD => self.mem.write_u64(addr, value)?,
             _ => return Err(self.unimplemented(instr.0)),
         }
-        self.pc = self.pc.wrapping_add(4);
+        self.advance();
         Ok(())
+    }
+
+    /// Move the program counter to the next sequential instruction.
+    fn advance(&mut self) {
+        self.pc = self.pc.wrapping_add(INSTR_SIZE);
     }
 
     fn unimplemented(&self, instr: u32) -> StepError {
