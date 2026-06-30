@@ -27,15 +27,31 @@ fn with_bit(value: u64, mask: u64, on: bool) -> u64 {
 mod cause {
     pub const BREAKPOINT: u64 = 3;
     pub const ECALL_FROM_U: u64 = 8;
-    pub const ECALL_FROM_S: u64 = 9;
+    // S-mode ecall (code 9) never reaches the kernel: snemu services it as an
+    // SBI firmware call, so there's no `ECALL_FROM_S` trap.
     /// The top `scause` bit marks an interrupt (vs. an exception).
     pub const INTERRUPT: u64 = 1 << 63;
+    /// Supervisor software interrupt code (with [`INTERRUPT`] set).
+    pub const SUPERVISOR_SOFTWARE: u64 = 1;
     /// Supervisor timer interrupt code (with [`INTERRUPT`] set).
     pub const SUPERVISOR_TIMER: u64 = 5;
 }
 
-/// `sie.STIE` — supervisor timer interrupt enable (bit 5).
+/// `sie.STIE` / `sie.SSIE` — supervisor timer / software interrupt enables.
 const SIE_STIE: u64 = 1 << 5;
+const SIE_SSIE: u64 = 1 << 1;
+/// `sip.SSIP` — supervisor software interrupt pending (set by an IPI, cleared
+/// by the kernel's `csrc sip`).
+const SIP_SSIP: u64 = 1 << 1;
+
+/// SBI calls the kernel makes from S-mode (snemu plays firmware).
+mod sbi {
+    /// Send-IPI extension id (`"sPI"`), function 0 = `sbi_send_ipi`.
+    pub const EID_IPI: u64 = 0x0073_5049;
+    pub const FID_SEND_IPI: u64 = 0;
+    pub const SUCCESS: i64 = 0;
+    pub const ERR_NOT_SUPPORTED: i64 = -2;
+}
 
 /// Sign-extend a 32-bit result to 64 bits (the `.w` instruction convention).
 fn sext32(v: u32) -> u64 {
@@ -241,10 +257,10 @@ impl Cpu {
 
     /// Fetch, decode, and execute one instruction (16- or 32-bit).
     pub fn step(&mut self) -> Result<(), StepError> {
-        // Deliver a pending timer interrupt before fetching: `sepc` then points
-        // at the un-run instruction, so `sret` resumes exactly where we left off.
-        if self.timer_interrupt_pending() {
-            self.take_trap(cause::INTERRUPT | cause::SUPERVISOR_TIMER, 0);
+        // Deliver a pending interrupt before fetching: `sepc` then points at the
+        // un-run instruction, so `sret` resumes exactly where we left off.
+        if let Some(cause) = self.pending_interrupt() {
+            self.take_trap(cause, 0);
             return Ok(());
         }
         let pc_pa = self.translate(self.pc, Access::Fetch)?;
@@ -610,11 +626,12 @@ impl Cpu {
         }
         match instr.funct12() {
             priv12::ECALL => {
-                let cause = match self.privilege {
-                    Privilege::User => cause::ECALL_FROM_U,
-                    Privilege::Supervisor => cause::ECALL_FROM_S,
-                };
-                self.take_trap(cause, 0);
+                // U-mode ecall is a syscall — trap to the kernel. S-mode ecall is
+                // an SBI call — snemu services it as firmware (no M-mode here).
+                match self.privilege {
+                    Privilege::User => self.take_trap(cause::ECALL_FROM_U, 0),
+                    Privilege::Supervisor => self.sbi_call(),
+                }
                 Ok(())
             }
             priv12::EBREAK => {
@@ -647,6 +664,58 @@ impl Cpu {
 
     fn csr_write(&mut self, addr: u16, value: u64) {
         self.csr.write(addr, value).expect("modeled trap CSR");
+    }
+
+    /// The highest-priority deliverable supervisor interrupt, if any. RISC-V
+    /// orders software above timer; both sit below external (which snemu has no
+    /// source for yet).
+    fn pending_interrupt(&self) -> Option<u64> {
+        if self.software_interrupt_pending() {
+            return Some(cause::INTERRUPT | cause::SUPERVISOR_SOFTWARE);
+        }
+        if self.timer_interrupt_pending() {
+            return Some(cause::INTERRUPT | cause::SUPERVISOR_TIMER);
+        }
+        None
+    }
+
+    /// Whether a supervisor software interrupt (an IPI) is pending and currently
+    /// deliverable: `sip.SSIP` raised, `sie.SSIE` set, and the privilege gate met.
+    fn software_interrupt_pending(&self) -> bool {
+        if self.csr_read(addr::SIP) & SIP_SSIP == 0 {
+            return false;
+        }
+        if self.csr_read(addr::SIE) & SIE_SSIE == 0 {
+            return false;
+        }
+        match self.privilege {
+            Privilege::User => true,
+            Privilege::Supervisor => self.csr_read(addr::SSTATUS) & sstatus::SIE != 0,
+        }
+    }
+
+    /// Service an S-mode `ecall` as an SBI firmware call: dispatch on the
+    /// extension/function ids in `a7`/`a6`, write `a0` = error / `a1` = value,
+    /// and step past the `ecall` (S-mode execution continues; no trap).
+    fn sbi_call(&mut self) {
+        let (error, value) = match (self.x[17], self.x[16]) {
+            (sbi::EID_IPI, sbi::FID_SEND_IPI) => self.sbi_send_ipi(self.x[10], self.x[11]),
+            _ => (sbi::ERR_NOT_SUPPORTED, 0),
+        };
+        self.set_reg(10, error as u64);
+        self.set_reg(11, value);
+        self.advance();
+    }
+
+    /// `sbi_send_ipi(hart_mask, hart_mask_base)`: raise a software interrupt on
+    /// each targeted hart. snemu is single-hart (mhartid 0), so the only target
+    /// that exists is hart 0 — raise `sip.SSIP` on ourself when the mask selects it.
+    fn sbi_send_ipi(&mut self, hart_mask: u64, hart_mask_base: u64) -> (i64, u64) {
+        if hart_mask_base == 0 && hart_mask & 1 != 0 {
+            let sip = self.csr_read(addr::SIP) | SIP_SSIP;
+            self.csr_write(addr::SIP, sip);
+        }
+        (sbi::SUCCESS, 0)
     }
 
     /// Whether a supervisor timer interrupt is pending and currently deliverable.
@@ -1389,13 +1458,40 @@ mod tests {
     }
 
     #[test]
-    fn ecall_traps_to_the_supervisor_handler() {
-        let mut cpu = cpu_with(&[ecall()]);
+    fn s_mode_ecall_is_serviced_as_sbi_not_trapped() {
+        // snemu plays the firmware: an S-mode ecall is an SBI call, not a trap to
+        // the kernel's own handler. An unknown EID returns SBI_ERR_NOT_SUPPORTED
+        // (-2) in a0 and execution continues past the ecall.
+        let mut cpu = cpu_with(&[ecall(), addi(1, 0, 7)]);
         cpu.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
+        cpu.set_reg(17, 0xdead); // a7 = unrecognized EID
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 4); // advanced; did NOT trap to stvec
+        assert_eq!(cpu.reg(10) as i64, -2); // a0 = SBI_ERR_NOT_SUPPORTED
+    }
+
+    #[test]
+    fn sbi_send_ipi_raises_a_software_interrupt_for_this_hart() {
+        let mut cpu = cpu_with(&[ecall()]);
+        cpu.set_reg(17, 0x735049); // a7 = EID "sPI" (send_ipi extension)
+        cpu.set_reg(16, 0); // a6 = FID 0
+        cpu.set_reg(10, 1); // a0 = hart_mask, bit 0 -> hart 0 (us)
+        cpu.set_reg(11, 0); // a1 = hart_mask_base
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), 0); // a0 = SBI_SUCCESS
+        assert_ne!(cpu.csr.read(addr::SIP).unwrap() & (1 << 1), 0); // SSIP raised
+    }
+
+    #[test]
+    fn pending_software_interrupt_traps_to_the_handler() {
+        let mut cpu = cpu_with(&[addi(1, 0, 7)]);
+        cpu.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
+        cpu.csr.write(addr::SIP, 1 << 1).unwrap(); // SSIP pending
+        cpu.csr.write(addr::SIE, 1 << 1).unwrap(); // SSIE enabled
+        cpu.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
         cpu.step().unwrap();
         assert_eq!(cpu.pc(), RAM_BASE + 0x200);
-        assert_eq!(cpu.csr.read(addr::SEPC).unwrap(), RAM_BASE);
-        assert_eq!(cpu.csr.read(addr::SCAUSE).unwrap(), 9); // ECALL from S-mode
+        assert_eq!(cpu.csr.read(addr::SCAUSE).unwrap(), (1 << 63) | 1); // software int
     }
 
     #[test]
