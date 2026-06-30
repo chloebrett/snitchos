@@ -1,5 +1,5 @@
 //! Demonstrates `#[entry]`'s manifest clause: the typed `~>`-stage interface is
-//! const-encoded into a `.note.snitch.iface` ELF note (the seed step lifts that
+//! const-encoded into a `.snitch.iface` ELF note (the seed step lifts that
 //! into the program's `user.iface` xattr). This stage reads a `Row`, produces a
 //! `u64`, and declares it uses `ConsoleOut`. It just yields forever — the point
 //! is the section, not the behavior.

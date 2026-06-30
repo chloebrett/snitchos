@@ -14,7 +14,7 @@ publish = false
 [dependencies]
 snitchos-user = { path = "../runtime" }
 # The value model — `#[entry(in, out, uses)]` emits a `hitch`-encoded manifest
-# into a `.note.snitch.iface` ELF note (the `manifest_demo` bin).
+# into a `.snitch.iface` ELF note (the `manifest_demo` bin).
 hitch = { path = "../../hitch" }
 # The Stitch interpreter (no_std + alloc) — the `stitch_repl` bin runs it on the
 # metal. Only that bin links it; other bins don't reference it.
