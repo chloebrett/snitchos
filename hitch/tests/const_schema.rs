@@ -16,10 +16,33 @@ fn primitives_have_a_const_schema() {
 }
 
 #[test]
-fn the_runtime_schema_projects_the_const() {
-    // `schema()` is a default that converts `SCHEMA` to the alloc `TypeSchema`,
-    // so existing runtime callers keep working with no per-type code.
+fn every_primitive_projects_to_its_runtime_schema() {
+    // `schema()` is a default that converts `SCHEMA` to the alloc `TypeSchema`
+    // (exercising every scalar arm of `to_type_schema`), so existing runtime
+    // callers keep working with no per-type code.
+    assert_eq!(<bool as Schema>::schema(), TypeSchema::Bool);
+    assert_eq!(<i8 as Schema>::schema(), TypeSchema::I8);
+    assert_eq!(<i16 as Schema>::schema(), TypeSchema::I16);
+    assert_eq!(<i32 as Schema>::schema(), TypeSchema::I32);
+    assert_eq!(<i64 as Schema>::schema(), TypeSchema::I64);
     assert_eq!(<u8 as Schema>::schema(), TypeSchema::U8);
+    assert_eq!(<u16 as Schema>::schema(), TypeSchema::U16);
+    assert_eq!(<u32 as Schema>::schema(), TypeSchema::U32);
+    assert_eq!(<u64 as Schema>::schema(), TypeSchema::U64);
+    assert_eq!(<f32 as Schema>::schema(), TypeSchema::F32);
+    assert_eq!(<f64 as Schema>::schema(), TypeSchema::F64);
+    assert_eq!(<String as Schema>::schema(), TypeSchema::Str);
+}
+
+#[test]
+fn const_schema_projects_bytes_and_seq() {
+    // `Bytes` and `Seq` have no primitive `Schema` impl, so cover their
+    // `to_type_schema` arms directly.
+    assert_eq!(ConstSchema::Bytes.to_type_schema(), TypeSchema::Bytes);
+    assert_eq!(
+        ConstSchema::Seq(&ConstSchema::U64).to_type_schema(),
+        TypeSchema::Seq(Box::new(TypeSchema::U64))
+    );
 }
 
 #[cfg(feature = "derive")]

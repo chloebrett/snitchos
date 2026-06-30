@@ -293,7 +293,7 @@ impl Schema for String {
     const SCHEMA: ConstSchema = ConstSchema::Str;
 }
 
-/// Fixed byte size of the `.note.snitch.iface` manifest note. A manifest larger
+/// Fixed byte size of the `.snitch.iface` manifest note. A manifest larger
 /// than this is a **compile error** (the const encoder indexes past the buffer) —
 /// the right failure; bump this if a real interface needs more.
 pub const MANIFEST_BYTES: usize = 1024;
@@ -314,10 +314,11 @@ const fn put_tag(tag: u8, buf: &mut [u8], pos: usize) -> usize {
 
 const fn put_u32(n: u32, buf: &mut [u8], pos: usize) -> usize {
     let b = n.to_le_bytes();
-    buf[pos] = b[0];
-    buf[pos + 1] = b[1];
-    buf[pos + 2] = b[2];
-    buf[pos + 3] = b[3];
+    let mut i = 0;
+    while i < 4 {
+        buf[pos + i] = b[i];
+        i += 1;
+    }
     pos + 4
 }
 
@@ -475,12 +476,13 @@ fn read_manifest_schema(cur: &mut Cursor) -> Result<TypeSchema, Error> {
     Ok(schema)
 }
 
-/// Decode a `.note.snitch.iface` note (as written by [`encode_manifest`]) back
+/// Decode a `.snitch.iface` note (as written by [`encode_manifest`]) back
 /// into a runtime [`Manifest`] — what the host seed step does to populate the
 /// `user.iface` xattr. The trailing zero padding is ignored.
 pub fn decode_manifest(bytes: &[u8]) -> Result<Manifest, Error> {
+    let total = bytes.len();
     let mut cur = Cursor { bytes };
-    cur.u32()?; // payload length: framing only — the body below is self-delimiting
+    let payload_len = cur.u32()?;
     let input = match cur.array::<1>()?[0] {
         0 => None,
         1 => Some(read_manifest_schema(&mut cur)?),
@@ -491,6 +493,11 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Manifest, Error> {
     let mut uses = Vec::new();
     for _ in 0..uses_count {
         uses.push(read_manifest_str(&mut cur)?);
+    }
+    // The 4-byte prefix must match what the body actually consumed — a guard
+    // against a corrupt or truncated note (and the prefix's reason to exist).
+    if total - cur.bytes.len() - 4 != payload_len {
+        return Err(Error::SchemaMismatch);
     }
     Ok(Manifest { input, output, uses })
 }
