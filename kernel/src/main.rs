@@ -225,7 +225,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         }
     }
 
-    println!("I am alive — entering heartbeat");
+    println!("I am alive");
 
     // Register the metric set early — BEFORE timer init, spawns, or
     // anything else that might compete with us for CPU. Each
@@ -607,5 +607,6 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // higher-half VAs in earlier increments.
     unsafe { mmu::unmap_identity() };
 
+    println!("entering heartbeat");
     heartbeat::run(metrics)
 }
