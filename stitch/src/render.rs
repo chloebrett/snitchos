@@ -208,6 +208,14 @@ fn is_variant_with_fields(value: &Value) -> bool {
     matches!(value, Value::Data(data) if data.variant != data.type_name && !data.fields.is_empty())
 }
 
+/// Whether `value` is a `Data` holding at least one field that is *itself* a
+/// record/variant — the case that trees the whole thing rather than flattening
+/// the nested record into a single cell.
+fn has_nested_record(value: &Value) -> bool {
+    matches!(value, Value::Data(data)
+        if data.fields.iter().any(|(_, v)| matches!(v, Value::Data(_))))
+}
+
 /// A `Data`'s tree label: a sum variant shows its *variant* name; a product
 /// (nested inside a tree) shows its *type* name.
 fn node_label(data: &DataValue) -> String {
@@ -248,12 +256,16 @@ fn tree_lines(value: &Value) -> Vec<String> {
 }
 
 /// Render `value` for the terminal against `style`: a homogeneous record *list*
-/// becomes a table; a single product record a key/value table; a sum variant an
-/// indented tree; anything else falls back to [`Value::display`].
+/// becomes a table; a record holding a nested record, or a sum variant, an
+/// indented tree; a *flat* product record a key/value table; anything else falls
+/// back to [`Value::display`].
 #[must_use]
 pub fn render_with(value: &Value, style: &dyn TableStyle) -> String {
     if let Some(table) = as_table(value) {
         return style.render(&table);
+    }
+    if has_nested_record(value) {
+        return tree(value);
     }
     if let Some(kv) = as_kv(value) {
         return style.render(&kv);
@@ -418,6 +430,40 @@ Ok
             fields: vec![],
         }));
         assert_eq!(render(&none), "None");
+    }
+
+    #[test]
+    fn a_list_column_holding_nested_records_still_tables_and_flattens_them() {
+        // Nested-record trees are scoped to a *single* record; inside a table
+        // column the nested record stays flattened (multi-line cells are future
+        // work), so the list still renders as a box table.
+        let inner = variant("P", "P", vec![(Some("x"), Value::Int(1))]);
+        let list = Value::List(vec![record(vec![("k", inner)])].into());
+        let out = render(&list);
+        assert!(out.starts_with('┌'), "{out}"); // a box table, not a tree
+        assert!(out.contains("P(x: 1)"), "{out}"); // the nested record stayed flat
+    }
+
+    #[test]
+    fn a_product_containing_a_nested_record_trees_instead_of_kv_tabling() {
+        // A flat product kv-tables; once it holds a nested record the whole thing
+        // trees, so the nested structure isn't flattened into one cell.
+        let endpoint = variant(
+            "Endpoint",
+            "Endpoint",
+            vec![(Some("id"), Value::Int(3)), (Some("badge"), Value::Int(7))],
+        );
+        let cap =
+            variant("Cap", "Cap", vec![(Some("handle"), Value::Int(0)), (Some("kind"), endpoint)]);
+        assert_eq!(
+            render(&cap),
+            "\
+Cap
+├─ handle: 0
+└─ kind: Endpoint
+   ├─ id: 3
+   └─ badge: 7"
+        );
     }
 
     #[test]
