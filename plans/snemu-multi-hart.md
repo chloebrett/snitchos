@@ -70,17 +70,22 @@ so the ~94 existing `cpu.rs` unit tests keep their API (`Cpu::new`, `cpu.step()`
    step) — `rdtime`/`stimecmp` read it instead of per-hart `instret`; the `Cpu`
    wrapper sets `cycle = instret` to preserve single-hart behavior. Test: a
    2-hart machine advances only hart 0 while hart 1 is `Stopped`.
-3. **`hart_start` (SBI HSM).** Service EID `0x48534D` in the `Machine`: wake the
-   target hart at `start_addr` (physical, MMU off), `a0 = hartid`, `a1 = opaque`,
-   `state = Running`; return `SBI_SUCCESS` (or error if already running). Test:
-   after the call, hart 1 runs from the entry with the right registers.
-4. **Cross-hart `send_ipi`.** Target the *other* hart's `sip.SSIP` (not just
-   self). Test: hart 0's `send_ipi(1<<1, 0)` makes hart 1 take a software
-   interrupt.
-5. **2-hart DTB + real boot.** Re-dump `virt.dtb` with `-smp 2`; wire `main` to a
-   2-hart `Machine`. Run the kernel: it should pass `hart_start`, hart 1 runs
-   `_secondary_start`, sets `SECONDARY_READY`, and hart 0 proceeds to the
-   heartbeat loop (`entering heartbeat` should finally print).
+3. **`hart_start` (SBI HSM)** ✅ DONE. Introduced the effect mechanism: an S-mode
+   `ecall` stashes a `SbiRequest` in `pending_sbi`; `step` drains it into a
+   `HartEffect::Sbi`; the driver (`Machine`/`Cpu`) runs `service_sbi(&mut [Hart],
+   caller, req)` with full access to all harts and writes `a0`/`a1` back.
+   `hart_start` wakes the target hart at `start_addr` (`Hart::start`), errors on
+   unknown/already-running id.
+4. **Cross-hart `send_ipi`** ✅ DONE (fell out of increment 3). `service_sbi`'s
+   `send_ipi` iterates every hart and raises `sip.SSIP` on those the mask selects
+   (hart `i` = mhartid `i`). Test: hart 0's IPI raises only hart 1's SSIP.
+5. **2-hart DTB + real boot** ✅ DONE. Re-dumped `virt.dtb` at `-smp 2`; added
+   `loader::load_machine` (shares ELF parsing via `load_memory`); `main` boots a
+   2-hart `Machine`. **The kernel boots on two harts:** hart 1 comes up with its
+   own page table (distinct `satp`), `SECONDARY_READY` releases hart 0, it clears
+   the SMP smoke, reaches the heartbeat loop (`entering heartbeat` prints), and
+   emits 414+ ongoing telemetry frames. Next meta-loop stop was a compressed
+   `c.subw` (unrelated to SMP), since implemented.
 
 ## Open / external
 
