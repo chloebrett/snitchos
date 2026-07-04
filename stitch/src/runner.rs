@@ -236,7 +236,14 @@ impl Repl {
         let mut out = render_telemetry(&env.take_telemetry());
         match result {
             Ok(value) if value != Value::Unit => {
-                writeln!(out, "=> {}", value.display()).expect(INFALLIBLE);
+                let rendered = crate::render::render(&value);
+                // A multi-line result (a table) reads better on its own line than
+                // jammed after the `=> ` prompt.
+                if rendered.contains('\n') {
+                    writeln!(out, "=>\n{rendered}").expect(INFALLIBLE);
+                } else {
+                    writeln!(out, "=> {rendered}").expect(INFALLIBLE);
+                }
             }
             Ok(_) => {}
             Err(error) => writeln!(out, "runtime error: {}", error.message()).expect(INFALLIBLE),
@@ -273,6 +280,19 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::runner::{discover_modules, run_module_files, run_program_source};
+
+    #[test]
+    fn the_repl_renders_a_scalar_result_inline() {
+        assert!(Repl::new().eval_line("40 + 2").contains("=> 42"));
+    }
+
+    #[test]
+    fn the_repl_renders_a_record_list_as_a_table() {
+        let mut repl = Repl::new();
+        repl.eval_line("prod P(n: Int)");
+        let out = repl.eval_line("[P(1), P(2)]");
+        assert!(out.contains('┌') && out.contains("│ n │"), "{out}");
+    }
 
     #[test]
     fn emitting_from_a_function_without_uses_telemetry_is_refused() {
