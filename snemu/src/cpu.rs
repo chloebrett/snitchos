@@ -18,6 +18,14 @@ pub enum Privilege {
     Supervisor,
 }
 
+/// Whether a hart is executing or parked. Secondary harts boot `Stopped` and are
+/// woken by an SBI `hart_start`; the boot hart starts `Running`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HartState {
+    Running,
+    Stopped,
+}
+
 /// Set (`on`) or clear (`!on`) the bits of `mask` in `value`.
 fn with_bit(value: u64, mask: u64, on: bool) -> u64 {
     if on { value | mask } else { value & !mask }
@@ -168,43 +176,58 @@ impl From<BusError> for StepError {
     }
 }
 
-/// A single RISC-V hart over a flat memory.
-pub struct Cpu {
+/// A single RISC-V hart: register file, pc, CSRs, and privilege. The memory and
+/// devices it runs against live in a shared [`Bus`] threaded through `step`, so
+/// several harts can share one address space (see `Machine`).
+pub(crate) struct Hart {
     x: [u64; 32],
     pc: u64,
     instret: u64,
+    /// The shared machine clock as of this step — the `rdtime` / `stimecmp`
+    /// source. Set by the driver (the `Cpu` wrapper or the `Machine`) before each
+    /// `step`, so every hart reads one common monotonic clock, not its own
+    /// per-hart retired count.
+    cycle: u64,
     /// Length in bytes of the instruction currently executing (2 or 4); set by
     /// `step` and used for pc advance and link addresses.
     cur_ilen: u64,
     privilege: Privilege,
     csr: Csr,
-    bus: Bus,
     /// Address reserved by the most recent `lr`, if still valid. `sc` succeeds
-    /// only while it holds; any store to that address breaks it. Single hart, so
-    /// this is the entire LR/SC story — no cross-hart invalidation to model.
+    /// only while it holds; any store to that address breaks it.
     reservation: Option<u64>,
+    /// Running or parked (secondary harts start parked until `hart_start`).
+    state: HartState,
+}
+
+/// A single-hart machine: one [`Hart`] plus the [`Bus`] it owns. The convenience
+/// wrapper the loader, `main`, and the unit tests drive; multi-hart runs use a
+/// `Machine` that shares one `Bus` across several `Hart`s instead.
+pub struct Cpu {
+    hart: Hart,
+    bus: Bus,
 }
 
 impl Cpu {
-    /// A fresh hart, started in S-mode (the privilege the kernel boots in;
-    /// firmware/snemu has already dropped out of M-mode at reset).
+    /// A fresh single-hart machine over `mem`, positioned at the RAM base.
     #[must_use]
     pub fn new(mem: Memory) -> Self {
         Self {
-            x: [0; 32],
-            pc: RAM_BASE,
-            instret: 0,
-            cur_ilen: ILEN_FULL,
-            privilege: Privilege::Supervisor,
-            csr: Csr::new(),
+            hart: Hart::new(),
             bus: Bus::new(mem),
-            reservation: None,
         }
+    }
+
+    /// Fetch/decode/execute one instruction against this machine's bus. The
+    /// single hart's clock is just its own retired count.
+    pub fn step(&mut self) -> Result<(), StepError> {
+        self.hart.set_cycle(self.hart.instret);
+        self.hart.step(&mut self.bus)
     }
 
     #[must_use]
     pub fn privilege(&self) -> Privilege {
-        self.privilege
+        self.hart.privilege
     }
 
     #[must_use]
@@ -221,63 +244,117 @@ impl Cpu {
     /// The current `satp` value (for diagnostics).
     #[must_use]
     pub fn satp(&self) -> u64 {
-        self.csr.read(addr::SATP).unwrap_or(0)
+        self.hart.satp()
     }
 
     #[must_use]
     pub fn reg(&self, i: usize) -> u64 {
-        self.x[i]
+        self.hart.reg(i)
     }
 
     pub fn set_reg(&mut self, i: usize, value: u64) {
+        self.hart.set_reg(i, value);
+    }
+
+    #[must_use]
+    pub fn pc(&self) -> u64 {
+        self.hart.pc
+    }
+
+    pub fn set_pc(&mut self, addr: u64) {
+        self.hart.pc = addr;
+    }
+
+    #[must_use]
+    pub fn instret(&self) -> u64 {
+        self.hart.instret
+    }
+}
+
+impl Hart {
+    /// A fresh hart, started in S-mode (the privilege the kernel boots in;
+    /// firmware/snemu has already dropped out of M-mode at reset).
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        Self {
+            x: [0; 32],
+            pc: RAM_BASE,
+            instret: 0,
+            cycle: 0,
+            cur_ilen: ILEN_FULL,
+            privilege: Privilege::Supervisor,
+            csr: Csr::new(),
+            reservation: None,
+            state: HartState::Running,
+        }
+    }
+
+    /// Park this hart (a secondary before its `hart_start`).
+    pub(crate) fn park(&mut self) {
+        self.state = HartState::Stopped;
+    }
+
+    #[must_use]
+    pub(crate) fn is_running(&self) -> bool {
+        self.state == HartState::Running
+    }
+
+    /// Set the shared machine clock this hart observes for its next `step`.
+    pub(crate) fn set_cycle(&mut self, cycle: u64) {
+        self.cycle = cycle;
+    }
+
+    /// The current `satp` value (for diagnostics).
+    #[must_use]
+    fn satp(&self) -> u64 {
+        self.csr.read(addr::SATP).unwrap_or(0)
+    }
+
+    #[must_use]
+    pub(crate) fn reg(&self, i: usize) -> u64 {
+        self.x[i]
+    }
+
+    pub(crate) fn set_reg(&mut self, i: usize, value: u64) {
         if i != 0 {
             self.x[i] = value;
         }
     }
 
     #[must_use]
-    pub fn pc(&self) -> u64 {
+    pub(crate) fn pc(&self) -> u64 {
         self.pc
     }
 
-    pub fn set_pc(&mut self, addr: u64) {
-        self.pc = addr;
-    }
-
-    #[must_use]
-    pub fn instret(&self) -> u64 {
-        self.instret
-    }
-
     /// Translate a guest virtual address through `satp` (Sv39 or bare).
-    fn translate(&self, va: u64, access: Access) -> Result<u64, StepError> {
+    fn translate(&self, va: u64, access: Access, bus: &Bus) -> Result<u64, StepError> {
         let satp = self.csr.read(addr::SATP).expect("satp is modeled");
-        mmu::translate(satp, va, access, self.bus.ram()).map_err(|_| StepError::PageFault { va })
+        mmu::translate(satp, va, access, bus.ram()).map_err(|_| StepError::PageFault { va })
     }
 
-    /// Fetch, decode, and execute one instruction (16- or 32-bit).
-    pub fn step(&mut self) -> Result<(), StepError> {
+    /// Fetch, decode, and execute one instruction (16- or 32-bit) against `bus`.
+    pub(crate) fn step(&mut self, bus: &mut Bus) -> Result<(), StepError> {
         // Deliver a pending interrupt before fetching: `sepc` then points at the
         // un-run instruction, so `sret` resumes exactly where we left off.
         if let Some(cause) = self.pending_interrupt() {
             self.take_trap(cause, 0);
             return Ok(());
         }
-        let pc_pa = self.translate(self.pc, Access::Fetch)?;
-        let half = self.bus.read_u16(pc_pa)?;
+        let pc_pa = self.translate(self.pc, Access::Fetch, bus)?;
+        let half = bus.read_u16(pc_pa)?;
         let raw = if is_compressed(half) {
             self.cur_ilen = ILEN_COMPRESSED;
             expand(half).ok_or_else(|| self.unimplemented(u32::from(half)))?
         } else {
             self.cur_ilen = ILEN_FULL;
-            self.bus.read_u32(pc_pa)?
+            bus.read_u32(pc_pa)?
         };
-        self.execute(raw)?;
+        self.execute(raw, bus)?;
         self.instret += 1;
         Ok(())
     }
 
-    fn execute(&mut self, raw: u32) -> Result<(), StepError> {
+    fn execute(&mut self, raw: u32, bus: &mut Bus) -> Result<(), StepError> {
         let instr = Instr(raw);
         match instr.opcode() {
             opcode::LUI => {
@@ -303,9 +380,9 @@ impl Cpu {
                 self.jalr(instr);
                 Ok(())
             }
-            opcode::LOAD => self.load(instr),
-            opcode::STORE => self.store(instr),
-            opcode::AMO => self.amo(instr),
+            opcode::LOAD => self.load(instr, bus),
+            opcode::STORE => self.store(instr, bus),
+            opcode::AMO => self.amo(instr, bus),
             opcode::SYSTEM => self.system(instr),
             opcode::MISC_MEM => {
                 // fence / fence.i: no caches or store buffers to order.
@@ -474,17 +551,17 @@ impl Cpu {
     }
 
     /// LOAD: read memory at `rs1 + imm`, sign/zero-extend into rd.
-    fn load(&mut self, instr: Instr) -> Result<(), StepError> {
+    fn load(&mut self, instr: Instr, bus: &Bus) -> Result<(), StepError> {
         let va = self.x[instr.rs1()].wrapping_add(instr.i_imm());
-        let addr = self.translate(va, Access::Load)?;
+        let addr = self.translate(va, Access::Load, bus)?;
         let value = match instr.funct3() {
-            funct3::load::LB => i64::from(self.bus.read_u8(addr)? as i8) as u64,
-            funct3::load::LH => i64::from(self.bus.read_u16(addr)? as i16) as u64,
-            funct3::load::LW => i64::from(self.bus.read_u32(addr)? as i32) as u64,
-            funct3::load::LD => self.bus.read_u64(addr)?,
-            funct3::load::LBU => u64::from(self.bus.read_u8(addr)?),
-            funct3::load::LHU => u64::from(self.bus.read_u16(addr)?),
-            funct3::load::LWU => u64::from(self.bus.read_u32(addr)?),
+            funct3::load::LB => i64::from(bus.read_u8(addr)? as i8) as u64,
+            funct3::load::LH => i64::from(bus.read_u16(addr)? as i16) as u64,
+            funct3::load::LW => i64::from(bus.read_u32(addr)? as i32) as u64,
+            funct3::load::LD => bus.read_u64(addr)?,
+            funct3::load::LBU => u64::from(bus.read_u8(addr)?),
+            funct3::load::LHU => u64::from(bus.read_u16(addr)?),
+            funct3::load::LWU => u64::from(bus.read_u32(addr)?),
             _ => return Err(self.unimplemented(instr.0)),
         };
         self.set_reg(instr.rd(), value);
@@ -493,18 +570,18 @@ impl Cpu {
     }
 
     /// STORE: write rs2 (truncated to the access width) to `rs1 + imm`.
-    fn store(&mut self, instr: Instr) -> Result<(), StepError> {
+    fn store(&mut self, instr: Instr, bus: &mut Bus) -> Result<(), StepError> {
         let va = self.x[instr.rs1()].wrapping_add(instr.s_imm());
-        let addr = self.translate(va, Access::Store)?;
+        let addr = self.translate(va, Access::Store, bus)?;
         if self.reservation == Some(addr) {
             self.reservation = None; // a write to the reserved cell breaks lr/sc
         }
         let value = self.x[instr.rs2()];
         match instr.funct3() {
-            funct3::store::SB => self.bus.write_u8(addr, value as u8)?,
-            funct3::store::SH => self.bus.write_u16(addr, value as u16)?,
-            funct3::store::SW => self.bus.write_u32(addr, value as u32)?,
-            funct3::store::SD => self.bus.write_u64(addr, value)?,
+            funct3::store::SB => bus.write_u8(addr, value as u8)?,
+            funct3::store::SH => bus.write_u16(addr, value as u16)?,
+            funct3::store::SW => bus.write_u32(addr, value as u32)?,
+            funct3::store::SD => bus.write_u64(addr, value)?,
             _ => return Err(self.unimplemented(instr.0)),
         }
         self.advance();
@@ -515,29 +592,29 @@ impl Cpu {
     /// combines it with rs2, stores the result, and returns the old value in rd.
     /// Single hart, so the sequence is atomic with no reservation tracking; the
     /// `aq`/`rl` ordering bits are no-ops. (LR/SC surface via the meta-loop.)
-    fn amo(&mut self, instr: Instr) -> Result<(), StepError> {
+    fn amo(&mut self, instr: Instr, bus: &mut Bus) -> Result<(), StepError> {
         // AMOs touch a page that must be both readable and writable; the kernel's
         // data mappings are R+W, so checking the store permission suffices.
-        let addr = self.translate(self.x[instr.rs1()], Access::Store)?;
+        let addr = self.translate(self.x[instr.rs1()], Access::Store, bus)?;
         let rs2 = self.x[instr.rs2()];
         match instr.funct5() {
-            amo_op::LR => return self.load_reserved(instr, addr),
-            amo_op::SC => return self.store_conditional(instr, addr, rs2),
+            amo_op::LR => return self.load_reserved(instr, addr, bus),
+            amo_op::SC => return self.store_conditional(instr, addr, rs2, bus),
             _ => {}
         }
         let old = match instr.funct3() {
             funct3::amo::W => {
-                let old = self.bus.read_u32(addr)?;
+                let old = bus.read_u32(addr)?;
                 let new =
                     amo_combine_u32(instr.funct5(), old, rs2 as u32).ok_or(self.unimplemented(instr.0))?;
-                self.bus.write_u32(addr, new)?;
+                bus.write_u32(addr, new)?;
                 sext32(old)
             }
             funct3::amo::D => {
-                let old = self.bus.read_u64(addr)?;
+                let old = bus.read_u64(addr)?;
                 let new =
                     amo_combine_u64(instr.funct5(), old, rs2).ok_or(self.unimplemented(instr.0))?;
-                self.bus.write_u64(addr, new)?;
+                bus.write_u64(addr, new)?;
                 old
             }
             _ => return Err(self.unimplemented(instr.0)),
@@ -548,10 +625,10 @@ impl Cpu {
     }
 
     /// `lr.w`/`lr.d`: load the addressed value into rd and reserve the address.
-    fn load_reserved(&mut self, instr: Instr, addr: u64) -> Result<(), StepError> {
+    fn load_reserved(&mut self, instr: Instr, addr: u64, bus: &Bus) -> Result<(), StepError> {
         let value = match instr.funct3() {
-            funct3::amo::W => sext32(self.bus.read_u32(addr)?),
-            funct3::amo::D => self.bus.read_u64(addr)?,
+            funct3::amo::W => sext32(bus.read_u32(addr)?),
+            funct3::amo::D => bus.read_u64(addr)?,
             _ => return Err(self.unimplemented(instr.0)),
         };
         self.reservation = Some(addr);
@@ -562,12 +639,18 @@ impl Cpu {
 
     /// `sc.w`/`sc.d`: store rs2 iff the reservation still names this address,
     /// writing 0 (success) or 1 (failure) to rd. The reservation clears either way.
-    fn store_conditional(&mut self, instr: Instr, addr: u64, rs2: u64) -> Result<(), StepError> {
+    fn store_conditional(
+        &mut self,
+        instr: Instr,
+        addr: u64,
+        rs2: u64,
+        bus: &mut Bus,
+    ) -> Result<(), StepError> {
         let reserved = self.reservation.take() == Some(addr);
         if reserved {
             match instr.funct3() {
-                funct3::amo::W => self.bus.write_u32(addr, rs2 as u32)?,
-                funct3::amo::D => self.bus.write_u64(addr, rs2)?,
+                funct3::amo::W => bus.write_u32(addr, rs2 as u32)?,
+                funct3::amo::D => bus.write_u64(addr, rs2)?,
                 _ => return Err(self.unimplemented(instr.0)),
             }
         }
@@ -598,9 +681,9 @@ impl Cpu {
         let pc = self.pc;
         let csr = instr.csr();
         if csr == addr::TIME {
-            // The `time` counter is read-only and computed, not stored: tie it to
-            // the retired-instruction count so the clock is deterministic.
-            self.set_reg(instr.rd(), self.instret);
+            // The `time` counter is read-only and computed, not stored: it's the
+            // shared machine clock, deterministic across harts.
+            self.set_reg(instr.rd(), self.cycle);
             self.advance();
             return Ok(());
         }
@@ -725,7 +808,7 @@ impl Cpu {
     /// global `sstatus.SIE` enabled.
     fn timer_interrupt_pending(&self) -> bool {
         let stimecmp = self.csr.read(addr::STIMECMP).unwrap_or(u64::MAX);
-        if self.instret < stimecmp {
+        if self.cycle < stimecmp {
             return false;
         }
         if self.csr_read(addr::SIE) & SIE_STIE == 0 {
@@ -1463,7 +1546,7 @@ mod tests {
         // the kernel's own handler. An unknown EID returns SBI_ERR_NOT_SUPPORTED
         // (-2) in a0 and execution continues past the ecall.
         let mut cpu = cpu_with(&[ecall(), addi(1, 0, 7)]);
-        cpu.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
+        cpu.hart.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
         cpu.set_reg(17, 0xdead); // a7 = unrecognized EID
         cpu.step().unwrap();
         assert_eq!(cpu.pc(), RAM_BASE + 4); // advanced; did NOT trap to stvec
@@ -1479,28 +1562,28 @@ mod tests {
         cpu.set_reg(11, 0); // a1 = hart_mask_base
         cpu.step().unwrap();
         assert_eq!(cpu.reg(10), 0); // a0 = SBI_SUCCESS
-        assert_ne!(cpu.csr.read(addr::SIP).unwrap() & (1 << 1), 0); // SSIP raised
+        assert_ne!(cpu.hart.csr.read(addr::SIP).unwrap() & (1 << 1), 0); // SSIP raised
     }
 
     #[test]
     fn pending_software_interrupt_traps_to_the_handler() {
         let mut cpu = cpu_with(&[addi(1, 0, 7)]);
-        cpu.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
-        cpu.csr.write(addr::SIP, 1 << 1).unwrap(); // SSIP pending
-        cpu.csr.write(addr::SIE, 1 << 1).unwrap(); // SSIE enabled
-        cpu.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
+        cpu.hart.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
+        cpu.hart.csr.write(addr::SIP, 1 << 1).unwrap(); // SSIP pending
+        cpu.hart.csr.write(addr::SIE, 1 << 1).unwrap(); // SSIE enabled
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
         cpu.step().unwrap();
         assert_eq!(cpu.pc(), RAM_BASE + 0x200);
-        assert_eq!(cpu.csr.read(addr::SCAUSE).unwrap(), (1 << 63) | 1); // software int
+        assert_eq!(cpu.hart.csr.read(addr::SCAUSE).unwrap(), (1 << 63) | 1); // software int
     }
 
     #[test]
     fn ebreak_traps_with_the_breakpoint_cause() {
         let mut cpu = cpu_with(&[ebreak()]);
-        cpu.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
+        cpu.hart.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
         cpu.step().unwrap();
         assert_eq!(cpu.pc(), RAM_BASE + 0x200);
-        assert_eq!(cpu.csr.read(addr::SCAUSE).unwrap(), 3); // breakpoint
+        assert_eq!(cpu.hart.csr.read(addr::SCAUSE).unwrap(), 3); // breakpoint
     }
 
     /// sie.STIE — supervisor timer interrupt enable (bit 5).
@@ -1510,21 +1593,21 @@ mod tests {
     fn timer_interrupt_fires_when_time_reaches_stimecmp() {
         // jal x0, 0 — a self-loop, so without the timer the cpu would spin here.
         let mut cpu = cpu_with(&[jal(0, 0)]);
-        cpu.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
-        cpu.csr.write(addr::STIMECMP, 0).unwrap(); // deadline 0; time >= 0 at once
-        cpu.csr.write(addr::SIE, STIE).unwrap();
-        cpu.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
+        cpu.hart.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
+        cpu.hart.csr.write(addr::STIMECMP, 0).unwrap(); // deadline 0; time >= 0 at once
+        cpu.hart.csr.write(addr::SIE, STIE).unwrap();
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
         cpu.step().unwrap();
         assert_eq!(cpu.pc(), RAM_BASE + 0x200); // trapped to stvec
-        assert_eq!(cpu.csr.read(addr::SCAUSE).unwrap(), (1 << 63) | 5); // timer interrupt
-        assert_eq!(cpu.csr.read(addr::SEPC).unwrap(), RAM_BASE); // resume the un-run instr
+        assert_eq!(cpu.hart.csr.read(addr::SCAUSE).unwrap(), (1 << 63) | 5); // timer interrupt
+        assert_eq!(cpu.hart.csr.read(addr::SEPC).unwrap(), RAM_BASE); // resume the un-run instr
     }
 
     #[test]
     fn timer_interrupt_is_masked_when_sstatus_sie_clear() {
         let mut cpu = cpu_with(&[addi(1, 0, 7)]);
-        cpu.csr.write(addr::STIMECMP, 0).unwrap();
-        cpu.csr.write(addr::SIE, STIE).unwrap();
+        cpu.hart.csr.write(addr::STIMECMP, 0).unwrap();
+        cpu.hart.csr.write(addr::SIE, STIE).unwrap();
         // sstatus.SIE left clear: in S-mode the interrupt stays pending, not taken.
         cpu.step().unwrap();
         assert_eq!(cpu.reg(1), 7); // the instruction ran instead of trapping
@@ -1534,8 +1617,8 @@ mod tests {
     #[test]
     fn timer_interrupt_needs_the_per_source_enable() {
         let mut cpu = cpu_with(&[addi(1, 0, 7)]);
-        cpu.csr.write(addr::STIMECMP, 0).unwrap();
-        cpu.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
+        cpu.hart.csr.write(addr::STIMECMP, 0).unwrap();
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
         // sie.STIE left clear: the global enable alone doesn't deliver it.
         cpu.step().unwrap();
         assert_eq!(cpu.reg(1), 7);
@@ -1544,9 +1627,9 @@ mod tests {
     #[test]
     fn timer_interrupt_waits_for_the_deadline() {
         let mut cpu = cpu_with(&[addi(1, 0, 7), addi(2, 0, 9)]);
-        cpu.csr.write(addr::STIMECMP, 5).unwrap(); // five ticks out
-        cpu.csr.write(addr::SIE, STIE).unwrap();
-        cpu.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
+        cpu.hart.csr.write(addr::STIMECMP, 5).unwrap(); // five ticks out
+        cpu.hart.csr.write(addr::SIE, STIE).unwrap();
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
         cpu.step().unwrap(); // instret 0 < 5: runs the instruction, no trap
         assert_eq!(cpu.reg(1), 7);
         assert_eq!(cpu.pc(), RAM_BASE + 4);
@@ -1555,8 +1638,8 @@ mod tests {
     #[test]
     fn sret_instruction_returns_to_sepc() {
         let mut cpu = cpu_with(&[sret()]);
-        cpu.csr.write(addr::SEPC, RAM_BASE + 0x40).unwrap();
-        cpu.csr.write(addr::SSTATUS, sstatus::SPIE).unwrap(); // SPP=U, SPIE=1
+        cpu.hart.csr.write(addr::SEPC, RAM_BASE + 0x40).unwrap();
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::SPIE).unwrap(); // SPP=U, SPIE=1
         cpu.step().unwrap();
         assert_eq!(cpu.pc(), RAM_BASE + 0x40);
         assert_eq!(cpu.privilege(), Privilege::User);
@@ -1584,17 +1667,17 @@ mod tests {
         const TRAP_PC: u64 = RAM_BASE + 0x40;
         const ILLEGAL_INSTRUCTION: u64 = 2;
         let mut cpu = Cpu::new(Memory::new(0x1000));
-        cpu.csr.write(addr::STVEC, HANDLER).unwrap();
-        cpu.csr.write(addr::SSTATUS, sstatus::SIE).unwrap(); // interrupts enabled
+        cpu.hart.csr.write(addr::STVEC, HANDLER).unwrap();
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::SIE).unwrap(); // interrupts enabled
         cpu.set_pc(TRAP_PC);
 
-        cpu.take_trap(ILLEGAL_INSTRUCTION, 0xbad);
+        cpu.hart.take_trap(ILLEGAL_INSTRUCTION, 0xbad);
 
         assert_eq!(cpu.pc(), HANDLER);
-        assert_eq!(cpu.csr.read(addr::SEPC).unwrap(), TRAP_PC);
-        assert_eq!(cpu.csr.read(addr::SCAUSE).unwrap(), ILLEGAL_INSTRUCTION);
-        assert_eq!(cpu.csr.read(addr::STVAL).unwrap(), 0xbad);
-        let s = cpu.csr.read(addr::SSTATUS).unwrap();
+        assert_eq!(cpu.hart.csr.read(addr::SEPC).unwrap(), TRAP_PC);
+        assert_eq!(cpu.hart.csr.read(addr::SCAUSE).unwrap(), ILLEGAL_INSTRUCTION);
+        assert_eq!(cpu.hart.csr.read(addr::STVAL).unwrap(), 0xbad);
+        let s = cpu.hart.csr.read(addr::SSTATUS).unwrap();
         assert_eq!(s & sstatus::SIE, 0, "SIE cleared on trap");
         assert_ne!(s & sstatus::SPIE, 0, "SPIE holds prior SIE");
         assert_ne!(s & sstatus::SPP, 0, "SPP records the interrupted S-mode");
@@ -1605,15 +1688,15 @@ mod tests {
     fn sret_restores_state_and_returns() {
         const RETURN_PC: u64 = RAM_BASE + 0x80;
         let mut cpu = Cpu::new(Memory::new(0x1000));
-        cpu.csr.write(addr::SEPC, RETURN_PC).unwrap();
+        cpu.hart.csr.write(addr::SEPC, RETURN_PC).unwrap();
         // Mid-trap state: SPIE=1, SPP=0 (trapped from U-mode), SIE=0.
-        cpu.csr.write(addr::SSTATUS, sstatus::SPIE).unwrap();
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::SPIE).unwrap();
 
-        cpu.sret();
+        cpu.hart.sret();
 
         assert_eq!(cpu.pc(), RETURN_PC);
         assert_eq!(cpu.privilege(), Privilege::User); // SPP was U
-        let s = cpu.csr.read(addr::SSTATUS).unwrap();
+        let s = cpu.hart.csr.read(addr::SSTATUS).unwrap();
         assert_ne!(s & sstatus::SIE, 0, "SIE restored from SPIE");
         assert_ne!(s & sstatus::SPIE, 0, "SPIE set to 1");
         assert_eq!(s & sstatus::SPP, 0, "SPP cleared to U");
@@ -1870,7 +1953,7 @@ mod tests {
         mem.write_u64(root + 4 * 8, leaf).unwrap();
 
         let mut cpu = Cpu::new(mem);
-        cpu.csr.write(addr::SATP, (8 << 60) | (root >> 12)).unwrap();
+        cpu.hart.csr.write(addr::SATP, (8 << 60) | (root >> 12)).unwrap();
         cpu.set_pc(0x1_0000_0000 | 0x3000); // VPN[2]=4, offset 0x3000
 
         cpu.step().unwrap();
