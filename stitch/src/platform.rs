@@ -63,6 +63,29 @@ impl ObjectKind {
     }
 }
 
+/// The emoji `hold` shows for a rights bitmask, one glyph per *category* present
+/// (not per bit): 🪴 mint (`MINT` — the authority-growing right), 👀 read
+/// (`RECV`/`WAIT`, the consumer ends), ✏️ write (`EMIT`/`SEND`/`SIGNAL`, the
+/// emitting/producer ends). Order is fixed (mint, read, write) and an empty mask
+/// yields the empty string. This is the cap-domain's own display of an opaque
+/// field — the sibling of [`ObjectKind::as_str`] — kept out of the generic table
+/// renderer, which knows shapes, not rights.
+#[must_use]
+pub fn rights_glyphs(rights: Rights) -> alloc::string::String {
+    use snitchos_abi::rights as r;
+    let mut out = alloc::string::String::new();
+    if rights & r::MINT != 0 {
+        out.push('🪴');
+    }
+    if rights & (r::RECV | r::WAIT) != 0 {
+        out.push('👀');
+    }
+    if rights & (r::EMIT | r::SEND | r::SIGNAL) != 0 {
+        out.push_str("✏️");
+    }
+    out
+}
+
 /// One capability the calling process holds — what `hold` enumerates. Pure data
 /// (no kernel types), so a test can construct a cap table by hand.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -338,6 +361,28 @@ mod tests {
         fn fs_read(&self, _name: &str) -> Option<String> {
             None
         }
+    }
+
+    #[test]
+    fn rights_glyphs_maps_each_category_to_its_emoji() {
+        use snitchos_abi::rights as r;
+        assert_eq!(rights_glyphs(0), "");
+        assert_eq!(rights_glyphs(r::MINT), "🪴");
+        assert_eq!(rights_glyphs(r::RECV), "👀");
+        assert_eq!(rights_glyphs(r::WAIT), "👀"); // WAIT is a read (consumer) right
+        assert_eq!(rights_glyphs(r::EMIT), "✏️");
+        assert_eq!(rights_glyphs(r::SEND), "✏️");
+        assert_eq!(rights_glyphs(r::SIGNAL), "✏️"); // SIGNAL is a write (producer) right
+    }
+
+    #[test]
+    fn rights_glyphs_lists_mint_then_read_then_write_and_dedupes_a_category() {
+        use snitchos_abi::rights as r;
+        // SEND|RECV is one read and one write — a single 👀 and a single ✏️.
+        assert_eq!(rights_glyphs(r::SEND | r::RECV), "👀✏️");
+        assert_eq!(rights_glyphs(r::MINT | r::RECV | r::SEND), "🪴👀✏️");
+        // Two write rights collapse to one ✏️ (category, not per-bit).
+        assert_eq!(rights_glyphs(r::EMIT | r::SEND), "✏️");
     }
 
     #[test]

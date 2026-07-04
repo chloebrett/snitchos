@@ -421,7 +421,7 @@ fn native_hold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
                 fields: alloc::vec![
                     (Some("handle".into()), Value::Int(i64::from(cap.handle))),
                     (Some("kind".into()), Value::Str(cap.kind.as_str().into())),
-                    (Some("rights".into()), Value::Int(i64::from(cap.rights))),
+                    (Some("rights".into()), Value::Str(crate::platform::rights_glyphs(cap.rights).into())),
                     (Some("badge".into()), Value::Int(i64::try_from(cap.badge).unwrap_or(i64::MAX))),
                 ],
             }))
@@ -958,14 +958,14 @@ mod tests {
 
     /// The named `Cap` record `hold` lifts each capability into (the unhitch
     /// shape the shell's shape-dispatched renderer tables).
-    fn cap_record(handle: i64, kind: &str, rights: i64, badge: i64) -> Value {
+    fn cap_record(handle: i64, kind: &str, rights: &str, badge: i64) -> Value {
         Value::Data(Rc::new(crate::value::DataValue {
             type_name: "Cap".into(),
             variant: "Cap".into(),
             fields: vec![
                 (Some("handle".into()), Value::Int(handle)),
                 (Some("kind".into()), Value::Str(kind.into())),
-                (Some("rights".into()), Value::Int(rights)),
+                (Some("rights".into()), Value::Str(rights.into())),
                 (Some("badge".into()), Value::Int(badge)),
             ],
         }))
@@ -985,7 +985,8 @@ mod tests {
         assert_eq!(
             value,
             Value::List(
-                vec![cap_record(2, "Endpoint", 6, 0), cap_record(3, "Endpoint", 2, 7)].into()
+                vec![cap_record(2, "Endpoint", "👀✏️", 0), cap_record(3, "Endpoint", "✏️", 7)]
+                    .into()
             )
         );
     }
