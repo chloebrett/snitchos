@@ -21,14 +21,24 @@
 
 use fs_core::{FsError, InodeId, NodeKind, Stat};
 use fs_proto::{markers, FileRights, Op, Request, Response, UserBuf};
-use snitchos_user::{Endpoint, Metric, delegated_handle, entry, register_counter, tracer};
+use snitchos_user::{Denied, Endpoint, MSG_WORDS, Metric, delegated_handle, entry, register_counter, tracer};
 
-/// Stat `cap` and return the decoded `Stat`, or `None` on any failure. The
-/// `fs.stat` span stays open across the `call`, so the server's handling nests
-/// under it across the process boundary.
+/// `call` `req` on `cap` inside a span named `span` — the span stays open across
+/// the `call`, so the server's handling nests under it across the process
+/// boundary. The single-call idiom every request below shares (readdir spans two
+/// calls, so it keeps its own block).
+fn traced_call(
+    cap: Endpoint,
+    span: &str,
+    req: [u64; MSG_WORDS],
+) -> Result<([u64; MSG_WORDS], Option<usize>), Denied> {
+    let _s = tracer().span(span);
+    cap.call(req)
+}
+
+/// Stat `cap` and return the decoded `Stat`, or `None` on any failure.
 fn stat(cap: Endpoint) -> Option<Stat> {
-    let _s = tracer().span("fs.stat");
-    let (words, _) = cap.call(Request::Stat.encode()).ok()?;
+    let (words, _) = traced_call(cap, "fs.stat", Request::Stat.encode()).ok()?;
     match Response::decode(Op::Stat, words) {
         Ok(Response::Stat(s)) => Some(s),
         _ => None,
@@ -68,12 +78,8 @@ fn main() {
         },
         kind: NodeKind::File,
     };
-    let file_cap = {
-        let _s = tracer().span("fs.create");
-        let Ok((_c, Some(cap))) = root.call(create.encode()) else {
-            return;
-        };
-        cap
+    let Ok((_c, Some(file_cap))) = traced_call(root, "fs.create", create.encode()) else {
+        return;
     };
     let file = Endpoint::from_raw_handle(file_cap);
 
@@ -95,12 +101,9 @@ fn main() {
             len: data.len() as u64,
         },
     };
-    {
-        let _s = tracer().span("fs.write");
-        let Ok((_w, _)) = file.call(write.encode()) else {
-            return;
-        };
-    }
+    let Ok((_w, _)) = traced_call(file, "fs.write", write.encode()) else {
+        return;
+    };
 
     let mut buf = [0u8; 2];
     let read = Request::Read {
@@ -110,12 +113,8 @@ fn main() {
             len: buf.len() as u64,
         },
     };
-    let words = {
-        let _s = tracer().span("fs.read");
-        let Ok((words, _)) = file.call(read.encode()) else {
-            return;
-        };
-        words
+    let Ok((words, _)) = traced_call(file, "fs.read", read.encode()) else {
+        return;
     };
     if let Ok(Response::Count(n)) = Response::decode(Op::Read, words)
         && n == 2
@@ -169,46 +168,41 @@ fn main() {
             len: data.len() as u64,
         },
     };
-    let ro = {
-        let _s = tracer().span("fs.lookup");
-        root.call(Request::Lookup { name: lookup_name, rights: FileRights::READ }.encode())
-    };
+    let ro = traced_call(
+        root,
+        "fs.lookup",
+        Request::Lookup { name: lookup_name, rights: FileRights::READ }.encode(),
+    );
     if let Ok((_l, Some(ro))) = ro {
-        let _s = tracer().span("fs.write");
-        let _ = Endpoint::from_raw_handle(ro).call(write_hi.encode());
+        let _ = traced_call(Endpoint::from_raw_handle(ro), "fs.write", write_hi.encode());
     }
 
     // Positive control: look the same file up asking for READ|WRITE; the write
     // through *that* cap must succeed — proving the gate refuses only the
     // under-authorized write, not every write.
-    let rw = {
-        let _s = tracer().span("fs.lookup");
-        root.call(
-            Request::Lookup { name: lookup_name, rights: FileRights::READ | FileRights::WRITE }.encode(),
-        )
-    };
-    if let Ok((_l, Some(rw))) = rw {
-        let _s = tracer().span("fs.write");
-        if let Ok((words, _)) = Endpoint::from_raw_handle(rw).call(write_hi.encode())
-            && matches!(Response::decode(Op::Write, words), Ok(Response::Count(_)))
-        {
-            marker.emit(markers::WRITE_AUTHORIZED_OK);
-        }
+    let rw = traced_call(
+        root,
+        "fs.lookup",
+        Request::Lookup { name: lookup_name, rights: FileRights::READ | FileRights::WRITE }.encode(),
+    );
+    if let Ok((_l, Some(rw))) = rw
+        && let Ok((words, _)) = traced_call(Endpoint::from_raw_handle(rw), "fs.write", write_hi.encode())
+        && matches!(Response::decode(Op::Write, words), Ok(Response::Count(_)))
+    {
+        marker.emit(markers::WRITE_AUTHORIZED_OK);
     }
 
     // Remove the file, then confirm the name no longer resolves — proving the
     // unlink took effect across the boundary, not just that the server replied.
-    let rm = {
-        let _s = tracer().span("fs.remove");
-        root.call(Request::Remove { name: lookup_name }.encode())
-    };
+    let rm = traced_call(root, "fs.remove", Request::Remove { name: lookup_name }.encode());
     if let Ok((rm, _)) = rm
         && matches!(Response::decode(Op::Remove, rm), Ok(Response::Removed))
     {
-        let gone = {
-            let _s = tracer().span("fs.lookup");
-            root.call(Request::Lookup { name: lookup_name, rights: FileRights::READ }.encode())
-        };
+        let gone = traced_call(
+            root,
+            "fs.lookup",
+            Request::Lookup { name: lookup_name, rights: FileRights::READ }.encode(),
+        );
         if let Ok((gone, _)) = gone
             && matches!(Response::decode(Op::Lookup, gone), Ok(Response::Err(FsError::NotFound)))
         {
