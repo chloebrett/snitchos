@@ -93,11 +93,13 @@ pub enum Op {
     Create = 4,
     Remove = 5,
     Readdir = 6,
+    /// Read an inode-attached extended attribute (e.g. the `user.iface` manifest).
+    GetXattr = 7,
 }
 
 impl Op {
     /// Every opcode, for exhaustive round-trip testing and dispatch tables.
-    pub const ALL: [Op; 7] = [
+    pub const ALL: [Op; 8] = [
         Op::Lookup,
         Op::Stat,
         Op::Read,
@@ -105,6 +107,7 @@ impl Op {
         Op::Create,
         Op::Remove,
         Op::Readdir,
+        Op::GetXattr,
     ];
 
     #[must_use]
@@ -122,7 +125,52 @@ impl Op {
             4 => Some(Op::Create),
             5 => Some(Op::Remove),
             6 => Some(Op::Readdir),
+            7 => Some(Op::GetXattr),
             _ => None,
+        }
+    }
+}
+
+/// Which extended attribute a [`Request::GetXattr`] reads. The FS's xattr
+/// namespace is small and OS-defined, so a compact enum rides the wire in one
+/// word (a `UserBuf` name plus the `UserBuf` dst wouldn't fit `MSG_WORDS`).
+/// Discriminants are the wire encoding: append-only, never renumber.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum XattrKey {
+    /// `user.iface` — a program's typed-interface manifest (from its
+    /// `.snitch.iface` note).
+    UserIface = 0,
+    /// `user.type` — a per-file type hint (e.g. "is this a program?"), the
+    /// lighter cousin the FS design doc anticipates.
+    UserType = 1,
+}
+
+impl XattrKey {
+    /// Every key, for exhaustive round-trip testing.
+    pub const ALL: [XattrKey; 2] = [XattrKey::UserIface, XattrKey::UserType];
+
+    #[must_use]
+    pub const fn to_u64(self) -> u64 {
+        self as u64
+    }
+
+    #[must_use]
+    pub const fn from_u64(raw: u64) -> Option<XattrKey> {
+        match raw {
+            0 => Some(XattrKey::UserIface),
+            1 => Some(XattrKey::UserType),
+            _ => None,
+        }
+    }
+
+    /// The attribute name this key names, as the [`fs_core::Filesystem`] xattr
+    /// API takes it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            XattrKey::UserIface => "user.iface",
+            XattrKey::UserType => "user.type",
         }
     }
 }
@@ -189,7 +237,7 @@ pub const fn required_right(op: Op) -> Option<FileRights> {
     match op {
         Op::Read => Some(FileRights::READ),
         Op::Write => Some(FileRights::WRITE),
-        Op::Stat | Op::Lookup | Op::Create | Op::Remove | Op::Readdir => None,
+        Op::Stat | Op::Lookup | Op::Create | Op::Remove | Op::Readdir | Op::GetXattr => None,
     }
 }
 
@@ -242,6 +290,7 @@ pub enum Request {
     Create { name: UserBuf, kind: NodeKind },
     Remove { name: UserBuf },
     Readdir { index: u64, name_dst: UserBuf },
+    GetXattr { key: XattrKey, dst: UserBuf },
 }
 
 impl Request {
@@ -256,6 +305,7 @@ impl Request {
             Request::Create { .. } => Op::Create,
             Request::Remove { .. } => Op::Remove,
             Request::Readdir { .. } => Op::Readdir,
+            Request::GetXattr { .. } => Op::GetXattr,
         }
     }
 
@@ -270,6 +320,7 @@ impl Request {
             Request::Remove { name } => [op, name.ptr, name.len, 0],
             Request::Create { name, kind } => [op, name.ptr, name.len, kind_to_wire(kind)],
             Request::Readdir { index, name_dst } => [op, index, name_dst.ptr, name_dst.len],
+            Request::GetXattr { key, dst } => [op, key.to_u64(), dst.ptr, dst.len],
         }
     }
 
@@ -290,6 +341,10 @@ impl Request {
             },
             Op::Remove => Request::Remove { name: UserBuf { ptr: w1, len: w2 } },
             Op::Readdir => Request::Readdir { index: w1, name_dst: UserBuf { ptr: w2, len: w3 } },
+            Op::GetXattr => Request::GetXattr {
+                key: XattrKey::from_u64(w1).ok_or(WireError::BadKind(w1))?,
+                dst: UserBuf { ptr: w2, len: w3 },
+            },
         })
     }
 }
@@ -351,7 +406,7 @@ impl Response {
         }
         Ok(match op {
             Op::Stat => Response::Stat(Stat { kind: kind_from_wire(w1)?, size: w2 }),
-            Op::Read | Op::Write => Response::Count(w1),
+            Op::Read | Op::Write | Op::GetXattr => Response::Count(w1),
             Op::Lookup | Op::Create => Response::Inode(InodeId::new(w1 as u32)),
             Op::Remove => Response::Removed,
             Op::Readdir => {
@@ -392,6 +447,43 @@ const fn error_from_status(status: u64) -> Result<FsError, WireError> {
 mod tests {
     use super::*;
     use fs_core::{FsError, InodeId, NodeKind, Stat};
+
+    #[test]
+    fn getxattr_op_is_appended_at_seven() {
+        assert_eq!(Op::GetXattr.to_u8(), 7, "append-only: never renumber 0..=6");
+        assert_eq!(Op::from_u8(7), Some(Op::GetXattr));
+    }
+
+    #[test]
+    fn xattr_key_round_trips_and_names_its_attribute() {
+        for key in XattrKey::ALL {
+            assert_eq!(XattrKey::from_u64(key.to_u64()), Some(key));
+        }
+        assert_eq!(XattrKey::UserIface.name(), "user.iface");
+    }
+
+    #[test]
+    fn getxattr_request_round_trips() {
+        let req = Request::GetXattr {
+            key: XattrKey::UserIface,
+            dst: UserBuf { ptr: 0x7000, len: 1024 },
+        };
+        assert_eq!(Request::decode(req.encode()), Ok(req));
+    }
+
+    #[test]
+    fn getxattr_is_ungated_metadata() {
+        // Reading a program's manifest rides the file cap you already hold; no
+        // separate right (like `Stat`/`Lookup`). A dedicated `XATTR` right is a
+        // deferred refinement.
+        assert_eq!(required_right(Op::GetXattr), None);
+    }
+
+    #[test]
+    fn getxattr_replies_with_a_byte_count() {
+        let resp = Response::Count(1024);
+        assert_eq!(Response::decode(Op::GetXattr, resp.encode()), Ok(resp));
+    }
 
     #[test]
     fn read_and_write_are_distinct_rights() {
@@ -491,6 +583,7 @@ mod tests {
         assert_eq!(Op::Create.to_u8(), 4);
         assert_eq!(Op::Remove.to_u8(), 5);
         assert_eq!(Op::Readdir.to_u8(), 6);
+        assert_eq!(Op::GetXattr.to_u8(), 7);
     }
 
     fn buf(ptr: u64, len: u64) -> UserBuf {
@@ -616,7 +709,7 @@ mod tests {
     fn read_and_write_are_the_only_gated_ops() {
         assert_eq!(required_right(Op::Read), Some(FileRights::READ));
         assert_eq!(required_right(Op::Write), Some(FileRights::WRITE));
-        for op in [Op::Stat, Op::Lookup, Op::Create, Op::Remove, Op::Readdir] {
+        for op in [Op::Stat, Op::Lookup, Op::Create, Op::Remove, Op::Readdir, Op::GetXattr] {
             assert_eq!(required_right(op), None);
         }
     }

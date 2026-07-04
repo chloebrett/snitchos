@@ -15,7 +15,7 @@
 #![no_std]
 
 use fs_core::{Filesystem, FsError, InodeId};
-use fs_proto::{Badge, Denial, FileRights, Request, Response, check_rights};
+use fs_proto::{Badge, Denial, FileRights, Request, Response, XattrKey, check_rights};
 use snitchos_user::{
     Endpoint, Metric, copy_from_caller, copy_to_caller, delegated_handle, register_gauge, reply,
     reply_with_cap, rights, tracer,
@@ -130,8 +130,35 @@ pub fn serve<F: Filesystem>(mut fs: F) -> ! {
             Request::Readdir { index, name_dst } => {
                 readdir(&mut fs, reply_handle, badge, index, name_dst);
             }
+            Request::GetXattr { key, dst } => {
+                get_xattr(&mut fs, reply_handle, badge, key, dst);
+            }
         }
     }
+}
+
+/// Handle `getxattr`: read the inode's attribute and push its bytes to the
+/// caller's buffer (option-D copy), replying with the count copied. The value
+/// (e.g. a `user.iface` manifest) is the source directly — no scratch buffer, so
+/// it isn't capped at `DATA_CAP` like the file-read path.
+fn get_xattr<F: Filesystem>(
+    fs: &mut F,
+    reply_handle: usize,
+    file: Badge,
+    key: XattrKey,
+    dst: fs_proto::UserBuf,
+) {
+    let resp = match fs.getxattr(file.inode, key.name()) {
+        Ok(value) => {
+            let n = (dst.len as usize).min(value.len());
+            match copy_to_caller(reply_handle, value.as_ptr() as usize, n, dst.ptr as usize) {
+                Ok(_) => Response::Count(n as u64),
+                Err(_) => Response::Err(FsError::Internal),
+            }
+        }
+        Err(e) => Response::Err(e),
+    };
+    let _ = reply(reply_handle, resp.encode());
 }
 
 /// Handle `create`: pull the filename across from the caller (option-D copy),
