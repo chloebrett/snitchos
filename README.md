@@ -113,6 +113,7 @@ cargo xtask snemu-boot --frames  # also decode + dump the telemetry frames snemu
 cargo xtask snemu-boot --workload demo  # boot a runtime workload under snemu (injects the DTB bootarg)
 cargo xtask snemu-diff          # differential oracle: diff snemu vs QEMU telemetry on the default boot
 cargo xtask snemu-diff --workload demo  # ...on a specific workload (both emulators run it)
+cargo xtask snemu-diff --all    # sweep every workload; print an agree/disagree summary table
 cargo xtask collect            # build + run collector (OTLP + Prometheus)
 cargo xtask collect -- --text  # also print decoded frames to stdout
 cargo xtask reader             # collector in text-only mode (no docker needed)

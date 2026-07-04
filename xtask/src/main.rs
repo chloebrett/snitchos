@@ -62,6 +62,10 @@ enum Cmd {
         /// Implies the `itest-workloads` build. Omit for the default `init` boot.
         #[arg(long)]
         workload: Option<String>,
+        /// Sweep *every* workload and print an agree/disagree summary table.
+        /// (Ignores `--workload`.)
+        #[arg(long)]
+        all: bool,
     },
     /// Build the kernel and run it in QEMU.
     ///
@@ -493,8 +497,12 @@ fn main() -> ExitCode {
         Cmd::SnemuBoot { features, max_steps, frames, workload } => {
             snemu_boot(&features, max_steps, frames, workload.as_deref())
         }
-        Cmd::SnemuDiff { steps, qemu_secs, workload } => {
-            snemu_diff::run(steps, qemu_secs, workload.as_deref())
+        Cmd::SnemuDiff { steps, qemu_secs, workload, all } => {
+            if all {
+                snemu_diff::run_all(steps, qemu_secs)
+            } else {
+                snemu_diff::run(steps, qemu_secs, workload.as_deref())
+            }
         }
         Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
         Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {

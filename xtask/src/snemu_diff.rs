@@ -8,7 +8,6 @@
 //! support yet — so the QEMU side boots the same default. That keeps the two
 //! comparable without per-scenario surgery.
 
-use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::os::unix::net::UnixStream;
 use std::process::{ExitCode, Stdio};
@@ -115,8 +114,6 @@ pub(crate) struct Diff {
     /// The first structurally-differing pair, if the streams diverge within the
     /// shorter one's length. `(snemu, qemu)`.
     pub divergence: Option<(OwnedFrame, OwnedFrame)>,
-    pub snemu_len: usize,
-    pub qemu_len: usize,
 }
 
 /// Compare two frame streams by their canonical (timestamp-normalized) sequence,
@@ -132,12 +129,7 @@ pub(crate) fn diff_streams(snemu: &[OwnedFrame], qemu: &[OwnedFrame]) -> Diff {
             break;
         }
     }
-    Diff {
-        common_prefix,
-        divergence,
-        snemu_len: snemu.len(),
-        qemu_len: qemu.len(),
-    }
+    Diff { common_prefix, divergence }
 }
 
 /// The set of registered string names in a stream (the kernel's telemetry
@@ -162,33 +154,34 @@ fn decode_frames(bytes: &[u8]) -> Vec<OwnedFrame> {
     frames
 }
 
-/// Boot the kernel under snemu in-process for up to `max_steps` and return the
-/// telemetry frames it transmitted.
-fn collect_snemu(kernel: &[u8], dtb: &[u8], max_steps: u64) -> Result<Vec<OwnedFrame>, String> {
+/// Boot the kernel under snemu in-process for up to `max_steps` and return its
+/// telemetry frames plus how it stopped (step limit vs a fault — a meta-loop
+/// signal we keep as data rather than swallow).
+fn collect_snemu(kernel: &[u8], dtb: &[u8], max_steps: u64) -> Result<(Vec<OwnedFrame>, String), String> {
     let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(dtb), HART_COUNT)
         .map_err(|e| format!("snemu load: {e:?}"))?;
     let mut steps = 0u64;
+    let mut stop = format!("step limit ({max_steps})");
     while steps < max_steps {
         match machine.step() {
             Ok(()) => steps += 1,
-            // A fault ends the run; surface it (a meta-loop signal) rather than
-            // silently diffing a truncated stream.
             Err(e) => {
-                eprintln!("snemu-diff: snemu halted after {steps} steps with {e:?}");
+                stop = format!("{e:?} @ {steps} steps");
                 break;
             }
         }
     }
-    if steps == max_steps {
-        eprintln!("snemu-diff: snemu reached the {max_steps}-step limit cleanly");
-    }
-    Ok(decode_frames(machine.virtio_tx_output()))
+    Ok((decode_frames(machine.virtio_tx_output()), stop))
 }
 
 /// Boot the kernel under QEMU (default `init` workload), collect the telemetry
 /// frames for `window`, then kill it.
 fn collect_qemu(window: Duration, workload: Option<&str>) -> Result<Vec<OwnedFrame>, String> {
-    let socket = std::env::temp_dir().join(format!("snitch-diff-{}.sock", std::process::id()));
+    let socket = std::env::temp_dir().join(format!(
+        "snitch-diff-{}-{}.sock",
+        std::process::id(),
+        workload.unwrap_or("default")
+    ));
     let _ = std::fs::remove_file(&socket);
     let chardev = format!(
         "socket,path={},server=on,wait=on,id=telemetry",
@@ -248,123 +241,194 @@ fn connect_with_deadline(path: &std::path::Path, timeout: Duration) -> Result<Un
     }
 }
 
-/// The differential oracle entry point: boot the same kernel (optionally a
-/// selected `workload`) under snemu and QEMU, structurally diff their frame
-/// streams, and report.
-pub fn run(max_steps: u64, qemu_secs: u64, workload: Option<&str>) -> ExitCode {
-    // A workload needs the runtime registry compiled in on both sides.
-    let features: &[&str] = if workload.is_some() { &["itest-workloads"] } else { &[] };
-    if !qemu::build_kernel(features).is_ok_and(|s| s.success()) {
-        eprintln!("snemu-diff: kernel build failed");
-        return ExitCode::from(1);
+/// The runtime workloads snemu can select (mirrors `kernel_core::workloads::
+/// bootargs::select`). The sweep runs the oracle over every one.
+const WORKLOADS: &[&str] = &[
+    "demo", "init", "smp", "smp-spsc", "smp-spsc-batch", "priorities", "block-wake", "workers",
+    "heap-grow", "frame-oom", "heap-oom", "spawn-storm", "ipi-pong", "shootdown-storm",
+    "mutex-storm", "virtio-storm", "tlb-shootdown", "ping-pong", "userspace", "userspace-fault",
+    "userspace-bad-ptr", "userspace-span-flood", "user-hog", "syscall-hog", "console-echo",
+    "spawn-image", "manifest-iface", "probe", "stack-guard", "stack-overflow-deep",
+    "boot-stack-guard", "spawn-demo", "spawn-reap", "wait-any", "endpoint-create", "ipc",
+    "ipc-rpc", "badge-mint", "badge-handout", "fs", "notify-smoke", "stitch-repl", "stitch-fs",
+];
+
+/// The structured outcome of comparing one workload under snemu vs QEMU.
+struct Comparison {
+    snemu_frames: usize,
+    qemu_frames: usize,
+    common_prefix: usize,
+    vocab_shared: usize,
+    only_snemu: Vec<String>,
+    only_qemu: Vec<String>,
+    /// How snemu's run ended (step limit vs a fault).
+    snemu_stop: String,
+    divergence: Option<(OwnedFrame, OwnedFrame)>,
+}
+
+impl Comparison {
+    /// Faithful ⇔ snemu invented no telemetry QEMU never emitted. (Names only
+    /// QEMU has are behavior snemu didn't reach in its budget, not a divergence.)
+    fn faithful(&self) -> bool {
+        self.only_snemu.is_empty()
     }
-    let kernel = match std::fs::read(qemu::KERNEL_BIN) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("snemu-diff: read kernel: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let dtb = match std::fs::read(SNEMU_DTB) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("snemu-diff: read {SNEMU_DTB}: {e}");
-            return ExitCode::from(1);
-        }
-    };
+}
+
+/// Boot `kernel` (with `workload`) under both emulators and structurally compare.
+fn compare(
+    kernel: &[u8],
+    dtb_base: &[u8],
+    workload: Option<&str>,
+    max_steps: u64,
+    qemu_secs: u64,
+) -> Result<Comparison, String> {
     // Firmware role: inject the workload into the DTB snemu boots (QEMU gets it
     // via `-append`), so both emulators run the same scenario.
     let dtb = match workload {
-        Some(w) => snemu::dtb::set_bootargs(&dtb, &format!("workload={w}")).unwrap_or(dtb),
-        None => dtb,
+        Some(w) => snemu::dtb::set_bootargs(dtb_base, &format!("workload={w}"))
+            .ok_or("DTB patch failed")?,
+        None => dtb_base.to_vec(),
     };
+    let (snemu, snemu_stop) = collect_snemu(kernel, &dtb, max_steps)?;
+    let qemu = collect_qemu(Duration::from_secs(qemu_secs), workload)?;
 
-    let label = workload.unwrap_or("default (init)");
-    eprintln!("snemu-diff: workload = {label}");
-    eprintln!("snemu-diff: booting under snemu ({max_steps} steps)...");
-    let snemu = match collect_snemu(&kernel, &dtb, max_steps) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("snemu-diff: snemu: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    eprintln!("snemu-diff: booting under qemu ({qemu_secs}s window)...");
-    let qemu = match collect_qemu(Duration::from_secs(qemu_secs), workload) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("snemu-diff: qemu: {e}");
-            return ExitCode::from(1);
-        }
-    };
-
-    report(&snemu, &qemu)
+    let d = diff_streams(&snemu, &qemu);
+    let sv = string_vocabulary(&snemu);
+    let qv = string_vocabulary(&qemu);
+    Ok(Comparison {
+        snemu_frames: snemu.len(),
+        qemu_frames: qemu.len(),
+        common_prefix: d.common_prefix,
+        vocab_shared: sv.intersection(&qv).count(),
+        only_snemu: sv.difference(&qv).cloned().collect(),
+        only_qemu: qv.difference(&sv).cloned().collect(),
+        snemu_stop,
+        divergence: d.divergence,
+    })
 }
 
-/// Print the structural comparison of the two frame streams.
-fn report(snemu: &[OwnedFrame], qemu: &[OwnedFrame]) -> ExitCode {
+/// Build the kernel and read the base DTB the emulators share.
+fn prepare(with_workloads: bool) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let features: &[&str] = if with_workloads { &["itest-workloads"] } else { &[] };
+    if !qemu::build_kernel(features).is_ok_and(|s| s.success()) {
+        return Err("kernel build failed".to_string());
+    }
+    let kernel = std::fs::read(qemu::KERNEL_BIN).map_err(|e| format!("read kernel: {e}"))?;
+    let dtb = std::fs::read(SNEMU_DTB).map_err(|e| format!("read {SNEMU_DTB}: {e}"))?;
+    Ok((kernel, dtb))
+}
+
+/// Single-workload oracle: boot under both, diff, print the detailed report.
+pub fn run(max_steps: u64, qemu_secs: u64, workload: Option<&str>) -> ExitCode {
+    let (kernel, dtb) = match prepare(workload.is_some()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("snemu-diff: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    eprintln!("snemu-diff: workload = {}", workload.unwrap_or("default (init)"));
+    let cmp = match compare(&kernel, &dtb, workload, max_steps, qemu_secs) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("snemu-diff: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    print_detailed(&cmp);
+    if cmp.faithful() { ExitCode::SUCCESS } else { ExitCode::from(1) }
+}
+
+/// Sweep every workload through the oracle and tabulate agree/disagree.
+pub fn run_all(max_steps: u64, qemu_secs: u64) -> ExitCode {
+    let (kernel, dtb) = match prepare(true) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("snemu-diff: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut results: Vec<(String, Result<Comparison, String>)> = Vec::new();
+    for (i, &w) in WORKLOADS.iter().enumerate() {
+        eprintln!("snemu-diff: [{}/{}] {w}...", i + 1, WORKLOADS.len());
+        let cmp = compare(&kernel, &dtb, Some(w), max_steps, qemu_secs);
+        results.push((w.to_string(), cmp));
+    }
+
+    print_summary(&results)
+}
+
+/// The detailed single-workload report.
+fn print_detailed(cmp: &Comparison) {
     eprintln!(
-        "snemu-diff: snemu emitted {} frames, qemu emitted {} frames",
-        snemu.len(),
-        qemu.len()
+        "snemu-diff: snemu {} frames ({}), qemu {} frames",
+        cmp.snemu_frames, cmp.snemu_stop, cmp.qemu_frames
     );
-    let d = diff_streams(snemu, qemu);
     eprintln!(
         "snemu-diff: structural agreement on the first {} frame(s)",
-        d.common_prefix
+        cmp.common_prefix
     );
-    match &d.divergence {
-        Some((s, q)) => {
-            eprintln!("snemu-diff: first divergence at frame {}:", d.common_prefix);
-            eprintln!("  snemu: {s:?}");
-            eprintln!("  qemu:  {q:?}");
-        }
-        None if d.snemu_len == d.qemu_len => {
-            eprintln!("snemu-diff: streams agree in full (same length)");
-        }
-        None => {
-            eprintln!(
-                "snemu-diff: shorter stream is a structural prefix of the longer (lengths differ)"
-            );
-        }
+    if let Some((s, q)) = &cmp.divergence {
+        eprintln!("snemu-diff: first divergence at frame {}:", cmp.common_prefix);
+        eprintln!("  snemu: {s:?}");
+        eprintln!("  qemu:  {q:?}");
     }
-
-    let sv = string_vocabulary(snemu);
-    let qv = string_vocabulary(qemu);
-    let only_snemu: BTreeSet<_> = sv.difference(&qv).collect();
-    let only_qemu: BTreeSet<_> = qv.difference(&sv).collect();
     eprintln!(
-        "snemu-diff: registered-name vocabulary — snemu {}, qemu {}, {} shared",
-        sv.len(),
-        qv.len(),
-        sv.intersection(&qv).count()
+        "snemu-diff: vocabulary — {} shared, {} only-qemu, {} only-snemu",
+        cmp.vocab_shared,
+        cmp.only_qemu.len(),
+        cmp.only_snemu.len()
     );
-    if !only_qemu.is_empty() {
-        eprintln!("  only in qemu:  {only_qemu:?}");
+    if !cmp.only_snemu.is_empty() {
+        eprintln!("  only in snemu: {:?}", cmp.only_snemu);
     }
-
-    // Verdict: any name snemu emitted that QEMU never did is a real divergence
-    // (snemu invented telemetry) — a fail. Names only QEMU emitted are frames
-    // snemu didn't reach in its step budget (QEMU runs far longer in wall-clock),
-    // not a fault. The boot prefix agreement quantifies faithfulness up to the
-    // first cross-hart ordering difference.
-    if only_snemu.is_empty() {
-        eprintln!(
-            "snemu-diff: PASS — snemu is faithful to QEMU: boot prefix agreed on {} frames, \
-             and every telemetry name snemu emitted, QEMU emitted too \
-             ({} name(s) appear only in QEMU — behavior snemu didn't reach in {} frames).",
-            d.common_prefix,
-            only_qemu.len(),
-            snemu.len(),
-        );
-        ExitCode::SUCCESS
+    if cmp.faithful() {
+        eprintln!("snemu-diff: PASS — snemu faithful to QEMU (nothing only-in-snemu).");
     } else {
-        eprintln!("  only in snemu: {only_snemu:?}");
-        eprintln!(
-            "snemu-diff: FAIL — snemu emitted telemetry names QEMU never did (above): a real divergence.",
-        );
-        ExitCode::from(1)
+        eprintln!("snemu-diff: FAIL — snemu emitted telemetry QEMU never did.");
     }
+}
+
+/// The sweep summary table + verdict counts.
+fn print_summary(results: &[(String, Result<Comparison, String>)]) -> ExitCode {
+    println!();
+    println!(
+        "{:<22} {:<7} {:>6} {:>16} {:>10}  {}",
+        "WORKLOAD", "VERDICT", "PREFIX", "SNEMU→QEMU", "VOCAB", "SNEMU STOP"
+    );
+    let (mut pass, mut fail, mut errored) = (0, 0, 0);
+    for (name, result) in results {
+        match result {
+            Ok(cmp) => {
+                let verdict = if cmp.faithful() {
+                    pass += 1;
+                    "PASS"
+                } else {
+                    fail += 1;
+                    "FAIL"
+                };
+                let frames = format!("{}→{}", cmp.snemu_frames, cmp.qemu_frames);
+                let vocab = format!(
+                    "{}/{}q/{}s",
+                    cmp.vocab_shared,
+                    cmp.only_qemu.len(),
+                    cmp.only_snemu.len()
+                );
+                println!(
+                    "{name:<22} {verdict:<7} {:>6} {frames:>16} {vocab:>10}  {}",
+                    cmp.common_prefix, cmp.snemu_stop
+                );
+            }
+            Err(e) => {
+                errored += 1;
+                println!("{name:<22} {:<7} {:>6} {:>16} {:>10}  {e}", "ERROR", "-", "-", "-");
+            }
+        }
+    }
+    println!();
+    println!("snemu-diff: {pass} PASS, {fail} FAIL, {errored} ERROR of {} workloads", results.len());
+    if fail == 0 && errored == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) }
 }
 
 #[cfg(test)]

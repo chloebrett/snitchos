@@ -13,7 +13,7 @@ const FDT_BEGIN_NODE: u32 = 1;
 const FDT_END_NODE: u32 = 2;
 const FDT_PROP: u32 = 3;
 const FDT_NOP: u32 = 4;
-const FDT_END: u32 = 9;
+// FDT_END (9) — end of the structure block — falls into the walk's catch-all.
 
 // Header field offsets.
 const OFF_TOTALSIZE: usize = 0x04;
@@ -52,14 +52,13 @@ pub fn set_bootargs(dtb: &[u8], bootargs: &str) -> Option<Vec<u8>> {
     let strings_block = dtb.get(off_strings..off_strings + size_strings)?;
 
     // Find (or plan to append) the "bootargs" property name in the strings block.
-    let (nameoff, new_strings) = match find_string(strings_block, b"bootargs") {
-        Some(off) => (off, strings_block.to_vec()),
-        None => {
-            let off = strings_block.len();
-            let mut s = strings_block.to_vec();
-            s.extend_from_slice(b"bootargs\0");
-            (off, s)
-        }
+    let (nameoff, new_strings) = if let Some(off) = find_string(strings_block, b"bootargs") {
+        (off, strings_block.to_vec())
+    } else {
+        let off = strings_block.len();
+        let mut s = strings_block.to_vec();
+        s.extend_from_slice(b"bootargs\0");
+        (off, s)
     };
 
     // The property token goes right after `/chosen`'s BEGIN_NODE (properties
@@ -98,8 +97,8 @@ pub fn set_bootargs(dtb: &[u8], bootargs: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Byte offset (within the struct block) just past `/chosen`'s BEGIN_NODE token
-/// and name — where its first property belongs.
+/// Byte offset (within the struct block) just past `/chosen`'s `BEGIN_NODE`
+/// token and name — where its first property belongs.
 fn chosen_properties_offset(struct_block: &[u8]) -> Option<usize> {
     let mut i = 0;
     while let Some(tok) = be32(struct_block, i) {
@@ -118,7 +117,7 @@ fn chosen_properties_offset(struct_block: &[u8]) -> Option<usize> {
                 let len = be32(struct_block, i + 4)? as usize;
                 i = align4(i + 12 + len);
             }
-            FDT_END => return None,
+            // FDT_END (tree ended, no /chosen) or any unknown token: give up.
             _ => return None,
         }
     }
