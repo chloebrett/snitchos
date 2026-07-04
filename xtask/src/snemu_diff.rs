@@ -455,6 +455,24 @@ fn fmt_timing(t: &Timing) -> String {
     format!("{}/{}", fmt_opt(t.first_span), fmt_opt(t.milestone))
 }
 
+/// Build a DTB whose `workload=<name>` bootarg is padded to a **fixed 40-char
+/// field**, so every workload's DTB is byte-for-byte the same size. That makes
+/// writing one over another in a booted snapshot's RAM layout-preserving — the
+/// guest re-parses an identically-shaped blob. Trailing spaces are ignored by
+/// the kernel's whitespace-split bootarg parser.
+fn workload_dtb(base: &[u8], name: &str) -> Option<Vec<u8>> {
+    const FIELD: usize = 40;
+    let arg = format!("workload={name}");
+    // `{:<FIELD}` pads but does NOT truncate — an over-long name would silently
+    // produce a different-size DTB and break the layout-preserving invariant.
+    assert!(
+        arg.len() <= FIELD,
+        "workload bootarg {arg:?} ({} chars) exceeds the {FIELD}-char fixed field",
+        arg.len(),
+    );
+    snemu::dtb::set_bootargs(base, &format!("{arg:<FIELD$}"))
+}
+
 /// The snapshot/fork harness: boot the common prefix **once**, snapshot it, then
 /// fork every workload by cloning the snapshot, patching its `workload=` bootarg
 /// into RAM, and resuming. Proves boot amortization — one boot, N workloads —
@@ -467,10 +485,11 @@ pub fn run_fork(max_steps: u64) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // Boot with the LONGEST workload's DTB so the reserved DTB region is maximal;
-    // per-workload DTBs (smaller) then fit when patched into the snapshot's RAM.
-    let longest = WORKLOADS.iter().max_by_key(|w| w.len()).copied().unwrap_or("demo");
-    let Some(boot_dtb) = snemu::dtb::set_bootargs(&base_dtb, &format!("workload={longest}")) else {
+    // Fixed-width bootarg → every workload's DTB is the SAME size, so patching
+    // one over another in the snapshot's RAM is layout-preserving (no re-parse
+    // wedge). The base workload is irrelevant (overwritten before the guest
+    // reads it), but must be this same fixed size.
+    let Some(boot_dtb) = workload_dtb(&base_dtb, "init") else {
         eprintln!("snemu-fork: DTB patch failed");
         return ExitCode::from(1);
     };
@@ -504,8 +523,7 @@ pub fn run_fork(max_steps: u64) -> ExitCode {
     println!("{:<22} {:>7} {:>9} {:>8}  {}", "WORKLOAD", "FRAMES", "FORK+RUN", "1ST-SPAN", "STOP");
     for &w in WORKLOADS {
         let mut m = snapshot.clone();
-        let patched = snemu::dtb::set_bootargs(&base_dtb, &format!("workload={w}"));
-        if let Some(dtb) = patched {
+        if let Some(dtb) = workload_dtb(&base_dtb, w) {
             if let Err(e) = m.write_ram(snemu::loader::DTB_ADDR, &dtb) {
                 println!("{w:<22} patch failed: {e}");
                 continue;
