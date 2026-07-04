@@ -11,12 +11,25 @@
 use crate::prelude::*;
 use crate::value::{DataValue, Value};
 
-/// The style-agnostic model of a table: an optional header row and the rows of
-/// already-rendered cells (row-major). A record *list* has a header (the shared
-/// field names); a single-record **key/value** table is headerless (each row is
-/// `[field, value]`). A [`TableStyle`] turns it into text.
+/// A column's horizontal alignment. Decided from the *value type* (numbers
+/// right-align, everything else left) — read off the value, never by re-parsing
+/// the rendered cell string.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Align {
+    /// Left-justified — the default (text, records, anything non-numeric).
+    Left,
+    /// Right-justified — a column whose every cell is numeric.
+    Right,
+}
+
+/// The style-agnostic model of a table: an optional header row, the per-column
+/// alignments, and the rows of already-rendered cells (row-major). A record
+/// *list* has a header (the shared field names); a single-record **key/value**
+/// table is headerless (each row is `[field, value]`). A [`TableStyle`] turns it
+/// into text.
 pub struct Table {
     header: Option<Vec<String>>,
+    aligns: Vec<Align>,
     rows: Vec<Vec<String>>,
 }
 
@@ -31,6 +44,12 @@ impl Table {
     #[must_use]
     pub fn rows(&self) -> &[Vec<String>] {
         &self.rows
+    }
+
+    /// Each column's horizontal alignment (one per column).
+    #[must_use]
+    pub fn aligns(&self) -> &[Align] {
+        &self.aligns
     }
 
     /// Each column's display width — the widest of its header (if any) and its
@@ -76,11 +95,16 @@ impl TableStyle for BoxStyle {
                 widths.iter().map(|w| "─".repeat(w + 2)).collect::<Vec<_>>();
             format!("{left}{}{right}", segments.join(&tee.to_string()))
         };
+        let aligns = table.aligns();
         let row = |cells: &[String]| {
             let padded = cells
                 .iter()
                 .zip(&widths)
-                .map(|(cell, width)| format!("{cell:<width$}"))
+                .zip(aligns)
+                .map(|((cell, width), align)| match align {
+                    Align::Left => format!("{cell:<width$}"),
+                    Align::Right => format!("{cell:>width$}"),
+                })
                 .collect::<Vec<_>>();
             format!("│ {} │", padded.join(" │ "))
         };
@@ -110,27 +134,44 @@ fn as_table(value: &Value) -> Option<Table> {
     let Value::List(items) = value else {
         return None;
     };
-    let (columns, first_row) = record_row(items.first()?)?;
+    let (columns, first_row, mut aligns) = record_row(items.first()?)?;
     let mut rows = alloc::vec![first_row];
     for item in &items[1..] {
-        let (cols, cells) = record_row(item)?;
+        let (cols, cells, cell_aligns) = record_row(item)?;
         if cols != columns {
             return None; // heterogeneous shapes don't form one table
         }
+        // A column is right-aligned only if *every* cell in it is numeric; one
+        // non-numeric cell demotes the whole column to left.
+        for (col, cell_align) in cell_aligns.iter().enumerate() {
+            if *cell_align == Align::Left {
+                aligns[col] = Align::Left;
+            }
+        }
         rows.push(cells);
     }
-    Some(Table { header: Some(columns), rows })
+    Some(Table { header: Some(columns), aligns, rows })
 }
 
-/// A record's `(column names, cell strings)`, or `None` if it isn't a `Data` with
-/// all fields named.
-fn record_row(value: &Value) -> Option<(Vec<String>, Vec<String>)> {
+/// The alignment a value's column wants: numbers right-justify, everything else
+/// left. Read off the value's *type*, not its rendered text.
+fn align_of(value: &Value) -> Align {
+    match value {
+        Value::Int(_) | Value::Float(_) => Align::Right,
+        _ => Align::Left,
+    }
+}
+
+/// A record's `(column names, cell strings, per-field alignments)`, or `None` if
+/// it isn't a `Data` with all fields named.
+fn record_row(value: &Value) -> Option<(Vec<String>, Vec<String>, Vec<Align>)> {
     let Value::Data(data) = value else {
         return None;
     };
     let columns = data.fields.iter().map(|(name, _)| name.clone()).collect::<Option<Vec<_>>>()?;
     let cells = data.fields.iter().map(|(_, v)| v.display()).collect();
-    Some((columns, cells))
+    let aligns = data.fields.iter().map(|(_, v)| align_of(v)).collect();
+    Some((columns, cells, aligns))
 }
 
 /// A single **product** record as a **headerless** key/value [`Table`] (each row
@@ -150,7 +191,15 @@ fn as_kv(value: &Value) -> Option<Table> {
         .iter()
         .map(|(name, value)| Some(alloc::vec![name.clone()?, value.display()]))
         .collect::<Option<Vec<_>>>()?;
-    Some(Table { header: None, rows })
+    // Field-name column is a label (always left); the value column right-aligns
+    // only when every value is numeric.
+    let value_align =
+        if data.fields.iter().all(|(_, v)| align_of(v) == Align::Right) {
+            Align::Right
+        } else {
+            Align::Left
+        };
+    Some(Table { header: None, aligns: alloc::vec![Align::Left, value_align], rows })
 }
 
 /// Whether `value` is a sum variant carrying fields — the tree case (a nullary
@@ -223,7 +272,7 @@ pub fn render(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BoxStyle, Table, TableStyle, render};
+    use super::{Align, BoxStyle, Table, TableStyle, render};
     use crate::value::{DataValue, Value};
     #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
     use crate::prelude::*;
@@ -339,7 +388,7 @@ Ok
 ┌────┬─────┐
 │ id │ tag │
 ├────┼─────┤
-│ 1  │ x   │
+│  1 │ x   │
 │ 20 │ yy  │
 └────┴─────┘"
         );
@@ -372,9 +421,45 @@ Ok
     }
 
     #[test]
-    fn box_style_renders_the_model_directly() {
+    fn a_column_mixing_numbers_and_text_stays_left_aligned() {
+        // One non-numeric cell demotes the whole column to left.
+        let list = Value::List(
+            vec![
+                record(vec![("v", Value::Int(5))]),
+                record(vec![("v", Value::Str("hi".into()))]),
+            ]
+            .into(),
+        );
+        assert_eq!(
+            render(&list),
+            "\
+┌────┐
+│ v  │
+├────┤
+│ 5  │
+│ hi │
+└────┘"
+        );
+    }
+
+    #[test]
+    fn a_key_value_table_right_aligns_an_all_numeric_value_column() {
+        let point = record(vec![("x", Value::Int(1)), ("y", Value::Int(20))]);
+        assert_eq!(
+            render(&point),
+            "\
+┌───┬────┐
+│ x │  1 │
+│ y │ 20 │
+└───┴────┘"
+        );
+    }
+
+    #[test]
+    fn box_style_honors_per_column_alignment() {
         let table = Table {
             header: Some(vec!["a".into(), "bb".into()]),
+            aligns: vec![Align::Left, Align::Right],
             rows: vec![
                 vec!["1".into(), "2".into()],
                 vec!["30".into(), "4".into()],
@@ -386,8 +471,8 @@ Ok
 ┌────┬────┐
 │ a  │ bb │
 ├────┼────┤
-│ 1  │ 2  │
-│ 30 │ 4  │
+│ 1  │  2 │
+│ 30 │  4 │
 └────┴────┘"
         );
     }
