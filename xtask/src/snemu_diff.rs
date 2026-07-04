@@ -154,14 +154,34 @@ fn decode_frames(bytes: &[u8]) -> Vec<OwnedFrame> {
     frames
 }
 
+/// Wall-clock timing for one emulator run.
+#[derive(Clone, Copy)]
+struct Timing {
+    /// Wall time from run start to the first `SpanStart` frame.
+    first_span: Option<Duration>,
+    /// Wall time for the whole run (snemu: the step loop; qemu: the window).
+    total: Duration,
+}
+
+fn has_span(frames: &[OwnedFrame]) -> bool {
+    frames.iter().any(|f| matches!(f, OwnedFrame::SpanStart { .. }))
+}
+
 /// Boot the kernel under snemu in-process for up to `max_steps` and return its
-/// telemetry frames plus how it stopped (step limit vs a fault — a meta-loop
-/// signal we keep as data rather than swallow).
-fn collect_snemu(kernel: &[u8], dtb: &[u8], max_steps: u64) -> Result<(Vec<OwnedFrame>, String), String> {
+/// telemetry frames, how it stopped (step limit vs a fault — a meta-loop signal
+/// we keep as data), and wall-clock timing.
+fn collect_snemu(
+    kernel: &[u8],
+    dtb: &[u8],
+    max_steps: u64,
+) -> Result<(Vec<OwnedFrame>, String, Timing), String> {
+    let start = Instant::now();
     let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(dtb), HART_COUNT)
         .map_err(|e| format!("snemu load: {e:?}"))?;
     let mut steps = 0u64;
     let mut stop = format!("step limit ({max_steps})");
+    let mut first_span = None;
+    let mut seen_tx = 0usize;
     while steps < max_steps {
         match machine.step() {
             Ok(()) => steps += 1,
@@ -170,13 +190,31 @@ fn collect_snemu(kernel: &[u8], dtb: &[u8], max_steps: u64) -> Result<(Vec<Owned
                 break;
             }
         }
+        // Watch the TX buffer for the first span (cheap length check per step;
+        // decode only when it grows, and only until we've found one).
+        if first_span.is_none() {
+            let tx = machine.virtio_tx_output();
+            if tx.len() != seen_tx {
+                seen_tx = tx.len();
+                if has_span(&decode_frames(tx)) {
+                    first_span = Some(start.elapsed());
+                }
+            }
+        }
     }
-    Ok((decode_frames(machine.virtio_tx_output()), stop))
+    let timing = Timing { first_span, total: start.elapsed() };
+    Ok((decode_frames(machine.virtio_tx_output()), stop, timing))
 }
 
-/// Boot the kernel under QEMU (default `init` workload), collect the telemetry
-/// frames for `window`, then kill it.
-fn collect_qemu(window: Duration, workload: Option<&str>) -> Result<Vec<OwnedFrame>, String> {
+/// Boot the kernel under QEMU (with `workload`), collect the telemetry frames
+/// for `window`, then kill it. Timing is measured from spawn: `first_span` is
+/// when the first `SpanStart` arrives on the wire (a real streaming latency,
+/// including QEMU's firmware + DTB-gen startup); `total` is the whole window.
+fn collect_qemu(
+    window: Duration,
+    workload: Option<&str>,
+) -> Result<(Vec<OwnedFrame>, Timing), String> {
+    let start = Instant::now();
     let socket = std::env::temp_dir().join(format!(
         "snitch-diff-{}-{}.sock",
         std::process::id(),
@@ -199,12 +237,20 @@ fn collect_qemu(window: Duration, workload: Option<&str>) -> Result<Vec<OwnedFra
 
     let stream = connect_with_deadline(&socket, Duration::from_secs(10));
     let frames = Arc::new(Mutex::new(Vec::new()));
+    let first_span = Arc::new(Mutex::new(None));
     let reader = match stream {
         Ok(stream) => {
             let sink = Arc::clone(&frames);
+            let span_at = Arc::clone(&first_span);
             Some(thread::spawn(move || {
                 let mut stream = stream;
                 let _ = decode_stream(&mut stream, |f| {
+                    if matches!(f, protocol::Frame::SpanStart { .. }) {
+                        let mut slot = span_at.lock().unwrap();
+                        if slot.is_none() {
+                            *slot = Some(start.elapsed());
+                        }
+                    }
                     sink.lock().unwrap().push(OwnedFrame::from_borrowed(f));
                 });
             }))
@@ -222,11 +268,15 @@ fn collect_qemu(window: Duration, workload: Option<&str>) -> Result<Vec<OwnedFra
         let _ = reader.join();
     }
     let _ = std::fs::remove_file(&socket);
+    let timing = Timing {
+        first_span: *first_span.lock().unwrap(),
+        total: start.elapsed(),
+    };
     let frames = Arc::try_unwrap(frames)
         .map_err(|_| "reader thread still holds frames".to_string())?
         .into_inner()
         .map_err(|_| "frame mutex poisoned".to_string())?;
-    Ok(frames)
+    Ok((frames, timing))
 }
 
 /// Connect to `path` as a client, retrying until it exists or the deadline.
@@ -264,6 +314,8 @@ struct Comparison {
     /// How snemu's run ended (step limit vs a fault).
     snemu_stop: String,
     divergence: Option<(OwnedFrame, OwnedFrame)>,
+    snemu_timing: Timing,
+    qemu_timing: Timing,
 }
 
 impl Comparison {
@@ -289,8 +341,8 @@ fn compare(
             .ok_or("DTB patch failed")?,
         None => dtb_base.to_vec(),
     };
-    let (snemu, snemu_stop) = collect_snemu(kernel, &dtb, max_steps)?;
-    let qemu = collect_qemu(Duration::from_secs(qemu_secs), workload)?;
+    let (snemu, snemu_stop, snemu_timing) = collect_snemu(kernel, &dtb, max_steps)?;
+    let (qemu, qemu_timing) = collect_qemu(Duration::from_secs(qemu_secs), workload)?;
 
     let d = diff_streams(&snemu, &qemu);
     let sv = string_vocabulary(&snemu);
@@ -304,6 +356,8 @@ fn compare(
         only_qemu: qv.difference(&sv).cloned().collect(),
         snemu_stop,
         divergence: d.divergence,
+        snemu_timing,
+        qemu_timing,
     })
 }
 
@@ -357,10 +411,11 @@ pub fn run_all(max_steps: u64, qemu_secs: u64, limit: Option<usize>) -> ExitCode
         let cmp = compare(&kernel, &dtb, Some(w), max_steps, qemu_secs);
         match &cmp {
             Ok(c) => eprintln!(
-                "{} (snemu {} frames, {})",
+                "{} (snemu {} frames | 1st-span snemu {} vs qemu {})",
                 if c.faithful() { "PASS" } else { "FAIL" },
                 c.snemu_frames,
-                c.snemu_stop
+                fmt_opt(c.snemu_timing.first_span),
+                fmt_opt(c.qemu_timing.first_span),
             ),
             Err(e) => eprintln!("ERROR: {e}"),
         }
@@ -370,11 +425,26 @@ pub fn run_all(max_steps: u64, qemu_secs: u64, limit: Option<usize>) -> ExitCode
     print_summary(&results)
 }
 
+/// Format an optional `Duration` in seconds (or `—` if never reached).
+fn fmt_opt(d: Option<Duration>) -> String {
+    d.map_or_else(|| "—".to_string(), |d| format!("{:.2}s", d.as_secs_f64()))
+}
+
+/// Format a `Timing` as `first-span/total` seconds.
+fn fmt_timing(t: &Timing) -> String {
+    format!("{}/{:.2}s", fmt_opt(t.first_span), t.total.as_secs_f64())
+}
+
 /// The detailed single-workload report.
 fn print_detailed(cmp: &Comparison) {
     eprintln!(
         "snemu-diff: snemu {} frames ({}), qemu {} frames",
         cmp.snemu_frames, cmp.snemu_stop, cmp.qemu_frames
+    );
+    eprintln!(
+        "snemu-diff: wall time (first-span/total) — snemu {}, qemu {}",
+        fmt_timing(&cmp.snemu_timing),
+        fmt_timing(&cmp.qemu_timing),
     );
     eprintln!(
         "snemu-diff: structural agreement on the first {} frame(s)",
@@ -403,10 +473,11 @@ fn print_detailed(cmp: &Comparison) {
 
 /// The sweep summary table + verdict counts.
 fn print_summary(results: &[(String, Result<Comparison, String>)]) -> ExitCode {
+    // Timing columns are `first-span/total` wall seconds for each emulator.
     println!();
     println!(
-        "{:<22} {:<7} {:>6} {:>16} {:>10}  {}",
-        "WORKLOAD", "VERDICT", "PREFIX", "SNEMU→QEMU", "VOCAB", "SNEMU STOP"
+        "{:<22} {:<5} {:>5} {:>9} {:>15} {:>15}  {}",
+        "WORKLOAD", "VERD", "PREFX", "VOCAB", "SNEMU sp/tot", "QEMU sp/tot", "SNEMU STOP"
     );
     let (mut pass, mut fail, mut errored) = (0, 0, 0);
     for (name, result) in results {
@@ -419,7 +490,6 @@ fn print_summary(results: &[(String, Result<Comparison, String>)]) -> ExitCode {
                     fail += 1;
                     "FAIL"
                 };
-                let frames = format!("{}→{}", cmp.snemu_frames, cmp.qemu_frames);
                 let vocab = format!(
                     "{}/{}q/{}s",
                     cmp.vocab_shared,
@@ -427,13 +497,16 @@ fn print_summary(results: &[(String, Result<Comparison, String>)]) -> ExitCode {
                     cmp.only_snemu.len()
                 );
                 println!(
-                    "{name:<22} {verdict:<7} {:>6} {frames:>16} {vocab:>10}  {}",
-                    cmp.common_prefix, cmp.snemu_stop
+                    "{name:<22} {verdict:<5} {:>5} {vocab:>9} {:>15} {:>15}  {}",
+                    cmp.common_prefix,
+                    fmt_timing(&cmp.snemu_timing),
+                    fmt_timing(&cmp.qemu_timing),
+                    cmp.snemu_stop
                 );
             }
             Err(e) => {
                 errored += 1;
-                println!("{name:<22} {:<7} {:>6} {:>16} {:>10}  {e}", "ERROR", "-", "-", "-");
+                println!("{name:<22} {:<5} {:>5} {:>9} {:>15} {:>15}  {e}", "ERR", "-", "-", "-", "-");
             }
         }
     }
