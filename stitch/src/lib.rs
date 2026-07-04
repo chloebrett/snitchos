@@ -35,6 +35,7 @@ pub mod ops;
 pub mod parser;
 pub mod pattern;
 pub mod platform;
+pub mod render;
 pub mod registry;
 pub mod runner;
 pub mod telemetry;
