@@ -339,8 +339,9 @@ pub fn run(max_steps: u64, qemu_secs: u64, workload: Option<&str>) -> ExitCode {
     if cmp.faithful() { ExitCode::SUCCESS } else { ExitCode::from(1) }
 }
 
-/// Sweep every workload through the oracle and tabulate agree/disagree.
-pub fn run_all(max_steps: u64, qemu_secs: u64) -> ExitCode {
+/// Sweep the workloads (all, or the first `limit`) through the oracle and
+/// tabulate agree/disagree.
+pub fn run_all(max_steps: u64, qemu_secs: u64, limit: Option<usize>) -> ExitCode {
     let (kernel, dtb) = match prepare(true) {
         Ok(v) => v,
         Err(e) => {
@@ -349,10 +350,20 @@ pub fn run_all(max_steps: u64, qemu_secs: u64) -> ExitCode {
         }
     };
 
+    let count = limit.unwrap_or(WORKLOADS.len()).min(WORKLOADS.len());
     let mut results: Vec<(String, Result<Comparison, String>)> = Vec::new();
-    for (i, &w) in WORKLOADS.iter().enumerate() {
-        eprintln!("snemu-diff: [{}/{}] {w}...", i + 1, WORKLOADS.len());
+    for (i, &w) in WORKLOADS.iter().take(count).enumerate() {
+        eprint!("snemu-diff: [{}/{count}] {w:<22} ", i + 1);
         let cmp = compare(&kernel, &dtb, Some(w), max_steps, qemu_secs);
+        match &cmp {
+            Ok(c) => eprintln!(
+                "{} (snemu {} frames, {})",
+                if c.faithful() { "PASS" } else { "FAIL" },
+                c.snemu_frames,
+                c.snemu_stop
+            ),
+            Err(e) => eprintln!("ERROR: {e}"),
+        }
         results.push((w.to_string(), cmp));
     }
 

@@ -66,6 +66,9 @@ enum Cmd {
         /// (Ignores `--workload`.)
         #[arg(long)]
         all: bool,
+        /// With `--all`, sweep only the first N workloads (faster).
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Build the kernel and run it in QEMU.
     ///
@@ -497,9 +500,9 @@ fn main() -> ExitCode {
         Cmd::SnemuBoot { features, max_steps, frames, workload } => {
             snemu_boot(&features, max_steps, frames, workload.as_deref())
         }
-        Cmd::SnemuDiff { steps, qemu_secs, workload, all } => {
+        Cmd::SnemuDiff { steps, qemu_secs, workload, all, limit } => {
             if all {
-                snemu_diff::run_all(steps, qemu_secs)
+                snemu_diff::run_all(steps, qemu_secs, limit)
             } else {
                 snemu_diff::run(steps, qemu_secs, workload.as_deref())
             }
