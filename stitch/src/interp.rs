@@ -713,8 +713,8 @@ fn stage_name(expr: &Expr) -> Result<&str, RuntimeError> {
 /// isolation + hitch marshalling is the next milestone. Resolving the stage file
 /// is a language mechanism, so it isn't gated by `FsRead` (a `Spawn`/`Exec`
 /// authority gate is a later refinement).
-fn eval_cross_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, RuntimeError> {
-    let name = stage_name(right)?;
+/// Resolve a stage name to its parsed program + typed-process manifest via the FS.
+fn resolve_stage(name: &str, env: &Env) -> Result<(Vec<Item>, hitch::Manifest), RuntimeError> {
     let source = env
         .platform()
         .fs_read(&format!("{name}.st"))
@@ -722,12 +722,32 @@ fn eval_cross_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, Runtim
     let items = parse_program(&source)
         .map_err(|e| RuntimeError::new(format!("stage `{name}` does not parse: {}", e.message)))?;
     let manifest = crate::bridge::manifest_of_main(&items)?;
+    Ok((items, manifest))
+}
 
-    let input = eval(left, env)?;
-
+fn eval_cross_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, RuntimeError> {
+    let name = stage_name(right)?;
+    let (items, manifest) = resolve_stage(name, env)?;
     let input_schema = manifest.input.ok_or_else(|| {
         RuntimeError::new(format!("stage `{name}` is a source — it takes no input"))
     })?;
+
+    // Static pipeline typecheck: if the upstream is itself a `~>` stage, its
+    // *declared* output must be `compatible` with this stage's input (schema vs
+    // schema, no values). Caught here — before the upstream is evaluated/run — so a
+    // mismatched pipeline is rejected without side effects.
+    if let Expr::Binary { op: BinOp::CrossPipe, right: upstream, .. } = left {
+        let upstream_name = stage_name(upstream)?;
+        let (_, upstream_manifest) = resolve_stage(upstream_name, env)?;
+        if !upstream_manifest.output.compatible(&input_schema) {
+            return Err(RuntimeError::new(format!(
+                "pipeline: stage `{upstream_name}`'s output is not compatible with stage `{name}`'s input"
+            )));
+        }
+    }
+
+    // Dynamic check: the actual input *value* must fit this stage's input.
+    let input = eval(left, env)?;
     let hitched = crate::bridge::to_hitch(&input)?;
     if !input_schema.accepts(&hitched) {
         return Err(RuntimeError::new(format!(
@@ -1295,6 +1315,29 @@ mod tests {
         let fake = Rc::new(FakePlatform::new());
         let err = run_program_on("main() = 5 ~> (1 + 2)", fake).expect_err("not a name");
         assert!(err.message().contains("program name"), "{}", err.message());
+    }
+
+    #[test]
+    fn a_compatible_two_stage_pipeline_runs() {
+        let fake = Rc::new(FakePlatform::with_files(&[
+            ("double.st", "main(x: Int) -> Int = x + x"),
+            ("inc.st", "main(x: Int) -> Int = x + 1"),
+        ]));
+        // 5 -> double -> 10 -> inc -> 11.
+        assert_eq!(run_program_on("main() = 5 ~> double ~> inc", fake).expect("runs"), Value::Int(11));
+    }
+
+    #[test]
+    fn a_pipeline_with_incompatible_adjacent_stages_is_rejected_statically() {
+        // `b`'s declared output is `Str`, but `c` wants `Int`. The static check
+        // (`compatible`, schema-vs-schema) rejects the pipeline — a distinct error
+        // from the dynamic per-stage `accepts`, and raised before `b` even runs.
+        let fake = Rc::new(FakePlatform::with_files(&[
+            ("b.st", "main(x: Int) -> Str = \"s\""),
+            ("c.st", "main(x: Int) -> Int = x + 1"),
+        ]));
+        let err = run_program_on("main() = 5 ~> b ~> c", fake).expect_err("pipeline type error");
+        assert!(err.message().contains("compatible"), "{}", err.message());
     }
 
     #[test]
