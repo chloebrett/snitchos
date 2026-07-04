@@ -268,10 +268,25 @@ frame; the taint's path through the system is a *trace you can read*.
   snitch (`SyscallRefused`, house style). Tempo renders the taint propagation
   graph; Grafana counts flows per label.
 - Granularity ladder: process-level (tractable, do this) → per-message → per-byte
-  (research cliff, don't). **Stitch option**: the interpreter can do
-  language-level fine-grained IFC (Jif-style) *inside* a process while the kernel
-  does process-level — a two-layer flow story mirroring the two-layer authority
-  story in the actor-model doc.
+  (research cliff, don't). **Why "cliff":** difficulty doesn't ramp down the
+  ladder — it drops vertically at the last step. Process/message labels are
+  metadata on a bounded set of kernel objects, joined and checked only at
+  IPC/syscall boundaries the kernel already mediates; cost scales with boundary
+  crossings. Per-byte is a *different problem*, not a finer version of the same
+  one: (a) once an `add` can combine two differently-labeled bytes, propagation
+  moves into the instruction stream — shadow memory for all of RAM plus
+  instrumentation of every instruction, i.e. dedicated dynamic-taint-analysis
+  territory (libdft/TaintDroid/Panorama; several-fold slowdowns, a research
+  system in its own right); (b) implicit flows (`if secret { x = 1 }`) leak with
+  no data flow at all, and tracking control-flow taint is a documented open
+  problem that ends in over-tainting — everything labeled everything; (c) the
+  legibility payoff inverts — a process-level taint path is a readable trace
+  (the whole pitch of this axis), a per-byte "path" is millions of ALU ops.
+  **Stitch option — the non-cliff route to fine grain**: the interpreter can do
+  language-level fine-grained IFC (Jif-style) *inside* a process — it already
+  sees every operation, so no shadow memory or binary instrumentation — while
+  the kernel does process-level; a two-layer flow story mirroring the two-layer
+  authority story in the actor-model doc.
 
 ### Novelty vs prior art
 
