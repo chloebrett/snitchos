@@ -9,7 +9,7 @@
 
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
-use crate::value::Value;
+use crate::value::{DataValue, Value};
 
 /// The style-agnostic model of a table: an optional header row and the rows of
 /// already-rendered cells (row-major). A record *list* has a header (the shared
@@ -133,14 +133,16 @@ fn record_row(value: &Value) -> Option<(Vec<String>, Vec<String>)> {
     Some((columns, cells))
 }
 
-/// A single named-field record as a **headerless** key/value [`Table`] (each row
-/// is `[field, value]`), or `None` if it isn't a `Data` with all fields named and
-/// at least one field — a nullary variant (like `None`) renders as its name.
+/// A single **product** record as a **headerless** key/value [`Table`] (each row
+/// is `[field, value]`), or `None` if it isn't a product `Data` (a `prod`, i.e.
+/// `variant == type_name`) with all fields named and at least one field. Sum
+/// variants render as a tree instead (so the variant name is not lost); a nullary
+/// variant (like `None`) renders as its name.
 fn as_kv(value: &Value) -> Option<Table> {
     let Value::Data(data) = value else {
         return None;
     };
-    if data.fields.is_empty() {
+    if data.variant != data.type_name || data.fields.is_empty() {
         return None;
     }
     let rows = data
@@ -151,9 +153,54 @@ fn as_kv(value: &Value) -> Option<Table> {
     Some(Table { header: None, rows })
 }
 
+/// Whether `value` is a sum variant carrying fields — the tree case (a nullary
+/// variant like `None` renders as its name, not a tree).
+fn is_variant_with_fields(value: &Value) -> bool {
+    matches!(value, Value::Data(data) if data.variant != data.type_name && !data.fields.is_empty())
+}
+
+/// A `Data`'s tree label: a sum variant shows its *variant* name; a product
+/// (nested inside a tree) shows its *type* name.
+fn node_label(data: &DataValue) -> String {
+    if data.variant == data.type_name {
+        data.type_name.clone()
+    } else {
+        data.variant.clone()
+    }
+}
+
+/// Render a value as an indented tree (`├─`/`└─`), recursing through nested `Data`.
+/// Non-`Data` values (and empty ones) are leaves rendered with [`Value::display`].
+fn tree(value: &Value) -> String {
+    tree_lines(value).join("\n")
+}
+
+fn tree_lines(value: &Value) -> Vec<String> {
+    let Value::Data(data) = value else {
+        return alloc::vec![value.display()];
+    };
+    if data.fields.is_empty() {
+        return alloc::vec![node_label(data)];
+    }
+    let mut lines = alloc::vec![node_label(data)];
+    let last = data.fields.len() - 1;
+    for (i, (name, child)) in data.fields.iter().enumerate() {
+        let (branch, indent) = if i == last { ("└─ ", "   ") } else { ("├─ ", "│  ") };
+        let mut sublines = tree_lines(child);
+        if let Some(name) = name {
+            sublines[0] = format!("{name}: {}", sublines[0]);
+        }
+        for (row, line) in sublines.into_iter().enumerate() {
+            let prefix = if row == 0 { branch } else { indent };
+            lines.push(format!("{prefix}{line}"));
+        }
+    }
+    lines
+}
+
 /// Render `value` for the terminal against `style`: a homogeneous record *list*
-/// becomes a table; a single record becomes a key/value table; anything else falls
-/// back to [`Value::display`].
+/// becomes a table; a single product record a key/value table; a sum variant an
+/// indented tree; anything else falls back to [`Value::display`].
 #[must_use]
 pub fn render_with(value: &Value, style: &dyn TableStyle) -> String {
     if let Some(table) = as_table(value) {
@@ -161,6 +208,9 @@ pub fn render_with(value: &Value, style: &dyn TableStyle) -> String {
     }
     if let Some(kv) = as_kv(value) {
         return style.render(&kv);
+    }
+    if is_variant_with_fields(value) {
+        return tree(value);
     }
     value.display()
 }
@@ -185,6 +235,57 @@ mod tests {
             variant: "R".into(),
             fields: fields.into_iter().map(|(n, v)| (Some(n.into()), v)).collect(),
         }))
+    }
+
+    /// A `Data` with an explicit `type_name`/`variant` and (optionally named)
+    /// fields — for building sum variants and nested products.
+    fn variant(type_name: &str, name: &str, fields: Vec<(Option<&str>, Value)>) -> Value {
+        Value::Data(Rc::new(DataValue {
+            type_name: type_name.into(),
+            variant: name.into(),
+            fields: fields.into_iter().map(|(n, v)| (n.map(Into::into), v)).collect(),
+        }))
+    }
+
+    #[test]
+    fn a_sum_variant_with_a_nested_record_renders_as_a_tree() {
+        let point =
+            variant("Point", "Point", vec![(Some("x"), Value::Int(1)), (Some("y"), Value::Int(2))]);
+        let ok = variant("Result", "Ok", vec![(None, point)]);
+        assert_eq!(
+            render(&ok),
+            "\
+Ok
+└─ Point
+   ├─ x: 1
+   └─ y: 2"
+        );
+    }
+
+    #[test]
+    fn a_flat_sum_variant_renders_as_a_tree() {
+        let some = variant("Maybe", "Some", vec![(None, Value::Int(5))]);
+        assert_eq!(render(&some), "Some\n└─ 5");
+    }
+
+    #[test]
+    fn a_flat_product_still_renders_as_a_kv_table_not_a_tree() {
+        let point = variant("Point", "Point", vec![(Some("x"), Value::Int(1))]);
+        assert!(render(&point).contains('┌'), "{}", render(&point));
+    }
+
+    #[test]
+    fn a_named_field_sum_variant_renders_as_a_tree_not_a_kv_table() {
+        // A sum variant must not kv-table (that would drop the variant name).
+        let circle = variant("Shape", "Circle", vec![(Some("r"), Value::Int(1))]);
+        assert_eq!(render(&circle), "Circle\n└─ r: 1");
+    }
+
+    #[test]
+    fn a_positional_field_product_renders_via_display_not_a_tree() {
+        // A product with positional fields is neither a kv table nor a tree.
+        let celsius = variant("Celsius", "Celsius", vec![(None, Value::Int(5))]);
+        assert_eq!(render(&celsius), "Celsius(5)");
     }
 
     #[test]
