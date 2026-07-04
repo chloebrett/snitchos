@@ -114,6 +114,22 @@ impl Env {
         self.platform.as_ref()
     }
 
+    /// A shared handle to the platform backend — for building a *fresh* env (a
+    /// separately-namespaced `~>` stage) that still routes effects to the same
+    /// place. Prefer [`platform`](Self::platform) for a one-off call.
+    #[must_use]
+    pub fn platform_rc(&self) -> Rc<dyn Platform> {
+        Rc::clone(&self.platform)
+    }
+
+    /// A shared handle to the telemetry backend — the twin of
+    /// [`platform_rc`](Self::platform_rc) for building a stage env whose
+    /// `emit`/`span` reach the caller's sink.
+    #[must_use]
+    pub fn telemetry_rc(&self) -> Rc<dyn Telemetry> {
+        Rc::clone(&self.telemetry)
+    }
+
     /// A clone of this environment carrying `authority` as its capability set —
     /// the call-boundary primitive for a named function (its body runs with
     /// exactly its declared `uses`, replacing the caller's). Inner scopes inherit

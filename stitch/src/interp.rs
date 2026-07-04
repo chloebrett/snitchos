@@ -418,15 +418,22 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         } => Ok(Value::Bool(
             as_bool(&eval(left, env)?, "`or`")? || as_bool(&eval(right, env)?, "`or`")?,
         )),
-        // `lhs |> f(a)` ≡ `f(lhs, a)`; `lhs |> f` ≡ `f(lhs)`. `~>` (the cross-process
-        // pipe) parses as a distinct op but, until the spawn/marshal lowering
-        // milestone, evaluates in-process exactly like `|>` — a placeholder, not its
-        // final semantics (see docs/typed-processes-and-the-data-model-design.md).
+        // `lhs |> f(a)` ≡ `f(lhs, a)`; `lhs |> f` ≡ `f(lhs)`.
         Expr::Binary {
-            op: BinOp::Pipe | BinOp::CrossPipe,
+            op: BinOp::Pipe,
             left,
             right,
         } => eval_pipe(left, right, env),
+        // `lhs ~> stage` — the cross-process pipe. The RHS names a program (a
+        // `<name>.st` stage resolved via the FS); the input value is typechecked
+        // against the stage's declared input, then the stage runs. In-process for
+        // now (soft authority); process isolation + marshalling is the next
+        // milestone (see docs/typed-processes-and-the-data-model-design.md).
+        Expr::Binary {
+            op: BinOp::CrossPipe,
+            left,
+            right,
+        } => eval_cross_pipe(left, right, env),
         Expr::Binary { op, left, right } => eval_binary(*op, &eval(left, env)?, &eval(right, env)?),
         Expr::Unary { op, operand } => eval_unary(*op, &eval(operand, env)?),
         Expr::Var(name) => env
@@ -687,6 +694,66 @@ fn eval_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, RuntimeError
     } else {
         apply_values(&eval(right, env)?, &[piped], env)
     }
+}
+
+/// The right side of `~>` names a program stage. v1 accepts only a bare name
+/// (`data ~> clean`); a computed stage (a first-class `Program` value) is a later
+/// step.
+fn stage_name(expr: &Expr) -> Result<&str, RuntimeError> {
+    match expr {
+        Expr::Var(name) => Ok(name),
+        _ => Err(RuntimeError::new("the right side of `~>` must be a program name")),
+    }
+}
+
+/// Evaluate `lhs ~> stage`. Resolve `stage` → a `<name>.st` program via the FS,
+/// **typecheck** the input value against the stage's declared input (a dynamic
+/// [`accepts`](hitch::TypeSchema::accepts) check — we hold a value, not a schema),
+/// then run its `main` on the input. In-process for now (soft authority); process
+/// isolation + hitch marshalling is the next milestone. Resolving the stage file
+/// is a language mechanism, so it isn't gated by `FsRead` (a `Spawn`/`Exec`
+/// authority gate is a later refinement).
+fn eval_cross_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, RuntimeError> {
+    let name = stage_name(right)?;
+    let source = env
+        .platform()
+        .fs_read(&format!("{name}.st"))
+        .ok_or_else(|| RuntimeError::new(format!("no such stage `{name}`")))?;
+    let items = parse_program(&source)
+        .map_err(|e| RuntimeError::new(format!("stage `{name}` does not parse: {}", e.message)))?;
+    let manifest = crate::bridge::manifest_of_main(&items)?;
+
+    let input = eval(left, env)?;
+
+    let input_schema = manifest.input.ok_or_else(|| {
+        RuntimeError::new(format!("stage `{name}` is a source — it takes no input"))
+    })?;
+    let hitched = crate::bridge::to_hitch(&input)?;
+    if !input_schema.accepts(&hitched) {
+        return Err(RuntimeError::new(format!(
+            "stage `{name}` expects a different input type"
+        )));
+    }
+
+    run_stage(name, &items, input, env)
+}
+
+/// Run a resolved stage's `main` on `input`, **in-process** — a fresh env (the
+/// stage's own namespace) that shares the caller's platform + telemetry so the
+/// stage's effects reach the same terminal/wire.
+fn run_stage(
+    name: &str,
+    items: &[Item],
+    input: Value,
+    caller: &Env,
+) -> Result<Value, RuntimeError> {
+    let mut all = prelude_items();
+    all.extend_from_slice(items);
+    let env = build_env_with_backends(caller.telemetry_rc(), caller.platform_rc(), &all);
+    let main = env
+        .lookup("main")
+        .ok_or_else(|| RuntimeError::new(format!("stage `{name}` has no `main`")))?;
+    apply_values(&main, &[input], &env)
 }
 
 /// Apply a callable to already-evaluated positional arguments. Shared by
@@ -1193,10 +1260,42 @@ fn apply_use(call: &Expr, callback: Value, env: &Env) -> Result<Value, RuntimeEr
 mod tests {
     use crate::interp::{Module, eval_modules, eval_program};
     use crate::parser::parse_program;
+    use crate::platform::FakePlatform;
     use crate::test_support::{
         run, run_err, run_modules, run_program, run_program_err, run_program_events,
+        run_program_on,
     };
     use crate::value::{TelemetryEvent, Value};
+    use alloc::rc::Rc;
+
+    #[test]
+    fn cross_pipe_runs_a_typechecked_stage_from_the_fs() {
+        // `~>` resolves the RHS name to `<name>.st`, typechecks the input against
+        // the stage's declared input, and (for now) runs it in-process.
+        let fake = Rc::new(FakePlatform::with_files(&[("double.st", "main(x: Int) -> Int = x + x")]));
+        assert_eq!(run_program_on("main() = 5 ~> double", fake).expect("stage runs"), Value::Int(10));
+    }
+
+    #[test]
+    fn cross_pipe_rejects_an_input_of_the_wrong_type() {
+        let fake = Rc::new(FakePlatform::with_files(&[("double.st", "main(x: Int) -> Int = x + x")]));
+        let err = run_program_on(r#"main() = "hi" ~> double"#, fake).expect_err("type mismatch");
+        assert!(err.message().contains("input"), "{}", err.message());
+    }
+
+    #[test]
+    fn cross_pipe_to_a_missing_stage_errors() {
+        let fake = Rc::new(FakePlatform::new());
+        let err = run_program_on("main() = 5 ~> nope", fake).expect_err("no such stage");
+        assert!(err.message().contains("no such stage"), "{}", err.message());
+    }
+
+    #[test]
+    fn cross_pipe_rhs_must_be_a_program_name() {
+        let fake = Rc::new(FakePlatform::new());
+        let err = run_program_on("main() = 5 ~> (1 + 2)", fake).expect_err("not a name");
+        assert!(err.message().contains("program name"), "{}", err.message());
+    }
 
     #[test]
     fn a_module_can_call_a_function_in_another_module() {
