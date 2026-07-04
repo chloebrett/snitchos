@@ -426,6 +426,31 @@ pub fn stitch_view_reads_a_file(h: &mut View) -> Result<(), String> {
         .map_err(|e| format!("{e} — view() didn't read + print the file on the metal"))
 }
 
+/// `workload=stitch-fs`: the cross-process pipe `~>` resolves a stage off the FS,
+/// typechecks the input, and runs it — on the metal. At the prompt we run
+/// `5 ~> double`: `~>` reads `double.st`, extracts its manifest (`Int -> Int`),
+/// checks the input `5` fits, and runs the stage's `main(5)`. The stage emits
+/// `pipe.out` = `5 + 5`, so a `pipe.out`=10 `Metric` on the wire proves the whole
+/// resolve → typecheck → run path executed. (In-process for now — the soft-authority
+/// stage run; process isolation is a later milestone.)
+pub fn stitch_cross_pipe_runs_a_stage(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+
+    h.send_input(b"5 ~> double\n")
+        .map_err(|e| format!("inject REPL input: {e}"))?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("pipe.out") && *value == 10
+        }
+        _ => false,
+    })
+    .ok_or("no 'pipe.out'=10 metric within 30s — the `~>` stage didn't resolve/typecheck/run on the metal")?;
+
+    Ok(())
+}
+
 pub fn heap_oom(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {

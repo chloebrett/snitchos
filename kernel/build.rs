@@ -116,6 +116,13 @@ fn build_and_embed_user(kernel_dir: &str) {
     // shell/a client reads it from the filesystem and spawns the bytes). The
     // build-time injection of a Rust executable into the seed.
     copy_if_different(&format!("{bin_dir}/spawnee"), &ws.join("fs-image/bin/spawnee"));
+    // `manifest_demo` carries a `#[entry(in, out, uses)]` manifest in its
+    // `.snitch.iface` note — the fs seed extracts it into a `user.iface` xattr, so
+    // this is the end-to-end data source for the typed-interface path.
+    copy_if_different(
+        &format!("{bin_dir}/manifest_demo"),
+        &ws.join("fs-image/bin/manifest_demo"),
+    );
     build(&["fs"]);
 
     for (bin, env_var) in USER_PROGRAMS {

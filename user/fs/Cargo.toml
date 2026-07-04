@@ -14,3 +14,8 @@ snitchos-std = { path = "../std" }
 fs-core = { path = "../../fs-core" }
 fs-proto = { path = "../../fs-proto" }
 ramfs = { path = "../../ramfs" }
+
+# Host-side (build.rs) ELF parsing: extract a seeded program's `.snitch.iface`
+# note into its `user.iface` xattr. `read`+`elf` only — no write, no other formats.
+[build-dependencies]
+object = { version = "0.36", default-features = false, features = ["read_core", "elf", "std"] }

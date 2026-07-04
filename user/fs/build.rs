@@ -29,14 +29,36 @@ fn generate_fs_image_seed() {
     // Deterministic order for reproducible builds.
     files.sort();
 
-    let mut body = String::from("pub static SEED: &[(&str, &[u8])] = &[\n");
+    // Each entry is `(path, content, xattrs)`. A program with a `.snitch.iface`
+    // note (from `#[entry(in, out, uses)]`) gets its manifest lifted into a
+    // `user.iface` xattr — the seeded FS then serves it over `GetXattr`.
+    let mut body =
+        String::from("pub static SEED: &[(&str, &[u8], &[(&str, &[u8])])] = &[\n");
     for (name, abs) in &files {
-        body.push_str(&format!("    ({name:?}, include_bytes!({abs:?})),\n"));
+        let content = std::fs::read(abs).unwrap_or_default();
+        let xattrs = match extract_iface(&content) {
+            Some(iface) => format!("&[(\"user.iface\", &{iface:?})]"),
+            None => "&[]".to_string(),
+        };
+        body.push_str(&format!("    ({name:?}, include_bytes!({abs:?}), {xattrs}),\n"));
     }
     body.push_str("];\n");
 
     std::fs::write(Path::new(&out).join("fs_seed.rs"), body)
         .expect("write generated fs_seed.rs");
+}
+
+/// If `bytes` is an ELF carrying a `.snitch.iface` note, return the manifest
+/// bytes trimmed to the 4-byte length prefix + payload (dropping the fixed-size
+/// zero padding, so the xattr is only as big as the manifest). `None` for a
+/// non-ELF (e.g. a `.st` source) or an ELF without the note.
+fn extract_iface(bytes: &[u8]) -> Option<Vec<u8>> {
+    use object::{Object, ObjectSection};
+    let file = object::File::parse(bytes).ok()?;
+    let data = file.section_by_name(".snitch.iface")?.data().ok()?;
+    let prefix: [u8; 4] = data.get(0..4)?.try_into().ok()?;
+    let payload = u32::from_le_bytes(prefix) as usize;
+    data.get(..4 + payload).map(<[u8]>::to_vec)
 }
 
 /// Walk `dir`, pushing `(relative-path, absolute-path)` for every file. `prefix`

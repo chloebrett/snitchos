@@ -245,6 +245,7 @@ catalog! {
     wfi "stitch-print-writes-to-console"  scenarios::stitch_print_writes_to_console [userspace, stitch] {"stitch-repl"};
     wfi "stitch-hold-lists-caps"          scenarios::stitch_hold_lists_caps         [userspace, stitch] {"stitch-repl"};
     wfi "stitch-view-reads-a-file"        scenarios::stitch_view_reads_a_file       [userspace, stitch, fs] {"stitch-fs"};
+    wfi "stitch-cross-pipe-runs-a-stage"  scenarios::stitch_cross_pipe_runs_a_stage [userspace, stitch, fs] {"stitch-fs"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back
