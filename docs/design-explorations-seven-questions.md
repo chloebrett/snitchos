@@ -6,7 +6,9 @@ explores one of the seven "ask the strong model" questions, grounded in three
 code audits run for this exercise (cross-hart shared state; the full syscall/cap
 ABI; the wire format and its durability) plus the Hitch, Stitch, IPC, and
 capability design docs. Recommendations are marked **⟶**; genuine user decisions
-are marked **⚖**.*
+are marked **⚖**. The **Priority coda** at the end ranks all of this into an
+ordered arc (added 2026-07-04 after re-checking snemu's true state — it is at
+~milestone 3, not milestone 1, which pulls the "exciting" axes from far to near).*
 
 ---
 
@@ -450,6 +452,87 @@ machinery that exists or is already planned:
    kernel enforcement state? Axis 3 generalizes it; a standing mismatch that
    goes unnoticed for weeks falsifies "observability keeps the system honest"
    from the inside.
+
+---
+
+## Priority coda — what to do, in order
+
+*Added 2026-07-04. The seven questions produce a menu; this is the arc. The
+organizing insight: the single highest-leverage item (the differential-
+observability oracle) is also the **falsifier that makes the risky axes safe to
+build** — so the sequence is oracle-first, then the subtle features become
+falsifiable instead of plausible-but-wrong. This is snemu post 2's own lesson
+("build the thing that can tell you no"; page-fault-as-trap was a beautiful,
+correct, completely-wrong fix caught only by an oracle) generalized forward.*
+
+**Recalibration that reorders everything:** snemu is at ~milestone 3 (boots the
+real kernel on 2 harts through 43 workloads; deterministic instruction-count
+clock; snapshot-by-`Clone`; a working `snemu-diff` differential oracle at
+release-parity with QEMU), **not** milestone 1. So the axes previously filed as
+"exciting but distant" (replay, differential observability) are **near** — their
+substrate exists today. Build cost is not the binding constraint on this project;
+the constraints are conceptual soundness of a few designs and the steward's
+comprehension bandwidth. Price nothing here in human-solo-months.
+
+### Tier 1 — cheap insurance + trust the ground truth (days, parallelizable)
+
+1. **Wire hardening** (Q2). Golden-bytes snapshot test + `Hello.protocol_version`
+   enforcement + a versioned capture-container header. ~A day; pure downside-
+   protection; promoted from latent to urgent precisely because replay (which
+   persists raw streams) is now near. `snemu-diff` is already a stakeholder — its
+   `canonical()` is coupled to `Frame`'s shape.
+2. **Close the snemu guard-page fidelity bug** (snemu post 2's teed-up next
+   step; the 3 FAILs of 43, one MMU-walk root cause). Load-bearing because replay
+   *and* differential observability lean on snemu as trustworthy ground truth;
+   40/43 means "snemu tells the truth" is still 93% asserted. Get to 43/43.
+
+### Tier 2 — the flagship: build the oracle (the live thread's sequel)
+
+3. **Differential-observability oracle #1** (Q3-axis-3). Have snemu report
+   instret-attributed ground truth (watchpoint on `CURRENT_TASK`) and diff it
+   against the kernel's *claimed* `cpu_time_ticks` / heartbeat cadence. Rides the
+   existing `snemu-diff` machinery (canonicalization, structural diff, per-
+   workload table). Four compounding reasons it's the flagship: (a) natural
+   post-3 — "snemu checks the *kernel*, not just QEMU"; (b) cheap on existing
+   infra; (c) genuinely never-been-done (OS telemetry audited against
+   instruction-level truth); (d) **it is the falsifier axes 1/5 need** — replay
+   fidelity and budget accounting are both "is my telemetry true?" underneath.
+   Define **attribution coverage** (% of retired instructions attributable to a
+   task/span) as the headline metric; the unattributed remainder is the kernel's
+   observability dark matter, a dashboard and a devlog in itself.
+
+### Tier 3 — structural cleanups, design-first (parallel to Tier 2; unblock the userland/shell cluster)
+
+4. **Manifest v2, thin** (Q1). Design doc first, then build only the thin
+   version: BootInfo with *named* handles, killing the positional
+   `delegated_handle(i)` contract. Resist the rich `Slot` type (protocol schemas,
+   constraints, optional) until axes 4/5/6 exist to demand it — the project's own
+   second-pass philosophy applied to its own proposal. Highest fan-out (five
+   consumers), so the *design* is worth doing now even if the rich build waits.
+5. **Reply-cap forwarding decision** (Q3 #5). Make the design call now (lean:
+   `CallThrough` re-targeting — keeps reply caps affine, adds one snitchable
+   forwarding event that is also the interposition hook). Bites real layered-
+   service work — FS-calling-a-block-server pays the relay tax with no speculative
+   proxy anywhere — so it is not axis-contingent.
+
+### Adopt as policy (free, no code)
+
+6. **Ambient diet** (Q3 #3): new syscalls default cap-mediated. Stops the drift
+   (17/30 ambient today, incl. `Spawn`/`MapAnon`) without clawing back the
+   existing surface; let the Q1 manifest be the vehicle when they do get gated.
+
+### Deferred leaves — pick by appetite, *after* the oracle exists
+
+Replay recording side (axis 1), budget attribution-only (Q6a phase 1), the
+one-bit IFC (axis 4). All now-cheap to build; the reason to wait is that #3 is
+the machine that tells you whether each one is actually correct. For any axis
+where being wrong is *silent* rather than loud (sync-order replay DRF-
+preservation, budget exhaustion semantics), build its oracle before its feature.
+
+**Single next thing:** close the guard-page bug (you're already there), then
+build differential-observability oracle #1. One coherent arc, the sequel the
+posts are already walking toward, and it converts the scariest half of the axis
+list from "PhD-shaped" to "guarded by a machine that can say no."
 
 ---
 
