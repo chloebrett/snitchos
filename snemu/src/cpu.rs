@@ -35,6 +35,9 @@ fn with_bit(value: u64, mask: u64, on: bool) -> u64 {
 mod cause {
     pub const BREAKPOINT: u64 = 3;
     pub const ECALL_FROM_U: u64 = 8;
+    pub const INSTRUCTION_PAGE_FAULT: u64 = 12;
+    pub const LOAD_PAGE_FAULT: u64 = 13;
+    pub const STORE_PAGE_FAULT: u64 = 15;
     // S-mode ecall (code 9) never reaches the kernel: snemu services it as an
     // SBI firmware call, so there's no `ECALL_FROM_S` trap.
     /// The top `scause` bit marks an interrupt (vs. an exception).
@@ -380,10 +383,24 @@ impl Hart {
         self.pc = pc;
     }
 
-    /// Translate a guest virtual address through `satp` (Sv39 or bare).
-    fn translate(&self, va: u64, access: Access, bus: &Bus) -> Result<u64, StepError> {
+    /// Translate a guest virtual address through `satp` (Sv39 or bare). On a page
+    /// fault, deliver an S-mode trap (scause = the fault cause by access kind,
+    /// stval = the faulting VA) and return `None` so the caller aborts the
+    /// instruction — real hardware traps to the kernel's handler, it doesn't halt.
+    fn translate_or_trap(&mut self, va: u64, access: Access, bus: &Bus) -> Option<u64> {
         let satp = self.csr.read(addr::SATP).expect("satp is modeled");
-        mmu::translate(satp, va, access, bus.ram()).map_err(|_| StepError::PageFault { va })
+        match mmu::translate(satp, va, access, bus.ram()) {
+            Ok(pa) => Some(pa),
+            Err(_) => {
+                let cause = match access {
+                    Access::Fetch => cause::INSTRUCTION_PAGE_FAULT,
+                    Access::Load => cause::LOAD_PAGE_FAULT,
+                    Access::Store => cause::STORE_PAGE_FAULT,
+                };
+                self.take_trap(cause, va);
+                None
+            }
+        }
     }
 
     /// Fetch, decode, and execute one instruction (16- or 32-bit) against `bus`.
@@ -395,7 +412,9 @@ impl Hart {
             self.take_trap(cause, 0);
             return Ok(HartEffect::None);
         }
-        let pc_pa = self.translate(self.pc, Access::Fetch, bus)?;
+        let Some(pc_pa) = self.translate_or_trap(self.pc, Access::Fetch, bus) else {
+            return Ok(HartEffect::None); // fetch faulted → trapped to the handler
+        };
         let half = bus.read_u16(pc_pa)?;
         let raw = if is_compressed(half) {
             self.cur_ilen = ILEN_COMPRESSED;
@@ -608,7 +627,9 @@ impl Hart {
     /// LOAD: read memory at `rs1 + imm`, sign/zero-extend into rd.
     fn load(&mut self, instr: Instr, bus: &Bus) -> Result<(), StepError> {
         let va = self.x[instr.rs1()].wrapping_add(instr.i_imm());
-        let addr = self.translate(va, Access::Load, bus)?;
+        let Some(addr) = self.translate_or_trap(va, Access::Load, bus) else {
+            return Ok(()); // load faulted → trapped
+        };
         let value = match instr.funct3() {
             funct3::load::LB => i64::from(bus.read_u8(addr)? as i8) as u64,
             funct3::load::LH => i64::from(bus.read_u16(addr)? as i16) as u64,
@@ -627,7 +648,9 @@ impl Hart {
     /// STORE: write rs2 (truncated to the access width) to `rs1 + imm`.
     fn store(&mut self, instr: Instr, bus: &mut Bus) -> Result<(), StepError> {
         let va = self.x[instr.rs1()].wrapping_add(instr.s_imm());
-        let addr = self.translate(va, Access::Store, bus)?;
+        let Some(addr) = self.translate_or_trap(va, Access::Store, bus) else {
+            return Ok(()); // store faulted → trapped
+        };
         if self.reservation == Some(addr) {
             self.reservation = None; // a write to the reserved cell breaks lr/sc
         }
@@ -650,7 +673,9 @@ impl Hart {
     fn amo(&mut self, instr: Instr, bus: &mut Bus) -> Result<(), StepError> {
         // AMOs touch a page that must be both readable and writable; the kernel's
         // data mappings are R+W, so checking the store permission suffices.
-        let addr = self.translate(self.x[instr.rs1()], Access::Store, bus)?;
+        let Some(addr) = self.translate_or_trap(self.x[instr.rs1()], Access::Store, bus) else {
+            return Ok(()); // AMO faulted → trapped
+        };
         let rs2 = self.x[instr.rs2()];
         match instr.funct5() {
             amo_op::LR => return self.load_reserved(instr, addr, bus),
@@ -2182,6 +2207,23 @@ mod tests {
         cpu.set_reg(11, 1);
         cpu.step().unwrap();
         assert_eq!(cpu.reg(10), u64::MAX); // sext32(0 - 1) = -1
+    }
+
+    #[test]
+    fn a_fetch_page_fault_traps_instead_of_halting() {
+        // Sv39 on, root page table pointing at a zeroed page → every translation
+        // (including the instruction fetch) faults. It must trap, not halt.
+        let mut mem = Memory::new(0x4000);
+        mem.write_u32(RAM_BASE, addi(1, 0, 1)).unwrap(); // never runs
+        let mut cpu = Cpu::new(mem);
+        cpu.set_pc(RAM_BASE);
+        let root = RAM_BASE + 0x2000; // page-aligned, zeroed
+        cpu.hart.csr.write(addr::SATP, (8u64 << 60) | (root >> 12)).unwrap();
+        cpu.hart.csr.write(addr::STVEC, RAM_BASE + 0x300).unwrap();
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 0x300); // trapped to stvec, not halted
+        assert_eq!(cpu.hart.csr.read(addr::SCAUSE).unwrap(), 12); // instruction page fault
+        assert_eq!(cpu.hart.csr.read(addr::STVAL).unwrap(), RAM_BASE); // faulting VA
     }
 
     #[test]
