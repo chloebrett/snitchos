@@ -2352,6 +2352,46 @@ pub fn userspace_emits_span(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Auto-instrumentation (`workload=userspace`): the runtime opens a
+/// process-lifetime **root span** named after the binary (`hello`) before `main`
+/// runs, so a program is observable birth-to-death even if it opens nothing —
+/// and any span it *does* open nests under that root. Asserts the `hello` root
+/// SpanStart appears and that `hello.work` carries it as `parent`.
+pub fn userspace_has_a_root_span(h: &mut View) -> Result<(), String> {
+    let root_id = match h
+        .wait_for(SEC * 20, |f, strings| match f {
+            OwnedFrame::SpanStart { name_id, .. } => {
+                strings.get(name_id).map(String::as_str) == Some("hello")
+            }
+            _ => false,
+        })
+        .ok_or(
+            "no root SpanStart named 'hello' within 20s — the runtime didn't open a \
+             process-lifetime span for the program",
+        )? {
+        OwnedFrame::SpanStart { id, .. } => id,
+        _ => return Err("matched non-SpanStart (impossible)".to_string()),
+    };
+
+    let work = h
+        .wait_for(SEC * 10, |f, strings| {
+            matches!(f, OwnedFrame::SpanStart { name_id, .. }
+                if strings.get(name_id).map(String::as_str) == Some("hello.work"))
+        })
+        .ok_or("no SpanStart 'hello.work' within 10s")?;
+    let work_parent = match work {
+        OwnedFrame::SpanStart { parent, .. } => parent,
+        _ => return Err("matched non-SpanStart (impossible)".to_string()),
+    };
+    if work_parent != root_id {
+        return Err(format!(
+            "hello.work parent {work_parent:?} != root 'hello' id {root_id:?} — the program's \
+             own span did not nest under the auto-opened lifetime root"
+        ));
+    }
+    Ok(())
+}
+
 /// Refusal observability (`workload=userspace`): `hello` deliberately invokes
 /// a handle it holds but for the wrong object (the `SpanSink` at handle 1,
 /// invoked as a telemetry sink). The kernel refuses — and snitches a

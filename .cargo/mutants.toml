@@ -28,6 +28,10 @@ exclude_re = [
   "replace on_send ->",
   "replace on_receive ->",
   "replace drain_front ->",
+  # Equivalent mutants in stitch rights_glyphs: within a category the rights
+  # are disjoint bits (RECV|WAIT for read, EMIT|SEND|SIGNAL for write), so
+  # `rights & (A | B)` and `rights & (A ^ B)` mask the same value.
+  "replace \\| with \\^ in rights_glyphs",
   # Equivalent mutant in fs-proto Badge::pack: inode occupies bits [0..32)
   # and rights [32..48) — disjoint by construction, so | and ^ are identical.
   "replace \\| with \\^ in Badge::pack",

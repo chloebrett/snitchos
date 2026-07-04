@@ -98,6 +98,18 @@ fn expand_entry(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     };
     func.sig.abi = Some(parse_quote!(extern "C"));
 
+    // Auto-instrumentation: open a process-lifetime root span named after the
+    // binary, held for the whole body. Every program is observable birth-to-death
+    // on the wire even if it opens no span itself, and any span it *does* open
+    // nests under this root — observability by construction, not opt-in-per-call.
+    // The guard drops when `main` returns (emitting `SpanEnd`); a program that
+    // `exit()`s mid-body simply never emits the close, and the kernel reclaims it.
+    let root_span: syn::Stmt = parse_quote! {
+        let __snitch_root_span =
+            ::snitchos_user::tracer().span(::core::env!("CARGO_BIN_NAME"));
+    };
+    func.block.stmts.insert(0, root_span);
+
     let manifest = if attr.is_empty() {
         TokenStream2::new()
     } else {
@@ -158,6 +170,29 @@ mod tests {
         assert!(out.contains("fn main"), "symbol must be named `main`: {out}");
         assert!(out.contains("let marker = 42"), "original body must survive: {out}");
         assert!(!out.contains("__SNITCH_IFACE"), "no manifest without a clause: {out}");
+    }
+
+    #[test]
+    fn injects_a_lifetime_root_span_named_by_bin() {
+        let out = expand_entry(
+            quote! {},
+            quote! {
+                fn main() {
+                    let marker = 42;
+                }
+            },
+        )
+        .to_string();
+
+        // Every program opens a process-lifetime root span so it is observable
+        // birth-to-death even if it never opens one itself — auto-instrumentation
+        // by construction, not opt-in-per-call.
+        assert!(out.contains("tracer"), "root span opens through the tracer: {out}");
+        assert!(
+            out.contains("CARGO_BIN_NAME"),
+            "root span is named after the binary at compile time: {out}"
+        );
+        assert!(out.contains("let marker = 42"), "original body still runs: {out}");
     }
 
     #[test]

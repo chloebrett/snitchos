@@ -677,6 +677,7 @@ dependencies = [
  "linked_list_allocator",
  "postcard",
  "protocol",
+ "serde_json",
  "snitchos-abi",
  "spin",
 ]

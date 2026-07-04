@@ -265,6 +265,7 @@ catalog! {
     wfi "userspace-yield-round-trips"     scenarios::userspace_yield_round_trips     [userspace]  {"userspace"};
     wfi "userspace-spansink-granted"      scenarios::userspace_spansink_granted     [userspace]  {"userspace"};
     wfi "userspace-emits-span"            scenarios::userspace_emits_span           [userspace]  {"userspace"};
+    wfi "userspace-has-a-root-span"       scenarios::userspace_has_a_root_span      [userspace]  {"userspace"};
     wfi "userspace-prints"                scenarios::userspace_prints               [userspace]  {"userspace"};
     wfi "userspace-refusal-snitched"      scenarios::userspace_refusal_snitched     [userspace]  {"userspace"};
     wfi "userspace-quota-refused"         scenarios::userspace_quota_refused        [userspace]  {"userspace-span-flood"};

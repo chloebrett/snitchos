@@ -130,29 +130,97 @@ fn build_and_embed_user(kernel_dir: &str) {
         embed(&format!("{bin_dir}/{bin}"), env_var);
     }
 
-    // Rebuild the embed whenever a user program — or its only dependency, the
-    // `abi` crate — changes. Directory paths are watched recursively by cargo,
-    // so this covers every source without enumerating files.
-    for p in [
-        "user/hello/src",
-        "user/hello/Cargo.toml",
-        "user/hello/build.rs",
-        "user/fs/src",
-        "user/fs/Cargo.toml",
-        "user/fs/build.rs",
-        "fs-image",
-        "ramfs/src",
-        "user/runtime/src",
-        "user/runtime/user.ld",
-        "user/runtime/build.rs",
-        "user/runtime/Cargo.toml",
-        "fs-core/src",
-        "fs-proto/src",
-        "abi/src",
-        "abi/Cargo.toml",
-    ] {
-        println!("cargo:rerun-if-changed={}", ws.join(p).display());
+    // Rebuild the embed whenever any source the bins are built from changes.
+    // Derived from the real dependency graph (below) rather than a hand list, so
+    // adding a dependency to a bin can never silently embed a stale kernel — the
+    // failure mode a maintained allow-list invites. `fs-image` is data seeded
+    // into `fs-server-seeded`, not a crate, so it stays explicit.
+    println!("cargo:rerun-if-changed={}", ws.join("fs-image").display());
+    watch_bin_dependency_closure(ws);
+}
+
+/// Emit `cargo:rerun-if-changed` for every **workspace crate** the embedded bin
+/// packages (`hello`, `fs`) transitively depend on, derived from `cargo
+/// metadata`. Watching each crate's directory (recursive) covers its `src`,
+/// `Cargo.toml`, and `build.rs` without enumerating files — and, crucially,
+/// stays correct as dependencies come and go. External (registry) deps are
+/// immutable, so only workspace members need watching.
+fn watch_bin_dependency_closure(ws: &Path) {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let out = Command::new(cargo)
+        .args(["metadata", "--format-version", "1"])
+        .current_dir(ws)
+        // Don't leak the outer kernel build's flags into the nested cargo — they
+        // break its rustc target probe (same scrub as the user build above).
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("RUSTFLAGS")
+        .stderr(Stdio::inherit())
+        .output()
+        .expect("cargo metadata failed to run");
+    assert!(out.status.success(), "cargo metadata exited non-zero");
+    let meta: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("cargo metadata emitted invalid JSON");
+
+    // package id -> manifest_path, and the resolve graph's id -> [dep ids].
+    let mut manifest_of = std::collections::HashMap::new();
+    let mut seeds = alloc_ids_for(&meta, &["hello", "fs"], &mut manifest_of);
+    let deps_of = resolve_edges(&meta);
+
+    // BFS the closure; watch each reachable crate whose source lives in-tree.
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = seeds.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        if let Some(manifest) = manifest_of.get(&id)
+            && let Some(dir) = Path::new(manifest).parent()
+            && dir.starts_with(ws)
+        {
+            println!("cargo:rerun-if-changed={}", dir.display());
+        }
+        if let Some(next) = deps_of.get(&id) {
+            seeds.extend(next.iter().cloned());
+        }
     }
+}
+
+/// Collect the package ids named in `names`, filling `manifest_of` for *every*
+/// package as a side effect (the id -> manifest_path map the closure walk needs).
+fn alloc_ids_for(
+    meta: &serde_json::Value,
+    names: &[&str],
+    manifest_of: &mut std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let mut seeds = Vec::new();
+    for pkg in meta["packages"].as_array().into_iter().flatten() {
+        let (Some(id), Some(manifest)) = (pkg["id"].as_str(), pkg["manifest_path"].as_str())
+        else {
+            continue;
+        };
+        manifest_of.insert(id.to_string(), manifest.to_string());
+        if pkg["name"].as_str().is_some_and(|n| names.contains(&n)) {
+            seeds.push(id.to_string());
+        }
+    }
+    seeds
+}
+
+/// Build the resolve graph's adjacency map: package id -> its dependency ids.
+fn resolve_edges(
+    meta: &serde_json::Value,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut edges = std::collections::HashMap::new();
+    for node in meta["resolve"]["nodes"].as_array().into_iter().flatten() {
+        let Some(id) = node["id"].as_str() else { continue };
+        let deps = node["dependencies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|d| d.as_str().map(str::to_string))
+            .collect();
+        edges.insert(id.to_string(), deps);
+    }
+    edges
 }
 
 /// Copy `src` → `dst` only when the contents differ — so a rebuild that produces
