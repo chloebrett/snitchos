@@ -492,7 +492,8 @@ Ok
         assert_eq!(display_width("🪴"), 2); // a plane-1 emoji is two cells
         assert_eq!(display_width("👀"), 2);
         assert_eq!(display_width("✏️"), 2); // U+270F (1) + VS16 promotes to 2
-        assert_eq!(display_width("🪴👀✏️"), 6);
+        assert_eq!(display_width("📝"), 2); // single-scalar plane-1 emoji
+        assert_eq!(display_width("🪴👀📝"), 6);
     }
 
     #[test]

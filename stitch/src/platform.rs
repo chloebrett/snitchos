@@ -65,7 +65,7 @@ impl ObjectKind {
 
 /// The emoji `hold` shows for a rights bitmask, one glyph per *category* present
 /// (not per bit): 🪴 mint (`MINT` — the authority-growing right), 👀 read
-/// (`RECV`/`WAIT`, the consumer ends), ✏️ write (`EMIT`/`SEND`/`SIGNAL`, the
+/// (`RECV`/`WAIT`, the consumer ends), 📝 write (`EMIT`/`SEND`/`SIGNAL`, the
 /// emitting/producer ends). Order is fixed (mint, read, write) and an empty mask
 /// yields the empty string. This is the cap-domain's own display of an opaque
 /// field — the sibling of [`ObjectKind::as_str`] — kept out of the generic table
@@ -81,14 +81,14 @@ pub fn rights_glyphs(rights: Rights) -> alloc::string::String {
         out.push('👀');
     }
     if rights & (r::EMIT | r::SEND | r::SIGNAL) != 0 {
-        out.push_str("✏️");
+        out.push('📝');
     }
     out
 }
 
 /// Wrap each rights glyph in its ANSI color — the presentation companion to
 /// [`rights_glyphs`], and the colorizer the REPL hands the box style when its
-/// output channel supports color: 🪴 green (mint), 👀 blue (read), ✏️ amber/yellow
+/// output channel supports color: 🪴 green (mint), 👀 blue (read), 📝 amber/yellow
 /// (write). Non-glyph text (other cells, borders) passes through untouched, so
 /// the box style can apply this to every cell blindly. Amber uses SGR 33 (yellow)
 /// for portability — a bare UART terminal needn't grok 256-color.
@@ -96,7 +96,7 @@ pub fn rights_glyphs(rights: Rights) -> alloc::string::String {
 pub fn colorize_rights(cell: &str) -> alloc::string::String {
     cell.replace('🪴', "\u{1b}[32m🪴\u{1b}[0m")
         .replace('👀', "\u{1b}[34m👀\u{1b}[0m")
-        .replace("✏️", "\u{1b}[33m✏️\u{1b}[0m")
+        .replace('📝', "\u{1b}[33m📝\u{1b}[0m")
 }
 
 /// One capability the calling process holds — what `hold` enumerates. Pure data
@@ -380,10 +380,10 @@ mod tests {
     fn colorize_rights_wraps_each_glyph_in_its_ansi_color() {
         assert_eq!(colorize_rights("🪴"), "\u{1b}[32m🪴\u{1b}[0m"); // green mint
         assert_eq!(colorize_rights("👀"), "\u{1b}[34m👀\u{1b}[0m"); // blue read
-        assert_eq!(colorize_rights("✏️"), "\u{1b}[33m✏️\u{1b}[0m"); // amber write
+        assert_eq!(colorize_rights("📝"), "\u{1b}[33m📝\u{1b}[0m"); // amber write
         assert_eq!(
-            colorize_rights("🪴👀✏️"),
-            "\u{1b}[32m🪴\u{1b}[0m\u{1b}[34m👀\u{1b}[0m\u{1b}[33m✏️\u{1b}[0m"
+            colorize_rights("🪴👀📝"),
+            "\u{1b}[32m🪴\u{1b}[0m\u{1b}[34m👀\u{1b}[0m\u{1b}[33m📝\u{1b}[0m"
         );
     }
 
@@ -400,19 +400,19 @@ mod tests {
         assert_eq!(rights_glyphs(r::MINT), "🪴");
         assert_eq!(rights_glyphs(r::RECV), "👀");
         assert_eq!(rights_glyphs(r::WAIT), "👀"); // WAIT is a read (consumer) right
-        assert_eq!(rights_glyphs(r::EMIT), "✏️");
-        assert_eq!(rights_glyphs(r::SEND), "✏️");
-        assert_eq!(rights_glyphs(r::SIGNAL), "✏️"); // SIGNAL is a write (producer) right
+        assert_eq!(rights_glyphs(r::EMIT), "📝");
+        assert_eq!(rights_glyphs(r::SEND), "📝");
+        assert_eq!(rights_glyphs(r::SIGNAL), "📝"); // SIGNAL is a write (producer) right
     }
 
     #[test]
     fn rights_glyphs_lists_mint_then_read_then_write_and_dedupes_a_category() {
         use snitchos_abi::rights as r;
-        // SEND|RECV is one read and one write — a single 👀 and a single ✏️.
-        assert_eq!(rights_glyphs(r::SEND | r::RECV), "👀✏️");
-        assert_eq!(rights_glyphs(r::MINT | r::RECV | r::SEND), "🪴👀✏️");
-        // Two write rights collapse to one ✏️ (category, not per-bit).
-        assert_eq!(rights_glyphs(r::EMIT | r::SEND), "✏️");
+        // SEND|RECV is one read and one write — a single 👀 and a single 📝.
+        assert_eq!(rights_glyphs(r::SEND | r::RECV), "👀📝");
+        assert_eq!(rights_glyphs(r::MINT | r::RECV | r::SEND), "🪴👀📝");
+        // Two write rights collapse to one 📝 (category, not per-bit).
+        assert_eq!(rights_glyphs(r::EMIT | r::SEND), "📝");
     }
 
     #[test]

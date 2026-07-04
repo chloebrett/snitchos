@@ -985,7 +985,7 @@ mod tests {
         assert_eq!(
             value,
             Value::List(
-                vec![cap_record(2, "Endpoint", "👀✏️", 0), cap_record(3, "Endpoint", "✏️", 7)]
+                vec![cap_record(2, "Endpoint", "👀📝", 0), cap_record(3, "Endpoint", "📝", 7)]
                     .into()
             )
         );

@@ -325,7 +325,7 @@ mod tests {
         let fake = Rc::new(FakePlatform::with_caps(vec![CapInfo {
             handle: 2,
             kind: ObjectKind::Endpoint,
-            rights: 0b0010, // SEND — a write glyph (✏️), amber SGR 33
+            rights: 0b0010, // SEND — a write glyph (📝), amber SGR 33
             badge: 0,
         }]));
         let mut repl =
