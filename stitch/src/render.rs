@@ -10,6 +10,17 @@
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 use crate::value::{DataValue, Value};
+use unicode_width::UnicodeWidthStr;
+
+/// The number of terminal cells `text` occupies — what a column must be padded
+/// to so borders line up. `char` count won't do: an emoji is one `char` but two
+/// cells, and a VS16-selected emoji (`✏️` = `U+270F` + `U+FE0F`) is two `char`s
+/// for the same two cells. `unicode-width` (0.2+) scores all of these correctly,
+/// including the VS16 promotion of an otherwise one-cell symbol, so this is a
+/// thin wrapper that names the intent at the call sites.
+fn display_width(text: &str) -> usize {
+    text.width()
+}
 
 /// A column's horizontal alignment. Decided from the *value type* (numbers
 /// right-align, everything else left) — read off the value, never by re-parsing
@@ -53,8 +64,8 @@ impl Table {
     }
 
     /// Each column's display width — the widest of its header (if any) and its
-    /// cells, counted in **characters** (box-drawing and any non-ASCII are
-    /// multi-byte, so byte length would misalign).
+    /// cells, counted in **terminal cells** ([`display_width`]): an emoji is one
+    /// `char` but two cells, so neither byte nor `char` length would align.
     #[must_use]
     pub fn widths(&self) -> Vec<usize> {
         let columns = self
@@ -65,9 +76,9 @@ impl Table {
             .unwrap_or(0);
         (0..columns)
             .map(|col| {
-                let header_width = self.header.as_ref().map_or(0, |h| h[col].chars().count());
+                let header_width = self.header.as_ref().map_or(0, |h| display_width(&h[col]));
                 let cell_width =
-                    self.rows.iter().map(|row| row[col].chars().count()).max().unwrap_or(0);
+                    self.rows.iter().map(|row| display_width(&row[col])).max().unwrap_or(0);
                 header_width.max(cell_width)
             })
             .collect()
@@ -96,15 +107,21 @@ impl TableStyle for BoxStyle {
             format!("{left}{}{right}", segments.join(&tee.to_string()))
         };
         let aligns = table.aligns();
+        // Pad by *display width*, not `char` count: `{cell:<width$}` counts chars,
+        // so a two-cell emoji would be under-padded and shear the border.
+        let pad = |cell: &str, width: usize, align: Align| {
+            let fill = " ".repeat(width.saturating_sub(display_width(cell)));
+            match align {
+                Align::Left => format!("{cell}{fill}"),
+                Align::Right => format!("{fill}{cell}"),
+            }
+        };
         let row = |cells: &[String]| {
             let padded = cells
                 .iter()
                 .zip(&widths)
                 .zip(aligns)
-                .map(|((cell, width), align)| match align {
-                    Align::Left => format!("{cell:<width$}"),
-                    Align::Right => format!("{cell:>width$}"),
-                })
+                .map(|((cell, width), align)| pad(cell, *width, *align))
                 .collect::<Vec<_>>();
             format!("│ {} │", padded.join(" │ "))
         };
@@ -430,6 +447,35 @@ Ok
             fields: vec![],
         }));
         assert_eq!(render(&none), "None");
+    }
+
+    #[test]
+    fn display_width_counts_terminal_cells_including_vs16_promotion() {
+        use super::display_width;
+        assert_eq!(display_width(""), 0);
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("│"), 1); // box-drawing is one cell
+        assert_eq!(display_width("🪴"), 2); // a plane-1 emoji is two cells
+        assert_eq!(display_width("👀"), 2);
+        assert_eq!(display_width("✏️"), 2); // U+270F (1) + VS16 promotes to 2
+        assert_eq!(display_width("🪴👀✏️"), 6);
+    }
+
+    #[test]
+    fn an_emoji_column_keeps_every_border_line_the_same_display_width() {
+        use super::display_width;
+        // Cells of differing display width (4 cells vs 2) in one column: padding
+        // must be by display width, or the box shears.
+        let list = Value::List(
+            vec![
+                record(vec![("r", Value::Str("👀👀".into()))]),
+                record(vec![("r", Value::Str("👀".into()))]),
+            ]
+            .into(),
+        );
+        let out = render(&list);
+        let widths = out.lines().map(display_width).collect::<Vec<_>>();
+        assert!(widths.iter().all(|&w| w == widths[0]), "misaligned:\n{out}\nwidths={widths:?}");
     }
 
     #[test]

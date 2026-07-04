@@ -12,6 +12,11 @@ snitchos-abi = { path = "../abi" }
 # The `hitch` value model. `stitch` understands `hitch`, never the reverse:
 # `hitch` is a leaf, so `stitch` owns the `Value` <-> `hitch::Value` bridge.
 hitch = { path = "../hitch" }
+# Display-width measurement for table column alignment: emoji/CJK occupy two
+# terminal cells but count as one `char` (and a VS16-selected emoji like ✏️ is
+# two `char`s for one cell-pair), so char count misaligns. `no_std`, no deps;
+# host + target.
+unicode-width = "0.2"
 
 # The userspace runtime — only on the SnitchOS target (riscv `target_os =
 # "none"`). Backs the on-target `RuntimeTelemetry`, which routes Stitch's
