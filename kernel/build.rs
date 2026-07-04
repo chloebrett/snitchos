@@ -9,7 +9,10 @@ const USER_TARGET: &str = "riscv64gc-unknown-none-elf";
 /// each freshly-built ELF under its env var, consumed by
 /// `include_bytes!(env!(...))` in `src/trap/user.rs`. One row per program — the
 /// single place the build enumerates them (the kernel-side registry pairs with
-/// this; see the workload-registry refactor).
+/// this; see the workload-registry refactor). It is also the source of truth for
+/// rebuild-watching: [`seed_packages_for_embedded_bins`] seeds the dependency
+/// closure from the owning package of each bin named here, so a new bin added to
+/// this table extends `rerun-if-changed` coverage automatically.
 const USER_PROGRAMS: &[(&str, &str)] = &[
     ("hello", "SNITCHOS_USER_ELF"),
     ("faulter", "SNITCHOS_FAULTER_ELF"),
@@ -130,21 +133,40 @@ fn build_and_embed_user(kernel_dir: &str) {
         embed(&format!("{bin_dir}/{bin}"), env_var);
     }
 
-    // Rebuild the embed whenever any source the bins are built from changes.
-    // Derived from the real dependency graph (below) rather than a hand list, so
-    // adding a dependency to a bin can never silently embed a stale kernel — the
-    // failure mode a maintained allow-list invites. `fs-image` is data seeded
-    // into `fs-server-seeded`, not a crate, so it stays explicit.
+    // Rebuild the embed whenever any source the bins are built from changes,
+    // derived from the real dependency graph (below) rather than a hand list — so
+    // adding a dependency to a bin can never silently embed a stale kernel, the
+    // failure mode a maintained allow-list invites.
+    //
+    // Two inputs the graph walk can't see, so they are watched explicitly here:
+    //  * `fs-image` — data baked into `fs-server-seeded` at compile time, not a crate.
+    //  * `Cargo.lock` — a `cargo update` can bump an *external* (registry)
+    //    dependency of a bin without touching any in-tree source. The walk only
+    //    watches workspace crates (registry sources are immutable per lockfile),
+    //    so the lockfile is what re-triggers on a resolved-version change.
     println!("cargo:rerun-if-changed={}", ws.join("fs-image").display());
+    println!("cargo:rerun-if-changed={}", ws.join("Cargo.lock").display());
     watch_bin_dependency_closure(ws);
 }
 
-/// Emit `cargo:rerun-if-changed` for every **workspace crate** the embedded bin
-/// packages (`hello`, `fs`) transitively depend on, derived from `cargo
-/// metadata`. Watching each crate's directory (recursive) covers its `src`,
-/// `Cargo.toml`, and `build.rs` without enumerating files — and, crucially,
-/// stays correct as dependencies come and go. External (registry) deps are
-/// immutable, so only workspace members need watching.
+/// Emit `cargo:rerun-if-changed` for every **workspace crate** the embedded bins
+/// transitively depend on, derived from `cargo metadata`. Watching each crate's
+/// directory (recursive) covers its `src`, `Cargo.toml`, and `build.rs` without
+/// enumerating files, and stays correct as dependencies come and go. Registry
+/// deps are immutable per lockfile, so only workspace members are watched here —
+/// `Cargo.lock` (watched by the caller) catches resolved-version changes.
+///
+/// KNOWN LIMIT — feature-resolution skew. The closure comes from `cargo
+/// metadata`'s default feature resolution, which can differ from the actual bin
+/// build's (`cargo build -p hello -p fs --target …`, run above). If an embedded
+/// bin ever gains an **optional dependency behind a feature** that the real build
+/// enables but metadata doesn't resolve, that edge is absent from the graph here,
+/// the crate goes unwatched, and its changes silently embed a stale kernel. No
+/// embedded bin has feature-gated dependencies today; **if you add one, either
+/// watch its crate explicitly or move the userspace build to cargo
+/// artifact-dependencies** (`-Z bindeps`), which tracks features/targets/lockfile
+/// natively and would retire this whole walk. This is the one staleness edge the
+/// external metadata walk cannot close from the outside.
 fn watch_bin_dependency_closure(ws: &Path) {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let out = Command::new(cargo)
@@ -163,7 +185,7 @@ fn watch_bin_dependency_closure(ws: &Path) {
 
     // package id -> manifest_path, and the resolve graph's id -> [dep ids].
     let mut manifest_of = std::collections::HashMap::new();
-    let mut seeds = alloc_ids_for(&meta, &["hello", "fs"], &mut manifest_of);
+    let mut seeds = seed_packages_for_embedded_bins(&meta, &mut manifest_of);
     let deps_of = resolve_edges(&meta);
 
     // BFS the closure; watch each reachable crate whose source lives in-tree.
@@ -184,13 +206,23 @@ fn watch_bin_dependency_closure(ws: &Path) {
     }
 }
 
-/// Collect the package ids named in `names`, filling `manifest_of` for *every*
-/// package as a side effect (the id -> manifest_path map the closure walk needs).
-fn alloc_ids_for(
+/// Seed the closure walk with the packages that *own* an embedded bin, and fill
+/// `manifest_of` for every package (the id -> manifest_path map the walk needs).
+///
+/// A package is a seed iff it has a `bin` target whose name is in
+/// [`USER_PROGRAMS`] — so the seed set is **derived from that single source of
+/// truth**, not a second hand-maintained list that could drift from it. Add a bin
+/// to `USER_PROGRAMS` (even one in a brand-new userspace crate) and its owning
+/// package — and therefore its whole dependency closure — is watched
+/// automatically. The one standing assumption: every embedded bin resolves to an
+/// in-tree package via its bin-target name, which holds for the path crates the
+/// kernel embeds.
+fn seed_packages_for_embedded_bins(
     meta: &serde_json::Value,
-    names: &[&str],
     manifest_of: &mut std::collections::HashMap<String, String>,
 ) -> Vec<String> {
+    let embedded: std::collections::HashSet<&str> =
+        USER_PROGRAMS.iter().map(|(bin, _)| *bin).collect();
     let mut seeds = Vec::new();
     for pkg in meta["packages"].as_array().into_iter().flatten() {
         let (Some(id), Some(manifest)) = (pkg["id"].as_str(), pkg["manifest_path"].as_str())
@@ -198,7 +230,15 @@ fn alloc_ids_for(
             continue;
         };
         manifest_of.insert(id.to_string(), manifest.to_string());
-        if pkg["name"].as_str().is_some_and(|n| names.contains(&n)) {
+        let owns_embedded_bin = pkg["targets"].as_array().into_iter().flatten().any(|t| {
+            let is_bin = t["kind"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|k| k.as_str() == Some("bin"));
+            is_bin && t["name"].as_str().is_some_and(|n| embedded.contains(n))
+        });
+        if owns_embedded_bin {
             seeds.push(id.to_string());
         }
     }
