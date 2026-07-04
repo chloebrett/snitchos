@@ -236,6 +236,7 @@ catalog! {
     wfi "fs-workload"                     scenarios::fs_workload_traces             [userspace, ipc] {"fs"};
     wfi "userspace-bad-ptr"               scenarios::userspace_bad_ptr_refused      [userspace]      {"userspace-bad-ptr"};
     wfi "userspace-custom-metric"         scenarios::userspace_custom_metric        [userspace]      {"probe"};
+    wfi "probe-reports-the-timebase"      scenarios::probe_reports_the_timebase     [userspace]      {"probe"};
     wfi "span-name-not-poisonable"        scenarios::span_name_not_poisonable       [userspace]      {"probe"};
     wfi "stitch-telemetry-on-the-wire"    scenarios::stitch_telemetry_on_the_wire   [userspace, stitch] {"stitch-repl"};
     wfi "stitch-fs-loads-and-runs"        scenarios::stitch_fs_loads_and_runs       [userspace, stitch, fs] {"stitch-fs"};

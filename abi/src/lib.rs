@@ -238,6 +238,12 @@ pub enum Syscall {
     /// number revoked in `a0`, or `usize::MAX` if the handle resolves nothing. The
     /// reclaim half of the shell powerbox's grant→use→reclaim. (`a0` = handle.)
     Revoke = 28,
+    /// Read the platform timebase frequency in Hz — the rate [`Self::ClockNow`]'s
+    /// ticks advance at (the DTB `timebase-frequency`; 10 MHz on QEMU `virt`). No
+    /// arguments; returns the frequency in `a0`. Ambient, like `ClockNow`. Lets the
+    /// stdlib convert clock ticks to a real `Duration` without hardcoding the
+    /// platform rate — `Instant::elapsed()` divides a tick delta by this.
+    ClockFreq = 29,
 }
 
 impl Syscall {
@@ -276,6 +282,7 @@ impl Syscall {
             26 => Some(Self::SpawnImage),
             27 => Some(Self::CapList),
             28 => Some(Self::Revoke),
+            29 => Some(Self::ClockFreq),
             _ => None,
         }
     }
@@ -348,9 +355,67 @@ pub struct CapDesc {
 /// copy/`MemoryRegion` mechanism, not by widening this.
 pub const MSG_WORDS: usize = 4;
 
+/// The length of the longest prefix of `bytes` that is at most `max` bytes and
+/// does not split a UTF-8 character — so, for valid-UTF-8 input, the prefix is
+/// itself valid UTF-8. Callers chunk console output with this: `ConsoleWrite`
+/// validates each syscall's bytes as UTF-8 (it forwards through the kernel's
+/// `str`-based console), so a naive `chunks(max)` byte-split would hand the
+/// kernel a partial character and the whole write would be refused. Always
+/// returns at least 1 for non-empty input, so a chunking loop makes progress
+/// even in the degenerate case of a single char wider than `max`.
+#[must_use]
+pub fn utf8_chunk_end(bytes: &[u8], max: usize) -> usize {
+    if bytes.len() <= max {
+        return bytes.len();
+    }
+    // `bytes[max]` starts the next chunk; if it's a UTF-8 continuation byte
+    // (`0b10xx_xxxx`) the char straddles the boundary, so back up to its start.
+    let mut end = max;
+    while end > 0 && bytes[end] & 0b1100_0000 == 0b1000_0000 {
+        end -= 1;
+    }
+    if end == 0 { max } else { end }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf8_chunk_end_returns_whole_slice_when_it_fits() {
+        assert_eq!(utf8_chunk_end(b"abcd", 4), 4);
+        assert_eq!(utf8_chunk_end(b"ab", 10), 2);
+        assert_eq!(utf8_chunk_end(b"", 4), 0);
+    }
+
+    #[test]
+    fn utf8_chunk_end_never_splits_a_multibyte_char() {
+        // "a─b" = [0x61, 0xE2,0x94,0x80, 0x62] — the box-drawing '─' is 3 bytes.
+        let s = "a─b".as_bytes();
+        // A boundary landing inside '─' backs up to just before it.
+        assert_eq!(utf8_chunk_end(s, 2), 1); // don't split 'a─'
+        assert_eq!(utf8_chunk_end(s, 3), 1);
+        // A boundary just past '─' keeps the whole char.
+        assert_eq!(utf8_chunk_end(s, 4), 4);
+        // Landing exactly on a char start (the 'a') takes just it.
+        assert_eq!(utf8_chunk_end(s, 1), 1);
+    }
+
+    #[test]
+    fn utf8_chunk_end_stays_in_bounds_on_malformed_input() {
+        // Defensive: a slice starting with continuation bytes isn't valid UTF-8,
+        // but the `end > 0` guard must stop the backup at the start rather than
+        // underflow. (Real console output is always valid UTF-8.)
+        assert_eq!(utf8_chunk_end(&[0x80, 0x80, 0x80], 1), 1);
+    }
+
+    #[test]
+    fn utf8_chunk_end_makes_progress_on_a_char_longer_than_max() {
+        // A 4-byte emoji with max below one char: still return >=1 to avoid a
+        // stuck loop (degenerate; real writes use max=256 >> 4).
+        let emoji = "🪴".as_bytes(); // 4 bytes
+        assert!(utf8_chunk_end(emoji, 2) >= 1);
+    }
 
     #[test]
     fn syscall_numbers_round_trip() {
@@ -383,6 +448,7 @@ mod tests {
         assert_eq!(Syscall::SpawnImage as usize, 26);
         assert_eq!(Syscall::CapList as usize, 27);
         assert_eq!(Syscall::Revoke as usize, 28);
+        assert_eq!(Syscall::ClockFreq as usize, 29);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Exit));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Yield));
@@ -413,7 +479,8 @@ mod tests {
         assert_eq!(Syscall::from_usize(26), Some(Syscall::SpawnImage));
         assert_eq!(Syscall::from_usize(27), Some(Syscall::CapList));
         assert_eq!(Syscall::from_usize(28), Some(Syscall::Revoke));
-        assert_eq!(Syscall::from_usize(29), None);
+        assert_eq!(Syscall::from_usize(29), Some(Syscall::ClockFreq));
+        assert_eq!(Syscall::from_usize(30), None);
     }
 
     #[test]

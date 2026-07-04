@@ -1928,6 +1928,36 @@ pub fn userspace_bad_ptr_refused(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Honest clock (`workload=probe`): the `ClockFreq` syscall plumbs the kernel's
+/// DTB timebase to userspace, so `std::time::Instant` converts tick deltas to a
+/// real `Duration` without hardcoding the platform rate. Asserts `probe` reports
+/// `snitchos.probe.timebase_hz == 10_000_000` (the QEMU `virt` timebase the
+/// kernel parsed), then that `Instant::elapsed()` over a bounded spin produces a
+/// positive `snitchos.probe.elapsed_nanos` — the full stack (syscall → runtime →
+/// `Instant`) working end to end.
+pub fn probe_reports_the_timebase(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 20, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.probe.timebase_hz")
+                && *value == 10_000_000)
+    })
+    .ok_or(
+        "no snitchos.probe.timebase_hz == 10_000_000 within 20s — ClockFreq didn't report the \
+         DTB timebase to userspace",
+    )?;
+
+    h.wait_for(SEC * 10, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.probe.elapsed_nanos")
+                && *value > 0)
+    })
+    .ok_or(
+        "no positive snitchos.probe.elapsed_nanos within 10s — Instant::elapsed() produced a \
+         zero/invalid Duration (tick→Duration conversion broken)",
+    )?;
+    Ok(())
+}
+
 /// Userspace-defined metrics (`workload=probe`, debt #2): a `probe` program
 /// registers its *own* metric (`snitchos.probe.custom`, a gauge) through its
 /// bootstrap `TelemetrySink` cap — the kernel doesn't know the name ahead of

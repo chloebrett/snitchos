@@ -20,7 +20,7 @@
 
 use core::alloc::Layout;
 use core::arch::asm;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use snitchos_abi::Syscall;
 use talc::locking::AssumeUnlockable;
@@ -387,7 +387,14 @@ pub fn console_read(dst: &mut [u8]) -> usize {
 /// caller controls layout (prompts, escape sequences).
 pub fn console_write(bytes: &[u8]) -> usize {
     let mut written = 0;
-    for chunk in bytes.chunks(DEBUG_WRITE_MAX) {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        // Split on a UTF-8 char boundary, not a raw byte count: `ConsoleWrite`
+        // validates each syscall's bytes as UTF-8, so a chunk ending mid-character
+        // (a box-drawing glyph is 3 bytes, an emoji 4) would be refused and the
+        // rest of the output dropped.
+        let end = snitchos_abi::utf8_chunk_end(rest, DEBUG_WRITE_MAX);
+        let (chunk, tail) = rest.split_at(end);
         let ret: usize;
         // SAFETY: `ecall`; the kernel range-validates `(ptr, len)`, copies the
         // bytes to the UART or refuses (a0 = usize::MAX). `ptr` isn't deref'd here.
@@ -403,6 +410,7 @@ pub fn console_write(bytes: &[u8]) -> usize {
             break;
         }
         written += ret;
+        rest = tail;
     }
     written
 }
@@ -445,6 +453,32 @@ pub fn clock_now() -> u64 {
             out("a0") ret,
         );
     }
+    ret
+}
+
+/// Read the platform timebase frequency in Hz (the `ClockFreq` syscall) — the
+/// rate [`clock_now`] ticks advance at. Cached after the first read: the timebase
+/// is fixed for the life of the process, so at most one syscall is made. Backs
+/// `snitchos_std::time::Instant`'s tick→`Duration` conversion, so a program never
+/// hardcodes the platform rate.
+#[must_use]
+pub fn clock_freq() -> u64 {
+    static CACHED: AtomicU64 = AtomicU64::new(0);
+    let hz = CACHED.load(Ordering::Relaxed);
+    if hz != 0 {
+        return hz;
+    }
+    let ret: u64;
+    // SAFETY: `ecall`; `ClockFreq` takes no arguments and returns the timebase
+    // frequency in `a0`. No memory is touched.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::ClockFreq as usize,
+            out("a0") ret,
+        );
+    }
+    CACHED.store(ret, Ordering::Relaxed);
     ret
 }
 

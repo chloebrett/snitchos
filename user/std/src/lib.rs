@@ -30,10 +30,6 @@
 //!   (one thread per process today), a thread-create syscall, and a futex.
 //! - `thread::sleep` — needs a block-until-deadline syscall; a cooperative
 //!   spin-yield would busy-wait, not sleep, so it's left out.
-//! - `time::Instant` (→ `Duration`) — the monotonic clock is readable
-//!   (`snitchos_user::clock_now`), but an honest tick→`Duration` conversion needs
-//!   the platform timebase handed to userspace (it's DTB-parsed kernel-side and
-//!   not yet plumbed out); a hardcoded QEMU timebase would be a portability lie.
 //! - `collections::HashMap`/`HashSet` — need `hashbrown` + a `RandomState` seed
 //!   (an entropy syscall) for DoS-resistant hashing, or a fixed hasher.
 //! - `fs` — capability-rooted (a granted directory capability, WASI-style
@@ -88,10 +84,55 @@ pub mod process {
 
 /// `std::time`.
 pub mod time {
-    /// `Duration` lives in `core` — free. `Instant` is *Not yet provided* (see
-    /// the crate docs): it needs the platform timebase exposed to userspace for
-    /// an honest tick→`Duration` conversion.
+    /// `Duration` lives in `core` — free.
     pub use core::time::Duration;
+
+    /// `std::time::Instant` — a monotonic timestamp, backed by the kernel's
+    /// `ClockNow` tick counter. `elapsed`/`duration_since` convert a tick delta to
+    /// a `Duration` using the platform timebase (`ClockFreq`), so nothing here
+    /// hardcodes the clock rate. Monotonic and never rolls backward.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct Instant(u64);
+
+    impl Instant {
+        /// Read the monotonic clock now.
+        #[must_use]
+        pub fn now() -> Instant {
+            Instant(snitchos_user::clock_now())
+        }
+
+        /// Time elapsed since this instant was captured.
+        #[must_use]
+        pub fn elapsed(&self) -> Duration {
+            Instant::now().duration_since(*self)
+        }
+
+        /// `self - earlier` as a `Duration`, saturating at zero when `earlier` is
+        /// the later instant (the clock is monotonic, but instants may be compared
+        /// out of order). Matches `std`'s saturating semantics.
+        #[must_use]
+        pub fn duration_since(&self, earlier: Instant) -> Duration {
+            ticks_to_duration(self.0.saturating_sub(earlier.0))
+        }
+
+        /// Alias of [`Instant::duration_since`], which already saturates.
+        #[must_use]
+        pub fn saturating_duration_since(&self, earlier: Instant) -> Duration {
+            self.duration_since(earlier)
+        }
+    }
+
+    /// Convert a `ClockNow` tick delta to a `Duration` at the platform timebase
+    /// (`ClockFreq`, cached in the runtime). `u128` intermediate so `ticks · 1e9`
+    /// can't overflow for deltas beyond ~18 s.
+    fn ticks_to_duration(ticks: u64) -> Duration {
+        let hz = snitchos_user::clock_freq();
+        if hz == 0 {
+            return Duration::ZERO;
+        }
+        let nanos = u128::from(ticks) * 1_000_000_000 / u128::from(hz);
+        Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+    }
 }
 
 /// `std::sync`.

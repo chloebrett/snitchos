@@ -55,6 +55,12 @@ use crate::percpu::PerCpu;
 /// `Relaxed`: init-once, then read forever — no payload to publish.
 pub static TIMER_INTERVAL_TICKS: AtomicU64 = AtomicU64::new(0);
 
+/// The platform timebase frequency in Hz — the rate [`now_ticks`] advances at
+/// (DTB `timebase-frequency`; 10 MHz on QEMU `virt`). Stored at boot for the
+/// `ClockFreq` syscall so userspace can convert ticks to real time without
+/// hardcoding the platform rate. `Relaxed`: init-once at boot, read-only after.
+pub static TIMEBASE_HZ: AtomicU64 = AtomicU64::new(0);
+
 /// Timer ticks per heartbeat. The timer fires fast (so console RX is drained and
 /// preemption is checked promptly — responsive interactive input), but the
 /// *heartbeat* (telemetry, smoke patterns) stays at its original cadence by

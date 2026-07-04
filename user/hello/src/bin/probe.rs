@@ -16,7 +16,8 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{Metric, entry, register_gauge, tracer};
+use snitchos_std::time::Instant;
+use snitchos_user::{Metric, clock_freq, clock_now, entry, register_gauge, tracer};
 
 /// A span name the *kernel* also uses — the poisoning probe. With per-process
 /// scoping we get a fresh id for it, distinct from the kernel's.
@@ -45,4 +46,19 @@ fn main() {
     // `StringId`, distinct from the kernel's — no span-name poisoning. The guard
     // closes it on return.
     let _span = tracer().span(KERNEL_SPAN_NAME);
+
+    // Report the platform timebase the runtime learned via the `ClockFreq`
+    // syscall — the rate `std::time::Instant` divides tick deltas by. The itest
+    // asserts it equals the DTB timebase, proving no hardcoded clock rate in
+    // userspace.
+    register_gauge("snitchos.probe.timebase_hz").emit(clock_freq() as i64);
+
+    // Exercise `Instant` end to end: time a bounded spin (guaranteed to burn
+    // >= 1000 ticks so the elapsed `Duration` is non-zero) and emit its nanos.
+    let start = Instant::now();
+    let t0 = clock_now();
+    while clock_now() - t0 < 1000 {
+        core::hint::spin_loop();
+    }
+    register_gauge("snitchos.probe.elapsed_nanos").emit(start.elapsed().as_nanos() as i64);
 }

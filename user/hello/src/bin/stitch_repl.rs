@@ -25,8 +25,8 @@ use alloc::vec::Vec;
 
 use fs_proto::{FileRights, Op, Request, Response, UserBuf};
 use snitchos_user::{
-    Endpoint, Metric, Tracer, clock_now, endpoint, entry, register_counter, register_histogram,
-    tracer,
+    Endpoint, Metric, Tracer, clock_freq, clock_now, endpoint, entry, register_counter,
+    register_histogram, tracer,
 };
 use stitch::platform::{Platform, RuntimePlatform};
 use stitch::runner::Repl;
@@ -110,8 +110,12 @@ fn read_file(path: &str) -> Option<String> {
 
 const PROMPT: &str = "stitch> ";
 
-/// Timebase is 10 MHz on QEMU `virt` → 10_000 ticks per millisecond.
-const TICKS_PER_MS: u64 = 10_000;
+/// Clock ticks per millisecond, derived from the platform timebase the kernel
+/// reports (`ClockFreq`) rather than hardcoding QEMU's 10 MHz. `.max(1)` guards
+/// the `dt / ticks_per_ms()` divide on an implausibly slow clock.
+fn ticks_per_ms() -> u64 {
+    (clock_freq() / 1000).max(1)
+}
 
 /// Evaluate `src`, timing it with the monotonic clock and bracketing it in a
 /// real SnitchOS span. Returns the rendered output and the elapsed ticks.
@@ -138,7 +142,7 @@ fn bench(
     let (out, dt) = timed(repl, tr, metrics, src);
     platform.write(&format!(
         "  [{label:>8}] {dt:>9} ticks (~{} ms)   {src}  {out}",
-        dt / TICKS_PER_MS
+        dt / ticks_per_ms()
     ));
 }
 
@@ -200,7 +204,7 @@ fn main() {
         } else if !trimmed.is_empty() {
             let (out, dt) = timed(&mut repl, tr, &mut metrics, &line);
             platform.write(&out);
-            platform.write(&format!("  ({dt} ticks, ~{} ms)\n", dt / TICKS_PER_MS));
+            platform.write(&format!("  ({dt} ticks, ~{} ms)\n", dt / ticks_per_ms()));
         }
         platform.write(PROMPT);
     }

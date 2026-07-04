@@ -251,6 +251,9 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // drain + preemption, while the heartbeat still runs at the per-second
     // cadence (gated in the handler). One heartbeat period = `timebase_hz` ticks.
     unsafe { trap::init_timer(timebase_hz / trap::TICKS_PER_HEARTBEAT) };
+    // Publish the raw timebase for the `ClockFreq` syscall (userspace `Instant`
+    // divides a `ClockNow` tick delta by this to get a real `Duration`).
+    trap::TIMEBASE_HZ.store(u64::from(timebase_hz), Ordering::Relaxed);
 
     // v0.6 step 7: enable S-mode software interrupts (the IPI
     // channel). Trap vector + handler are already installed; the
