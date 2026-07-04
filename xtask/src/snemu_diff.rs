@@ -154,11 +154,18 @@ fn decode_frames(bytes: &[u8]) -> Vec<OwnedFrame> {
     frames
 }
 
+/// Frame count that marks "boot telemetry produced" — a milestone both emulators
+/// reach, so their time-to-here is a fair apples-to-apples "finish" (unlike a
+/// fixed wall-clock window). Covers boot through the first heartbeats.
+const MILESTONE_FRAMES: usize = 100;
+
 /// Wall-clock timing for one emulator run.
 #[derive(Clone, Copy)]
 struct Timing {
     /// Wall time from run start to the first `SpanStart` frame.
     first_span: Option<Duration>,
+    /// Wall time to emit [`MILESTONE_FRAMES`] frames — the comparable finish line.
+    milestone: Option<Duration>,
     /// Wall time for the whole run (snemu: the step loop; qemu: the window).
     total: Duration,
 }
@@ -181,6 +188,7 @@ fn collect_snemu(
     let mut steps = 0u64;
     let mut stop = format!("step limit ({max_steps})");
     let mut first_span = None;
+    let mut milestone = None;
     let mut seen_tx = 0usize;
     while steps < max_steps {
         match machine.step() {
@@ -190,19 +198,23 @@ fn collect_snemu(
                 break;
             }
         }
-        // Watch the TX buffer for the first span (cheap length check per step;
-        // decode only when it grows, and only until we've found one).
-        if first_span.is_none() {
+        // Watch the TX buffer for the timing marks (cheap length check per step;
+        // decode only when it grows, and only until both marks are found).
+        if first_span.is_none() || milestone.is_none() {
             let tx = machine.virtio_tx_output();
             if tx.len() != seen_tx {
                 seen_tx = tx.len();
-                if has_span(&decode_frames(tx)) {
+                let frames = decode_frames(tx);
+                if first_span.is_none() && has_span(&frames) {
                     first_span = Some(start.elapsed());
+                }
+                if milestone.is_none() && frames.len() >= MILESTONE_FRAMES {
+                    milestone = Some(start.elapsed());
                 }
             }
         }
     }
-    let timing = Timing { first_span, total: start.elapsed() };
+    let timing = Timing { first_span, milestone, total: start.elapsed() };
     Ok((decode_frames(machine.virtio_tx_output()), stop, timing))
 }
 
@@ -238,10 +250,12 @@ fn collect_qemu(
     let stream = connect_with_deadline(&socket, Duration::from_secs(10));
     let frames = Arc::new(Mutex::new(Vec::new()));
     let first_span = Arc::new(Mutex::new(None));
+    let milestone = Arc::new(Mutex::new(None));
     let reader = match stream {
         Ok(stream) => {
             let sink = Arc::clone(&frames);
             let span_at = Arc::clone(&first_span);
+            let milestone_at = Arc::clone(&milestone);
             Some(thread::spawn(move || {
                 let mut stream = stream;
                 let _ = decode_stream(&mut stream, |f| {
@@ -251,7 +265,11 @@ fn collect_qemu(
                             *slot = Some(start.elapsed());
                         }
                     }
-                    sink.lock().unwrap().push(OwnedFrame::from_borrowed(f));
+                    let mut v = sink.lock().unwrap();
+                    v.push(OwnedFrame::from_borrowed(f));
+                    if v.len() == MILESTONE_FRAMES {
+                        *milestone_at.lock().unwrap() = Some(start.elapsed());
+                    }
                 });
             }))
         }
@@ -270,6 +288,7 @@ fn collect_qemu(
     let _ = std::fs::remove_file(&socket);
     let timing = Timing {
         first_span: *first_span.lock().unwrap(),
+        milestone: *milestone.lock().unwrap(),
         total: start.elapsed(),
     };
     let frames = Arc::try_unwrap(frames)
@@ -430,9 +449,10 @@ fn fmt_opt(d: Option<Duration>) -> String {
     d.map_or_else(|| "—".to_string(), |d| format!("{:.2}s", d.as_secs_f64()))
 }
 
-/// Format a `Timing` as `first-span/total` seconds.
+/// Format a `Timing` as `first-span/milestone` seconds — the two comparable
+/// marks (time to first telemetry, time to the boot-telemetry milestone).
 fn fmt_timing(t: &Timing) -> String {
-    format!("{}/{:.2}s", fmt_opt(t.first_span), t.total.as_secs_f64())
+    format!("{}/{}", fmt_opt(t.first_span), fmt_opt(t.milestone))
 }
 
 /// The detailed single-workload report.
@@ -442,9 +462,14 @@ fn print_detailed(cmp: &Comparison) {
         cmp.snemu_frames, cmp.snemu_stop, cmp.qemu_frames
     );
     eprintln!(
-        "snemu-diff: wall time (first-span/total) — snemu {}, qemu {}",
+        "snemu-diff: wall time first-span / {MILESTONE_FRAMES}-frame milestone — snemu {}, qemu {}",
         fmt_timing(&cmp.snemu_timing),
         fmt_timing(&cmp.qemu_timing),
+    );
+    eprintln!(
+        "snemu-diff: snemu total run {:.2}s (qemu window {:.2}s)",
+        cmp.snemu_timing.total.as_secs_f64(),
+        cmp.qemu_timing.total.as_secs_f64(),
     );
     eprintln!(
         "snemu-diff: structural agreement on the first {} frame(s)",
@@ -473,11 +498,11 @@ fn print_detailed(cmp: &Comparison) {
 
 /// The sweep summary table + verdict counts.
 fn print_summary(results: &[(String, Result<Comparison, String>)]) -> ExitCode {
-    // Timing columns are `first-span/total` wall seconds for each emulator.
+    // Timing columns are `first-span / {MILESTONE_FRAMES}-frame` wall seconds.
     println!();
     println!(
         "{:<22} {:<5} {:>5} {:>9} {:>15} {:>15}  {}",
-        "WORKLOAD", "VERD", "PREFX", "VOCAB", "SNEMU sp/tot", "QEMU sp/tot", "SNEMU STOP"
+        "WORKLOAD", "VERD", "PREFX", "VOCAB", "SNEMU sp/ms", "QEMU sp/ms", "SNEMU STOP"
     );
     let (mut pass, mut fail, mut errored) = (0, 0, 0);
     for (name, result) in results {
