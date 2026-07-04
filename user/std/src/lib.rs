@@ -6,17 +6,41 @@
 //! `main` — dropping `#![no_std]` needs a real `*-snitchos` *target* (nightly
 //! `build-std` + a `sys` backend). This facade is the *stepping stone*: it maps
 //! std's surface onto SnitchOS so we can write std-idiomatic code on **stable**
-//! today and see exactly what's left.
+//! today. An eventual real `std` target reuses this same mapping in its `sys`
+//! backend.
 //!
-//! Reading this crate top to bottom is the map: parts backed by what we have
-//! are **wired**; the rest are `todo!("…why…")`. The `todo!` messages double as
-//! the spec — and crucially they encode the **capability** design, not POSIX:
-//! `fs`/`net`/`env` are capability-rooted or unsupported, never ambient. An
-//! eventual real `std` target reuses this same mapping in its `sys` backend.
+//! **The surface only contains what actually works.** Every item here is backed
+//! by a real syscall or is a free `core`/`alloc` re-export — nothing type-checks
+//! and then panics at runtime. The mapping is deliberately **capability-shaped**,
+//! not POSIX: `fs`/`net`/`env` are capability-rooted or unsupported, never
+//! ambient. What SnitchOS can't yet provide is documented under *Not yet
+//! provided* below and tracked in `plans/userspace-runtime-maturity.md`; it is
+//! kept out of the callable surface on purpose.
 //!
 //! Already free (re-exported from `core`/`alloc`, no platform needed): `Vec`,
 //! `String`, `Box`, `Rc`/`Arc`, `format!`, the `BTree*`/`VecDeque` collections,
 //! iterators, `Option`/`Result` — i.e. most of std's *non-platform* surface.
+//!
+//! # Not yet provided (and why)
+//!
+//! These parts of std are **absent from the surface**, not stubbed, because the
+//! mechanism they need doesn't exist yet:
+//!
+//! - `thread::spawn` / `sync::Mutex` (blocking) — need multi-threaded processes
+//!   (one thread per process today), a thread-create syscall, and a futex.
+//! - `thread::sleep` — needs a block-until-deadline syscall; a cooperative
+//!   spin-yield would busy-wait, not sleep, so it's left out.
+//! - `time::Instant` (→ `Duration`) — the monotonic clock is readable
+//!   (`snitchos_user::clock_now`), but an honest tick→`Duration` conversion needs
+//!   the platform timebase handed to userspace (it's DTB-parsed kernel-side and
+//!   not yet plumbed out); a hardcoded QEMU timebase would be a portability lie.
+//! - `collections::HashMap`/`HashSet` — need `hashbrown` + a `RandomState` seed
+//!   (an entropy syscall) for DoS-resistant hashing, or a fixed hasher.
+//! - `fs` — capability-rooted (a granted directory capability, WASI-style
+//!   preopens), never a global namespace; see the v0.10 `Filesystem`.
+//! - `net` — a socket is a granted endpoint capability; needs the network stack.
+//! - `env` — args/vars need a startup-info (`BootInfo`) mechanism, not a global
+//!   environment.
 
 #![no_std]
 
@@ -44,76 +68,45 @@ pub mod thread {
     pub fn yield_now() {
         snitchos_user::yield_now();
     }
-
-    /// `std::thread::spawn`. TODO: needs multi-threaded processes (one thread
-    /// per process today) + a thread-create syscall.
-    pub fn spawn() {
-        todo!("thread::spawn — needs multi-threaded processes + a spawn syscall")
-    }
-
-    /// `std::thread::sleep`. TODO: needs a timer/sleep syscall.
-    pub fn sleep() {
-        todo!("thread::sleep — needs a timer syscall")
-    }
 }
 
 /// `std::process`.
 pub mod process {
-    /// Terminate the process. Backed by the `Exit` syscall. (`_code` is ignored
-    /// until `Exit` carries an exit status — a small ABI extension.)
-    pub fn exit(_code: i32) -> ! {
-        snitchos_user::exit()
+    /// Terminate the process with exit status `code`. Backed by the `Exit`
+    /// syscall; the status is what a parent's `wait` collects.
+    pub fn exit(code: i32) -> ! {
+        snitchos_user::exit_with(code)
     }
 
-    /// Abort the process. Backed by the `Exit` syscall.
+    /// Abnormally terminate the process. Backed by the `Exit` syscall with a
+    /// non-zero status (`134` = `128 + SIGABRT`, the conventional abort code) so
+    /// a waiting parent can tell it apart from a clean `exit(0)`.
     pub fn abort() -> ! {
-        snitchos_user::exit()
+        snitchos_user::exit_with(134)
     }
 }
 
 /// `std::time`.
 pub mod time {
-    /// `Duration` lives in `core` — free.
+    /// `Duration` lives in `core` — free. `Instant` is *Not yet provided* (see
+    /// the crate docs): it needs the platform timebase exposed to userspace for
+    /// an honest tick→`Duration` conversion.
     pub use core::time::Duration;
-
-    /// `std::time::Instant`. TODO: needs a read-monotonic-clock syscall (the
-    /// kernel has the clock; userspace can't read it yet).
-    pub struct Instant(());
-    impl Instant {
-        pub fn now() -> Instant {
-            todo!("time::Instant::now — needs a read-clock syscall")
-        }
-    }
 }
 
 /// `std::sync`.
 pub mod sync {
     /// `Arc` works today — atomic refcount, and riscv64gc has the `a` extension.
+    /// `Mutex` is *Not yet provided* (needs threads + a futex to block).
     pub use alloc::sync::Arc;
-
-    /// `std::sync::Mutex`. TODO: trivial single-threaded, but the std API
-    /// (poisoning, `MutexGuard`) and real *blocking* need threads + a futex.
-    pub struct Mutex<T>(core::marker::PhantomData<T>);
-    impl<T> Mutex<T> {
-        pub fn new(_value: T) -> Mutex<T> {
-            todo!("sync::Mutex — needs threads/futex for blocking")
-        }
-    }
 }
 
 /// `std::collections`.
 pub mod collections {
-    /// The `alloc` collections are free.
+    /// The `alloc` collections are free. `HashMap`/`HashSet` are *Not yet
+    /// provided* (need `hashbrown` + a hash seed).
     pub use alloc::collections::{BTreeMap, BTreeSet, BinaryHeap, LinkedList, VecDeque};
-
-    /// `HashMap`/`HashSet`. TODO: `hashbrown` + a `RandomState` seed (an
-    /// entropy syscall) for DoS-resistant hashing — or a fixed hasher.
-    pub fn hashmap() {
-        todo!("collections::HashMap — needs hashbrown + a hash seed")
-    }
 }
-
-// --- Stubbed: the ambient-namespace surface, capability-rooted or unsupported ---
 
 /// `std::io` — `print!`/`println!` to stdout. Each line is a `DebugWrite`
 /// syscall → a snitched `Frame::Log`, so userspace stdout is observable on the
@@ -170,30 +163,4 @@ macro_rules! println {
     ($($arg:tt)*) => {
         $crate::io::_print(::core::format_args!("{}\n", ::core::format_args!($($arg)*)))
     };
-}
-
-/// `std::fs` — **capability-rooted, not ambient**. TODO: the v0.10 capability
-/// `Filesystem`; `File::open` resolves against a *granted directory capability*
-/// (WASI-style preopens), never a global namespace. See
-/// `plans/userspace-runtime-maturity.md` (the `std::fs` design constraint).
-pub mod fs {
-    pub fn open() {
-        todo!("fs::File::open — capability-rooted (v0.10 Filesystem), not ambient")
-    }
-}
-
-/// `std::net` — **capability-rooted, not ambient**. TODO: a socket is a granted
-/// endpoint capability; needs the post-v1.0 network stack.
-pub mod net {
-    pub fn connect() {
-        todo!("net::TcpStream::connect — capability-rooted endpoint, needs the net stack")
-    }
-}
-
-/// `std::env` — **not ambient**. TODO: args/vars need a startup-info mechanism
-/// (a `BootInfo` page handed at entry), not a global environment.
-pub mod env {
-    pub fn args() {
-        todo!("env::args — needs a startup-info (BootInfo) mechanism, not ambient")
-    }
 }

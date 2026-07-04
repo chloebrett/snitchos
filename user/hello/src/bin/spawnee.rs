@@ -7,13 +7,15 @@
 #![no_std]
 #![no_main]
 
-use snitchos_user::{delegated_handle, entry, exit_with, Tracer};
+use snitchos_std::process;
+use snitchos_user::{delegated_handle, entry, Tracer};
 
 #[entry]
 fn main() {
     // The parent delegated its span cap; it lands at handle 2 for the child.
     // Opening a span through it exercises the delegated authority end to end.
     let _ = Tracer::from_raw_handle(delegated_handle(0)).span("spawnee.via_delegated");
-    // Exit with a recognizable status the parent collects via `wait`.
-    exit_with(42);
+    // Exit with a recognizable status the parent collects via `wait` — through
+    // the std-shaped `process::exit`, which must carry the code (not drop it).
+    process::exit(42);
 }
