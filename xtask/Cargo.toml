@@ -13,6 +13,9 @@ snitchos-abi = { path = "../abi" }
 # with the `user/fs` client that emits them (see `fs_proto::markers`).
 fs-proto = { path = "../fs-proto" }
 itest-harness = { path = "../itest-harness" }
+# The snemu emulator, driven in-process for the differential oracle
+# (`snemu-diff`): boot the same kernel under snemu and diff its frames vs QEMU.
+snemu = { path = "../snemu" }
 ctrlc = "3"
 
 [lints]

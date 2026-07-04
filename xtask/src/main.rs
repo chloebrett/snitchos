@@ -7,6 +7,7 @@ mod itest;
 mod loc;
 mod measure;
 mod qemu;
+mod snemu_diff;
 mod source;
 
 const COLLECTOR_BIN: &str = "target/debug/collector";
@@ -42,6 +43,16 @@ enum Cmd {
         /// Dump every telemetry frame snemu decodes off the virtio-console.
         #[arg(long)]
         frames: bool,
+    },
+    /// Differential oracle: boot the same kernel under snemu and QEMU and
+    /// structurally diff their telemetry frame streams (timestamps normalized).
+    SnemuDiff {
+        /// snemu instruction-step budget (round-robin splits it across harts).
+        #[arg(long, default_value_t = 150_000_000)]
+        steps: u64,
+        /// Seconds to collect QEMU telemetry before killing it.
+        #[arg(long, default_value_t = 6)]
+        qemu_secs: u64,
     },
     /// Build the kernel and run it in QEMU.
     ///
@@ -471,6 +482,7 @@ fn main() -> ExitCode {
         Cmd::Build => build(),
         Cmd::Snemu => snemu(),
         Cmd::SnemuBoot { features, max_steps, frames } => snemu_boot(&features, max_steps, frames),
+        Cmd::SnemuDiff { steps, qemu_secs } => snemu_diff::run(steps, qemu_secs),
         Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
         Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {
             measure::measure(&workload, seconds, warmup, timebase_hz, burst, markdown)
