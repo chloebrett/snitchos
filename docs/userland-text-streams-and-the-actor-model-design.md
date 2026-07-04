@@ -1,6 +1,12 @@
 # The SnitchOS userland — text streams, capabilities, and the actor model
 
-**Status:** **Design / exploration (captured 2026-06-28). Pre-implementation.**
+**Status:** **Design / exploration (captured 2026-06-28); foundations SHIPPING.**
+Most of this doc — the actor model, isolation, cross-*process* `~>`, promises — is
+still design. But the substrate underneath has landed: the **Hitch** value model +
+typed manifests ([typed-processes-and-the-data-model-design.md](typed-processes-and-the-data-model-design.md)),
+and the **`~>` typed pipe for in-process Stitch stages** (the `compatible`
+schema-vs-schema check, `stitch-cross-pipe-runs-a-stage` itest). The cross-*process*
+`~>` (spawn a stage, marshal over an Endpoint) and the actor layer remain design.
 Records a long design discussion that started from a small question — "what are
 the *useful userspace programs*, the GNU of SnitchOS, that need only pure I/O?" —
 and pulled a thread all the way to "what is the shell's worldview, and does

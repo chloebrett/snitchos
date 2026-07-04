@@ -1,6 +1,15 @@
 # 📦 Executables in the filesystem — design
 
-**Status:** **Design (captured 2026-06-28). Pre-implementation.** The floor under
+**Status:** **Design; partly SHIPPED (updated 2026-07-04).** The `fs-image/`
+drop-in + build-time ELF injection are real: `kernel/build.rs` builds the `hello`
+bins and copies chosen ELFs (`spawnee`, `manifest_demo`) into `fs-image/bin/`, which
+`user/fs/build.rs` bakes into the seed — and the seed is now a **3-tuple**
+`&[(&str, &[u8], &[(&str, &[u8])])]` carrying content *plus* extracted xattrs (a
+program's `.snitch.iface` note → `user.iface`; see
+[typed-processes-and-the-data-model-design.md](typed-processes-and-the-data-model-design.md)).
+Still design: a *formal declared-executables list* (today it's ad-hoc copies in
+`kernel/build.rs`) and running a program *loaded from the FS by the shell* under a
+cap (`SpawnImage` exists; the shell doesn't yet). The floor under
 [`spawn`](shell-primitives-design.md#proc--spawn--reap-the-delegation-act): before
 the shell can meaningfully *run a program*, programs must **live in the
 filesystem** rather than be baked into the kernel image. Sits beside

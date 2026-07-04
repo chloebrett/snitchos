@@ -1,7 +1,14 @@
 # Typed processes, Hitch (the value model), and manifest storage
 
-**Status:** **Design / exploration (captured 2026-06-28). Pre-implementation.**
-Began as a correction to §7 of
+**Status:** **Design → largely SHIPPED (updated 2026-07-04).** The Hitch value
+model, both codecs, the `Schema`/`ConstSchema`/`Pod` derives, the const manifest
+serializer, `#[entry(in,out,uses)]` → `.snitch.iface`, ramfs xattrs + the
+build-time ELF extraction, `GetXattr` over FS IPC, and the Stitch↔Stitch `~>`
+typecheck are all built and mutation-clean, with an end-to-end `manifest-iface-served`
+integration test. Remaining: the shell consumer, and **cross-language `~>`** (a
+`Platform::fs_getxattr` native + a `resolve_stage` branch that reads a Rust ELF
+stage's `user.iface` instead of parsing `.st` source). Began as a correction to §7
+of
 [userland-text-streams-and-the-actor-model-design.md](userland-text-streams-and-the-actor-model-design.md)
 (the cross-process format) and grew into a self-contained idea: **a process
 declares its own input/output types and required capabilities as part of its file —
@@ -337,23 +344,31 @@ manifest is `(in: TypeSchema, out: TypeSchema, uses)` = a program's `main`
 signature. Two phases that converge on the same `Manifest` + structural-compat
 check, so phase 1 is not throwaway:
 
-- **Phase 1 — Stitch, parse-on-demand (no FS/build plumbing).** The shell already
-  has the interpreter and is about to run the `.st`, so it maps `main`'s parsed
-  signature → a `Manifest` *in memory* — no xattr, no ELF note, no seed step. Needs:
-  a **type bridge** (`stitch::Type` AST → `hitch::TypeSchema`, the type-level twin of
-  the `Value` bridge), a `main`-signature → `Manifest` extractor, and
-  `hitch::TypeSchema` schema-vs-schema **`compatible`** (v1 = structural equality).
-  Unlocks typed `~>` between `.st` stages — the 90% case (shell coreutils are `.st`).
+- **Phase 1 — Stitch, parse-on-demand (no FS/build plumbing). ✅ SHIPPED.** The shell
+  already has the interpreter and is about to run the `.st`, so it maps `main`'s
+  parsed signature → a `Manifest` *in memory* — no xattr, no ELF note, no seed step.
+  Built: the **type bridge** (`stitch::bridge::type_to_schema`, `stitch::Type` AST →
+  `hitch::TypeSchema`), `manifest_of_main`, and `hitch::TypeSchema::compatible`
+  (structural equality). Typed `~>` between `.st` stages works
+  (`stitch-cross-pipe-runs-a-stage` itest; `eval_cross_pipe` in `interp.rs`).
   *A stage's interface IS `main`'s typed signature* (`main(x: T) -> U uses C`);
   `Func`/`@`/generic types are not marshallable. v1 covers scalars + `List` +
   monomorphic prod/sum.
-- **Phase 2 — the uniform `user.iface` surface + Rust stages.** `#[entry(in,out,uses)]`
-  → `.snitch.iface` link section → `user/fs/build.rs` extracts to the xattr;
-  Stitch manifests also extracted to the xattr at seed time; `getxattr` in `ramfs`.
-  Adds a second *source* (xattr, O(1), no parse) and a second *producer* (Rust macro)
-  for the identical artifact.
-- Shell pre-spawn step: get each stage's `Manifest`, structurally typecheck the
-  `~>` pipeline, decide `uses` grants — extends userland §8's cap analysis.
+- **Phase 2 — the uniform `user.iface` surface + Rust stages. ✅ SHIPPED (Rust
+  side).** `#[entry(in,out,uses)]` → `.snitch.iface` link section → `user/fs/build.rs`
+  extracts it (via the `object` crate) into a `user.iface` xattr → `ramfs`
+  `getxattr`/`setxattr` + `seeded_with_xattrs` → `GetXattr` over FS IPC. Proven
+  end-to-end by the `manifest-iface-served` itest (client reads `bin/manifest_demo`'s
+  `user.iface`, `decode_manifest`s it, checks the shape). *Not* done: `.st` manifests
+  are parse-on-demand (Phase 1), not written to an xattr at seed time — the
+  parse-on-demand source is used for `.st` instead of a second xattr producer.
+- **Shell pre-spawn step — the remaining piece.** Get each stage's `Manifest`,
+  structurally typecheck the `~>` pipeline (`compatible`), decide `uses` grants
+  (userland §8's cap analysis). For a **Rust-ELF** stage this needs a
+  `Platform::fs_getxattr` native (wrapping `GetXattr`, as `fs_read` wraps `Read`) and
+  a `resolve_stage` branch that reads `user.iface` → `decode_manifest` instead of
+  parsing `.st`. The primitives (`GetXattr`, `decode_manifest`, `compatible`) all
+  exist; only this Stitch-side plumbing + the shell itself remain.
 
 ---
 
