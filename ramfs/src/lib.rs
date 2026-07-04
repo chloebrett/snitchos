@@ -15,9 +15,31 @@ use fs_core::{DirEntry, Filesystem, FsError, InodeId, NodeKind, Stat};
 
 const ROOT: InodeId = InodeId::new(0);
 
-enum Node {
+/// One entry in an xattr-carrying seed image: `(path, content, xattrs)`, where
+/// each xattr is a `(name, value)` pair. A program's entry is its ELF bytes plus a
+/// `("user.iface", <manifest note>)` xattr.
+pub type SeedEntry<'a> = (&'a str, &'a [u8], &'a [(&'a str, &'a [u8])]);
+
+/// An inode: its content (file bytes or directory entries) plus its extended
+/// attributes. Keeping `xattrs` *on* the node makes them inode-attached — they
+/// live and die with the inode, and move with it under rename by construction.
+struct Node {
+    body: Body,
+    xattrs: BTreeMap<String, Vec<u8>>,
+}
+
+enum Body {
     File(Vec<u8>),
     Dir(BTreeMap<String, InodeId>),
+}
+
+impl Node {
+    fn new(body: Body) -> Self {
+        Self {
+            body,
+            xattrs: BTreeMap::new(),
+        }
+    }
 }
 
 /// A RAM-backed filesystem. Construct with [`RamFs::new`]; an empty root
@@ -29,7 +51,7 @@ pub struct RamFs {
 impl Default for RamFs {
     fn default() -> Self {
         Self {
-            nodes: alloc::vec![Node::Dir(BTreeMap::new())],
+            nodes: alloc::vec![Node::new(Body::Dir(BTreeMap::new()))],
         }
     }
 }
@@ -49,28 +71,53 @@ impl RamFs {
     pub fn seeded(files: &[(&str, &[u8])]) -> Self {
         let mut fs = Self::new();
         for (path, bytes) in files {
-            let mut dir = fs.root();
-            let mut parts = path.split('/').filter(|p| !p.is_empty()).peekable();
-            while let Some(part) = parts.next() {
-                if parts.peek().is_some() {
-                    // Intermediate component: reuse the dir if it exists, else mkdir.
-                    dir = match fs.lookup(dir, part) {
-                        Ok(existing) => existing,
-                        Err(_) => fs
-                            .create(dir, part, NodeKind::Dir)
-                            .expect("seed: mkdir on a fresh ramfs cannot fail"),
-                    };
-                } else {
-                    // Leaf component: the file itself.
-                    let ino = fs
-                        .create(dir, part, NodeKind::File)
-                        .expect("seed: create on a fresh ramfs cannot fail");
-                    fs.write(ino, 0, bytes)
-                        .expect("seed: write to a just-created file cannot fail");
-                }
+            fs.insert_file(path, bytes);
+        }
+        fs
+    }
+
+    /// Like [`seeded`](Self::seeded), but each entry also carries a set of
+    /// `(name, value)` extended attributes applied to the leaf file — this is how
+    /// a program's `.snitch.iface` note lands in its `user.iface` xattr at seed
+    /// time (the manifest the shell reads before spawning).
+    #[must_use]
+    pub fn seeded_with_xattrs(files: &[SeedEntry]) -> Self {
+        let mut fs = Self::new();
+        for (path, bytes, xattrs) in files {
+            let ino = fs.insert_file(path, bytes);
+            for (name, value) in *xattrs {
+                fs.setxattr(ino, name, value)
+                    .expect("seed: setxattr on a just-created inode cannot fail");
             }
         }
         fs
+    }
+
+    /// Create `path` (mkdir-p on intermediates), write `bytes` to the leaf file,
+    /// and return the leaf's inode. Infallible on a freshly-built seed fs.
+    fn insert_file(&mut self, path: &str, bytes: &[u8]) -> InodeId {
+        let mut dir = self.root();
+        let mut leaf = dir;
+        let mut parts = path.split('/').filter(|p| !p.is_empty()).peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_some() {
+                // Intermediate component: reuse the dir if it exists, else mkdir.
+                dir = match self.lookup(dir, part) {
+                    Ok(existing) => existing,
+                    Err(_) => self
+                        .create(dir, part, NodeKind::Dir)
+                        .expect("seed: mkdir on a fresh ramfs cannot fail"),
+                };
+            } else {
+                // Leaf component: the file itself.
+                leaf = self
+                    .create(dir, part, NodeKind::File)
+                    .expect("seed: create on a fresh ramfs cannot fail");
+                self.write(leaf, 0, bytes)
+                    .expect("seed: write to a just-created file cannot fail");
+            }
+        }
+        leaf
     }
 
     fn node(&self, ino: InodeId) -> Result<&Node, FsError> {
@@ -86,19 +133,19 @@ impl Filesystem for RamFs {
     }
 
     fn lookup(&self, dir: InodeId, name: &str) -> Result<InodeId, FsError> {
-        match self.node(dir)? {
-            Node::File(_) => Err(FsError::NotADir),
-            Node::Dir(entries) => entries.get(name).copied().ok_or(FsError::NotFound),
+        match &self.node(dir)?.body {
+            Body::File(_) => Err(FsError::NotADir),
+            Body::Dir(entries) => entries.get(name).copied().ok_or(FsError::NotFound),
         }
     }
 
     fn stat(&self, ino: InodeId) -> Result<Stat, FsError> {
-        match self.node(ino)? {
-            Node::Dir(_) => Ok(Stat {
+        match &self.node(ino)?.body {
+            Body::Dir(_) => Ok(Stat {
                 kind: NodeKind::Dir,
                 size: 0,
             }),
-            Node::File(data) => Ok(Stat {
+            Body::File(data) => Ok(Stat {
                 kind: NodeKind::File,
                 size: data.len() as u64,
             }),
@@ -106,9 +153,9 @@ impl Filesystem for RamFs {
     }
 
     fn read(&self, ino: InodeId, off: u64, buf: &mut [u8]) -> Result<usize, FsError> {
-        let data = match self.node(ino)? {
-            Node::Dir(_) => return Err(FsError::IsADir),
-            Node::File(data) => data,
+        let data = match &self.node(ino)?.body {
+            Body::Dir(_) => return Err(FsError::IsADir),
+            Body::File(data) => data,
         };
         let off = off as usize;
         if off >= data.len() {
@@ -120,10 +167,13 @@ impl Filesystem for RamFs {
     }
 
     fn write(&mut self, ino: InodeId, off: u64, data: &[u8]) -> Result<usize, FsError> {
-        let file = match self.nodes.get_mut(ino.as_u32() as usize) {
-            None => return Err(FsError::NotFound),
-            Some(Node::Dir(_)) => return Err(FsError::IsADir),
-            Some(Node::File(file)) => file,
+        let node = self
+            .nodes
+            .get_mut(ino.as_u32() as usize)
+            .ok_or(FsError::NotFound)?;
+        let file = match &mut node.body {
+            Body::Dir(_) => return Err(FsError::IsADir),
+            Body::File(file) => file,
         };
         let off = off as usize;
         let end = off + data.len();
@@ -136,16 +186,20 @@ impl Filesystem for RamFs {
 
     fn create(&mut self, dir: InodeId, name: &str, kind: NodeKind) -> Result<InodeId, FsError> {
         // The parent must be a directory — otherwise there's nothing to add to.
-        match self.node(dir)? {
-            Node::Dir(_) => {}
-            Node::File(_) => return Err(FsError::NotADir),
+        match &self.node(dir)?.body {
+            Body::Dir(_) => {}
+            Body::File(_) => return Err(FsError::NotADir),
         }
         let ino = InodeId::new(self.nodes.len() as u32);
-        self.nodes.push(match kind {
-            NodeKind::File => Node::File(Vec::new()),
-            NodeKind::Dir => Node::Dir(BTreeMap::new()),
-        });
-        if let Some(Node::Dir(entries)) = self.nodes.get_mut(dir.as_u32() as usize) {
+        self.nodes.push(Node::new(match kind {
+            NodeKind::File => Body::File(Vec::new()),
+            NodeKind::Dir => Body::Dir(BTreeMap::new()),
+        }));
+        if let Some(Node {
+            body: Body::Dir(entries),
+            ..
+        }) = self.nodes.get_mut(dir.as_u32() as usize)
+        {
             entries.insert(name.into(), ino);
         }
         Ok(ino)
@@ -154,33 +208,129 @@ impl Filesystem for RamFs {
     fn remove(&mut self, dir: InodeId, name: &str) -> Result<(), FsError> {
         match self.nodes.get_mut(dir.as_u32() as usize) {
             None => Err(FsError::NotFound),
-            Some(Node::File(_)) => Err(FsError::NotADir),
-            Some(Node::Dir(entries)) => entries.remove(name).map(|_| ()).ok_or(FsError::NotFound),
+            Some(node) => match &mut node.body {
+                Body::File(_) => Err(FsError::NotADir),
+                Body::Dir(entries) => entries.remove(name).map(|_| ()).ok_or(FsError::NotFound),
+            },
         }
     }
 
     fn readdir(&self, dir: InodeId) -> Result<Vec<DirEntry>, FsError> {
-        match self.node(dir)? {
-            Node::File(_) => Err(FsError::NotADir),
-            Node::Dir(entries) => Ok(entries
+        match &self.node(dir)?.body {
+            Body::File(_) => Err(FsError::NotADir),
+            Body::Dir(entries) => Ok(entries
                 .iter()
                 .map(|(name, &ino)| DirEntry {
                     name: name.clone(),
                     ino,
                     kind: match self.nodes.get(ino.as_u32() as usize) {
-                        Some(Node::Dir(_)) => NodeKind::Dir,
+                        Some(Node {
+                            body: Body::Dir(_),
+                            ..
+                        }) => NodeKind::Dir,
                         _ => NodeKind::File,
                     },
                 })
                 .collect()),
         }
     }
+
+    fn getxattr(&self, ino: InodeId, name: &str) -> Result<Vec<u8>, FsError> {
+        self.node(ino)?
+            .xattrs
+            .get(name)
+            .cloned()
+            .ok_or(FsError::NotFound)
+    }
+
+    fn setxattr(&mut self, ino: InodeId, name: &str, value: &[u8]) -> Result<(), FsError> {
+        let node = self
+            .nodes
+            .get_mut(ino.as_u32() as usize)
+            .ok_or(FsError::NotFound)?;
+        node.xattrs.insert(name.into(), value.into());
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_core::{Filesystem, FsError, NodeKind};
+    use fs_core::{Filesystem, FsError, InodeId, NodeKind};
+
+    #[test]
+    fn setxattr_then_getxattr_round_trips() {
+        let mut fs = RamFs::new();
+        let root = fs.root();
+        let prog = fs.create(root, "prog", NodeKind::File).unwrap();
+
+        fs.setxattr(prog, "user.iface", b"manifest-bytes").unwrap();
+
+        assert_eq!(fs.getxattr(prog, "user.iface").unwrap(), b"manifest-bytes");
+    }
+
+    #[test]
+    fn getxattr_of_a_missing_name_is_not_found() {
+        let mut fs = RamFs::new();
+        let root = fs.root();
+        let prog = fs.create(root, "prog", NodeKind::File).unwrap();
+
+        assert_eq!(fs.getxattr(prog, "user.iface"), Err(FsError::NotFound));
+    }
+
+    #[test]
+    fn setxattr_overwrites_and_is_per_inode() {
+        let mut fs = RamFs::new();
+        let root = fs.root();
+        let a = fs.create(root, "a", NodeKind::File).unwrap();
+        let b = fs.create(root, "b", NodeKind::File).unwrap();
+
+        fs.setxattr(a, "k", b"1").unwrap();
+        fs.setxattr(a, "k", b"2").unwrap();
+
+        assert_eq!(fs.getxattr(a, "k").unwrap(), b"2", "overwrites in place");
+        assert_eq!(fs.getxattr(b, "k"), Err(FsError::NotFound), "xattrs are per-inode");
+    }
+
+    #[test]
+    fn a_directory_can_carry_xattrs_too() {
+        let mut fs = RamFs::new();
+        let root = fs.root();
+        let dir = fs.create(root, "d", NodeKind::Dir).unwrap();
+
+        fs.setxattr(dir, "user.type", b"dir").unwrap();
+
+        assert_eq!(fs.getxattr(dir, "user.type").unwrap(), b"dir");
+    }
+
+    #[test]
+    fn xattr_ops_on_a_missing_inode_error() {
+        let mut fs = RamFs::new();
+        assert_eq!(fs.setxattr(InodeId::new(99), "k", b"v"), Err(FsError::NotFound));
+        assert_eq!(fs.getxattr(InodeId::new(99), "k"), Err(FsError::NotFound));
+    }
+
+    #[test]
+    fn seeded_with_xattrs_applies_them_to_the_leaf_file() {
+        let fs = RamFs::seeded_with_xattrs(&[
+            ("bin/prog", b"ELF", &[("user.iface", b"manifest-bytes")]),
+            ("plain", b"data", &[]),
+        ]);
+        let root = fs.root();
+
+        let bin = fs.lookup(root, "bin").unwrap();
+        let prog = fs.lookup(bin, "prog").unwrap();
+        assert_eq!(fs.getxattr(prog, "user.iface").unwrap(), b"manifest-bytes");
+
+        // The content is still there alongside the xattr.
+        let mut buf = [0u8; 3];
+        assert_eq!(fs.read(prog, 0, &mut buf).unwrap(), 3);
+        assert_eq!(&buf, b"ELF");
+
+        // A file seeded with no xattrs has none.
+        let plain = fs.lookup(root, "plain").unwrap();
+        assert_eq!(fs.getxattr(plain, "user.iface"), Err(FsError::NotFound));
+    }
 
     #[test]
     fn seeded_prepopulates_files_readable_from_the_root() {

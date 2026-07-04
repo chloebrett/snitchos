@@ -91,4 +91,19 @@ pub trait Filesystem {
     fn create(&mut self, dir: InodeId, name: &str, kind: NodeKind) -> Result<InodeId, FsError>;
     fn remove(&mut self, dir: InodeId, name: &str) -> Result<(), FsError>;
     fn readdir(&self, dir: InodeId) -> Result<Vec<DirEntry>, FsError>;
+
+    /// Read an inode-attached extended attribute (e.g. `user.iface`, the typed
+    /// interface a program's `.snitch.iface` note is lifted into). A filesystem
+    /// with no xattr support returns [`FsError::Unsupported`]; a missing name is
+    /// [`FsError::NotFound`]. Default: unsupported.
+    fn getxattr(&self, _ino: InodeId, _name: &str) -> Result<Vec<u8>, FsError> {
+        Err(FsError::Unsupported)
+    }
+
+    /// Set (create or overwrite) an extended attribute on an inode. Inode-attached,
+    /// so it moves with the file under rename, and needs only the file itself — not
+    /// its parent directory. Default: unsupported.
+    fn setxattr(&mut self, _ino: InodeId, _name: &str, _value: &[u8]) -> Result<(), FsError> {
+        Err(FsError::Unsupported)
+    }
 }
