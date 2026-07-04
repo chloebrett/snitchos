@@ -80,7 +80,10 @@ fn run_file(path: &str) -> ExitCode {
 /// [`StdPlatform`], so they draw from a single stdin stream.
 fn repl() -> ExitCode {
     let platform = Rc::new(StdPlatform);
-    let mut repl = Repl::with_backends(Rc::new(RecordingTelemetry::default()), platform.clone());
+    // Color only when stdout is a real terminal — a pipe or file gets clean text.
+    let colored = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let mut repl = Repl::with_backends(Rc::new(RecordingTelemetry::default()), platform.clone())
+        .color(colored);
     platform.write("stitch> ");
     while let Some(line) = platform.read_line() {
         let out = match line.trim().strip_prefix(":load ") {

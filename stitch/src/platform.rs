@@ -86,6 +86,19 @@ pub fn rights_glyphs(rights: Rights) -> alloc::string::String {
     out
 }
 
+/// Wrap each rights glyph in its ANSI color — the presentation companion to
+/// [`rights_glyphs`], and the colorizer the REPL hands the box style when its
+/// output channel supports color: 🪴 green (mint), 👀 blue (read), ✏️ amber/yellow
+/// (write). Non-glyph text (other cells, borders) passes through untouched, so
+/// the box style can apply this to every cell blindly. Amber uses SGR 33 (yellow)
+/// for portability — a bare UART terminal needn't grok 256-color.
+#[must_use]
+pub fn colorize_rights(cell: &str) -> alloc::string::String {
+    cell.replace('🪴', "\u{1b}[32m🪴\u{1b}[0m")
+        .replace('👀', "\u{1b}[34m👀\u{1b}[0m")
+        .replace("✏️", "\u{1b}[33m✏️\u{1b}[0m")
+}
+
 /// One capability the calling process holds — what `hold` enumerates. Pure data
 /// (no kernel types), so a test can construct a cap table by hand.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -361,6 +374,23 @@ mod tests {
         fn fs_read(&self, _name: &str) -> Option<String> {
             None
         }
+    }
+
+    #[test]
+    fn colorize_rights_wraps_each_glyph_in_its_ansi_color() {
+        assert_eq!(colorize_rights("🪴"), "\u{1b}[32m🪴\u{1b}[0m"); // green mint
+        assert_eq!(colorize_rights("👀"), "\u{1b}[34m👀\u{1b}[0m"); // blue read
+        assert_eq!(colorize_rights("✏️"), "\u{1b}[33m✏️\u{1b}[0m"); // amber write
+        assert_eq!(
+            colorize_rights("🪴👀✏️"),
+            "\u{1b}[32m🪴\u{1b}[0m\u{1b}[34m👀\u{1b}[0m\u{1b}[33m✏️\u{1b}[0m"
+        );
+    }
+
+    #[test]
+    fn colorize_rights_leaves_non_rights_text_untouched() {
+        assert_eq!(colorize_rights("Endpoint"), "Endpoint");
+        assert_eq!(colorize_rights(""), "");
     }
 
     #[test]

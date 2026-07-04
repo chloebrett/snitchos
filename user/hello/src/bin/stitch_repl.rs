@@ -151,7 +151,10 @@ fn main() {
     // One env, built once (prelude registered a single time) and reused for every
     // line. Telemetry routes through the capability-backed backend (spans/metrics
     // become real wire frames); console routes through the same `platform`.
-    let mut repl = Repl::with_backends(Rc::new(RuntimeTelemetry::default()), platform.clone());
+    // The UART console renders ANSI, so color rights glyphs (green mint / blue
+    // read / amber write) in result tables.
+    let mut repl = Repl::with_backends(Rc::new(RuntimeTelemetry::default()), platform.clone())
+        .color(true);
     let tr = tracer();
     // The interpreter's own metrics (independent of any loaded program), plus a
     // counter of `:load`s served off the filesystem.

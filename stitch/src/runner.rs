@@ -145,6 +145,10 @@ pub struct Repl {
     /// [`Repl::with_backends`]. Held here so `print`/`readLine` route consistently
     /// across env rebuilds.
     platform: Rc<dyn Platform>,
+    /// Whether result rendering colorizes recognized glyphs (rights) with ANSI.
+    /// Off by default (pipes and snapshots stay clean); the interactive REPL turns
+    /// it on for a color-capable channel via [`Repl::color`].
+    colored: bool,
 }
 
 impl Default for Repl {
@@ -176,7 +180,22 @@ impl Repl {
     /// shares the one input stream.
     #[must_use]
     pub fn with_backends(telemetry: Rc<dyn Telemetry>, platform: Rc<dyn Platform>) -> Self {
-        Repl { prelude: prelude_items(), defs: Vec::new(), env: None, telemetry, platform }
+        Repl {
+            prelude: prelude_items(),
+            defs: Vec::new(),
+            env: None,
+            telemetry,
+            platform,
+            colored: false,
+        }
+    }
+
+    /// Enable (or disable) ANSI color in result rendering — the caller decides
+    /// from its output channel (a TTY on the host, the UART on the metal).
+    #[must_use]
+    pub fn color(mut self, on: bool) -> Self {
+        self.colored = on;
+        self
     }
 
     /// Load a whole `.st` source: parse it and accumulate its declarations into
@@ -236,7 +255,11 @@ impl Repl {
         let mut out = render_telemetry(&env.take_telemetry());
         match result {
             Ok(value) if value != Value::Unit => {
-                let rendered = crate::render::render(&value);
+                let rendered = if self.colored {
+                    crate::render::render_colored(&value, crate::platform::colorize_rights)
+                } else {
+                    crate::render::render(&value)
+                };
                 // A multi-line result (a table) reads better on its own line than
                 // jammed after the `=> ` prompt.
                 if rendered.contains('\n') {
@@ -292,6 +315,39 @@ mod tests {
         repl.eval_line("prod P(n: Int)");
         let out = repl.eval_line("[P(1), P(2)]");
         assert!(out.contains('┌') && out.contains("│ n │"), "{out}");
+    }
+
+    #[test]
+    fn a_colored_repl_wraps_rights_glyphs_in_ansi() {
+        use crate::platform::{CapInfo, FakePlatform, ObjectKind};
+        use crate::prelude::*;
+        use crate::telemetry::RecordingTelemetry;
+        let fake = Rc::new(FakePlatform::with_caps(vec![CapInfo {
+            handle: 2,
+            kind: ObjectKind::Endpoint,
+            rights: 0b0010, // SEND — a write glyph (✏️), amber SGR 33
+            badge: 0,
+        }]));
+        let mut repl =
+            Repl::with_backends(Rc::new(RecordingTelemetry::default()), fake).color(true);
+        let out = repl.eval_line("hold()");
+        assert!(out.contains("\u{1b}[33m"), "expected amber ANSI: {out:?}");
+    }
+
+    #[test]
+    fn a_default_repl_renders_rights_without_ansi() {
+        use crate::platform::{CapInfo, FakePlatform, ObjectKind};
+        use crate::prelude::*;
+        use crate::telemetry::RecordingTelemetry;
+        let fake = Rc::new(FakePlatform::with_caps(vec![CapInfo {
+            handle: 2,
+            kind: ObjectKind::Endpoint,
+            rights: 0b0010,
+            badge: 0,
+        }]));
+        let mut repl = Repl::with_backends(Rc::new(RecordingTelemetry::default()), fake);
+        let out = repl.eval_line("hold()");
+        assert!(!out.contains('\u{1b}'), "expected no ANSI by default: {out:?}");
     }
 
     #[test]

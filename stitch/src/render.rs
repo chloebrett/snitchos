@@ -93,8 +93,33 @@ pub trait TableStyle {
 }
 
 /// Unicode box-drawing table: `┌─┬─┐` borders with one space of padding inside
-/// each cell.
-pub struct BoxStyle;
+/// each cell. Carries a `colorize` hook applied to each cell's *content* — the
+/// identity for [`plain`](Self::plain), an ANSI wrapper (e.g.
+/// [`colorize_rights`](crate::platform::colorize_rights)) for a colored channel.
+/// Colorizing happens *after* width measurement, so the escape bytes (which are
+/// printable ASCII, not zero-width to a measurer) never shift the layout.
+pub struct BoxStyle {
+    colorize: fn(&str) -> String,
+}
+
+fn uncolored(cell: &str) -> String {
+    cell.to_string()
+}
+
+impl BoxStyle {
+    /// A box table with no color — cell content is drawn verbatim.
+    #[must_use]
+    pub fn plain() -> Self {
+        BoxStyle { colorize: uncolored }
+    }
+
+    /// A box table whose cell content is passed through `colorize` (an ANSI
+    /// wrapper) after layout is measured.
+    #[must_use]
+    pub fn with_colorizer(colorize: fn(&str) -> String) -> Self {
+        BoxStyle { colorize }
+    }
+}
 
 impl TableStyle for BoxStyle {
     fn render(&self, table: &Table) -> String {
@@ -111,9 +136,10 @@ impl TableStyle for BoxStyle {
         // so a two-cell emoji would be under-padded and shear the border.
         let pad = |cell: &str, width: usize, align: Align| {
             let fill = " ".repeat(width.saturating_sub(display_width(cell)));
+            let shown = (self.colorize)(cell);
             match align {
-                Align::Left => format!("{cell}{fill}"),
-                Align::Right => format!("{fill}{cell}"),
+                Align::Left => format!("{shown}{fill}"),
+                Align::Right => format!("{fill}{shown}"),
             }
         };
         let row = |cells: &[String]| {
@@ -296,7 +322,15 @@ pub fn render_with(value: &Value, style: &dyn TableStyle) -> String {
 /// [`render_with`] using the default [`BoxStyle`] — the REPL's result printer.
 #[must_use]
 pub fn render(value: &Value) -> String {
-    render_with(value, &BoxStyle)
+    render_with(value, &BoxStyle::plain())
+}
+
+/// [`render_with`] a colored [`BoxStyle`] — `colorize` wraps recognized cell
+/// content (rights glyphs) in ANSI. The REPL uses this on a color-capable
+/// channel; [`render`] stays plain for pipes and snapshots.
+#[must_use]
+pub fn render_colored(value: &Value, colorize: fn(&str) -> String) -> String {
+    render_with(value, &BoxStyle::with_colorizer(colorize))
 }
 
 #[cfg(test)]
@@ -548,6 +582,29 @@ Cap
     }
 
     #[test]
+    fn a_colorizer_decorates_cells_without_shifting_the_layout() {
+        // A colorizer changes a cell's byte/char length (real one adds ANSI) but
+        // must not change column widths: fill is computed from the *undecorated*
+        // cell, and the decoration wraps the content after. Here `[..]` stands in
+        // for the zero-visible-width ANSI a real colorizer would add.
+        let table = Table {
+            header: None,
+            aligns: vec![Align::Left],
+            rows: vec![vec!["ab".into()], vec!["abcd".into()]],
+        };
+        // Column width is 4 (from "abcd"); "ab" gets 2 fill spaces, both computed
+        // before the `[..]` wrap — so the fill count ignores the brackets.
+        assert_eq!(
+            BoxStyle::with_colorizer(|s| alloc::format!("[{s}]")).render(&table),
+            "\
+┌──────┐
+│ [ab]   │
+│ [abcd] │
+└──────┘"
+        );
+    }
+
+    #[test]
     fn box_style_honors_per_column_alignment() {
         let table = Table {
             header: Some(vec!["a".into(), "bb".into()]),
@@ -558,7 +615,7 @@ Cap
             ],
         };
         assert_eq!(
-            BoxStyle.render(&table),
+            BoxStyle::plain().render(&table),
             "\
 ┌────┬────┐
 │ a  │ bb │
