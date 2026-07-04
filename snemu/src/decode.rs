@@ -534,7 +534,8 @@ fn expand_c_ca(half: u16) -> Option<u32> {
         (0, 0b10) => Some(reg_alu(funct3::OR, rd, rd, rs2)),              // c.or
         (0, 0b11) => Some(reg_alu(funct3::AND, rd, rd, rs2)),             // c.and
         (1, 0b00) => Some(reg_alu_w(funct3::ADD, rd, rd, rs2) | ALT_OP_BIT), // c.subw
-        _ => None, // c.addw (1, 01) surfaces via the meta-loop when hit
+        (1, 0b01) => Some(reg_alu_w(funct3::ADD, rd, rd, rs2)),             // c.addw
+        _ => None,
     }
 }
 

@@ -43,6 +43,11 @@ enum Cmd {
         /// Dump every telemetry frame snemu decodes off the virtio-console.
         #[arg(long)]
         frames: bool,
+        /// Select a runtime workload (e.g. `demo`, `smp`). Implies the
+        /// `itest-workloads` kernel build and injects `workload=<name>` into the
+        /// DTB's /chosen/bootargs.
+        #[arg(long)]
+        workload: Option<String>,
     },
     /// Differential oracle: boot the same kernel under snemu and QEMU and
     /// structurally diff their telemetry frame streams (timestamps normalized).
@@ -53,6 +58,10 @@ enum Cmd {
         /// Seconds to collect QEMU telemetry before killing it.
         #[arg(long, default_value_t = 6)]
         qemu_secs: u64,
+        /// Runtime workload to run under both emulators (e.g. `demo`, `smp`).
+        /// Implies the `itest-workloads` build. Omit for the default `init` boot.
+        #[arg(long)]
+        workload: Option<String>,
     },
     /// Build the kernel and run it in QEMU.
     ///
@@ -481,8 +490,12 @@ fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Build => build(),
         Cmd::Snemu => snemu(),
-        Cmd::SnemuBoot { features, max_steps, frames } => snemu_boot(&features, max_steps, frames),
-        Cmd::SnemuDiff { steps, qemu_secs } => snemu_diff::run(steps, qemu_secs),
+        Cmd::SnemuBoot { features, max_steps, frames, workload } => {
+            snemu_boot(&features, max_steps, frames, workload.as_deref())
+        }
+        Cmd::SnemuDiff { steps, qemu_secs, workload } => {
+            snemu_diff::run(steps, qemu_secs, workload.as_deref())
+        }
         Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
         Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {
             measure::measure(&workload, seconds, warmup, timebase_hz, burst, markdown)
@@ -643,12 +656,22 @@ fn snemu() -> ExitCode {
 /// UART output (stdout) and its stop reason (stderr) stream straight to the
 /// terminal. Always rebuilds without `minimal-boot`, so the meta-loop never
 /// runs a stale ELF left by `cargo xtask snemu`.
-fn snemu_boot(features: &str, max_steps: Option<u64>, frames: bool) -> ExitCode {
-    let features_vec: Vec<&str> = if features.is_empty() {
+fn snemu_boot(
+    features: &str,
+    max_steps: Option<u64>,
+    frames: bool,
+    workload: Option<&str>,
+) -> ExitCode {
+    let mut features_vec: Vec<&str> = if features.is_empty() {
         Vec::new()
     } else {
         features.split(',').collect()
     };
+    // A workload needs the runtime registry compiled in; snemu selects it via
+    // the DTB bootarg.
+    if workload.is_some() && !features_vec.contains(&"itest-workloads") {
+        features_vec.push("itest-workloads");
+    }
     let status = qemu::build_kernel(&features_vec).expect("failed to invoke cargo");
     if !status.success() {
         eprintln!("snemu-boot: kernel build failed");
@@ -659,6 +682,9 @@ fn snemu_boot(features: &str, max_steps: Option<u64>, frames: bool) -> ExitCode 
     cmd.args(["run", "-q", "-p", "snemu", "--"]);
     if frames {
         cmd.arg("--frames");
+    }
+    if let Some(name) = workload {
+        cmd.args(["--workload", name]);
     }
     cmd.arg(qemu::KERNEL_BIN);
     if let Some(n) = max_steps {

@@ -24,18 +24,23 @@ const DTB: &[u8] = include_bytes!("../virt.dtb");
 
 fn main() -> ExitCode {
     let mut dump_frames = false;
+    let mut workload: Option<String> = None;
     let mut positional = Vec::new();
-    for arg in std::env::args().skip(1) {
-        if arg == "--frames" {
-            dump_frames = true;
-        } else {
-            positional.push(arg);
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--frames" => dump_frames = true,
+            // Firmware role: select a runtime workload by injecting
+            // `workload=<name>` into /chosen/bootargs (needs an itest-workloads
+            // kernel; a plain build ignores it and boots the default).
+            "--workload" => workload = args.next(),
+            _ => positional.push(arg),
         }
     }
 
     let mut positional = positional.into_iter();
     let Some(path) = positional.next() else {
-        eprintln!("usage: snemu [--frames] <kernel.elf> [max-steps]");
+        eprintln!("usage: snemu [--frames] [--workload <name>] <kernel.elf> [max-steps]");
         return ExitCode::FAILURE;
     };
     let max_steps = positional
@@ -51,7 +56,13 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut machine = match snemu::loader::load_machine(&image, RAM_SIZE, Some(DTB), HART_COUNT) {
+    let dtb = match &workload {
+        Some(name) => snemu::dtb::set_bootargs(DTB, &format!("workload={name}"))
+            .unwrap_or_else(|| DTB.to_vec()),
+        None => DTB.to_vec(),
+    };
+
+    let mut machine = match snemu::loader::load_machine(&image, RAM_SIZE, Some(&dtb), HART_COUNT) {
         Ok(machine) => machine,
         Err(e) => {
             eprintln!("snemu: load failed: {e:?}");

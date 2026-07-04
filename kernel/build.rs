@@ -44,6 +44,7 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("spawn-image-demo", "SNITCHOS_SPAWN_IMAGE_DEMO_ELF"),
     ("notify_waiter", "SNITCHOS_NOTIFY_WAITER_ELF"),
     ("notify_signaller", "SNITCHOS_NOTIFY_SIGNALLER_ELF"),
+    ("iface-reader", "SNITCHOS_IFACE_READER_ELF"),
 ];
 
 fn main() {

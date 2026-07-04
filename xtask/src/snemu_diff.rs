@@ -187,14 +187,18 @@ fn collect_snemu(kernel: &[u8], dtb: &[u8], max_steps: u64) -> Result<Vec<OwnedF
 
 /// Boot the kernel under QEMU (default `init` workload), collect the telemetry
 /// frames for `window`, then kill it.
-fn collect_qemu(window: Duration) -> Result<Vec<OwnedFrame>, String> {
+fn collect_qemu(window: Duration, workload: Option<&str>) -> Result<Vec<OwnedFrame>, String> {
     let socket = std::env::temp_dir().join(format!("snitch-diff-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&socket);
     let chardev = format!(
         "socket,path={},server=on,wait=on,id=telemetry",
         socket.display()
     );
-    let mut qemu = qemu::base_command(&chardev)
+    let mut cmd = qemu::base_command(&chardev);
+    if let Some(w) = workload {
+        cmd.args(["-append", &format!("workload={w}")]);
+    }
+    let mut qemu = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -244,10 +248,13 @@ fn connect_with_deadline(path: &std::path::Path, timeout: Duration) -> Result<Un
     }
 }
 
-/// The differential oracle entry point: boot the same kernel under snemu and
-/// QEMU, structurally diff their frame streams, and report.
-pub fn run(max_steps: u64, qemu_secs: u64) -> ExitCode {
-    if !qemu::build_kernel(&[]).is_ok_and(|s| s.success()) {
+/// The differential oracle entry point: boot the same kernel (optionally a
+/// selected `workload`) under snemu and QEMU, structurally diff their frame
+/// streams, and report.
+pub fn run(max_steps: u64, qemu_secs: u64, workload: Option<&str>) -> ExitCode {
+    // A workload needs the runtime registry compiled in on both sides.
+    let features: &[&str] = if workload.is_some() { &["itest-workloads"] } else { &[] };
+    if !qemu::build_kernel(features).is_ok_and(|s| s.success()) {
         eprintln!("snemu-diff: kernel build failed");
         return ExitCode::from(1);
     }
@@ -265,7 +272,15 @@ pub fn run(max_steps: u64, qemu_secs: u64) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // Firmware role: inject the workload into the DTB snemu boots (QEMU gets it
+    // via `-append`), so both emulators run the same scenario.
+    let dtb = match workload {
+        Some(w) => snemu::dtb::set_bootargs(&dtb, &format!("workload={w}")).unwrap_or(dtb),
+        None => dtb,
+    };
 
+    let label = workload.unwrap_or("default (init)");
+    eprintln!("snemu-diff: workload = {label}");
     eprintln!("snemu-diff: booting under snemu ({max_steps} steps)...");
     let snemu = match collect_snemu(&kernel, &dtb, max_steps) {
         Ok(f) => f,
@@ -275,7 +290,7 @@ pub fn run(max_steps: u64, qemu_secs: u64) -> ExitCode {
         }
     };
     eprintln!("snemu-diff: booting under qemu ({qemu_secs}s window)...");
-    let qemu = match collect_qemu(Duration::from_secs(qemu_secs)) {
+    let qemu = match collect_qemu(Duration::from_secs(qemu_secs), workload) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("snemu-diff: qemu: {e}");

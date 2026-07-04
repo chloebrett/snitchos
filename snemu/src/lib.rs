@@ -5,6 +5,7 @@
 
 mod bus;
 pub mod cpu;
+pub mod dtb;
 mod csr;
 mod decode;
 pub mod loader;

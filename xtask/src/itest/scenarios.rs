@@ -2747,6 +2747,30 @@ pub fn spawn_image_loads_from_fs(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// `workload=manifest-iface`: the end-to-end typed-interface proof. A client reads
+/// `/bin/manifest_demo`'s `user.iface` xattr off the seeded FS (`GetXattr`),
+/// `decode_manifest`s the bytes, and checks the shape matches its
+/// `#[entry(in = Row, out = u64, uses = [ConsoleOut])]` clause — emitting
+/// `snitchos.manifest.iface_ok = 1` only if it all reconstructs. Asserting `== 1`
+/// proves the whole chain: `#[entry]` note → build-time extraction → `user.iface`
+/// xattr → `GetXattr` IPC → `hitch::decode_manifest`.
+pub fn manifest_iface_served(h: &mut View) -> Result<(), String> {
+    let frame = h
+        .wait_for(SEC * 30, is_metric_named("snitchos.manifest.iface_ok"))
+        .ok_or("no snitchos.manifest.iface_ok metric within 30s")?;
+    let value = match frame {
+        OwnedFrame::Metric { value, .. } => value,
+        _ => return Err("matched non-metric (impossible)".to_string()),
+    };
+    if value != 1 {
+        return Err(format!(
+            "iface_ok = {value}, expected 1 — the manifest read/decode/shape check failed \
+             (a broken link in note → extract → xattr → IPC → decode)"
+        ));
+    }
+    Ok(())
+}
+
 /// v0.11 spawn-with-caps (`workload=spawn-demo`): a parent `Spawn`s a child,
 /// delegating its `SpanSink` cap, and the child *uses* that delegated cap. Proves
 /// the whole path: `Spawn` creates a process holding exactly the delegated caps,

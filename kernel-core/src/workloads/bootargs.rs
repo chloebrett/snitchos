@@ -115,6 +115,10 @@ pub enum WorkloadKind {
     /// `/bin/spawnee` off the filesystem and spawns it from the buffer via the
     /// `SpawnImage` syscall (vs the embedded `Spawn` registry).
     SpawnImage,
+    /// Typed-interface end-to-end: a client reads `/bin/manifest_demo`'s
+    /// `user.iface` xattr off the seeded FS, `decode_manifest`s it, and checks
+    /// the shape — proving the `#[entry]` → note → xattr → IPC → decode chain.
+    ManifestIface,
     /// v0.11 spawn-with-caps demo: a `spawner` parent that `Spawn`s a `spawnee`
     /// child at runtime, delegating its span cap. Proves the `Spawn` syscall
     /// carries delegated authority into a freshly-created process. See
@@ -276,6 +280,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "stitch-repl" => Some(WorkloadKind::StitchRepl),
             "stitch-fs" => Some(WorkloadKind::StitchFs),
             "spawn-image" => Some(WorkloadKind::SpawnImage),
+            "manifest-iface" => Some(WorkloadKind::ManifestIface),
             "probe" => Some(WorkloadKind::Probe),
             "stack-guard" => Some(WorkloadKind::StackGuard),
             "stack-overflow-deep" => Some(WorkloadKind::StackOverflowDeep),
@@ -427,6 +432,11 @@ mod tests {
     #[test]
     fn selects_spawn_image() {
         assert_eq!(select("workload=spawn-image"), Some(WorkloadKind::SpawnImage));
+    }
+
+    #[test]
+    fn selects_manifest_iface() {
+        assert_eq!(select("workload=manifest-iface"), Some(WorkloadKind::ManifestIface));
     }
 
     #[test]

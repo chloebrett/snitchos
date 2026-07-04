@@ -9,5 +9,10 @@ publish = false
 # virtio-console back into `Frame`s. The emulator core (`lib`) stays decoupled.
 protocol = { path = "../protocol", features = ["std"] }
 
+[dev-dependencies]
+# Read-only FDT parser (the same one the kernel uses) — verifies the bootargs
+# our firmware-role DTB patch injects parses back correctly.
+fdt = "0.1.5"
+
 [lints]
 workspace = true

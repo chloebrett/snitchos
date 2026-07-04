@@ -140,6 +140,7 @@ pub static FS_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_ELF"))
 pub static FS_SERVER_SEEDED_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_SEEDED_ELF"));
 pub static FS_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_CLIENT_ELF"));
 pub static SPAWN_IMAGE_DEMO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAWN_IMAGE_DEMO_ELF"));
+pub static IFACE_READER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_IFACE_READER_ELF"));
 
 /// The counter a U-mode page fault bumps — the isolation firewall doing its
 /// job. Registered alongside the other userspace counters in [`init_metric`];
@@ -363,6 +364,11 @@ pub static FS_SERVER_SEEDED: ProgramSpec =
 /// `workload=spawn-image`: reads `/bin/spawnee` off the (seeded) filesystem and
 /// spawns it via `SpawnImage`. Holds `SEND` on the FS endpoint (to read the ELF).
 pub static SPAWN_IMAGE_DEMO: ProgramSpec = ipc_user(SPAWN_IMAGE_DEMO_ELF, Rights::SEND.bits());
+
+/// `workload=manifest-iface`: reads `/bin/manifest_demo`'s `user.iface` xattr off
+/// the seeded FS (over `GetXattr`), decodes it, and checks the shape — the
+/// end-to-end proof of the typed-interface path. Holds `SEND` on the FS endpoint.
+pub static IFACE_READER: ProgramSpec = ipc_user(IFACE_READER_ELF, Rights::SEND.bits());
 
 /// The single entry function for every userspace program. The scheduler has
 /// switched us in and our `arg` word holds our [`ProgramSpec`] address (set by
@@ -596,6 +602,16 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
         programs: &[
             ProgramSpawn { name: "fs_server", program: &FS_SERVER_SEEDED, priority: Priority::Normal },
             ProgramSpawn { name: "spawn_image_demo", program: &SPAWN_IMAGE_DEMO, priority: Priority::Normal },
+        ],
+    }),
+    // Typed-interface end-to-end: the seeded FS server (holding
+    // `/bin/manifest_demo` with a `user.iface` xattr) plus a client that reads it
+    // over `GetXattr`, `decode_manifest`s it, and checks the shape.
+    (WorkloadKind::ManifestIface, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "fs_server", program: &FS_SERVER_SEEDED, priority: Priority::Normal },
+            ProgramSpawn { name: "iface_reader", program: &IFACE_READER, priority: Priority::Normal },
         ],
     }),
     // Userspace-defined metrics: a single probe that names + emits its own metric.

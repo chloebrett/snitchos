@@ -2159,6 +2159,18 @@ mod tests {
     }
 
     #[test]
+    fn compressed_addw_adds_words_and_sign_extends() {
+        // c.addw x10, x11 == 0x9d2d (captured from the demo workload boot).
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x9d2d).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(10, 0x7fff_ffff);
+        cpu.set_reg(11, 1);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), 0xffff_ffff_8000_0000); // sext32(0x7fffffff + 1)
+    }
+
+    #[test]
     fn compressed_subw_subtracts_words_and_sign_extends() {
         // c.subw x10, x11 == 0x9d0d (captured from the kernel boot).
         let mut mem = Memory::new(0x1000);
