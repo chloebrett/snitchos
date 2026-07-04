@@ -32,6 +32,15 @@ How to run it well:
 
 ### Userspace (`user/`) — 2026-07-04
 
+**Status:** #5 (honest `std`) and #4 (runtime auto-instrumentation — per-process
+root span) shipped 2026-07-04. #5 fully closed, incl. the timebase→`Instant`
+follow-up: a new `ClockFreq` syscall plumbs the DTB timebase to userspace so
+`std::time::Instant` converts ticks to a real `Duration` with no hardcoded rate
+(and `stitch_repl` dropped its `TICKS_PER_MS = 10_000` hardcode). #4 also surfaced
++ fixed a latent build-staleness bug (`kernel/build.rs` now derives its
+`rerun-if-changed` set from `cargo metadata` + `USER_PROGRAMS`). #1–#3 (the big
+cluster) and #6 (supervision tree) outstanding.
+
 Central framing: this isn't really a userland yet — it's a museum of
 kernel-feature demos wearing userland clothes. ~35 binaries, nearly all existing
 to prove one wire-frame sequence to one itest. That framing drives the list.
