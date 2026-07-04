@@ -533,8 +533,14 @@ fn expand_c_ca(half: u16) -> Option<u32> {
         (0, 0b01) => Some(reg_alu(funct3::XOR, rd, rd, rs2)),             // c.xor
         (0, 0b10) => Some(reg_alu(funct3::OR, rd, rd, rs2)),              // c.or
         (0, 0b11) => Some(reg_alu(funct3::AND, rd, rd, rs2)),             // c.and
-        _ => None,
+        (1, 0b00) => Some(reg_alu_w(funct3::ADD, rd, rd, rs2) | ALT_OP_BIT), // c.subw
+        _ => None, // c.addw (1, 01) surfaces via the meta-loop when hit
     }
+}
+
+/// Encode an OP-32 register op `funct3 rd, rs1, rs2` (`.w` word arithmetic).
+fn reg_alu_w(funct3: u32, rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode::OP_32
 }
 
 /// `c.beqz rs1', offset` -> `beq rs1', x0, offset`.

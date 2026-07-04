@@ -7,7 +7,7 @@
 //! indivisible, `aq`/`rl` are no-ops. Relaxed memory is a later milestone.
 
 use crate::bus::Bus;
-use crate::cpu::{Hart, StepError};
+use crate::cpu::{Hart, HartEffect, StepError, service_sbi};
 use crate::mem::Memory;
 
 /// A machine with `hart_count` harts over one shared address space.
@@ -42,7 +42,9 @@ impl Machine {
         for i in 0..self.harts.len() {
             if self.harts[i].is_running() {
                 self.harts[i].set_cycle(self.time);
-                self.harts[i].step(&mut self.bus)?;
+                if let HartEffect::Sbi(req) = self.harts[i].step(&mut self.bus)? {
+                    service_sbi(&mut self.harts, i, &req);
+                }
                 self.time += 1;
             }
         }
@@ -64,9 +66,22 @@ impl Machine {
         self.harts[hart].reg(i)
     }
 
+    pub fn set_reg(&mut self, hart: usize, i: usize, value: u64) {
+        self.harts[hart].set_reg(i, value);
+    }
+
+    pub fn set_pc(&mut self, hart: usize, pc: u64) {
+        self.harts[hart].set_pc(pc);
+    }
+
     #[must_use]
     pub fn pc(&self, hart: usize) -> u64 {
         self.harts[hart].pc()
+    }
+
+    #[must_use]
+    pub fn satp(&self, hart: usize) -> u64 {
+        self.harts[hart].satp()
     }
 
     #[must_use]
@@ -115,5 +130,46 @@ mod tests {
         assert_eq!(m.hart_count(), 1);
         m.step().unwrap();
         assert_eq!(m.reg(0, 1), 42);
+    }
+
+    #[test]
+    fn hart_start_wakes_a_parked_secondary_at_the_entry() {
+        const ECALL: u32 = 0x0000_0073;
+        const SELF_LOOP: u32 = 0x0000_006f; // jal x0, 0 — hart 1 idles here
+        const EID_HSM: u64 = 0x0048_534D;
+        let entry = RAM_BASE + 0x40;
+
+        let mut mem = Memory::new(0x1000);
+        mem.write_u32(RAM_BASE, ECALL).unwrap(); // hart 0 issues the SBI call
+        mem.write_u32(entry, SELF_LOOP).unwrap(); // hart 1's entry point
+        let mut m = Machine::new(mem, 2);
+        // sbi_hart_start(hartid=1, start_addr=entry, opaque=0x1234).
+        m.set_reg(0, 17, EID_HSM); // a7 = EID
+        m.set_reg(0, 16, 0); // a6 = FID 0
+        m.set_reg(0, 10, 1); // a0 = target hartid
+        m.set_reg(0, 11, entry); // a1 = start address
+        m.set_reg(0, 12, 0x1234); // a2 = opaque
+        assert!(!m.is_running(1));
+
+        m.step().unwrap();
+
+        assert_eq!(m.reg(0, 10), 0); // SBI_SUCCESS returned to the caller
+        assert!(m.is_running(1)); // secondary woken
+        assert_eq!(m.pc(1), entry); // ...running its self-loop at the entry
+        assert_eq!(m.reg(1, 10), 1); // a0 = hartid
+        assert_eq!(m.reg(1, 11), 0x1234); // a1 = opaque
+    }
+
+    #[test]
+    fn hart_start_on_an_unknown_hart_id_errors() {
+        const ECALL: u32 = 0x0000_0073;
+        const EID_HSM: u64 = 0x0048_534D;
+        let mut m = machine_with(&[ECALL], 2);
+        m.set_reg(0, 17, EID_HSM);
+        m.set_reg(0, 16, 0);
+        m.set_reg(0, 10, 5); // no hart 5 exists
+        m.set_reg(0, 11, RAM_BASE);
+        m.step().unwrap();
+        assert_eq!(m.reg(0, 10) as i64, -3); // SBI_ERR_INVALID_PARAM
     }
 }

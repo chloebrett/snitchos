@@ -57,8 +57,31 @@ mod sbi {
     /// Send-IPI extension id (`"sPI"`), function 0 = `sbi_send_ipi`.
     pub const EID_IPI: u64 = 0x0073_5049;
     pub const FID_SEND_IPI: u64 = 0;
+    /// Hart State Management extension id (`"HSM"`), function 0 = `sbi_hart_start`.
+    pub const EID_HSM: u64 = 0x0048_534D;
+    pub const FID_HART_START: u64 = 0;
     pub const SUCCESS: i64 = 0;
     pub const ERR_NOT_SUPPORTED: i64 = -2;
+    pub const ERR_INVALID_PARAM: i64 = -3;
+    pub const ERR_ALREADY_AVAILABLE: i64 = -6;
+}
+
+/// An SBI firmware call captured from an S-mode `ecall` — serviced by the driver
+/// (`Machine`/`Cpu`) against the whole hart set, since `send_ipi`/`hart_start`
+/// touch harts other than the caller.
+pub(crate) struct SbiRequest {
+    eid: u64,
+    fid: u64,
+    arg0: u64,
+    arg1: u64,
+    arg2: u64,
+}
+
+/// What a `step` asks the driver to do after it returns — cross-hart work a hart
+/// can't do while it only holds `&mut self`.
+pub(crate) enum HartEffect {
+    None,
+    Sbi(SbiRequest),
 }
 
 /// Sign-extend a 32-bit result to 64 bits (the `.w` instruction convention).
@@ -198,6 +221,9 @@ pub(crate) struct Hart {
     reservation: Option<u64>,
     /// Running or parked (secondary harts start parked until `hart_start`).
     state: HartState,
+    /// An SBI request captured from an S-mode `ecall` this step, drained by
+    /// `step` into a [`HartEffect`] for the driver to service.
+    pending_sbi: Option<SbiRequest>,
 }
 
 /// A single-hart machine: one [`Hart`] plus the [`Bus`] it owns. The convenience
@@ -219,10 +245,14 @@ impl Cpu {
     }
 
     /// Fetch/decode/execute one instruction against this machine's bus. The
-    /// single hart's clock is just its own retired count.
+    /// single hart's clock is just its own retired count; an SBI call is serviced
+    /// against the lone hart (a self-IPI targets it; `hart_start` finds no peer).
     pub fn step(&mut self) -> Result<(), StepError> {
         self.hart.set_cycle(self.hart.instret);
-        self.hart.step(&mut self.bus)
+        if let HartEffect::Sbi(req) = self.hart.step(&mut self.bus)? {
+            service_sbi(std::slice::from_mut(&mut self.hart), 0, &req);
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -286,12 +316,30 @@ impl Hart {
             csr: Csr::new(),
             reservation: None,
             state: HartState::Running,
+            pending_sbi: None,
         }
     }
 
     /// Park this hart (a secondary before its `hart_start`).
     pub(crate) fn park(&mut self) {
         self.state = HartState::Stopped;
+    }
+
+    /// Wake this parked hart at `pc` with `a0 = hartid`, `a1 = opaque` — the SBI
+    /// `hart_start` contract. A parked-from-birth secondary is otherwise in reset
+    /// state (MMU off, S-mode), so this is all the setup a fresh start needs.
+    pub(crate) fn start(&mut self, pc: u64, hartid: u64, opaque: u64) {
+        self.pc = pc;
+        self.set_reg(10, hartid);
+        self.set_reg(11, opaque);
+        self.state = HartState::Running;
+    }
+
+    /// Raise this hart's supervisor software-interrupt pending bit (`sip.SSIP`) —
+    /// the effect of an IPI targeting it.
+    pub(crate) fn raise_software_interrupt(&mut self) {
+        let sip = self.csr_read(addr::SIP) | SIP_SSIP;
+        self.csr_write(addr::SIP, sip);
     }
 
     #[must_use]
@@ -306,7 +354,7 @@ impl Hart {
 
     /// The current `satp` value (for diagnostics).
     #[must_use]
-    fn satp(&self) -> u64 {
+    pub(crate) fn satp(&self) -> u64 {
         self.csr.read(addr::SATP).unwrap_or(0)
     }
 
@@ -326,6 +374,10 @@ impl Hart {
         self.pc
     }
 
+    pub(crate) fn set_pc(&mut self, pc: u64) {
+        self.pc = pc;
+    }
+
     /// Translate a guest virtual address through `satp` (Sv39 or bare).
     fn translate(&self, va: u64, access: Access, bus: &Bus) -> Result<u64, StepError> {
         let satp = self.csr.read(addr::SATP).expect("satp is modeled");
@@ -333,12 +385,13 @@ impl Hart {
     }
 
     /// Fetch, decode, and execute one instruction (16- or 32-bit) against `bus`.
-    pub(crate) fn step(&mut self, bus: &mut Bus) -> Result<(), StepError> {
+    /// Returns any cross-hart work (an SBI request) for the driver to service.
+    pub(crate) fn step(&mut self, bus: &mut Bus) -> Result<HartEffect, StepError> {
         // Deliver a pending interrupt before fetching: `sepc` then points at the
         // un-run instruction, so `sret` resumes exactly where we left off.
         if let Some(cause) = self.pending_interrupt() {
             self.take_trap(cause, 0);
-            return Ok(());
+            return Ok(HartEffect::None);
         }
         let pc_pa = self.translate(self.pc, Access::Fetch, bus)?;
         let half = bus.read_u16(pc_pa)?;
@@ -351,7 +404,7 @@ impl Hart {
         };
         self.execute(raw, bus)?;
         self.instret += 1;
-        Ok(())
+        Ok(self.pending_sbi.take().map_or(HartEffect::None, HartEffect::Sbi))
     }
 
     fn execute(&mut self, raw: u32, bus: &mut Bus) -> Result<(), StepError> {
@@ -710,10 +763,11 @@ impl Hart {
         match instr.funct12() {
             priv12::ECALL => {
                 // U-mode ecall is a syscall — trap to the kernel. S-mode ecall is
-                // an SBI call — snemu services it as firmware (no M-mode here).
+                // an SBI call — captured here and serviced by the driver (which
+                // holds every hart), since send_ipi/hart_start cross harts.
                 match self.privilege {
                     Privilege::User => self.take_trap(cause::ECALL_FROM_U, 0),
-                    Privilege::Supervisor => self.sbi_call(),
+                    Privilege::Supervisor => self.capture_sbi_call(),
                 }
                 Ok(())
             }
@@ -777,28 +831,18 @@ impl Hart {
         }
     }
 
-    /// Service an S-mode `ecall` as an SBI firmware call: dispatch on the
-    /// extension/function ids in `a7`/`a6`, write `a0` = error / `a1` = value,
-    /// and step past the `ecall` (S-mode execution continues; no trap).
-    fn sbi_call(&mut self) {
-        let (error, value) = match (self.x[17], self.x[16]) {
-            (sbi::EID_IPI, sbi::FID_SEND_IPI) => self.sbi_send_ipi(self.x[10], self.x[11]),
-            _ => (sbi::ERR_NOT_SUPPORTED, 0),
-        };
-        self.set_reg(10, error as u64);
-        self.set_reg(11, value);
+    /// Capture an S-mode `ecall`'s SBI arguments (`a7`=EID, `a6`=FID, `a0..a2`)
+    /// and advance past it. The driver services the request after `step` returns
+    /// and writes `a0`/`a1` back; S-mode execution then continues (no trap).
+    fn capture_sbi_call(&mut self) {
+        self.pending_sbi = Some(SbiRequest {
+            eid: self.x[17],
+            fid: self.x[16],
+            arg0: self.x[10],
+            arg1: self.x[11],
+            arg2: self.x[12],
+        });
         self.advance();
-    }
-
-    /// `sbi_send_ipi(hart_mask, hart_mask_base)`: raise a software interrupt on
-    /// each targeted hart. snemu is single-hart (mhartid 0), so the only target
-    /// that exists is hart 0 — raise `sip.SSIP` on ourself when the mask selects it.
-    fn sbi_send_ipi(&mut self, hart_mask: u64, hart_mask_base: u64) -> (i64, u64) {
-        if hart_mask_base == 0 && hart_mask & 1 != 0 {
-            let sip = self.csr_read(addr::SIP) | SIP_SSIP;
-            self.csr_write(addr::SIP, sip);
-        }
-        (sbi::SUCCESS, 0)
     }
 
     /// Whether a supervisor timer interrupt is pending and currently deliverable.
@@ -862,6 +906,46 @@ impl Hart {
         StepError::Unimplemented {
             pc: self.pc,
             instr,
+        }
+    }
+}
+
+/// Service an SBI request from hart `caller` against the whole hart set (snemu
+/// plays firmware). `send_ipi` and `hart_start` reach harts other than the
+/// caller, so this runs at the driver level, not inside `Hart::step`. The result
+/// (`a0` = error, `a1` = value) is written back into the caller.
+pub(crate) fn service_sbi(harts: &mut [Hart], caller: usize, req: &SbiRequest) {
+    let (error, value) = match (req.eid, req.fid) {
+        (sbi::EID_IPI, sbi::FID_SEND_IPI) => {
+            send_ipi(harts, req.arg0, req.arg1);
+            (sbi::SUCCESS, 0)
+        }
+        (sbi::EID_HSM, sbi::FID_HART_START) => hart_start(harts, req.arg0, req.arg1, req.arg2),
+        _ => (sbi::ERR_NOT_SUPPORTED, 0),
+    };
+    harts[caller].set_reg(10, error as u64);
+    harts[caller].set_reg(11, value);
+}
+
+/// Raise `sip.SSIP` on every hart the mask selects. Hart `i` has mhartid `i`
+/// here, and bit `k` of `hart_mask` targets hart `hart_mask_base + k`.
+fn send_ipi(harts: &mut [Hart], hart_mask: u64, hart_mask_base: u64) {
+    for id in 0..harts.len() as u64 {
+        if id >= hart_mask_base && (hart_mask >> (id - hart_mask_base)) & 1 != 0 {
+            harts[id as usize].raise_software_interrupt();
+        }
+    }
+}
+
+/// Wake the target hart at `start_addr` (physical, MMU off) with `a0 = hartid`,
+/// `a1 = opaque`. Errors if the hart id is unknown or already running.
+fn hart_start(harts: &mut [Hart], hartid: u64, start_addr: u64, opaque: u64) -> (i64, u64) {
+    match harts.get_mut(hartid as usize) {
+        None => (sbi::ERR_INVALID_PARAM, 0),
+        Some(h) if h.is_running() => (sbi::ERR_ALREADY_AVAILABLE, 0),
+        Some(h) => {
+            h.start(start_addr, hartid, opaque);
+            (sbi::SUCCESS, 0)
         }
     }
 }
@@ -1566,6 +1650,16 @@ mod tests {
     }
 
     #[test]
+    fn send_ipi_targets_the_selected_hart_not_the_others() {
+        // The cross-hart IPI: hart 0 sends to hart 1 (bit 1 of the mask). Only
+        // hart 1's SSIP is raised.
+        let mut harts = vec![Hart::new(), Hart::new()];
+        send_ipi(&mut harts, 1 << 1, 0);
+        assert_eq!(harts[0].csr_read(addr::SIP) & SIP_SSIP, 0);
+        assert_ne!(harts[1].csr_read(addr::SIP) & SIP_SSIP, 0);
+    }
+
+    #[test]
     fn pending_software_interrupt_traps_to_the_handler() {
         let mut cpu = cpu_with(&[addi(1, 0, 7)]);
         cpu.hart.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
@@ -2062,6 +2156,18 @@ mod tests {
         cpu.set_reg(12, 0xffff_ffff_0000_0000);
         cpu.step().unwrap();
         assert_eq!(cpu.reg(12), 0xffff_ffff_ffff_ffff); // sign-propagating >> 32
+    }
+
+    #[test]
+    fn compressed_subw_subtracts_words_and_sign_extends() {
+        // c.subw x10, x11 == 0x9d0d (captured from the kernel boot).
+        let mut mem = Memory::new(0x1000);
+        mem.write_u16(RAM_BASE, 0x9d0d).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_reg(10, 0);
+        cpu.set_reg(11, 1);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), u64::MAX); // sext32(0 - 1) = -1
     }
 
     #[test]

@@ -10,15 +10,16 @@ use std::io::Cursor;
 use std::process::ExitCode;
 
 use protocol::stream::{OwnedFrame, decode_stream};
-use snemu::cpu::StepError;
 
 /// QEMU `virt` default RAM (128 MiB).
 const RAM_SIZE: usize = 128 * 1024 * 1024;
 const DEFAULT_MAX_STEPS: u64 = 50_000_000;
+/// Harts the machine boots with. The kernel is `MAX_HARTS = 2` and brings up its
+/// secondary unconditionally, so the DTB and machine must offer two.
+const HART_COUNT: usize = 2;
 
 /// Device tree the guest sees, dumped from QEMU's `virt` machine:
-/// `qemu-system-riscv64 -machine virt,dumpdtb=snemu/virt.dtb -smp 1 -m 128M`.
-/// (`-smp 1` so the kernel boots uniprocessor — snemu is single-hart for now.)
+/// `qemu-system-riscv64 -machine virt,dumpdtb=snemu/virt.dtb -smp 2 -m 128M`.
 const DTB: &[u8] = include_bytes!("../virt.dtb");
 
 fn main() -> ExitCode {
@@ -50,8 +51,8 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut cpu = match snemu::loader::load(&image, RAM_SIZE, Some(DTB)) {
-        Ok(cpu) => cpu,
+    let mut machine = match snemu::loader::load_machine(&image, RAM_SIZE, Some(DTB), HART_COUNT) {
+        Ok(machine) => machine,
         Err(e) => {
             eprintln!("snemu: load failed: {e:?}");
             return ExitCode::FAILURE;
@@ -60,14 +61,16 @@ fn main() -> ExitCode {
 
     let mut steps = 0u64;
     while steps < max_steps {
-        match cpu.step() {
+        match machine.step() {
             Ok(()) => steps += 1,
-            Err(StepError::Unimplemented { pc, instr }) => {
-                eprintln!("snemu: unimplemented instruction {instr:#010x} at pc {pc:#018x} (after {steps} steps, satp {:#x})", cpu.satp());
-                break;
-            }
-            Err(other) => {
-                eprintln!("snemu: halted with {other:?} at pc {:#018x} (after {steps} steps, satp {:#x})", cpu.pc(), cpu.satp());
+            // The error carries the faulting pc / instruction; report the harts'
+            // satp for boot-phase context.
+            Err(err) => {
+                eprintln!(
+                    "snemu: halted with {err:?} (after {steps} steps, hart0 satp {:#x}, hart1 satp {:#x})",
+                    machine.satp(0),
+                    machine.satp(1)
+                );
                 break;
             }
         }
@@ -76,8 +79,8 @@ fn main() -> ExitCode {
         eprintln!("snemu: step limit reached ({max_steps})");
     }
 
-    print!("{}", String::from_utf8_lossy(cpu.uart_output()));
-    report_frames(cpu.virtio_tx_output(), dump_frames);
+    print!("{}", String::from_utf8_lossy(machine.uart_output()));
+    report_frames(machine.virtio_tx_output(), dump_frames);
     ExitCode::SUCCESS
 }
 

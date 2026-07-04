@@ -3,6 +3,7 @@
 //! entry point (a0 = hartid 0, a1 = null DTB — both the register defaults).
 
 use crate::cpu::Cpu;
+use crate::machine::Machine;
 use crate::mem::{Memory, RAM_BASE};
 
 /// Where snemu places the device tree blob in RAM (high, clear of the kernel
@@ -78,9 +79,45 @@ fn validate_header(image: &[u8]) -> Result<(), ElfError> {
 }
 
 /// Load an ELF64 RISC-V `image` into a fresh `ram_size`-byte machine and return
-/// a `Cpu` positioned at the entry point. If a `dtb` is given, it's placed in
-/// RAM and its address handed to the kernel in `a1` (as firmware would).
+/// a single-hart `Cpu` positioned at the entry point. If a `dtb` is given, it's
+/// placed in RAM and its address handed to the kernel in `a1` (as firmware would).
 pub fn load(image: &[u8], ram_size: usize, dtb: Option<&[u8]>) -> Result<Cpu, ElfError> {
+    let (mem, entry_pc, dtb_addr) = load_memory(image, ram_size, dtb)?;
+    let mut cpu = Cpu::new(mem);
+    cpu.set_pc(entry_pc);
+    if let Some(addr) = dtb_addr {
+        cpu.set_reg(11, addr); // a1 = DTB address
+    }
+    Ok(cpu)
+}
+
+/// Like [`load`], but into a multi-hart [`Machine`] with `hart_count` harts. Hart
+/// 0 boots at the entry with `a1` = DTB; the secondaries start parked until the
+/// kernel's `hart_start`.
+pub fn load_machine(
+    image: &[u8],
+    ram_size: usize,
+    dtb: Option<&[u8]>,
+    hart_count: usize,
+) -> Result<Machine, ElfError> {
+    let (mem, entry_pc, dtb_addr) = load_memory(image, ram_size, dtb)?;
+    let mut machine = Machine::new(mem, hart_count);
+    machine.set_pc(0, entry_pc);
+    if let Some(addr) = dtb_addr {
+        machine.set_reg(0, 11, addr); // a1 = DTB address
+    }
+    Ok(machine)
+}
+
+/// Parse the ELF and lay out RAM: copy each `PT_LOAD` segment, place the DTB (if
+/// any), and return `(memory, entry_pc, dtb_addr)`. The entry is translated
+/// through its segment's vaddr->paddr mapping (higher-half kernels boot at the
+/// physical entry), falling back to the raw entry if no segment covers it.
+fn load_memory(
+    image: &[u8],
+    ram_size: usize,
+    dtb: Option<&[u8]>,
+) -> Result<(Memory, u64, Option<u64>), ElfError> {
     validate_header(image)?;
     let entry = u64_at(image, off::E_ENTRY)?;
     let phoff = u64_at(image, off::E_PHOFF)?;
@@ -108,21 +145,16 @@ pub fn load(image: &[u8], ram_size: usize, dtb: Option<&[u8]>) -> Result<Cpu, El
         }
     }
 
-    if let Some(dtb) = dtb {
-        mem.write_bytes(DTB_ADDR, dtb)
-            .map_err(|_| ElfError::SegmentOutOfRange)?;
-    }
+    let dtb_addr = match dtb {
+        Some(dtb) => {
+            mem.write_bytes(DTB_ADDR, dtb)
+                .map_err(|_| ElfError::SegmentOutOfRange)?;
+            Some(DTB_ADDR)
+        }
+        None => None,
+    };
 
-    let mut cpu = Cpu::new(mem);
-    // The kernel is linked at higher-half VAs but boots at physical PC, so
-    // translate the entry through its segment's vaddr->paddr mapping. Falls
-    // back to the entry verbatim if no PT_LOAD covers it.
-    cpu.set_pc(entry_pa.unwrap_or(entry));
-    // Firmware handoff: a0 = hartid (0, the register default), a1 = DTB address.
-    if dtb.is_some() {
-        cpu.set_reg(11, DTB_ADDR);
-    }
-    Ok(cpu)
+    Ok((mem, entry_pa.unwrap_or(entry), dtb_addr))
 }
 
 #[cfg(test)]
