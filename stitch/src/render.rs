@@ -11,39 +11,45 @@
 use crate::prelude::*;
 use crate::value::Value;
 
-/// The style-agnostic tabular projection of a homogeneous record list: column
-/// headers and the already-rendered cell strings (row-major). A [`TableStyle`]
-/// turns it into text.
+/// The style-agnostic model of a table: an optional header row and the rows of
+/// already-rendered cells (row-major). A record *list* has a header (the shared
+/// field names); a single-record **key/value** table is headerless (each row is
+/// `[field, value]`). A [`TableStyle`] turns it into text.
 pub struct Table {
-    columns: Vec<String>,
+    header: Option<Vec<String>>,
     rows: Vec<Vec<String>>,
 }
 
 impl Table {
-    /// The column headers (the records' shared field names).
+    /// The header row (column names), or `None` for a headerless key/value table.
     #[must_use]
-    pub fn columns(&self) -> &[String] {
-        &self.columns
+    pub fn header(&self) -> Option<&[String]> {
+        self.header.as_deref()
     }
 
-    /// The rows, each a vector of cell strings aligned to [`columns`](Self::columns).
+    /// The rows, each a vector of cell strings (one per column).
     #[must_use]
     pub fn rows(&self) -> &[Vec<String>] {
         &self.rows
     }
 
-    /// Each column's display width — the widest of its header and cells, counted
-    /// in **characters** (box-drawing and any non-ASCII are multi-byte, so byte
-    /// length would misalign).
+    /// Each column's display width — the widest of its header (if any) and its
+    /// cells, counted in **characters** (box-drawing and any non-ASCII are
+    /// multi-byte, so byte length would misalign).
     #[must_use]
     pub fn widths(&self) -> Vec<usize> {
-        self.columns
-            .iter()
-            .enumerate()
-            .map(|(col, header)| {
-                let widest_cell =
+        let columns = self
+            .header
+            .as_ref()
+            .map(Vec::len)
+            .or_else(|| self.rows.first().map(Vec::len))
+            .unwrap_or(0);
+        (0..columns)
+            .map(|col| {
+                let header_width = self.header.as_ref().map_or(0, |h| h[col].chars().count());
+                let cell_width =
                     self.rows.iter().map(|row| row[col].chars().count()).max().unwrap_or(0);
-                header.chars().count().max(widest_cell)
+                header_width.max(cell_width)
             })
             .collect()
     }
@@ -80,10 +86,12 @@ impl TableStyle for BoxStyle {
         };
 
         let mut out = border('┌', '┬', '┐');
-        out.push('\n');
-        out.push_str(&row(table.columns()));
-        out.push('\n');
-        out.push_str(&border('├', '┼', '┤'));
+        if let Some(header) = table.header() {
+            out.push('\n');
+            out.push_str(&row(header));
+            out.push('\n');
+            out.push_str(&border('├', '┼', '┤'));
+        }
         for r in table.rows() {
             out.push('\n');
             out.push_str(&row(r));
@@ -111,7 +119,7 @@ fn as_table(value: &Value) -> Option<Table> {
         }
         rows.push(cells);
     }
-    Some(Table { columns, rows })
+    Some(Table { header: Some(columns), rows })
 }
 
 /// A record's `(column names, cell strings)`, or `None` if it isn't a `Data` with
@@ -125,14 +133,36 @@ fn record_row(value: &Value) -> Option<(Vec<String>, Vec<String>)> {
     Some((columns, cells))
 }
 
-/// Render `value` for the terminal against `style`: a homogeneous record list
-/// becomes a table; anything else falls back to [`Value::display`].
+/// A single named-field record as a **headerless** key/value [`Table`] (each row
+/// is `[field, value]`), or `None` if it isn't a `Data` with all fields named and
+/// at least one field — a nullary variant (like `None`) renders as its name.
+fn as_kv(value: &Value) -> Option<Table> {
+    let Value::Data(data) = value else {
+        return None;
+    };
+    if data.fields.is_empty() {
+        return None;
+    }
+    let rows = data
+        .fields
+        .iter()
+        .map(|(name, value)| Some(alloc::vec![name.clone()?, value.display()]))
+        .collect::<Option<Vec<_>>>()?;
+    Some(Table { header: None, rows })
+}
+
+/// Render `value` for the terminal against `style`: a homogeneous record *list*
+/// becomes a table; a single record becomes a key/value table; anything else falls
+/// back to [`Value::display`].
 #[must_use]
 pub fn render_with(value: &Value, style: &dyn TableStyle) -> String {
-    match as_table(value) {
-        Some(table) => style.render(&table),
-        None => value.display(),
+    if let Some(table) = as_table(value) {
+        return style.render(&table);
     }
+    if let Some(kv) = as_kv(value) {
+        return style.render(&kv);
+    }
+    value.display()
 }
 
 /// [`render_with`] using the default [`BoxStyle`] — the REPL's result printer.
@@ -215,9 +245,35 @@ mod tests {
     }
 
     #[test]
+    fn a_single_record_renders_as_a_key_value_table() {
+        let cap = record(vec![
+            ("handle", Value::Int(0)),
+            ("kind", Value::Str("TelemetrySink".into())),
+        ]);
+        assert_eq!(
+            render(&cap),
+            "\
+┌────────┬───────────────┐
+│ handle │ 0             │
+│ kind   │ TelemetrySink │
+└────────┴───────────────┘"
+        );
+    }
+
+    #[test]
+    fn a_nullary_variant_renders_as_its_name_not_a_table() {
+        let none = Value::Data(Rc::new(DataValue {
+            type_name: "Maybe".into(),
+            variant: "None".into(),
+            fields: vec![],
+        }));
+        assert_eq!(render(&none), "None");
+    }
+
+    #[test]
     fn box_style_renders_the_model_directly() {
         let table = Table {
-            columns: vec!["a".into(), "bb".into()],
+            header: Some(vec!["a".into(), "bb".into()]),
             rows: vec![
                 vec!["1".into(), "2".into()],
                 vec!["30".into(), "4".into()],
