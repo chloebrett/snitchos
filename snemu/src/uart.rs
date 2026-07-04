@@ -20,6 +20,7 @@ pub(crate) mod lsr {
 
 /// A minimal ns16550a UART. Transmitted bytes accumulate in `out`; the host
 /// harness drains them. The transmitter is modeled as always ready.
+#[derive(Clone)]
 pub(crate) struct Uart {
     out: Vec<u8>,
 }

@@ -69,6 +69,7 @@ mod sbi {
 /// An SBI firmware call captured from an S-mode `ecall` — serviced by the driver
 /// (`Machine`/`Cpu`) against the whole hart set, since `send_ipi`/`hart_start`
 /// touch harts other than the caller.
+#[derive(Clone)]
 pub(crate) struct SbiRequest {
     eid: u64,
     fid: u64,
@@ -202,6 +203,7 @@ impl From<BusError> for StepError {
 /// A single RISC-V hart: register file, pc, CSRs, and privilege. The memory and
 /// devices it runs against live in a shared [`Bus`] threaded through `step`, so
 /// several harts can share one address space (see `Machine`).
+#[derive(Clone)]
 pub(crate) struct Hart {
     x: [u64; 32],
     pc: u64,

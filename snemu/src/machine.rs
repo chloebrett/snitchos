@@ -11,6 +11,11 @@ use crate::cpu::{Hart, HartEffect, StepError, service_sbi};
 use crate::mem::Memory;
 
 /// A machine with `hart_count` harts over one shared address space.
+/// `Clone` is the snapshot primitive: snemu has no hidden state (no JIT cache,
+/// no host threads), so a full machine snapshot is a deep copy of registers,
+/// RAM, and device state — and restore is just keeping the clone. This is what
+/// makes the boot-once/fork-per-workload harness possible.
+#[derive(Clone)]
 pub struct Machine {
     harts: Vec<Hart>,
     bus: Bus,
@@ -49,6 +54,33 @@ impl Machine {
             }
         }
         Ok(())
+    }
+
+    /// Step (round-robin) until the UART output contains `marker` — a stable
+    /// boot checkpoint — or `max_steps` elapse. Returns the steps taken. This is
+    /// the boot-once half of the snapshot/fork harness: run to the marker, then
+    /// `clone()` the machine to snapshot it.
+    pub fn run_until_uart(&mut self, marker: &[u8], max_steps: u64) -> Result<u64, String> {
+        let mut steps = 0u64;
+        let mut seen_len = 0usize;
+        while steps < max_steps {
+            let len = self.bus.uart_output().len();
+            if len != seen_len {
+                seen_len = len;
+                if self.bus.uart_output().windows(marker.len()).any(|w| w == marker) {
+                    return Ok(steps);
+                }
+            }
+            self.step().map_err(|e| format!("fault before UART marker: {e:?}"))?;
+            steps += 1;
+        }
+        Err(format!("UART marker not seen within {max_steps} steps"))
+    }
+
+    /// Overwrite guest RAM at `addr` — used to patch the DTB's `workload=`
+    /// bootarg into a snapshot before resuming it (the per-workload fork).
+    pub fn write_ram(&mut self, addr: u64, bytes: &[u8]) -> Result<(), String> {
+        self.bus.write_ram(addr, bytes).map_err(|e| format!("write_ram: {e:?}"))
     }
 
     #[must_use]
@@ -107,6 +139,26 @@ mod tests {
             mem.write_u32(RAM_BASE + (i as u64) * 4, word).unwrap();
         }
         Machine::new(mem, harts)
+    }
+
+    #[test]
+    fn a_clone_is_an_independent_deterministic_snapshot() {
+        // addi x1=42, x2=7, x3=1 — three independent instructions.
+        let program = &[0x02a0_0093, 0x0070_0113, 0x0010_0193];
+        let mut m = machine_with(program, 1);
+        m.step().unwrap(); // x1 = 42
+        let snapshot = m.clone();
+        m.step().unwrap(); // original advances: x2 = 7
+
+        // The snapshot is independent — the original's step didn't touch it.
+        assert_eq!(snapshot.reg(0, 1), 42);
+        assert_eq!(snapshot.reg(0, 2), 0);
+        assert_eq!(m.reg(0, 2), 7);
+
+        // ...and deterministic — resuming the snapshot reproduces the original.
+        let mut resumed = snapshot.clone();
+        resumed.step().unwrap();
+        assert_eq!(resumed.reg(0, 2), 7);
     }
 
     #[test]

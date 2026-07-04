@@ -58,6 +58,7 @@ pub(crate) enum CsrError {
 }
 
 /// The control-and-status register file.
+#[derive(Clone)]
 pub(crate) struct Csr {
     values: BTreeMap<u16, u64>,
 }

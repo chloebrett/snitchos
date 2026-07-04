@@ -87,6 +87,7 @@ struct Queue {
 }
 
 /// The virtio-mmio device block: one live console plus seven empty slots.
+#[derive(Clone)]
 pub(crate) struct Virtio {
     status: u32,
     device_features_sel: u32,

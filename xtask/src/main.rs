@@ -70,6 +70,14 @@ enum Cmd {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Snapshot/fork harness: boot the common prefix once under snemu, then fork
+    /// every workload from that snapshot (clone + DTB bootarg patch). snemu-only;
+    /// proves boot amortization.
+    SnemuFork {
+        /// Per-workload step budget after the fork.
+        #[arg(long, default_value_t = 20_000_000)]
+        steps: u64,
+    },
     /// Build the kernel and run it in QEMU.
     ///
     /// Use `--workload <name>` to boot a runtime-selected workload for
@@ -507,6 +515,7 @@ fn main() -> ExitCode {
                 snemu_diff::run(steps, qemu_secs, workload.as_deref())
             }
         }
+        Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
         Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
         Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {
             measure::measure(&workload, seconds, warmup, timebase_hz, burst, markdown)

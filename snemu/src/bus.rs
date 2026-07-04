@@ -17,6 +17,7 @@ fn uart_offset(addr: u64) -> Option<usize> {
         .then(|| (addr - UART_BASE) as usize)
 }
 
+#[derive(Clone)]
 pub(crate) struct Bus {
     ram: Memory,
     uart: Uart,
@@ -34,6 +35,11 @@ impl Bus {
 
     pub(crate) fn uart_output(&self) -> &[u8] {
         self.uart.output()
+    }
+
+    /// Overwrite guest RAM (used to patch a snapshot's DTB before a fork).
+    pub(crate) fn write_ram(&mut self, addr: u64, bytes: &[u8]) -> Result<(), BusError> {
+        self.ram.write_bytes(addr, bytes)
     }
 
     /// Bytes the virtio-console has transmitted (the telemetry frame stream).

@@ -8,7 +8,7 @@ use crate::mem::{Memory, RAM_BASE};
 
 /// Where snemu places the device tree blob in RAM (high, clear of the kernel
 /// image + heap). The kernel reads its address from `a1` and reserves it.
-const DTB_ADDR: u64 = RAM_BASE + 0x0700_0000;
+pub const DTB_ADDR: u64 = RAM_BASE + 0x0700_0000;
 
 const ELF64_HEADER_SIZE: usize = 64;
 const ELFCLASS64: u8 = 2;

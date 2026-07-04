@@ -11,6 +11,7 @@ pub enum BusError {
 }
 
 /// Flat guest RAM, addressed by absolute guest physical address.
+#[derive(Clone)]
 pub struct Memory {
     ram: Vec<u8>,
 }

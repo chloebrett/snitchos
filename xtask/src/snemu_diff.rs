@@ -455,6 +455,122 @@ fn fmt_timing(t: &Timing) -> String {
     format!("{}/{}", fmt_opt(t.first_span), fmt_opt(t.milestone))
 }
 
+/// The snapshot/fork harness: boot the common prefix **once**, snapshot it, then
+/// fork every workload by cloning the snapshot, patching its `workload=` bootarg
+/// into RAM, and resuming. Proves boot amortization — one boot, N workloads —
+/// the snemu-only fast path (no QEMU). All in-process; no per-workload reboot.
+pub fn run_fork(max_steps: u64) -> ExitCode {
+    let (kernel, base_dtb) = match prepare(true) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("snemu-fork: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    // Boot with the LONGEST workload's DTB so the reserved DTB region is maximal;
+    // per-workload DTBs (smaller) then fit when patched into the snapshot's RAM.
+    let longest = WORKLOADS.iter().max_by_key(|w| w.len()).copied().unwrap_or("demo");
+    let Some(boot_dtb) = snemu::dtb::set_bootargs(&base_dtb, &format!("workload={longest}")) else {
+        eprintln!("snemu-fork: DTB patch failed");
+        return ExitCode::from(1);
+    };
+    let mut base = match snemu::loader::load_machine(&kernel, RAM_SIZE, Some(&boot_dtb), HART_COUNT) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("snemu-fork: load: {e:?}");
+            return ExitCode::from(1);
+        }
+    };
+
+    // Boot once to the "I am alive" marker — the last checkpoint before the
+    // kernel reads the workload bootarg (kernel/src/main.rs:228 vs :339).
+    let boot_start = Instant::now();
+    let boot_steps = match base.run_until_uart(b"I am alive", 60_000_000) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("snemu-fork: boot: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let boot_time = boot_start.elapsed();
+    let snapshot = base; // the machine, parked at the pre-workload checkpoint
+    eprintln!(
+        "snemu-fork: booted common prefix once in {:.3}s ({boot_steps} steps), snapshotting.",
+        boot_time.as_secs_f64()
+    );
+
+    let sweep_start = Instant::now();
+    println!();
+    println!("{:<22} {:>7} {:>9} {:>8}  {}", "WORKLOAD", "FRAMES", "FORK+RUN", "1ST-SPAN", "STOP");
+    for &w in WORKLOADS {
+        let mut m = snapshot.clone();
+        let patched = snemu::dtb::set_bootargs(&base_dtb, &format!("workload={w}"));
+        if let Some(dtb) = patched {
+            if let Err(e) = m.write_ram(snemu::loader::DTB_ADDR, &dtb) {
+                println!("{w:<22} patch failed: {e}");
+                continue;
+            }
+        }
+        let (frames, stop, span_at) = fork_collect(&mut m, max_steps);
+        println!(
+            "{w:<22} {:>7} {:>8.3}s {:>7}  {stop}",
+            frames.len(),
+            span_at.0.as_secs_f64(),
+            fmt_opt(span_at.1),
+        );
+    }
+    let sweep_time = sweep_start.elapsed();
+    println!();
+    println!(
+        "snemu-fork: 1 boot ({:.3}s) + {} forks in {:.3}s = {:.3}s total.",
+        boot_time.as_secs_f64(),
+        WORKLOADS.len(),
+        sweep_time.as_secs_f64(),
+        (boot_time + sweep_time).as_secs_f64(),
+    );
+    println!(
+        "snemu-fork: booting each fresh would re-run the ~{boot_steps}-step prefix {}× \
+         (~{:.1}s of boot saved).",
+        WORKLOADS.len(),
+        boot_time.as_secs_f64() * (WORKLOADS.len() - 1) as f64,
+    );
+    ExitCode::SUCCESS
+}
+
+/// Run a forked machine to its step budget, returning frames, stop reason, and
+/// (total run time, first-span-after-resume).
+fn fork_collect(
+    machine: &mut snemu::machine::Machine,
+    max_steps: u64,
+) -> (Vec<OwnedFrame>, String, (Duration, Option<Duration>)) {
+    let start = Instant::now();
+    let mut steps = 0u64;
+    let mut stop = format!("step limit ({max_steps})");
+    let mut first_span = None;
+    let mut seen_tx = 0usize;
+    let base_frames = decode_frames(machine.virtio_tx_output()).len(); // already in snapshot
+    while steps < max_steps {
+        match machine.step() {
+            Ok(()) => steps += 1,
+            Err(e) => {
+                stop = format!("{e:?} @ {steps} steps");
+                break;
+            }
+        }
+        if first_span.is_none() {
+            let tx = machine.virtio_tx_output();
+            if tx.len() != seen_tx {
+                seen_tx = tx.len();
+                // "first span after resume" = past whatever the snapshot held.
+                if decode_frames(tx).len() > base_frames && has_span(&decode_frames(tx)) {
+                    first_span = Some(start.elapsed());
+                }
+            }
+        }
+    }
+    (decode_frames(machine.virtio_tx_output()), stop, (start.elapsed(), first_span))
+}
+
 /// The detailed single-workload report.
 fn print_detailed(cmp: &Comparison) {
     eprintln!(
