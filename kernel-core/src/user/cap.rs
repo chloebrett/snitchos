@@ -216,6 +216,12 @@ pub enum CapError {
     /// where nothing bumps a generation; the check guards future
     /// revocation.)
     Stale,
+    /// The handle names a live capability, but it is [`Multiplicity::Once`]
+    /// (affine) and so must not be duplicated by delegation: copy-semantics
+    /// would hand a child a second holding of a single-use authority (and,
+    /// since delegation always re-inserts [`Multiplicity::Persistent`], reborn
+    /// non-affine). The reply cap is the only such cap today.
+    NotDelegable,
 }
 
 /// One table slot: the generation a valid handle must carry, the grant's
@@ -410,7 +416,17 @@ pub fn mint_badged(parent: Capability, badge: u64, rights: Rights) -> Result<Cap
 pub fn delegate(table: &CapTable, handles: &[Handle]) -> Result<Vec<Capability>, CapError> {
     handles
         .iter()
-        .map(|handle| table.resolve(*handle).copied())
+        .map(|handle| {
+            // A `Once` (affine) cap must not be duplicated by delegation:
+            // copy-semantics would hand the child a second holding of a
+            // single-use authority (and delegation always re-inserts
+            // Persistent, so the child's copy could be invoked repeatedly).
+            // Refuse — all-or-nothing, like an unheld handle.
+            if table.multiplicity_of(*handle)? == Multiplicity::Once {
+                return Err(CapError::NotDelegable);
+            }
+            table.resolve(*handle).copied()
+        })
         .collect()
 }
 
@@ -1628,5 +1644,30 @@ mod tests {
         let h = table.insert(emit_sink());
         let _ = delegate(&table, &[h]).expect("a held handle delegates");
         assert!(table.resolve(h).is_ok());
+    }
+
+    #[test]
+    fn delegating_a_once_cap_is_refused() {
+        // A `Once` (affine) cap — the reply cap is the only one today — must not
+        // be duplicable by delegation. Copy-semantics would hand a child a second
+        // holding of a single-use authority, reborn Persistent (delegation always
+        // re-inserts Persistent), letting it reply more than once. Refused outright.
+        let mut table = CapTable::new();
+        let once = table.insert_once(reply_cap(7));
+        assert_eq!(delegate(&table, &[once]), Err(CapError::NotDelegable));
+    }
+
+    #[test]
+    fn a_once_cap_refuses_the_whole_delegation_set() {
+        // All-or-nothing (matching an unheld handle): a Once cap anywhere in the
+        // set fails the entire delegation — no partial child cap set, and the
+        // valid Persistent cap alongside it is not delegated.
+        let mut table = CapTable::new();
+        let persistent = table.insert(emit_sink());
+        let once = table.insert_once(reply_cap(7));
+        assert_eq!(
+            delegate(&table, &[persistent, once]),
+            Err(CapError::NotDelegable)
+        );
     }
 }
