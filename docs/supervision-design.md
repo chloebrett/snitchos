@@ -2,13 +2,25 @@
 
 *Supervision is capability ownership viewed twice. The supervisor owns the durable objects; services borrow authority from it and are restartable precisely because of that. Every transition is a span.*
 
-**Status: design only — not built.** This is redesign item **#6** from
-[redesign-from-scratch.md](redesign-from-scratch.md). It builds on shipped
-primitives (`Spawn`, `Wait`/`WaitAny`, `EndpointCreate`, `Notify`, caps + `Revoke`,
-the clock) and names two new ones it would need for the *full* vision. Nothing
-here is implemented; the increment plan at the end is the build order.
+**Status: design only — not built, and deliberately downstream.** This is redesign
+item **#6** from [redesign-from-scratch.md](redesign-from-scratch.md). It builds on
+shipped primitives (`Spawn`, `Wait`/`WaitAny`, `EndpointCreate`, `Notify`, caps +
+`Revoke`, the clock) and names two new ones it would need for the *full* vision.
+Nothing here is implemented.
 
-Related: [capability-system-design.md](capability-system-design.md),
+**Sequencing (added 2026-07-05, after the axes review).** The supervisor is, in the
+terms of [design-explorations-seven-questions.md](design-explorations-seven-questions.md)
+Q1, a *manifest satisfier* — it reads each service's declared authority requirements
+and grants them from its own caps. So its authority model **is** the manifest-v2
+`Slot` design, and #6 should be built *after* manifest v2, not on the positional
+`delegated_handle(i)` contract that manifest v2 exists to kill. Everywhere below that
+says "grant a cap," read "satisfy the child's manifest `Slot`s." The mechanics in
+this doc stand; the build order moves behind manifest v2 and the differential oracle
+— see [Relationship to the rest of the design](#relationship-to-the-rest-of-the-design-and-why-6-is-downstream)
+at the end.
+
+Related: [manifest-design.md](manifest-design.md) (the `Slot` language this consumes —
+build it first), [capability-system-design.md](capability-system-design.md),
 [ipc-design.md](ipc-design.md), [notification-design.md](notification-design.md),
 [observability-design.md](observability-design.md), and the actor-model reframe in
 [userland-text-streams-and-the-actor-model-design.md](userland-text-streams-and-the-actor-model-design.md).
@@ -122,7 +134,7 @@ Pure data, host-testable, living in `kernel-core` alongside `sched::Runqueue` an
 struct ServiceSpec {
     name: &'static str,
     program: ProgramRef,          // Spawn registry id today; an FS path after #1
-    grants: &'static [Grant],     // caps the supervisor delegates each incarnation
+    needs: &'static [Slot],       // the child's manifest Slots the supervisor satisfies
     deps: &'static [ServiceId],   // must be Ready before this one starts
     readiness: Readiness,         // Spawned | SignaledReady(NotifyId)
     restart: RestartPolicy,       // Never | OnFailure | Always
@@ -135,10 +147,16 @@ enum RestartPolicy { Never, OnFailure, Always }
 struct RestartLimits { max_restarts: u32, window: Duration }  // Duration ← the clock work
 ```
 
-A `Grant` names a supervisor-owned object and the rights/handle-slot to delegate
-into the child — the bridge to redesign **#2** (typed startup ABI): today it's a
-positional `delegated_handle(i)`; after #2 it's "satisfy the child's declared
-`Endpoint fs` requirement by role."
+`needs` is **not a supervision-specific type** — it is the child's manifest `Slot`
+list (Q1: `Slot { name, object, rights, protocol, optional, constraints }`), the same
+authority-requirement language the shell's `~>` grant step, checkpoint petitions, and
+Stitch's `uses` row all consume. The supervisor is one *satisfier* among several: it
+maps each `Slot` to one of *its own* caps (minting an attenuated/badged child where
+the Slot asks for less) and hands the result to the child via the manifest-v2
+`BootInfo` page, so the child reads authority by role — `bootstrap.get::<Endpoint>("fs")`
+— never a positional `delegated_handle(i)`. This is exactly why #6 sits downstream of
+manifest v2 (see the end); pre-manifest, `needs` degrades to a positional handle
+array, which is the throwaway path.
 
 ---
 
@@ -218,9 +236,10 @@ On every `Starting` transition (first start or restart):
 
 1. Supervisor has already created the service's durable objects **once** (at tree
    construction) and holds them.
-2. `Spawn(program, handles)` where `handles` are the supervisor-table handles named
-   by the spec's `grants` — copy-semantics delegation lands them at the child's
-   `delegated_handle(0..)`.
+2. Supervisor `satisfy`s the child's `needs` (§ manifest `Slot`s) from its own caps —
+   minting attenuated/badged children where a Slot asks for less — and passes the
+   results via the `BootInfo` page (post-manifest-v2) or a positional handle array
+   (pre-manifest). Same objects each incarnation.
 3. On death + restart, step 2 re-runs against the **new** child table. Same objects,
    new incarnation. Clients holding minted caps to those objects are untouched.
 4. `rest-for-one` restarts dependents so any that cached a delegated handle to the
@@ -230,6 +249,15 @@ The old incarnation's private caps die with it (address space + table reclaimed 
 `Exit` — the v0.12 reap path). No `Revoke` needed for those; `Revoke` is for
 *proactively* reclaiming authority from a *live* misbehaving service (a policy hook,
 not part of the restart happy path).
+
+**Restart is checkpoint-restore's twin.** Steps 1–3 — re-satisfy a manifest against a
+fresh `CapTable` — are *exactly* the operation axis 6 (checkpoint) calls "restore":
+[cross-cutting-axes-brainstorm.md](cross-cutting-axes-brainstorm.md) #6 defines restore
+as "re-run the delegation decision to re-satisfy the manifest." Restart and restore
+are the same re-delegation primitive under two triggers (a crash vs an image load),
+and should share one implementation — a `satisfy(manifest, into: &mut CapTable)` that
+both call. Building supervision's re-grant as a bespoke path would fork code that
+checkpoint has to re-converge later.
 
 ---
 
@@ -284,6 +312,14 @@ authority flowing down the tree, restarts nested under the service's umbrella sp
    times out). The clock work gives the *time source*; the *blocking-with-deadline*
    syscall is missing.
 
+Both v2 primitives must land **cap-mediated, not ambient** — per the adopted
+ambient-diet policy (seven-questions Q3 #3 / coda #6: *new syscalls default
+capability-gated*). `Kill` is authorized by a **lifecycle cap** the supervisor holds
+over each child (born at `Spawn`, so a process can only kill what it launched); the
+timed wait is child-scoped by caller already, and should take a deadline argument on
+`WaitAny` rather than becoming a second ambient call. Adding these as ambient syscalls
+would reopen exactly the drift the policy was adopted to stop.
+
 So the honest split: **v1 = crash-restart** (Wait-based, one-for-one + rest-for-one,
 backoff + intensity, supervisor-owned endpoints, every transition a span) — fully
 doable now. **v2 = health checks + graceful shutdown** — gated on `Kill` + timed wait.
@@ -292,6 +328,12 @@ Don't oversell v1 as full lifecycle management.
 ---
 
 ## Where the code lives + increment plan
+
+**Prerequisites (per the sequencing above): manifest v2 (the `Slot` language +
+`BootInfo` + the shared `satisfy` primitive) and the differential-observability
+oracle (to catch silent cap-re-grant failures) land first.** The steps below are the
+supervision-internal order once those exist; on today's positional ABI they'd run but
+produce the throwaway path.
 
 Mirrors the project's kernel-core-vs-userspace split: **pure policy in `kernel-core`
 (host-tested), mechanism in a userspace engine.**
@@ -312,17 +354,45 @@ Mirrors the project's kernel-core-vs-userspace split: **pure policy in `kernel-c
 5. **v2 later** — `Kill` + timed wait, then graceful shutdown (reverse-dep teardown)
    and hung-service detection.
 
-## Interaction with #1 and #2
+## Relationship to the rest of the design (and why #6 is downstream)
 
-- Wants **#2 (typed startup ABI)**: `Grant` becomes "satisfy the child's declared
-  capability requirement by role," not a positional `delegated_handle(i)`. Cleaner,
-  but v1 works on today's positional delegation.
-- Benefits from **#1 (programs-as-files)**: `ProgramRef::File(path)` instead of a
-  `Registry(id)`, so the service table is data all the way down and adding a service
-  is not a kernel edit. v1 works on `Spawn`-by-registry-id.
+Re-read after [cross-cutting-axes-brainstorm.md](cross-cutting-axes-brainstorm.md) and
+[design-explorations-seven-questions.md](design-explorations-seven-questions.md)
+(2026-07-05): supervision is not a standalone feature but a **consumer** sitting on
+several designs, and the honest build order reflects that.
 
-Neither blocks v1. If #1/#2 are on the near roadmap, doing a slice of them first
-makes #6 land straighter; if not, #6 stands alone on today's primitives.
+- **Manifest v2 (Q1) — the blocker, build it first.** The supervisor *is* a manifest
+  satisfier; its `needs` list is the manifest `Slot` language and its re-grant is
+  `satisfy(manifest, into: table)`. Building it on the positional `delegated_handle(i)`
+  ABI now is throwaway work manifest v2 exists to delete — and manifest v2 is the
+  highest-fan-out design item (five consumers) regardless. **Do manifest v2 first;
+  supervision falls out as one satisfier.**
+- **Checkpoint (axis 6) — a shared primitive.** Restart == restore (§ Cap re-grant on
+  restart). One `satisfy` implementation serves both; don't fork it.
+- **The differential oracle (axis 3) — build it before this.** Cap re-grant is a
+  *silent-failure* operation: if a restarted service doesn't actually receive a
+  re-delegated cap, a client just hangs against a dead endpoint with no error. The
+  coda's rule is "for any feature whose wrongness is silent, build its oracle first."
+  Axis 3's snitch-on-the-snitch check should verify *the restarted service holds the
+  caps the supervisor claims it granted* — so #6 wants the Tier-2 oracle in place.
+- **Budgets (axis 5) — the general form of restart intensity.** The intensity storm
+  guard is a crude, hand-rolled budget; when axis 5 lands it should become a `Budget`
+  policy. Hazard to design against now: `MapAnon` is ambient and unmetered, so a
+  service that leaks memory *per incarnation* turns an unbounded restart loop into a
+  leak amplifier — which is why intensity is load-bearing, and a case the budget axis
+  closes properly.
+- **Replay (axis 1) — the supervisor is a nondeterminism source.** `WaitAny` return
+  order and the backoff clock reads are scheduling-/time-visible inputs (axis 2's
+  documented `WaitAny`-order carve-out). A supervisor is inherently a nondet process;
+  for replay its `WaitAny` order and clock draws are recorded-input sites, not blockers.
+- **Programs-as-files (#1) — still applies.** `ProgramRef::File(path)` instead of a
+  `Registry(id)` once #1 lands, so the service table is data all the way down and
+  adding a service is not a kernel edit.
+
+Net: the mechanics in this doc stand, but #6 is **re-filed as downstream of manifest
+v2 and the differential oracle**, not "the next standalone item." The pieces it needs
+from those designs are the `Slot` language, the shared `satisfy` primitive, and the
+restart-cap-survival oracle.
 
 ## Open questions
 
