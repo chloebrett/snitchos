@@ -38,9 +38,31 @@ impl WallClock for FakeWallClock {
     }
 }
 
+/// Which OTLP trace a `CompletedSpan` belongs to. The exporter holds one
+/// `trace_id` per kind so the kernel session trace and the capability
+/// derivation tree appear as separate Tempo traces.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum TraceKind {
+    #[default]
+    Session,
+    Capabilities,
+}
+
+/// A timestamped annotation on a `CompletedSpan` — emitted as an OTLP
+/// span event so moments (e.g. `granted`, `transferred`, `revoked`) are
+/// visible on the lifetime bar without creating separate child spans.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpanEvent {
+    pub name: String,
+    /// Nanoseconds since UNIX epoch (wall-clock anchored, same as span times).
+    pub time_ns: u128,
+    /// Key-value string pairs surfaced as OTLP event attributes.
+    pub attributes: Vec<(String, String)>,
+}
+
 /// A span completed by matching a `SpanEnd` to a remembered `SpanStart`.
 /// Carries enough info to build an OTLP span at export time.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct CompletedSpan {
     pub name: String,
     pub span_id: u64,
@@ -65,6 +87,14 @@ pub struct CompletedSpan {
     /// path surfaces it as the `host.cpu_id` OTLP attribute so Tempo
     /// can slice traces by CPU.
     pub hart_id: u8,
+    /// Which OTLP trace this span belongs to. Defaults to `Session`.
+    pub trace: TraceKind,
+    /// Extra key-value attributes appended after the standard ones (e.g.
+    /// `cap.*` fields for capability spans). Empty for session spans.
+    pub extra_attributes: Vec<(String, String)>,
+    /// Timestamped annotations on this span (e.g. `granted`/`revoked`
+    /// moments for capability lifetime bars). Empty for session spans.
+    pub events: Vec<SpanEvent>,
 }
 
 /// Wall-clock + tick anchor for the current kernel session. Set on
@@ -264,6 +294,7 @@ impl State {
                     thread_name,
                     thread_priority,
                     hart_id: open.hart_id,
+                    ..Default::default()
                 })
             }
             // Kept distinct from the `Dropped` arm despite the identical

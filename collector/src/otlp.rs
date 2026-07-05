@@ -11,7 +11,7 @@
 use prost::Message;
 
 use crate::SpanExporter;
-use crate::state::CompletedSpan;
+use crate::state::{CompletedSpan, TraceKind};
 
 // --- OTLP proto subset (prost-derived) ---------------------------------
 
@@ -78,6 +78,19 @@ struct Span {
     /// the hart the span ran on. Built by `span_attributes`.
     #[prost(message, repeated, tag = "9")]
     attributes: Vec<KeyValue>,
+    /// Timestamped annotations on this span (OTLP tag 11).
+    #[prost(message, repeated, tag = "11")]
+    events: Vec<Event>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct Event {
+    #[prost(fixed64, tag = "1")]
+    time_unix_nano: u64,
+    #[prost(string, tag = "2")]
+    name: String,
+    #[prost(message, repeated, tag = "3")]
+    attributes: Vec<KeyValue>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -112,6 +125,7 @@ pub struct Exporter {
     endpoint: String,
     agent: ureq::Agent,
     trace_id: [u8; 16],
+    cap_trace_id: [u8; 16],
 }
 
 impl Exporter {
@@ -120,13 +134,14 @@ impl Exporter {
             endpoint: crate::url::ensure_suffix(endpoint, "/v1/traces"),
             agent: ureq::AgentBuilder::new().build(),
             trace_id: session_trace_id(),
+            cap_trace_id: session_trace_id(),
         }
     }
 
     /// Build an OTLP request containing one span and POST it.
     #[cfg_attr(test, mutants::skip)] // makes real HTTP calls — not unit-testable without a mock server
     fn export(&self, span: &CompletedSpan) {
-        let proto_span = build_proto_span(span, &self.trace_id);
+        let proto_span = build_proto_span(span, &self.trace_id, &self.cap_trace_id);
 
         let req = ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
@@ -205,9 +220,43 @@ fn session_trace_id() -> [u8; 16] {
         .to_le_bytes()
 }
 
-/// Build an OTLP `Span` proto from a `CompletedSpan` and a `trace_id`.
-/// Pure — no I/O — so it is fully host-testable without a mock server.
-fn build_proto_span(span: &CompletedSpan, trace_id: &[u8; 16]) -> Span {
+/// Build an OTLP `Span` proto from a `CompletedSpan`. Selects `session_trace_id`
+/// or `cap_trace_id` based on `span.trace`. Pure — no I/O.
+fn build_proto_span(
+    span: &CompletedSpan,
+    session_trace_id: &[u8; 16],
+    cap_trace_id: &[u8; 16],
+) -> Span {
+    let trace_id = match span.trace {
+        TraceKind::Session => session_trace_id,
+        TraceKind::Capabilities => cap_trace_id,
+    };
+    let mut attributes = span_attributes(span);
+    for (key, value) in &span.extra_attributes {
+        attributes.push(KeyValue {
+            key: key.clone(),
+            value: Some(AnyValue { string_value: value.clone() }),
+        });
+    }
+    let events = span
+        .events
+        .iter()
+        .map(|ev| {
+            let ev_attributes = ev
+                .attributes
+                .iter()
+                .map(|(k, v)| KeyValue {
+                    key: k.clone(),
+                    value: Some(AnyValue { string_value: v.clone() }),
+                })
+                .collect();
+            Event {
+                time_unix_nano: clamp_u128_to_u64(ev.time_ns),
+                name: ev.name.clone(),
+                attributes: ev_attributes,
+            }
+        })
+        .collect();
     Span {
         trace_id: trace_id.to_vec(),
         span_id: span.span_id.to_be_bytes().to_vec(),
@@ -221,7 +270,8 @@ fn build_proto_span(span: &CompletedSpan, trace_id: &[u8; 16]) -> Span {
         kind: 1, // INTERNAL
         start_time_unix_nano: clamp_u128_to_u64(span.start_time_ns),
         end_time_unix_nano: clamp_u128_to_u64(span.end_time_ns),
-        attributes: span_attributes(span),
+        attributes,
+        events,
     }
 }
 
@@ -283,6 +333,7 @@ fn priority_label(level: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{SpanEvent, TraceKind};
 
     #[test]
     fn clamp_passes_through_values_within_range() {
@@ -314,6 +365,7 @@ mod tests {
             thread_name: thread_name.map(str::to_string),
             thread_priority: None,
             hart_id,
+            ..Default::default()
         }
     }
 
@@ -350,6 +402,53 @@ mod tests {
     }
 
     #[test]
+    fn build_proto_span_selects_cap_trace_id_for_cap_span() {
+        let session_id = [1u8; 16];
+        let cap_id = [2u8; 16];
+        let span = CompletedSpan {
+            trace: TraceKind::Capabilities,
+            name: "fs".to_string(),
+            span_id: 1,
+            parent_span_id: 0,
+            start_time_ns: 0,
+            end_time_ns: 100,
+            task_id: 0,
+            thread_name: None,
+            thread_priority: None,
+            hart_id: 0,
+            extra_attributes: vec![("cap.holder".to_string(), "7".to_string())],
+            events: vec![
+                SpanEvent {
+                    name: "granted".to_string(),
+                    time_ns: 10,
+                    attributes: vec![("holder".to_string(), "3".to_string())],
+                },
+                SpanEvent { name: "revoked".to_string(), time_ns: 90, attributes: vec![] },
+            ],
+        };
+        let proto = build_proto_span(&span, &session_id, &cap_id);
+        assert_eq!(proto.trace_id, cap_id.to_vec());
+        assert_eq!(attr(&proto.attributes, "cap.holder"), Some("7"));
+        assert_eq!(proto.events.len(), 2);
+        assert_eq!(proto.events[0].name, "granted");
+        assert_eq!(proto.events[0].time_unix_nano, 10);
+        assert_eq!(attr(&proto.events[0].attributes, "holder"), Some("3"));
+        assert_eq!(proto.events[1].name, "revoked");
+        assert!(proto.events[1].attributes.is_empty());
+    }
+
+    #[test]
+    fn build_proto_span_uses_session_trace_id_for_session_span() {
+        let session_id = [1u8; 16];
+        let cap_id = [2u8; 16];
+        let span = completed(0, None, 0);
+        let proto = build_proto_span(&span, &session_id, &cap_id);
+        assert_eq!(proto.trace_id, session_id.to_vec());
+        assert!(proto.events.is_empty());
+        assert_eq!(attr(&proto.attributes, "cap.holder"), None);
+    }
+
+    #[test]
     fn build_proto_span_maps_fields_onto_proto() {
         let span = CompletedSpan {
             name: "kernel.boot".to_string(),
@@ -358,13 +457,12 @@ mod tests {
             start_time_ns: 1_000_000,
             end_time_ns: 2_000_000,
             task_id: 1,
-            thread_name: None,
-            thread_priority: None,
-            hart_id: 0,
+            ..Default::default()
         };
-        let trace_id: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let proto = build_proto_span(&span, &trace_id);
-        assert_eq!(proto.trace_id, trace_id.to_vec());
+        let session_id: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let cap_id = [0u8; 16];
+        let proto = build_proto_span(&span, &session_id, &cap_id);
+        assert_eq!(proto.trace_id, session_id.to_vec());
         assert_eq!(proto.span_id, 42u64.to_be_bytes().to_vec());
         assert_eq!(proto.parent_span_id, 7u64.to_be_bytes().to_vec());
         assert_eq!(proto.name, "kernel.boot");
@@ -375,8 +473,7 @@ mod tests {
     #[test]
     fn build_proto_span_uses_empty_bytes_for_root_span() {
         let span = completed(0, None, 0); // parent_span_id == 0
-        let trace_id = [0u8; 16];
-        let proto = build_proto_span(&span, &trace_id);
+        let proto = build_proto_span(&span, &[0u8; 16], &[0u8; 16]);
         assert_eq!(proto.parent_span_id, Vec::<u8>::new());
     }
 
