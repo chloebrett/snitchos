@@ -137,6 +137,14 @@ cargo xtask loc                # lines of code by crate + production/test split
 cargo xtask --help
 ```
 
+> **snemu runs optimized by default.** xtask runs the snemu interpreter
+> in-process, and `[profile.dev.package.snemu] opt-level = 3` (root `Cargo.toml`)
+> keeps just that crate optimized even under the default dev build — so
+> `snemu-boot` / `snemu-diff` / `snemu-fork` are ~20x faster without recompiling
+> the rest of xtask in release. snemu is deterministic (instruction-count clock),
+> so this changes only speed, never the guest's execution or telemetry. To debug
+> snemu itself, set that `opt-level = 0` temporarily.
+
 ## Tests
 
 Two layers, two commands.
