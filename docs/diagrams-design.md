@@ -62,7 +62,9 @@ the last-reviewed date so staleness is visible:
 
 **Shipped (bucket A):** `docs/memory-map.md` (the four address spaces),
 `docs/context-switch.md` (`yield_now` + `SpanCursor`), `docs/boot-handoff.md`
-(trampoline + the `println!` cliff). Registered in `diagram_cmd::HAND_DRAWN`.
+(trampoline + the `println!` cliff), `docs/ipc-call-reply.md` (the synchronous
+rendezvous + one-shot reply cap), `docs/stitch-pipeline.md` (lexer → Pratt
+parser → tree-walk → effect seam). Registered in `diagram_cmd::HAND_DRAWN`.
 
 **Local SVGs — `cargo xtask diagram svg`.** Hand-drawn diagrams are mermaid
 (flowchart/sequence), which graphviz can't render — so `svg` shells out to
