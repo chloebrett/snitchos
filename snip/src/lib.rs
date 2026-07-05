@@ -350,14 +350,21 @@ concurrent change is the useful signal, not a failure.\n\n",
     out.push_str("CANDIDATE FILES (");
     out.push_str(&candidates.len().to_string());
     out.push_str("):\n\n");
+    // Bound the payload: every file is always named (so the model knows it
+    // exists), but diff bodies draw from a shared global line budget and a
+    // per-file cap, so no single file — nor the whole set — can blow up the
+    // prompt. Over-budget bodies are elided with a truncation marker.
+    let mut budget = GLOBAL_LINE_BUDGET;
     for c in candidates {
         out.push_str("### ");
         out.push_str(&c.path);
         out.push_str("  [");
         out.push_str(c.status.label());
         out.push_str("]\n");
-        push_candidate_body(&mut out, c);
-        out.push('\n');
+        let body = cap_diff(&candidate_body(c), PER_FILE_LINE_CAP.min(budget));
+        budget = budget.saturating_sub(body.lines().count());
+        out.push_str(&body);
+        out.push_str("\n\n");
     }
 
     out.push_str(
@@ -380,38 +387,183 @@ that does belong.\n",
     out
 }
 
-const PER_HUNK_DISPLAY_CAP: usize = 200;
+/// A coarse pass-1 partition of the candidates, decided from paths + change
+/// sizes alone (no diff bodies). `needs_diff` files get a full-diff pass 2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Triage {
+    pub settled_include: Vec<String>,
+    pub settled_exclude: Vec<String>,
+    pub needs_diff: Vec<String>,
+}
 
-/// Render one candidate's body into the prompt: labelled hunks when the diff has
-/// them, else the raw (capped) diff/content for untracked or binary files.
-fn push_candidate_body(out: &mut String, c: &Candidate) {
-    if c.diff.trim().is_empty() {
-        out.push_str("(no diff shown)\n");
-        return;
+#[derive(Deserialize, Default)]
+struct WireTriage {
+    #[serde(default)]
+    settled_include: Vec<String>,
+    #[serde(default)]
+    settled_exclude: Vec<String>,
+    #[serde(default)]
+    needs_diff: Vec<String>,
+}
+
+/// Count added / removed lines in a unified diff (ignoring the `+++`/`---`
+/// file headers), for the pass-1 change-size hint.
+fn diff_line_counts(diff: &str) -> (usize, usize) {
+    let mut added = 0;
+    let mut removed = 0;
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        match line.as_bytes().first() {
+            Some(b'+') => added += 1,
+            Some(b'-') => removed += 1,
+            _ => {}
+        }
     }
+    (added, removed)
+}
 
+/// Build the lean pass-1 prompt: paths, statuses, and change sizes only — no
+/// diff bodies — asking the model to bucket every file into settled-in,
+/// settled-out, or needs-a-closer-look.
+pub fn build_triage_prompt(message: &str, candidates: &[Candidate]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "You are triaging a git working tree that contains SEVERAL UNRELATED changes \
+made concurrently by parallel agents. Given ONE commit message, bucket every \
+candidate file WITHOUT yet seeing its diff, using only its path and change size:\n\
+- settled_include: you are confident the WHOLE file belongs to this commit.\n\
+- settled_exclude: you are confident it belongs to a DIFFERENT change.\n\
+- needs_diff: you cannot tell from the path, OR the file might mix changes from \
+several concerns (so it may need partial staging). When unsure, choose needs_diff.\n\
+EVERY candidate must appear in exactly one list.\n\n",
+    );
+    out.push_str("COMMIT MESSAGE:\n");
+    out.push_str(message);
+    out.push_str("\n\nCANDIDATE FILES:\n");
+    for c in candidates {
+        let (added, removed) = diff_line_counts(&c.diff);
+        out.push_str("- ");
+        out.push_str(&c.path);
+        out.push_str("  [");
+        out.push_str(c.status.label());
+        out.push_str(", +");
+        out.push_str(&added.to_string());
+        out.push_str(" -");
+        out.push_str(&removed.to_string());
+        out.push_str("]\n");
+    }
+    out.push_str(
+        "\nRespond with ONLY this JSON — no prose:\n\
+{\"settled_include\":[\"path\",...],\"settled_exclude\":[\"path\",...],\"needs_diff\":[\"path\",...]}\n\
+Every path MUST be one of the candidates above.\n",
+    );
+    out
+}
+
+/// Parse the pass-1 reply into a [`Triage`]. Unknown paths are dropped; any
+/// candidate the model failed to bucket is escalated to `needs_diff` (a closer
+/// look is the safe default for anything unaccounted for).
+pub fn parse_triage(raw_json: &str, candidates: &[Candidate]) -> Triage {
+    let wire: WireTriage = extract_json_object(raw_json)
+        .and_then(|j| serde_json::from_str(j).ok())
+        .unwrap_or_default();
+
+    let known = |p: &String| candidates.iter().any(|c| &c.path == p);
+    let keep = |v: Vec<String>| v.into_iter().filter(&known).collect::<Vec<_>>();
+    let settled_include = keep(wire.settled_include);
+    let settled_exclude = keep(wire.settled_exclude);
+    let mut needs_diff = keep(wire.needs_diff);
+
+    let unbucketed: Vec<String> = candidates
+        .iter()
+        .filter(|c| {
+            !settled_include.iter().any(|x| x == &c.path)
+                && !settled_exclude.iter().any(|x| x == &c.path)
+                && !needs_diff.iter().any(|x| x == &c.path)
+        })
+        .map(|c| c.path.clone())
+        .collect();
+    needs_diff.extend(unbucketed);
+
+    Triage { settled_include, settled_exclude, needs_diff }
+}
+
+/// Combine a pass-1 [`Triage`] with the optional pass-2 [`Selection`] over its
+/// `needs_diff` files into one final [`Selection`]. Settled files become
+/// High-confidence whole-file decisions; pass-2 files carry their own verdicts
+/// (including any partial-hunk selection) and set the overall confidence.
+pub fn merge_triage(triage: Triage, pass2: Option<Selection>) -> Selection {
+    let mut include: Vec<Included> = triage
+        .settled_include
+        .into_iter()
+        .map(|path| Included {
+            path,
+            reason: "clearly in scope from its path".to_string(),
+            confidence: Confidence::High,
+            hunks: None,
+        })
+        .collect();
+    let mut exclude: Vec<Excluded> = triage
+        .settled_exclude
+        .into_iter()
+        .map(|path| Excluded {
+            path,
+            reason: "clearly a different change from its path".to_string(),
+            confidence: Confidence::High,
+            omitted: false,
+        })
+        .collect();
+
+    let (overall, note) = match pass2 {
+        Some(p) => {
+            include.extend(p.include);
+            exclude.extend(p.exclude);
+            (p.overall, p.note)
+        }
+        None => (Confidence::High, None),
+    };
+
+    Selection { include, exclude, overall, note }
+}
+
+/// Max diff lines shown for any one file. The whole prompt's diff bodies share
+/// [`GLOBAL_LINE_BUDGET`]; whichever bites first wins.
+const PER_FILE_LINE_CAP: usize = 300;
+/// Total diff lines across all files' bodies in one prompt.
+const GLOBAL_LINE_BUDGET: usize = 2000;
+
+/// Render one candidate's uncapped body: labelled hunks when the diff has them,
+/// else the raw diff/content for untracked or binary files. Capping is applied
+/// by the caller against the shared budget.
+fn candidate_body(c: &Candidate) -> String {
+    if c.diff.trim().is_empty() {
+        return "(no diff shown)".to_string();
+    }
     let parsed = parse_hunks(&c.diff);
     if parsed.hunks.is_empty() {
-        out.push_str("```\n");
-        out.push_str(&cap_diff(&c.diff, PER_HUNK_DISPLAY_CAP));
-        out.push_str("\n```\n");
-        return;
+        return format!("```\n{}\n```", c.diff.trim_end());
     }
-
+    let mut out = String::new();
     for h in &parsed.hunks {
         out.push('[');
         out.push_str(&h.id);
         out.push_str("]\n```\n");
-        out.push_str(&cap_diff(&h.text, PER_HUNK_DISPLAY_CAP));
+        out.push_str(h.text.trim_end());
         out.push_str("\n```\n");
     }
+    out
 }
 
 /// Token usage reported by the model for one `pick` (summed across retries).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
+    /// Total input tokens (uncached + cache-read + cache-creation).
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// The portion of `input_tokens` that was served from cache (a subset).
+    pub cache_read_tokens: u64,
 }
 
 impl Usage {
@@ -426,6 +578,7 @@ impl std::ops::Add for Usage {
         Usage {
             input_tokens: self.input_tokens + other.input_tokens,
             output_tokens: self.output_tokens + other.output_tokens,
+            cache_read_tokens: self.cache_read_tokens + other.cache_read_tokens,
         }
     }
 }
@@ -464,6 +617,7 @@ pub fn extract_usage(envelope_json: &str) -> Usage {
     Usage {
         input_tokens: u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
         output_tokens: u.output_tokens,
+        cache_read_tokens: u.cache_read_input_tokens,
     }
 }
 
@@ -664,7 +818,17 @@ pub fn pick(
     cfg: &ClaudeCfg,
 ) -> Result<(Selection, Usage), PickError> {
     let prompt = build_prompt(message, candidates);
-    let (text, usage) = run_claude(&prompt, cfg)?;
+    run_and_parse(&prompt, candidates, cfg)
+}
+
+/// Run a full-diff prompt and parse the reply into a [`Selection`], retrying
+/// once with a terser nudge if the first reply doesn't parse.
+fn run_and_parse(
+    prompt: &str,
+    candidates: &[Candidate],
+    cfg: &ClaudeCfg,
+) -> Result<(Selection, Usage), PickError> {
+    let (text, usage) = run_claude(prompt, cfg)?;
     if let Ok(sel) = parse_reply(&text, candidates) {
         return Ok((sel, usage));
     }
@@ -676,4 +840,33 @@ Reply with ONLY the raw JSON object, nothing else."
     let (text, retry_usage) = run_claude(&retry, cfg)?;
     let sel = parse_reply(&text, candidates).map_err(PickError::Parse)?;
     Ok((sel, usage + retry_usage))
+}
+
+/// Two-pass triage: a lean pass-1 call (paths + change sizes, no diff bodies)
+/// buckets the files; only the `needs_diff` subset gets a full-diff pass-2 call.
+/// When pass 1 settles everything, one cheap call decides the whole tree.
+///
+/// If the pass-1 reply is unparseable, [`parse_triage`] escalates everything to
+/// `needs_diff`, degrading gracefully to a single full-diff pass.
+pub fn pick_two_pass(
+    message: &str,
+    candidates: &[Candidate],
+    cfg: &ClaudeCfg,
+) -> Result<(Selection, Usage), PickError> {
+    let triage_prompt = build_triage_prompt(message, candidates);
+    let (text, usage) = run_claude(&triage_prompt, cfg)?;
+    let triage = parse_triage(&text, candidates);
+
+    if triage.needs_diff.is_empty() {
+        return Ok((merge_triage(triage, None), usage));
+    }
+
+    let subset: Vec<Candidate> = candidates
+        .iter()
+        .filter(|c| triage.needs_diff.iter().any(|p| p == &c.path))
+        .cloned()
+        .collect();
+    let subset_prompt = build_prompt(message, &subset);
+    let (pass2, pass2_usage) = run_and_parse(&subset_prompt, &subset, cfg)?;
+    Ok((merge_triage(triage, Some(pass2)), usage + pass2_usage))
 }

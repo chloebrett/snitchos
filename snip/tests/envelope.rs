@@ -16,10 +16,11 @@ fn missing_usage_is_zero() {
 }
 
 #[test]
-fn counts_cache_tokens_as_input() {
+fn counts_cache_tokens_as_input_but_tracks_the_cached_portion() {
     let env = r#"{"usage":{"input_tokens":10,"cache_read_input_tokens":900,"cache_creation_input_tokens":100,"output_tokens":5}}"#;
     let u = extract_usage(env);
     assert_eq!(u.input_tokens, 1010, "cache read + creation count as input");
+    assert_eq!(u.cache_read_tokens, 900, "the cache-read portion is tracked separately");
     assert_eq!(u.output_tokens, 5);
 }
 

@@ -303,9 +303,17 @@ enum Cmd {
         /// Which diagram to generate.
         target: DiagramTarget,
         /// Verify the committed diagram is up to date instead of rewriting it;
-        /// exit non-zero on drift. For the generated-diagram gate.
+        /// exit non-zero on drift. For the generated-diagram gate. Not
+        /// applicable to `caps` (a runtime snapshot, not a contract).
         #[arg(long, default_value_t = false)]
         check: bool,
+        /// (`caps` only) Runtime workload to boot under snemu for the capture;
+        /// omit for the default `init` boot.
+        #[arg(long)]
+        workload: Option<String>,
+        /// (`caps` only) snemu instruction-step budget for the capture boot.
+        #[arg(long, default_value_t = 150_000_000)]
+        steps: u64,
     },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
@@ -378,6 +386,12 @@ enum Cmd {
         /// (By default a fully-high-confidence proposal is staged automatically.)
         #[arg(long, default_value_t = false)]
         no_auto: bool,
+        /// Opt into two-pass lean-first triage (paths-only pass, then full diffs
+        /// only for undecided files). Rarely cheaper: `claude -p` has a ~57k-token
+        /// fixed baseline per call, so the extra call usually outweighs the diffs
+        /// it skips. Only worth it for a huge diff payload. Default: single pass.
+        #[arg(long, default_value_t = false)]
+        lean: bool,
         /// `git add` the files from the last proposal.
         #[arg(long, default_value_t = false)]
         stage: bool,
@@ -439,6 +453,8 @@ enum DiagramTarget {
     Deps,
     /// Integration-test scenario/workload matrix, from the `SCENARIOS` registry.
     ItestMatrix,
+    /// Capability derivation tree, folded from a snemu boot's `CapEvent` frames.
+    Caps,
 }
 
 /// Scenario classification filter for `cargo xtask itest --profile`.
@@ -643,22 +659,29 @@ fn main() -> ExitCode {
             })
         }
         Cmd::Baseline { cmd } => baseline(cmd),
-        Cmd::Diagram { target, check } => match target {
+        Cmd::Diagram { target, check, workload, steps } => match target {
             DiagramTarget::Deps => diagram_cmd::deps(check),
             DiagramTarget::ItestMatrix => diagram_cmd::itest_matrix(check),
+            DiagramTarget::Caps if check => {
+                eprintln!(
+                    "diagram caps: a runtime snapshot, not a contract — --check does not apply"
+                );
+                ExitCode::from(2)
+            }
+            DiagramTarget::Caps => diagram_cmd::caps(workload.as_deref(), steps),
         },
         Cmd::Loc => loc::run(),
         Cmd::Audit { crate_name, json, include_short } => {
             audit::run(&crate_name, json, include_short)
         }
         Cmd::Debug { features } => debug(&features),
-        Cmd::Snip { message, fast, yes, no_auto, stage, commit, force, no_verify } => {
+        Cmd::Snip { message, fast, yes, no_auto, lean, stage, commit, force, no_verify } => {
             if commit {
                 snip::commit(no_verify)
             } else if stage {
                 snip::stage(force)
             } else if let Some(message) = message {
-                snip::propose(&message, &snip::ProposeOpts { fast, yes, no_auto, force })
+                snip::propose(&message, &snip::ProposeOpts { fast, yes, no_auto, force, lean })
             } else {
                 eprintln!(
                     "snip: provide a commit message to propose, or --stage / --commit to finalize"

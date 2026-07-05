@@ -10,6 +10,7 @@ use std::process::{Command, ExitCode, Stdio};
 /// Committed artifacts, relative to the workspace root.
 const DEPS_DOC: &str = "docs/generated/deps.md";
 const ITEST_MATRIX_DOC: &str = "docs/generated/itest-matrix.md";
+const CAPS_DOC: &str = "docs/generated/caps.md";
 
 /// Verify every committed diagram in `docs/generated/` is up to date. Called
 /// from the `cargo xtask test` gate so a stale diagram fails the suite. Runs
@@ -49,6 +50,47 @@ pub fn itest_matrix(check: bool) -> ExitCode {
     } else {
         write_doc(&path, &doc)
     }
+}
+
+/// Generate the capability derivation tree: boot under snemu, fold its
+/// `CapEvent` frames into a `parent_cap_id → cap_id` graph. A runtime snapshot,
+/// not a contract — so it's written (never `--check`ed) and left out of the
+/// `docs/generated/` gate.
+pub fn caps(workload: Option<&str>, steps: u64) -> ExitCode {
+    eprintln!(
+        "diagram caps: booting {} under snemu ({steps} steps)…",
+        workload.unwrap_or("init (default)")
+    );
+    let frames = match crate::snemu_diff::collect_frames(workload, steps) {
+        Ok(frames) => frames,
+        Err(err) => {
+            eprintln!("diagram caps: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let cap_events =
+        frames.iter().filter(|f| matches!(f, protocol::stream::OwnedFrame::CapEvent { .. })).count();
+    if cap_events == 0 {
+        eprintln!(
+            "diagram caps: no CapEvent frames in {} decoded — the boot may not have \
+             reached userspace; try a larger --steps",
+            frames.len()
+        );
+        return ExitCode::from(1);
+    }
+
+    let graph = diagram::caps::derivation_tree(&frames);
+    let body = format!("```mermaid\n{}```\n", graph.to_mermaid());
+    let doc = render_doc("Capability derivation tree", "caps", &body);
+
+    let path = workspace_root().join(CAPS_DOC);
+    let written = write_doc(&path, &doc);
+    if written != ExitCode::SUCCESS {
+        return written;
+    }
+    eprintln!("diagram caps: folded {cap_events} CapEvent frames");
+    render_svg(&graph.to_dot(), &path.with_extension("svg"));
+    ExitCode::SUCCESS
 }
 
 /// Generate (or, with `check`, verify) the workspace crate-dependency graph.

@@ -411,6 +411,23 @@ fn compare(
     })
 }
 
+/// Boot the kernel under snemu (optionally selecting `workload`) and return the
+/// decoded telemetry frames. The snemu half of the oracle, reused by
+/// `diagram caps` to source `CapEvent` frames without the QEMU side.
+pub(crate) fn collect_frames(
+    workload: Option<&str>,
+    max_steps: u64,
+) -> Result<Vec<OwnedFrame>, String> {
+    let (kernel, dtb_base) = prepare(workload.is_some())?;
+    let dtb = match workload {
+        Some(w) => snemu::dtb::set_bootargs(&dtb_base, &format!("workload={w}"))
+            .ok_or("DTB patch failed")?,
+        None => dtb_base,
+    };
+    let (frames, _stop, _timing) = collect_snemu(&kernel, &dtb, max_steps)?;
+    Ok(frames)
+}
+
 /// Build the kernel and read the base DTB the emulators share.
 fn prepare(with_workloads: bool) -> Result<(Vec<u8>, Vec<u8>), String> {
     let features: &[&str] = if with_workloads { &["itest-workloads"] } else { &[] };

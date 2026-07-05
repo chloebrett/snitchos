@@ -15,10 +15,15 @@ use std::process::{Command, ExitCode};
 use serde::{Deserialize, Serialize};
 use snip::{
     Candidate, ClaudeCfg, Confidence, Selection, Status, Usage, build_patch, fingerprint,
-    parse_hunks, parse_status, pick,
+    parse_hunks, parse_status, pick, pick_two_pass,
 };
 
 const PLAN_PATH: &str = ".git/snip-plan.json";
+
+/// Context lines each side of a hunk when diffing. Fewer = smaller prompt.
+/// MUST be identical in `gather` (what the model labels) and `stage_partial`
+/// (what we reconstruct), or hunk boundaries — and thus the H-ids — diverge.
+const DIFF_CONTEXT: &str = "-U1";
 
 /// A file to stage only in part: named hunks of its diff, applied via
 /// `git apply --cached`.
@@ -51,6 +56,12 @@ pub struct ProposeOpts {
     pub no_auto: bool,
     /// Proceed despite drift / low confidence when staging.
     pub force: bool,
+    /// Opt into the two-pass lean-first triage (a cheap paths-only pass, then
+    /// full diffs only for undecided files). Rarely a token win: `claude -p`
+    /// carries a ~57k-token fixed baseline PER call, so a second call usually
+    /// costs more than the diffs it avoids sending. Worth it only when the diff
+    /// payload is genuinely huge. Default is a single full-diff pass.
+    pub lean: bool,
 }
 
 pub fn propose(message: &str, opts: &ProposeOpts) -> ExitCode {
@@ -81,12 +92,19 @@ fn timed(verb: &str, f: impl FnOnce() -> (ExitCode, Option<Usage>)) -> ExitCode 
     let (code, usage) = f();
     let secs = start.elapsed().as_secs_f64();
     match usage {
-        Some(u) if u.total() > 0 => eprintln!(
-            "(snip {verb} took {secs:.1}s · {} tokens: {} in / {} out)",
-            u.total(),
-            u.input_tokens,
-            u.output_tokens
-        ),
+        Some(u) if u.total() > 0 => {
+            let cached = if u.cache_read_tokens > 0 {
+                format!(" ({} cached)", u.cache_read_tokens)
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "(snip {verb} took {secs:.1}s · {} tokens: {} in{cached} / {} out)",
+                u.total(),
+                u.input_tokens,
+                u.output_tokens
+            );
+        }
         _ => eprintln!("(snip {verb} took {secs:.1}s)"),
     }
     code
@@ -99,12 +117,15 @@ fn run_propose(message: &str, opts: &ProposeOpts) -> Result<(ExitCode, Usage), S
         return Ok((ExitCode::SUCCESS, Usage::default()));
     }
 
+    let strategy = if opts.lean { "lean-first" } else { "full-diff" };
     println!(
-        "→ asking claude (sonnet) to triage {} changed file(s)…",
+        "→ asking claude (sonnet, {strategy}) to triage {} changed file(s)…",
         candidates.len()
     );
-    let (selection, usage) = pick(message, &candidates, &ClaudeCfg::default())
-        .map_err(|e| format!("claude query failed: {e}"))?;
+    let cfg = ClaudeCfg::default();
+    let picker = if opts.lean { pick_two_pass } else { pick };
+    let (selection, usage) =
+        picker(message, &candidates, &cfg).map_err(|e| format!("claude query failed: {e}"))?;
 
     print_selection(&selection);
 
@@ -181,7 +202,7 @@ fn run_stage(force: bool) -> Result<(), String> {
 /// than trusting a stored patch) means the drift guard already proved the hunk
 /// ids still line up with the live diff.
 fn stage_partial(p: &Partial) -> Result<(), String> {
-    let diff = git_stdout(&["diff", "HEAD", "--", &p.path])?;
+    let diff = git_stdout(&["diff", DIFF_CONTEXT, "HEAD", "--", &p.path])?;
     let file = parse_hunks(&diff);
     let patch = build_patch(&file, &p.hunks).ok_or_else(|| {
         format!("none of the planned hunks for {} exist in its current diff", p.path)
@@ -228,7 +249,7 @@ fn candidate_diff(path: &str, status: Status) -> Result<String, String> {
         // Untracked files have no HEAD blob to diff against — show their content.
         Status::Untracked => Ok(fs::read_to_string(path).unwrap_or_else(|_| "(binary or unreadable)".to_string())),
         // Everything else: the combined staged+unstaged diff against HEAD.
-        _ => git_stdout(&["diff", "HEAD", "--", path]),
+        _ => git_stdout(&["diff", DIFF_CONTEXT, "HEAD", "--", path]),
     }
 }
 
