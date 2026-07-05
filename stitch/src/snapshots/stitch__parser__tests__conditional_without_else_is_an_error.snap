@@ -4,6 +4,10 @@ expression: "parse(\"x => a\")"
 ---
 Err(
     ParseError {
-        message: "expected '|' in conditional, found Eof",
+        message: "expected '|' in conditional",
+        span: Span {
+            start: 6,
+            end: 6,
+        },
     },
 )

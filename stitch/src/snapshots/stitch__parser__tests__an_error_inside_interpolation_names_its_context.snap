@@ -5,5 +5,9 @@ expression: "parse(r#\"\"value is {1 +}\"\"#)"
 Err(
     ParseError {
         message: "in string interpolation `{1 +}`: unexpected token: Eof",
+        span: Span {
+            start: 0,
+            end: 0,
+        },
     },
 )

@@ -4,6 +4,10 @@ expression: "parse(\"1 2\")"
 ---
 Err(
     ParseError {
-        message: "expected end of input, found Int(2)",
+        message: "expected end of input",
+        span: Span {
+            start: 2,
+            end: 3,
+        },
     },
 )

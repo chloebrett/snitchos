@@ -48,7 +48,7 @@ pub enum StrPart {
 }
 
 /// A byte range `[start, end)` into the source — for diagnostics.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub struct Span {
     pub start: usize,
     pub end: usize,

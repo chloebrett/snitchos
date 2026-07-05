@@ -5,5 +5,9 @@ expression: "parse(\"1 +\")"
 Err(
     ParseError {
         message: "unexpected token: Eof",
+        span: Span {
+            start: 0,
+            end: 0,
+        },
     },
 )

@@ -5,5 +5,9 @@ expression: "parse(r#\"match { x > 0 => \"pos\" }\"#)"
 Err(
     ParseError {
         message: "a subjectless `match` must end in a `_ => …` catch-all",
+        span: Span {
+            start: 0,
+            end: 0,
+        },
     },
 )

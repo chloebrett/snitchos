@@ -4,6 +4,10 @@ expression: "parse(\"(1\")"
 ---
 Err(
     ParseError {
-        message: "expected ')', found Eof",
+        message: "expected ')'",
+        span: Span {
+            start: 2,
+            end: 2,
+        },
     },
 )

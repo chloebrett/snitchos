@@ -12,20 +12,39 @@ use crate::ast::{
     Arg, BinOp, Expr, Field, Item, MatchArm, Method, MethodModifier, Param, Pattern, Stmt,
     StrSegment, Type, UnOp, Variant,
 };
-use crate::lexer::{StrPart, Token, TokenKind, lex};
+use crate::lexer::{Span, StrPart, Token, TokenKind, lex};
 
-/// A parse error. Carries a human-readable message; source positions are a
-/// later increment (the lexer doesn't track spans yet).
+/// A parse error: a human-readable message plus the source [`Span`] it points
+/// at (defaulted to the start of input for errors not yet span-attributed).
 #[derive(Debug, PartialEq)]
 pub struct ParseError {
     pub message: String,
+    pub span: Span,
 }
 
 impl ParseError {
     fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
+        Self { message: message.into(), span: Span::default() }
+    }
+
+    /// A parse error anchored at `span`.
+    fn at(message: impl Into<String>, span: Span) -> Self {
+        Self { message: message.into(), span }
+    }
+
+    /// Render as `line:col: message`, followed by the offending source line and
+    /// a caret under the span's start. Line and (character-counted) column are
+    /// 1-based.
+    #[must_use]
+    pub fn render(&self, src: &str) -> String {
+        let offset = self.span.start.min(src.len());
+        let before = &src[..offset];
+        let line = before.matches('\n').count() + 1;
+        let line_start = before.rfind('\n').map_or(0, |nl| nl + 1);
+        let col = src[line_start..offset].chars().count() + 1;
+        let line_text = src[line_start..].lines().next().unwrap_or("");
+        let caret = " ".repeat(col - 1);
+        format!("{line}:{col}: {}\n{line_text}\n{caret}^", self.message)
     }
 }
 
@@ -593,19 +612,21 @@ impl Parser {
     /// Consume the next token, requiring it to equal `want`, or panic with
     /// context. (The single seam where parse errors will become `Result`.)
     fn expect(&mut self, want: &TokenKind, what: &str) -> Result<(), ParseError> {
+        let span = self.tokens[self.pos].span;
         let got = self.bump();
         if got == want {
             Ok(())
         } else {
-            Err(ParseError::new(format!("expected {what}, found {got:?}")))
+            Err(ParseError::at(format!("expected {what}"), span))
         }
     }
 
     /// Consume an identifier token, returning its name.
     fn expect_ident(&mut self, what: &str) -> Result<String, ParseError> {
+        let span = self.tokens[self.pos].span;
         match self.bump().clone() {
             TokenKind::Ident(name) => Ok(name),
-            other => Err(ParseError::new(format!("expected {what}, found {other:?}"))),
+            _ => Err(ParseError::at(format!("expected {what}"), span)),
         }
     }
 
@@ -1381,6 +1402,21 @@ mod tests {
     /// Parse a program (declarations), unwrapping.
     fn prog(src: &str) -> Vec<Item> {
         parse_program(src).expect("test program should parse")
+    }
+
+    #[test]
+    fn a_parse_error_renders_line_col_and_a_caret() {
+        // The stray `2` starts at byte 2 → line 1, column 3.
+        let err = parse("1 2").expect_err("a trailing token is a parse error");
+        assert_eq!(err.render("1 2"), "1:3: expected end of input\n1 2\n  ^");
+    }
+
+    #[test]
+    fn a_parse_error_on_a_later_line_renders_that_lines_number() {
+        // The stray `2` is the first char of line 2 → 2:1, and the rendered
+        // source line is line 2 alone. Exercises the preceding-newline path.
+        let err = parse("1\n2 3").expect_err("a trailing token is a parse error");
+        assert_eq!(err.render("1\n2 3"), "2:1: expected end of input\n2 3\n^");
     }
 
     #[test]
