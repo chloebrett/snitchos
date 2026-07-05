@@ -81,9 +81,9 @@ everywhere the object is, including down the delegation chain and on the wire.
 
 ### Bounded, opaque, non-resolving
 
-- **Bounded**: a fixed max length (proposed **24 bytes**, UTF-8; Zircon uses 32).
+- **Bounded**: a fixed max length of **24 bytes**, UTF-8 (decided; Zircon uses 32).
   Fits inline in the object and the wire frame without heap churn; truncate on
-  overflow. A `[u8; N]` + length, not a `String`.
+  overflow. A `[u8; 24]` + length, not a `String`.
 - **Opaque to the kernel**: the name is stored and copied, never parsed, compared,
   or consulted for any authority decision. No code path branches on it.
 - **Not a namespace**: there is no "resolve a name to an object" syscall. You reach
@@ -162,16 +162,17 @@ A genuinely cross-cutting change — the reason it's a milestone, not a tweak:
 3. **(Deferred)** Holder-alias (local rename); naming non-endpoint objects if a case
    arises (their kinds are already descriptive, so low priority).
 
+## Decisions
+
+- **Name length: 24 bytes**, UTF-8, inline (`[u8; 24]` + length). Truncate on
+  overflow. Kept tight because the name is copied per `CapEvent`.
+- **Required at `EndpointCreate`**, and **create-time only** (immutable — no later
+  `set_name`). A mandatory, unchanging name is the cleanest observability signal
+  and means every endpoint on the wire is named. Existing `EndpointCreate` callers
+  must be updated to pass one (compiler-enforced — the signature changes).
+
 ## Open questions
 
-- **Name length bound.** 24 bytes inline? Zircon's 32? Driven by the `CapEvent`
-  frame budget — the name is copied per event, so keep it tight.
-- **Who may name.** Only the creator at `EndpointCreate`? Or a later
-  `set_name(handle)` (Zircon allows re-set)? Start with create-time only; simpler,
-  and an immutable name is a cleaner observability signal.
 - **Non-endpoint objects.** `TelemetrySink`/`SpanSink`/`Notification` kinds are
   already self-describing; naming them is possible but low-value. Scope to endpoints
   first.
-- **Empty vs required.** Is a name mandatory at `EndpointCreate`, or optional
-  (blank)? Optional keeps existing callers working; a lint/convention can push
-  toward always naming.
