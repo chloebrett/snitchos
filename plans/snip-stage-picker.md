@@ -24,9 +24,20 @@ running git after you approve.
 
 Non-goals: amending, multi-commit planning in one shot.
 
-**Update (shipped):** partial-file / hunk-level staging now works — see "Partial
-application" below. And every `snip` subcommand prints its wall-clock duration to
-stderr (`(snip propose took 4.2s)`), so the model round-trip cost is visible.
+**Update (shipped):**
+- Partial-file / hunk-level staging — see "Partial application" below.
+- Every `snip` subcommand prints its wall-clock duration to stderr, and when the
+  model was called, the token usage too: `(snip propose took 4.2s · 67646 tokens:
+  67136 in / 510 out)`. Usage comes from the `claude -p --output-format json`
+  envelope's `usage` block (cache read/creation tokens count as input),
+  extracted by `snip::extract_usage` and summed across the retry.
+- **Auto-stage on full confidence.** After proposing, if the proposal is
+  high-confidence *throughout* — `overall` High, every include High, and every
+  *actively-decided* exclude High (excludes-by-omission don't count) — `snip`
+  stages automatically, no second command. Predicate: `Selection::is_confident()`.
+  `--no-auto` suppresses it; commit always stays a separate step, so you still own
+  the commit. A single Med/Low anywhere in the active decisions holds it back
+  (observed live: `overall: high` but one `[med]` exclude → did not auto-stage).
 
 ## User-facing flow — three explicit steps
 

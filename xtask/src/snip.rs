@@ -14,8 +14,8 @@ use std::process::{Command, ExitCode};
 
 use serde::{Deserialize, Serialize};
 use snip::{
-    Candidate, ClaudeCfg, Confidence, Selection, Status, build_patch, fingerprint, parse_hunks,
-    parse_status, pick,
+    Candidate, ClaudeCfg, Confidence, Selection, Status, Usage, build_patch, fingerprint,
+    parse_hunks, parse_status, pick,
 };
 
 const PLAN_PATH: &str = ".git/snip-plan.json";
@@ -41,48 +41,69 @@ struct Plan {
     overall: String,
 }
 
-pub fn propose(message: &str, fast: bool, yes: bool, force: bool) -> ExitCode {
-    timed("propose", || match run_propose(message, fast, yes, force) {
-        Ok(code) => code,
-        Err(e) => fail(&e),
+/// Options for the propose step.
+pub struct ProposeOpts {
+    /// Status-only payload (no diffs). Fastest, coarser.
+    pub fast: bool,
+    /// Stage immediately after proposing, regardless of confidence.
+    pub yes: bool,
+    /// Suppress auto-staging even when the proposal is high-confidence throughout.
+    pub no_auto: bool,
+    /// Proceed despite drift / low confidence when staging.
+    pub force: bool,
+}
+
+pub fn propose(message: &str, opts: &ProposeOpts) -> ExitCode {
+    timed("propose", || match run_propose(message, opts) {
+        Ok((code, usage)) => (code, Some(usage)),
+        Err(e) => (fail(&e), None),
     })
 }
 
 pub fn stage(force: bool) -> ExitCode {
     timed("stage", || match run_stage(force) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => fail(&e),
+        Ok(()) => (ExitCode::SUCCESS, None),
+        Err(e) => (fail(&e), None),
     })
 }
 
 pub fn commit(no_verify: bool) -> ExitCode {
     timed("commit", || match run_commit(no_verify) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => fail(&e),
+        Ok(()) => (ExitCode::SUCCESS, None),
+        Err(e) => (fail(&e), None),
     })
 }
 
-/// Run `f`, printing how long it took to stderr so it never pollutes the
-/// stdout that a caller might parse.
-fn timed(verb: &str, f: impl FnOnce() -> ExitCode) -> ExitCode {
+/// Run `f`, printing how long it took — and, when the model was called, how many
+/// tokens it used — to stderr, so it never pollutes parseable stdout.
+fn timed(verb: &str, f: impl FnOnce() -> (ExitCode, Option<Usage>)) -> ExitCode {
     let start = std::time::Instant::now();
-    let code = f();
-    eprintln!("(snip {verb} took {:.1}s)", start.elapsed().as_secs_f64());
+    let (code, usage) = f();
+    let secs = start.elapsed().as_secs_f64();
+    match usage {
+        Some(u) if u.total() > 0 => eprintln!(
+            "(snip {verb} took {secs:.1}s · {} tokens: {} in / {} out)",
+            u.total(),
+            u.input_tokens,
+            u.output_tokens
+        ),
+        _ => eprintln!("(snip {verb} took {secs:.1}s)"),
+    }
     code
 }
 
-fn run_propose(message: &str, fast: bool, yes: bool, force: bool) -> Result<ExitCode, String> {
-    let candidates = gather(fast)?;
+fn run_propose(message: &str, opts: &ProposeOpts) -> Result<(ExitCode, Usage), String> {
+    let candidates = gather(opts.fast)?;
     if candidates.is_empty() {
         println!("Nothing to stage — the working tree is clean.");
-        return Ok(ExitCode::SUCCESS);
+        return Ok((ExitCode::SUCCESS, Usage::default()));
     }
 
     println!(
         "→ asking claude (sonnet) to triage {} changed file(s)…",
         candidates.len()
     );
-    let selection = pick(message, &candidates, &ClaudeCfg::default())
+    let (selection, usage) = pick(message, &candidates, &ClaudeCfg::default())
         .map_err(|e| format!("claude query failed: {e}"))?;
 
     print_selection(&selection);
@@ -110,16 +131,20 @@ fn run_propose(message: &str, fast: bool, yes: bool, force: bool) -> Result<Exit
 
     if plan.include.is_empty() && plan.partial.is_empty() {
         println!("\nNo files selected. Nothing written to stage.");
-        return Ok(ExitCode::SUCCESS);
+        return Ok((ExitCode::SUCCESS, usage));
     }
 
-    if yes {
-        println!();
-        run_stage(force)?;
-    } else {
-        println!("\nNext: `cargo xtask snip --stage` to `git add` these, then inspect `git diff --cached`.");
+    let auto = selection.is_confident() && !opts.no_auto;
+    if auto {
+        println!("\n✓ high confidence throughout — auto-staging (use --no-auto to skip).");
     }
-    Ok(ExitCode::SUCCESS)
+    if opts.yes || auto {
+        println!();
+        run_stage(opts.force)?;
+    } else {
+        println!("\nNext: `cargo xtask snip --stage` to stage these, then inspect `git diff --cached`.");
+    }
+    Ok((ExitCode::SUCCESS, usage))
 }
 
 fn run_stage(force: bool) -> Result<(), String> {

@@ -32,6 +32,8 @@ fn git_apply_cached(dir: &Path, patch: &str) {
 }
 
 #[test]
+// Building fixture text; efficiency of the construction is irrelevant here.
+#[allow(clippy::format_collect)]
 fn stages_only_the_selected_hunk_via_git_apply() {
     let dir = std::env::temp_dir().join("snip-apply-test");
     let _ = std::fs::remove_dir_all(&dir);

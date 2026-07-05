@@ -374,6 +374,10 @@ enum Cmd {
         /// Propose and immediately `git add` (still leaves commit separate).
         #[arg(long, default_value_t = false)]
         yes: bool,
+        /// Don't auto-stage even when the proposal is high-confidence throughout.
+        /// (By default a fully-high-confidence proposal is staged automatically.)
+        #[arg(long, default_value_t = false)]
+        no_auto: bool,
         /// `git add` the files from the last proposal.
         #[arg(long, default_value_t = false)]
         stage: bool,
@@ -648,13 +652,13 @@ fn main() -> ExitCode {
             audit::run(&crate_name, json, include_short)
         }
         Cmd::Debug { features } => debug(&features),
-        Cmd::Snip { message, fast, yes, stage, commit, force, no_verify } => {
+        Cmd::Snip { message, fast, yes, no_auto, stage, commit, force, no_verify } => {
             if commit {
                 snip::commit(no_verify)
             } else if stage {
                 snip::stage(force)
             } else if let Some(message) = message {
-                snip::propose(&message, fast, yes, force)
+                snip::propose(&message, &snip::ProposeOpts { fast, yes, no_auto, force })
             } else {
                 eprintln!(
                     "snip: provide a commit message to propose, or --stage / --commit to finalize"

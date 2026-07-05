@@ -25,16 +25,17 @@ fn cfg(program: &Path) -> ClaudeCfg {
 
 #[test]
 fn picks_files_by_shelling_out_to_the_configured_program() {
-    let envelope = r#"{"type":"result","is_error":false,"result":"{\"include\":[{\"path\":\"a.rs\",\"reason\":\"yes\",\"confidence\":\"high\"}],\"exclude\":[],\"overall\":\"high\"}"}"#;
+    let envelope = r#"{"type":"result","is_error":false,"result":"{\"include\":[{\"path\":\"a.rs\",\"reason\":\"yes\",\"confidence\":\"high\"}],\"exclude\":[],\"overall\":\"high\"}","usage":{"input_tokens":300,"output_tokens":20}}"#;
     let program = fake_claude("ok-claude.sh", envelope);
     let candidates = [candidate("a.rs"), candidate("b.rs")];
 
-    let selection = pick("some message", &candidates, &cfg(&program)).expect("pick succeeds");
+    let (selection, usage) = pick("some message", &candidates, &cfg(&program)).expect("pick succeeds");
 
     assert_eq!(selection.include.len(), 1);
     assert_eq!(selection.include[0].path, "a.rs");
     // b.rs was never mentioned → surfaced as excluded-by-omission.
     assert!(selection.exclude.iter().any(|e| e.path == "b.rs"));
+    assert_eq!(usage.total(), 320, "usage flows out of pick");
 }
 
 #[test]

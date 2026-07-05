@@ -220,6 +220,10 @@ pub struct Excluded {
     pub path: String,
     pub reason: String,
     pub confidence: Confidence,
+    /// True when the model never mentioned this candidate at all (excluded by
+    /// omission), rather than actively deciding to leave it out. Omission
+    /// excludes are Low-by-construction and don't count against confidence.
+    pub omitted: bool,
 }
 
 /// The validated result of a triage: which candidates to stage, which to leave.
@@ -245,6 +249,19 @@ pub struct ClaudeCfg {
 impl Default for ClaudeCfg {
     fn default() -> Self {
         ClaudeCfg { program: "claude".to_string(), model: "sonnet".to_string() }
+    }
+}
+
+impl Selection {
+    /// True when the model is unambiguously confident: `overall` is High, every
+    /// included file is High, and every *actively-decided* exclude is High.
+    /// Excludes-by-omission (files the model never mentioned) don't count — they
+    /// are Low by construction. Used to decide whether `propose` may auto-stage.
+    pub fn is_confident(&self) -> bool {
+        let high = |c: Confidence| matches!(c, Confidence::High);
+        high(self.overall)
+            && self.include.iter().all(|i| high(i.confidence))
+            && self.exclude.iter().all(|e| e.omitted || high(e.confidence))
     }
 }
 
@@ -390,6 +407,41 @@ fn push_candidate_body(out: &mut String, c: &Candidate) {
     }
 }
 
+/// Token usage reported by the model for one `pick` (summed across retries).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+impl Usage {
+    pub fn total(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+}
+
+impl std::ops::Add for Usage {
+    type Output = Usage;
+    fn add(self, other: Usage) -> Usage {
+        Usage {
+            input_tokens: self.input_tokens + other.input_tokens,
+            output_tokens: self.output_tokens + other.output_tokens,
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct WireUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+}
+
 #[derive(Deserialize)]
 struct Envelope {
     #[serde(default)]
@@ -398,6 +450,21 @@ struct Envelope {
     result: Option<String>,
     #[serde(default)]
     subtype: Option<String>,
+    #[serde(default)]
+    usage: Option<WireUsage>,
+}
+
+/// Pull token usage from the `claude -p --output-format json` envelope. Cache
+/// read/creation tokens count toward input. Missing usage reads as zero.
+pub fn extract_usage(envelope_json: &str) -> Usage {
+    let Ok(env) = serde_json::from_str::<Envelope>(envelope_json) else {
+        return Usage::default();
+    };
+    let u = env.usage.unwrap_or_default();
+    Usage {
+        input_tokens: u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
+        output_tokens: u.output_tokens,
+    }
 }
 
 /// Extract the model's answer text from the JSON envelope emitted by
@@ -518,6 +585,7 @@ pub fn parse_reply(raw_json: &str, candidates: &[Candidate]) -> Result<Selection
             confidence: Confidence::from_wire(e.confidence.as_deref()),
             path: e.path,
             reason: e.reason,
+            omitted: false,
         })
         .collect();
 
@@ -533,6 +601,7 @@ pub fn parse_reply(raw_json: &str, candidates: &[Candidate]) -> Result<Selection
             path: c.path.clone(),
             reason: "not mentioned by the model; excluded by omission".to_string(),
             confidence: Confidence::Low,
+            omitted: true,
         });
     }
 
@@ -548,7 +617,7 @@ pub fn parse_reply(raw_json: &str, candidates: &[Candidate]) -> Result<Selection
 
 /// Run one `claude -p` invocation with `prompt` on stdin, returning the model's
 /// answer text (envelope already unwrapped).
-fn run_claude(prompt: &str, cfg: &ClaudeCfg) -> Result<String, PickError> {
+fn run_claude(prompt: &str, cfg: &ClaudeCfg) -> Result<(String, Usage), PickError> {
     let mut child = Command::new(&cfg.program)
         .args([
             "-p",
@@ -581,7 +650,8 @@ fn run_claude(prompt: &str, cfg: &ClaudeCfg) -> Result<String, PickError> {
     }
 
     let envelope = String::from_utf8_lossy(&out.stdout);
-    extract_result_text(&envelope).map_err(PickError::Parse)
+    let text = extract_result_text(&envelope).map_err(PickError::Parse)?;
+    Ok((text, extract_usage(&envelope)))
 }
 
 /// Ask Sonnet (via `claude -p`) which candidates to stage for `message`.
@@ -592,17 +662,18 @@ pub fn pick(
     message: &str,
     candidates: &[Candidate],
     cfg: &ClaudeCfg,
-) -> Result<Selection, PickError> {
+) -> Result<(Selection, Usage), PickError> {
     let prompt = build_prompt(message, candidates);
-    let text = run_claude(&prompt, cfg)?;
+    let (text, usage) = run_claude(&prompt, cfg)?;
     if let Ok(sel) = parse_reply(&text, candidates) {
-        return Ok(sel);
+        return Ok((sel, usage));
     }
 
     let retry = format!(
         "{prompt}\n\nIMPORTANT: your previous answer could not be parsed. \
 Reply with ONLY the raw JSON object, nothing else."
     );
-    let text = run_claude(&retry, cfg)?;
-    parse_reply(&text, candidates).map_err(PickError::Parse)
+    let (text, retry_usage) = run_claude(&retry, cfg)?;
+    let sel = parse_reply(&text, candidates).map_err(PickError::Parse)?;
+    Ok((sel, usage + retry_usage))
 }
