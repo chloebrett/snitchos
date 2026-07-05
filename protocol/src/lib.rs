@@ -31,7 +31,9 @@ pub mod stream;
 ///   - 4: added `task_id` to `MetricRegister` (the emitter dimension) so two
 ///     processes that register a metric with the same name stay distinct
 ///     Prometheus series rather than colliding into one family.
-pub const PROTOCOL_VERSION: u8 = 4;
+///   - 5: appended `RefusalReason::CapNotDelegable` (refused delegation of a
+///     `Once`/affine cap). Additive; old collectors can't decode the new reason.
+pub const PROTOCOL_VERSION: u8 = 5;
 
 /// `MetricRegister.task_id` sentinel for a **kernel-global** metric — one
 /// registered by the kernel itself (the `&'static` `register_counter`/`gauge`/
@@ -282,6 +284,11 @@ pub enum RefusalReason {
   /// one waiter per notification in v0.12 (the second waiter is refused, never
   /// silently dropped, so the first parker can't be stranded).
   NotificationBusy,
+  /// A `Spawn`/`SpawnImage` delegate array named a `Once` (affine) capability —
+  /// the reply cap is the only one today. Copy-semantics delegation would
+  /// duplicate a single-use authority (reborn Persistent in the child), so the
+  /// kernel refuses the whole delegation rather than silently widening it.
+  CapNotDelegable,
 }
 
 #[cfg(test)]
@@ -761,6 +768,7 @@ mod tests {
       RefusalReason::BadMetricHandle,
       RefusalReason::BadMetricKind,
       RefusalReason::NotificationBusy,
+      RefusalReason::CapNotDelegable,
     ] {
       let frame = Frame::SyscallRefused {
         syscall: 3,

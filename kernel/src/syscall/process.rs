@@ -172,7 +172,13 @@ fn delegate_from_user(
                 .map(|(handle, cap)| (cap, caps.cap_id_of(*handle).unwrap_or(0)))
                 .collect()
         })
-        .map_err(|_| RefusalReason::CapNotFound)
+        .map_err(|e| match e {
+            // A `Once`/affine cap in the delegate set refuses the whole spawn,
+            // snitched with its own reason rather than the generic not-found.
+            kernel_core::cap::CapError::NotDelegable => RefusalReason::CapNotDelegable,
+            // A bad/stale handle: the delegated cap isn't held.
+            _ => RefusalReason::CapNotFound,
+        })
 }
 
 /// Spawn a userspace process from a **caller-supplied ELF image** (v0.13,
