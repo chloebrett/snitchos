@@ -249,3 +249,28 @@ files) is the building block; this reuses the same gather + prompt + validate sp
 swapping the output contract from `Selection` to `Vec<ProposedCommit>` and adding the
 disjointness/coverage invariant to `parse_reply`'s validation. Worth building once v1
 proves the triage quality.
+
+### Future: edit-provenance ledger (deterministic "pure file" fast path)
+
+A `PostToolUse` hook (`.claude/settings.json`, on Write/Edit) appends to a local
+ledger — e.g. `.git/snip-provenance.jsonl` — one record per agent edit:
+`{ timestamp, agent_id/session, file, lines_touched }`. Over a parallel-agent run
+this builds a map of **who touched what**.
+
+From that ledger, a file is **pure** if only one agent edited it. Pure files can be
+staged/committed with zero model inference — the provenance already proves the change
+is single-concern. `snip` only needs the model for the *mixed* files (touched by
+several agents, or edited by hand outside any agent). So the flow becomes:
+
+1. Hook records provenance as agents work.
+2. `snip` partitions the tree: pure-by-agent files → group by agent (trivial, free,
+   deterministic); mixed/ambiguous files → fall back to the Sonnet triage above.
+3. Report both, staged separately.
+
+This is faster and cheaper than asking the model about everything, and it's *more*
+accurate for the pure majority (provenance is ground truth, not inference). It also
+opens per-agent commit messages ("everything agent X did") as a natural grouping.
+Caveats: the hook only sees agent edits, not manual ones or non-Edit mutations
+(codegen, `cargo fmt`), so "pure" means "pure among tracked agent edits" — the model
+fallback still owns anything the ledger can't vouch for. Line-level records also let a
+future hunk-staging mode attribute individual hunks, not just whole files.
