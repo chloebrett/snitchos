@@ -337,11 +337,42 @@ struct Comparison {
     qemu_timing: Timing,
 }
 
+/// Telemetry names a *living* kernel emits on a recurring cadence (the heartbeat
+/// loop), carrying no workload-specific meaning. Their appearing **only** in
+/// snemu's vocabulary is never evidence of invented telemetry: it means QEMU
+/// halted — a deliberate-crash workload (`panic-now`, the stack-guard family) —
+/// before its slower wall-clock reached the first heartbeat, while snemu's
+/// instruction-clock passed several "seconds" of the same boot and emitted a few.
+/// Boot-to-crash is ~40M instructions ≈ ~4 "seconds" on snemu's `rdtime = instret`
+/// clock (10 MHz timebase → 10M instr/heartbeat), but ~0.2 s of real time in QEMU
+/// (first heartbeat not due until 1 s). Reset-on-panic wouldn't change it: snemu
+/// heartbeats *before* the crash. See
+/// `notes/snemu-guard-page-fail-is-timing-not-mmu.md`.
+///
+/// Caveat: this also masks a hypothetical snemu bug where snemu *fails* to halt
+/// and over-emits `kernel.heartbeat`. That would show up first in the frame-count
+/// / common-prefix signals; a count-bounded check is a future tightening.
+const BENIGN_ONLY_SNEMU: &[&str] = &["kernel.heartbeat"];
+
+/// The only-snemu names that actually indicate snemu invented telemetry QEMU
+/// would never emit — the only-snemu set minus the recurring-infra names a crash
+/// can truncate ([`BENIGN_ONLY_SNEMU`]). Empty ⇒ faithful.
+fn invented_names(only_snemu: &[String]) -> Vec<String> {
+    only_snemu
+        .iter()
+        .filter(|n| !BENIGN_ONLY_SNEMU.contains(&n.as_str()))
+        .cloned()
+        .collect()
+}
+
 impl Comparison {
-    /// Faithful ⇔ snemu invented no telemetry QEMU never emitted. (Names only
-    /// QEMU has are behavior snemu didn't reach in its budget, not a divergence.)
+    /// Faithful ⇔ snemu invented no telemetry QEMU never emitted. Names only QEMU
+    /// has are behavior snemu didn't reach in its budget; recurring-infra names
+    /// (heartbeat) only snemu has are behavior *QEMU* didn't reach before halting
+    /// — neither is invention. Only genuinely snemu-invented names ([`invented_names`])
+    /// break faithfulness.
     fn faithful(&self) -> bool {
-        self.only_snemu.is_empty()
+        invented_names(&self.only_snemu).is_empty()
     }
 }
 
@@ -623,10 +654,19 @@ fn print_detailed(cmp: &Comparison) {
     if !cmp.only_snemu.is_empty() {
         eprintln!("  only in snemu: {:?}", cmp.only_snemu);
     }
+    let invented = invented_names(&cmp.only_snemu);
     if cmp.faithful() {
-        eprintln!("snemu-diff: PASS — snemu faithful to QEMU (nothing only-in-snemu).");
+        if cmp.only_snemu.is_empty() {
+            eprintln!("snemu-diff: PASS — snemu faithful to QEMU (nothing only-in-snemu).");
+        } else {
+            eprintln!(
+                "snemu-diff: PASS — only-in-snemu is recurring infra QEMU halted before \
+                 reaching ({:?}), not invented telemetry.",
+                cmp.only_snemu
+            );
+        }
     } else {
-        eprintln!("snemu-diff: FAIL — snemu emitted telemetry QEMU never did.");
+        eprintln!("snemu-diff: FAIL — snemu invented telemetry QEMU never emits: {invented:?}");
     }
 }
 
@@ -697,6 +737,28 @@ mod tests {
     }
     fn strreg(id: u32, value: &str) -> OwnedFrame {
         OwnedFrame::StringRegister { id: StringId(id), value: value.to_string() }
+    }
+
+    #[test]
+    fn kernel_heartbeat_alone_in_only_snemu_is_not_an_invention() {
+        // A deliberate-crash workload (`panic-now`, the stack-guard family) halts
+        // QEMU before its wall-clock reaches the first heartbeat; snemu's
+        // instruction-clock passes several "seconds" of the same boot and emits a
+        // few `kernel.heartbeat`s. That's recurring infra QEMU truncated, not
+        // telemetry snemu invented — so it must not count as unfaithful.
+        let only_snemu = vec!["kernel.heartbeat".to_string()];
+        assert!(invented_names(&only_snemu).is_empty());
+    }
+
+    #[test]
+    fn a_workload_specific_only_snemu_name_is_still_an_invention() {
+        // Anything other than the recurring-infra names IS snemu emitting
+        // telemetry QEMU never would — a real divergence the filter must keep.
+        let only_snemu = vec![
+            "kernel.heartbeat".to_string(),
+            "snitchos.task.ghost.runs_total".to_string(),
+        ];
+        assert_eq!(invented_names(&only_snemu), vec!["snitchos.task.ghost.runs_total"]);
     }
 
     #[test]

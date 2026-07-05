@@ -103,7 +103,25 @@ earlier "model reset-on-panic so terminal streams converge" idea is dead as a fi
 for this FAIL (it's still a real fidelity nicety, just not the lever here). The
 only real fix is oracle-side.
 
-## What should change
+## FIX LANDED (oracle-side)
+
+`xtask/src/snemu_diff.rs`: added `BENIGN_ONLY_SNEMU = ["kernel.heartbeat"]` and
+`invented_names(only_snemu)` = only-snemu minus those recurring-infra names.
+`Comparison::faithful()` now checks `invented_names(&self.only_snemu).is_empty()`
+instead of `only_snemu.is_empty()`. So an only-snemu set of exactly
+`{kernel.heartbeat}` (what `panic-now` and the stack-guard family produce, already
+observed) is PASS; any *other* only-snemu name still FAILs (a genuine invention).
+Reporting distinguishes the two cases. Unit-tested:
+`kernel_heartbeat_alone_in_only_snemu_is_not_an_invention` (benign) and
+`a_workload_specific_only_snemu_name_is_still_an_invention` (still caught).
+
+Known limitation, documented in-code: this masks a hypothetical snemu bug where
+snemu *fails to halt* and over-emits `kernel.heartbeat`. Future tightening: bound
+the benign pass on the heartbeat **count** (a few, not hundreds) or on snemu
+showing the crash it reached — the panic currently emits only to UART, not
+telemetry, so there's no crash frame to key on today.
+
+## What should change (remaining)
 
 1. **Oracle: stop failing halting workloads on a benign name.** Options, cheapest
    first:
