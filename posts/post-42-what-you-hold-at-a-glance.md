@@ -24,11 +24,19 @@
 
 - then color: 🪴 green, 👀 blue, 📝 amber. and here's the design I'm proud of, because it's the same move as the glyph, one layer out.
 
-- the renderer must not know that green means mint. it lays out boxes; it knows shapes. so color is a `TableStyle` that takes a **colorizer** — a plain function `&str -> String` — and runs it over each cell. the box style knows "apply this function to the content"; it does not know what the function *does*. the domain supplies the function (`colorize_rights`, which wraps the three glyphs in ANSI), exactly as it supplied the glyphs. the renderer never names a color.
+- the renderer must not know that green means mint. it lays out boxes; it knows shapes. so color is a `TableStyle` that takes a **colorizer** — a plain function the box style runs for each cell. the box style knows "apply this function"; it does not know what the function *does*. the domain supplies the function (`colorize_rights`, which wraps the three glyphs in ANSI), exactly as it supplied the glyphs. the renderer never names a color.
 
 - the glyph is the seam. it's the token that carries meaning out of the domain and into the presentation, and both sides only have to agree on the token. *what a cap is* lives in one file; *how a cap looks* in another; the emoji is the handshake between them. the value flowing through the shell stays clean data — no escape codes baked in — right up until the last inch, where a style paints it.
 
 - one detail that matters more than it looks: the color goes on **after** the width is measured. an ANSI escape is bytes the terminal eats but a measurer counts, so if you colorize before you pad, every border drifts by the length of `\x1b[33m`. measure the naked glyph, pad to that, *then* paint. the fill is computed on the truth; the color is a coat on top.
+
+## the seam is provenance, not a name
+
+- color raised a question the glyph never did: *which* cells get painted? my first answer was "any cell holding a rights glyph" — scan the output, colorize the emoji. wrong the instant a user prints a 🪴 in a string of their own. my second answer was "any cell in the column named `rights`" — better, until you notice a user can write `prod Thing(rights: Str)` and name a column whatever they please. both answers key on something the user controls. both are spoofable.
+
+- the only un-spoofable signal is *provenance*: did the kernel build this row, or did user code? so a record carries one un-forgeable bit — `native` — that `hold` sets and no Stitch syntax can. there is no surface form that produces a native record; you cannot *say* it in the language. the colorizer keys on that bit, per row, and nothing else. a user's `rights` column, glyphs and all, stays plain — because it didn't come from the kernel. the seam I kept reaching for wasn't the content or the column name; it was *where the value came from*, and that's the one thing user code can't fake.
+
+- and the lesson generalizes past color: any time a presentation decision carries authority — this is real, that is not — you cannot read it off what the data *says*, because the data is user-controlled all the way down. you read it off what the data *is*: a bit the trusted producer set and the untrusted world has no way to write. content lies; provenance doesn't.
 
 ## the craft of lining up
 
@@ -53,6 +61,8 @@
 - **legibility is a rendering concern, but *meaning* belongs to the domain — so hand the domain a brush, don't teach the renderer.** the table stays shape-only forever; `hold` paints its own rights; a color style takes a function it doesn't understand. every seam here is the same seam — the *what* apart from the *how*, with a glyph as the handshake — and it's why four features fit without the renderer growing a single line about capabilities.
 
 - **the value carries its own truth; read alignment and shape off it, not off its printed form.** numbers right-align because they're numbers, not because they look like numbers. records tree because they're records. the moment you sniff the rendered string to recover what the value already knew, you've thrown away the structure post 41 spent a whole post celebrating.
+
+- **when a display decision carries authority, key it on provenance, not content.** "which cells are real rights" turned out to be a security question wearing a formatting costume. i reached for the content, then the column name, and both were forgeable — a user can print any glyph, name any column. the un-spoofable answer was "the kernel built this row," carried as one bit no user record can set, because the language has no syntax to set it. content is controlled by whoever wrote it; provenance isn't.
 
 - **width is a lie you tell the terminal, and the terminal gets a vote.** bytes, then characters, then cells — each layer of "measure it right" was really a layer of "stop assuming the display agrees with you." emoji width, and VS16 especially, is where that assumption breaks in the open, and the only safe move is to pick glyphs whose width nobody argues about.
 
