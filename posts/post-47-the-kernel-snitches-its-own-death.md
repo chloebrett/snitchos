@@ -1,4 +1,4 @@
-# Post 46 — The kernel snitches its own death
+# Post 47 — The kernel snitches its own death
 
 - SnitchOS has one job in its name: it snitches. every span, every metric, every context switch, every capability handed from one process to another goes out a structured telemetry channel that the collector turns into traces and dashboards. the whole point of the project is that nothing interesting happens without a frame to prove it. and yet the single most interesting thing a kernel can do — *die* — produced no frame at all. a panic wrote a line to an emergency UART and spun forever on `wfi`. if you weren't tailing a serial console at that exact moment, the kernel's death was invisible on the one channel built to see everything.
 

@@ -1,4 +1,4 @@
-# Post 45 — The tree has names
+# Post 46 — The tree has names
 
 - post 44 ended with an IOU: the names were on the wire, but the collector was ignoring them. every `CapEvent` — grant, mint, revoke — arrived with a name field attached, and the collector read it, advanced its internal timestamp, and moved on. the snitching was happening; the drawing wasn't. this post closes that gap. the capability derivation tree is now in Tempo, and every node has a name.
 
