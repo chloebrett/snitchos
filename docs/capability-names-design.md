@@ -163,9 +163,19 @@ A genuinely cross-cutting change — the reason it's a milestone, not a tweak:
    row on the UART. Host-tested end-to-endpoints (abi, kernel-core describe,
    stitch); 0 missed mutants on the pure helpers; regressions (endpoint-create,
    init-fs, grant/revoke, hold-lists) all green.
-2. **`CapEvent`s carry the name.** Thread the name through the three emit sites +
-   the wire frame + the collector's OTLP mapping. The observability win: a *named*
-   derivation tree in Tempo. Itest asserts a `CapEvent` frame carries the name.
+2. **`CapEvent`s carry the name.** ✅ **DONE (wire).** `Frame::CapEvent` (+
+   `OwnedFrame`) gains a `name: [u8; CAP_NAME_LEN]` at the end (postcard-positional;
+   `protocol` now depends on the leaf `abi` for `CAP_NAME_LEN`/`name_str`). All
+   three `emit_cap_*` functions take a name; every call site resolves it — endpoint
+   caps via `ipc::name_of(id)` (capturing the id under the caps lock, resolving
+   after, to avoid nesting the endpoint lock), non-endpoint kinds empty. Itest
+   `stitch-grant-revoke-capevents` now asserts the real grant/revoke frames carry
+   `name="fs"` (`Transferred` *and* `Revoked`). Host roundtrip test proves the name
+   survives encode/decode; 0 missed mutants on the helpers.
+   **Deferred (collector → Tempo):** the collector doesn't yet build cap spans from
+   `CapEvent`s (that host-side derivation-tree reconstruction is the separate v0.8
+   work its `state.rs` comment names). The name is now *on the wire* waiting for it;
+   mapping it to an OTLP attribute lands with that tree.
 3. **(Deferred)** Holder-alias (local rename); naming non-endpoint objects if a case
    arises (their kinds are already descriptive, so low priority).
 
