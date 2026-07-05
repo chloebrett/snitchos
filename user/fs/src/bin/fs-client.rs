@@ -21,7 +21,7 @@
 
 use fs_core::{FsError, InodeId, NodeKind, Stat};
 use fs_proto::{markers, FileRights, Op, Request, Response, UserBuf};
-use snitchos_user::{Denied, Endpoint, MSG_WORDS, Metric, delegated_handle, entry, register_counter, tracer};
+use snitchos_user::{Denied, Endpoint, MSG_WORDS, Metric, bootstrap, entry, register_counter, tracer};
 
 /// `call` `req` on `cap` inside a span named `span` — the span stays open across
 /// the `call`, so the server's handling nests under it across the process
@@ -45,17 +45,21 @@ fn stat(cap: Endpoint) -> Option<Stat> {
     }
 }
 
-#[entry]
+#[entry(needs = [("fs", ENDPOINT, SEND)])]
 fn main() {
     // The client names its own checkpoint metric; each step emits its marker
     // value through this handle (one counter, many values — as before, but
     // process-named rather than the shared `telemetry_total`).
     let marker: Metric = register_counter("snitchos.fs_client.marker");
 
-    // Connect → root directory File cap. The FS endpoint is our first delegated
-    // cap (handle 2) — works whether launched by `run_ipc` (endpoint at handle 2)
-    // or by an init-`Spawn` delegating a bare `SEND` cap (delegated[0]).
-    let fs = Endpoint::from_raw_handle(delegated_handle(0));
+    // Connect → root directory File cap. Resolve the FS endpoint by the role name
+    // this program declared in `#[entry(needs = [("fs", …)])]` — by name, not a
+    // positional handle index. It lands at the first delegated handle either way
+    // (the satisfier delegates it as the first slot), but the program never names
+    // the integer.
+    let Some(fs) = bootstrap().get::<Endpoint>("fs") else {
+        return;
+    };
     let Ok((_r, Some(root_cap))) = fs.call([0, 0, 0, 0]) else {
         return;
     };
