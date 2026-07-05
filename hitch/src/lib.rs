@@ -215,6 +215,55 @@ pub fn resolve_slot(slots: &[(&str, u8)], name: &str, want_object: u8) -> Result
     Ok(index)
 }
 
+/// A capability the satisfier holds, as [`satisfy`] sees it: its object kind,
+/// rights, and the raw handle in the satisfier's own table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapView {
+    pub object: u8,
+    pub rights: u32,
+    pub handle: u32,
+}
+
+/// How [`satisfy`] plans to grant one slot from the satisfier's caps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grant {
+    /// The satisfier holds a cap that exactly matches — delegate its handle as-is.
+    Use { handle: u32 },
+    /// The satisfier holds a cap with *more* rights — mint an attenuated child
+    /// carrying exactly the slot's rights, derived from `from`.
+    Mint { from: u32, rights: u32 },
+}
+
+/// [`satisfy`] failed: `slot` is the index of the first slot that can't be
+/// satisfied from the held caps (matching is all-or-nothing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unsatisfied {
+    pub slot: usize,
+}
+
+/// Match each of `needs` (in declaration order) against the caps in `have`,
+/// producing a per-slot [`Grant`] plan — or the first [`Unsatisfied`] slot
+/// (all-or-nothing). A held cap matches a slot when their object kinds agree and
+/// the cap carries at least the slot's rights; an exactly-matching cap is
+/// delegated as-is, a wider one is attenuated by minting.
+///
+/// # Errors
+/// [`Unsatisfied`] if any slot has no matching held cap.
+pub fn satisfy(needs: &[Slot], have: &[CapView]) -> Result<Vec<Grant>, Unsatisfied> {
+    let mut plan = Vec::with_capacity(needs.len());
+    for (i, slot) in needs.iter().enumerate() {
+        let matched = have
+            .iter()
+            .find(|c| c.object == slot.object && c.rights & slot.rights == slot.rights);
+        match matched {
+            Some(c) if c.rights == slot.rights => plan.push(Grant::Use { handle: c.handle }),
+            Some(c) => plan.push(Grant::Mint { from: c.handle, rights: slot.rights }),
+            None => return Err(Unsatisfied { slot: i }),
+        }
+    }
+    Ok(plan)
+}
+
 /// The const-constructible twin of [`TypeSchema`]: the same shape, but built from
 /// `&'static str` / `&'static [..]` so a type's shape can be an associated
 /// `const`. This is what `#[derive(Schema)]` emits, and what a manifest in a

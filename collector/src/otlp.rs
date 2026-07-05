@@ -126,23 +126,7 @@ impl Exporter {
     /// Build an OTLP request containing one span and POST it.
     #[cfg_attr(test, mutants::skip)] // makes real HTTP calls — not unit-testable without a mock server
     fn export(&self, span: &CompletedSpan) {
-        let attributes = span_attributes(span);
-
-        let proto_span = Span {
-            trace_id: self.trace_id.to_vec(),
-            span_id: span.span_id.to_be_bytes().to_vec(),
-            trace_state: String::new(),
-            parent_span_id: if span.parent_span_id == 0 {
-                Vec::new() // OTLP convention: empty bytes = no parent
-            } else {
-                span.parent_span_id.to_be_bytes().to_vec()
-            },
-            name: span.name.clone(),
-            kind: 1, // INTERNAL
-            start_time_unix_nano: clamp_u128_to_u64(span.start_time_ns),
-            end_time_unix_nano: clamp_u128_to_u64(span.end_time_ns),
-            attributes,
-        };
+        let proto_span = build_proto_span(span, &self.trace_id);
 
         let req = ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
@@ -219,6 +203,26 @@ fn session_trace_id() -> [u8; 16] {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos())
         .to_le_bytes()
+}
+
+/// Build an OTLP `Span` proto from a `CompletedSpan` and a `trace_id`.
+/// Pure — no I/O — so it is fully host-testable without a mock server.
+fn build_proto_span(span: &CompletedSpan, trace_id: &[u8; 16]) -> Span {
+    Span {
+        trace_id: trace_id.to_vec(),
+        span_id: span.span_id.to_be_bytes().to_vec(),
+        trace_state: String::new(),
+        parent_span_id: if span.parent_span_id == 0 {
+            Vec::new()
+        } else {
+            span.parent_span_id.to_be_bytes().to_vec()
+        },
+        name: span.name.clone(),
+        kind: 1, // INTERNAL
+        start_time_unix_nano: clamp_u128_to_u64(span.start_time_ns),
+        end_time_unix_nano: clamp_u128_to_u64(span.end_time_ns),
+        attributes: span_attributes(span),
+    }
 }
 
 fn clamp_u128_to_u64(v: u128) -> u64 {
@@ -343,6 +347,37 @@ mod tests {
     fn span_attributes_include_thread_name_when_resolved() {
         let attrs = span_attributes(&completed(3, Some("task_b"), 0));
         assert_eq!(attr(&attrs, "thread.name"), Some("task_b"));
+    }
+
+    #[test]
+    fn build_proto_span_maps_fields_onto_proto() {
+        let span = CompletedSpan {
+            name: "kernel.boot".to_string(),
+            span_id: 42,
+            parent_span_id: 7,
+            start_time_ns: 1_000_000,
+            end_time_ns: 2_000_000,
+            task_id: 1,
+            thread_name: None,
+            thread_priority: None,
+            hart_id: 0,
+        };
+        let trace_id: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let proto = build_proto_span(&span, &trace_id);
+        assert_eq!(proto.trace_id, trace_id.to_vec());
+        assert_eq!(proto.span_id, 42u64.to_be_bytes().to_vec());
+        assert_eq!(proto.parent_span_id, 7u64.to_be_bytes().to_vec());
+        assert_eq!(proto.name, "kernel.boot");
+        assert_eq!(proto.start_time_unix_nano, 1_000_000);
+        assert_eq!(proto.end_time_unix_nano, 2_000_000);
+    }
+
+    #[test]
+    fn build_proto_span_uses_empty_bytes_for_root_span() {
+        let span = completed(0, None, 0); // parent_span_id == 0
+        let trace_id = [0u8; 16];
+        let proto = build_proto_span(&span, &trace_id);
+        assert_eq!(proto.parent_span_id, Vec::<u8>::new());
     }
 
     #[test]

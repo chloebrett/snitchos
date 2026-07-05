@@ -92,11 +92,16 @@ run-ambient shared state (telemetry, platform, authority via `Rc`). So the *fuel
 budget lands as a fifth run-ambient `Env` field (`Rc<Cell<u64>>` + `with_fuel` +
 `take_fuel`, decremented once per `eval`) — **✅ DONE**: `eval_program_with_fuel`,
 a non-terminating program now faults "evaluation fuel exhausted" instead of
-hanging; 523 green, mutation-clean. The **depth guard** (B3) can ride the same
-Env-counter shape; only the **self-tail trampoline** (B4) needs real `eval_call`
-restructuring. The full struct-reify is deferred as a code-org refactor — the
-*behaviours* the review wanted (a place to hang fuel/depth) are delivered without
-it.
+hanging; 523 green, mutation-clean. The **depth guard** (B3) — **✅ DONE**: a
+run-shared depth counter + a `CallGuard` (RAII decrement on every exit, incl. `?`)
+at the `apply_values` closure boundary; unbounded *non-tail* recursion (which the
+trampoline can't fix) now faults "call stack too deep" instead of overflowing.
+⚠️ `MAX_CALL_DEPTH = 48` is **deliberately low + target-dependent**: `eval` is a
+giant function (huge stack frame — itself a Phase-C target), so deep recursion
+overflows at a low depth on constrained stacks (esp. the metal's 16 KiB). Raise it
+once the eval frame shrinks. Only the **self-tail trampoline** (B4) — real
+`eval_call` restructuring — remains, plus **B5** the leak characterization. The
+full struct-reify is deferred as a code-org refactor.
 
 ### Step B1: Reify `Interp` — `eval_*` become methods (pure refactor)
 **Acceptance**: an `Interp` struct owns the eval entry points (env access,
