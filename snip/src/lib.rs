@@ -771,6 +771,15 @@ pub fn parse_reply(raw_json: &str, candidates: &[Candidate]) -> Result<Selection
 
 /// Run one `claude -p` invocation with `prompt` on stdin, returning the model's
 /// answer text (envelope already unwrapped).
+/// A dedicated empty directory to run `claude -p` from, so it picks up no
+/// project context. Created on demand; falls back to the temp dir if creation
+/// fails (worst case: back to loading whatever context that dir implies).
+fn neutral_cwd() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join("snip-neutral-cwd");
+    let _ = std::fs::create_dir_all(&dir);
+    if dir.is_dir() { dir } else { std::env::temp_dir() }
+}
+
 fn run_claude(prompt: &str, cfg: &ClaudeCfg) -> Result<(String, Usage), PickError> {
     let mut child = Command::new(&cfg.program)
         .args([
@@ -782,6 +791,11 @@ fn run_claude(prompt: &str, cfg: &ClaudeCfg) -> Result<(String, Usage), PickErro
             "--allowedTools",
             "",
         ])
+        // Run from an empty directory so `claude -p` doesn't load the project's
+        // CLAUDE.md / .claude / .mcp.json into its context — that cruft added
+        // ~25k tokens/call and we don't need it: the whole task is in the prompt
+        // and tools are disabled. Measured ~57k → ~32k baseline per call.
+        .current_dir(neutral_cwd())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

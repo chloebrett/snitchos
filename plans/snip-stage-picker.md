@@ -219,6 +219,39 @@ The tool surfaces confidence, and gently gates on it (never silently):
   Low overall unless `--force`.
 - Confidence is persisted in the plan so `stage` can enforce this without re-asking.
 
+## Token cost — the `claude -p` baseline dominates (measured)
+
+Measured 2026-07-05: a trivial "say hi" call through `claude -p` costs **~57k input
+tokens** (≈2 fresh + ~32k cache-creation + ~25k cache-read). That is Claude Code's
+own fixed baseline — its system prompt + built-in tool schemas + skills — paid on
+**every** call and NOT reducible via flags (`--strict-mcp-config`/empty MCP made no
+difference). Our diff payload is a small delta on top.
+
+**Neutral-cwd win (biggest free lever):** ~25k of that baseline was the *project's*
+own context — `run_claude` spawns `claude -p` from an empty scratch dir
+(`neutral_cwd()`), so it loads no `CLAUDE.md` / `.claude` / `.mcp.json`. We don't need
+them: the whole task is in the prompt and tools are disabled. Measured on the real
+tree: **~71k → ~46k per call.** The residual ~32k is Claude Code's core (system
+prompt + built-in tool schemas), not reducible from the CLI.
+
+Consequences, which override the original "shrink the payload" intuition:
+
+- **Payload optimisations are marginal.** `-U1`, per-file/global caps, and `--fast`
+  shave the *delta*, not the ~57k floor. Still worth keeping (free, bound worst case),
+  but they don't move the headline number much.
+- **Two-pass lean-first is usually a *net loss* for token count** — it adds a whole
+  second ~57k-baseline call to avoid sending some diffs. It only wins when the diff
+  payload genuinely exceeds a baseline (a very large tree). So single-pass is the
+  **default**; two-pass is opt-in via `--lean`.
+- **Caching is the real mitigator.** The baseline is cached for ~1h
+  (`ephemeral_1h_input_tokens`), so repeated `snip` calls within an hour serve it as
+  (≈10×-cheaper) cache reads. Hence: batch your `snip` usage, and the per-call $ cost
+  after the first is far below the raw token figure. The timer line's `(N cached)`
+  split makes this visible — it turned out to be the most useful of the four levers.
+- **The only way to escape the baseline** is the raw Messages API (just our prompt,
+  no CC system prompt) — but that needs separate API billing, which the Max plan
+  doesn't cover. Out of scope by decision.
+
 ## Speed budget
 
 - Payload: status always; diffs capped at ~200 lines/file; binaries elided. Keeps the
