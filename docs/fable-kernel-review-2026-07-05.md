@@ -14,7 +14,19 @@ observability), so they're worth fixing before the axes build on them.
 
 ---
 
-## F1 — Caps transferred over IPC lose their derivation identity (High, verified)
+## F1 — Caps transferred over IPC lose their derivation identity (High, verified) — **reply-mint half FIXED 2026-07-05**
+
+**FIXED (2026-07-05), reply-mint half only:** `reply_handle_for`
+(`kernel/src/syscall/ipc.rs`) now mints one `cap_id`, stores it via
+`insert_once_with_id`, and emits that same id — so the reply cap's
+`CapEvent::Transferred` names an id the kernel actually holds (until the reply
+consumes it) instead of a fresh id matching no slot. No new host test: the
+mechanism (`insert_once_with_id`) is already host-tested in `kernel-core`, and the
+bug is not wire-distinguishable (both versions emit *a* cap_id) — verified by
+build. **The handout half remains open** (a badged cap moved to a client via
+`Reply`/`take_reply` still lands with `cap_id 0` because `StashedReply` carries a
+bare `Capability`); closing it means threading `cap_id`+`parent_cap_id` through the
+transfer, the same "carry the whole holding across the boundary" fix F6 pointed at.
 
 **The defect.** A capability handed to another process through `Reply`
 (cap-in-reply, the badge-handout pattern) or the reply-cap mint lands in the
