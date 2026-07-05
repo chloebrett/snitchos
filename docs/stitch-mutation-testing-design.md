@@ -39,7 +39,10 @@ that fall out of owning the whole language.
    mutated AST: milliseconds, no build step. Stitch mutation testing runs at
    mutants-per-second where the Rust tool runs at mutants-per-minute. (Devlog
    angle: "mutation testing my toy language — faster than the industrial tool,
-   because there's no compiler in the loop.")
+   because there's no compiler in the loop.") *Compounding lever:* the tool re-runs
+   the interpreter once per mutant, so interpreter throughput **is** mutants/sec — a
+   **release build** of the interpreter (a potential ~20x win, basically free — see
+   the snemu precedent) directly multiplies this. Today everything runs in debug.
 
 ## Mechanism sketch
 
