@@ -12,7 +12,7 @@ use crate::ast::{
     Arg, BinOp, Expr, Field, Item, MatchArm, Method, MethodModifier, Param, Pattern, Stmt,
     StrSegment, Type, UnOp, Variant,
 };
-use crate::lexer::{Span, StrPart, Token, TokenKind, lex};
+use crate::lexer::{LexError, Span, StrPart, Token, TokenKind, lex};
 
 /// A parse error: a human-readable message plus the source [`Span`] it points
 /// at (defaulted to the start of input for errors not yet span-attributed).
@@ -57,6 +57,9 @@ const NO_SEMICOLONS: &str = "Stitch has no semicolons — remove the `;` (statem
 /// Returns `Err` on an unexpected/missing token or trailing input.
 pub fn parse(src: &str) -> Result<Expr, ParseError> {
     let mut parser = Parser::new(src);
+    if let Some(err) = parser.lex_error() {
+        return Err(err);
+    }
     let expr = parser.parse_expr(0)?;
     if matches!(parser.peek(), TokenKind::Semicolon) {
         return Err(ParseError::new(NO_SEMICOLONS));
@@ -71,6 +74,9 @@ pub fn parse(src: &str) -> Result<Expr, ParseError> {
 /// Returns `Err` on a malformed declaration.
 pub fn parse_program(src: &str) -> Result<Vec<Item>, ParseError> {
     let mut parser = Parser::new(src);
+    if let Some(err) = parser.lex_error() {
+        return Err(err);
+    }
     let mut items = Vec::new();
     while !matches!(parser.peek(), TokenKind::Eof) {
         items.push(parser.parse_item()?);
@@ -300,15 +306,26 @@ fn binding_power(op: BinOp) -> (u8, u8) {
 
 struct Parser {
     tokens: Vec<Token>,
+    lex_errors: Vec<LexError>,
     pos: usize,
 }
 
 impl Parser {
     fn new(src: &str) -> Self {
+        let lexed = lex(src);
         Self {
-            tokens: lex(src),
+            tokens: lexed.tokens,
+            lex_errors: lexed.errors,
             pos: 0,
         }
+    }
+
+    /// The first lexing error (if any), as a parse error — so malformed input is
+    /// surfaced instead of silently miscompiling.
+    fn lex_error(&self) -> Option<ParseError> {
+        self.lex_errors
+            .first()
+            .map(|e| ParseError::at(e.message.clone(), e.span))
     }
 
     fn peek(&self) -> &TokenKind {
@@ -1409,6 +1426,16 @@ mod tests {
         // The stray `2` starts at byte 2 → line 1, column 3.
         let err = parse("1 2").expect_err("a trailing token is a parse error");
         assert_eq!(err.render("1 2"), "1:3: expected end of input\n1 2\n  ^");
+    }
+
+    #[test]
+    fn a_lexing_error_surfaces_as_a_parse_error() {
+        // A stray char must not be silently dropped — both entry points surface
+        // the lex error (without the wiring, `parse_program` returns `Ok([])`).
+        let expr_err = parse("`").expect_err("a stray char fails expression parse");
+        assert!(expr_err.message.contains("unexpected character"), "got: {}", expr_err.message);
+        let prog_err = parse_program("`").expect_err("a stray char fails program parse");
+        assert!(prog_err.message.contains("unexpected character"), "got: {}", prog_err.message);
     }
 
     #[test]

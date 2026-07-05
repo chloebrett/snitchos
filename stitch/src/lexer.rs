@@ -69,6 +69,22 @@ impl PartialEq<TokenKind> for Token {
     }
 }
 
+/// A lexical error: a message plus the source [`Span`] it points at.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct LexError {
+    pub message: String,
+    pub span: Span,
+}
+
+/// The result of lexing: the full token stream plus any errors. Lexing is
+/// non-fatal — a malformed literal still yields a token (a zero value) and an
+/// unknown character is skipped, but each is *recorded* here, so the parser can
+/// surface errors rather than silently miscompiling.
+pub struct Lexed {
+    pub tokens: Vec<Token>,
+    pub errors: Vec<LexError>,
+}
+
 /// A lexical token's kind (the "what", without the "where").
 #[derive(Debug, PartialEq, Clone)]
 pub enum TokenKind {
@@ -160,13 +176,17 @@ fn keyword(word: &str) -> Option<TokenKind> {
 /// Tokenize Stitch source text. Each branch delegates to a kind-specific
 /// helper; the helpers all consume their own characters from `chars`.
 #[must_use]
-pub fn lex(src: &str) -> Vec<Token> {
+pub fn lex(src: &str) -> Lexed {
     let mut tokens = Vec::new();
+    let mut errors = Vec::new();
     let mut chars = Cursor::new(src);
     while let Some(c) = chars.peek() {
         let start = chars.offset();
-        let kind = if c.is_ascii_digit() {
-            Some(lex_number(&mut chars))
+        let kind = if c.is_whitespace() {
+            chars.next();
+            None
+        } else if c.is_ascii_digit() {
+            Some(lex_number(&mut chars, start, &mut errors))
         } else if c.is_ascii_alphabetic() || c == '_' {
             Some(lex_word(&mut chars))
         } else if c == '"' {
@@ -176,10 +196,15 @@ pub fn lex(src: &str) -> Vec<Token> {
         } else if c == '/' && matches!(chars.peek2(), Some('/' | '*')) {
             skip_comment(&mut chars);
             None
+        } else if let Some(kind) = lex_operator(&mut chars) {
+            Some(kind)
         } else {
-            // An operator/punctuation token, or `None` if `lex_operator`
-            // consumed an unrecognized char (lenient; lexer errors are A3).
-            lex_operator(&mut chars)
+            // `lex_operator` consumed a non-whitespace char it didn't recognize.
+            errors.push(LexError {
+                message: format!("unexpected character `{c}`"),
+                span: Span { start, end: chars.offset() },
+            });
+            None
         };
         if let Some(kind) = kind {
             let end = chars.offset();
@@ -188,7 +213,7 @@ pub fn lex(src: &str) -> Vec<Token> {
     }
     let end = src.len();
     tokens.push(Token { kind: TokenKind::Eof, span: Span { start: end, end } });
-    tokens
+    Lexed { tokens, errors }
 }
 
 /// Read a run of `[A-Za-z0-9_]` from the cursor (the tail of a word).
@@ -207,7 +232,7 @@ fn read_word(chars: &mut Cursor<'_>) -> String {
 
 /// Lex an int or float literal. `_` separators are ignored; a `.` only
 /// starts a fraction when a digit follows, so `0..n` leaves the dots alone.
-fn lex_number(chars: &mut Cursor<'_>) -> TokenKind {
+fn lex_number(chars: &mut Cursor<'_>, start: usize, errors: &mut Vec<LexError>) -> TokenKind {
     let mut text = String::new();
     let mut is_float = false;
     loop {
@@ -229,10 +254,29 @@ fn lex_number(chars: &mut Cursor<'_>) -> TokenKind {
             _ => break,
         }
     }
+    let end = chars.offset();
     if is_float {
-        TokenKind::Float(text.parse().unwrap_or(0.0))
+        text.parse().map_or_else(
+            |_| {
+                errors.push(LexError {
+                    message: format!("invalid float literal `{text}`"),
+                    span: Span { start, end },
+                });
+                TokenKind::Float(0.0)
+            },
+            TokenKind::Float,
+        )
     } else {
-        TokenKind::Int(text.parse().unwrap_or(0))
+        text.parse().map_or_else(
+            |_| {
+                errors.push(LexError {
+                    message: format!("integer literal `{text}` out of range"),
+                    span: Span { start, end },
+                });
+                TokenKind::Int(0)
+            },
+            TokenKind::Int,
+        )
     }
 }
 
@@ -406,51 +450,70 @@ fn lex_operator(chars: &mut Cursor<'_>) -> Option<TokenKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StrPart, TokenKind, lex};
+    use super::{StrPart, Token, TokenKind, lex};
+
+    /// Lex and keep only the tokens (dropping the error channel) — for the token
+    /// tests that assert on token shape.
+    fn toks(src: &str) -> Vec<Token> {
+        lex(src).tokens
+    }
+
+    #[test]
+    fn lex_reports_a_stray_char_and_an_overflowing_int() {
+        use super::Span;
+        // A backtick is not a Stitch token — reported, not silently dropped.
+        let stray = "`";
+        let errs = lex(stray).errors;
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].span, Span { start: 0, end: 1 });
+        // A literal beyond i64::MAX is reported, not silently clamped to 0.
+        let over = "99999999999999999999";
+        assert_eq!(lex(over).errors.len(), 1);
+    }
 
     #[test]
     fn tokens_carry_byte_offset_spans() {
         use super::{Span, TokenKind};
         // "ab + 1": ident at bytes 0..2, '+' at 3..4, int at 5..6, Eof at 6..6.
-        let toks = lex("ab + 1");
-        assert_eq!(toks[0].kind, TokenKind::Ident("ab".to_string()));
-        assert_eq!(toks[0].span, Span { start: 0, end: 2 });
-        assert_eq!(toks[1].kind, TokenKind::Plus);
-        assert_eq!(toks[1].span, Span { start: 3, end: 4 });
-        assert_eq!(toks[2].kind, TokenKind::Int(1));
-        assert_eq!(toks[2].span, Span { start: 5, end: 6 });
-        assert_eq!(toks[3].kind, TokenKind::Eof);
-        assert_eq!(toks[3].span, Span { start: 6, end: 6 });
+        let tokens = toks("ab + 1");
+        assert_eq!(tokens[0].kind, TokenKind::Ident("ab".to_string()));
+        assert_eq!(tokens[0].span, Span { start: 0, end: 2 });
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[1].span, Span { start: 3, end: 4 });
+        assert_eq!(tokens[2].kind, TokenKind::Int(1));
+        assert_eq!(tokens[2].span, Span { start: 5, end: 6 });
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
+        assert_eq!(tokens[3].span, Span { start: 6, end: 6 });
     }
 
     #[test]
     fn lexes_an_integer_literal() {
-        assert_eq!(lex("42"), vec![TokenKind::Int(42), TokenKind::Eof]);
+        assert_eq!(toks("42"), vec![TokenKind::Int(42), TokenKind::Eof]);
     }
 
     #[test]
     fn ignores_underscores_in_int_literals() {
-        assert_eq!(lex("1_000"), vec![TokenKind::Int(1000), TokenKind::Eof]);
+        assert_eq!(toks("1_000"), vec![TokenKind::Int(1000), TokenKind::Eof]);
     }
 
     #[test]
     fn lexes_a_float_literal() {
-        assert_eq!(lex("2.5"), vec![TokenKind::Float(2.5), TokenKind::Eof]);
+        assert_eq!(toks("2.5"), vec![TokenKind::Float(2.5), TokenKind::Eof]);
     }
 
     #[test]
     fn lexes_an_identifier() {
         assert_eq!(
-            lex("foo_bar2"),
+            toks("foo_bar2"),
             vec![TokenKind::Ident("foo_bar2".to_string()), TokenKind::Eof]
         );
     }
 
     #[test]
     fn lexes_keywords_and_bool_literals() {
-        assert_eq!(lex("let"), vec![TokenKind::Let, TokenKind::Eof]);
+        assert_eq!(toks("let"), vec![TokenKind::Let, TokenKind::Eof]);
         assert_eq!(
-            lex("true false"),
+            toks("true false"),
             vec![TokenKind::Bool(true), TokenKind::Bool(false), TokenKind::Eof]
         );
     }
@@ -458,7 +521,7 @@ mod tests {
     #[test]
     fn a_non_keyword_word_stays_an_identifier() {
         assert_eq!(
-            lex("letter"),
+            toks("letter"),
             vec![TokenKind::Ident("letter".to_string()), TokenKind::Eof]
         );
     }
@@ -470,7 +533,7 @@ mod tests {
             RParen, Semicolon, Slash, Star,
         };
         assert_eq!(
-            lex("+ * / % ( ) { } [ ] , ; @ :"),
+            toks("+ * / % ( ) { } [ ] , ; @ :"),
             vec![
                 Plus, Star, Slash, Percent, LParen, RParen, LBrace, RBrace, LBracket, RBracket,
                 Comma, Semicolon, At, Colon, Eof,
@@ -485,7 +548,7 @@ mod tests {
             QuestionDot,
         };
         assert_eq!(
-            lex("- -> = == => < <= > >= != | |> ? ?."),
+            toks("- -> = == => < <= > >= != | |> ? ?."),
             vec![
                 Minus, Arrow, Eq, EqEq, FatArrow, Lt, Le, Gt, Ge, NotEq, Bar, Pipe, Question,
                 QuestionDot, Eof,
@@ -496,21 +559,21 @@ mod tests {
     #[test]
     fn lexes_the_dot_family() {
         use TokenKind::{Dot, DotDot, DotDotEq, Eof};
-        assert_eq!(lex(". .. ..="), vec![Dot, DotDot, DotDotEq, Eof]);
+        assert_eq!(toks(". .. ..="), vec![Dot, DotDot, DotDotEq, Eof]);
     }
 
     #[test]
     fn lexes_the_cross_pipe() {
         use TokenKind::{CrossPipe, Eof, Pipe};
         // `~>` is its own token, distinct from the in-process `|>`.
-        assert_eq!(lex("|> ~>"), vec![Pipe, CrossPipe, Eof]);
+        assert_eq!(toks("|> ~>"), vec![Pipe, CrossPipe, Eof]);
     }
 
     #[test]
     fn a_range_glues_to_its_operands() {
         use TokenKind::{DotDot, Eof, Ident, Int};
         assert_eq!(
-            lex("0..n"),
+            toks("0..n"),
             vec![Int(0), DotDot, Ident("n".to_string()), Eof]
         );
     }
@@ -518,14 +581,14 @@ mod tests {
     #[test]
     fn lexes_placeholders() {
         use TokenKind::{Eof, Placeholder};
-        assert_eq!(lex("$"), vec![Placeholder(None), Eof]);
-        assert_eq!(lex("$a"), vec![Placeholder(Some("a".to_string())), Eof]);
+        assert_eq!(toks("$"), vec![Placeholder(None), Eof]);
+        assert_eq!(toks("$a"), vec![Placeholder(Some("a".to_string())), Eof]);
     }
 
     #[test]
     fn lexes_a_plain_string() {
         assert_eq!(
-            lex("\"hello\""),
+            toks("\"hello\""),
             vec![TokenKind::Str(vec![StrPart::Lit("hello".to_string())]), TokenKind::Eof]
         );
     }
@@ -534,7 +597,7 @@ mod tests {
     fn processes_string_escapes() {
         // source: "a\nb\"c"  → a, newline, b, quote, c
         assert_eq!(
-            lex("\"a\\nb\\\"c\""),
+            toks("\"a\\nb\\\"c\""),
             vec![
                 TokenKind::Str(vec![StrPart::Lit("a\nb\"c".to_string())]),
                 TokenKind::Eof
@@ -546,7 +609,7 @@ mod tests {
     fn lexes_string_interpolation() {
         // source: "hi {name}!"
         assert_eq!(
-            lex("\"hi {name}!\""),
+            toks("\"hi {name}!\""),
             vec![
                 TokenKind::Str(vec![
                     StrPart::Lit("hi ".to_string()),
@@ -562,20 +625,20 @@ mod tests {
     fn escapes_literal_braces() {
         // source: "{{x}}" → the literal text {x}
         assert_eq!(
-            lex("\"{{x}}\""),
+            toks("\"{{x}}\""),
             vec![TokenKind::Str(vec![StrPart::Lit("{x}".to_string())]), TokenKind::Eof]
         );
     }
 
     #[test]
     fn skips_line_comments() {
-        assert_eq!(lex("1 // comment\n2"), vec![TokenKind::Int(1), TokenKind::Int(2), TokenKind::Eof]);
+        assert_eq!(toks("1 // comment\n2"), vec![TokenKind::Int(1), TokenKind::Int(2), TokenKind::Eof]);
     }
 
     #[test]
     fn skips_nested_block_comments() {
         assert_eq!(
-            lex("1 /* a /* nested */ b */ 2"),
+            toks("1 /* a /* nested */ b */ 2"),
             vec![TokenKind::Int(1), TokenKind::Int(2), TokenKind::Eof]
         );
     }
@@ -583,7 +646,7 @@ mod tests {
     #[test]
     fn a_bare_slash_still_divides() {
         assert_eq!(
-            lex("1 / 2"),
+            toks("1 / 2"),
             vec![TokenKind::Int(1), TokenKind::Slash, TokenKind::Int(2), TokenKind::Eof]
         );
     }
