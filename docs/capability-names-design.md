@@ -151,11 +151,18 @@ A genuinely cross-cutting change — the reason it's a milestone, not a tweak:
 
 ## Increments
 
-1. **The object carries a name, and `hold` shows it.** `Endpoint` + `EndpointCreate`
-   name arg + `CapDesc`/`CapList` field + `CapInfo` + `hold`'s `for` column. Name
-   `init`'s FS endpoint `"fs"`. The visible win: `hold` disambiguates endpoints.
-   (Kernel + ABI host-tested where possible; on-metal itest asserts the `for=fs`
-   row via the UART, mirroring `stitch-hold-lists-caps`.)
+1. **The object carries a name, and `hold` shows it.** ✅ **DONE.** `CapDesc` gains
+   a NUL-padded `name: [u8; CAP_NAME_LEN]` (+ `pack_name`/`name_str` helpers, an
+   array `Pod` impl in `hitch-pod`); the kernel `Endpoint` object stores it,
+   `EndpointCreate` takes it at `a1`/`a2` (required, UTF-8-validated), and
+   `CapTable::describe(name_of)` resolves each endpoint cap's name via a kernel
+   resolver reading the endpoint table. Userspace `endpoint_create(name)` +
+   `RuntimePlatform::hold` lift it into `CapInfo.name`; `hold` emits a `for` field
+   the table renders. `init`/the shared workload endpoint is named `"fs"`. Itest
+   `stitch-hold-shows-endpoint-name` asserts the rendered `│ … Endpoint │ fs │ …`
+   row on the UART. Host-tested end-to-endpoints (abi, kernel-core describe,
+   stitch); 0 missed mutants on the pure helpers; regressions (endpoint-create,
+   init-fs, grant/revoke, hold-lists) all green.
 2. **`CapEvent`s carry the name.** Thread the name through the three emit sites +
    the wire frame + the collector's OTLP mapping. The observability win: a *named*
    derivation tree in Tempo. Itest asserts a `CapEvent` frame carries the name.

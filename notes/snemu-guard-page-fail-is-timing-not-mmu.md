@@ -143,20 +143,26 @@ telemetry, so there's no crash frame to key on today.
    it.
 3. **My round-2 "scheduler starvation / Heisenbug"** — **wrong, a measurement
    artifact.** I concluded the guard task was starved (never scheduled) because
-   `cargo xtask snemu-boot --frames | grep …` returned 0 `ContextSwitch` / 0 `Log`
-   frames at high step counts. Those were **empty pipes**, not real zeros: the
-   `--frames` text dump through a shell pipe silently produced nothing at large
-   `--max-steps` (yet worked at 3M). I read "no output" as "the task never runs."
-   The in-process oracle (which decodes frames directly, no shell pipe) shows 8299
-   frames *with* context switches *and* heartbeats, and the UART shows the guard
-   faulting — so the task runs fine.
+   `cargo xtask snemu-boot --frames … 2>/dev/null | grep …` returned 0
+   `ContextSwitch` / 0 `Log` frames. I *thought* the cause was scale (empty pipes
+   at large `--max-steps`, since a 3M run had shown frames). **The real cause was
+   dumber and now fixed:** `snemu-boot`'s `--frames` dump was written to
+   **stderr**, and I was silencing build noise with `2>/dev/null` — so I discarded
+   the very data I asked for. The 3M run that "worked" used `2>&1`; every empty run
+   used `2>/dev/null`. Step count was a pure confound. (Fix: `snemu/src/main.rs`
+   `report_frames` now prints the dump to **stdout** — the requested data belongs
+   there; diagnostics stay on stderr. Verified: the same 60M run now yields 976
+   `ContextSwitch` frames through `2>/dev/null`.) The in-process oracle decodes
+   frames directly (no CLI, no stream to misroute), which is why it was right all
+   along: 8299 frames *with* context switches *and* heartbeats.
 
 **Lessons:**
-- Trust the **in-process** oracle (`snemu-diff`) over `snemu-boot --frames`
-  piped through the shell. The latter's stdout is unreliable at high step counts
-  — treat an empty pipe as "no measurement," never as "count is zero."
 - A conclusion built on the *absence* of output needs the output path proven to
-  work at that scale first. "0 frames" and "the pipe broke" look identical.
+  work first. "0 frames" and "I threw the frames away with `2>/dev/null`" look
+  identical on a terminal. Check *which* stream your data is on before trusting a
+  zero.
+- Prefer the **in-process** oracle (`snemu-diff`) over the `snemu-boot` CLI for
+  measurement: no stream to misroute, no shell in the middle.
 
 ## Bottom line
 
