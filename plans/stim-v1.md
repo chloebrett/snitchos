@@ -1,6 +1,15 @@
 # Plan: stim v1 — a minimal modal editor as a Stitch program
 
-**Status**: Active
+**Status**: **PAUSED (2026-07-05)** — blocked pending [Stitch core
+redesign](stitch-core-redesign.md) Phases A+B (spans + a reified evaluator with
+fuel/trampoline). stim is built on the *rebuilt* foundation, not the current
+tree-walker, to avoid rework. The **stim-vs-bytecode-VM** ordering is decided at
+the redesign's post-Phase-D decision point (informed by the Phase-B leak finding).
+Group-1 primitive Step 1.1 (`Str.slice`) already landed and is foundation-agnostic;
+the remaining `List` primitives may fold into the redesign or resume after A+B.
+When resuming: B4's trampoline may let the driver loop (Step 4.1) be Stitch, not a
+native.
+
 **Lands on**: `main`, incrementally (project convention: no feature branches;
 the user commits each known-good increment). The five groups below are the
 natural commit/review milestones.
