@@ -455,6 +455,10 @@ enum DiagramTarget {
     ItestMatrix,
     /// Capability derivation tree, folded from a snemu boot's `CapEvent` frames.
     Caps,
+    /// Span call-graph, folded from a snemu boot's `SpanStart` frames.
+    Trace,
+    /// Scheduler task-transition graph, from a snemu boot's `ContextSwitch` frames.
+    Switches,
     /// Render the hand-drawn diagram docs' mermaid to local SVGs (needs `mmdc`).
     Svg,
 }
@@ -671,6 +675,8 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
             DiagramTarget::Caps => diagram_cmd::caps(workload.as_deref(), steps),
+            DiagramTarget::Trace => diagram_cmd::trace(workload.as_deref(), steps),
+            DiagramTarget::Switches => diagram_cmd::switches(workload.as_deref(), steps),
             DiagramTarget::Svg => diagram_cmd::svg(),
         },
         Cmd::Loc => loc::run(),

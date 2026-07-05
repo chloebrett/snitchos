@@ -126,6 +126,20 @@ decode path — no re-parsing, no bespoke reader. Two input modes:
 
 B2 has **no `--check` mode** — it's a snapshot of a run, not a contract.
 
+**`trace` + `switches` shipped (fixed-budget B2 folds).** Both collapse-by-key so
+they stay bounded regardless of run length, and both use the `Graph` model's new
+labelled edges. `diagram::trace::span_call_graph` folds `SpanStart` frames into a
+graph of span *names* (resolved via `StringRegister`), parent→child, edges
+labelled with occurrence count, root spans (`parent == SpanId(0)`) styled — it
+surfaced that SnitchOS spans are mostly flat (only `console_init`/`telemetry_init`
+nest under `kernel.boot`). `diagram::switches::transition_graph` folds
+`ContextSwitch` frames into a task→task graph, edges labelled with hand-off
+count, nodes named via `ThreadRegister` — on `--workload demo` it shows hart 1's
+`main`↔`probe` ping-pong dominating. Both boot via `snemu_diff::collect_frames`
+(fixed `--steps`, no quiescence — the collapse handles boundedness); richest
+under `--workload demo`. Write `docs/generated/{trace,switches}.md` + gitignored
+SVGs; not gated.
+
 **`caps` shipped (first B2 target).** `diagram::caps::derivation_tree(&[OwnedFrame])`
 folds `CapEvent` frames by `parent_cap_id → cap_id` into a top-down `Graph`
 (TDD, pure). xtask's `diagram caps` sources the frames by booting under snemu

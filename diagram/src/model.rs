@@ -15,6 +15,12 @@ struct Node {
     classes: Vec<String>,
 }
 
+struct Edge {
+    from: String,
+    to: String,
+    label: Option<String>,
+}
+
 /// A named style shared by nodes carrying its name — a mermaid `classDef` plus
 /// the equivalent DOT node attributes, so roots (etc.) look the same in both
 /// backends.
@@ -30,7 +36,7 @@ struct ClassDef {
 pub struct Graph {
     direction: Direction,
     nodes: Vec<Node>,
-    edges: Vec<(String, String)>,
+    edges: Vec<Edge>,
     classes: Vec<ClassDef>,
 }
 
@@ -52,7 +58,15 @@ impl Graph {
     }
 
     pub fn edge(&mut self, from: &str, to: &str) {
-        self.edges.push((from.to_string(), to.to_string()));
+        self.edges.push(Edge { from: from.to_string(), to: to.to_string(), label: None });
+    }
+
+    pub fn edge_labeled(&mut self, from: &str, to: &str, label: &str) {
+        self.edges.push(Edge {
+            from: from.to_string(),
+            to: to.to_string(),
+            label: Some(label.to_string()),
+        });
     }
 
     /// Register a style class: `mermaid` is the `classDef` body (e.g.
@@ -72,7 +86,10 @@ impl Graph {
             Direction::TopDown => "graph TD",
         };
         let nodes = self.nodes.iter().map(|n| format!("    {}[\"{}\"]", n.id, n.label));
-        let edges = self.edges.iter().map(|(from, to)| format!("    {from} --> {to}"));
+        let edges = self.edges.iter().map(|e| match &e.label {
+            Some(label) => format!("    {} -->|{label}| {}", e.from, e.to),
+            None => format!("    {} --> {}", e.from, e.to),
+        });
         let classdefs =
             self.classes.iter().map(|c| format!("    classDef {} {};", c.name, c.mermaid));
         let assignments = self.classes.iter().filter_map(|c| {
@@ -109,7 +126,10 @@ impl Graph {
             let attrs = if attrs.is_empty() { String::new() } else { format!(" {}", attrs.join(" ")) };
             format!("    \"{}\" [label=\"{}\"{attrs}];", n.id, n.label)
         });
-        let edges = self.edges.iter().map(|(from, to)| format!("    \"{from}\" -> \"{to}\";"));
+        let edges = self.edges.iter().map(|e| match &e.label {
+            Some(label) => format!("    \"{}\" -> \"{}\" [label=\"{label}\"];", e.from, e.to),
+            None => format!("    \"{}\" -> \"{}\";", e.from, e.to),
+        });
         std::iter::once(format!("digraph {{\n    rankdir={rankdir};"))
             .chain(nodes)
             .chain(edges)
@@ -164,6 +184,23 @@ mod tests {
 | default-boot-starts-init | init (default) |
 ";
         assert_eq!(t.to_markdown(), expected);
+    }
+
+    #[test]
+    fn labeled_edges_render_in_both_backends() {
+        let mut g = Graph::new(Direction::LeftRight);
+        g.node("a", "A");
+        g.node("b", "B");
+        g.edge_labeled("a", "b", "42");
+
+        assert_eq!(
+            g.to_mermaid(),
+            "graph LR\n    a[\"A\"]\n    b[\"B\"]\n    a -->|42| b\n",
+        );
+        assert_eq!(
+            g.to_dot(),
+            "digraph {\n    rankdir=LR;\n    \"a\" [label=\"A\"];\n    \"b\" [label=\"B\"];\n    \"a\" -> \"b\" [label=\"42\"];\n}\n",
+        );
     }
 
     #[test]

@@ -11,3 +11,5 @@ pub mod deps;
 pub mod itest_matrix;
 pub mod markdown;
 pub mod model;
+pub mod switches;
+pub mod trace;

@@ -67,6 +67,7 @@ const HAND_DRAWN: &[&str] = &[
     "docs/boot-handoff.md",
     "docs/ipc-call-reply.md",
     "docs/stitch-pipeline.md",
+    "docs/supervision-lifecycle.md",
 ];
 
 /// Render every hand-drawn diagram doc's mermaid to a local SVG (gitignored)
@@ -150,6 +151,66 @@ fn command_exists(cmd: &str) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+/// Generate the span call-graph: boot under snemu, fold `SpanStart` frames into
+/// a name-collapsed parent→child graph. A runtime snapshot — written, not gated.
+pub fn trace(workload: Option<&str>, steps: u64) -> ExitCode {
+    render_snapshot(
+        workload,
+        steps,
+        "trace",
+        "docs/generated/trace.md",
+        "Span call-graph",
+        diagram::trace::span_call_graph,
+    )
+}
+
+/// Generate the scheduler transition graph: boot under snemu, fold `ContextSwitch`
+/// frames into a task→task graph with hand-off counts.
+pub fn switches(workload: Option<&str>, steps: u64) -> ExitCode {
+    render_snapshot(
+        workload,
+        steps,
+        "switches",
+        "docs/generated/switches.md",
+        "Scheduler task-transition graph",
+        diagram::switches::transition_graph,
+    )
+}
+
+/// Shared body for the fixed-budget B2 folds (`trace`, `switches`): boot under
+/// snemu, run `fold` over the frames, write `<doc>` + a gitignored SVG.
+fn render_snapshot(
+    workload: Option<&str>,
+    steps: u64,
+    target: &str,
+    doc_rel: &str,
+    title: &str,
+    fold: impl Fn(&[protocol::stream::OwnedFrame]) -> diagram::model::Graph,
+) -> ExitCode {
+    eprintln!(
+        "diagram {target}: booting {} under snemu ({steps} steps)…",
+        workload.unwrap_or("init (default)")
+    );
+    let frames = match crate::snemu_diff::collect_frames(workload, steps) {
+        Ok(frames) => frames,
+        Err(err) => {
+            eprintln!("diagram {target}: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let graph = fold(&frames);
+    let body = format!("```mermaid\n{}```\n", graph.to_mermaid());
+    let doc = render_doc(title, target, &body);
+
+    let path = workspace_root().join(doc_rel);
+    let written = write_doc(&path, &doc);
+    if written != ExitCode::SUCCESS {
+        return written;
+    }
+    render_svg(&graph.to_dot(), &path.with_extension("svg"));
+    ExitCode::SUCCESS
 }
 
 /// Generate the capability derivation tree: boot under snemu, fold its
