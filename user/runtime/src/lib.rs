@@ -438,6 +438,30 @@ pub fn cap_list(dst: &mut [snitchos_abi::CapDesc]) -> usize {
     if ret == usize::MAX { 0 } else { ret }
 }
 
+/// Revoke every capability **derived from** the holding at `handle` — the
+/// transitive reclaim (the `Revoke` syscall). Returns the number of descendant
+/// caps invalidated, or `usize::MAX` if `handle` resolves nothing in the caller's
+/// table (the holding itself always survives). Unlike [`Endpoint::revoke_derived`]
+/// this takes a raw handle — revocation isn't endpoint-specific — and preserves
+/// the "no such handle" sentinel so a caller (the shell's `revoke`) can tell it
+/// apart from "revoked zero descendants". Backs the shell's `revoke`; ungated,
+/// because giving up authority you granted grants nothing.
+#[must_use]
+pub fn revoke(handle: usize) -> usize {
+    let ret: usize;
+    // SAFETY: `ecall`; the kernel resolves `handle` in the caller's own table and
+    // revokes every cap derived from it across all process tables, returning the
+    // count (or usize::MAX if the handle resolves nothing). No pointer is deref'd.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::Revoke as usize,
+            inlateout("a0") handle => ret,
+        );
+    }
+    ret
+}
+
 /// Read the monotonic clock — the kernel tick counter (the `ClockNow` syscall),
 /// at the platform timebase (10 MHz on QEMU `virt` → 1 tick = 0.1 µs). Lets a
 /// program time its own work; subtract two reads for an elapsed-tick duration.
