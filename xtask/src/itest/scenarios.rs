@@ -3588,3 +3588,23 @@ pub fn priorities_ordered_but_fair(h: &mut View) -> Result<(), String> {
 
     Ok(())
 }
+
+/// The viewer binary receives a scoped READ cap for a file (delegated by
+/// view-demo) and reads it, emitting `snitchos.viewer.bytes_read` with the
+/// number of bytes it received. Proves: cap delegation across the Spawn
+/// boundary, the Read IPC path through the FS, and the powerbox hand-off.
+pub fn viewer_reads_delegated_file(h: &mut View) -> Result<(), String> {
+    let frame = h
+        .wait_for(SEC * 20, is_metric_named("snitchos.viewer.bytes_read"))
+        .ok_or("no snitchos.viewer.bytes_read metric within 20s — viewer didn't run or read failed")?;
+    let value = match frame {
+        OwnedFrame::Metric { value, .. } => value,
+        _ => return Err("matched non-metric (impossible)".to_string()),
+    };
+    if value < 1 {
+        return Err(format!(
+            "viewer.bytes_read = {value}, expected ≥ 1 (file was empty or read returned 0)"
+        ));
+    }
+    Ok(())
+}

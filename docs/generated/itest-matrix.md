@@ -106,6 +106,7 @@
 | userspace-bad-ptr | userspace-bad-ptr | wfi | userspace |
 | userspace-cannot-touch-kernel | userspace-fault | wfi | userspace |
 | userspace-quota-refused | userspace-span-flood | wfi | userspace |
+| viewer-reads-delegated-file | view-demo | cpu | userspace |
 | virtio-storm | virtio-storm | cpu | smp, stress |
 | wait-any-reaps-exiting-child | wait-any | cpu | userspace |
 | two-userspace-workers-round-robin | workers | cpu | userspace |

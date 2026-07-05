@@ -115,6 +115,11 @@ pub enum WorkloadKind {
     /// `/bin/spawnee` off the filesystem and spawns it from the buffer via the
     /// `SpawnImage` syscall (vs the embedded `Spawn` registry).
     SpawnImage,
+    /// Powerbox viewer demo: a seeded FS server + `view-demo` launcher. The
+    /// launcher connects to the FS, looks up a file with READ-only rights, then
+    /// spawns the viewer (`Spawn` registry id 6) with that attenuated cap
+    /// delegated. First end-to-end demo of the powerbox hand-off pattern.
+    ViewerDemo,
     /// Typed-interface end-to-end: a client reads `/bin/manifest_demo`'s
     /// `user.iface` xattr off the seeded FS, `decode_manifest`s it, and checks
     /// the shape — proving the `#[entry]` → note → xattr → IPC → decode chain.
@@ -292,6 +297,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "stitch-repl" => Some(WorkloadKind::StitchRepl),
             "stitch-fs" => Some(WorkloadKind::StitchFs),
             "spawn-image" => Some(WorkloadKind::SpawnImage),
+            "view-demo" => Some(WorkloadKind::ViewerDemo),
             "manifest-iface" => Some(WorkloadKind::ManifestIface),
             "manifest-satisfy" => Some(WorkloadKind::ManifestSatisfy),
             "probe" => Some(WorkloadKind::Probe),
@@ -446,6 +452,11 @@ mod tests {
     #[test]
     fn selects_spawn_image() {
         assert_eq!(select("workload=spawn-image"), Some(WorkloadKind::SpawnImage));
+    }
+
+    #[test]
+    fn selects_viewer_demo() {
+        assert_eq!(select("workload=view-demo"), Some(WorkloadKind::ViewerDemo));
     }
 
     #[test]

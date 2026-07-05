@@ -49,6 +49,8 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("notify_waiter", "SNITCHOS_NOTIFY_WAITER_ELF"),
     ("notify_signaller", "SNITCHOS_NOTIFY_SIGNALLER_ELF"),
     ("iface-reader", "SNITCHOS_IFACE_READER_ELF"),
+    ("viewer", "SNITCHOS_VIEWER_ELF"),
+    ("view-demo", "SNITCHOS_VIEW_DEMO_ELF"),
 ];
 
 fn main() {

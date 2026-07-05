@@ -139,6 +139,8 @@ pub static BADGE_HANDOUT_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_BADGE
 pub static FS_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_ELF"));
 pub static FS_SERVER_SEEDED_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_SEEDED_ELF"));
 pub static FS_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_CLIENT_ELF"));
+pub static VIEWER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_VIEWER_ELF"));
+pub static VIEW_DEMO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_VIEW_DEMO_ELF"));
 pub static SPAWN_IMAGE_DEMO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAWN_IMAGE_DEMO_ELF"));
 pub static SATISFIER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SATISFIER_ELF"));
 pub static IFACE_READER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_IFACE_READER_ELF"));
@@ -369,6 +371,10 @@ pub static FS_SERVER_SEEDED: ProgramSpec =
 /// spawns it via `SpawnImage`. Holds `SEND` on the FS endpoint (to read the ELF).
 pub static SPAWN_IMAGE_DEMO: ProgramSpec = ipc_user(SPAWN_IMAGE_DEMO_ELF, Rights::SEND.bits());
 
+/// `workload=view-demo`: powerbox launcher — connects to the seeded FS, looks
+/// up a file with READ rights, spawns the viewer with that cap delegated.
+pub static VIEW_DEMO: ProgramSpec = ipc_user(VIEW_DEMO_ELF, Rights::SEND.bits());
+
 /// `workload=manifest-satisfy`: the generic satisfier. Reads `/bin/fs-probe`'s
 /// declared `needs` off the seeded FS (`user.iface` xattr), matches them against
 /// its own caps via `hitch::satisfy`, and `SpawnImage`s the child with the granted
@@ -499,12 +505,13 @@ pub fn spawn_image_with_caps(
 /// `hello` until those programs land. Phase 1b swaps the id for an executable
 /// File cap read from the FS.
 static SPAWNABLE: &[(&str, &[u8])] = &[
-    ("spawnee", SPAWNEE_ELF),
-    ("memhog", MEMHOG_ELF),
-    ("notify-signaller", NOTIFY_SIGNALLER_ELF),
-    ("spinner", SPINNER_ELF),
-    ("fs-server", FS_SERVER_ELF),
-    ("fs-client", FS_CLIENT_ELF),
+    ("spawnee", SPAWNEE_ELF),         // 0
+    ("memhog", MEMHOG_ELF),           // 1
+    ("notify-signaller", NOTIFY_SIGNALLER_ELF), // 2
+    ("spinner", SPINNER_ELF),         // 3
+    ("fs-server", FS_SERVER_ELF),     // 4
+    ("fs-client", FS_CLIENT_ELF),     // 5
+    ("viewer", VIEWER_ELF),           // 6
 ];
 
 /// Resolve a `Spawn` program id to its `(name, image)`, or `None` if out of range.
@@ -612,6 +619,16 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
         programs: &[
             ProgramSpawn { name: "fs_server", program: &FS_SERVER_SEEDED, priority: Priority::Normal },
             ProgramSpawn { name: "spawn_image_demo", program: &SPAWN_IMAGE_DEMO, priority: Priority::Normal },
+        ],
+    }),
+    // Powerbox viewer demo: seeded FS server + view-demo launcher. view-demo
+    // connects to the FS, looks up a file with READ-only rights, then spawns
+    // the viewer (SPAWNABLE id 6) with that attenuated cap delegated.
+    (WorkloadKind::ViewerDemo, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "fs_server", program: &FS_SERVER_SEEDED, priority: Priority::Normal },
+            ProgramSpawn { name: "view_demo", program: &VIEW_DEMO, priority: Priority::Normal },
         ],
     }),
     // Generic satisfier: the seeded FS server (holding `/bin/fs-probe` + its

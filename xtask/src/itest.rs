@@ -294,6 +294,7 @@ catalog! {
     cpu "revoke-reclaims-a-minted-cap"    scenarios::revoke_reclaims_a_minted_cap   [userspace]  {"endpoint-create"};
     cpu "notify-signal-wakes-waiter"      scenarios::notify_signal_wakes_waiter     [userspace]  {"notify-smoke"};
     cpu "priorities-ordered-but-fair"     scenarios::priorities_ordered_but_fair    [userspace]  {"priorities"};
+    cpu "viewer-reads-delegated-file"     scenarios::viewer_reads_delegated_file    [userspace]  {"view-demo"};
 }
 
 /// Set the process-wide failure-capture transcript depth. Call once at

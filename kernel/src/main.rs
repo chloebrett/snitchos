@@ -440,6 +440,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::BadgeMint)
         | Some(WorkloadKind::BadgeHandout)
         | Some(WorkloadKind::Fs)
+        | Some(WorkloadKind::ViewerDemo)
         // The no-bootarg default boots `init` (userspace, placed on hart 1 via the
         // layout below) — nothing to spawn on hart 0 here.
         | None => {}

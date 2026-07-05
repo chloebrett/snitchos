@@ -123,28 +123,28 @@ Reporting distinguishes the two cases. Unit-tested:
 `kernel_heartbeat_alone_in_only_snemu_is_not_an_invention` (benign) and
 `a_workload_specific_only_snemu_name_is_still_an_invention` (still caught).
 
-Known limitation, documented in-code: this masks a hypothetical snemu bug where
-snemu *fails to halt* and over-emits `kernel.heartbeat`. Future tightening: bound
-the benign pass on the heartbeat **count** (a few, not hundreds) or on snemu
-showing the crash it reached — the panic currently emits only to UART, not
-telemetry, so there's no crash frame to key on today.
+**Robustness tightening — SHIPPED (was the one open limitation).** The benign
+pass used to forgive `kernel.heartbeat`-only-in-snemu *unconditionally*, which
+would mask a hypothetical snemu bug that fails to halt and over-emits heartbeats.
+Closed by [plans/panic-emits-telemetry.md](panic-emits-telemetry.md): the kernel
+panic handler now emits a `Log("kernel panic …")` on the wire, so `invented_names`
+takes a `snemu_crashed` flag (`snemu_reached_crash` = a panic Log is present) and
+forgives `kernel.heartbeat` **only when snemu is proven to have reached the crash**.
+A snemu that ran past where it should have died — heartbeats but no panic frame —
+now correctly FAILs. Verified: `panic-now` and `stack-guard` PASS "…snemu reached
+the crash too (panic frame present)". (Every crashing workload emits the frame:
+the stack-guard family's `report_stack_guard_fault` calls `panic!()`, which runs
+the same handler.)
 
 ## Remaining / follow-ups
 
-1. **Oracle robustness (the one real open item).** The benign-name filter forgives
-   `kernel.heartbeat` in only-snemu unconditionally, so it would mask a
-   *hypothetical* snemu bug that fails to halt a panicking kernel and over-emits
-   heartbeats (main on hart 0 would keep looping instead of idling). Today the
-   filter looks only at the vocabulary *set*, not the count.
-   - A count threshold ("a few heartbeats, not hundreds") is **fragile** — a
-     faithful snemu emits ~4 before a `panic-now` crash, a fail-to-halt one ~15 to
-     the step limit; the margin is workload-dependent and thin.
-   - The **clean** fix is to make the crash observable in telemetry, then forgive
-     only-snemu `kernel.heartbeat` *iff snemu also shows the crash* (proving it
-     halted, just later). Blocked today: the panic handler deliberately bypasses
-     locks/alloc for safety and emits only to UART, so there's no crash frame — and
-     emitting one from the panic path risks the intern/virtio re-entry deadlock
-     CLAUDE.md warns about. So: documented limitation, not worth a fragile patch now.
+1. **~~Oracle robustness~~ — RESOLVED** (was the one real open item). The
+   "clean fix" below shipped: the panic handler now emits a `kernel panic` `Log`
+   (panic-safe: no alloc/intern, non-blocking bounded-retry send —
+   [plans/panic-emits-telemetry.md](panic-emits-telemetry.md)), and the oracle
+   forgives `kernel.heartbeat`-only-in-snemu **only when that panic frame is
+   present** (`snemu_reached_crash`). A fail-to-halt snemu — heartbeats but no
+   panic — now FAILs. The fragile heartbeat-count threshold was avoided entirely.
 2. **~~snemu reset-on-panic~~** — dropped. Investigated (measured one `kernel.boot`
    in QEMU's stream): QEMU does **not** reset on panic, so there was never a gap to
    close. See the secondary-thread section.
