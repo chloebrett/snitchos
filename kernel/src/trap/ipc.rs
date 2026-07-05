@@ -76,11 +76,15 @@ impl Default for Delivered {
 struct Endpoint {
     state: EndpointState,
     pending: BTreeMap<TaskId, Delivered>,
+    /// The object's human name (see `docs/capability-names-design.md`) — set once
+    /// by the creator, shared by every cap to this endpoint, resolved for display
+    /// (`hold`, `CapEvent`s). NUL-padded UTF-8; opaque to authority.
+    name: [u8; snitchos_abi::CAP_NAME_LEN],
 }
 
 impl Endpoint {
-    fn new() -> Self {
-        Self { state: EndpointState::Idle, pending: BTreeMap::new() }
+    fn new(name: [u8; snitchos_abi::CAP_NAME_LEN]) -> Self {
+        Self { state: EndpointState::Idle, pending: BTreeMap::new(), name }
     }
 }
 
@@ -88,16 +92,23 @@ impl Endpoint {
 /// (no endpoint destruction in v0.9).
 static ENDPOINTS: Mutex<Vec<Endpoint>> = Mutex::new(Vec::new());
 
+/// The name of endpoint `id`, NUL-padded (empty if the id is unknown) — the
+/// resolver `describe`/`CapList` threads into each endpoint cap's `CapDesc`.
+#[must_use]
+pub fn name_of(id: EndpointId) -> [u8; snitchos_abi::CAP_NAME_LEN] {
+    ENDPOINTS.lock().get(id.0 as usize).map_or([0; snitchos_abi::CAP_NAME_LEN], |e| e.name)
+}
+
 /// The single kernel-brokered endpoint shared by the `workload=ipc` demo
 /// processes. Created once at boot; both processes are bootstrapped with a
 /// capability naming it (sender `SEND`, receiver `RECV`).
 pub static DEMO_ENDPOINT: Once<EndpointId> = Once::new();
 
-/// Create a fresh endpoint and return its id.
-pub fn create() -> EndpointId {
+/// Create a fresh endpoint with object `name` and return its id.
+pub fn create(name: [u8; snitchos_abi::CAP_NAME_LEN]) -> EndpointId {
     let mut eps = ENDPOINTS.lock();
     let id = EndpointId(eps.len() as u32);
-    eps.push(Endpoint::new());
+    eps.push(Endpoint::new(name));
     id
 }
 

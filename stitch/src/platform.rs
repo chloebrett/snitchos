@@ -136,6 +136,11 @@ pub struct CapInfo {
     pub kind: ObjectKind,
     pub rights: Rights,
     pub badge: u64,
+    /// The cap's *object* name — a human label set by the object's creator (see
+    /// `docs/capability-names-design.md`), resolved for display. Empty for objects
+    /// with no name (bootstrap telemetry/span, unnamed endpoints). Opaque: shown,
+    /// never used for authority or lookup.
+    pub name: alloc::string::String,
 }
 
 /// What happens when a Stitch program touches the outside world, decoupled from
@@ -321,13 +326,15 @@ impl Platform for FakePlatform {
         if parent.rights & snitchos_abi::rights::MINT == 0 {
             return None;
         }
+        // A minted cap points at the *same* object, so it inherits its name.
+        let name = parent.name.clone();
         let mut next = self.next_handle.borrow_mut();
         if *next == 0 {
             *next = caps.iter().map(|c| c.handle).max().unwrap_or(0) + 1;
         }
         let new_handle = *next;
         *next += 1;
-        caps.push(CapInfo { handle: new_handle, kind: ObjectKind::Endpoint, rights, badge });
+        caps.push(CapInfo { handle: new_handle, kind: ObjectKind::Endpoint, rights, badge, name });
         drop(caps);
         drop(next);
         self.parents.borrow_mut().insert(new_handle, handle);
@@ -406,6 +413,7 @@ mod on_target {
                     kind: super::ObjectKind::from_abi(d.kind),
                     rights: d.rights,
                     badge: d.badge,
+                    name: d.name_str().into(),
                 })
                 .collect()
         }
@@ -638,9 +646,9 @@ mod tests {
     #[test]
     fn fake_returns_its_scripted_caps() {
         let caps = vec![
-            CapInfo { handle: 2, kind: ObjectKind::Endpoint, rights: 0b0110, badge: 0 },
+            CapInfo { handle: 2, kind: ObjectKind::Endpoint, rights: 0b0110, badge: 0, name: String::new() },
             // A badged endpoint — what a file cap looks like (no `File` kind).
-            CapInfo { handle: 3, kind: ObjectKind::Endpoint, rights: 0b0010, badge: 7 },
+            CapInfo { handle: 3, kind: ObjectKind::Endpoint, rights: 0b0010, badge: 7, name: String::new() },
         ];
         let fake = FakePlatform::with_caps(caps.clone());
 

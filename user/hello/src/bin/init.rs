@@ -25,7 +25,7 @@ fn main() {
     // The kernel handed init no endpoint — it builds its own IPC world. Delegate
     // the owning `RECV | MINT` cap to the server (program id 4 = `fs-server`); the
     // grant is a `CapEvent::Transferred` rooted at init's endpoint holding.
-    let fs_endpoint = endpoint_create();
+    let fs_endpoint = endpoint_create("fs");
     let _ = spawn(4, &[fs_endpoint.raw_handle() as u32]);
 
     // Bring up an FS client on the *same* endpoint (Step 7). We hold `RECV | MINT`,

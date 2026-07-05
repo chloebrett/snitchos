@@ -454,18 +454,26 @@ impl CapTable {
     /// userspace `unhitch`es it into named records. Pure (no kernel state), so it
     /// is host-tested here rather than behind the syscall.
     #[must_use]
-    pub fn describe(&self) -> Vec<CapDesc> {
+    pub fn describe(
+        &self,
+        endpoint_name: impl Fn(EndpointId) -> [u8; snitchos_abi::CAP_NAME_LEN],
+    ) -> Vec<CapDesc> {
+        let unnamed = [0u8; snitchos_abi::CAP_NAME_LEN];
         self.slots
             .iter()
             .enumerate()
             .filter_map(|(index, slot)| {
                 let cap = slot.cap.as_ref()?;
-                let (kind, badge) = match cap.object {
-                    Object::TelemetrySink => (object_kind::TELEMETRY_SINK, 0),
-                    Object::SpanSink => (object_kind::SPAN_SINK, 0),
-                    Object::Endpoint { badge, .. } => (object_kind::ENDPOINT, badge),
-                    Object::Reply { .. } => (object_kind::REPLY, 0),
-                    Object::Notification { .. } => (object_kind::NOTIFICATION, 0),
+                // Only endpoints carry a name (a per-object label resolved via the
+                // caller's `endpoint_name`); other kinds are self-describing.
+                let (kind, badge, name) = match cap.object {
+                    Object::TelemetrySink => (object_kind::TELEMETRY_SINK, 0, unnamed),
+                    Object::SpanSink => (object_kind::SPAN_SINK, 0, unnamed),
+                    Object::Endpoint { id, badge } => {
+                        (object_kind::ENDPOINT, badge, endpoint_name(id))
+                    }
+                    Object::Reply { .. } => (object_kind::REPLY, 0, unnamed),
+                    Object::Notification { .. } => (object_kind::NOTIFICATION, 0, unnamed),
                 };
                 Some(CapDesc {
                     handle: Handle::new(index as u32, slot.generation).raw(),
@@ -473,6 +481,7 @@ impl CapTable {
                     rights: cap.rights.bits(),
                     reserved: 0,
                     badge,
+                    name,
                 })
             })
             .collect()
@@ -1243,7 +1252,7 @@ mod tests {
             rights: Rights::SEND | Rights::MINT,
         });
 
-        let descs = table.describe();
+        let descs = table.describe(|_| [0; snitchos_abi::CAP_NAME_LEN]);
 
         assert_eq!(
             descs,
@@ -1254,6 +1263,7 @@ mod tests {
                     rights: snitchos_abi::rights::EMIT,
                     reserved: 0,
                     badge: 0,
+                    name: [0; snitchos_abi::CAP_NAME_LEN],
                 },
                 CapDesc {
                     handle: endpoint.raw(),
@@ -1261,9 +1271,25 @@ mod tests {
                     rights: snitchos_abi::rights::SEND | snitchos_abi::rights::MINT,
                     reserved: 0,
                     badge: 0xab,
+                    name: [0; snitchos_abi::CAP_NAME_LEN],
                 },
             ]
         );
+    }
+
+    #[test]
+    fn describe_resolves_the_endpoint_name_through_the_resolver() {
+        let mut table = CapTable::new();
+        table.insert(Capability {
+            object: Object::Endpoint { id: EndpointId(7), badge: 0 },
+            rights: Rights::SEND,
+        });
+        // The resolver names endpoint 7 "fs"; describe threads it into the CapDesc.
+        let descs = table.describe(|id| {
+            assert_eq!(id, EndpointId(7));
+            snitchos_abi::pack_name("fs")
+        });
+        assert_eq!(descs[0].name_str(), "fs");
     }
 
     #[test]
@@ -1273,7 +1299,7 @@ mod tests {
         let second = table.insert(emit_sink());
         assert!(table.consume(first));
 
-        let descs = table.describe();
+        let descs = table.describe(|_| [0; snitchos_abi::CAP_NAME_LEN]);
 
         assert_eq!(descs.len(), 1);
         assert_eq!(descs[0].handle, second.raw());

@@ -89,7 +89,7 @@ pub(super) fn handle_cap_list(frame: &mut TrapFrame) {
     // Snapshot to an owned Vec; the lock drops at the `;` (never held across the
     // copy). `describe` is non-destructive, so validation can ride on
     // `copy_to_user` rather than pre-checking.
-    let descs = proc.caps.lock().describe();
+    let descs = proc.caps.lock().describe(crate::ipc::name_of);
     let total = descs.len();
     let n = total.min(capacity);
 

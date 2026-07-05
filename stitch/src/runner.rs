@@ -327,6 +327,7 @@ mod tests {
             kind: ObjectKind::Endpoint,
             rights: 0b0010, // SEND — a write glyph (📝), amber SGR 33
             badge: 0,
+            name: String::new(),
         }]));
         let mut repl =
             Repl::with_backends(Rc::new(RecordingTelemetry::default()), fake).color(true);
@@ -344,6 +345,7 @@ mod tests {
             kind: ObjectKind::Endpoint,
             rights: 0b0010,
             badge: 0,
+            name: String::new(),
         }]));
         let mut repl = Repl::with_backends(Rc::new(RecordingTelemetry::default()), fake);
         let out = repl.eval_line("hold()");

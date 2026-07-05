@@ -79,6 +79,7 @@
 | stitch-fs-loads-and-runs | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-fs-loads-nested | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-grant-revoke-capevents | stitch-fs | wfi | userspace, stitch, fs |
+| stitch-hold-shows-endpoint-name | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-view-reads-a-file | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-hold-lists-caps | stitch-repl | wfi | userspace, stitch |
 | stitch-print-writes-to-console | stitch-repl | wfi | userspace, stitch |

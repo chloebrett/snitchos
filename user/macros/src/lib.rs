@@ -133,20 +133,47 @@ fn expand_entry(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     };
     func.block.stmts.insert(0, root_span);
 
-    let manifest = if attr.is_empty() {
-        TokenStream2::new()
+    // Parse the manifest clause once (empty attr = a bare `#[entry]`, no needs).
+    let args = if attr.is_empty() {
+        None
     } else {
         match syn::parse2::<ManifestArgs>(attr) {
-            Ok(args) => manifest_items(&args),
+            Ok(args) => Some(args),
             Err(err) => return err.to_compile_error(),
         }
     };
+
+    // The `.snitch.iface` note (satisfier-facing) is emitted only for a clause.
+    let manifest = args.as_ref().map_or_else(TokenStream2::new, manifest_items);
+    // The `__SNITCH_SLOTS` name→object table (program-facing) is emitted for *every*
+    // program — empty when there are no needs — so the runtime can resolve
+    // `bootstrap().get(name)` unconditionally.
+    let needs: &[SlotArg] = args.as_ref().map_or(&[], |a| a.needs.as_slice());
+    let slots = slots_table(needs);
 
     quote! {
         #[unsafe(no_mangle)]
         #func
 
         #manifest
+        #slots
+    }
+}
+
+/// The `__SNITCH_SLOTS` name→object table, in declaration order — the runtime
+/// resolves `bootstrap().get(name)` against this (a role name → its handle index,
+/// `delegated_handle(index)`) without parsing the ELF note. Emitted for every
+/// program (empty when there are no needs); consumed by the runtime bootstrap
+/// accessor in a later increment.
+fn slots_table(needs: &[SlotArg]) -> TokenStream2 {
+    let entries = needs.iter().map(|s| {
+        let name = &s.name;
+        let object = &s.object;
+        quote! { (#name, ::snitchos_user::object_kind::#object as u8) }
+    });
+    quote! {
+        #[allow(dead_code, reason = "resolved by the runtime bootstrap accessor in a later increment")]
+        const __SNITCH_SLOTS: &[(&str, u8)] = &[ #(#entries),* ];
     }
 }
 
@@ -254,5 +281,31 @@ mod tests {
         let out = expand_entry(quote! { out = Table }, quote! { fn main() {} }).to_string();
         assert!(out.contains("Option :: None"), "source stage has no input: {out}");
         assert!(out.contains("__SNITCH_IFACE"), "still emits the note: {out}");
+    }
+
+    #[test]
+    fn emits_a_slots_table_in_declaration_order() {
+        // The runtime-facing half of manifest-as-index: a compile-time table mapping
+        // each declared role name to its handle index (declaration order), so
+        // `bootstrap().get("fs")` resolves a name without parsing the ELF note.
+        let out = expand_entry(
+            quote! { out = Table, needs = [("fs", ENDPOINT, SEND), ("log", ENDPOINT, RECV)] },
+            quote! { fn main() {} },
+        )
+        .to_string();
+
+        assert!(out.contains("__SNITCH_SLOTS"), "emits the slot table: {out}");
+        let fs_at = out.find("\"fs\"").expect("fs role in the table");
+        let log_at = out.find("\"log\"").expect("log role in the table");
+        assert!(fs_at < log_at, "roles listed in declaration order (fs before log): {out}");
+    }
+
+    #[test]
+    fn no_needs_clause_emits_an_empty_slots_table() {
+        // Every program emits the table — empty for a bare `#[entry]` — so the
+        // runtime can reference `__SNITCH_SLOTS` unconditionally (Increment 3 relies
+        // on the symbol always existing).
+        let out = expand_entry(quote! {}, quote! { fn main() {} }).to_string();
+        assert!(out.contains("__SNITCH_SLOTS"), "still emits an (empty) slot table: {out}");
     }
 }

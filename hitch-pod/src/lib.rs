@@ -31,6 +31,12 @@ macro_rules! impl_pod {
 }
 impl_pod!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64);
 
+// SAFETY: `[T; N]` is `T` repeated contiguously with no padding between elements
+// and none at the end, so if every `T` byte is initialized and valid (`T: Pod`),
+// every array byte is too. Lets fixed-size byte-array fields (e.g. an inline name)
+// live in a `#[derive(Pod)]` struct.
+unsafe impl<T: Pod, const N: usize> Pod for [T; N] {}
+
 /// The packed bytes of a POD slice, **zero-copy**: exactly its `repr(C)` image.
 /// Because `T: Pod` has no padding, every byte is initialized — nothing
 /// uninitialized crosses the boundary.

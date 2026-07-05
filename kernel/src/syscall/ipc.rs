@@ -365,13 +365,16 @@ pub(super) fn handle_reply_recv(frame: &mut TrapFrame) {
 }
 
 /// Create a fresh IPC endpoint and hand the caller an owning capability (v0.13).
-/// No args; returns the new `Endpoint` cap's handle in `a0`. The cap carries
-/// `RECV | MINT` — the caller owns the endpoint (may receive, and mint badged
-/// `SEND` caps for clients). Ambient, the endpoint mirror of `NotifyCreate`: a
-/// process manufactures its own IPC world (e.g. `init` bringing up the FS server)
-/// instead of the kernel pre-creating it.
+/// `a1` = pointer to the object *name* (UTF-8), `a2` = its length (see
+/// `docs/capability-names-design.md`; required, truncated to `CAP_NAME_LEN` on a
+/// char boundary). Returns the new `Endpoint` cap's handle in `a0`. The cap
+/// carries `RECV | MINT` — the caller owns the endpoint (may receive, and mint
+/// badged `SEND` caps for clients). Ambient, the endpoint mirror of
+/// `NotifyCreate`: a process manufactures its own IPC world (e.g. `init` bringing
+/// up the FS server) instead of the kernel pre-creating it.
 pub(super) fn handle_endpoint_create(frame: &mut TrapFrame) {
     use kernel_core::cap::{Capability, Object, Rights};
+    use protocol::RefusalReason;
     use snitchos_abi::Syscall;
 
     let sc = Syscall::EndpointCreate as u8;
@@ -379,7 +382,20 @@ pub(super) fn handle_endpoint_create(frame: &mut TrapFrame) {
         return;
     };
 
-    let id = crate::ipc::create();
+    // Read the caller-supplied object name (a1 = ptr, a2 = len), bounded and
+    // UTF-8-validated. A bad range or non-UTF-8 name refuses (names are required).
+    let mut name_buf = [0u8; snitchos_abi::CAP_NAME_LEN];
+    let name_len = (frame.a2 as usize).min(snitchos_abi::CAP_NAME_LEN);
+    let Some(name_bytes) = crate::user::copy_from_user(frame.a1 as usize, name_len, &mut name_buf)
+    else {
+        super::refuse(frame, sc, RefusalReason::BadUserRange);
+        return;
+    };
+    let Ok(name) = core::str::from_utf8(name_bytes) else {
+        super::refuse(frame, sc, RefusalReason::BadUtf8);
+        return;
+    };
+    let id = crate::ipc::create(snitchos_abi::pack_name(name));
     let rights = Rights::RECV | Rights::MINT;
     // Stamp the holding with its global cap id — the derivation-tree root for this
     // endpoint — so the wire `cap_id` matches and a later delegation links to it.

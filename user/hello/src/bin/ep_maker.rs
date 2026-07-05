@@ -13,7 +13,7 @@ use snitchos_user::{endpoint_create, entry, exit, register_counter, rights};
 
 #[entry]
 fn main() {
-    let ep = endpoint_create();
+    let ep = endpoint_create("ep-maker");
     let minted = ep.mint_badged(0xE9, rights::SEND).is_ok();
     register_counter("snitchos.epmaker.minted").emit(i64::from(minted));
     // Reclaim: revoke the caps derived from this endpoint — the badged `SEND` we

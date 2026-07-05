@@ -347,6 +347,39 @@ pub struct CapDesc {
     pub rights: u32,
     pub reserved: u32,
     pub badge: u64,
+    /// The cap's *object* name (see `docs/capability-names-design.md`) — a human
+    /// label, NUL-padded UTF-8, empty (all-zero) if the object is unnamed. Trails
+    /// the `u64` so the struct stays 48 bytes, 8-aligned, padding-free (the
+    /// `Pod` derive enforces it). Read with [`CapDesc::name_str`]; the kernel packs
+    /// it with [`pack_name`]. Opaque: shown, never used for authority or lookup.
+    pub name: [u8; CAP_NAME_LEN],
+}
+
+/// The maximum length, in bytes, of a capability object name — the inline bound
+/// that keeps [`CapDesc`] (and the `CapEvent` wire frame) fixed-size. UTF-8;
+/// overlong names truncate on a character boundary (see [`pack_name`]).
+pub const CAP_NAME_LEN: usize = 24;
+
+/// Pack a name string into a fixed `[u8; CAP_NAME_LEN]`, NUL-padded, truncating on
+/// a UTF-8 character boundary so the stored bytes are always valid UTF-8. The
+/// kernel calls this when a creator names an object; the inverse is
+/// [`CapDesc::name_str`].
+#[must_use]
+pub fn pack_name(name: &str) -> [u8; CAP_NAME_LEN] {
+    let take = utf8_chunk_end(name.as_bytes(), CAP_NAME_LEN);
+    let mut out = [0u8; CAP_NAME_LEN];
+    out[..take].copy_from_slice(&name.as_bytes()[..take]);
+    out
+}
+
+impl CapDesc {
+    /// The object name as a string — the UTF-8 prefix before the first NUL (names
+    /// are NUL-padded by [`pack_name`]). Empty if the object is unnamed.
+    #[must_use]
+    pub fn name_str(&self) -> &str {
+        let end = self.name.iter().position(|&b| b == 0).unwrap_or(self.name.len());
+        core::str::from_utf8(&self.name[..end]).unwrap_or("")
+    }
 }
 
 /// The number of inline `u64` words a single IPC message carries. The single
@@ -380,6 +413,29 @@ pub fn utf8_chunk_end(bytes: &[u8], max: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cap_name_round_trips_and_defaults_empty() {
+        assert_eq!(CapDesc::default().name_str(), "");
+        let d = CapDesc { name: pack_name("fs"), ..CapDesc::default() };
+        assert_eq!(d.name_str(), "fs");
+    }
+
+    #[test]
+    fn cap_name_truncates_at_the_24_byte_bound() {
+        // 36 ASCII bytes → the first 24 (a..x) survive.
+        let d = CapDesc { name: pack_name("abcdefghijklmnopqrstuvwxyz0123456789"), ..CapDesc::default() };
+        assert_eq!(d.name_str(), "abcdefghijklmnopqrstuvwx");
+        assert_eq!(d.name_str().len(), CAP_NAME_LEN);
+    }
+
+    #[test]
+    fn cap_name_truncation_never_splits_a_char() {
+        // "abc..w" is 23 bytes; the 2-byte 'é' straddling the 24-byte bound is
+        // dropped whole, so the stored name stays valid UTF-8.
+        let d = CapDesc { name: pack_name("abcdefghijklmnopqrstuvwé"), ..CapDesc::default() };
+        assert_eq!(d.name_str(), "abcdefghijklmnopqrstuvw");
+    }
 
     #[test]
     fn utf8_chunk_end_returns_whole_slice_when_it_fits() {
@@ -497,8 +553,9 @@ mod tests {
     fn cap_desc_has_a_padding_free_layout() {
         // A packed-hitch entry: kernel and userspace agree on this exact shape.
         // Field order is chosen so there is no implicit padding (so no
-        // uninitialized kernel bytes are ever copied out).
-        assert_eq!(core::mem::size_of::<CapDesc>(), 24);
+        // uninitialized kernel bytes are ever copied out): 4×u32 + u64 = 24, then
+        // the inline name = 24, total 48, 8-aligned.
+        assert_eq!(core::mem::size_of::<CapDesc>(), 24 + CAP_NAME_LEN);
         assert_eq!(core::mem::align_of::<CapDesc>(), 8);
     }
 }

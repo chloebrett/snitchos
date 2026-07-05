@@ -186,21 +186,28 @@ pub fn spawn_image(image: &[u8], handles: &[u32]) -> Option<u32> {
     if ret == usize::MAX { None } else { Some(ret as u32) }
 }
 
-/// Create a fresh IPC endpoint, returning an owning [`Endpoint`] capability the
-/// caller holds with `RECV | MINT` (`EndpointCreate` syscall). Ambient — making
-/// your own endpoint needs no prior cap; mint badged `SEND` caps from it for
-/// clients and delegate the ends you want. Lets a process build its own IPC world
-/// (e.g. `init` bringing up a server) instead of relying on a kernel-created one.
+/// Create a fresh IPC endpoint with the object `name` (see
+/// `docs/capability-names-design.md` — required, truncated to `CAP_NAME_LEN`),
+/// returning an owning [`Endpoint`] capability the caller holds with `RECV | MINT`
+/// (`EndpointCreate` syscall). Ambient — making your own endpoint needs no prior
+/// cap; mint badged `SEND` caps from it for clients and delegate the ends you
+/// want. Lets a process build its own IPC world (e.g. `init` bringing up a server)
+/// instead of relying on a kernel-created one. The name is display-only (it shows
+/// in `hold` and in `CapEvent`s), never used for authority.
 #[must_use]
-pub fn endpoint_create() -> Endpoint {
+pub fn endpoint_create(name: &str) -> Endpoint {
     let handle: usize;
-    // SAFETY: `ecall`; the kernel allocates an endpoint, inserts a RECV|MINT cap
-    // into our table, and returns its handle in a0.
+    let name = name.as_bytes();
+    // SAFETY: `ecall`; the kernel allocates an endpoint named by (a1, a2) —
+    // range-validated and UTF-8-checked kernel-side — inserts a RECV|MINT cap into
+    // our table, and returns its handle in a0. `name` is not deref'd in U-mode.
     unsafe {
         asm!(
             "ecall",
             in("a7") Syscall::EndpointCreate as usize,
             out("a0") handle,
+            in("a1") name.as_ptr() as usize,
+            in("a2") name.len(),
         );
     }
     Endpoint::from_raw_handle(handle)

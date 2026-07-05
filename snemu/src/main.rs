@@ -99,6 +99,14 @@ fn main() -> ExitCode {
 /// telemetry frames and report them. A trailing partial frame (the kernel was
 /// mid-send when the run stopped) decodes cleanly as EOF; only genuinely
 /// malformed bytes error, and we keep whatever decoded before that.
+///
+/// Stream discipline: the decoded frames (`--frames`) are the *requested data*,
+/// so they go to **stdout** — `snemu --frames … | grep …` works, and silencing
+/// build/diagnostic noise with `2>/dev/null` never eats them. The byte/frame
+/// count and any decode-error note are diagnostics and stay on **stderr**.
+/// (This was a real trap: with the dump on stderr, `--frames 2>/dev/null | grep`
+/// silently returned nothing and I mistook it for "zero frames" — see
+/// notes/snemu-guard-page-fail-is-timing-not-mmu.md.)
 fn report_frames(bytes: &[u8], dump: bool) {
     let mut frames = Vec::new();
     let mut cursor = Cursor::new(bytes);
@@ -114,7 +122,7 @@ fn report_frames(bytes: &[u8], dump: bool) {
     }
     if dump {
         for frame in &frames {
-            eprintln!("  {frame:?}");
+            println!("  {frame:?}");
         }
     }
 }

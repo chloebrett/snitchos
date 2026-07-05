@@ -436,6 +436,7 @@ fn native_hold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
                 fields: alloc::vec![
                     (Some("handle".into()), Value::Int(i64::from(cap.handle))),
                     (Some("kind".into()), Value::Str(cap.kind.as_str().into())),
+                    (Some("for".into()), Value::Str(cap.name.as_str().into())),
                     (
                         Some("rights".into()),
                         Value::Str(crate::platform::rights_glyphs(cap.rights).into()),
@@ -1057,6 +1058,7 @@ mod tests {
             fields: vec![
                 (Some("handle".into()), Value::Int(handle)),
                 (Some("kind".into()), Value::Str(kind.into())),
+                (Some("for".into()), Value::Str("".into())), // these fixtures are unnamed
                 (Some("rights".into()), Value::Str(rights.into())),
                 (Some("badge".into()), Value::Int(badge)),
             ],
@@ -1070,9 +1072,9 @@ mod tests {
         // `main` needs no `uses` clause. Each cap lifts into a named `Cap` record,
         // not a tuple — so a `Seq<record>` of them renders as a table.
         let fake = Rc::new(FakePlatform::with_caps(vec![
-            CapInfo { handle: 2, kind: ObjectKind::Endpoint, rights: 0b0110, badge: 0 },
+            CapInfo { handle: 2, kind: ObjectKind::Endpoint, rights: 0b0110, badge: 0, name: String::new() },
             // A badged endpoint — a file cap (no distinct `File` kind).
-            CapInfo { handle: 3, kind: ObjectKind::Endpoint, rights: 0b0010, badge: 7 },
+            CapInfo { handle: 3, kind: ObjectKind::Endpoint, rights: 0b0010, badge: 7, name: String::new() },
         ]));
         let value = run_program_on("main() = hold()", fake).expect("hold should run");
         assert_eq!(
@@ -1092,6 +1094,27 @@ mod tests {
     }
 
     #[test]
+    fn hold_reports_the_object_name_in_a_for_field() {
+        // A named endpoint (the FS) carries its object name; `hold` surfaces it as a
+        // `for` field so the shell can tell one Endpoint from another.
+        let fake = Rc::new(FakePlatform::with_caps(vec![CapInfo {
+            handle: 2,
+            kind: ObjectKind::Endpoint,
+            rights: 0b0010,
+            badge: 0,
+            name: "fs".into(),
+        }]));
+        let value = run_program_on("main() = hold()", fake).expect("hold should run");
+        let Value::List(caps) = value else { panic!("hold should be a list") };
+        let Value::Data(cap) = &caps[0] else { panic!("a cap is a record") };
+        let has_for = cap
+            .fields
+            .iter()
+            .any(|(n, v)| n.as_deref() == Some("for") && *v == Value::Str("fs".into()));
+        assert!(has_for, "hold's Cap record should carry for=\"fs\": {:?}", cap.fields);
+    }
+
+    #[test]
     fn revoke_reports_the_descendant_count_and_leaves_the_holding() {
         // `revoke @h` reclaims the caps derived *from* h (transitive), not h
         // itself — the holding survives. With no grants yet there are no
@@ -1102,6 +1125,7 @@ mod tests {
             kind: ObjectKind::Endpoint,
             rights: 0b1110,
             badge: 0,
+            name: String::new(),
         }]));
         let count = run_program_on("main() = revoke(2)", fake.clone()).expect("revoke should run");
         assert_eq!(count, Value::Int(0));
@@ -1135,6 +1159,7 @@ mod tests {
             kind: ObjectKind::Endpoint,
             rights,
             badge: 0,
+            name: String::new(),
         }]))
     }
 
@@ -1197,8 +1222,8 @@ mod tests {
         // Two MINT endpoints, a child minted from each. Revoking one parent must
         // reclaim only *its* child — the other endpoint's child is untouched.
         let fake = Rc::new(FakePlatform::with_caps(vec![
-            CapInfo { handle: 2, kind: ObjectKind::Endpoint, rights: 0b1110, badge: 0 },
-            CapInfo { handle: 5, kind: ObjectKind::Endpoint, rights: 0b1110, badge: 0 },
+            CapInfo { handle: 2, kind: ObjectKind::Endpoint, rights: 0b1110, badge: 0, name: String::new() },
+            CapInfo { handle: 5, kind: ObjectKind::Endpoint, rights: 0b1110, badge: 0, name: String::new() },
         ]));
         let child2 = run_program_on(r#"main() = grant(2, 1, "SEND")"#, fake.clone()).expect("g2");
         let child5 = run_program_on(r#"main() = grant(5, 1, "SEND")"#, fake.clone()).expect("g5");

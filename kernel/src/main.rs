@@ -545,7 +545,9 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     if let Some(layout) = user::user_layout(selected.unwrap_or(WorkloadKind::Init)) {
         user::init_metric();
         if layout.needs_endpoint {
-            crate::ipc::DEMO_ENDPOINT.call_once(crate::ipc::create);
+            // The shared workload endpoint is the FS server's in the fs workloads;
+            // name it so `hold` shows `for=fs` (see capability-names-design.md).
+            crate::ipc::DEMO_ENDPOINT.call_once(|| crate::ipc::create(snitchos_abi::pack_name("fs")));
         }
         for p in layout.programs {
             let _ = user::spawn_program(1, p.name, p.program, p.priority);

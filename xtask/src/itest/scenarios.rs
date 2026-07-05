@@ -451,6 +451,22 @@ pub fn stitch_cross_pipe_runs_a_stage(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// `workload=stitch-fs`: `hold` shows the FS endpoint's *object name* in the `for`
+/// column — the name set at endpoint creation (`init`/the kernel names it "fs")
+/// flowing kernel → `CapDesc` → `CapInfo` → the rendered table. The injected
+/// `hold()` can't echo "fs", and no boot text contains it, so finding "fs" in the
+/// UART log proves the name round-tripped end to end (see
+/// `docs/capability-names-design.md`).
+pub fn stitch_hold_names_the_fs_endpoint(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+    h.send_input(b"hold()\n").map_err(|e| format!("inject REPL input: {e}"))?;
+    // Match the rendered `for` cell space-delimited (`│ fs …`), not bare "fs" —
+    // bare "fs" is a substring of OpenSBI's "Offset" and would false-match at boot.
+    h.wait_for_log(SEC * 30, " fs ")
+        .map_err(|e| format!("{e} — hold() didn't show the endpoint's `fs` name on the metal"))
+}
+
 /// `workload=stitch-fs`: the shell's grant→revoke loop, on the metal. The REPL
 /// holds a `SEND | MINT` endpoint cap at handle 2; `grant(2, 777, "SEND")` mints a
 /// badged `SEND` child (the `MintBadged` syscall → `CapEvent::Transferred{Endpoint,
