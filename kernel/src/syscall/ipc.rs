@@ -148,12 +148,20 @@ fn reply_handle_for(
     let Some(caller) = reply_to else {
         return 0;
     };
-    let handle = proc
-        .caps
-        .lock()
-        .insert_once(Capability { object: Object::Reply { caller }, rights: Rights::NONE });
+    // Mint the global cap id once and both *store* it on the holding and *emit* it
+    // on the wire, so the `CapEvent::Transferred` names an id the kernel actually
+    // holds (until the reply consumes it) — the derivation tree the host
+    // reconstructs stays honest. Previously the wire carried a fresh
+    // `next_cap_id()` while the holding stored `0`, so the announced id matched no
+    // slot.
+    let cap_id = crate::process::next_cap_id();
+    let handle = proc.caps.lock().insert_once_with_id(
+        Capability { object: Object::Reply { caller }, rights: Rights::NONE },
+        cap_id,
+        0, // reply-cap derivation edge to the originating `call` not tracked yet
+    );
     crate::tracing::emit_cap_transferred(
-        crate::process::next_cap_id(),
+        cap_id,
         0, // reply-cap derivation edge to the originating `call` not tracked yet
         holder.0,
         protocol::CapObject::Reply,

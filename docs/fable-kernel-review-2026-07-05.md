@@ -153,9 +153,18 @@ position==id invariant is ever wanted, it's already lost).
 
 ---
 
-## F6 — Delegation drops `Multiplicity`; `Once` caps become `Persistent` across a process boundary (Med, verified)
+## F6 — Delegation drops `Multiplicity`; `Once` caps become `Persistent` across a process boundary (Med, verified) — **FIXED 2026-07-05**
 
 *(Surfaced on a second pass — ranks with F1, above F4/F5.)*
+
+**FIXED (2026-07-05):** `delegate()` now checks `multiplicity_of` per handle and
+refuses the whole set (`CapError::NotDelegable`) if any names a `Once` cap —
+all-or-nothing, like an unheld handle. A server can no longer smuggle its reply-cap
+handle into a `Spawn` delegate array. TDD: `delegating_a_once_cap_is_refused` +
+`a_once_cap_refuses_the_whole_delegation_set` (RED confirmed, then GREEN); all 444
+kernel-core tests pass. Chose *refuse* over *preserve multiplicity* (see below);
+the deeper "carry the whole holding across the boundary" fix that F1 also needs is
+still open for the handout path.
 
 `delegate()` (`kernel-core/src/user/cap.rs:410`) copies a `Capability` by value
 regardless of its slot's multiplicity, and every receiving-side insertion uses
