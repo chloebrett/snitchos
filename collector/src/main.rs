@@ -13,6 +13,7 @@ use clap::Parser;
 use protocol::Frame;
 use protocol::stream::decode_stream;
 
+mod caps;
 mod loki;
 mod otlp;
 mod prom;

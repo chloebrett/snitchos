@@ -9,6 +9,7 @@ mutants = "0.0.3"
 
 [dependencies]
 protocol = { path = "../protocol", features = ["std"] }
+snitchos-abi = { path = "../abi" }
 clap = { version = "4", features = ["derive"] }
 prost = "0.13"
 ureq = "2"

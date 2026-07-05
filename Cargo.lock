@@ -197,6 +197,7 @@ dependencies = [
  "mutants",
  "prost",
  "protocol",
+ "snitchos-abi",
  "tiny_http",
  "ureq",
 ]
