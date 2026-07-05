@@ -370,6 +370,7 @@ version = "0.0.1"
 dependencies = [
  "fs-core",
  "fs-proto",
+ "hitch",
  "object",
  "ramfs",
  "snitchos-std",

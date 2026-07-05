@@ -156,13 +156,11 @@ fn expand_entry(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
         }
     };
 
-    // The `.snitch.iface` note (satisfier-facing) is a *stage interface*, so it's
-    // emitted only when the clause declares an `out` type; a `needs`-only program
-    // gets just the slot table below.
-    let manifest = match &args {
-        Some(a) if a.output.is_some() => manifest_items(a),
-        _ => TokenStream2::new(),
-    };
+    // The `.snitch.iface` note (satisfier-facing) is emitted for any manifest
+    // clause — its `needs` are what a satisfier reads to grant authority. A bare
+    // `#[entry]` (no clause) has no note. The `in`/`out` stage interface is the
+    // optional part (a `needs`-only program declares neither).
+    let manifest = args.as_ref().map_or_else(TokenStream2::new, manifest_items);
     // The `__SNITCH_SLOTS` name→object table (program-facing) is emitted for *every*
     // program — empty when there are no needs — so the runtime can resolve
     // `bootstrap().get(name)` unconditionally.
@@ -200,8 +198,10 @@ fn manifest_items(args: &ManifestArgs) -> TokenStream2 {
         Some(ty) => quote! { ::core::option::Option::Some(<#ty as hitch::Schema>::SCHEMA) },
         None => quote! { ::core::option::Option::None },
     };
-    // Only called when `output` is present (guarded in `expand_entry`).
-    let output = args.output.as_ref().expect("manifest note requires an `out` type");
+    let output = match &args.output {
+        Some(ty) => quote! { ::core::option::Option::Some(<#ty as hitch::Schema>::SCHEMA) },
+        None => quote! { ::core::option::Option::None },
+    };
     let slots = args.needs.iter().map(|s| {
         let name = &s.name;
         let object = &s.object;
@@ -217,7 +217,7 @@ fn manifest_items(args: &ManifestArgs) -> TokenStream2 {
     quote! {
         const __SNITCH_MANIFEST: hitch::ConstManifest = hitch::ConstManifest {
             input: #input,
-            output: <#output as hitch::Schema>::SCHEMA,
+            output: #output,
             needs: &[ #(#slots),* ],
         };
         #[unsafe(link_section = ".snitch.iface")]
@@ -328,17 +328,17 @@ mod tests {
     }
 
     #[test]
-    fn needs_without_out_emits_slots_but_no_note() {
-        // A program can declare authority needs without being a `~>` stage: no `out`
-        // means no `.snitch.iface` stage-interface note, but the slot table still
-        // lists the roles so `bootstrap().get` resolves them.
+    fn needs_without_out_still_emits_a_note_carrying_the_needs() {
+        // A needs-only program (no `~>` stage interface) still emits the note — so a
+        // satisfier can read its required authorities off the `user.iface` xattr —
+        // it just has no `out` type. The runtime-facing slot table is emitted too.
         let out = expand_entry(
             quote! { needs = [("fs", ENDPOINT, SEND)] },
             quote! { fn main() {} },
         )
         .to_string();
+        assert!(out.contains("__SNITCH_IFACE"), "emits the note (needs are satisfier-facing): {out}");
         assert!(out.contains("__SNITCH_SLOTS"), "emits the slot table: {out}");
         assert!(out.contains("\"fs\""), "lists the fs role: {out}");
-        assert!(!out.contains("__SNITCH_IFACE"), "no stage-interface note without `out`: {out}");
     }
 }

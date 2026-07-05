@@ -54,7 +54,7 @@ fn shape_matches(m: &Manifest) -> bool {
         &m.input,
         Some(TypeSchema::Product { fields, .. }) if fields.len() == 2
     );
-    let output_ok = m.output == TypeSchema::U64;
+    let output_ok = m.output == Some(TypeSchema::U64);
     let needs_ok = m.needs.len() == 1
         && m.needs[0].name == "fs"
         && m.needs[0].object == object_kind::ENDPOINT as u8

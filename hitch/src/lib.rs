@@ -161,14 +161,15 @@ impl TypeSchema {
 /// `~>` typechecks against (structural [`TypeSchema`] compatibility of `out` → next
 /// `in`) and the shell reads to decide which caps to grant a spawned stage.
 ///
-/// `input` is `None` for a **source** (a stage with no upstream input, a zero-param
-/// `main`). `needs` are the typed authority slots the program requires (the manifest
-/// v2 shape — see `docs/manifest-design.md`); a satisfier grants each from its own
-/// caps.
+/// `input`/`output` describe a `~>` **stage** interface (`in`→`out`) and are both
+/// `None` for a program that isn't a stage — it may still declare `needs`, the
+/// typed authority slots it requires (the manifest v2 shape — see
+/// `docs/manifest-design.md`), which a satisfier grants from its own caps. `input`
+/// is also `None` for a **source** stage (no upstream input).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub input: Option<TypeSchema>,
-    pub output: TypeSchema,
+    pub output: Option<TypeSchema>,
     pub needs: Vec<Slot>,
 }
 
@@ -394,15 +395,16 @@ pub const MANIFEST_BYTES: usize = 1024;
 /// Manifest note format version — the first payload byte (at offset 4, after the
 /// 4-byte length prefix, so the FS seed's length-based padding trim is unaffected).
 /// Bumped on any incompatible change to the encoding below; [`decode_manifest`]
-/// rejects an unknown version rather than misparsing it.
-pub const MANIFEST_VERSION: u8 = 1;
+/// rejects an unknown version rather than misparsing it. (v2: `output` became
+/// optional — a presence tag now precedes it, like `input`.)
+pub const MANIFEST_VERSION: u8 = 2;
 
 /// The const-constructible form of a [`Manifest`]: built from [`ConstSchema`] +
 /// `&'static` data so it can be `const`-encoded into a `#[link_section]` static by
 /// [`encode_manifest`]. `#[entry(in, out, needs)]` builds one of these.
 pub struct ConstManifest {
     pub input: Option<ConstSchema>,
-    pub output: ConstSchema,
+    pub output: Option<ConstSchema>,
     pub needs: &'static [ConstSlot],
 }
 
@@ -447,6 +449,16 @@ const fn put_opt_str(name: Option<&str>, buf: &mut [u8], pos: usize) -> usize {
         Some(s) => {
             let pos = put_tag(1, buf, pos);
             put_str(s, buf, pos)
+        }
+        None => put_tag(0, buf, pos),
+    }
+}
+
+const fn put_opt_schema(schema: Option<&ConstSchema>, buf: &mut [u8], pos: usize) -> usize {
+    match schema {
+        Some(s) => {
+            let pos = put_tag(1, buf, pos);
+            put_schema(s, buf, pos)
         }
         None => put_tag(0, buf, pos),
     }
@@ -506,14 +518,8 @@ pub const fn encode_manifest(manifest: &ConstManifest) -> [u8; MANIFEST_BYTES] {
     let mut buf = [0u8; MANIFEST_BYTES];
     let mut pos = 4;
     pos = put_tag(MANIFEST_VERSION, &mut buf, pos);
-    pos = match &manifest.input {
-        Some(schema) => {
-            let pos = put_tag(1, &mut buf, pos);
-            put_schema(schema, &mut buf, pos)
-        }
-        None => put_tag(0, &mut buf, pos),
-    };
-    pos = put_schema(&manifest.output, &mut buf, pos);
+    pos = put_opt_schema(manifest.input.as_ref(), &mut buf, pos);
+    pos = put_opt_schema(manifest.output.as_ref(), &mut buf, pos);
     pos = put_u32(manifest.needs.len() as u32, &mut buf, pos);
     let mut i = 0;
     while i < manifest.needs.len() {
@@ -543,6 +549,14 @@ fn read_manifest_opt_str(cur: &mut Cursor) -> Result<Option<String>, Error> {
     match cur.array::<1>()?[0] {
         0 => Ok(None),
         1 => Ok(Some(read_manifest_str(cur)?)),
+        _ => Err(Error::SchemaMismatch),
+    }
+}
+
+fn read_manifest_opt_schema(cur: &mut Cursor) -> Result<Option<TypeSchema>, Error> {
+    match cur.array::<1>()?[0] {
+        0 => Ok(None),
+        1 => Ok(Some(read_manifest_schema(cur)?)),
         _ => Err(Error::SchemaMismatch),
     }
 }
@@ -599,12 +613,8 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Manifest, Error> {
     if cur.array::<1>()?[0] != MANIFEST_VERSION {
         return Err(Error::SchemaMismatch);
     }
-    let input = match cur.array::<1>()?[0] {
-        0 => None,
-        1 => Some(read_manifest_schema(&mut cur)?),
-        _ => return Err(Error::SchemaMismatch),
-    };
-    let output = read_manifest_schema(&mut cur)?;
+    let input = read_manifest_opt_schema(&mut cur)?;
+    let output = read_manifest_opt_schema(&mut cur)?;
     let needs_count = cur.u32()?;
     let mut needs = Vec::new();
     for _ in 0..needs_count {

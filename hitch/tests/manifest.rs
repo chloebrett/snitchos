@@ -17,7 +17,7 @@ fn a_needs_slot_round_trips_with_object_and_rights() {
     // `Slot` mirrors the ABI discriminants (no forked numbering).
     const M: ConstManifest = ConstManifest {
         input: None,
-        output: ConstSchema::Bool,
+        output: Some(ConstSchema::Bool),
         needs: &[ConstSlot {
             name: "fs",
             object: object_kind::ENDPOINT as u8,
@@ -40,12 +40,31 @@ fn decode_rejects_an_unknown_version() {
     // The version byte (payload[0], at offset 4) exists so a future format change
     // is rejected loudly instead of misparsed. Corrupt it and decoding must fail.
     const M: ConstManifest =
-        ConstManifest { input: None, output: ConstSchema::Bool, needs: &[] };
+        ConstManifest { input: None, output: Some(ConstSchema::Bool), needs: &[] };
     let mut bytes = encode_manifest(&M);
     bytes[4] = 0xFF;
     assert!(
         decode_manifest(&bytes).is_err(),
         "an unknown manifest version must be rejected, not misparsed",
+    );
+}
+
+#[test]
+fn a_needs_only_manifest_has_no_stage_interface() {
+    // A program that declares authority needs but isn't a `~>` stage: no input, no
+    // output — just needs. The note still carries them, so a satisfier can read the
+    // program's required authorities off its `user.iface` xattr.
+    const M: ConstManifest = ConstManifest {
+        input: None,
+        output: None,
+        needs: &[ConstSlot { name: "fs", object: 2, rights: 0b0010 }],
+    };
+    let decoded = decode_manifest(&encode_manifest(&M)).expect("decodes");
+    assert_eq!(decoded.input, None);
+    assert_eq!(decoded.output, None);
+    assert_eq!(
+        decoded.needs,
+        vec![Slot { name: "fs".into(), object: 2, rights: 0b0010 }],
     );
 }
 
@@ -56,7 +75,7 @@ fn a_manifest_round_trips_through_the_note_encoding() {
             type_name: "Row",
             fields: &[(Some("name"), ConstSchema::Str), (Some("n"), ConstSchema::U32)],
         }),
-        output: ConstSchema::Seq(&ConstSchema::U64),
+        output: Some(ConstSchema::Seq(&ConstSchema::U64)),
         // object 2 = Endpoint, rights 0b0010 = SEND (raw here; the ABI-agreement
         // pin is `a_needs_slot_round_trips_with_object_and_rights`).
         needs: &[
@@ -77,7 +96,7 @@ fn a_manifest_round_trips_through_the_note_encoding() {
                     (Some("n".into()), TypeSchema::U32),
                 ],
             }),
-            output: TypeSchema::Seq(Box::new(TypeSchema::U64)),
+            output: Some(TypeSchema::Seq(Box::new(TypeSchema::U64))),
             needs: vec![
                 Slot { name: "fs".into(), object: 2, rights: 0b0010 },
                 Slot { name: "log".into(), object: 2, rights: 0b0010 },
@@ -90,7 +109,7 @@ fn a_manifest_round_trips_through_the_note_encoding() {
 fn every_scalar_kind_round_trips_in_a_manifest() {
     const M: ConstManifest = ConstManifest {
         input: None,
-        output: ConstSchema::Product {
+        output: Some(ConstSchema::Product {
             type_name: "All",
             fields: &[
                 (Some("bool"), ConstSchema::Bool),
@@ -107,11 +126,11 @@ fn every_scalar_kind_round_trips_in_a_manifest() {
                 (Some("str"), ConstSchema::Str),
                 (Some("bytes"), ConstSchema::Bytes),
             ],
-        },
+        }),
         needs: &[],
     };
     let decoded = decode_manifest(&encode_manifest(&M)).expect("decodes");
-    let TypeSchema::Product { fields, .. } = decoded.output else {
+    let Some(TypeSchema::Product { fields, .. }) = decoded.output else {
         panic!("an all-scalar product");
     };
     let kinds: Vec<TypeSchema> = fields.into_iter().map(|(_, s)| s).collect();
@@ -143,14 +162,15 @@ fn the_note_byte_layout_is_exact() {
     // here must be a deliberate, reviewed format change.
     const M: ConstManifest = ConstManifest {
         input: None,
-        output: ConstSchema::U8,
+        output: Some(ConstSchema::U8),
         needs: &[ConstSlot { name: "X", object: 2, rights: 0b0010 }],
     };
     let bytes = encode_manifest(&M);
 
     let payload: &[u8] = &[
-        0x01, // format version = 1
+        0x02, // format version = 2
         0x00, // input: None
+        0x01, // output: present
         0x05, // output: U8 (tag 5)
         0x01, 0x00, 0x00, 0x00, // needs count = 1
         0x01, 0x00, 0x00, 0x00, // slot[0].name length = 1
@@ -166,12 +186,12 @@ fn the_note_byte_layout_is_exact() {
 fn a_source_manifest_has_no_input() {
     const M: ConstManifest = ConstManifest {
         input: None,
-        output: ConstSchema::Bool,
+        output: Some(ConstSchema::Bool),
         needs: &[],
     };
     let decoded = decode_manifest(&encode_manifest(&M)).expect("decodes");
     assert_eq!(decoded.input, None);
-    assert_eq!(decoded.output, TypeSchema::Bool);
+    assert_eq!(decoded.output, Some(TypeSchema::Bool));
     assert!(decoded.needs.is_empty());
 }
 
@@ -179,19 +199,19 @@ fn a_source_manifest_has_no_input() {
 fn an_enum_output_round_trips() {
     const M: ConstManifest = ConstManifest {
         input: None,
-        output: ConstSchema::Sum {
+        output: Some(ConstSchema::Sum {
             type_name: "Status",
             variants: &[
                 ("Ok", ConstSchema::Product { type_name: "Status", fields: &[(None, ConstSchema::U64)] }),
                 ("Pending", ConstSchema::Product { type_name: "Status", fields: &[] }),
             ],
-        },
+        }),
         needs: &[],
     };
     let decoded = decode_manifest(&encode_manifest(&M)).expect("decodes");
     assert_eq!(
         decoded.output,
-        TypeSchema::Sum {
+        Some(TypeSchema::Sum {
             type_name: "Status".into(),
             variants: vec![
                 (
@@ -206,6 +226,6 @@ fn an_enum_output_round_trips() {
                     TypeSchema::Product { type_name: "Status".into(), fields: vec![] }
                 ),
             ],
-        }
+        })
     );
 }

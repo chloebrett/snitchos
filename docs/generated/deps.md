@@ -27,10 +27,12 @@ graph LR
     stitch["stitch"]
     xtask["xtask"]
     collector --> protocol
+    collector --> snitchos_abi
     diagram --> protocol
     diagram --> snitchos_abi
     fs --> fs_core
     fs --> fs_proto
+    fs --> hitch
     fs --> ramfs
     fs --> snitchos_std
     fs --> snitchos_user

@@ -11,6 +11,10 @@ publish = false
 [dependencies]
 snitchos-user = { path = "../runtime" }
 snitchos-std = { path = "../std" }
+# `#[entry(needs = […])]` emits a `hitch`-encoded `.snitch.iface` note (the FS
+# client declares its authority needs). `default-features = false` — no schema
+# derive is needed (a needs-only note carries no in/out types).
+hitch = { path = "../../hitch", default-features = false }
 fs-core = { path = "../../fs-core" }
 fs-proto = { path = "../../fs-proto" }
 ramfs = { path = "../../ramfs" }

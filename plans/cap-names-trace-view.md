@@ -55,8 +55,11 @@ closes that gap.
       end = revoke `t`, `cap.revoked = true`, name = the object name.
 - [ ] A granted-but-never-revoked cap yields, at flush, a cap span ending at the
       last-seen timestamp with `cap.revoked = false`.
-- [ ] A transitive revoke (parent revoked) closes the parent's span **and** every
-      descendant's span, all ending at the revoke `t`.
+- [ ] A transitive revoke closes every span in the subtree at the same `t`,
+      because the kernel emits one `Revoked` per swept cap (`CapEventKind::Revoked`
+      doc: "A transitive revoke emits one `Revoked` per swept descendant") — the
+      collector closes each cap on its own `Revoked` event; no software-side tree
+      walk is needed.
 - [ ] `parent_cap_id` linkage is preserved: a derived cap's span parents onto its
       source cap's span; a root grant (`parent_cap_id == 0`) has no parent.
 - [ ] Reply caps (`CapObject::Reply`) produce no cap span.
@@ -122,12 +125,12 @@ parent_span_id: parent_cap_id, name: label, extra_attributes: [cap.*], events:
 at flush; transitive-revoke subtree closes together; reply-cap dropped; root has no
 parent; label = name-or-kind; the span carries granted+revoked events). Mirror
 `diagram/caps.rs`'s conventions.
-**GREEN**: Implement `CapTracker` (open-holding map keyed by `cap_id`; child index
-for transitive close; per-cap event log) + the `CompletedSpan` mapping. Timestamps
-stay kernel-`t` here; anchoring to wall-clock happens in Step 4 via the session
-anchor (events anchored alongside the span).
-**MUTATE / KILL MUTANTS**: Cover the subtree walk, the reply-drop, the
-revoked/held flag, the parent-zero branch, the event accumulation.
+**GREEN**: Implement `CapTracker` (open-holding map keyed by `cap_id`; per-cap event
+log) + the `CompletedSpan` mapping. Each `Revoked` closes exactly one cap (no
+software subtree walk — the kernel emits one `Revoked` per swept cap). `observe`
+takes pre-anchored wall-clock `t: u128` (Step 4 anchors before calling).
+**MUTATE / KILL MUTANTS**: Cover the reply-drop, the revoked/held flag, the
+parent-zero branch, the event accumulation, the Transferred-updates-existing branch.
 **REFACTOR**: Factor shared label/attribute building with an eye toward the
 `diagram` conventions (do not couple crates; duplicate-with-a-comment is fine).
 **Done when**: Criteria met, mutation report clean, human approves.

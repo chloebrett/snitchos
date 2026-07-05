@@ -279,7 +279,9 @@ pub fn manifest_of_main(items: &[Item]) -> Result<hitch::Manifest, RuntimeError>
         .iter()
         .map(|name| hitch::Slot { name: name.clone(), object: 0, rights: 0 })
         .collect();
-    Ok(hitch::Manifest { input, output, needs })
+    // A Stitch stage always has an output (a `main` return type is required); the
+    // manifest models `output` as optional only because non-stage programs omit it.
+    Ok(hitch::Manifest { input, output: Some(output), needs })
 }
 
 #[cfg(test)]
@@ -400,7 +402,7 @@ mod tests {
     fn manifest_of_main_reads_input_output_and_needs() {
         let m = manifest(r"main(x: Int) -> List<Str> uses FsRead, ConsoleOut = []").expect("manifest");
         assert_eq!(m.input, Some(hitch::TypeSchema::I64));
-        assert_eq!(m.output, hitch::TypeSchema::Seq(Box::new(hitch::TypeSchema::Str)));
+        assert_eq!(m.output, Some(hitch::TypeSchema::Seq(Box::new(hitch::TypeSchema::Str))));
         // Effect names become name-only slots (object/rights unresolved → 0).
         assert_eq!(
             m.needs,
@@ -415,7 +417,7 @@ mod tests {
     fn a_zero_param_main_is_a_source_with_no_input() {
         let m = manifest(r"main() -> Int = 0").expect("manifest");
         assert_eq!(m.input, None);
-        assert_eq!(m.output, hitch::TypeSchema::I64);
+        assert_eq!(m.output, Some(hitch::TypeSchema::I64));
         assert!(m.needs.is_empty());
     }
 
@@ -441,7 +443,7 @@ mod tests {
         let m = manifest(r#"helper(x: Bool) -> Bool = x  main(x: Int) -> Str = """#)
             .expect("manifest");
         assert_eq!(m.input, Some(hitch::TypeSchema::I64));
-        assert_eq!(m.output, hitch::TypeSchema::Str);
+        assert_eq!(m.output, Some(hitch::TypeSchema::Str));
     }
 
     #[test]

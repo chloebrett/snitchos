@@ -761,7 +761,12 @@ fn eval_cross_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, Runtim
     if let Expr::Binary { op: BinOp::CrossPipe, right: upstream, .. } = left {
         let upstream_name = stage_name(upstream)?;
         let (_, upstream_manifest) = resolve_stage(upstream_name, env)?;
-        if !upstream_manifest.output.compatible(&input_schema) {
+        let Some(upstream_output) = &upstream_manifest.output else {
+            return Err(RuntimeError::new(format!(
+                "pipeline: stage `{upstream_name}` has no output type to pipe from"
+            )));
+        };
+        if !upstream_output.compatible(&input_schema) {
             return Err(RuntimeError::new(format!(
                 "pipeline: stage `{upstream_name}`'s output is not compatible with stage `{name}`'s input"
             )));
