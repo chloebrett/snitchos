@@ -822,6 +822,12 @@ pub(crate) fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<
             if let Some(uses) = &closure.uses {
                 call_env = call_env.with_authority(uses.iter().cloned().collect());
             }
+            // Bump the call-depth guard for the duration of the body — dropped on
+            // every exit path below, so nesting is decremented even on `?`. Caps
+            // unbounded non-tail recursion with a catchable fault, not an overflow.
+            let _guard = call_env
+                .enter_call()
+                .ok_or_else(|| RuntimeError::new("call stack too deep"))?;
             // This is a function boundary, so `?`'s early-return stops here and
             // becomes the call's value.
             match eval(&closure.body, &call_env) {
@@ -2011,12 +2017,24 @@ mod tests {
 
     #[test]
     fn evaluation_faults_when_the_fuel_budget_is_exhausted() {
-        // A non-terminating program must fault *catchably* under a finite budget,
-        // rather than hang or overflow the Rust stack.
-        let items = crate::parser::parse_program("f(n) = f(n)  main() = f(0)")
+        // An infinite but *iterative* computation (bounded call depth) must fault
+        // on the fuel budget — not the depth guard, and not by hanging. (A
+        // recursive non-terminator would trip the depth guard first.)
+        let items = crate::parser::parse_program("main() = 1.. |> count")
             .expect("program parses");
         let err = super::eval_program_with_fuel(&items, 500).expect_err("fuel should run out");
         assert!(err.message().contains("fuel"), "got: {}", err.message());
+    }
+
+    #[test]
+    fn deep_non_tail_recursion_faults_instead_of_overflowing() {
+        // Non-tail infinite recursion can't be trampolined away — the depth guard
+        // must turn a Rust-stack overflow into a catchable fault (under the default,
+        // effectively-unbounded fuel, so it's depth that catches it, not fuel).
+        let items = crate::parser::parse_program("f(n) = f(n) + 1  main() = f(0)")
+            .expect("program parses");
+        let err = super::eval_program(&items).expect_err("recursion depth should be capped");
+        assert!(err.message().contains("deep"), "got: {}", err.message());
     }
 
     #[test]

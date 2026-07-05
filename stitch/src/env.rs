@@ -64,6 +64,22 @@ pub struct Env {
     /// overflowing the Rust stack). This is the hook the Stitch mutation tester's
     /// fuel cap rides.
     fuel: Rc<Cell<u64>>,
+    /// Current nested-call depth, run-shared like `fuel`. A backstop that turns
+    /// an unbounded-non-tail-recursion Rust-stack overflow into a catchable fault
+    /// (see [`enter_call`](Self::enter_call)).
+    depth: Rc<Cell<u32>>,
+}
+
+/// Undoes [`Env::enter_call`]'s depth increment when dropped — so nesting is
+/// decremented on *every* exit from a call, error paths (`?`) included.
+pub struct CallGuard {
+    depth: Rc<Cell<u32>>,
+}
+
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        self.depth.set(self.depth.get().saturating_sub(1));
+    }
 }
 
 impl Default for Env {
@@ -103,6 +119,7 @@ impl Env {
             platform: Rc::new(NullPlatform),
             authority: Rc::new(BTreeSet::new()),
             fuel: Rc::new(Cell::new(u64::MAX)),
+            depth: Rc::new(Cell::new(0)),
         }
     }
 
@@ -126,6 +143,27 @@ impl Env {
         }
         self.fuel.set(remaining - 1);
         true
+    }
+
+    /// The maximum nested-call depth before a fault — a backstop that converts a
+    /// Rust-stack overflow (unbounded non-tail recursion) into a catchable error.
+    /// Conservative and target-dependent: on-target stacks are far smaller than
+    /// the host's, and the real fix for *tail* recursion is the trampoline. Tune
+    /// here.
+    const MAX_CALL_DEPTH: u32 = 48;
+
+    /// Enter a nested call: bump the run-shared depth counter and hand back a
+    /// [`CallGuard`] that decrements it on drop (so depth tracks *current* nesting
+    /// on every exit path). `None` if entering would exceed [`MAX_CALL_DEPTH`] —
+    /// the caller should fault rather than recurse into an overflow.
+    #[must_use]
+    pub fn enter_call(&self) -> Option<CallGuard> {
+        let depth = self.depth.get() + 1;
+        if depth > Self::MAX_CALL_DEPTH {
+            return None;
+        }
+        self.depth.set(depth);
+        Some(CallGuard { depth: Rc::clone(&self.depth) })
     }
 
     /// A clone of this environment whose console / capability / process / FS
@@ -192,6 +230,7 @@ impl Env {
             platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
             fuel: Rc::clone(&self.fuel),
+            depth: Rc::clone(&self.depth),
         }
     }
 
@@ -211,6 +250,7 @@ impl Env {
             platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
             fuel: Rc::clone(&self.fuel),
+            depth: Rc::clone(&self.depth),
         }
     }
 
@@ -242,6 +282,7 @@ impl Env {
             platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
             fuel: Rc::clone(&self.fuel),
+            depth: Rc::clone(&self.depth),
         }
     }
 
@@ -360,5 +401,38 @@ impl Env {
             self.field_mut.set(field_mut).is_ok(),
             "field mutability must be installed exactly once"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Env;
+
+    #[test]
+    fn enter_call_allows_exactly_the_depth_limit_then_refuses() {
+        let env = Env::new();
+        // Hold each guard so depth stays incremented: exactly MAX_CALL_DEPTH
+        // enters succeed, and the next is refused. Pins the boundary exactly (the
+        // eval-level tests only check "deep faults / shallow doesn't").
+        let mut guards = Vec::new();
+        for _ in 0..Env::MAX_CALL_DEPTH {
+            guards.push(env.enter_call().expect("under the limit succeeds"));
+        }
+        assert_eq!(guards.len() as u32, Env::MAX_CALL_DEPTH);
+        assert!(env.enter_call().is_none(), "at the limit, a further call is refused");
+    }
+
+    #[test]
+    fn dropping_call_guards_frees_the_depth() {
+        let env = Env::new();
+        {
+            let mut guards = Vec::new();
+            for _ in 0..Env::MAX_CALL_DEPTH {
+                guards.push(env.enter_call().expect("under the limit"));
+            }
+            assert!(env.enter_call().is_none(), "exhausted at the limit");
+        }
+        // Guards dropped ⇒ depth freed ⇒ we can enter again.
+        assert!(env.enter_call().is_some(), "a dropped guard must decrement depth");
     }
 }
