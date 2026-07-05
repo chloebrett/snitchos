@@ -627,6 +627,7 @@ const UNIT_TEST_CRATES: &[(&str, &[&str])] = &[
     ("protocol", &["--features", "std"]),
     ("collector", &[]),
     ("itest-harness", &[]),
+    ("diagram", &[]),
 ];
 
 /// Run every workspace crate's host unit tests, in order. Returns
@@ -652,6 +653,13 @@ pub fn run_unit_tests() -> ExitCode {
         &["test", "-p", "kernel-core", "--test", "loom_tx", "--quiet"],
         &[("RUSTFLAGS", "--cfg loom")],
     ) {
+        return ExitCode::from(1);
+    }
+    // Generated diagrams (docs/generated/) are contract artifacts: a stale one
+    // means the source of truth moved without the committed diagram noticing.
+    // `--check` re-derives and diffs, failing the gate on drift.
+    eprintln!("=== generated diagrams ===");
+    if crate::diagram_cmd::check_all() != ExitCode::SUCCESS {
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS

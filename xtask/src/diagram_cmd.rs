@@ -10,6 +10,13 @@ use std::process::{Command, ExitCode, Stdio};
 /// The committed crate-graph artifact, relative to the workspace root.
 const DEPS_DOC: &str = "docs/generated/deps.md";
 
+/// Verify every committed diagram in `docs/generated/` is up to date. Called
+/// from the `cargo xtask test` gate so a stale diagram fails the suite. New
+/// generated targets add their `--check` here.
+pub fn check_all() -> ExitCode {
+    deps(true)
+}
+
 /// Generate (or, with `check`, verify) the workspace crate-dependency graph.
 pub fn deps(check: bool) -> ExitCode {
     let json = match cargo_metadata() {
