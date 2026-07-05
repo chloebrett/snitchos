@@ -6,6 +6,7 @@
 //! snemu for a capture, `--check` diffs, file writes) and delegates projection
 //! to this crate. See `docs/diagrams-design.md`.
 
+pub mod caps;
 pub mod deps;
 pub mod itest_matrix;
 pub mod model;
