@@ -58,6 +58,20 @@ impl<T: ?Sized> Mutex<T> {
         // adds save+clear of sstatus.SIE here.
         MutexGuard { inner: self.inner.lock() }
     }
+
+    /// Try to acquire the lock without blocking: the guard if it was free,
+    /// `None` if it's held (by any hart, or by this hart mid-critical-section).
+    /// The non-blocking seam the panic path needs — it must never spin on a lock
+    /// the panicking code might already hold. Runs the same acquisition hooks as
+    /// [`lock`](Self::lock), but only on the success path.
+    // The first caller is the panic-safe telemetry emit (increment 3 of
+    // plans/panic-emits-telemetry.md); this `allow` goes away when it lands.
+    #[allow(dead_code, reason = "seam for the panic-safe virtio send, wired up next")]
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        // Acquisition hook stub (success path only). Mirrors `lock`: v0.5.x adds
+        // preempt::disable(); SMP adds save+clear of sstatus.SIE here.
+        self.inner.try_lock().map(|inner| MutexGuard { inner })
+    }
 }
 
 impl<T: ?Sized> Deref for MutexGuard<'_, T> {
