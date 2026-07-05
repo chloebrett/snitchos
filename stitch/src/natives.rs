@@ -421,9 +421,14 @@ fn native_hold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
                 fields: alloc::vec![
                     (Some("handle".into()), Value::Int(i64::from(cap.handle))),
                     (Some("kind".into()), Value::Str(cap.kind.as_str().into())),
-                    (Some("rights".into()), Value::Str(crate::platform::rights_glyphs(cap.rights).into())),
+                    (
+                        Some("rights".into()),
+                        Value::Str(crate::platform::rights_glyphs(cap.rights).into()),
+                    ),
                     (Some("badge".into()), Value::Int(i64::try_from(cap.badge).unwrap_or(i64::MAX))),
                 ],
+                // Kernel-built: the un-forgeable provenance the renderer colors on.
+                native: true,
             }))
         })
         .collect::<Vec<_>>();
@@ -968,6 +973,7 @@ mod tests {
                 (Some("rights".into()), Value::Str(rights.into())),
                 (Some("badge".into()), Value::Int(badge)),
             ],
+            native: true, // mirrors `hold`'s kernel-built provenance
         }))
     }
 

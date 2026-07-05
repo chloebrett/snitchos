@@ -849,6 +849,7 @@ fn make_data(ctor: &Constructor, values: &[Value]) -> Result<Value, RuntimeError
         type_name: ctor.type_name.clone(),
         variant: ctor.variant.clone(),
         fields,
+        native: false,
     })))
 }
 
@@ -930,6 +931,7 @@ pub(crate) fn some(value: Value) -> Value {
         type_name: "Maybe".to_string(),
         variant: "Some".to_string(),
         fields: vec![(None, value)],
+        native: false,
     }))
 }
 
@@ -939,6 +941,7 @@ pub(crate) fn none() -> Value {
         type_name: "Maybe".to_string(),
         variant: "None".to_string(),
         fields: Vec::new(),
+        native: false,
     }))
 }
 
@@ -1202,6 +1205,7 @@ fn rebuild_with_field(
         type_name: data.type_name.clone(),
         variant: data.variant.clone(),
         fields,
+        native: false,
     })))
 }
 

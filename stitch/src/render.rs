@@ -42,6 +42,12 @@ pub struct Table {
     header: Option<Vec<String>>,
     aligns: Vec<Align>,
     rows: Vec<Vec<String>>,
+    /// Per-row provenance (one per entry in `rows`): `true` when that row came
+    /// from a kernel-built (`native`) record. A colorizer keys on this so only
+    /// genuine kernel data (e.g. `hold`'s rights) is colored — never a user
+    /// record that merely looks the same. `false` for every row of a
+    /// user-constructed table.
+    row_native: Vec<bool>,
 }
 
 impl Table {
@@ -61,6 +67,13 @@ impl Table {
     #[must_use]
     pub fn aligns(&self) -> &[Align] {
         &self.aligns
+    }
+
+    /// Per-row provenance (one per row): whether that row came from a
+    /// kernel-built record. A colorizer paints only these rows.
+    #[must_use]
+    pub fn row_native(&self) -> &[bool] {
+        &self.row_native
     }
 
     /// Each column's display width — the widest of its header (if any) and its
@@ -93,16 +106,19 @@ pub trait TableStyle {
 }
 
 /// Unicode box-drawing table: `┌─┬─┐` borders with one space of padding inside
-/// each cell. Carries a `colorize` hook applied to each cell's *content* — the
-/// identity for [`plain`](Self::plain), an ANSI wrapper (e.g.
-/// [`colorize_rights`](crate::platform::colorize_rights)) for a colored channel.
+/// each cell. Carries a `colorize` hook — the identity for [`plain`](Self::plain),
+/// an ANSI wrapper (e.g. [`colorize_rights`](crate::platform::colorize_rights))
+/// for a colored channel. The hook is given each data row's **provenance** (was
+/// it kernel-built?) alongside the content, so a colorizer can paint only genuine
+/// kernel data — coloring keys on *where the row came from*, not on which glyphs
+/// appear or what the column is named, so a user record can never spoof it.
 /// Colorizing happens *after* width measurement, so the escape bytes (which are
 /// printable ASCII, not zero-width to a measurer) never shift the layout.
 pub struct BoxStyle {
-    colorize: fn(&str) -> String,
+    colorize: fn(bool, &str) -> String,
 }
 
-fn uncolored(cell: &str) -> String {
+fn uncolored(_native: bool, cell: &str) -> String {
     cell.to_string()
 }
 
@@ -113,10 +129,10 @@ impl BoxStyle {
         BoxStyle { colorize: uncolored }
     }
 
-    /// A box table whose cell content is passed through `colorize` (an ANSI
-    /// wrapper) after layout is measured.
+    /// A box table whose cell content is passed through `colorize` (given each
+    /// row's provenance + the content) after layout is measured.
     #[must_use]
-    pub fn with_colorizer(colorize: fn(&str) -> String) -> Self {
+    pub fn with_colorizer(colorize: fn(bool, &str) -> String) -> Self {
         BoxStyle { colorize }
     }
 }
@@ -133,21 +149,28 @@ impl TableStyle for BoxStyle {
         };
         let aligns = table.aligns();
         // Pad by *display width*, not `char` count: `{cell:<width$}` counts chars,
-        // so a two-cell emoji would be under-padded and shear the border.
-        let pad = |cell: &str, width: usize, align: Align| {
+        // so a two-cell emoji would be under-padded and shear the border. `native`
+        // is the row's provenance — the colorizer paints only kernel-built rows.
+        let pad = |colorize: fn(bool, &str) -> String,
+                   native: bool,
+                   cell: &str,
+                   width: usize,
+                   align: Align| {
             let fill = " ".repeat(width.saturating_sub(display_width(cell)));
-            let shown = (self.colorize)(cell);
+            let shown = colorize(native, cell);
             match align {
                 Align::Left => format!("{shown}{fill}"),
                 Align::Right => format!("{fill}{shown}"),
             }
         };
-        let row = |cells: &[String]| {
+        // The header row is labels, not data — never colorized. Each data row runs
+        // the installed colorizer with its own provenance.
+        let row = |cells: &[String], colorize: fn(bool, &str) -> String, native: bool| {
             let padded = cells
                 .iter()
                 .zip(&widths)
                 .zip(aligns)
-                .map(|((cell, width), align)| pad(cell, *width, *align))
+                .map(|((cell, width), align)| pad(colorize, native, cell, *width, *align))
                 .collect::<Vec<_>>();
             format!("│ {} │", padded.join(" │ "))
         };
@@ -155,13 +178,13 @@ impl TableStyle for BoxStyle {
         let mut out = border('┌', '┬', '┐');
         if let Some(header) = table.header() {
             out.push('\n');
-            out.push_str(&row(header));
+            out.push_str(&row(header, uncolored, false));
             out.push('\n');
             out.push_str(&border('├', '┼', '┤'));
         }
-        for r in table.rows() {
+        for (r, native) in table.rows().iter().zip(table.row_native()) {
             out.push('\n');
-            out.push_str(&row(r));
+            out.push_str(&row(r, self.colorize, *native));
         }
         out.push('\n');
         out.push_str(&border('└', '┴', '┘'));
@@ -177,8 +200,10 @@ fn as_table(value: &Value) -> Option<Table> {
     let Value::List(items) = value else {
         return None;
     };
-    let (columns, first_row, mut aligns) = record_row(items.first()?)?;
+    let first = items.first()?;
+    let (columns, first_row, mut aligns) = record_row(first)?;
     let mut rows = alloc::vec![first_row];
+    let mut row_native = alloc::vec![native_of(first)];
     for item in &items[1..] {
         let (cols, cells, cell_aligns) = record_row(item)?;
         if cols != columns {
@@ -192,8 +217,16 @@ fn as_table(value: &Value) -> Option<Table> {
             }
         }
         rows.push(cells);
+        row_native.push(native_of(item)); // provenance is per row: a mixed list
+        // (real caps + a look-alike user record) colors only the real rows.
     }
-    Some(Table { header: Some(columns), aligns, rows })
+    Some(Table { header: Some(columns), aligns, rows, row_native })
+}
+
+/// Whether `value` is a kernel-built record — the un-forgeable provenance the
+/// colorizer keys on. User Stitch cannot set a `DataValue`'s `native` flag.
+fn native_of(value: &Value) -> bool {
+    matches!(value, Value::Data(data) if data.native)
 }
 
 /// The alignment a value's column wants: numbers right-justify, everything else
@@ -242,7 +275,9 @@ fn as_kv(value: &Value) -> Option<Table> {
         } else {
             Align::Left
         };
-    Some(Table { header: None, aligns: alloc::vec![Align::Left, value_align], rows })
+    // Every row of this single record shares its provenance.
+    let row_native = alloc::vec![data.native; rows.len()];
+    Some(Table { header: None, aligns: alloc::vec![Align::Left, value_align], rows, row_native })
 }
 
 /// Whether `value` is a sum variant carrying fields — the tree case (a nullary
@@ -329,7 +364,7 @@ pub fn render(value: &Value) -> String {
 /// content (rights glyphs) in ANSI. The REPL uses this on a color-capable
 /// channel; [`render`] stays plain for pipes and snapshots.
 #[must_use]
-pub fn render_colored(value: &Value, colorize: fn(&str) -> String) -> String {
+pub fn render_colored(value: &Value, colorize: fn(bool, &str) -> String) -> String {
     render_with(value, &BoxStyle::with_colorizer(colorize))
 }
 
@@ -346,6 +381,7 @@ mod tests {
             type_name: "R".into(),
             variant: "R".into(),
             fields: fields.into_iter().map(|(n, v)| (Some(n.into()), v)).collect(),
+            native: false,
         }))
     }
 
@@ -356,6 +392,7 @@ mod tests {
             type_name: type_name.into(),
             variant: name.into(),
             fields: fields.into_iter().map(|(n, v)| (n.map(Into::into), v)).collect(),
+            native: false,
         }))
     }
 
@@ -419,6 +456,7 @@ Ok
             type_name: "P".into(),
             variant: "P".into(),
             fields: vec![(None, Value::Int(1))],
+            native: false,
         }));
         let list = Value::List(vec![positional].into());
         assert!(!render(&list).contains('│'), "{}", render(&list));
@@ -479,6 +517,7 @@ Ok
             type_name: "Maybe".into(),
             variant: "None".into(),
             fields: vec![],
+            native: false,
         }));
         assert_eq!(render(&none), "None");
     }
@@ -592,17 +631,38 @@ Cap
             header: None,
             aligns: vec![Align::Left],
             rows: vec![vec!["ab".into()], vec!["abcd".into()]],
+            row_native: vec![true, true], // native so the colorizer runs
         };
         // Column width is 4 (from "abcd"); "ab" gets 2 fill spaces, both computed
         // before the `[..]` wrap — so the fill count ignores the brackets.
         assert_eq!(
-            BoxStyle::with_colorizer(|s| alloc::format!("[{s}]")).render(&table),
+            BoxStyle::with_colorizer(|_native, s| alloc::format!("[{s}]")).render(&table),
             "\
 ┌──────┐
 │ [ab]   │
 │ [abcd] │
 └──────┘"
         );
+    }
+
+    #[test]
+    fn the_colorizer_only_touches_native_rows() {
+        // Coloring keys on provenance: the native row is decorated, the
+        // non-native row (and the header) are left alone — a user look-alike row
+        // in the same table is never colored.
+        let table = Table {
+            header: Some(vec!["c".into()]),
+            aligns: vec![Align::Left],
+            rows: vec![vec!["a".into()], vec!["b".into()]],
+            row_native: vec![true, false],
+        };
+        let out = BoxStyle::with_colorizer(|native, cell| {
+            if native { alloc::format!("<{cell}>") } else { cell.to_string() }
+        })
+        .render(&table);
+        assert!(out.contains("<a>"), "{out}"); // native row decorated
+        assert!(!out.contains("<b>"), "{out}"); // non-native row untouched
+        assert!(!out.contains("<c>"), "{out}"); // header never decorated
     }
 
     #[test]
@@ -614,6 +674,7 @@ Cap
                 vec!["1".into(), "2".into()],
                 vec!["30".into(), "4".into()],
             ],
+            row_native: vec![false, false],
         };
         assert_eq!(
             BoxStyle::plain().render(&table),

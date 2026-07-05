@@ -182,6 +182,13 @@ pub struct DataValue {
     pub type_name: String,
     pub variant: String,
     pub fields: Vec<(Option<String>, Value)>,
+    /// Provenance: `true` only for records the kernel/native code built (e.g.
+    /// `hold`'s capability rows), which user Stitch can never construct — there
+    /// is no surface syntax that sets it. This is the un-forgeable signal the
+    /// renderer keys color on, so a user's `prod X(rights: Str)` can never be
+    /// mistaken for real rights. Not part of value equality (it's provenance, not
+    /// content), so a user record and a native one still compare equal by fields.
+    pub native: bool,
 }
 
 /// The captured contents of a closure: parameter names, the body to evaluate on

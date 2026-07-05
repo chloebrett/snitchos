@@ -79,6 +79,7 @@ pub fn from_hitch(value: &hitch::Value) -> Result<Value, RuntimeError> {
             // A prod's variant is its type name (registry mirrors this).
             variant: type_name.clone(),
             fields: from_hitch_fields(fields)?,
+            native: false,
         }))),
         hitch::Value::Sum {
             type_name,
@@ -92,6 +93,7 @@ pub fn from_hitch(value: &hitch::Value) -> Result<Value, RuntimeError> {
                 type_name: type_name.clone(),
                 variant: variant.clone(),
                 fields: from_hitch_fields(fields)?,
+                native: false,
             })))
         }
     }
@@ -445,6 +447,7 @@ mod tests {
             type_name: type_name.to_string(),
             variant: variant.to_string(),
             fields,
+            native: false,
         }))
     }
 

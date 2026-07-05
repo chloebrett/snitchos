@@ -114,6 +114,7 @@ pub(crate) fn register_items(items: &[Item], env: &Env, reg: &mut Registration) 
                             type_name: name.clone(),
                             variant: variant.name.clone(),
                             fields: Vec::new(),
+                            native: false,
                         }))
                     } else {
                         Value::Constructor(Rc::new(Constructor {
@@ -265,6 +266,7 @@ pub(crate) fn register_builtin_types(globals: &mut BTreeMap<String, Value>) {
             type_name: "Maybe".to_string(),
             variant: "None".to_string(),
             fields: Vec::new(),
+            native: false,
         })),
     );
 }

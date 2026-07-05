@@ -351,6 +351,22 @@ mod tests {
     }
 
     #[test]
+    fn a_colored_repl_leaves_user_built_glyphs_alone() {
+        use crate::platform::NullPlatform;
+        use crate::prelude::*;
+        use crate::telemetry::RecordingTelemetry;
+        // A user record is not kernel-built, so its cells are never colored — even
+        // a column literally named `rights` full of real rights glyphs. Coloring
+        // keys on provenance, which user Stitch cannot forge.
+        let mut repl =
+            Repl::with_backends(Rc::new(RecordingTelemetry::default()), Rc::new(NullPlatform))
+                .color(true);
+        repl.eval_line("prod C(rights: Str)");
+        let out = repl.eval_line("[C(\"🪴👀📝\"), C(\"📝\")]");
+        assert!(!out.contains('\u{1b}'), "user-built glyphs were colored: {out:?}");
+    }
+
+    #[test]
     fn emitting_from_a_function_without_uses_telemetry_is_refused() {
         // `speak` calls emit but declares no `uses` — even though `main` holds
         // Telemetry, authority does not inherit across the named-function boundary.

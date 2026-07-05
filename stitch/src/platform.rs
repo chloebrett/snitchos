@@ -89,11 +89,17 @@ pub fn rights_glyphs(rights: Rights) -> alloc::string::String {
 /// Wrap each rights glyph in its ANSI color — the presentation companion to
 /// [`rights_glyphs`], and the colorizer the REPL hands the box style when its
 /// output channel supports color: 🪴 green (mint), 👀 blue (read), 📝 amber/yellow
-/// (write). Non-glyph text (other cells, borders) passes through untouched, so
-/// the box style can apply this to every cell blindly. Amber uses SGR 33 (yellow)
-/// for portability — a bare UART terminal needn't grok 256-color.
+/// (write). Keyed on the cell's **provenance**, not its content or column name:
+/// `native` is true only for cells from a kernel-built record (a `DataValue`
+/// whose `native` flag is set — `hold`'s rows), which user Stitch can never
+/// forge. So a glyph a user prints in *any* column is left alone; only genuine
+/// rights are painted. Amber uses SGR 33 (yellow) for portability — a bare UART
+/// terminal needn't grok 256-color.
 #[must_use]
-pub fn colorize_rights(cell: &str) -> alloc::string::String {
+pub fn colorize_rights(native: bool, cell: &str) -> alloc::string::String {
+    if !native {
+        return cell.into();
+    }
     cell.replace('🪴', "\u{1b}[32m🪴\u{1b}[0m")
         .replace('👀', "\u{1b}[34m👀\u{1b}[0m")
         .replace('📝', "\u{1b}[33m📝\u{1b}[0m")
@@ -378,19 +384,22 @@ mod tests {
 
     #[test]
     fn colorize_rights_wraps_each_glyph_in_its_ansi_color() {
-        assert_eq!(colorize_rights("🪴"), "\u{1b}[32m🪴\u{1b}[0m"); // green mint
-        assert_eq!(colorize_rights("👀"), "\u{1b}[34m👀\u{1b}[0m"); // blue read
-        assert_eq!(colorize_rights("📝"), "\u{1b}[33m📝\u{1b}[0m"); // amber write
-        assert_eq!(
-            colorize_rights("🪴👀📝"),
-            "\u{1b}[32m🪴\u{1b}[0m\u{1b}[34m👀\u{1b}[0m\u{1b}[33m📝\u{1b}[0m"
-        );
+        let c = |cell| colorize_rights(true, cell); // native (kernel-built) cell
+        assert_eq!(c("🪴"), "\u{1b}[32m🪴\u{1b}[0m"); // green mint
+        assert_eq!(c("👀"), "\u{1b}[34m👀\u{1b}[0m"); // blue read
+        assert_eq!(c("📝"), "\u{1b}[33m📝\u{1b}[0m"); // amber write
+        assert_eq!(c("🪴👀📝"), "\u{1b}[32m🪴\u{1b}[0m\u{1b}[34m👀\u{1b}[0m\u{1b}[33m📝\u{1b}[0m");
     }
 
     #[test]
-    fn colorize_rights_leaves_non_rights_text_untouched() {
-        assert_eq!(colorize_rights("Endpoint"), "Endpoint");
-        assert_eq!(colorize_rights(""), "");
+    fn colorize_rights_only_colors_native_cells() {
+        // The whole point of keying on provenance: a glyph a user (or another
+        // program) prints is never colored, because its cell isn't native.
+        assert_eq!(colorize_rights(false, "🪴"), "🪴");
+        assert_eq!(colorize_rights(false, "🪴👀📝"), "🪴👀📝");
+        // A native cell with no glyphs (another cap column) passes through too.
+        assert_eq!(colorize_rights(true, "Endpoint"), "Endpoint");
+        assert_eq!(colorize_rights(true, ""), "");
     }
 
     #[test]
