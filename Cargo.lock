@@ -254,6 +254,7 @@ version = "0.0.1"
 dependencies = [
  "protocol",
  "serde_json",
+ "snitchos-abi",
 ]
 
 [[package]]
@@ -944,6 +945,7 @@ version = "0.0.1"
 dependencies = [
  "postcard",
  "serde",
+ "snitchos-abi",
 ]
 
 [[package]]
@@ -1190,6 +1192,7 @@ dependencies = [
 name = "snitchos-user"
 version = "0.0.1"
 dependencies = [
+ "hitch",
  "snitchos-abi",
  "snitchos-user-macros",
  "talc",

@@ -18,6 +18,36 @@ fn object_name(object: CapObject) -> &'static str {
     }
 }
 
+/// Tracks whether `CapEvent` emission has gone quiescent, so a snemu boot can
+/// stop stepping once the authority graph has settled instead of running its
+/// full step ceiling. "Quiescent" = at least one `CapEvent` seen, and
+/// `window` steps have since elapsed with no new one. A fresh `CapEvent` resets
+/// the window (init's children mint reply caps in bursts as they do IPC).
+pub struct CapQuiescence {
+    window: u64,
+    last_count: usize,
+    last_change_step: Option<u64>,
+}
+
+impl CapQuiescence {
+    pub fn new(window: u64) -> Self {
+        Self { window, last_count: 0, last_change_step: None }
+    }
+
+    /// Observe the cumulative `CapEvent` count at instruction `step`. Returns
+    /// `true` once emission is quiescent (see [`CapQuiescence`]).
+    pub fn observe(&mut self, count: usize, step: u64) -> bool {
+        if count > self.last_count {
+            self.last_count = count;
+            self.last_change_step = Some(step);
+        }
+        match self.last_change_step {
+            Some(changed) => step.saturating_sub(changed) >= self.window,
+            None => false,
+        }
+    }
+}
+
 /// Build the derivation tree from a frame stream. Each `CapEvent` contributes a
 /// node keyed by `cap_id` (labelled with its object kind and holder); an edge
 /// runs from `parent_cap_id` to `cap_id` for every non-root derivation
@@ -64,7 +94,31 @@ mod tests {
             badge: 0,
             t: 0,
             hart_id: 0,
+            name: [0u8; snitchos_abi::CAP_NAME_LEN],
         }
+    }
+
+    #[test]
+    fn quiescence_needs_at_least_one_cap_event() {
+        let mut q = CapQuiescence::new(10);
+        assert!(!q.observe(0, 1000), "no CapEvent seen — never quiescent");
+    }
+
+    #[test]
+    fn quiescence_trips_after_the_window_since_the_last_cap_event() {
+        let mut q = CapQuiescence::new(10);
+        assert!(!q.observe(1, 5), "first cap at step 5");
+        assert!(!q.observe(1, 14), "9 < 10 elapsed");
+        assert!(q.observe(1, 15), "10 >= 10 elapsed — quiescent");
+    }
+
+    #[test]
+    fn a_new_cap_event_resets_the_window() {
+        let mut q = CapQuiescence::new(10);
+        q.observe(1, 5);
+        assert!(!q.observe(2, 12), "new cap at 12 resets the window");
+        assert!(!q.observe(2, 21), "9 since reset");
+        assert!(q.observe(2, 22), "10 since reset — quiescent");
     }
 
     #[test]

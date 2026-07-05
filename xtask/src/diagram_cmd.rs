@@ -12,6 +12,12 @@ const DEPS_DOC: &str = "docs/generated/deps.md";
 const ITEST_MATRIX_DOC: &str = "docs/generated/itest-matrix.md";
 const CAPS_DOC: &str = "docs/generated/caps.md";
 
+/// Instruction-step window with no new `CapEvent` after which the `caps` boot is
+/// considered settled and stops. Large enough to span init's setup + first
+/// round of IPC (reply caps trickle in bursts), small enough to skip the long
+/// heartbeat tail. `--steps` remains the hard ceiling.
+const CAP_QUIESCENCE_STEPS: u64 = 10_000_000;
+
 /// Verify every committed diagram in `docs/generated/` is up to date. Called
 /// from the `cargo xtask test` gate so a stale diagram fails the suite. Runs
 /// every target (each prints its own status) and fails if any is stale.
@@ -58,11 +64,16 @@ pub fn itest_matrix(check: bool) -> ExitCode {
 /// `docs/generated/` gate.
 pub fn caps(workload: Option<&str>, steps: u64) -> ExitCode {
     eprintln!(
-        "diagram caps: booting {} under snemu ({steps} steps)…",
+        "diagram caps: booting {} under snemu (≤{steps} steps, early-stop after \
+         {CAP_QUIESCENCE_STEPS} idle)…",
         workload.unwrap_or("init (default)")
     );
-    let frames = match crate::snemu_diff::collect_frames(workload, steps) {
-        Ok(frames) => frames,
+    let (frames, ran) = match crate::snemu_diff::collect_frames_until_cap_quiescence(
+        workload,
+        steps,
+        CAP_QUIESCENCE_STEPS,
+    ) {
+        Ok(collected) => collected,
         Err(err) => {
             eprintln!("diagram caps: {err}");
             return ExitCode::from(1);
@@ -88,7 +99,7 @@ pub fn caps(workload: Option<&str>, steps: u64) -> ExitCode {
     if written != ExitCode::SUCCESS {
         return written;
     }
-    eprintln!("diagram caps: folded {cap_events} CapEvent frames");
+    eprintln!("diagram caps: folded {cap_events} CapEvent frames (stopped at {ran} steps)");
     render_svg(&graph.to_dot(), &path.with_extension("svg"));
     ExitCode::SUCCESS
 }
