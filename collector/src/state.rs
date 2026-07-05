@@ -867,11 +867,127 @@ mod tests {
         assert_eq!(span.thread_priority, Some(2));
     }
 
+    fn extra(span: &CompletedSpan, key: &str) -> Option<String> {
+        span.extra_attributes
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    }
+
     fn cap_name(s: &str) -> [u8; 24] {
         let mut buf = [0u8; 24];
         let b = s.as_bytes();
         buf[..b.len().min(24)].copy_from_slice(&b[..b.len().min(24)]);
         buf
+    }
+
+    /// Integration guard: drives the realistic grant→mint(derive)→revoke flow
+    /// through `State` and asserts the named derivation tree comes out correctly.
+    #[test]
+    fn cap_derivation_tree_full_flow() {
+        // 5 s wall-clock; 10 MHz timebase. One tick = 100 ns.
+        let mut state = State::new(FakeWallClock(5_000_000_000));
+        state.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+
+        // init creates the fs endpoint (root holding, RECV|MINT rights = 3).
+        state.handle(&Frame::CapEvent {
+            kind: protocol::CapEventKind::Granted,
+            cap_id: 1,
+            parent_cap_id: 0,
+            holder: 1,
+            object: protocol::CapObject::Endpoint,
+            rights: 3,
+            badge: 0,
+            t: 100,
+            hart_id: 0,
+            name: cap_name("fs"),
+        });
+        assert!(state.drain_cap_spans().is_empty(), "root cap not yet closed");
+
+        // MintBadged: derive a SEND-only badged cap from cap 1 into a client.
+        state.handle(&Frame::CapEvent {
+            kind: protocol::CapEventKind::Granted,
+            cap_id: 2,
+            parent_cap_id: 1,
+            holder: 2,
+            object: protocol::CapObject::Endpoint,
+            rights: 1,
+            badge: 42,
+            t: 200,
+            hart_id: 0,
+            name: cap_name("fs"),
+        });
+        assert!(state.drain_cap_spans().is_empty(), "derived cap not yet closed");
+
+        // Revoke: kernel sweeps the subtree and emits one Revoked per cap.
+        state.handle(&Frame::CapEvent {
+            kind: protocol::CapEventKind::Revoked,
+            cap_id: 2,
+            parent_cap_id: 0,
+            holder: 2,
+            object: protocol::CapObject::Endpoint,
+            rights: 0,
+            badge: 0,
+            t: 900,
+            hart_id: 0,
+            name: [0u8; 24],
+        });
+        state.handle(&Frame::CapEvent {
+            kind: protocol::CapEventKind::Revoked,
+            cap_id: 1,
+            parent_cap_id: 0,
+            holder: 1,
+            object: protocol::CapObject::Endpoint,
+            rights: 0,
+            badge: 0,
+            t: 900,
+            hart_id: 0,
+            name: [0u8; 24],
+        });
+
+        let spans = state.drain_cap_spans();
+        assert_eq!(spans.len(), 2);
+
+        let root = spans.iter().find(|s| s.span_id == 1).unwrap();
+        let derived = spans.iter().find(|s| s.span_id == 2).unwrap();
+
+        // Both in the capabilities trace.
+        assert_eq!(root.trace, TraceKind::Capabilities);
+        assert_eq!(derived.trace, TraceKind::Capabilities);
+
+        // Names (object name "fs" wins over kind label for both).
+        assert_eq!(root.name, "fs");
+        assert_eq!(derived.name, "fs");
+
+        // Parent/child edge: cap 2 parents onto cap 1; cap 1 is a root.
+        assert_eq!(root.parent_span_id, 0);
+        assert_eq!(derived.parent_span_id, 1);
+
+        // Timing: both spans have positive duration; derived was granted after root.
+        assert!(root.start_time_ns < root.end_time_ns);
+        assert!(derived.start_time_ns > root.start_time_ns);
+
+        // Both close at the same revoke tick.
+        assert_eq!(root.end_time_ns, derived.end_time_ns);
+
+        // cap.revoked attribute.
+        assert_eq!(extra(root, "cap.revoked").as_deref(), Some("true"));
+        assert_eq!(extra(derived, "cap.revoked").as_deref(), Some("true"));
+
+        // Badge only on the derived SEND cap.
+        assert!(extra(derived, "cap.badge").is_some());
+        assert!(extra(root, "cap.badge").is_none());
+
+        // Each span carries granted + revoked events.
+        assert_eq!(root.events.len(), 2);
+        assert_eq!(root.events[0].name, "granted");
+        assert_eq!(root.events[1].name, "revoked");
+        assert_eq!(derived.events.len(), 2);
+        assert_eq!(derived.events[0].name, "granted");
+        assert_eq!(derived.events[1].name, "revoked");
+
+        // Subsequent drain is empty.
+        assert!(state.drain_cap_spans().is_empty());
     }
 
     #[test]
