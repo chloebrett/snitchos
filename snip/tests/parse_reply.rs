@@ -4,6 +4,12 @@ fn candidate(path: &str) -> Candidate {
     Candidate { path: path.to_string(), status: Status::Modified, diff: String::new() }
 }
 
+const TWO_HUNK_DIFF: &str = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,3 @@\n a\n+b\n c\n@@ -10,2 +11,3 @@\n d\n+e\n f\n";
+
+fn candidate_with_diff(path: &str, diff: &str) -> Candidate {
+    Candidate { path: path.to_string(), status: Status::Modified, diff: diff.to_string() }
+}
+
 #[test]
 fn parses_a_clean_selection_with_reasons_and_confidence() {
     let candidates = [candidate("kernel/src/trap.rs"), candidate("stitch/src/interp.rs")];
@@ -83,6 +89,35 @@ fn tolerates_a_markdown_fenced_json_reply() {
 
     assert_eq!(selection.include.len(), 1);
     assert_eq!(selection.include[0].path, "a.rs");
+}
+
+#[test]
+fn a_whole_file_include_has_no_hunk_restriction() {
+    let candidates = [candidate("a.rs")];
+    let raw = r#"{"include":[{"path":"a.rs","reason":"all of it","confidence":"high"}],"exclude":[],"overall":"high"}"#;
+    let selection = parse_reply(raw, &candidates).unwrap();
+    assert_eq!(selection.include[0].hunks, None);
+}
+
+#[test]
+fn a_partial_include_carries_the_validated_hunk_ids() {
+    let candidates = [candidate_with_diff("f", TWO_HUNK_DIFF)];
+    // The model asks for H2 (valid) and H9 (does not exist) — H9 is dropped.
+    let raw = r#"{"include":[{"path":"f","reason":"only the second change","confidence":"med","hunks":["H2","H9"]}],"exclude":[],"overall":"med"}"#;
+
+    let selection = parse_reply(raw, &candidates).unwrap();
+
+    assert_eq!(selection.include.len(), 1);
+    assert_eq!(selection.include[0].hunks.as_deref(), Some(&["H2".to_string()][..]));
+}
+
+#[test]
+fn a_partial_include_with_no_valid_hunks_is_dropped() {
+    let candidates = [candidate_with_diff("f", TWO_HUNK_DIFF)];
+    let raw = r#"{"include":[{"path":"f","reason":"garbage hunks","confidence":"low","hunks":["H9"]}],"exclude":[],"overall":"low"}"#;
+
+    let selection = parse_reply(raw, &candidates).unwrap();
+    assert!(selection.include.is_empty(), "a partial include with no real hunks stages nothing");
 }
 
 #[test]

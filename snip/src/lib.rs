@@ -107,6 +107,72 @@ pub fn cap_diff(diff: &str, max_lines: usize) -> String {
     out
 }
 
+/// One hunk of a unified diff, labelled `H1`, `H2`, … by position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hunk {
+    pub id: String,
+    /// The full hunk text, `@@` line through its last body line, byte-exact.
+    pub text: String,
+}
+
+impl Hunk {
+    /// The `@@ … @@` line, for compact display.
+    pub fn header_line(&self) -> &str {
+        self.text.lines().next().unwrap_or("")
+    }
+}
+
+/// A single file's unified diff, split into its header and positional hunks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDiff {
+    /// Everything before the first hunk (`diff --git` … `+++`), byte-exact.
+    pub header: String,
+    pub hunks: Vec<Hunk>,
+}
+
+/// Split a single-file unified diff into its header and hunks. Byte-preserving:
+/// `header` followed by every `hunk.text` reproduces the input exactly.
+pub fn parse_hunks(diff: &str) -> FileDiff {
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    for line in diff.split_inclusive('\n') {
+        if line.starts_with("@@ ") {
+            starts.push(offset);
+        }
+        offset += line.len();
+    }
+
+    let header_end = starts.first().copied().unwrap_or(diff.len());
+    let header = diff[..header_end].to_string();
+
+    let hunks = starts
+        .iter()
+        .enumerate()
+        .map(|(i, &start)| {
+            let end = starts.get(i + 1).copied().unwrap_or(diff.len());
+            Hunk { id: format!("H{}", i + 1), text: diff[start..end].to_string() }
+        })
+        .collect();
+
+    FileDiff { header, hunks }
+}
+
+/// Reconstruct a valid patch containing only the hunks whose ids appear in
+/// `ids`, in their original order. Returns `None` if none of the ids match a
+/// hunk (an empty patch is never staged).
+pub fn build_patch(file: &FileDiff, ids: &[String]) -> Option<String> {
+    let kept: String = file
+        .hunks
+        .iter()
+        .filter(|h| ids.iter().any(|id| id == &h.id))
+        .map(|h| h.text.as_str())
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    Some(format!("{}{}", file.header, kept))
+}
+
 /// A content fingerprint of the candidate set, used to detect that the working
 /// tree drifted between `snip` proposing and `stage`/`commit` finalising.
 ///
@@ -136,11 +202,16 @@ pub struct Candidate {
 }
 
 /// A file the model chose to include, with its rationale and confidence.
+///
+/// `hunks` is `None` for a whole-file stage, or `Some(ids)` when only those
+/// (validated) hunks of the file should be staged — the partial-application case
+/// where a file mixes related and unrelated changes.
 #[derive(Debug, Clone)]
 pub struct Included {
     pub path: String,
     pub reason: String,
     pub confidence: Confidence,
+    pub hunks: Option<Vec<String>>,
 }
 
 /// A file the model chose to exclude, with its rationale and confidence.
@@ -268,16 +339,7 @@ concurrent change is the useful signal, not a failure.\n\n",
         out.push_str("  [");
         out.push_str(c.status.label());
         out.push_str("]\n");
-        if c.diff.trim().is_empty() {
-            out.push_str("(no diff shown)\n");
-        } else {
-            out.push_str("```\n");
-            out.push_str(&c.diff);
-            if !c.diff.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str("```\n");
-        }
+        push_candidate_body(&mut out, c);
         out.push('\n');
     }
 
@@ -289,10 +351,43 @@ concurrent change is the useful signal, not a failure.\n\n",
   \"overall\": \"high|medium|low\",\n\
   \"note\": \"optional caveat when overall is not high\"\n\
 }\n\
-Every path MUST be one of the candidate files above; do not invent paths.\n",
+Every path MUST be one of the candidate files above; do not invent paths.\n\n\
+PARTIAL FILES: if a file contains BOTH changes that belong to this commit AND \
+unrelated changes, include it with a \"hunks\" array naming only the relevant \
+hunk ids shown in [brackets], e.g. {\"path\":\"x.rs\",\"reason\":\"only the parser fix\",\
+\"confidence\":\"high\",\"hunks\":[\"H1\",\"H3\"]}. Omit \"hunks\" to stage the whole file. \
+Use partial staging whenever a file mixes concerns rather than excluding a change \
+that does belong.\n",
     );
 
     out
+}
+
+const PER_HUNK_DISPLAY_CAP: usize = 200;
+
+/// Render one candidate's body into the prompt: labelled hunks when the diff has
+/// them, else the raw (capped) diff/content for untracked or binary files.
+fn push_candidate_body(out: &mut String, c: &Candidate) {
+    if c.diff.trim().is_empty() {
+        out.push_str("(no diff shown)\n");
+        return;
+    }
+
+    let parsed = parse_hunks(&c.diff);
+    if parsed.hunks.is_empty() {
+        out.push_str("```\n");
+        out.push_str(&cap_diff(&c.diff, PER_HUNK_DISPLAY_CAP));
+        out.push_str("\n```\n");
+        return;
+    }
+
+    for h in &parsed.hunks {
+        out.push('[');
+        out.push_str(&h.id);
+        out.push_str("]\n```\n");
+        out.push_str(&cap_diff(&h.text, PER_HUNK_DISPLAY_CAP));
+        out.push_str("\n```\n");
+    }
 }
 
 #[derive(Deserialize)]
@@ -334,6 +429,8 @@ struct WireEntry {
     reason: String,
     #[serde(default)]
     confidence: Option<String>,
+    #[serde(default)]
+    hunks: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -346,6 +443,39 @@ struct WireReply {
     overall: Option<String>,
     #[serde(default)]
     note: Option<String>,
+}
+
+/// Outcome of validating a wire `hunks` list for an included file.
+enum HunkResolution {
+    /// Drop the include: a partial selection named no real hunk, so staging the
+    /// whole file would risk staging changes the model wanted left out.
+    Drop,
+    /// Stage the whole file (no `hunks` given).
+    WholeFile,
+    /// Stage only these (validated, existing) hunk ids.
+    Partial(Vec<String>),
+}
+
+/// Resolve a wire `hunks` list into a validated selection for `path`, keeping
+/// only hunk ids that really exist in the candidate's diff.
+fn validate_hunks(
+    requested: Option<Vec<String>>,
+    path: &str,
+    candidates: &[Candidate],
+) -> HunkResolution {
+    let Some(requested) = requested else {
+        return HunkResolution::WholeFile;
+    };
+    let Some(cand) = candidates.iter().find(|c| c.path == path) else {
+        return HunkResolution::Drop;
+    };
+    let valid: Vec<String> = parse_hunks(&cand.diff).hunks.into_iter().map(|h| h.id).collect();
+    let kept: Vec<String> = requested.into_iter().filter(|id| valid.contains(id)).collect();
+    if kept.is_empty() {
+        HunkResolution::Drop
+    } else {
+        HunkResolution::Partial(kept)
+    }
 }
 
 /// Parse the model's JSON reply and validate it against `candidates`.
@@ -365,10 +495,18 @@ pub fn parse_reply(raw_json: &str, candidates: &[Candidate]) -> Result<Selection
         .include
         .into_iter()
         .filter(|e| known(&e.path))
-        .map(|e| Included {
-            confidence: Confidence::from_wire(e.confidence.as_deref()),
-            path: e.path,
-            reason: e.reason,
+        .filter_map(|e| {
+            let hunks = match validate_hunks(e.hunks, &e.path, candidates) {
+                HunkResolution::Drop => return None,
+                HunkResolution::WholeFile => None,
+                HunkResolution::Partial(ids) => Some(ids),
+            };
+            Some(Included {
+                confidence: Confidence::from_wire(e.confidence.as_deref()),
+                path: e.path,
+                reason: e.reason,
+                hunks,
+            })
         })
         .collect();
 

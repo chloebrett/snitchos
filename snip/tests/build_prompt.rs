@@ -34,6 +34,19 @@ fn prompt_includes_message_every_candidate_and_the_json_contract() {
 }
 
 #[test]
+fn prompt_labels_hunks_and_documents_partial_staging() {
+    let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,1 +1,2 @@\n a\n+b\n@@ -9,1 +10,2 @@\n c\n+d\n";
+    let candidates = [candidate("f", Status::Modified, diff)];
+
+    let prompt = build_prompt("some change", &candidates);
+
+    assert!(prompt.contains("[H1]"), "first hunk is labelled");
+    assert!(prompt.contains("[H2]"), "second hunk is labelled");
+    assert!(prompt.contains("\"hunks\""), "output contract mentions hunks");
+    assert!(prompt.to_lowercase().contains("partial"), "explains partial staging");
+}
+
+#[test]
 fn prompt_reflects_each_candidate_status() {
     let candidates = [candidate("gone.rs", Status::Deleted, "")];
     let prompt = build_prompt("cleanup", &candidates);

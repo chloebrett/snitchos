@@ -22,8 +22,11 @@ running git after you approve.
 - **Safe.** Never invents paths; never commits without an explicit second step;
   detects if the working tree drifted between propose and finalize.
 
-Non-goals (v1): partial-file / hunk-level staging (whole files only — can graduate
-later), amending, multi-commit planning in one shot.
+Non-goals: amending, multi-commit planning in one shot.
+
+**Update (shipped):** partial-file / hunk-level staging now works — see "Partial
+application" below. And every `snip` subcommand prints its wall-clock duration to
+stderr (`(snip propose took 4.2s)`), so the model round-trip cost is visible.
 
 ## User-facing flow — three explicit steps
 
@@ -229,10 +232,45 @@ The tool surfaces confidence, and gently gates on it (never silently):
    that echoes canned JSON) so the subprocess path is covered without hitting Max.
 6. Wire the three subcommands into `xtask` `Cmd`.
 
+## Partial application (shipped)
+
+When a file mixes changes belonging to this commit with unrelated ones, the model
+returns it in `include` with a `hunks` array naming only the relevant hunk ids —
+otherwise it omits `hunks` and the whole file is staged.
+
+- Each candidate's diff is parsed into positional hunks (`H1`, `H2`, …) by
+  `snip::parse_hunks` (byte-preserving: header + every hunk text reconstructs the
+  input). `build_prompt` labels each hunk `[H1]` in the prompt and documents the
+  contract; `parse_reply` validates requested ids against the file's real hunks and
+  **drops** an include whose partial selection names no real hunk (never silently
+  stages a whole file the model wanted only part of).
+- The plan persists partials as `{path, hunks: [ids]}` (ids, not patch text). At
+  `stage`, `snip::build_patch` reconstructs a patch of just those hunks from a
+  freshly re-derived `git diff HEAD -- <path>`, applied with
+  `git apply --cached --recount`. Re-deriving is safe because the drift guard already
+  proved the working tree (and thus the hunk ids) is unchanged since propose.
+- Gather stores the **full** diff (no line cap); the per-hunk display cap lives in
+  `build_prompt`, so `parse_reply`'s id validation and `build_patch`'s reconstruction
+  both see faithful hunk text.
+- Proven end-to-end by `snip/tests/apply.rs`: a two-hunk change, stage only H2 via
+  `git apply --cached`, assert the index holds H2 and H1 stays unstaged.
+
 ## Open questions deferred
 
-- Partial/hunk staging (would need `git apply --cached` of model-selected hunks).
 - Caching the gather between `snip` and `stage` to skip a second `git diff`.
+
+### Future: suggest a commit message from already-staged changes
+
+The inverse of the core flow. Given whatever is *already staged* (`git diff --cached`),
+ask Sonnet to propose a commit message (subject + optional body), so the tool closes
+the loop in both directions: "message → files" (today) and "files → message" (this).
+Useful when you've hand-staged with `git add -p` or `snip --stage` and just want a
+well-formed message. New verb, e.g. `snip --message` (or `snip msg`): gather the
+staged diff (reuse `parse_status` on `--cached` + `git diff --cached`), prompt for a
+conventional-commit-style subject, print it (and optionally `git commit` it, same
+opt-in split as today). Reuses the whole transport + gather spine; only the prompt and
+output contract change (a message string instead of a `Selection`). Pairs naturally
+with the edit-provenance ledger (message could summarise "everything agent X did").
 
 ### Future: whole-tree partition mode (`snip plan`)
 

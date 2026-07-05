@@ -13,16 +13,30 @@ use std::fs;
 use std::process::{Command, ExitCode};
 
 use serde::{Deserialize, Serialize};
-use snip::{Candidate, ClaudeCfg, Confidence, Selection, Status, cap_diff, fingerprint, parse_status, pick};
+use snip::{
+    Candidate, ClaudeCfg, Confidence, Selection, Status, build_patch, fingerprint, parse_hunks,
+    parse_status, pick,
+};
 
 const PLAN_PATH: &str = ".git/snip-plan.json";
-const DIFF_CAP: usize = 200;
+
+/// A file to stage only in part: named hunks of its diff, applied via
+/// `git apply --cached`.
+#[derive(Serialize, Deserialize)]
+struct Partial {
+    path: String,
+    hunks: Vec<String>,
+}
 
 /// Persisted proposal: what to stage, and a fingerprint to detect drift.
 #[derive(Serialize, Deserialize)]
 struct Plan {
     message: String,
+    /// Whole-file stages (`git add`).
     include: Vec<String>,
+    /// Partial stages (`git apply --cached` of the named hunks).
+    #[serde(default)]
+    partial: Vec<Partial>,
     fingerprint: String,
     overall: String,
 }
@@ -73,15 +87,28 @@ fn run_propose(message: &str, fast: bool, yes: bool, force: bool) -> Result<Exit
 
     print_selection(&selection);
 
+    let include: Vec<String> = selection
+        .include
+        .iter()
+        .filter(|i| i.hunks.is_none())
+        .map(|i| i.path.clone())
+        .collect();
+    let partial: Vec<Partial> = selection
+        .include
+        .iter()
+        .filter_map(|i| i.hunks.clone().map(|hunks| Partial { path: i.path.clone(), hunks }))
+        .collect();
+
     let plan = Plan {
         message: message.to_string(),
-        include: selection.include.iter().map(|i| i.path.clone()).collect(),
+        include,
+        partial,
         fingerprint: fingerprint(&candidates),
         overall: confidence_str(selection.overall).to_string(),
     };
     write_plan(&plan)?;
 
-    if plan.include.is_empty() {
+    if plan.include.is_empty() && plan.partial.is_empty() {
         println!("\nNo files selected. Nothing written to stage.");
         return Ok(ExitCode::SUCCESS);
     }
@@ -100,19 +127,42 @@ fn run_stage(force: bool) -> Result<(), String> {
     guard_drift(&plan, force)?;
     guard_confidence(&plan, force)?;
 
-    if plan.include.is_empty() {
+    if plan.include.is_empty() && plan.partial.is_empty() {
         return Err("plan selects no files".to_string());
     }
-    let mut args = vec!["add", "--"];
-    args.extend(plan.include.iter().map(String::as_str));
-    git(&args)?;
 
-    println!("Staged {} file(s):", plan.include.len());
+    if !plan.include.is_empty() {
+        let mut args = vec!["add", "--"];
+        args.extend(plan.include.iter().map(String::as_str));
+        git(&args)?;
+    }
+    for p in &plan.partial {
+        stage_partial(p)?;
+    }
+
+    println!("Staged {} file(s):", plan.include.len() + plan.partial.len());
     for p in &plan.include {
         println!("  + {p}");
     }
+    for p in &plan.partial {
+        println!("  + {} (hunks {})", p.path, p.hunks.join(", "));
+    }
     println!("\nInspect with `git diff --cached`, then `cargo xtask snip --commit`.");
     Ok(())
+}
+
+/// Stage only the named hunks of one file: re-derive its current diff, rebuild a
+/// patch of just those hunks, and `git apply --cached` it. Re-deriving (rather
+/// than trusting a stored patch) means the drift guard already proved the hunk
+/// ids still line up with the live diff.
+fn stage_partial(p: &Partial) -> Result<(), String> {
+    let diff = git_stdout(&["diff", "HEAD", "--", &p.path])?;
+    let file = parse_hunks(&diff);
+    let patch = build_patch(&file, &p.hunks).ok_or_else(|| {
+        format!("none of the planned hunks for {} exist in its current diff", p.path)
+    })?;
+    git_apply_cached(&patch)
+        .map_err(|e| format!("could not apply selected hunks of {}: {e}", p.path))
 }
 
 fn run_commit(no_verify: bool) -> Result<(), String> {
@@ -141,11 +191,9 @@ fn gather(fast: bool) -> Result<Vec<Candidate>, String> {
         } else {
             candidate_diff(&entry.path, entry.status)?
         };
-        candidates.push(Candidate {
-            path: entry.path,
-            status: entry.status,
-            diff: cap_diff(&diff, DIFF_CAP),
-        });
+        // Store the full diff: `build_prompt` caps per-hunk for display, and
+        // partial staging needs faithful hunk text for id validation.
+        candidates.push(Candidate { path: entry.path, status: entry.status, diff });
     }
     Ok(candidates)
 }
@@ -184,7 +232,11 @@ Review the proposal, then pass --force to stage anyway.".to_string(),
 fn print_selection(sel: &Selection) {
     println!("\ninclude ({}):", sel.include.len());
     for i in &sel.include {
-        println!("  + [{:<4}] {}  — {}", confidence_str(i.confidence), i.path, i.reason);
+        let scope = match &i.hunks {
+            Some(hunks) => format!(" (partial: hunks {})", hunks.join(", ")),
+            None => String::new(),
+        };
+        println!("  + [{:<4}] {}{scope}  — {}", confidence_str(i.confidence), i.path, i.reason);
     }
     println!("exclude ({}):", sel.exclude.len());
     for e in &sel.exclude {
@@ -231,6 +283,31 @@ fn git_stdout(args: &[&str]) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Feed `patch` to `git apply --cached` on stdin, staging just those hunks.
+fn git_apply_cached(patch: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new("git")
+        .args(["apply", "--cached", "--recount", "-"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run git apply: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "no stdin handle for git apply".to_string())?
+        .write_all(patch.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
 }
 
 /// Run git for effect (add/commit), streaming its output.
