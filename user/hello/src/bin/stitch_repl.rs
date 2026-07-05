@@ -140,8 +140,13 @@ fn bench(
     src: &str,
 ) {
     let (out, dt) = timed(repl, tr, metrics, src);
+    // `eval_line` ends a *result* line with a newline but a Unit line (the
+    // `span(...)` self-test evaluates to Unit, and on the metal its telemetry goes
+    // to the wire, not the local render) with none — so normalize to exactly one
+    // trailing newline, or the final `stitch>` prompt runs onto this line.
+    let out = out.trim_end();
     platform.write(&format!(
-        "  [{label:>8}] {dt:>9} ticks (~{} ms)   {src}  {out}",
+        "  [{label:>8}] {dt:>9} ticks (~{} ms)   {src}  {out}\n",
         dt / ticks_per_ms()
     ));
 }
