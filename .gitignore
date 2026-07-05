@@ -43,6 +43,12 @@ target
 # anchored unexpectedly here on git 2.50).
 .itest-runs
 
+# Locally-rendered diagram SVGs (`cargo xtask diagram <target>` writes these
+# next to the committed mermaid .md). Graphviz layout is version-dependent, so
+# they're a local-dev convenience, not a reviewable artifact. The .md is the
+# committed source of truth.
+docs/generated/*.svg
+
 # Built executables injected into the fs image at build time (kernel/build.rs
 # copies them here for SpawnImage). Source files in fs-image/ are committed; the
 # generated ELFs under fs-image/bin/ are not.

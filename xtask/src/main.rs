@@ -3,6 +3,7 @@ use std::process::{Command, ExitCode};
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod audit;
+mod diagram_cmd;
 mod itest;
 mod loc;
 mod measure;
@@ -294,6 +295,17 @@ enum Cmd {
         #[command(subcommand)]
         cmd: BaselineCmd,
     },
+    /// Generate a mermaid diagram from a source of truth into
+    /// `docs/generated/`. Diagrams render in GitHub markdown in-diff, so the
+    /// committed artifacts are reviewable. See `docs/diagrams-design.md`.
+    Diagram {
+        /// Which diagram to generate.
+        target: DiagramTarget,
+        /// Verify the committed diagram is up to date instead of rewriting it;
+        /// exit non-zero on drift. For the generated-diagram gate.
+        #[arg(long, default_value_t = false)]
+        check: bool,
+    },
     /// Count lines of code across the workspace, split by crate and
     /// by production vs test lines.
     Loc,
@@ -382,6 +394,14 @@ impl From<CaptureArg> for itest_harness::CaptureLevel {
             CaptureArg::Full => itest_harness::CaptureLevel::Full,
         }
     }
+}
+
+/// Which diagram `cargo xtask diagram` generates. The set is open — new
+/// targets (static projections + telemetry folds) land as variants.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DiagramTarget {
+    /// Workspace crate dependency graph, from `cargo metadata`.
+    Deps,
 }
 
 /// Scenario classification filter for `cargo xtask itest --profile`.
@@ -586,6 +606,9 @@ fn main() -> ExitCode {
             })
         }
         Cmd::Baseline { cmd } => baseline(cmd),
+        Cmd::Diagram { target, check } => match target {
+            DiagramTarget::Deps => diagram_cmd::deps(check),
+        },
         Cmd::Loc => loc::run(),
         Cmd::Audit { crate_name, json, include_short } => {
             audit::run(&crate_name, json, include_short)

@@ -3,8 +3,9 @@
 //! and writing `docs/generated/`, the `--check` diff); all projection logic
 //! lives in `diagram` and is host-tested there. See `docs/diagrams-design.md`.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 /// The committed crate-graph artifact, relative to the workspace root.
 const DEPS_DOC: &str = "docs/generated/deps.md";
@@ -25,14 +26,51 @@ pub fn deps(check: bool) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let mermaid = diagram::deps::workspace_graph(&members).to_mermaid();
-    let doc = render_doc("Workspace crate graph", "deps", &mermaid);
+    let graph = diagram::deps::workspace_graph(&members);
+    let doc = render_doc("Workspace crate graph", "deps", &graph.to_mermaid());
 
     let path = workspace_root().join(DEPS_DOC);
     if check {
-        check_up_to_date(&path, &doc, "deps")
-    } else {
-        write_doc(&path, &doc)
+        return check_up_to_date(&path, &doc, "deps");
+    }
+    let written = write_doc(&path, &doc);
+    if written != ExitCode::SUCCESS {
+        return written;
+    }
+    // Local-dev convenience: also render an SVG via graphviz. Best-effort —
+    // the committed, reviewable source of truth is the mermaid .md; a missing
+    // `dot` never fails the command.
+    render_svg(&graph.to_dot(), &path.with_extension("svg"));
+    ExitCode::SUCCESS
+}
+
+/// Pipe DOT to `dot -Tsvg`, writing an SVG next to the `.md`. Graphviz layout
+/// is version-dependent, so this artifact is gitignored (not `--check`ed);
+/// it's just something to open in a browser during local dev. Absent `dot`,
+/// warn and carry on.
+fn render_svg(dot: &str, out: &Path) {
+    let Ok(mut child) = Command::new("dot")
+        .args(["-Tsvg", "-o"])
+        .arg(out)
+        .stdin(Stdio::piped())
+        .spawn()
+    else {
+        eprintln!(
+            "diagram: `dot` not found — skipping SVG (install graphviz, e.g. \
+             `brew install graphviz`); the mermaid .md is written regardless"
+        );
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(e) = stdin.write_all(dot.as_bytes())
+    {
+        eprintln!("diagram: writing to dot: {e}");
+        return;
+    }
+    match child.wait() {
+        Ok(status) if status.success() => eprintln!("diagram: wrote {}", out.display()),
+        Ok(status) => eprintln!("diagram: dot exited with {status}"),
+        Err(e) => eprintln!("diagram: waiting on dot: {e}"),
     }
 }
 
@@ -61,11 +99,11 @@ fn render_doc(title: &str, target: &str, mermaid: &str) -> String {
 }
 
 fn write_doc(path: &Path, doc: &str) -> ExitCode {
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("diagram: creating {}: {e}", parent.display());
-            return ExitCode::from(1);
-        }
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("diagram: creating {}: {e}", parent.display());
+        return ExitCode::from(1);
     }
     match std::fs::write(path, doc) {
         Ok(()) => {

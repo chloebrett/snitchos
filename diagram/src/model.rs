@@ -43,11 +43,44 @@ impl Graph {
             .map(|line| line + "\n")
             .collect()
     }
+
+    pub fn to_dot(&self) -> String {
+        let rankdir = match self.direction {
+            Direction::LeftRight => "LR",
+            Direction::TopDown => "TB",
+        };
+        let nodes = self.nodes.iter().map(|(id, label)| format!("    \"{id}\" [label=\"{label}\"];"));
+        let edges = self.edges.iter().map(|(from, to)| format!("    \"{from}\" -> \"{to}\";"));
+        std::iter::once(format!("digraph {{\n    rankdir={rankdir};"))
+            .chain(nodes)
+            .chain(edges)
+            .chain(std::iter::once("}".to_string()))
+            .map(|line| line + "\n")
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emits_a_dot_digraph_for_local_graphviz_rendering() {
+        let mut g = Graph::new(Direction::LeftRight);
+        g.node("a", "Crate A");
+        g.node("b", "Crate B");
+        g.edge("a", "b");
+
+        let expected = "\
+digraph {
+    rankdir=LR;
+    \"a\" [label=\"Crate A\"];
+    \"b\" [label=\"Crate B\"];
+    \"a\" -> \"b\";
+}
+";
+        assert_eq!(g.to_dot(), expected);
+    }
 
     #[test]
     fn emits_a_flowchart_with_labelled_nodes_and_edges() {
