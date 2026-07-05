@@ -26,6 +26,8 @@ fn fingerprint_ignores_candidate_ordering() {
 }
 
 #[test]
+// Building fixture text; efficiency of the construction is irrelevant here.
+#[allow(clippy::format_collect)]
 fn cap_diff_truncates_long_diffs_with_a_marker() {
     let body: String = (0..500).map(|i| format!("line {i}\n")).collect();
     let capped = cap_diff(&body, 200);

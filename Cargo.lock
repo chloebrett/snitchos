@@ -484,6 +484,7 @@ dependencies = [
  "hitch-pod",
  "postcard",
  "serde",
+ "snitchos-abi",
 ]
 
 [[package]]
@@ -1164,6 +1165,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "snip"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "snitchos-abi"
 version = "0.0.1"
 dependencies = [
@@ -1813,7 +1822,10 @@ dependencies = [
  "fs-proto",
  "itest-harness",
  "protocol",
+ "serde",
+ "serde_json",
  "snemu",
+ "snip",
  "snitchos-abi",
 ]
 

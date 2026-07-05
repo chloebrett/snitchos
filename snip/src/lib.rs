@@ -101,7 +101,9 @@ pub fn cap_diff(diff: &str, max_lines: usize) -> String {
         return diff.to_string();
     }
     let mut out: String = diff.lines().take(max_lines).collect::<Vec<_>>().join("\n");
-    out.push_str(&format!("\n… {} lines truncated …\n", total - max_lines));
+    out.push_str("\n… ");
+    out.push_str(&(total - max_lines).to_string());
+    out.push_str(" lines truncated …\n");
     out
 }
 
