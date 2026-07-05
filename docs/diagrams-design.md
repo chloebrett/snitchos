@@ -64,7 +64,9 @@ the last-reviewed date so staleness is visible:
 `docs/context-switch.md` (`yield_now` + `SpanCursor`), `docs/boot-handoff.md`
 (trampoline + the `println!` cliff), `docs/ipc-call-reply.md` (the synchronous
 rendezvous + one-shot reply cap), `docs/stitch-pipeline.md` (lexer → Pratt
-parser → tree-walk → effect seam). Registered in `diagram_cmd::HAND_DRAWN`.
+parser → tree-walk → effect seam), `docs/supervision-lifecycle.md` (per-service
+state machine, extracted from `supervision-design.md`). Registered in
+`diagram_cmd::HAND_DRAWN`.
 
 **Local SVGs — `cargo xtask diagram svg`.** Hand-drawn diagrams are mermaid
 (flowchart/sequence), which graphviz can't render — so `svg` shells out to

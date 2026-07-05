@@ -59,6 +59,7 @@
 | ipi-pong | ipi-pong | cpu | smp, ipi, stress |
 | manifest-iface-served | manifest-iface | wfi | userspace, fs |
 | manifest-satisfy-grants-by-name | manifest-satisfy | wfi | userspace, fs |
+| manifest-satisfy-refuses-unsatisfiable | manifest-satisfy | wfi | userspace, fs |
 | mutex-storm | mutex-storm | cpu | smp, stress |
 | notify-signal-wakes-waiter | notify-smoke | cpu | userspace |
 | kernel-panic-emits-frame | panic-now | wfi | sched |

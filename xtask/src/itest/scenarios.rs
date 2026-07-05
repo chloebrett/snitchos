@@ -2996,6 +2996,23 @@ pub fn manifest_satisfy_grants_by_name(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Refusal (`workload=manifest-satisfy`): the satisfier also reads `fs-hungry`,
+/// which declares an `Endpoint` with `RECV` — a right the satisfier (holding only
+/// `SEND`) can't provide. `hitch::satisfy` returns `Unsatisfied`, so the satisfier
+/// **refuses** the whole spawn (no partial grant), snitching a `satisfy.refused.recv`
+/// span naming the unsatisfiable role — least authority, observable on the wire.
+pub fn manifest_satisfy_refuses_unsatisfiable(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::SpanStart { name_id, .. }
+            if strings.get(name_id).map(String::as_str) == Some("satisfy.refused.recv"))
+    })
+    .ok_or(
+        "no `satisfy.refused.recv` span within 30s — the satisfier didn't refuse the \
+         unsatisfiable slot (satisfy should return Unsatisfied for RECV vs a SEND-only cap)",
+    )?;
+    Ok(())
+}
+
 /// v0.11 spawn-with-caps (`workload=spawn-demo`): a parent `Spawn`s a child,
 /// delegating its `SpanSink` cap, and the child *uses* that delegated cap. Proves
 /// the whole path: `Spawn` creates a process holding exactly the delegated caps,

@@ -165,21 +165,9 @@ array, which is the throwaway path.
 Per service. The supervisor drives each service through this; the whole set is the
 supervision tree.
 
-```mermaid
-stateDiagram-v2
-    [*] --> Pending
-    Pending --> Starting: deps Ready
-    Starting --> Ready: readiness satisfied
-    Ready --> Running: (dependents may now start)
-    Running --> Exited: Wait → status 0
-    Running --> Failed: Wait → status ≠ 0 (or Killed)
-    Exited --> [*]: policy Never / OnFailure
-    Exited --> Restarting: policy Always
-    Failed --> Restarting: policy Always / OnFailure, within intensity
-    Failed --> GaveUp: intensity exceeded → escalate
-    Restarting --> Starting: after backoff delay
-    GaveUp --> [*]
-```
+The diagram lives in its own doc so it can be rendered to SVG:
+**[supervision-lifecycle.md](supervision-lifecycle.md)** (a hand-drawn diagram,
+`cargo xtask diagram svg`).
 
 `Exited` vs `Failed` is decided by the `i32` from `Wait`/`WaitAny`: **0 = clean,
 non-zero = failure** (the honest exit-code plumbing from the #5 work — `process::exit(code)`
