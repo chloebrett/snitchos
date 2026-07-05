@@ -48,6 +48,7 @@ target
 # they're a local-dev convenience, not a reviewable artifact. The .md is the
 # committed source of truth.
 docs/generated/*.svg
+docs/*.svg
 
 # Built executables injected into the fs image at build time (kernel/build.rs
 # copies them here for SpawnImage). Source files in fs-image/ are committed; the

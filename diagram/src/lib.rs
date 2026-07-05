@@ -9,4 +9,5 @@
 pub mod caps;
 pub mod deps;
 pub mod itest_matrix;
+pub mod markdown;
 pub mod model;

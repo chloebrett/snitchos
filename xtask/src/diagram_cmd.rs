@@ -58,6 +58,95 @@ pub fn itest_matrix(check: bool) -> ExitCode {
     }
 }
 
+/// Hand-drawn (bucket A) diagram docs — each a self-contained `.md` with one
+/// mermaid block. `svg` renders these to local SVGs. Add new hand-authored
+/// diagrams here.
+const HAND_DRAWN: &[&str] =
+    &["docs/memory-map.md", "docs/context-switch.md", "docs/boot-handoff.md"];
+
+/// Render every hand-drawn diagram doc's mermaid to a local SVG (gitignored)
+/// via `mmdc` (mermaid-cli). The committed `.md` stays the source of truth and
+/// renders on GitHub in-diff; the SVG is a local-viewing convenience — mermaid
+/// (flowchart/sequence) can't go through graphviz like the graph targets do.
+pub fn svg() -> ExitCode {
+    if !command_exists("mmdc") {
+        eprintln!(
+            "diagram svg: `mmdc` (mermaid-cli) not found — install it with \
+             `npm install -g @mermaid-js/mermaid-cli`, then re-run"
+        );
+        return ExitCode::from(1);
+    }
+    let root = workspace_root();
+    let mut failures = 0u32;
+    for rel in HAND_DRAWN {
+        let md_path = root.join(rel);
+        let md = match std::fs::read_to_string(&md_path) {
+            Ok(md) => md,
+            Err(e) => {
+                eprintln!("diagram svg: reading {rel}: {e}");
+                failures += 1;
+                continue;
+            }
+        };
+        let blocks = diagram::markdown::extract_mermaid(&md);
+        if blocks.is_empty() {
+            eprintln!("diagram svg: no mermaid block in {rel}");
+            failures += 1;
+            continue;
+        }
+        for (i, block) in blocks.iter().enumerate() {
+            let svg_path = if blocks.len() == 1 {
+                md_path.with_extension("svg")
+            } else {
+                md_path.with_extension(format!("{i}.svg"))
+            };
+            if !render_mermaid_svg(block, &svg_path) {
+                failures += 1;
+            }
+        }
+    }
+    if failures == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// Pipe one mermaid block through `mmdc` to `out`. Returns `true` on success.
+fn render_mermaid_svg(mermaid: &str, out: &Path) -> bool {
+    let stem = out.file_stem().and_then(|s| s.to_str()).unwrap_or("diagram");
+    let tmp = std::env::temp_dir().join(format!("snitch-{stem}.mmd"));
+    if let Err(e) = std::fs::write(&tmp, mermaid) {
+        eprintln!("diagram svg: writing temp mmd: {e}");
+        return false;
+    }
+    let status = Command::new("mmdc").arg("-i").arg(&tmp).arg("-o").arg(out).status();
+    let _ = std::fs::remove_file(&tmp);
+    match status {
+        Ok(s) if s.success() => {
+            eprintln!("diagram svg: wrote {}", out.display());
+            true
+        }
+        Ok(s) => {
+            eprintln!("diagram svg: mmdc failed for {}: {s}", out.display());
+            false
+        }
+        Err(e) => {
+            eprintln!("diagram svg: invoking mmdc: {e}");
+            false
+        }
+    }
+}
+
+fn command_exists(cmd: &str) -> bool {
+    Command::new(cmd)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// Generate the capability derivation tree: boot under snemu, fold its
 /// `CapEvent` frames into a `parent_cap_id → cap_id` graph. A runtime snapshot,
 /// not a contract — so it's written (never `--check`ed) and left out of the

@@ -455,6 +455,8 @@ enum DiagramTarget {
     ItestMatrix,
     /// Capability derivation tree, folded from a snemu boot's `CapEvent` frames.
     Caps,
+    /// Render the hand-drawn diagram docs' mermaid to local SVGs (needs `mmdc`).
+    Svg,
 }
 
 /// Scenario classification filter for `cargo xtask itest --profile`.
@@ -669,6 +671,7 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
             DiagramTarget::Caps => diagram_cmd::caps(workload.as_deref(), steps),
+            DiagramTarget::Svg => diagram_cmd::svg(),
         },
         Cmd::Loc => loc::run(),
         Cmd::Audit { crate_name, json, include_short } => {

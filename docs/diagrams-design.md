@@ -53,10 +53,24 @@ Priority order (highest "I keep re-explaining this" load first):
 6. **Stitch pipeline** (`flowchart`) — source → lexer → parser → AST →
    tree-walk interp → (future bytecode VM). Lives in `docs/language-design.md`.
 
-**Convention for A:** the mermaid block lives inline in the owning design doc,
-fenced as ` ```mermaid `. No generation, no `--check`. A one-line HTML comment
-above the fence records the commit/last-reviewed date so staleness is at least
-visible: `<!-- diagram: reviewed 2026-07-05, owner=memory-map -->`.
+**Convention for A:** each hand-drawn diagram is its **own self-contained `.md`**
+with exactly one fenced ` ```mermaid ` block plus prose (so it renders on GitHub
+and the block is cleanly extractable). A one-line HTML comment at the top records
+the last-reviewed date so staleness is visible:
+`<!-- diagram: reviewed 2026-07-05, owner=memory-map -->`. No generation, no
+`--check`.
+
+**Shipped (bucket A):** `docs/memory-map.md` (the four address spaces),
+`docs/context-switch.md` (`yield_now` + `SpanCursor`), `docs/boot-handoff.md`
+(trampoline + the `println!` cliff). Registered in `diagram_cmd::HAND_DRAWN`.
+
+**Local SVGs — `cargo xtask diagram svg`.** Hand-drawn diagrams are mermaid
+(flowchart/sequence), which graphviz can't render — so `svg` shells out to
+`mmdc` (mermaid-cli). `diagram::markdown::extract_mermaid` (pure, tested) pulls
+the fenced block out of each `HAND_DRAWN` doc; xtask renders it to a gitignored
+`.svg` beside the `.md`. Graceful skip + install hint if `mmdc` is absent — the
+committed `.md` is the source of truth regardless. (The generated graph targets
+keep their lighter graphviz-DOT SVG path; `svg` is only for the mermaid docs.)
 
 ---
 
