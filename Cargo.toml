@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "kernel-core", "protocol", "collector", "stitch", "hitch", "hitch-pod", "hitch-derive", "xtask", "itest-harness", "abi", "fs-core", "ramfs", "fs-proto", "user/macros", "user/runtime", "user/std", "user/hello", "user/fs", "snemu"]
+members = ["kernel", "kernel-core", "protocol", "collector", "stitch", "hitch", "hitch-pod", "hitch-derive", "xtask", "itest-harness", "abi", "fs-core", "ramfs", "fs-proto", "user/macros", "user/runtime", "user/std", "user/hello", "user/fs", "snemu", "diagram"]
 # `learning/` is a separate, host-targeted workspace of standalone "toy"
 # crates for understanding kernel concepts in isolation. Excluded so it
 # never participates in the no_std/riscv64 kernel build.
@@ -51,6 +51,21 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+# snemu is a tree-walking RV64 interpreter that xtask runs *in-process* (the
+# `snemu-boot` / `snemu-diff` / `snemu-fork` subcommands). Its hot fetch-decode-
+# execute loop is ~20x slower unoptimized, so an unoptimized snemu dominates the
+# wall-clock of every meta-loop run. Optimize *only* this crate — even under the
+# default dev build of xtask — so the fast path is fast by default, without
+# forcing xtask's heavy dependency tree (ring/rustls/etc.) to recompile in
+# release. snemu is deterministic (instruction-count clock), so opt-level changes
+# nothing about the guest's execution or telemetry — only how fast snemu runs it.
+#
+# Debug-assertions/overflow-checks stay ON (dev default) — cheap sanity nets worth
+# keeping on a from-scratch emulator. To debug snemu itself (step it, or match
+# true-release codegen exactly), temporarily set `opt-level = 0` here.
+[profile.dev.package.snemu]
+opt-level = 3
 
 [patch.crates-io]
 linked_list_allocator = { path = "vendor/linked_list_allocator" }

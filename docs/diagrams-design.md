@@ -128,12 +128,32 @@ cargo xtask diagram <target> [--check] [--out PATH] [--capture PATH | --workload
   are rejected for the buckets they don't apply to (clap can't express that
   cross-field rule, so validate in the handler and error clearly).
 
-**Module layout:** `xtask/src/diagram/mod.rs` (dispatch + CLI glue),
-`diagram/static_.rs` (B1), `diagram/runtime.rs` (B2, folds `OwnedFrame`), and a
-thin `diagram/mermaid.rs` string-builder so no target hand-concatenates syntax.
-The fold logic (frames → graph model → mermaid) is **pure and host-testable** —
-feed it a `Vec<OwnedFrame>` fixture, assert on the emitted mermaid. That is the
-TDD seam; the snemu/QEMU boot is I/O at the edge, kept out of the tested core.
+**Crate boundary:** diagram logic lives in its **own `diagram` library crate**,
+not inside xtask. This keeps the projections pure, host-tested, and
+independently mutation-testable (add it to the `xtask mutants` set), and matches
+the workspace grain — xtask orchestrates libs (`kernel-core`, `protocol`,
+`collector`), it doesn't house them. xtask stays a thin I/O shell: it shells out
+`cargo metadata`, drives snemu for a capture, does `--check` diffs and file
+writes, then **delegates every projection to `diagram`**.
+
+- `diagram` crate (host-only lib; depends on `protocol` w/ `std` + `serde_json`):
+  - `model` — **typed diagram values** (`Graph { nodes, edges }`,
+    `Sequence { participants, messages }`, a class/table model), each with a
+    `to_mermaid()` emitter, so no target hand-concatenates syntax. The typed
+    model is the testable seam: a target builds a *value*, the emitter turns it
+    into syntax, tests assert on the emitted string.
+  - `deps` — `parse_cargo_metadata(json) -> Vec<CrateNode>` and
+    `workspace_graph(&[CrateNode]) -> Graph`, both **pure** (tested against a
+    JSON fixture, no `cargo` invocation).
+  - `caps` — `derivation_tree(&[OwnedFrame]) -> Graph`, **pure** (tested against
+    a hand-built frame fixture, no boot).
+- `xtask` — a `Diagram` subcommand that provides the I/O and hands data to the
+  lib.
+
+Mermaid is the primary backend (GitHub renders it in-diff for free); DOT stays
+reachable as an optional second `Graph` backend for local graphviz layout, but
+is not built in the first slice. `petgraph` is deliberately avoided — dedup is a
+`HashSet`, and the graph targets need no algorithms yet.
 
 ---
 

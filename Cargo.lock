@@ -249,6 +249,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "diagram"
+version = "0.0.1"
+dependencies = [
+ "protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "dispatch2"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1801,6 +1809,7 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "ctrlc",
+ "diagram",
  "fs-proto",
  "itest-harness",
  "protocol",
