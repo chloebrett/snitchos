@@ -1,0 +1,16 @@
+[package]
+name = "snip"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Sonnet-assisted staging: pure prompt-build + reply-parse core, plus one
+# impure `pick` that shells out to `claude -p`. All git I/O lives in xtask.
+# See plans/snip-stage-picker.md.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true
