@@ -41,9 +41,12 @@ So the mechanism is the same one `canonical()` was built for, just at the
 vocabulary layer:
 
 - **QEMU** (real 10 MHz wall-clock, fast boot): the guard task faults within the
-  first few ms — *before* the first `kernel.heartbeat` span registers — and the
-  kernel reboot-loops on the panic, faulting before a heartbeat every cycle
-  (82575 frames, none reaching a heartbeat). `kernel.heartbeat` never registers.
+  first few ms — *before* the first `kernel.heartbeat` span registers (first
+  heartbeat isn't due until 1 s). So `kernel.heartbeat` never registers on the
+  QEMU side. (The high QEMU frame count — ~78k for `panic-now` over the 6 s window
+  — is **not** reboots; it's hart 1's probe spinning and emitting spans while
+  hart 0 idles post-panic. Measured: exactly one `kernel.boot` registration, no
+  reboot. See the secondary-thread section.)
 - **snemu** (deterministic instruction-count clock): the same fault lands *after*
   several heartbeat spans have already opened (heartbeat period = 10M
   instructions; boot-to-fault ≈ 40M). So `kernel.heartbeat` is in snemu's
@@ -59,16 +62,20 @@ too strict for a workload that **deliberately halts**: whether a terminal crash
 lands before or after the first heartbeat is a clock artifact, and both orderings
 are legitimate.
 
-## Secondary thread worth a look (not the cause of the FAIL)
+## Secondary thread — investigated, and there is NO reset gap
 
-snemu runs to the 150M **step limit** rather than halting, i.e. it keeps emitting
-frames after the ~40M guard fault, whereas QEMU **reboot-loops** (82575 frames of
-repeated boots). So there's a *second*, independent difference: **QEMU resets on a
-kernel panic; snemu keeps emulating the panicked kernel.** That's panic/reset
-fidelity, orthogonal to the guard MMU/scheduler, and it doesn't drive the FAIL
-(the FAIL is purely the `kernel.heartbeat` vocabulary entry). Might be worth
-modeling a reset-on-panic in snemu later so halting workloads converge to the same
-terminal state — but it's cosmetic for the oracle today.
+I had claimed (unverified, from the raw frame count) that QEMU **reboot-loops** on
+the panic while snemu keeps emulating — a "panic/reset fidelity" difference. That
+was a third bad inference. **Measured it:** in QEMU's `panic-now` stream, there is
+exactly **one** `kernel.boot` registration and 19363 `SpanStart`s out of 77619
+frames. QEMU boots **once** and does not reboot — the kernel panic handler is just
+`loop { wfi }` (no SBI reset), and QEMU has no auto-reset. The big frame count is
+hart 1's probe task spinning and emitting spans for the whole 6 s capture window
+while hart 0 idles post-panic. snemu does the *same* thing (hart 0 idles, hart 1
+runs on); it just gets fewer hart-1 turns because its budget is 150M instructions,
+not 6 real seconds. So the frame-count gap is benign wall-time-vs-instruction
+volume, `canonical()`/vocabulary already absorbs it, and **there is no reset-on-
+panic gap to model.** Both emulators boot once and idle after the crash.
 
 ## CONFIRMED via minimal repro (`panic-now`)
 
@@ -96,12 +103,13 @@ DTB's 10 MHz means a heartbeat period ("1 second") = 10M instructions, so snemu
 reads boot as ~4 s → ~4 heartbeats. QEMU runs the same 40M instructions in ~0.2 s
 real; its first heartbeat isn't due until 1 s → 0 heartbeats.
 
-**Corollary — reset-on-panic would NOT fix it.** Even within a *single* boot,
-snemu's first heartbeat (10M instr) precedes the crash (40M instr), so resetting
-after the crash doesn't erase the heartbeats already emitted before it. The
-earlier "model reset-on-panic so terminal streams converge" idea is dead as a fix
-for this FAIL (it's still a real fidelity nicety, just not the lever here). The
-only real fix is oracle-side.
+**Corollary — there's nothing on the snemu side to fix.** Two dead ends: (a) I
+briefly imagined "make snemu reset-on-panic like QEMU" — but QEMU doesn't reset
+(measured above), so there's nothing to mirror. (b) Even if it did, snemu's first
+heartbeat (10M instr) precedes the crash (40M instr), so a post-crash reset can't
+erase heartbeats already emitted. Both emulators boot once and idle after the
+crash; the divergence is purely how many heartbeats fit before the crash in each
+clock. The only real fix is oracle-side.
 
 ## FIX LANDED (oracle-side)
 
@@ -121,20 +129,25 @@ the benign pass on the heartbeat **count** (a few, not hundreds) or on snemu
 showing the crash it reached — the panic currently emits only to UART, not
 telemetry, so there's no crash frame to key on today.
 
-## What should change (remaining)
+## Remaining / follow-ups
 
-1. **Oracle: stop failing halting workloads on a benign name.** Options, cheapest
-   first:
-   - Per-workload allowlist: `{stack-guard, stack-overflow-deep, boot-stack-guard}
-     → benign only-snemu = {kernel.heartbeat}`. Gets the sweep to 43/43 honestly
-     and documents *why*.
-   - Or compare only the boot-prefix up to the crash for crash-defined workloads.
-   - Or treat an only-snemu name that appears in QEMU's vocabulary on *some other*
-     workload as non-invented (the kernel demonstrably emits `kernel.heartbeat`;
-     it isn't fabricated telemetry).
-2. **(Optional, unrelated) snemu reset-on-panic** — a fidelity nicety so a
-   panicked kernel stops like QEMU's does, but it does **not** fix this FAIL (see
-   the corollary above: snemu heartbeats *before* the crash regardless of reset).
+1. **Oracle robustness (the one real open item).** The benign-name filter forgives
+   `kernel.heartbeat` in only-snemu unconditionally, so it would mask a
+   *hypothetical* snemu bug that fails to halt a panicking kernel and over-emits
+   heartbeats (main on hart 0 would keep looping instead of idling). Today the
+   filter looks only at the vocabulary *set*, not the count.
+   - A count threshold ("a few heartbeats, not hundreds") is **fragile** — a
+     faithful snemu emits ~4 before a `panic-now` crash, a fail-to-halt one ~15 to
+     the step limit; the margin is workload-dependent and thin.
+   - The **clean** fix is to make the crash observable in telemetry, then forgive
+     only-snemu `kernel.heartbeat` *iff snemu also shows the crash* (proving it
+     halted, just later). Blocked today: the panic handler deliberately bypasses
+     locks/alloc for safety and emits only to UART, so there's no crash frame — and
+     emitting one from the panic path risks the intern/virtio re-entry deadlock
+     CLAUDE.md warns about. So: documented limitation, not worth a fragile patch now.
+2. **~~snemu reset-on-panic~~** — dropped. Investigated (measured one `kernel.boot`
+   in QEMU's stream): QEMU does **not** reset on panic, so there was never a gap to
+   close. See the secondary-thread section.
 
 ## Honesty trail — how I got it wrong twice before landing here
 
@@ -170,11 +183,13 @@ Don't chase the guard-PTE encoding, the `remap`+shootdown path, **or** the
 scheduler. The MMU walk is faithful, the guard faults in both emulators, and snemu
 schedules fine. The 3 FAILs are the oracle's vocabulary rule being too strict
 about a benign crash-vs-heartbeat **ordering** that the deterministic
-instruction-clock induces. Fix it in the oracle (allowlist / prefix-compare), not
-in snemu. Optionally model reset-on-panic so terminal streams converge.
+instruction-clock induces. Fixed in the oracle (benign-name filter), not in snemu.
+There is no reset-on-panic gap (QEMU boots once; measured). The one real follow-up
+is oracle robustness (make the crash observable in telemetry so the benign pass can
+be conditioned on snemu actually reaching it) — see Remaining.
 
 **Debug edits used and reverted:** `snemu/src/cpu.rs` — a `translate_or_trap`
 KSTACK-window `eprintln!`, a `dbg_timer_traps` field + timer-trap counter, a
 guard-fault `eprintln!`; `kernel/src/sched/mod.rs` — `println!`s in
-`touch_current_stack_guard`, `spawn_on_with_arg`, and `prepare_switch`. All
-removed.
+`touch_current_stack_guard`, `spawn_on_with_arg`, and `prepare_switch`;
+`xtask/src/snemu_diff.rs` — a `QEMU-DBG` boot/span counter. All removed.
