@@ -273,6 +273,45 @@ pub fn send(bytes: &[u8]) {
     });
 }
 
+/// Best-effort, **non-blocking** send for the panic path: emit `bytes` iff the
+/// console is up *and* its lock is free right now. Returns `true` if the frame
+/// was staged+transmitted, `false` if `init` hasn't run or the lock is held.
+///
+/// A panic can fire from anywhere — including a hart that's *mid-[`send`]* and
+/// already holds this lock. A blocking `lock()` there would deadlock, so this
+/// uses [`try_lock`](crate::sync::Mutex::try_lock) and simply gives up on
+/// contention (the panic message is already on the emergency UART regardless).
+/// Dropping the frame on contention is only acceptable *because* it's the panic
+/// path — hence the `_panic` suffix; normal telemetry must never silently drop.
+///
+/// Reusing the in-mutex `staging.buf` (not a separate buffer) is sound precisely
+/// because `try_lock` succeeding proves no one else is mid-stage: the same lock
+/// guards the buffer and `TX_QUEUE`, so a free lock means both are in a
+/// consistent, idle state. `transmit` spins to completion before we release the
+/// guard, so the device has finished reading the buffer by the time we return —
+/// fine on a halting kernel.
+// The caller is the panic handler (increment 4 of
+// plans/panic-emits-telemetry.md); this `allow` goes away when it lands.
+#[allow(dead_code, reason = "wired into the panic handler next")]
+#[must_use]
+pub fn try_send_panic(bytes: &[u8]) -> bool {
+    let Some(handle) = CONSOLE.get() else {
+        return false;
+    };
+    let Some(mut staging) = handle.try_lock() else {
+        return false;
+    };
+    let base = staging.base;
+    // SAFETY: `try_lock` succeeded, so this hart is the exclusive holder — the
+    // sole writer to `staging.buf` and sole driver of `TX_QUEUE` for this
+    // critical section. `staged` points into the `.bss`-resident buffer, so
+    // `transmit`'s `va_to_pa` is correct.
+    kernel_core::virtio::stage_and_emit(&mut staging.buf, bytes, |staged| unsafe {
+        transmit(base, staged);
+    });
+    true
+}
+
 /// Drive the virtio-mmio handshake on a discovered console device up
 /// through `FEATURES_OK`. After this returns `Ok`, the next step is
 /// virtqueue setup, then `DRIVER_OK`, then we can transmit.
