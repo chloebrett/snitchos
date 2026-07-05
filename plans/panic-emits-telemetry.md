@@ -1,6 +1,7 @@
 # The kernel snitches its own death — a panic-safe telemetry frame
 
-**Status: PLANNED.** Motivated by the snemu differential-oracle work
+**Status: increments 1–4 SHIPPED + verified (commit gate 10/10). 5–6 remain.**
+Motivated by the snemu differential-oracle work
 ([notes/snemu-guard-page-fail-is-timing-not-mmu.md](snemu-guard-page-fail-is-timing-not-mmu.md)):
 a kernel panic is currently invisible on the structured telemetry channel — it
 goes out the emergency UART only. For an OS whose first-class concern is
@@ -101,12 +102,20 @@ into a fixed buffer, no alloc.
 A non-blocking, static-buffer send that never touches the heap or the intern
 table.
 
-- `try_lock` the console mutex; return `false` if held.
-- Stage `bytes` through a **dedicated** static `PANIC_TX_STAGING` (not the normal
-  `TX_STAGING`, which the panicking code may be mid-use of), `va_to_pa` it (kernel
-  static → higher-half VA, `va_to_pa` handles it), push one descriptor, notify.
-- Kernel-side; covered by increment 4's itest. Document the "why a separate staging
-  buffer" in a comment (mirrors the `TX_STAGING` cross-hart race lesson).
+- `try_lock` the console mutex; return `false` if held. **Dropped the plan's
+  separate `PANIC_TX_STAGING`:** the staging buffer lives *inside* the mutex, so a
+  successful `try_lock` proves it (and `TX_QUEUE`) are idle — reuse `staging.buf`.
+- **Gotcha found at the gate (2/10 → 10/10):** a single `try_lock` flaked badly.
+  A *peer* hart emitting telemetry holds the console lock for a full device
+  round-trip (the `transmit` spin), which under the `--repeat` parallel load is
+  most of the time — so one-shot `try_lock` lost the race ~80% and dropped the
+  panic frame (UART confirmed the panic *did* fire; only the telemetry was lost).
+  Fix: **bounded retry** of `try_lock` (`PANIC_SEND_TRY_LOCK_SPINS`), which catches
+  the peer's release windows. Still bounded (no blocking `lock()`), so a
+  self-panic-while-holding-the-lock gives up instead of self-deadlocking. In
+  practice it exits almost immediately (gate ran in 0.6 s), only spinning under
+  real contention.
+- Kernel-side; covered by increment 4's itest.
 
 ## Increment 4 — wire into `panic.rs` + itest
 
