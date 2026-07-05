@@ -153,6 +153,50 @@ position==id invariant is ever wanted, it's already lost).
 
 ---
 
+## F6 — Delegation drops `Multiplicity`; `Once` caps become `Persistent` across a process boundary (Med, verified)
+
+*(Surfaced on a second pass — ranks with F1, above F4/F5.)*
+
+`delegate()` (`kernel-core/src/user/cap.rs:410`) copies a `Capability` by value
+regardless of its slot's multiplicity, and every receiving-side insertion uses
+`insert_with_id` → `grant(cap, Multiplicity::Persistent, …)` (`trap/user.rs:759`).
+Multiplicity lives on the `Slot`, not the `Capability`, so it **never travels with
+a transfer** — a `Once` cap, delegated, is reborn `Persistent` in the child.
+
+The only `Once` cap today is the reply cap, which makes the consequence concrete:
+a server that places its reply-cap handle (received in `a5`) into a `Spawn`
+delegate array hands its child a reply cap that can be invoked **repeatedly**, and
+now two processes hold reply authority for the same blocked caller. This breaks
+the affine invariant the cap docs assert ("holding it *is* the authority…
+answering consumes it") and chains into F3: the second, out-of-band `reply`
+`wake()`s the original caller, which may since have re-blocked on something else
+and now takes a spurious wake / a clobbered `REPLIES` entry.
+
+Same root cause as F1 — properties stored on the `Slot` (`cap_id`, `multiplicity`)
+are lost the moment a cap crosses a process boundary. F1 loses *identity*
+(observability + revocation); F6 loses *multiplicity* (a clear model-invariant
+violation). Fix them together: the transfer path should carry the full holding
+(cap_id, parent_cap_id, multiplicity), not a bare `Capability`.
+
+## F7 — 16-bit generation counter wraps, defeating the stale-handle guard (Low, theoretical)
+
+`Handle` gives 16 bits to the generation, bumped `wrapping_add(1)` on `consume`
+(`cap.rs:590`). After 2^16 consume/reuse cycles on one slot the generation wraps,
+and an ancient stale handle can alias the current occupant — the exact ABA the
+generation exists to prevent. Currently unreachable for harm: the only
+consumed-and-reused cap is the reply cap, whose holder (the server) discards the
+handle immediately rather than retaining old ones. But a long-lived server churns
+a slot through full wraps, so the guard is one design change away (a second `Once`
+object, or any retained `Once` handle) from mattering. Widen the field or note the
+bound.
+
+## F8 — `MapAnon` never reclaims within a process (Low, semi-documented)
+
+`heap_top` is monotonic (`syscall/mem.rs:59`); a userspace free can't return
+frames to the kernel, so a long-lived churning process pins up to `HEAP_MAX`.
+Bounded per-process, and the code already flags disjoint-placement + unmap as
+future work — a noted limitation more than a defect.
+
 ## What I'd keep (the good bones)
 
 - **The pure/kernel split is real and pays off.** `on_send`/`on_receive`,
