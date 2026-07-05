@@ -42,14 +42,16 @@ relevant increment:
 - **(b) Grant records are satisfier-emitted telemetry**, not a new kernel frame.
 - **(c) All slots required** in the thin build (`optional` deferred).
 
-## Two open decisions that gate specific increments
+## Decisions (confirmed 2026-07-05)
 
-- **Increment 6 — where the satisfier reads the child's manifest.** For a
-  `Spawn`-by-registry-id child, init doesn't hold the ELF bytes. Recommended first
-  path: the **FS `user.iface` xattr** (the mechanism already exists —
-  `workload=manifest-iface` reads exactly this), which ties the first generic-satisfier
-  demo to the FS/`SpawnImage` path. Alternative: a kernel "manifest of spawnable id"
-  read. **Decide before Increment 6**; Increments 1–5 don't depend on it.
+- **Increment 1 — `Slot.object`/`.rights` mirror `abi` discriminants** (raw
+  `u8`/`u32`), not a forked enum or a hitch→abi hard dep. Locked.
+- **Increment 6 — the satisfier reads the child's manifest from the FS `user.iface`
+  xattr, and launches via `SpawnImage`.** The mechanism already exists
+  (`workload=manifest-iface` reads exactly this xattr). So the first generic-satisfier
+  demo runs the FS/`SpawnImage` path — init reads the child ELF + its lifted manifest
+  off the seeded FS, satisfies, and `SpawnImage`s. A kernel "manifest of spawnable id"
+  read is **not** pursued. Increments 1–5 don't depend on this.
 
 ## TDD discipline (per project rules)
 
@@ -160,8 +162,8 @@ all-or-nothing early-out are load-bearing.
 
 ## Increment 6 — generic satisfier in `init` + named grant records (integration)
 
-`init` reads a child's manifest (**source per the gating decision above — recommend
-FS `user.iface` xattr + `SpawnImage`**), runs the Increment-5 matcher, mints
+`init` reads a child's manifest **from the FS `user.iface` xattr and launches via
+`SpawnImage`** (decided above), runs the Increment-5 matcher, mints
 attenuated caps via `MintBadged`, assembles the handle array in slot order, `Spawn`s,
 and emits one **named grant record** per satisfied slot as telemetry (`granted fs ⟵
 cap <cap_id>`, off the v0.13 cap-id spine).
