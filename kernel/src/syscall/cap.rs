@@ -41,13 +41,19 @@ pub(super) fn handle_mint_badged(frame: &mut TrapFrame) {
         let mut caps = proc.caps.lock();
         let parent = caps.resolve(handle).copied().map_err(|_| Denied::NoSuchCapability);
         let parent_cap_id = caps.cap_id_of(handle).unwrap_or(0);
-        parent
-            .and_then(|p| mint_badged(p, badge, rights))
-            .map(|child| (caps.insert_with_id(child, child_cap_id, parent_cap_id), parent_cap_id))
+        parent.and_then(|p| {
+            let child = mint_badged(p, badge, rights)?;
+            // The minted cap names the same endpoint object — capture its id so the
+            // wire `CapEvent` carries the endpoint's name (resolved after the lock).
+            let kernel_core::cap::Object::Endpoint { id, .. } = p.object else {
+                return Err(Denied::WrongObject);
+            };
+            Ok((caps.insert_with_id(child, child_cap_id, parent_cap_id), parent_cap_id, id))
+        })
     };
 
     match minted {
-        Ok((h, parent_cap_id)) => {
+        Ok((h, parent_cap_id, ep_id)) => {
             crate::tracing::emit_cap_transferred(
                 child_cap_id,
                 parent_cap_id,
@@ -55,6 +61,7 @@ pub(super) fn handle_mint_badged(frame: &mut TrapFrame) {
                 protocol::CapObject::Endpoint,
                 rights.bits(),
                 badge,
+                crate::ipc::name_of(ep_id),
             );
             frame.a0 = u64::from(h.raw());
         }
@@ -139,9 +146,10 @@ pub(super) fn handle_revoke(frame: &mut TrapFrame) {
 
     let revoked = crate::sched::revoke_descendants_of(root_cap_id);
     for (holder, cap_id, parent_cap_id, cap) in &revoked {
-        let badge = match cap.object {
-            Object::Endpoint { badge, .. } => badge,
-            _ => 0,
+        // Endpoint caps carry the object's name (and badge); other kinds neither.
+        let (badge, name) = match cap.object {
+            Object::Endpoint { id, badge } => (badge, crate::ipc::name_of(id)),
+            _ => (0, [0; snitchos_abi::CAP_NAME_LEN]),
         };
         crate::tracing::emit_cap_revoked(
             *cap_id,
@@ -150,6 +158,7 @@ pub(super) fn handle_revoke(frame: &mut TrapFrame) {
             crate::user::cap_object_kind(cap.object),
             cap.rights.bits(),
             badge,
+            name,
         );
     }
     frame.a0 = revoked.len() as u64;

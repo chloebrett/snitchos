@@ -120,6 +120,24 @@ pub fn eval_program_with_telemetry(
 /// # Errors
 /// Propagates `main`'s runtime error (including a refused effect like an
 /// undeclared `print`), or reports a missing `main`.
+/// Like [`eval_program`], but under a finite evaluation budget of `fuel` steps —
+/// so a non-terminating program faults with "evaluation fuel exhausted" instead
+/// of hanging. The budget is seeded before `build_env` so every closure captures
+/// the same counter. This is the entry the Stitch mutation tester's fuel cap uses.
+///
+/// # Errors
+/// Propagates `main`'s runtime error, reports a missing `main`, or faults on fuel
+/// exhaustion.
+pub fn eval_program_with_fuel(items: &[Item], fuel: u64) -> Result<Value, RuntimeError> {
+    let mut all = prelude_items();
+    all.extend_from_slice(items);
+    let env = build_env_in(Env::new().with_fuel(fuel), &all);
+    match env.lookup("main") {
+        Some(main) => eval_call(&main, &[], &env),
+        None => Err(RuntimeError::new("no `main` function")),
+    }
+}
+
 pub fn eval_program_with_platform(
     items: &[Item],
     platform: Rc<dyn Platform>,
@@ -399,6 +417,9 @@ fn link_imports(
 /// # Errors
 /// Returns `Err` on a runtime fault (type mismatch, division by zero, …).
 pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
+    if !env.take_fuel() {
+        return Err(RuntimeError::new("evaluation fuel exhausted"));
+    }
     match expr {
         Expr::Int(n) => Ok(Value::Int(*n)),
         Expr::Float(f) => Ok(Value::Float(*f)),
@@ -1986,6 +2007,16 @@ mod tests {
             run_program("double(x) = x * 2  main() = double(21)"),
             Value::Int(42)
         );
+    }
+
+    #[test]
+    fn evaluation_faults_when_the_fuel_budget_is_exhausted() {
+        // A non-terminating program must fault *catchably* under a finite budget,
+        // rather than hang or overflow the Rust stack.
+        let items = crate::parser::parse_program("f(n) = f(n)  main() = f(0)")
+            .expect("program parses");
+        let err = super::eval_program_with_fuel(&items, 500).expect_err("fuel should run out");
+        assert!(err.message().contains("fuel"), "got: {}", err.message());
     }
 
     #[test]

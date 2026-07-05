@@ -312,7 +312,13 @@ pub fn emit_hart_register(id: u8, mhartid: u64, role: protocol::HartRole) {
 /// identity, the object kind, and the granted `rights`, so the host can
 /// reconstruct the capability derivation tree. `parent_cap_id` is `0`
 /// (root) — no derivation until v0.8.
-pub fn emit_cap_granted(cap_id: u64, holder: u32, object: protocol::CapObject, rights: u32) {
+pub fn emit_cap_granted(
+    cap_id: u64,
+    holder: u32,
+    object: protocol::CapObject,
+    rights: u32,
+    name: [u8; snitchos_abi::CAP_NAME_LEN],
+) {
     emit_frame(&Frame::CapEvent {
         kind: protocol::CapEventKind::Granted,
         cap_id,
@@ -324,6 +330,7 @@ pub fn emit_cap_granted(cap_id: u64, holder: u32, object: protocol::CapObject, r
         badge: 0,
         t: timestamp(),
         hart_id: crate::percpu::current_hartid() as u8,
+        name,
     });
 }
 
@@ -339,6 +346,7 @@ pub fn emit_cap_transferred(
     object: protocol::CapObject,
     rights: u32,
     badge: u64,
+    name: [u8; snitchos_abi::CAP_NAME_LEN],
 ) {
     emit_frame(&Frame::CapEvent {
         kind: protocol::CapEventKind::Transferred,
@@ -350,6 +358,7 @@ pub fn emit_cap_transferred(
         badge,
         t: timestamp(),
         hart_id: crate::percpu::current_hartid() as u8,
+        name,
     });
 }
 
@@ -365,6 +374,7 @@ pub fn emit_cap_revoked(
     object: protocol::CapObject,
     rights: u32,
     badge: u64,
+    name: [u8; snitchos_abi::CAP_NAME_LEN],
 ) {
     emit_frame(&Frame::CapEvent {
         kind: protocol::CapEventKind::Revoked,
@@ -376,6 +386,7 @@ pub fn emit_cap_revoked(
         badge,
         t: timestamp(),
         hart_id: crate::percpu::current_hartid() as u8,
+        name,
     });
 }
 

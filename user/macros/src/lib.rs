@@ -133,6 +133,14 @@ fn expand_entry(attr: TokenStream2, item: TokenStream2) -> TokenStream2 {
     };
     func.block.stmts.insert(0, root_span);
 
+    // Publish the program's `#[entry(needs)]` slot table (the `__SNITCH_SLOTS` const
+    // emitted below, for every program) so `bootstrap().get(name)` can resolve role
+    // names → delegated handles.
+    let register_slots: syn::Stmt = parse_quote! {
+        ::snitchos_user::__register_slots(__SNITCH_SLOTS);
+    };
+    func.block.stmts.insert(0, register_slots);
+
     // Parse the manifest clause once (empty attr = a bare `#[entry]`, no needs).
     let args = if attr.is_empty() {
         None
@@ -172,7 +180,6 @@ fn slots_table(needs: &[SlotArg]) -> TokenStream2 {
         quote! { (#name, ::snitchos_user::object_kind::#object as u8) }
     });
     quote! {
-        #[allow(dead_code, reason = "resolved by the runtime bootstrap accessor in a later increment")]
         const __SNITCH_SLOTS: &[(&str, u8)] = &[ #(#entries),* ];
     }
 }

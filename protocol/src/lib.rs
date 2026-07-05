@@ -162,6 +162,12 @@ pub enum Frame<'a> {
     badge: u64,
     t: u64,
     hart_id: u8,
+    /// The object's human *name* (`docs/capability-names-design.md`), NUL-padded
+    /// UTF-8 — so the host reconstructs a *named* derivation tree ("transferred
+    /// the `fs` endpoint"). Empty for unnamed objects (only endpoints carry a
+    /// name today). Read with [`snitchos_abi::name_str`]. Last field — postcard is
+    /// positional, so new fields go at the end.
+    name: [u8; snitchos_abi::CAP_NAME_LEN],
   },
   /// The kernel **refused a syscall**, and why. A first-class observability
   /// event so a denied U-mode request is never silent — `syscall` is the raw
@@ -342,6 +348,7 @@ mod tests {
       badge: 0,
       t: 1234,
       hart_id: 1,
+      name: [0; snitchos_abi::CAP_NAME_LEN],
     };
 
     let mut buf = [0u8; 64];
@@ -365,6 +372,7 @@ mod tests {
       badge: 0,
       t: 5678,
       hart_id: 1,
+      name: [0; snitchos_abi::CAP_NAME_LEN],
     };
 
     let mut buf = [0u8; 64];
@@ -388,6 +396,7 @@ mod tests {
       badge: 0,
       t: 9012,
       hart_id: 1,
+      name: [0; snitchos_abi::CAP_NAME_LEN],
     };
 
     let mut buf = [0u8; 64];
@@ -433,6 +442,7 @@ mod tests {
       badge: 0,
       t: 3456,
       hart_id: 1,
+      name: [0; snitchos_abi::CAP_NAME_LEN],
     };
 
     let mut buf = [0u8; 64];
@@ -457,6 +467,7 @@ mod tests {
       badge: 0,
       t: 7890,
       hart_id: 0,
+      name: [0; snitchos_abi::CAP_NAME_LEN],
     };
 
     let mut buf = [0u8; 64];
@@ -481,6 +492,7 @@ mod tests {
       badge: 0xCAFE,
       t: 7777,
       hart_id: 1,
+      name: [0; snitchos_abi::CAP_NAME_LEN],
     };
 
     let mut buf = [0u8; 64];

@@ -53,7 +53,7 @@ pub(crate) fn canonical(frame: &OwnedFrame) -> OwnedFrame {
             reason: *reason,
             hart_id: *hart_id,
         },
-        CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, badge, hart_id, .. } => {
+        CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, badge, hart_id, name, .. } => {
             CapEvent {
                 kind: *kind,
                 cap_id: *cap_id,
@@ -64,6 +64,7 @@ pub(crate) fn canonical(frame: &OwnedFrame) -> OwnedFrame {
                 badge: *badge,
                 t: 0,
                 hart_id: *hart_id,
+                name: *name,
             }
         }
         SyscallRefused { syscall, reason, task_id, hart_id, .. } => SyscallRefused {
@@ -412,20 +413,44 @@ fn compare(
 }
 
 /// Boot the kernel under snemu (optionally selecting `workload`) and return the
-/// decoded telemetry frames. The snemu half of the oracle, reused by
-/// `diagram caps` to source `CapEvent` frames without the QEMU side.
-pub(crate) fn collect_frames(
+/// decoded telemetry frames, stopping early once `CapEvent` emission goes
+/// quiescent — `quiescence_window` steps elapse with no new cap event after at
+/// least one is seen — or at `max_steps`. Reused by `diagram caps`: init emits
+/// its authority graph during early boot then just heartbeats, so running the
+/// full ceiling would waste most of the wall-clock. Also returns the step count
+/// actually reached. The snemu half of the oracle, minus the QEMU side.
+pub(crate) fn collect_frames_until_cap_quiescence(
     workload: Option<&str>,
     max_steps: u64,
-) -> Result<Vec<OwnedFrame>, String> {
+    quiescence_window: u64,
+) -> Result<(Vec<OwnedFrame>, u64), String> {
     let (kernel, dtb_base) = prepare(workload.is_some())?;
     let dtb = match workload {
         Some(w) => snemu::dtb::set_bootargs(&dtb_base, &format!("workload={w}"))
             .ok_or("DTB patch failed")?,
         None => dtb_base,
     };
-    let (frames, _stop, _timing) = collect_snemu(&kernel, &dtb, max_steps)?;
-    Ok(frames)
+    let mut machine = snemu::loader::load_machine(&kernel, RAM_SIZE, Some(&dtb), HART_COUNT)
+        .map_err(|e| format!("snemu load: {e:?}"))?;
+    let mut quiescence = diagram::caps::CapQuiescence::new(quiescence_window);
+    let mut steps = 0u64;
+    let mut seen_tx = 0usize;
+    while steps < max_steps {
+        match machine.step() {
+            Ok(()) => steps += 1,
+            Err(_) => break,
+        }
+        let tx = machine.virtio_tx_output();
+        if tx.len() != seen_tx {
+            seen_tx = tx.len();
+            let caps =
+                decode_frames(tx).iter().filter(|f| matches!(f, OwnedFrame::CapEvent { .. })).count();
+            if quiescence.observe(caps, steps) {
+                break;
+            }
+        }
+    }
+    Ok((decode_frames(machine.virtio_tx_output()), steps))
 }
 
 /// Build the kernel and read the base DTB the emulators share.

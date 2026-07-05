@@ -11,7 +11,7 @@
 //! recursion and mutual recursion work (letrec at the top level).
 
 use core::str;
-use core::cell::{OnceCell, RefCell};
+use core::cell::{Cell, OnceCell, RefCell};
 
 use alloc::collections::{BTreeMap, BTreeSet};
 
@@ -57,6 +57,13 @@ pub struct Env {
     /// call boundary); lambdas and inner scopes inherit through `extend`. The
     /// program entry / REPL prompt is seeded with the process's ambient caps.
     authority: Rc<BTreeSet<String>>,
+    /// Remaining evaluation steps — a budget decremented once per `eval` call,
+    /// shared across the whole run via `Rc` like the sinks above. The default is
+    /// effectively unbounded (`u64::MAX`); [`with_fuel`](Self::with_fuel) sets a
+    /// finite budget so a non-terminating program faults instead of hanging (or
+    /// overflowing the Rust stack). This is the hook the Stitch mutation tester's
+    /// fuel cap rides.
+    fuel: Rc<Cell<u64>>,
 }
 
 impl Default for Env {
@@ -95,7 +102,30 @@ impl Env {
             telemetry,
             platform: Rc::new(NullPlatform),
             authority: Rc::new(BTreeSet::new()),
+            fuel: Rc::new(Cell::new(u64::MAX)),
         }
+    }
+
+    /// A clone of this environment with a finite evaluation budget of `steps` —
+    /// seed it *before* building the program env so every closure captures the
+    /// same budgeted counter. Consumed one step per `eval` call; on exhaustion
+    /// [`take_fuel`](Self::take_fuel) reports empty and the interpreter faults.
+    #[must_use]
+    pub fn with_fuel(self, steps: u64) -> Env {
+        Env { fuel: Rc::new(Cell::new(steps)), ..self }
+    }
+
+    /// Consume one unit of evaluation fuel. Returns `false` when the budget is
+    /// exhausted (the caller should fault), `true` otherwise. Decrements the
+    /// run-shared counter in place.
+    #[must_use]
+    pub fn take_fuel(&self) -> bool {
+        let remaining = self.fuel.get();
+        if remaining == 0 {
+            return false;
+        }
+        self.fuel.set(remaining - 1);
+        true
     }
 
     /// A clone of this environment whose console / capability / process / FS
@@ -161,6 +191,7 @@ impl Env {
             telemetry: Rc::clone(&self.telemetry),
             platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
+            fuel: Rc::clone(&self.fuel),
         }
     }
 
@@ -179,6 +210,7 @@ impl Env {
             telemetry: Rc::clone(&self.telemetry),
             platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
+            fuel: Rc::clone(&self.fuel),
         }
     }
 
@@ -209,6 +241,7 @@ impl Env {
             telemetry: Rc::clone(&self.telemetry),
             platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
+            fuel: Rc::clone(&self.fuel),
         }
     }
 

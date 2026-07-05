@@ -20,7 +20,7 @@
 
 use core::alloc::Layout;
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use snitchos_abi::Syscall;
 use talc::locking::AssumeUnlockable;
@@ -133,6 +133,90 @@ pub fn span_handle() -> u32 {
 #[must_use]
 pub const fn delegated_handle(i: usize) -> usize {
     2 + i
+}
+
+// --- Bootstrap namespace: resolve delegated caps by declared role name ---
+
+// This program's `#[entry(needs = [...])]` slot table — `(role, object-kind)` in
+// declaration order — published by the macro's `main` prologue via
+// [`__register_slots`]. Stored as pointer + length because a slice can't live in
+// one atomic; single-threaded userspace, so `Relaxed` suffices (as with the
+// startup-cap statics above).
+static SLOTS_PTR: AtomicPtr<(&'static str, u8)> = AtomicPtr::new(core::ptr::null_mut());
+static SLOTS_LEN: AtomicUsize = AtomicUsize::new(0);
+
+/// Publish this program's slot table. Called by `#[entry]`'s generated prologue
+/// with the bin's `__SNITCH_SLOTS` const — not for direct use.
+#[doc(hidden)]
+pub fn __register_slots(slots: &'static [(&'static str, u8)]) {
+    SLOTS_LEN.store(slots.len(), Ordering::Relaxed);
+    SLOTS_PTR.store(slots.as_ptr().cast_mut(), Ordering::Relaxed);
+}
+
+fn registered_slots() -> &'static [(&'static str, u8)] {
+    let ptr = SLOTS_PTR.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        return &[];
+    }
+    let len = SLOTS_LEN.load(Ordering::Relaxed);
+    // SAFETY: `__register_slots` stored the pointer + length of the bin's `'static`
+    // `__SNITCH_SLOTS` slice; it is never mutated, and userspace is single-threaded.
+    unsafe { core::slice::from_raw_parts(ptr.cast_const(), len) }
+}
+
+/// This process's bootstrap capability namespace — resolve a delegated capability
+/// by the **role name** it declared in `#[entry(needs = [...])]`, instead of a
+/// positional [`delegated_handle`]. Obtain one via [`bootstrap`].
+pub struct Bootstrap {
+    _private: (),
+}
+
+/// Access this process's [`Bootstrap`] namespace (see [`Bootstrap::get`]).
+#[must_use]
+pub fn bootstrap() -> Bootstrap {
+    Bootstrap { _private: () }
+}
+
+impl Bootstrap {
+    /// Resolve role `name` to the capability a parent satisfied for it, wrapped as
+    /// `T`. `None` if the program declared no such slot, or the requested type `T`
+    /// doesn't match the slot's declared object kind — asking for the wrong type
+    /// isn't authority either.
+    #[must_use]
+    pub fn get<T: BootstrapCap>(&self, name: &str) -> Option<T> {
+        let index = hitch::resolve_slot(registered_slots(), name, T::OBJECT).ok()?;
+        Some(T::from_raw_handle(delegated_handle(index)))
+    }
+}
+
+/// A capability type reachable through [`Bootstrap::get`]: its object kind (matched
+/// against the declared slot) and how to wrap the resolved raw handle.
+pub trait BootstrapCap {
+    /// The `object_kind` this capability wraps.
+    const OBJECT: u8;
+    /// Wrap the resolved raw handle.
+    fn from_raw_handle(handle: usize) -> Self;
+}
+
+impl BootstrapCap for Endpoint {
+    const OBJECT: u8 = snitchos_abi::object_kind::ENDPOINT as u8;
+    fn from_raw_handle(handle: usize) -> Self {
+        Endpoint::from_raw_handle(handle)
+    }
+}
+
+impl BootstrapCap for Tracer {
+    const OBJECT: u8 = snitchos_abi::object_kind::SPAN_SINK as u8;
+    fn from_raw_handle(handle: usize) -> Self {
+        Tracer::from_raw_handle(handle)
+    }
+}
+
+impl BootstrapCap for TelemetrySink {
+    const OBJECT: u8 = snitchos_abi::object_kind::TELEMETRY_SINK as u8;
+    fn from_raw_handle(handle: usize) -> Self {
+        TelemetrySink::from_raw_handle(handle)
+    }
 }
 
 /// Spawn program `program_id` (an index into the kernel's spawnable registry) as

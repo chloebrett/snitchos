@@ -28,6 +28,7 @@ graph LR
     xtask["xtask"]
     collector --> protocol
     diagram --> protocol
+    diagram --> snitchos_abi
     fs --> fs_core
     fs --> fs_proto
     fs --> ramfs
@@ -50,10 +51,12 @@ graph LR
     kernel --> snitchos_abi
     kernel_core --> protocol
     kernel_core --> snitchos_abi
+    protocol --> snitchos_abi
     ramfs --> fs_core
     snemu --> protocol
     snitchos_abi --> hitch_pod
     snitchos_std --> snitchos_user
+    snitchos_user --> hitch
     snitchos_user --> snitchos_abi
     snitchos_user --> snitchos_user_macros
     stitch --> hitch

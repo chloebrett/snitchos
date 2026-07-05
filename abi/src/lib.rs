@@ -373,13 +373,20 @@ pub fn pack_name(name: &str) -> [u8; CAP_NAME_LEN] {
 }
 
 impl CapDesc {
-    /// The object name as a string — the UTF-8 prefix before the first NUL (names
-    /// are NUL-padded by [`pack_name`]). Empty if the object is unnamed.
+    /// The object name as a string (see [`name_str`]).
     #[must_use]
     pub fn name_str(&self) -> &str {
-        let end = self.name.iter().position(|&b| b == 0).unwrap_or(self.name.len());
-        core::str::from_utf8(&self.name[..end]).unwrap_or("")
+        name_str(&self.name)
     }
+}
+
+/// A NUL-padded name buffer as a string — the UTF-8 prefix before the first NUL
+/// ([`pack_name`] NUL-pads). Empty if unnamed. Shared by [`CapDesc`] and the
+/// `CapEvent` wire frame, which carry an object name the same way.
+#[must_use]
+pub fn name_str(name: &[u8]) -> &str {
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    core::str::from_utf8(&name[..end]).unwrap_or("")
 }
 
 /// The number of inline `u64` words a single IPC message carries. The single

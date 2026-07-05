@@ -43,6 +43,8 @@ pub enum OwnedFrame {
         badge: u64,
         t: u64,
         hart_id: u8,
+        /// The object's name, NUL-padded (see [`snitchos_abi::name_str`]).
+        name: [u8; snitchos_abi::CAP_NAME_LEN],
     },
     SyscallRefused { syscall: u8, reason: RefusalReason, task_id: u32, t: u64, hart_id: u8 },
     Log { msg: String, task_id: u32, t: u64, hart_id: u8 },
@@ -83,8 +85,8 @@ impl OwnedFrame {
             Frame::HartRegister { id, mhartid, role } => {
                 OwnedFrame::HartRegister { id, mhartid, role }
             }
-            Frame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, badge, t, hart_id } => {
-                OwnedFrame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, badge, t, hart_id }
+            Frame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, badge, t, hart_id, name } => {
+                OwnedFrame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, badge, t, hart_id, name }
             }
             Frame::SyscallRefused { syscall, reason, task_id, t, hart_id } => {
                 OwnedFrame::SyscallRefused { syscall, reason, task_id, t, hart_id }
@@ -203,6 +205,7 @@ mod tests {
             badge: 0xCAFE,
             t: 7777,
             hart_id: 1,
+            name: snitchos_abi::pack_name("fs"),
         };
         let owned = OwnedFrame::from_borrowed(&f);
         assert_eq!(
@@ -217,8 +220,12 @@ mod tests {
                 badge: 0xCAFE,
                 t: 7777,
                 hart_id: 1,
+                name: snitchos_abi::pack_name("fs"),
             },
         );
+        // The object name must survive too, or the host loses the named tree.
+        let OwnedFrame::CapEvent { name, .. } = owned else { panic!("a CapEvent") };
+        assert_eq!(snitchos_abi::name_str(&name), "fs");
     }
 
     #[test]
@@ -240,7 +247,7 @@ mod tests {
             Frame::MetricRegister { name_id: StringId(0), kind: MetricKind::Counter, task_id: 0 },
             Frame::HartRegister { id: 0, mhartid: 0, role: crate::HartRole::Boot },
             Frame::Message { endpoint: 1, from: 2, to: 3, parent_span: SpanId(4), t: 5, hart_id: 0 },
-            Frame::CapEvent { kind: CapEventKind::Granted, cap_id: 1, parent_cap_id: 0, holder: 1, object: CapObject::Endpoint, rights: 0b0010, badge: 0, t: 1, hart_id: 0 },
+            Frame::CapEvent { kind: CapEventKind::Granted, cap_id: 1, parent_cap_id: 0, holder: 1, object: CapObject::Endpoint, rights: 0b0010, badge: 0, t: 1, hart_id: 0, name: [0; snitchos_abi::CAP_NAME_LEN] },
         ] {
             // Just exercising — that we get *some* OwnedFrame back
             // without panicking covers the variant.
@@ -277,6 +284,7 @@ mod tests {
             badge: 0,
             t: 123,
             hart_id: 0,
+            name: [0; snitchos_abi::CAP_NAME_LEN],
         };
         let mut buf = [0u8; 64];
         let encoded_len = postcard::to_slice(&frame, &mut buf).unwrap().len();

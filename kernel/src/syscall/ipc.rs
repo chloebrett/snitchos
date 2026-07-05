@@ -167,6 +167,7 @@ fn reply_handle_for(
         protocol::CapObject::Reply,
         Rights::NONE.bits(),
         0, // reply caps carry no badge
+        [0; snitchos_abi::CAP_NAME_LEN], // a reply cap names no object
     );
     u64::from(handle.raw())
 }
@@ -227,9 +228,9 @@ pub(super) fn handle_call(frame: &mut TrapFrame) {
             // revocable node, not a `parent_cap_id==0` orphan the wire misreports.
             let cap_id = crate::process::next_cap_id();
             let handle = proc.caps.lock().insert_with_id(cap, cap_id, reply.parent_cap_id);
-            let badge = match cap.object {
-                kernel_core::cap::Object::Endpoint { badge, .. } => badge,
-                _ => 0,
+            let (badge, name) = match cap.object {
+                kernel_core::cap::Object::Endpoint { id, badge } => (badge, crate::ipc::name_of(id)),
+                _ => (0, [0; snitchos_abi::CAP_NAME_LEN]),
             };
             crate::tracing::emit_cap_transferred(
                 cap_id,
@@ -238,6 +239,7 @@ pub(super) fn handle_call(frame: &mut TrapFrame) {
                 crate::user::cap_object_kind(cap.object),
                 cap.rights.bits(),
                 badge,
+                name,
             );
             u64::from(handle.raw())
         }
@@ -411,6 +413,7 @@ pub(super) fn handle_endpoint_create(frame: &mut TrapFrame) {
         crate::sched::current_task_id().0,
         protocol::CapObject::Endpoint,
         rights.bits(),
+        crate::ipc::name_of(id), // the name just created
     );
     frame.a0 = u64::from(handle.raw());
 }

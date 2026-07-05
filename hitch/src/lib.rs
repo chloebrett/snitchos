@@ -184,6 +184,37 @@ pub struct Slot {
     pub rights: u32,
 }
 
+/// Why a `#[entry(needs = …)]` slot lookup failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotError {
+    /// No slot declares that role name.
+    NotFound,
+    /// The role exists but its declared object kind differs from the requested one
+    /// — a program can't read a delegated slot as the wrong capability type.
+    WrongObject { declared: u8, wanted: u8 },
+}
+
+/// Resolve role `name` in a slot table (`(name, object-kind)` pairs, in
+/// declaration order) to its **index** — the handle offset the runtime turns into
+/// `delegated_handle(index)`. Errors if the role is absent
+/// ([`SlotError::NotFound`]) or its declared object kind differs from
+/// `want_object` ([`SlotError::WrongObject`]). Pure — the host-testable core of
+/// the runtime's `bootstrap().get::<T>(name)`.
+///
+/// # Errors
+/// See [`SlotError`].
+pub fn resolve_slot(slots: &[(&str, u8)], name: &str, want_object: u8) -> Result<usize, SlotError> {
+    let (index, &(_, declared)) = slots
+        .iter()
+        .enumerate()
+        .find(|(_, (n, _))| *n == name)
+        .ok_or(SlotError::NotFound)?;
+    if declared != want_object {
+        return Err(SlotError::WrongObject { declared, wanted: want_object });
+    }
+    Ok(index)
+}
+
 /// The const-constructible twin of [`TypeSchema`]: the same shape, but built from
 /// `&'static str` / `&'static [..]` so a type's shape can be an associated
 /// `const`. This is what `#[derive(Schema)]` emits, and what a manifest in a

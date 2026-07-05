@@ -474,7 +474,9 @@ pub fn stitch_hold_names_the_fs_endpoint(h: &mut View) -> Result<(), String> {
 /// `CapEvent::Revoked` carrying the same badge). Proves both shell verbs drive the
 /// real syscalls end-to-end, and each surfaces as its own `CapEvent` — least
 /// authority you can watch on the wire. The badge (`777`) ties the revoke to the
-/// exact cap the grant minted.
+/// exact cap the grant minted, and each `CapEvent` carries the endpoint's object
+/// **name** (`"fs"`) — so the host reconstructs a *named* derivation tree
+/// ("transferred the `fs` endpoint"; see `docs/capability-names-design.md`).
 pub fn stitch_grant_then_revoke_snitches_capevents(h: &mut View) -> Result<(), String> {
     use protocol::{CapEventKind, CapObject};
     const BADGE: u64 = 777;
@@ -483,24 +485,26 @@ pub fn stitch_grant_then_revoke_snitches_capevents(h: &mut View) -> Result<(), S
         .ok_or("stitch REPL never reached its boot self-test within 30s")?;
 
     // grant: mint a badged SEND cap derived from the MINT endpoint at handle 2.
+    // The Transferred event names the endpoint it derived from ("fs").
     h.send_input(b"grant(2, 777, \"SEND\")\n")
         .map_err(|e| format!("inject REPL input: {e}"))?;
     h.wait_for(SEC * 30, |f, _| {
-        matches!(f, OwnedFrame::CapEvent { kind: CapEventKind::Transferred, object: CapObject::Endpoint, badge, .. }
-            if *badge == BADGE)
+        matches!(f, OwnedFrame::CapEvent { kind: CapEventKind::Transferred, object: CapObject::Endpoint, badge, name, .. }
+            if *badge == BADGE && snitchos_abi::name_str(name) == "fs")
     })
     .ok_or(
-        "no CapEvent::Transferred{Endpoint, badge=777} within 30s — grant didn't mint on the metal",
+        "no CapEvent::Transferred{Endpoint, badge=777, name=fs} within 30s — grant didn't mint a named cap on the metal",
     )?;
 
-    // revoke: reclaim what handle 2 derived — the just-minted child.
+    // revoke: reclaim what handle 2 derived — the just-minted child, still named.
     h.send_input(b"revoke(2)\n")
         .map_err(|e| format!("inject REPL input: {e}"))?;
     h.wait_for(SEC * 30, |f, _| {
-        matches!(f, OwnedFrame::CapEvent { kind: CapEventKind::Revoked, badge, .. } if *badge == BADGE)
+        matches!(f, OwnedFrame::CapEvent { kind: CapEventKind::Revoked, badge, name, .. }
+            if *badge == BADGE && snitchos_abi::name_str(name) == "fs")
     })
     .ok_or(
-        "no CapEvent::Revoked{badge=777} within 30s — revoke didn't reclaim the granted cap",
+        "no CapEvent::Revoked{badge=777, name=fs} within 30s — revoke didn't reclaim the named cap",
     )?;
 
     Ok(())

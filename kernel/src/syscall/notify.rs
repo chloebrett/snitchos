@@ -40,6 +40,7 @@ pub(super) fn handle_notify_create(frame: &mut TrapFrame) {
         crate::sched::current_task_id().0,
         protocol::CapObject::Notification,
         rights.bits(),
+        [0; snitchos_abi::CAP_NAME_LEN], // notifications carry no name
     );
     frame.a0 = u64::from(handle.raw());
 }

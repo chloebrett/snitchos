@@ -14,6 +14,9 @@ std = []
 [dependencies]
 serde = { version = "1", default-features = false, features = ["derive"] }
 postcard = { version = "1", default-features = false }
+# For `CAP_NAME_LEN` + `name_str` — the `CapEvent` frame carries an object name
+# the same way `CapDesc` does. `no_std`, no transitive deps; leaf crate, no cycle.
+snitchos-abi = { path = "../abi" }
 
 [lints]
 workspace = true

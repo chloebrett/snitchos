@@ -11,6 +11,10 @@ publish = false
 
 [dependencies]
 snitchos-abi = { path = "../../abi" }
+# The manifest value model — used here only for `resolve_slot` (the pure
+# name→index + object-kind lookup behind `bootstrap().get`). `default-features =
+# false` skips the host-only `derive` proc-macro; we need just the plain function.
+hitch = { path = "../../hitch", default-features = false }
 # The `#[entry]` attribute macro, re-exported as `snitchos_user::entry`. A
 # separate crate because attribute macros can only live in a `proc-macro` crate;
 # it builds for the host and never enters the riscv program image.

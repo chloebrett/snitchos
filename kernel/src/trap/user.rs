@@ -751,7 +751,13 @@ fn run_loaded_with_caps(
             tracing::emit_metric(id, 1);
         }
         let cap_id = process.caps.lock().cap_id_of(handle).unwrap_or(0);
-        tracing::emit_cap_granted(cap_id, holder, object, kernel_core::cap::Rights::EMIT.bits());
+        tracing::emit_cap_granted(
+            cap_id,
+            holder,
+            object,
+            kernel_core::cap::Rights::EMIT.bits(),
+            [0; snitchos_abi::CAP_NAME_LEN], // bootstrap telemetry/span carry no name
+        );
     }
 
     // Grant the parent-delegated caps (a `Spawn`'s payload) on top of bootstrap.
@@ -763,9 +769,9 @@ fn run_loaded_with_caps(
         if let Some(id) = cap_grants_metric_id() {
             tracing::emit_metric(id, 1);
         }
-        let badge = match cap.object {
-            kernel_core::cap::Object::Endpoint { badge, .. } => badge,
-            _ => 0,
+        let (badge, name) = match cap.object {
+            kernel_core::cap::Object::Endpoint { id, badge } => (badge, crate::ipc::name_of(id)),
+            _ => (0, [0; snitchos_abi::CAP_NAME_LEN]),
         };
         tracing::emit_cap_transferred(
             cap_id,
@@ -774,6 +780,7 @@ fn run_loaded_with_caps(
             cap_object_kind(cap.object),
             cap.rights.bits(),
             badge,
+            name,
         );
     }
 
@@ -866,8 +873,22 @@ fn run_ipc(
         if let Some(id) = cap_grants_metric_id() {
             tracing::emit_metric(id, 1);
         }
-        let cap_id = process.caps.lock().cap_id_of(handle).unwrap_or(0);
-        tracing::emit_cap_granted(cap_id, holder, object, rights_bits);
+        // Capture cap_id + (for an endpoint) its id under one lock; resolve the
+        // name after dropping caps, so we never nest the ENDPOINTS lock inside it.
+        let (cap_id, ep_id) = {
+            let caps = process.caps.lock();
+            let cap_id = caps.cap_id_of(handle).unwrap_or(0);
+            let ep_id = match caps.resolve(handle) {
+                Ok(kernel_core::cap::Capability {
+                    object: kernel_core::cap::Object::Endpoint { id, .. },
+                    ..
+                }) => Some(*id),
+                _ => None,
+            };
+            (cap_id, ep_id)
+        };
+        let name = ep_id.map_or([0; snitchos_abi::CAP_NAME_LEN], crate::ipc::name_of);
+        tracing::emit_cap_granted(cap_id, holder, object, rights_bits, name);
     }
 
     let process_ptr = core::ptr::addr_of!(process).cast_mut();

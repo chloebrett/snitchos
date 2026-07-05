@@ -18,6 +18,7 @@ extern crate alloc;
 pub mod clock;
 pub mod console;
 pub mod notify;
+pub mod panic_log;
 pub mod reap;
 pub mod sched;
 pub mod stack;
