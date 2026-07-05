@@ -424,6 +424,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::ManifestIface)
         | Some(WorkloadKind::Probe)
         | Some(WorkloadKind::StackGuard)
+        | Some(WorkloadKind::PanicNow)
         | Some(WorkloadKind::StackOverflowDeep)
         | Some(WorkloadKind::BootStackGuard)
         | Some(WorkloadKind::SpawnDemo)
@@ -587,6 +588,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // hart 0; the trap handler recognizes the guard region, snitches + panics.
         Some(WorkloadKind::StackGuard) => {
             let _ = sched::spawn("stack_guard_smoke", storms::stack_guard::smoke_body);
+        }
+        // Minimal crash: a task that panics immediately (no guard page). Isolates
+        // the stack-guard family's snemu-vs-QEMU `kernel.heartbeat` divergence.
+        Some(WorkloadKind::PanicNow) => {
+            let _ = sched::spawn("panic_now", storms::panic_now::body);
         }
         // Tier-B deep-overflow smoke: a kernel task recurses into its guard page;
         // the fault handler (on the per-hart exception stack) reports cleanly.

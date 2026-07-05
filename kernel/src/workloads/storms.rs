@@ -32,6 +32,18 @@ fn fence_via_uart_lsr() {
     unsafe { core::ptr::read_volatile(lsr as *const u8) };
 }
 
+pub mod panic_now {
+    //! Minimal crash smoke (`workload=panic-now`): a kernel task calls `panic!()`
+    //! immediately on its first run — no guard page, no MMU, no fault. Isolates
+    //! whether the stack-guard family's snemu-vs-QEMU divergence (only-snemu
+    //! `kernel.heartbeat`) is really about the crash *timing*, not guard pages.
+
+    /// Entry for the panic task. Never returns: the `panic!` halts the kernel.
+    pub extern "C" fn body() -> ! {
+        panic!("panic-now workload: deliberate immediate panic");
+    }
+}
+
 pub mod stack_guard {
     //! Kernel-stack guard Tier-B smoke (`workload=stack-guard`): a kernel task
     //! deliberately stores into its *own* unmapped guard page from a context with

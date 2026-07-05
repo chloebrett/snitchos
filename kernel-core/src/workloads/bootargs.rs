@@ -191,6 +191,13 @@ pub enum WorkloadKind {
     /// fault→name→halt path deterministically (no deep-overflow double-fault).
     /// `itest-workloads` only.
     StackGuard,
+    /// Minimal crash workload: a kernel task calls `panic!()` immediately on its
+    /// first run — no guard page, no MMU, no fault. Exists purely to isolate the
+    /// snemu-vs-QEMU divergence the stack-guard family shows (only-snemu
+    /// `kernel.heartbeat`): if a bare panic reproduces it, the divergence is a
+    /// crash-vs-heartbeat *timing* artifact, not anything about guard pages.
+    /// `itest-workloads` only.
+    PanicNow,
     /// Kernel-stack guard Tier-B *deep* smoke: a kernel task recurses until it
     /// genuinely overflows its stack into the guard page. Proves the **per-hart
     /// exception stack** — the fault handler builds its frame on a clean stack and
@@ -283,6 +290,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "manifest-iface" => Some(WorkloadKind::ManifestIface),
             "probe" => Some(WorkloadKind::Probe),
             "stack-guard" => Some(WorkloadKind::StackGuard),
+            "panic-now" => Some(WorkloadKind::PanicNow),
             "stack-overflow-deep" => Some(WorkloadKind::StackOverflowDeep),
             "boot-stack-guard" => Some(WorkloadKind::BootStackGuard),
             "spawn-demo" => Some(WorkloadKind::SpawnDemo),
@@ -453,6 +461,11 @@ mod tests {
     #[test]
     fn selects_stack_guard() {
         assert_eq!(select("workload=stack-guard"), Some(WorkloadKind::StackGuard));
+    }
+
+    #[test]
+    fn selects_panic_now() {
+        assert_eq!(select("workload=panic-now"), Some(WorkloadKind::PanicNow));
     }
 
     #[test]

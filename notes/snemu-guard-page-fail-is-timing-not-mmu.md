@@ -70,6 +70,39 @@ fidelity, orthogonal to the guard MMU/scheduler, and it doesn't drive the FAIL
 modeling a reset-on-panic in snemu later so halting workloads converge to the same
 terminal state — but it's cosmetic for the oracle today.
 
+## CONFIRMED via minimal repro (`panic-now`)
+
+Built the smallest possible workload to test the thesis: `workload=panic-now` —
+a kernel task that calls `panic!()` immediately on first run, **no guard page, no
+MMU, no fault** (`kernel/src/workloads/storms.rs::panic_now`, dispatched in
+`kmain`, swept by the oracle). `cargo xtask snemu-diff --workload panic-now`:
+
+```
+snemu 8297 frames (step limit 150M), qemu 77920 frames
+first divergence at frame 171: ContextSwitch{from:3,to:4,Yield,hart 1}  (same wobble)
+vocabulary — 83 shared, 0 only-qemu, 1 only-snemu: ["kernel.heartbeat"]
+FAIL
+```
+
+**Byte-for-byte the same signature as `stack-guard`** (8297 vs 8299 frames, same
+frame-171 divergence, same only-snemu name). So the guard page / MMU / scheduler
+are conclusively *not* involved — a bare panic reproduces the whole FAIL. The
+minimal form is: *a kernel that crashes at a fixed post-boot point emits N>0
+heartbeats before dying under snemu's instruction-clock, 0 under QEMU's
+wall-clock.*
+
+Quantified: boot-to-crash ≈ 40M instructions. snemu's `rdtime = instret` + the
+DTB's 10 MHz means a heartbeat period ("1 second") = 10M instructions, so snemu
+reads boot as ~4 s → ~4 heartbeats. QEMU runs the same 40M instructions in ~0.2 s
+real; its first heartbeat isn't due until 1 s → 0 heartbeats.
+
+**Corollary — reset-on-panic would NOT fix it.** Even within a *single* boot,
+snemu's first heartbeat (10M instr) precedes the crash (40M instr), so resetting
+after the crash doesn't erase the heartbeats already emitted before it. The
+earlier "model reset-on-panic so terminal streams converge" idea is dead as a fix
+for this FAIL (it's still a real fidelity nicety, just not the lever here). The
+only real fix is oracle-side.
+
 ## What should change
 
 1. **Oracle: stop failing halting workloads on a benign name.** Options, cheapest
@@ -81,7 +114,9 @@ terminal state — but it's cosmetic for the oracle today.
    - Or treat an only-snemu name that appears in QEMU's vocabulary on *some other*
      workload as non-invented (the kernel demonstrably emits `kernel.heartbeat`;
      it isn't fabricated telemetry).
-2. **(Optional) snemu reset-on-panic**, so the terminal frame streams converge.
+2. **(Optional, unrelated) snemu reset-on-panic** — a fidelity nicety so a
+   panicked kernel stops like QEMU's does, but it does **not** fix this FAIL (see
+   the corollary above: snemu heartbeats *before* the crash regardless of reset).
 
 ## Honesty trail — how I got it wrong twice before landing here
 

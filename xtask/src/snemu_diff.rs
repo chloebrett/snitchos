@@ -317,7 +317,7 @@ const WORKLOADS: &[&str] = &[
     "heap-grow", "frame-oom", "heap-oom", "spawn-storm", "ipi-pong", "shootdown-storm",
     "mutex-storm", "virtio-storm", "tlb-shootdown", "ping-pong", "userspace", "userspace-fault",
     "userspace-bad-ptr", "userspace-span-flood", "user-hog", "syscall-hog", "console-echo",
-    "spawn-image", "manifest-iface", "probe", "stack-guard", "stack-overflow-deep",
+    "spawn-image", "manifest-iface", "probe", "panic-now", "stack-guard", "stack-overflow-deep",
     "boot-stack-guard", "spawn-demo", "spawn-reap", "wait-any", "endpoint-create", "ipc",
     "ipc-rpc", "badge-mint", "badge-handout", "fs", "notify-smoke", "stitch-repl", "stitch-fs",
 ];
