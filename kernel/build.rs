@@ -132,6 +132,9 @@ fn build_and_embed_user(kernel_dir: &str) {
     // the FS: its `.snitch.iface` note (extracted to a `user.iface` xattr) declares
     // the `needs` the satisfier matches, and its ELF is what `SpawnImage` loads.
     copy_if_different(&format!("{bin_dir}/fs-probe"), &ws.join("fs-image/bin/fs-probe"));
+    // `fs-hungry` is the *unsatisfiable* child (needs a cap the satisfier lacks) —
+    // the satisfier reads its needs, refuses, and never `SpawnImage`s it.
+    copy_if_different(&format!("{bin_dir}/fs-hungry"), &ws.join("fs-image/bin/fs-hungry"));
     build(&["fs"]);
 
     for (bin, env_var) in USER_PROGRAMS {

@@ -16,11 +16,8 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use fs_proto::{FileRights, Op, Request, Response, UserBuf, XattrKey};
-use hitch::{CapView, Grant, decode_manifest, satisfy};
+use hitch::{CapView, Grant, Unsatisfied, decode_manifest, satisfy};
 use snitchos_user::{Endpoint, endpoint, entry, exit, object_kind, rights, spawn_image, tracer};
-
-/// The child the satisfier launches (an ELF + its `user.iface` xattr on the FS).
-const CHILD: &str = "bin/fs-probe";
 
 /// Path-walk the FS to a file cap (attach → `Lookup` each `/`-component).
 fn cap_for(path: &str) -> Option<Endpoint> {
@@ -79,25 +76,27 @@ fn read_all(file: Endpoint) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-#[entry]
-fn main() {
+/// Satisfy `child`'s declared needs from `have` and `SpawnImage` it — or, if a
+/// required slot can't be matched, **refuse** (no partial spawn), snitching a
+/// `satisfy.refused.<role>` span. Each satisfied slot is bracketed in a
+/// `satisfy.<role>` span (the named grant record).
+fn process(child: &str, have: &[CapView]) {
     // The child's file cap — its manifest xattr and its ELF both live here.
-    let Some(file) = cap_for(CHILD) else { exit() };
-    let Some(iface) = read_iface(file) else { exit() };
-    let Ok(manifest) = decode_manifest(&iface) else { exit() };
-
-    // The caps *we* hold to satisfy from: our FS endpoint (a bare `SEND` cap
-    // delivered at the startup endpoint). A real satisfier would enumerate its
-    // table via `CapList`; here we know our one bootstrap cap.
-    let have = [CapView {
-        object: object_kind::ENDPOINT as u8,
-        rights: rights::SEND,
-        handle: endpoint().raw_handle() as u32,
-    }];
+    let Some(file) = cap_for(child) else { return };
+    let Some(iface) = read_iface(file) else { return };
+    let Ok(manifest) = decode_manifest(&iface) else { return };
 
     // Match the child's declared needs to our caps — the generic, data-driven
-    // delegation. Unsatisfiable → refuse (no partial spawn); handled in 6b-2.
-    let Ok(plan) = satisfy(&manifest.needs, &have) else { exit() };
+    // delegation. All-or-nothing: an unsatisfiable required slot refuses the whole
+    // spawn, snitching the role rather than granting a partial set.
+    let plan = match satisfy(&manifest.needs, have) {
+        Ok(plan) => plan,
+        Err(Unsatisfied { slot }) => {
+            let role = manifest.needs.get(slot).map_or("?", |s| s.name.as_str());
+            let _refused = tracer().span(&format!("satisfy.refused.{role}"));
+            return;
+        }
+    };
 
     // Assemble the delegated-handle array in slot order, bracketing each grant in
     // a `satisfy.<role>` span — the named grant record.
@@ -109,7 +108,7 @@ fn main() {
             Grant::Mint { from, rights } => {
                 match Endpoint::from_raw_handle(*from as usize).mint_badged(0, *rights) {
                     Ok(h) => h as u32,
-                    Err(_) => exit(),
+                    Err(_) => return,
                 }
             }
         };
@@ -117,7 +116,24 @@ fn main() {
     }
 
     // Read the child ELF and spawn it with exactly the satisfied handles.
-    let Some(elf) = read_all(file) else { exit() };
+    let Some(elf) = read_all(file) else { return };
     let _ = spawn_image(&elf, &handles);
+}
+
+#[entry]
+fn main() {
+    // The caps *we* hold to satisfy from: our FS endpoint (a bare `SEND` cap
+    // delivered at the startup endpoint). A real satisfier would enumerate its
+    // table via `CapList`; here we know our one bootstrap cap.
+    let have = [CapView {
+        object: object_kind::ENDPOINT as u8,
+        rights: rights::SEND,
+        handle: endpoint().raw_handle() as u32,
+    }];
+
+    // Satisfiable: `fs-probe` needs the `SEND` cap we hold → grant + spawn.
+    process("bin/fs-probe", &have);
+    // Unsatisfiable: `fs-hungry` needs `RECV` we don't hold → refuse (snitched).
+    process("bin/fs-hungry", &have);
     exit();
 }

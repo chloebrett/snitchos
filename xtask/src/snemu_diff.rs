@@ -413,6 +413,23 @@ fn compare(
 }
 
 /// Boot the kernel under snemu (optionally selecting `workload`) and return the
+/// decoded telemetry frames after `max_steps`. Used by `diagram trace`/`switches`,
+/// whose folds collapse by name/task so a fixed budget captures the structure.
+pub(crate) fn collect_frames(
+    workload: Option<&str>,
+    max_steps: u64,
+) -> Result<Vec<OwnedFrame>, String> {
+    let (kernel, dtb_base) = prepare(workload.is_some())?;
+    let dtb = match workload {
+        Some(w) => snemu::dtb::set_bootargs(&dtb_base, &format!("workload={w}"))
+            .ok_or("DTB patch failed")?,
+        None => dtb_base,
+    };
+    let (frames, _stop, _timing) = collect_snemu(&kernel, &dtb, max_steps)?;
+    Ok(frames)
+}
+
+/// Boot the kernel under snemu (optionally selecting `workload`) and return the
 /// decoded telemetry frames, stopping early once `CapEvent` emission goes
 /// quiescent — `quiescence_window` steps elapse with no new cap event after at
 /// least one is seen — or at `max_steps`. Reused by `diagram caps`: init emits

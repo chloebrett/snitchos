@@ -246,6 +246,7 @@ catalog! {
     wfi "spawn-image-loads-from-fs"       scenarios::spawn_image_loads_from_fs      [userspace, spawn, fs] {"spawn-image"};
     wfi "manifest-iface-served"           scenarios::manifest_iface_served          [userspace, fs] {"manifest-iface"};
     wfi "manifest-satisfy-grants-by-name" scenarios::manifest_satisfy_grants_by_name [userspace, fs] {"manifest-satisfy"};
+    wfi "manifest-satisfy-refuses-unsatisfiable" scenarios::manifest_satisfy_refuses_unsatisfiable [userspace, fs] {"manifest-satisfy"};
     wfi "stitch-reads-a-line"             scenarios::stitch_reads_a_line            [userspace, stitch] {"stitch-repl"};
     wfi "stitch-print-writes-to-console"  scenarios::stitch_print_writes_to_console [userspace, stitch] {"stitch-repl"};
     wfi "stitch-hold-lists-caps"          scenarios::stitch_hold_lists_caps         [userspace, stitch] {"stitch-repl"};

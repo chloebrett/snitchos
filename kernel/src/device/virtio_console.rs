@@ -295,19 +295,38 @@ pub fn try_send_panic(bytes: &[u8]) -> bool {
     let Some(handle) = CONSOLE.get() else {
         return false;
     };
-    let Some(mut staging) = handle.try_lock() else {
-        return false;
-    };
-    let base = staging.base;
-    // SAFETY: `try_lock` succeeded, so this hart is the exclusive holder — the
-    // sole writer to `staging.buf` and sole driver of `TX_QUEUE` for this
-    // critical section. `staged` points into the `.bss`-resident buffer, so
-    // `transmit`'s `va_to_pa` is correct.
-    kernel_core::virtio::stage_and_emit(&mut staging.buf, bytes, |staged| unsafe {
-        transmit(base, staged);
-    });
-    true
+    // Retry `try_lock` rather than a single shot: a *peer* hart emitting telemetry
+    // holds this lock for a full device round-trip (the `transmit` spin), which
+    // under load is most of the time — so one `try_lock` usually loses and drops
+    // the panic frame. Retrying across the peer's release windows reliably catches
+    // a gap. Bounded (never a blocking `lock()`) so that if *this* hart panicked
+    // while already holding the lock, we give up instead of self-deadlocking —
+    // the panic message is already on the emergency UART regardless.
+    for _ in 0..PANIC_SEND_TRY_LOCK_SPINS {
+        let Some(mut staging) = handle.try_lock() else {
+            core::hint::spin_loop();
+            continue;
+        };
+        let base = staging.base;
+        // SAFETY: `try_lock` succeeded, so this hart is the exclusive holder — the
+        // sole writer to `staging.buf` and sole driver of `TX_QUEUE` for this
+        // critical section. `staged` points into the `.bss`-resident buffer, so
+        // `transmit`'s `va_to_pa` is correct.
+        kernel_core::virtio::stage_and_emit(&mut staging.buf, bytes, |staged| unsafe {
+            transmit(base, staged);
+        });
+        return true;
+    }
+    false
 }
+
+/// Bound on the panic send's `try_lock` retries. Large enough to outlast a busy
+/// peer hart's telemetry (many device round-trips, even under heavy host load),
+/// so the panic frame reliably lands; finite so a self-panic-while-holding-the-
+/// lock gives up (~a few hundred ms of spin, on a kernel that's already halting)
+/// instead of hanging. Best-effort, not a guarantee — the UART message is the
+/// backstop.
+const PANIC_SEND_TRY_LOCK_SPINS: u32 = 200_000_000;
 
 /// Drive the virtio-mmio handshake on a discovered console device up
 /// through `FEATURES_OK`. After this returns `Ok`, the next step is

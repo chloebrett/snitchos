@@ -1,8 +1,15 @@
 # Plan: Manifest v2 — typed, named startup ABI (redesign #2, thin build)
 
 **Branch**: feat/manifest-v2-thin
-**Status**: Planned — not started.
-**Design**: [docs/manifest-design.md](../docs/manifest-design.md). This plan builds
+**Status (2026-07-05): SHIPPED + verified.** All increments (1, 2, 3, 4, 5, 6a,
+6b-1, 6b-2) landed and are green; the pure cores (`resolve_slot`, `satisfy`, the
+note codec) are mutation-clean. Programs declare authority by role, a satisfier
+grants by matching (`hitch::satisfy`), delegation is data-driven + named on the
+wire (`satisfy.<role>` spans), and children resolve by name (`bootstrap().get`) —
+no new kernel mechanism (manifest-as-index). Archived here as a completion record.
+Deferred items (rich `Slot` fields, explicit `BootInfo` page, other consumers)
+live in [docs/manifest-design.md](../../docs/manifest-design.md) § Deferred.
+**Design**: [docs/manifest-design.md](../../docs/manifest-design.md). This plan builds
 the **thin** version only (coda Tier-3 #4): `Slot { name, object, rights }`,
 delivery by *manifest-as-index* (no new kernel mechanism), a userspace satisfier.
 The rich fields (`protocol`, `optional`, `constraints`) and the explicit `BootInfo`
