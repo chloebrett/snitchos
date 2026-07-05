@@ -118,11 +118,15 @@ writes `docs/generated/caps.md` (committed illustrative snapshot, **not** gated)
 label by the cap's on-wire `name` (`snitchos_abi::name_str`) when present,
 falling back to the object kind — so endpoints read `fs` not `Endpoint`;
 (2) one-shot `Reply` caps (minted `parent_cap_id: 0`, unparented leaves) are
-dropped as derivation noise, taking the real `init` boot from 35 nodes to 21.
-**Speed:** the snemu boot stops on cap-event *quiescence* — `CapQuiescence`
-(pure, tested) trips once ≥1 cap is seen and a step window elapses with no new
-one; a real boot stops ~54M steps in instead of the 150M ceiling.
-Candidate follow-ups: style roots distinctly, annotate `Revoked`.
+dropped as derivation noise, taking the real `init` boot from 35 nodes to 21;
+(3) genuinely-root grants (`parent_cap_id == 0`) carry a `root` style class
+(a `Graph` gained per-node classes + a `classDef`/DOT-attr registry, so roots
+look styled in both mermaid and the SVG); (4) caps with a `Revoked` event get a
+`⊘ revoked` label suffix (confirmed live on the `endpoint-create` workload:
+`#4 ep-maker h4 ⊘ revoked`). **Speed:** the snemu boot stops on cap-event
+*quiescence* — `CapQuiescence` (pure, tested) trips once ≥1 cap is seen and a
+step window elapses with no new one; a real boot stops ~54M steps in instead of
+the 150M ceiling.
 
 ---
 

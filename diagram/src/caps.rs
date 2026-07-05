@@ -3,8 +3,8 @@
 //! the authority graph the running system snitches about itself. Pure: xtask
 //! sources the frames (a capture, or a fresh snemu boot) and hands them here.
 
-use protocol::CapObject;
 use protocol::stream::OwnedFrame;
+use protocol::{CapEventKind, CapObject};
 
 use crate::model::{Direction, Graph};
 
@@ -55,6 +55,20 @@ impl CapQuiescence {
 /// are ignored. Top-down layout so roots sit at the top.
 pub fn derivation_tree(frames: &[OwnedFrame]) -> Graph {
     let mut graph = Graph::new(Direction::TopDown);
+    graph.define_class(
+        "root",
+        "fill:#dae8fc,stroke:#6c8ebf",
+        &[("style", "filled"), ("fillcolor", "#dae8fc")],
+    );
+
+    let revoked: std::collections::HashSet<u64> = frames
+        .iter()
+        .filter_map(|f| match f {
+            OwnedFrame::CapEvent { kind: CapEventKind::Revoked, cap_id, .. } => Some(*cap_id),
+            _ => None,
+        })
+        .collect();
+
     let mut nodes_seen = std::collections::HashSet::new();
     let mut edges_seen = std::collections::HashSet::new();
     for frame in frames {
@@ -69,8 +83,17 @@ pub fn derivation_tree(frames: &[OwnedFrame]) -> Graph {
         if nodes_seen.insert(*cap_id) {
             let named = snitchos_abi::name_str(name);
             let descriptor = if named.is_empty() { object_name(*object) } else { named };
-            let label = format!("#{cap_id} {descriptor} h{holder}");
-            graph.node(&format!("cap{cap_id}"), &label);
+            let mut label = format!("#{cap_id} {descriptor} h{holder}");
+            if revoked.contains(cap_id) {
+                label.push_str(" ⊘ revoked");
+            }
+            let id = format!("cap{cap_id}");
+            // parent_cap_id 0 marks a genuinely-root grant — style it distinctly.
+            if *parent_cap_id == 0 {
+                graph.node_classed(&id, &label, &["root"]);
+            } else {
+                graph.node(&id, &label);
+            }
         }
         if *parent_cap_id != 0 && edges_seen.insert((*parent_cap_id, *cap_id)) {
             graph.edge(&format!("cap{parent_cap_id}"), &format!("cap{cap_id}"));
@@ -137,6 +160,8 @@ mod tests {
         let expected = "\
 graph TD
     cap1[\"#1 fs.root h6\"]
+    classDef root fill:#dae8fc,stroke:#6c8ebf;
+    class cap1 root;
 ";
         assert_eq!(derivation_tree(&[named]).to_mermaid(), expected);
     }
@@ -152,8 +177,32 @@ graph TD
         let expected = "\
 graph TD
     cap1[\"#1 Endpoint h6\"]
+    classDef root fill:#dae8fc,stroke:#6c8ebf;
+    class cap1 root;
 ";
         assert_eq!(derivation_tree(&frames).to_mermaid(), expected);
+    }
+
+    #[test]
+    fn marks_root_grants_with_the_root_class() {
+        let frames = vec![
+            cap_event(CapEventKind::Granted, 1, 0, 4, CapObject::Endpoint),
+            cap_event(CapEventKind::Transferred, 2, 1, 6, CapObject::Endpoint),
+        ];
+        let mermaid = derivation_tree(&frames).to_mermaid();
+        assert!(mermaid.contains("classDef root"), "defines the root class");
+        assert!(mermaid.contains("class cap1 root;"), "cap1 (parent 0) styled as root");
+        assert!(!mermaid.contains("class cap2 root"), "cap2 (derived) is not a root");
+    }
+
+    #[test]
+    fn annotates_revoked_caps_in_the_label() {
+        let frames = vec![
+            cap_event(CapEventKind::Granted, 1, 0, 4, CapObject::Endpoint),
+            cap_event(CapEventKind::Revoked, 1, 0, 4, CapObject::Endpoint),
+        ];
+        let mermaid = derivation_tree(&frames).to_mermaid();
+        assert!(mermaid.contains("#1 Endpoint h4 ⊘ revoked"), "revoked cap is annotated");
     }
 
     #[test]
@@ -168,6 +217,8 @@ graph TD
     cap1[\"#1 Endpoint h1\"]
     cap2[\"#2 Endpoint h2\"]
     cap1 --> cap2
+    classDef root fill:#dae8fc,stroke:#6c8ebf;
+    class cap1 root;
 ";
         assert_eq!(derivation_tree(&frames).to_mermaid(), expected);
     }

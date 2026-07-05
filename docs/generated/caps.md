@@ -37,4 +37,6 @@ graph TD
     cap27 --> cap28
     cap10 --> cap31
     cap31 --> cap32
+    classDef root fill:#dae8fc,stroke:#6c8ebf;
+    class cap1,cap2,cap3,cap4,cap6,cap8,cap9,cap11,cap12 root;
 ```
