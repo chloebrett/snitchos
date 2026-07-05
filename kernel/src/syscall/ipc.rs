@@ -393,11 +393,14 @@ pub(super) fn handle_endpoint_create(frame: &mut TrapFrame) {
         super::refuse(frame, sc, RefusalReason::BadUserRange);
         return;
     };
-    let Ok(name) = core::str::from_utf8(name_bytes) else {
+    // A boundary-split name (the fixed-size read cut a codepoint at byte 24)
+    // truncates on the last char boundary per the design; only a genuinely invalid
+    // byte refuses. Plain `from_utf8` would wrongly refuse the split case.
+    let Some(packed) = snitchos_abi::pack_name_bytes(name_bytes) else {
         super::refuse(frame, sc, RefusalReason::BadUtf8);
         return;
     };
-    let id = crate::ipc::create(snitchos_abi::pack_name(name));
+    let id = crate::ipc::create(packed);
     let rights = Rights::RECV | Rights::MINT;
     // Stamp the holding with its global cap id — the derivation-tree root for this
     // endpoint — so the wire `cap_id` matches and a later delegation links to it.

@@ -33,7 +33,10 @@ pub mod stream;
 ///     Prometheus series rather than colliding into one family.
 ///   - 5: appended `RefusalReason::CapNotDelegable` (refused delegation of a
 ///     `Once`/affine cap). Additive; old collectors can't decode the new reason.
-pub const PROTOCOL_VERSION: u8 = 5;
+///   - 6: appended `name` to `Frame::CapEvent` (the object's human name, for the
+///     host-reconstructed *named* derivation tree — see `docs/capability-names-design.md`).
+///     A breaking positional field-add on an existing variant, so it bumps.
+pub const PROTOCOL_VERSION: u8 = 6;
 
 /// `MetricRegister.task_id` sentinel for a **kernel-global** metric — one
 /// registered by the kernel itself (the `&'static` `register_counter`/`gauge`/

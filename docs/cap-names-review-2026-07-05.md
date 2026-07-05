@@ -15,7 +15,12 @@ code doesn't quite live up to the doc's confidence, plus one scope observation.
 
 ---
 
-## C1 — The `CapEvent.name` wire change shipped without a `PROTOCOL_VERSION` bump (Low-Med, verified)
+## C1 — The `CapEvent.name` wire change shipped without a `PROTOCOL_VERSION` bump (Low-Med, verified) — **FIXED 2026-07-05**
+
+**FIXED (2026-07-05):** bumped `PROTOCOL_VERSION` 5→6 with a history entry recording
+the `CapEvent.name` breaking positional field-add, so the version contract now sees
+the change. (The deeper fix — Q2's golden-bytes snapshot test that would *enforce*
+this rather than rely on remembering — remains a separate follow-up.)
 
 `Frame::CapEvent` gained a `name: [u8; CAP_NAME_LEN]` field at the end
 (`protocol/src/lib.rs:170`) — a **breaking positional wire change** (every CapEvent
@@ -40,7 +45,16 @@ bump to 6 with its own entry. And it's the strongest argument yet for Q2's
 golden-bytes snapshot test — that test would have failed loudly on the CapEvent
 layout change and forced the bump.
 
-## C2 — `EndpointCreate` *rejects* boundary-straddling UTF-8 names instead of truncating them (Low-Med, verified)
+## C2 — `EndpointCreate` *rejects* boundary-straddling UTF-8 names instead of truncating them (Low-Med, verified) — **FIXED 2026-07-05**
+
+**FIXED (2026-07-05):** added a pure `abi::pack_name_bytes(&[u8])` that distinguishes
+an incomplete trailing sequence (truncate on the char boundary, per the design) from
+a genuinely invalid byte (still refuse), via `Utf8Error::error_len()`. TDD:
+`pack_name_bytes_truncates_a_codepoint_split_at_the_bound` + `_accepts_valid_utf8` +
+`_refuses_a_genuinely_invalid_byte` (RED confirmed against a stub, then GREEN; 13 abi
+tests pass). `handle_endpoint_create` now calls it instead of raw `from_utf8` +
+`pack_name`, so a valid name whose 24th byte splits a codepoint truncates instead of
+being refused.
 
 The doc promises names are *"truncated to `CAP_NAME_LEN` on a char boundary"*
 (design §"Bounded", and the `handle_endpoint_create` doc-comment itself). `pack_name`

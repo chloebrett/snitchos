@@ -417,6 +417,34 @@ pub fn utf8_chunk_end(bytes: &[u8], max: usize) -> usize {
     if end == 0 { max } else { end }
 }
 
+/// Pack a raw (possibly boundary-truncated) UTF-8 name buffer — e.g. the bytes a
+/// fixed-size syscall read copied out of user memory — into a `[u8; CAP_NAME_LEN]`,
+/// distinguishing the two ways a fixed-size read can end mid-UTF-8:
+///
+/// - an **incomplete trailing sequence** (the read split a codepoint at the byte
+///   bound): keep the valid prefix, truncated on the last char boundary — the
+///   cap-names design's "truncate on a char boundary";
+/// - a **genuinely invalid byte** mid-string: reject (`None`) — a garbage name is
+///   not a long name, so it stays a refusal.
+///
+/// The `&[u8]` counterpart of [`pack_name`], for callers (the `EndpointCreate`
+/// syscall) that hold raw bytes rather than a `&str`. A naive `from_utf8` would
+/// refuse the first case too, rejecting a valid name whose 24th byte happened to
+/// split a codepoint.
+#[must_use]
+pub fn pack_name_bytes(bytes: &[u8]) -> Option<[u8; CAP_NAME_LEN]> {
+    let valid = match core::str::from_utf8(bytes) {
+        Ok(s) => s,
+        // `error_len() == None` = an incomplete trailing sequence: the read split a
+        // codepoint at its end. Keep the valid prefix (`valid_up_to()` is a char
+        // boundary of already-validated bytes, so this re-validation can't fail).
+        Err(e) if e.error_len().is_none() => core::str::from_utf8(&bytes[..e.valid_up_to()]).ok()?,
+        // A genuinely invalid byte mid-string: refuse.
+        Err(_) => return None,
+    };
+    Some(pack_name(valid))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +462,31 @@ mod tests {
         let d = CapDesc { name: pack_name("abcdefghijklmnopqrstuvwxyz0123456789"), ..CapDesc::default() };
         assert_eq!(d.name_str(), "abcdefghijklmnopqrstuvwx");
         assert_eq!(d.name_str().len(), CAP_NAME_LEN);
+    }
+
+    #[test]
+    fn pack_name_bytes_accepts_valid_utf8() {
+        let packed = pack_name_bytes(b"fs").expect("valid UTF-8 name");
+        assert_eq!(name_str(&packed), "fs");
+    }
+
+    #[test]
+    fn pack_name_bytes_truncates_a_codepoint_split_at_the_bound() {
+        // A fixed 24-byte read of "abc..w" (23 ASCII) + 'é' (2 bytes) copies the
+        // 23 ASCII plus the *first* byte of 'é' — an incomplete trailing sequence.
+        // The design says truncate on a char boundary (drop the partial 'é'), NOT
+        // refuse a valid name. Raw `from_utf8` would reject this.
+        let full = "abcdefghijklmnopqrstuvwé".as_bytes(); // 25 bytes
+        let cut = &full[..CAP_NAME_LEN]; // 24 bytes: 23 ASCII + first byte of 'é'
+        let packed = pack_name_bytes(cut).expect("a boundary split truncates, not refuses");
+        assert_eq!(name_str(&packed), "abcdefghijklmnopqrstuvw");
+    }
+
+    #[test]
+    fn pack_name_bytes_refuses_a_genuinely_invalid_byte() {
+        // 0xFF never appears in valid UTF-8, mid-string (not a boundary artifact) —
+        // a garbage name is refused, not silently truncated to its prefix.
+        assert_eq!(pack_name_bytes(b"fs\xffbar"), None);
     }
 
     #[test]
