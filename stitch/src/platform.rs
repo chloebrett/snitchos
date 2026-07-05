@@ -86,6 +86,29 @@ pub fn rights_glyphs(rights: Rights) -> alloc::string::String {
     out
 }
 
+/// Parse a rights spec — one or more right *names* (`SEND`, `RECV`, `MINT`,
+/// `EMIT`, `SIGNAL`, `WAIT`), case-insensitive, separated by space, comma, or
+/// `|` — into the bitmask. The input side of [`rights_glyphs`], for the shell's
+/// `grant`. `None` if the spec is empty or names an unknown right (strict, so a
+/// typo fails loudly rather than granting less than asked).
+#[must_use]
+pub fn parse_rights(spec: &str) -> Option<Rights> {
+    use snitchos_abi::rights as r;
+    let mut bits = 0;
+    for token in spec.split([' ', ',', '|']).filter(|t| !t.is_empty()) {
+        bits |= match token.to_ascii_uppercase().as_str() {
+            "EMIT" => r::EMIT,
+            "SEND" => r::SEND,
+            "RECV" => r::RECV,
+            "MINT" => r::MINT,
+            "SIGNAL" => r::SIGNAL,
+            "WAIT" => r::WAIT,
+            _ => return None,
+        };
+    }
+    (bits != 0).then_some(bits)
+}
+
 /// Wrap each rights glyph in its ANSI color — the presentation companion to
 /// [`rights_glyphs`], and the colorizer the REPL hands the box style when its
 /// output channel supports color: 🪴 green (mint), 👀 blue (read), 📝 amber/yellow
@@ -148,6 +171,15 @@ pub trait Platform {
     /// The on-target backend calls the `Revoke` syscall, which emits a
     /// `CapEvent::Revoked` per swept cap.
     fn revoke(&self, handle: Handle) -> Option<usize>;
+
+    /// Mint a fresh badged capability *derived from* the endpoint at `handle`,
+    /// carrying `rights` and tagged with `badge`, into the caller's own table.
+    /// Returns the new handle, or `None` if refused (you hold no cap at `handle`,
+    /// or it lacks the `MINT` right). Backs the shell's `grant`; capability-
+    /// mediated — the *kernel* enforces `MINT`, not an ambient authority. The
+    /// on-target backend calls the `MintBadged` syscall, which emits a
+    /// `CapEvent::Transferred` recording the parent→child derivation edge.
+    fn grant(&self, handle: Handle, badge: u64, rights: Rights) -> Option<Handle>;
 }
 
 /// The default backend: a program with no platform installed. Reads nothing and
@@ -160,6 +192,10 @@ pub struct NullPlatform;
 impl Platform for NullPlatform {
     fn revoke(&self, _handle: Handle) -> Option<usize> {
         None // holds nothing, so no handle resolves
+    }
+
+    fn grant(&self, _handle: Handle, _badge: u64, _rights: Rights) -> Option<Handle> {
+        None // holds nothing to mint from
     }
 
     fn read_line(&self) -> Option<alloc::string::String> {
@@ -185,7 +221,17 @@ impl Platform for NullPlatform {
 pub struct FakePlatform {
     input: core::cell::RefCell<alloc::collections::VecDeque<alloc::string::String>>,
     output: core::cell::RefCell<alloc::string::String>,
-    caps: alloc::vec::Vec<CapInfo>,
+    /// The cap table `hold` reports — mutable so `grant` appends and `revoke`
+    /// reclaims, and a follow-up `hold` sees the change.
+    caps: core::cell::RefCell<alloc::vec::Vec<CapInfo>>,
+    /// Derivation edges (child handle → parent handle), grown by `grant`. Lets the
+    /// fake model transitive `revoke` faithfully — the kernel tracks this via the
+    /// cap-id spine; the fake needs just enough to reclaim descendants.
+    parents: core::cell::RefCell<alloc::collections::BTreeMap<Handle, Handle>>,
+    /// Monotonic handle allocator for minted caps — never reused, so a revoked
+    /// handle can't be silently re-minted (matching the kernel's generation
+    /// bump). `0` = uninitialized; seeded above the scripted caps on first grant.
+    next_handle: core::cell::RefCell<Handle>,
     files: alloc::collections::BTreeMap<alloc::string::String, alloc::string::String>,
 }
 
@@ -208,7 +254,7 @@ impl FakePlatform {
     /// Script the capability table `hold` reports.
     #[must_use]
     pub fn with_caps(caps: alloc::vec::Vec<CapInfo>) -> Self {
-        Self { caps, ..Self::default() }
+        Self { caps: core::cell::RefCell::new(caps), ..Self::default() }
     }
 
     /// Script the files `fs_read` (and so `view`) can read, as `(name, contents)`.
@@ -238,7 +284,7 @@ impl Platform for FakePlatform {
     }
 
     fn hold(&self) -> alloc::vec::Vec<CapInfo> {
-        self.caps.clone()
+        self.caps.borrow().clone()
     }
 
     fn fs_read(&self, name: &str) -> Option<alloc::string::String> {
@@ -246,10 +292,46 @@ impl Platform for FakePlatform {
     }
 
     fn revoke(&self, handle: Handle) -> Option<usize> {
-        // The fake tracks no derivation yet (that lands with `grant`), so a held
-        // handle simply has no descendants: `Some(0)`, table unchanged. An unheld
-        // handle resolves nothing: `None`.
-        self.caps.iter().any(|c| c.handle == handle).then_some(0)
+        if !self.caps.borrow().iter().any(|c| c.handle == handle) {
+            return None; // no such handle held
+        }
+        // Sweep the derivation tree below `handle` (transitive), removing the
+        // descendants; the holding itself survives — faithful to the kernel.
+        let parents = self.parents.borrow();
+        let mut doomed = alloc::vec::Vec::new();
+        let mut frontier = alloc::vec![handle];
+        while let Some(node) = frontier.pop() {
+            for (&child, &parent) in parents.iter() {
+                if parent == node && !doomed.contains(&child) {
+                    doomed.push(child);
+                    frontier.push(child);
+                }
+            }
+        }
+        drop(parents);
+        self.caps.borrow_mut().retain(|c| !doomed.contains(&c.handle));
+        self.parents.borrow_mut().retain(|child, _| !doomed.contains(child));
+        Some(doomed.len())
+    }
+
+    fn grant(&self, handle: Handle, badge: u64, rights: Rights) -> Option<Handle> {
+        let mut caps = self.caps.borrow_mut();
+        // Must hold the parent endpoint and it must carry MINT.
+        let parent = caps.iter().find(|c| c.handle == handle)?;
+        if parent.rights & snitchos_abi::rights::MINT == 0 {
+            return None;
+        }
+        let mut next = self.next_handle.borrow_mut();
+        if *next == 0 {
+            *next = caps.iter().map(|c| c.handle).max().unwrap_or(0) + 1;
+        }
+        let new_handle = *next;
+        *next += 1;
+        caps.push(CapInfo { handle: new_handle, kind: ObjectKind::Endpoint, rights, badge });
+        drop(caps);
+        drop(next);
+        self.parents.borrow_mut().insert(new_handle, handle);
+        Some(new_handle)
     }
 }
 
@@ -379,6 +461,17 @@ mod on_target {
                 count => Some(count),
             }
         }
+
+        fn grant(&self, handle: super::Handle, badge: u64, rights: super::Rights) -> Option<super::Handle> {
+            use snitchos_user::Endpoint;
+            // `grant` mints from an endpoint, so wrapping the handle as one is
+            // faithful. `mint_badged` (the `MintBadged` syscall) lands the child in
+            // our own table and returns its handle, or `Err` on refusal (no MINT).
+            Endpoint::from_raw_handle(handle as usize)
+                .mint_badged(badge, rights)
+                .ok()
+                .map(|h| h as super::Handle)
+        }
     }
 }
 
@@ -412,6 +505,31 @@ mod tests {
         fn revoke(&self, _handle: Handle) -> Option<usize> {
             None
         }
+        fn grant(&self, _handle: Handle, _badge: u64, _rights: Rights) -> Option<Handle> {
+            None
+        }
+    }
+
+    #[test]
+    fn parse_rights_maps_names_to_the_bitmask() {
+        use snitchos_abi::rights as r;
+        assert_eq!(parse_rights("EMIT"), Some(r::EMIT));
+        assert_eq!(parse_rights("SEND"), Some(r::SEND));
+        assert_eq!(parse_rights("send"), Some(r::SEND)); // case-insensitive
+        assert_eq!(parse_rights("RECV"), Some(r::RECV));
+        assert_eq!(parse_rights("MINT"), Some(r::MINT));
+        assert_eq!(parse_rights("SIGNAL"), Some(r::SIGNAL));
+        assert_eq!(parse_rights("WAIT"), Some(r::WAIT));
+        assert_eq!(parse_rights("SEND RECV"), Some(r::SEND | r::RECV));
+        assert_eq!(parse_rights("SEND,RECV"), Some(r::SEND | r::RECV)); // comma too
+        assert_eq!(parse_rights("MINT|SEND"), Some(r::MINT | r::SEND)); // and pipe
+    }
+
+    #[test]
+    fn parse_rights_rejects_empty_and_unknown_names() {
+        assert_eq!(parse_rights(""), None);
+        assert_eq!(parse_rights("   "), None);
+        assert_eq!(parse_rights("SEND FLY"), None); // one bad name fails the whole thing
     }
 
     #[test]

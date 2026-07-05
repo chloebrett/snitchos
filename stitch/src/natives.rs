@@ -56,6 +56,11 @@ pub(crate) const NATIVES: &[NativeFn] = &[
         func: native_revoke,
     },
     NativeFn {
+        name: "grant",
+        arity: 3,
+        func: native_grant,
+    },
+    NativeFn {
         name: "readFile",
         arity: 1,
         func: native_read_file,
@@ -462,6 +467,36 @@ fn native_revoke(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         None => {
             Err(RuntimeError::new(format!("revoke: you hold no capability at handle {handle}")))
         }
+    }
+}
+
+/// `grant(handle, badge, rights)` — mint a fresh badged capability *derived from*
+/// the endpoint at `handle`, carrying `rights` (a name string like `"SEND"` or
+/// `"SEND RECV"`) and tagged with `badge`, into your own table; returns the new
+/// handle. Ungated but capability-mediated: the kernel refuses unless you hold
+/// `MINT` on that endpoint. The on-target backend calls `MintBadged`, so the grant
+/// surfaces as a `CapEvent::Transferred` recording the derivation edge.
+fn native_grant(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [Value::Int(handle), Value::Int(badge), Value::Str(rights)] = args else {
+        return Err(RuntimeError::new(
+            "grant expects (handle, badge, rights): an endpoint handle, a badge number, \
+             and a rights name like \"SEND\"",
+        ));
+    };
+    let handle = u32::try_from(*handle)
+        .map_err(|_| RuntimeError::new(format!("grant: {handle} is not a valid handle")))?;
+    let badge = u64::try_from(*badge)
+        .map_err(|_| RuntimeError::new(format!("grant: {badge} is not a valid badge")))?;
+    let rights = crate::platform::parse_rights(rights).ok_or_else(|| {
+        RuntimeError::new(format!(
+            "grant: unknown rights {rights:?} (expected names like SEND, RECV, MINT)"
+        ))
+    })?;
+    match env.platform().grant(handle, badge, rights) {
+        Some(new) => Ok(Value::Int(i64::from(new))),
+        None => Err(RuntimeError::new(format!(
+            "grant: refused — you need MINT on an endpoint at handle {handle}"
+        ))),
     }
 }
 
@@ -1090,6 +1125,116 @@ mod tests {
         let err = run_program_on("main() = revoke(1)", Rc::new(crate::platform::NullPlatform))
             .expect_err("the null backend holds nothing");
         assert!(err.message().contains('1'), "{}", err.message());
+    }
+
+    /// A cap table with one endpoint whose rights are `rights` — the seed for the
+    /// grant tests (`0b1110` = MINT|RECV|SEND).
+    fn one_endpoint(rights: u32) -> Rc<FakePlatform> {
+        Rc::new(FakePlatform::with_caps(vec![CapInfo {
+            handle: 2,
+            kind: ObjectKind::Endpoint,
+            rights,
+            badge: 0,
+        }]))
+    }
+
+    #[test]
+    fn grant_mints_a_narrower_cap_into_your_table() {
+        let fake = one_endpoint(0b1110); // has MINT
+        let new = run_program_on(r#"main() = grant(2, 7, "SEND")"#, fake.clone())
+            .expect("grant should run");
+        assert!(matches!(new, Value::Int(h) if h > 2), "grant returns the new handle, got {new:?}");
+        let after = run_program_on("main() = hold()", fake).expect("hold");
+        let Value::List(caps) = after else { panic!("hold should be a list") };
+        assert_eq!(caps.len(), 2, "the minted cap appears in a follow-up hold");
+    }
+
+    #[test]
+    fn grant_from_a_cap_without_mint_is_refused() {
+        let fake = one_endpoint(0b0010); // SEND only, no MINT
+        let err = run_program_on(r#"main() = grant(2, 7, "SEND")"#, fake)
+            .expect_err("no MINT right");
+        assert!(err.message().to_lowercase().contains("mint"), "{}", err.message());
+    }
+
+    #[test]
+    fn grant_with_unknown_rights_is_an_error() {
+        let fake = one_endpoint(0b1110);
+        let err = run_program_on(r#"main() = grant(2, 7, "FLY")"#, fake)
+            .expect_err("unknown right");
+        assert!(err.message().contains("FLY"), "{}", err.message());
+    }
+
+    /// The `handle` fields present in a `hold()` result, sorted.
+    fn handles(hold_result: &Value) -> Vec<i64> {
+        let Value::List(caps) = hold_result else { panic!("hold should be a list") };
+        let mut hs = caps
+            .iter()
+            .map(|cap| {
+                let Value::Data(d) = cap else { panic!("a cap is a record") };
+                let (_, Value::Int(h)) = &d.fields[0] else { panic!("handle is the first field") };
+                *h
+            })
+            .collect::<Vec<_>>();
+        hs.sort_unstable();
+        hs
+    }
+
+    #[test]
+    fn grant_then_revoke_reclaims_the_minted_cap() {
+        // The least-authority loop: mint a child from the endpoint, then revoke the
+        // parent — the child is reclaimed (count 1), the parent (handle 2) survives.
+        let fake = one_endpoint(0b1110);
+        run_program_on(r#"main() = grant(2, 7, "SEND")"#, fake.clone()).expect("grant");
+        let count = run_program_on("main() = revoke(2)", fake.clone()).expect("revoke");
+        assert_eq!(count, Value::Int(1), "one descendant reclaimed");
+        let after = run_program_on("main() = hold()", fake).expect("hold");
+        assert_eq!(handles(&after), vec![2], "only the parent survives, the child is gone");
+    }
+
+    #[test]
+    fn revoke_reclaims_only_the_targets_descendants_not_a_siblings() {
+        // Two MINT endpoints, a child minted from each. Revoking one parent must
+        // reclaim only *its* child — the other endpoint's child is untouched.
+        let fake = Rc::new(FakePlatform::with_caps(vec![
+            CapInfo { handle: 2, kind: ObjectKind::Endpoint, rights: 0b1110, badge: 0 },
+            CapInfo { handle: 5, kind: ObjectKind::Endpoint, rights: 0b1110, badge: 0 },
+        ]));
+        let child2 = run_program_on(r#"main() = grant(2, 1, "SEND")"#, fake.clone()).expect("g2");
+        let child5 = run_program_on(r#"main() = grant(5, 1, "SEND")"#, fake.clone()).expect("g5");
+        let (Value::Int(c2), Value::Int(c5)) = (child2, child5) else { panic!("handles") };
+        let count = run_program_on("main() = revoke(2)", fake.clone()).expect("revoke");
+        assert_eq!(count, Value::Int(1), "exactly one descendant (child of 2) reclaimed");
+        let after = run_program_on("main() = hold()", fake).expect("hold");
+        let mut expected = vec![2, 5, c5];
+        expected.sort_unstable();
+        assert_eq!(handles(&after), expected, "sibling's child (of 5) survives; {c2}'s is gone");
+    }
+
+    #[test]
+    fn a_reminted_cap_gets_a_fresh_handle_and_revokes_cleanly() {
+        // After a grant→revoke, a second grant must mint a *distinct* handle and be
+        // revocable on its own — the parent-cleanup can't leave a stale edge that
+        // mis-counts the second revoke.
+        let fake = one_endpoint(0b1110);
+        run_program_on(r#"main() = grant(2, 1, "SEND")"#, fake.clone()).expect("grant 1");
+        run_program_on("main() = revoke(2)", fake.clone()).expect("revoke 1");
+        run_program_on(r#"main() = grant(2, 2, "SEND")"#, fake.clone()).expect("grant 2");
+        let count = run_program_on("main() = revoke(2)", fake.clone()).expect("revoke 2");
+        assert_eq!(count, Value::Int(1), "the second revoke reclaims exactly its one child");
+        let after = run_program_on("main() = hold()", fake).expect("hold");
+        assert_eq!(handles(&after), vec![2], "only the parent survives");
+    }
+
+    #[test]
+    fn grant_with_the_default_backend_is_refused() {
+        // The default (null) backend holds nothing to mint from.
+        let err = run_program_on(
+            r#"main() = grant(2, 7, "SEND")"#,
+            Rc::new(crate::platform::NullPlatform),
+        )
+        .expect_err("the null backend holds nothing");
+        assert!(err.message().to_lowercase().contains("mint"), "{}", err.message());
     }
 
     #[test]

@@ -44,6 +44,16 @@ impl Platform for StdPlatform {
         // The host CLI holds no SnitchOS capabilities, so no handle resolves.
         None
     }
+
+    fn grant(
+        &self,
+        _handle: stitch::platform::Handle,
+        _badge: u64,
+        _rights: stitch::platform::Rights,
+    ) -> Option<stitch::platform::Handle> {
+        // No capabilities to mint from at the host CLI.
+        None
+    }
 }
 
 fn main() -> ExitCode {
