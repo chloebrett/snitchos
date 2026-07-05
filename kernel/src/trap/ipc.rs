@@ -191,6 +191,11 @@ pub fn take_delivered(ep: EndpointId, me: TaskId) -> Delivered {
 pub struct StashedReply {
     pub msg: Message,
     pub cap: Option<kernel_core::cap::Capability>,
+    /// The `cap_id` of the server holding `cap` was moved from — the child's
+    /// parent in the derivation tree. Captured before the server consumes its
+    /// holding so the caller's re-insert links the edge (and `Revoke` can reach
+    /// the handed-out cap). `0` when no cap is transferred.
+    pub parent_cap_id: u64,
 }
 
 /// Point-to-point reply mailbox, keyed by the **caller** awaiting a reply. The
@@ -208,5 +213,5 @@ pub fn stash_reply(caller: TaskId, reply: StashedReply) {
 /// Take the reply delivered to `me` (called by `call` after `block_current`
 /// returns). Defaults to empty (zeros, no cap) if absent — never panics.
 pub fn take_reply(me: TaskId) -> StashedReply {
-    REPLIES.lock().remove(&me).unwrap_or(StashedReply { msg: [0; MSG_WORDS], cap: None })
+    REPLIES.lock().remove(&me).unwrap_or(StashedReply { msg: [0; MSG_WORDS], cap: None, parent_cap_id: 0 })
 }

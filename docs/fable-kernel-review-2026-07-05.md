@@ -14,19 +14,26 @@ observability), so they're worth fixing before the axes build on them.
 
 ---
 
-## F1 — Caps transferred over IPC lose their derivation identity (High, verified) — **reply-mint half FIXED 2026-07-05**
+## F1 — Caps transferred over IPC lose their derivation identity (High, verified) — **FIXED 2026-07-05 (both halves)**
 
-**FIXED (2026-07-05), reply-mint half only:** `reply_handle_for`
+**FIXED (2026-07-05), reply-mint half:** `reply_handle_for`
 (`kernel/src/syscall/ipc.rs`) now mints one `cap_id`, stores it via
 `insert_once_with_id`, and emits that same id — so the reply cap's
-`CapEvent::Transferred` names an id the kernel actually holds (until the reply
-consumes it) instead of a fresh id matching no slot. No new host test: the
-mechanism (`insert_once_with_id`) is already host-tested in `kernel-core`, and the
-bug is not wire-distinguishable (both versions emit *a* cap_id) — verified by
-build. **The handout half remains open** (a badged cap moved to a client via
-`Reply`/`take_reply` still lands with `cap_id 0` because `StashedReply` carries a
-bare `Capability`); closing it means threading `cap_id`+`parent_cap_id` through the
-transfer, the same "carry the whole holding across the boundary" fix F6 pointed at.
+`CapEvent::Transferred` names an id the kernel actually holds instead of a fresh id
+matching no slot. No new host test: the mechanism (`insert_once_with_id`) is
+already host-tested, and the bug is not wire-distinguishable — verified by build.
+
+**FIXED (2026-07-05), handout half:** `StashedReply` now carries `parent_cap_id`;
+`reply_via_cap` captures the transferred holding's `cap_id` *before* consuming it,
+and `handle_call`'s resume re-inserts the received cap with `insert_with_id(cap,
+fresh_id, parent_cap_id)` and emits the matching `CapEvent::Transferred`. So a
+badged cap handed to a client via `Reply` is now a real derivation-tree node
+(parent = the server's minted holding) that `Revoke` can reach, instead of a
+`parent_cap_id==0` orphan the wire misreported. Tested end-to-end: itest
+`badge-handout-links-derivation` (RED confirmed — the handout linked to no mint;
+then GREEN) asserts the client's handout `Transferred` links back to the server's
+mint `cap_id`. Full itest suite: 100 pass on the reply-transfer paths (fs / badge /
+rpc) — no regression.
 
 **The defect.** A capability handed to another process through `Reply`
 (cap-in-reply, the badge-handout pattern) or the reply-cap mint lands in the

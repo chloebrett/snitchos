@@ -279,10 +279,13 @@ pub static CONSOLE_ECHO: ProgramSpec = ProgramSpec { elf: CONSOLE_ECHO_ELF, laun
 /// `ConsoleRead`/`ConsoleWrite` need no caps.
 pub static STITCH_REPL: ProgramSpec = ProgramSpec { elf: STITCH_REPL_ELF, launch: Launch::Plain };
 
-/// `workload=stitch-fs`: the same REPL ELF, but IPC-launched with a `SEND` cap
-/// on the FS endpoint (delivered at `a2`) so it can read files off the
-/// filesystem. The plain `stitch-repl` workload uses [`STITCH_REPL`] (no fs).
-pub static STITCH_REPL_IPC: ProgramSpec = ipc_user(STITCH_REPL_ELF, Rights::SEND.bits());
+/// `workload=stitch-fs`: the same REPL ELF, but IPC-launched with a `SEND | MINT`
+/// cap on the FS endpoint (delivered at `a2`) so it can both read files off the
+/// filesystem *and* re-delegate: a shell is a delegating authority, so it holds
+/// `MINT` to grant narrower badged caps (backing `grant`/`revoke`). The plain
+/// `stitch-repl` workload uses [`STITCH_REPL`] (no fs, no mint).
+pub static STITCH_REPL_IPC: ProgramSpec =
+    ipc_user(STITCH_REPL_ELF, Rights::SEND.bits() | Rights::MINT.bits());
 
 /// `workload=probe`: the userspace-defined-metrics demo. Ambient launch — it
 /// registers + emits through its bootstrap `TelemetrySink` cap, which it

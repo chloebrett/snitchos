@@ -221,16 +221,21 @@ pub(super) fn handle_call(frame: &mut TrapFrame) {
     frame.a4 = reply.msg[3];
     frame.a5 = match reply.cap {
         Some(cap) => {
-            let handle = proc.caps.lock().insert(cap);
+            // The caller's new holding is a fresh derivation-tree node whose parent
+            // is the server holding the cap was moved from (`reply.parent_cap_id`),
+            // so store and emit the same minted id — the handed-out cap is a real,
+            // revocable node, not a `parent_cap_id==0` orphan the wire misreports.
+            let cap_id = crate::process::next_cap_id();
+            let handle = proc.caps.lock().insert_with_id(cap, cap_id, reply.parent_cap_id);
             let badge = match cap.object {
                 kernel_core::cap::Object::Endpoint { badge, .. } => badge,
                 _ => 0,
             };
             crate::tracing::emit_cap_transferred(
-                crate::process::next_cap_id(),
-                0, // cap-in-reply derivation edge not tracked yet
+                cap_id,
+                reply.parent_cap_id,
                 me.0,
-                protocol::CapObject::Endpoint,
+                crate::user::cap_object_kind(cap.object),
                 cap.rights.bits(),
                 badge,
             );
@@ -287,28 +292,32 @@ fn reply_via_cap(
             Err(denied) => Err(denied),
             Ok(caller) => {
                 caps.consume(handle);
-                let cap = match transfer {
+                let (cap, parent_cap_id) = match transfer {
                     Some(h) => {
                         let c = caps.resolve(h).copied().ok();
+                        // The transferred holding's global id becomes the child's
+                        // parent in the derivation tree — read it *before* consuming
+                        // the holding, so the caller's re-insert links the edge.
+                        let parent = caps.cap_id_of(h).unwrap_or(0);
                         if c.is_some() {
                             caps.consume(h);
                         }
-                        c
+                        (c, parent)
                     }
-                    None => None,
+                    None => (None, 0),
                 };
-                Ok((caller, cap))
+                Ok((caller, cap, parent_cap_id))
             }
         }
     };
-    let (caller, cap) = match resolved {
-        Ok(pair) => pair,
+    let (caller, cap, parent_cap_id) = match resolved {
+        Ok(triple) => triple,
         Err(denied) => {
             super::refuse(frame, sc, super::refusal_for(denied));
             return Err(());
         }
     };
-    crate::ipc::stash_reply(caller, crate::ipc::StashedReply { msg: resp, cap });
+    crate::ipc::stash_reply(caller, crate::ipc::StashedReply { msg: resp, cap, parent_cap_id });
     crate::sched::wake(caller);
     crate::ipc::REPLIES_TOTAL.inc();
     Ok(())
