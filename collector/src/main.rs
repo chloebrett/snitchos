@@ -113,12 +113,35 @@ fn main() -> std::io::Result<()> {
             print_frame(frame, args.pretty);
         }
         let mut state = state.lock().unwrap();
+        // Flush open cap holdings before the session anchor resets.
+        if matches!(frame, Frame::Hello { .. }) {
+            for cap_span in state.flush_caps() {
+                for exporter in &exporters {
+                    exporter.export(&cap_span);
+                }
+            }
+        }
         if let Some(completed) = state.handle(frame) {
             for exporter in &exporters {
                 exporter.export(&completed);
             }
         }
+        for cap_span in state.drain_cap_spans() {
+            for exporter in &exporters {
+                exporter.export(&cap_span);
+            }
+        }
     })?;
+
+    // Flush any still-open cap holdings at stream EOF.
+    {
+        let mut state = state.lock().unwrap();
+        for cap_span in state.flush_caps() {
+            for exporter in &exporters {
+                exporter.export(&cap_span);
+            }
+        }
+    }
 
     eprintln!("kernel disconnected; restart with `cargo xtask collect`");
     Ok(())

@@ -10,6 +10,8 @@ use std::time::SystemTime;
 
 use protocol::{Frame, MetricKind, SpanId, StringId};
 
+use crate::caps::CapTracker;
+
 /// Injectable source of host wall-clock nanoseconds since epoch.
 pub trait WallClock: Send {
     fn now_ns(&self) -> u128;
@@ -181,6 +183,7 @@ pub struct State {
     /// Have we seen the warning-about-missing-Hello yet? Avoids
     /// spamming once per frame.
     warned_no_hello: bool,
+    cap_tracker: CapTracker,
 }
 
 impl State {
@@ -198,6 +201,7 @@ impl State {
             metric_values: HashMap::new(),
             histograms: HashMap::new(),
             warned_no_hello: false,
+            cap_tracker: CapTracker::new(),
         }
     }
 
@@ -347,14 +351,10 @@ impl State {
                 // ids remain valid in the meantime.
                 None
             }
-            Frame::CapEvent { t, .. } => {
-                // v0.7b: the authority event is on the wire (the itest reads
-                // it directly off the socket). Host-side reconstruction of the
-                // capability derivation tree from these events — and the
-                // Grafana node-graph view — is v0.8, once transfer/attenuation
-                // produce real parent→child edges. Advance the anchor for
-                // timestamp continuity in the meantime.
+            Frame::CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, badge, t, hart_id: _, name } => {
                 self.advance_anchor(*t);
+                let wall_t = self.tick_to_wall_ns(*t);
+                self.cap_tracker.observe(*kind, *cap_id, *parent_cap_id, *holder, *object, *rights, *badge, wall_t, *name);
                 None
             }
             Frame::SyscallRefused { t, .. } => {
@@ -421,6 +421,18 @@ impl State {
         )
     }
 
+    /// Cap spans closed since the last call (via `Revoked` events).
+    /// Call after every `handle` and export the results.
+    pub fn drain_cap_spans(&mut self) -> Vec<CompletedSpan> {
+        self.cap_tracker.drain_closed()
+    }
+
+    /// Close all still-open cap holdings at wall-clock now. Call on a new
+    /// `Hello` (kernel restart) and at stream EOF before shutting down.
+    pub fn flush_caps(&mut self) -> Vec<CompletedSpan> {
+        self.cap_tracker.flush(self.clock.now_ns())
+    }
+
     fn reset_session(&mut self) {
         self.strings.clear();
         self.metric_kinds.clear();
@@ -429,6 +441,7 @@ impl State {
         self.metric_values.clear();
         self.histograms.clear();
         self.warned_no_hello = false;
+        self.cap_tracker = CapTracker::new();
     }
 
     /// Update `first_t` if we're seeing the smallest `t` yet — pre-init
@@ -799,5 +812,124 @@ mod tests {
         // end is before start in wall-clock terms because t went
         // backwards. start_time_ns > end_time_ns.
         assert!(span.start_time_ns > span.end_time_ns);
+    }
+
+    #[test]
+    fn span_end_carries_nonzero_parent_span_id() {
+        let mut s = State::new(FakeWallClock(0));
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        s.handle(&Frame::StringRegister { id: StringId(1), value: "child" });
+        s.handle(&Frame::SpanStart {
+            id: SpanId(2),
+            parent: SpanId(99),
+            name_id: StringId(1),
+            t: 100,
+            task_id: 0,
+            hart_id: 0,
+        });
+        let span = s.handle(&Frame::SpanEnd { id: SpanId(2), t: 200 }).unwrap();
+        assert_eq!(span.parent_span_id, 99);
+    }
+
+    #[test]
+    fn span_end_carries_task_id() {
+        let mut s = State::new(FakeWallClock(0));
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        s.handle(&Frame::StringRegister { id: StringId(1), value: "t" });
+        s.handle(&Frame::SpanStart {
+            id: SpanId(1),
+            parent: SpanId(0),
+            name_id: StringId(1),
+            t: 100,
+            task_id: 7,
+            hart_id: 0,
+        });
+        let span = s.handle(&Frame::SpanEnd { id: SpanId(1), t: 200 }).unwrap();
+        assert_eq!(span.task_id, 7);
+    }
+
+    #[test]
+    fn span_end_resolves_thread_name_and_priority() {
+        let mut s = State::new(FakeWallClock(0));
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        s.handle(&Frame::ThreadRegister { id: 4, name: "worker", priority: 2 });
+        s.handle(&Frame::StringRegister { id: StringId(1), value: "t" });
+        s.handle(&Frame::SpanStart {
+            id: SpanId(1),
+            parent: SpanId(0),
+            name_id: StringId(1),
+            t: 100,
+            task_id: 4,
+            hart_id: 0,
+        });
+        let span = s.handle(&Frame::SpanEnd { id: SpanId(1), t: 200 }).unwrap();
+        assert_eq!(span.thread_name.as_deref(), Some("worker"));
+        assert_eq!(span.thread_priority, Some(2));
+    }
+
+    fn cap_name(s: &str) -> [u8; 24] {
+        let mut buf = [0u8; 24];
+        let b = s.as_bytes();
+        buf[..b.len().min(24)].copy_from_slice(&b[..b.len().min(24)]);
+        buf
+    }
+
+    #[test]
+    fn cap_grant_revoke_drains_as_cap_span() {
+        let mut state = State::new(FakeWallClock(1_000_000_000));
+        state.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        state.handle(&Frame::CapEvent {
+            kind: protocol::CapEventKind::Granted,
+            cap_id: 1,
+            parent_cap_id: 0,
+            holder: 3,
+            object: protocol::CapObject::Endpoint,
+            rights: 0,
+            badge: 0,
+            t: 100,
+            hart_id: 0,
+            name: cap_name("fs"),
+        });
+        assert!(state.drain_cap_spans().is_empty());
+        state.handle(&Frame::CapEvent {
+            kind: protocol::CapEventKind::Revoked,
+            cap_id: 1,
+            parent_cap_id: 0,
+            holder: 3,
+            object: protocol::CapObject::Endpoint,
+            rights: 0,
+            badge: 0,
+            t: 200,
+            hart_id: 0,
+            name: [0u8; 24],
+        });
+        let spans = state.drain_cap_spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].name, "fs");
+        assert_eq!(spans[0].span_id, 1);
+        assert!(spans[0].start_time_ns < spans[0].end_time_ns);
+        assert_eq!(spans[0].trace, TraceKind::Capabilities);
+    }
+
+    #[test]
+    fn flush_caps_closes_open_holding() {
+        let mut state = State::new(FakeWallClock(1_000_000_000));
+        state.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        state.handle(&Frame::CapEvent {
+            kind: protocol::CapEventKind::Granted,
+            cap_id: 2,
+            parent_cap_id: 0,
+            holder: 5,
+            object: protocol::CapObject::Endpoint,
+            rights: 0,
+            badge: 0,
+            t: 50,
+            hart_id: 0,
+            name: [0u8; 24],
+        });
+        let spans = state.flush_caps();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].span_id, 2);
+        assert_eq!(spans[0].end_time_ns, 1_000_000_000);
     }
 }
