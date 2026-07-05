@@ -376,8 +376,11 @@ impl Task {
 /// with an empty runqueue runs its idle task and `wfi`s until an IPI
 /// arrives saying "you have new work."
 pub struct Scheduler {
-    /// All known tasks, indexed by their position in this vec. `id.0`
-    /// equals `tasks[i].id.0`; the vec is never reordered.
+    /// All known tasks, looked up by scanning for a matching `id`
+    /// (`tasks.iter().find(|t| t.id == …)`), never by vec position:
+    /// `reap_task` uses `swap_remove`, which reorders, so a task's index
+    /// carries no meaning. The `Box` gives each `Task` a stable heap address
+    /// regardless of where it sits in the vec.
     #[allow(
         clippy::vec_box,
         reason = "the Box is load-bearing: it gives each Task a stable heap address so the raw `*mut TaskContext` / `*const SpanCursor` pointers stay valid across Vec growth and past the scheduler-mutex drop"
