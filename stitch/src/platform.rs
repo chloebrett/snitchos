@@ -139,6 +139,15 @@ pub trait Platform {
     /// (and so `view`). The on-target backend does an FS-over-IPC lookup + read
     /// through its endpoint cap; gated in the language by the `FsRead` authority.
     fn fs_read(&self, name: &str) -> Option<alloc::string::String>;
+
+    /// Revoke every capability *derived from* the holding at `handle` — the
+    /// transitive reclaim. Returns the number of descendant caps invalidated
+    /// (`0` if none were derived), or `None` if the caller holds no cap at
+    /// `handle`. The holding at `handle` itself survives. Backs the shell's
+    /// `revoke`; ungated, because giving up authority you granted grants nothing.
+    /// The on-target backend calls the `Revoke` syscall, which emits a
+    /// `CapEvent::Revoked` per swept cap.
+    fn revoke(&self, handle: Handle) -> Option<usize>;
 }
 
 /// The default backend: a program with no platform installed. Reads nothing and
@@ -149,6 +158,10 @@ pub trait Platform {
 pub struct NullPlatform;
 
 impl Platform for NullPlatform {
+    fn revoke(&self, _handle: Handle) -> Option<usize> {
+        None // holds nothing, so no handle resolves
+    }
+
     fn read_line(&self) -> Option<alloc::string::String> {
         None
     }
@@ -230,6 +243,13 @@ impl Platform for FakePlatform {
 
     fn fs_read(&self, name: &str) -> Option<alloc::string::String> {
         self.files.get(name).cloned()
+    }
+
+    fn revoke(&self, handle: Handle) -> Option<usize> {
+        // The fake tracks no derivation yet (that lands with `grant`), so a held
+        // handle simply has no descendants: `Some(0)`, table unchanged. An unheld
+        // handle resolves nothing: `None`.
+        self.caps.iter().any(|c| c.handle == handle).then_some(0)
     }
 }
 
@@ -350,6 +370,15 @@ mod on_target {
             }
             String::from_utf8(bytes).ok()
         }
+
+        fn revoke(&self, handle: super::Handle) -> Option<usize> {
+            // The `Revoke` syscall reclaims every cap derived from `handle` and
+            // returns the count, or `usize::MAX` if the handle resolves nothing.
+            match snitchos_user::revoke(handle as usize) {
+                usize::MAX => None,
+                count => Some(count),
+            }
+        }
     }
 }
 
@@ -378,6 +407,9 @@ mod tests {
             Vec::new()
         }
         fn fs_read(&self, _name: &str) -> Option<String> {
+            None
+        }
+        fn revoke(&self, _handle: Handle) -> Option<usize> {
             None
         }
     }

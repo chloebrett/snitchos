@@ -51,6 +51,11 @@ pub(crate) const NATIVES: &[NativeFn] = &[
         func: native_hold,
     },
     NativeFn {
+        name: "revoke",
+        arity: 1,
+        func: native_revoke,
+    },
+    NativeFn {
         name: "readFile",
         arity: 1,
         func: native_read_file,
@@ -438,6 +443,26 @@ fn native_hold(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         })
         .collect::<Vec<_>>();
     Ok(Value::List(rows.into()))
+}
+
+/// `revoke(handle)` — reclaim every capability *derived from* the holding at
+/// `handle` (transitive), returning the count of caps invalidated. `handle` is an
+/// integer as shown in `hold`'s `handle` column; the holding itself survives.
+/// Ungated, like `hold`: giving up authority you granted grants nothing. Errors
+/// if you hold no capability at that handle. The on-target backend calls the
+/// `Revoke` syscall, so each reclaimed cap surfaces as a `CapEvent::Revoked`.
+fn native_revoke(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [Value::Int(handle)] = args else {
+        return Err(RuntimeError::new("revoke expects one argument: a capability handle"));
+    };
+    let handle = u32::try_from(*handle)
+        .map_err(|_| RuntimeError::new(format!("revoke: {handle} is not a valid handle")))?;
+    match env.platform().revoke(handle) {
+        Some(count) => Ok(Value::Int(i64::try_from(count).unwrap_or(i64::MAX))),
+        None => {
+            Err(RuntimeError::new(format!("revoke: you hold no capability at handle {handle}")))
+        }
+    }
 }
 
 /// `readFile(name)` — read the named file's UTF-8 contents as `Some(Str)`, or
@@ -1029,6 +1054,42 @@ mod tests {
         let fake = Rc::new(FakePlatform::new());
         let value = run_program_on("main() = hold()", fake).expect("hold should run");
         assert_eq!(value, Value::List(vec![].into()));
+    }
+
+    #[test]
+    fn revoke_reports_the_descendant_count_and_leaves_the_holding() {
+        // `revoke @h` reclaims the caps derived *from* h (transitive), not h
+        // itself — the holding survives. With no grants yet there are no
+        // descendants, so the count is 0 and `hold` is unchanged. Ungated: giving
+        // up authority you hold grants nothing (like `hold`).
+        let fake = Rc::new(FakePlatform::with_caps(vec![CapInfo {
+            handle: 2,
+            kind: ObjectKind::Endpoint,
+            rights: 0b1110,
+            badge: 0,
+        }]));
+        let count = run_program_on("main() = revoke(2)", fake.clone()).expect("revoke should run");
+        assert_eq!(count, Value::Int(0));
+        let after = run_program_on("main() = hold()", fake).expect("hold should run");
+        let Value::List(caps) = after else { panic!("hold should be a list") };
+        assert_eq!(caps.len(), 1, "the revoked holding itself survives");
+    }
+
+    #[test]
+    fn revoke_a_handle_you_do_not_hold_is_an_error() {
+        let fake = Rc::new(FakePlatform::new());
+        let err =
+            run_program_on("main() = revoke(9)", fake).expect_err("no capability at that handle");
+        assert!(err.message().contains('9'), "{}", err.message());
+    }
+
+    #[test]
+    fn revoke_with_the_default_backend_is_an_error() {
+        // The default (null) backend holds no caps, so no handle resolves — revoke
+        // errors rather than silently reporting a revoked count.
+        let err = run_program_on("main() = revoke(1)", Rc::new(crate::platform::NullPlatform))
+            .expect_err("the null backend holds nothing");
+        assert!(err.message().contains('1'), "{}", err.message());
     }
 
     #[test]

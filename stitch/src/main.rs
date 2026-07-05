@@ -39,6 +39,11 @@ impl Platform for StdPlatform {
         // at the CLI prompt too (on the metal this is the FS-over-IPC path).
         std::fs::read_to_string(name).ok()
     }
+
+    fn revoke(&self, _handle: stitch::platform::Handle) -> Option<usize> {
+        // The host CLI holds no SnitchOS capabilities, so no handle resolves.
+        None
+    }
 }
 
 fn main() -> ExitCode {
