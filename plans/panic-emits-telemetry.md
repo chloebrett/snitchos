@@ -1,6 +1,7 @@
 # The kernel snitches its own death — a panic-safe telemetry frame
 
-**Status: increments 1–4 SHIPPED + verified (commit gate 10/10). 5–6 remain.**
+**Status: increments 1–5 SHIPPED + verified (gate 10/10; oracle conditions on the
+panic frame, 7 tests green). Increment 6 (dynamic message) remains.**
 Motivated by the snemu differential-oracle work
 ([notes/snemu-guard-page-fail-is-timing-not-mmu.md](snemu-guard-page-fail-is-timing-not-mmu.md)):
 a kernel panic is currently invisible on the structured telemetry channel — it

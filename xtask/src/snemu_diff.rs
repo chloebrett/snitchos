@@ -331,6 +331,10 @@ struct Comparison {
     vocab_shared: usize,
     only_snemu: Vec<String>,
     only_qemu: Vec<String>,
+    /// Whether snemu's stream shows it reached the crash (a `kernel panic` Log) —
+    /// gates whether `kernel.heartbeat`-only-in-snemu is a benign truncation or a
+    /// failed-to-halt bug. See [`snemu_reached_crash`].
+    snemu_crashed: bool,
     /// How snemu's run ended (step limit vs a fault).
     snemu_stop: String,
     divergence: Option<(OwnedFrame, OwnedFrame)>,
@@ -350,18 +354,32 @@ struct Comparison {
 /// heartbeats *before* the crash. See
 /// `notes/snemu-guard-page-fail-is-timing-not-mmu.md`.
 ///
-/// Caveat: this also masks a hypothetical snemu bug where snemu *fails* to halt
-/// and over-emits `kernel.heartbeat`. That would show up first in the frame-count
-/// / common-prefix signals; a count-bounded check is a future tightening.
+/// Forgiven **only when snemu reached the crash** ([`snemu_reached_crash`]): the
+/// benign case is "QEMU halted before its first heartbeat, snemu emitted a few
+/// then crashed too." If snemu emits `kernel.heartbeat` QEMU lacks but *never*
+/// crashes, that's the opposite — snemu **failed to halt** and ran past where it
+/// should have died — and must FAIL. Conditioning on the panic frame is what
+/// tells the two apart (it closes the caveat the unconditional filter left open).
 const BENIGN_ONLY_SNEMU: &[&str] = &["kernel.heartbeat"];
+
+/// The panic handler emits `Log("kernel panic …")` on the wire (see
+/// `plans/panic-emits-telemetry.md`), so its presence in snemu's stream proves
+/// snemu ran all the way to the crash — just later than QEMU on the
+/// instruction-clock — rather than hanging past where it should have halted.
+fn snemu_reached_crash(frames: &[OwnedFrame]) -> bool {
+    frames
+        .iter()
+        .any(|f| matches!(f, OwnedFrame::Log { msg, .. } if msg.contains("kernel panic")))
+}
 
 /// The only-snemu names that actually indicate snemu invented telemetry QEMU
 /// would never emit — the only-snemu set minus the recurring-infra names a crash
-/// can truncate ([`BENIGN_ONLY_SNEMU`]). Empty ⇒ faithful.
-fn invented_names(only_snemu: &[String]) -> Vec<String> {
+/// can truncate ([`BENIGN_ONLY_SNEMU`]), and only when snemu is proven to have
+/// crashed (`snemu_crashed`). Empty ⇒ faithful.
+fn invented_names(only_snemu: &[String], snemu_crashed: bool) -> Vec<String> {
     only_snemu
         .iter()
-        .filter(|n| !BENIGN_ONLY_SNEMU.contains(&n.as_str()))
+        .filter(|n| !(snemu_crashed && BENIGN_ONLY_SNEMU.contains(&n.as_str())))
         .cloned()
         .collect()
 }
@@ -369,11 +387,12 @@ fn invented_names(only_snemu: &[String]) -> Vec<String> {
 impl Comparison {
     /// Faithful ⇔ snemu invented no telemetry QEMU never emitted. Names only QEMU
     /// has are behavior snemu didn't reach in its budget; recurring-infra names
-    /// (heartbeat) only snemu has are behavior *QEMU* didn't reach before halting
-    /// — neither is invention. Only genuinely snemu-invented names ([`invented_names`])
-    /// break faithfulness.
+    /// (heartbeat) only snemu has are behavior *QEMU* didn't reach before halting —
+    /// but that excuse holds *only if snemu itself reached the crash*
+    /// (`snemu_crashed`). Otherwise, and for any other only-snemu name, it's a
+    /// genuine invention ([`invented_names`]) and breaks faithfulness.
     fn faithful(&self) -> bool {
-        invented_names(&self.only_snemu).is_empty()
+        invented_names(&self.only_snemu, self.snemu_crashed).is_empty()
     }
 }
 
@@ -405,6 +424,7 @@ fn compare(
         vocab_shared: sv.intersection(&qv).count(),
         only_snemu: sv.difference(&qv).cloned().collect(),
         only_qemu: qv.difference(&sv).cloned().collect(),
+        snemu_crashed: snemu_reached_crash(&snemu),
         snemu_stop,
         divergence: d.divergence,
         snemu_timing,
@@ -713,14 +733,15 @@ fn print_detailed(cmp: &Comparison) {
     if !cmp.only_snemu.is_empty() {
         eprintln!("  only in snemu: {:?}", cmp.only_snemu);
     }
-    let invented = invented_names(&cmp.only_snemu);
+    let invented = invented_names(&cmp.only_snemu, cmp.snemu_crashed);
     if cmp.faithful() {
         if cmp.only_snemu.is_empty() {
             eprintln!("snemu-diff: PASS — snemu faithful to QEMU (nothing only-in-snemu).");
         } else {
             eprintln!(
                 "snemu-diff: PASS — only-in-snemu is recurring infra QEMU halted before \
-                 reaching ({:?}), not invented telemetry.",
+                 reaching ({:?}); snemu reached the crash too (panic frame present), so it's \
+                 a benign clock-ordering truncation, not invented telemetry.",
                 cmp.only_snemu
             );
         }
@@ -798,26 +819,43 @@ mod tests {
         OwnedFrame::StringRegister { id: StringId(id), value: value.to_string() }
     }
 
-    #[test]
-    fn kernel_heartbeat_alone_in_only_snemu_is_not_an_invention() {
-        // A deliberate-crash workload (`panic-now`, the stack-guard family) halts
-        // QEMU before its wall-clock reaches the first heartbeat; snemu's
-        // instruction-clock passes several "seconds" of the same boot and emits a
-        // few `kernel.heartbeat`s. That's recurring infra QEMU truncated, not
-        // telemetry snemu invented — so it must not count as unfaithful.
-        let only_snemu = vec!["kernel.heartbeat".to_string()];
-        assert!(invented_names(&only_snemu).is_empty());
+    fn log(msg: &str) -> OwnedFrame {
+        OwnedFrame::Log { msg: msg.to_string(), task_id: 0, t: 0, hart_id: 0 }
     }
 
     #[test]
-    fn a_workload_specific_only_snemu_name_is_still_an_invention() {
-        // Anything other than the recurring-infra names IS snemu emitting
-        // telemetry QEMU never would — a real divergence the filter must keep.
+    fn kernel_heartbeat_is_benign_only_when_snemu_reached_the_crash() {
+        // A deliberate-crash workload halts QEMU before its wall-clock reaches the
+        // first heartbeat, while snemu's instruction-clock emits a few first. That's
+        // recurring infra QEMU truncated — benign — but ONLY if snemu actually
+        // reached the crash. With the crash observed, `kernel.heartbeat` only in
+        // snemu is forgiven.
+        let only_snemu = vec!["kernel.heartbeat".to_string()];
+        assert!(invented_names(&only_snemu, true).is_empty());
+
+        // If snemu did NOT crash yet still emits heartbeats QEMU lacks, that's the
+        // "failed to halt" bug — snemu ran past where it should have died. Not
+        // forgiven: it counts as an invention.
+        assert_eq!(invented_names(&only_snemu, false), vec!["kernel.heartbeat"]);
+    }
+
+    #[test]
+    fn a_workload_specific_only_snemu_name_is_always_an_invention() {
+        // Anything other than the recurring-infra names IS snemu emitting telemetry
+        // QEMU never would — kept regardless of whether snemu crashed.
         let only_snemu = vec![
             "kernel.heartbeat".to_string(),
             "snitchos.task.ghost.runs_total".to_string(),
         ];
-        assert_eq!(invented_names(&only_snemu), vec!["snitchos.task.ghost.runs_total"]);
+        assert_eq!(invented_names(&only_snemu, true), vec!["snitchos.task.ghost.runs_total"]);
+    }
+
+    #[test]
+    fn snemu_reached_crash_keys_on_the_panic_log() {
+        // The panic handler emits `Log("kernel panic …")`; its presence proves
+        // snemu ran to the crash (just later than QEMU), not that it hung past it.
+        assert!(snemu_reached_crash(&[hello(), log("kernel panic: deliberate")]));
+        assert!(!snemu_reached_crash(&[hello(), span_start(1, 1)]));
     }
 
     #[test]
