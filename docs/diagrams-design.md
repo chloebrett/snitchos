@@ -108,6 +108,17 @@ decode path — no re-parsing, no bespoke reader. Two input modes:
 
 B2 has **no `--check` mode** — it's a snapshot of a run, not a contract.
 
+**`caps` shipped (first B2 target).** `diagram::caps::derivation_tree(&[OwnedFrame])`
+folds `CapEvent` frames by `parent_cap_id → cap_id` into a top-down `Graph`
+(TDD, pure). xtask's `diagram caps` sources the frames by booting under snemu
+(`snemu_diff::collect_frames`, default `init`, `--workload`/`--steps` overrides),
+writes `docs/generated/caps.md` (committed illustrative snapshot, **not** gated)
++ a gitignored `caps.svg`. A real `init` boot folds ~35 CapEvents into init → fs-server
+→ per-connection badged-endpoint branches. **Known refinement:** one-shot `Reply`
+caps are minted `parent_cap_id: 0`, so they render as isolated nodes — faithful,
+but noise in a derivation view. Candidate follow-ups: drop/collapse `Reply` caps,
+style roots distinctly, or annotate `Revoked`.
+
 ---
 
 ## The `xtask diagram` surface
