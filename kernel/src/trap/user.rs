@@ -140,6 +140,7 @@ pub static FS_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_ELF"))
 pub static FS_SERVER_SEEDED_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER_SEEDED_ELF"));
 pub static FS_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_CLIENT_ELF"));
 pub static SPAWN_IMAGE_DEMO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAWN_IMAGE_DEMO_ELF"));
+pub static SATISFIER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SATISFIER_ELF"));
 pub static IFACE_READER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_IFACE_READER_ELF"));
 
 /// The counter a U-mode page fault bumps — the isolation firewall doing its
@@ -367,6 +368,12 @@ pub static FS_SERVER_SEEDED: ProgramSpec =
 /// `workload=spawn-image`: reads `/bin/spawnee` off the (seeded) filesystem and
 /// spawns it via `SpawnImage`. Holds `SEND` on the FS endpoint (to read the ELF).
 pub static SPAWN_IMAGE_DEMO: ProgramSpec = ipc_user(SPAWN_IMAGE_DEMO_ELF, Rights::SEND.bits());
+
+/// `workload=manifest-satisfy`: the generic satisfier. Reads `/bin/fs-probe`'s
+/// declared `needs` off the seeded FS (`user.iface` xattr), matches them against
+/// its own caps via `hitch::satisfy`, and `SpawnImage`s the child with the granted
+/// handles. Holds `SEND` on the FS endpoint (to read + delegate).
+pub static SATISFIER: ProgramSpec = ipc_user(SATISFIER_ELF, Rights::SEND.bits());
 
 /// `workload=manifest-iface`: reads `/bin/manifest_demo`'s `user.iface` xattr off
 /// the seeded FS (over `GetXattr`), decodes it, and checks the shape — the
@@ -605,6 +612,17 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
         programs: &[
             ProgramSpawn { name: "fs_server", program: &FS_SERVER_SEEDED, priority: Priority::Normal },
             ProgramSpawn { name: "spawn_image_demo", program: &SPAWN_IMAGE_DEMO, priority: Priority::Normal },
+        ],
+    }),
+    // Generic satisfier: the seeded FS server (holding `/bin/fs-probe` + its
+    // `user.iface` xattr) plus the `satisfier`, which reads the child's declared
+    // `needs`, matches them via `hitch::satisfy`, and `SpawnImage`s the child with
+    // the granted `fs` cap — data-driven delegation, named on the wire.
+    (WorkloadKind::ManifestSatisfy, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "fs_server", program: &FS_SERVER_SEEDED, priority: Priority::Normal },
+            ProgramSpawn { name: "satisfier", program: &SATISFIER, priority: Priority::Normal },
         ],
     }),
     // Typed-interface end-to-end: the seeded FS server (holding

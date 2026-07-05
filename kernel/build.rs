@@ -44,6 +44,7 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("fs-server", "SNITCHOS_FS_SERVER_ELF"),
     ("fs-server-seeded", "SNITCHOS_FS_SERVER_SEEDED_ELF"),
     ("fs-client", "SNITCHOS_FS_CLIENT_ELF"),
+    ("satisfier", "SNITCHOS_SATISFIER_ELF"),
     ("spawn-image-demo", "SNITCHOS_SPAWN_IMAGE_DEMO_ELF"),
     ("notify_waiter", "SNITCHOS_NOTIFY_WAITER_ELF"),
     ("notify_signaller", "SNITCHOS_NOTIFY_SIGNALLER_ELF"),
@@ -127,6 +128,10 @@ fn build_and_embed_user(kernel_dir: &str) {
         &format!("{bin_dir}/manifest_demo"),
         &ws.join("fs-image/bin/manifest_demo"),
     );
+    // `fs-probe` is the child the `manifest-satisfy` workload's satisfier reads off
+    // the FS: its `.snitch.iface` note (extracted to a `user.iface` xattr) declares
+    // the `needs` the satisfier matches, and its ELF is what `SpawnImage` loads.
+    copy_if_different(&format!("{bin_dir}/fs-probe"), &ws.join("fs-image/bin/fs-probe"));
     build(&["fs"]);
 
     for (bin, env_var) in USER_PROGRAMS {

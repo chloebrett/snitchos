@@ -1309,6 +1309,26 @@ pub fn stack_guard_fault_detected(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// The kernel snitches its own panic on the structured channel (`workload=panic-now`).
+/// A kernel task calls `panic!()`; the panic handler emits a **telemetry `Log`**
+/// ("kernel panic") on the virtio-console, in addition to the emergency-UART
+/// message — best-effort and panic-safe (no alloc, no intern, non-blocking
+/// `try_lock`, single writer via the `PANICKING` guard). Asserts that `Log`
+/// reaches the wire: for an observability-first kernel, its own death is the one
+/// event most worth a frame, and this proves it's no longer UART-only. See
+/// `plans/panic-emits-telemetry.md`.
+pub fn kernel_panic_emits_frame(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 20, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. } if msg.contains("kernel panic"))
+    })
+    .ok_or(
+        "no Log containing 'kernel panic' within 20s — the panic handler's telemetry emit \
+         didn't reach the wire (console down, lock contended the whole time, or the \
+         panic-safe encode/send path regressed)",
+    )?;
+    Ok(())
+}
+
 /// Kernel-stack *deep* overflow reported cleanly (`workload=stack-overflow-deep`,
 /// Tier B + per-hart exception stack): a kernel task (`stack_overflow_deep`)
 /// recurses until it genuinely overflows its stack into the unmapped guard page.
@@ -2944,6 +2964,35 @@ pub fn manifest_iface_served(h: &mut View) -> Result<(), String> {
              (a broken link in note → extract → xattr → IPC → decode)"
         ));
     }
+    Ok(())
+}
+
+/// Generic satisfaction (`workload=manifest-satisfy`): the `satisfier` reads
+/// `fs-probe`'s declared `needs` off the FS (`user.iface` xattr), matches them
+/// against its own caps via `hitch::satisfy`, and `SpawnImage`s the child with the
+/// granted `fs` cap. Asserts (1) a `satisfy.fs` span — the satisfier naming the
+/// grant by *role* — and (2) `fs-probe` reaches the FS through the satisfied cap
+/// (`snitchos.fs_probe.reached == 1`), proving the data-driven, name-resolved
+/// delegation works end to end (needs → satisfy → delegate → `bootstrap().get`).
+pub fn manifest_satisfy_grants_by_name(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, strings| {
+        matches!(f, OwnedFrame::SpanStart { name_id, .. }
+            if strings.get(name_id).map(String::as_str) == Some("satisfy.fs"))
+    })
+    .ok_or(
+        "no `satisfy.fs` span within 30s — the satisfier didn't satisfy/name the `fs` slot \
+         (read needs → satisfy → grant broke)",
+    )?;
+
+    h.wait_for(SEC * 20, |f, strings| {
+        matches!(f, OwnedFrame::Metric { name_id, value, .. }
+            if strings.get(name_id).map(String::as_str) == Some("snitchos.fs_probe.reached")
+                && *value == 1)
+    })
+    .ok_or(
+        "no snitchos.fs_probe.reached == 1 within 20s — the satisfied `fs` cap didn't reach \
+         the live FS (delegation or `bootstrap().get` resolution failed)",
+    )?;
     Ok(())
 }
 

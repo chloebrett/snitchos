@@ -41,10 +41,51 @@ fn panic(info: &PanicInfo) -> ! {
         use core::fmt::Write;
         let mut uart = unsafe { uart::Uart16550::new(console::emergency_uart_base()) };
         let _ = writeln!(&mut uart, "Kernel panic: {}", info);
+
+        // Snitch the panic on the *structured* channel too, not just the UART —
+        // for an observability-first kernel, its own death is the one event most
+        // worth a frame. Best-effort and panic-safe (see `snitch_panic`).
+        snitch_panic();
     }
     loop {
         unsafe {
             asm!("wfi");
         }
+    }
+}
+
+/// Best-effort emit of a `kernel panic` telemetry frame on the virtio-console.
+///
+/// Panic-safe by construction, because a panic can fire from anywhere:
+/// - **no alloc / no intern** — [`kernel_core::panic_log::encode`] reuses
+///   `Frame::Log` (inlines its `&str`) and encodes into a fixed buffer;
+/// - **no blocking** — [`virtio_console::try_send_panic`](crate::virtio_console::try_send_panic)
+///   `try_lock`s the console and skips on contention (a hart may have panicked
+///   *mid-send*, already holding the lock — a blocking send would deadlock);
+/// - **single writer** — the `PANICKING` swap in [`panic`] admits exactly one
+///   hart into the panic branch, so this is the sole writer to the static buffer.
+///
+/// If the console isn't up yet, or its lock is held, the frame is silently
+/// dropped — the emergency-UART message already went out, so nothing is lost that
+/// a human can't see.
+fn snitch_panic() {
+    /// `.bss`-resident so its VA translates for the device (heap VAs don't); 256 B
+    /// matches the console staging buffer, with headroom for a richer message
+    /// (increment 6 of `plans/panic-emits-telemetry.md`).
+    static mut PANIC_FRAME_BUF: [u8; 256] = [0u8; 256];
+
+    let task_id = crate::sched::current_task_id().0;
+    let hart_id = crate::percpu::current_hartid() as u8;
+    let t = crate::tracing::timestamp();
+
+    // SAFETY: the `PANICKING` guard admits exactly one hart into the panic branch,
+    // so this is the sole writer to `PANIC_FRAME_BUF` — no aliasing.
+    #[allow(
+        clippy::deref_addrof,
+        reason = "the required &mut *(&raw mut STATIC) idiom; a direct &mut STATIC is forbidden"
+    )]
+    let buf = unsafe { &mut *(&raw mut PANIC_FRAME_BUF) };
+    if let Some(n) = kernel_core::panic_log::encode(buf, "kernel panic", task_id, t, hart_id) {
+        let _ = crate::virtio_console::try_send_panic(&buf[..n]);
     }
 }

@@ -422,6 +422,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::StitchFs)
         | Some(WorkloadKind::SpawnImage)
         | Some(WorkloadKind::ManifestIface)
+        | Some(WorkloadKind::ManifestSatisfy)
         | Some(WorkloadKind::Probe)
         | Some(WorkloadKind::StackGuard)
         | Some(WorkloadKind::PanicNow)
@@ -498,6 +499,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::StitchFs
                     | WorkloadKind::SpawnImage
                     | WorkloadKind::ManifestIface
+                    | WorkloadKind::ManifestSatisfy
                     | WorkloadKind::SpawnDemo
                     | WorkloadKind::SpawnReap
                     | WorkloadKind::WaitAny

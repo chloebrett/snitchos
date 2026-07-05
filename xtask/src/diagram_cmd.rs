@@ -61,8 +61,13 @@ pub fn itest_matrix(check: bool) -> ExitCode {
 /// Hand-drawn (bucket A) diagram docs — each a self-contained `.md` with one
 /// mermaid block. `svg` renders these to local SVGs. Add new hand-authored
 /// diagrams here.
-const HAND_DRAWN: &[&str] =
-    &["docs/memory-map.md", "docs/context-switch.md", "docs/boot-handoff.md"];
+const HAND_DRAWN: &[&str] = &[
+    "docs/memory-map.md",
+    "docs/context-switch.md",
+    "docs/boot-handoff.md",
+    "docs/ipc-call-reply.md",
+    "docs/stitch-pipeline.md",
+];
 
 /// Render every hand-drawn diagram doc's mermaid to a local SVG (gitignored)
 /// via `mmdc` (mermaid-cli). The committed `.md` stays the source of truth and

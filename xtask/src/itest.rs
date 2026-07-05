@@ -214,6 +214,7 @@ catalog! {
     wfi "stack-guard-fault-detected"      scenarios::stack_guard_fault_detected     [sched]         {"stack-guard"};
     wfi "deep-overflow-reports-cleanly"   scenarios::deep_overflow_reports_cleanly  [sched]         {"stack-overflow-deep"};
     wfi "boot-stack-guard-fault-detected" scenarios::boot_stack_guard_fault_detected [sched]        {"boot-stack-guard"};
+    wfi "kernel-panic-emits-frame"        scenarios::kernel_panic_emits_frame       [sched]         {"panic-now"};
     wfi "block-wake-smoke"                scenarios::block_wake_smoke               [sched]         {"block-wake"};
     wfi "ipc-message-crosses"             scenarios::ipc_message_crosses            [userspace, ipc] {"ipc"};
     wfi "ipc-trace-crosses"               scenarios::ipc_trace_crosses              [userspace, ipc] {"ipc"};
@@ -244,6 +245,7 @@ catalog! {
     wfi "stitch-fs-loads-nested"          scenarios::stitch_fs_loads_nested         [userspace, stitch, fs] {"stitch-fs"};
     wfi "spawn-image-loads-from-fs"       scenarios::spawn_image_loads_from_fs      [userspace, spawn, fs] {"spawn-image"};
     wfi "manifest-iface-served"           scenarios::manifest_iface_served          [userspace, fs] {"manifest-iface"};
+    wfi "manifest-satisfy-grants-by-name" scenarios::manifest_satisfy_grants_by_name [userspace, fs] {"manifest-satisfy"};
     wfi "stitch-reads-a-line"             scenarios::stitch_reads_a_line            [userspace, stitch] {"stitch-repl"};
     wfi "stitch-print-writes-to-console"  scenarios::stitch_print_writes_to_console [userspace, stitch] {"stitch-repl"};
     wfi "stitch-hold-lists-caps"          scenarios::stitch_hold_lists_caps         [userspace, stitch] {"stitch-repl"};

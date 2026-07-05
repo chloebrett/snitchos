@@ -119,6 +119,11 @@ pub enum WorkloadKind {
     /// `user.iface` xattr off the seeded FS, `decode_manifest`s it, and checks
     /// the shape — proving the `#[entry]` → note → xattr → IPC → decode chain.
     ManifestIface,
+    /// Generic satisfier: a `satisfier` reads `/bin/fs-probe`'s declared `needs`
+    /// off the seeded FS, matches them against its own caps via `hitch::satisfy`,
+    /// and `SpawnImage`s the child with the granted `fs` cap — data-driven
+    /// delegation (not hardcoded), named on the wire as `satisfy.<role>` spans.
+    ManifestSatisfy,
     /// v0.11 spawn-with-caps demo: a `spawner` parent that `Spawn`s a `spawnee`
     /// child at runtime, delegating its span cap. Proves the `Spawn` syscall
     /// carries delegated authority into a freshly-created process. See
@@ -288,6 +293,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "stitch-fs" => Some(WorkloadKind::StitchFs),
             "spawn-image" => Some(WorkloadKind::SpawnImage),
             "manifest-iface" => Some(WorkloadKind::ManifestIface),
+            "manifest-satisfy" => Some(WorkloadKind::ManifestSatisfy),
             "probe" => Some(WorkloadKind::Probe),
             "stack-guard" => Some(WorkloadKind::StackGuard),
             "panic-now" => Some(WorkloadKind::PanicNow),
@@ -445,6 +451,11 @@ mod tests {
     #[test]
     fn selects_manifest_iface() {
         assert_eq!(select("workload=manifest-iface"), Some(WorkloadKind::ManifestIface));
+    }
+
+    #[test]
+    fn selects_manifest_satisfy() {
+        assert_eq!(select("workload=manifest-satisfy"), Some(WorkloadKind::ManifestSatisfy));
     }
 
     #[test]

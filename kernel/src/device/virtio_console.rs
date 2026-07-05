@@ -290,9 +290,6 @@ pub fn send(bytes: &[u8]) {
 /// consistent, idle state. `transmit` spins to completion before we release the
 /// guard, so the device has finished reading the buffer by the time we return —
 /// fine on a halting kernel.
-// The caller is the panic handler (increment 4 of
-// plans/panic-emits-telemetry.md); this `allow` goes away when it lands.
-#[allow(dead_code, reason = "wired into the panic handler next")]
 #[must_use]
 pub fn try_send_panic(bytes: &[u8]) -> bool {
     let Some(handle) = CONSOLE.get() else {
