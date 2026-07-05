@@ -160,7 +160,7 @@ macro_rules! catalog {
         $( [ $( $tag:ident ),* $(,)? ] )?
         $( { $wl:literal } )?
     );* $(;)? ) => {
-        const SCENARIOS: &[Scenario] = &[ $(
+        pub(crate) const SCENARIOS: &[Scenario] = &[ $(
             catalog!(@meta $profile $name)
                 $( .tagged(&[ $( stringify!($tag) ),* ]) )?
                 $( .on_workload($wl) )?
@@ -226,6 +226,7 @@ catalog! {
     wfi "badge-mint-mints-and-refuses"    scenarios::badge_mint_mints_and_refuses   [userspace, ipc] {"badge-mint"};
     wfi "badge-handout-transfers-cap"     scenarios::badge_handout_transfers_cap    [userspace, ipc] {"badge-handout"};
     wfi "badge-demux-distinguishes-clients" scenarios::badge_demux_distinguishes_clients [userspace, ipc] {"badge-handout"};
+    wfi "badge-handout-links-derivation"  scenarios::badge_handout_links_derivation  [userspace, ipc] {"badge-handout"};
     wfi "fs-connect-mints-root"           scenarios::fs_connect_mints_root          [userspace, ipc] {"fs"};
     wfi "fs-stat-root"                    scenarios::fs_stat_root                   [userspace, ipc] {"fs"};
     wfi "fs-create-stat"                  scenarios::fs_create_then_stat            [userspace, ipc] {"fs"};
@@ -248,6 +249,7 @@ catalog! {
     wfi "stitch-hold-lists-caps"          scenarios::stitch_hold_lists_caps         [userspace, stitch] {"stitch-repl"};
     wfi "stitch-view-reads-a-file"        scenarios::stitch_view_reads_a_file       [userspace, stitch, fs] {"stitch-fs"};
     wfi "stitch-cross-pipe-runs-a-stage"  scenarios::stitch_cross_pipe_runs_a_stage [userspace, stitch, fs] {"stitch-fs"};
+    wfi "stitch-grant-revoke-capevents"   scenarios::stitch_grant_then_revoke_snitches_capevents [userspace, stitch, fs] {"stitch-fs"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
     cpu "virtio-storm"                    scenarios::virtio_storm                   [smp, stress]   {"virtio-storm"};
     // Userspace scenarios are wfi-bounded: `hello` exits (hart 1 falls back

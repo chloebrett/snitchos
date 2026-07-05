@@ -19,6 +19,7 @@ graph LR
     protocol["protocol"]
     ramfs["ramfs"]
     snemu["snemu"]
+    snip["snip"]
     snitchos_abi["snitchos-abi"]
     snitchos_std["snitchos-std"]
     snitchos_user["snitchos-user"]
@@ -41,6 +42,7 @@ graph LR
     hello --> stitch
     hitch --> hitch_derive
     hitch --> hitch_pod
+    hitch --> snitchos_abi
     hitch_pod --> hitch_derive
     kernel --> hitch_pod
     kernel --> kernel_core
@@ -64,5 +66,6 @@ graph LR
     xtask --> itest_harness
     xtask --> protocol
     xtask --> snemu
+    xtask --> snip
     xtask --> snitchos_abi
 ```

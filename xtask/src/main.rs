@@ -9,6 +9,7 @@ mod loc;
 mod measure;
 mod qemu;
 mod snemu_diff;
+mod snip;
 mod source;
 
 const COLLECTOR_BIN: &str = "target/debug/collector";
@@ -356,6 +357,36 @@ enum Cmd {
         #[arg(long)]
         grep: Option<String>,
     },
+    /// Sonnet-assisted staging for parallel-agent workflows. You write the
+    /// commit message; Sonnet picks which of the many concurrent working-tree
+    /// changes belong to it. Three steps:
+    ///   `snip "<msg>"`   propose (asks claude, writes .git/snip-plan.json)
+    ///   `snip --stage`   `git add` the proposed files (then inspect `git diff --cached`)
+    ///   `snip --commit`  `git commit` the plan's message
+    ///
+    /// The agent never runs git — this xtask binary does, after you approve.
+    Snip {
+        /// Commit message to triage for. Omit when using --stage or --commit.
+        message: Option<String>,
+        /// Diffstat-free payload (filenames + status only). Fastest, coarser.
+        #[arg(long, default_value_t = false)]
+        fast: bool,
+        /// Propose and immediately `git add` (still leaves commit separate).
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+        /// `git add` the files from the last proposal.
+        #[arg(long, default_value_t = false)]
+        stage: bool,
+        /// `git commit` the last proposal's message, then clear the plan.
+        #[arg(long, default_value_t = false)]
+        commit: bool,
+        /// Proceed despite working-tree drift or low overall confidence.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        /// Pass `--no-verify` through to `git commit`.
+        #[arg(long, default_value_t = false)]
+        no_verify: bool,
+    },
 }
 
 /// Failure-capture transcript depth for `cargo xtask itest --capture`.
@@ -402,6 +433,8 @@ impl From<CaptureArg> for itest_harness::CaptureLevel {
 enum DiagramTarget {
     /// Workspace crate dependency graph, from `cargo metadata`.
     Deps,
+    /// Integration-test scenario/workload matrix, from the `SCENARIOS` registry.
+    ItestMatrix,
 }
 
 /// Scenario classification filter for `cargo xtask itest --profile`.
@@ -608,12 +641,27 @@ fn main() -> ExitCode {
         Cmd::Baseline { cmd } => baseline(cmd),
         Cmd::Diagram { target, check } => match target {
             DiagramTarget::Deps => diagram_cmd::deps(check),
+            DiagramTarget::ItestMatrix => diagram_cmd::itest_matrix(check),
         },
         Cmd::Loc => loc::run(),
         Cmd::Audit { crate_name, json, include_short } => {
             audit::run(&crate_name, json, include_short)
         }
         Cmd::Debug { features } => debug(&features),
+        Cmd::Snip { message, fast, yes, stage, commit, force, no_verify } => {
+            if commit {
+                snip::commit(no_verify)
+            } else if stage {
+                snip::stage(force)
+            } else if let Some(message) = message {
+                snip::propose(&message, fast, yes, force)
+            } else {
+                eprintln!(
+                    "snip: provide a commit message to propose, or --stage / --commit to finalize"
+                );
+                ExitCode::from(1)
+            }
+        }
     }
 }
 

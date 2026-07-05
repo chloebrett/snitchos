@@ -60,9 +60,52 @@ impl Graph {
     }
 }
 
+/// A markdown table — for tabular diagrams (e.g. the itest scenario/workload
+/// matrix) that read better as a grid than as a node graph. Rows keep
+/// insertion order so the emitted markdown is deterministic.
+pub struct Table {
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+impl Table {
+    pub fn new(headers: &[&str]) -> Self {
+        Self { headers: headers.iter().map(|h| (*h).to_string()).collect(), rows: Vec::new() }
+    }
+
+    pub fn row(&mut self, cells: &[&str]) {
+        self.rows.push(cells.iter().map(|c| (*c).to_string()).collect());
+    }
+
+    pub fn to_markdown(&self) -> String {
+        let render = |cells: &[String]| format!("| {} |", cells.join(" | "));
+        let separator = vec!["---".to_string(); self.headers.len()];
+        std::iter::once(render(&self.headers))
+            .chain(std::iter::once(render(&separator)))
+            .chain(self.rows.iter().map(|r| render(r)))
+            .map(|line| line + "\n")
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emits_a_markdown_table() {
+        let mut t = Table::new(&["Scenario", "Workload"]);
+        t.row(&["boot-reaches-heartbeat", "demo"]);
+        t.row(&["default-boot-starts-init", "init (default)"]);
+
+        let expected = "\
+| Scenario | Workload |
+| --- | --- |
+| boot-reaches-heartbeat | demo |
+| default-boot-starts-init | init (default) |
+";
+        assert_eq!(t.to_markdown(), expected);
+    }
 
     #[test]
     fn emits_a_dot_digraph_for_local_graphviz_rendering() {

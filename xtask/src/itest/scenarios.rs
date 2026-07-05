@@ -451,6 +451,45 @@ pub fn stitch_cross_pipe_runs_a_stage(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// `workload=stitch-fs`: the shell's grant→revoke loop, on the metal. The REPL
+/// holds a `SEND | MINT` endpoint cap at handle 2; `grant(2, 777, "SEND")` mints a
+/// badged `SEND` child (the `MintBadged` syscall → `CapEvent::Transferred{Endpoint,
+/// badge}`), then `revoke(2)` reclaims it (the `Revoke` syscall → a
+/// `CapEvent::Revoked` carrying the same badge). Proves both shell verbs drive the
+/// real syscalls end-to-end, and each surfaces as its own `CapEvent` — least
+/// authority you can watch on the wire. The badge (`777`) ties the revoke to the
+/// exact cap the grant minted.
+pub fn stitch_grant_then_revoke_snitches_capevents(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+    const BADGE: u64 = 777;
+
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+
+    // grant: mint a badged SEND cap derived from the MINT endpoint at handle 2.
+    h.send_input(b"grant(2, 777, \"SEND\")\n")
+        .map_err(|e| format!("inject REPL input: {e}"))?;
+    h.wait_for(SEC * 30, |f, _| {
+        matches!(f, OwnedFrame::CapEvent { kind: CapEventKind::Transferred, object: CapObject::Endpoint, badge, .. }
+            if *badge == BADGE)
+    })
+    .ok_or(
+        "no CapEvent::Transferred{Endpoint, badge=777} within 30s — grant didn't mint on the metal",
+    )?;
+
+    // revoke: reclaim what handle 2 derived — the just-minted child.
+    h.send_input(b"revoke(2)\n")
+        .map_err(|e| format!("inject REPL input: {e}"))?;
+    h.wait_for(SEC * 30, |f, _| {
+        matches!(f, OwnedFrame::CapEvent { kind: CapEventKind::Revoked, badge, .. } if *badge == BADGE)
+    })
+    .ok_or(
+        "no CapEvent::Revoked{badge=777} within 30s — revoke didn't reclaim the granted cap",
+    )?;
+
+    Ok(())
+}
+
 pub fn heap_oom(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
@@ -1642,6 +1681,53 @@ pub fn badge_handout_transfers_cap(h: &mut View) -> Result<(), String> {
     .ok_or(
         "no CapEvent::Transferred{Endpoint, badge=0xBEE1} within 30s — the server didn't \
          mint + hand back a badged cap",
+    )?;
+    Ok(())
+}
+
+/// F1 (handout half): a cap handed to a client via `reply` must keep its place in
+/// the derivation tree — the client's holding's `parent_cap_id` links to the
+/// server's minted holding it was moved from. Without that link the handed-out cap
+/// is a root-parented orphan (`parent_cap_id == 0`) that `Revoke` can't reach and
+/// the host-reconstructed cap tree can't attribute.
+///
+/// On the `badge-handout` workload the server mints a badged `SEND` (a
+/// `Transferred{0xBEE1}` into its *own* table, parented at the endpoint) then hands
+/// it back in the `reply` (a second `Transferred{0xBEE1}`, now into the *client*).
+/// The mint is snitched before the handout (mint → reply → client resume), so we
+/// accumulate every `0xBEE1` holding's `cap_id` and succeed when a later handout's
+/// `parent_cap_id` names one of them — i.e. the handout is recorded as *derived
+/// from* the mint. Impossible while the handout is emitted with `parent_cap_id == 0`.
+pub fn badge_handout_links_derivation(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+
+    let seen: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
+    h.wait_for(SEC * 20, |f, _| {
+        if let OwnedFrame::CapEvent {
+            kind: CapEventKind::Transferred,
+            object: CapObject::Endpoint,
+            badge,
+            cap_id,
+            parent_cap_id,
+            ..
+        } = f
+            && *badge == 0xBEE1
+        {
+            // A handout whose parent is an already-seen 0xBEE1 holding = the
+            // derivation edge survived the reply transfer.
+            if *parent_cap_id != 0 && seen.borrow().contains(parent_cap_id) {
+                return true;
+            }
+            seen.borrow_mut().insert(*cap_id);
+        }
+        false
+    })
+    .ok_or(
+        "no handout Transferred{0xBEE1} linked to the mint it came from — the handed-out cap \
+         is a parent_cap_id==0 orphan (F1 handout half); Revoke can't reach it, the derivation \
+         tree can't attribute it",
     )?;
     Ok(())
 }
