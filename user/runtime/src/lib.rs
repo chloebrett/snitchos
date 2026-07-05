@@ -724,6 +724,11 @@ pub use snitchos_abi::MSG_WORDS;
 /// source of truth the kernel reads. Pass these to [`Endpoint::mint_badged`].
 pub use snitchos_abi::rights;
 
+/// Capability object kinds (`object_kind::ENDPOINT`, …) — re-exported from the
+/// shared [`snitchos_abi::object_kind`] ABI. Used by `#[entry(needs = [...])]` to
+/// name the object a manifest [`Slot`](hitch::Slot) requires.
+pub use snitchos_abi::object_kind;
+
 #[derive(Clone, Copy)]
 pub struct Endpoint {
     handle: usize,

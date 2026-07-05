@@ -1,8 +1,8 @@
 //! Demonstrates `#[entry]`'s manifest clause: the typed `~>`-stage interface is
 //! const-encoded into a `.snitch.iface` ELF note (the seed step lifts that
 //! into the program's `user.iface` xattr). This stage reads a `Row`, produces a
-//! `u64`, and declares it uses `ConsoleOut`. It just yields forever — the point
-//! is the section, not the behavior.
+//! `u64`, and declares one authority slot — an `Endpoint` with `SEND` under the
+//! role `fs`. It just yields forever — the point is the section, not the behavior.
 
 #![no_std]
 #![no_main]
@@ -17,7 +17,7 @@ struct Row {
     count: i64,
 }
 
-#[entry(in = Row, out = u64, uses = [ConsoleOut])]
+#[entry(in = Row, out = u64, needs = [("fs", ENDPOINT, SEND)])]
 fn main() {
     loop {
         yield_now();

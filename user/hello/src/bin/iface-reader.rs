@@ -12,7 +12,7 @@
 
 use fs_proto::{FileRights, Op, Request, Response, UserBuf, XattrKey};
 use hitch::{Manifest, TypeSchema, decode_manifest};
-use snitchos_user::{Endpoint, endpoint, entry, register_gauge};
+use snitchos_user::{Endpoint, endpoint, entry, object_kind, register_gauge, rights};
 
 /// Resolve `path` to a File cap by attaching to the FS (badge-0 send mints the
 /// root cap) and walking each `/`-component with `Lookup`.
@@ -47,7 +47,7 @@ fn read_manifest() -> Option<Manifest> {
     decode_manifest(&buf[..n]).ok()
 }
 
-/// Does the manifest match `#[entry(in = Row, out = u64, uses = [ConsoleOut])]`
+/// Does the manifest match `#[entry(in = Row, out = u64, needs = [("fs", ENDPOINT, SEND)])]`
 /// with `Row { name: u32, count: i64 }`?
 fn shape_matches(m: &Manifest) -> bool {
     let input_ok = matches!(
@@ -55,8 +55,11 @@ fn shape_matches(m: &Manifest) -> bool {
         Some(TypeSchema::Product { fields, .. }) if fields.len() == 2
     );
     let output_ok = m.output == TypeSchema::U64;
-    let uses_ok = m.uses.len() == 1 && m.uses[0] == "ConsoleOut";
-    input_ok && output_ok && uses_ok
+    let needs_ok = m.needs.len() == 1
+        && m.needs[0].name == "fs"
+        && m.needs[0].object == object_kind::ENDPOINT as u8
+        && m.needs[0].rights == rights::SEND;
+    input_ok && output_ok && needs_ok
 }
 
 #[entry]

@@ -28,6 +28,9 @@ postcard = { version = "1", default-features = false, features = ["alloc"] }
 [dev-dependencies]
 # Tests deriving `Pod` need to name `hitch_pod` (the path the derive emits).
 hitch-pod = { path = "../hitch-pod", features = ["derive"] }
+# Manifest `Slot` tests assert the object/rights discriminants mirror the ABI's
+# (the single source of truth); dev-only, no library dependency on `abi`.
+snitchos-abi = { path = "../abi" }
 
 [lints]
 workspace = true

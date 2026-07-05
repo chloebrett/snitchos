@@ -13,7 +13,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{bracketed, parse_quote, Ident, ItemFn, Token, Type};
+use syn::{bracketed, parenthesized, parse_quote, Expr, Ident, ItemFn, LitStr, Token, Type};
 
 /// Mark the entry function of a SnitchOS userspace program.
 ///
@@ -38,18 +38,41 @@ pub fn entry(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// The interface declared by an `#[entry(..)]` clause. Types feed
-/// `<T as hitch::Schema>::SCHEMA`; `uses` are bare effect names, stringified.
+/// `<T as hitch::Schema>::SCHEMA`; `needs` are typed authority slots.
 struct ManifestArgs {
     input: Option<Type>,
     output: Type,
-    uses: Vec<Ident>,
+    needs: Vec<SlotArg>,
+}
+
+/// One `needs` entry: `("role", ObjectKind, rights_expr)` — e.g.
+/// `("fs", ENDPOINT, SEND)`. `object` is an `abi::object_kind` constant name and
+/// `rights` an expression over `abi::rights` constants; both are reached through the
+/// runtime's re-exports at emit time (`::snitchos_user::object_kind` / `::rights`).
+struct SlotArg {
+    name: LitStr,
+    object: Ident,
+    rights: Expr,
+}
+
+impl Parse for SlotArg {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let content;
+        parenthesized!(content in input);
+        let name: LitStr = content.parse()?;
+        content.parse::<Token![,]>()?;
+        let object: Ident = content.parse()?;
+        content.parse::<Token![,]>()?;
+        let rights: Expr = content.parse()?;
+        Ok(SlotArg { name, object, rights })
+    }
 }
 
 impl Parse for ManifestArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut in_ty: Option<Type> = None;
         let mut out_ty: Option<Type> = None;
-        let mut uses: Vec<Ident> = Vec::new();
+        let mut needs: Vec<SlotArg> = Vec::new();
         while !input.is_empty() {
             // `in` is a keyword, so it is matched as a token rather than an ident.
             if input.peek(Token![in]) {
@@ -61,17 +84,17 @@ impl Parse for ManifestArgs {
                 input.parse::<Token![=]>()?;
                 match key.to_string().as_str() {
                     "out" => out_ty = Some(input.parse()?),
-                    "uses" => {
+                    "needs" => {
                         let content;
                         bracketed!(content in input);
-                        uses = Punctuated::<Ident, Token![,]>::parse_terminated(&content)?
+                        needs = Punctuated::<SlotArg, Token![,]>::parse_terminated(&content)?
                             .into_iter()
                             .collect();
                     }
                     other => {
                         return Err(syn::Error::new(
                             key.span(),
-                            format!("unknown `entry` key `{other}` (expected `in`, `out`, `uses`)"),
+                            format!("unknown `entry` key `{other}` (expected `in`, `out`, `needs`)"),
                         ));
                     }
                 }
@@ -84,7 +107,7 @@ impl Parse for ManifestArgs {
         }
         let output =
             out_ty.ok_or_else(|| input.error("`#[entry(..)]` manifest requires `out = T`"))?;
-        Ok(ManifestArgs { input: in_ty, output, uses })
+        Ok(ManifestArgs { input: in_ty, output, needs })
     }
 }
 
@@ -134,12 +157,23 @@ fn manifest_items(args: &ManifestArgs) -> TokenStream2 {
         None => quote! { ::core::option::Option::None },
     };
     let output = &args.output;
-    let uses = args.uses.iter().map(ToString::to_string);
+    let slots = args.needs.iter().map(|s| {
+        let name = &s.name;
+        let object = &s.object;
+        let rights = &s.rights;
+        quote! {
+            hitch::ConstSlot {
+                name: #name,
+                object: ::snitchos_user::object_kind::#object as u8,
+                rights: { use ::snitchos_user::rights::*; #rights },
+            }
+        }
+    });
     quote! {
         const __SNITCH_MANIFEST: hitch::ConstManifest = hitch::ConstManifest {
             input: #input,
             output: <#output as hitch::Schema>::SCHEMA,
-            uses: &[ #(#uses),* ],
+            needs: &[ #(#slots),* ],
         };
         #[unsafe(link_section = ".snitch.iface")]
         #[used]
@@ -198,7 +232,7 @@ mod tests {
     #[test]
     fn a_manifest_clause_emits_the_note_static() {
         let out = expand_entry(
-            quote! { in = Row, out = Table, uses = [FsRead, ConsoleOut] },
+            quote! { in = Row, out = Table, needs = [("fs", ENDPOINT, SEND)] },
             quote! { fn main() {} },
         )
         .to_string();
@@ -208,10 +242,11 @@ mod tests {
         assert!(out.contains("encode_manifest"), "const-encodes the manifest: {out}");
         assert!(out.contains("Row"), "input type referenced: {out}");
         assert!(out.contains("Table"), "output type referenced: {out}");
-        assert!(
-            out.contains("FsRead") && out.contains("ConsoleOut"),
-            "uses listed: {out}"
-        );
+        // The typed slot: a `ConstSlot` naming the role, its object kind, and rights.
+        assert!(out.contains("ConstSlot"), "emits a typed slot: {out}");
+        assert!(out.contains("\"fs\""), "slot role name listed: {out}");
+        assert!(out.contains("ENDPOINT"), "slot object kind listed: {out}");
+        assert!(out.contains("SEND"), "slot rights listed: {out}");
     }
 
     #[test]

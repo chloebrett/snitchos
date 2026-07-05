@@ -270,7 +270,16 @@ pub fn manifest_of_main(items: &[Item]) -> Result<hitch::Manifest, RuntimeError>
         .ok_or_else(|| RuntimeError::new("a stage `main` must declare its return type"))?;
     let output = type_to_schema(ret, &defs)?;
 
-    Ok(hitch::Manifest { input, output, uses: uses.clone() })
+    // Stitch effect names (`uses C`) become **name-only** authority slots: the
+    // effect → typed-capability (object/rights) mapping is deferred to the
+    // manifest-v2 vocabulary (Q5), so `object`/`rights` are `0` placeholders and the
+    // interface carries just the declared role names. Language-side authority is
+    // still enforced via `method.uses` / `with_authority`.
+    let needs = uses
+        .iter()
+        .map(|name| hitch::Slot { name: name.clone(), object: 0, rights: 0 })
+        .collect();
+    Ok(hitch::Manifest { input, output, needs })
 }
 
 #[cfg(test)]
@@ -388,11 +397,18 @@ mod tests {
     }
 
     #[test]
-    fn manifest_of_main_reads_input_output_and_uses() {
+    fn manifest_of_main_reads_input_output_and_needs() {
         let m = manifest(r"main(x: Int) -> List<Str> uses FsRead, ConsoleOut = []").expect("manifest");
         assert_eq!(m.input, Some(hitch::TypeSchema::I64));
         assert_eq!(m.output, hitch::TypeSchema::Seq(Box::new(hitch::TypeSchema::Str)));
-        assert_eq!(m.uses, vec!["FsRead".to_string(), "ConsoleOut".to_string()]);
+        // Effect names become name-only slots (object/rights unresolved → 0).
+        assert_eq!(
+            m.needs,
+            vec![
+                hitch::Slot { name: "FsRead".into(), object: 0, rights: 0 },
+                hitch::Slot { name: "ConsoleOut".into(), object: 0, rights: 0 },
+            ],
+        );
     }
 
     #[test]
@@ -400,7 +416,7 @@ mod tests {
         let m = manifest(r"main() -> Int = 0").expect("manifest");
         assert_eq!(m.input, None);
         assert_eq!(m.output, hitch::TypeSchema::I64);
-        assert!(m.uses.is_empty());
+        assert!(m.needs.is_empty());
     }
 
     #[test]

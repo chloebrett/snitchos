@@ -162,13 +162,26 @@ impl TypeSchema {
 /// `in`) and the shell reads to decide which caps to grant a spawned stage.
 ///
 /// `input` is `None` for a **source** (a stage with no upstream input, a zero-param
-/// `main`). `uses` are the declared effect names (the soft authority layer; see the
-/// userland doc §5).
+/// `main`). `needs` are the typed authority slots the program requires (the manifest
+/// v2 shape — see `docs/manifest-design.md`); a satisfier grants each from its own
+/// caps.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub input: Option<TypeSchema>,
     pub output: TypeSchema,
-    pub uses: Vec<String>,
+    pub needs: Vec<Slot>,
+}
+
+/// A typed authority requirement — one entry of a [`Manifest`]'s `needs`. The child
+/// declares "I need an `object`-kind capability carrying at least `rights`, under the
+/// local role `name`"; a satisfier resolves it against its own caps. `object` and
+/// `rights` mirror the ABI's `object_kind` / `rights` discriminants (the single source
+/// of truth) — stored raw (`u8`/`u32`) so `hitch` keeps no dependency on `abi`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slot {
+    pub name: String,
+    pub object: u8,
+    pub rights: u32,
 }
 
 /// The const-constructible twin of [`TypeSchema`]: the same shape, but built from
@@ -298,13 +311,28 @@ impl Schema for String {
 /// the right failure; bump this if a real interface needs more.
 pub const MANIFEST_BYTES: usize = 1024;
 
+/// Manifest note format version — the first payload byte (at offset 4, after the
+/// 4-byte length prefix, so the FS seed's length-based padding trim is unaffected).
+/// Bumped on any incompatible change to the encoding below; [`decode_manifest`]
+/// rejects an unknown version rather than misparsing it.
+pub const MANIFEST_VERSION: u8 = 1;
+
 /// The const-constructible form of a [`Manifest`]: built from [`ConstSchema`] +
 /// `&'static` data so it can be `const`-encoded into a `#[link_section]` static by
-/// [`encode_manifest`]. `#[entry(in, out, uses)]` builds one of these.
+/// [`encode_manifest`]. `#[entry(in, out, needs)]` builds one of these.
 pub struct ConstManifest {
     pub input: Option<ConstSchema>,
     pub output: ConstSchema,
-    pub uses: &'static [&'static str],
+    pub needs: &'static [ConstSlot],
+}
+
+/// The const-constructible twin of [`Slot`] — a `&'static str` name so a slot can live
+/// in a `#[link_section]` static. `#[entry(needs = [...])]` builds these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConstSlot {
+    pub name: &'static str,
+    pub object: u8,
+    pub rights: u32,
 }
 
 const fn put_tag(tag: u8, buf: &mut [u8], pos: usize) -> usize {
@@ -397,6 +425,7 @@ const fn put_schema(schema: &ConstSchema, buf: &mut [u8], pos: usize) -> usize {
 pub const fn encode_manifest(manifest: &ConstManifest) -> [u8; MANIFEST_BYTES] {
     let mut buf = [0u8; MANIFEST_BYTES];
     let mut pos = 4;
+    pos = put_tag(MANIFEST_VERSION, &mut buf, pos);
     pos = match &manifest.input {
         Some(schema) => {
             let pos = put_tag(1, &mut buf, pos);
@@ -405,10 +434,13 @@ pub const fn encode_manifest(manifest: &ConstManifest) -> [u8; MANIFEST_BYTES] {
         None => put_tag(0, &mut buf, pos),
     };
     pos = put_schema(&manifest.output, &mut buf, pos);
-    pos = put_u32(manifest.uses.len() as u32, &mut buf, pos);
+    pos = put_u32(manifest.needs.len() as u32, &mut buf, pos);
     let mut i = 0;
-    while i < manifest.uses.len() {
-        pos = put_str(manifest.uses[i], &mut buf, pos);
+    while i < manifest.needs.len() {
+        let slot = &manifest.needs[i];
+        pos = put_str(slot.name, &mut buf, pos);
+        pos = put_tag(slot.object, &mut buf, pos);
+        pos = put_u32(slot.rights, &mut buf, pos);
         i += 1;
     }
     let prefix = ((pos - 4) as u32).to_le_bytes();
@@ -483,23 +515,30 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Manifest, Error> {
     let total = bytes.len();
     let mut cur = Cursor { bytes };
     let payload_len = cur.u32()?;
+    // Format version — reject an unknown version rather than misparsing it.
+    if cur.array::<1>()?[0] != MANIFEST_VERSION {
+        return Err(Error::SchemaMismatch);
+    }
     let input = match cur.array::<1>()?[0] {
         0 => None,
         1 => Some(read_manifest_schema(&mut cur)?),
         _ => return Err(Error::SchemaMismatch),
     };
     let output = read_manifest_schema(&mut cur)?;
-    let uses_count = cur.u32()?;
-    let mut uses = Vec::new();
-    for _ in 0..uses_count {
-        uses.push(read_manifest_str(&mut cur)?);
+    let needs_count = cur.u32()?;
+    let mut needs = Vec::new();
+    for _ in 0..needs_count {
+        let name = read_manifest_str(&mut cur)?;
+        let object = cur.array::<1>()?[0];
+        let rights = u32::try_from(cur.u32()?).map_err(|_| Error::SchemaMismatch)?;
+        needs.push(Slot { name, object, rights });
     }
     // The 4-byte prefix must match what the body actually consumed — a guard
     // against a corrupt or truncated note (and the prefix's reason to exist).
     if total - cur.bytes.len() - 4 != payload_len {
         return Err(Error::SchemaMismatch);
     }
-    Ok(Manifest { input, output, uses })
+    Ok(Manifest { input, output, needs })
 }
 
 /// The Plain-Old-Data primitive: [`Pod`], the zero-copy [`pod_bytes`], and
