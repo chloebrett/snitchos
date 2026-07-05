@@ -39,7 +39,8 @@ follow-up: a new `ClockFreq` syscall plumbs the DTB timebase to userspace so
 (and `stitch_repl` dropped its `TICKS_PER_MS = 10_000` hardcode). #4 also surfaced
 + fixed a latent build-staleness bug (`kernel/build.rs` now derives its
 `rerun-if-changed` set from `cargo metadata` + `USER_PROGRAMS`). #1–#3 (the big
-cluster) and #6 (supervision tree) outstanding.
+cluster) outstanding. #6 (supervision tree) has a design —
+[supervision-design.md](supervision-design.md) — but is unbuilt.
 
 Central framing: this isn't really a userland yet — it's a museum of
 kernel-feature demos wearing userland clothes. ~35 binaries, nearly all existing
