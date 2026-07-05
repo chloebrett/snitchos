@@ -159,6 +159,11 @@ pub(crate) const NATIVES: &[NativeFn] = &[
         func: native_length,
     },
     NativeFn {
+        name: "strSlice",
+        arity: 3,
+        func: native_slice,
+    },
+    NativeFn {
         name: "strTrim",
         arity: 1,
         func: native_trim,
@@ -512,6 +517,28 @@ fn native_length(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     };
     let count = expect_str("Str.length", s)?.chars().count();
     Ok(Value::Int(i64::try_from(count).unwrap_or(i64::MAX)))
+}
+
+/// `Str.slice(s, start, end)` — the char-indexed, half-open substring `[start,
+/// end)`. Indices count Unicode scalars (like `Str.length`) and clamp to
+/// `[0, length]`; a `start >= end` (after clamping, negatives → 0) yields `""`.
+fn native_slice(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [s, start, end] = args else {
+        return Err(RuntimeError::new("Str.slice expects (s, start, end)"));
+    };
+    let text = expect_str("Str.slice", s)?;
+    let (Value::Int(start), Value::Int(end)) = (start, end) else {
+        return Err(RuntimeError::new("Str.slice expects (s, start, end) with Int bounds"));
+    };
+    let len = text.chars().count();
+    // Negatives clamp to 0; anything past the end clamps to `len`.
+    let clamp = |i: i64| usize::try_from(i).unwrap_or(0).min(len);
+    let (start, end) = (clamp(*start), clamp(*end));
+    if start >= end {
+        return Ok(Value::Str("".into()));
+    }
+    let sliced: String = text.chars().skip(start).take(end - start).collect();
+    Ok(Value::Str(sliced.into()))
 }
 
 /// `Str.trim(s)` — `s` with surrounding whitespace removed.
@@ -1219,6 +1246,20 @@ mod tests {
     fn str_length_counts_chars() {
         assert_eq!(run_str(r#"Str.length("hello")"#), Value::Int(5));
         assert_eq!(run_str(r#"Str.length("")"#), Value::Int(0));
+    }
+
+    #[test]
+    fn str_slice_takes_a_char_indexed_half_open_substring() {
+        // Interior `[start, end)`, char-indexed (like `Str.length`).
+        assert_eq!(run_str(r#"Str.slice("hello", 1, 3)"#), Value::Str("el".into()));
+        // The whole string, exactly and via a high clamp.
+        assert_eq!(run_str(r#"Str.slice("hello", 0, 5)"#), Value::Str("hello".into()));
+        assert_eq!(run_str(r#"Str.slice("hello", 0, 99)"#), Value::Str("hello".into()));
+        // Empty when `start >= end` (equal, and crossed).
+        assert_eq!(run_str(r#"Str.slice("hello", 3, 3)"#), Value::Str("".into()));
+        assert_eq!(run_str(r#"Str.slice("hello", 4, 2)"#), Value::Str("".into()));
+        // Char-indexed, not byte-indexed: `é` is one char.
+        assert_eq!(run_str(r#"Str.slice("héllo", 1, 3)"#), Value::Str("él".into()));
     }
 
     #[test]

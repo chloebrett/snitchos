@@ -322,6 +322,7 @@ const BUILTIN_MODULE_SPECS: &[(&str, &[(&str, &str)])] = &[
             ("upper", "strUpper"),
             ("lower", "strLower"),
             ("length", "strLength"),
+            ("slice", "strSlice"),
             ("trim", "strTrim"),
             ("contains", "strContains"),
             ("startsWith", "strStartsWith"),
