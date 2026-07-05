@@ -114,10 +114,15 @@ folds `CapEvent` frames by `parent_cap_id → cap_id` into a top-down `Graph`
 (`snemu_diff::collect_frames`, default `init`, `--workload`/`--steps` overrides),
 writes `docs/generated/caps.md` (committed illustrative snapshot, **not** gated)
 + a gitignored `caps.svg`. A real `init` boot folds ~35 CapEvents into init → fs-server
-→ per-connection badged-endpoint branches. **Known refinement:** one-shot `Reply`
-caps are minted `parent_cap_id: 0`, so they render as isolated nodes — faithful,
-but noise in a derivation view. Candidate follow-ups: drop/collapse `Reply` caps,
-style roots distinctly, or annotate `Revoked`.
+→ per-connection badged-endpoint branches. **Refinements shipped:** (1) nodes
+label by the cap's on-wire `name` (`snitchos_abi::name_str`) when present,
+falling back to the object kind — so endpoints read `fs` not `Endpoint`;
+(2) one-shot `Reply` caps (minted `parent_cap_id: 0`, unparented leaves) are
+dropped as derivation noise, taking the real `init` boot from 35 nodes to 21.
+**Speed:** the snemu boot stops on cap-event *quiescence* — `CapQuiescence`
+(pure, tested) trips once ≥1 cap is seen and a step window elapses with no new
+one; a real boot stops ~54M steps in instead of the 150M ceiling.
+Candidate follow-ups: style roots distinctly, annotate `Revoked`.
 
 ---
 

@@ -58,11 +58,18 @@ pub fn derivation_tree(frames: &[OwnedFrame]) -> Graph {
     let mut nodes_seen = std::collections::HashSet::new();
     let mut edges_seen = std::collections::HashSet::new();
     for frame in frames {
-        let OwnedFrame::CapEvent { cap_id, parent_cap_id, holder, object, .. } = frame else {
+        let OwnedFrame::CapEvent { cap_id, parent_cap_id, holder, object, name, .. } = frame else {
             continue;
         };
+        // One-shot reply caps are unparented per-`call` leaves — noise in a
+        // derivation view. Drop them so the tree shows lasting authority.
+        if matches!(object, CapObject::Reply) {
+            continue;
+        }
         if nodes_seen.insert(*cap_id) {
-            let label = format!("#{cap_id} {} h{holder}", object_name(*object));
+            let named = snitchos_abi::name_str(name);
+            let descriptor = if named.is_empty() { object_name(*object) } else { named };
+            let label = format!("#{cap_id} {descriptor} h{holder}");
             graph.node(&format!("cap{cap_id}"), &label);
         }
         if *parent_cap_id != 0 && edges_seen.insert((*parent_cap_id, *cap_id)) {
@@ -119,6 +126,34 @@ mod tests {
         assert!(!q.observe(2, 12), "new cap at 12 resets the window");
         assert!(!q.observe(2, 21), "9 since reset");
         assert!(q.observe(2, 22), "10 since reset — quiescent");
+    }
+
+    #[test]
+    fn labels_prefer_the_cap_name_over_the_object_kind() {
+        let mut named = cap_event(CapEventKind::Granted, 1, 0, 6, CapObject::Endpoint);
+        if let OwnedFrame::CapEvent { name, .. } = &mut named {
+            *name = snitchos_abi::pack_name("fs.root");
+        }
+        let expected = "\
+graph TD
+    cap1[\"#1 fs.root h6\"]
+";
+        assert_eq!(derivation_tree(&[named]).to_mermaid(), expected);
+    }
+
+    #[test]
+    fn drops_one_shot_reply_caps_as_derivation_noise() {
+        // Reply caps are minted per-`call` with parent_cap_id 0 — unparented
+        // one-shots that clutter a derivation view without adding structure.
+        let frames = vec![
+            cap_event(CapEventKind::Granted, 1, 0, 6, CapObject::Endpoint),
+            cap_event(CapEventKind::Transferred, 2, 0, 6, CapObject::Reply),
+        ];
+        let expected = "\
+graph TD
+    cap1[\"#1 Endpoint h6\"]
+";
+        assert_eq!(derivation_tree(&frames).to_mermaid(), expected);
     }
 
     #[test]
