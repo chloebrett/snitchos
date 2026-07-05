@@ -41,10 +41,15 @@ there, informed by the Phase-B leak measurement (below).
 
 ---
 
-## Phase A — Spans (tokens + diagnostics) + Interning
+## Phase A — Spans (tokens + diagnostics) — ✅ DONE (A1–A3)
 
-Delivers real parse/lex error messages (line:col + caret) and symbol interning.
-AST node *shape* stays put except a `Symbol` swap at leaves.
+Delivers real parse/lex error messages (line:col + caret) and stops the lexer
+silently swallowing garbage. A1–A3 shipped 2026-07-05 (521 tests green, mutation-
+clean). **Interning (former A4) moved to Phase C** — by this plan's own
+"don't churn the AST twice" rule, `Symbol`-in-the-AST belongs with C's AST reshape
+(the resolution pass), and an isolated lexer-only version delivers ~zero (intern
+then immediately un-intern to a still-`String` AST) while forcing a global-interner
+decision. So Phase A is complete at A1–A3.
 
 ### Step A1: `Span` + tokens carry position
 **Acceptance**: `lex` yields `Token { kind: TokenKind, span: Span{start,end} }`
@@ -67,15 +72,11 @@ an unrecognized char is a spanned error, not a silent skip (`lexer.rs:128`).
 a spanned error (today both are swallowed).
 **GREEN**: split whitespace-skip from unknown-char (`lexer.rs:294,344`); emit errors.
 
-### Step A4: Intern identifiers to `Symbol`
-**Acceptance**: a `Symbol(u32)` interner; the lexer interns identifiers
-(`TokenKind::Ident(Symbol)`); AST leaves (`Var`, `Field.name`, `Param.name`) carry
-`Symbol`; name comparison is integer equality; interp resolution updated.
-**RED**: a test that two occurrences of the same identifier intern to one `Symbol`.
-**GREEN**: adapt from the `kernel-core` intern table; a test helper builds `Symbol`
-leaves so the AST tests stay readable.
+*(Former Step A4 — interning — folded into Phase C; see the Phase A note above.)*
 
-*PR boundary: "Stitch spans + diagnostics + interning."*
+*PR boundaries (shipped): A1 "tokens carry byte-offset spans"; A2 "spanned parse
+errors with caret rendering"; A3 "lexer error channel — report bad literals + stray
+chars."*
 
 ---
 
@@ -84,6 +85,18 @@ leaves so the AST tests stay readable.
 The execution context the runtime has no home for today (free `eval_*` fns
 threading `&Env`). Also produces the **leak measurement** that informs the post-D
 stim-vs-VM decision.
+
+**Re-scope (2026-07-05):** the full free-fns→methods reify of `interp.rs` (2958
+lines) is too big for one known-good increment, and `Env` already carries
+run-ambient shared state (telemetry, platform, authority via `Rc`). So the *fuel*
+budget lands as a fifth run-ambient `Env` field (`Rc<Cell<u64>>` + `with_fuel` +
+`take_fuel`, decremented once per `eval`) — **✅ DONE**: `eval_program_with_fuel`,
+a non-terminating program now faults "evaluation fuel exhausted" instead of
+hanging; 523 green, mutation-clean. The **depth guard** (B3) can ride the same
+Env-counter shape; only the **self-tail trampoline** (B4) needs real `eval_call`
+restructuring. The full struct-reify is deferred as a code-org refactor — the
+*behaviours* the review wanted (a place to hang fuel/depth) are delivered without
+it.
 
 ### Step B1: Reify `Interp` — `eval_*` become methods (pure refactor)
 **Acceptance**: an `Interp` struct owns the eval entry points (env access,
@@ -132,8 +145,11 @@ investigation commit).*
 
 ## Phase C — Faithful surface AST + one lowering pass → core IR
 
-The big structural piece and the true VM prework. **AST node spans land here** (one
-churn of the exact-tree tests, together with the reshape).
+The big structural piece and the true VM prework. **AST node spans AND identifier
+interning both land here** (one churn of the exact-tree tests, together with the
+reshape) — the resolution pass that lowers surface→core is the natural home for
+turning names into interned `Symbol`s/slots, and doing spans + symbols in the same
+AST reshape honours the "don't churn the AST twice" rule.
 
 **Phase goal**: the parser emits a faithful, round-trippable **surface AST** (keep
 `Placeholder`, a real `SubjectlessMatch`, an `OperatorRef` — no more parse-time
