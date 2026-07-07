@@ -1,0 +1,58 @@
+---
+source: protocol/tests/wire_stability.rs
+expression: out
+---
+PROTOCOL_VERSION = 6
+
+== Frame variants (discriminant = first byte; append at END) ==
+Hello            00 01 06
+SpanStart        01 01 02 03 04 05 06
+SpanEnd          02 01 02
+Event            03 01 02 03
+Metric           04 01 03 03 04
+Dropped          05 07
+StringRegister   06 01 01 78
+MetricRegister   07 01 01 02
+ThreadRegister   08 01 01 74 02
+ContextSwitch    09 01 02 03 01 04
+HartRegister     0a 01 02 01
+CapEvent         0b 01 01 02 03 02 04 05 06 07 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+SyscallRefused   0c 01 07 02 03 04
+Log              0d 01 6c 01 02 03
+Message          0e 01 02 03 04 05 06
+NotifySignal     0f 01 02 03 04 05
+NotifyWait       10 01 02 03 04 05
+
+== Supporting enums (arm = discriminant byte; append at END) ==
+CapEventKind::Granted        00
+CapEventKind::Transferred    01
+CapEventKind::Revoked        02
+CapObject::TelemetrySink     00
+CapObject::SpanSink          01
+CapObject::Endpoint          02
+CapObject::Reply             03
+CapObject::Notification      04
+SwitchReason::Yield          00
+SwitchReason::Preempt        01
+SwitchReason::Blocked        02
+SwitchReason::Exit           03
+MetricKind::Counter          00
+MetricKind::Gauge            01
+MetricKind::Histogram        02
+HartRole::Boot               00
+HartRole::Worker             01
+RefusalReason::UnknownSyscall 00
+RefusalReason::NoProcess     01
+RefusalReason::CapNotFound   02
+RefusalReason::CapWrongRights 03
+RefusalReason::CapWrongObject 04
+RefusalReason::BadUserRange  05
+RefusalReason::BadUtf8       06
+RefusalReason::Quota         07
+RefusalReason::BadSpanId     08
+RefusalReason::OutOfMemory   09
+RefusalReason::UnknownProgram 0a
+RefusalReason::BadMetricHandle 0b
+RefusalReason::BadMetricKind 0c
+RefusalReason::NotificationBusy 0d
+RefusalReason::CapNotDelegable 0e

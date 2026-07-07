@@ -18,5 +18,16 @@ postcard = { version = "1", default-features = false }
 # the same way `CapDesc` does. `no_std`, no transitive deps; leaf crate, no cycle.
 snitchos-abi = { path = "../abi" }
 
+[dev-dependencies]
+# Golden-bytes snapshot of the on-wire encoding (`tests/wire_stability.rs`), so a
+# variant/field reorder — which roundtrip tests can't catch — must be deliberately
+# re-blessed. `to_allocvec` needs `alloc`, on for the host test build. serde +
+# snitchos-abi are re-declared here so the `tests/` integration crate can name
+# `serde::Serialize` (the encode bound) and `CAP_NAME_LEN`.
+insta = "1"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+snitchos-abi = { path = "../abi" }
+
 [lints]
 workspace = true

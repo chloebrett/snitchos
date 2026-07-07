@@ -6,7 +6,7 @@
 #![no_main]
 
 use fs_proto::{Op, Request, Response, UserBuf};
-use snitchos_user::{Endpoint, bootstrap, console_write, entry, register_counter};
+use snitchos_user::{Endpoint, bootstrap, console_write, entry, register_counter, yield_now};
 
 const BUF_SIZE: usize = 512;
 
@@ -49,4 +49,9 @@ fn main() {
     }
 
     bytes_read.emit(total as i64);
+    // Yield a few times so the parent can revoke the cap while we still hold
+    // it — the CapEvent::Revoked fires during this window, not after exit.
+    for _ in 0..4 {
+        yield_now();
+    }
 }

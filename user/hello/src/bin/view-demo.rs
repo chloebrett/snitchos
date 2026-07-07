@@ -7,7 +7,7 @@
 #![no_main]
 
 use fs_proto::{FileRights, Op, Request, Response, UserBuf};
-use snitchos_user::{Endpoint, bootstrap, entry, spawn};
+use snitchos_user::{Endpoint, bootstrap, entry, revoke, spawn, wait, yield_now};
 
 /// SPAWNABLE index for the viewer binary (see `kernel/src/trap/user.rs`).
 const VIEWER_ID: usize = 6;
@@ -57,5 +57,15 @@ fn main() {
     }
 
     // Spawn the viewer with the READ-only file cap delegated.
-    let _ = spawn(VIEWER_ID, &[file_cap as u32]);
+    if let Some(child) = spawn(VIEWER_ID, &[file_cap as u32]) {
+        // Yield to let the viewer run and read the file.
+        yield_now();
+        // Revoke the delegated cap while the viewer still holds it — the
+        // CapEvent::Revoked fires NOW, proving the authority window is closed.
+        // The viewer's next Read call will be Denied; it yields a few times
+        // before exiting, so this window is reliably open.
+        revoke(file_cap);
+        // Reap the viewer after it exits.
+        wait(child);
+    }
 }
