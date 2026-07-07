@@ -135,6 +135,16 @@ impl Machine {
     pub fn instret(&self) -> u64 {
         self.time
     }
+
+    /// Enable or disable the Tier-1 decode cache (M5) on **every** hart. Off by
+    /// default (the pure interpreter is the oracle); snemu exposes this as a flag
+    /// so a run with it on can be proven identical to one with it off — same
+    /// instret, same telemetry, only faster.
+    pub fn set_decode_cache(&mut self, on: bool) {
+        for hart in &mut self.harts {
+            hart.set_decode_cache(on);
+        }
+    }
 }
 
 #[cfg(test)]

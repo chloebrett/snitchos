@@ -9,6 +9,7 @@ pub mod cpu;
 pub mod dtb;
 mod csr;
 mod decode;
+mod decode_cache;
 pub mod loader;
 pub mod machine;
 mod mmu;

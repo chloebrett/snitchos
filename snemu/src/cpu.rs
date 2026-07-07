@@ -4,6 +4,7 @@
 use crate::bus::Bus;
 use crate::csr::{Csr, CsrError, addr, sstatus};
 use crate::decode::{Instr, amo_op, expand, funct3, funct7, is_compressed, opcode, priv12, system};
+use crate::decode_cache::{DecodeCache, Decoded};
 use crate::mem::{BusError, Memory, RAM_BASE};
 use crate::mmu::{self, Access};
 
@@ -229,6 +230,10 @@ pub(crate) struct Hart {
     /// An SBI request captured from an S-mode `ecall` this step, drained by
     /// `step` into a [`HartEffect`] for the driver to service.
     pending_sbi: Option<SbiRequest>,
+    /// Tier-1 decode cache (M5), or `None` when disabled — the default, which
+    /// runs the pure interpreter (the correctness oracle). Toggled per hart via
+    /// [`set_decode_cache`](Self::set_decode_cache).
+    decode_cache: Option<DecodeCache>,
 }
 
 /// A single-hart machine: one [`Hart`] plus the [`Bus`] it owns. The convenience
@@ -304,6 +309,19 @@ impl Cpu {
     pub fn instret(&self) -> u64 {
         self.hart.instret
     }
+
+    /// Enable or disable this hart's Tier-1 decode cache (M5).
+    pub fn set_decode_cache(&mut self, on: bool) {
+        self.hart.set_decode_cache(on);
+    }
+
+    /// Decode-cache hits so far (0 when the cache is disabled). Used by the
+    /// equivalence test to confirm the fast path engaged.
+    #[cfg(test)]
+    #[must_use]
+    pub fn decode_cache_hits(&self) -> u64 {
+        self.hart.decode_cache.as_ref().map_or(0, DecodeCache::hits)
+    }
 }
 
 impl Hart {
@@ -322,7 +340,16 @@ impl Hart {
             reservation: None,
             state: HartState::Running,
             pending_sbi: None,
+            decode_cache: None,
         }
+    }
+
+    /// Enable or disable this hart's Tier-1 decode cache. Enabling starts from a
+    /// cold cache; disabling drops it (back to the pure interpreter). The flag is
+    /// what lets snemu run the interpreter as the oracle and prove the cache
+    /// changes nothing but speed.
+    pub(crate) fn set_decode_cache(&mut self, on: bool) {
+        self.decode_cache = on.then(DecodeCache::default);
     }
 
     /// Park this hart (a secondary before its `hart_start`).
@@ -412,6 +439,22 @@ impl Hart {
             self.take_trap(cause, 0);
             return Ok(HartEffect::None);
         }
+        // Fast path: a cache hit skips the whole fetch pipeline (translate, byte
+        // read, compressed expand) and goes straight to dispatch. Only the
+        // decoded form is reused — `execute` still reads live `pc`/registers, so
+        // behaviour is identical to the slow path (the equivalence the flag
+        // guards).
+        if self.decode_cache.is_some() {
+            let satp = self.csr.read(addr::SATP).unwrap_or(0);
+            if let Some(decoded) = self.decode_cache.as_mut().and_then(|c| c.get(satp, self.pc)) {
+                self.cur_ilen = decoded.ilen;
+                self.execute(decoded.raw, bus)?;
+                self.instret += 1;
+                return Ok(self.pending_sbi.take().map_or(HartEffect::None, HartEffect::Sbi));
+            }
+        }
+        // Slow path: the full fetch pipeline. A cache miss above already synced
+        // the cache's address space, so `insert` lands in the right one.
         let Some(pc_pa) = self.translate_or_trap(self.pc, Access::Fetch, bus) else {
             return Ok(HartEffect::None); // fetch faulted → trapped to the handler
         };
@@ -423,6 +466,9 @@ impl Hart {
             self.cur_ilen = ILEN_FULL;
             bus.read_u32(pc_pa)?
         };
+        if let Some(cache) = self.decode_cache.as_mut() {
+            cache.insert(self.pc, Decoded { raw, ilen: self.cur_ilen });
+        }
         self.execute(raw, bus)?;
         self.instret += 1;
         Ok(self.pending_sbi.take().map_or(HartEffect::None, HartEffect::Sbi))
@@ -784,7 +830,14 @@ impl Hart {
     /// Privileged SYSTEM ops (funct3 = 0), dispatched by funct12.
     fn priv_op(&mut self, instr: Instr) -> Result<(), StepError> {
         if instr.funct7() == funct7::SFENCE_VMA {
-            self.advance(); // no TLB to flush — translation walks every access
+            // No hardware TLB to flush — translation walks every access. But the
+            // decode cache IS a translated-instruction cache, so the guest's
+            // invalidation must drop it (this is the coherence hook that lets the
+            // fast path skip re-translation safely).
+            if let Some(cache) = self.decode_cache.as_mut() {
+                cache.flush();
+            }
+            self.advance();
             return Ok(());
         }
         match instr.funct12() {
@@ -1327,6 +1380,33 @@ mod tests {
             mem.write_u32(RAM_BASE + (i as u64) * 4, word).unwrap();
         }
         Cpu::new(mem)
+    }
+
+    #[test]
+    fn the_decode_cache_changes_nothing_but_speed() {
+        // A tiny loop that re-executes the same PCs, so the cache takes hits:
+        // `addi x1,x1,1` once, then `jal x0,0` spinning on itself. Running it with
+        // the cache OFF and ON must yield byte-identical architectural state —
+        // instret, pc, and the register — proving the cache is a pure speedup.
+        let program = &[0x0010_8093, 0x0000_006f]; // addi x1,x1,1 ; jal x0,0
+        let run = |cache: bool| {
+            let mut cpu = cpu_with(program);
+            cpu.set_decode_cache(cache);
+            for _ in 0..8 {
+                cpu.step().unwrap();
+            }
+            (cpu.instret(), cpu.pc(), cpu.reg(1))
+        };
+        let off = run(false);
+        let on = run(true);
+        assert_eq!(on, off, "cache ON must equal cache OFF");
+        // And the fast path actually engaged (the jal re-executed).
+        let mut cpu = cpu_with(program);
+        cpu.set_decode_cache(true);
+        for _ in 0..8 {
+            cpu.step().unwrap();
+        }
+        assert!(cpu.decode_cache_hits() > 0, "the loop should hit the cache");
     }
 
     #[test]

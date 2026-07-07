@@ -575,6 +575,7 @@ pub(crate) fn collect_workload_frames(
     dtb_base: &[u8],
     workload: Option<&str>,
     max_steps: u64,
+    decode_cache: bool,
 ) -> Result<Vec<OwnedFrame>, String> {
     let dtb = match workload {
         Some(w) => snemu::dtb::set_bootargs(dtb_base, &format!("workload={w}"))
@@ -583,6 +584,7 @@ pub(crate) fn collect_workload_frames(
     };
     let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(&dtb), HART_COUNT)
         .map_err(|e| format!("snemu load: {e:?}"))?;
+    machine.set_decode_cache(decode_cache);
     let mut steps = 0u64;
     while steps < max_steps {
         match machine.step() {
@@ -608,6 +610,7 @@ pub(crate) fn measure_workload(
     dtb_base: &[u8],
     workload: Option<&str>,
     max_steps: u64,
+    decode_cache: bool,
 ) -> Result<snemu::bench::Sample, String> {
     let dtb = match workload {
         Some(w) => snemu::dtb::set_bootargs(dtb_base, &format!("workload={w}"))
@@ -616,6 +619,7 @@ pub(crate) fn measure_workload(
     };
     let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(&dtb), HART_COUNT)
         .map_err(|e| format!("snemu load: {e:?}"))?;
+    machine.set_decode_cache(decode_cache);
     let start = Instant::now();
     let mut steps = 0u64;
     let mut startup: Option<snemu::bench::StartupMark> = None;

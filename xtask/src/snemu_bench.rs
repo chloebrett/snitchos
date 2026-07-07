@@ -64,7 +64,7 @@ pub const TAXONOMY: &[TaxonomyEntry] = &[
 /// `max_steps` budget, then print the MIPS/wall-clock report. Determinism is
 /// enforced by [`BenchReport::from_samples`]: identical `instret` every run, or
 /// it errors loudly.
-pub fn run(workload: Option<&str>, max_steps: u64, runs: u32) -> ExitCode {
+pub fn run(workload: Option<&str>, max_steps: u64, runs: u32, decode_cache: bool) -> ExitCode {
     if runs == 0 {
         eprintln!("snemu bench: --runs must be at least 1");
         return ExitCode::from(2);
@@ -78,9 +78,10 @@ pub fn run(workload: Option<&str>, max_steps: u64, runs: u32) -> ExitCode {
     };
 
     let label = workload.unwrap_or("default (init)");
-    eprintln!("snemu bench: {label} — {runs} run(s) at up to {max_steps} steps each");
+    let cache = if decode_cache { " [decode-cache]" } else { "" };
+    eprintln!("snemu bench: {label}{cache} — {runs} run(s) at up to {max_steps} steps each");
 
-    match bench_one(&kernel, &dtb, workload, max_steps, runs, true) {
+    match bench_one(&kernel, &dtb, workload, max_steps, runs, decode_cache, true) {
         Ok(r) => {
             print_report(label, &r);
             ExitCode::SUCCESS
@@ -96,7 +97,7 @@ pub fn run(workload: Option<&str>, max_steps: u64, runs: u32) -> ExitCode {
 /// and print a one-row-per-class comparison table. The "various workloads"
 /// picture: MIPS varies with the instruction mix, and each row is a bar a JIT
 /// tier will try to move.
-pub fn run_taxonomy(runs: u32) -> ExitCode {
+pub fn run_taxonomy(runs: u32, decode_cache: bool) -> ExitCode {
     if runs == 0 {
         eprintln!("snemu bench: --runs must be at least 1");
         return ExitCode::from(2);
@@ -117,7 +118,7 @@ pub fn run_taxonomy(runs: u32) -> ExitCode {
             "snemu bench: {:<16} {} — {runs} run(s) at up to {} steps",
             e.class, e.workload, e.steps,
         );
-        match bench_one(&kernel, &dtb, Some(e.workload), e.steps, runs, false) {
+        match bench_one(&kernel, &dtb, Some(e.workload), e.steps, runs, decode_cache, false) {
             Ok(r) => rows.push((e, r)),
             Err(err) => {
                 eprintln!("snemu bench: {} ({}): {err}", e.class, e.workload);
@@ -135,7 +136,7 @@ pub fn run_taxonomy(runs: u32) -> ExitCode {
 /// fair cross-engine axis is that milestone, not instret — QEMU's instruction
 /// count is nondeterministic for this (timer-driven) guest, so only wall-clock
 /// to an observable point compares apples-to-apples. See step 4.
-pub fn run_baseline(runs: u32) -> ExitCode {
+pub fn run_baseline(runs: u32, decode_cache: bool) -> ExitCode {
     if runs == 0 {
         eprintln!("snemu bench: --runs must be at least 1");
         return ExitCode::from(2);
@@ -151,7 +152,7 @@ pub fn run_baseline(runs: u32) -> ExitCode {
     let mut rows: Vec<BaselineRow> = Vec::new();
     for e in TAXONOMY {
         eprintln!("snemu bench: {:<16} {} — snemu ×{runs} + QEMU baseline", e.class, e.workload);
-        let report = match bench_one(&kernel, &dtb, Some(e.workload), e.steps, runs, false) {
+        let report = match bench_one(&kernel, &dtb, Some(e.workload), e.steps, runs, decode_cache, false) {
             Ok(r) => r,
             Err(err) => {
                 eprintln!("snemu bench: {} ({}): {err}", e.class, e.workload);
@@ -226,6 +227,56 @@ fn fmt_millis(d: Option<Duration>) -> String {
     d.map_or_else(|| "—".to_string(), |d| format!("{:.3}s", d.as_secs_f64()))
 }
 
+/// Prove the decode cache changes nothing but speed: run each taxonomy workload
+/// with the cache OFF and ON and assert **byte-identical telemetry**. The
+/// interpreter is the oracle; a divergence means the cache (its satp/sfence
+/// invalidation, or an SMC case) is wrong. This is the integration guard the
+/// on/off flag exists to enable — the unit test proves it on a toy loop, this
+/// proves it on the real kernel through address-space switches and userspace.
+pub fn run_verify() -> ExitCode {
+    let (kernel, dtb) = match snemu_diff::prepare(true) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("snemu bench: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut all_ok = true;
+    for e in TAXONOMY {
+        eprint!("snemu verify-cache: {:<16} {} ... ", e.class, e.workload);
+        let off = snemu_diff::collect_workload_frames(&kernel, &dtb, Some(e.workload), e.steps, false);
+        let on = snemu_diff::collect_workload_frames(&kernel, &dtb, Some(e.workload), e.steps, true);
+        match (off, on) {
+            (Ok(off), Ok(on)) if off == on => {
+                eprintln!("OK ({} frames identical)", off.len());
+            }
+            (Ok(off), Ok(on)) => {
+                all_ok = false;
+                let at = off.iter().zip(&on).position(|(a, b)| a != b);
+                eprintln!(
+                    "DIVERGED (off={} frames, on={} frames, first diff at index {:?})",
+                    off.len(),
+                    on.len(),
+                    at,
+                );
+            }
+            (Err(err), _) | (_, Err(err)) => {
+                all_ok = false;
+                eprintln!("ERROR: {err}");
+            }
+        }
+    }
+
+    if all_ok {
+        println!("\nsnemu verify-cache: decode cache is faithful across the taxonomy");
+        ExitCode::SUCCESS
+    } else {
+        println!("\nsnemu verify-cache: FAILED — the decode cache diverged from the interpreter");
+        ExitCode::from(1)
+    }
+}
+
 /// Run `workload` `runs` times to `steps`, optionally logging each run, and
 /// reduce to a determinism-checked [`BenchReport`]. Shared by the single-
 /// workload and taxonomy paths.
@@ -235,11 +286,12 @@ fn bench_one(
     workload: Option<&str>,
     steps: u64,
     runs: u32,
+    decode_cache: bool,
     verbose: bool,
 ) -> Result<BenchReport, String> {
     let mut samples: Vec<Sample> = Vec::with_capacity(runs as usize);
     for i in 0..runs {
-        let s = snemu_diff::measure_workload(kernel, dtb, workload, steps)?;
+        let s = snemu_diff::measure_workload(kernel, dtb, workload, steps, decode_cache)?;
         if verbose {
             let startup = s.startup.map_or_else(
                 || " (silent)".to_string(),

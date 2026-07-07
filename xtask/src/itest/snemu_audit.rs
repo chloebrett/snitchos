@@ -67,7 +67,7 @@ pub fn run(max_steps: u64, limit: Option<usize>) -> ExitCode {
     for (i, (workload, names)) in groups.iter().take(group_cap).enumerate() {
         let label = workload.unwrap_or("default (init)");
         eprint!("snemu-itest: [{}/{group_cap}] {label:<24} ", i + 1);
-        match snemu_diff::collect_workload_frames(&kernel, &dtb, *workload, max_steps) {
+        match snemu_diff::collect_workload_frames(&kernel, &dtb, *workload, max_steps, false) {
             Ok(frames) => {
                 eprintln!("({} frames → {} scenario(s))", frames.len(), names.len());
                 for name in names {

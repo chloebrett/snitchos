@@ -115,6 +115,15 @@ enum Cmd {
         /// `--workload`/`--steps`.
         #[arg(long)]
         baseline: bool,
+        /// Enable the Tier-1 decode cache (M5). A/B against the default (off) to
+        /// read the speedup; instret stays identical (correctness).
+        #[arg(long)]
+        decode_cache: bool,
+        /// Verify the decode cache is faithful: run each taxonomy workload with
+        /// the cache off and on and assert identical telemetry. Overrides the
+        /// other modes.
+        #[arg(long)]
+        verify_cache: bool,
     },
     /// Build the kernel and run it in QEMU.
     ///
@@ -672,13 +681,15 @@ fn main() -> ExitCode {
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
         Cmd::SnemuItest { steps, limit } => itest::snemu_audit::run(steps, limit),
-        Cmd::SnemuBench { workload, steps, runs, taxonomy, baseline } => {
-            if baseline {
-                snemu_bench::run_baseline(runs)
+        Cmd::SnemuBench { workload, steps, runs, taxonomy, baseline, decode_cache, verify_cache } => {
+            if verify_cache {
+                snemu_bench::run_verify()
+            } else if baseline {
+                snemu_bench::run_baseline(runs, decode_cache)
             } else if taxonomy {
-                snemu_bench::run_taxonomy(runs)
+                snemu_bench::run_taxonomy(runs, decode_cache)
             } else {
-                snemu_bench::run(workload.as_deref(), steps, runs)
+                snemu_bench::run(workload.as_deref(), steps, runs, decode_cache)
             }
         }
         Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
