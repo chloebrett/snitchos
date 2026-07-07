@@ -211,6 +211,12 @@ pub struct View {
     /// against a closed stream, so every miss would dump a tail — the summary
     /// report stands in for it. The live QEMU path leaves this `false`.
     quiet: bool,
+    /// Batch-replay mode (a closed, pre-collected stream). Changes the meaning of
+    /// reaching the stream's end in [`assert_absent`]: for a fixed-budget capture,
+    /// "the whole run was scanned and the bad frame never appeared" is a valid
+    /// *clean absence*, not the inconclusive mid-run disconnect a live QEMU death
+    /// would be. `false` for the live path.
+    batch: bool,
 }
 
 impl Boot {
@@ -314,6 +320,7 @@ impl Boot {
             input: Arc::clone(&self.input),
             log_path: self.log_path.clone(),
             quiet: false,
+            batch: false,
         }
     }
 
@@ -351,6 +358,7 @@ impl View {
             input: Arc::new(Mutex::new(None)),
             log_path: PathBuf::new(),
             quiet: true,
+            batch: true,
         }
     }
 
@@ -466,6 +474,11 @@ impl View {
                     }
                 }
                 Advance::Timeout => break Ok(()),
+                // A batch replay reaching the end of its closed, fixed-budget
+                // capture without the bad frame IS a clean absence — the whole
+                // run was scanned. Only a *live* disconnect (QEMU dying mid-run)
+                // is inconclusive.
+                Advance::Disconnected if self.batch => break Ok(()),
                 Advance::Disconnected => {
                     self.dump_recent("QEMU disconnected");
                     self.record_failure_capture(WaitOutcome::Disconnected);
@@ -923,6 +936,33 @@ mod replay_tests {
             matches!(f, OwnedFrame::Hello { .. })
         });
         assert!(miss.is_none(), "no Hello frame was replayed");
+    }
+
+    #[test]
+    fn assert_absent_over_a_batch_is_a_clean_pass_when_the_bad_frame_never_appears() {
+        // Negative-oracle scenarios (e.g. "no stale TLB read") pass when the bad
+        // frame is absent. On a closed batch capture that means reaching the end
+        // clean — which must be Ok, not the "QEMU disconnected, inconclusive"
+        // error the live path gives.
+        let frames = vec![OwnedFrame::Dropped { count: 1 }, OwnedFrame::Dropped { count: 2 }];
+        let mut view = View::replay(frames);
+        let result = view.assert_absent(Duration::from_secs(30), "a bad frame", "found one", |f, _| {
+            matches!(f, OwnedFrame::Hello { .. })
+        });
+        assert!(result.is_ok(), "absence over a batch is a clean pass: {result:?}");
+    }
+
+    #[test]
+    fn assert_absent_over_a_batch_still_fails_when_the_bad_frame_is_present() {
+        let frames = vec![
+            OwnedFrame::Dropped { count: 1 },
+            OwnedFrame::Hello { timebase_hz: 10, protocol_version: 4 },
+        ];
+        let mut view = View::replay(frames);
+        let result = view.assert_absent(Duration::from_secs(30), "a Hello", "found a Hello", |f, _| {
+            matches!(f, OwnedFrame::Hello { .. })
+        });
+        assert_eq!(result, Err("found a Hello".to_string()));
     }
 }
 
