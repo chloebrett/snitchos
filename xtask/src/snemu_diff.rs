@@ -4,9 +4,11 @@
 //! metric values, which drift with wall-clock) are normalized away, and we diff
 //! the boot-prefix frame sequence plus the registered-name vocabulary.
 //!
-//! snemu boots the default (`init`) workload — it has no `workload=` bootarg
-//! support yet — so the QEMU side boots the same default. That keeps the two
-//! comparable without per-scenario surgery.
+//! Both emulators boot the *same* workload: with no `--workload`, the kernel's
+//! default (`init`); otherwise snemu patches `workload=<name>` into the DTB
+//! bootargs it feeds the guest (`snemu::dtb::set_bootargs`, the firmware role)
+//! while QEMU gets it via `-append`. `run_all` sweeps the whole [`WORKLOADS`]
+//! list this way, so every scenario is compared apples-to-apples.
 
 use std::io::Cursor;
 use std::os::unix::net::UnixStream;
@@ -491,7 +493,7 @@ pub(crate) fn collect_frames_until_cap_quiescence(
 }
 
 /// Build the kernel and read the base DTB the emulators share.
-fn prepare(with_workloads: bool) -> Result<(Vec<u8>, Vec<u8>), String> {
+pub(crate) fn prepare(with_workloads: bool) -> Result<(Vec<u8>, Vec<u8>), String> {
     let features: &[&str] = if with_workloads { &["itest-workloads"] } else { &[] };
     if !qemu::build_kernel(features).is_ok_and(|s| s.success()) {
         return Err("kernel build failed".to_string());
@@ -499,6 +501,38 @@ fn prepare(with_workloads: bool) -> Result<(Vec<u8>, Vec<u8>), String> {
     let kernel = std::fs::read(qemu::KERNEL_BIN).map_err(|e| format!("read kernel: {e}"))?;
     let dtb = std::fs::read(SNEMU_DTB).map_err(|e| format!("read {SNEMU_DTB}: {e}"))?;
     Ok((kernel, dtb))
+}
+
+/// Boot `kernel` under snemu (selecting `workload` via a DTB bootarg patch, or
+/// the default `init` boot for `None`), step to `max_steps`, and return the
+/// whole decoded telemetry stream. The snemu half of the fidelity audit: the
+/// frames a scenario's assertion body then replays against (via
+/// `View::replay`). Unlike [`collect_snemu`] this keeps no timing marks — the
+/// audit cares only about the frame *content*.
+pub(crate) fn collect_workload_frames(
+    kernel: &[u8],
+    dtb_base: &[u8],
+    workload: Option<&str>,
+    max_steps: u64,
+) -> Result<Vec<OwnedFrame>, String> {
+    let dtb = match workload {
+        Some(w) => snemu::dtb::set_bootargs(dtb_base, &format!("workload={w}"))
+            .ok_or("DTB patch failed")?,
+        None => dtb_base.to_vec(),
+    };
+    let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(&dtb), HART_COUNT)
+        .map_err(|e| format!("snemu load: {e:?}"))?;
+    let mut steps = 0u64;
+    while steps < max_steps {
+        match machine.step() {
+            Ok(()) => steps += 1,
+            // A guest fault (e.g. a deliberate-panic workload halting a hart) is
+            // the end of this run's stream, not an audit error — return what the
+            // guest emitted before it stopped.
+            Err(_) => break,
+        }
+    }
+    Ok(decode_frames(machine.virtio_tx_output()))
 }
 
 /// Single-workload oracle: boot under both, diff, print the detailed report.

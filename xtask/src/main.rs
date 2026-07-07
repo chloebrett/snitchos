@@ -80,6 +80,17 @@ enum Cmd {
         #[arg(long, default_value_t = 20_000_000)]
         steps: u64,
     },
+    /// Fidelity audit: replay every itest scenario's assertion against a
+    /// snemu-produced frame stream (no QEMU) and report how many pass. Sizes the
+    /// "can snemu back the itests" gap without rewriting scenarios.
+    SnemuItest {
+        /// Per-workload snemu instruction-step budget.
+        #[arg(long, default_value_t = 150_000_000)]
+        steps: u64,
+        /// Audit only the first N workload groups (faster smoke).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Build the kernel and run it in QEMU.
     ///
     /// Use `--workload <name>` to boot a runtime-selected workload for
@@ -595,6 +606,7 @@ fn main() -> ExitCode {
             }
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
+        Cmd::SnemuItest { steps, limit } => itest::snemu_audit::run(steps, limit),
         Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
         Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {
             measure::measure(&workload, seconds, warmup, timebase_hz, burst, markdown)

@@ -56,6 +56,19 @@ impl Recorder {
         }
     }
 
+    /// A recorder pre-filled with an already-complete frame stream, marked
+    /// closed. Used by the snemu fidelity audit: snemu runs to a step budget
+    /// up front, its whole telemetry stream is decoded, and scenarios replay
+    /// against it. Because it's closed, a cursor that reaches the end reports
+    /// `Disconnected` at once rather than blocking — so `wait_for` never waits
+    /// out a wall-clock budget against a static buffer.
+    fn from_closed(frames: Vec<OwnedFrame>) -> Self {
+        Self {
+            buf: Mutex::new(RecordBuf { frames, closed: true }),
+            grew: Condvar::new(),
+        }
+    }
+
     /// Append one decoded frame and wake any waiter sitting at the end.
     fn push(&self, frame: OwnedFrame) {
         let mut buf = self.buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -193,6 +206,11 @@ pub struct View {
     /// [`wait_for_log`](Self::wait_for_log) — the only way to assert on-target
     /// `ConsoleWrite` output, which goes to the UART, not the telemetry stream.
     log_path: PathBuf,
+    /// Suppress the per-scenario timeout/disconnect frame-tail dumps. Set by
+    /// batch [`replay`](Self::replay): the fidelity audit runs many scenarios
+    /// against a closed stream, so every miss would dump a tail — the summary
+    /// report stands in for it. The live QEMU path leaves this `false`.
+    quiet: bool,
 }
 
 impl Boot {
@@ -295,6 +313,7 @@ impl Boot {
             captured: None,
             input: Arc::clone(&self.input),
             log_path: self.log_path.clone(),
+            quiet: false,
         }
     }
 
@@ -306,6 +325,35 @@ impl Boot {
 }
 
 impl View {
+    /// Build a `View` over an already-collected frame stream, with no live
+    /// guest behind it — the snemu fidelity audit's entry point. snemu runs to
+    /// a step budget, its telemetry is decoded to `frames`, and a scenario's
+    /// `fn(&mut View)` body replays against them. The stream is closed, so
+    /// `wait_for` resolves instantly (match ⇒ frame, miss ⇒ `None`); there is no
+    /// QEMU stdin (`send_input` fails) and no UART log (`wait_for_log` fails), so
+    /// scenarios needing console I/O surface as audit failures — exactly the
+    /// fidelity gap the audit is meant to find.
+    pub(crate) fn replay(frames: Vec<OwnedFrame>) -> Self {
+        View {
+            recorder: Arc::new(Recorder::from_closed(frames)),
+            cursor: 0,
+            strings: HashMap::new(),
+            timebase_hz: None,
+            recent: VecDeque::new(),
+            max_wait: (Duration::ZERO, Duration::ZERO),
+            frames_seen: 0,
+            last_frame_at: None,
+            capture_level: capture_level(),
+            frame_histogram: BTreeMap::new(),
+            last_t_per_hart: BTreeMap::new(),
+            workload: None,
+            captured: None,
+            input: Arc::new(Mutex::new(None)),
+            log_path: PathBuf::new(),
+            quiet: true,
+        }
+    }
+
     /// Inject `bytes` into the guest's UART by writing to QEMU's stdin (the
     /// `-nographic` serial console). The bytes land in the kernel's UART RX
     /// FIFO; the timer-driven drain rings them and a userspace reader sees them
@@ -547,6 +595,12 @@ impl View {
     }
 
     fn dump_recent(&self, reason: &str) {
+        // Batch replay (the fidelity audit) runs many scenarios against a
+        // closed stream; each miss would dump a tail. The summary report is the
+        // signal there, so stay silent.
+        if self.quiet {
+            return;
+        }
         // The ring may hold up to `TRANSCRIPT_TAIL_FRAMES` (or everything,
         // under `Full`); the inline dump only needs the last handful. The
         // persisted `.capture.json` sidecar carries the rest.
@@ -829,6 +883,46 @@ mod log_tests {
         handle.join().unwrap();
         let _ = std::fs::remove_file(&path);
         assert!(found);
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    //! `View::replay` — the batch-replay constructor the snemu fidelity audit
+    //! uses to run a scenario's `fn(&mut View)` assertion body against a
+    //! pre-collected frame stream (no live QEMU). The stream is closed up front,
+    //! so every `wait_for` resolves *instantly*: a match returns the frame, a
+    //! miss drains to the closed end and returns `None` — never blocking out a
+    //! wall-clock budget, since all frames are already present.
+    use super::{OwnedFrame, View};
+    use std::time::Duration;
+
+    #[test]
+    fn a_matching_predicate_resolves_instantly_against_replayed_frames() {
+        let frames = vec![
+            OwnedFrame::Dropped { count: 1 },
+            OwnedFrame::Log { msg: "kernel panic: boom".into(), task_id: 0, t: 0, hart_id: 0 },
+        ];
+        let mut view = View::replay(frames);
+        // A generous budget: if replay ever *blocked* instead of scanning the
+        // pre-filled buffer, this would sit for 30s. It returns at once.
+        let hit = view.wait_for(Duration::from_secs(30), |f, _| {
+            matches!(f, OwnedFrame::Log { msg, .. } if msg.contains("kernel panic"))
+        });
+        assert!(hit.is_some(), "the panic Log is in the replayed stream");
+    }
+
+    #[test]
+    fn an_absent_predicate_returns_none_without_blocking() {
+        let frames = vec![OwnedFrame::Dropped { count: 1 }];
+        let mut view = View::replay(frames);
+        // The stream is closed, so reaching the end is an instant disconnect —
+        // not a 30s timeout. A missing frame fails fast, which is what makes the
+        // audit cheap.
+        let miss = view.wait_for(Duration::from_secs(30), |f, _| {
+            matches!(f, OwnedFrame::Hello { .. })
+        });
+        assert!(miss.is_none(), "no Hello frame was replayed");
     }
 }
 
