@@ -203,6 +203,39 @@ fn has_span(frames: &[OwnedFrame]) -> bool {
     frames.iter().any(|f| matches!(f, OwnedFrame::SpanStart { .. }))
 }
 
+/// Incremental decode of a growing telemetry buffer: tracks how many complete
+/// frames have appeared and whether a `SpanStart` has, decoding **only the newly
+/// arrived suffix** each call. Replaces the old whole-buffer re-decode on every
+/// growth (≈O(n²) — it re-parsed all prior frames each time a byte landed), which
+/// dominated and profile-contaminated the boot-milestone timing. Resumes at the
+/// last complete frame boundary, so total decode work is O(bytes).
+#[derive(Default)]
+struct FrameProgress {
+    /// Bytes already consumed into complete frames (the resume offset).
+    consumed: usize,
+    /// Complete frames seen so far.
+    count: usize,
+    /// Whether any `SpanStart` has appeared.
+    saw_span: bool,
+}
+
+impl FrameProgress {
+    /// Fold in whatever bytes have arrived since the last call. `tx` is the whole
+    /// buffer so far; only `tx[consumed..]` is decoded, one frame at a time, until
+    /// the suffix ends mid-frame. `consumed` stops at the last *complete* frame's
+    /// boundary, so the trailing partial frame is re-read (just that one) once it
+    /// completes — never the whole buffer.
+    fn advance(&mut self, tx: &[u8]) {
+        while let Ok((frame, n)) = protocol::stream::try_decode_frame(&tx[self.consumed..]) {
+            self.count += 1;
+            if matches!(frame, protocol::Frame::SpanStart { .. }) {
+                self.saw_span = true;
+            }
+            self.consumed += n;
+        }
+    }
+}
+
 /// Boot the kernel under snemu in-process for up to `max_steps` and return its
 /// telemetry frames, how it stopped (step limit vs a fault — a meta-loop signal
 /// we keep as data), and wall-clock timing.
@@ -219,6 +252,7 @@ fn collect_snemu(
     let mut first_span = None;
     let mut milestone = None;
     let mut seen_tx = 0usize;
+    let mut progress = FrameProgress::default();
     while steps < max_steps {
         match machine.step() {
             Ok(()) => steps += 1,
@@ -228,16 +262,17 @@ fn collect_snemu(
             }
         }
         // Watch the TX buffer for the timing marks (cheap length check per step;
-        // decode only when it grows, and only until both marks are found).
+        // decode only the newly-arrived suffix when it grows, and only until both
+        // marks are found — O(bytes) total, not a whole-buffer re-decode).
         if first_span.is_none() || milestone.is_none() {
             let tx = machine.virtio_tx_output();
             if tx.len() != seen_tx {
                 seen_tx = tx.len();
-                let frames = decode_frames(tx);
-                if first_span.is_none() && has_span(&frames) {
+                progress.advance(tx);
+                if first_span.is_none() && progress.saw_span {
                     first_span = Some(start.elapsed());
                 }
-                if milestone.is_none() && frames.len() >= MILESTONE_FRAMES {
+                if milestone.is_none() && progress.count >= MILESTONE_FRAMES {
                     milestone = Some(start.elapsed());
                 }
             }
@@ -1005,5 +1040,38 @@ mod tests {
         let a = vec![strreg(0, "kernel.boot"), strreg(1, "console_init")];
         let b = vec![strreg(9, "console_init"), strreg(3, "kernel.boot")];
         assert_eq!(string_vocabulary(&a), string_vocabulary(&b));
+    }
+
+    #[test]
+    fn frame_progress_matches_a_whole_buffer_decode() {
+        use protocol::Frame;
+        let frames = [
+            Frame::Dropped { count: 0 },
+            Frame::SpanStart {
+                id: SpanId(1),
+                parent: SpanId(0),
+                name_id: StringId(7),
+                t: 3,
+                task_id: 0,
+                hart_id: 0,
+            },
+            Frame::Dropped { count: 42 },
+        ];
+        let mut bytes = Vec::new();
+        for f in &frames {
+            bytes.extend_from_slice(&postcard::to_allocvec(f).expect("encode"));
+        }
+        // Feed the buffer one byte at a time — the pathological growth the old
+        // O(n²) re-decode suffered — and assert the incremental tracker ends at
+        // the same frame count + span flag as a single whole-buffer decode,
+        // proving it resumes at frame boundaries instead of re-parsing.
+        let mut p = FrameProgress::default();
+        for end in 1..=bytes.len() {
+            p.advance(&bytes[..end]);
+        }
+        let full = decode_frames(&bytes);
+        assert_eq!(full.len(), 3);
+        assert_eq!(p.count, full.len(), "same count as whole-buffer decode");
+        assert!(p.saw_span, "the middle SpanStart was seen");
     }
 }

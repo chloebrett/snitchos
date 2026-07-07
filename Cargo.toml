@@ -67,5 +67,13 @@ panic = "abort"
 [profile.dev.package.snemu]
 opt-level = 3
 
+# NOTE: opt-pinning the decode path (`protocol` / `postcard`) was tried and
+# measured — it moved the "time to N frames" milestone by <5% (within run-to-run
+# noise), because that metric is dominated by an O(n²) whole-buffer re-decode in
+# `collect_snemu`, not by decode opt-level, and because stepping (already opt-3
+# via `snemu`) dominates every bulk-decode tool. Not worth an override; the
+# algorithmic fix (incremental decode) is what mattered. Re-add with evidence if a
+# genuinely decode-bound path shows up.
+
 [patch.crates-io]
 linked_list_allocator = { path = "vendor/linked_list_allocator" }

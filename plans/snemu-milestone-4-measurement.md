@@ -115,17 +115,26 @@ asymmetry, stated precisely.
 100-frame boot milestone in ~0.13s vs QEMU ~0.125s → **~0.96× — rough parity**,
 flat across classes.
 
-**Watch the milestone metric — it's observation-contaminated.** The debug run
-showed 0.72× (snemu 0.17s), release 0.96× (snemu 0.13s), yet snemu's *stepping*
-(MIPS) is ~parity across profiles. The difference is the milestone *watcher*:
-`collect_snemu` re-decodes the whole TX buffer via `protocol::stream` every time
-it grows (roughly quadratic in frames), and `protocol` is NOT in the snemu
-opt-level override, so that decode is unoptimized in debug — inflating snemu's
-milestone by ~0.04s. The 0.72→0.96 shift is faster *measurement*, not faster
-emulation (the observer effect this milestone warned about). **MIPS is the clean
-signal** (step loop timed with no per-step decode); the milestone is softer.
-Follow-up: de-noise it (decode incrementally, not whole-buffer each growth) or
-lean on MIPS.
+**The milestone metric is stepping-bound and NOISY — prefer MIPS.** Investigated
+after the debug/release runs disagreed (0.72× vs 0.96×). Two hypotheses tested
+and *rejected*: (a) opt-pinning the decode crates (`protocol`/`postcard`) moved
+it <5% (reverted); (b) the whole-buffer re-decode in `collect_snemu` was O(n²) —
+fixed with an incremental decoder (`FrameProgress` + the now-public
+`protocol::stream::try_decode_frame`), but that *also* barely moved it. Reason:
+`collect_snemu` only decodes until both marks are found (~100 frames), so the
+re-decode was capped at small N and never actually expensive. The milestone is
+dominated by **snemu stepping far enough to emit 100 frames** (~2–4M instr ≈
+0.13–0.22s at ~20 MIPS), and it swings ±20% run-to-run. The 0.72↔0.96 spread was
+mostly noise. **Use MIPS as the primary number** (deterministic instret, low-
+variance); treat the milestone as a soft, high-variance cross-check (report best,
+run ≥5).
+
+**Kept anyway — the O(n²) fix removed a real snemu-vs-QEMU decoder asymmetry.**
+QEMU's `collect_qemu` reader used the streaming `decode_stream` (drains consumed
+bytes → O(n)); snemu re-decoded the whole in-memory buffer each growth → O(n²).
+So snemu ran a strictly worse decoder than QEMU — a bias *against* snemu, small at
+N=100 but real, and painful for any larger-N decode. Both sides are O(n)
+streaming now.
 
 **Correcting a stale assumption:** an earlier note expected release to make snemu
 ~20× faster (flipping it well ahead of QEMU). It doesn't — because

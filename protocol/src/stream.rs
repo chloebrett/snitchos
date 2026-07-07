@@ -115,7 +115,11 @@ impl OwnedFrame {
 /// mid-frame, read more"; any other error means "the bytes don't match
 /// the protocol," which is worth surfacing rather than silently
 /// spinning forever.
-pub(crate) fn try_decode_frame(buf: &[u8]) -> Result<(Frame<'_>, usize), postcard::Error> {
+///
+/// Public so a caller holding a *growing in-memory* buffer (rather than a
+/// `Read` stream) can decode incrementally — advancing an offset by the returned
+/// consumed-count — instead of re-decoding the whole buffer on every growth.
+pub fn try_decode_frame(buf: &[u8]) -> Result<(Frame<'_>, usize), postcard::Error> {
     postcard::take_from_bytes(buf).map(|(frame, rest)| (frame, buf.len() - rest.len()))
 }
 
