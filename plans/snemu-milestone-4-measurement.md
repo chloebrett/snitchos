@@ -95,11 +95,50 @@ produce; re-check under a release build and the M5 before/after.
 - Each is a guest program (or existing scenario) with a known, fixed
   instruction budget so cross-engine comparison is exact.
 
-### Step 4 — the QEMU baseline
-- Record QEMU (TCG) wall-clock for the same taxonomy + the real itest
-  scenarios. Capture the startup-vs-execution split where possible.
-- Deliverable: a baseline table snemu variants are measured against.
-  Note the determinism asymmetry (snemu seeded once vs QEMU `--repeat`).
+### Step 4 — the QEMU baseline — SHIPPED
+`cargo xtask snemu-bench --baseline` sweeps the taxonomy under snemu **and**
+QEMU, printing a wall-clock overlay: snemu MIPS + snemu-vs-QEMU time to the
+shared **100-frame milestone** + speedup. QEMU is best-effort (missing binary /
+unreached milestone blanks its column, never fails the run).
+
+**The comparison axis is wall-clock-to-milestone, NOT instret.** QEMU *can* be
+made to count instructions (`-icount`, or a TCG plugin), but: `-icount` models/
+throttles virtual time so its wall-clock stops being a real speed number; and in
+the normal TCG mode we benchmark, QEMU's instret is **nondeterministic for this
+timer-driven guest** (heartbeat cadence, spin iterations, scheduling all depend
+on real time → different runs retire different counts). snemu's clock *is* its
+instret (deterministic); QEMU's isn't — so only a shared *observable* milestone
+(first-frame / N-frames) compares apples-to-apples. This is the determinism
+asymmetry, stated precisely.
+
+**Numbers (release xtask — the honest baseline):** ~23 MIPS; snemu reaches the
+100-frame boot milestone in ~0.13s vs QEMU ~0.125s → **~0.96× — rough parity**,
+flat across classes.
+
+**Watch the milestone metric — it's observation-contaminated.** The debug run
+showed 0.72× (snemu 0.17s), release 0.96× (snemu 0.13s), yet snemu's *stepping*
+(MIPS) is ~parity across profiles. The difference is the milestone *watcher*:
+`collect_snemu` re-decodes the whole TX buffer via `protocol::stream` every time
+it grows (roughly quadratic in frames), and `protocol` is NOT in the snemu
+opt-level override, so that decode is unoptimized in debug — inflating snemu's
+milestone by ~0.04s. The 0.72→0.96 shift is faster *measurement*, not faster
+emulation (the observer effect this milestone warned about). **MIPS is the clean
+signal** (step loop timed with no per-step decode); the milestone is softer.
+Follow-up: de-noise it (decode incrementally, not whole-buffer each growth) or
+lean on MIPS.
+
+**Correcting a stale assumption:** an earlier note expected release to make snemu
+~20× faster (flipping it well ahead of QEMU). It doesn't — because
+`[profile.dev.package.snemu] opt-level = 3` (root `Cargo.toml`) already builds
+snemu optimized in *every* profile. Debug and release run the same opt-3 snemu
+(~20 vs ~23 MIPS; the small gap is unoptimized glue — `protocol` decode, xtask —
+not the interpreter). So the "20× release tax" is exactly what that override
+*prevents*; we never pay it, and there is no debug/release inversion to wait for.
+The real finding: **snemu is at ~parity with QEMU for boot wall-clock, already
+optimized — the ~23-MIPS interpreter ceiling is what M5's decode/block cache must
+lift to pull decisively ahead.** (Aside: release xtask now builds cleanly —
+`scrub_inherited_cargo_env` also drops `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`, the
+leak that used to break the spawned kernel host build in release.)
 
 ### Step 5 — hot-block + dispatch profiling
 - In measurement mode, maintain a cheap per-PC (or per-block) execution

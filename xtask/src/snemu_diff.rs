@@ -164,13 +164,39 @@ const MILESTONE_FRAMES: usize = 100;
 
 /// Wall-clock timing for one emulator run.
 #[derive(Clone, Copy)]
-struct Timing {
+pub(crate) struct Timing {
     /// Wall time from run start to the first `SpanStart` frame.
-    first_span: Option<Duration>,
+    pub(crate) first_span: Option<Duration>,
     /// Wall time to emit [`MILESTONE_FRAMES`] frames — the comparable finish line.
-    milestone: Option<Duration>,
+    pub(crate) milestone: Option<Duration>,
     /// Wall time for the whole run (snemu: the step loop; qemu: the window).
-    total: Duration,
+    pub(crate) total: Duration,
+}
+
+/// Wall-clock timing to the shared milestones for `workload` under **snemu**
+/// (patches the DTB bootarg, steps to `max_steps`). The snemu half of the step-4
+/// baseline overlay.
+pub(crate) fn timing_snemu(
+    kernel: &[u8],
+    dtb_base: &[u8],
+    workload: Option<&str>,
+    max_steps: u64,
+) -> Result<Timing, String> {
+    let dtb = match workload {
+        Some(w) => snemu::dtb::set_bootargs(dtb_base, &format!("workload={w}"))
+            .ok_or("DTB patch failed")?,
+        None => dtb_base.to_vec(),
+    };
+    let (_frames, _stop, timing) = collect_snemu(kernel, &dtb, max_steps)?;
+    Ok(timing)
+}
+
+/// Wall-clock timing to the shared milestones for `workload` under **QEMU**
+/// (collected over `window`). The baseline snemu is measured against; note the
+/// determinism asymmetry — snemu is seeded once, QEMU is not.
+pub(crate) fn timing_qemu(workload: Option<&str>, window: Duration) -> Result<Timing, String> {
+    let (_frames, timing) = collect_qemu(window, workload)?;
+    Ok(timing)
 }
 
 fn has_span(frames: &[OwnedFrame]) -> bool {

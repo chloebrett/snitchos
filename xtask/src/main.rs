@@ -110,6 +110,11 @@ enum Cmd {
         /// and print a comparison table. Ignores `--workload`/`--steps`.
         #[arg(long)]
         taxonomy: bool,
+        /// Like `--taxonomy`, plus a QEMU wall-clock baseline overlay (time to
+        /// the shared 100-frame milestone, snemu vs QEMU). Ignores
+        /// `--workload`/`--steps`.
+        #[arg(long)]
+        baseline: bool,
     },
     /// Build the kernel and run it in QEMU.
     ///
@@ -591,22 +596,62 @@ enum BaselineCmd {
 /// Strip the leaked vars once, before spawning anything, so children see the
 /// same environment a shell build would. xtask reads its own package metadata
 /// only via compile-time `env!`, which `remove_var` does not affect.
+/// Whether an inherited env var must be scrubbed before xtask spawns child
+/// cargo builds. Two families leak from the `cargo run` that launched xtask and
+/// corrupt those children:
+/// - **`CARGO_*` per-package vars** (`CARGO_MANIFEST_DIR`, `CARGO_PKG_*`, …) —
+///   make child builds think they're xtask, thrashing the build cache.
+/// - **`RUSTFLAGS` / `CARGO_ENCODED_RUSTFLAGS`** — a *release* `cargo run
+///   --release -p xtask` leaks xtask's host rustflags into the spawned
+///   `cargo build -p kernel`, whose host `build.rs` compile then dies with
+///   "Only small, tiny and large code models are allowed on `AArch64`" (the
+///   kernel's riscv `code-model=medium` flag applied to a host compile). The
+///   kernel's real flags come from its target-scoped `.cargo/config.toml`, not
+///   this inherited value, so dropping it is safe and unblocks release xtask.
+fn should_scrub_env_key(key: &str) -> bool {
+    key == "CARGO_MANIFEST_DIR"
+        || key == "CARGO_MANIFEST_PATH"
+        || key == "CARGO_CRATE_NAME"
+        || key == "CARGO_BIN_NAME"
+        || key == "CARGO_PRIMARY_PACKAGE"
+        || key.starts_with("CARGO_PKG_")
+        || key == "RUSTFLAGS"
+        || key == "CARGO_ENCODED_RUSTFLAGS"
+}
+
 fn scrub_inherited_cargo_env() {
     let leaked: Vec<String> = std::env::vars()
         .map(|(key, _)| key)
-        .filter(|key| {
-            key == "CARGO_MANIFEST_DIR"
-                || key == "CARGO_MANIFEST_PATH"
-                || key == "CARGO_CRATE_NAME"
-                || key == "CARGO_BIN_NAME"
-                || key == "CARGO_PRIMARY_PACKAGE"
-                || key.starts_with("CARGO_PKG_")
-        })
+        .filter(|key| should_scrub_env_key(key))
         .collect();
     for key in leaked {
         // SAFETY: called as the first statement of `main`, before any thread is
         // spawned, so there is no concurrent access to the process environment.
         unsafe { std::env::remove_var(key) };
+    }
+}
+
+#[cfg(test)]
+mod env_scrub_tests {
+    use super::should_scrub_env_key;
+
+    #[test]
+    fn scrubs_the_leaking_cargo_and_rustflags_vars() {
+        // The per-package CARGO_* leak (cache thrash) and the release rustflags
+        // leak (kernel host-build failure) must both be scrubbed.
+        assert!(should_scrub_env_key("CARGO_MANIFEST_DIR"));
+        assert!(should_scrub_env_key("CARGO_PKG_VERSION"));
+        assert!(should_scrub_env_key("RUSTFLAGS"));
+        assert!(should_scrub_env_key("CARGO_ENCODED_RUSTFLAGS"));
+    }
+
+    #[test]
+    fn leaves_unrelated_and_needed_vars_alone() {
+        // Don't over-scrub: PATH and cargo's home/target config are needed by
+        // the child builds.
+        assert!(!should_scrub_env_key("PATH"));
+        assert!(!should_scrub_env_key("CARGO_HOME"));
+        assert!(!should_scrub_env_key("CARGO_TARGET_DIR"));
     }
 }
 
@@ -627,8 +672,10 @@ fn main() -> ExitCode {
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
         Cmd::SnemuItest { steps, limit } => itest::snemu_audit::run(steps, limit),
-        Cmd::SnemuBench { workload, steps, runs, taxonomy } => {
-            if taxonomy {
+        Cmd::SnemuBench { workload, steps, runs, taxonomy, baseline } => {
+            if baseline {
+                snemu_bench::run_baseline(runs)
+            } else if taxonomy {
                 snemu_bench::run_taxonomy(runs)
             } else {
                 snemu_bench::run(workload.as_deref(), steps, runs)

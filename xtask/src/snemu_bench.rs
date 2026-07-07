@@ -6,10 +6,16 @@
 //! `plans/snemu-milestone-4-measurement.md`.
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 use snemu::bench::{BenchReport, Sample};
 
 use crate::snemu_diff;
+
+/// Per-workload QEMU window for the baseline overlay: long enough for QEMU
+/// (firmware + DTB-gen startup, then real-time boot) to reach the 100-frame
+/// milestone on the slower workloads.
+const QEMU_BASELINE_WINDOW: Duration = Duration::from_secs(8);
 
 /// One workload class in the measurement taxonomy: a representative runtime
 /// workload run to a fixed instruction budget. The four classes give "various
@@ -124,6 +130,102 @@ pub fn run_taxonomy(runs: u32) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Sweep the taxonomy under snemu **and** QEMU, printing a baseline overlay:
+/// snemu MIPS + snemu-vs-QEMU wall-clock to the shared 100-frame milestone. The
+/// fair cross-engine axis is that milestone, not instret — QEMU's instruction
+/// count is nondeterministic for this (timer-driven) guest, so only wall-clock
+/// to an observable point compares apples-to-apples. See step 4.
+pub fn run_baseline(runs: u32) -> ExitCode {
+    if runs == 0 {
+        eprintln!("snemu bench: --runs must be at least 1");
+        return ExitCode::from(2);
+    }
+    let (kernel, dtb) = match snemu_diff::prepare(true) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("snemu bench: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let mut rows: Vec<BaselineRow> = Vec::new();
+    for e in TAXONOMY {
+        eprintln!("snemu bench: {:<16} {} — snemu ×{runs} + QEMU baseline", e.class, e.workload);
+        let report = match bench_one(&kernel, &dtb, Some(e.workload), e.steps, runs, false) {
+            Ok(r) => r,
+            Err(err) => {
+                eprintln!("snemu bench: {} ({}): {err}", e.class, e.workload);
+                return ExitCode::from(1);
+            }
+        };
+        // snemu milestone timing is a separate (frame-watching) pass so the MIPS
+        // run above stays decode-free.
+        let snemu_milestone = snemu_diff::timing_snemu(&kernel, &dtb, Some(e.workload), e.steps)
+            .ok()
+            .and_then(|t| t.milestone);
+        // QEMU is best-effort: a missing binary or an unreached milestone leaves
+        // the column blank rather than failing the whole baseline.
+        let qemu_milestone = snemu_diff::timing_qemu(Some(e.workload), QEMU_BASELINE_WINDOW)
+            .ok()
+            .and_then(|t| t.milestone);
+        rows.push(BaselineRow { entry: e, report, snemu_milestone, qemu_milestone });
+    }
+
+    print_baseline(&rows);
+    ExitCode::SUCCESS
+}
+
+/// One row of the baseline overlay: a taxonomy entry's snemu report plus each
+/// engine's wall-clock to the shared milestone.
+struct BaselineRow {
+    entry: &'static TaxonomyEntry,
+    report: BenchReport,
+    snemu_milestone: Option<Duration>,
+    qemu_milestone: Option<Duration>,
+}
+
+/// How many times faster snemu reached the shared milestone than QEMU
+/// (`qemu / snemu`). `None` if either engine never reached it, or snemu's time
+/// is zero (below the clock) — no honest ratio rather than an infinity.
+fn milestone_speedup(snemu: Option<Duration>, qemu: Option<Duration>) -> Option<f64> {
+    let (snemu, qemu) = (snemu?, qemu?);
+    let s = snemu.as_secs_f64();
+    if s <= 0.0 {
+        return None;
+    }
+    Some(qemu.as_secs_f64() / s)
+}
+
+fn print_baseline(rows: &[BaselineRow]) {
+    println!("\n=== snemu bench: taxonomy vs QEMU baseline ===");
+    println!(
+        "  {:<16} {:<14} {:>10} {:>12} {:>12} {:>9}",
+        "CLASS", "WORKLOAD", "MIPS(best)", "snemu→100f", "qemu→100f", "speedup",
+    );
+    for row in rows {
+        let speedup = milestone_speedup(row.snemu_milestone, row.qemu_milestone)
+            .map_or_else(|| "—".to_string(), |x| format!("{x:.2}x"));
+        println!(
+            "  {:<16} {:<14} {:>10.2} {:>12} {:>12} {:>9}",
+            row.entry.class,
+            row.entry.workload,
+            row.report.best_mips,
+            fmt_millis(row.snemu_milestone),
+            fmt_millis(row.qemu_milestone),
+            speedup,
+        );
+    }
+    println!(
+        "\n  note: the fair axis is wall-clock to the 100-frame milestone, not instret —\n  \
+         QEMU's instruction count is nondeterministic for this timer-driven guest.",
+    );
+}
+
+/// Format an optional milestone duration in seconds, or `—` if never reached.
+fn fmt_millis(d: Option<Duration>) -> String {
+    d.map_or_else(|| "—".to_string(), |d| format!("{:.3}s", d.as_secs_f64()))
+}
+
 /// Run `workload` `runs` times to `steps`, optionally logging each run, and
 /// reduce to a determinism-checked [`BenchReport`]. Shared by the single-
 /// workload and taxonomy paths.
@@ -214,6 +316,32 @@ mod taxonomy_tests {
                 e.workload,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod baseline_tests {
+    use super::milestone_speedup;
+    use std::time::Duration;
+
+    #[test]
+    fn speedup_is_qemu_over_snemu() {
+        // snemu reaching the milestone in 0.5s vs QEMU in 2.0s = snemu 4× faster.
+        let s = milestone_speedup(Some(Duration::from_millis(500)), Some(Duration::from_secs(2)));
+        assert!((s.unwrap() - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_missing_milestone_on_either_side_has_no_ratio() {
+        // If either engine never reached the milestone (silent, or QEMU absent),
+        // there's no honest ratio to report.
+        assert!(milestone_speedup(None, Some(Duration::from_secs(1))).is_none());
+        assert!(milestone_speedup(Some(Duration::from_secs(1)), None).is_none());
+    }
+
+    #[test]
+    fn a_zero_snemu_time_has_no_ratio_not_infinity() {
+        assert!(milestone_speedup(Some(Duration::ZERO), Some(Duration::from_secs(1))).is_none());
     }
 }
 
