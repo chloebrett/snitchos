@@ -68,13 +68,17 @@ parser → tree-walk → effect seam), `docs/supervision-lifecycle.md` (per-serv
 state machine, extracted from `supervision-design.md`). Registered in
 `diagram_cmd::HAND_DRAWN`.
 
-**Local SVGs — `cargo xtask diagram svg`.** Hand-drawn diagrams are mermaid
-(flowchart/sequence), which graphviz can't render — so `svg` shells out to
-`mmdc` (mermaid-cli). `diagram::markdown::extract_mermaid` (pure, tested) pulls
-the fenced block out of each `HAND_DRAWN` doc; xtask renders it to a gitignored
-`.svg` beside the `.md`. Graceful skip + install hint if `mmdc` is absent — the
-committed `.md` is the source of truth regardless. (The generated graph targets
-keep their lighter graphviz-DOT SVG path; `svg` is only for the mermaid docs.)
+**Local PNGs — `cargo xtask diagram png`.** Hand-drawn diagrams are mermaid
+(flowchart/sequence/state), which graphviz can't render — so `png` shells out to
+`mmdc` (mermaid-cli, needs Node ≥ 18). `diagram::markdown::extract_mermaid`
+(pure, tested) pulls the fenced block out of each `HAND_DRAWN` doc; xtask
+renders it to a gitignored `.png` beside the `.md`. **PNG, not SVG:** mermaid
+emits flowchart/state labels as `<foreignObject>` HTML, which only browser-class
+renderers show (a plain `rsvg-convert`/Preview shows empty boxes); mmdc's own
+Chromium raster renders them, so a PNG is correct everywhere. Graceful skip +
+install hint if `mmdc` is absent — the committed `.md` is the source of truth
+regardless. (The generated graph targets keep their graphviz-DOT `.svg` path —
+graphviz emits plain `<text>`, which rasterizes fine.)
 
 ---
 

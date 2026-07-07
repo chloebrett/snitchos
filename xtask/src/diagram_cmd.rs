@@ -59,7 +59,7 @@ pub fn itest_matrix(check: bool) -> ExitCode {
 }
 
 /// Hand-drawn (bucket A) diagram docs — each a self-contained `.md` with one
-/// mermaid block. `svg` renders these to local SVGs. Add new hand-authored
+/// mermaid block. `png` renders these to local PNGs. Add new hand-authored
 /// diagrams here.
 const HAND_DRAWN: &[&str] = &[
     "docs/memory-map.md",
@@ -70,15 +70,17 @@ const HAND_DRAWN: &[&str] = &[
     "docs/supervision-lifecycle.md",
 ];
 
-/// Render every hand-drawn diagram doc's mermaid to a local SVG (gitignored)
+/// Render every hand-drawn diagram doc's mermaid to a local PNG (gitignored)
 /// via `mmdc` (mermaid-cli). The committed `.md` stays the source of truth and
-/// renders on GitHub in-diff; the SVG is a local-viewing convenience — mermaid
-/// (flowchart/sequence) can't go through graphviz like the graph targets do.
-pub fn svg() -> ExitCode {
+/// renders on GitHub in-diff; the PNG is a local-viewing convenience. PNG (not
+/// SVG) because mermaid emits flowchart/state labels as `<foreignObject>` HTML,
+/// which only browser-class renderers show — mmdc's own Chromium raster does,
+/// so a PNG renders correctly everywhere, unlike the SVG.
+pub fn png() -> ExitCode {
     if !command_exists("mmdc") {
         eprintln!(
-            "diagram svg: `mmdc` (mermaid-cli) not found — install it with \
-             `npm install -g @mermaid-js/mermaid-cli`, then re-run"
+            "diagram png: `mmdc` (mermaid-cli) not found — install it with \
+             `npm install -g @mermaid-js/mermaid-cli` (needs Node \u{2265} 18), then re-run"
         );
         return ExitCode::from(1);
     }
@@ -89,24 +91,24 @@ pub fn svg() -> ExitCode {
         let md = match std::fs::read_to_string(&md_path) {
             Ok(md) => md,
             Err(e) => {
-                eprintln!("diagram svg: reading {rel}: {e}");
+                eprintln!("diagram png: reading {rel}: {e}");
                 failures += 1;
                 continue;
             }
         };
         let blocks = diagram::markdown::extract_mermaid(&md);
         if blocks.is_empty() {
-            eprintln!("diagram svg: no mermaid block in {rel}");
+            eprintln!("diagram png: no mermaid block in {rel}");
             failures += 1;
             continue;
         }
         for (i, block) in blocks.iter().enumerate() {
-            let svg_path = if blocks.len() == 1 {
-                md_path.with_extension("svg")
+            let png_path = if blocks.len() == 1 {
+                md_path.with_extension("png")
             } else {
-                md_path.with_extension(format!("{i}.svg"))
+                md_path.with_extension(format!("{i}.png"))
             };
-            if !render_mermaid_svg(block, &svg_path) {
+            if !render_mermaid_png(block, &png_path) {
                 failures += 1;
             }
         }
@@ -118,27 +120,29 @@ pub fn svg() -> ExitCode {
     }
 }
 
-/// Pipe one mermaid block through `mmdc` to `out`. Returns `true` on success.
-fn render_mermaid_svg(mermaid: &str, out: &Path) -> bool {
+/// Pipe one mermaid block through `mmdc` to a PNG at `out`. Returns `true` on
+/// success. mmdc infers the output format from the extension and rasterizes via
+/// its bundled Chromium, so the `<foreignObject>` labels render correctly.
+fn render_mermaid_png(mermaid: &str, out: &Path) -> bool {
     let stem = out.file_stem().and_then(|s| s.to_str()).unwrap_or("diagram");
     let tmp = std::env::temp_dir().join(format!("snitch-{stem}.mmd"));
     if let Err(e) = std::fs::write(&tmp, mermaid) {
-        eprintln!("diagram svg: writing temp mmd: {e}");
+        eprintln!("diagram png: writing temp mmd: {e}");
         return false;
     }
     let status = Command::new("mmdc").arg("-i").arg(&tmp).arg("-o").arg(out).status();
     let _ = std::fs::remove_file(&tmp);
     match status {
         Ok(s) if s.success() => {
-            eprintln!("diagram svg: wrote {}", out.display());
+            eprintln!("diagram png: wrote {}", out.display());
             true
         }
         Ok(s) => {
-            eprintln!("diagram svg: mmdc failed for {}: {s}", out.display());
+            eprintln!("diagram png: mmdc failed for {}: {s}", out.display());
             false
         }
         Err(e) => {
-            eprintln!("diagram svg: invoking mmdc: {e}");
+            eprintln!("diagram png: invoking mmdc: {e}");
             false
         }
     }

@@ -459,8 +459,8 @@ enum DiagramTarget {
     Trace,
     /// Scheduler task-transition graph, from a snemu boot's `ContextSwitch` frames.
     Switches,
-    /// Render the hand-drawn diagram docs' mermaid to local SVGs (needs `mmdc`).
-    Svg,
+    /// Render the hand-drawn diagram docs' mermaid to local PNGs (needs `mmdc`).
+    Png,
 }
 
 /// Scenario classification filter for `cargo xtask itest --profile`.
@@ -677,7 +677,7 @@ fn main() -> ExitCode {
             DiagramTarget::Caps => diagram_cmd::caps(workload.as_deref(), steps),
             DiagramTarget::Trace => diagram_cmd::trace(workload.as_deref(), steps),
             DiagramTarget::Switches => diagram_cmd::switches(workload.as_deref(), steps),
-            DiagramTarget::Svg => diagram_cmd::svg(),
+            DiagramTarget::Png => diagram_cmd::png(),
         },
         Cmd::Loc => loc::run(),
         Cmd::Audit { crate_name, json, include_short } => {

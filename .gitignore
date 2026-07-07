@@ -49,6 +49,7 @@ target
 # committed source of truth.
 docs/generated/*.svg
 docs/*.svg
+docs/*.png
 
 # Built executables injected into the fs image at build time (kernel/build.rs
 # copies them here for SpawnImage). Source files in fs-image/ are committed; the
