@@ -535,6 +535,38 @@ pub(crate) fn collect_workload_frames(
     Ok(decode_frames(machine.virtio_tx_output()))
 }
 
+/// Boot `workload` under snemu and step up to `max_steps` rounds, timing the
+/// wall-clock — one measurement sample (`instret` + elapsed) for the `snemu
+/// bench` harness. The step loop is the *only* work timed: no per-step frame
+/// decode (that's observability-mode perturbation), so MIPS reflects the raw
+/// interpreter. `instret` is deterministic for a given workload+budget, so
+/// repeated calls yield identical counts — the invariant `bench::BenchReport`
+/// enforces.
+pub(crate) fn measure_workload(
+    kernel: &[u8],
+    dtb_base: &[u8],
+    workload: Option<&str>,
+    max_steps: u64,
+) -> Result<snemu::bench::Sample, String> {
+    let dtb = match workload {
+        Some(w) => snemu::dtb::set_bootargs(dtb_base, &format!("workload={w}"))
+            .ok_or("DTB patch failed")?,
+        None => dtb_base.to_vec(),
+    };
+    let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(&dtb), HART_COUNT)
+        .map_err(|e| format!("snemu load: {e:?}"))?;
+    let start = Instant::now();
+    let mut steps = 0u64;
+    while steps < max_steps {
+        match machine.step() {
+            Ok(()) => steps += 1,
+            Err(_) => break,
+        }
+    }
+    let wall = start.elapsed();
+    Ok(snemu::bench::Sample { instret: machine.instret(), wall })
+}
+
 /// Single-workload oracle: boot under both, diff, print the detailed report.
 pub fn run(max_steps: u64, qemu_secs: u64, workload: Option<&str>) -> ExitCode {
     let (kernel, dtb) = match prepare(workload.is_some()) {

@@ -125,6 +125,16 @@ impl Machine {
     pub fn virtio_tx_output(&self) -> &[u8] {
         self.bus.virtio_tx_output()
     }
+
+    /// Total guest instructions retired across all harts — the shared clock is
+    /// advanced once per executed instruction, so it *is* the aggregate instret.
+    /// The measurement spine's headline counter: deterministic for a given
+    /// program+seed, so MIPS (`instret / wall_clock`) is the honest, engine-
+    /// independent speed number. See `plans/snemu-milestone-4-measurement.md`.
+    #[must_use]
+    pub fn instret(&self) -> u64 {
+        self.time
+    }
 }
 
 #[cfg(test)]
@@ -174,6 +184,37 @@ mod tests {
         assert_eq!(m.pc(0), RAM_BASE + 4);
         assert_eq!(m.reg(1, 1), 0); // hart 1 never ran
         assert_eq!(m.pc(1), RAM_BASE);
+    }
+
+    #[test]
+    fn instret_counts_every_retired_instruction_deterministically() {
+        // The measurement spine's headline counter: guest instructions retired.
+        // One hart over three independent instructions retires exactly three,
+        // and a fresh machine over the same program retires the same count —
+        // the determinism that makes cross-engine MIPS comparison honest.
+        let program = &[0x02a0_0093, 0x0070_0113, 0x0010_0193];
+        let mut m = machine_with(program, 1);
+        assert_eq!(m.instret(), 0, "a fresh machine has retired nothing");
+        m.step().unwrap();
+        m.step().unwrap();
+        m.step().unwrap();
+        assert_eq!(m.instret(), 3);
+
+        let mut again = machine_with(program, 1);
+        for _ in 0..3 {
+            again.step().unwrap();
+        }
+        assert_eq!(again.instret(), m.instret(), "same program → same instret");
+    }
+
+    #[test]
+    fn instret_aggregates_across_running_harts() {
+        // With two harts running, one scheduler round retires one instruction
+        // per running hart — the aggregate the MIPS number is built on. Hart 1
+        // starts parked, so the first round retires only hart 0's instruction.
+        let mut m = machine_with(&[0x02a0_0093], 2); // addi x1, x0, 42
+        m.step().unwrap();
+        assert_eq!(m.instret(), 1, "only the running hart retired");
     }
 
     #[test]

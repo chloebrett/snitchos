@@ -8,6 +8,7 @@ mod itest;
 mod loc;
 mod measure;
 mod qemu;
+mod snemu_bench;
 mod snemu_diff;
 mod snip;
 mod source;
@@ -90,6 +91,21 @@ enum Cmd {
         /// Audit only the first N workload groups (faster smoke).
         #[arg(long)]
         limit: Option<usize>,
+    },
+    /// Measurement spine: run a workload under snemu N times and report guest
+    /// MIPS + wall-clock spread over a deterministic instret. The "measure
+    /// first" baseline every JIT tier is judged against.
+    SnemuBench {
+        /// Workload to measure (implies the `itest-workloads` build). Omit for
+        /// the default `init` boot.
+        #[arg(long)]
+        workload: Option<String>,
+        /// Instruction-step budget per run.
+        #[arg(long, default_value_t = 50_000_000)]
+        steps: u64,
+        /// Number of timed runs (determinism check + wall-clock spread).
+        #[arg(long, default_value_t = 5)]
+        runs: u32,
     },
     /// Build the kernel and run it in QEMU.
     ///
@@ -607,6 +623,9 @@ fn main() -> ExitCode {
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
         Cmd::SnemuItest { steps, limit } => itest::snemu_audit::run(steps, limit),
+        Cmd::SnemuBench { workload, steps, runs } => {
+            snemu_bench::run(workload.as_deref(), steps, runs)
+        }
         Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
         Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {
             measure::measure(&workload, seconds, warmup, timebase_hz, burst, markdown)
