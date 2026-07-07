@@ -72,7 +72,21 @@ deltas — something QEMU (nondeterministic, no fixed instret) can't give.
 - Test: same seed → identical instret every run; wall-clock reported
   with spread.
 
-### Step 3 — the workload taxonomy
+### Step 3 — the workload taxonomy — SHIPPED
+`cargo xtask snemu-bench --taxonomy` sweeps the four classes (checked-in
+`TAXONOMY` table in `xtask/src/snemu_bench.rs`, each validated against the
+runtime-workload registry in tests) and prints a per-class comparison table:
+- **startup-bound** → `demo` @ 10M steps
+- **compute-bound** → `mutex-storm` @ 50M (tight lock loop)
+- **memory-bound** → `heap-oom` @ 50M (allocator churn, load/store heavy)
+- **trap-mmio-heavy** → `syscall-hog` @ 50M (syscall spam)
+
+**Finding (debug interpreter):** MIPS is nearly *flat* across all four classes
+(~19.0–19.6). The interpreter's cost is **dispatch/decode-bound**, not mix-
+sensitive — so a decode/block cache (M5) should help uniformly, and there's no
+per-class hot path to specialize first. A finding the spine was built to
+produce; re-check under a release build and the M5 before/after.
+
 - Define the four workload classes as concrete, checked-in benchmarks:
   - **startup-bound** — boot-to-heartbeat.
   - **compute-bound** — a synthetic tight loop (LCG burner) and/or a storm.

@@ -315,7 +315,7 @@ fn connect_with_deadline(path: &std::path::Path, timeout: Duration) -> Result<Un
 
 /// The runtime workloads snemu can select (mirrors `kernel_core::workloads::
 /// bootargs::select`). The sweep runs the oracle over every one.
-const WORKLOADS: &[&str] = &[
+pub(crate) const WORKLOADS: &[&str] = &[
     "demo", "init", "smp", "smp-spsc", "smp-spsc-batch", "priorities", "block-wake", "workers",
     "heap-grow", "frame-oom", "heap-oom", "spawn-storm", "ipi-pong", "shootdown-storm",
     "mutex-storm", "virtio-storm", "tlb-shootdown", "ping-pong", "userspace", "userspace-fault",

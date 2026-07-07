@@ -106,6 +106,10 @@ enum Cmd {
         /// Number of timed runs (determinism check + wall-clock spread).
         #[arg(long, default_value_t = 5)]
         runs: u32,
+        /// Sweep the four taxonomy classes (startup/compute/memory/trap-MMIO)
+        /// and print a comparison table. Ignores `--workload`/`--steps`.
+        #[arg(long)]
+        taxonomy: bool,
     },
     /// Build the kernel and run it in QEMU.
     ///
@@ -623,8 +627,12 @@ fn main() -> ExitCode {
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
         Cmd::SnemuItest { steps, limit } => itest::snemu_audit::run(steps, limit),
-        Cmd::SnemuBench { workload, steps, runs } => {
-            snemu_bench::run(workload.as_deref(), steps, runs)
+        Cmd::SnemuBench { workload, steps, runs, taxonomy } => {
+            if taxonomy {
+                snemu_bench::run_taxonomy(runs)
+            } else {
+                snemu_bench::run(workload.as_deref(), steps, runs)
+            }
         }
         Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
         Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {
