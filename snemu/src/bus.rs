@@ -37,6 +37,12 @@ impl Bus {
         self.uart.output()
     }
 
+    /// Queue host console input for the guest to read via the UART receive
+    /// buffer — the interactive harness injecting a scenario's keystrokes.
+    pub(crate) fn push_console_input(&mut self, bytes: &[u8]) {
+        self.uart.push_input(bytes);
+    }
+
     /// Overwrite guest RAM (used to patch a snapshot's DTB before a fork).
     pub(crate) fn write_ram(&mut self, addr: u64, bytes: &[u8]) -> Result<(), BusError> {
         self.ram.write_bytes(addr, bytes)

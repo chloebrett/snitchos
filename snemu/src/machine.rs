@@ -121,6 +121,13 @@ impl Machine {
         self.bus.uart_output()
     }
 
+    /// Inject host console input for the guest to read through the UART receive
+    /// buffer. The interactive audit harness calls this when a scenario reaches
+    /// its "ready to read" marker, then keeps stepping so the guest drains it.
+    pub fn push_console_input(&mut self, bytes: &[u8]) {
+        self.bus.push_console_input(bytes);
+    }
+
     #[must_use]
     pub fn virtio_tx_output(&self) -> &[u8] {
         self.bus.virtio_tx_output()
