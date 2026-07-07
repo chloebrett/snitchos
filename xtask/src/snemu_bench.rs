@@ -35,8 +35,12 @@ pub fn run(workload: Option<&str>, max_steps: u64, runs: u32) -> ExitCode {
     for i in 0..runs {
         match snemu_diff::measure_workload(&kernel, &dtb, workload, max_steps) {
             Ok(s) => {
+                let startup = s.startup.map_or_else(
+                    || " (silent)".to_string(),
+                    |m| format!(", startup {} instr / {:.3}s", m.instret, m.wall.as_secs_f64()),
+                );
                 eprintln!(
-                    "  run {}/{runs}: {} instr in {:.3}s → {:.2} MIPS",
+                    "  run {}/{runs}: {} instr in {:.3}s → {:.2} MIPS{startup}",
                     i + 1,
                     s.instret,
                     s.wall.as_secs_f64(),
@@ -71,4 +75,11 @@ fn print_report(label: &str, r: &BenchReport) {
         "  MIPS      best {:.2} / mean {:.2} / worst {:.2}",
         r.best_mips, r.mean_mips, r.worst_mips,
     );
+    match (r.startup_instret, r.mean_startup_wall) {
+        (Some(instret), Some(wall)) => println!(
+            "  startup   {instret} instr to first telemetry / {:.3}s mean wall",
+            wall.as_secs_f64(),
+        ),
+        _ => println!("  startup   — (no telemetry within budget)"),
+    }
 }

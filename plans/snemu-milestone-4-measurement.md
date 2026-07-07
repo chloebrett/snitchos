@@ -45,14 +45,16 @@ deltas — something QEMU (nondeterministic, no fixed instret) can't give.
   What was load-bearing and real: exposing the deterministic aggregate counter.
   `Machine::instret()` (returns the shared clock `time` = total retired across
   harts) is SHIPPED, host-tested (determinism + cross-hart aggregation).
-- **Step 2 — SHIPPED.** `cargo xtask snemu bench [--workload W] [--steps N]
-  [--runs K]` runs a workload under snemu K times, timing only the step loop
-  (no per-step decode = no observer effect), and reports guest MIPS (best/mean/
-  worst) over a deterministic instret. Determinism is *enforced*: the pure
-  `snemu::bench::BenchReport::from_samples` errors if instret varies across runs
-  (12/12 viable mutants caught). First number: **default `init` boot ≈ 20 MIPS**,
-  instret identical to the instruction across runs. Startup-time split is the
-  one Step-2 sub-item still open (measure boot-to-first-frame separately).
+- **Step 2 — SHIPPED (incl. startup split).** `cargo xtask snemu bench
+  [--workload W] [--steps N] [--runs K]` runs a workload under snemu K times,
+  timing only the step loop (no per-step decode = no observer effect), and
+  reports guest MIPS (best/mean/worst) + **startup** (boot-to-first-telemetry:
+  deterministic instret + mean wall) over a deterministic total instret.
+  Determinism is *enforced*: the pure `snemu::bench::BenchReport::from_samples`
+  errors if total OR startup instret varies across runs, or if the startup mark
+  is reached in some runs but not others (22/22 viable mutants caught). First
+  numbers: **default `init` boot ≈ 20 MIPS (debug xtask); 1,997,578 instr to
+  first telemetry (identical every run) / ~0.11s.**
 
 ### Step 1 — the two-mode split (deferred; see Progress)
 - Gate per-instruction telemetry behind a mode flag. Measurement mode
@@ -63,7 +65,7 @@ deltas — something QEMU (nondeterministic, no fixed instret) can't give.
   produces the frame stream. Instret identical across modes (determinism
   check — the mode must not change *what executes*).
 
-### Step 2 — the benchmark harness (SHIPPED; startup-split open)
+### Step 2 — the benchmark harness (SHIPPED)
 - `cargo xtask snemu bench [workload]`: runs a workload deterministically
   (fixed seed), in measurement mode, N times, reports guest MIPS +
   wall-clock + startup time with variance.

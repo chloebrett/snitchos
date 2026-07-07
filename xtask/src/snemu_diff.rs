@@ -557,14 +557,24 @@ pub(crate) fn measure_workload(
         .map_err(|e| format!("snemu load: {e:?}"))?;
     let start = Instant::now();
     let mut steps = 0u64;
+    let mut startup: Option<snemu::bench::StartupMark> = None;
     while steps < max_steps {
         match machine.step() {
             Ok(()) => steps += 1,
             Err(_) => break,
         }
+        // Boot-to-first-telemetry: the first non-empty virtio TX buffer marks
+        // when the guest emitted its first frame. Cheap length check, and only
+        // until the mark is taken.
+        if startup.is_none() && !machine.virtio_tx_output().is_empty() {
+            startup = Some(snemu::bench::StartupMark {
+                instret: machine.instret(),
+                wall: start.elapsed(),
+            });
+        }
     }
     let wall = start.elapsed();
-    Ok(snemu::bench::Sample { instret: machine.instret(), wall })
+    Ok(snemu::bench::Sample { instret: machine.instret(), wall, startup })
 }
 
 /// Single-workload oracle: boot under both, diff, print the detailed report.
