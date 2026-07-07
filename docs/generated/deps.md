@@ -6,28 +6,36 @@
 
 ```mermaid
 graph LR
-    collector["collector"]
-    diagram["diagram"]
-    fs["fs"]
-    fs_core["fs-core"]
-    fs_proto["fs-proto"]
-    hello["hello"]
-    hitch["hitch"]
-    hitch_derive["hitch-derive"]
-    hitch_pod["hitch-pod"]
-    itest_harness["itest-harness"]
-    kernel["kernel"]
-    kernel_core["kernel-core"]
-    protocol["protocol"]
-    ramfs["ramfs"]
-    snemu["snemu"]
-    snip["snip"]
-    snitchos_abi["snitchos-abi"]
-    snitchos_std["snitchos-std"]
-    snitchos_user["snitchos-user"]
-    snitchos_user_macros["snitchos-user-macros"]
-    stitch["stitch"]
-    xtask["xtask"]
+    subgraph tooling
+        collector["collector"]
+        diagram["diagram"]
+        itest_harness["itest-harness"]
+        snemu["snemu"]
+        snip["snip"]
+        xtask["xtask"]
+    end
+    subgraph userspace
+        fs["fs"]
+        hello["hello"]
+        snitchos_std["snitchos-std"]
+        snitchos_user["snitchos-user"]
+        snitchos_user_macros["snitchos-user-macros"]
+        stitch["stitch"]
+    end
+    subgraph shared
+        fs_core["fs-core"]
+        fs_proto["fs-proto"]
+        hitch["hitch"]
+        hitch_derive["hitch-derive"]
+        hitch_pod["hitch-pod"]
+        protocol["protocol"]
+        ramfs["ramfs"]
+        snitchos_abi["snitchos-abi"]
+    end
+    subgraph kernel
+        kernel["kernel"]
+        kernel_core["kernel-core"]
+    end
     collector --> protocol
     collector --> snitchos_abi
     diagram --> protocol

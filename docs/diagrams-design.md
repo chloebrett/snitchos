@@ -264,10 +264,12 @@ A visual audit (rendering every diagram to PNG and eyeballing it) drove these:
    (`fs.serve ×13`, `kernel.heartbeat ×23`).
 4. **Legends** — every generated diagram's `.md` now opens with a "how to read
    this" caption (notation, colors, provenance), threaded through `render_doc`.
-
-**Still open:** `deps` layer-clustering (group crates into kernel/host/userspace
-`subgraph`s) — needs subgraph support in the `Graph` model + a crate→layer map;
-deferred as the one remaining audit item.
+5. **deps layer-clustering** — the `Graph` model gained subgraph support
+   (`node_in` → mermaid `subgraph` / DOT `cluster_*`), and `workspace_graph`
+   takes an editorial `layer_of` map (kernel / shared / userspace / tooling in
+   `diagram_cmd::deps_layer`). The flat 21-crate hairball is now four labelled
+   boxes, so the layering — everything funnelling into the `shared` protocol/abi
+   layer — is legible at a glance.
 
 ## Decisions
 

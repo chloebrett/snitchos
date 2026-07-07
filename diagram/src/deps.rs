@@ -50,14 +50,23 @@ pub fn parse_cargo_metadata(json: &str) -> Result<Vec<CrateNode>, serde_json::Er
 /// Project workspace members into a flowchart. Only edges whose target is
 /// itself a workspace member survive (external crates like `clap`/`serde` are
 /// dropped); node ids are the crate names with `-` sanitized to `_` so mermaid
-/// doesn't misparse hyphens, while labels keep the real name.
-pub fn workspace_graph(members: &[CrateNode]) -> Graph {
+/// doesn't misparse hyphens, while labels keep the real name. `layer_of` groups
+/// each crate into a named cluster (kernel / userspace / …) — `None` leaves a
+/// crate ungrouped. The layer mapping is editorial, so it lives with the caller.
+pub fn workspace_graph(
+    members: &[CrateNode],
+    layer_of: impl Fn(&str) -> Option<String>,
+) -> Graph {
     let is_member = |name: &str| members.iter().any(|m| m.name == name);
     let sanitize = |name: &str| name.replace('-', "_");
 
     let mut graph = Graph::new(Direction::LeftRight);
     for member in members {
-        graph.node(&sanitize(&member.name), &member.name);
+        let id = sanitize(&member.name);
+        match layer_of(&member.name) {
+            Some(layer) => graph.node_in(&id, &member.name, &layer),
+            None => graph.node(&id, &member.name),
+        }
     }
     let mut seen = std::collections::HashSet::new();
     for member in members {
@@ -96,7 +105,20 @@ graph LR
     xtask --> diagram
     diagram --> protocol
 ";
-        assert_eq!(workspace_graph(&members).to_mermaid(), expected);
+        assert_eq!(workspace_graph(&members, |_| None).to_mermaid(), expected);
+    }
+
+    #[test]
+    fn groups_crates_into_layer_subgraphs() {
+        let members = vec![node("kernel", &["kernel-core"]), node("kernel-core", &[]), node("xtask", &[])];
+        let layer = |name: &str| match name {
+            "kernel" | "kernel-core" => Some("kernel".to_string()),
+            _ => None,
+        };
+        let mermaid = workspace_graph(&members, layer).to_mermaid();
+        assert!(mermaid.contains("subgraph kernel"), "kernel crates clustered");
+        assert!(mermaid.contains("        kernel[\"kernel\"]"), "kernel node inside the subgraph");
+        assert!(mermaid.contains("    xtask[\"xtask\"]"), "ungrouped crate stays top-level");
     }
 
     #[test]
@@ -135,7 +157,7 @@ graph LR
     hitch_pod[\"hitch-pod\"]
     hitch --> hitch_pod
 ";
-        assert_eq!(workspace_graph(&members).to_mermaid(), expected);
+        assert_eq!(workspace_graph(&members, |_| None).to_mermaid(), expected);
     }
 
     #[test]
@@ -147,6 +169,6 @@ graph LR
     kernel_core[\"kernel-core\"]
     xtask --> kernel_core
 ";
-        assert_eq!(workspace_graph(&members).to_mermaid(), expected);
+        assert_eq!(workspace_graph(&members, |_| None).to_mermaid(), expected);
     }
 }

@@ -13,6 +13,7 @@ struct Node {
     id: String,
     label: String,
     classes: Vec<String>,
+    group: Option<String>,
 }
 
 struct Edge {
@@ -46,14 +47,26 @@ impl Graph {
     }
 
     pub fn node(&mut self, id: &str, label: &str) {
-        self.node_classed(id, label, &[]);
+        self.push_node(id, label, &[], None);
     }
 
     pub fn node_classed(&mut self, id: &str, label: &str, classes: &[&str]) {
+        self.push_node(id, label, classes, None);
+    }
+
+    /// Add a node inside a named subgraph/cluster `group`. Nodes sharing a group
+    /// are boxed together (mermaid `subgraph`, DOT `cluster_*`); groups render in
+    /// first-appearance order.
+    pub fn node_in(&mut self, id: &str, label: &str, group: &str) {
+        self.push_node(id, label, &[], Some(group));
+    }
+
+    fn push_node(&mut self, id: &str, label: &str, classes: &[&str], group: Option<&str>) {
         self.nodes.push(Node {
             id: id.to_string(),
             label: label.to_string(),
             classes: classes.iter().map(|c| (*c).to_string()).collect(),
+            group: group.map(str::to_string),
         });
     }
 
@@ -80,34 +93,56 @@ impl Graph {
         });
     }
 
+    /// Groups (subgraph names) in first-appearance order across the nodes.
+    fn group_order(&self) -> Vec<&str> {
+        let mut groups: Vec<&str> = Vec::new();
+        for group in self.nodes.iter().filter_map(|n| n.group.as_deref()) {
+            if !groups.contains(&group) {
+                groups.push(group);
+            }
+        }
+        groups
+    }
+
     pub fn to_mermaid(&self) -> String {
         let header = match self.direction {
             Direction::LeftRight => "graph LR",
             Direction::TopDown => "graph TD",
         };
-        let nodes = self.nodes.iter().map(|n| format!("    {}[\"{}\"]", n.id, n.label));
-        let edges = self.edges.iter().map(|e| match &e.label {
-            Some(label) => format!("    {} -->|{label}| {}", e.from, e.to),
-            None => format!("    {} --> {}", e.from, e.to),
-        });
-        let classdefs =
-            self.classes.iter().map(|c| format!("    classDef {} {};", c.name, c.mermaid));
-        let assignments = self.classes.iter().filter_map(|c| {
+        let node_line = |n: &Node, indent: &str| format!("{indent}{}[\"{}\"]", n.id, n.label);
+
+        let mut lines = vec![header.to_string()];
+        for group in self.group_order() {
+            lines.push(format!("    subgraph {group}"));
+            for n in self.nodes.iter().filter(|n| n.group.as_deref() == Some(group)) {
+                lines.push(node_line(n, "        "));
+            }
+            lines.push("    end".to_string());
+        }
+        for n in self.nodes.iter().filter(|n| n.group.is_none()) {
+            lines.push(node_line(n, "    "));
+        }
+        for e in &self.edges {
+            lines.push(match &e.label {
+                Some(label) => format!("    {} -->|{label}| {}", e.from, e.to),
+                None => format!("    {} --> {}", e.from, e.to),
+            });
+        }
+        for c in &self.classes {
+            lines.push(format!("    classDef {} {};", c.name, c.mermaid));
+        }
+        for c in &self.classes {
             let ids: Vec<&str> = self
                 .nodes
                 .iter()
                 .filter(|n| n.classes.contains(&c.name))
                 .map(|n| n.id.as_str())
                 .collect();
-            (!ids.is_empty()).then(|| format!("    class {} {};", ids.join(","), c.name))
-        });
-        std::iter::once(header.to_string())
-            .chain(nodes)
-            .chain(edges)
-            .chain(classdefs)
-            .chain(assignments)
-            .map(|line| line + "\n")
-            .collect()
+            if !ids.is_empty() {
+                lines.push(format!("    class {} {};", ids.join(","), c.name));
+            }
+        }
+        lines.join("\n") + "\n"
     }
 
     pub fn to_dot(&self) -> String {
@@ -115,7 +150,7 @@ impl Graph {
             Direction::LeftRight => "LR",
             Direction::TopDown => "TB",
         };
-        let nodes = self.nodes.iter().map(|n| {
+        let node_line = |n: &Node, indent: &str| {
             let attrs: Vec<String> = n
                 .classes
                 .iter()
@@ -123,19 +158,31 @@ impl Graph {
                 .flat_map(|c| c.dot.iter())
                 .map(|(k, v)| format!("{k}=\"{v}\""))
                 .collect();
-            let attrs = if attrs.is_empty() { String::new() } else { format!(" {}", attrs.join(" ")) };
-            format!("    \"{}\" [label=\"{}\"{attrs}];", n.id, n.label)
-        });
-        let edges = self.edges.iter().map(|e| match &e.label {
-            Some(label) => format!("    \"{}\" -> \"{}\" [label=\"{label}\"];", e.from, e.to),
-            None => format!("    \"{}\" -> \"{}\";", e.from, e.to),
-        });
-        std::iter::once(format!("digraph {{\n    rankdir={rankdir};"))
-            .chain(nodes)
-            .chain(edges)
-            .chain(std::iter::once("}".to_string()))
-            .map(|line| line + "\n")
-            .collect()
+            let attrs =
+                if attrs.is_empty() { String::new() } else { format!(" {}", attrs.join(" ")) };
+            format!("{indent}\"{}\" [label=\"{}\"{attrs}];", n.id, n.label)
+        };
+
+        let mut lines = vec![format!("digraph {{\n    rankdir={rankdir};")];
+        for group in self.group_order() {
+            lines.push(format!("    subgraph cluster_{group} {{"));
+            lines.push(format!("        label=\"{group}\";"));
+            for n in self.nodes.iter().filter(|n| n.group.as_deref() == Some(group)) {
+                lines.push(node_line(n, "        "));
+            }
+            lines.push("    }".to_string());
+        }
+        for n in self.nodes.iter().filter(|n| n.group.is_none()) {
+            lines.push(node_line(n, "    "));
+        }
+        for e in &self.edges {
+            lines.push(match &e.label {
+                Some(label) => format!("    \"{}\" -> \"{}\" [label=\"{label}\"];", e.from, e.to),
+                None => format!("    \"{}\" -> \"{}\";", e.from, e.to),
+            });
+        }
+        lines.push("}".to_string());
+        lines.join("\n") + "\n"
     }
 }
 
@@ -184,6 +231,24 @@ mod tests {
 | default-boot-starts-init | init (default) |
 ";
         assert_eq!(t.to_markdown(), expected);
+    }
+
+    #[test]
+    fn grouped_nodes_render_as_subgraphs_in_both_backends() {
+        let mut g = Graph::new(Direction::LeftRight);
+        g.node_in("a", "A", "kernel");
+        g.node_in("b", "B", "host");
+        g.node("c", "C");
+        g.edge("a", "b");
+
+        assert_eq!(
+            g.to_mermaid(),
+            "graph LR\n    subgraph kernel\n        a[\"A\"]\n    end\n    subgraph host\n        b[\"B\"]\n    end\n    c[\"C\"]\n    a --> b\n",
+        );
+        assert_eq!(
+            g.to_dot(),
+            "digraph {\n    rankdir=LR;\n    subgraph cluster_kernel {\n        label=\"kernel\";\n        \"a\" [label=\"A\"];\n    }\n    subgraph cluster_host {\n        label=\"host\";\n        \"b\" [label=\"B\"];\n    }\n    \"c\" [label=\"C\"];\n    \"a\" -> \"b\";\n}\n",
+        );
     }
 
     #[test]

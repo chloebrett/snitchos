@@ -284,6 +284,23 @@ pub fn caps(workload: Option<&str>, steps: u64) -> ExitCode {
 }
 
 /// Generate (or, with `check`, verify) the workspace crate-dependency graph.
+/// Editorial crate → layer mapping for the `deps` graph's clustering. Keeps the
+/// workspace legible by grouping crates into the four layers rather than a flat
+/// hairball. New crates land here (else they render ungrouped).
+fn deps_layer(crate_name: &str) -> Option<String> {
+    let layer = match crate_name {
+        "kernel" | "kernel-core" => "kernel",
+        "protocol" | "snitchos-abi" | "fs-proto" | "fs-core" | "ramfs" | "hitch" | "hitch-pod"
+        | "hitch-derive" => "shared",
+        "hello" | "fs" | "snitchos-user" | "snitchos-std" | "snitchos-user-macros" | "stitch" => {
+            "userspace"
+        }
+        "xtask" | "collector" | "snemu" | "itest-harness" | "diagram" | "snip" => "tooling",
+        _ => return None,
+    };
+    Some(layer.to_string())
+}
+
 pub fn deps(check: bool) -> ExitCode {
     let json = match cargo_metadata() {
         Ok(json) => json,
@@ -299,7 +316,7 @@ pub fn deps(check: bool) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let graph = diagram::deps::workspace_graph(&members);
+    let graph = diagram::deps::workspace_graph(&members, deps_layer);
     let body = format!("```mermaid\n{}```\n", graph.to_mermaid());
     let doc = render_doc(
         "Workspace crate graph",
