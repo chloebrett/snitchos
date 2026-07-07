@@ -41,3 +41,13 @@
 - the shell has one verb — `view`. the natural next verbs are the ones that make it a real delegation shell: `spawn` (launch any SPAWNABLE with a chosen set of caps), and eventually `grant` (hand a cap to an already-running process, not just a new one). but those are downstream of the post that's still pending: the Stitch core redesign Phase C, which gives Stitch a faithful surface AST and a lowering pass to core IR. the shell is Stitch — the language needs to be right before the shell grows more verbs through it.
 
 - the other thing the trace is missing: the `CapEvent::Revoked` is there, but the collector doesn't yet draw the authority timeline — the span that covers the delegation window, with Revoked as its close. the events are all on the wire. wiring the collector to turn them into a proper timeline span is the step that makes the Tempo view tell the story without squinting.
+
+## postscript — a flaky test and the wrong measurement
+
+- there was a loose end to tidy after this post shipped. `ipc-wakeup-is-prompt` — a scenario that asserts the IPC receiver opens its span within 100ms of the sender — was failing about 13% of the time. the error message said "the woken receiver waited for a timer tick because the idle loop wfi'd past ready work." that turned out to be wrong about the cause.
+
+- first attempt: add a self-IPI from `sched::wake()` so that if the secondary hart's idle is in `wfi`, the pending SSIP breaks the sleep without waiting for a timer tick. ran 100 reps. failure rate went to 20%. worse.
+
+- the actual problem was in what the test was measuring. the scenario compared kernel timestamps: `t` from the sender's `ipc.send` SpanStart against `t` from the receiver's `ipc.recv` SpanStart. the kernel captures `t` at the top of `SpanOpen`, before the virtio TX spin — and that spin runs with SIE=0 (inside a syscall, timer masked). when the heartbeat on hart 0 holds the CONSOLE mutex, the sender's `SpanOpen` can stall for 100ms+, all of it invisible to the scheduler. the gap `t_recv − t_send` was measuring heartbeat contention, not scheduling latency.
+
+- the fix: use host-side arrival times instead of kernel timestamps. the `ipc.send` frame only lands on the wire after the slow TX completes, so the gap from that point to when `ipc.recv` arrives reflects only how long it took the receiver to get scheduled and emit its span — which is the thing the test was always supposed to measure. 0/100 after the change. the scheduler was fine the whole time; the ruler was wrong.
