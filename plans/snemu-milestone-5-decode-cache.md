@@ -1,11 +1,23 @@
 # snemu M5 — JIT Tier 1: the decode cache
 
-**Status: increments 1–2 SHIPPED + verified.** A per-hart decode cache behind an
-on/off flag, proven byte-identical to the interpreter across the taxonomy.
-Increment 1 (cache the fetch) reached ~1.15×; increment 2 (drop the
-per-instruction `satp` read) reached **~1.44×** (26.4 vs 18.3 MIPS default boot,
-~1.4× flat across the taxonomy). A further increment (pre-decode the *operation*)
-is the path toward the tier ladder's 2–4×.
+**Status: increments 1–3 SHIPPED + verified.** A per-hart decode cache behind an
+on/off flag, proven byte-identical to the interpreter across the taxonomy. The
+measure-first chain, each step guided by the M4 spine:
+
+| step | change | interp (off) | cache (on) |
+|---|---|---|---|
+| — | baseline interpreter | 18.3 | — |
+| inc 1 | direct-mapped cache | 18.3 | 21.0 |
+| inc 2 | drop per-instr `satp` read | 18.3 | 26.4 |
+| **inc 3** | **CSR file: BTreeMap → flat array** | **41.4** | **52.8** |
+
+**Headline: snemu 18.3 → 52.8 MIPS = 2.9× self-speedup; vs QEMU on the boot
+milestone flipped from ~0.96× (parity) to ~1.6×.** The dominant cost was never
+instruction decode — it was per-instruction CSR reads (`pending_interrupt` probes
+`sip`/`sie`/`sstatus` every step through a `BTreeMap`). Fixing the CSR *storage*
+(inc 3) helped the interpreter itself 2.25×, more than the whole decode cache.
+The op pre-decode (the *original* inc-3 idea) is deferred — dispatch is cheap
+jump-table matching, not the cap; revisit only if a JIT tier needs it.
 
 Design context: the tier ladder in [docs/snemu-design.md](../docs/snemu-design.md)
 (*JIT: the tier ladder*). Measured against the M4 spine
@@ -67,14 +79,33 @@ op pre-decode: the fast path read `satp` from the CSR file **every instruction**
 - Still byte-identical telemetry across the taxonomy (`--verify-cache`), and the
   new eviction/flush behaviour is unit-tested (aliasing eviction; flush-then-reuse).
 
-## Increment 3 (next) — pre-decode the operation → toward 2–4×
+## Increment 3 (SHIPPED) — CSR file: BTreeMap → flat array
 
-Cache a **dispatch-ready decoded form** (an `Op` enum with fields already
-extracted), not just `raw`, so `execute` skips the opcode `match` + field
-re-extraction. Restructures `execute` into decode-to-`Op` + execute-`Op`. The
-verification harness (`--verify-cache`) and A/B bench are already in place to keep
-it honest. (Related lever for both paths: `pending_interrupt` also does
-per-instruction `BTreeMap` CSR reads — a candidate to cache locally.)
+Inc 2 flagged `pending_interrupt`'s per-instruction CSR reads as the next lever;
+the data confirmed it emphatically. `Csr` stored 10 registers in a
+`BTreeMap<u16,u64>`, and the interrupt check probes `sip`/`sie`/`sstatus` on
+*every* step — tree comparisons + pointer-chasing, per instruction.
+
+- Replaced the `BTreeMap` with a `[u64; N]` flat array indexed by a jump-table
+  `Csr::slot(addr)` match. API unchanged (`read`/`write` signatures identical), so
+  nothing outside `csr.rs` moved. `Clone` (the snapshot/fork primitive) is now a
+  cheap array copy too.
+- **Interpreter 18.3 → 41.4 MIPS (2.25×); cache 26.4 → 52.8 (2.0×).** Bigger than
+  the entire decode cache — the cap was CSR *storage*, not decode.
+- Guarded by a round-trip test over every modeled CSR (protects the address→slot
+  map from drift/aliasing); `--verify-cache` still byte-identical across the
+  taxonomy.
+
+**The lesson (twice now):** the tier ladder predicted decode was the bottleneck;
+measurement said per-instruction `BTreeMap` CSR access was. Measure-first beat the
+textbook.
+
+## Deferred — pre-decode the operation (the textbook Tier-1 finish)
+
+Cache a dispatch-ready `Op` enum so `execute` skips the opcode `match` + field
+re-extraction. Deprioritised: after inc 3, dispatch is cheap jump-table matching,
+not the cap. The harness (`--verify-cache`, A/B bench) is in place if a future
+tier makes it worthwhile.
 
 ## CLI
 

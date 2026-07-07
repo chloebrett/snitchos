@@ -1,9 +1,7 @@
-//! The control-and-status register file: a sparse store over the CSR
+//! The control-and-status register file: a flat store over the CSR
 //! addresses snemu models. Addresses outside that set surface as
 //! `CsrError::Unknown` (the meta-loop signal), so they're added on demand
 //! rather than silently reading as zero.
-
-use std::collections::BTreeMap;
 
 /// CSR addresses (`instr[31:20]`), named per the privileged spec. The kernel
 /// runs in S-mode, so these are the Supervisor trap CSRs. Extended as the
@@ -57,29 +55,53 @@ pub(crate) enum CsrError {
     Unknown(u16),
 }
 
-/// The control-and-status register file.
+/// The control-and-status register file. Stored as a **flat array** indexed by a
+/// jump-table [`slot`](Csr::slot) map, not a `BTreeMap`: `read`/`write` are on the
+/// hot path (`pending_interrupt` probes `sip`/`sie`/`sstatus` every instruction),
+/// where a tree lookup's comparisons and pointer-chasing measured as a real tax.
+/// An array index behind a `match` is O(1) with no indirection, and `Clone` (the
+/// snapshot/fork primitive) becomes a cheap array copy. The API is unchanged, so
+/// nothing else moves.
 #[derive(Clone)]
 pub(crate) struct Csr {
-    values: BTreeMap<u16, u64>,
+    values: [u64; SUPPORTED.len()],
 }
 
 impl Csr {
     pub(crate) fn new() -> Self {
-        let values = SUPPORTED.iter().map(|&a| (a, 0)).collect();
-        Self { values }
+        Self { values: [0; SUPPORTED.len()] }
+    }
+
+    /// The dense array slot for a modeled CSR, or `None` if unmodeled. A `match`
+    /// (jump table), so lookup is a branch + array index — no scan, no tree. Must
+    /// cover exactly [`SUPPORTED`]; the round-trip test guards against drift.
+    #[inline]
+    fn slot(addr: u16) -> Option<usize> {
+        Some(match addr {
+            addr::SSTATUS => 0,
+            addr::SIE => 1,
+            addr::STVEC => 2,
+            addr::SSCRATCH => 3,
+            addr::SEPC => 4,
+            addr::SCAUSE => 5,
+            addr::STVAL => 6,
+            addr::SIP => 7,
+            addr::SATP => 8,
+            addr::STIMECMP => 9,
+            _ => return None,
+        })
     }
 
     pub(crate) fn read(&self, addr: u16) -> Result<u64, CsrError> {
-        self.values
-            .get(&addr)
-            .copied()
+        Self::slot(addr)
+            .map(|i| self.values[i])
             .ok_or(CsrError::Unknown(addr))
     }
 
     pub(crate) fn write(&mut self, addr: u16, value: u64) -> Result<(), CsrError> {
-        match self.values.get_mut(&addr) {
-            Some(slot) => {
-                *slot = value;
+        match Self::slot(addr) {
+            Some(i) => {
+                self.values[i] = value;
                 Ok(())
             }
             None => Err(CsrError::Unknown(addr)),
@@ -104,5 +126,21 @@ mod tests {
         let mut csr = Csr::new();
         assert_eq!(csr.read(0xfff), Err(CsrError::Unknown(0xfff)));
         assert_eq!(csr.write(0xfff, 1), Err(CsrError::Unknown(0xfff)));
+    }
+
+    #[test]
+    fn every_modeled_csr_defaults_to_zero_and_round_trips_independently() {
+        // Guards the address→slot mapping: each modeled CSR must have its own
+        // slot (write one, it reads back; the others stay put — no aliasing).
+        let mut csr = Csr::new();
+        for &a in SUPPORTED {
+            assert_eq!(csr.read(a).unwrap(), 0, "{a:#x} defaults to zero");
+        }
+        for (i, &a) in SUPPORTED.iter().enumerate() {
+            csr.write(a, 0x1000 + i as u64).unwrap();
+        }
+        for (i, &a) in SUPPORTED.iter().enumerate() {
+            assert_eq!(csr.read(a).unwrap(), 0x1000 + i as u64, "{a:#x} kept its own value");
+        }
     }
 }
