@@ -17,7 +17,9 @@ use alloc::vec::Vec;
 
 use fs_proto::{FileRights, Op, Request, Response, UserBuf, XattrKey};
 use hitch::{CapView, Grant, Unsatisfied, decode_manifest, satisfy};
-use snitchos_user::{Endpoint, endpoint, entry, exit, object_kind, rights, spawn_image, tracer};
+use snitchos_user::{
+    Endpoint, endpoint, entry, exit, object_kind, register_counter, rights, spawn_image, tracer,
+};
 
 /// Path-walk the FS to a file cap (attach → `Lookup` each `/`-component).
 fn cap_for(path: &str) -> Option<Endpoint> {
@@ -107,7 +109,13 @@ fn process(child: &str, have: &[CapView]) {
             Grant::Use { handle } => *handle,
             Grant::Mint { from, rights } => {
                 match Endpoint::from_raw_handle(*from as usize).mint_badged(0, *rights) {
-                    Ok(h) => h as u32,
+                    Ok(h) => {
+                        // Snitch the attenuation: we minted a *narrower* cap than we
+                        // hold (the kernel's `CapEvent::Transferred` carries the
+                        // narrowed rights + parent cap id for the trace).
+                        register_counter("snitchos.satisfy.attenuated_total").emit(1);
+                        h as u32
+                    }
                     Err(_) => return,
                 }
             }
@@ -127,11 +135,13 @@ fn main() {
     // table via `CapList`; here we know our one bootstrap cap.
     let have = [CapView {
         object: object_kind::ENDPOINT as u8,
-        rights: rights::SEND,
+        rights: rights::MINT | rights::SEND,
         handle: endpoint().raw_handle() as u32,
     }];
 
-    // Satisfiable: `fs-probe` needs the `SEND` cap we hold → grant + spawn.
+    // Exact match: `fs-warden` needs `MINT|SEND` (what we hold) → Use (delegate as-is).
+    process("bin/fs-warden", &have);
+    // Attenuation: `fs-probe` needs only `SEND` → Mint a narrowed cap from our MINT|SEND.
     process("bin/fs-probe", &have);
     // Unsatisfiable: `fs-hungry` needs `RECV` we don't hold → refuse (snitched).
     process("bin/fs-hungry", &have);

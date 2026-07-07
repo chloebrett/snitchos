@@ -3016,6 +3016,40 @@ pub fn manifest_satisfy_refuses_unsatisfiable(h: &mut View) -> Result<(), String
     Ok(())
 }
 
+/// Attenuation (`workload=manifest-satisfy`): the satisfier holds `MINT|SEND` on the
+/// FS endpoint. `fs-warden` needs exactly `MINT|SEND` → an exact-match `Use` (the
+/// wide cap delegated as-is); `fs-probe` needs only `SEND` → a `Grant::Mint`, so the
+/// satisfier `MintBadged`s a *narrowed* `SEND` cap (dropping `MINT`) and delegates
+/// that. Asserts (1) `snitchos.satisfy.attenuated_total ≥ 1` — the satisfier actually
+/// minted an attenuated cap, not just copied a handle — and (2) `fs_warden.reached`
+/// — the Use'd wide cap works too. With `grants-by-name` (the minted `SEND` reaches
+/// the FS) and `refuses-unsatisfiable`, this exercises the whole Use/Mint/Refuse
+/// triad on one boot.
+pub fn manifest_satisfy_attenuates(h: &mut View) -> Result<(), String> {
+    // Both markers land on one boot, but which comes first (the Use child reaching vs
+    // the satisfier minting for the Mint child) is cooperative-scheduling-dependent —
+    // and `wait_for` consumes forward — so accumulate both without assuming order.
+    let attenuated = std::cell::Cell::new(false);
+    let warden_reached = std::cell::Cell::new(false);
+    h.wait_for(SEC * 40, |f, strings| {
+        if let OwnedFrame::Metric { name_id, value, .. } = f {
+            match strings.get(name_id).map(String::as_str) {
+                Some("snitchos.satisfy.attenuated_total") if *value >= 1 => attenuated.set(true),
+                Some("snitchos.fs_warden.reached") if *value == 1 => warden_reached.set(true),
+                _ => {}
+            }
+        }
+        attenuated.get() && warden_reached.get()
+    })
+    .ok_or(
+        "within 40s the manifest-satisfy boot didn't show BOTH \
+         snitchos.satisfy.attenuated_total ≥ 1 (fs-probe's SEND need minted an attenuated cap \
+         from the held MINT|SEND) AND snitchos.fs_warden.reached == 1 (the exact-match MINT|SEND \
+         Use cap reached the FS)",
+    )?;
+    Ok(())
+}
+
 /// v0.11 spawn-with-caps (`workload=spawn-demo`): a parent `Spawn`s a child,
 /// delegating its `SpanSink` cap, and the child *uses* that delegated cap. Proves
 /// the whole path: `Spawn` creates a process holding exactly the delegated caps,
@@ -3628,6 +3662,50 @@ pub fn viewer_reads_delegated_file(h: &mut View) -> Result<(), String> {
     if value < 1 {
         return Err(format!(
             "viewer.bytes_read = {value}, expected ≥ 1 (file was empty or read returned 0)"
+        ));
+    }
+
+    Ok(())
+}
+
+/// The shell parses `view bin/spawnee`, looks up the file with READ-only
+/// rights, spawns the viewer, revokes the cap after the viewer reads. Proves
+/// the interactive powerbox loop: a user command triggers the full delegate →
+/// use → revoke sequence, all observable in Tempo.
+pub fn shell_view_command_revokes_cap(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+
+    // Wait for the shell to reach its read loop before injecting.
+    h.wait_for(SEC * 20, is_span_start_named("shell.ready"))
+        .ok_or("shell never reached its input loop (no shell.ready span within 20s)")?;
+
+    h.send_input(b"view bin/spawnee\n")
+        .map_err(|e| format!("inject shell input: {e}"))?;
+
+    // Revoke fires while viewer's Read IPC is in-flight (same ordering as the
+    // view-demo workload scenario — Revoked before bytes_read on the wire).
+    h.wait_for(SEC * 20, |f, _| {
+        matches!(
+            f,
+            OwnedFrame::CapEvent {
+                kind: CapEventKind::Revoked,
+                object: CapObject::Endpoint,
+                ..
+            }
+        )
+    })
+    .ok_or("no CapEvent::Revoked{Endpoint} within 20s — shell view command didn't revoke the file cap")?;
+
+    let frame = h
+        .wait_for(SEC * 10, is_metric_named("snitchos.viewer.bytes_read"))
+        .ok_or("no snitchos.viewer.bytes_read metric within 10s after Revoked")?;
+    let value = match frame {
+        OwnedFrame::Metric { value, .. } => value,
+        _ => return Err("matched non-metric (impossible)".to_string()),
+    };
+    if value < 1 {
+        return Err(format!(
+            "viewer.bytes_read = {value}, expected ≥ 1"
         ));
     }
 

@@ -247,6 +247,7 @@ catalog! {
     wfi "manifest-iface-served"           scenarios::manifest_iface_served          [userspace, fs] {"manifest-iface"};
     wfi "manifest-satisfy-grants-by-name" scenarios::manifest_satisfy_grants_by_name [userspace, fs] {"manifest-satisfy"};
     wfi "manifest-satisfy-refuses-unsatisfiable" scenarios::manifest_satisfy_refuses_unsatisfiable [userspace, fs] {"manifest-satisfy"};
+    wfi "manifest-satisfy-attenuates"     scenarios::manifest_satisfy_attenuates     [userspace, fs] {"manifest-satisfy"};
     wfi "stitch-reads-a-line"             scenarios::stitch_reads_a_line            [userspace, stitch] {"stitch-repl"};
     wfi "stitch-print-writes-to-console"  scenarios::stitch_print_writes_to_console [userspace, stitch] {"stitch-repl"};
     wfi "stitch-hold-lists-caps"          scenarios::stitch_hold_lists_caps         [userspace, stitch] {"stitch-repl"};
@@ -295,6 +296,7 @@ catalog! {
     cpu "notify-signal-wakes-waiter"      scenarios::notify_signal_wakes_waiter     [userspace]  {"notify-smoke"};
     cpu "priorities-ordered-but-fair"     scenarios::priorities_ordered_but_fair    [userspace]  {"priorities"};
     cpu "viewer-reads-delegated-file"     scenarios::viewer_reads_delegated_file    [userspace]  {"view-demo"};
+    cpu "shell-view-command-revokes-cap"  scenarios::shell_view_command_revokes_cap [userspace]  {"shell"};
 }
 
 /// Set the process-wide failure-capture transcript depth. Call once at

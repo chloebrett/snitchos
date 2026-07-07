@@ -120,6 +120,10 @@ pub enum WorkloadKind {
     /// spawns the viewer (`Spawn` registry id 6) with that attenuated cap
     /// delegated. First end-to-end demo of the powerbox hand-off pattern.
     ViewerDemo,
+    /// Interactive powerbox shell: a seeded FS server + `shell`. The shell reads
+    /// `view <path>` commands from the UART console, looks up files with
+    /// READ-only rights, spawns the viewer, and revokes the cap on exit.
+    Shell,
     /// Typed-interface end-to-end: a client reads `/bin/manifest_demo`'s
     /// `user.iface` xattr off the seeded FS, `decode_manifest`s it, and checks
     /// the shape — proving the `#[entry]` → note → xattr → IPC → decode chain.
@@ -298,6 +302,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "stitch-fs" => Some(WorkloadKind::StitchFs),
             "spawn-image" => Some(WorkloadKind::SpawnImage),
             "view-demo" => Some(WorkloadKind::ViewerDemo),
+            "shell" => Some(WorkloadKind::Shell),
             "manifest-iface" => Some(WorkloadKind::ManifestIface),
             "manifest-satisfy" => Some(WorkloadKind::ManifestSatisfy),
             "probe" => Some(WorkloadKind::Probe),
@@ -457,6 +462,11 @@ mod tests {
     #[test]
     fn selects_viewer_demo() {
         assert_eq!(select("workload=view-demo"), Some(WorkloadKind::ViewerDemo));
+    }
+
+    #[test]
+    fn selects_shell() {
+        assert_eq!(select("workload=shell"), Some(WorkloadKind::Shell));
     }
 
     #[test]

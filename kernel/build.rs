@@ -51,6 +51,7 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("iface-reader", "SNITCHOS_IFACE_READER_ELF"),
     ("viewer", "SNITCHOS_VIEWER_ELF"),
     ("view-demo", "SNITCHOS_VIEW_DEMO_ELF"),
+    ("shell", "SNITCHOS_SHELL_ELF"),
 ];
 
 fn main() {
@@ -137,6 +138,9 @@ fn build_and_embed_user(kernel_dir: &str) {
     // `fs-hungry` is the *unsatisfiable* child (needs a cap the satisfier lacks) —
     // the satisfier reads its needs, refuses, and never `SpawnImage`s it.
     copy_if_different(&format!("{bin_dir}/fs-hungry"), &ws.join("fs-image/bin/fs-hungry"));
+    // `fs-warden` is the *exact-match* child (needs `MINT|SEND`, what the satisfier
+    // holds) → a `Use` grant, vs `fs-probe`'s narrower `SEND` → an attenuating `Mint`.
+    copy_if_different(&format!("{bin_dir}/fs-warden"), &ws.join("fs-image/bin/fs-warden"));
     build(&["fs"]);
 
     for (bin, env_var) in USER_PROGRAMS {

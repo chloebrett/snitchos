@@ -141,6 +141,7 @@ pub static FS_SERVER_SEEDED_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_SERVER
 pub static FS_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_FS_CLIENT_ELF"));
 pub static VIEWER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_VIEWER_ELF"));
 pub static VIEW_DEMO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_VIEW_DEMO_ELF"));
+pub static SHELL_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SHELL_ELF"));
 pub static SPAWN_IMAGE_DEMO_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAWN_IMAGE_DEMO_ELF"));
 pub static SATISFIER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SATISFIER_ELF"));
 pub static IFACE_READER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_IFACE_READER_ELF"));
@@ -375,11 +376,17 @@ pub static SPAWN_IMAGE_DEMO: ProgramSpec = ipc_user(SPAWN_IMAGE_DEMO_ELF, Rights
 /// up a file with READ rights, spawns the viewer with that cap delegated.
 pub static VIEW_DEMO: ProgramSpec = ipc_user(VIEW_DEMO_ELF, Rights::SEND.bits());
 
-/// `workload=manifest-satisfy`: the generic satisfier. Reads `/bin/fs-probe`'s
-/// declared `needs` off the seeded FS (`user.iface` xattr), matches them against
-/// its own caps via `hitch::satisfy`, and `SpawnImage`s the child with the granted
-/// handles. Holds `SEND` on the FS endpoint (to read + delegate).
-pub static SATISFIER: ProgramSpec = ipc_user(SATISFIER_ELF, Rights::SEND.bits());
+/// `workload=shell`: interactive powerbox shell. Holds `SEND` on the seeded FS
+/// endpoint, reads commands from the UART, and executes them with least authority.
+pub static SHELL: ProgramSpec = ipc_user(SHELL_ELF, Rights::SEND.bits());
+
+/// `workload=manifest-satisfy`: the generic satisfier. Reads a child's declared
+/// `needs` off the seeded FS (`user.iface` xattr), matches them against its own caps
+/// via `hitch::satisfy`, and `SpawnImage`s the child with the granted handles. Holds
+/// `MINT | SEND` on the FS endpoint: `SEND` to read + delegate as-is (`Use`), `MINT`
+/// to attenuate a wider cap down to a child's narrower need (`Mint`).
+pub static SATISFIER: ProgramSpec =
+    ipc_user(SATISFIER_ELF, Rights::MINT.bits() | Rights::SEND.bits());
 
 /// `workload=manifest-iface`: reads `/bin/manifest_demo`'s `user.iface` xattr off
 /// the seeded FS (over `GetXattr`), decodes it, and checks the shape — the
@@ -629,6 +636,16 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
         programs: &[
             ProgramSpawn { name: "fs_server", program: &FS_SERVER_SEEDED, priority: Priority::Normal },
             ProgramSpawn { name: "view_demo", program: &VIEW_DEMO, priority: Priority::Normal },
+        ],
+    }),
+    // Interactive powerbox shell: seeded FS + shell. The shell reads `view
+    // <path>` commands from the UART, looks up the file with READ-only rights,
+    // spawns the viewer (SPAWNABLE id 6) with that cap, then revokes on exit.
+    (WorkloadKind::Shell, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "fs_server", program: &FS_SERVER_SEEDED, priority: Priority::Normal },
+            ProgramSpawn { name: "shell", program: &SHELL, priority: Priority::Normal },
         ],
     }),
     // Generic satisfier: the seeded FS server (holding `/bin/fs-probe` + its
