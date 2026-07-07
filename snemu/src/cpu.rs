@@ -443,18 +443,16 @@ impl Hart {
         // read, compressed expand) and goes straight to dispatch. Only the
         // decoded form is reused — `execute` still reads live `pc`/registers, so
         // behaviour is identical to the slow path (the equivalence the flag
-        // guards).
-        if self.decode_cache.is_some() {
-            let satp = self.csr.read(addr::SATP).unwrap_or(0);
-            if let Some(decoded) = self.decode_cache.as_mut().and_then(|c| c.get(satp, self.pc)) {
-                self.cur_ilen = decoded.ilen;
-                self.execute(decoded.raw, bus)?;
-                self.instret += 1;
-                return Ok(self.pending_sbi.take().map_or(HartEffect::None, HartEffect::Sbi));
-            }
+        // guards). No satp read here: the cache is flushed on any translation
+        // change (satp write / sfence.vma), so a live entry is valid by
+        // construction — the hot path is a single array probe.
+        if let Some(decoded) = self.decode_cache.as_mut().and_then(|c| c.get(self.pc)) {
+            self.cur_ilen = decoded.ilen;
+            self.execute(decoded.raw, bus)?;
+            self.instret += 1;
+            return Ok(self.pending_sbi.take().map_or(HartEffect::None, HartEffect::Sbi));
         }
-        // Slow path: the full fetch pipeline. A cache miss above already synced
-        // the cache's address space, so `insert` lands in the right one.
+        // Slow path: the full fetch pipeline, then cache the result.
         let Some(pc_pa) = self.translate_or_trap(self.pc, Access::Fetch, bus) else {
             return Ok(HartEffect::None); // fetch faulted → trapped to the handler
         };
@@ -821,6 +819,12 @@ impl Hart {
         };
         if do_write {
             self.csr.write(csr, new).map_err(|e| csr_step_error(pc, e))?;
+            // Writing `satp` switches the address space, so every cached
+            // (translated) instruction is now stale. This is the coherence hook
+            // that lets the fast path skip re-reading satp per instruction.
+            if csr == addr::SATP && let Some(cache) = self.decode_cache.as_mut() {
+                cache.flush();
+            }
         }
         self.set_reg(instr.rd(), old);
         self.advance();

@@ -51,16 +51,15 @@ struct Slot {
 
 /// A per-hart decode cache — a **direct-mapped array**, not a hash map: a PC
 /// indexes straight into `slots` with a shift+mask (no hashing, which measured
-/// *slower* than the page walk it was meant to save). Valid for one address
-/// space (`satp`) and until the guest invalidates translations; both flush via
-/// an **epoch bump** (O(1) — a slot counts only if its epoch matches the current
-/// one), so the frequent boot-time `sfence`/`satp` churn stays cheap. Tracks
-/// hit/miss counts for the hot-block metrics (M4 step 5) and to prove the fast
-/// path engaged.
+/// *slower* than the page walk it was meant to save). A cached entry is a
+/// translated instruction, valid until the guest changes translations; the hart
+/// flushes on a `satp` write and on `sfence.vma`, both via an O(1) **epoch bump**
+/// (a slot counts only if its epoch matches the current one). Keeping `satp`
+/// invalidation out of the lookup means the fast path never re-reads the CSR file
+/// — the hot path is a single array probe. Tracks hit/miss counts for the
+/// hot-block metrics (M4 step 5) and to prove the fast path engaged.
 #[derive(Clone)]
 pub(crate) struct DecodeCache {
-    /// The address space the live entries belong to; a change bumps `epoch`.
-    satp: u64,
     /// Slots written with an earlier epoch are stale. Starts at 1 so the
     /// zero-initialised slots (epoch 0) are invalid from birth.
     epoch: u64,
@@ -72,7 +71,6 @@ pub(crate) struct DecodeCache {
 impl DecodeCache {
     pub(crate) fn new() -> Self {
         Self {
-            satp: 0,
             epoch: 1,
             slots: vec![Slot::default(); SLOTS].into_boxed_slice(),
             hits: 0,
@@ -85,16 +83,13 @@ impl DecodeCache {
         ((pc >> 1) & INDEX_MASK) as usize
     }
 
-    /// Look up `pc` in address space `satp`. A `satp` change flushes first (the
-    /// slots map different physical code). Returns the cached [`Decoded`] on a
-    /// hit — the slot's epoch is current AND its tag matches this exact PC (not an
-    /// aliasing neighbour) — bumping hits; else `None`, bumping misses, and the
-    /// caller does the slow fetch+expand and [`insert`](Self::insert)s.
-    pub(crate) fn get(&mut self, satp: u64, pc: u64) -> Option<Decoded> {
-        if satp != self.satp {
-            self.satp = satp;
-            self.epoch += 1;
-        }
+    /// Look up `pc`. Returns the cached [`Decoded`] on a hit — the slot's epoch is
+    /// current AND its tag matches this exact PC (not an aliasing neighbour that
+    /// shares its index) — bumping hits; else `None`, bumping misses, and the
+    /// caller does the slow fetch+expand and [`insert`](Self::insert)s. No `satp`
+    /// check here: the hart flushes on any translation change, so a live slot is
+    /// by construction valid for the current address space.
+    pub(crate) fn get(&mut self, pc: u64) -> Option<Decoded> {
         let slot = &self.slots[Self::index(pc)];
         if slot.epoch == self.epoch && slot.tag == pc {
             self.hits += 1;
@@ -140,42 +135,48 @@ mod tests {
     #[test]
     fn a_miss_then_insert_then_hit_returns_the_decoded_instruction() {
         let mut cache = DecodeCache::default();
-        assert_eq!(cache.get(0, 0x1000), None, "cold lookup misses");
+        assert_eq!(cache.get(0x1000), None, "cold lookup misses");
         cache.insert(0x1000, A);
-        assert_eq!(cache.get(0, 0x1000), Some(A), "warm lookup hits");
+        assert_eq!(cache.get(0x1000), Some(A), "warm lookup hits");
     }
 
     #[test]
-    fn a_satp_change_flushes_stale_entries() {
-        // Entries belong to one address space. Switching satp (a context switch)
-        // must not return the previous space's code for the same VA.
+    fn a_flush_drops_every_entry() {
+        // The invalidation hook (satp write / sfence.vma): after a flush, a
+        // previously-warm PC misses.
         let mut cache = DecodeCache::default();
-        cache.insert(0x1000, A); // satp still 0 (its default)
-        assert_eq!(cache.get(0, 0x1000), Some(A));
-        assert_eq!(cache.get(1, 0x1000), None, "new satp sees no stale entry");
-        // ...and the old entry is gone even back under satp 0.
-        assert_eq!(cache.get(0, 0x1000), None);
-    }
-
-    #[test]
-    fn an_sfence_flush_drops_entries_but_keeps_the_address_space() {
-        // sfence.vma invalidates translations in the *current* space; entries go,
-        // but a subsequent same-satp lookup shouldn't be treated as a space change.
-        let mut cache = DecodeCache::default();
-        let _ = cache.get(7, 0x2000); // establish satp=7
         cache.insert(0x2000, B);
-        assert_eq!(cache.get(7, 0x2000), Some(B));
+        assert_eq!(cache.get(0x2000), Some(B));
         cache.flush();
-        assert_eq!(cache.get(7, 0x2000), None, "flushed");
+        assert_eq!(cache.get(0x2000), None, "flushed");
+        // ...and the cache is usable again afterwards (new epoch, fresh inserts).
+        cache.insert(0x2000, A);
+        assert_eq!(cache.get(0x2000), Some(A));
+    }
+
+    #[test]
+    fn two_pcs_sharing_a_slot_evict_each_other() {
+        // Direct-mapped: PCs that land on the same index alias. The tag check
+        // means the evicted one misses (never returns the wrong instruction) and
+        // the resident one hits. `SLOTS << 1` in PC space is exactly one index
+        // period apart.
+        let mut cache = DecodeCache::default();
+        let p1 = 0x8000;
+        let p2 = p1 + ((super::SLOTS as u64) << 1); // same index, different tag
+        cache.insert(p1, A);
+        assert_eq!(cache.get(p1), Some(A));
+        cache.insert(p2, B); // aliases p1's slot, evicting it
+        assert_eq!(cache.get(p2), Some(B), "resident hits");
+        assert_eq!(cache.get(p1), None, "evicted neighbour misses, never mis-hits");
     }
 
     #[test]
     fn hits_count_only_the_fast_path() {
         let mut cache = DecodeCache::default();
-        let _ = cache.get(0, 0x1000); // miss
+        let _ = cache.get(0x1000); // miss
         cache.insert(0x1000, A);
-        let _ = cache.get(0, 0x1000); // hit
-        let _ = cache.get(0, 0x1000); // hit
+        let _ = cache.get(0x1000); // hit
+        let _ = cache.get(0x1000); // hit
         assert_eq!(cache.hits(), 2);
     }
 }

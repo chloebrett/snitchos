@@ -1,9 +1,11 @@
 # snemu M5 — JIT Tier 1: the decode cache
 
-**Status: increment 1 SHIPPED + verified.** A per-hart decode cache behind an
-on/off flag, proven byte-identical to the interpreter across the taxonomy, giving
-~1.1–1.15× today. The 2–4× the tier ladder predicts needs increment 2 (pre-decode
-the *operation*, not just the fetch).
+**Status: increments 1–2 SHIPPED + verified.** A per-hart decode cache behind an
+on/off flag, proven byte-identical to the interpreter across the taxonomy.
+Increment 1 (cache the fetch) reached ~1.15×; increment 2 (drop the
+per-instruction `satp` read) reached **~1.44×** (26.4 vs 18.3 MIPS default boot,
+~1.4× flat across the taxonomy). A further increment (pre-decode the *operation*)
+is the path toward the tier ladder's 2–4×.
 
 Design context: the tier ladder in [docs/snemu-design.md](../docs/snemu-design.md)
 (*JIT: the tier ladder*). Measured against the M4 spine
@@ -48,13 +50,31 @@ Design context: the tier ladder in [docs/snemu-design.md](../docs/snemu-design.m
   (134), mutex-storm (254), heap-oom (1281), syscall-hog (2335 frames) — covering
   satp switches, userspace, storms. instret identical on every A/B bench run.
 
-## Increment 2 (next) — pre-decode the operation → the real 2–4×
+## Increment 2 (SHIPPED) — the fast path is a single array probe
+
+Profiling the increment-1 cache pointed at a bigger, cheaper win than the planned
+op pre-decode: the fast path read `satp` from the CSR file **every instruction**
+(a `BTreeMap<u16,u64>` lookup) just to detect address-space changes. Removed it:
+
+- The cache is now **satp-agnostic** — `get(pc)` is a single direct-mapped array
+  probe, no CSR read. Correctness moves to **flush-on-write**: the hart flushes
+  the cache when the guest writes `satp` (hook in `csr_access`) or runs
+  `sfence.vma` (hook in `priv_op`). Both are rare (context switches / TLB
+  invalidations), so a live slot is valid for the current address space by
+  construction.
+- Result: **21.0 → 26.4 MIPS** (default boot), i.e. **1.15× → 1.44×** over the
+  interpreter; ~1.4× flat across the taxonomy; startup 0.123 → 0.081 s.
+- Still byte-identical telemetry across the taxonomy (`--verify-cache`), and the
+  new eviction/flush behaviour is unit-tested (aliasing eviction; flush-then-reuse).
+
+## Increment 3 (next) — pre-decode the operation → toward 2–4×
 
 Cache a **dispatch-ready decoded form** (an `Op` enum with fields already
 extracted), not just `raw`, so `execute` skips the opcode `match` + field
-re-extraction. Restructures `execute` into decode-to-`Op` + execute-`Op`. This is
-where the tier's headline 2–4× lives; increment 1 built the cache + flag +
-invalidation + the verification harness it rides on.
+re-extraction. Restructures `execute` into decode-to-`Op` + execute-`Op`. The
+verification harness (`--verify-cache`) and A/B bench are already in place to keep
+it honest. (Related lever for both paths: `pending_interrupt` also does
+per-instruction `BTreeMap` CSR reads — a candidate to cache locally.)
 
 ## CLI
 
