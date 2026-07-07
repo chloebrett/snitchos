@@ -49,8 +49,15 @@ fn main() {
     }
 
     bytes_read.emit(total as i64);
-    // Yield a few times so the parent can revoke the cap while we still hold
-    // it — the CapEvent::Revoked fires during this window, not after exit.
+    // Hold the cap alive while the parent revokes it. A cap released on
+    // process exit vanishes silently (no CapEvent::Revoked); revoke only
+    // fires when the holder is still running. Four yields give the parent
+    // enough scheduling turns to call revoke before we exit.
+    //
+    // TODO: replace with a proper parent-signals-done primitive once one
+    // exists. The yield count is fragile: it assumes the parent wins the
+    // CPU within four scheduling turns, which holds today under cooperative
+    // round-robin but is an implicit timing contract, not a hard guarantee.
     for _ in 0..4 {
         yield_now();
     }
