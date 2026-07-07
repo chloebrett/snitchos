@@ -45,7 +45,7 @@ fn panic(info: &PanicInfo) -> ! {
         // Snitch the panic on the *structured* channel too, not just the UART —
         // for an observability-first kernel, its own death is the one event most
         // worth a frame. Best-effort and panic-safe (see `snitch_panic`).
-        snitch_panic();
+        snitch_panic(info);
     }
     loop {
         unsafe {
@@ -68,10 +68,20 @@ fn panic(info: &PanicInfo) -> ! {
 /// If the console isn't up yet, or its lock is held, the frame is silently
 /// dropped — the emergency-UART message already went out, so nothing is lost that
 /// a human can't see.
-fn snitch_panic() {
+///
+/// The message carries the real panic reason + location, formatted from `info`
+/// into a fixed `static` buffer via [`kernel_core::panic_log::MsgWriter`] — the
+/// same no-alloc `core::fmt::Write` trick the emergency UART uses above,
+/// truncating at a char boundary if the message overruns the buffer.
+fn snitch_panic(info: &PanicInfo) {
+    use core::fmt::Write;
+
+    /// Holds the formatted `"kernel panic: <info>"` message, kept smaller than
+    /// `PANIC_FRAME_BUF` to leave room for the postcard `Log` framing overhead.
+    static mut PANIC_MSG_BUF: [u8; 192] = [0u8; 192];
     /// `.bss`-resident so its VA translates for the device (heap VAs don't); 256 B
-    /// matches the console staging buffer, with headroom for a richer message
-    /// (increment 6 of `plans/panic-emits-telemetry.md`).
+    /// matches the console staging buffer, with headroom over `PANIC_MSG_BUF` for
+    /// the `Log` frame's length/id/timestamp fields.
     static mut PANIC_FRAME_BUF: [u8; 256] = [0u8; 256];
 
     let task_id = crate::sched::current_task_id().0;
@@ -79,13 +89,23 @@ fn snitch_panic() {
     let t = crate::tracing::timestamp();
 
     // SAFETY: the `PANICKING` guard admits exactly one hart into the panic branch,
-    // so this is the sole writer to `PANIC_FRAME_BUF` — no aliasing.
+    // so this is the sole writer to both static buffers — no aliasing.
     #[allow(
         clippy::deref_addrof,
         reason = "the required &mut *(&raw mut STATIC) idiom; a direct &mut STATIC is forbidden"
     )]
-    let buf = unsafe { &mut *(&raw mut PANIC_FRAME_BUF) };
-    if let Some(n) = kernel_core::panic_log::encode(buf, "kernel panic", task_id, t, hart_id) {
-        let _ = crate::virtio_console::try_send_panic(&buf[..n]);
+    let (msg_buf, frame_buf) = unsafe {
+        (&mut *(&raw mut PANIC_MSG_BUF), &mut *(&raw mut PANIC_FRAME_BUF))
+    };
+
+    let mut msg = kernel_core::panic_log::MsgWriter::new(msg_buf);
+    // Never errors (overflow truncates); the emergency UART already has the full
+    // text, so a truncated telemetry copy is acceptable.
+    let _ = write!(msg, "kernel panic: {info}");
+
+    if let Some(n) =
+        kernel_core::panic_log::encode(frame_buf, msg.as_str(), task_id, t, hart_id)
+    {
+        let _ = crate::virtio_console::try_send_panic(&frame_buf[..n]);
     }
 }

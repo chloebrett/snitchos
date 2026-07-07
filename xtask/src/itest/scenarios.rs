@@ -1311,20 +1311,23 @@ pub fn stack_guard_fault_detected(h: &mut View) -> Result<(), String> {
 
 /// The kernel snitches its own panic on the structured channel (`workload=panic-now`).
 /// A kernel task calls `panic!()`; the panic handler emits a **telemetry `Log`**
-/// ("kernel panic") on the virtio-console, in addition to the emergency-UART
-/// message — best-effort and panic-safe (no alloc, no intern, non-blocking
-/// `try_lock`, single writer via the `PANICKING` guard). Asserts that `Log`
-/// reaches the wire: for an observability-first kernel, its own death is the one
-/// event most worth a frame, and this proves it's no longer UART-only. See
-/// `plans/panic-emits-telemetry.md`.
+/// (`"kernel panic: <PanicInfo>"`) on the virtio-console, in addition to the
+/// emergency-UART message — best-effort and panic-safe (no alloc, no intern,
+/// non-blocking `try_lock`, single writer via the `PANICKING` guard). Asserts the
+/// `Log` reaches the wire *carrying the real reason* (increment 6): it contains
+/// both the `"kernel panic"` marker and the workload's own panic message. For an
+/// observability-first kernel, its own death is the one event most worth a frame,
+/// and this proves it's no longer UART-only. See `plans/panic-emits-telemetry.md`.
 pub fn kernel_panic_emits_frame(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 20, |f, _| {
-        matches!(f, OwnedFrame::Log { msg, .. } if msg.contains("kernel panic"))
+        matches!(f, OwnedFrame::Log { msg, .. }
+            if msg.contains("kernel panic") && msg.contains("deliberate immediate panic"))
     })
     .ok_or(
-        "no Log containing 'kernel panic' within 20s — the panic handler's telemetry emit \
-         didn't reach the wire (console down, lock contended the whole time, or the \
-         panic-safe encode/send path regressed)",
+        "no Log carrying the panic reason within 20s — expected a Log containing both \
+         'kernel panic' and the workload's 'deliberate immediate panic' message. The panic \
+         handler's telemetry emit didn't reach the wire (console down, lock contended the \
+         whole time), or increment 6's dynamic-message formatting regressed to the fixed marker",
     )?;
     Ok(())
 }
@@ -3591,12 +3594,33 @@ pub fn priorities_ordered_but_fair(h: &mut View) -> Result<(), String> {
 
 /// The viewer binary receives a scoped READ cap for a file (delegated by
 /// view-demo) and reads it, emitting `snitchos.viewer.bytes_read` with the
-/// number of bytes it received. Proves: cap delegation across the Spawn
-/// boundary, the Read IPC path through the FS, and the powerbox hand-off.
+/// number of bytes it received. view-demo revokes the file cap while the viewer
+/// is still alive (blocked in its Read IPC call) — the full powerbox loop:
+/// delegate, use, revoke.
+///
+/// Wire order: the revoke fires while viewer's Read is in-flight (view-demo
+/// gets CPU when viewer blocks on IPC), so CapEvent::Revoked arrives BEFORE
+/// bytes_read. The scenario asserts in wire order.
 pub fn viewer_reads_delegated_file(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+
+    // Revoke fires while viewer's Read IPC is in-flight — assert it first.
+    h.wait_for(SEC * 20, |f, _| {
+        matches!(
+            f,
+            OwnedFrame::CapEvent {
+                kind: CapEventKind::Revoked,
+                object: CapObject::Endpoint,
+                ..
+            }
+        )
+    })
+    .ok_or("no CapEvent::Revoked{Endpoint} within 20s — view-demo didn't revoke the delegated file cap")?;
+
+    // After the IPC completes, the viewer emits how many bytes it read.
     let frame = h
-        .wait_for(SEC * 20, is_metric_named("snitchos.viewer.bytes_read"))
-        .ok_or("no snitchos.viewer.bytes_read metric within 20s — viewer didn't run or read failed")?;
+        .wait_for(SEC * 10, is_metric_named("snitchos.viewer.bytes_read"))
+        .ok_or("no snitchos.viewer.bytes_read metric within 10s after Revoked — viewer read failed")?;
     let value = match frame {
         OwnedFrame::Metric { value, .. } => value,
         _ => return Err("matched non-metric (impossible)".to_string()),
@@ -3606,5 +3630,6 @@ pub fn viewer_reads_delegated_file(h: &mut View) -> Result<(), String> {
             "viewer.bytes_read = {value}, expected ≥ 1 (file was empty or read returned 0)"
         ));
     }
+
     Ok(())
 }

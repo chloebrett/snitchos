@@ -1,7 +1,10 @@
 # The kernel snitches its own death — a panic-safe telemetry frame
 
-**Status: increments 1–5 SHIPPED + verified (gate 10/10; oracle conditions on the
-panic frame, 7 tests green). Increment 6 (dynamic message) remains.**
+**Status: increments 1–6 SHIPPED + verified. 1–5: gate 10/10; oracle conditions
+on the panic frame. Increment 6 (dynamic message) SHIPPED — the frame now carries
+`"kernel panic: <PanicInfo>"` (reason + location), formatted no-alloc via
+`panic_log::MsgWriter` (char-boundary truncation, 11/11 mutants caught); the itest
+now asserts the real reason reaches the wire, gate 10/10 @ ~500 ms.**
 Motivated by the snemu differential-oracle work
 ([notes/snemu-guard-page-fail-is-timing-not-mmu.md](snemu-guard-page-fail-is-timing-not-mmu.md)):
 a kernel panic is currently invisible on the structured telemetry channel — it
@@ -144,12 +147,25 @@ over-heartbeats *without* ever emitting the panic now correctly FAILs.
   frame is still an invention.
 - Replaces the documented limitation in the oracle note.
 
-## Increment 6 (follow-up) — a real message, still no heap
+## Increment 6 (follow-up) — a real message, still no heap — SHIPPED
 
 Format the panic `info` (location + reason) into a bounded `[u8; N]` via a
 `core::fmt::Write` cursor (the handler already streams `info` to the UART this way
 — no allocation), truncating on overflow, and use that as the Log message instead
-of the fixed marker. Optional; lands after v1 proves the path is safe.
+of the fixed marker.
+
+- `kernel_core::panic_log::MsgWriter` — a `core::fmt::Write` over a caller buffer;
+  overflow drops whole chars at a UTF-8 boundary (never splits a code point, never
+  writes past the end), `as_str()` valid by construction, `write_str` never errors.
+  Host-tested (fits / exact-fill boundary / multi-byte truncation); 11/11 mutants
+  caught after the exact-fill test killed the `>`→`>=` survivor.
+- `panic.rs::snitch_panic(info)` formats `"kernel panic: {info}"` into a second
+  static `PANIC_MSG_BUF` (192 B, < the 256 B frame buf for postcard framing
+  headroom), then encodes that `&str`. Keeping the `"kernel panic"` prefix means
+  the collector/oracle keying is unchanged while the reason now rides along.
+- itest `kernel-panic-emits-frame` strengthened: the `Log` must contain both
+  `"kernel panic"` **and** the workload's `"deliberate immediate panic"` — proving
+  dynamic content flows, not just the marker. Gate 10/10 @ ~500 ms.
 
 ## Deferred / out of scope
 
