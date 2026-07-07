@@ -2,29 +2,24 @@
 
 # Capability derivation tree
 
+*From a live boot. Each node is a capability — `#id object holder [rights]`, holder resolved to its process name; edges show `parent → derived`. Blue = a root grant (`parent_cap_id 0`); `⊘ revoked` marks a revoked cap. One-shot reply caps and isolated bootstrap grants (per-process telemetry/span sinks) are omitted so the delegation structure stands out.*
+
 ```mermaid
 graph TD
-    cap1["#1 TelemetrySink h4"]
-    cap2["#2 SpanSink h4"]
-    cap3["#3 TelemetrySink h5"]
-    cap4["#4 SpanSink h5"]
-    cap5["#5 SpanSink h5"]
-    cap6["#6 fs h4"]
-    cap7["#7 fs h4"]
-    cap8["#8 TelemetrySink h6"]
-    cap9["#9 SpanSink h6"]
-    cap10["#10 fs h6"]
-    cap11["#11 TelemetrySink h7"]
-    cap12["#12 SpanSink h7"]
-    cap13["#13 fs h7"]
-    cap15["#15 fs h6"]
-    cap16["#16 fs h7"]
-    cap19["#19 fs h6"]
-    cap20["#20 fs h7"]
-    cap27["#27 fs h6"]
-    cap28["#28 fs h7"]
-    cap31["#31 fs h6"]
-    cap32["#32 fs h7"]
+    cap2["#2 SpanSink init [EMIT]"]
+    cap5["#5 SpanSink spawnee [EMIT]"]
+    cap6["#6 fs init [RECV|MINT]"]
+    cap7["#7 fs init [SEND]"]
+    cap10["#10 fs fs-server [RECV|MINT]"]
+    cap13["#13 fs fs-client [SEND]"]
+    cap15["#15 fs fs-server [SEND]"]
+    cap16["#16 fs fs-client [SEND]"]
+    cap19["#19 fs fs-server [SEND]"]
+    cap20["#20 fs fs-client [SEND]"]
+    cap27["#27 fs fs-server [SEND]"]
+    cap28["#28 fs fs-client [SEND]"]
+    cap31["#31 fs fs-server [SEND]"]
+    cap32["#32 fs fs-client [SEND]"]
     cap2 --> cap5
     cap6 --> cap7
     cap6 --> cap10
@@ -38,5 +33,5 @@ graph TD
     cap10 --> cap31
     cap31 --> cap32
     classDef root fill:#dae8fc,stroke:#6c8ebf;
-    class cap1,cap2,cap3,cap4,cap6,cap8,cap9,cap11,cap12 root;
+    class cap2,cap6 root;
 ```

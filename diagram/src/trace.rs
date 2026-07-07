@@ -42,6 +42,7 @@ pub fn span_call_graph(frames: &[OwnedFrame]) -> Graph {
 
     let mut node_order: Vec<&str> = Vec::new();
     let mut node_seen: HashSet<&str> = HashSet::new();
+    let mut spans_of: HashMap<&str, u64> = HashMap::new();
     let mut roots: HashSet<&str> = HashSet::new();
     let mut edge_order: Vec<(&str, &str)> = Vec::new();
     let mut counts: HashMap<(&str, &str), u64> = HashMap::new();
@@ -56,6 +57,10 @@ pub fn span_call_graph(frames: &[OwnedFrame]) -> Graph {
         if node_seen.insert(name) {
             node_order.push(name);
         }
+        // How many times this span opened — the profiling signal that makes
+        // even a top-level (unparented) span informative, given SnitchOS spans
+        // are mostly flat.
+        *spans_of.entry(name).or_insert(0) += 1;
         if parent.0 == 0 {
             roots.insert(name);
         } else if let Some(parent_name) = span_name.get(&parent.0).copied() {
@@ -68,10 +73,11 @@ pub fn span_call_graph(frames: &[OwnedFrame]) -> Graph {
     }
 
     for name in node_order {
+        let label = format!("{name} ×{}", spans_of[name]);
         if roots.contains(name) {
-            graph.node_classed(&node_id(name), name, &["root"]);
+            graph.node_classed(&node_id(name), &label, &["root"]);
         } else {
-            graph.node(&node_id(name), name);
+            graph.node(&node_id(name), &label);
         }
     }
     for (parent, child) in edge_order {
@@ -111,8 +117,8 @@ mod tests {
         ];
         let expected = "\
 graph TD
-    kernel_boot[\"kernel.boot\"]
-    heartbeat[\"heartbeat\"]
+    kernel_boot[\"kernel.boot ×1\"]
+    heartbeat[\"heartbeat ×2\"]
     kernel_boot -->|2| heartbeat
     classDef root fill:#dae8fc,stroke:#6c8ebf;
     class kernel_boot root;

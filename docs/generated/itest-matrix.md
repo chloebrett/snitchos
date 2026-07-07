@@ -2,6 +2,8 @@
 
 # Integration-test scenario / workload matrix
 
+*Every integration-test scenario, the runtime workload it boots (`init (default)` = no bootarg), its profile (`wfi` fans out across the parallel pool; `cpu` runs real guest work serially), and its selection tags.*
+
 | Scenario | Workload | Profile | Tags |
 | --- | --- | --- | --- |
 | badge-demux-distinguishes-clients | badge-handout | wfi | userspace, ipc |
@@ -58,6 +60,7 @@
 | rpc-trace-nests | ipc-rpc | wfi | userspace, ipc |
 | ipi-pong | ipi-pong | cpu | smp, ipi, stress |
 | manifest-iface-served | manifest-iface | wfi | userspace, fs |
+| manifest-satisfy-attenuates | manifest-satisfy | wfi | userspace, fs |
 | manifest-satisfy-grants-by-name | manifest-satisfy | wfi | userspace, fs |
 | manifest-satisfy-refuses-unsatisfiable | manifest-satisfy | wfi | userspace, fs |
 | mutex-storm | mutex-storm | cpu | smp, stress |
@@ -68,6 +71,7 @@
 | probe-reports-the-timebase | probe | wfi | userspace |
 | span-name-not-poisonable | probe | wfi | userspace |
 | userspace-custom-metric | probe | wfi | userspace |
+| shell-view-command-revokes-cap | shell | cpu | userspace |
 | shootdown-storm | shootdown-storm | cpu | smp, stress |
 | smp-producer-consumer-correctness | smp burst=256 | cpu | smp, workload |
 | spawn-delegates-to-child | spawn-demo | cpu | userspace |

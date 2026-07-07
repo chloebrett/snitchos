@@ -2,19 +2,32 @@
 
 # Scheduler task-transition graph
 
+*From a live boot. Nodes are tasks (named via `ThreadRegister`); an edge `a → b` labelled `N` means the scheduler switched from `a` to `b` `N` times. Disconnected clusters are separate harts.*
+
 ```mermaid
 graph LR
-    t7["hart_1_main"]
-    t8["hart_1_probe"]
+    t3["hart_1_main"]
+    t4["init"]
+    t5["spawnee"]
     t0["main"]
     t1["idle"]
     t2["exit_smoke"]
-    t3["task_a"]
-    t4["task_b"]
-    t7 -->|407| t8
-    t8 -->|406| t7
-    t0 -->|1| t1
+    t6["fs-server"]
+    t7["fs-client"]
+    t3 -->|3| t4
+    t4 -->|3| t3
+    t3 -->|2| t5
+    t0 -->|1007| t1
     t1 -->|1| t2
-    t2 -->|1| t3
-    t3 -->|1| t4
+    t2 -->|1| t0
+    t5 -->|1| t4
+    t5 -->|1| t6
+    t1 -->|1005| t0
+    t6 -->|2| t7
+    t7 -->|15| t3
+    t4 -->|1| t6
+    t3 -->|13| t6
+    t6 -->|14| t3
+    t3 -->|14| t7
+    t7 -->|1| t6
 ```

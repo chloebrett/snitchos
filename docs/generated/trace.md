@@ -2,18 +2,45 @@
 
 # Span call-graph
 
+*From a live boot, collapsed by span name. `name ×N` = how many times that span opened; an edge `parent → child` labelled `N` is that nesting's count. Blue = a top-level span (`parent SpanId(0)`) — most SnitchOS spans are top-level, so this is more a span-frequency profile than a deep tree.*
+
 ```mermaid
 graph TD
-    kernel_runs_at_higher_half["kernel.runs_at_higher_half"]
-    kernel_boot["kernel.boot"]
-    console_init["console_init"]
-    telemetry_init["telemetry_init"]
-    hart1_probe["hart1.probe"]
-    kernel_heartbeat["kernel.heartbeat"]
-    task_a_tick["task_a.tick"]
-    task_b_tick["task_b.tick"]
+    kernel_runs_at_higher_half["kernel.runs_at_higher_half ×1"]
+    kernel_boot["kernel.boot ×1"]
+    console_init["console_init ×1"]
+    telemetry_init["telemetry_init ×1"]
+    kernel_heartbeat["kernel.heartbeat ×23"]
+    init["init ×1"]
+    spawnee["spawnee ×1"]
+    spawnee_via_delegated["spawnee.via_delegated ×1"]
+    fs_server["fs-server ×1"]
+    fs_client["fs-client ×1"]
+    fs_stat["fs.stat ×2"]
+    fs_serve["fs.serve ×13"]
+    fs_create["fs.create ×1"]
+    fs_write["fs.write ×3"]
+    fs_read["fs.read ×1"]
+    fs_readdir["fs.readdir ×1"]
+    fs_lookup["fs.lookup ×3"]
+    fs_remove["fs.remove ×1"]
     kernel_boot -->|1| console_init
     kernel_boot -->|1| telemetry_init
+    spawnee -->|1| spawnee_via_delegated
+    fs_client -->|2| fs_stat
+    fs_stat -->|2| fs_serve
+    fs_client -->|1| fs_create
+    fs_create -->|1| fs_serve
+    fs_client -->|3| fs_write
+    fs_write -->|3| fs_serve
+    fs_client -->|1| fs_read
+    fs_read -->|1| fs_serve
+    fs_client -->|1| fs_readdir
+    fs_readdir -->|2| fs_serve
+    fs_client -->|3| fs_lookup
+    fs_lookup -->|3| fs_serve
+    fs_client -->|1| fs_remove
+    fs_remove -->|1| fs_serve
     classDef root fill:#dae8fc,stroke:#6c8ebf;
-    class kernel_runs_at_higher_half,kernel_boot,hart1_probe,kernel_heartbeat,task_a_tick,task_b_tick root;
+    class kernel_runs_at_higher_half,kernel_boot,kernel_heartbeat,init,spawnee,fs_server,fs_client root;
 ```

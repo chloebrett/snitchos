@@ -247,6 +247,28 @@ Per house rules, test-first, one increment at a time:
    Granted→Transferred chain → expected derivation `graph`.
 8. GREEN the fold; then add the `--workload` boot path as integration glue.
 
+## Audit follow-ups (shipped)
+
+A visual audit (rendering every diagram to PNG and eyeballing it) drove these:
+
+1. **PNG rendering (`diagram png`)** — flowchart/state SVGs used `<foreignObject>`
+   labels that non-browser rasterizers show as empty boxes; switched hand-drawn
+   local render to PNG (correct everywhere). See the render note above.
+2. **caps: holders → names, rights, de-clutter** — holders now resolve to process
+   names via `ThreadRegister` (`init`/`fs-server`/`fs-client`), labels carry
+   decoded `[rights]` (the least-authority story: `init [RECV|MINT]` delegates
+   attenuated `[SEND]`), and isolated bootstrap grants are dropped (21 → 14 nodes
+   on the real boot).
+3. **trace: occurrence counts** — nodes carry `name ×N`, so the (mostly flat)
+   top-level spans are informative; the `init` boot yields a real FS profile
+   (`fs.serve ×13`, `kernel.heartbeat ×23`).
+4. **Legends** — every generated diagram's `.md` now opens with a "how to read
+   this" caption (notation, colors, provenance), threaded through `render_doc`.
+
+**Still open:** `deps` layer-clustering (group crates into kernel/host/userspace
+`subgraph`s) — needs subgraph support in the `Graph` model + a crate→layer map;
+deferred as the one remaining audit item.
+
 ## Decisions
 
 - **B1/B2 outputs live in `docs/generated/`** — a machine-owned dir,

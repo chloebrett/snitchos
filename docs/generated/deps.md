@@ -2,6 +2,8 @@
 
 # Workspace crate graph
 
+*Workspace crates and the dependency edges between them (external crates omitted). An arrow points from a crate to a crate it depends on.*
+
 ```mermaid
 graph LR
     collector["collector"]

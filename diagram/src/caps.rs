@@ -3,6 +3,8 @@
 //! the authority graph the running system snitches about itself. Pure: xtask
 //! sources the frames (a capture, or a fresh snemu boot) and hands them here.
 
+use std::collections::{HashMap, HashSet};
+
 use protocol::stream::OwnedFrame;
 use protocol::{CapEventKind, CapObject};
 
@@ -16,6 +18,25 @@ fn object_name(object: CapObject) -> &'static str {
         CapObject::Reply => "Reply",
         CapObject::Notification => "Notification",
     }
+}
+
+/// Decode a rights bitmask into `|`-joined flag names (e.g. `RECV|MINT`), so the
+/// diagram shows *what authority* a cap carries — the least-authority story.
+fn rights_str(rights: u32) -> String {
+    use snitchos_abi::rights as r;
+    [
+        (r::EMIT, "EMIT"),
+        (r::SEND, "SEND"),
+        (r::RECV, "RECV"),
+        (r::MINT, "MINT"),
+        (r::SIGNAL, "SIGNAL"),
+        (r::WAIT, "WAIT"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| rights & bit != 0)
+    .map(|(_, name)| name)
+    .collect::<Vec<_>>()
+    .join("|")
 }
 
 /// Tracks whether `CapEvent` emission has gone quiescent, so a snemu boot can
@@ -48,20 +69,22 @@ impl CapQuiescence {
     }
 }
 
-/// Build the derivation tree from a frame stream. Each `CapEvent` contributes a
-/// node keyed by `cap_id` (labelled with its object kind and holder); an edge
-/// runs from `parent_cap_id` to `cap_id` for every non-root derivation
-/// (`parent_cap_id == 0` marks a genuinely-root grant). Non-`CapEvent` frames
-/// are ignored. Top-down layout so roots sit at the top.
+/// Build the derivation tree from a frame stream. Each non-`Reply` `CapEvent`
+/// contributes a node keyed by `cap_id`, labelled `#id name holder [rights]`
+/// (holder resolved to a process name via `ThreadRegister` when known, rights
+/// decoded to flag names); an edge runs `parent_cap_id → cap_id`, and a
+/// `parent_cap_id == 0` grant is styled as a root. **Isolated** grants — no
+/// parent and no children, i.e. the per-process bootstrap telemetry/span sinks —
+/// are dropped, so what remains is the actual delegation structure. Top-down.
 pub fn derivation_tree(frames: &[OwnedFrame]) -> Graph {
-    let mut graph = Graph::new(Direction::TopDown);
-    graph.define_class(
-        "root",
-        "fill:#dae8fc,stroke:#6c8ebf",
-        &[("style", "filled"), ("fillcolor", "#dae8fc")],
-    );
-
-    let revoked: std::collections::HashSet<u64> = frames
+    let names: HashMap<u32, &str> = frames
+        .iter()
+        .filter_map(|f| match f {
+            OwnedFrame::ThreadRegister { id, name, .. } => Some((*id, name.as_str())),
+            _ => None,
+        })
+        .collect();
+    let revoked: HashSet<u64> = frames
         .iter()
         .filter_map(|f| match f {
             OwnedFrame::CapEvent { kind: CapEventKind::Revoked, cap_id, .. } => Some(*cap_id),
@@ -69,35 +92,75 @@ pub fn derivation_tree(frames: &[OwnedFrame]) -> Graph {
         })
         .collect();
 
-    let mut nodes_seen = std::collections::HashSet::new();
-    let mut edges_seen = std::collections::HashSet::new();
+    // Pass 1: collect non-Reply nodes (label + root-ness) and derivation edges.
+    let mut order: Vec<u64> = Vec::new();
+    let mut label_of: HashMap<u64, String> = HashMap::new();
+    let mut roots: HashSet<u64> = HashSet::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+    let mut edge_order: Vec<(u64, u64)> = Vec::new();
+    let mut edges_seen: HashSet<(u64, u64)> = HashSet::new();
     for frame in frames {
-        let OwnedFrame::CapEvent { cap_id, parent_cap_id, holder, object, name, .. } = frame else {
+        let OwnedFrame::CapEvent { cap_id, parent_cap_id, holder, object, name, rights, .. } = frame
+        else {
             continue;
         };
-        // One-shot reply caps are unparented per-`call` leaves — noise in a
-        // derivation view. Drop them so the tree shows lasting authority.
         if matches!(object, CapObject::Reply) {
             continue;
         }
-        if nodes_seen.insert(*cap_id) {
+        if seen.insert(*cap_id) {
+            order.push(*cap_id);
             let named = snitchos_abi::name_str(name);
             let descriptor = if named.is_empty() { object_name(*object) } else { named };
-            let mut label = format!("#{cap_id} {descriptor} h{holder}");
+            let holder_label =
+                names.get(holder).map_or_else(|| format!("h{holder}"), |n| (*n).to_string());
+            let mut label = format!("#{cap_id} {descriptor} {holder_label}");
+            let rs = rights_str(*rights);
+            if !rs.is_empty() {
+                label.push_str(" [");
+                label.push_str(&rs);
+                label.push(']');
+            }
             if revoked.contains(cap_id) {
                 label.push_str(" ⊘ revoked");
             }
-            let id = format!("cap{cap_id}");
-            // parent_cap_id 0 marks a genuinely-root grant — style it distinctly.
+            label_of.insert(*cap_id, label);
             if *parent_cap_id == 0 {
-                graph.node_classed(&id, &label, &["root"]);
-            } else {
-                graph.node(&id, &label);
+                roots.insert(*cap_id);
             }
         }
         if *parent_cap_id != 0 && edges_seen.insert((*parent_cap_id, *cap_id)) {
-            graph.edge(&format!("cap{parent_cap_id}"), &format!("cap{cap_id}"));
+            edge_order.push((*parent_cap_id, *cap_id));
         }
+    }
+
+    // Keep only edges between real (non-Reply) nodes; a node is dropped if it
+    // ends up in no edge (isolated bootstrap grant).
+    let edges: Vec<(u64, u64)> = edge_order
+        .into_iter()
+        .filter(|(from, to)| label_of.contains_key(from) && label_of.contains_key(to))
+        .collect();
+    let connected: HashSet<u64> = edges.iter().flat_map(|(from, to)| [*from, *to]).collect();
+
+    let mut graph = Graph::new(Direction::TopDown);
+    graph.define_class(
+        "root",
+        "fill:#dae8fc,stroke:#6c8ebf",
+        &[("style", "filled"), ("fillcolor", "#dae8fc")],
+    );
+    for cap_id in order {
+        if !connected.contains(&cap_id) {
+            continue;
+        }
+        let id = format!("cap{cap_id}");
+        let label = &label_of[&cap_id];
+        if roots.contains(&cap_id) {
+            graph.node_classed(&id, label, &["root"]);
+        } else {
+            graph.node(&id, label);
+        }
+    }
+    for (from, to) in edges {
+        graph.edge(&format!("cap{from}"), &format!("cap{to}"));
     }
     graph
 }
@@ -153,34 +216,68 @@ mod tests {
 
     #[test]
     fn labels_prefer_the_cap_name_over_the_object_kind() {
-        let mut named = cap_event(CapEventKind::Granted, 1, 0, 6, CapObject::Endpoint);
-        if let OwnedFrame::CapEvent { name, .. } = &mut named {
+        // Named root with a child, so it survives the isolated-node drop.
+        let mut root = cap_event(CapEventKind::Granted, 1, 0, 6, CapObject::Endpoint);
+        if let OwnedFrame::CapEvent { name, .. } = &mut root {
             *name = snitchos_abi::pack_name("fs.root");
         }
-        let expected = "\
-graph TD
-    cap1[\"#1 fs.root h6\"]
-    classDef root fill:#dae8fc,stroke:#6c8ebf;
-    class cap1 root;
-";
-        assert_eq!(derivation_tree(&[named]).to_mermaid(), expected);
+        let child = cap_event(CapEventKind::Transferred, 2, 1, 7, CapObject::Endpoint);
+        let mermaid = derivation_tree(&[root, child]).to_mermaid();
+        assert!(mermaid.contains("cap1[\"#1 fs.root h6\"]"), "name preferred over object kind");
+    }
+
+    #[test]
+    fn shows_decoded_rights_in_the_label() {
+        use snitchos_abi::rights;
+        let mut root = cap_event(CapEventKind::Granted, 1, 0, 6, CapObject::Endpoint);
+        if let OwnedFrame::CapEvent { rights: bits, .. } = &mut root {
+            *bits = rights::RECV | rights::MINT;
+        }
+        let child = cap_event(CapEventKind::Transferred, 2, 1, 7, CapObject::Endpoint);
+        let mermaid = derivation_tree(&[root, child]).to_mermaid();
+        assert!(mermaid.contains("[RECV|MINT]"), "rights decoded onto the label");
+    }
+
+    #[test]
+    fn resolves_holder_ids_to_process_names() {
+        let frames = vec![
+            OwnedFrame::ThreadRegister { id: 6, name: "fs-server".to_string(), priority: 0 },
+            cap_event(CapEventKind::Granted, 1, 0, 6, CapObject::Endpoint),
+            cap_event(CapEventKind::Transferred, 2, 1, 7, CapObject::Endpoint),
+        ];
+        let mermaid = derivation_tree(&frames).to_mermaid();
+        assert!(mermaid.contains("#1 Endpoint fs-server"), "holder id resolved to its name");
+        assert!(!mermaid.contains(" h6"), "raw holder id not shown when named");
     }
 
     #[test]
     fn drops_one_shot_reply_caps_as_derivation_noise() {
-        // Reply caps are minted per-`call` with parent_cap_id 0 — unparented
-        // one-shots that clutter a derivation view without adding structure.
+        // Reply caps are minted per-`call` — one-shots that clutter a derivation
+        // view. cap3 is minted off cap1 but must not appear.
         let frames = vec![
             cap_event(CapEventKind::Granted, 1, 0, 6, CapObject::Endpoint),
-            cap_event(CapEventKind::Transferred, 2, 0, 6, CapObject::Reply),
+            cap_event(CapEventKind::Transferred, 2, 1, 7, CapObject::Endpoint),
+            cap_event(CapEventKind::Transferred, 3, 1, 6, CapObject::Reply),
         ];
-        let expected = "\
-graph TD
-    cap1[\"#1 Endpoint h6\"]
-    classDef root fill:#dae8fc,stroke:#6c8ebf;
-    class cap1 root;
-";
-        assert_eq!(derivation_tree(&frames).to_mermaid(), expected);
+        let mermaid = derivation_tree(&frames).to_mermaid();
+        assert!(!mermaid.contains("Reply"), "reply caps are dropped");
+        assert!(!mermaid.contains("cap3"), "the reply cap node is absent");
+        assert!(mermaid.contains("cap1 --> cap2"), "the real delegation edge remains");
+    }
+
+    #[test]
+    fn drops_isolated_bootstrap_grants() {
+        let frames = vec![
+            // Isolated: parent 0, never a parent of anything → dropped.
+            cap_event(CapEventKind::Granted, 9, 0, 4, CapObject::TelemetrySink),
+            // Connected delegation stays.
+            cap_event(CapEventKind::Granted, 1, 0, 4, CapObject::Endpoint),
+            cap_event(CapEventKind::Transferred, 2, 1, 6, CapObject::Endpoint),
+        ];
+        let mermaid = derivation_tree(&frames).to_mermaid();
+        assert!(!mermaid.contains("cap9"), "isolated bootstrap grant dropped");
+        assert!(!mermaid.contains("TelemetrySink"), "the childless sink is gone");
+        assert!(mermaid.contains("cap1 --> cap2"), "the delegation stays");
     }
 
     #[test]
@@ -199,6 +296,7 @@ graph TD
     fn annotates_revoked_caps_in_the_label() {
         let frames = vec![
             cap_event(CapEventKind::Granted, 1, 0, 4, CapObject::Endpoint),
+            cap_event(CapEventKind::Transferred, 2, 1, 6, CapObject::Endpoint),
             cap_event(CapEventKind::Revoked, 1, 0, 4, CapObject::Endpoint),
         ];
         let mermaid = derivation_tree(&frames).to_mermaid();
