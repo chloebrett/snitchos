@@ -1115,9 +1115,7 @@ pub fn block_current() {
 /// Return a `Blocked` task to the runqueue so the scheduler can pick it.
 /// The [`kernel_core::sched::on_wake`] guard makes this idempotent: waking a
 /// task that is already `Ready`/`Running`/`Exited` (a racing or duplicate
-/// wake) is a no-op, so a task is never double-enqueued. Enqueues on the
-/// current hart's runqueue (single-hart v0.9 core; cross-hart wake — enqueue
-/// on the task's home hart + IPI — is the deferred follow-on).
+/// wake) is a no-op, so a task is never double-enqueued.
 pub fn wake(id: TaskId) {
     let now = crate::tracing::timestamp();
     let me = crate::percpu::current_hartid();
