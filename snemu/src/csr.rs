@@ -32,6 +32,9 @@ pub(crate) mod sstatus {
     pub const SPIE: u64 = 1 << 5;
     /// Supervisor previous privilege (0 = U, 1 = S).
     pub const SPP: u64 = 1 << 8;
+    /// Permit Supervisor User Memory access — S-mode may load/store U-pages only
+    /// when this is set (never fetch from them).
+    pub const SUM: u64 = 1 << 18;
 }
 
 /// The CSR addresses snemu currently models (the S-mode trap set + satp).

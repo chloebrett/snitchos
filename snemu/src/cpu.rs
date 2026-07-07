@@ -416,7 +416,9 @@ impl Hart {
     /// instruction — real hardware traps to the kernel's handler, it doesn't halt.
     fn translate_or_trap(&mut self, va: u64, access: Access, bus: &Bus) -> Option<u64> {
         let satp = self.csr.read(addr::SATP).expect("satp is modeled");
-        match mmu::translate(satp, va, access, bus.ram()) {
+        let user = self.privilege == Privilege::User;
+        let sum = self.csr_read(addr::SSTATUS) & sstatus::SUM != 0;
+        match mmu::translate(satp, va, access, bus.ram(), user, sum) {
             Ok(pa) => Some(pa),
             Err(_) => {
                 let cause = match access {
