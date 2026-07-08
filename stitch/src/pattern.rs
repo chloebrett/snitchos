@@ -4,7 +4,7 @@
 
 use crate::ast::{MatchArm, Pattern};
 use crate::env::Env;
-use crate::interp::eval;
+use crate::interp::{eval, eval_tail};
 use crate::ops::as_bool;
 use crate::value::{RuntimeError, Value};
 
@@ -15,6 +15,7 @@ pub(crate) fn eval_match(
     subject: &Value,
     arms: &[MatchArm],
     env: &Env,
+    tail: bool,
 ) -> Result<Value, RuntimeError> {
     for arm in arms {
         let Some(bound) = try_match(&arm.pattern, subject, env) else {
@@ -25,7 +26,7 @@ pub(crate) fn eval_match(
             None => true,
         };
         if guard_holds {
-            return eval(&arm.body, &bound);
+            return if tail { eval_tail(&arm.body, &bound) } else { eval(&arm.body, &bound) };
         }
     }
     Err(RuntimeError::new("no match arm matched"))

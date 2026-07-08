@@ -21,7 +21,7 @@ use crate::prelude::*;
 use crate::ast::Method;
 use crate::platform::{NullPlatform, Platform};
 use crate::telemetry::{RecordingTelemetry, Telemetry};
-use crate::value::{TelemetryEvent, Value};
+use crate::value::{ClosureData, TelemetryEvent, Value};
 
 /// Why an assignment failed — formatted into a message by the interpreter.
 pub enum AssignError {
@@ -68,6 +68,10 @@ pub struct Env {
     /// an unbounded-non-tail-recursion Rust-stack overflow into a catchable fault
     /// (see [`enter_call`](Self::enter_call)).
     depth: Rc<Cell<u32>>,
+    /// The closure currently being applied — set by `apply_values` before
+    /// evaluating a closure body so that `eval_tail` can detect self-tail-calls
+    /// and signal the trampoline instead of recursing into Rust.
+    self_closure: Option<Rc<ClosureData>>,
 }
 
 /// Undoes [`Env::enter_call`]'s depth increment when dropped — so nesting is
@@ -120,6 +124,7 @@ impl Env {
             authority: Rc::new(BTreeSet::new()),
             fuel: Rc::new(Cell::new(u64::MAX)),
             depth: Rc::new(Cell::new(0)),
+            self_closure: None,
         }
     }
 
@@ -151,6 +156,20 @@ impl Env {
     /// the host's, and the real fix for *tail* recursion is the trampoline. Tune
     /// here.
     const MAX_CALL_DEPTH: u32 = 48;
+
+    /// Mark `closure` as the function currently being applied — so that
+    /// `eval_tail` can recognise a self-tail-call by pointer identity and signal
+    /// the trampoline instead of recursing into Rust.
+    #[must_use]
+    pub fn with_self_closure(self, closure: Rc<ClosureData>) -> Env {
+        Env { self_closure: Some(closure), ..self }
+    }
+
+    /// Returns `true` if `c` is pointer-equal to the closure this environment
+    /// was set up for (i.e., we're about to make a self-tail-call).
+    pub fn is_self_closure(&self, c: &Rc<ClosureData>) -> bool {
+        self.self_closure.as_ref().is_some_and(|s| Rc::ptr_eq(s, c))
+    }
 
     /// Enter a nested call: bump the run-shared depth counter and hand back a
     /// [`CallGuard`] that decrements it on drop (so depth tracks *current* nesting
@@ -231,6 +250,7 @@ impl Env {
             authority: Rc::clone(&self.authority),
             fuel: Rc::clone(&self.fuel),
             depth: Rc::clone(&self.depth),
+            self_closure: None,
         }
     }
 
@@ -251,6 +271,7 @@ impl Env {
             authority: Rc::clone(&self.authority),
             fuel: Rc::clone(&self.fuel),
             depth: Rc::clone(&self.depth),
+            self_closure: None,
         }
     }
 
@@ -283,6 +304,7 @@ impl Env {
             authority: Rc::clone(&self.authority),
             fuel: Rc::clone(&self.fuel),
             depth: Rc::clone(&self.depth),
+            self_closure: None,
         }
     }
 

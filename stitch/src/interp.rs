@@ -472,8 +472,8 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
                 eval(els, env)
             }
         }
-        Expr::Block { stmts, result } => eval_block(stmts, result.as_deref(), env),
-        Expr::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env),
+        Expr::Block { stmts, result } => eval_block(stmts, result.as_deref(), env, false),
+        Expr::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env, false),
         // `()` is unit; `(a, b, …)` is a tuple.
         Expr::Tuple(elements) if elements.is_empty() => Ok(Value::Unit),
         Expr::Tuple(elements) => {
@@ -803,6 +803,56 @@ fn run_stage(
     apply_values(&main, &[input], &env)
 }
 
+/// Evaluate `expr` in a tail-call context. Handles the tail-position AST nodes
+/// (conditional branches, block results, match arm bodies, and direct calls) so
+/// that a self-tail-call returns `Err(TailCall(new_args))` instead of recursing
+/// into Rust. `apply_values` catches that signal and loops. Everything else
+/// delegates to `eval` — no self-tail-call is possible there.
+pub(crate) fn eval_tail(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
+    match expr {
+        // A call in tail position: detect self-tail-calls by pointer identity.
+        Expr::Call { callee, args } if !matches!(callee.as_ref(), Expr::Field { .. }) => {
+            let callee_val = eval(callee, env)?;
+            if let Value::Closure(c) = &callee_val {
+                if env.is_self_closure(c) {
+                    let mut values = Vec::with_capacity(args.len());
+                    for arg in args {
+                        if arg.label.is_some() || matches!(arg.value, Expr::Spread(_)) {
+                            // Named / spread args to self are uncommon; don't
+                            // trampoline — fall through to a normal call instead.
+                            return eval_call(&callee_val, args, env);
+                        }
+                        values.push(eval(&arg.value, env)?);
+                    }
+                    if values.len() != c.params.len() {
+                        return Err(RuntimeError::new(format!(
+                            "function expects {} argument(s), got {}",
+                            c.params.len(),
+                            values.len()
+                        )));
+                    }
+                    return Err(RuntimeError::TailCall(values));
+                }
+            }
+            eval_call(&callee_val, args, env)
+        }
+        // Conditional branches are in tail position.
+        Expr::If { cond, then, els } => {
+            if as_bool(&eval(cond, env)?, "condition")? {
+                eval_tail(then, env)
+            } else {
+                eval_tail(els, env)
+            }
+        }
+        // Block result expression is in tail position.
+        Expr::Block { stmts, result } => eval_block(stmts, result.as_deref(), env, true),
+        // Match arm bodies are in tail position.
+        Expr::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env, true),
+        // Everything else: no self-tail-call is reachable here.
+        _ => eval(expr, env),
+    }
+}
+
 /// Apply a callable to already-evaluated positional arguments. Shared by
 /// `eval_call`, pipes, `use`, and the native combinators. `env` is threaded so
 /// native functions can reach the telemetry sink (closures use their own
@@ -817,27 +867,36 @@ pub(crate) fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<
                     args.len()
                 )));
             }
-            let mut call_env = closure.env.clone();
-            for (param, arg) in closure.params.iter().zip(args) {
-                call_env = call_env.extend(param.clone(), arg.clone());
-            }
-            // A named function runs with *exactly* its declared `uses` — authority
-            // does not inherit across the boundary (least privilege). A lambda
-            // (`uses: None`) keeps the authority of its defining env.
-            if let Some(uses) = &closure.uses {
-                call_env = call_env.with_authority(uses.iter().cloned().collect());
-            }
-            // Bump the call-depth guard for the duration of the body — dropped on
-            // every exit path below, so nesting is decremented even on `?`. Caps
-            // unbounded non-tail recursion with a catchable fault, not an overflow.
-            let _guard = call_env
-                .enter_call()
-                .ok_or_else(|| RuntimeError::new("call stack too deep"))?;
-            // This is a function boundary, so `?`'s early-return stops here and
-            // becomes the call's value.
-            match eval(&closure.body, &call_env) {
-                Err(RuntimeError::Return(value)) => Ok(value),
-                other => other,
+            let mut current_args = args.to_vec();
+            loop {
+                let mut call_env = closure.env.clone();
+                for (param, arg) in closure.params.iter().zip(&current_args) {
+                    call_env = call_env.extend(param.clone(), arg.clone());
+                }
+                // A named function runs with *exactly* its declared `uses` — authority
+                // does not inherit across the boundary (least privilege). A lambda
+                // (`uses: None`) keeps the authority of its defining env.
+                if let Some(uses) = &closure.uses {
+                    call_env = call_env.with_authority(uses.iter().cloned().collect());
+                }
+                // Mark the closure being applied so eval_tail can detect self-tail-calls.
+                call_env = call_env.with_self_closure(Rc::clone(closure));
+                // Bump the call-depth guard for the duration of the body — dropped on
+                // every exit path (including the TailCall continue), so depth
+                // oscillates at one level and never accumulates across tail iterations.
+                let _guard = call_env
+                    .enter_call()
+                    .ok_or_else(|| RuntimeError::new("call stack too deep"))?;
+                // This is a function boundary, so `?`'s early-return stops here and
+                // becomes the call's value.
+                match eval_tail(&closure.body, &call_env) {
+                    Err(RuntimeError::TailCall(new_args)) => {
+                        // _guard drops: depth decrements before the next iteration.
+                        current_args = new_args;
+                    }
+                    Err(RuntimeError::Return(value)) => return Ok(value),
+                    other => return other,
+                }
             }
         }
         Value::Native(native) => {
@@ -1246,7 +1305,7 @@ fn rebuild_with_field(
 /// extends a fresh child scope, so bindings are visible to later statements but
 /// not outside the block), then evaluate the trailing expression — or `Unit`
 /// if there isn't one.
-fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env) -> Result<Value, RuntimeError> {
+fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env, tail: bool) -> Result<Value, RuntimeError> {
     let mut scope = env.clone();
     for (index, stmt) in stmts.iter().enumerate() {
         match stmt {
@@ -1287,7 +1346,9 @@ fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env) -> Result<Value,
         }
     }
     match result {
-        Some(expr) => eval(expr, &scope),
+        Some(expr) => {
+            if tail { eval_tail(expr, &scope) } else { eval(expr, &scope) }
+        }
         None => Ok(Value::Unit),
     }
 }
@@ -2043,12 +2104,58 @@ mod tests {
     }
 
     #[test]
+    fn self_tail_recursive_function_runs_in_bounded_stack() {
+        // A tail-recursive countdown: the recursive call is the only act of the
+        // else branch, so it must trampoline instead of growing the Rust call
+        // stack. Without trampolining this faults at MAX_CALL_DEPTH (48).
+        // 1_000_000 is far past that limit, proving the trampoline is engaged.
+        let items = crate::parser::parse_program(
+            "count(n) = n == 0 => 0 | count(n - 1)  main() = count(1000000)",
+        )
+        .expect("program parses");
+        assert_eq!(
+            super::eval_program(&items).expect("no error"),
+            crate::value::Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn self_tail_recursive_function_with_block_body_runs_in_bounded_stack() {
+        // The trampoline must fire when the tail call is the result of a block
+        // (not just a bare if-expression body).
+        let items = crate::parser::parse_program(
+            "count(n) = { n == 0 => 0 | count(n - 1) }  main() = count(1000000)",
+        )
+        .expect("program parses");
+        assert_eq!(
+            super::eval_program(&items).expect("no error"),
+            crate::value::Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn self_tail_recursive_function_via_match_runs_in_bounded_stack() {
+        // The trampoline must fire when the tail call is in a match arm body.
+        let items = crate::parser::parse_program(
+            "count(n) = match n { 0 => 0  _ => count(n - 1) }  main() = count(1000000)",
+        )
+        .expect("program parses");
+        assert_eq!(
+            super::eval_program(&items).expect("no error"),
+            crate::value::Value::Int(0)
+        );
+    }
+
+    #[test]
     fn supports_mutual_recursion() {
+        // isOdd(3) = true distinguishes the trampoline from a "return true"
+        // constant (and kills the is_self_closure→true mutant: odd calls get
+        // trapped as self-tail-calls to isEven, which would return false at n=0).
         assert_eq!(
             run_program(
                 "isEven(n) = n == 0 => true | isOdd(n - 1)  \
                  isOdd(n) = n == 0 => false | isEven(n - 1)  \
-                 main() = isEven(4)"
+                 main() = isOdd(3)"
             ),
             Value::Bool(true)
         );

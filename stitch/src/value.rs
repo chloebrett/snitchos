@@ -346,6 +346,9 @@ pub enum RuntimeError {
     Fault(String),
     /// `?` short-circuit: unwind to the enclosing function and return this value.
     Return(Value),
+    /// Self-tail-call signal: `apply_values` catches this and loops instead of
+    /// recursing, bounding the Rust stack for tail-recursive Stitch functions.
+    TailCall(Vec<Value>),
 }
 
 impl RuntimeError {
@@ -364,6 +367,9 @@ impl RuntimeError {
         match self {
             RuntimeError::Fault(message) => message.clone(),
             RuntimeError::Return(_) => "`?` used outside a function".to_string(),
+            RuntimeError::TailCall(_) => {
+                "internal: tail-call signal escaped the trampoline".to_string()
+            }
         }
     }
 }
