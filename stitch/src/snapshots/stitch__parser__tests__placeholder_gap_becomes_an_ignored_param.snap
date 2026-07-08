@@ -9,21 +9,18 @@ Call {
     args: [
         Arg {
             label: None,
-            value: Lambda {
-                params: [
-                    "$a",
-                    "_",
-                    "$c",
-                ],
-                body: Binary {
-                    op: Add,
-                    left: Var(
-                        "$a",
+            value: Binary {
+                op: Add,
+                left: Placeholder(
+                    Some(
+                        "a",
                     ),
-                    right: Var(
-                        "$c",
+                ),
+                right: Placeholder(
+                    Some(
+                        "c",
                     ),
-                },
+                ),
             },
         },
     ],

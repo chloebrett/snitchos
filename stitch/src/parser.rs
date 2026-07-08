@@ -3,7 +3,6 @@
 //! literals, variables, unary/binary operators, grouping, and the postfix
 //! layer (calls, field access, `?.`, `?`, indexing).
 
-use alloc::collections::BTreeSet;
 
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
@@ -84,108 +83,6 @@ pub fn parse_program(src: &str) -> Result<Vec<Item>, ParseError> {
     Ok(items)
 }
 
-/// Turn the set of referenced placeholder names (`{"$a", "$c"}`) into a
-/// positional lambda parameter list. The letter *is* the index (`$a`=0, `$b`=1,
-/// …), so arity is the highest letter referenced and any unreferenced lower slot
-/// becomes a `_` hole — letting a placeholder *select* a positional argument
-/// (`$b` alone ⇒ `(_, $b)`). Returns `None` when no placeholder was referenced
-/// (the argument is an ordinary value, not a lambda).
-fn positional_params(referenced: &BTreeSet<String>) -> Option<Vec<String>> {
-    let max = referenced
-        .iter()
-        .filter_map(|name| name.strip_prefix('$').and_then(|s| s.chars().next()))
-        .map(|letter| (letter as usize) - ('a' as usize))
-        .max()?;
-    let params = (0..=max)
-        .map(|index| {
-            let letter = (b'a' + index as u8) as char;
-            let name = format!("${letter}");
-            if referenced.contains(&name) {
-                name
-            } else {
-                "_".to_string()
-            }
-        })
-        .collect();
-    Some(params)
-}
-
-/// Rewrite `Placeholder` nodes in `expr` into `Var("$x")`, collecting the
-/// `$x` parameter names used. Stops at explicit `Lambda` boundaries (a
-/// placeholder inside a written-out lambda isn't ours to capture). Used to
-/// desugar `$`-placeholder arguments into lambdas at the enclosing call.
-fn collect_placeholders(expr: &mut Expr, params: &mut BTreeSet<String>) {
-    match expr {
-        Expr::Placeholder(name) => {
-            let param = format!("${}", name.as_deref().unwrap_or("a"));
-            params.insert(param.clone());
-            *expr = Expr::Var(param);
-        }
-        Expr::Binary { left, right, .. } => {
-            collect_placeholders(left, params);
-            collect_placeholders(right, params);
-        }
-        Expr::Unary { operand, .. } | Expr::Try(operand) | Expr::Spread(operand) => {
-            collect_placeholders(operand, params);
-        }
-        Expr::Call { callee, args } => {
-            collect_placeholders(callee, params);
-            for arg in args {
-                collect_placeholders(&mut arg.value, params);
-            }
-        }
-        Expr::Field { object, .. } | Expr::SafeField { object, .. } => {
-            collect_placeholders(object, params);
-        }
-        Expr::Index { object, index } => {
-            collect_placeholders(object, params);
-            collect_placeholders(index, params);
-        }
-        Expr::Range { start, end, .. } => {
-            if let Some(start) = start {
-                collect_placeholders(start, params);
-            }
-            if let Some(end) = end {
-                collect_placeholders(end, params);
-            }
-        }
-        Expr::If { cond, then, els } => {
-            collect_placeholders(cond, params);
-            collect_placeholders(then, params);
-            collect_placeholders(els, params);
-        }
-        Expr::Tuple(elems) | Expr::List(elems) => {
-            for elem in elems {
-                collect_placeholders(elem, params);
-            }
-        }
-        Expr::Map(entries) => {
-            for (key, value) in entries {
-                collect_placeholders(key, params);
-                collect_placeholders(value, params);
-            }
-        }
-        Expr::SubjectlessMatch { arms, default } => {
-            for (cond, body) in arms {
-                collect_placeholders(cond, params);
-                collect_placeholders(body, params);
-            }
-            collect_placeholders(default, params);
-        }
-        // Atoms with no sub-expressions, explicit lambdas (their body's
-        // placeholders belong to that lambda), and strings (interpolations are
-        // already sub-parsed) — all left for a later check.
-        Expr::Int(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Var(_)
-        | Expr::SelfRef
-        | Expr::Str(_)
-        | Expr::Lambda { .. }
-        | Expr::Block { .. }
-        | Expr::Match { .. } => {}
-    }
-}
 
 /// Convert lexer string parts into AST segments, sub-parsing each `{expr}`
 /// interpolation's raw source into a full expression.
@@ -244,24 +141,6 @@ fn operator_fn(tok: &TokenKind) -> Option<BinOp> {
     }
 }
 
-/// Desugar a bare operator in argument position to its function:
-/// `op` ⇒ `(lhs, rhs) -> lhs op rhs`.
-///
-/// **Limitation — always binary.** This produces a fixed two-parameter lambda, so
-/// it can't express a *unary* use (`-` desugars to subtraction, never negation)
-/// or any other arity. For those, write the explicit lambda (`x -> 0 - x`). The
-/// binary form covers the common cases the feature exists for: `fold(0, +)`,
-/// `fold(1, *)`, a comparison passed to a higher-order function, etc.
-fn operator_lambda(op: BinOp) -> Expr {
-    Expr::Lambda {
-        params: vec!["lhs".to_string(), "rhs".to_string()],
-        body: Box::new(Expr::Binary {
-            op,
-            left: Box::new(Expr::Var("lhs".to_string())),
-            right: Box::new(Expr::Var("rhs".to_string())),
-        }),
-    }
-}
 
 /// If `op` is a range operator, return whether it's inclusive (`..=` vs `..`).
 fn range_kind(op: BinOp) -> Option<bool> {
@@ -619,17 +498,9 @@ impl Parser {
             && matches!(self.peek_at(1), TokenKind::Comma | TokenKind::RParen)
         {
             self.bump(); // the operator
-            return Ok(Arg { label, value: operator_lambda(op) });
+            return Ok(Arg { label, value: Expr::OperatorRef(op) });
         }
-        let mut value = self.parse_expr(0)?;
-        let mut referenced = BTreeSet::new();
-        collect_placeholders(&mut value, &mut referenced);
-        if let Some(params) = positional_params(&referenced) {
-            value = Expr::Lambda {
-                params,
-                body: Box::new(value),
-            };
-        }
+        let value = self.parse_expr(0)?;
         Ok(Arg { label, value })
     }
 
@@ -1412,7 +1283,7 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::{Expr, Item};
+    use crate::ast::{BinOp, Expr, Item};
     use crate::parser::{parse, parse_program};
 
     /// Parse an expression, unwrapping — for tests with valid Stitch input.
@@ -2120,6 +1991,28 @@ mod tests {
         assert!(
             matches!(expr, Expr::SubjectlessMatch { .. }),
             "expected SubjectlessMatch, got {expr:?}"
+        );
+    }
+
+    #[test]
+    fn placeholder_is_a_surface_node() {
+        // Parser must keep Placeholder; desugaring to Lambda belongs in the lowering pass.
+        let expr = p("f($)");
+        let Expr::Call { args, .. } = expr else { panic!("expected Call, got {expr:?}") };
+        assert!(
+            matches!(args[0].value, Expr::Placeholder(None)),
+            "expected Placeholder, got {:?}", args[0].value
+        );
+    }
+
+    #[test]
+    fn operator_ref_is_a_surface_node() {
+        // Parser must keep OperatorRef; desugaring to Lambda belongs in the lowering pass.
+        let expr = p("f(+)");
+        let Expr::Call { args, .. } = expr else { panic!("expected Call, got {expr:?}") };
+        assert!(
+            matches!(args[0].value, Expr::OperatorRef(BinOp::Add)),
+            "expected OperatorRef(Add), got {:?}", args[0].value
         );
     }
 

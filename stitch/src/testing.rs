@@ -13,6 +13,7 @@ use crate::interp::{
     Module, eval, eval_modules, eval_program, eval_program_with_platform,
     eval_program_with_telemetry,
 };
+use crate::lower::lower;
 use crate::parser::{parse, parse_program};
 use crate::platform::Platform;
 use crate::value::{RuntimeError, TelemetryEvent, Value};
@@ -20,13 +21,16 @@ use crate::value::{RuntimeError, TelemetryEvent, Value};
 /// Parse then evaluate in an empty environment, unwrapping — for tests with
 /// valid, total expressions.
 pub fn run(src: &str) -> Value {
-    eval(&parse(src).expect("test input should parse"), &Env::new())
-        .expect("test input should evaluate")
+    let mut expr = parse(src).expect("test input should parse");
+    lower(&mut expr);
+    eval(&expr, &Env::new()).expect("test input should evaluate")
 }
 
 /// Parse then evaluate, expecting a runtime error message.
 pub fn run_err(src: &str) -> String {
-    eval(&parse(src).expect("test input should parse"), &Env::new())
+    let mut expr = parse(src).expect("test input should parse");
+    lower(&mut expr);
+    eval(&expr, &Env::new())
         .expect_err("test input should fail at runtime")
         .message()
 }

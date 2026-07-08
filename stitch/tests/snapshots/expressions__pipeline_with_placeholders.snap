@@ -16,22 +16,17 @@ Binary {
             args: [
                 Arg {
                     label: None,
-                    value: Lambda {
-                        params: [
-                            "$a",
-                        ],
-                        body: Binary {
-                            op: Gt,
-                            left: Field {
-                                object: Var(
-                                    "$a",
-                                ),
-                                name: "celsius",
-                            },
-                            right: Int(
-                                30,
+                    value: Binary {
+                        op: Gt,
+                        left: Field {
+                            object: Placeholder(
+                                None,
                             ),
+                            name: "celsius",
                         },
+                        right: Int(
+                            30,
+                        ),
                     },
                 },
             ],
@@ -44,16 +39,11 @@ Binary {
         args: [
             Arg {
                 label: None,
-                value: Lambda {
-                    params: [
-                        "$a",
-                    ],
-                    body: Field {
-                        object: Var(
-                            "$a",
-                        ),
-                        name: "celsius",
-                    },
+                value: Field {
+                    object: Placeholder(
+                        None,
+                    ),
+                    name: "celsius",
                 },
             },
         ],

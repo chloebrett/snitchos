@@ -6,8 +6,9 @@
 use stitch::testing::run_source;
 use stitch::value::Value;
 
-/// The canonical FSM source — the same file the ramfs seeds and the shell loads.
-const STIM: &str = include_str!("../../fs-image/stim.st");
+/// The canonical FSM source — the same file the ramfs seeds (at `/stim/stim.st`)
+/// and the shell loads.
+const STIM: &str = include_str!("../../fs-image/stim/stim.st");
 
 /// Evaluate `body` against the stim FSM's definitions, returning its value.
 fn fsm(body: &str) -> Value {

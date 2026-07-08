@@ -9,7 +9,12 @@
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 
-use crate::ast::{Arg, Expr, Item, MatchArm, Method, Stmt, StrSegment};
+use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Method, Stmt, StrSegment};
+
+/// Lower a single expression in place (e.g. for a REPL line or a test `run`).
+pub fn lower(expr: &mut Expr) {
+    lower_expr(expr);
+}
 
 /// Lower a full program (all top-level items) in place.
 pub fn lower_program(items: &mut [Item]) {
@@ -70,7 +75,10 @@ fn lower_expr(expr: &mut Expr) {
         Expr::Call { callee, args } => {
             lower_expr(callee);
             for arg in args.iter_mut() {
+                // Lower inside the arg first (inner calls consume their own
+                // placeholders), then wrap this arg if it contains any.
                 lower_expr(&mut arg.value);
+                lower_placeholder_arg(&mut arg.value);
             }
         }
         Expr::Field { object, .. } | Expr::SafeField { object, .. } => lower_expr(object),
@@ -119,6 +127,9 @@ fn lower_expr(expr: &mut Expr) {
                 lower_match_arm(arm);
             }
         }
+        Expr::OperatorRef(op) => {
+            *expr = operator_lambda(*op);
+        }
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Bool(_)
@@ -126,6 +137,122 @@ fn lower_expr(expr: &mut Expr) {
         | Expr::SelfRef
         | Expr::Placeholder(_) => {}
     }
+}
+
+/// Desugar a binary operator reference to its two-parameter lambda:
+/// `op` ⇒ `(lhs, rhs) -> lhs op rhs`.
+fn operator_lambda(op: BinOp) -> Expr {
+    Expr::Lambda {
+        params: vec!["lhs".to_string(), "rhs".to_string()],
+        body: Box::new(Expr::Binary {
+            op,
+            left: Box::new(Expr::Var("lhs".to_string())),
+            right: Box::new(Expr::Var("rhs".to_string())),
+        }),
+    }
+}
+
+/// If `expr` contains any `Placeholder` nodes, rewrite them to `Var("$x")`
+/// and wrap the whole expression in a `Lambda`. Stops at `Lambda` boundaries
+/// (placeholders inside written-out lambdas bind to those lambdas, not this one).
+fn lower_placeholder_arg(expr: &mut Expr) {
+    use alloc::collections::BTreeSet;
+    let mut referenced = BTreeSet::new();
+    collect_placeholders(expr, &mut referenced);
+    if let Some(params) = positional_params(&referenced) {
+        let mut body = Expr::Tuple(Vec::new()); // dummy
+        core::mem::swap(expr, &mut body);
+        *expr = Expr::Lambda { params, body: Box::new(body) };
+    }
+}
+
+/// Rewrite `Placeholder` nodes in `expr` to `Var("$x")`, collecting the
+/// `$x` param names used. Stops at `Lambda` boundaries.
+fn collect_placeholders(expr: &mut Expr, params: &mut alloc::collections::BTreeSet<String>) {
+    match expr {
+        Expr::Placeholder(name) => {
+            let param = format!("${}", name.as_deref().unwrap_or("a"));
+            params.insert(param.clone());
+            *expr = Expr::Var(param);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_placeholders(left, params);
+            collect_placeholders(right, params);
+        }
+        Expr::Unary { operand, .. } | Expr::Try(operand) | Expr::Spread(operand) => {
+            collect_placeholders(operand, params);
+        }
+        Expr::Call { callee, args } => {
+            collect_placeholders(callee, params);
+            for arg in args.iter_mut() {
+                collect_placeholders(&mut arg.value, params);
+            }
+        }
+        Expr::Field { object, .. } | Expr::SafeField { object, .. } => {
+            collect_placeholders(object, params);
+        }
+        Expr::Index { object, index } => {
+            collect_placeholders(object, params);
+            collect_placeholders(index, params);
+        }
+        Expr::Range { start, end, .. } => {
+            if let Some(e) = start {
+                collect_placeholders(e, params);
+            }
+            if let Some(e) = end {
+                collect_placeholders(e, params);
+            }
+        }
+        Expr::If { cond, then, els } => {
+            collect_placeholders(cond, params);
+            collect_placeholders(then, params);
+            collect_placeholders(els, params);
+        }
+        Expr::Tuple(elems) | Expr::List(elems) => {
+            for e in elems.iter_mut() {
+                collect_placeholders(e, params);
+            }
+        }
+        Expr::Map(entries) => {
+            for (k, v) in entries.iter_mut() {
+                collect_placeholders(k, params);
+                collect_placeholders(v, params);
+            }
+        }
+        // Lambda: stop here — its body's placeholders belong to it.
+        // Atoms and surface-only nodes (already lowered by the time we're called,
+        // or never contain sub-expressions with placeholders).
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::Var(_)
+        | Expr::SelfRef
+        | Expr::Str(_)
+        | Expr::OperatorRef(_)
+        | Expr::SubjectlessMatch { .. }
+        | Expr::Lambda { .. }
+        | Expr::Block { .. }
+        | Expr::Match { .. } => {}
+    }
+}
+
+/// Turn a set of referenced placeholder names into a positional param list.
+/// The letter is the index (`$a`=0, `$b`=1, …); unreferenced lower slots
+/// become `_` holes (`$b` alone ⇒ `(_, $b)`). `None` when empty.
+fn positional_params(referenced: &alloc::collections::BTreeSet<String>) -> Option<Vec<String>> {
+    let max = referenced
+        .iter()
+        .filter_map(|name| name.strip_prefix('$').and_then(|s| s.chars().next()))
+        .map(|letter| (letter as usize) - ('a' as usize))
+        .max()?;
+    let params = (0..=max)
+        .map(|index| {
+            let letter = (b'a' + index as u8) as char;
+            let name = format!("${letter}");
+            if referenced.contains(&name) { name } else { "_".to_string() }
+        })
+        .collect();
+    Some(params)
 }
 
 /// Lower a block (stmts + optional result) in place.

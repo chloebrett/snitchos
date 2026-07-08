@@ -9,16 +9,11 @@ Call {
     args: [
         Arg {
             label: None,
-            value: Lambda {
-                params: [
-                    "$a",
-                ],
-                body: Field {
-                    object: Var(
-                        "$a",
-                    ),
-                    name: "celsius",
-                },
+            value: Field {
+                object: Placeholder(
+                    None,
+                ),
+                name: "celsius",
             },
         },
     ],

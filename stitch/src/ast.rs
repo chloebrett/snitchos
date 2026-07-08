@@ -223,6 +223,9 @@ pub enum Expr {
         stmts: Vec<Stmt>,
         result: Option<Box<Expr>>,
     },
+    /// A bare binary operator used as a first-class value in argument position:
+    /// `f(+)`, `fold(0, *)`. Lowered to `(lhs, rhs) -> lhs op rhs`.
+    OperatorRef(BinOp),
     /// `match subject { arm* }` (subject form).
     Match {
         subject: Box<Expr>,

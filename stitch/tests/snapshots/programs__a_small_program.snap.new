@@ -1,5 +1,6 @@
 ---
 source: stitch/tests/programs.rs
+assertion_line: 32
 expression: "prog(\"sum Shape = Circle(radius: Float) | Rect(w: Float, h: Float)  \\\n         area(s) = match s { Circle(r) => 3 * r * r  Rect(w, h) => w * h }  \\\n         hot(readings, threshold) = readings |> filter($.celsius > threshold) |> map($.sensor)\")"
 ---
 [

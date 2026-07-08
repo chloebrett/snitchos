@@ -15,20 +15,18 @@ Call {
         },
         Arg {
             label: None,
-            value: Lambda {
-                params: [
-                    "$a",
-                    "$b",
-                ],
-                body: Binary {
-                    op: Add,
-                    left: Var(
-                        "$a",
+            value: Binary {
+                op: Add,
+                left: Placeholder(
+                    Some(
+                        "a",
                     ),
-                    right: Var(
-                        "$b",
+                ),
+                right: Placeholder(
+                    Some(
+                        "b",
                     ),
-                },
+                ),
             },
         },
     ],

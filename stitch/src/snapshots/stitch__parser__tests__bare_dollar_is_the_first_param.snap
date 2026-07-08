@@ -9,14 +9,9 @@ Call {
     args: [
         Arg {
             label: None,
-            value: Lambda {
-                params: [
-                    "$a",
-                ],
-                body: Var(
-                    "$a",
-                ),
-            },
+            value: Placeholder(
+                None,
+            ),
         },
     ],
 }

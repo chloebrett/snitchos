@@ -9,19 +9,14 @@ Call {
     args: [
         Arg {
             label: None,
-            value: Lambda {
-                params: [
-                    "$a",
-                ],
-                body: Binary {
-                    op: Gt,
-                    left: Var(
-                        "$a",
-                    ),
-                    right: Int(
-                        30,
-                    ),
-                },
+            value: Binary {
+                op: Gt,
+                left: Placeholder(
+                    None,
+                ),
+                right: Int(
+                    30,
+                ),
             },
         },
         Arg {
