@@ -45,6 +45,18 @@ fn lines_col(setup: &str) -> Value {
     fsm(&format!("{{ let s = {setup}  let out = [s.lines, s.col]  out }}"))
 }
 
+/// Project `[lines, row, col]` — for transitions that move the cursor across
+/// lines (a line-join changes all three).
+fn lines_row_col(setup: &str) -> Value {
+    fsm(&format!("{{ let s = {setup}  let out = [s.lines, s.row, s.col]  out }}"))
+}
+
+/// The expected `[lines, row, col]` for a multi-line buffer.
+fn buffer(lines: &[&str], row: i64, col: i64) -> Value {
+    let ls = lines.iter().map(|l| Value::Str((*l).into())).collect::<Vec<_>>();
+    Value::List(vec![Value::List(ls.into()), Value::Int(row), Value::Int(col)].into())
+}
+
 /// The expected `[lines, col]` for a single-line buffer holding `text`.
 fn line_and_col(text: &str, col: i64) -> Value {
     Value::List(
@@ -103,6 +115,35 @@ fn insert_edits_only_the_cursor_row_and_leaves_other_lines() {
     assert_eq!(
         lines_col(r#"insertChar(Editor(..initialState("xx\nyy"), row: 1, col: 1), "Z")"#),
         expected
+    );
+}
+
+#[test]
+fn backspace_deletes_the_char_before_the_cursor() {
+    // "abc" with the cursor at col 2 → deletes 'b' → "ac", col 1.
+    assert_eq!(
+        lines_col(r#"backspace(Editor(..initialState("abc"), col: 2))"#),
+        line_and_col("ac", 1)
+    );
+}
+
+#[test]
+fn backspace_at_col_0_joins_onto_the_previous_line() {
+    // Three lines, cursor at row 2 col 0: joins "c" onto "b" → ["a","bc"], and the
+    // cursor lands at the join (row 1, col = len "b" = 1). Proves the join targets
+    // row-1 / removeAt(row), not hardcoded indices.
+    assert_eq!(
+        lines_row_col(r#"backspace(Editor(..initialState("a\nb\nc"), row: 2, col: 0))"#),
+        buffer(&["a", "bc"], 1, 1)
+    );
+}
+
+#[test]
+fn backspace_at_the_top_left_is_a_no_op() {
+    // Row 0, col 0: nothing before the cursor — a round-trip identity no-op.
+    assert_eq!(
+        fsm(r#"backspace(initialState("ab"))"#),
+        fsm(r#"initialState("ab")"#)
     );
 }
 

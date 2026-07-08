@@ -78,3 +78,33 @@ insertChar(state, ch) = {
         col: state.col + Str.length(ch),
     )
 }
+
+// `Backspace` — three cases, checked in order:
+//   col > 0            : delete the char just before the cursor (col−1).
+//   col == 0, row > 0  : join this line onto the end of the previous one; the
+//                        cursor lands at the seam (end of the old previous line).
+//   col == 0, row == 0 : nothing before the cursor — a no-op.
+backspace(state) = match {
+    state.col > 0 => {
+        let line = lineAt(state, state.row)
+        let before = Str.slice(line, 0, state.col - 1)
+        let after = Str.slice(line, state.col, Str.length(line))
+        Editor(
+            ..state,
+            lines: List.set(state.lines, state.row, before + after),
+            col: state.col - 1,
+        )
+    }
+    state.row > 0 => {
+        let prev = lineAt(state, state.row - 1)
+        let cur = lineAt(state, state.row)
+        let merged = List.set(state.lines, state.row - 1, prev + cur)
+        Editor(
+            ..state,
+            lines: List.removeAt(merged, state.row),
+            row: state.row - 1,
+            col: Str.length(prev),
+        )
+    }
+    _ => state
+}

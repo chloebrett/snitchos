@@ -15,8 +15,9 @@ driver loop (Step 4.1) be Stitch, not a native.
 user decision). Done: **2.1 `initialState`** (`Mode`/`Editor` types + line split);
 **2.2 `j`/`k`** (`moveUp`/`moveDown`, clamped, col re-clamp); **2.3 `i`/`Esc`**
 (`enterInsert`/`enterNormal`, round-trip identity); **2.4 `insertChar`** (first
-buffer edit — `Str.slice` split + string `+` + `List.set`). All via the
-`stitch::testing` harness. Next: **2.5 `Backspace`** (delete prev char / join line).
+buffer edit — `Str.slice` split + string `+` + `List.set`); **2.5 `backspace`**
+(delete / line-join via `List.removeAt`). All via the `stitch::testing` harness.
+Next: **2.6 `Enter`** (split the line at col into two).
 
 **Enabling fix (2026-07-08): built-in `use` now resolves in the REPL/single-program
 path.** Found while answering "can I launch stim from the shell?": `build_env_in`
@@ -207,10 +208,16 @@ mid/end/start-of-line + a **multi-line** case proving the edit lands on the curs
 row and leaves siblings intact. 8 FSM tests green. First real workout of the Group-1
 primitives composed together.
 
-#### Step 2.5: `Backspace` — delete prev char, or join with the previous line at col 0
+#### Step 2.5: `Backspace` — delete prev char, or join with the previous line at col 0 — ✅ DONE (2026-07-08)
 **Acceptance**: col>0 deletes the char before the cursor (col−1); col==0 & row>0
 joins this line onto the end of the previous (cursor lands at the join); col==0 &
 row==0 is a no-op. **RED**: mid-line delete, line-join, and top-left no-op.
+DONE: `backspace(state)` = three-arm subjectless `match` (col>0 delete via
+`Str.slice`; row>0 join via `List.set(prev+cur)` + `List.removeAt(row)`, cursor →
+`Str.length(prev)`; else no-op). Join tested on a **3-line** buffer (catches
+hardcoded row-1/removeAt indices); no-op is a round-trip identity. 11 FSM tests
+green. **All five Group-1 primitives now exercised by the FSM** (`removeAt` = the
+line-join).
 
 #### Step 2.6: `Enter` — split the current line at col into two lines
 **Acceptance**: splits `line` into `[0,col)` and `[col,len)`; cursor to next line,
