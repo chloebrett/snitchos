@@ -165,6 +165,13 @@ fn collect_placeholders(expr: &mut Expr, params: &mut BTreeSet<String>) {
                 collect_placeholders(value, params);
             }
         }
+        Expr::SubjectlessMatch { arms, default } => {
+            for (cond, body) in arms {
+                collect_placeholders(cond, params);
+                collect_placeholders(body, params);
+            }
+            collect_placeholders(default, params);
+        }
         // Atoms with no sub-expressions, explicit lambdas (their body's
         // placeholders belong to that lambda), and strings (interpolations are
         // already sub-parsed) — all left for a later check.
@@ -1242,13 +1249,10 @@ impl Parser {
             ));
         }
         self.bump(); // '}'
-        Ok(arms.into_iter().rev().fold(default, |els, (cond, then)| {
-            Expr::If {
-                cond: Box::new(cond),
-                then: Box::new(then),
-                els: Box::new(els),
-            }
-        }))
+        Ok(Expr::SubjectlessMatch {
+            arms,
+            default: Box::new(default),
+        })
     }
 
     /// Is the parser at a `_ =>` subjectless catch-all arm?
@@ -2105,6 +2109,17 @@ mod tests {
             error.message.contains("`ext` applies to"),
             "{}",
             error.message
+        );
+    }
+
+    #[test]
+    fn subjectless_match_is_a_surface_node() {
+        // The parser must preserve the subjectless match form in the AST;
+        // desugaring to Expr::If is the lowering pass's job, not the parser's.
+        let expr = p(r#"match { n > 0 => "pos"  _ => "neg" }"#);
+        assert!(
+            matches!(expr, Expr::SubjectlessMatch { .. }),
+            "expected SubjectlessMatch, got {expr:?}"
         );
     }
 

@@ -2,6 +2,9 @@
 source: stitch/src/parser.rs
 expression: "p(\"match { _ => 0 }\")"
 ---
-Int(
-    0,
-)
+SubjectlessMatch {
+    arms: [],
+    default: Int(
+        0,
+    ),
+}

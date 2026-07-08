@@ -223,10 +223,17 @@ pub enum Expr {
         stmts: Vec<Stmt>,
         result: Option<Box<Expr>>,
     },
-    /// `match subject { arm* }` (subject form; subjectless is a later increment).
+    /// `match subject { arm* }` (subject form).
     Match {
         subject: Box<Expr>,
         arms: Vec<MatchArm>,
+    },
+    /// `match { cond => body … _ => default }` — a condition table. Each arm
+    /// is `(condition, body)`; `default` is the mandatory catch-all body.
+    /// Lowered to nested `Expr::If` chains before evaluation.
+    SubjectlessMatch {
+        arms: Vec<(Expr, Expr)>,
+        default: Box<Expr>,
     },
 }
 
