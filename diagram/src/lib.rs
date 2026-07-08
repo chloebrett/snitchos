@@ -8,6 +8,7 @@
 
 pub mod caps;
 pub mod deps;
+mod fold;
 pub mod itest_matrix;
 pub mod markdown;
 pub mod model;

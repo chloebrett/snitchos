@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use protocol::stream::OwnedFrame;
 use protocol::{CapEventKind, CapObject};
 
+use crate::fold::thread_names;
 use crate::model::{Direction, Graph};
 
 fn object_name(object: CapObject) -> &'static str {
@@ -77,13 +78,7 @@ impl CapQuiescence {
 /// parent and no children, i.e. the per-process bootstrap telemetry/span sinks —
 /// are dropped, so what remains is the actual delegation structure. Top-down.
 pub fn derivation_tree(frames: &[OwnedFrame]) -> Graph {
-    let names: HashMap<u32, &str> = frames
-        .iter()
-        .filter_map(|f| match f {
-            OwnedFrame::ThreadRegister { id, name, .. } => Some((*id, name.as_str())),
-            _ => None,
-        })
-        .collect();
+    let names = thread_names(frames);
     let revoked: HashSet<u64> = frames
         .iter()
         .filter_map(|f| match f {
@@ -142,11 +137,7 @@ pub fn derivation_tree(frames: &[OwnedFrame]) -> Graph {
     let connected: HashSet<u64> = edges.iter().flat_map(|(from, to)| [*from, *to]).collect();
 
     let mut graph = Graph::new(Direction::TopDown);
-    graph.define_class(
-        "root",
-        "fill:#dae8fc,stroke:#6c8ebf",
-        &[("style", "filled"), ("fillcolor", "#dae8fc")],
-    );
+    graph.define_root_class();
     for cap_id in order {
         if !connected.contains(&cap_id) {
             continue;

@@ -3,10 +3,11 @@
 //! many times that hand-off happened, nodes named from `ThreadRegister`. Pure —
 //! xtask sources the frames from a snemu boot.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use protocol::stream::OwnedFrame;
 
+use crate::fold::{OrderedCounter, thread_names};
 use crate::model::{Direction, Graph};
 
 /// Build the transition graph: one node per task that appears in a switch
@@ -14,18 +15,11 @@ use crate::model::{Direction, Graph};
 /// `from → to` hand-off labelled with its count. Deterministic: nodes and edges
 /// keep first-seen order.
 pub fn transition_graph(frames: &[OwnedFrame]) -> Graph {
-    let names: HashMap<u32, &str> = frames
-        .iter()
-        .filter_map(|f| match f {
-            OwnedFrame::ThreadRegister { id, name, .. } => Some((*id, name.as_str())),
-            _ => None,
-        })
-        .collect();
+    let names = thread_names(frames);
 
     let mut graph = Graph::new(Direction::LeftRight);
     let mut node_seen: HashSet<u32> = HashSet::new();
-    let mut edge_order: Vec<(u32, u32)> = Vec::new();
-    let mut counts: HashMap<(u32, u32), u64> = HashMap::new();
+    let mut edges: OrderedCounter<(u32, u32)> = OrderedCounter::new();
 
     for frame in frames {
         let OwnedFrame::ContextSwitch { from, to, .. } = frame else {
@@ -37,15 +31,11 @@ pub fn transition_graph(frames: &[OwnedFrame]) -> Graph {
                 graph.node(&format!("t{id}"), &label);
             }
         }
-        let key = (*from, *to);
-        if !counts.contains_key(&key) {
-            edge_order.push(key);
-        }
-        *counts.entry(key).or_insert(0) += 1;
+        edges.add((*from, *to));
     }
 
-    for (from, to) in edge_order {
-        graph.edge_labeled(&format!("t{from}"), &format!("t{to}"), &counts[&(from, to)].to_string());
+    for (&(from, to), count) in edges.iter() {
+        graph.edge_labeled(&format!("t{from}"), &format!("t{to}"), &count.to_string());
     }
     graph
 }

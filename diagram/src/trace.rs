@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use protocol::stream::OwnedFrame;
 
+use crate::fold::OrderedCounter;
 use crate::model::{Direction, Graph};
 
 fn node_id(name: &str) -> String {
@@ -34,18 +35,14 @@ pub fn span_call_graph(frames: &[OwnedFrame]) -> Graph {
     }
 
     let mut graph = Graph::new(Direction::TopDown);
-    graph.define_class(
-        "root",
-        "fill:#dae8fc,stroke:#6c8ebf",
-        &[("style", "filled"), ("fillcolor", "#dae8fc")],
-    );
+    graph.define_root_class();
 
-    let mut node_order: Vec<&str> = Vec::new();
-    let mut node_seen: HashSet<&str> = HashSet::new();
-    let mut spans_of: HashMap<&str, u64> = HashMap::new();
+    // Node count = how many times each span opened (the profiling signal that
+    // makes even a top-level, unparented span informative, given SnitchOS spans
+    // are mostly flat). Edges are parent→child nesting with their own counts.
+    let mut nodes: OrderedCounter<&str> = OrderedCounter::new();
     let mut roots: HashSet<&str> = HashSet::new();
-    let mut edge_order: Vec<(&str, &str)> = Vec::new();
-    let mut counts: HashMap<(&str, &str), u64> = HashMap::new();
+    let mut edges: OrderedCounter<(&str, &str)> = OrderedCounter::new();
 
     for frame in frames {
         let OwnedFrame::SpanStart { parent, name_id, .. } = frame else {
@@ -54,34 +51,24 @@ pub fn span_call_graph(frames: &[OwnedFrame]) -> Graph {
         let Some(name) = strings.get(&name_id.0).copied() else {
             continue;
         };
-        if node_seen.insert(name) {
-            node_order.push(name);
-        }
-        // How many times this span opened — the profiling signal that makes
-        // even a top-level (unparented) span informative, given SnitchOS spans
-        // are mostly flat.
-        *spans_of.entry(name).or_insert(0) += 1;
+        nodes.add(name);
         if parent.0 == 0 {
             roots.insert(name);
         } else if let Some(parent_name) = span_name.get(&parent.0).copied() {
-            let key = (parent_name, name);
-            if !counts.contains_key(&key) {
-                edge_order.push(key);
-            }
-            *counts.entry(key).or_insert(0) += 1;
+            edges.add((parent_name, name));
         }
     }
 
-    for name in node_order {
-        let label = format!("{name} ×{}", spans_of[name]);
+    for (&name, count) in nodes.iter() {
+        let label = format!("{name} ×{count}");
         if roots.contains(name) {
             graph.node_classed(&node_id(name), &label, &["root"]);
         } else {
             graph.node(&node_id(name), &label);
         }
     }
-    for (parent, child) in edge_order {
-        graph.edge_labeled(&node_id(parent), &node_id(child), &counts[&(parent, child)].to_string());
+    for (&(parent, child), count) in edges.iter() {
+        graph.edge_labeled(&node_id(parent), &node_id(child), &count.to_string());
     }
     graph
 }

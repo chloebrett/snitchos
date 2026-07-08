@@ -82,6 +82,17 @@ impl Graph {
         });
     }
 
+    /// Register the conventional `root` style — a light-blue fill the runtime
+    /// graphs share to highlight entry points (caps root grants, trace top-level
+    /// spans). Nodes opt in via the class name `"root"`.
+    pub(crate) fn define_root_class(&mut self) {
+        self.define_class(
+            "root",
+            "fill:#dae8fc,stroke:#6c8ebf",
+            &[("style", "filled"), ("fillcolor", "#dae8fc")],
+        );
+    }
+
     /// Register a style class: `mermaid` is the `classDef` body (e.g.
     /// `fill:#dae8fc,stroke:#6c8ebf`); `dot` is the equivalent DOT node
     /// attributes (e.g. `[("style", "filled"), ("fillcolor", "#dae8fc")]`).
