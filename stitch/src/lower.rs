@@ -4,11 +4,12 @@
 //! all desugaring. Current desugars:
 //!
 //!   - `SubjectlessMatch { arms, default }` → nested `Expr::If` chains
+//!   - `Stmt::Use { binding, call }` → `call(..args, binding -> { rest })`
 
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 
-use crate::ast::{Expr, Item, MatchArm, Method, Stmt, StrSegment};
+use crate::ast::{Arg, Expr, Item, MatchArm, Method, Stmt, StrSegment};
 
 /// Lower a full program (all top-level items) in place.
 pub fn lower_program(items: &mut [Item]) {
@@ -110,12 +111,7 @@ fn lower_expr(expr: &mut Expr) {
             }
         }
         Expr::Block { stmts, result } => {
-            for stmt in stmts.iter_mut() {
-                lower_stmt(stmt);
-            }
-            if let Some(e) = result {
-                lower_expr(e);
-            }
+            lower_block(stmts, result);
         }
         Expr::Match { subject, arms } => {
             lower_expr(subject);
@@ -132,6 +128,73 @@ fn lower_expr(expr: &mut Expr) {
     }
 }
 
+/// Lower a block (stmts + optional result) in place.
+///
+/// Scans for the first `Stmt::Use` and transforms it:
+///
+///   `use x <- f(a); rest` → `f(a, x -> { rest })`
+///
+/// The callback (rest-of-block) is itself lowered recursively, so nested
+/// `use <-` statements are handled naturally.
+fn lower_block(stmts: &mut Vec<Stmt>, result: &mut Option<Box<Expr>>) {
+    // Find the first Stmt::Use.
+    let use_idx = stmts.iter().position(|s| matches!(s, Stmt::Use { .. }));
+    let Some(idx) = use_idx else {
+        // No use <-, just recursively lower stmts and result.
+        for stmt in stmts.iter_mut() {
+            lower_stmt(stmt);
+        }
+        if let Some(e) = result {
+            lower_expr(e);
+        }
+        return;
+    };
+
+    // Lower everything before the `use` statement.
+    for stmt in &mut stmts[..idx] {
+        lower_stmt(stmt);
+    }
+
+    // Pull out the `use` statement and everything after it.
+    let use_stmt = stmts.remove(idx);
+    let rest_stmts: Vec<Stmt> = stmts.drain(idx..).collect();
+    let rest_result: Option<Box<Expr>> = result.take();
+
+    let Stmt::Use { binding, mut call } = use_stmt else {
+        unreachable!()
+    };
+
+    // Build the callback lambda: `binding -> { rest }`.
+    // Lower the rest block recursively first (handles nested use <-).
+    let mut callback_body = Expr::Block {
+        stmts: rest_stmts,
+        result: rest_result,
+    };
+    lower_expr(&mut callback_body);
+
+    let params: Vec<String> = binding.into_iter().collect();
+    let callback = Expr::Lambda {
+        params,
+        body: Box::new(callback_body),
+    };
+    let callback_arg = Arg { label: None, value: callback };
+
+    // Append callback to the call or wrap in a new call.
+    lower_expr(&mut call);
+    let desugared = if let Expr::Call { callee, mut args } = call {
+        args.push(callback_arg);
+        Expr::Call { callee, args }
+    } else {
+        Expr::Call {
+            callee: Box::new(call),
+            args: vec![callback_arg],
+        }
+    };
+
+    // The use site becomes the block's result expression.
+    *result = Some(Box::new(desugared));
+}
+
 fn lower_stmt(stmt: &mut Stmt) {
     match stmt {
         Stmt::Let { value, .. } | Stmt::Assign { value, .. } => lower_expr(value),
@@ -145,4 +208,52 @@ fn lower_match_arm(arm: &mut MatchArm) {
         lower_expr(guard);
     }
     lower_expr(&mut arm.body);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_program;
+
+    fn has_use_stmt(items: &[Item]) -> bool {
+        items.iter().any(|item| match item {
+            Item::Func { body, .. } => expr_has_use(body),
+            Item::Const { value, .. } => expr_has_use(value),
+            _ => false,
+        })
+    }
+
+    fn expr_has_use(expr: &Expr) -> bool {
+        match expr {
+            Expr::Block { stmts, result } => {
+                stmts.iter().any(|s| matches!(s, Stmt::Use { .. }) || stmt_has_use(s))
+                    || result.as_deref().map_or(false, expr_has_use)
+            }
+            Expr::Call { callee, args } => {
+                expr_has_use(callee) || args.iter().any(|a| expr_has_use(&a.value))
+            }
+            Expr::Lambda { body, .. } => expr_has_use(body),
+            Expr::If { cond, then, els } => {
+                expr_has_use(cond) || expr_has_use(then) || expr_has_use(els)
+            }
+            _ => false,
+        }
+    }
+
+    fn stmt_has_use(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Use { .. } => true,
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => expr_has_use(value),
+            Stmt::Expr(e) => expr_has_use(e),
+        }
+    }
+
+    #[test]
+    fn use_desugar_removed_by_lowering() {
+        // After lowering, Stmt::Use must be gone — replaced by a call + lambda.
+        let mut items = parse_program("main() = { use x <- f(1)  x + 1 }").unwrap();
+        assert!(has_use_stmt(&items), "Stmt::Use should be present before lowering");
+        lower_program(&mut items);
+        assert!(!has_use_stmt(&items), "Stmt::Use should be gone after lowering");
+    }
 }

@@ -86,7 +86,7 @@ fn try_match(pattern: &Pattern, value: &Value, env: &Env) -> Option<Env> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{run, run_err, run_program};
+    use crate::testing::{run, run_err, run_program};
     use crate::value::Value;
 
     #[test]

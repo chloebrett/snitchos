@@ -122,7 +122,7 @@ fn type_mismatch(op: BinOp, left: &Value, right: &Value) -> RuntimeError {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{run, run_err};
+    use crate::testing::{run, run_err};
     use crate::value::Value;
 
     #[test]

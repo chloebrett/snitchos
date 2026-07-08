@@ -4,6 +4,12 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
+[features]
+# Exposes `stitch::testing` — the shared harness for running `.st` programs from
+# outside the crate (integration tests, stim's FSM tests, the Stitch mutation
+# tester). Off by default; the metal build never compiles it.
+testing = []
+
 [dependencies]
 protocol = { path = "../protocol" }
 # The kernel↔userspace ABI — for the cap object-kind discriminants the `hold`

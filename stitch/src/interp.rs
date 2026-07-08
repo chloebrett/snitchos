@@ -1340,20 +1340,9 @@ fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env, tail: bool) -> R
             Stmt::Expr(expr) => {
                 eval(expr, &scope)?;
             }
-            // `use x <- f(a)` turns the rest of the block into a callback and
-            // appends it to the call: `f(a, x -> { rest })` (Gleam-style).
-            Stmt::Use { binding, call } => {
-                let rest = Expr::Block {
-                    stmts: stmts[index + 1..].to_vec(),
-                    result: result.map(|expr| Box::new(expr.clone())),
-                };
-                let callback = Value::Closure(Rc::new(ClosureData {
-                    params: binding.iter().cloned().collect(),
-                    body: rest,
-                    env: scope.clone(),
-                    uses: None,
-                }));
-                return apply_use(call, callback, &scope);
+            Stmt::Use { .. } => {
+                // Lowered to Expr::Call + Lambda by lower::lower_block before eval.
+                return Err(RuntimeError::new("Stmt::Use reached eval — lowering pass not applied"));
             }
             Stmt::Assign { target, value } => {
                 let new_value = eval(value, &scope)?;
@@ -1369,33 +1358,13 @@ fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env, tail: bool) -> R
     }
 }
 
-/// Apply a `use`'s call with the rest-of-block `callback` appended as the final
-/// argument: `f(a)` becomes `f(a, callback)`, `f` becomes `f(callback)`.
-fn apply_use(call: &Expr, callback: Value, env: &Env) -> Result<Value, RuntimeError> {
-    if let Expr::Call { callee, args } = call {
-        let function = eval(callee, env)?;
-        let mut values = Vec::with_capacity(args.len() + 1);
-        for arg in args {
-            if arg.label.is_some() || matches!(arg.value, Expr::Spread(_)) {
-                return Err(RuntimeError::new(
-                    "a `use` call takes positional arguments only",
-                ));
-            }
-            values.push(eval(&arg.value, env)?);
-        }
-        values.push(callback);
-        apply_values(&function, &values, env)
-    } else {
-        apply_values(&eval(call, env)?, &[callback], env)
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use crate::interp::{Module, eval_modules, eval_program};
     use crate::parser::parse_program;
     use crate::platform::FakePlatform;
-    use crate::test_support::{
+    use crate::testing::{
         run, run_err, run_modules, run_program, run_program_err, run_program_events,
         run_program_on,
     };

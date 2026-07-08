@@ -43,5 +43,9 @@ pub mod telemetry;
 pub mod value;
 pub mod wire;
 
-#[cfg(test)]
-mod test_support;
+/// Shared harness for running Stitch programs from Rust — the crate's own unit
+/// tests, integration tests, and external consumers (stim's FSM, the mutation
+/// tester). Available under `#[cfg(test)]` for in-crate tests and behind the
+/// `testing` feature for everyone else; never compiled into the metal build.
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;

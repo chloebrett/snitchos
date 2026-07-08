@@ -1138,7 +1138,7 @@ fn native_join(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::{
+    use crate::testing::{
         run_modules, run_program, run_program_err, run_program_events, run_program_on,
     };
     use crate::value::{TelemetryEvent, Value};
