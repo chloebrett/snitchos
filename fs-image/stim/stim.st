@@ -59,3 +59,9 @@ moveDown(state) = match {
         Editor(..state, row: row, col: clampedCol(state, row))
     }
 }
+
+// `i` — enter Insert mode. Only the mode changes; buffer and cursor are untouched.
+enterInsert(state) = Editor(..state, mode: Insert)
+
+// `Esc` — return to Normal mode. The inverse of `enterInsert`; buffer/cursor kept.
+enterNormal(state) = Editor(..state, mode: Normal)

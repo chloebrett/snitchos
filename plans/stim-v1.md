@@ -13,8 +13,10 @@ driver loop (Step 4.1) be Stitch, not a native.
 
 **Group 2 UNDERWAY** — the editor FSM in `fs-image/stim/stim.st` (own ramfs folder,
 user decision). Done: **2.1 `initialState`** (`Mode`/`Editor` types + line split);
-**2.2 `j`/`k`** (`moveUp`/`moveDown`, clamped, col re-clamp). All via the
-`stitch::testing` harness. Next: **2.3 `i`/`Esc` mode switch**.
+**2.2 `j`/`k`** (`moveUp`/`moveDown`, clamped, col re-clamp); **2.3 `i`/`Esc`**
+(`enterInsert`/`enterNormal`, round-trip identity). All via the `stitch::testing`
+harness. Next: **2.4 insert a printable char** (first buffer edit — `Str.slice` +
+concat + `List.set`).
 
 **Enabling fix (2026-07-08): built-in `use` now resolves in the REPL/single-program
 path.** Found while answering "can I launch stim from the shell?": `build_env_in`
@@ -187,9 +189,13 @@ subjectless `match` (prelude `min`/`max` are *list* folds, not scalar `min(a,b)`
 branches). No cargo-mutants (Stitch code — behavior-tested; the Stitch mutation
 tester covers the FSM later).
 
-#### Step 2.3: `i` enters Insert, `Esc` returns to Normal
+#### Step 2.3: `i` enters Insert, `Esc` returns to Normal — ✅ DONE (2026-07-08)
 **Acceptance**: mode transitions both ways; buffer/cursor unchanged by the switch.
 **RED**: round-trip mode test.
+DONE: `enterInsert`/`enterNormal` = one-line `Editor(..state, mode: …)` spreads.
+Tested by a snapshot of the Insert state (mode flipped, buffer/cursor intact) + a
+**round-trip identity** assert (`enterNormal(enterInsert(s)) == s`, full `Editor`
+equality) proving nothing but the mode changed. 6 FSM tests green.
 
 #### Step 2.4: Insert a printable char at `(row, col)`, advancing col
 **Acceptance**: `"ac"` + insert `b` at col 1 → `"abc"`, col 2 (uses `Str.slice` +

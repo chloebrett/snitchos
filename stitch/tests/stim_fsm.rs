@@ -54,6 +54,18 @@ fn j_at_the_last_line_and_k_at_the_top_are_no_ops() {
 }
 
 #[test]
+fn i_enters_insert_and_esc_returns_to_normal() {
+    // `i` flips Normal→Insert; the snapshot shows the buffer/cursor untouched.
+    insta::assert_debug_snapshot!(fsm(r#"enterInsert(initialState("ab"))"#));
+    // `Esc` after `i` returns to *exactly* the starting state — a round-trip
+    // identity proves the mode switch alone changed, nothing else.
+    assert_eq!(
+        fsm(r#"enterNormal(enterInsert(initialState("ab")))"#),
+        fsm(r#"initialState("ab")"#)
+    );
+}
+
+#[test]
 fn moving_onto_a_shorter_line_reclamps_the_column() {
     // Cursor at col 2 on "aaa" (len 3); moving down to "b" (len 1) pulls col to 1.
     assert_eq!(
