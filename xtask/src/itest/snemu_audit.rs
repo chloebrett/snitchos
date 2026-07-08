@@ -67,7 +67,7 @@ pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>) -> ExitCode
         eprint!("snemu-itest: [{}/{cap}] {:<40} ", i + 1, s.name);
         let outcome = match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
             Ok(machine) => {
-                let mut view = View::live(machine, max_steps);
+                let mut view = View::live(machine, budget_for(s.name, max_steps));
                 match scenario_view_fn(s.name)(&mut view) {
                     Ok(()) => Outcome::Pass,
                     Err(e) => Outcome::Fail(e),
@@ -80,6 +80,23 @@ pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>) -> ExitCode
     }
 
     print_report(&results, started.elapsed().as_secs_f64())
+}
+
+/// Per-scenario step-budget override. Most scenarios reach their assertion well
+/// under the default; a handful are genuinely **budget-bound** under snemu's
+/// instruction clock — their thresholds (N consumed samples, an OOM, a reaper
+/// completing) require the scheduler-gated heartbeat to fire many times, which is
+/// hundreds of millions to low billions of instructions. Those pass with the
+/// budget below (each measured), while the default keeps the fast majority fast.
+/// A larger caller `--steps` still wins (`.max`).
+fn budget_for(name: &str, default: u64) -> u64 {
+    let needed = match name {
+        "workload-cooperative-baseline" => 1_000_000_000,
+        "frame-allocator-oom" | "heap-oom" => 3_000_000_000,
+        "spawn-reclaims-memory" | "spawn-reclaims-names" => 2_500_000_000,
+        _ => return default,
+    };
+    needed.max(default)
 }
 
 /// Print the per-scenario pass/fail lines and the headline "N/M pass" summary.
