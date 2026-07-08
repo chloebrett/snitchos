@@ -143,6 +143,12 @@ impl Machine {
         self.time
     }
 
+    /// Total supervisor timer interrupts delivered across all harts (diagnostic).
+    #[must_use]
+    pub fn timer_fires(&self) -> u64 {
+        self.harts.iter().map(Hart::timer_fires).sum()
+    }
+
     /// Enable or disable the Tier-1 decode cache (M5) on **every** hart. Off by
     /// default (the pure interpreter is the oracle); snemu exposes this as a flag
     /// so a run with it on can be proven identical to one with it off — same

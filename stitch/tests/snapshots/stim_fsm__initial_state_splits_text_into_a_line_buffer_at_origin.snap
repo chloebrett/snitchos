@@ -1,0 +1,5 @@
+---
+source: stitch/tests/stim_fsm.rs
+expression: "fsm(r#\"initialState(\"a\\nb\")\"#)"
+---
+Editor[(Some("lines"), List[Str("a"), Str("b")]), (Some("row"), Int(0)), (Some("col"), Int(0)), (Some("mode"), Normal[])]

@@ -89,6 +89,12 @@ fn main() -> ExitCode {
     if steps == max_steps {
         eprintln!("snemu: step limit reached ({max_steps})");
     }
+    let fires = machine.timer_fires();
+    let instret = machine.instret();
+    eprintln!(
+        "snemu: {instret} instret, {fires} timer fires ({} instret/fire)",
+        if fires == 0 { 0 } else { instret / fires },
+    );
 
     print!("{}", String::from_utf8_lossy(machine.uart_output()));
     report_frames(machine.virtio_tx_output(), dump_frames);

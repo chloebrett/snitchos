@@ -9,10 +9,12 @@ decision point (informed by the Phase-B leak finding). B4's trampoline may let t
 driver loop (Step 4.1) be Stitch, not a native.
 
 **Group 1 COMPLETE (2026-07-08, 5/5)** — `Str.slice` + the `List` module
-(`at`/`set`/`insert`/`removeAt`); all total (out-of-range → `None`/unchanged),
-mutation-clean, 534 green. **Next: Group 2 — the editor FSM in `.st`** (Step 2.1
-`initialState`), the thesis proper. Open item to confirm at 2.1: where `stim.st`
-lives (embedded in shell build vs. seeded into ramfs).
+(`at`/`set`/`insert`/`removeAt`); all total, mutation-clean.
+
+**Group 2 UNDERWAY** — the editor FSM in `fs-image/stim.st`. **2.1 `initialState`
+DONE** (`Mode`/`Editor` types + line-buffer split), snapshot-tested through the new
+`stitch::testing` harness. `stim.st` lives in the **ramfs** (user decision). Next:
+**2.2 `j`/`k` row movement** (clamped, with col re-clamp).
 
 **Lands on**: `main`, incrementally (project convention: no feature branches;
 the user commits each known-good increment). The five groups below are the
@@ -144,9 +146,21 @@ Pure logic, no I/O. Tested by running the `.st` through the interpreter and
 asserting on the returned state / rendered string. State is
 `{lines: List<Str>, row: Int, col: Int, mode}` with `..spread` updates.
 
-#### Step 2.1: `initialState(text)` splits text into a line buffer at row/col 0
+#### Step 2.1: `initialState(text)` splits text into a line buffer at row/col 0 — ✅ DONE (2026-07-08)
 **Acceptance**: `"a\nb"` → lines `["a","b"]`, row 0, col 0, mode Normal; `""` → one
 empty line. **RED**: a program asserting the constructed state's fields.
+DONE: `sum Mode = Normal | Insert`, `prod Editor(lines, row, col, mode)`, and
+`initialState = Editor(lines: Str.split(text, "\n"), row: 0, col: 0, mode: Normal)`
+in `fs-image/stim.st`. `Str.split` gives `[""]` for `""` (one empty line, never
+zero). Snapshot-tested in `stitch/tests/stim_fsm.rs` via `stitch::testing`.
+
+**Harness (new infra, built this step):** `stitch::testing` — the `pub`, feature-
+gated (`testing`) promotion of the old `pub(crate)` `test_support` helpers, plus a
+new `run_source(defs, body)` that runs a `.st` program's function through the
+module path (so `use Str`/`use List` resolve). External consumers: `tests/stim_fsm.rs`
+now, the Stitch mutation tester later. Wired into the `xtask test` gate as
+`("stitch", &["--features", "testing"])` (stitch was previously **not** gated at
+all — its 535 tests only ran via a direct `cargo test -p stitch`).
 
 #### Step 2.2: Normal-mode `j`/`k` move row, clamped, with col re-clamp
 **Acceptance**: `j` at last line is a no-op; `k` at row 0 is a no-op; moving onto a
@@ -268,8 +282,10 @@ on the decoded wire. Registered in `SCENARIOS`; skips cleanly if no QEMU.
 
 ## Open items (surfaced, not blocking)
 
-- **Where the `stim.st` program lives** (embedded in the shell build vs. seeded
-  into the ramfs) — follow the shell's program-loading convention; confirm at 2.1.
+- **Where the `stim.st` program lives** — DECIDED (2026-07-08, user): **seeded into
+  the ramfs** at `fs-image/stim.st` (recursively seeded; the shell `:load`s it, same
+  as `double.st`/`greet.st`). One canonical file: ramfs seed + shell load + the
+  host FSM tests' `include_str!` source.
 - **Driver: native trampoline vs. Stitch loop + TCO** (Step 4.1) — default to the
   trampoline; the Stitch-loop variant is the thesis-max follow-up.
 - **Command-line vs. direct `:w` recognizer** (Step 2.7) — keep minimal for v1.

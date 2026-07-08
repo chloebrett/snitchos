@@ -234,6 +234,8 @@ pub(crate) struct Hart {
     /// runs the pure interpreter (the correctness oracle). Toggled per hart via
     /// [`set_decode_cache`](Self::set_decode_cache).
     decode_cache: Option<DecodeCache>,
+    /// Diagnostic: supervisor timer interrupts actually delivered to this hart.
+    timer_fires: u64,
 }
 
 /// A single-hart machine: one [`Hart`] plus the [`Bus`] it owns. The convenience
@@ -341,7 +343,13 @@ impl Hart {
             state: HartState::Running,
             pending_sbi: None,
             decode_cache: None,
+            timer_fires: 0,
         }
+    }
+
+    /// Supervisor timer interrupts delivered to this hart (diagnostic).
+    pub(crate) fn timer_fires(&self) -> u64 {
+        self.timer_fires
     }
 
     /// Enable or disable this hart's Tier-1 decode cache. Enabling starts from a
@@ -438,6 +446,9 @@ impl Hart {
         // Deliver a pending interrupt before fetching: `sepc` then points at the
         // un-run instruction, so `sret` resumes exactly where we left off.
         if let Some(cause) = self.pending_interrupt() {
+            if cause == cause::INTERRUPT | cause::SUPERVISOR_TIMER {
+                self.timer_fires += 1;
+            }
             self.take_trap(cause, 0);
             return Ok(HartEffect::None);
         }

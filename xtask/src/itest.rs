@@ -638,6 +638,9 @@ const UNIT_TEST_CRATES: &[(&str, &[&str])] = &[
     ("collector", &[]),
     ("itest-harness", &[]),
     ("diagram", &[]),
+    // `--features testing` exposes `stitch::testing` so the integration tests
+    // (e.g. the stim FSM in `tests/stim_fsm.rs`) can run the interpreter.
+    ("stitch", &["--features", "testing"]),
 ];
 
 /// Run every workspace crate's host unit tests, in order. Returns
