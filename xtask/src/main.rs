@@ -85,8 +85,11 @@ enum Cmd {
     /// snemu-produced frame stream (no QEMU) and report how many pass. Sizes the
     /// "can snemu back the itests" gap without rewriting scenarios.
     SnemuItest {
-        /// Per-scenario snemu instruction-step budget.
-        #[arg(long, default_value_t = 150_000_000)]
+        /// Per-scenario snemu instruction-step budget. Passing scenarios
+        /// short-circuit well under this; the budget only bounds failing ones and
+        /// the slow OOM/cooperative workloads. 400M recovers the budget-sensitive
+        /// scenarios (e.g. `sched-yield-round-trips`).
+        #[arg(long, default_value_t = 400_000_000)]
         steps: u64,
         /// Audit only the first N scenarios (faster smoke).
         #[arg(long)]
