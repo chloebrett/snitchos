@@ -151,8 +151,9 @@ asserting on the returned state / rendered string. State is
 empty line. **RED**: a program asserting the constructed state's fields.
 DONE: `sum Mode = Normal | Insert`, `prod Editor(lines, row, col, mode)`, and
 `initialState = Editor(lines: Str.split(text, "\n"), row: 0, col: 0, mode: Normal)`
-in `fs-image/stim.st`. `Str.split` gives `[""]` for `""` (one empty line, never
-zero). Snapshot-tested in `stitch/tests/stim_fsm.rs` via `stitch::testing`.
+in **`fs-image/stim/stim.st`** (its own ramfs folder → `/stim/stim.st`).
+`Str.split` gives `[""]` for `""` (one empty line, never zero). Snapshot-tested in
+`stitch/tests/stim_fsm.rs` via `stitch::testing`.
 
 **Harness (new infra, built this step):** `stitch::testing` — the `pub`, feature-
 gated (`testing`) promotion of the old `pub(crate)` `test_support` helpers, plus a
@@ -210,6 +211,20 @@ interpreter-tested.*
 The host effects the driver performs, behind the `Platform` seam (host fake +
 on-target). Includes the FS truncate slice (a real gap: `ramfs::write` only grows;
 `fs-core` has no truncate).
+
+**FS subdir-readiness (audited 2026-07-08).** Reads from subdirs work end-to-end at
+any depth — `user/fs/build.rs` recurses `fs-image/`, `RamFs::seeded_with_xattrs`
+does `mkdir -p` per segment, ramfs is a real inode tree (`Body::File | Body::Dir`),
+and every client walks `/`-paths one `Lookup` at a time. So `fs-image/stim/…` seeds
+to `/stim/…` and `:load /stim/stim.st` works with no fs change. (The stale ramfs
+module doc that claimed "flat, subdirs Unsupported" was corrected.) The write side
+has exactly TWO gaps, **neither subdir-specific** (both hit a root-level `:w` too):
+(1) **no truncate** — Steps 3.2/3.3 below (fs-core method + `fs_proto::Op`=8 +
+ramfs impl + server dispatch); (2) **no write-capable resolver / `:w`** — every
+client walker requests `READ` only; stim itself won't walk (per 4.2 the shell
+resolves with `READ|WRITE` and delegates the file cap), so this is a shell change in
+Group 4, not new fs mechanism. `Create` already supports `kind=Dir` over IPC, so
+even runtime subdir creation needs no protocol work.
 
 #### Step 3.1: `Platform::read_byte()` (raw, single byte) + fake + on-target
 **Acceptance**: fake replays scripted bytes then `None`; on-target drains

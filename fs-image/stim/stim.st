@@ -6,9 +6,9 @@
 // console write, fs write). The driver loop lives outside — this file is all
 // logic, no I/O.
 //
-// Seeded into the ramfs (`fs-image/`) and `:load`ed by the Stitch shell; also
-// exercised at the host level through the interpreter (see
-// `stitch/tests/stim_fsm.rs`).
+// Lives in its own ramfs folder: seeded from `fs-image/stim/` to `/stim/stim.st`
+// (the seed recurses; the shell path-walks and `:load`s it). Also exercised at
+// the host level through the interpreter (see `stitch/tests/stim_fsm.rs`).
 
 use Str
 use List
