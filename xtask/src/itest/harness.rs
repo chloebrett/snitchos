@@ -503,6 +503,17 @@ impl View {
         stdin.flush().map_err(|e| format!("flush QEMU stdin: {e}"))
     }
 
+    /// The guest's console (UART) output so far, for a **live** view — what the
+    /// program actually printed. The audit appends this to a failing scenario's
+    /// report so an interactive failure (a REPL error, a refused command) is
+    /// self-explaining instead of needing a manual re-run. `None` for the QEMU
+    /// path (its console is already in the per-scenario log file).
+    pub(crate) fn console_output(&self) -> Option<String> {
+        self.live
+            .as_ref()
+            .map(|live| String::from_utf8_lossy(live.machine.uart_output()).into_owned())
+    }
+
     /// Block up to `budget` for the guest's UART output to contain `needle`. This
     /// is how a scenario asserts on-target **console output** (`ConsoleWrite` →
     /// UART), which — unlike `DebugWrite` — never becomes a telemetry frame, so

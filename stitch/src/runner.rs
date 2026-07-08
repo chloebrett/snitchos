@@ -15,6 +15,7 @@ use crate::interp::{
     Module, build_env_with_backends, eval, eval_modules_with_telemetry,
     eval_program_with_telemetry, is_builtin_module, prelude_items,
 };
+use crate::lower::lower_program;
 use crate::parser::{parse, parse_program};
 use crate::platform::{NullPlatform, Platform};
 use crate::telemetry::{RecordingTelemetry, Telemetry};
@@ -243,6 +244,7 @@ impl Repl {
         if self.env.is_none() {
             let mut all = self.prelude.clone();
             all.extend_from_slice(&self.defs);
+            lower_program(&mut all);
             self.env = Some(build_env_with_backends(
                 Rc::clone(&self.telemetry),
                 Rc::clone(&self.platform),
@@ -596,5 +598,15 @@ mod tests {
     #[test]
     fn a_blank_repl_line_produces_nothing() {
         assert_eq!(Repl::new().eval_line("   "), "");
+    }
+
+    #[test]
+    fn loaded_source_with_use_arrow_is_lowered_before_eval() {
+        // `use x <- f(args)` in a loaded function body must be desugared before
+        // the REPL builds its env — otherwise Stmt::Use reaches eval and faults.
+        let mut repl = Repl::new();
+        repl.load_source("wrap(cb) = cb(42)   f() = { use x <- wrap()   x + 1 }");
+        let out = repl.eval_line("f()");
+        assert_eq!(out.trim(), "=> 43", "got: {out}");
     }
 }

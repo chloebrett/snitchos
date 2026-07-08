@@ -39,6 +39,23 @@ fn ints(a: i64, b: i64) -> Value {
     Value::List(vec![Value::Int(a), Value::Int(b)].into())
 }
 
+/// Project `[lines, col]` from the `Editor` that `setup` evaluates to — for
+/// edit transitions, where the line buffer and the column both change.
+fn lines_col(setup: &str) -> Value {
+    fsm(&format!("{{ let s = {setup}  let out = [s.lines, s.col]  out }}"))
+}
+
+/// The expected `[lines, col]` for a single-line buffer holding `text`.
+fn line_and_col(text: &str, col: i64) -> Value {
+    Value::List(
+        vec![
+            Value::List(vec![Value::Str(text.into())].into()),
+            Value::Int(col),
+        ]
+        .into(),
+    )
+}
+
 #[test]
 fn j_moves_down_a_line_and_k_moves_up() {
     // Three lines; j descends 0→1, k climbs back 1→0.
@@ -51,6 +68,42 @@ fn j_at_the_last_line_and_k_at_the_top_are_no_ops() {
     // k at row 0 stays put; j at the last line stays put (clamped to the buffer).
     assert_eq!(row_col(r#"moveUp(initialState("a\nb"))"#), ints(0, 0));
     assert_eq!(row_col(r#"moveDown(moveDown(initialState("a\nb")))"#), ints(1, 0));
+}
+
+#[test]
+fn insert_a_printable_char_splits_the_line_and_advances_the_column() {
+    // Mid-line: "ac" with the cursor at col 1, insert 'b' → "abc", col 2.
+    assert_eq!(
+        lines_col(r#"insertChar(Editor(..initialState("ac"), col: 1), "b")"#),
+        line_and_col("abc", 2)
+    );
+    // End of line: "ab" at col 2 (the end), insert 'c' → "abc", col 3.
+    assert_eq!(
+        lines_col(r#"insertChar(Editor(..initialState("ab"), col: 2), "c")"#),
+        line_and_col("abc", 3)
+    );
+    // Start of line: "bc" at col 0, insert 'a' → "abc", col 1.
+    assert_eq!(
+        lines_col(r#"insertChar(initialState("bc"), "a")"#),
+        line_and_col("abc", 1)
+    );
+}
+
+#[test]
+fn insert_edits_only_the_cursor_row_and_leaves_other_lines() {
+    // Two lines, cursor on row 1 col 1: inserting 'Z' edits only "yy"→"yZy" and
+    // leaves "xx" untouched — the edit lands on the cursor's row, not row 0.
+    let expected = Value::List(
+        vec![
+            Value::List(vec![Value::Str("xx".into()), Value::Str("yZy".into())].into()),
+            Value::Int(2),
+        ]
+        .into(),
+    );
+    assert_eq!(
+        lines_col(r#"insertChar(Editor(..initialState("xx\nyy"), row: 1, col: 1), "Z")"#),
+        expected
+    );
 }
 
 #[test]

@@ -65,3 +65,16 @@ enterInsert(state) = Editor(..state, mode: Insert)
 
 // `Esc` — return to Normal mode. The inverse of `enterInsert`; buffer/cursor kept.
 enterNormal(state) = Editor(..state, mode: Normal)
+
+// Insert the printable `ch` at the cursor: split the current line at `col`, drop
+// `ch` between the halves, write the line back, and advance the cursor past it.
+insertChar(state, ch) = {
+    let line = lineAt(state, state.row)
+    let before = Str.slice(line, 0, state.col)
+    let after = Str.slice(line, state.col, Str.length(line))
+    Editor(
+        ..state,
+        lines: List.set(state.lines, state.row, before + ch + after),
+        col: state.col + Str.length(ch),
+    )
+}

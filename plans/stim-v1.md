@@ -14,9 +14,9 @@ driver loop (Step 4.1) be Stitch, not a native.
 **Group 2 UNDERWAY** — the editor FSM in `fs-image/stim/stim.st` (own ramfs folder,
 user decision). Done: **2.1 `initialState`** (`Mode`/`Editor` types + line split);
 **2.2 `j`/`k`** (`moveUp`/`moveDown`, clamped, col re-clamp); **2.3 `i`/`Esc`**
-(`enterInsert`/`enterNormal`, round-trip identity). All via the `stitch::testing`
-harness. Next: **2.4 insert a printable char** (first buffer edit — `Str.slice` +
-concat + `List.set`).
+(`enterInsert`/`enterNormal`, round-trip identity); **2.4 `insertChar`** (first
+buffer edit — `Str.slice` split + string `+` + `List.set`). All via the
+`stitch::testing` harness. Next: **2.5 `Backspace`** (delete prev char / join line).
 
 **Enabling fix (2026-07-08): built-in `use` now resolves in the REPL/single-program
 path.** Found while answering "can I launch stim from the shell?": `build_env_in`
@@ -197,9 +197,15 @@ Tested by a snapshot of the Insert state (mode flipped, buffer/cursor intact) + 
 **round-trip identity** assert (`enterNormal(enterInsert(s)) == s`, full `Editor`
 equality) proving nothing but the mode changed. 6 FSM tests green.
 
-#### Step 2.4: Insert a printable char at `(row, col)`, advancing col
+#### Step 2.4: Insert a printable char at `(row, col)`, advancing col — ✅ DONE (2026-07-08)
 **Acceptance**: `"ac"` + insert `b` at col 1 → `"abc"`, col 2 (uses `Str.slice` +
 concat + `List.set`). **RED**: mid-line + end-of-line insert.
+DONE: `insertChar(state, ch)` = split the line with `Str.slice(line,0,col)` /
+`Str.slice(line,col,len)`, concat `before + ch + after` (string `+` — resolved the
+open item; `ops.rs:58`), `List.set` the line back, `col += Str.length(ch)`. Tested
+mid/end/start-of-line + a **multi-line** case proving the edit lands on the cursor's
+row and leaves siblings intact. 8 FSM tests green. First real workout of the Group-1
+primitives composed together.
 
 #### Step 2.5: `Backspace` — delete prev char, or join with the previous line at col 0
 **Acceptance**: col>0 deletes the char before the cursor (col−1); col==0 & row>0

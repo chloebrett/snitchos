@@ -25,10 +25,13 @@ use super::harness::View;
 use super::{SCENARIOS, scenario_view_fn};
 use crate::snemu_diff;
 
-/// One scenario's outcome under the snemu-backed replay.
+/// One scenario's outcome under the live snemu run.
 enum Outcome {
     Pass,
-    Fail(String),
+    /// The assertion message, plus the guest's console (UART) output at the point
+    /// of failure — so an interactive failure explains itself (what the REPL
+    /// printed, an error, a refused command) without a manual re-run.
+    Fail { why: String, console: String },
 }
 
 /// Run the audit: build the `itest-workloads` kernel, boot each distinct
@@ -70,10 +73,13 @@ pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>) -> ExitCode
                 let mut view = View::live(machine, budget_for(s.name, max_steps));
                 match scenario_view_fn(s.name)(&mut view) {
                     Ok(()) => Outcome::Pass,
-                    Err(e) => Outcome::Fail(e),
+                    Err(why) => Outcome::Fail {
+                        why,
+                        console: console_tail(view.console_output().unwrap_or_default().as_str()),
+                    },
                 }
             }
-            Err(e) => Outcome::Fail(format!("snemu load failed: {e}")),
+            Err(e) => Outcome::Fail { why: format!("snemu load failed: {e}"), console: String::new() },
         };
         eprintln!("{}", if matches!(outcome, Outcome::Pass) { "ok" } else { "FAIL" });
         results.push((s.name, outcome));
@@ -94,6 +100,9 @@ fn budget_for(name: &str, default: u64) -> u64 {
         "workload-cooperative-baseline" => 1_000_000_000,
         "frame-allocator-oom" | "heap-oom" => 3_000_000_000,
         "spawn-reclaims-memory" | "spawn-reclaims-names" => 2_500_000_000,
+        // The on-target Stitch tree-walker computing `primes(10)` via naive trial
+        // division over a lazy range is genuinely compute-heavy.
+        "stitch-fs-loads-and-runs" => 3_000_000_000,
         _ => return default,
     };
     needed.max(default)
@@ -108,7 +117,18 @@ fn print_report(results: &[(&str, Outcome)], elapsed_secs: f64) -> ExitCode {
     for (name, outcome) in results {
         match outcome {
             Outcome::Pass => println!("  PASS  {name}"),
-            Outcome::Fail(why) => println!("  FAIL  {name}\n          {}", first_line(why)),
+            Outcome::Fail { why, console } => {
+                println!("  FAIL  {name}\n          {}", first_line(why));
+                // The guest's own words at the moment of failure — the fastest way
+                // to see *why* an interactive scenario broke (a REPL error, a
+                // refused command) without re-running by hand.
+                if !console.is_empty() {
+                    println!("          --- console ---");
+                    for line in console.lines() {
+                        println!("          | {line}");
+                    }
+                }
+            }
         }
     }
     println!(
@@ -122,4 +142,13 @@ fn print_report(results: &[(&str, Outcome)], elapsed_secs: f64) -> ExitCode {
 /// report shows only its first line to stay scannable.
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or(s)
+}
+
+/// The last chunk of the guest's console output — where an error or the last
+/// prompt lives. Bounded so a chatty program doesn't flood the report.
+fn console_tail(output: &str) -> String {
+    const MAX_LINES: usize = 20;
+    let lines: Vec<&str> = output.lines().collect();
+    let start = lines.len().saturating_sub(MAX_LINES);
+    lines[start..].join("\n")
 }
