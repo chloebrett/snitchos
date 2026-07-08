@@ -92,6 +92,28 @@ fn build_env_in(env: Env, items: &[Item]) -> Env {
     // After every `on`/`contract` is collected, fold contract default methods
     // into the types that conform — a concrete impl already present wins.
     bake_contract_defaults(&mut reg);
+    // Resolve *whole-module* `use` of the built-in stdlib modules (`use Str`,
+    // `use List`, `use Seq`) here in the single-program / REPL path, the same way
+    // the multi-module path does — without this a `:load`ed program opening with
+    // `use Str` faults "unbound variable `Str`" on first call. We filter to
+    // whole-module (`names: None`) imports of a *known* built-in so this
+    // by-signature-infallible function needs no error channel: an unknown `use`
+    // stays a silent no-op (unchanged — only an actual use of the unbound name
+    // faults), and selection imports (`use Str.{upper}`, whose members could be
+    // missing) remain the multi-module path's job for now.
+    let builtins: BTreeMap<String, Rc<ModuleHandle>> =
+        builtin_modules(&reg.globals).into_iter().collect();
+    let builtin_uses: Vec<Item> = items
+        .iter()
+        .filter(|item| matches!(item, Item::Use { module, names: None } if builtins.contains_key(module)))
+        .cloned()
+        .collect();
+    // Cannot fail: every `use` here is a whole-module import of a built-in present
+    // in `builtins`, so `link_imports` only takes its infallible `None` arm
+    // (binding the module value directly) — the missing-module and missing-member
+    // branches are unreachable.
+    link_imports(&builtin_uses, &mut reg.globals, &builtins)
+        .expect("whole-module built-in `use` linking is infallible after filtering");
     env.set_globals(reg.globals);
     env.set_methods(reg.methods);
     env.set_field_mut(reg.field_mut);
@@ -325,74 +347,34 @@ fn check_coherence(modules: &[Module]) -> Result<(), RuntimeError> {
 }
 
 /// The built-in standard-library modules and the members each exposes — the
-/// single source of truth for both [`builtin_modules`] (the runtime handles) and
-/// [`is_builtin_module`] (the loader's "don't read a file for this" check).
-/// They're namespaced *views* onto existing native functions (no relocation, the
-/// flat names stay in scope too): `Seq` groups the lazy producers, `Str` the
-/// string operations. (`List` waits until it has genuinely list-specific members:
-/// eager constructors are literals, and the polymorphic combinators deliberately
-/// stay unqualified — one name over both List and Seq, never split.)
-/// Each member is `(exported_name, source_native)`: the name the module exposes,
-/// and the flat native it resolves to. They differ when a clean module name would
-/// collide in the flat namespace — `Str.contains` (substring) is sourced from
-/// `strContains` so it doesn't clash with the prelude's flat `contains` (element
-/// membership). String ops are `str`-prefixed natively so generic names stay out
-/// of the flat namespace and live only under `Str`.
-const BUILTIN_MODULE_SPECS: &[(&str, &[(&str, &str)])] = &[
-    ("Seq", &[("iterate", "iterate"), ("repeat", "repeat")]),
-    (
-        "Str",
-        &[
-            ("join", "join"),
-            ("upper", "strUpper"),
-            ("lower", "strLower"),
-            ("length", "strLength"),
-            ("slice", "strSlice"),
-            ("trim", "strTrim"),
-            ("contains", "strContains"),
-            ("startsWith", "strStartsWith"),
-            ("split", "strSplit"),
-            ("replace", "strReplace"),
-        ],
-    ),
-    (
-        "List",
-        &[
-            ("at", "listAt"),
-            ("set", "listSet"),
-            ("insert", "listInsert"),
-            ("removeAt", "listRemoveAt"),
-        ],
-    ),
-];
-
 /// Whether `name` is a built-in stdlib module (provided by the runtime, not read
 /// from a `.st` file) — the module loader skips these.
+/// Derived from the `module` field on each [`NativeFn`]; no separate spec table.
 #[must_use]
 pub fn is_builtin_module(name: &str) -> bool {
-    BUILTIN_MODULE_SPECS.iter().any(|(module, _)| *module == name)
+    NATIVES.iter().any(|n| n.module == Some(name))
 }
 
-/// Assemble the built-in module handles, resolving each spec's members against
-/// the shared base globals (where the natives live).
+/// Assemble the built-in module handles from the natives that declare a `module`.
+/// The export name is `export_as` when set, otherwise the native's own `name`.
 fn builtin_modules(base_globals: &BTreeMap<String, Value>) -> Vec<(String, Rc<ModuleHandle>)> {
-    BUILTIN_MODULE_SPECS
-        .iter()
-        .map(|(name, members)| {
-            let exports = members
-                .iter()
-                .filter_map(|(export, source)| {
-                    base_globals
-                        .get(*source)
-                        .map(|value| ((*export).to_string(), value.clone()))
-                })
-                .collect();
+    let mut by_module: BTreeMap<&str, Vec<(String, Value)>> = BTreeMap::new();
+    for native in NATIVES {
+        let Some(module) = native.module else { continue };
+        let export_name = native.export_as.unwrap_or(native.name).to_string();
+        if let Some(value) = base_globals.get(native.name) {
+            by_module.entry(module).or_default().push((export_name, value.clone()));
+        }
+    }
+    by_module
+        .into_iter()
+        .map(|(name, exports)| {
             let handle = ModuleHandle {
-                name: (*name).to_string(),
-                exports,
+                name: name.to_string(),
+                exports: exports.into_iter().collect(),
                 private: BTreeSet::new(),
             };
-            ((*name).to_string(), Rc::new(handle))
+            (name.to_string(), Rc::new(handle))
         })
         .collect()
 }
@@ -3105,5 +3087,18 @@ mod tests {
             ),
             Value::Int(15)
         );
+    }
+
+    #[test]
+    fn builtin_module_membership_is_declared_on_native() {
+        // Natives self-declare their module; is_builtin_module and builtin_modules
+        // are derived from NATIVES, not from a separate hand-maintained table.
+        use crate::natives::NATIVES;
+        let str_natives: Vec<_> = NATIVES.iter().filter(|n| n.module == Some("Str")).collect();
+        assert!(!str_natives.is_empty(), "no native declares module Str");
+        let seq_natives: Vec<_> = NATIVES.iter().filter(|n| n.module == Some("Seq")).collect();
+        assert!(!seq_natives.is_empty(), "no native declares module Seq");
+        let list_natives: Vec<_> = NATIVES.iter().filter(|n| n.module == Some("List")).collect();
+        assert!(!list_natives.is_empty(), "no native declares module List");
     }
 }

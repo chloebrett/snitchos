@@ -16,6 +16,19 @@ user decision). Done: **2.1 `initialState`** (`Mode`/`Editor` types + line split
 **2.2 `j`/`k`** (`moveUp`/`moveDown`, clamped, col re-clamp). All via the
 `stitch::testing` harness. Next: **2.3 `i`/`Esc` mode switch**.
 
+**Enabling fix (2026-07-08): built-in `use` now resolves in the REPL/single-program
+path.** Found while answering "can I launch stim from the shell?": `build_env_in`
+(the `eval_program`/REPL path, incl. `:load`'s `load_source`) silently dropped
+`Item::Use` (`register_items` `_ => {}`), so the FSM's `use Str  use List` faulted
+"unbound variable `Str`" — built-in linking lived *only* in the multi-module
+`eval_modules` path. Fixed by linking whole-module built-in `use`s in `build_env_in`
+(filter to `names: None` + known built-in → `link_imports` takes its infallible
+arm). Now `:load /stim/stim.st` + calling `initialState`/`moveDown` works on the
+metal (after a rebuild reseeds the ramfs). Regression tests:
+`stitch/tests/builtin_module_use.rs` (incl. a `Repl`-API test driving the real
+`:load` path). Selection imports (`use Str.{upper}`) in the single path stay a
+no-op — still multi-module-path-only, a documented follow-up.
+
 **Lands on**: `main`, incrementally (project convention: no feature branches;
 the user commits each known-good increment). The five groups below are the
 natural commit/review milestones.

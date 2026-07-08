@@ -147,6 +147,13 @@ pub struct NativeFn {
     pub name: &'static str,
     pub arity: usize,
     pub func: fn(&[Value], &Env) -> Result<Value, RuntimeError>,
+    /// The stdlib module this native is exported through, if any (e.g. `"Str"`).
+    /// Drives `is_builtin_module` and `builtin_modules` — no separate spec table.
+    pub module: Option<&'static str>,
+    /// The name this native is exported under in its module. `None` means use `name`.
+    /// Used when the internal name is prefixed to avoid flat-namespace collisions
+    /// (e.g. `strUpper` → `upper` in `Str`).
+    pub export_as: Option<&'static str>,
 }
 
 /// A telemetry event recorded by `emit`/`span`. The v0 stub for the real

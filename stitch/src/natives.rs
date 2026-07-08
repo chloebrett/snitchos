@@ -15,211 +15,49 @@ use crate::value::{DataValue, LazySeq, NativeFn, RuntimeError, Step, Value};
 
 /// The native functions, registered into every program's globals.
 pub(crate) const NATIVES: &[NativeFn] = &[
-    NativeFn {
-        name: "map",
-        arity: 2,
-        func: native_map,
-    },
-    NativeFn {
-        name: "filter",
-        arity: 2,
-        func: native_filter,
-    },
-    NativeFn {
-        name: "fold",
-        arity: 3,
-        func: native_fold,
-    },
-    NativeFn {
-        name: "join",
-        arity: 2,
-        func: native_join,
-    },
-    NativeFn {
-        name: "print",
-        arity: 1,
-        func: native_print,
-    },
-    NativeFn {
-        name: "readLine",
-        arity: 0,
-        func: native_read_line,
-    },
-    NativeFn {
-        name: "hold",
-        arity: 0,
-        func: native_hold,
-    },
-    NativeFn {
-        name: "revoke",
-        arity: 1,
-        func: native_revoke,
-    },
-    NativeFn {
-        name: "grant",
-        arity: 3,
-        func: native_grant,
-    },
-    NativeFn {
-        name: "readFile",
-        arity: 1,
-        func: native_read_file,
-    },
-    NativeFn {
-        name: "emit",
-        arity: 2,
-        func: native_emit,
-    },
-    NativeFn {
-        name: "span",
-        arity: 2,
-        func: native_span,
-    },
-    NativeFn {
-        name: "toList",
-        arity: 1,
-        func: native_to_list,
-    },
-    NativeFn {
-        name: "take",
-        arity: 2,
-        func: native_take,
-    },
-    NativeFn {
-        name: "iterate",
-        arity: 2,
-        func: native_iterate,
-    },
-    NativeFn {
-        name: "repeat",
-        arity: 1,
-        func: native_repeat,
-    },
-    NativeFn {
-        name: "takeWhile",
-        arity: 2,
-        func: native_take_while,
-    },
-    NativeFn {
-        name: "foldWhile",
-        arity: 3,
-        func: native_fold_while,
-    },
-    // --- more list combinators (flat / polymorphic, auto-in-scope) ---
-    NativeFn {
-        name: "reverse",
-        arity: 1,
-        func: native_reverse,
-    },
-    NativeFn {
-        name: "drop",
-        arity: 2,
-        func: native_drop,
-    },
-    NativeFn {
-        name: "dropWhile",
-        arity: 2,
-        func: native_drop_while,
-    },
-    NativeFn {
-        name: "flatMap",
-        arity: 2,
-        func: native_flat_map,
-    },
-    NativeFn {
-        name: "sort",
-        arity: 1,
-        func: native_sort,
-    },
-    NativeFn {
-        name: "sortBy",
-        arity: 2,
-        func: native_sort_by,
-    },
-    NativeFn {
-        name: "concat",
-        arity: 2,
-        func: native_concat,
-    },
-    NativeFn {
-        name: "zip",
-        arity: 2,
-        func: native_zip,
-    },
-    NativeFn {
-        name: "enumerate",
-        arity: 1,
-        func: native_enumerate,
-    },
-    // --- string operations (exposed under the `Str` module; `str`-prefixed
-    //     internally so generic names don't clutter the flat namespace) ---
-    NativeFn {
-        name: "strUpper",
-        arity: 1,
-        func: native_upper,
-    },
-    NativeFn {
-        name: "strLower",
-        arity: 1,
-        func: native_lower,
-    },
-    NativeFn {
-        name: "strLength",
-        arity: 1,
-        func: native_length,
-    },
-    NativeFn {
-        name: "strSlice",
-        arity: 3,
-        func: native_slice,
-    },
-    NativeFn {
-        name: "strTrim",
-        arity: 1,
-        func: native_trim,
-    },
-    NativeFn {
-        name: "strContains",
-        arity: 2,
-        func: native_str_contains,
-    },
-    NativeFn {
-        name: "strStartsWith",
-        arity: 2,
-        func: native_starts_with,
-    },
-    NativeFn {
-        name: "strSplit",
-        arity: 2,
-        func: native_split,
-    },
-    NativeFn {
-        name: "strReplace",
-        arity: 3,
-        func: native_replace,
-    },
-    // --- list index operations (exposed under the `List` module; `list`-prefixed
-    //     internally, mirroring the `Str` split) ---
-    NativeFn {
-        name: "listAt",
-        arity: 2,
-        func: native_list_at,
-    },
-    NativeFn {
-        name: "listSet",
-        arity: 3,
-        func: native_list_set,
-    },
-    NativeFn {
-        name: "listInsert",
-        arity: 3,
-        func: native_list_insert,
-    },
-    NativeFn {
-        name: "listRemoveAt",
-        arity: 2,
-        func: native_list_remove_at,
-    },
+    NativeFn { name: "map",       arity: 2, func: native_map,       module: None, export_as: None },
+    NativeFn { name: "filter",    arity: 2, func: native_filter,    module: None, export_as: None },
+    NativeFn { name: "fold",      arity: 3, func: native_fold,      module: None, export_as: None },
+    NativeFn { name: "print",     arity: 1, func: native_print,     module: None, export_as: None },
+    NativeFn { name: "readLine",  arity: 0, func: native_read_line, module: None, export_as: None },
+    NativeFn { name: "hold",      arity: 0, func: native_hold,      module: None, export_as: None },
+    NativeFn { name: "revoke",    arity: 1, func: native_revoke,    module: None, export_as: None },
+    NativeFn { name: "grant",     arity: 3, func: native_grant,     module: None, export_as: None },
+    NativeFn { name: "readFile",  arity: 1, func: native_read_file, module: None, export_as: None },
+    NativeFn { name: "emit",      arity: 2, func: native_emit,      module: None, export_as: None },
+    NativeFn { name: "span",      arity: 2, func: native_span,      module: None, export_as: None },
+    NativeFn { name: "toList",    arity: 1, func: native_to_list,   module: None, export_as: None },
+    NativeFn { name: "take",      arity: 2, func: native_take,      module: None, export_as: None },
+    NativeFn { name: "takeWhile", arity: 2, func: native_take_while, module: None, export_as: None },
+    NativeFn { name: "foldWhile", arity: 3, func: native_fold_while, module: None, export_as: None },
+    NativeFn { name: "reverse",   arity: 1, func: native_reverse,   module: None, export_as: None },
+    NativeFn { name: "drop",      arity: 2, func: native_drop,      module: None, export_as: None },
+    NativeFn { name: "dropWhile", arity: 2, func: native_drop_while, module: None, export_as: None },
+    NativeFn { name: "flatMap",   arity: 2, func: native_flat_map,  module: None, export_as: None },
+    NativeFn { name: "sort",      arity: 1, func: native_sort,      module: None, export_as: None },
+    NativeFn { name: "sortBy",    arity: 2, func: native_sort_by,   module: None, export_as: None },
+    NativeFn { name: "concat",    arity: 2, func: native_concat,    module: None, export_as: None },
+    NativeFn { name: "zip",       arity: 2, func: native_zip,       module: None, export_as: None },
+    NativeFn { name: "enumerate", arity: 1, func: native_enumerate, module: None, export_as: None },
+    // --- Seq module: lazy producers ---
+    NativeFn { name: "iterate", arity: 2, func: native_iterate, module: Some("Seq"), export_as: None },
+    NativeFn { name: "repeat",  arity: 1, func: native_repeat,  module: Some("Seq"), export_as: None },
+    // --- Str module: string operations (`str`-prefixed flat name, clean module name) ---
+    NativeFn { name: "join",         arity: 2, func: native_join,         module: Some("Str"), export_as: None },
+    NativeFn { name: "strUpper",     arity: 1, func: native_upper,        module: Some("Str"), export_as: Some("upper") },
+    NativeFn { name: "strLower",     arity: 1, func: native_lower,        module: Some("Str"), export_as: Some("lower") },
+    NativeFn { name: "strLength",    arity: 1, func: native_length,       module: Some("Str"), export_as: Some("length") },
+    NativeFn { name: "strSlice",     arity: 3, func: native_slice,        module: Some("Str"), export_as: Some("slice") },
+    NativeFn { name: "strTrim",      arity: 1, func: native_trim,         module: Some("Str"), export_as: Some("trim") },
+    NativeFn { name: "strContains",  arity: 2, func: native_str_contains, module: Some("Str"), export_as: Some("contains") },
+    NativeFn { name: "strStartsWith",arity: 2, func: native_starts_with,  module: Some("Str"), export_as: Some("startsWith") },
+    NativeFn { name: "strSplit",     arity: 2, func: native_split,        module: Some("Str"), export_as: Some("split") },
+    NativeFn { name: "strReplace",   arity: 3, func: native_replace,      module: Some("Str"), export_as: Some("replace") },
+    // --- List module: index operations (`list`-prefixed flat name, clean module name) ---
+    NativeFn { name: "listAt",       arity: 2, func: native_list_at,      module: Some("List"), export_as: Some("at") },
+    NativeFn { name: "listSet",      arity: 3, func: native_list_set,     module: Some("List"), export_as: Some("set") },
+    NativeFn { name: "listInsert",   arity: 3, func: native_list_insert,  module: Some("List"), export_as: Some("insert") },
+    NativeFn { name: "listRemoveAt", arity: 2, func: native_list_remove_at, module: Some("List"), export_as: Some("removeAt") },
 ];
 
 /// `foldWhile(coll, init, f)` — reduce left-to-right with an early stop. `f(acc,
