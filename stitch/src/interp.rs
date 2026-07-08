@@ -355,6 +355,15 @@ const BUILTIN_MODULE_SPECS: &[(&str, &[(&str, &str)])] = &[
             ("replace", "strReplace"),
         ],
     ),
+    (
+        "List",
+        &[
+            ("at", "listAt"),
+            ("set", "listSet"),
+            ("insert", "listInsert"),
+            ("removeAt", "listRemoveAt"),
+        ],
+    ),
 ];
 
 /// Whether `name` is a built-in stdlib module (provided by the runtime, not read

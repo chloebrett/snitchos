@@ -198,6 +198,28 @@ pub(crate) const NATIVES: &[NativeFn] = &[
         arity: 3,
         func: native_replace,
     },
+    // --- list index operations (exposed under the `List` module; `list`-prefixed
+    //     internally, mirroring the `Str` split) ---
+    NativeFn {
+        name: "listAt",
+        arity: 2,
+        func: native_list_at,
+    },
+    NativeFn {
+        name: "listSet",
+        arity: 3,
+        func: native_list_set,
+    },
+    NativeFn {
+        name: "listInsert",
+        arity: 3,
+        func: native_list_insert,
+    },
+    NativeFn {
+        name: "listRemoveAt",
+        arity: 2,
+        func: native_list_remove_at,
+    },
 ];
 
 /// `foldWhile(coll, init, f)` — reduce left-to-right with an early stop. `f(acc,
@@ -653,6 +675,125 @@ fn native_replace(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     let from = expect_str("Str.replace", from)?;
     let to = expect_str("Str.replace", to)?;
     Ok(Value::Str(text.replace(from, to).into()))
+}
+
+/// `List.at(xs, i)` — the element at position `i` as `Some(elem)`, or `None`
+/// when `i` is out of range (negative or `>= len`). Total: never panics, never
+/// errors on a valid `List` — the editor FSM relies on the `Maybe` so an
+/// out-of-bounds cursor is a value, not a fault.
+fn native_list_at(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [xs, i] = args else {
+        return Err(RuntimeError::new("List.at expects (xs, i)"));
+    };
+    let Value::List(items) = xs else {
+        return Err(RuntimeError::new(format!(
+            "List.at expects a List, got {}",
+            xs.kind()
+        )));
+    };
+    let Value::Int(i) = i else {
+        return Err(RuntimeError::new("List.at expects (xs, i) with an Int index"));
+    };
+    let Ok(index) = usize::try_from(*i) else {
+        return Ok(none());
+    };
+    match items.get(index) {
+        Some(value) => Ok(some(value.clone())),
+        None => Ok(none()),
+    }
+}
+
+/// `List.set(xs, i, v)` — a new `List` equal to `xs` with position `i` replaced
+/// by `v`. Functional: `xs` is untouched. Total, mirroring `List.at` — an
+/// out-of-range `i` (negative or `>= len`) returns `xs` unchanged rather than
+/// panicking or erroring.
+fn native_list_set(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [xs, i, v] = args else {
+        return Err(RuntimeError::new("List.set expects (xs, i, v)"));
+    };
+    let Value::List(items) = xs else {
+        return Err(RuntimeError::new(format!(
+            "List.set expects a List, got {}",
+            xs.kind()
+        )));
+    };
+    let Value::Int(i) = i else {
+        return Err(RuntimeError::new("List.set expects (xs, i, v) with an Int index"));
+    };
+    let Ok(index) = usize::try_from(*i) else {
+        return Ok(xs.clone());
+    };
+    if index >= items.len() {
+        return Ok(xs.clone());
+    }
+    let updated: Vec<Value> = items
+        .iter()
+        .enumerate()
+        .map(|(pos, elem)| if pos == index { v.clone() } else { elem.clone() })
+        .collect();
+    Ok(Value::List(updated.into()))
+}
+
+/// `List.insert(xs, i, v)` — a new `List` with `v` inserted *before* position
+/// `i`, shifting the tail right. The valid range is `0..=len`: `i == len`
+/// appends (the inclusive bound is what distinguishes insert from set). Total —
+/// an out-of-range `i` (negative or `> len`) returns `xs` unchanged. `xs` is
+/// untouched.
+fn native_list_insert(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [xs, i, v] = args else {
+        return Err(RuntimeError::new("List.insert expects (xs, i, v)"));
+    };
+    let Value::List(items) = xs else {
+        return Err(RuntimeError::new(format!(
+            "List.insert expects a List, got {}",
+            xs.kind()
+        )));
+    };
+    let Value::Int(i) = i else {
+        return Err(RuntimeError::new("List.insert expects (xs, i, v) with an Int index"));
+    };
+    let Ok(index) = usize::try_from(*i) else {
+        return Ok(xs.clone());
+    };
+    if index > items.len() {
+        return Ok(xs.clone());
+    }
+    let mut updated: Vec<Value> = Vec::with_capacity(items.len() + 1);
+    updated.extend(items[..index].iter().cloned());
+    updated.push(v.clone());
+    updated.extend(items[index..].iter().cloned());
+    Ok(Value::List(updated.into()))
+}
+
+/// `List.removeAt(xs, i)` — a new `List` with position `i` removed, shifting the
+/// tail left. Total, mirroring the rest of the `List` family — an out-of-range
+/// `i` (negative or `>= len`) returns `xs` unchanged. `xs` is untouched.
+fn native_list_remove_at(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
+    let [xs, i] = args else {
+        return Err(RuntimeError::new("List.removeAt expects (xs, i)"));
+    };
+    let Value::List(items) = xs else {
+        return Err(RuntimeError::new(format!(
+            "List.removeAt expects a List, got {}",
+            xs.kind()
+        )));
+    };
+    let Value::Int(i) = i else {
+        return Err(RuntimeError::new("List.removeAt expects (xs, i) with an Int index"));
+    };
+    let Ok(index) = usize::try_from(*i) else {
+        return Ok(xs.clone());
+    };
+    if index >= items.len() {
+        return Ok(xs.clone());
+    }
+    let updated: Vec<Value> = items
+        .iter()
+        .enumerate()
+        .filter(|&(pos, _)| pos != index)
+        .map(|(_, elem)| elem.clone())
+        .collect();
+    Ok(Value::List(updated.into()))
 }
 
 /// `drop(seq, n)` — a lazy `Seq` of `seq` with its first `n` elements skipped.
@@ -1312,6 +1453,90 @@ mod tests {
     fn run_str(body: &str) -> Value {
         let source = format!("use Str  main() = {body}");
         run_modules(&[("main", source.as_str())], "main")
+    }
+
+    /// Run a one-liner that uses the `List` module, returning `main`'s value.
+    fn run_list(body: &str) -> Value {
+        let source = format!("use List  main() = {body}");
+        run_modules(&[("main", source.as_str())], "main")
+    }
+
+    #[test]
+    fn list_remove_at_drops_the_index_and_leaves_the_original() {
+        let list = |xs: &[i64]| Value::List(xs.iter().copied().map(Value::Int).collect());
+        // Remove at front, interior, and last position.
+        assert_eq!(run_list("List.removeAt([10, 20, 30], 0)"), list(&[20, 30]));
+        assert_eq!(run_list("List.removeAt([10, 20, 30], 1)"), list(&[10, 30]));
+        assert_eq!(run_list("List.removeAt([10, 20, 30], 2)"), list(&[10, 20]));
+        // Out of range (`== len`, past it, and negative) → unchanged, no panic
+        // (total, like the rest of the `List` family).
+        assert_eq!(run_list("List.removeAt([10, 20, 30], 3)"), list(&[10, 20, 30]));
+        assert_eq!(run_list("List.removeAt([10, 20, 30], 4)"), list(&[10, 20, 30]));
+        assert_eq!(run_list("List.removeAt([10, 20, 30], -1)"), list(&[10, 20, 30]));
+        // Empty list → unchanged.
+        assert_eq!(run_list("List.removeAt([], 0)"), list(&[]));
+        // Functional: the original binding is untouched.
+        assert_eq!(
+            run_list("{ let xs = [1, 2, 3]  let ys = List.removeAt(xs, 1)  let both = [xs, ys]  both }"),
+            Value::List(vec![list(&[1, 2, 3]), list(&[1, 3])].into())
+        );
+    }
+
+    #[test]
+    fn list_insert_inserts_before_index_and_appends_at_len() {
+        let list = |xs: &[i64]| Value::List(xs.iter().copied().map(Value::Int).collect());
+        // Insert before the index: front, interior.
+        assert_eq!(run_list("List.insert([10, 20, 30], 0, 99)"), list(&[99, 10, 20, 30]));
+        assert_eq!(run_list("List.insert([10, 20, 30], 1, 99)"), list(&[10, 99, 20, 30]));
+        // `i == len` appends (the inclusive upper bound distinguishes insert
+        // from set).
+        assert_eq!(run_list("List.insert([10, 20, 30], 3, 99)"), list(&[10, 20, 30, 99]));
+        // Past `len` and negative → unchanged, no panic (total).
+        assert_eq!(run_list("List.insert([10, 20, 30], 4, 99)"), list(&[10, 20, 30]));
+        assert_eq!(run_list("List.insert([10, 20, 30], -1, 99)"), list(&[10, 20, 30]));
+        // Empty list, index 0 → a singleton.
+        assert_eq!(run_list("List.insert([], 0, 99)"), list(&[99]));
+        // Functional: the original binding is untouched.
+        assert_eq!(
+            run_list("{ let xs = [1, 2]  let ys = List.insert(xs, 1, 9)  let both = [xs, ys]  both }"),
+            Value::List(vec![list(&[1, 2]), list(&[1, 9, 2])].into())
+        );
+    }
+
+    #[test]
+    fn list_set_replaces_functionally_and_leaves_the_original() {
+        let list = |xs: &[i64]| Value::List(xs.iter().copied().map(Value::Int).collect());
+        // Replace in the interior and at both ends.
+        assert_eq!(run_list("List.set([10, 20, 30], 1, 99)"), list(&[10, 99, 30]));
+        assert_eq!(run_list("List.set([10, 20, 30], 0, 99)"), list(&[99, 20, 30]));
+        assert_eq!(run_list("List.set([10, 20, 30], 2, 99)"), list(&[10, 20, 99]));
+        // Out of range (past the end, and negative) → unchanged, no panic
+        // (total, mirroring `List.at`).
+        assert_eq!(run_list("List.set([10, 20, 30], 3, 99)"), list(&[10, 20, 30]));
+        assert_eq!(run_list("List.set([10, 20, 30], -1, 99)"), list(&[10, 20, 30]));
+        // Empty list → unchanged.
+        assert_eq!(run_list("List.set([], 0, 99)"), list(&[]));
+        // Functional: the original binding is untouched by the set. (The pair is
+        // bound rather than trailing the block as a bare `[…]`, which maximal-munch
+        // would otherwise glue to the prior call as an index.)
+        assert_eq!(
+            run_list("{ let xs = [1, 2, 3]  let ys = List.set(xs, 0, 9)  let both = [xs, ys]  both }"),
+            Value::List(vec![list(&[1, 2, 3]), list(&[9, 2, 3])].into())
+        );
+    }
+
+    #[test]
+    fn list_at_returns_some_in_range_and_none_out_of_range() {
+        use crate::interp::{none, some};
+        // In range → `Some(elem)`, char-indexed from 0.
+        assert_eq!(run_list("List.at([10, 20, 30], 0)"), some(Value::Int(10)));
+        assert_eq!(run_list("List.at([10, 20, 30], 2)"), some(Value::Int(30)));
+        // Past the end → `None` (no panic).
+        assert_eq!(run_list("List.at([10, 20, 30], 3)"), none());
+        // A negative index → `None`, not a wrap-around or panic.
+        assert_eq!(run_list("List.at([10, 20, 30], -1)"), none());
+        // Empty list → always `None`.
+        assert_eq!(run_list("List.at([], 0)"), none());
     }
 
     #[test]

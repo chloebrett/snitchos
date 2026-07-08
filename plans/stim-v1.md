@@ -1,14 +1,18 @@
 # Plan: stim v1 — a minimal modal editor as a Stitch program
 
-**Status**: **PAUSED (2026-07-05)** — blocked pending [Stitch core
-redesign](stitch-core-redesign.md) Phases A+B (spans + a reified evaluator with
-fuel/trampoline). stim is built on the *rebuilt* foundation, not the current
-tree-walker, to avoid rework. The **stim-vs-bytecode-VM** ordering is decided at
-the redesign's post-Phase-D decision point (informed by the Phase-B leak finding).
-Group-1 primitive Step 1.1 (`Str.slice`) already landed and is foundation-agnostic;
-the remaining `List` primitives may fold into the redesign or resume after A+B.
-When resuming: B4's trampoline may let the driver loop (Step 4.1) be Stitch, not a
-native.
+**Status**: **RESUMED (2026-07-08)** — the A+B blocker is cleared: [Stitch core
+redesign](stitch-core-redesign.md) Phase A (spans) is done and Phase B's fuel,
+depth-guard, **and self-tail trampoline (B4)** are all in (`self_tail_recursive_*`
+tests green). stim now builds on the rebuilt foundation as intended. The
+**stim-vs-bytecode-VM** ordering is still decided at the redesign's post-Phase-D
+decision point (informed by the Phase-B leak finding). B4's trampoline may let the
+driver loop (Step 4.1) be Stitch, not a native.
+
+**Group 1 COMPLETE (2026-07-08, 5/5)** — `Str.slice` + the `List` module
+(`at`/`set`/`insert`/`removeAt`); all total (out-of-range → `None`/unchanged),
+mutation-clean, 534 green. **Next: Group 2 — the editor FSM in `.st`** (Step 2.1
+`initialState`), the thesis proper. Open item to confirm at 2.1: where `stim.st`
+lives (embedded in shell build vs. seeded into ramfs).
 
 **Lands on**: `main`, incrementally (project convention: no feature branches;
 the user commits each known-good increment). The five groups below are the
@@ -91,23 +95,43 @@ panic); `start>=end` → `""`. Counts Unicode scalars (chars), matching `Str.len
 **GREEN**: a `Str.slice` native via `chars()` indexing.
 **MUTATE/KILL/REFACTOR**: per skill. **Done when**: criteria met, report reviewed.
 
-#### Step 1.2: `List.at(xs, i) -> Maybe<T>`
+#### Step 1.2: `List.at(xs, i) -> Maybe<T>` — ✅ DONE (2026-07-08)
 **Acceptance**: in-range → `Some(elem)`; out-of-range → `None`.
 **RED**: in-range and out-of-range tests. **GREEN**: index into the `Rc<[Value]>`.
+Landed as the `List` builtin module (`BUILTIN_MODULE_SPECS`) + `listAt` native;
+negative and past-end indices both `None` (total, never panics). Mutation-clean
+(the one generated mutant is unviable — `Value: !Default`).
 
-#### Step 1.3: `List.set(xs, i, v)` — functional, returns a new list
+#### Step 1.3: `List.set(xs, i, v)` — functional, returns a new list — ✅ DONE (2026-07-08)
 **Acceptance**: returns a list equal to `xs` with index `i` replaced; out-of-range
 → unchanged (or error — decide in RED); original `xs` unchanged.
 **RED**: replace-middle + out-of-range + originality tests.
+DECISION: out-of-range (negative or `>= len`) → **unchanged** (total, mirroring
+`List.at`). `listSet` native + `List.set` mapping. Mutation-clean (`>=`→`<` and
+`==`→`!=` both caught; whole-fn mutant unviable). 532 green. Originality test binds
+the `[xs, ys]` pair — a bare trailing `[…]` maximal-munches onto the prior call as
+an index (`stitch_maximal_munch_call_paren` applies to `[` too).
 
-#### Step 1.4: `List.insert(xs, i, v)` — functional insert-before-index
+#### Step 1.4: `List.insert(xs, i, v)` — functional insert-before-index — ✅ DONE (2026-07-08)
 **Acceptance**: inserts at `i` (0..=len); `len` appends; original unchanged.
 **RED**: insert-front/middle/end tests.
+`listInsert` native + `List.insert` mapping. Valid range `0..=len` (inclusive so
+`i==len` appends); out-of-range (`> len` or negative) → unchanged (total). Mutation-
+clean (all three `>`-boundary mutants — `==`/`<`/`>=` — caught by the append +
+past-end tests; whole-fn mutant unviable). 533 green.
 
-#### Step 1.5: `List.removeAt(xs, i)` — functional remove
+#### Step 1.5: `List.removeAt(xs, i)` — functional remove — ✅ DONE (2026-07-08)
 **Acceptance**: removes index `i`; out-of-range → unchanged (or error — decide in
 RED); original unchanged.
 **RED**: remove-middle + out-of-range tests.
+DECISION: out-of-range (`>= len` or negative) → **unchanged** (total, matching the
+family). `listRemoveAt` native + `List.removeAt` mapping. Mutation-clean (`>=`→`<`
+and filter `!=`→`==` both caught; whole-fn mutant unviable). 534 green.
+
+**Group 1 COMPLETE (5/5).** The `List` builtin module = `at`/`set`/`insert`/
+`removeAt`, all sharing one contract: total, never-panic, out-of-range is a value
+(`None`/unchanged), original untouched. `Str.slice` from 1.1. All the primitives the
+FSM needs now exist. **Group 2 (the editor FSM in `.st`) is unblocked.**
 
 *PR boundary: "Stitch editor primitives" — the slice/index natives, useful beyond
 stim.*
