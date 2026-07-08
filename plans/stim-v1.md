@@ -16,8 +16,9 @@ user decision). Done: **2.1 `initialState`** (`Mode`/`Editor` types + line split
 **2.2 `j`/`k`** (`moveUp`/`moveDown`, clamped, col re-clamp); **2.3 `i`/`Esc`**
 (`enterInsert`/`enterNormal`, round-trip identity); **2.4 `insertChar`** (first
 buffer edit — `Str.slice` split + string `+` + `List.set`); **2.5 `backspace`**
-(delete / line-join via `List.removeAt`). All via the `stitch::testing` harness.
-Next: **2.6 `Enter`** (split the line at col into two).
+(delete / line-join via `List.removeAt`); **2.6 `splitLine`** (Enter — split via
+`List.insert`; inverse of backspace-join). All via the `stitch::testing` harness.
+Next: **2.7 `:w` → `Save` effect** (the first *effect*, not just a state map).
 
 **Enabling fix (2026-07-08): built-in `use` now resolves in the REPL/single-program
 path.** Found while answering "can I launch stim from the shell?": `build_env_in`
@@ -219,10 +220,14 @@ hardcoded row-1/removeAt indices); no-op is a round-trip identity. 11 FSM tests
 green. **All five Group-1 primitives now exercised by the FSM** (`removeAt` = the
 line-join).
 
-#### Step 2.6: `Enter` — split the current line at col into two lines
+#### Step 2.6: `Enter` — split the current line at col into two lines — ✅ DONE (2026-07-08)
 **Acceptance**: splits `line` into `[0,col)` and `[col,len)`; cursor to next line,
 col 0; line count grows by one (uses `Str.slice` + `List.set` + `List.insert`).
 **RED**: split-middle, split-at-end, split-at-start.
+DONE: `splitLine(state)` = `Str.slice` head/tail, `List.set(row, head)` +
+`List.insert(row+1, tail)`, cursor → (row+1, 0). Tested middle/end/start + a
+multi-line row-targeting case, plus **`backspace(splitLine(s)) == s`** (the two are
+inverses — one round-trip guards off-by-ones in both). 14 FSM tests green.
 
 #### Step 2.7: `:w` produces a `Save` effect carrying the serialized buffer
 **Acceptance**: entering `:w` yields `Step{state, effect: Save(text)}` where `text`

@@ -108,3 +108,19 @@ backspace(state) = match {
     }
     _ => state
 }
+
+// `Enter` — split the current line at the cursor: the head `[0,col)` stays on this
+// line, the tail `[col,len)` becomes a new line below, and the cursor moves to the
+// start of that new line. The inverse of `backspace`'s line-join.
+splitLine(state) = {
+    let line = lineAt(state, state.row)
+    let before = Str.slice(line, 0, state.col)
+    let after = Str.slice(line, state.col, Str.length(line))
+    let head = List.set(state.lines, state.row, before)
+    Editor(
+        ..state,
+        lines: List.insert(head, state.row + 1, after),
+        row: state.row + 1,
+        col: 0,
+    )
+}

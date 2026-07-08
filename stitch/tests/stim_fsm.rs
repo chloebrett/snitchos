@@ -148,6 +148,46 @@ fn backspace_at_the_top_left_is_a_no_op() {
 }
 
 #[test]
+fn enter_splits_the_line_at_the_cursor_into_two() {
+    // Middle: "abc" at col 1 → "a" / "bc", cursor to the new line (row 1, col 0).
+    assert_eq!(
+        lines_row_col(r#"splitLine(Editor(..initialState("abc"), col: 1))"#),
+        buffer(&["a", "bc"], 1, 0)
+    );
+    // At end: col 3 → "abc" and a fresh empty line below.
+    assert_eq!(
+        lines_row_col(r#"splitLine(Editor(..initialState("abc"), col: 3))"#),
+        buffer(&["abc", ""], 1, 0)
+    );
+    // At start: col 0 → an empty line above, content pushed down.
+    assert_eq!(
+        lines_row_col(r#"splitLine(initialState("abc"))"#),
+        buffer(&["", "abc"], 1, 0)
+    );
+}
+
+#[test]
+fn enter_splits_only_the_cursor_line_and_keeps_the_rest() {
+    // Three lines, split "abc" (row 1) at col 1 → x, a, bc, y; the split lands on
+    // the cursor row and its neighbours are undisturbed.
+    assert_eq!(
+        lines_row_col(r#"splitLine(Editor(..initialState("x\nabc\ny"), row: 1, col: 1))"#),
+        buffer(&["x", "a", "bc", "y"], 2, 0)
+    );
+}
+
+#[test]
+fn enter_then_backspace_is_the_identity() {
+    // `splitLine` leaves the cursor at col 0 of the new line, exactly where
+    // `backspace` joins back — so the two compose to the original state. A
+    // round-trip that catches an off-by-one in *either* transition.
+    assert_eq!(
+        fsm(r#"backspace(splitLine(Editor(..initialState("abc"), col: 1)))"#),
+        fsm(r#"Editor(..initialState("abc"), col: 1)"#)
+    );
+}
+
+#[test]
 fn i_enters_insert_and_esc_returns_to_normal() {
     // `i` flips Normal→Insert; the snapshot shows the buffer/cursor untouched.
     insta::assert_debug_snapshot!(fsm(r#"enterInsert(initialState("ab"))"#));
