@@ -1,6 +1,9 @@
-//! `RamFs` — the first `Filesystem` implementation. A RAM-backed, flat
-//! single-root filesystem. Subdirectories are `Unsupported` for now
-//! (additive later — no trait change). Host-testable; no cap/IPC types.
+//! `RamFs` — the first `Filesystem` implementation. A RAM-backed filesystem
+//! with a real inode tree: nodes are `File` or `Dir` (name→inode), so
+//! subdirectories are fully supported — `create` makes files or dirs in any
+//! dir, `seeded_with_xattrs` does `mkdir -p` per path segment, and callers walk
+//! multi-segment paths one `lookup` at a time. (There is no `truncate`: `write`
+//! only grows/overwrites.) Host-testable; no cap/IPC types.
 
 #![no_std]
 #![forbid(unsafe_code)]

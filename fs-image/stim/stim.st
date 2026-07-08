@@ -30,3 +30,32 @@ initialState(text) = Editor(
     col: 0,
     mode: Normal,
 )
+
+// The text of the line at `row`, or "" if out of range (never happens for a
+// clamped cursor, but keeps every accessor total).
+lineAt(state, row) = unwrapOr(List.at(state.lines, row), "")
+
+// `col`, pulled left to the end of the line at `row` if that line is shorter —
+// a vertical move must never leave the cursor past the end of its new line.
+clampedCol(state, row) = {
+    let lineLen = Str.length(lineAt(state, row))
+    match { state.col > lineLen => lineLen  _ => state.col }
+}
+
+// `k` — up one line, clamped at the top; re-clamp the column onto the new line.
+moveUp(state) = match {
+    state.row <= 0 => state
+    _ => {
+        let row = state.row - 1
+        Editor(..state, row: row, col: clampedCol(state, row))
+    }
+}
+
+// `j` — down one line, clamped at the last line; re-clamp the column.
+moveDown(state) = match {
+    state.row >= count(state.lines) - 1 => state
+    _ => {
+        let row = state.row + 1
+        Editor(..state, row: row, col: clampedCol(state, row))
+    }
+}

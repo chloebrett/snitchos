@@ -11,10 +11,10 @@ driver loop (Step 4.1) be Stitch, not a native.
 **Group 1 COMPLETE (2026-07-08, 5/5)** — `Str.slice` + the `List` module
 (`at`/`set`/`insert`/`removeAt`); all total, mutation-clean.
 
-**Group 2 UNDERWAY** — the editor FSM in `fs-image/stim.st`. **2.1 `initialState`
-DONE** (`Mode`/`Editor` types + line-buffer split), snapshot-tested through the new
-`stitch::testing` harness. `stim.st` lives in the **ramfs** (user decision). Next:
-**2.2 `j`/`k` row movement** (clamped, with col re-clamp).
+**Group 2 UNDERWAY** — the editor FSM in `fs-image/stim/stim.st` (own ramfs folder,
+user decision). Done: **2.1 `initialState`** (`Mode`/`Editor` types + line split);
+**2.2 `j`/`k`** (`moveUp`/`moveDown`, clamped, col re-clamp). All via the
+`stitch::testing` harness. Next: **2.3 `i`/`Esc` mode switch**.
 
 **Lands on**: `main`, incrementally (project convention: no feature branches;
 the user commits each known-good increment). The five groups below are the
@@ -163,9 +163,16 @@ now, the Stitch mutation tester later. Wired into the `xtask test` gate as
 `("stitch", &["--features", "testing"])` (stitch was previously **not** gated at
 all — its 535 tests only ran via a direct `cargo test -p stitch`).
 
-#### Step 2.2: Normal-mode `j`/`k` move row, clamped, with col re-clamp
+#### Step 2.2: Normal-mode `j`/`k` move row, clamped, with col re-clamp — ✅ DONE (2026-07-08)
 **Acceptance**: `j` at last line is a no-op; `k` at row 0 is a no-op; moving onto a
 shorter line clamps col to its length. **RED**: boundary + clamp cases.
+DONE: `moveUp`/`moveDown` (+ `lineAt`/`clampedCol` helpers) in `stim.st`, each a
+`match {}` clamp returning the state unchanged at the boundary and `Editor(..state,
+row, col: clampedCol(...))` otherwise. Uses prelude `count`/`unwrapOr`; clamps with
+subjectless `match` (prelude `min`/`max` are *list* folds, not scalar `min(a,b)`).
+5 FSM tests green (row move both ways, both no-op boundaries, col re-clamp both
+branches). No cargo-mutants (Stitch code — behavior-tested; the Stitch mutation
+tester covers the FSM later).
 
 #### Step 2.3: `i` enters Insert, `Esc` returns to Normal
 **Acceptance**: mode transitions both ways; buffer/cursor unchanged by the switch.
