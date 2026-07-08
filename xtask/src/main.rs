@@ -85,12 +85,15 @@ enum Cmd {
     /// snemu-produced frame stream (no QEMU) and report how many pass. Sizes the
     /// "can snemu back the itests" gap without rewriting scenarios.
     SnemuItest {
-        /// Per-workload snemu instruction-step budget.
+        /// Per-scenario snemu instruction-step budget.
         #[arg(long, default_value_t = 150_000_000)]
         steps: u64,
-        /// Audit only the first N workload groups (faster smoke).
+        /// Audit only the first N scenarios (faster smoke).
         #[arg(long)]
         limit: Option<usize>,
+        /// Audit only scenarios whose name contains this substring.
+        #[arg(long)]
+        only: Option<String>,
     },
     /// Measurement spine: run a workload under snemu N times and report guest
     /// MIPS + wall-clock spread over a deterministic instret. The "measure
@@ -680,7 +683,9 @@ fn main() -> ExitCode {
             }
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
-        Cmd::SnemuItest { steps, limit } => itest::snemu_audit::run(steps, limit),
+        Cmd::SnemuItest { steps, limit, only } => {
+            itest::snemu_audit::run(steps, limit, only.as_deref())
+        }
         Cmd::SnemuBench { workload, steps, runs, taxonomy, baseline, decode_cache, verify_cache } => {
             if verify_cache {
                 snemu_bench::run_verify()

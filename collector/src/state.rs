@@ -183,6 +183,13 @@ pub struct State {
     /// Have we seen the warning-about-missing-Hello yet? Avoids
     /// spamming once per frame.
     warned_no_hello: bool,
+    /// The `protocol_version` from the most recent `Hello`, if one has arrived.
+    /// Compared against the version this build speaks; a mismatch means the
+    /// wire may misdecode (see [`State::protocol_mismatch`]).
+    protocol_version: Option<u8>,
+    /// Have we already warned about a version mismatch this session? One loud
+    /// warning per `Hello`, not one per frame.
+    warned_version_mismatch: bool,
     cap_tracker: CapTracker,
 }
 
@@ -201,8 +208,16 @@ impl State {
             metric_values: HashMap::new(),
             histograms: HashMap::new(),
             warned_no_hello: false,
+            protocol_version: None,
+            warned_version_mismatch: false,
             cap_tracker: CapTracker::new(),
         }
+    }
+
+    /// The wire-version disagreement from the current session's `Hello`, if any —
+    /// `None` before `Hello`, or when the received version matches this build.
+    pub fn protocol_mismatch(&self) -> Option<protocol::VersionMismatch> {
+        self.protocol_version.and_then(|v| protocol::check_protocol_version(v).err())
     }
 
     /// Default bucket boundaries for histogram observations. Exponential
@@ -238,10 +253,24 @@ impl State {
         match frame {
             Frame::Hello {
                 timebase_hz,
-                protocol_version: _,
+                protocol_version,
             } => {
                 self.reset_session();
                 self.timebase_hz = *timebase_hz;
+                self.protocol_version = Some(*protocol_version);
+                match protocol::check_protocol_version(*protocol_version) {
+                    Err(m) if !self.warned_version_mismatch => {
+                        eprintln!(
+                            "collector: WARNING — kernel protocol_version {} != collector {}. \
+                             The wire format differs; frames may misdecode. Rebuild both from \
+                             the same tree (postcard's positional encoding is not forward/\
+                             backward compatible across versions).",
+                            m.received, m.expected,
+                        );
+                        self.warned_version_mismatch = true;
+                    }
+                    _ => {}
+                }
                 self.anchor = Some(SessionAnchor {
                     wallclock_ns: self.clock.now_ns(),
                     first_t: 0,
@@ -488,6 +517,27 @@ mod tests {
         });
         assert_eq!(s.timebase_hz, 10_000_000);
         assert!(s.anchor.is_some());
+    }
+
+    #[test]
+    fn hello_with_current_version_reports_no_mismatch() {
+        let mut s = State::new(FakeWallClock(0));
+        s.handle(&Frame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: protocol::PROTOCOL_VERSION,
+        });
+        assert_eq!(s.protocol_mismatch(), None);
+    }
+
+    #[test]
+    fn hello_with_wrong_version_is_flagged() {
+        let mut s = State::new(FakeWallClock(0));
+        let wrong = protocol::PROTOCOL_VERSION.wrapping_add(1);
+        s.handle(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: wrong });
+        assert_eq!(
+            s.protocol_mismatch(),
+            Some(protocol::VersionMismatch { received: wrong, expected: protocol::PROTOCOL_VERSION }),
+        );
     }
 
     /// Helper: build a State pre-anchored by sending Hello.

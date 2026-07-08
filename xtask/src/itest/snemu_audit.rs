@@ -18,7 +18,6 @@
 //! closed batch stream as a disconnect. Both are real "snemu can't judge this
 //! yet" signals.
 
-use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -37,7 +36,7 @@ enum Outcome {
 /// group's frames, and print a per-scenario + summary report. `limit` caps the
 /// number of workload groups (faster smoke). Exit is always `SUCCESS` — the
 /// audit *reports* fidelity, it doesn't gate on it.
-pub fn run(max_steps: u64, limit: Option<usize>) -> ExitCode {
+pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>) -> ExitCode {
     let (kernel, dtb) = match snemu_diff::prepare(true) {
         Ok(v) => v,
         Err(e) => {
@@ -46,51 +45,38 @@ pub fn run(max_steps: u64, limit: Option<usize>) -> ExitCode {
         }
     };
 
-    // Group scenarios by their `workload` bootarg so snemu boots each workload
-    // once, not once per scenario (the shared-boot idea, applied to the audit).
-    // `None` (the default `init` boot) is its own group.
-    let mut groups: BTreeMap<Option<&str>, Vec<&str>> = BTreeMap::new();
-    for s in SCENARIOS {
-        groups.entry(s.workload).or_default().push(s.name);
-    }
-
-    let total_groups = groups.len();
-    let group_cap = limit.unwrap_or(total_groups).min(total_groups);
+    let selected: Vec<&itest_harness::Scenario> = SCENARIOS
+        .iter()
+        .filter(|s| only.is_none_or(|sub| s.name.contains(sub)))
+        .collect();
+    let cap = limit.map_or(selected.len(), |l| l.min(selected.len()));
     eprintln!(
-        "snemu-itest: {} scenarios across {total_groups} workload group(s); \
-         auditing {group_cap} group(s) at {max_steps} steps each",
+        "snemu-itest: auditing {cap} of {} scenario(s), live under snemu, \
+         up to {max_steps} steps each",
         SCENARIOS.len(),
     );
 
+    // Each scenario drives its own live machine: `wait_for` steps it until the
+    // frame it needs, `send_input` reaches the modelled UART — so interactive
+    // scenarios (console echo, the Stitch REPL) run for real. A passing scenario
+    // short-circuits at its last marker; only a failing one runs the full budget.
+    // Decode cache is on (verified faithful) so the higher budgets stay cheap.
     let mut results: Vec<(&str, Outcome)> = Vec::new();
     let started = Instant::now();
-    for (i, (workload, names)) in groups.iter().take(group_cap).enumerate() {
-        let label = workload.unwrap_or("default (init)");
-        eprint!("snemu-itest: [{}/{group_cap}] {label:<24} ", i + 1);
-        // Decode cache ON — verified byte-identical to the interpreter
-        // (`snemu-bench --verify-cache`), so the audit's frames are unchanged
-        // while the higher step budgets run affordably.
-        match snemu_diff::collect_workload_frames(&kernel, &dtb, *workload, max_steps, true) {
-            Ok(frames) => {
-                eprintln!("({} frames → {} scenario(s))", frames.len(), names.len());
-                for name in names {
-                    let mut view = View::replay(frames.clone());
-                    let outcome = match scenario_view_fn(name)(&mut view) {
-                        Ok(()) => Outcome::Pass,
-                        Err(e) => Outcome::Fail(e),
-                    };
-                    results.push((name, outcome));
+    for (i, s) in selected.iter().take(cap).enumerate() {
+        eprint!("snemu-itest: [{}/{cap}] {:<40} ", i + 1, s.name);
+        let outcome = match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
+            Ok(machine) => {
+                let mut view = View::live(machine, max_steps);
+                match scenario_view_fn(s.name)(&mut view) {
+                    Ok(()) => Outcome::Pass,
+                    Err(e) => Outcome::Fail(e),
                 }
             }
-            // A whole-group boot failure fails every scenario in it — snemu
-            // couldn't even produce a stream.
-            Err(e) => {
-                eprintln!("BOOT ERROR: {e}");
-                for name in names {
-                    results.push((name, Outcome::Fail(format!("snemu boot failed: {e}"))));
-                }
-            }
-        }
+            Err(e) => Outcome::Fail(format!("snemu load failed: {e}")),
+        };
+        eprintln!("{}", if matches!(outcome, Outcome::Pass) { "ok" } else { "FAIL" });
+        results.push((s.name, outcome));
     }
 
     print_report(&results, started.elapsed().as_secs_f64())

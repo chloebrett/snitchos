@@ -598,6 +598,26 @@ pub(crate) fn collect_workload_frames(
     Ok(decode_frames(machine.virtio_tx_output()))
 }
 
+/// Load a fresh, unstepped snemu machine for `workload` (DTB bootarg patched,
+/// decode cache on). The interactive audit builds a live `View` over this and
+/// steps it per scenario, so each scenario gets its own machine to drive with
+/// its own console input.
+pub(crate) fn load_workload_machine(
+    kernel: &[u8],
+    dtb_base: &[u8],
+    workload: Option<&str>,
+) -> Result<snemu::machine::Machine, String> {
+    let dtb = match workload {
+        Some(w) => snemu::dtb::set_bootargs(dtb_base, &format!("workload={w}"))
+            .ok_or("DTB patch failed")?,
+        None => dtb_base.to_vec(),
+    };
+    let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(&dtb), HART_COUNT)
+        .map_err(|e| format!("snemu load: {e:?}"))?;
+    machine.set_decode_cache(true);
+    Ok(machine)
+}
+
 /// Boot `workload` under snemu and step up to `max_steps` rounds, timing the
 /// wall-clock — one measurement sample (`instret` + elapsed) for the `snemu
 /// bench` harness. The step loop is the *only* work timed: no per-step frame

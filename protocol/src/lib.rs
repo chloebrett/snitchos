@@ -38,6 +38,29 @@ pub mod stream;
 ///     A breaking positional field-add on an existing variant, so it bumps.
 pub const PROTOCOL_VERSION: u8 = 6;
 
+/// A received `Hello.protocol_version` disagreed with the version this build
+/// speaks. Names both sides so the consumer can say exactly what diverged.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct VersionMismatch {
+  pub received: u8,
+  pub expected: u8,
+}
+
+/// Check a received `Hello.protocol_version` against [`PROTOCOL_VERSION`]. A
+/// mismatch means the stream was produced by a different wire format — and
+/// postcard's positional encoding means every later frame may misdecode — so
+/// consumers must refuse loudly rather than silently emit garbage.
+///
+/// # Errors
+/// [`VersionMismatch`] (naming both versions) when `received != PROTOCOL_VERSION`.
+pub fn check_protocol_version(received: u8) -> Result<(), VersionMismatch> {
+  if received == PROTOCOL_VERSION {
+    Ok(())
+  } else {
+    Err(VersionMismatch { received, expected: PROTOCOL_VERSION })
+  }
+}
+
 /// `MetricRegister.task_id` sentinel for a **kernel-global** metric — one
 /// registered by the kernel itself (the `&'static` `register_counter`/`gauge`/
 /// `histogram` path), not by a userspace process. The collector attaches no
@@ -303,6 +326,23 @@ pub enum RefusalReason {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// The current build's version is accepted.
+  #[test]
+  fn accepts_the_current_protocol_version() {
+    assert_eq!(check_protocol_version(PROTOCOL_VERSION), Ok(()));
+  }
+
+  /// A mismatched version is rejected, naming both sides so the consumer's
+  /// message can say exactly what disagreed.
+  #[test]
+  fn rejects_a_mismatched_protocol_version() {
+    let wrong = PROTOCOL_VERSION.wrapping_add(1);
+    assert_eq!(
+      check_protocol_version(wrong),
+      Err(VersionMismatch { received: wrong, expected: PROTOCOL_VERSION })
+    );
+  }
 
   /// Roundtrip a `Frame::Hello` through postcard and back.
   #[test]

@@ -23,12 +23,99 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use protocol::stream::{OwnedFrame, decode_stream};
+use protocol::stream::{OwnedFrame, decode_stream, try_decode_frame};
 use protocol::StringId;
 
 use itest_harness::{CaptureLevel, ErrorOrigin, FailureCapture, WaitOutcome};
 
 use crate::qemu;
+
+/// Guest instructions stepped between decode/UART checks in live mode. Big
+/// enough to amortise the check, small enough to react to a just-emitted frame
+/// or console byte within one batch.
+const LIVE_STEP_BATCH: u64 = 4096;
+
+/// A live snemu machine driving a [`View`] — the interactive fidelity path. Where
+/// a replay `View` reads a *pre-captured* frame buffer, this steps a real machine
+/// on demand: `wait_for` advances it until the next telemetry frame appears, and
+/// `send_input` injects console bytes the guest then reads. That reactive
+/// input→output loop is exactly what a batch capture can't reproduce (the result
+/// frames depend on input fed mid-run). Bounded by a total `max_steps`.
+struct LiveSnemu {
+    machine: snemu::machine::Machine,
+    /// Bytes of the virtio-console TX stream already decoded into frames.
+    tx_consumed: usize,
+    /// Total guest instructions stepped so far, capped at `max_steps`.
+    steps: u64,
+    max_steps: u64,
+    /// The guest faulted/halted — no more frames will come.
+    halted: bool,
+}
+
+impl LiveSnemu {
+    fn new(machine: snemu::machine::Machine, max_steps: u64) -> Self {
+        Self { machine, tx_consumed: 0, steps: 0, max_steps, halted: false }
+    }
+
+    /// The next telemetry frame, stepping the machine as needed. `None` once the
+    /// step budget is spent or the guest halts with nothing left to decode — the
+    /// live analogue of a closed stream.
+    fn next_frame(&mut self) -> Option<OwnedFrame> {
+        loop {
+            // Decode from the already-produced TX bytes first (the borrow of the
+            // machine ends before we step, so the two never overlap).
+            let decoded = {
+                let tx = self.machine.virtio_tx_output();
+                try_decode_frame(&tx[self.tx_consumed..])
+                    .ok()
+                    .map(|(frame, n)| (OwnedFrame::from_borrowed(&frame), n))
+            };
+            if let Some((frame, n)) = decoded {
+                self.tx_consumed += n;
+                return Some(frame);
+            }
+            if self.halted || self.steps >= self.max_steps {
+                return None;
+            }
+            self.step_batch();
+        }
+    }
+
+    /// Step the guest until `needle` appears in the UART output, or the budget is
+    /// spent. Returns whether it was seen — the live form of `wait_for_log`.
+    fn wait_for_uart(&mut self, needle: &str) -> bool {
+        loop {
+            if uart_contains(self.machine.uart_output(), needle) {
+                return true;
+            }
+            if self.halted || self.steps >= self.max_steps {
+                return false;
+            }
+            self.step_batch();
+        }
+    }
+
+    /// Advance up to [`LIVE_STEP_BATCH`] instructions (capped at the budget),
+    /// stopping early on a fault.
+    fn step_batch(&mut self) {
+        let target = (self.steps + LIVE_STEP_BATCH).min(self.max_steps);
+        while self.steps < target {
+            if self.machine.step().is_err() {
+                self.halted = true;
+                return;
+            }
+            self.steps += 1;
+        }
+    }
+}
+
+/// Whether `output` (the guest's UART bytes) contains `needle` as a substring.
+fn uart_contains(output: &[u8], needle: &str) -> bool {
+    !needle.is_empty()
+        && output
+            .windows(needle.len())
+            .any(|w| w == needle.as_bytes())
+}
 
 /// Maps `StringId` → name as we observe `StringRegister` frames. Matchers
 /// read this so they can say "is this span 'kernel.boot'?" without
@@ -217,6 +304,11 @@ pub struct View {
     /// *clean absence*, not the inconclusive mid-run disconnect a live QEMU death
     /// would be. `false` for the live path.
     batch: bool,
+    /// When `Some`, frames come from stepping this snemu machine on demand rather
+    /// than from `recorder` — the interactive path (`send_input` reaches a real
+    /// UART). `None` for QEMU and batch replay. A live view is also `batch` (its
+    /// budget-exhaustion is a clean end, like a closed capture).
+    live: Option<LiveSnemu>,
 }
 
 impl Boot {
@@ -321,6 +413,7 @@ impl Boot {
             log_path: self.log_path.clone(),
             quiet: false,
             batch: false,
+            live: None,
         }
     }
 
@@ -340,6 +433,11 @@ impl View {
     /// QEMU stdin (`send_input` fails) and no UART log (`wait_for_log` fails), so
     /// scenarios needing console I/O surface as audit failures — exactly the
     /// fidelity gap the audit is meant to find.
+    ///
+    /// Now test-only: the audit drives a [`live`](Self::live) machine instead, but
+    /// the replay path still backs the batch/`assert_absent` unit tests (whose
+    /// semantics a live view shares, being `batch` too).
+    #[cfg(test)]
     pub(crate) fn replay(frames: Vec<OwnedFrame>) -> Self {
         View {
             recorder: Arc::new(Recorder::from_closed(frames)),
@@ -359,27 +457,69 @@ impl View {
             log_path: PathBuf::new(),
             quiet: true,
             batch: true,
+            live: None,
         }
     }
 
-    /// Inject `bytes` into the guest's UART by writing to QEMU's stdin (the
-    /// `-nographic` serial console). The bytes land in the kernel's UART RX
-    /// FIFO; the timer-driven drain rings them and a userspace reader sees them
-    /// via `ConsoleRead`. Used by console-input scenarios; wait for the program
-    /// to be reading (e.g. an "alive" marker) before injecting, or early bytes
-    /// can be dropped.
-    pub fn send_input(&self, bytes: &[u8]) -> Result<(), String> {
+    /// Build a `View` that drives a **live** snemu machine, stepping it up to
+    /// `max_steps` guest instructions. Unlike [`replay`](Self::replay), this feeds
+    /// input reactively — `send_input` reaches the machine's UART, `wait_for`
+    /// steps until the next frame — so interactive scenarios (console echo, the
+    /// Stitch REPL) run for real. Also `batch` (a spent step budget is a clean
+    /// end, like a closed capture).
+    pub(crate) fn live(machine: snemu::machine::Machine, max_steps: u64) -> Self {
+        View {
+            recorder: Arc::new(Recorder::from_closed(Vec::new())),
+            cursor: 0,
+            strings: HashMap::new(),
+            timebase_hz: None,
+            recent: VecDeque::new(),
+            max_wait: (Duration::ZERO, Duration::ZERO),
+            frames_seen: 0,
+            last_frame_at: None,
+            capture_level: capture_level(),
+            frame_histogram: BTreeMap::new(),
+            last_t_per_hart: BTreeMap::new(),
+            workload: None,
+            captured: None,
+            input: Arc::new(Mutex::new(None)),
+            log_path: PathBuf::new(),
+            quiet: true,
+            batch: true,
+            live: Some(LiveSnemu::new(machine, max_steps)),
+        }
+    }
+
+    /// Inject `bytes` into the guest's UART. On QEMU this writes the process's
+    /// stdin (the `-nographic` serial console); on a live snemu view it pushes
+    /// straight into the modelled UART RX FIFO. Either way the bytes land where
+    /// the kernel's timer-driven drain rings them and a userspace reader sees them
+    /// via `ConsoleRead`. Wait for the program to be reading (e.g. an "alive"
+    /// marker) before injecting, or early bytes can be dropped.
+    pub fn send_input(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if let Some(live) = self.live.as_mut() {
+            live.machine.push_console_input(bytes);
+            return Ok(());
+        }
         let mut guard = self.input.lock().map_err(|_| "input mutex poisoned".to_string())?;
         let stdin = guard.as_mut().ok_or("QEMU stdin was not piped")?;
         stdin.write_all(bytes).map_err(|e| format!("write to QEMU stdin: {e}"))?;
         stdin.flush().map_err(|e| format!("flush QEMU stdin: {e}"))
     }
 
-    /// Block up to `budget` for the guest's UART log to contain `needle`. This is
-    /// how a scenario asserts on-target **console output** (`ConsoleWrite` →
+    /// Block up to `budget` for the guest's UART output to contain `needle`. This
+    /// is how a scenario asserts on-target **console output** (`ConsoleWrite` →
     /// UART), which — unlike `DebugWrite` — never becomes a telemetry frame, so
-    /// `wait_for` can't see it. Polls the log file QEMU writes concurrently.
-    pub fn wait_for_log(&self, budget: Duration, needle: &str) -> Result<(), String> {
+    /// `wait_for` can't see it. QEMU: poll the log file it writes concurrently;
+    /// live snemu: step the machine and scan its UART output.
+    pub fn wait_for_log(&mut self, budget: Duration, needle: &str) -> Result<(), String> {
+        if let Some(live) = self.live.as_mut() {
+            return if live.wait_for_uart(needle) {
+                Ok(())
+            } else {
+                Err(format!("UART output never contained {needle:?} within the step budget"))
+            };
+        }
         if poll_file_for(&self.log_path, needle, Instant::now() + budget) {
             Ok(())
         } else {
@@ -437,6 +577,16 @@ impl View {
     /// only this handle's `cursor` advances. Delegates to `Recorder` so the
     /// blocking/timeout logic is host-testable without a live QEMU.
     fn advance(&mut self, deadline: Instant) -> Advance {
+        // Live mode ignores the wall-clock deadline — the step budget bounds the
+        // wait. The next frame comes from stepping the machine; a spent budget is
+        // an end-of-stream (`Disconnected`), which — being `batch` — reads as a
+        // clean miss for `wait_for` and a clean window for `assert_absent`.
+        if let Some(live) = self.live.as_mut() {
+            return match live.next_frame() {
+                Some(frame) => Advance::Frame(frame),
+                None => Advance::Disconnected,
+            };
+        }
         let recorder = Arc::clone(&self.recorder);
         recorder.advance(&mut self.cursor, deadline)
     }
@@ -542,8 +692,19 @@ impl View {
             OwnedFrame::StringRegister { id, value } => {
                 self.strings.insert(*id, value.clone());
             }
-            OwnedFrame::Hello { timebase_hz, .. } => {
+            OwnedFrame::Hello { timebase_hz, protocol_version } => {
                 self.timebase_hz = Some(*timebase_hz);
+                // A version mismatch means the harness and kernel were built from
+                // different wire formats — every later frame may misdecode, so the
+                // scenario failures downstream would be misleading. Surface the real
+                // cause loudly. Hello arrives once per boot, so no dedup needed.
+                if let Err(m) = protocol::check_protocol_version(*protocol_version) {
+                    eprintln!(
+                        "itest harness: WARNING — kernel protocol_version {} != harness {}. \
+                         Frames may misdecode; rebuild the kernel and harness from the same tree.",
+                        m.received, m.expected,
+                    );
+                }
             }
             // Frames carrying both a hart id and a timestamp pin per-hart
             // progress — used to spot which hart fell silent.
