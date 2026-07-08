@@ -91,9 +91,16 @@ fn parse_str_segments(parts: Vec<StrPart>) -> Result<Vec<StrSegment>, ParseError
         .into_iter()
         .map(|part| match part {
             StrPart::Lit(text) => Ok(StrSegment::Lit(text)),
-            StrPart::Expr(raw) => {
-                let inner = parse(&raw).map_err(|e| {
-                    ParseError::new(format!("in string interpolation `{{{raw}}}`: {}", e.message))
+            StrPart::Expr(tokens, lex_errors) => {
+                let mut sub = Parser::from_tokens(tokens, lex_errors);
+                if let Some(err) = sub.lex_error() {
+                    return Err(ParseError::new(format!(
+                        "in string interpolation: {}",
+                        err.message
+                    )));
+                }
+                let inner = sub.parse_expr(0).map_err(|e| {
+                    ParseError::new(format!("in string interpolation: {}", e.message))
                 })?;
                 Ok(StrSegment::Interp(Box::new(inner)))
             }
@@ -206,6 +213,12 @@ impl Parser {
         }
     }
 
+    /// Construct a parser directly from pre-lexed tokens (used by `parse_str_segments`
+    /// to avoid re-lexing string interpolations).
+    fn from_tokens(tokens: Vec<Token>, lex_errors: Vec<LexError>) -> Self {
+        Self { tokens, lex_errors, pos: 0 }
+    }
+
     /// The first lexing error (if any), as a parse error — so malformed input is
     /// surfaced instead of silently miscompiling.
     fn lex_error(&self) -> Option<ParseError> {
@@ -295,32 +308,22 @@ impl Parser {
     }
 
     /// Does an explicit lambda start here? `Ident ->` or `( … ) ->`.
-    fn at_lambda(&self) -> bool {
+    ///
+    /// For the parenthesised form, uses checkpoint/backtrack: save pos, try to
+    /// parse the parameter list, check for `->`, then unconditionally restore —
+    /// O(params) instead of O(token-stream).
+    fn at_lambda(&mut self) -> bool {
         match self.peek() {
             TokenKind::Ident(_) => matches!(self.peek_at(1), TokenKind::Arrow),
-            TokenKind::LParen => self.parens_then_arrow(),
+            TokenKind::LParen => {
+                let saved = self.pos;
+                let is_lambda = self.parse_lambda_params().is_ok()
+                    && matches!(self.peek(), TokenKind::Arrow);
+                self.pos = saved;
+                is_lambda
+            }
             _ => false,
         }
-    }
-
-    /// Scan from the current `(` to its matching `)` and report whether an
-    /// `->` follows — i.e. whether this is a lambda param list vs. grouping.
-    fn parens_then_arrow(&self) -> bool {
-        let mut depth = 0usize;
-        for (i, tok) in self.tokens.iter().enumerate().skip(self.pos) {
-            match tok.kind {
-                TokenKind::LParen => depth += 1,
-                TokenKind::RParen => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return matches!(self.tokens.get(i + 1).map(|t| &t.kind), Some(TokenKind::Arrow));
-                    }
-                }
-                TokenKind::Eof => return false,
-                _ => {}
-            }
-        }
-        false
     }
 
     /// Parse a lambda: `params -> body`. Body is a full expression (loosest),

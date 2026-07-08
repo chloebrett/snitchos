@@ -40,11 +40,14 @@ impl<'a> Cursor<'a> {
 }
 
 /// A piece of a string literal: literal text, or a `{expr}` interpolation
-/// whose raw source the parser sub-parses later.
+/// whose content is pre-lexed at lex time so the parser never re-lexes.
+/// The raw source string is kept alongside the tokens for error messages.
 #[derive(Debug, PartialEq, Clone)]
 pub enum StrPart {
     Lit(String),
-    Expr(String),
+    /// Pre-lexed interpolation: the tokens inside `{…}` plus any lex errors,
+    /// and the raw source text for diagnostic context.
+    Expr(Vec<Token>, Vec<LexError>),
 }
 
 /// A byte range `[start, end)` into the source — for diagnostics.
@@ -318,7 +321,9 @@ fn lex_string(chars: &mut Cursor<'_>) -> TokenKind {
                 if !lit.is_empty() {
                     parts.push(StrPart::Lit(core::mem::take(&mut lit)));
                 }
-                parts.push(StrPart::Expr(read_interpolation(chars)));
+                let raw = read_interpolation(chars);
+                let lexed = lex(&raw);
+                parts.push(StrPart::Expr(lexed.tokens, lexed.errors));
             }
             // `}}` is a literal brace; a stray `}` in text is taken literally.
             Some('}') => {
@@ -606,19 +611,30 @@ mod tests {
     }
 
     #[test]
-    fn lexes_string_interpolation() {
-        // source: "hi {name}!"
-        assert_eq!(
-            toks("\"hi {name}!\""),
-            vec![
-                TokenKind::Str(vec![
-                    StrPart::Lit("hi ".to_string()),
-                    StrPart::Expr("name".to_string()),
-                    StrPart::Lit("!".to_string()),
-                ]),
-                TokenKind::Eof
-            ]
+    fn interp_expr_carries_pre_lexed_tokens() {
+        // Interpolations must be lexed at lex time; the parser must not re-lex.
+        // A `{name}` interpolation should carry a pre-lexed Ident token, not a raw String.
+        let tokens = toks("\"hi {name}!\"");
+        let TokenKind::Str(ref parts) = tokens[0].kind else { panic!("expected Str") };
+        let StrPart::Expr(ref interp_tokens, _) = parts[1] else {
+            panic!("expected Expr with tokens, got {:?}", parts[1])
+        };
+        assert!(
+            matches!(interp_tokens[0].kind, TokenKind::Ident(_)),
+            "first interp token should be Ident, got {:?}", interp_tokens[0]
         );
+    }
+
+    #[test]
+    fn lexes_string_interpolation() {
+        // source: "hi {name}!" → three parts: Lit + Expr + Lit
+        let tokens = toks("\"hi {name}!\"");
+        let TokenKind::Str(ref parts) = tokens[0].kind else { panic!("expected Str token") };
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(&parts[0], StrPart::Lit(s) if s == "hi "));
+        assert!(matches!(&parts[1], StrPart::Expr(_, _)));
+        assert!(matches!(&parts[2], StrPart::Lit(s) if s == "!"));
+        assert!(tokens[1] == TokenKind::Eof);
     }
 
     #[test]
