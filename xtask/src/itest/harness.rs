@@ -244,7 +244,7 @@ pub struct Boot {
 /// One scenario's read-cursor over a `Boot`'s recorded frame stream, plus
 /// the per-scenario assertion bookkeeping. Obtained from `Boot::view`.
 /// The frame-assertion API scenarios use: `wait_for`, `assert_absent`,
-/// `name_of`, `timebase_hz`. The executor reads `max_wait()` /
+/// `name_of`, `send_input`, `wait_for_log`. The executor reads `max_wait()` /
 /// `take_capture()` afterwards to build the scenario's report.
 pub struct View {
     /// Shared with the owning `Boot`; retained so a `View` can keep
@@ -254,7 +254,6 @@ pub struct View {
     /// what `wait_for` does; `absorb` runs once per frame stepped over.
     cursor: usize,
     strings: StringTable,
-    timebase_hz: Option<u64>,
     /// Rolling window of the last few frames received. Printed on
     /// timeout so failures say "boot reached Hello + `SpanStart`, then
     /// nothing" rather than just "no heartbeat within 10s".
@@ -399,7 +398,6 @@ impl Boot {
             recorder: Arc::clone(&self.recorder),
             cursor: 0,
             strings: HashMap::new(),
-            timebase_hz: None,
             recent: VecDeque::new(),
             max_wait: (Duration::ZERO, Duration::ZERO),
             frames_seen: 0,
@@ -443,7 +441,6 @@ impl View {
             recorder: Arc::new(Recorder::from_closed(frames)),
             cursor: 0,
             strings: HashMap::new(),
-            timebase_hz: None,
             recent: VecDeque::new(),
             max_wait: (Duration::ZERO, Duration::ZERO),
             frames_seen: 0,
@@ -472,7 +469,6 @@ impl View {
             recorder: Arc::new(Recorder::from_closed(Vec::new())),
             cursor: 0,
             strings: HashMap::new(),
-            timebase_hz: None,
             recent: VecDeque::new(),
             max_wait: (Duration::ZERO, Duration::ZERO),
             frames_seen: 0,
@@ -674,13 +670,6 @@ impl View {
         self.strings.get(&id).map(String::as_str)
     }
 
-    /// Timebase frequency from the most recent `Hello` frame, or `None`
-    /// if `Hello` has not arrived yet. Use this to convert kernel tick
-    /// deltas to wall-clock durations inside scenarios.
-    pub fn timebase_hz(&self) -> Option<u64> {
-        self.timebase_hz
-    }
-
     fn absorb(&mut self, frame: &OwnedFrame) {
         self.frames_seen = self.frames_seen.saturating_add(1);
         self.last_frame_at = Some(Instant::now());
@@ -692,8 +681,7 @@ impl View {
             OwnedFrame::StringRegister { id, value } => {
                 self.strings.insert(*id, value.clone());
             }
-            OwnedFrame::Hello { timebase_hz, protocol_version } => {
-                self.timebase_hz = Some(*timebase_hz);
+            OwnedFrame::Hello { timebase_hz: _, protocol_version } => {
                 // A version mismatch means the harness and kernel were built from
                 // different wire formats — every later frame may misdecode, so the
                 // scenario failures downstream would be misleading. Surface the real
