@@ -17,8 +17,9 @@ user decision). Done: **2.1 `initialState`** (`Mode`/`Editor` types + line split
 (`enterInsert`/`enterNormal`, round-trip identity); **2.4 `insertChar`** (first
 buffer edit — `Str.slice` split + string `+` + `List.set`); **2.5 `backspace`**
 (delete / line-join via `List.removeAt`); **2.6 `splitLine`** (Enter — split via
-`List.insert`; inverse of backspace-join). All via the `stitch::testing` harness.
-Next: **2.7 `:w` → `Save` effect** (the first *effect*, not just a state map).
+`List.insert`; inverse of backspace-join); **2.7 `save`** (`Effect`/`Step` types +
+`serialize` + `Save` effect). All via the `stitch::testing` harness. Next: **2.8
+`renderFrame`** (state → escape-sequence screen string).
 
 **Enabling fix (2026-07-08): built-in `use` now resolves in the REPL/single-program
 path.** Found while answering "can I launch stim from the shell?": `build_env_in`
@@ -229,11 +230,20 @@ DONE: `splitLine(state)` = `Str.slice` head/tail, `List.set(row, head)` +
 multi-line row-targeting case, plus **`backspace(splitLine(s)) == s`** (the two are
 inverses — one round-trip guards off-by-ones in both). 14 FSM tests green.
 
-#### Step 2.7: `:w` produces a `Save` effect carrying the serialized buffer
+#### Step 2.7: `:w` produces a `Save` effect carrying the serialized buffer — ✅ DONE (2026-07-09)
 **Acceptance**: entering `:w` yields `Step{state, effect: Save(text)}` where `text`
 is the lines joined by `\n`; other keys yield `effect: Redraw`/`None`.
 **RED**: assert the effect + serialized payload. (Command-line accumulation for
 `:` then `w` then Enter, or a direct `:w` recognizer — decide in RED; keep minimal.)
+DONE: introduced `sum Effect = Save(Str) | Redraw | Noop` (**`Noop`, not `None`** —
+`None` is the prelude `Maybe`'s), `prod Step(state, effect)`, `serialize(state) =
+Str.join(lines, "\n")` (`Value::display` renders Str raw, so no quoting), and
+`save(state) = Step(state, Save(serialize(state)))` (state unchanged). Tested the
+Save payload (match on `st.effect`), serialize round-trip, and state-unchanged.
+**DECISION (the "decide in RED" call):** 2.7 delivers the effect vocabulary +
+`serialize`/`save`; the `:`-command *keystroke* accumulation (command-line buffer /
+mode) defers to **2.9 dispatch** — it needs the dispatch anyway, and 2.7's essence
+(the Save payload) stands alone. 16 FSM tests green.
 
 #### Step 2.8: `renderFrame(state)` → an escape-sequence frame string
 **Acceptance**: emits clear+home (`ESC[2J ESC[H`), each buffer line, and a cursor

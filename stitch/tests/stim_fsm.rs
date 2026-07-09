@@ -188,6 +188,31 @@ fn enter_then_backspace_is_the_identity() {
 }
 
 #[test]
+fn serialize_joins_the_line_buffer_with_newlines() {
+    // The inverse of `initialState`'s split: lines back to one newline-joined blob.
+    assert_eq!(
+        fsm(r#"serialize(initialState("a\nb\nc"))"#),
+        Value::Str("a\nb\nc".into())
+    );
+    // A single empty line serializes to the empty string (round-trips "").
+    assert_eq!(fsm(r#"serialize(initialState(""))"#), Value::Str("".into()));
+}
+
+#[test]
+fn save_yields_a_save_effect_carrying_the_serialized_buffer() {
+    // `:w` → Step{state, Save(text)} where text is the whole buffer joined by \n.
+    assert_eq!(
+        fsm(r#"{ let st = save(initialState("a\nb"))  match st.effect { Save(t) => t  _ => "?" } }"#),
+        Value::Str("a\nb".into())
+    );
+    // Saving does not edit the buffer — the Step carries the state unchanged.
+    assert_eq!(
+        fsm(r#"{ let st = save(initialState("a\nb"))  st.state }"#),
+        fsm(r#"initialState("a\nb")"#)
+    );
+}
+
+#[test]
 fn i_enters_insert_and_esc_returns_to_normal() {
     // `i` flips Normal→Insert; the snapshot shows the buffer/cursor untouched.
     insta::assert_debug_snapshot!(fsm(r#"enterInsert(initialState("ab"))"#));

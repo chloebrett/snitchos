@@ -16,10 +16,19 @@ use List
 // The two modes. Normal navigates; Insert edits.
 sum Mode = Normal | Insert
 
+// What the driver must perform after a transition. `Save` carries the bytes to
+// write back; `Redraw` asks for a screen repaint; `Noop` is nothing. (Named
+// `Noop`, not `None`, so it doesn't clash with the prelude's `Maybe` `None`.)
+sum Effect = Save(Str) | Redraw | Noop
+
 // The whole editor state — immutable. Every transition returns a fresh `Editor`
 // via `..spread` update. `row`/`col` is a full cursor (0-based); unbound keys
 // like `h`/`l` are just navigation we haven't wired, not missing state.
 prod Editor(lines: List<Str>, row: Int, col: Int, mode: Mode)
+
+// A transition's result for the driver: the next state plus the effect to run.
+// The pure `step` returns this; the driver performs `effect` and loops on `state`.
+prod Step(state: Editor, effect: Effect)
 
 // Build the initial state from a document's text: split into a line buffer at
 // the origin in Normal mode. Splitting on "\n" makes the empty document one
@@ -124,3 +133,11 @@ splitLine(state) = {
         col: 0,
     )
 }
+
+// The buffer serialized for saving: the lines joined back with newlines — the
+// inverse of `initialState`'s split.
+serialize(state) = Str.join(state.lines, "\n")
+
+// `:w` — a `Save` effect carrying the whole serialized buffer. The state is
+// unchanged (saving doesn't edit).
+save(state) = Step(state: state, effect: Save(serialize(state)))
