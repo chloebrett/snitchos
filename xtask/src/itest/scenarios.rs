@@ -2845,17 +2845,24 @@ pub fn console_echo_round_trips(h: &mut View) -> Result<(), String> {
 
 /// `workload=stitch-fs`: a Stitch program is loaded *off the filesystem* and run.
 /// The seeded FS server holds `primes.st` (baked from the build-time fs-image);
-/// the REPL `:load`s it over its FS endpoint cap, then `primes(10)` runs it — the
+/// the REPL `:load`s it over its FS endpoint cap, then `primes(5)` runs it — the
 /// loaded program's `primes.compute` span and `primes.count`/`primes.largest`
 /// gauges cross the wire. End-to-end: fs-image seed → cap-mediated fs read →
 /// interpret → telemetry, all on the metal.
+///
+/// `primes(5)` (not `(10)`) exercises the identical path — FS load, parse, lazy
+/// `filter`/`take`/`toList`, span, emit — for a fraction of the tree-walker's
+/// trial-division cost. The magnitude added no coverage; under snemu's
+/// instruction clock it was ~½ the scenario's instructions, so the smaller count
+/// keeps the same assertion cheaper on both engines. See the snemu-itest
+/// slowest-by-instret table.
 pub fn stitch_fs_loads_and_runs(h: &mut View) -> Result<(), String> {
     // The boot self-test span confirms the REPL is up and its telemetry flows;
     // by now it's polling the console, so injected input won't be dropped.
     h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
         .ok_or("stitch REPL never reached its boot self-test within 30s")?;
 
-    h.send_input(b":load primes.st\nprimes(10)\n")
+    h.send_input(b":load primes.st\nprimes(5)\n")
         .map_err(|e| format!("inject REPL input: {e}"))?;
 
     h.wait_for(SEC * 30, is_span_start_named("primes.compute")).ok_or(
@@ -2864,19 +2871,19 @@ pub fn stitch_fs_loads_and_runs(h: &mut View) -> Result<(), String> {
 
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
-            strings.get(name_id).map(String::as_str) == Some("primes.count") && *value == 10
+            strings.get(name_id).map(String::as_str) == Some("primes.count") && *value == 5
         }
         _ => false,
     })
-    .ok_or("no 'primes.count'=10 metric — the loaded program didn't compute the first 10 primes")?;
+    .ok_or("no 'primes.count'=5 metric — the loaded program didn't compute the first 5 primes")?;
 
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
-            strings.get(name_id).map(String::as_str) == Some("primes.largest") && *value == 29
+            strings.get(name_id).map(String::as_str) == Some("primes.largest") && *value == 11
         }
         _ => false,
     })
-    .ok_or("no 'primes.largest'=29 metric — the 10th prime should be 29")?;
+    .ok_or("no 'primes.largest'=11 metric — the 5th prime should be 11")?;
 
     Ok(())
 }

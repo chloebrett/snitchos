@@ -514,6 +514,15 @@ impl View {
             .map(|live| String::from_utf8_lossy(live.machine.uart_output()).into_owned())
     }
 
+    /// Guest instructions this **live** view stepped — the deterministic cost of
+    /// reaching (or failing to reach) the scenario's assertion. `None` for the
+    /// QEMU / replay paths, which don't step a machine. This is the metric the
+    /// audit sorts by to find the CPU-heavy scenarios: unlike wall-clock it's
+    /// contention-free and reproducible.
+    pub(crate) fn steps_taken(&self) -> Option<u64> {
+        self.live.as_ref().map(|live| live.steps)
+    }
+
     /// Block up to `budget` for the guest's UART output to contain `needle`. This
     /// is how a scenario asserts on-target **console output** (`ConsoleWrite` →
     /// UART), which — unlike `DebugWrite` — never becomes a telemetry frame, so

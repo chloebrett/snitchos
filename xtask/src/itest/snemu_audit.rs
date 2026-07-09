@@ -27,6 +27,15 @@ use super::harness::View;
 use super::{SCENARIOS, scenario_view_fn};
 use crate::snemu_diff;
 
+/// One scenario's audit row: its outcome plus the deterministic guest-instruction
+/// cost of reaching it. `steps` is what the slowest-scenario table sorts by —
+/// contention-free (unlike wall-clock), so it pinpoints where the CPU goes.
+struct Row {
+    name: &'static str,
+    outcome: Outcome,
+    steps: u64,
+}
+
 /// One scenario's outcome under the live snemu run.
 enum Outcome {
     Pass,
@@ -76,19 +85,20 @@ pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>, jobs: usize
     // fan-out) so a long audit still shows progress.
     let done = AtomicUsize::new(0);
     let started = Instant::now();
-    let results: Vec<(&str, Outcome)> = parallel_map(&work, jobs, |_, s| {
-        let outcome = match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
+    let results: Vec<Row> = parallel_map(&work, jobs, |_, s| {
+        let (outcome, steps) = match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
             Ok(machine) => {
                 let mut view = View::live(machine, budget_for(s.name, max_steps));
-                match scenario_view_fn(s.name)(&mut view) {
+                let outcome = match scenario_view_fn(s.name)(&mut view) {
                     Ok(()) => Outcome::Pass,
                     Err(why) => Outcome::Fail {
                         why,
                         console: console_tail(view.console_output().unwrap_or_default().as_str()),
                     },
-                }
+                };
+                (outcome, view.steps_taken().unwrap_or(0))
             }
-            Err(e) => Outcome::Fail { why: format!("snemu load failed: {e}"), console: String::new() },
+            Err(e) => (Outcome::Fail { why: format!("snemu load failed: {e}"), console: String::new() }, 0),
         };
         let n = done.fetch_add(1, Ordering::SeqCst) + 1;
         eprintln!(
@@ -96,7 +106,7 @@ pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>, jobs: usize
             s.name,
             if matches!(outcome, Outcome::Pass) { "ok" } else { "FAIL" },
         );
-        (s.name, outcome)
+        Row { name: s.name, outcome, steps }
     });
 
     print_report(&results, started.elapsed().as_secs_f64())
@@ -114,21 +124,22 @@ fn budget_for(name: &str, default: u64) -> u64 {
         "workload-cooperative-baseline" => 1_000_000_000,
         "frame-allocator-oom" | "heap-oom" => 3_000_000_000,
         "spawn-reclaims-memory" | "spawn-reclaims-names" => 2_500_000_000,
-        // The on-target Stitch tree-walker computing `primes(10)` via naive trial
-        // division over a lazy range is genuinely compute-heavy.
-        "stitch-fs-loads-and-runs" => 3_000_000_000,
+        // `stitch-fs-loads-and-runs` no longer needs an override: `primes(5)`
+        // (down from `(10)`) reaches its assertion in ~310M instructions, under
+        // the default budget.
         _ => return default,
     };
     needed.max(default)
 }
 
-/// Print the per-scenario pass/fail lines and the headline "N/M pass" summary.
-fn print_report(results: &[(&str, Outcome)], elapsed_secs: f64) -> ExitCode {
-    let passed = results.iter().filter(|(_, o)| matches!(o, Outcome::Pass)).count();
+/// Print the per-scenario pass/fail lines, the slowest-scenario table (where the
+/// CPU goes), and the headline "N/M pass" summary.
+fn print_report(results: &[Row], elapsed_secs: f64) -> ExitCode {
+    let passed = results.iter().filter(|r| matches!(r.outcome, Outcome::Pass)).count();
     let total = results.len();
 
     println!("\n=== snemu itest fidelity ===");
-    for (name, outcome) in results {
+    for Row { name, outcome, .. } in results {
         match outcome {
             Outcome::Pass => println!("  PASS  {name}"),
             Outcome::Fail { why, console } => {
@@ -145,11 +156,33 @@ fn print_report(results: &[(&str, Outcome)], elapsed_secs: f64) -> ExitCode {
             }
         }
     }
+
+    print_slowest(results);
+
     println!(
         "\n{passed}/{total} scenarios pass under snemu ({:.0}% fidelity, {elapsed_secs:.1}s)",
         if total == 0 { 0.0 } else { 100.0 * passed as f64 / total as f64 },
     );
     ExitCode::SUCCESS
+}
+
+/// The scenarios that cost the most guest instructions to judge — the compute
+/// tail that floors the parallel wall-clock (no fan-out beats the single slowest
+/// one). Sorted by deterministic `steps`, so it's the same ranking every run and
+/// the honest target list for "assert the same thing for less CPU".
+fn print_slowest(results: &[Row]) {
+    const TOP: usize = 12;
+    let mut ranked: Vec<&Row> = results.iter().filter(|r| r.steps > 0).collect();
+    ranked.sort_unstable_by_key(|r| std::cmp::Reverse(r.steps));
+    if ranked.is_empty() {
+        return;
+    }
+    let total: u64 = ranked.iter().map(|r| r.steps).sum();
+    println!("\n=== slowest by guest instructions (Minstret; {}M total) ===", total / 1_000_000);
+    for r in ranked.iter().take(TOP) {
+        let pct = if total == 0 { 0.0 } else { 100.0 * r.steps as f64 / total as f64 };
+        println!("  {:>7}M  {:>4.1}%  {}", r.steps / 1_000_000, pct, r.name);
+    }
 }
 
 /// A scenario failure message can be multi-line (a dumped frame tail); the
