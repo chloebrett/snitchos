@@ -183,14 +183,14 @@ catalog! {
     // SMP demo these exercise lives behind the explicit `demo` workload (which
     // reproduces the former default exactly). `default-boot-starts-init` below
     // covers the new default path.
-    wfi "boot-reaches-heartbeat"          scenarios::boot_reaches_heartbeat         [boot]          {"demo"};
-    wfi "heartbeat-cadence"               scenarios::heartbeat_cadence              [boot]          {"demo"};
-    wfi "pre-init-order"                  scenarios::pre_init_order                 [boot]          {"demo"};
-    wfi "kernel-runs-at-higher-half"      scenarios::kernel_runs_at_higher_half     [boot]          {"demo"};
-    wfi "frame-allocator-metrics"         scenarios::frame_allocator_metrics        [frame]         {"demo"};
+    wfi "boot-reaches-heartbeat"          scenarios::boot_reaches_heartbeat         [boot]          {"init"};
+    wfi "heartbeat-cadence"               scenarios::heartbeat_cadence              [boot]          {"init"};
+    wfi "pre-init-order"                  scenarios::pre_init_order                 [boot]          {"init"};
+    wfi "kernel-runs-at-higher-half"      scenarios::kernel_runs_at_higher_half     [boot]          {"init"};
+    wfi "frame-allocator-metrics"         scenarios::frame_allocator_metrics        [frame]         {"init"};
     wfi "frame-allocator-oom"             scenarios::frame_allocator_oom            [frame, oom]    {"frame-oom"};
-    wfi "kernel-heap-metrics"             scenarios::kernel_heap_metrics            [heap]          {"demo"};
-    wfi "sched-context-switch-smoke"      scenarios::sched_context_switch_smoke     [sched]         {"demo"};
+    wfi "kernel-heap-metrics"             scenarios::kernel_heap_metrics            [heap]          {"init"};
+    wfi "sched-context-switch-smoke"      scenarios::sched_context_switch_smoke     [sched]         {"init"};
     wfi "sched-spawn-registers-thread"    scenarios::sched_spawn_registers_thread   [sched]         {"demo"};
     cpu "sched-yield-round-trips"         scenarios::sched_yield_round_trips        [sched]         {"demo"};
     wfi "sched-spans-carry-task-id"       scenarios::sched_spans_carry_task_id      [sched]         {"demo"};
@@ -199,8 +199,8 @@ catalog! {
     cpu "heap-oom"                        scenarios::heap_oom                       [heap, oom]    {"heap-oom"};
     cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline  [workload]      {"demo"};
     cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness [smp, workload] {"smp burst=256"};
-    wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup                [smp, ipi]      {"demo"};
-    wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots       [smp]           {"demo"};
+    wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup                [smp, ipi]      {"init"};
+    wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots       [smp]           {"init"};
     wfi "smp-spawn-on-hart-1-runs"        scenarios::smp_spawn_on_hart_1_runs       [smp]           {"demo"};
     wfi "smp-spans-carry-hart-id"         scenarios::smp_spans_carry_hart_id        [smp]           {"demo"};
     wfi "smp-ipi-wakes-idle-hart"         scenarios::smp_ipi_wakes_idle_hart        [smp, ipi]      {"demo"};

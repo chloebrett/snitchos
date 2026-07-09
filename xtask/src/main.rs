@@ -104,6 +104,11 @@ enum Cmd {
         /// serial. Results stay in deterministic report order regardless.
         #[arg(long, short = 'j')]
         jobs: Option<usize>,
+        /// Disable `wfi` idle-skip (on by default). The A/B baseline: run the
+        /// audit both ways and confirm fidelity + per-scenario instret are
+        /// identical — idle-skip must change only speed, never telemetry.
+        #[arg(long)]
+        no_idle_skip: bool,
     },
     /// Measurement spine: run a workload under snemu N times and report guest
     /// MIPS + wall-clock spread over a deterministic instret. The "measure
@@ -693,11 +698,11 @@ fn main() -> ExitCode {
             }
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
-        Cmd::SnemuItest { steps, limit, only, jobs } => {
+        Cmd::SnemuItest { steps, limit, only, jobs, no_idle_skip } => {
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
-            itest::snemu_audit::run(steps, limit, only.as_deref(), jobs)
+            itest::snemu_audit::run(steps, limit, only.as_deref(), jobs, !no_idle_skip)
         }
         Cmd::SnemuBench { workload, steps, runs, taxonomy, baseline, decode_cache, verify_cache } => {
             if verify_cache {

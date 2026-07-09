@@ -13,14 +13,6 @@
 | block-wake-smoke | block-wake | wfi | sched |
 | boot-stack-guard-fault-detected | boot-stack-guard | wfi | sched |
 | console-echo-round-trips | console-echo | cpu | userspace |
-| boot-reaches-heartbeat | demo | wfi | boot |
-| frame-allocator-metrics | demo | wfi | frame |
-| heartbeat-cadence | demo | wfi | boot |
-| ipi-self-wakeup | demo | wfi | smp, ipi |
-| kernel-heap-metrics | demo | wfi | heap |
-| kernel-runs-at-higher-half | demo | wfi | boot |
-| pre-init-order | demo | wfi | boot |
-| sched-context-switch-smoke | demo | wfi | sched |
 | sched-context-switches-on-wire | demo | wfi | sched |
 | sched-span-survives-yield | demo | wfi | sched |
 | sched-spans-carry-task-id | demo | wfi | sched |
@@ -28,7 +20,6 @@
 | sched-task-exits-cleanly | demo | wfi | sched |
 | sched-yield-round-trips | demo | cpu | sched |
 | smp-ipi-wakes-idle-hart | demo | wfi | smp, ipi |
-| smp-secondary-hart-boots | demo | wfi | smp |
 | smp-spans-carry-hart-id | demo | wfi | smp |
 | smp-spawn-on-hart-1-runs | demo | wfi | smp |
 | task-stack-high-water | demo | wfi | sched |
@@ -46,9 +37,18 @@
 | fs-write-read | fs | wfi | userspace, ipc |
 | heap-grows-on-demand | heap-grow | wfi | userspace |
 | heap-oom | heap-oom | cpu | heap, oom |
+| boot-reaches-heartbeat | init | wfi | boot |
+| frame-allocator-metrics | init | wfi | frame |
+| heartbeat-cadence | init | wfi | boot |
 | init-brings-up-fs-server | init | cpu | userspace |
 | init-runs-fs-client | init | cpu | userspace |
 | init-supervises-a-child | init | cpu | userspace |
+| ipi-self-wakeup | init | wfi | smp, ipi |
+| kernel-heap-metrics | init | wfi | heap |
+| kernel-runs-at-higher-half | init | wfi | boot |
+| pre-init-order | init | wfi | boot |
+| sched-context-switch-smoke | init | wfi | sched |
+| smp-secondary-hart-boots | init | wfi | smp |
 | default-boot-starts-init | init (default) | wfi | boot |
 | ipc-message-crosses | ipc | wfi | userspace, ipc |
 | ipc-telemetry | ipc | wfi | userspace, ipc |

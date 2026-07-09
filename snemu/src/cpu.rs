@@ -243,6 +243,12 @@ pub(crate) struct Hart {
     /// runs the pure interpreter (the correctness oracle). Toggled per hart via
     /// [`set_decode_cache`](Self::set_decode_cache).
     decode_cache: Option<DecodeCache>,
+    /// Whether `wfi` parks the hart (Idle) so the driver can fast-forward the
+    /// clock over idle time, vs. acting as a bare nop that advances. On by
+    /// default; toggled per hart via [`set_idle_skip`](Self::set_idle_skip) so a
+    /// run with it on can be proven identical to one with it off (the decode-cache
+    /// philosophy — the interpreter stays the oracle).
+    idle_skip: bool,
     /// Diagnostic: supervisor timer interrupts actually delivered to this hart.
     timer_fires: u64,
 }
@@ -337,6 +343,12 @@ impl Cpu {
         self.hart.set_decode_cache(on);
     }
 
+    /// Enable or disable `wfi` idle-skip (on by default). Off restores the bare
+    /// nop-`wfi` behaviour — the baseline for proving idle-skip changes only speed.
+    pub fn set_idle_skip(&mut self, on: bool) {
+        self.hart.set_idle_skip(on);
+    }
+
     /// Decode-cache hits so far (0 when the cache is disabled). Used by the
     /// equivalence test to confirm the fast path engaged.
     #[cfg(test)]
@@ -363,6 +375,7 @@ impl Hart {
             state: HartState::Running,
             pending_sbi: None,
             decode_cache: None,
+            idle_skip: true,
             timer_fires: 0,
         }
     }
@@ -378,6 +391,14 @@ impl Hart {
     /// changes nothing but speed.
     pub(crate) fn set_decode_cache(&mut self, on: bool) {
         self.decode_cache = on.then(DecodeCache::default);
+    }
+
+    /// Enable or disable `wfi` idle-skip. With it off, `wfi` is a bare
+    /// nop-that-advances (the pre-fidelity behaviour) and the driver never
+    /// fast-forwards — the A/B baseline that proves idle-skip changes only speed,
+    /// not telemetry.
+    pub(crate) fn set_idle_skip(&mut self, on: bool) {
+        self.idle_skip = on;
     }
 
     /// Park this hart (a secondary before its `hart_start`).
@@ -933,7 +954,7 @@ impl Hart {
                 // arrives — modelling a real hart's halt so the driver can skip the
                 // idle wait instead of emulating every idle-loop instruction.
                 self.advance();
-                if self.pending_interrupt().is_none() {
+                if self.idle_skip && self.pending_interrupt().is_none() {
                     self.state = HartState::Idle;
                 }
                 Ok(())
@@ -1949,6 +1970,17 @@ mod tests {
         let mut cpu = cpu_with(&[wfi()]);
         cpu.step().unwrap();
         assert_eq!(cpu.pc(), RAM_BASE + 4);
+    }
+
+    #[test]
+    fn wfi_with_idle_skip_disabled_is_a_bare_nop_that_never_parks() {
+        // The A/B baseline: with idle-skip off, wfi advances but leaves the hart
+        // Running (the pre-fidelity behaviour), so no fast-forward ever happens.
+        let mut cpu = cpu_with(&[wfi()]);
+        cpu.set_idle_skip(false);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 4);
+        assert!(cpu.hart.is_running(), "idle-skip off: wfi does not park the hart");
     }
 
     #[test]

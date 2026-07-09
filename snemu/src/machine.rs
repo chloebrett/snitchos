@@ -190,6 +190,15 @@ impl Machine {
             hart.set_decode_cache(on);
         }
     }
+
+    /// Enable or disable `wfi` idle-skip on **every** hart (on by default). Off
+    /// restores bare nop-`wfi` and disables the clock fast-forward — the A/B
+    /// baseline proving idle-skip changes only speed, not the telemetry stream.
+    pub fn set_idle_skip(&mut self, on: bool) {
+        for hart in &mut self.harts {
+            hart.set_idle_skip(on);
+        }
+    }
 }
 
 #[cfg(test)]

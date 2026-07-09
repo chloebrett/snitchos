@@ -50,7 +50,13 @@ enum Outcome {
 /// group's frames, and print a per-scenario + summary report. `limit` caps the
 /// number of workload groups (faster smoke). Exit is always `SUCCESS` — the
 /// audit *reports* fidelity, it doesn't gate on it.
-pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>, jobs: usize) -> ExitCode {
+pub fn run(
+    max_steps: u64,
+    limit: Option<usize>,
+    only: Option<&str>,
+    jobs: usize,
+    idle_skip: bool,
+) -> ExitCode {
     let (kernel, dtb) = match snemu_diff::prepare(true) {
         Ok(v) => v,
         Err(e) => {
@@ -67,8 +73,9 @@ pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>, jobs: usize
     let work: Vec<&itest_harness::Scenario> = selected.into_iter().take(cap).collect();
     eprintln!(
         "snemu-itest: auditing {cap} of {} scenario(s), live under snemu, \
-         up to {max_steps} steps each, {jobs} worker(s)",
+         up to {max_steps} steps each, {jobs} worker(s), idle-skip {}",
         SCENARIOS.len(),
+        if idle_skip { "on" } else { "off" },
     );
 
     // Each scenario drives its own live machine: `wait_for` steps it until the
@@ -87,7 +94,8 @@ pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>, jobs: usize
     let started = Instant::now();
     let results: Vec<Row> = parallel_map(&work, jobs, |_, s| {
         let (outcome, steps) = match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
-            Ok(machine) => {
+            Ok(mut machine) => {
+                machine.set_idle_skip(idle_skip);
                 let mut view = View::live(machine, budget_for(s.name, max_steps));
                 let outcome = match scenario_view_fn(s.name)(&mut view) {
                     Ok(()) => Outcome::Pass,
