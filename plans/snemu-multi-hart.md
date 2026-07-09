@@ -96,6 +96,33 @@ so the ~94 existing `cpu.rs` unit tests keep their API (`Cpu::new`, `cpu.step()`
   goes through the shared bus — the bus/Machine must notify the other hart's
   reservation, or we accept single-hart-only SC breaking as a known gap to start).
 
+## Follow-on: host-thread fan-out of the audit (post-5 "what's next")
+
+Distinct axis from guest harts above: parallelise the **`snemu-itest` audit
+across host threads**, one scenario per worker. Post 5 sold this — scenarios are
+independent (each owns its own `Machine`, no shared mutable state), so it's
+embarrassingly parallel; the win is deterministic *and* fast.
+
+- **`parallel_map(items, jobs, f)`** in `xtask/src/itest/snemu_audit.rs`: an
+  order-preserving work-queue (`AtomicUsize` cursor + slotted `Mutex<Vec<Option>>`)
+  over `thread::scope`. Results land in **selection order regardless of worker
+  count** — the property the report's determinism rests on. `jobs <= 1` runs
+  serial. Unit-tested for order+value equivalence across job counts.
+- **`cargo xtask snemu-itest --jobs/-j N`**, default `available_parallelism()`
+  (10 on the M1 Max), `1` forces serial. snemu is a pure interpreter
+  (**CPU-bound**), so useful `jobs` tops out at the physical core count; RAM is
+  not the ceiling (128 MiB/machine × jobs).
+- **Measured:** full 108-scenario audit **355s serial → 66.2s at jobs=10**
+  (~5.4×), fidelity unchanged at **106/108** (the two revoke-race holdouts, and
+  *only* those — parallelism moved no outcome). Beats QEMU's ten-run flake gate
+  (~570s) by ~8.6×, and it's a proof you run once, not dice you roll ten times.
+- **Floor is the compute tail, not core count.** Wall-clock bottoms out at the
+  single heaviest scenario: a handful carry 3B-step budgets (`frame-allocator-oom`,
+  `heap-oom`, `stitch-fs-loads-and-runs`, `workload-cooperative-baseline`,
+  `spawn-reclaims-*`) at ~30–56s each. They now overlap instead of stacking, but
+  no parallelism beats the slowest one alone — so 66s, not 355/10 ≈ 35s. The
+  lever for the next tier is post-04's JIT, which attacks that tail directly.
+
 ## Non-goals (for now)
 
 Relaxed memory, >2 harts, hart hotplug/stop (`sbi_hart_stop`), and external

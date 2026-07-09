@@ -97,6 +97,13 @@ enum Cmd {
         /// Audit only scenarios whose name contains this substring.
         #[arg(long)]
         only: Option<String>,
+        /// Parallel host workers. Scenarios are independent (each owns its own
+        /// snemu machine), so they fan out across cores. snemu is a pure
+        /// interpreter (CPU-bound), so the sweet spot is the physical core
+        /// count. Defaults to the machine's available parallelism; `1` forces
+        /// serial. Results stay in deterministic report order regardless.
+        #[arg(long, short = 'j')]
+        jobs: Option<usize>,
     },
     /// Measurement spine: run a workload under snemu N times and report guest
     /// MIPS + wall-clock spread over a deterministic instret. The "measure
@@ -686,8 +693,11 @@ fn main() -> ExitCode {
             }
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
-        Cmd::SnemuItest { steps, limit, only } => {
-            itest::snemu_audit::run(steps, limit, only.as_deref())
+        Cmd::SnemuItest { steps, limit, only, jobs } => {
+            let jobs = jobs.unwrap_or_else(|| {
+                std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+            });
+            itest::snemu_audit::run(steps, limit, only.as_deref(), jobs)
         }
         Cmd::SnemuBench { workload, steps, runs, taxonomy, baseline, decode_cache, verify_cache } => {
             if verify_cache {

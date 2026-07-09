@@ -19,6 +19,8 @@
 //! yet" signals.
 
 use std::process::ExitCode;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use super::harness::View;
@@ -39,7 +41,7 @@ enum Outcome {
 /// group's frames, and print a per-scenario + summary report. `limit` caps the
 /// number of workload groups (faster smoke). Exit is always `SUCCESS` — the
 /// audit *reports* fidelity, it doesn't gate on it.
-pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>) -> ExitCode {
+pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>, jobs: usize) -> ExitCode {
     let (kernel, dtb) = match snemu_diff::prepare(true) {
         Ok(v) => v,
         Err(e) => {
@@ -53,9 +55,10 @@ pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>) -> ExitCode
         .filter(|s| only.is_none_or(|sub| s.name.contains(sub)))
         .collect();
     let cap = limit.map_or(selected.len(), |l| l.min(selected.len()));
+    let work: Vec<&itest_harness::Scenario> = selected.into_iter().take(cap).collect();
     eprintln!(
         "snemu-itest: auditing {cap} of {} scenario(s), live under snemu, \
-         up to {max_steps} steps each",
+         up to {max_steps} steps each, {jobs} worker(s)",
         SCENARIOS.len(),
     );
 
@@ -64,10 +67,16 @@ pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>) -> ExitCode
     // scenarios (console echo, the Stitch REPL) run for real. A passing scenario
     // short-circuits at its last marker; only a failing one runs the full budget.
     // Decode cache is on (verified faithful) so the higher budgets stay cheap.
-    let mut results: Vec<(&str, Outcome)> = Vec::new();
+    //
+    // Scenarios are independent — each owns its own machine, no shared mutable
+    // state — so they fan out across `jobs` host threads. snemu is a pure
+    // interpreter (CPU-bound), so parallelism is worth up to the core count;
+    // `parallel_map` keeps the report deterministic by slotting results back into
+    // selection order. A `done` counter narrates completions (unordered under
+    // fan-out) so a long audit still shows progress.
+    let done = AtomicUsize::new(0);
     let started = Instant::now();
-    for (i, s) in selected.iter().take(cap).enumerate() {
-        eprint!("snemu-itest: [{}/{cap}] {:<40} ", i + 1, s.name);
+    let results: Vec<(&str, Outcome)> = parallel_map(&work, jobs, |_, s| {
         let outcome = match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
             Ok(machine) => {
                 let mut view = View::live(machine, budget_for(s.name, max_steps));
@@ -81,9 +90,14 @@ pub fn run(max_steps: u64, limit: Option<usize>, only: Option<&str>) -> ExitCode
             }
             Err(e) => Outcome::Fail { why: format!("snemu load failed: {e}"), console: String::new() },
         };
-        eprintln!("{}", if matches!(outcome, Outcome::Pass) { "ok" } else { "FAIL" });
-        results.push((s.name, outcome));
-    }
+        let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+        eprintln!(
+            "snemu-itest: [{n}/{cap}] {:<40} {}",
+            s.name,
+            if matches!(outcome, Outcome::Pass) { "ok" } else { "FAIL" },
+        );
+        (s.name, outcome)
+    });
 
     print_report(&results, started.elapsed().as_secs_f64())
 }
@@ -151,4 +165,76 @@ fn console_tail(output: &str) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let start = lines.len().saturating_sub(MAX_LINES);
     lines[start..].join("\n")
+}
+
+/// Map `f` over `items` across `jobs` host threads, returning results in the
+/// **input order** regardless of the worker count. This is the audit's
+/// parallelism primitive: scenarios are independent (each owns its own snemu
+/// machine, no shared mutable state), so fanning them out across cores turns the
+/// single-threaded compute tail into wall-clock the number of cores divides —
+/// while the order-preserving slotting keeps the report deterministic, the
+/// property the whole snemu-vs-QEMU story rests on. `jobs <= 1` runs serially.
+fn parallel_map<T, R, F>(items: &[T], jobs: usize, f: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(usize, &T) -> R + Sync,
+{
+    let jobs = jobs.max(1);
+    if jobs == 1 {
+        return items.iter().enumerate().map(|(i, t)| f(i, t)).collect();
+    }
+
+    let next = AtomicUsize::new(0);
+    let slots: Mutex<Vec<Option<R>>> =
+        Mutex::new((0..items.len()).map(|_| None).collect());
+
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(item) = items.get(i) else { break };
+                    let result = f(i, item);
+                    slots.lock().expect("slots mutex poisoned")[i] = Some(result);
+                }
+            });
+        }
+    });
+
+    slots
+        .into_inner()
+        .expect("slots mutex poisoned")
+        .into_iter()
+        .map(|slot| slot.expect("every slot filled: index range covers all items"))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parallel_map;
+
+    #[test]
+    fn parallel_map_preserves_input_order_and_matches_serial_for_any_job_count() {
+        let items: Vec<u64> = (0..200).collect();
+        let square = |_: usize, x: &u64| x * x;
+
+        let serial = parallel_map(&items, 1, square);
+        assert_eq!(serial, items.iter().map(|x| x * x).collect::<Vec<_>>());
+
+        for jobs in [2usize, 3, 8, 32] {
+            let parallel = parallel_map(&items, jobs, square);
+            assert_eq!(
+                parallel, serial,
+                "jobs={jobs}: results must match serial order and values",
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_map_passes_the_input_index_to_the_closure() {
+        let items = vec!['a', 'b', 'c'];
+        let with_index = parallel_map(&items, 4, |i, c| (i, *c));
+        assert_eq!(with_index, vec![(0, 'a'), (1, 'b'), (2, 'c')]);
+    }
 }
