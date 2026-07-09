@@ -153,6 +153,16 @@ pub trait Platform {
     /// see [`line_edit`](crate::line_edit).
     fn read_line(&self) -> Option<alloc::string::String>;
 
+    /// Read one raw input byte, or `None` when none is available. Unlike
+    /// [`read_line`](Self::read_line) this bypasses all line discipline (echo,
+    /// backspace) — the byte-at-a-time path the stim driver reads keystrokes
+    /// through. The fake replays a scripted session then returns `None` forever;
+    /// the on-target backend blocks until a byte arrives, so it never returns
+    /// `None`. Defaults to "no input" for backends that source none.
+    fn read_byte(&self) -> Option<u8> {
+        None
+    }
+
     /// Write text to the console (the human terminal).
     fn write(&self, text: &str);
 
@@ -238,6 +248,9 @@ pub struct FakePlatform {
     /// bump). `0` = uninitialized; seeded above the scripted caps on first grant.
     next_handle: core::cell::RefCell<Handle>,
     files: alloc::collections::BTreeMap<alloc::string::String, alloc::string::String>,
+    /// Scripted raw bytes for `read_byte` — the stim driver's keystroke source.
+    /// Drained front-to-back, then `None`.
+    bytes: core::cell::RefCell<alloc::collections::VecDeque<u8>>,
 }
 
 #[cfg(not(target_os = "none"))]
@@ -262,6 +275,15 @@ impl FakePlatform {
         Self { caps: core::cell::RefCell::new(caps), ..Self::default() }
     }
 
+    /// Script raw byte input for `read_byte` — the stim driver's keystroke source.
+    #[must_use]
+    pub fn with_bytes(bytes: &[u8]) -> Self {
+        Self {
+            bytes: core::cell::RefCell::new(bytes.iter().copied().collect()),
+            ..Self::default()
+        }
+    }
+
     /// Script the files `fs_read` (and so `view`) can read, as `(name, contents)`.
     #[must_use]
     pub fn with_files(files: &[(&str, &str)]) -> Self {
@@ -282,6 +304,10 @@ impl FakePlatform {
 impl Platform for FakePlatform {
     fn read_line(&self) -> Option<alloc::string::String> {
         self.input.borrow_mut().pop_front()
+    }
+
+    fn read_byte(&self) -> Option<u8> {
+        self.bytes.borrow_mut().pop_front()
     }
 
     fn write(&self, text: &str) {
@@ -357,6 +383,7 @@ mod on_target {
     use crate::line_edit::LineEditor;
 
     use core::cell::RefCell;
+    use alloc::collections::VecDeque;
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -365,6 +392,10 @@ mod on_target {
     #[derive(Default)]
     pub struct RuntimePlatform {
         editor: RefCell<LineEditor>,
+        /// Refill buffer for `read_byte`: `console_read` returns chunks, but the
+        /// stim driver wants one raw byte at a time. Bytes drain from the front;
+        /// a fresh `console_read` refills when it's empty.
+        bytes: RefCell<VecDeque<u8>>,
     }
 
     impl RuntimePlatform {
@@ -375,6 +406,24 @@ mod on_target {
     }
 
     impl Platform for RuntimePlatform {
+        fn read_byte(&self) -> Option<u8> {
+            // Raw, one byte at a time — no line editor. Blocks (yielding) until a
+            // byte arrives; a UART has no end-of-input, so this never returns
+            // `None` on the metal (the driver runs until the process is killed).
+            loop {
+                if let Some(b) = self.bytes.borrow_mut().pop_front() {
+                    return Some(b);
+                }
+                let mut buf = [0u8; 64];
+                let n = console_read(&mut buf);
+                if n == 0 {
+                    yield_now();
+                    continue;
+                }
+                self.bytes.borrow_mut().extend(&buf[..n]);
+            }
+        }
+
         fn read_line(&self) -> Option<String> {
             let mut buf = [0u8; 64];
             loop {
@@ -516,6 +565,24 @@ mod tests {
         fn grant(&self, _handle: Handle, _badge: u64, _rights: Rights) -> Option<Handle> {
             None
         }
+    }
+
+    #[test]
+    fn a_backend_that_sources_no_input_reads_no_byte() {
+        // `NullPlatform` uses the trait's default `read_byte` — "no input".
+        assert_eq!(NullPlatform.read_byte(), None);
+    }
+
+    #[test]
+    fn fake_read_byte_replays_scripted_bytes_then_none() {
+        // Raw single-byte input for the stim driver: the fake hands back each
+        // scripted byte in order, then `None` forever (a finite session).
+        let fake = FakePlatform::with_bytes(b"jk:");
+        assert_eq!(fake.read_byte(), Some(b'j'));
+        assert_eq!(fake.read_byte(), Some(b'k'));
+        assert_eq!(fake.read_byte(), Some(b':'));
+        assert_eq!(fake.read_byte(), None);
+        assert_eq!(fake.read_byte(), None); // stays exhausted
     }
 
     #[test]

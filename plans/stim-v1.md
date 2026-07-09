@@ -336,7 +336,7 @@ and honour it in `uses`-checking; (c) the **driver holds the file handle** (from
 startup cap ABI) and passes it to `fsWrite` on a `Save` effect — the FSM stays
 handle-free.
 
-#### Step 3.1: `Platform::read_byte() -> Option<u8>` (raw, single byte) + fake + on-target
+#### Step 3.1: `Platform::read_byte() -> Option<u8>` (raw, single byte) + fake + on-target — ✅ DONE (2026-07-09)
 **Touches**: `stitch/src/platform.rs` (trait + `NullPlatform`/`FakePlatform`/
 `RuntimePlatform`). **Design**: `Null`→`None`; `Fake`→a scripted byte queue (new
 `with_bytes` ctor, `RefCell<VecDeque<u8>>`) drains then `None`; `Runtime`→raw
@@ -345,6 +345,14 @@ handle-free.
 **Acceptance**: fake replays scripted bytes then `None`; on-target drains
 `console_read` a byte at a time. **RED**: fake-replay test. **Mutants**: the
 refill/empty-queue boundary.
+DONE: trait **default** `read_byte→None` (so `Null`/`Counting` doubles need no edit),
+overridden in `Fake` (`pop_front`) + `Runtime` (blocking refill; never `None` on the
+metal — a UART has no EOF, so v1 exits via Ctrl-C). Host-tested (fake replay + the
+no-input default via `NullPlatform`); riscv lib compiles clean. **Mutation-clean
+(10/10)** — the 2 initially-missed mutants were the untested trait default; the
+`NullPlatform` test killed them. **Infra note:** `cargo mutants -p stitch` needs
+`--features testing` (else the `stim_fsm`/`builtin_module_use` integration tests
+fail to build) — fold into the `xtask mutants` fix.
 
 #### Step 3.2: `fs-core::Filesystem::truncate(ino, len)` + ramfs impl
 **Touches**: `fs-core/src/lib.rs` (trait method), `ramfs/src/lib.rs` (impl).
