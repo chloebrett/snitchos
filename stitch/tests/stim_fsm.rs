@@ -188,6 +188,21 @@ fn enter_then_backspace_is_the_identity() {
 }
 
 #[test]
+fn render_frame_clears_draws_lines_and_positions_the_cursor() {
+    // A two-line buffer at the origin: clear+home, the lines (CRLF-separated), then
+    // a cursor move to (1,1) — ANSI is 1-based.
+    insta::assert_debug_snapshot!(fsm(r#"renderFrame(initialState("ab\ncd"))"#));
+}
+
+#[test]
+fn render_frame_moves_the_cursor_to_the_1_based_position() {
+    // Cursor at row 1, col 3 → the trailing move is ESC[2;4H (both +1).
+    insta::assert_debug_snapshot!(
+        fsm(r#"renderFrame(Editor(..initialState("hello\nworld"), row: 1, col: 3))"#)
+    );
+}
+
+#[test]
 fn serialize_joins_the_line_buffer_with_newlines() {
     // The inverse of `initialState`'s split: lines back to one newline-joined blob.
     assert_eq!(

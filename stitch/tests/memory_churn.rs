@@ -96,12 +96,11 @@ fn measure(f: impl Fn(), n: usize) -> (usize, usize) {
 
 const RUNS: usize = 50;
 
-/// Characterizes the Rc cycle: each `eval_program` call leaks its env.
-/// Growth should be roughly proportional to RUNS if the cycle exists.
-/// Ignored in CI — run manually to re-measure after structural changes.
+/// Each `eval_program` call must not accumulate live bytes — env must be freed
+/// when the call returns (no Rc cycle). Growth above 2× the first run's cost
+/// over 50 runs indicates a retained cycle.
 #[test]
-#[ignore]
-fn characterize_env_cycle_growth() {
+fn eval_program_does_not_accumulate_memory() {
     let simple = compile("step(acc) = acc + 1  main() = fold(1..100, 0, (acc, _) -> step(acc))");
     let (s1, sn) = measure(|| { eval_program(&simple).expect("run"); }, RUNS);
     eprintln!("simple fold:       after run 1 = {s1:>8} B, after {RUNS} runs = {sn:>10} B  (ratio {:.1}×)", sn as f64 / s1.max(1) as f64);
@@ -110,7 +109,10 @@ fn characterize_env_cycle_growth() {
     let (h1, hn) = measure(|| { eval_program(&heavy).expect("run"); }, RUNS);
     eprintln!("closure-heavy fold: after run 1 = {h1:>8} B, after {RUNS} runs = {hn:>10} B  (ratio {:.1}×)", hn as f64 / h1.max(1) as f64);
 
-    // Growth proportional to RUNS confirms linear leak (Rc cycle).
-    // If this ever drops below 5× (bounded churn), the cycle has been fixed.
-    assert!(sn > s1 * 5, "expected linear growth (Rc cycle); got {sn} B after {RUNS} runs vs {s1} B after 1");
+    let limit = s1.max(1024) * 2;
+    assert!(sn <= limit,
+        "simple fold: live bytes grew from {s1} (run 1) to {sn} (after {RUNS} runs) — Rc cycle not fixed (limit: {limit})");
+    let limit = h1.max(1024) * 2;
+    assert!(hn <= limit,
+        "closure-heavy fold: live bytes grew from {h1} (run 1) to {hn} (after {RUNS} runs) — Rc cycle not fixed (limit: {limit})");
 }

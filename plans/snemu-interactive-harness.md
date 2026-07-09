@@ -46,11 +46,33 @@ frames never exist. The input has to be fed *during* the run.
 So of the 11 previously input-blocked scenarios, ~9 now pass; the remaining 2 are
 genuine behaviour/timing gaps to investigate, not harness limits.
 
-## Foundation for later
+## NEXT TASK — parallel / multi-core snemu pool
 
-The live per-scenario model is also the basis for the **parallel snemu pool**
-(each host thread owns a live `Machine`) — deterministic, no QEMU process/socket,
-more stable than QEMU under load.
+The live per-scenario model is the basis for a **parallel snemu pool**: run the
+~108-scenario audit across host threads, each owning its own live `Machine`.
+snemu is in-process, deterministic, and has no QEMU process/socket — so there's
+no cross-run CPU thrash or port contention (the very things that make QEMU flake
+under `--repeat`). More stable than QEMU under load, and the throughput win is
+real: the audit is ~355s single-threaded but ~90% CPU-bound on a handful of
+compute-heavy scenarios, so spreading it across ~8 cores should hit **~44s wall
+— beating QEMU's 57s single run** (and its ~570s `--repeat 10` flake gate).
+
+Concretely:
+- `snemu_audit::run` loops scenarios **sequentially** today
+  (`for s in selected { … View::live(machine) … }`). Parallelize it — a thread
+  pool (or `rayon`) over `selected`, collecting `(name, Outcome)` results.
+- Per-scenario state is already isolated (each gets its own `Machine`), so
+  there's no shared mutable emulator state to guard.
+- Share the read-only `kernel`/`dtb` bytes across threads (`Arc<[u8]>`).
+- Buffer each scenario's stderr/console so parallel output doesn't interleave;
+  print the report in scenario order at the end.
+- Cap concurrency at ~cpu-count; the big-budget scenarios (OOM/Stitch @2.5–3B)
+  dominate wall-clock, so schedule longest-first if possible.
+
+### Speed baseline (full 108-scenario suite, for measuring the pool against)
+- QEMU: **57s wall / 158s CPU** (~2.8 cores, parallel), 108/108.
+- snemu: **~355s wall**, single-threaded, 106/108. Slow tail = the interpreter
+  (M5/M6 JIT target) + the honest cost of running compute to completion.
 
 ## Result: 99/108 (from 74/108 at the start of the fidelity push)
 

@@ -1,0 +1,5 @@
+---
+source: stitch/tests/stim_fsm.rs
+expression: "fsm(r#\"renderFrame(initialState(\"ab\\ncd\"))\"#)"
+---
+Str("\u{1b}[2J\u{1b}[Hab\r\ncd\u{1b}[1;1H")

@@ -1,0 +1,5 @@
+---
+source: stitch/tests/stim_fsm.rs
+expression: "fsm(r#\"renderFrame(Editor(..initialState(\"hello\\nworld\"), row: 1, col: 3))\"#)"
+---
+Str("\u{1b}[2J\u{1b}[Hhello\r\nworld\u{1b}[2;4H")

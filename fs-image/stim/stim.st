@@ -141,3 +141,12 @@ serialize(state) = Str.join(state.lines, "\n")
 // `:w` — a `Save` effect carrying the whole serialized buffer. The state is
 // unchanged (saving doesn't edit).
 save(state) = Step(state: state, effect: Save(serialize(state)))
+
+// Render a full-screen frame: clear + home (`\e[2J\e[H`), the buffer's lines
+// (CRLF-separated so each starts in column 0 on a raw terminal), then an absolute
+// cursor move to the 1-based `(row, col)`. v1 clears and redraws every keystroke —
+// no diffing.
+renderFrame(state) = {
+    let body = Str.join(state.lines, "\r\n")
+    "\e[2J\e[H{body}\e[{state.row + 1};{state.col + 1}H"
+}

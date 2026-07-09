@@ -307,6 +307,8 @@ fn lex_string(chars: &mut Cursor<'_>) -> TokenKind {
             Some('\\') => match chars.next() {
                 Some('n') => lit.push('\n'),
                 Some('t') => lit.push('\t'),
+                Some('r') => lit.push('\r'),
+                Some('e') => lit.push('\u{1b}'),
                 Some('"') => lit.push('"'),
                 Some('\\') => lit.push('\\'),
                 Some(other) => lit.push(other),
@@ -605,6 +607,19 @@ mod tests {
             toks("\"a\\nb\\\"c\""),
             vec![
                 TokenKind::Str(vec![StrPart::Lit("a\nb\"c".to_string())]),
+                TokenKind::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn processes_escape_and_carriage_return_escapes() {
+        // `\e` is the ESC control char (0x1b) for ANSI terminal sequences; `\r` is
+        // carriage return. source: "\e[H\r" → ESC, [, H, CR.
+        assert_eq!(
+            toks("\"\\e[H\\r\""),
+            vec![
+                TokenKind::Str(vec![StrPart::Lit("\u{1b}[H\r".to_string())]),
                 TokenKind::Eof
             ]
         );

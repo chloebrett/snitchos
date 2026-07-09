@@ -203,7 +203,16 @@ pub struct DataValue {
 pub struct ClosureData {
     pub params: Vec<String>,
     pub body: Expr,
-    pub env: Env,
+    /// The local bindings this closure closes over — captured at creation time
+    /// as shared `Rc<RefCell<Value>>` cells (not value copies) so that `mut`
+    /// bindings remain observable through the closure after reassignment.
+    /// Only locals are stored here; globals are resolved via the call-site env,
+    /// which breaks the `env ↔ globals ↔ Closure` Rc cycle.
+    pub upvalues: Vec<(String, Rc<RefCell<Value>>, bool)>,
+    /// The defining scope's authority, captured for lambdas (`uses: None`) so
+    /// that capability constraints from the creation context are preserved.
+    /// Named functions (`uses: Some(…)`) always override this at call time.
+    pub authority: Rc<BTreeSet<String>>,
     /// The capability/effects clause for a *named function* (`Some`, possibly
     /// empty) — its body runs with exactly these authorities, not the caller's.
     /// `None` for a lambda, which inherits the authority of where it was defined.

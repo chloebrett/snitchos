@@ -371,6 +371,44 @@ impl Env {
             .and_then(|globals| globals.get(name).cloned())
     }
 
+    /// Look up a name in the *local* scope chain (not globals) and return its
+    /// shared cell and mutability flag — for building closure upvalues without
+    /// capturing the full env.
+    pub fn lookup_local_cell(&self, name: &str) -> Option<(Rc<RefCell<Value>>, bool)> {
+        let mut current = &self.locals;
+        while let Some(scope) = current {
+            if scope.name == name {
+                return Some((Rc::clone(&scope.value), scope.mutable));
+            }
+            current = &scope.parent;
+        }
+        None
+    }
+
+    /// Bind `name` to an *existing* cell (shared `Rc<RefCell<Value>>`), rather
+    /// than creating a new one. Used when restoring upvalues at closure call time
+    /// so mutable captures see mutations made after the closure was created.
+    pub fn extend_cell(&self, name: String, cell: Rc<RefCell<Value>>, mutable: bool) -> Env {
+        Env {
+            locals: Some(Rc::new(Scope { name, value: cell, mutable, parent: self.locals.clone() })),
+            globals: Rc::clone(&self.globals),
+            methods: Rc::clone(&self.methods),
+            field_mut: Rc::clone(&self.field_mut),
+            telemetry: Rc::clone(&self.telemetry),
+            platform: Rc::clone(&self.platform),
+            authority: Rc::clone(&self.authority),
+            fuel: Rc::clone(&self.fuel),
+            depth: Rc::clone(&self.depth),
+            self_closure: None,
+        }
+    }
+
+    /// The current authority set, as a shared `Rc` — for capturing at closure
+    /// creation time without cloning the `BTreeSet`.
+    pub fn authority_rc(&self) -> Rc<BTreeSet<String>> {
+        Rc::clone(&self.authority)
+    }
+
     pub fn lookup_method(&self, type_name: &str, method_name: &str) -> Option<Method> {
         self.methods
             .get()

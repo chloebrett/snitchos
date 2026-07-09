@@ -18,8 +18,10 @@ user decision). Done: **2.1 `initialState`** (`Mode`/`Editor` types + line split
 buffer edit — `Str.slice` split + string `+` + `List.set`); **2.5 `backspace`**
 (delete / line-join via `List.removeAt`); **2.6 `splitLine`** (Enter — split via
 `List.insert`; inverse of backspace-join); **2.7 `save`** (`Effect`/`Step` types +
-`serialize` + `Save` effect). All via the `stitch::testing` harness. Next: **2.8
-`renderFrame`** (state → escape-sequence screen string).
+`serialize` + `Save` effect); **2.8 `renderFrame`** (state → ANSI screen string;
+needed the new `\e`/`\r` lexer escapes). All via the `stitch::testing` harness.
+Next — the capstone: **2.9 `step`** (key→`Step` dispatch tying 2.2–2.7 together,
+plus the `:w` command-line). Completes Group 2.
 
 **Enabling fix (2026-07-08): built-in `use` now resolves in the REPL/single-program
 path.** Found while answering "can I launch stim from the shell?": `build_env_in`
@@ -245,11 +247,19 @@ Save payload (match on `st.effect`), serialize round-trip, and state-unchanged.
 mode) defers to **2.9 dispatch** — it needs the dispatch anyway, and 2.7's essence
 (the Save payload) stands alone. 16 FSM tests green.
 
-#### Step 2.8: `renderFrame(state)` → an escape-sequence frame string
+#### Step 2.8: `renderFrame(state)` → an escape-sequence frame string — ✅ DONE (2026-07-09)
 **Acceptance**: emits clear+home (`ESC[2J ESC[H`), each buffer line, and a cursor
 move (`ESC[row;colH`, 1-based) to `(row, col)`. Snapshot-tested (`insta`).
 **RED**: a snapshot of a small buffer's frame. **GREEN**: string assembly in
 Stitch (`Str` ops) — no native beyond what Group 1 added.
+DONE: `renderFrame(state) = "\e[2J\e[H{body}\e[{row+1};{col+1}H"` where `body =
+Str.join(lines, "\r\n")`. Uses string **interpolation** for the 1-based cursor
+coords (`+` can't concat Int to Str). Snapshots verify `\e[2J\e[H…\e[1;1H` and a
+cursor at `\e[2;4H`.
+**Enabling lexer increment:** the lexer had no way to emit ESC (`0x1b`) from a
+string literal (only `\n \t \" \\`, else `\X→X`). Added **`\e` (ESC 0x1b)** and
+**`\r` (CR)** escapes (`lexer.rs`, RED/GREEN, standard + idiomatic; behaviour change
+only for the previously-pointless `\e`/`\r`→`e`/`r`). 541 lib + 18 FSM tests green.
 
 #### Step 2.9: `step(state, key)` — top-level dispatch tying 2.2–2.7 together
 **Acceptance**: dispatches by mode + key to the right sub-transition; unknown keys
