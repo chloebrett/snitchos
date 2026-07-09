@@ -44,16 +44,48 @@ impl Machine {
     /// observing the shared clock, which advances one tick per executed
     /// instruction.
     pub fn step(&mut self) -> Result<(), StepError> {
+        let mut retired = false;
         for i in 0..self.harts.len() {
-            if self.harts[i].is_running() {
-                self.harts[i].set_cycle(self.time);
-                if let HartEffect::Sbi(req) = self.harts[i].step(&mut self.bus)? {
+            // A stopped (parked secondary) hart never runs; only running and idle
+            // harts are visited — idle ones so a pending timer/IPI can wake them.
+            if self.harts[i].is_stopped() {
+                continue;
+            }
+            self.harts[i].set_cycle(self.time);
+            match self.harts[i].step(&mut self.bus)? {
+                HartEffect::Sbi(req) => {
                     service_sbi(&mut self.harts, i, &req);
+                    self.time += 1;
+                    retired = true;
                 }
-                self.time += 1;
+                HartEffect::None => {
+                    self.time += 1;
+                    retired = true;
+                }
+                // A parked (wfi) hart retired nothing — don't tick the clock for it.
+                HartEffect::Idle => {}
             }
         }
+        // Every running hart is parked on wfi: nothing will advance the shared
+        // clock toward a timer, so jump it to the earliest armed deadline. That
+        // makes the timer pending, and the next round wakes the hart — collapsing
+        // the idle wait from millions of steps to one. A stopped hart never runs;
+        // an idle hart with no armed timer can only be woken by an IPI, which
+        // can't arrive while every hart idles, so it contributes no deadline.
+        if !retired && let Some(deadline) = self.earliest_wake_deadline() {
+            self.time = self.time.max(deadline);
+        }
         Ok(())
+    }
+
+    /// The soonest clock value at which any idle hart's armed timer would wake it.
+    /// `None` if no idle hart has a deadline (nothing to fast-forward to).
+    fn earliest_wake_deadline(&self) -> Option<u64> {
+        self.harts
+            .iter()
+            .filter(|h| h.is_idle())
+            .filter_map(Hart::wake_deadline)
+            .min()
     }
 
     /// Step (round-robin) until the UART output contains `marker` — a stable
@@ -207,6 +239,49 @@ mod tests {
         assert_eq!(m.pc(0), RAM_BASE + 4);
         assert_eq!(m.reg(1, 1), 0); // hart 1 never ran
         assert_eq!(m.pc(1), RAM_BASE);
+    }
+
+    #[test]
+    fn an_all_idle_machine_fast_forwards_to_the_earliest_armed_timer() {
+        // Both harts parked on wfi with timers armed at different deadlines.
+        // Nothing advances the shared clock, so the machine must jump it to the
+        // *earliest* deadline — and wake exactly that hart, not the later one.
+        let mut m = machine_with(&[0x0000_0013], 2); // nop; harts are parked below
+        m.harts[0].arm_idle_timer(1200);
+        m.harts[1].arm_idle_timer(500);
+
+        m.step().unwrap(); // no hart retires → jump to min(1200, 500)
+        assert_eq!(m.instret(), 500, "clock jumped to the earliest deadline");
+
+        m.step().unwrap(); // clock now 500: hart 1's timer fires, hart 0 waits
+        assert!(m.is_running(1), "the earliest-deadline hart woke");
+        assert!(!m.is_running(0), "the later-deadline hart is still parked");
+    }
+
+    #[test]
+    fn a_running_hart_advances_the_clock_and_wakes_an_idle_peer_without_a_jump() {
+        // Hart 0 spins in a self-loop (always retiring, advancing the shared
+        // clock one tick per round); hart 1 idles with a timer 3 ticks out. The
+        // clock must reach 3 by real execution — no fast-forward while a hart
+        // runs — and hart 1 wakes exactly when it does.
+        const SELF_LOOP: u32 = 0x0000_006f; // jal x0, 0
+        let mut m = machine_with(&[SELF_LOOP], 2);
+        m.harts[1].arm_idle_timer(3);
+
+        // Rounds 1-2 take the clock to 2 (hart 0 retires one tick each); hart 1
+        // observes 1 then 2, both under its deadline, so it stays parked.
+        for _ in 0..2 {
+            m.step().unwrap();
+            assert!(!m.is_running(1), "idle until the clock reaches the deadline");
+        }
+        assert_eq!(m.pc(0), RAM_BASE, "hart 0 kept spinning on its self-loop");
+
+        // Round 3: hart 0 advances the clock to 3, and hart 1 — checked later the
+        // same round against the shared clock — sees its deadline and wakes. No
+        // fast-forward jump happened; real execution carried the clock there.
+        m.step().unwrap();
+        assert!(m.is_running(1), "idle peer woke when the running hart's clock hit 3");
+        assert_eq!(m.instret(), 4, "clock advanced by execution (3 hart-0 + 1 wake), not a jump");
     }
 
     #[test]

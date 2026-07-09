@@ -25,6 +25,11 @@ pub enum Privilege {
 pub(crate) enum HartState {
     Running,
     Stopped,
+    /// Halted on `wfi`, waiting for an interrupt to become pending (its timer
+    /// reaching `stimecmp`, or an IPI). Retires no instructions until woken —
+    /// this is what lets a driver fast-forward the clock over idle time instead
+    /// of grinding through the idle loop one instruction at a time.
+    Idle,
 }
 
 /// Set (`on`) or clear (`!on`) the bits of `mask` in `value`.
@@ -87,6 +92,10 @@ pub(crate) struct SbiRequest {
 pub(crate) enum HartEffect {
     None,
     Sbi(SbiRequest),
+    /// The hart is parked on `wfi` and retired nothing this step. The driver
+    /// uses this to fast-forward the shared clock to the earliest wake deadline
+    /// once every hart is idle (or stopped).
+    Idle,
 }
 
 /// Sign-extend a 32-bit result to 64 bits (the `.w` instruction convention).
@@ -261,8 +270,19 @@ impl Cpu {
     /// against the lone hart (a self-IPI targets it; `hart_start` finds no peer).
     pub fn step(&mut self) -> Result<(), StepError> {
         self.hart.set_cycle(self.hart.instret);
-        if let HartEffect::Sbi(req) = self.hart.step(&mut self.bus)? {
-            service_sbi(std::slice::from_mut(&mut self.hart), 0, &req);
+        match self.hart.step(&mut self.bus)? {
+            HartEffect::Sbi(req) => {
+                service_sbi(std::slice::from_mut(&mut self.hart), 0, &req);
+            }
+            // The lone hart parked on wfi: jump its clock (its retired-instruction
+            // count) to the timer deadline so the next step delivers the interrupt,
+            // instead of returning without progress forever.
+            HartEffect::Idle => {
+                if let Some(deadline) = self.hart.wake_deadline() {
+                    self.hart.instret = self.hart.instret.max(deadline);
+                }
+            }
+            HartEffect::None => {}
         }
         Ok(())
     }
@@ -387,6 +407,28 @@ impl Hart {
         self.state == HartState::Running
     }
 
+    #[must_use]
+    pub(crate) fn is_idle(&self) -> bool {
+        self.state == HartState::Idle
+    }
+
+    #[must_use]
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.state == HartState::Stopped
+    }
+
+    /// Test helper: arm this hart's supervisor timer at `deadline` with the
+    /// interrupt fully enabled, and park it idle — the state a hart is in after
+    /// `wfi` in the idle loop. Lets a `Machine` test exercise the fast-forward
+    /// without hand-assembling the CSR-setup + `wfi` guest sequence.
+    #[cfg(test)]
+    pub(crate) fn arm_idle_timer(&mut self, deadline: u64) {
+        self.csr.write(addr::STIMECMP, deadline).unwrap();
+        self.csr.write(addr::SIE, SIE_STIE).unwrap();
+        self.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
+        self.state = HartState::Idle;
+    }
+
     /// Set the shared machine clock this hart observes for its next `step`.
     pub(crate) fn set_cycle(&mut self, cycle: u64) {
         self.cycle = cycle;
@@ -443,6 +485,15 @@ impl Hart {
     /// Fetch, decode, and execute one instruction (16- or 32-bit) against `bus`.
     /// Returns any cross-hart work (an SBI request) for the driver to service.
     pub(crate) fn step(&mut self, bus: &mut Bus) -> Result<HartEffect, StepError> {
+        // A parked (wfi) hart stays parked, retiring nothing, until an interrupt
+        // becomes pending against the current clock — then it wakes and falls
+        // through to deliver that interrupt as a trap.
+        if self.state == HartState::Idle {
+            if self.pending_interrupt().is_none() {
+                return Ok(HartEffect::Idle);
+            }
+            self.state = HartState::Running;
+        }
         // Deliver a pending interrupt before fetching: `sepc` then points at the
         // un-run instruction, so `sret` resumes exactly where we left off.
         if let Some(cause) = self.pending_interrupt() {
@@ -877,7 +928,14 @@ impl Hart {
                 Ok(())
             }
             priv12::WFI => {
-                self.advance(); // no interrupts to wait for in the interpreter
+                // wfi retires and advances past itself; if nothing is pending, the
+                // hart parks (Idle) at the next instruction until an interrupt
+                // arrives — modelling a real hart's halt so the driver can skip the
+                // idle wait instead of emulating every idle-loop instruction.
+                self.advance();
+                if self.pending_interrupt().is_none() {
+                    self.state = HartState::Idle;
+                }
                 Ok(())
             }
             _ => Err(self.unimplemented(instr.0)),
@@ -940,6 +998,29 @@ impl Hart {
             arg2: self.x[12],
         });
         self.advance();
+    }
+
+    /// The clock value at which this hart's armed timer would wake it — `stimecmp`
+    /// iff the timer is deliverable once the clock reaches it (`sie.STIE` set and
+    /// the `sstatus.SIE`/privilege gate met), else `None`. Same gate as
+    /// [`timer_interrupt_pending`](Self::timer_interrupt_pending) minus the
+    /// `cycle >= stimecmp` check — it's the *future* deadline, so the driver can
+    /// fast-forward an idle clock straight to it. `None` means only an IPI can
+    /// wake this hart (impossible while every hart idles, so nothing to jump to).
+    pub(crate) fn wake_deadline(&self) -> Option<u64> {
+        if self.csr_read(addr::SIE) & SIE_STIE == 0 {
+            return None;
+        }
+        let armed = match self.privilege {
+            Privilege::User => true,
+            Privilege::Supervisor => self.csr_read(addr::SSTATUS) & sstatus::SIE != 0,
+        };
+        if !armed {
+            return None;
+        }
+        // An unset / explicitly-disarmed `stimecmp` (`u64::MAX`) never fires —
+        // treat it as no deadline so the driver doesn't jump the clock to infinity.
+        self.csr.read(addr::STIMECMP).ok().filter(|&t| t != u64::MAX)
     }
 
     /// Whether a supervisor timer interrupt is pending and currently deliverable.
@@ -1868,6 +1949,41 @@ mod tests {
         let mut cpu = cpu_with(&[wfi()]);
         cpu.step().unwrap();
         assert_eq!(cpu.pc(), RAM_BASE + 4);
+    }
+
+    #[test]
+    fn wfi_parks_the_hart_when_no_interrupt_is_pending() {
+        // Real hardware halts on wfi until an interrupt is pending. With no timer
+        // armed, the hart parks (Idle) rather than spinning the idle loop — the
+        // fidelity fix that lets the machine fast-forward idle time.
+        let mut cpu = cpu_with(&[wfi()]);
+        cpu.step().unwrap();
+        assert_eq!(cpu.pc(), RAM_BASE + 4, "wfi still retires and advances PC");
+        assert!(!cpu.hart.is_running(), "wfi with nothing pending parks the hart");
+    }
+
+    #[test]
+    fn an_idle_hart_fast_forwards_the_clock_to_its_timer_deadline() {
+        // wfi parks the hart at the following instruction; with a timer armed 1000
+        // ticks out, the machine must jump the clock straight to the deadline and
+        // deliver the timer — not grind 1000 idle steps to get there.
+        let mut cpu = cpu_with(&[wfi(), jal(0, 0)]);
+        cpu.hart.csr.write(addr::STVEC, RAM_BASE + 0x200).unwrap();
+        cpu.hart.csr.write(addr::STIMECMP, 1000).unwrap();
+        cpu.hart.csr.write(addr::SIE, STIE).unwrap();
+        cpu.hart.csr.write(addr::SSTATUS, sstatus::SIE).unwrap();
+
+        cpu.step().unwrap(); // wfi: time 0 < 1000, nothing pending → park
+        assert!(!cpu.hart.is_running());
+        cpu.step().unwrap(); // parked, idle → jump clock to the deadline
+        cpu.step().unwrap(); // deliver the timer trap
+
+        // Delivered a timer 1000 ticks out in a *fixed* 3 step() calls — proof the
+        // driver jumped the clock rather than grinding 1000 idle steps to reach it
+        // (nop-wfi would still be looping at RAM_BASE+4 here).
+        assert_eq!(cpu.pc(), RAM_BASE + 0x200, "trapped to stvec");
+        assert_eq!(cpu.hart.csr.read(addr::SCAUSE).unwrap(), (1 << 63) | 5);
+        assert_eq!(cpu.instret(), 1000, "clock fast-forwarded to the deadline");
     }
 
     #[test]

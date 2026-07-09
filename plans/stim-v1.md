@@ -310,29 +310,87 @@ resolves with `READ|WRITE` and delegates the file cap), so this is a shell chang
 Group 4, not new fs mechanism. `Create` already supports `kind=Dir` over IPC, so
 even runtime subdir creation needs no protocol work.
 
-#### Step 3.1: `Platform::read_byte()` (raw, single byte) + fake + on-target
+**Breakdown (2026-07-09).** Group 3 is the host side of the effects the pure FSM
+names (`Redraw`/`Save`) — it spans four crates. Dependency graph:
+
+```
+3.2 truncate (fs-core + ramfs) ─┐
+3.3 Truncate IPC op (proto + server) ─┴→ 3.4 Platform::fs_write ─┐
+3.1 Platform::read_byte ─────────────────────────────────────────┼→ 3.5 natives
+                                                                  │   (writeConsole reuses Platform::write — no new method)
+                                                                  └→ Group 4 driver
+```
+
+3.1 and 3.2 are independent leaves; 3.3 needs 3.2; 3.4 needs 3.2+3.3.
+
+**★ DECISION (user, 2026-07-09) — `fs_write` addresses a DELEGATED FILE CAP, not a
+path.** `fs_write(fileHandle, bytes)` writes through a cap the shell resolved +
+delegated into stim (Group 4.2); stim never walks the FS. **Read-only is
+kernel-enforced** — `Write`/`Truncate` on a `READ`-only cap → a real
+`SyscallRefused` (snitched), realizing 4.2's acceptance and the explicit-authority
+thesis. **Knock-ons:** (a) **create-if-absent moves to the shell** (4.2 resolves the
+path, creates the file if missing, then delegates its cap); (b) a **new `FsWrite`
+authority** (parallel to `FsRead`) gates the `fsWrite` native — add it to the ambient
+set in `interp.rs::build_env_in` (`["Telemetry","ConsoleOut","ConsoleIn","FsRead"]`)
+and honour it in `uses`-checking; (c) the **driver holds the file handle** (from its
+startup cap ABI) and passes it to `fsWrite` on a `Save` effect — the FSM stays
+handle-free.
+
+#### Step 3.1: `Platform::read_byte() -> Option<u8>` (raw, single byte) + fake + on-target
+**Touches**: `stitch/src/platform.rs` (trait + `NullPlatform`/`FakePlatform`/
+`RuntimePlatform`). **Design**: `Null`→`None`; `Fake`→a scripted byte queue (new
+`with_bytes` ctor, `RefCell<VecDeque<u8>>`) drains then `None`; `Runtime`→raw
+`console_read` into a small refill buffer, pop one byte — **bypasses `LineEditor`**
+(unlike `read_line`), `yield_now`+retry when the console is empty.
 **Acceptance**: fake replays scripted bytes then `None`; on-target drains
-`console_read` a byte at a time (bypassing `LineEditor`). **RED**: fake-replay test.
+`console_read` a byte at a time. **RED**: fake-replay test. **Mutants**: the
+refill/empty-queue boundary.
 
 #### Step 3.2: `fs-core::Filesystem::truncate(ino, len)` + ramfs impl
-**Acceptance**: `truncate` shrinks a file to `len` (drops trailing bytes) and grows
-with zero-fill; `read` afterwards reflects it. **RED**: shrink + grow ramfs tests.
+**Touches**: `fs-core/src/lib.rs` (trait method), `ramfs/src/lib.rs` (impl).
+**Design**: `Body::File` → `Vec::resize(len, 0)` (shrink drops trailing bytes; grow
+zero-fills); `NotAFile` on a dir. The one real *missing capability* (audit: `write`
+only grows).
+**Acceptance**: shrink drops trailing bytes, grow zero-fills, `read` reflects both.
+**RED**: shrink + grow ramfs tests. **Mutants**: the shrink-vs-grow branch, the
+zero-fill length.
 
-#### Step 3.3: `fs_proto::Request::Truncate{len}` + fs-server handler
-**Acceptance**: a `Truncate` request truncates the badged file (WRITE required;
-refused + snitched without it). **RED**: proto roundtrip + server-handler test.
+#### Step 3.3: `fs_proto::Op::Truncate = 8` + `Request::Truncate{len}` + fs-server handler
+**Touches**: `fs-proto/src/lib.rs` (**append** `Op::Truncate = 8` — never reorder;
+positional wire), `user/fs/src/lib.rs` (`fs::serve` dispatch). **Design**: wire
+`kind_to/from_wire`, `Request`/`Response`, `required_right(Truncate) = WRITE`; server
+calls `fs.truncate(badge-inode, len)`.
+**Acceptance**: a `Truncate` truncates the badged file (WRITE required; **refused +
+snitched without it**). **RED**: proto round-trip + server-handler + refusal tests.
+**Mutants**: the rights gate, the op-discriminant mapping.
 
-#### Step 3.4: `Platform::fs_write(target, bytes)` — Create-if-absent, Truncate, Write
-**Acceptance**: writes the whole payload, truncating to its length first (shorter
-payloads leave no stale bytes); fake records it; on-target does the FS-over-IPC
-sequence through the write cap. **RED**: fake write + shorter-overwrite test.
+#### Step 3.4: `Platform::fs_write(fileHandle, bytes)` — Truncate-then-Write through a delegated cap
+**Touches**: `stitch/src/platform.rs`. **Design** (per the decision above): NOT a
+path walk. `Fake`→record `(handle, bytes)` + return success (or scripted refusal);
+`Runtime`→`Endpoint::from_raw_handle(fileHandle)`, issue `Truncate(len)` then
+`Write(0, bytes)` in ≤256-byte chunks (`DATA_CAP`). **Create-if-absent is the
+shell's job** (4.2), not here.
+**Acceptance**: truncates to the payload length first (no stale trailing bytes),
+then writes; fake records the sequence; a `READ`-only cap → refusal. **RED**: fake
+records truncate-then-write; refusal path. (End-to-end "shorter save leaves no stale
+bytes" is proven by 3.2/3.3 at the fs layer and by the Group-5 re-read.) **Mutants**:
+the truncate-before-write ordering, the chunk loop.
 
 #### Step 3.5: expose `readByte` / `writeConsole` / `fsWrite` as Stitch natives
-**Acceptance**: the three natives are callable from `.st` and route to the
-`Platform` seam. **RED**: a `.st` program driving each against `FakePlatform`.
+**Touches**: `stitch/src/natives.rs` (+ the `FsWrite` authority in `interp.rs`).
+**Design**: `readByte() -> Maybe<Str>` (the byte as a 1-char string, or `None`;
+gated by `ConsoleIn`); `writeConsole(s)` — **raw write, no trailing newline** (unlike
+`print`; needed for escape sequences; gated by `ConsoleOut`, reuses `Platform::write`);
+`fsWrite(fileHandle: Int, bytes: Str) -> Bool` → `Platform::fs_write` (gated by the
+new `FsWrite`).
+**Acceptance**: the three are callable from `.st` and route to the seam; each is
+refused without its authority. **RED**: a `.st` program driving each against
+`FakePlatform` (+ undeclared-authority refusals). **Mutants**: mostly covered by the
+Platform-level tests.
 
-*PR boundary: "stim effect natives + FS truncate" — the raw-read, fs-write, and
-truncate substrate.*
+*PR boundaries:* **(a)** "FS truncate through the stack" (3.2 + 3.3 — one vertical
+slice: trait → ramfs → proto → server); **(b)** "stim effect natives + Platform seam"
+(3.1 + 3.4 + 3.5 + the `FsWrite` authority).
 
 ---
 
@@ -345,9 +403,13 @@ run to a `:w`, assert the final file content and the emitted console frames.
 `step`/`render` closures (default) vs. a Stitch loop (needs interpreter TCO —
 defer). **RED**: a full scripted-session test asserting saved bytes.
 
-#### Step 4.2: `stim <file>` from the Stitch shell — delegate the file cap; enforce read-only
-**Acceptance**: the shell resolves the file, delegates its cap into stim, and shows
-the grant (`CapEvent`); with only a read cap, `:w` is a snitched `SyscallRefused`.
+#### Step 4.2: `stim <file>` from the Stitch shell — resolve, create-if-absent, delegate the file cap; enforce read-only
+**Acceptance**: the shell resolves the file path (**create-if-absent** — the write
+side of the resolver that Group-3 `fs_write` deliberately does *not* do), delegates
+its cap into stim at a known handle, and shows the grant (`CapEvent`); with only a
+read cap, `:w` is a snitched `SyscallRefused` (**kernel-enforced** via the delegated
+cap's missing `WRITE` — per the Group-3 decision). The driver passes that handle to
+`fsWrite` on a `Save` effect.
 **RED**: a shell-level test (read+write → save works; read-only → refusal snitches).
 
 #### Step 4.3: tracing — a session root span + a span per `:w`
