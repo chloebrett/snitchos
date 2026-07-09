@@ -1,6 +1,32 @@
 # snemu wfi idle-skip (fast-forward)
 
-## Why
+## Outcome (measured) — the premise was wrong
+
+**Shipped, correct, and it gives ~0 speedup on this suite.** The hypothesis below
+— that the compute tail is dominated by *idle* emulation — turned out false. The
+kernel's heartbeat loop busy-yields through the scheduler (`heartbeat.rs:159`),
+and the itest workloads have always-ready tasks (task_a/task_b burning LCG, the
+OOM allocation loops), so the instructions between heartbeats are **real work,
+not wfi spinning**. Verified two ways:
+
+- Full audit with idle-skip on vs. off (the `--no-idle-skip` flag): total instret
+  and per-scenario cost are **byte-identical**; fidelity stays 106/108.
+- Even the idle-by-design `init` scenarios are identical on/off (43M/41M/34M),
+  because they reach their assertion during boot before the system ever settles
+  into a steady idle loop. Only 3 of 108 scenarios use `init` at all.
+
+So idle-skip is kept as a **fidelity improvement**, not a speed win: snemu now
+models `wfi` like real hardware and QEMU (halt-until-interrupt) instead of a nop
+that spins, with **zero regressions**. It's the right foundation for a future
+idle-waiting workload (an interactive shell blocked on keystrokes), which this
+suite simply doesn't contain. It ships behind `set_idle_skip` (default on;
+`snemu-itest --no-idle-skip` for the A/B), mirroring the decode-cache flag so the
+pure-interpreter path stays provably the oracle.
+
+The actual speed lever for the compute-bound tail is the post-04 JIT, not idle
+handling. The audit's big win was the multi-core host fan-out (355s → 66s, 5.4×).
+
+## Why (original hypothesis — see Outcome above for how it held up)
 
 The snemu-itest slowest-by-instret table (added alongside the multi-core audit
 fan-out) shows the compute tail is dominated by **idle emulation**, not work:
@@ -81,20 +107,22 @@ units*, idle included. Consequences:
 - **audit `steps_taken`**: counts `Machine::step` *rounds* (host-loop), not
   `time` — so it correctly drops. This is the metric the win shows up in.
 
-## Increments (each TDD, green throughout)
+## Increments (each TDD, green throughout) — all ✅ SHIPPED
 
-1. **`HartState::Idle` + `wfi` blocks.** Unit: a hart that runs `wfi` with no
-   timer armed enters `Idle`; `is_running()` false. `wfi_is_a_nop_that_advances`
-   still holds (PC advanced).
-2. **`Machine` fast-forward.** Unit: a 1-hart machine idling in `wfi` with
-   `stimecmp` armed jumps `time` to `stimecmp` and delivers the timer in O(1)
-   rounds, not `stimecmp` rounds. Unit: with hart 0 running, an `Idle` hart 1's
-   timer still fires mid-round-robin.
-3. **`Cpu` wrapper parity.** Single-hart `Cpu::step` applies the jump; existing
-   cpu tests stay green.
-4. **Validation gate.** `cargo xtask snemu-diff --all` (differential vs QEMU:
-   telemetry must be unchanged) + full `snemu-itest` (still 106/108, and the
-   slowest table collapses). Compare instret before/after per workload.
+1. **`HartState::Idle` + `wfi` blocks.** ✅ A hart that runs `wfi` with no timer
+   armed enters `Idle`; `is_running()` false; `wfi_is_a_nop_that_advances` still
+   holds. Gated on the `idle_skip` flag (default on).
+2. **`Machine` fast-forward.** ✅ `earliest_wake_deadline` + the retired/skip
+   loop. Tests: an all-idle machine jumps `time` to the earliest armed deadline
+   and wakes exactly that hart; a running hart advances the clock and wakes an
+   idle peer *without* a jump.
+3. **`Cpu` wrapper parity.** ✅ Single-hart `Cpu::step` applies the jump; 135 cpu
+   tests green.
+4. **Flag + validation.** ✅ `set_idle_skip` on `Hart`/`Cpu`/`Machine` (default
+   on) + `snemu-itest --no-idle-skip`; parity test proves off = bare-nop `wfi`.
+   Full `snemu-itest` stayed 106/108 on **and** off, byte-identical — the
+   validation that idle-skip changes only speed (of which there was none here;
+   see Outcome).
 
 ## Non-goals
 
