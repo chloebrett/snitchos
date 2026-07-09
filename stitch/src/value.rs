@@ -2,9 +2,11 @@
 //! typed: a `Value` carries its own kind, and operations check kinds at runtime
 //! (no implicit Int/Float coercion — that previews the eventual static types).
 
+use core::cell::{OnceCell, RefCell};
 use core::fmt;
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::rc::Weak;
 
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
@@ -206,9 +208,16 @@ pub struct ClosureData {
     /// The local bindings this closure closes over — captured at creation time
     /// as shared `Rc<RefCell<Value>>` cells (not value copies) so that `mut`
     /// bindings remain observable through the closure after reassignment.
-    /// Only locals are stored here; globals are resolved via the call-site env,
-    /// which breaks the `env ↔ globals ↔ Closure` Rc cycle.
+    /// Only locals are stored here; globals are resolved via the closure's own
+    /// home globals at call time, which breaks the `Rc<OnceCell> → globals map →
+    /// Closure → Rc<OnceCell>` cycle (closures hold a `Weak`, not a strong ref).
     pub upvalues: Vec<(String, Rc<RefCell<Value>>, bool)>,
+    /// A weak reference to the globals cell from the env in which this closure
+    /// was defined ("home globals"). Stored as `Weak` to break the Rc cycle: the
+    /// strong `Rc<OnceCell>` lives only in the env; when the env is dropped the
+    /// map is freed even though closures still hold `Weak` refs. At call time we
+    /// upgrade (always succeeds during a live `eval_program` call).
+    pub home_globals: Weak<OnceCell<BTreeMap<String, Value>>>,
     /// The defining scope's authority, captured for lambdas (`uses: None`) so
     /// that capability constraints from the creation context are preserved.
     /// Named functions (`uses: Some(…)`) always override this at call time.

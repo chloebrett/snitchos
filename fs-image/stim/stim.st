@@ -13,8 +13,9 @@
 use Str
 use List
 
-// The two modes. Normal navigates; Insert edits.
-sum Mode = Normal | Insert
+// The modes. Normal navigates; Insert edits; Command reads a `:`-command (v1's
+// only command is `:w`).
+sum Mode = Normal | Insert | Command
 
 // What the driver must perform after a transition. `Save` carries the bytes to
 // write back; `Redraw` asks for a screen repaint; `Noop` is nothing. (Named
@@ -149,4 +150,51 @@ save(state) = Step(state: state, effect: Save(serialize(state)))
 renderFrame(state) = {
     let body = Str.join(state.lines, "\r\n")
     "\e[2J\e[H{body}\e[{state.row + 1};{state.col + 1}H"
+}
+
+// --- The dispatch (`step`) ---------------------------------------------------
+//
+// `step(state, key) -> Step{state, effect}` routes a key by the current mode to
+// the right transition. A `key` is either a single printable character (its own
+// text, e.g. "a" or ":") or a symbolic name the driver maps raw bytes to:
+// "Esc", "Enter", "Backspace". Every handled key redraws; save emits `Save`;
+// unbound keys are a `Noop`.
+
+redraw(state) = Step(state: state, effect: Redraw)
+noop(state) = Step(state: state, effect: Noop)
+
+// A key is a printable char (vs. a symbolic name) iff it is exactly one char.
+isPrintable(key) = Str.length(key) == 1
+
+enterCommand(state) = Editor(..state, mode: Command)
+
+// Normal mode: navigation + mode entry. `h`/`l` and everything unbound are Noops.
+stepNormal(state, key) = match {
+    key == "j" => redraw(moveDown(state))
+    key == "k" => redraw(moveUp(state))
+    key == "i" => redraw(enterInsert(state))
+    key == ":" => redraw(enterCommand(state))
+    _ => noop(state)
+}
+
+// Insert mode: printables edit the buffer; the named keys leave/split/delete.
+stepInsert(state, key) = match {
+    key == "Esc" => redraw(enterNormal(state))
+    key == "Enter" => redraw(splitLine(state))
+    key == "Backspace" => redraw(backspace(state))
+    isPrintable(key) => redraw(insertChar(state, key))
+    _ => noop(state)
+}
+
+// Command mode (`:`): v1 recognizes only `w` (save), directly — no command-line
+// accumulation. `w` saves and returns to Normal; any other key cancels to Normal.
+stepCommand(state, key) = match {
+    key == "w" => save(enterNormal(state))
+    _ => redraw(enterNormal(state))
+}
+
+step(state, key) = match state.mode {
+    Normal => stepNormal(state, key)
+    Insert => stepInsert(state, key)
+    Command => stepCommand(state, key)
 }

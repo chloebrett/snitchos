@@ -19,9 +19,17 @@ buffer edit — `Str.slice` split + string `+` + `List.set`); **2.5 `backspace`*
 (delete / line-join via `List.removeAt`); **2.6 `splitLine`** (Enter — split via
 `List.insert`; inverse of backspace-join); **2.7 `save`** (`Effect`/`Step` types +
 `serialize` + `Save` effect); **2.8 `renderFrame`** (state → ANSI screen string;
-needed the new `\e`/`\r` lexer escapes). All via the `stitch::testing` harness.
-Next — the capstone: **2.9 `step`** (key→`Step` dispatch tying 2.2–2.7 together,
-plus the `:w` command-line). Completes Group 2.
+needed the new `\e`/`\r` lexer escapes); **2.9 `step`** (key→`Step` dispatch +
+`Command` mode / `:w`).
+
+**★ GROUP 2 COMPLETE (2026-07-09) — the whole pure FSM is a Stitch program.**
+`fs-image/stim/stim.st`: types (`Mode`/`Effect`/`Editor`/`Step`), transitions
+(`initialState`, `moveUp`/`moveDown`, `enterInsert`/`enterNormal`, `insertChar`,
+`backspace`, `splitLine`), `serialize`/`save`, `renderFrame`, and `step`. 21 FSM
+tests via `stitch::testing`, incl. two inverse-pair invariants (`Esc∘i`,
+`Backspace∘Enter`). No I/O — pure logic. **Next: Group 3** (effect natives +
+Platform seam + FS truncate) — the host side that lets a driver actually read keys,
+write the console, and save.
 
 **Enabling fix (2026-07-08): built-in `use` now resolves in the REPL/single-program
 path.** Found while answering "can I launch stim from the shell?": `build_env_in`
@@ -261,9 +269,21 @@ string literal (only `\n \t \" \\`, else `\X→X`). Added **`\e` (ESC 0x1b)** an
 **`\r` (CR)** escapes (`lexer.rs`, RED/GREEN, standard + idiomatic; behaviour change
 only for the previously-pointless `\e`/`\r`→`e`/`r`). 541 lib + 18 FSM tests green.
 
-#### Step 2.9: `step(state, key)` — top-level dispatch tying 2.2–2.7 together
+#### Step 2.9: `step(state, key)` — top-level dispatch tying 2.2–2.7 together — ✅ DONE (2026-07-09)
 **Acceptance**: dispatches by mode + key to the right sub-transition; unknown keys
 are `None`/`Redraw` no-ops. **RED**: a table of (mode, key) → expected effect/state.
+DONE: `step(state, key) = match state.mode { Normal/Insert/Command }` → `stepNormal`
+/`stepInsert`/`stepCommand`, each returning a `Step{state, effect}`. Handled keys
+`redraw`, `:w` → `Save`, unbound → `noop`.
+**KEY PROTOCOL (design decision):** the driver maps raw bytes → key *tokens*; the
+FSM dispatches on tokens — a printable is its own 1-char text (`"a"`,`":"`), control
+keys are symbolic (`"Esc"`/`"Enter"`/`"Backspace"`). `isPrintable(key) =
+Str.length(key)==1` distinguishes them. Keeps byte encodings out of the FSM (Group 3
+driver honours this).
+**`:w` = the sanctioned direct recognizer:** added `Command` to `sum Mode` (no
+`Editor` field change → no snapshot churn); `:`→Command, `w`→`save` + back to Normal
+(no Enter, no command-line accumulation — deferred). 21 FSM tests (dispatch table +
+the full `:` → `w` → Save path).
 
 *PR boundary: "stim editor FSM (Stitch)" — the whole `.st` program, pure,
 interpreter-tested.*

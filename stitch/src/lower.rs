@@ -9,7 +9,9 @@
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 
-use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Method, Stmt, StrSegment};
+use alloc::collections::BTreeSet;
+
+use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Method, Pattern, Stmt, StrSegment};
 
 /// Lower a single expression in place (e.g. for a REPL line or a test `run`).
 pub fn lower(expr: &mut Expr) {
@@ -335,6 +337,159 @@ fn lower_match_arm(arm: &mut MatchArm) {
         lower_expr(guard);
     }
     lower_expr(&mut arm.body);
+}
+
+/// The names bound by a pattern — names that are in scope in the arm body.
+pub fn pattern_bindings(pat: &Pattern) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    collect_pattern_bindings(pat, &mut names);
+    names
+}
+
+fn collect_pattern_bindings(pat: &Pattern, out: &mut BTreeSet<String>) {
+    match pat {
+        Pattern::Binding(name) => {
+            out.insert(name.clone());
+        }
+        Pattern::Constructor { args, .. } => {
+            for arg in args {
+                collect_pattern_bindings(arg, out);
+            }
+        }
+        Pattern::Tuple(pats) | Pattern::Or(pats) => {
+            for p in pats {
+                collect_pattern_bindings(p, out);
+            }
+        }
+        Pattern::Wildcard
+        | Pattern::Int(_)
+        | Pattern::Float(_)
+        | Pattern::Bool(_)
+        | Pattern::Str(_) => {}
+    }
+}
+
+/// The free variables in `expr` — names referenced but not bound within the
+/// expression itself, given the set of names already bound in the outer scope.
+///
+/// Used at closure creation to determine which local bindings to capture as
+/// upvalues. Note: globals and parameters are **not** included in `bound`
+/// when calling this for a lambda body; the result therefore includes
+/// references to globals too, which is fine — the caller filters by whether
+/// the name exists as a *local* in the defining env (via `lookup_local_cell`).
+pub fn free_vars(expr: &Expr, bound: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut free = BTreeSet::new();
+    collect_free_vars(expr, bound, &mut free);
+    free
+}
+
+fn collect_free_vars(expr: &Expr, bound: &BTreeSet<String>, free: &mut BTreeSet<String>) {
+    match expr {
+        Expr::Var(name) => {
+            if !bound.contains(name.as_str()) {
+                free.insert(name.clone());
+            }
+        }
+        Expr::Lambda { params, body } => {
+            let mut inner = bound.clone();
+            inner.extend(params.iter().cloned());
+            collect_free_vars(body, &inner, free);
+        }
+        Expr::Block { stmts, result } => {
+            let mut inner = bound.clone();
+            for stmt in stmts {
+                match stmt {
+                    Stmt::Let { name, value, .. } => {
+                        collect_free_vars(value, &inner, free);
+                        inner.insert(name.clone());
+                    }
+                    Stmt::Assign { target, value } => {
+                        collect_free_vars(target, &inner, free);
+                        collect_free_vars(value, &inner, free);
+                    }
+                    Stmt::Use { call, binding } => {
+                        collect_free_vars(call, &inner, free);
+                        if let Some(name) = binding {
+                            inner.insert(name.clone());
+                        }
+                    }
+                    Stmt::Expr(e) => collect_free_vars(e, &inner, free),
+                }
+            }
+            if let Some(e) = result {
+                collect_free_vars(e, &inner, free);
+            }
+        }
+        Expr::Match { subject, arms } => {
+            collect_free_vars(subject, bound, free);
+            for arm in arms {
+                let mut arm_bound = bound.clone();
+                arm_bound.extend(pattern_bindings(&arm.pattern));
+                if let Some(guard) = &arm.guard {
+                    collect_free_vars(guard, &arm_bound, free);
+                }
+                collect_free_vars(&arm.body, &arm_bound, free);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_free_vars(left, bound, free);
+            collect_free_vars(right, bound, free);
+        }
+        Expr::Unary { operand, .. } | Expr::Try(operand) | Expr::Spread(operand) => {
+            collect_free_vars(operand, bound, free);
+        }
+        Expr::Call { callee, args } => {
+            collect_free_vars(callee, bound, free);
+            for arg in args {
+                collect_free_vars(&arg.value, bound, free);
+            }
+        }
+        Expr::Field { object, .. } | Expr::SafeField { object, .. } => {
+            collect_free_vars(object, bound, free);
+        }
+        Expr::Index { object, index } => {
+            collect_free_vars(object, bound, free);
+            collect_free_vars(index, bound, free);
+        }
+        Expr::Range { start, end, .. } => {
+            if let Some(e) = start {
+                collect_free_vars(e, bound, free);
+            }
+            if let Some(e) = end {
+                collect_free_vars(e, bound, free);
+            }
+        }
+        Expr::If { cond, then, els } => {
+            collect_free_vars(cond, bound, free);
+            collect_free_vars(then, bound, free);
+            collect_free_vars(els, bound, free);
+        }
+        Expr::Tuple(elems) | Expr::List(elems) => {
+            for e in elems {
+                collect_free_vars(e, bound, free);
+            }
+        }
+        Expr::Map(entries) => {
+            for (k, v) in entries {
+                collect_free_vars(k, bound, free);
+                collect_free_vars(v, bound, free);
+            }
+        }
+        Expr::Str(segments) => {
+            for seg in segments {
+                if let StrSegment::Interp(e) = seg {
+                    collect_free_vars(e, bound, free);
+                }
+            }
+        }
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::SelfRef
+        | Expr::OperatorRef(_)
+        | Expr::SubjectlessMatch { .. }
+        | Expr::Placeholder(_) => {}
+    }
 }
 
 #[cfg(test)]

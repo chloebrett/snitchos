@@ -15,6 +15,66 @@ fn fsm(body: &str) -> Value {
     run_source(STIM, body)
 }
 
+/// The effect tag ("Save"/"Redraw"/"Noop") of `step(setup, key)`.
+fn step_effect(setup: &str, key: &str) -> Value {
+    fsm(&format!(
+        r#"{{ let st = step({setup}, "{key}")  match st.effect {{ Save(_) => "Save"  Redraw => "Redraw"  Noop => "Noop" }} }}"#
+    ))
+}
+
+/// The resulting mode name of `step(setup, key)`.
+fn step_mode(setup: &str, key: &str) -> Value {
+    fsm(&format!(
+        r#"{{ let st = step({setup}, "{key}")  match st.state.mode {{ Normal => "Normal"  Insert => "Insert"  Command => "Command" }} }}"#
+    ))
+}
+
+fn s(text: &str) -> Value {
+    Value::Str(text.into())
+}
+
+#[test]
+fn step_dispatches_normal_mode_keys() {
+    let start = r#"initialState("a\nb")"#;
+    // j moves down (Redraw); i enters Insert; : enters Command.
+    assert_eq!(step_effect(start, "j"), s("Redraw"));
+    assert_eq!(row_col(&format!(r#"step({start}, "j").state"#)), ints(1, 0));
+    assert_eq!(step_mode(start, "i"), s("Insert"));
+    assert_eq!(step_mode(start, ":"), s("Command"));
+    // An unbound key (`z`, and `h`/`l`) is a Noop — nothing changes.
+    assert_eq!(step_effect(start, "z"), s("Noop"));
+    assert_eq!(fsm(&format!(r#"step({start}, "z").state"#)), fsm(start));
+    assert_eq!(step_effect(start, "h"), s("Noop"));
+}
+
+#[test]
+fn step_dispatches_insert_mode_keys() {
+    let ins = r#"Editor(..initialState("ac"), col: 1, mode: Insert)"#;
+    // A printable inserts and advances; Esc→Normal; Enter splits; Backspace deletes.
+    assert_eq!(step_effect(ins, "b"), s("Redraw"));
+    assert_eq!(lines_col(&format!(r#"step({ins}, "b").state"#)), line_and_col("abc", 2));
+    assert_eq!(step_mode(ins, "Esc"), s("Normal"));
+    assert_eq!(step_mode(ins, "Enter"), s("Insert")); // split keeps Insert mode
+    assert_eq!(lines_col(&format!(r#"step({ins}, "Backspace").state"#)), line_and_col("c", 0));
+}
+
+#[test]
+fn step_colon_w_saves_the_buffer_and_returns_to_normal() {
+    let start = r#"initialState("hi\nthere")"#;
+    // The full `:w`: `:` enters Command, then `w` yields a Save effect.
+    let cmd = format!(r#"step({start}, ":").state"#);
+    assert_eq!(step_effect(&cmd, "w"), s("Save"));
+    // The Save carries the serialized buffer, and we return to Normal.
+    assert_eq!(
+        fsm(&format!(r#"{{ let st = step({cmd}, "w")  match st.effect {{ Save(t) => t  _ => "?" }} }}"#)),
+        s("hi\nthere")
+    );
+    assert_eq!(step_mode(&cmd, "w"), s("Normal"));
+    // Any other command key cancels back to Normal (a Redraw, no save).
+    assert_eq!(step_mode(&cmd, "q"), s("Normal"));
+    assert_eq!(step_effect(&cmd, "q"), s("Redraw"));
+}
+
 #[test]
 fn initial_state_splits_text_into_a_line_buffer_at_origin() {
     // "a\nb" → two lines, cursor at the origin, Normal mode.

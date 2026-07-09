@@ -13,6 +13,8 @@
 use core::str;
 use core::cell::{Cell, OnceCell, RefCell};
 
+use alloc::rc::Weak;
+
 use alloc::collections::{BTreeMap, BTreeSet};
 
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
@@ -407,6 +409,23 @@ impl Env {
     /// creation time without cloning the `BTreeSet`.
     pub fn authority_rc(&self) -> Rc<BTreeSet<String>> {
         Rc::clone(&self.authority)
+    }
+
+    /// A `Weak` reference to the globals cell — for storing in `ClosureData` to
+    /// break the `Rc<OnceCell> → map → Closure → Rc<OnceCell>` cycle.
+    /// The weak ref does not keep the globals alive: when the env (and any env
+    /// clones) are dropped, the strong count reaches 0 and the map is freed even
+    /// though closures still hold weak refs to it. During a single `eval_program`
+    /// call the env is always alive on the Rust stack, so upgrades always succeed.
+    pub fn home_globals_weak(&self) -> Weak<OnceCell<BTreeMap<String, Value>>> {
+        Rc::downgrade(&self.globals)
+    }
+
+    /// Replace the globals slot of this env with `globals`. Used in `apply_values`
+    /// to seed the call env from the closure's home globals rather than the
+    /// call-site globals — so module functions can see their own siblings.
+    pub fn with_home_globals(self, globals: Rc<OnceCell<BTreeMap<String, Value>>>) -> Env {
+        Env { globals, ..self }
     }
 
     pub fn lookup_method(&self, type_name: &str, method_name: &str) -> Option<Method> {

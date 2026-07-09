@@ -2,13 +2,14 @@
 //! *is* the program — no compilation. v0 is dynamically typed; see `value.rs`.
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use core::cell::RefCell;
 
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 
 use crate::ast::{Arg, BinOp, Expr, Item, MethodModifier, Stmt, StrSegment, Type};
 use crate::env::{AssignError, Env};
-use crate::lower::lower_program;
+use crate::lower::{free_vars, lower_program};
 use crate::natives::NATIVES;
 use crate::ops::{as_bool, eval_binary, eval_unary};
 use crate::parser::parse_program;
@@ -502,12 +503,25 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             }
             Ok(Value::Map(Rc::new(map)))
         }
-        Expr::Lambda { params, body } => Ok(Value::Closure(Rc::new(ClosureData {
-            params: params.clone(),
-            body: (**body).clone(),
-            env: env.clone(),
-            uses: None,
-        }))),
+        Expr::Lambda { params, body } => {
+            let param_set: BTreeSet<String> = params.iter().cloned().collect();
+            let candidates = free_vars(body, &param_set);
+            let upvalues: Vec<(String, Rc<RefCell<Value>>, bool)> = candidates
+                .into_iter()
+                .filter_map(|name| {
+                    env.lookup_local_cell(&name)
+                        .map(|(cell, mutable)| (name, cell, mutable))
+                })
+                .collect();
+            Ok(Value::Closure(Rc::new(ClosureData {
+                params: params.clone(),
+                body: (**body).clone(),
+                upvalues,
+                home_globals: env.home_globals_weak(),
+                authority: env.authority_rc(),
+                uses: None,
+            })))
+        }
         // `receiver.method(args)` parses as a call whose callee is a field
         // access (there is no dedicated method-call node). Intercept that shape
         // *before* evaluating the callee — `receiver.method` isn't a value on
@@ -867,15 +881,33 @@ pub(crate) fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<
             }
             let mut current_args = args.to_vec();
             loop {
-                let mut call_env = closure.env.clone();
+                // Start from a globals-only env seeded from the closure's home
+                // globals (via Weak upgrade) so that module-level siblings are
+                // visible. The Weak breaks the cycle: globals → closures → Weak
+                // → globals does NOT prevent the globals Rc from being freed.
+                // During eval_program the env is live so upgrade always succeeds;
+                // fall back to call-site globals only if the env was already freed
+                // (shouldn't happen in practice — indicates a misuse).
+                let base_env = env.globals_only();
+                let mut call_env = match closure.home_globals.upgrade() {
+                    Some(home) => base_env.with_home_globals(home),
+                    None => base_env,
+                };
+                // Restore captured locals from upvalues using the shared cells
+                // so that mutations made after closure creation are visible.
+                for (name, cell, mutable) in &closure.upvalues {
+                    call_env = call_env.extend_cell(name.clone(), Rc::clone(cell), *mutable);
+                }
                 for (param, arg) in closure.params.iter().zip(&current_args) {
                     call_env = call_env.extend(param.clone(), arg.clone());
                 }
                 // A named function runs with *exactly* its declared `uses` — authority
                 // does not inherit across the boundary (least privilege). A lambda
-                // (`uses: None`) keeps the authority of its defining env.
+                // (`uses: None`) keeps the authority captured at definition site.
                 if let Some(uses) = &closure.uses {
                     call_env = call_env.with_authority(uses.iter().cloned().collect());
+                } else {
+                    call_env = call_env.with_authority((*closure.authority).clone());
                 }
                 // Mark the closure being applied so eval_tail can detect self-tail-calls.
                 call_env = call_env.with_self_closure(Rc::clone(closure));
@@ -1178,7 +1210,9 @@ fn eval_safe_field(object: &Value, name: &str, env: &Env) -> Result<Value, Runti
             object: Box::new(Expr::Var("v".to_string())),
             name: name.to_string(),
         },
-        env: env.clone(),
+        upvalues: Vec::new(),
+        home_globals: env.home_globals_weak(),
+        authority: env.authority_rc(),
         uses: None,
     }));
     call_instance_method(object, "map", core::slice::from_ref(&accessor), env)?.ok_or_else(|| {
