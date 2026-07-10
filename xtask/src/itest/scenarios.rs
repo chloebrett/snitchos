@@ -451,6 +451,53 @@ pub fn stitch_cross_pipe_runs_a_stage(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// `workload=stitch-fs`: **stim, the editor, runs end-to-end on the metal.** Boot
+/// the REPL, `:stim` a fresh file, type a marker in insert mode, and `:w`. Three
+/// things are proven:
+///   1. the shell launches the editor — a `stim.session` span opens;
+///   2. the *edit* path works on-target — the typed marker `ZQXMARK` reaches the
+///      UART. `read_byte` does **not** echo (unlike the REPL's `read_line`), and
+///      the REPL already consumed the `:stim` line, so the marker can only appear
+///      by `renderFrame` drawing the buffer — i.e. bytes → FSM `step`/`insertChar`
+///      → `renderFrame` → console write all ran;
+///   3. the *save* path fires — a nested `stim.save` span brackets the `:w`'s
+///      `fs_write`.
+///
+/// We don't re-read the file's bytes: in-process (Phase 1) stim is a modal takeover
+/// (the REPL never returns; Ctrl-C would kill it), so a re-read has nowhere to run.
+/// The rendered marker + the save span are the Phase-1 equivalent proof; byte-level
+/// re-read waits for the Phase-2 spawned stim (where the REPL survives the child).
+pub fn stim_edits_a_file_and_saves(h: &mut View) -> Result<(), String> {
+    // The REPL is up once its boot self-test span appears.
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+
+    // Launch stim on a fresh root-level file; `:stim` resolves/creates it with a
+    // WRITE cap and the driver opens the session span.
+    h.send_input(b":stim note.txt\n")
+        .map_err(|e| format!("inject :stim: {e}"))?;
+    h.wait_for(SEC * 30, is_span_start_named("stim.session"))
+        .ok_or("no 'stim.session' span within 30s — :stim didn't launch the editor on the metal")?;
+
+    // Only now are the raw editor keys safe to send: waiting for the session span
+    // ensures the REPL's line reader has consumed the whole `:stim` line before
+    // stim starts draining raw bytes (read_byte and read_line share the console).
+    // Insert a distinctive marker, leave insert mode, and `:w`.
+    h.send_input(b"iZQXMARK\x1b:w")
+        .map_err(|e| format!("inject editor keys: {e}"))?;
+
+    // The edit reached the FSM and was drawn: read_byte doesn't echo, so ZQXMARK on
+    // the UART can only come from renderFrame painting the buffer.
+    h.wait_for_log(SEC * 30, "ZQXMARK")
+        .map_err(|e| format!("{e} — stim didn't render the edited buffer on the metal"))?;
+
+    // `:w` reached the save path — a nested save span around the fs_write.
+    h.wait_for(SEC * 30, is_span_start_named("stim.save"))
+        .ok_or("no 'stim.save' span within 30s — :w didn't reach the save path on the metal")?;
+
+    Ok(())
+}
+
 /// `workload=stitch-fs`: `hold` shows the FS endpoint's *object name* in the `for`
 /// column — the name set at endpoint creation (`init`/the kernel names it "fs")
 /// flowing kernel → `CapDesc` → `CapInfo` → the rendered table. The injected

@@ -254,6 +254,7 @@ catalog! {
     wfi "stitch-hold-lists-caps"          scenarios::stitch_hold_lists_caps         [userspace, stitch] {"stitch-repl"};
     wfi "stitch-view-reads-a-file"        scenarios::stitch_view_reads_a_file       [userspace, stitch, fs] {"stitch-fs"};
     wfi "stitch-cross-pipe-runs-a-stage"  scenarios::stitch_cross_pipe_runs_a_stage [userspace, stitch, fs] {"stitch-fs"};
+    wfi "stim-edits-a-file-and-saves"     scenarios::stim_edits_a_file_and_saves    [userspace, stitch, fs] {"stitch-fs"};
     wfi "stitch-grant-revoke-capevents"   scenarios::stitch_grant_then_revoke_snitches_capevents [userspace, stitch, fs] {"stitch-fs"};
     wfi "stitch-hold-shows-endpoint-name" scenarios::stitch_hold_names_the_fs_endpoint [userspace, stitch, fs] {"stitch-fs"};
     cpu "mutex-storm"                     scenarios::mutex_storm                    [smp, stress]   {"mutex-storm"};
