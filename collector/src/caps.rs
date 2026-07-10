@@ -50,9 +50,10 @@ impl CapTracker {
             return;
         }
         match kind {
-            CapEventKind::Granted | CapEventKind::Transferred => {
+            CapEventKind::Granted | CapEventKind::Transferred | CapEventKind::Minted => {
                 let event_name = match kind {
                     CapEventKind::Granted => "granted",
+                    CapEventKind::Minted => "minted",
                     _ => "transferred",
                 };
                 let ev = SpanEvent {
@@ -327,6 +328,40 @@ mod tests {
         assert_eq!(events[0].time_ns, 10);
         assert_eq!(events[1].name, "revoked");
         assert_eq!(events[1].time_ns, 90);
+    }
+
+    fn mint(
+        tracker: &mut CapTracker,
+        cap_id: u64,
+        holder: u32,
+        t: u128,
+        name: [u8; CAP_NAME_LEN],
+    ) {
+        tracker.observe(
+            CapEventKind::Minted,
+            cap_id,
+            0,
+            holder,
+            CapObject::Endpoint,
+            0b0110,
+            0,
+            t,
+            name,
+        );
+    }
+
+    #[test]
+    fn minted_event_opens_holding_named_minted() {
+        let mut tracker = CapTracker::new();
+        mint(&mut tracker, 1, 3, 10, packed_name("fs"));
+        revoke(&mut tracker, 1, 3, 90);
+        let spans = tracker.drain_closed();
+        assert_eq!(spans.len(), 1);
+        let events = &spans[0].events;
+        assert_eq!(events[0].name, "minted");
+        assert_eq!(events[0].time_ns, 10);
+        assert_eq!(events[1].name, "revoked");
+        assert_eq!(spans[0].name, "fs");
     }
 
     #[test]

@@ -218,6 +218,21 @@ mod tests {
     }
 
     #[test]
+    fn minted_cap_renders_as_a_root_node() {
+        // A self-minted endpoint (parent 0) is a derivation-tree root, exactly
+        // like a `Granted` root — the tree builder keys on `parent_cap_id`, not
+        // the kind. A child keeps it from being dropped as an isolated node.
+        let mut root = cap_event(CapEventKind::Minted, 1, 0, 6, CapObject::Endpoint);
+        if let OwnedFrame::CapEvent { name, .. } = &mut root {
+            *name = snitchos_abi::pack_name("fs");
+        }
+        let child = cap_event(CapEventKind::Transferred, 2, 1, 7, CapObject::Endpoint);
+        let mermaid = derivation_tree(&[root, child]).to_mermaid();
+        assert!(mermaid.contains("cap1[\"#1 fs h6\"]"), "minted cap is a node");
+        assert!(mermaid.contains("cap1 --> cap2"), "minted cap roots its child");
+    }
+
+    #[test]
     fn shows_decoded_rights_in_the_label() {
         use snitchos_abi::rights;
         let mut root = cap_event(CapEventKind::Granted, 1, 0, 6, CapObject::Endpoint);

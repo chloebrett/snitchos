@@ -2,7 +2,7 @@
 source: protocol/tests/wire_stability.rs
 expression: out
 ---
-PROTOCOL_VERSION = 6
+PROTOCOL_VERSION = 7
 
 == Frame variants (discriminant = first byte; append at END) ==
 Hello            00 01 06
@@ -27,6 +27,7 @@ NotifyWait       10 01 02 03 04 05
 CapEventKind::Granted        00
 CapEventKind::Transferred    01
 CapEventKind::Revoked        02
+CapEventKind::Minted         03
 CapObject::TelemetrySink     00
 CapObject::SpanSink          01
 CapObject::Endpoint          02

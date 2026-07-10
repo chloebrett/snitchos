@@ -302,6 +302,35 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_a_minted_cap_event_over_postcard() {
+        // `Minted` is the newest CapEventKind discriminant (appended after
+        // Revoked — self-minted-via-syscall provenance). Encode + decode over
+        // postcard so a future reorder — which would silently break the wire —
+        // fails this test.
+        let frame = Frame::CapEvent {
+            kind: CapEventKind::Minted,
+            cap_id: 88,
+            parent_cap_id: 0,
+            holder: 5,
+            object: CapObject::Endpoint,
+            rights: 0b0110,
+            badge: 0,
+            t: 456,
+            hart_id: 1,
+            name: [0; snitchos_abi::CAP_NAME_LEN],
+        };
+        let mut buf = [0u8; 64];
+        let encoded_len = postcard::to_slice(&frame, &mut buf).unwrap().len();
+        let (decoded, _) = try_decode_frame(&buf[..encoded_len]).expect("decode should succeed");
+        assert_eq!(decoded, frame, "Minted CapEvent survives the wire intact");
+        // And it converts to the owned form (the harness/collector path).
+        assert!(matches!(
+            OwnedFrame::from_borrowed(&frame),
+            OwnedFrame::CapEvent { kind: CapEventKind::Minted, cap_id: 88, holder: 5, .. },
+        ));
+    }
+
+    #[test]
     fn truncated_returns_unexpected_end() {
         let frame = Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 };
         let mut buf = [0u8; 64];

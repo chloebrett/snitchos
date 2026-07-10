@@ -36,7 +36,10 @@ pub mod stream;
 ///   - 6: appended `name` to `Frame::CapEvent` (the object's human name, for the
 ///     host-reconstructed *named* derivation tree — see `docs/capability-names-design.md`).
 ///     A breaking positional field-add on an existing variant, so it bumps.
-pub const PROTOCOL_VERSION: u8 = 6;
+///   - 7: appended `CapEventKind::Minted` (self-minted-via-syscall provenance —
+///     `EndpointCreate`/`NotifyCreate`). Additive enum variant; old captures never
+///     carry it, but an old decoder can't read a new one.
+pub const PROTOCOL_VERSION: u8 = 7;
 
 /// A received `Hello.protocol_version` disagreed with the version this build
 /// speaks. Names both sides so the consumer can say exactly what diverged.
@@ -254,6 +257,14 @@ pub enum CapEventKind {
   /// reclaim half of the grant→use→reclaim lifecycle. (Appended — postcard is
   /// positional.) See `docs/cap-revocation-design.md`.
   Revoked,
+  /// A capability the holder **created itself via a syscall** — `EndpointCreate`
+  /// or `NotifyCreate` (self-service provenance). Distinct from `Granted`
+  /// (authority installed by the kernel at spawn — bootstrap sinks, the
+  /// `run_ipc` endpoint) and `Transferred` (derived from a parent you hold). The
+  /// predicate is *which handler emits it*: only the two Create syscalls, so
+  /// there is no ambiguous case. `parent_cap_id` is `0` (a derivation-tree root).
+  /// (Appended — postcard is positional.) See `docs/capability-system-design.md`.
+  Minted,
 }
 
 /// What a [`Frame::CapEvent`]'s capability points at. v0.7b has one object

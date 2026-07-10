@@ -59,7 +59,7 @@ fn wire_encoding_is_stable() {
     let mut enum_arm = |label: String, bytes: Vec<u8>| {
         writeln!(out, "{label:<28} {}", hex(&bytes)).unwrap();
     };
-    for k in [CapEventKind::Granted, CapEventKind::Transferred, CapEventKind::Revoked] {
+    for k in [CapEventKind::Granted, CapEventKind::Transferred, CapEventKind::Revoked, CapEventKind::Minted] {
         enum_arm(format!("CapEventKind::{k:?}"), enc(&k));
     }
     for o in [CapObject::TelemetrySink, CapObject::SpanSink, CapObject::Endpoint, CapObject::Reply, CapObject::Notification] {
