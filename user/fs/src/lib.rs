@@ -133,6 +133,15 @@ pub fn serve<F: Filesystem>(mut fs: F) -> ! {
             Request::GetXattr { key, dst } => {
                 get_xattr(&mut fs, reply_handle, badge, key, dst);
             }
+            Request::Truncate { len } => {
+                // The rights gate above already refused this without WRITE. Resize
+                // the badged file; reply with the new length as the count.
+                let resp = match fs.truncate(badge.inode, len) {
+                    Ok(()) => Response::Count(len),
+                    Err(e) => Response::Err(e),
+                };
+                let _ = reply(reply_handle, resp.encode());
+            }
         }
     }
 }

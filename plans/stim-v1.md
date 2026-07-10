@@ -367,7 +367,7 @@ unaffected). `Vec::resize(len, 0)` gives shrink-drop + grow-zero-fill in one cal
 3 ramfs tests (shrink, grow, dir→`IsADir`); 20 ramfs green; fs-core builds;
 mutation-clean (1/1 — the no-op mutant dies on the shrink test).
 
-#### Step 3.3: `fs_proto::Op::Truncate = 8` + `Request::Truncate{len}` + fs-server handler
+#### Step 3.3: `fs_proto::Op::Truncate = 8` + `Request::Truncate{len}` + fs-server handler — ✅ DONE (2026-07-10)
 **Touches**: `fs-proto/src/lib.rs` (**append** `Op::Truncate = 8` — never reorder;
 positional wire), `user/fs/src/lib.rs` (`fs::serve` dispatch). **Design**: wire
 `kind_to/from_wire`, `Request`/`Response`, `required_right(Truncate) = WRITE`; server
@@ -375,6 +375,15 @@ calls `fs.truncate(badge-inode, len)`.
 **Acceptance**: a `Truncate` truncates the badged file (WRITE required; **refused +
 snitched without it**). **RED**: proto round-trip + server-handler + refusal tests.
 **Mutants**: the rights gate, the op-discriminant mapping.
+DONE: `Op::Truncate = 8` appended (+`ALL`[9], `from_u8`); `Request::Truncate{len}`
+(`[op, len, 0, 0]`); `required_right` folds it into the `WRITE` arm; success reply =
+`Response::Count(new_len)`. Server: one dispatch arm — the **generic `check_rights`
+gate auto-refuses without WRITE** (→ `Denied`, snitched), so no per-op gate code.
+`fs` compiles clean for riscv. Proto tests: dedicated round-trip + rights + folded
+into the 3 exhaustive loops (`every_op/request/response`); renamed the stale
+`read_and_write_are_the_only_gated_ops`. 37 fs-proto green; **mutation-clean on the
+gate + opcode map** (11 caught / 2 unviable / 0 missed). *(Server dispatch isn't
+host-testable — `serve` is `-> !` over IPC; covered by the Group-5 boot itest.)*
 
 #### Step 3.4: `Platform::fs_write(fileHandle, bytes)` — Truncate-then-Write through a delegated cap
 **Touches**: `stitch/src/platform.rs`. **Design** (per the decision above): NOT a

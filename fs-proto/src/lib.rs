@@ -95,11 +95,14 @@ pub enum Op {
     Readdir = 6,
     /// Read an inode-attached extended attribute (e.g. the `user.iface` manifest).
     GetXattr = 7,
+    /// Resize a file to an exact length (shrink drops trailing bytes, grow
+    /// zero-fills). WRITE-gated. **Appended** — opcodes never renumber.
+    Truncate = 8,
 }
 
 impl Op {
     /// Every opcode, for exhaustive round-trip testing and dispatch tables.
-    pub const ALL: [Op; 8] = [
+    pub const ALL: [Op; 9] = [
         Op::Lookup,
         Op::Stat,
         Op::Read,
@@ -108,6 +111,7 @@ impl Op {
         Op::Remove,
         Op::Readdir,
         Op::GetXattr,
+        Op::Truncate,
     ];
 
     #[must_use]
@@ -126,6 +130,7 @@ impl Op {
             5 => Some(Op::Remove),
             6 => Some(Op::Readdir),
             7 => Some(Op::GetXattr),
+            8 => Some(Op::Truncate),
             _ => None,
         }
     }
@@ -236,7 +241,7 @@ impl core::ops::BitAnd for FileRights {
 pub const fn required_right(op: Op) -> Option<FileRights> {
     match op {
         Op::Read => Some(FileRights::READ),
-        Op::Write => Some(FileRights::WRITE),
+        Op::Write | Op::Truncate => Some(FileRights::WRITE),
         Op::Stat | Op::Lookup | Op::Create | Op::Remove | Op::Readdir | Op::GetXattr => None,
     }
 }
@@ -291,6 +296,8 @@ pub enum Request {
     Remove { name: UserBuf },
     Readdir { index: u64, name_dst: UserBuf },
     GetXattr { key: XattrKey, dst: UserBuf },
+    /// Resize the badged file to `len` bytes. WRITE-gated.
+    Truncate { len: u64 },
 }
 
 impl Request {
@@ -306,6 +313,7 @@ impl Request {
             Request::Remove { .. } => Op::Remove,
             Request::Readdir { .. } => Op::Readdir,
             Request::GetXattr { .. } => Op::GetXattr,
+            Request::Truncate { .. } => Op::Truncate,
         }
     }
 
@@ -321,6 +329,7 @@ impl Request {
             Request::Create { name, kind } => [op, name.ptr, name.len, kind_to_wire(kind)],
             Request::Readdir { index, name_dst } => [op, index, name_dst.ptr, name_dst.len],
             Request::GetXattr { key, dst } => [op, key.to_u64(), dst.ptr, dst.len],
+            Request::Truncate { len } => [op, len, 0, 0],
         }
     }
 
@@ -345,6 +354,7 @@ impl Request {
                 key: XattrKey::from_u64(w1).ok_or(WireError::BadKind(w1))?,
                 dst: UserBuf { ptr: w2, len: w3 },
             },
+            Op::Truncate => Request::Truncate { len: w1 },
         })
     }
 }
@@ -406,7 +416,7 @@ impl Response {
         }
         Ok(match op {
             Op::Stat => Response::Stat(Stat { kind: kind_from_wire(w1)?, size: w2 }),
-            Op::Read | Op::Write | Op::GetXattr => Response::Count(w1),
+            Op::Read | Op::Write | Op::GetXattr | Op::Truncate => Response::Count(w1),
             Op::Lookup | Op::Create => Response::Inode(InodeId::new(w1 as u32)),
             Op::Remove => Response::Removed,
             Op::Readdir => {
@@ -600,6 +610,7 @@ mod tests {
             Request::Create { name: buf(0x4000, 9), kind: NodeKind::File },
             Request::Remove { name: buf(0x5000, 5) },
             Request::Readdir { index: 3, name_dst: buf(0x6000, 256) },
+            Request::Truncate { len: 128 },
         ];
 
         for req in reqs {
@@ -651,6 +662,7 @@ mod tests {
             (Op::Create, Response::Inode(InodeId::new(9))),
             (Op::Remove, Response::Removed),
             (Op::Readdir, Response::Entry { ino: InodeId::new(3), kind: NodeKind::File, name_len: 5 }),
+            (Op::Truncate, Response::Count(128)),
         ];
 
         for (op, resp) in cases {
@@ -706,12 +718,25 @@ mod tests {
     }
 
     #[test]
-    fn read_and_write_are_the_only_gated_ops() {
+    fn read_write_and_truncate_are_the_gated_ops() {
         assert_eq!(required_right(Op::Read), Some(FileRights::READ));
         assert_eq!(required_right(Op::Write), Some(FileRights::WRITE));
+        // Truncate mutates file data, so it is WRITE-gated like Write.
+        assert_eq!(required_right(Op::Truncate), Some(FileRights::WRITE));
         for op in [Op::Stat, Op::Lookup, Op::Create, Op::Remove, Op::Readdir, Op::GetXattr] {
             assert_eq!(required_right(op), None);
         }
+    }
+
+    #[test]
+    fn truncate_request_round_trips_and_carries_its_length() {
+        let req = Request::Truncate { len: 42 };
+        assert_eq!(Request::decode(req.encode()), Ok(req));
+        // op in w0, the new length in w1, the rest padding.
+        assert_eq!(req.encode(), [u64::from(Op::Truncate.to_u8()), 42, 0, 0]);
+        // Refused without WRITE, allowed with it.
+        assert_eq!(check_rights(Op::Truncate, FileRights::READ), Err(FileRights::WRITE));
+        assert_eq!(check_rights(Op::Truncate, FileRights::WRITE), Ok(()));
     }
 
     #[test]
