@@ -438,28 +438,85 @@ read-only refusal), and tracing.
 
 ### Group 4 — Driver + shell integration
 
-#### Step 4.1: the `stim` driver loop (read byte → `step` → perform effect)
-**Acceptance**: end-to-end against `FakePlatform` — scripted keys + a seeded file,
-run to a `:w`, assert the final file content and the emitted console frames.
-*Sub-decision (record in the step):* native trampoline calling the Stitch
-`step`/`render` closures (default) vs. a Stitch loop (needs interpreter TCO —
-defer). **RED**: a full scripted-session test asserting saved bytes.
+**Design pass (2026-07-10).** Decisions: **#2 native trampoline first** (the Stitch-loop
+variant — now unblocked by B4 — is a post-v1 thesis follow-up); **#6 `:stim <path>` is a
+REPL command** (parallel to `:load`, not a native).
 
-#### Step 4.2: `stim <file>` from the Stitch shell — resolve, create-if-absent, delegate the file cap; enforce read-only
-**Acceptance**: the shell resolves the file path (**create-if-absent** — the write
-side of the resolver that Group-3 `fs_write` deliberately does *not* do), delegates
-its cap into stim at a known handle, and shows the grant (`CapEvent`); with only a
-read cap, `:w` is a snitched `SyscallRefused` (**kernel-enforced** via the delegated
-cap's missing `WRITE` — per the Group-3 decision). The driver passes that handle to
-`fsWrite` on a `Save` effect.
-**RED**: a shell-level test (read+write → save works; read-only → refusal snitches).
+**★ Core constraint that shapes the whole group:** 4.1's acceptance drives the loop
+against `FakePlatform` (a host test), so the **driver logic must be host-buildable and
+`Platform`-generic**. Since `apply_values` is `pub(crate)`, that means it lives *in* the
+`stitch` crate as a new **`stitch::stim`** module (`pub fn run<…>(…)` over `Rc<dyn
+Platform>`), using crate-internal `apply_values` / `build_env` / `Value` — **no public
+embedding API to build** (the phase-2 Stitch loop would shrink the Rust side anyway, so
+don't over-invest here). The on-target `:stim` command is a thin wrapper that constructs
+the real backends and calls the same `run`.
+
+**★ #4 DECIDED (user, 2026-07-10): spawn a least-authority process — but in-process
+first** (a phase split like #2). **Phase 1:** `:stim` calls `run` **in-process** (stim
+runs inside the REPL, read-only still real via the file cap's rights). **Phase 2 (the
+thesis):** `:stim` Spawns a least-authority `stim` process holding only telemetry + span
++ console + the one file cap, whose `main` reads the cap at `delegated_handle(0)` and
+calls the same `run`. The shared `run` means Phase 2 only swaps the thin wrapper.
+
+#### Step 4.1: the `stim` driver loop — `stitch::stim::run` (native trampoline) — ⏳ IMPLEMENTED (2026-07-10), verify pending
+**Status**: `stitch/src/stim.rs` written (RED tests + `run` + helpers); **compile/test
+blocked by concurrent Phase C churn in `interp.rs`** — verified by inspection (all
+entry points check out: `prelude_items`/`parse_program`/`lower_program(&mut items)`→
+`&mut [Item]` coerce/`build_env`/`env.lookup`/`apply_values`; `RuntimeError::new` takes
+`Into<String>`; `Value::Data{variant,fields:(Option<String>,Value)}`). Run
+`cargo test -p stitch --lib a_scripted_session` once the tree compiles. Used
+`apply_values` (pub(crate)) not `eval_call` (private). 3 tests: edit→`:w`→saved bytes
++ drew frame; no-`:w`→no save; read-only (`deny_writes`)→refused, records nothing.
+Still TODO after verify: MUTATE (`byte_to_key` arms, effect dispatch).
+
+**Touches**: new `stitch/src/stim.rs`. **Design**:
+`run(source, file_content, file_handle, platform)` —
+1. `build_env(prelude + parse(source))` **once** (heeds the B5 leak finding — env built
+   once, closures applied per key, never `eval_program` per key).
+2. look up the `initialState` / `step` / `renderFrame` closures (`env.lookup`);
+   `state = apply(initialState, [Str(content)])`; perform one initial Redraw.
+3. loop: `platform.read_byte()` → `None` ends the loop (fake EOF / test end; the metal
+   blocks, so on-target it runs till Ctrl-C). `Some(b)` → `key = byte_to_key(b)` →
+   `stepv = apply(step, [state, Str(key)])` → pull `state`/`effect` fields off the `Step`
+   record → perform: **Redraw** `platform.write(apply(renderFrame,[state]))`; **Save(text)**
+   `platform.fs_write(file_handle, text.bytes)`; **Noop** nothing.
+- `byte_to_key(u8)`: `0x1b`→`"Esc"`, `0x0d|0x0a`→`"Enter"`, `0x7f|0x08`→`"Backspace"`,
+  else `char::from(b)` — the raw-byte→token map the FSM's 2.9 protocol assumes (keeps
+  encodings out of the FSM). Small Rust helper, host-tested.
+- Marshalling helpers (local): `field(&Value,&str)->Option<&Value>` over a Data record's
+  fields; effect-variant match on `Value::Data{variant,fields}`.
+**Acceptance**: end-to-end against `FakePlatform` — scripted keys + a seeded file, run to
+`:w`, assert `fake.writes()` (saved bytes) and `fake.output()` (console frames).
+**RED**: a full scripted-session test asserting the saved bytes. *(Source = `include_str!`
+of `fs-image/stim/stim.st`, as in `stim_fsm.rs`.)* **Mutants**: `byte_to_key` arms, the
+effect dispatch.
+
+#### Step 4.2: `:stim <file>` from the shell — resolve, create-if-absent, delegate the file cap; enforce read-only
+**Touches**: `user/hello/src/bin/stitch_repl.rs` (`:stim` handler), a new
+**write-capable path resolver** (all existing client walkers request `READ` only — audit),
+and (per #4) a spawnable `stim` binary + `SPAWNABLE` entry.
+**Design**: `:stim <path>` → resolve the path walking with `READ|WRITE`, **create-if-absent**
+(the write side Group-3 `fs_write` deliberately skips — `Create` then the file cap), then
+Spawn `stim` delegating `[file cap]` (+ bootstrap telemetry/span, console). `stim`'s `main`
+reads the file cap at `delegated_handle(0)`, reads its content through it, and calls
+`stitch::stim::run(<compiled-in source>, content, handle, RuntimePlatform)`.
+**Acceptance**: read+write file → `:w` saves; a **read-only** cap → `:w`'s `fsWrite` →
+kernel-refused (`SyscallRefused` snitched) → `false`; the grant shows a `CapEvent`.
+**RED**: a shell-level test (save works with WRITE; read-only refusal snitches). *(The
+resolver + Spawn wiring is on-target; the read-only *refusal semantics* are already
+host-tested at 3.4 via `deny_writes` — this step proves the metal path + the shell glue.)*
 
 #### Step 4.3: tracing — a session root span + a span per `:w`
-**Acceptance**: opening stim starts a session span; each `:w` opens a nested span;
-both appear on the wire (via the `Telemetry` seam). **RED**: assert the span
-sequence from a scripted session.
+**Touches**: `stitch/src/stim.rs` (the driver emits, since the FSM is pure). **Design**:
+`run` opens a `stim.session` span for the whole loop and a nested `stim.save` span around
+each `Save`-effect `fs_write`, through the env's `Telemetry` seam (same one `emit`/`span`
+use).
+**Acceptance**: a scripted session emits the session span then a nested save span per `:w`.
+**RED**: assert the span sequence from a scripted `run` (host, via the recording telemetry —
+`run_program_events`-style).
 
-*PR boundary: "stim driver + shell invocation + tracing."*
+*PR boundary: "stim driver + shell invocation + tracing" (4.1 host-testable + mutation-
+tested; 4.2/4.3's on-target glue proven by the Group-5 boot itest).*
 
 ---
 

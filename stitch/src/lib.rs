@@ -40,6 +40,7 @@ pub mod platform;
 pub mod render;
 pub mod registry;
 pub mod runner;
+pub mod stim;
 pub mod telemetry;
 pub mod value;
 pub mod wire;
