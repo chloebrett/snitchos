@@ -261,28 +261,64 @@ the actual desugar logic, which is what carries risk.
 
 ---
 
-### Step C4: Interpreter evaluates CoreExpr; delete the old path
+### Step C4: Interpreter evaluates CoreExpr; delete the old path — IN PROGRESS
 
-**What**:
+**Groundwork done (2026-07-10):** `lower::free_vars_core(&CoreExpr, &BTreeSet<String>)`
+— the CoreExpr analog of `free_vars`, needed by `eval_core`'s `Lambda` arm to capture
+upvalues. Additive, green (564 tests).
 
-**(a) `eval_core(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError>`** — new
-evaluator matching `CoreExprKind` arms; `eval_tail_core` for the trampoline. Written
-alongside the existing `eval` so tests stay green throughout.
+**The cutover is atomic** — `ClosureData.body` can't be both `Expr` and `Rc<CoreExpr>`,
+so there is no green intermediate until it all lands. Execute as one focused push in
+this order, then run the 564-suite:
 
-**(b) `ClosureData.body: Expr → Rc<CoreExpr>`** — the code-ref switch lands here (the
-former "C4", partly done via upvalue capture 2026-07-09; the body-type change is the
-remaining piece). Closure creation `Rc::clone`s the body instead of deep-cloning.
+**Seam map (from the interp.rs survey):**
+- `ClosureData.body: Expr` is **read at exactly one site**: `apply_values` →
+  `eval_tail(&closure.body, …)` (interp.rs ~922). Constructed at 3 sites: the `Lambda`
+  eval arm (interp.rs ~516), the `eval_safe_field` accessor (~1207), and
+  `registry::register_items` for `Item::Func` (~92).
+- `apply_values` and **all of `natives.rs` are Value-level** — natives need zero
+  changes (`NativeFn.func` is `fn(&[Value], &Env)`; the 13 `apply_values` call sites
+  all pass `&Value` + `&[Value]`).
 
-**(c) Wire-up**: `build_env_with_backends` calls `lower_items_to_core` and registers
-`CoreItem`s; `apply_values` calls `eval_core`. When all 544+ tests pass through the
-new path, **delete** the old `eval(&Expr, …)` and the in-place `lower_program`.
+**EXPR-WALKING functions to mirror as `_core` (take `&CoreExpr`/`&[CoreArg]`/
+`&[CoreStmt]`/`&[CoreMatchArm]`/`&[CoreStrSegment]`):** `eval`→`eval_core`,
+`eval_tail`→`eval_tail_core`, `eval_call`, `eval_method_call`, `eval_pipe`,
+`eval_cross_pipe`, `stage_name`, `construct` (handles `CoreExprKind::Spread`),
+`eval_string`, `eval_range`+`eval_int`, `eval_block`, `assign_place`,
+`is_assignable_place`, and the `eval_safe_field` accessor (builds an `Rc<CoreExpr>`
+body now). In `pattern.rs`: `eval_match(&Value, &[CoreMatchArm], …)` — its helper
+`try_match` is Value-level and reused unchanged (`CoreMatchArm.pattern` is `ast::Pattern`).
 
-**TDD order**:
-1. RED: an integration test running a program through `lower_items_to_core` +
-   `eval_core` directly, asserting the result — before full wire-up.
-2. GREEN: implement `eval_core` arm by arm against the existing behavior suite.
-3. Wire the default path over; all 544+ green through the new evaluator.
-4. Delete the old `eval` + in-place `lower_program`; `body: Expr` field is gone.
+**VALUE-LEVEL, reused as-is:** `eval_binary`/`eval_unary`/`as_bool` (ops.rs),
+`apply_values`, `make_data`, `eval_index`, `eval_field`, `eval_try`, `range_seq`,
+`assign_binding`, `rebuild_with_field`, `some`/`none`, `try_match`.
+
+**Two `Expr` dependencies to resolve:**
+1. **Method bodies** (`env.lookup_method` returns `ast::Method` with `body: Option<Expr>`).
+   Decision: **lower method bodies to core on-the-fly** in `eval_core`'s method path
+   (`lower_expr_to_core(&method.body)` then `eval_core`). Keeps the method table as
+   `Vec<Method>` — no `env.rs`/registry method-table refactor. Noted perf follow-up
+   (re-lowers per call; cache or store `CoreMethod` later).
+2. **Lambda upvalues** use `free_vars` over the body — `eval_core`'s `Lambda` arm uses
+   `free_vars_core` (done) over the `Rc<CoreExpr>` body.
+
+**Edit order:**
+1. `ClosureData.body: Expr → Rc<CoreExpr>` (value.rs).
+2. Write `eval_core` + all `_core` mirrors (interp.rs) + `eval_match` core arm (pattern.rs).
+3. Fix the 3 `ClosureData` construction sites to build `Rc<CoreExpr>` bodies
+   (Lambda arm uses `free_vars_core`; accessor builds a core `Field`; registry lowers
+   the func body via `lower_expr_to_core`).
+4. `apply_values` → `eval_tail_core(&closure.body, …)`.
+5. Wire entry points: `build_env_in` / the `eval_program_with_*` fns lower the
+   top-level expr + items to core and call `eval_core`. Check const-value evaluation.
+6. Delete the old `eval` + expr-walking helpers + the `lower_program` entry point
+   (the desugar helpers `lower_expr`/`lower_block`/etc. stay — they back
+   `lower_expr_to_core`).
+7. Run the 564-suite; fix. Then mutation-check the desugars + `to_core` (deferred
+   from C3) now that behavioral coverage flows through the core path.
+
+**Post-cutover expectation:** all 564 green through `eval_core`; `body: Expr` gone;
+one evaluator.
 
 ---
 

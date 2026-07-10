@@ -685,6 +685,120 @@ fn collect_free_vars(expr: &Expr, bound: &BTreeSet<String>, free: &mut BTreeSet<
     }
 }
 
+/// The free variables in a *core* expression — the analog of [`free_vars`] over the
+/// desugared core IR. Used by `eval_core`'s `Lambda` arm to capture upvalues. The
+/// core IR has no surface-only nodes, so this is a strict subset of the surface
+/// walk (no `Placeholder`/`OperatorRef`/`SubjectlessMatch`, and `CoreStmt` has no
+/// `Use`).
+#[must_use]
+pub fn free_vars_core(expr: &CoreExpr, bound: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut free = BTreeSet::new();
+    collect_free_vars_core(expr, bound, &mut free);
+    free
+}
+
+fn collect_free_vars_core(expr: &CoreExpr, bound: &BTreeSet<String>, free: &mut BTreeSet<String>) {
+    match &expr.kind {
+        CoreExprKind::Var(name) => {
+            if !bound.contains(name.as_str()) {
+                free.insert(name.clone());
+            }
+        }
+        CoreExprKind::Lambda { params, body } => {
+            let mut inner = bound.clone();
+            inner.extend(params.iter().cloned());
+            collect_free_vars_core(body, &inner, free);
+        }
+        CoreExprKind::Block { stmts, result } => {
+            let mut inner = bound.clone();
+            for stmt in stmts {
+                match stmt {
+                    CoreStmt::Let { name, value, .. } => {
+                        collect_free_vars_core(value, &inner, free);
+                        inner.insert(name.clone());
+                    }
+                    CoreStmt::Assign { target, value } => {
+                        collect_free_vars_core(target, &inner, free);
+                        collect_free_vars_core(value, &inner, free);
+                    }
+                    CoreStmt::Expr(e) => collect_free_vars_core(e, &inner, free),
+                }
+            }
+            if let Some(e) = result {
+                collect_free_vars_core(e, &inner, free);
+            }
+        }
+        CoreExprKind::Match { subject, arms } => {
+            collect_free_vars_core(subject, bound, free);
+            for arm in arms {
+                let mut arm_bound = bound.clone();
+                arm_bound.extend(pattern_bindings(&arm.pattern));
+                if let Some(guard) = &arm.guard {
+                    collect_free_vars_core(guard, &arm_bound, free);
+                }
+                collect_free_vars_core(&arm.body, &arm_bound, free);
+            }
+        }
+        CoreExprKind::Binary { left, right, .. } => {
+            collect_free_vars_core(left, bound, free);
+            collect_free_vars_core(right, bound, free);
+        }
+        CoreExprKind::Unary { operand, .. }
+        | CoreExprKind::Try(operand)
+        | CoreExprKind::Spread(operand) => {
+            collect_free_vars_core(operand, bound, free);
+        }
+        CoreExprKind::Call { callee, args } => {
+            collect_free_vars_core(callee, bound, free);
+            for arg in args {
+                collect_free_vars_core(&arg.value, bound, free);
+            }
+        }
+        CoreExprKind::Field { object, .. } | CoreExprKind::SafeField { object, .. } => {
+            collect_free_vars_core(object, bound, free);
+        }
+        CoreExprKind::Index { object, index } => {
+            collect_free_vars_core(object, bound, free);
+            collect_free_vars_core(index, bound, free);
+        }
+        CoreExprKind::Range { start, end, .. } => {
+            if let Some(e) = start {
+                collect_free_vars_core(e, bound, free);
+            }
+            if let Some(e) = end {
+                collect_free_vars_core(e, bound, free);
+            }
+        }
+        CoreExprKind::If { cond, then, els } => {
+            collect_free_vars_core(cond, bound, free);
+            collect_free_vars_core(then, bound, free);
+            collect_free_vars_core(els, bound, free);
+        }
+        CoreExprKind::Tuple(elems) | CoreExprKind::List(elems) => {
+            for e in elems {
+                collect_free_vars_core(e, bound, free);
+            }
+        }
+        CoreExprKind::Map(entries) => {
+            for (k, v) in entries {
+                collect_free_vars_core(k, bound, free);
+                collect_free_vars_core(v, bound, free);
+            }
+        }
+        CoreExprKind::Str(segments) => {
+            for seg in segments {
+                if let CoreStrSegment::Interp(e) = seg {
+                    collect_free_vars_core(e, bound, free);
+                }
+            }
+        }
+        CoreExprKind::Int(_)
+        | CoreExprKind::Float(_)
+        | CoreExprKind::Bool(_)
+        | CoreExprKind::SelfRef => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
