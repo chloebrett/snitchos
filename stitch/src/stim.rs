@@ -157,6 +157,16 @@ mod tests {
     }
 
     #[test]
+    fn the_enter_and_backspace_bytes_map_to_their_key_tokens() {
+        // Type "ab", then CR (0x0d) splits into two lines, then DEL (0x7f) joins
+        // them back, then `:w`. The saved buffer is "ab" only if the raw CR/DEL
+        // bytes reached the FSM as the "Enter"/"Backspace" tokens.
+        let fake = FakePlatform::with_bytes(b"iab\x0d\x7f\x1b:w");
+        run(STIM, "", 7, &fake).expect("stim session should run");
+        assert_eq!(fake.writes(), vec![(7u32, b"ab".to_vec())]);
+    }
+
+    #[test]
     fn a_read_only_cap_refuses_the_save_and_records_nothing() {
         // `deny_writes` models a read-only file cap (the kernel refusal the metal
         // surfaces as `false`). `:w` routes to `fs_write`, which is refused.
