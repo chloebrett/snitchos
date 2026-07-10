@@ -1,7 +1,11 @@
 //! Abstract syntax tree. Grows one node per parser increment.
 
+use core::fmt;
+
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
+
+use crate::lexer::Span;
 
 /// A top-level declaration in a program.
 #[derive(Debug, PartialEq, Clone)]
@@ -139,9 +143,46 @@ pub enum Type {
     SelfType,
 }
 
-/// An expression.
+/// An expression node: its shape ([`ExprKind`]) plus the source [`Span`] it was
+/// parsed from. Spans are metadata, not identity — [`PartialEq`] compares only
+/// `kind`, and [`Debug`] forwards to `kind`, so structural equality assertions
+/// and snapshot tests ignore positions (spans get dedicated span tests).
+#[derive(Clone)]
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+impl fmt::Debug for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.kind.fmt(f)
+    }
+}
+
+impl Expr {
+    /// A node with a real source span.
+    #[must_use]
+    pub fn new(kind: ExprKind, span: Span) -> Self {
+        Self { kind, span }
+    }
+
+    /// A node with the default (zero) span — for synthesised nodes (desugars,
+    /// tests) that have no single source origin.
+    #[must_use]
+    pub fn bare(kind: ExprKind) -> Self {
+        Self { kind, span: Span::default() }
+    }
+}
+
+impl PartialEq for Expr {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
+/// The shape of an expression.
 #[derive(Debug, PartialEq, Clone)]
-pub enum Expr {
+pub enum ExprKind {
     Int(i64),
     Float(f64),
     Bool(bool),

@@ -3,7 +3,7 @@
 //! The parser emits a faithful surface AST; this pass is the single home for
 //! all desugaring. Current desugars:
 //!
-//!   - `SubjectlessMatch { arms, default }` → nested `Expr::If` chains
+//!   - `SubjectlessMatch { arms, default }` → nested `ExprKind::If` chains
 //!   - `Stmt::Use { binding, call }` → `call(..args, binding -> { rest })`
 
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
@@ -11,7 +11,7 @@ use crate::prelude::*;
 
 use alloc::collections::BTreeSet;
 
-use crate::ast::{Arg, BinOp, Expr, Item, MatchArm, Method, Pattern, Stmt, StrSegment};
+use crate::ast::{Arg, BinOp, Expr, ExprKind, Item, MatchArm, Method, Pattern, Stmt, StrSegment};
 
 /// Lower a single expression in place (e.g. for a REPL line or a test `run`).
 pub fn lower(expr: &mut Expr) {
@@ -45,36 +45,36 @@ fn lower_method(method: &mut Method) {
 }
 
 fn lower_expr(expr: &mut Expr) {
-    match expr {
-        Expr::SubjectlessMatch { arms, default } => {
+    match &mut expr.kind {
+        ExprKind::SubjectlessMatch { arms, default } => {
             // Lower children first, then replace the node.
             for (cond, body) in arms.iter_mut() {
                 lower_expr(cond);
                 lower_expr(body);
             }
             lower_expr(default);
-            // Fold into nested `Expr::If` chains (innermost = default).
+            // Fold into nested `ExprKind::If` chains (innermost = default).
             // We need to own `default`, so swap in a dummy and take ownership.
-            let mut dummy = Expr::Tuple(Vec::new());
+            let mut dummy = Expr::bare(ExprKind::Tuple(Vec::new()));
             core::mem::swap(&mut dummy, default);
             let mut result = dummy;
             for (cond, body) in arms.drain(..).rev() {
-                result = Expr::If {
+                result = Expr::bare(ExprKind::If {
                     cond: Box::new(cond),
                     then: Box::new(body),
                     els: Box::new(result),
-                };
+                });
             }
             *expr = result;
         }
-        Expr::Binary { left, right, .. } => {
+        ExprKind::Binary { left, right, .. } => {
             lower_expr(left);
             lower_expr(right);
         }
-        Expr::Unary { operand, .. } | Expr::Try(operand) | Expr::Spread(operand) => {
+        ExprKind::Unary { operand, .. } | ExprKind::Try(operand) | ExprKind::Spread(operand) => {
             lower_expr(operand);
         }
-        Expr::Call { callee, args } => {
+        ExprKind::Call { callee, args } => {
             lower_expr(callee);
             for arg in args.iter_mut() {
                 // Lower inside the arg first (inner calls consume their own
@@ -83,12 +83,12 @@ fn lower_expr(expr: &mut Expr) {
                 lower_placeholder_arg(&mut arg.value);
             }
         }
-        Expr::Field { object, .. } | Expr::SafeField { object, .. } => lower_expr(object),
-        Expr::Index { object, index } => {
+        ExprKind::Field { object, .. } | ExprKind::SafeField { object, .. } => lower_expr(object),
+        ExprKind::Index { object, index } => {
             lower_expr(object);
             lower_expr(index);
         }
-        Expr::Range { start, end, .. } => {
+        ExprKind::Range { start, end, .. } => {
             if let Some(e) = start {
                 lower_expr(e);
             }
@@ -96,62 +96,62 @@ fn lower_expr(expr: &mut Expr) {
                 lower_expr(e);
             }
         }
-        Expr::If { cond, then, els } => {
+        ExprKind::If { cond, then, els } => {
             lower_expr(cond);
             lower_expr(then);
             lower_expr(els);
         }
-        Expr::Lambda { body, .. } => lower_expr(body),
-        Expr::Tuple(elems) | Expr::List(elems) => {
+        ExprKind::Lambda { body, .. } => lower_expr(body),
+        ExprKind::Tuple(elems) | ExprKind::List(elems) => {
             for e in elems.iter_mut() {
                 lower_expr(e);
             }
         }
-        Expr::Map(entries) => {
+        ExprKind::Map(entries) => {
             for (k, v) in entries.iter_mut() {
                 lower_expr(k);
                 lower_expr(v);
             }
         }
-        Expr::Str(segments) => {
+        ExprKind::Str(segments) => {
             for seg in segments.iter_mut() {
                 if let StrSegment::Interp(e) = seg {
                     lower_expr(e);
                 }
             }
         }
-        Expr::Block { stmts, result } => {
+        ExprKind::Block { stmts, result } => {
             lower_block(stmts, result);
         }
-        Expr::Match { subject, arms } => {
+        ExprKind::Match { subject, arms } => {
             lower_expr(subject);
             for arm in arms.iter_mut() {
                 lower_match_arm(arm);
             }
         }
-        Expr::OperatorRef(op) => {
+        ExprKind::OperatorRef(op) => {
             *expr = operator_lambda(*op);
         }
-        Expr::Int(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Var(_)
-        | Expr::SelfRef
-        | Expr::Placeholder(_) => {}
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Var(_)
+        | ExprKind::SelfRef
+        | ExprKind::Placeholder(_) => {}
     }
 }
 
 /// Desugar a binary operator reference to its two-parameter lambda:
 /// `op` ⇒ `(lhs, rhs) -> lhs op rhs`.
 fn operator_lambda(op: BinOp) -> Expr {
-    Expr::Lambda {
+    Expr::bare(ExprKind::Lambda {
         params: vec!["lhs".to_string(), "rhs".to_string()],
-        body: Box::new(Expr::Binary {
+        body: Box::new(Expr::bare(ExprKind::Binary {
             op,
-            left: Box::new(Expr::Var("lhs".to_string())),
-            right: Box::new(Expr::Var("rhs".to_string())),
-        }),
-    }
+            left: Box::new(Expr::bare(ExprKind::Var("lhs".to_string()))),
+            right: Box::new(Expr::bare(ExprKind::Var("rhs".to_string()))),
+        })),
+    })
 }
 
 /// If `expr` contains any `Placeholder` nodes, rewrite them to `Var("$x")`
@@ -162,42 +162,42 @@ fn lower_placeholder_arg(expr: &mut Expr) {
     let mut referenced = BTreeSet::new();
     collect_placeholders(expr, &mut referenced);
     if let Some(params) = positional_params(&referenced) {
-        let mut body = Expr::Tuple(Vec::new()); // dummy
+        let mut body = Expr::bare(ExprKind::Tuple(Vec::new())); // dummy
         core::mem::swap(expr, &mut body);
-        *expr = Expr::Lambda { params, body: Box::new(body) };
+        *expr = Expr::bare(ExprKind::Lambda { params, body: Box::new(body) });
     }
 }
 
 /// Rewrite `Placeholder` nodes in `expr` to `Var("$x")`, collecting the
 /// `$x` param names used. Stops at `Lambda` boundaries.
 fn collect_placeholders(expr: &mut Expr, params: &mut alloc::collections::BTreeSet<String>) {
-    match expr {
-        Expr::Placeholder(name) => {
+    match &mut expr.kind {
+        ExprKind::Placeholder(name) => {
             let param = format!("${}", name.as_deref().unwrap_or("a"));
             params.insert(param.clone());
-            *expr = Expr::Var(param);
+            *expr = Expr::bare(ExprKind::Var(param));
         }
-        Expr::Binary { left, right, .. } => {
+        ExprKind::Binary { left, right, .. } => {
             collect_placeholders(left, params);
             collect_placeholders(right, params);
         }
-        Expr::Unary { operand, .. } | Expr::Try(operand) | Expr::Spread(operand) => {
+        ExprKind::Unary { operand, .. } | ExprKind::Try(operand) | ExprKind::Spread(operand) => {
             collect_placeholders(operand, params);
         }
-        Expr::Call { callee, args } => {
+        ExprKind::Call { callee, args } => {
             collect_placeholders(callee, params);
             for arg in args.iter_mut() {
                 collect_placeholders(&mut arg.value, params);
             }
         }
-        Expr::Field { object, .. } | Expr::SafeField { object, .. } => {
+        ExprKind::Field { object, .. } | ExprKind::SafeField { object, .. } => {
             collect_placeholders(object, params);
         }
-        Expr::Index { object, index } => {
+        ExprKind::Index { object, index } => {
             collect_placeholders(object, params);
             collect_placeholders(index, params);
         }
-        Expr::Range { start, end, .. } => {
+        ExprKind::Range { start, end, .. } => {
             if let Some(e) = start {
                 collect_placeholders(e, params);
             }
@@ -205,17 +205,17 @@ fn collect_placeholders(expr: &mut Expr, params: &mut alloc::collections::BTreeS
                 collect_placeholders(e, params);
             }
         }
-        Expr::If { cond, then, els } => {
+        ExprKind::If { cond, then, els } => {
             collect_placeholders(cond, params);
             collect_placeholders(then, params);
             collect_placeholders(els, params);
         }
-        Expr::Tuple(elems) | Expr::List(elems) => {
+        ExprKind::Tuple(elems) | ExprKind::List(elems) => {
             for e in elems.iter_mut() {
                 collect_placeholders(e, params);
             }
         }
-        Expr::Map(entries) => {
+        ExprKind::Map(entries) => {
             for (k, v) in entries.iter_mut() {
                 collect_placeholders(k, params);
                 collect_placeholders(v, params);
@@ -224,17 +224,17 @@ fn collect_placeholders(expr: &mut Expr, params: &mut alloc::collections::BTreeS
         // Lambda: stop here — its body's placeholders belong to it.
         // Atoms and surface-only nodes (already lowered by the time we're called,
         // or never contain sub-expressions with placeholders).
-        Expr::Int(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Var(_)
-        | Expr::SelfRef
-        | Expr::Str(_)
-        | Expr::OperatorRef(_)
-        | Expr::SubjectlessMatch { .. }
-        | Expr::Lambda { .. }
-        | Expr::Block { .. }
-        | Expr::Match { .. } => {}
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Var(_)
+        | ExprKind::SelfRef
+        | ExprKind::Str(_)
+        | ExprKind::OperatorRef(_)
+        | ExprKind::SubjectlessMatch { .. }
+        | ExprKind::Lambda { .. }
+        | ExprKind::Block { .. }
+        | ExprKind::Match { .. } => {}
     }
 }
 
@@ -295,33 +295,35 @@ fn lower_block(stmts: &mut Vec<Stmt>, result: &mut Option<Box<Expr>>) {
 
     // Build the callback lambda: `binding -> { rest }`.
     // Lower the rest block recursively first (handles nested use <-).
-    let mut callback_body = Expr::Block {
+    let mut callback_body = Expr::bare(ExprKind::Block {
         stmts: rest_stmts,
         result: rest_result,
-    };
+    });
     lower_expr(&mut callback_body);
 
     let params: Vec<String> = binding.into_iter().collect();
-    let callback = Expr::Lambda {
+    let callback = Expr::bare(ExprKind::Lambda {
         params,
         body: Box::new(callback_body),
-    };
+    });
     let callback_arg = Arg { label: None, value: callback };
 
     // Append callback to the call or wrap in a new call.
     lower_expr(&mut call);
-    let desugared = if let Expr::Call { callee, mut args } = call {
-        args.push(callback_arg);
-        Expr::Call { callee, args }
-    } else {
-        Expr::Call {
-            callee: Box::new(call),
-            args: vec![callback_arg],
+    let call_span = call.span;
+    let desugared = match call.kind {
+        ExprKind::Call { callee, mut args } => {
+            args.push(callback_arg);
+            ExprKind::Call { callee, args }
         }
+        other => ExprKind::Call {
+            callee: Box::new(Expr::new(other, call_span)),
+            args: vec![callback_arg],
+        },
     };
 
     // The use site becomes the block's result expression.
-    *result = Some(Box::new(desugared));
+    *result = Some(Box::new(Expr::new(desugared, call_span)));
 }
 
 fn lower_stmt(stmt: &mut Stmt) {
@@ -384,18 +386,18 @@ pub fn free_vars(expr: &Expr, bound: &BTreeSet<String>) -> BTreeSet<String> {
 }
 
 fn collect_free_vars(expr: &Expr, bound: &BTreeSet<String>, free: &mut BTreeSet<String>) {
-    match expr {
-        Expr::Var(name) => {
+    match &expr.kind {
+        ExprKind::Var(name) => {
             if !bound.contains(name.as_str()) {
                 free.insert(name.clone());
             }
         }
-        Expr::Lambda { params, body } => {
+        ExprKind::Lambda { params, body } => {
             let mut inner = bound.clone();
             inner.extend(params.iter().cloned());
             collect_free_vars(body, &inner, free);
         }
-        Expr::Block { stmts, result } => {
+        ExprKind::Block { stmts, result } => {
             let mut inner = bound.clone();
             for stmt in stmts {
                 match stmt {
@@ -420,7 +422,7 @@ fn collect_free_vars(expr: &Expr, bound: &BTreeSet<String>, free: &mut BTreeSet<
                 collect_free_vars(e, &inner, free);
             }
         }
-        Expr::Match { subject, arms } => {
+        ExprKind::Match { subject, arms } => {
             collect_free_vars(subject, bound, free);
             for arm in arms {
                 let mut arm_bound = bound.clone();
@@ -431,27 +433,27 @@ fn collect_free_vars(expr: &Expr, bound: &BTreeSet<String>, free: &mut BTreeSet<
                 collect_free_vars(&arm.body, &arm_bound, free);
             }
         }
-        Expr::Binary { left, right, .. } => {
+        ExprKind::Binary { left, right, .. } => {
             collect_free_vars(left, bound, free);
             collect_free_vars(right, bound, free);
         }
-        Expr::Unary { operand, .. } | Expr::Try(operand) | Expr::Spread(operand) => {
+        ExprKind::Unary { operand, .. } | ExprKind::Try(operand) | ExprKind::Spread(operand) => {
             collect_free_vars(operand, bound, free);
         }
-        Expr::Call { callee, args } => {
+        ExprKind::Call { callee, args } => {
             collect_free_vars(callee, bound, free);
             for arg in args {
                 collect_free_vars(&arg.value, bound, free);
             }
         }
-        Expr::Field { object, .. } | Expr::SafeField { object, .. } => {
+        ExprKind::Field { object, .. } | ExprKind::SafeField { object, .. } => {
             collect_free_vars(object, bound, free);
         }
-        Expr::Index { object, index } => {
+        ExprKind::Index { object, index } => {
             collect_free_vars(object, bound, free);
             collect_free_vars(index, bound, free);
         }
-        Expr::Range { start, end, .. } => {
+        ExprKind::Range { start, end, .. } => {
             if let Some(e) = start {
                 collect_free_vars(e, bound, free);
             }
@@ -459,36 +461,36 @@ fn collect_free_vars(expr: &Expr, bound: &BTreeSet<String>, free: &mut BTreeSet<
                 collect_free_vars(e, bound, free);
             }
         }
-        Expr::If { cond, then, els } => {
+        ExprKind::If { cond, then, els } => {
             collect_free_vars(cond, bound, free);
             collect_free_vars(then, bound, free);
             collect_free_vars(els, bound, free);
         }
-        Expr::Tuple(elems) | Expr::List(elems) => {
+        ExprKind::Tuple(elems) | ExprKind::List(elems) => {
             for e in elems {
                 collect_free_vars(e, bound, free);
             }
         }
-        Expr::Map(entries) => {
+        ExprKind::Map(entries) => {
             for (k, v) in entries {
                 collect_free_vars(k, bound, free);
                 collect_free_vars(v, bound, free);
             }
         }
-        Expr::Str(segments) => {
+        ExprKind::Str(segments) => {
             for seg in segments {
                 if let StrSegment::Interp(e) = seg {
                     collect_free_vars(e, bound, free);
                 }
             }
         }
-        Expr::Int(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::SelfRef
-        | Expr::OperatorRef(_)
-        | Expr::SubjectlessMatch { .. }
-        | Expr::Placeholder(_) => {}
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::SelfRef
+        | ExprKind::OperatorRef(_)
+        | ExprKind::SubjectlessMatch { .. }
+        | ExprKind::Placeholder(_) => {}
     }
 }
 
@@ -506,16 +508,16 @@ mod tests {
     }
 
     fn expr_has_use(expr: &Expr) -> bool {
-        match expr {
-            Expr::Block { stmts, result } => {
+        match &expr.kind {
+            ExprKind::Block { stmts, result } => {
                 stmts.iter().any(|s| matches!(s, Stmt::Use { .. }) || stmt_has_use(s))
                     || result.as_deref().map_or(false, expr_has_use)
             }
-            Expr::Call { callee, args } => {
+            ExprKind::Call { callee, args } => {
                 expr_has_use(callee) || args.iter().any(|a| expr_has_use(&a.value))
             }
-            Expr::Lambda { body, .. } => expr_has_use(body),
-            Expr::If { cond, then, els } => {
+            ExprKind::Lambda { body, .. } => expr_has_use(body),
+            ExprKind::If { cond, then, els } => {
                 expr_has_use(cond) || expr_has_use(then) || expr_has_use(els)
             }
             _ => false,

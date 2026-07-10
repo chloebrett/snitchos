@@ -8,7 +8,7 @@
 use crate::prelude::*;
 
 use crate::ast::{
-    Arg, BinOp, Expr, Field, Item, MatchArm, Method, MethodModifier, Param, Pattern, Stmt,
+    Arg, BinOp, Expr, ExprKind, Field, Item, MatchArm, Method, MethodModifier, Param, Pattern, Stmt,
     StrSegment, Type, UnOp, Variant,
 };
 use crate::lexer::{LexError, Span, StrPart, Token, TokenKind, lex};
@@ -22,10 +22,6 @@ pub struct ParseError {
 }
 
 impl ParseError {
-    fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into(), span: Span::default() }
-    }
-
     /// A parse error anchored at `span`.
     fn at(message: impl Into<String>, span: Span) -> Self {
         Self { message: message.into(), span }
@@ -236,6 +232,24 @@ impl Parser {
         ParseError::at(message, self.current_span())
     }
 
+    /// The start byte of the current (not-yet-consumed) token — captured at the
+    /// entry of a node to mark where its span begins.
+    fn cur_start(&self) -> usize {
+        self.tokens[self.pos].span.start
+    }
+
+    /// The end byte of the most recently consumed token — where the span of a
+    /// just-parsed node ends. Zero before anything is consumed.
+    fn prev_end(&self) -> usize {
+        self.pos.checked_sub(1).map_or(0, |i| self.tokens[i].span.end)
+    }
+
+    /// Build an expression node spanning from `start` to the end of the last
+    /// consumed token.
+    fn spanned(&self, start: usize, kind: ExprKind) -> Expr {
+        Expr::new(kind, Span { start, end: self.prev_end() })
+    }
+
     /// Look `offset` tokens ahead, clamped to the trailing `Eof`.
     fn peek_at(&self, offset: usize) -> &TokenKind {
         let i = (self.pos + offset).min(self.tokens.len() - 1);
@@ -265,20 +279,22 @@ impl Parser {
                 break;
             }
             self.bump(); // consume the operator
+            let start = left.span.start;
             left = if let Some(inclusive) = range_kind(op) {
                 // `start..` is open-ended when no operand follows the `..`.
                 let end = self.starts_expr().then(|| self.parse_expr(r_bp)).transpose()?;
-                Expr::Range {
+                self.spanned(start, ExprKind::Range {
                     start: Some(Box::new(left)),
                     end: end.map(Box::new),
                     inclusive,
-                }
+                })
             } else {
-                Expr::Binary {
+                let right = self.parse_expr(r_bp)?;
+                self.spanned(start, ExprKind::Binary {
                     op,
                     left: Box::new(left),
-                    right: Box::new(self.parse_expr(r_bp)?),
-                }
+                    right: Box::new(right),
+                })
             };
             // A second operator at the same precedence level can't chain a
             // non-associative one (`a < b < c`, `1..2..3`).
@@ -298,11 +314,12 @@ impl Parser {
             let then = self.parse_expr(1)?;
             self.expect(&TokenKind::Bar, "'|' in conditional")?;
             let els = self.parse_expr(1)?;
-            left = Expr::If {
+            let start = left.span.start;
+            left = self.spanned(start, ExprKind::If {
                 cond: Box::new(left),
                 then: Box::new(then),
                 els: Box::new(els),
-            };
+            });
             if matches!(self.peek(), TokenKind::FatArrow) {
                 return Err(self.err(
                     "chained conditionals aren't allowed — use `match` for more than two cases",
@@ -334,13 +351,14 @@ impl Parser {
     /// Parse a lambda: `params -> body`. Body is a full expression (loosest),
     /// so lambdas are right-associative (`x -> y -> z` is `x -> (y -> z)`).
     fn parse_lambda(&mut self) -> Result<Expr, ParseError> {
+        let start = self.cur_start();
         let params = self.parse_lambda_params()?;
         self.expect(&TokenKind::Arrow, "'->'")?;
         let body = self.parse_expr(0)?;
-        Ok(Expr::Lambda {
+        Ok(self.spanned(start, ExprKind::Lambda {
             params,
             body: Box::new(body),
-        })
+        }))
     }
 
     /// Parse a lambda's parameters: a bare `name`, or `(name, …)`.
@@ -368,16 +386,17 @@ impl Parser {
     /// (`..n`, `..=n`, bare `..`), binding tighter than any infix. (In call-arg
     /// position a leading `..` is a spread, handled earlier in `parse_arg`.)
     fn parse_prefix(&mut self) -> Result<Expr, ParseError> {
+        let start = self.cur_start();
         if matches!(self.peek(), TokenKind::DotDot | TokenKind::DotDotEq) {
             let inclusive = matches!(self.peek(), TokenKind::DotDotEq);
             let (_, r_bp) = binding_power(BinOp::Range);
             self.bump(); // '..' / '..='
             let end = self.starts_expr().then(|| self.parse_expr(r_bp)).transpose()?;
-            return Ok(Expr::Range {
+            return Ok(self.spanned(start, ExprKind::Range {
                 start: None,
                 end: end.map(Box::new),
                 inclusive,
-            });
+            }));
         }
         let op = match self.peek() {
             TokenKind::Minus => UnOp::Neg,
@@ -385,10 +404,11 @@ impl Parser {
             _ => return self.parse_postfix(),
         };
         self.bump(); // consume the operator
-        Ok(Expr::Unary {
+        let operand = self.parse_prefix()?;
+        Ok(self.spanned(start, ExprKind::Unary {
             op,
-            operand: Box::new(self.parse_prefix()?),
-        })
+            operand: Box::new(operand),
+        }))
     }
 
     /// Can the current token begin an expression atom? Used to tell an
@@ -416,36 +436,39 @@ impl Parser {
     /// left-associative so `a.b.c` and `f(x)(y)` chain.
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_atom()?;
+        let start = expr.span.start;
         loop {
             // Clone the lookahead token so its borrow ends before we recurse.
             match self.peek().clone() {
-                TokenKind::LParen => expr = self.parse_call(expr)?,
+                TokenKind::LParen => expr = self.parse_call(start, expr)?,
                 TokenKind::Dot => {
                     self.bump();
-                    expr = Expr::Field {
+                    let name = self.expect_ident("field name after '.'")?;
+                    expr = self.spanned(start, ExprKind::Field {
                         object: Box::new(expr),
-                        name: self.expect_ident("field name after '.'")?,
-                    };
+                        name,
+                    });
                 }
                 TokenKind::QuestionDot => {
                     self.bump();
-                    expr = Expr::SafeField {
+                    let name = self.expect_ident("field name after '?.'")?;
+                    expr = self.spanned(start, ExprKind::SafeField {
                         object: Box::new(expr),
-                        name: self.expect_ident("field name after '?.'")?,
-                    };
+                        name,
+                    });
                 }
                 TokenKind::Question => {
                     self.bump();
-                    expr = Expr::Try(Box::new(expr));
+                    expr = self.spanned(start, ExprKind::Try(Box::new(expr)));
                 }
                 TokenKind::LBracket => {
                     self.bump();
                     let index = self.parse_expr(0)?;
                     self.expect(&TokenKind::RBracket, "']'")?;
-                    expr = Expr::Index {
+                    expr = self.spanned(start, ExprKind::Index {
                         object: Box::new(expr),
                         index: Box::new(index),
-                    };
+                    });
                 }
                 _ => break,
             }
@@ -453,8 +476,9 @@ impl Parser {
         Ok(expr)
     }
 
-    /// Parse a call's `(args…)`; the callee is already parsed.
-    fn parse_call(&mut self, callee: Expr) -> Result<Expr, ParseError> {
+    /// Parse a call's `(args…)`; the callee is already parsed. `start` is the
+    /// byte offset of the callee (so the call node spans callee through `)`).
+    fn parse_call(&mut self, start: usize, callee: Expr) -> Result<Expr, ParseError> {
         self.bump(); // '('
         let mut args = Vec::new();
         if !matches!(self.peek(), TokenKind::RParen) {
@@ -471,10 +495,10 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RParen, "')' in call arguments")?;
-        Ok(Expr::Call {
+        Ok(self.spanned(start, ExprKind::Call {
             callee: Box::new(callee),
             args,
-        })
+        }))
     }
 
     /// Parse one call argument: an optional `label:` then a value. The value's
@@ -483,11 +507,12 @@ impl Parser {
     fn parse_arg(&mut self) -> Result<Arg, ParseError> {
         // `..base` — a spread (functional-update base).
         if matches!(self.peek(), TokenKind::DotDot) {
+            let start = self.cur_start();
             self.bump();
             let base = self.parse_expr(0)?;
             return Ok(Arg {
                 label: None,
-                value: Expr::Spread(Box::new(base)),
+                value: self.spanned(start, ExprKind::Spread(Box::new(base))),
             });
         }
         let label = if matches!(self.peek(), TokenKind::Ident(_)) && matches!(self.peek_at(1), TokenKind::Colon)
@@ -505,8 +530,9 @@ impl Parser {
         if let Some(op) = operator_fn(self.peek())
             && matches!(self.peek_at(1), TokenKind::Comma | TokenKind::RParen)
         {
+            let start = self.cur_start();
             self.bump(); // the operator
-            return Ok(Arg { label, value: Expr::OperatorRef(op) });
+            return Ok(Arg { label, value: self.spanned(start, ExprKind::OperatorRef(op)) });
         }
         let value = self.parse_expr(0)?;
         Ok(Arg { label, value })
@@ -536,15 +562,15 @@ impl Parser {
     /// Parse a `[…]` collection literal — a list `[a, b]` or a map `[k: v, …]`
     /// (empty list `[]`, empty map `[:]`). The opening `[` is already consumed;
     /// list vs. map is decided by whether the first element is followed by `:`.
-    fn parse_collection(&mut self) -> Result<Expr, ParseError> {
+    fn parse_collection(&mut self, start: usize) -> Result<Expr, ParseError> {
         if matches!(self.peek(), TokenKind::RBracket) {
             self.bump();
-            return Ok(Expr::List(Vec::new()));
+            return Ok(self.spanned(start, ExprKind::List(Vec::new())));
         }
         if matches!(self.peek(), TokenKind::Colon) && matches!(self.peek_at(1), TokenKind::RBracket) {
             self.bump(); // :
             self.bump(); // ]
-            return Ok(Expr::Map(Vec::new()));
+            return Ok(self.spanned(start, ExprKind::Map(Vec::new())));
         }
         let first = self.parse_expr(0)?;
         if matches!(self.peek(), TokenKind::Colon) {
@@ -562,7 +588,7 @@ impl Parser {
                 entries.push((key, self.parse_expr(0)?));
             }
             self.expect(&TokenKind::RBracket, "']'")?;
-            Ok(Expr::Map(entries))
+            Ok(self.spanned(start, ExprKind::Map(entries)))
         } else {
             let mut items = vec![first];
             while matches!(self.peek(), TokenKind::Comma) {
@@ -573,14 +599,15 @@ impl Parser {
                 items.push(self.parse_expr(0)?);
             }
             self.expect(&TokenKind::RBracket, "']'")?;
-            Ok(Expr::List(items))
+            Ok(self.spanned(start, ExprKind::List(items)))
         }
     }
 
-    /// Parse a block `{ stmt* result? }`. The `{` is already consumed.
+    /// Parse a block `{ stmt* result? }`. The `{` is already consumed; `start` is
+    /// the byte offset of that `{`.
     /// Statements are separated by maximal munch (no semicolons); the trailing
     /// expression, if any, is the block's value.
-    fn parse_block(&mut self) -> Result<Expr, ParseError> {
+    fn parse_block(&mut self, start: usize) -> Result<Expr, ParseError> {
         let mut stmts = Vec::new();
         let mut result = None;
         while !matches!(self.peek(), TokenKind::RBrace) {
@@ -608,7 +635,7 @@ impl Parser {
             }
         }
         self.bump(); // '}'
-        Ok(Expr::Block { stmts, result })
+        Ok(self.spanned(start, ExprKind::Block { stmts, result }))
     }
 
     /// Parse a `use binding? <- call` statement (Gleam-style callback sugar).
@@ -881,8 +908,9 @@ impl Parser {
             self.bump();
             self.parse_expr(0)
         } else if matches!(self.peek(), TokenKind::LBrace) {
+            let start = self.cur_start();
             self.bump();
-            self.parse_block()
+            self.parse_block(start)
         } else {
             Err(self.err("expected '=' or '{' for the function body"))
         }
@@ -1073,10 +1101,11 @@ impl Parser {
         Ok(Type::Name { name, args })
     }
 
-    /// Parse `match subject { arm* }`. The `match` keyword is already consumed.
-    fn parse_match(&mut self) -> Result<Expr, ParseError> {
+    /// Parse `match subject { arm* }`. The `match` keyword is already consumed;
+    /// `start` is the byte offset of that `match`.
+    fn parse_match(&mut self, start: usize) -> Result<Expr, ParseError> {
         if matches!(self.peek(), TokenKind::LBrace) {
-            return self.parse_subjectless_match();
+            return self.parse_subjectless_match(start);
         }
         let subject = self.parse_expr(0)?;
         self.expect(&TokenKind::LBrace, "'{' after match subject")?;
@@ -1088,10 +1117,10 @@ impl Parser {
             arms.push(self.parse_match_arm()?);
         }
         self.bump(); // '}'
-        Ok(Expr::Match {
+        Ok(self.spanned(start, ExprKind::Match {
             subject: Box::new(subject),
             arms,
-        })
+        }))
     }
 
     /// Parse the subjectless `match { cond => body … _ => default }` condition
@@ -1099,7 +1128,7 @@ impl Parser {
     /// (`Expr::If`) — it's the N-ary form of the binary conditional. Each arm is
     /// `condition => body`; the table must end in a `_ => …` catch-all, which
     /// becomes the innermost else. The `{` is the current token.
-    fn parse_subjectless_match(&mut self) -> Result<Expr, ParseError> {
+    fn parse_subjectless_match(&mut self, start: usize) -> Result<Expr, ParseError> {
         self.bump(); // '{'
         let mut arms = Vec::new();
         let default = loop {
@@ -1128,10 +1157,10 @@ impl Parser {
             ));
         }
         self.bump(); // '}'
-        Ok(Expr::SubjectlessMatch {
+        Ok(self.spanned(start, ExprKind::SubjectlessMatch {
             arms,
             default: Box::new(default),
-        })
+        }))
     }
 
     /// Is the parser at a `_ =>` subjectless catch-all arm?
@@ -1242,25 +1271,29 @@ impl Parser {
     }
 
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
+        let start = self.cur_start();
         // Clone the leading token so its borrow ends before we recurse.
         Ok(match self.bump().clone() {
-            TokenKind::Int(n) => Expr::Int(n),
-            TokenKind::Float(f) => Expr::Float(f),
-            TokenKind::Bool(b) => Expr::Bool(b),
-            TokenKind::Ident(name) => Expr::Var(name),
-            TokenKind::Placeholder(name) => Expr::Placeholder(name),
+            TokenKind::Int(n) => self.spanned(start, ExprKind::Int(n)),
+            TokenKind::Float(f) => self.spanned(start, ExprKind::Float(f)),
+            TokenKind::Bool(b) => self.spanned(start, ExprKind::Bool(b)),
+            TokenKind::Ident(name) => self.spanned(start, ExprKind::Var(name)),
+            TokenKind::Placeholder(name) => self.spanned(start, ExprKind::Placeholder(name)),
             // `@x` is field `x` on the receiver; bare `@` is the receiver.
-            TokenKind::At if matches!(self.peek(), TokenKind::Ident(_)) => Expr::Field {
-                object: Box::new(Expr::SelfRef),
-                name: self.expect_ident("field name after '@'")?,
-            },
-            TokenKind::At => Expr::SelfRef,
-            TokenKind::Str(parts) => Expr::Str(parse_str_segments(parts)?),
+            TokenKind::At if matches!(self.peek(), TokenKind::Ident(_)) => {
+                let name = self.expect_ident("field name after '@'")?;
+                self.spanned(start, ExprKind::Field {
+                    object: Box::new(self.spanned(start, ExprKind::SelfRef)),
+                    name,
+                })
+            }
+            TokenKind::At => self.spanned(start, ExprKind::SelfRef),
+            TokenKind::Str(parts) => self.spanned(start, ExprKind::Str(parse_str_segments(parts)?)),
             TokenKind::LParen => {
                 // `()` unit, `(e)` grouping, `(e, …)` tuple.
                 if matches!(self.peek(), TokenKind::RParen) {
                     self.bump();
-                    Expr::Tuple(Vec::new())
+                    self.spanned(start, ExprKind::Tuple(Vec::new()))
                 } else {
                     let first = self.parse_expr(0)?;
                     if matches!(self.peek(), TokenKind::Comma) {
@@ -1273,16 +1306,16 @@ impl Parser {
                             elems.push(self.parse_expr(0)?);
                         }
                         self.expect(&TokenKind::RParen, "')'")?;
-                        Expr::Tuple(elems)
+                        self.spanned(start, ExprKind::Tuple(elems))
                     } else {
                         self.expect(&TokenKind::RParen, "')'")?;
                         first
                     }
                 }
             }
-            TokenKind::LBracket => self.parse_collection()?,
-            TokenKind::LBrace => self.parse_block()?,
-            TokenKind::Match => self.parse_match()?,
+            TokenKind::LBracket => self.parse_collection(start)?,
+            TokenKind::LBrace => self.parse_block(start)?,
+            TokenKind::Match => self.parse_match(start)?,
             TokenKind::Semicolon => return Err(self.err(NO_SEMICOLONS)),
             other => return Err(self.err(format!("unexpected token: {other:?}"))),
         })
@@ -1291,7 +1324,7 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::{BinOp, Expr, Item};
+    use crate::ast::{BinOp, Expr, ExprKind, Item};
     use crate::parser::{parse, parse_program};
 
     /// Parse an expression, unwrapping — for tests with valid Stitch input.
@@ -1392,27 +1425,27 @@ mod tests {
     #[test]
     fn parses_the_cross_pipe_as_a_binary_op() {
         use crate::ast::BinOp;
-        assert!(matches!(p("a ~> b"), Expr::Binary { op: BinOp::CrossPipe, .. }));
+        assert!(matches!(p("a ~> b").kind, ExprKind::Binary { op: BinOp::CrossPipe, .. }));
     }
 
     #[test]
     fn the_cross_pipe_is_left_associative() {
         use crate::ast::BinOp;
         // `a ~> b ~> c` parses as `(a ~> b) ~> c`.
-        let Expr::Binary { op: BinOp::CrossPipe, left, .. } = p("a ~> b ~> c") else {
+        let ExprKind::Binary { op: BinOp::CrossPipe, left, .. } = p("a ~> b ~> c").kind else {
             panic!("expected a cross-pipe");
         };
-        assert!(matches!(*left, Expr::Binary { op: BinOp::CrossPipe, .. }));
+        assert!(matches!(left.kind, ExprKind::Binary { op: BinOp::CrossPipe, .. }));
     }
 
     #[test]
     fn arithmetic_binds_tighter_than_the_cross_pipe() {
         use crate::ast::BinOp;
         // `a + b ~> f` parses as `(a + b) ~> f`, same precedence as `|>`.
-        let Expr::Binary { op: BinOp::CrossPipe, left, .. } = p("a + b ~> f") else {
+        let ExprKind::Binary { op: BinOp::CrossPipe, left, .. } = p("a + b ~> f").kind else {
             panic!("expected a cross-pipe");
         };
-        assert!(matches!(*left, Expr::Binary { op: BinOp::Add, .. }));
+        assert!(matches!(left.kind, ExprKind::Binary { op: BinOp::Add, .. }));
     }
 
     #[test]
@@ -1997,7 +2030,7 @@ mod tests {
         // desugaring to Expr::If is the lowering pass's job, not the parser's.
         let expr = p(r#"match { n > 0 => "pos"  _ => "neg" }"#);
         assert!(
-            matches!(expr, Expr::SubjectlessMatch { .. }),
+            matches!(expr.kind, ExprKind::SubjectlessMatch { .. }),
             "expected SubjectlessMatch, got {expr:?}"
         );
     }
@@ -2006,9 +2039,9 @@ mod tests {
     fn placeholder_is_a_surface_node() {
         // Parser must keep Placeholder; desugaring to Lambda belongs in the lowering pass.
         let expr = p("f($)");
-        let Expr::Call { args, .. } = expr else { panic!("expected Call, got {expr:?}") };
+        let ExprKind::Call { args, .. } = expr.kind else { panic!("expected Call") };
         assert!(
-            matches!(args[0].value, Expr::Placeholder(None)),
+            matches!(args[0].value.kind, ExprKind::Placeholder(None)),
             "expected Placeholder, got {:?}", args[0].value
         );
     }
@@ -2017,9 +2050,9 @@ mod tests {
     fn operator_ref_is_a_surface_node() {
         // Parser must keep OperatorRef; desugaring to Lambda belongs in the lowering pass.
         let expr = p("f(+)");
-        let Expr::Call { args, .. } = expr else { panic!("expected Call, got {expr:?}") };
+        let ExprKind::Call { args, .. } = expr.kind else { panic!("expected Call") };
         assert!(
-            matches!(args[0].value, Expr::OperatorRef(BinOp::Add)),
+            matches!(args[0].value.kind, ExprKind::OperatorRef(BinOp::Add)),
             "expected OperatorRef(Add), got {:?}", args[0].value
         );
     }
@@ -2108,5 +2141,36 @@ mod tests {
         // unexpected token, not at byte 0.
         let err2 = parse_program("f(x) x").expect_err("should fail on missing =");
         assert_ne!(err2.span, Span::default(), "ParseError span for program error should not be Span::default()");
+    }
+
+    #[test]
+    fn an_atom_carries_the_span_of_its_token() {
+        use crate::lexer::Span;
+        // Leading whitespace: the `x` sits at bytes 2..3.
+        assert_eq!(p("  x").span, Span { start: 2, end: 3 });
+        // A multi-char literal spans its whole extent.
+        assert_eq!(p("42").span, Span { start: 0, end: 2 });
+    }
+
+    #[test]
+    fn a_binary_span_covers_both_operands() {
+        use crate::lexer::Span;
+        // `a + b` — the whole expression spans byte 0 (the `a`) through byte 5
+        // (past the `b`), not just the operator.
+        let expr = p("a + b");
+        assert_eq!(expr.span, Span { start: 0, end: 5 });
+        // The operands keep their own tighter spans.
+        let ExprKind::Binary { left, right, .. } = expr.kind else { panic!("expected Binary") };
+        assert_eq!(left.span, Span { start: 0, end: 1 });
+        assert_eq!(right.span, Span { start: 4, end: 5 });
+    }
+
+    #[test]
+    fn a_call_span_runs_from_callee_through_the_closing_paren() {
+        use crate::lexer::Span;
+        // `f(x)` spans 0..4; the field/call chain keeps the leftmost start.
+        assert_eq!(p("f(x)").span, Span { start: 0, end: 4 });
+        // A postfix chain `a.b.c` spans from `a` through the last field.
+        assert_eq!(p("a.b.c").span, Span { start: 0, end: 5 });
     }
 }

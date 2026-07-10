@@ -390,6 +390,7 @@ impl Env {
     /// Bind `name` to an *existing* cell (shared `Rc<RefCell<Value>>`), rather
     /// than creating a new one. Used when restoring upvalues at closure call time
     /// so mutable captures see mutations made after the closure was created.
+    #[must_use]
     pub fn extend_cell(&self, name: String, cell: Rc<RefCell<Value>>, mutable: bool) -> Env {
         Env {
             locals: Some(Rc::new(Scope { name, value: cell, mutable, parent: self.locals.clone() })),
@@ -424,6 +425,7 @@ impl Env {
     /// Replace the globals slot of this env with `globals`. Used in `apply_values`
     /// to seed the call env from the closure's home globals rather than the
     /// call-site globals — so module functions can see their own siblings.
+    #[must_use]
     pub fn with_home_globals(self, globals: Rc<OnceCell<BTreeMap<String, Value>>>) -> Env {
         Env { globals, ..self }
     }

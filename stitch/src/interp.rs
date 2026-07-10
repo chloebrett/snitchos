@@ -7,7 +7,7 @@ use core::cell::RefCell;
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 
-use crate::ast::{Arg, BinOp, Expr, Item, MethodModifier, Stmt, StrSegment, Type};
+use crate::ast::{Arg, BinOp, Expr, ExprKind, Item, MethodModifier, Stmt, StrSegment, Type};
 use crate::env::{AssignError, Env};
 use crate::lower::{free_vars, lower_program};
 use crate::natives::NATIVES;
@@ -419,20 +419,20 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
     if !env.take_fuel() {
         return Err(RuntimeError::new("evaluation fuel exhausted"));
     }
-    match expr {
-        Expr::Int(n) => Ok(Value::Int(*n)),
-        Expr::Float(f) => Ok(Value::Float(*f)),
-        Expr::Bool(b) => Ok(Value::Bool(*b)),
-        Expr::Str(segments) => eval_string(segments, env),
+    match &expr.kind {
+        ExprKind::Int(n) => Ok(Value::Int(*n)),
+        ExprKind::Float(f) => Ok(Value::Float(*f)),
+        ExprKind::Bool(b) => Ok(Value::Bool(*b)),
+        ExprKind::Str(segments) => eval_string(segments, env),
         // `and`/`or` short-circuit, so they can't pre-evaluate both operands.
-        Expr::Binary {
+        ExprKind::Binary {
             op: BinOp::And,
             left,
             right,
         } => Ok(Value::Bool(
             as_bool(&eval(left, env)?, "`and`")? && as_bool(&eval(right, env)?, "`and`")?,
         )),
-        Expr::Binary {
+        ExprKind::Binary {
             op: BinOp::Or,
             left,
             right,
@@ -440,7 +440,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             as_bool(&eval(left, env)?, "`or`")? || as_bool(&eval(right, env)?, "`or`")?,
         )),
         // `lhs |> f(a)` ≡ `f(lhs, a)`; `lhs |> f` ≡ `f(lhs)`.
-        Expr::Binary {
+        ExprKind::Binary {
             op: BinOp::Pipe,
             left,
             right,
@@ -450,46 +450,46 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         // against the stage's declared input, then the stage runs. In-process for
         // now (soft authority); process isolation + marshalling is the next
         // milestone (see docs/typed-processes-and-the-data-model-design.md).
-        Expr::Binary {
+        ExprKind::Binary {
             op: BinOp::CrossPipe,
             left,
             right,
         } => eval_cross_pipe(left, right, env),
-        Expr::Binary { op, left, right } => eval_binary(*op, &eval(left, env)?, &eval(right, env)?),
-        Expr::Unary { op, operand } => eval_unary(*op, &eval(operand, env)?),
-        Expr::Var(name) => env
+        ExprKind::Binary { op, left, right } => eval_binary(*op, &eval(left, env)?, &eval(right, env)?),
+        ExprKind::Unary { op, operand } => eval_unary(*op, &eval(operand, env)?),
+        ExprKind::Var(name) => env
             .lookup(name)
             .ok_or_else(|| RuntimeError::new(format!("unbound variable `{name}`"))),
-        Expr::SelfRef => env
+        ExprKind::SelfRef => env
             .lookup("@")
             .ok_or_else(|| RuntimeError::new("`@` is only valid inside a method body")),
         // Only the taken branch is evaluated.
-        Expr::If { cond, then, els } => {
+        ExprKind::If { cond, then, els } => {
             if as_bool(&eval(cond, env)?, "condition")? {
                 eval(then, env)
             } else {
                 eval(els, env)
             }
         }
-        Expr::Block { stmts, result } => eval_block(stmts, result.as_deref(), env, false),
-        Expr::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env, false),
+        ExprKind::Block { stmts, result } => eval_block(stmts, result.as_deref(), env, false),
+        ExprKind::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env, false),
         // `()` is unit; `(a, b, …)` is a tuple.
-        Expr::Tuple(elements) if elements.is_empty() => Ok(Value::Unit),
-        Expr::Tuple(elements) => {
+        ExprKind::Tuple(elements) if elements.is_empty() => Ok(Value::Unit),
+        ExprKind::Tuple(elements) => {
             let values = elements
                 .iter()
                 .map(|element| eval(element, env))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Tuple(values.into()))
         }
-        Expr::List(elements) => {
+        ExprKind::List(elements) => {
             let values = elements
                 .iter()
                 .map(|element| eval(element, env))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::List(values.into()))
         }
-        Expr::Map(entries) => {
+        ExprKind::Map(entries) => {
             let mut map: Vec<(Value, Value)> = Vec::new();
             for (key_expr, value_expr) in entries {
                 let key = eval(key_expr, env)?;
@@ -503,7 +503,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             }
             Ok(Value::Map(Rc::new(map)))
         }
-        Expr::Lambda { params, body } => {
+        ExprKind::Lambda { params, body } => {
             let param_set: BTreeSet<String> = params.iter().cloned().collect();
             let candidates = free_vars(body, &param_set);
             let upvalues: Vec<(String, Rc<RefCell<Value>>, bool)> = candidates
@@ -527,15 +527,15 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         // *before* evaluating the callee — `receiver.method` isn't a value on
         // its own; the receiver and the name must be resolved together against
         // the method registry. Any other call falls through to `eval_call`.
-        Expr::Call { callee, args } => match callee.as_ref() {
-            Expr::Field { object, name } => eval_method_call(object, name, args, env),
+        ExprKind::Call { callee, args } => match &callee.kind {
+            ExprKind::Field { object, name } => eval_method_call(object, name, args, env),
             _ => eval_call(&eval(callee, env)?, args, env),
         },
-        Expr::Field { object, name } => eval_field(&eval(object, env)?, name),
-        Expr::Try(operand) => eval_try(eval(operand, env)?, env),
-        Expr::SafeField { object, name } => eval_safe_field(&eval(object, env)?, name, env),
-        Expr::Index { object, index } => eval_index(&eval(object, env)?, &eval(index, env)?),
-        Expr::Range { start, end, inclusive } => {
+        ExprKind::Field { object, name } => eval_field(&eval(object, env)?, name),
+        ExprKind::Try(operand) => eval_try(eval(operand, env)?, env),
+        ExprKind::SafeField { object, name } => eval_safe_field(&eval(object, env)?, name, env),
+        ExprKind::Index { object, index } => eval_index(&eval(object, env)?, &eval(index, env)?),
+        ExprKind::Range { start, end, inclusive } => {
             eval_range(start.as_deref(), end.as_deref(), *inclusive, env)
         }
         _ => Err(RuntimeError::new(
@@ -560,7 +560,7 @@ fn eval_call(callee: &Value, args: &[Arg], env: &Env) -> Result<Value, RuntimeEr
                 "named arguments are only allowed when constructing a prod/variant",
             ));
         }
-        if matches!(arg.value, Expr::Spread(_)) {
+        if matches!(&arg.value.kind, ExprKind::Spread(_)) {
             return Err(RuntimeError::new(
                 "spread (`..`) is only allowed when constructing a prod/variant",
             ));
@@ -589,8 +589,8 @@ fn eval_method_call(
     // (for a `free` method, no `@`). Special case (Java-style type path): a bare
     // name with no value that names a type with methods (a `sum`'s type name has
     // no value, only its variants do) is resolved *as a type*, not evaluated.
-    let (type_name, self_value): (String, Option<Value>) = match object {
-        Expr::Var(type_path) if env.lookup(type_path).is_none() && env.has_methods(type_path) => {
+    let (type_name, self_value): (String, Option<Value>) = match &object.kind {
+        ExprKind::Var(type_path) if env.lookup(type_path).is_none() && env.has_methods(type_path) => {
             (type_path.clone(), None)
         }
         _ => {
@@ -712,12 +712,12 @@ fn eval_method_call(
 /// function reference and is applied to `left` alone.
 fn eval_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, RuntimeError> {
     let piped = eval(left, env)?;
-    if let Expr::Call { callee, args } = right {
+    if let ExprKind::Call { callee, args } = &right.kind {
         let function = eval(callee, env)?;
         let mut values = Vec::with_capacity(args.len() + 1);
         values.push(piped);
         for arg in args {
-            if arg.label.is_some() || matches!(arg.value, Expr::Spread(_)) {
+            if arg.label.is_some() || matches!(&arg.value.kind, ExprKind::Spread(_)) {
                 return Err(RuntimeError::new(
                     "a piped call takes positional arguments only",
                 ));
@@ -734,8 +734,8 @@ fn eval_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, RuntimeError
 /// (`data ~> clean`); a computed stage (a first-class `Program` value) is a later
 /// step.
 fn stage_name(expr: &Expr) -> Result<&str, RuntimeError> {
-    match expr {
-        Expr::Var(name) => Ok(name),
+    match &expr.kind {
+        ExprKind::Var(name) => Ok(name),
         _ => Err(RuntimeError::new("the right side of `~>` must be a program name")),
     }
 }
@@ -770,7 +770,7 @@ fn eval_cross_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, Runtim
     // *declared* output must be `compatible` with this stage's input (schema vs
     // schema, no values). Caught here — before the upstream is evaluated/run — so a
     // mismatched pipeline is rejected without side effects.
-    if let Expr::Binary { op: BinOp::CrossPipe, right: upstream, .. } = left {
+    if let ExprKind::Binary { op: BinOp::CrossPipe, right: upstream, .. } = &left.kind {
         let upstream_name = stage_name(upstream)?;
         let (_, upstream_manifest) = resolve_stage(upstream_name, env)?;
         let Some(upstream_output) = &upstream_manifest.output else {
@@ -821,15 +821,15 @@ fn run_stage(
 /// into Rust. `apply_values` catches that signal and loops. Everything else
 /// delegates to `eval` — no self-tail-call is possible there.
 pub(crate) fn eval_tail(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
-    match expr {
+    match &expr.kind {
         // A call in tail position: detect self-tail-calls by pointer identity.
-        Expr::Call { callee, args } if !matches!(callee.as_ref(), Expr::Field { .. }) => {
+        ExprKind::Call { callee, args } if !matches!(&callee.kind, ExprKind::Field { .. }) => {
             let callee_val = eval(callee, env)?;
             if let Value::Closure(c) = &callee_val {
                 if env.is_self_closure(c) {
                     let mut values = Vec::with_capacity(args.len());
                     for arg in args {
-                        if arg.label.is_some() || matches!(arg.value, Expr::Spread(_)) {
+                        if arg.label.is_some() || matches!(&arg.value.kind, ExprKind::Spread(_)) {
                             // Named / spread args to self are uncommon; don't
                             // trampoline — fall through to a normal call instead.
                             return eval_call(&callee_val, args, env);
@@ -849,7 +849,7 @@ pub(crate) fn eval_tail(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             eval_call(&callee_val, args, env)
         }
         // Conditional branches are in tail position.
-        Expr::If { cond, then, els } => {
+        ExprKind::If { cond, then, els } => {
             if as_bool(&eval(cond, env)?, "condition")? {
                 eval_tail(then, env)
             } else {
@@ -857,9 +857,9 @@ pub(crate) fn eval_tail(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             }
         }
         // Block result expression is in tail position.
-        Expr::Block { stmts, result } => eval_block(stmts, result.as_deref(), env, true),
+        ExprKind::Block { stmts, result } => eval_block(stmts, result.as_deref(), env, true),
         // Match arm bodies are in tail position.
-        Expr::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env, true),
+        ExprKind::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env, true),
         // Everything else: no self-tail-call is reachable here.
         _ => eval(expr, env),
     }
@@ -983,7 +983,7 @@ fn construct(ctor: &Constructor, args: &[Arg], env: &Env) -> Result<Value, Runti
     for arg in args {
         // `..base` — copy every field from `base` as the starting point; later
         // args override. `base` must be a value of the same type.
-        if let Expr::Spread(base) = &arg.value {
+        if let ExprKind::Spread(base) = &arg.value.kind {
             let base = eval(base, env)?;
             let Value::Data(data) = &base else {
                 return Err(RuntimeError::new(format!(
@@ -1206,10 +1206,10 @@ fn eval_safe_field(object: &Value, name: &str, env: &Env) -> Result<Value, Runti
     // inside the container.
     let accessor = Value::Closure(Rc::new(ClosureData {
         params: vec!["v".to_string()],
-        body: Expr::Field {
-            object: Box::new(Expr::Var("v".to_string())),
+        body: Expr::bare(ExprKind::Field {
+            object: Box::new(Expr::bare(ExprKind::Var("v".to_string()))),
             name: name.to_string(),
-        },
+        }),
         upvalues: Vec::new(),
         home_globals: env.home_globals_weak(),
         authority: env.authority_rc(),
@@ -1249,10 +1249,10 @@ fn eval_field(object: &Value, name: &str) -> Result<Value, RuntimeError> {
 /// with the field replaced and reassigns the *root binding* (value semantics).
 /// A nested path (`a.b.x = v`) recurses: rebuild `b`, then assign `a.b`.
 fn assign_place(place: &Expr, value: Value, scope: &Env) -> Result<(), RuntimeError> {
-    match place {
-        Expr::Var(name) => assign_binding(name, value, scope),
-        Expr::SelfRef => assign_binding("@", value, scope),
-        Expr::Field { object, name } => {
+    match &place.kind {
+        ExprKind::Var(name) => assign_binding(name, value, scope),
+        ExprKind::SelfRef => assign_binding("@", value, scope),
+        ExprKind::Field { object, name } => {
             let current = eval(object, scope)?;
             let Value::Data(data) = &current else {
                 return Err(RuntimeError::new(format!(
@@ -1286,9 +1286,9 @@ fn assign_place(place: &Expr, value: Value, scope: &Env) -> Result<(), RuntimeEr
 /// Whether `expr` is an assignable place: a variable, `@`, or a field path
 /// rooted at one. (A temporary like `Counter(0)` or a literal is not.)
 fn is_assignable_place(expr: &Expr) -> bool {
-    match expr {
-        Expr::Var(_) | Expr::SelfRef => true,
-        Expr::Field { object, .. } => is_assignable_place(object),
+    match &expr.kind {
+        ExprKind::Var(_) | ExprKind::SelfRef => true,
+        ExprKind::Field { object, .. } => is_assignable_place(object),
         _ => false,
     }
 }
@@ -1357,7 +1357,7 @@ fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env, tail: bool) -> R
                 eval(expr, &scope)?;
             }
             Stmt::Use { .. } => {
-                // Lowered to Expr::Call + Lambda by lower::lower_block before eval.
+                // Lowered to ExprKind::Call + Lambda by lower::lower_block before eval.
                 return Err(RuntimeError::new("Stmt::Use reached eval — lowering pass not applied"));
             }
             Stmt::Assign { target, value } => {

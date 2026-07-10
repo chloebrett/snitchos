@@ -196,38 +196,32 @@ propagates its own span. 10 insta snapshots updated to show real byte offsets.
 
 ---
 
-### Step C2: Surface `Expr` carries per-node spans
+### Step C2: Surface `Expr` carries per-node spans — ✅ DONE (2026-07-10)
 
-**Why first**: lowering operates on `&Expr`, not on tokens — so CoreExpr spans can
-only be *real* once the surface `Expr` carries them. This is also the one
-unavoidable churn of the exact-tree tests; doing it up front means C3/C4 are born
-with real spans and each stays testable.
+Wrapped the AST: `Expr { kind: ExprKind, span: Span }`; the old `enum Expr` became
+`enum ExprKind` (variants unchanged — children stay `Box<Expr>`, so spans nest).
 
-**What**: wrap AST nodes so each carries a `Span`. Preferred shape (matches the C3
-CoreExpr shape, so the mirror is 1:1):
-```rust
-pub struct Expr { pub kind: ExprKind, pub span: Span }
-pub enum ExprKind { Int(i64), Var(String), Binary { … }, … }  // today's Expr variants
-```
-Parser construction sites set `span` from the token range they consumed (start of
-the first token .. end of the last). `Stmt` gets a span too (needed for C5 frames
-and `use <-` desugar provenance). `Pattern` spans are **out of scope** for now
-(faults cite expression positions, not pattern positions).
+**Two decisions that killed the churn:**
+- `PartialEq for Expr` compares **only `.kind`** — structural equality assertions in
+  tests ignore spans, so no `assert_eq!` test churned.
+- `Debug for Expr` **forwards to `.kind`** — every `insta` tree snapshot printed
+  identically to before, so **zero snapshot churn** (the plan budgeted for accepting
+  ~40; we accepted none). Spans get dedicated span tests instead.
 
-**Blast radius**: every `Expr::Foo { … }` literal in `parser.rs`, `lower.rs`,
-`interp.rs`, and tests becomes `Expr { kind: ExprKind::Foo { … }, span }`. The
-`insta` snapshots of parsed trees churn once (accept the new shape). This is
-mechanical but wide — the bulk of C2's effort.
+Spans originate in `parser.rs` via three helpers (`cur_start`, `prev_end`,
+`spanned(start, kind)`): atoms carry their token span; binary/postfix/call nodes span
+from the leftmost operand's start through the last consumed token. `lower.rs` and
+`interp.rs` (both doomed in C4) got mechanical `.kind` matches + `Expr::bare(...)`
+constructions with default spans — real spans there don't matter, they're deleted in
+C4. `Stmt`/`Pattern` spans deferred (faults cite expression positions; add if C5
+needs them).
 
-**TDD order**:
-1. RED: `parse("  x").unwrap().span` points at byte 2 (the `x`), not 0; a binary
-   expr's span covers both operands.
-2. GREEN: introduce `ExprKind`, thread spans through parser construction sites.
-3. Accept the churned tree snapshots; keep all behavior tests green (544+).
-
-**Interim value**: even before CoreExpr exists, the *current* eval could begin
-citing locations — but we don't thread spans into faults yet (that's C5, on the
-core IR). C2 is the span-origination substrate.
+New span tests (`an_atom_carries_the_span_of_its_token`,
+`a_binary_span_covers_both_operands`,
+`a_call_span_runs_from_callee_through_the_closing_paren`) + the C1 error-span test.
+**556 lib tests green, zero snapshots churned.** Two pre-existing clippy warnings
+(`index` unused, one `collapsible_if`) remain in the doomed `eval` — left for the C4
+deletion.
 
 ---
 
