@@ -418,6 +418,13 @@ fn link_imports(
 /// # Errors
 /// Returns `Err` on a runtime fault (type mismatch, division by zero, …).
 pub fn eval(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
+    // Stamp the offending expression's span onto an unlocated fault as it leaves —
+    // the innermost `eval` to see it wins (`stamped` no-ops once `at` is set), so a
+    // fault cites the tightest sub-expression that produced it.
+    eval_dispatch(expr, env).map_err(|error| error.stamped(expr.span))
+}
+
+fn eval_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
     if !env.take_fuel() {
         return Err(RuntimeError::new("evaluation fuel exhausted"));
     }
@@ -828,6 +835,13 @@ fn run_stage(
 /// into Rust. `apply_values` catches that signal and loops. Everything else
 /// delegates to `eval` — no self-tail-call is possible there.
 pub(crate) fn eval_tail(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
+    // Stamp faults that bubble up through a tail-position node (e.g. an arity error
+    // from `eval_call`) with this expression's span, like `eval` does. A `TailCall`
+    // control signal passes through unstamped.
+    eval_tail_dispatch(expr, env).map_err(|error| error.stamped(expr.span))
+}
+
+fn eval_tail_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
     match &expr.kind {
         // A call in tail position: detect self-tail-calls by pointer identity.
         CoreExprKind::Call { callee, args } if !matches!(&callee.kind, CoreExprKind::Field { .. }) => {
@@ -1394,6 +1408,29 @@ mod tests {
     };
     use crate::value::{TelemetryEvent, Value};
     use alloc::rc::Rc;
+
+    /// Parse, lower to core, and evaluate in an empty env, returning the fault.
+    fn fault(src: &str) -> crate::value::RuntimeError {
+        let expr = crate::parser::parse(src).expect("parse");
+        let core = crate::lower::lower_expr_to_core(&expr);
+        crate::interp::eval(&core, &crate::env::Env::new()).expect_err("should fault")
+    }
+
+    #[test]
+    fn a_runtime_fault_carries_the_span_of_the_offending_expression() {
+        use crate::lexer::Span;
+        // `1 / 0` — the division faults; the fault must cite the whole `1 / 0`
+        // expression (bytes 0..5), not be span-less.
+        assert_eq!(fault("1 / 0").span(), Some(Span { start: 0, end: 5 }));
+    }
+
+    #[test]
+    fn a_fault_cites_the_innermost_offending_subexpression() {
+        use crate::lexer::Span;
+        // `4 + (1 / 0)` — the fault originates in the inner `1 / 0` (bytes 5..10),
+        // so the innermost span wins, not the outer `+`.
+        assert_eq!(fault("4 + (1 / 0)").span(), Some(Span { start: 5, end: 10 }));
+    }
 
     #[test]
     fn cross_pipe_runs_a_typechecked_stage_from_the_fs() {

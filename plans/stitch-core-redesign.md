@@ -356,27 +356,33 @@ one evaluator.
 
 ---
 
-### Step C5: Frame stack + spanned faults
+### Step C5: Spanned faults — ✅ DONE (2026-07-10)
 
-**What**: Replace `depth: Rc<Cell<u32>>` in `Env` with a
-`frames: Rc<RefCell<Vec<CallFrame>>>` where:
-```rust
-struct CallFrame {
-    span: Span,
-    name: Option<String>,  // function name if known
-}
-```
-`enter_call` pushes; `CallGuard` drop pops. `RuntimeError::Fault` becomes:
-```rust
-Fault { message: String, at: Option<Span> }
-```
-The `at` span comes from the `CoreExpr` node being evaluated when the fault fires.
-The frame stack provides the backtrace.
+`RuntimeError::Fault(String)` → `Fault { message: String, at: Option<Span> }`.
+`eval` (and `eval_tail`) split into a thin wrapper + `*_dispatch`; the wrapper
+stamps the current `expr.span` onto an unlocated fault as it propagates out
+(`RuntimeError::stamped` no-ops once `at` is set, and passes `Return`/`TailCall`
+control signals through untouched) — so a fault cites the **innermost**
+sub-expression that produced it. `RuntimeError::span()` exposes it. Only 3 `Fault`
+sites existed (all in value.rs, everything else goes through `new`), and no test
+compared `RuntimeError` by equality, so churn was minimal — existing `run_err`
+tests use `.message()` and were unaffected.
 
-Acceptance: `run("1 / 0")` returns `Fault { message: "division by zero", at: Some(span) }`
-where `span` covers the offending division expression (e.g. `Span { start: 0, end: 5 }`
-for the whole `1 / 0`, or the operator at `2..3` — pick one convention and test it).
-All existing fault-message tests updated to match the new error type.
+Tests: `a_runtime_fault_carries_the_span_of_the_offending_expression` (`1 / 0` →
+`0..5`) and `a_fault_cites_the_innermost_offending_subexpression` (`4 + (1 / 0)` →
+the inner `5..10`, not the outer `+`). **567 lib + 26 integration green, clippy
+clean.**
+
+**Deliberately deferred (each its own concern, not a one-liner):**
+- **Rendering `line:col` + caret** (à la `ParseError::render`) needs a **SourceMap**:
+  runtime spans come from *multiple independently-parsed sources* (prelude, user
+  program, REPL defs), whose byte offsets overlap, so a fault span alone can't be
+  rendered against "the" source. A `SourceMap` (source-id per span, or per-closure
+  provenance) is the natural next step to make faults user-visibly cite a location.
+- **Frame stack / backtraces** — replacing `depth: Rc<Cell<u32>>` with a
+  `Vec<CallFrame>` was in the original C5 sketch, but it only enables backtraces,
+  which nothing renders yet. Left as YAGNI; the depth guard still works as the
+  recursion backstop.
 
 ---
 

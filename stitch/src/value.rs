@@ -13,6 +13,7 @@ use crate::prelude::*;
 
 use crate::core_ir::CoreExpr;
 use crate::env::Env;
+use crate::lexer::Span;
 
 /// A value produced by evaluating an expression.
 #[derive(Clone)]
@@ -369,8 +370,10 @@ impl PartialEq for Value {
 /// the standard tree-walk technique for non-local return.)
 #[derive(Debug, PartialEq)]
 pub enum RuntimeError {
-    /// A genuine runtime error (type mismatch, division by zero, …).
-    Fault(String),
+    /// A genuine runtime error (type mismatch, division by zero, …). `at` is the
+    /// source span of the offending expression, stamped by `eval` as the fault
+    /// propagates out (the innermost node wins); `None` until stamped.
+    Fault { message: String, at: Option<Span> },
     /// `?` short-circuit: unwind to the enclosing function and return this value.
     Return(Value),
     /// Self-tail-call signal: `apply_values` catches this and loops instead of
@@ -380,7 +383,7 @@ pub enum RuntimeError {
 
 impl RuntimeError {
     pub(crate) fn new(message: impl Into<String>) -> Self {
-        RuntimeError::Fault(message.into())
+        RuntimeError::Fault { message: message.into(), at: None }
     }
 
     /// The `?` early-return control signal carrying the failure value.
@@ -388,11 +391,35 @@ impl RuntimeError {
         RuntimeError::Return(value)
     }
 
+    /// Attach `span` to an unlocated fault — used by `eval` to stamp the span of
+    /// the expression being evaluated when a fault first surfaces. Already-located
+    /// faults (an inner node already stamped) and control signals pass through
+    /// unchanged, so the innermost expression's span wins.
+    #[must_use]
+    pub(crate) fn stamped(self, span: Span) -> Self {
+        match self {
+            RuntimeError::Fault { message, at: None } => {
+                RuntimeError::Fault { message, at: Some(span) }
+            }
+            other => other,
+        }
+    }
+
+    /// The source span of a located fault, if any. `None` for control signals and
+    /// for a fault that never reached an `eval` boundary to be stamped.
+    #[must_use]
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            RuntimeError::Fault { at, .. } => *at,
+            _ => None,
+        }
+    }
+
     /// The fault message for display. A `Return` reaching here means a `?` was
     /// used outside any function — surfaced as a fault rather than silently lost.
     pub fn message(&self) -> String {
         match self {
-            RuntimeError::Fault(message) => message.clone(),
+            RuntimeError::Fault { message, .. } => message.clone(),
             RuntimeError::Return(_) => "`?` used outside a function".to_string(),
             RuntimeError::TailCall(_) => {
                 "internal: tail-call signal escaped the trampoline".to_string()
