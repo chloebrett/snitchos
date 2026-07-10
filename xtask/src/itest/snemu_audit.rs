@@ -78,46 +78,156 @@ pub fn run(
         if idle_skip { "on" } else { "off" },
     );
 
-    // Each scenario drives its own live machine: `wait_for` steps it until the
-    // frame it needs, `send_input` reaches the modelled UART — so interactive
-    // scenarios (console echo, the Stitch REPL) run for real. A passing scenario
-    // short-circuits at its last marker; only a failing one runs the full budget.
-    // Decode cache is on (verified faithful) so the higher budgets stay cheap.
-    //
-    // Scenarios are independent — each owns its own machine, no shared mutable
-    // state — so they fan out across `jobs` host threads. snemu is a pure
-    // interpreter (CPU-bound), so parallelism is worth up to the core count;
-    // `parallel_map` keeps the report deterministic by slotting results back into
-    // selection order. A `done` counter narrates completions (unordered under
-    // fan-out) so a long audit still shows progress.
-    let done = AtomicUsize::new(0);
     let started = Instant::now();
-    let results: Vec<Row> = parallel_map(&work, jobs, |_, s| {
-        let (outcome, steps) = match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
-            Ok(mut machine) => {
-                machine.set_idle_skip(idle_skip);
-                let mut view = View::live(machine, budget_for(s.name, max_steps));
-                let outcome = match scenario_view_fn(s.name)(&mut view) {
-                    Ok(()) => Outcome::Pass,
-                    Err(why) => Outcome::Fail {
-                        why,
-                        console: console_tail(view.console_output().unwrap_or_default().as_str()),
-                    },
-                };
-                (outcome, view.steps_taken().unwrap_or(0))
-            }
-            Err(e) => (Outcome::Fail { why: format!("snemu load failed: {e}"), console: String::new() }, 0),
-        };
-        let n = done.fetch_add(1, Ordering::SeqCst) + 1;
-        eprintln!(
-            "snemu-itest: [{n}/{cap}] {:<40} {}",
-            s.name,
-            if matches!(outcome, Outcome::Pass) { "ok" } else { "FAIL" },
-        );
-        Row { name: s.name, outcome, steps }
+
+    // Boot-once, forked per scenario. Every scenario on a workload shares the same
+    // boot-to-steady-state, so a workload is booted **once** to the `entering
+    // heartbeat` checkpoint and snapshotted (`Machine: Clone` — the deep copy the
+    // machine was built for); each of its scenarios then forks the snapshot rather
+    // than re-running the ~25M-instruction boot. For 108 scenarios over ~30
+    // workloads that removes ~2B instructions of redundant boot. Fidelity-exact:
+    // the clone carries machine state *and* the emitted-frame history (its
+    // virtio-TX buffer), so even boot-time-assertion scenarios see their frames.
+    //
+    // The unit of parallelism is the **workload group**, not the scenario: a
+    // `Machine` holds a `RefCell` (single-thread by design), so it must never
+    // cross a thread boundary. One worker owns a group's snapshot and forks it
+    // locally for each scenario. A dynamic work-queue (`parallel_map`) balances
+    // groups across cores; the heavy scenarios are mostly singleton workloads, so
+    // they still fan out. A workload that never reaches the checkpoint (an early
+    // crash) falls back to a fresh boot per scenario.
+    let groups = group_by_workload(&work);
+    let done = AtomicUsize::new(0);
+    let group_results = parallel_map(&groups, jobs, |_, group| {
+        run_group(&kernel, &dtb, group, max_steps, idle_skip, &done, cap)
     });
 
-    print_report(&results, started.elapsed().as_secs_f64())
+    // Flatten groups back into selection order via each scenario's original index.
+    let mut rows: Vec<Option<Row>> = (0..work.len()).map(|_| None).collect();
+    let mut boot_steps = 0u64;
+    for (group_boot, scenario_rows) in group_results {
+        boot_steps += group_boot;
+        for (index, row) in scenario_rows {
+            rows[index] = Some(row);
+        }
+    }
+    let results: Vec<Row> = rows.into_iter().flatten().collect();
+
+    print_report(&results, boot_steps, started.elapsed().as_secs_f64())
+}
+
+/// The UART marker for the boot-once checkpoint: `kmain` prints it once, after all
+/// boot + per-workload spawn, just before the heartbeat loop. Snapshotting here
+/// captures a workload's entire boot; scenarios fork and step forward from it
+/// (the first heartbeat and everything after happens post-fork).
+const CHECKPOINT: &[u8] = b"entering heartbeat";
+
+/// Budget for booting a snapshot to [`CHECKPOINT`]. A normal boot reaches it in
+/// ~25M steps; the generous cap lets heavier-spawn workloads through while failing
+/// fast for a workload that crashes before the heartbeat loop (→ fresh-boot
+/// fallback).
+const CHECKPOINT_BUDGET: u64 = 60_000_000;
+
+/// One workload's scenarios, tagged with their original position in the selection
+/// (so results can be slotted back into report order after the parallel fan-out).
+struct Group<'a> {
+    workload: Option<&'a str>,
+    scenarios: Vec<(usize, &'a itest_harness::Scenario)>,
+}
+
+/// Partition `work` into per-workload groups, preserving first-appearance order of
+/// workloads and selection order within each. Each carries its scenarios' original
+/// indices for the post-fan-out re-ordering.
+fn group_by_workload<'a>(work: &[&'a itest_harness::Scenario]) -> Vec<Group<'a>> {
+    let mut groups: Vec<Group<'a>> = Vec::new();
+    for (index, s) in work.iter().enumerate() {
+        match groups.iter_mut().find(|g| g.workload == s.workload) {
+            Some(g) => g.scenarios.push((index, s)),
+            None => groups.push(Group { workload: s.workload, scenarios: vec![(index, s)] }),
+        }
+    }
+    groups
+}
+
+/// Run one workload group on a single thread: boot its snapshot once to the
+/// checkpoint, then fork (clone) it for each scenario. Returns the one-time boot
+/// cost and each scenario's `(original_index, Row)`. If the snapshot never reaches
+/// the checkpoint (early-crash workload), every scenario boots fresh instead.
+fn run_group(
+    kernel: &[u8],
+    dtb: &[u8],
+    group: &Group,
+    max_steps: u64,
+    idle_skip: bool,
+    done: &AtomicUsize,
+    cap: usize,
+) -> (u64, Vec<(usize, Row)>) {
+    let snapshot = boot_snapshot(kernel, dtb, group.workload, idle_skip);
+    let boot_steps = snapshot.as_ref().map_or(0, |(_, n)| *n);
+
+    let rows = group
+        .scenarios
+        .iter()
+        .map(|&(index, s)| {
+            let (outcome, steps) = match &snapshot {
+                // Fork the shared post-boot snapshot (idle-skip already set on it).
+                Ok((machine, _)) => run_scenario(machine.clone(), s, max_steps),
+                // Never reached the checkpoint: boot this scenario fresh.
+                Err(_) => match snemu_diff::load_workload_machine(kernel, dtb, s.workload) {
+                    Ok(mut machine) => {
+                        machine.set_idle_skip(idle_skip);
+                        run_scenario(machine, s, max_steps)
+                    }
+                    Err(e) => (
+                        Outcome::Fail { why: format!("snemu load failed: {e}"), console: String::new() },
+                        0,
+                    ),
+                },
+            };
+            let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+            eprintln!(
+                "snemu-itest: [{n}/{cap}] {:<40} {}",
+                s.name,
+                if matches!(outcome, Outcome::Pass) { "ok" } else { "FAIL" },
+            );
+            (index, Row { name: s.name, outcome, steps })
+        })
+        .collect();
+
+    (boot_steps, rows)
+}
+
+/// Boot a fresh machine for `workload` to [`CHECKPOINT`] with idle-skip set — the
+/// snapshot every scenario in the group forks. `Err` if it never reached the
+/// checkpoint (the caller then boots each scenario fresh).
+fn boot_snapshot(
+    kernel: &[u8],
+    dtb: &[u8],
+    workload: Option<&str>,
+    idle_skip: bool,
+) -> Result<(snemu::machine::Machine, u64), String> {
+    let mut machine = snemu_diff::load_workload_machine(kernel, dtb, workload)?;
+    machine.set_idle_skip(idle_skip);
+    let steps = machine.run_until_uart(CHECKPOINT, CHECKPOINT_BUDGET)?;
+    Ok((machine, steps))
+}
+
+/// Drive `scenario` against `machine` (a fresh or forked live machine), returning
+/// its outcome and the guest-instruction cost of reaching it.
+fn run_scenario(
+    machine: snemu::machine::Machine,
+    scenario: &itest_harness::Scenario,
+    max_steps: u64,
+) -> (Outcome, u64) {
+    let mut view = View::live(machine, budget_for(scenario.name, max_steps));
+    let outcome = match scenario_view_fn(scenario.name)(&mut view) {
+        Ok(()) => Outcome::Pass,
+        Err(why) => Outcome::Fail {
+            why,
+            console: console_tail(view.console_output().unwrap_or_default().as_str()),
+        },
+    };
+    (outcome, view.steps_taken().unwrap_or(0))
 }
 
 /// Per-scenario step-budget override. Most scenarios reach their assertion well
@@ -141,8 +251,10 @@ fn budget_for(name: &str, default: u64) -> u64 {
 }
 
 /// Print the per-scenario pass/fail lines, the slowest-scenario table (where the
-/// CPU goes), and the headline "N/M pass" summary.
-fn print_report(results: &[Row], elapsed_secs: f64) -> ExitCode {
+/// CPU goes), and the headline "N/M pass" summary. `boot_steps` is the one-time
+/// per-workload snapshot-boot cost, folded into the honest total-instret figure
+/// (the per-scenario steps are post-fork only).
+fn print_report(results: &[Row], boot_steps: u64, elapsed_secs: f64) -> ExitCode {
     let passed = results.iter().filter(|r| matches!(r.outcome, Outcome::Pass)).count();
     let total = results.len();
 
@@ -165,7 +277,7 @@ fn print_report(results: &[Row], elapsed_secs: f64) -> ExitCode {
         }
     }
 
-    print_slowest(results);
+    print_slowest(results, boot_steps);
 
     println!(
         "\n{passed}/{total} scenarios pass under snemu ({:.0}% fidelity, {elapsed_secs:.1}s)",
@@ -178,15 +290,20 @@ fn print_report(results: &[Row], elapsed_secs: f64) -> ExitCode {
 /// tail that floors the parallel wall-clock (no fan-out beats the single slowest
 /// one). Sorted by deterministic `steps`, so it's the same ranking every run and
 /// the honest target list for "assert the same thing for less CPU".
-fn print_slowest(results: &[Row]) {
+fn print_slowest(results: &[Row], boot_steps: u64) {
     const TOP: usize = 12;
     let mut ranked: Vec<&Row> = results.iter().filter(|r| r.steps > 0).collect();
     ranked.sort_unstable_by_key(|r| std::cmp::Reverse(r.steps));
     if ranked.is_empty() {
         return;
     }
-    let total: u64 = ranked.iter().map(|r| r.steps).sum();
-    println!("\n=== slowest by guest instructions (Minstret; {}M total) ===", total / 1_000_000);
+    // Total = per-scenario fork-forward instructions + the one-time boot-once
+    // cost (paid per workload, not per scenario). The scenario steps are post-fork
+    // only, so the boot line makes the north-star figure honest.
+    let scenario_total: u64 = ranked.iter().map(|r| r.steps).sum();
+    let total = scenario_total + boot_steps;
+    println!("\n=== slowest by guest instructions (Minstret; {}M total, {}M boot-once) ===",
+        total / 1_000_000, boot_steps / 1_000_000);
     for r in ranked.iter().take(TOP) {
         let pct = if total == 0 { 0.0 } else { 100.0 * r.steps as f64 / total as f64 };
         println!("  {:>7}M  {:>4.1}%  {}", r.steps / 1_000_000, pct, r.name);

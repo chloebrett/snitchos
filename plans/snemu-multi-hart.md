@@ -123,6 +123,33 @@ embarrassingly parallel; the win is deterministic *and* fast.
   no parallelism beats the slowest one alone — so 66s, not 355/10 ≈ 35s. The
   lever for the next tier is post-04's JIT, which attacks that tail directly.
 
+### Total instret as the north-star, and two levers
+
+The slowest table's headline is **total instret** — deterministic guest work the
+audit does, independent of host cores. Two ways to move it: run the emulator
+faster (MIPS → the JIT), or execute fewer guest instructions. The first big
+instret cut is **boot-once/fork**:
+
+- **The redundant-boot tax.** Every scenario used to re-boot the kernel from
+  scratch (~25M instructions to steady state). With 108 scenarios over ~30
+  workloads, that's ~2B of duplicated boot in the 9.26B total.
+- **Boot-once/fork.** Boot each *workload* once to the `entering heartbeat`
+  checkpoint, snapshot via `Machine: Clone`, then fork per scenario. The clone
+  carries machine state *and* the emitted-frame history (its virtio-TX buffer),
+  so boot-time-assertion scenarios (`pre-init-order`) still see their frames —
+  fidelity-exact. Reuses the snapshot design `snemu-fork` already proved.
+- **Parallelise over workload *groups*, not scenarios.** A `Machine` holds a
+  `RefCell` (single-thread by design), so it must never cross a thread boundary.
+  One worker owns a group's snapshot and forks it locally; a dynamic work-queue
+  balances groups, and the heavy scenarios are mostly singleton workloads so they
+  still fan out. Early-crash workloads (never reach the checkpoint) fall back to
+  a fresh boot per scenario.
+- **Measured:** total instret **9261M → 7495M (−19%, ~1.77B)**, fidelity
+  unchanged at **106/108**. Wall-clock ~unchanged (61.6s) because `frame-oom`
+  still floors it under max parallelism — boot-once is an *instret*/aggregate-CPU
+  win, which is what pays off on a busier machine or a serial run. Reported total
+  now separates the one-time `boot-once` cost so the north-star stays honest.
+
 ## Non-goals (for now)
 
 Relaxed memory, >2 harts, hart hotplug/stop (`sbi_hart_stop`), and external
