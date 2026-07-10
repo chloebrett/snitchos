@@ -62,8 +62,8 @@
 5689344 rpc-trace-nests
 5681152 rpc-round-trips
 5652480 ipc-message-crosses
-5623808 ipc-wakeup-is-prompt
 5623808 ipc-trace-crosses
+5623808 ipc-wakeup-is-prompt
 5468160 init-brings-up-fs-server
 5312512 spawn-delegates-to-child
 5177344 badge-mint-mints-and-refuses
@@ -73,12 +73,12 @@
 4075520 boot-stack-guard-fault-detected
 4063232 stack-guard-fault-detected
 4005888 syscall-hog-still-preempted
-3338240 userspace-emits-telemetry
 3338240 userspace-cap-denied
+3338240 userspace-emits-telemetry
 3338240 userspace-cannot-touch-kernel
 3338240 userspace-process-exits
-3334144 heartbeat-cadence
 3334144 kernel-heap-metrics
+3334144 heartbeat-cadence
 3330048 userspace-quota-refused
 2777088 userspace-yield-round-trips
 2740224 userspace-emits-span
@@ -101,8 +101,8 @@
 106496 frame-allocator-metrics
 106496 userspace-grant-snitched
 81920 smp-ipi-wakes-idle-hart
-40960 pre-init-order
 40960 boot-reaches-heartbeat
-0 kernel-runs-at-higher-half
-0 smp-secondary-hart-boots
+40960 pre-init-order
 0 sched-spawn-registers-thread
+0 smp-secondary-hart-boots
+0 kernel-runs-at-higher-half

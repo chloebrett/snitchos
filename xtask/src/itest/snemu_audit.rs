@@ -130,75 +130,109 @@ pub fn run(
     );
 
     let started = Instant::now();
+    let worker_busy: Vec<AtomicU64> = (0..jobs.max(1)).map(|_| AtomicU64::new(0)).collect();
+    let segments: Mutex<Vec<Segment>> = Mutex::new(Vec::new());
 
-    // Boot-once, forked per scenario. Every scenario on a workload shares the same
-    // boot-to-steady-state, so a workload is booted **once** to the `entering
-    // heartbeat` checkpoint and snapshotted (`Machine: Clone` — the deep copy the
-    // machine was built for); each of its scenarios then forks the snapshot rather
-    // than re-running the ~25M-instruction boot. For 108 scenarios over ~30
-    // workloads that removes ~2B instructions of redundant boot. Fidelity-exact:
-    // the clone carries machine state *and* the emitted-frame history (its
-    // virtio-TX buffer), so even boot-time-assertion scenarios see their frames.
-    //
-    // The unit of parallelism is the **workload group**, not the scenario: a
-    // `Machine` holds a `RefCell` (single-thread by design), so it must never
-    // cross a thread boundary. One worker owns a group's snapshot and forks it
-    // locally for each scenario. A dynamic work-queue (`parallel_map`) balances
-    // groups across cores; the heavy scenarios are mostly singleton workloads, so
-    // they still fan out. A workload that never reaches the checkpoint (an early
-    // crash) falls back to a fresh boot per scenario.
-    // Longest-processing-time packing: `parallel_map`'s dynamic work-queue hands
-    // out groups in array order, so putting the heaviest groups first keeps a slow
-    // group from being grabbed last and stranding one worker while the rest idle
-    // (LPT is a 4/3-approximation to the optimal makespan). "Heaviest" is estimated
-    // from the *previous* run's per-scenario instret — deterministic, so it's a
-    // stable predictor — summed per group. Unknown (new) scenarios sort first, so
-    // a possibly-huge newcomer isn't left for the tail. `--no-lpt` keeps selection
-    // order for the A/B baseline.
-    let mut groups = group_by_workload(&work);
+    // Phase 1 — boot-once. Boot each *distinct* workload one time to the `entering
+    // heartbeat` checkpoint and snapshot it (`Machine: Clone` — the deep copy the
+    // machine was built for), so each scenario forks the snapshot instead of
+    // re-running the ~25M-instruction boot (~2B saved over the suite, fidelity-
+    // exact: the clone carries the emitted-frame history in its virtio-TX buffer).
+    // `Machine` is `Sync` (Mutex-backed UART), so the snapshot map is *shared*
+    // across workers in phase 2 — the key to scenario-level parallelism below.
+    let mut distinct: Vec<Option<&str>> = Vec::new();
+    for s in &work {
+        if !distinct.contains(&s.workload) {
+            distinct.push(s.workload);
+        }
+    }
+    let booted = parallel_map(&distinct, jobs, |worker, _, &workload| {
+        let start_s = started.elapsed().as_secs_f64();
+        let boot_start = Instant::now();
+        let snapshot = boot_snapshot(&kernel, &dtb, workload, idle_skip);
+        worker_busy[worker].fetch_add(boot_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let boot_steps = snapshot.as_ref().map_or(0, |(_, n)| *n);
+        segments.lock().expect("segments mutex").push(Segment {
+            kind: "boot",
+            name: workload.unwrap_or("(default)").to_owned(),
+            workload: workload.map(str::to_owned),
+            worker,
+            start_s,
+            end_s: started.elapsed().as_secs_f64(),
+            instret: boot_steps,
+            pass: true,
+        });
+        (workload, snapshot.map(|(m, _)| m), boot_steps)
+    });
+    let boot_steps: u64 = booted.iter().map(|(_, _, n)| *n).sum();
+    let snapshots: std::collections::HashMap<Option<&str>, Result<snemu::machine::Machine, String>> =
+        booted.into_iter().map(|(w, snap, _)| (w, snap)).collect();
+
+    // Phase 2 — scenario-level fan-out. This is what fixes the packing: because the
+    // snapshot is shared, each *scenario* (not each workload group) is an
+    // independent unit of work, so a workload's scenarios spread across all workers
+    // instead of stacking on one. LPT order (heaviest first, by the previous run's
+    // deterministic instret) keeps a slow scenario off the tail; unknowns sort
+    // first. `--no-lpt` keeps selection order for the A/B baseline.
+    let mut order: Vec<(usize, &itest_harness::Scenario)> = work.iter().copied().enumerate().collect();
     if lpt {
         let history = load_durations();
         let heaviest = history.values().copied().max().unwrap_or(0);
-        groups.sort_by_key(|g| {
-            let cost: u64 = g
-                .scenarios
-                .iter()
-                .map(|(_, s)| history.get(s.name).copied().unwrap_or(heaviest))
-                .sum();
-            std::cmp::Reverse(cost)
+        order.sort_by_key(|(_, s)| {
+            std::cmp::Reverse(history.get(s.name).copied().unwrap_or(heaviest))
         });
     }
 
-    // Per-worker busy time — each `run_group` adds its own wall (boot + its
-    // scenarios) to its worker's slot. Utilization = busy / makespan reveals how
-    // even the packing is: the bottleneck worker sits near 100%, and a low minimum
-    // means a straggler stranded one core (what LPT exists to fix).
     let done = AtomicUsize::new(0);
-    let worker_busy: Vec<AtomicU64> = (0..jobs.max(1)).map(|_| AtomicU64::new(0)).collect();
-    let segments: Mutex<Vec<Segment>> = Mutex::new(Vec::new());
-    let ctx = RunCtx {
-        kernel: &kernel,
-        dtb: &dtb,
-        max_steps,
-        idle_skip,
-        cap,
-        done: &done,
-        worker_busy: &worker_busy,
-        run_start: started,
-        segments: &segments,
-    };
-    let group_results = parallel_map(&groups, jobs, |worker, _, group| {
-        run_group(&ctx, group, worker)
+    let scenario_results = parallel_map(&order, jobs, |worker, _, &(index, s)| {
+        // Fork the shared post-boot snapshot; fall back to a fresh boot for an
+        // early-crash workload that never reached the checkpoint.
+        let machine = match snapshots.get(&s.workload) {
+            Some(Ok(snapshot)) => Some(snapshot.clone()),
+            _ => match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
+                Ok(mut m) => {
+                    m.set_idle_skip(idle_skip);
+                    Some(m)
+                }
+                Err(_) => None,
+            },
+        };
+        let scenario_start = Instant::now();
+        let start_s = started.elapsed().as_secs_f64();
+        let (outcome, steps) = match machine {
+            Some(m) => run_scenario(m, s, max_steps),
+            None => (
+                Outcome::Fail { why: "snemu load failed".to_owned(), console: String::new() },
+                0,
+            ),
+        };
+        worker_busy[worker].fetch_add(scenario_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let wall = scenario_start.elapsed().as_secs_f64();
+        let pass = matches!(outcome, Outcome::Pass);
+        segments.lock().expect("segments mutex").push(Segment {
+            kind: "scenario",
+            name: s.name.to_owned(),
+            workload: s.workload.map(str::to_owned),
+            worker,
+            start_s,
+            end_s: started.elapsed().as_secs_f64(),
+            instret: steps,
+            pass,
+        });
+        let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+        eprintln!(
+            "snemu-itest: [{n:>3}/{cap}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s",
+            s.name,
+            if pass { "ok" } else { "FAIL" },
+            steps / 1_000_000,
+        );
+        (index, Row { name: s.name, outcome, steps })
     });
 
-    // Flatten groups back into selection order via each scenario's original index.
+    // Restore selection order via each scenario's original index.
     let mut rows: Vec<Option<Row>> = (0..work.len()).map(|_| None).collect();
-    let mut boot_steps = 0u64;
-    for (group_boot, scenario_rows) in group_results {
-        boot_steps += group_boot;
-        for (index, row) in scenario_rows {
-            rows[index] = Some(row);
-        }
+    for (index, row) in scenario_results {
+        rows[index] = Some(row);
     }
     let results: Vec<Row> = rows.into_iter().flatten().collect();
     let makespan = started.elapsed();
@@ -359,122 +393,9 @@ const CHECKPOINT: &[u8] = b"entering heartbeat";
 /// fallback).
 const CHECKPOINT_BUDGET: u64 = 60_000_000;
 
-/// One workload's scenarios, tagged with their original position in the selection
-/// (so results can be slotted back into report order after the parallel fan-out).
-struct Group<'a> {
-    workload: Option<&'a str>,
-    scenarios: Vec<(usize, &'a itest_harness::Scenario)>,
-}
-
-/// Partition `work` into per-workload groups, preserving first-appearance order of
-/// workloads and selection order within each. Each carries its scenarios' original
-/// indices for the post-fan-out re-ordering.
-fn group_by_workload<'a>(work: &[&'a itest_harness::Scenario]) -> Vec<Group<'a>> {
-    let mut groups: Vec<Group<'a>> = Vec::new();
-    for (index, s) in work.iter().enumerate() {
-        match groups.iter_mut().find(|g| g.workload == s.workload) {
-            Some(g) => g.scenarios.push((index, s)),
-            None => groups.push(Group { workload: s.workload, scenarios: vec![(index, s)] }),
-        }
-    }
-    groups
-}
-
-/// Shared, read-only context every `run_group` call needs — bundled so the fan-out
-/// closure passes one reference instead of a long argument list. `done` and
-/// `worker_busy` are the only interior-mutable members (atomics), shared across
-/// worker threads.
-struct RunCtx<'a> {
-    kernel: &'a [u8],
-    dtb: &'a [u8],
-    max_steps: u64,
-    idle_skip: bool,
-    cap: usize,
-    done: &'a AtomicUsize,
-    worker_busy: &'a [AtomicU64],
-    /// Run start, for timeline offsets (`start_s`/`end_s`) on every segment.
-    run_start: Instant,
-    /// Shared timeline collector — each worker appends its boot + scenario spans.
-    segments: &'a Mutex<Vec<Segment>>,
-}
-
-/// Run one workload group on a single thread: boot its snapshot once to the
-/// checkpoint, then fork (clone) it for each scenario. Returns the one-time boot
-/// cost and each scenario's `(original_index, Row)`. If the snapshot never reaches
-/// the checkpoint (early-crash workload), every scenario boots fresh instead.
-fn run_group(ctx: &RunCtx, group: &Group, worker: usize) -> (u64, Vec<(usize, Row)>) {
-    let group_start = Instant::now();
-    let boot_start_s = ctx.run_start.elapsed().as_secs_f64();
-    let snapshot = boot_snapshot(ctx.kernel, ctx.dtb, group.workload, ctx.idle_skip);
-    let boot_steps = snapshot.as_ref().map_or(0, |(_, n)| *n);
-    // Record the once-per-workload boot span (grey on the timeline).
-    ctx.segments.lock().expect("segments mutex").push(Segment {
-        kind: "boot",
-        name: group.workload.unwrap_or("(default)").to_owned(),
-        workload: group.workload.map(str::to_owned),
-        worker,
-        start_s: boot_start_s,
-        end_s: ctx.run_start.elapsed().as_secs_f64(),
-        instret: boot_steps,
-        pass: true,
-    });
-
-    let rows = group
-        .scenarios
-        .iter()
-        .map(|&(index, s)| {
-            let scenario_start = Instant::now();
-            let scenario_start_s = ctx.run_start.elapsed().as_secs_f64();
-            let (outcome, steps) = match &snapshot {
-                // Fork the shared post-boot snapshot (idle-skip already set on it).
-                Ok((machine, _)) => run_scenario(machine.clone(), s, ctx.max_steps),
-                // Never reached the checkpoint: boot this scenario fresh.
-                Err(_) => match snemu_diff::load_workload_machine(ctx.kernel, ctx.dtb, s.workload) {
-                    Ok(mut machine) => {
-                        machine.set_idle_skip(ctx.idle_skip);
-                        run_scenario(machine, s, ctx.max_steps)
-                    }
-                    Err(e) => (
-                        Outcome::Fail { why: format!("snemu load failed: {e}"), console: String::new() },
-                        0,
-                    ),
-                },
-            };
-            let wall = scenario_start.elapsed().as_secs_f64();
-            let pass = matches!(outcome, Outcome::Pass);
-            ctx.segments.lock().expect("segments mutex").push(Segment {
-                kind: "scenario",
-                name: s.name.to_owned(),
-                workload: s.workload.map(str::to_owned),
-                worker,
-                start_s: scenario_start_s,
-                end_s: ctx.run_start.elapsed().as_secs_f64(),
-                instret: steps,
-                pass,
-            });
-            let n = ctx.done.fetch_add(1, Ordering::SeqCst) + 1;
-            // Per-scenario line: completion index, the CPU thread (worker) it ran
-            // on, name, verdict, then its deterministic instret and wall time.
-            eprintln!(
-                "snemu-itest: [{n:>3}/{}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s",
-                ctx.cap,
-                s.name,
-                if pass { "ok" } else { "FAIL" },
-                steps / 1_000_000,
-            );
-            (index, Row { name: s.name, outcome, steps })
-        })
-        .collect();
-
-    // Attribute this group's whole wall (boot + its scenarios) to the worker that
-    // ran it; a worker accumulates across every group it grabbed from the queue.
-    ctx.worker_busy[worker].fetch_add(group_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    (boot_steps, rows)
-}
-
 /// Boot a fresh machine for `workload` to [`CHECKPOINT`] with idle-skip set — the
-/// snapshot every scenario in the group forks. `Err` if it never reached the
-/// checkpoint (the caller then boots each scenario fresh).
+/// shared snapshot every scenario on this workload forks. `Err` if it never reached
+/// the checkpoint (each scenario then boots fresh).
 fn boot_snapshot(
     kernel: &[u8],
     dtb: &[u8],

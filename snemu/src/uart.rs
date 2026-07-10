@@ -3,8 +3,8 @@
 //! host harness drains; host-injected input queues for the guest to read via the
 //! receive buffer, with the line-status register signalling data-ready.
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::Mutex;
 
 /// ns16550a register offsets from the device base.
 pub(crate) mod reg {
@@ -30,27 +30,38 @@ pub(crate) mod lsr {
 /// harness drains them); received bytes queue in `rx` (the host injects console
 /// input there). The transmitter is modeled as always ready.
 ///
-/// `rx` is a `RefCell` so a **read** of the RBR register — which pops a byte, an
-/// MMIO side effect — can happen behind the bus's `&self` read path without
-/// rippling `&mut` through the whole fetch/load chain. A `Machine` lives on one
-/// thread, so the single-threaded borrow is sound.
-#[derive(Clone)]
+/// `rx` is a `Mutex` (not a `RefCell`) so a **read** of the RBR register — which
+/// pops a byte, an MMIO side effect — can happen behind the bus's `&self` read
+/// path *and* leave the `Machine` `Sync`. That matters because the boot-once audit
+/// shares a booted snapshot across worker threads to `clone` (fork) it per
+/// scenario; a `RefCell` would make `Machine` non-`Sync` and force group-atomic
+/// parallelism. The lock is only taken on actual UART MMIO (the bus dispatches by
+/// address first), so it's off the interpreter's hot path.
 pub(crate) struct Uart {
     out: Vec<u8>,
-    rx: RefCell<VecDeque<u8>>,
+    rx: Mutex<VecDeque<u8>>,
+}
+
+impl Clone for Uart {
+    fn clone(&self) -> Self {
+        Self {
+            out: self.out.clone(),
+            rx: Mutex::new(self.rx.lock().expect("uart rx").clone()),
+        }
+    }
 }
 
 impl Uart {
     pub(crate) fn new() -> Self {
-        Self { out: Vec::new(), rx: RefCell::new(VecDeque::new()) }
+        Self { out: Vec::new(), rx: Mutex::new(VecDeque::new()) }
     }
 
     pub(crate) fn read(&self, offset: usize) -> u8 {
         match offset {
             // RBR (== THR offset): pop one received byte, or 0 if the FIFO's dry.
-            reg::RBR => self.rx.borrow_mut().pop_front().unwrap_or(0),
+            reg::RBR => self.rx.lock().expect("uart rx").pop_front().unwrap_or(0),
             reg::LSR => {
-                let dr = if self.rx.borrow().is_empty() { 0 } else { lsr::DR };
+                let dr = if self.rx.lock().expect("uart rx").is_empty() { 0 } else { lsr::DR };
                 lsr::THRE | lsr::TEMT | dr
             }
             _ => 0,
@@ -66,7 +77,7 @@ impl Uart {
     /// Queue host-supplied console input for the guest to read via RBR. The
     /// interactive audit harness calls this to inject a scenario's keystrokes.
     pub(crate) fn push_input(&mut self, bytes: &[u8]) {
-        self.rx.get_mut().extend(bytes.iter().copied());
+        self.rx.get_mut().expect("uart rx").extend(bytes.iter().copied());
     }
 
     pub(crate) fn output(&self) -> &[u8] {
