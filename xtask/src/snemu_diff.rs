@@ -555,11 +555,21 @@ pub(crate) fn collect_frames_until_cap_quiescence(
 
 /// Build the kernel and read the base DTB the emulators share.
 pub(crate) fn prepare(with_workloads: bool) -> Result<(Vec<u8>, Vec<u8>), String> {
+    prepare_profiled(with_workloads, false)
+}
+
+/// Like [`prepare`], but builds the kernel in the optimized (`--release`)
+/// profile when `release` is set and reads the matching ELF. Used by
+/// `snemu-itest --release` to reproduce the release-codegen kernel bug in-process.
+pub(crate) fn prepare_profiled(
+    with_workloads: bool,
+    release: bool,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
     let features: &[&str] = if with_workloads { &["itest-workloads"] } else { &[] };
-    if !qemu::build_kernel(features).is_ok_and(|s| s.success()) {
+    if !qemu::build_kernel_profiled(features, release).is_ok_and(|s| s.success()) {
         return Err("kernel build failed".to_string());
     }
-    let kernel = std::fs::read(qemu::KERNEL_BIN).map_err(|e| format!("read kernel: {e}"))?;
+    let kernel = std::fs::read(qemu::kernel_bin(release)).map_err(|e| format!("read kernel: {e}"))?;
     let dtb = std::fs::read(SNEMU_DTB).map_err(|e| format!("read {SNEMU_DTB}: {e}"))?;
     Ok((kernel, dtb))
 }

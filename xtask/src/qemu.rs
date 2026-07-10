@@ -57,10 +57,50 @@ pub fn base_command(chardev_arg: &str, ram_mb: u32) -> Command {
 /// (into an isolated target dir), so there is no separate user-build step
 /// and nothing to pass in — a fresh embed falls out of building the kernel.
 pub fn build_kernel(features: &[&str]) -> std::io::Result<std::process::ExitStatus> {
+    build_kernel_profiled(features, false)
+}
+
+/// The kernel ELF path for a given profile. Cargo writes the debug build to
+/// `.../debug/kernel` and the optimized build to `.../release/kernel`; a caller
+/// that built with `--release` must read from the matching directory.
+#[must_use]
+pub fn kernel_bin(release: bool) -> &'static str {
+    if release {
+        "target/riscv64gc-unknown-none-elf/release/kernel"
+    } else {
+        KERNEL_BIN
+    }
+}
+
+/// Invoke `cargo build -p kernel` with optional cargo features, optionally in
+/// the optimized (`--release`) profile.
+///
+/// The kernel's `build.rs` builds and embeds the userspace programs itself
+/// (into an isolated target dir), so there is no separate user-build step
+/// and nothing to pass in — a fresh embed falls out of building the kernel.
+pub fn build_kernel_profiled(
+    features: &[&str],
+    release: bool,
+) -> std::io::Result<std::process::ExitStatus> {
     let mut cmd = Command::new("cargo");
     cmd.args(["build", "-p", "kernel", "--target", KERNEL_TARGET]);
+    if release {
+        cmd.arg("--release");
+    }
     if !features.is_empty() {
         cmd.arg("--features").arg(features.join(","));
     }
     cmd.status()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernel_bin_selects_profile_directory() {
+        assert!(kernel_bin(false).contains("/debug/"));
+        assert!(kernel_bin(true).contains("/release/"));
+        assert!(kernel_bin(true).ends_with("/kernel"));
+    }
 }

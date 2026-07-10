@@ -107,8 +107,9 @@ pub fn run(
     jobs: usize,
     idle_skip: bool,
     lpt: bool,
+    release: bool,
 ) -> ExitCode {
-    let (kernel, dtb) = match snemu_diff::prepare(true) {
+    let (kernel, dtb) = match snemu_diff::prepare_profiled(true, release) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("snemu-itest: {e}");
