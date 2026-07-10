@@ -184,14 +184,14 @@ pub fn run(metrics: Metrics) -> ! {
 /// Default: alloc+free, keeps `in_use` bounded. Under the `workload=frame-oom`
 /// selection: leak **a quarter of the pool per tick**, so exhaustion is a *gradual*
 /// ~4-heartbeat drain under sustained pressure — not a one-shot OOM (the trivial
-/// case). Making the rate pool-relative (`total / 4`) rather than a fixed count is
-/// what keeps it correct across machines of different RAM: it is exactly the old
-/// `8192/tick` on QEMU's 128 MiB (32K frames), and proportionally fewer on snemu's
-/// smaller `frame-oom` machine (a smaller pool → the same gradual OOM, but cheaper
-/// to reach — that's how the audit keeps `frame-allocator-oom` off the critical
-/// path; see `xtask` `ram_bytes_for`). Drives the `frame-allocator-oom` scenario;
-/// `frame-oom` also runs on the light spawn layout (no demo task_a/task_b burning
-/// between ticks; see `kmain`).
+/// case). The rate is pool-relative (`total / 4`) rather than a fixed count so the
+/// gradual ~4-heartbeat shape holds **at any RAM size** — the point being that
+/// SnitchOS's OOM path works regardless of physical RAM, so `frame-oom` boots on a
+/// deliberately small machine (snemu 48 MiB; see `xtask` `ram_mb_for`) while QEMU
+/// and the default run 128 MiB, and `total/4` is exactly the old `8192/tick` at
+/// 128 MiB. Drives the `frame-allocator-oom` scenario; `frame-oom` also runs on
+/// the light spawn layout (no demo task_a/task_b burning between ticks; see
+/// `kmain`).
 fn frame_smoke() {
     use kernel_core::bootargs::WorkloadKind;
     if boot_workload::selected() == Some(WorkloadKind::FrameOom) {

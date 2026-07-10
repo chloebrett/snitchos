@@ -197,7 +197,7 @@ catalog! {
     wfi "sched-context-switches-on-wire"  scenarios::sched_context_switches_on_wire [sched]         {"demo"};
     wfi "sched-span-survives-yield"       scenarios::sched_span_survives_yield      [sched]         {"demo"};
     cpu "heap-oom"                        scenarios::heap_oom                       [heap, oom]    {"heap-oom"};
-    cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline  [workload]      {"demo"};
+    cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline  [workload]      {"cooperative"};
     cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness [smp, workload] {"smp burst=256"};
     wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup                [smp, ipi]      {"init"};
     wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots       [smp]           {"init"};

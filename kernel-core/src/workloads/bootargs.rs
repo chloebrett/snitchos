@@ -160,6 +160,13 @@ pub enum WorkloadKind {
     /// `init` (v0.13). Exercises the scheduler (context switch, yield, per-task
     /// spans) and SMP bring-up — the `sched-*`/`smp-*` scenarios run here.
     Demo,
+    /// Just the single-hart cooperative producer/consumer pair — the
+    /// `workload-cooperative-baseline` correctness oracle without the demo's
+    /// `task_a`/`task_b`. Those burn LCG that the baseline doesn't need, and by
+    /// eating half the scheduler's turns they slow the producer/consumer's
+    /// progress, so carving them out lets the baseline reach its sample threshold
+    /// in far fewer instructions. Same assertion, cheaper to reach.
+    Cooperative,
     /// v0.8b priority demo: a `High`-priority and a `Low`-priority cooperative
     /// worker share one hart. The High worker runs far more often (priority
     /// respected), but the Low worker still makes progress (aging prevents
@@ -316,6 +323,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "init" => Some(WorkloadKind::Init),
             "endpoint-create" => Some(WorkloadKind::EndpointCreate),
             "demo" => Some(WorkloadKind::Demo),
+            "cooperative" => Some(WorkloadKind::Cooperative),
             "priorities" => Some(WorkloadKind::Priorities),
             "block-wake" => Some(WorkloadKind::BlockWake),
             "ipc" => Some(WorkloadKind::Ipc),
@@ -432,6 +440,11 @@ mod tests {
     #[test]
     fn selects_priorities() {
         assert_eq!(select("workload=priorities"), Some(WorkloadKind::Priorities));
+    }
+
+    #[test]
+    fn selects_cooperative() {
+        assert_eq!(select("workload=cooperative"), Some(WorkloadKind::Cooperative));
     }
 
     #[test]

@@ -390,6 +390,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             let _ = sched::spawn("workload_producer", workload::producer_entry);
             let _ = sched::spawn("workload_consumer", workload::consumer_entry);
         }
+        // Just the cooperative producer/consumer pair — the
+        // `workload-cooperative-baseline` oracle without demo's task_a/task_b, so
+        // the pair gets every scheduler turn and reaches its sample threshold in
+        // far fewer instructions (same assertion, cheaper). See `bootargs`.
+        Some(WorkloadKind::Cooperative) => {
+            let _ = sched::spawn("workload_producer", workload::producer_entry);
+            let _ = sched::spawn("workload_consumer", workload::consumer_entry);
+        }
         // v0.9 block/wake smoke: a blocker + waker on hart 0. The blocker
         // calls `block_current`; the waker `wake`s it. Single-hart, kernel
         // tasks — no hart-1 placement (skipped from the probe below).

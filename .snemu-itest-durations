@@ -1,4 +1,3 @@
-438034432 workload-cooperative-baseline
 400000000 smp-tlb-shootdown-visible
 326520832 sched-yield-round-trips
 323256320 stitch-fs-loads-and-runs
@@ -16,9 +15,9 @@
 117248000 stitch-telemetry-on-the-wire
 112611328 task-stack-high-water
 109842432 sched-task-exits-cleanly
-98562048 frame-allocator-oom
 65724416 mutex-storm
 51884032 heap-grows-on-demand
+43962368 frame-allocator-oom
 35422208 virtio-storm
 30236672 manifest-satisfy-refuses-unsatisfiable
 29724672 manifest-satisfy-grants-by-name
@@ -27,6 +26,7 @@
 21684224 smp-ping-pong-cadence
 20918272 sched-spans-carry-task-id
 20377600 manifest-satisfy-attenuates
+19828736 workload-cooperative-baseline
 17309696 spawn-image-loads-from-fs
 16740352 shell-view-command-revokes-cap
 16695296 viewer-reads-delegated-file
@@ -61,8 +61,8 @@
 5660672 rpc-trace-nests
 5656576 rpc-round-trips
 5627904 ipc-message-crosses
-5599232 ipc-trace-crosses
 5599232 ipc-wakeup-is-prompt
+5599232 ipc-trace-crosses
 5578752 fs-connect-mints-root
 5378048 init-brings-up-fs-server
 5246976 spawn-delegates-to-child
@@ -74,12 +74,12 @@
 4063232 stack-guard-fault-detected
 4001792 syscall-hog-still-preempted
 3514368 userspace-cannot-touch-kernel
-3313664 userspace-cap-denied
-3313664 userspace-process-exits
-3313664 userspace-emits-telemetry
 3313664 userspace-quota-refused
-3268608 kernel-heap-metrics
+3313664 userspace-process-exits
+3313664 userspace-cap-denied
+3313664 userspace-emits-telemetry
 3268608 heartbeat-cadence
+3268608 kernel-heap-metrics
 2301952 userspace-yield-round-trips
 2265088 userspace-emits-span
 2240512 userspace-refusal-snitched
@@ -98,11 +98,11 @@
 163840 sched-context-switch-smoke
 131072 userspace-spansink-granted
 114688 userspace-cap-granted-event
-102400 userspace-grant-snitched
 102400 frame-allocator-metrics
+102400 userspace-grant-snitched
 81920 smp-ipi-wakes-idle-hart
 40960 boot-reaches-heartbeat
 40960 pre-init-order
-0 sched-spawn-registers-thread
 0 kernel-runs-at-higher-half
 0 smp-secondary-hart-boots
+0 sched-spawn-registers-thread

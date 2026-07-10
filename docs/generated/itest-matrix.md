@@ -13,6 +13,7 @@
 | block-wake-smoke | block-wake | wfi | sched |
 | boot-stack-guard-fault-detected | boot-stack-guard | wfi | sched |
 | console-echo-round-trips | console-echo | cpu | userspace |
+| workload-cooperative-baseline | cooperative | cpu | workload |
 | sched-context-switches-on-wire | demo | wfi | sched |
 | sched-span-survives-yield | demo | wfi | sched |
 | sched-spans-carry-task-id | demo | wfi | sched |
@@ -23,7 +24,6 @@
 | smp-spans-carry-hart-id | demo | wfi | smp |
 | smp-spawn-on-hart-1-runs | demo | wfi | smp |
 | task-stack-high-water | demo | wfi | sched |
-| workload-cooperative-baseline | demo | cpu | workload |
 | endpoint-create-yields-owning-cap | endpoint-create | cpu | userspace |
 | revoke-reclaims-a-minted-cap | endpoint-create | cpu | userspace |
 | frame-allocator-oom | frame-oom | wfi | frame, oom |
