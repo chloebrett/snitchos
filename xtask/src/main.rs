@@ -109,6 +109,12 @@ enum Cmd {
         /// identical — idle-skip must change only speed, never telemetry.
         #[arg(long)]
         no_idle_skip: bool,
+        /// Disable longest-processing-time packing (on by default). LPT feeds the
+        /// heaviest workload groups to the worker queue first, using the previous
+        /// run's per-scenario instret as the cost predictor. `--no-lpt` keeps
+        /// selection order — the A/B baseline for measuring the packing win.
+        #[arg(long)]
+        no_lpt: bool,
     },
     /// Measurement spine: run a workload under snemu N times and report guest
     /// MIPS + wall-clock spread over a deterministic instret. The "measure
@@ -698,11 +704,11 @@ fn main() -> ExitCode {
             }
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
-        Cmd::SnemuItest { steps, limit, only, jobs, no_idle_skip } => {
+        Cmd::SnemuItest { steps, limit, only, jobs, no_idle_skip, no_lpt } => {
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
-            itest::snemu_audit::run(steps, limit, only.as_deref(), jobs, !no_idle_skip)
+            itest::snemu_audit::run(steps, limit, only.as_deref(), jobs, !no_idle_skip, !no_lpt)
         }
         Cmd::SnemuBench { workload, steps, runs, taxonomy, baseline, decode_cache, verify_cache } => {
             if verify_cache {

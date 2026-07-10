@@ -18,10 +18,12 @@
 //! closed batch stream as a disconnect. Both are real "snemu can't judge this
 //! yet" signals.
 
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::process::ExitCode;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use super::harness::View;
 use super::{SCENARIOS, scenario_view_fn};
@@ -45,6 +47,54 @@ enum Outcome {
     Fail { why: String, console: String },
 }
 
+/// The machine-readable packing snapshot the audit writes after each run — a single
+/// structured JSON object, mirroring the itest history's `*.capture.json`
+/// convention (format-follows-shape: TOML for human config, NDJSON for streams,
+/// JSON for a tool-consumed snapshot). It's the data layer the `viz/` renderer
+/// reads to animate how the workers packed the run. Schema:
+/// `docs/snemu-itest-packing-viz-design.md`.
+#[derive(serde::Serialize)]
+struct PackingReport {
+    /// `"LPT"` or `"selection-order"` — which packing produced this timeline.
+    packing: &'static str,
+    jobs: usize,
+    makespan_s: f64,
+    /// Sum of every scenario's fork-forward instret plus the one-time boot-once cost.
+    total_instret: u64,
+    boot_instret: u64,
+    workers: Vec<WorkerStat>,
+    /// Every boot + scenario span on the timeline, in completion order.
+    segments: Vec<Segment>,
+}
+
+/// One host worker's share of the run — its busy time and utilization over the
+/// makespan (100% = the bottleneck; a low value means a stranded core).
+#[derive(serde::Serialize)]
+struct WorkerStat {
+    id: usize,
+    busy_s: f64,
+    util: f64,
+}
+
+/// One span on a worker's timeline: a per-workload boot, or a scenario fork+run.
+/// `start_s`/`end_s` are offsets from the run start, so the renderer can place bars
+/// directly.
+#[derive(serde::Serialize)]
+struct Segment {
+    /// `"boot"` (once-per-workload snapshot boot) or `"scenario"` (fork + assert).
+    kind: &'static str,
+    /// Scenario name, or the workload name for a boot span.
+    name: String,
+    workload: Option<String>,
+    worker: usize,
+    start_s: f64,
+    end_s: f64,
+    /// Guest instructions: `steps` for a scenario, the boot-step count for a boot.
+    instret: u64,
+    /// Scenario verdict; always `true` for a boot span.
+    pass: bool,
+}
+
 /// Run the audit: build the `itest-workloads` kernel, boot each distinct
 /// workload under snemu to `max_steps`, replay every scenario against its
 /// group's frames, and print a per-scenario + summary report. `limit` caps the
@@ -56,6 +106,7 @@ pub fn run(
     only: Option<&str>,
     jobs: usize,
     idle_skip: bool,
+    lpt: bool,
 ) -> ExitCode {
     let (kernel, dtb) = match snemu_diff::prepare(true) {
         Ok(v) => v,
@@ -96,10 +147,48 @@ pub fn run(
     // groups across cores; the heavy scenarios are mostly singleton workloads, so
     // they still fan out. A workload that never reaches the checkpoint (an early
     // crash) falls back to a fresh boot per scenario.
-    let groups = group_by_workload(&work);
+    // Longest-processing-time packing: `parallel_map`'s dynamic work-queue hands
+    // out groups in array order, so putting the heaviest groups first keeps a slow
+    // group from being grabbed last and stranding one worker while the rest idle
+    // (LPT is a 4/3-approximation to the optimal makespan). "Heaviest" is estimated
+    // from the *previous* run's per-scenario instret — deterministic, so it's a
+    // stable predictor — summed per group. Unknown (new) scenarios sort first, so
+    // a possibly-huge newcomer isn't left for the tail. `--no-lpt` keeps selection
+    // order for the A/B baseline.
+    let mut groups = group_by_workload(&work);
+    if lpt {
+        let history = load_durations();
+        let heaviest = history.values().copied().max().unwrap_or(0);
+        groups.sort_by_key(|g| {
+            let cost: u64 = g
+                .scenarios
+                .iter()
+                .map(|(_, s)| history.get(s.name).copied().unwrap_or(heaviest))
+                .sum();
+            std::cmp::Reverse(cost)
+        });
+    }
+
+    // Per-worker busy time — each `run_group` adds its own wall (boot + its
+    // scenarios) to its worker's slot. Utilization = busy / makespan reveals how
+    // even the packing is: the bottleneck worker sits near 100%, and a low minimum
+    // means a straggler stranded one core (what LPT exists to fix).
     let done = AtomicUsize::new(0);
-    let group_results = parallel_map(&groups, jobs, |_, group| {
-        run_group(&kernel, &dtb, group, max_steps, idle_skip, &done, cap)
+    let worker_busy: Vec<AtomicU64> = (0..jobs.max(1)).map(|_| AtomicU64::new(0)).collect();
+    let segments: Mutex<Vec<Segment>> = Mutex::new(Vec::new());
+    let ctx = RunCtx {
+        kernel: &kernel,
+        dtb: &dtb,
+        max_steps,
+        idle_skip,
+        cap,
+        done: &done,
+        worker_busy: &worker_busy,
+        run_start: started,
+        segments: &segments,
+    };
+    let group_results = parallel_map(&groups, jobs, |worker, _, group| {
+        run_group(&ctx, group, worker)
     });
 
     // Flatten groups back into selection order via each scenario's original index.
@@ -112,8 +201,150 @@ pub fn run(
         }
     }
     let results: Vec<Row> = rows.into_iter().flatten().collect();
+    let makespan = started.elapsed();
 
-    print_report(&results, boot_steps, started.elapsed().as_secs_f64())
+    // Persist this run's per-scenario instret as the packing predictor for next
+    // time (a full run overwrites; a filtered `--only` run merges, preserving the
+    // durations it didn't touch).
+    save_durations(&results);
+
+    // Emit the machine-readable packing snapshot for the `viz/` renderer.
+    let scenario_instret: u64 = results.iter().map(|r| r.steps).sum();
+    write_packing_report(
+        lpt,
+        jobs,
+        makespan,
+        scenario_instret + boot_steps,
+        boot_steps,
+        &worker_busy,
+        segments.into_inner().expect("segments mutex"),
+    );
+
+    let exit = print_report(&results, boot_steps, makespan.as_secs_f64());
+    print_utilization(&worker_busy, makespan, lpt);
+    exit
+}
+
+/// Where the packing snapshot lands — alongside the itest history family, a stable
+/// path the `viz/` renderer loads by default. Gitignored (a machine artifact, not
+/// a PR-reviewed baseline).
+const PACKING_PATH: &str = ".itest-runs/snemu-packing.json";
+
+/// Serialize the run's packing timeline to [`PACKING_PATH`] as pretty JSON
+/// (mirroring `capture.json`). Best-effort: a write failure is a warning, never a
+/// gate — the audit's job is the fidelity verdict, the viz is a bonus.
+fn write_packing_report(
+    lpt: bool,
+    jobs: usize,
+    makespan: Duration,
+    total_instret: u64,
+    boot_instret: u64,
+    worker_busy: &[AtomicU64],
+    mut segments: Vec<Segment>,
+) {
+    let makespan_s = makespan.as_secs_f64();
+    let makespan_ns = makespan.as_nanos().max(1) as f64;
+    let workers = worker_busy
+        .iter()
+        .enumerate()
+        .map(|(id, b)| {
+            let busy_ns = b.load(Ordering::Relaxed) as f64;
+            WorkerStat { id, busy_s: busy_ns / 1e9, util: 100.0 * busy_ns / makespan_ns }
+        })
+        .collect();
+    // Stable order for a readable diff: by worker, then start time.
+    segments.sort_by(|a, b| {
+        a.worker.cmp(&b.worker).then(a.start_s.total_cmp(&b.start_s))
+    });
+    let report = PackingReport {
+        packing: if lpt { "LPT" } else { "selection-order" },
+        jobs,
+        makespan_s,
+        total_instret,
+        boot_instret,
+        workers,
+        segments,
+    };
+    match serde_json::to_string_pretty(&report) {
+        Ok(json) => {
+            if let Some(dir) = std::path::Path::new(PACKING_PATH).parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Err(e) = std::fs::write(PACKING_PATH, json) {
+                eprintln!("snemu-itest: could not write {PACKING_PATH}: {e}");
+            }
+        }
+        Err(e) => eprintln!("snemu-itest: could not serialize packing report: {e}"),
+    }
+}
+
+/// Report each worker's utilization — busy time over the wall-clock makespan — so
+/// the packing quality is visible. A well-packed run has every worker near the
+/// bottleneck's 100%; a low minimum means one core was left running a straggler
+/// while the others finished. Comparing this between `--no-lpt` and the default
+/// (LPT) is the A/B for the packing change.
+fn print_utilization(worker_busy: &[AtomicU64], makespan: Duration, lpt: bool) {
+    let makespan_ns = makespan.as_nanos().max(1) as f64;
+    let utils: Vec<f64> = worker_busy
+        .iter()
+        .map(|b| 100.0 * b.load(Ordering::Relaxed) as f64 / makespan_ns)
+        .collect();
+    if utils.is_empty() {
+        return;
+    }
+    println!(
+        "\n=== worker utilization ({} packing, {} worker(s), {:.1}s makespan) ===",
+        if lpt { "LPT" } else { "selection-order" },
+        utils.len(),
+        makespan.as_secs_f64(),
+    );
+    for (w, u) in utils.iter().enumerate() {
+        let bar = "█".repeat((u / 5.0).round() as usize);
+        println!("  w{w:<2} {u:>5.1}%  {bar}");
+    }
+    let mean = utils.iter().sum::<f64>() / utils.len() as f64;
+    let min = utils.iter().copied().fold(f64::INFINITY, f64::min);
+    println!("  mean {mean:.1}%, min {min:.1}%  (higher + tighter = better packing)");
+}
+
+/// Where per-scenario instret is cached between runs, to drive LPT packing. Repo
+/// root, gitignored; a plain `<instret> <name>` line per scenario.
+const DURATIONS_PATH: &str = ".snemu-itest-durations";
+
+/// Load the cached per-scenario instret (scenario name → guest instructions).
+/// Missing or unparsable file → empty map (first run packs in selection order).
+fn load_durations() -> HashMap<String, u64> {
+    let Ok(text) = std::fs::read_to_string(DURATIONS_PATH) else {
+        return HashMap::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let (steps, name) = line.split_once(char::is_whitespace)?;
+            Some((name.trim().to_owned(), steps.trim().parse().ok()?))
+        })
+        .collect()
+}
+
+/// Write this run's per-scenario instret back to the cache, merged over any prior
+/// entries (so a `--only` subset run doesn't erase durations for scenarios it
+/// skipped). Best-effort: a write failure just means next run packs from stale or
+/// partial history, never a hard error.
+fn save_durations(results: &[Row]) {
+    let mut durations = load_durations();
+    for r in results {
+        // Record every scenario, including the 0-step ones whose assertion is
+        // already satisfied from the forked checkpoint's frame buffer — they're
+        // legitimately cheap, and omitting them makes LPT mistake them for
+        // unknown-and-therefore-heaviest next run.
+        durations.insert(r.name.to_owned(), r.steps);
+    }
+    let mut lines: Vec<(String, u64)> = durations.into_iter().collect();
+    lines.sort_by_key(|(_, steps)| std::cmp::Reverse(*steps));
+    let mut body = String::new();
+    for (name, steps) in &lines {
+        let _ = writeln!(body, "{steps} {name}");
+    }
+    let _ = std::fs::write(DURATIONS_PATH, body);
 }
 
 /// The UART marker for the boot-once checkpoint: `kmain` prints it once, after all
@@ -149,34 +380,59 @@ fn group_by_workload<'a>(work: &[&'a itest_harness::Scenario]) -> Vec<Group<'a>>
     groups
 }
 
+/// Shared, read-only context every `run_group` call needs — bundled so the fan-out
+/// closure passes one reference instead of a long argument list. `done` and
+/// `worker_busy` are the only interior-mutable members (atomics), shared across
+/// worker threads.
+struct RunCtx<'a> {
+    kernel: &'a [u8],
+    dtb: &'a [u8],
+    max_steps: u64,
+    idle_skip: bool,
+    cap: usize,
+    done: &'a AtomicUsize,
+    worker_busy: &'a [AtomicU64],
+    /// Run start, for timeline offsets (`start_s`/`end_s`) on every segment.
+    run_start: Instant,
+    /// Shared timeline collector — each worker appends its boot + scenario spans.
+    segments: &'a Mutex<Vec<Segment>>,
+}
+
 /// Run one workload group on a single thread: boot its snapshot once to the
 /// checkpoint, then fork (clone) it for each scenario. Returns the one-time boot
 /// cost and each scenario's `(original_index, Row)`. If the snapshot never reaches
 /// the checkpoint (early-crash workload), every scenario boots fresh instead.
-fn run_group(
-    kernel: &[u8],
-    dtb: &[u8],
-    group: &Group,
-    max_steps: u64,
-    idle_skip: bool,
-    done: &AtomicUsize,
-    cap: usize,
-) -> (u64, Vec<(usize, Row)>) {
-    let snapshot = boot_snapshot(kernel, dtb, group.workload, idle_skip);
+fn run_group(ctx: &RunCtx, group: &Group, worker: usize) -> (u64, Vec<(usize, Row)>) {
+    let group_start = Instant::now();
+    let boot_start_s = ctx.run_start.elapsed().as_secs_f64();
+    let snapshot = boot_snapshot(ctx.kernel, ctx.dtb, group.workload, ctx.idle_skip);
     let boot_steps = snapshot.as_ref().map_or(0, |(_, n)| *n);
+    // Record the once-per-workload boot span (grey on the timeline).
+    ctx.segments.lock().expect("segments mutex").push(Segment {
+        kind: "boot",
+        name: group.workload.unwrap_or("(default)").to_owned(),
+        workload: group.workload.map(str::to_owned),
+        worker,
+        start_s: boot_start_s,
+        end_s: ctx.run_start.elapsed().as_secs_f64(),
+        instret: boot_steps,
+        pass: true,
+    });
 
     let rows = group
         .scenarios
         .iter()
         .map(|&(index, s)| {
+            let scenario_start = Instant::now();
+            let scenario_start_s = ctx.run_start.elapsed().as_secs_f64();
             let (outcome, steps) = match &snapshot {
                 // Fork the shared post-boot snapshot (idle-skip already set on it).
-                Ok((machine, _)) => run_scenario(machine.clone(), s, max_steps),
+                Ok((machine, _)) => run_scenario(machine.clone(), s, ctx.max_steps),
                 // Never reached the checkpoint: boot this scenario fresh.
-                Err(_) => match snemu_diff::load_workload_machine(kernel, dtb, s.workload) {
+                Err(_) => match snemu_diff::load_workload_machine(ctx.kernel, ctx.dtb, s.workload) {
                     Ok(mut machine) => {
-                        machine.set_idle_skip(idle_skip);
-                        run_scenario(machine, s, max_steps)
+                        machine.set_idle_skip(ctx.idle_skip);
+                        run_scenario(machine, s, ctx.max_steps)
                     }
                     Err(e) => (
                         Outcome::Fail { why: format!("snemu load failed: {e}"), console: String::new() },
@@ -184,16 +440,35 @@ fn run_group(
                     ),
                 },
             };
-            let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+            let wall = scenario_start.elapsed().as_secs_f64();
+            let pass = matches!(outcome, Outcome::Pass);
+            ctx.segments.lock().expect("segments mutex").push(Segment {
+                kind: "scenario",
+                name: s.name.to_owned(),
+                workload: s.workload.map(str::to_owned),
+                worker,
+                start_s: scenario_start_s,
+                end_s: ctx.run_start.elapsed().as_secs_f64(),
+                instret: steps,
+                pass,
+            });
+            let n = ctx.done.fetch_add(1, Ordering::SeqCst) + 1;
+            // Per-scenario line: completion index, the CPU thread (worker) it ran
+            // on, name, verdict, then its deterministic instret and wall time.
             eprintln!(
-                "snemu-itest: [{n}/{cap}] {:<40} {}",
+                "snemu-itest: [{n:>3}/{}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s",
+                ctx.cap,
                 s.name,
-                if matches!(outcome, Outcome::Pass) { "ok" } else { "FAIL" },
+                if pass { "ok" } else { "FAIL" },
+                steps / 1_000_000,
             );
             (index, Row { name: s.name, outcome, steps })
         })
         .collect();
 
+    // Attribute this group's whole wall (boot + its scenarios) to the worker that
+    // ran it; a worker accumulates across every group it grabbed from the queue.
+    ctx.worker_busy[worker].fetch_add(group_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     (boot_steps, rows)
 }
 
@@ -332,15 +607,18 @@ fn console_tail(output: &str) -> String {
 /// single-threaded compute tail into wall-clock the number of cores divides —
 /// while the order-preserving slotting keeps the report deterministic, the
 /// property the whole snemu-vs-QEMU story rests on. `jobs <= 1` runs serially.
+/// The closure receives `(worker_id, item_index, &item)`: `worker_id` is the host
+/// thread (0..jobs) — surfaced so per-item progress can name the CPU thread it ran
+/// on — and `item_index` is the item's position in `items`.
 fn parallel_map<T, R, F>(items: &[T], jobs: usize, f: F) -> Vec<R>
 where
     T: Sync,
     R: Send,
-    F: Fn(usize, &T) -> R + Sync,
+    F: Fn(usize, usize, &T) -> R + Sync,
 {
     let jobs = jobs.max(1);
     if jobs == 1 {
-        return items.iter().enumerate().map(|(i, t)| f(i, t)).collect();
+        return items.iter().enumerate().map(|(i, t)| f(0, i, t)).collect();
     }
 
     let next = AtomicUsize::new(0);
@@ -348,12 +626,15 @@ where
         Mutex::new((0..items.len()).map(|_| None).collect());
 
     std::thread::scope(|scope| {
-        for _ in 0..jobs {
-            scope.spawn(|| {
+        for worker in 0..jobs {
+            let f = &f;
+            let next = &next;
+            let slots = &slots;
+            scope.spawn(move || {
                 loop {
                     let i = next.fetch_add(1, Ordering::SeqCst);
                     let Some(item) = items.get(i) else { break };
-                    let result = f(i, item);
+                    let result = f(worker, i, item);
                     slots.lock().expect("slots mutex poisoned")[i] = Some(result);
                 }
             });
@@ -375,7 +656,7 @@ mod tests {
     #[test]
     fn parallel_map_preserves_input_order_and_matches_serial_for_any_job_count() {
         let items: Vec<u64> = (0..200).collect();
-        let square = |_: usize, x: &u64| x * x;
+        let square = |_: usize, _: usize, x: &u64| x * x;
 
         let serial = parallel_map(&items, 1, square);
         assert_eq!(serial, items.iter().map(|x| x * x).collect::<Vec<_>>());
@@ -392,7 +673,65 @@ mod tests {
     #[test]
     fn parallel_map_passes_the_input_index_to_the_closure() {
         let items = vec!['a', 'b', 'c'];
-        let with_index = parallel_map(&items, 4, |i, c| (i, *c));
+        let with_index = parallel_map(&items, 4, |_worker, i, c| (i, *c));
         assert_eq!(with_index, vec![(0, 'a'), (1, 'b'), (2, 'c')]);
+    }
+
+    #[test]
+    fn parallel_map_reports_a_worker_id_below_the_job_count() {
+        let items: Vec<u64> = (0..64).collect();
+        let jobs = 4;
+        let workers = parallel_map(&items, jobs, |worker, _i, _x| worker);
+        assert!(workers.iter().all(|&w| w < jobs), "worker id stays in 0..jobs");
+    }
+
+    #[test]
+    fn packing_report_serializes_to_the_documented_json_schema() {
+        use super::{PackingReport, Segment, WorkerStat};
+        let report = PackingReport {
+            packing: "LPT",
+            jobs: 2,
+            makespan_s: 40.0,
+            total_instret: 1_000_000,
+            boot_instret: 50_000,
+            workers: vec![
+                WorkerStat { id: 0, busy_s: 38.0, util: 95.0 },
+                WorkerStat { id: 1, busy_s: 20.0, util: 50.0 },
+            ],
+            segments: vec![
+                Segment {
+                    kind: "boot",
+                    name: "frame-oom".to_owned(),
+                    workload: Some("frame-oom".to_owned()),
+                    worker: 0,
+                    start_s: 0.0,
+                    end_s: 0.8,
+                    instret: 50_000,
+                    pass: true,
+                },
+                Segment {
+                    kind: "scenario",
+                    name: "frame-allocator-oom".to_owned(),
+                    workload: Some("frame-oom".to_owned()),
+                    worker: 0,
+                    start_s: 0.8,
+                    end_s: 38.0,
+                    instret: 774_000,
+                    pass: true,
+                },
+            ],
+        };
+
+        let json = serde_json::to_string_pretty(&report).expect("serializes");
+        // Round-trips as valid JSON, and the renderer's load-bearing fields exist
+        // with the right shape (the data-layer contract with `viz/`).
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["packing"], "LPT");
+        assert_eq!(v["jobs"], 2);
+        assert_eq!(v["workers"][0]["util"], 95.0);
+        assert_eq!(v["segments"][0]["kind"], "boot");
+        assert_eq!(v["segments"][1]["name"], "frame-allocator-oom");
+        assert_eq!(v["segments"][1]["start_s"], 0.8);
+        assert_eq!(v["segments"][1]["pass"], true);
     }
 }
