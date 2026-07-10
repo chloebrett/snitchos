@@ -570,6 +570,7 @@ fn eval_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
                 authority: env.authority_rc(),
                 uses: None,
                 source: env.source(),
+                name: None,
             })))
         }
         // `receiver.method(args)` parses as a call whose callee is a field
@@ -1286,6 +1287,7 @@ fn eval_safe_field(object: &Value, name: &str, env: &Env) -> Result<Value, Runti
         authority: env.authority_rc(),
         uses: None,
         source: env.source(),
+        name: None,
     }));
     call_instance_method(object, "map", core::slice::from_ref(&accessor), env)?.ok_or_else(|| {
         RuntimeError::new(format!(
@@ -1479,6 +1481,19 @@ mod tests {
     }
 
     #[test]
+    fn a_registered_function_closure_carries_its_name() {
+        // Groundwork for stack-trace frames: a top-level function's closure knows
+        // its own name (a lambda's is `None`).
+        let mut items = parse_program("foo() = 1").expect("parse");
+        crate::lower::lower_program(&mut items);
+        let env = crate::interp::build_env(&items);
+        let Some(Value::Closure(closure)) = env.lookup("foo") else {
+            panic!("expected a closure for foo")
+        };
+        assert_eq!(closure.name.as_deref(), Some("foo"));
+    }
+
+    #[test]
     fn a_fault_is_stamped_with_the_running_closures_source() {
         use crate::source::SourceId;
         use crate::value::ClosureData;
@@ -1494,6 +1509,7 @@ mod tests {
             authority: env.authority_rc(),
             uses: Some(Vec::new()),
             source: SourceId(7),
+            name: None,
         }));
         let err = crate::interp::apply_values(&closure, &[], &env).expect_err("div by zero");
         assert_eq!(err.source(), Some(SourceId(7)));

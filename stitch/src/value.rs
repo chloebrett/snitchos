@@ -234,6 +234,9 @@ pub struct ClosureData {
     /// `apply_values` so it can be resolved to `file:line:col`. `SourceId::default()`
     /// (synthetic) for closures with no real origin (e.g. the `?.` accessor).
     pub source: SourceId,
+    /// The function's name if it has one (a top-level `fn`), else `None` for an
+    /// anonymous lambda. Groundwork for stack-trace frames (`in <name>`).
+    pub name: Option<String>,
 }
 
 impl Value {

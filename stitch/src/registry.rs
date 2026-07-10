@@ -99,6 +99,7 @@ pub(crate) fn register_items(items: &[Item], env: &Env, reg: &mut Registration) 
                     // Functions inherit the source of the env they're registered in;
                     // `build_env` tags that env, so faults resolve to the program file.
                     source: env.source(),
+                    name: Some(name.clone()),
                 }));
                 reg.globals.insert(name.clone(), closure);
             }
