@@ -135,16 +135,15 @@ frame stack is the future home of spanned fault backtraces (Phase C).
 *Why:* this is what makes a **Stitch-hosted stim loop** viable (vs. the native
 trampoline the stim plan assumed).
 
-### Step B5: Characterize the "leaks per-run" (investigation → written finding)
-**Acceptance**: a measurement of whether a representative repeated transition
-(a `step`-shaped immutable update loop) grows memory unboundedly (a retained `Rc`
-cycle) or is bounded churn (acyclic, promptly reclaimed). Result written into the
-review doc / a memory. **This is the datum the post-D decision needs.**
-**RED/GREEN**: an investigation increment, not a feature — instrument allocation
-across N iterations; identify cycle vs churn; document.
+### Step B5: Characterize the "leaks per-run" (investigation → written finding) — ✅ DONE (2026-07-08/09)
 
-*PR boundary: "Stitch reified evaluator + fuel + trampoline" (B5 may be a separate
-investigation commit).*
+Confirmed: `Rc` cycle `EnvInner → globals BTreeMap → Closure { env: Env } → EnvInner`.
+50× linear growth over 50 `eval_program` calls. Measurement in `stitch/tests/memory_churn.rs`
+(tracking `#[global_allocator]`). **Fixed structurally in C4 (upvalue capture)**:
+closures store `upvalues: Vec<(String, Rc<RefCell<Value>>, bool)>` + 
+`home_globals: Weak<OnceCell<BTreeMap<String, Value>>>` instead of `env: Env`.
+The `Weak` breaks the cycle — `Rc<OnceCell>` ref count hits 0 when the env drops.
+`memory_churn` test now shows 0 B growth over 50 runs. 543 tests green.
 
 ---
 
@@ -158,18 +157,153 @@ AST reshape honours the "don't churn the AST twice" rule.
 
 **Phase goal**: the parser emits a faithful, round-trippable **surface AST** (keep
 `Placeholder`, a real `SubjectlessMatch`, an `OperatorRef` — no more parse-time
-desugar to `If` at `parser.rs:1207`); a **single lowering pass** produces a smaller
-**core IR**, absorbing *both* the parse-time desugars and the eval-time `use <-`
-lowering (`ast.rs:274`); `Value::Closure` holds a **code-ref into the IR + upvalues**,
-not `body: Expr` (`value.rs:198`); the reified evaluator (B) evaluates the core IR;
-runtime `Fault`s carry spans (via the B3 frame stack).
+desugars); a **single lowering pass** produces a smaller **core IR**, absorbing
+*both* the parse-time desugars and the eval-time `use <-` lowering; `Value::Closure`
+holds a **code-ref into the IR + upvalues**, not `body: Expr`; the reified evaluator
+evaluates the core IR; runtime `Fault`s carry spans (via the B3 frame stack).
 
-**Acceptance (to detail into steps when we reach it)**: subjectless `match`
-survives to the surface AST and round-trips; desugaring lives in exactly one pass;
-the tree-walker evaluates the core IR; runtime faults cite `line:col`; 504 green.
+**Current state (2026-07-10, after B and F completion):**
+- Parser already emits faithful surface AST — `SubjectlessMatch`, `Placeholder`,
+  `OperatorRef` all survive to the AST; goal 1 is already achieved.
+- `lower.rs` desugars in place by mutating `Expr` values; produces no separate IR
+  type. Current desugars: `SubjectlessMatch` → nested `If`; `OperatorRef` → Lambda;
+  `Placeholder` → `Var + Lambda`; `Stmt::Use` → callback-lambda.
+- `ClosureData.body: Expr` — owned clone of the body expr; no code-ref sharing.
+  Upvalues landed in C4 (2026-07-09).
+- No spans on AST nodes; `ParseError` is a bare `String`; `Env` depth is a
+  counter only — no frame stack, no per-call location.
+- No intern infrastructure in the eval pipeline. 543 tests green.
 
-*This phase gets detailed into TDD steps at the start of Phase C — planning it in
-detail now would be guessing at the IR shape before A/B inform it.*
+**Acceptance**: desugaring lives in exactly one pass; tree-walker evaluates the
+core IR; runtime faults cite `line:col`; 543+ green.
+
+---
+
+### Step C1: ParseError carries a real span
+
+**Current state**: `ParseError { message: String, span: Span }` exists but `span` is
+always `Span::default()` — the parser never threads the current-token span when
+constructing errors. The field is there; the wiring is not.
+
+**What**: At every `ParseError::new(...)` call site in `parser.rs`, pass the span of
+the current or offending token instead of `Span::default()`. Add a
+`ParseError::at(message, span)` constructor. The existing tests that match on error
+messages are unaffected; new tests assert `err.span != Span::default()` for a parse
+error on known-bad input.
+
+**TDD order**:
+1. RED: `parse("let x =").unwrap_err().span` is not `Span::default()`.
+2. GREEN: thread `self.current_span()` (or equivalent) through each error site.
+3. Mutation gate: mutating the span-threading to return `default()` kills the test.
+
+---
+
+### Step C2: Define CoreExpr + lowering produces it
+
+**What**: New `src/core.rs` defines `CoreExpr` (and `CoreStmt`, `CoreItem`,
+`CorePattern`, `CoreMatchArm`) — the IR the evaluator will consume. CoreExpr is a
+strict subset of Expr: same structure but **no** `SubjectlessMatch`, `Placeholder`,
+`OperatorRef`, `Spread` (desugared by lowering). Every node carries a `Span`.
+
+Key structural differences from `Expr`:
+- `CoreExpr::Var(String)` initially (Symbol arrives in C3 alongside the eval port).
+- `CoreExpr::Lambda { params: Vec<String>, body: Rc<CoreExpr> }` — body is `Rc`,
+  not `Box`, so multiple closures over the same definition share the IR node.
+- No `Stmt::Use` in `CoreStmt` (desugared away).
+- `CoreMatchArm` has `CorePattern` and `CoreExpr` body.
+
+**New `lower.rs` API** (additive; old in-place API kept for now):
+```rust
+pub fn lower_expr(expr: &Expr) -> Result<CoreExpr, LowerError>
+pub fn lower_item(item: &Item) -> Result<CoreItem, LowerError>
+pub fn lower_items(items: &[Item]) -> Result<Vec<CoreItem>, LowerError>
+```
+`LowerError` for `Placeholder` in non-call-arg position and other malformed surface
+constructs that the parser accepts but lowering rejects.
+
+**TDD order**:
+1. RED: tests in `lower.rs` that call `lower_expr` on surface constructs and assert
+   the resulting `CoreExpr` shape (one test per desugar: SubjectlessMatch, OperatorRef,
+   Placeholder, Use).
+2. GREEN: write `core.rs` + `lower_expr`.
+3. Existing 543 tests unaffected (they still use old `lower_program` in-place path).
+
+---
+
+### Step C3: Interpreter evaluates CoreExpr + identifier interning
+
+**Why together**: folding interning into the eval-port step means `CoreExpr::Var`
+becomes `CoreExpr::Var(Symbol)` in the same pass — one full-tree update, not two.
+
+**What**:
+
+**(a) Symbol table** — new `src/symbol.rs`: `SymbolTable` maps `String → Symbol(u32)`
+(insert-or-get, O(log n)). `free_vars` in `lower.rs` switches to `BTreeSet<Symbol>`.
+Resolution pass (part of lowering): every `String` name in the lowered IR is
+interned through the program's `SymbolTable`; `CoreExpr::Var(Symbol)`,
+`CoreExpr::Lambda { params: Vec<Symbol>, body: Rc<CoreExpr> }`, etc.
+
+**(b) Slot-indexed locals in Env** — `Env.locals` becomes `Vec<(Symbol, Rc<RefCell<Value>>, bool)>`
+(or a flat `Vec<Slot>` indexed by symbol ID for O(1) local lookup). Globals stay
+`BTreeMap<String, Value>` (or keyed by Symbol — decide at implementation time based
+on profile).
+
+**(c) `eval_core(expr: &CoreExpr, env: &Env) → Result<Value, RuntimeError>`** — new
+evaluator function alongside existing `eval`. Written from scratch matching CoreExpr
+arms. `eval_tail_core` handles the trampoline path.
+
+**(d) Wire-up**: `build_env_with_backends` calls `lower_items` → `CoreItem`s and
+registers them. `apply_values` calls `eval_core` (not `eval`). Once all tests pass
+through the new path, the old `eval(expr: &Expr, ...)` and in-place `lower_program`
+are deleted.
+
+**TDD order**:
+1. RED: one integration test that runs a Stitch program through `lower_items` +
+   `eval_core` directly and checks the result — before the full wire-up.
+2. GREEN: implement `eval_core` for all arms, one at a time (test per arm if
+   granularity demands; or branch-by-branch against existing test suite).
+3. Wire `build_env_with_backends` to use the new path; all 543+ tests go green
+   through the new evaluator.
+4. Delete old `eval` + in-place `lower_program`.
+
+---
+
+### Step C4: ClosureData.body: Rc\<CoreExpr\> — ✅ DONE (2026-07-09, upvalue capture)
+
+The upvalue + `home_globals: Weak<OnceCell<…>>` design landed. `body: Expr` still
+present but this is addressed structurally in C3 (the `eval_core` port makes the
+body type switch to `Rc<CoreExpr>` as part of the same change).
+
+---
+
+### Step C5: Frame stack + spanned faults
+
+**What**: Replace `depth: Rc<Cell<u32>>` in `Env` with a
+`frames: Rc<RefCell<Vec<CallFrame>>>` where:
+```rust
+struct CallFrame {
+    span: Span,
+    name: Option<String>,  // function name if known
+}
+```
+`enter_call` pushes; `CallGuard` drop pops. `RuntimeError::Fault` becomes:
+```rust
+Fault { message: String, at: Option<Span> }
+```
+The `at` span comes from the `CoreExpr` node being evaluated when the fault fires.
+The frame stack provides the backtrace.
+
+Acceptance: `run("1 / 0")` returns `Fault { message: "division by zero", at: Some(Span { start: 2, end: 7 }) }`.
+All existing fault-message tests updated to match the new error type.
+
+---
+
+### Phase C non-goals (deferred to VM milestone)
+
+- Full bytecode compilation of CoreExpr
+- Generics / type parameters in CoreExpr
+- Multi-shot continuations
+- Inlining / dead-code elimination passes
 
 ---
 
