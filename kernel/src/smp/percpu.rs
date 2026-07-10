@@ -215,7 +215,22 @@ pub static PER_HART_DATA: [PerHartData; MAX_HARTS] = [
 /// missing mapping.
 pub unsafe fn init(hartid: usize) {
     debug_assert!(hartid < MAX_HARTS, "hartid out of range");
-    let ptr = &PER_HART_DATA[hartid] as *const PerHartData as usize;
+    // Materialize `PER_HART_DATA`'s base with a side-effecting `asm!` `lla` rather
+    // than a plain `&PER_HART_DATA[hartid]`. Both compute the address PC-relative
+    // (`auipc`), but a plain reference is a *pure* value the optimizer is free to
+    // hoist across the higher-half trampoline in `kmain` — where PC is still
+    // physical, so `auipc` yields a *physical* address. That truncated `tp`
+    // (`0x8032_xxxx` instead of `0xffffffff_8032_xxxx`) was a release-only bug:
+    // debug never hoisted it, and `current_hartid`'s range check silently swallowed
+    // the bad value until the exception-stack asm (`ld …, 24(tp)`) read `tp` raw and
+    // faulted. A non-`pure` `asm!` block is ordered after the trampoline's `asm!`,
+    // so the base is computed post-jump at higher-half PC.
+    let base: usize;
+    unsafe {
+        asm!("lla {b}, {s}", b = out(reg) base, s = sym PER_HART_DATA,
+             options(nostack, preserves_flags));
+    }
+    let ptr = base + hartid * core::mem::size_of::<PerHartData>();
     unsafe {
         asm!("mv tp, {}", in(reg) ptr, options(nostack, preserves_flags));
     }
