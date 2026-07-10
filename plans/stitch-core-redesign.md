@@ -225,38 +225,39 @@ deletion.
 
 ---
 
-### Step C3: Define CoreExpr + lowering produces it (with real spans)
+### Step C3: Define CoreExpr + lowering produces it (with real spans) — ✅ DONE (2026-07-10)
 
-**What**: New `src/core.rs` defines `CoreExpr { kind: CoreExprKind, span: Span }`
-(plus `CoreStmt`, `CoreItem`, `CoreArg`, `CoreStrSegment`, `CoreMatchArm`) — the IR
-the evaluator consumes. `CoreExprKind` is `ExprKind` minus the surface-only nodes:
-**no** `SubjectlessMatch`, `OperatorRef`, `Placeholder`. `Spread` **stays** (it's
-core — `construct()` needs it). `Pattern` is reused unchanged (no surface-only
-pattern variants). Names stay `String` (interning deferred — see phase note).
+New `src/core_ir.rs` (named `core_ir`, not `core`, to avoid shadowing the `core`
+crate in this `no_std` lib) defines `CoreExpr { kind: CoreExprKind, span: Span }`
+plus `CoreExprKind`, `CoreArg`, `CoreStrSegment`, `CoreStmt`, `CoreMatchArm`,
+`CoreItem`, `CoreMethod`. `CoreExprKind` is `ExprKind` minus the surface-only nodes
+(`SubjectlessMatch`, `OperatorRef`, `Placeholder`); `Spread` stays. `Pattern`,
+`Field`, `Variant`, `Param`, `Type`, `MethodModifier` are reused from `ast`
+unchanged. Names stay `String` (interning deferred). Like `Expr`, `CoreExpr`'s
+`PartialEq`/`Debug` ignore/forward the span.
 
-Key structural points:
-- `CoreExprKind::Lambda { params: Vec<String>, body: Rc<CoreExpr> }` — `Rc`, not
-  `Box`, so a closure captures a shared code-ref instead of deep-cloning the body.
-- `CoreItem::Func { …, body: Rc<CoreExpr> }` likewise.
-- `CoreStmt` has only `Let`/`Assign`/`Expr` (no `Use` — desugared to a `Call`).
-- Every node's `span` is copied from the surface node it lowered from.
+- `CoreExprKind::Lambda { body: Rc<CoreExpr> }` and `CoreItem::Func { body: Rc<CoreExpr> }`
+  use `Rc` — closures share a code-ref instead of deep-cloning.
+- `CoreStmt` has only `Let`/`Assign`/`Expr`.
 
-**New `lower.rs` API** (additive; old in-place `lower_program` kept until C4):
-```rust
-pub fn lower_expr_to_core(expr: &Expr) -> CoreExpr
-pub fn lower_item_to_core(item: &Item) -> CoreItem
-pub fn lower_items_to_core(items: &[Item]) -> Vec<CoreItem>
-```
-Infallible for now: a `Placeholder` surviving in non-arg position lowers to
-`Var("$a")` (faults at eval, as today). A spanned `LowerError` is a later refinement
-once we want to reject it at lower-time pointing at the `$`.
+**Implementation choice**: `lower_expr_to_core` = `clone` → existing in-place
+`lower_expr` (the tested surface→surface desugar) → `to_core` (a pure, total 1:1
+reshape; `unreachable!` on any surviving surface-only node). This reuses the tested
+desugar logic rather than reimplementing the four desugars in core-building form.
+C4 note: when the in-place path is deleted, `lower_expr`'s desugar helpers stay (they
+back `lower_expr_to_core`); only the old `eval` and the `lower_program` entry point
+retire. `lower_item(s)_to_core` lower `Func`/`Const`/method bodies; type metadata
+passes through.
 
-**TDD order** (structural tests on the internal IR):
-1. RED: `lower_expr_to_core` on a parsed `SubjectlessMatch` → top-level kind is `If`;
-   on `OperatorRef(Add)` → a 2-param `Lambda`; on a `use x <- f(1)` block → a `Call`;
-   on a lambda → `body` is `Rc<CoreExpr>`; a node's `span` matches its surface origin.
-2. GREEN: write `core.rs` + the three `*_to_core` functions.
-3. Existing 544 tests unaffected (they still run through the old in-place path).
+New tests: the four desugars (`SubjectlessMatch`→`If`, `OperatorRef`→2-param
+`Lambda`, `use <-` block→`Call` result, `Placeholder`→`Lambda` arg), span
+preservation, and item lowering (body desugared, type decl passes through). **564
+lib tests green**, zero churn.
+
+**Mutation deferred to C4**: `to_core` is mechanical 1:1 mirroring; it gets full
+behavioral coverage for free once C4 wires `eval_core` and the whole 564-test suite
+runs through the core path (a wrong arm mapping would fail there). The C3 tests cover
+the actual desugar logic, which is what carries risk.
 
 ---
 

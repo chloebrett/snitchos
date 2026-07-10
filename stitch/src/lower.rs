@@ -12,10 +12,201 @@ use crate::prelude::*;
 use alloc::collections::BTreeSet;
 
 use crate::ast::{Arg, BinOp, Expr, ExprKind, Item, MatchArm, Method, Pattern, Stmt, StrSegment};
+use crate::core_ir::{
+    CoreArg, CoreExpr, CoreExprKind, CoreItem, CoreMatchArm, CoreMethod, CoreStmt, CoreStrSegment,
+};
 
 /// Lower a single expression in place (e.g. for a REPL line or a test `run`).
 pub fn lower(expr: &mut Expr) {
     lower_expr(expr);
+}
+
+/// Lower a surface expression into a core expression, desugaring the surface-only
+/// nodes (`SubjectlessMatch`, `OperatorRef`, `Placeholder`, `use <-`) into ordinary
+/// core nodes. Every core node carries the span of the surface node it came from.
+///
+/// Implemented as the existing surface→surface desugar (`lower_expr`) followed by a
+/// pure 1:1 reshape into the core IR (`to_core`). After `lower_expr` no surface-only
+/// node remains, so `to_core` is a total structural map.
+#[must_use]
+pub fn lower_expr_to_core(expr: &Expr) -> CoreExpr {
+    let mut desugared = expr.clone();
+    lower_expr(&mut desugared);
+    to_core(&desugared)
+}
+
+/// Reshape a fully-desugared surface expression into the core IR. Panics if a
+/// surface-only node survives (a lowering bug — `lower_expr` must have removed it).
+fn to_core(expr: &Expr) -> CoreExpr {
+    let span = expr.span;
+    let kind = match &expr.kind {
+        ExprKind::Int(n) => CoreExprKind::Int(*n),
+        ExprKind::Float(f) => CoreExprKind::Float(*f),
+        ExprKind::Bool(b) => CoreExprKind::Bool(*b),
+        ExprKind::Var(name) => CoreExprKind::Var(name.clone()),
+        ExprKind::SelfRef => CoreExprKind::SelfRef,
+        ExprKind::Spread(base) => CoreExprKind::Spread(Box::new(to_core(base))),
+        ExprKind::Binary { op, left, right } => CoreExprKind::Binary {
+            op: *op,
+            left: Box::new(to_core(left)),
+            right: Box::new(to_core(right)),
+        },
+        ExprKind::Unary { op, operand } => CoreExprKind::Unary {
+            op: *op,
+            operand: Box::new(to_core(operand)),
+        },
+        ExprKind::Call { callee, args } => CoreExprKind::Call {
+            callee: Box::new(to_core(callee)),
+            args: args.iter().map(to_core_arg).collect(),
+        },
+        ExprKind::Field { object, name } => CoreExprKind::Field {
+            object: Box::new(to_core(object)),
+            name: name.clone(),
+        },
+        ExprKind::SafeField { object, name } => CoreExprKind::SafeField {
+            object: Box::new(to_core(object)),
+            name: name.clone(),
+        },
+        ExprKind::Try(operand) => CoreExprKind::Try(Box::new(to_core(operand))),
+        ExprKind::Index { object, index } => CoreExprKind::Index {
+            object: Box::new(to_core(object)),
+            index: Box::new(to_core(index)),
+        },
+        ExprKind::Lambda { params, body } => CoreExprKind::Lambda {
+            params: params.clone(),
+            body: Rc::new(to_core(body)),
+        },
+        ExprKind::Range { start, end, inclusive } => CoreExprKind::Range {
+            start: start.as_ref().map(|e| Box::new(to_core(e))),
+            end: end.as_ref().map(|e| Box::new(to_core(e))),
+            inclusive: *inclusive,
+        },
+        ExprKind::If { cond, then, els } => CoreExprKind::If {
+            cond: Box::new(to_core(cond)),
+            then: Box::new(to_core(then)),
+            els: Box::new(to_core(els)),
+        },
+        ExprKind::Tuple(elems) => CoreExprKind::Tuple(elems.iter().map(to_core).collect()),
+        ExprKind::List(elems) => CoreExprKind::List(elems.iter().map(to_core).collect()),
+        ExprKind::Map(entries) => {
+            CoreExprKind::Map(entries.iter().map(|(k, v)| (to_core(k), to_core(v))).collect())
+        }
+        ExprKind::Str(segments) => CoreExprKind::Str(segments.iter().map(to_core_segment).collect()),
+        ExprKind::Block { stmts, result } => CoreExprKind::Block {
+            stmts: stmts.iter().map(to_core_stmt).collect(),
+            result: result.as_ref().map(|e| Box::new(to_core(e))),
+        },
+        ExprKind::Match { subject, arms } => CoreExprKind::Match {
+            subject: Box::new(to_core(subject)),
+            arms: arms.iter().map(to_core_arm).collect(),
+        },
+        ExprKind::Placeholder(_) | ExprKind::OperatorRef(_) | ExprKind::SubjectlessMatch { .. } => {
+            unreachable!("surface-only node survived lowering: {:?}", expr.kind)
+        }
+    };
+    CoreExpr::new(kind, span)
+}
+
+fn to_core_arg(arg: &Arg) -> CoreArg {
+    CoreArg { label: arg.label.clone(), value: to_core(&arg.value) }
+}
+
+fn to_core_segment(segment: &StrSegment) -> CoreStrSegment {
+    match segment {
+        StrSegment::Lit(text) => CoreStrSegment::Lit(text.clone()),
+        StrSegment::Interp(expr) => CoreStrSegment::Interp(Box::new(to_core(expr))),
+    }
+}
+
+fn to_core_stmt(stmt: &Stmt) -> CoreStmt {
+    match stmt {
+        Stmt::Let { name, mutable, value } => CoreStmt::Let {
+            name: name.clone(),
+            mutable: *mutable,
+            value: to_core(value),
+        },
+        Stmt::Assign { target, value } => CoreStmt::Assign {
+            target: to_core(target),
+            value: to_core(value),
+        },
+        Stmt::Expr(expr) => CoreStmt::Expr(to_core(expr)),
+        Stmt::Use { .. } => {
+            unreachable!("Stmt::Use survived lowering — lower_block should have desugared it")
+        }
+    }
+}
+
+fn to_core_arm(arm: &MatchArm) -> CoreMatchArm {
+    CoreMatchArm {
+        pattern: arm.pattern.clone(),
+        guard: arm.guard.as_ref().map(to_core),
+        body: to_core(&arm.body),
+    }
+}
+
+/// Lower a whole program's top-level items into the core IR.
+#[must_use]
+pub fn lower_items_to_core(items: &[Item]) -> Vec<CoreItem> {
+    items.iter().map(lower_item_to_core).collect()
+}
+
+/// Lower one top-level item, lowering its executable bodies (`Func.body`,
+/// `Const.value`, method bodies) to `CoreExpr`. Type metadata passes through.
+#[must_use]
+pub fn lower_item_to_core(item: &Item) -> CoreItem {
+    match item {
+        Item::Prod { name, generics, fields, public } => CoreItem::Prod {
+            name: name.clone(),
+            generics: generics.clone(),
+            fields: fields.clone(),
+            public: *public,
+        },
+        Item::Sum { name, generics, variants, public } => CoreItem::Sum {
+            name: name.clone(),
+            generics: generics.clone(),
+            variants: variants.clone(),
+            public: *public,
+        },
+        Item::Func { name, params, ret, uses, body, public } => CoreItem::Func {
+            name: name.clone(),
+            params: params.clone(),
+            ret: ret.clone(),
+            uses: uses.clone(),
+            body: Rc::new(lower_expr_to_core(body)),
+            public: *public,
+        },
+        Item::Contract { name, generics, methods } => CoreItem::Contract {
+            name: name.clone(),
+            generics: generics.clone(),
+            methods: methods.iter().map(to_core_method).collect(),
+        },
+        Item::On { target, contract, methods } => CoreItem::On {
+            target: target.clone(),
+            contract: contract.clone(),
+            methods: methods.iter().map(to_core_method).collect(),
+        },
+        Item::Const { name, mutable, value, public } => CoreItem::Const {
+            name: name.clone(),
+            mutable: *mutable,
+            value: lower_expr_to_core(value),
+            public: *public,
+        },
+        Item::Use { module, names } => CoreItem::Use {
+            module: module.clone(),
+            names: names.clone(),
+        },
+    }
+}
+
+fn to_core_method(method: &Method) -> CoreMethod {
+    CoreMethod {
+        name: method.name.clone(),
+        modifier: method.modifier.clone(),
+        params: method.params.clone(),
+        ret: method.ret.clone(),
+        uses: method.uses.clone(),
+        body: method.body.as_ref().map(lower_expr_to_core),
+    }
 }
 
 /// Lower a full program (all top-level items) in place.
@@ -539,5 +730,105 @@ mod tests {
         assert!(has_use_stmt(&items), "Stmt::Use should be present before lowering");
         lower_program(&mut items);
         assert!(!has_use_stmt(&items), "Stmt::Use should be gone after lowering");
+    }
+
+    /// Parse a single expression and lower it to core.
+    fn lc(src: &str) -> CoreExpr {
+        let expr = crate::parser::parse(src).expect("expr should parse");
+        lower_expr_to_core(&expr)
+    }
+
+    #[test]
+    fn subjectless_match_lowers_to_nested_if() {
+        use crate::core_ir::CoreExprKind;
+        let core = lc(r#"match { n > 0 => "pos"  _ => "neg" }"#);
+        assert!(matches!(core.kind, CoreExprKind::If { .. }), "got {:?}", core.kind);
+    }
+
+    #[test]
+    fn operator_ref_lowers_to_a_two_param_lambda() {
+        use crate::core_ir::CoreExprKind;
+        // `f(+)` — the `+` argument lowers to `(lhs, rhs) -> lhs + rhs`.
+        let core = lc("f(+)");
+        let CoreExprKind::Call { args, .. } = core.kind else { panic!("expected Call") };
+        let CoreExprKind::Lambda { params, .. } = &args[0].value.kind else {
+            panic!("expected Lambda, got {:?}", args[0].value.kind)
+        };
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn use_block_lowers_to_a_call() {
+        use crate::core_ir::CoreExprKind;
+        // A block whose first statement is `use <-` desugars: the `use` statement is
+        // gone and the block's result becomes a call whose last argument is the
+        // rest-of-block callback.
+        let core = lc("{ use x <- f(1)  x + 1 }");
+        let CoreExprKind::Block { stmts, result } = core.kind else {
+            panic!("expected Block, got {:?}", core.kind)
+        };
+        assert!(stmts.is_empty(), "the `use` statement should be desugared away");
+        let result = result.expect("block should have a result expression");
+        assert!(
+            matches!(result.kind, CoreExprKind::Call { .. }),
+            "use should desugar to a call, got {:?}", result.kind
+        );
+    }
+
+    #[test]
+    fn placeholder_lowers_to_a_lambda_argument() {
+        use crate::core_ir::CoreExprKind;
+        // `f($)` — the bare placeholder argument becomes a one-param lambda.
+        let core = lc("f($)");
+        let CoreExprKind::Call { args, .. } = core.kind else { panic!("expected Call") };
+        assert!(
+            matches!(args[0].value.kind, CoreExprKind::Lambda { .. }),
+            "got {:?}", args[0].value.kind
+        );
+    }
+
+    #[test]
+    fn lowering_preserves_the_surface_span() {
+        use crate::lexer::Span;
+        // A lowered binary keeps the span its surface node carried.
+        let expr = crate::parser::parse("a + b").expect("parse");
+        let surface_span = expr.span;
+        let core = lower_expr_to_core(&expr);
+        assert_eq!(core.span, surface_span);
+        assert_eq!(core.span, Span { start: 0, end: 5 });
+    }
+
+    #[test]
+    fn a_function_item_lowers_its_body_to_core() {
+        use crate::core_ir::{CoreExprKind, CoreItem};
+        let items = parse_program("main() = 1 + 2").expect("parse");
+        let core = lower_items_to_core(&items);
+        let CoreItem::Func { name, body, .. } = &core[0] else { panic!("expected Func") };
+        assert_eq!(name, "main");
+        assert!(matches!(body.kind, CoreExprKind::Binary { .. }), "got {:?}", body.kind);
+    }
+
+    #[test]
+    fn a_function_body_is_desugared_during_item_lowering() {
+        use crate::core_ir::{CoreExprKind, CoreItem};
+        // `f(+)` in a function body must desugar the operator ref to a lambda.
+        let items = parse_program("g() = f(+)").expect("parse");
+        let core = lower_items_to_core(&items);
+        let CoreItem::Func { body, .. } = &core[0] else { panic!("expected Func") };
+        let CoreExprKind::Call { args, .. } = &body.kind else { panic!("expected Call") };
+        assert!(
+            matches!(args[0].value.kind, CoreExprKind::Lambda { .. }),
+            "operator ref should desugar to a lambda, got {:?}", args[0].value.kind
+        );
+    }
+
+    #[test]
+    fn a_type_declaration_passes_through_item_lowering() {
+        use crate::core_ir::CoreItem;
+        let items = parse_program("prod Point(x: Int, y: Int)").expect("parse");
+        let core = lower_items_to_core(&items);
+        let CoreItem::Prod { name, fields, .. } = &core[0] else { panic!("expected Prod") };
+        assert_eq!(name, "Point");
+        assert_eq!(fields.len(), 2);
     }
 }
