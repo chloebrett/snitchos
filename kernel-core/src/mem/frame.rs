@@ -22,6 +22,11 @@ pub struct Bitmap<'a> {
     /// per alloc) instead of O(n²) — the frontier only advances. `free`/release
     /// rewind it when they return a frame *below* the cursor.
     next_hint: usize,
+    /// Cumulative count of bitmap words `alloc` has examined — a diagnostic on the
+    /// allocator's search cost. Its whole point is to make the O(1)-cursor property
+    /// *assertable*: a full fill stays O(n) here, so a regression to a linear
+    /// scan-from-0 (O(n²)) is caught by a test, not just by an audit measurement.
+    scan_words: usize,
 }
 
 impl<'a> Bitmap<'a> {
@@ -37,7 +42,7 @@ impl<'a> Bitmap<'a> {
         for w in bits.iter_mut() {
             *w = 0;
         }
-        Self { bits, capacity, frames_free: 0, next_hint: 0 }
+        Self { bits, capacity, frames_free: 0, next_hint: 0, scan_words: 0 }
     }
 
     /// Mark frames `[start, start + count)` as free. Out-of-range
@@ -66,6 +71,7 @@ impl<'a> Bitmap<'a> {
         // fully allocated. Advancing it as words fill makes a sequential fill O(n)
         // instead of O(n²).
         for i in self.next_hint..self.bits.len() {
+            self.scan_words += 1;
             let w = self.bits[i];
             if w != 0 {
                 let bit = w.trailing_zeros() as usize;
@@ -141,6 +147,13 @@ impl<'a> Bitmap<'a> {
     /// O(1) — reads the maintained counter.
     pub fn count_free(&self) -> usize {
         self.frames_free
+    }
+
+    /// Cumulative bitmap words examined by `alloc` — the allocator's search cost.
+    /// Stays O(n) for a sequential fill thanks to the frontier cursor; asserted by
+    /// `filling_the_pool_is_linear_not_quadratic`.
+    pub fn scan_words(&self) -> usize {
+        self.scan_words
     }
 
     pub fn count_in_use(&self) -> usize {
@@ -252,6 +265,29 @@ mod tests {
         let (mut storage, cap) = empty(128);
         let mut bm = Bitmap::new(&mut storage, cap);
         assert_eq!(bm.alloc(), None);
+    }
+
+    #[test]
+    fn filling_the_pool_is_linear_not_quadratic() {
+        // Turns the O(1)-cursor property into an assertion. Filling N frames
+        // sequentially costs O(N) total word-scans via the frontier cursor; a
+        // regression to "scan from word 0 every alloc" is O(N²). No *behavioral*
+        // test can catch that (the frames handed out are identical) — only the
+        // scan cost differs. This kills the scan-from-0 mutant.
+        const N: usize = 8192;
+        let (mut storage, cap) = empty(N);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        bm.release_range(0, N);
+        for _ in 0..N {
+            bm.alloc().unwrap();
+        }
+        // Cursor fill: ~1-2 word-scans per alloc ≈ N. Scan-from-0 fill: Σ(k/64) ≈
+        // N²/128 ≈ 500k for N=8192. 4·N cleanly separates them.
+        assert!(
+            bm.scan_words() < 4 * N,
+            "fill scanned {} words for {N} frames — expected O(N) (~{N}), not O(N²)",
+            bm.scan_words(),
+        );
     }
 
     #[test]

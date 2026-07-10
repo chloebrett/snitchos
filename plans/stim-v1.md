@@ -512,7 +512,12 @@ so `:stim` never returns to the REPL; **Ctrl-C exits the whole REPL** (Phase-2 S
 this — Ctrl-C kills just the child). (3) read-only *refusal semantics* already host-tested
 at 3.4 (`deny_writes`); this step is the metal path + shell glue.
 
-#### Step 4.3: tracing — a session root span + a span per `:w` — ⏳ IMPLEMENTED (2026-07-10), verify pending
+#### Step 4.3: tracing — a session root span + a span per `:w` — ✅ DONE (2026-07-10)
+**Verified**: 5 stim tests green (incl. the span-sequence assertion); `stitch_repl`
+builds clean for riscv (4.2+4.3 on-target); mutation-clean (10 caught / 2 unviable /
+0 missed — the `span_open`/`span_close` calls are unit statements cargo-mutants can't
+mutate, but the span-sequence test pins their order exactly). 574 lib green.
+
 **Touches**: `stitch/src/stim.rs` (the driver emits, since the FSM is pure) + the
 `stitch_repl` `:stim` call site.
 **Design**: `run` gains a `telemetry: &dyn Telemetry` param; opens `stim.session` for the
@@ -534,6 +539,13 @@ process's life (fine; it *is* the session).
 
 *PR boundary: "stim driver + shell invocation + tracing" (4.1 host-testable + mutation-
 tested; 4.2/4.3's on-target glue proven by the Group-5 boot itest).*
+
+**★ GROUP 4 COMPLETE (2026-07-10) — the driver, shell invocation, and tracing.** The pure
+FSM and the host substrate are wired together: `stitch::stim::run` drives read→step→
+perform (native trampoline), `:stim <file>` resolves/creates + runs in-process, and the
+driver emits session + per-`:w` spans. 574 lib green, riscv builds, mutation-clean.
+**Next: Group 5** — the boot itest (the demonstrable proof + validates the 4.2 caveats).
+**Deferred (post-v1):** #2 Stitch-loop driver; #4 Phase-2 spawn (least-authority stim).
 
 ---
 
