@@ -103,10 +103,27 @@ source line + caret, resolved to the correct source among prelude/program/REPL.
   `err.source() == Some(7)`. 574 green, clippy clean. **Bonus:** because
   `register_items` reads `env.source()`, 1c only needs `build_env` to *set* the env's
   source — functions then inherit it automatically.
-- **1c — remaining:** register each real source (prelude, program, REPL line/defs,
-  stages, modules) in a run-shared `Rc<RefCell<SourceMap>>`; `build_env_in` +
-  entry points tag their env via `.with_source(id)`; add `RuntimeError::render(&SourceMap)`
-  and wire it into the REPL + program error display.
+- **1c ✅ DONE (2026-07-11)** — the render path, end to end. Key correctness point:
+  prelude and user bodies carry spans into *different* texts, so registration is
+  **split per source** — `build_env_in` was refactored into `build_env_batches(env,
+  &[(items, SourceId)], uses_from)` that registers each batch under its own source.
+  New `eval_program_located(items, &mut SourceMap, user_src)` registers the prelude
+  as `<prelude>` and the user items as `user_src`, so a fault in a prelude function
+  resolves against prelude text and a user fault against the program.
+  `RuntimeError::render(&SourceMap)` renders a located fault; unlocated/synthetic →
+  message alone. Wired into `run_program_source` (registers `<program>`, faults print
+  `<program>:line:col: msg` + line + caret) and the REPL `eval_line` (per-line local
+  `SourceMap`, faults print `<repl>:line:col`). Parse errors now render with caret
+  too. Tests: a fault in `bad()` on line 2 cites `<program>:2:9`; REPL `1/0` cites
+  `<repl>:1:1`. **577 lib + 26 integration green, clippy clean.**
+
+  **Follow-ups (noted, not blocking):** REPL faults *inside loaded defs* render
+  message-only (needs keeping the def source text — `load_source` currently drops it);
+  multi-module (`run_module_files`/`eval_modules`) faults render message-only (pass an
+  empty `SourceMap` today) — each module would register its own source.
+
+**Phase 1 is complete.** Runtime faults cite `file:line:col` for single-program and
+REPL-line code. Phase 2 (stack traces) builds on this.
 
 ---
 

@@ -14,7 +14,7 @@ use crate::prelude::*;
 use crate::core_ir::CoreExpr;
 use crate::env::Env;
 use crate::lexer::Span;
-use crate::source::SourceId;
+use crate::source::{SourceId, SourceMap};
 
 /// A value produced by evaluating an expression.
 #[derive(Clone)]
@@ -443,6 +443,20 @@ impl RuntimeError {
         match self {
             RuntimeError::Fault { source, .. } => *source,
             _ => None,
+        }
+    }
+
+    /// Render this fault against `sources`: a located fault (one with a span)
+    /// resolves to `name:line:col: message` + the offending line + a caret; an
+    /// unlocated fault (or control signal) renders its [`message`](Self::message)
+    /// alone. The source defaults to synthetic (location-free) when unstamped.
+    #[must_use]
+    pub fn render(&self, sources: &SourceMap) -> String {
+        match self {
+            RuntimeError::Fault { message, at: Some(span), source } => {
+                sources.render(source.unwrap_or_default(), *span, message)
+            }
+            _ => self.message(),
         }
     }
 

@@ -10,6 +10,7 @@ use crate::prelude::*;
 use crate::ast::{BinOp, Item, MethodModifier, Type};
 use crate::core_ir::{CoreArg, CoreExpr, CoreExprKind, CoreStmt, CoreStrSegment};
 use crate::lexer::Span;
+use crate::source::{SourceId, SourceMap};
 use crate::env::{AssignError, Env};
 use crate::lower::{free_vars_core, lower_expr_to_core, lower_program};
 use crate::natives::NATIVES;
@@ -77,6 +78,17 @@ pub fn build_env_with_backends(
 }
 
 fn build_env_in(env: Env, items: &[Item]) -> Env {
+    // Single batch tagged with the env's own source (synthetic for the plain
+    // callers; a real id when the caller pre-tagged the env).
+    let source = env.source();
+    build_env_batches(env, &[(items, source)], items)
+}
+
+/// Build the global environment from one or more item batches, each tagged with a
+/// [`SourceId`] so the functions/methods it registers carry that source (for
+/// located faults). `uses_from` is the batch whose whole-module built-in `use`
+/// statements are linked (the user program's, not the prelude's).
+fn build_env_batches(env: Env, batches: &[(&[Item], SourceId)], uses_from: &[Item]) -> Env {
     // The program entry / REPL prompt holds the process's ambient capabilities —
     // it *was* handed a `TelemetrySink` cap. Authority threads down from here;
     // named functions then narrow it to their declared `uses`.
@@ -91,7 +103,11 @@ fn build_env_in(env: Env, items: &[Item]) -> Env {
         reg.globals.insert(native.name.to_string(), Value::Native(*native));
     }
     register_builtin_types(&mut reg.globals);
-    register_items(items, &env, &mut reg);
+    // Each batch registers under its own source, so a fault in (say) a prelude
+    // function resolves against the prelude text, not the user program's.
+    for (items, source) in batches {
+        register_items(items, &env.clone().with_source(*source), &mut reg);
+    }
     // After every `on`/`contract` is collected, fold contract default methods
     // into the types that conform — a concrete impl already present wins.
     bake_contract_defaults(&mut reg);
@@ -106,7 +122,7 @@ fn build_env_in(env: Env, items: &[Item]) -> Env {
     // missing) remain the multi-module path's job for now.
     let builtins: BTreeMap<String, Rc<ModuleHandle>> =
         builtin_modules(&reg.globals).into_iter().collect();
-    let builtin_uses: Vec<Item> = items
+    let builtin_uses: Vec<Item> = uses_from
         .iter()
         .filter(|item| matches!(item, Item::Use { module, names: None } if builtins.contains_key(module)))
         .cloned()
@@ -133,6 +149,30 @@ pub fn eval_program_with_telemetry(
     all.extend_from_slice(items);
     lower_program(&mut all);
     let env = build_env(&all);
+    let result = match env.lookup("main") {
+        Some(main) => eval_call(&main, &[], &env),
+        None => Err(RuntimeError::new("no `main` function")),
+    };
+    (result, env.telemetry())
+}
+
+/// Like [`eval_program_with_telemetry`], but registers the prelude and the user
+/// program as **distinct sources** in `sources` (the caller having registered the
+/// user text as `user_src`), so a runtime fault carries the right source and can be
+/// rendered to `file:line:col` via [`RuntimeError::render`]. A fault inside a
+/// prelude function resolves against the prelude text, a fault in user code against
+/// the user program — their spans index different sources.
+pub fn eval_program_located(
+    items: &[Item],
+    sources: &mut SourceMap,
+    user_src: SourceId,
+) -> (Result<Value, RuntimeError>, Vec<TelemetryEvent>) {
+    let prelude_src = sources.register("<prelude>", PRELUDE);
+    let mut prelude = prelude_items();
+    lower_program(&mut prelude);
+    let mut user = items.to_vec();
+    lower_program(&mut user);
+    let env = build_env_batches(Env::new(), &[(&prelude, prelude_src), (&user, user_src)], &user);
     let result = match env.lookup("main") {
         Some(main) => eval_call(&main, &[], &env),
         None => Err(RuntimeError::new("no `main` function")),

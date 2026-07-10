@@ -12,12 +12,13 @@ use crate::prelude::*;
 use crate::ast::Item;
 use crate::env::Env;
 use crate::interp::{
-    Module, build_env_with_backends, eval, eval_modules_with_telemetry,
-    eval_program_with_telemetry, is_builtin_module, prelude_items,
+    Module, build_env_with_backends, eval, eval_modules_with_telemetry, eval_program_located,
+    is_builtin_module, prelude_items,
 };
 use crate::lower::{lower_expr_to_core, lower_program};
 use crate::parser::{parse, parse_program};
 use crate::platform::{NullPlatform, Platform};
+use crate::source::SourceMap;
 use crate::telemetry::{RecordingTelemetry, Telemetry};
 use crate::value::{RuntimeError, TelemetryEvent, Value};
 
@@ -41,12 +42,16 @@ pub fn run_program_source(src: &str) -> RunResult {
         Err(error) => {
             return RunResult {
                 stdout: String::new(),
-                stderr: format!("parse error: {}\n", error.message),
+                stderr: format!("parse error: {}\n", error.render(src)),
                 exit_code: 2,
             };
         }
     };
-    finish(eval_program_with_telemetry(&items))
+    // Register the program source so a runtime fault renders `file:line:col`.
+    let mut sources = SourceMap::new();
+    let user_src = sources.register("<program>", src);
+    let out = eval_program_located(&items, &mut sources, user_src);
+    finish(out, &sources)
 }
 
 /// Discover, load, and run a multi-file program rooted at the `entry` module,
@@ -67,7 +72,9 @@ pub fn run_module_files(
             };
         }
     };
-    finish(eval_modules_with_telemetry(&modules, entry))
+    // Multi-module source registration is a follow-up; faults render message-only
+    // (their closures carry the synthetic source) against this empty map.
+    finish(eval_modules_with_telemetry(&modules, entry), &SourceMap::new())
 }
 
 /// Walk a program's `use` imports from `entry`, fetching and parsing each
@@ -104,7 +111,10 @@ pub fn discover_modules(
 
 /// Render an evaluation outcome (result + telemetry) into stdout/stderr + an exit
 /// code — shared by the single-module and multi-file paths.
-fn finish((result, events): (Result<Value, RuntimeError>, Vec<TelemetryEvent>)) -> RunResult {
+fn finish(
+    (result, events): (Result<Value, RuntimeError>, Vec<TelemetryEvent>),
+    sources: &SourceMap,
+) -> RunResult {
     let mut stdout = render_telemetry(&events);
     match result {
         Ok(value) => {
@@ -115,7 +125,7 @@ fn finish((result, events): (Result<Value, RuntimeError>, Vec<TelemetryEvent>)) 
         }
         Err(error) => RunResult {
             stdout,
-            stderr: format!("runtime error: {}\n", error.message()),
+            stderr: format!("runtime error: {}\n", error.render(sources)),
             exit_code: 1,
         },
     }
@@ -238,7 +248,7 @@ impl Repl {
         }
         let expr = match parse(trimmed) {
             Ok(expr) => expr,
-            Err(error) => return format!("parse error: {}\n", error.message),
+            Err(error) => return format!("parse error: {}\n", error.render(trimmed)),
         };
         // Build the env once (prelude + defs), then reuse it for every expression.
         if self.env.is_none() {
@@ -251,8 +261,19 @@ impl Repl {
                 &all,
             ));
         }
-        let env = self.env.as_ref().expect("env was just built above");
-        let result = eval(&lower_expr_to_core(&expr), env);
+        // Register this line as its own source and evaluate against a clone of the
+        // cached env tagged with it, so a fault in the typed expression renders
+        // `<repl>:line:col`. (A fault inside a *loaded* def still renders
+        // message-only — def-source registration is a follow-up.)
+        let mut sources = SourceMap::new();
+        let line_id = sources.register("<repl>", trimmed);
+        let env = self
+            .env
+            .as_ref()
+            .expect("env was just built above")
+            .clone()
+            .with_source(line_id);
+        let result = eval(&lower_expr_to_core(&expr), &env);
         // Drain only *this* line's telemetry from the long-lived sink.
         let mut out = render_telemetry(&env.take_telemetry());
         match result {
@@ -271,7 +292,9 @@ impl Repl {
                 }
             }
             Ok(_) => {}
-            Err(error) => writeln!(out, "runtime error: {}", error.message()).expect(INFALLIBLE),
+            Err(error) => {
+                writeln!(out, "runtime error: {}", error.render(&sources)).expect(INFALLIBLE);
+            }
         }
         out
     }
@@ -309,6 +332,16 @@ mod tests {
     #[test]
     fn the_repl_renders_a_scalar_result_inline() {
         assert!(Repl::new().eval_line("40 + 2").contains("=> 42"));
+    }
+
+    #[test]
+    fn the_repl_cites_the_line_on_a_runtime_fault() {
+        // A fault in a typed expression renders `<repl>:line:col` + caret.
+        let out = Repl::new().eval_line("1 / 0");
+        assert!(
+            out.contains("<repl>:1:1: division by zero"),
+            "expected a located fault, got: {out}"
+        );
     }
 
     #[test]
@@ -513,6 +546,30 @@ mod tests {
         let result = run_program_source(r#"main() uses Telemetry = emit("x", 1)"#);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "emit x = 1\n");
+    }
+
+    #[test]
+    fn a_runtime_fault_renders_with_file_line_col_and_caret() {
+        // `1 / 0` in `main` faults; the error cites the program source at the
+        // offending expression (`1` is column 10 of `main() = 1 / 0`).
+        let result = run_program_source("main() = 1 / 0");
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(
+            result.stderr,
+            "runtime error: <program>:1:10: division by zero\nmain() = 1 / 0\n         ^\n"
+        );
+    }
+
+    #[test]
+    fn a_fault_inside_a_user_function_cites_that_functions_line() {
+        // The fault happens in `bad`, on line 2 — the trace should point there, not
+        // at `main`'s call site.
+        let result = run_program_source("main() = bad()\nbad() = 1 / 0");
+        assert_eq!(result.exit_code, 1);
+        assert!(
+            result.stderr.contains("<program>:2:9: division by zero"),
+            "stderr was: {}", result.stderr
+        );
     }
 
     #[test]

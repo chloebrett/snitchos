@@ -82,6 +82,7 @@
 | spawn-storm | spawn-storm | cpu | smp, stress |
 | stack-guard-fault-detected | stack-guard | wfi | sched |
 | deep-overflow-reports-cleanly | stack-overflow-deep | wfi | sched |
+| stim-edits-a-file-and-saves | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-cross-pipe-runs-a-stage | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-fs-loads-and-runs | stitch-fs | wfi | userspace, stitch, fs |
 | stitch-fs-loads-nested | stitch-fs | wfi | userspace, stitch, fs |

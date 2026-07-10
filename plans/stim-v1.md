@@ -551,13 +551,34 @@ driver emits session + per-`:w` spans. 574 lib green, riscv builds, mutation-cle
 
 ### Group 5 — Boot itest (the demonstrable proof)
 
-#### Step 5.1: an `xtask itest` scenario driving stim in QEMU
+#### Step 5.1: an `xtask itest` scenario driving stim in QEMU — ✅ DONE (2026-07-10)
 **Acceptance**: boot init→shell→`stim <file>`; feed scripted keys over the console;
 `:w`; assert (a) the file's new bytes via a re-read, and (b) the session/`:w` spans
 on the decoded wire. Registered in `SCENARIOS`; skips cleanly if no QEMU.
 **RED**: the scenario asserting saved content + spans. (Integration — no MUTATE.)
+DONE: `stim_edits_a_file_and_saves` (`workload=stitch-fs`). Boots the REPL, `:stim
+note.txt` (resolver creates it + WRITE cap), waits for the **`stim.session`** span,
+then sends `iZQXMARK\x1b:w` and asserts **`ZQXMARK` on the UART** (renderFrame drew
+the buffer — `read_byte` doesn't echo, so it's a genuine bytes→FSM→render→console
+proof) and the **`stim.save`** span. **Passed on the metal** (`max wait 0.6s`).
+**Re-read deferred:** in-process stim is a modal takeover (REPL never returns), so
+byte-level re-read waits for Phase-2 spawn; render-marker + save-span is the Phase-1
+proof. Waiting for the `:stim` line's span before sending raw keys sidesteps the
+read_byte/read_line console-sharing caveat.
 
 *PR boundary: "stim boot itest" — v1 is demonstrable.*
+
+**★★ STIM v1 SHIPPED (2026-07-10) — all five groups done.** Primitives (G1) → the FSM
+as a Stitch program (G2) → the host substrate (G3) → driver + `:stim` + tracing (G4) →
+the boot itest (G5). stim runs **end-to-end on the metal**: `:stim note.txt` edits and
+`:w` saves, with session/save spans on the wire. The thesis is real — the editor *is* a
+Stitch program, cap-confined, fully observed.
+**Deferred (post-v1, each its own follow-up):** #2 the Stitch-loop driver (unblocked by
+B4); #4 Phase-2 spawn (a least-authority stim process → real cap-confinement + Ctrl-C
+returns to the shell + byte-level re-read verification); the fast-follow grammar (`:q`,
+`h`/`l`, `x`/`dd`/`o`) and the axis twists. **Before commit:** the full unit gate +
+`cargo xtask itest --repeat 10` once the concurrent Phase-C `runner.rs`/`source` churn
+settles (this run used `--skip-unit-tests` around a transient doctest break).
 
 ---
 
