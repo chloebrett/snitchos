@@ -106,10 +106,8 @@ impl PhysFrame {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Stats {
-    #[expect(
-        dead_code,
-        reason = "part of the frame-stats snapshot; in_use/free are surfaced today, total kept for completeness"
-    )]
+    /// Total tracked frames — the frame-oom heartbeat leaks `total / 4` per tick
+    /// so exhaustion is gradual at any RAM size (see `heartbeat::frame_smoke`).
     pub total: usize,
     pub in_use: usize,
     pub free: usize,

@@ -16,6 +16,12 @@ pub struct Bitmap<'a> {
     bits: &'a mut [u64],
     capacity: usize,
     frames_free: usize,
+    /// Search cursor: the lowest word index that *may* hold a free bit. Invariant:
+    /// every word below it is fully allocated (`0`). `alloc` scans from here rather
+    /// than word 0, so filling the pool sequentially is O(n) total (O(1) amortized
+    /// per alloc) instead of O(n²) — the frontier only advances. `free`/release
+    /// rewind it when they return a frame *below* the cursor.
+    next_hint: usize,
 }
 
 impl<'a> Bitmap<'a> {
@@ -31,7 +37,7 @@ impl<'a> Bitmap<'a> {
         for w in bits.iter_mut() {
             *w = 0;
         }
-        Self { bits, capacity, frames_free: 0 }
+        Self { bits, capacity, frames_free: 0, next_hint: 0 }
     }
 
     /// Mark frames `[start, start + count)` as free. Out-of-range
@@ -56,15 +62,22 @@ impl<'a> Bitmap<'a> {
         if self.frames_free == 0 {
             return None;
         }
-        for (i, w) in self.bits.iter_mut().enumerate() {
-            if *w != 0 {
+        // Scan from the frontier, not word 0 — words below `next_hint` are known
+        // fully allocated. Advancing it as words fill makes a sequential fill O(n)
+        // instead of O(n²).
+        for i in self.next_hint..self.bits.len() {
+            let w = self.bits[i];
+            if w != 0 {
                 let bit = w.trailing_zeros() as usize;
                 let frame = i * 64 + bit;
                 if frame >= self.capacity {
                     return None;
                 }
-                *w &= !(1u64 << bit);
+                self.bits[i] = w & !(1u64 << bit);
                 self.frames_free -= 1;
+                // This word may still hold free bits; if it just emptied, the next
+                // alloc advances past it. Either way words below `i` stay 0.
+                self.next_hint = i;
                 return Some(frame);
             }
         }
@@ -143,6 +156,9 @@ impl<'a> Bitmap<'a> {
         if self.bits[word_idx] & mask == 0 {
             self.bits[word_idx] |= mask;
             self.frames_free += 1;
+            // A frame became free below the search frontier — rewind so `alloc`
+            // reconsiders it (keeps "returns the lowest free frame").
+            self.next_hint = self.next_hint.min(word_idx);
         }
     }
 }
@@ -235,6 +251,24 @@ mod tests {
     fn alloc_returns_none_when_empty() {
         let (mut storage, cap) = empty(128);
         let mut bm = Bitmap::new(&mut storage, cap);
+        assert_eq!(bm.alloc(), None);
+    }
+
+    #[test]
+    fn alloc_reuses_a_frame_freed_below_the_allocation_frontier() {
+        // Exhaust the pool so the search frontier sits at the top, then free a
+        // low frame far behind it. The next alloc must return that low frame — an
+        // O(1) search cursor must *rewind* on free, never strand freed frames
+        // behind the frontier. (This is the correctness guard the hint must keep.)
+        let (mut storage, cap) = empty(256);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        bm.release_range(0, 256);
+        for _ in 0..256 {
+            bm.alloc().unwrap();
+        }
+        assert_eq!(bm.alloc(), None); // pool empty, frontier at the top
+        bm.free(3);
+        assert_eq!(bm.alloc(), Some(3), "a frame freed behind the frontier is found again");
         assert_eq!(bm.alloc(), None);
     }
 

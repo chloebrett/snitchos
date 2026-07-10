@@ -271,7 +271,9 @@ fn main() {
             match open_file_rw(path) {
                 Some((handle, content)) => {
                     platform.write(&format!("\u{1b}[2J\u{1b}[Hstim: {path} (Ctrl-C to exit)\r\n"));
-                    if let Err(e) = stitch::stim::run(STIM_SRC, &content, handle, &*platform) {
+                    // stim's session/save spans route through the real telemetry cap.
+                    let stim_tel = RuntimeTelemetry::default();
+                    if let Err(e) = stitch::stim::run(STIM_SRC, &content, handle, &*platform, &stim_tel) {
                         platform.write(&format!("stim: {}\n", e.message()));
                     }
                 }

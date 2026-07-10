@@ -16,7 +16,10 @@
 
 pub mod markers;
 
-use fs_core::{FsError, InodeId, NodeKind, Stat};
+use fs_core::{FsError, InodeId, Stat};
+// Re-export: `Request::Create` exposes `NodeKind` in the public API, so callers get
+// it from `fs_proto` without a direct `fs-core` dependency.
+pub use fs_core::NodeKind;
 
 /// The IPC message width, re-exported from the shared ABI — the wire layouts
 /// here encode into `[u64; MSG_WORDS]`.

@@ -22,6 +22,7 @@ use crate::prelude::*;
 
 use crate::ast::Method;
 use crate::platform::{NullPlatform, Platform};
+use crate::source::SourceId;
 use crate::telemetry::{RecordingTelemetry, Telemetry};
 use crate::value::{ClosureData, TelemetryEvent, Value};
 
@@ -74,6 +75,10 @@ pub struct Env {
     /// evaluating a closure body so that `eval_tail` can detect self-tail-calls
     /// and signal the trampoline instead of recursing into Rust.
     self_closure: Option<Rc<ClosureData>>,
+    /// Which source the code running in this scope came from — set at each closure
+    /// boundary (`apply_values`) and at program registration (`build_env`). `eval`
+    /// stamps it onto a fault so the fault's span can be resolved to `file:line:col`.
+    source: SourceId,
 }
 
 /// Undoes [`Env::enter_call`]'s depth increment when dropped — so nesting is
@@ -127,6 +132,7 @@ impl Env {
             fuel: Rc::new(Cell::new(u64::MAX)),
             depth: Rc::new(Cell::new(0)),
             self_closure: None,
+            source: SourceId::default(),
         }
     }
 
@@ -228,6 +234,20 @@ impl Env {
         Env { authority: Rc::new(authority), ..self }
     }
 
+    /// A clone of this environment tagged with `source` — the source the code
+    /// running in it came from. Set at each closure boundary (`apply_values`) and at
+    /// program registration (`build_env`); read by `eval` when stamping a fault.
+    #[must_use]
+    pub fn with_source(self, source: SourceId) -> Env {
+        Env { source, ..self }
+    }
+
+    /// The source the code in this scope came from.
+    #[must_use]
+    pub fn source(&self) -> SourceId {
+        self.source
+    }
+
     /// Whether capability `cap` is in scope — the gate `emit`/`span` consult.
     #[must_use]
     pub fn has_authority(&self, cap: &str) -> bool {
@@ -253,6 +273,7 @@ impl Env {
             fuel: Rc::clone(&self.fuel),
             depth: Rc::clone(&self.depth),
             self_closure: None,
+            source: self.source,
         }
     }
 
@@ -274,6 +295,7 @@ impl Env {
             fuel: Rc::clone(&self.fuel),
             depth: Rc::clone(&self.depth),
             self_closure: None,
+            source: self.source,
         }
     }
 
@@ -307,6 +329,7 @@ impl Env {
             fuel: Rc::clone(&self.fuel),
             depth: Rc::clone(&self.depth),
             self_closure: None,
+            source: self.source,
         }
     }
 
@@ -403,6 +426,7 @@ impl Env {
             fuel: Rc::clone(&self.fuel),
             depth: Rc::clone(&self.depth),
             self_closure: None,
+            source: self.source,
         }
     }
 

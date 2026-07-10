@@ -14,6 +14,7 @@ use crate::prelude::*;
 use crate::core_ir::CoreExpr;
 use crate::env::Env;
 use crate::lexer::Span;
+use crate::source::SourceId;
 
 /// A value produced by evaluating an expression.
 #[derive(Clone)]
@@ -229,6 +230,10 @@ pub struct ClosureData {
     /// empty) — its body runs with exactly these authorities, not the caller's.
     /// `None` for a lambda, which inherits the authority of where it was defined.
     pub uses: Option<Vec<String>>,
+    /// The source this closure's body was lowered from — stamped onto a fault by
+    /// `apply_values` so it can be resolved to `file:line:col`. `SourceId::default()`
+    /// (synthetic) for closures with no real origin (e.g. the `?.` accessor).
+    pub source: SourceId,
 }
 
 impl Value {
@@ -372,8 +377,10 @@ impl PartialEq for Value {
 pub enum RuntimeError {
     /// A genuine runtime error (type mismatch, division by zero, …). `at` is the
     /// source span of the offending expression, stamped by `eval` as the fault
-    /// propagates out (the innermost node wins); `None` until stamped.
-    Fault { message: String, at: Option<Span> },
+    /// propagates out (the innermost node wins); `source` names which source that
+    /// span indexes, stamped by `apply_values` from the running closure (the
+    /// innermost closure wins). Both `None` until stamped.
+    Fault { message: String, at: Option<Span>, source: Option<SourceId> },
     /// `?` short-circuit: unwind to the enclosing function and return this value.
     Return(Value),
     /// Self-tail-call signal: `apply_values` catches this and loops instead of
@@ -383,7 +390,7 @@ pub enum RuntimeError {
 
 impl RuntimeError {
     pub(crate) fn new(message: impl Into<String>) -> Self {
-        RuntimeError::Fault { message: message.into(), at: None }
+        RuntimeError::Fault { message: message.into(), at: None, source: None }
     }
 
     /// The `?` early-return control signal carrying the failure value.
@@ -398,8 +405,22 @@ impl RuntimeError {
     #[must_use]
     pub(crate) fn stamped(self, span: Span) -> Self {
         match self {
-            RuntimeError::Fault { message, at: None } => {
-                RuntimeError::Fault { message, at: Some(span) }
+            RuntimeError::Fault { message, at: None, source } => {
+                RuntimeError::Fault { message, at: Some(span), source }
+            }
+            other => other,
+        }
+    }
+
+    /// Attach `source` to a fault whose source isn't yet known — used by
+    /// `apply_values` to stamp the running closure's source. Already-sourced faults
+    /// (an inner closure already stamped) and control signals pass through, so the
+    /// innermost closure wins.
+    #[must_use]
+    pub(crate) fn with_source(self, source: SourceId) -> Self {
+        match self {
+            RuntimeError::Fault { message, at, source: None } => {
+                RuntimeError::Fault { message, at, source: Some(source) }
             }
             other => other,
         }
@@ -411,6 +432,16 @@ impl RuntimeError {
     pub fn span(&self) -> Option<Span> {
         match self {
             RuntimeError::Fault { at, .. } => *at,
+            _ => None,
+        }
+    }
+
+    /// The source a located fault belongs to, if stamped. Pairs with [`span`](Self::span)
+    /// to resolve the fault against a `SourceMap`.
+    #[must_use]
+    pub fn source(&self) -> Option<SourceId> {
+        match self {
+            RuntimeError::Fault { source, .. } => *source,
             _ => None,
         }
     }

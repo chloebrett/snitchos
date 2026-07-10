@@ -96,6 +96,9 @@ pub(crate) fn register_items(items: &[Item], env: &Env, reg: &mut Registration) 
                     home_globals: env.home_globals_weak(),
                     authority: env.authority_rc(),
                     uses: Some(uses.clone()),
+                    // Functions inherit the source of the env they're registered in;
+                    // `build_env` tags that env, so faults resolve to the program file.
+                    source: env.source(),
                 }));
                 reg.globals.insert(name.clone(), closure);
             }

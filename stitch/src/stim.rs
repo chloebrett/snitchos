@@ -12,6 +12,7 @@ use crate::interp::{apply_values, build_env, prelude_items};
 use crate::lower::lower_program;
 use crate::parser::parse_program;
 use crate::platform::{Handle, Platform};
+use crate::telemetry::Telemetry;
 use crate::value::{RuntimeError, Value};
 
 /// Run the stim editor: load the FSM `source`, seed it with the file's `content`,
@@ -28,6 +29,7 @@ pub fn run(
     content: &str,
     file_handle: Handle,
     platform: &dyn Platform,
+    telemetry: &dyn Telemetry,
 ) -> Result<(), RuntimeError> {
     // Build the interpreter env ONCE (prelude + the FSM), then reuse it for every
     // keystroke — never re-`eval_program` per key (that is the B5 per-run leak).
@@ -40,6 +42,9 @@ pub fn run(
     let step = lookup(&env, "step")?;
     let render = lookup(&env, "renderFrame")?;
 
+    // One span for the whole editing session; each `:w` nests its own (below). The
+    // FSM is pure — spans are the *driver's* to emit.
+    telemetry.span_open("stim.session");
     let mut state = apply_values(&initial, &[Value::Str(content.into())], &env)?;
     redraw(&render, &state, &env, platform)?;
 
@@ -53,9 +58,10 @@ pub fn run(
         let effect = field(&stepped, "effect")
             .cloned()
             .ok_or_else(|| RuntimeError::new("stim: step result has no `effect`"))?;
-        perform(&effect, &next, &render, &env, platform, file_handle)?;
+        perform(&effect, &next, &render, &env, platform, file_handle, telemetry)?;
         state = next;
     }
+    telemetry.span_close("stim.session");
     Ok(())
 }
 
@@ -109,6 +115,7 @@ fn perform(
     env: &Env,
     platform: &dyn Platform,
     file_handle: Handle,
+    telemetry: &dyn Telemetry,
 ) -> Result<(), RuntimeError> {
     let Value::Data(d) = effect else {
         return Ok(());
@@ -117,9 +124,12 @@ fn perform(
         "Redraw" => redraw(render, state, env, platform)?,
         "Save" => {
             if let Some((_, Value::Str(text))) = d.fields.first() {
+                // Each save is its own span, nested in the session span.
+                telemetry.span_open("stim.save");
                 // A refused write (read-only cap) returns `false`; the kernel has
                 // already snitched the `SyscallRefused`. v1 does not surface it.
                 let _saved = platform.fs_write(file_handle, text.as_bytes());
+                telemetry.span_close("stim.save");
             }
         }
         _ => {} // Noop
@@ -131,6 +141,7 @@ fn perform(
 mod tests {
     use super::run;
     use crate::platform::FakePlatform;
+    use crate::telemetry::RecordingTelemetry;
 
     /// The canonical FSM source — the same file the ramfs seeds.
     const STIM: &str = include_str!("../../fs-image/stim/stim.st");
@@ -140,7 +151,7 @@ mod tests {
         // Seed "ab"; script: `i` (insert), `Z` (→ "Zab"), Esc, then `:w` (save).
         // Esc is 0x1b — the driver maps it to the "Esc" key token.
         let fake = FakePlatform::with_bytes(b"iZ\x1b:w");
-        run(STIM, "ab", 7, &fake).expect("stim session should run");
+        run(STIM, "ab", 7, &fake, &RecordingTelemetry::default()).expect("stim session should run");
         // `:w` saved the edited buffer through the (fake) file cap at handle 7.
         assert_eq!(fake.writes(), vec![(7u32, b"Zab".to_vec())]);
         // A redraw drew the edited buffer to the console.
@@ -151,9 +162,41 @@ mod tests {
     fn without_a_w_command_nothing_is_saved() {
         // Edit but never `:w` — the buffer changes on screen, but no write happens.
         let fake = FakePlatform::with_bytes(b"iZ\x1b");
-        run(STIM, "ab", 7, &fake).expect("stim session should run");
+        run(STIM, "ab", 7, &fake, &RecordingTelemetry::default()).expect("stim session should run");
         assert!(fake.writes().is_empty(), "no `:w` → no save");
         assert!(fake.output().contains("Zab"), "the edit still drew");
+    }
+
+    #[test]
+    fn a_session_span_wraps_the_run_and_each_save_nests_a_span() {
+        use crate::telemetry::Telemetry;
+        use crate::value::TelemetryEvent;
+
+        // Two `:w`s in one session → one session span with two nested save spans.
+        let fake = FakePlatform::with_bytes(b":w:w");
+        let tel = RecordingTelemetry::default();
+        run(STIM, "hi", 7, &fake, &tel).expect("stim session should run");
+
+        let spans: Vec<String> = tel
+            .snapshot()
+            .iter()
+            .filter_map(|e| match e {
+                TelemetryEvent::SpanOpen { name } => Some(format!("open {name}")),
+                TelemetryEvent::SpanClose { name } => Some(format!("close {name}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                "open stim.session",
+                "open stim.save",
+                "close stim.save",
+                "open stim.save",
+                "close stim.save",
+                "close stim.session",
+            ]
+        );
     }
 
     #[test]
@@ -162,7 +205,7 @@ mod tests {
         // them back, then `:w`. The saved buffer is "ab" only if the raw CR/DEL
         // bytes reached the FSM as the "Enter"/"Backspace" tokens.
         let fake = FakePlatform::with_bytes(b"iab\x0d\x7f\x1b:w");
-        run(STIM, "", 7, &fake).expect("stim session should run");
+        run(STIM, "", 7, &fake, &RecordingTelemetry::default()).expect("stim session should run");
         assert_eq!(fake.writes(), vec![(7u32, b"ab".to_vec())]);
     }
 
@@ -172,7 +215,7 @@ mod tests {
         // surfaces as `false`). `:w` routes to `fs_write`, which is refused.
         let fake = FakePlatform::with_bytes(b":w");
         fake.deny_writes();
-        run(STIM, "ab", 7, &fake).expect("stim session should run");
+        run(STIM, "ab", 7, &fake, &RecordingTelemetry::default()).expect("stim session should run");
         assert!(fake.writes().is_empty(), "a refused save records nothing");
     }
 }

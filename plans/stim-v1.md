@@ -512,11 +512,22 @@ so `:stim` never returns to the REPL; **Ctrl-C exits the whole REPL** (Phase-2 S
 this — Ctrl-C kills just the child). (3) read-only *refusal semantics* already host-tested
 at 3.4 (`deny_writes`); this step is the metal path + shell glue.
 
-#### Step 4.3: tracing — a session root span + a span per `:w`
-**Touches**: `stitch/src/stim.rs` (the driver emits, since the FSM is pure). **Design**:
-`run` opens a `stim.session` span for the whole loop and a nested `stim.save` span around
-each `Save`-effect `fs_write`, through the env's `Telemetry` seam (same one `emit`/`span`
-use).
+#### Step 4.3: tracing — a session root span + a span per `:w` — ⏳ IMPLEMENTED (2026-07-10), verify pending
+**Touches**: `stitch/src/stim.rs` (the driver emits, since the FSM is pure) + the
+`stitch_repl` `:stim` call site.
+**Design**: `run` gains a `telemetry: &dyn Telemetry` param; opens `stim.session` for the
+whole loop and, in `perform`, wraps each `Save`-effect `fs_write` in a nested `stim.save`
+(`span_open`/`span_close` on the `Telemetry` seam). Tests pass a `RecordingTelemetry` and
+read `snapshot()`; on-target `:stim` passes a `RuntimeTelemetry` (spans → real wire frames).
+**Status**: written — RED span-sequence test asserts `open session, open save, close save,
+open save, close save, close session` for `b":w:w"`; `run`/`perform` emit; all 5 call sites
+updated. **Compile/test blocked by concurrent Phase C churn** (lib won't build — `ClosureData`
+gaining a `source` field mid-refactor, unrelated to stim). Verify once settled:
+`cargo test -p stitch --lib stim` (5 tests) + `cargo build -p hello --bin stitch_repl
+--target riscv64gc-unknown-none-elf`; then MUTATE.
+**Caveat**: on the metal `run` never returns (UART has no EOF), so `span_close(session)`
+only fires on the finite fake path — on-target the session span stays open for the
+process's life (fine; it *is* the session).
 **Acceptance**: a scripted session emits the session span then a nested save span per `:w`.
 **RED**: assert the span sequence from a scripted `run` (host, via the recording telemetry —
 `run_program_events`-style).

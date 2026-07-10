@@ -418,10 +418,10 @@ fn link_imports(
 /// # Errors
 /// Returns `Err` on a runtime fault (type mismatch, division by zero, …).
 pub fn eval(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
-    // Stamp the offending expression's span onto an unlocated fault as it leaves —
-    // the innermost `eval` to see it wins (`stamped` no-ops once `at` is set), so a
-    // fault cites the tightest sub-expression that produced it.
-    eval_dispatch(expr, env).map_err(|error| error.stamped(expr.span))
+    // Stamp the offending expression's span (innermost node wins) and the running
+    // source (innermost closure wins) onto an unlocated fault as it leaves — both
+    // no-op once set, so a fault cites the tightest sub-expression and its source.
+    eval_dispatch(expr, env).map_err(|error| error.stamped(expr.span).with_source(env.source()))
 }
 
 fn eval_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
@@ -529,6 +529,7 @@ fn eval_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
                 home_globals: env.home_globals_weak(),
                 authority: env.authority_rc(),
                 uses: None,
+                source: env.source(),
             })))
         }
         // `receiver.method(args)` parses as a call whose callee is a field
@@ -836,9 +837,10 @@ fn run_stage(
 /// delegates to `eval` — no self-tail-call is possible there.
 pub(crate) fn eval_tail(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
     // Stamp faults that bubble up through a tail-position node (e.g. an arity error
-    // from `eval_call`) with this expression's span, like `eval` does. A `TailCall`
-    // control signal passes through unstamped.
-    eval_tail_dispatch(expr, env).map_err(|error| error.stamped(expr.span))
+    // from `eval_call`) with this expression's span + source, like `eval` does. A
+    // `TailCall` control signal passes through unstamped.
+    eval_tail_dispatch(expr, env)
+        .map_err(|error| error.stamped(expr.span).with_source(env.source()))
 }
 
 fn eval_tail_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
@@ -913,7 +915,10 @@ pub(crate) fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<
                 let mut call_env = match closure.home_globals.upgrade() {
                     Some(home) => base_env.with_home_globals(home),
                     None => base_env,
-                };
+                }
+                // The body runs "in" the closure's source — `eval` stamps it onto
+                // any fault so the fault resolves to the right file.
+                .with_source(closure.source);
                 // Restore captured locals from upvalues using the shared cells
                 // so that mutations made after closure creation are visible.
                 for (name, cell, mutable) in &closure.upvalues {
@@ -1240,6 +1245,7 @@ fn eval_safe_field(object: &Value, name: &str, env: &Env) -> Result<Value, Runti
         home_globals: env.home_globals_weak(),
         authority: env.authority_rc(),
         uses: None,
+        source: env.source(),
     }));
     call_instance_method(object, "map", core::slice::from_ref(&accessor), env)?.ok_or_else(|| {
         RuntimeError::new(format!(
@@ -1430,6 +1436,27 @@ mod tests {
         // `4 + (1 / 0)` — the fault originates in the inner `1 / 0` (bytes 5..10),
         // so the innermost span wins, not the outer `+`.
         assert_eq!(fault("4 + (1 / 0)").span(), Some(Span { start: 5, end: 10 }));
+    }
+
+    #[test]
+    fn a_fault_is_stamped_with_the_running_closures_source() {
+        use crate::source::SourceId;
+        use crate::value::ClosureData;
+        // A closure tagged with source id 7, whose body faults: the fault it raises
+        // must carry that source (stamped by `apply_values` via the call env).
+        let env = crate::env::Env::new();
+        let body = crate::lower::lower_expr_to_core(&crate::parser::parse("1 / 0").expect("parse"));
+        let closure = Value::Closure(Rc::new(ClosureData {
+            params: Vec::new(),
+            body: Rc::new(body),
+            upvalues: Vec::new(),
+            home_globals: env.home_globals_weak(),
+            authority: env.authority_rc(),
+            uses: Some(Vec::new()),
+            source: SourceId(7),
+        }));
+        let err = crate::interp::apply_values(&closure, &[], &env).expect_err("div by zero");
+        assert_eq!(err.source(), Some(SourceId(7)));
     }
 
     #[test]
