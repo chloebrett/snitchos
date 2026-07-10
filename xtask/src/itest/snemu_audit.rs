@@ -453,6 +453,10 @@ fn budget_for(name: &str, default: u64) -> u64 {
         "workload-cooperative-baseline" => 1_000_000_000,
         "frame-allocator-oom" | "heap-oom" => 3_000_000_000,
         "spawn-reclaims-memory" | "spawn-reclaims-names" => 2_500_000_000,
+        // The stim editor is a Stitch tree-walker (interpreter-in-interpreter):
+        // trivial in release (~8M) but ~407M in the debug kernel, just over the
+        // default. Budget it for the debug fidelity run; release finishes far under.
+        "stim-edits-a-file-and-saves" => 600_000_000,
         // `stitch-fs-loads-and-runs` no longer needs an override: `primes(5)`
         // (down from `(10)`) reaches its assertion in ~310M instructions, under
         // the default budget.

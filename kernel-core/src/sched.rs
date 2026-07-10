@@ -5,12 +5,63 @@
 //!
 //! See `plans/v0.5-threading.md`.
 
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 
 /// Identifier for a task. Allocated by the kernel-side task table;
 /// kernel-core treats it as an opaque newtype.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TaskId(pub u32);
+
+/// `TaskId → slot` index into the kernel's `tasks: Vec<Box<Task>>`, so a lookup by
+/// id is a map probe instead of an O(tasks) linear scan of the table. Maintained in
+/// lockstep with the `Vec` under the scheduler lock: [`insert`](Self::insert) on
+/// `push`, [`swap_remove`](Self::swap_remove) mirroring `Vec::swap_remove`. Pure
+/// bookkeeping — the kernel owns the actual `Vec`; this only tracks where each id
+/// lives, so `prepare_switch` touches exactly the two tasks it switches between.
+#[derive(Debug, Default, Clone)]
+pub struct TaskDirectory {
+    slots: BTreeMap<u32, usize>,
+}
+
+impl TaskDirectory {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { slots: BTreeMap::new() }
+    }
+
+    /// Record that `id` now lives at `slot` (= the `Vec` len just before `push`).
+    pub fn insert(&mut self, id: TaskId, slot: usize) {
+        self.slots.insert(id.0, slot);
+    }
+
+    /// The slot `id` occupies, or `None` if unknown.
+    #[must_use]
+    pub fn slot_of(&self, id: TaskId) -> Option<usize> {
+        self.slots.get(&id.0).copied()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    /// Mirror `Vec::swap_remove(slot_of(removed))`: `removed` is dropped and the
+    /// element that was last (`moved`) takes its slot. Pass `moved == removed` when
+    /// `removed` was itself the last element (nothing moves). A no-op for an unknown
+    /// `removed`.
+    pub fn swap_remove(&mut self, removed: TaskId, moved: TaskId) {
+        if let Some(slot) = self.slots.remove(&removed.0)
+            && moved != removed
+        {
+            self.slots.insert(moved.0, slot);
+        }
+    }
+}
 
 /// Static scheduling priority (v0.8b). Higher runs first; `Normal` is the
 /// default. Discriminants are the level used by [`aged_priority`] arithmetic —
@@ -286,6 +337,44 @@ pub fn on_wake(state: TaskState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_resolves_ids_to_slots() {
+        let mut dir = TaskDirectory::new();
+        dir.insert(TaskId(10), 0);
+        dir.insert(TaskId(20), 1);
+        dir.insert(TaskId(30), 2);
+        assert_eq!(dir.slot_of(TaskId(10)), Some(0));
+        assert_eq!(dir.slot_of(TaskId(30)), Some(2));
+        assert_eq!(dir.slot_of(TaskId(99)), None);
+        assert_eq!(dir.len(), 3);
+    }
+
+    #[test]
+    fn directory_swap_remove_repoints_the_moved_id() {
+        // Mirrors `Vec::swap_remove(0)` on [10,20,30]: 30 moves into slot 0.
+        let mut dir = TaskDirectory::new();
+        dir.insert(TaskId(10), 0);
+        dir.insert(TaskId(20), 1);
+        dir.insert(TaskId(30), 2);
+        dir.swap_remove(TaskId(10), TaskId(30)); // removed=10 (slot 0), moved=30 (was last)
+        assert_eq!(dir.slot_of(TaskId(10)), None);
+        assert_eq!(dir.slot_of(TaskId(30)), Some(0)); // repointed to the freed slot
+        assert_eq!(dir.slot_of(TaskId(20)), Some(1)); // untouched
+        assert_eq!(dir.len(), 2);
+    }
+
+    #[test]
+    fn directory_swap_remove_of_the_last_element_moves_nothing() {
+        // `Vec::swap_remove(last)`: no element moves, so moved == removed.
+        let mut dir = TaskDirectory::new();
+        dir.insert(TaskId(10), 0);
+        dir.insert(TaskId(20), 1);
+        dir.swap_remove(TaskId(20), TaskId(20));
+        assert_eq!(dir.slot_of(TaskId(20)), None);
+        assert_eq!(dir.slot_of(TaskId(10)), Some(0));
+        assert_eq!(dir.len(), 1);
+    }
 
     #[test]
     fn requeued_task_keeps_its_state() {

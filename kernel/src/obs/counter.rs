@@ -79,6 +79,7 @@ static COUNTERS: &[&DeferredCounter] = &[
     // scheduler
     &crate::sched::CONTEXT_SWITCHES,
     &crate::sched::PREEMPTIONS,
+    &crate::sched::SCHED_LOOKUP_PROBES,
     &crate::sched::SMOKE_MARKER_HITS,
     &crate::sched::EXIT_SMOKE_HITS,
     &crate::sched::WAKE_RESUMED,

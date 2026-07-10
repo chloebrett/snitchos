@@ -134,6 +134,12 @@ Today `apply_values` tracks only a **depth counter** (`depth: Rc<Cell<u32>>` +
 the stack*. Replace it with a **frame stack** that records the call chain, so a fault
 can carry a backtrace.
 
+**Groundwork done (2026-07-11):** `ClosureData.name: Option<String>` — set to the
+function name in `register_items`, `None` for lambdas / the `?.` accessor. Additive,
+tested (`a_registered_function_closure_carries_its_name`), 578 green. This is the
+per-frame name the trace needs; the rest of Phase 2 (the frame stack + snapshot +
+render) builds on it.
+
 **Design:**
 ```rust
 struct Frame { name: Option<String>, call_site: Span, source: SourceId }

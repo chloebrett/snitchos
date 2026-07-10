@@ -19,9 +19,14 @@ use crate::sink::FrameSink;
 ///
 /// **Invariant:** the number of strings interned *before* `heap::init` must
 /// not exceed `INLINE_CAP` — a spill before the allocator exists would
-/// `Vec::push` with no heap and fault. Pre-heap interning is just
-/// `kernel.boot` + the init-phase spans (~10-20), so 64 is comfortable
-/// headroom. (This is the one boot-order coupling the table carries.)
+/// `Vec::push` with no heap and fault. Pre-heap interning is `kernel.boot` +
+/// the init-phase spans **plus every counter and metric name**
+/// (`counter::register_all` + `heartbeat::Metrics::register` both run before
+/// `heap::init` in `kmain`) — a set that grows by one each time a
+/// `DeferredCounter`/metric is added, and sat right at ~64. The cap carries
+/// headroom above the current set so a new counter doesn't tip it over the
+/// allocator-free boundary. (This is the one boot-order coupling the table
+/// carries; if it grows a lot, move heap init before the registration step.)
 ///
 /// **Why O(n) lookup is fine:** every lookup is a linear scan, and the total
 /// `n` is bounded in practice — kernel strings are a known, modest set (~100),
@@ -33,7 +38,7 @@ use crate::sink::FrameSink;
 /// `BTreeMap<&str, StringId>` index then.) Userspace names are `Owned` and
 /// reclaimed on process exit via [`InternTable::release`]; kernel `&'static`
 /// literals are a bounded, permanent set.
-pub const INLINE_CAP: usize = 64;
+pub const INLINE_CAP: usize = 96;
 
 /// An interned name. Kernel literals (`span!("kernel.boot")`, the `snitchos.*`
 /// metrics) are a bounded, permanent set held as borrowed `&'static`; userspace

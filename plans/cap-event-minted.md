@@ -30,13 +30,13 @@ The birthday framing lives in the **renderer**, not the wire: `Minted` frames ca
 
 ## Acceptance Criteria
 
-- [ ] `CapEventKind::Minted` exists as the **last** discriminant (append-only; postcard is positional) and roundtrips through postcard intact.
-- [ ] The whole workspace compiles and all host tests pass with the variant added but before any kernel emission changes (known-good intermediate).
-- [ ] The collector's cap aggregator treats `Minted` as opening a holding (like `Granted`), tagged with a distinct `"minted"` event name.
-- [ ] `EndpointCreate` emits `Minted` (not `Granted`); the endpoint an IPC program creates for itself is snitched as `Minted{Endpoint}`.
-- [ ] `NotifyCreate` emits `Minted` (not `Granted`); a self-created notification is snitched as `Minted{Notification}`.
-- [ ] Bootstrap grants (telemetry/span sinks, `run_ipc` endpoint) remain `Granted` — unchanged on the wire.
-- [ ] The wire-stability golden test covers `Minted`.
+- [x] `CapEventKind::Minted` exists as the **last** discriminant (append-only; postcard is positional) and roundtrips through postcard intact. *(discriminant `03`; `round_trips_a_minted_cap_event_over_postcard`)*
+- [x] The whole workspace compiles and all host tests pass with the variant added but before any kernel emission changes (known-good intermediate). *(`cargo xtask clippy` + `cargo xtask test` green; kernel still emits `Granted`)*
+- [x] The collector's cap aggregator treats `Minted` as opening a holding (like `Granted`), tagged with a distinct `"minted"` event name. *(`minted_event_opens_holding_named_minted`; 21/21 mutants caught)*
+- [ ] `EndpointCreate` emits `Minted` (not `Granted`); the endpoint an IPC program creates for itself is snitched as `Minted{Endpoint}`. *(Step 2)*
+- [ ] `NotifyCreate` emits `Minted` (not `Granted`); a self-created notification is snitched as `Minted{Notification}`. *(Step 2)*
+- [ ] Bootstrap grants (telemetry/span sinks, `run_ipc` endpoint) remain `Granted` — unchanged on the wire. *(Step 2 regression check)*
+- [x] The wire-stability golden test covers `Minted`. *(golden `.snap` updated — `Minted 03` appended, existing arms undisturbed)*
 
 ## Steps
 

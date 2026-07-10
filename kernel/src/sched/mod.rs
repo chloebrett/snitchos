@@ -25,7 +25,7 @@ use protocol::SwitchReason;
 
 use kernel_core::sched::{
     address_space_switch, on_cpu_delta, pick_next, quantum_expired, should_preempt, Candidate,
-    CurrentDisposition, Priority, Runqueue, TaskId, TaskState,
+    CurrentDisposition, Priority, Runqueue, TaskDirectory, TaskId, TaskState,
 };
 use kernel_core::span::SpanCursor;
 
@@ -386,6 +386,11 @@ pub struct Scheduler {
         reason = "the Box is load-bearing: it gives each Task a stable heap address so the raw `*mut TaskContext` / `*const SpanCursor` pointers stay valid across Vec growth and past the scheduler-mutex drop"
     )]
     tasks: Vec<Box<Task>>,
+    /// `TaskId → index into tasks`, kept in lockstep with `tasks` on every
+    /// `push`/`swap_remove` so a lookup by id is a map probe, not an O(tasks) scan
+    /// (`prepare_switch` touches only the two tasks it switches between). See
+    /// `plans/scheduler-o1-task-lookup.md`.
+    directory: TaskDirectory,
     /// One runqueue per hart. Hart `i` pops from `runqueues[i]`.
     runqueues: [Runqueue; crate::percpu::MAX_HARTS],
 }
@@ -394,8 +399,40 @@ impl Scheduler {
     const fn new() -> Self {
         Self {
             tasks: Vec::new(),
+            directory: TaskDirectory::new(),
             runqueues: [const { Runqueue::new() }; crate::percpu::MAX_HARTS],
         }
+    }
+
+    /// Push a task into the table, keeping the id→slot [`directory`](Self::directory)
+    /// in sync. The single funnel for table growth so the invariant can't drift.
+    fn insert_task(&mut self, task: Box<Task>) {
+        self.directory.insert(task.id, self.tasks.len());
+        self.tasks.push(task);
+    }
+
+    /// The task with `id`, resolved through the directory (O(1) probe, not a scan).
+    /// Counts one lookup probe for the O(1) itest oracle.
+    fn task(&self, id: TaskId) -> Option<&Task> {
+        SCHED_LOOKUP_PROBES.inc();
+        self.directory.slot_of(id).map(|slot| &*self.tasks[slot])
+    }
+
+    /// Mutable sibling of [`task`](Self::task).
+    fn task_mut(&mut self, id: TaskId) -> Option<&mut Task> {
+        SCHED_LOOKUP_PROBES.inc();
+        let slot = self.directory.slot_of(id)?;
+        Some(&mut self.tasks[slot])
+    }
+
+    /// Remove `id` from the table (freeing its `Box<Task>` + stack) via
+    /// `swap_remove`, updating the directory to mirror the move. No-op if absent.
+    fn swap_remove_task(&mut self, id: TaskId) -> Option<Box<Task>> {
+        let slot = self.directory.slot_of(id)?;
+        // `swap_remove` moves the last element into `slot`; tell the directory who.
+        let moved = self.tasks.last().expect("non-empty: slot resolved").id;
+        self.directory.swap_remove(id, moved);
+        Some(self.tasks.swap_remove(slot))
     }
 
     /// Number of *live* tasks in the table. Exited tasks remain in
@@ -444,6 +481,15 @@ pub static CONTEXT_SWITCHES: DeferredCounter = DeferredCounter::new("snitchos.sc
 /// path (an atomic, never a frame from the timer handler) and drained by the
 /// heartbeat as `snitchos.sched.preemptions_total`. `Relaxed`: pure counter.
 pub static PREEMPTIONS: DeferredCounter = DeferredCounter::new("snitchos.sched.preemptions_total");
+
+/// Cumulative count of **task-table lookup probes** — one per `Task` resolved by id
+/// through the [`Scheduler::directory`]. With the directory a lookup touches exactly
+/// the target task (O(1)); the old linear scan touched every entry (O(tasks)). The
+/// heartbeat drains it as `snitchos.sched.lookup_probes_total`; dividing by
+/// `context_switches_total` gives probes-per-switch, which the O(1) itest asserts
+/// stays **constant** as the live-task count grows. `Relaxed`: pure counter.
+pub static SCHED_LOOKUP_PROBES: DeferredCounter =
+    DeferredCounter::new("snitchos.sched.lookup_probes_total");
 
 /// Time spent in `yield_now`'s bookkeeping (everything from function
 /// entry up to but not including the `switch` asm). Captures the
@@ -604,7 +650,7 @@ pub fn current_task_id() -> TaskId {
 pub fn current_task_arg() -> usize {
     let id = current_task_id();
     let sched = SCHEDULER.lock();
-    sched.tasks.iter().find(|t| t.id == id).map_or(0, |t| t.arg)
+    sched.task(id).map_or(0, |t| t.arg)
 }
 
 /// Whether this hart's runqueue holds any `Ready` task (the caller, running, is
@@ -663,6 +709,7 @@ pub fn address_space_of(id: TaskId) -> Option<usize> {
 static CURRENT_TASK: PerCpu<AtomicU32> =
     PerCpu::new([const { AtomicU32::new(0) }; MAX_HARTS]);
 
+
 /// Timestamp when the current task last became `Running`. On every
 /// `yield_now` we compute `now - CURRENT_TASK_ENTRY_TICK` and add to
 /// the outgoing task's `cpu_time_ticks` — this is the per-task
@@ -706,7 +753,7 @@ pub fn register_bare_task(name: &str, state: TaskState) -> TaskId {
     // address won't change. Used to seed `CURRENT_SPAN_CURSOR` so the
     // calling hart's span emissions parent correctly under this task.
     let cursor_ptr = (&task.span_cursor as *const SpanCursor) as *mut SpanCursor;
-    SCHEDULER.lock().tasks.push(task);
+    SCHEDULER.lock().insert_task(task);
     // Seed this hart's per-CPU current-task slots so subsequent
     // `current_task_id()`, span emissions, and the first `yield_now`
     // see *this* task, not the default (task 0). Pre-step-10 this
@@ -799,7 +846,7 @@ pub fn spawn_on_with_arg(
     let owned_name = task.name.clone();
     {
         let mut sched = SCHEDULER.lock();
-        sched.tasks.push(task);
+        sched.insert_task(task);
         // Enter the ready set now; stamp the wait clock (= now) for aging.
         sched.runqueues[hart].push_back(Candidate {
             id,
@@ -897,38 +944,40 @@ fn prepare_switch(
         };
         sched.runqueues[me].remove(next_id);
 
-        // Single pass through the task table: dispose of the outgoing task,
-        // accumulate its on-CPU time, and capture both context pointers + the
-        // incoming task's address space. `Box<Task>` keeps each `Task` at a
-        // stable heap address even if the `Vec` reallocates, so the raw
-        // pointers stay valid past the lock drop.
+        // Two O(1) directory lookups — the outgoing and incoming tasks — instead of
+        // an O(tasks) scan of the whole table. `current_id != next_id` always
+        // (`next` came off the runqueue, which never holds the running task), so the
+        // two `&mut Task` borrows are disjoint and taken in sequence. `Box<Task>`
+        // keeps each `Task` at a stable heap address even if the `Vec` reallocates,
+        // so the raw pointers stay valid past the lock drop.
         let prev_entry = CURRENT_TASK_ENTRY_TICK.this_cpu().load(Ordering::Relaxed);
         let cpu_delta = on_cpu_delta(prev_entry, t_entry);
-        let mut current_ctx: *mut TaskContext = core::ptr::null_mut();
-        let mut current_priority = Priority::Normal;
-        let mut next_ctx: *mut TaskContext = core::ptr::null_mut();
-        let mut next_cursor: *mut SpanCursor = core::ptr::null_mut();
-        let mut next_root: usize = 0;
-        let mut next_proc: *mut Process = core::ptr::null_mut();
-        for task in sched.tasks.iter_mut() {
-            if task.id == current_id {
-                current_ctx = task.context.get();
-                current_priority = task.priority;
-                task.cpu_time_ticks.fetch_add(cpu_delta, Ordering::Relaxed);
-                if let Some(state) = disposition.next_state() {
-                    task.state = state;
-                }
+
+        // Outgoing task: accumulate on-CPU time, apply the disposition's new state.
+        let (current_ctx, current_priority) = {
+            let task = sched
+                .task_mut(current_id)
+                .expect("prepare_switch: current task missing from table");
+            task.cpu_time_ticks.fetch_add(cpu_delta, Ordering::Relaxed);
+            if let Some(state) = disposition.next_state() {
+                task.state = state;
             }
-            if task.id == next_id {
-                next_ctx = task.context.get();
-                next_cursor = core::ptr::from_ref(&task.span_cursor).cast_mut();
-                next_root = task.address_space.load(Ordering::Relaxed);
-                next_proc = task.process.load(Ordering::Relaxed);
-                task.runs.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        assert!(!current_ctx.is_null(), "prepare_switch: current task missing from table");
-        assert!(!next_ctx.is_null(), "prepare_switch: next task missing from table");
+            (task.context.get(), task.priority)
+        };
+
+        // Incoming task: bump its run count; capture its context + address space.
+        let (next_ctx, next_cursor, next_root, next_proc) = {
+            let task = sched
+                .task_mut(next_id)
+                .expect("prepare_switch: next task missing from table");
+            task.runs.fetch_add(1, Ordering::Relaxed);
+            (
+                task.context.get(),
+                core::ptr::from_ref(&task.span_cursor).cast_mut(),
+                task.address_space.load(Ordering::Relaxed),
+                task.process.load(Ordering::Relaxed),
+            )
+        };
 
         if disposition.requeues() {
             // The outgoing task re-enters the ready set now — stamp its wait
@@ -1031,11 +1080,8 @@ pub fn maybe_preempt(from_user: bool) {
     let me = crate::percpu::current_hartid();
     let due = {
         let sched = SCHEDULER.lock();
-        let current_level = sched
-            .tasks
-            .iter()
-            .find(|t| t.id == current_id)
-            .map_or(Priority::Normal as u8, |t| t.priority as u8);
+        let current_level =
+            sched.task(current_id).map_or(Priority::Normal as u8, |t| t.priority as u8);
         should_preempt(current_level, sched.runqueues[me].iter(), now, AGING_STEP_TICKS)
     };
     if due {
@@ -1120,7 +1166,7 @@ pub fn wake(id: TaskId) {
     let now = crate::tracing::timestamp();
     let me = crate::percpu::current_hartid();
     let mut sched = SCHEDULER.lock();
-    let priority = sched.tasks.iter_mut().find(|t| t.id == id).and_then(|task| {
+    let priority = sched.task_mut(id).and_then(|task| {
         if kernel_core::sched::on_wake(task.state) {
             task.state = TaskState::Ready;
             Some(task.priority)
@@ -1270,10 +1316,10 @@ pub fn reap_task(child: TaskId) {
     // never nest SCHEDULER under FRAME_ALLOC).
     let task = {
         let mut sched = SCHEDULER.lock();
-        let Some(idx) = sched.tasks.iter().position(|t| t.id == child) else {
+        let Some(task) = sched.swap_remove_task(child) else {
             return;
         };
-        sched.tasks.swap_remove(idx)
+        task
     };
 
     let root_pa = task.address_space.load(Ordering::Relaxed);
