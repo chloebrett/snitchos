@@ -10,6 +10,7 @@ mod measure;
 mod qemu;
 mod snemu_bench;
 mod snemu_diff;
+mod snemu_profile;
 mod snip;
 mod source;
 
@@ -119,6 +120,26 @@ enum Cmd {
         /// debug. Cuts per-instruction bloat suite-wide — but currently surfaces
         /// a latent release-codegen kernel bug (timer death / boot corruption),
         /// which is exactly what this flag exists to reproduce in-process.
+        #[arg(long)]
+        release: bool,
+    },
+    /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
+    /// run under snemu with exact per-PC counting and report the top kernel
+    /// functions by instructions retired. Answers *which code* a scenario spends
+    /// its cycles in (e.g. a cross-hart spin-wait vs. real work), the per-function
+    /// complement to `snemu-itest`'s per-scenario ruler.
+    SnemuProfile {
+        /// Workload to profile (implies the `itest-workloads` build). Omit for the
+        /// default `init` boot.
+        #[arg(long)]
+        workload: Option<String>,
+        /// Instructions to run (post-boot) under the profiler.
+        #[arg(long, default_value_t = 400_000_000)]
+        steps: u64,
+        /// How many top functions to list.
+        #[arg(long, default_value_t = 25)]
+        top: usize,
+        /// Profile the optimized (`--release`) kernel (matches the release itests).
         #[arg(long)]
         release: bool,
     },
@@ -715,6 +736,9 @@ fn main() -> ExitCode {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
             itest::snemu_audit::run(steps, limit, only.as_deref(), jobs, !no_idle_skip, !no_lpt, release)
+        }
+        Cmd::SnemuProfile { workload, steps, top, release } => {
+            snemu_profile::run(workload.as_deref(), steps, top, release)
         }
         Cmd::SnemuBench { workload, steps, runs, taxonomy, baseline, decode_cache, verify_cache } => {
             if verify_cache {

@@ -24,6 +24,12 @@ snip = { path = "../snip" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ctrlc = "3"
+# ELF symbol-table parsing for the guest instret profiler (`snemu-profile`):
+# map executed PCs back to kernel function names. Host-only dev tooling; the
+# `read` feature (no write) keeps it lean.
+object = { version = "0.36", default-features = false, features = ["read", "std", "elf"] }
+# Demangle Rust symbol names in the profiler report (`_ZN6kernel...` → readable).
+rustc-demangle = "0.1"
 
 [dev-dependencies]
 # Encode `Frame`s into a byte stream for the incremental-decoder unit test

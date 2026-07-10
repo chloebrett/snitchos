@@ -22,6 +22,13 @@ pub struct Machine {
     /// The shared monotonic clock (the `rdtime` source): one tick per
     /// instruction executed by any hart.
     time: u64,
+    /// Opt-in exact instret profiler: `PC → instructions retired at that PC`,
+    /// accumulated across all harts. `None` (the default) so the normal
+    /// boot/fork path pays nothing; the `snemu-profile` tool enables it after
+    /// forking a snapshot, so the histogram covers only the scenario's own run.
+    /// Every retired instruction is counted (no sampling) — deterministic, like
+    /// the instret clock itself.
+    profile: Option<std::collections::HashMap<u64, u64>>,
 }
 
 impl Machine {
@@ -37,7 +44,23 @@ impl Machine {
             harts,
             bus: Bus::new(mem),
             time: 0,
+            profile: None,
         }
+    }
+
+    /// Start (or reset) exact instret profiling on this machine. The histogram
+    /// begins empty; every subsequently retired instruction is attributed to the
+    /// PC it executed at. Enable *after* forking a booted snapshot to profile only
+    /// the scenario's run.
+    pub fn enable_profiling(&mut self) {
+        self.profile = Some(std::collections::HashMap::new());
+    }
+
+    /// Take the accumulated `PC → instret` histogram, leaving profiling off.
+    /// `None` if profiling was never enabled.
+    #[must_use]
+    pub fn take_profile(&mut self) -> Option<std::collections::HashMap<u64, u64>> {
+        self.profile.take()
     }
 
     /// One scheduler round: step each running hart once, in id order, each
@@ -52,15 +75,25 @@ impl Machine {
                 continue;
             }
             self.harts[i].set_cycle(self.time);
+            // PC of the instruction about to execute — captured before `step`
+            // advances it, so the profiler attributes the retired instruction to
+            // where it ran.
+            let pc = self.harts[i].pc();
             match self.harts[i].step(&mut self.bus)? {
                 HartEffect::Sbi(req) => {
                     service_sbi(&mut self.harts, i, &req);
                     self.time += 1;
                     retired = true;
+                    if let Some(p) = self.profile.as_mut() {
+                        *p.entry(pc).or_insert(0) += 1;
+                    }
                 }
                 HartEffect::None => {
                     self.time += 1;
                     retired = true;
+                    if let Some(p) = self.profile.as_mut() {
+                        *p.entry(pc).or_insert(0) += 1;
+                    }
                 }
                 // A parked (wfi) hart retired nothing — don't tick the clock for it.
                 HartEffect::Idle => {}
@@ -233,6 +266,30 @@ mod tests {
         let mut resumed = snapshot.clone();
         resumed.step().unwrap();
         assert_eq!(resumed.reg(0, 2), 7);
+    }
+
+    #[test]
+    fn profiler_attributes_each_retired_instruction_to_its_pc() {
+        // Three sequential addis; profiling counts one instret at each PC.
+        let program = &[0x02a0_0093, 0x0070_0113, 0x0010_0193];
+        let mut m = machine_with(program, 1);
+        m.enable_profiling();
+        for _ in 0..3 {
+            m.step().unwrap();
+        }
+        let profile = m.take_profile().expect("profiling was enabled");
+        assert_eq!(profile.get(&RAM_BASE), Some(&1));
+        assert_eq!(profile.get(&(RAM_BASE + 4)), Some(&1));
+        assert_eq!(profile.get(&(RAM_BASE + 8)), Some(&1));
+        // Total attributed == instructions retired.
+        assert_eq!(profile.values().sum::<u64>(), 3);
+    }
+
+    #[test]
+    fn profiling_is_off_by_default() {
+        let mut m = machine_with(&[0x02a0_0093], 1);
+        m.step().unwrap();
+        assert!(m.take_profile().is_none());
     }
 
     #[test]

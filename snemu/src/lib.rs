@@ -14,5 +14,6 @@ pub mod loader;
 pub mod machine;
 mod mmu;
 pub mod mem;
+pub mod symbols;
 mod uart;
 mod virtio;
