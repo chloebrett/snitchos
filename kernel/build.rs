@@ -102,6 +102,18 @@ fn build_and_embed_user(kernel_dir: &str) {
         cmd.args(["--target", USER_TARGET, "--target-dir", &user_target_dir]);
         if profile == "release" {
             cmd.arg("--release");
+            // Pin the embedded userspace to opt-level 1 even in a release kernel
+            // build. At opt-level >= 2, LLVM exposes a latent UB *class* in the
+            // userspace crates (confirmed in `snitchos-user`, plus at least one
+            // more): talc's OOM handler loops mapping 68 KiB regions until the
+            // per-process heap cap, then the program hangs in the panic handler —
+            // the FS server and spawn/reap paths wedge and their itests time out.
+            // The release-itest speedup is kernel-dominated (userspace is a tiny
+            // instret fraction), so opt-1 here costs ~nothing and sidesteps the
+            // whole class. The kernel itself stays at the workspace release
+            // opt-level (3). Root-causing the userspace UB is a separate follow-up
+            // (see notes/release-build-exposes-timer-death-and-uart-corruption.md).
+            cmd.args(["--config", "profile.release.opt-level=1"]);
         }
         // Don't leak the outer kernel build's flags into the user build — let it
         // resolve config exactly like a standalone `cargo build -p hello`.
