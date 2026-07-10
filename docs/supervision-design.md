@@ -32,13 +32,19 @@ So v1 supervision = **`process(child)` (built) + a `WaitAny` loop + `restart_dec
 (data-driven cap re-grant) is done and tested; restart is just calling `process` again
 against the new incarnation.
 
-**On the differential-oracle prerequisite.** The 2026-07-05 sequencing filed #6 behind
-the Tier-2 differential oracle, because cap re-grant is silent-failure-shaped (a restarted
-service that doesn't receive its re-delegated cap leaves a client hanging with no error).
-**Adopted position (2026-07-11):** v1's acceptance itest (step 4) bakes the *targeted*
-form of that check — assert a client's minted cap survives a restart — which is the oracle
-for this specific invariant. The full differential oracle (axis 3, snemu-scale) is the
-general form and is **not** a v1 gate; build v1 with the targeted check.
+**On the differential-oracle prerequisite — the oracle already ships.** The 2026-07-05
+sequencing filed #6 behind the Tier-2 differential oracle, because cap re-grant is
+silent-failure-shaped (a restarted service that doesn't receive its re-delegated cap
+leaves a client hanging with no error). **Resolved (2026-07-11):** the oracle for *this*
+invariant is `cap_list` (syscall 27, shipped, `snitchos_user::cap_list`, backs the shell's
+`hold`): a process enumerates its **own** cap table. That is the snitch-on-the-snitch —
+the kernel's `CapEvent::Transferred` is the supervisor's *claim* ("re-granted `fs` to
+incarnation 3"); `cap_list` from the restarted service is the holder's *independent report*
+of what it actually holds. Cross-checking them is precisely axis-3's "verify the restarted
+service holds the caps the supervisor claims it granted," at cap-holding granularity, with
+both halves already on the wire. The snemu-scale frame-diffing oracle is a *separate,
+general* thing #6 does not need. So v1 is not gated on new oracle work — it uses `cap_list`
+in its acceptance itest (step 4).
 
 Related: [manifest-design.md](manifest-design.md) (the `Slot` language this consumes —
 **shipped**), [capability-system-design.md](capability-system-design.md),
@@ -350,20 +356,26 @@ Mirrors the project's kernel-core-vs-userspace split: **pure policy in `kernel-c
 1. **`kernel-core::supervision`** — `ServiceSpec`, `startup_order` (topo + cycle
    detection), `restart_decision` (policy + backoff + intensity), `restart_set`
    (D1). All pure, all `cargo test -p kernel-core`. TDD each.
-2. **Generic supervisor engine** — a new `supervisor` root (leaning new-root over
-   evolving `init`: `init` is load-bearing for the default boot + several itests, so a
-   `workload=supervised-*` root is additive and safe to iterate; `init` becomes the
-   supervisor later, once proven). It reads a service table, creates durable objects,
+2. **Generic supervisor engine** — a new `supervisor` root (**decided 2026-07-11**: new
+   root, not evolving `init` — `init` is load-bearing for the default boot + several
+   itests, so a `workload=supervised-*` root is additive and safe to iterate; `init`
+   becomes the supervisor later, once proven). It reads a service table, creates durable
+   objects,
    brings services up in `startup_order` (respecting `readiness`), runs a `WaitAny`
    loop, and on each exit consults `restart_decision` → re-spawn + re-delegate or
    escalate. **The re-delegate step is `satisfier.rs::process(child)`, already built** —
    the engine's new code is the table walk, the `WaitAny` loop, and the policy calls.
 3. **Supervision telemetry** — umbrella span per service, incarnation child spans,
    `restarts_total` + `state` metrics, transition events.
-4. **Acceptance itest** (`workload=supervised-crash-loop`): a service that exits
-   non-zero on a schedule; assert it restarts `N` times, that backoff spacing grows,
-   that intensity trips `Escalate` after the cap, and that a **client's minted cap
-   survives** across a restart (proves D3). Reuses the honest exit-code path from #5.
+4. **Acceptance itest** (`workload=supervised-crash-loop`) — **first graph (decided
+   2026-07-11): the FS server as the supervised service + a client holding a minted cap**,
+   reusing today's services rather than inventing new ones. The FS server exits non-zero
+   on a schedule (injected crash); assert it restarts `N` times, that backoff spacing grows,
+   that intensity trips `Escalate` after the cap, and — the oracle for the silent
+   failure — that the **restarted service's own `cap_list` still contains the re-granted
+   cap** (by object/rights/name), cross-checked against the supervisor's `CapEvent`
+   grant (proves D3 by direct possession, not an inferred "the call worked"). Reuses the
+   honest exit-code path from #5 and `cap_list` (27) for the snitch-on-the-snitch.
 5. **v2 later** — `Kill` + timed wait, then graceful shutdown (reverse-dep teardown)
    and hung-service detection.
 
@@ -379,15 +391,14 @@ supervision is not a standalone feature but a **consumer** sitting on several de
   **falls out as one satisfier plus a restart loop** — the re-grant is not new code.
 - **Checkpoint (axis 6) — a shared primitive.** Restart == restore (§ Cap re-grant on
   restart). One `satisfy` implementation serves both; don't fork it.
-- **The differential oracle (axis 3) — NOT a v1 gate (adopted 2026-07-11).** Cap
-  re-grant is a *silent-failure* operation: if a restarted service doesn't actually
+- **The differential oracle (axis 3) — already shipped for this invariant (2026-07-11).**
+  Cap re-grant is a *silent-failure* operation: if a restarted service doesn't actually
   receive a re-delegated cap, a client just hangs against a dead endpoint with no error.
-  The coda's rule is "for any feature whose wrongness is silent, build its oracle first"
-  — but for v1 the oracle is a single itest assertion: step 4 verifies *the restarted
-  service's client cap survives*, which is exactly "the restarted service holds the caps
-  the supervisor claims it granted" for the one topology v1 builds. The full Tier-2
-  differential oracle (the general, snemu-scale form) is worthwhile but is **not** a
-  prerequisite for shipping v1; it generalises the targeted check, it doesn't unblock it.
+  The coda's rule is "for any feature whose wrongness is silent, build its oracle first" —
+  and it's built: `cap_list` (27) lets the restarted service report its *own* caps, and
+  cross-checking that against the supervisor's `CapEvent` grant is the snitch-on-the-snitch
+  axis 3 named. Both halves are on the wire today; step 4 just uses them. The snemu-scale
+  frame-diffing oracle is the *general* form — worthwhile, but not a prerequisite here.
 - **Budgets (axis 5) — the general form of restart intensity.** The intensity storm
   guard is a crude, hand-rolled budget; when axis 5 lands it should become a `Budget`
   policy. Hazard to design against now: `MapAnon` is ambient and unmetered, so a
