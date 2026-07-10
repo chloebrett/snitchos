@@ -43,6 +43,11 @@ target
 # anchored unexpectedly here on git 2.50).
 .itest-runs
 
+# Per-scenario instret cache the snemu-itest audit rewrites every run to
+# drive LPT packing. A machine artifact (regenerates on the next run), not a
+# reviewed baseline — otherwise it dirties nearly every commit.
+.snemu-itest-durations
+
 # Locally-rendered diagram SVGs (`cargo xtask diagram <target>` writes these
 # next to the committed mermaid .md). Graphviz layout is version-dependent, so
 # they're a local-dev convenience, not a reviewable artifact. The .md is the

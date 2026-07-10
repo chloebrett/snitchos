@@ -603,11 +603,17 @@ pub(crate) fn collect_workload_frames(
 /// steps it per scenario, so each scenario gets its own machine to drive with
 /// its own console input.
 /// RAM (MiB) a workload's machine boots with. Most run on the default; the
-/// `frame-oom` workload runs on a **smaller** machine on purpose — it exhausts RAM
-/// to prove clean OOM, and since the frame allocator's `alloc` is a linear bitmap
-/// scan (O(n) per call → O(n²) to fill the pool), a smaller pool reaches OOM in
-/// *quadratically* fewer instructions. Shared with the QEMU harness (`-m`) so both
-/// engines run the identical machine.
+/// `frame-oom` workload runs on a **smaller** machine on purpose.
+///
+/// The reason is coverage, not speed: SnitchOS should work regardless of physical
+/// RAM, so we boot at least one workload on a genuinely small machine and exercise
+/// the whole boot + frame-allocator + gradual-OOM path on a small pool. (The
+/// allocator is now O(1) — `kernel_core::mem::frame::Bitmap` — so the small pool is
+/// only marginally cheaper to exhaust; before that fix it was a large,
+/// quadratic win, but that's no longer why we keep it.)
+///
+/// Shared with the QEMU harness (`-m`) so **both** engines run the identical
+/// machine — the test is only meaningful if snemu and QEMU agree on the RAM size.
 pub(crate) fn ram_mb_for(workload: Option<&str>) -> u32 {
     const DEFAULT_MB: u32 = 128;
     match workload {
