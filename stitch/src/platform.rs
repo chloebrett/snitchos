@@ -178,6 +178,18 @@ pub trait Platform {
     /// through its endpoint cap; gated in the language by the `FsRead` authority.
     fn fs_read(&self, name: &str) -> Option<alloc::string::String>;
 
+    /// Write `bytes` as the entire contents of the file named by the delegated
+    /// cap at `file` — truncating to the payload length first, so a shorter save
+    /// leaves no stale trailing bytes. Returns `true` on success, `false` if the
+    /// cap refuses (a read-only cap → kernel-enforced `SyscallRefused`) or there
+    /// is no FS. Backs `fsWrite`; the *shell* resolves the path, creates the file
+    /// if absent, and delegates its cap — stim never walks the FS. Defaults to
+    /// "can't write" (no filesystem).
+    fn fs_write(&self, file: Handle, bytes: &[u8]) -> bool {
+        let _ = (file, bytes);
+        false
+    }
+
     /// Revoke every capability *derived from* the holding at `handle` — the
     /// transitive reclaim. Returns the number of descendant caps invalidated
     /// (`0` if none were derived), or `None` if the caller holds no cap at
@@ -251,6 +263,11 @@ pub struct FakePlatform {
     /// Scripted raw bytes for `read_byte` — the stim driver's keystroke source.
     /// Drained front-to-back, then `None`.
     bytes: core::cell::RefCell<alloc::collections::VecDeque<u8>>,
+    /// Recorded `fs_write`s — `(file-cap handle, payload)` — so a driver test can
+    /// assert the saved bytes.
+    writes: core::cell::RefCell<alloc::vec::Vec<(Handle, alloc::vec::Vec<u8>)>>,
+    /// When set, `fs_write` refuses (returns `false`) — models a read-only cap.
+    deny_write: core::cell::Cell<bool>,
 }
 
 #[cfg(not(target_os = "none"))]
@@ -284,6 +301,18 @@ impl FakePlatform {
         }
     }
 
+    /// The `fs_write`s recorded so far — `(file-cap handle, payload)` in order.
+    #[must_use]
+    pub fn writes(&self) -> alloc::vec::Vec<(Handle, alloc::vec::Vec<u8>)> {
+        self.writes.borrow().clone()
+    }
+
+    /// Make every subsequent `fs_write` refuse — models handing stim a read-only
+    /// cap (the kernel refusal the on-target backend surfaces as `false`).
+    pub fn deny_writes(&self) {
+        self.deny_write.set(true);
+    }
+
     /// Script the files `fs_read` (and so `view`) can read, as `(name, contents)`.
     #[must_use]
     pub fn with_files(files: &[(&str, &str)]) -> Self {
@@ -308,6 +337,14 @@ impl Platform for FakePlatform {
 
     fn read_byte(&self) -> Option<u8> {
         self.bytes.borrow_mut().pop_front()
+    }
+
+    fn fs_write(&self, file: Handle, bytes: &[u8]) -> bool {
+        if self.deny_write.get() {
+            return false;
+        }
+        self.writes.borrow_mut().push((file, bytes.to_vec()));
+        true
     }
 
     fn write(&self, text: &str) {
@@ -510,6 +547,39 @@ mod on_target {
             String::from_utf8(bytes).ok()
         }
 
+        fn fs_write(&self, file: super::Handle, bytes: &[u8]) -> bool {
+            use fs_proto::{Op, Request, Response, UserBuf};
+            use snitchos_user::Endpoint;
+
+            // `file` is a delegated file cap — the shell resolved the path,
+            // created it if absent, and handed us the cap. No walk here.
+            let file = Endpoint::from_raw_handle(file as usize);
+
+            // Truncate to the payload length first, so a shorter save leaves no
+            // stale trailing bytes. A refused Truncate (no WRITE on the cap) fails
+            // the whole op — the read-only enforcement stim's `:w` relies on.
+            let trunc = Request::Truncate { len: bytes.len() as u64 };
+            match file.call(trunc.encode()) {
+                Ok((words, _)) if matches!(Response::decode(Op::Truncate, words), Ok(Response::Count(_))) => {}
+                _ => return false,
+            }
+
+            // Write the payload in ≤256-byte chunks (the FS `DATA_CAP`).
+            let mut offset = 0u64;
+            for chunk in bytes.chunks(256) {
+                let write = Request::Write {
+                    offset,
+                    src: UserBuf { ptr: chunk.as_ptr() as u64, len: chunk.len() as u64 },
+                };
+                match file.call(write.encode()) {
+                    Ok((words, _)) if matches!(Response::decode(Op::Write, words), Ok(Response::Count(_))) => {}
+                    _ => return false,
+                }
+                offset += chunk.len() as u64;
+            }
+            true
+        }
+
         fn revoke(&self, handle: super::Handle) -> Option<usize> {
             // The `Revoke` syscall reclaims every cap derived from `handle` and
             // returns the count, or `usize::MAX` if the handle resolves nothing.
@@ -571,6 +641,32 @@ mod tests {
     fn a_backend_that_sources_no_input_reads_no_byte() {
         // `NullPlatform` uses the trait's default `read_byte` — "no input".
         assert_eq!(NullPlatform.read_byte(), None);
+    }
+
+    #[test]
+    fn a_backend_with_no_filesystem_cannot_write() {
+        // `NullPlatform` uses the trait's default `fs_write` — no FS, no write.
+        // (The mirror `-> false` mutant is equivalent — the default *is* `false`.)
+        assert!(!NullPlatform.fs_write(0, b"x"));
+    }
+
+    #[test]
+    fn fake_fs_write_records_the_write_and_reports_success() {
+        // The delegated-cap write: stim hands a file-cap handle + the whole
+        // payload; the fake records it and reports success.
+        let fake = FakePlatform::new();
+        assert!(fake.fs_write(7, b"hello world"));
+        assert_eq!(fake.writes(), vec![(7u32, b"hello world".to_vec())]);
+    }
+
+    #[test]
+    fn fake_fs_write_reports_refusal_when_the_cap_denies_it() {
+        // A read-only cap → the kernel refuses the write; the fake models that as
+        // `false`, recording nothing.
+        let fake = FakePlatform::new();
+        fake.deny_writes();
+        assert!(!fake.fs_write(7, b"nope"));
+        assert!(fake.writes().is_empty());
     }
 
     #[test]

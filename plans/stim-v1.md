@@ -385,7 +385,7 @@ into the 3 exhaustive loops (`every_op/request/response`); renamed the stale
 gate + opcode map** (11 caught / 2 unviable / 0 missed). *(Server dispatch isn't
 host-testable — `serve` is `-> !` over IPC; covered by the Group-5 boot itest.)*
 
-#### Step 3.4: `Platform::fs_write(fileHandle, bytes)` — Truncate-then-Write through a delegated cap
+#### Step 3.4: `Platform::fs_write(fileHandle, bytes)` — Truncate-then-Write through a delegated cap — ✅ DONE (2026-07-10)
 **Touches**: `stitch/src/platform.rs`. **Design** (per the decision above): NOT a
 path walk. `Fake`→record `(handle, bytes)` + return success (or scripted refusal);
 `Runtime`→`Endpoint::from_raw_handle(fileHandle)`, issue `Truncate(len)` then
@@ -396,6 +396,13 @@ then writes; fake records the sequence; a `READ`-only cap → refusal. **RED**: 
 records truncate-then-write; refusal path. (End-to-end "shorter save leaves no stale
 bytes" is proven by 3.2/3.3 at the fs layer and by the Group-5 re-read.) **Mutants**:
 the truncate-before-write ordering, the chunk loop.
+DONE: trait default `fs_write→false` (no FS); `Fake` records `(Handle, Vec<u8>)` +
+`writes()` getter + `deny_writes()` (models a read-only cap → `false`, records
+nothing); `Runtime` does `Truncate(len)` then chunked `Write` through the delegated
+`Endpoint`, `false` on any refusal (the read-only kernel-enforcement). Host-tested
+(record + refusal + `NullPlatform` default); riscv clippy-clean. Mutation: 8/9 caught,
+**1 equivalent** (default `→false` mutated to `false` — unkillable, like the documented
+`advance_anchor` one). 547 lib green.
 
 #### Step 3.5: expose `readByte` / `writeConsole` / `fsWrite` as Stitch natives
 **Touches**: `stitch/src/natives.rs` (+ the `FsWrite` authority in `interp.rs`).
