@@ -458,16 +458,15 @@ thesis):** `:stim` Spawns a least-authority `stim` process holding only telemetr
 + console + the one file cap, whose `main` reads the cap at `delegated_handle(0)` and
 calls the same `run`. The shared `run` means Phase 2 only swaps the thin wrapper.
 
-#### Step 4.1: the `stim` driver loop — `stitch::stim::run` (native trampoline) — ⏳ IMPLEMENTED (2026-07-10), verify pending
-**Status**: `stitch/src/stim.rs` written (RED tests + `run` + helpers); **compile/test
-blocked by concurrent Phase C churn in `interp.rs`** — verified by inspection (all
-entry points check out: `prelude_items`/`parse_program`/`lower_program(&mut items)`→
-`&mut [Item]` coerce/`build_env`/`env.lookup`/`apply_values`; `RuntimeError::new` takes
-`Into<String>`; `Value::Data{variant,fields:(Option<String>,Value)}`). Run
-`cargo test -p stitch --lib a_scripted_session` once the tree compiles. Used
-`apply_values` (pub(crate)) not `eval_call` (private). 3 tests: edit→`:w`→saved bytes
-+ drew frame; no-`:w`→no save; read-only (`deny_writes`)→refused, records nothing.
-Still TODO after verify: MUTATE (`byte_to_key` arms, effect dispatch).
+#### Step 4.1: the `stim` driver loop — `stitch::stim::run` (native trampoline) — ✅ DONE (2026-07-10)
+**Status**: `stitch/src/stim.rs`. Used `apply_values` (pub(crate)) not `eval_call`
+(private). **4 tests**: edit→`:w`→saved bytes + drew frame; no-`:w`→no save; read-only
+(`deny_writes`)→refused, records nothing; and CR/DEL bytes→Enter/Backspace tokens
+end-to-end (the driver's unique byte-mapping responsibility). 569 lib green, clippy
+host+riscv, **mutation-clean (10 caught / 2 unviable / 0 missed)**. *(Was written +
+inspection-verified while `interp.rs` was mid-Phase-C-churn; compiled + passed clean
+once the tree settled — no fixes needed beyond one `cloned_ref_to_slice_refs` clippy
+nit → `core::slice::from_ref`.)*
 
 **Touches**: new `stitch/src/stim.rs`. **Design**:
 `run(source, file_content, file_handle, platform)` —
@@ -491,20 +490,27 @@ Still TODO after verify: MUTATE (`byte_to_key` arms, effect dispatch).
 of `fs-image/stim/stim.st`, as in `stim_fsm.rs`.)* **Mutants**: `byte_to_key` arms, the
 effect dispatch.
 
-#### Step 4.2: `:stim <file>` from the shell — resolve, create-if-absent, delegate the file cap; enforce read-only
-**Touches**: `user/hello/src/bin/stitch_repl.rs` (`:stim` handler), a new
-**write-capable path resolver** (all existing client walkers request `READ` only — audit),
-and (per #4) a spawnable `stim` binary + `SPAWNABLE` entry.
-**Design**: `:stim <path>` → resolve the path walking with `READ|WRITE`, **create-if-absent**
-(the write side Group-3 `fs_write` deliberately skips — `Create` then the file cap), then
-Spawn `stim` delegating `[file cap]` (+ bootstrap telemetry/span, console). `stim`'s `main`
-reads the file cap at `delegated_handle(0)`, reads its content through it, and calls
-`stitch::stim::run(<compiled-in source>, content, handle, RuntimePlatform)`.
-**Acceptance**: read+write file → `:w` saves; a **read-only** cap → `:w`'s `fsWrite` →
-kernel-refused (`SyscallRefused` snitched) → `false`; the grant shows a `CapEvent`.
-**RED**: a shell-level test (save works with WRITE; read-only refusal snitches). *(The
-resolver + Spawn wiring is on-target; the read-only *refusal semantics* are already
-host-tested at 3.4 via `deny_writes` — this step proves the metal path + the shell glue.)*
+#### Step 4.2: `:stim <file>` from the shell — resolve, create-if-absent, in-process run (Phase 1) — ✅ IMPLEMENTED (2026-07-10), behavior via Group-5
+**Touches**: `user/hello/src/bin/stitch_repl.rs` (`:stim` handler + `open_file_rw` — the
+new **write-capable path resolver**), `fs-proto` (re-export `NodeKind` so callers get it
+without a direct `fs-core` dep).
+**Design (Phase 1, in-process — per #4's phase split)**: `:stim <path>` →
+`open_file_rw(path)` walks every component with `READ|WRITE` (a minted cap's rights are
+`parent ∩ requested`, so a `READ` hop would strip WRITE below it), **creates the leaf
+File if absent** (the write side Group-3 `fs_write` skips), reads its current content, and
+returns `(cap_handle, content)`; then `stitch::stim::run(<include_str! source>, content,
+handle, &RuntimePlatform)` runs **in-process** (stim uses the REPL's platform; read-only
+still real via the file cap's rights). `read_all` extracted from `read_file` and shared.
+Compiles clean for riscv, clippy-clean; **behavior proven by the Group-5 boot itest** (IPC,
+not host-testable). **Phase 2 (deferred):** Spawn a least-authority `stim` process
+delegating `[file cap]`; `run` is unchanged.
+**⚠ Caveats (record for Group 5 / follow-up):** (1) **read_byte vs read_line** share one
+`RuntimePlatform`/console — the REPL reads lines, stim reads raw bytes; a mode switch may
+leave stale `LineEditor` state (fine for scripted itest; revisit for interactive use). (2)
+**in-process is a modal takeover** — on the metal `run` blocks forever (a UART never EOFs),
+so `:stim` never returns to the REPL; **Ctrl-C exits the whole REPL** (Phase-2 Spawn fixes
+this — Ctrl-C kills just the child). (3) read-only *refusal semantics* already host-tested
+at 3.4 (`deny_writes`); this step is the metal path + shell glue.
 
 #### Step 4.3: tracing — a session root span + a span per `:w`
 **Touches**: `stitch/src/stim.rs` (the driver emits, since the FSM is pure). **Design**:

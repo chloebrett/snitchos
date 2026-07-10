@@ -23,7 +23,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use fs_proto::{FileRights, Op, Request, Response, UserBuf};
+use fs_proto::{FileRights, NodeKind, Op, Request, Response, UserBuf};
 use snitchos_user::{
     Endpoint, Metric, Tracer, clock_freq, clock_now, endpoint, entry, register_counter,
     register_histogram, tracer,
@@ -81,8 +81,12 @@ fn read_file(path: &str) -> Option<String> {
         let (_l, next) = cap.call(lookup.encode()).ok()?;
         cap = Endpoint::from_raw_handle(next?);
     }
-    let file = cap;
+    read_all(&cap)
+}
 
+/// Drain a File cap's whole contents into a `String` via ≤256-byte `Read` chunks
+/// (the server's per-copy cap). `None` if the bytes aren't UTF-8.
+fn read_all(file: &Endpoint) -> Option<String> {
     let mut bytes = Vec::new();
     let mut offset = 0u64;
     let mut chunk = [0u8; 256];
@@ -106,6 +110,57 @@ fn read_file(path: &str) -> Option<String> {
         }
     }
     String::from_utf8(bytes).ok()
+}
+
+/// The write side of [`read_file`]: resolve `path` to a File cap carrying
+/// `READ|WRITE`, **creating the leaf file if it is absent**, and read its current
+/// contents. Returns `(cap_handle, content)`, or `None` if the FS endpoint or a
+/// directory component doesn't resolve. Every component is walked with `WRITE` so
+/// the leaf cap keeps it — a minted cap's rights are `parent ∩ requested`, so a
+/// `READ`-only hop would strip write authority from everything below it.
+fn open_file_rw(path: &str) -> Option<(u32, String)> {
+    let (_r, root_cap) = endpoint().call([0, 0, 0, 0]).ok()?;
+    let mut cap = Endpoint::from_raw_handle(root_cap?);
+    let rw = FileRights::READ | FileRights::WRITE;
+
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    let (leaf, dirs) = parts.split_last()?;
+
+    // Descend to the parent directory, keeping WRITE at every hop.
+    for part in dirs {
+        let pb = part.as_bytes();
+        let lookup = Request::Lookup {
+            name: UserBuf { ptr: pb.as_ptr() as u64, len: pb.len() as u64 },
+            rights: rw,
+        };
+        let (_l, next) = cap.call(lookup.encode()).ok()?;
+        cap = Endpoint::from_raw_handle(next?);
+    }
+
+    // Look up the leaf with WRITE; create an empty File if it's absent.
+    let lb = leaf.as_bytes();
+    let lookup = Request::Lookup {
+        name: UserBuf { ptr: lb.as_ptr() as u64, len: lb.len() as u64 },
+        rights: rw,
+    };
+    let (words, next) = cap.call(lookup.encode()).ok()?;
+    let file_handle = match Response::decode(Op::Lookup, words) {
+        Ok(Response::Inode(_)) => next?,
+        _ => {
+            let create = Request::Create {
+                name: UserBuf { ptr: lb.as_ptr() as u64, len: lb.len() as u64 },
+                kind: NodeKind::File,
+            };
+            let (cwords, created) = cap.call(create.encode()).ok()?;
+            match Response::decode(Op::Create, cwords) {
+                Ok(Response::Inode(_)) => created?,
+                _ => return None,
+            }
+        }
+    };
+
+    let content = read_all(&Endpoint::from_raw_handle(file_handle)).unwrap_or_default();
+    Some((u32::try_from(file_handle).ok()?, content))
 }
 
 const PROMPT: &str = "stitch> ";
@@ -206,6 +261,22 @@ fn main() {
                 None => format!("load error: cannot read `{name}` from fs\n"),
             };
             platform.write(&msg);
+        } else if let Some(path) = trimmed.strip_prefix(":stim ") {
+            // Open `path` in stim: resolve/create it with a WRITE cap, then hand
+            // that cap + the FSM to the driver. In-process (phase 1) — stim uses
+            // this REPL's platform; read-only is still real via the file cap's
+            // rights. The FSM source is compiled in (also seeded at /stim/stim.st).
+            const STIM_SRC: &str = include_str!("../../../../fs-image/stim/stim.st");
+            let path = path.trim();
+            match open_file_rw(path) {
+                Some((handle, content)) => {
+                    platform.write(&format!("\u{1b}[2J\u{1b}[Hstim: {path} (Ctrl-C to exit)\r\n"));
+                    if let Err(e) = stitch::stim::run(STIM_SRC, &content, handle, &*platform) {
+                        platform.write(&format!("stim: {}\n", e.message()));
+                    }
+                }
+                None => platform.write(&format!("stim: cannot open `{path}`\n")),
+            }
         } else if !trimmed.is_empty() {
             let (out, dt) = timed(&mut repl, tr, &mut metrics, &line);
             platform.write(&out);
