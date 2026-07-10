@@ -6,8 +6,8 @@ Err(
     ParseError {
         message: "chained conditionals aren't allowed — use `match` for more than two cases",
         span: Span {
-            start: 0,
-            end: 0,
+            start: 11,
+            end: 13,
         },
     },
 )

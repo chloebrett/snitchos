@@ -6,8 +6,8 @@ Err(
     ParseError {
         message: "ranges don't chain — `a..b..c` is ambiguous; use a single range",
         span: Span {
-            start: 0,
-            end: 0,
+            start: 4,
+            end: 6,
         },
     },
 )

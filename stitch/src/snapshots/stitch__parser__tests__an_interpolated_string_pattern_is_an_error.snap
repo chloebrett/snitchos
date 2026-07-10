@@ -6,8 +6,8 @@ Err(
     ParseError {
         message: "string interpolation isn't allowed in a pattern — match on a plain string literal",
         span: Span {
-            start: 0,
-            end: 0,
+            start: 16,
+            end: 18,
         },
     },
 )

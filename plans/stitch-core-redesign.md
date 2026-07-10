@@ -179,22 +179,14 @@ core IR; runtime faults cite `line:col`; 543+ green.
 
 ---
 
-### Step C1: ParseError carries a real span
+### Step C1: ParseError carries a real span — ✅ DONE (2026-07-10)
 
-**Current state**: `ParseError { message: String, span: Span }` exists but `span` is
-always `Span::default()` — the parser never threads the current-token span when
-constructing errors. The field is there; the wiring is not.
-
-**What**: At every `ParseError::new(...)` call site in `parser.rs`, pass the span of
-the current or offending token instead of `Span::default()`. Add a
-`ParseError::at(message, span)` constructor. The existing tests that match on error
-messages are unaffected; new tests assert `err.span != Span::default()` for a parse
-error on known-bad input.
-
-**TDD order**:
-1. RED: `parse("let x =").unwrap_err().span` is not `Span::default()`.
-2. GREEN: thread `self.current_span()` (or equivalent) through each error site.
-3. Mutation gate: mutating the span-threading to return `default()` kills the test.
+`ParseError { message: String, span: Span }` existed but span was always
+`Span::default()`. Added `Parser::current_span()` + `Parser::err(msg)` helper;
+replaced all 21 `ParseError::new(...)` call sites with `self.err(...)` (or
+`parser.err()`/`sub.err()` in free functions). Interpolation sub-parser now
+propagates its own span. 10 insta snapshots updated to show real byte offsets.
+544 tests green.
 
 ---
 

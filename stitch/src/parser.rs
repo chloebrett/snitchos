@@ -61,7 +61,7 @@ pub fn parse(src: &str) -> Result<Expr, ParseError> {
     }
     let expr = parser.parse_expr(0)?;
     if matches!(parser.peek(), TokenKind::Semicolon) {
-        return Err(ParseError::new(NO_SEMICOLONS));
+        return Err(parser.err(NO_SEMICOLONS));
     }
     parser.expect(&TokenKind::Eof, "end of input")?;
     Ok(expr)
@@ -94,13 +94,10 @@ fn parse_str_segments(parts: Vec<StrPart>) -> Result<Vec<StrSegment>, ParseError
             StrPart::Expr(tokens, lex_errors) => {
                 let mut sub = Parser::from_tokens(tokens, lex_errors);
                 if let Some(err) = sub.lex_error() {
-                    return Err(ParseError::new(format!(
-                        "in string interpolation: {}",
-                        err.message
-                    )));
+                    return Err(sub.err(format!("in string interpolation: {}", err.message)));
                 }
                 let inner = sub.parse_expr(0).map_err(|e| {
-                    ParseError::new(format!("in string interpolation: {}", e.message))
+                    ParseError::at(format!("in string interpolation: {}", e.message), e.span)
                 })?;
                 Ok(StrSegment::Interp(Box::new(inner)))
             }
@@ -231,6 +228,14 @@ impl Parser {
         &self.tokens[self.pos].kind
     }
 
+    fn current_span(&self) -> Span {
+        self.tokens[self.pos].span
+    }
+
+    fn err(&self, message: impl Into<String>) -> ParseError {
+        ParseError::at(message, self.current_span())
+    }
+
     /// Look `offset` tokens ahead, clamped to the trailing `Eof`.
     fn peek_at(&self, offset: usize) -> &TokenKind {
         let i = (self.pos + offset).min(self.tokens.len() - 1);
@@ -280,7 +285,7 @@ impl Parser {
             if is_non_assoc(op)
                 && infix_op(self.peek()).is_some_and(|next| binding_power(next).0 == l_bp)
             {
-                return Err(ParseError::new(non_assoc_message(op)));
+                return Err(self.err(non_assoc_message(op)));
             }
         }
         // The `cond => then | els` conditional binds looser than any binary
@@ -299,7 +304,7 @@ impl Parser {
                 els: Box::new(els),
             };
             if matches!(self.peek(), TokenKind::FatArrow) {
-                return Err(ParseError::new(
+                return Err(self.err(
                     "chained conditionals aren't allowed — use `match` for more than two cases",
                 ));
             }
@@ -580,7 +585,7 @@ impl Parser {
         let mut result = None;
         while !matches!(self.peek(), TokenKind::RBrace) {
             if matches!(self.peek(), TokenKind::Eof) {
-                return Err(ParseError::new("unterminated block: expected '}'"));
+                return Err(self.err("unterminated block: expected '}'"));
             }
             if matches!(self.peek(), TokenKind::Let) {
                 stmts.push(self.parse_let()?);
@@ -658,7 +663,7 @@ impl Parser {
         };
         if matches!(self.peek(), TokenKind::Use) {
             if public {
-                return Err(ParseError::new(
+                return Err(self.err(
                     "`ext` applies to declarations, not a `use` import",
                 ));
             }
@@ -677,12 +682,12 @@ impl Parser {
                 })
             }
             TokenKind::Ident(_) => self.parse_func(public),
-            TokenKind::Contract | TokenKind::On if public => Err(ParseError::new(
+            TokenKind::Contract | TokenKind::On if public => Err(self.err(
                 "`ext` applies to functions, types, and constants — not `contract`/`on`",
             )),
             TokenKind::Contract => self.parse_contract(),
             TokenKind::On => self.parse_on(),
-            other => Err(ParseError::new(format!(
+            other => Err(self.err(format!(
                 "expected a declaration, found {other:?}"
             ))),
         }
@@ -727,7 +732,7 @@ impl Parser {
         let mut methods = Vec::new();
         while !matches!(self.peek(), TokenKind::RBrace) {
             if matches!(self.peek(), TokenKind::Eof) {
-                return Err(ParseError::new("unterminated `on` block: expected '}'"));
+                return Err(self.err("unterminated `on` block: expected '}'"));
             }
             methods.push(self.parse_method(true)?); // on-methods require a body
         }
@@ -748,7 +753,7 @@ impl Parser {
         let mut methods = Vec::new();
         while !matches!(self.peek(), TokenKind::RBrace) {
             if matches!(self.peek(), TokenKind::Eof) {
-                return Err(ParseError::new("unterminated contract: expected '}'"));
+                return Err(self.err("unterminated contract: expected '}'"));
             }
             methods.push(self.parse_method(false)?);
         }
@@ -786,7 +791,7 @@ impl Parser {
         let body = if matches!(self.peek(), TokenKind::Eq | TokenKind::LBrace) {
             Some(self.parse_body()?)
         } else if require_body {
-            return Err(ParseError::new("expected '=' or '{' for the method body"));
+            return Err(self.err("expected '=' or '{' for the method body"));
         } else {
             None
         };
@@ -879,7 +884,7 @@ impl Parser {
             self.bump();
             self.parse_block()
         } else {
-            Err(ParseError::new("expected '=' or '{' for the function body"))
+            Err(self.err("expected '=' or '{' for the function body"))
         }
     }
 
@@ -1078,7 +1083,7 @@ impl Parser {
         let mut arms = Vec::new();
         while !matches!(self.peek(), TokenKind::RBrace) {
             if matches!(self.peek(), TokenKind::Eof) {
-                return Err(ParseError::new("unterminated match: expected '}'"));
+                return Err(self.err("unterminated match: expected '}'"));
             }
             arms.push(self.parse_match_arm()?);
         }
@@ -1099,12 +1104,12 @@ impl Parser {
         let mut arms = Vec::new();
         let default = loop {
             if matches!(self.peek(), TokenKind::RBrace) {
-                return Err(ParseError::new(
+                return Err(self.err(
                     "a subjectless `match` must end in a `_ => …` catch-all",
                 ));
             }
             if matches!(self.peek(), TokenKind::Eof) {
-                return Err(ParseError::new("unterminated match: expected '}'"));
+                return Err(self.err("unterminated match: expected '}'"));
             }
             if self.at_catch_all() {
                 self.bump(); // '_'
@@ -1118,7 +1123,7 @@ impl Parser {
             arms.push((cond, self.parse_expr(0)?));
         };
         if !matches!(self.peek(), TokenKind::RBrace) {
-            return Err(ParseError::new(
+            return Err(self.err(
                 "a `_ => …` catch-all must be the last arm of a subjectless match",
             ));
         }
@@ -1180,7 +1185,7 @@ impl Parser {
                 [StrPart::Lit(text)] => Pattern::Str(text.clone()),
                 [] => Pattern::Str(String::new()),
                 _ => {
-                    return Err(ParseError::new(
+                    return Err(self.err(
                         "string interpolation isn't allowed in a pattern — match on a plain string literal",
                     ));
                 }
@@ -1208,7 +1213,7 @@ impl Parser {
                 }
             }
             other => {
-                return Err(ParseError::new(format!(
+                return Err(self.err(format!(
                     "unexpected token in pattern: {other:?}"
                 )));
             }
@@ -1278,8 +1283,8 @@ impl Parser {
             TokenKind::LBracket => self.parse_collection()?,
             TokenKind::LBrace => self.parse_block()?,
             TokenKind::Match => self.parse_match()?,
-            TokenKind::Semicolon => return Err(ParseError::new(NO_SEMICOLONS)),
-            other => return Err(ParseError::new(format!("unexpected token: {other:?}"))),
+            TokenKind::Semicolon => return Err(self.err(NO_SEMICOLONS)),
+            other => return Err(self.err(format!("unexpected token: {other:?}"))),
         })
     }
 }
@@ -2087,5 +2092,21 @@ mod tests {
     #[test]
     fn parenthesized_type_is_not_a_tuple() {
         insta::assert_debug_snapshot!(prog("prod Wrap(x: (Int))"));
+    }
+
+    #[test]
+    fn parse_error_carries_the_offending_span() {
+        use crate::lexer::Span;
+        // "let x =" — the `=` is at bytes 6..7; the parser fails when it hits
+        // EOF where an expression was expected.  The error span must not be the
+        // zero-width default.
+        let err = parse("let x =").expect_err("should fail on incomplete let");
+        assert_ne!(err.span, Span::default(), "ParseError span should not be Span::default()");
+        assert!(err.span.start > 0 || err.span.end > 0, "span should point somewhere in the source");
+
+        // A missing `=` in a function definition — span should point at the
+        // unexpected token, not at byte 0.
+        let err2 = parse_program("f(x) x").expect_err("should fail on missing =");
+        assert_ne!(err2.span, Span::default(), "ParseError span for program error should not be Span::default()");
     }
 }

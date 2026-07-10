@@ -6,8 +6,8 @@ Err(
     ParseError {
         message: "a subjectless `match` must end in a `_ => …` catch-all",
         span: Span {
-            start: 0,
-            end: 0,
+            start: 23,
+            end: 24,
         },
     },
 )
