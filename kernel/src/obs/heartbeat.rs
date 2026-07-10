@@ -183,8 +183,13 @@ pub fn run(metrics: Metrics) -> ! {
 /// Smoke pattern that exercises the frame allocator each heartbeat.
 /// Default: alloc+free, keeps `in_use` bounded. Under the
 /// `workload=frame-oom` selection: leak 8192 frames per tick (32 MiB)
-/// so the allocator's ~32K-frame free pool exhausts in ~4 heartbeats.
-/// Drives the `frame-allocator-oom` integration scenario.
+/// so the allocator's ~32K-frame free pool exhausts over ~4 heartbeats —
+/// a *gradual* exhaustion under sustained pressure, not a one-shot drain
+/// (OOMing in a single tick would be a trivial case; the point is the kernel
+/// keeps heartbeating as the pool bleeds out). Drives the `frame-allocator-oom`
+/// integration scenario. (The scenario is fast on snemu not because it OOMs in
+/// fewer heartbeats but because `frame-oom` now runs on the light spawn layout —
+/// no demo task_a/task_b burning between ticks; see `kmain`.)
 fn frame_smoke() {
     use kernel_core::bootargs::WorkloadKind;
     if boot_workload::selected() == Some(WorkloadKind::FrameOom) {

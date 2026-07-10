@@ -380,12 +380,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             // Lock-free ring that fences per-batch (shared static, no split).
             let _ = sched::spawn("workload_producer", workload::spsc_batch_producer_entry);
         }
-        // The kernel scheduler demo (`workload=demo`, the former default) and the
-        // OOM workloads, which keep the standard tasks and only change the
-        // heartbeat. The no-bootarg default (`None`) now boots `init` instead —
-        // it spawns no hart-0 demo tasks here; init is realised post-secondary via
-        // the userspace layout (see below).
-        Some(WorkloadKind::Demo) | Some(WorkloadKind::FrameOom) | Some(WorkloadKind::HeapOom) => {
+        // The kernel scheduler demo (`workload=demo`, the former default). The
+        // no-bootarg default (`None`) now boots `init` instead — it spawns no
+        // hart-0 demo tasks here; init is realised post-secondary via the
+        // userspace layout (see below).
+        Some(WorkloadKind::Demo) => {
             let _ = sched::spawn("task_a", demo_tasks::task_a_entry);
             let _ = sched::spawn("task_b", demo_tasks::task_b_entry);
             let _ = sched::spawn("workload_producer", workload::producer_entry);
@@ -442,6 +441,13 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::Fs)
         | Some(WorkloadKind::ViewerDemo)
         | Some(WorkloadKind::Shell)
+        // The OOM workloads: their pressure lives entirely in the heartbeat smoke
+        // (`frame_smoke` / `heap_smoke_pattern`), keyed on the workload — no demo
+        // tasks needed. Running them light (no task_a/task_b burning between ticks)
+        // keeps the *gradual*, multi-heartbeat exhaustion the scenarios assert
+        // while making each interval idle-cheap.
+        | Some(WorkloadKind::FrameOom)
+        | Some(WorkloadKind::HeapOom)
         // The no-bootarg default boots `init` (userspace, placed on hart 1 via the
         // layout below) — nothing to spawn on hart 0 here.
         | None => {}
