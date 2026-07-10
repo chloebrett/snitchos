@@ -435,6 +435,20 @@ fn run_scenario(
 /// budget below (each measured), while the default keeps the fast majority fast.
 /// A larger caller `--steps` still wins (`.max`).
 fn budget_for(name: &str, default: u64) -> u64 {
+    // A *cap*, not a floor: the sole `assert_absent` scenario. A negative oracle
+    // scans for the bad frame until its window elapses — and under snemu (batch)
+    // "window elapsed" means the step budget is exhausted (see `View::assert_absent`
+    // / `Advance::Disconnected`). So this scenario consumes its *entire* budget
+    // confirming absence, regardless of the workload: at the 400M default it was the
+    // suite's tail pole (~9s) doing nothing but re-scanning idle heartbeats. Its
+    // real need is small and measured: `tlb_remap_rounds >= 100` is reached by ~4M
+    // post-fork, and the cumulative `tlb_stale_reads` oracle re-emits every
+    // heartbeat, so a handful of heartbeats of absence is conclusive. 60M gives
+    // ~10+ heartbeats of margin. A larger `--steps` deliberately does NOT raise this
+    // one — more budget is pure wasted scanning, not more coverage.
+    if name == "smp-tlb-shootdown-visible" {
+        return 60_000_000;
+    }
     let needed = match name {
         "workload-cooperative-baseline" => 1_000_000_000,
         "frame-allocator-oom" | "heap-oom" => 3_000_000_000,
