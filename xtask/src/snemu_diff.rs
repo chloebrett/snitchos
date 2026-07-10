@@ -301,7 +301,7 @@ fn collect_qemu(
         "socket,path={},server=on,wait=on,id=telemetry",
         socket.display()
     );
-    let mut cmd = qemu::base_command(&chardev);
+    let mut cmd = qemu::base_command(&chardev, qemu::DEFAULT_RAM_MB);
     if let Some(w) = workload {
         cmd.args(["-append", &format!("workload={w}")]);
     }
@@ -602,17 +602,37 @@ pub(crate) fn collect_workload_frames(
 /// decode cache on). The interactive audit builds a live `View` over this and
 /// steps it per scenario, so each scenario gets its own machine to drive with
 /// its own console input.
+/// RAM (MiB) a workload's machine boots with. Most run on the default; the
+/// `frame-oom` workload runs on a **smaller** machine on purpose — it exhausts RAM
+/// to prove clean OOM, and since the frame allocator's `alloc` is a linear bitmap
+/// scan (O(n) per call → O(n²) to fill the pool), a smaller pool reaches OOM in
+/// *quadratically* fewer instructions. Shared with the QEMU harness (`-m`) so both
+/// engines run the identical machine.
+pub(crate) fn ram_mb_for(workload: Option<&str>) -> u32 {
+    const DEFAULT_MB: u32 = 128;
+    match workload {
+        Some("frame-oom") => 48,
+        _ => DEFAULT_MB,
+    }
+}
+
 pub(crate) fn load_workload_machine(
     kernel: &[u8],
     dtb_base: &[u8],
     workload: Option<&str>,
 ) -> Result<snemu::machine::Machine, String> {
-    let dtb = match workload {
+    let ram_bytes = u64::from(ram_mb_for(workload)) * 1024 * 1024;
+    let mut dtb = match workload {
         Some(w) => snemu::dtb::set_bootargs(dtb_base, &format!("workload={w}"))
             .ok_or("DTB patch failed")?,
         None => dtb_base.to_vec(),
     };
-    let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(&dtb), HART_COUNT)
+    // Match the DTB's declared RAM to the host Memory so the kernel sizes its frame
+    // pool to the smaller machine (else it manages frames that don't exist).
+    if ram_bytes != RAM_SIZE as u64 {
+        dtb = snemu::dtb::set_memory_size(&dtb, ram_bytes).ok_or("DTB memory patch failed")?;
+    }
+    let mut machine = snemu::loader::load_machine(kernel, ram_bytes as usize, Some(&dtb), HART_COUNT)
         .map_err(|e| format!("snemu load: {e:?}"))?;
     machine.set_decode_cache(true);
     Ok(machine)

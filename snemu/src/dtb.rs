@@ -124,6 +124,80 @@ fn chosen_properties_offset(struct_block: &[u8]) -> Option<usize> {
     None
 }
 
+/// Return a copy of `dtb` with the `/memory` node's `reg` **size** overwritten to
+/// `size_bytes` (base address unchanged). In-place — same length, so no header
+/// fix-ups. `None` if `dtb` isn't a valid FDT, has no `memory@…` node, or its `reg`
+/// isn't the QEMU `virt` shape (2 address cells + 2 size cells → a 16-byte value).
+///
+/// The kernel's frame allocator sizes its pool from this (`frame::init_from_dtb`
+/// walks `/memory`), so shrinking it makes an OOM workload exhaust RAM
+/// proportionally faster — the same organic exhaustion on a smaller machine, which
+/// is a more honest "small-RAM OOM" than pre-reserving frames.
+#[must_use]
+pub fn set_memory_size(dtb: &[u8], size_bytes: u64) -> Option<Vec<u8>> {
+    if be32(dtb, 0)? != FDT_MAGIC {
+        return None;
+    }
+    let off_struct = be32(dtb, OFF_DT_STRUCT)? as usize;
+    let off_strings = be32(dtb, OFF_DT_STRINGS)? as usize;
+    let size_strings = be32(dtb, OFF_SIZE_STRINGS)? as usize;
+    let size_struct = be32(dtb, OFF_SIZE_STRUCT)? as usize;
+    let struct_block = dtb.get(off_struct..off_struct + size_struct)?;
+    let strings_block = dtb.get(off_strings..off_strings + size_strings)?;
+
+    // reg value = [base: u64_be][size: u64_be]; overwrite the size (last 8 bytes).
+    let reg_value_off = memory_reg_value_offset(struct_block, strings_block)?;
+    let size_off = off_struct + reg_value_off + 8;
+    let mut out = dtb.to_vec();
+    out.get_mut(size_off..size_off + 8)?.copy_from_slice(&size_bytes.to_be_bytes());
+    Some(out)
+}
+
+/// Byte offset (within `struct_block`) of the `memory@…` node's `reg` property
+/// **value**, for the QEMU `virt` shape (a single 16-byte cell: base u64, size
+/// u64). `None` if there's no such node/property.
+fn memory_reg_value_offset(struct_block: &[u8], strings: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    let mut depth = 0i32;
+    let mut memory_depth: Option<i32> = None;
+    while let Some(tok) = be32(struct_block, i) {
+        match tok {
+            FDT_BEGIN_NODE => {
+                depth += 1;
+                let name_start = i + 4;
+                let rel_nul = struct_block[name_start..].iter().position(|&b| b == 0)?;
+                let name = &struct_block[name_start..name_start + rel_nul];
+                if name == b"memory" || name.starts_with(b"memory@") {
+                    memory_depth = Some(depth);
+                }
+                i = align4(name_start + rel_nul + 1);
+            }
+            FDT_END_NODE => {
+                if memory_depth == Some(depth) {
+                    memory_depth = None; // left the memory node without finding reg
+                }
+                depth -= 1;
+                i += 4;
+            }
+            FDT_NOP => i += 4,
+            FDT_PROP => {
+                let len = be32(struct_block, i + 4)? as usize;
+                let nameoff = be32(struct_block, i + 8)? as usize;
+                let value_off = i + 12;
+                if memory_depth == Some(depth) && len == 16 {
+                    let rel_nul = strings.get(nameoff..)?.iter().position(|&b| b == 0)?;
+                    if &strings[nameoff..nameoff + rel_nul] == b"reg" {
+                        return Some(value_off);
+                    }
+                }
+                i = align4(i + 12 + len);
+            }
+            _ => return None, // FDT_END
+        }
+    }
+    None
+}
+
 /// Offset of a null-terminated `needle` within the strings block, if present.
 fn find_string(strings: &[u8], needle: &[u8]) -> Option<usize> {
     let mut off = 0;
@@ -165,5 +239,33 @@ mod tests {
     #[test]
     fn rejects_a_non_fdt_blob() {
         assert!(set_bootargs(&[0, 1, 2, 3, 4, 5, 6, 7], "x").is_none());
+    }
+
+    #[test]
+    fn set_memory_size_shrinks_the_region_read_back_by_the_fdt_reader() {
+        const NEW: u64 = 48 * 1024 * 1024;
+        let base_before = fdt::Fdt::new(DTB)
+            .unwrap()
+            .memory()
+            .regions()
+            .next()
+            .unwrap()
+            .starting_address as u64;
+
+        let patched = set_memory_size(DTB, NEW).expect("patch");
+        // In-place edit — same length, no header shift.
+        assert_eq!(patched.len(), DTB.len());
+
+        let fdt = fdt::Fdt::new(&patched).expect("valid fdt after patch");
+        let region = fdt.memory().regions().next().expect("memory region");
+        assert_eq!(region.size, Some(NEW as usize), "size took");
+        assert_eq!(region.starting_address as u64, base_before, "base unchanged");
+        // The rest of the tree still parses.
+        assert!(fdt.cpus().count() >= 2);
+    }
+
+    #[test]
+    fn set_memory_size_rejects_a_non_fdt_blob() {
+        assert!(set_memory_size(&[0, 1, 2, 3, 4, 5, 6, 7], 1).is_none());
     }
 }

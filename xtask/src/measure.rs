@@ -247,7 +247,7 @@ pub fn measure(
         Some(b) => format!("workload={workload} burst={b}"),
         None => format!("workload={workload}"),
     };
-    let mut cmd = qemu::base_command(&chardev);
+    let mut cmd = qemu::base_command(&chardev, qemu::DEFAULT_RAM_MB);
     cmd.args(["-append", &append])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

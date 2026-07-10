@@ -1002,7 +1002,7 @@ fn debug(features: &str) -> ExitCode {
     eprintln!("After the trampoline, symbol breakpoints work normally.");
     eprintln!();
 
-    let status = qemu::base_command(&chardev_arg)
+    let status = qemu::base_command(&chardev_arg, qemu::DEFAULT_RAM_MB)
         // -s = listen on localhost:1234 for GDB.
         // -S = halt CPU at startup; wait for the debugger to `continue`.
         .args(["-s", "-S"])
@@ -1040,7 +1040,7 @@ fn boot(features: &str, workload: Option<&str>, burst: Option<usize>) -> ExitCod
     // terminal to satisfy that wait.
     let chardev_arg = format!("socket,path={TELEMETRY_SOCKET},server=on,wait=on,id=telemetry");
 
-    let mut cmd = qemu::base_command(&chardev_arg);
+    let mut cmd = qemu::base_command(&chardev_arg, qemu::DEFAULT_RAM_MB);
     // Lands in /chosen/bootargs; `kmain` reads it to pick the runtime
     // workload + burst.
     let bootargs: Vec<String> = workload

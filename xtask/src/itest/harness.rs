@@ -345,7 +345,9 @@ impl Boot {
             .try_clone()
             .map_err(|e| format!("clone log handle: {e}"))?;
 
-        let mut qemu_cmd = qemu::base_command(&chardev);
+        // Per-workload RAM (shared with the snemu audit so both engines run the
+        // identical machine) — `frame-oom` boots small on purpose.
+        let mut qemu_cmd = qemu::base_command(&chardev, crate::snemu_diff::ram_mb_for(workload));
         if let Some(workload) = workload {
             // Lands in /chosen/bootargs; `kmain` reads it to pick the
             // runtime workload.

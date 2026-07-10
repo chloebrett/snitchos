@@ -6,9 +6,19 @@ use crate::cpu::Cpu;
 use crate::machine::Machine;
 use crate::mem::{Memory, RAM_BASE};
 
-/// Where snemu places the device tree blob in RAM (high, clear of the kernel
-/// image + heap). The kernel reads its address from `a1` and reserves it.
-pub const DTB_ADDR: u64 = RAM_BASE + 0x0700_0000;
+/// Default offset (from `RAM_BASE`) where snemu places the device tree blob —
+/// high, clear of the kernel image + heap. Clamped down to fit a smaller machine
+/// (see [`load_memory`]); the kernel reads the final address from `a1` and both
+/// sizes its frame pool from the DTB and reserves the DTB region, so it must land
+/// inside the RAM the DTB itself declares.
+const DTB_OFFSET: u64 = 0x0700_0000;
+
+/// The DTB placement address for the **default** (largest) machine — where the
+/// blob lands when RAM is big enough for the full [`DTB_OFFSET`]. The
+/// snapshot/fork harness overwrites the DTB here to re-patch bootargs; it only
+/// runs the default-size machine, so the clamp in [`load_memory`] is a no-op for
+/// it and this address is exact.
+pub const DTB_ADDR: u64 = RAM_BASE + DTB_OFFSET;
 
 const ELF64_HEADER_SIZE: usize = 64;
 const ELFCLASS64: u8 = 2;
@@ -147,9 +157,16 @@ fn load_memory(
 
     let dtb_addr = match dtb {
         Some(dtb) => {
-            mem.write_bytes(DTB_ADDR, dtb)
+            // Place the DTB near the top of RAM but always *within* it: the fixed
+            // high offset for the default machine, clamped down for a smaller one
+            // so the kernel (which sizes its frame pool from the DTB and reserves
+            // the DTB region) finds it in range.
+            let margin = 0x1000u64; // a page of headroom above the blob
+            let max_offset = (ram_size as u64).saturating_sub(dtb.len() as u64 + margin);
+            let addr = RAM_BASE + DTB_OFFSET.min(max_offset);
+            mem.write_bytes(addr, dtb)
                 .map_err(|_| ElfError::SegmentOutOfRange)?;
-            Some(DTB_ADDR)
+            Some(addr)
         }
         None => None,
     };

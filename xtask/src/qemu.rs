@@ -8,10 +8,14 @@ use std::process::Command;
 pub const KERNEL_BIN: &str = "target/riscv64gc-unknown-none-elf/debug/kernel";
 pub const KERNEL_TARGET: &str = "riscv64gc-unknown-none-elf";
 
+/// Default guest RAM (MiB) — the machine size for every workload except the
+/// deliberately-small ones (see `snemu_diff::ram_mb_for`).
+pub const DEFAULT_RAM_MB: u32 = 128;
+
 /// Build a `Command` pre-loaded with every QEMU arg that is common to
-/// all invocations. The caller finishes it with `.status()` or
-/// `.spawn()` and any additional stdio config.
-pub fn base_command(chardev_arg: &str) -> Command {
+/// all invocations, with `ram_mb` guest RAM. The caller finishes it with
+/// `.status()` or `.spawn()` and any additional stdio config.
+pub fn base_command(chardev_arg: &str, ram_mb: u32) -> Command {
     let mut cmd = Command::new("qemu-system-riscv64");
     cmd.args([
         "-machine", "virt",
@@ -27,7 +31,9 @@ pub fn base_command(chardev_arg: &str) -> Command {
         // each VCPU its own host thread, restoring fair timer
         // delivery. Required for reliable suite runs.
         "-accel", "tcg,thread=multi",
-        "-m", "128M",
+    ]);
+    cmd.args(["-m", &format!("{ram_mb}M")]);
+    cmd.args([
         "-nographic",
         "-bios", "default",
         "-kernel", KERNEL_BIN,
