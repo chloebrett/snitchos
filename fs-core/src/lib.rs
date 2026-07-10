@@ -88,6 +88,11 @@ pub trait Filesystem {
     fn stat(&self, ino: InodeId) -> Result<Stat, FsError>;
     fn read(&self, ino: InodeId, off: u64, buf: &mut [u8]) -> Result<usize, FsError>;
     fn write(&mut self, ino: InodeId, off: u64, data: &[u8]) -> Result<usize, FsError>;
+    /// Resize a file to exactly `len` bytes: shrinking drops the trailing bytes,
+    /// growing zero-fills. The write side's counterpart to a saved buffer getting
+    /// shorter — without it, an overwrite would leave stale trailing bytes.
+    /// `IsADir` on a directory.
+    fn truncate(&mut self, ino: InodeId, len: u64) -> Result<(), FsError>;
     fn create(&mut self, dir: InodeId, name: &str, kind: NodeKind) -> Result<InodeId, FsError>;
     fn remove(&mut self, dir: InodeId, name: &str) -> Result<(), FsError>;
     fn readdir(&self, dir: InodeId) -> Result<Vec<DirEntry>, FsError>;

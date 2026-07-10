@@ -354,14 +354,18 @@ no-input default via `NullPlatform`); riscv lib compiles clean. **Mutation-clean
 `--features testing` (else the `stim_fsm`/`builtin_module_use` integration tests
 fail to build) — fold into the `xtask mutants` fix.
 
-#### Step 3.2: `fs-core::Filesystem::truncate(ino, len)` + ramfs impl
+#### Step 3.2: `fs-core::Filesystem::truncate(ino, len)` + ramfs impl — ✅ DONE (2026-07-10)
 **Touches**: `fs-core/src/lib.rs` (trait method), `ramfs/src/lib.rs` (impl).
 **Design**: `Body::File` → `Vec::resize(len, 0)` (shrink drops trailing bytes; grow
-zero-fills); `NotAFile` on a dir. The one real *missing capability* (audit: `write`
-only grows).
+zero-fills); `IsADir` on a dir (the not-a-file error, mirroring `write`/`read`). The
+one real *missing capability* (audit: `write` only grows).
 **Acceptance**: shrink drops trailing bytes, grow zero-fills, `read` reflects both.
 **RED**: shrink + grow ramfs tests. **Mutants**: the shrink-vs-grow branch, the
 zero-fill length.
+DONE: **required** trait method (RamFs is the only impl; `fs::serve` is generic so
+unaffected). `Vec::resize(len, 0)` gives shrink-drop + grow-zero-fill in one call.
+3 ramfs tests (shrink, grow, dir→`IsADir`); 20 ramfs green; fs-core builds;
+mutation-clean (1/1 — the no-op mutant dies on the shrink test).
 
 #### Step 3.3: `fs_proto::Op::Truncate = 8` + `Request::Truncate{len}` + fs-server handler
 **Touches**: `fs-proto/src/lib.rs` (**append** `Op::Truncate = 8` — never reorder;

@@ -187,6 +187,20 @@ impl Filesystem for RamFs {
         Ok(data.len())
     }
 
+    fn truncate(&mut self, ino: InodeId, len: u64) -> Result<(), FsError> {
+        let node = self
+            .nodes
+            .get_mut(ino.as_u32() as usize)
+            .ok_or(FsError::NotFound)?;
+        match &mut node.body {
+            Body::Dir(_) => Err(FsError::IsADir),
+            Body::File(file) => {
+                file.resize(len as usize, 0); // shrink drops trailing; grow zero-fills
+                Ok(())
+            }
+        }
+    }
+
     fn create(&mut self, dir: InodeId, name: &str, kind: NodeKind) -> Result<InodeId, FsError> {
         // The parent must be a directory — otherwise there's nothing to add to.
         match &self.node(dir)?.body {
@@ -461,6 +475,43 @@ mod tests {
         let read = fs.read(ino, 0, &mut buf).unwrap();
         assert_eq!(read, 6);
         assert_eq!(&buf, b"helXYZ");
+    }
+
+    #[test]
+    fn truncate_shrinks_a_file_dropping_trailing_bytes() {
+        let mut fs = RamFs::new();
+        let root = fs.root();
+        let ino = fs.create(root, "f.txt", NodeKind::File).unwrap();
+        fs.write(ino, 0, b"hello").unwrap();
+
+        fs.truncate(ino, 3).unwrap();
+
+        assert_eq!(fs.stat(ino).unwrap().size, 3);
+        let mut buf = [0u8; 8];
+        let read = fs.read(ino, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..read], b"hel"); // the trailing "lo" is gone
+    }
+
+    #[test]
+    fn truncate_grows_a_file_with_zero_fill() {
+        let mut fs = RamFs::new();
+        let root = fs.root();
+        let ino = fs.create(root, "f.txt", NodeKind::File).unwrap();
+        fs.write(ino, 0, b"hi").unwrap();
+
+        fs.truncate(ino, 5).unwrap();
+
+        assert_eq!(fs.stat(ino).unwrap().size, 5);
+        let mut buf = [0u8; 5];
+        fs.read(ino, 0, &mut buf).unwrap();
+        assert_eq!(&buf, b"hi\0\0\0");
+    }
+
+    #[test]
+    fn truncate_on_a_directory_is_an_error() {
+        let mut fs = RamFs::new();
+        let root = fs.root();
+        assert_eq!(fs.truncate(root, 0), Err(FsError::IsADir));
     }
 
     #[test]
