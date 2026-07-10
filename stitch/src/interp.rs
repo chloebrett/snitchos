@@ -79,7 +79,7 @@ fn build_env_in(env: Env, items: &[Item]) -> Env {
     // it *was* handed a `TelemetrySink` cap. Authority threads down from here;
     // named functions then narrow it to their declared `uses`.
     let env = env.with_authority(
-        ["Telemetry", "ConsoleOut", "ConsoleIn", "FsRead"]
+        ["Telemetry", "ConsoleOut", "ConsoleIn", "FsRead", "FsWrite"]
             .into_iter()
             .map(String::from)
             .collect(),

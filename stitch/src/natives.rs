@@ -24,6 +24,9 @@ pub(crate) const NATIVES: &[NativeFn] = &[
     NativeFn { name: "revoke",    arity: 1, func: native_revoke,    module: None, export_as: None },
     NativeFn { name: "grant",     arity: 3, func: native_grant,     module: None, export_as: None },
     NativeFn { name: "readFile",  arity: 1, func: native_read_file, module: None, export_as: None },
+    NativeFn { name: "readByte",     arity: 0, func: native_read_byte,     module: None, export_as: None },
+    NativeFn { name: "writeConsole", arity: 1, func: native_write_console, module: None, export_as: None },
+    NativeFn { name: "fsWrite",      arity: 2, func: native_fs_write,      module: None, export_as: None },
     NativeFn { name: "emit",      arity: 2, func: native_emit,      module: None, export_as: None },
     NativeFn { name: "span",      arity: 2, func: native_span,      module: None, export_as: None },
     NativeFn { name: "toList",    arity: 1, func: native_to_list,   module: None, export_as: None },
@@ -272,6 +275,67 @@ fn native_read_line(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         Some(line) => some(Value::Str(line.into())),
         None => none(),
     })
+}
+
+/// `readByte()` — read one raw input byte as `Some(Str)` (a single character), or
+/// `None` at end of input. Gated by `ConsoleIn`, like `readLine`; the byte-at-a-
+/// time keystroke source the stim driver reads through (bypassing line editing).
+fn native_read_byte(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [] = args else {
+        return Err(RuntimeError::new("readByte expects no arguments"));
+    };
+    if !env.has_authority("ConsoleIn") {
+        return Err(RuntimeError::new("readByte requires `uses ConsoleIn`"));
+    }
+    Ok(match env.platform().read_byte() {
+        Some(byte) => some(Value::Str(char::from(byte).to_string().into())),
+        None => none(),
+    })
+}
+
+/// `writeConsole(text)` — write `text` to the console *raw*, with no trailing
+/// newline (unlike `print`) — so the stim driver can push ANSI escape frames.
+/// Gated by `ConsoleOut`.
+fn native_write_console(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [value] = args else {
+        return Err(RuntimeError::new("writeConsole expects (text)"));
+    };
+    let Value::Str(text) = value else {
+        return Err(RuntimeError::new(format!(
+            "writeConsole text must be a Str, got {}",
+            value.kind()
+        )));
+    };
+    if !env.has_authority("ConsoleOut") {
+        return Err(RuntimeError::new("writeConsole requires `uses ConsoleOut`"));
+    }
+    env.platform().write(text);
+    Ok(Value::Unit)
+}
+
+/// `fsWrite(fileHandle, text)` — write `text` as the whole contents of the file
+/// named by the delegated cap `fileHandle`, truncating first. Returns `true` on
+/// success, `false` if the cap refuses (a read-only cap). Gated by `FsWrite`
+/// (distinct from `FsRead` — reading and writing files are separately granted).
+fn native_fs_write(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
+    let [handle, value] = args else {
+        return Err(RuntimeError::new("fsWrite expects (fileHandle, text)"));
+    };
+    let Value::Int(handle) = handle else {
+        return Err(RuntimeError::new("fsWrite fileHandle must be an Int"));
+    };
+    let Value::Str(text) = value else {
+        return Err(RuntimeError::new(format!(
+            "fsWrite text must be a Str, got {}",
+            value.kind()
+        )));
+    };
+    if !env.has_authority("FsWrite") {
+        return Err(RuntimeError::new("fsWrite requires `uses FsWrite`"));
+    }
+    let handle = u32::try_from(*handle)
+        .map_err(|_| RuntimeError::new("fsWrite fileHandle is out of range"))?;
+    Ok(Value::Bool(env.platform().fs_write(handle, text.as_bytes())))
 }
 
 /// `hold()` — list the capabilities the calling process holds, as a `List` of
@@ -1026,6 +1090,63 @@ mod tests {
             }
             other => panic!("expected Some(\"note\"), got {}", other.display()),
         }
+    }
+
+    #[test]
+    fn read_byte_with_console_in_returns_the_scripted_byte() {
+        let fake = Rc::new(FakePlatform::with_bytes(b"j"));
+        let value = run_program_on("main() uses ConsoleIn = readByte()", fake)
+            .expect("declared readByte should run");
+        match value {
+            Value::Data(d) if d.variant == "Some" => {
+                assert_eq!(d.fields[0].1, Value::Str("j".into()));
+            }
+            other => panic!("expected Some(\"j\"), got {}", other.display()),
+        }
+    }
+
+    #[test]
+    fn read_byte_needs_console_in() {
+        let fake = Rc::new(FakePlatform::with_bytes(b"j"));
+        let err = run_program_on("main() uses ConsoleOut = readByte()", fake)
+            .expect_err("readByte needs ConsoleIn, not ConsoleOut");
+        assert!(err.message().contains("ConsoleIn"), "{}", err.message());
+    }
+
+    #[test]
+    fn write_console_writes_raw_with_no_trailing_newline() {
+        // Unlike `print`, `writeConsole` emits exactly the text — needed for the
+        // stim driver to push escape sequences.
+        let fake = Rc::new(FakePlatform::new());
+        run_program_on(r#"main() uses ConsoleOut = writeConsole("hi")"#, fake.clone())
+            .expect("declared writeConsole should run");
+        assert_eq!(fake.output(), "hi");
+    }
+
+    #[test]
+    fn write_console_needs_console_out() {
+        let fake = Rc::new(FakePlatform::new());
+        let err = run_program_on(r#"main() uses ConsoleIn = writeConsole("hi")"#, fake)
+            .expect_err("writeConsole needs ConsoleOut");
+        assert!(err.message().contains("ConsoleOut"), "{}", err.message());
+    }
+
+    #[test]
+    fn fs_write_with_authority_writes_through_the_platform_and_returns_true() {
+        let fake = Rc::new(FakePlatform::new());
+        let value = run_program_on(r#"main() uses FsWrite = fsWrite(7, "data")"#, fake.clone())
+            .expect("declared fsWrite should run");
+        assert_eq!(value, Value::Bool(true));
+        assert_eq!(fake.writes(), vec![(7u32, b"data".to_vec())]);
+    }
+
+    #[test]
+    fn fs_write_needs_the_fs_write_authority_not_fs_read() {
+        // The split: holding `FsRead` (readFile) does not grant writing.
+        let fake = Rc::new(FakePlatform::new());
+        let err = run_program_on(r#"main() uses FsRead = fsWrite(7, "data")"#, fake)
+            .expect_err("fsWrite needs FsWrite, not FsRead");
+        assert!(err.message().contains("FsWrite"), "{}", err.message());
     }
 
     /// The named `Cap` record `hold` lifts each capability into (the unhitch

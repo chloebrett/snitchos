@@ -404,7 +404,7 @@ nothing); `Runtime` does `Truncate(len)` then chunked `Write` through the delega
 **1 equivalent** (default `→false` mutated to `false` — unkillable, like the documented
 `advance_anchor` one). 547 lib green.
 
-#### Step 3.5: expose `readByte` / `writeConsole` / `fsWrite` as Stitch natives
+#### Step 3.5: expose `readByte` / `writeConsole` / `fsWrite` as Stitch natives — ✅ DONE (2026-07-10)
 **Touches**: `stitch/src/natives.rs` (+ the `FsWrite` authority in `interp.rs`).
 **Design**: `readByte() -> Maybe<Str>` (the byte as a 1-char string, or `None`;
 gated by `ConsoleIn`); `writeConsole(s)` — **raw write, no trailing newline** (unlike
@@ -415,10 +415,24 @@ new `FsWrite`).
 refused without its authority. **RED**: a `.st` program driving each against
 `FakePlatform` (+ undeclared-authority refusals). **Mutants**: mostly covered by the
 Platform-level tests.
+DONE: three flat natives (`readByte`→`char::from(byte)` 1-char string; `writeConsole`
+raw via `Platform::write`; `fsWrite`→`Platform::fs_write`, `Int`→`u32` handle) each
+`has_authority`-gated; `FsWrite` added to the ambient set (`interp.rs:82`). **Note:**
+the concurrent Group-F cleanup migrated the `NATIVES` table to inline `module`/
+`export_as` (my `List` natives came along, still namespaced) — new natives are flat
+`module: None`. 6 native tests (3 route + 3 refusals), 553 lib green, clippy-clean
+host+riscv, mutation-clean (3 caught / 3 unviable / 0 missed).
 
 *PR boundaries:* **(a)** "FS truncate through the stack" (3.2 + 3.3 — one vertical
 slice: trait → ramfs → proto → server); **(b)** "stim effect natives + Platform seam"
 (3.1 + 3.4 + 3.5 + the `FsWrite` authority).
+
+**★ GROUP 3 COMPLETE (2026-07-10) — the whole host substrate.** `read_byte`,
+`truncate` (trait+ramfs+proto+server), `fs_write` (delegated-cap), and the three
+natives + `FsWrite` authority. Everything host-tested + riscv-verified + mutation-
+clean. **Next: Group 4** — the `stim` driver loop (read byte → `step` → perform
+effect), shell invocation (resolve + create-if-absent + delegate the file cap;
+read-only refusal), and tracing.
 
 ---
 
