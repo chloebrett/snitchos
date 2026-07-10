@@ -261,11 +261,45 @@ the actual desugar logic, which is what carries risk.
 
 ---
 
-### Step C4: Interpreter evaluates CoreExpr; delete the old path — IN PROGRESS
+### Step C4: Interpreter evaluates CoreExpr; delete the old path — ✅ DONE (2026-07-10)
 
-**Groundwork done (2026-07-10):** `lower::free_vars_core(&CoreExpr, &BTreeSet<String>)`
-— the CoreExpr analog of `free_vars`, needed by `eval_core`'s `Lambda` arm to capture
-upvalues. Additive, green (564 tests).
+The runtime now evaluates the core IR end to end; `ClosureData.body: Rc<CoreExpr>`;
+one evaluator. **564 lib + 26 feature-gated integration tests green through the core
+path; clippy clean.**
+
+**How it was done** (differs slightly from the pre-plan below): rather than write
+`eval_core` *alongside* the old `eval`, the existing `eval` + expr-walking helpers were
+**retyped in place** to walk `CoreExpr` (`&Expr`→`&CoreExpr`, `ExprKind::`→
+`CoreExprKind::`, `&[Arg]`→`&[CoreArg]`, `&[Stmt]`→`&[CoreStmt]`,
+`&[StrSegment]`→`&[CoreStrSegment]`, `pattern::eval_match` → `&[CoreMatchArm]`). Since
+nothing evaluates surface `Expr` after the cut, keeping the names `eval`/`eval_tail`
+(now walking core) was less churn than a `_core` split and left no duplicate to delete.
+- `ClosureData.body: Expr → Rc<CoreExpr>` (value.rs). Lambda arm shares the `Rc`
+  (no deep clone) and uses `free_vars_core` for upvalue capture. `eval_safe_field`'s
+  accessor builds an `Rc<CoreExpr>` body. `registry::register_items` lowers each
+  `Func` body via `lower_expr_to_core`.
+- **Method bodies** stay `ast::Method`/`Expr` in the method table and are lowered to
+  core **on-the-fly** at dispatch (`eval_method_call`, `call_instance_method`) — no
+  `env.rs`/registry method-table refactor. `apply_values` + `natives.rs` unchanged
+  (Value-level). External eval callers (REPL `runner::eval_line`, `testing::run`/
+  `run_err`) lower the parsed expr with `lower_expr_to_core` before eval.
+- `eval`'s match became total over `CoreExprKind`; the old `_ =>` "not implemented"
+  fallback is replaced by an explicit `Spread` error (spread is arg-position only).
+
+**Follow-up cleanup (behavior-neutral, deferred):** the 6 in-place `lower_program(&mut …)`
+calls in the entry points + REPL are now **redundant** (func bodies lower via
+`lower_expr_to_core`; methods lower on-the-fly), and surface `free_vars`/`lower` are
+orphaned. Safe to delete in a follow-up (all downstream consumers —
+`collect_exports`/`manifest_of_main`/`check_coherence`/`link_imports` — read item
+names/types, not expr bodies). Left in place to keep this cutover's diff tight.
+
+**Mutation (deferred from C3):** `to_core` + the desugars now get strong behavioral
+coverage — every construct in the 564-suite is evaluated through `lower_expr_to_core`
++ `eval`(core). An explicit `cargo mutants` pass on `lower.rs`/`core_ir.rs` is a
+nice-to-have follow-up.
+
+**Groundwork (2026-07-10):** `lower::free_vars_core(&CoreExpr, &BTreeSet<String>)`
+— the CoreExpr analog of `free_vars`. Additive.
 
 **The cutover is atomic** — `ClosureData.body` can't be both `Expr` and `Rc<CoreExpr>`,
 so there is no green intermediate until it all lands. Execute as one focused push in

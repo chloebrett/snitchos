@@ -91,7 +91,7 @@ pub(crate) fn register_items(items: &[Item], env: &Env, reg: &mut Registration) 
             } => {
                 let closure = Value::Closure(Rc::new(ClosureData {
                     params: params.iter().map(|param| param.name.clone()).collect(),
-                    body: body.clone(),
+                    body: Rc::new(crate::lower::lower_expr_to_core(body)),
                     upvalues: Vec::new(),
                     home_globals: env.home_globals_weak(),
                     authority: env.authority_rc(),

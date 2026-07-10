@@ -7,9 +7,11 @@ use core::cell::RefCell;
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 
-use crate::ast::{Arg, BinOp, Expr, ExprKind, Item, MethodModifier, Stmt, StrSegment, Type};
+use crate::ast::{BinOp, Item, MethodModifier, Type};
+use crate::core_ir::{CoreArg, CoreExpr, CoreExprKind, CoreStmt, CoreStrSegment};
+use crate::lexer::Span;
 use crate::env::{AssignError, Env};
-use crate::lower::{free_vars, lower_program};
+use crate::lower::{free_vars_core, lower_expr_to_core, lower_program};
 use crate::natives::NATIVES;
 use crate::ops::{as_bool, eval_binary, eval_unary};
 use crate::parser::parse_program;
@@ -415,24 +417,24 @@ fn link_imports(
 ///
 /// # Errors
 /// Returns `Err` on a runtime fault (type mismatch, division by zero, …).
-pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
+pub fn eval(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
     if !env.take_fuel() {
         return Err(RuntimeError::new("evaluation fuel exhausted"));
     }
     match &expr.kind {
-        ExprKind::Int(n) => Ok(Value::Int(*n)),
-        ExprKind::Float(f) => Ok(Value::Float(*f)),
-        ExprKind::Bool(b) => Ok(Value::Bool(*b)),
-        ExprKind::Str(segments) => eval_string(segments, env),
+        CoreExprKind::Int(n) => Ok(Value::Int(*n)),
+        CoreExprKind::Float(f) => Ok(Value::Float(*f)),
+        CoreExprKind::Bool(b) => Ok(Value::Bool(*b)),
+        CoreExprKind::Str(segments) => eval_string(segments, env),
         // `and`/`or` short-circuit, so they can't pre-evaluate both operands.
-        ExprKind::Binary {
+        CoreExprKind::Binary {
             op: BinOp::And,
             left,
             right,
         } => Ok(Value::Bool(
             as_bool(&eval(left, env)?, "`and`")? && as_bool(&eval(right, env)?, "`and`")?,
         )),
-        ExprKind::Binary {
+        CoreExprKind::Binary {
             op: BinOp::Or,
             left,
             right,
@@ -440,7 +442,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             as_bool(&eval(left, env)?, "`or`")? || as_bool(&eval(right, env)?, "`or`")?,
         )),
         // `lhs |> f(a)` ≡ `f(lhs, a)`; `lhs |> f` ≡ `f(lhs)`.
-        ExprKind::Binary {
+        CoreExprKind::Binary {
             op: BinOp::Pipe,
             left,
             right,
@@ -450,46 +452,46 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         // against the stage's declared input, then the stage runs. In-process for
         // now (soft authority); process isolation + marshalling is the next
         // milestone (see docs/typed-processes-and-the-data-model-design.md).
-        ExprKind::Binary {
+        CoreExprKind::Binary {
             op: BinOp::CrossPipe,
             left,
             right,
         } => eval_cross_pipe(left, right, env),
-        ExprKind::Binary { op, left, right } => eval_binary(*op, &eval(left, env)?, &eval(right, env)?),
-        ExprKind::Unary { op, operand } => eval_unary(*op, &eval(operand, env)?),
-        ExprKind::Var(name) => env
+        CoreExprKind::Binary { op, left, right } => eval_binary(*op, &eval(left, env)?, &eval(right, env)?),
+        CoreExprKind::Unary { op, operand } => eval_unary(*op, &eval(operand, env)?),
+        CoreExprKind::Var(name) => env
             .lookup(name)
             .ok_or_else(|| RuntimeError::new(format!("unbound variable `{name}`"))),
-        ExprKind::SelfRef => env
+        CoreExprKind::SelfRef => env
             .lookup("@")
             .ok_or_else(|| RuntimeError::new("`@` is only valid inside a method body")),
         // Only the taken branch is evaluated.
-        ExprKind::If { cond, then, els } => {
+        CoreExprKind::If { cond, then, els } => {
             if as_bool(&eval(cond, env)?, "condition")? {
                 eval(then, env)
             } else {
                 eval(els, env)
             }
         }
-        ExprKind::Block { stmts, result } => eval_block(stmts, result.as_deref(), env, false),
-        ExprKind::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env, false),
+        CoreExprKind::Block { stmts, result } => eval_block(stmts, result.as_deref(), env, false),
+        CoreExprKind::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env, false),
         // `()` is unit; `(a, b, …)` is a tuple.
-        ExprKind::Tuple(elements) if elements.is_empty() => Ok(Value::Unit),
-        ExprKind::Tuple(elements) => {
+        CoreExprKind::Tuple(elements) if elements.is_empty() => Ok(Value::Unit),
+        CoreExprKind::Tuple(elements) => {
             let values = elements
                 .iter()
                 .map(|element| eval(element, env))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Tuple(values.into()))
         }
-        ExprKind::List(elements) => {
+        CoreExprKind::List(elements) => {
             let values = elements
                 .iter()
                 .map(|element| eval(element, env))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::List(values.into()))
         }
-        ExprKind::Map(entries) => {
+        CoreExprKind::Map(entries) => {
             let mut map: Vec<(Value, Value)> = Vec::new();
             for (key_expr, value_expr) in entries {
                 let key = eval(key_expr, env)?;
@@ -503,9 +505,9 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             }
             Ok(Value::Map(Rc::new(map)))
         }
-        ExprKind::Lambda { params, body } => {
+        CoreExprKind::Lambda { params, body } => {
             let param_set: BTreeSet<String> = params.iter().cloned().collect();
-            let candidates = free_vars(body, &param_set);
+            let candidates = free_vars_core(body, &param_set);
             let upvalues: Vec<(String, Rc<RefCell<Value>>, bool)> = candidates
                 .into_iter()
                 .filter_map(|name| {
@@ -515,7 +517,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
                 .collect();
             Ok(Value::Closure(Rc::new(ClosureData {
                 params: params.clone(),
-                body: (**body).clone(),
+                body: Rc::clone(body),
                 upvalues,
                 home_globals: env.home_globals_weak(),
                 authority: env.authority_rc(),
@@ -527,19 +529,21 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
         // *before* evaluating the callee — `receiver.method` isn't a value on
         // its own; the receiver and the name must be resolved together against
         // the method registry. Any other call falls through to `eval_call`.
-        ExprKind::Call { callee, args } => match &callee.kind {
-            ExprKind::Field { object, name } => eval_method_call(object, name, args, env),
+        CoreExprKind::Call { callee, args } => match &callee.kind {
+            CoreExprKind::Field { object, name } => eval_method_call(object, name, args, env),
             _ => eval_call(&eval(callee, env)?, args, env),
         },
-        ExprKind::Field { object, name } => eval_field(&eval(object, env)?, name),
-        ExprKind::Try(operand) => eval_try(eval(operand, env)?, env),
-        ExprKind::SafeField { object, name } => eval_safe_field(&eval(object, env)?, name, env),
-        ExprKind::Index { object, index } => eval_index(&eval(object, env)?, &eval(index, env)?),
-        ExprKind::Range { start, end, inclusive } => {
+        CoreExprKind::Field { object, name } => eval_field(&eval(object, env)?, name),
+        CoreExprKind::Try(operand) => eval_try(eval(operand, env)?, env),
+        CoreExprKind::SafeField { object, name } => eval_safe_field(&eval(object, env)?, name, env),
+        CoreExprKind::Index { object, index } => eval_index(&eval(object, env)?, &eval(index, env)?),
+        CoreExprKind::Range { start, end, inclusive } => {
             eval_range(start.as_deref(), end.as_deref(), *inclusive, env)
         }
-        _ => Err(RuntimeError::new(
-            "evaluation not yet implemented for this expression",
+        // A spread is only meaningful as a call/construction argument; the arg
+        // handlers intercept it there. Reaching it as a bare expression is invalid.
+        CoreExprKind::Spread(_) => Err(RuntimeError::new(
+            "spread (`..`) is only allowed when constructing a prod/variant",
         )),
     }
 }
@@ -548,7 +552,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
 /// environment, then bound to the closure's parameters on top of the
 /// environment the closure captured — that captured env is what makes it a
 /// closure rather than a plain function.
-fn eval_call(callee: &Value, args: &[Arg], env: &Env) -> Result<Value, RuntimeError> {
+fn eval_call(callee: &Value, args: &[CoreArg], env: &Env) -> Result<Value, RuntimeError> {
     // Constructors are the only callees that take named args / `..` spread.
     if let Value::Constructor(ctor) = callee {
         return construct(ctor, args, env);
@@ -560,7 +564,7 @@ fn eval_call(callee: &Value, args: &[Arg], env: &Env) -> Result<Value, RuntimeEr
                 "named arguments are only allowed when constructing a prod/variant",
             ));
         }
-        if matches!(&arg.value.kind, ExprKind::Spread(_)) {
+        if matches!(&arg.value.kind, CoreExprKind::Spread(_)) {
             return Err(RuntimeError::new(
                 "spread (`..`) is only allowed when constructing a prod/variant",
             ));
@@ -579,9 +583,9 @@ fn eval_call(callee: &Value, args: &[Arg], env: &Env) -> Result<Value, RuntimeEr
 /// are not, the same hygiene a closure gets from its captured env. The receiver
 /// is bound as `@` and the arguments to the method's parameters.
 fn eval_method_call(
-    object: &Expr,
+    object: &CoreExpr,
     name: &str,
-    args: &[Arg],
+    args: &[CoreArg],
     env: &Env,
 ) -> Result<Value, RuntimeError> {
     // Resolve what we're dispatching on. The object is usually evaluated to a
@@ -590,7 +594,7 @@ fn eval_method_call(
     // name with no value that names a type with methods (a `sum`'s type name has
     // no value, only its variants do) is resolved *as a type*, not evaluated.
     let (type_name, self_value): (String, Option<Value>) = match &object.kind {
-        ExprKind::Var(type_path) if env.lookup(type_path).is_none() && env.has_methods(type_path) => {
+        CoreExprKind::Var(type_path) if env.lookup(type_path).is_none() && env.has_methods(type_path) => {
             (type_path.clone(), None)
         }
         _ => {
@@ -691,9 +695,12 @@ fn eval_method_call(
         .body
         .as_ref()
         .expect("an `on`-block method always has a body (parser-enforced)");
+    // Method bodies are stored as surface `Expr` in the method table; lower to core
+    // on dispatch. (Caching a `CoreMethod` table is a noted follow-up.)
+    let core_body = lower_expr_to_core(body);
     // A method is a call boundary, so a `?` early-return stops here (like a
     // closure call) rather than escaping the method.
-    let result = match eval(body, &method_env) {
+    let result = match eval(&core_body, &method_env) {
         Err(RuntimeError::Return(value)) => value,
         other => other?,
     };
@@ -710,14 +717,14 @@ fn eval_method_call(
 /// Evaluate a pipe `left |> right`. If `right` is a call `f(a, …)`, insert
 /// `left` as the first argument: `f(left, a, …)`. Otherwise `right` is a bare
 /// function reference and is applied to `left` alone.
-fn eval_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, RuntimeError> {
+fn eval_pipe(left: &CoreExpr, right: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
     let piped = eval(left, env)?;
-    if let ExprKind::Call { callee, args } = &right.kind {
+    if let CoreExprKind::Call { callee, args } = &right.kind {
         let function = eval(callee, env)?;
         let mut values = Vec::with_capacity(args.len() + 1);
         values.push(piped);
         for arg in args {
-            if arg.label.is_some() || matches!(&arg.value.kind, ExprKind::Spread(_)) {
+            if arg.label.is_some() || matches!(&arg.value.kind, CoreExprKind::Spread(_)) {
                 return Err(RuntimeError::new(
                     "a piped call takes positional arguments only",
                 ));
@@ -733,9 +740,9 @@ fn eval_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, RuntimeError
 /// The right side of `~>` names a program stage. v1 accepts only a bare name
 /// (`data ~> clean`); a computed stage (a first-class `Program` value) is a later
 /// step.
-fn stage_name(expr: &Expr) -> Result<&str, RuntimeError> {
+fn stage_name(expr: &CoreExpr) -> Result<&str, RuntimeError> {
     match &expr.kind {
-        ExprKind::Var(name) => Ok(name),
+        CoreExprKind::Var(name) => Ok(name),
         _ => Err(RuntimeError::new("the right side of `~>` must be a program name")),
     }
 }
@@ -759,7 +766,7 @@ fn resolve_stage(name: &str, env: &Env) -> Result<(Vec<Item>, hitch::Manifest), 
     Ok((items, manifest))
 }
 
-fn eval_cross_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, RuntimeError> {
+fn eval_cross_pipe(left: &CoreExpr, right: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
     let name = stage_name(right)?;
     let (items, manifest) = resolve_stage(name, env)?;
     let input_schema = manifest.input.ok_or_else(|| {
@@ -770,7 +777,7 @@ fn eval_cross_pipe(left: &Expr, right: &Expr, env: &Env) -> Result<Value, Runtim
     // *declared* output must be `compatible` with this stage's input (schema vs
     // schema, no values). Caught here — before the upstream is evaluated/run — so a
     // mismatched pipeline is rejected without side effects.
-    if let ExprKind::Binary { op: BinOp::CrossPipe, right: upstream, .. } = &left.kind {
+    if let CoreExprKind::Binary { op: BinOp::CrossPipe, right: upstream, .. } = &left.kind {
         let upstream_name = stage_name(upstream)?;
         let (_, upstream_manifest) = resolve_stage(upstream_name, env)?;
         let Some(upstream_output) = &upstream_manifest.output else {
@@ -820,36 +827,36 @@ fn run_stage(
 /// that a self-tail-call returns `Err(TailCall(new_args))` instead of recursing
 /// into Rust. `apply_values` catches that signal and loops. Everything else
 /// delegates to `eval` — no self-tail-call is possible there.
-pub(crate) fn eval_tail(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
+pub(crate) fn eval_tail(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
     match &expr.kind {
         // A call in tail position: detect self-tail-calls by pointer identity.
-        ExprKind::Call { callee, args } if !matches!(&callee.kind, ExprKind::Field { .. }) => {
+        CoreExprKind::Call { callee, args } if !matches!(&callee.kind, CoreExprKind::Field { .. }) => {
             let callee_val = eval(callee, env)?;
-            if let Value::Closure(c) = &callee_val {
-                if env.is_self_closure(c) {
-                    let mut values = Vec::with_capacity(args.len());
-                    for arg in args {
-                        if arg.label.is_some() || matches!(&arg.value.kind, ExprKind::Spread(_)) {
-                            // Named / spread args to self are uncommon; don't
-                            // trampoline — fall through to a normal call instead.
-                            return eval_call(&callee_val, args, env);
-                        }
-                        values.push(eval(&arg.value, env)?);
+            if let Value::Closure(c) = &callee_val
+                && env.is_self_closure(c)
+            {
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    if arg.label.is_some() || matches!(&arg.value.kind, CoreExprKind::Spread(_)) {
+                        // Named / spread args to self are uncommon; don't
+                        // trampoline — fall through to a normal call instead.
+                        return eval_call(&callee_val, args, env);
                     }
-                    if values.len() != c.params.len() {
-                        return Err(RuntimeError::new(format!(
-                            "function expects {} argument(s), got {}",
-                            c.params.len(),
-                            values.len()
-                        )));
-                    }
-                    return Err(RuntimeError::TailCall(values));
+                    values.push(eval(&arg.value, env)?);
                 }
+                if values.len() != c.params.len() {
+                    return Err(RuntimeError::new(format!(
+                        "function expects {} argument(s), got {}",
+                        c.params.len(),
+                        values.len()
+                    )));
+                }
+                return Err(RuntimeError::TailCall(values));
             }
             eval_call(&callee_val, args, env)
         }
         // Conditional branches are in tail position.
-        ExprKind::If { cond, then, els } => {
+        CoreExprKind::If { cond, then, els } => {
             if as_bool(&eval(cond, env)?, "condition")? {
                 eval_tail(then, env)
             } else {
@@ -857,9 +864,9 @@ pub(crate) fn eval_tail(expr: &Expr, env: &Env) -> Result<Value, RuntimeError> {
             }
         }
         // Block result expression is in tail position.
-        ExprKind::Block { stmts, result } => eval_block(stmts, result.as_deref(), env, true),
+        CoreExprKind::Block { stmts, result } => eval_block(stmts, result.as_deref(), env, true),
         // Match arm bodies are in tail position.
-        ExprKind::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env, true),
+        CoreExprKind::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env, true),
         // Everything else: no self-tail-call is reachable here.
         _ => eval(expr, env),
     }
@@ -977,13 +984,13 @@ fn make_data(ctor: &Constructor, values: &[Value]) -> Result<Value, RuntimeError
 
 /// Build a `Data` value from a constructor applied to arguments. Positional
 /// args fill fields in order; named args (`x: …`) fill by label in any order.
-fn construct(ctor: &Constructor, args: &[Arg], env: &Env) -> Result<Value, RuntimeError> {
+fn construct(ctor: &Constructor, args: &[CoreArg], env: &Env) -> Result<Value, RuntimeError> {
     let mut values: Vec<Option<Value>> = vec![None; ctor.field_names.len()];
     let mut next_positional = 0;
     for arg in args {
         // `..base` — copy every field from `base` as the starting point; later
         // args override. `base` must be a value of the same type.
-        if let ExprKind::Spread(base) = &arg.value.kind {
+        if let CoreExprKind::Spread(base) = &arg.value.kind {
             let base = eval(base, env)?;
             let Value::Data(data) = &base else {
                 return Err(RuntimeError::new(format!(
@@ -1036,12 +1043,12 @@ fn construct(ctor: &Constructor, args: &[Arg], env: &Env) -> Result<Value, Runti
 
 /// Evaluate a string literal: concatenate literal segments and the displayed
 /// value of each `{expr}` interpolation.
-fn eval_string(segments: &[StrSegment], env: &Env) -> Result<Value, RuntimeError> {
+fn eval_string(segments: &[CoreStrSegment], env: &Env) -> Result<Value, RuntimeError> {
     let mut text = String::new();
     for segment in segments {
         match segment {
-            StrSegment::Lit(literal) => text.push_str(literal),
-            StrSegment::Interp(expr) => text.push_str(&eval(expr, env)?.display()),
+            CoreStrSegment::Lit(literal) => text.push_str(literal),
+            CoreStrSegment::Interp(expr) => text.push_str(&eval(expr, env)?.display()),
         }
     }
     Ok(Value::Str(text.into()))
@@ -1118,8 +1125,11 @@ fn call_instance_method(
         method_env = method_env.extend(param.name.clone(), arg.clone());
     }
     method_env = method_env.with_authority(method.uses.iter().cloned().collect());
+    // Method bodies are surface `Expr`; lower to core on dispatch (see note in
+    // `eval_method_call`).
+    let core_body = lower_expr_to_core(body);
     // A method is a call boundary, so a `?` inside it stops here.
-    let result = match eval(body, &method_env) {
+    let result = match eval(&core_body, &method_env) {
         Err(RuntimeError::Return(value)) => value,
         other => other?,
     };
@@ -1130,8 +1140,8 @@ fn call_instance_method(
 /// to be a sequence (`..n` has no first element); the end may be absent, giving
 /// an endless sequence (`n..`).
 fn eval_range(
-    start: Option<&Expr>,
-    end: Option<&Expr>,
+    start: Option<&CoreExpr>,
+    end: Option<&CoreExpr>,
     inclusive: bool,
     env: &Env,
 ) -> Result<Value, RuntimeError> {
@@ -1144,7 +1154,7 @@ fn eval_range(
 }
 
 /// Evaluate `expr` to an `Int`, or a type error tagged with `what`.
-fn eval_int(expr: &Expr, env: &Env, what: &str) -> Result<i64, RuntimeError> {
+fn eval_int(expr: &CoreExpr, env: &Env, what: &str) -> Result<i64, RuntimeError> {
     match eval(expr, env)? {
         Value::Int(n) => Ok(n),
         other => Err(RuntimeError::new(format!(
@@ -1204,12 +1214,14 @@ fn eval_try(value: Value, env: &Env) -> Result<Value, RuntimeError> {
 fn eval_safe_field(object: &Value, name: &str, env: &Env) -> Result<Value, RuntimeError> {
     // The accessor `v -> v.field`, handed to `map` as the function to apply
     // inside the container.
+    let var_v = CoreExpr::new(CoreExprKind::Var("v".to_string()), Span::default());
+    let accessor_body = CoreExpr::new(
+        CoreExprKind::Field { object: Box::new(var_v), name: name.to_string() },
+        Span::default(),
+    );
     let accessor = Value::Closure(Rc::new(ClosureData {
         params: vec!["v".to_string()],
-        body: Expr::bare(ExprKind::Field {
-            object: Box::new(Expr::bare(ExprKind::Var("v".to_string()))),
-            name: name.to_string(),
-        }),
+        body: Rc::new(accessor_body),
         upvalues: Vec::new(),
         home_globals: env.home_globals_weak(),
         authority: env.authority_rc(),
@@ -1248,11 +1260,11 @@ fn eval_field(object: &Value, name: &str) -> Result<Value, RuntimeError> {
 /// field assignment doesn't mutate in place — it rebuilds the containing record
 /// with the field replaced and reassigns the *root binding* (value semantics).
 /// A nested path (`a.b.x = v`) recurses: rebuild `b`, then assign `a.b`.
-fn assign_place(place: &Expr, value: Value, scope: &Env) -> Result<(), RuntimeError> {
+fn assign_place(place: &CoreExpr, value: Value, scope: &Env) -> Result<(), RuntimeError> {
     match &place.kind {
-        ExprKind::Var(name) => assign_binding(name, value, scope),
-        ExprKind::SelfRef => assign_binding("@", value, scope),
-        ExprKind::Field { object, name } => {
+        CoreExprKind::Var(name) => assign_binding(name, value, scope),
+        CoreExprKind::SelfRef => assign_binding("@", value, scope),
+        CoreExprKind::Field { object, name } => {
             let current = eval(object, scope)?;
             let Value::Data(data) = &current else {
                 return Err(RuntimeError::new(format!(
@@ -1285,10 +1297,10 @@ fn assign_place(place: &Expr, value: Value, scope: &Env) -> Result<(), RuntimeEr
 
 /// Whether `expr` is an assignable place: a variable, `@`, or a field path
 /// rooted at one. (A temporary like `Counter(0)` or a literal is not.)
-fn is_assignable_place(expr: &Expr) -> bool {
+fn is_assignable_place(expr: &CoreExpr) -> bool {
     match &expr.kind {
-        ExprKind::Var(_) | ExprKind::SelfRef => true,
-        ExprKind::Field { object, .. } => is_assignable_place(object),
+        CoreExprKind::Var(_) | CoreExprKind::SelfRef => true,
+        CoreExprKind::Field { object, .. } => is_assignable_place(object),
         _ => false,
     }
 }
@@ -1337,11 +1349,11 @@ fn rebuild_with_field(
 /// extends a fresh child scope, so bindings are visible to later statements but
 /// not outside the block), then evaluate the trailing expression — or `Unit`
 /// if there isn't one.
-fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env, tail: bool) -> Result<Value, RuntimeError> {
+fn eval_block(stmts: &[CoreStmt], result: Option<&CoreExpr>, env: &Env, tail: bool) -> Result<Value, RuntimeError> {
     let mut scope = env.clone();
-    for (index, stmt) in stmts.iter().enumerate() {
+    for stmt in stmts {
         match stmt {
-            Stmt::Let {
+            CoreStmt::Let {
                 name,
                 mutable,
                 value,
@@ -1353,14 +1365,10 @@ fn eval_block(stmts: &[Stmt], result: Option<&Expr>, env: &Env, tail: bool) -> R
                     scope.extend(name.clone(), bound)
                 };
             }
-            Stmt::Expr(expr) => {
+            CoreStmt::Expr(expr) => {
                 eval(expr, &scope)?;
             }
-            Stmt::Use { .. } => {
-                // Lowered to ExprKind::Call + Lambda by lower::lower_block before eval.
-                return Err(RuntimeError::new("Stmt::Use reached eval — lowering pass not applied"));
-            }
-            Stmt::Assign { target, value } => {
+            CoreStmt::Assign { target, value } => {
                 let new_value = eval(value, &scope)?;
                 assign_place(target, new_value, &scope)?;
             }

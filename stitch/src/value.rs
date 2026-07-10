@@ -11,7 +11,7 @@ use alloc::rc::Weak;
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 
-use crate::ast::Expr;
+use crate::core_ir::CoreExpr;
 use crate::env::Env;
 
 /// A value produced by evaluating an expression.
@@ -204,7 +204,9 @@ pub struct DataValue {
 /// each call, and the lexical environment in effect where the lambda appeared.
 pub struct ClosureData {
     pub params: Vec<String>,
-    pub body: Expr,
+    /// The closure's code, as a shared reference into the core IR — closures over
+    /// the same definition share this `Rc` instead of deep-cloning the body.
+    pub body: Rc<CoreExpr>,
     /// The local bindings this closure closes over — captured at creation time
     /// as shared `Rc<RefCell<Value>>` cells (not value copies) so that `mut`
     /// bindings remain observable through the closure after reassignment.

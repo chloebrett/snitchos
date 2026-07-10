@@ -2,7 +2,8 @@
 //! the environment) or fails; `eval_match` walks the arms in order and runs the
 //! first whose pattern matches and whose guard holds.
 
-use crate::ast::{MatchArm, Pattern};
+use crate::ast::Pattern;
+use crate::core_ir::CoreMatchArm;
 use crate::env::Env;
 use crate::interp::{eval, eval_tail};
 use crate::ops::as_bool;
@@ -13,7 +14,7 @@ use crate::value::{RuntimeError, Value};
 /// a runtime error (v0 has no static exhaustiveness check yet).
 pub(crate) fn eval_match(
     subject: &Value,
-    arms: &[MatchArm],
+    arms: &[CoreMatchArm],
     env: &Env,
     tail: bool,
 ) -> Result<Value, RuntimeError> {

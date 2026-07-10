@@ -15,7 +15,7 @@ use crate::interp::{
     Module, build_env_with_backends, eval, eval_modules_with_telemetry,
     eval_program_with_telemetry, is_builtin_module, prelude_items,
 };
-use crate::lower::lower_program;
+use crate::lower::{lower_expr_to_core, lower_program};
 use crate::parser::{parse, parse_program};
 use crate::platform::{NullPlatform, Platform};
 use crate::telemetry::{RecordingTelemetry, Telemetry};
@@ -252,7 +252,7 @@ impl Repl {
             ));
         }
         let env = self.env.as_ref().expect("env was just built above");
-        let result = eval(&expr, env);
+        let result = eval(&lower_expr_to_core(&expr), env);
         // Drain only *this* line's telemetry from the long-lived sink.
         let mut out = render_telemetry(&env.take_telemetry());
         match result {
