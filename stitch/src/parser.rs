@@ -32,14 +32,7 @@ impl ParseError {
     /// 1-based.
     #[must_use]
     pub fn render(&self, src: &str) -> String {
-        let offset = self.span.start.min(src.len());
-        let before = &src[..offset];
-        let line = before.matches('\n').count() + 1;
-        let line_start = before.rfind('\n').map_or(0, |nl| nl + 1);
-        let col = src[line_start..offset].chars().count() + 1;
-        let line_text = src[line_start..].lines().next().unwrap_or("");
-        let caret = " ".repeat(col - 1);
-        format!("{line}:{col}: {}\n{line_text}\n{caret}^", self.message)
+        crate::source::caret_render(src, self.span, &self.message)
     }
 }
 
