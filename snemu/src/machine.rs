@@ -29,6 +29,15 @@ pub struct Machine {
     /// Every retired instruction is counted (no sampling) — deterministic, like
     /// the instret clock itself.
     profile: Option<std::collections::HashMap<u64, u64>>,
+    /// Native-op helpers (tier-0.5 of the JIT): when a hart's PC hits `memset_pc` /
+    /// `memcpy_pc`, execute the op natively on guest RAM and charge the instret the
+    /// interpreter would have retired, instead of grinding the store loop one
+    /// instruction at a time. This is the shared "PC → native block" dispatch a JIT
+    /// generalises (compiled blocks replace these hand-written ones). Resolved from
+    /// the kernel ELF symbols; `None` if stripped. Off unless [`set_native_ops`].
+    memset_pc: Option<u64>,
+    memcpy_pc: Option<u64>,
+    native_ops: bool,
 }
 
 impl Machine {
@@ -45,7 +54,24 @@ impl Machine {
             bus: Bus::new(mem),
             time: 0,
             profile: None,
+            memset_pc: None,
+            memcpy_pc: None,
+            native_ops: false,
         }
+    }
+
+    /// Register the guest entry PCs of `memset`/`memcpy` (resolved from the kernel
+    /// ELF) so the native-op helper can intercept them. Called by the loader.
+    pub fn set_native_op_pcs(&mut self, memset_pc: Option<u64>, memcpy_pc: Option<u64>) {
+        self.memset_pc = memset_pc;
+        self.memcpy_pc = memcpy_pc;
+    }
+
+    /// Enable/disable the native-op helper (off by default). A/B this against the
+    /// pure interpreter to confirm it changes only speed, never the frame stream —
+    /// the same fidelity discipline as `idle_skip`.
+    pub fn set_native_ops(&mut self, on: bool) {
+        self.native_ops = on;
     }
 
     /// Start (or reset) exact instret profiling on this machine. The histogram
@@ -79,6 +105,28 @@ impl Machine {
             // advances it, so the profiler attributes the retired instruction to
             // where it ran.
             let pc = self.harts[i].pc();
+
+            // Native-op fast path (tier-0.5 JIT): only when this is the *sole*
+            // running hart — then there's no cross-hart interleaving the lockstep
+            // scheduler must preserve, so collapsing a whole memset/memcpy into one
+            // step (charging the instret the loop would have retired) is fidelity-
+            // exact. Falls through to the interpreter if the helper declines (e.g. a
+            // page it would fault on).
+            if self.native_ops
+                && !self.harts[i].is_idle()
+                && self.only_running_hart(i)
+                && (Some(pc) == self.memset_pc || Some(pc) == self.memcpy_pc)
+                && let Some(charged) =
+                    self.harts[i].try_native_memop(&mut self.bus, self.memset_pc, self.memcpy_pc)
+            {
+                self.time += charged;
+                retired = true;
+                if let Some(p) = self.profile.as_mut() {
+                    *p.entry(pc).or_insert(0) += charged;
+                }
+                continue;
+            }
+
             match self.harts[i].step(&mut self.bus)? {
                 HartEffect::Sbi(req) => {
                     service_sbi(&mut self.harts, i, &req);
@@ -109,6 +157,17 @@ impl Machine {
             self.time = self.time.max(deadline);
         }
         Ok(())
+    }
+
+    /// Whether hart `i` is the only one actively running — every other hart is idle
+    /// (parked on `wfi`) or stopped. Gates the native-op helper: when true, nothing
+    /// else is making progress this round, so collapsing hart `i`'s memset/memcpy
+    /// into a single fast step doesn't rob another hart of interleaved instructions.
+    fn only_running_hart(&self, i: usize) -> bool {
+        self.harts
+            .iter()
+            .enumerate()
+            .all(|(j, h)| j == i || h.is_idle() || h.is_stopped())
     }
 
     /// The soonest clock value at which any idle hart's armed timer would wake it.

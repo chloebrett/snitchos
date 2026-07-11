@@ -57,6 +57,51 @@ impl SymbolTable {
     }
 }
 
+/// Resolve the runtime address of a named function symbol from an ELF64 image's
+/// `.symtab`, or `None` if absent/stripped. Used to find the entry PC of
+/// `memset`/`memcpy` so the native-op helper (tier-0.5 of the JIT) can intercept
+/// them. Hand-rolled to match the loader's ethos: walk the section headers to
+/// `.symtab` + its linked string table, scan `STT_FUNC` entries for an exact name.
+#[must_use]
+pub fn function_addr(image: &[u8], name: &str) -> Option<u64> {
+    let u16_at = |o: usize| -> Option<u16> { Some(u16::from_le_bytes(image.get(o..o + 2)?.try_into().ok()?)) };
+    let u32_at = |o: usize| -> Option<u32> { Some(u32::from_le_bytes(image.get(o..o + 4)?.try_into().ok()?)) };
+    let u64_at = |o: usize| -> Option<u64> { Some(u64::from_le_bytes(image.get(o..o + 8)?.try_into().ok()?)) };
+
+    // ELF64 header → section header table (e_shoff @0x28, e_shentsize @0x3a, e_shnum @0x3c).
+    let sh_off = usize::try_from(u64_at(0x28)?).ok()?;
+    let sh_entsize = u16_at(0x3a)? as usize;
+    let sh_num = u16_at(0x3c)? as usize;
+
+    for i in 0..sh_num {
+        let sh = sh_off + i * sh_entsize;
+        if u32_at(sh + 4)? != 2 {
+            continue; // sh_type != SHT_SYMTAB
+        }
+        let sym_off = usize::try_from(u64_at(sh + 0x18)?).ok()?; // sh_offset
+        let sym_size = usize::try_from(u64_at(sh + 0x20)?).ok()?; // sh_size
+        let sym_entsize = usize::try_from(u64_at(sh + 0x38)?).ok()?; // sh_entsize
+        let strtab = sh_off + u32_at(sh + 0x28)? as usize * sh_entsize; // sh_link → strtab section
+        let str_off = usize::try_from(u64_at(strtab + 0x18)?).ok()?;
+
+        let count = if sym_entsize == 0 { 0 } else { sym_size / sym_entsize };
+        for s in 0..count {
+            let sym = sym_off + s * sym_entsize;
+            // Elf64_Sym: st_name @0 (u32), st_info @4 (u8), st_value @8 (u64).
+            if image.get(sym + 4)? & 0xf != 2 {
+                continue; // not STT_FUNC
+            }
+            let st_name = u32_at(sym)? as usize;
+            let name_bytes = image.get(str_off + st_name..)?;
+            let end = name_bytes.iter().position(|&b| b == 0).unwrap_or(name_bytes.len());
+            if &name_bytes[..end] == name.as_bytes() {
+                return u64_at(sym + 8);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

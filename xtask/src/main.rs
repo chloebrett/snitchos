@@ -123,6 +123,11 @@ enum Cmd {
         /// or `high` (release everywhere — surfaces the userspace opt≥2 UB class).
         #[arg(long, value_enum, default_value_t = qemu::OptLevel::Mid)]
         opt: qemu::OptLevel,
+        /// Enable the native-op helper (tier-0.5 JIT): fast-path guest memset/memcpy
+        /// (execute natively + charge the interpreter-equivalent instret). A/B it —
+        /// on vs off must keep the suite green (fidelity), only faster.
+        #[arg(long)]
+        native_ops: bool,
     },
     /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
     /// run under snemu with exact per-PC counting and report the top kernel
@@ -732,11 +737,13 @@ fn main() -> ExitCode {
             }
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
-        Cmd::SnemuItest { steps, limit, only, jobs, no_idle_skip, no_lpt, opt } => {
+        Cmd::SnemuItest { steps, limit, only, jobs, no_idle_skip, no_lpt, opt, native_ops } => {
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
-            itest::snemu_audit::run(steps, limit, only.as_deref(), jobs, !no_idle_skip, !no_lpt, opt)
+            itest::snemu_audit::run(
+                steps, limit, only.as_deref(), jobs, !no_idle_skip, !no_lpt, opt, native_ops,
+            )
         }
         Cmd::SnemuProfile { workload, steps, top, release } => {
             snemu_profile::run(workload.as_deref(), steps, top, release)

@@ -37,6 +37,19 @@ fn with_bit(value: u64, mask: u64, on: bool) -> u64 {
     if on { value | mask } else { value & !mask }
 }
 
+/// Instret the interpreter would retire for a `memset`/`memcpy` of `len` bytes —
+/// dominated by the word-store loop (~`len/8` iterations of a few instructions),
+/// plus a small prologue and a byte tail. The native-op helper charges this to the
+/// clock so a run with helpers on totals the same instret as the pure interpreter,
+/// keeping the deterministic timing (and thus the frame stream) identical. The
+/// constants are calibrated against the interpreter A/B (`snemu-bench`/`snemu-itest`
+/// with native ops off vs on).
+fn memop_charge(len: u64) -> u64 {
+    const BASE: u64 = 8;
+    const PER_WORD: u64 = 3;
+    BASE + (len / 8) * PER_WORD + (len % 8)
+}
+
 /// Trap cause codes (`scause`, exceptions; interrupt bit clear).
 mod cause {
     pub const BREAKPOINT: u64 = 3;
@@ -501,6 +514,74 @@ impl Hart {
                 None
             }
         }
+    }
+
+    /// Native-op helper (tier-0.5 of the JIT): if `pc` is the entry of `memset` or
+    /// `memcpy`, execute the whole op against guest RAM in one shot and return the
+    /// instret the interpreted loop would have retired (charged to the clock so the
+    /// deterministic timing — and thus the frame stream — is unchanged). Returns
+    /// `None` to decline (not a memop entry, or a page it would fault on — let the
+    /// interpreter run it and trap correctly). ABI: `memset(a0=dst, a1=val, a2=len)`,
+    /// `memcpy(a0=dst, a1=src, a2=len)`, both returning `dst` in `a0`, `ra`=return.
+    pub(crate) fn try_native_memop(
+        &mut self,
+        bus: &mut Bus,
+        memset_pc: Option<u64>,
+        memcpy_pc: Option<u64>,
+    ) -> Option<u64> {
+        let pc = self.pc();
+        let is_set = Some(pc) == memset_pc;
+        if !is_set && Some(pc) != memcpy_pc {
+            return None;
+        }
+        let dst = self.reg(10);
+        let src = self.reg(11); // memcpy source (unused for memset)
+        let len = self.reg(12);
+
+        // Translate every chunk up front (Store for dst, Load for src) so a fault
+        // aborts *before* any write — no partial state to unwind. Chunk by the
+        // smaller page remainder of dst/src so each chunk stays within one page each.
+        let satp = self.csr.read(addr::SATP).expect("satp is modeled");
+        let user = self.privilege == Privilege::User;
+        let sum = self.csr_read(addr::SSTATUS) & sstatus::SUM != 0;
+        let mut chunks: Vec<(u64, u64, usize)> = Vec::new(); // (dst_pa, src_pa, len)
+        let mut off = 0u64;
+        while off < len {
+            let dva = dst + off;
+            let drem = 0x1000 - (dva & 0xfff);
+            let mut clen = drem.min(len - off);
+            let dpa = mmu::translate(satp, dva, Access::Store, bus.ram(), user, sum).ok()?;
+            let spa = if is_set {
+                0
+            } else {
+                let sva = src + off;
+                clen = clen.min(0x1000 - (sva & 0xfff));
+                mmu::translate(satp, sva, Access::Load, bus.ram(), user, sum).ok()?
+            };
+            chunks.push((dpa, spa, clen as usize));
+            off += clen;
+        }
+
+        // Execute: fill (memset) or copy (memcpy) each translated chunk.
+        if is_set {
+            let val = self.reg(11) as u8;
+            let buf = [val; 0x1000];
+            for (dpa, _, clen) in &chunks {
+                bus.write_ram(*dpa, &buf[..*clen]).ok()?;
+            }
+        } else {
+            for (dpa, spa, clen) in &chunks {
+                let mut buf = [0u8; 0x1000];
+                for k in 0..*clen {
+                    buf[k] = bus.ram().read_u8(spa + k as u64).ok()?;
+                }
+                bus.write_ram(*dpa, &buf[..*clen]).ok()?;
+            }
+        }
+
+        self.set_reg(10, dst); // return value = dst
+        self.set_pc(self.reg(1)); // return to `ra`
+        Some(memop_charge(len))
     }
 
     /// Fetch, decode, and execute one instruction (16- or 32-bit) against `bus`.

@@ -116,6 +116,13 @@ pub fn load_machine(
     if let Some(addr) = dtb_addr {
         machine.set_reg(0, 11, addr); // a1 = DTB address
     }
+    // Resolve the entry PCs of `memset`/`memcpy` from the ELF symbol table so the
+    // native-op helper can intercept them (no-op if enabling is left off, or if the
+    // binary is stripped).
+    machine.set_native_op_pcs(
+        crate::symbols::function_addr(image, "memset"),
+        crate::symbols::function_addr(image, "memcpy"),
+    );
     Ok(machine)
 }
 

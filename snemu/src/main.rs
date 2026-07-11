@@ -25,11 +25,14 @@ const DTB: &[u8] = include_bytes!("../virt.dtb");
 fn main() -> ExitCode {
     let mut dump_frames = false;
     let mut workload: Option<String> = None;
+    let mut native_ops = false;
     let mut positional = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--frames" => dump_frames = true,
+            // Native-op helper (tier-0.5 JIT): fast-path memset/memcpy.
+            "--native-ops" => native_ops = true,
             // Firmware role: select a runtime workload by injecting
             // `workload=<name>` into /chosen/bootargs (needs an itest-workloads
             // kernel; a plain build ignores it and boots the default).
@@ -69,6 +72,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    machine.set_native_ops(native_ops);
 
     let mut steps = 0u64;
     while steps < max_steps {
