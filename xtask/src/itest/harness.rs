@@ -45,18 +45,20 @@ struct LiveSnemu {
     machine: snemu::machine::Machine,
     /// Bytes of the virtio-console TX stream already decoded into frames.
     tx_consumed: usize,
-    /// Host `Machine::step()` calls so far (the run budget), capped at `max_steps`.
-    /// Not guest instructions — with the block JIT one call can retire a whole
-    /// block; the reported cost metric is `guest_instret` (`Machine::instret`).
-    steps: u64,
-    max_steps: u64,
+    /// The run budget, denominated in **guest instret** (`Machine::instret`), not
+    /// host `step()` calls — with the block JIT one call retires a whole block, so a
+    /// step-call budget would let the JIT scan several times more guest work than the
+    /// interpreter for the same budget (which inflated `assert_absent` poles like
+    /// `smp-tlb`). Instret makes the budget mode-independent: identical guest work
+    /// on↔off, and the JIT cashes its win as wall-time, not extra scanning.
+    max_instret: u64,
     /// The guest faulted/halted — no more frames will come.
     halted: bool,
 }
 
 impl LiveSnemu {
-    fn new(machine: snemu::machine::Machine, max_steps: u64) -> Self {
-        Self { machine, tx_consumed: 0, steps: 0, max_steps, halted: false }
+    fn new(machine: snemu::machine::Machine, max_instret: u64) -> Self {
+        Self { machine, tx_consumed: 0, max_instret, halted: false }
     }
 
     /// The next telemetry frame, stepping the machine as needed. `None` once the
@@ -76,7 +78,7 @@ impl LiveSnemu {
                 self.tx_consumed += n;
                 return Some(frame);
             }
-            if self.halted || self.steps >= self.max_steps {
+            if self.halted || self.machine.instret() >= self.max_instret {
                 return None;
             }
             self.step_batch();
@@ -90,23 +92,23 @@ impl LiveSnemu {
             if uart_contains(self.machine.uart_output(), needle) {
                 return true;
             }
-            if self.halted || self.steps >= self.max_steps {
+            if self.halted || self.machine.instret() >= self.max_instret {
                 return false;
             }
             self.step_batch();
         }
     }
 
-    /// Advance up to [`LIVE_STEP_BATCH`] instructions (capped at the budget),
-    /// stopping early on a fault.
+    /// Advance ~[`LIVE_STEP_BATCH`] guest instructions (capped at the budget),
+    /// stopping early on a fault. Batched on `instret`, so the JIT (which retires a
+    /// whole block per `step`) and the interpreter cover the same guest work.
     fn step_batch(&mut self) {
-        let target = (self.steps + LIVE_STEP_BATCH).min(self.max_steps);
-        while self.steps < target {
+        let target = (self.machine.instret() + LIVE_STEP_BATCH).min(self.max_instret);
+        while self.machine.instret() < target {
             if self.machine.step().is_err() {
                 self.halted = true;
                 return;
             }
-            self.steps += 1;
         }
     }
 }
