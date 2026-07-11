@@ -424,6 +424,36 @@ fn d_plus_a_charwise_motion_deletes_the_intra_line_range() {
 }
 
 #[test]
+fn dd_deletes_the_whole_current_line() {
+    // The doubled operator (`d` while a Delete is already pending) is the linewise
+    // self: dd removes the current line. On the middle line, the cursor stays on the
+    // row — now the line that was below.
+    assert_eq!(
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpDelete)), "d").state"#),
+        buffer(&["a", "c"], 1, 0)
+    );
+    // dd on the last line clamps the cursor up to the new last line.
+    assert_eq!(
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 2, pending: Pending(op: OpDelete)), "d").state"#),
+        buffer(&["a", "b"], 1, 0)
+    );
+    // dd on the only line leaves one empty line — the buffer never goes to zero lines.
+    assert_eq!(
+        lines_row_col(r#"step(Editor(..initialState("abc"), pending: Pending(op: OpDelete)), "d").state"#),
+        buffer(&[""], 0, 0)
+    );
+    // dd is an observable Edit and clears the pending operator.
+    assert_eq!(
+        step_effect(r#"Editor(..initialState("a\nb"), pending: Pending(op: OpDelete))"#, "d"),
+        s("Edit")
+    );
+    assert_eq!(
+        pending_op_of(r#"step(Editor(..initialState("a\nb"), pending: Pending(op: OpDelete)), "d").state"#),
+        s("None")
+    );
+}
+
+#[test]
 fn zero_and_dollar_jump_to_the_line_ends() {
     // "hello" with the cursor mid-line: `0` → column 0, `$` → the last character
     // (col 4). `$` lands *on* the last char (len−1), unlike `A` which appends at len.

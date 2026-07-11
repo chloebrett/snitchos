@@ -394,6 +394,35 @@ applyMotionOp(state, target) =
     state.pending.op == OpDelete => deleteCharwise(state, target)
     | state
 
+// Remove `n` whole lines starting at `lo` from `lines` (tail-recursive).
+removeLinesFrom(lines, lo, n) =
+    n <= 0 => lines | removeLinesFrom(List.removeAt(lines, lo), lo, n - 1)
+
+// Delete whole lines `[lo, hi]` (inclusive). The buffer never goes to zero lines —
+// deleting everything leaves one empty line. The cursor drops to column 0 of the
+// line that now sits at `lo`, clamped to the last line.
+deleteLines(state, lo, hi) = {
+    let remaining = removeLinesFrom(state.lines, lo, hi - lo + 1)
+    let lines2 = count(remaining) <= 0 => [""] | remaining
+    let last = count(lines2) - 1
+    let row = lo > last => last | lo
+    Editor(..state, lines: lines2, row: row, col: 0)
+}
+
+// Whether `key` re-presses the pending operator — the doubled-operator case (`dd`).
+isSameOp(op, key) = match {
+    op == OpDelete => key == "d"
+    op == OpChange => key == "c"
+    op == OpYank => key == "y"
+    _ => false
+}
+
+// The doubled operator (`dd`/`cc`/`yy`): apply the pending operator linewise to the
+// current line. P2.4: delete only; `cc`/`yy` extend this in 2.6.
+applyLinewiseSelf(state) =
+    state.pending.op == OpDelete => editIfChanged(clearPending(state), clearPending(deleteLines(state, state.row, state.row)), opSpanName(state.pending.op))
+    | redraw(clearPending(state))
+
 // Normal mode dispatch: at the top level (no pending operator) route to the flat
 // table; while operator-pending (`pending.op != OpNone`) route to the operator
 // branch. `step` still dispatches on `mode` — this branch lives inside Normal.
@@ -405,10 +434,12 @@ stepNormal(state, key) =
 // and clears the accumulator. Non-motion keys cancel (refined in 2.4/2.8). The
 // change is measured against a pending-cleared baseline, so a no-op range (a motion
 // that selects nothing) spans nothing even though clearing pending changed the state.
-stepOperatorPending(state, key) = match motionTarget(state, key) {
-    Some(target) => editIfChanged(clearPending(state), clearPending(applyMotionOp(state, target)), opSpanName(state.pending.op))
-    None => redraw(clearPending(state))
-}
+stepOperatorPending(state, key) =
+    isSameOp(state.pending.op, key) => applyLinewiseSelf(state)
+    | match motionTarget(state, key) {
+        Some(target) => editIfChanged(clearPending(state), clearPending(applyMotionOp(state, target)), opSpanName(state.pending.op))
+        None => redraw(clearPending(state))
+    }
 
 // The top-level Normal table: navigation, small edits, mode/operator entry. Unbound
 // keys are Noops.
