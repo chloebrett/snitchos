@@ -458,10 +458,23 @@ fn link_imports(
 /// # Errors
 /// Returns `Err` on a runtime fault (type mismatch, division by zero, …).
 pub fn eval(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
-    // Stamp the offending expression's span (innermost node wins) and the running
-    // source (innermost closure wins) onto an unlocated fault as it leaves — both
-    // no-op once set, so a fault cites the tightest sub-expression and its source.
-    eval_dispatch(expr, env).map_err(|error| error.stamped(expr.span).with_source(env.source()))
+    // Stamp the offending expression's span (innermost node wins), the running
+    // source (innermost closure wins), and the call-stack backtrace onto an
+    // unlocated fault as it leaves — all no-op once set, so a fault cites the
+    // tightest sub-expression, its source, and the deepest call stack.
+    eval_dispatch(expr, env).map_err(|error| locate(error, expr.span, env))
+}
+
+/// Attach the innermost span, source, and backtrace to a fault as it leaves an
+/// `eval`/`eval_tail` boundary. The trace snapshot is taken only when the fault
+/// doesn't already carry one, so the deepest stack wins in O(1), not O(depth²).
+fn locate(error: RuntimeError, span: Span, env: &Env) -> RuntimeError {
+    let error = error.stamped(span).with_source(env.source());
+    if error.trace().is_empty() {
+        error.with_trace(env.frames_snapshot())
+    } else {
+        error
+    }
 }
 
 fn eval_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
@@ -878,10 +891,9 @@ fn run_stage(
 /// delegates to `eval` — no self-tail-call is possible there.
 pub(crate) fn eval_tail(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
     // Stamp faults that bubble up through a tail-position node (e.g. an arity error
-    // from `eval_call`) with this expression's span + source, like `eval` does. A
-    // `TailCall` control signal passes through unstamped.
-    eval_tail_dispatch(expr, env)
-        .map_err(|error| error.stamped(expr.span).with_source(env.source()))
+    // from `eval_call`) with this expression's span + source + trace, like `eval`.
+    // A `TailCall` control signal passes through unstamped.
+    eval_tail_dispatch(expr, env).map_err(|error| locate(error, expr.span, env))
 }
 
 fn eval_tail_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
@@ -978,11 +990,11 @@ pub(crate) fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<
                 }
                 // Mark the closure being applied so eval_tail can detect self-tail-calls.
                 call_env = call_env.with_self_closure(Rc::clone(closure));
-                // Bump the call-depth guard for the duration of the body — dropped on
-                // every exit path (including the TailCall continue), so depth
-                // oscillates at one level and never accumulates across tail iterations.
+                // Push a call-stack frame for the duration of the body — popped on
+                // every exit path (including the TailCall continue), so a tail-
+                // recursive function shows a single frame, not one per iteration.
                 let _guard = call_env
-                    .enter_call()
+                    .enter_call(closure.name.clone())
                     .ok_or_else(|| RuntimeError::new("call stack too deep"))?;
                 // This is a function boundary, so `?`'s early-return stops here and
                 // becomes the call's value.

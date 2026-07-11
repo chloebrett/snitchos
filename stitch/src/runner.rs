@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(result.exit_code, 1);
         assert_eq!(
             result.stderr,
-            "runtime error: <program>:1:10: division by zero\nmain() = 1 / 0\n         ^\n"
+            "runtime error: <program>:1:10: division by zero\nmain() = 1 / 0\n         ^\n  in main\n"
         );
     }
 
@@ -570,6 +570,30 @@ mod tests {
             result.stderr.contains("<program>:2:9: division by zero"),
             "stderr was: {}", result.stderr
         );
+    }
+
+    #[test]
+    fn a_fault_renders_the_call_chain_as_a_backtrace() {
+        // main → outer → inner → fault. The backtrace lists the whole chain,
+        // innermost frame first.
+        let src = "main() = outer()\nouter() = inner()\ninner() = 1 / 0";
+        let result = run_program_source(src);
+        assert_eq!(result.exit_code, 1);
+        assert!(
+            result.stderr.contains("\n  in inner\n  in outer\n  in main"),
+            "stderr was: {}", result.stderr
+        );
+    }
+
+    #[test]
+    fn a_tail_recursive_fault_shows_a_single_frame() {
+        // `count` tail-recurses many times before faulting; the trace must show one
+        // `count` frame, not one per iteration (tail calls replace, not nest).
+        let src = "main() = count(5)\ncount(n) = n == 0 => 1 / 0 | count(n - 1)";
+        let result = run_program_source(src);
+        assert_eq!(result.exit_code, 1);
+        let count_frames = result.stderr.matches("in count").count();
+        assert_eq!(count_frames, 1, "expected one `count` frame, stderr was: {}", result.stderr);
     }
 
     #[test]

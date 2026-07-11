@@ -372,6 +372,15 @@ impl PartialEq for Value {
     }
 }
 
+/// One entry in a fault's stack trace: a function that was active on the call
+/// stack when the fault fired. Pushed by [`Env::enter_call`](crate::env::Env) at
+/// each closure application and snapshotted onto a fault at the raise point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Frame {
+    /// The active function's name, or `None` for an anonymous lambda.
+    pub name: Option<String>,
+}
+
 /// The error channel of evaluation. Carries either a real fault or a control
 /// signal — `?`'s early return — which unwinds to the enclosing function rather
 /// than aborting the program. (Reusing the `Err` channel for control flow is
@@ -382,8 +391,9 @@ pub enum RuntimeError {
     /// source span of the offending expression, stamped by `eval` as the fault
     /// propagates out (the innermost node wins); `source` names which source that
     /// span indexes, stamped by `apply_values` from the running closure (the
-    /// innermost closure wins). Both `None` until stamped.
-    Fault { message: String, at: Option<Span>, source: Option<SourceId> },
+    /// innermost closure wins). `trace` is the call stack snapshotted at the raise
+    /// point (innermost-last). All empty/`None` until stamped.
+    Fault { message: String, at: Option<Span>, source: Option<SourceId>, trace: Vec<Frame> },
     /// `?` short-circuit: unwind to the enclosing function and return this value.
     Return(Value),
     /// Self-tail-call signal: `apply_values` catches this and loops instead of
@@ -393,7 +403,7 @@ pub enum RuntimeError {
 
 impl RuntimeError {
     pub(crate) fn new(message: impl Into<String>) -> Self {
-        RuntimeError::Fault { message: message.into(), at: None, source: None }
+        RuntimeError::Fault { message: message.into(), at: None, source: None, trace: Vec::new() }
     }
 
     /// The `?` early-return control signal carrying the failure value.
@@ -408,8 +418,8 @@ impl RuntimeError {
     #[must_use]
     pub(crate) fn stamped(self, span: Span) -> Self {
         match self {
-            RuntimeError::Fault { message, at: None, source } => {
-                RuntimeError::Fault { message, at: Some(span), source }
+            RuntimeError::Fault { message, at: None, source, trace } => {
+                RuntimeError::Fault { message, at: Some(span), source, trace }
             }
             other => other,
         }
@@ -422,10 +432,32 @@ impl RuntimeError {
     #[must_use]
     pub(crate) fn with_source(self, source: SourceId) -> Self {
         match self {
-            RuntimeError::Fault { message, at, source: None } => {
-                RuntimeError::Fault { message, at, source: Some(source) }
+            RuntimeError::Fault { message, at, source: None, trace } => {
+                RuntimeError::Fault { message, at, source: Some(source), trace }
             }
             other => other,
+        }
+    }
+
+    /// Snapshot `frames` as this fault's stack trace, if it doesn't already have
+    /// one — so the innermost `eval` (deepest call stack) wins, like span/source.
+    #[must_use]
+    pub(crate) fn with_trace(self, frames: Vec<Frame>) -> Self {
+        match self {
+            RuntimeError::Fault { message, at, source, trace } if trace.is_empty() => {
+                RuntimeError::Fault { message, at, source, trace: frames }
+            }
+            other => other,
+        }
+    }
+
+    /// This fault's stack trace (innermost-last), or empty for a control signal or
+    /// an unstamped fault.
+    #[must_use]
+    pub fn trace(&self) -> &[Frame] {
+        match self {
+            RuntimeError::Fault { trace, .. } => trace,
+            _ => &[],
         }
     }
 
@@ -456,8 +488,14 @@ impl RuntimeError {
     #[must_use]
     pub fn render(&self, sources: &SourceMap) -> String {
         match self {
-            RuntimeError::Fault { message, at: Some(span), source } => {
-                sources.render(source.unwrap_or_default(), *span, message)
+            RuntimeError::Fault { message, at: Some(span), source, trace } => {
+                let mut out = sources.render(source.unwrap_or_default(), *span, message);
+                // The call stack, innermost frame first (`trace` is innermost-last).
+                for frame in trace.iter().rev() {
+                    out.push_str("\n  in ");
+                    out.push_str(frame.name.as_deref().unwrap_or("<lambda>"));
+                }
+                out
             }
             _ => self.message(),
         }

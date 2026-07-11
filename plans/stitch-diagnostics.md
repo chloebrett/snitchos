@@ -127,7 +127,30 @@ REPL-line code. Phase 2 (stack traces) builds on this.
 
 ---
 
-## Phase 2 — Stack traces (the frame stack)
+## Phase 2 — Stack traces (the frame stack) — ✅ DONE (2026-07-11)
+
+`apply_values` tracked only a **depth counter** (`depth: Rc<Cell<u32>>`); replaced
+with a **frame stack** `frames: Rc<RefCell<Vec<Frame>>>` on `Env`. `enter_call(name)`
+pushes a `Frame { name }`; `CallGuard::drop` pops; `frames.len() >= MAX_CALL_DEPTH`
+subsumes the old depth guard (its boundary tests kept, calling `enter_call(None)`).
+`RuntimeError::Fault` gained `trace: Vec<Frame>`; the `eval`/`eval_tail` wrappers
+snapshot `env.frames_snapshot()` onto an unlocated fault via a shared `locate` helper
+(only when the trace is empty → deepest stack wins in O(1), not O(depth²)).
+`RuntimeError::render` appends `\n  in <name>` per frame, innermost first.
+
+Tests: a `main → outer → inner` chain renders `in inner / in outer / in main`; a
+**tail-recursive** `count` that faults shows a **single** `count` frame (tail calls
+pop+push per iteration, so the stack never nests) — the subtlety, verified. **580 lib
++ 26 integration green, clippy clean.**
+
+The whole diagnostics plan is complete: runtime faults cite `file:line:col` **and**
+carry a backtrace. Remaining polish is the noted Phase 1 follow-ups (REPL def-source,
+multi-module source) + optional per-frame call-site locations (`in foo  file:line`),
+which need call-site spans threaded into `enter_call`.
+
+---
+
+### Original Phase 2 design (for reference)
 
 Today `apply_values` tracks only a **depth counter** (`depth: Rc<Cell<u32>>` +
 `CallGuard` RAII) as the recursion backstop — it knows *how deep* but not *what's on

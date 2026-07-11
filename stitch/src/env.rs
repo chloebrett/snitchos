@@ -24,7 +24,7 @@ use crate::ast::Method;
 use crate::platform::{NullPlatform, Platform};
 use crate::source::SourceId;
 use crate::telemetry::{RecordingTelemetry, Telemetry};
-use crate::value::{ClosureData, TelemetryEvent, Value};
+use crate::value::{ClosureData, Frame, TelemetryEvent, Value};
 
 /// Why an assignment failed — formatted into a message by the interpreter.
 pub enum AssignError {
@@ -67,10 +67,11 @@ pub struct Env {
     /// overflowing the Rust stack). This is the hook the Stitch mutation tester's
     /// fuel cap rides.
     fuel: Rc<Cell<u64>>,
-    /// Current nested-call depth, run-shared like `fuel`. A backstop that turns
-    /// an unbounded-non-tail-recursion Rust-stack overflow into a catchable fault
-    /// (see [`enter_call`](Self::enter_call)).
-    depth: Rc<Cell<u32>>,
+    /// The active call stack, run-shared like `fuel`. Each closure application
+    /// pushes a [`Frame`]; the guard pops it. `frames.len()` is the recursion depth
+    /// (the backstop that turns unbounded non-tail recursion into a catchable fault),
+    /// and the whole stack is snapshotted onto a fault to form its backtrace.
+    frames: Rc<RefCell<Vec<Frame>>>,
     /// The closure currently being applied — set by `apply_values` before
     /// evaluating a closure body so that `eval_tail` can detect self-tail-calls
     /// and signal the trampoline instead of recursing into Rust.
@@ -81,15 +82,15 @@ pub struct Env {
     source: SourceId,
 }
 
-/// Undoes [`Env::enter_call`]'s depth increment when dropped — so nesting is
-/// decremented on *every* exit from a call, error paths (`?`) included.
+/// Pops [`Env::enter_call`]'s pushed frame when dropped — so the call stack is
+/// unwound on *every* exit from a call, error paths (`?`) included.
 pub struct CallGuard {
-    depth: Rc<Cell<u32>>,
+    frames: Rc<RefCell<Vec<Frame>>>,
 }
 
 impl Drop for CallGuard {
     fn drop(&mut self) {
-        self.depth.set(self.depth.get().saturating_sub(1));
+        self.frames.borrow_mut().pop();
     }
 }
 
@@ -130,7 +131,7 @@ impl Env {
             platform: Rc::new(NullPlatform),
             authority: Rc::new(BTreeSet::new()),
             fuel: Rc::new(Cell::new(u64::MAX)),
-            depth: Rc::new(Cell::new(0)),
+            frames: Rc::new(RefCell::new(Vec::new())),
             self_closure: None,
             source: SourceId::default(),
         }
@@ -179,18 +180,27 @@ impl Env {
         self.self_closure.as_ref().is_some_and(|s| Rc::ptr_eq(s, c))
     }
 
-    /// Enter a nested call: bump the run-shared depth counter and hand back a
-    /// [`CallGuard`] that decrements it on drop (so depth tracks *current* nesting
-    /// on every exit path). `None` if entering would exceed [`MAX_CALL_DEPTH`] —
-    /// the caller should fault rather than recurse into an overflow.
+    /// Enter a nested call: push a [`Frame`] for the function named `name` onto the
+    /// run-shared call stack and hand back a [`CallGuard`] that pops it on drop (so
+    /// the stack tracks *current* nesting on every exit path). `None` if entering
+    /// would exceed [`MAX_CALL_DEPTH`] — the caller should fault rather than recurse
+    /// into an overflow.
     #[must_use]
-    pub fn enter_call(&self) -> Option<CallGuard> {
-        let depth = self.depth.get() + 1;
-        if depth > Self::MAX_CALL_DEPTH {
+    pub fn enter_call(&self, name: Option<String>) -> Option<CallGuard> {
+        let mut frames = self.frames.borrow_mut();
+        if frames.len() as u32 >= Self::MAX_CALL_DEPTH {
             return None;
         }
-        self.depth.set(depth);
-        Some(CallGuard { depth: Rc::clone(&self.depth) })
+        frames.push(Frame { name });
+        drop(frames);
+        Some(CallGuard { frames: Rc::clone(&self.frames) })
+    }
+
+    /// A snapshot of the current call stack (innermost-last) — captured onto a fault
+    /// at the raise point to form its backtrace.
+    #[must_use]
+    pub fn frames_snapshot(&self) -> Vec<Frame> {
+        self.frames.borrow().clone()
     }
 
     /// A clone of this environment whose console / capability / process / FS
@@ -271,7 +281,7 @@ impl Env {
             platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
             fuel: Rc::clone(&self.fuel),
-            depth: Rc::clone(&self.depth),
+            frames: Rc::clone(&self.frames),
             self_closure: None,
             source: self.source,
         }
@@ -293,7 +303,7 @@ impl Env {
             platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
             fuel: Rc::clone(&self.fuel),
-            depth: Rc::clone(&self.depth),
+            frames: Rc::clone(&self.frames),
             self_closure: None,
             source: self.source,
         }
@@ -327,7 +337,7 @@ impl Env {
             platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
             fuel: Rc::clone(&self.fuel),
-            depth: Rc::clone(&self.depth),
+            frames: Rc::clone(&self.frames),
             self_closure: None,
             source: self.source,
         }
@@ -424,7 +434,7 @@ impl Env {
             platform: Rc::clone(&self.platform),
             authority: Rc::clone(&self.authority),
             fuel: Rc::clone(&self.fuel),
-            depth: Rc::clone(&self.depth),
+            frames: Rc::clone(&self.frames),
             self_closure: None,
             source: self.source,
         }
@@ -521,10 +531,10 @@ mod tests {
         // eval-level tests only check "deep faults / shallow doesn't").
         let mut guards = Vec::new();
         for _ in 0..Env::MAX_CALL_DEPTH {
-            guards.push(env.enter_call().expect("under the limit succeeds"));
+            guards.push(env.enter_call(None).expect("under the limit succeeds"));
         }
         assert_eq!(guards.len() as u32, Env::MAX_CALL_DEPTH);
-        assert!(env.enter_call().is_none(), "at the limit, a further call is refused");
+        assert!(env.enter_call(None).is_none(), "at the limit, a further call is refused");
     }
 
     #[test]
@@ -533,11 +543,11 @@ mod tests {
         {
             let mut guards = Vec::new();
             for _ in 0..Env::MAX_CALL_DEPTH {
-                guards.push(env.enter_call().expect("under the limit"));
+                guards.push(env.enter_call(None).expect("under the limit"));
             }
-            assert!(env.enter_call().is_none(), "exhausted at the limit");
+            assert!(env.enter_call(None).is_none(), "exhausted at the limit");
         }
         // Guards dropped ⇒ depth freed ⇒ we can enter again.
-        assert!(env.enter_call().is_some(), "a dropped guard must decrement depth");
+        assert!(env.enter_call(None).is_some(), "a dropped guard must decrement depth");
     }
 }
