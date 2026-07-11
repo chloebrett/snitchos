@@ -155,8 +155,8 @@ pub(crate) fn compile_op(raw: u32, ilen: u64, pc: u64) -> Compiled {
         opcode::OP if instr.funct7() != funct7::MULDIV => mid(alu_reg(instr)),
         opcode::OP_IMM_32 => mid(alu_imm_32(instr)),
         opcode::OP_32 if instr.funct7() != funct7::MULDIV => mid(alu_reg_32(instr)),
-        opcode::LOAD => mid(load_op(instr)),
-        opcode::STORE => mid(store_op(instr)),
+        opcode::LOAD => mid(load_op(instr, pc)),
+        opcode::STORE => mid(store_op(instr, pc)),
         opcode::JAL => Compiled::Terminate(Op::Jump {
             rd: instr.rd() as u8,
             link: pc.wrapping_add(ilen),
@@ -244,7 +244,7 @@ fn alu_reg_32(instr: Instr) -> Option<Op> {
 
 /// Lower a `LOAD` instruction (a mid-block op that may fault). Only known widths
 /// compile; an unknown funct3 ends the block (the interpreter reports it).
-fn load_op(instr: Instr) -> Option<Op> {
+fn load_op(instr: Instr, pc: u64) -> Option<Op> {
     match instr.funct3() {
         funct3::load::LB
         | funct3::load::LH
@@ -257,13 +257,14 @@ fn load_op(instr: Instr) -> Option<Op> {
             rd: instr.rd() as u8,
             rs1: instr.rs1() as u8,
             imm: instr.i_imm() as i64,
+            pc,
         }),
         _ => None,
     }
 }
 
 /// Lower a `STORE` instruction (a mid-block op that may fault).
-fn store_op(instr: Instr) -> Option<Op> {
+fn store_op(instr: Instr, pc: u64) -> Option<Op> {
     match instr.funct3() {
         funct3::store::SB | funct3::store::SH | funct3::store::SW | funct3::store::SD => {
             Some(Op::Store {
@@ -271,6 +272,7 @@ fn store_op(instr: Instr) -> Option<Op> {
                 rs1: instr.rs1() as u8,
                 rs2: instr.rs2() as u8,
                 imm: instr.s_imm() as i64,
+                pc,
             })
         }
         _ => None,
@@ -338,11 +340,11 @@ pub(crate) enum Op {
     /// `pc + imm`, resolved to an absolute at compile time).
     SetImm { rd: u8, value: u64 },
     /// `x[rd] = mem[x[rs1] + imm]` at the width/signedness of `funct3`. Can page
-    /// fault: on a fault the trap is taken and the block bails.
-    Load { funct3: u32, rd: u8, rs1: u8, imm: i64 },
+    /// fault: on a fault the trap is taken (with `sepc` = `pc`) and the block bails.
+    Load { funct3: u32, rd: u8, rs1: u8, imm: i64, pc: u64 },
     /// `mem[x[rs1] + imm] = x[rs2]` (truncated to the width of `funct3`). Can page
-    /// fault and bail like `Load`.
-    Store { funct3: u32, rs1: u8, rs2: u8, imm: i64 },
+    /// fault and bail like `Load`. `pc` is set before the access so a fault reports it.
+    Store { funct3: u32, rs1: u8, rs2: u8, imm: i64, pc: u64 },
     /// Block exit: `pc = cond(x[rs1], x[rs2]) ? taken : not_taken`. Targets are
     /// absolute (resolved at compile time from the branch's PC + immediate).
     Branch { cond: Cond, rs1: u8, rs2: u8, taken: u64, not_taken: u64 },
@@ -380,48 +382,72 @@ impl Block {
     /// exactly the interpreter's instret for the same run. A block with no branch or
     /// fault falls through, setting `pc` to `exit_pc`.
     pub(crate) fn exec(&self, hart: &mut Hart, bus: &mut Bus) -> Result<u64, StepError> {
+        // Register caching (increment 4): copy the register file into a host local,
+        // run the whole block against it (no per-op array-through-`&mut Hart`), and
+        // write it back once at every exit. `w!` writes, keeping x0 hardwired. Memory
+        // ops take/return values (`load_value`/`store_value`) so they don't flush the
+        // cache; on a fault we write the cache back before the trap propagates.
+        let mut regs = hart.registers();
+        macro_rules! w {
+            ($rd:expr, $val:expr) => {
+                if $rd != 0 {
+                    regs[$rd as usize] = $val;
+                }
+            };
+        }
         let mut retired = 0u64;
         for op in &self.ops {
             retired += 1; // this op is about to retire (a faulting mem op still counts)
             match *op {
                 Op::AluImm { alu, rd, rs1, imm } => {
-                    let value = alu.apply(hart.reg(rs1 as usize), imm as u64);
-                    hart.set_reg(rd as usize, value);
+                    w!(rd, alu.apply(regs[rs1 as usize], imm as u64));
                 }
                 Op::AluReg { alu, rd, rs1, rs2 } => {
-                    let value = alu.apply(hart.reg(rs1 as usize), hart.reg(rs2 as usize));
-                    hart.set_reg(rd as usize, value);
+                    w!(rd, alu.apply(regs[rs1 as usize], regs[rs2 as usize]));
                 }
-                Op::SetImm { rd, value } => hart.set_reg(rd as usize, value),
-                Op::Load { funct3, rd, rs1, imm } => {
-                    if hart.block_load(bus, funct3, rd as usize, rs1 as usize, imm)? {
-                        return Ok(retired); // faulted → trap took pc; stop the block
+                Op::SetImm { rd, value } => w!(rd, value),
+                Op::Load { funct3, rd, rs1, imm, pc } => {
+                    // Set pc to this op first, so a page fault's trap reports the
+                    // faulting instruction (not the block entry) in sepc.
+                    hart.set_pc(pc);
+                    match hart.load_value(bus, funct3, regs[rs1 as usize], imm)? {
+                        Some(value) => w!(rd, value),
+                        None => {
+                            hart.set_registers(regs); // faulted → trap took pc; stop
+                            return Ok(retired);
+                        }
                     }
                 }
-                Op::Store { funct3, rs1, rs2, imm } => {
-                    if hart.block_store(bus, funct3, rs1 as usize, rs2 as usize, imm)? {
+                Op::Store { funct3, rs1, rs2, imm, pc } => {
+                    hart.set_pc(pc);
+                    if hart.store_value(bus, funct3, regs[rs1 as usize], imm, regs[rs2 as usize])? {
+                        hart.set_registers(regs);
                         return Ok(retired);
                     }
                 }
                 Op::Branch { cond, rs1, rs2, taken, not_taken } => {
-                    let take = cond.eval(hart.reg(rs1 as usize), hart.reg(rs2 as usize));
+                    let take = cond.eval(regs[rs1 as usize], regs[rs2 as usize]);
+                    hart.set_registers(regs);
                     hart.set_pc(if take { taken } else { not_taken });
                     return Ok(retired);
                 }
                 Op::Jump { rd, link, target } => {
-                    hart.set_reg(rd as usize, link);
+                    w!(rd, link);
+                    hart.set_registers(regs);
                     hart.set_pc(target);
                     return Ok(retired);
                 }
                 Op::JumpReg { rd, rs1, imm, link } => {
                     // Target from rs1 *before* writing rd (they may alias).
-                    let target = hart.reg(rs1 as usize).wrapping_add(imm as u64) & !1;
-                    hart.set_reg(rd as usize, link);
+                    let target = regs[rs1 as usize].wrapping_add(imm as u64) & !1;
+                    w!(rd, link);
+                    hart.set_registers(regs);
                     hart.set_pc(target);
                     return Ok(retired);
                 }
             }
         }
+        hart.set_registers(regs);
         hart.set_pc(self.exit_pc); // fell through without a branch
         Ok(retired)
     }

@@ -458,17 +458,18 @@ fn load_durations() -> HashMap<String, PackCost> {
     };
     text.lines()
         .filter_map(|line| {
-            let mut cols = line.split_whitespace();
-            let instret: u64 = cols.next()?.parse().ok()?;
-            // New format has wall as the second column; old format has the name there.
-            let (wall, name) = match cols.next() {
-                Some(tok) => match tok.parse::<u64>() {
-                    Ok(w) => (w, cols.next()?.to_owned()),
-                    Err(_) => (0, tok.to_owned()),
+            let (instret_str, rest) = line.trim().split_once(char::is_whitespace)?;
+            let instret: u64 = instret_str.parse().ok()?;
+            // New format: `<instret> <wall> <name>` — the second token parses as a
+            // number. Old format: `<instret> <name>` — it doesn't, so wall is unknown
+            // (0). The name is the remainder, so a name with spaces survives.
+            match rest.trim_start().split_once(char::is_whitespace) {
+                Some((wall_str, name)) => match wall_str.parse::<u64>() {
+                    Ok(wall) => Some((name.trim().to_owned(), (instret, wall))),
+                    Err(_) => Some((rest.trim().to_owned(), (instret, 0))),
                 },
-                None => return None,
-            };
-            Some((name, (instret, wall)))
+                None => Some((rest.trim().to_owned(), (instret, 0))),
+            }
         })
         .collect()
 }

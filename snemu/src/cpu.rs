@@ -550,6 +550,18 @@ impl Hart {
         }
     }
 
+    /// Snapshot the register file — the block executor caches it in a host local
+    /// and operates on that across the whole block (M6 increment 4).
+    pub(crate) fn registers(&self) -> [u64; 32] {
+        self.x
+    }
+
+    /// Restore the register file from a block executor's cache, keeping `x0` zero.
+    pub(crate) fn set_registers(&mut self, mut regs: [u64; 32]) {
+        regs[0] = 0;
+        self.x = regs;
+    }
+
     #[must_use]
     pub(crate) fn pc(&self) -> u64 {
         self.pc
@@ -957,38 +969,43 @@ impl Hart {
 
     /// LOAD: read memory at `rs1 + imm`, sign/zero-extend into rd.
     fn load(&mut self, instr: Instr, bus: &Bus) -> Result<(), StepError> {
-        if self.block_load(bus, instr.funct3(), instr.rd(), instr.rs1(), instr.i_imm() as i64)? {
+        let base = self.x[instr.rs1()];
+        let Some(value) = self.load_value(bus, instr.funct3(), base, instr.i_imm() as i64)? else {
             return Ok(()); // faulted → trapped, don't advance
-        }
+        };
+        self.set_reg(instr.rd(), value);
         self.advance();
         Ok(())
     }
 
     /// STORE: write rs2 (truncated to the access width) to `rs1 + imm`.
     fn store(&mut self, instr: Instr, bus: &mut Bus) -> Result<(), StepError> {
-        if self.block_store(bus, instr.funct3(), instr.rs1(), instr.rs2(), instr.s_imm() as i64)? {
+        let base = self.x[instr.rs1()];
+        let value = self.x[instr.rs2()];
+        if self.store_value(bus, instr.funct3(), base, instr.s_imm() as i64, value)? {
             return Ok(()); // faulted → trapped, don't advance
         }
         self.advance();
         Ok(())
     }
 
-    /// Execute a LOAD by decoded fields, without advancing `pc` (the caller — the
-    /// interpreter or the block executor — owns pc). Returns `true` if it faulted:
-    /// a trap was taken (pc is now the handler) and the caller must stop.
-    pub(crate) fn block_load(
+    /// Execute a LOAD from base address `base` + `imm`, returning the loaded value
+    /// (sign/zero-extended per `funct3`), or `None` if it page-faulted (a trap was
+    /// taken against the current `pc`, which the caller set). Takes/returns values,
+    /// not register indices, so the block executor can keep the register file in
+    /// host locals across the op; `pc` is not advanced (the caller owns it).
+    pub(crate) fn load_value(
         &mut self,
         bus: &Bus,
         funct3: u32,
-        rd: usize,
-        rs1: usize,
+        base: u64,
         imm: i64,
-    ) -> Result<bool, StepError> {
-        let va = self.x[rs1].wrapping_add(imm as u64);
+    ) -> Result<Option<u64>, StepError> {
+        let va = base.wrapping_add(imm as u64);
         let Some(addr) = self.translate_or_trap(va, Access::Load, bus) else {
-            return Ok(true);
+            return Ok(None);
         };
-        let value = match funct3 {
+        Ok(Some(match funct3 {
             funct3::load::LB => i64::from(bus.read_u8(addr)? as i8) as u64,
             funct3::load::LH => i64::from(bus.read_u16(addr)? as i16) as u64,
             funct3::load::LW => i64::from(bus.read_u32(addr)? as i32) as u64,
@@ -997,29 +1014,26 @@ impl Hart {
             funct3::load::LHU => u64::from(bus.read_u16(addr)?),
             funct3::load::LWU => u64::from(bus.read_u32(addr)?),
             other => return Err(self.unimplemented(other)),
-        };
-        self.set_reg(rd, value);
-        Ok(false)
+        }))
     }
 
-    /// Execute a STORE by decoded fields, without advancing `pc`. Returns `true` if
-    /// it faulted (trap taken, caller must stop). Mirrors the `block_load` contract.
-    pub(crate) fn block_store(
+    /// Execute a STORE of `value` to base `base` + `imm`. Returns `true` if it
+    /// page-faulted (trap taken, caller must stop). Value-based like `load_value`.
+    pub(crate) fn store_value(
         &mut self,
         bus: &mut Bus,
         funct3: u32,
-        rs1: usize,
-        rs2: usize,
+        base: u64,
         imm: i64,
+        value: u64,
     ) -> Result<bool, StepError> {
-        let va = self.x[rs1].wrapping_add(imm as u64);
+        let va = base.wrapping_add(imm as u64);
         let Some(addr) = self.translate_or_trap(va, Access::Store, bus) else {
             return Ok(true);
         };
         if self.reservation == Some(addr) {
             self.reservation = None; // a write to the reserved cell breaks lr/sc
         }
-        let value = self.x[rs2];
         match funct3 {
             funct3::store::SB => bus.write_u8(addr, value as u8)?,
             funct3::store::SH => bus.write_u16(addr, value as u16)?,
@@ -1828,6 +1842,41 @@ mod tests {
             cpu.set_reg(1, 0x1_2345_6789);
             cpu.set_reg(2, 5);
         });
+    }
+
+    #[test]
+    fn block_jit_reports_the_faulting_instructions_pc_mid_block() {
+        // A block whose *second* op (a store) page-faults. The trap's `sepc` must
+        // point at the store, not the block entry — the interpreter sets pc per
+        // instruction, so the JIT (which advances pc once per block) must set it on
+        // the faulting op or it resumes at the wrong place.
+        let mut mem = Memory::new(0x10000);
+        let code = RAM_BASE + 0x3000;
+        mem.write_u32(code, i_type(opcode::OP_IMM, funct3::ADD, 5, 0, 1)).unwrap(); // op1: addi, no fault
+        mem.write_u32(code + 4, sw(7, 6, 0)).unwrap(); // op2: store to x6 (unmapped) → faults
+        // Sv39: one 1 GiB leaf maps VA 4..5 GiB (VPN[2]=4) onto physical RAM, RWX.
+        let root = RAM_BASE + 0x8000;
+        let leaf = ((0x8000_0000_u64 >> 12) << 10) | pte::V | pte::R | pte::W | pte::X;
+        mem.write_u64(root + 4 * 8, leaf).unwrap();
+
+        let mut cpu = Cpu::new(mem);
+        cpu.hart.csr.write(addr::SATP, (8 << 60) | (root >> 12)).unwrap();
+        cpu.hart.csr.write(addr::STVEC, 0x1_0000_3000).unwrap();
+        cpu.set_pc(0x1_0000_3000); // VPN[2]=4, offset 0x3000
+        cpu.set_reg(6, 0x1_4000_0000); // store target in VPN[2]=5 — unmapped → faults
+
+        // Compile + run the block directly (bypassing the hotness gate — this block
+        // faults on its one and only run, so it never gets hot on its own).
+        let block = cpu.hart.compile_block(&cpu.bus);
+        block.exec(&mut cpu.hart, &mut cpu.bus).unwrap();
+
+        assert_eq!(cpu.hart.csr.read(addr::SCAUSE).unwrap(), 15, "store page fault");
+        assert_eq!(
+            cpu.hart.csr.read(addr::SEPC).unwrap(),
+            0x1_0000_3004,
+            "sepc points at the faulting store, not the block entry"
+        );
+        assert_eq!(cpu.hart.csr.read(addr::STVAL).unwrap(), 0x1_4000_0000, "faulting VA");
     }
 
     #[test]
