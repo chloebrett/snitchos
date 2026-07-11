@@ -100,10 +100,10 @@ The behavior change. TDD drives at the itest layer (kernel has no host `#[test]`
 ## Pre-PR Quality Gate
 
 Before each PR:
-1. Mutation testing — `cargo xtask mutants` on host-reachable surfaces (Step 1).
-2. Refactoring assessment (Step 2's emit-helper collapse question).
-3. `cargo xtask clippy` (whole workspace) + host tests + `cargo xtask itest --repeat 10`.
-4. Docs: update `docs/capability-system-design.md` (the four-kind provenance table) and the `CapEventKind` doc comment. Note the `Minted` carve-in the milestone/roadmap if it warrants it.
+1. Mutation testing — `cargo xtask mutants` on host-reachable surfaces (Step 1). *(done: 21/21 caught on `collector::caps`.)*
+2. Refactoring assessment (Step 2's emit-helper collapse question). *(done: declined — named helpers self-document.)*
+3. `cargo xtask clippy` (whole workspace) + host tests + `cargo xtask snemu-itest` (deterministic — replaces the old `itest --repeat 10` flake-gate; itest/QEMU is being retired in favour of snemu-itest). *(done: 108/110; the 2 failures are the standing snemu FS-read fidelity gap — `bytes_read=0` in `viewer-reads-delegated-file` / `shell-view-command-revokes-cap` — not `CapEvent`-related. All 4 flipped + 3 regression scenarios pass.)*
+4. Docs: update `docs/capability-system-design.md` (the four-kind provenance table) and the `CapEventKind` doc comment. *(done.)*
 
 ## Out of scope (explicitly not this plan)
 
