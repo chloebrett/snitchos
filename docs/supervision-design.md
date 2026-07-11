@@ -177,8 +177,12 @@ service boundary.
 
 ## The service spec (the data model)
 
-Pure data, host-testable, living in `kernel-core` alongside `sched::Runqueue` and
-`bootargs` (the same "policy logic with no MMIO/CSRs" tier). Sketch:
+Pure data, host-testable. **Correction (built 2026-07-11):** this lives in a new
+`shared`-tier crate **`supervision`** (like `fs-core`), *not* `kernel-core` as
+first sketched. The consumer is the *userspace* supervisor engine, and **userspace
+cannot depend on `kernel-core`** — so the "policy logic with no MMIO/CSRs" tier for
+this feature is a standalone `#![no_std]` crate both sides could use, host-tested
+via `cargo test -p supervision`. Sketch:
 
 ```rust
 struct ServiceSpec {
@@ -388,18 +392,27 @@ Mirrors the project's kernel-core-vs-userspace split: **pure policy in `kernel-c
    kernel mechanism; added `BootstrapCap for Notification` so children resolve
    notifications by role. This proves the D2 `Signal`/`WaitNotify` pattern the
    supervisor reuses.
-1. **`kernel-core::supervision`** — `ServiceSpec`, `startup_order` (topo + cycle
-   detection), `restart_decision` (policy + backoff + intensity), `restart_set`
-   (D1). All pure, all `cargo test -p kernel-core`. TDD each.
-2. **Generic supervisor engine** — a new `supervisor` root (**decided 2026-07-11**: new
-   root, not evolving `init` — `init` is load-bearing for the default boot + several
-   itests, so a `workload=supervised-*` root is additive and safe to iterate; `init`
-   becomes the supervisor later, once proven). It reads a service table, creates durable
-   objects,
-   brings services up in `startup_order` (respecting `readiness`), runs a `WaitAny`
-   loop, and on each exit consults `restart_decision` → re-spawn + re-delegate or
-   escalate. **The re-delegate step is `satisfier.rs::process(child)`, already built** —
-   the engine's new code is the table walk, the `WaitAny` loop, and the policy calls.
+1. **✅ DONE (2026-07-11) — `supervision` crate** (new `shared`-tier crate, *not*
+   `kernel-core` — see the data-model correction above; userspace can't depend on
+   `kernel-core`). `ServiceSpec` + `startup_order` (topo + cycle detection),
+   `restart_decision` (policy + backoff + intensity), `restart_set` (D1). All pure,
+   all `cargo test -p supervision`, TDD'd; 14 tests, mutation-clean (17 mutants, 0
+   missed — the intensity-window boundary survivor killed by a `now == window` test).
+2. **✅ DONE (2026-07-11) — Generic supervisor engine** (`workload=supervised`,
+   `user/hello/src/bin/supervised.rs`; new root, not evolving `init`, as decided). It
+   walks a data-driven service table (`ServiceDef` = `ServiceSpec` + program id/policy/
+   limits), computes `startup_order`, brings services up in dependency order, runs the
+   `WaitAny` loop, and on each exit consults `restart_decision` → re-spawn (honoring the
+   backoff via a cooperative `clock_now`/`yield_now` spin — no sleep syscall yet) or
+   `escalate` (a root escalation snitches a fatal span + `escalated`/`halted` counters
+   and halts). First service table: `spinner` (stable) + `crasher` (`spawnee`, exits 42)
+   depending on it; the crasher crash-loops past its intensity budget and escalates.
+   Acceptance: itest **`supervised-restarts-then-escalates`** (passes) — asserts the
+   crasher's `restarts_total` climbs then `escalated == 1`, proving bring-up, the
+   `WaitAny` loop, and both the Restart and Escalate branches on the wire. **Not yet
+   wired: cap re-grant** — this table uses `SPAWNABLE`-id services with no delegated
+   caps, so `satisfier.rs::process(child)` re-delegation is deferred to the step-4
+   FS-server graph (where a client's minted cap must survive a restart).
 3. **Supervision telemetry** — umbrella span per service, incarnation child spans,
    `restarts_total` + `state` metrics, transition events.
 4. **Acceptance itest** (`workload=supervised-crash-loop`) — **first graph (decided
