@@ -22,6 +22,7 @@ pub mod panic_log;
 pub mod reap;
 pub mod sched;
 pub mod stack;
+pub mod supervision;
 pub mod trap;
 pub mod virtio;
 
