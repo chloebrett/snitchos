@@ -1120,6 +1120,24 @@ impl Parser {
         }))
     }
 
+    /// Parse `handle <op> with <handler> { body }`. `op` is a native effect
+    /// name; `<handler>` is any expression (typically a lambda). The trailing
+    /// `{ … }` block is the handler's dynamic extent. The `handle` keyword is
+    /// already consumed.
+    fn parse_handle(&mut self, start: usize) -> Result<Expr, ParseError> {
+        let op = self.expect_ident("effect name after `handle`")?;
+        self.expect(&TokenKind::With, "`with` after the effect name")?;
+        let handler = self.parse_expr(0)?;
+        let body_start = self.cur_start();
+        self.expect(&TokenKind::LBrace, "'{' for the `handle` body")?;
+        let body = self.parse_block(body_start)?;
+        Ok(self.spanned(start, ExprKind::Handle {
+            op,
+            handler: Box::new(handler),
+            body: Box::new(body),
+        }))
+    }
+
     /// Parse the subjectless `match { cond => body … _ => default }` condition
     /// table and desugar it into nested `cond => then | els` conditionals
     /// (`Expr::If`) — it's the N-ary form of the binary conditional. Each arm is
@@ -1313,6 +1331,7 @@ impl Parser {
             TokenKind::LBracket => self.parse_collection(start)?,
             TokenKind::LBrace => self.parse_block(start)?,
             TokenKind::Match => self.parse_match(start)?,
+            TokenKind::Handle => self.parse_handle(start)?,
             TokenKind::Semicolon => return Err(self.err(NO_SEMICOLONS)),
             other => return Err(self.err(format!("unexpected token: {other:?}"))),
         })

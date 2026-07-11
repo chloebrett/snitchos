@@ -535,6 +535,10 @@ fn eval_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
         }
         CoreExprKind::Block { stmts, result } => eval_block(stmts, result.as_deref(), env, false),
         CoreExprKind::Match { subject, arms } => eval_match(&eval(subject, env)?, arms, env, false),
+        CoreExprKind::Handle { op, handler, body } => {
+            let handler = eval(handler, env)?;
+            eval(body, &env.clone().with_handler(op.clone(), handler))
+        }
         // `()` is unit; `(a, b, …)` is a tuple.
         CoreExprKind::Tuple(elements) if elements.is_empty() => Ok(Value::Unit),
         CoreExprKind::Tuple(elements) => {
@@ -1537,6 +1541,40 @@ mod tests {
         assert!(
             !events.iter().any(|ev| matches!(ev, TelemetryEvent::Emit { name, .. } if name == "x")),
             "the original `x` emit should have been intercepted, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_handle_block_installs_a_handler_over_its_body_only() {
+        // `handle emit with <lambda> { body }` redirects `emit` for the body's
+        // dynamic extent; an `emit` *after* the block still reaches the sink.
+        let mut items = crate::interp::prelude_items();
+        crate::lower::lower_program(&mut items);
+        let env = crate::interp::build_env(&items);
+        let e = crate::lower::lower_expr_to_core(
+            &crate::parser::parse(
+                r#"{
+                    handle emit with (n, v) -> emit("wrapped", v) { emit("x", 1) }
+                    emit("outside", 2)
+                }"#,
+            )
+            .expect("parse"),
+        );
+        crate::interp::eval(&e, &env).expect("handle runs");
+        let events = env.telemetry();
+        assert!(
+            events.iter().any(|ev| matches!(ev,
+                TelemetryEvent::Emit { name, value } if name == "wrapped" && *value == Value::Int(1))),
+            "the handler's `wrapped` emit should reach the sink, got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|ev| matches!(ev, TelemetryEvent::Emit { name, .. } if name == "x")),
+            "the intercepted `x` emit should not reach the sink, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|ev| matches!(ev,
+                TelemetryEvent::Emit { name, value } if name == "outside" && *value == Value::Int(2))),
+            "the `emit` after the block should reach the sink unhandled, got {events:?}"
         );
     }
 

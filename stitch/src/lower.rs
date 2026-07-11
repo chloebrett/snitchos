@@ -100,6 +100,11 @@ fn to_core(expr: &Expr) -> CoreExpr {
             subject: Box::new(to_core(subject)),
             arms: arms.iter().map(to_core_arm).collect(),
         },
+        ExprKind::Handle { op, handler, body } => CoreExprKind::Handle {
+            op: op.clone(),
+            handler: Box::new(to_core(handler)),
+            body: Box::new(to_core(body)),
+        },
         ExprKind::Placeholder(_) | ExprKind::OperatorRef(_) | ExprKind::SubjectlessMatch { .. } => {
             unreachable!("surface-only node survived lowering: {:?}", expr.kind)
         }
@@ -320,6 +325,10 @@ fn lower_expr(expr: &mut Expr) {
                 lower_match_arm(arm);
             }
         }
+        ExprKind::Handle { op: _, handler, body } => {
+            lower_expr(handler);
+            lower_expr(body);
+        }
         ExprKind::OperatorRef(op) => {
             *expr = operator_lambda(*op);
         }
@@ -425,7 +434,8 @@ fn collect_placeholders(expr: &mut Expr, params: &mut alloc::collections::BTreeS
         | ExprKind::SubjectlessMatch { .. }
         | ExprKind::Lambda { .. }
         | ExprKind::Block { .. }
-        | ExprKind::Match { .. } => {}
+        | ExprKind::Match { .. }
+        | ExprKind::Handle { .. } => {}
     }
 }
 
@@ -624,6 +634,10 @@ fn collect_free_vars(expr: &Expr, bound: &BTreeSet<String>, free: &mut BTreeSet<
                 collect_free_vars(&arm.body, &arm_bound, free);
             }
         }
+        ExprKind::Handle { op: _, handler, body } => {
+            collect_free_vars(handler, bound, free);
+            collect_free_vars(body, bound, free);
+        }
         ExprKind::Binary { left, right, .. } => {
             collect_free_vars(left, bound, free);
             collect_free_vars(right, bound, free);
@@ -738,6 +752,10 @@ fn collect_free_vars_core(expr: &CoreExpr, bound: &BTreeSet<String>, free: &mut 
                 }
                 collect_free_vars_core(&arm.body, &arm_bound, free);
             }
+        }
+        CoreExprKind::Handle { op: _, handler, body } => {
+            collect_free_vars_core(handler, bound, free);
+            collect_free_vars_core(body, bound, free);
         }
         CoreExprKind::Binary { left, right, .. } => {
             collect_free_vars_core(left, bound, free);

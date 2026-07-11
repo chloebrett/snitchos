@@ -471,12 +471,19 @@ which carries `handlers`. Test: a handler intercepts `emit("x",1)` and re-emits
 `emit("wrapped",1)`, which shallow-forwards to the ambient sink (no self-recursion).
 **583 lib + 29 integration green, clippy clean.**
 
-**D3 — `handle` surface syntax + installation.**
-New keyword `handle`; parse `handle <op> with <expr> { body }` → a surface AST node
-lowering to: eval the handler value, eval `body` under `env.with_handler(op, value)`.
-- RED: `handle emit with (n, v) -> record(n, v) { emit("x", 1) }` runs the handler,
-  not the ambient emit; an `emit` *outside* the block still hits the sink.
-- GREEN: lexer keyword + parser node + lowering/eval arm.
+**D3 — `handle` surface syntax + installation — ✅ DONE (2026-07-11).**
+New keywords `handle` + `with`; `parse_handle` reads `handle <op> with <expr> { body }`
+(op = ident, handler = `parse_expr(0)`, body = `parse_block`) into `ExprKind::Handle`,
+lowered 1:1 to `CoreExprKind::Handle { op, handler, body }`. Interp arm: eval the
+handler value, eval `body` under `env.clone().with_handler(op, value)` — the D2
+mechanism, now reachable from source. Both walks (`collect_free_vars` surface + core)
+recurse into handler+body with the same `bound` set (handle binds nothing itself);
+`collect_placeholders` treats it as a block boundary like `Block`/`Match`.
+- RED→GREEN test `a_handle_block_installs_a_handler_over_its_body_only`: full
+  parse→lower→eval of `handle emit with (n, v) -> emit("wrapped", v) { emit("x", 1) }`
+  intercepts the inner emit (shallow-forwarding `wrapped` to the ambient sink), and an
+  `emit` *after* the block still reaches the sink unhandled.
+- **584 lib + integration green, no new clippy warnings.**
 
 **D4 — Attenuation + spanned unhandled-effect fault.**
 `without Cap { body }` (drop authority for the extent) and/or a refusing handler; an

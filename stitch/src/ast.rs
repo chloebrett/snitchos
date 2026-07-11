@@ -296,6 +296,14 @@ pub enum ExprKind {
     /// A bare binary operator used as a first-class value in argument position:
     /// `f(+)`, `fold(0, *)`. Lowered to `(lhs, rhs) -> lhs op rhs`.
     OperatorRef(BinOp),
+    /// `handle <op> with <handler> { body }` — install a dynamically-scoped
+    /// effect handler for `op` (a native effect name like `emit`) over the
+    /// body's extent. Outside the block the effect is unhandled again.
+    Handle {
+        op: String,
+        handler: Box<Expr>,
+        body: Box<Expr>,
+    },
     /// `match subject { arm* }` (subject form).
     Match {
         subject: Box<Expr>,

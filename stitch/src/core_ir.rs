@@ -110,6 +110,13 @@ pub enum CoreExprKind {
         subject: Box<CoreExpr>,
         arms: Vec<CoreMatchArm>,
     },
+    /// `handle <op> with <handler> { body }` — install a dynamically-scoped
+    /// effect handler for `op` over the body's extent (see the surface node).
+    Handle {
+        op: String,
+        handler: Box<CoreExpr>,
+        body: Box<CoreExpr>,
+    },
 }
 
 /// A call argument in the core IR.
