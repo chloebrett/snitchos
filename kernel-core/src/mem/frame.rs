@@ -418,6 +418,17 @@ mod tests {
     }
 
     #[test]
+    fn alloc_contiguous_exactly_all_free_frames_succeeds() {
+        // n == frames_free is the boundary of the guard `n > self.frames_free`;
+        // requesting exactly what's free must succeed, not be rejected as "too many".
+        let (mut storage, cap) = empty(64);
+        let mut bm = Bitmap::new(&mut storage, cap);
+        bm.release_range(0, 64);
+        assert_eq!(bm.alloc_contiguous(64), Some(0));
+        assert_eq!(bm.count_free(), 0);
+    }
+
+    #[test]
     fn alloc_contiguous_larger_than_pool_returns_none() {
         let (mut storage, cap) = empty(64);
         let mut bm = Bitmap::new(&mut storage, cap);
