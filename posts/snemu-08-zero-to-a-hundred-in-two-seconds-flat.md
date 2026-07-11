@@ -122,6 +122,63 @@ before it faults.
   me cut the machine to an eighth without a single anxious "but what if a run spikes"
   — there are no spikes when the run is a function.
 
+## what's next
+
+the harness is wrung out. two seconds is packing at 85%, budgets in the right unit,
+and a machine sized to what the guest actually touches — there's maybe three tenths
+of a second of online-scheduling slack left, and the counterfactual re-pack i added
+this session tells me exactly how much, but chasing it is polishing. the interpreter
+tier is done too: register caching was the last thing i could think to try inside
+backend A, and it measured to nothing. from here the two real directions both point
+away from the thing i spent this session on.
+
+- **backend B.** the reified IR was always a two-backend bet: A is the portable
+  interpreter i've been measuring, B is native codegen — copy-and-patch stencils over
+  the same ops, real machine code, the throughput a tree-walker structurally cannot
+  reach. this is the only remaining lever that speeds the compute tail by a *factor*
+  instead of trimming it. and the value-based memory ops i refactored for increment 4
+  — the ones that turned out neutral for backend A — are exactly the shape B wants:
+  compute an address, hand it a value, keep the registers in host registers. inc 4
+  paid for itself after all; just not where i was looking.
+- **the browser.** the entire reason backend A is a portable, `unsafe`-free
+  interpreter and not a native JIT is so it can run inside a wasm sandbox. that's the
+  bet the whole tier structure is placed on: SnitchOS booting in a tab, driven by the
+  same emulator that runs these itests, with B as a host-only fast path and A as the
+  everywhere tier. two-seconds-flat on my laptop is a nice number; the point of it
+  being *this* emulator is that the number comes with me to the browser.
+
+the third direction isn't the emulator at all — it's the harness's own scheduling,
+which has more structure in it than i'm using. right now there's one snapshot per
+workload: boot to a checkpoint, then every scenario forks that. but a snapshot is
+just an execution state frozen mid-run, and states go deeper — after the FS server is
+up, after a client has connected, after the first RPC round-trips. scenarios that
+share a longer prefix of setup could fork from a *deeper* snapshot and skip
+re-running the part they have in common.
+
+the snapshots form a **tree**, not a graph. a state can't be the merge of two others
+— you can splice a branch off an existing state, never weld two states together — so
+every deeper snapshot descends from exactly one shallower one, all the way back to
+cold boot, with scenarios hanging off the nodes as leaves. and here's the part that's
+actually a nice problem: to run a leaf you first have to *materialize* its snapshot,
+which means running its parent forward to the fork point — that costs time and blocks
+the leaf until it's done. moving the frozen state between workers is cheap (a clone,
+cheaper still with copy-on-write); the entire cost is the dependency ordering. so it
+becomes tree-structured parallel scheduling: given a hundred-plus leaves hanging off
+a tree of snapshots, in what order do you compute the internal nodes, and on which
+workers, to unblock the most work soonest and land the whole thing fastest? do it
+generically, close to optimal, with the tree discovered and saved from previous runs
+so the next one starts warm — that's a genuinely interesting problem, and it's the
+direct sequel to the packing i spent this session on. packing was scheduling
+independent jobs. this is scheduling jobs that first have to grow the branch they
+hang from.
+
+and the small stuff, when i want it: work-stealing to take the last of the packing
+slack, copy-on-write forks to make every clone near-free regardless of RAM. neither
+is urgent at 16 MiB and 85% busy — but the tree scheduling is the one i actually want
+to sit down and think about.
+
+## coda
+
 zero to a hundred, two seconds flat. the engine was the part i built and the part
 that didn't matter. the speed was already in there; the whole job was to stop
 throwing it away.
