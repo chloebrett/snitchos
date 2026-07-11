@@ -128,6 +128,16 @@ fn perform(
     };
     match d.variant.as_str() {
         "Redraw" => redraw(render, state, env, platform)?,
+        "Edit" => {
+            // A buffer mutation: span it by the FSM-supplied name, then repaint. The
+            // edit already happened (the FSM is pure); the span is a zero-duration
+            // marker on the wire — the edit history *is* the trace.
+            if let Some((_, Value::Str(name))) = d.fields.first() {
+                telemetry.span_open(name);
+                redraw(render, state, env, platform)?;
+                telemetry.span_close(name);
+            }
+        }
         "Save" => {
             if let Some((_, Value::Str(text))) = d.fields.first() {
                 // Each save is its own span, nested in the session span.
@@ -203,6 +213,48 @@ mod tests {
                 "close stim.session",
             ]
         );
+    }
+
+    #[test]
+    fn a_buffer_edit_emits_a_named_span_nested_in_the_session() {
+        use crate::telemetry::Telemetry;
+        use crate::value::TelemetryEvent;
+
+        // `x` deletes the char under the cursor — an observable Edit. The driver
+        // opens the span the FSM named ("stim.delete-char"), nested in the session
+        // span: the edit history is a trace on the wire.
+        let fake = FakePlatform::with_bytes(b"x");
+        let tel = RecordingTelemetry::default();
+        run(STIM, "abc", 7, &fake, &tel).expect("stim session should run");
+
+        let spans: Vec<String> = tel
+            .snapshot()
+            .iter()
+            .filter_map(|e| match e {
+                TelemetryEvent::SpanOpen { name } => Some(format!("open {name}")),
+                TelemetryEvent::SpanClose { name } => Some(format!("close {name}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                "open stim.session",
+                "open stim.delete-char",
+                "close stim.delete-char",
+                "close stim.session",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_two_key_r_replace_flows_through_the_per_byte_loop() {
+        // `r` enters Replace mode, `Z` replaces the char under the cursor ('a'→'Z'),
+        // then `:w` saves — proving a two-key command survives the one-byte-at-a-time
+        // driver loop (the first multi-keystroke command in stim).
+        let fake = FakePlatform::with_bytes(b"rZ:w");
+        run(STIM, "abc", 7, &fake, &RecordingTelemetry::default()).expect("stim session should run");
+        assert_eq!(fake.writes(), vec![(7u32, b"Zbc".to_vec())]);
     }
 
     #[test]

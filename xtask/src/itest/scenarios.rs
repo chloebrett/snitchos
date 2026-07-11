@@ -3349,6 +3349,17 @@ pub fn supervised_restarts_then_escalates(h: &mut View) -> Result<(), String> {
     })
     .ok_or("no svc.crasher.restarts_total >= 1 — the supervisor didn't restart the failed service")?;
 
+    // Step-3 telemetry: the backoff before that restart is observable (the growing
+    // `backoff_ticks` gauge is the crash-loop line in Grafana).
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.svc.crasher.backoff_ticks")
+                && *value >= 1
+        }
+        _ => false,
+    })
+    .ok_or("no svc.crasher.backoff_ticks — the backoff before restart wasn't emitted")?;
+
     // It kept crash-looping past its intensity budget, so the policy escalated
     // and the root halted — the storm guard, observable on the wire.
     h.wait_for(SEC * 20, |f, strings| match f {

@@ -18,14 +18,14 @@ fn fsm(body: &str) -> Value {
 /// The effect tag ("Save"/"Redraw"/"Noop"/"Quit") of `step(setup, key)`.
 fn step_effect(setup: &str, key: &str) -> Value {
     fsm(&format!(
-        r#"{{ let st = step({setup}, "{key}")  match st.effect {{ Save(_) => "Save"  Redraw => "Redraw"  Noop => "Noop"  Quit => "Quit" }} }}"#
+        r#"{{ let st = step({setup}, "{key}")  match st.effect {{ Save(_) => "Save"  Redraw => "Redraw"  Noop => "Noop"  Quit => "Quit"  Edit(_) => "Edit" }} }}"#
     ))
 }
 
 /// The resulting mode name of `step(setup, key)`.
 fn step_mode(setup: &str, key: &str) -> Value {
     fsm(&format!(
-        r#"{{ let st = step({setup}, "{key}")  match st.state.mode {{ Normal => "Normal"  Insert => "Insert"  Command => "Command" }} }}"#
+        r#"{{ let st = step({setup}, "{key}")  match st.state.mode {{ Normal => "Normal"  Insert => "Insert"  Command => "Command"  Replace => "Replace" }} }}"#
     ))
 }
 
@@ -54,7 +54,7 @@ fn h_and_l_move_the_cursor_within_the_line() {
     assert_eq!(row_col(&format!(r#"step({mid}, "h").state"#)), ints(0, 0));
     // `h` at column 0 and `l` at the line's end are both no-ops (clamped).
     assert_eq!(row_col(r#"step(initialState("abc"), "h").state"#), ints(0, 0));
-    assert_eq!(row_col(&format!(r#"step(Editor(..initialState("abc"), col: 3), "l").state"#)), ints(0, 3));
+    assert_eq!(row_col(r#"step(Editor(..initialState("abc"), col: 3), "l").state"#), ints(0, 3));
     // They're handled keys, so they redraw (even the clamped no-op).
     assert_eq!(step_effect(mid, "h"), s("Redraw"));
 }
@@ -79,6 +79,27 @@ fn x_deletes_the_character_under_the_cursor() {
 }
 
 #[test]
+fn capital_x_deletes_the_char_before_the_cursor_as_an_observable_edit() {
+    // "abc" col 2 → `X` deletes 'b' → "ac", col 1 (the mirror of `x`, which deletes
+    // the char *under* the cursor).
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("abc"), col: 2), "X").state"#),
+        line_and_col("ac", 1)
+    );
+    // At col 0 there is nothing before the cursor → the buffer is untouched.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("abc"), col: 0), "X").state"#),
+        line_and_col("abc", 0)
+    );
+    // A real deletion is an observable `Edit` effect — the driver spans it — not a
+    // bare `Redraw`.
+    assert_eq!(step_effect(r#"Editor(..initialState("abc"), col: 2)"#, "X"), s("Edit"));
+    // A no-op `X` (col 0) changed nothing, so it falls back to `Redraw` and emits no
+    // span — telemetry reflects real edits only.
+    assert_eq!(step_effect(r#"Editor(..initialState("abc"), col: 0)"#, "X"), s("Redraw"));
+}
+
+#[test]
 fn o_opens_a_line_below_and_enters_insert() {
     // "ab" → `o` → an empty line below, cursor there, in Insert mode.
     assert_eq!(
@@ -86,6 +107,133 @@ fn o_opens_a_line_below_and_enters_insert() {
         buffer(&["ab", ""], 1, 0)
     );
     assert_eq!(step_mode(r#"initialState("ab")"#, "o"), s("Insert"));
+}
+
+#[test]
+fn a_capital_a_and_capital_i_position_the_cursor_and_enter_insert() {
+    // `a` appends: the cursor advances one column and enters Insert (insert *after*
+    // the char under the cursor).
+    assert_eq!(row_col(r#"step(initialState("ab"), "a").state"#), ints(0, 1));
+    assert_eq!(step_mode(r#"initialState("ab")"#, "a"), s("Insert"));
+    // `a` at end of line clamps at `len` — it can't advance past the buffer.
+    assert_eq!(row_col(r#"step(Editor(..initialState("ab"), col: 2), "a").state"#), ints(0, 2));
+    // `A` jumps to end-of-line (col == len) and enters Insert.
+    assert_eq!(row_col(r#"step(initialState("ab"), "A").state"#), ints(0, 2));
+    // `I` jumps to the first non-blank column and enters Insert.
+    assert_eq!(row_col(r#"step(Editor(..initialState("  ab"), col: 3), "I").state"#), ints(0, 2));
+    // Each only moves the cursor + switches mode — no buffer edit → Redraw.
+    assert_eq!(step_effect(r#"initialState("ab")"#, "a"), s("Redraw"));
+    assert_eq!(step_effect(r#"initialState("ab")"#, "A"), s("Redraw"));
+    assert_eq!(step_effect(r#"Editor(..initialState("  ab"), col: 3)"#, "I"), s("Redraw"));
+}
+
+#[test]
+fn capital_o_opens_a_line_above_and_enters_insert() {
+    // `O` on row 1 opens a fresh empty line *above* it (the mirror of `o` below),
+    // cursor there, in Insert.
+    assert_eq!(
+        lines_row_col(r#"step(Editor(..initialState("x\ny"), row: 1), "O").state"#),
+        buffer(&["x", "", "y"], 1, 0)
+    );
+    assert_eq!(step_mode(r#"initialState("ab")"#, "O"), s("Insert"));
+    // Opening a line mutates the buffer → an observable Edit.
+    assert_eq!(step_effect(r#"initialState("ab")"#, "O"), s("Edit"));
+}
+
+#[test]
+fn tilde_toggles_the_case_under_the_cursor_and_advances() {
+    // "aBc" col 0: `~` flips 'a'→'A' → "ABc" and advances to col 1.
+    assert_eq!(
+        lines_col(r#"step(initialState("aBc"), "~").state"#),
+        line_and_col("ABc", 1)
+    );
+    // On an uppercase char it flips the other way: col 1 'B'→'b' → "abc", col 2.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("aBc"), col: 1), "~").state"#),
+        line_and_col("abc", 2)
+    );
+    // At end of line (nothing under the cursor) it's a no-op → Redraw, no span.
+    assert_eq!(step_effect(r#"Editor(..initialState("aBc"), col: 3)"#, "~"), s("Redraw"));
+    // A real toggle is an observable Edit.
+    assert_eq!(step_effect(r#"initialState("aBc")"#, "~"), s("Edit"));
+}
+
+#[test]
+fn capital_j_joins_the_next_line_onto_the_current_one() {
+    // "ab" / "cd" → `J` → "ab cd" (one space at the seam), cursor at the join (col 2),
+    // and the second line is gone.
+    assert_eq!(
+        lines_row_col(r#"step(initialState("ab\ncd"), "J").state"#),
+        buffer(&["ab cd"], 0, 2)
+    );
+    // The next line's leading blanks are stripped before joining (vim's collapse).
+    assert_eq!(
+        lines_row_col(r#"step(initialState("ab\n   cd"), "J").state"#),
+        buffer(&["ab cd"], 0, 2)
+    );
+    // On the last line there is nothing to join → a no-op Redraw.
+    assert_eq!(step_effect(r#"Editor(..initialState("ab\ncd"), row: 1)"#, "J"), s("Redraw"));
+    // A real join is an observable Edit.
+    assert_eq!(step_effect(r#"initialState("ab\ncd")"#, "J"), s("Edit"));
+}
+
+#[test]
+fn capital_d_deletes_from_the_cursor_to_the_end_of_line() {
+    // "abcd" col 1 → `D` drops "bcd", leaving "a".
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("abcd"), col: 1), "D").state"#),
+        line_and_col("a", 1)
+    );
+    // At end of line there is nothing to delete → a no-op Redraw.
+    assert_eq!(step_effect(r#"Editor(..initialState("ab"), col: 2)"#, "D"), s("Redraw"));
+    assert_eq!(step_effect(r#"Editor(..initialState("abcd"), col: 1)"#, "D"), s("Edit"));
+    // `D` stays in Normal mode.
+    assert_eq!(step_mode(r#"Editor(..initialState("abcd"), col: 1)"#, "D"), s("Normal"));
+}
+
+#[test]
+fn capital_c_changes_to_end_of_line_and_enters_insert() {
+    // `C` is `D` then Insert: "abcd" col 1 → "a", cursor at col 1, in Insert.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("abcd"), col: 1), "C").state"#),
+        line_and_col("a", 1)
+    );
+    assert_eq!(step_mode(r#"Editor(..initialState("abcd"), col: 1)"#, "C"), s("Insert"));
+    assert_eq!(step_effect(r#"Editor(..initialState("abcd"), col: 1)"#, "C"), s("Edit"));
+}
+
+#[test]
+fn s_substitutes_the_char_under_the_cursor_and_enters_insert() {
+    // `s` deletes the char under the cursor and enters Insert: "abc" col 1 → "ac",
+    // col 1, Insert.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("abc"), col: 1), "s").state"#),
+        line_and_col("ac", 1)
+    );
+    assert_eq!(step_mode(r#"Editor(..initialState("abc"), col: 1)"#, "s"), s("Insert"));
+    assert_eq!(step_effect(r#"Editor(..initialState("abc"), col: 1)"#, "s"), s("Edit"));
+}
+
+#[test]
+fn r_replaces_the_char_under_the_cursor_via_a_two_key_sequence() {
+    // `r` enters Replace mode — a Redraw, no edit yet — the mini-accumulator waiting
+    // for the replacement char.
+    assert_eq!(step_mode(r#"initialState("abc")"#, "r"), s("Replace"));
+    assert_eq!(step_effect(r#"initialState("abc")"#, "r"), s("Redraw"));
+    // In Replace mode the next printable replaces the char under the cursor and
+    // returns to Normal: "abc" col 1, then `Z` → "aZc", cursor stays at col 1.
+    let pend = r#"Editor(..initialState("abc"), col: 1, mode: Replace)"#;
+    assert_eq!(lines_col(&format!(r#"step({pend}, "Z").state"#)), line_and_col("aZc", 1));
+    assert_eq!(step_mode(pend, "Z"), s("Normal"));
+    assert_eq!(step_effect(pend, "Z"), s("Edit"));
+    // Esc cancels Replace mode with no edit.
+    assert_eq!(step_mode(pend, "Esc"), s("Normal"));
+    assert_eq!(step_effect(pend, "Esc"), s("Redraw"));
+    // `r` at end of line then a char is a no-op (nothing under the cursor) → Redraw,
+    // and still returns to Normal.
+    let at_end = r#"Editor(..initialState("abc"), col: 3, mode: Replace)"#;
+    assert_eq!(step_effect(at_end, "Z"), s("Redraw"));
+    assert_eq!(step_mode(at_end, "Z"), s("Normal"));
 }
 
 #[test]
@@ -171,6 +319,32 @@ fn line_and_col(text: &str, col: i64) -> Value {
         ]
         .into(),
     )
+}
+
+#[test]
+fn zero_and_dollar_jump_to_the_line_ends() {
+    // "hello" with the cursor mid-line: `0` → column 0, `$` → the last character
+    // (col 4). `$` lands *on* the last char (len−1), unlike `A` which appends at len.
+    let mid = r#"Editor(..initialState("hello"), col: 2)"#;
+    assert_eq!(row_col(&format!(r#"step({mid}, "0").state"#)), ints(0, 0));
+    assert_eq!(row_col(&format!(r#"step({mid}, "$").state"#)), ints(0, 4));
+    // On an empty line `$` clamps to col 0 (max(len−1, 0)), never −1.
+    assert_eq!(row_col(r#"step(initialState(""), "$").state"#), ints(0, 0));
+    // Pure motions — a handled key that only moves the cursor is a Redraw, not an
+    // Edit (nothing in the buffer changed).
+    assert_eq!(step_effect(mid, "0"), s("Redraw"));
+    assert_eq!(step_effect(mid, "$"), s("Redraw"));
+}
+
+#[test]
+fn caret_jumps_to_the_first_non_blank_column() {
+    // "  hi" → `^` lands on col 2 (the 'h'), skipping the two leading spaces.
+    assert_eq!(row_col(r#"step(Editor(..initialState("  hi"), col: 3), "^").state"#), ints(0, 2));
+    // A line with no content (all spaces) clamps `^` to col 0.
+    assert_eq!(row_col(r#"step(Editor(..initialState("   "), col: 2), "^").state"#), ints(0, 0));
+    // No leading blanks → `^` is column 0, same as `0`.
+    assert_eq!(row_col(r#"step(Editor(..initialState("hi"), col: 1), "^").state"#), ints(0, 0));
+    assert_eq!(step_effect(r#"Editor(..initialState("  hi"), col: 3)"#, "^"), s("Redraw"));
 }
 
 #[test]
