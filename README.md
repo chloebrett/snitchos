@@ -1,14 +1,41 @@
-# snitchos
+# SnitchOS
 
 The operating system that snitches on itself 🐀
 
-![SnitchOS in Grafana 1](posts/tracing-30min-1.png)
+SnitchOS is an experimental operating system built on the logical extrapolation of two ideas. In practice, this gives it some curious - and at times novel - properties.
+
+## Idea 1: 💋 Elegance > compatibility: design from first principles.
+
+- 🐀 **Everything the kernel and userspace does gets "snitched"**: traced, logged and visible in Grafana. Distributed-systems-tier observability on a toy microkernel - super helpful for debugging, and a level of monitoring no other OS can give you.
+- 🔐 **Strictly no Linux-style ambient authority** - capabilities as a core concept and threaded through every part of the OS. The confused deputy problem is structurally impossible; the price is no POSIX compatibility.
+- 📁 The **filesystem lives in userspace**, and owns its own capabilities. The kernel owns the generic capability mechanism, but has no idea what a file is.
+- ⌨️ Forget Bash: the **shell is designed from the ground up** with capabilities and typed data in mind. No untyped Linux byte-pipes: `|>` gives fast in-process spawns mediated by the shell; `~>` spawns cross-process with kernel-mediated authority - basically the actor model at OS-level.
+
+## Idea 2: 🧬 Don't be afraid to reinvent a better wheel.
+
+- 🔋 **Snemu**: I got sick of QEMU taking 1 second to boot for each of all 100+ integration tests - so I built my own RISC-V emulator. Snemu runs the whole suite in <5 seconds, has its own JIT, is fully deterministic, and supports a unique tree-based snapshot system.
+- 🪡 **Stitch**: Bash is an unspecified mess that assumes the ambient-authority untyped-data world of Linux - let's not go there. I built Stitch instead: a language first and foremost, taking inspiration from Rust, Kotlin, Haskell and some others (e.g. Gleam for `use <-` syntax). Then a shell on top of it, with `|>` for in-process pipes and `~>` for cross-process: typed data, capabilities mediated by the kernel.
+- 🫨 **Stim**: a Vim clone built in Stitch, with full support for capabilities. Read-only mode is kernel-enforced; editing a file grants only the rights to that file. Every mode switch is a span; every command is traced.
+
+Here's an example of a Grafana dashboard showing the heap pressure:
 
 ![SnitchOS in Grafana 2](posts/tracing-30min-2.png)
 
-![SnitchOS in Grafana 3](posts/tracing-30min-3.png)
+## What's been built
 
-## Status
+- Boot in QEMU, boot fully traced to Grafana.
+- The usual kernel scaffolding: Interrupts / trap handling, Sv39 paging, clock, priority-based scheduler.
+- Multi-hart / SMP (cooperative inside the kernel, preemptive in user-space).
+- Full suite of integration tests, heavily optimized, with its own emulator.
+- Capabilities, and IPC with capabilities as a first class concept.
+- RAMfs filesystem that lives in userspace and hands out capabilities.
+- Console input / output.
+- Process lifecycle: spawn, wait, reap.
+- Notification system.
+
+## What's next
+
+## Detailed status log
 
 **v0.1 "Hello, traced world"** — _complete_. Kernel boots on RISC-V in QEMU, emits a structured boot-phase span tree over a dedicated virtio-console channel, host-side collector decodes and prints.
 
@@ -36,11 +63,11 @@ See [posts/post-9-moving-the-kernel-without-breaking-it.md](posts/post-9-moving-
 - **Step 12 (`Mutex<VecDeque>` → `heapless::spsc::Queue`)** — _complete_. The lock-free SPSC queue retires the chokepoint; the counter-intuitive result ("lock-free made it slower" at low contention) is [post 19](posts/post-19-lock-free-made-it-slower.md).
 - **Steps 13–14 (integration suite + closeout)** — _complete_. SMP scenarios: `smp-producer-consumer-correctness`, `smp-spans-carry-hart-id`, `smp-tlb-shootdown-visible` (added `mmu::remap` + a counterfactual-verified stale-TLB oracle), plus the ping-pong alternation oracle (which surfaced a real lost-wakeup, documented in `plans/scaling-corners.md`). Collector cashes the wire's `hart_id` into a `host.cpu_id` OTLP span attribute so Tempo can slice traces by CPU. See [post 21](posts/post-21-make-it-fail-first.md).
 
-**v0.7 "Userspace & capabilities"** — _complete_. Two steps. **v0.7a** drops the first userspace process to U-mode (the `user/` crates: a `runtime` with crt0 + syscall bindings + a `talc` heap, a `std` facade, an `#[entry]` macro, demo programs) behind one deliberately-*ambient* syscall — built the "Unix way" so the rewrite could feel the pain. **v0.7b** replaces ambient authority with **capabilities**: `kernel_core::cap` defines a `Capability { object, rights }` named by an opaque `Handle` and validated against the *calling* process's own `CapTable` — no ambient authority, every invocation checked. Per-process Sv39 page tables + the `U`-bit isolation firewall; `copy_from_user` validates a user range under a transient `SUM`; every refusal snitches a `SyscallRefused` frame. See [docs/capability-system-design.md](docs/capability-system-design.md).
+**v0.7 "Userspace & capabilities"** — _complete_. Two steps. **v0.7a** drops the first userspace process to U-mode (the `user/` crates: a `runtime` with crt0 + syscall bindings + a `talc` heap, a `std` facade, an `#[entry]` macro, demo programs) behind one deliberately-_ambient_ syscall — built the "Unix way" so the rewrite could feel the pain. **v0.7b** replaces ambient authority with **capabilities**: `kernel_core::cap` defines a `Capability { object, rights }` named by an opaque `Handle` and validated against the _calling_ process's own `CapTable` — no ambient authority, every invocation checked. Per-process Sv39 page tables + the `U`-bit isolation firewall; `copy_from_user` validates a user range under a transient `SUM`; every refusal snitches a `SyscallRefused` frame. See [docs/capability-system-design.md](docs/capability-system-design.md).
 
-**v0.8 "Preemption & priorities"** — _complete_. Timer-driven preemption of **userspace** (the `SPP == User` gate; kernel code stays cooperative), layered on the v0.5 cooperative switch — the preempted task's full `TrapFrame` parks on its kernel stack while the scheduler swaps only the callee-saved registers. `ContextSwitch{Preempt}` + `snitchos.sched.preemptions_total`. **v0.8b** adds static priorities (Low/Normal/High) with **aging** anti-starvation: `pick_next` takes the highest *effective* priority, ties broken by longest wait — "ordered, but fair."
+**v0.8 "Preemption & priorities"** — _complete_. Timer-driven preemption of **userspace** (the `SPP == User` gate; kernel code stays cooperative), layered on the v0.5 cooperative switch — the preempted task's full `TrapFrame` parks on its kernel stack while the scheduler swaps only the callee-saved registers. `ContextSwitch{Preempt}` + `snitchos.sched.preemptions_total`. **v0.8b** adds static priorities (Low/Normal/High) with **aging** anti-starvation: `pick_next` takes the highest _effective_ priority, ties broken by longest wait — "ordered, but fair."
 
-**v0.9 "IPC over capabilities"** — _complete_. Synchronous **endpoints** (a pure rendezvous state machine in `kernel-core`): `send`/`receive` of an inline `[u64; 4]` message, blocking until a peer arrives. **v0.9b** `call`/`reply` RPC over a one-shot, kernel-minted **reply capability** (possession is authority; consumed on use). **v0.9c** **badged endpoints**: a `MINT`-holder derives badged `SEND` caps (`MintBadged`) and the kernel delivers the *unforgeable* badge to the receiver, so one endpoint demuxes many clients by capability — plus cap-transfer-in-reply. Trace context crosses the boundary (the sender's span parents the receiver's); new `Message` + `CapEvent` wire frames. See [docs/ipc-design.md](docs/ipc-design.md).
+**v0.9 "IPC over capabilities"** — _complete_. Synchronous **endpoints** (a pure rendezvous state machine in `kernel-core`): `send`/`receive` of an inline `[u64; 4]` message, blocking until a peer arrives. **v0.9b** `call`/`reply` RPC over a one-shot, kernel-minted **reply capability** (possession is authority; consumed on use). **v0.9c** **badged endpoints**: a `MINT`-holder derives badged `SEND` caps (`MintBadged`) and the kernel delivers the _unforgeable_ badge to the receiver, so one endpoint demuxes many clients by capability — plus cap-transfer-in-reply. Trace context crosses the boundary (the sender's span parents the receiver's); new `Message` + `CapEvent` wire frames. See [docs/ipc-design.md](docs/ipc-design.md).
 
 **v0.10 "RAMfs"** — _complete_ (cap-agnostic core + protocol; front-end wired). The deliverable is the **`Filesystem` trait** (`fs-core` — inode-addressed, host-testable, imports no cap/IPC types) with a flat in-memory impl (`ramfs`) behind it, and `fs-proto` (the `Badge` packing `(inode, file_rights)`, opcodes, wire `Request`/`Response`). A **File cap is a badged endpoint cap**: the FS owns `MINT` and attenuates on `lookup`. Bulk bytes cross via a kernel **cross-address-space copy** (`CopyFromCaller`/`CopyToCaller` — message-passing, not shared memory). The `user/fs` front-end (`fs-server`/`fs-client`) does the badge→inode demux above the cap-agnostic trait. See [docs/filesystem-design.md](docs/filesystem-design.md).
 
@@ -185,7 +212,7 @@ Useful flags:
 
 - `--repeat N` — run the whole suite N times back-to-back, then print an aggregate flake table listing scenarios that failed at least once.
 - `--tag <tag>` — run every scenario carrying `<tag>` (union). Repeatable / comma-separated: `--tag frame --tag heap` or `--tag frame,heap` runs scenarios tagged either — same comma-means-also convention as the positional scenario list. An unknown tag errors with the known set; can't be combined with a named scenario. Tags are set per-row in the `catalog!` table in `xtask/src/itest.rs` (`boot`, `frame`, `heap`, `oom`, `sched`, `smp`, `ipi`, `workload`, `stress`, `userspace`).
-- `--shared` — shared-boot mode: group scenarios by their `workload` and run each group against a *single* kernel boot instead of one boot per scenario (the ~19 default-demo and the userspace scenarios each boot QEMU once). Each scenario reads the same recorded frame stream through its own cursor. Off by default — the flake gate (`--repeat 10`) and baselines want the per-scenario isolation of separate boots. Composes with `--tag`/`--skip`. Cuts total QEMU boots (CPU time ~40% on a full run); see [plans/itest-shared-boot-mode.md](plans/itest-shared-boot-mode.md).
+- `--shared` — shared-boot mode: group scenarios by their `workload` and run each group against a _single_ kernel boot instead of one boot per scenario (the ~19 default-demo and the userspace scenarios each boot QEMU once). Each scenario reads the same recorded frame stream through its own cursor. Off by default — the flake gate (`--repeat 10`) and baselines want the per-scenario isolation of separate boots. Composes with `--tag`/`--skip`. Cuts total QEMU boots (CPU time ~40% on a full run); see [plans/itest-shared-boot-mode.md](plans/itest-shared-boot-mode.md).
 - `--keep-existing-qemus` — don't `pkill` stale QEMUs at start (rare; useful if you want a concurrent debug QEMU).
 - `--skip-unit-tests` — bypass the unit-test prerequisite.
 
