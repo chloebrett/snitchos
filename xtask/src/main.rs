@@ -1159,8 +1159,10 @@ fn run_mutants(extra_args: &[String]) -> ExitCode {
             "hitch",
             "-p",
             "hitch-pod",
+            "-p",
+            "stitch",
             "--features",
-            "protocol/std",
+            "protocol/std,stitch/testing",
         ])
         .args(extra_args)
         .status()

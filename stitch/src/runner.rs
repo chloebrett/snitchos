@@ -15,7 +15,7 @@ use crate::interp::{
     Module, build_env_with_backends, eval, eval_modules_with_telemetry, eval_program_located,
     is_builtin_module, prelude_items,
 };
-use crate::lower::{lower_expr_to_core, lower_program};
+use crate::lower::lower_expr_to_core;
 use crate::parser::{parse, parse_program};
 use crate::platform::{NullPlatform, Platform};
 use crate::source::SourceMap;
@@ -254,7 +254,6 @@ impl Repl {
         if self.env.is_none() {
             let mut all = self.prelude.clone();
             all.extend_from_slice(&self.defs);
-            lower_program(&mut all);
             self.env = Some(build_env_with_backends(
                 Rc::clone(&self.telemetry),
                 Rc::clone(&self.platform),

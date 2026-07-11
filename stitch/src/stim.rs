@@ -9,7 +9,6 @@ use crate::prelude::*;
 
 use crate::env::Env;
 use crate::interp::{apply_values, build_env, prelude_items};
-use crate::lower::lower_program;
 use crate::parser::parse_program;
 use crate::platform::{Handle, Platform};
 use crate::telemetry::Telemetry;
@@ -35,7 +34,6 @@ pub fn run(
     // keystroke — never re-`eval_program` per key (that is the B5 per-run leak).
     let mut items = prelude_items();
     items.extend(parse_program(source).map_err(|e| RuntimeError::new(e.message))?);
-    lower_program(&mut items);
     let env = build_env(&items);
 
     let initial = lookup(&env, "initialState")?;

@@ -12,7 +12,7 @@ use crate::core_ir::{CoreArg, CoreExpr, CoreExprKind, CoreStmt, CoreStrSegment};
 use crate::lexer::Span;
 use crate::source::{SourceId, SourceMap};
 use crate::env::{AssignError, Env};
-use crate::lower::{free_vars_core, lower_expr_to_core, lower_program};
+use crate::lower::{free_vars_core, lower_expr_to_core};
 use crate::natives::NATIVES;
 use crate::ops::{as_bool, eval_binary, eval_unary};
 use crate::parser::parse_program;
@@ -147,7 +147,6 @@ pub fn eval_program_with_telemetry(
     // The Stitch-source prelude loads first; user items can shadow it.
     let mut all = prelude_items();
     all.extend_from_slice(items);
-    lower_program(&mut all);
     let env = build_env(&all);
     let result = match env.lookup("main") {
         Some(main) => eval_call(&main, &[], &env),
@@ -168,10 +167,8 @@ pub fn eval_program_located(
     user_src: SourceId,
 ) -> (Result<Value, RuntimeError>, Vec<TelemetryEvent>) {
     let prelude_src = sources.register("<prelude>", PRELUDE);
-    let mut prelude = prelude_items();
-    lower_program(&mut prelude);
-    let mut user = items.to_vec();
-    lower_program(&mut user);
+    let prelude = prelude_items();
+    let user = items.to_vec();
     let env = build_env_batches(Env::new(), &[(&prelude, prelude_src), (&user, user_src)], &user);
     let result = match env.lookup("main") {
         Some(main) => eval_call(&main, &[], &env),
@@ -198,7 +195,6 @@ pub fn eval_program_located(
 pub fn eval_program_with_fuel(items: &[Item], fuel: u64) -> Result<Value, RuntimeError> {
     let mut all = prelude_items();
     all.extend_from_slice(items);
-    lower_program(&mut all);
     let env = build_env_in(Env::new().with_fuel(fuel), &all);
     match env.lookup("main") {
         Some(main) => eval_call(&main, &[], &env),
@@ -212,7 +208,6 @@ pub fn eval_program_with_platform(
 ) -> Result<Value, RuntimeError> {
     let mut all = prelude_items();
     all.extend_from_slice(items);
-    lower_program(&mut all);
     let env = build_env_in(Env::new().with_platform(platform), &all);
     match env.lookup("main") {
         Some(main) => eval_call(&main, &[], &env),
@@ -261,8 +256,7 @@ pub fn eval_modules_with_telemetry(
         base_reg.globals.insert(native.name.to_string(), Value::Native(*native));
     }
     register_builtin_types(&mut base_reg.globals);
-    let mut prelude = parse_program(PRELUDE).expect("the prelude must parse");
-    lower_program(&mut prelude);
+    let prelude = parse_program(PRELUDE).expect("the prelude must parse");
     register_items(&prelude, &base, &mut base_reg);
 
     // One env per module, each sharing `base`'s method/field-mut tables + sink
@@ -277,9 +271,7 @@ pub fn eval_modules_with_telemetry(
     let mut per_module = Vec::with_capacity(modules.len());
     for (module, env) in modules.iter().zip(&envs) {
         let mut reg = Registration::seeded(base_reg.globals.clone());
-        let mut lowered = module.items.clone();
-        lower_program(&mut lowered);
-        register_items(&lowered, env, &mut reg);
+        register_items(&module.items, env, &mut reg);
         combined.absorb_types(&reg);
         per_module.push(reg);
     }
