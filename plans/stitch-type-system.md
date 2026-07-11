@@ -106,10 +106,11 @@ canonical `Ty`; a `TypeError` type exists carrying a message + span.
 **RED**: `1 + true` yields one error; `1 + 2` none.
 **GREEN**: `synth(Binary)` encodes each operator's operand/result typing (arithmetic, comparison, boolean, concat) against `consistent`.
 
-### Step 6: call argument + result types
+### Step 6: call argument + result types — ✅ DONE (2026-07-11)
 **Acceptance**: calling `f(x: Int) -> Str` as `f("no")` errors at the arg; `f(1)` clean and the call synthesizes `Str`; calling an unknown/`Dyn` callee is clean.
-**RED**: `f("no")` where `f(x: Int) -> Str` yields one arg error; the call's result type is `Str`.
-**GREEN**: `synth(Call)` looks up the callee signature, checks args against param types, returns the declared result (`Dyn` when the callee type is unknown).
+**GREEN**: `FnSig { params, ret }` + `collect_funcs` index every declared function; `Ctx` gained a `funcs` map; `synth_call` grew a second arm — a known function checks each arg against its parameter type (positional) and yields the declared return (`Dyn` for unknown callees). Return-type synthesis proven by `f() -> Int = g(1)` erroring when `g` returns `Str`.
+**Mutation**: 36 mutants, 27 caught / 9 unviable, 0 survivors.
+**Done**: 598 lib green, clippy clean.
 
 ### Step 7: wire the pass in (reported, non-fatal)
 **Acceptance**: a host entry (e.g. `check_program_located` or a `runner` hook) collects type errors and renders them via the `SourceMap`; running a well-typed program is unchanged; the 588-test suite + prelude stay green (no false positives).
