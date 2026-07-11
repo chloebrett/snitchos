@@ -15,10 +15,10 @@ fn fsm(body: &str) -> Value {
     run_source(STIM, body)
 }
 
-/// The effect tag ("Save"/"Redraw"/"Noop") of `step(setup, key)`.
+/// The effect tag ("Save"/"Redraw"/"Noop"/"Quit") of `step(setup, key)`.
 fn step_effect(setup: &str, key: &str) -> Value {
     fsm(&format!(
-        r#"{{ let st = step({setup}, "{key}")  match st.effect {{ Save(_) => "Save"  Redraw => "Redraw"  Noop => "Noop" }} }}"#
+        r#"{{ let st = step({setup}, "{key}")  match st.effect {{ Save(_) => "Save"  Redraw => "Redraw"  Noop => "Noop"  Quit => "Quit" }} }}"#
     ))
 }
 
@@ -70,9 +70,13 @@ fn step_colon_w_saves_the_buffer_and_returns_to_normal() {
         s("hi\nthere")
     );
     assert_eq!(step_mode(&cmd, "w"), s("Normal"));
-    // Any other command key cancels back to Normal (a Redraw, no save).
+    // `:q` quits — a Quit effect (the driver breaks its loop on it) — and returns
+    // to Normal.
+    assert_eq!(step_effect(&cmd, "q"), s("Quit"));
     assert_eq!(step_mode(&cmd, "q"), s("Normal"));
-    assert_eq!(step_effect(&cmd, "q"), s("Redraw"));
+    // Any *other* command key cancels back to Normal (a harmless Redraw, no save).
+    assert_eq!(step_effect(&cmd, "z"), s("Redraw"));
+    assert_eq!(step_mode(&cmd, "z"), s("Normal"));
 }
 
 #[test]

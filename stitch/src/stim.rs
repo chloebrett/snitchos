@@ -60,9 +60,17 @@ pub fn run(
             .ok_or_else(|| RuntimeError::new("stim: step result has no `effect`"))?;
         perform(&effect, &next, &render, &env, platform, file_handle, telemetry)?;
         state = next;
+        if is_quit(&effect) {
+            break;
+        }
     }
     telemetry.span_close("stim.session");
     Ok(())
+}
+
+/// Whether the effect is `Quit` — the FSM asking the driver to end the session.
+fn is_quit(effect: &Value) -> bool {
+    matches!(effect, Value::Data(d) if d.variant == "Quit")
 }
 
 fn lookup(env: &Env, name: &str) -> Result<Value, RuntimeError> {
@@ -207,6 +215,15 @@ mod tests {
         let fake = FakePlatform::with_bytes(b"iab\x0d\x7f\x1b:w");
         run(STIM, "", 7, &fake, &RecordingTelemetry::default()).expect("stim session should run");
         assert_eq!(fake.writes(), vec![(7u32, b"ab".to_vec())]);
+    }
+
+    #[test]
+    fn colon_q_quits_the_loop_and_ignores_later_keys() {
+        // `:q` breaks the driver loop; the trailing `iZ\x1b:w` — which would
+        // otherwise insert and save "Z" — is never read.
+        let fake = FakePlatform::with_bytes(b":qiZ\x1b:w");
+        run(STIM, "hi", 7, &fake, &RecordingTelemetry::default()).expect("stim session should run");
+        assert!(fake.writes().is_empty(), ":q must stop before the later :w");
     }
 
     #[test]

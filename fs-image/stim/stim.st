@@ -18,9 +18,10 @@ use List
 sum Mode = Normal | Insert | Command
 
 // What the driver must perform after a transition. `Save` carries the bytes to
-// write back; `Redraw` asks for a screen repaint; `Noop` is nothing. (Named
-// `Noop`, not `None`, so it doesn't clash with the prelude's `Maybe` `None`.)
-sum Effect = Save(Str) | Redraw | Noop
+// write back; `Redraw` asks for a screen repaint; `Noop` is nothing; `Quit` ends
+// the session (the driver breaks its loop). (Named `Noop`, not `None`, so it
+// doesn't clash with the prelude's `Maybe` `None`.)
+sum Effect = Save(Str) | Redraw | Noop | Quit
 
 // The whole editor state — immutable. Every transition returns a fresh `Editor`
 // via `..spread` update. `row`/`col` is a full cursor (0-based); unbound keys
@@ -162,6 +163,7 @@ renderFrame(state) = {
 
 redraw(state) = Step(state: state, effect: Redraw)
 noop(state) = Step(state: state, effect: Noop)
+quit(state) = Step(state: state, effect: Quit)
 
 // A key is a printable char (vs. a symbolic name) iff it is exactly one char.
 isPrintable(key) = Str.length(key) == 1
@@ -186,10 +188,11 @@ stepInsert(state, key) = match {
     _ => noop(state)
 }
 
-// Command mode (`:`): v1 recognizes only `w` (save), directly — no command-line
-// accumulation. `w` saves and returns to Normal; any other key cancels to Normal.
+// Command mode (`:`): `w` saves, `q` quits — both directly, no command-line
+// accumulation. Each returns to Normal first; any other key cancels to Normal.
 stepCommand(state, key) = match {
     key == "w" => save(enterNormal(state))
+    key == "q" => quit(enterNormal(state))
     _ => redraw(enterNormal(state))
 }
 
