@@ -25,3 +25,6 @@ snitchos-std = { path = "../std" }
 # The FS wire protocol — `stitch_repl`'s `:load` reads a `.st` file off the
 # filesystem endpoint (the `stitch-fs` workload).
 fs-proto = { path = "../../fs-proto" }
+# Pure supervision policy — the `supervised` root's dependency ordering, restart
+# decision, and backoff/intensity live here (host-tested; userspace-safe).
+supervision = { path = "../../supervision" }

@@ -82,6 +82,11 @@ pub static SPAWNEE_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPAWNEE_ELF"));
 /// `spawnee`, then `WaitAny`s for whichever exits — the supervising-parent demo.
 pub static SUPERVISOR_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SUPERVISOR_ELF"));
 
+/// The `workload=supervised` generic supervisor root (supervision step 2): walks
+/// a data-driven service table, bringing services up in dependency order and
+/// consulting the pure `supervision` policy on each exit (restart/stop/escalate).
+pub static SUPERVISED_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SUPERVISED_ELF"));
+
 /// The `spinner` child (spawnable id 3): loops forever, never exits. A long-lived
 /// sibling so `WaitAny` deterministically returns the *other* child.
 pub static SPINNER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPINNER_ELF"));
@@ -303,6 +308,11 @@ pub static SPAWNER: ProgramSpec = ProgramSpec { elf: SPAWNER_ELF, launch: Launch
 /// `workload=wait-any`: the supervising parent (ambient — `Spawn`/`WaitAny` need
 /// no cap; it delegates its span cap to the exiting child).
 pub static SUPERVISOR: ProgramSpec = ProgramSpec { elf: SUPERVISOR_ELF, launch: Launch::Plain };
+
+/// `workload=supervised`: the generic supervisor root — data-driven service
+/// table + policy-driven restarts. Holds only its bootstrap caps (Launch::Plain);
+/// it spawns its services (spinner/spawnee) from the `SPAWNABLE` registry.
+pub static SUPERVISED: ProgramSpec = ProgramSpec { elf: SUPERVISED_ELF, launch: Launch::Plain };
 
 /// `workload=init`: the supervising root — spawns + `WaitAny`-reaps a child,
 /// delegating its span cap downward. Holds only its bootstrap caps (Launch::Plain).
@@ -699,6 +709,13 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::Init, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "init", program: &INIT, priority: Priority::Normal }],
+    }),
+    // Supervision step 2: the generic supervisor root. Only `supervised` is in the
+    // layout; it spawns its service table (spinner/spawnee) at runtime from the
+    // SPAWNABLE registry and drives restarts via the pure `supervision` policy.
+    (WorkloadKind::Supervised, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "supervised", program: &SUPERVISED, priority: Priority::Normal }],
     }),
     // v0.13 EndpointCreate: a single program manufactures its own endpoint and
     // proves it by minting — no kernel-created endpoint (`needs_endpoint: false`).

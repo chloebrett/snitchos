@@ -441,6 +441,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::SpawnReap)
         | Some(WorkloadKind::WaitAny)
         | Some(WorkloadKind::Init)
+        | Some(WorkloadKind::Supervised)
         | Some(WorkloadKind::EndpointCreate)
         | Some(WorkloadKind::NotifySmoke)
         | Some(WorkloadKind::Priorities)
@@ -522,6 +523,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::SpawnReap
                     | WorkloadKind::WaitAny
                     | WorkloadKind::Init
+                    | WorkloadKind::Supervised
                     | WorkloadKind::EndpointCreate
                     | WorkloadKind::UserspaceBadPtr
                     | WorkloadKind::Priorities

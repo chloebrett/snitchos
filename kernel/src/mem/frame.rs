@@ -71,6 +71,11 @@ impl Allocator {
         self.bitmap.free(idx);
     }
 
+    fn alloc_contiguous(&mut self, n: usize) -> Option<PhysFrame> {
+        let idx = self.bitmap.alloc_contiguous(n)?;
+        Some(PhysFrame(self.ram_base + idx * FRAME_SIZE))
+    }
+
     fn stats(&self) -> Stats {
         let total = self.bitmap.capacity();
         let free = self.bitmap.count_free();
@@ -186,6 +191,26 @@ pub fn alloc_zeroed() -> Option<PhysFrame> {
         (frame.kernel_va() as *mut u8).write_bytes(0, FRAME_SIZE);
     }
     Some(frame)
+}
+
+/// Allocate `n` physically contiguous frames. Returns the run's base
+/// frame, or `None` if no run of `n` free frames exists (including
+/// when `n == 0`, or when enough total free frames exist but none are
+/// contiguous). Callers derive the rest of the run as
+/// `base.addr() + i * FRAME_SIZE`.
+pub fn alloc_contiguous(n: usize) -> Option<PhysFrame> {
+    let alloc = FRAME_ALLOC.get()?;
+    let result = alloc.lock().alloc_contiguous(n);
+    match result {
+        Some(frame) => {
+            ALLOC_COUNT.add(n as u64);
+            Some(frame)
+        }
+        None => {
+            ALLOC_FAIL_COUNT.inc();
+            None
+        }
+    }
 }
 
 /// Return a frame to the free pool. Double-free is idempotent

@@ -1,11 +1,16 @@
 //! Pure supervision policy — dependency ordering, restart decisions, and
-//! restart-set computation. No MMIO, no CSRs, no syscalls: this is the
-//! "policy logic" tier that lives beside `sched` and `bootargs` and is
-//! exercised entirely by `cargo test -p kernel-core`.
+//! restart-set computation. No MMIO, no CSRs, no syscalls, no capability or
+//! IPC types: like `fs-core`, this is a `shared`-tier crate that compiles and
+//! unit-tests on the host, so **userspace** (the supervisor engine) can depend
+//! on it even though it cannot depend on `kernel-core`.
 //!
-//! The userspace supervisor engine (`workload=supervised-*`) is the
-//! mechanism that calls into these decisions; see
-//! `docs/supervision-design.md` step 1.
+//! The userspace supervisor engine (`workload=supervised-*`) is the mechanism
+//! that calls into these decisions; see `docs/supervision-design.md` step 1.
+
+#![no_std]
+#![forbid(unsafe_code)]
+
+extern crate alloc;
 
 use alloc::vec::Vec;
 

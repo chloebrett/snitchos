@@ -156,6 +156,12 @@ pub enum WorkloadKind {
     /// (delegating its span cap) and reaps it via `WaitAny` — the root of the
     /// capability delegation graph. The first userspace process's eventual shape.
     Init,
+    /// Supervision step 2: the generic supervisor root. A `supervised` process
+    /// walks a data-driven service table — bringing services up in dependency
+    /// order, reaping via `WaitAny`, and consulting the pure `supervision` policy
+    /// (restart with backoff, stop, or escalate) — instead of hardcoding it. Its
+    /// `crasher` service crash-loops past its intensity budget and escalates.
+    Supervised,
     /// v0.13 EndpointCreate: a single program manufactures its own IPC endpoint
     /// via the `EndpointCreate` syscall and proves the returned cap is a real
     /// owning `RECV | MINT` by minting a badged `SEND` on it.
@@ -328,6 +334,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "spawn-reap" => Some(WorkloadKind::SpawnReap),
             "wait-any" => Some(WorkloadKind::WaitAny),
             "init" => Some(WorkloadKind::Init),
+            "supervised" => Some(WorkloadKind::Supervised),
             "endpoint-create" => Some(WorkloadKind::EndpointCreate),
             "demo" => Some(WorkloadKind::Demo),
             "cooperative" => Some(WorkloadKind::Cooperative),
@@ -544,6 +551,11 @@ mod tests {
     #[test]
     fn selects_spawn_reap() {
         assert_eq!(select("workload=spawn-reap"), Some(WorkloadKind::SpawnReap));
+    }
+
+    #[test]
+    fn selects_supervised() {
+        assert_eq!(select("workload=supervised"), Some(WorkloadKind::Supervised));
     }
 
     #[test]
