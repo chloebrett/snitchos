@@ -2,4 +2,4 @@
 source: stitch/tests/stim_fsm.rs
 expression: "fsm(r#\"enterInsert(initialState(\"ab\"))\"#)"
 ---
-Editor[(Some("lines"), List[Str("ab")]), (Some("row"), Int(0)), (Some("col"), Int(0)), (Some("mode"), Insert[])]
+Editor[(Some("lines"), List[Str("ab")]), (Some("row"), Int(0)), (Some("col"), Int(0)), (Some("mode"), Insert[]), (Some("pending"), Pending[(Some("op"), OpNone[])]), (Some("clipboard"), Register[(Some("text"), Str("")), (Some("wise"), Charwise[])])]

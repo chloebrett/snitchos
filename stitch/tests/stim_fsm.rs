@@ -33,6 +33,37 @@ fn s(text: &str) -> Value {
     Value::Str(text.into())
 }
 
+/// The name of the pending operator after `step(setup, key)` — "None" when not
+/// operator-pending.
+fn pending_op(setup: &str, key: &str) -> Value {
+    fsm(&format!(
+        r#"{{ let st = step({setup}, "{key}")  match st.state.pending.op {{ OpNone => "None"  OpDelete => "Delete"  OpChange => "Change"  OpYank => "Yank" }} }}"#
+    ))
+}
+
+/// The `[row, col]` of `motionTarget(setup, key)`, or `[0, 0]` if the key is not a
+/// motion. Binding `rc` keeps the trailing `[…]` off the match (maximal munch).
+fn motion_rowcol(setup: &str, key: &str) -> Value {
+    fsm(&format!(
+        r#"{{ match motionTarget({setup}, "{key}") {{ Some(t) => {{ let rc = [t.row, t.col]  rc }}  None => {{ let z = [0, 0]  z }} }} }}"#
+    ))
+}
+
+/// The wiseness name of `motionTarget(setup, key)` — "Charwise"/"Linewise", or
+/// "None" if the key is not a motion.
+fn motion_wise(setup: &str, key: &str) -> Value {
+    fsm(&format!(
+        r#"{{ match motionTarget({setup}, "{key}") {{ Some(t) => (match t.wise {{ Charwise => "Charwise"  Linewise => "Linewise" }})  None => "None" }} }}"#
+    ))
+}
+
+/// The name of the pending operator of the `Editor` that `setup` evaluates to.
+fn pending_op_of(setup: &str) -> Value {
+    fsm(&format!(
+        r#"{{ let s = {setup}  match s.pending.op {{ OpNone => "None"  OpDelete => "Delete"  OpChange => "Change"  OpYank => "Yank" }} }}"#
+    ))
+}
+
 #[test]
 fn step_dispatches_normal_mode_keys() {
     let start = r#"initialState("a\nb")"#;
@@ -319,6 +350,33 @@ fn line_and_col(text: &str, col: i64) -> Value {
         ]
         .into(),
     )
+}
+
+#[test]
+fn operators_enter_operator_pending_within_normal_mode() {
+    // A fresh state is not operator-pending.
+    assert_eq!(pending_op_of(r#"initialState("abc")"#), s("None"));
+    // `d` does not act yet — it stays in Normal mode with a pending Delete operator,
+    // awaiting a motion. A Redraw, no edit.
+    assert_eq!(step_mode(r#"initialState("abc")"#, "d"), s("Normal"));
+    assert_eq!(step_effect(r#"initialState("abc")"#, "d"), s("Redraw"));
+    assert_eq!(pending_op(r#"initialState("abc")"#, "d"), s("Delete"));
+    // `c` and `y` likewise set their operator and stay in Normal.
+    assert_eq!(pending_op(r#"initialState("abc")"#, "c"), s("Change"));
+    assert_eq!(pending_op(r#"initialState("abc")"#, "y"), s("Yank"));
+}
+
+#[test]
+fn motion_target_carries_position_and_wiseness() {
+    // `$` yields a charwise target at the last char (col 4 of "hello") — motionTarget
+    // is the single definition the bare move and the operator both consume.
+    assert_eq!(motion_rowcol(r#"initialState("hello")"#, "$"), ints(0, 4));
+    assert_eq!(motion_wise(r#"initialState("hello")"#, "$"), s("Charwise"));
+    // `j` yields a linewise target on the next row, carrying the column.
+    assert_eq!(motion_rowcol(r#"Editor(..initialState("ab\ncd"), col: 1)"#, "j"), ints(1, 1));
+    assert_eq!(motion_wise(r#"Editor(..initialState("ab\ncd"), col: 1)"#, "j"), s("Linewise"));
+    // A non-motion key has no target.
+    assert_eq!(motion_wise(r#"initialState("hello")"#, "z"), s("None"));
 }
 
 #[test]

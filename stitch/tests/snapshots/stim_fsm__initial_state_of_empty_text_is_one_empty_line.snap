@@ -2,4 +2,4 @@
 source: stitch/tests/stim_fsm.rs
 expression: "fsm(r#\"initialState(\"\")\"#)"
 ---
-Editor[(Some("lines"), List[Str("")]), (Some("row"), Int(0)), (Some("col"), Int(0)), (Some("mode"), Normal[])]
+Editor[(Some("lines"), List[Str("")]), (Some("row"), Int(0)), (Some("col"), Int(0)), (Some("mode"), Normal[]), (Some("pending"), Pending[(Some("op"), OpNone[])]), (Some("clipboard"), Register[(Some("text"), Str("")), (Some("wise"), Charwise[])])]

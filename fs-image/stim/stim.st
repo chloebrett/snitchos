@@ -30,10 +30,33 @@ sum Mode = Normal | Insert | Command | Replace
 // back to `Redraw` (see `editIfChanged`), so no-op keystrokes emit no span.
 sum Effect = Save(Str) | Redraw | Noop | Quit | Edit(Str)
 
+// The operator awaiting a motion in operator-pending state. `OpNone` means "not
+// operator-pending" — the top level of `stepNormal`.
+sum Op = OpNone | OpDelete | OpChange | OpYank
+
+// A motion's (and a register's) shape: charwise acts on a span within a line,
+// linewise on whole lines.
+sum Wise = Charwise | Linewise
+
+// The operator-pending accumulator. It grows a count (Phase 3) and a register
+// (Phase 5); for now it holds only the pending operator. A field on `Editor`, not a
+// mode — operator-pending stays *within* Normal mode (the cursor still shows).
+prod Pending(op: Op)
+
+// The unnamed register (the yank/paste clipboard). Carries its wiseness so paste
+// knows linewise (open a line) vs charwise (insert inline). This is the soft form of
+// the future clipboard-service entry — kept a growable value type so it can absorb
+// provenance / label / caps later (see docs/clipboard-design.md).
+prod Register(text: Str, wise: Wise)
+
+// A motion's result: a target cursor position plus the wiseness that decides, under
+// an operator, whether the range is a span within a line or whole lines.
+prod Target(row: Int, col: Int, wise: Wise)
+
 // The whole editor state — immutable. Every transition returns a fresh `Editor`
 // via `..spread` update. `row`/`col` is a full cursor (0-based); unbound keys
 // like `h`/`l` are just navigation we haven't wired, not missing state.
-prod Editor(lines: List<Str>, row: Int, col: Int, mode: Mode)
+prod Editor(lines: List<Str>, row: Int, col: Int, mode: Mode, pending: Pending, clipboard: Register)
 
 // A transition's result for the driver: the next state plus the effect to run.
 // The pure `step` returns this; the driver performs `effect` and loops on `state`.
@@ -47,6 +70,8 @@ initialState(text) = Editor(
     row: 0,
     col: 0,
     mode: Normal,
+    pending: Pending(op: OpNone),
+    clipboard: Register(text: "", wise: Charwise),
 )
 
 // The text of the line at `row`, or "" if out of range (never happens for a
@@ -60,39 +85,6 @@ clampedCol(state, row) = {
     state.col > lineLen => lineLen | state.col
 }
 
-// `k` — up one line, clamped at the top; re-clamp the column onto the new line.
-moveUp(state) =
-    state.row <= 0 => state
-    | {
-        let row = state.row - 1
-        Editor(..state, row: row, col: clampedCol(state, row))
-    }
-
-// `j` — down one line, clamped at the last line; re-clamp the column.
-moveDown(state) =
-    state.row >= count(state.lines) - 1 => state
-    | {
-        let row = state.row + 1
-        Editor(..state, row: row, col: clampedCol(state, row))
-    }
-
-// `h` — cursor left within the line, clamped at column 0.
-moveLeft(state) = state.col > 0 => Editor(..state, col: state.col - 1) | state
-
-// `l` — cursor right within the line, clamped at the line's end.
-moveRight(state) =
-    state.col < Str.length(lineAt(state, state.row)) => Editor(..state, col: state.col + 1) | state
-
-// `0` — jump to the first column of the current line.
-moveLineStart(state) = Editor(..state, col: 0)
-
-// `$` — jump to the last character of the current line (`len − 1`), clamped at 0
-// for an empty line. Lands *on* the last char (unlike `A`, which appends at `len`).
-moveLineEnd(state) = {
-    let lineLen = Str.length(lineAt(state, state.row))
-    lineLen <= 0 => Editor(..state, col: 0) | Editor(..state, col: lineLen - 1)
-}
-
 // The column of the first non-space character at or after `i`, or the line length
 // if the rest of the line is blank. Tail-recursive scan; v1 treats only " " as blank.
 firstNonBlank(line, i) = match {
@@ -101,13 +93,53 @@ firstNonBlank(line, i) = match {
     _ => i
 }
 
-// `^` — jump to the first non-blank column. An all-blank line has no such column,
-// so it clamps to col 0.
-moveFirstNonBlank(state) = {
+// The column `$` targets: the last character (`len − 1`), clamped to 0 on an empty
+// line — lands *on* the last char (unlike `A`, which appends at `len`).
+lineEndCol(state) = {
+    let lineLen = Str.length(lineAt(state, state.row))
+    lineLen <= 0 => 0 | lineLen - 1
+}
+
+// The column `^` (and `I`) target: the first non-blank column, or 0 if the line is
+// all blank.
+firstNonBlankCol(state) = {
     let line = lineAt(state, state.row)
     let idx = firstNonBlank(line, 0)
-    idx >= Str.length(line) => Editor(..state, col: 0) | Editor(..state, col: idx)
+    idx >= Str.length(line) => 0 | idx
 }
+
+// Clamp a row index into the buffer `[0, count − 1]`.
+clampRow(state, r) = r < 0 => 0 | (r > count(state.lines) - 1 => count(state.lines) - 1 | r)
+
+// A motion's target position + wiseness, or `None` for a non-motion key. THE single
+// motion definition — consumed both bare (`moveTo`, wiseness ignored) and as an
+// operator's range endpoint (Phase 2.3+). One `motionTarget` powers `l` and `dl`.
+motionTarget(state, key) = match {
+    key == "h" => Some(Target(row: state.row, col: state.col - 1, wise: Charwise))
+    key == "l" => Some(Target(row: state.row, col: state.col + 1, wise: Charwise))
+    key == "0" => Some(Target(row: state.row, col: 0, wise: Charwise))
+    key == "$" => Some(Target(row: state.row, col: lineEndCol(state), wise: Charwise))
+    key == "^" => Some(Target(row: state.row, col: firstNonBlankCol(state), wise: Charwise))
+    key == "j" => Some(Target(row: clampRow(state, state.row + 1), col: state.col, wise: Linewise))
+    key == "k" => Some(Target(row: clampRow(state, state.row - 1), col: state.col, wise: Linewise))
+    _ => None
+}
+
+// Move the cursor to `target`, clamping the column onto the target row's `[0, len]`.
+// A vertical move re-clamps onto a shorter line; `h` past column 0 clamps back up.
+moveTo(state, target) = {
+    let lineLen = Str.length(lineAt(state, target.row))
+    let col = target.col < 0 => 0 | (target.col > lineLen => lineLen | target.col)
+    Editor(..state, row: target.row, col: col)
+}
+
+// Apply a motion key as a bare cursor move (ignoring wiseness); a no-op for a
+// non-motion key, whose target defaults to the current cursor.
+moveByKey(state, key) = moveTo(state, unwrapOr(motionTarget(state, key), Target(row: state.row, col: state.col, wise: Charwise)))
+
+// `k` / `j` — named wrappers over the shared motion machinery.
+moveUp(state) = moveByKey(state, "k")
+moveDown(state) = moveByKey(state, "j")
 
 // `x` — delete the character under the cursor. No-op at end of line (nothing under
 // the cursor); the cursor re-clamps onto the shortened line.
@@ -195,7 +227,7 @@ appendAfter(state) = {
 appendEnd(state) = Editor(..state, col: Str.length(lineAt(state, state.row)), mode: Insert)
 
 // `I` — insert at the first non-blank column, then enter Insert.
-insertHead(state) = enterInsert(moveFirstNonBlank(state))
+insertHead(state) = enterInsert(Editor(..state, col: firstNonBlankCol(state)))
 
 // `O` — open a fresh empty line *above* the cursor and enter Insert there (the
 // mirror of `o`). Inserting at `row` pushes the current line and its successors down.
@@ -324,15 +356,18 @@ isPrintable(key) = Str.length(key) == 1
 
 enterCommand(state) = Editor(..state, mode: Command)
 
+// Enter operator-pending: record the operator, stay in Normal mode, await a motion.
+enterOp(state, op) = Editor(..state, pending: Pending(op: op))
+
 // Normal mode: navigation, small edits, mode entry. Unbound keys are Noops.
 stepNormal(state, key) = match {
-    key == "j" => redraw(moveDown(state))
-    key == "k" => redraw(moveUp(state))
-    key == "h" => redraw(moveLeft(state))
-    key == "l" => redraw(moveRight(state))
-    key == "0" => redraw(moveLineStart(state))
-    key == "$" => redraw(moveLineEnd(state))
-    key == "^" => redraw(moveFirstNonBlank(state))
+    key == "j" => redraw(moveByKey(state, key))
+    key == "k" => redraw(moveByKey(state, key))
+    key == "h" => redraw(moveByKey(state, key))
+    key == "l" => redraw(moveByKey(state, key))
+    key == "0" => redraw(moveByKey(state, key))
+    key == "$" => redraw(moveByKey(state, key))
+    key == "^" => redraw(moveByKey(state, key))
     key == "x" => editIfChanged(state, deleteChar(state), "stim.delete-char")
     key == "X" => editIfChanged(state, deleteBefore(state), "stim.delete-char")
     key == "~" => editIfChanged(state, toggleCase(state), "stim.toggle-case")
@@ -341,6 +376,9 @@ stepNormal(state, key) = match {
     key == "C" => edit(changeToEol(state), "stim.change-to-eol")
     key == "s" => edit(substitute(state), "stim.substitute")
     key == "r" => redraw(enterReplace(state))
+    key == "d" => redraw(enterOp(state, OpDelete))
+    key == "c" => redraw(enterOp(state, OpChange))
+    key == "y" => redraw(enterOp(state, OpYank))
     key == "o" => edit(openLine(state), "stim.open-line")
     key == "i" => redraw(enterInsert(state))
     key == "a" => redraw(appendAfter(state))
