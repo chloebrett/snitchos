@@ -38,16 +38,21 @@ fn with_bit(value: u64, mask: u64, on: bool) -> u64 {
 }
 
 /// Instret the interpreter would retire for a `memset`/`memcpy` of `len` bytes —
-/// dominated by the word-store loop (~`len/8` iterations of a few instructions),
-/// plus a small prologue and a byte tail. The native-op helper charges this to the
-/// clock so a run with helpers on totals the same instret as the pure interpreter,
-/// keeping the deterministic timing (and thus the frame stream) identical. The
-/// constants are calibrated against the interpreter A/B (`snemu-bench`/`snemu-itest`
-/// with native ops off vs on).
-fn memop_charge(len: u64) -> u64 {
-    const BASE: u64 = 8;
+/// dominated by the word-store loop (~`len/8` iterations), plus a per-call fixed
+/// cost and a byte tail. The native-op helper charges this to the clock so a run
+/// with helpers on totals the same guest instret as the pure interpreter, keeping
+/// the deterministic timing (and thus the frame stream) identical. Constants are
+/// disassembly-informed and validated by the `--calibrate-memops` probe: over an
+/// `init` boot `real/charged = 1.011` (was 1.121 with the old BASE=8), and the
+/// `snemu-itest` on↔off *guest* instret matches to within ~1% on 94/110 scenarios.
+pub(crate) fn memop_charge(len: u64) -> u64 {
+    // The word loop is `sd; addi; bltu` = 3/word. The per-call fixed cost — prologue
+    // + head-align setup + the 7-insn 8-byte splat + tail setup + ret ≈ 24 — is what
+    // the old BASE=8 lowballed; tail bytes run the 4-insn byte loop, not 1.
+    const BASE: u64 = 24;
     const PER_WORD: u64 = 3;
-    BASE + (len / 8) * PER_WORD + (len % 8)
+    const PER_TAIL_BYTE: u64 = 4;
+    BASE + (len / 8) * PER_WORD + (len % 8) * PER_TAIL_BYTE
 }
 
 /// Trap cause codes (`scause`, exceptions; interrupt bit clear).

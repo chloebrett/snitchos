@@ -26,6 +26,7 @@ fn main() -> ExitCode {
     let mut dump_frames = false;
     let mut workload: Option<String> = None;
     let mut native_ops = false;
+    let mut calibrate_memops = false;
     let mut positional = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -33,6 +34,9 @@ fn main() -> ExitCode {
             "--frames" => dump_frames = true,
             // Native-op helper (tier-0.5 JIT): fast-path memset/memcpy.
             "--native-ops" => native_ops = true,
+            // Calibration: measure each memop's real interpreted cost against
+            // `memop_charge` (the collapse's clock charge). Forces native ops off.
+            "--calibrate-memops" => calibrate_memops = true,
             // Firmware role: select a runtime workload by injecting
             // `workload=<name>` into /chosen/bootargs (needs an itest-workloads
             // kernel; a plain build ignores it and boots the default).
@@ -72,7 +76,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    machine.set_native_ops(native_ops);
+    // The probe measures the interpreter's real per-memop cost, so it needs memops
+    // interpreted, not collapsed — force native ops off when calibrating.
+    machine.set_native_ops(native_ops && !calibrate_memops);
+    if calibrate_memops {
+        machine.enable_memop_probe();
+    }
 
     let mut steps = 0u64;
     while steps < max_steps {
@@ -99,6 +108,14 @@ fn main() -> ExitCode {
         "snemu: {instret} instret, {fires} timer fires ({} instret/fire)",
         if fires == 0 { 0 } else { instret / fires },
     );
+
+    if let Some((invocations, real, charged)) = machine.memop_probe_report() {
+        let ratio = if charged == 0 { 0.0 } else { real as f64 / charged as f64 };
+        eprintln!(
+            "snemu: memop calibration — {invocations} memops, {real} real instret, \
+             {charged} charged (real/charged = {ratio:.3}; 1.000 = faithful clock)"
+        );
+    }
 
     print!("{}", String::from_utf8_lossy(machine.uart_output()));
     report_frames(machine.virtio_tx_output(), dump_frames);

@@ -7,8 +7,35 @@
 //! indivisible, `aq`/`rl` are no-ops. Relaxed memory is a later milestone.
 
 use crate::bus::Bus;
-use crate::cpu::{Hart, HartEffect, StepError, service_sbi};
+use crate::cpu::{Hart, HartEffect, StepError, memop_charge, service_sbi};
 use crate::mem::Memory;
+
+/// Calibration tripwire for the native-op collapse. With native ops OFF it watches
+/// each `memset`/`memcpy` from its entry PC to its return, recording how many
+/// instructions the interpreter *actually* retired next to what `memop_charge(len)`
+/// would have charged. A run's `real` vs `charged` totals quantify the clock skew
+/// the collapse introduces: if they diverge, the deterministic clock (and thus the
+/// frame stream's timing) drifts when native ops are on, and `memop_charge` needs
+/// recalibrating. Diagnostic only — enable with native ops off (a collapsed memop
+/// never enters the interpreter, so the probe would not see it).
+#[derive(Clone, Default)]
+struct MemopProbe {
+    /// Per-hart in-flight memop being timed. `None` when the hart is not currently
+    /// inside a probed memop.
+    inflight: Vec<Option<InFlight>>,
+    invocations: u64,
+    real: u64,
+    charged: u64,
+}
+
+/// A memop currently being timed on one hart: its return address, the `len` it was
+/// called with, and the instructions retired so far since its entry.
+#[derive(Clone)]
+struct InFlight {
+    return_pc: u64,
+    len: u64,
+    count: u64,
+}
 
 /// A machine with `hart_count` harts over one shared address space.
 /// `Clone` is the snapshot primitive: snemu has no hidden state (no JIT cache,
@@ -38,6 +65,8 @@ pub struct Machine {
     memset_pc: Option<u64>,
     memcpy_pc: Option<u64>,
     native_ops: bool,
+    /// The memop calibration probe (see [`MemopProbe`]); `None` unless enabled.
+    memop_probe: Option<MemopProbe>,
 }
 
 impl Machine {
@@ -57,6 +86,7 @@ impl Machine {
             memset_pc: None,
             memcpy_pc: None,
             native_ops: false,
+            memop_probe: None,
         }
     }
 
@@ -72,6 +102,28 @@ impl Machine {
     /// the same fidelity discipline as `idle_skip`.
     pub fn set_native_ops(&mut self, on: bool) {
         self.native_ops = on;
+    }
+
+    /// Enable the memop calibration probe (see [`MemopProbe`]). Run with native ops
+    /// **off**: the probe measures the interpreter's real per-memop retired count
+    /// against `memop_charge`, which is only observable when memops are interpreted
+    /// rather than collapsed.
+    pub fn enable_memop_probe(&mut self) {
+        self.memop_probe = Some(MemopProbe {
+            inflight: vec![None; self.harts.len()],
+            ..MemopProbe::default()
+        });
+    }
+
+    /// The probe's `(invocations, real_retired, charged)` totals, or `None` if the
+    /// probe was never enabled. `real == charged` means `memop_charge` is faithful
+    /// and the collapse introduces no clock skew; `charged < real` means the clock
+    /// runs fast (short-charges memops) when native ops are on.
+    #[must_use]
+    pub fn memop_probe_report(&self) -> Option<(u64, u64, u64)> {
+        self.memop_probe
+            .as_ref()
+            .map(|p| (p.invocations, p.real, p.charged))
     }
 
     /// Start (or reset) exact instret profiling on this machine. The histogram
@@ -134,12 +186,14 @@ impl Machine {
             // advances it, so the profiler attributes the retired instruction to
             // where it ran.
             let pc = self.harts[i].pc();
+            self.probe_memop_entry(i, pc);
 
             match self.harts[i].step(&mut self.bus)? {
                 HartEffect::Sbi(req) => {
                     service_sbi(&mut self.harts, i, &req);
                     self.time += 1;
                     retired = true;
+                    self.probe_memop_retire(i);
                     if let Some(p) = self.profile.as_mut() {
                         *p.entry(pc).or_insert(0) += 1;
                     }
@@ -147,6 +201,7 @@ impl Machine {
                 HartEffect::None => {
                     self.time += 1;
                     retired = true;
+                    self.probe_memop_retire(i);
                     if let Some(p) = self.profile.as_mut() {
                         *p.entry(pc).or_insert(0) += 1;
                     }
@@ -176,6 +231,44 @@ impl Machine {
                 && (Some(self.harts[i].pc()) == self.memset_pc
                     || Some(self.harts[i].pc()) == self.memcpy_pc)
         })
+    }
+
+    /// Probe hook: if hart `i` is at a memop entry and not already inside one, start
+    /// timing the op (remember its return address + `len`). No-op unless the probe
+    /// is enabled. Runs with native ops off, so a memop reaches the interpreter and
+    /// its real retired count is observable.
+    fn probe_memop_entry(&mut self, i: usize, pc: u64) {
+        if Some(pc) != self.memset_pc && Some(pc) != self.memcpy_pc {
+            return;
+        }
+        let return_pc = self.harts[i].reg(1);
+        let len = self.harts[i].reg(12);
+        if let Some(probe) = self.memop_probe.as_mut()
+            && probe.inflight[i].is_none()
+        {
+            probe.inflight[i] = Some(InFlight { return_pc, len, count: 0 });
+        }
+    }
+
+    /// Probe hook: hart `i` retired one instruction. Count it toward any in-flight
+    /// memop; when the hart returns to the op's `ra`, commit its real retired count
+    /// and what `memop_charge` would have charged.
+    fn probe_memop_retire(&mut self, i: usize) {
+        let new_pc = self.harts[i].pc();
+        let Some(probe) = self.memop_probe.as_mut() else {
+            return;
+        };
+        let Some(inflight) = probe.inflight[i].as_mut() else {
+            return;
+        };
+        inflight.count += 1;
+        let (done, len, count) = (new_pc == inflight.return_pc, inflight.len, inflight.count);
+        if done {
+            probe.inflight[i] = None;
+            probe.invocations += 1;
+            probe.real += count;
+            probe.charged += memop_charge(len);
+        }
     }
 
     /// Reproduce the `charged` scheduler rounds that hart `i`'s memop collapses,
@@ -502,7 +595,7 @@ mod tests {
         // Hart 1 running its self-loop.
         m.harts[1].start(peer_pc, 1, 0);
 
-        let charged = 11; // memop_charge(8) = 8 + (8/8)*3 + 0
+        let charged = 27; // memop_charge(8) = 24 + (8/8)*3 + 0
         m.step().unwrap();
 
         assert_eq!(m.pc(0), after_memset, "hart 0 returned from the collapsed memset");
@@ -512,6 +605,39 @@ mod tests {
             charged * 2,
             "clock counts hart 0's charged stores AND hart 1's catch-up retirements"
         );
+    }
+
+    #[test]
+    fn the_memop_probe_measures_real_retired_against_the_charge() {
+        // The calibration tripwire: with native ops OFF, the probe watches each
+        // memop from its entry PC to its return (`ra`) and records how many
+        // instructions the interpreter *actually* retired, alongside what
+        // `memop_charge(len)` would have charged — so a run can quantify the clock
+        // skew the native-op collapse introduces (charged != real => the clock
+        // drifts). Here a 3-instruction stub stands in for the kernel's memset.
+        const NOP: u32 = 0x0000_0013; // addi x0, x0, 0
+        const RET: u32 = 0x0000_8067; // jalr x0, 0(x1)
+        let ret_target = RAM_BASE + 0x100;
+        let mut mem = Memory::new(0x2000);
+        mem.write_u32(RAM_BASE, NOP).unwrap();
+        mem.write_u32(RAM_BASE + 4, NOP).unwrap();
+        mem.write_u32(RAM_BASE + 8, RET).unwrap();
+        mem.write_u32(ret_target, 0x0000_006f).unwrap(); // self-loop after return
+        let mut m = Machine::new(mem, 1);
+        m.set_native_op_pcs(Some(RAM_BASE), None); // memset entry = RAM_BASE
+        m.enable_memop_probe(); // native ops stay OFF — the probe measures the real loop
+
+        m.harts[0].set_reg(1, ret_target); // ra
+        m.harts[0].set_reg(12, 8); // a2 = len → charged = memop_charge(8) = 27
+        for _ in 0..3 {
+            m.step().unwrap(); // run the 3-instruction stub to its return
+        }
+
+        let (invocations, real, charged) =
+            m.memop_probe_report().expect("probe was enabled");
+        assert_eq!(invocations, 1, "one memop observed");
+        assert_eq!(real, 3, "the interpreter retired the stub's 3 instructions");
+        assert_eq!(charged, 27, "memop_charge(8) would have charged 27");
     }
 
     #[test]
@@ -534,7 +660,7 @@ mod tests {
 
         m.step().unwrap();
 
-        let charged = 8 + (0x1000 / 8) * 3; // memop_charge(4096) = 8 + 512*3 = 1544
+        let charged = 24 + (0x1000 / 8) * 3; // memop_charge(4096) = 24 + 512*3 = 1560
         assert_eq!(m.instret(), charged, "clock jumped by the charged instret in one step");
         assert_eq!(m.pc(0), after_memset, "returned from the memset");
         assert_eq!(m.reg(0, 10), RAM_BASE + 0x1000, "a0 = dst per the memop ABI");
@@ -557,8 +683,8 @@ mod tests {
         m.harts[0].set_reg(1, after_memset); // ra
         m.harts[0].set_reg(10, RAM_BASE + 0x800); // dst
         m.harts[0].set_reg(11, 0); // val
-        m.harts[0].set_reg(12, 8); // len → charged = 11
-        let charged = 11;
+        m.harts[0].set_reg(12, 8); // len → charged = 27
+        let charged = 27;
         m.harts[1].arm_idle_timer(charged); // fires on the span's final tick
 
         assert!(!m.is_running(1), "hart 1 idle before the collapse");
