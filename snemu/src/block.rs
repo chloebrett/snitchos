@@ -22,6 +22,50 @@
 
 use crate::bus::Bus;
 use crate::cpu::{Hart, StepError};
+use crate::decode::{Instr, funct3, funct7, opcode};
+
+/// The result of trying to lower one guest instruction to IR.
+pub(crate) enum Compiled {
+    /// A mid-block op — keep walking to the next instruction.
+    Continue(Op),
+    /// A block-ending op (a branch) — append it and stop.
+    Terminate(Op),
+    /// An instruction the compiler doesn't lower yet (or a block boundary like a
+    /// jump/`ecall`/memory op). End the block *before* it; the interpreter runs it.
+    Unsupported,
+}
+
+/// Lower one already-decoded instruction (`raw`, `ilen`, at absolute `pc`) to IR.
+/// Pure — the frontend both backends share. Branch targets are resolved to absolute
+/// addresses here so the executor never re-reads `pc`. Grows one instruction family
+/// at a time, each driven by an equivalence test against the interpreter.
+pub(crate) fn compile_op(raw: u32, ilen: u64, pc: u64) -> Compiled {
+    let instr = Instr(raw);
+    match instr.opcode() {
+        opcode::OP_IMM if instr.funct3() == funct3::ADD => Compiled::Continue(Op::AluImm {
+            alu: AluOp::Add,
+            rd: instr.rd() as u8,
+            rs1: instr.rs1() as u8,
+            imm: instr.i_imm() as i64,
+        }),
+        opcode::OP if instr.funct7() != funct7::MULDIV && instr.funct3() == funct3::ADD && !instr.is_alt_op() => {
+            Compiled::Continue(Op::AluReg {
+                alu: AluOp::Add,
+                rd: instr.rd() as u8,
+                rs1: instr.rs1() as u8,
+                rs2: instr.rs2() as u8,
+            })
+        }
+        opcode::BRANCH if instr.funct3() == funct3::branch::BNE => Compiled::Terminate(Op::Branch {
+            cond: Cond::Ne,
+            rs1: instr.rs1() as u8,
+            rs2: instr.rs2() as u8,
+            taken: pc.wrapping_add(instr.b_imm()),
+            not_taken: pc.wrapping_add(ilen),
+        }),
+        _ => Compiled::Unsupported,
+    }
+}
 
 /// A register-immediate / register-register integer op (`OP-IMM` / `OP`). The
 /// interpreter's `op_imm`/`op` semantics, pre-decoded. Grows as discovery needs it.
@@ -51,16 +95,24 @@ pub(crate) enum Op {
     Branch { cond: Cond, rs1: u8, rs2: u8, taken: u64, not_taken: u64 },
 }
 
-/// A compiled basic block: a straight sequence of ops ending (in a complete block)
-/// at a control-flow op.
+/// A compiled basic block: a straight sequence of ops. It ends either at a
+/// `Branch` (which sets `pc` itself) or by falling through — running off the end
+/// without a branch (block-length cap, or an instruction the compiler couldn't
+/// lower), in which case `pc` is set to `exit_pc`, the address just past the last
+/// compiled instruction (where the interpreter resumes).
 #[derive(Clone, Debug)]
 pub(crate) struct Block {
     ops: Vec<Op>,
+    exit_pc: u64,
 }
 
 impl Block {
-    pub(crate) fn new(ops: Vec<Op>) -> Self {
-        Self { ops }
+    pub(crate) fn new(ops: Vec<Op>, exit_pc: u64) -> Self {
+        Self { ops, exit_pc }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.ops.is_empty()
     }
 
     /// Execute the block against `hart` (and `bus`, for the memory ops later
@@ -88,6 +140,7 @@ impl Block {
                 }
             }
         }
+        hart.set_pc(self.exit_pc); // fell through without a branch
         Ok(())
     }
 }
@@ -112,7 +165,7 @@ impl Cond {
 
 #[cfg(test)]
 mod tests {
-    use super::{AluOp, Block, Cond, Op};
+    use super::{AluOp, Block, Compiled, Cond, Op, compile_op};
     use crate::bus::Bus;
     use crate::cpu::Hart;
     use crate::mem::Memory;
@@ -126,11 +179,14 @@ mod tests {
         // x1 = x0 + 5; x2 = x1 + 3; if x1 != x2 -> taken. The executor walks the
         // reified IR and lands registers + pc exactly where the instructions would.
         let (mut hart, mut bus) = hart_and_bus();
-        let block = Block::new(vec![
-            Op::AluImm { alu: AluOp::Add, rd: 1, rs1: 0, imm: 5 },
-            Op::AluImm { alu: AluOp::Add, rd: 2, rs1: 1, imm: 3 },
-            Op::Branch { cond: Cond::Ne, rs1: 1, rs2: 2, taken: 0x2010, not_taken: 0x2004 },
-        ]);
+        let block = Block::new(
+            vec![
+                Op::AluImm { alu: AluOp::Add, rd: 1, rs1: 0, imm: 5 },
+                Op::AluImm { alu: AluOp::Add, rd: 2, rs1: 1, imm: 3 },
+                Op::Branch { cond: Cond::Ne, rs1: 1, rs2: 2, taken: 0x2010, not_taken: 0x2004 },
+            ],
+            0, // exit_pc unused: the branch sets pc
+        );
 
         block.exec(&mut hart, &mut bus).unwrap();
 
@@ -146,10 +202,13 @@ mod tests {
         let (mut hart, mut bus) = hart_and_bus();
         hart.set_reg(1, 40);
         hart.set_reg(2, 2);
-        let block = Block::new(vec![
-            Op::AluReg { alu: AluOp::Add, rd: 3, rs1: 1, rs2: 2 },
-            Op::Branch { cond: Cond::Ne, rs1: 3, rs2: 3, taken: 0x2010, not_taken: 0x2004 },
-        ]);
+        let block = Block::new(
+            vec![
+                Op::AluReg { alu: AluOp::Add, rd: 3, rs1: 1, rs2: 2 },
+                Op::Branch { cond: Cond::Ne, rs1: 3, rs2: 3, taken: 0x2010, not_taken: 0x2004 },
+            ],
+            0,
+        );
 
         block.exec(&mut hart, &mut bus).unwrap();
 
@@ -161,10 +220,29 @@ mod tests {
     fn a_write_to_x0_is_discarded() {
         // x0 is hardwired zero — an ALU op targeting it must not change it.
         let (mut hart, mut bus) = hart_and_bus();
-        let block = Block::new(vec![Op::AluImm { alu: AluOp::Add, rd: 0, rs1: 0, imm: 99 }]);
+        let block = Block::new(vec![Op::AluImm { alu: AluOp::Add, rd: 0, rs1: 0, imm: 99 }], 0x2004);
 
         block.exec(&mut hart, &mut bus).unwrap();
 
         assert_eq!(hart.reg(0), 0);
+        assert_eq!(hart.pc(), 0x2004, "no branch -> pc advances to the block's exit");
+    }
+
+    #[test]
+    fn compile_op_lowers_supported_families_and_rejects_the_rest() {
+        // addi x1,x0,5 -> a mid-block AluImm; bne -> a terminator; a load -> Unsupported.
+        let addi = 0x0050_0093; // addi x1, x0, 5
+        assert!(matches!(
+            compile_op(addi, 4, 0x1000),
+            Compiled::Continue(Op::AluImm { rd: 1, rs1: 0, imm: 5, .. })
+        ));
+        let bne = 0x0020_9463; // bne x1, x2, +8
+        assert!(matches!(
+            compile_op(bne, 4, 0x1000),
+            Compiled::Terminate(Op::Branch { rs1: 1, rs2: 2, taken, not_taken: 0x1004, .. })
+                if taken == 0x1008
+        ));
+        let lw = 0x0000_2083; // lw x1, 0(x0) — a memory op, a block boundary for now
+        assert!(matches!(compile_op(lw, 4, 0x1000), Compiled::Unsupported));
     }
 }

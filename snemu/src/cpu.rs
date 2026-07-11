@@ -3,6 +3,7 @@
 
 use crate::bus::Bus;
 use crate::csr::{Csr, CsrError, addr, sstatus};
+use crate::block::{self, Block, Compiled};
 use crate::decode::{Instr, amo_op, expand, funct3, funct7, is_compressed, opcode, priv12, system};
 use crate::decode_cache::{DecodeCache, Decoded};
 use crate::mem::{BusError, Memory, RAM_BASE};
@@ -587,6 +588,54 @@ impl Hart {
         self.set_reg(10, dst); // return value = dst
         self.set_pc(self.reg(1)); // return to `ra`
         Some(memop_charge(len))
+    }
+
+    /// Compile the basic block starting at the current PC into IR (backend A of the
+    /// M6 block JIT). Walks instructions — fetching without executing or trapping —
+    /// lowering each via `block::compile_op`, until a branch (terminator), an
+    /// instruction it can't lower (a block boundary), a fetch fault, or the length
+    /// cap. Executing the returned block is byte-identical to interpreting the same
+    /// instructions (the oracle property, proven by the on↔off A/B). The cap bounds
+    /// how late a timer can be delivered (at most one block).
+    #[allow(dead_code, reason = "wired into Hart::step in M6 increment 3")]
+    pub(crate) fn compile_block(&self, bus: &Bus) -> Block {
+        const MAX_OPS: usize = 64;
+        let mut ops = Vec::new();
+        let mut pc = self.pc;
+        for _ in 0..MAX_OPS {
+            let Some(decoded) = self.fetch_for_compile(pc, bus) else { break };
+            match block::compile_op(decoded.raw, decoded.ilen, pc) {
+                Compiled::Continue(op) => {
+                    ops.push(op);
+                    pc = pc.wrapping_add(decoded.ilen);
+                }
+                Compiled::Terminate(op) => {
+                    ops.push(op);
+                    pc = pc.wrapping_add(decoded.ilen);
+                    break;
+                }
+                Compiled::Unsupported => break,
+            }
+        }
+        Block::new(ops, pc)
+    }
+
+    /// Fetch + decode the instruction at `pc` without executing or trapping — the
+    /// block compiler walks a block this way. `None` on a fetch fault or an illegal
+    /// compressed encoding: the compiler ends the block there and the interpreter
+    /// re-fetches and traps correctly at run time. Side-effect-free (`&self`).
+    #[allow(dead_code, reason = "used by compile_block, wired into Hart::step in M6 increment 3")]
+    fn fetch_for_compile(&self, pc: u64, bus: &Bus) -> Option<Decoded> {
+        let satp = self.csr.read(addr::SATP).ok()?;
+        let user = self.privilege == Privilege::User;
+        let sum = self.csr_read(addr::SSTATUS) & sstatus::SUM != 0;
+        let pa = mmu::translate(satp, pc, Access::Fetch, bus.ram(), user, sum).ok()?;
+        let half = bus.read_u16(pa).ok()?;
+        if is_compressed(half) {
+            Some(Decoded { raw: expand(half)?, ilen: ILEN_COMPRESSED })
+        } else {
+            Some(Decoded { raw: bus.read_u32(pa).ok()?, ilen: ILEN_FULL })
+        }
     }
 
     /// Fetch, decode, and execute one instruction (16- or 32-bit) against `bus`.
@@ -1585,6 +1634,34 @@ mod tests {
             mem.write_u32(RAM_BASE + (i as u64) * 4, word).unwrap();
         }
         Cpu::new(mem)
+    }
+
+    #[test]
+    fn a_compiled_block_matches_the_interpreter() {
+        // The block JIT's oracle property, proven per block: compiling a straight run
+        // to IR and executing it must land the exact architectural state — every
+        // register and pc — that interpreting the same instructions one-by-one does.
+        let program = &[
+            0x0050_0093, // addi x1, x0, 5
+            0x0030_8113, // addi x2, x1, 3
+            0x0020_81b3, // add  x3, x1, x2
+            0x0020_9463, // bne  x1, x2, +8   (taken: 5 != 8)
+        ];
+
+        // Interpreter oracle: step the four instructions one at a time.
+        let mut interp = cpu_with(program);
+        for _ in 0..4 {
+            interp.step().unwrap();
+        }
+
+        // Block JIT: compile the block from the entry PC and execute it in one shot.
+        let mut jit = cpu_with(program);
+        let block = jit.hart.compile_block(&jit.bus);
+        block.exec(&mut jit.hart, &mut jit.bus).unwrap();
+
+        assert_eq!(jit.hart.x, interp.hart.x, "all registers match the interpreter");
+        assert_eq!(jit.hart.pc(), interp.hart.pc(), "pc matches the interpreter");
+        assert_eq!(jit.hart.pc(), RAM_BASE + 0xc + 8, "the bne was taken to pc+8");
     }
 
     #[test]
