@@ -12,7 +12,8 @@
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 
-use crate::core_ir::{CoreExpr, CoreExprKind};
+use crate::ast::Type;
+use crate::core_ir::{CoreExpr, CoreExprKind, CoreItem};
 use crate::lexer::Span;
 
 /// A Stitch type. Primitives are canonical variants; declared types are `Named`.
@@ -63,6 +64,68 @@ pub fn synth(expr: &CoreExpr) -> Ty {
     }
 }
 
+/// Check `expr` against an `expected` type, returning a mismatch error if the
+/// type synthesized for `expr` is inconsistent with `expected`. Step 2 uses the
+/// simplest bidirectional rule — synthesize then subsume; expression-directed
+/// checking rules (e.g. a lambda against a function type) arrive with later
+/// constructs.
+#[must_use]
+fn check(expr: &CoreExpr, expected: &Ty) -> Option<TypeError> {
+    let got = synth(expr);
+    if consistent(&got, expected) {
+        None
+    } else {
+        Some(TypeError {
+            message: format!("type mismatch: expected `{expected:?}`, found `{got:?}`"),
+            span: expr.span,
+        })
+    }
+}
+
+/// Whether two types are *consistent* (gradual `~`): `Dyn` matches anything in
+/// either direction; otherwise types must be equal. Structural equality (derived
+/// on [`Ty`]) covers `Named`/`Tuple`/`Func` for free. Contract subtyping extends
+/// this with a subtype arm in a later stage.
+#[must_use]
+fn consistent(a: &Ty, b: &Ty) -> bool {
+    matches!(a, Ty::Dyn) || matches!(b, Ty::Dyn) || a == b
+}
+
+/// Convert a surface type annotation into a [`Ty`], canonicalising the primitive
+/// names. Type names the checker doesn't track yet — user types, function/tuple
+/// annotations — become `Dyn` (gradual, hence unchecked) until a later stage
+/// teaches the checker to resolve them.
+#[must_use]
+fn ty_of_annotation(ann: &Type) -> Ty {
+    match ann {
+        Type::Name { name, .. } => match name.as_str() {
+            "Int" => Ty::Int,
+            "Float" => Ty::Float,
+            "Bool" => Ty::Bool,
+            "Str" => Ty::Str,
+            _ => Ty::Dyn,
+        },
+        _ => Ty::Dyn,
+    }
+}
+
+/// Type-check a lowered program, collecting every type error. Each function's
+/// body is checked against its declared return type (`Dyn` — hence unchecked —
+/// when the return is unannotated).
+#[must_use]
+pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
+    let mut errors = Vec::new();
+    for item in items {
+        if let CoreItem::Func { ret, body, .. } = item {
+            let expected = ret.as_ref().map_or(Ty::Dyn, ty_of_annotation);
+            if let Some(error) = check(body, &expected) {
+                errors.push(error);
+            }
+        }
+    }
+    errors
+}
+
 #[cfg(test)]
 mod tests {
     use super::{synth, Ty};
@@ -87,5 +150,45 @@ mod tests {
         // synthesized structurally, so it stays `Dyn`. Pins the `is_empty()`
         // guard (a mutant that drops it would mis-type `(1, 2)` as `Unit`).
         assert_eq!(synth(&core("(1, 2)")), Ty::Dyn);
+    }
+
+    /// Type-check a whole program, returning its type errors.
+    fn errors(src: &str) -> Vec<super::TypeError> {
+        let items = crate::lower::lower_items_to_core(
+            &crate::parser::parse_program(src).expect("parses"),
+        );
+        super::check_program(&items)
+    }
+
+    #[test]
+    fn a_function_body_is_checked_against_its_declared_return_type() {
+        // A body whose synthesized type is inconsistent with the declared return
+        // is one error, reported at the body expression.
+        let src = r#"f() -> Int = "x""#;
+        let errs = errors(src);
+        assert_eq!(errs.len(), 1, "one return-type mismatch, got {errs:?}");
+        assert_eq!(
+            errs[0].span.start,
+            src.find(r#""x""#).expect("has the body"),
+            "the error is at the body: {errs:?}"
+        );
+        // A matching return type is clean (structural equality).
+        assert!(errors(r#"f() -> Str = "x""#).is_empty(), "Str body matches Str return");
+        // An unannotated return is `Dyn` — consistent with anything (the `b` side).
+        assert!(errors(r#"f() = "x""#).is_empty(), "no annotation → no check");
+        // A body whose type is unknown (`Dyn`, the `a` side) is also consistent.
+        assert!(errors("f() -> Int = (1, 2)").is_empty(), "Dyn body → no check");
+    }
+
+    #[test]
+    fn the_return_check_spans_each_primitive_and_stays_gradual_for_unknown_annotations() {
+        // Every primitive return is checked...
+        assert_eq!(errors(r#"f() -> Float = "x""#).len(), 1, "Float ≠ Str");
+        assert_eq!(errors(r#"f() -> Bool = "x""#).len(), 1, "Bool ≠ Str");
+        assert_eq!(errors("f() -> Str = 1").len(), 1, "Str ≠ Int");
+        // ...but an annotation the checker doesn't track yet is gradual (`Dyn`):
+        // an unknown type *name*, and a non-name (tuple) annotation.
+        assert!(errors(r#"f() -> Foo = "x""#).is_empty(), "unknown type name → Dyn → clean");
+        assert!(errors(r#"f() -> () = "x""#).is_empty(), "non-name annotation → Dyn → clean");
     }
 }

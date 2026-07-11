@@ -83,10 +83,11 @@ canonical `Ty`; a `TypeError` type exists carrying a message + span.
 **RED**: a test that `synth` of a `4` core-expr yields `Ty::Int` (and a string literal `Ty::Str`).
 **GREEN**: `Ty` enum, `synth(&CoreExpr, &Ctx) -> Ty` covering literal arms.
 
-### Step 2: `check` + function return vs body
+### Step 2: `check` + function return vs body — ✅ DONE (2026-07-11)
 **Acceptance**: a function `f() -> Int = "x"` reports one error at the body span; `f() -> Str = "x"` reports none; an unannotated `f() = "x"` reports none (return `Dyn`).
-**RED**: `check_program` over a parsed+lowered `f() -> Int = "x"` returns one error whose span is the `"x"`.
-**GREEN**: `check(&CoreExpr, expected: &Ty, &Ctx)` via `consistent`; `check_program` builds the fn context and checks each body against its declared return (`Dyn` when absent).
+**GREEN**: `check(&CoreExpr, expected) -> Option<TypeError>` (synth-then-subsume); `consistent(a, b) = Dyn|Dyn|a==b` — structural equality (derived on `Ty`) covers `Named`/`Tuple`/`Func` for free, so the predicate is complete and clean (subtyping extends it in Stage 5); `ty_of_annotation` canonicalises primitive names, everything else `Dyn` (gradual); `check_program(&[CoreItem])` checks each `Func` body against its declared return (`Dyn` when absent), via `lower_items_to_core`.
+**Mutation**: 22 mutants, 18 caught / 4 unviable, 0 survivors — tests cover each primitive arm, both `Dyn` operands, structural match, and the gradual fallbacks.
+**Done**: 594 lib green, clippy clean.
 
 ### Step 3: params in the type context
 **Acceptance**: `f(x: Int) -> Int = x` clean; `f(x: Str) -> Int = x` errors at the body; `f(x) -> Int = x` clean (param `Dyn`).
