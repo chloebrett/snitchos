@@ -294,7 +294,7 @@ catalog! {
     cpu "init-supervises-a-child"         scenarios::init_supervises_a_child        [userspace]  {"init"};
     cpu "init-brings-up-fs-server"        scenarios::init_brings_up_fs_server       [userspace]  {"init"};
     cpu "init-runs-fs-client"             scenarios::init_runs_fs_client            [userspace]  {"init"};
-    cpu "supervised-restarts-then-escalates" scenarios::supervised_restarts_then_escalates [userspace] {"supervised"};
+    cpu "supervised-regrants-caps-on-restart" scenarios::supervised_regrants_caps_on_restart [userspace] {"supervised"};
     cpu "endpoint-create-yields-owning-cap" scenarios::endpoint_create_yields_an_owning_cap [userspace] {"endpoint-create"};
     cpu "revoke-reclaims-a-minted-cap"    scenarios::revoke_reclaims_a_minted_cap   [userspace]  {"endpoint-create"};
     cpu "notify-signal-wakes-waiter"      scenarios::notify_signal_wakes_waiter     [userspace]  {"notify-smoke"};
