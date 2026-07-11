@@ -17,6 +17,7 @@ extern crate alloc;
 // Single-module concerns (`clock`, `sched`, `trap`, `virtio`) stay at the root.
 pub mod clock;
 pub mod console;
+pub mod fwcfg;
 pub mod notify;
 pub mod panic_log;
 pub mod reap;
