@@ -78,6 +78,66 @@ impl DmaAccess {
     }
 }
 
+/// Register offset for the DMA address register's high 32 bits, from
+/// the `fw_cfg` MMIO base. Writing the low half (`REG_DMA_ADDR_LOW`)
+/// triggers the device to read the descriptor.
+pub const REG_DMA_ADDR_HIGH: usize = 0x10;
+pub const REG_DMA_ADDR_LOW: usize = 0x14;
+
+/// Set by the device (never by the driver) when a completed transfer
+/// failed — e.g. an unknown `select_key`.
+pub const DMA_CTL_ERROR: u32 = 0x02;
+
+/// Register and descriptor-memory access needed to drive a `fw_cfg`
+/// DMA transfer. `write_reg` is ordinary MMIO; `write_descriptor` /
+/// `read_descriptor_control` touch the guest-RAM [`DmaAccess`]
+/// descriptor the device reads and updates in place — not a device
+/// register, but abstracted the same way so the sequence logic here
+/// stays host-testable without a real memory bus.
+pub trait FwCfgTransport {
+    fn write_reg(&mut self, offset: usize, value: u32);
+    fn write_descriptor(&mut self, bytes: [u8; 16]);
+    fn read_descriptor_control(&self) -> u32;
+}
+
+/// Stage a select+write DMA descriptor pointing at `payload_pa` /
+/// `payload_len` and trigger the transfer by writing the descriptor's
+/// own physical address (`desc_pa`) to the DMA address register, high
+/// half first — the low-half write is what the device treats as the
+/// signal to read the descriptor, so the descriptor must be fully
+/// staged in memory before either half is written.
+///
+/// Does not poll for completion. A real caller spins on
+/// [`dma_pending`] reading the descriptor back via
+/// `read_descriptor_control`; that loop can't run against a host-test
+/// mock, so it stays kernel-side.
+pub fn write_file<T: FwCfgTransport>(
+    dev: &mut T,
+    select_key: u16,
+    payload_pa: u64,
+    payload_len: u32,
+    desc_pa: u64,
+) {
+    let control = (u32::from(select_key) << 16) | DMA_CTL_SELECT | DMA_CTL_WRITE;
+    let descriptor = DmaAccess { control, length: payload_len, address: payload_pa };
+    dev.write_descriptor(descriptor.to_bytes());
+    dev.write_reg(REG_DMA_ADDR_HIGH, (desc_pa >> 32) as u32);
+    dev.write_reg(REG_DMA_ADDR_LOW, desc_pa as u32);
+}
+
+/// Whether the device is still processing the descriptor last
+/// triggered by [`write_file`] — the driver's `SELECT`/`WRITE`
+/// control bits are cleared by the device once it has finished
+/// reading (successfully or not).
+pub fn dma_pending(control: u32) -> bool {
+    control & (DMA_CTL_SELECT | DMA_CTL_WRITE) != 0
+}
+
+/// Whether a completed transfer (`!dma_pending`) failed.
+pub fn dma_failed(control: u32) -> bool {
+    control & DMA_CTL_ERROR != 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +259,93 @@ mod tests {
         let control = (0x42u32 << 16) | DMA_CTL_SELECT | DMA_CTL_WRITE;
         let d = DmaAccess { control, length: 28, address: 0 };
         assert_eq!(&d.to_bytes()[0..4], &[0x00, 0x42, 0x00, 0x11]);
+    }
+
+    #[derive(Default)]
+    struct MockTransport {
+        reg_writes: Vec<(usize, u32)>,
+        descriptor: [u8; 16],
+    }
+
+    impl FwCfgTransport for MockTransport {
+        fn write_reg(&mut self, offset: usize, value: u32) {
+            self.reg_writes.push((offset, value));
+        }
+
+        fn write_descriptor(&mut self, bytes: [u8; 16]) {
+            self.descriptor = bytes;
+        }
+
+        fn read_descriptor_control(&self) -> u32 {
+            u32::from_be_bytes(self.descriptor[0..4].try_into().unwrap())
+        }
+    }
+
+    #[test]
+    fn write_file_stages_the_descriptor_before_triggering_the_transfer() {
+        let mut dev = MockTransport::default();
+        write_file(&mut dev, 0x42, 0x8000_1000, 28, 0x8000_2000);
+        // The descriptor must be fully written to memory before the register
+        // write that tells the device to read it — otherwise the device could
+        // race the driver and read a half-written descriptor.
+        assert_ne!(dev.descriptor, [0u8; 16], "descriptor never staged");
+        assert!(!dev.reg_writes.is_empty(), "no register writes issued");
+    }
+
+    #[test]
+    fn write_file_builds_the_correct_control_word() {
+        let mut dev = MockTransport::default();
+        write_file(&mut dev, 0x42, 0x8000_1000, 28, 0x8000_2000);
+        let control = u32::from_be_bytes(dev.descriptor[0..4].try_into().unwrap());
+        assert_eq!(control, (0x42u32 << 16) | DMA_CTL_SELECT | DMA_CTL_WRITE);
+    }
+
+    #[test]
+    fn write_file_stages_payload_address_and_length() {
+        let mut dev = MockTransport::default();
+        write_file(&mut dev, 0x42, 0x8000_1000, 28, 0x8000_2000);
+        let length = u32::from_be_bytes(dev.descriptor[4..8].try_into().unwrap());
+        let address = u64::from_be_bytes(dev.descriptor[8..16].try_into().unwrap());
+        assert_eq!(length, 28);
+        assert_eq!(address, 0x8000_1000);
+    }
+
+    #[test]
+    fn write_file_writes_descriptor_physical_address_high_half_then_low_half() {
+        let mut dev = MockTransport::default();
+        let desc_pa: u64 = 0x0001_0203_8000_2000;
+        write_file(&mut dev, 0x42, 0x8000_1000, 28, desc_pa);
+        assert_eq!(
+            dev.reg_writes,
+            [
+                (REG_DMA_ADDR_HIGH, (desc_pa >> 32) as u32),
+                (REG_DMA_ADDR_LOW, desc_pa as u32),
+            ]
+        );
+    }
+
+    #[test]
+    fn dma_pending_is_true_while_select_or_write_bit_is_set() {
+        assert!(dma_pending(DMA_CTL_SELECT | DMA_CTL_WRITE));
+        assert!(dma_pending(DMA_CTL_SELECT));
+        assert!(dma_pending(DMA_CTL_WRITE));
+    }
+
+    #[test]
+    fn dma_pending_is_false_once_the_device_clears_the_control_bits() {
+        assert!(!dma_pending(0));
+        // An error bit alone (no SELECT/WRITE) still means "not pending" —
+        // the device finished processing, just unsuccessfully.
+        assert!(!dma_pending(DMA_CTL_ERROR));
+    }
+
+    #[test]
+    fn dma_failed_is_true_when_the_error_bit_is_set_on_completion() {
+        assert!(dma_failed(DMA_CTL_ERROR));
+    }
+
+    #[test]
+    fn dma_failed_is_false_on_clean_completion() {
+        assert!(!dma_failed(0));
     }
 }
