@@ -8,9 +8,16 @@
 //! v1 (this): crash-restart with backoff + an intensity storm-guard. It brings
 //! services up in dependency order, reaps whichever exits, and consults the
 //! policy: restart (after a backoff), stop, or — once a service crash-loops past
-//! its intensity budget — **escalate** (a root escalation is a halt). Cap
-//! re-grant on restart (the `satisfier` path) and per-incarnation umbrella spans
-//! are steps 3–4; this proves the engine and the escalate path first.
+//! its intensity budget — **escalate** (a root escalation is a halt).
+//!
+//! Telemetry (step 3): each transition drives a `snitchos.svc.<name>.state` gauge
+//! (Starting/Running/Backoff/Stopped/Escalated), plus `.restarts_total`,
+//! `.backoff_ticks`, and per-incarnation `.uptime_ticks`, and point-event spans at
+//! exit/escalate. **Deferred:** the long-lived *umbrella span per service with a
+//! child span per incarnation* (the Tempo trace tree) — the kernel span cursor is
+//! per-task LIFO, so a single supervisor task can't hold concurrent per-service
+//! spans open across the `WaitAny` loop; that tree needs an explicit-parent span
+//! model. Cap re-grant on restart (the `satisfier` path) is step 4.
 
 #![no_std]
 #![no_main]
@@ -20,7 +27,10 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
-use snitchos_user::{clock_now, entry, exit, register_counter, span_handle, spawn, wait_any, yield_now};
+use snitchos_user::{
+    Metric, clock_now, entry, exit, register_counter, register_gauge, span_handle, spawn, tracer,
+    wait_any, yield_now,
+};
 use supervision::{
     ExitOutcome, RestartAction, RestartHistory, RestartLimits, RestartPolicy, ServiceId, ServiceSpec,
     restart_decision, startup_order,
@@ -40,12 +50,52 @@ struct ServiceDef {
     limits: RestartLimits,
 }
 
+/// A service's metric handles, **registered once** at bring-up and reused for the
+/// life of the process. The per-process metric table is bounded (16 slots) and
+/// registration does not dedup by name, so re-registering per emit inside the
+/// supervise loop would exhaust it — the late `escalate` counters would then be
+/// refused. Register once, emit through the handle (`Metric` is `Copy`).
+#[derive(Clone, Copy)]
+struct Metrics {
+    state: Metric,
+    restarts: Metric,
+    backoff: Metric,
+    uptime: Metric,
+}
+
+fn register_metrics(name: &str) -> Metrics {
+    Metrics {
+        state: register_gauge(&format!("snitchos.svc.{name}.state")),
+        restarts: register_counter(&format!("snitchos.svc.{name}.restarts_total")),
+        backoff: register_gauge(&format!("snitchos.svc.{name}.backoff_ticks")),
+        uptime: register_gauge(&format!("snitchos.svc.{name}.uptime_ticks")),
+    }
+}
+
 /// Live bookkeeping for one service across its incarnations.
 struct Live {
     id: ServiceId,
     /// Current incarnation's task id; `None` once the service has stopped.
     task: Option<u32>,
+    /// When the current incarnation last became `Running` — for `uptime_ticks`.
+    started: u64,
+    /// Pre-registered metric handles (see [`Metrics`]).
+    metrics: Metrics,
     history: RestartHistory,
+}
+
+/// The lifecycle state a service is in, emitted as the `snitchos.svc.<name>.state`
+/// gauge so Grafana can render a per-service state timeline (and a crash loop shows
+/// as `Running`↔`Backoff` flapping before it trips `Escalated`). Values are stable;
+/// the collector maps them back to names.
+#[derive(Clone, Copy)]
+#[repr(i64)]
+enum State {
+    Starting = 1,
+    Running = 2,
+    Backoff = 3,
+    Stopped = 4,
+    Escalated = 5,
 }
 
 /// Ids are indices into the service table below, so `deps` reads naturally.
@@ -117,7 +167,10 @@ fn wait_until(deadline: u64) {
 /// there is no parent to escalate to, so we snitch a fatal event and halt. The
 /// `reason` names the escalation path in a span so the trace records *why*.
 fn escalate(name: &str, reason: &str) -> ! {
-    let _fatal = snitchos_user::tracer().span(&format!("supervised.escalate.{name}.{reason}"));
+    // Terminal path — runs once, so inline (one-shot) registration is safe; it
+    // won't leak metric-table slots the way a per-emit loop would.
+    let _fatal = tracer().span(&format!("supervised.escalate.{name}.{reason}"));
+    register_gauge(&format!("snitchos.svc.{name}.state")).emit(State::Escalated as i64);
     register_counter(&format!("snitchos.svc.{name}.escalated")).emit(1);
     register_counter("snitchos.supervised.halted").emit(1);
     exit();
@@ -134,11 +187,23 @@ fn main() {
         Err(_) => escalate("supervised", "dependency-cycle"),
     };
 
-    // Bring services up in order, recording each incarnation.
+    // Bring services up in order, recording each incarnation and its state.
+    // Register each service's metrics once here and reuse the handles.
     let mut live: Vec<Live> = Vec::with_capacity(order.len());
     for id in &order {
-        let task = launch(def_for(&defs, *id));
-        live.push(Live { id: *id, task: Some(task), history: RestartHistory { consecutive_failures: 0, recent: Vec::new() } });
+        let def = def_for(&defs, *id);
+        let metrics = register_metrics(def.name);
+        metrics.state.emit(State::Starting as i64);
+        let task = launch(def);
+        let started = clock_now();
+        metrics.state.emit(State::Running as i64);
+        live.push(Live {
+            id: *id,
+            task: Some(task),
+            started,
+            metrics,
+            history: RestartHistory { consecutive_failures: 0, recent: Vec::new() },
+        });
     }
 
     // Supervise. Each reaped child is looked up, its outcome scored, and the
@@ -156,11 +221,19 @@ fn main() {
         };
         slot.task = None;
         let id = slot.id;
+        let uptime = now.saturating_sub(slot.started);
+        let m = slot.metrics;
         let def = def_for(&defs, id);
+
+        // This incarnation is gone — record how long it lived and note the exit as
+        // a point-event span (`let _` closes it immediately: SpanStart + SpanEnd).
+        m.uptime.emit(uptime as i64);
+        let _ = tracer().span(&format!("svc.{}.exited.{status}", def.name));
 
         let outcome = if status == 0 { ExitOutcome::Clean } else { ExitOutcome::Failed(status) };
         match restart_decision(def.policy, outcome, &slot.history, def.limits, now) {
             RestartAction::Stop => {
+                m.state.emit(State::Stopped as i64);
                 register_counter(&format!("snitchos.svc.{}.stopped", def.name)).emit(1);
             }
             RestartAction::Escalate => escalate(def.name, "intensity-exceeded"),
@@ -176,12 +249,18 @@ fn main() {
                 slot.history.recent.retain(|t| now.saturating_sub(*t) < window);
                 let restarts = slot.history.recent.len() as i64;
 
+                // Back off (state Backoff, the wait visible as backoff_ticks), then
+                // relaunch and return to Running.
+                m.state.emit(State::Backoff as i64);
+                m.backoff.emit(after as i64);
                 wait_until(now + after);
                 let task = launch(def);
                 if let Some(slot) = live.iter_mut().find(|l| l.id == id) {
                     slot.task = Some(task);
+                    slot.started = clock_now();
                 }
-                register_counter(&format!("snitchos.svc.{}.restarts_total", def.name)).emit(restarts);
+                m.state.emit(State::Running as i64);
+                m.restarts.emit(restarts);
             }
         }
     }

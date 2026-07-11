@@ -413,8 +413,18 @@ Mirrors the project's kernel-core-vs-userspace split: **pure policy in `kernel-c
    wired: cap re-grant** — this table uses `SPAWNABLE`-id services with no delegated
    caps, so `satisfier.rs::process(child)` re-delegation is deferred to the step-4
    FS-server graph (where a client's minted cap must survive a restart).
-3. **Supervision telemetry** — umbrella span per service, incarnation child spans,
-   `restarts_total` + `state` metrics, transition events.
+3. **✅ DONE (metrics + point events; trace tree deferred) — Supervision telemetry.**
+   Each transition drives a `snitchos.svc.<name>.state` gauge (Starting/Running/
+   Backoff/Stopped/Escalated), plus `.restarts_total`, `.backoff_ticks`, and
+   per-incarnation `.uptime_ticks`; exit/escalate emit point-event spans. The itest
+   also asserts `backoff_ticks`. **Deferred — the umbrella-span-per-service +
+   child-span-per-incarnation trace tree** (the Tempo money-shot): the kernel span
+   cursor is **per-task LIFO** (`SpanClose` is validated against the cursor top), so a
+   single supervisor task cannot hold concurrent per-service umbrella spans open across
+   the `WaitAny` loop without risking out-of-order closes. That tree needs an
+   explicit-parent span model (open-with-parent-id, not stack-nested) — its own small
+   design, tracked as a supervision follow-up. The metric tier already gives Grafana
+   the per-service state timeline and the crash-loop `backoff_ticks` line.
 4. **Acceptance itest** (`workload=supervised-crash-loop`) — **first graph (decided
    2026-07-11): the FS server as the supervised service + a client holding a minted cap**,
    reusing today's services rather than inventing new ones. The FS server exits non-zero
