@@ -14,8 +14,8 @@ use crate::prelude::*;
 
 use alloc::collections::BTreeMap;
 
-use crate::ast::Type;
-use crate::core_ir::{CoreExpr, CoreExprKind, CoreItem};
+use crate::ast::{Field, Type};
+use crate::core_ir::{CoreArg, CoreExpr, CoreExprKind, CoreItem};
 use crate::lexer::Span;
 
 /// The types of the names in scope while checking a body — currently the
@@ -52,11 +52,30 @@ pub struct TypeError {
     pub span: Span,
 }
 
-/// Synthesize the type of `expr` bottom-up. Anything not yet understood is
-/// [`Ty::Dyn`] — the gradual default — so the checker stays sound-by-omission
-/// as constructs are added step by step.
-#[must_use]
-pub fn synth(expr: &CoreExpr, env: &TyEnv) -> Ty {
+/// A declared constructor: which type it builds, and its fields in order.
+struct Ctor {
+    type_name: String,
+    fields: Vec<FieldTy>,
+}
+
+/// One constructor field: its label (`None` when positional) and its type.
+struct FieldTy {
+    label: Option<String>,
+    ty: Ty,
+}
+
+/// The checking context: the program's declared constructors (shared across all
+/// bodies) plus the types of the names in scope (parameters, for now).
+struct Ctx<'a> {
+    ctors: &'a BTreeMap<String, Ctor>,
+    locals: TyEnv,
+}
+
+/// Synthesize the type of `expr` bottom-up, pushing any type errors found within
+/// it (e.g. a bad constructor argument) into `errors`. Anything not yet
+/// understood is [`Ty::Dyn`] — the gradual default — so the checker stays
+/// sound-by-omission as constructs are added step by step.
+fn synth(expr: &CoreExpr, ctx: &Ctx, errors: &mut Vec<TypeError>) -> Ty {
     match &expr.kind {
         CoreExprKind::Int(_) => Ty::Int,
         CoreExprKind::Float(_) => Ty::Float,
@@ -67,27 +86,54 @@ pub fn synth(expr: &CoreExpr, env: &TyEnv) -> Ty {
         CoreExprKind::Tuple(elems) if elems.is_empty() => Ty::Unit,
         // A variable's type comes from the environment (a parameter, for now);
         // names the checker isn't tracking (globals, other functions) are `Dyn`.
-        CoreExprKind::Var(name) => env.get(name).cloned().unwrap_or(Ty::Dyn),
+        CoreExprKind::Var(name) => ctx.locals.get(name).cloned().unwrap_or(Ty::Dyn),
+        CoreExprKind::Call { callee, args } => synth_call(callee, args, ctx, errors),
         // Everything else is not yet understood: stay gradual (sound-by-omission).
         _ => Ty::Dyn,
     }
 }
 
-/// Check `expr` against an `expected` type, returning a mismatch error if the
-/// type synthesized for `expr` is inconsistent with `expected`. Step 2 uses the
-/// simplest bidirectional rule — synthesize then subsume; expression-directed
-/// checking rules (e.g. a lambda against a function type) arrive with later
-/// constructs.
-#[must_use]
-fn check(expr: &CoreExpr, expected: &Ty, env: &TyEnv) -> Option<TypeError> {
-    let got = synth(expr, env);
-    if consistent(&got, expected) {
-        None
-    } else {
-        Some(TypeError {
+/// Synthesize a call. A call to a declared constructor checks each argument
+/// against its field type and yields the constructed `Named` type; other callees
+/// aren't typed yet (`Dyn`) — function-call checking arrives in a later step.
+fn synth_call(
+    callee: &CoreExpr,
+    args: &[CoreArg],
+    ctx: &Ctx,
+    errors: &mut Vec<TypeError>,
+) -> Ty {
+    let CoreExprKind::Var(name) = &callee.kind else {
+        return Ty::Dyn;
+    };
+    let Some(ctor) = ctx.ctors.get(name) else {
+        return Ty::Dyn;
+    };
+    for (i, arg) in args.iter().enumerate() {
+        // Labelled args match by label; positional args by position.
+        let field = match &arg.label {
+            Some(label) => {
+                ctor.fields.iter().find(|f| f.label.as_deref() == Some(label.as_str()))
+            }
+            None => ctor.fields.get(i),
+        };
+        if let Some(field) = field {
+            check(&arg.value, &field.ty, ctx, errors);
+        }
+    }
+    Ty::Named { name: ctor.type_name.clone(), args: Vec::new() }
+}
+
+/// Check `expr` against an `expected` type, pushing a mismatch error (at the
+/// expression's span) when its synthesized type is inconsistent. The simplest
+/// bidirectional rule — synthesize then subsume; expression-directed checking
+/// rules (e.g. a lambda against a function type) arrive with later constructs.
+fn check(expr: &CoreExpr, expected: &Ty, ctx: &Ctx, errors: &mut Vec<TypeError>) {
+    let got = synth(expr, ctx, errors);
+    if !consistent(&got, expected) {
+        errors.push(TypeError {
             message: format!("type mismatch: expected `{expected:?}`, found `{got:?}`"),
             span: expr.span,
-        })
+        });
     }
 }
 
@@ -118,23 +164,57 @@ fn ty_of_annotation(ann: &Type) -> Ty {
     }
 }
 
+/// The field types of a constructor, in declaration order.
+fn field_tys(fields: &[Field]) -> Vec<FieldTy> {
+    fields
+        .iter()
+        .map(|f| FieldTy { label: f.name.clone(), ty: ty_of_annotation(&f.ty) })
+        .collect()
+}
+
+/// Index every declared constructor by name: a `prod`'s single constructor and
+/// each `sum` variant, mapped to its type name + field types.
+fn collect_ctors(items: &[CoreItem]) -> BTreeMap<String, Ctor> {
+    let mut ctors = BTreeMap::new();
+    for item in items {
+        match item {
+            CoreItem::Prod { name, fields, .. } => {
+                ctors.insert(
+                    name.clone(),
+                    Ctor { type_name: name.clone(), fields: field_tys(fields) },
+                );
+            }
+            CoreItem::Sum { name, variants, .. } => {
+                for variant in variants {
+                    ctors.insert(
+                        variant.name.clone(),
+                        Ctor { type_name: name.clone(), fields: field_tys(&variant.fields) },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    ctors
+}
+
 /// Type-check a lowered program, collecting every type error. Each function's
 /// body is checked against its declared return type (`Dyn` — hence unchecked —
-/// when the return is unannotated).
+/// when the return is unannotated), against the program's declared constructors.
 #[must_use]
 pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
+    let ctors = collect_ctors(items);
     let mut errors = Vec::new();
     for item in items {
         if let CoreItem::Func { params, ret, body, .. } = item {
             // Bind each parameter to its declared type (unannotated → `Dyn`).
-            let env: TyEnv = params
+            let locals: TyEnv = params
                 .iter()
                 .map(|p| (p.name.clone(), p.ty.as_ref().map_or(Ty::Dyn, ty_of_annotation)))
                 .collect();
+            let ctx = Ctx { ctors: &ctors, locals };
             let expected = ret.as_ref().map_or(Ty::Dyn, ty_of_annotation);
-            if let Some(error) = check(body, &expected, &env) {
-                errors.push(error);
-            }
+            check(body, &expected, &ctx, &mut errors);
         }
     }
     errors
@@ -142,16 +222,19 @@ pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{synth, Ty, TyEnv};
+    use super::{Ctx, Ty, TyEnv};
+    use alloc::collections::BTreeMap;
 
     /// Lower a literal source expression to a `CoreExpr` for synthesis.
     fn core(src: &str) -> crate::core_ir::CoreExpr {
         crate::lower::lower_expr_to_core(&crate::parser::parse(src).expect("parses"))
     }
 
-    /// Synthesize the type of a source expression in an empty environment.
+    /// Synthesize the type of a source expression in an empty context.
     fn ty(src: &str) -> Ty {
-        synth(&core(src), &TyEnv::new())
+        let ctors = BTreeMap::new();
+        let ctx = Ctx { ctors: &ctors, locals: TyEnv::new() };
+        super::synth(&core(src), &ctx, &mut Vec::new())
     }
 
     #[test]
@@ -227,5 +310,53 @@ mod tests {
         assert!(errors("f(x: Int) -> Int = x").is_empty(), "param Int matches Int return");
         // An unannotated parameter is `Dyn` — consistent with anything.
         assert!(errors("f(x) -> Int = x").is_empty(), "unannotated param → Dyn → clean");
+    }
+
+    #[test]
+    fn a_constructor_argument_is_checked_against_its_field_type() {
+        // `y: Int` receives a `Str` — one error, at the offending argument.
+        let src = r#"prod Point(x: Int, y: Int)  f() = Point(1, "x")"#;
+        let errs = errors(src);
+        assert_eq!(errs.len(), 1, "field `y: Int` got `Str`, got {errs:?}");
+        assert_eq!(
+            errs[0].span.start,
+            src.find(r#""x""#).expect("the bad arg"),
+            "the error is at the argument: {errs:?}"
+        );
+        // Well-typed arguments are clean.
+        assert!(
+            errors("prod Point(x: Int, y: Int)  f() = Point(1, 2)").is_empty(),
+            "matching arg types are clean"
+        );
+        // A `Dyn` argument (an unannotated param) is consistent with any field.
+        assert!(
+            errors("prod Point(x: Int, y: Int)  f(a) = Point(1, a)").is_empty(),
+            "Dyn argument → clean"
+        );
+        // Labelled arguments bind by field *name*, not position: with distinct
+        // field types, a positional-only checker would mis-match these.
+        assert!(
+            errors(r#"prod P(x: Int, y: Str)  f() = P(y: "s", x: 1)"#).is_empty(),
+            "labelled args bind by name, not position"
+        );
+        assert_eq!(
+            errors(r#"prod P(x: Int, y: Str)  f() = P(x: "no", y: "s")"#).len(),
+            1,
+            "labelled `x: Int` got Str"
+        );
+    }
+
+    #[test]
+    fn a_sum_variant_constructor_argument_is_checked() {
+        // Each `sum` variant is a constructor too: its arguments are checked
+        // against the variant's field types.
+        let src = "sum Shape = Circle(Int) | Rect(Int, Int)  f() = Circle(\"x\")";
+        let errs = errors(src);
+        assert_eq!(errs.len(), 1, "Circle(Int) got Str, got {errs:?}");
+        assert_eq!(errs[0].span.start, src.find(r#""x""#).expect("the bad arg"));
+        assert!(
+            errors("sum Shape = Circle(Int) | Rect(Int, Int)  f() = Rect(1, 2)").is_empty(),
+            "matching variant args are clean"
+        );
     }
 }
