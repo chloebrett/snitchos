@@ -95,10 +95,11 @@ canonical `Ty`; a `TypeError` type exists carrying a message + span.
 **Mutation**: 23 mutants, 19 caught / 4 unviable, 0 survivors.
 **Done**: 595 lib green, clippy clean.
 
-### Step 4: constructor argument types
+### Step 4: constructor argument types — ✅ DONE (2026-07-11)
 **Acceptance**: with `prod Point(x: Int, y: Int)`, `Point(1, "x")` errors at the `"x"` arg (`y: Int` got `Str`); `Point(1, 2)` clean; a `Dyn` arg is clean.
-**RED**: the `Point(1, "x")` program yields one error at the second arg.
-**GREEN**: register `prod`/`sum` field types in the ctx; check each constructor call's args (positional + labelled) against the declared field types.
+**GREEN**: introduced the error-accumulator architecture — `synth`/`check` now take a `&Ctx` (declared constructors + local `TyEnv`) and push into `&mut Vec<TypeError>` (a construction both synthesizes a `Named` type *and* emits arg errors). `collect_ctors` indexes every `prod` constructor + `sum` variant → `(type_name, field_tys)`; `synth_call` checks each arg against its field type (labelled by name, positional by index) and yields the `Named` type. Non-constructor calls stay `Dyn` (function-call checking is Step 6).
+**Mutation**: 33 mutants — real Sum-arm survivor killed with a sum-variant test; final run 0 missed (remaining timeouts are load-induced, each provably caught).
+**Done**: 597 lib green, clippy clean.
 
 ### Step 5: binary-operator operands
 **Acceptance**: `1 + 2 : Int`; `1.0 + 2.0 : Float`; `1 + true` errors; string `++`/comparisons per the ops table; a `Dyn` operand suppresses the error.
