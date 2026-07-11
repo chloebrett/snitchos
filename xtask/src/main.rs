@@ -116,12 +116,13 @@ enum Cmd {
         /// selection order — the A/B baseline for measuring the packing win.
         #[arg(long)]
         no_lpt: bool,
-        /// Build the kernel in the optimized (`--release`) profile instead of
-        /// debug. Cuts per-instruction bloat suite-wide — but currently surfaces
-        /// a latent release-codegen kernel bug (timer death / boot corruption),
-        /// which is exactly what this flag exists to reproduce in-process.
-        #[arg(long)]
-        release: bool,
+        /// Optimization regime, with distinct failure modes — flick between them to
+        /// localize a bug: `low` (debug, opt-0 — where scenarios depending on unbuilt
+        /// work like supervision fail, the honest correctness test), `mid` (release
+        /// kernel + opt-1 userspace — fast and currently green, the former `--release`),
+        /// or `high` (release everywhere — surfaces the userspace opt≥2 UB class).
+        #[arg(long, value_enum, default_value_t = qemu::OptLevel::Mid)]
+        opt: qemu::OptLevel,
     },
     /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
     /// run under snemu with exact per-PC counting and report the top kernel
@@ -731,11 +732,11 @@ fn main() -> ExitCode {
             }
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
-        Cmd::SnemuItest { steps, limit, only, jobs, no_idle_skip, no_lpt, release } => {
+        Cmd::SnemuItest { steps, limit, only, jobs, no_idle_skip, no_lpt, opt } => {
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
-            itest::snemu_audit::run(steps, limit, only.as_deref(), jobs, !no_idle_skip, !no_lpt, release)
+            itest::snemu_audit::run(steps, limit, only.as_deref(), jobs, !no_idle_skip, !no_lpt, opt)
         }
         Cmd::SnemuProfile { workload, steps, top, release } => {
             snemu_profile::run(workload.as_deref(), steps, top, release)

@@ -91,7 +91,10 @@ const CHECKPOINT_BUDGET: u64 = 60_000_000;
 /// Boot `workload` to the heartbeat checkpoint (unprofiled), then run `steps`
 /// instructions with profiling on and print the top `top` functions by instret.
 pub fn run(workload: Option<&str>, steps: u64, top: usize, release: bool) -> ExitCode {
-    let (kernel, dtb) = match snemu_diff::prepare_profiled(true, release) {
+    // The profiler's `--release` maps to `Mid` (release kernel + opt-1 userspace);
+    // it profiles the kernel, so the userspace opt level is immaterial here.
+    let opt = if release { crate::qemu::OptLevel::Mid } else { crate::qemu::OptLevel::Low };
+    let (kernel, dtb) = match snemu_diff::prepare_profiled(true, opt) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("snemu-profile: {e}");

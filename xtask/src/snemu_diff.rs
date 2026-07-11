@@ -555,21 +555,22 @@ pub(crate) fn collect_frames_until_cap_quiescence(
 
 /// Build the kernel and read the base DTB the emulators share.
 pub(crate) fn prepare(with_workloads: bool) -> Result<(Vec<u8>, Vec<u8>), String> {
-    prepare_profiled(with_workloads, false)
+    prepare_profiled(with_workloads, qemu::OptLevel::Low)
 }
 
-/// Like [`prepare`], but builds the kernel in the optimized (`--release`)
-/// profile when `release` is set and reads the matching ELF. Used by
-/// `snemu-itest --release` to reproduce the release-codegen kernel bug in-process.
+/// Like [`prepare`], but builds the kernel at the given [`qemu::OptLevel`] and reads
+/// the matching ELF. Used by `snemu-itest --opt=<low|mid|high>` to run the same
+/// scenarios under three optimization regimes with distinct failure modes.
 pub(crate) fn prepare_profiled(
     with_workloads: bool,
-    release: bool,
+    opt: qemu::OptLevel,
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
     let features: &[&str] = if with_workloads { &["itest-workloads"] } else { &[] };
-    if !qemu::build_kernel_profiled(features, release).is_ok_and(|s| s.success()) {
+    if !qemu::build_kernel_profiled(features, opt).is_ok_and(|s| s.success()) {
         return Err("kernel build failed".to_string());
     }
-    let kernel = std::fs::read(qemu::kernel_bin(release)).map_err(|e| format!("read kernel: {e}"))?;
+    let kernel =
+        std::fs::read(qemu::kernel_bin(opt.is_release())).map_err(|e| format!("read kernel: {e}"))?;
     let dtb = std::fs::read(SNEMU_DTB).map_err(|e| format!("read {SNEMU_DTB}: {e}"))?;
     Ok((kernel, dtb))
 }
@@ -628,6 +629,13 @@ pub(crate) fn ram_mb_for(workload: Option<&str>) -> u32 {
     const DEFAULT_MB: u32 = 128;
     match workload {
         Some("frame-oom") => 48,
+        // `spawn-reap`'s leak-vs-reclaim teeth need the children's total (15 × 4 MiB
+        // = 60 MiB) to exceed RAM. On a small machine that holds with margin (60 >
+        // 48) *and* halves the child count — so the per-spawn frame-zeroing `memset`
+        // that dominates this scenario's instret (the suite pole) drops ~2×, with
+        // teeth that clearly exceed the machine rather than leaning on kernel
+        // overhead (the old 30 × 4 = 120 barely under 128). See `reaper.rs`.
+        Some("spawn-reap") => 48,
         _ => DEFAULT_MB,
     }
 }

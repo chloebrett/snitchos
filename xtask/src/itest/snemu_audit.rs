@@ -107,9 +107,9 @@ pub fn run(
     jobs: usize,
     idle_skip: bool,
     lpt: bool,
-    release: bool,
+    opt: crate::qemu::OptLevel,
 ) -> ExitCode {
-    let (kernel, dtb) = match snemu_diff::prepare_profiled(true, release) {
+    let (kernel, dtb) = match snemu_diff::prepare_profiled(true, opt) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("snemu-itest: {e}");

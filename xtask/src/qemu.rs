@@ -56,8 +56,34 @@ pub fn base_command(chardev_arg: &str, ram_mb: u32) -> Command {
 /// The kernel's `build.rs` builds and embeds the userspace programs itself
 /// (into an isolated target dir), so there is no separate user-build step
 /// and nothing to pass in — a fresh embed falls out of building the kernel.
+/// Optimization regime for a kernel build. The three levels have *distinct*
+/// failure scenarios, which is why they're worth flicking between (esp. under
+/// `snemu-itest`):
+/// - **Low** — debug, opt-level 0 everywhere. The regime where scenarios that
+///   depend on unbuilt work (e.g. supervision) fail — the honest correctness test.
+/// - **Mid** — release kernel (opt-3) with the embedded userspace pinned to opt-1
+///   (the `build.rs` default, which dodges the userspace opt≥2 UB class). Fast, and
+///   currently green — the former `--release` behavior.
+/// - **High** — release everywhere, userspace at opt-3 too. Surfaces the userspace
+///   opt≥2 UB class (talc OOM loop / hang) `build.rs` otherwise sidesteps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum OptLevel {
+    Low,
+    #[default]
+    Mid,
+    High,
+}
+
+impl OptLevel {
+    /// Whether this builds the optimized (`--release`) kernel profile. `Mid`/`High`
+    /// both do (they differ only in the *userspace* opt level); `Low` is debug.
+    pub fn is_release(self) -> bool {
+        !matches!(self, OptLevel::Low)
+    }
+}
+
 pub fn build_kernel(features: &[&str]) -> std::io::Result<std::process::ExitStatus> {
-    build_kernel_profiled(features, false)
+    build_kernel_profiled(features, OptLevel::Low)
 }
 
 /// The kernel ELF path for a given profile. Cargo writes the debug build to
@@ -80,12 +106,18 @@ pub fn kernel_bin(release: bool) -> &'static str {
 /// and nothing to pass in — a fresh embed falls out of building the kernel.
 pub fn build_kernel_profiled(
     features: &[&str],
-    release: bool,
+    opt: OptLevel,
 ) -> std::io::Result<std::process::ExitStatus> {
     let mut cmd = Command::new("cargo");
     cmd.args(["build", "-p", "kernel", "--target", KERNEL_TARGET]);
-    if release {
+    if opt.is_release() {
         cmd.arg("--release");
+    }
+    // `High` lets the embedded userspace reach opt-3; the kernel's `build.rs` reads
+    // this to override its default opt-1 userspace pin (so `Mid` leaves it unset and
+    // gets the pin). Building the UB class on purpose is the whole point of `High`.
+    if matches!(opt, OptLevel::High) {
+        cmd.env("SNITCHOS_USERSPACE_OPT", "3");
     }
     if !features.is_empty() {
         cmd.arg("--features").arg(features.join(","));
@@ -102,5 +134,12 @@ mod tests {
         assert!(kernel_bin(false).contains("/debug/"));
         assert!(kernel_bin(true).contains("/release/"));
         assert!(kernel_bin(true).ends_with("/kernel"));
+    }
+
+    #[test]
+    fn opt_level_low_is_debug_mid_and_high_are_release() {
+        assert!(!OptLevel::Low.is_release());
+        assert!(OptLevel::Mid.is_release());
+        assert!(OptLevel::High.is_release());
     }
 }
