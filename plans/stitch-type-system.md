@@ -112,10 +112,17 @@ canonical `Ty`; a `TypeError` type exists carrying a message + span.
 **Mutation**: 36 mutants, 27 caught / 9 unviable, 0 survivors.
 **Done**: 598 lib green, clippy clean.
 
-### Step 7: wire the pass in (reported, non-fatal)
-**Acceptance**: a host entry (e.g. `check_program_located` or a `runner` hook) collects type errors and renders them via the `SourceMap`; running a well-typed program is unchanged; the 588-test suite + prelude stay green (no false positives).
-**RED**: an integration-style test: a program with a real mismatch surfaces a rendered `file:line:col` type error; a valid unannotated program surfaces none.
-**GREEN**: expose `check_program`; add the reporting hook. Decide fatal-vs-warning with the user at this step (default: report, don't block — gradual).
+### Step 7: wire the pass in (reported, non-fatal) — ✅ DONE (2026-07-12)
+**Acceptance**: a host entry collects type errors and renders them via the `SourceMap`; running a well-typed program is unchanged; the suite + prelude stay green (no false positives).
+**GREEN**: `TypeError::render(&SourceMap, SourceId)` (same presentation as a runtime `Fault`); `runner::type_check_report` lowers the program, runs `check_program`, and prepends `type error: …` lines to a run's stderr — **advisory only, never changes the exit code or blocks eval** (the gradual report-don't-block default, chosen with the user). Wired into `run_program_source` (single-module path; REPL + multi-module wiring deferred).
+**Mutation**: check.rs 38 (29 caught / 9 unviable / 0 survivors); runner `type_check_report` 2/2 caught.
+**Done**: 600 lib + all integration green; **zero false positives** on existing programs (gradual `Dyn` held); clippy clean.
+
+**Note — Step 5 (binary-operator operands) was leapfrogged.** Per the user's 6→7→5
+ordering (where "5" = **contract subtyping**, i.e. the roadmap's *Stage 5*), the
+plan-step-5 "binary-operator operands" (`1 + true` errors) is **not yet done** —
+`synth(Binary)` still falls through to `Dyn`. It remains an open, self-contained step to
+pick up whenever.
 
 ## Pre-PR Quality Gate
 1. Mutation testing (`cargo xtask mutants -p stitch`, now wired).

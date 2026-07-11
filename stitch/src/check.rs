@@ -17,6 +17,7 @@ use alloc::collections::BTreeMap;
 use crate::ast::{Field, Type};
 use crate::core_ir::{CoreArg, CoreExpr, CoreExprKind, CoreItem};
 use crate::lexer::Span;
+use crate::source::{SourceId, SourceMap};
 
 /// The types of the names in scope while checking a body — currently the
 /// function's parameters. Grows to hold `let`-bindings and the receiver later.
@@ -50,6 +51,16 @@ pub enum Ty {
 pub struct TypeError {
     pub message: String,
     pub span: Span,
+}
+
+impl TypeError {
+    /// Render this error as `name:line:col: message` + the offending line and a
+    /// caret, resolving `span` against `source` in `sources` — the same
+    /// presentation as a runtime `Fault`.
+    #[must_use]
+    pub fn render(&self, sources: &SourceMap, source: SourceId) -> String {
+        sources.render(source, self.span, &self.message)
+    }
 }
 
 /// A declared constructor: which type it builds, and its fields in order.

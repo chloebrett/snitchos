@@ -50,8 +50,24 @@ pub fn run_program_source(src: &str) -> RunResult {
     // Register the program source so a runtime fault renders `file:line:col`.
     let mut sources = SourceMap::new();
     let user_src = sources.register("<program>", src);
+    // Static type check (gradual): report mismatches, but never block execution.
+    let type_report = type_check_report(&items, &sources, user_src);
     let out = eval_program_located(&items, &mut sources, user_src);
-    finish(out, &sources)
+    let mut result = finish(out, &sources);
+    result.stderr = format!("{type_report}{}", result.stderr);
+    result
+}
+
+/// Type-check `items` and render each error as a `type error: …` line. Gradual:
+/// the result is advisory text, prepended to a run's stderr — it never changes
+/// the exit code or halts evaluation.
+fn type_check_report(items: &[Item], sources: &SourceMap, source: crate::source::SourceId) -> String {
+    let core = crate::lower::lower_items_to_core(items);
+    let mut report = String::new();
+    for error in crate::check::check_program(&core) {
+        writeln!(report, "type error: {}", error.render(sources, source)).expect(INFALLIBLE);
+    }
+    report
 }
 
 /// Discover, load, and run a multi-file program rooted at the `entry` module,
@@ -331,6 +347,24 @@ mod tests {
     #[test]
     fn the_repl_renders_a_scalar_result_inline() {
         assert!(Repl::new().eval_line("40 + 2").contains("=> 42"));
+    }
+
+    #[test]
+    fn a_type_error_is_reported_as_a_non_fatal_warning() {
+        // `f` has a return-type mismatch but is never called; the program still
+        // runs (gradual: type errors are reported, not fatal).
+        let result = run_program_source("main() = 1\nf() -> Int = \"x\"");
+        assert_eq!(result.exit_code, 0, "gradual: a type error doesn't block, got {result:?}");
+        assert!(result.stderr.contains("type error"), "reports the error: {}", result.stderr);
+        assert!(result.stderr.contains("<program>:2:"), "renders file:line:col: {}", result.stderr);
+        assert!(result.stdout.contains("=> 1"), "the program still produced its result");
+    }
+
+    #[test]
+    fn a_well_typed_program_reports_no_type_errors() {
+        // A clean (here, unannotated) program surfaces no type warnings.
+        let result = run_program_source("main() = 1");
+        assert!(!result.stderr.contains("type error"), "no warnings: {}", result.stderr);
     }
 
     #[test]
