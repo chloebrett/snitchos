@@ -67,3 +67,29 @@ inner() = 1 / 0
 - and the one that's most on-thesis to admit: **the fault narrates to the console, not to the wire.** everything else on this system that narrates does it as a telemetry frame you can watch in Grafana. a fault, for now, renders to stderr and the REPL. a fault that emitted its own spanned backtrace *as a telemetry event* — so a crash shows up on the same dashboard as everything else — is the obviously-right ending and I haven't built it. the data's all there on the `RuntimeError`; it just isn't on the wire yet.
 
 - still. the thing I set out to fix is fixed. an error on this platform used to be the one event that happened in the dark — a string with no address, no history, no thread back to the code. now it points at the expression, names the file and line, draws the caret, and prints the path that got there. the same idea that stamps the span stamps the source and snapshots the stack: write once, innermost wins, on the way out. the error path finally does the thing the whole system was built to do. it tells you what happened.
+
+---
+
+## addendum — effects learn to bend
+
+- the diagnostics were the payoff of the spans. the *next* thing the spans unlock is effects, and I got the first two pieces of it in while the plumbing was warm. it's mid-flight — there's no surface syntax yet — but the machine underneath is built and I want it on the record.
+- the thesis for this one: post 8 was "the language learns to say no" — `uses Telemetry` is a gate, and a function that doesn't declare it can't `emit`. that's a *boolean*. you either may perform an effect or you may not. what's missing is the ability to *redirect* an allowed effect — to say "inside this block, `emit` goes somewhere else." that's a handler, and it's the membrane stim's modes will eventually be built from: a mode is just a handler that intercepts keypresses differently. so, effects with handlers, single-shot, no fancy resumable continuations — the tree-walkable subset.
+
+- **first, `uses` grew a span** (this is where the spans pay off again). it was a bare `Vec<String>` of capability names; now it's `Vec<Effect>`, and each `Effect` carries the span of where the capability was declared. same trick as the AST nodes — equality and debug ignore the span, so it's metadata and nothing structural churned. the point is that a future refusal can cite *two* places: where you performed the effect (the diagnostics above) and where — or whether — you declared it. the "you didn't say `uses Telemetry`" error will point at the function signature, not just the `emit` call. the declaration is now a located thing.
+
+- **then the handler stack.** the `Env` gained a dynamically-scoped stack of `(op-name → handler value)`. an effect native — `emit`, `print`, `readByte`, all eight of them — used to go straight to the platform. now it goes through one function first:
+
+```rust
+fn perform_effect(op, args, env, ambient) -> Result<Value> {
+    match env.handler_for(op) {
+        Some(handler) => apply_values(&handler, args, &env.without_top_handler(op)),
+        None          => ambient(),   // the platform, as before
+    }
+}
+```
+
+- with no handler installed that's just `ambient()` — so the whole change is invisible, every existing test passes untouched, the platform still gets every effect. install a handler for `emit` and suddenly `emit("x", 1)` calls *your* function with `("x", 1)` instead.
+- the detail I like is `without_top_handler`. when the handler runs, its own op is popped off the stack for the duration — so a handler that itself calls `emit` (to log-then-forward, say) doesn't re-enter itself into an infinite loop; the inner `emit` sails past to the *next* handler down, or to the ambient platform. that's what makes a handler able to wrap an effect rather than only replace it. the test I pinned it with installs a handler that re-emits under a different name and checks that the renamed metric reaches the real sink — proving both that the handler intercepted *and* that its forward escaped the membrane.
+- and it's dynamically scoped, which is the whole point of a membrane: a function called three layers deep inside a handled block sees the handler, even though it was defined somewhere that never heard of it. that falls out because the handler stack rides through calls on the `Env` the same way the source does — threaded, not reset at the boundary. authority gets *replaced* at each call (least privilege); handlers *flow through* (dynamic extent). same struct, opposite discipline, and that difference is exactly the difference between "what you're allowed to do" and "who's listening while you do it."
+
+- what's not here yet: you can't *write* `handle emit with f { … }` — there's no keyword, the installation only exists through the Rust `Env` API. the surface syntax is the next step, and after it, attenuation — a block that *drops* a capability for its extent, so an effect inside it faults. and when that fault fires it'll be spanned, and cite the `uses` declaration, because both of those are now things a fault can point at. which is the nice part: the error work and the effect work aren't two projects. the effects will break, and when they do, the faults already know how to tell you where.
