@@ -1138,6 +1138,20 @@ impl Parser {
         }))
     }
 
+    /// Parse `without <Cap> { body }` — drop capability `Cap` for the body's
+    /// extent (attenuation). `Cap` is a bare capability name. The `without`
+    /// keyword is already consumed.
+    fn parse_without(&mut self, start: usize) -> Result<Expr, ParseError> {
+        let cap = self.expect_ident("capability name after `without`")?;
+        let body_start = self.cur_start();
+        self.expect(&TokenKind::LBrace, "'{' for the `without` body")?;
+        let body = self.parse_block(body_start)?;
+        Ok(self.spanned(start, ExprKind::Without {
+            cap,
+            body: Box::new(body),
+        }))
+    }
+
     /// Parse the subjectless `match { cond => body … _ => default }` condition
     /// table and desugar it into nested `cond => then | els` conditionals
     /// (`Expr::If`) — it's the N-ary form of the binary conditional. Each arm is
@@ -1332,6 +1346,7 @@ impl Parser {
             TokenKind::LBrace => self.parse_block(start)?,
             TokenKind::Match => self.parse_match(start)?,
             TokenKind::Handle => self.parse_handle(start)?,
+            TokenKind::Without => self.parse_without(start)?,
             TokenKind::Semicolon => return Err(self.err(NO_SEMICOLONS)),
             other => return Err(self.err(format!("unexpected token: {other:?}"))),
         })

@@ -117,6 +117,12 @@ pub enum CoreExprKind {
         handler: Box<CoreExpr>,
         body: Box<CoreExpr>,
     },
+    /// `without <cap> { body }` — drop capability `cap` for the body's extent
+    /// (attenuation; see the surface node).
+    Without {
+        cap: String,
+        body: Box<CoreExpr>,
+    },
 }
 
 /// A call argument in the core IR.

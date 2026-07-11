@@ -539,6 +539,7 @@ fn eval_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
             let handler = eval(handler, env)?;
             eval(body, &env.clone().with_handler(op.clone(), handler))
         }
+        CoreExprKind::Without { cap, body } => eval(body, &env.without_authority(cap)),
         // `()` is unit; `(a, b, …)` is a tuple.
         CoreExprKind::Tuple(elements) if elements.is_empty() => Ok(Value::Unit),
         CoreExprKind::Tuple(elements) => {
@@ -1575,6 +1576,32 @@ mod tests {
             events.iter().any(|ev| matches!(ev,
                 TelemetryEvent::Emit { name, value } if name == "outside" && *value == Value::Int(2))),
             "the `emit` after the block should reach the sink unhandled, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn without_drops_authority_over_its_body_and_the_refusal_is_spanned() {
+        // `without Telemetry { … }` attenuates the body: the seeded Telemetry
+        // authority is dropped for the extent, so a direct `emit` is refused —
+        // and the refusal cites the *perform site* (the `emit(…)` call), not the
+        // whole block. The same `emit` outside the block still succeeds.
+        let mut items = crate::interp::prelude_items();
+        crate::lower::lower_program(&mut items);
+        let env = crate::interp::build_env(&items);
+
+        let ok = crate::lower::lower_expr_to_core(
+            &crate::parser::parse(r#"emit("x", 1)"#).expect("parse"),
+        );
+        crate::interp::eval(&ok, &env).expect("emit succeeds with Telemetry in scope");
+
+        let src = r#"without Telemetry { emit("x", 1) }"#;
+        let e = crate::lower::lower_expr_to_core(&crate::parser::parse(src).expect("parse"));
+        let err = crate::interp::eval(&e, &env).expect_err("emit refused without Telemetry");
+        let span = err.span().expect("the refusal should be spanned at the perform site");
+        assert_eq!(
+            span.start,
+            src.find("emit").expect("src has an emit call"),
+            "the refusal should cite the `emit(…)` call, not the `without` block: {err:?}"
         );
     }
 

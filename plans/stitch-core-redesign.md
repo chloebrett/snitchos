@@ -485,14 +485,25 @@ recurse into handler+body with the same `bound` set (handle binds nothing itself
   `emit` *after* the block still reaches the sink unhandled.
 - **584 lib + integration green, no new clippy warnings.**
 
-**D4 — Attenuation + spanned unhandled-effect fault.**
-`without Cap { body }` (drop authority for the extent) and/or a refusing handler; an
-effect with neither authority nor handler faults **spanned**, citing the perform site
-(reusing the diagnostics work). Optionally fold the `uses` declaration span (D1) into
-the message.
-- RED: inside `without Telemetry { emit(…) }` the `emit` faults with a span at the
-  call; the same `emit` outside succeeds.
-- GREEN: the attenuation construct + spanned refusal.
+**D4 — Attenuation + spanned unhandled-effect fault — ✅ DONE (2026-07-11).**
+New keyword `without`; `parse_without` reads `without <Cap> { body }` into
+`ExprKind::Without { cap, body }`, lowered 1:1 to `CoreExprKind::Without`. Interp arm
+evals the body under `env.without_authority(cap)` (a `&Env` → `Env` clone that drops
+`cap` from the authority `BTreeSet`; no-op if unheld). Same three-walk plumbing as D3
+(`collect_free_vars` ×2, `collect_placeholders` block boundary).
+- **Spanned refusal came for free**: the authority gate in each effect native already
+  returns an *unlocated* `RuntimeError`; C5's `eval`→`locate` wrapper stamps the
+  innermost `CoreExpr.span` (the `emit(…)` Call) as the fault leaves. No native
+  change needed — the perform-site span falls out of the existing diagnostics.
+- RED→GREEN test `without_drops_authority_over_its_body_and_the_refusal_is_spanned`:
+  with `Telemetry` seeded, `emit("x", 1)` succeeds; inside `without Telemetry { … }`
+  the same call faults with `span.start == the emit call offset`.
+- **Scope**: lexical/direct attenuation only — `without Cap { f() }` where `f` declares
+  `uses Cap` does NOT stay attenuated, because `with_authority` restores `f`'s declared
+  set at the call boundary (the authority model is per-function-declared, not
+  caller-intersected). Transitive/caller-intersected attenuation is a later call.
+- Deferred (optional): fold the D1 `uses` declaration span into the refusal message.
+- **585 lib + integration green, no new clippy warnings.**
 
 ### Non-goals (Phase D)
 - Multi-shot / resumable continuations (VM).

@@ -304,6 +304,15 @@ pub enum ExprKind {
         handler: Box<Expr>,
         body: Box<Expr>,
     },
+    /// `without <Cap> { body }` — attenuation: drop capability `Cap` from the
+    /// authority in scope for the body's extent. A direct effect needing `Cap`
+    /// then faults (spanned at the perform site). Lexical/direct only — it does
+    /// not pierce a named-function `uses` boundary, which restores that
+    /// function's declared authority at the call.
+    Without {
+        cap: String,
+        body: Box<Expr>,
+    },
     /// `match subject { arm* }` (subject form).
     Match {
         subject: Box<Expr>,

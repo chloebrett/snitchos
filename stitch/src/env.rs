@@ -251,6 +251,17 @@ impl Env {
         Env { authority: Rc::new(authority), ..self }
     }
 
+    /// A clone of this environment with capability `cap` dropped from the
+    /// authority in scope — the attenuation primitive behind `without Cap { … }`.
+    /// A no-op if `cap` was not held. Only this scope's direct effects are
+    /// attenuated; a named-function call restores that function's declared `uses`.
+    #[must_use]
+    pub fn without_authority(&self, cap: &str) -> Env {
+        let mut authority = (*self.authority).clone();
+        authority.remove(cap);
+        Env { authority: Rc::new(authority), ..self.clone() }
+    }
+
     /// A clone of this environment tagged with `source` — the source the code
     /// running in it came from. Set at each closure boundary (`apply_values`) and at
     /// program registration (`build_env`); read by `eval` when stamping a fault.

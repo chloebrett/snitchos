@@ -105,6 +105,10 @@ fn to_core(expr: &Expr) -> CoreExpr {
             handler: Box::new(to_core(handler)),
             body: Box::new(to_core(body)),
         },
+        ExprKind::Without { cap, body } => CoreExprKind::Without {
+            cap: cap.clone(),
+            body: Box::new(to_core(body)),
+        },
         ExprKind::Placeholder(_) | ExprKind::OperatorRef(_) | ExprKind::SubjectlessMatch { .. } => {
             unreachable!("surface-only node survived lowering: {:?}", expr.kind)
         }
@@ -329,6 +333,9 @@ fn lower_expr(expr: &mut Expr) {
             lower_expr(handler);
             lower_expr(body);
         }
+        ExprKind::Without { cap: _, body } => {
+            lower_expr(body);
+        }
         ExprKind::OperatorRef(op) => {
             *expr = operator_lambda(*op);
         }
@@ -435,7 +442,8 @@ fn collect_placeholders(expr: &mut Expr, params: &mut alloc::collections::BTreeS
         | ExprKind::Lambda { .. }
         | ExprKind::Block { .. }
         | ExprKind::Match { .. }
-        | ExprKind::Handle { .. } => {}
+        | ExprKind::Handle { .. }
+        | ExprKind::Without { .. } => {}
     }
 }
 
@@ -638,6 +646,9 @@ fn collect_free_vars(expr: &Expr, bound: &BTreeSet<String>, free: &mut BTreeSet<
             collect_free_vars(handler, bound, free);
             collect_free_vars(body, bound, free);
         }
+        ExprKind::Without { cap: _, body } => {
+            collect_free_vars(body, bound, free);
+        }
         ExprKind::Binary { left, right, .. } => {
             collect_free_vars(left, bound, free);
             collect_free_vars(right, bound, free);
@@ -755,6 +766,9 @@ fn collect_free_vars_core(expr: &CoreExpr, bound: &BTreeSet<String>, free: &mut 
         }
         CoreExprKind::Handle { op: _, handler, body } => {
             collect_free_vars_core(handler, bound, free);
+            collect_free_vars_core(body, bound, free);
+        }
+        CoreExprKind::Without { cap: _, body } => {
             collect_free_vars_core(body, bound, free);
         }
         CoreExprKind::Binary { left, right, .. } => {
