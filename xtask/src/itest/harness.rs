@@ -312,6 +312,12 @@ pub struct View {
     /// UART). `None` for QEMU and batch replay. A live view is also `batch` (its
     /// budget-exhaustion is a clean end, like a closed capture).
     live: Option<LiveSnemu>,
+    /// The console injections this scenario has performed, tagged by guest instret
+    /// — the scenario's *branch key* for the snapshot tree. Empty ⇒ observe-only ⇒
+    /// eligible for the zero-input collapse. Only the live path records (that's the
+    /// only path whose `send_input` reaches a real, instret-bearing guest); QEMU and
+    /// batch replay leave it empty. Read via [`branch_key`](Self::branch_key).
+    branch_key: super::snapshot_tree::BranchKey,
 }
 
 impl Boot {
@@ -418,6 +424,7 @@ impl Boot {
             quiet: false,
             batch: false,
             live: None,
+            branch_key: super::snapshot_tree::BranchKey::default(),
         }
     }
 
@@ -438,10 +445,12 @@ impl View {
     /// scenarios needing console I/O surface as audit failures — exactly the
     /// fidelity gap the audit is meant to find.
     ///
-    /// Now test-only: the audit drives a [`live`](Self::live) machine instead, but
-    /// the replay path still backs the batch/`assert_absent` unit tests (whose
-    /// semantics a live view shares, being `batch` too).
-    #[cfg(test)]
+    /// The audit's live path drives a [`live`](Self::live) machine, but the zero-input
+    /// **collapse** (`--share-snapshots`) reuses `replay`: a workload's observe-only
+    /// scenarios share one forward run, and each replays the prefix of that recorded
+    /// stream truncated to its own budget — verdict-identical to running live, for a
+    /// fraction of the guest steps. The batch/`assert_absent` unit tests also cover
+    /// this path (a live view shares its `batch` semantics).
     pub(crate) fn replay(frames: Vec<OwnedFrame>) -> Self {
         View {
             recorder: Arc::new(Recorder::from_closed(frames)),
@@ -461,6 +470,7 @@ impl View {
             quiet: true,
             batch: true,
             live: None,
+            branch_key: super::snapshot_tree::BranchKey::default(),
         }
     }
 
@@ -489,6 +499,7 @@ impl View {
             quiet: true,
             batch: true,
             live: Some(LiveSnemu::new(machine, max_steps)),
+            branch_key: super::snapshot_tree::BranchKey::default(),
         }
     }
 
@@ -500,6 +511,11 @@ impl View {
     /// marker) before injecting, or early bytes can be dropped.
     pub fn send_input(&mut self, bytes: &[u8]) -> Result<(), String> {
         if let Some(live) = self.live.as_mut() {
+            // Tap the injection into the scenario's branch key before feeding it:
+            // the guest instret *now* is the fork point where this scenario
+            // diverges from its observe-only siblings. A non-empty key marks the
+            // scenario ineligible for the zero-input collapse.
+            self.branch_key.record(live.machine.instret(), bytes);
             live.machine.push_console_input(bytes);
             return Ok(());
         }
@@ -507,6 +523,14 @@ impl View {
         let stdin = guard.as_mut().ok_or("QEMU stdin was not piped")?;
         stdin.write_all(bytes).map_err(|e| format!("write to QEMU stdin: {e}"))?;
         stdin.flush().map_err(|e| format!("flush QEMU stdin: {e}"))
+    }
+
+    /// This scenario's branch key — the console injections it performed, tagged by
+    /// guest instret. The audit reads it after a scenario runs to classify it:
+    /// empty ⇒ observe-only (collapsible onto a shared forward run), non-empty ⇒
+    /// interactive (must run live). See `docs/snemu-itest-snapshot-tree-design.md`.
+    pub(crate) fn branch_key(&self) -> &super::snapshot_tree::BranchKey {
+        &self.branch_key
     }
 
     /// The guest's console (UART) output so far, for a **live** view — what the
@@ -541,6 +565,12 @@ impl View {
     /// `wait_for` can't see it. QEMU: poll the log file it writes concurrently;
     /// live snemu: step the machine and scan its UART output.
     pub fn wait_for_log(&mut self, budget: Duration, needle: &str) -> Result<(), String> {
+        // A console-output read disqualifies the scenario from the zero-input
+        // collapse: the shared *telemetry* stream can't reproduce UART output, so
+        // this scenario must always run live. Marked even on the QEMU path (harmless
+        // there — those views never collapse) so the signal is captured wherever the
+        // scenario body runs.
+        self.branch_key.mark_console_read();
         if let Some(live) = self.live.as_mut() {
             return if live.wait_for_uart(needle) {
                 Ok(())

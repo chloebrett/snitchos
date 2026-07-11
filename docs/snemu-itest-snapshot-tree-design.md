@@ -1,6 +1,12 @@
 # snemu itest — the discovered snapshot tree
 
-**Status:** design, unbuilt.
+**Status:** increment 1 (zero-input collapse) **shipped**; increments 2–5 unbuilt.
+Behind `cargo xtask snemu-itest --share-snapshots` (off by default — the A/B
+baseline). On the full 111-scenario suite the collapse is verdict-identical to the
+fork-per-scenario path (the oracle), 99/111 scenarios collapse onto shared forward
+runs, and total guest instret drops **1479M → 275M (−81%)** (serial wall-clock
+25.2s → 19.9s). Pure core + tap in `xtask/src/itest/snapshot_tree.rs` +
+`harness.rs`; orchestration in `snemu_audit.rs`.
 **Prereq context:** [snemu progress], `xtask/src/itest/snemu_audit.rs` (the current
 boot-once/fork-per-scenario harness), the packing/right-sizing work in snemu post 08.
 
@@ -188,10 +194,28 @@ Both fall out of the same dirty-set, so build it once. (snemu already tracks a w
 
 ## increments (each behaviour-preserving, oracle-checked)
 
-1. **Zero-input collapse.** Run each workload's guest forward once to the deepest
-   instret any of its observe-only scenarios needs; every observer asserts against
-   that single stream. An interactive scenario forks off at its first injection.
-   Needs the input tap + dirty-set fork; no tree yet. Biggest chunk of redundant work.
+1. **Zero-input collapse.** ✅ **Shipped** (`--share-snapshots`). Each workload's
+   guest runs forward once to the deepest instret any observe-only scenario needed
+   last run (prior-instret depth; budget fallback); every observer replays a prefix
+   of that recorded `(instret, frame)` stream truncated to its own budget
+   ([`frames_within`]), so a positive *and* a negative-oracle verdict match the live
+   path exactly. Classification is the **branch key**: injections (tapped in
+   `View::send_input`) *and* a console-read flag (tapped in `wait_for_log`) — a
+   non-empty key or a console read runs live. Keys persist to
+   `.itest-runs/snemu-branch-keys.json`, stamped with the kernel fingerprint (a
+   kernel change discards them). First run discovers (nothing collapses); later runs
+   consume. Verified: 111/111 verdicts identical to sharing-off, −81% instret.
+   - **Console-read limitation + fix (follow-up).** Today a `wait_for_log` scenario
+     can't collapse because the shared stream carries only telemetry frames, not the
+     UART byte stream `wait_for_log` scans. The lift: **record the guest's UART
+     output alongside the frame stream in the shared forward run** (snemu already
+     exposes `uart_output()`), and give the collapsed replay `View` that recorded
+     UART so `wait_for_log` matches against it — same truncation discipline (the
+     scenario sees UART bytes emitted within its budget). That folds the
+     ~console-output watchers into the collapse too; only genuinely *interactive*
+     (input-injecting) scenarios would stay live. Deferred — worth it once the input
+     tree (increment 2) is in, since it's the same "record-once, replay-truncated"
+     shape applied to a second output channel.
 2. **Input-prefix tree + state-hash dedup.** Generalise to shared prefixes among
    interactive scenarios; verify shares by hash; persist + invalidate the tree.
 3. **Precedence-aware scheduler.** Wire the tree into the existing list scheduler as

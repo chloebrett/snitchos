@@ -137,6 +137,14 @@ enum Cmd {
         /// the A/B baseline to isolate the caching's wall-time effect.
         #[arg(long)]
         no_reg_cache: bool,
+        /// Enable the discovered-snapshot-tree collapse (off by default — the A/B
+        /// baseline). Observe-only scenarios (empty branch key, learned from a prior
+        /// run's persisted keys) of a workload share one forward run instead of each
+        /// re-executing the identical deterministic guest; each replays a prefix of
+        /// that shared stream truncated to its own budget, so verdicts are identical
+        /// to the fork-per-scenario path. See `docs/snemu-itest-snapshot-tree-design.md`.
+        #[arg(long)]
+        share_snapshots: bool,
     },
     /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
     /// run under snemu with exact per-PC counting and report the top kernel
@@ -748,13 +756,14 @@ fn main() -> ExitCode {
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
         Cmd::SnemuItest {
             steps, limit, only, jobs, no_idle_skip, order, opt, native_ops, block_jit, no_reg_cache,
+            share_snapshots,
         } => {
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
             itest::snemu_audit::run(
                 steps, limit, only.as_deref(), jobs, !no_idle_skip, order, opt, native_ops,
-                block_jit, !no_reg_cache,
+                block_jit, !no_reg_cache, share_snapshots,
             )
         }
         Cmd::SnemuProfile { workload, steps, top, release } => {

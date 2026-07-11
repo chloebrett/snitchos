@@ -26,8 +26,93 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use super::harness::View;
+use super::snapshot_tree::{self, BranchKeyTable};
 use super::{SCENARIOS, scenario_view_fn};
 use crate::snemu_diff;
+
+/// Guest instructions stepped between frame-decode checks while recording a shared
+/// forward run — mirrors `harness::LIVE_STEP_BATCH` so a recorded frame's instret
+/// tag lands on the same batch boundary a live scenario's `wait_for` would observe.
+/// Alignment is what makes [`snapshot_tree::frames_within`] truncation reproduce the
+/// live frame set exactly.
+const SHARED_STEP_BATCH: u64 = 4096;
+
+/// Run one workload's post-boot snapshot forward to `depth` guest instructions,
+/// recording every telemetry frame tagged with the instret at which it became
+/// decodable. This is the **shared forward run** the zero-input collapse pays once
+/// per workload; each observe-only scenario then replays a budget-truncated prefix
+/// of it instead of re-executing the identical deterministic guest. Stops early if
+/// the guest faults (draining any last decodable frames first).
+fn record_shared_stream(
+    mut machine: snemu::machine::Machine,
+    depth: u64,
+) -> Vec<(u64, protocol::stream::OwnedFrame)> {
+    use protocol::stream::{OwnedFrame, try_decode_frame};
+    let mut consumed = 0usize;
+    let mut out = Vec::new();
+    loop {
+        // Drain every frame already in the TX buffer, tagging each with the current
+        // instret (the batch boundary at which it was decoded — see SHARED_STEP_BATCH).
+        loop {
+            let decoded = {
+                let tx = machine.virtio_tx_output();
+                try_decode_frame(&tx[consumed..])
+                    .ok()
+                    .map(|(frame, n)| (OwnedFrame::from_borrowed(&frame), n))
+            };
+            match decoded {
+                Some((frame, n)) => {
+                    consumed += n;
+                    out.push((machine.instret(), frame));
+                }
+                None => break,
+            }
+        }
+        if machine.instret() >= depth {
+            return out;
+        }
+        let target = (machine.instret() + SHARED_STEP_BATCH).min(depth);
+        while machine.instret() < target {
+            if machine.step().is_err() {
+                // Faulted: one final decode pass for any frames the trap emitted,
+                // then stop — no further frames will come.
+                loop {
+                    let decoded = {
+                        let tx = machine.virtio_tx_output();
+                        try_decode_frame(&tx[consumed..])
+                            .ok()
+                            .map(|(frame, n)| (OwnedFrame::from_borrowed(&frame), n))
+                    };
+                    match decoded {
+                        Some((frame, n)) => {
+                            consumed += n;
+                            out.push((machine.instret(), frame));
+                        }
+                        None => return out,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Replay a collapsed (observe-only) scenario against the shared stream, truncated
+/// to its own budget so its verdict — positive *or* negative-oracle — matches a live
+/// run exactly. Returns the same `(Outcome, instret, ram)` shape as [`run_scenario`];
+/// a collapsed scenario does no stepping, so its guest cost is zero (the work was
+/// paid once in the shared run).
+fn run_collapsed(
+    stream: &[(u64, protocol::stream::OwnedFrame)],
+    scenario: &itest_harness::Scenario,
+    max_steps: u64,
+) -> Outcome {
+    let frames = snapshot_tree::frames_within(stream, budget_for(scenario.name, max_steps));
+    let mut view = View::replay(frames);
+    match scenario_view_fn(scenario.name)(&mut view) {
+        Ok(()) => Outcome::Pass,
+        Err(why) => Outcome::Fail { why, console: String::new() },
+    }
+}
 
 /// One scenario's audit row: its outcome plus the deterministic guest-instruction
 /// cost of reaching it. `instret` (guest instructions retired) is what the
@@ -45,6 +130,15 @@ struct Row {
     ram_used_bytes: u64,
     ram_alloc_mb: u32,
     workload: Option<&'static str>,
+    /// This scenario's branch key, observed if it ran live (its console
+    /// injections), or the prior key carried through if it ran collapsed. Persisted
+    /// so a later run can classify it for the zero-input collapse.
+    branch_key: snapshot_tree::BranchKey,
+    /// Ran against a shared forward run (`--share-snapshots`) rather than stepping
+    /// its own machine. A collapsed row has zero measured guest cost, so it's kept
+    /// out of the durations cache (its prior instret — the shared-run depth input —
+    /// must not be overwritten with 0).
+    collapsed: bool,
 }
 
 /// One scenario's outcome under the live snemu run.
@@ -143,6 +237,7 @@ pub fn run(
     native_ops: bool,
     block_jit: bool,
     reg_cache: bool,
+    share_snapshots: bool,
 ) -> ExitCode {
     let (kernel, dtb) = match snemu_diff::prepare_profiled(true, opt) {
         Ok(v) => v,
@@ -211,9 +306,9 @@ pub fn run(
     // instead of stacking on one. LPT order (heaviest first, by the previous run's
     // wall-time or instret per `--order`) keeps a slow scenario off the tail;
     // unknowns sort first. `--order selection` keeps selection order (the A/B baseline).
+    let history = load_durations();
     let mut sched: Vec<(usize, &itest_harness::Scenario)> = work.iter().copied().enumerate().collect();
     if order != PackOrder::Selection {
-        let history = load_durations();
         // Order key: prior wall-microseconds (the true target) or prior instret
         // (deterministic). An unknown scenario sorts heaviest so a first-seen slow
         // one doesn't land on the tail.
@@ -224,33 +319,105 @@ pub fn run(
         });
     }
 
+    // Zero-input collapse (`--share-snapshots`, off by default — the A/B baseline).
+    // A workload's observe-only scenarios (empty branch key, learned from the prior
+    // run's persisted keys) share ONE forward run instead of each re-executing the
+    // identical deterministic guest. The first run has no keys → nothing collapses
+    // (that pass IS the discovery), and it records keys for next time. A collapsed
+    // scenario needs no forked machine — it replays a budget-truncated prefix of its
+    // workload's shared stream, verdict-identical to the live path.
+    let prior_keys = if share_snapshots { load_prior_keys(&kernel) } else { BranchKeyTable::new() };
+    let collapsible = |name: &str, workload: Option<&str>| {
+        share_snapshots
+            && matches!(snapshots.get(&workload), Some(Ok(_)))
+            && prior_keys.get(name).is_some_and(snapshot_tree::BranchKey::is_observe_only)
+    };
+
+    // Depth each collapse workload's shared run must reach: the deepest instret any
+    // of its observe-only scenarios needed last run (fallback: its budget cap). Run
+    // that far once and every observer's frame is present; each then truncates to
+    // its own budget on replay.
+    let mut depths: std::collections::HashMap<Option<&str>, u64> = std::collections::HashMap::new();
+    for (_, s) in &sched {
+        if collapsible(s.name, s.workload) {
+            let need = history.get(s.name).map_or_else(|| budget_for(s.name, max_steps), |c| c.0);
+            let slot = depths.entry(s.workload).or_insert(0);
+            *slot = (*slot).max(need);
+        }
+    }
+    let collapse_workloads: Vec<(Option<&str>, u64)> = depths.into_iter().collect();
+    let shared_streams: std::collections::HashMap<Option<&str>, Vec<(u64, protocol::stream::OwnedFrame)>> =
+        parallel_map(&collapse_workloads, jobs, |worker, _, &(workload, depth)| {
+            let start_s = started.elapsed().as_secs_f64();
+            let t0 = Instant::now();
+            let stream = match snapshots.get(&workload) {
+                Some(Ok(snapshot)) => record_shared_stream(snapshot.clone(), depth),
+                _ => Vec::new(),
+            };
+            worker_busy[worker].fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            let pass_instret = stream.last().map_or(0, |(i, _)| *i);
+            segments.lock().expect("segments mutex").push(Segment {
+                kind: "shared",
+                name: workload.unwrap_or("(default)").to_owned(),
+                workload: workload.map(str::to_owned),
+                worker,
+                start_s,
+                end_s: started.elapsed().as_secs_f64(),
+                instret: pass_instret,
+                pass: true,
+            });
+            (workload, stream)
+        })
+        .into_iter()
+        .collect();
+
+    // Phase 2 — scenario-level fan-out. This is what fixes the packing: because the
+    // snapshot is shared, each *scenario* (not each workload group) is an
+    // independent unit of work, so a workload's scenarios spread across all workers
+    // instead of stacking on one. LPT order (heaviest first, by the previous run's
+    // wall-time or instret per `--order`) keeps a slow scenario off the tail.
     let done = AtomicUsize::new(0);
     let scenario_results = parallel_map(&sched, jobs, |worker, _, &(index, s)| {
-        // Fork the shared post-boot snapshot; fall back to a fresh boot for an
-        // early-crash workload that never reached the checkpoint.
-        let machine = match snapshots.get(&s.workload) {
-            Some(Ok(snapshot)) => Some(snapshot.clone()),
-            _ => match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
-                Ok(mut m) => {
-                    m.set_idle_skip(idle_skip);
-                    m.set_native_ops(native_ops);
-                    m.set_block_jit(block_jit);
-                    m.set_register_cache(reg_cache);
-                    Some(m)
-                }
-                Err(_) => None,
-            },
-        };
         let scenario_start = Instant::now();
         let start_s = started.elapsed().as_secs_f64();
-        let (outcome, instret, ram_used_bytes) = match machine {
-            Some(m) => run_scenario(m, s, max_steps),
-            None => (
-                Outcome::Fail { why: "snemu load failed".to_owned(), console: String::new() },
-                0,
-                0,
-            ),
-        };
+        let (outcome, instret, ram_used_bytes, branch_key, collapsed) =
+            if let (true, Some(stream)) =
+                (collapsible(s.name, s.workload), shared_streams.get(&s.workload))
+            {
+                // Collapsed: replay the shared stream, no forked machine, no stepping.
+                let outcome = run_collapsed(stream, s, max_steps);
+                let key = prior_keys.get(s.name).cloned().unwrap_or_default();
+                (outcome, 0, 0, key, true)
+            } else {
+                // Live: fork the post-boot snapshot; fall back to a fresh boot for an
+                // early-crash workload that never reached the checkpoint.
+                let machine = match snapshots.get(&s.workload) {
+                    Some(Ok(snapshot)) => Some(snapshot.clone()),
+                    _ => match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
+                        Ok(mut m) => {
+                            m.set_idle_skip(idle_skip);
+                            m.set_native_ops(native_ops);
+                            m.set_block_jit(block_jit);
+                            m.set_register_cache(reg_cache);
+                            Some(m)
+                        }
+                        Err(_) => None,
+                    },
+                };
+                match machine {
+                    Some(m) => {
+                        let (outcome, instret, ram, key) = run_scenario(m, s, max_steps);
+                        (outcome, instret, ram, key, false)
+                    }
+                    None => (
+                        Outcome::Fail { why: "snemu load failed".to_owned(), console: String::new() },
+                        0,
+                        0,
+                        snapshot_tree::BranchKey::default(),
+                        false,
+                    ),
+                }
+            };
         worker_busy[worker].fetch_add(scenario_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let wall = scenario_start.elapsed().as_secs_f64();
         let pass = matches!(outcome, Outcome::Pass);
@@ -266,12 +433,13 @@ pub fn run(
         });
         let n = done.fetch_add(1, Ordering::SeqCst) + 1;
         eprintln!(
-            "snemu-itest: [{n:>3}/{cap}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s  {:>4}/{}MiB",
+            "snemu-itest: [{n:>3}/{cap}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s  {:>4}/{}MiB{}",
             s.name,
             if pass { "ok" } else { "FAIL" },
             instret / 1_000_000,
             ram_used_bytes / (1024 * 1024),
             snemu_diff::ram_mb_for(s.workload),
+            if collapsed { "  (shared)" } else { "" },
         );
         let ram_alloc_mb = snemu_diff::ram_mb_for(s.workload);
         (index, Row {
@@ -282,6 +450,8 @@ pub fn run(
             ram_used_bytes,
             ram_alloc_mb,
             workload: s.workload,
+            branch_key,
+            collapsed,
         })
     });
 
@@ -297,6 +467,19 @@ pub fn run(
     // time (a full run overwrites; a filtered `--only` run merges, preserving the
     // durations it didn't touch).
     save_durations(&results);
+
+    // Persist the branch keys observed this run so a later `--share-snapshots` run
+    // can classify each scenario. Only when sharing is on, so the A/B baseline
+    // (sharing off) leaves the cache — and its own verdict — untouched. The keys are
+    // stamped with the kernel fingerprint so a kernel change discards them (a stale
+    // key could mis-classify or under-run a shared stream).
+    if share_snapshots {
+        let mut table = prior_keys.clone();
+        for r in results.iter().filter(|r| !r.collapsed) {
+            table.insert(r.name.to_owned(), r.branch_key.clone());
+        }
+        save_prior_keys(&kernel, &table);
+    }
 
     // Counterfactual: re-pack this run's measured per-item wall-times across the
     // workers with ideal (LPT) knowledge, to show how much of the makespan is
@@ -514,6 +697,60 @@ fn print_utilization(
 /// root, gitignored; a plain `<instret> <name>` line per scenario.
 const DURATIONS_PATH: &str = ".snemu-itest-durations";
 
+/// Where discovered branch keys are cached between runs — a JSON sibling of the
+/// packing report. Stamped with the kernel fingerprint (below); a mismatch discards
+/// the whole cache, since a kernel change can move any frame's emit instret and thus
+/// invalidate every recorded key + depth.
+const BRANCH_KEYS_PATH: &str = ".itest-runs/snemu-branch-keys.json";
+
+/// A cheap, run-to-run-stable fingerprint of the kernel image, so the branch-key
+/// cache invalidates when the kernel changes. `DefaultHasher` has fixed keys, so it
+/// is deterministic across processes on one toolchain — enough for cache keying.
+fn kernel_fingerprint(kernel: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    kernel.hash(&mut h);
+    h.finish()
+}
+
+/// Load the prior run's branch keys, or an empty table if absent, corrupt, or
+/// stamped with a different kernel fingerprint (invalidated). An empty table means
+/// nothing collapses this run — the pass rediscovers every key.
+fn load_prior_keys(kernel: &[u8]) -> BranchKeyTable {
+    let Ok(text) = std::fs::read_to_string(BRANCH_KEYS_PATH) else {
+        return BranchKeyTable::new();
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return BranchKeyTable::new();
+    };
+    if doc.get("kernel_hash").and_then(serde_json::Value::as_u64) != Some(kernel_fingerprint(kernel)) {
+        return BranchKeyTable::new();
+    }
+    doc.get("keys")
+        .map(std::string::ToString::to_string)
+        .and_then(|k| snapshot_tree::parse_branch_keys(&k))
+        .unwrap_or_default()
+}
+
+/// Persist the branch-key table, stamped with the current kernel fingerprint.
+/// Best-effort: a write failure just means next run rediscovers, never a hard error.
+fn save_prior_keys(kernel: &[u8], table: &BranchKeyTable) {
+    let keys: serde_json::Value =
+        serde_json::from_str(&snapshot_tree::serialize_branch_keys(table)).unwrap_or_default();
+    let doc = serde_json::json!({ "kernel_hash": kernel_fingerprint(kernel), "keys": keys });
+    if let Some(dir) = std::path::Path::new(BRANCH_KEYS_PATH).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match serde_json::to_string_pretty(&doc) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(BRANCH_KEYS_PATH, json) {
+                eprintln!("snemu-itest: could not write {BRANCH_KEYS_PATH}: {e}");
+            }
+        }
+        Err(e) => eprintln!("snemu-itest: could not serialize branch keys: {e}"),
+    }
+}
+
 /// Cached per-scenario packing cost: `(instret, wall_micros)`. Instret is the
 /// deterministic ordering key; wall-microseconds is the default (true-optimum) key.
 type PackCost = (u64, u64);
@@ -549,7 +786,11 @@ fn load_durations() -> HashMap<String, PackCost> {
 /// partial history, never a hard error.
 fn save_durations(results: &[Row]) {
     let mut costs = load_durations();
-    for r in results {
+    // A collapsed scenario did no stepping (instret 0) — its real cost lives in the
+    // shared run. Skip it so its *prior* recorded instret survives; that value is the
+    // shared-run depth input, and overwriting it with 0 would collapse the depth to
+    // nothing next run.
+    for r in results.iter().filter(|r| !r.collapsed) {
         // Record every scenario, including the 0-cost ones whose assertion is
         // already satisfied from the forked checkpoint's frame buffer — they're
         // legitimately cheap, and omitting them makes LPT mistake them for
@@ -604,12 +845,14 @@ fn boot_snapshot(
 }
 
 /// Drive `scenario` against `machine` (a fresh or forked live machine), returning
-/// its outcome and the guest-instruction cost of reaching it.
+/// its outcome, the guest-instruction cost of reaching it, its peak RAM, and the
+/// branch key it produced (the console injections it performed — empty ⇒
+/// observe-only, the collapse eligibility a later run reads).
 fn run_scenario(
     machine: snemu::machine::Machine,
     scenario: &itest_harness::Scenario,
     max_steps: u64,
-) -> (Outcome, u64, u64) {
+) -> (Outcome, u64, u64, snapshot_tree::BranchKey) {
     let mut view = View::live(machine, budget_for(scenario.name, max_steps));
     let outcome = match scenario_view_fn(scenario.name)(&mut view) {
         Ok(()) => Outcome::Pass,
@@ -618,7 +861,12 @@ fn run_scenario(
             console: console_tail(view.console_output().unwrap_or_default().as_str()),
         },
     };
-    (outcome, view.guest_instret().unwrap_or(0), view.ram_high_water().unwrap_or(0))
+    (
+        outcome,
+        view.guest_instret().unwrap_or(0),
+        view.ram_high_water().unwrap_or(0),
+        view.branch_key().clone(),
+    )
 }
 
 /// Per-scenario step-budget override. Most scenarios reach their assertion well
