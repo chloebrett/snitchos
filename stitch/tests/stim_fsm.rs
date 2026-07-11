@@ -380,6 +380,50 @@ fn motion_target_carries_position_and_wiseness() {
 }
 
 #[test]
+fn d_plus_a_charwise_motion_deletes_the_intra_line_range() {
+    // Drive operator-pending directly: `pending.op = OpDelete`, then a charwise motion.
+    // d$ deletes from the cursor through end-of-line (inclusive) — same result as D.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete)), "$").state"#),
+        line_and_col("a", 1)
+    );
+    // dl deletes the char under the cursor (exclusive, forward) — like x.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete)), "l").state"#),
+        line_and_col("acd", 1)
+    );
+    // dh deletes the char before the cursor (backward) — like X, cursor moves back.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete)), "h").state"#),
+        line_and_col("bcd", 0)
+    );
+    // d0 deletes from line-start up to the cursor (exclusive of the char under it).
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("abcd"), col: 2, pending: Pending(op: OpDelete)), "0").state"#),
+        line_and_col("cd", 0)
+    );
+    // The operator clears after applying, and a real delete is an observable Edit.
+    assert_eq!(
+        pending_op_of(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete)), "l").state"#),
+        s("None")
+    );
+    assert_eq!(
+        step_effect(r#"Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete))"#, "l"),
+        s("Edit")
+    );
+    // dl at end of line deletes nothing (range past the last char) → Redraw, and still
+    // clears the pending operator.
+    assert_eq!(
+        step_effect(r#"Editor(..initialState("ab"), col: 2, pending: Pending(op: OpDelete))"#, "l"),
+        s("Redraw")
+    );
+    assert_eq!(
+        pending_op_of(r#"step(Editor(..initialState("ab"), col: 2, pending: Pending(op: OpDelete)), "l").state"#),
+        s("None")
+    );
+}
+
+#[test]
 fn zero_and_dollar_jump_to_the_line_ends() {
     // "hello" with the cursor mid-line: `0` → column 0, `$` → the last character
     // (col 4). `$` lands *on* the last char (len−1), unlike `A` which appends at len.

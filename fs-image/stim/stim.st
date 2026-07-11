@@ -49,9 +49,10 @@ prod Pending(op: Op)
 // provenance / label / caps later (see docs/clipboard-design.md).
 prod Register(text: Str, wise: Wise)
 
-// A motion's result: a target cursor position plus the wiseness that decides, under
-// an operator, whether the range is a span within a line or whole lines.
-prod Target(row: Int, col: Int, wise: Wise)
+// A motion's result: a target cursor position, the wiseness that decides (under an
+// operator) span-within-a-line vs whole-lines, and `inclusive` — whether an operator
+// range includes the target character. Only `$` is inclusive; `h l 0 ^` are exclusive.
+prod Target(row: Int, col: Int, wise: Wise, inclusive: Bool)
 
 // The whole editor state — immutable. Every transition returns a fresh `Editor`
 // via `..spread` update. `row`/`col` is a full cursor (0-based); unbound keys
@@ -115,13 +116,13 @@ clampRow(state, r) = r < 0 => 0 | (r > count(state.lines) - 1 => count(state.lin
 // motion definition — consumed both bare (`moveTo`, wiseness ignored) and as an
 // operator's range endpoint (Phase 2.3+). One `motionTarget` powers `l` and `dl`.
 motionTarget(state, key) = match {
-    key == "h" => Some(Target(row: state.row, col: state.col - 1, wise: Charwise))
-    key == "l" => Some(Target(row: state.row, col: state.col + 1, wise: Charwise))
-    key == "0" => Some(Target(row: state.row, col: 0, wise: Charwise))
-    key == "$" => Some(Target(row: state.row, col: lineEndCol(state), wise: Charwise))
-    key == "^" => Some(Target(row: state.row, col: firstNonBlankCol(state), wise: Charwise))
-    key == "j" => Some(Target(row: clampRow(state, state.row + 1), col: state.col, wise: Linewise))
-    key == "k" => Some(Target(row: clampRow(state, state.row - 1), col: state.col, wise: Linewise))
+    key == "h" => Some(Target(row: state.row, col: state.col - 1, wise: Charwise, inclusive: false))
+    key == "l" => Some(Target(row: state.row, col: state.col + 1, wise: Charwise, inclusive: false))
+    key == "0" => Some(Target(row: state.row, col: 0, wise: Charwise, inclusive: false))
+    key == "$" => Some(Target(row: state.row, col: lineEndCol(state), wise: Charwise, inclusive: true))
+    key == "^" => Some(Target(row: state.row, col: firstNonBlankCol(state), wise: Charwise, inclusive: false))
+    key == "j" => Some(Target(row: clampRow(state, state.row + 1), col: state.col, wise: Linewise, inclusive: false))
+    key == "k" => Some(Target(row: clampRow(state, state.row - 1), col: state.col, wise: Linewise, inclusive: false))
     _ => None
 }
 
@@ -135,7 +136,7 @@ moveTo(state, target) = {
 
 // Apply a motion key as a bare cursor move (ignoring wiseness); a no-op for a
 // non-motion key, whose target defaults to the current cursor.
-moveByKey(state, key) = moveTo(state, unwrapOr(motionTarget(state, key), Target(row: state.row, col: state.col, wise: Charwise)))
+moveByKey(state, key) = moveTo(state, unwrapOr(motionTarget(state, key), Target(row: state.row, col: state.col, wise: Charwise, inclusive: false)))
 
 // `k` / `j` — named wrappers over the shared motion machinery.
 moveUp(state) = moveByKey(state, "k")
@@ -359,8 +360,59 @@ enterCommand(state) = Editor(..state, mode: Command)
 // Enter operator-pending: record the operator, stay in Normal mode, await a motion.
 enterOp(state, op) = Editor(..state, pending: Pending(op: op))
 
-// Normal mode: navigation, small edits, mode entry. Unbound keys are Noops.
-stepNormal(state, key) = match {
+// Leave operator-pending: reset the accumulator to no pending operator.
+clearPending(state) = Editor(..state, pending: Pending(op: OpNone))
+
+// Delete a charwise (intra-line) column range `[lo, hi)` on `row`, clamped to the
+// line, returning the cursor to the range start.
+deleteCharRange(state, row, lo, hi) = {
+    let line = lineAt(state, row)
+    let len = Str.length(line)
+    let a = lo < 0 => 0 | (lo > len => len | lo)
+    let b = hi < 0 => 0 | (hi > len => len | hi)
+    let moved = Editor(..state, lines: List.set(state.lines, row, Str.slice(line, 0, a) + Str.slice(line, b, len)), col: a)
+    Editor(..moved, col: clampedCol(moved, row))
+}
+
+// Delete the charwise range between the cursor and a motion `target` on the same
+// line. Backward motion → `[target, cursor)`; forward → `[cursor, target)`, extended
+// by one for an inclusive motion (`$`).
+deleteCharwise(state, target) =
+    target.col < state.col => deleteCharRange(state, state.row, target.col, state.col)
+    | deleteCharRange(state, state.row, state.col, (target.inclusive => target.col + 1 | target.col))
+
+// The telemetry span name for an operator.
+opSpanName(op) = match {
+    op == OpDelete => "stim.delete"
+    op == OpChange => "stim.change"
+    _ => "stim.yank"
+}
+
+// Apply the pending operator over the range from the cursor to a motion `target`.
+// P2.3: delete + charwise only. `c`/`y` (2.6) and linewise (2.4/2.5) extend this.
+applyMotionOp(state, target) =
+    state.pending.op == OpDelete => deleteCharwise(state, target)
+    | state
+
+// Normal mode dispatch: at the top level (no pending operator) route to the flat
+// table; while operator-pending (`pending.op != OpNone`) route to the operator
+// branch. `step` still dispatches on `mode` — this branch lives inside Normal.
+stepNormal(state, key) =
+    state.pending.op == OpNone => stepTopLevel(state, key)
+    | stepOperatorPending(state, key)
+
+// Operator-pending: a motion applies the pending operator over `[cursor, target]`
+// and clears the accumulator. Non-motion keys cancel (refined in 2.4/2.8). The
+// change is measured against a pending-cleared baseline, so a no-op range (a motion
+// that selects nothing) spans nothing even though clearing pending changed the state.
+stepOperatorPending(state, key) = match motionTarget(state, key) {
+    Some(target) => editIfChanged(clearPending(state), clearPending(applyMotionOp(state, target)), opSpanName(state.pending.op))
+    None => redraw(clearPending(state))
+}
+
+// The top-level Normal table: navigation, small edits, mode/operator entry. Unbound
+// keys are Noops.
+stepTopLevel(state, key) = match {
     key == "j" => redraw(moveByKey(state, key))
     key == "k" => redraw(moveByKey(state, key))
     key == "h" => redraw(moveByKey(state, key))
