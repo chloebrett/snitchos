@@ -14,15 +14,66 @@
 //!
 //! See `plans/snemu-milestone-6-block-jit.md`.
 
-// The IR + executor are consumed by block discovery (increment 2) and the
-// `PC → block` dispatch in `Hart::step` (increment 3). Until the interpreter calls
-// `Block::exec`, they are exercised only by this module's tests. Removed the moment
-// increment 3 wires them in.
-#![allow(dead_code, reason = "wired into Hart::step in M6 increment 3")]
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::bus::Bus;
 use crate::cpu::{Hart, StepError};
 use crate::decode::{Instr, funct3, funct7, opcode};
+
+/// How many times an entry PC is interpreted before it's compiled — so genuinely
+/// one-shot code never pays compilation, only hot blocks do.
+const HOT_THRESHOLD: u32 = 2;
+
+/// A per-hart `PC → compiled block` cache with hotness tiering — the block JIT's
+/// analogue of the decode cache. Blocks are `Arc`'d so a lookup hands back a cheap
+/// refcount clone: the executor needs `&mut Hart`, and the cache lives *inside* the
+/// hart, so we can't hold a borrow of it across `Block::exec`. Invalidation mirrors
+/// the decode cache and rides the guest's TLB contract — cleared on a `satp` write
+/// and `sfence.vma`. Clones as plain data for the snapshot; blocks are immutable, so
+/// the shared `Arc`s across a fork are harmless.
+#[derive(Clone, Default)]
+pub(crate) struct BlockCache {
+    blocks: HashMap<u64, Arc<Block>>,
+    hotness: HashMap<u64, u32>,
+    hits: u64,
+}
+
+impl BlockCache {
+    /// The compiled block at `pc` (a cheap `Arc` clone), or `None`. Bumps the hit
+    /// counter — the borrow of the cache ends when the clone is returned, freeing
+    /// `&mut Hart` for the executor.
+    pub(crate) fn get(&mut self, pc: u64) -> Option<Arc<Block>> {
+        let block = self.blocks.get(&pc)?.clone();
+        self.hits += 1;
+        Some(block)
+    }
+
+    /// Count a cold interpretation of entry `pc`; return `true` exactly on the visit
+    /// that crosses the hotness threshold (compile once). After a block is inserted,
+    /// `get` short-circuits, so the counter is never revisited.
+    pub(crate) fn record_hot(&mut self, pc: u64) -> bool {
+        let count = self.hotness.entry(pc).or_insert(0);
+        *count += 1;
+        *count == HOT_THRESHOLD
+    }
+
+    pub(crate) fn insert(&mut self, pc: u64, block: Arc<Block>) {
+        self.blocks.insert(pc, block);
+    }
+
+    /// Drop every compiled block and hotness count — the guest invalidated
+    /// translations, so cached (translated) blocks are stale.
+    pub(crate) fn flush(&mut self) {
+        self.blocks.clear();
+        self.hotness.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hits(&self) -> u64 {
+        self.hits
+    }
+}
 
 /// The result of trying to lower one guest instruction to IR.
 pub(crate) enum Compiled {
@@ -115,6 +166,12 @@ impl Block {
         self.ops.is_empty()
     }
 
+    /// Number of guest instructions in the block — one per op, so this is the
+    /// instret the block retires when executed.
+    pub(crate) fn len(&self) -> usize {
+        self.ops.len()
+    }
+
     /// Execute the block against `hart` (and `bus`, for the memory ops later
     /// increments add). Walks the reified ops in order; a `Branch` sets `pc` and
     /// ends the block.
@@ -165,7 +222,9 @@ impl Cond {
 
 #[cfg(test)]
 mod tests {
-    use super::{AluOp, Block, Compiled, Cond, Op, compile_op};
+    use std::sync::Arc;
+
+    use super::{AluOp, Block, BlockCache, Compiled, Cond, HOT_THRESHOLD, Op, compile_op};
     use crate::bus::Bus;
     use crate::cpu::Hart;
     use crate::mem::Memory;
@@ -244,5 +303,26 @@ mod tests {
         ));
         let lw = 0x0000_2083; // lw x1, 0(x0) — a memory op, a block boundary for now
         assert!(matches!(compile_op(lw, 4, 0x1000), Compiled::Unsupported));
+    }
+
+    #[test]
+    fn a_pc_compiles_only_once_it_is_hot() {
+        // The hotness gate: an entry PC is interpreted `HOT_THRESHOLD` times before
+        // `record_hot` says compile — genuinely one-shot code never compiles.
+        let mut cache = BlockCache::default();
+        for _ in 0..HOT_THRESHOLD - 1 {
+            assert!(!cache.record_hot(0x1000), "cold visits don't compile");
+        }
+        assert!(cache.record_hot(0x1000), "the threshold visit triggers a compile");
+    }
+
+    #[test]
+    fn get_returns_an_inserted_block_and_flush_drops_it() {
+        let mut cache = BlockCache::default();
+        assert!(cache.get(0x2000).is_none(), "cold lookup misses");
+        cache.insert(0x2000, Arc::new(Block::new(vec![], 0x2004)));
+        assert!(cache.get(0x2000).is_some(), "warm lookup hits");
+        cache.flush();
+        assert!(cache.get(0x2000).is_none(), "flush (satp/sfence) drops the block");
     }
 }

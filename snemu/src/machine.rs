@@ -206,6 +206,15 @@ impl Machine {
                         *p.entry(pc).or_insert(0) += 1;
                     }
                 }
+                // A block JIT block retired `n` instructions in one step — advance
+                // the shared clock by all of them (the single-tick case, generalised).
+                HartEffect::Block(n) => {
+                    self.time += n;
+                    retired = true;
+                    if let Some(p) = self.profile.as_mut() {
+                        *p.entry(pc).or_insert(0) += n;
+                    }
+                }
                 // A parked (wfi) hart retired nothing — don't tick the clock for it.
                 HartEffect::Idle => {}
             }
@@ -309,6 +318,12 @@ impl Machine {
                         self.time += 1;
                         if let Some(p) = self.profile.as_mut() {
                             *p.entry(pc).or_insert(0) += 1;
+                        }
+                    }
+                    HartEffect::Block(n) => {
+                        self.time += n;
+                        if let Some(p) = self.profile.as_mut() {
+                            *p.entry(pc).or_insert(0) += n;
                         }
                     }
                     HartEffect::Idle => {}
@@ -440,6 +455,14 @@ impl Machine {
     pub fn set_decode_cache(&mut self, on: bool) {
         for hart in &mut self.harts {
             hart.set_decode_cache(on);
+        }
+    }
+
+    /// Enable or disable the Tier-2 block JIT (M6) on **every** hart. Off by default
+    /// (the interpreter is the oracle); the on↔off A/B proves it changes only speed.
+    pub fn set_block_jit(&mut self, on: bool) {
+        for hart in &mut self.harts {
+            hart.set_block_jit(on);
         }
     }
 

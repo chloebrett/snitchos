@@ -1,9 +1,11 @@
 //! The hart: register file, program counter, instruction-count clock, and
 //! the fetch/decode/execute `step`. The single API everything tests through.
 
+use std::sync::Arc;
+
+use crate::block::{self, Block, BlockCache, Compiled};
 use crate::bus::Bus;
 use crate::csr::{Csr, CsrError, addr, sstatus};
-use crate::block::{self, Block, Compiled};
 use crate::decode::{Instr, amo_op, expand, funct3, funct7, is_compressed, opcode, priv12, system};
 use crate::decode_cache::{DecodeCache, Decoded};
 use crate::mem::{BusError, Memory, RAM_BASE};
@@ -115,6 +117,10 @@ pub(crate) enum HartEffect {
     /// uses this to fast-forward the shared clock to the earliest wake deadline
     /// once every hart is idle (or stopped).
     Idle,
+    /// A block JIT block retired `n` instructions this step (typically > 1). The
+    /// driver advances the shared clock by `n` — the analogue of `None`'s single
+    /// tick, generalised to a whole block.
+    Block(u64),
 }
 
 /// Sign-extend a 32-bit result to 64 bits (the `.w` instruction convention).
@@ -262,6 +268,9 @@ pub(crate) struct Hart {
     /// runs the pure interpreter (the correctness oracle). Toggled per hart via
     /// [`set_decode_cache`](Self::set_decode_cache).
     decode_cache: Option<DecodeCache>,
+    /// Tier-2 block JIT (M6) `PC → block` cache, or `None` when disabled (the
+    /// default oracle path). Toggled per hart via [`set_block_jit`](Self::set_block_jit).
+    block_cache: Option<BlockCache>,
     /// Whether `wfi` parks the hart (Idle) so the driver can fast-forward the
     /// clock over idle time, vs. acting as a bare nop that advances. On by
     /// default; toggled per hart via [`set_idle_skip`](Self::set_idle_skip) so a
@@ -307,7 +316,9 @@ impl Cpu {
                     self.hart.instret = self.hart.instret.max(deadline);
                 }
             }
-            HartEffect::None => {}
+            // A block already advanced the hart's own instret; the wrapper's clock
+            // reads it directly, so there's nothing extra to do.
+            HartEffect::None | HartEffect::Block(_) => {}
         }
         Ok(())
     }
@@ -362,6 +373,11 @@ impl Cpu {
         self.hart.set_decode_cache(on);
     }
 
+    /// Enable/disable the Tier-2 block JIT on the lone hart.
+    pub fn set_block_jit(&mut self, on: bool) {
+        self.hart.set_block_jit(on);
+    }
+
     /// Enable or disable `wfi` idle-skip (on by default). Off restores the bare
     /// nop-`wfi` behaviour — the baseline for proving idle-skip changes only speed.
     pub fn set_idle_skip(&mut self, on: bool) {
@@ -394,6 +410,7 @@ impl Hart {
             state: HartState::Running,
             pending_sbi: None,
             decode_cache: None,
+            block_cache: None,
             idle_skip: true,
             timer_fires: 0,
         }
@@ -410,6 +427,52 @@ impl Hart {
     /// changes nothing but speed.
     pub(crate) fn set_decode_cache(&mut self, on: bool) {
         self.decode_cache = on.then(DecodeCache::default);
+    }
+
+    /// Enable or disable this hart's Tier-2 block JIT (M6). Like the decode cache,
+    /// it's a pure speedup proven by the on↔off A/B (`set_block_jit(false)` is the
+    /// interpreter oracle). Starts from a cold cache; disabling drops it.
+    pub(crate) fn set_block_jit(&mut self, on: bool) {
+        self.block_cache = on.then(BlockCache::default);
+    }
+
+    /// Block JIT hits so far — used by tests to prove the fast path engaged.
+    #[cfg(test)]
+    pub(crate) fn block_jit_hits(&self) -> u64 {
+        self.block_cache.as_ref().map_or(0, BlockCache::hits)
+    }
+
+    /// Block JIT fast path: if a compiled hot block starts at the current PC, run it
+    /// and return the instructions it retired. Otherwise count the PC toward
+    /// hotness, compile it once hot, and — for a non-empty block — run it. Returns
+    /// `None` when there's no block to run (still cold, or the PC starts with an
+    /// instruction the compiler can't lower), so the caller interprets one
+    /// instruction. Interrupts were checked by `step` before this, so a block runs
+    /// interrupt-free (the per-block hoist; a timer is at most one block late).
+    fn try_run_block(&mut self, bus: &mut Bus) -> Result<Option<u64>, StepError> {
+        let pc = self.pc;
+        // Already compiled? A cheap `Arc` clone releases the cache borrow, freeing
+        // `&mut self` for the executor.
+        if let Some(block) = self.block_cache.as_mut().and_then(|c| c.get(pc)) {
+            if block.is_empty() {
+                return Ok(None); // "nothing compilable starts here" marker → interpret
+            }
+            let n = block.len() as u64;
+            block.exec(self, bus)?;
+            return Ok(Some(n));
+        }
+        // Cold: count it; compile only once it crosses the hotness threshold.
+        if !self.block_cache.as_mut().expect("block jit is on").record_hot(pc) {
+            return Ok(None);
+        }
+        let block = Arc::new(self.compile_block(bus));
+        self.block_cache.as_mut().expect("block jit is on").insert(pc, Arc::clone(&block));
+        if block.is_empty() {
+            return Ok(None);
+        }
+        let n = block.len() as u64;
+        block.exec(self, bus)?;
+        Ok(Some(n))
     }
 
     /// Enable or disable `wfi` idle-skip. With it off, `wfi` is a bare
@@ -597,7 +660,6 @@ impl Hart {
     /// cap. Executing the returned block is byte-identical to interpreting the same
     /// instructions (the oracle property, proven by the on↔off A/B). The cap bounds
     /// how late a timer can be delivered (at most one block).
-    #[allow(dead_code, reason = "wired into Hart::step in M6 increment 3")]
     pub(crate) fn compile_block(&self, bus: &Bus) -> Block {
         const MAX_OPS: usize = 64;
         let mut ops = Vec::new();
@@ -624,7 +686,6 @@ impl Hart {
     /// block compiler walks a block this way. `None` on a fetch fault or an illegal
     /// compressed encoding: the compiler ends the block there and the interpreter
     /// re-fetches and traps correctly at run time. Side-effect-free (`&self`).
-    #[allow(dead_code, reason = "used by compile_block, wired into Hart::step in M6 increment 3")]
     fn fetch_for_compile(&self, pc: u64, bus: &Bus) -> Option<Decoded> {
         let satp = self.csr.read(addr::SATP).ok()?;
         let user = self.privilege == Privilege::User;
@@ -658,6 +719,16 @@ impl Hart {
             }
             self.take_trap(cause, 0);
             return Ok(HartEffect::None);
+        }
+        // Block JIT (M6): if a compiled hot block starts here, run it in one shot —
+        // amortising fetch/decode/dispatch and the per-instruction interrupt probe
+        // over the whole block (interrupts were just checked above). Falls through to
+        // per-instruction interpretation when there's no block to run.
+        if self.block_cache.is_some()
+            && let Some(n) = self.try_run_block(bus)?
+        {
+            self.instret += n;
+            return Ok(HartEffect::Block(n));
         }
         // Fast path: a cache hit skips the whole fetch pipeline (translate, byte
         // read, compressed expand) and goes straight to dispatch. Only the
@@ -1042,8 +1113,13 @@ impl Hart {
             // Writing `satp` switches the address space, so every cached
             // (translated) instruction is now stale. This is the coherence hook
             // that lets the fast path skip re-reading satp per instruction.
-            if csr == addr::SATP && let Some(cache) = self.decode_cache.as_mut() {
-                cache.flush();
+            if csr == addr::SATP {
+                if let Some(cache) = self.decode_cache.as_mut() {
+                    cache.flush();
+                }
+                if let Some(cache) = self.block_cache.as_mut() {
+                    cache.flush();
+                }
             }
         }
         self.set_reg(instr.rd(), old);
@@ -1059,6 +1135,9 @@ impl Hart {
             // invalidation must drop it (this is the coherence hook that lets the
             // fast path skip re-translation safely).
             if let Some(cache) = self.decode_cache.as_mut() {
+                cache.flush();
+            }
+            if let Some(cache) = self.block_cache.as_mut() {
                 cache.flush();
             }
             self.advance();
@@ -1662,6 +1741,48 @@ mod tests {
         assert_eq!(jit.hart.x, interp.hart.x, "all registers match the interpreter");
         assert_eq!(jit.hart.pc(), interp.hart.pc(), "pc matches the interpreter");
         assert_eq!(jit.hart.pc(), RAM_BASE + 0xc + 8, "the bne was taken to pc+8");
+    }
+
+    #[test]
+    fn the_block_jit_changes_nothing_but_speed() {
+        // A backward-branch loop forms a hot block that re-executes. Running to the
+        // loop's exit (a fixed guest state, not a fixed step count — a JIT step
+        // retires a whole block) with the JIT off and on must yield byte-identical
+        // architectural state: instret, pc, every register. The oracle property.
+        let program = &[
+            0x0010_8093, // addi x1, x1, 1
+            0xfe20_9ee3, // bne  x1, x2, -4   (loop back to the addi while x1 != x2)
+        ];
+        let exit_pc = RAM_BASE + 8; // fall-through past the branch when x1 == x2
+        let run = |jit: bool| {
+            let mut cpu = cpu_with(program);
+            cpu.set_reg(2, 10); // loop ten times
+            cpu.set_block_jit(jit);
+            for _ in 0..1000 {
+                if cpu.pc() == exit_pc {
+                    break;
+                }
+                cpu.step().unwrap();
+            }
+            (cpu.instret(), cpu.pc(), cpu.reg(1), cpu.reg(2))
+        };
+        let off = run(false);
+        let on = run(true);
+        assert_eq!(on, off, "block JIT ON must equal the interpreter OFF");
+        assert_eq!(on.1, exit_pc, "the loop actually exited");
+        assert_eq!(on.2, 10, "x1 counted up to x2");
+
+        // ...and the fast path engaged — the hot block re-executed from the cache.
+        let mut cpu = cpu_with(program);
+        cpu.set_reg(2, 10);
+        cpu.set_block_jit(true);
+        for _ in 0..1000 {
+            if cpu.pc() == exit_pc {
+                break;
+            }
+            cpu.step().unwrap();
+        }
+        assert!(cpu.hart.block_jit_hits() > 0, "the loop's block should hit the cache");
     }
 
     #[test]
