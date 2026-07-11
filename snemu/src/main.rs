@@ -22,7 +22,7 @@ const HART_COUNT: usize = 2;
 /// `qemu-system-riscv64 -machine virt,dumpdtb=snemu/virt.dtb -smp 2 -m 128M`.
 const DTB: &[u8] = include_bytes!("../virt.dtb");
 
-/// Run a SnitchOS kernel ELF under the snemu RV64GC emulator.
+/// Run a `SnitchOS` kernel ELF under the snemu RV64GC emulator.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -106,7 +106,7 @@ fn main() -> ExitCode {
     let instret = machine.instret();
     eprintln!(
         "snemu: {instret} instret, {fires} timer fires ({} instret/fire)",
-        if fires == 0 { 0 } else { instret / fires },
+        instret.checked_div(fires).unwrap_or(0),
     );
 
     if let Some((invocations, real, charged)) = machine.memop_probe_report() {
