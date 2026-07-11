@@ -8,8 +8,8 @@
 use crate::prelude::*;
 
 use crate::ast::{
-    Arg, BinOp, Expr, ExprKind, Field, Item, MatchArm, Method, MethodModifier, Param, Pattern, Stmt,
-    StrSegment, Type, UnOp, Variant,
+    Arg, BinOp, Effect, Expr, ExprKind, Field, Item, MatchArm, Method, MethodModifier, Param,
+    Pattern, Stmt, StrSegment, Type, UnOp, Variant,
 };
 use crate::lexer::{LexError, Span, StrPart, Token, TokenKind, lex};
 
@@ -850,14 +850,18 @@ impl Parser {
 
     /// An optional `uses Cap1, Cap2, …` effects clause, after the return type
     /// and before the body. Empty when absent. Each capability is a bare name.
-    fn parse_uses(&mut self) -> Result<Vec<String>, ParseError> {
+    fn parse_uses(&mut self) -> Result<Vec<Effect>, ParseError> {
         if !matches!(self.peek(), TokenKind::Uses) {
             return Ok(Vec::new());
         }
         self.bump();
         let mut caps = Vec::new();
         loop {
-            caps.push(self.expect_ident("capability name after `uses`")?);
+            // The capability name's span is the current token's, before `expect_ident`
+            // consumes it.
+            let span = self.current_span();
+            let name = self.expect_ident("capability name after `uses`")?;
+            caps.push(Effect::new(name, span));
             if matches!(self.peek(), TokenKind::Comma) {
                 self.bump();
             } else {
@@ -1984,15 +1988,27 @@ mod tests {
     fn parses_a_uses_effects_clause() {
         let one = prog("emitIt() uses Telemetry = 1");
         let Item::Func { uses, .. } = &one[0] else { panic!("expected a function") };
-        assert_eq!(uses.as_slice(), ["Telemetry".to_string()]);
+        let names: Vec<&str> = uses.iter().map(|effect| effect.name.as_str()).collect();
+        assert_eq!(names, ["Telemetry"]);
 
         let many = prog("act() uses Net, Tasks { 1 }");
         let Item::Func { uses, .. } = &many[0] else { panic!("expected a function") };
-        assert_eq!(uses.as_slice(), ["Net".to_string(), "Tasks".to_string()]);
+        let names: Vec<&str> = uses.iter().map(|effect| effect.name.as_str()).collect();
+        assert_eq!(names, ["Net", "Tasks"]);
 
         let none = prog("pure(x) = x");
         let Item::Func { uses, .. } = &none[0] else { panic!("expected a function") };
         assert!(uses.is_empty(), "a function with no clause has no effects");
+    }
+
+    #[test]
+    fn a_uses_clause_captures_the_capability_span() {
+        use crate::lexer::Span;
+        // `f() uses Telemetry = 1` — `Telemetry` is at bytes 9..18; its declaration
+        // span is captured (not the zero default) so a refused effect can cite it.
+        let items = prog("f() uses Telemetry = 1");
+        let Item::Func { uses, .. } = &items[0] else { panic!("expected a function") };
+        assert_eq!(uses[0].span, Span { start: 9, end: 18 });
     }
 
     #[test]

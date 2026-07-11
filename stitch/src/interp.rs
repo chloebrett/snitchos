@@ -751,7 +751,7 @@ fn eval_method_call(
     }
     // A method, like a named function, runs with exactly its declared `uses` —
     // authority does not inherit across the method boundary.
-    method_env = method_env.with_authority(method.uses.iter().cloned().collect());
+    method_env = method_env.with_authority(method.uses.iter().map(|e| e.name.clone()).collect());
 
     let body = method
         .body
@@ -1196,7 +1196,7 @@ fn call_instance_method(
     for (param, arg) in method.params.iter().zip(args) {
         method_env = method_env.extend(param.name.clone(), arg.clone());
     }
-    method_env = method_env.with_authority(method.uses.iter().cloned().collect());
+    method_env = method_env.with_authority(method.uses.iter().map(|e| e.name.clone()).collect());
     // Method bodies are surface `Expr`; lower to core on dispatch (see note in
     // `eval_method_call`).
     let core_body = lower_expr_to_core(body);

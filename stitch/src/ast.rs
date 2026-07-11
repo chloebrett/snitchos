@@ -7,6 +7,35 @@ use crate::prelude::*;
 
 use crate::lexer::Span;
 
+/// One capability in a `uses Cap, …` effect row: its name plus the source span it
+/// was declared at (so a refused effect can cite the declaration). Spans are
+/// metadata — `PartialEq` compares only `name` and `Debug` renders just the name
+/// (like a `String`), so structural asserts and snapshots ignore positions.
+#[derive(Clone)]
+pub struct Effect {
+    pub name: String,
+    pub span: Span,
+}
+
+impl Effect {
+    #[must_use]
+    pub fn new(name: impl Into<String>, span: Span) -> Self {
+        Self { name: name.into(), span }
+    }
+}
+
+impl PartialEq for Effect {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl fmt::Debug for Effect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.name.fmt(f)
+    }
+}
+
 /// A top-level declaration in a program.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Item {
@@ -33,7 +62,7 @@ pub enum Item {
         name: String,
         params: Vec<Param>,
         ret: Option<Type>,
-        uses: Vec<String>,
+        uses: Vec<Effect>,
         body: Expr,
         public: bool,
     },
@@ -78,7 +107,7 @@ pub struct Method {
     pub ret: Option<Type>,
     /// The capability/effects clause (`uses Telemetry`, …) — the authority the
     /// method body may exercise. Empty when omitted; same gate as a function.
-    pub uses: Vec<String>,
+    pub uses: Vec<Effect>,
     pub body: Option<Expr>,
 }
 

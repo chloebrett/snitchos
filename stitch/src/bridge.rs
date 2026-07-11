@@ -277,7 +277,7 @@ pub fn manifest_of_main(items: &[Item]) -> Result<hitch::Manifest, RuntimeError>
     // still enforced via `method.uses` / `with_authority`.
     let needs = uses
         .iter()
-        .map(|name| hitch::Slot { name: name.clone(), object: 0, rights: 0 })
+        .map(|effect| hitch::Slot { name: effect.name.clone(), object: 0, rights: 0 })
         .collect();
     // A Stitch stage always has an output (a `main` return type is required); the
     // manifest models `output` as optional only because non-stage programs omit it.

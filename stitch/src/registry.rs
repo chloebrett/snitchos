@@ -95,7 +95,9 @@ pub(crate) fn register_items(items: &[Item], env: &Env, reg: &mut Registration) 
                     upvalues: Vec::new(),
                     home_globals: env.home_globals_weak(),
                     authority: env.authority_rc(),
-                    uses: Some(uses.clone()),
+                    // Runtime authority is names-only; the declaration spans stay on
+                    // the AST for diagnostics.
+                    uses: Some(uses.iter().map(|effect| effect.name.clone()).collect()),
                     // Functions inherit the source of the env they're registered in;
                     // `build_env` tags that env, so faults resolve to the program file.
                     source: env.source(),

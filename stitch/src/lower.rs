@@ -171,7 +171,7 @@ pub fn lower_item_to_core(item: &Item) -> CoreItem {
             name: name.clone(),
             params: params.clone(),
             ret: ret.clone(),
-            uses: uses.clone(),
+            uses: uses.iter().map(|effect| effect.name.clone()).collect(),
             body: Rc::new(lower_expr_to_core(body)),
             public: *public,
         },
@@ -204,7 +204,7 @@ fn to_core_method(method: &Method) -> CoreMethod {
         modifier: method.modifier.clone(),
         params: method.params.clone(),
         ret: method.ret.clone(),
-        uses: method.uses.clone(),
+        uses: method.uses.iter().map(|effect| effect.name.clone()).collect(),
         body: method.body.as_ref().map(lower_expr_to_core),
     }
 }

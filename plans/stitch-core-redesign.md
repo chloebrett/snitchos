@@ -445,14 +445,16 @@ extent (D4).
 
 ### Steps
 
-**D1 — Spanned structured effect row** *(separable; lead or defer)*.
-`uses: Vec<String>` → `Vec<Effect>` (`Effect { name: String, span: Span }`).
-`parse_uses` captures each cap's span, so a refusal can cite the declaration as well
-as the perform site. Mechanical, behavior-preserving; `uses`/tree tests churn once
-(like C2). *Optional for the handler MVP — do it for better effect diagnostics, else
-defer.*
-- RED: a parsed `uses Telemetry` carries a non-default span for `Telemetry`.
-- GREEN: thread spans through `parse_uses`; 580 green.
+**D1 — Spanned structured effect row — ✅ DONE (2026-07-11).**
+`uses: Vec<String>` → `Vec<Effect>` (`ast::Effect { name: String, span: Span }`), on
+`Item::Func` + `Method`. `Effect`'s `PartialEq`/`Debug` ignore/forward the span (same
+metadata treatment as `Expr`) → **zero snapshot churn**; only the one `uses` assert
+test updated to compare names. `parse_uses` captures each cap's span (`current_span()`
+before `expect_ident`). Consumers that need names-only extract `.name`: `register_items`
+→ `ClosureData.uses`, the two method-authority sites, `lower_item_to_core`/
+`to_core_method` → `CoreItem`/`CoreMethod` (runtime authority stays `Vec<String>`), and
+`bridge::manifest_of_main`'s `needs`. Declaration spans now live on the AST for D4's
+refusal messages. Test: `f() uses Telemetry` → span `9..18`. **581 green, clippy clean.**
 
 **D2 — Handler stack + effect dispatch (mechanism, no syntax).**
 `Env` gains `handlers` (dynamically-scoped op-name→value stack) + `with_handler(op,
