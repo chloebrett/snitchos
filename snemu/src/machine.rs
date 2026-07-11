@@ -89,10 +89,39 @@ impl Machine {
         self.profile.take()
     }
 
+    /// Advance the machine. Normally this is one scheduler round (each running hart
+    /// steps once). When the native-op helper is on and a running hart sits at a
+    /// `memset`/`memcpy` entry, this instead collapses that whole op — see
+    /// [`collapse_memop`](Self::collapse_memop) — which subsumes many rounds into
+    /// one call. Instret (the shared clock) is accounted identically either way.
+    pub fn step(&mut self) -> Result<(), StepError> {
+        // Native-op fast path (tier-0.5 JIT): if a running hart is at a memop entry,
+        // collapse the op AND advance every other hart by the charged instret, so
+        // cross-hart interleaving is reproduced exactly (a running peer retires the
+        // same instructions it would across the collapsed rounds). Handled at the
+        // top — before any hart steps — so at collapse time no hart has moved this
+        // round and the peer catch-up is symmetric. Declines (fault) fall through to
+        // a normal round so the interpreter traps.
+        if self.native_ops
+            && let Some(i) = self.hart_at_memop()
+        {
+            let entry_pc = self.harts[i].pc();
+            if let Some(charged) =
+                self.harts[i].try_native_memop(&mut self.bus, self.memset_pc, self.memcpy_pc)
+            {
+                if let Some(p) = self.profile.as_mut() {
+                    *p.entry(entry_pc).or_insert(0) += charged;
+                }
+                return self.collapse_memop(i, charged);
+            }
+        }
+        self.step_round()
+    }
+
     /// One scheduler round: step each running hart once, in id order, each
     /// observing the shared clock, which advances one tick per executed
     /// instruction.
-    pub fn step(&mut self) -> Result<(), StepError> {
+    fn step_round(&mut self) -> Result<(), StepError> {
         let mut retired = false;
         for i in 0..self.harts.len() {
             // A stopped (parked secondary) hart never runs; only running and idle
@@ -105,36 +134,6 @@ impl Machine {
             // advances it, so the profiler attributes the retired instruction to
             // where it ran.
             let pc = self.harts[i].pc();
-
-            // Native-op fast path (tier-0.5 JIT): only when this is the *sole*
-            // running hart — then there's no cross-hart interleaving the lockstep
-            // scheduler must preserve, so collapsing a whole memset/memcpy into one
-            // step (charging the instret the loop would have retired) is fidelity-
-            // exact. Falls through to the interpreter if the helper declines (e.g. a
-            // page it would fault on).
-            // PC check first — it filters out ~every instruction with two compares,
-            // so the per-instruction hot path pays almost nothing; the hart scan
-            // (`only_running_hart`) runs only at an actual memset/memcpy entry.
-            // The gate is load-bearing for fidelity: firing a collapsed memset while
-            // another hart is doing real work robs it of interleaved instructions
-            // and diverges cross-hart timing (measured: it wedges
-            // `viewer-reads-delegated-file`). Its cost: the idle-task flicker on an
-            // "idle" hart makes it miss the workload memsets — see the plan for the
-            // lockstep-preserving fix that would capture those too.
-            if self.native_ops
-                && (Some(pc) == self.memset_pc || Some(pc) == self.memcpy_pc)
-                && !self.harts[i].is_idle()
-                && self.only_running_hart(i)
-                && let Some(charged) =
-                    self.harts[i].try_native_memop(&mut self.bus, self.memset_pc, self.memcpy_pc)
-            {
-                self.time += charged;
-                retired = true;
-                if let Some(p) = self.profile.as_mut() {
-                    *p.entry(pc).or_insert(0) += charged;
-                }
-                continue;
-            }
 
             match self.harts[i].step(&mut self.bus)? {
                 HartEffect::Sbi(req) => {
@@ -168,15 +167,74 @@ impl Machine {
         Ok(())
     }
 
-    /// Whether hart `i` is the only one actively running — every other hart is idle
-    /// (parked on `wfi`) or stopped. Gates the native-op helper: when true, nothing
-    /// else is making progress this round, so collapsing hart `i`'s memset/memcpy
-    /// into a single fast step doesn't rob another hart of interleaved instructions.
-    fn only_running_hart(&self, i: usize) -> bool {
-        self.harts
-            .iter()
-            .enumerate()
-            .all(|(j, h)| j == i || h.is_idle() || h.is_stopped())
+    /// The lowest-id running hart whose PC is a `memset`/`memcpy` entry, or `None`.
+    /// Idle/stopped harts are skipped — only a hart about to *execute* the op is a
+    /// collapse candidate. Cheap: a scan of `hart_count` PCs against two values.
+    fn hart_at_memop(&self) -> Option<usize> {
+        (0..self.harts.len()).find(|&i| {
+            self.harts[i].is_running()
+                && (Some(self.harts[i].pc()) == self.memset_pc
+                    || Some(self.harts[i].pc()) == self.memcpy_pc)
+        })
+    }
+
+    /// Reproduce the `charged` scheduler rounds that hart `i`'s memop collapses,
+    /// with hart `i`'s stores already applied natively by `try_native_memop`. Each
+    /// round advances the shared clock by hart `i`'s one store, then steps every
+    /// other non-stopped hart once against that clock — exactly the round-robin the
+    /// interpreter would run, so a running peer retires the same instructions and an
+    /// idle peer's timer fires at the same tick. The collapse is only *observably*
+    /// exact when no peer touches the memop's byte range mid-op (private in the
+    /// kernel's call sites); the `snemu-itest` on↔off byte-identical A/B is the proof.
+    fn collapse_memop(&mut self, i: usize, charged: u64) -> Result<(), StepError> {
+        let base = self.time;
+        // Quiet-span fast path: if every other hart is idle/stopped and none has a
+        // timer armed to fire within the span, no peer retires or wakes — the whole
+        // collapse is just hart `i`'s `charged` ticks. Preserves post-7's O(1)
+        // single-runner collapse (the common boot / all-idle-peer case).
+        if self.no_peer_activity_within(i, base + charged) {
+            self.time = base + charged;
+            return Ok(());
+        }
+        for _ in 0..charged {
+            self.time += 1; // hart i's store this round
+            for j in 0..self.harts.len() {
+                if j == i || self.harts[j].is_stopped() {
+                    continue;
+                }
+                self.harts[j].set_cycle(self.time);
+                let pc = self.harts[j].pc();
+                match self.harts[j].step(&mut self.bus)? {
+                    HartEffect::Sbi(req) => {
+                        service_sbi(&mut self.harts, j, &req);
+                        self.time += 1;
+                        if let Some(p) = self.profile.as_mut() {
+                            *p.entry(pc).or_insert(0) += 1;
+                        }
+                    }
+                    HartEffect::None => {
+                        self.time += 1;
+                        if let Some(p) = self.profile.as_mut() {
+                            *p.entry(pc).or_insert(0) += 1;
+                        }
+                    }
+                    HartEffect::Idle => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether no hart other than `i` will retire or wake before the clock reaches
+    /// `end`: every other hart is idle or stopped, and no idle peer has a timer
+    /// armed to fire at or before `end`. When true a collapse can jump straight to
+    /// `end` without stepping any peer (nothing would have moved).
+    fn no_peer_activity_within(&self, i: usize, end: u64) -> bool {
+        self.harts.iter().enumerate().all(|(j, h)| {
+            j == i
+                || h.is_stopped()
+                || (h.is_idle() && h.wake_deadline().is_none_or(|d| d > end))
+        })
     }
 
     /// The soonest clock value at which any idle hart's armed timer would wake it.
@@ -416,6 +474,98 @@ mod tests {
         m.step().unwrap();
         assert!(m.is_running(1), "idle peer woke when the running hart's clock hit 3");
         assert_eq!(m.instret(), 4, "clock advanced by execution (3 hart-0 + 1 wake), not a jump");
+    }
+
+    #[test]
+    fn a_native_memop_advances_a_running_peer_by_the_charged_instret() {
+        // The lockstep-preserving collapse: hart 0 hits a memset entry while hart 1
+        // runs — collapsing hart 0's whole memset into one shot must ALSO advance
+        // hart 1 by exactly the charged instret, so the shared clock counts both
+        // harts' retirements just as a round-by-round interpreter run would. This is
+        // what keeps cross-hart interleaving faithful with the helper on.
+        const SELF_LOOP: u32 = 0x0000_006f; // jal x0, 0
+        let after_memset = RAM_BASE + 4;
+        let peer_pc = RAM_BASE + 0x100;
+        let mut mem = Memory::new(0x2000);
+        mem.write_u32(after_memset, SELF_LOOP).unwrap(); // hart 0 parks here post-memset
+        mem.write_u32(peer_pc, SELF_LOOP).unwrap(); // hart 1 spins here, retiring 1/round
+        let mut m = Machine::new(mem, 2);
+        m.set_native_op_pcs(Some(RAM_BASE), None); // memset entry PC = RAM_BASE
+        m.set_native_ops(true);
+
+        // Hart 0 at the memset entry: memset(dst, val=0, len=8), ra = after_memset.
+        m.harts[0].set_pc(RAM_BASE);
+        m.harts[0].set_reg(1, after_memset); // ra
+        m.harts[0].set_reg(10, RAM_BASE + 0x800); // a0 = dst (disjoint from code)
+        m.harts[0].set_reg(11, 0); // a1 = val
+        m.harts[0].set_reg(12, 8); // a2 = len
+        // Hart 1 running its self-loop.
+        m.harts[1].start(peer_pc, 1, 0);
+
+        let charged = 11; // memop_charge(8) = 8 + (8/8)*3 + 0
+        m.step().unwrap();
+
+        assert_eq!(m.pc(0), after_memset, "hart 0 returned from the collapsed memset");
+        assert_eq!(m.pc(1), peer_pc, "hart 1 kept spinning on its self-loop");
+        assert_eq!(
+            m.instret(),
+            charged * 2,
+            "clock counts hart 0's charged stores AND hart 1's catch-up retirements"
+        );
+    }
+
+    #[test]
+    fn a_lone_hart_collapses_a_memop_to_the_charged_instret_in_one_step() {
+        // No peer to interleave → the quiet-span fast path: one `Machine::step`
+        // applies the whole memop and jumps the clock by exactly the charged instret
+        // (here a 4 KiB fill), instead of grinding the store loop one tick at a time.
+        let after_memset = RAM_BASE + 4;
+        let mut mem = Memory::new(0x4000);
+        mem.write_u32(after_memset, 0x0000_006f).unwrap();
+        let mut m = Machine::new(mem, 1);
+        m.set_native_op_pcs(Some(RAM_BASE), None);
+        m.set_native_ops(true);
+
+        m.harts[0].set_pc(RAM_BASE);
+        m.harts[0].set_reg(1, after_memset); // ra
+        m.harts[0].set_reg(10, RAM_BASE + 0x1000); // dst
+        m.harts[0].set_reg(11, 0); // val
+        m.harts[0].set_reg(12, 0x1000); // len = 4096
+
+        m.step().unwrap();
+
+        let charged = 8 + (0x1000 / 8) * 3; // memop_charge(4096) = 8 + 512*3 = 1544
+        assert_eq!(m.instret(), charged, "clock jumped by the charged instret in one step");
+        assert_eq!(m.pc(0), after_memset, "returned from the memset");
+        assert_eq!(m.reg(0, 10), RAM_BASE + 0x1000, "a0 = dst per the memop ABI");
+    }
+
+    #[test]
+    fn a_native_memop_wakes_an_idle_peer_whose_timer_fires_within_the_span() {
+        // Hart 0 collapses a memset; hart 1 idles with a timer armed to fire on the
+        // last tick of the collapsed span. The interleave must advance the shared
+        // clock through the span so hart 1's timer fires at exactly its deadline —
+        // a bare `time += charged` jump would skip past the wake.
+        let after_memset = RAM_BASE + 4;
+        let mut mem = Memory::new(0x2000);
+        mem.write_u32(after_memset, 0x0000_006f).unwrap(); // hart 0 self-loops post-memset
+        let mut m = Machine::new(mem, 2);
+        m.set_native_op_pcs(Some(RAM_BASE), None);
+        m.set_native_ops(true);
+
+        m.harts[0].set_pc(RAM_BASE);
+        m.harts[0].set_reg(1, after_memset); // ra
+        m.harts[0].set_reg(10, RAM_BASE + 0x800); // dst
+        m.harts[0].set_reg(11, 0); // val
+        m.harts[0].set_reg(12, 8); // len → charged = 11
+        let charged = 11;
+        m.harts[1].arm_idle_timer(charged); // fires on the span's final tick
+
+        assert!(!m.is_running(1), "hart 1 idle before the collapse");
+        m.step().unwrap();
+
+        assert!(m.is_running(1), "hart 1's timer fired within the collapsed span");
+        assert_eq!(m.pc(0), after_memset, "hart 0 returned from the collapsed memset");
     }
 
     #[test]
