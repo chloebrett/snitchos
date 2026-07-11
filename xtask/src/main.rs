@@ -128,6 +128,11 @@ enum Cmd {
         /// on vs off must keep the suite green (fidelity), only faster.
         #[arg(long)]
         native_ops: bool,
+        /// Enable the Tier-2 block JIT (M6): compile + run hot basic blocks. A/B it
+        /// against off while ISA coverage expands — on vs off must stay green +
+        /// byte-identical guest instret (the oracle), only faster.
+        #[arg(long)]
+        block_jit: bool,
     },
     /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
     /// run under snemu with exact per-PC counting and report the top kernel
@@ -737,12 +742,12 @@ fn main() -> ExitCode {
             }
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
-        Cmd::SnemuItest { steps, limit, only, jobs, no_idle_skip, no_lpt, opt, native_ops } => {
+        Cmd::SnemuItest { steps, limit, only, jobs, no_idle_skip, no_lpt, opt, native_ops, block_jit } => {
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
             itest::snemu_audit::run(
-                steps, limit, only.as_deref(), jobs, !no_idle_skip, !no_lpt, opt, native_ops,
+                steps, limit, only.as_deref(), jobs, !no_idle_skip, !no_lpt, opt, native_ops, block_jit,
             )
         }
         Cmd::SnemuProfile { workload, steps, top, release } => {

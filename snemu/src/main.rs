@@ -26,6 +26,7 @@ fn main() -> ExitCode {
     let mut dump_frames = false;
     let mut workload: Option<String> = None;
     let mut native_ops = false;
+    let mut block_jit = false;
     let mut calibrate_memops = false;
     let mut positional = Vec::new();
     let mut args = std::env::args().skip(1);
@@ -34,6 +35,8 @@ fn main() -> ExitCode {
             "--frames" => dump_frames = true,
             // Native-op helper (tier-0.5 JIT): fast-path memset/memcpy.
             "--native-ops" => native_ops = true,
+            // Tier-2 block JIT (M6): compile + run hot basic blocks.
+            "--block-jit" => block_jit = true,
             // Calibration: measure each memop's real interpreted cost against
             // `memop_charge` (the collapse's clock charge). Forces native ops off.
             "--calibrate-memops" => calibrate_memops = true,
@@ -79,6 +82,7 @@ fn main() -> ExitCode {
     // The probe measures the interpreter's real per-memop cost, so it needs memops
     // interpreted, not collapsed — force native ops off when calibrating.
     machine.set_native_ops(native_ops && !calibrate_memops);
+    machine.set_block_jit(block_jit);
     if calibrate_memops {
         machine.enable_memop_probe();
     }
