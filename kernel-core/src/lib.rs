@@ -20,6 +20,7 @@ pub mod console;
 pub mod fwcfg;
 pub mod notify;
 pub mod panic_log;
+pub mod ramfb;
 pub mod reap;
 pub mod sched;
 pub mod stack;

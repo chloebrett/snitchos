@@ -50,6 +50,34 @@ pub fn find_file(dir: &[u8], name: &str) -> Option<FwCfgFile> {
     None
 }
 
+/// Control bit: select a file by its `select_key` before the transfer
+/// (packed into the high 16 bits of `control`, per the `fw_cfg` DMA
+/// spec).
+pub const DMA_CTL_SELECT: u32 = 0x01;
+/// Control bit: this is a write from guest to device.
+pub const DMA_CTL_WRITE: u32 = 0x10;
+
+/// The `FWCfgDmaAccess` descriptor written to the DMA address register
+/// to drive a select+write transfer. 16 bytes on the wire, big-endian.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DmaAccess {
+    pub control: u32,
+    pub length: u32,
+    pub address: u64,
+}
+
+impl DmaAccess {
+    /// Serialize to the exact 16 big-endian bytes QEMU's `fw_cfg` DMA
+    /// interface reads: `control(4) length(4) address(8)`.
+    pub fn to_bytes(self) -> [u8; 16] {
+        let mut buf = [0u8; 16];
+        buf[0..4].copy_from_slice(&self.control.to_be_bytes());
+        buf[4..8].copy_from_slice(&self.length.to_be_bytes());
+        buf[8..16].copy_from_slice(&self.address.to_be_bytes());
+        buf
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +167,37 @@ mod tests {
         let dir = directory(&[("etc/ramfb", 0x42, 28)]);
         let truncated = &dir[..dir.len() - 10];
         assert_eq!(find_file(truncated, "etc/ramfb"), None);
+    }
+
+    #[test]
+    fn dma_access_serializes_every_field_to_exact_big_endian_bytes() {
+        let d = DmaAccess {
+            control: 0x0102_0304,
+            length: 0x0506_0708,
+            address: 0x1112_1314_1516_1718,
+        };
+        let expected: [u8; 16] = [
+            0x01, 0x02, 0x03, 0x04, // control
+            0x05, 0x06, 0x07, 0x08, // length
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // address
+        ];
+        assert_eq!(d.to_bytes(), expected);
+    }
+
+    #[test]
+    fn dma_access_address_is_big_endian_not_little_endian() {
+        let d = DmaAccess { control: 0, length: 0, address: 0x0001_0203_0405_0607 };
+        let bytes = d.to_bytes();
+        assert_eq!(&bytes[8..16], &[0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]);
+        assert_ne!(&bytes[8..16], &d.address.to_le_bytes());
+    }
+
+    #[test]
+    fn dma_access_control_word_from_select_and_write() {
+        // The canonical construction: select a file's key, mark it a write.
+        // key=0x42 packed into the high 16 bits, per the fw_cfg DMA spec.
+        let control = (0x42u32 << 16) | DMA_CTL_SELECT | DMA_CTL_WRITE;
+        let d = DmaAccess { control, length: 28, address: 0 };
+        assert_eq!(&d.to_bytes()[0..4], &[0x00, 0x42, 0x00, 0x11]);
     }
 }
