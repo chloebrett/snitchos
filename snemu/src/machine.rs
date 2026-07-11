@@ -112,10 +112,19 @@ impl Machine {
             // step (charging the instret the loop would have retired) is fidelity-
             // exact. Falls through to the interpreter if the helper declines (e.g. a
             // page it would fault on).
+            // PC check first — it filters out ~every instruction with two compares,
+            // so the per-instruction hot path pays almost nothing; the hart scan
+            // (`only_running_hart`) runs only at an actual memset/memcpy entry.
+            // The gate is load-bearing for fidelity: firing a collapsed memset while
+            // another hart is doing real work robs it of interleaved instructions
+            // and diverges cross-hart timing (measured: it wedges
+            // `viewer-reads-delegated-file`). Its cost: the idle-task flicker on an
+            // "idle" hart makes it miss the workload memsets — see the plan for the
+            // lockstep-preserving fix that would capture those too.
             if self.native_ops
+                && (Some(pc) == self.memset_pc || Some(pc) == self.memcpy_pc)
                 && !self.harts[i].is_idle()
                 && self.only_running_hart(i)
-                && (Some(pc) == self.memset_pc || Some(pc) == self.memcpy_pc)
                 && let Some(charged) =
                     self.harts[i].try_native_memop(&mut self.bus, self.memset_pc, self.memcpy_pc)
             {
