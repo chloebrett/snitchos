@@ -271,6 +271,10 @@ pub(crate) struct Hart {
     /// Tier-2 block JIT (M6) `PC → block` cache, or `None` when disabled (the
     /// default oracle path). Toggled per hart via [`set_block_jit`](Self::set_block_jit).
     block_cache: Option<BlockCache>,
+    /// Whether the block executor caches the register file in a host local (M6
+    /// increment 4). On by default; `false` runs each op through the hart directly —
+    /// the A/B baseline proving the cache changes only speed, not architectural state.
+    reg_cache: bool,
     /// Whether `wfi` parks the hart (Idle) so the driver can fast-forward the
     /// clock over idle time, vs. acting as a bare nop that advances. On by
     /// default; toggled per hart via [`set_idle_skip`](Self::set_idle_skip) so a
@@ -378,6 +382,11 @@ impl Cpu {
         self.hart.set_block_jit(on);
     }
 
+    /// Enable/disable block-executor register caching on the lone hart.
+    pub fn set_register_cache(&mut self, on: bool) {
+        self.hart.set_register_cache(on);
+    }
+
     /// Enable or disable `wfi` idle-skip (on by default). Off restores the bare
     /// nop-`wfi` behaviour — the baseline for proving idle-skip changes only speed.
     pub fn set_idle_skip(&mut self, on: bool) {
@@ -411,6 +420,7 @@ impl Hart {
             pending_sbi: None,
             decode_cache: None,
             block_cache: None,
+            reg_cache: true,
             idle_skip: true,
             timer_fires: 0,
         }
@@ -434,6 +444,16 @@ impl Hart {
     /// interpreter oracle). Starts from a cold cache; disabling drops it.
     pub(crate) fn set_block_jit(&mut self, on: bool) {
         self.block_cache = on.then(BlockCache::default);
+    }
+
+    /// Enable/disable register caching in the block executor (M6 increment 4). On by
+    /// default; off runs each op through the hart — the A/B baseline for the cache.
+    pub(crate) fn set_register_cache(&mut self, on: bool) {
+        self.reg_cache = on;
+    }
+
+    pub(crate) fn reg_cache_enabled(&self) -> bool {
+        self.reg_cache
     }
 
     /// Block JIT hits so far — used by tests to prove the fast path engaged.

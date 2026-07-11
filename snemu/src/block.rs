@@ -380,8 +380,18 @@ impl Block {
     /// block; a `Load`/`Store` that page-faults takes the trap (setting `pc` to the
     /// handler) and bails — so the returned count can be short of the block length,
     /// exactly the interpreter's instret for the same run. A block with no branch or
-    /// fault falls through, setting `pc` to `exit_pc`.
+    /// fault falls through, setting `pc` to `exit_pc`. The two paths are architecturally
+    /// identical (proven by the on↔off A/B); register caching only changes speed.
     pub(crate) fn exec(&self, hart: &mut Hart, bus: &mut Bus) -> Result<u64, StepError> {
+        if hart.reg_cache_enabled() {
+            self.exec_cached(hart, bus)
+        } else {
+            self.exec_uncached(hart, bus)
+        }
+    }
+
+    /// Register-caching executor (M6 increment 4, default).
+    fn exec_cached(&self, hart: &mut Hart, bus: &mut Bus) -> Result<u64, StepError> {
         // Register caching (increment 4): copy the register file into a host local,
         // run the whole block against it (no per-op array-through-`&mut Hart`), and
         // write it back once at every exit. `w!` writes, keeping x0 hardwired. Memory
@@ -449,6 +459,59 @@ impl Block {
         }
         hart.set_registers(regs);
         hart.set_pc(self.exit_pc); // fell through without a branch
+        Ok(retired)
+    }
+
+    /// Through-hart executor: every op reads/writes the register file directly (no
+    /// host-local cache). The A/B baseline for register caching — architecturally
+    /// identical to [`exec_cached`](Self::exec_cached), only slower (or not).
+    fn exec_uncached(&self, hart: &mut Hart, bus: &mut Bus) -> Result<u64, StepError> {
+        let mut retired = 0u64;
+        for op in &self.ops {
+            retired += 1;
+            match *op {
+                Op::AluImm { alu, rd, rs1, imm } => {
+                    hart.set_reg(rd as usize, alu.apply(hart.reg(rs1 as usize), imm as u64));
+                }
+                Op::AluReg { alu, rd, rs1, rs2 } => {
+                    let v = alu.apply(hart.reg(rs1 as usize), hart.reg(rs2 as usize));
+                    hart.set_reg(rd as usize, v);
+                }
+                Op::SetImm { rd, value } => hart.set_reg(rd as usize, value),
+                Op::Load { funct3, rd, rs1, imm, pc } => {
+                    hart.set_pc(pc);
+                    let base = hart.reg(rs1 as usize);
+                    match hart.load_value(bus, funct3, base, imm)? {
+                        Some(value) => hart.set_reg(rd as usize, value),
+                        None => return Ok(retired),
+                    }
+                }
+                Op::Store { funct3, rs1, rs2, imm, pc } => {
+                    hart.set_pc(pc);
+                    let (base, value) = (hart.reg(rs1 as usize), hart.reg(rs2 as usize));
+                    if hart.store_value(bus, funct3, base, imm, value)? {
+                        return Ok(retired);
+                    }
+                }
+                Op::Branch { cond, rs1, rs2, taken, not_taken } => {
+                    let take = cond.eval(hart.reg(rs1 as usize), hart.reg(rs2 as usize));
+                    hart.set_pc(if take { taken } else { not_taken });
+                    return Ok(retired);
+                }
+                Op::Jump { rd, link, target } => {
+                    hart.set_reg(rd as usize, link);
+                    hart.set_pc(target);
+                    return Ok(retired);
+                }
+                Op::JumpReg { rd, rs1, imm, link } => {
+                    let target = hart.reg(rs1 as usize).wrapping_add(imm as u64) & !1;
+                    hart.set_reg(rd as usize, link);
+                    hart.set_pc(target);
+                    return Ok(retired);
+                }
+            }
+        }
+        hart.set_pc(self.exit_pc);
         Ok(retired)
     }
 }

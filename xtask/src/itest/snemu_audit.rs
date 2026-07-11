@@ -137,6 +137,7 @@ pub fn run(
     opt: crate::qemu::OptLevel,
     native_ops: bool,
     block_jit: bool,
+    reg_cache: bool,
 ) -> ExitCode {
     let (kernel, dtb) = match snemu_diff::prepare_profiled(true, opt) {
         Ok(v) => v,
@@ -179,7 +180,8 @@ pub fn run(
     let booted = parallel_map(&distinct, jobs, |worker, _, &workload| {
         let start_s = started.elapsed().as_secs_f64();
         let boot_start = Instant::now();
-        let snapshot = boot_snapshot(&kernel, &dtb, workload, idle_skip, native_ops, block_jit);
+        let snapshot =
+            boot_snapshot(&kernel, &dtb, workload, idle_skip, native_ops, block_jit, reg_cache);
         worker_busy[worker].fetch_add(boot_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let boot_instret = snapshot.as_ref().map_or(0, |(_, n)| *n);
         segments.lock().expect("segments mutex").push(Segment {
@@ -228,6 +230,7 @@ pub fn run(
                     m.set_idle_skip(idle_skip);
                     m.set_native_ops(native_ops);
                     m.set_block_jit(block_jit);
+                    m.set_register_cache(reg_cache);
                     Some(m)
                 }
                 Err(_) => None,
@@ -519,12 +522,14 @@ fn boot_snapshot(
     idle_skip: bool,
     native_ops: bool,
     block_jit: bool,
+    reg_cache: bool,
 ) -> Result<(snemu::machine::Machine, u64), String> {
     let mut machine = snemu_diff::load_workload_machine(kernel, dtb, workload)?;
     machine.set_idle_skip(idle_skip);
     // Set on the snapshot; the per-scenario forks inherit it through `clone`.
     machine.set_native_ops(native_ops);
     machine.set_block_jit(block_jit);
+    machine.set_register_cache(reg_cache);
     machine.run_until_uart(CHECKPOINT, CHECKPOINT_BUDGET)?;
     // Report the boot-once cost as guest instret (not host step calls) to match the
     // per-scenario metric — a block collapses many instructions into one step.

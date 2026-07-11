@@ -466,6 +466,14 @@ impl Machine {
         }
     }
 
+    /// Enable or disable block-executor register caching (M6 increment 4) on **every**
+    /// hart. On by default; the on↔off A/B isolates the caching's speed effect.
+    pub fn set_register_cache(&mut self, on: bool) {
+        for hart in &mut self.harts {
+            hart.set_register_cache(on);
+        }
+    }
+
     /// Enable or disable `wfi` idle-skip on **every** hart (on by default). Off
     /// restores bare nop-`wfi` and disables the clock fast-forward — the A/B
     /// baseline proving idle-skip changes only speed, not the telemetry stream.

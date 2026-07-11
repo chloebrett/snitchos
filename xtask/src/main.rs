@@ -133,6 +133,10 @@ enum Cmd {
         /// byte-identical guest instret (the oracle), only faster.
         #[arg(long = "jit")]
         block_jit: bool,
+        /// With `--jit`, disable the block executor's register caching (M6 inc 4) —
+        /// the A/B baseline to isolate the caching's wall-time effect.
+        #[arg(long)]
+        no_reg_cache: bool,
     },
     /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
     /// run under snemu with exact per-PC counting and report the top kernel
@@ -743,13 +747,14 @@ fn main() -> ExitCode {
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
         Cmd::SnemuItest {
-            steps, limit, only, jobs, no_idle_skip, order, opt, native_ops, block_jit,
+            steps, limit, only, jobs, no_idle_skip, order, opt, native_ops, block_jit, no_reg_cache,
         } => {
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
             itest::snemu_audit::run(
-                steps, limit, only.as_deref(), jobs, !no_idle_skip, order, opt, native_ops, block_jit,
+                steps, limit, only.as_deref(), jobs, !no_idle_skip, order, opt, native_ops,
+                block_jit, !no_reg_cache,
             )
         }
         Cmd::SnemuProfile { workload, steps, top, release } => {
