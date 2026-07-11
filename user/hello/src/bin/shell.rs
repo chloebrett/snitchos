@@ -13,7 +13,9 @@
 #![no_main]
 
 use fs_proto::{FileRights, Request, UserBuf};
-use snitchos_user::{Endpoint, bootstrap, console_read, entry, revoke, spawn, tracer, wait, yield_now};
+use snitchos_user::{
+    Endpoint, bootstrap, console_read, entry, notify_create, revoke, spawn, tracer, wait,
+};
 
 /// SPAWNABLE index for the viewer binary (see `kernel/src/trap/user.rs`).
 const VIEWER_ID: usize = 6;
@@ -51,10 +53,17 @@ fn cmd_view(root: Endpoint, path: &[u8]) {
         return;
     };
     let file_cap = file.raw_handle();
-    if let Some(child) = spawn(VIEWER_ID, &[file_cap as u32]) {
-        yield_now();
-        revoke(file_cap);
-        wait(child);
+    // Two-phase readiness handshake (see viewer.rs / supervision-design D2): `done` =
+    // viewer signals read-complete; `proceed` = we release it after revoking. Revoke
+    // lands after the read (grant → use → reclaim), deterministically — no yield bet.
+    let done = notify_create();
+    let proceed = notify_create();
+    let handles = [file_cap as u32, done.raw_handle() as u32, proceed.raw_handle() as u32];
+    if let Some(child) = spawn(VIEWER_ID, &handles) {
+        let _ = done.wait();
+        let _ = revoke(file_cap);
+        let _ = proceed.signal(1);
+        let _ = wait(child);
     }
 }
 

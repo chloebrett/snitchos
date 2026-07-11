@@ -3762,7 +3762,24 @@ pub fn priorities_ordered_but_fair(h: &mut View) -> Result<(), String> {
 pub fn viewer_reads_delegated_file(h: &mut View) -> Result<(), String> {
     use protocol::{CapEventKind, CapObject};
 
-    // Revoke fires while viewer's Read IPC is in-flight — assert it first.
+    // Deterministic grant → use → reclaim (supervision-design D2, the readiness/done
+    // signal): the viewer reads, `Signal`s "done", and the parent revokes only after —
+    // so `bytes_read` lands BEFORE `Revoked` on the wire. This supersedes the old
+    // revoke-during-in-flight race (which failed under `snemu-itest --opt=low`).
+    let frame = h
+        .wait_for(SEC * 20, is_metric_named("snitchos.viewer.bytes_read"))
+        .ok_or("no snitchos.viewer.bytes_read metric within 20s — viewer read failed")?;
+    let value = match frame {
+        OwnedFrame::Metric { value, .. } => value,
+        _ => return Err("matched non-metric (impossible)".to_string()),
+    };
+    if value < 1 {
+        return Err(format!(
+            "viewer.bytes_read = {value}, expected ≥ 1 (file was empty or read returned 0)"
+        ));
+    }
+
+    // The parent reclaims the cap only after the read completed — Revoked follows.
     h.wait_for(SEC * 20, |f, _| {
         matches!(
             f,
@@ -3773,21 +3790,7 @@ pub fn viewer_reads_delegated_file(h: &mut View) -> Result<(), String> {
             }
         )
     })
-    .ok_or("no CapEvent::Revoked{Endpoint} within 20s — view-demo didn't revoke the delegated file cap")?;
-
-    // After the IPC completes, the viewer emits how many bytes it read.
-    let frame = h
-        .wait_for(SEC * 10, is_metric_named("snitchos.viewer.bytes_read"))
-        .ok_or("no snitchos.viewer.bytes_read metric within 10s after Revoked — viewer read failed")?;
-    let value = match frame {
-        OwnedFrame::Metric { value, .. } => value,
-        _ => return Err("matched non-metric (impossible)".to_string()),
-    };
-    if value < 1 {
-        return Err(format!(
-            "viewer.bytes_read = {value}, expected ≥ 1 (file was empty or read returned 0)"
-        ));
-    }
+    .ok_or("no CapEvent::Revoked{Endpoint} within 20s after bytes_read — parent didn't reclaim the file cap")?;
 
     Ok(())
 }
@@ -3806,8 +3809,21 @@ pub fn shell_view_command_revokes_cap(h: &mut View) -> Result<(), String> {
     h.send_input(b"view bin/spawnee\n")
         .map_err(|e| format!("inject shell input: {e}"))?;
 
-    // Revoke fires while viewer's Read IPC is in-flight (same ordering as the
-    // view-demo workload scenario — Revoked before bytes_read on the wire).
+    // Same deterministic order as the view-demo scenario: the viewer reads and signals
+    // done, then the shell revokes — bytes_read BEFORE Revoked on the wire.
+    let frame = h
+        .wait_for(SEC * 20, is_metric_named("snitchos.viewer.bytes_read"))
+        .ok_or("no snitchos.viewer.bytes_read metric within 20s — viewer read failed")?;
+    let value = match frame {
+        OwnedFrame::Metric { value, .. } => value,
+        _ => return Err("matched non-metric (impossible)".to_string()),
+    };
+    if value < 1 {
+        return Err(format!(
+            "viewer.bytes_read = {value}, expected ≥ 1"
+        ));
+    }
+
     h.wait_for(SEC * 20, |f, _| {
         matches!(
             f,
@@ -3818,20 +3834,7 @@ pub fn shell_view_command_revokes_cap(h: &mut View) -> Result<(), String> {
             }
         )
     })
-    .ok_or("no CapEvent::Revoked{Endpoint} within 20s — shell view command didn't revoke the file cap")?;
-
-    let frame = h
-        .wait_for(SEC * 10, is_metric_named("snitchos.viewer.bytes_read"))
-        .ok_or("no snitchos.viewer.bytes_read metric within 10s after Revoked")?;
-    let value = match frame {
-        OwnedFrame::Metric { value, .. } => value,
-        _ => return Err("matched non-metric (impossible)".to_string()),
-    };
-    if value < 1 {
-        return Err(format!(
-            "viewer.bytes_read = {value}, expected ≥ 1"
-        ));
-    }
+    .ok_or("no CapEvent::Revoked{Endpoint} within 20s after bytes_read — shell didn't reclaim the file cap")?;
 
     Ok(())
 }

@@ -1,16 +1,26 @@
-//! `view-demo` child: receives a scoped READ-only file cap at `"file"`,
-//! reads it, prints the bytes to the UART console, and emits
-//! `snitchos.viewer.bytes_read` with the total byte count.
+//! `view-demo`/`shell` child: receives a scoped READ-only file cap at `"file"`,
+//! reads it, prints the bytes to the UART, and emits `snitchos.viewer.bytes_read`.
+//! Then runs the **readiness/done handshake** (supervision-design D2), replacing the
+//! old fragile yield-count timing bet. It `Signal`s `"done"` — telling the parent the
+//! read is complete, so the parent revokes only now (grant → use → reclaim: `bytes_read`
+//! before `Revoked` on the wire) — then `WaitNotify`s `"proceed"`, staying alive while
+//! the parent revokes so `CapEvent::Revoked` fires with a live holder (a cap released on
+//! process exit fires none). The parent signals `"proceed"` after revoking; the viewer
+//! wakes and exits.
 
 #![no_std]
 #![no_main]
 
 use fs_proto::{Op, Request, Response, UserBuf};
-use snitchos_user::{Endpoint, bootstrap, console_write, entry, register_counter, yield_now};
+use snitchos_user::{Endpoint, Notification, bootstrap, console_write, entry, register_counter};
 
 const BUF_SIZE: usize = 512;
 
-#[entry(needs = [("file", ENDPOINT, SEND)])]
+#[entry(needs = [
+    ("file", ENDPOINT, SEND),
+    ("done", NOTIFICATION, SIGNAL),
+    ("proceed", NOTIFICATION, WAIT),
+])]
 fn main() {
     let bytes_read: snitchos_user::Metric = register_counter("snitchos.viewer.bytes_read");
 
@@ -49,16 +59,16 @@ fn main() {
     }
 
     bytes_read.emit(total as i64);
-    // Hold the cap alive while the parent revokes it. A cap released on
-    // process exit vanishes silently (no CapEvent::Revoked); revoke only
-    // fires when the holder is still running. Four yields give the parent
-    // enough scheduling turns to call revoke before we exit.
-    //
-    // TODO: replace with a proper parent-signals-done primitive once one
-    // exists. The yield count is fragile: it assumes the parent wins the
-    // CPU within four scheduling turns, which holds today under cooperative
-    // round-robin but is an implicit timing contract, not a hard guarantee.
-    for _ in 0..4 {
-        yield_now();
+
+    // The read is complete — tell the parent so it revokes only now. `signal`/`wait`
+    // coalesce, so this is order-independent (no lost wakeup if the parent hasn't
+    // reached its `wait`/`signal` yet).
+    if let Some(done) = bootstrap().get::<Notification>("done") {
+        let _ = done.signal(1);
+    }
+    // Block until the parent has revoked and released us — keeps us alive across the
+    // revoke so `CapEvent::Revoked` fires with a live holder.
+    if let Some(proceed) = bootstrap().get::<Notification>("proceed") {
+        let _ = proceed.wait();
     }
 }

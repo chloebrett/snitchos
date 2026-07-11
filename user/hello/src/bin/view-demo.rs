@@ -7,7 +7,7 @@
 #![no_main]
 
 use fs_proto::{FileRights, Op, Request, Response, UserBuf};
-use snitchos_user::{Endpoint, bootstrap, entry, revoke, spawn, wait, yield_now};
+use snitchos_user::{Endpoint, bootstrap, entry, notify_create, revoke, spawn, wait};
 
 /// SPAWNABLE index for the viewer binary (see `kernel/src/trap/user.rs`).
 const VIEWER_ID: usize = 6;
@@ -50,22 +50,29 @@ fn main() {
     let Ok((stat_words, _)) = file.call(Request::Stat.encode()) else {
         return;
     };
-    if let Ok(Response::Stat(s)) = Response::decode(Op::Stat, stat_words) {
-        if s.size == 0 {
-            return;
-        }
+    if let Ok(Response::Stat(s)) = Response::decode(Op::Stat, stat_words)
+        && s.size == 0
+    {
+        return;
     }
 
-    // Spawn the viewer with the READ-only file cap delegated.
-    if let Some(child) = spawn(VIEWER_ID, &[file_cap as u32]) {
-        // Yield to let the viewer run and read the file.
-        yield_now();
-        // Revoke the delegated cap while the viewer still holds it — the
-        // CapEvent::Revoked fires NOW, proving the authority window is closed.
-        // The viewer's next Read call will be Denied; it yields a few times
-        // before exiting, so this window is reliably open.
-        revoke(file_cap);
-        // Reap the viewer after it exits.
-        wait(child);
+    // Two-phase readiness handshake with the viewer (replaces the old yield-count
+    // timing bet): `done` = the viewer signals it finished reading; `proceed` = we
+    // release it to exit after revoking. Both are ambient to create.
+    let done = notify_create();
+    let proceed = notify_create();
+
+    // Spawn the viewer with the file cap + both notification caps, in slot order
+    // (file, done, proceed) — the viewer resolves each by role via bootstrap().get.
+    let handles = [file_cap as u32, done.raw_handle() as u32, proceed.raw_handle() as u32];
+    if let Some(child) = spawn(VIEWER_ID, &handles) {
+        // Wait until the viewer has finished reading, THEN reclaim — so Revoked lands
+        // after bytes_read on the wire (grant → use → reclaim), deterministically.
+        let _ = done.wait();
+        let _ = revoke(file_cap);
+        // Release the viewer (it's blocked in WaitNotify, alive, so the revoke above
+        // fired a real CapEvent::Revoked), then reap it.
+        let _ = proceed.signal(1);
+        let _ = wait(child);
     }
 }

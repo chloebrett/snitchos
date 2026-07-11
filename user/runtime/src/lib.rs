@@ -219,6 +219,13 @@ impl BootstrapCap for TelemetrySink {
     }
 }
 
+impl BootstrapCap for Notification {
+    const OBJECT: u8 = snitchos_abi::object_kind::NOTIFICATION as u8;
+    fn from_raw_handle(handle: usize) -> Self {
+        Notification::from_raw_handle(handle)
+    }
+}
+
 /// Spawn program `program_id` (an index into the kernel's spawnable registry) as
 /// a new process, delegating the capabilities named by `handles` (raw handle
 /// values from this process's own table). Returns the child's task id, or `None`
