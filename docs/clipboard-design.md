@@ -161,6 +161,16 @@ the house style: *shelf* (things set aside), *stash*, *hitch-board* (it holds
 hitched values), or lean into the snitch/observability theme. Bikeshed later; the
 `snip` name is taken (the xtask staging tool).
 
+## A good first consumer of the provenance work
+
+Provenance / data-flow tracking is infrastructure that needs a concrete driver to be
+built against — and **the clipboard is a strong candidate first consumer** (it
+exercises typed values + provenance + IFC + caps all at once, in a feature people
+touch constantly). The **shell** is the other good first consumer (delegation is a
+visible verb there). Either grounds the provenance work in something real rather than
+building it in the abstract; the clipboard has the edge on breadth of exercise, the
+shell on being already-in-flight.
+
 ## Why this is worth remembering (not building yet)
 
 It's tangential to the current stim grammar / spawn work and should not preempt it.

@@ -157,10 +157,18 @@ needs a designed-in recovery cap, not an afterthought.
   rest). This rides the **checkpoint/persistence axis**, which isn't built — so a
   full account system waits on it (or a soft form re-derives caps at each login from
   a root authority, i.e. lean on model A first).
-- **Recovery.** The cap-world "forgot my password" tension: if authority is a sealed
-  bundle, nobody can reset it without a **recovery capability** designed in from the
-  start (a sealed recovery share, a social-recovery quorum, a hardware root). Must be
-  a first-class part of the design, not bolted on.
+- **Recovery — the trust-model fork (the sharpest open question).** The cap-world
+  "forgot my password" tension: if authority is a sealed bundle nobody else holds,
+  it cannot be reset without a **recovery capability** designed in from the start.
+  But note the bind — **any recovery authority is, by construction, a party that can
+  impersonate you** (it can produce your authority without your secret), which
+  directly undermines the unforgeable-authority property that made caps worth it. So
+  the real fork, which shapes the *whole trust model*, is: lean fully self-sovereign
+  (your key *is* your authority; lose it, lose the account — crypto-anarchist, no
+  backdoor) vs. design in a recovery path (a sealed recovery share, a social-recovery
+  *quorum* so no single party can impersonate you, or a hardware root — each a
+  different answer to "who, if anyone, can stand in for you"). This is a values
+  decision, not just a mechanism, and it must be first-class, not bolted on.
 - **Bootstrapping the first account** and the root authority (who holds the ur-caps;
   how account #1 is created).
 - **Multi-session / the same human twice** — two concurrent sessions each hold a
