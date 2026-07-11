@@ -45,7 +45,9 @@ struct LiveSnemu {
     machine: snemu::machine::Machine,
     /// Bytes of the virtio-console TX stream already decoded into frames.
     tx_consumed: usize,
-    /// Total guest instructions stepped so far, capped at `max_steps`.
+    /// Host `Machine::step()` calls so far (the run budget), capped at `max_steps`.
+    /// Not guest instructions — with the block JIT one call can retire a whole
+    /// block; the reported cost metric is `guest_instret` (`Machine::instret`).
     steps: u64,
     max_steps: u64,
     /// The guest faulted/halted — no more frames will come.
@@ -516,13 +518,13 @@ impl View {
             .map(|live| String::from_utf8_lossy(live.machine.uart_output()).into_owned())
     }
 
-    /// Guest instructions this **live** view stepped — the deterministic cost of
-    /// reaching (or failing to reach) the scenario's assertion. `None` for the
-    /// QEMU / replay paths, which don't step a machine. This is the metric the
-    /// audit sorts by to find the CPU-heavy scenarios: unlike wall-clock it's
-    /// contention-free and reproducible.
-    pub(crate) fn steps_taken(&self) -> Option<u64> {
-        self.live.as_ref().map(|live| live.steps)
+    /// Guest instructions retired reaching (or failing to reach) the scenario's
+    /// assertion — the real `Machine::instret`, deterministic and engine-independent
+    /// (so it's comparable across JIT on/off, unlike the host step-call count, which
+    /// a block collapses). `None` for the QEMU / replay paths, which don't step a
+    /// machine. The metric the audit sorts by to find CPU-heavy scenarios.
+    pub(crate) fn guest_instret(&self) -> Option<u64> {
+        self.live.as_ref().map(|live| live.machine.instret())
     }
 
     /// Block up to `budget` for the guest's UART output to contain `needle`. This

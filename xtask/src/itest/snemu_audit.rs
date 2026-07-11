@@ -30,12 +30,13 @@ use super::{SCENARIOS, scenario_view_fn};
 use crate::snemu_diff;
 
 /// One scenario's audit row: its outcome plus the deterministic guest-instruction
-/// cost of reaching it. `steps` is what the slowest-scenario table sorts by —
-/// contention-free (unlike wall-clock), so it pinpoints where the CPU goes.
+/// cost of reaching it. `instret` (guest instructions retired) is what the
+/// slowest-scenario table sorts by — contention-free and engine-independent (unlike
+/// wall-clock or host step-calls), so it pinpoints where the CPU goes.
 struct Row {
     name: &'static str,
     outcome: Outcome,
-    steps: u64,
+    instret: u64,
 }
 
 /// One scenario's outcome under the live snemu run.
@@ -154,7 +155,7 @@ pub fn run(
         let boot_start = Instant::now();
         let snapshot = boot_snapshot(&kernel, &dtb, workload, idle_skip, native_ops, block_jit);
         worker_busy[worker].fetch_add(boot_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        let boot_steps = snapshot.as_ref().map_or(0, |(_, n)| *n);
+        let boot_instret = snapshot.as_ref().map_or(0, |(_, n)| *n);
         segments.lock().expect("segments mutex").push(Segment {
             kind: "boot",
             name: workload.unwrap_or("(default)").to_owned(),
@@ -162,12 +163,12 @@ pub fn run(
             worker,
             start_s,
             end_s: started.elapsed().as_secs_f64(),
-            instret: boot_steps,
+            instret: boot_instret,
             pass: true,
         });
-        (workload, snapshot.map(|(m, _)| m), boot_steps)
+        (workload, snapshot.map(|(m, _)| m), boot_instret)
     });
-    let boot_steps: u64 = booted.iter().map(|(_, _, n)| *n).sum();
+    let boot_instret: u64 = booted.iter().map(|(_, _, n)| *n).sum();
     let snapshots: std::collections::HashMap<Option<&str>, Result<snemu::machine::Machine, String>> =
         booted.into_iter().map(|(w, snap, _)| (w, snap)).collect();
 
@@ -204,7 +205,7 @@ pub fn run(
         };
         let scenario_start = Instant::now();
         let start_s = started.elapsed().as_secs_f64();
-        let (outcome, steps) = match machine {
+        let (outcome, instret) = match machine {
             Some(m) => run_scenario(m, s, max_steps),
             None => (
                 Outcome::Fail { why: "snemu load failed".to_owned(), console: String::new() },
@@ -221,7 +222,7 @@ pub fn run(
             worker,
             start_s,
             end_s: started.elapsed().as_secs_f64(),
-            instret: steps,
+            instret,
             pass,
         });
         let n = done.fetch_add(1, Ordering::SeqCst) + 1;
@@ -229,9 +230,9 @@ pub fn run(
             "snemu-itest: [{n:>3}/{cap}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s",
             s.name,
             if pass { "ok" } else { "FAIL" },
-            steps / 1_000_000,
+            instret / 1_000_000,
         );
-        (index, Row { name: s.name, outcome, steps })
+        (index, Row { name: s.name, outcome, instret })
     });
 
     // Restore selection order via each scenario's original index.
@@ -247,20 +248,27 @@ pub fn run(
     // durations it didn't touch).
     save_durations(&results);
 
+    // Counterfactual: re-pack this run's measured per-item wall-times across the
+    // workers with ideal (LPT) knowledge, to show how much of the makespan is
+    // packing slack vs. the irreducible pole — without needing a second run.
+    let segs = segments.into_inner().expect("segments mutex");
+    let durations: Vec<f64> = segs.iter().map(|s| s.end_s - s.start_s).collect();
+    let ideal_makespan = counterfactual_makespan(&durations, jobs);
+
     // Emit the machine-readable packing snapshot for the `viz/` renderer.
-    let scenario_instret: u64 = results.iter().map(|r| r.steps).sum();
+    let scenario_instret: u64 = results.iter().map(|r| r.instret).sum();
     write_packing_report(
         lpt,
         jobs,
         makespan,
-        scenario_instret + boot_steps,
-        boot_steps,
+        scenario_instret + boot_instret,
+        boot_instret,
         &worker_busy,
-        segments.into_inner().expect("segments mutex"),
+        segs,
     );
 
-    let exit = print_report(&results, boot_steps, makespan.as_secs_f64());
-    print_utilization(&worker_busy, makespan, lpt);
+    let exit = print_report(&results, boot_instret, makespan.as_secs_f64());
+    print_utilization(&worker_busy, makespan, lpt, ideal_makespan);
     exit
 }
 
@@ -322,7 +330,27 @@ fn write_packing_report(
 /// bottleneck's 100%; a low minimum means one core was left running a straggler
 /// while the others finished. Comparing this between `--no-lpt` and the default
 /// (LPT) is the A/B for the packing change.
-fn print_utilization(worker_busy: &[AtomicU64], makespan: Duration, lpt: bool) {
+/// Least-loaded-worker (LPT) simulation: given the measured per-item wall-times and
+/// the worker count, what makespan would ideal packing have produced? Sort longest
+/// first, greedily place each item on the currently-least-loaded worker, and take
+/// the peak load. This is the achievable ideal (LPT is within 4/3 of optimal), so
+/// `actual − ideal` is the packing slack — the wall-time a better packer could
+/// reclaim in the same conditions, without paying for a second run to find out.
+fn counterfactual_makespan(durations: &[f64], workers: usize) -> f64 {
+    let mut sorted: Vec<f64> = durations.to_vec();
+    sorted.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let mut loads = vec![0.0f64; workers.max(1)];
+    for d in sorted {
+        let least = loads
+            .iter_mut()
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .expect("at least one worker");
+        *least += d;
+    }
+    loads.into_iter().fold(0.0, f64::max)
+}
+
+fn print_utilization(worker_busy: &[AtomicU64], makespan: Duration, lpt: bool, ideal: f64) {
     let makespan_ns = makespan.as_nanos().max(1) as f64;
     let utils: Vec<f64> = worker_busy
         .iter()
@@ -344,6 +372,12 @@ fn print_utilization(worker_busy: &[AtomicU64], makespan: Duration, lpt: bool) {
     let mean = utils.iter().sum::<f64>() / utils.len() as f64;
     let min = utils.iter().copied().fold(f64::INFINITY, f64::min);
     println!("  mean {mean:.1}%, min {min:.1}%  (higher + tighter = better packing)");
+    let actual = makespan.as_secs_f64();
+    let slack = (actual - ideal).max(0.0);
+    println!(
+        "  ideal LPT re-pack: {ideal:.1}s  (actual {actual:.1}s — {slack:.1}s of packing slack \
+         reclaimable in the same conditions)"
+    );
 }
 
 /// Where per-scenario instret is cached between runs, to drive LPT packing. Repo
@@ -375,7 +409,7 @@ fn save_durations(results: &[Row]) {
         // already satisfied from the forked checkpoint's frame buffer — they're
         // legitimately cheap, and omitting them makes LPT mistake them for
         // unknown-and-therefore-heaviest next run.
-        durations.insert(r.name.to_owned(), r.steps);
+        durations.insert(r.name.to_owned(), r.instret);
     }
     let mut lines: Vec<(String, u64)> = durations.into_iter().collect();
     lines.sort_by_key(|(_, steps)| std::cmp::Reverse(*steps));
@@ -414,8 +448,11 @@ fn boot_snapshot(
     // Set on the snapshot; the per-scenario forks inherit it through `clone`.
     machine.set_native_ops(native_ops);
     machine.set_block_jit(block_jit);
-    let steps = machine.run_until_uart(CHECKPOINT, CHECKPOINT_BUDGET)?;
-    Ok((machine, steps))
+    machine.run_until_uart(CHECKPOINT, CHECKPOINT_BUDGET)?;
+    // Report the boot-once cost as guest instret (not host step calls) to match the
+    // per-scenario metric — a block collapses many instructions into one step.
+    let boot_instret = machine.instret();
+    Ok((machine, boot_instret))
 }
 
 /// Drive `scenario` against `machine` (a fresh or forked live machine), returning
@@ -433,7 +470,7 @@ fn run_scenario(
             console: console_tail(view.console_output().unwrap_or_default().as_str()),
         },
     };
-    (outcome, view.steps_taken().unwrap_or(0))
+    (outcome, view.guest_instret().unwrap_or(0))
 }
 
 /// Per-scenario step-budget override. Most scenarios reach their assertion well
@@ -475,10 +512,10 @@ fn budget_for(name: &str, default: u64) -> u64 {
 }
 
 /// Print the per-scenario pass/fail lines, the slowest-scenario table (where the
-/// CPU goes), and the headline "N/M pass" summary. `boot_steps` is the one-time
+/// CPU goes), and the headline "N/M pass" summary. `boot_instret` is the one-time
 /// per-workload snapshot-boot cost, folded into the honest total-instret figure
 /// (the per-scenario steps are post-fork only).
-fn print_report(results: &[Row], boot_steps: u64, elapsed_secs: f64) -> ExitCode {
+fn print_report(results: &[Row], boot_instret: u64, elapsed_secs: f64) -> ExitCode {
     let passed = results.iter().filter(|r| matches!(r.outcome, Outcome::Pass)).count();
     let total = results.len();
 
@@ -501,7 +538,7 @@ fn print_report(results: &[Row], boot_steps: u64, elapsed_secs: f64) -> ExitCode
         }
     }
 
-    print_slowest(results, boot_steps);
+    print_slowest(results, boot_instret);
 
     println!(
         "\n{passed}/{total} scenarios pass under snemu ({:.0}% fidelity, {elapsed_secs:.1}s)",
@@ -514,23 +551,23 @@ fn print_report(results: &[Row], boot_steps: u64, elapsed_secs: f64) -> ExitCode
 /// tail that floors the parallel wall-clock (no fan-out beats the single slowest
 /// one). Sorted by deterministic `steps`, so it's the same ranking every run and
 /// the honest target list for "assert the same thing for less CPU".
-fn print_slowest(results: &[Row], boot_steps: u64) {
+fn print_slowest(results: &[Row], boot_instret: u64) {
     const TOP: usize = 12;
-    let mut ranked: Vec<&Row> = results.iter().filter(|r| r.steps > 0).collect();
-    ranked.sort_unstable_by_key(|r| std::cmp::Reverse(r.steps));
+    let mut ranked: Vec<&Row> = results.iter().filter(|r| r.instret > 0).collect();
+    ranked.sort_unstable_by_key(|r| std::cmp::Reverse(r.instret));
     if ranked.is_empty() {
         return;
     }
     // Total = per-scenario fork-forward instructions + the one-time boot-once
     // cost (paid per workload, not per scenario). The scenario steps are post-fork
     // only, so the boot line makes the north-star figure honest.
-    let scenario_total: u64 = ranked.iter().map(|r| r.steps).sum();
-    let total = scenario_total + boot_steps;
+    let scenario_total: u64 = ranked.iter().map(|r| r.instret).sum();
+    let total = scenario_total + boot_instret;
     println!("\n=== slowest by guest instructions (Minstret; {}M total, {}M boot-once) ===",
-        total / 1_000_000, boot_steps / 1_000_000);
+        total / 1_000_000, boot_instret / 1_000_000);
     for r in ranked.iter().take(TOP) {
-        let pct = if total == 0 { 0.0 } else { 100.0 * r.steps as f64 / total as f64 };
-        println!("  {:>7}M  {:>4.1}%  {}", r.steps / 1_000_000, pct, r.name);
+        let pct = if total == 0 { 0.0 } else { 100.0 * r.instret as f64 / total as f64 };
+        println!("  {:>7}M  {:>4.1}%  {}", r.instret / 1_000_000, pct, r.name);
     }
 }
 

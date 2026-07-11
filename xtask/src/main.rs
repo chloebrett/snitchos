@@ -131,7 +131,7 @@ enum Cmd {
         /// Enable the Tier-2 block JIT (M6): compile + run hot basic blocks. A/B it
         /// against off while ISA coverage expands — on vs off must stay green +
         /// byte-identical guest instret (the oracle), only faster.
-        #[arg(long)]
+        #[arg(long = "jit")]
         block_jit: bool,
     },
     /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
