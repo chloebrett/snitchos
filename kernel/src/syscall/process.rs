@@ -29,7 +29,10 @@ pub(super) fn handle_exit(frame: &TrapFrame) -> ! {
         crate::sched::wake(parent);
     }
 
-    crate::sched::exit_now()
+    // Owned by the REAP table: the zombie persists (holding `status`) until the
+    // parent `Wait`s + `reap_task`s it — so exit via the *owned* path, which does
+    // not mark the task ownerless for the heartbeat sweep.
+    crate::sched::exit_now_owned()
 }
 
 /// Wait for a child to exit and return its status (v0.12). `a0` = the child's

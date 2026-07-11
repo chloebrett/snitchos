@@ -176,6 +176,10 @@ pub fn run(metrics: Metrics) -> ! {
             #[cfg(feature = "itest-workloads")]
             emit_storm_metrics(&metrics, count);
         }
+        // Reclaim fire-and-forget kernel tasks that have exited — drops their
+        // `Box<Task>` and returns each stack slot to the mapped pool. In the
+        // heartbeat (not the switch path); the pool makes the drop shootdown-free.
+        sched::reap_ownerless_exited();
         sched::yield_now();
     }
 }

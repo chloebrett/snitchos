@@ -75,3 +75,24 @@ scales — the O(1) proof under a large *live* table, independent of the leak fi
 3. `exit_now` auto-reap + `exit_now_owned` split; deferred pending-reap. (B) done.
 4. `live-tasks` workload + `sched-task-lookup-is-o1` scenario + probe-constant assert.
 5. Re-profile spawn-storm; confirm `prepare_switch` share collapses.
+
+## Outcome (both landed)
+
+**(A) O(1) lookup — done, mutation-proven.** `TaskDirectory` (unit-tested) replaced
+the scans; `prepare_switch` went **66% → 19%** of spawn-storm instret (profiler).
+`sched-task-lookup-is-o1` (workload `live-tasks`, 200 loop-yield tasks) asserts
+probes/switch ≤ 4; observed **2.0**. Killed mutant: reverting `task_mut` to a scan
+→ **79.9** probes/switch, that scenario fails while behavioural tests pass.
+
+**(B) reap — done via the stack-slot pool (not per-reap unmap).** The first cut
+reaped by dropping `KernelStack`, whose `teardown` does `mmu::unmap` + a cross-hart
+TLB **shootdown** per page — run from the heartbeat sweep it *wedged* cross-hart
+(`rpc/ipc-telemetry`, `heartbeat-cadence`, `kernel-heap-metrics` hung to budget). Fix:
+`MAPPED_STACK_POOL` — `Drop` returns the slot **mapped** to a pool (no unmap, no
+shootdown); `new` reuses a pooled slot (no map). Reclamation is now a cheap slot
+push, so the heartbeat's `reap_ownerless_exited` sweep (ownerless kernel tasks only;
+userspace stays owned by `Wait`) can't wedge. Mapped-stack memory is bounded by
+*peak concurrent* tasks, reused. Bonus: the userspace `reap_task` path is now
+shootdown-free too. After (B), `TaskDirectory::slot_of` drops out of the spawn-storm
+profile entirely (table no longer accumulates zombies). Release **110/110 ~4.3s**;
+debug 108/110 (only the two supervision-blocked scenarios).

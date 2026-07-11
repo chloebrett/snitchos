@@ -113,7 +113,13 @@ fn build_and_embed_user(kernel_dir: &str) {
             // whole class. The kernel itself stays at the workspace release
             // opt-level (3). Root-causing the userspace UB is a separate follow-up
             // (see notes/release-build-exposes-timer-death-and-uart-corruption.md).
-            cmd.args(["--config", "profile.release.opt-level=1"]);
+            //
+            // `SNITCHOS_USERSPACE_OPT` overrides the pin — `snemu-itest --opt=high`
+            // sets it to `3` to *reproduce* the UB class on purpose (vs `--opt=mid`,
+            // which leaves it unset and gets the safe opt-1). `rerun-if-env-changed`
+            // (in `main`) rerebuilds when flicking between the two.
+            let us_opt = std::env::var("SNITCHOS_USERSPACE_OPT").unwrap_or_else(|_| "1".into());
+            cmd.args(["--config", &format!("profile.release.opt-level={us_opt}")]);
         }
         // Don't leak the outer kernel build's flags into the user build — let it
         // resolve config exactly like a standalone `cargo build -p hello`.

@@ -115,6 +115,17 @@ pub const STACK_SIZE: usize = kernel_core::stack::STACK_BYTES;
 static STACK_SLOTS: Mutex<kernel_core::stack::SlotAllocator> =
     Mutex::new(kernel_core::stack::SlotAllocator::new());
 
+/// Pool of window slots that are **mapped but idle** — freed by a task's `Drop`
+/// and ready to be handed to the next [`KernelStack::new`] with their mappings
+/// intact. This is what lets stack reclamation skip `mmu::unmap` (and its
+/// cross-hart TLB shootdown) entirely: a reaped stack's slot goes back here rather
+/// than being torn down, and the next spawn reuses it — no map, no unmap, no
+/// shootdown. Mapped-stack memory is bounded by *peak concurrent* tasks (the pool
+/// caps at the high-water mark), not by lifetime spawn count. `Drop` pushes; `new`
+/// pops (re-sentinel-filling for the high-water gauge). See
+/// `plans/scheduler-o1-task-lookup.md`.
+static MAPPED_STACK_POOL: Mutex<alloc::vec::Vec<usize>> = Mutex::new(alloc::vec::Vec::new());
+
 /// Install the kstack window's root-level page-table subtree (root PTE 257) in the
 /// kernel root **before any user address space is created**, so
 /// [`crate::mmu::new_user_root`]'s high-half copy captures it and every process
@@ -150,6 +161,14 @@ impl KernelStack {
     /// sentinel-fill them for the high-water gauge. `None` if the window or the
     /// frame allocator is exhausted; a partial mapping is rolled back.
     fn new() -> Option<KernelStack> {
+        // Reuse a mapped-but-idle slot from the pool if one's available — its pages
+        // are already mapped, so no `mmu::map` (and no shootdown) is needed. Just
+        // re-fill the overflow sentinel and hand it out.
+        if let Some(slot) = MAPPED_STACK_POOL.lock().pop() {
+            let mut stack = KernelStack { slot };
+            stack.fill_sentinel();
+            return Some(stack);
+        }
         let slot = STACK_SLOTS.lock().alloc()?;
         let base = kernel_core::stack::slot_stack_base_va(slot);
         let perms = kernel_core::mmu::PtePerms::R.union(kernel_core::mmu::PtePerms::W);
@@ -229,7 +248,11 @@ impl KernelStack {
 
 impl Drop for KernelStack {
     fn drop(&mut self) {
-        Self::teardown(self.slot, kernel_core::stack::STACK_PAGES);
+        // Return the slot to the mapped pool — do NOT unmap. Keeping the pages
+        // mapped is what avoids the cross-hart TLB shootdown `mmu::unmap` would fire
+        // (which, run from a reap, wedged the heartbeat). The next `new` reuses it.
+        // Bounded: the pool caps at peak concurrent tasks, and the memory is reused.
+        MAPPED_STACK_POOL.lock().push(self.slot);
     }
 }
 
@@ -247,6 +270,12 @@ pub struct Task {
     /// `Ready` / `Running` distinctions aren't currently load-bearing
     /// outside the runqueue, but the value is correct.
     pub state: TaskState,
+    /// `true` for a fire-and-forget kernel task that exits via [`exit_now`] with no
+    /// one to `Wait` on it. Once it reaches `Exited`, the heartbeat's
+    /// [`reap_ownerless_exited`] sweep reclaims it (drops its `Box<Task>`; the
+    /// stack's slot returns to [`MAPPED_STACK_POOL`], no unmap/shootdown). Userspace
+    /// processes exit `owned` (`ownerless == false`): a parent `Wait` reaps them.
+    pub ownerless: bool,
     pub span_cursor: SpanCursor,
     /// The user address space this task runs in: the root page-table PA,
     /// or `0` for a kernel task (`main`/`idle`), which runs under whatever
@@ -353,6 +382,7 @@ impl Task {
             id,
             name,
             state,
+            ownerless: false,
             span_cursor: SpanCursor::new(),
             address_space: AtomicUsize::new(0),
             process: AtomicPtr::new(core::ptr::null_mut()),
@@ -1093,14 +1123,14 @@ pub fn maybe_preempt(from_user: bool) {
     }
 }
 
-/// Terminate the calling task. Marks it `Exited`, picks the next
-/// ready task on this hart, and switches into it via the load-only
-/// `switch_into` asm. Never returns.
+/// Terminate the calling (kernel) task. Marks it `Exited`, picks the next ready
+/// task on this hart, and switches into it via the load-only `switch_into` asm.
+/// Never returns.
 ///
-/// The exited task's `Box<Task>` and `Box<Stack>` remain allocated
-/// in `SCHEDULER.tasks` — v0.5.x minimal-scope variant; reaping
-/// lands later. `task_count` and `task_snapshots` filter out
-/// `Exited` entries so the heartbeat doesn't keep reporting them.
+/// The task is **ownerless** (nothing will `Wait` on it), so the heartbeat's
+/// [`reap_ownerless_exited`] sweep reclaims it once it's `Exited` — its `Box<Task>`
+/// is dropped and its stack slot returns to the pool. Fire-and-forget kernel tasks
+/// (storm workers, demo tasks) that used to leak are now reclaimed.
 ///
 /// Open spans on the calling task's cursor are NOT auto-closed —
 /// the caller must balance them first. The cursor itself becomes
@@ -1112,6 +1142,30 @@ pub fn maybe_preempt(from_user: bool) {
 /// to switch into. Storm scenarios ensure `hart_1_main` stays on
 /// hart 1's queue specifically to keep this invariant.
 pub fn exit_now() -> ! {
+    exit_now_inner(true)
+}
+
+/// Like [`exit_now`], but the task is **owned** by the `REAP` table — a userspace
+/// process whose parent will `Wait` and [`reap_task`] it. Does *not* mark it
+/// ownerless, so the zombie persists (holding its exit status) until the parent
+/// collects it.
+pub fn exit_now_owned() -> ! {
+    exit_now_inner(false)
+}
+
+/// Shared exit path. `auto_reap` marks the task ownerless (heartbeat sweep reclaims
+/// it) vs. leaving the zombie for a parent `Wait`.
+fn exit_now_inner(auto_reap: bool) -> ! {
+    // Flag ourselves ownerless before switching away; the heartbeat sweep reclaims
+    // us once `prepare_switch` sets `Exited`. (We can't drop our own stack here —
+    // the sweep does it later, and with the pool that drop is just a slot push.)
+    if auto_reap {
+        let current_id = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
+        if let Some(task) = SCHEDULER.lock().task_mut(current_id) {
+            task.ownerless = true;
+        }
+    }
+
     // `empty_ok = false`: a terminating task has nowhere to fall back to, so an
     // empty runqueue is fatal (prepare_switch panics rather than returning).
     // The switch carries `SwitchReason::Exit` so an exit is distinguishable from
@@ -1121,12 +1175,39 @@ pub fn exit_now() -> ! {
         .expect("prepare_switch with empty_ok=false returns Some or panics");
 
     // SAFETY: `next_ctx` points at the `UnsafeCell<TaskContext>` of a live
-    // `Box<Task>` in `SCHEDULER.tasks`. The exiting task's stack is abandoned,
-    // but its `Box<Task>` is leaked (not freed), so no dangling reference. The
-    // load-only `switch_into` `ret`s into the next task on its own stack — the
-    // calling task's `sp` is gone the instant it writes the new one, so we
-    // never save the exiting context. Never returns.
+    // `Box<Task>` in `SCHEDULER.tasks`. The exiting task's stack is abandoned but
+    // still mapped until the sweep reclaims it; no dangling reference. The load-only
+    // `switch_into` `ret`s into the next task on its own stack — the calling task's
+    // `sp` is gone the instant it writes the new one, so we never save the exiting
+    // context. Never returns.
     unsafe { switch_into(next_ctx) }
+}
+
+/// Reclaim every **ownerless** task that has reached `Exited` — the fire-and-forget
+/// kernel tasks (storm workers, demo tasks) that [`exit_now`] flagged. Called from
+/// the heartbeat, a safe non-switch context. With the mapped-stack pool each task's
+/// `Drop` is cheap (a slot push, no `mmu::unmap`/shootdown), so the sweep can't wedge
+/// on a cross-hart ack. Without it these tasks leak (`Box<Task>` + a stack slot each)
+/// and bloat every task-table scan. Owned (userspace) exits are reaped by parent
+/// `Wait` instead.
+///
+/// Two-phase to keep `Drop` off the scheduler lock (as [`reap_task`]): collect victim
+/// ids under the lock, then reclaim each with `swap_remove_task` under the lock but
+/// drop the `Box` *after* releasing it.
+pub fn reap_ownerless_exited() {
+    let victims: alloc::vec::Vec<TaskId> = {
+        let sched = SCHEDULER.lock();
+        sched
+            .tasks
+            .iter()
+            .filter(|t| t.ownerless && t.state == TaskState::Exited)
+            .map(|t| t.id)
+            .collect()
+    };
+    for id in victims {
+        let reaped = SCHEDULER.lock().swap_remove_task(id);
+        drop(reaped); // off-lock; `KernelStack::Drop` just returns the slot to the pool.
+    }
 }
 
 /// Block the calling task: mark it `Blocked`, switch to the next ready task
