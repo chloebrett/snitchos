@@ -14,6 +14,11 @@ pub enum BusError {
 #[derive(Clone)]
 pub struct Memory {
     ram: Vec<u8>,
+    /// Highest byte offset (past-the-end) ever written, for right-sizing the machine:
+    /// it's the guest's RAM footprint (the smallest RAM that would still fit it).
+    /// Reset after the ELF/DTB load so it tracks only *guest execution* writes, not
+    /// the loader placing the image (which puts the DTB near the top).
+    high_water: u64,
 }
 
 /// Generates a little-endian read/write pair backed by [`Memory::span`].
@@ -28,6 +33,7 @@ macro_rules! accessors {
 
         pub fn $write(&mut self, addr: u64, value: $ty) -> Result<(), BusError> {
             let span = self.span(addr, $len)?;
+            self.high_water = self.high_water.max(span.end as u64);
             self.ram[span].copy_from_slice(&value.to_le_bytes());
             Ok(())
         }
@@ -37,14 +43,29 @@ macro_rules! accessors {
 impl Memory {
     #[must_use]
     pub fn new(size: usize) -> Self {
-        Self { ram: vec![0; size] }
+        Self { ram: vec![0; size], high_water: 0 }
     }
 
-    /// Copy `bytes` into RAM starting at `addr` (used by the ELF loader).
+    /// Copy `bytes` into RAM starting at `addr` (the ELF loader, or a guest bulk
+    /// write like a native `memset`/virtio DMA).
     pub(crate) fn write_bytes(&mut self, addr: u64, bytes: &[u8]) -> Result<(), BusError> {
         let span = self.span(addr, bytes.len())?;
+        self.high_water = self.high_water.max(span.end as u64);
         self.ram[span].copy_from_slice(bytes);
         Ok(())
+    }
+
+    /// Guest RAM footprint: the highest byte offset ever written (past-the-end),
+    /// i.e. the smallest machine that would still hold everything the guest touched.
+    #[must_use]
+    pub fn high_water(&self) -> u64 {
+        self.high_water
+    }
+
+    /// Reset the write high-water — called after the ELF/DTB load so the mark tracks
+    /// only guest-execution writes (the loader placed the DTB near the top of RAM).
+    pub(crate) fn reset_high_water(&mut self) {
+        self.high_water = 0;
     }
 
     accessors!(read_u8, write_u8, u8, 1);

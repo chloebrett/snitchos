@@ -178,6 +178,9 @@ fn load_memory(
         None => None,
     };
 
+    // The image + DTB are placed; from here the write high-water tracks only guest
+    // execution (so it's a true RAM footprint, not skewed by the DTB near the top).
+    mem.reset_high_water();
     Ok((mem, entry_pa.unwrap_or(entry), dtb_addr))
 }
 

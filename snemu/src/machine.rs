@@ -442,6 +442,13 @@ impl Machine {
         self.time
     }
 
+    /// Guest RAM footprint so far — the highest byte the guest has written (past the
+    /// ELF/DTB load). Used to right-size the machine: the smallest RAM that still fits.
+    #[must_use]
+    pub fn ram_high_water(&self) -> u64 {
+        self.bus.ram().high_water()
+    }
+
     /// Total supervisor timer interrupts delivered across all harts (diagnostic).
     #[must_use]
     pub fn timer_fires(&self) -> u64 {

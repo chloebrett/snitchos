@@ -617,22 +617,24 @@ pub(crate) fn collect_workload_frames(
 /// decode cache on). The interactive audit builds a live `View` over this and
 /// steps it per scenario, so each scenario gets its own machine to drive with
 /// its own console input.
-/// RAM (MiB) a workload's machine boots with. Most run on the default; the
-/// `frame-oom` workload runs on a **smaller** machine on purpose.
-///
-/// The reason is coverage, not speed: SnitchOS should work regardless of physical
-/// RAM, so we boot at least one workload on a genuinely small machine and exercise
-/// the whole boot + frame-allocator + gradual-OOM path on a small pool. (The
-/// allocator is now O(1) — `kernel_core::mem::frame::Bitmap` — so the small pool is
-/// only marginally cheaper to exhaust; before that fix it was a large,
-/// quadratic win, but that's no longer why we keep it.)
+/// RAM (MiB) a workload's machine boots with. The default is deliberately **small**
+/// (SnitchOS should work on modest RAM, and a small machine makes per-scenario
+/// fork-clones cheaper) — the `snemu-itest` RAM right-sizing report confirms most
+/// scenarios' peak footprint is well under it. The `frame-oom` workload is pinned
+/// **large** as the suite's one large-RAM coverage point: it leaks frames until the
+/// pool is exhausted, so on a big machine it genuinely fills ~all of it, exercising
+/// the large frame bitmap + high-address frame handling the small default never hits.
 ///
 /// Shared with the QEMU harness (`-m`) so **both** engines run the identical
 /// machine — the test is only meaningful if snemu and QEMU agree on the RAM size.
 pub(crate) fn ram_mb_for(workload: Option<&str>) -> u32 {
-    const DEFAULT_MB: u32 = 128;
+    // Right-sized from the `snemu-itest` RAM report: every scenario except the two
+    // OOM-teeth workloads peaks at ≤12 MiB of guest footprint, so 16 MiB is ~1.3×
+    // headroom — keeping fork-clones cheap without crowding any real usage.
+    const DEFAULT_MB: u32 = 16;
     match workload {
-        Some("frame-oom") => 48,
+        // Large-RAM coverage: frame-oom fills whatever pool it's given before OOMing.
+        Some("frame-oom") => 128,
         // `spawn-reap`'s leak-vs-reclaim teeth need the children's total (15 × 4 MiB
         // = 60 MiB) to exceed RAM. On a small machine that holds with margin (60 >
         // 48) *and* halves the child count — so the per-spawn frame-zeroing `memset`

@@ -40,6 +40,11 @@ struct Row {
     /// Wall-clock seconds this scenario took — the LPT order predictor by default
     /// (the true optimisation target), with `instret` the deterministic alternative.
     wall_s: f64,
+    /// Peak guest RAM footprint (bytes) vs. the machine RAM (MiB) it was allocated,
+    /// for the right-sizing report, keyed by workload (RAM is set per workload).
+    ram_used_bytes: u64,
+    ram_alloc_mb: u32,
+    workload: Option<&'static str>,
 }
 
 /// One scenario's outcome under the live snemu run.
@@ -238,10 +243,11 @@ pub fn run(
         };
         let scenario_start = Instant::now();
         let start_s = started.elapsed().as_secs_f64();
-        let (outcome, instret) = match machine {
+        let (outcome, instret, ram_used_bytes) = match machine {
             Some(m) => run_scenario(m, s, max_steps),
             None => (
                 Outcome::Fail { why: "snemu load failed".to_owned(), console: String::new() },
+                0,
                 0,
             ),
         };
@@ -260,12 +266,23 @@ pub fn run(
         });
         let n = done.fetch_add(1, Ordering::SeqCst) + 1;
         eprintln!(
-            "snemu-itest: [{n:>3}/{cap}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s",
+            "snemu-itest: [{n:>3}/{cap}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s  {:>4}/{}MiB",
             s.name,
             if pass { "ok" } else { "FAIL" },
             instret / 1_000_000,
+            ram_used_bytes / (1024 * 1024),
+            snemu_diff::ram_mb_for(s.workload),
         );
-        (index, Row { name: s.name, outcome, instret, wall_s: wall })
+        let ram_alloc_mb = snemu_diff::ram_mb_for(s.workload);
+        (index, Row {
+            name: s.name,
+            outcome,
+            instret,
+            wall_s: wall,
+            ram_used_bytes,
+            ram_alloc_mb,
+            workload: s.workload,
+        })
     });
 
     // Restore selection order via each scenario's original index.
@@ -311,6 +328,7 @@ pub fn run(
 
     let exit = print_report(&results, boot_instret, makespan.as_secs_f64());
     print_utilization(&worker_busy, makespan, order, ideal_wall, ideal_instret);
+    print_ram_sizing(&results);
     exit
 }
 
@@ -400,6 +418,54 @@ fn phase_ideal(segs: &[Segment], kind: &str, workers: usize, by_wall: bool) -> f
         })
         .collect();
     counterfactual_makespan(&items, workers)
+}
+
+/// Per-**workload** right-sizing: RAM is set per workload (`ram_mb_for`), so a
+/// machine must fit its *heaviest* scenario. Aggregates each workload's peak guest
+/// footprint and flags workloads whose machine is >1.5× that peak (shrink
+/// candidates) or <1.1× it (tight — do not shrink). `used` here is the max over the
+/// workload's scenarios; `n` is how many ran.
+fn print_ram_sizing(results: &[Row]) {
+    let mb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+    // workload → (peak used bytes, alloc MiB, scenario count).
+    let mut by_workload: std::collections::BTreeMap<Option<&str>, (u64, u32, u32)> =
+        std::collections::BTreeMap::new();
+    for r in results.iter().filter(|r| r.ram_used_bytes > 0) {
+        let e = by_workload.entry(r.workload).or_insert((0, r.ram_alloc_mb, 0));
+        e.0 = e.0.max(r.ram_used_bytes);
+        e.2 += 1;
+    }
+    let line = |w: Option<&str>, used: u64, alloc: u32, n: u32, tag: &str| {
+        println!(
+            "  {:<24} peak {:>5.1} of {:>3} MiB  ({:.1}× · {n} scn)  {tag}",
+            w.unwrap_or("(default/init)"),
+            mb(used),
+            alloc,
+            f64::from(alloc) / mb(used).max(1.0),
+        );
+    };
+    let mut over: Vec<_> = by_workload
+        .iter()
+        .filter(|(_, (used, alloc, _))| f64::from(*alloc) > 1.5 * mb(*used))
+        .collect();
+    over.sort_by(|a, b| {
+        let hr = |(used, alloc, _): &(u64, u32, u32)| f64::from(*alloc) / mb(*used).max(1.0);
+        hr(b.1).partial_cmp(&hr(a.1)).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let tight: Vec<_> = by_workload
+        .iter()
+        .filter(|(_, (used, alloc, _))| mb(*used) > 0.9 * f64::from(*alloc))
+        .collect();
+    if over.is_empty() && tight.is_empty() {
+        return;
+    }
+    println!("\n=== RAM right-sizing (per-workload peak footprint vs allocated machine) ===");
+    for (w, (used, alloc, n)) in over {
+        line(*w, *used, *alloc, *n, "shrinkable");
+    }
+    for (w, (used, alloc, n)) in tight {
+        line(*w, *used, *alloc, *n, "⚠ do NOT shrink");
+    }
 }
 
 fn print_utilization(
@@ -543,7 +609,7 @@ fn run_scenario(
     machine: snemu::machine::Machine,
     scenario: &itest_harness::Scenario,
     max_steps: u64,
-) -> (Outcome, u64) {
+) -> (Outcome, u64, u64) {
     let mut view = View::live(machine, budget_for(scenario.name, max_steps));
     let outcome = match scenario_view_fn(scenario.name)(&mut view) {
         Ok(()) => Outcome::Pass,
@@ -552,7 +618,7 @@ fn run_scenario(
             console: console_tail(view.console_output().unwrap_or_default().as_str()),
         },
     };
-    (outcome, view.guest_instret().unwrap_or(0))
+    (outcome, view.guest_instret().unwrap_or(0), view.ram_high_water().unwrap_or(0))
 }
 
 /// Per-scenario step-budget override. Most scenarios reach their assertion well

@@ -529,6 +529,12 @@ impl View {
         self.live.as_ref().map(|live| live.machine.instret())
     }
 
+    /// Peak guest RAM footprint (`Machine::ram_high_water`) reaching the scenario's
+    /// assertion — for right-sizing each workload's machine. `None` for QEMU/replay.
+    pub(crate) fn ram_high_water(&self) -> Option<u64> {
+        self.live.as_ref().map(|live| live.machine.ram_high_water())
+    }
+
     /// Block up to `budget` for the guest's UART output to contain `needle`. This
     /// is how a scenario asserts on-target **console output** (`ConsoleWrite` →
     /// UART), which — unlike `DebugWrite` — never becomes a telemetry frame, so
