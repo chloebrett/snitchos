@@ -3322,6 +3322,47 @@ pub fn init_supervises_a_child(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Supervision step 2 — the generic supervisor engine (`workload=supervised`).
+/// The `supervised` root walks a data-driven service table: it brings `spinner`
+/// (long-lived) and `crasher` (`spawnee`, which exits 42) up in dependency order,
+/// reaps via `WaitAny`, and consults the pure `supervision` policy on each exit.
+/// `crasher` fails every incarnation, so the engine restarts it (backoff) until
+/// it crash-loops past its intensity budget, at which point the policy returns
+/// `Escalate` and the root halts. Asserts the restart path ran (restarts_total
+/// climbed) and then the intensity guard tripped (`escalated == 1`) — proving
+/// bring-up, the `WaitAny` loop, `restart_decision`'s Restart branch, and its
+/// Escalate branch, end to end on the wire.
+pub fn supervised_restarts_then_escalates(h: &mut View) -> Result<(), String> {
+    // The engine spawned the crasher — it registers as a `spawnee` task. Proof
+    // the service table was ordered and brought up.
+    h.wait_for(SEC * 20, is_thread_register_named("spawnee"))
+        .ok_or("no ThreadRegister for 'spawnee' — the supervisor didn't bring up its crasher service")?;
+
+    // The crasher failed and was restarted at least once — `restart_decision`
+    // returned Restart and the engine re-spawned it.
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.svc.crasher.restarts_total")
+                && *value >= 1
+        }
+        _ => false,
+    })
+    .ok_or("no svc.crasher.restarts_total >= 1 — the supervisor didn't restart the failed service")?;
+
+    // It kept crash-looping past its intensity budget, so the policy escalated
+    // and the root halted — the storm guard, observable on the wire.
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.svc.crasher.escalated")
+                && *value == 1
+        }
+        _ => false,
+    })
+    .ok_or("no svc.crasher.escalated == 1 — the intensity guard never tripped Escalate")?;
+
+    Ok(())
+}
+
 /// v0.13 `EndpointCreate` — a process manufactures its own IPC endpoint and gets
 /// back a real *owning* capability (`workload=endpoint-create`). `ep_maker`
 /// creates an endpoint, then mints a badged `SEND` cap on it; minting requires the
