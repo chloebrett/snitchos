@@ -59,6 +59,7 @@
 | rpc-telemetry | ipc-rpc | wfi | userspace, ipc |
 | rpc-trace-nests | ipc-rpc | wfi | userspace, ipc |
 | ipi-pong | ipi-pong | cpu | smp, ipi, stress |
+| sched-task-lookup-is-o1 | live-tasks | cpu | sched |
 | manifest-iface-served | manifest-iface | wfi | userspace, fs |
 | manifest-satisfy-attenuates | manifest-satisfy | wfi | userspace, fs |
 | manifest-satisfy-grants-by-name | manifest-satisfy | wfi | userspace, fs |
