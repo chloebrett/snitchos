@@ -286,12 +286,15 @@ nothing evaluates surface `Expr` after the cut, keeping the names `eval`/`eval_t
 - `eval`'s match became total over `CoreExprKind`; the old `_ =>` "not implemented"
   fallback is replaced by an explicit `Spread` error (spread is arg-position only).
 
-**Follow-up cleanup (behavior-neutral, deferred):** the 6 in-place `lower_program(&mut …)`
-calls in the entry points + REPL are now **redundant** (func bodies lower via
-`lower_expr_to_core`; methods lower on-the-fly), and surface `free_vars`/`lower` are
-orphaned. Safe to delete in a follow-up (all downstream consumers —
-`collect_exports`/`manifest_of_main`/`check_coherence`/`link_imports` — read item
-names/types, not expr bodies). Left in place to keep this cutover's diff tight.
+**Follow-up cleanup — ✅ DONE (2026-07-11).** Removed all **9** redundant in-place
+`lower_program(&mut …)` calls (turned out to be 9, not 6 — every entry point in
+`interp.rs` + `runner.rs` + `stim.rs`); each sat right before `register_items`/
+`build_env`, which re-lowers each body via `lower_expr_to_core` (the sole desugar path
+— confirmed `build_env_batches` registers only through `register_items`, and
+`Item::Const` currently produces no runtime value, so nothing depended on the pre-pass).
+Deleted the orphaned surface `free_vars` + its private `collect_free_vars` (~130 lines)
+and the `lower` wrapper. `lower_program` the fn stays — still used by the `memory_churn`
+leak-guard integration test. 585 lib + integration green, no new clippy.
 
 **Mutation (deferred from C3):** `to_core` + the desugars now get strong behavioral
 coverage — every construct in the 564-suite is evaluated through `lower_expr_to_core`
@@ -553,9 +556,9 @@ type system (downstream of it), not on the VM. *(Its own plan when started.)*
 
 ## Pre-PR Quality Gate (each phase)
 
-1. Mutation testing (`mutation-testing` skill) on the phase's Rust — **fix the
-   `xtask mutants` package list to include `-p stitch`** (currently omitted; found
-   during stim Step 1.1).
+1. Mutation testing (`mutation-testing` skill) on the phase's Rust. `xtask mutants`
+   now includes `-p stitch` with `--features protocol/std,stitch/testing` (fixed
+   2026-07-11; package+feature set verified to compile).
 2. Refactoring assessment (`refactoring` skill).
 3. `cargo xtask clippy` + full `stitch` suite green.
 
