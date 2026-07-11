@@ -290,10 +290,16 @@ fn emit_sched_metrics(m: &Metrics) {
     emit!(m, sched_runqueue_depth = sched_snap.runqueue_depth);
     emit!(m, sched_tasks_total    = sched_snap.tasks_total);
     emit!(m, sched_yield_overhead = sched::LAST_YIELD_OVERHEAD_TICKS.load(Ordering::Relaxed));
-    // Per-task metrics: skipped under the spawn storm, which uses
-    // sentinel StringIds for these (see Task::new_bare) — emitting
+    // Per-task metrics: skipped under the spawn storm and live-tasks workloads,
+    // which use sentinel StringIds for these (see Task::new_bare) — emitting
     // against id 0 would mis-tag whichever name id 0 is.
-    if boot_workload::selected() != Some(kernel_core::bootargs::WorkloadKind::SpawnStorm) {
+    if !matches!(
+        boot_workload::selected(),
+        Some(
+            kernel_core::bootargs::WorkloadKind::SpawnStorm
+                | kernel_core::bootargs::WorkloadKind::LiveTasks
+        )
+    ) {
         for snap in sched::task_snapshots() {
             tracing::emit_metric(snap.cpu_time_metric, snap.cpu_time_ticks as i64);
             tracing::emit_metric(snap.runs_metric, snap.runs as i64);

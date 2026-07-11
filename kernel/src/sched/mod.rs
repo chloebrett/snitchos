@@ -328,9 +328,13 @@ impl Task {
         // workload, so a sentinel StringId is fine. (`boot_workload::selected()`
         // is set in `kmain` before any task is created.)
         let (cpu_time_metric, runs_metric, stack_high_water_metric) =
-            if crate::boot_workload::selected()
-                == Some(kernel_core::bootargs::WorkloadKind::SpawnStorm)
-            {
+            if matches!(
+                crate::boot_workload::selected(),
+                Some(
+                    kernel_core::bootargs::WorkloadKind::SpawnStorm
+                        | kernel_core::bootargs::WorkloadKind::LiveTasks
+                )
+            ) {
                 (protocol::StringId(0), protocol::StringId(0), protocol::StringId(0))
             } else {
                 (

@@ -411,7 +411,7 @@ pub(super) fn handle_endpoint_create(frame: &mut TrapFrame) {
         0, // self-created endpoint: a derivation-tree root
     );
 
-    crate::tracing::emit_cap_granted(
+    crate::tracing::emit_cap_minted(
         cap_id,
         crate::sched::current_task_id().0,
         protocol::CapObject::Endpoint,

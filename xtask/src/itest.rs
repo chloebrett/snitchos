@@ -209,6 +209,7 @@ catalog! {
     cpu "shootdown-storm"                 scenarios::shootdown_storm                [smp, stress]   {"shootdown-storm"};
     cpu "smp-tlb-shootdown-visible"       scenarios::smp_tlb_shootdown_visible      [smp]           {"tlb-shootdown"};
     cpu "smp-ping-pong-cadence"           scenarios::smp_ping_pong_cadence          [smp, ipi]      {"ping-pong"};
+    cpu "sched-task-lookup-is-o1"         scenarios::sched_task_lookup_is_o1        [sched]         {"live-tasks"};
     wfi "sched-task-exits-cleanly"        scenarios::sched_task_exits_cleanly       [sched]         {"demo"};
     wfi "task-stack-high-water"           scenarios::task_stack_high_water_reported [sched]         {"demo"};
     wfi "default-boot-starts-init"        scenarios::default_boot_starts_init       [boot];

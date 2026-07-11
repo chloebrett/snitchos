@@ -32,6 +32,29 @@ fn fence_via_uart_lsr() {
     unsafe { core::ptr::read_volatile(lsr as *const u8) };
 }
 
+pub mod live_tasks {
+    //! Many long-**lived** tasks (`workload=live-tasks`): spawn `N` tasks that each
+    //! loop-`yield_now` forever (never exit), so the scheduler's task table holds `N`
+    //! *live* entries and every context switch resolves two of them by id. Stresses
+    //! the O(1) `TaskDirectory` lookup with a large live table — distinct from
+    //! `spawn-storm`, whose tasks exit (and, pre-reaping, linger as zombies). Drives
+    //! the `sched-task-lookup-is-o1` scenario, which asserts probes-per-switch stays
+    //! constant (~2) as the live count grows; an O(tasks) scan would be ~`N`.
+
+    /// How many live tasks to spawn. Large enough that a linear-scan lookup would be
+    /// obvious (probes-per-switch ≈ `N` ≫ the O(1) constant) yet the ~16 KiB stacks
+    /// (× `N`) fit the default machine.
+    pub const N: usize = 200;
+
+    /// Entry for each live task: yield forever. Never exits, so it stays a live
+    /// table entry the scheduler round-robins through.
+    pub extern "C" fn body() -> ! {
+        loop {
+            crate::sched::yield_now();
+        }
+    }
+}
+
 pub mod panic_now {
     //! Minimal crash smoke (`workload=panic-now`): a kernel task calls `panic!()`
     //! immediately on its first run — no guard page, no MMU, no fault. Isolates

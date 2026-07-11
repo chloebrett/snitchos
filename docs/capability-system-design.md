@@ -93,6 +93,26 @@ ones:
 **frame** (`Granted | Invoked | Denied`, later `Revoked | Transferred`)
 that carries the fields a counter can't.
 
+**Shipped `CapEventKind` — a four-way provenance lifecycle.** Each kind
+answers *where did this holding come from?*, and the predicate is simply
+*which kernel handler emits it* — no judgment calls:
+
+| kind | provenance | sites |
+|---|---|---|
+| `Granted` | born holding it (kernel-installed at spawn) | bootstrap telemetry/span sinks, the `run_ipc` endpoint |
+| `Minted` | **the process created it itself via syscall** | `EndpointCreate`, `NotifyCreate` |
+| `Transferred` | handed / derived from a parent you hold | delegation, `MintBadged`, reply-cap mint |
+| `Revoked` | reclaimed (the derivation edge cut) | `Revoke` |
+
+`Minted` is deliberately the *self-service* axis, not an *object-created*
+axis: the `run_ipc` bootstrap endpoint is a fresh object too, but it is
+kernel-installed at spawn, so it stays `Granted`. Only the two Create
+syscalls are self-minted, so every emission site lands on exactly one row.
+`Minted` (like `Granted`) carries `parent_cap_id == 0` — a derivation-tree
+root. The "capability birthday" framing lives in the renderer, not the
+wire: `Minted` frames carry a timestamp; naming that a birthday is a
+host-side rendering choice.
+
 ## The capability derivation tree — emitted, not stored
 Capabilities are *derived* from one another: the kernel mints a root and
 grants it to `init`; `init` grants / attenuates / transfers to produce

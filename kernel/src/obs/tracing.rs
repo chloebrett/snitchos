@@ -334,6 +334,34 @@ pub fn emit_cap_granted(
     });
 }
 
+/// Emit a `CapEvent::Minted` frame — a capability the holder **created itself**
+/// via a syscall (`EndpointCreate` / `NotifyCreate`). Distinct from `Granted`
+/// (kernel-installed at spawn) and `Transferred` (derived from a parent you
+/// hold): the process manufactured its own authority. `parent_cap_id` is `0`
+/// (a derivation-tree root — self-minted objects have no ancestor).
+pub fn emit_cap_minted(
+    cap_id: u64,
+    holder: u32,
+    object: protocol::CapObject,
+    rights: u32,
+    name: [u8; snitchos_abi::CAP_NAME_LEN],
+) {
+    emit_frame(&Frame::CapEvent {
+        kind: protocol::CapEventKind::Minted,
+        cap_id,
+        parent_cap_id: 0,
+        holder,
+        object,
+        rights,
+        // Self-minted objects carry no badge (a badge is a derivation-time
+        // attenuation; minting via a Create syscall produces the root holding).
+        badge: 0,
+        t: timestamp(),
+        hart_id: crate::percpu::current_hartid() as u8,
+        name,
+    });
+}
+
 /// Emit a `CapEvent::Transferred` frame — a capability handed from one holder
 /// to another. `parent_cap_id` names the **source holding** the transferred cap
 /// derived from (the derivation edge), or `0` where no precise parent is tracked

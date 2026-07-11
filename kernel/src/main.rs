@@ -406,8 +406,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             let _ = sched::spawn("waker", sched::block_wake_waker_entry);
         }
         // Storms spawn post-secondary (task storms) or are entirely
-        // heartbeat-driven (spawn/ipi/shootdown).
+        // heartbeat-driven (spawn/ipi/shootdown). `live-tasks` fills its table in
+        // the post-secondary match below too.
         Some(WorkloadKind::SpawnStorm)
+        | Some(WorkloadKind::LiveTasks)
         | Some(WorkloadKind::IpiPong)
         | Some(WorkloadKind::ShootdownStorm)
         | Some(WorkloadKind::MutexStorm)
@@ -597,6 +599,14 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // hart-1 reader that holds the stale translation under test.
         Some(WorkloadKind::TlbShootdownVisible) => {
             let _ = sched::spawn_on(1, "tlb_reader", storms::tlb_shootdown::reader_body);
+        }
+        // Many long-lived tasks: fill the scheduler table with N tasks that
+        // loop-yield forever, so every switch resolves ids against a large *live*
+        // table — the O(1) `TaskDirectory` stress (`sched-task-lookup-is-o1`).
+        Some(WorkloadKind::LiveTasks) => {
+            for _ in 0..storms::live_tasks::N {
+                let _ = sched::spawn("live", storms::live_tasks::body);
+            }
         }
         // Cross-hart ping-pong: pong on hart 1; ping is heartbeat-driven
         // on hart 0 (`emit_storm_metrics`). They alternate a shared turn

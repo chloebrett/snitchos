@@ -35,6 +35,12 @@ pub enum WorkloadKind {
     /// Cross-hart spawn storm: hart 0 runs a serialised `spawn_on(1, …)`
     /// loop; hart 1 stays idle until poked. Heartbeat-driven.
     SpawnStorm,
+    /// Many long-**lived** tasks: spawn a large fixed set of tasks that each
+    /// loop-yield forever (never exit), so the scheduler's task table genuinely
+    /// holds N *live* entries. Stresses the O(1) `TaskDirectory` lookup — the
+    /// `sched-task-lookup-is-o1` scenario asserts probes-per-switch stays constant
+    /// as the live-task count grows.
+    LiveTasks,
     /// Tight cross-hart IPI wakeup loop (hart 0 → hart 1).
     /// Heartbeat-driven.
     IpiPong,
@@ -290,6 +296,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "frame-oom" => Some(WorkloadKind::FrameOom),
             "heap-oom" => Some(WorkloadKind::HeapOom),
             "spawn-storm" => Some(WorkloadKind::SpawnStorm),
+            "live-tasks" => Some(WorkloadKind::LiveTasks),
             "ipi-pong" => Some(WorkloadKind::IpiPong),
             "shootdown-storm" => Some(WorkloadKind::ShootdownStorm),
             "mutex-storm" => Some(WorkloadKind::MutexStorm),
@@ -605,6 +612,11 @@ mod tests {
         // Task-driven cross-hart workload that spawns its own hart-1
         // task (pong) and skips the default probe.
         assert!(WorkloadKind::PingPong.is_storm());
+    }
+
+    #[test]
+    fn selects_live_tasks() {
+        assert_eq!(select("workload=live-tasks"), Some(WorkloadKind::LiveTasks));
     }
 
     #[test]

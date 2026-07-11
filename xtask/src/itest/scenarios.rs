@@ -962,6 +962,66 @@ pub fn workload_cooperative_baseline(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// O(1) task-lookup proof (`workload=live-tasks`): 200 tasks loop-yield forever, so
+/// the scheduler's table holds 200 **live** entries and every context switch resolves
+/// two of them by id. `prepare_switch` (and `wake`/`preempt`) used to scan the whole
+/// table (O(tasks)); the `TaskDirectory` makes each lookup a direct probe. The kernel
+/// counts task-table entries touched to resolve ids as
+/// `snitchos.sched.lookup_probes_total`; dividing by `context_switches_total` is
+/// probes-per-switch.
+///
+/// Asserts probes-per-switch stays a small constant (≈2 — the outgoing + incoming
+/// task) even with 200 live tasks; an O(tasks) scan would be ~200× that. `drain_all`
+/// emits `context_switches_total` then `lookup_probes_total` within one heartbeat, so
+/// the probes reading captured right after a switches reading is from the same tick —
+/// a consistent ratio. Proven to bite by reverting the directory lookup to a scan
+/// (see `plans/scheduler-o1-task-lookup.md`): only this scenario fails, every
+/// behavioural test still passes.
+pub fn sched_task_lookup_is_o1(h: &mut View) -> Result<(), String> {
+    // Round-robin the 200-task table many times over first, so the lookup cost is
+    // measured across the whole table, not just its first few entries.
+    let switches = h
+        .wait_for(SEC * 20, |f, strings| {
+            matches!(f, OwnedFrame::Metric { name_id, value, .. }
+                if strings.get(name_id).map(String::as_str)
+                    == Some("snitchos.sched.context_switches_total")
+                    && *value >= 5000)
+        })
+        .and_then(|f| match f {
+            OwnedFrame::Metric { value, .. } => Some(value),
+            _ => None,
+        })
+        .ok_or(
+            "context_switches_total never reached 5000 within 20s — the live-tasks \
+             workload didn't fill/run its 200-task table",
+        )?;
+
+    let probes = h
+        .wait_for(SEC * 5, |f, strings| {
+            matches!(f, OwnedFrame::Metric { name_id, .. }
+                if strings.get(name_id).map(String::as_str)
+                    == Some("snitchos.sched.lookup_probes_total"))
+        })
+        .and_then(|f| match f {
+            OwnedFrame::Metric { value, .. } => Some(value),
+            _ => None,
+        })
+        .ok_or("no lookup_probes_total emitted after the switch threshold")?;
+
+    // Each switch touches exactly the two tasks it swaps between (+ the occasional
+    // wake/preempt lookup). A linear scan would be ~200× this with 200 live tasks.
+    const MAX_PROBES_PER_SWITCH: i64 = 4;
+    if probes > MAX_PROBES_PER_SWITCH * switches {
+        return Err(format!(
+            "lookup_probes_total={probes} vs context_switches_total={switches} = \
+             {:.1} probes/switch with 200 live tasks — expected ≈2 (O(1) `TaskDirectory`), \
+             not O(tasks). prepare_switch is scanning the task table.",
+            probes as f64 / switches as f64
+        ));
+    }
+    Ok(())
+}
+
 /// v0.6 step 11: the producer/consumer workload, but cross-hart.
 /// Selected at runtime via the `workload=smp` bootarg on the
 /// `itest-workloads` kernel — producer on hart 0, consumer on hart 1;
@@ -3295,15 +3355,16 @@ pub fn revoke_reclaims_a_minted_cap(h: &mut View) -> Result<(), String> {
     use protocol::{CapEventKind, CapObject};
 
     // The endpoint's owning grant — capture its cap_id (the parent of the mint).
-    let granted = h
+    // `ep_maker` created it via `EndpointCreate`, so it's snitched as self-minted.
+    let minted = h
         .wait_for(SEC * 20, |f, _| {
             matches!(
                 f,
-                OwnedFrame::CapEvent { kind: CapEventKind::Granted, object: CapObject::Endpoint, .. }
+                OwnedFrame::CapEvent { kind: CapEventKind::Minted, object: CapObject::Endpoint, .. }
             )
         })
-        .ok_or("no CapEvent::Granted{Endpoint} — ep_maker didn't create its endpoint")?;
-    let endpoint_id = match granted {
+        .ok_or("no CapEvent::Minted{Endpoint} — ep_maker didn't create its endpoint")?;
+    let endpoint_id = match minted {
         OwnedFrame::CapEvent { cap_id, .. } => cap_id,
         _ => unreachable!("matched a CapEvent above"),
     };
@@ -3340,7 +3401,7 @@ pub fn revoke_reclaims_a_minted_cap(h: &mut View) -> Result<(), String> {
 }
 
 /// v0.13 `init` brings up the FS server on its *own* manufactured endpoint
-/// (`workload=init`). `init` `EndpointCreate`s (a `Granted{Endpoint, RECV|MINT}`),
+/// (`workload=init`). `init` `EndpointCreate`s (a `Minted{Endpoint, RECV|MINT}`),
 /// then `Spawn`s the FS server delegating that cap — a `Transferred{Endpoint,
 /// RECV|MINT}` whose `parent_cap_id` links back to init's endpoint holding. Proves
 /// the FS server is parented to init's endpoint (not the kernel's `DEMO_ENDPOINT`),
@@ -3350,21 +3411,22 @@ pub fn init_brings_up_fs_server(h: &mut View) -> Result<(), String> {
     // RECV | MINT (snitchos_abi::rights) — the FS server owner cap.
     const RECV_MINT: u32 = 0b0100 | 0b1000;
 
-    // init created its endpoint — capture that owning grant's cap_id.
-    let granted = h
+    // init created its endpoint via `EndpointCreate` — capture that self-minted
+    // owning holding's cap_id.
+    let minted = h
         .wait_for(SEC * 20, |f, _| {
             matches!(
                 f,
                 OwnedFrame::CapEvent {
-                    kind: CapEventKind::Granted,
+                    kind: CapEventKind::Minted,
                     object: CapObject::Endpoint,
                     rights,
                     ..
                 } if *rights == RECV_MINT
             )
         })
-        .ok_or("no CapEvent::Granted{Endpoint, RECV|MINT} — init didn't create its endpoint")?;
-    let endpoint_id = match granted {
+        .ok_or("no CapEvent::Minted{Endpoint, RECV|MINT} — init didn't create its endpoint")?;
+    let endpoint_id = match minted {
         OwnedFrame::CapEvent { cap_id, .. } => cap_id,
         _ => unreachable!("matched a CapEvent above"),
     };
@@ -3403,21 +3465,22 @@ pub fn init_runs_fs_client(h: &mut View) -> Result<(), String> {
     const RECV_MINT: u32 = 0b0100 | 0b1000;
     const SEND: u32 = 0b0010;
 
-    // init's owning endpoint grant — capture its cap_id (the delegation root).
-    let granted = h
+    // init's owning endpoint holding (self-minted via `EndpointCreate`) — capture
+    // its cap_id (the delegation root).
+    let minted = h
         .wait_for(SEC * 20, |f, _| {
             matches!(
                 f,
                 OwnedFrame::CapEvent {
-                    kind: CapEventKind::Granted,
+                    kind: CapEventKind::Minted,
                     object: CapObject::Endpoint,
                     rights,
                     ..
                 } if *rights == RECV_MINT
             )
         })
-        .ok_or("no CapEvent::Granted{Endpoint, RECV|MINT} — init didn't create its endpoint")?;
-    let endpoint_id = match granted {
+        .ok_or("no CapEvent::Minted{Endpoint, RECV|MINT} — init didn't create its endpoint")?;
+    let endpoint_id = match minted {
         OwnedFrame::CapEvent { cap_id, .. } => cap_id,
         _ => unreachable!("matched a CapEvent above"),
     };
@@ -3564,6 +3627,21 @@ pub fn spawn_reclaims_names(h: &mut View) -> Result<(), String> {
 /// that its `WaitNotify` syscall returned those bits. The dependency arrow a
 /// synchronous trace can't draw.
 pub fn notify_signal_wakes_waiter(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+
+    // The `notify-waiter` parent manufactured its own notification via `NotifyCreate`
+    // — a self-minted holding, snitched as `Minted{Notification}` (not a bootstrap
+    // `Granted`). This pins the second of the two self-minting syscalls. Checked
+    // first because the create precedes the signaller's spawn (wait_for's cursor
+    // only moves forward).
+    h.wait_for(SEC * 20, |f, _| {
+        matches!(
+            f,
+            OwnedFrame::CapEvent { kind: CapEventKind::Minted, object: CapObject::Notification, .. }
+        )
+    })
+    .ok_or("no CapEvent::Minted{Notification} — NotifyCreate didn't snitch a self-minted cap")?;
+
     // The signaller child was created (registered during the parent's `spawn()`).
     h.wait_for(SEC * 20, is_thread_register_named("notify-signaller"))
         .ok_or("no ThreadRegister for 'notify-signaller' — Spawn didn't create the child")?;

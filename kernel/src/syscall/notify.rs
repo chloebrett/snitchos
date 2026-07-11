@@ -10,7 +10,7 @@ use crate::trap::TrapFrame;
 /// Create a fresh notification, return a `SIGNAL | WAIT` capability to it (v0.12).
 /// Ambient like `MapAnon`: making your own notification needs no prior authority;
 /// the caller then attenuates + delegates the end(s) it wants. Snitched as
-/// `CapEvent::Granted`.
+/// `CapEvent::Minted` (self-minted-via-syscall provenance).
 pub(super) fn handle_notify_create(frame: &mut TrapFrame) {
     use kernel_core::cap::{Capability, Object, Rights};
     use snitchos_abi::Syscall;
@@ -35,7 +35,7 @@ pub(super) fn handle_notify_create(frame: &mut TrapFrame) {
         0, // self-created notification: a derivation-tree root
     );
 
-    crate::tracing::emit_cap_granted(
+    crate::tracing::emit_cap_minted(
         cap_id,
         crate::sched::current_task_id().0,
         protocol::CapObject::Notification,
