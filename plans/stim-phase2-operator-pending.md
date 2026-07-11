@@ -135,6 +135,33 @@ spans** (the observable-operator granularity) and defers the range *attribute* t
 small follow-up once we decide how the trait carries span attributes. The grammar
 architecture doesn't block on it.
 
+## Forward direction: the clipboard service (build toward, not away from)
+
+The stim register is the **soft form** of the future clipboard primitive
+([docs/clipboard-design.md](../docs/clipboard-design.md)): eventually there is *one*
+capability-scoped clipboard *service*, vim's registers are **named slots in it**, and
+an entry is an immutable record `{value, schema, provenance, label, caps}` reached
+over IPC. Phase 2 must not paint us into a corner against that. Concretely:
+
+- **Keep `Register` a distinct, growable value type** (not a bare `Str`) — same
+  discipline as `Pending`. When the service lands, `Register` grows toward `Entry`
+  (provenance `{file cap, lines, time}`, an IFC label, optional caps) without a
+  signature churn, and `y`/`p` re-target from the in-state field to service IPC.
+- **Yank/paste are already spans** (`stim.yank` / `stim.paste`) — that *is* the
+  clipboard doc's "copy/paste are spans, the history is a trace on the wire"
+  alignment. We get it for free by staying on the observable-effect model.
+- **`wise` is the first bit of entry metadata.** Charwise/Linewise is stim-specific
+  shape that, in the service world, lives in the entry's schema/attributes. Modelling
+  it on `Register` now is the seed of typed entries (clipboard P2), not a throwaway.
+- **Explicitly out of stim P2:** provenance, IFC labels, capability-carrying entries,
+  named registers, history. Those ride the clipboard *service* (its P1–P5), not the
+  editor. Stim P2 is a single in-state unnamed register whose *shape* is
+  entry-compatible — structural alignment, not feature parity. Named registers (`"a`)
+  are grammar Phase 5, and land as service slots.
+
+The one-line rule: **stim's register is a local, immutable, span-observed,
+wiseness-tagged value that the clipboard service can later absorb as an entry.**
+
 ## TDD increments (each RED→GREEN through `stitch/tests/stim_fsm.rs`)
 
 1. `Op`/`Wise`/`Pending`/`Register` + Editor fields; `initialState` seeds them;
