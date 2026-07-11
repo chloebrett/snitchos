@@ -89,10 +89,11 @@ canonical `Ty`; a `TypeError` type exists carrying a message + span.
 **Mutation**: 22 mutants, 18 caught / 4 unviable, 0 survivors — tests cover each primitive arm, both `Dyn` operands, structural match, and the gradual fallbacks.
 **Done**: 594 lib green, clippy clean.
 
-### Step 3: params in the type context
+### Step 3: params in the type context — ✅ DONE (2026-07-11)
 **Acceptance**: `f(x: Int) -> Int = x` clean; `f(x: Str) -> Int = x` errors at the body; `f(x) -> Int = x` clean (param `Dyn`).
-**RED**: the `Str`→`Int` case yields one error; the annotated-match and unannotated cases yield none.
-**GREEN**: bind params (`Ty` from annotation, else `Dyn`) into a `TyEnv`; `synth(Var)` reads it.
+**GREEN**: `TyEnv = BTreeMap<String, Ty>`; `synth`/`check` take `&TyEnv`; `synth(Var)` reads it (unknown names → `Dyn`); `check_program` binds each param (`ty_of_annotation`, else `Dyn`) into the env per function body.
+**Mutation**: 23 mutants, 19 caught / 4 unviable, 0 survivors.
+**Done**: 595 lib green, clippy clean.
 
 ### Step 4: constructor argument types
 **Acceptance**: with `prod Point(x: Int, y: Int)`, `Point(1, "x")` errors at the `"x"` arg (`y: Int` got `Str`); `Point(1, 2)` clean; a `Dyn` arg is clean.

@@ -12,9 +12,15 @@
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 
+use alloc::collections::BTreeMap;
+
 use crate::ast::Type;
 use crate::core_ir::{CoreExpr, CoreExprKind, CoreItem};
 use crate::lexer::Span;
+
+/// The types of the names in scope while checking a body — currently the
+/// function's parameters. Grows to hold `let`-bindings and the receiver later.
+pub type TyEnv = BTreeMap<String, Ty>;
 
 /// A Stitch type. Primitives are canonical variants; declared types are `Named`.
 /// `Dyn` is the gradual unknown — the type of unannotated / not-yet-known code,
@@ -50,7 +56,7 @@ pub struct TypeError {
 /// [`Ty::Dyn`] — the gradual default — so the checker stays sound-by-omission
 /// as constructs are added step by step.
 #[must_use]
-pub fn synth(expr: &CoreExpr) -> Ty {
+pub fn synth(expr: &CoreExpr, env: &TyEnv) -> Ty {
     match &expr.kind {
         CoreExprKind::Int(_) => Ty::Int,
         CoreExprKind::Float(_) => Ty::Float,
@@ -59,6 +65,9 @@ pub fn synth(expr: &CoreExpr) -> Ty {
         CoreExprKind::Str(_) => Ty::Str,
         // `()` — the empty tuple — is the unit type.
         CoreExprKind::Tuple(elems) if elems.is_empty() => Ty::Unit,
+        // A variable's type comes from the environment (a parameter, for now);
+        // names the checker isn't tracking (globals, other functions) are `Dyn`.
+        CoreExprKind::Var(name) => env.get(name).cloned().unwrap_or(Ty::Dyn),
         // Everything else is not yet understood: stay gradual (sound-by-omission).
         _ => Ty::Dyn,
     }
@@ -70,8 +79,8 @@ pub fn synth(expr: &CoreExpr) -> Ty {
 /// checking rules (e.g. a lambda against a function type) arrive with later
 /// constructs.
 #[must_use]
-fn check(expr: &CoreExpr, expected: &Ty) -> Option<TypeError> {
-    let got = synth(expr);
+fn check(expr: &CoreExpr, expected: &Ty, env: &TyEnv) -> Option<TypeError> {
+    let got = synth(expr, env);
     if consistent(&got, expected) {
         None
     } else {
@@ -116,9 +125,14 @@ fn ty_of_annotation(ann: &Type) -> Ty {
 pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
     let mut errors = Vec::new();
     for item in items {
-        if let CoreItem::Func { ret, body, .. } = item {
+        if let CoreItem::Func { params, ret, body, .. } = item {
+            // Bind each parameter to its declared type (unannotated → `Dyn`).
+            let env: TyEnv = params
+                .iter()
+                .map(|p| (p.name.clone(), p.ty.as_ref().map_or(Ty::Dyn, ty_of_annotation)))
+                .collect();
             let expected = ret.as_ref().map_or(Ty::Dyn, ty_of_annotation);
-            if let Some(error) = check(body, &expected) {
+            if let Some(error) = check(body, &expected, &env) {
                 errors.push(error);
             }
         }
@@ -128,20 +142,25 @@ pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{synth, Ty};
+    use super::{synth, Ty, TyEnv};
 
     /// Lower a literal source expression to a `CoreExpr` for synthesis.
     fn core(src: &str) -> crate::core_ir::CoreExpr {
         crate::lower::lower_expr_to_core(&crate::parser::parse(src).expect("parses"))
     }
 
+    /// Synthesize the type of a source expression in an empty environment.
+    fn ty(src: &str) -> Ty {
+        synth(&core(src), &TyEnv::new())
+    }
+
     #[test]
     fn literals_synthesize_their_canonical_type() {
-        assert_eq!(synth(&core("4")), Ty::Int);
-        assert_eq!(synth(&core("4.0")), Ty::Float);
-        assert_eq!(synth(&core("true")), Ty::Bool);
-        assert_eq!(synth(&core(r#""hi""#)), Ty::Str);
-        assert_eq!(synth(&core("()")), Ty::Unit);
+        assert_eq!(ty("4"), Ty::Int);
+        assert_eq!(ty("4.0"), Ty::Float);
+        assert_eq!(ty("true"), Ty::Bool);
+        assert_eq!(ty(r#""hi""#), Ty::Str);
+        assert_eq!(ty("()"), Ty::Unit);
     }
 
     #[test]
@@ -149,7 +168,7 @@ mod tests {
         // Only the *empty* tuple is `Unit`; a populated tuple is not yet
         // synthesized structurally, so it stays `Dyn`. Pins the `is_empty()`
         // guard (a mutant that drops it would mis-type `(1, 2)` as `Unit`).
-        assert_eq!(synth(&core("(1, 2)")), Ty::Dyn);
+        assert_eq!(ty("(1, 2)"), Ty::Dyn);
     }
 
     /// Type-check a whole program, returning its type errors.
@@ -190,5 +209,23 @@ mod tests {
         // an unknown type *name*, and a non-name (tuple) annotation.
         assert!(errors(r#"f() -> Foo = "x""#).is_empty(), "unknown type name → Dyn → clean");
         assert!(errors(r#"f() -> () = "x""#).is_empty(), "non-name annotation → Dyn → clean");
+    }
+
+    #[test]
+    fn a_parameter_annotation_flows_into_the_body() {
+        // A parameter used as the body carries its declared type, so it is checked
+        // against the return type.
+        let src = "f(x: Str) -> Int = x";
+        let errs = errors(src);
+        assert_eq!(errs.len(), 1, "param `x: Str` ≠ `Int` return, got {errs:?}");
+        assert_eq!(
+            errs[0].span.start,
+            src.rfind('x').expect("the body `x`"),
+            "the error is at the body reference: {errs:?}"
+        );
+        // A matching parameter type is clean.
+        assert!(errors("f(x: Int) -> Int = x").is_empty(), "param Int matches Int return");
+        // An unannotated parameter is `Dyn` — consistent with anything.
+        assert!(errors("f(x) -> Int = x").is_empty(), "unannotated param → Dyn → clean");
     }
 }
