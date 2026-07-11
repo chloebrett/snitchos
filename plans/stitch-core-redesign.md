@@ -456,16 +456,20 @@ before `expect_ident`). Consumers that need names-only extract `.name`: `registe
 `bridge::manifest_of_main`'s `needs`. Declaration spans now live on the AST for D4's
 refusal messages. Test: `f() uses Telemetry` → span `9..18`. **581 green, clippy clean.**
 
-**D2 — Handler stack + effect dispatch (mechanism, no syntax).**
-`Env` gains `handlers` (dynamically-scoped op-name→value stack) + `with_handler(op,
-value)` + `handler_for(op) -> Option<Value>` + `without_top_handler(op)`. Refactor the
-8 effect natives: before the platform call, `if let Some(h) = env.handler_for("<op>")
-{ return apply_values(&h, &args, &env.without_top_handler("<op>")) }`. No handler
-installed → identical behavior → 580 green.
-- RED (unit): install a handler for `emit` on an env; performing `emit` routes to the
-  handler (a spy), not the ambient sink; a handler that itself calls `emit` forwards
-  to the ambient (shallow).
-- GREEN: the stack + dispatch in the 8 natives.
+**D2 — Handler stack + effect dispatch (mechanism, no syntax) — ✅ DONE (2026-07-11).**
+`Env` gained `handlers: Rc<Vec<(String, Value)>>` (dynamically-scoped op→value stack,
+threaded through *all* constructors like `source` — preserved, not reset at
+boundaries, so handlers are dynamic) + `with_handler(op, value)` / `handler_for(op)` /
+`without_top_handler(op)`. New `interp::perform_effect(op, args, env, ambient)`:
+dispatches to `handler_for(op)` (running it under `without_top_handler(op)` for shallow
+forwarding) else runs `ambient`. All 8 effect natives (`emit`/`span`/`print`/
+`readLine`/`readByte`/`writeConsole`/`fsWrite`/`readFile`) wrap their platform call in
+it, *after* the authority gate (so `uses` still gates; a handler redirects an allowed
+effect). No handler installed → identical → 583 green. Handler dynamic scoping works
+because `apply_values` builds the call env from the passed env's `globals_only()`,
+which carries `handlers`. Test: a handler intercepts `emit("x",1)` and re-emits
+`emit("wrapped",1)`, which shallow-forwards to the ambient sink (no self-recursion).
+**583 lib + 29 integration green, clippy clean.**
 
 **D3 — `handle` surface syntax + installation.**
 New keyword `handle`; parse `handle <op> with <expr> { body }` → a surface AST node

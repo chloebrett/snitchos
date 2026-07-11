@@ -1027,6 +1027,23 @@ pub(crate) fn apply_values(callee: &Value, args: &[Value], env: &Env) -> Result<
     }
 }
 
+/// Dispatch an effect operation `op` (already authority-checked by the caller): if a
+/// handler for `op` is installed in the dynamic extent, call it with `args` — running
+/// it with its own `op` handler popped, so it can forward to the next handler down (or
+/// the ambient platform) by performing `op` again without re-entering itself (shallow
+/// semantics). Otherwise run `ambient` (the native's platform/sink behavior).
+pub(crate) fn perform_effect(
+    op: &str,
+    args: &[Value],
+    env: &Env,
+    ambient: impl FnOnce() -> Result<Value, RuntimeError>,
+) -> Result<Value, RuntimeError> {
+    match env.handler_for(op) {
+        Some(handler) => apply_values(&handler, args, &env.without_top_handler(op)),
+        None => ambient(),
+    }
+}
+
 /// The Stitch-source prelude, compiled into the binary and loaded before user code.
 const PRELUDE: &str = include_str!("prelude.st");
 
@@ -1490,6 +1507,37 @@ mod tests {
         // `4 + (1 / 0)` — the fault originates in the inner `1 / 0` (bytes 5..10),
         // so the innermost span wins, not the outer `+`.
         assert_eq!(fault("4 + (1 / 0)").span(), Some(Span { start: 5, end: 10 }));
+    }
+
+    #[test]
+    fn an_installed_handler_intercepts_an_effect_and_forwards_to_ambient() {
+        // Build an env from the prelude (emit native + Telemetry authority seeded).
+        let mut items = crate::interp::prelude_items();
+        crate::lower::lower_program(&mut items);
+        let env = crate::interp::build_env(&items);
+        // A handler for `emit` that re-emits under a fixed name. Its own `emit` call
+        // must forward to the ambient sink (shallow: the emit handler is popped while
+        // the handler runs), not re-enter itself.
+        let h = crate::lower::lower_expr_to_core(
+            &crate::parser::parse(r#"(n, v) -> emit("wrapped", v)"#).expect("parse"),
+        );
+        let handler = crate::interp::eval(&h, &env).expect("handler builds");
+        let env2 = env.clone().with_handler("emit".to_string(), handler);
+        // Perform `emit("x", 1)` within the handler's dynamic extent.
+        let e = crate::lower::lower_expr_to_core(
+            &crate::parser::parse(r#"emit("x", 1)"#).expect("parse"),
+        );
+        crate::interp::eval(&e, &env2).expect("emit runs");
+        let events = env.telemetry();
+        assert!(
+            events.iter().any(|ev| matches!(ev,
+                TelemetryEvent::Emit { name, value } if name == "wrapped" && *value == Value::Int(1))),
+            "handler's `wrapped` emit should reach the sink, got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|ev| matches!(ev, TelemetryEvent::Emit { name, .. } if name == "x")),
+            "the original `x` emit should have been intercepted, got {events:?}"
+        );
     }
 
     #[test]

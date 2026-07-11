@@ -9,7 +9,7 @@ use core::cmp::Ordering;
 use crate::prelude::*;
 
 use crate::env::Env;
-use crate::interp::{apply_values, none, some};
+use crate::interp::{apply_values, none, perform_effect, some};
 use crate::ops::value_order;
 use crate::value::{DataValue, LazySeq, NativeFn, RuntimeError, Step, Value};
 
@@ -241,10 +241,12 @@ fn native_span(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     if !env.has_authority("Telemetry") {
         return Err(RuntimeError::new("span requires `uses Telemetry`"));
     }
-    env.span_open(name);
-    let result = apply_values(body, &[], env)?;
-    env.span_close(name);
-    Ok(result)
+    perform_effect("span", args, env, || {
+        env.span_open(name);
+        let result = apply_values(body, &[], env)?;
+        env.span_close(name);
+        Ok(result)
+    })
 }
 
 /// `print(x)` — write `x` (its display form) plus a newline to the console.
@@ -257,8 +259,10 @@ fn native_print(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     if !env.has_authority("ConsoleOut") {
         return Err(RuntimeError::new("print requires `uses ConsoleOut`"));
     }
-    env.platform().write(&format!("{}\n", value.display()));
-    Ok(Value::Unit)
+    perform_effect("print", args, env, || {
+        env.platform().write(&format!("{}\n", value.display()));
+        Ok(Value::Unit)
+    })
 }
 
 /// `readLine()` — read one finished line of console input (no trailing newline)
@@ -271,9 +275,11 @@ fn native_read_line(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     if !env.has_authority("ConsoleIn") {
         return Err(RuntimeError::new("readLine requires `uses ConsoleIn`"));
     }
-    Ok(match env.platform().read_line() {
-        Some(line) => some(Value::Str(line.into())),
-        None => none(),
+    perform_effect("readLine", args, env, || {
+        Ok(match env.platform().read_line() {
+            Some(line) => some(Value::Str(line.into())),
+            None => none(),
+        })
     })
 }
 
@@ -287,9 +293,11 @@ fn native_read_byte(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     if !env.has_authority("ConsoleIn") {
         return Err(RuntimeError::new("readByte requires `uses ConsoleIn`"));
     }
-    Ok(match env.platform().read_byte() {
-        Some(byte) => some(Value::Str(char::from(byte).to_string().into())),
-        None => none(),
+    perform_effect("readByte", args, env, || {
+        Ok(match env.platform().read_byte() {
+            Some(byte) => some(Value::Str(char::from(byte).to_string().into())),
+            None => none(),
+        })
     })
 }
 
@@ -309,8 +317,10 @@ fn native_write_console(args: &[Value], env: &Env) -> Result<Value, RuntimeError
     if !env.has_authority("ConsoleOut") {
         return Err(RuntimeError::new("writeConsole requires `uses ConsoleOut`"));
     }
-    env.platform().write(text);
-    Ok(Value::Unit)
+    perform_effect("writeConsole", args, env, || {
+        env.platform().write(text);
+        Ok(Value::Unit)
+    })
 }
 
 /// `fsWrite(fileHandle, text)` — write `text` as the whole contents of the file
@@ -333,9 +343,11 @@ fn native_fs_write(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     if !env.has_authority("FsWrite") {
         return Err(RuntimeError::new("fsWrite requires `uses FsWrite`"));
     }
-    let handle = u32::try_from(*handle)
-        .map_err(|_| RuntimeError::new("fsWrite fileHandle is out of range"))?;
-    Ok(Value::Bool(env.platform().fs_write(handle, text.as_bytes())))
+    perform_effect("fsWrite", args, env, || {
+        let handle = u32::try_from(*handle)
+            .map_err(|_| RuntimeError::new("fsWrite fileHandle is out of range"))?;
+        Ok(Value::Bool(env.platform().fs_write(handle, text.as_bytes())))
+    })
 }
 
 /// `hold()` — list the capabilities the calling process holds, as a `List` of
@@ -443,9 +455,11 @@ fn native_read_file(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     if !env.has_authority("FsRead") {
         return Err(RuntimeError::new("readFile requires `uses FsRead`"));
     }
-    Ok(match env.platform().fs_read(name) {
-        Some(contents) => some(Value::Str(contents.into())),
-        None => none(),
+    perform_effect("readFile", args, env, || {
+        Ok(match env.platform().fs_read(name) {
+            Some(contents) => some(Value::Str(contents.into())),
+            None => none(),
+        })
     })
 }
 
@@ -463,8 +477,10 @@ fn native_emit(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
     if !env.has_authority("Telemetry") {
         return Err(RuntimeError::new("emit requires `uses Telemetry`"));
     }
-    env.emit_metric(name, value);
-    Ok(Value::Unit)
+    perform_effect("emit", args, env, || {
+        env.emit_metric(name, value);
+        Ok(Value::Unit)
+    })
 }
 
 /// Require a list argument, with an error tagged by the combinator `name`.

@@ -80,6 +80,12 @@ pub struct Env {
     /// boundary (`apply_values`) and at program registration (`build_env`). `eval`
     /// stamps it onto a fault so the fault's span can be resolved to `file:line:col`.
     source: SourceId,
+    /// Dynamically-scoped effect handlers: a stack of `(op-name, handler value)`.
+    /// `handle op with f { … }` pushes `(op, f)` for the block's extent (via a scoped
+    /// env clone). An effect native dispatches to the topmost handler for its op
+    /// before falling to the ambient platform. Threaded through calls (not reset at
+    /// boundaries) so handlers are dynamic, not lexical.
+    handlers: Rc<Vec<(String, Value)>>,
 }
 
 /// Pops [`Env::enter_call`]'s pushed frame when dropped — so the call stack is
@@ -134,6 +140,7 @@ impl Env {
             frames: Rc::new(RefCell::new(Vec::new())),
             self_closure: None,
             source: SourceId::default(),
+            handlers: Rc::new(Vec::new()),
         }
     }
 
@@ -258,6 +265,39 @@ impl Env {
         self.source
     }
 
+    /// A clone of this environment with `handler` installed for effect op `op`,
+    /// pushed on top of the dynamically-scoped handler stack. The returned env's
+    /// dynamic extent (the block it evaluates) is where the handler is active.
+    #[must_use]
+    pub fn with_handler(self, op: String, handler: Value) -> Env {
+        let mut handlers = (*self.handlers).clone();
+        handlers.push((op, handler));
+        Env { handlers: Rc::new(handlers), ..self }
+    }
+
+    /// The topmost handler installed for effect op `op`, if any — what an effect
+    /// native dispatches to before the ambient platform.
+    #[must_use]
+    pub fn handler_for(&self, op: &str) -> Option<Value> {
+        self.handlers
+            .iter()
+            .rev()
+            .find(|(name, _)| name == op)
+            .map(|(_, handler)| handler.clone())
+    }
+
+    /// A clone with the topmost handler for `op` removed — the env a handler runs
+    /// in, so performing `op` again forwards to the next handler down (or ambient)
+    /// instead of re-entering the same handler (shallow semantics).
+    #[must_use]
+    pub fn without_top_handler(&self, op: &str) -> Env {
+        let mut handlers = (*self.handlers).clone();
+        if let Some(pos) = handlers.iter().rposition(|(name, _)| name == op) {
+            handlers.remove(pos);
+        }
+        Env { handlers: Rc::new(handlers), ..self.clone() }
+    }
+
     /// Whether capability `cap` is in scope — the gate `emit`/`span` consult.
     #[must_use]
     pub fn has_authority(&self, cap: &str) -> bool {
@@ -284,6 +324,7 @@ impl Env {
             frames: Rc::clone(&self.frames),
             self_closure: None,
             source: self.source,
+            handlers: Rc::clone(&self.handlers),
         }
     }
 
@@ -306,6 +347,7 @@ impl Env {
             frames: Rc::clone(&self.frames),
             self_closure: None,
             source: self.source,
+            handlers: Rc::clone(&self.handlers),
         }
     }
 
@@ -340,6 +382,7 @@ impl Env {
             frames: Rc::clone(&self.frames),
             self_closure: None,
             source: self.source,
+            handlers: Rc::clone(&self.handlers),
         }
     }
 
@@ -437,6 +480,7 @@ impl Env {
             frames: Rc::clone(&self.frames),
             self_closure: None,
             source: self.source,
+            handlers: Rc::clone(&self.handlers),
         }
     }
 
