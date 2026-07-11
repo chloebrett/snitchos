@@ -110,12 +110,12 @@ enum Cmd {
         /// identical — idle-skip must change only speed, never telemetry.
         #[arg(long)]
         no_idle_skip: bool,
-        /// Disable longest-processing-time packing (on by default). LPT feeds the
-        /// heaviest workload groups to the worker queue first, using the previous
-        /// run's per-scenario instret as the cost predictor. `--no-lpt` keeps
-        /// selection order — the A/B baseline for measuring the packing win.
-        #[arg(long)]
-        no_lpt: bool,
+        /// Scenario packing order: `wall` (default — LPT by the previous run's
+        /// wall-time, the true optimisation target but noisy), `instret` (LPT by
+        /// prior instret — deterministic, reproducible), or `selection` (no packing —
+        /// the A/B baseline). The report prints both counterfactuals regardless.
+        #[arg(long, value_enum, default_value_t)]
+        order: itest::snemu_audit::PackOrder,
         /// Optimization regime, with distinct failure modes — flick between them to
         /// localize a bug: `low` (debug, opt-0 — where scenarios depending on unbuilt
         /// work like supervision fail, the honest correctness test), `mid` (release
@@ -742,12 +742,14 @@ fn main() -> ExitCode {
             }
         }
         Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
-        Cmd::SnemuItest { steps, limit, only, jobs, no_idle_skip, no_lpt, opt, native_ops, block_jit } => {
+        Cmd::SnemuItest {
+            steps, limit, only, jobs, no_idle_skip, order, opt, native_ops, block_jit,
+        } => {
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
             itest::snemu_audit::run(
-                steps, limit, only.as_deref(), jobs, !no_idle_skip, !no_lpt, opt, native_ops, block_jit,
+                steps, limit, only.as_deref(), jobs, !no_idle_skip, order, opt, native_ops, block_jit,
             )
         }
         Cmd::SnemuProfile { workload, steps, top, release } => {

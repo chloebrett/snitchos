@@ -37,6 +37,9 @@ struct Row {
     name: &'static str,
     outcome: Outcome,
     instret: u64,
+    /// Wall-clock seconds this scenario took — the LPT order predictor by default
+    /// (the true optimisation target), with `instret` the deterministic alternative.
+    wall_s: f64,
 }
 
 /// One scenario's outcome under the live snemu run.
@@ -96,6 +99,29 @@ struct Segment {
     pass: bool,
 }
 
+/// How scenarios are ordered onto the worker queue.
+#[derive(Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum PackOrder {
+    /// LPT by the previous run's wall-time — the true optimisation target, but noisy
+    /// run-to-run. The default.
+    #[default]
+    Wall,
+    /// LPT by the previous run's instret — deterministic, reproducible ranking.
+    Instret,
+    /// Selection order — no packing; the A/B baseline for the packing win.
+    Selection,
+}
+
+impl PackOrder {
+    fn label(self) -> &'static str {
+        match self {
+            PackOrder::Wall => "LPT-by-wall",
+            PackOrder::Instret => "LPT-by-instret",
+            PackOrder::Selection => "selection-order",
+        }
+    }
+}
+
 /// Run the audit: build the `itest-workloads` kernel, boot each distinct
 /// workload under snemu to `max_steps`, replay every scenario against its
 /// group's frames, and print a per-scenario + summary report. `limit` caps the
@@ -107,7 +133,7 @@ pub fn run(
     only: Option<&str>,
     jobs: usize,
     idle_skip: bool,
-    lpt: bool,
+    order: PackOrder,
     opt: crate::qemu::OptLevel,
     native_ops: bool,
     block_jit: bool,
@@ -176,19 +202,23 @@ pub fn run(
     // snapshot is shared, each *scenario* (not each workload group) is an
     // independent unit of work, so a workload's scenarios spread across all workers
     // instead of stacking on one. LPT order (heaviest first, by the previous run's
-    // deterministic instret) keeps a slow scenario off the tail; unknowns sort
-    // first. `--no-lpt` keeps selection order for the A/B baseline.
-    let mut order: Vec<(usize, &itest_harness::Scenario)> = work.iter().copied().enumerate().collect();
-    if lpt {
+    // wall-time or instret per `--order`) keeps a slow scenario off the tail;
+    // unknowns sort first. `--order selection` keeps selection order (the A/B baseline).
+    let mut sched: Vec<(usize, &itest_harness::Scenario)> = work.iter().copied().enumerate().collect();
+    if order != PackOrder::Selection {
         let history = load_durations();
-        let heaviest = history.values().copied().max().unwrap_or(0);
-        order.sort_by_key(|(_, s)| {
-            std::cmp::Reverse(history.get(s.name).copied().unwrap_or(heaviest))
+        // Order key: prior wall-microseconds (the true target) or prior instret
+        // (deterministic). An unknown scenario sorts heaviest so a first-seen slow
+        // one doesn't land on the tail.
+        let key = |c: &PackCost| if order == PackOrder::Instret { c.0 } else { c.1 };
+        let heaviest = history.values().map(key).max().unwrap_or(u64::MAX);
+        sched.sort_by_key(|(_, s)| {
+            std::cmp::Reverse(history.get(s.name).map_or(heaviest, |c| key(c)))
         });
     }
 
     let done = AtomicUsize::new(0);
-    let scenario_results = parallel_map(&order, jobs, |worker, _, &(index, s)| {
+    let scenario_results = parallel_map(&sched, jobs, |worker, _, &(index, s)| {
         // Fork the shared post-boot snapshot; fall back to a fresh boot for an
         // early-crash workload that never reached the checkpoint.
         let machine = match snapshots.get(&s.workload) {
@@ -232,7 +262,7 @@ pub fn run(
             if pass { "ok" } else { "FAIL" },
             instret / 1_000_000,
         );
-        (index, Row { name: s.name, outcome, instret })
+        (index, Row { name: s.name, outcome, instret, wall_s: wall })
     });
 
     // Restore selection order via each scenario's original index.
@@ -250,15 +280,24 @@ pub fn run(
 
     // Counterfactual: re-pack this run's measured per-item wall-times across the
     // workers with ideal (LPT) knowledge, to show how much of the makespan is
-    // packing slack vs. the irreducible pole — without needing a second run.
+    // packing slack vs. the irreducible pole — without needing a second run. The
+    // two phases (boot-all-workloads, then fork-and-run-scenarios) are separated by
+    // a hard barrier, so the *achievable* ideal is each phase's LPT makespan summed;
+    // a single merged pool would optimistically overlap phases that never overlap.
     let segs = segments.into_inner().expect("segments mutex");
-    let durations: Vec<f64> = segs.iter().map(|s| s.end_s - s.start_s).collect();
-    let ideal_makespan = counterfactual_makespan(&durations, jobs);
+    // Two counterfactuals, both respecting the boot→scenario phase barrier (each
+    // phase's LPT makespan, summed): one ordered by wall-time (the true optimum),
+    // one by instret (what the deterministic scheduler can do). Their diff is the
+    // ordering cost; actual − instret-ideal is the online/staleness cost.
+    let ideal_wall =
+        phase_ideal(&segs, "boot", jobs, true) + phase_ideal(&segs, "scenario", jobs, true);
+    let ideal_instret =
+        phase_ideal(&segs, "boot", jobs, false) + phase_ideal(&segs, "scenario", jobs, false);
 
     // Emit the machine-readable packing snapshot for the `viz/` renderer.
     let scenario_instret: u64 = results.iter().map(|r| r.instret).sum();
     write_packing_report(
-        lpt,
+        order,
         jobs,
         makespan,
         scenario_instret + boot_instret,
@@ -268,7 +307,7 @@ pub fn run(
     );
 
     let exit = print_report(&results, boot_instret, makespan.as_secs_f64());
-    print_utilization(&worker_busy, makespan, lpt, ideal_makespan);
+    print_utilization(&worker_busy, makespan, order, ideal_wall, ideal_instret);
     exit
 }
 
@@ -281,7 +320,7 @@ const PACKING_PATH: &str = ".itest-runs/snemu-packing.json";
 /// (mirroring `capture.json`). Best-effort: a write failure is a warning, never a
 /// gate — the audit's job is the fidelity verdict, the viz is a bonus.
 fn write_packing_report(
-    lpt: bool,
+    order: PackOrder,
     jobs: usize,
     makespan: Duration,
     total_instret: u64,
@@ -304,7 +343,7 @@ fn write_packing_report(
         a.worker.cmp(&b.worker).then(a.start_s.total_cmp(&b.start_s))
     });
     let report = PackingReport {
-        packing: if lpt { "LPT" } else { "selection-order" },
+        packing: order.label(),
         jobs,
         makespan_s,
         total_instret,
@@ -325,32 +364,48 @@ fn write_packing_report(
     }
 }
 
-/// Report each worker's utilization — busy time over the wall-clock makespan — so
-/// the packing quality is visible. A well-packed run has every worker near the
-/// bottleneck's 100%; a low minimum means one core was left running a straggler
-/// while the others finished. Comparing this between `--no-lpt` and the default
-/// (LPT) is the A/B for the packing change.
-/// Least-loaded-worker (LPT) simulation: given the measured per-item wall-times and
-/// the worker count, what makespan would ideal packing have produced? Sort longest
-/// first, greedily place each item on the currently-least-loaded worker, and take
-/// the peak load. This is the achievable ideal (LPT is within 4/3 of optimal), so
-/// `actual − ideal` is the packing slack — the wall-time a better packer could
-/// reclaim in the same conditions, without paying for a second run to find out.
-fn counterfactual_makespan(durations: &[f64], workers: usize) -> f64 {
-    let mut sorted: Vec<f64> = durations.to_vec();
-    sorted.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+/// Least-loaded-worker (LPT) simulation over `items`, each a `(sort_key, duration)`:
+/// place items **longest-`sort_key`-first** onto the currently-least-loaded worker
+/// and take the peak load. The `sort_key` is what a scheduler would *order* by
+/// (wall-time = the true optimum; instret = the deterministic proxy the real run
+/// uses); the value *packed* is always the measured wall-time `duration`. Feeding
+/// the two different keys yields the two counterfactuals whose diff is the
+/// ordering cost.
+fn counterfactual_makespan(items: &[(f64, f64)], workers: usize) -> f64 {
+    let mut sorted: Vec<(f64, f64)> = items.to_vec();
+    sorted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     let mut loads = vec![0.0f64; workers.max(1)];
-    for d in sorted {
+    for (_, dur) in sorted {
         let least = loads
             .iter_mut()
             .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .expect("at least one worker");
-        *least += d;
+        *least += dur;
     }
     loads.into_iter().fold(0.0, f64::max)
 }
 
-fn print_utilization(worker_busy: &[AtomicU64], makespan: Duration, lpt: bool, ideal: f64) {
+/// One phase's LPT-ideal makespan, ordered either by wall-time (the optimum) or by
+/// guest instret (the deterministic proxy). Packs the measured wall-times either way.
+fn phase_ideal(segs: &[Segment], kind: &str, workers: usize, by_wall: bool) -> f64 {
+    let items: Vec<(f64, f64)> = segs
+        .iter()
+        .filter(|s| s.kind == kind)
+        .map(|s| {
+            let dur = s.end_s - s.start_s;
+            (if by_wall { dur } else { s.instret as f64 }, dur)
+        })
+        .collect();
+    counterfactual_makespan(&items, workers)
+}
+
+fn print_utilization(
+    worker_busy: &[AtomicU64],
+    makespan: Duration,
+    order: PackOrder,
+    ideal_wall: f64,
+    ideal_instret: f64,
+) {
     let makespan_ns = makespan.as_nanos().max(1) as f64;
     let utils: Vec<f64> = worker_busy
         .iter()
@@ -361,7 +416,7 @@ fn print_utilization(worker_busy: &[AtomicU64], makespan: Duration, lpt: bool, i
     }
     println!(
         "\n=== worker utilization ({} packing, {} worker(s), {:.1}s makespan) ===",
-        if lpt { "LPT" } else { "selection-order" },
+        order.label(),
         utils.len(),
         makespan.as_secs_f64(),
     );
@@ -373,10 +428,16 @@ fn print_utilization(worker_busy: &[AtomicU64], makespan: Duration, lpt: bool, i
     let min = utils.iter().copied().fold(f64::INFINITY, f64::min);
     println!("  mean {mean:.1}%, min {min:.1}%  (higher + tighter = better packing)");
     let actual = makespan.as_secs_f64();
-    let slack = (actual - ideal).max(0.0);
+    let ordering_cost = (ideal_instret - ideal_wall).max(0.0);
+    let online_cost = (actual - ideal_instret).max(0.0);
     println!(
-        "  ideal LPT re-pack: {ideal:.1}s  (actual {actual:.1}s — {slack:.1}s of packing slack \
-         reclaimable in the same conditions)"
+        "  ideal LPT re-pack: {ideal_wall:.1}s by wall-time · {ideal_instret:.1}s by instret  \
+         (actual {actual:.1}s)"
+    );
+    println!(
+        "    gap breakdown: {ordering_cost:.1}s ordering (instret vs wall) + {online_cost:.1}s \
+         online/staleness = {:.1}s total to wall-optimal",
+        (actual - ideal_wall).max(0.0),
     );
 }
 
@@ -384,38 +445,53 @@ fn print_utilization(worker_busy: &[AtomicU64], makespan: Duration, lpt: bool, i
 /// root, gitignored; a plain `<instret> <name>` line per scenario.
 const DURATIONS_PATH: &str = ".snemu-itest-durations";
 
-/// Load the cached per-scenario instret (scenario name → guest instructions).
-/// Missing or unparsable file → empty map (first run packs in selection order).
-fn load_durations() -> HashMap<String, u64> {
+/// Cached per-scenario packing cost: `(instret, wall_micros)`. Instret is the
+/// deterministic ordering key; wall-microseconds is the default (true-optimum) key.
+type PackCost = (u64, u64);
+
+/// Load the cached per-scenario costs (name → `(instret, wall_micros)`). Missing or
+/// unparsable file → empty map (first run packs in selection order). Tolerates the
+/// old single-column `<instret> <name>` format (wall defaults to 0).
+fn load_durations() -> HashMap<String, PackCost> {
     let Ok(text) = std::fs::read_to_string(DURATIONS_PATH) else {
         return HashMap::new();
     };
     text.lines()
         .filter_map(|line| {
-            let (steps, name) = line.split_once(char::is_whitespace)?;
-            Some((name.trim().to_owned(), steps.trim().parse().ok()?))
+            let mut cols = line.split_whitespace();
+            let instret: u64 = cols.next()?.parse().ok()?;
+            // New format has wall as the second column; old format has the name there.
+            let (wall, name) = match cols.next() {
+                Some(tok) => match tok.parse::<u64>() {
+                    Ok(w) => (w, cols.next()?.to_owned()),
+                    Err(_) => (0, tok.to_owned()),
+                },
+                None => return None,
+            };
+            Some((name, (instret, wall)))
         })
         .collect()
 }
 
-/// Write this run's per-scenario instret back to the cache, merged over any prior
-/// entries (so a `--only` subset run doesn't erase durations for scenarios it
-/// skipped). Best-effort: a write failure just means next run packs from stale or
+/// Write this run's per-scenario `(instret, wall_micros)` back to the cache, merged
+/// over any prior entries (so a `--only` subset run doesn't erase costs for scenarios
+/// it skipped). Best-effort: a write failure just means next run packs from stale or
 /// partial history, never a hard error.
 fn save_durations(results: &[Row]) {
-    let mut durations = load_durations();
+    let mut costs = load_durations();
     for r in results {
-        // Record every scenario, including the 0-step ones whose assertion is
+        // Record every scenario, including the 0-cost ones whose assertion is
         // already satisfied from the forked checkpoint's frame buffer — they're
         // legitimately cheap, and omitting them makes LPT mistake them for
         // unknown-and-therefore-heaviest next run.
-        durations.insert(r.name.to_owned(), r.instret);
+        let wall_micros = (r.wall_s * 1_000_000.0) as u64;
+        costs.insert(r.name.to_owned(), (r.instret, wall_micros));
     }
-    let mut lines: Vec<(String, u64)> = durations.into_iter().collect();
-    lines.sort_by_key(|(_, steps)| std::cmp::Reverse(*steps));
+    let mut lines: Vec<(String, PackCost)> = costs.into_iter().collect();
+    lines.sort_by_key(|(_, (instret, _))| std::cmp::Reverse(*instret));
     let mut body = String::new();
-    for (name, steps) in &lines {
-        let _ = writeln!(body, "{steps} {name}");
+    for (name, (instret, wall)) in &lines {
+        let _ = writeln!(body, "{instret} {wall} {name}");
     }
     let _ = std::fs::write(DURATIONS_PATH, body);
 }
