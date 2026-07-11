@@ -80,4 +80,12 @@ mod tests {
         assert_eq!(synth(&core(r#""hi""#)), Ty::Str);
         assert_eq!(synth(&core("()")), Ty::Unit);
     }
+
+    #[test]
+    fn a_non_empty_tuple_is_not_unit_and_stays_gradual_for_now() {
+        // Only the *empty* tuple is `Unit`; a populated tuple is not yet
+        // synthesized structurally, so it stays `Dyn`. Pins the `is_empty()`
+        // guard (a mutant that drops it would mis-type `(1, 2)` as `Unit`).
+        assert_eq!(synth(&core("(1, 2)")), Ty::Dyn);
+    }
 }
