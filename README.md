@@ -13,9 +13,11 @@ SnitchOS is an experimental operating system built on the logical extrapolation 
 
 ## Idea 2: 🧬 Don't be afraid to reinvent a better wheel.
 
-- 🔋 **Snemu**: I got sick of QEMU taking 1 second to boot for each of all 100+ integration tests - so I built my own RISC-V emulator. Snemu runs the whole suite in <5 seconds, has its own JIT, is fully deterministic, and supports a unique tree-based snapshot system.
+- 🔋 **Snemu**: I got sick of QEMU taking 1 second to boot for each of all 100+ integration tests - so I built my own RISC-V emulator. Snemu runs the whole suite in <5 seconds, has its own JIT, is fully deterministic, and supports a unique tree-based snapshot system. It's also the path to running the OS inside a web browser with all the same support as the real one.
 - 🪡 **Stitch**: Bash is an unspecified mess that assumes the ambient-authority untyped-data world of Linux - let's not go there. I built Stitch instead: a language first and foremost, taking inspiration from Rust, Kotlin, Haskell and some others (e.g. Gleam for `use <-` syntax). Then a shell on top of it, with `|>` for in-process pipes and `~>` for cross-process: typed data, capabilities mediated by the kernel.
 - 🫨 **Stim**: a Vim clone built in Stitch, with full support for capabilities. Read-only mode is kernel-enforced; editing a file grants only the rights to that file. Every mode switch is a span; every command is traced.
+
+<!-- TODO: add visual examples for each of the above! Animated is best. -->
 
 Here's an example of a Grafana dashboard showing the heap pressure:
 
@@ -34,6 +36,8 @@ Here's an example of a Grafana dashboard showing the heap pressure:
 - Notification system.
 
 ## What's next
+
+TODO
 
 ## Detailed status log
 
