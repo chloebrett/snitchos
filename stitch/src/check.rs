@@ -14,7 +14,7 @@ use crate::prelude::*;
 
 use alloc::collections::BTreeMap;
 
-use crate::ast::{Field, Type};
+use crate::ast::{BinOp, Field, Type};
 use crate::core_ir::{CoreArg, CoreExpr, CoreExprKind, CoreItem};
 use crate::lexer::Span;
 use crate::source::{SourceId, SourceMap};
@@ -108,9 +108,84 @@ fn synth(expr: &CoreExpr, ctx: &Ctx, errors: &mut Vec<TypeError>) -> Ty {
         // names the checker isn't tracking (globals, other functions) are `Dyn`.
         CoreExprKind::Var(name) => ctx.locals.get(name).cloned().unwrap_or(Ty::Dyn),
         CoreExprKind::Call { callee, args } => synth_call(callee, args, ctx, errors),
+        CoreExprKind::Binary { op, left, right } => {
+            synth_binary(*op, left, right, expr.span, ctx, errors)
+        }
         // Everything else is not yet understood: stay gradual (sound-by-omission).
         _ => Ty::Dyn,
     }
+}
+
+/// Synthesize a binary operation: synthesize both operands (collecting any nested
+/// errors), then type the operator. An operator that can't apply to the operand
+/// types is one error at `span`; a `Dyn` operand is gradual (never an error).
+fn synth_binary(
+    op: BinOp,
+    left: &CoreExpr,
+    right: &CoreExpr,
+    span: Span,
+    ctx: &Ctx,
+    errors: &mut Vec<TypeError>,
+) -> Ty {
+    let l = synth(left, ctx, errors);
+    let r = synth(right, ctx, errors);
+    if let Some(ty) = binop_type(op, &l, &r) {
+        return ty;
+    }
+    errors.push(TypeError {
+        message: format!("operator `{op:?}` cannot apply to `{l:?}` and `{r:?}`"),
+        span,
+    });
+    Ty::Dyn
+}
+
+/// The result type of `op` on operand types `l`/`r`, or `None` when the operator
+/// can't apply (a type error). Mirrors the runtime rules in `ops::eval_binary`.
+fn binop_type(op: BinOp, l: &Ty, r: &Ty) -> Option<Ty> {
+    match op {
+        // `+` is numeric addition or string concatenation.
+        BinOp::Add => numeric_or_str(l, r),
+        BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => numeric(l, r),
+        // Equality is defined between same-kind values; the result is always Bool.
+        // (Operand-kind checking is deferred; the result type is what matters here.)
+        BinOp::Eq | BinOp::Ne => Some(Ty::Bool),
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => orderable(l, r).then_some(Ty::Bool),
+        BinOp::And | BinOp::Or => boolish(l, r).then_some(Ty::Bool),
+        // Pipes and ranges aren't typed as binary operators yet: gradual.
+        BinOp::Pipe | BinOp::CrossPipe | BinOp::Range | BinOp::RangeIncl => Some(Ty::Dyn),
+    }
+}
+
+/// Numeric arithmetic: both `Int` → `Int`, both `Float` → `Float`; a `Dyn`
+/// operand is gradual (`Dyn`); any other pairing is a type error.
+fn numeric(l: &Ty, r: &Ty) -> Option<Ty> {
+    match (l, r) {
+        (Ty::Dyn, _) | (_, Ty::Dyn) => Some(Ty::Dyn),
+        (Ty::Int, Ty::Int) => Some(Ty::Int),
+        (Ty::Float, Ty::Float) => Some(Ty::Float),
+        _ => None,
+    }
+}
+
+/// `+`: numeric addition, or `Str + Str` string concatenation.
+fn numeric_or_str(l: &Ty, r: &Ty) -> Option<Ty> {
+    if let (Ty::Str, Ty::Str) = (l, r) {
+        return Some(Ty::Str);
+    }
+    numeric(l, r)
+}
+
+/// Whether both operands are of one orderable kind (`Int`/`Float`/`Str`, matching)
+/// — or `Dyn`. Ordering comparisons need comparable, same-kind operands.
+fn orderable(l: &Ty, r: &Ty) -> bool {
+    let ord = |t: &Ty| matches!(t, Ty::Int | Ty::Float | Ty::Str | Ty::Dyn);
+    ord(l) && ord(r) && consistent(l, r)
+}
+
+/// Whether both operands are booleans (or `Dyn`) — the domain of `and`/`or`.
+fn boolish(l: &Ty, r: &Ty) -> bool {
+    let is_bool = |t: &Ty| matches!(t, Ty::Bool | Ty::Dyn);
+    is_bool(l) && is_bool(r)
 }
 
 /// Synthesize a call. A call to a declared constructor checks each argument
@@ -428,5 +503,30 @@ mod tests {
         );
         // An unknown callee is `Dyn` — its call is unchecked.
         assert!(errors("f() = unknownFn(1)").is_empty(), "unknown callee → Dyn → clean");
+    }
+
+    #[test]
+    fn binary_operators_check_operand_types_and_synthesize_a_result() {
+        // Arithmetic on mismatched kinds is one error, at the operation.
+        let src = "f() = 1 + true";
+        let errs = errors(src);
+        assert_eq!(errs.len(), 1, "Int + Bool, got {errs:?}");
+        assert_eq!(errs[0].span.start, src.find("1 + true").expect("the op"));
+        // Well-typed arithmetic and string concatenation are clean.
+        assert!(errors("f() = 1 + 2").is_empty(), "Int + Int");
+        assert!(errors("f() = 1.0 * 2.0").is_empty(), "Float * Float");
+        assert!(errors(r#"f() = "a" + "b""#).is_empty(), "Str + Str concat");
+        // The result type flows out: `1 + 2` is Int, `1 < 2` is Bool.
+        assert_eq!(errors("f() -> Str = 1 + 2").len(), 1, "Int result ≠ Str return");
+        assert_eq!(errors("f() -> Int = 1 < 2").len(), 1, "Bool result ≠ Int return");
+        // Ordering across kinds is an error.
+        assert_eq!(errors(r#"f() = 1 < "x""#).len(), 1, "Int < Str");
+        // Logic operators need booleans and yield Bool.
+        assert_eq!(errors("f() = 1 and true").len(), 1, "Int `and` Bool");
+        assert_eq!(errors("f() -> Int = true or false").len(), 1, "Bool result ≠ Int return");
+        // Equality yields Bool regardless of the (same-kind) operands.
+        assert_eq!(errors("f() -> Int = 1 == 2").len(), 1, "== result Bool ≠ Int return");
+        // A `Dyn` operand suppresses the error (gradual).
+        assert!(errors("f(a) = a + 1").is_empty(), "Dyn operand → no error");
     }
 }
