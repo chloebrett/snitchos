@@ -59,6 +59,9 @@ fn main() {
     println!("cargo:rustc-link-arg=-T{dir}/linker.ld");
     println!("cargo:rerun-if-changed={dir}/linker.ld");
     println!("cargo:rerun-if-changed={dir}/src/entry.S");
+    // The embedded-userspace opt override (`snemu-itest --opt=high`); rebuild the
+    // embed when it flips so mid↔high actually re-optimizes the userspace.
+    println!("cargo:rerun-if-env-changed=SNITCHOS_USERSPACE_OPT");
 
     build_and_embed_user(&dir);
 }
