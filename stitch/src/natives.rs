@@ -225,6 +225,18 @@ fn native_to_list(args: &[Value], _env: &Env) -> Result<Value, RuntimeError> {
     Ok(Value::List(items.into()))
 }
 
+/// Build the refusal for an effect the caller lacks authority for. The primary
+/// span (the perform site) is stamped by `eval` as the fault unwinds; when the
+/// capability was dropped by a `without Cap { … }` in scope, a secondary note
+/// points at that `without` — the actionable site.
+fn refuse(env: &Env, effect: &str, cap: &str) -> RuntimeError {
+    let err = RuntimeError::new(format!("{effect} requires `uses {cap}`"));
+    match env.withheld_note(cap) {
+        Some((span, source)) => err.noted(format!("`{cap}` withheld here"), span, source),
+        None => err,
+    }
+}
+
 /// `span(name, body)` — open a span, run the zero-argument `body` thunk, close
 /// the span, and return the body's value. The `use <- span(name)` sugar makes
 /// the rest of a block the body. v0 stub for span frames on the wire.
@@ -239,7 +251,7 @@ fn native_span(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         )));
     };
     if !env.has_authority("Telemetry") {
-        return Err(RuntimeError::new("span requires `uses Telemetry`"));
+        return Err(refuse(env, "span", "Telemetry"));
     }
     perform_effect("span", args, env, || {
         env.span_open(name);
@@ -257,7 +269,7 @@ fn native_print(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         return Err(RuntimeError::new("print expects (value)"));
     };
     if !env.has_authority("ConsoleOut") {
-        return Err(RuntimeError::new("print requires `uses ConsoleOut`"));
+        return Err(refuse(env, "print", "ConsoleOut"));
     }
     perform_effect("print", args, env, || {
         env.platform().write(&format!("{}\n", value.display()));
@@ -273,7 +285,7 @@ fn native_read_line(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         return Err(RuntimeError::new("readLine expects no arguments"));
     };
     if !env.has_authority("ConsoleIn") {
-        return Err(RuntimeError::new("readLine requires `uses ConsoleIn`"));
+        return Err(refuse(env, "readLine", "ConsoleIn"));
     }
     perform_effect("readLine", args, env, || {
         Ok(match env.platform().read_line() {
@@ -291,7 +303,7 @@ fn native_read_byte(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         return Err(RuntimeError::new("readByte expects no arguments"));
     };
     if !env.has_authority("ConsoleIn") {
-        return Err(RuntimeError::new("readByte requires `uses ConsoleIn`"));
+        return Err(refuse(env, "readByte", "ConsoleIn"));
     }
     perform_effect("readByte", args, env, || {
         Ok(match env.platform().read_byte() {
@@ -315,7 +327,7 @@ fn native_write_console(args: &[Value], env: &Env) -> Result<Value, RuntimeError
         )));
     };
     if !env.has_authority("ConsoleOut") {
-        return Err(RuntimeError::new("writeConsole requires `uses ConsoleOut`"));
+        return Err(refuse(env, "writeConsole", "ConsoleOut"));
     }
     perform_effect("writeConsole", args, env, || {
         env.platform().write(text);
@@ -341,7 +353,7 @@ fn native_fs_write(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         )));
     };
     if !env.has_authority("FsWrite") {
-        return Err(RuntimeError::new("fsWrite requires `uses FsWrite`"));
+        return Err(refuse(env, "fsWrite", "FsWrite"));
     }
     perform_effect("fsWrite", args, env, || {
         let handle = u32::try_from(*handle)
@@ -453,7 +465,7 @@ fn native_read_file(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         )));
     };
     if !env.has_authority("FsRead") {
-        return Err(RuntimeError::new("readFile requires `uses FsRead`"));
+        return Err(refuse(env, "readFile", "FsRead"));
     }
     perform_effect("readFile", args, env, || {
         Ok(match env.platform().fs_read(name) {
@@ -475,7 +487,7 @@ fn native_emit(args: &[Value], env: &Env) -> Result<Value, RuntimeError> {
         )));
     };
     if !env.has_authority("Telemetry") {
-        return Err(RuntimeError::new("emit requires `uses Telemetry`"));
+        return Err(refuse(env, "emit", "Telemetry"));
     }
     perform_effect("emit", args, env, || {
         env.emit_metric(name, value);

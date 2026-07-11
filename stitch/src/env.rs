@@ -21,6 +21,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use crate::prelude::*;
 
 use crate::ast::Method;
+use crate::lexer::Span;
 use crate::platform::{NullPlatform, Platform};
 use crate::source::SourceId;
 use crate::telemetry::{RecordingTelemetry, Telemetry};
@@ -86,6 +87,11 @@ pub struct Env {
     /// before falling to the ambient platform. Threaded through calls (not reset at
     /// boundaries) so handlers are dynamic, not lexical.
     handlers: Rc<Vec<(String, Value)>>,
+    /// Dynamically-scoped record of capabilities withheld by `without Cap { … }`:
+    /// a stack of `(cap, the `without` construct's span, its source)`. Pushed for
+    /// the block's extent (via a scoped env clone) so a subsequent effect refusal
+    /// can cite *where* the authority was dropped, not just the perform site.
+    withheld: Rc<Vec<(String, Span, SourceId)>>,
 }
 
 /// Pops [`Env::enter_call`]'s pushed frame when dropped — so the call stack is
@@ -136,6 +142,7 @@ impl Env {
             telemetry,
             platform: Rc::new(NullPlatform),
             authority: Rc::new(BTreeSet::new()),
+            withheld: Rc::new(Vec::new()),
             fuel: Rc::new(Cell::new(u64::MAX)),
             frames: Rc::new(RefCell::new(Vec::new())),
             self_closure: None,
@@ -253,13 +260,34 @@ impl Env {
 
     /// A clone of this environment with capability `cap` dropped from the
     /// authority in scope — the attenuation primitive behind `without Cap { … }`.
-    /// A no-op if `cap` was not held. Only this scope's direct effects are
-    /// attenuated; a named-function call restores that function's declared `uses`.
+    /// A no-op on the authority if `cap` was not held. Only this scope's direct
+    /// effects are attenuated; a named-function call restores that function's
+    /// declared `uses`. `span` is the `without` construct's span, recorded so a
+    /// later refusal can cite where the authority was withheld (see
+    /// [`withheld_note`](Self::withheld_note)).
     #[must_use]
-    pub fn without_authority(&self, cap: &str) -> Env {
+    pub fn without_authority(&self, cap: &str, span: Span) -> Env {
         let mut authority = (*self.authority).clone();
         authority.remove(cap);
-        Env { authority: Rc::new(authority), ..self.clone() }
+        let mut withheld = (*self.withheld).clone();
+        withheld.push((cap.to_string(), span, self.source));
+        Env {
+            authority: Rc::new(authority),
+            withheld: Rc::new(withheld),
+            ..self.clone()
+        }
+    }
+
+    /// Where capability `cap` was most recently withheld by `without`, if in scope —
+    /// its `(span, source)`. The effect-authority gate reads this to annotate a
+    /// refusal with the actionable `without` site.
+    #[must_use]
+    pub fn withheld_note(&self, cap: &str) -> Option<(Span, SourceId)> {
+        self.withheld
+            .iter()
+            .rev()
+            .find(|(name, _, _)| name == cap)
+            .map(|(_, span, source)| (*span, *source))
     }
 
     /// A clone of this environment tagged with `source` — the source the code
@@ -336,6 +364,7 @@ impl Env {
             self_closure: None,
             source: self.source,
             handlers: Rc::clone(&self.handlers),
+            withheld: Rc::clone(&self.withheld),
         }
     }
 
@@ -359,6 +388,7 @@ impl Env {
             self_closure: None,
             source: self.source,
             handlers: Rc::clone(&self.handlers),
+            withheld: Rc::clone(&self.withheld),
         }
     }
 
@@ -394,6 +424,7 @@ impl Env {
             self_closure: None,
             source: self.source,
             handlers: Rc::clone(&self.handlers),
+            withheld: Rc::clone(&self.withheld),
         }
     }
 
@@ -492,6 +523,7 @@ impl Env {
             self_closure: None,
             source: self.source,
             handlers: Rc::clone(&self.handlers),
+            withheld: Rc::clone(&self.withheld),
         }
     }
 

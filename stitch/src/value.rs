@@ -381,6 +381,18 @@ pub struct Frame {
     pub name: Option<String>,
 }
 
+/// A secondary annotation on a fault: a labelled span pointing somewhere *other*
+/// than the primary offending expression — e.g. an unhandled-effect refusal notes
+/// the `without Cap { … }` construct that withheld the authority. Carries its own
+/// `source` because the annotated site may live in a different source than the
+/// primary span (prelude vs user program).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Note {
+    pub label: String,
+    pub span: Span,
+    pub source: Option<SourceId>,
+}
+
 /// The error channel of evaluation. Carries either a real fault or a control
 /// signal — `?`'s early return — which unwinds to the enclosing function rather
 /// than aborting the program. (Reusing the `Err` channel for control flow is
@@ -393,7 +405,19 @@ pub enum RuntimeError {
     /// span indexes, stamped by `apply_values` from the running closure (the
     /// innermost closure wins). `trace` is the call stack snapshotted at the raise
     /// point (innermost-last). All empty/`None` until stamped.
-    Fault { message: String, at: Option<Span>, source: Option<SourceId>, trace: Vec<Frame> },
+    Fault {
+        message: String,
+        at: Option<Span>,
+        source: Option<SourceId>,
+        trace: Vec<Frame>,
+        /// A secondary annotation (e.g. where a `without` withheld authority),
+        /// rendered as an extra caret after the primary. Attached at the raise site
+        /// (it carries its own span+source), untouched by the stamping methods.
+        /// Boxed so a `Fault` — which rides in every `Result<Value, _>` on the
+        /// interpreter's (stack-tight) recursion frame — grows by one word, not
+        /// three; a single note is all any effect refusal needs.
+        note: Option<Box<Note>>,
+    },
     /// `?` short-circuit: unwind to the enclosing function and return this value.
     Return(Value),
     /// Self-tail-call signal: `apply_values` catches this and loops instead of
@@ -403,7 +427,37 @@ pub enum RuntimeError {
 
 impl RuntimeError {
     pub(crate) fn new(message: impl Into<String>) -> Self {
-        RuntimeError::Fault { message: message.into(), at: None, source: None, trace: Vec::new() }
+        RuntimeError::Fault {
+            message: message.into(),
+            at: None,
+            source: None,
+            trace: Vec::new(),
+            note: None,
+        }
+    }
+
+    /// Attach a secondary annotation (a labelled span pointing at a related site).
+    /// A no-op on a control signal or a fault that already carries one. Used by the
+    /// effect-authority gate to note where a `without` withheld the capability.
+    #[must_use]
+    pub(crate) fn noted(self, label: String, span: Span, source: SourceId) -> Self {
+        match self {
+            RuntimeError::Fault { message, at, source: src, trace, note: None } => {
+                let note = Some(Box::new(Note { label, span, source: Some(source) }));
+                RuntimeError::Fault { message, at, source: src, trace, note }
+            }
+            other => other,
+        }
+    }
+
+    /// This fault's secondary annotation, if any — a labelled span (with its own
+    /// source) pointing at a related site, for rendering after the primary caret.
+    #[must_use]
+    pub fn note(&self) -> Option<&Note> {
+        match self {
+            RuntimeError::Fault { note, .. } => note.as_deref(),
+            _ => None,
+        }
     }
 
     /// The `?` early-return control signal carrying the failure value.
@@ -418,8 +472,8 @@ impl RuntimeError {
     #[must_use]
     pub(crate) fn stamped(self, span: Span) -> Self {
         match self {
-            RuntimeError::Fault { message, at: None, source, trace } => {
-                RuntimeError::Fault { message, at: Some(span), source, trace }
+            RuntimeError::Fault { message, at: None, source, trace, note } => {
+                RuntimeError::Fault { message, at: Some(span), source, trace, note }
             }
             other => other,
         }
@@ -432,8 +486,8 @@ impl RuntimeError {
     #[must_use]
     pub(crate) fn with_source(self, source: SourceId) -> Self {
         match self {
-            RuntimeError::Fault { message, at, source: None, trace } => {
-                RuntimeError::Fault { message, at, source: Some(source), trace }
+            RuntimeError::Fault { message, at, source: None, trace, note } => {
+                RuntimeError::Fault { message, at, source: Some(source), trace, note }
             }
             other => other,
         }
@@ -444,8 +498,8 @@ impl RuntimeError {
     #[must_use]
     pub(crate) fn with_trace(self, frames: Vec<Frame>) -> Self {
         match self {
-            RuntimeError::Fault { message, at, source, trace } if trace.is_empty() => {
-                RuntimeError::Fault { message, at, source, trace: frames }
+            RuntimeError::Fault { message, at, source, trace, note } if trace.is_empty() => {
+                RuntimeError::Fault { message, at, source, trace: frames, note }
             }
             other => other,
         }
@@ -488,12 +542,17 @@ impl RuntimeError {
     #[must_use]
     pub fn render(&self, sources: &SourceMap) -> String {
         match self {
-            RuntimeError::Fault { message, at: Some(span), source, trace } => {
+            RuntimeError::Fault { message, at: Some(span), source, trace, note } => {
                 let mut out = sources.render(source.unwrap_or_default(), *span, message);
                 // The call stack, innermost frame first (`trace` is innermost-last).
                 for frame in trace.iter().rev() {
                     out.push_str("\n  in ");
                     out.push_str(frame.name.as_deref().unwrap_or("<lambda>"));
+                }
+                // The secondary annotation, rendered against its own source.
+                if let Some(note) = note {
+                    out.push('\n');
+                    out.push_str(&sources.render(note.source.unwrap_or_default(), note.span, &note.label));
                 }
                 out
             }

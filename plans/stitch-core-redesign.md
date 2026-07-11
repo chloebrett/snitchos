@@ -505,8 +505,26 @@ evals the body under `env.without_authority(cap)` (a `&Env` → `Env` clone that
   `uses Cap` does NOT stay attenuated, because `with_authority` restores `f`'s declared
   set at the call boundary (the authority model is per-function-declared, not
   caller-intersected). Transitive/caller-intersected attenuation is a later call.
-- Deferred (optional): fold the D1 `uses` declaration span into the refusal message.
 - **585 lib + integration green, no new clippy warnings.**
+
+**D4 follow-up 3a — spanned *withholding* note — ✅ DONE (2026-07-11).** The original
+"fold the `uses` declaration span" idea proved the weakest option (the two common
+refusal causes — undeclared, or `without`-withheld — have no `uses` decl to cite).
+Instead: the `without Cap { … }` construct's span is recorded in the `Env`
+(`withheld: Rc<Vec<(cap, Span, SourceId)>>`, pushed by `without_authority(cap, span)`,
+read by `withheld_note`), and the effect-authority gate (`natives::refuse`) attaches a
+secondary `Note` to the refusal. `RuntimeError::Fault` gained `note: Option<Box<Note>>`
+(a labelled span with its own source); `render` emits a second caret. Result: a
+two-caret diagnostic — primary at the perform site, secondary "`Cap` withheld here" at
+the `without`. Tests: structured (`…notes_where_authority_was_withheld`) + rendered
+(`…renders_both_the_perform_and_the_withholding_site`).
+- **Frame-fragility gotcha:** a first cut used `Vec<Note>` (24 B) and overflowed the
+  `deep_non_tail_recursion` test — `Fault` rides in every `Result` on the tight
+  recursion frame, tipping `MAX_CALL_DEPTH=48` past the test-thread stack. Fixed by
+  boxing (`Option<Box<Note>>`, 8 B). See [[project_stitch_interp_frame_fragility]].
+- 3b (block-form `handle` delimiter): decided **no change** — structurally identical to
+  `match subject { … }`; a real handler is a lambda, not a bare block.
+- **587 lib + integration green, no new clippy warnings.**
 
 ### Non-goals (Phase D)
 - Multi-shot / resumable continuations (VM).

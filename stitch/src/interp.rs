@@ -531,7 +531,9 @@ fn eval_dispatch(expr: &CoreExpr, env: &Env) -> Result<Value, RuntimeError> {
             let handler = eval(handler, env)?;
             eval(body, &env.clone().with_handler(op.clone(), handler))
         }
-        CoreExprKind::Without { cap, body } => eval(body, &env.without_authority(cap)),
+        CoreExprKind::Without { cap, body } => {
+            eval(body, &env.without_authority(cap, expr.span))
+        }
         // `()` is unit; `(a, b, …)` is a tuple.
         CoreExprKind::Tuple(elements) if elements.is_empty() => Ok(Value::Unit),
         CoreExprKind::Tuple(elements) => {
@@ -1594,6 +1596,62 @@ mod tests {
             span.start,
             src.find("emit").expect("src has an emit call"),
             "the refusal should cite the `emit(…)` call, not the `without` block: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_without_refusal_notes_where_authority_was_withheld() {
+        // A refusal inside `without Telemetry { … }` carries a secondary note that
+        // points at the `without` construct — the actionable site — in addition to
+        // the primary span at the perform site.
+        let mut items = crate::interp::prelude_items();
+        crate::lower::lower_program(&mut items);
+        let env = crate::interp::build_env(&items);
+        let src = r#"without Telemetry { emit("x", 1) }"#;
+        let e = crate::lower::lower_expr_to_core(&crate::parser::parse(src).expect("parse"));
+        let err = crate::interp::eval(&e, &env).expect_err("emit refused without Telemetry");
+        assert_eq!(
+            err.span().map(|s| s.start),
+            Some(src.find("emit").expect("has emit")),
+            "primary span cites the perform site: {err:?}"
+        );
+        let note = err.note().expect("a withholding note is attached");
+        assert!(
+            note.label.contains("Telemetry"),
+            "the note names the withheld cap: {:?}",
+            note.label
+        );
+        assert_eq!(
+            note.span.start,
+            src.find("without").expect("has without"),
+            "the note points at the `without` construct: {note:?}"
+        );
+    }
+
+    #[test]
+    fn a_without_refusal_renders_both_the_perform_and_the_withholding_site() {
+        // End-to-end render: a two-caret diagnostic — the primary at the `emit`
+        // perform site, a secondary at the `without Telemetry` that withheld it.
+        let src = "main() uses Telemetry = without Telemetry { emit(\"x\", 1) }";
+        let mut sources = crate::source::SourceMap::new();
+        let user_src = sources.register("prog.st", src);
+        let items = parse_program(src).expect("parse");
+        let (result, _telemetry) =
+            crate::interp::eval_program_located(&items, &mut sources, user_src);
+        let err = result.expect_err("emit refused inside `without Telemetry`");
+        let rendered = err.render(&sources);
+        assert!(
+            rendered.contains("emit requires `uses Telemetry`"),
+            "primary message present:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("`Telemetry` withheld here"),
+            "secondary note present:\n{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("prog.st:1:").count(),
+            2,
+            "both carets resolve to a source location:\n{rendered}"
         );
     }
 

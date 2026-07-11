@@ -2216,4 +2216,28 @@ mod tests {
         // A postfix chain `a.b.c` spans from `a` through the last field.
         assert_eq!(p("a.b.c").span, Span { start: 0, end: 5 });
     }
+
+    #[test]
+    fn handle_splits_a_call_valued_handler_from_the_body_block() {
+        // `handle <op> with <expr> { body }` is shaped like `match subject { … }`:
+        // the handler expr stops before `{`, which begins the body. A call-valued
+        // handler (not a bare lambda) must not swallow the body block — the parser
+        // stops it there because `{` is a leading atom, never a postfix.
+        let ExprKind::Handle { op, handler, body } =
+            p(r#"handle emit with makeHandler() { emit("x", 1) }"#).kind
+        else {
+            panic!("expected a Handle node");
+        };
+        assert_eq!(op, "emit");
+        assert!(
+            matches!(handler.kind, ExprKind::Call { .. }),
+            "handler is the call, got {:?}",
+            handler.kind
+        );
+        assert!(
+            matches!(body.kind, ExprKind::Block { .. }),
+            "body is the block, got {:?}",
+            body.kind
+        );
+    }
 }
