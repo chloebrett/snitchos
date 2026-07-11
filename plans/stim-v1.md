@@ -83,8 +83,9 @@ clear-and-redraw each keystroke; whole-buffer save; cap-confinement + enforced
 read-only; session + per-`:w` spans. Engine carries a full `(row, col)` cursor
 (so `h`/`l` are unbound keys, not missing engine features).
 
-**Out (fast-follow / other axes):** `:q` (Ctrl-C ends v1 — yes, it's an
-un-exitable vim on purpose), `h`/`l`, `x`/`dd`/`o`, arrow keys (no ESC-sequence
+**Out (fast-follow / other axes):** `:q` (genuinely un-exitable in v1 — no `:q`, and
+SnitchOS has no signals so Ctrl-C just types `0x03`; the only exit is killing the
+process. an un-exitable vim on purpose), `h`/`l`, `x`/`dd`/`o`, arrow keys (no ESC-sequence
 parsing — every v1 key is a single byte), diffed redraw, structured editing, `~>`
 filter, scrub/replay, checkpoint, taint-yank, metrics, the Stitch-loop/TCO variant.
 
@@ -508,9 +509,13 @@ delegating `[file cap]`; `run` is unchanged.
 `RuntimePlatform`/console — the REPL reads lines, stim reads raw bytes; a mode switch may
 leave stale `LineEditor` state (fine for scripted itest; revisit for interactive use). (2)
 **in-process is a modal takeover** — on the metal `run` blocks forever (a UART never EOFs),
-so `:stim` never returns to the REPL; **Ctrl-C exits the whole REPL** (Phase-2 Spawn fixes
-this — Ctrl-C kills just the child). (3) read-only *refusal semantics* already host-tested
-at 3.4 (`deny_writes`); this step is the metal path + shell glue.
+so `:stim` never returns to the REPL. **stim is genuinely un-exitable in v1: no `:q`, and
+no signals** — SnitchOS has no Ctrl-C, so `0x03` just reaches `read_byte` and gets *typed
+into the buffer* like any byte. The only exit is killing the process (quit the emulator).
+Phase-2 spawn doesn't add an interrupt (still no signals) — it makes stim a *separate*
+process so that when it eventually exits (`:q`, fast-follow) the shell survives, and
+killing stim doesn't take the shell down. (3) read-only *refusal semantics* already
+host-tested at 3.4 (`deny_writes`); this step is the metal path + shell glue.
 
 #### Step 4.3: tracing — a session root span + a span per `:w` — ✅ DONE (2026-07-10)
 **Verified**: 5 stim tests green (incl. the span-sequence assertion); `stitch_repl`
