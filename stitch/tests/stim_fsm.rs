@@ -41,10 +41,51 @@ fn step_dispatches_normal_mode_keys() {
     assert_eq!(row_col(&format!(r#"step({start}, "j").state"#)), ints(1, 0));
     assert_eq!(step_mode(start, "i"), s("Insert"));
     assert_eq!(step_mode(start, ":"), s("Command"));
-    // An unbound key (`z`, and `h`/`l`) is a Noop — nothing changes.
+    // An unbound key (`z`) is a Noop — nothing changes.
     assert_eq!(step_effect(start, "z"), s("Noop"));
     assert_eq!(fsm(&format!(r#"step({start}, "z").state"#)), fsm(start));
-    assert_eq!(step_effect(start, "h"), s("Noop"));
+}
+
+#[test]
+fn h_and_l_move_the_cursor_within_the_line() {
+    // "abc" cursor at col 1: `l` → col 2, `h` → col 0.
+    let mid = r#"Editor(..initialState("abc"), col: 1)"#;
+    assert_eq!(row_col(&format!(r#"step({mid}, "l").state"#)), ints(0, 2));
+    assert_eq!(row_col(&format!(r#"step({mid}, "h").state"#)), ints(0, 0));
+    // `h` at column 0 and `l` at the line's end are both no-ops (clamped).
+    assert_eq!(row_col(r#"step(initialState("abc"), "h").state"#), ints(0, 0));
+    assert_eq!(row_col(&format!(r#"step(Editor(..initialState("abc"), col: 3), "l").state"#)), ints(0, 3));
+    // They're handled keys, so they redraw (even the clamped no-op).
+    assert_eq!(step_effect(mid, "h"), s("Redraw"));
+}
+
+#[test]
+fn x_deletes_the_character_under_the_cursor() {
+    // "abc" col 1 → delete 'b' → "ac", col 1.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("abc"), col: 1), "x").state"#),
+        line_and_col("ac", 1)
+    );
+    // At end of line (col == len) there's nothing under the cursor → no-op.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("abc"), col: 3), "x").state"#),
+        line_and_col("abc", 3)
+    );
+    // Deleting the last char re-clamps the cursor onto the shortened line.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("ab"), col: 1), "x").state"#),
+        line_and_col("a", 1)
+    );
+}
+
+#[test]
+fn o_opens_a_line_below_and_enters_insert() {
+    // "ab" → `o` → an empty line below, cursor there, in Insert mode.
+    assert_eq!(
+        lines_row_col(r#"step(initialState("ab"), "o").state"#),
+        buffer(&["ab", ""], 1, 0)
+    );
+    assert_eq!(step_mode(r#"initialState("ab")"#, "o"), s("Insert"));
 }
 
 #[test]

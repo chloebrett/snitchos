@@ -612,6 +612,20 @@ settles (this run used `--skip-unit-tests` around a transient doctest break).
   (`h`/`l`, `x`/`dd`/`o`, `:q`), then the axis-tie-in twists (modes-as-authority
   via effect handlers, structured editing via `render.rs`, `~>` filter, scrub,
   persistence) as each underlying axis lands.
+  - **Grammar batch DONE (2026-07-11):** **`:q`** (new `Quit` effect + `quit` helper
+    + `q` arm in `stepCommand`; the driver breaks its loop on `Quit` via `is_quit`,
+    which also closes the session span cleanly and un-sticks the modal takeover —
+    you return to the `stitch>` prompt). **`h`/`l`** (`moveLeft`/`moveRight`,
+    clamped within the line), **`x`** (`deleteChar` — under-cursor, no-op at EOL,
+    col re-clamps), **`o`** (`openLine` — empty line below + Insert). All in
+    `fs-image/stim/stim.st`, routed in `stepNormal`/`stepCommand`; the driver's
+    `byte_to_key` already maps them (printables), so no driver change beyond
+    `is_quit`. 24 FSM tests + driver `:q`-quits test (mutation-clean 2/2); the metal
+    itest still passes. *Remaining:* `dd`, `:q!`/unsaved-guard, arrow keys.
+    ⚠ `:q` return-to-prompt works interactively but a *burst* sending bytes in the
+    same console chunk as `:q` can lose them to the `read_byte` prefetch (the
+    console-sharing caveat) — so a scripted `:q` metal itest is deferred (wants a
+    span-end matcher or careful send timing).
 - [Stitch mutation testing](../docs/stitch-mutation-testing-design.md) — then run
   it over the editor FSM to give the Stitch logic the same gate the natives get.
 

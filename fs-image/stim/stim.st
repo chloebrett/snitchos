@@ -71,6 +71,39 @@ moveDown(state) = match {
     }
 }
 
+// `h` — cursor left within the line, clamped at column 0.
+moveLeft(state) = match {
+    state.col > 0 => Editor(..state, col: state.col - 1)
+    _ => state
+}
+
+// `l` — cursor right within the line, clamped at the line's end.
+moveRight(state) = match {
+    state.col < Str.length(lineAt(state, state.row)) => Editor(..state, col: state.col + 1)
+    _ => state
+}
+
+// `x` — delete the character under the cursor. No-op at end of line (nothing under
+// the cursor); the cursor re-clamps onto the shortened line.
+deleteChar(state) = match {
+    state.col < Str.length(lineAt(state, state.row)) => {
+        let line = lineAt(state, state.row)
+        let edited = Str.slice(line, 0, state.col) + Str.slice(line, state.col + 1, Str.length(line))
+        let moved = Editor(..state, lines: List.set(state.lines, state.row, edited))
+        Editor(..moved, col: clampedCol(moved, state.row))
+    }
+    _ => state
+}
+
+// `o` — open a fresh empty line below the cursor and enter Insert mode there.
+openLine(state) = Editor(
+    ..state,
+    lines: List.insert(state.lines, state.row + 1, ""),
+    row: state.row + 1,
+    col: 0,
+    mode: Insert,
+)
+
 // `i` — enter Insert mode. Only the mode changes; buffer and cursor are untouched.
 enterInsert(state) = Editor(..state, mode: Insert)
 
@@ -170,10 +203,14 @@ isPrintable(key) = Str.length(key) == 1
 
 enterCommand(state) = Editor(..state, mode: Command)
 
-// Normal mode: navigation + mode entry. `h`/`l` and everything unbound are Noops.
+// Normal mode: navigation, small edits, mode entry. Unbound keys are Noops.
 stepNormal(state, key) = match {
     key == "j" => redraw(moveDown(state))
     key == "k" => redraw(moveUp(state))
+    key == "h" => redraw(moveLeft(state))
+    key == "l" => redraw(moveRight(state))
+    key == "x" => redraw(deleteChar(state))
+    key == "o" => redraw(openLine(state))
     key == "i" => redraw(enterInsert(state))
     key == ":" => redraw(enterCommand(state))
     _ => noop(state)
