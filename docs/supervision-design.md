@@ -137,6 +137,27 @@ Two tiers:
 opt-in flag that names a readiness notification the supervisor creates and delegates
 the `SIGNAL` end of. No new mechanism required.
 
+**A concrete race this closes (found 2026-07-11).** Readiness isn't only for service
+*startup* order — the same event-vs-timing choice already bites the shipped powerbox
+path, in the *teardown* direction. `view-demo`/`shell` hand a file cap to a spawned
+`viewer`, then **`yield_now()` once and `revoke`** — a bet that one scheduling turn is
+enough for the viewer to complete a full synchronous Read IPC round-trip before the cap
+is pulled. `viewer.rs:57` admits it: *"replace with a proper parent-signals-done
+primitive … the yield count is fragile … an implicit timing contract, not a hard
+guarantee."* It is: `snemu-itest --opt=low` (debug) fails `viewer-reads-delegated-file`
+and `shell-view-command-revokes-cap` with `bytes_read=0` (the viewer's first Read is
+`Denied` — the revoke won), while QEMU-debug and every `--opt=mid/high` build win the
+race and pass. It is a **real race, not snemu mis-emulation** — the timing just resolves
+the other way. The fix is exactly D2's primitive applied to "done": the child `Signal`s
+completion, the parent `WaitNotify`s before revoking — an event, not a yield count.
+**Caveat (honest):** widening the window (1 → 16 yields) did *not* flip it green — it
+changed the failure to a hang (`bytes_read` never emitted, budget exhausted). So the
+yield-count handshake is unsound in *both* directions, and there is likely a residual
+lost-wakeup / IPC-scheduling interaction (or a snemu scheduling-fidelity gap) beneath the
+timing race. Treat these two scenarios as a **reproducer** the readiness/done signal
+should make deterministic — and if `--opt=low` still fails after the signal lands, isolate
+the residual as a separate IPC bug (its own oracle), don't paper over it with yields.
+
 ### D3 — Cap re-grant model: supervisor-owns-endpoints (the invariant above)
 
 Durable objects (endpoints, notifications, memory regions) are created **once** by
@@ -353,6 +374,15 @@ reframe at the top). So the steps below are buildable now, on shipped primitives
 Mirrors the project's kernel-core-vs-userspace split: **pure policy in `kernel-core`
 (host-tested), mechanism in a userspace engine.**
 
+0. **Readiness/done signal on the powerbox path** (standalone, do first — it closes a
+   real shipped race *and* proves the `Signal`/`WaitNotify` handshake the supervisor
+   reuses for D2). Replace `view-demo`/`shell`'s `yield_now()`-then-`revoke` timing bet
+   with an event: the viewer `Signal`s "done reading," the parent `WaitNotify`s before
+   revoking. **Acceptance:** `snemu-itest --opt=low` passes `viewer-reads-delegated-file`
+   and `shell-view-command-revokes-cap` (today they fail `bytes_read=0`; see "A concrete
+   race this closes" under D2). If they still fail after the signal, isolate the residual
+   lost-wakeup/IPC issue separately — this increment's win is *determinism*, not "more
+   yields." Needs no new kernel mechanism (`NotifyCreate`/`Signal`/`WaitNotify` shipped).
 1. **`kernel-core::supervision`** — `ServiceSpec`, `startup_order` (topo + cycle
    detection), `restart_decision` (policy + backoff + intensity), `restart_set`
    (D1). All pure, all `cargo test -p kernel-core`. TDD each.
