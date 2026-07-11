@@ -26,6 +26,7 @@ pub(crate) mod prelude {
 
 pub mod ast;
 pub mod bridge;
+pub mod check;
 pub mod core_ir;
 pub mod env;
 pub mod interp;
