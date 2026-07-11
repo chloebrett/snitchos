@@ -1,14 +1,14 @@
-//! `snemu [--frames] <kernel.elf> [max-steps]` — load an ELF64 RISC-V image,
-//! run it, print whatever it writes to the UART, and decode the telemetry
-//! frames it transmits over the virtio-console. On the first instruction snemu
-//! doesn't implement, it halts and reports the program counter + raw word (the
-//! meta-loop signal): run, see what it hits, implement that, repeat.
-//!
-//! `--frames` dumps every decoded telemetry frame (otherwise just a count).
+//! `snemu` — load an ELF64 RISC-V image, run it, print whatever it writes to the
+//! UART, and decode the telemetry frames it transmits over the virtio-console. On
+//! the first instruction snemu doesn't implement, it halts and reports the program
+//! counter + raw word (the meta-loop signal): run, see what it hits, implement
+//! that, repeat.
 
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use clap::Parser;
 use protocol::stream::{OwnedFrame, decode_stream};
 
 /// QEMU `virt` default RAM (128 MiB).
@@ -22,51 +22,46 @@ const HART_COUNT: usize = 2;
 /// `qemu-system-riscv64 -machine virt,dumpdtb=snemu/virt.dtb -smp 2 -m 128M`.
 const DTB: &[u8] = include_bytes!("../virt.dtb");
 
+/// Run a SnitchOS kernel ELF under the snemu RV64GC emulator.
+#[derive(Parser)]
+#[command(version, about)]
+struct Cli {
+    /// The kernel ELF64 image to run.
+    kernel: PathBuf,
+    /// Instruction (scheduler-step) budget before giving up.
+    #[arg(default_value_t = DEFAULT_MAX_STEPS)]
+    max_steps: u64,
+    /// Dump every decoded telemetry frame (otherwise just a count).
+    #[arg(long)]
+    frames: bool,
+    /// Firmware role: select a runtime workload by injecting `workload=<name>` into
+    /// `/chosen/bootargs` (needs an itest-workloads kernel; a plain build ignores it).
+    #[arg(long)]
+    workload: Option<String>,
+    /// Native-op helper (tier-0.5 JIT): fast-path guest memset/memcpy.
+    #[arg(long)]
+    native_ops: bool,
+    /// Tier-2 block JIT (M6): compile + run hot basic blocks.
+    #[arg(long)]
+    block_jit: bool,
+    /// Measure each memop's real interpreted cost against `memop_charge` (forces
+    /// native ops off).
+    #[arg(long)]
+    calibrate_memops: bool,
+}
+
 fn main() -> ExitCode {
-    let mut dump_frames = false;
-    let mut workload: Option<String> = None;
-    let mut native_ops = false;
-    let mut block_jit = false;
-    let mut calibrate_memops = false;
-    let mut positional = Vec::new();
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--frames" => dump_frames = true,
-            // Native-op helper (tier-0.5 JIT): fast-path memset/memcpy.
-            "--native-ops" => native_ops = true,
-            // Tier-2 block JIT (M6): compile + run hot basic blocks.
-            "--block-jit" => block_jit = true,
-            // Calibration: measure each memop's real interpreted cost against
-            // `memop_charge` (the collapse's clock charge). Forces native ops off.
-            "--calibrate-memops" => calibrate_memops = true,
-            // Firmware role: select a runtime workload by injecting
-            // `workload=<name>` into /chosen/bootargs (needs an itest-workloads
-            // kernel; a plain build ignores it and boots the default).
-            "--workload" => workload = args.next(),
-            _ => positional.push(arg),
-        }
-    }
+    let cli = Cli::parse();
 
-    let mut positional = positional.into_iter();
-    let Some(path) = positional.next() else {
-        eprintln!("usage: snemu [--frames] [--workload <name>] <kernel.elf> [max-steps]");
-        return ExitCode::FAILURE;
-    };
-    let max_steps = positional
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MAX_STEPS);
-
-    let image = match std::fs::read(&path) {
+    let image = match std::fs::read(&cli.kernel) {
         Ok(bytes) => bytes,
         Err(e) => {
-            eprintln!("snemu: cannot read {path}: {e}");
+            eprintln!("snemu: cannot read {}: {e}", cli.kernel.display());
             return ExitCode::FAILURE;
         }
     };
 
-    let dtb = match &workload {
+    let dtb = match &cli.workload {
         Some(name) => snemu::dtb::set_bootargs(DTB, &format!("workload={name}"))
             .unwrap_or_else(|| DTB.to_vec()),
         None => DTB.to_vec(),
@@ -81,12 +76,13 @@ fn main() -> ExitCode {
     };
     // The probe measures the interpreter's real per-memop cost, so it needs memops
     // interpreted, not collapsed — force native ops off when calibrating.
-    machine.set_native_ops(native_ops && !calibrate_memops);
-    machine.set_block_jit(block_jit);
-    if calibrate_memops {
+    machine.set_native_ops(cli.native_ops && !cli.calibrate_memops);
+    machine.set_block_jit(cli.block_jit);
+    if cli.calibrate_memops {
         machine.enable_memop_probe();
     }
 
+    let max_steps = cli.max_steps;
     let mut steps = 0u64;
     while steps < max_steps {
         match machine.step() {
@@ -122,7 +118,7 @@ fn main() -> ExitCode {
     }
 
     print!("{}", String::from_utf8_lossy(machine.uart_output()));
-    report_frames(machine.virtio_tx_output(), dump_frames);
+    report_frames(machine.virtio_tx_output(), cli.frames);
     ExitCode::SUCCESS
 }
 

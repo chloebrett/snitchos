@@ -8,6 +8,8 @@ publish = false
 # Host-side telemetry decode: the binary turns the bytes snemu pulls off the
 # virtio-console back into `Frame`s. The emulator core (`lib`) stays decoupled.
 protocol = { path = "../protocol", features = ["std"] }
+# CLI arg parsing for the `snemu` binary (the lib is arg-free).
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 # Read-only FDT parser (the same one the kernel uses) — verifies the bootargs

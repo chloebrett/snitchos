@@ -1219,6 +1219,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 name = "snemu"
 version = "0.0.1"
 dependencies = [
+ "clap",
  "fdt",
  "protocol",
 ]
@@ -1312,6 +1313,10 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "supervision"
+version = "0.0.1"
 
 [[package]]
 name = "syn"
