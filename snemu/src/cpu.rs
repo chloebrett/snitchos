@@ -457,9 +457,7 @@ impl Hart {
             if block.is_empty() {
                 return Ok(None); // "nothing compilable starts here" marker → interpret
             }
-            let n = block.len() as u64;
-            block.exec(self, bus)?;
-            return Ok(Some(n));
+            return Ok(Some(block.exec(self, bus)?));
         }
         // Cold: count it; compile only once it crosses the hotness threshold.
         if !self.block_cache.as_mut().expect("block jit is on").record_hot(pc) {
@@ -470,9 +468,7 @@ impl Hart {
         if block.is_empty() {
             return Ok(None);
         }
-        let n = block.len() as u64;
-        block.exec(self, bus)?;
-        Ok(Some(n))
+        Ok(Some(block.exec(self, bus)?))
     }
 
     /// Enable or disable `wfi` idle-skip. With it off, `wfi` is a bare
@@ -961,11 +957,38 @@ impl Hart {
 
     /// LOAD: read memory at `rs1 + imm`, sign/zero-extend into rd.
     fn load(&mut self, instr: Instr, bus: &Bus) -> Result<(), StepError> {
-        let va = self.x[instr.rs1()].wrapping_add(instr.i_imm());
+        if self.block_load(bus, instr.funct3(), instr.rd(), instr.rs1(), instr.i_imm() as i64)? {
+            return Ok(()); // faulted → trapped, don't advance
+        }
+        self.advance();
+        Ok(())
+    }
+
+    /// STORE: write rs2 (truncated to the access width) to `rs1 + imm`.
+    fn store(&mut self, instr: Instr, bus: &mut Bus) -> Result<(), StepError> {
+        if self.block_store(bus, instr.funct3(), instr.rs1(), instr.rs2(), instr.s_imm() as i64)? {
+            return Ok(()); // faulted → trapped, don't advance
+        }
+        self.advance();
+        Ok(())
+    }
+
+    /// Execute a LOAD by decoded fields, without advancing `pc` (the caller — the
+    /// interpreter or the block executor — owns pc). Returns `true` if it faulted:
+    /// a trap was taken (pc is now the handler) and the caller must stop.
+    pub(crate) fn block_load(
+        &mut self,
+        bus: &Bus,
+        funct3: u32,
+        rd: usize,
+        rs1: usize,
+        imm: i64,
+    ) -> Result<bool, StepError> {
+        let va = self.x[rs1].wrapping_add(imm as u64);
         let Some(addr) = self.translate_or_trap(va, Access::Load, bus) else {
-            return Ok(()); // load faulted → trapped
+            return Ok(true);
         };
-        let value = match instr.funct3() {
+        let value = match funct3 {
             funct3::load::LB => i64::from(bus.read_u8(addr)? as i8) as u64,
             funct3::load::LH => i64::from(bus.read_u16(addr)? as i16) as u64,
             funct3::load::LW => i64::from(bus.read_u32(addr)? as i32) as u64,
@@ -973,32 +996,38 @@ impl Hart {
             funct3::load::LBU => u64::from(bus.read_u8(addr)?),
             funct3::load::LHU => u64::from(bus.read_u16(addr)?),
             funct3::load::LWU => u64::from(bus.read_u32(addr)?),
-            _ => return Err(self.unimplemented(instr.0)),
+            other => return Err(self.unimplemented(other)),
         };
-        self.set_reg(instr.rd(), value);
-        self.advance();
-        Ok(())
+        self.set_reg(rd, value);
+        Ok(false)
     }
 
-    /// STORE: write rs2 (truncated to the access width) to `rs1 + imm`.
-    fn store(&mut self, instr: Instr, bus: &mut Bus) -> Result<(), StepError> {
-        let va = self.x[instr.rs1()].wrapping_add(instr.s_imm());
+    /// Execute a STORE by decoded fields, without advancing `pc`. Returns `true` if
+    /// it faulted (trap taken, caller must stop). Mirrors the `block_load` contract.
+    pub(crate) fn block_store(
+        &mut self,
+        bus: &mut Bus,
+        funct3: u32,
+        rs1: usize,
+        rs2: usize,
+        imm: i64,
+    ) -> Result<bool, StepError> {
+        let va = self.x[rs1].wrapping_add(imm as u64);
         let Some(addr) = self.translate_or_trap(va, Access::Store, bus) else {
-            return Ok(()); // store faulted → trapped
+            return Ok(true);
         };
         if self.reservation == Some(addr) {
             self.reservation = None; // a write to the reserved cell breaks lr/sc
         }
-        let value = self.x[instr.rs2()];
-        match instr.funct3() {
+        let value = self.x[rs2];
+        match funct3 {
             funct3::store::SB => bus.write_u8(addr, value as u8)?,
             funct3::store::SH => bus.write_u16(addr, value as u16)?,
             funct3::store::SW => bus.write_u32(addr, value as u32)?,
             funct3::store::SD => bus.write_u64(addr, value)?,
-            _ => return Err(self.unimplemented(instr.0)),
+            other => return Err(self.unimplemented(other)),
         }
-        self.advance();
-        Ok(())
+        Ok(false)
     }
 
     /// AMO: atomic read-modify-write. Reads the addressed word/doubleword,
@@ -1741,6 +1770,114 @@ mod tests {
         assert_eq!(jit.hart.x, interp.hart.x, "all registers match the interpreter");
         assert_eq!(jit.hart.pc(), interp.hart.pc(), "pc matches the interpreter");
         assert_eq!(jit.hart.pc(), RAM_BASE + 0xc + 8, "the bne was taken to pc+8");
+    }
+
+    /// Compile a straight run to IR, execute it once, and assert every register and
+    /// pc match interpreting the same `program` instruction-by-instruction.
+    fn assert_block_matches_interp(program: &[u32], setup: impl Fn(&mut Cpu)) {
+        let mut interp = cpu_with(program);
+        setup(&mut interp);
+        for _ in 0..program.len() {
+            interp.step().unwrap();
+        }
+        let mut jit = cpu_with(program);
+        setup(&mut jit);
+        let block = jit.hart.compile_block(&jit.bus);
+        block.exec(&mut jit.hart, &mut jit.bus).unwrap();
+        assert_eq!(jit.hart.x, interp.hart.x, "registers diverged from the interpreter");
+        assert_eq!(jit.hart.pc(), interp.hart.pc(), "pc diverged from the interpreter");
+    }
+
+    #[test]
+    fn block_jit_covers_the_alu_families() {
+        // A medley of every integer ALU family — reg-reg, reg-imm, and their 32-bit
+        // `.w` forms, plus LUI/AUIPC — ending in a branch. Compiling the block must
+        // reproduce the interpreter exactly (the per-op oracle, all families at once).
+        let program = &[
+            add(3, 1, 2),
+            sub(4, 1, 2),
+            sll(5, 1, 2),
+            slt(6, 1, 2),
+            sltu(7, 1, 2),
+            xor(8, 1, 2),
+            srl(9, 1, 2),
+            sra(10, 1, 2),
+            or(11, 1, 2),
+            and(12, 1, 2),
+            i_type(opcode::OP_IMM, funct3::ADD, 13, 1, -3), // addi
+            slli(14, 1, 4),
+            srli(15, 1, 4),
+            srai(16, 1, 4),
+            andi(17, 1, 0xF),
+            slti(18, 1, 100),
+            sltiu(19, 1, 100),
+            xori(20, 1, 0x55),
+            addiw(21, 1, 7),
+            slliw(22, 1, 3),
+            sraiw(23, 1, 2),
+            addw(24, 1, 2),
+            subw(25, 1, 2),
+            sllw(26, 1, 2),
+            sraw(27, 1, 2),
+            srlw(28, 1, 2),
+            u_type(opcode::LUI, 29, 0xABCDE),
+            u_type(opcode::AUIPC, 30, 0x10),
+            bne(1, 2, 8),
+        ];
+        assert_block_matches_interp(program, |cpu| {
+            cpu.set_reg(1, 0x1_2345_6789);
+            cpu.set_reg(2, 5);
+        });
+    }
+
+    #[test]
+    fn block_jit_covers_jumps() {
+        // JAL: link pc+4 into rd and jump to a compile-time target (the block ends).
+        assert_block_matches_interp(
+            &[
+                i_type(opcode::OP_IMM, funct3::ADD, 5, 0, 7), // addi x5, x0, 7
+                jal(1, 16),                                   // jal x1, +16
+            ],
+            |_| {},
+        );
+        // JALR: link pc+4, jump to the runtime target (x2 + imm) & !1.
+        assert_block_matches_interp(&[jalr(1, 2, 4)], |cpu| {
+            cpu.set_reg(2, RAM_BASE + 0x40);
+        });
+    }
+
+    #[test]
+    fn block_jit_covers_loads_and_stores() {
+        // Build a RAM pointer, store a value through it, load it back, and branch on
+        // the result — all inside one block. Memory ops run mid-block (they can fault
+        // and bail, but here they succeed) and the block must match the interpreter.
+        let program = &[
+            u_type(opcode::AUIPC, 1, 0), // auipc x1, 0  -> x1 = RAM_BASE (a valid RAM ptr)
+            i_type(opcode::OP_IMM, funct3::ADD, 1, 1, 0x400), // addi x1, x1, 0x400
+            sw(2, 1, 0),  // sw x2, 0(x1)
+            lw(3, 1, 0),  // lw x3, 0(x1)
+            ld(4, 1, 0),  // ld x4, 0(x1)  (a second width)
+            bne(3, 2, 8), // not taken: x3 == x2
+        ];
+        assert_block_matches_interp(program, |cpu| {
+            cpu.set_reg(2, 0x1234_5678);
+        });
+    }
+
+    #[test]
+    fn block_jit_covers_all_branch_conditions() {
+        // Every branch condition, taken and not-taken: the compiled terminator must
+        // resolve pc to the same place the interpreter does.
+        let conds: &[fn(u32, u32, i32) -> u32] = &[beq, bne, blt, bge, bltu, bgeu];
+        let cases: &[(u64, u64)] = &[(5, 5), (5, 8), (8, 5), (u64::MAX, 1)];
+        for &enc in conds {
+            for &(a, b) in cases {
+                assert_block_matches_interp(&[enc(1, 2, 8)], |cpu| {
+                    cpu.set_reg(1, a);
+                    cpu.set_reg(2, b);
+                });
+            }
+        }
     }
 
     #[test]

@@ -14,7 +14,6 @@
 //!
 //! See `plans/snemu-milestone-6-block-jit.md`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::bus::Bus;
@@ -25,48 +24,101 @@ use crate::decode::{Instr, funct3, funct7, opcode};
 /// one-shot code never pays compilation, only hot blocks do.
 const HOT_THRESHOLD: u32 = 2;
 
-/// A per-hart `PC → compiled block` cache with hotness tiering — the block JIT's
-/// analogue of the decode cache. Blocks are `Arc`'d so a lookup hands back a cheap
-/// refcount clone: the executor needs `&mut Hart`, and the cache lives *inside* the
-/// hart, so we can't hold a borrow of it across `Block::exec`. Invalidation mirrors
-/// the decode cache and rides the guest's TLB contract — cleared on a `satp` write
-/// and `sfence.vma`. Clones as plain data for the snapshot; blocks are immutable, so
-/// the shared `Arc`s across a fork are harmless.
+/// Direct-mapped cache index bits: 2^14 = 16384 slots. Block entries are far
+/// sparser than instructions (only branch/jump targets start blocks), so this is
+/// ample while keeping the per-fork snapshot clone cheap. Indexed by `(pc >> 1)` —
+/// instructions are ≥2-byte aligned.
+const INDEX_BITS: u32 = 14;
+const SLOTS: usize = 1 << INDEX_BITS;
+const INDEX_MASK: u64 = (SLOTS as u64) - 1;
+
+/// What a cache slot holds for its PC: a hotness count (still being interpreted) or
+/// a compiled block (`Arc` so a lookup is a refcount clone, not a deep copy — the
+/// executor needs `&mut Hart`, which the cache lives inside).
 #[derive(Clone, Default)]
+enum Entry {
+    #[default]
+    Empty,
+    Hot(u32),
+    Compiled(Arc<Block>),
+}
+
+/// One direct-mapped slot: the epoch it was written in (for O(1) flush), the full
+/// PC tag (to reject an aliasing neighbour that shares the index), and its entry.
+#[derive(Clone, Default)]
+struct Slot {
+    epoch: u64,
+    tag: u64,
+    entry: Entry,
+}
+
+/// A per-hart `PC → compiled block` cache with hotness tiering — the block JIT's
+/// analogue of the decode cache, and **direct-mapped for the same reason**: a PC
+/// indexes straight into `slots` with a shift+mask (no hashing, which the decode
+/// cache measured *slower* than the work it saved; the HashMap version of this
+/// cache made the JIT net-slower than the interpreter). Invalidation rides the
+/// guest's TLB contract via an O(1) epoch bump — cleared on a `satp` write and
+/// `sfence.vma`. Clones as plain data for the snapshot; blocks are immutable, so
+/// the shared `Arc`s across a fork are harmless.
+#[derive(Clone)]
 pub(crate) struct BlockCache {
-    blocks: HashMap<u64, Arc<Block>>,
-    hotness: HashMap<u64, u32>,
+    /// Slots written with an earlier epoch are stale. Starts at 1 so the
+    /// zero-initialised slots (epoch 0) are invalid from birth.
+    epoch: u64,
+    slots: Box<[Slot]>,
     hits: u64,
 }
 
+impl Default for BlockCache {
+    fn default() -> Self {
+        Self { epoch: 1, slots: vec![Slot::default(); SLOTS].into_boxed_slice(), hits: 0 }
+    }
+}
+
 impl BlockCache {
-    /// The compiled block at `pc` (a cheap `Arc` clone), or `None`. Bumps the hit
-    /// counter — the borrow of the cache ends when the clone is returned, freeing
-    /// `&mut Hart` for the executor.
-    pub(crate) fn get(&mut self, pc: u64) -> Option<Arc<Block>> {
-        let block = self.blocks.get(&pc)?.clone();
-        self.hits += 1;
-        Some(block)
+    #[inline]
+    fn index(pc: u64) -> usize {
+        ((pc >> 1) & INDEX_MASK) as usize
     }
 
-    /// Count a cold interpretation of entry `pc`; return `true` exactly on the visit
-    /// that crosses the hotness threshold (compile once). After a block is inserted,
-    /// `get` short-circuits, so the counter is never revisited.
+    /// The compiled block at `pc` (a cheap `Arc` clone), or `None` if the slot holds
+    /// no live compiled block for this exact PC. Bumps the hit counter; the cache
+    /// borrow ends with the clone, freeing `&mut Hart` for the executor.
+    pub(crate) fn get(&mut self, pc: u64) -> Option<Arc<Block>> {
+        let slot = &self.slots[Self::index(pc)];
+        if slot.epoch == self.epoch
+            && slot.tag == pc
+            && let Entry::Compiled(block) = &slot.entry
+        {
+            self.hits += 1;
+            return Some(Arc::clone(block));
+        }
+        None
+    }
+
+    /// Count a cold interpretation of entry `pc` (called only after `get` missed);
+    /// return `true` on the visit that crosses the hotness threshold, so the caller
+    /// compiles once. A miss or an aliasing eviction restarts the count at 1.
     pub(crate) fn record_hot(&mut self, pc: u64) -> bool {
-        let count = self.hotness.entry(pc).or_insert(0);
-        *count += 1;
-        *count == HOT_THRESHOLD
+        let epoch = self.epoch;
+        let slot = &mut self.slots[Self::index(pc)];
+        let count = match &slot.entry {
+            Entry::Hot(n) if slot.epoch == epoch && slot.tag == pc => *n + 1,
+            _ => 1,
+        };
+        *slot = Slot { epoch, tag: pc, entry: Entry::Hot(count) };
+        count >= HOT_THRESHOLD
     }
 
     pub(crate) fn insert(&mut self, pc: u64, block: Arc<Block>) {
-        self.blocks.insert(pc, block);
+        self.slots[Self::index(pc)] =
+            Slot { epoch: self.epoch, tag: pc, entry: Entry::Compiled(block) };
     }
 
-    /// Drop every compiled block and hotness count — the guest invalidated
-    /// translations, so cached (translated) blocks are stale.
+    /// Invalidate every slot in O(1) — the guest invalidated translations (`satp`
+    /// write / `sfence.vma`), so cached (translated) blocks are stale.
     pub(crate) fn flush(&mut self) {
-        self.blocks.clear();
-        self.hotness.clear();
+        self.epoch += 1;
     }
 
     #[cfg(test)]
@@ -92,43 +144,184 @@ pub(crate) enum Compiled {
 /// at a time, each driven by an equivalence test against the interpreter.
 pub(crate) fn compile_op(raw: u32, ilen: u64, pc: u64) -> Compiled {
     let instr = Instr(raw);
+    let mid = |op: Option<Op>| op.map_or(Compiled::Unsupported, Compiled::Continue);
     match instr.opcode() {
-        opcode::OP_IMM if instr.funct3() == funct3::ADD => Compiled::Continue(Op::AluImm {
-            alu: AluOp::Add,
+        opcode::LUI => Compiled::Continue(Op::SetImm { rd: instr.rd() as u8, value: instr.u_imm() }),
+        opcode::AUIPC => Compiled::Continue(Op::SetImm {
+            rd: instr.rd() as u8,
+            value: pc.wrapping_add(instr.u_imm()),
+        }),
+        opcode::OP_IMM => mid(alu_imm(instr)),
+        opcode::OP if instr.funct7() != funct7::MULDIV => mid(alu_reg(instr)),
+        opcode::OP_IMM_32 => mid(alu_imm_32(instr)),
+        opcode::OP_32 if instr.funct7() != funct7::MULDIV => mid(alu_reg_32(instr)),
+        opcode::LOAD => mid(load_op(instr)),
+        opcode::STORE => mid(store_op(instr)),
+        opcode::JAL => Compiled::Terminate(Op::Jump {
+            rd: instr.rd() as u8,
+            link: pc.wrapping_add(ilen),
+            target: pc.wrapping_add(instr.j_imm()),
+        }),
+        opcode::JALR if instr.funct3() == 0 => Compiled::Terminate(Op::JumpReg {
             rd: instr.rd() as u8,
             rs1: instr.rs1() as u8,
             imm: instr.i_imm() as i64,
+            link: pc.wrapping_add(ilen),
         }),
-        opcode::OP if instr.funct7() != funct7::MULDIV && instr.funct3() == funct3::ADD && !instr.is_alt_op() => {
-            Compiled::Continue(Op::AluReg {
-                alu: AluOp::Add,
-                rd: instr.rd() as u8,
+        opcode::BRANCH => branch_cond(instr.funct3()).map_or(Compiled::Unsupported, |cond| {
+            Compiled::Terminate(Op::Branch {
+                cond,
                 rs1: instr.rs1() as u8,
                 rs2: instr.rs2() as u8,
+                taken: pc.wrapping_add(instr.b_imm()),
+                not_taken: pc.wrapping_add(ilen),
             })
-        }
-        opcode::BRANCH if instr.funct3() == funct3::branch::BNE => Compiled::Terminate(Op::Branch {
-            cond: Cond::Ne,
-            rs1: instr.rs1() as u8,
-            rs2: instr.rs2() as u8,
-            taken: pc.wrapping_add(instr.b_imm()),
-            not_taken: pc.wrapping_add(ilen),
         }),
         _ => Compiled::Unsupported,
     }
 }
 
-/// A register-immediate / register-register integer op (`OP-IMM` / `OP`). The
-/// interpreter's `op_imm`/`op` semantics, pre-decoded. Grows as discovery needs it.
+/// Lower an `OP-IMM` instruction. Shifts carry their shift amount as `imm`; the
+/// rest carry the sign-extended immediate. Mirrors the interpreter's `op_imm`.
+fn alu_imm(instr: Instr) -> Option<Op> {
+    let (alu, imm) = match instr.funct3() {
+        funct3::ADD => (AluOp::Add, instr.i_imm() as i64),
+        funct3::SLT => (AluOp::Slt, instr.i_imm() as i64),
+        funct3::SLTU => (AluOp::Sltu, instr.i_imm() as i64),
+        funct3::XOR => (AluOp::Xor, instr.i_imm() as i64),
+        funct3::OR => (AluOp::Or, instr.i_imm() as i64),
+        funct3::AND => (AluOp::And, instr.i_imm() as i64),
+        funct3::SLL => (AluOp::Sll, i64::from(instr.shamt6())),
+        funct3::SR if instr.is_alt_op() => (AluOp::Sra, i64::from(instr.shamt6())),
+        funct3::SR => (AluOp::Srl, i64::from(instr.shamt6())),
+        _ => return None,
+    };
+    Some(Op::AluImm { alu, rd: instr.rd() as u8, rs1: instr.rs1() as u8, imm })
+}
+
+/// Lower an `OP` (register-register) instruction. Mirrors the interpreter's `op`.
+fn alu_reg(instr: Instr) -> Option<Op> {
+    let alu = match instr.funct3() {
+        funct3::ADD if instr.is_alt_op() => AluOp::Sub,
+        funct3::ADD => AluOp::Add,
+        funct3::SLL => AluOp::Sll,
+        funct3::SLT => AluOp::Slt,
+        funct3::SLTU => AluOp::Sltu,
+        funct3::XOR => AluOp::Xor,
+        funct3::SR if instr.is_alt_op() => AluOp::Sra,
+        funct3::SR => AluOp::Srl,
+        funct3::OR => AluOp::Or,
+        funct3::AND => AluOp::And,
+        _ => return None,
+    };
+    Some(Op::AluReg { alu, rd: instr.rd() as u8, rs1: instr.rs1() as u8, rs2: instr.rs2() as u8 })
+}
+
+/// Lower an `OP-IMM-32` (`.w`) instruction. Mirrors `op_imm_32`.
+fn alu_imm_32(instr: Instr) -> Option<Op> {
+    let (alu, imm) = match instr.funct3() {
+        funct3::ADD => (AluOp::AddW, instr.i_imm() as i64),
+        funct3::SLL => (AluOp::SllW, i64::from(instr.shamt5())),
+        funct3::SR if instr.is_alt_op() => (AluOp::SraW, i64::from(instr.shamt5())),
+        funct3::SR => (AluOp::SrlW, i64::from(instr.shamt5())),
+        _ => return None,
+    };
+    Some(Op::AluImm { alu, rd: instr.rd() as u8, rs1: instr.rs1() as u8, imm })
+}
+
+/// Lower an `OP-32` (`.w` register-register) instruction. Mirrors `op_32`.
+fn alu_reg_32(instr: Instr) -> Option<Op> {
+    let alu = match instr.funct3() {
+        funct3::ADD if instr.is_alt_op() => AluOp::SubW,
+        funct3::ADD => AluOp::AddW,
+        funct3::SLL => AluOp::SllW,
+        funct3::SR if instr.is_alt_op() => AluOp::SraW,
+        funct3::SR => AluOp::SrlW,
+        _ => return None,
+    };
+    Some(Op::AluReg { alu, rd: instr.rd() as u8, rs1: instr.rs1() as u8, rs2: instr.rs2() as u8 })
+}
+
+/// Lower a `LOAD` instruction (a mid-block op that may fault). Only known widths
+/// compile; an unknown funct3 ends the block (the interpreter reports it).
+fn load_op(instr: Instr) -> Option<Op> {
+    match instr.funct3() {
+        funct3::load::LB
+        | funct3::load::LH
+        | funct3::load::LW
+        | funct3::load::LD
+        | funct3::load::LBU
+        | funct3::load::LHU
+        | funct3::load::LWU => Some(Op::Load {
+            funct3: instr.funct3(),
+            rd: instr.rd() as u8,
+            rs1: instr.rs1() as u8,
+            imm: instr.i_imm() as i64,
+        }),
+        _ => None,
+    }
+}
+
+/// Lower a `STORE` instruction (a mid-block op that may fault).
+fn store_op(instr: Instr) -> Option<Op> {
+    match instr.funct3() {
+        funct3::store::SB | funct3::store::SH | funct3::store::SW | funct3::store::SD => {
+            Some(Op::Store {
+                funct3: instr.funct3(),
+                rs1: instr.rs1() as u8,
+                rs2: instr.rs2() as u8,
+                imm: instr.s_imm() as i64,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Map a branch `funct3` to its condition.
+fn branch_cond(funct3: u32) -> Option<Cond> {
+    Some(match funct3 {
+        funct3::branch::BEQ => Cond::Eq,
+        funct3::branch::BNE => Cond::Ne,
+        funct3::branch::BLT => Cond::Lt,
+        funct3::branch::BGE => Cond::Ge,
+        funct3::branch::BLTU => Cond::Ltu,
+        funct3::branch::BGEU => Cond::Geu,
+        _ => return None,
+    })
+}
+
+/// A register-immediate / register-register integer op (`OP-IMM` / `OP` and their
+/// 32-bit `.w` forms). The interpreter's `op_imm`/`op`/`op_imm_32`/`op_32`
+/// semantics, pre-decoded — `apply(a, b)` treats `b` as the immediate (for
+/// `AluImm`) or `x[rs2]` (for `AluReg`); shift ops mask it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AluOp {
     Add,
+    Sub,
+    Sll,
+    Slt,
+    Sltu,
+    Xor,
+    Srl,
+    Sra,
+    Or,
+    And,
+    AddW,
+    SubW,
+    SllW,
+    SrlW,
+    SraW,
 }
 
 /// A branch condition (`funct3` of a `BRANCH`), pre-decoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Cond {
+    Eq,
     Ne,
+    Lt,
+    Ge,
+    Ltu,
+    Geu,
 }
 
 /// One reified IR operation. Operands are resolved so execution never re-decodes;
@@ -141,9 +334,23 @@ pub(crate) enum Op {
     AluImm { alu: AluOp, rd: u8, rs1: u8, imm: i64 },
     /// `x[rd] = alu(x[rs1], x[rs2])` — a register-register op.
     AluReg { alu: AluOp, rd: u8, rs1: u8, rs2: u8 },
+    /// `x[rd] = value` — `LUI` (value = the upper immediate) or `AUIPC` (value =
+    /// `pc + imm`, resolved to an absolute at compile time).
+    SetImm { rd: u8, value: u64 },
+    /// `x[rd] = mem[x[rs1] + imm]` at the width/signedness of `funct3`. Can page
+    /// fault: on a fault the trap is taken and the block bails.
+    Load { funct3: u32, rd: u8, rs1: u8, imm: i64 },
+    /// `mem[x[rs1] + imm] = x[rs2]` (truncated to the width of `funct3`). Can page
+    /// fault and bail like `Load`.
+    Store { funct3: u32, rs1: u8, rs2: u8, imm: i64 },
     /// Block exit: `pc = cond(x[rs1], x[rs2]) ? taken : not_taken`. Targets are
     /// absolute (resolved at compile time from the branch's PC + immediate).
     Branch { cond: Cond, rs1: u8, rs2: u8, taken: u64, not_taken: u64 },
+    /// Block exit (`JAL`): `x[rd] = link; pc = target` — both compile-time absolute.
+    Jump { rd: u8, link: u64, target: u64 },
+    /// Block exit (`JALR`): `x[rd] = link; pc = (x[rs1] + imm) & !1` — a runtime
+    /// target, so it can't be resolved at compile time.
+    JumpReg { rd: u8, rs1: u8, imm: i64, link: u64 },
 }
 
 /// A compiled basic block: a straight sequence of ops. It ends either at a
@@ -166,21 +373,16 @@ impl Block {
         self.ops.is_empty()
     }
 
-    /// Number of guest instructions in the block — one per op, so this is the
-    /// instret the block retires when executed.
-    pub(crate) fn len(&self) -> usize {
-        self.ops.len()
-    }
-
-    /// Execute the block against `hart` (and `bus`, for the memory ops later
-    /// increments add). Walks the reified ops in order; a `Branch` sets `pc` and
-    /// ends the block.
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "exec becomes fallible once memory-op (page fault) / unimplemented-op arms land in increment 2+"
-    )]
-    pub(crate) fn exec(&self, hart: &mut Hart, _bus: &mut Bus) -> Result<(), StepError> {
+    /// Execute the block against `hart`/`bus`, returning the number of instructions
+    /// it retired. Walks the reified ops in order. A `Branch` sets `pc` and ends the
+    /// block; a `Load`/`Store` that page-faults takes the trap (setting `pc` to the
+    /// handler) and bails — so the returned count can be short of the block length,
+    /// exactly the interpreter's instret for the same run. A block with no branch or
+    /// fault falls through, setting `pc` to `exit_pc`.
+    pub(crate) fn exec(&self, hart: &mut Hart, bus: &mut Bus) -> Result<u64, StepError> {
+        let mut retired = 0u64;
         for op in &self.ops {
+            retired += 1; // this op is about to retire (a faulting mem op still counts)
             match *op {
                 Op::AluImm { alu, rd, rs1, imm } => {
                     let value = alu.apply(hart.reg(rs1 as usize), imm as u64);
@@ -190,23 +392,69 @@ impl Block {
                     let value = alu.apply(hart.reg(rs1 as usize), hart.reg(rs2 as usize));
                     hart.set_reg(rd as usize, value);
                 }
+                Op::SetImm { rd, value } => hart.set_reg(rd as usize, value),
+                Op::Load { funct3, rd, rs1, imm } => {
+                    if hart.block_load(bus, funct3, rd as usize, rs1 as usize, imm)? {
+                        return Ok(retired); // faulted → trap took pc; stop the block
+                    }
+                }
+                Op::Store { funct3, rs1, rs2, imm } => {
+                    if hart.block_store(bus, funct3, rs1 as usize, rs2 as usize, imm)? {
+                        return Ok(retired);
+                    }
+                }
                 Op::Branch { cond, rs1, rs2, taken, not_taken } => {
                     let take = cond.eval(hart.reg(rs1 as usize), hart.reg(rs2 as usize));
                     hart.set_pc(if take { taken } else { not_taken });
-                    return Ok(());
+                    return Ok(retired);
+                }
+                Op::Jump { rd, link, target } => {
+                    hart.set_reg(rd as usize, link);
+                    hart.set_pc(target);
+                    return Ok(retired);
+                }
+                Op::JumpReg { rd, rs1, imm, link } => {
+                    // Target from rs1 *before* writing rd (they may alias).
+                    let target = hart.reg(rs1 as usize).wrapping_add(imm as u64) & !1;
+                    hart.set_reg(rd as usize, link);
+                    hart.set_pc(target);
+                    return Ok(retired);
                 }
             }
         }
         hart.set_pc(self.exit_pc); // fell through without a branch
-        Ok(())
+        Ok(retired)
     }
+}
+
+/// Sign-extend a 32-bit result to 64 bits (the `.w` convention), matching the
+/// interpreter's `sext32`.
+fn sext32(v: u32) -> u64 {
+    i64::from(v as i32) as u64
 }
 
 impl AluOp {
     /// Apply the op to two 64-bit operands (`b` is the immediate or `x[rs2]`).
+    /// Shifts mask `b` to the width's shift range, exactly as the interpreter does.
     fn apply(self, a: u64, b: u64) -> u64 {
+        let sh = (b & 0x3f) as u32; // RV64 shift amount
+        let shw = (b & 0x1f) as u32; // .w shift amount
         match self {
             AluOp::Add => a.wrapping_add(b),
+            AluOp::Sub => a.wrapping_sub(b),
+            AluOp::Sll => a << sh,
+            AluOp::Slt => u64::from((a as i64) < (b as i64)),
+            AluOp::Sltu => u64::from(a < b),
+            AluOp::Xor => a ^ b,
+            AluOp::Srl => a >> sh,
+            AluOp::Sra => ((a as i64) >> sh) as u64,
+            AluOp::Or => a | b,
+            AluOp::And => a & b,
+            AluOp::AddW => sext32((a as u32).wrapping_add(b as u32)),
+            AluOp::SubW => sext32((a as u32).wrapping_sub(b as u32)),
+            AluOp::SllW => sext32((a as u32) << shw),
+            AluOp::SrlW => sext32((a as u32) >> shw),
+            AluOp::SraW => sext32(((a as i32) >> shw) as u32),
         }
     }
 }
@@ -215,7 +463,12 @@ impl Cond {
     /// Whether the branch is taken for operands `a = x[rs1]`, `b = x[rs2]`.
     fn eval(self, a: u64, b: u64) -> bool {
         match self {
+            Cond::Eq => a == b,
             Cond::Ne => a != b,
+            Cond::Lt => (a as i64) < (b as i64),
+            Cond::Ge => (a as i64) >= (b as i64),
+            Cond::Ltu => a < b,
+            Cond::Geu => a >= b,
         }
     }
 }
@@ -289,11 +542,17 @@ mod tests {
 
     #[test]
     fn compile_op_lowers_supported_families_and_rejects_the_rest() {
-        // addi x1,x0,5 -> a mid-block AluImm; bne -> a terminator; a load -> Unsupported.
+        // addi -> a mid-block AluImm; lw -> a mid-block Load; bne -> a terminator;
+        // jal (a jump) -> a block boundary the compiler doesn't lower yet.
         let addi = 0x0050_0093; // addi x1, x0, 5
         assert!(matches!(
             compile_op(addi, 4, 0x1000),
             Compiled::Continue(Op::AluImm { rd: 1, rs1: 0, imm: 5, .. })
+        ));
+        let lw = 0x0000_2083; // lw x1, 0(x0)
+        assert!(matches!(
+            compile_op(lw, 4, 0x1000),
+            Compiled::Continue(Op::Load { rd: 1, rs1: 0, imm: 0, .. })
         ));
         let bne = 0x0020_9463; // bne x1, x2, +8
         assert!(matches!(
@@ -301,8 +560,8 @@ mod tests {
             Compiled::Terminate(Op::Branch { rs1: 1, rs2: 2, taken, not_taken: 0x1004, .. })
                 if taken == 0x1008
         ));
-        let lw = 0x0000_2083; // lw x1, 0(x0) — a memory op, a block boundary for now
-        assert!(matches!(compile_op(lw, 4, 0x1000), Compiled::Unsupported));
+        let ecall = 0x0000_0073; // ecall — a trap boundary the compiler doesn't lower
+        assert!(matches!(compile_op(ecall, 4, 0x1000), Compiled::Unsupported));
     }
 
     #[test]
