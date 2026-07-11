@@ -402,17 +402,93 @@ clean.**
 
 ## Phase D — Effects: structured `uses` row + runtime handler-stack
 
-**Phase goal**: `uses: Vec<String>` (`ast.rs:32`) → a structured, **spanned effect
-row** on the surface AST + IR; `authority: Rc<BTreeSet<String>>` (`env.rs:59`) → a
-runtime **handler stack of capability *values*** on the `Interp` (Phase B's home);
-performing an effect walks the handler stack; installing a handler scopes it to a
-block's dynamic extent. The *membrane* semantics stim's modes-as-authority needs —
-no VM required (multi-shot resumable continuations, which would want the VM, are
-explicitly out of scope here).
+**Phase goal**: `uses: Vec<String>` → a structured, **spanned effect row**;
+`authority: Rc<BTreeSet<String>>` → a runtime **handler stack** so effects can be
+intercepted / redirected / attenuated over a block's dynamic extent (the membrane
+stim's modes need). Single-shot only — no resumable continuations (VM territory).
 
-**Acceptance (to detail later)**: an unhandled effect faults (spanned); a
-block-scoped handler attenuates effects in its extent; `emit`/`span`/`use <-` keep
-working.
+**Current state (2026-07-11 survey):**
+- `uses: Vec<String>` on `Item::Func` + `Method`; bare names, no span. `parse_uses`
+  parses `uses Cap, Cap`. `ClosureData.uses: Option<Vec<String>>`.
+- `authority: Rc<BTreeSet<String>>` on `Env` — a flat name-gate. **Set** at 3 call
+  boundaries (`apply_values` named/lambda; `eval_method_call`/`call_instance_method`)
+  + **seed** in `build_env_batches` (5 caps). **Checked** at 8 native sites via
+  `has_authority(cap)` → plain `RuntimeError` on refusal (no telemetry/counter).
+- Effects are the 8 natives `emit`/`span`/`print`/`writeConsole`/`readLine`/
+  `readByte`/`fsWrite`/`fsRead`, each dispatching straight to `env.platform()` /
+  `env.emit_metric` / `env.span_*`. `use <-` is pure sugar, **not** an effect.
+- **No handler-installation syntax exists** — `uses` is purely a declaration gate.
+
+### ★ Design decision (settle before D2): the handler model — DECIDED: per-operation (2026-07-11)
+
+- **(CHOSEN) Per-operation handlers.** A handler is a *function* that
+  dynamically overrides a named effect op. `Env` gains a dynamically-scoped
+  `handlers` stack (op-name → handler value), threaded via `with_handler` **like
+  `authority` — no `RefCell`/guard; the block's env clone *is* the dynamic extent**.
+  An effect native, before the platform call, checks `env.handler_for("emit")`; a
+  handler present → call it with the effect's args (its result is the effect's
+  result); else the ambient platform (current behavior). Surface:
+  `handle emit with f { body }` — inside `body`, `emit(x)` calls `f(x)`. Minimal,
+  tree-walkable, delivers redirection (stim modes) *and* attenuation (a refusing
+  handler). **Shallow semantics**: dispatch runs the handler with *its own* op popped
+  (`env.without_top_handler("emit")`), so a handler can forward by calling the op
+  again (goes to the next handler down / ambient) without self-recursion.
+- **(Alt) Per-capability contract handlers.** A cap (`Telemetry`) becomes a
+  `contract`, a handler an object implementing it, `handle Telemetry with obj { … }`
+  dispatching each op to `obj.emit`/`obj.span`. More Java-shaped, reuses method
+  dispatch, but heavier (a handler must implement the whole cap) and couples effects
+  to contracts. A later sugar over per-op, once a cap has many ops.
+
+`uses` stays the **gate**; handlers redirect *where an allowed effect goes*.
+Attenuation = a refusing handler, or `without Cap { body }` dropping authority for the
+extent (D4).
+
+### Steps
+
+**D1 — Spanned structured effect row** *(separable; lead or defer)*.
+`uses: Vec<String>` → `Vec<Effect>` (`Effect { name: String, span: Span }`).
+`parse_uses` captures each cap's span, so a refusal can cite the declaration as well
+as the perform site. Mechanical, behavior-preserving; `uses`/tree tests churn once
+(like C2). *Optional for the handler MVP — do it for better effect diagnostics, else
+defer.*
+- RED: a parsed `uses Telemetry` carries a non-default span for `Telemetry`.
+- GREEN: thread spans through `parse_uses`; 580 green.
+
+**D2 — Handler stack + effect dispatch (mechanism, no syntax).**
+`Env` gains `handlers` (dynamically-scoped op-name→value stack) + `with_handler(op,
+value)` + `handler_for(op) -> Option<Value>` + `without_top_handler(op)`. Refactor the
+8 effect natives: before the platform call, `if let Some(h) = env.handler_for("<op>")
+{ return apply_values(&h, &args, &env.without_top_handler("<op>")) }`. No handler
+installed → identical behavior → 580 green.
+- RED (unit): install a handler for `emit` on an env; performing `emit` routes to the
+  handler (a spy), not the ambient sink; a handler that itself calls `emit` forwards
+  to the ambient (shallow).
+- GREEN: the stack + dispatch in the 8 natives.
+
+**D3 — `handle` surface syntax + installation.**
+New keyword `handle`; parse `handle <op> with <expr> { body }` → a surface AST node
+lowering to: eval the handler value, eval `body` under `env.with_handler(op, value)`.
+- RED: `handle emit with (n, v) -> record(n, v) { emit("x", 1) }` runs the handler,
+  not the ambient emit; an `emit` *outside* the block still hits the sink.
+- GREEN: lexer keyword + parser node + lowering/eval arm.
+
+**D4 — Attenuation + spanned unhandled-effect fault.**
+`without Cap { body }` (drop authority for the extent) and/or a refusing handler; an
+effect with neither authority nor handler faults **spanned**, citing the perform site
+(reusing the diagnostics work). Optionally fold the `uses` declaration span (D1) into
+the message.
+- RED: inside `without Telemetry { emit(…) }` the `emit` faults with a span at the
+  call; the same `emit` outside succeeds.
+- GREEN: the attenuation construct + spanned refusal.
+
+### Non-goals (Phase D)
+- Multi-shot / resumable continuations (VM).
+- Effect *inference* (effects are declared, not inferred).
+- Per-capability contract handlers (the Alt) until a cap grows many ops.
+
+**Acceptance**: an unhandled effect faults (spanned); a block-scoped handler
+redirects/attenuates effects in its extent; `emit`/`span`/`use <-` keep working; 580+
+green.
 
 ### ★ Decision point (after Phase D)
 **stim on the tree-walk core, or continue into the bytecode VM (+ types + GC)
