@@ -64,10 +64,19 @@ struct FieldTy {
     ty: Ty,
 }
 
-/// The checking context: the program's declared constructors (shared across all
-/// bodies) plus the types of the names in scope (parameters, for now).
+/// A declared function's signature: its parameter types (in order) and its
+/// return type.
+struct FnSig {
+    params: Vec<Ty>,
+    ret: Ty,
+}
+
+/// The checking context: the program's declared constructors and function
+/// signatures (shared across all bodies) plus the types of the names in scope
+/// (parameters, for now).
 struct Ctx<'a> {
     ctors: &'a BTreeMap<String, Ctor>,
+    funcs: &'a BTreeMap<String, FnSig>,
     locals: TyEnv,
 }
 
@@ -105,22 +114,32 @@ fn synth_call(
     let CoreExprKind::Var(name) = &callee.kind else {
         return Ty::Dyn;
     };
-    let Some(ctor) = ctx.ctors.get(name) else {
-        return Ty::Dyn;
-    };
-    for (i, arg) in args.iter().enumerate() {
-        // Labelled args match by label; positional args by position.
-        let field = match &arg.label {
-            Some(label) => {
-                ctor.fields.iter().find(|f| f.label.as_deref() == Some(label.as_str()))
+    if let Some(ctor) = ctx.ctors.get(name) {
+        for (i, arg) in args.iter().enumerate() {
+            // Labelled args match by label; positional args by position.
+            let field = match &arg.label {
+                Some(label) => {
+                    ctor.fields.iter().find(|f| f.label.as_deref() == Some(label.as_str()))
+                }
+                None => ctor.fields.get(i),
+            };
+            if let Some(field) = field {
+                check(&arg.value, &field.ty, ctx, errors);
             }
-            None => ctor.fields.get(i),
-        };
-        if let Some(field) = field {
-            check(&arg.value, &field.ty, ctx, errors);
         }
+        return Ty::Named { name: ctor.type_name.clone(), args: Vec::new() };
     }
-    Ty::Named { name: ctor.type_name.clone(), args: Vec::new() }
+    if let Some(sig) = ctx.funcs.get(name) {
+        // Check each argument against its parameter type (positional); the call's
+        // type is the function's declared return.
+        for (i, arg) in args.iter().enumerate() {
+            if let Some(param) = sig.params.get(i) {
+                check(&arg.value, param, ctx, errors);
+            }
+        }
+        return sig.ret.clone();
+    }
+    Ty::Dyn
 }
 
 /// Check `expr` against an `expected` type, pushing a mismatch error (at the
@@ -198,12 +217,31 @@ fn collect_ctors(items: &[CoreItem]) -> BTreeMap<String, Ctor> {
     ctors
 }
 
+/// Index every declared function by name → its parameter and return types
+/// (unannotated slots → `Dyn`).
+fn collect_funcs(items: &[CoreItem]) -> BTreeMap<String, FnSig> {
+    let mut funcs = BTreeMap::new();
+    for item in items {
+        if let CoreItem::Func { name, params, ret, .. } = item {
+            let params = params
+                .iter()
+                .map(|p| p.ty.as_ref().map_or(Ty::Dyn, ty_of_annotation))
+                .collect();
+            let ret = ret.as_ref().map_or(Ty::Dyn, ty_of_annotation);
+            funcs.insert(name.clone(), FnSig { params, ret });
+        }
+    }
+    funcs
+}
+
 /// Type-check a lowered program, collecting every type error. Each function's
 /// body is checked against its declared return type (`Dyn` — hence unchecked —
-/// when the return is unannotated), against the program's declared constructors.
+/// when the return is unannotated), against the program's declared constructors
+/// and function signatures.
 #[must_use]
 pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
     let ctors = collect_ctors(items);
+    let funcs = collect_funcs(items);
     let mut errors = Vec::new();
     for item in items {
         if let CoreItem::Func { params, ret, body, .. } = item {
@@ -212,7 +250,7 @@ pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
                 .iter()
                 .map(|p| (p.name.clone(), p.ty.as_ref().map_or(Ty::Dyn, ty_of_annotation)))
                 .collect();
-            let ctx = Ctx { ctors: &ctors, locals };
+            let ctx = Ctx { ctors: &ctors, funcs: &funcs, locals };
             let expected = ret.as_ref().map_or(Ty::Dyn, ty_of_annotation);
             check(body, &expected, &ctx, &mut errors);
         }
@@ -233,7 +271,8 @@ mod tests {
     /// Synthesize the type of a source expression in an empty context.
     fn ty(src: &str) -> Ty {
         let ctors = BTreeMap::new();
-        let ctx = Ctx { ctors: &ctors, locals: TyEnv::new() };
+        let funcs = BTreeMap::new();
+        let ctx = Ctx { ctors: &ctors, funcs: &funcs, locals: TyEnv::new() };
         super::synth(&core(src), &ctx, &mut Vec::new())
     }
 
@@ -358,5 +397,25 @@ mod tests {
             errors("sum Shape = Circle(Int) | Rect(Int, Int)  f() = Rect(1, 2)").is_empty(),
             "matching variant args are clean"
         );
+    }
+
+    #[test]
+    fn a_function_call_checks_arguments_and_synthesizes_the_return_type() {
+        // A wrong argument type is one error, at the argument.
+        let src = r#"g(x: Int) -> Str = "y"  f() = g("no")"#;
+        let errs = errors(src);
+        assert_eq!(errs.len(), 1, "g expects Int, got Str, got {errs:?}");
+        assert_eq!(errs[0].span.start, src.find(r#""no""#).expect("the bad arg"));
+        // A correct argument is clean.
+        assert!(errors(r#"g(x: Int) -> Str = "y"  f() = g(1)"#).is_empty(), "correct arg clean");
+        // The call synthesizes the return type: `g(1)` is `Str`, so using it where
+        // an `Int` is expected is an error (proves the result type flows out).
+        assert_eq!(
+            errors(r#"g(x: Int) -> Str = "y"  f() -> Int = g(1)"#).len(),
+            1,
+            "call result Str ≠ Int return"
+        );
+        // An unknown callee is `Dyn` — its call is unchecked.
+        assert!(errors("f() = unknownFn(1)").is_empty(), "unknown callee → Dyn → clean");
     }
 }
