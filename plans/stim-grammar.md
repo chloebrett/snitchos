@@ -143,13 +143,31 @@ like the v1 grammar; the driver is unchanged (every key is still a byte the
 `h j k l`, `i o`, `x`, `Esc`, `Enter`, `Backspace`, printables, `:w :q`. Flat
 Normal-mode table; no accumulator.
 
-**Phase 1 — the rest of the flat single-keys (cheap, no new machine).**
+**Phase 1 — the rest of the flat single-keys (cheap, no new machine). ✅ DONE.**
 The inserts `a A I O`, the line motions `0 $ ^`, and the flat edits `X r{c} ~ J
-D C Y s`. All are complete-in-one-key (or one-key-plus-one-arg for `r`), so they
+D C s`. All are complete-in-one-key (or one-key-plus-one-arg for `r`), so they
 extend the flat table with no accumulator. High value, low cost — this is the
 "feels like a real editor" batch. (`r{c}` needs a one-key operator-pending-lite:
 `r` then the replacement char — a two-key mini-command, the gentlest introduction
-to accumulation.)
+to accumulation; shipped as a fourth `Mode = … | Replace`, keeping the state shape
+`(lines, row, col, mode)` unchanged — the `pending` field is still Phase 2's.)
+
+Two deviations from the original list, both deliberate:
+- **`Y` slipped to the register phases (2/5).** `Y` = `yy` needs a register to yank
+  into, and registers don't exist until Phase 2's unnamed clipboard / Phase 5's
+  named ones. Faking a clipboard in Phase 1 would have added state the phase doesn't
+  otherwise need. `p`/`P` (already Phase 2 in the list) travel with it.
+- **The observable-effect model landed a phase early.** The doc calls for building
+  the grammar "as a set of observable effects from Phase 2 on"; we did it from
+  Phase 1. `Effect` gained `Edit(Str)` (the mutation's telemetry span name); a
+  helper `editIfChanged(old, new, name)` emits `Edit` only when the buffer actually
+  changed (a clamped no-op falls back to `Redraw`, so no-op keystrokes span
+  nothing); the driver opens/closes that span per edit, exactly as it already does
+  for `stim.save`. So the edit history is a trace on the wire as of Phase 1. The
+  `Edit(Str)` carries only a name today; Phase 2 adds the range field.
+
+TDD'd through `stitch/tests/stim_fsm.rs` (FSM logic) + `stitch/src/stim.rs` tests
+(driver: the edit span reaches the wire, the two-key `r` survives the per-byte loop).
 
 **Phase 2 — the operator-pending core (the load-bearing phase).**
 Introduce `pending.op` + the operator-pending branch of `stepNormal`. Define the
