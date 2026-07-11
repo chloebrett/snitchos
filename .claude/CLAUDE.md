@@ -200,7 +200,15 @@ cargo xtask stack {up,down,logs}  # docker-compose the Tempo/Prometheus/Grafana 
 cargo xtask itest [scenario]  # kernel integration tests in QEMU (host unit tests are `cargo xtask test`)
 cargo xtask build             # just build the kernel ELF
 cargo xtask clippy [-- args]  # clippy the WHOLE workspace correctly (see note below)
+cargo xtask diagram <target>  # generate a diagram (deps|itest-matrix|caps|trace|switches) into docs/generated/; --check gates the static ones
+cargo xtask diagram png       # render the hand-drawn mermaid docs to local PNGs (needs mmdc, Node >=18)
 ```
+
+**Diagrams:** the `diagram` crate + `cargo xtask diagram` draw the workspace's
+diagrams. Static targets (`deps`, `itest-matrix`) are `--check`-gated (drift
+fails `cargo xtask test`); telemetry targets (`caps`, `trace`, `switches`) fold
+`OwnedFrame`s from a snemu boot. Committed `.md` renders on GitHub. Design +
+what's-deferred: [docs/diagrams-design.md](../docs/diagrams-design.md).
 
 **Linting:** use `cargo xtask clippy`, not `cargo clippy --workspace`. The kernel
 only builds for `riscv64gc-unknown-none-elf`; a plain workspace clippy compiles it
