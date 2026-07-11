@@ -2,11 +2,15 @@
 
 *Supervision is capability ownership viewed twice. The supervisor owns the durable objects; services borrow authority from it and are restartable precisely because of that. Every transition is a span.*
 
-**Status: design only — not built, but now UNBLOCKED (manifest v2 shipped).** This is
-redesign item **#6** from [redesign-from-scratch.md](redesign-from-scratch.md). v1
-(crash-restart) is achievable entirely on shipped primitives (`Spawn`, `Wait`/`WaitAny`,
-`EndpointCreate`, `Notify`, caps + `Revoke`, the clock); v2 (health + graceful shutdown)
-names two new ones. No supervision code exists yet — but its hardest part does (below).
+**Status: v1 SHIPPED (steps 0–4, 2026-07-11).** This is redesign item **#6** from
+[redesign-from-scratch.md](redesign-from-scratch.md). v1 (crash-restart) is built on
+shipped primitives (`Spawn`, `Wait`/`WaitAny`, `EndpointCreate`, `Notify`, caps +
+`Revoke`, the clock): pure policy in the shared `supervision` crate, a `workload=supervised`
+engine, metric telemetry, and cap re-grant on restart verified by a `cap_list` oracle
+(see the increment plan at the bottom for the per-step ✅ notes). **v2 (health + graceful
+shutdown)** — `Kill` + timed-wait syscalls — remains, plus follow-ups (the real
+`satisfier` manifest path, a client whose cap survives an IPC round-trip across restart,
+and the umbrella/incarnation span trace tree).
 
 **The reframe (updated 2026-07-11, after manifest v2 shipped).** The supervisor is, in
 the terms of [design-explorations-seven-questions.md](design-explorations-seven-questions.md)
@@ -425,15 +429,25 @@ Mirrors the project's kernel-core-vs-userspace split: **pure policy in `kernel-c
    explicit-parent span model (open-with-parent-id, not stack-nested) — its own small
    design, tracked as a supervision follow-up. The metric tier already gives Grafana
    the per-service state timeline and the crash-loop `backoff_ticks` line.
-4. **Acceptance itest** (`workload=supervised-crash-loop`) — **first graph (decided
-   2026-07-11): the FS server as the supervised service + a client holding a minted cap**,
-   reusing today's services rather than inventing new ones. The FS server exits non-zero
-   on a schedule (injected crash); assert it restarts `N` times, that backoff spacing grows,
-   that intensity trips `Escalate` after the cap, and — the oracle for the silent
-   failure — that the **restarted service's own `cap_list` still contains the re-granted
-   cap** (by object/rights/name), cross-checked against the supervisor's `CapEvent`
-   grant (proves D3 by direct possession, not an inferred "the call worked"). Reuses the
-   honest exit-code path from #5 and `cap_list` (27) for the snitch-on-the-snitch.
+4. **✅ DONE (2026-07-11) — Acceptance itest + cap re-grant** (`workload=supervised`,
+   itest `supervised-regrants-caps-on-restart`). The supervisor **owns a durable
+   endpoint** (`endpoint_create("svc-ep")`) and delegates a freshly-**minted `SEND`**
+   on it to the `crasher` service (the new `cap-reporter` program) **each incarnation**
+   — on restart the same delegation re-runs against the new `CapTable` (D3). The
+   reporter enumerates its **own `cap_list`** and emits `snitchos.reporter.holds_endpoint`
+   = 1 iff it holds an `ENDPOINT` cap named `svc-ep` with `SEND` — the holder's
+   independent confirmation. The itest asserts (via a **cursor-advancing** sequence, so
+   order is load-bearing): reporter brought up → `holds_endpoint == 1` (initial grant) →
+   `backoff_ticks` → `restarts_total ≥ 1` → **`holds_endpoint == 1` again, *after* the
+   restart** (proves the re-grant reached a fresh table — the silent-failure oracle) →
+   `escalated == 1`. A minted cap **does** carry the object name, so the `svc-ep` name
+   check is airtight. **Simpler than the doc's original FS-server-crash-loop sketch** —
+   a purpose-built `cap-reporter` proves D3 directly rather than injecting a crash into
+   the FS server. **Not done: `satisfier.rs::process(child)` re-use** — this delegates a
+   single endpoint by hand (`launch`), not the general manifest-`satisfy` path; wiring
+   the satisfier + a client whose minted cap survives an IPC round-trip across a restart
+   is a further increment. Also un-reused: `cap_list` (27) — the reporter self-checks and
+   emits, rather than the harness reading a raw `CapList` frame.
 5. **v2 later** — `Kill` + timed wait, then graceful shutdown (reverse-dep teardown)
    and hung-service detection.
 

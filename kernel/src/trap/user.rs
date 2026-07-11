@@ -87,6 +87,11 @@ pub static SUPERVISOR_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SUPERVISOR_ELF"
 /// consulting the pure `supervision` policy on each exit (restart/stop/escalate).
 pub static SUPERVISED_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SUPERVISED_ELF"));
 
+/// The `cap-reporter` supervised service (supervision step 4): each incarnation
+/// enumerates its own `cap_list`, reports whether the supervisor's re-granted
+/// endpoint landed, then exits non-zero — the cap-re-grant crash-loop oracle.
+pub static CAP_REPORTER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_CAP_REPORTER_ELF"));
+
 /// The `spinner` child (spawnable id 3): loops forever, never exits. A long-lived
 /// sibling so `WaitAny` deterministically returns the *other* child.
 pub static SPINNER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPINNER_ELF"));
@@ -529,6 +534,7 @@ static SPAWNABLE: &[(&str, &[u8])] = &[
     ("fs-server", FS_SERVER_ELF),     // 4
     ("fs-client", FS_CLIENT_ELF),     // 5
     ("viewer", VIEWER_ELF),           // 6
+    ("cap-reporter", CAP_REPORTER_ELF), // 7
 ];
 
 /// Resolve a `Spawn` program id to its `(name, image)`, or `None` if out of range.

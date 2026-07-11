@@ -7,7 +7,7 @@ use fs_proto::markers;
 use protocol::stream::OwnedFrame;
 
 
-use super::harness::View;
+use super::harness::{StringTable, View};
 use super::matchers::{is_cap_granted_span, is_cap_granted_telemetry, is_dropped, is_hello, is_metric_named, is_span_start_named, is_string_register_named, is_thread_register_named};
 
 const SEC: Duration = Duration::from_secs(1);
@@ -3322,54 +3322,69 @@ pub fn init_supervises_a_child(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
-/// Supervision step 2 — the generic supervisor engine (`workload=supervised`).
-/// The `supervised` root walks a data-driven service table: it brings `spinner`
-/// (long-lived) and `crasher` (`spawnee`, which exits 42) up in dependency order,
-/// reaps via `WaitAny`, and consults the pure `supervision` policy on each exit.
-/// `crasher` fails every incarnation, so the engine restarts it (backoff) until
-/// it crash-loops past its intensity budget, at which point the policy returns
-/// `Escalate` and the root halts. Asserts the restart path ran (restarts_total
-/// climbed) and then the intensity guard tripped (`escalated == 1`) — proving
-/// bring-up, the `WaitAny` loop, `restart_decision`'s Restart branch, and its
-/// Escalate branch, end to end on the wire.
-pub fn supervised_restarts_then_escalates(h: &mut View) -> Result<(), String> {
-    // The engine spawned the crasher — it registers as a `spawnee` task. Proof
-    // the service table was ordered and brought up.
-    h.wait_for(SEC * 20, is_thread_register_named("spawnee"))
-        .ok_or("no ThreadRegister for 'spawnee' — the supervisor didn't bring up its crasher service")?;
-
-    // The crasher failed and was restarted at least once — `restart_decision`
-    // returned Restart and the engine re-spawned it.
-    h.wait_for(SEC * 20, |f, strings| match f {
+/// A `wait_for` predicate matching a `Metric` frame named `name` whose value
+/// satisfies `pred`. Factors the repeated string-resolve match in the supervision
+/// scenario below.
+fn metric_where(
+    name: &'static str,
+    pred: impl Fn(i64) -> bool,
+) -> impl Fn(&OwnedFrame, &StringTable) -> bool {
+    move |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
-            strings.get(name_id).map(String::as_str) == Some("snitchos.svc.crasher.restarts_total")
-                && *value >= 1
+            strings.get(name_id).map(String::as_str) == Some(name) && pred(*value)
         }
         _ => false,
-    })
-    .ok_or("no svc.crasher.restarts_total >= 1 — the supervisor didn't restart the failed service")?;
+    }
+}
 
-    // Step-3 telemetry: the backoff before that restart is observable (the growing
-    // `backoff_ticks` gauge is the crash-loop line in Grafana).
-    h.wait_for(SEC * 20, |f, strings| match f {
-        OwnedFrame::Metric { name_id, value, .. } => {
-            strings.get(name_id).map(String::as_str) == Some("snitchos.svc.crasher.backoff_ticks")
-                && *value >= 1
-        }
-        _ => false,
-    })
-    .ok_or("no svc.crasher.backoff_ticks — the backoff before restart wasn't emitted")?;
+/// Supervision steps 2–4 — the generic supervisor engine with cap re-grant on
+/// restart (`workload=supervised`). The `supervised` root owns a durable endpoint
+/// (`svc-ep`) and walks a data-driven service table: `spinner` (long-lived) and
+/// `crasher` (the `cap-reporter` program, delegated a freshly-minted `SEND` on the
+/// endpoint each incarnation). Every incarnation reads its **own** `cap_list` and
+/// reports whether the re-granted cap landed, then exits non-zero — so the engine
+/// restarts it (backoff) until it crash-loops past its intensity budget and the
+/// policy escalates (halt).
+///
+/// The assertions advance a single cursor, so their *order* is load-bearing: a
+/// second `holds_endpoint == 1` observed **after** a restart proves the cap re-grant
+/// reached a fresh `CapTable` (D3), not merely the first launch — the
+/// snitch-on-the-snitch oracle. Also proves bring-up, the `WaitAny` loop, backoff
+/// telemetry, and the Escalate branch, end to end on the wire.
+pub fn supervised_regrants_caps_on_restart(h: &mut View) -> Result<(), String> {
+    // The engine spawned the crasher (the `cap-reporter` program). Proof the
+    // service table was ordered and brought up.
+    h.wait_for(SEC * 20, is_thread_register_named("cap-reporter"))
+        .ok_or("no ThreadRegister for 'cap-reporter' — the supervisor didn't bring up its crasher service")?;
 
-    // It kept crash-looping past its intensity budget, so the policy escalated
-    // and the root halted — the storm guard, observable on the wire.
-    h.wait_for(SEC * 20, |f, strings| match f {
-        OwnedFrame::Metric { name_id, value, .. } => {
-            strings.get(name_id).map(String::as_str) == Some("snitchos.svc.crasher.escalated")
-                && *value == 1
-        }
-        _ => false,
-    })
-    .ok_or("no svc.crasher.escalated == 1 — the intensity guard never tripped Escalate")?;
+    // The first incarnation confirms, from its own cap_list, that the delegated
+    // endpoint landed — the initial grant.
+    h.wait_for(SEC * 20, metric_where("snitchos.reporter.holds_endpoint", |v| v == 1))
+        .ok_or("no reporter.holds_endpoint == 1 — the first incarnation didn't receive the delegated endpoint")?;
+
+    // Its backoff before the restart is observable (step-3 telemetry).
+    h.wait_for(SEC * 20, metric_where("snitchos.svc.crasher.backoff_ticks", |v| v >= 1))
+        .ok_or("no svc.crasher.backoff_ticks — the backoff before restart wasn't emitted")?;
+
+    // The crasher was restarted — `restart_decision` returned Restart and the
+    // engine re-spawned it, re-running the delegation against the new table.
+    h.wait_for(SEC * 20, metric_where("snitchos.svc.crasher.restarts_total", |v| v >= 1))
+        .ok_or("no svc.crasher.restarts_total >= 1 — the supervisor didn't restart the failed service")?;
+
+    // THE ORACLE: a *post-restart* incarnation confirms — from its own cap_list —
+    // that the re-granted endpoint is in its fresh table. Because the cursor is past
+    // the first grant and the restart above, this frame can only come from a new
+    // incarnation, so it proves the re-grant (D3), not just the initial delegation.
+    h.wait_for(SEC * 20, metric_where("snitchos.reporter.holds_endpoint", |v| v == 1))
+        .ok_or(
+            "no post-restart reporter.holds_endpoint == 1 — the re-granted cap didn't reach the \
+             restarted incarnation's table (silent cap-re-grant failure)",
+        )?;
+
+    // It kept crash-looping past its intensity budget, so the policy escalated and
+    // the root halted — the storm guard, observable on the wire.
+    h.wait_for(SEC * 20, metric_where("snitchos.svc.crasher.escalated", |v| v == 1))
+        .ok_or("no svc.crasher.escalated == 1 — the intensity guard never tripped Escalate")?;
 
     Ok(())
 }

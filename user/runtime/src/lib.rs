@@ -827,6 +827,12 @@ pub use snitchos_abi::rights;
 /// name the object a manifest [`Slot`](hitch::Slot) requires.
 pub use snitchos_abi::object_kind;
 
+/// A packed capability-table record — the element type [`cap_list`] writes. Its
+/// `kind`/`rights`/`badge`/`name` describe one holding the process owns. Re-exported
+/// so a `cap_list` caller can name the buffer type without depending on
+/// `snitchos-abi` directly.
+pub use snitchos_abi::CapDesc;
+
 #[derive(Clone, Copy)]
 pub struct Endpoint {
     handle: usize,

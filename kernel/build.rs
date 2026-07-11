@@ -30,6 +30,7 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("spawnee", "SNITCHOS_SPAWNEE_ELF"),
     ("supervisor", "SNITCHOS_SUPERVISOR_ELF"),
     ("supervised", "SNITCHOS_SUPERVISED_ELF"),
+    ("cap-reporter", "SNITCHOS_CAP_REPORTER_ELF"),
     ("spinner", "SNITCHOS_SPINNER_ELF"),
     ("init", "SNITCHOS_INIT_ELF"),
     ("ep_maker", "SNITCHOS_EP_MAKER_ELF"),

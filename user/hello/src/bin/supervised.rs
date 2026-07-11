@@ -17,7 +17,14 @@
 //! child span per incarnation* (the Tempo trace tree) — the kernel span cursor is
 //! per-task LIFO, so a single supervisor task can't hold concurrent per-service
 //! spans open across the `WaitAny` loop; that tree needs an explicit-parent span
-//! model. Cap re-grant on restart (the `satisfier` path) is step 4.
+//! model.
+//!
+//! Cap re-grant (step 4, D3): the supervisor owns a durable endpoint (`svc-ep`) and
+//! delegates a freshly-minted `SEND` on it to `crasher` (the `cap-reporter` program)
+//! **each incarnation**. On restart, the same delegation re-runs against the new
+//! `CapTable`. The reporter enumerates its own `cap_list` and emits
+//! `snitchos.reporter.holds_endpoint` — the holder's independent confirmation that
+//! the re-granted cap landed (the snitch-on-the-snitch oracle for D3).
 
 #![no_std]
 #![no_main]
@@ -28,8 +35,8 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use snitchos_user::{
-    Metric, clock_now, entry, exit, register_counter, register_gauge, span_handle, spawn, tracer,
-    wait_any, yield_now,
+    Endpoint, Metric, clock_now, endpoint_create, entry, exit, register_counter, register_gauge,
+    rights, span_handle, spawn, tracer, wait_any, yield_now,
 };
 use supervision::{
     ExitOutcome, RestartAction, RestartHistory, RestartLimits, RestartPolicy, ServiceId, ServiceSpec,
@@ -46,6 +53,9 @@ struct ServiceDef {
     program: usize,
     /// Delegate our span cap to the child (some programs open a span through it).
     give_span: bool,
+    /// Delegate a freshly-minted `SEND` on our durable endpoint each incarnation —
+    /// the D3 cap re-grant (the child borrows authority the supervisor owns).
+    give_endpoint: bool,
     policy: RestartPolicy,
     limits: RestartLimits,
 }
@@ -103,9 +113,9 @@ const SPINNER: ServiceId = ServiceId(0);
 const CRASHER: ServiceId = ServiceId(1);
 
 /// The service table — the whole "what runs, in what order, restart how" as
-/// data. `spinner` is a stable long-lived service; `crasher` (`spawnee`, which
-/// exits 42) depends on it and crash-loops, so we watch backoff grow then trip
-/// the intensity guard into an escalate.
+/// data. `spinner` is a stable long-lived service; `crasher` (the `cap-reporter`
+/// program, exit 17) depends on it, holds a re-granted endpoint each incarnation,
+/// and crash-loops — so we watch cap re-grant + backoff before intensity escalates.
 fn services() -> [ServiceDef; 2] {
     [
         ServiceDef {
@@ -113,14 +123,18 @@ fn services() -> [ServiceDef; 2] {
             name: "spinner",
             program: 3,
             give_span: false,
+            give_endpoint: false,
             policy: RestartPolicy::Never,
             limits: NO_RESTART,
         },
         ServiceDef {
+            // `cap-reporter` (SPAWNABLE id 7): reads its own cap_list, reports
+            // whether the re-granted endpoint landed, then crashes (exit 17).
             spec: ServiceSpec { id: CRASHER, deps: &[SPINNER] },
             name: "crasher",
-            program: 0,
-            give_span: true,
+            program: 7,
+            give_span: false,
+            give_endpoint: true,
             policy: RestartPolicy::OnFailure,
             limits: CRASHER_LIMITS,
         },
@@ -143,12 +157,23 @@ fn def_for(defs: &[ServiceDef], id: ServiceId) -> &ServiceDef {
     defs.iter().find(|d| d.spec.id == id).expect("id is from the same table")
 }
 
-/// Launch one service, delegating its span cap if it wants one. Returns the new
-/// incarnation's task id (or escalates the whole supervisor if the spawn fails —
-/// a service we can't even start is a fatal supervision error).
-fn launch(def: &ServiceDef) -> u32 {
-    let handles: &[u32] = if def.give_span { &[span_handle()] } else { &[] };
-    match spawn(def.program, handles) {
+/// Launch one service, delegating the caps it declares: our span cap, and/or a
+/// **freshly-minted** `SEND` on our durable endpoint (`ep`) — the per-incarnation
+/// cap re-grant. Returns the new incarnation's task id (or escalates the whole
+/// supervisor if a mint or the spawn fails — a service we can't grant authority to
+/// or even start is a fatal supervision error).
+fn launch(def: &ServiceDef, ep: &Endpoint) -> u32 {
+    let mut handles: Vec<u32> = Vec::new();
+    if def.give_span {
+        handles.push(span_handle());
+    }
+    if def.give_endpoint {
+        match ep.mint_badged(0, rights::SEND) {
+            Ok(h) => handles.push(h as u32),
+            Err(_) => escalate(def.name, "mint-failed"),
+        }
+    }
+    match spawn(def.program, &handles) {
         Some(task) => task,
         None => escalate(def.name, "spawn-failed"),
     }
@@ -180,6 +205,11 @@ fn escalate(name: &str, reason: &str) -> ! {
 fn main() {
     let defs = services();
 
+    // The supervisor owns the durable endpoint (D3): it lives across every service
+    // incarnation, so a service is restartable *because* its authority is ours to
+    // re-grant. Named so the reporter can confirm it by object name in `cap_list`.
+    let ep = endpoint_create("svc-ep");
+
     // Order the table by dependency; a cycle is a fatal configuration error.
     let specs: Vec<ServiceSpec> = defs.iter().map(|d| d.spec).collect();
     let order = match startup_order(&specs) {
@@ -194,7 +224,7 @@ fn main() {
         let def = def_for(&defs, *id);
         let metrics = register_metrics(def.name);
         metrics.state.emit(State::Starting as i64);
-        let task = launch(def);
+        let task = launch(def, &ep);
         let started = clock_now();
         metrics.state.emit(State::Running as i64);
         live.push(Live {
@@ -254,7 +284,7 @@ fn main() {
                 m.state.emit(State::Backoff as i64);
                 m.backoff.emit(after as i64);
                 wait_until(now + after);
-                let task = launch(def);
+                let task = launch(def, &ep);
                 if let Some(slot) = live.iter_mut().find(|l| l.id == id) {
                     slot.task = Some(task);
                     slot.started = clock_now();
