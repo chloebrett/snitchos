@@ -42,7 +42,7 @@ struct Cli {
     #[arg(long)]
     native_ops: bool,
     /// Tier-2 block JIT (M6): compile + run hot basic blocks.
-    #[arg(long)]
+    #[arg(long = "jit")]
     block_jit: bool,
     /// Measure each memop's real interpreted cost against `memop_charge` (forces
     /// native ops off).
