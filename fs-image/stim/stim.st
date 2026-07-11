@@ -50,50 +50,42 @@ lineAt(state, row) = unwrapOr(List.at(state.lines, row), "")
 // a vertical move must never leave the cursor past the end of its new line.
 clampedCol(state, row) = {
     let lineLen = Str.length(lineAt(state, row))
-    match { state.col > lineLen => lineLen  _ => state.col }
+    state.col > lineLen => lineLen | state.col
 }
 
 // `k` — up one line, clamped at the top; re-clamp the column onto the new line.
-moveUp(state) = match {
+moveUp(state) =
     state.row <= 0 => state
-    _ => {
+    | {
         let row = state.row - 1
         Editor(..state, row: row, col: clampedCol(state, row))
     }
-}
 
 // `j` — down one line, clamped at the last line; re-clamp the column.
-moveDown(state) = match {
+moveDown(state) =
     state.row >= count(state.lines) - 1 => state
-    _ => {
+    | {
         let row = state.row + 1
         Editor(..state, row: row, col: clampedCol(state, row))
     }
-}
 
 // `h` — cursor left within the line, clamped at column 0.
-moveLeft(state) = match {
-    state.col > 0 => Editor(..state, col: state.col - 1)
-    _ => state
-}
+moveLeft(state) = state.col > 0 => Editor(..state, col: state.col - 1) | state
 
 // `l` — cursor right within the line, clamped at the line's end.
-moveRight(state) = match {
-    state.col < Str.length(lineAt(state, state.row)) => Editor(..state, col: state.col + 1)
-    _ => state
-}
+moveRight(state) =
+    state.col < Str.length(lineAt(state, state.row)) => Editor(..state, col: state.col + 1) | state
 
 // `x` — delete the character under the cursor. No-op at end of line (nothing under
 // the cursor); the cursor re-clamps onto the shortened line.
-deleteChar(state) = match {
+deleteChar(state) =
     state.col < Str.length(lineAt(state, state.row)) => {
         let line = lineAt(state, state.row)
         let edited = Str.slice(line, 0, state.col) + Str.slice(line, state.col + 1, Str.length(line))
         let moved = Editor(..state, lines: List.set(state.lines, state.row, edited))
         Editor(..moved, col: clampedCol(moved, state.row))
     }
-    _ => state
-}
+    | state
 
 // `o` — open a fresh empty line below the cursor and enter Insert mode there.
 openLine(state) = Editor(
