@@ -33,8 +33,8 @@ const SNEMU_DTB: &str = "snemu/virt.dtb";
 /// names, kinds, hart/task ids, span topology — is kept and compared.
 pub(crate) fn canonical(frame: &OwnedFrame) -> OwnedFrame {
     use OwnedFrame::{
-        CapEvent, ContextSwitch, Event, Log, Message, Metric, NotifySignal, NotifyWait, SpanEnd,
-        SpanStart, SyscallRefused,
+        CapEvent, ContextSwitch, Event, HartRegister, Log, Message, Metric, NotifySignal,
+        NotifyWait, SpanEnd, SpanStart, SyscallRefused,
     };
     match frame {
         SpanStart { id, parent, name_id, task_id, hart_id, .. } => SpanStart {
@@ -104,8 +104,12 @@ pub(crate) fn canonical(frame: &OwnedFrame) -> OwnedFrame {
             t: 0,
             hart_id: *hart_id,
         },
+        // `mhartid` is the raw platform boot-hart id (snemu boots on 0, QEMU on 1) —
+        // firmware noise, not kernel behavior, so it must not halt a structural diff.
+        // Normalize it; keep `id` (the logical hart) and `role`, which are semantic.
+        HartRegister { id, role, .. } => HartRegister { id: *id, mhartid: 0, role: *role },
         // No timestamp / volatile field: Hello, StringRegister, MetricRegister,
-        // ThreadRegister, HartRegister, Dropped.
+        // ThreadRegister, Dropped.
         other => other.clone(),
     }
 }
@@ -1079,6 +1083,19 @@ mod tests {
         // The same metric with different values (heartbeat counts drift) is a match.
         let snemu = vec![metric(5, 10)];
         let qemu = vec![metric(9999, 20)];
+        let d = diff_streams(&snemu, &qemu);
+        assert_eq!(d.common_prefix, 1);
+        assert!(d.divergence.is_none());
+    }
+
+    #[test]
+    fn hart_register_mhartid_drift_is_ignored() {
+        // snemu and QEMU boot on different physical harts, so `mhartid` differs (0 vs
+        // 1) while the logical topology is identical. That's firmware noise, not a
+        // structural divergence — canonicalization must normalize it so the diff sees
+        // past early boot instead of halting on it (`id`, the logical hart, is kept).
+        let snemu = vec![OwnedFrame::HartRegister { id: 0, mhartid: 0, role: protocol::HartRole::Boot }];
+        let qemu = vec![OwnedFrame::HartRegister { id: 0, mhartid: 1, role: protocol::HartRole::Boot }];
         let d = diff_streams(&snemu, &qemu);
         assert_eq!(d.common_prefix, 1);
         assert!(d.divergence.is_none());
