@@ -11,6 +11,12 @@ protocol = { path = "../protocol", features = ["std"] }
 # CLI arg parsing for the `snemu` binary (the lib is arg-free).
 clap = { version = "4", features = ["derive"] }
 
+# Backend B (native block JIT, host-only): `mmap`/`MAP_JIT` for executable memory.
+# Only the JIT module uses it; the interpreter core stays dependency-free and
+# `unsafe`-free. Scoped off wasm (the browser path is Backend A only).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Read-only FDT parser (the same one the kernel uses) — verifies the bootargs
 # our firmware-role DTB patch injects parses back correctly.

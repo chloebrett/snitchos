@@ -1,7 +1,9 @@
 # snemu itest — the discovered snapshot tree
 
 **Status:** increments 1–3 **shipped** (collapse, fork-node sharing + state-hash
-verification, precedence-aware scheduler); 4–5 unbuilt.
+verification, precedence-aware scheduler); increment 4 (CoW) **deferred by
+measurement** — the clone is already cheap (~0.19s total, right-sized machines);
+increment 5 (viz) unbuilt.
 Behind `cargo xtask snemu-itest --share-snapshots` (off by default — the A/B
 baseline). On the full 111-scenario suite the collapse is verdict-identical to the
 fork-per-scenario path (the oracle), 99/111 scenarios collapse onto shared forward
@@ -268,8 +270,20 @@ Both fall out of the same dirty-set, so build it once. (snemu already tracks a w
    utilisation **~85% → 99%**, verdicts unchanged. The scheduler is a generic
    primitive (`Node { deps, priority }` + `run_scheduled`) with its own unit tests
    (precedence, priority order, all-run across worker counts).
-4. **CoW forks + incremental hash.** The dirty-set machinery, if increments 1–2 used
-   a cruder clone/hash to start.
+4. **CoW forks + incremental hash.** ⏸ **Deferred — measured, premise doesn't hold.**
+   The design bet on CoW *if* the deep `Machine::clone` and O(RAM) hash were expensive.
+   Measured, they aren't: across the whole suite the machine clones total **~0.19s**
+   (111 clones sharing-off, 72 sharing-on) — a few percent of the makespan, and spread
+   across the worker pool it's a fraction of that on the critical path. Increment 1's
+   RAM right-sizing already shrank the machines to **16 MiB**, so cloning one is
+   ~1.7 ms. CoW's absolute ceiling is therefore that ~0.19s, while page-granularity
+   tracking would tax the interpreter's *hot* memory path (a per-access page-index +
+   `Arc` deref, over the 275M–1.5B guest instructions a run retires) — very likely
+   **net-negative**. The incremental Merkle hash is likewise moot: we hash only ~19
+   fork points × ~10 MiB ≈ 0.02s, so there's nothing to save until hashing becomes
+   *frequent* (e.g. a per-step determinism check). **Revisit only if guest RAM grows
+   (large-memory workloads) or the suite grows enough that clone cost climbs** — the
+   dirty-set machinery is the right tool then, not now.
 5. **Visualisation.** (below)
 
 ## correctness / oracle

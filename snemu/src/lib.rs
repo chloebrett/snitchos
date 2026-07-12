@@ -11,6 +11,7 @@ pub mod dtb;
 mod csr;
 mod decode;
 mod decode_cache;
+mod jit;
 pub mod loader;
 pub mod machine;
 mod mmu;
