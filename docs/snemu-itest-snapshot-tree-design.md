@@ -1,6 +1,6 @@
 # snemu itest — the discovered snapshot tree
 
-**Status:** increments 1–2 **shipped** (state-hash dedup deferred); 3–5 unbuilt.
+**Status:** increments 1–2 **shipped, including state-hash verification**; 3–5 unbuilt.
 Behind `cargo xtask snemu-itest --share-snapshots` (off by default — the A/B
 baseline). On the full 111-scenario suite the collapse is verdict-identical to the
 fork-per-scenario path (the oracle), 99/111 scenarios collapse onto shared forward
@@ -237,15 +237,21 @@ Both fall out of the same dirty-set, so build it once. (snemu already tracks a w
    per child; the child's body re-runs boot→injection as already-buffered frame waits
    (no stepping) and injects from the shared state. On this suite the tree is shallow
    (scenarios diverge at their *first* injection, so no deeper prefixes), but the
-   `stitch-fs` node is shared 7 ways and `stitch-repl` 3 ways. Correctness rests on
-   the same A/B oracle + the self-healing fallback (above), not yet the state hash.
-   - **State-hash dedup (deferred).** The design's internal check — hash each fork
-     point, equal ⇒ confirmed shareable, unequal ⇒ determinism leak — needs a
-     `Machine::state_hash()` in snemu (hash guest RAM via the write-set + registers).
-     Its value is the *determinism regression test* (catches a hidden entropy source
-     or a mis-share **at the fork point**, before it reaches an assertion), which the
-     verdict A/B and the fallback don't provide as precisely. Worth building next; the
-     fallback covers the *correctness* role in the meantime.
+   `stitch-fs` node is shared 7 ways and `stitch-repl` 3 ways.
+   - **State-hash verification (shipped).** `Machine::state_hash()` (snemu) folds the
+     shared clock, every hart's architectural registers/PC/privilege/CSRs, guest RAM
+     (`[0, high_water)`), and device output into one content hash — excluding the perf
+     toggles (caches, idle-skip, native-ops), which must not move it. Each scenario
+     captures its **fork-point hash** on its first injection (the tap in
+     `View::send_input`, when the guest is at the fork instret with no input yet).
+     Before a scenario forks a materialised node, its `state_hash()` must equal that
+     recorded hash: match ⇒ the node provably *is* the state the scenario coincides at
+     (the share is sound); mismatch ⇒ a determinism leak or a JIT/idle-skip boundary
+     drift — flagged (`⚠ … FAILED the state-hash check`) and the scenario runs
+     **unshared** (safe) + self-heals. Verified end-to-end: poisoning a recorded hash
+     fires the check, the scenario runs unshared, still passes, and the next run is
+     clean. This is the design's self-auditing property — the optimiser is now
+     simultaneously a continuous determinism regression test.
 3. **Precedence-aware scheduler.** Wire the tree into the existing list scheduler as
    bottom-level priorities with the materialise-before-run constraint.
 4. **CoW forks + incremental hash.** The dirty-set machinery, if increments 1–2 used
