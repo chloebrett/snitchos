@@ -319,6 +319,17 @@ fn collect_conformances(items: &[CoreItem]) -> BTreeMap<String, BTreeSet<String>
     conformances
 }
 
+/// Whether a type annotation mentions the self-type `@` anywhere (directly or
+/// nested in a type argument, function, or tuple).
+fn contains_self_type(ann: &Type) -> bool {
+    match ann {
+        Type::SelfType => true,
+        Type::Name { args, .. } => args.iter().any(contains_self_type),
+        Type::Func { param, ret } => contains_self_type(param) || contains_self_type(ret),
+        Type::Tuple(items) => items.iter().any(contains_self_type),
+    }
+}
+
 /// The names of every declared type — `prod`, `sum`, `contract`.
 fn collect_type_names(items: &[CoreItem]) -> BTreeSet<String> {
     items
@@ -395,7 +406,20 @@ pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
     let conformances = collect_conformances(items);
     let mut errors = Vec::new();
     for item in items {
-        if let CoreItem::Func { params, ret, body, .. } = item {
+        if let CoreItem::Func { name, params, ret, body, .. } = item {
+            // Gate `@`: the self-type is meaningless in a top-level function (no
+            // receiver). Methods are `On`/`Contract` items, not checked in this
+            // loop, so their `@` is untouched.
+            let self_in_signature = params.iter().filter_map(|p| p.ty.as_ref()).any(contains_self_type)
+                || ret.as_ref().is_some_and(contains_self_type);
+            if self_in_signature {
+                errors.push(TypeError {
+                    message: format!(
+                        "`@` (self-type) is only valid in a method; `{name}` has no receiver"
+                    ),
+                    span: body.span,
+                });
+            }
             // Bind each parameter to its declared type (unannotated → `Dyn`).
             let locals: TyEnv = params
                 .iter()
@@ -619,6 +643,19 @@ mod tests {
         );
         // A `Dyn` operand suppresses the check.
         assert!(errors("f(a) = a == 1").is_empty(), "Dyn == Int → clean");
+    }
+
+    #[test]
+    fn the_self_type_is_rejected_in_a_top_level_function_signature() {
+        // `@` (self-type) names the receiver's type — meaningless in a top-level
+        // function, which has no receiver.
+        assert_eq!(errors("foo() -> @ = foo()").len(), 1, "@ return outside a method");
+        assert_eq!(errors("foo(x: @) = x").len(), 1, "@ param outside a method");
+        assert_eq!(errors("foo() -> Maybe<@> = foo()").len(), 1, "@ nested in a type argument");
+        // A signature without `@` is clean.
+        assert!(errors("foo(x: Int) -> Int = x").is_empty(), "no @ → clean");
+        // Inside an `on` method, `@` is allowed (methods aren't gated here).
+        assert!(errors("prod P(n: Int)  on P { dup() -> @ = @ }").is_empty(), "@ in a method is fine");
     }
 
     #[test]
