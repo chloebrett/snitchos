@@ -149,9 +149,8 @@ fn binop_type(op: BinOp, l: &Ty, r: &Ty) -> Option<Ty> {
         // `+` is numeric addition or string concatenation.
         BinOp::Add => numeric_or_str(l, r),
         BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => numeric(l, r),
-        // Equality is defined between same-kind values; the result is always Bool.
-        // (Operand-kind checking is deferred; the result type is what matters here.)
-        BinOp::Eq | BinOp::Ne => Some(Ty::Bool),
+        // Equality is defined between same-kind values only; the result is Bool.
+        BinOp::Eq | BinOp::Ne => same_value_kind(l, r).then_some(Ty::Bool),
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => orderable(l, r).then_some(Ty::Bool),
         BinOp::And | BinOp::Or => boolish(l, r).then_some(Ty::Bool),
         // Pipes and ranges aren't typed as binary operators yet: gradual.
@@ -189,6 +188,18 @@ fn orderable(l: &Ty, r: &Ty) -> bool {
 fn boolish(l: &Ty, r: &Ty) -> bool {
     let is_bool = |t: &Ty| matches!(t, Ty::Bool | Ty::Dyn);
     is_bool(l) && is_bool(r)
+}
+
+/// Whether `l` and `r` are the same *value kind* for `==`/`!=` — i.e. would share
+/// a `Value` discriminant at runtime (which is where equality is defined). `Ty`'s
+/// variant discriminants line up with `Value`'s: each primitive is distinct, and
+/// all `Named` (all `Tuple`, all `Func`) collapse to one — so `Circle == Rect` is
+/// same-kind, but `1 == 1.0` is not. `Dyn`/`SelfTy` are unknown, hence never an
+/// error.
+fn same_value_kind(l: &Ty, r: &Ty) -> bool {
+    matches!(l, Ty::Dyn | Ty::SelfTy)
+        || matches!(r, Ty::Dyn | Ty::SelfTy)
+        || core::mem::discriminant(l) == core::mem::discriminant(r)
 }
 
 /// Synthesize a call. A call to a declared constructor checks each argument
@@ -590,6 +601,24 @@ mod tests {
         assert_eq!(errors("f() -> Int = 1 == 2").len(), 1, "== result Bool ≠ Int return");
         // A `Dyn` operand suppresses the error (gradual).
         assert!(errors("f(a) = a + 1").is_empty(), "Dyn operand → no error");
+    }
+
+    #[test]
+    fn equality_requires_same_kind_operands() {
+        // Same-kind equality is clean.
+        assert!(errors("f() = 1 == 2").is_empty(), "Int == Int");
+        assert!(errors(r#"f() = "a" != "b""#).is_empty(), "Str != Str");
+        // Cross-kind equality is an error (matching the runtime discriminant rule).
+        assert_eq!(errors(r#"f() = 1 == "x""#).len(), 1, "Int == Str");
+        assert_eq!(errors("f() = 1 == 2.0").len(), 1, "Int == Float");
+        // Two *different* declared types share a value-kind (both heap data), which
+        // the runtime allows (returns false) — so the checker accepts it too.
+        assert!(
+            errors("prod A(x: Int)  prod B(x: Int)  f() = A(1) == B(1)").is_empty(),
+            "Named == Named is a same-kind comparison"
+        );
+        // A `Dyn` operand suppresses the check.
+        assert!(errors("f(a) = a == 1").is_empty(), "Dyn == Int → clean");
     }
 
     #[test]

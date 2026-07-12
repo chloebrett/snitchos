@@ -128,7 +128,7 @@ canonical `Ty`; a `TypeError` type exists carrying a message + span.
 
 ### Step 5: binary-operator operands — ✅ DONE (2026-07-12, after 7)
 **Acceptance**: `1 + 2 : Int`; `1.0 + 2.0 : Float`; `"a" + "b" : Str`; `1 + true` errors; comparisons/logic yield `Bool`; a `Dyn` operand suppresses the error.
-**GREEN**: `synth(Binary)` → `synth_binary` (synth both operands, then `binop_type(op, l, r) -> Option<Ty>`, `None` = a spanned operator error). Mirrors `ops::eval_binary`: `numeric` (Int/Int→Int, Float/Float→Float), `numeric_or_str` (`+` also `Str+Str`), `orderable` (matching Int/Float/Str → Bool), `boolish` (`and`/`or` → Bool); `Eq`/`Ne` → Bool (operand-kind check deferred — avoids false-positiving cross-`Named` equality, which the runtime allows); pipes/ranges → `Dyn`.
+**GREEN**: `synth(Binary)` → `synth_binary` (synth both operands, then `binop_type(op, l, r) -> Option<Ty>`, `None` = a spanned operator error). Mirrors `ops::eval_binary`: `numeric` (Int/Int→Int, Float/Float→Float), `numeric_or_str` (`+` also `Str+Str`), `orderable` (matching Int/Float/Str → Bool), `boolish` (`and`/`or` → Bool); `Eq`/`Ne` → Bool; pipes/ranges → `Dyn`. **Eq/Ne operand-kind check added 2026-07-12** — `same_value_kind` (via `core::mem::discriminant` on `Ty`, whose variants line up with runtime `Value` kinds) errors on `1 == "x"` / `1 == 1.0` but accepts cross-`Named` `A == B` (same heap-data kind, which the runtime allows); `Dyn`/`SelfTy` never error.
 **Mutation**: 56 mutants — killed 2 survivors (`orderable`/`boolish` "always false" — needed *clean-context* assertions, since return-annotation tests give 1 error either way); final 43 caught / 13 unviable / 0 survivors.
 **Done**: 601 lib green, clippy clean.
 
