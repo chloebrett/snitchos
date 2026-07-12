@@ -519,10 +519,12 @@ mod tests {
         // The result type flows out: `1 + 2` is Int, `1 < 2` is Bool.
         assert_eq!(errors("f() -> Str = 1 + 2").len(), 1, "Int result ≠ Str return");
         assert_eq!(errors("f() -> Int = 1 < 2").len(), 1, "Bool result ≠ Int return");
-        // Ordering across kinds is an error.
+        // Ordering across kinds is an error; same orderable kinds are clean.
         assert_eq!(errors(r#"f() = 1 < "x""#).len(), 1, "Int < Str");
-        // Logic operators need booleans and yield Bool.
+        assert!(errors("f() = 1 < 2").is_empty(), "Int < Int is a clean comparison");
+        // Logic operators need booleans (clean when both are) and yield Bool.
         assert_eq!(errors("f() = 1 and true").len(), 1, "Int `and` Bool");
+        assert!(errors("f() = true and false").is_empty(), "Bool `and` Bool is clean");
         assert_eq!(errors("f() -> Int = true or false").len(), 1, "Bool result ≠ Int return");
         // Equality yields Bool regardless of the (same-kind) operands.
         assert_eq!(errors("f() -> Int = 1 == 2").len(), 1, "== result Bool ≠ Int return");

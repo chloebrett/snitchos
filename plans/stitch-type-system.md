@@ -118,11 +118,11 @@ canonical `Ty`; a `TypeError` type exists carrying a message + span.
 **Mutation**: check.rs 38 (29 caught / 9 unviable / 0 survivors); runner `type_check_report` 2/2 caught.
 **Done**: 600 lib + all integration green; **zero false positives** on existing programs (gradual `Dyn` held); clippy clean.
 
-**Note — Step 5 (binary-operator operands) was leapfrogged.** Per the user's 6→7→5
-ordering (where "5" = **contract subtyping**, i.e. the roadmap's *Stage 5*), the
-plan-step-5 "binary-operator operands" (`1 + true` errors) is **not yet done** —
-`synth(Binary)` still falls through to `Dyn`. It remains an open, self-contained step to
-pick up whenever.
+### Step 5: binary-operator operands — ✅ DONE (2026-07-12, after 7)
+**Acceptance**: `1 + 2 : Int`; `1.0 + 2.0 : Float`; `"a" + "b" : Str`; `1 + true` errors; comparisons/logic yield `Bool`; a `Dyn` operand suppresses the error.
+**GREEN**: `synth(Binary)` → `synth_binary` (synth both operands, then `binop_type(op, l, r) -> Option<Ty>`, `None` = a spanned operator error). Mirrors `ops::eval_binary`: `numeric` (Int/Int→Int, Float/Float→Float), `numeric_or_str` (`+` also `Str+Str`), `orderable` (matching Int/Float/Str → Bool), `boolish` (`and`/`or` → Bool); `Eq`/`Ne` → Bool (operand-kind check deferred — avoids false-positiving cross-`Named` equality, which the runtime allows); pipes/ranges → `Dyn`.
+**Mutation**: 56 mutants — killed 2 survivors (`orderable`/`boolish` "always false" — needed *clean-context* assertions, since return-annotation tests give 1 error either way); final 43 caught / 13 unviable / 0 survivors.
+**Done**: 601 lib green, clippy clean.
 
 ## Pre-PR Quality Gate
 1. Mutation testing (`cargo xtask mutants -p stitch`, now wired).
