@@ -129,6 +129,7 @@ pub(crate) mod baseline;
 mod harness;
 mod matchers;
 mod scenarios;
+pub(crate) mod schedule;
 pub(crate) mod snapshot_tree;
 pub(crate) mod snemu_audit;
 

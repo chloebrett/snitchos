@@ -1,6 +1,7 @@
 # snemu itest — the discovered snapshot tree
 
-**Status:** increments 1–2 **shipped, including state-hash verification**; 3–5 unbuilt.
+**Status:** increments 1–3 **shipped** (collapse, fork-node sharing + state-hash
+verification, precedence-aware scheduler); 4–5 unbuilt.
 Behind `cargo xtask snemu-itest --share-snapshots` (off by default — the A/B
 baseline). On the full 111-scenario suite the collapse is verdict-identical to the
 fork-per-scenario path (the oracle), 99/111 scenarios collapse onto shared forward
@@ -252,8 +253,21 @@ Both fall out of the same dirty-set, so build it once. (snemu already tracks a w
      fires the check, the scenario runs unshared, still passes, and the next run is
      clean. This is the design's self-auditing property — the optimiser is now
      simultaneously a continuous determinism regression test.
-3. **Precedence-aware scheduler.** Wire the tree into the existing list scheduler as
-   bottom-level priorities with the materialise-before-run constraint.
+3. **Precedence-aware scheduler.** ✅ **Shipped** (`xtask/src/itest/schedule.rs`).
+   The audit is a forest of per-workload pipelines — boot → {shared stream, fork
+   nodes} → scenarios. It used to run those as four global `parallel_map` barriers,
+   stranding workers while the slowest workload booted. Now one
+   `run_scheduled(nodes, jobs, dispatch)` walks the whole dependency graph with
+   **critical-path (bottom-level) list scheduling**: each node's priority is its
+   estimated instret plus the longest successor chain beneath it (memoised over the
+   reverse edges), and a freed worker takes the highest-priority *ready* node (all
+   deps materialised). It's online-greedy, so the prior-run instret estimates only
+   steer order — they never commit to a plan (Graham's bound holds regardless). As a
+   workload boots, its scenarios become ready and fan out while other workloads are
+   still booting. Result: full-suite makespan **5.0s → 3.3s** at 6 workers, worker
+   utilisation **~85% → 99%**, verdicts unchanged. The scheduler is a generic
+   primitive (`Node { deps, priority }` + `run_scheduled`) with its own unit tests
+   (precedence, priority order, all-run across worker counts).
 4. **CoW forks + incremental hash.** The dirty-set machinery, if increments 1–2 used
    a cruder clone/hash to start.
 5. **Visualisation.** (below)

@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use super::harness::View;
+use super::schedule;
 use super::snapshot_tree::{self, BranchKeyTable};
 use super::{SCENARIOS, scenario_view_fn};
 use crate::snemu_diff;
@@ -94,6 +95,100 @@ fn record_shared_stream(
             }
         }
     }
+}
+
+/// One node of the audit pipeline's dependency graph (increment 3), scheduled by
+/// [`schedule::run_scheduled`]. Per workload: `Boot` → {`Shared` stream, `Fork`
+/// nodes} → `Scenario`s. Producers write their output into a shared store keyed by
+/// workload; the precedence guarantees a consumer's inputs exist by the time it runs.
+enum PipelineTask<'a> {
+    /// Boot this workload to the checkpoint → its post-boot snapshot.
+    Boot(Option<&'a str>),
+    /// Record this workload's shared forward stream to the given depth (collapse).
+    Shared(Option<&'a str>, u64),
+    /// Materialise this workload's pre-injection fork nodes at the given instrets.
+    Fork(Option<&'a str>, Vec<u64>),
+    /// Judge this scenario (original index + descriptor).
+    Scenario(usize, &'a itest_harness::Scenario),
+}
+
+/// Rough, uniform bottom-level weight for a boot task (guest instret). Boots are
+/// roughly equal, so this cancels in relative ordering — the scenario subtree beneath
+/// each boot is what actually distinguishes their priorities.
+const BOOT_WEIGHT: f64 = 5_000_000.0;
+
+/// The shared post-boot snapshot store: workload → `Arc<Result<Machine>>`. `Arc` so a
+/// consumer clones the handle under the lock, then deep-copies the machine *outside*
+/// it (the deep copy is the expensive part). `Err` marks a workload that never
+/// reached the checkpoint.
+type SnapStore<'a> = Mutex<
+    std::collections::HashMap<Option<&'a str>, std::sync::Arc<Result<snemu::machine::Machine, String>>>,
+>;
+
+/// The shared collapse-stream store: workload → `Arc` of its recorded
+/// `(emit_instret, frame)` forward run, read by that workload's collapsed scenarios.
+type StreamStore<'a> = Mutex<
+    std::collections::HashMap<Option<&'a str>, std::sync::Arc<Vec<(u64, protocol::stream::OwnedFrame)>>>,
+>;
+
+/// The shared fork-node store: workload → `Arc` of `first_injection_instret →
+/// (pre-injection Machine, its state hash)`, read by that workload's interactive
+/// scenarios.
+type ForkStore<'a> = Mutex<
+    std::collections::HashMap<Option<&'a str>, std::sync::Arc<std::collections::HashMap<u64, (snemu::machine::Machine, u64)>>>,
+>;
+
+/// Read a workload's post-boot snapshot from the store and deep-clone a fresh machine
+/// to run, or `None` if it never booted. The store lock is held only to clone the
+/// `Arc`; the machine copy happens after it's released.
+fn read_snapshot<'a>(store: &SnapStore<'a>, workload: Option<&'a str>) -> Option<snemu::machine::Machine> {
+    let arc = store.lock().expect("snapshot store").get(&workload).cloned();
+    match arc.as_deref() {
+        Some(Ok(machine)) => Some(machine.clone()),
+        _ => None,
+    }
+}
+
+/// Memoised **bottom-level** of node `i`: its own weight plus the longest
+/// estimated-instret chain of successors beneath it. This is the list-scheduling
+/// priority — the deepest root-to-leaf chain (the makespan floor) launches first.
+fn bottom_level(i: usize, weights: &[f64], successors: &[Vec<usize>], memo: &mut [f64]) -> f64 {
+    if !memo[i].is_nan() {
+        return memo[i];
+    }
+    let mut best = 0.0f64;
+    for &j in &successors[i] {
+        best = best.max(bottom_level(j, weights, successors, memo));
+    }
+    let value = weights[i] + best;
+    memo[i] = value;
+    value
+}
+
+/// Push one timeline span onto the shared segment list (a `boot`/`shared`/`fork`
+/// setup span or a `scenario` span), for the packing counterfactual + `viz/` renderer.
+#[allow(clippy::too_many_arguments, reason = "a flat timeline record; a struct here would just be unpacked at the call")]
+fn push_segment(
+    segments: &Mutex<Vec<Segment>>,
+    kind: &'static str,
+    name: &str,
+    workload: Option<&str>,
+    worker: usize,
+    start_s: f64,
+    end_s: f64,
+    instret: u64,
+    pass: bool,
+) {
+    segments.lock().expect("segments mutex").push(Segment {
+        kind,
+        name: name.to_owned(),
+        workload: workload.map(str::to_owned),
+        worker,
+        start_s,
+        end_s,
+        instret,
+        pass,
+    });
 }
 
 /// Advance a workload's post-boot snapshot forward to exactly `target` guest
@@ -294,197 +389,143 @@ pub fn run(
             distinct.push(s.workload);
         }
     }
-    let booted = parallel_map(&distinct, jobs, |worker, _, &workload| {
-        let start_s = started.elapsed().as_secs_f64();
-        let boot_start = Instant::now();
-        let snapshot =
-            boot_snapshot(&kernel, &dtb, workload, idle_skip, native_ops, block_jit, reg_cache);
-        worker_busy[worker].fetch_add(boot_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        let boot_instret = snapshot.as_ref().map_or(0, |(_, n)| *n);
-        segments.lock().expect("segments mutex").push(Segment {
-            kind: "boot",
-            name: workload.unwrap_or("(default)").to_owned(),
-            workload: workload.map(str::to_owned),
-            worker,
-            start_s,
-            end_s: started.elapsed().as_secs_f64(),
-            instret: boot_instret,
-            pass: true,
-        });
-        (workload, snapshot.map(|(m, _)| m), boot_instret)
-    });
-    let boot_instret: u64 = booted.iter().map(|(_, _, n)| *n).sum();
-    let snapshots: std::collections::HashMap<Option<&str>, Result<snemu::machine::Machine, String>> =
-        booted.into_iter().map(|(w, snap, _)| (w, snap)).collect();
-
-    // Phase 2 — scenario-level fan-out. This is what fixes the packing: because the
-    // snapshot is shared, each *scenario* (not each workload group) is an
-    // independent unit of work, so a workload's scenarios spread across all workers
-    // instead of stacking on one. LPT order (heaviest first, by the previous run's
-    // wall-time or instret per `--order`) keeps a slow scenario off the tail;
-    // unknowns sort first. `--order selection` keeps selection order (the A/B baseline).
+    // Ordering key retained for the packing counterfactual + progress display; the
+    // scheduler itself orders by bottom-level priority below.
     let history = load_durations();
     let mut sched: Vec<(usize, &itest_harness::Scenario)> = work.iter().copied().enumerate().collect();
     if order != PackOrder::Selection {
-        // Order key: prior wall-microseconds (the true target) or prior instret
-        // (deterministic). An unknown scenario sorts heaviest so a first-seen slow
-        // one doesn't land on the tail.
         let key = |c: &PackCost| if order == PackOrder::Instret { c.0 } else { c.1 };
         let heaviest = history.values().map(key).max().unwrap_or(u64::MAX);
-        sched.sort_by_key(|(_, s)| {
-            std::cmp::Reverse(history.get(s.name).map_or(heaviest, &key))
-        });
+        sched.sort_by_key(|(_, s)| std::cmp::Reverse(history.get(s.name).map_or(heaviest, &key)));
     }
 
-    // Zero-input collapse (`--share-snapshots`, off by default — the A/B baseline).
-    // A workload's observe-only scenarios (empty branch key, learned from the prior
-    // run's persisted keys) share ONE forward run instead of each re-executing the
-    // identical deterministic guest. The first run has no keys → nothing collapses
-    // (that pass IS the discovery), and it records keys for next time. A collapsed
-    // scenario needs no forked machine — it replays a budget-truncated prefix of its
-    // workload's shared stream, verdict-identical to the live path.
+    // Zero-input collapse + fork-node sharing classification (`--share-snapshots`, off
+    // by default). Boot-independent predicates over the *prior* run's persisted keys;
+    // the runtime dispatch re-checks that the boot actually succeeded.
     let prior_keys = if share_snapshots { load_prior_keys(&kernel) } else { BranchKeyTable::new() };
-    let collapsible = |name: &str, workload: Option<&str>| {
-        share_snapshots
-            && matches!(snapshots.get(&workload), Some(Ok(_)))
-            && prior_keys.get(name).is_some_and(snapshot_tree::BranchKey::is_observe_only)
+    let would_collapse = |name: &str| {
+        share_snapshots && prior_keys.get(name).is_some_and(snapshot_tree::BranchKey::is_observe_only)
     };
-
-    // Depth each collapse workload's shared run must reach: the deepest instret any
-    // of its observe-only scenarios needed last run (fallback: its budget cap). Run
-    // that far once and every observer's frame is present; each then truncates to
-    // its own budget on replay.
+    let fork_instret = |name: &str| -> Option<u64> {
+        share_snapshots
+            .then(|| prior_keys.get(name))
+            .flatten()
+            .and_then(snapshot_tree::BranchKey::first_injection_instret)
+    };
+    // Per-workload shared-run depth (deepest observer's prior instret; budget cap
+    // fallback) and fork instrets — both from the cache, no boot needed.
     let mut depths: std::collections::HashMap<Option<&str>, u64> = std::collections::HashMap::new();
+    let mut fork_points: std::collections::HashMap<Option<&str>, std::collections::BTreeSet<u64>> =
+        std::collections::HashMap::new();
     for (_, s) in &sched {
-        if collapsible(s.name, s.workload) {
+        if would_collapse(s.name) {
             let need = history.get(s.name).map_or_else(|| budget_for(s.name, max_steps), |c| c.0);
             let slot = depths.entry(s.workload).or_insert(0);
             *slot = (*slot).max(need);
         }
-    }
-    let collapse_workloads: Vec<(Option<&str>, u64)> = depths.into_iter().collect();
-    let shared_streams: std::collections::HashMap<Option<&str>, Vec<(u64, protocol::stream::OwnedFrame)>> =
-        parallel_map(&collapse_workloads, jobs, |worker, _, &(workload, depth)| {
-            let start_s = started.elapsed().as_secs_f64();
-            let t0 = Instant::now();
-            let stream = match snapshots.get(&workload) {
-                Some(Ok(snapshot)) => record_shared_stream(snapshot.clone(), depth),
-                _ => Vec::new(),
-            };
-            worker_busy[worker].fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            let pass_instret = stream.last().map_or(0, |(i, _)| *i);
-            segments.lock().expect("segments mutex").push(Segment {
-                kind: "shared",
-                name: workload.unwrap_or("(default)").to_owned(),
-                workload: workload.map(str::to_owned),
-                worker,
-                start_s,
-                end_s: started.elapsed().as_secs_f64(),
-                instret: pass_instret,
-                pass: true,
-            });
-            (workload, stream)
-        })
-        .into_iter()
-        .collect();
-
-    // Input-prefix tree (increment 2). An *interactive* scenario can't replay a
-    // recorded stream (its result frames depend on the input it feeds), but it still
-    // shares the deterministic execution from boot up to its first injection with
-    // every sibling on the same workload whose first injection lands at the same
-    // instret. Materialise that shared **pre-injection fork node** once and clone it
-    // per child — the child's body then re-runs boot→injection as already-buffered
-    // frame waits (no stepping) and injects from the shared state. `fork_instret`
-    // reads the *prior* run's key, so nothing forks on the first (discovery) run.
-    let fork_instret = |name: &str| -> Option<u64> {
-        share_snapshots.then(|| prior_keys.get(name)).flatten().and_then(
-            snapshot_tree::BranchKey::first_injection_instret,
-        )
-    };
-    let mut fork_points: std::collections::HashMap<Option<&str>, std::collections::BTreeSet<u64>> =
-        std::collections::HashMap::new();
-    for (_, s) in &sched {
-        if let Some(inst) = fork_instret(s.name)
-            && matches!(snapshots.get(&s.workload), Some(Ok(_)))
-        {
+        if let Some(inst) = fork_instret(s.name) {
             fork_points.entry(s.workload).or_default().insert(inst);
         }
     }
-    let fork_work: Vec<(Option<&str>, Vec<u64>)> = fork_points
-        .into_iter()
-        .map(|(workload, set)| (workload, set.into_iter().collect()))
-        .collect();
-    // Each fork node carries its `state_hash` so a scenario can verify, before
-    // forking it, that the node is the exact state it coincides at (`(Machine, hash)`).
-    let fork_nodes: std::collections::HashMap<Option<&str>, std::collections::HashMap<u64, (snemu::machine::Machine, u64)>> =
-        parallel_map(&fork_work, jobs, |worker, _, (workload, instrets)| {
-            let start_s = started.elapsed().as_secs_f64();
-            let t0 = Instant::now();
-            let mut nodes = std::collections::HashMap::new();
-            if let Some(Ok(snapshot)) = snapshots.get(workload) {
-                // `instrets` is sorted ascending, so advancing one machine through
-                // them in order materialises each node from the previous — the deeper
-                // fork points reuse the shallower run rather than restarting from boot.
-                let mut machine = snapshot.clone();
-                for &inst in instrets {
-                    machine = advance_machine_to(machine, inst);
-                    let hash = machine.state_hash();
-                    nodes.insert(inst, (machine.clone(), hash));
-                }
-            }
-            worker_busy[worker].fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            segments.lock().expect("segments mutex").push(Segment {
-                kind: "fork",
-                name: workload.unwrap_or("(default)").to_owned(),
-                workload: workload.map(str::to_owned),
-                worker,
-                start_s,
-                end_s: started.elapsed().as_secs_f64(),
-                instret: instrets.last().copied().unwrap_or(0),
-                pass: true,
-            });
-            (*workload, nodes)
-        })
-        .into_iter()
+
+    // Build the pipeline task graph (increment 3). The audit is a forest of
+    // per-workload pipelines — boot → {shared stream, fork nodes} → scenarios — and
+    // running those as four global barriers strands workers while the slowest
+    // workload boots. Instead, schedule the whole graph with critical-path
+    // (bottom-level) priorities: as each workload boots, its scenarios become ready
+    // and fan out while other workloads are still booting.
+    let mut kinds: Vec<PipelineTask> = Vec::new();
+    let mut deps_of: Vec<Vec<usize>> = Vec::new();
+    let mut weights: Vec<f64> = Vec::new();
+    let mut boot_idx: std::collections::HashMap<Option<&str>, usize> = std::collections::HashMap::new();
+    for &workload in &distinct {
+        boot_idx.insert(workload, kinds.len());
+        kinds.push(PipelineTask::Boot(workload));
+        deps_of.push(Vec::new());
+        weights.push(BOOT_WEIGHT);
+    }
+    let mut shared_idx: std::collections::HashMap<Option<&str>, usize> = std::collections::HashMap::new();
+    for (&workload, &depth) in &depths {
+        shared_idx.insert(workload, kinds.len());
+        kinds.push(PipelineTask::Shared(workload, depth));
+        deps_of.push(vec![boot_idx[&workload]]);
+        weights.push(depth as f64);
+    }
+    let mut fork_idx: std::collections::HashMap<Option<&str>, usize> = std::collections::HashMap::new();
+    for (&workload, insts) in &fork_points {
+        let list: Vec<u64> = insts.iter().copied().collect();
+        let weight = list.last().copied().unwrap_or(0) as f64;
+        fork_idx.insert(workload, kinds.len());
+        kinds.push(PipelineTask::Fork(workload, list));
+        deps_of.push(vec![boot_idx[&workload]]);
+        weights.push(weight);
+    }
+    for &(index, s) in &sched {
+        let dep = if would_collapse(s.name) {
+            shared_idx[&s.workload]
+        } else if fork_instret(s.name).is_some() {
+            fork_idx[&s.workload]
+        } else {
+            boot_idx[&s.workload]
+        };
+        // Unknown scenario ⇒ heaviest, so a first-seen slow one launches early (as LPT does).
+        let weight = history.get(s.name).map_or(u64::MAX, |c| c.0) as f64;
+        kinds.push(PipelineTask::Scenario(index, s));
+        deps_of.push(vec![dep]);
+        weights.push(weight);
+    }
+
+    // Bottom-level priority = the node's weight plus the longest chain of successors
+    // beneath it (memoised over the reverse edges) — Hu's level, weighted by instret.
+    let node_count = kinds.len();
+    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+    for (i, ds) in deps_of.iter().enumerate() {
+        for &d in ds {
+            successors[d].push(i);
+        }
+    }
+    let mut bottom = vec![f64::NAN; node_count];
+    for i in 0..node_count {
+        bottom_level(i, &weights, &successors, &mut bottom);
+    }
+    let nodes: Vec<schedule::Node> = (0..node_count)
+        .map(|i| schedule::Node { deps: deps_of[i].clone(), priority: bottom[i] })
         .collect();
 
-    // Phase 2 — scenario-level fan-out. This is what fixes the packing: because the
-    // snapshot is shared, each *scenario* (not each workload group) is an
-    // independent unit of work, so a workload's scenarios spread across all workers
-    // instead of stacking on one. LPT order (heaviest first, by the previous run's
-    // wall-time or instret per `--order`) keeps a slow scenario off the tail.
-    // Determinism leaks caught by the fork-point state hash: a materialised node
-    // whose hash disagrees with what the scenario recorded live is not the state the
-    // scenario coincides at, so the share is unsound — the scenario runs unshared
-    // instead (safe) and we count it.
+    // Shared stores the tasks read their deps' outputs from and write their own into;
+    // precedence guarantees a consumer's inputs exist by the time it runs.
+    let snap_store: SnapStore = Mutex::new(std::collections::HashMap::new());
+    let stream_store: StreamStore = Mutex::new(std::collections::HashMap::new());
+    let fork_store: ForkStore = Mutex::new(std::collections::HashMap::new());
+    let rows: Mutex<Vec<Option<Row>>> = Mutex::new((0..work.len()).map(|_| None).collect());
+    let boot_instret_acc = AtomicU64::new(0);
+    let done = AtomicUsize::new(0);
+    let fell_back = AtomicUsize::new(0);
     let unverified_shares = AtomicUsize::new(0);
 
-    // Run a scenario live against a real machine — preferring the shared
-    // pre-injection fork node (interactive scenarios sharing boot→first-injection),
-    // else the post-boot snapshot, else a fresh boot for an early-crash workload that
-    // never reached the checkpoint. Returns the full live measurement.
+    // Run a scenario live against a real machine — preferring its verified fork node
+    // (interactive prefix share), else the post-boot snapshot, else a fresh boot for a
+    // workload that never reached the checkpoint.
     let run_live = |s: &itest_harness::Scenario| -> (Outcome, u64, u64, snapshot_tree::BranchKey) {
-        // Use the fork node only if its content hash matches the scenario's recorded
-        // fork-point hash — the state-hash verification that makes the share sound. A
-        // mismatch (determinism leak, or a JIT/idle-skip boundary drift moving the
-        // node off the scenario's real injection state) drops to an unshared boot.
         let expected = prior_keys.get(s.name).and_then(snapshot_tree::BranchKey::fork_state_hash);
-        let forked = fork_instret(s.name)
-            .and_then(|inst| fork_nodes.get(&s.workload).and_then(|m| m.get(&inst)))
-            .and_then(|(machine, node_hash)| match expected {
-                Some(exp) if exp == *node_hash => Some(machine.clone()),
-                Some(_) => {
-                    unverified_shares.fetch_add(1, Ordering::Relaxed);
-                    None
-                }
-                // No recorded hash (older cache): can't verify, so don't share.
-                None => None,
-            });
+        let forked = fork_instret(s.name).and_then(|inst| {
+            let arc = fork_store.lock().expect("fork store").get(&s.workload).cloned();
+            arc.and_then(|nodes| nodes.get(&inst).map(|(m, h)| (m.clone(), *h)))
+        });
+        let forked = forked.and_then(|(machine, node_hash)| match expected {
+            // Fork the node only if its content hash matches the recorded fork-point
+            // state — the state-hash verification that makes the share sound.
+            Some(exp) if exp == node_hash => Some(machine),
+            Some(_) => {
+                unverified_shares.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            None => None,
+        });
         let machine = match forked {
             Some(m) => Some(m),
-            None => match snapshots.get(&s.workload) {
-                Some(Ok(snapshot)) => Some(snapshot.clone()),
-                _ => match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
+            None => read_snapshot(&snap_store, s.workload).or_else(|| {
+                match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
                     Ok(mut m) => {
                         m.set_idle_skip(idle_skip);
                         m.set_native_ops(native_ops);
@@ -493,8 +534,8 @@ pub fn run(
                         Some(m)
                     }
                     Err(_) => None,
-                },
-            },
+                }
+            }),
         };
         match machine {
             Some(m) => run_scenario(m, s, max_steps),
@@ -507,80 +548,112 @@ pub fn run(
         }
     };
 
-    let done = AtomicUsize::new(0);
-    let fell_back = AtomicUsize::new(0);
-    let scenario_results = parallel_map(&sched, jobs, |worker, _, &(index, s)| {
-        let scenario_start = Instant::now();
+    let dispatch = |worker: usize, task: usize| {
         let start_s = started.elapsed().as_secs_f64();
-        let (outcome, instret, ram_used_bytes, branch_key, collapsed) =
-            if let (true, Some(stream)) =
-                (collapsible(s.name, s.workload), shared_streams.get(&s.workload))
-            {
-                // Collapsed: replay the shared stream, no forked machine, no stepping.
-                match run_collapsed(stream, s, max_steps) {
-                    Outcome::Pass => {
-                        let key = prior_keys.get(s.name).cloned().unwrap_or_default();
-                        (Outcome::Pass, 0, 0, key, true)
-                    }
-                    // A collapsed *failure* is inconclusive: the shared stream's depth
-                    // (a hint from the prior run's instret) may simply be too short for
-                    // this scenario's assertion. Collapse is an optimisation, so fall
-                    // back to a live run for the authoritative verdict — self-healing,
-                    // since the live instret it records fixes the depth next run, and a
-                    // collapse can therefore never produce a false failure.
-                    Outcome::Fail { .. } => {
-                        fell_back.fetch_add(1, Ordering::Relaxed);
-                        let (outcome, instret, ram, key) = run_live(s);
-                        (outcome, instret, ram, key, false)
+        let t0 = Instant::now();
+        match &kinds[task] {
+            PipelineTask::Boot(workload) => {
+                let snapshot =
+                    boot_snapshot(&kernel, &dtb, *workload, idle_skip, native_ops, block_jit, reg_cache);
+                let (machine, boot_instret) = match snapshot {
+                    Ok((m, n)) => (Ok(m), n),
+                    Err(e) => (Err(e), 0),
+                };
+                boot_instret_acc.fetch_add(boot_instret, Ordering::Relaxed);
+                snap_store
+                    .lock()
+                    .expect("snapshot store")
+                    .insert(*workload, std::sync::Arc::new(machine));
+                push_segment(&segments, "boot", workload.unwrap_or("(default)"), *workload, worker, start_s, started.elapsed().as_secs_f64(), boot_instret, true);
+            }
+            PipelineTask::Shared(workload, depth) => {
+                let stream = match read_snapshot(&snap_store, *workload) {
+                    Some(m) => record_shared_stream(m, *depth),
+                    None => Vec::new(),
+                };
+                let pass_instret = stream.last().map_or(0, |(i, _)| *i);
+                stream_store
+                    .lock()
+                    .expect("stream store")
+                    .insert(*workload, std::sync::Arc::new(stream));
+                push_segment(&segments, "shared", workload.unwrap_or("(default)"), *workload, worker, start_s, started.elapsed().as_secs_f64(), pass_instret, true);
+            }
+            PipelineTask::Fork(workload, instrets) => {
+                let mut nodes = std::collections::HashMap::new();
+                if let Some(mut machine) = read_snapshot(&snap_store, *workload) {
+                    for &inst in instrets {
+                        machine = advance_machine_to(machine, inst);
+                        let hash = machine.state_hash();
+                        nodes.insert(inst, (machine.clone(), hash));
                     }
                 }
-            } else {
-                let (outcome, instret, ram, key) = run_live(s);
-                (outcome, instret, ram, key, false)
-            };
-        worker_busy[worker].fetch_add(scenario_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        let wall = scenario_start.elapsed().as_secs_f64();
-        let pass = matches!(outcome, Outcome::Pass);
-        segments.lock().expect("segments mutex").push(Segment {
-            kind: "scenario",
-            name: s.name.to_owned(),
-            workload: s.workload.map(str::to_owned),
-            worker,
-            start_s,
-            end_s: started.elapsed().as_secs_f64(),
-            instret,
-            pass,
-        });
-        let n = done.fetch_add(1, Ordering::SeqCst) + 1;
-        eprintln!(
-            "snemu-itest: [{n:>3}/{cap}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s  {:>4}/{}MiB{}",
-            s.name,
-            if pass { "ok" } else { "FAIL" },
-            instret / 1_000_000,
-            ram_used_bytes / (1024 * 1024),
-            snemu_diff::ram_mb_for(s.workload),
-            if collapsed { "  (shared)" } else { "" },
-        );
-        let ram_alloc_mb = snemu_diff::ram_mb_for(s.workload);
-        (index, Row {
-            name: s.name,
-            outcome,
-            instret,
-            wall_s: wall,
-            ram_used_bytes,
-            ram_alloc_mb,
-            workload: s.workload,
-            branch_key,
-            collapsed,
-        })
-    });
+                fork_store
+                    .lock()
+                    .expect("fork store")
+                    .insert(*workload, std::sync::Arc::new(nodes));
+                push_segment(&segments, "fork", workload.unwrap_or("(default)"), *workload, worker, start_s, started.elapsed().as_secs_f64(), instrets.last().copied().unwrap_or(0), true);
+            }
+            PipelineTask::Scenario(index, s) => {
+                let snapshot_ok =
+                    matches!(snap_store.lock().expect("snapshot store").get(&s.workload).map(|a| a.is_ok()), Some(true));
+                let stream = if would_collapse(s.name) && snapshot_ok {
+                    stream_store.lock().expect("stream store").get(&s.workload).cloned()
+                } else {
+                    None
+                };
+                let (outcome, instret, ram_used_bytes, branch_key, collapsed) =
+                    if let Some(stream) = stream {
+                        // Collapsed: replay the budget-truncated shared stream. A
+                        // failure is inconclusive (depth hint too short) → fall back to
+                        // a live run for the authoritative verdict.
+                        match run_collapsed(&stream, s, max_steps) {
+                            Outcome::Pass => {
+                                let key = prior_keys.get(s.name).cloned().unwrap_or_default();
+                                (Outcome::Pass, 0, 0, key, true)
+                            }
+                            Outcome::Fail { .. } => {
+                                fell_back.fetch_add(1, Ordering::Relaxed);
+                                let (outcome, instret, ram, key) = run_live(s);
+                                (outcome, instret, ram, key, false)
+                            }
+                        }
+                    } else {
+                        let (outcome, instret, ram, key) = run_live(s);
+                        (outcome, instret, ram, key, false)
+                    };
+                let wall = t0.elapsed().as_secs_f64();
+                let pass = matches!(outcome, Outcome::Pass);
+                push_segment(&segments, "scenario", s.name, s.workload, worker, start_s, started.elapsed().as_secs_f64(), instret, pass);
+                let n = done.fetch_add(1, Ordering::SeqCst) + 1;
+                eprintln!(
+                    "snemu-itest: [{n:>3}/{cap}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s  {:>4}/{}MiB{}",
+                    s.name,
+                    if pass { "ok" } else { "FAIL" },
+                    instret / 1_000_000,
+                    ram_used_bytes / (1024 * 1024),
+                    snemu_diff::ram_mb_for(s.workload),
+                    if collapsed { "  (shared)" } else { "" },
+                );
+                rows.lock().expect("rows")[*index] = Some(Row {
+                    name: s.name,
+                    outcome,
+                    instret,
+                    wall_s: wall,
+                    ram_used_bytes,
+                    ram_alloc_mb: snemu_diff::ram_mb_for(s.workload),
+                    workload: s.workload,
+                    branch_key,
+                    collapsed,
+                });
+            }
+        }
+        worker_busy[worker].fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    };
 
-    // Restore selection order via each scenario's original index.
-    let mut rows: Vec<Option<Row>> = (0..work.len()).map(|_| None).collect();
-    for (index, row) in scenario_results {
-        rows[index] = Some(row);
-    }
-    let results: Vec<Row> = rows.into_iter().flatten().collect();
+    schedule::run_scheduled(&nodes, jobs, dispatch);
+
+    let results: Vec<Row> = rows.into_inner().expect("rows").into_iter().flatten().collect();
+    let boot_instret = boot_instret_acc.load(Ordering::Relaxed);
     let makespan = started.elapsed();
 
     let fallbacks = fell_back.load(Ordering::Relaxed);
@@ -1118,91 +1191,8 @@ fn console_tail(output: &str) -> String {
     lines[start..].join("\n")
 }
 
-/// Map `f` over `items` across `jobs` host threads, returning results in the
-/// **input order** regardless of the worker count. This is the audit's
-/// parallelism primitive: scenarios are independent (each owns its own snemu
-/// machine, no shared mutable state), so fanning them out across cores turns the
-/// single-threaded compute tail into wall-clock the number of cores divides —
-/// while the order-preserving slotting keeps the report deterministic, the
-/// property the whole snemu-vs-QEMU story rests on. `jobs <= 1` runs serially.
-/// The closure receives `(worker_id, item_index, &item)`: `worker_id` is the host
-/// thread (0..jobs) — surfaced so per-item progress can name the CPU thread it ran
-/// on — and `item_index` is the item's position in `items`.
-fn parallel_map<T, R, F>(items: &[T], jobs: usize, f: F) -> Vec<R>
-where
-    T: Sync,
-    R: Send,
-    F: Fn(usize, usize, &T) -> R + Sync,
-{
-    let jobs = jobs.max(1);
-    if jobs == 1 {
-        return items.iter().enumerate().map(|(i, t)| f(0, i, t)).collect();
-    }
-
-    let next = AtomicUsize::new(0);
-    let slots: Mutex<Vec<Option<R>>> =
-        Mutex::new((0..items.len()).map(|_| None).collect());
-
-    std::thread::scope(|scope| {
-        for worker in 0..jobs {
-            let f = &f;
-            let next = &next;
-            let slots = &slots;
-            scope.spawn(move || {
-                loop {
-                    let i = next.fetch_add(1, Ordering::SeqCst);
-                    let Some(item) = items.get(i) else { break };
-                    let result = f(worker, i, item);
-                    slots.lock().expect("slots mutex poisoned")[i] = Some(result);
-                }
-            });
-        }
-    });
-
-    slots
-        .into_inner()
-        .expect("slots mutex poisoned")
-        .into_iter()
-        .map(|slot| slot.expect("every slot filled: index range covers all items"))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::parallel_map;
-
-    #[test]
-    fn parallel_map_preserves_input_order_and_matches_serial_for_any_job_count() {
-        let items: Vec<u64> = (0..200).collect();
-        let square = |_: usize, _: usize, x: &u64| x * x;
-
-        let serial = parallel_map(&items, 1, square);
-        assert_eq!(serial, items.iter().map(|x| x * x).collect::<Vec<_>>());
-
-        for jobs in [2usize, 3, 8, 32] {
-            let parallel = parallel_map(&items, jobs, square);
-            assert_eq!(
-                parallel, serial,
-                "jobs={jobs}: results must match serial order and values",
-            );
-        }
-    }
-
-    #[test]
-    fn parallel_map_passes_the_input_index_to_the_closure() {
-        let items = vec!['a', 'b', 'c'];
-        let with_index = parallel_map(&items, 4, |_worker, i, c| (i, *c));
-        assert_eq!(with_index, vec![(0, 'a'), (1, 'b'), (2, 'c')]);
-    }
-
-    #[test]
-    fn parallel_map_reports_a_worker_id_below_the_job_count() {
-        let items: Vec<u64> = (0..64).collect();
-        let jobs = 4;
-        let workers = parallel_map(&items, jobs, |worker, _i, _x| worker);
-        assert!(workers.iter().all(|&w| w < jobs), "worker id stays in 0..jobs");
-    }
-
     #[test]
     fn packing_report_serializes_to_the_documented_json_schema() {
         use super::{PackingReport, Segment, WorkerStat};
