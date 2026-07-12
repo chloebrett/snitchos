@@ -374,12 +374,32 @@ deleteCharRange(state, row, lo, hi) = {
     Editor(..moved, col: clampedCol(moved, row))
 }
 
-// Delete the charwise range between the cursor and a motion `target` on the same
-// line. Backward motion → `[target, cursor)`; forward → `[cursor, target)`, extended
-// by one for an inclusive motion (`$`).
-deleteCharwise(state, target) =
-    target.col < state.col => deleteCharRange(state, state.row, target.col, state.col)
-    | deleteCharRange(state, state.row, state.col, (target.inclusive => target.col + 1 | target.col))
+// The half-open charwise column range `[lo, hi)` between the cursor and a motion
+// `target` on the same line. Backward → `[target, cursor)`; forward → `[cursor,
+// target)`, extended by one for an inclusive motion (`$`).
+charLo(state, target) = target.col < state.col => target.col | state.col
+charHi(state, target) = target.col < state.col => state.col | (target.inclusive => target.col + 1 | target.col)
+
+// Delete that charwise range on the cursor's line.
+deleteCharwise(state, target) = deleteCharRange(state, state.row, charLo(state, target), charHi(state, target))
+
+// The text of the charwise range (clamped to the line).
+charRangeText(state, target) = {
+    let line = lineAt(state, state.row)
+    let len = Str.length(line)
+    let a = charLo(state, target)
+    let b = charHi(state, target)
+    let a2 = a < 0 => 0 | (a > len => len | a)
+    let b2 = b < 0 => 0 | (b > len => len | b)
+    Str.slice(line, a2, b2)
+}
+
+// The text of whole lines `[lo, hi]` joined by newlines (recursive).
+joinLinesRange(state, lo, hi) = match {
+    lo > hi => ""
+    lo == hi => lineAt(state, lo)
+    _ => lineAt(state, lo) + "\n" + joinLinesRange(state, lo + 1, hi)
+}
 
 // The telemetry span name for an operator.
 opSpanName(op) = match {
@@ -399,11 +419,44 @@ deleteRange(state, target) = match target.wise {
         | deleteLines(state, (target.row < state.row => target.row | state.row), (target.row < state.row => state.row | target.row))
 }
 
+// The lo/hi whole-line bounds of a linewise motion (min/max of the two rows).
+lineLo(state, target) = target.row < state.row => target.row | state.row
+lineHi(state, target) = target.row < state.row => state.row | target.row
+
+// Yank the range from the cursor to a motion `target` into the unnamed register,
+// without editing the buffer. Charwise = the intra-line span; linewise = whole lines.
+// An unmoved linewise motion selects nothing (like delete).
+yankRange(state, target) = match target.wise {
+    Charwise => Editor(..state, clipboard: Register(text: charRangeText(state, target), wise: Charwise))
+    Linewise =>
+        target.row == state.row => state
+        | Editor(..state, clipboard: Register(text: joinLinesRange(state, lineLo(state, target), lineHi(state, target)), wise: Linewise))
+}
+
+// Replace whole lines `[lo, hi]` with a single empty line and enter Insert at its
+// start — the linewise change (`cc`/`cj`). Unlike delete, it KEEPS a line.
+changeLines(state, lo, hi) = {
+    let removed = removeLinesFrom(state.lines, lo, hi - lo + 1)
+    Editor(..state, lines: List.insert(removed, lo, ""), row: lo, col: 0, mode: Insert)
+}
+
+// Change the range from the cursor to a motion `target`: charwise = delete the span
+// then enter Insert; linewise = blank the lines then enter Insert. An unmoved
+// linewise motion changes nothing.
+changeRange(state, target) = match target.wise {
+    Charwise => enterInsert(deleteCharwise(state, target))
+    Linewise =>
+        target.row == state.row => state
+        | changeLines(state, lineLo(state, target), lineHi(state, target))
+}
+
 // Apply the pending operator over the range from the cursor to a motion `target`.
-// P2.3–2.5: delete only (charwise + linewise). `c`/`y` extend this in 2.6.
-applyMotionOp(state, target) =
-    state.pending.op == OpDelete => deleteRange(state, target)
-    | state
+applyMotionOp(state, target) = match state.pending.op {
+    OpDelete => deleteRange(state, target)
+    OpChange => changeRange(state, target)
+    OpYank => yankRange(state, target)
+    _ => state
+}
 
 // Remove `n` whole lines starting at `lo` from `lines` (tail-recursive).
 removeLinesFrom(lines, lo, n) =
@@ -428,11 +481,17 @@ isSameOp(op, key) = match {
     _ => false
 }
 
+// Yank the current line into the unnamed register, linewise (`yy` / `Y`).
+yankLine(state) = Editor(..state, clipboard: Register(text: lineAt(state, state.row), wise: Linewise))
+
 // The doubled operator (`dd`/`cc`/`yy`): apply the pending operator linewise to the
-// current line. P2.4: delete only; `cc`/`yy` extend this in 2.6.
-applyLinewiseSelf(state) =
-    state.pending.op == OpDelete => editIfChanged(clearPending(state), clearPending(deleteLines(state, state.row, state.row)), opSpanName(state.pending.op))
-    | redraw(clearPending(state))
+// current line. dd removes it; cc blanks-and-inserts (keeps the line); yy copies it.
+applyLinewiseSelf(state) = match state.pending.op {
+    OpDelete => editIfChanged(clearPending(state), clearPending(deleteLines(state, state.row, state.row)), "stim.delete")
+    OpChange => edit(clearPending(changeLines(state, state.row, state.row)), "stim.change")
+    OpYank => editIfChanged(clearPending(state), clearPending(yankLine(state)), "stim.yank")
+    _ => redraw(clearPending(state))
+}
 
 // Normal mode dispatch: at the top level (no pending operator) route to the flat
 // table; while operator-pending (`pending.op != OpNone`) route to the operator
@@ -469,6 +528,7 @@ stepTopLevel(state, key) = match {
     key == "D" => editIfChanged(state, deleteToEol(state), "stim.delete-to-eol")
     key == "C" => edit(changeToEol(state), "stim.change-to-eol")
     key == "s" => edit(substitute(state), "stim.substitute")
+    key == "Y" => editIfChanged(state, yankLine(state), "stim.yank")
     key == "r" => redraw(enterReplace(state))
     key == "d" => redraw(enterOp(state, OpDelete))
     key == "c" => redraw(enterOp(state, OpChange))

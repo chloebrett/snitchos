@@ -57,6 +57,18 @@ fn motion_wise(setup: &str, key: &str) -> Value {
     ))
 }
 
+/// The unnamed register's text of the `Editor` that `setup` evaluates to.
+fn clipboard_text(setup: &str) -> Value {
+    fsm(&format!("{{ let s = {setup}  let t = s.clipboard.text  t }}"))
+}
+
+/// The unnamed register's wiseness name ("Charwise"/"Linewise").
+fn clipboard_wise(setup: &str) -> Value {
+    fsm(&format!(
+        r#"{{ let s = {setup}  match s.clipboard.wise {{ Charwise => "Charwise"  Linewise => "Linewise" }} }}"#
+    ))
+}
+
 /// The name of the pending operator of the `Editor` that `setup` evaluates to.
 fn pending_op_of(setup: &str) -> Value {
     fsm(&format!(
@@ -481,6 +493,60 @@ fn d_plus_a_linewise_motion_deletes_a_range_of_lines() {
         pending_op_of(r#"step(Editor(..initialState("a\nb"), row: 1, pending: Pending(op: OpDelete)), "j").state"#),
         s("None")
     );
+}
+
+#[test]
+fn c_changes_a_range_and_enters_insert() {
+    // c$ deletes to end-of-line and enters Insert (charwise change) — like C.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpChange)), "$").state"#),
+        line_and_col("a", 1)
+    );
+    assert_eq!(
+        step_mode(r#"Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpChange))"#, "$"),
+        s("Insert")
+    );
+    // cc clears the whole line to empty and enters Insert — it KEEPS the line (unlike
+    // dd, which removes it).
+    assert_eq!(
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpChange)), "c").state"#),
+        buffer(&["a", "", "c"], 1, 0)
+    );
+    assert_eq!(
+        step_mode(r#"Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpChange))"#, "c"),
+        s("Insert")
+    );
+    assert_eq!(
+        step_effect(r#"Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpChange))"#, "$"),
+        s("Edit")
+    );
+}
+
+#[test]
+fn y_yanks_a_range_into_the_clipboard_without_deleting() {
+    // yy yanks the whole line, linewise — the buffer is untouched.
+    let yy = r#"step(Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpYank)), "y").state"#;
+    assert_eq!(lines_row_col(yy), buffer(&["a", "b", "c"], 1, 0));
+    assert_eq!(clipboard_text(yy), s("b"));
+    assert_eq!(clipboard_wise(yy), s("Linewise"));
+    // y$ yanks a charwise span (cursor..end) without deleting.
+    let ydollar = r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpYank)), "$").state"#;
+    assert_eq!(clipboard_text(ydollar), s("bcd"));
+    assert_eq!(clipboard_wise(ydollar), s("Charwise"));
+    // Yank is observable (a copy is a span) but does not edit the buffer.
+    assert_eq!(
+        step_effect(r#"Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpYank))"#, "y"),
+        s("Edit")
+    );
+}
+
+#[test]
+fn capital_y_yanks_the_current_line() {
+    // Y = yy: yank the whole current line, linewise, with no buffer change.
+    let cap_y = r#"step(Editor(..initialState("a\nb"), row: 0), "Y").state"#;
+    assert_eq!(clipboard_text(cap_y), s("a"));
+    assert_eq!(clipboard_wise(cap_y), s("Linewise"));
+    assert_eq!(lines_row_col(cap_y), buffer(&["a", "b"], 0, 0));
 }
 
 #[test]
