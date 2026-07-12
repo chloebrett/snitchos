@@ -64,8 +64,16 @@ enum Ty {
   error outside an `on`/`contract` method).
 - **Stage 4 — generics + local inference.** `Ty::Var`, instantiation of `Maybe<T>` etc.,
   bound checking (`T: Drawable`), the monomorphisation-relevant checks.
-- **Stage 5 — contract subtyping.** `render(d: Drawable)` accepts any conforming type;
-  `consistent` grows a subtype arm driven by the conformance table.
+- **Stage 5 — contract subtyping — ✅ DONE (2026-07-12).** Two cycles: **(A)** declared
+  `prod`/`sum`/`contract` names in annotations resolve to `Named` (via `collect_type_names`
+  threaded into `ty_of_annotation`; unknown names stay `Dyn`) — so `f() -> Point = "x"`
+  is now caught; **(B)** `check` uses `assignable(got, expected)` = `consistent` **or**
+  `subtype`, where `subtype` consults `collect_conformances` (every `on T : C`). A
+  `Circle` is accepted where a `Drawable` is expected iff `on Circle : Drawable`;
+  directional (not vice-versa). 603 lib + all integration green — **zero false positives**
+  from resolving user type names. Mutation 74 → 61 caught / 13 unviable / 0 survivors.
+  (Method-body checking — `on`/`contract` methods — still deferred; only `Func` bodies
+  are checked.)
 - **Stage 6 — capabilities as effects.** Lift `uses` from the runtime gate to a static
   effect check: a body performing an effect must be under a declared/inherited `uses`.
   The headline feature; the runtime gate becomes a backstop.

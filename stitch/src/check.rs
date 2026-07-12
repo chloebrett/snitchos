@@ -12,7 +12,7 @@
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{BinOp, Field, Type};
 use crate::core_ir::{CoreArg, CoreExpr, CoreExprKind, CoreItem};
@@ -88,6 +88,9 @@ struct FnSig {
 struct Ctx<'a> {
     ctors: &'a BTreeMap<String, Ctor>,
     funcs: &'a BTreeMap<String, FnSig>,
+    /// Each declared type → the contracts it conforms to (`on T : C`), for
+    /// subtyping: a `T` value is accepted where a conformed-to `C` is expected.
+    conformances: &'a BTreeMap<String, BTreeSet<String>>,
     locals: TyEnv,
 }
 
@@ -234,7 +237,7 @@ fn synth_call(
 /// rules (e.g. a lambda against a function type) arrive with later constructs.
 fn check(expr: &CoreExpr, expected: &Ty, ctx: &Ctx, errors: &mut Vec<TypeError>) {
     let got = synth(expr, ctx, errors);
-    if !consistent(&got, expected) {
+    if !assignable(&got, expected, ctx.conformances) {
         errors.push(TypeError {
             message: format!("type mismatch: expected `{expected:?}`, found `{got:?}`"),
             span: expr.span,
@@ -242,58 +245,107 @@ fn check(expr: &CoreExpr, expected: &Ty, ctx: &Ctx, errors: &mut Vec<TypeError>)
     }
 }
 
+/// Whether a value of type `got` can be used where `expected` is wanted:
+/// *consistent* (gradual/equal) **or** a subtype of it (contract conformance).
+/// Assignability is directional — a `Circle` is a `Drawable`, not vice versa.
+#[must_use]
+fn assignable(got: &Ty, expected: &Ty, conformances: &BTreeMap<String, BTreeSet<String>>) -> bool {
+    consistent(got, expected) || subtype(got, expected, conformances)
+}
+
+/// Whether `sub` is a nominal subtype of `sup`: a declared type conforms to the
+/// expected contract (`on Sub : Sup`).
+#[must_use]
+fn subtype(sub: &Ty, sup: &Ty, conformances: &BTreeMap<String, BTreeSet<String>>) -> bool {
+    let (Ty::Named { name: sub, .. }, Ty::Named { name: sup, .. }) = (sub, sup) else {
+        return false;
+    };
+    conformances.get(sub).is_some_and(|contracts| contracts.contains(sup))
+}
+
 /// Whether two types are *consistent* (gradual `~`): `Dyn` matches anything in
 /// either direction; otherwise types must be equal. Structural equality (derived
-/// on [`Ty`]) covers `Named`/`Tuple`/`Func` for free. Contract subtyping extends
-/// this with a subtype arm in a later stage.
+/// on [`Ty`]) covers `Named`/`Tuple`/`Func` for free. Subtyping is layered on top
+/// by [`assignable`].
 #[must_use]
 fn consistent(a: &Ty, b: &Ty) -> bool {
     matches!(a, Ty::Dyn) || matches!(b, Ty::Dyn) || a == b
 }
 
 /// Convert a surface type annotation into a [`Ty`], canonicalising the primitive
-/// names. Type names the checker doesn't track yet — user types, function/tuple
-/// annotations — become `Dyn` (gradual, hence unchecked) until a later stage
-/// teaches the checker to resolve them.
+/// names and resolving names of `types` (the program's declared `prod`/`sum`/
+/// `contract`) to nominal `Named` types. Anything else — unknown names (generics,
+/// builtins, typos) and function/tuple annotations — stays `Dyn` (gradual).
 #[must_use]
-fn ty_of_annotation(ann: &Type) -> Ty {
+fn ty_of_annotation(ann: &Type, types: &BTreeSet<String>) -> Ty {
     match ann {
         Type::Name { name, .. } => match name.as_str() {
             "Int" => Ty::Int,
             "Float" => Ty::Float,
             "Bool" => Ty::Bool,
             "Str" => Ty::Str,
+            other if types.contains(other) => Ty::Named { name: name.clone(), args: Vec::new() },
             _ => Ty::Dyn,
         },
         _ => Ty::Dyn,
     }
 }
 
+/// Each declared type → the set of contracts it conforms to, from every
+/// `on Type : Contract` block.
+fn collect_conformances(items: &[CoreItem]) -> BTreeMap<String, BTreeSet<String>> {
+    let mut conformances: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for item in items {
+        if let CoreItem::On {
+            target: Type::Name { name: type_name, .. },
+            contract: Some(Type::Name { name: contract_name, .. }),
+            ..
+        } = item
+        {
+            conformances.entry(type_name.clone()).or_default().insert(contract_name.clone());
+        }
+    }
+    conformances
+}
+
+/// The names of every declared type — `prod`, `sum`, `contract`.
+fn collect_type_names(items: &[CoreItem]) -> BTreeSet<String> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            CoreItem::Prod { name, .. }
+            | CoreItem::Sum { name, .. }
+            | CoreItem::Contract { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The field types of a constructor, in declaration order.
-fn field_tys(fields: &[Field]) -> Vec<FieldTy> {
+fn field_tys(fields: &[Field], types: &BTreeSet<String>) -> Vec<FieldTy> {
     fields
         .iter()
-        .map(|f| FieldTy { label: f.name.clone(), ty: ty_of_annotation(&f.ty) })
+        .map(|f| FieldTy { label: f.name.clone(), ty: ty_of_annotation(&f.ty, types) })
         .collect()
 }
 
 /// Index every declared constructor by name: a `prod`'s single constructor and
 /// each `sum` variant, mapped to its type name + field types.
-fn collect_ctors(items: &[CoreItem]) -> BTreeMap<String, Ctor> {
+fn collect_ctors(items: &[CoreItem], types: &BTreeSet<String>) -> BTreeMap<String, Ctor> {
     let mut ctors = BTreeMap::new();
     for item in items {
         match item {
             CoreItem::Prod { name, fields, .. } => {
                 ctors.insert(
                     name.clone(),
-                    Ctor { type_name: name.clone(), fields: field_tys(fields) },
+                    Ctor { type_name: name.clone(), fields: field_tys(fields, types) },
                 );
             }
             CoreItem::Sum { name, variants, .. } => {
                 for variant in variants {
                     ctors.insert(
                         variant.name.clone(),
-                        Ctor { type_name: name.clone(), fields: field_tys(&variant.fields) },
+                        Ctor { type_name: name.clone(), fields: field_tys(&variant.fields, types) },
                     );
                 }
             }
@@ -305,15 +357,15 @@ fn collect_ctors(items: &[CoreItem]) -> BTreeMap<String, Ctor> {
 
 /// Index every declared function by name → its parameter and return types
 /// (unannotated slots → `Dyn`).
-fn collect_funcs(items: &[CoreItem]) -> BTreeMap<String, FnSig> {
+fn collect_funcs(items: &[CoreItem], types: &BTreeSet<String>) -> BTreeMap<String, FnSig> {
     let mut funcs = BTreeMap::new();
     for item in items {
         if let CoreItem::Func { name, params, ret, .. } = item {
             let params = params
                 .iter()
-                .map(|p| p.ty.as_ref().map_or(Ty::Dyn, ty_of_annotation))
+                .map(|p| p.ty.as_ref().map_or(Ty::Dyn, |t| ty_of_annotation(t, types)))
                 .collect();
-            let ret = ret.as_ref().map_or(Ty::Dyn, ty_of_annotation);
+            let ret = ret.as_ref().map_or(Ty::Dyn, |t| ty_of_annotation(t, types));
             funcs.insert(name.clone(), FnSig { params, ret });
         }
     }
@@ -326,18 +378,20 @@ fn collect_funcs(items: &[CoreItem]) -> BTreeMap<String, FnSig> {
 /// and function signatures.
 #[must_use]
 pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
-    let ctors = collect_ctors(items);
-    let funcs = collect_funcs(items);
+    let types = collect_type_names(items);
+    let ctors = collect_ctors(items, &types);
+    let funcs = collect_funcs(items, &types);
+    let conformances = collect_conformances(items);
     let mut errors = Vec::new();
     for item in items {
         if let CoreItem::Func { params, ret, body, .. } = item {
             // Bind each parameter to its declared type (unannotated → `Dyn`).
             let locals: TyEnv = params
                 .iter()
-                .map(|p| (p.name.clone(), p.ty.as_ref().map_or(Ty::Dyn, ty_of_annotation)))
+                .map(|p| (p.name.clone(), p.ty.as_ref().map_or(Ty::Dyn, |t| ty_of_annotation(t, &types))))
                 .collect();
-            let ctx = Ctx { ctors: &ctors, funcs: &funcs, locals };
-            let expected = ret.as_ref().map_or(Ty::Dyn, ty_of_annotation);
+            let ctx = Ctx { ctors: &ctors, funcs: &funcs, conformances: &conformances, locals };
+            let expected = ret.as_ref().map_or(Ty::Dyn, |t| ty_of_annotation(t, &types));
             check(body, &expected, &ctx, &mut errors);
         }
     }
@@ -358,7 +412,13 @@ mod tests {
     fn ty(src: &str) -> Ty {
         let ctors = BTreeMap::new();
         let funcs = BTreeMap::new();
-        let ctx = Ctx { ctors: &ctors, funcs: &funcs, locals: TyEnv::new() };
+        let conformances = BTreeMap::new();
+        let ctx = Ctx {
+            ctors: &ctors,
+            funcs: &funcs,
+            conformances: &conformances,
+            locals: TyEnv::new(),
+        };
         super::synth(&core(src), &ctx, &mut Vec::new())
     }
 
@@ -530,5 +590,47 @@ mod tests {
         assert_eq!(errors("f() -> Int = 1 == 2").len(), 1, "== result Bool ≠ Int return");
         // A `Dyn` operand suppresses the error (gradual).
         assert!(errors("f(a) = a + 1").is_empty(), "Dyn operand → no error");
+    }
+
+    #[test]
+    fn a_declared_type_name_in_an_annotation_is_checked() {
+        // A user `prod`/`sum`/`contract` name resolves to a nominal type, so a
+        // return annotation of that type is checked.
+        assert_eq!(
+            errors(r#"prod Point(x: Int)  f() -> Point = "x""#).len(),
+            1,
+            "Str body ≠ Point return"
+        );
+        assert!(
+            errors("prod Point(x: Int)  f() -> Point = Point(1)").is_empty(),
+            "a Point body matches a Point return"
+        );
+        // An unknown type name stays gradual (`Dyn`).
+        assert!(
+            errors(r#"f() -> Unknown = "x""#).is_empty(),
+            "unknown type name → Dyn → clean"
+        );
+    }
+
+    #[test]
+    fn a_conforming_type_is_accepted_where_its_contract_is_expected() {
+        // `Circle` conforms to `Drawable` (`on Circle : Drawable`), so a `Circle`
+        // is accepted where a `Drawable` parameter is expected — subtyping.
+        let ok = concat!(
+            "contract Drawable { draw() -> Str }  ",
+            "prod Circle(r: Int)  ",
+            "on Circle : Drawable { draw() -> Str = \"o\" }  ",
+            "render(d: Drawable) -> Str = \"x\"  ",
+            "f() = render(Circle(1))",
+        );
+        assert!(errors(ok).is_empty(), "a Circle is a Drawable: {:?}", errors(ok));
+        // Without the conformance, a `Circle` is not a `Drawable`.
+        let bad = concat!(
+            "contract Drawable { draw() -> Str }  ",
+            "prod Circle(r: Int)  ",
+            "render(d: Drawable) -> Str = \"x\"  ",
+            "f() = render(Circle(1))",
+        );
+        assert_eq!(errors(bad).len(), 1, "a non-conforming Circle is rejected");
     }
 }
