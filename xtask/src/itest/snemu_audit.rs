@@ -332,7 +332,7 @@ pub fn run(
         let key = |c: &PackCost| if order == PackOrder::Instret { c.0 } else { c.1 };
         let heaviest = history.values().map(key).max().unwrap_or(u64::MAX);
         sched.sort_by_key(|(_, s)| {
-            std::cmp::Reverse(history.get(s.name).map_or(heaviest, |c| key(c)))
+            std::cmp::Reverse(history.get(s.name).map_or(heaviest, &key))
         });
     }
 
@@ -404,10 +404,10 @@ pub fn run(
     let mut fork_points: std::collections::HashMap<Option<&str>, std::collections::BTreeSet<u64>> =
         std::collections::HashMap::new();
     for (_, s) in &sched {
-        if let Some(inst) = fork_instret(s.name) {
-            if matches!(snapshots.get(&s.workload), Some(Ok(_))) {
-                fork_points.entry(s.workload).or_default().insert(inst);
-            }
+        if let Some(inst) = fork_instret(s.name)
+            && matches!(snapshots.get(&s.workload), Some(Ok(_)))
+        {
+            fork_points.entry(s.workload).or_default().insert(inst);
         }
     }
     let fork_work: Vec<(Option<&str>, Vec<u64>)> = fork_points
@@ -457,7 +457,7 @@ pub fn run(
     let run_live = |s: &itest_harness::Scenario| -> (Outcome, u64, u64, snapshot_tree::BranchKey) {
         let forked = fork_instret(s.name)
             .and_then(|inst| fork_nodes.get(&s.workload).and_then(|m| m.get(&inst)))
-            .map(Clone::clone);
+            .cloned();
         let machine = match forked {
             Some(m) => Some(m),
             None => match snapshots.get(&s.workload) {

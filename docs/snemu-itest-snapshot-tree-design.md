@@ -1,12 +1,24 @@
 # snemu itest — the discovered snapshot tree
 
-**Status:** increment 1 (zero-input collapse) **shipped**; increments 2–5 unbuilt.
+**Status:** increments 1–2 **shipped** (state-hash dedup deferred); 3–5 unbuilt.
 Behind `cargo xtask snemu-itest --share-snapshots` (off by default — the A/B
 baseline). On the full 111-scenario suite the collapse is verdict-identical to the
 fork-per-scenario path (the oracle), 99/111 scenarios collapse onto shared forward
 runs, and total guest instret drops **1479M → 275M (−81%)** (serial wall-clock
-25.2s → 19.9s). Pure core + tap in `xtask/src/itest/snapshot_tree.rs` +
-`harness.rs`; orchestration in `snemu_audit.rs`.
+25.2s → 19.9s). Increment 2 adds interactive **fork-node** sharing: the 7 `stitch-fs`
+and 3 `stitch-repl` scenarios each share one materialised pre-injection node. Pure
+core + tap in `xtask/src/itest/snapshot_tree.rs` + `harness.rs`; orchestration in
+`snemu_audit.rs`.
+
+**Correctness beyond the oracle — the self-healing fallback.** The collapse depth is
+a *hint* (the prior run's instret); a too-short shared stream would silently fail a
+positive scenario. Rather than trust the hint, a collapsed **failure** falls back to a
+live run for the authoritative verdict, records the true instret (curing the depth
+next run), and logs it. So collapse is a pure optimisation that **can never produce a
+false verdict** — proven by poisoning *every* depth to 500 K instret: 96 scenarios
+fell back to live and the suite still passed 111/111 identical to baseline, then the
+next run self-healed to full collapse. This is a different guard than the design's
+state-hash (which stays a follow-up for its determinism-regression value).
 **Prereq context:** [snemu progress], `xtask/src/itest/snemu_audit.rs` (the current
 boot-once/fork-per-scenario harness), the packing/right-sizing work in snemu post 08.
 
@@ -216,8 +228,24 @@ Both fall out of the same dirty-set, so build it once. (snemu already tracks a w
      (input-injecting) scenarios would stay live. Deferred — worth it once the input
      tree (increment 2) is in, since it's the same "record-once, replay-truncated"
      shape applied to a second output channel.
-2. **Input-prefix tree + state-hash dedup.** Generalise to shared prefixes among
-   interactive scenarios; verify shares by hash; persist + invalidate the tree.
+2. **Input-prefix tree + state-hash dedup.** ✅ **Fork-node sharing shipped**;
+   state-hash dedup deferred. Interactive scenarios can't replay a recorded stream
+   (their result frames depend on the input they feed), but they still share the
+   deterministic execution boot→first-injection with every sibling on the same
+   workload whose first injection lands at the same instret. That shared
+   **pre-injection fork node** is materialised once (`advance_machine_to`) and cloned
+   per child; the child's body re-runs boot→injection as already-buffered frame waits
+   (no stepping) and injects from the shared state. On this suite the tree is shallow
+   (scenarios diverge at their *first* injection, so no deeper prefixes), but the
+   `stitch-fs` node is shared 7 ways and `stitch-repl` 3 ways. Correctness rests on
+   the same A/B oracle + the self-healing fallback (above), not yet the state hash.
+   - **State-hash dedup (deferred).** The design's internal check — hash each fork
+     point, equal ⇒ confirmed shareable, unequal ⇒ determinism leak — needs a
+     `Machine::state_hash()` in snemu (hash guest RAM via the write-set + registers).
+     Its value is the *determinism regression test* (catches a hidden entropy source
+     or a mis-share **at the fork point**, before it reaches an assertion), which the
+     verdict A/B and the fallback don't provide as precisely. Worth building next; the
+     fallback covers the *correctness* role in the meantime.
 3. **Precedence-aware scheduler.** Wire the tree into the existing list scheduler as
    bottom-level priorities with the materialise-before-run constraint.
 4. **CoW forks + incremental hash.** The dirty-set machinery, if increments 1–2 used
