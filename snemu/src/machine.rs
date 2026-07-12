@@ -442,6 +442,31 @@ impl Machine {
         self.time
     }
 
+    /// A content hash of the machine's guest-visible state: the shared clock, every
+    /// hart's architectural registers, and guest RAM + device output. Because the
+    /// guest is a closed deterministic system, this is a pure function of
+    /// `(initial state, harness input)` — so two runs fed the same input to the same
+    /// instret hash **equal**, and an unequal hash at a claimed shared fork point is
+    /// a determinism leak (a hidden entropy source, or a mis-share). That makes the
+    /// snapshot tree's sharing self-verifying. Excludes performance toggles (caches,
+    /// idle-skip, native-ops), which must not change the hash. Cost is O(written RAM
+    /// + harts), paid only at the few fork points, not per step.
+    ///
+    /// The value is stable within a build (a fixed-key `DefaultHasher`), enough to
+    /// key a cache and to compare two states in the same process; it is not a
+    /// cross-toolchain-stable digest.
+    #[must_use]
+    pub fn state_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.time.hash(&mut h);
+        for hart in &self.harts {
+            hart.hash_state(&mut h);
+        }
+        self.bus.hash_state(&mut h);
+        h.finish()
+    }
+
     /// Guest RAM footprint so far — the highest byte the guest has written (past the
     /// ELF/DTB load). Used to right-size the machine: the smallest RAM that still fits.
     #[must_use]
@@ -523,6 +548,42 @@ mod tests {
         let mut resumed = snapshot.clone();
         resumed.step().unwrap();
         assert_eq!(resumed.reg(0, 2), 7);
+    }
+
+    #[test]
+    fn state_hash_is_equal_for_equal_state_and_changes_as_the_guest_runs() {
+        let program = &[0x02a0_0093, 0x0070_0113, 0x0010_0193];
+        let mut a = machine_with(program, 1);
+        let mut b = machine_with(program, 1);
+
+        // Identical fresh machines hash equal — the hash is a pure function of state.
+        assert_eq!(a.state_hash(), b.state_hash());
+
+        // Stepping the guest changes the state, and so the hash.
+        let before = a.state_hash();
+        a.step().unwrap();
+        assert_ne!(a.state_hash(), before, "a retired instruction must change the hash");
+
+        // Determinism (the self-audit): two independent runs to the same point hash
+        // equal. Unequal here would be a determinism leak — exactly what the snapshot
+        // tree's fork-point check relies on to confirm a share is sound.
+        b.step().unwrap();
+        assert_eq!(a.state_hash(), b.state_hash(), "same input to the same point ⇒ same state");
+
+        // A clone reproduces the hash; diverging one register breaks it.
+        let mut c = a.clone();
+        assert_eq!(a.state_hash(), c.state_hash(), "a clone is the same state");
+        c.set_reg(0, 5, 0xdead);
+        assert_ne!(a.state_hash(), c.state_hash(), "a changed register changes the hash");
+    }
+
+    #[test]
+    fn state_hash_reflects_guest_ram_writes() {
+        let mut a = machine_with(&[], 1);
+        let b = machine_with(&[], 1);
+        assert_eq!(a.state_hash(), b.state_hash());
+        a.write_ram(RAM_BASE + 0x40, &[1, 2, 3, 4]).unwrap();
+        assert_ne!(a.state_hash(), b.state_hash(), "a guest RAM write changes the hash");
     }
 
     #[test]

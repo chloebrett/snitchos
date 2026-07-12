@@ -41,6 +41,19 @@ macro_rules! accessors {
 }
 
 impl Memory {
+    /// Fold guest RAM into `h` for the machine state hash. Only the written region
+    /// `[0, high_water)` is hashed — everything above is zero by construction, so
+    /// this captures all non-zero RAM at a fraction of the cost of the full array
+    /// (the guest footprint is a few MiB of a much larger machine). `high_water`
+    /// itself is folded in so a machine that merely *touched* a higher address (then
+    /// zeroed it) still differs from one that never did.
+    pub(crate) fn hash_state(&self, h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.high_water.hash(h);
+        let written = (self.high_water as usize).min(self.ram.len());
+        self.ram[..written].hash(h);
+    }
+
     #[must_use]
     pub fn new(size: usize) -> Self {
         Self { ram: vec![0; size], high_water: 0 }

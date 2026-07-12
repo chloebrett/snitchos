@@ -414,7 +414,9 @@ pub fn run(
         .into_iter()
         .map(|(workload, set)| (workload, set.into_iter().collect()))
         .collect();
-    let fork_nodes: std::collections::HashMap<Option<&str>, std::collections::HashMap<u64, snemu::machine::Machine>> =
+    // Each fork node carries its `state_hash` so a scenario can verify, before
+    // forking it, that the node is the exact state it coincides at (`(Machine, hash)`).
+    let fork_nodes: std::collections::HashMap<Option<&str>, std::collections::HashMap<u64, (snemu::machine::Machine, u64)>> =
         parallel_map(&fork_work, jobs, |worker, _, (workload, instrets)| {
             let start_s = started.elapsed().as_secs_f64();
             let t0 = Instant::now();
@@ -426,7 +428,8 @@ pub fn run(
                 let mut machine = snapshot.clone();
                 for &inst in instrets {
                     machine = advance_machine_to(machine, inst);
-                    nodes.insert(inst, machine.clone());
+                    let hash = machine.state_hash();
+                    nodes.insert(inst, (machine.clone(), hash));
                 }
             }
             worker_busy[worker].fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -450,14 +453,33 @@ pub fn run(
     // independent unit of work, so a workload's scenarios spread across all workers
     // instead of stacking on one. LPT order (heaviest first, by the previous run's
     // wall-time or instret per `--order`) keeps a slow scenario off the tail.
+    // Determinism leaks caught by the fork-point state hash: a materialised node
+    // whose hash disagrees with what the scenario recorded live is not the state the
+    // scenario coincides at, so the share is unsound — the scenario runs unshared
+    // instead (safe) and we count it.
+    let unverified_shares = AtomicUsize::new(0);
+
     // Run a scenario live against a real machine — preferring the shared
     // pre-injection fork node (interactive scenarios sharing boot→first-injection),
     // else the post-boot snapshot, else a fresh boot for an early-crash workload that
     // never reached the checkpoint. Returns the full live measurement.
     let run_live = |s: &itest_harness::Scenario| -> (Outcome, u64, u64, snapshot_tree::BranchKey) {
+        // Use the fork node only if its content hash matches the scenario's recorded
+        // fork-point hash — the state-hash verification that makes the share sound. A
+        // mismatch (determinism leak, or a JIT/idle-skip boundary drift moving the
+        // node off the scenario's real injection state) drops to an unshared boot.
+        let expected = prior_keys.get(s.name).and_then(snapshot_tree::BranchKey::fork_state_hash);
         let forked = fork_instret(s.name)
             .and_then(|inst| fork_nodes.get(&s.workload).and_then(|m| m.get(&inst)))
-            .cloned();
+            .and_then(|(machine, node_hash)| match expected {
+                Some(exp) if exp == *node_hash => Some(machine.clone()),
+                Some(_) => {
+                    unverified_shares.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+                // No recorded hash (older cache): can't verify, so don't share.
+                None => None,
+            });
         let machine = match forked {
             Some(m) => Some(m),
             None => match snapshots.get(&s.workload) {
@@ -566,6 +588,14 @@ pub fn run(
         eprintln!(
             "snemu-itest: {fallbacks} collapsed scenario(s) failed their shared stream and \
              fell back to a live run (depth hint too short — self-healed for next run)"
+        );
+    }
+    let unverified = unverified_shares.load(Ordering::Relaxed);
+    if unverified > 0 {
+        eprintln!(
+            "snemu-itest: ⚠ {unverified} fork-node share(s) FAILED the state-hash check \
+             (materialised node ≠ the scenario's recorded fork-point state) — ran unshared. \
+             Investigate: a determinism leak or a JIT/idle-skip boundary drift."
         );
     }
 

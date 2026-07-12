@@ -31,6 +31,18 @@ pub struct BranchKey {
     /// cache without the field still parses.
     #[serde(default)]
     reads_console: bool,
+    /// The machine's [`state_hash`] at the fork point — captured on the first
+    /// injection, when the guest is at [`first_injection_instret`] with no input yet
+    /// fed. It is the fork node's *content address*: a materialised node whose hash
+    /// matches this is provably the state the scenario coincides at, so the share is
+    /// sound; a mismatch is a determinism leak (or a JIT/idle-skip boundary drift) and
+    /// the scenario runs unshared instead. `None` for observe-only scenarios and for
+    /// caches written before this field existed.
+    ///
+    /// [`state_hash`]: snemu::machine::Machine::state_hash
+    /// [`first_injection_instret`]: BranchKey::first_injection_instret
+    #[serde(default)]
+    fork_state_hash: Option<u64>,
 }
 
 impl BranchKey {
@@ -43,6 +55,21 @@ impl BranchKey {
     /// telemetry stream can't serve, so it disqualifies the scenario from collapse.
     pub fn mark_console_read(&mut self) {
         self.reads_console = true;
+    }
+
+    /// Record the machine state hash at the fork point (the first injection). Only the
+    /// first call sticks — the fork node is materialised before any input, so it's the
+    /// pre-*first*-injection state that matters; later injections don't move it.
+    pub fn set_fork_hash(&mut self, hash: u64) {
+        if self.fork_state_hash.is_none() {
+            self.fork_state_hash = Some(hash);
+        }
+    }
+
+    /// The fork-point content address, or `None` if this scenario never injected
+    /// (observe-only) or the cache predates the field.
+    pub fn fork_state_hash(&self) -> Option<u64> {
+        self.fork_state_hash
     }
 
     /// Whether this scenario is a pure telemetry watcher — no input fed, no console
@@ -123,6 +150,20 @@ mod tests {
     #[test]
     fn an_observe_only_key_has_no_fork_instret() {
         assert_eq!(BranchKey::default().first_injection_instret(), None);
+    }
+
+    #[test]
+    fn the_fork_point_hash_is_captured_once_at_the_first_injection() {
+        // The state hash at the first injection is the fork point's content address.
+        // It's recorded once (the first injection); a later injection doesn't move it,
+        // because the fork node is materialised *before* any input is fed.
+        let mut key = BranchKey::default();
+        assert_eq!(key.fork_state_hash(), None, "no injection ⇒ no fork hash");
+        key.set_fork_hash(0xABCD);
+        key.record(9_913_396, b"a\n");
+        key.set_fork_hash(0x1234); // a second injection must not overwrite it
+        key.record(10_000_000, b"b\n");
+        assert_eq!(key.fork_state_hash(), Some(0xABCD));
     }
 
     #[test]

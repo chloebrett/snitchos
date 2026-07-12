@@ -53,6 +53,16 @@ impl Bus {
         self.virtio.tx_output()
     }
 
+    /// Fold the bus's guest-visible state into `h` for the machine state hash: guest
+    /// RAM, plus the UART and virtio output streams (the emitted telemetry/console —
+    /// device progress that a determinism divergence would show up in).
+    pub(crate) fn hash_state(&self, h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.ram.hash_state(h);
+        self.uart.output().hash(h);
+        self.virtio.tx_output().hash(h);
+    }
+
     /// RAM, for the page-table walker (PTEs always live in physical memory).
     pub(crate) fn ram(&self) -> &Memory {
         &self.ram

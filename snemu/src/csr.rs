@@ -95,6 +95,12 @@ impl Csr {
         })
     }
 
+    /// Fold the CSR file into `h` for the machine state hash — the flat value array
+    /// captures every modeled control register.
+    pub(crate) fn hash_state(&self, h: &mut impl std::hash::Hasher) {
+        std::hash::Hash::hash(&self.values, h);
+    }
+
     pub(crate) fn read(&self, addr: u16) -> Result<u64, CsrError> {
         Self::slot(addr)
             .map(|i| self.values[i])

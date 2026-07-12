@@ -515,6 +515,16 @@ impl View {
             // the guest instret *now* is the fork point where this scenario
             // diverges from its observe-only siblings. A non-empty key marks the
             // scenario ineligible for the zero-input collapse.
+            //
+            // On the *first* injection also capture the machine state hash — the fork
+            // point's content address, which lets a later run verify that the
+            // materialised fork node really is the state this scenario coincides at.
+            // Only on the first (the hash is O(written RAM), and the fork node sits
+            // before any input anyway).
+            if self.branch_key.fork_state_hash().is_none() {
+                let hash = live.machine.state_hash();
+                self.branch_key.set_fork_hash(hash);
+            }
             self.branch_key.record(live.machine.instret(), bytes);
             live.machine.push_console_input(bytes);
             return Ok(());

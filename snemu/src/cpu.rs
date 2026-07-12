@@ -16,7 +16,7 @@ const ILEN_FULL: u64 = 4;
 const ILEN_COMPRESSED: u64 = 2;
 
 /// The privilege mode the hart is executing in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Privilege {
     User,
     Supervisor,
@@ -24,7 +24,7 @@ pub enum Privilege {
 
 /// Whether a hart is executing or parked. Secondary harts boot `Stopped` and are
 /// woken by an SBI `hart_start`; the boot hart starts `Running`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum HartState {
     Running,
     Stopped,
@@ -562,6 +562,24 @@ impl Hart {
     #[must_use]
     pub(crate) fn reg(&self, i: usize) -> u64 {
         self.x[i]
+    }
+
+    /// Fold this hart's **architectural** state into `h` — the register file, PC,
+    /// privilege, CSRs, the LR/SC reservation, and running/parked state: everything
+    /// that determines future execution. The performance toggles (decode/block
+    /// caches, `reg_cache`, `idle_skip`, `native_ops`) are deliberately excluded —
+    /// they change speed, not architectural state, so two runs that differ only in
+    /// them must still hash equal (the A/B fidelity discipline). `instret`/`cycle`/
+    /// `timer_fires` are diagnostics, and `pending_sbi` is drained within each step
+    /// (always `None` between steps), so none of them are folded in.
+    pub(crate) fn hash_state(&self, h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.x.hash(h);
+        self.pc.hash(h);
+        self.privilege.hash(h);
+        self.csr.hash_state(h);
+        self.reservation.hash(h);
+        self.state.hash(h);
     }
 
     pub(crate) fn set_reg(&mut self, i: usize, value: u64) {
