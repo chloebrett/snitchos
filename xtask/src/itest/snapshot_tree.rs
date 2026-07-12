@@ -52,6 +52,16 @@ impl BranchKey {
     pub fn is_observe_only(&self) -> bool {
         self.injections.is_empty() && !self.reads_console
     }
+
+    /// The instret of this scenario's first injection — the **fork point** at which
+    /// it (and every sibling on the same workload with the same first-injection
+    /// instret) diverges from the shared pre-injection execution. `None` for an
+    /// observe-only scenario, which never injects. Scenarios sharing a
+    /// `(workload, first_injection_instret)` coincide up to that instret (identical
+    /// deterministic guest, no input yet), so one materialised node serves them all.
+    pub fn first_injection_instret(&self) -> Option<u64> {
+        self.injections.first().map(|i| i.instret)
+    }
 }
 
 /// The prefix of a recorded `(emit_instret, frame)` stream a scenario budgeted to
@@ -108,6 +118,22 @@ mod tests {
             !key.is_observe_only(),
             "any recorded injection makes a scenario interactive"
         );
+    }
+
+    #[test]
+    fn an_observe_only_key_has_no_fork_instret() {
+        assert_eq!(BranchKey::default().first_injection_instret(), None);
+    }
+
+    #[test]
+    fn the_fork_instret_is_the_first_injection() {
+        // Two scenarios sharing a workload coincide up to their first injection —
+        // that instret is where the shared pre-injection node is materialised and
+        // the scenarios fork. Later injections don't move the fork point.
+        let mut key = BranchKey::default();
+        key.record(9_913_396, b":load primes.st\n");
+        key.record(26_570_989, b"quit\n");
+        assert_eq!(key.first_injection_instret(), Some(9_913_396));
     }
 
     #[test]

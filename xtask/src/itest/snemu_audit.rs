@@ -96,6 +96,23 @@ fn record_shared_stream(
     }
 }
 
+/// Advance a workload's post-boot snapshot forward to exactly `target` guest
+/// instructions **without injecting any input**, returning the machine at that
+/// state — the shared *pre-injection* fork node. Every interactive scenario whose
+/// first injection lands at `target` coincides here (identical deterministic guest,
+/// no input yet), so this node is materialised once and cloned per child instead of
+/// each re-running boot→`target`. Stepping one instruction at a time lands exactly on
+/// `target` under the interpreter; the block JIT can overshoot to the next block
+/// boundary (a known open question — the A/B oracle gates it). Stops early on a fault.
+fn advance_machine_to(mut machine: snemu::machine::Machine, target: u64) -> snemu::machine::Machine {
+    while machine.instret() < target {
+        if machine.step().is_err() {
+            break;
+        }
+    }
+    machine
+}
+
 /// Replay a collapsed (observe-only) scenario against the shared stream, truncated
 /// to its own budget so its verdict — positive *or* negative-oracle — matches a live
 /// run exactly. Returns the same `(Outcome, instret, ram)` shape as [`run_scenario`];
@@ -371,12 +388,105 @@ pub fn run(
         .into_iter()
         .collect();
 
+    // Input-prefix tree (increment 2). An *interactive* scenario can't replay a
+    // recorded stream (its result frames depend on the input it feeds), but it still
+    // shares the deterministic execution from boot up to its first injection with
+    // every sibling on the same workload whose first injection lands at the same
+    // instret. Materialise that shared **pre-injection fork node** once and clone it
+    // per child — the child's body then re-runs boot→injection as already-buffered
+    // frame waits (no stepping) and injects from the shared state. `fork_instret`
+    // reads the *prior* run's key, so nothing forks on the first (discovery) run.
+    let fork_instret = |name: &str| -> Option<u64> {
+        share_snapshots.then(|| prior_keys.get(name)).flatten().and_then(
+            snapshot_tree::BranchKey::first_injection_instret,
+        )
+    };
+    let mut fork_points: std::collections::HashMap<Option<&str>, std::collections::BTreeSet<u64>> =
+        std::collections::HashMap::new();
+    for (_, s) in &sched {
+        if let Some(inst) = fork_instret(s.name) {
+            if matches!(snapshots.get(&s.workload), Some(Ok(_))) {
+                fork_points.entry(s.workload).or_default().insert(inst);
+            }
+        }
+    }
+    let fork_work: Vec<(Option<&str>, Vec<u64>)> = fork_points
+        .into_iter()
+        .map(|(workload, set)| (workload, set.into_iter().collect()))
+        .collect();
+    let fork_nodes: std::collections::HashMap<Option<&str>, std::collections::HashMap<u64, snemu::machine::Machine>> =
+        parallel_map(&fork_work, jobs, |worker, _, (workload, instrets)| {
+            let start_s = started.elapsed().as_secs_f64();
+            let t0 = Instant::now();
+            let mut nodes = std::collections::HashMap::new();
+            if let Some(Ok(snapshot)) = snapshots.get(workload) {
+                // `instrets` is sorted ascending, so advancing one machine through
+                // them in order materialises each node from the previous — the deeper
+                // fork points reuse the shallower run rather than restarting from boot.
+                let mut machine = snapshot.clone();
+                for &inst in instrets {
+                    machine = advance_machine_to(machine, inst);
+                    nodes.insert(inst, machine.clone());
+                }
+            }
+            worker_busy[worker].fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            segments.lock().expect("segments mutex").push(Segment {
+                kind: "fork",
+                name: workload.unwrap_or("(default)").to_owned(),
+                workload: workload.map(str::to_owned),
+                worker,
+                start_s,
+                end_s: started.elapsed().as_secs_f64(),
+                instret: instrets.last().copied().unwrap_or(0),
+                pass: true,
+            });
+            (*workload, nodes)
+        })
+        .into_iter()
+        .collect();
+
     // Phase 2 — scenario-level fan-out. This is what fixes the packing: because the
     // snapshot is shared, each *scenario* (not each workload group) is an
     // independent unit of work, so a workload's scenarios spread across all workers
     // instead of stacking on one. LPT order (heaviest first, by the previous run's
     // wall-time or instret per `--order`) keeps a slow scenario off the tail.
+    // Run a scenario live against a real machine — preferring the shared
+    // pre-injection fork node (interactive scenarios sharing boot→first-injection),
+    // else the post-boot snapshot, else a fresh boot for an early-crash workload that
+    // never reached the checkpoint. Returns the full live measurement.
+    let run_live = |s: &itest_harness::Scenario| -> (Outcome, u64, u64, snapshot_tree::BranchKey) {
+        let forked = fork_instret(s.name)
+            .and_then(|inst| fork_nodes.get(&s.workload).and_then(|m| m.get(&inst)))
+            .map(Clone::clone);
+        let machine = match forked {
+            Some(m) => Some(m),
+            None => match snapshots.get(&s.workload) {
+                Some(Ok(snapshot)) => Some(snapshot.clone()),
+                _ => match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
+                    Ok(mut m) => {
+                        m.set_idle_skip(idle_skip);
+                        m.set_native_ops(native_ops);
+                        m.set_block_jit(block_jit);
+                        m.set_register_cache(reg_cache);
+                        Some(m)
+                    }
+                    Err(_) => None,
+                },
+            },
+        };
+        match machine {
+            Some(m) => run_scenario(m, s, max_steps),
+            None => (
+                Outcome::Fail { why: "snemu load failed".to_owned(), console: String::new() },
+                0,
+                0,
+                snapshot_tree::BranchKey::default(),
+            ),
+        }
+    };
+
     let done = AtomicUsize::new(0);
+    let fell_back = AtomicUsize::new(0);
     let scenario_results = parallel_map(&sched, jobs, |worker, _, &(index, s)| {
         let scenario_start = Instant::now();
         let start_s = started.elapsed().as_secs_f64();
@@ -385,38 +495,26 @@ pub fn run(
                 (collapsible(s.name, s.workload), shared_streams.get(&s.workload))
             {
                 // Collapsed: replay the shared stream, no forked machine, no stepping.
-                let outcome = run_collapsed(stream, s, max_steps);
-                let key = prior_keys.get(s.name).cloned().unwrap_or_default();
-                (outcome, 0, 0, key, true)
-            } else {
-                // Live: fork the post-boot snapshot; fall back to a fresh boot for an
-                // early-crash workload that never reached the checkpoint.
-                let machine = match snapshots.get(&s.workload) {
-                    Some(Ok(snapshot)) => Some(snapshot.clone()),
-                    _ => match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
-                        Ok(mut m) => {
-                            m.set_idle_skip(idle_skip);
-                            m.set_native_ops(native_ops);
-                            m.set_block_jit(block_jit);
-                            m.set_register_cache(reg_cache);
-                            Some(m)
-                        }
-                        Err(_) => None,
-                    },
-                };
-                match machine {
-                    Some(m) => {
-                        let (outcome, instret, ram, key) = run_scenario(m, s, max_steps);
+                match run_collapsed(stream, s, max_steps) {
+                    Outcome::Pass => {
+                        let key = prior_keys.get(s.name).cloned().unwrap_or_default();
+                        (Outcome::Pass, 0, 0, key, true)
+                    }
+                    // A collapsed *failure* is inconclusive: the shared stream's depth
+                    // (a hint from the prior run's instret) may simply be too short for
+                    // this scenario's assertion. Collapse is an optimisation, so fall
+                    // back to a live run for the authoritative verdict — self-healing,
+                    // since the live instret it records fixes the depth next run, and a
+                    // collapse can therefore never produce a false failure.
+                    Outcome::Fail { .. } => {
+                        fell_back.fetch_add(1, Ordering::Relaxed);
+                        let (outcome, instret, ram, key) = run_live(s);
                         (outcome, instret, ram, key, false)
                     }
-                    None => (
-                        Outcome::Fail { why: "snemu load failed".to_owned(), console: String::new() },
-                        0,
-                        0,
-                        snapshot_tree::BranchKey::default(),
-                        false,
-                    ),
                 }
+            } else {
+                let (outcome, instret, ram, key) = run_live(s);
+                (outcome, instret, ram, key, false)
             };
         worker_busy[worker].fetch_add(scenario_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let wall = scenario_start.elapsed().as_secs_f64();
@@ -462,6 +560,14 @@ pub fn run(
     }
     let results: Vec<Row> = rows.into_iter().flatten().collect();
     let makespan = started.elapsed();
+
+    let fallbacks = fell_back.load(Ordering::Relaxed);
+    if fallbacks > 0 {
+        eprintln!(
+            "snemu-itest: {fallbacks} collapsed scenario(s) failed their shared stream and \
+             fell back to a live run (depth hint too short — self-healed for next run)"
+        );
+    }
 
     // Persist this run's per-scenario instret as the packing predictor for next
     // time (a full run overwrites; a filtered `--only` run merges, preserving the
