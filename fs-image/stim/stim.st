@@ -388,10 +388,21 @@ opSpanName(op) = match {
     _ => "stim.yank"
 }
 
+// Delete the range from the cursor to a motion `target`, dispatched by wiseness.
+// Charwise = an intra-line span; linewise = whole lines `[min, max]` of the two rows.
+// A linewise motion that didn't move (`dj` on the last line) selects a single
+// unmoved line, which we treat as a no-op — `dd` is the way to delete one line.
+deleteRange(state, target) = match target.wise {
+    Charwise => deleteCharwise(state, target)
+    Linewise =>
+        target.row == state.row => state
+        | deleteLines(state, (target.row < state.row => target.row | state.row), (target.row < state.row => state.row | target.row))
+}
+
 // Apply the pending operator over the range from the cursor to a motion `target`.
-// P2.3: delete + charwise only. `c`/`y` (2.6) and linewise (2.4/2.5) extend this.
+// P2.3–2.5: delete only (charwise + linewise). `c`/`y` extend this in 2.6.
 applyMotionOp(state, target) =
-    state.pending.op == OpDelete => deleteCharwise(state, target)
+    state.pending.op == OpDelete => deleteRange(state, target)
     | state
 
 // Remove `n` whole lines starting at `lo` from `lines` (tail-recursive).

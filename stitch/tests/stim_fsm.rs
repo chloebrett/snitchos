@@ -454,6 +454,36 @@ fn dd_deletes_the_whole_current_line() {
 }
 
 #[test]
+fn d_plus_a_linewise_motion_deletes_a_range_of_lines() {
+    // A linewise motion (`j`/`k`) under an operator selects whole lines. dj deletes
+    // the current line and the one below (range [row, row+1]).
+    assert_eq!(
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 0, pending: Pending(op: OpDelete)), "j").state"#),
+        buffer(&["c"], 0, 0)
+    );
+    // dk deletes the current line and the one above.
+    assert_eq!(
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 2, pending: Pending(op: OpDelete)), "k").state"#),
+        buffer(&["a"], 0, 0)
+    );
+    // A real multi-line delete is an observable Edit.
+    assert_eq!(
+        step_effect(r#"Editor(..initialState("a\nb\nc"), row: 0, pending: Pending(op: OpDelete))"#, "j"),
+        s("Edit")
+    );
+    // dj on the last line: `j` can't move, so the range is a single unmoved line →
+    // no-op Redraw (dd is the way to delete one line), and pending clears.
+    assert_eq!(
+        step_effect(r#"Editor(..initialState("a\nb"), row: 1, pending: Pending(op: OpDelete))"#, "j"),
+        s("Redraw")
+    );
+    assert_eq!(
+        pending_op_of(r#"step(Editor(..initialState("a\nb"), row: 1, pending: Pending(op: OpDelete)), "j").state"#),
+        s("None")
+    );
+}
+
+#[test]
 fn zero_and_dollar_jump_to_the_line_ends() {
     // "hello" with the cursor mid-line: `0` → column 0, `$` → the last character
     // (col 4). `$` lands *on* the last char (len−1), unlike `A` which appends at len.
