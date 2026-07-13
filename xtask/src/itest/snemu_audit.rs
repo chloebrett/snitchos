@@ -819,7 +819,7 @@ fn phase_ideal(segs: &[Segment], kind: &str, workers: usize, by_wall: bool) -> f
 
 /// Per-**workload** right-sizing: RAM is set per workload (`ram_mb_for`), so a
 /// machine must fit its *heaviest* scenario. Aggregates each workload's peak guest
-/// footprint and flags workloads whose machine is >1.5× that peak (shrink
+/// footprint and flags workloads whose machine is >2× that peak (shrink
 /// candidates) or <1.1× it (tight — do not shrink). `used` here is the max over the
 /// workload's scenarios; `n` is how many ran.
 fn print_ram_sizing(results: &[Row]) {
@@ -843,7 +843,7 @@ fn print_ram_sizing(results: &[Row]) {
     };
     let mut over: Vec<_> = by_workload
         .iter()
-        .filter(|(_, (used, alloc, _))| f64::from(*alloc) > 1.5 * mb(*used))
+        .filter(|(_, (used, alloc, _))| f64::from(*alloc) > 2.0 * mb(*used))
         .collect();
     over.sort_by(|a, b| {
         let hr = |(used, alloc, _): &(u64, u32, u32)| f64::from(*alloc) / mb(*used).max(1.0);
