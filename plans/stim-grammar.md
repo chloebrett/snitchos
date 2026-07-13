@@ -177,9 +177,18 @@ that the production works). Then `c` and `y` fall out (`c` = the delete range +
 `enterInsert`; `y` = the range into the unnamed register, no delete). Also `p`/`P`.
 This phase is the whole architecture; everything after it is filling in the two sets.
 
-**Phase 3 — counts.**
-A count accumulator (`pending.count`), folded from digit keys, multiplying motions
-and repeating operators/actions (`3w`, `2dd`, `d3w`, `5x`). Small, rides Phase 2.
+**Phase 3 — counts. ✅ DONE.**
+A count accumulator, folded from digit keys, multiplying motions and repeating
+operators/actions (`3j`, `2dd`, `d2j`, `5x`, `2p`). Rode Phase 2. Deviations from the
+sketch: (1) the count lives on **`Editor` (`count: Int`)**, not inside `Pending` —
+Stitch prods have no default fields, so keeping `Pending` single-field avoided
+editing 28 `Pending(op:)` test constructions, and the count is genuinely a
+pre-operator accumulator anyway; (2) digit `0` disambiguates by context (line-start
+motion when the count is empty, digit once one is accumulating); (3) a single count
+accumulator, so the double-count `2d3w` (= 6) is **not** supported (it reads `23`) —
+single count on either side (`2dd`, `d3w`-style) works; (4) count applies to motions
+`h l j k` (not the absolute `0 $ ^`), `x`, `p`/`P`, `Y`, and operator line-spans;
+`5x`'s register holds only the last char (repeat-delete), a documented fidelity gap.
 
 **Phase 4 — word motions + text objects.**
 `w b e` (and `W B E`) as new motions — instantly usable bare *and* under operators

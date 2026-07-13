@@ -57,6 +57,11 @@ fn motion_wise(setup: &str, key: &str) -> Value {
     ))
 }
 
+/// The accumulated count of the `Editor` that `setup` evaluates to.
+fn count_of(setup: &str) -> Value {
+    fsm(&format!("{{ let s = {setup}  let c = s.count  c }}"))
+}
+
 /// The unnamed register's text of the `Editor` that `setup` evaluates to.
 fn clipboard_text(setup: &str) -> Value {
     fsm(&format!("{{ let s = {setup}  let t = s.clipboard.text  t }}"))
@@ -613,6 +618,44 @@ fn esc_and_unknown_keys_cancel_operator_pending() {
     assert_eq!(
         lines_col(&format!(r#"step(step({pend}, "z").state, "x").state"#)),
         line_and_col("ac", 1)
+    );
+}
+
+#[test]
+fn digits_accumulate_a_count_and_zero_is_a_motion_when_the_count_is_empty() {
+    // 1 then 2 builds the count 12.
+    assert_eq!(count_of(r#"step(step(initialState("x"), "1").state, "2").state"#), Value::Int(12));
+    // A leading 0 is the line-start motion, not a count digit.
+    assert_eq!(count_of(r#"step(Editor(..initialState("abc"), col: 2), "0").state"#), Value::Int(0));
+    assert_eq!(row_col(r#"step(Editor(..initialState("abc"), col: 2), "0").state"#), ints(0, 0));
+    // But 0 *after* a digit folds in: 1 then 0 = 10.
+    assert_eq!(count_of(r#"step(step(initialState("x"), "1").state, "0").state"#), Value::Int(10));
+}
+
+#[test]
+fn a_count_repeats_motions_and_clears_afterward() {
+    // 3j moves down three lines; the count clamps at the last line.
+    assert_eq!(row_col(r#"step(Editor(..initialState("a\nb\nc\nd"), count: 3), "j").state"#), ints(3, 0));
+    assert_eq!(row_col(r#"step(Editor(..initialState("a\nb"), count: 9), "j").state"#), ints(1, 0));
+    // 2l moves right twice.
+    assert_eq!(row_col(r#"step(Editor(..initialState("abcd"), count: 2), "l").state"#), ints(0, 2));
+    // The count is consumed after the motion.
+    assert_eq!(count_of(r#"step(Editor(..initialState("a\nb\nc"), count: 2), "j").state"#), Value::Int(0));
+}
+
+#[test]
+fn a_count_repeats_x_and_scales_operators() {
+    // 3x deletes three characters.
+    assert_eq!(lines_col(r#"step(Editor(..initialState("abcdef"), count: 3), "x").state"#), line_and_col("def", 0));
+    // 2dd deletes two whole lines (count on the doubled operator).
+    assert_eq!(
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc\nd"), pending: Pending(op: OpDelete), count: 2), "d").state"#),
+        buffer(&["c", "d"], 0, 0)
+    );
+    // d2j deletes the current line plus two below (count on the linewise motion).
+    assert_eq!(
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc\nd"), pending: Pending(op: OpDelete), count: 2), "j").state"#),
+        buffer(&["d"], 0, 0)
     );
 }
 

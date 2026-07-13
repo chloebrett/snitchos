@@ -57,7 +57,7 @@ prod Target(row: Int, col: Int, wise: Wise, inclusive: Bool)
 // The whole editor state — immutable. Every transition returns a fresh `Editor`
 // via `..spread` update. `row`/`col` is a full cursor (0-based); unbound keys
 // like `h`/`l` are just navigation we haven't wired, not missing state.
-prod Editor(lines: List<Str>, row: Int, col: Int, mode: Mode, pending: Pending, clipboard: Register)
+prod Editor(lines: List<Str>, row: Int, col: Int, mode: Mode, pending: Pending, clipboard: Register, count: Int)
 
 // A transition's result for the driver: the next state plus the effect to run.
 // The pure `step` returns this; the driver performs `effect` and loops on `state`.
@@ -73,6 +73,7 @@ initialState(text) = Editor(
     mode: Normal,
     pending: Pending(op: OpNone),
     clipboard: Register(text: "", wise: Charwise),
+    count: 0,
 )
 
 // The text of the line at `row`, or "" if out of range (never happens for a
@@ -386,8 +387,44 @@ enterCommand(state) = Editor(..state, mode: Command)
 // Enter operator-pending: record the operator, stay in Normal mode, await a motion.
 enterOp(state, op) = Editor(..state, pending: Pending(op: op))
 
-// Leave operator-pending: reset the accumulator to no pending operator.
-clearPending(state) = Editor(..state, pending: Pending(op: OpNone))
+// Leave operator-pending: reset the accumulator to no pending operator, count clear.
+clearPending(state) = Editor(..state, pending: Pending(op: OpNone), count: 0)
+
+// The count prefix in effect: an unset (0) count means 1.
+effectiveCount(state) = state.count <= 0 => 1 | state.count
+
+// Consume the count prefix (after a command uses it).
+clearCount(state) = Editor(..state, count: 0)
+
+// Apply `f` to `state` `n` times (n >= 1).
+repeat(f, state, n) = n <= 1 => f(state) | repeat(f, f(state), n - 1)
+
+// The integer value of a single digit key.
+digitVal(key) = match {
+    key == "1" => 1
+    key == "2" => 2
+    key == "3" => 3
+    key == "4" => 4
+    key == "5" => 5
+    key == "6" => 6
+    key == "7" => 7
+    key == "8" => 8
+    key == "9" => 9
+    _ => 0
+}
+
+// Whether `key` is a count digit here: "1".."9" always; "0" only once a count is
+// already accumulating (a leading "0" is the line-start motion).
+isCountDigit(state, key) = match {
+    key == "0" => state.count > 0
+    _ => Str.length(key) == 1 and Str.contains("123456789", key)
+}
+
+// Fold a digit key into the count accumulator.
+foldDigit(state, key) = Editor(..state, count: state.count * 10 + digitVal(key))
+
+// Reset the count in a completed `Step`'s state (top-level commands consume it).
+clearCountStep(step) = Step(state: clearCount(step.state), effect: step.effect)
 
 // Delete a charwise (intra-line) column range `[lo, hi)` on `row`, clamped to the
 // line, cutting the removed text into the unnamed register (charwise) and returning
@@ -511,62 +548,93 @@ isSameOp(op, key) = match {
     _ => false
 }
 
-// Yank the current line into the unnamed register, linewise (`yy` / `Y`).
-yankLine(state) = Editor(..state, clipboard: Register(text: lineAt(state, state.row), wise: Linewise))
+// Yank whole lines `[lo, hi]` into the unnamed register, linewise (`yy`/`Y`, and
+// counted `3yy`/`3Y`).
+yankLinesRange(state, lo, hi) = Editor(..state, clipboard: Register(text: joinLinesRange(state, lo, hi), wise: Linewise))
 
-// The doubled operator (`dd`/`cc`/`yy`): apply the pending operator linewise to the
-// current line. dd removes it; cc blanks-and-inserts (keeps the line); yy copies it.
+// The last row a linewise count reaches from the cursor (`Ndd` spans N lines),
+// clamped to the buffer.
+countLastRow(state) = clampRow(state, state.row + effectiveCount(state) - 1)
+
+// The doubled operator (`dd`/`cc`/`yy`, and counted `2dd`): apply the pending
+// operator linewise to `count` lines. dd removes them; cc blanks-and-inserts (keeps
+// one line); yy copies them.
 applyLinewiseSelf(state) = match state.pending.op {
-    OpDelete => editIfChanged(clearPending(state), clearPending(deleteLines(state, state.row, state.row)), "stim.delete")
-    OpChange => edit(clearPending(changeLines(state, state.row, state.row)), "stim.change")
-    OpYank => editIfChanged(clearPending(state), clearPending(yankLine(state)), "stim.yank")
+    OpDelete => editIfChanged(clearPending(state), clearPending(deleteLines(state, state.row, countLastRow(state))), "stim.delete")
+    OpChange => edit(clearPending(changeLines(state, state.row, countLastRow(state))), "stim.change")
+    OpYank => editIfChanged(clearPending(state), clearPending(yankLinesRange(state, state.row, countLastRow(state))), "stim.yank")
     _ => redraw(clearPending(state))
 }
 
 // Normal mode dispatch: at the top level (no pending operator) route to the flat
 // table; while operator-pending (`pending.op != OpNone`) route to the operator
 // branch. `step` still dispatches on `mode` — this branch lives inside Normal.
-stepNormal(state, key) =
+stepNormal(state, key) = match {
+    isCountDigit(state, key) => redraw(foldDigit(state, key))
     state.pending.op == OpNone => stepTopLevel(state, key)
-    | stepOperatorPending(state, key)
+    _ => stepOperatorPending(state, key)
+}
+
+// The target `count` repetitions of a motion reach (`d3w`, `d2j`): the cursor after
+// `n` bare moves, carrying the motion's wiseness/inclusive.
+countedTarget(state, key, n, base) = {
+    let moved = repeat(s -> moveByKey(s, key), state, n)
+    Target(row: moved.row, col: moved.col, wise: base.wise, inclusive: base.inclusive)
+}
+
+// Apply the pending operator over a motion, scaled by the count, and clear the
+// accumulator. Measured against a pending-cleared baseline so a no-op range spans
+// nothing even though clearing the accumulator changed the state.
+applyOpOverMotion(state, key, base) = {
+    let target = effectiveCount(state) <= 1 => base | countedTarget(state, key, effectiveCount(state), base)
+    editIfChanged(clearPending(state), clearPending(applyMotionOp(state, target)), opSpanName(state.pending.op))
+}
 
 // Operator-pending: a motion applies the pending operator over `[cursor, target]`
-// and clears the accumulator. Non-motion keys cancel (refined in 2.4/2.8). The
-// change is measured against a pending-cleared baseline, so a no-op range (a motion
-// that selects nothing) spans nothing even though clearing pending changed the state.
+// (count-scaled) and clears the accumulator; the same operator again is the linewise
+// self; Esc and unknown keys cancel.
 stepOperatorPending(state, key) = match {
     key == "Esc" => redraw(clearPending(state))
     isSameOp(state.pending.op, key) => applyLinewiseSelf(state)
     _ => match motionTarget(state, key) {
-        Some(target) => editIfChanged(clearPending(state), clearPending(applyMotionOp(state, target)), opSpanName(state.pending.op))
+        Some(target) => applyOpOverMotion(state, key, target)
         None => redraw(clearPending(state))
     }
 }
 
-// The top-level Normal table: navigation, small edits, mode/operator entry. Unbound
-// keys are Noops.
+// The top-level Normal dispatch. Operators `d`/`c`/`y` enter operator-pending
+// *carrying* the count (so `2dd` works); every other command consumes the count via
+// `clearCountStep`. The body applies the count where it multiplies (motions, `x`,
+// paste).
 stepTopLevel(state, key) = match {
-    key == "j" => redraw(moveByKey(state, key))
-    key == "k" => redraw(moveByKey(state, key))
-    key == "h" => redraw(moveByKey(state, key))
-    key == "l" => redraw(moveByKey(state, key))
+    key == "d" => redraw(enterOp(state, OpDelete))
+    key == "c" => redraw(enterOp(state, OpChange))
+    key == "y" => redraw(enterOp(state, OpYank))
+    _ => clearCountStep(stepTopLevelBody(state, key))
+}
+
+// Repeat a bare motion `key` by the count.
+countedMotion(state, key) = repeat(s -> moveByKey(s, key), state, effectiveCount(state))
+
+stepTopLevelBody(state, key) = match {
+    key == "j" => redraw(countedMotion(state, key))
+    key == "k" => redraw(countedMotion(state, key))
+    key == "h" => redraw(countedMotion(state, key))
+    key == "l" => redraw(countedMotion(state, key))
     key == "0" => redraw(moveByKey(state, key))
     key == "$" => redraw(moveByKey(state, key))
     key == "^" => redraw(moveByKey(state, key))
-    key == "x" => editIfChanged(state, deleteChar(state), "stim.delete-char")
+    key == "x" => editIfChanged(state, repeat(deleteChar, state, effectiveCount(state)), "stim.delete-char")
     key == "X" => editIfChanged(state, deleteBefore(state), "stim.delete-char")
     key == "~" => editIfChanged(state, toggleCase(state), "stim.toggle-case")
     key == "J" => editIfChanged(state, joinLines(state), "stim.join")
     key == "D" => editIfChanged(state, deleteToEol(state), "stim.delete-to-eol")
     key == "C" => edit(changeToEol(state), "stim.change-to-eol")
     key == "s" => edit(substitute(state), "stim.substitute")
-    key == "Y" => editIfChanged(state, yankLine(state), "stim.yank")
-    key == "p" => editIfChanged(state, pasteAfter(state), "stim.paste")
-    key == "P" => editIfChanged(state, pasteBefore(state), "stim.paste")
+    key == "Y" => editIfChanged(state, yankLinesRange(state, state.row, countLastRow(state)), "stim.yank")
+    key == "p" => editIfChanged(state, repeat(pasteAfter, state, effectiveCount(state)), "stim.paste")
+    key == "P" => editIfChanged(state, repeat(pasteBefore, state, effectiveCount(state)), "stim.paste")
     key == "r" => redraw(enterReplace(state))
-    key == "d" => redraw(enterOp(state, OpDelete))
-    key == "c" => redraw(enterOp(state, OpChange))
-    key == "y" => redraw(enterOp(state, OpYank))
     key == "o" => edit(openLine(state), "stim.open-line")
     key == "i" => redraw(enterInsert(state))
     key == "a" => redraw(appendAfter(state))
