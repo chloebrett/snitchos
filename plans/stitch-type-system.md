@@ -144,7 +144,10 @@ canonical `Ty`; a `TypeError` type exists carrying a message + span.
 
 ### Step 7: wire the pass in (reported, non-fatal) — ✅ DONE (2026-07-12)
 **Acceptance**: a host entry collects type errors and renders them via the `SourceMap`; running a well-typed program is unchanged; the suite + prelude stay green (no false positives).
-**GREEN**: `TypeError::render(&SourceMap, SourceId)` (same presentation as a runtime `Fault`); `runner::type_check_report` lowers the program, runs `check_program`, and prepends `type error: …` lines to a run's stderr — **advisory only, never changes the exit code or blocks eval** (the gradual report-don't-block default, chosen with the user). Wired into `run_program_source` (single-module path; REPL + multi-module wiring deferred).
+**GREEN**: `TypeError::render(&SourceMap, SourceId)` (same presentation as a runtime `Fault`); `runner::type_check_report` lowers the program, runs `check_program`, and prepends `type error: …` lines to a run's stderr — **advisory only, never changes the exit code or blocks eval** (the gradual report-don't-block default, chosen with the user). Wired into `run_program_source` (single-module path). **REPL + multi-module wired
+2026-07-13**: `check_expr(expr, items)` (new entry, via `World::build`/`World::ctx`) checks
+each REPL expression → `<repl>:line:col` warnings; `run_module_files` checks each module
+(message-only, cross-module refs `Dyn`). REPL *declaration*-line checking still deferred.
 **Mutation**: check.rs 38 (29 caught / 9 unviable / 0 survivors); runner `type_check_report` 2/2 caught.
 **Done**: 600 lib + all integration green; **zero false positives** on existing programs (gradual `Dyn` held); clippy clean.
 

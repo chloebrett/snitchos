@@ -520,14 +520,7 @@ fn collect_funcs(items: &[CoreItem], types: &BTreeSet<String>) -> BTreeMap<Strin
 /// and function signatures.
 #[must_use]
 pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
-    let types = collect_type_names(items);
-    let world = World {
-        ctors: collect_ctors(items, &types),
-        funcs: collect_funcs(items, &types),
-        conformances: collect_conformances(items),
-        sums: collect_sums(items),
-        types,
-    };
+    let world = World::build(items);
     let mut errors = Vec::new();
     for item in items {
         match item {
@@ -567,6 +560,19 @@ pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
     errors
 }
 
+/// Type-check a single expression against a program's declarations — the REPL's
+/// per-line entry. `items` supplies the constructors/functions/types in scope;
+/// the expression is synthesized (with `@` and locals empty) and its errors
+/// collected.
+#[must_use]
+pub fn check_expr(expr: &CoreExpr, items: &[CoreItem]) -> Vec<TypeError> {
+    let world = World::build(items);
+    let ctx = world.ctx(Ty::Dyn, TyEnv::new());
+    let mut errors = Vec::new();
+    synth(expr, &ctx, &mut errors);
+    errors
+}
+
 /// Whether a callable's signature mentions the self-type `@` in any parameter or
 /// its return.
 fn signature_mentions_self(params: &[Param], ret: Option<&Type>) -> bool {
@@ -584,6 +590,30 @@ struct World {
 }
 
 impl World {
+    /// Index a program's declarations once, for reuse across every body.
+    fn build(items: &[CoreItem]) -> World {
+        let types = collect_type_names(items);
+        World {
+            ctors: collect_ctors(items, &types),
+            funcs: collect_funcs(items, &types),
+            conformances: collect_conformances(items),
+            sums: collect_sums(items),
+            types,
+        }
+    }
+
+    /// A checking context over this world with the given `@` type and locals.
+    fn ctx(&self, self_ty: Ty, locals: TyEnv) -> Ctx<'_> {
+        Ctx {
+            ctors: &self.ctors,
+            funcs: &self.funcs,
+            conformances: &self.conformances,
+            sums: &self.sums,
+            self_ty,
+            locals,
+        }
+    }
+
     /// Check one callable's body against its declared return type, with its
     /// parameters bound and `@` bound to `self_ty`.
     fn check_callable(
@@ -598,14 +628,7 @@ impl World {
             .iter()
             .map(|p| (p.name.clone(), p.ty.as_ref().map_or(Ty::Dyn, |t| ty_of_annotation(t, &self.types))))
             .collect();
-        let ctx = Ctx {
-            ctors: &self.ctors,
-            funcs: &self.funcs,
-            conformances: &self.conformances,
-            sums: &self.sums,
-            self_ty,
-            locals,
-        };
+        let ctx = self.ctx(self_ty, locals);
         let expected = ret.map_or(Ty::Dyn, |t| ty_of_annotation(t, &self.types));
         check(body, &expected, &ctx, errors);
     }

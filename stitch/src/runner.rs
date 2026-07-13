@@ -88,9 +88,21 @@ pub fn run_module_files(
             };
         }
     };
+    // Static type check (gradual): each module is checked independently — a
+    // cross-module reference is unknown, hence `Dyn`. Source registration is a
+    // follow-up, so these render message-only (like this path's runtime faults).
+    let mut type_report = String::new();
+    for module in &modules {
+        let core = crate::lower::lower_items_to_core(&module.items);
+        for error in crate::check::check_program(&core) {
+            writeln!(type_report, "type error: {}", error.message).expect(INFALLIBLE);
+        }
+    }
     // Multi-module source registration is a follow-up; faults render message-only
     // (their closures carry the synthetic source) against this empty map.
-    finish(eval_modules_with_telemetry(&modules, entry), &SourceMap::new())
+    let mut result = finish(eval_modules_with_telemetry(&modules, entry), &SourceMap::new());
+    result.stderr = format!("{type_report}{}", result.stderr);
+    result
 }
 
 /// Walk a program's `use` imports from `entry`, fetching and parsing each
@@ -267,9 +279,9 @@ impl Repl {
             Err(error) => return format!("parse error: {}\n", error.render(trimmed)),
         };
         // Build the env once (prelude + defs), then reuse it for every expression.
+        let mut all = self.prelude.clone();
+        all.extend_from_slice(&self.defs);
         if self.env.is_none() {
-            let mut all = self.prelude.clone();
-            all.extend_from_slice(&self.defs);
             self.env = Some(build_env_with_backends(
                 Rc::clone(&self.telemetry),
                 Rc::clone(&self.platform),
@@ -282,15 +294,23 @@ impl Repl {
         // message-only — def-source registration is a follow-up.)
         let mut sources = SourceMap::new();
         let line_id = sources.register("<repl>", trimmed);
+        let core_expr = lower_expr_to_core(&expr);
+        // Gradual type check of the expression against the accumulated program —
+        // reported as `<repl>:line:col` warnings, never blocking evaluation.
+        let mut out = String::new();
+        let all_core = crate::lower::lower_items_to_core(&all);
+        for error in crate::check::check_expr(&core_expr, &all_core) {
+            writeln!(out, "type error: {}", error.render(&sources, line_id)).expect(INFALLIBLE);
+        }
         let env = self
             .env
             .as_ref()
             .expect("env was just built above")
             .clone()
             .with_source(line_id);
-        let result = eval(&lower_expr_to_core(&expr), &env);
+        let result = eval(&core_expr, &env);
         // Drain only *this* line's telemetry from the long-lived sink.
-        let mut out = render_telemetry(&env.take_telemetry());
+        out.push_str(&render_telemetry(&env.take_telemetry()));
         match result {
             Ok(value) if value != Value::Unit => {
                 let rendered = if self.colored {
@@ -347,6 +367,20 @@ mod tests {
     #[test]
     fn the_repl_renders_a_scalar_result_inline() {
         assert!(Repl::new().eval_line("40 + 2").contains("=> 42"));
+    }
+
+    #[test]
+    fn the_repl_prints_nothing_for_a_unit_result() {
+        // A unit-valued expression is silent — no `=>` line.
+        assert!(!Repl::new().eval_line("()").contains("=>"), "unit result should be silent");
+    }
+
+    #[test]
+    fn the_repl_warns_on_a_type_error_in_an_expression() {
+        // A type-wrong expression at the prompt is reported (gradual: it still runs).
+        let out = Repl::new().eval_line("1 + true");
+        assert!(out.contains("type error"), "reports the error: {out}");
+        assert!(out.contains("<repl>:1:"), "renders the location: {out}");
     }
 
     #[test]
@@ -564,6 +598,15 @@ mod tests {
         let result = run_module_files("main", fake_fs(&[("main", "use gone  main() = 1")]));
         assert_eq!(result.exit_code, 2);
         assert!(result.stderr.contains("gone"), "{}", result.stderr);
+    }
+
+    #[test]
+    fn run_module_files_reports_type_errors_without_blocking() {
+        // A type error in any module is reported (gradual: the program still runs).
+        let result = run_module_files("main", fake_fs(&[("main", r#"main() -> Int = "x""#)]));
+        assert!(result.stderr.contains("type error"), "reports the error: {}", result.stderr);
+        assert_eq!(result.exit_code, 0, "gradual: a type error doesn't block");
+        assert!(result.stdout.contains("=> x"), "the program still produced its result");
     }
 
     #[test]
