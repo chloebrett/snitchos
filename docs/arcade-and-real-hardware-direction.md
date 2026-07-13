@@ -84,6 +84,45 @@ directly mitigates the silent-failure risk that's the real hazard on metal. Guar
   in-order, standard RV64GC, closest to QEMU `virt` — is the feature. Staying boring is
   staying de-risked.
 
+### The VF2 Lite (JH7110S) variant — cheaper, same arch, thinner trail
+
+StarFive shipped a **VisionFive 2 Lite** (Aug 2025, from ~$20) on the **JH7110S** — a
+cost-reduced bin of the same SoC. **Same quad U74, RV64GC, OpenSBI**, so the decisive lever
+holds: **zero arch port.** The deltas that matter for us:
+
+- **Clock 1.25 GHz vs 1.5 GHz** — nearly irrelevant. It only dents the far-future
+  software-3D ceiling (§6, scale those estimates ~−17%); a non-issue for bring-up, the SMP
+  showpiece, Tetris, or the StS port.
+- **Price ~$20–40 (4GB)** — a genuine win; ~Milk-V-Mars-cheap but keeps the M.2 slot.
+- **WiFi 6 + BT 5.4 onboard — ignore it.** A wireless stack is *less tractable* than USB on
+  bare metal (see §8); onboard or not, it's a spec-sheet number, not a usable feature. Use
+  wired GbE.
+- **The one cost that cuts against it:** the JH7110**S** is a *newer, slightly different* SoC,
+  so it (a) may have undocumented MMIO/clock deltas from the well-trodden JH7110, and (b) has
+  a thinner bare-metal community trail. That partially *un-does* the "buy the worked-example
+  trail" logic that chose the VF2 over the cheaper Mars in the first place.
+
+**Verdict:** the Lite is a legitimate cheaper pick and the no-port guarantee fully holds — but
+if minimizing silent-failure risk (the #1 hazard on metal) is the priority, the **plain VF2**
+keeps the proven trail. Take the Lite to save ~$40 *if* you accept some MMIO-delta uncertainty
+and lean harder on un-parking DTB discovery early (§3). Either way, neither is an RVV board, so
+the K1 question (§13) is orthogonal.
+
+### Boot media & cooling — what you don't need
+
+- **Boot media: microSD, not eMMC.** The board has onboard SPI-NOR for U-Boot/SPL and the
+  mask ROM loads from microSD out of the box, so the boot chain needs *zero* add-on storage.
+  eMMC is soldered-on fast persistence whose only near-term use would require writing an
+  **MMC driver** (JH7110 DesignWare MSHC) — real bring-up work for a problem (onboard
+  persistence for the FS) that doesn't exist until far-future. The fast dev loop isn't eMMC
+  anyway; it's **TFTP boot** from U-Boot once dwmac works (no card-swapping, no reflash).
+- **Cooling: a heatsink, not a fan.** The JH7110 draws low-single-digit watts; its "runs
+  warm" reputation is from full-Linux + GPU + AI loads SnitchOS never runs. A cheap heatsink
+  covers everything through the 2D arcade phase. A fan only earns its place under *sustained*
+  heavy load (the software-3D renderer pinning all harts) — and you'd **observe** the
+  throttling as a frame-time-histogram regression in Grafana (surface hart temp as telemetry,
+  #19) before buying one. Don't buy on spec.
+
 ### Why the JH7110 is the right fit for SnitchOS specifically
 
 1. RISC-V → zero arch port.
@@ -318,6 +357,19 @@ Splits into three very different costs:
   behind anything RP1-like. On QEMU it's virtio-net (reuses your virtio machinery).
 - **SSH: overshoots — skip it.** `russh`/`thrussh` are std + tokio (fail the litmus test);
   porting one into a no_std microkernel is a major project. You don't need it.
+- **WiFi / BT: don't put it in the kernel — and a USB dongle is the *worst* option.** The
+  honest framing: a wireless stack isn't necessarily *more code* than USB, but it's strictly
+  *less tractable* on bare metal — (1) radio chips are firmware-gated and vendor-secret (the
+  GPU-secrecy hazard, §5, not USB's documented-spec situation), and (2) it stacks layers USB
+  lacks — an 802.11 MLME state machine *plus* a WPA2/WPA3-SAE supplicant (the 4-way
+  handshake, key mgmt). BT is the same shape (HCI + L2CAP + SMP pairing + HID-over-GATT). A
+  **USB WiFi dongle dodges nothing** — it stacks the WiFi behemoth *on top of* the USB
+  behemoth (§7), so it needs the whole USB host stack *and* the firmware/MLME/supplicant; on
+  a kernel with no USB host it's simply unusable. **The on-pattern escape hatch (if wireless
+  is ever wanted): an ESP32 as a "network coprocessor"** — it has WiFi built in and runs its
+  own battle-tested stack; it bridges WiFi ↔ UART/SPI, exactly the controller-bridge move
+  (§7). Relocates the behemoth to hardware where it's already solved; you consume a trivial
+  wire. Until then: **wired GbE, or a cable.**
 
 **The cheap interaction path is a raw TCP "network REPL"** (`nc`/`telnet` → type commands)
 over smoltcp — which is just the control-plane/REPL with the transport swapped to a socket.
@@ -609,6 +661,8 @@ one click away.*
 - **VF2 vs an RVV board.** If hardware-accelerated compute / fast 3D matters, the SpacemiT K1
   (RVV 1.0) reframes the board choice — at the cost of a different SoC's MMIO bring-up (still
   RISC-V, no arch port).
+- **VF2 vs VF2 Lite (JH7110S).** Save ~$40 for the same arch, at the cost of a thinner
+  bare-metal trail + possible MMIO deltas. Verdict + guardrails in §2 ("The VF2 Lite variant").
 - **Display:** SPI panel (easy, ~30–40 fps QVGA ceiling) vs display controller (harder,
   uncapped). Decide early.
 - **Games as userspace processes vs kernel tasks** — MVP can be a kernel task (cooperative
