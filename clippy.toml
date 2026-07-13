@@ -3,3 +3,6 @@ disallowed-types = [
     { path = "spin::MutexGuard", reason = "use kernel::sync::MutexGuard" },
     { path = "spin::Once", reason = "use kernel::sync::Once" },
 ]
+
+# Prose terms `doc_markdown` mistakes for identifiers (the Backend B JIT docs use them).
+doc-valid-idents = ["AArch64", ".."]

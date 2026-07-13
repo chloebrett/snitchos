@@ -145,6 +145,11 @@ enum Cmd {
         /// to the fork-per-scenario path. See `docs/snemu-itest-snapshot-tree-design.md`.
         #[arg(long)]
         share_snapshots: bool,
+        /// Enable **Backend B** (native AArch64 codegen) for the block JIT — implies
+        /// `--jit`. Host-only (arm64/macos); A/B it against off, which must stay green
+        /// + byte-identical guest instret (the oracle), only faster.
+        #[arg(long = "native-jit")]
+        native_jit: bool,
     },
     /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
     /// run under snemu with exact per-PC counting and report the top kernel
@@ -757,13 +762,14 @@ fn main() -> ExitCode {
         Cmd::SnemuItest {
             steps, limit, only, jobs, no_idle_skip, order, opt, native_ops, block_jit, no_reg_cache,
             share_snapshots,
+            native_jit,
         } => {
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
             itest::snemu_audit::run(
                 steps, limit, only.as_deref(), jobs, !no_idle_skip, order, opt, native_ops,
-                block_jit, !no_reg_cache, share_snapshots,
+                block_jit, !no_reg_cache, share_snapshots, native_jit,
             )
         }
         Cmd::SnemuProfile { workload, steps, top, release } => {

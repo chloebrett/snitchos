@@ -289,6 +289,11 @@ pub(crate) struct Hart {
     /// a run with B on must stay byte-identical to one with it off. Only consulted on
     /// hosts where the `jit` module compiles (aarch64/macos today).
     native_jit: bool,
+    /// Backend B's compiled-native-code cache (host-only). Rebuilt lazily; excluded
+    /// from the snapshot (clones cold) and flushed with the block cache. Present only
+    /// where the `jit` module compiles.
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    native_cache: crate::jit::NativeCache,
     /// Diagnostic: supervisor timer interrupts actually delivered to this hart.
     timer_fires: u64,
 }
@@ -437,6 +442,8 @@ impl Hart {
             reg_cache: true,
             idle_skip: true,
             native_jit: false,
+            #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+            native_cache: crate::jit::NativeCache::new(),
             timer_fires: 0,
         }
     }
@@ -471,7 +478,6 @@ impl Hart {
 
     /// Whether Backend B (native codegen) is selected — the block executor reads this
     /// to choose native execution vs. the reified-`Op` walk.
-    #[allow(dead_code, reason = "consulted once native block execution is wired (needs branch codegen first)")]
     pub(crate) fn native_jit_enabled(&self) -> bool {
         self.native_jit
     }
@@ -507,7 +513,7 @@ impl Hart {
             if block.is_empty() {
                 return Ok(None); // "nothing compilable starts here" marker → interpret
             }
-            return Ok(Some(block.exec(self, bus)?));
+            return Ok(Some(self.run_block(&block, bus)?));
         }
         // Cold: count it; compile only once it crosses the hotness threshold.
         if !self.block_cache.as_mut().expect("block jit is on").record_hot(pc) {
@@ -518,7 +524,39 @@ impl Hart {
         if block.is_empty() {
             return Ok(None);
         }
-        Ok(Some(block.exec(self, bus)?))
+        Ok(Some(self.run_block(&block, bus)?))
+    }
+
+    /// Execute a compiled block via Backend B (native codegen) when it's selected and
+    /// the block is natively compilable, else Backend A (the reified-`Op` walk). Both
+    /// are architecturally identical (the on↔off A/B oracle); B is a pure speedup.
+    fn run_block(&mut self, block: &Block, bus: &mut Bus) -> Result<u64, StepError> {
+        if self.native_jit_enabled()
+            && let Some(retired) = self.run_block_native(block)
+        {
+            return Ok(retired);
+        }
+        block.exec(self, bus)
+    }
+
+    /// Backend B: run `block` natively against the register file, applying the result
+    /// and resume PC. `None` when the block isn't natively compilable (a memory op or
+    /// an ALU family the emitter doesn't cover) — the caller runs Backend A. Native
+    /// blocks have no memory ops, so `bus` isn't needed. Host-only.
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    fn run_block_native(&mut self, block: &Block) -> Option<u64> {
+        let pc = self.pc;
+        let mut regs = self.x;
+        let exit = self.native_cache.run(pc, block.ops(), block.exit_pc(), &mut regs)?;
+        self.set_registers(regs);
+        self.pc = exit.pc;
+        Some(exit.retired)
+    }
+
+    /// Backend B is unavailable off aarch64/macos — always fall back to Backend A.
+    #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+    fn run_block_native(&mut self, _block: &Block) -> Option<u64> {
+        None
     }
 
     /// Enable or disable `wfi` idle-skip. With it off, `wfi` is a bare
@@ -1231,6 +1269,8 @@ impl Hart {
                 if let Some(cache) = self.block_cache.as_mut() {
                     cache.flush();
                 }
+                #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+                self.native_cache.flush();
             }
         }
         self.set_reg(instr.rd(), old);
@@ -1251,6 +1291,8 @@ impl Hart {
             if let Some(cache) = self.block_cache.as_mut() {
                 cache.flush();
             }
+            #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+            self.native_cache.flush();
             self.advance();
             return Ok(());
         }
@@ -1852,6 +1894,37 @@ mod tests {
         assert_eq!(jit.hart.x, interp.hart.x, "all registers match the interpreter");
         assert_eq!(jit.hart.pc(), interp.hart.pc(), "pc matches the interpreter");
         assert_eq!(jit.hart.pc(), RAM_BASE + 0xc + 8, "the bne was taken to pc+8");
+    }
+
+    /// Backend B's oracle at the Cpu level: running a block through the **native**
+    /// executor must land the exact register/pc state the interpreter does. The block
+    /// (addi/addi/add/bne) is all-emittable, so native genuinely engages (asserted).
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
+    fn native_backend_matches_the_interpreter() {
+        let program = &[
+            0x0050_0093, // addi x1, x0, 5
+            0x0030_8113, // addi x2, x1, 3
+            0x0020_81b3, // add  x3, x1, x2
+            0x0020_9463, // bne  x1, x2, +8   (taken)
+        ];
+        let mut interp = cpu_with(program);
+        for _ in 0..4 {
+            interp.step().unwrap();
+        }
+
+        let mut jit = cpu_with(program);
+        jit.hart.set_native_jit(true);
+        let block = jit.hart.compile_block(&jit.bus);
+        assert!(
+            crate::jit::NativeBlock::compile(block.ops(), block.exit_pc()).is_some(),
+            "this block is natively compilable — native, not Backend A, runs it",
+        );
+        let retired = jit.hart.run_block(&block, &mut jit.bus).unwrap();
+
+        assert_eq!(retired, 4, "every op retired");
+        assert_eq!(jit.hart.x, interp.hart.x, "native registers match the interpreter");
+        assert_eq!(jit.hart.pc(), interp.hart.pc(), "native pc matches the interpreter");
     }
 
     /// Compile a straight run to IR, execute it once, and assert every register and

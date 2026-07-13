@@ -338,6 +338,64 @@ impl NativeBlock {
     }
 }
 
+/// A per-hart cache of compiled native blocks, keyed by entry PC. Mirrors the block
+/// cache's lifecycle: populated lazily, flushed with it on `satp`/`sfence` (stale
+/// translations ⇒ stale native code). A miss that isn't natively compilable caches
+/// `None`, so we don't re-attempt compilation every visit.
+pub(crate) struct NativeCache {
+    blocks: std::collections::HashMap<u64, Option<NativeBlock>>,
+}
+
+// SAFETY: a `NativeCache` owns its `ExecBuffer`s exclusively (no aliasing), and the
+// mmap'd code is immutable once installed and lives in process-global memory. Moving
+// the cache to another thread — which the audit does when it clones a `Machine` onto a
+// worker — is therefore sound. (`Machine: Send + Sync` requires this, since the raw
+// buffer pointer is otherwise neither.)
+unsafe impl Send for NativeCache {}
+unsafe impl Sync for NativeCache {}
+
+impl NativeCache {
+    pub(crate) fn new() -> Self {
+        Self { blocks: std::collections::HashMap::new() }
+    }
+
+    /// Drop every compiled block — the design's "rebuild lazily" invalidation, called
+    /// wherever the block cache flushes.
+    pub(crate) fn flush(&mut self) {
+        self.blocks.clear();
+    }
+
+    /// Run the block entered at `pc` natively, compiling + caching it on first visit.
+    /// Returns the exit (retired + resume PC), or `None` if the block isn't natively
+    /// compilable — the caller then runs Backend A.
+    pub(crate) fn run(
+        &mut self,
+        pc: u64,
+        ops: &[Op],
+        exit_pc: u64,
+        regs: &mut [u64; 32],
+    ) -> Option<NativeExit> {
+        let compiled = self.blocks.entry(pc).or_insert_with(|| NativeBlock::compile(ops, exit_pc));
+        compiled.as_ref().map(|block| block.run(regs))
+    }
+}
+
+impl Clone for NativeCache {
+    /// A cloned `Machine` (a snapshot/fork) starts with a **cold** native cache — the
+    /// code is a pure, rebuildable function of the immutable kernel, so it must not
+    /// enter the snapshot (the block cache does the same). This is why the raw-pointer
+    /// buffers never need to be `Clone`.
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl Default for NativeCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

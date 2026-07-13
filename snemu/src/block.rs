@@ -375,6 +375,16 @@ impl Block {
         self.ops.is_empty()
     }
 
+    /// The reified ops, for Backend B to lower to native code.
+    pub(crate) fn ops(&self) -> &[Op] {
+        &self.ops
+    }
+
+    /// The fall-through resume PC (used when the block has no terminating branch).
+    pub(crate) fn exit_pc(&self) -> u64 {
+        self.exit_pc
+    }
+
     /// Execute the block against `hart`/`bus`, returning the number of instructions
     /// it retired. Walks the reified ops in order. A `Branch` sets `pc` and ends the
     /// block; a `Load`/`Store` that page-faults takes the trap (setting `pc` to the
