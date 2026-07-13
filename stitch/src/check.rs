@@ -14,8 +14,8 @@ use crate::prelude::*;
 
 use alloc::collections::{BTreeMap, BTreeSet};
 
-use crate::ast::{BinOp, Field, Param, Type};
-use crate::core_ir::{CoreArg, CoreExpr, CoreExprKind, CoreItem};
+use crate::ast::{BinOp, Field, Param, Pattern, Type};
+use crate::core_ir::{CoreArg, CoreExpr, CoreExprKind, CoreItem, CoreMatchArm};
 use crate::lexer::Span;
 use crate::source::{SourceId, SourceMap};
 
@@ -91,6 +91,8 @@ struct Ctx<'a> {
     /// Each declared type → the contracts it conforms to (`on T : C`), for
     /// subtyping: a `T` value is accepted where a conformed-to `C` is expected.
     conformances: &'a BTreeMap<String, BTreeSet<String>>,
+    /// Each `sum` type → its variant names, for `match` exhaustiveness.
+    sums: &'a BTreeMap<String, Vec<String>>,
     /// The type of `@` in scope: the receiver's `Named` type inside an `on`
     /// method, `SelfTy` in a `contract` default, `Dyn` at top level.
     self_ty: Ty,
@@ -120,8 +122,90 @@ fn synth(expr: &CoreExpr, ctx: &Ctx, errors: &mut Vec<TypeError>) -> Ty {
         CoreExprKind::Binary { op, left, right } => {
             synth_binary(*op, left, right, expr.span, ctx, errors)
         }
+        CoreExprKind::Match { subject, arms } => synth_match(subject, arms, expr.span, ctx, errors),
         // Everything else is not yet understood: stay gradual (sound-by-omission).
         _ => Ty::Dyn,
+    }
+}
+
+/// Synthesize a `match`: synthesize the subject and every guard/arm body (for
+/// nested errors), and — when the subject has a known `sum` type — require the
+/// arms to cover every variant. The match's own type is `Dyn` for now (joining
+/// the arm types is a later refinement).
+fn synth_match(
+    subject: &CoreExpr,
+    arms: &[CoreMatchArm],
+    span: Span,
+    ctx: &Ctx,
+    errors: &mut Vec<TypeError>,
+) -> Ty {
+    let subject_ty = synth(subject, ctx, errors);
+    check_exhaustive(&subject_ty, arms, span, ctx, errors);
+    for arm in arms {
+        if let Some(guard) = &arm.guard {
+            synth(guard, ctx, errors);
+        }
+        synth(&arm.body, ctx, errors);
+    }
+    Ty::Dyn
+}
+
+/// Require a `match` over a known `sum` to cover every variant (or carry an
+/// unguarded catch-all). A missing variant is a spanned error naming it. A
+/// non-sum or unknown subject type is not checked (gradual).
+fn check_exhaustive(
+    subject_ty: &Ty,
+    arms: &[CoreMatchArm],
+    span: Span,
+    ctx: &Ctx,
+    errors: &mut Vec<TypeError>,
+) {
+    let Ty::Named { name, .. } = subject_ty else {
+        return;
+    };
+    let Some(variants) = ctx.sums.get(name) else {
+        return;
+    };
+    let mut covered = BTreeSet::new();
+    let mut has_catch_all = false;
+    for arm in arms {
+        // A guarded arm may not fire, so it can't be counted toward coverage.
+        if arm.guard.is_none() {
+            has_catch_all |= pattern_coverage(&arm.pattern, &mut covered);
+        }
+    }
+    if has_catch_all {
+        return;
+    }
+    let missing: Vec<&str> =
+        variants.iter().map(String::as_str).filter(|v| !covered.contains(*v)).collect();
+    if !missing.is_empty() {
+        errors.push(TypeError {
+            message: format!("non-exhaustive match: missing {}", missing.join(", ")),
+            span,
+        });
+    }
+}
+
+/// Record which variants a pattern covers into `covered`, returning whether it is
+/// an unguarded catch-all (matches any value). Constructor patterns cover their
+/// variant; `_`/bindings catch all; `|` alternatives combine.
+fn pattern_coverage(pattern: &Pattern, covered: &mut BTreeSet<String>) -> bool {
+    match pattern {
+        Pattern::Wildcard | Pattern::Binding(_) => true,
+        Pattern::Constructor { name, .. } => {
+            covered.insert(name.clone());
+            false
+        }
+        Pattern::Or(alternatives) => {
+            // Record every alternative's variants; the Or catches all if any does.
+            let mut catch_all = false;
+            for alt in alternatives {
+                catch_all = pattern_coverage(alt, covered) || catch_all;
+            }
+            catch_all
+        }
+        _ => false,
     }
 }
 
@@ -353,6 +437,19 @@ fn contains_self_type(ann: &Type) -> bool {
     }
 }
 
+/// Each `sum` type → its variant names, in declaration order.
+fn collect_sums(items: &[CoreItem]) -> BTreeMap<String, Vec<String>> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            CoreItem::Sum { name, variants, .. } => {
+                Some((name.clone(), variants.iter().map(|v| v.name.clone()).collect()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The names of every declared type — `prod`, `sum`, `contract`.
 fn collect_type_names(items: &[CoreItem]) -> BTreeSet<String> {
     items
@@ -428,6 +525,7 @@ pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
         ctors: collect_ctors(items, &types),
         funcs: collect_funcs(items, &types),
         conformances: collect_conformances(items),
+        sums: collect_sums(items),
         types,
     };
     let mut errors = Vec::new();
@@ -481,6 +579,7 @@ struct World {
     ctors: BTreeMap<String, Ctor>,
     funcs: BTreeMap<String, FnSig>,
     conformances: BTreeMap<String, BTreeSet<String>>,
+    sums: BTreeMap<String, Vec<String>>,
     types: BTreeSet<String>,
 }
 
@@ -503,6 +602,7 @@ impl World {
             ctors: &self.ctors,
             funcs: &self.funcs,
             conformances: &self.conformances,
+            sums: &self.sums,
             self_ty,
             locals,
         };
@@ -526,14 +626,30 @@ mod tests {
         let ctors = BTreeMap::new();
         let funcs = BTreeMap::new();
         let conformances = BTreeMap::new();
+        let sums = BTreeMap::new();
         let ctx = Ctx {
             ctors: &ctors,
             funcs: &funcs,
             conformances: &conformances,
+            sums: &sums,
             self_ty: Ty::Dyn,
             locals: TyEnv::new(),
         };
         super::synth(&core(src), &ctx, &mut Vec::new())
+    }
+
+    #[test]
+    fn the_real_stitch_programs_type_check_clean() {
+        // A regression guard: the actual `.st` code — the prelude stdlib and the
+        // stim editor FSM — must stay free of (false-positive) type warnings, so
+        // the gradual checker never flags correct real-world code.
+        let prelude = crate::lower::lower_items_to_core(&crate::interp::prelude_items());
+        assert_eq!(super::check_program(&prelude), Vec::new(), "prelude type-checks clean");
+        let stim = crate::lower::lower_items_to_core(
+            &crate::parser::parse_program(include_str!("../../fs-image/stim/stim.st"))
+                .expect("stim parses"),
+        );
+        assert_eq!(super::check_program(&stim), Vec::new(), "stim type-checks clean");
     }
 
     #[test]
@@ -793,6 +909,42 @@ mod tests {
         // `@` itself is the receiver's type.
         assert!(errors("prod P(n: Int)  on P { me() -> P = @ }").is_empty(), "@ is a P");
         assert_eq!(errors("prod P(n: Int)  on P { me() -> Str = @ }").len(), 1, "@ is a P, not Str");
+    }
+
+    #[test]
+    fn a_match_over_a_sum_must_cover_every_variant() {
+        // A `match` over a sum-typed subject that omits a variant is an error.
+        let src = "sum Shape = Circle(Int) | Rect(Int, Int)  area(s: Shape) = match s { Circle(r) => r }";
+        let errs = errors(src);
+        assert_eq!(errs.len(), 1, "Rect is not covered, got {errs:?}");
+        assert!(errs[0].message.contains("Rect"), "the error names the missing variant: {errs:?}");
+        // Covering every variant is clean.
+        assert!(
+            errors("sum Shape = Circle(Int) | Rect(Int, Int)  area(s: Shape) = match s { Circle(r) => r  Rect(w, h) => w }").is_empty(),
+            "all variants covered"
+        );
+        // A wildcard (or an `A | B` alternative) covers the rest.
+        assert!(
+            errors("sum Shape = Circle(Int) | Rect(Int, Int)  area(s: Shape) = match s { Circle(r) => r  _ => 0 }").is_empty(),
+            "wildcard covers the rest"
+        );
+        // A match on an unknown (unannotated) subject stays gradual.
+        assert!(errors("f(s) = match s { Circle(r) => r }").is_empty(), "Dyn subject → no check");
+        // An `A | B` alternative covers both variants; a bare `_` inside an Or
+        // catches all the rest.
+        assert!(
+            errors("sum T = A | B | C  f(t: T) = match t { A | B => 0  C => 1 }").is_empty(),
+            "an Or covers each of its alternatives"
+        );
+        assert!(
+            errors("sum T = A | B | C  f(t: T) = match t { A | _ => 0 }").is_empty(),
+            "an Or containing `_` catches all"
+        );
+        assert_eq!(
+            errors("sum T = A | B | C  f(t: T) = match t { A | B => 0 }").len(),
+            1,
+            "C is still missing behind an Or of A and B"
+        );
     }
 
     #[test]

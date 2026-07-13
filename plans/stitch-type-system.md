@@ -58,8 +58,16 @@ enum Ty {
 - **Stage 1 — skeleton + nominal checks** (this plan's steps). `Ty`, `synth`/`check`,
   `consistent`, spanned `TypeError`; check literals, function param/return vs body,
   constructor arg types, binary-op operand types, and calls. Wire in as a reported pass.
-- **Stage 2 — exhaustive `match`.** Over a sum subject, every variant covered (or a
-  `_`), else a spanned error naming the missing variants. Needs Stage 1's subject synth.
+- **Stage 2 — exhaustive `match` — ✅ DONE (2026-07-13).** `synth(Match)` →
+  `synth_match` (synth subject + guards + arm bodies) + `check_exhaustive`: when the
+  subject has a known `sum` type (`collect_sums` → `Ctx.sums`), the arms must cover every
+  variant or carry an unguarded catch-all, else a spanned error names the missing
+  variants. `pattern_coverage` handles `Constructor` (covers its variant), `Wildcard`/
+  `Binding` (catch-all), and `Or` (combines alternatives); guarded arms don't count
+  toward coverage. Match result type is `Dyn` for now (joining arm types is a
+  refinement). 608 lib + all integration green, **0 false positives** (existing matches
+  are exhaustive). Mutation 98/113 caught, 0 survivors. Pattern-binding variable types
+  still `Dyn` (a `Circle(r)` arm's `r` is unknown).
 - **Stage 3 — `@` self-type.** **Gating ✅ DONE (2026-07-12)**: `contains_self_type` +
   a check in `check_program` — `@` (`Type::SelfType`, incl. nested in a type arg /
   function / tuple) in a top-level `Func` signature is an error (naturally scoped:
