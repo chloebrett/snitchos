@@ -84,8 +84,8 @@ enum Ty {
   green, **zero false positives** on real `on`-block programs. Mutation 79/93 caught,
   0 survivors. (Sum-variant field access + `@method()` sibling-call return types still
   gradual/`Dyn`.)
-- **Stage 4 — generics + local inference.** `Ty::Var`, instantiation of `Maybe<T>` etc.,
-  bound checking (`T: Drawable`), the monomorphisation-relevant checks.
+- **Stage 4 — generics + local inference.** Broken down below (see *Stage 4 — Generics
+  breakdown*).
 - **Stage 5 — contract subtyping — ✅ DONE (2026-07-12).** Two cycles: **(A)** declared
   `prod`/`sum`/`contract` names in annotations resolve to `Named` (via `collect_type_names`
   threaded into `ty_of_annotation`; unknown names stay `Dyn`) — so `f() -> Point = "x"`
@@ -100,6 +100,68 @@ enum Ty {
   effect check: a body performing an effect must be under a declared/inherited `uses`.
   The headline feature; the runtime gate becomes a backstop.
 - **Later** — immutable-key (`Key`/`Hashable`) constraint, `Map`/`Set` key eligibility.
+
+---
+
+## Stage 4 — Generics breakdown (scoped 2026-07-13)
+
+**Pivotal fact:** generic *types* are supported syntactically (`prod P<T>`, `sum S<T>`,
+`contract C<T>` carry `generics`; `Maybe<Int>` annotations parse), but generic
+*functions/methods* are **not** — `Func`/`Method`/`On` have no `generics` field and
+`parse_func` reads `name` then `(` (so `id<T>(x)` is a parse error). That splits generics
+into two tracks: **A (generic types)** is checker-only and doable now; **B (generic
+functions)** needs front-end (parser + AST) work first.
+
+**Standing constraint:** the prelude is *all* generics (`Maybe`/`Result`/`List`/`Seq`,
+generic combinators). Every step must keep `the_real_stitch_programs_type_check_clean`
+green — i.e. **no false positives**. The rule of thumb: when a type argument can't be
+resolved/inferred, fall back to gradual (`Dyn` / arity-mismatch = compatible), never
+error. `Ty::Named.args` is currently *always* empty, so today generic types are matched
+by name only — that's the gradual baseline to preserve.
+
+### Track A — generic types (checker-only, no parser work)
+
+- **G1 — Type-argument annotations + gradual-arg consistency.** `ty_of_annotation`
+  recurses into `<…>` so `Maybe<Int>` → `Named{Maybe, [Int]}`. `consistent` for `Named`:
+  same name; if **both** sides carry args of equal arity, args must be pairwise-consistent;
+  if either side has **empty/mismatched-arity** args (unknown), it's gradual-compatible.
+  → `f() -> Maybe<Int> = Some(1)` stays clean (the `Some` result has empty args), but
+  `Maybe<Int>` vs `Maybe<Str>` is caught. *Small, mechanical; the Track-A prerequisite.*
+- **G2 — Generic constructor instantiation.** `Some(5)` → `Maybe<Int>`, `Cons(1, t)` →
+  `List<Int>`: a constructor knows its type's `generics` and which field carries which
+  param, so unify the argument types against the field types to solve the params and
+  yield `Named{Type, [solved…]}`. Unsolved params → `Dyn` arg (gradual). *Inference-lite
+  — one level, no unification engine. Medium; first real "solve a type variable".*
+
+### Track B — generic functions (needs front-end first, then inference)
+
+- **G3 — Generic function/method syntax (parser + AST, no checker logic).** Add
+  `generics: Vec<String>` to `Func`, `Method` (and thread through `CoreItem`/lowering);
+  parse `foo<T>(…)`. Optionally parse bounds `<T: Drawable>` here (needed by G6) — or
+  defer bounds to G6. *Front-end only; unblocks writing generic functions. No type
+  errors change.*
+- **G4 — Rigid type-params in generic definitions.** With G3's `generics`, checking
+  `id<T>(x: T) -> T = x` adds `T` to the in-scope type names so it resolves to a rigid
+  param (`Named{T}` suffices — same-name consistency makes `x: T` match `-> T`); a real
+  mismatch (`id<T>(x: T) -> Int = x`) is caught. *Checks generic **definitions**; no
+  call-site inference. Self-contained given G3.*
+- **G5 — Generic function-call inference (the hard part).** `id(5)` → solve `T = Int` →
+  result `Int`; `map(f, xs)` → solve `A`, `B`. Introduces flexible inference variables
+  (`Ty::Var(u32)`) + a unifier + substitution; instantiate a generic signature with fresh
+  vars, unify args against params, apply the solution to the return. Unsolvable → `Dyn`
+  (gradual, no false positive). *The unification engine; the biggest, riskiest step.*
+- **G6 — Bounds (`T: Drawable`).** At the instantiation site, the solved type must conform
+  to the bound (reuse the conformance table); inside a bounded body, `T` is known to
+  conform, so contract methods on it are allowed. *Depends on G4/G5 + bound syntax.*
+
+### Sequencing & pause points
+
+Order **G1 → G2** (deliver generic **types**, entirely in `check.rs`, low risk) — a
+coherent, shippable milestone on its own. **Reassess before Track B:** G3 is a
+front-end detour and G5 is a genuine unification engine (the checker's first). Decide
+then whether generic *functions* are worth that depth now, or whether generic *types*
+(A) plus the existing gradual fallback for generic functions is enough for a while.
+Bounds (G6) only matter once G4/G5 exist.
 
 ---
 
