@@ -525,7 +525,9 @@ fn sext32(v: u32) -> u64 {
 impl AluOp {
     /// Apply the op to two 64-bit operands (`b` is the immediate or `x[rs2]`).
     /// Shifts mask `b` to the width's shift range, exactly as the interpreter does.
-    fn apply(self, a: u64, b: u64) -> u64 {
+    /// `pub(crate)` so Backend B's tests can oracle native codegen against the same
+    /// semantics Backend A executes.
+    pub(crate) fn apply(self, a: u64, b: u64) -> u64 {
         let sh = (b & 0x3f) as u32; // RV64 shift amount
         let shw = (b & 0x1f) as u32; // .w shift amount
         match self {

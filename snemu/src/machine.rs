@@ -498,6 +498,17 @@ impl Machine {
         }
     }
 
+    /// Select **Backend B** (native AArch64 codegen) vs **Backend A** (the reified-`Op`
+    /// interpreter) for the block JIT on **every** hart. Off by default — A is the
+    /// oracle and the browser backend; B falls back to A per-block, so the on↔off A/B
+    /// must stay byte-identical. No effect unless the block JIT is also on and the host
+    /// supports native emission (aarch64/macos today).
+    pub fn set_native_jit(&mut self, on: bool) {
+        for hart in &mut self.harts {
+            hart.set_native_jit(on);
+        }
+    }
+
     /// Enable or disable block-executor register caching (M6 increment 4) on **every**
     /// hart. On by default; the on↔off A/B isolates the caching's speed effect.
     pub fn set_register_cache(&mut self, on: bool) {

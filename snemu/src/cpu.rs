@@ -281,6 +281,14 @@ pub(crate) struct Hart {
     /// run with it on can be proven identical to one with it off (the decode-cache
     /// philosophy — the interpreter stays the oracle).
     idle_skip: bool,
+    /// Whether the block JIT uses **Backend B** (native AArch64 codegen) instead of
+    /// **Backend A** (the reified-`Op` interpreter) to execute compiled blocks. Off by
+    /// default — A is the correct-by-construction oracle and the only backend that
+    /// runs in the browser. Independent of `block_cache`: B still needs A's frontend
+    /// (discovery/cache), and falls back to A for any block it can't emit natively, so
+    /// a run with B on must stay byte-identical to one with it off. Only consulted on
+    /// hosts where the `jit` module compiles (aarch64/macos today).
+    native_jit: bool,
     /// Diagnostic: supervisor timer interrupts actually delivered to this hart.
     timer_fires: u64,
 }
@@ -382,6 +390,12 @@ impl Cpu {
         self.hart.set_block_jit(on);
     }
 
+    /// Select Backend B (native codegen) vs Backend A (the `Op` interpreter) for the
+    /// block JIT on the lone hart. Off by default; A is the oracle.
+    pub fn set_native_jit(&mut self, on: bool) {
+        self.hart.set_native_jit(on);
+    }
+
     /// Enable/disable block-executor register caching on the lone hart.
     pub fn set_register_cache(&mut self, on: bool) {
         self.hart.set_register_cache(on);
@@ -422,6 +436,7 @@ impl Hart {
             block_cache: None,
             reg_cache: true,
             idle_skip: true,
+            native_jit: false,
             timer_fires: 0,
         }
     }
@@ -444,6 +459,21 @@ impl Hart {
     /// interpreter oracle). Starts from a cold cache; disabling drops it.
     pub(crate) fn set_block_jit(&mut self, on: bool) {
         self.block_cache = on.then(BlockCache::default);
+    }
+
+    /// Enable or disable **Backend B** (native codegen) for this hart's block JIT.
+    /// A pure speedup over Backend A, proven by the on↔off A/B; `false` is the
+    /// interpreter-over-IR oracle. Has effect only when the block JIT (frontend) is
+    /// also on and the host supports native emission.
+    pub(crate) fn set_native_jit(&mut self, on: bool) {
+        self.native_jit = on;
+    }
+
+    /// Whether Backend B (native codegen) is selected — the block executor reads this
+    /// to choose native execution vs. the reified-`Op` walk.
+    #[allow(dead_code, reason = "consulted once native block execution is wired (needs branch codegen first)")]
+    pub(crate) fn native_jit_enabled(&self) -> bool {
+        self.native_jit
     }
 
     /// Enable/disable register caching in the block executor (M6 increment 4). On by
