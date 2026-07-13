@@ -31,69 +31,97 @@ unsafe extern "C" {
     fn sys_icache_invalidate(start: *mut libc::c_void, len: libc::size_t);
 }
 
-/// A page of executable memory generated code lives in. Allocated `MAP_JIT` so the
-/// hardened runtime permits toggling it writable→executable per thread; [`install`]
-/// writes code and flips it to executable, [`as_ptr`] hands back a callable pointer.
-///
-/// [`install`]: ExecBuffer::install
-/// [`as_ptr`]: ExecBuffer::as_ptr
-pub(crate) struct ExecBuffer {
+/// One `MAP_JIT` region of executable memory: a bump-allocated chunk of the arena.
+struct Chunk {
     ptr: *mut u8,
-    len: usize,
+    cap: usize,
+    used: usize,
 }
 
-impl ExecBuffer {
-    /// Reserve `len` bytes (rounded up to a page) of `MAP_JIT` read/write/exec memory.
-    /// Panics if the mapping fails — a JIT with nowhere to write can't proceed.
-    pub(crate) fn new(len: usize) -> Self {
+impl Chunk {
+    /// Map a fresh `MAP_JIT` RWX region of at least `cap` bytes (rounded to a page).
+    fn new(cap: usize) -> Self {
         let page = 16 * 1024; // Apple Silicon page size
-        let len = len.max(1).div_ceil(page) * page;
+        let cap = cap.max(1).div_ceil(page) * page;
         // SAFETY: a standard anonymous mmap. `MAP_JIT` + RWX is the Apple-sanctioned
-        // way to get a JIT region under the hardened runtime; null addr lets the
-        // kernel choose. We check the result against `MAP_FAILED` below.
+        // way to get a JIT region under the hardened runtime; a null addr lets the
+        // kernel choose. Checked against `MAP_FAILED`.
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
-                len,
+                cap,
                 libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
                 libc::MAP_ANON | libc::MAP_PRIVATE | libc::MAP_JIT,
                 -1,
                 0,
             )
         };
-        assert!(ptr != libc::MAP_FAILED, "mmap MAP_JIT failed (JIT region)");
-        Self { ptr: ptr.cast(), len }
-    }
-
-    /// Copy `code` into the buffer and make it executable. The sequence is the W^X
-    /// dance: unlock writes for this thread, copy, re-lock (making it executable),
-    /// then flush the I-cache so the CPU fetches the freshly written bytes.
-    pub(crate) fn install(&mut self, code: &[u8]) {
-        assert!(code.len() <= self.len, "generated code exceeds the buffer");
-        // SAFETY: `write_protect(false)` makes this thread's MAP_JIT pages writable;
-        // `code` fits (checked); `copy` writes within the mapping; `write_protect(true)`
-        // restores execute permission before anyone calls in; `icache` flush covers
-        // exactly the region we wrote. The pointer stays valid for `self.len`.
-        unsafe {
-            pthread_jit_write_protect_np(0);
-            std::ptr::copy_nonoverlapping(code.as_ptr(), self.ptr, code.len());
-            pthread_jit_write_protect_np(1);
-            sys_icache_invalidate(self.ptr.cast(), code.len());
-        }
-    }
-
-    /// The entry pointer, to `transmute` into a callable `extern "C"` fn. The caller
-    /// asserts the buffer holds valid code matching the fn-pointer signature.
-    pub(crate) fn as_ptr(&self) -> *const u8 {
-        self.ptr.cast_const()
+        assert!(ptr != libc::MAP_FAILED, "mmap MAP_JIT failed (JIT arena)");
+        Self { ptr: ptr.cast(), cap, used: 0 }
     }
 }
 
-impl Drop for ExecBuffer {
+impl Drop for Chunk {
     fn drop(&mut self) {
-        // SAFETY: `ptr`/`len` are the exact mapping from `new`, unmapped once.
+        // SAFETY: `ptr`/`cap` are the exact mapping from `new`, unmapped once.
         unsafe {
-            libc::munmap(self.ptr.cast(), self.len);
+            libc::munmap(self.ptr.cast(), self.cap);
+        }
+    }
+}
+
+/// One bump size for the code arena. Blocks are a few hundred bytes, so a 1 MiB chunk
+/// holds thousands — amortising the `mmap` syscall from once-per-block to
+/// once-per-chunk (the whole point of the arena over the old page-per-block buffer).
+const CHUNK_BYTES: usize = 1 << 20;
+
+/// A growable arena of executable memory that compiled blocks are **bump-allocated**
+/// into. Replaces the old one-`mmap`-per-block scheme: a single `mmap` per 1 MiB chunk,
+/// and [`reset`](CodeArena::reset) rewinds every chunk to reuse the mapping on a cache
+/// flush (the caller drops the block pointers at the same instant, so no stale code
+/// executes).
+pub(crate) struct CodeArena {
+    chunks: Vec<Chunk>,
+}
+
+impl CodeArena {
+    pub(crate) fn new() -> Self {
+        Self { chunks: Vec::new() }
+    }
+
+    /// Copy `code` into the arena and return its entry pointer. Allocates a fresh chunk
+    /// when the current one can't fit it. The write itself is the W^X dance: unlock this
+    /// thread's `MAP_JIT` pages, copy, re-lock (making it executable), flush the I-cache.
+    /// Instructions are 4 bytes, so `used` stays 4-aligned.
+    pub(crate) fn install(&mut self, code: &[u8]) -> *const u8 {
+        let need = code.len();
+        if self.chunks.last().is_none_or(|c| c.cap - c.used < need) {
+            self.chunks.push(Chunk::new(CHUNK_BYTES.max(need)));
+        }
+        let chunk = self.chunks.last_mut().expect("just pushed a chunk");
+        // SAFETY: `dst` is within the chunk (room checked above). Unlocking makes this
+        // thread's MAP_JIT pages writable; the copy stays in bounds; re-locking restores
+        // execute permission before anyone calls in; the I-cache flush covers exactly the
+        // bytes written. The returned pointer is valid until `reset`/drop, and the caller
+        // (the block cache) drops it before either happens.
+        let dst = unsafe {
+            let dst = chunk.ptr.add(chunk.used);
+            pthread_jit_write_protect_np(0);
+            std::ptr::copy_nonoverlapping(code.as_ptr(), dst, need);
+            pthread_jit_write_protect_np(1);
+            sys_icache_invalidate(dst.cast(), need);
+            dst
+        };
+        chunk.used += need;
+        dst.cast_const()
+    }
+
+    /// Rewind every chunk to empty, keeping the mappings for reuse. Called on a cache
+    /// flush — safe because the block cache that owns the entry pointers is cleared at
+    /// the same moment, so no rewound-over code is ever executed.
+    pub(crate) fn reset(&mut self) {
+        for chunk in &mut self.chunks {
+            chunk.used = 0;
         }
     }
 }
@@ -219,11 +247,13 @@ pub(crate) struct NativeExit {
     pub pc: u64,
 }
 
-/// A block lowered to native AArch64 (Backend B). Compiled from the reified `Op` IR;
-/// runs against the guest register file passed by pointer and returns [`NativeExit`]
-/// — architecturally identical to Backend A walking the same ops.
+/// A block lowered to native AArch64 (Backend B) — an entry pointer into a
+/// [`CodeArena`]. Compiled from the reified `Op` IR; runs against the guest register
+/// file passed by pointer and returns [`NativeExit`], architecturally identical to
+/// Backend A walking the same ops. The arena owns the memory; the pointer is valid
+/// until the arena resets (which the block cache is cleared alongside).
 pub(crate) struct NativeBlock {
-    buf: ExecBuffer,
+    entry: *const u8,
 }
 
 impl NativeBlock {
@@ -235,11 +265,11 @@ impl NativeBlock {
     const T: u32 = 11; // extra scratch for branch/jump targets
     const U: u32 = 12;
 
-    /// Lower a block to native code, or `None` if any op isn't lowerable yet (a memory
+    /// Lower a block into `arena`, or `None` if any op isn't lowerable yet (a memory
     /// op, or an ALU family Backend B doesn't emit) — `None` means "run on Backend A".
     /// A block ends at its terminator (`Branch`/`Jump`/`JumpReg`), which sets the exit
     /// PC; a block with no terminator falls through to `exit_pc`.
-    pub(crate) fn compile(ops: &[Op], exit_pc: u64) -> Option<Self> {
+    pub(crate) fn compile_into(ops: &[Op], exit_pc: u64, arena: &mut CodeArena) -> Option<Self> {
         let retired = u16::try_from(ops.len()).ok()?; // blocks are length-capped
         let mut code = Code::new();
         let mut terminated = false;
@@ -305,9 +335,7 @@ impl NativeBlock {
         code.movz(0, retired); // x0 = retired
         code.ret();
 
-        let mut buf = ExecBuffer::new(code.bytes().len());
-        buf.install(code.bytes());
-        Some(Self { buf })
+        Some(Self { entry: arena.install(code.bytes()) })
     }
 
     /// Store scratch `A` (the op's result) into guest `x[rd]`, skipping `rd == 0`
@@ -328,12 +356,12 @@ impl NativeBlock {
 
     /// Execute the block against `regs`, returning the retired count + resume PC.
     pub(crate) fn run(&self, regs: &mut [u64; 32]) -> NativeExit {
-        // SAFETY: `compile` emitted a function of exactly this C ABI — one pointer arg
-        // (the register-file base) returning a two-word `NativeExit` in x0/x1 — that
-        // only reads/writes the 32 words behind `regs` and clobbers caller-saved
-        // scratch. The buffer is executable and outlives the call (borrowed via `&self`).
+        // SAFETY: `compile_into` emitted a function of exactly this C ABI — one pointer
+        // arg (the register-file base) returning a two-word `NativeExit` in x0/x1 — that
+        // only reads/writes the 32 words behind `regs` and clobbers caller-saved scratch.
+        // `entry` points into a live arena chunk (not yet reset), executable.
         let f: extern "C" fn(*mut u64) -> NativeExit =
-            unsafe { std::mem::transmute(self.buf.as_ptr()) };
+            unsafe { std::mem::transmute(self.entry) };
         f(regs.as_mut_ptr())
     }
 }
@@ -344,25 +372,28 @@ impl NativeBlock {
 /// `None`, so we don't re-attempt compilation every visit.
 pub(crate) struct NativeCache {
     blocks: std::collections::HashMap<u64, Option<NativeBlock>>,
+    arena: CodeArena,
 }
 
-// SAFETY: a `NativeCache` owns its `ExecBuffer`s exclusively (no aliasing), and the
-// mmap'd code is immutable once installed and lives in process-global memory. Moving
-// the cache to another thread — which the audit does when it clones a `Machine` onto a
-// worker — is therefore sound. (`Machine: Send + Sync` requires this, since the raw
-// buffer pointer is otherwise neither.)
+// SAFETY: a `NativeCache` owns its `CodeArena` (and thus its mmap'd chunks)
+// exclusively (no aliasing), and the code is immutable once installed and lives in
+// process-global memory. Moving the cache to another thread — which the audit does
+// when it clones a `Machine` onto a worker — is therefore sound. (`Machine: Send +
+// Sync` requires this, since the raw chunk pointers are otherwise neither.)
 unsafe impl Send for NativeCache {}
 unsafe impl Sync for NativeCache {}
 
 impl NativeCache {
     pub(crate) fn new() -> Self {
-        Self { blocks: std::collections::HashMap::new() }
+        Self { blocks: std::collections::HashMap::new(), arena: CodeArena::new() }
     }
 
-    /// Drop every compiled block — the design's "rebuild lazily" invalidation, called
-    /// wherever the block cache flushes.
+    /// Drop every compiled block and rewind the arena — the design's "rebuild lazily"
+    /// invalidation, called wherever the block cache flushes. Clearing `blocks` (the
+    /// entry pointers) *before* resetting the arena is what makes the rewind safe.
     pub(crate) fn flush(&mut self) {
         self.blocks.clear();
+        self.arena.reset();
     }
 
     /// Run the block entered at `pc` natively, compiling + caching it on first visit.
@@ -375,7 +406,10 @@ impl NativeCache {
         exit_pc: u64,
         regs: &mut [u64; 32],
     ) -> Option<NativeExit> {
-        let compiled = self.blocks.entry(pc).or_insert_with(|| NativeBlock::compile(ops, exit_pc));
+        let compiled = self
+            .blocks
+            .entry(pc)
+            .or_insert_with(|| NativeBlock::compile_into(ops, exit_pc, &mut self.arena));
         compiled.as_ref().map(|block| block.run(regs))
     }
 }
@@ -403,14 +437,14 @@ mod tests {
     #[test]
     fn a_generated_function_returning_a_constant_runs() {
         // `movz x0, #42 ; ret` — the smallest possible generated function.
-        let mut buf = ExecBuffer::new(64);
+        let mut arena = CodeArena::new();
         let mut code = Code::new();
         code.movz(0, 42);
         code.ret();
-        buf.install(code.bytes());
-        // SAFETY: the buffer holds a valid `movz;ret` with the C ABI (no args, u64
+        let entry = arena.install(code.bytes());
+        // SAFETY: the arena holds a valid `movz;ret` with the C ABI (no args, u64
         // return in x0), matching this fn-pointer type.
-        let f: extern "C" fn() -> u64 = unsafe { std::mem::transmute(buf.as_ptr()) };
+        let f: extern "C" fn() -> u64 = unsafe { std::mem::transmute(entry) };
         assert_eq!(f(), 42);
     }
 
@@ -463,7 +497,8 @@ mod tests {
         let (exp_retired, exp_pc) = ref_exec(&mut expected, ops, exit_pc);
 
         let mut regs = init;
-        let block = NativeBlock::compile(ops, exit_pc).expect("block is emittable");
+        let mut arena = CodeArena::new();
+        let block = NativeBlock::compile_into(ops, exit_pc, &mut arena).expect("block is emittable");
         let exit = block.run(&mut regs);
 
         assert_eq!(exit.retired, exp_retired, "retired count");
@@ -543,24 +578,56 @@ mod tests {
     #[test]
     fn a_block_with_a_memory_op_does_not_compile() {
         // Memory ops aren't emitted yet → None, so the caller falls back to Backend A.
+        let mut arena = CodeArena::new();
         let with_load = vec![Op::Load { funct3: 3, rd: 1, rs1: 2, imm: 0, pc: 0x1000 }];
-        assert!(NativeBlock::compile(&with_load, 0).is_none(), "a load isn't emittable yet");
+        assert!(
+            NativeBlock::compile_into(&with_load, 0, &mut arena).is_none(),
+            "a load isn't emittable yet",
+        );
         // A shift ALU also isn't emitted yet.
         let with_shift = vec![Op::AluReg { alu: AluOp::Sll, rd: 1, rs1: 2, rs2: 3 }];
-        assert!(NativeBlock::compile(&with_shift, 0).is_none(), "shifts aren't emittable yet");
+        assert!(
+            NativeBlock::compile_into(&with_shift, 0, &mut arena).is_none(),
+            "shifts aren't emittable yet",
+        );
     }
 
     #[test]
     fn a_generated_function_can_add_its_two_arguments() {
         // `add x0, x0, x1 ; ret` — proves argument passing (x0, x1) + a real ALU op.
-        let mut buf = ExecBuffer::new(64);
+        let mut arena = CodeArena::new();
         let mut code = Code::new();
         code.add(0, 0, 1);
         code.ret();
-        buf.install(code.bytes());
-        // SAFETY: the buffer holds `add x0,x0,x1; ret`, matching this two-arg C ABI.
-        let f: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(buf.as_ptr()) };
+        let entry = arena.install(code.bytes());
+        // SAFETY: the arena holds `add x0,x0,x1; ret`, matching this two-arg C ABI.
+        let f: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(entry) };
         assert_eq!(f(3, 4), 7);
         assert_eq!(f(1000, 337), 1337);
+    }
+
+    #[test]
+    fn the_arena_bump_allocates_many_blocks_and_resets() {
+        // Two distinct blocks in one arena get distinct entries and both run; reset
+        // rewinds so the space is reused (the flush path).
+        let mut arena = CodeArena::new();
+        let a = NativeBlock::compile_into(
+            &[Op::SetImm { rd: 1, value: 7 }],
+            0x10,
+            &mut arena,
+        )
+        .unwrap();
+        let b = NativeBlock::compile_into(
+            &[Op::SetImm { rd: 1, value: 9 }],
+            0x20,
+            &mut arena,
+        )
+        .unwrap();
+        let mut regs = [0u64; 32];
+        assert_eq!(a.run(&mut regs).pc, 0x10);
+        assert_eq!(regs[1], 7);
+        assert_eq!(b.run(&mut regs).pc, 0x20);
+        assert_eq!(regs[1], 9);
+        arena.reset(); // safe once the block handles above are dropped by the caller
     }
 }

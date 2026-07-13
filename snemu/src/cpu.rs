@@ -1916,8 +1916,9 @@ mod tests {
         let mut jit = cpu_with(program);
         jit.hart.set_native_jit(true);
         let block = jit.hart.compile_block(&jit.bus);
+        let mut arena = crate::jit::CodeArena::new();
         assert!(
-            crate::jit::NativeBlock::compile(block.ops(), block.exit_pc()).is_some(),
+            crate::jit::NativeBlock::compile_into(block.ops(), block.exit_pc(), &mut arena).is_some(),
             "this block is natively compilable — native, not Backend A, runs it",
         );
         let retired = jit.hart.run_block(&block, &mut jit.bus).unwrap();
