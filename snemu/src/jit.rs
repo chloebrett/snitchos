@@ -17,7 +17,7 @@
 // (lower `Op`s, run compiled blocks) consume every item here; the allow goes then.
 #![allow(dead_code, reason = "increment-0 JIT scaffolding; wired in by later increments")]
 
-use crate::block::{AluOp, Op};
+use crate::block::{AluOp, Cond, Op};
 
 // Apple-specific libSystem entry points, not surfaced by the `libc` crate. Linked by
 // default on macOS (every binary links libSystem).
@@ -164,6 +164,34 @@ impl Code {
         self.movk(xd, (value >> 32) as u16, 2);
         self.movk(xd, (value >> 48) as u16, 3);
     }
+
+    /// `mov Xd, Xm` — register move (`orr Xd, xzr, Xm`).
+    fn mov_reg(&mut self, xd: u32, xm: u32) {
+        self.emit(0xAA00_0000 | (xm << 16) | (31 << 5) | xd);
+    }
+
+    /// `cmp Xn, Xm` — set the condition flags from `Xn − Xm` (`subs xzr, Xn, Xm`).
+    fn cmp(&mut self, xn: u32, xm: u32) {
+        self.emit(0xEB00_0000 | (xm << 16) | (xn << 5) | 31);
+    }
+
+    /// `csel Xd, Xn, Xm, cond` — `Xd = cond ? Xn : Xm`, reading the flags `cmp` set.
+    fn csel(&mut self, xd: u32, xn: u32, xm: u32, cond: u32) {
+        self.emit(0x9A80_0000 | (xm << 16) | (cond << 12) | (xn << 5) | xd);
+    }
+}
+
+/// The AArch64 condition code that matches a RISC-V branch condition after a `cmp`
+/// of the two operands (signed conditions use N/V, unsigned use C).
+fn cond_code(cond: Cond) -> u32 {
+    match cond {
+        Cond::Eq => 0b0000,  // EQ
+        Cond::Ne => 0b0001,  // NE
+        Cond::Lt => 0b1011,  // LT (signed <)
+        Cond::Ge => 0b1010,  // GE (signed >=)
+        Cond::Ltu => 0b0011, // LO/CC (unsigned <)
+        Cond::Geu => 0b0010, // HS/CS (unsigned >=)
+    }
 }
 
 /// The AArch64 opcode family for a RISC-V `AluOp` Backend B can emit as a single
@@ -182,25 +210,39 @@ fn alu_base(alu: AluOp) -> Option<u32> {
     })
 }
 
+/// What a native block returns: the instructions it retired and the PC to resume at
+/// (a branch's resolved target, a jump's target, or the fall-through `exit_pc`).
+/// `#[repr(C)]` two-`u64` struct → the AArch64 C ABI returns it in `x0`/`x1`.
+#[repr(C)]
+pub(crate) struct NativeExit {
+    pub retired: u64,
+    pub pc: u64,
+}
+
 /// A block lowered to native AArch64 (Backend B). Compiled from the reified `Op` IR;
-/// runs against the guest register file passed by pointer, returning the retired
-/// instruction count — architecturally identical to Backend A walking the same ops.
+/// runs against the guest register file passed by pointer and returns [`NativeExit`]
+/// — architecturally identical to Backend A walking the same ops.
 pub(crate) struct NativeBlock {
     buf: ExecBuffer,
 }
 
 impl NativeBlock {
-    /// Guest register-file base pointer (first C-ABI arg) and two caller-saved scratch
+    /// Guest register-file base pointer (first C-ABI arg) and caller-saved scratch
     /// registers. A leaf function: no callee-saved clobbers, so no prologue/epilogue.
     const REGS: u32 = 0;
     const A: u32 = 9;
     const B: u32 = 10;
+    const T: u32 = 11; // extra scratch for branch/jump targets
+    const U: u32 = 12;
 
-    /// Lower an all-emittable, fall-through block (ALU + `SetImm` only) to native code,
-    /// or `None` if any op isn't lowerable yet — a branch/jump/memory op, or an ALU
-    /// family increment 1 doesn't cover. `None` means "run this block on Backend A".
-    pub(crate) fn compile(ops: &[Op]) -> Option<Self> {
+    /// Lower a block to native code, or `None` if any op isn't lowerable yet (a memory
+    /// op, or an ALU family Backend B doesn't emit) — `None` means "run on Backend A".
+    /// A block ends at its terminator (`Branch`/`Jump`/`JumpReg`), which sets the exit
+    /// PC; a block with no terminator falls through to `exit_pc`.
+    pub(crate) fn compile(ops: &[Op], exit_pc: u64) -> Option<Self> {
+        let retired = u16::try_from(ops.len()).ok()?; // blocks are length-capped
         let mut code = Code::new();
+        let mut terminated = false;
         for op in ops {
             match *op {
                 Op::SetImm { rd, value } => {
@@ -221,14 +263,46 @@ impl NativeBlock {
                     code.alu(base, Self::A, Self::A, Self::B);
                     Self::write_rd(&mut code, rd);
                 }
-                // Block exits + memory ops aren't emitted in increment 1 → Backend A.
-                _ => return None,
+                // Terminators set x1 = exit pc, then fall through to the shared
+                // `finish` (x0 = retired; ret). A terminator is always the block's
+                // last op, so nothing follows.
+                Op::Branch { cond, rs1, rs2, taken, not_taken } => {
+                    code.ldr(Self::A, Self::REGS, u32::from(rs1) * 8);
+                    code.ldr(Self::B, Self::REGS, u32::from(rs2) * 8);
+                    code.cmp(Self::A, Self::B);
+                    code.mov_imm64(Self::T, taken);
+                    code.mov_imm64(Self::U, not_taken);
+                    code.csel(1, Self::T, Self::U, cond_code(cond));
+                    terminated = true;
+                }
+                Op::Jump { rd, link, target } => {
+                    Self::write_link(&mut code, rd, link);
+                    code.mov_imm64(1, target);
+                    terminated = true;
+                }
+                Op::JumpReg { rd, rs1, imm, link } => {
+                    // Target from rs1 (+imm, clear bit 0) *before* writing rd — they
+                    // may alias, and the target uses rs1's pre-write value.
+                    code.ldr(Self::A, Self::REGS, u32::from(rs1) * 8);
+                    code.mov_imm64(Self::B, imm as u64);
+                    code.alu(0x8B00_0000, Self::A, Self::A, Self::B); // add
+                    code.mov_imm64(Self::B, !1u64);
+                    code.alu(0x8A00_0000, Self::A, Self::A, Self::B); // and → clear bit 0
+                    Self::write_link(&mut code, rd, link);
+                    code.mov_reg(1, Self::A);
+                    terminated = true;
+                }
+                // Memory ops aren't emitted yet → Backend A.
+                Op::Load { .. } | Op::Store { .. } => return None,
+            }
+            if terminated {
+                break;
             }
         }
-        // Fall-through: every op retired. Return the count in x0 (the reg-file pointer
-        // is dead now), then return to the caller.
-        let retired = u16::try_from(ops.len()).ok()?; // blocks are length-capped
-        code.movz(0, retired);
+        if !terminated {
+            code.mov_imm64(1, exit_pc); // fall-through PC
+        }
+        code.movz(0, retired); // x0 = retired
         code.ret();
 
         let mut buf = ExecBuffer::new(code.bytes().len());
@@ -244,13 +318,22 @@ impl NativeBlock {
         }
     }
 
-    /// Execute the block against `regs`, returning the instructions it retired.
-    pub(crate) fn run(&self, regs: &mut [u64; 32]) -> u64 {
+    /// Write a jump's link address into `x[rd]` (skipping `rd == 0`), via scratch `T`.
+    fn write_link(code: &mut Code, rd: u8, link: u64) {
+        if rd != 0 {
+            code.mov_imm64(Self::T, link);
+            code.str(Self::T, Self::REGS, u32::from(rd) * 8);
+        }
+    }
+
+    /// Execute the block against `regs`, returning the retired count + resume PC.
+    pub(crate) fn run(&self, regs: &mut [u64; 32]) -> NativeExit {
         // SAFETY: `compile` emitted a function of exactly this C ABI — one pointer arg
-        // (the register-file base) and a `u64` return — that only reads/writes the 32
-        // words behind `regs` and clobbers caller-saved scratch. The buffer is
-        // executable and outlives the call (borrowed through `&self`).
-        let f: extern "C" fn(*mut u64) -> u64 = unsafe { std::mem::transmute(self.buf.as_ptr()) };
+        // (the register-file base) returning a two-word `NativeExit` in x0/x1 — that
+        // only reads/writes the 32 words behind `regs` and clobbers caller-saved
+        // scratch. The buffer is executable and outlives the call (borrowed via `&self`).
+        let f: extern "C" fn(*mut u64) -> NativeExit =
+            unsafe { std::mem::transmute(self.buf.as_ptr()) };
         f(regs.as_mut_ptr())
     }
 }
@@ -273,23 +356,61 @@ mod tests {
         assert_eq!(f(), 42);
     }
 
-    use crate::block::{AluOp, Op};
+    use crate::block::{AluOp, Cond, Op};
 
-    /// Reference: apply an op to a register file with the *same* `AluOp::apply`
-    /// semantics Backend A uses, x0 hardwired zero. Backend A is already proven
-    /// identical to the interpreter, so native == this == A == interpreter.
-    fn ref_apply(regs: &mut [u64; 32], op: &Op) {
-        let (rd, value) = match *op {
-            Op::SetImm { rd, value } => (rd, value),
-            Op::AluImm { alu, rd, rs1, imm } => (rd, alu.apply(regs[rs1 as usize], imm as u64)),
-            Op::AluReg { alu, rd, rs1, rs2 } => {
-                (rd, alu.apply(regs[rs1 as usize], regs[rs2 as usize]))
+    /// Reference execution mirroring Backend A over the same ops (using the canonical
+    /// `AluOp::apply` / `Cond::eval`), returning `(retired, resume_pc)` and mutating
+    /// `regs`. Backend A is already proven identical to the interpreter, so native ==
+    /// this == A == interpreter.
+    fn ref_exec(regs: &mut [u64; 32], ops: &[Op], exit_pc: u64) -> (u64, u64) {
+        let w = |regs: &mut [u64; 32], rd: u8, v: u64| {
+            if rd != 0 {
+                regs[rd as usize] = v;
             }
-            _ => return,
         };
-        if rd != 0 {
-            regs[rd as usize] = value;
+        for (i, op) in ops.iter().enumerate() {
+            let retired = i as u64 + 1;
+            match *op {
+                Op::SetImm { rd, value } => w(regs, rd, value),
+                Op::AluImm { alu, rd, rs1, imm } => {
+                    w(regs, rd, alu.apply(regs[rs1 as usize], imm as u64));
+                }
+                Op::AluReg { alu, rd, rs1, rs2 } => {
+                    w(regs, rd, alu.apply(regs[rs1 as usize], regs[rs2 as usize]));
+                }
+                Op::Branch { cond, rs1, rs2, taken, not_taken } => {
+                    let take = cond.eval(regs[rs1 as usize], regs[rs2 as usize]);
+                    return (retired, if take { taken } else { not_taken });
+                }
+                Op::Jump { rd, link, target } => {
+                    w(regs, rd, link);
+                    return (retired, target);
+                }
+                Op::JumpReg { rd, rs1, imm, link } => {
+                    let target = regs[rs1 as usize].wrapping_add(imm as u64) & !1;
+                    w(regs, rd, link);
+                    return (retired, target);
+                }
+                Op::Load { .. } | Op::Store { .. } => unreachable!("no mem ops in these tests"),
+            }
         }
+        (ops.len() as u64, exit_pc)
+    }
+
+    /// Run `ops` natively and against the reference; assert identical retired count,
+    /// resume PC, and full register file — the codegen oracle.
+    #[track_caller]
+    fn assert_native_matches(ops: &[Op], init: [u64; 32], exit_pc: u64) {
+        let mut expected = init;
+        let (exp_retired, exp_pc) = ref_exec(&mut expected, ops, exit_pc);
+
+        let mut regs = init;
+        let block = NativeBlock::compile(ops, exit_pc).expect("block is emittable");
+        let exit = block.run(&mut regs);
+
+        assert_eq!(exit.retired, exp_retired, "retired count");
+        assert_eq!(exit.pc, exp_pc, "resume pc");
+        assert_eq!(regs, expected, "register file");
     }
 
     #[test]
@@ -303,34 +424,72 @@ mod tests {
             Op::AluReg { alu: AluOp::Or, rd: 10, rs1: 8, rs2: 9 },
             Op::AluImm { alu: AluOp::Add, rd: 0, rs1: 7, imm: 0xff }, // rd=0: discarded write
         ];
-        let mut regs = [0u64; 32];
-        regs[5] = 111;
-        regs[6] = 222;
-
-        let mut expected = regs;
-        for op in &ops {
-            ref_apply(&mut expected, op);
-        }
-
-        let block = NativeBlock::compile(&ops).expect("an all-ALU block is emittable");
-        let retired = block.run(&mut regs);
-
-        assert_eq!(retired, ops.len() as u64, "a fall-through block retires every op");
-        assert_eq!(regs, expected, "native register file matches the Op semantics");
+        let mut init = [0u64; 32];
+        init[5] = 111;
+        init[6] = 222;
+        // A fall-through block resumes at exit_pc.
+        assert_native_matches(&ops, init, 0xffff_ffff_8020_1234);
     }
 
     #[test]
-    fn a_block_with_an_unemittable_op_does_not_compile() {
-        // A branch (a block exit) isn't part of increment 1's ALU set → None, so the
-        // caller falls back to Backend A. Also a shift, not yet emitted.
-        use crate::block::Cond;
-        let with_branch = vec![
-            Op::SetImm { rd: 5, value: 1 },
-            Op::Branch { cond: Cond::Eq, rs1: 5, rs2: 0, taken: 0x1000, not_taken: 0x1004 },
-        ];
-        assert!(NativeBlock::compile(&with_branch).is_none(), "a branch isn't emittable yet");
+    fn a_native_conditional_branch_resolves_both_directions() {
+        let mut init = [0u64; 32];
+        init[5] = 7;
+        init[6] = 7;
+        // rs1==rs2 → Eq taken; also exercise Lt (signed) with 7 vs 7 (not <).
+        let taken = 0x1000;
+        let not_taken = 0x1004;
+        // Equal operands: Beq → taken, Bne → not_taken, Blt → not_taken.
+        assert_native_matches(
+            &[Op::Branch { cond: Cond::Eq, rs1: 5, rs2: 6, taken, not_taken }],
+            init,
+            0,
+        );
+        assert_native_matches(
+            &[Op::Branch { cond: Cond::Ne, rs1: 5, rs2: 6, taken, not_taken }],
+            init,
+            0,
+        );
+        // Signed vs unsigned: rs1 = -1 (0xFFFF..), rs2 = 1. Signed -1 < 1 (Lt taken);
+        // unsigned 0xFFFF.. > 1 (Ltu not-taken) — proves the flag choice.
+        let mut signed = [0u64; 32];
+        signed[5] = u64::MAX;
+        signed[6] = 1;
+        for cond in [Cond::Lt, Cond::Ge, Cond::Ltu, Cond::Geu] {
+            assert_native_matches(
+                &[Op::Branch { cond, rs1: 5, rs2: 6, taken, not_taken }],
+                signed,
+                0,
+            );
+        }
+    }
+
+    #[test]
+    fn native_jump_and_jumpreg_set_the_link_and_target() {
+        let mut init = [0u64; 32];
+        init[5] = 0x2000_0003; // JumpReg base; +imm then clear bit 0
+        // JAL: link into rd, jump to a constant target.
+        assert_native_matches(
+            &[Op::Jump { rd: 1, link: 0xffff_0004, target: 0x8000_0000 }],
+            init,
+            0,
+        );
+        // JALR: target = (x5 + 8) & ~1, link into rd (aliasing rd=5 with rs1=5).
+        assert_native_matches(
+            &[Op::JumpReg { rd: 5, rs1: 5, imm: 8, link: 0xabc0_0004 }],
+            init,
+            0,
+        );
+    }
+
+    #[test]
+    fn a_block_with_a_memory_op_does_not_compile() {
+        // Memory ops aren't emitted yet → None, so the caller falls back to Backend A.
+        let with_load = vec![Op::Load { funct3: 3, rd: 1, rs1: 2, imm: 0, pc: 0x1000 }];
+        assert!(NativeBlock::compile(&with_load, 0).is_none(), "a load isn't emittable yet");
+        // A shift ALU also isn't emitted yet.
         let with_shift = vec![Op::AluReg { alu: AluOp::Sll, rd: 1, rs1: 2, rs2: 3 }];
-        assert!(NativeBlock::compile(&with_shift).is_none(), "shifts aren't emittable yet");
+        assert!(NativeBlock::compile(&with_shift, 0).is_none(), "shifts aren't emittable yet");
     }
 
     #[test]

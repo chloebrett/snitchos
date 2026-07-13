@@ -552,7 +552,9 @@ impl AluOp {
 
 impl Cond {
     /// Whether the branch is taken for operands `a = x[rs1]`, `b = x[rs2]`.
-    fn eval(self, a: u64, b: u64) -> bool {
+    /// `pub(crate)` so Backend B's tests can oracle native branch codegen against the
+    /// same condition Backend A evaluates.
+    pub(crate) fn eval(self, a: u64, b: u64) -> bool {
         match self {
             Cond::Eq => a == b,
             Cond::Ne => a != b,
