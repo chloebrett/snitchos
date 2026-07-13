@@ -591,6 +591,32 @@ fn a_delete_populates_the_clipboard_so_paste_can_move_it() {
 }
 
 #[test]
+fn esc_and_unknown_keys_cancel_operator_pending() {
+    let pend = r#"Editor(..initialState("abc"), col: 1, pending: Pending(op: OpDelete))"#;
+    // d then Esc aborts the operator: back to plain Normal, no edit, buffer intact.
+    assert_eq!(step_mode(pend, "Esc"), s("Normal"));
+    assert_eq!(step_effect(pend, "Esc"), s("Redraw"));
+    assert_eq!(pending_op(pend, "Esc"), s("None"));
+    assert_eq!(
+        fsm(&format!(r#"step({pend}, "Esc").state.lines"#)),
+        fsm(r#"initialState("abc").lines"#)
+    );
+    // An unknown key (`z`) also cancels — the operator is dropped and the key is
+    // swallowed (not run as a Normal command); the buffer is untouched.
+    assert_eq!(step_effect(pend, "z"), s("Redraw"));
+    assert_eq!(pending_op(pend, "z"), s("None"));
+    assert_eq!(
+        fsm(&format!(r#"step({pend}, "z").state.lines"#)),
+        fsm(r#"initialState("abc").lines"#)
+    );
+    // After cancelling, the editor is clean Normal — the next key acts normally.
+    assert_eq!(
+        lines_col(&format!(r#"step(step({pend}, "z").state, "x").state"#)),
+        line_and_col("ac", 1)
+    );
+}
+
+#[test]
 fn zero_and_dollar_jump_to_the_line_ends() {
     // "hello" with the cursor mid-line: `0` → column 0, `$` → the last character
     // (col 4). `$` lands *on* the last char (len−1), unlike `A` which appends at len.

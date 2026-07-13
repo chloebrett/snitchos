@@ -534,12 +534,14 @@ stepNormal(state, key) =
 // and clears the accumulator. Non-motion keys cancel (refined in 2.4/2.8). The
 // change is measured against a pending-cleared baseline, so a no-op range (a motion
 // that selects nothing) spans nothing even though clearing pending changed the state.
-stepOperatorPending(state, key) =
+stepOperatorPending(state, key) = match {
+    key == "Esc" => redraw(clearPending(state))
     isSameOp(state.pending.op, key) => applyLinewiseSelf(state)
-    | match motionTarget(state, key) {
+    _ => match motionTarget(state, key) {
         Some(target) => editIfChanged(clearPending(state), clearPending(applyMotionOp(state, target)), opSpanName(state.pending.op))
         None => redraw(clearPending(state))
     }
+}
 
 // The top-level Normal table: navigation, small edits, mode/operator entry. Unbound
 // keys are Noops.

@@ -1,8 +1,16 @@
 # Design: stim Phase 2 — the operator-pending core
 
-**Status**: Design (pre-implementation). The load-bearing phase of the stim grammar
-(`plans/stim-grammar.md`). Phase 0 + Phase 1 are shipped; this introduces the
+**Status**: ✅ SHIPPED. The load-bearing phase of the stim grammar
+(`plans/stim-grammar.md`). Phase 0 + Phase 1 were shipped; this introduced the
 `pending` accumulator that turns `stepNormal` from a flat table into a tiny parser.
+All 8 increments (2.1–2.8) landed, TDD'd through `stitch/tests/stim_fsm.rs` (47 FSM
+tests) + the driver tests. Delivered: `d`/`c`/`y` × motions, `dd`/`cc`/`yy`, `Y`,
+`p`/`P`, deletes-cut-to-register, and clean operator-pending cancel (explicit `Esc`
+arm + unknown-key swallow). Notes vs the design below: (1) `Target` gained an
+`inclusive: Bool` (only `$` is inclusive) so `d$` deletes through EOL; (2) `x`/`X`/`D`
+were refactored to one-liners over `deleteCharRange` and inherit the register cut;
+(3) the range-attribute-on-span decision held — operators emit names
+(`stim.delete`/`change`/`yank`/`paste`), range payload deferred.
 
 ## The one generalization
 
