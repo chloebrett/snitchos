@@ -143,25 +143,12 @@ moveUp(state) = moveByKey(state, "k")
 moveDown(state) = moveByKey(state, "j")
 
 // `x` — delete the character under the cursor. No-op at end of line (nothing under
-// the cursor); the cursor re-clamps onto the shortened line.
-deleteChar(state) =
-    state.col < Str.length(lineAt(state, state.row)) => {
-        let line = lineAt(state, state.row)
-        let edited = Str.slice(line, 0, state.col) + Str.slice(line, state.col + 1, Str.length(line))
-        let moved = Editor(..state, lines: List.set(state.lines, state.row, edited))
-        Editor(..moved, col: clampedCol(moved, state.row))
-    }
-    | state
+// the cursor). Cuts into the register and re-clamps the cursor.
+deleteChar(state) = deleteCharRange(state, state.row, state.col, state.col + 1)
 
 // `X` — delete the character *before* the cursor (the mirror of `x`). No-op at
 // column 0, where nothing precedes the cursor.
-deleteBefore(state) =
-    state.col > 0 => {
-        let line = lineAt(state, state.row)
-        let edited = Str.slice(line, 0, state.col - 1) + Str.slice(line, state.col, Str.length(line))
-        Editor(..state, lines: List.set(state.lines, state.row, edited), col: state.col - 1)
-    }
-    | state
+deleteBefore(state) = deleteCharRange(state, state.row, state.col - 1, state.col)
 
 // `~` — toggle the case of the character under the cursor and advance one column.
 // A char equal to its own lowercase is lowercase-or-non-alpha → uppercase it; else
@@ -190,13 +177,9 @@ joinLines(state) =
     }
     | state
 
-// `D` — delete from the cursor to the end of the line, keeping `[0, col)`. The
-// cursor re-clamps onto the shortened line.
-deleteToEol(state) = {
-    let line = lineAt(state, state.row)
-    let moved = Editor(..state, lines: List.set(state.lines, state.row, Str.slice(line, 0, state.col)))
-    Editor(..moved, col: clampedCol(moved, state.row))
-}
+// `D` — delete from the cursor to the end of the line, keeping `[0, col)`. Cuts into
+// the register and re-clamps the cursor.
+deleteToEol(state) = deleteCharRange(state, state.row, state.col, Str.length(lineAt(state, state.row)))
 
 // `C` — change to end of line: `D` then enter Insert.
 changeToEol(state) = enterInsert(deleteToEol(state))
@@ -238,6 +221,49 @@ openAbove(state) = Editor(
     col: 0,
     mode: Insert,
 )
+
+// Insert every line of `newLines` into `lines` starting at index `at`, in order
+// (each insert shifts the tail, so successive indices `at + i` land contiguously).
+insertLinesFrom(lines, at, newLines, i) =
+    i >= count(newLines) => lines
+    | insertLinesFrom(List.insert(lines, at + i, unwrapOr(List.at(newLines, i), "")), at, newLines, i + 1)
+
+// Paste the register's text into the current line at column `at`, cursor landing on
+// the last pasted character.
+pasteCharwise(state, at) = {
+    let line = lineAt(state, state.row)
+    let text = state.clipboard.text
+    let edited = Str.slice(line, 0, at) + text + Str.slice(line, at, Str.length(line))
+    Editor(..state, lines: List.set(state.lines, state.row, edited), col: at + Str.length(text) - 1)
+}
+
+// Paste the register's lines into the buffer at row `at`, cursor at the first pasted
+// line. A multi-line register (from a linewise yank/delete of several lines) splits
+// back into that many lines.
+pasteLinewise(state, at) = Editor(
+    ..state,
+    lines: insertLinesFrom(state.lines, at, Str.split(state.clipboard.text, "\n"), 0),
+    row: at,
+    col: 0,
+)
+
+// Paste dispatched by the register's wiseness: `charAt` is the column for a charwise
+// paste, `lineIdx` the row for a linewise one.
+doPaste(state, charAt, lineIdx) = match state.clipboard.wise {
+    Charwise => pasteCharwise(state, charAt)
+    Linewise => pasteLinewise(state, lineIdx)
+}
+
+// `p` — paste after: charwise after the cursor (col + 1, clamped), linewise on a new
+// line below.
+pasteAfter(state) = {
+    let len = Str.length(lineAt(state, state.row))
+    let at = state.col + 1 > len => len | state.col + 1
+    doPaste(state, at, state.row + 1)
+}
+
+// `P` — paste before: charwise at the cursor, linewise on a new line above.
+pasteBefore(state) = doPaste(state, state.col, state.row)
 
 // `Esc` — return to Normal mode. The inverse of `enterInsert`; buffer/cursor kept.
 enterNormal(state) = Editor(..state, mode: Normal)
@@ -364,13 +390,16 @@ enterOp(state, op) = Editor(..state, pending: Pending(op: op))
 clearPending(state) = Editor(..state, pending: Pending(op: OpNone))
 
 // Delete a charwise (intra-line) column range `[lo, hi)` on `row`, clamped to the
-// line, returning the cursor to the range start.
+// line, cutting the removed text into the unnamed register (charwise) and returning
+// the cursor to the range start. An empty range leaves the register untouched.
 deleteCharRange(state, row, lo, hi) = {
     let line = lineAt(state, row)
     let len = Str.length(line)
     let a = lo < 0 => 0 | (lo > len => len | lo)
     let b = hi < 0 => 0 | (hi > len => len | hi)
-    let moved = Editor(..state, lines: List.set(state.lines, row, Str.slice(line, 0, a) + Str.slice(line, b, len)), col: a)
+    let cut = Str.slice(line, a, b)
+    let based = cut == "" => state | Editor(..state, clipboard: Register(text: cut, wise: Charwise))
+    let moved = Editor(..based, lines: List.set(based.lines, row, Str.slice(line, 0, a) + Str.slice(line, b, len)), col: a)
     Editor(..moved, col: clampedCol(moved, row))
 }
 
@@ -466,11 +495,12 @@ removeLinesFrom(lines, lo, n) =
 // deleting everything leaves one empty line. The cursor drops to column 0 of the
 // line that now sits at `lo`, clamped to the last line.
 deleteLines(state, lo, hi) = {
+    let cut = joinLinesRange(state, lo, hi)
     let remaining = removeLinesFrom(state.lines, lo, hi - lo + 1)
     let lines2 = count(remaining) <= 0 => [""] | remaining
     let last = count(lines2) - 1
     let row = lo > last => last | lo
-    Editor(..state, lines: lines2, row: row, col: 0)
+    Editor(..state, lines: lines2, row: row, col: 0, clipboard: Register(text: cut, wise: Linewise))
 }
 
 // Whether `key` re-presses the pending operator — the doubled-operator case (`dd`).
@@ -529,6 +559,8 @@ stepTopLevel(state, key) = match {
     key == "C" => edit(changeToEol(state), "stim.change-to-eol")
     key == "s" => edit(substitute(state), "stim.substitute")
     key == "Y" => editIfChanged(state, yankLine(state), "stim.yank")
+    key == "p" => editIfChanged(state, pasteAfter(state), "stim.paste")
+    key == "P" => editIfChanged(state, pasteBefore(state), "stim.paste")
     key == "r" => redraw(enterReplace(state))
     key == "d" => redraw(enterOp(state, OpDelete))
     key == "c" => redraw(enterOp(state, OpChange))

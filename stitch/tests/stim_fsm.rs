@@ -550,6 +550,47 @@ fn capital_y_yanks_the_current_line() {
 }
 
 #[test]
+fn p_and_capital_p_paste_charwise_from_the_clipboard() {
+    // A charwise register pastes inline: p after the cursor, P before it.
+    let clip = r#"Editor(..initialState("ac"), col: 0, clipboard: Register(text: "X", wise: Charwise))"#;
+    // p inserts "X" after col 0 → "aXc", cursor on the pasted char (col 1).
+    assert_eq!(lines_col(&format!(r#"step({clip}, "p").state"#)), line_and_col("aXc", 1));
+    // P inserts "X" before col 0 → "Xac", cursor on the pasted char (col 0).
+    assert_eq!(lines_col(&format!(r#"step({clip}, "P").state"#)), line_and_col("Xac", 0));
+    assert_eq!(step_effect(clip, "p"), s("Edit"));
+    // An empty (never-yanked) register pastes nothing → Redraw.
+    assert_eq!(step_effect(r#"initialState("ac")"#, "p"), s("Redraw"));
+}
+
+#[test]
+fn p_and_capital_p_paste_linewise_opening_a_line() {
+    // A linewise register opens a new line: p below the cursor row, P above.
+    let clip = r#"Editor(..initialState("a\nb"), row: 0, clipboard: Register(text: "X", wise: Linewise))"#;
+    // p opens "X" below row 0 → ["a","X","b"], cursor at the new line (row 1, col 0).
+    assert_eq!(lines_row_col(&format!(r#"step({clip}, "p").state"#)), buffer(&["a", "X", "b"], 1, 0));
+    // P opens "X" above row 0 → ["X","a","b"], cursor at row 0.
+    assert_eq!(lines_row_col(&format!(r#"step({clip}, "P").state"#)), buffer(&["X", "a", "b"], 0, 0));
+    // A multi-line linewise register pastes all of its lines.
+    let clip2 = r#"Editor(..initialState("a"), row: 0, clipboard: Register(text: "X\nY", wise: Linewise))"#;
+    assert_eq!(lines_row_col(&format!(r#"step({clip2}, "p").state"#)), buffer(&["a", "X", "Y"], 1, 0));
+}
+
+#[test]
+fn a_delete_populates_the_clipboard_so_paste_can_move_it() {
+    // dd cuts the line into the register (linewise) — the basis for a line move via p.
+    let after_dd = r#"step(Editor(..initialState("a\nb\nc"), row: 0, pending: Pending(op: OpDelete)), "d").state"#;
+    assert_eq!(clipboard_text(after_dd), s("a"));
+    assert_eq!(clipboard_wise(after_dd), s("Linewise"));
+    // x cuts the char under the cursor (charwise).
+    let after_x = r#"step(initialState("abc"), "x").state"#;
+    assert_eq!(clipboard_text(after_x), s("a"));
+    assert_eq!(clipboard_wise(after_x), s("Charwise"));
+    // A no-op delete (x at end of line) does not clobber the register.
+    let noop_x = r#"step(Editor(..initialState("ab"), col: 2, clipboard: Register(text: "keep", wise: Charwise)), "x").state"#;
+    assert_eq!(clipboard_text(noop_x), s("keep"));
+}
+
+#[test]
 fn zero_and_dollar_jump_to_the_line_ends() {
     // "hello" with the cursor mid-line: `0` → column 0, `$` → the last character
     // (col 4). `$` lands *on* the last char (len−1), unlike `A` which appends at len.
