@@ -60,8 +60,22 @@ enum Ty {
   constructor arg types, binary-op operand types, and calls. Wire in as a reported pass.
 - **Stage 2 — exhaustive `match`.** Over a sum subject, every variant covered (or a
   `_`), else a spanned error naming the missing variants. Needs Stage 1's subject synth.
-- **Stage 3 — `@` self-type.** Meaning (`@` = receiver's own type) + gating (parse/type
-  error outside an `on`/`contract` method).
+- **Stage 3 — `@` self-type.** **Gating ✅ DONE (2026-07-12)**: `contains_self_type` +
+  a check in `check_program` — `@` (`Type::SelfType`, incl. nested in a type arg /
+  function / tuple) in a top-level `Func` signature is an error (naturally scoped:
+  `check_program` only walks `Func`, so `On`/`Contract` method `@`s are untouched).
+  Error at the body span (annotations are unspanned; a precise `@` span would need
+  parser support — follow-up). **Meaning ✅ DONE (2026-07-12)** with method-body
+  checking: `Ctx.self_ty` holds the receiver type, `synth(SelfRef)` returns it, and
+  `synth_field` looks up `@field` against the receiver `prod`'s declared field types.
+
+- **Method-body checking ✅ DONE (2026-07-12).** `check_program` refactored around a
+  `World` (shared decls) + `check_callable`; now checks `on Type { … }` method bodies
+  (`@` = the receiver `Named` type) and `contract` default-method bodies (`@` = `SelfTy`)
+  against their return types, in addition to `Func` bodies. 607 lib + all integration
+  green, **zero false positives** on real `on`-block programs. Mutation 79/93 caught,
+  0 survivors. (Sum-variant field access + `@method()` sibling-call return types still
+  gradual/`Dyn`.)
 - **Stage 4 — generics + local inference.** `Ty::Var`, instantiation of `Maybe<T>` etc.,
   bound checking (`T: Drawable`), the monomorphisation-relevant checks.
 - **Stage 5 — contract subtyping — ✅ DONE (2026-07-12).** Two cycles: **(A)** declared

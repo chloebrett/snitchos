@@ -14,7 +14,7 @@ use crate::prelude::*;
 
 use alloc::collections::{BTreeMap, BTreeSet};
 
-use crate::ast::{BinOp, Field, Type};
+use crate::ast::{BinOp, Field, Param, Type};
 use crate::core_ir::{CoreArg, CoreExpr, CoreExprKind, CoreItem};
 use crate::lexer::Span;
 use crate::source::{SourceId, SourceMap};
@@ -91,6 +91,9 @@ struct Ctx<'a> {
     /// Each declared type → the contracts it conforms to (`on T : C`), for
     /// subtyping: a `T` value is accepted where a conformed-to `C` is expected.
     conformances: &'a BTreeMap<String, BTreeSet<String>>,
+    /// The type of `@` in scope: the receiver's `Named` type inside an `on`
+    /// method, `SelfTy` in a `contract` default, `Dyn` at top level.
+    self_ty: Ty,
     locals: TyEnv,
 }
 
@@ -110,6 +113,9 @@ fn synth(expr: &CoreExpr, ctx: &Ctx, errors: &mut Vec<TypeError>) -> Ty {
         // A variable's type comes from the environment (a parameter, for now);
         // names the checker isn't tracking (globals, other functions) are `Dyn`.
         CoreExprKind::Var(name) => ctx.locals.get(name).cloned().unwrap_or(Ty::Dyn),
+        // `@` — the receiver, whose type the context carries.
+        CoreExprKind::SelfRef => ctx.self_ty.clone(),
+        CoreExprKind::Field { object, name } => synth_field(object, name, ctx, errors),
         CoreExprKind::Call { callee, args } => synth_call(callee, args, ctx, errors),
         CoreExprKind::Binary { op, left, right } => {
             synth_binary(*op, left, right, expr.span, ctx, errors)
@@ -240,6 +246,23 @@ fn synth_call(
         return sig.ret.clone();
     }
     Ty::Dyn
+}
+
+/// Synthesize a field access `object.name`. When `object` has a declared product
+/// type, the field's declared type is looked up (a `prod`'s constructor is keyed
+/// by the type name); otherwise — a sum, a builtin, an unknown field — it's `Dyn`.
+fn synth_field(object: &CoreExpr, name: &str, ctx: &Ctx, errors: &mut Vec<TypeError>) -> Ty {
+    let Ty::Named { name: type_name, .. } = synth(object, ctx, errors) else {
+        return Ty::Dyn;
+    };
+    let Some(ctor) = ctx.ctors.get(&type_name) else {
+        return Ty::Dyn;
+    };
+    ctor
+        .fields
+        .iter()
+        .find(|f| f.label.as_deref() == Some(name))
+        .map_or(Ty::Dyn, |f| f.ty.clone())
 }
 
 /// Check `expr` against an `expected` type, pushing a mismatch error (at the
@@ -401,36 +424,91 @@ fn collect_funcs(items: &[CoreItem], types: &BTreeSet<String>) -> BTreeMap<Strin
 #[must_use]
 pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
     let types = collect_type_names(items);
-    let ctors = collect_ctors(items, &types);
-    let funcs = collect_funcs(items, &types);
-    let conformances = collect_conformances(items);
+    let world = World {
+        ctors: collect_ctors(items, &types),
+        funcs: collect_funcs(items, &types),
+        conformances: collect_conformances(items),
+        types,
+    };
     let mut errors = Vec::new();
     for item in items {
-        if let CoreItem::Func { name, params, ret, body, .. } = item {
-            // Gate `@`: the self-type is meaningless in a top-level function (no
-            // receiver). Methods are `On`/`Contract` items, not checked in this
-            // loop, so their `@` is untouched.
-            let self_in_signature = params.iter().filter_map(|p| p.ty.as_ref()).any(contains_self_type)
-                || ret.as_ref().is_some_and(contains_self_type);
-            if self_in_signature {
-                errors.push(TypeError {
-                    message: format!(
-                        "`@` (self-type) is only valid in a method; `{name}` has no receiver"
-                    ),
-                    span: body.span,
-                });
+        match item {
+            CoreItem::Func { name, params, ret, body, .. } => {
+                // Gate `@`: the self-type is meaningless in a top-level function
+                // (no receiver). Methods carry a receiver, so they're exempt.
+                if signature_mentions_self(params, ret.as_ref()) {
+                    errors.push(TypeError {
+                        message: format!(
+                            "`@` (self-type) is only valid in a method; `{name}` has no receiver"
+                        ),
+                        span: body.span,
+                    });
+                }
+                world.check_callable(params, ret.as_ref(), body, Ty::Dyn, &mut errors);
             }
-            // Bind each parameter to its declared type (unannotated → `Dyn`).
-            let locals: TyEnv = params
-                .iter()
-                .map(|p| (p.name.clone(), p.ty.as_ref().map_or(Ty::Dyn, |t| ty_of_annotation(t, &types))))
-                .collect();
-            let ctx = Ctx { ctors: &ctors, funcs: &funcs, conformances: &conformances, locals };
-            let expected = ret.as_ref().map_or(Ty::Dyn, |t| ty_of_annotation(t, &types));
-            check(body, &expected, &ctx, &mut errors);
+            // `on Type { … }` method bodies check with `@` = the receiver's type.
+            CoreItem::On { target, methods, .. } => {
+                let self_ty = ty_of_annotation(target, &world.types);
+                for method in methods {
+                    if let Some(body) = &method.body {
+                        world.check_callable(&method.params, method.ret.as_ref(), body, self_ty.clone(), &mut errors);
+                    }
+                }
+            }
+            // `contract` default methods check with `@` = the abstract self.
+            CoreItem::Contract { methods, .. } => {
+                for method in methods {
+                    if let Some(body) = &method.body {
+                        world.check_callable(&method.params, method.ret.as_ref(), body, Ty::SelfTy, &mut errors);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     errors
+}
+
+/// Whether a callable's signature mentions the self-type `@` in any parameter or
+/// its return.
+fn signature_mentions_self(params: &[Param], ret: Option<&Type>) -> bool {
+    params.iter().filter_map(|p| p.ty.as_ref()).any(contains_self_type)
+        || ret.is_some_and(contains_self_type)
+}
+
+/// The program-wide declarations, shared while checking every body.
+struct World {
+    ctors: BTreeMap<String, Ctor>,
+    funcs: BTreeMap<String, FnSig>,
+    conformances: BTreeMap<String, BTreeSet<String>>,
+    types: BTreeSet<String>,
+}
+
+impl World {
+    /// Check one callable's body against its declared return type, with its
+    /// parameters bound and `@` bound to `self_ty`.
+    fn check_callable(
+        &self,
+        params: &[Param],
+        ret: Option<&Type>,
+        body: &CoreExpr,
+        self_ty: Ty,
+        errors: &mut Vec<TypeError>,
+    ) {
+        let locals: TyEnv = params
+            .iter()
+            .map(|p| (p.name.clone(), p.ty.as_ref().map_or(Ty::Dyn, |t| ty_of_annotation(t, &self.types))))
+            .collect();
+        let ctx = Ctx {
+            ctors: &self.ctors,
+            funcs: &self.funcs,
+            conformances: &self.conformances,
+            self_ty,
+            locals,
+        };
+        let expected = ret.map_or(Ty::Dyn, |t| ty_of_annotation(t, &self.types));
+        check(body, &expected, &ctx, errors);
+    }
 }
 
 #[cfg(test)]
@@ -452,6 +530,7 @@ mod tests {
             ctors: &ctors,
             funcs: &funcs,
             conformances: &conformances,
+            self_ty: Ty::Dyn,
             locals: TyEnv::new(),
         };
         super::synth(&core(src), &ctx, &mut Vec::new())
@@ -652,6 +731,7 @@ mod tests {
         assert_eq!(errors("foo() -> @ = foo()").len(), 1, "@ return outside a method");
         assert_eq!(errors("foo(x: @) = x").len(), 1, "@ param outside a method");
         assert_eq!(errors("foo() -> Maybe<@> = foo()").len(), 1, "@ nested in a type argument");
+        assert_eq!(errors("foo() -> @ -> Int = foo()").len(), 1, "@ on one side of a function type");
         // A signature without `@` is clean.
         assert!(errors("foo(x: Int) -> Int = x").is_empty(), "no @ → clean");
         // Inside an `on` method, `@` is allowed (methods aren't gated here).
@@ -676,6 +756,43 @@ mod tests {
             errors(r#"f() -> Unknown = "x""#).is_empty(),
             "unknown type name → Dyn → clean"
         );
+    }
+
+    #[test]
+    fn a_method_body_is_checked_against_its_return_type() {
+        // An `on` method's body is checked like a function's.
+        assert_eq!(
+            errors(r#"prod P(n: Int)  on P { m() -> Int = "x" }"#).len(),
+            1,
+            "Str method body ≠ Int return"
+        );
+        assert!(
+            errors(r#"prod P(n: Int)  on P { m() -> Str = "x" }"#).is_empty(),
+            "a matching method body is clean"
+        );
+        // A `contract` default method's body is checked too.
+        assert_eq!(
+            errors(r#"contract C { greet() -> Int = "x" }"#).len(),
+            1,
+            "default method Str ≠ Int return"
+        );
+    }
+
+    #[test]
+    fn the_receiver_and_its_fields_are_typed_in_a_method() {
+        // `@n` reads the receiver's field `n` (Int).
+        assert_eq!(
+            errors("prod P(n: Int)  on P { m() -> Str = @n }").len(),
+            1,
+            "@n is Int, not the declared Str return"
+        );
+        assert!(
+            errors("prod P(n: Int)  on P { m() -> Int = @n }").is_empty(),
+            "@n Int matches an Int return"
+        );
+        // `@` itself is the receiver's type.
+        assert!(errors("prod P(n: Int)  on P { me() -> P = @ }").is_empty(), "@ is a P");
+        assert_eq!(errors("prod P(n: Int)  on P { me() -> Str = @ }").len(), 1, "@ is a P, not Str");
     }
 
     #[test]
