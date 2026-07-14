@@ -660,6 +660,51 @@ fn a_count_repeats_x_and_scales_operators() {
 }
 
 #[test]
+fn word_motions_move_by_words_within_the_line() {
+    let line = r#"initialState("foo bar baz")"#;
+    // w advances to the next word start.
+    assert_eq!(row_col(&format!(r#"step({line}, "w").state"#)), ints(0, 4));
+    assert_eq!(row_col(&format!(r#"step(Editor(..{line}, col: 4), "w").state"#)), ints(0, 8));
+    // e advances to the end of the current/next word.
+    assert_eq!(row_col(&format!(r#"step({line}, "e").state"#)), ints(0, 2));
+    assert_eq!(row_col(&format!(r#"step(Editor(..{line}, col: 2), "e").state"#)), ints(0, 6));
+    // b goes back to the previous word start.
+    assert_eq!(row_col(&format!(r#"step(Editor(..{line}, col: 8), "b").state"#)), ints(0, 4));
+    assert_eq!(row_col(&format!(r#"step(Editor(..{line}, col: 4), "b").state"#)), ints(0, 0));
+    // 2w moves two words (count rides the existing machinery).
+    assert_eq!(row_col(&format!(r#"step(Editor(..{line}, count: 2), "w").state"#)), ints(0, 8));
+}
+
+#[test]
+fn operators_consume_word_motions() {
+    // dw deletes from the cursor to the next word start.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("foo bar"), pending: Pending(op: OpDelete)), "w").state"#),
+        line_and_col("bar", 0)
+    );
+    // de deletes through the end of the word (e is inclusive).
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("foo bar"), pending: Pending(op: OpDelete)), "e").state"#),
+        line_and_col(" bar", 0)
+    );
+    // db deletes back to the previous word start.
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("foo bar"), col: 4, pending: Pending(op: OpDelete)), "b").state"#),
+        line_and_col("bar", 0)
+    );
+    // dw on the last word deletes to end of line (the motion clamps within the line).
+    assert_eq!(
+        lines_col(r#"step(Editor(..initialState("foo bar"), col: 4, pending: Pending(op: OpDelete)), "w").state"#),
+        line_and_col("foo ", 4)
+    );
+    // cw changes over the word range and enters Insert.
+    assert_eq!(
+        step_mode(r#"Editor(..initialState("foo bar"), pending: Pending(op: OpChange))"#, "w"),
+        s("Insert")
+    );
+}
+
+#[test]
 fn zero_and_dollar_jump_to_the_line_ends() {
     // "hello" with the cursor mid-line: `0` → column 0, `$` → the last character
     // (col 4). `$` lands *on* the last char (len−1), unlike `A` which appends at len.

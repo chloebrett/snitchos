@@ -113,6 +113,58 @@ firstNonBlankCol(state) = {
 // Clamp a row index into the buffer `[0, count − 1]`.
 clampRow(state, r) = r < 0 => 0 | (r > count(state.lines) - 1 => count(state.lines) - 1 | r)
 
+// --- Word motions (whitespace-delimited "words"; v1 treats `w` like `W` — a run of
+// non-space chars — so punctuation is not yet its own word). Within-line only;
+// cross-line word motion is deferred. ---
+
+// Forward: the first space index at/after `i` (or `len`) — the end of a non-space run.
+scanWordEnd(line, i, len) = match {
+    i >= len => i
+    Str.slice(line, i, i + 1) == " " => i
+    _ => scanWordEnd(line, i + 1, len)
+}
+
+// Forward: the first non-space index at/after `i` (or `len`) — skips a run of spaces.
+scanSpaces(line, i, len) = match {
+    i >= len => i
+    Str.slice(line, i, i + 1) == " " => scanSpaces(line, i + 1, len)
+    _ => i
+}
+
+// Backward: the first non-space index at/below `i` (or -1) — skips spaces leftward.
+scanSpacesBack(line, i) = match {
+    i < 0 => i
+    Str.slice(line, i, i + 1) == " " => scanSpacesBack(line, i - 1)
+    _ => i
+}
+
+// Backward: the start of the word containing `i` (walk left while the char to the
+// left is non-space).
+scanWordStartBack(line, i) = match {
+    i <= 0 => 0
+    Str.slice(line, i - 1, i) == " " => i
+    _ => scanWordStartBack(line, i - 1)
+}
+
+// `w` — the next word start (or line end if none): skip the current non-space run,
+// then the following spaces. Exclusive.
+wordForwardCol(line, c) = scanSpaces(line, scanWordEnd(line, c, Str.length(line)), Str.length(line))
+
+// `e` — the end of the current/next word (inclusive): skip spaces from `c + 1`, then
+// take that word's last char. Stays put if no word lies ahead.
+wordEndCol(line, c) = {
+    let len = Str.length(line)
+    let start = scanSpaces(line, c + 1, len)
+    start >= len => c | scanWordEnd(line, start, len) - 1
+}
+
+// `b` — the previous word start (exclusive, backward): skip spaces left of the
+// cursor, then walk to that word's start.
+wordBackCol(line, c) = {
+    let start = scanSpacesBack(line, c - 1)
+    start < 0 => 0 | scanWordStartBack(line, start)
+}
+
 // A motion's target position + wiseness, or `None` for a non-motion key. THE single
 // motion definition — consumed both bare (`moveTo`, wiseness ignored) and as an
 // operator's range endpoint (Phase 2.3+). One `motionTarget` powers `l` and `dl`.
@@ -124,6 +176,9 @@ motionTarget(state, key) = match {
     key == "^" => Some(Target(row: state.row, col: firstNonBlankCol(state), wise: Charwise, inclusive: false))
     key == "j" => Some(Target(row: clampRow(state, state.row + 1), col: state.col, wise: Linewise, inclusive: false))
     key == "k" => Some(Target(row: clampRow(state, state.row - 1), col: state.col, wise: Linewise, inclusive: false))
+    key == "w" => Some(Target(row: state.row, col: wordForwardCol(lineAt(state, state.row), state.col), wise: Charwise, inclusive: false))
+    key == "e" => Some(Target(row: state.row, col: wordEndCol(lineAt(state, state.row), state.col), wise: Charwise, inclusive: true))
+    key == "b" => Some(Target(row: state.row, col: wordBackCol(lineAt(state, state.row), state.col), wise: Charwise, inclusive: false))
     _ => None
 }
 
@@ -621,6 +676,9 @@ stepTopLevelBody(state, key) = match {
     key == "k" => redraw(countedMotion(state, key))
     key == "h" => redraw(countedMotion(state, key))
     key == "l" => redraw(countedMotion(state, key))
+    key == "w" => redraw(countedMotion(state, key))
+    key == "e" => redraw(countedMotion(state, key))
+    key == "b" => redraw(countedMotion(state, key))
     key == "0" => redraw(moveByKey(state, key))
     key == "$" => redraw(moveByKey(state, key))
     key == "^" => redraw(moveByKey(state, key))
