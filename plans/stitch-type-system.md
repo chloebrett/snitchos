@@ -96,9 +96,8 @@ enum Ty {
   from resolving user type names. Mutation 74 → 61 caught / 13 unviable / 0 survivors.
   (Method-body checking — `on`/`contract` methods — still deferred; only `Func` bodies
   are checked.)
-- **Stage 6 — capabilities as effects.** Lift `uses` from the runtime gate to a static
-  effect check: a body performing an effect must be under a declared/inherited `uses`.
-  The headline feature; the runtime gate becomes a backstop.
+- **Stage 6 — capabilities as effects.** The headline feature. Broken down below (see
+  *Stage 6 — Capabilities-as-effects breakdown*).
 - **Later** — immutable-key (`Key`/`Hashable`) constraint, `Map`/`Set` key eligibility.
 
 ---
@@ -168,6 +167,69 @@ front-end detour and G5 is a genuine unification engine (the checker's first). D
 then whether generic *functions* are worth that depth now, or whether generic *types*
 (A) plus the existing gradual fallback for generic functions is enough for a while.
 Bounds (G6) only matter once G4/G5 exist.
+
+---
+
+## Stage 6 — Capabilities-as-effects breakdown (scoped 2026-07-15)
+
+**The headline feature** — "capabilities are tracked in the type system." Lift `uses`
+from a *runtime* authority gate to a *compile-time* effect check. Two directions, and the
+*reverse* one is the real prize (uniquely static):
+
+- **Under-declared → error** (unsafe): a body performs an effect it doesn't declare.
+  Partly duplicates the runtime gate (a nicer, earlier backstop).
+- **Over-declared → warning** (non-minimal): a body declares a cap it never exercises.
+  The runtime *cannot* tell you this — holding unused authority is silently fine at
+  runtime — so it's a purely-static least-authority win ([[project_explicit_authority_shell_idea]]).
+
+**Ground truth already in the tree:**
+- Native → cap table (centralize the scattered `refuse(env, name, cap)` in `natives.rs`):
+  `emit`/`span`→`Telemetry`, `print`/`writeConsole`→`ConsoleOut`, `readLine`/`readByte`→
+  `ConsoleIn`, `fsWrite`→`FsWrite`, `readFile`→`FsRead`. An "effect" is a `Call` whose
+  callee is one of these names.
+- `uses: Vec<String>` on `CoreItem::Func` + `CoreMethod` (⚠️ spans dropped in lowering —
+  the surface `Effect{name, span}` becomes a bare `String`; the reverse warning's span
+  falls back to the body until a lowering tweak preserves `uses` spans).
+- `without Cap { … }` **attenuates** authority; `handle` does **not** (the runtime gate
+  fires *before* the handler, so a handled effect still needs its cap — match that).
+
+**Constraint:** prelude clean. Valid functions' `uses` are already accurate (else they'd
+fail the runtime gate today), so the **forward** check should be clean out of the box.
+The **reverse** check is riskier: it needs a *complete* over-approximation of `required`,
+or it false-warns "unused" on a cap that's actually needed via a path the analysis missed
+(higher-order, dynamic dispatch, `Dyn`). Hence it stays a warning, and conservative.
+
+### Sub-steps
+
+- **C1 — Native requirements + intra-function forward check.** A native→cap table; walk a
+  body collecting the caps of the effect-natives it *directly* calls; error when a
+  required cap isn't in the function's declared `uses`. (No call-graph propagation yet.)
+  → `f() = emit("x", 1)` without `uses Telemetry` errors. *The core; small.*
+- **C2 — Call-graph propagation (transitive forward).** Calling a user function requires
+  its declared `uses`; `required(g)` also unions the `uses` of every function `g` calls;
+  error when `g` under-declares. → `g() = f()` where `f() uses Telemetry` requires `g` to
+  declare `Telemetry`. *"Effects flow up the call graph."* Medium.
+- **C3 — Reverse check: declared-but-unused warning** (the user's ask). `declared \
+  required` → a warning per unused cap. **Depends on C2** for soundness (C1-only
+  `required` misses transitive uses → false "unused"). Conservative — warn only when
+  confident. Span at the body (or a lowering tweak to keep `uses` spans). → `f() uses
+  Telemetry = 1` warns "declares `uses Telemetry` but never uses it." *The uniquely-static
+  least-authority win.*
+- **C4 — `without` attenuation (flow-sensitive precision, optional).** Track *available*
+  authority through the body: inside `without Cap { … }`, `Cap` is unavailable, so an
+  effect needing it there errors even if the function declares it — matching the runtime
+  refusal from the effects work. Turns the forward check flow-sensitive (an available-set
+  walk, not just `declared ⊇ required`). `handle` is not an attenuator. → `f() uses
+  Telemetry = without Telemetry { emit(…) }` errors. *Ties back to the `without`/`handle`
+  effect constructs; hardest, and the least essential.*
+
+### Sequencing
+
+**C1 → C2 → C3 → C4.** C1–C2 are the forward safety net (mirror + pre-empt the runtime
+gate). C3 is the least-authority payoff and reuses C2's `required` set exactly. C4 is an
+optional precision refinement that reconnects to the `without`/`handle` runtime effects.
+No inference/unification anywhere — `uses` are *declared*, so the whole analysis is
+decidable and local (much lower technical risk than generics Track B).
 
 ---
 
