@@ -304,6 +304,13 @@ catalog! {
     cpu "priorities-ordered-but-fair"     scenarios::priorities_ordered_but_fair    [userspace]  {"priorities"};
     cpu "viewer-reads-delegated-file"     scenarios::viewer_reads_delegated_file    [userspace]  {"view-demo"};
     cpu "shell-view-command-revokes-cap"  scenarios::shell_view_command_revokes_cap [userspace]  {"shell"};
+    // Framebuffer Milestone 0 (plans/framebuffer-milestone-0.md). `ramfb` is not
+    // a workload/bootarg tag like the others — it's read directly by `run_group`
+    // to add `-device ramfb` to the QEMU invocation (see `Boot::spawn`).
+    // `framebuffer-presents` gets its own workload so it never shares a boot
+    // with a non-ramfb scenario under `--shared`.
+    wfi "framebuffer-presents"            scenarios::framebuffer_presents           [display, ramfb] {"ramfb"};
+    wfi "framebuffer-absent-degrades-gracefully" scenarios::framebuffer_absent_degrades_gracefully [display];
 }
 
 /// Set the process-wide failure-capture transcript depth. Call once at
@@ -518,10 +525,14 @@ pub fn run(config: RunConfig) -> ExitCode {
     // package the View's `max_wait()` / `take_capture()` + the boot's log
     // path into a `ScenarioReport`. All scenarios in a group share a
     // workload (the runner's grouping invariant), so the group's bootarg
-    // is the first member's.
+    // is the first member's — same for the `ramfb` tag, which is why
+    // `framebuffer-presents` gets its own unshared `{"ramfb"}` workload
+    // (a group containing a mix of ramfb/non-ramfb members would apply
+    // the device to all-or-none based on whichever member sorts first).
     let run_group = |scns: &[&Scenario]| -> Vec<ScenarioReport> {
         let Some(first) = scns.first() else { return Vec::new() };
-        let boot = match Boot::spawn(first.name, first.workload) {
+        let ramfb = first.tags.contains(&"ramfb");
+        let boot = match Boot::spawn(first.name, first.workload, ramfb) {
             Ok(boot) => boot,
             // Spawn failure is infra, not a scenario assertion: report it
             // for every member so the runner records each as failed.

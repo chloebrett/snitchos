@@ -155,9 +155,10 @@ enum Cmd {
         /// faster — this is the lever for the memory/translation pole.
         #[arg(long)]
         tlb: bool,
-        /// Preset speedup bundle: `low` (idle-skip only), `med` (+native-ops, block
-        /// JIT, TLB — portable), `hi` (+Backend B native codegen, host-only). The
-        /// individual `--jit`/`--tlb`/… flags layer on top. Omit for `low`.
+        /// Preset speedup bundle: `low` (idle-skip only), `med` (+native-ops +TLB),
+        /// `hi` (+block JIT / Backend A — the fastest *portable*), `extra` (+Backend B
+        /// native codegen — experimental, host-only, currently slower). Individual
+        /// `--jit`/`--tlb`/… flags layer on top. Omit for `low`.
         #[arg(long, value_enum)]
         speedup: Option<itest::snemu_audit::SpeedLevel>,
     },

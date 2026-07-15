@@ -326,8 +326,10 @@ impl Boot {
     /// continuous proof of the additive guarantee); `kmain` reads
     /// `/chosen/bootargs` and dispatches. No rebuild — the whole suite
     /// shares one binary. `label` names the socket/log files (the scenario
-    /// or group name). See `docs/runtime-workload-selection-design.md`.
-    pub fn spawn(label: &str, workload: Option<&str>) -> Result<Self, String> {
+    /// or group name). `ramfb` adds `-device ramfb` to the QEMU invocation
+    /// (see the `framebuffer-presents` scenario). See
+    /// `docs/runtime-workload-selection-design.md`.
+    pub fn spawn(label: &str, workload: Option<&str>, ramfb: bool) -> Result<Self, String> {
         // No build here: the kernel is built once up-front in
         // `itest::run` (so `--repeat N` doesn't race with mid-run source
         // edits or burn time on per-iteration build checks). Scenarios
@@ -356,8 +358,11 @@ impl Boot {
             .map_err(|e| format!("clone log handle: {e}"))?;
 
         // Per-workload RAM (shared with the snemu audit so both engines run the
-        // identical machine) — `frame-oom` boots small on purpose.
-        let mut qemu_cmd = qemu::base_command(&chardev, crate::snemu_diff::ram_mb_for(workload));
+        // identical machine) — `frame-oom` boots small on purpose. `ramfb` adds
+        // `-device ramfb` (the `ramfb` scenario tag — see `run_group`); every
+        // other caller passes `false`, matching `base_command`'s old behaviour.
+        let mut qemu_cmd =
+            qemu::base_command_ex(&chardev, crate::snemu_diff::ram_mb_for(workload), ramfb, None);
         if let Some(workload) = workload {
             // Lands in /chosen/bootargs; `kmain` reads it to pick the
             // runtime workload.

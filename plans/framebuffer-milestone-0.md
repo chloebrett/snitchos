@@ -41,17 +41,20 @@ The kernel binary has no `#[test]`s. So:
 
 ## Acceptance Criteria
 
-- [ ] `frame::alloc_contiguous(n)` returns `n` physically-contiguous frames or `None`,
+- [x] `frame::alloc_contiguous(n)` returns `n` physically-contiguous frames or `None`,
       and decrements the maintained free-count by exactly `n`.
-- [ ] fw_cfg file-directory parsing finds `etc/ramfb` by name and returns its select
+- [x] fw_cfg file-directory parsing finds `etc/ramfb` by name and returns its select
       key + size; returns `None` for absent names.
-- [ ] The `RamfbCfg` (28-byte) and fw_cfg `DmaAccess` (16-byte) blobs serialize to the
+- [x] The `RamfbCfg` (28-byte) and fw_cfg `DmaAccess` (16-byte) blobs serialize to the
       exact big-endian bytes QEMU expects.
-- [ ] Booting with `-device ramfb` clears the QEMU display to a solid color.
-- [ ] `snitchos.display.frames_presented_total ≥ 1` appears on the wire within 10 s,
+- [x] Booting with `-device ramfb` clears the QEMU display to a solid color.
+- [x] `snitchos.display.frames_presented_total ≥ 1` appears on the wire within 10 s,
       and the kernel keeps heartbeating after.
-- [ ] Booting **without** `-device ramfb` snitches a refusal (`etc/ramfb` absent) and
+- [x] Booting **without** `-device ramfb` snitches a refusal (`etc/ramfb` absent) and
       the kernel keeps heartbeating — no panic, no hang.
+
+All six proven live: `framebuffer-presents` and `framebuffer-absent-degrades-gracefully`
+itests, both green (see step 7).
 
 ## Steps
 

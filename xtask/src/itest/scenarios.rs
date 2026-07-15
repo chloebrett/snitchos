@@ -3942,3 +3942,50 @@ pub fn shell_view_command_revokes_cap(h: &mut View) -> Result<(), String> {
 
     Ok(())
 }
+
+/// Framebuffer Milestone 0: booted with `-device ramfb` (the `ramfb` tag —
+/// see `Boot::spawn`), the kernel finds `etc/ramfb`, brings up the
+/// framebuffer, and presents (clears to a color) once per heartbeat.
+/// Asserts `snitchos.display.frames_presented_total ≥ 1`, then a
+/// subsequent `kernel.heartbeat` — proving the present loop didn't wedge
+/// the kernel. See `plans/framebuffer-milestone-0.md`.
+pub fn framebuffer_presents(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 10, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.display.frames_presented_total")
+                && *value >= 1
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no snitchos.display.frames_presented_total ≥ 1 within 10s — ramfb::init didn't find \
+         etc/ramfb, the DMA write hung/failed, or present() never ran",
+    )?;
+
+    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat within 10s after the first present — kernel wedged in the DMA poll?")?;
+
+    Ok(())
+}
+
+/// Framebuffer Milestone 0's graceful-degradation half: booted **without**
+/// `-device ramfb` (no `ramfb` tag), `etc/ramfb` doesn't exist, so
+/// `ramfb::init` snitches a refusal (`snitchos.display.init_refused_total`)
+/// instead of hanging — and the kernel keeps heartbeating regardless.
+pub fn framebuffer_absent_degrades_gracefully(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 10, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.display.init_refused_total")
+                && *value >= 1
+        }
+        _ => false,
+    })
+    .ok_or("no snitchos.display.init_refused_total ≥ 1 within 10s — refusal path didn't fire")?;
+
+    h.wait_for(SEC * 10, is_span_start_named("kernel.heartbeat"))
+        .ok_or("no heartbeat within 10s after the refusal — kernel hung on the missing device?")?;
+
+    Ok(())
+}
