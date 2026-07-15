@@ -41,42 +41,90 @@ pole. Every option below is priced against that picture.
 Option 1 turned out to be already-built: `cargo xtask snemu-profile` does exact
 per-PC instret counting rolled up to kernel function names (`xtask/src/snemu_profile.rs`,
 `snemu/src/symbols.rs`). Ran it 400M post-boot instructions on the two workloads that
-should discriminate the hypothesis — cross-hart `smp` and single-hart `demo`.
+should discriminate the hypothesis — cross-hart `smp` and single-hart `demo` — on the
+**release kernel** (`--release` → `OptLevel::Mid`), which is what the `snemu-itest`
+gate actually runs (`main.rs:124`, default `opt: Mid`). (A first pass on the debug
+kernel was misleading: ~35% of it was debug-only iterator/UB-check machinery —
+`Range::spec_next`, `Step::forward_unchecked`, `precondition_check` — that does not
+exist in the gate build. Numbers below are the release build.)
 
-**Neither is spin-wait bound.** The dominant cost in both is the **per-heartbeat
-telemetry emission path** — iterator-heavy walks over kernel data structures every
-tick — plus a debug-build tax (the itests run the unoptimized kernel for fidelity).
+**Neither is spin-wait bound.** On the release build the debug spin artifacts
+(`atomic_load`, `Mutex::lock`, `slice::Iter::position`) drop out of the top 20
+entirely. The dominant reducible cost in both is the **telemetry emission path** —
+string interning + serialization + the staging copy — which fires on every frame
+(every heartbeat tick, plus every span and context-switch frame).
 
-`demo` (single-hart), top of 800M retired:
-- 16.5% `Range::spec_next`, 12.2% `Step::forward_unchecked`, 5.9%
-  `unchecked_add::precondition_check` — debug-build iterator/UB-check machinery.
-- 10.3% `kernel::sched::demo_tasks::burn_lcg` — the demo's **deliberate** busy-loop.
-- ~14% iterator adapters (`enumerate`/`map`/`flatten`/`chain`/`fuse`::next) + intern
-  table (`InternTable::lookup_or_insert`, `as_str`) — the heartbeat per-task metric walk.
-- **No spin-wait function anywhere in the top 20.**
+`demo` (single-hart, release), of 800M retired:
+- ~42% deliberate demo busy-work: `task_b_entry` 36.1%, `task_a_entry` 6.1% (the LCG burn).
+- ~30% telemetry: `InternTable::lookup_or_insert` 10.3%, serialize/emit
+  (`serialize_field` 3.4% + `KernelSink::emit` 3.2% + `Frame::serialize` 2.8%),
+  `high_water_bytes` 4.4% (per-tick stack scan), `TaskDirectory::slot_of` 3.1%.
+- `memset` 9.5% + `memcpy` 4.7% — frame zeroing + the TX_STAGING copy per emit.
+- `prepare_switch` 6.4% — context-switch cost.
 
-`smp` (cross-hart), top of 800M retired:
-- 11.3% `slice::Iter::position` — a linear scan (largest single line).
-- ~15% atomics + lock (`atomic_load` 7.0%, `Atomic<bool>::load` 4.3%, `Mutex::lock`
-  3.8%) — the closest thing to cross-hart polling, but second-order, not the pole.
-- ~10% BTree navigation (`btree::search`/`navigate`/`into_kv`) — intern-table iteration
-  for per-tick telemetry.
-- 3.4% `kernel_core::stack::high_water_bytes` — the per-tick stack high-water scan.
-- ~10% the same iterator-adapter family as `demo`.
+`smp` (cross-hart, release), of 800M retired:
+- `memset` 17.0% + `memcpy` 7.5% — 24.5%, the largest block (frame zero + staging copy).
+- `InternTable::lookup_or_insert` **15.4%** — string interning on every emit, the
+  standout single hot spot.
+- serialize/emit (`serialize_field` 5.4% + `KernelSink::emit` 5.3% + `Frame::serialize`
+  4.6%) — ~15% telemetry serialization.
+- `prepare_switch` 10.4% — context switch.
+- Real workload: `producer_entry` 7.4% + `consumer_entry` 6.9%.
+- `high_water_bytes` 3.0%, `slot_of` 2.6%, Runqueue ops ~3%.
+- **No spin/atomic/lock function in the top 20.**
 
 **Consequences for the options below:**
-- **Option 2 (spin-wait elision) and Option 3.1 (wfi-convert spins) are demoted.**
-  The profiled poles are not spin-bound; at most ~15% of `smp` is cross-hart atomics,
-  and `demo` has none. `smp-tlb-shootdown-visible` (a 100%-spin negative-oracle
-  scenario) remains a genuine spin case, but it's already budget-capped at 60M and is
-  not where the bulk instret lives.
-- **The real lever is doing the per-heartbeat telemetry walk fewer times** — i.e.
-  reaching each budget-bound scenario's threshold in fewer heartbeats (Option 3.3,
-  now promoted to first), and/or making the per-tick walk itself cheaper (the
-  `slice::position` linear scan and intern-table BTree iteration are hot in a path
-  that fires every tick — a kernel-perf win that also helps real hardware).
-- **`burn_lcg` (10% of `demo`) is deliberate busy-work** — the demo's iteration count
+- **Option 2 (spin-wait elision) and Option 3.1 (wfi-convert spins) are dead as
+  levers.** On the real (release) gate build there is no spin cost to reclaim —
+  atomics and locks don't even reach the top 20. `smp-tlb-shootdown-visible` (a
+  100%-spin negative-oracle scenario) remains a genuine spin case, but it's already
+  budget-capped at 60M and is not where the bulk instret lives.
+- **The real lever is the telemetry emission path**, ~40-50% of instret across both
+  workloads and firing per frame. Two orthogonal attacks:
+  - **Cheaper per frame (kernel-perf, also helps real hardware):**
+    `InternTable::lookup_or_insert` at 15% smp / 10% demo is the prime target — the
+    kernel appears to re-intern the same string names on every emit instead of
+    caching the returned `StringId` (cf. the userspace "register once, reuse the Copy
+    handle" lesson). Behind it: the `memset`/`memcpy` staging + zeroing (24% smp), and
+    the postcard serialize path.
+  - **Fewer frames (Option 3.3):** reach each budget-bound scenario's threshold in
+    fewer heartbeats, and/or emit fewer per-tick frames. Scales the whole path down.
+- **The demo busy-work (~42% of `demo`) is deliberate** — `task_a`/`task_b`'s LCG burn
   is a direct knob on `workload-cooperative-baseline`'s cost.
+
+### Root cause of the `InternTable::lookup_or_insert` hot line (verified)
+
+`span_start` (`kernel/src/obs/tracing.rs:588`) calls `register_or_lookup(name)` on
+**every span open**, and `lookup_or_insert` (`kernel-core/src/obs/intern.rs:188`) is an
+**O(n) linear scan over the whole intern table** (`for (id, e) in self.iter()`,
+pointer-equality match). Spans open constantly — the `kernel.heartbeat` span every
+tick, per-task `task_x.tick` spans, producer/consumer spans — so each open re-scans the
+full table to re-derive a `StringId` that never changes for a given `&'static str`
+call site.
+
+By contrast the heartbeat **metrics** are already cheap: `Metrics::register()`
+(`heartbeat.rs:50`) resolves every metric's `StringId` **once** before `run()`, and the
+`emit!` macro reuses the stored id — no per-emit lookup. Counters do the same via
+`counter.rs:54`'s `self.id.call_once(...)`. The span path simply never got that
+treatment.
+
+### The fix (recommended first implementation)
+
+Give span opens the same register-once/reuse-id caching the metrics already have.
+Cleanest shape: make the `span!` macro (`tracing.rs:500`) cache its resolved id in a
+per-expansion-site `static` (a `Once<StringId>` / `AtomicU32`, mirroring
+`counter.rs`), resolve `register_or_lookup` on first open only, and pass the cached
+`name_id` to a new `span_start_id(name_id)`. Each call site has a fixed `&'static str`,
+so per-site caching yields identical `StringId`s and emits `StringRegister` exactly
+once — **byte-identical wire output**, no oracle risk, and the O(n) scan leaves the hot
+path entirely. Expected to remove ~10-15% of guest instret across the suite, and it's a
+real kernel-perf win on hardware too (not a test-only trick). TDD: assert (a) a span
+name registers exactly one `StringRegister` across repeated opens, (b) repeated opens of
+the same name reuse one `StringId`, (c) distinct names still get distinct ids.
+
+Runner-up levers, if more is wanted after: the `memset`/`memcpy` staging + zeroing
+(24% smp — the TX_STAGING copy per emit + frame zeroing) and fewer-frames threshold
+tuning (Option 3.3).
 
 ## Option 1 — Per-scenario instret breakdown (measure first)
 
