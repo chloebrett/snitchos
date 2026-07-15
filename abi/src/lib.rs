@@ -244,6 +244,12 @@ pub enum Syscall {
     /// stdlib convert clock ticks to a real `Duration` without hardcoding the
     /// platform rate — `Instant::elapsed()` divides a tick delta by this.
     ClockFreq = 29,
+    /// Terminate a child process named by an `Object::Process` capability (`a0` =
+    /// [`Handle`]) the caller holds with the `KILL` right — minted into the parent's
+    /// table at [`Self::Spawn`]. Tears down + reaps the target (its `WaitAny` parent
+    /// wakes with a killed status). Capability-authorized, so it composes to a
+    /// sub-supervisor granted `KILL` over its subtree (supervision v2a).
+    Kill = 30,
 }
 
 impl Syscall {
@@ -283,6 +289,7 @@ impl Syscall {
             27 => Some(Self::CapList),
             28 => Some(Self::Revoke),
             29 => Some(Self::ClockFreq),
+            30 => Some(Self::Kill),
             _ => None,
         }
     }
@@ -307,6 +314,8 @@ pub mod rights {
     /// May `wait` on a `Notification` — the consumer end (v0.12). Disjoint from
     /// `SIGNAL` so a cap can grant either end or both.
     pub const WAIT: u32 = 0b10_0000;
+    /// May `kill` the process an `Object::Process` cap names (supervision v2a).
+    pub const KILL: u32 = 0b100_0000;
 }
 
 /// Object-kind discriminants for a [`CapDesc`]'s `kind` field — what sort of
@@ -325,6 +334,8 @@ pub mod object_kind {
     pub const REPLY: u32 = 3;
     /// A `Notification`.
     pub const NOTIFICATION: u32 = 4;
+    /// A `Process` — a child's lifecycle handle, carrying `KILL` (supervision v2a).
+    pub const PROCESS: u32 = 5;
 }
 
 /// One capability in a process's own table, as written by [`Syscall::CapList`] —

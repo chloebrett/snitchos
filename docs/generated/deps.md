@@ -36,6 +36,7 @@ graph LR
         kernel["kernel"]
         kernel_core["kernel-core"]
     end
+    supervision["supervision"]
     collector --> protocol
     collector --> snitchos_abi
     diagram --> protocol
@@ -53,6 +54,7 @@ graph LR
     hello --> snitchos_std
     hello --> snitchos_user
     hello --> stitch
+    hello --> supervision
     hitch --> hitch_derive
     hitch --> hitch_pod
     hitch --> snitchos_abi

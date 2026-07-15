@@ -50,6 +50,7 @@
 | sched-context-switch-smoke | init | wfi | sched |
 | smp-secondary-hart-boots | init | wfi | smp |
 | default-boot-starts-init | init (default) | wfi | boot |
+| framebuffer-absent-degrades-gracefully | init (default) | wfi | display |
 | ipc-message-crosses | ipc | wfi | userspace, ipc |
 | ipc-telemetry | ipc | wfi | userspace, ipc |
 | ipc-trace-crosses | ipc | wfi | userspace, ipc |
@@ -72,6 +73,7 @@
 | probe-reports-the-timebase | probe | wfi | userspace |
 | span-name-not-poisonable | probe | wfi | userspace |
 | userspace-custom-metric | probe | wfi | userspace |
+| framebuffer-presents | ramfb | wfi | display, ramfb |
 | shell-view-command-revokes-cap | shell | cpu | userspace |
 | shootdown-storm | shootdown-storm | cpu | smp, stress |
 | smp-producer-consumer-correctness | smp burst=256 | cpu | smp, workload |
@@ -94,6 +96,8 @@
 | stitch-print-writes-to-console | stitch-repl | wfi | userspace, stitch |
 | stitch-reads-a-line | stitch-repl | wfi | userspace, stitch |
 | stitch-telemetry-on-the-wire | stitch-repl | wfi | userspace, stitch |
+| supervised-regrants-caps-on-restart | supervised | cpu | userspace |
+| supervised-ipc-client-cap-survives | supervised-ipc | cpu | userspace |
 | syscall-hog-still-preempted | syscall-hog | cpu | userspace |
 | smp-tlb-shootdown-visible | tlb-shootdown | cpu | smp |
 | preempt-runaway-user-task | user-hog | cpu | userspace |

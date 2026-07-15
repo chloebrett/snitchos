@@ -18,6 +18,7 @@ fn object_name(object: CapObject) -> &'static str {
         CapObject::Endpoint => "Endpoint",
         CapObject::Reply => "Reply",
         CapObject::Notification => "Notification",
+        CapObject::Process => "Process",
     }
 }
 

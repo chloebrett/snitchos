@@ -60,6 +60,15 @@ pub fn startup_order(specs: &[ServiceSpec]) -> Result<Vec<ServiceId>, Dependency
     Ok(order)
 }
 
+/// The order to **stop** services for a graceful shutdown: the reverse of
+/// [`startup_order`], so every service is stopped before the services it depends
+/// on. Fails with the same [`DependencyError::Cycle`] as `startup_order`.
+pub fn teardown_order(specs: &[ServiceSpec]) -> Result<Vec<ServiceId>, DependencyError> {
+    let mut order = startup_order(specs)?;
+    order.reverse();
+    Ok(order)
+}
+
 /// Which services to restart when one dies (Erlang taxonomy, D1). `one-for-all`
 /// is deferred until a motivating case exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +208,43 @@ mod tests {
             startup_order(&specs),
             Ok(alloc::vec![ServiceId(1), ServiceId(2), ServiceId(3)])
         );
+    }
+
+    #[test]
+    fn teardown_order_is_the_reverse_of_startup() {
+        // Stop dependents before what they depend on: c → b → a (v2a graceful
+        // shutdown walks this order).
+        let specs = [
+            svc(2, &[ServiceId(1)]),
+            svc(3, &[ServiceId(2)]),
+            svc(1, &[]),
+        ];
+        assert_eq!(
+            teardown_order(&specs),
+            Ok(alloc::vec![ServiceId(3), ServiceId(2), ServiceId(1)])
+        );
+    }
+
+    #[test]
+    fn teardown_stops_a_diamond_dependent_before_its_dependencies() {
+        // d depends on b and c, both on a → d must stop first, a last.
+        let specs = [
+            svc(1, &[]),
+            svc(2, &[ServiceId(1)]),
+            svc(3, &[ServiceId(1)]),
+            svc(4, &[ServiceId(2), ServiceId(3)]),
+        ];
+        let order = teardown_order(&specs).expect("acyclic");
+        let pos = |id: u32| order.iter().position(|s| *s == ServiceId(id)).unwrap();
+        assert_eq!(order.len(), 4);
+        assert!(pos(4) < pos(2) && pos(4) < pos(3));
+        assert!(pos(2) < pos(1) && pos(3) < pos(1));
+    }
+
+    #[test]
+    fn teardown_reports_a_cycle_like_startup() {
+        let specs = [svc(1, &[ServiceId(2)]), svc(2, &[ServiceId(1)])];
+        assert!(matches!(teardown_order(&specs), Err(DependencyError::Cycle(_))));
     }
 
     #[test]

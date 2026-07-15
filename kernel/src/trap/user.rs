@@ -468,6 +468,7 @@ pub(crate) fn cap_object_kind(object: kernel_core::cap::Object) -> protocol::Cap
         Object::Endpoint { .. } => protocol::CapObject::Endpoint,
         Object::Reply { .. } => protocol::CapObject::Reply,
         Object::Notification { .. } => protocol::CapObject::Notification,
+        Object::Process { .. } => protocol::CapObject::Process,
     }
 }
 

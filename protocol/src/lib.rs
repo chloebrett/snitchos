@@ -285,6 +285,9 @@ pub enum CapObject {
   /// notification id lives kernel-side; this wire tag attributes the grant to
   /// the notification kind.
   Notification,
+  /// A process lifecycle handle (v2a) — a parent's `KILL` cap over a child it
+  /// `Spawn`ed. The bound task id lives kernel-side.
+  Process,
 }
 
 /// Why the kernel refused a syscall (the `reason` in [`Frame::SyscallRefused`]).

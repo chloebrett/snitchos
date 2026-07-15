@@ -60,6 +60,9 @@ impl Rights {
     /// May `wait` on a `Notification` — the consumer end (v0.12).
     pub const WAIT: Rights = Rights(snitchos_abi::rights::WAIT);
 
+    /// May `kill` the process an [`Object::Process`] cap names (supervision v2a).
+    pub const KILL: Rights = Rights(snitchos_abi::rights::KILL);
+
     /// Whether `self` grants every right in `other`.
     #[must_use]
     pub const fn contains(self, other: Rights) -> bool {
@@ -132,6 +135,11 @@ pub enum Object {
     /// payload is one userspace-defined bit mask the kernel only carries. The
     /// object + semantics live in [`crate::notify`].
     Notification { id: NotificationId },
+    /// A child process's lifecycle handle (v2a) — names the `TaskId` a parent may
+    /// terminate. Minted into the parent's table at [`Spawn`](crate) and invoked by
+    /// the `Kill` syscall; [`Rights::KILL`] gates it. Composes: a parent can delegate
+    /// the cap to a sub-supervisor, granting `KILL` over that subtree.
+    Process { id: TaskId },
 }
 
 /// An unforgeable `{ object, rights }` pair.
@@ -333,6 +341,22 @@ pub fn invoke_recv(table: &CapTable, handle: Handle) -> Result<EndpointId, Denie
     Ok(id)
 }
 
+/// Resolve a `kill` invocation (v2a): `handle` must name an [`Object::Process`] in
+/// `table` carrying [`Rights::KILL`]. Returns the [`TaskId`] to terminate. Mirrors
+/// [`invoke_recv`]; the `Kill` syscall then tears the target down.
+pub fn invoke_kill(table: &CapTable, handle: Handle) -> Result<TaskId, Denied> {
+    let cap = table
+        .resolve(handle)
+        .map_err(|_| Denied::NoSuchCapability)?;
+    if !cap.rights.contains(Rights::KILL) {
+        return Err(Denied::MissingRight);
+    }
+    let Object::Process { id } = cap.object else {
+        return Err(Denied::WrongObject);
+    };
+    Ok(id)
+}
+
 /// Resolve a `signal` invocation (v0.12): `handle` must name an
 /// [`Object::Notification`] in `table` carrying [`Rights::SIGNAL`] — the
 /// producer end. Returns the [`NotificationId`] to signal. The `wait` twin is
@@ -474,6 +498,7 @@ impl CapTable {
                     }
                     Object::Reply { .. } => (object_kind::REPLY, 0, unnamed),
                     Object::Notification { .. } => (object_kind::NOTIFICATION, 0, unnamed),
+                    Object::Process { .. } => (object_kind::PROCESS, 0, unnamed),
                 };
                 Some(CapDesc {
                     handle: Handle::new(index as u32, slot.generation).raw(),
@@ -1049,6 +1074,36 @@ mod tests {
             rights: Rights::SEND,
         });
         assert_eq!(invoke_recv(&table, h), Err(Denied::MissingRight));
+    }
+
+    #[test]
+    fn invoke_kill_accepts_a_process_cap_with_the_kill_right() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::Process { id: TaskId(42) },
+            rights: Rights::KILL,
+        });
+        assert_eq!(invoke_kill(&table, h), Ok(TaskId(42)));
+    }
+
+    #[test]
+    fn invoke_kill_refuses_a_process_cap_lacking_the_kill_right() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::Process { id: TaskId(42) },
+            rights: Rights::NONE,
+        });
+        assert_eq!(invoke_kill(&table, h), Err(Denied::MissingRight));
+    }
+
+    #[test]
+    fn invoke_kill_refuses_a_non_process_object() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::Endpoint { id: EndpointId(8), badge: 0 },
+            rights: Rights::KILL,
+        });
+        assert_eq!(invoke_kill(&table, h), Err(Denied::WrongObject));
     }
 
     fn notification_cap(id: u32, rights: Rights) -> Capability {

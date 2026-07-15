@@ -35,6 +35,24 @@ pub(super) fn handle_exit(frame: &TrapFrame) -> ! {
     crate::sched::exit_now_owned()
 }
 
+/// Terminate a child named by an `Object::Process` cap (`a0` = its handle), the
+/// v2a `Kill` syscall. **Increment 3 (WIP):** the real path is `invoke_kill` (which
+/// validates the `KILL` right + `Process` object — host-tested in `kernel_core::cap`)
+/// followed by tearing the target down. That teardown needs a `sched::kill_task`
+/// primitive able to stop a *non-current*, possibly-blocked task and wake its
+/// `WaitAny` parent — new scheduler machinery that must be QEMU-tested. Until it
+/// lands, `Kill` is wired end to end but inert: it refuses, so the ABI + dispatch are
+/// exercised without an untested termination path panicking the kernel.
+pub(super) fn handle_kill(frame: &mut TrapFrame) {
+    use snitchos_abi::Syscall;
+
+    let sc = Syscall::Kill as u8;
+    let Some(_proc) = super::current_process_or_refuse(frame, sc) else {
+        return;
+    };
+    super::refuse(frame, sc, protocol::RefusalReason::CapNotFound);
+}
+
 /// Wait for a child to exit and return its status (v0.12). `a0` = the child's
 /// task id; returns its exit status in `a0`. Blocks until the child `Exit`s
 /// (re-checking on each wake), or returns immediately if it already exited
