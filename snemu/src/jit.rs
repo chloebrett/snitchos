@@ -257,101 +257,167 @@ pub(crate) struct NativeBlock {
 }
 
 impl NativeBlock {
-    /// Guest register-file base pointer (first C-ABI arg) and caller-saved scratch
-    /// registers. A leaf function: no callee-saved clobbers, so no prologue/epilogue.
+    /// Reserved host registers. `REGS` (x0) holds the guest register-file base pointer
+    /// during the block and the retired count at return; `PC` (x1) returns the resume
+    /// PC; `SA`/`SB` (x9/x10) are scratch — immediates, branch/jump targets, the compare.
+    /// A leaf function: no callee-saved clobbers, so no prologue/epilogue.
     const REGS: u32 = 0;
-    const A: u32 = 9;
-    const B: u32 = 10;
-    const T: u32 = 11; // extra scratch for branch/jump targets
-    const U: u32 = 12;
+    const PC: u32 = 1;
+    const SA: u32 = 9;
+    const SB: u32 = 10;
+    /// The AArch64 zero register (`xzr`) — guest `x0` reads as this and needs no slot.
+    const XZR: u32 = 31;
+    /// Caller-saved host registers a block's guest registers live in across its whole
+    /// run — loaded once at entry, stored once at exit, so the body is pure register
+    /// ALU (this is what beats the register-*array* interpreter). 12 slots cover typical
+    /// blocks; a block touching more distinct guest registers falls back to Backend A.
+    const POOL: [u32; 12] = [2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15];
 
-    /// Lower a block into `arena`, or `None` if any op isn't lowerable yet (a memory
-    /// op, or an ALU family Backend B doesn't emit) — `None` means "run on Backend A".
-    /// A block ends at its terminator (`Branch`/`Jump`/`JumpReg`), which sets the exit
-    /// PC; a block with no terminator falls through to `exit_pc`.
+    /// Lower a block into `arena` with **cross-op register allocation** — guest
+    /// registers stay in host registers for the whole block. `None` if any op isn't
+    /// lowerable (a memory op, an ALU family Backend B doesn't emit, or more distinct
+    /// guest registers than the host pool holds) — `None` means "run on Backend A". A
+    /// block ends at its terminator, which computes the exit PC; a block with no
+    /// terminator falls through to `exit_pc`.
     pub(crate) fn compile_into(ops: &[Op], exit_pc: u64, arena: &mut CodeArena) -> Option<Self> {
         let retired = u16::try_from(ops.len()).ok()?; // blocks are length-capped
+
+        // Pass 1: which guest registers are read (load at entry) / written (store at
+        // exit), rejecting any op Backend B can't emit. `x0` is never tracked (`xzr`).
+        let mut read = [false; 32];
+        let mut dirty = [false; 32];
+        let src = |r: u8, read: &mut [bool; 32]| {
+            if r != 0 {
+                read[usize::from(r)] = true;
+            }
+        };
+        let dst = |r: u8, dirty: &mut [bool; 32]| {
+            if r != 0 {
+                dirty[usize::from(r)] = true;
+            }
+        };
+        for op in ops {
+            match *op {
+                // `SetImm` and `Jump` both only write `rd` (no source register).
+                Op::SetImm { rd, .. } | Op::Jump { rd, .. } => dst(rd, &mut dirty),
+                Op::AluImm { alu, rd, rs1, .. } => {
+                    alu_base(alu)?;
+                    src(rs1, &mut read);
+                    dst(rd, &mut dirty);
+                }
+                Op::AluReg { alu, rd, rs1, rs2 } => {
+                    alu_base(alu)?;
+                    src(rs1, &mut read);
+                    src(rs2, &mut read);
+                    dst(rd, &mut dirty);
+                }
+                Op::Branch { rs1, rs2, .. } => {
+                    src(rs1, &mut read);
+                    src(rs2, &mut read);
+                }
+                Op::JumpReg { rd, rs1, .. } => {
+                    src(rs1, &mut read);
+                    dst(rd, &mut dirty);
+                }
+                Op::Load { .. } | Op::Store { .. } => return None,
+            }
+        }
+
+        // Assign a host register to every guest register the block touches.
+        let mut host = [Self::XZR; 32];
+        let mut next = 0;
+        for g in 1..32 {
+            if read[g] || dirty[g] {
+                host[g] = *Self::POOL.get(next)?; // more regs than the pool → Backend A
+                next += 1;
+            }
+        }
+        let h = |g: u8| host[usize::from(g)];
+
         let mut code = Code::new();
+        // Prologue: load each read guest register into its host register.
+        for g in 1..32 {
+            if read[g] {
+                code.ldr(host[g], Self::REGS, g as u32 * 8);
+            }
+        }
+
+        // Body: pure host-register ALU. A terminator computes the exit PC into `SA`.
         let mut terminated = false;
+        let mut exit_in_sa = false;
         for op in ops {
             match *op {
                 Op::SetImm { rd, value } => {
-                    code.mov_imm64(Self::A, value);
-                    Self::write_rd(&mut code, rd);
+                    if rd != 0 {
+                        code.mov_imm64(h(rd), value);
+                    }
                 }
                 Op::AluImm { alu, rd, rs1, imm } => {
-                    let base = alu_base(alu)?;
-                    code.ldr(Self::A, Self::REGS, u32::from(rs1) * 8);
-                    code.mov_imm64(Self::B, imm as u64);
-                    code.alu(base, Self::A, Self::A, Self::B);
-                    Self::write_rd(&mut code, rd);
+                    if rd != 0 {
+                        let base = alu_base(alu)?;
+                        code.mov_imm64(Self::SA, imm as u64);
+                        code.alu(base, h(rd), h(rs1), Self::SA);
+                    }
                 }
                 Op::AluReg { alu, rd, rs1, rs2 } => {
-                    let base = alu_base(alu)?;
-                    code.ldr(Self::A, Self::REGS, u32::from(rs1) * 8);
-                    code.ldr(Self::B, Self::REGS, u32::from(rs2) * 8);
-                    code.alu(base, Self::A, Self::A, Self::B);
-                    Self::write_rd(&mut code, rd);
+                    if rd != 0 {
+                        let base = alu_base(alu)?;
+                        code.alu(base, h(rd), h(rs1), h(rs2));
+                    }
                 }
-                // Terminators set x1 = exit pc, then fall through to the shared
-                // `finish` (x0 = retired; ret). A terminator is always the block's
-                // last op, so nothing follows.
                 Op::Branch { cond, rs1, rs2, taken, not_taken } => {
-                    code.ldr(Self::A, Self::REGS, u32::from(rs1) * 8);
-                    code.ldr(Self::B, Self::REGS, u32::from(rs2) * 8);
-                    code.cmp(Self::A, Self::B);
-                    code.mov_imm64(Self::T, taken);
-                    code.mov_imm64(Self::U, not_taken);
-                    code.csel(1, Self::T, Self::U, cond_code(cond));
+                    code.cmp(h(rs1), h(rs2));
+                    code.mov_imm64(Self::SA, taken);
+                    code.mov_imm64(Self::SB, not_taken);
+                    code.csel(Self::SA, Self::SA, Self::SB, cond_code(cond));
+                    exit_in_sa = true;
                     terminated = true;
                 }
                 Op::Jump { rd, link, target } => {
-                    Self::write_link(&mut code, rd, link);
-                    code.mov_imm64(1, target);
+                    if rd != 0 {
+                        code.mov_imm64(h(rd), link);
+                    }
+                    code.mov_imm64(Self::SA, target);
+                    exit_in_sa = true;
                     terminated = true;
                 }
                 Op::JumpReg { rd, rs1, imm, link } => {
-                    // Target from rs1 (+imm, clear bit 0) *before* writing rd — they
-                    // may alias, and the target uses rs1's pre-write value.
-                    code.ldr(Self::A, Self::REGS, u32::from(rs1) * 8);
-                    code.mov_imm64(Self::B, imm as u64);
-                    code.alu(0x8B00_0000, Self::A, Self::A, Self::B); // add
-                    code.mov_imm64(Self::B, !1u64);
-                    code.alu(0x8A00_0000, Self::A, Self::A, Self::B); // and → clear bit 0
-                    Self::write_link(&mut code, rd, link);
-                    code.mov_reg(1, Self::A);
+                    // Target = (x[rs1] + imm) & !1, computed into SA *before* writing rd
+                    // (they may alias); then the link goes to rd's host register.
+                    code.mov_imm64(Self::SB, imm as u64);
+                    code.alu(0x8B00_0000, Self::SA, h(rs1), Self::SB); // add
+                    code.mov_imm64(Self::SB, !1u64);
+                    code.alu(0x8A00_0000, Self::SA, Self::SA, Self::SB); // and → clear bit 0
+                    if rd != 0 {
+                        code.mov_imm64(h(rd), link);
+                    }
+                    exit_in_sa = true;
                     terminated = true;
                 }
-                // Memory ops aren't emitted yet → Backend A.
                 Op::Load { .. } | Op::Store { .. } => return None,
             }
             if terminated {
                 break;
             }
         }
-        if !terminated {
-            code.mov_imm64(1, exit_pc); // fall-through PC
+
+        // Epilogue: store every dirtied guest register back (reads host regs + the base
+        // in x0, so it must precede overwriting x0/x1; the exit PC in SA survives — the
+        // stores never touch it), then return `(retired, pc)`.
+        for g in 1..32 {
+            if dirty[g] {
+                code.str(host[g], Self::REGS, g as u32 * 8);
+            }
         }
-        code.movz(0, retired); // x0 = retired
+        code.movz(0, retired); // x0 = retired (base no longer needed)
+        if exit_in_sa {
+            code.mov_reg(Self::PC, Self::SA);
+        } else {
+            code.mov_imm64(Self::PC, exit_pc); // fall-through PC
+        }
         code.ret();
 
         Some(Self { entry: arena.install(code.bytes()) })
-    }
-
-    /// Store scratch `A` (the op's result) into guest `x[rd]`, skipping `rd == 0`
-    /// (x0 is hardwired zero — a legal discarded write).
-    fn write_rd(code: &mut Code, rd: u8) {
-        if rd != 0 {
-            code.str(Self::A, Self::REGS, u32::from(rd) * 8);
-        }
-    }
-
-    /// Write a jump's link address into `x[rd]` (skipping `rd == 0`), via scratch `T`.
-    fn write_link(code: &mut Code, rd: u8, link: u64) {
-        if rd != 0 {
-            code.mov_imm64(Self::T, link);
-            code.str(Self::T, Self::REGS, u32::from(rd) * 8);
-        }
     }
 
     /// Execute the block against `regs`, returning the retired count + resume PC.
@@ -572,6 +638,36 @@ mod tests {
             &[Op::JumpReg { rd: 5, rs1: 5, imm: 8, link: 0xabc0_0004 }],
             init,
             0,
+        );
+    }
+
+    #[test]
+    fn register_reuse_across_a_long_block_matches_the_semantics() {
+        // An accumulator-style block that reads/writes the same handful of registers
+        // many times — exactly the pattern where keeping them in host registers wins,
+        // and where a reg-alloc bug (stale load, missed store, alias) would show.
+        let mut ops = Vec::new();
+        for _ in 0..8 {
+            ops.push(Op::AluReg { alu: AluOp::Add, rd: 5, rs1: 5, rs2: 6 });
+            ops.push(Op::AluReg { alu: AluOp::Xor, rd: 6, rs1: 6, rs2: 7 });
+            ops.push(Op::AluImm { alu: AluOp::Sub, rd: 7, rs1: 7, imm: 1 });
+        }
+        ops.push(Op::Branch { cond: Cond::Ne, rs1: 5, rs2: 6, taken: 0x400, not_taken: 0x404 });
+        let mut init = [0u64; 32];
+        init[5] = 0x1111;
+        init[6] = 0x2222;
+        init[7] = 40;
+        assert_native_matches(&ops, init, 0);
+    }
+
+    #[test]
+    fn a_block_touching_too_many_registers_falls_back() {
+        // 13 distinct destination registers > the 12-slot host pool → None (Backend A).
+        let mut arena = CodeArena::new();
+        let ops: Vec<Op> = (1..=13).map(|g| Op::SetImm { rd: g, value: g as u64 }).collect();
+        assert!(
+            NativeBlock::compile_into(&ops, 0, &mut arena).is_none(),
+            "more guest regs than the host pool → fall back to Backend A",
         );
     }
 

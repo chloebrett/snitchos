@@ -15,7 +15,23 @@ pub const DEFAULT_RAM_MB: u32 = 128;
 /// Build a `Command` pre-loaded with every QEMU arg that is common to
 /// all invocations, with `ram_mb` guest RAM. The caller finishes it with
 /// `.status()` or `.spawn()` and any additional stdio config.
+///
+/// Headless (`-nographic`), no `ramfb` device — the shape every existing
+/// caller (itest harness, `measure`, `snemu-diff`) needs. For a ramfb-
+/// enabled and/or on-screen invocation, use [`base_command_ex`].
 pub fn base_command(chardev_arg: &str, ram_mb: u32) -> Command {
+    base_command_ex(chardev_arg, ram_mb, false, None)
+}
+
+/// Like [`base_command`], with two independent extras:
+/// - `ramfb`: add `-device ramfb`, so the guest sees an `etc/ramfb`
+///   `fw_cfg` file. Off by default — most invocations (itests, measure,
+///   snemu-diff) don't touch the display path and shouldn't pay for it.
+/// - `display`: a QEMU `-display` backend (e.g. `"cocoa"`, `"gtk"`) to
+///   show an actual window, replacing `-nographic` (the two conflict —
+///   `-nographic` forces `-display none`). `None` keeps the existing
+///   headless behaviour.
+pub fn base_command_ex(chardev_arg: &str, ram_mb: u32, ramfb: bool, display: Option<&str>) -> Command {
     let mut cmd = Command::new("qemu-system-riscv64");
     cmd.args([
         "-machine", "virt",
@@ -33,8 +49,15 @@ pub fn base_command(chardev_arg: &str, ram_mb: u32) -> Command {
         "-accel", "tcg,thread=multi",
     ]);
     cmd.args(["-m", &format!("{ram_mb}M")]);
+    match display {
+        Some(backend) => {
+            cmd.args(["-display", backend]);
+        }
+        None => {
+            cmd.args(["-nographic"]);
+        }
+    }
     cmd.args([
-        "-nographic",
         "-bios", "default",
         "-kernel", KERNEL_BIN,
         // Force modern virtio-mmio (version 2). Without this, QEMU
@@ -47,6 +70,9 @@ pub fn base_command(chardev_arg: &str, ram_mb: u32) -> Command {
         "-device", "virtio-serial-device",
         "-device", "virtconsole,chardev=telemetry",
     ]);
+    if ramfb {
+        cmd.args(["-device", "ramfb"]);
+    }
     cmd
 }
 

@@ -226,6 +226,16 @@ enum Cmd {
         /// `--workload smp`/`smp-spsc`.
         #[arg(long)]
         burst: Option<usize>,
+        /// Add `-device ramfb`, giving the guest an `etc/ramfb` fw_cfg
+        /// file to bring up the framebuffer.
+        #[arg(long)]
+        ramfb: bool,
+        /// Show an actual QEMU window instead of the default headless
+        /// (`-nographic`) run. Takes a `-display` backend, e.g. `cocoa`
+        /// (macOS) or `gtk` (Linux). Combine with `--ramfb` to see the
+        /// framebuffer.
+        #[arg(long)]
+        display: Option<String>,
     },
     /// Boot a runtime-selected workload, capture its telemetry for a
     /// fixed window, and print steady-state stats (throughput, lock-wait
@@ -786,7 +796,9 @@ fn main() -> ExitCode {
                 snemu_bench::run(workload.as_deref(), steps, runs, decode_cache)
             }
         }
-        Cmd::Boot { features, workload, burst } => boot(&features, workload.as_deref(), burst),
+        Cmd::Boot { features, workload, burst, ramfb, display } => {
+            boot(&features, workload.as_deref(), burst, ramfb, display.as_deref())
+        }
         Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {
             measure::measure(&workload, seconds, warmup, timebase_hz, burst, markdown)
         }
@@ -1080,7 +1092,13 @@ fn debug(features: &str) -> ExitCode {
     }
 }
 
-fn boot(features: &str, workload: Option<&str>, burst: Option<usize>) -> ExitCode {
+fn boot(
+    features: &str,
+    workload: Option<&str>,
+    burst: Option<usize>,
+    ramfb: bool,
+    display: Option<&str>,
+) -> ExitCode {
     let mut features_vec: Vec<&str> = if features.is_empty() {
         Vec::new()
     } else {
@@ -1105,7 +1123,7 @@ fn boot(features: &str, workload: Option<&str>, burst: Option<usize>) -> ExitCod
     // terminal to satisfy that wait.
     let chardev_arg = format!("socket,path={TELEMETRY_SOCKET},server=on,wait=on,id=telemetry");
 
-    let mut cmd = qemu::base_command(&chardev_arg, qemu::DEFAULT_RAM_MB);
+    let mut cmd = qemu::base_command_ex(&chardev_arg, qemu::DEFAULT_RAM_MB, ramfb, display);
     // Lands in /chosen/bootargs; `kmain` reads it to pick the runtime
     // workload + burst.
     let bootargs: Vec<String> = workload

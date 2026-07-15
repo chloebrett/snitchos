@@ -17,6 +17,19 @@ fn uart_offset(addr: u64) -> Option<usize> {
         .then(|| (addr - UART_BASE) as usize)
 }
 
+/// QEMU `virt` fw_cfg MMIO base (fixed at `0x1010_0000`) and its register page.
+/// snemu doesn't model fw_cfg — this is a **pure stub**: reads return 0, writes are
+/// dropped. That's enough for a guest to probe fw_cfg and find an *empty* directory
+/// (the count register reads 0), so features that self-configure through fw_cfg
+/// (e.g. ramfb) are skipped gracefully instead of the bus faulting on unmapped MMIO.
+const FWCFG_BASE: u64 = 0x1010_0000;
+const FWCFG_SIZE: u64 = 0x1000;
+
+/// Whether `addr` falls in the fw_cfg stub's register page.
+fn in_fwcfg(addr: u64) -> bool {
+    (FWCFG_BASE..FWCFG_BASE + FWCFG_SIZE).contains(&addr)
+}
+
 #[derive(Clone)]
 pub(crate) struct Bus {
     ram: Memory,
@@ -69,6 +82,9 @@ impl Bus {
     }
 
     pub(crate) fn read_u8(&self, addr: u64) -> Result<u8, BusError> {
+        if in_fwcfg(addr) {
+            return Ok(0);
+        }
         match uart_offset(addr) {
             Some(off) => Ok(self.uart.read(off)),
             None => self.ram.read_u8(addr),
@@ -76,6 +92,9 @@ impl Bus {
     }
 
     pub(crate) fn read_u16(&self, addr: u64) -> Result<u16, BusError> {
+        if in_fwcfg(addr) {
+            return Ok(0);
+        }
         match uart_offset(addr) {
             Some(off) => Ok(u16::from(self.uart.read(off))),
             None => self.ram.read_u16(addr),
@@ -83,6 +102,9 @@ impl Bus {
     }
 
     pub(crate) fn read_u32(&self, addr: u64) -> Result<u32, BusError> {
+        if in_fwcfg(addr) {
+            return Ok(0);
+        }
         if Virtio::in_window(addr) {
             return Ok(self.virtio.read(addr));
         }
@@ -93,6 +115,9 @@ impl Bus {
     }
 
     pub(crate) fn read_u64(&self, addr: u64) -> Result<u64, BusError> {
+        if in_fwcfg(addr) {
+            return Ok(0);
+        }
         match uart_offset(addr) {
             Some(off) => Ok(u64::from(self.uart.read(off))),
             None => self.ram.read_u64(addr),
@@ -100,6 +125,9 @@ impl Bus {
     }
 
     pub(crate) fn write_u8(&mut self, addr: u64, value: u8) -> Result<(), BusError> {
+        if in_fwcfg(addr) {
+            return Ok(());
+        }
         match uart_offset(addr) {
             Some(off) => {
                 self.uart.write(off, value);
@@ -110,6 +138,9 @@ impl Bus {
     }
 
     pub(crate) fn write_u16(&mut self, addr: u64, value: u16) -> Result<(), BusError> {
+        if in_fwcfg(addr) {
+            return Ok(());
+        }
         match uart_offset(addr) {
             Some(off) => {
                 self.uart.write(off, value as u8);
@@ -120,6 +151,9 @@ impl Bus {
     }
 
     pub(crate) fn write_u32(&mut self, addr: u64, value: u32) -> Result<(), BusError> {
+        if in_fwcfg(addr) {
+            return Ok(());
+        }
         if Virtio::in_window(addr) {
             self.virtio.write(addr, value);
             if Virtio::is_notify(addr) {
@@ -139,6 +173,9 @@ impl Bus {
     }
 
     pub(crate) fn write_u64(&mut self, addr: u64, value: u64) -> Result<(), BusError> {
+        if in_fwcfg(addr) {
+            return Ok(());
+        }
         match uart_offset(addr) {
             Some(off) => {
                 self.uart.write(off, value as u8);
@@ -146,5 +183,34 @@ impl Bus {
             }
             None => self.ram.write_u64(addr, value),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Bus, FWCFG_BASE};
+    use crate::mem::Memory;
+
+    /// The fw_cfg stub: selector/DMA writes are dropped (no fault) and data reads
+    /// return 0 — so a guest probing fw_cfg sees an empty directory (count 0) and
+    /// skips ramfb, instead of the bus faulting on unmapped MMIO (the QEMU-vs-snemu
+    /// divergence that halted boot). This is the whole contract of the stub.
+    #[test]
+    fn fwcfg_reads_zero_and_swallows_writes() {
+        let mut bus = Bus::new(Memory::new(0x1000));
+        // The exact registers the kernel touches: selector (u16 @ +0x08), the DMA
+        // address register (u32 @ +0x10), and the data register (u8 @ +0x00).
+        assert!(bus.write_u16(FWCFG_BASE + 0x08, 0x0019).is_ok(), "selector write must not fault");
+        assert!(bus.write_u32(FWCFG_BASE + 0x10, 0xdead_beef).is_ok(), "DMA write must not fault");
+        assert_eq!(bus.read_u8(FWCFG_BASE).unwrap(), 0, "data register reads 0");
+        assert_eq!(bus.read_u32(FWCFG_BASE).unwrap(), 0, "directory count reads 0 (empty)");
+    }
+
+    /// The stub is scoped to its page — RAM immediately below and above still works.
+    #[test]
+    fn addresses_outside_the_fwcfg_page_are_untouched() {
+        let mut bus = Bus::new(Memory::new(64 * 1024 * 1024));
+        bus.write_u32(crate::mem::RAM_BASE, 0x1234_5678).unwrap();
+        assert_eq!(bus.read_u32(crate::mem::RAM_BASE).unwrap(), 0x1234_5678, "RAM still routes");
     }
 }
