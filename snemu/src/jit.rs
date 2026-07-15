@@ -432,12 +432,29 @@ impl NativeBlock {
     }
 }
 
-/// A per-hart cache of compiled native blocks, keyed by entry PC. Mirrors the block
-/// cache's lifecycle: populated lazily, flushed with it on `satp`/`sfence` (stale
-/// translations ⇒ stale native code). A miss that isn't natively compilable caches
-/// `None`, so we don't re-attempt compilation every visit.
+/// Number of direct-mapped native-cache slots (power of two). Large enough that a
+/// scenario's hot block set rarely aliases (an alias just recompiles).
+const NATIVE_SLOTS: usize = 4096;
+
+/// One direct-mapped slot: the compiled result for `tag` (its entry PC), valid while
+/// `epoch` matches the cache. `result` is `Some` for a compiled block, `None` for a
+/// resolved-but-uncompilable PC (so we don't re-attempt compilation) — the two are
+/// distinguished from an *empty* slot by the epoch/tag match, not by `result`.
+#[derive(Default)]
+struct NativeSlot {
+    epoch: u64,
+    tag: u64,
+    result: Option<NativeBlock>,
+}
+
+/// A per-hart cache of compiled native blocks, **direct-mapped by entry PC** (not a
+/// `HashMap` — a `SipHash` probe per block execution measured as real overhead in the
+/// hot loop, which Backend A doesn't pay). Populated lazily; flushed with the block
+/// cache on `satp`/`sfence` (stale translations ⇒ stale native code) via an O(1)
+/// epoch bump plus an arena rewind.
 pub(crate) struct NativeCache {
-    blocks: std::collections::HashMap<u64, Option<NativeBlock>>,
+    epoch: u64,
+    slots: Box<[NativeSlot]>,
     arena: CodeArena,
 }
 
@@ -451,20 +468,29 @@ unsafe impl Sync for NativeCache {}
 
 impl NativeCache {
     pub(crate) fn new() -> Self {
-        Self { blocks: std::collections::HashMap::new(), arena: CodeArena::new() }
+        // Epoch starts at 1 so the zero-initialised slots (epoch 0) are stale.
+        let slots = (0..NATIVE_SLOTS).map(|_| NativeSlot::default()).collect();
+        Self { epoch: 1, slots, arena: CodeArena::new() }
     }
 
-    /// Drop every compiled block and rewind the arena — the design's "rebuild lazily"
-    /// invalidation, called wherever the block cache flushes. Clearing `blocks` (the
-    /// entry pointers) *before* resetting the arena is what makes the rewind safe.
+    #[inline]
+    fn index(pc: u64) -> usize {
+        ((pc >> 1) as usize) & (NATIVE_SLOTS - 1)
+    }
+
+    /// Invalidate every slot (O(1) epoch bump) and rewind the arena — the design's
+    /// "rebuild lazily" invalidation, called wherever the block cache flushes. Bumping
+    /// the epoch (so no slot is read) *before* rewinding the arena is what makes reuse
+    /// of the arena memory safe.
     pub(crate) fn flush(&mut self) {
-        self.blocks.clear();
+        self.epoch += 1;
         self.arena.reset();
     }
 
     /// Run the block entered at `pc` natively, compiling + caching it on first visit.
     /// Returns the exit (retired + resume PC), or `None` if the block isn't natively
-    /// compilable — the caller then runs Backend A.
+    /// compilable — the caller then runs Backend A. The hot path (a live slot) is a
+    /// single direct-mapped array index + tag compare, then the native call.
     pub(crate) fn run(
         &mut self,
         pc: u64,
@@ -472,11 +498,16 @@ impl NativeCache {
         exit_pc: u64,
         regs: &mut [u64; 32],
     ) -> Option<NativeExit> {
-        let compiled = self
-            .blocks
-            .entry(pc)
-            .or_insert_with(|| NativeBlock::compile_into(ops, exit_pc, &mut self.arena));
-        compiled.as_ref().map(|block| block.run(regs))
+        let idx = Self::index(pc);
+        let slot = &self.slots[idx];
+        if slot.epoch == self.epoch && slot.tag == pc {
+            return slot.result.as_ref().map(|block| block.run(regs));
+        }
+        // Miss (empty / stale / aliased): compile, run, then install into the slot.
+        let result = NativeBlock::compile_into(ops, exit_pc, &mut self.arena);
+        let exit = result.as_ref().map(|block| block.run(regs));
+        self.slots[idx] = NativeSlot { epoch: self.epoch, tag: pc, result };
+        exit
     }
 }
 
