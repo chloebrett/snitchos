@@ -334,18 +334,22 @@ impl PackOrder {
 }
 
 /// A `--speedup` preset — a named bundle of the snemu optimisation toggles, so the
-/// common cases don't need six flags. Individual `--jit`/`--tlb`/… flags still layer
-/// on top (see [`SpeedConfig::resolve`]).
+/// common cases don't need six flags. `low`→`med`→`hi` are **monotonic in speed and
+/// portable** (each the previous plus a proven-faster, browser-safe knob); `extra`
+/// adds the experimental, host-only bits on top. Individual `--jit`/`--tlb`/… flags
+/// still layer on (see [`SpeedConfig::resolve`]).
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum SpeedLevel {
-    /// The fidelity floor: idle-skip only (drop `--speedup` entirely for the pure
-    /// walk-everything oracle — well, minus idle-skip, which is itself A/B-proven).
+    /// The fidelity floor: idle-skip only.
     Low,
-    /// The portable, browser-safe speedups: idle-skip + native memops + the Tier-2
-    /// block JIT (Backend A) + register caching + the software TLB. No host-only codegen.
+    /// Low + the memory speedups: native memops + the software TLB. Still interpreted.
     Med,
-    /// Everything, including **Backend B** native AArch64 codegen (host-only).
+    /// Med + the Tier-2 block JIT (**Backend A**) — the fastest *portable* config.
     Hi,
+    /// Hi + **experimental, non-portable** extras: **Backend B** native AArch64
+    /// codegen. Host-only, and currently measured *slower* than Hi (its compile cost
+    /// isn't amortised yet) — this tier is for exercising the bleeding edge, not speed.
+    Extra,
 }
 
 /// The snemu optimisation toggles, bundled — every knob that changes only speed, not
@@ -362,12 +366,12 @@ pub struct SpeedConfig {
 }
 
 impl SpeedConfig {
-    /// The preset for a `--speedup` level. Each level is the previous one plus a
-    /// delta, so the difference between them is explicit:
+    /// The preset for a `--speedup` level. Each is the previous plus an explicit delta:
     /// - **Low** — idle-skip only (the fidelity floor).
-    /// - **Med** — Low + the portable, browser-safe speedups (native memops, the
-    ///   Tier-2 block JIT / Backend A, and the software TLB).
-    /// - **Hi** — Med + **Backend B** native AArch64 codegen (host-only).
+    /// - **Med** — Low + the memory speedups (native memops + the software TLB).
+    /// - **Hi** — Med + the Tier-2 block JIT (**Backend A** — the fastest portable).
+    /// - **Extra** — Hi + **Backend B** native codegen (experimental, host-only, and
+    ///   currently *slower* than Hi — the bleeding-edge tier, not a speed tier).
     fn preset(level: SpeedLevel) -> Self {
         let low = Self {
             idle_skip: true,
@@ -377,12 +381,14 @@ impl SpeedConfig {
             native_jit: false,
             tlb: false,
         };
-        let med = Self { native_ops: true, block_jit: true, tlb: true, ..low };
-        let hi = Self { native_jit: true, ..med };
+        let med = Self { native_ops: true, tlb: true, ..low };
+        let hi = Self { block_jit: true, ..med };
+        let extra = Self { native_jit: true, ..hi };
         match level {
             SpeedLevel::Low => low,
             SpeedLevel::Med => med,
             SpeedLevel::Hi => hi,
+            SpeedLevel::Extra => extra,
         }
     }
 
@@ -391,6 +397,10 @@ impl SpeedConfig {
     /// enables force a knob on, the `--no-*` disables force it off. So `--speedup med
     /// --native-jit` is Med plus Backend B, and a bare `--jit` is the old behaviour.
     /// `--native-jit` implies the block-JIT frontend.
+    #[allow(
+        clippy::fn_params_excessive_bools,
+        reason = "these are the raw CLI override flags being folded into the bundle"
+    )]
     pub fn resolve(
         level: Option<SpeedLevel>,
         native_ops: bool,
