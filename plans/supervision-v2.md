@@ -28,7 +28,21 @@ lands before the hard one.
 
 ## Increments (TDD each; policy-before-mechanism, mirroring v1)
 
-### 1. Pure policy — `teardown_order` (`supervision` crate, host-tested)
+### Status (2026-07-15)
+
+- **Increment 1 ✅** — `teardown_order` in the `supervision` crate (17 tests green).
+- **Increment 2 ✅** — the cap primitive, host-tested: `abi` (`Syscall::Kill = 30`,
+  `rights::KILL = 0b100_0000`, `object_kind::PROCESS = 5`), `kernel_core::cap`
+  (`Object::Process { id }`, `Rights::KILL`, `invoke_kill` + 3 tests, CapDesc arm),
+  `protocol::CapObject::Process`. abi/protocol/kernel-core tests all green.
+- **Increment 3 ⏳ WIP** — `Kill` is *wired* end to end (dispatch → `handle_kill`) and
+  the kernel compiles, but `handle_kill` is an **inert stub that refuses**: the real
+  teardown needs a `sched::kill_task(target)` primitive to stop a *non-current,
+  possibly-blocked* task and wake its `WaitAny` parent — new scheduler machinery that
+  must be QEMU-tested, so it wasn't rushed. `Spawn` does **not** yet mint the Process
+  cap. This is the next, substantial piece. See `handle_kill`'s doc comment.
+
+### 1. Pure policy — `teardown_order` (`supervision` crate, host-tested) ✅
 
 `teardown_order(specs) = startup_order(specs).reverse()` — stop dependents before the
 things they depend on. Same `Cycle` error. Trivial, but TDD it (it's the spine of

@@ -33,6 +33,7 @@ CapObject::SpanSink          01
 CapObject::Endpoint          02
 CapObject::Reply             03
 CapObject::Notification      04
+CapObject::Process           05
 SwitchReason::Yield          00
 SwitchReason::Preempt        01
 SwitchReason::Blocked        02

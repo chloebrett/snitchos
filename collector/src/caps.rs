@@ -120,6 +120,7 @@ fn object_kind(object: CapObject) -> &'static str {
         CapObject::Endpoint => "endpoint",
         CapObject::Reply => "reply",
         CapObject::Notification => "notification",
+        CapObject::Process => "process",
     }
 }
 

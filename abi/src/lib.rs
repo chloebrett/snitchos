@@ -576,6 +576,7 @@ mod tests {
         assert_eq!(Syscall::CapList as usize, 27);
         assert_eq!(Syscall::Revoke as usize, 28);
         assert_eq!(Syscall::ClockFreq as usize, 29);
+        assert_eq!(Syscall::Kill as usize, 30);
 
         assert_eq!(Syscall::from_usize(0), Some(Syscall::Exit));
         assert_eq!(Syscall::from_usize(1), Some(Syscall::Yield));
@@ -607,7 +608,8 @@ mod tests {
         assert_eq!(Syscall::from_usize(27), Some(Syscall::CapList));
         assert_eq!(Syscall::from_usize(28), Some(Syscall::Revoke));
         assert_eq!(Syscall::from_usize(29), Some(Syscall::ClockFreq));
-        assert_eq!(Syscall::from_usize(30), None);
+        assert_eq!(Syscall::from_usize(30), Some(Syscall::Kill));
+        assert_eq!(Syscall::from_usize(31), None);
     }
 
     #[test]
@@ -618,6 +620,7 @@ mod tests {
         assert_eq!(object_kind::ENDPOINT, 2);
         assert_eq!(object_kind::REPLY, 3);
         assert_eq!(object_kind::NOTIFICATION, 4);
+        assert_eq!(object_kind::PROCESS, 5);
     }
 
     #[test]

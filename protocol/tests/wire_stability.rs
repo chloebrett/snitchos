@@ -62,7 +62,7 @@ fn wire_encoding_is_stable() {
     for k in [CapEventKind::Granted, CapEventKind::Transferred, CapEventKind::Revoked, CapEventKind::Minted] {
         enum_arm(format!("CapEventKind::{k:?}"), enc(&k));
     }
-    for o in [CapObject::TelemetrySink, CapObject::SpanSink, CapObject::Endpoint, CapObject::Reply, CapObject::Notification] {
+    for o in [CapObject::TelemetrySink, CapObject::SpanSink, CapObject::Endpoint, CapObject::Reply, CapObject::Notification, CapObject::Process] {
         enum_arm(format!("CapObject::{o:?}"), enc(&o));
     }
     for r in [SwitchReason::Yield, SwitchReason::Preempt, SwitchReason::Blocked, SwitchReason::Exit] {
