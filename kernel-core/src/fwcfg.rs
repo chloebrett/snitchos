@@ -52,8 +52,9 @@ pub fn find_file(dir: &[u8], name: &str) -> Option<FwCfgFile> {
 
 /// Control bit: select a file by its `select_key` before the transfer
 /// (packed into the high 16 bits of `control`, per the `fw_cfg` DMA
-/// spec).
-pub const DMA_CTL_SELECT: u32 = 0x01;
+/// spec). Real bit assignments, low to high:
+/// `ERROR=0x01, READ=0x02, SKIP=0x04, SELECT=0x08, WRITE=0x10`.
+pub const DMA_CTL_SELECT: u32 = 0x08;
 /// Control bit: this is a write from guest to device.
 pub const DMA_CTL_WRITE: u32 = 0x10;
 
@@ -86,7 +87,7 @@ pub const REG_DMA_ADDR_LOW: usize = 0x14;
 
 /// Set by the device (never by the driver) when a completed transfer
 /// failed — e.g. an unknown `select_key`.
-pub const DMA_CTL_ERROR: u32 = 0x02;
+pub const DMA_CTL_ERROR: u32 = 0x01;
 
 /// Register and descriptor-memory access needed to drive a `fw_cfg`
 /// DMA transfer. `write_reg` is ordinary MMIO; `write_descriptor` /
@@ -258,7 +259,7 @@ mod tests {
         // key=0x42 packed into the high 16 bits, per the fw_cfg DMA spec.
         let control = (0x42u32 << 16) | DMA_CTL_SELECT | DMA_CTL_WRITE;
         let d = DmaAccess { control, length: 28, address: 0 };
-        assert_eq!(&d.to_bytes()[0..4], &[0x00, 0x42, 0x00, 0x11]);
+        assert_eq!(&d.to_bytes()[0..4], &[0x00, 0x42, 0x00, 0x18]);
     }
 
     #[derive(Default)]

@@ -20,11 +20,13 @@
 //! model.
 //!
 //! Cap re-grant (step 4, D3): the supervisor owns a durable endpoint (`svc-ep`) and
-//! delegates a freshly-minted `SEND` on it to `crasher` (the `cap-reporter` program)
-//! **each incarnation**. On restart, the same delegation re-runs against the new
-//! `CapTable`. The reporter enumerates its own `cap_list` and emits
-//! `snitchos.reporter.holds_endpoint` — the holder's independent confirmation that
-//! the re-granted cap landed (the snitch-on-the-snitch oracle for D3).
+//! is a **manifest satisfier** — each incarnation it runs `hitch::satisfy(needs,
+//! have)` (the shared primitive `satisfier.rs` and checkpoint use) against its own
+//! caps and delegates the plan in slot order, minting an attenuated `SEND` for
+//! `crasher`'s declared need. On restart, the same `satisfy` re-runs against the new
+//! `CapTable`. The `cap-reporter` program then enumerates its own `cap_list` and
+//! emits `snitchos.reporter.holds_endpoint` — the holder's independent confirmation
+//! that the re-granted cap landed (the snitch-on-the-snitch oracle for D3).
 
 #![no_std]
 #![no_main]
@@ -34,9 +36,10 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
+use hitch::{CapView, Grant, Slot, satisfy};
 use snitchos_user::{
-    Endpoint, Metric, clock_now, endpoint_create, entry, exit, register_counter, register_gauge,
-    rights, span_handle, spawn, tracer, wait_any, yield_now,
+    Endpoint, Metric, clock_now, endpoint_create, entry, exit, object_kind, register_counter,
+    register_gauge, rights, spawn, tracer, wait_any, yield_now,
 };
 use supervision::{
     ExitOutcome, RestartAction, RestartHistory, RestartLimits, RestartPolicy, ServiceId, ServiceSpec,
@@ -51,11 +54,13 @@ struct ServiceDef {
     name: &'static str,
     /// `SPAWNABLE` registry id (Phase 1a: embedded programs by index).
     program: usize,
-    /// Delegate our span cap to the child (some programs open a span through it).
-    give_span: bool,
-    /// Delegate a freshly-minted `SEND` on our durable endpoint each incarnation —
-    /// the D3 cap re-grant (the child borrows authority the supervisor owns).
-    give_endpoint: bool,
+    /// The child's declared authority requirements (a manifest `needs` list). The
+    /// supervisor is a *satisfier*: each incarnation it runs `hitch::satisfy(needs,
+    /// have)` against its own caps and delegates the result — so cap re-grant on
+    /// restart is the shared, data-driven `satisfy` primitive, not a hand-rolled
+    /// mint. (Here `needs` is static per service; the FS-manifest source the
+    /// `satisfier` reads from a `user.iface` xattr is a separate axis.)
+    needs: Vec<Slot>,
     policy: RestartPolicy,
     limits: RestartLimits,
 }
@@ -122,19 +127,23 @@ fn services() -> [ServiceDef; 2] {
             spec: ServiceSpec { id: SPINNER, deps: &[] },
             name: "spinner",
             program: 3,
-            give_span: false,
-            give_endpoint: false,
+            needs: Vec::new(),
             policy: RestartPolicy::Never,
             limits: NO_RESTART,
         },
         ServiceDef {
             // `cap-reporter` (SPAWNABLE id 7): reads its own cap_list, reports
-            // whether the re-granted endpoint landed, then crashes (exit 17).
+            // whether the re-granted endpoint landed, then crashes (exit 17). It
+            // *declares* it needs a `SEND` on the `svc-ep` endpoint; the supervisor
+            // satisfies that from its own `RECV | MINT` by minting an attenuated cap.
             spec: ServiceSpec { id: CRASHER, deps: &[SPINNER] },
             name: "crasher",
             program: 7,
-            give_span: false,
-            give_endpoint: true,
+            needs: alloc::vec![Slot {
+                name: "svc-ep".into(),
+                object: object_kind::ENDPOINT as u8,
+                rights: rights::SEND,
+            }],
             policy: RestartPolicy::OnFailure,
             limits: CRASHER_LIMITS,
         },
@@ -157,22 +166,44 @@ fn def_for(defs: &[ServiceDef], id: ServiceId) -> &ServiceDef {
     defs.iter().find(|d| d.spec.id == id).expect("id is from the same table")
 }
 
-/// Launch one service, delegating the caps it declares: our span cap, and/or a
-/// **freshly-minted** `SEND` on our durable endpoint (`ep`) — the per-incarnation
-/// cap re-grant. Returns the new incarnation's task id (or escalates the whole
-/// supervisor if a mint or the spawn fails — a service we can't grant authority to
-/// or even start is a fatal supervision error).
+/// Launch one service, **satisfying its declared `needs`** from the supervisor's
+/// own caps (`hitch::satisfy`) and delegating the plan in slot order — the shared,
+/// data-driven re-grant primitive, re-run per incarnation. Returns the new
+/// incarnation's task id, or escalates the whole supervisor if a slot is
+/// unsatisfiable, a mint fails, or the spawn fails (a service we can't grant
+/// authority to — or even start — is a fatal supervision error).
 fn launch(def: &ServiceDef, ep: &Endpoint) -> u32 {
-    let mut handles: Vec<u32> = Vec::new();
-    if def.give_span {
-        handles.push(span_handle());
+    // What we can satisfy from: our durable endpoint. We advertise the rights we
+    // can *provide*, not just the ones the cap literally carries — holding `MINT`
+    // means we can mint any right (`SEND`/`RECV`) for a child, so `satisfy` sees
+    // them as grantable (it matches on advertised rights and mints the attenuation).
+    // Same pattern as `satisfier.rs`, which advertises `MINT | SEND`.
+    let have = [CapView {
+        object: object_kind::ENDPOINT as u8,
+        rights: rights::RECV | rights::SEND | rights::MINT,
+        handle: ep.raw_handle() as u32,
+    }];
+    let plan = match satisfy(&def.needs, &have) {
+        Ok(plan) => plan,
+        Err(_) => escalate(def.name, "unsatisfiable-needs"),
+    };
+
+    // Assemble the delegated-handle array in slot order: an exact match rides as-is,
+    // a wider held cap is attenuated by minting exactly the slot's rights.
+    let mut handles: Vec<u32> = Vec::with_capacity(plan.len());
+    for grant in &plan {
+        let handle = match grant {
+            Grant::Use { handle } => *handle,
+            Grant::Mint { from, rights } => {
+                match Endpoint::from_raw_handle(*from as usize).mint_badged(0, *rights) {
+                    Ok(h) => h as u32,
+                    Err(_) => escalate(def.name, "mint-failed"),
+                }
+            }
+        };
+        handles.push(handle);
     }
-    if def.give_endpoint {
-        match ep.mint_badged(0, rights::SEND) {
-            Ok(h) => handles.push(h as u32),
-            Err(_) => escalate(def.name, "mint-failed"),
-        }
-    }
+
     match spawn(def.program, &handles) {
         Some(task) => task,
         None => escalate(def.name, "spawn-failed"),

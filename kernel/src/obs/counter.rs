@@ -100,6 +100,9 @@ static COUNTERS: &[&DeferredCounter] = &[
     &crate::mmu::SHOOTDOWNS_SENT_TOTAL,
     &crate::secondary::SECONDARY_WFI_COUNT,
     &crate::secondary::PROBE_TICKS,
+    // display
+    &crate::ramfb::FRAMES_PRESENTED,
+    &crate::ramfb::INIT_REFUSED,
 ];
 
 /// Intern every registered counter's name. Call once at boot, before the

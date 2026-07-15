@@ -165,6 +165,7 @@ pub fn run(metrics: Metrics) -> ! {
             count += 1;
             frame_smoke();
             heap_smoke_pattern(count);
+            crate::ramfb::present();
             emit_core(&metrics, count);
             crate::counter::drain_all();
             emit_frame_metrics(&metrics);

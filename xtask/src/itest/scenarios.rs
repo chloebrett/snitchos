@@ -3389,6 +3389,43 @@ pub fn supervised_regrants_caps_on_restart(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Supervision FU2 — a client's minted cap survives a server restart, proven by a
+/// real IPC round-trip (`workload=supervised-ipc`). The supervisor owns a durable
+/// endpoint and grants a minted `SEND` to a persistent client + a minted `RECV` to a
+/// crashing `ipc-echo-server` that serves one request then exits. The client sends a
+/// short series; each send rendezvous with whichever server incarnation is alive, and
+/// the supervisor respawns the server after every crash. The client never re-acquires
+/// its cap.
+///
+/// Cursor order is the proof: a second completed send (`ipcclient.sent == 2`) observed
+/// **after** a server restart (`server.restarts_total >= 1`) can only have landed on a
+/// fresh incarnation over the same endpoint — so the client's minted cap survived its
+/// server dying, because it names the durable object, not the process.
+pub fn supervised_ipc_client_cap_survives(h: &mut View) -> Result<(), String> {
+    // The supervisor brought up the crashing server.
+    h.wait_for(SEC * 20, is_thread_register_named("ipc-echo-server"))
+        .ok_or("no ThreadRegister for 'ipc-echo-server' — the supervisor didn't bring up the server")?;
+
+    // First round-trip completed: the client's send rendezvoused with a live server.
+    h.wait_for(SEC * 20, metric_where("snitchos.ipcclient.sent", |v| v == 1))
+        .ok_or("no ipcclient.sent == 1 — the client's first send never reached a server")?;
+
+    // The server crashed after serving and was respawned.
+    h.wait_for(SEC * 20, metric_where("snitchos.svc.server.restarts_total", |v| v >= 1))
+        .ok_or("no server.restarts_total >= 1 — the crashing server wasn't restarted")?;
+
+    // THE PROOF: a second send completes *after* the restart. The cursor is past the
+    // first send and the restart, so this round-trip landed on a fresh incarnation
+    // using the client's same minted cap — survival across the server's death.
+    h.wait_for(SEC * 20, metric_where("snitchos.ipcclient.sent", |v| v == 2))
+        .ok_or(
+            "no post-restart ipcclient.sent == 2 — the client's minted cap didn't reach a \
+             restarted server (cap didn't survive the restart)",
+        )?;
+
+    Ok(())
+}
+
 /// v0.13 `EndpointCreate` — a process manufactures its own IPC endpoint and gets
 /// back a real *owning* capability (`workload=endpoint-create`). `ep_maker`
 /// creates an endpoint, then mints a badged `SEND` cap on it; minting requires the

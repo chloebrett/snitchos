@@ -92,6 +92,19 @@ pub static SUPERVISED_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SUPERVISED_ELF"
 /// endpoint landed, then exits non-zero — the cap-re-grant crash-loop oracle.
 pub static CAP_REPORTER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_CAP_REPORTER_ELF"));
 
+/// The `workload=supervised-ipc` supervisor (supervision FU2): owns a durable
+/// endpoint and grants a minted `SEND` to a persistent client + a minted `RECV` to
+/// a crashing server, respawning the server so the client's cap survives restarts.
+pub static SUPERVISED_IPC_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SUPERVISED_IPC_ELF"));
+
+/// The `ipc-echo-server` supervised service (spawnable id 8): serves one request
+/// on its re-granted `RECV` cap, then crashes — forcing a restart per request.
+pub static IPC_ECHO_SERVER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_IPC_ECHO_SERVER_ELF"));
+
+/// The `ipc-echo-client` (spawnable id 9): sends a short series over its one minted
+/// `SEND` cap, each send rendezvousing with whichever server incarnation is alive.
+pub static IPC_ECHO_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_IPC_ECHO_CLIENT_ELF"));
+
 /// The `spinner` child (spawnable id 3): loops forever, never exits. A long-lived
 /// sibling so `WaitAny` deterministically returns the *other* child.
 pub static SPINNER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPINNER_ELF"));
@@ -319,6 +332,10 @@ pub static SUPERVISOR: ProgramSpec = ProgramSpec { elf: SUPERVISOR_ELF, launch: 
 /// it spawns its services (spinner/spawnee) from the `SPAWNABLE` registry.
 pub static SUPERVISED: ProgramSpec = ProgramSpec { elf: SUPERVISED_ELF, launch: Launch::Plain };
 
+/// `workload=supervised-ipc`: the cap-survival supervisor — owns its endpoint and
+/// grants from it (Launch::Plain; it `EndpointCreate`s + `Spawn`s its own services).
+pub static SUPERVISED_IPC: ProgramSpec = ProgramSpec { elf: SUPERVISED_IPC_ELF, launch: Launch::Plain };
+
 /// `workload=init`: the supervising root — spawns + `WaitAny`-reaps a child,
 /// delegating its span cap downward. Holds only its bootstrap caps (Launch::Plain).
 pub static INIT: ProgramSpec = ProgramSpec { elf: INIT_ELF, launch: Launch::Plain };
@@ -535,6 +552,8 @@ static SPAWNABLE: &[(&str, &[u8])] = &[
     ("fs-client", FS_CLIENT_ELF),     // 5
     ("viewer", VIEWER_ELF),           // 6
     ("cap-reporter", CAP_REPORTER_ELF), // 7
+    ("ipc-echo-server", IPC_ECHO_SERVER_ELF), // 8
+    ("ipc-echo-client", IPC_ECHO_CLIENT_ELF), // 9
 ];
 
 /// Resolve a `Spawn` program id to its `(name, image)`, or `None` if out of range.
@@ -722,6 +741,13 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::Supervised, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "supervised", program: &SUPERVISED, priority: Priority::Normal }],
+    }),
+    // Supervision FU2: the cap-survival supervisor. Only `supervised-ipc` is in the
+    // layout; it manufactures its own endpoint and spawns its client/server (ids
+    // 9/8) at runtime, respawning the crashing server so the client's cap survives.
+    (WorkloadKind::SupervisedIpc, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "supervised_ipc", program: &SUPERVISED_IPC, priority: Priority::Normal }],
     }),
     // v0.13 EndpointCreate: a single program manufactures its own endpoint and
     // proves it by minting — no kernel-created endpoint (`needs_endpoint: false`).

@@ -4,5 +4,5 @@ disallowed-types = [
     { path = "spin::Once", reason = "use kernel::sync::Once" },
 ]
 
-# Prose terms `doc_markdown` mistakes for identifiers (the Backend B JIT docs use them).
-doc-valid-idents = ["AArch64", ".."]
+# Prose terms `doc_markdown` mistakes for identifiers (the Backend B JIT + device docs).
+doc-valid-idents = ["AArch64", "fw_cfg", "ramfb", "MMIO", ".."]

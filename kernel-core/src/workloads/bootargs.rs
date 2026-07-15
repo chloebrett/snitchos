@@ -162,6 +162,12 @@ pub enum WorkloadKind {
     /// (restart with backoff, stop, or escalate) — instead of hardcoding it. Its
     /// `crasher` service crash-loops past its intensity budget and escalates.
     Supervised,
+    /// Supervision FU2: the cap-survival supervisor. A persistent client and a
+    /// crashing IPC server share the supervisor's durable endpoint; the client's
+    /// minted `SEND` keeps working across server restarts (a real IPC round-trip
+    /// lands on each fresh server incarnation), proving a minted cap survives its
+    /// server dying because it names the durable object, not the process.
+    SupervisedIpc,
     /// v0.13 EndpointCreate: a single program manufactures its own IPC endpoint
     /// via the `EndpointCreate` syscall and proves the returned cap is a real
     /// owning `RECV | MINT` by minting a badged `SEND` on it.
@@ -335,6 +341,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "wait-any" => Some(WorkloadKind::WaitAny),
             "init" => Some(WorkloadKind::Init),
             "supervised" => Some(WorkloadKind::Supervised),
+            "supervised-ipc" => Some(WorkloadKind::SupervisedIpc),
             "endpoint-create" => Some(WorkloadKind::EndpointCreate),
             "demo" => Some(WorkloadKind::Demo),
             "cooperative" => Some(WorkloadKind::Cooperative),
@@ -556,6 +563,9 @@ mod tests {
     #[test]
     fn selects_supervised() {
         assert_eq!(select("workload=supervised"), Some(WorkloadKind::Supervised));
+        // Must not be mis-parsed as the one-way `supervised` workload.
+        assert_eq!(select("workload=supervised-ipc"), Some(WorkloadKind::SupervisedIpc));
+        assert_ne!(select("workload=supervised-ipc"), Some(WorkloadKind::Supervised));
     }
 
     #[test]

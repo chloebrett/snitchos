@@ -25,7 +25,7 @@ mod syscall;
 mod trap;
 mod workloads;
 
-pub(crate) use device::{console, uart, virtio_console};
+pub(crate) use device::{console, fwcfg, ramfb, uart, virtio_console};
 pub(crate) use mem::{frame, heap, heap_smoke, mmu};
 pub(crate) use obs::{counter, heartbeat, tracing};
 pub(crate) use sched::{demo_tasks, process};
@@ -304,6 +304,16 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // up (the split needs a page-table frame).
     mmu::guard_boot_stack();
 
+    // Framebuffer bring-up (Milestone 0). Best-effort: a machine booted
+    // without `-device ramfb` has no `etc/ramfb` fw_cfg file, so `init`
+    // snitches a refusal (`INIT_REFUSED`) and boot continues with no
+    // display — never fatal.
+    //
+    // SAFETY: called exactly once, after heap::init (needs frames + the
+    // live linear map) and after mmu::enable, before any other user of
+    // root PTE slot 258.
+    let _ = unsafe { ramfb::init() };
+
     // v0.5 step 5 smoke: build a marker task context, switch into
     // it, marker bumps a counter and switches back. Proves the
     // context-switch asm (`sched::switch`) round-trips correctly
@@ -442,6 +452,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::WaitAny)
         | Some(WorkloadKind::Init)
         | Some(WorkloadKind::Supervised)
+        | Some(WorkloadKind::SupervisedIpc)
         | Some(WorkloadKind::EndpointCreate)
         | Some(WorkloadKind::NotifySmoke)
         | Some(WorkloadKind::Priorities)
@@ -524,6 +535,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::WaitAny
                     | WorkloadKind::Init
                     | WorkloadKind::Supervised
+                    | WorkloadKind::SupervisedIpc
                     | WorkloadKind::EndpointCreate
                     | WorkloadKind::UserspaceBadPtr
                     | WorkloadKind::Priorities

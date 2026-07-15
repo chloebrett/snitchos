@@ -7,10 +7,19 @@
 shipped primitives (`Spawn`, `Wait`/`WaitAny`, `EndpointCreate`, `Notify`, caps +
 `Revoke`, the clock): pure policy in the shared `supervision` crate, a `workload=supervised`
 engine, metric telemetry, and cap re-grant on restart verified by a `cap_list` oracle
-(see the increment plan at the bottom for the per-step ✅ notes). **v2 (health + graceful
-shutdown)** — `Kill` + timed-wait syscalls — remains, plus follow-ups (the real
-`satisfier` manifest path, a client whose cap survives an IPC round-trip across restart,
-and the umbrella/incarnation span trace tree).
+(see the increment plan at the bottom for the per-step ✅ notes).
+
+**Follow-ups (2026-07-13):** FU1 ✅ — the engine delegates via `hitch::satisfy(needs,
+have)` (the shared satisfier/checkpoint primitive), not a hand-rolled mint; each service
+declares its `needs` and the supervisor satisfies from its own caps (gotcha: `have` must
+advertise the rights the `MINT`-holder can *provide*, e.g. `RECV | SEND | MINT`, not just
+what the cap literally carries). FU2 ✅ — `workload=supervised-ipc` + itest
+`supervised-ipc-client-cap-survives`: a persistent client's minted `SEND` completes an IPC
+round-trip against a *post-restart* server incarnation, proving the cap survives its
+server dying (it names the durable object, not the process). **v2 (health + graceful
+shutdown)** — `Kill` + timed-wait syscalls — remains, plus the umbrella/incarnation span
+trace tree (needs an explicit-parent span model) and reading `needs` from the FS
+`user.iface` xattr (the full `satisfier.rs::process` source).
 
 **The reframe (updated 2026-07-11, after manifest v2 shipped).** The supervisor is, in
 the terms of [design-explorations-seven-questions.md](design-explorations-seven-questions.md)
