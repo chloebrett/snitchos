@@ -121,12 +121,14 @@ by name only — that's the gradual baseline to preserve.
 
 ### Track A — generic types (checker-only, no parser work)
 
-- **G1 — Type-argument annotations + gradual-arg consistency.** `ty_of_annotation`
-  recurses into `<…>` so `Maybe<Int>` → `Named{Maybe, [Int]}`. `consistent` for `Named`:
-  same name; if **both** sides carry args of equal arity, args must be pairwise-consistent;
-  if either side has **empty/mismatched-arity** args (unknown), it's gradual-compatible.
-  → `f() -> Maybe<Int> = Some(1)` stays clean (the `Some` result has empty args), but
-  `Maybe<Int>` vs `Maybe<Str>` is caught. *Small, mechanical; the Track-A prerequisite.*
+- **G1 — Type-argument annotations + gradual-arg consistency — ✅ DONE (2026-07-15).**
+  `ty_of_annotation` recurses into `<…>` (`Maybe<Int>` → `Named{Maybe,[Int]}`);
+  `consistent` for `Named` = same name + `args_consistent` (empty args on either side =
+  gradual-compatible; else equal arity + pairwise). Testable via a generic-typed param
+  flowing into a call: `Box<Int>` passed where `Box<Str>` is expected → error; `Box<Int>`
+  → `Box<Int>` and bare `Box` ~ `Box<Int>` clean. 613 lib + all integration green,
+  **prelude guard still clean** (synthesized types have empty args → gradual). Mutation
+  20/21 caught, 0 survivors.
 - **G2 — Generic constructor instantiation.** `Some(5)` → `Maybe<Int>`, `Cons(1, t)` →
   `List<Int>`: a constructor knows its type's `generics` and which field carries which
   param, so unify the argument types against the field types to solve the params and
