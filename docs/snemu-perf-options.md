@@ -108,7 +108,18 @@ By contrast the heartbeat **metrics** are already cheap: `Metrics::register()`
 `counter.rs:54`'s `self.id.call_once(...)`. The span path simply never got that
 treatment.
 
-### The fix (recommended first implementation)
+### The fix — SHIPPED (2026-07-15)
+
+Implemented: the `span!` macro (`kernel/src/obs/tracing.rs`) now caches its resolved
+`StringId` in a per-call-site `static Once<StringId>` (mirroring `counter.rs`) and calls
+a new `span_start_id(name_id)`; `span_start(name)` was removed (all callers are the
+macro). **Verified:** re-profiling `smp` release shows `InternTable::lookup_or_insert`
+gone from the top 12 — down from 15.4% (122M) to the sub-1.8% tail — with the reclaimed
+cycles now spent on real workload progress (`producer_entry` 59M→95M in the fixed
+window). `snemu-itest` stays green (113/114, 99% fidelity — the one miss is the standing
+FS-read fidelity gap, not a regression), confirming byte-identical wire behaviour.
+
+### The fix, as originally planned
 
 Give span opens the same register-once/reuse-id caching the metrics already have.
 Cleanest shape: make the `span!` macro (`tracing.rs:500`) cache its resolved id in a

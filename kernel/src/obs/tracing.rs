@@ -499,7 +499,17 @@ pub fn emit_message(endpoint: u32, from: u32, to: u32, parent: protocol::SpanId)
 #[macro_export]
 macro_rules! span {
     ($name:expr) => {
-        let _span = $crate::tracing::span_start($name);
+        // Intern the name once per call site (the name is a fixed `&'static
+        // str` here), caching its `StringId` — so a span opened every tick
+        // skips the O(n) intern-table scan `span_start` would repeat. Mirrors
+        // the `DeferredCounter` id cache. First open emits the `StringRegister`;
+        // later opens reuse the id, so the wire output is unchanged.
+        let _span = {
+            static SPAN_NAME_ID: $crate::sync::Once<::protocol::StringId> =
+                $crate::sync::Once::new();
+            let id = *SPAN_NAME_ID.call_once(|| $crate::tracing::register_or_lookup($name));
+            $crate::tracing::span_start_id(id)
+        };
     };
 }
 
@@ -582,10 +592,13 @@ impl Drop for Span {
     }
 }
 
-/// Open a span named `name`. Returns a `Span` guard whose `Drop` will
-/// emit `SpanEnd`. Nesting is automatic from Rust scopes.
-pub fn span_start(name: &'static str) -> Span {
-    let name_id = register_or_lookup(name);
+/// Open a span whose name is already interned to `name_id`, returning a
+/// `Span` guard whose `Drop` emits `SpanEnd`. Nesting is automatic from Rust
+/// scopes. This is the hot path behind the [`span!`] macro: the macro interns
+/// each span name once per call site (caching the `StringId`), so repeated
+/// opens skip the O(n) intern-table scan an un-cached name lookup would
+/// repeat every tick.
+pub fn span_start_id(name_id: StringId) -> Span {
     let cursor = current_cursor();
     let open = span::open(&SPAN_IDS, cursor);
     emit_frame(&Frame::SpanStart {
