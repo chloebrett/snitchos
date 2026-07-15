@@ -211,8 +211,10 @@ contents + delimiters/whitespace.
   long-term model, chosen disregarding the ~30-test-site churn).
 - *P4b-1 — `Range` + object-pending + word object `iw`/`aw`. ✅ DONE.* `diw`/`ciw`/
   `yiw`/`daw` all work; the whole object machinery proven end-to-end.
-- *P4b-2 — quote objects `i"`/`a"`.* New `textObjectRange` arm only. Bracket objects
-  (`i(`/`i{`/`i[`) deferred past v1.
+- *P4b-2 — quote objects `i"`/`a"` (and `i'`/`a'`). ✅ DONE.* Generic delimiter-pair
+  scan (`nextCharAt`/`findDelimOpen`), pairs counted left-to-right, targets the pair
+  enclosing or after the cursor. `ci"`/`di"`/`yi"`/`da"` work. Bracket objects
+  (`i(`/`i{`/`i[`) deferred past v1. **Phase 4 complete.**
 
 **Phase 5 — registers + the real command-line.**
 Named registers (`"{reg}` prefix; soft clipboard), and generalize `:` from the

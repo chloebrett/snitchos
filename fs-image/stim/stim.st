@@ -689,9 +689,51 @@ wordObject(state) = match state.pending.object {
     _ => innerWordRange(state)
 }
 
-// The `Range` for a text-object char, or `None` if the key isn't an object. v1: only
-// `w` (word); quotes/brackets are later objects.
-textObjectRange(state, key) = key == "w" => Some(wordObject(state)) | None
+// Forward: the first index at/after `i` holding `ch` (or `len` if none).
+nextCharAt(line, i, len, ch) = match {
+    i >= len => len
+    Str.slice(line, i, i + 1) == ch => i
+    _ => nextCharAt(line, i + 1, len, ch)
+}
+
+// The opening-delimiter index of the `ch`-pair enclosing or after the cursor (pairs
+// counted left to right: 1st–2nd, 3rd–4th, …), or -1 if there is no complete pair.
+findDelimOpen(line, from, len, c, ch) = {
+    let o = nextCharAt(line, from, len, ch)
+    o >= len => 0 - 1 | {
+        let close = nextCharAt(line, o + 1, len, ch)
+        match {
+            close >= len => 0 - 1
+            c <= close => o
+            _ => findDelimOpen(line, close + 1, len, c, ch)
+        }
+    }
+}
+
+// The `Range` for a delimiter pair `[o, close]`: `Inner` = between them, `Around` =
+// including them.
+delimRange(state, o, close) = match state.pending.object {
+    Around => Range(startRow: state.row, startCol: o, endRow: state.row, endCol: close + 1, wise: Charwise)
+    _ => Range(startRow: state.row, startCol: o + 1, endRow: state.row, endCol: close, wise: Charwise)
+}
+
+// The `Range` for the `ch`-delimited pair around the cursor, or `None` if there is no
+// pair on the line.
+delimObjectRange(state, ch) = {
+    let line = lineAt(state, state.row)
+    let len = Str.length(line)
+    let o = findDelimOpen(line, 0, len, state.col, ch)
+    o < 0 => None | Some(delimRange(state, o, nextCharAt(line, o + 1, len, ch)))
+}
+
+// The `Range` for a text-object char, or `None` if the key isn't an object. v1: word
+// (`w`) and quotes (`"` / `'`); brackets are deferred.
+textObjectRange(state, key) = match {
+    key == "w" => Some(wordObject(state))
+    key == "\"" => delimObjectRange(state, "\"")
+    key == "'" => delimObjectRange(state, "'")
+    _ => None
+}
 
 // The text of a charwise range `[lo, hi)` on `row`, clamped to the line.
 rangeText(state, row, lo, hi) = {

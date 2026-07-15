@@ -767,6 +767,49 @@ fn the_full_d_i_w_key_sequence_deletes_the_inner_word() {
 }
 
 #[test]
+fn quote_objects_target_the_text_in_quotes() {
+    // Line: foo "bar" baz — quotes at cols 4 and 8, "bar" at 5..7.
+    let inner = |col: i64| format!(
+        r#"Editor(..initialState("foo \"bar\" baz"), col: {col}, pending: Pending(op: OpDelete, count: 0, object: Inner))"#
+    );
+    // di" from inside the quotes deletes "bar", leaving the quotes themselves.
+    assert_eq!(lines_col(&format!(r#"step({}, "\"").state"#, inner(6))), line_and_col("foo \"\" baz", 5));
+    // It also works from before the string on the same line (cursor at col 1).
+    assert_eq!(lines_col(&format!(r#"step({}, "\"").state"#, inner(1))), line_and_col("foo \"\" baz", 5));
+    // da" deletes the quotes and their contents (leaving the surrounding spaces).
+    let around = r#"Editor(..initialState("foo \"bar\" baz"), col: 6, pending: Pending(op: OpDelete, count: 0, object: Around))"#;
+    assert_eq!(lines_col(&format!(r#"step({around}, "\"").state"#)), line_and_col("foo  baz", 4));
+}
+
+#[test]
+fn ci_quote_changes_and_yi_quote_yanks_the_quoted_text() {
+    // say "hi" now — quotes at 4 and 7, "hi" at 5..6.
+    let ci = r#"Editor(..initialState("say \"hi\" now"), col: 5, pending: Pending(op: OpChange, count: 0, object: Inner))"#;
+    assert_eq!(lines_col(&format!(r#"step({ci}, "\"").state"#)), line_and_col("say \"\" now", 5));
+    assert_eq!(step_mode(ci, "\\\""), s("Insert"));
+    let yi = r#"Editor(..initialState("say \"hi\" now"), col: 5, pending: Pending(op: OpYank, count: 0, object: Inner))"#;
+    assert_eq!(clipboard_text(&format!(r#"step({yi}, "\"").state"#)), s("hi"));
+}
+
+#[test]
+fn a_quote_object_with_no_quotes_on_the_line_cancels() {
+    let di = r#"Editor(..initialState("no quotes here"), pending: Pending(op: OpDelete, count: 0, object: Inner))"#;
+    // Nothing to match → the object resolves to nothing → cancel (Redraw, buffer intact).
+    assert_eq!(step_effect(di, "\\\""), s("Redraw"));
+    assert_eq!(
+        fsm(&format!(r#"step({di}, "\"").state.lines"#)),
+        fsm(r#"initialState("no quotes here").lines"#)
+    );
+}
+
+#[test]
+fn single_quote_object_targets_apostrophe_delimited_text() {
+    // a 'x' b — single quotes at 2 and 4, "x" at 3.
+    let di = r#"Editor(..initialState("a 'x' b"), col: 3, pending: Pending(op: OpDelete, count: 0, object: Inner))"#;
+    assert_eq!(lines_col(&format!(r#"step({di}, "'").state"#)), line_and_col("a '' b", 3));
+}
+
+#[test]
 fn zero_and_dollar_jump_to_the_line_ends() {
     // "hello" with the cursor mid-line: `0` → column 0, `$` → the last character
     // (col 4). `$` lands *on* the last char (len−1), unlike `A` which appends at len.
