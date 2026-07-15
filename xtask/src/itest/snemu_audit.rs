@@ -333,6 +333,117 @@ impl PackOrder {
     }
 }
 
+/// A `--speedup` preset — a named bundle of the snemu optimisation toggles, so the
+/// common cases don't need six flags. Individual `--jit`/`--tlb`/… flags still layer
+/// on top (see [`SpeedConfig::resolve`]).
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SpeedLevel {
+    /// The fidelity floor: idle-skip only (drop `--speedup` entirely for the pure
+    /// walk-everything oracle — well, minus idle-skip, which is itself A/B-proven).
+    Low,
+    /// The portable, browser-safe speedups: idle-skip + native memops + the Tier-2
+    /// block JIT (Backend A) + register caching + the software TLB. No host-only codegen.
+    Med,
+    /// Everything, including **Backend B** native AArch64 codegen (host-only).
+    Hi,
+}
+
+/// The snemu optimisation toggles, bundled — every knob that changes only speed, not
+/// behaviour (each on↔off byte-identical by its own oracle). Threaded as one value
+/// instead of six bools; applied to a machine by [`apply`](Self::apply).
+#[derive(Clone, Copy)]
+pub struct SpeedConfig {
+    pub idle_skip: bool,
+    pub native_ops: bool,
+    pub block_jit: bool,
+    pub reg_cache: bool,
+    pub native_jit: bool,
+    pub tlb: bool,
+}
+
+impl SpeedConfig {
+    /// The preset for a `--speedup` level. Each level is the previous one plus a
+    /// delta, so the difference between them is explicit:
+    /// - **Low** — idle-skip only (the fidelity floor).
+    /// - **Med** — Low + the portable, browser-safe speedups (native memops, the
+    ///   Tier-2 block JIT / Backend A, and the software TLB).
+    /// - **Hi** — Med + **Backend B** native AArch64 codegen (host-only).
+    fn preset(level: SpeedLevel) -> Self {
+        let low = Self {
+            idle_skip: true,
+            native_ops: false,
+            block_jit: false,
+            reg_cache: true,
+            native_jit: false,
+            tlb: false,
+        };
+        let med = Self { native_ops: true, block_jit: true, tlb: true, ..low };
+        let hi = Self { native_jit: true, ..med };
+        match level {
+            SpeedLevel::Low => low,
+            SpeedLevel::Med => med,
+            SpeedLevel::Hi => hi,
+        }
+    }
+
+    /// Resolve the effective config: start from the `--speedup` preset (or the `Low`
+    /// baseline when unset), then layer the individual flags on top — the `--*`
+    /// enables force a knob on, the `--no-*` disables force it off. So `--speedup med
+    /// --native-jit` is Med plus Backend B, and a bare `--jit` is the old behaviour.
+    /// `--native-jit` implies the block-JIT frontend.
+    pub fn resolve(
+        level: Option<SpeedLevel>,
+        native_ops: bool,
+        block_jit: bool,
+        native_jit: bool,
+        tlb: bool,
+        no_idle_skip: bool,
+        no_reg_cache: bool,
+    ) -> Self {
+        let mut cfg = Self::preset(level.unwrap_or(SpeedLevel::Low));
+        cfg.native_ops |= native_ops;
+        cfg.block_jit |= block_jit || native_jit;
+        cfg.native_jit |= native_jit;
+        cfg.tlb |= tlb;
+        if no_idle_skip {
+            cfg.idle_skip = false;
+        }
+        if no_reg_cache {
+            cfg.reg_cache = false;
+        }
+        cfg
+    }
+
+    /// A compact list of the enabled toggles for the run banner (`none` if all off).
+    fn label(self) -> String {
+        let mut on = Vec::new();
+        for (enabled, name) in [
+            (self.idle_skip, "idle-skip"),
+            (self.native_ops, "native-ops"),
+            (self.tlb, "tlb"),
+            (self.block_jit, "jit-A"),
+            (self.native_jit, "jit-B"),
+            (self.reg_cache && (self.block_jit || self.native_jit), "reg-cache"),
+        ] {
+            if enabled {
+                on.push(name);
+            }
+        }
+        if on.is_empty() { "none".to_owned() } else { on.join(",") }
+    }
+
+    /// Apply every toggle to `machine` (the block JIT frontend is on whenever Backend
+    /// B is, since B lowers the same blocks).
+    fn apply(self, machine: &mut snemu::machine::Machine) {
+        machine.set_idle_skip(self.idle_skip);
+        machine.set_native_ops(self.native_ops);
+        machine.set_block_jit(self.block_jit || self.native_jit);
+        machine.set_native_jit(self.native_jit);
+        machine.set_tlb(self.tlb);
+        machine.set_register_cache(self.reg_cache);
+    }
+}
+
 /// Run the audit: build the `itest-workloads` kernel, boot each distinct
 /// workload under snemu to `max_steps`, replay every scenario against its
 /// group's frames, and print a per-scenario + summary report. `limit` caps the
@@ -343,19 +454,11 @@ pub fn run(
     limit: Option<usize>,
     only: Option<&str>,
     jobs: usize,
-    idle_skip: bool,
     order: PackOrder,
     opt: crate::qemu::OptLevel,
-    native_ops: bool,
-    block_jit: bool,
-    reg_cache: bool,
     share_snapshots: bool,
-    native_jit: bool,
-    tlb: bool,
+    speed: SpeedConfig,
 ) -> ExitCode {
-    // Backend B (native codegen) needs the block JIT frontend, so `--native-jit`
-    // implies `--jit`.
-    let block_jit = block_jit || native_jit;
     let (kernel, dtb) = match snemu_diff::prepare_profiled(true, opt) {
         Ok(v) => v,
         Err(e) => {
@@ -372,9 +475,9 @@ pub fn run(
     let work: Vec<&itest_harness::Scenario> = selected.into_iter().take(cap).collect();
     eprintln!(
         "snemu-itest: auditing {cap} of {} scenario(s), live under snemu, \
-         up to {max_steps} steps each, {jobs} worker(s), idle-skip {}",
+         up to {max_steps} steps each, {jobs} worker(s), speed[{}]",
         SCENARIOS.len(),
-        if idle_skip { "on" } else { "off" },
+        speed.label(),
     );
 
     let started = Instant::now();
@@ -532,12 +635,7 @@ pub fn run(
             None => read_snapshot(&snap_store, s.workload).or_else(|| {
                 match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload) {
                     Ok(mut m) => {
-                        m.set_idle_skip(idle_skip);
-                        m.set_native_ops(native_ops);
-                        m.set_block_jit(block_jit);
-                        m.set_native_jit(native_jit);
-                        m.set_tlb(tlb);
-                        m.set_register_cache(reg_cache);
+                        speed.apply(&mut m);
                         Some(m)
                     }
                     Err(_) => None,
@@ -561,7 +659,7 @@ pub fn run(
         match &kinds[task] {
             PipelineTask::Boot(workload) => {
                 let snapshot =
-                    boot_snapshot(&kernel, &dtb, *workload, idle_skip, native_ops, block_jit, reg_cache, native_jit, tlb);
+                    boot_snapshot(&kernel, &dtb, *workload, speed);
                 let (machine, boot_instret) = match snapshot {
                     Ok((m, n)) => (Ok(m), n),
                     Err(e) => (Err(e), 0),
@@ -1042,21 +1140,11 @@ fn boot_snapshot(
     kernel: &[u8],
     dtb: &[u8],
     workload: Option<&str>,
-    idle_skip: bool,
-    native_ops: bool,
-    block_jit: bool,
-    reg_cache: bool,
-    native_jit: bool,
-    tlb: bool,
+    speed: SpeedConfig,
 ) -> Result<(snemu::machine::Machine, u64), String> {
     let mut machine = snemu_diff::load_workload_machine(kernel, dtb, workload)?;
-    machine.set_idle_skip(idle_skip);
     // Set on the snapshot; the per-scenario forks inherit it through `clone`.
-    machine.set_native_ops(native_ops);
-    machine.set_block_jit(block_jit);
-    machine.set_native_jit(native_jit);
-    machine.set_tlb(tlb);
-    machine.set_register_cache(reg_cache);
+    speed.apply(&mut machine);
     machine.run_until_uart(CHECKPOINT, CHECKPOINT_BUDGET)?;
     // Report the boot-once cost as guest instret (not host step calls) to match the
     // per-scenario metric — a block collapses many instructions into one step.

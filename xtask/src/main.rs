@@ -155,6 +155,11 @@ enum Cmd {
         /// faster — this is the lever for the memory/translation pole.
         #[arg(long)]
         tlb: bool,
+        /// Preset speedup bundle: `low` (idle-skip only), `med` (+native-ops, block
+        /// JIT, TLB — portable), `hi` (+Backend B native codegen, host-only). The
+        /// individual `--jit`/`--tlb`/… flags layer on top. Omit for `low`.
+        #[arg(long, value_enum)]
+        speedup: Option<itest::snemu_audit::SpeedLevel>,
     },
     /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
     /// run under snemu with exact per-PC counting and report the top kernel
@@ -779,14 +784,15 @@ fn main() -> ExitCode {
             share_snapshots,
             native_jit,
             tlb,
+            speedup,
         } => {
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
-            itest::snemu_audit::run(
-                steps, limit, only.as_deref(), jobs, !no_idle_skip, order, opt, native_ops,
-                block_jit, !no_reg_cache, share_snapshots, native_jit, tlb,
-            )
+            let speed = itest::snemu_audit::SpeedConfig::resolve(
+                speedup, native_ops, block_jit, native_jit, tlb, no_idle_skip, no_reg_cache,
+            );
+            itest::snemu_audit::run(steps, limit, only.as_deref(), jobs, order, opt, share_snapshots, speed)
         }
         Cmd::SnemuProfile { workload, steps, top, release } => {
             snemu_profile::run(workload.as_deref(), steps, top, release)
