@@ -63,16 +63,22 @@ impl TypeError {
     }
 }
 
-/// A declared constructor: which type it builds, and its fields in order.
+/// A declared constructor: which type it builds, that type's generic parameters
+/// (in order), and its fields.
 struct Ctor {
     type_name: String,
+    generics: Vec<String>,
     fields: Vec<FieldTy>,
 }
 
-/// One constructor field: its label (`None` when positional) and its type.
+/// One constructor field: its label (`None` when positional), its type, and —
+/// when the field's declared type is exactly one of the type's generic
+/// parameters (e.g. `Some(T)`) — the index of that parameter, so a construction
+/// can solve it from the argument's type.
 struct FieldTy {
     label: Option<String>,
     ty: Ty,
+    generic: Option<usize>,
 }
 
 /// A declared function's signature: its parameter types (in order) and its
@@ -305,6 +311,9 @@ fn synth_call(
         return Ty::Dyn;
     };
     if let Some(ctor) = ctx.ctors.get(name) {
+        // Solve the type's generic parameters from the argument types (unsolved
+        // ones stay `Dyn` — gradual).
+        let mut solved = vec![Ty::Dyn; ctor.generics.len()];
         for (i, arg) in args.iter().enumerate() {
             // Labelled args match by label; positional args by position.
             let field = match &arg.label {
@@ -314,10 +323,13 @@ fn synth_call(
                 None => ctor.fields.get(i),
             };
             if let Some(field) = field {
-                check(&arg.value, &field.ty, ctx, errors);
+                let arg_ty = check(&arg.value, &field.ty, ctx, errors);
+                if let Some(g) = field.generic {
+                    solved[g] = arg_ty;
+                }
             }
         }
-        return Ty::Named { name: ctor.type_name.clone(), args: Vec::new() };
+        return Ty::Named { name: ctor.type_name.clone(), args: solved };
     }
     if let Some(sig) = ctx.funcs.get(name) {
         // Check each argument against its parameter type (positional); the call's
@@ -353,7 +365,7 @@ fn synth_field(object: &CoreExpr, name: &str, ctx: &Ctx, errors: &mut Vec<TypeEr
 /// expression's span) when its synthesized type is inconsistent. The simplest
 /// bidirectional rule — synthesize then subsume; expression-directed checking
 /// rules (e.g. a lambda against a function type) arrive with later constructs.
-fn check(expr: &CoreExpr, expected: &Ty, ctx: &Ctx, errors: &mut Vec<TypeError>) {
+fn check(expr: &CoreExpr, expected: &Ty, ctx: &Ctx, errors: &mut Vec<TypeError>) -> Ty {
     let got = synth(expr, ctx, errors);
     if !assignable(&got, expected, ctx.conformances) {
         errors.push(TypeError {
@@ -361,6 +373,7 @@ fn check(expr: &CoreExpr, expected: &Ty, ctx: &Ctx, errors: &mut Vec<TypeError>)
             span: expr.span,
         });
     }
+    got
 }
 
 /// Whether a value of type `got` can be used where `expected` is wanted:
@@ -485,11 +498,22 @@ fn collect_type_names(items: &[CoreItem]) -> BTreeSet<String> {
         .collect()
 }
 
-/// The field types of a constructor, in declaration order.
-fn field_tys(fields: &[Field], types: &BTreeSet<String>) -> Vec<FieldTy> {
+/// The field types of a constructor, in declaration order. A field whose type is
+/// exactly one of the enclosing type's `generics` is recorded as that parameter
+/// and typed `Dyn` (a parameter accepts any argument); the construction solves it.
+fn field_tys(fields: &[Field], types: &BTreeSet<String>, generics: &[String]) -> Vec<FieldTy> {
     fields
         .iter()
-        .map(|f| FieldTy { label: f.name.clone(), ty: ty_of_annotation(&f.ty, types) })
+        .map(|f| {
+            let generic = match &f.ty {
+                Type::Name { name, args } if args.is_empty() => {
+                    generics.iter().position(|g| g == name)
+                }
+                _ => None,
+            };
+            let ty = if generic.is_some() { Ty::Dyn } else { ty_of_annotation(&f.ty, types) };
+            FieldTy { label: f.name.clone(), ty, generic }
+        })
         .collect()
 }
 
@@ -499,17 +523,25 @@ fn collect_ctors(items: &[CoreItem], types: &BTreeSet<String>) -> BTreeMap<Strin
     let mut ctors = BTreeMap::new();
     for item in items {
         match item {
-            CoreItem::Prod { name, fields, .. } => {
+            CoreItem::Prod { name, generics, fields, .. } => {
                 ctors.insert(
                     name.clone(),
-                    Ctor { type_name: name.clone(), fields: field_tys(fields, types) },
+                    Ctor {
+                        type_name: name.clone(),
+                        generics: generics.clone(),
+                        fields: field_tys(fields, types, generics),
+                    },
                 );
             }
-            CoreItem::Sum { name, variants, .. } => {
+            CoreItem::Sum { name, generics, variants, .. } => {
                 for variant in variants {
                     ctors.insert(
                         variant.name.clone(),
-                        Ctor { type_name: name.clone(), fields: field_tys(&variant.fields, types) },
+                        Ctor {
+                            type_name: name.clone(),
+                            generics: generics.clone(),
+                            fields: field_tys(&variant.fields, types, generics),
+                        },
                     );
                 }
             }
@@ -1007,6 +1039,30 @@ mod tests {
         assert!(
             errors("prod Box<T>(v: T)  sink(b: Box) = 0  g(x: Box<Int>) = sink(x)").is_empty(),
             "Box ~ Box<Int> (unknown args are gradual)"
+        );
+    }
+
+    #[test]
+    fn a_generic_constructor_infers_its_type_argument() {
+        // `Wrap(5)` fills `Opt`'s `T` with `Int`, so it's an `Opt<Int>` — passing it
+        // where `Opt<Str>` is expected is an error.
+        let bad = "sum Opt<T> = Wrap(T) | Empty  sink(o: Opt<Str>) = 0  f() = sink(Wrap(5))";
+        assert_eq!(errors(bad).len(), 1, "Wrap(5) is Opt<Int> ≠ Opt<Str>, got {:?}", errors(bad));
+        // A matching instantiation is clean.
+        assert!(
+            errors("sum Opt<T> = Wrap(T) | Empty  sink(o: Opt<Int>) = 0  f() = sink(Wrap(5))").is_empty(),
+            "Wrap(5) matches Opt<Int>"
+        );
+        // A nullary variant leaves the parameter unknown (gradual).
+        assert!(
+            errors("sum Opt<T> = Wrap(T) | Empty  sink(o: Opt<Str>) = 0  f() = sink(Empty)").is_empty(),
+            "Empty is Opt<?> — gradual against any Opt"
+        );
+        // Only a *bare* parameter is a solvable slot: `T` applied to arguments
+        // (`T<Int>`) is not, so its field stays gradual and solves nothing.
+        assert!(
+            errors("sum Weird<T> = V(T<Int>)  sink(w: Weird<Str>) = 0  f() = sink(V(5))").is_empty(),
+            "T<Int> is not a bare-parameter slot"
         );
     }
 

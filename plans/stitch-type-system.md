@@ -129,11 +129,15 @@ by name only — that's the gradual baseline to preserve.
   → `Box<Int>` and bare `Box` ~ `Box<Int>` clean. 613 lib + all integration green,
   **prelude guard still clean** (synthesized types have empty args → gradual). Mutation
   20/21 caught, 0 survivors.
-- **G2 — Generic constructor instantiation.** `Some(5)` → `Maybe<Int>`, `Cons(1, t)` →
-  `List<Int>`: a constructor knows its type's `generics` and which field carries which
-  param, so unify the argument types against the field types to solve the params and
-  yield `Named{Type, [solved…]}`. Unsolved params → `Dyn` arg (gradual). *Inference-lite
-  — one level, no unification engine. Medium; first real "solve a type variable".*
+- **G2 — Generic constructor instantiation — ✅ DONE (2026-07-15).** `Ctor` gained
+  `generics` + each `FieldTy` a `generic: Option<usize>` (a field whose type is a *bare*
+  parameter, e.g. `Wrap(T)`; typed `Dyn` so it accepts any arg, but its index is
+  recorded). At construction, `synth_call` solves each such param from the argument's
+  type (`check` now returns the synthesized `Ty`) and yields `Named{Type, [solved…]}`
+  (unsolved → `Dyn`). `check`→return-Ty refactor. `Wrap(5)` → `Opt<Int>` → error vs
+  `Opt<Str>`, clean vs `Opt<Int>`; `Empty` / a param-applied-to-args (`T<Int>`) stay
+  gradual. 614 lib + all integration green, **prelude guard clean** (prelude args are
+  `Dyn` → solved args `Dyn` → gradual). Mutation 8/12 caught, 0 survivors.
 
 ### Track B — generic functions (needs front-end first, then inference)
 
