@@ -191,10 +191,22 @@ single count on either side (`2dd`, `d3w`-style) works; (4) count applies to mot
 `5x`'s register holds only the last char (repeat-delete), a documented fidelity gap.
 
 **Phase 4 — word motions + text objects.**
-`w b e` (and `W B E`) as new motions — instantly usable bare *and* under operators
-(`dw`, `cw`, `ye`). Then text objects `{a|i}{w " ( { …}` as range-yielding motions
-(`diw`, `ci"`, `da(`). Text objects are the payoff of the range model — they define
-a range directly, and the operator machinery consumes it unchanged.
+
+*P4a — word motions `w b e`. ✅ DONE.* New `motionTarget` arms (charwise; `w`/`b`
+exclusive, `e` inclusive), instantly usable bare *and* under operators (`dw`, `cw`,
+`ye`) and with counts (`2w`, `d3w`) — all via the existing machinery, no new data
+structures. Deviations: (1) **whitespace-delimited words** for v1 — `w` == `W` (a run
+of non-space chars), so punctuation is not yet its own word (finer `\w`-vs-punct
+semantics deferred); (2) **within-line only** — cross-line word motion deferred
+(`dw` on the last word clamps to EOL, which happens to match vim); (3) the `cw`==`ce`
+vim special-case is skipped (`cw` changes over `[cursor, w-target)`).
+
+*P4b — text objects `{a|i}{w " ( { …}`.* The payoff of the range model. **Needs the
+data-structure evolution**: a cursor-independent `Range` (both ends set by the object,
+unlike a motion's `[cursor, target]`) that the operators consume, and a
+text-object-pending sub-state (the `i`/`a` prefix awaiting the object char) that
+reworks the operator-pending `None` branch (`Esc` already has its explicit arm to
+survive this). `i` = contents only, `a` = contents + delimiters/whitespace.
 
 **Phase 5 — registers + the real command-line.**
 Named registers (`"{reg}` prefix; soft clipboard), and generalize `:` from the
