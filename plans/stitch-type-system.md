@@ -201,10 +201,14 @@ or it false-warns "unused" on a cap that's actually needed via a path the analys
 
 ### Sub-steps
 
-- **C1 — Native requirements + intra-function forward check.** A native→cap table; walk a
-  body collecting the caps of the effect-natives it *directly* calls; error when a
-  required cap isn't in the function's declared `uses`. (No call-graph propagation yet.)
-  → `f() = emit("x", 1)` without `uses Telemetry` errors. *The core; small.*
+- **C1 — Native requirements + intra-function forward check — ✅ DONE (2026-07-15).**
+  `native_cap` table (mirrors `natives.rs`); `required_effects` walks a body (complete
+  `CoreExpr` recursion) collecting the caps of effect-natives it *directly* calls, each
+  with its span, skipping names shadowed by a user function; `check_callable` errors when
+  a required cap isn't in the declared `uses` (Func + `on`/`contract` methods).
+  `f() = emit("x", 1)` → error; `f() uses Telemetry = emit(…)` clean; found nested in
+  blocks/methods. 615 lib + all integration green — **prelude clean** (its `uses` are
+  accurate, else the runtime gate would refuse). Mutation 13/16 caught, 0 survivors.
 - **C2 — Call-graph propagation (transitive forward).** Calling a user function requires
   its declared `uses`; `required(g)` also unions the `uses` of every function `g` calls;
   error when `g` under-declares. → `g() = f()` where `f() uses Telemetry` requires `g` to

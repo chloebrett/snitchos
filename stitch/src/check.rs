@@ -15,7 +15,9 @@ use crate::prelude::*;
 use alloc::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{BinOp, Field, Param, Pattern, Type};
-use crate::core_ir::{CoreArg, CoreExpr, CoreExprKind, CoreItem, CoreMatchArm};
+use crate::core_ir::{
+    CoreArg, CoreExpr, CoreExprKind, CoreItem, CoreMatchArm, CoreStmt, CoreStrSegment,
+};
 use crate::lexer::Span;
 use crate::source::{SourceId, SourceMap};
 
@@ -578,7 +580,7 @@ pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
     let mut errors = Vec::new();
     for item in items {
         match item {
-            CoreItem::Func { name, params, ret, body, .. } => {
+            CoreItem::Func { name, params, ret, uses, body, .. } => {
                 // Gate `@`: the self-type is meaningless in a top-level function
                 // (no receiver). Methods carry a receiver, so they're exempt.
                 if signature_mentions_self(params, ret.as_ref()) {
@@ -589,14 +591,14 @@ pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
                         span: body.span,
                     });
                 }
-                world.check_callable(params, ret.as_ref(), body, Ty::Dyn, &mut errors);
+                world.check_callable(params, ret.as_ref(), uses, body, Ty::Dyn, &mut errors);
             }
             // `on Type { … }` method bodies check with `@` = the receiver's type.
             CoreItem::On { target, methods, .. } => {
                 let self_ty = ty_of_annotation(target, &world.types);
                 for method in methods {
                     if let Some(body) = &method.body {
-                        world.check_callable(&method.params, method.ret.as_ref(), body, self_ty.clone(), &mut errors);
+                        world.check_callable(&method.params, method.ret.as_ref(), &method.uses, body, self_ty.clone(), &mut errors);
                     }
                 }
             }
@@ -604,7 +606,7 @@ pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
             CoreItem::Contract { methods, .. } => {
                 for method in methods {
                     if let Some(body) = &method.body {
-                        world.check_callable(&method.params, method.ret.as_ref(), body, Ty::SelfTy, &mut errors);
+                        world.check_callable(&method.params, method.ret.as_ref(), &method.uses, body, Ty::SelfTy, &mut errors);
                     }
                 }
             }
@@ -625,6 +627,121 @@ pub fn check_expr(expr: &CoreExpr, items: &[CoreItem]) -> Vec<TypeError> {
     let mut errors = Vec::new();
     synth(expr, &ctx, &mut errors);
     errors
+}
+
+/// The capability an effect-native requires, or `None` for any other name.
+/// Mirrors the runtime authority gate in `natives.rs` — keep them in sync.
+fn native_cap(name: &str) -> Option<&'static str> {
+    match name {
+        "emit" | "span" => Some("Telemetry"),
+        "print" | "writeConsole" => Some("ConsoleOut"),
+        "readLine" | "readByte" => Some("ConsoleIn"),
+        "fsWrite" => Some("FsWrite"),
+        "readFile" => Some("FsRead"),
+        _ => None,
+    }
+}
+
+/// Collect the capabilities every effect-native *directly* called in `expr`
+/// requires, each mapped to its first call-site span. A name shadowed by a user
+/// function is a normal call, not an effect (its effects propagate in C2).
+fn required_effects(
+    expr: &CoreExpr,
+    funcs: &BTreeMap<String, FnSig>,
+    required: &mut BTreeMap<String, Span>,
+) {
+    if let CoreExprKind::Call { callee, .. } = &expr.kind
+        && let CoreExprKind::Var(name) = &callee.kind
+        && !funcs.contains_key(name)
+        && let Some(cap) = native_cap(name)
+    {
+        required.entry(cap.to_string()).or_insert(expr.span);
+    }
+    let mut recurse = |child: &CoreExpr| required_effects(child, funcs, required);
+    match &expr.kind {
+        CoreExprKind::Int(_)
+        | CoreExprKind::Float(_)
+        | CoreExprKind::Bool(_)
+        | CoreExprKind::Var(_)
+        | CoreExprKind::SelfRef => {}
+        CoreExprKind::Spread(e)
+        | CoreExprKind::Unary { operand: e, .. }
+        | CoreExprKind::Try(e)
+        | CoreExprKind::Field { object: e, .. }
+        | CoreExprKind::SafeField { object: e, .. } => recurse(e),
+        CoreExprKind::Lambda { body, .. } => recurse(body),
+        CoreExprKind::Binary { left, right, .. }
+        | CoreExprKind::Index { object: left, index: right } => {
+            recurse(left);
+            recurse(right);
+        }
+        CoreExprKind::Call { callee, args } => {
+            recurse(callee);
+            for arg in args {
+                recurse(&arg.value);
+            }
+        }
+        CoreExprKind::Range { start, end, .. } => {
+            if let Some(e) = start {
+                recurse(e);
+            }
+            if let Some(e) = end {
+                recurse(e);
+            }
+        }
+        CoreExprKind::If { cond, then, els } => {
+            recurse(cond);
+            recurse(then);
+            recurse(els);
+        }
+        CoreExprKind::Tuple(elems) | CoreExprKind::List(elems) => {
+            for e in elems {
+                recurse(e);
+            }
+        }
+        CoreExprKind::Map(entries) => {
+            for (k, v) in entries {
+                recurse(k);
+                recurse(v);
+            }
+        }
+        CoreExprKind::Str(segments) => {
+            for seg in segments {
+                if let CoreStrSegment::Interp(e) = seg {
+                    recurse(e);
+                }
+            }
+        }
+        CoreExprKind::Block { stmts, result } => {
+            for stmt in stmts {
+                match stmt {
+                    CoreStmt::Let { value, .. } => recurse(value),
+                    CoreStmt::Assign { target, value } => {
+                        recurse(target);
+                        recurse(value);
+                    }
+                    CoreStmt::Expr(e) => recurse(e),
+                }
+            }
+            if let Some(e) = result {
+                recurse(e);
+            }
+        }
+        CoreExprKind::Match { subject, arms } => {
+            recurse(subject);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    recurse(guard);
+                }
+                recurse(&arm.body);
+            }
+        }
+        CoreExprKind::Handle { handler, body, .. } => {
+            recurse(handler);
+            recurse(body);
+        }
+        CoreExprKind::Without { body, .. } => recurse(body),
+    }
 }
 
 /// Whether a callable's signature mentions the self-type `@` in any parameter or
@@ -668,12 +785,14 @@ impl World {
         }
     }
 
-    /// Check one callable's body against its declared return type, with its
-    /// parameters bound and `@` bound to `self_ty`.
+    /// Check one callable's body against its declared return type (with parameters
+    /// bound and `@` bound to `self_ty`), and require each effect it performs to be
+    /// covered by its declared `uses` capabilities.
     fn check_callable(
         &self,
         params: &[Param],
         ret: Option<&Type>,
+        uses: &[String],
         body: &CoreExpr,
         self_ty: Ty,
         errors: &mut Vec<TypeError>,
@@ -685,6 +804,20 @@ impl World {
         let ctx = self.ctx(self_ty, locals);
         let expected = ret.map_or(Ty::Dyn, |t| ty_of_annotation(t, &self.types));
         check(body, &expected, &ctx, errors);
+        // Effect check (C1): every directly-performed effect's capability must be
+        // in the declared `uses`.
+        let mut required = BTreeMap::new();
+        required_effects(body, &self.funcs, &mut required);
+        for (cap, span) in required {
+            if !uses.iter().any(|u| u == &cap) {
+                errors.push(TypeError {
+                    message: format!(
+                        "performs an effect that needs `uses {cap}`, which is not declared"
+                    ),
+                    span,
+                });
+            }
+        }
     }
 }
 
@@ -948,6 +1081,29 @@ mod tests {
         assert!(
             errors(r#"f() -> Unknown = "x""#).is_empty(),
             "unknown type name → Dyn → clean"
+        );
+    }
+
+    #[test]
+    fn an_effect_without_its_declared_capability_is_an_error() {
+        // `emit` needs `Telemetry`; a function that emits without declaring it errors.
+        let errs = errors(r#"f() = emit("x", 1)"#);
+        assert_eq!(errs.len(), 1, "emit needs `uses Telemetry`, got {errs:?}");
+        assert!(errs[0].message.contains("Telemetry"), "names the cap: {errs:?}");
+        // Declaring the capability is clean.
+        assert!(errors(r#"f() uses Telemetry = emit("x", 1)"#).is_empty(), "declared → clean");
+        // Each effect-native needs its own capability.
+        assert_eq!(errors(r#"f() = print("hi")"#).len(), 1, "print needs `uses ConsoleOut`");
+        assert_eq!(errors("f() = readLine()").len(), 1, "readLine needs `uses ConsoleIn`");
+        assert_eq!(errors(r#"f() = fsWrite(0, "x")"#).len(), 1, "fsWrite needs `uses FsWrite`");
+        assert_eq!(errors("f() = readFile(0)").len(), 1, "readFile needs `uses FsRead`");
+        // The effect is found nested inside a block.
+        assert_eq!(errors("f() = { emit(\"x\", 1) }").len(), 1, "effect nested in a block");
+        // A method body is checked the same way.
+        assert_eq!(
+            errors(r#"prod P(n: Int)  on P { m() = emit("x", 1) }"#).len(),
+            1,
+            "a method effect needs its cap too"
         );
     }
 
