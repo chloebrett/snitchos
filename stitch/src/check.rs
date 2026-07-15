@@ -382,12 +382,31 @@ fn subtype(sub: &Ty, sup: &Ty, conformances: &BTreeMap<String, BTreeSet<String>>
 }
 
 /// Whether two types are *consistent* (gradual `~`): `Dyn` matches anything in
-/// either direction; otherwise types must be equal. Structural equality (derived
-/// on [`Ty`]) covers `Named`/`Tuple`/`Func` for free. Subtyping is layered on top
-/// by [`assignable`].
+/// either direction. `Named` types match by name with *gradual* arguments — one
+/// side's missing (empty) argument list means "unknown", compatible with any;
+/// equal-arity argument lists must be pairwise-consistent. Everything else uses
+/// structural equality (derived on [`Ty`]). Subtyping is layered on by
+/// [`assignable`].
 #[must_use]
 fn consistent(a: &Ty, b: &Ty) -> bool {
-    matches!(a, Ty::Dyn) || matches!(b, Ty::Dyn) || a == b
+    if matches!(a, Ty::Dyn) || matches!(b, Ty::Dyn) {
+        return true;
+    }
+    match (a, b) {
+        (Ty::Named { name: na, args: aa }, Ty::Named { name: nb, args: ab }) => {
+            na == nb && args_consistent(aa, ab)
+        }
+        _ => a == b,
+    }
+}
+
+/// The gradual argument rule for `Named` types: an empty (unknown) list on either
+/// side is compatible; otherwise the arities must match and align pairwise.
+#[must_use]
+fn args_consistent(aa: &[Ty], ab: &[Ty]) -> bool {
+    aa.is_empty()
+        || ab.is_empty()
+        || (aa.len() == ab.len() && aa.iter().zip(ab).all(|(x, y)| consistent(x, y)))
 }
 
 /// Convert a surface type annotation into a [`Ty`], canonicalising the primitive
@@ -397,12 +416,15 @@ fn consistent(a: &Ty, b: &Ty) -> bool {
 #[must_use]
 fn ty_of_annotation(ann: &Type, types: &BTreeSet<String>) -> Ty {
     match ann {
-        Type::Name { name, .. } => match name.as_str() {
+        Type::Name { name, args } => match name.as_str() {
             "Int" => Ty::Int,
             "Float" => Ty::Float,
             "Bool" => Ty::Bool,
             "Str" => Ty::Str,
-            other if types.contains(other) => Ty::Named { name: name.clone(), args: Vec::new() },
+            other if types.contains(other) => Ty::Named {
+                name: name.clone(),
+                args: args.iter().map(|a| ty_of_annotation(a, types)).collect(),
+            },
             _ => Ty::Dyn,
         },
         _ => Ty::Dyn,
@@ -967,6 +989,24 @@ mod tests {
             errors("sum T = A | B | C  f(t: T) = match t { A | B => 0 }").len(),
             1,
             "C is still missing behind an Or of A and B"
+        );
+    }
+
+    #[test]
+    fn a_generic_type_argument_is_checked() {
+        // `Box<Int>` and `Box<Str>` are distinct instantiations: passing one where
+        // the other is expected is an error.
+        let bad = "prod Box<T>(v: T)  sink(b: Box<Str>) = 0  g(x: Box<Int>) = sink(x)";
+        assert_eq!(errors(bad).len(), 1, "Box<Int> ≠ Box<Str>, got {:?}", errors(bad));
+        // Matching instantiations are clean.
+        assert!(
+            errors("prod Box<T>(v: T)  sink(b: Box<Int>) = 0  g(x: Box<Int>) = sink(x)").is_empty(),
+            "Box<Int> matches Box<Int>"
+        );
+        // A bare (un-parameterized) generic type is gradual on its arguments.
+        assert!(
+            errors("prod Box<T>(v: T)  sink(b: Box) = 0  g(x: Box<Int>) = sink(x)").is_empty(),
+            "Box ~ Box<Int> (unknown args are gradual)"
         );
     }
 
