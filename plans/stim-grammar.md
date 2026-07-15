@@ -201,12 +201,18 @@ semantics deferred); (2) **within-line only** — cross-line word motion deferre
 (`dw` on the last word clamps to EOL, which happens to match vim); (3) the `cw`==`ce`
 vim special-case is skipped (`cw` changes over `[cursor, w-target)`).
 
-*P4b — text objects `{a|i}{w " ( { …}`.* The payoff of the range model. **Needs the
-data-structure evolution**: a cursor-independent `Range` (both ends set by the object,
-unlike a motion's `[cursor, target]`) that the operators consume, and a
-text-object-pending sub-state (the `i`/`a` prefix awaiting the object char) that
-reworks the operator-pending `None` branch (`Esc` already has its explicit arm to
-survive this). `i` = contents only, `a` = contents + delimiters/whitespace.
+*P4b — text objects.* Designed in [stim-phase4b-text-objects.md](stim-phase4b-text-objects.md).
+The payoff of the range model + the data-structure evolution: a cursor-independent
+`Range` (both ends set by the object) and a text-object-pending sub-state (the `i`/`a`
+prefix) that reworks the operator-pending `None` branch. `i` = contents only, `a` =
+contents + delimiters/whitespace.
+- *P4b-0 — accumulator consolidation. ✅ DONE.* `Pending(op, count, object)` — the
+  count moved off `Editor` back into the one partial-command record (the cleaner
+  long-term model, chosen disregarding the ~30-test-site churn).
+- *P4b-1 — `Range` + object-pending + word object `iw`/`aw`. ✅ DONE.* `diw`/`ciw`/
+  `yiw`/`daw` all work; the whole object machinery proven end-to-end.
+- *P4b-2 — quote objects `i"`/`a"`.* New `textObjectRange` arm only. Bracket objects
+  (`i(`/`i{`/`i[`) deferred past v1.
 
 **Phase 5 — registers + the real command-line.**
 Named registers (`"{reg}` prefix; soft clipboard), and generalize `:` from the

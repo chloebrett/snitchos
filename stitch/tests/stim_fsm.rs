@@ -57,9 +57,16 @@ fn motion_wise(setup: &str, key: &str) -> Value {
     ))
 }
 
+/// The text-object prefix name ("NoObj"/"Inner"/"Around") of `setup`'s `Editor`.
+fn object_of(setup: &str) -> Value {
+    fsm(&format!(
+        r#"{{ let s = {setup}  match s.pending.object {{ NoObj => "NoObj"  Inner => "Inner"  Around => "Around" }} }}"#
+    ))
+}
+
 /// The accumulated count of the `Editor` that `setup` evaluates to.
 fn count_of(setup: &str) -> Value {
-    fsm(&format!("{{ let s = {setup}  let c = s.count  c }}"))
+    fsm(&format!("{{ let s = {setup}  let c = s.pending.count  c }}"))
 }
 
 /// The unnamed register's text of the `Editor` that `setup` evaluates to.
@@ -401,41 +408,41 @@ fn d_plus_a_charwise_motion_deletes_the_intra_line_range() {
     // Drive operator-pending directly: `pending.op = OpDelete`, then a charwise motion.
     // d$ deletes from the cursor through end-of-line (inclusive) — same result as D.
     assert_eq!(
-        lines_col(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete)), "$").state"#),
+        lines_col(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "$").state"#),
         line_and_col("a", 1)
     );
     // dl deletes the char under the cursor (exclusive, forward) — like x.
     assert_eq!(
-        lines_col(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete)), "l").state"#),
+        lines_col(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "l").state"#),
         line_and_col("acd", 1)
     );
     // dh deletes the char before the cursor (backward) — like X, cursor moves back.
     assert_eq!(
-        lines_col(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete)), "h").state"#),
+        lines_col(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "h").state"#),
         line_and_col("bcd", 0)
     );
     // d0 deletes from line-start up to the cursor (exclusive of the char under it).
     assert_eq!(
-        lines_col(r#"step(Editor(..initialState("abcd"), col: 2, pending: Pending(op: OpDelete)), "0").state"#),
+        lines_col(r#"step(Editor(..initialState("abcd"), col: 2, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "0").state"#),
         line_and_col("cd", 0)
     );
     // The operator clears after applying, and a real delete is an observable Edit.
     assert_eq!(
-        pending_op_of(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete)), "l").state"#),
+        pending_op_of(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "l").state"#),
         s("None")
     );
     assert_eq!(
-        step_effect(r#"Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete))"#, "l"),
+        step_effect(r#"Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpDelete, count: 0, object: NoObj))"#, "l"),
         s("Edit")
     );
     // dl at end of line deletes nothing (range past the last char) → Redraw, and still
     // clears the pending operator.
     assert_eq!(
-        step_effect(r#"Editor(..initialState("ab"), col: 2, pending: Pending(op: OpDelete))"#, "l"),
+        step_effect(r#"Editor(..initialState("ab"), col: 2, pending: Pending(op: OpDelete, count: 0, object: NoObj))"#, "l"),
         s("Redraw")
     );
     assert_eq!(
-        pending_op_of(r#"step(Editor(..initialState("ab"), col: 2, pending: Pending(op: OpDelete)), "l").state"#),
+        pending_op_of(r#"step(Editor(..initialState("ab"), col: 2, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "l").state"#),
         s("None")
     );
 }
@@ -446,26 +453,26 @@ fn dd_deletes_the_whole_current_line() {
     // self: dd removes the current line. On the middle line, the cursor stays on the
     // row — now the line that was below.
     assert_eq!(
-        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpDelete)), "d").state"#),
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "d").state"#),
         buffer(&["a", "c"], 1, 0)
     );
     // dd on the last line clamps the cursor up to the new last line.
     assert_eq!(
-        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 2, pending: Pending(op: OpDelete)), "d").state"#),
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 2, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "d").state"#),
         buffer(&["a", "b"], 1, 0)
     );
     // dd on the only line leaves one empty line — the buffer never goes to zero lines.
     assert_eq!(
-        lines_row_col(r#"step(Editor(..initialState("abc"), pending: Pending(op: OpDelete)), "d").state"#),
+        lines_row_col(r#"step(Editor(..initialState("abc"), pending: Pending(op: OpDelete, count: 0, object: NoObj)), "d").state"#),
         buffer(&[""], 0, 0)
     );
     // dd is an observable Edit and clears the pending operator.
     assert_eq!(
-        step_effect(r#"Editor(..initialState("a\nb"), pending: Pending(op: OpDelete))"#, "d"),
+        step_effect(r#"Editor(..initialState("a\nb"), pending: Pending(op: OpDelete, count: 0, object: NoObj))"#, "d"),
         s("Edit")
     );
     assert_eq!(
-        pending_op_of(r#"step(Editor(..initialState("a\nb"), pending: Pending(op: OpDelete)), "d").state"#),
+        pending_op_of(r#"step(Editor(..initialState("a\nb"), pending: Pending(op: OpDelete, count: 0, object: NoObj)), "d").state"#),
         s("None")
     );
 }
@@ -475,27 +482,27 @@ fn d_plus_a_linewise_motion_deletes_a_range_of_lines() {
     // A linewise motion (`j`/`k`) under an operator selects whole lines. dj deletes
     // the current line and the one below (range [row, row+1]).
     assert_eq!(
-        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 0, pending: Pending(op: OpDelete)), "j").state"#),
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 0, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "j").state"#),
         buffer(&["c"], 0, 0)
     );
     // dk deletes the current line and the one above.
     assert_eq!(
-        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 2, pending: Pending(op: OpDelete)), "k").state"#),
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 2, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "k").state"#),
         buffer(&["a"], 0, 0)
     );
     // A real multi-line delete is an observable Edit.
     assert_eq!(
-        step_effect(r#"Editor(..initialState("a\nb\nc"), row: 0, pending: Pending(op: OpDelete))"#, "j"),
+        step_effect(r#"Editor(..initialState("a\nb\nc"), row: 0, pending: Pending(op: OpDelete, count: 0, object: NoObj))"#, "j"),
         s("Edit")
     );
     // dj on the last line: `j` can't move, so the range is a single unmoved line →
     // no-op Redraw (dd is the way to delete one line), and pending clears.
     assert_eq!(
-        step_effect(r#"Editor(..initialState("a\nb"), row: 1, pending: Pending(op: OpDelete))"#, "j"),
+        step_effect(r#"Editor(..initialState("a\nb"), row: 1, pending: Pending(op: OpDelete, count: 0, object: NoObj))"#, "j"),
         s("Redraw")
     );
     assert_eq!(
-        pending_op_of(r#"step(Editor(..initialState("a\nb"), row: 1, pending: Pending(op: OpDelete)), "j").state"#),
+        pending_op_of(r#"step(Editor(..initialState("a\nb"), row: 1, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "j").state"#),
         s("None")
     );
 }
@@ -504,25 +511,25 @@ fn d_plus_a_linewise_motion_deletes_a_range_of_lines() {
 fn c_changes_a_range_and_enters_insert() {
     // c$ deletes to end-of-line and enters Insert (charwise change) — like C.
     assert_eq!(
-        lines_col(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpChange)), "$").state"#),
+        lines_col(r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpChange, count: 0, object: NoObj)), "$").state"#),
         line_and_col("a", 1)
     );
     assert_eq!(
-        step_mode(r#"Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpChange))"#, "$"),
+        step_mode(r#"Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpChange, count: 0, object: NoObj))"#, "$"),
         s("Insert")
     );
     // cc clears the whole line to empty and enters Insert — it KEEPS the line (unlike
     // dd, which removes it).
     assert_eq!(
-        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpChange)), "c").state"#),
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpChange, count: 0, object: NoObj)), "c").state"#),
         buffer(&["a", "", "c"], 1, 0)
     );
     assert_eq!(
-        step_mode(r#"Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpChange))"#, "c"),
+        step_mode(r#"Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpChange, count: 0, object: NoObj))"#, "c"),
         s("Insert")
     );
     assert_eq!(
-        step_effect(r#"Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpChange))"#, "$"),
+        step_effect(r#"Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpChange, count: 0, object: NoObj))"#, "$"),
         s("Edit")
     );
 }
@@ -530,17 +537,17 @@ fn c_changes_a_range_and_enters_insert() {
 #[test]
 fn y_yanks_a_range_into_the_clipboard_without_deleting() {
     // yy yanks the whole line, linewise — the buffer is untouched.
-    let yy = r#"step(Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpYank)), "y").state"#;
+    let yy = r#"step(Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpYank, count: 0, object: NoObj)), "y").state"#;
     assert_eq!(lines_row_col(yy), buffer(&["a", "b", "c"], 1, 0));
     assert_eq!(clipboard_text(yy), s("b"));
     assert_eq!(clipboard_wise(yy), s("Linewise"));
     // y$ yanks a charwise span (cursor..end) without deleting.
-    let ydollar = r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpYank)), "$").state"#;
+    let ydollar = r#"step(Editor(..initialState("abcd"), col: 1, pending: Pending(op: OpYank, count: 0, object: NoObj)), "$").state"#;
     assert_eq!(clipboard_text(ydollar), s("bcd"));
     assert_eq!(clipboard_wise(ydollar), s("Charwise"));
     // Yank is observable (a copy is a span) but does not edit the buffer.
     assert_eq!(
-        step_effect(r#"Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpYank))"#, "y"),
+        step_effect(r#"Editor(..initialState("a\nb\nc"), row: 1, pending: Pending(op: OpYank, count: 0, object: NoObj))"#, "y"),
         s("Edit")
     );
 }
@@ -583,7 +590,7 @@ fn p_and_capital_p_paste_linewise_opening_a_line() {
 #[test]
 fn a_delete_populates_the_clipboard_so_paste_can_move_it() {
     // dd cuts the line into the register (linewise) — the basis for a line move via p.
-    let after_dd = r#"step(Editor(..initialState("a\nb\nc"), row: 0, pending: Pending(op: OpDelete)), "d").state"#;
+    let after_dd = r#"step(Editor(..initialState("a\nb\nc"), row: 0, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "d").state"#;
     assert_eq!(clipboard_text(after_dd), s("a"));
     assert_eq!(clipboard_wise(after_dd), s("Linewise"));
     // x cuts the char under the cursor (charwise).
@@ -597,7 +604,7 @@ fn a_delete_populates_the_clipboard_so_paste_can_move_it() {
 
 #[test]
 fn esc_and_unknown_keys_cancel_operator_pending() {
-    let pend = r#"Editor(..initialState("abc"), col: 1, pending: Pending(op: OpDelete))"#;
+    let pend = r#"Editor(..initialState("abc"), col: 1, pending: Pending(op: OpDelete, count: 0, object: NoObj))"#;
     // d then Esc aborts the operator: back to plain Normal, no edit, buffer intact.
     assert_eq!(step_mode(pend, "Esc"), s("Normal"));
     assert_eq!(step_effect(pend, "Esc"), s("Redraw"));
@@ -635,26 +642,26 @@ fn digits_accumulate_a_count_and_zero_is_a_motion_when_the_count_is_empty() {
 #[test]
 fn a_count_repeats_motions_and_clears_afterward() {
     // 3j moves down three lines; the count clamps at the last line.
-    assert_eq!(row_col(r#"step(Editor(..initialState("a\nb\nc\nd"), count: 3), "j").state"#), ints(3, 0));
-    assert_eq!(row_col(r#"step(Editor(..initialState("a\nb"), count: 9), "j").state"#), ints(1, 0));
+    assert_eq!(row_col(r#"step(Editor(..initialState("a\nb\nc\nd"), pending: Pending(op: OpNone, count: 3, object: NoObj)), "j").state"#), ints(3, 0));
+    assert_eq!(row_col(r#"step(Editor(..initialState("a\nb"), pending: Pending(op: OpNone, count: 9, object: NoObj)), "j").state"#), ints(1, 0));
     // 2l moves right twice.
-    assert_eq!(row_col(r#"step(Editor(..initialState("abcd"), count: 2), "l").state"#), ints(0, 2));
+    assert_eq!(row_col(r#"step(Editor(..initialState("abcd"), pending: Pending(op: OpNone, count: 2, object: NoObj)), "l").state"#), ints(0, 2));
     // The count is consumed after the motion.
-    assert_eq!(count_of(r#"step(Editor(..initialState("a\nb\nc"), count: 2), "j").state"#), Value::Int(0));
+    assert_eq!(count_of(r#"step(Editor(..initialState("a\nb\nc"), pending: Pending(op: OpNone, count: 2, object: NoObj)), "j").state"#), Value::Int(0));
 }
 
 #[test]
 fn a_count_repeats_x_and_scales_operators() {
     // 3x deletes three characters.
-    assert_eq!(lines_col(r#"step(Editor(..initialState("abcdef"), count: 3), "x").state"#), line_and_col("def", 0));
+    assert_eq!(lines_col(r#"step(Editor(..initialState("abcdef"), pending: Pending(op: OpNone, count: 3, object: NoObj)), "x").state"#), line_and_col("def", 0));
     // 2dd deletes two whole lines (count on the doubled operator).
     assert_eq!(
-        lines_row_col(r#"step(Editor(..initialState("a\nb\nc\nd"), pending: Pending(op: OpDelete), count: 2), "d").state"#),
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc\nd"), pending: Pending(op: OpDelete, count: 2, object: NoObj)), "d").state"#),
         buffer(&["c", "d"], 0, 0)
     );
     // d2j deletes the current line plus two below (count on the linewise motion).
     assert_eq!(
-        lines_row_col(r#"step(Editor(..initialState("a\nb\nc\nd"), pending: Pending(op: OpDelete), count: 2), "j").state"#),
+        lines_row_col(r#"step(Editor(..initialState("a\nb\nc\nd"), pending: Pending(op: OpDelete, count: 2, object: NoObj)), "j").state"#),
         buffer(&["d"], 0, 0)
     );
 }
@@ -672,36 +679,91 @@ fn word_motions_move_by_words_within_the_line() {
     assert_eq!(row_col(&format!(r#"step(Editor(..{line}, col: 8), "b").state"#)), ints(0, 4));
     assert_eq!(row_col(&format!(r#"step(Editor(..{line}, col: 4), "b").state"#)), ints(0, 0));
     // 2w moves two words (count rides the existing machinery).
-    assert_eq!(row_col(&format!(r#"step(Editor(..{line}, count: 2), "w").state"#)), ints(0, 8));
+    assert_eq!(row_col(&format!(r#"step(Editor(..{line}, pending: Pending(op: OpNone, count: 2, object: NoObj)), "w").state"#)), ints(0, 8));
 }
 
 #[test]
 fn operators_consume_word_motions() {
     // dw deletes from the cursor to the next word start.
     assert_eq!(
-        lines_col(r#"step(Editor(..initialState("foo bar"), pending: Pending(op: OpDelete)), "w").state"#),
+        lines_col(r#"step(Editor(..initialState("foo bar"), pending: Pending(op: OpDelete, count: 0, object: NoObj)), "w").state"#),
         line_and_col("bar", 0)
     );
     // de deletes through the end of the word (e is inclusive).
     assert_eq!(
-        lines_col(r#"step(Editor(..initialState("foo bar"), pending: Pending(op: OpDelete)), "e").state"#),
+        lines_col(r#"step(Editor(..initialState("foo bar"), pending: Pending(op: OpDelete, count: 0, object: NoObj)), "e").state"#),
         line_and_col(" bar", 0)
     );
     // db deletes back to the previous word start.
     assert_eq!(
-        lines_col(r#"step(Editor(..initialState("foo bar"), col: 4, pending: Pending(op: OpDelete)), "b").state"#),
+        lines_col(r#"step(Editor(..initialState("foo bar"), col: 4, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "b").state"#),
         line_and_col("bar", 0)
     );
     // dw on the last word deletes to end of line (the motion clamps within the line).
     assert_eq!(
-        lines_col(r#"step(Editor(..initialState("foo bar"), col: 4, pending: Pending(op: OpDelete)), "w").state"#),
+        lines_col(r#"step(Editor(..initialState("foo bar"), col: 4, pending: Pending(op: OpDelete, count: 0, object: NoObj)), "w").state"#),
         line_and_col("foo ", 4)
     );
     // cw changes over the word range and enters Insert.
     assert_eq!(
-        step_mode(r#"Editor(..initialState("foo bar"), pending: Pending(op: OpChange))"#, "w"),
+        step_mode(r#"Editor(..initialState("foo bar"), pending: Pending(op: OpChange, count: 0, object: NoObj))"#, "w"),
         s("Insert")
     );
+}
+
+#[test]
+fn i_or_a_after_an_operator_enters_text_object_pending() {
+    let d = r#"Editor(..initialState("foo bar"), pending: Pending(op: OpDelete, count: 0, object: NoObj))"#;
+    // After d, `i` enters inner-object-pending, `a` around — both stay within
+    // operator-pending (op still Delete), a Redraw, no edit yet.
+    assert_eq!(object_of(&format!(r#"step({d}, "i").state"#)), s("Inner"));
+    assert_eq!(object_of(&format!(r#"step({d}, "a").state"#)), s("Around"));
+    assert_eq!(pending_op_of(&format!(r#"step({d}, "i").state"#)), s("Delete"));
+    assert_eq!(step_effect(d, "i"), s("Redraw"));
+}
+
+#[test]
+fn diw_deletes_the_inner_word_from_anywhere_in_it() {
+    // The whole word is deleted regardless of where in it the cursor sits — the
+    // hallmark of a cursor-independent range. "foo bar baz": "bar" is cols 4..6.
+    let mid = r#"Editor(..initialState("foo bar baz"), col: 5, pending: Pending(op: OpDelete, count: 0, object: Inner))"#;
+    let start = r#"Editor(..initialState("foo bar baz"), col: 4, pending: Pending(op: OpDelete, count: 0, object: Inner))"#;
+    assert_eq!(lines_col(&format!(r#"step({mid}, "w").state"#)), line_and_col("foo  baz", 4));
+    assert_eq!(lines_col(&format!(r#"step({start}, "w").state"#)), line_and_col("foo  baz", 4));
+    // Observable Edit, and the accumulator clears.
+    assert_eq!(step_effect(mid, "w"), s("Edit"));
+    assert_eq!(object_of(&format!(r#"step({mid}, "w").state"#)), s("NoObj"));
+    assert_eq!(pending_op_of(&format!(r#"step({mid}, "w").state"#)), s("None"));
+}
+
+#[test]
+fn ciw_changes_and_yiw_yanks_the_inner_word() {
+    // ciw deletes the word and enters Insert.
+    let ci = r#"Editor(..initialState("foo bar"), col: 5, pending: Pending(op: OpChange, count: 0, object: Inner))"#;
+    assert_eq!(lines_col(&format!(r#"step({ci}, "w").state"#)), line_and_col("foo ", 4));
+    assert_eq!(step_mode(ci, "w"), s("Insert"));
+    // yiw copies the word to the register without touching the buffer.
+    let yi = r#"Editor(..initialState("foo bar"), col: 5, pending: Pending(op: OpYank, count: 0, object: Inner))"#;
+    assert_eq!(clipboard_text(&format!(r#"step({yi}, "w").state"#)), s("bar"));
+    assert_eq!(lines_col(&format!(r#"step({yi}, "w").state"#)), line_and_col("foo bar", 5));
+}
+
+#[test]
+fn daw_deletes_a_word_with_its_surrounding_whitespace() {
+    // daw removes the word plus its trailing space: "foo bar baz" → "foo baz".
+    let aw = r#"Editor(..initialState("foo bar baz"), col: 5, pending: Pending(op: OpDelete, count: 0, object: Around))"#;
+    assert_eq!(lines_col(&format!(r#"step({aw}, "w").state"#)), line_and_col("foo baz", 4));
+    // With no trailing space (word at EOL), it takes the leading space instead:
+    // "foo bar" → "foo".
+    let aw_end = r#"Editor(..initialState("foo bar"), col: 5, pending: Pending(op: OpDelete, count: 0, object: Around))"#;
+    assert_eq!(lines_col(&format!(r#"step({aw_end}, "w").state"#)), line_and_col("foo", 3));
+}
+
+#[test]
+fn the_full_d_i_w_key_sequence_deletes_the_inner_word() {
+    // Prove the dispatch wiring end to end: three keys d, i, w.
+    let seq = r#"step(step(step(Editor(..initialState("foo bar"), col: 5), "d").state, "i").state, "w").state"#;
+    assert_eq!(lines_col(seq), line_and_col("foo ", 4));
 }
 
 #[test]

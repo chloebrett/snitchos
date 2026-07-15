@@ -38,10 +38,15 @@ sum Op = OpNone | OpDelete | OpChange | OpYank
 // linewise on whole lines.
 sum Wise = Charwise | Linewise
 
-// The operator-pending accumulator. It grows a count (Phase 3) and a register
-// (Phase 5); for now it holds only the pending operator. A field on `Editor`, not a
-// mode — operator-pending stays *within* Normal mode (the cursor still shows).
-prod Pending(op: Op)
+// A text-object prefix awaiting its object char: `iw`/`aw`, `i"`/`a"`. `NoObj` = not
+// mid-object. `Inner` = contents only; `Around` = contents + delimiters/whitespace.
+sum ObjKind = NoObj | Inner | Around
+
+// The operator-pending accumulator — the whole partial command: the pending operator,
+// a count prefix, and a text-object prefix. A field on `Editor` (not a mode) —
+// operator-pending stays *within* Normal mode (the cursor still shows). It resets as a
+// unit via `clearPending`. (Register slot arrives in Phase 5.)
+prod Pending(op: Op, count: Int, object: ObjKind)
 
 // The unnamed register (the yank/paste clipboard). Carries its wiseness so paste
 // knows linewise (open a line) vs charwise (insert inline). This is the soft form of
@@ -54,10 +59,16 @@ prod Register(text: Str, wise: Wise)
 // range includes the target character. Only `$` is inclusive; `h l 0 ^` are exclusive.
 prod Target(row: Int, col: Int, wise: Wise, inclusive: Bool)
 
+// A cursor-independent region an operator acts on — the shape a text object produces
+// (both ends set by the object, unlike a motion's `[cursor, target]`). Charwise = the
+// half-open span `[startCol, endCol)` on `startRow`; linewise = whole rows
+// `[startRow, endRow]`. v1 objects are all single-row charwise.
+prod Range(startRow: Int, startCol: Int, endRow: Int, endCol: Int, wise: Wise)
+
 // The whole editor state — immutable. Every transition returns a fresh `Editor`
 // via `..spread` update. `row`/`col` is a full cursor (0-based); unbound keys
 // like `h`/`l` are just navigation we haven't wired, not missing state.
-prod Editor(lines: List<Str>, row: Int, col: Int, mode: Mode, pending: Pending, clipboard: Register, count: Int)
+prod Editor(lines: List<Str>, row: Int, col: Int, mode: Mode, pending: Pending, clipboard: Register)
 
 // A transition's result for the driver: the next state plus the effect to run.
 // The pure `step` returns this; the driver performs `effect` and loops on `state`.
@@ -71,9 +82,8 @@ initialState(text) = Editor(
     row: 0,
     col: 0,
     mode: Normal,
-    pending: Pending(op: OpNone),
+    pending: Pending(op: OpNone, count: 0, object: NoObj),
     clipboard: Register(text: "", wise: Charwise),
-    count: 0,
 )
 
 // The text of the line at `row`, or "" if out of range (never happens for a
@@ -439,17 +449,23 @@ isPrintable(key) = Str.length(key) == 1
 
 enterCommand(state) = Editor(..state, mode: Command)
 
-// Enter operator-pending: record the operator, stay in Normal mode, await a motion.
-enterOp(state, op) = Editor(..state, pending: Pending(op: op))
+// Overwrite the whole accumulator record.
+setPending(state, op, count, object) = Editor(..state, pending: Pending(op: op, count: count, object: object))
 
-// Leave operator-pending: reset the accumulator to no pending operator, count clear.
-clearPending(state) = Editor(..state, pending: Pending(op: OpNone), count: 0)
+// Enter operator-pending: record the operator, keep count/object, await a motion.
+enterOp(state, op) = setPending(state, op, state.pending.count, state.pending.object)
+
+// Set the text-object prefix (`i`/`a`) while operator-pending.
+setObject(state, object) = setPending(state, state.pending.op, state.pending.count, object)
+
+// Leave operator-pending: reset the whole accumulator (op, count, object).
+clearPending(state) = setPending(state, OpNone, 0, NoObj)
 
 // The count prefix in effect: an unset (0) count means 1.
-effectiveCount(state) = state.count <= 0 => 1 | state.count
+effectiveCount(state) = state.pending.count <= 0 => 1 | state.pending.count
 
-// Consume the count prefix (after a command uses it).
-clearCount(state) = Editor(..state, count: 0)
+// Consume the count prefix (after a command uses it), keeping op/object.
+clearCount(state) = setPending(state, state.pending.op, 0, state.pending.object)
 
 // Apply `f` to `state` `n` times (n >= 1).
 repeat(f, state, n) = n <= 1 => f(state) | repeat(f, f(state), n - 1)
@@ -471,12 +487,12 @@ digitVal(key) = match {
 // Whether `key` is a count digit here: "1".."9" always; "0" only once a count is
 // already accumulating (a leading "0" is the line-start motion).
 isCountDigit(state, key) = match {
-    key == "0" => state.count > 0
+    key == "0" => state.pending.count > 0
     _ => Str.length(key) == 1 and Str.contains("123456789", key)
 }
 
 // Fold a digit key into the count accumulator.
-foldDigit(state, key) = Editor(..state, count: state.count * 10 + digitVal(key))
+foldDigit(state, key) = setPending(state, state.pending.op, state.pending.count * 10 + digitVal(key), state.pending.object)
 
 // Reset the count in a completed `Step`'s state (top-level commands consume it).
 clearCountStep(step) = Step(state: clearCount(step.state), effect: step.effect)
@@ -621,13 +637,99 @@ applyLinewiseSelf(state) = match state.pending.op {
     _ => redraw(clearPending(state))
 }
 
-// Normal mode dispatch: at the top level (no pending operator) route to the flat
-// table; while operator-pending (`pending.op != OpNone`) route to the operator
-// branch. `step` still dispatches on `mode` — this branch lives inside Normal.
+// --- Text objects (Phase 4b). A text object yields a cursor-independent `Range`
+// that an operator consumes. v1: the word object `iw`/`aw`, single-row charwise. ---
+
+// Whether the character at column `i` is a space.
+isSpaceAt(line, i) = Str.slice(line, i, i + 1) == " "
+
+// Backward: the start of the maximal same-class (space vs non-space) run containing
+// `i`, given the class `isSp` of the run.
+sameClassBack(line, i, isSp) = match {
+    i <= 0 => 0
+    isSpaceAt(line, i - 1) == isSp => sameClassBack(line, i - 1, isSp)
+    _ => i
+}
+
+// Forward: the first index at/after `i` whose class differs from `isSp` (or `len`) —
+// the exclusive end of a same-class run.
+sameClassFwd(line, i, len, isSp) = match {
+    i >= len => i
+    isSpaceAt(line, i) == isSp => sameClassFwd(line, i + 1, len, isSp)
+    _ => i
+}
+
+// `iw` — the maximal same-class run (a word, or a whitespace gap) containing the
+// cursor. Degenerate (empty) if the cursor is past the last character.
+innerWordRange(state) = {
+    let line = lineAt(state, state.row)
+    let len = Str.length(line)
+    let c = state.col
+    c >= len => Range(startRow: state.row, startCol: c, endRow: state.row, endCol: c, wise: Charwise)
+    | {
+        let isSp = isSpaceAt(line, c)
+        Range(startRow: state.row, startCol: sameClassBack(line, c, isSp), endRow: state.row, endCol: sameClassFwd(line, c, len, isSp), wise: Charwise)
+    }
+}
+
+// `aw` — the inner word plus its trailing whitespace; if there is none (word at end
+// of line), the leading whitespace instead — vim's rule.
+aroundWordRange(state) = {
+    let inner = innerWordRange(state)
+    let line = lineAt(state, state.row)
+    let len = Str.length(line)
+    let afterSpaces = sameClassFwd(line, inner.endCol, len, true)
+    afterSpaces > inner.endCol => Range(startRow: inner.startRow, startCol: inner.startCol, endRow: inner.endRow, endCol: afterSpaces, wise: Charwise)
+    | Range(startRow: inner.startRow, startCol: sameClassBack(line, inner.startCol, true), endRow: inner.endRow, endCol: inner.endCol, wise: Charwise)
+}
+
+// The word object for the pending `i`/`a` kind.
+wordObject(state) = match state.pending.object {
+    Around => aroundWordRange(state)
+    _ => innerWordRange(state)
+}
+
+// The `Range` for a text-object char, or `None` if the key isn't an object. v1: only
+// `w` (word); quotes/brackets are later objects.
+textObjectRange(state, key) = key == "w" => Some(wordObject(state)) | None
+
+// The text of a charwise range `[lo, hi)` on `row`, clamped to the line.
+rangeText(state, row, lo, hi) = {
+    let line = lineAt(state, row)
+    let len = Str.length(line)
+    let a = lo < 0 => 0 | (lo > len => len | lo)
+    let b = hi < 0 => 0 | (hi > len => len | hi)
+    Str.slice(line, a, b)
+}
+
+// Apply the pending operator over an explicit `Range` (a text object), then clear the
+// accumulator. v1 ranges are charwise single-row, so this reuses the charwise
+// primitives. Measured against a pending-cleared baseline (like the motion path).
+applyOpRange(state, range) = match state.pending.op {
+    OpDelete => editIfChanged(clearPending(state), clearPending(deleteCharRange(state, range.startRow, range.startCol, range.endCol)), "stim.delete")
+    OpChange => edit(clearPending(enterInsert(deleteCharRange(state, range.startRow, range.startCol, range.endCol))), "stim.change")
+    OpYank => editIfChanged(clearPending(state), clearPending(Editor(..state, clipboard: Register(text: rangeText(state, range.startRow, range.startCol, range.endCol), wise: Charwise))), "stim.yank")
+    _ => redraw(clearPending(state))
+}
+
+// Normal mode dispatch: object-pending (an `i`/`a` object awaiting its char) first,
+// then a count digit, then the top-level table or the operator branch. `step` still
+// dispatches on `mode` — this all lives inside Normal.
 stepNormal(state, key) = match {
+    state.pending.object != NoObj => stepObjectPending(state, key)
     isCountDigit(state, key) => redraw(foldDigit(state, key))
     state.pending.op == OpNone => stepTopLevel(state, key)
     _ => stepOperatorPending(state, key)
+}
+
+// Object-pending: the key is the object char (`w`, later `"`/`(`). Resolve the range
+// and apply the pending operator; Esc or a non-object key cancels.
+stepObjectPending(state, key) = match {
+    key == "Esc" => redraw(clearPending(state))
+    _ => match textObjectRange(state, key) {
+        Some(range) => applyOpRange(state, range)
+        None => redraw(clearPending(state))
+    }
 }
 
 // The target `count` repetitions of a motion reach (`d3w`, `d2j`): the cursor after
@@ -653,8 +755,16 @@ stepOperatorPending(state, key) = match {
     isSameOp(state.pending.op, key) => applyLinewiseSelf(state)
     _ => match motionTarget(state, key) {
         Some(target) => applyOpOverMotion(state, key, target)
-        None => redraw(clearPending(state))
+        None => stepObjectOrCancel(state, key)
     }
+}
+
+// A non-motion, non-operator key while operator-pending: `i`/`a` begin a text object
+// (await its char); anything else cancels the operator.
+stepObjectOrCancel(state, key) = match {
+    key == "i" => redraw(setObject(state, Inner))
+    key == "a" => redraw(setObject(state, Around))
+    _ => redraw(clearPending(state))
 }
 
 // The top-level Normal dispatch. Operators `d`/`c`/`y` enter operator-pending
