@@ -289,6 +289,11 @@ pub(crate) struct Hart {
     /// a run with B on must stay byte-identical to one with it off. Only consulted on
     /// hosts where the `jit` module compiles (aarch64/macos today).
     native_jit: bool,
+    /// Software TLB (`Some` when enabled): caches Sv39 walks so a repeated access
+    /// skips the 3-level page-table read. A pure speedup — flushed on `satp`/`sfence`,
+    /// perms re-checked per access — proven by the on↔off A/B. `None` is the
+    /// walk-every-access oracle.
+    tlb: Option<crate::mmu::Tlb>,
     /// Backend B's compiled-native-code cache (host-only). Rebuilt lazily; excluded
     /// from the snapshot (clones cold) and flushed with the block cache. Present only
     /// where the `jit` module compiles.
@@ -401,6 +406,12 @@ impl Cpu {
         self.hart.set_native_jit(on);
     }
 
+    /// Enable/disable the software TLB on the lone hart. Off by default (the
+    /// walk-every-access oracle); a pure speedup when on.
+    pub fn set_tlb(&mut self, on: bool) {
+        self.hart.set_tlb(on);
+    }
+
     /// Enable/disable block-executor register caching on the lone hart.
     pub fn set_register_cache(&mut self, on: bool) {
         self.hart.set_register_cache(on);
@@ -442,6 +453,7 @@ impl Hart {
             reg_cache: true,
             idle_skip: true,
             native_jit: false,
+            tlb: None,
             #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
             native_cache: crate::jit::NativeCache::new(),
             timer_fires: 0,
@@ -474,6 +486,12 @@ impl Hart {
     /// also on and the host supports native emission.
     pub(crate) fn set_native_jit(&mut self, on: bool) {
         self.native_jit = on;
+    }
+
+    /// Enable or disable this hart's software TLB. A pure speedup (translation cache),
+    /// proven by the on↔off A/B; starts empty and re-warms.
+    pub(crate) fn set_tlb(&mut self, on: bool) {
+        self.tlb = on.then(crate::mmu::Tlb::default);
     }
 
     /// Whether Backend B (native codegen) is selected — the block executor reads this
@@ -685,7 +703,7 @@ impl Hart {
         let satp = self.csr.read(addr::SATP).expect("satp is modeled");
         let user = self.privilege == Privilege::User;
         let sum = self.csr_read(addr::SSTATUS) & sstatus::SUM != 0;
-        match mmu::translate(satp, va, access, bus.ram(), user, sum) {
+        match self.translate_cached(satp, va, access, bus.ram(), user, sum) {
             Ok(pa) => Some(pa),
             Err(_) => {
                 let cause = match access {
@@ -697,6 +715,39 @@ impl Hart {
                 None
             }
         }
+    }
+
+    /// Translate `va`, consulting the software TLB when it's enabled. A hit re-checks
+    /// permissions against the cached leaf PTE (privilege/`SUM` can change without a
+    /// TLB flush) and skips the page walk; a miss walks, caches the result, then
+    /// checks. With the TLB off (the oracle) or in bare mode, it's a plain
+    /// [`mmu::translate`]. Architecturally identical either way — only faster.
+    fn translate_cached(
+        &mut self,
+        satp: u64,
+        va: u64,
+        access: Access,
+        mem: &crate::mem::Memory,
+        user: bool,
+        sum: bool,
+    ) -> Result<u64, mmu::PageFault> {
+        let Some(tlb) = self.tlb.as_mut() else {
+            return mmu::translate(satp, va, access, mem, user, sum);
+        };
+        if !mmu::is_sv39(satp) {
+            return Ok(va); // bare mode is a free identity — nothing to cache
+        }
+        let vpn = va >> 12;
+        let (ppn, pte) = match tlb.get(vpn) {
+            Some(cached) => cached,
+            None => {
+                let (pte, pa) = mmu::walk_leaf(satp, va, mem)?;
+                tlb.insert(vpn, pa >> 12, pte);
+                (pa >> 12, pte)
+            }
+        };
+        mmu::check_perms(pte, access, user, sum)?;
+        Ok((ppn << 12) | (va & 0xfff))
     }
 
     /// Native-op helper (tier-0.5 of the JIT): if `pc` is the entry of `memset` or
@@ -1269,6 +1320,9 @@ impl Hart {
                 if let Some(cache) = self.block_cache.as_mut() {
                     cache.flush();
                 }
+                if let Some(tlb) = self.tlb.as_mut() {
+                    tlb.flush();
+                }
                 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
                 self.native_cache.flush();
             }
@@ -1290,6 +1344,9 @@ impl Hart {
             }
             if let Some(cache) = self.block_cache.as_mut() {
                 cache.flush();
+            }
+            if let Some(tlb) = self.tlb.as_mut() {
+                tlb.flush();
             }
             #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
             self.native_cache.flush();

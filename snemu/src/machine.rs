@@ -509,6 +509,14 @@ impl Machine {
         }
     }
 
+    /// Enable or disable the software TLB (translation cache) on **every** hart. Off by
+    /// default (the walk-every-access oracle); a pure speedup, on↔off byte-identical.
+    pub fn set_tlb(&mut self, on: bool) {
+        for hart in &mut self.harts {
+            hart.set_tlb(on);
+        }
+    }
+
     /// Enable or disable block-executor register caching (M6 increment 4) on **every**
     /// hart. On by default; the on↔off A/B isolates the caching's speed effect.
     pub fn set_register_cache(&mut self, on: bool) {

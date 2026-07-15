@@ -49,7 +49,23 @@ pub(crate) fn translate(
     if satp >> SATP_MODE_SHIFT != MODE_SV39 {
         return Ok(va);
     }
+    let (pte, pa) = walk_leaf(satp, va, mem)?;
+    check_perms(pte, access, user, sum)?;
+    Ok(pa)
+}
 
+/// Whether `satp` selects Sv39 (vs bare/identity mapping). The TLB only caches Sv39
+/// translations; bare mode is a free identity and needs no lookup.
+pub(crate) fn is_sv39(satp: u64) -> bool {
+    satp >> SATP_MODE_SHIFT == MODE_SV39
+}
+
+/// Walk the Sv39 table to the **leaf PTE** for `va`, returning `(leaf_pte, paddr)`
+/// with **no permission check** — the caller (or the TLB, per access) runs
+/// [`check_perms`], since permissions depend on privilege/`SUM` which the *walk*
+/// doesn't. `PageFault` if a level's PTE is invalid or the walk runs off the bottom.
+/// Assumes Sv39 (callers gate bare mode with [`is_sv39`]).
+pub(crate) fn walk_leaf(satp: u64, va: u64, mem: &Memory) -> Result<(u64, u64), PageFault> {
     let mut table = (satp & PPN_MASK) << 12;
     for level in (0u64..3).rev() {
         let vpn = (va >> (12 + 9 * level)) & 0x1ff;
@@ -61,16 +77,15 @@ pub(crate) fn translate(
         if pte & (pte::R | pte::X) != 0 {
             // Leaf PTE. Take the low (12 + 9*level) bits from the VA so
             // superpages (leaves above level 0) map their whole range.
-            check_perms(pte, access, user, sum)?;
             let mask = (1u64 << (12 + 9 * level)) - 1;
-            return Ok(((ppn << 12) & !mask) | (va & mask));
+            return Ok((pte, ((ppn << 12) & !mask) | (va & mask)));
         }
         table = ppn << 12;
     }
     Err(PageFault)
 }
 
-fn check_perms(pte: u64, access: Access, user: bool, sum: bool) -> Result<(), PageFault> {
+pub(crate) fn check_perms(pte: u64, access: Access, user: bool, sum: bool) -> Result<(), PageFault> {
     // Privilege gate on the U bit, before the R/W/X bits.
     let user_page = pte & pte::U != 0;
     let privilege_ok = if user {
@@ -93,6 +108,89 @@ fn check_perms(pte: u64, access: Access, user: bool, sum: bool) -> Result<(), Pa
         Access::Store => pte & pte::W != 0,
     };
     if ok { Ok(()) } else { Err(PageFault) }
+}
+
+/// Number of direct-mapped TLB entries (power of two). 1024 comfortably covers a
+/// scenario's hot working set of pages without a large clone cost.
+const TLB_ENTRIES: usize = 1024;
+
+/// One cached Sv39 translation: the leaf `pte` (for the per-access permission
+/// re-check) and the 4 KiB physical page number `ppn`, tagged by virtual page number
+/// and the cache `epoch` that validates it (a mismatched or zero epoch is stale).
+#[derive(Clone, Copy, Default)]
+struct TlbEntry {
+    epoch: u64,
+    vpn: u64,
+    ppn: u64,
+    pte: u64,
+}
+
+/// A per-hart translation cache: `vpn → (ppn, leaf pte)`, so a repeated access skips
+/// the 3-level page walk. **A pure speedup** — permissions are re-checked per access
+/// against the cached PTE, and the whole cache is invalidated (O(1) epoch bump) on
+/// `satp` write / `sfence.vma`, exactly like the decode and block caches. Clones as
+/// data for a snapshot fork (the forked machine shares the same page tables, so the
+/// entries stay valid until its next `satp`/`sfence`).
+#[derive(Clone)]
+pub(crate) struct Tlb {
+    epoch: u64,
+    entries: Box<[TlbEntry]>,
+}
+
+impl Default for Tlb {
+    fn default() -> Self {
+        // Epoch starts at 1 so the zero-initialised entries (epoch 0) are stale.
+        Self { epoch: 1, entries: vec![TlbEntry::default(); TLB_ENTRIES].into_boxed_slice() }
+    }
+}
+
+impl Tlb {
+    #[inline]
+    fn index(vpn: u64) -> usize {
+        (vpn as usize) & (TLB_ENTRIES - 1)
+    }
+
+    /// The cached `(ppn, leaf pte)` for `vpn`, or `None` on a miss / stale entry.
+    pub(crate) fn get(&self, vpn: u64) -> Option<(u64, u64)> {
+        let e = &self.entries[Self::index(vpn)];
+        (e.epoch == self.epoch && e.vpn == vpn).then_some((e.ppn, e.pte))
+    }
+
+    /// Cache the translation of `vpn` (found by a fresh walk).
+    pub(crate) fn insert(&mut self, vpn: u64, ppn: u64, pte: u64) {
+        self.entries[Self::index(vpn)] = TlbEntry { epoch: self.epoch, vpn, ppn, pte };
+    }
+
+    /// Invalidate every entry in O(1) — the guest changed the translation regime.
+    pub(crate) fn flush(&mut self) {
+        self.epoch += 1;
+    }
+}
+
+#[cfg(test)]
+mod tlb_tests {
+    use super::Tlb;
+
+    #[test]
+    fn a_cached_translation_hits_until_flushed() {
+        let mut tlb = Tlb::default();
+        assert_eq!(tlb.get(0x8_0000), None, "cold miss");
+        tlb.insert(0x8_0000, 0x4_2000, 0xf1);
+        assert_eq!(tlb.get(0x8_0000), Some((0x4_2000, 0xf1)), "hit after insert");
+        assert_eq!(tlb.get(0x8_0001), None, "a different vpn still misses");
+        tlb.flush();
+        assert_eq!(tlb.get(0x8_0000), None, "flush (satp/sfence) invalidates every entry");
+    }
+
+    #[test]
+    fn an_aliasing_vpn_evicts_the_slot() {
+        let mut tlb = Tlb::default();
+        tlb.insert(0, 0x100, 0xf);
+        // A vpn that maps to the same direct-mapped slot overwrites it.
+        tlb.insert(super::TLB_ENTRIES as u64, 0x200, 0xf);
+        assert_eq!(tlb.get(0), None, "evicted by the aliasing insert");
+        assert_eq!(tlb.get(super::TLB_ENTRIES as u64), Some((0x200, 0xf)));
+    }
 }
 
 #[cfg(test)]

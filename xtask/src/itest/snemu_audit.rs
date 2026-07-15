@@ -351,6 +351,7 @@ pub fn run(
     reg_cache: bool,
     share_snapshots: bool,
     native_jit: bool,
+    tlb: bool,
 ) -> ExitCode {
     // Backend B (native codegen) needs the block JIT frontend, so `--native-jit`
     // implies `--jit`.
@@ -535,6 +536,7 @@ pub fn run(
                         m.set_native_ops(native_ops);
                         m.set_block_jit(block_jit);
                         m.set_native_jit(native_jit);
+                        m.set_tlb(tlb);
                         m.set_register_cache(reg_cache);
                         Some(m)
                     }
@@ -559,7 +561,7 @@ pub fn run(
         match &kinds[task] {
             PipelineTask::Boot(workload) => {
                 let snapshot =
-                    boot_snapshot(&kernel, &dtb, *workload, idle_skip, native_ops, block_jit, reg_cache, native_jit);
+                    boot_snapshot(&kernel, &dtb, *workload, idle_skip, native_ops, block_jit, reg_cache, native_jit, tlb);
                 let (machine, boot_instret) = match snapshot {
                     Ok((m, n)) => (Ok(m), n),
                     Err(e) => (Err(e), 0),
@@ -1045,6 +1047,7 @@ fn boot_snapshot(
     block_jit: bool,
     reg_cache: bool,
     native_jit: bool,
+    tlb: bool,
 ) -> Result<(snemu::machine::Machine, u64), String> {
     let mut machine = snemu_diff::load_workload_machine(kernel, dtb, workload)?;
     machine.set_idle_skip(idle_skip);
@@ -1052,6 +1055,7 @@ fn boot_snapshot(
     machine.set_native_ops(native_ops);
     machine.set_block_jit(block_jit);
     machine.set_native_jit(native_jit);
+    machine.set_tlb(tlb);
     machine.set_register_cache(reg_cache);
     machine.run_until_uart(CHECKPOINT, CHECKPOINT_BUDGET)?;
     // Report the boot-once cost as guest instret (not host step calls) to match the

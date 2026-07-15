@@ -150,6 +150,11 @@ enum Cmd {
         /// + byte-identical guest instret (the oracle), only faster.
         #[arg(long = "native-jit")]
         native_jit: bool,
+        /// Enable the software **TLB** (Sv39 translation cache). A/B it against off,
+        /// which must stay green + byte-identical guest instret (the oracle), only
+        /// faster — this is the lever for the memory/translation pole.
+        #[arg(long)]
+        tlb: bool,
     },
     /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
     /// run under snemu with exact per-PC counting and report the top kernel
@@ -773,13 +778,14 @@ fn main() -> ExitCode {
             steps, limit, only, jobs, no_idle_skip, order, opt, native_ops, block_jit, no_reg_cache,
             share_snapshots,
             native_jit,
+            tlb,
         } => {
             let jobs = jobs.unwrap_or_else(|| {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
             itest::snemu_audit::run(
                 steps, limit, only.as_deref(), jobs, !no_idle_skip, order, opt, native_ops,
-                block_jit, !no_reg_cache, share_snapshots, native_jit,
+                block_jit, !no_reg_cache, share_snapshots, native_jit, tlb,
             )
         }
         Cmd::SnemuProfile { workload, steps, top, release } => {
