@@ -85,12 +85,15 @@ impl Bus {
 
     /// Fold the bus's guest-visible state into `h` for the machine state hash: guest
     /// RAM, plus the UART and virtio output streams (the emitted telemetry/console —
-    /// device progress that a determinism divergence would show up in).
+    /// device progress that a determinism divergence would show up in), plus the
+    /// fwcfg device's captured `etc/ramfb` config (`None` until a DMA write
+    /// completes) — its own semantic state, not derivable from RAM alone.
     pub(crate) fn hash_state(&self, h: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
         self.ram.hash_state(h);
         self.uart.output().hash(h);
         self.virtio.tx_output().hash(h);
+        self.fwcfg.ramfb_cfg().hash(h);
     }
 
     /// RAM, for the page-table walker (PTEs always live in physical memory).
@@ -311,5 +314,73 @@ mod tests {
             bus.read_u8(desc_pa + i as u64).unwrap()
         }));
         assert_eq!(control_after, 0, "control cleared to 0 on success");
+    }
+
+    /// Stage and trigger a select+write DMA transfer identical to
+    /// `dma_write_through_the_bus_captures_the_ramfb_config`.
+    fn stage_and_trigger_dma_write(bus: &mut Bus) {
+        let desc_pa = crate::mem::RAM_BASE + 0x1000;
+        let payload_pa = crate::mem::RAM_BASE + 0x2000;
+        let control: u32 = (0x42 << 16) | 0x08 | 0x10;
+        bus.write_ram(desc_pa, &control.to_be_bytes()).unwrap();
+        bus.write_ram(desc_pa + 4, &28u32.to_be_bytes()).unwrap();
+        bus.write_ram(desc_pa + 8, &payload_pa.to_be_bytes()).unwrap();
+        let mut cfg = [0u8; 28];
+        cfg[0..8].copy_from_slice(&0x8000_3000u64.to_be_bytes());
+        cfg[16..20].copy_from_slice(&1024u32.to_be_bytes());
+        bus.write_ram(payload_pa, &cfg).unwrap();
+        bus.write_u32(FWCFG_BASE + 0x10, ((desc_pa >> 32) as u32).to_be()).unwrap();
+        bus.write_u32(FWCFG_BASE + 0x14, (desc_pa as u32).to_be()).unwrap();
+    }
+
+    fn hash_of(bus: &Bus) -> u64 {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bus.hash_state(&mut h);
+        h.finish()
+    }
+
+    /// Two buses that perform the identical DMA write must hash identically
+    /// — the plan's determinism criterion: adding stateful device (`Fwcfg`)
+    /// state to the machine mustn't introduce a source of nondeterminism
+    /// (e.g. an uninitialized read, host-timing dependence).
+    #[test]
+    fn identical_dma_writes_produce_identical_hash_state() {
+        let mut bus_a = Bus::new(Memory::new(0x10000));
+        stage_and_trigger_dma_write(&mut bus_a);
+        let mut bus_b = Bus::new(Memory::new(0x10000));
+        stage_and_trigger_dma_write(&mut bus_b);
+
+        assert_eq!(hash_of(&bus_a), hash_of(&bus_b));
+    }
+
+    /// Discriminates "fwcfg state is folded into the hash" from "the hash
+    /// just happens to differ because RAM differs" — `bus_b` ends up with
+    /// **byte-identical RAM** to a post-DMA `bus_a`, but never actually
+    /// triggers the DMA register write, so its `Fwcfg` never captures a
+    /// config. If `hash_state` only hashed RAM, these would hash equal.
+    #[test]
+    fn fwcfg_capture_state_is_not_derivable_from_ram_alone() {
+        let mut bus_a = Bus::new(Memory::new(0x10000));
+        stage_and_trigger_dma_write(&mut bus_a);
+
+        let mut bus_b = Bus::new(Memory::new(0x10000));
+        let desc_pa = crate::mem::RAM_BASE + 0x1000;
+        let payload_pa = crate::mem::RAM_BASE + 0x2000;
+        bus_b.write_ram(desc_pa, &0u32.to_be_bytes()).unwrap(); // post-success control
+        bus_b.write_ram(desc_pa + 4, &28u32.to_be_bytes()).unwrap();
+        bus_b.write_ram(desc_pa + 8, &payload_pa.to_be_bytes()).unwrap();
+        let mut cfg = [0u8; 28];
+        cfg[0..8].copy_from_slice(&0x8000_3000u64.to_be_bytes());
+        cfg[16..20].copy_from_slice(&1024u32.to_be_bytes());
+        bus_b.write_ram(payload_pa, &cfg).unwrap();
+        // No DMA register write — bus_b's Fwcfg never captures anything,
+        // even though its RAM now matches bus_a's post-write RAM exactly.
+
+        assert_ne!(
+            hash_of(&bus_a),
+            hash_of(&bus_b),
+            "device capture state must contribute to the hash, not just RAM bytes"
+        );
     }
 }

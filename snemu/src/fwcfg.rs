@@ -24,8 +24,11 @@ const DMA_CTL_WRITE: u32 = 0x10;
 const DMA_CTL_ERROR: u32 = 0x01;
 
 /// The captured `RAMFBCfg` fields from a successful DMA write — this
-/// milestone's only writable file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// milestone's only writable file. `Hash` so `Bus::hash_state` can fold it
+/// into the machine's determinism check, same as `virtio`'s `tx_output()` —
+/// the device's semantically-meaningful captured result, not its raw bytes
+/// (those are already covered by the RAM hash separately).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct RamfbCfg {
     pub(crate) addr: u64,
     pub(crate) fourcc: u32,
@@ -450,5 +453,33 @@ mod tests {
         assert_eq!(dev.write_dma_addr_low(0x8000_1000), 0x8000_1000);
         dev.write_dma_addr_high(0x0000_0001);
         assert_eq!(dev.write_dma_addr_low(0x8000_2000), 0x1_8000_2000);
+    }
+
+    /// Isolates the device's *own* state from RAM content: two captured
+    /// configs that differ must hash differently via `ramfb_cfg()`'s `Hash`
+    /// impl alone — proves `Fwcfg`'s state genuinely participates in
+    /// `Bus::hash_state`, not just the RAM bytes the DMA write happened to
+    /// touch (which would differ regardless of whether the device's own
+    /// captured state was ever hashed at all).
+    #[test]
+    fn different_captured_configs_hash_differently() {
+        let mut mem_a = Memory::new(0x10000);
+        stage_valid_write(&mut mem_a, &sample_cfg_bytes());
+        let mut dev_a = Fwcfg::new();
+        dev_a.complete_dma(&mut mem_a, DESC_PA);
+
+        let mut alt_bytes = sample_cfg_bytes();
+        alt_bytes[16..20].copy_from_slice(&800u32.to_be_bytes()); // different width
+        let mut mem_b = Memory::new(0x10000);
+        stage_valid_write(&mut mem_b, &alt_bytes);
+        let mut dev_b = Fwcfg::new();
+        dev_b.complete_dma(&mut mem_b, DESC_PA);
+
+        use std::hash::{Hash, Hasher};
+        let mut ha = std::collections::hash_map::DefaultHasher::new();
+        dev_a.ramfb_cfg().hash(&mut ha);
+        let mut hb = std::collections::hash_map::DefaultHasher::new();
+        dev_b.ramfb_cfg().hash(&mut hb);
+        assert_ne!(ha.finish(), hb.finish());
     }
 }
