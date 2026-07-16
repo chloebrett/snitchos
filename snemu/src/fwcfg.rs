@@ -8,6 +8,8 @@
 //! `kernel-core/src/fwcfg.rs` is the spec this must satisfy; nothing here
 //! shares code with it, only the wire layout.
 
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+
 use crate::mem::Memory;
 
 /// Selector key for the file directory (`FW_CFG_FILE_DIR`), fixed by the
@@ -50,21 +52,59 @@ const RAMFB_REPORTED_SIZE: u32 = 28;
 
 /// The `fw_cfg` device's legacy (non-DMA) interface: a selector register
 /// picks an item, then sequential data-register reads return its bytes.
-#[derive(Clone)]
+///
+/// `selected`/`cursor` are atomics, not plain fields: reading the data
+/// register has a hardware side effect (the cursor advances), but `Bus`'s
+/// `read_u8` — which every load instruction goes through — is `&self`, not
+/// `&mut self` (reads never mutate for every other device on the bus, which
+/// have no such state). Interior mutability is the minimal-blast-radius fix;
+/// widening `Bus::read_u8` to `&mut self` would cascade through the whole
+/// CPU/mmu load path for one device's quirk. Atomics rather than `Cell`
+/// specifically because `Machine`/`Bus` must stay `Send + Sync` — the
+/// `snemu-itest` parallel worker pool shares booted machines across threads
+/// (`Arc<Mutex<HashMap<_, Machine>>>`), and `Cell` isn't `Sync`. No real
+/// contention ever happens (each thread works its own `Clone`d `Machine`);
+/// `Ordering::Relaxed` throughout reflects that this is a type-system
+/// requirement, not real synchronization.
 pub(crate) struct Fwcfg {
-    /// The currently selected item, if any. `None` until the first
-    /// `write_selector` — reads before that return `0` (matches the old
-    /// no-op stub's safe-degrade default for anything un-modeled).
-    selected: Option<u16>,
+    /// The currently selected item, if any. `-1` (not `Option<u16>` — atomics
+    /// don't hold `Option`) means none; reads before the first
+    /// `write_selector` return `0`, matching the old no-op stub's
+    /// safe-degrade default for anything un-modeled.
+    selected: AtomicI32,
     /// Read cursor into the selected item's byte content.
-    cursor: usize,
+    cursor: AtomicUsize,
     /// The captured config from a successful `etc/ramfb` DMA write, if any.
     ramfb_cfg: Option<RamfbCfg>,
+    /// The DMA descriptor's physical address, assembled from separate
+    /// high/low 32-bit register writes (mirrors `virtio::Queue`'s
+    /// `desc`/`avail`/`used` assembly via `put_low`/`put_high`).
+    dma_addr: u64,
+}
+
+/// Atomics don't derive `Clone` (cloning one means loading its current value
+/// into a fresh independent atomic, not automatically derivable) — the
+/// fork/snapshot-tree machinery (`Machine`/`Bus`'s `#[derive(Clone)]`) needs
+/// every field to implement `Clone` by *some* means, so this is that means.
+impl Clone for Fwcfg {
+    fn clone(&self) -> Self {
+        Self {
+            selected: AtomicI32::new(self.selected.load(Ordering::Relaxed)),
+            cursor: AtomicUsize::new(self.cursor.load(Ordering::Relaxed)),
+            ramfb_cfg: self.ramfb_cfg,
+            dma_addr: self.dma_addr,
+        }
+    }
 }
 
 impl Fwcfg {
     pub(crate) fn new() -> Self {
-        Self { selected: None, cursor: 0, ramfb_cfg: None }
+        Self {
+            selected: AtomicI32::new(-1),
+            cursor: AtomicUsize::new(0),
+            ramfb_cfg: None,
+            dma_addr: 0,
+        }
     }
 
     /// The captured `RAMFBCfg`, if a valid `etc/ramfb` DMA write has
@@ -108,20 +148,42 @@ impl Fwcfg {
         let _ = ram.write_u32(desc_pa, status.to_be());
     }
 
+    /// Stage the high half of the DMA descriptor's physical address
+    /// (register offset `0x10`). Takes an already wire-decoded logical
+    /// value — the bus is responsible for `u32::from_be` before calling,
+    /// same split as `write_selector`.
+    pub(crate) fn write_dma_addr_high(&mut self, value: u32) {
+        put_high(&mut self.dma_addr, value);
+    }
+
+    /// Stage the low half (register offset `0x14`) and return the
+    /// assembled 64-bit descriptor address. This is the DMA **trigger** —
+    /// the real device (and the kernel driver's `write_file`, which writes
+    /// high then low) treats the low-half write as "go"; the bus calls
+    /// [`Self::complete_dma`] with the returned address immediately after.
+    pub(crate) fn write_dma_addr_low(&mut self, value: u32) -> u64 {
+        put_low(&mut self.dma_addr, value);
+        self.dma_addr
+    }
+
     /// Select an item by key (the selector register, offset `0x08`). Resets
     /// the read cursor — re-selecting the same key starts a fresh read.
     pub(crate) fn write_selector(&mut self, key: u16) {
-        self.selected = Some(key);
-        self.cursor = 0;
+        self.selected.store(i32::from(key), Ordering::Relaxed);
+        self.cursor.store(0, Ordering::Relaxed);
     }
 
     /// Read the next byte of the selected item's content (the data
     /// register, offset `0x00`), advancing the cursor. Returns `0` past the
     /// item's end or with nothing selected — never panics on overrun.
-    pub(crate) fn read_data_byte(&mut self) -> u8 {
-        let Some(key) = self.selected else { return 0 };
-        let byte = Self::item_bytes(key).get(self.cursor).copied().unwrap_or(0);
-        self.cursor += 1;
+    /// `&self`, not `&mut self` — see the struct doc for why the state is
+    /// atomic.
+    pub(crate) fn read_data_byte(&self) -> u8 {
+        let selected = self.selected.load(Ordering::Relaxed);
+        let Ok(key) = u16::try_from(selected) else { return 0 }; // -1 = none selected
+        let cursor = self.cursor.load(Ordering::Relaxed);
+        let byte = Self::item_bytes(key).get(cursor).copied().unwrap_or(0);
+        self.cursor.store(cursor + 1, Ordering::Relaxed);
         byte
     }
 
@@ -135,6 +197,17 @@ impl Fwcfg {
             Vec::new()
         }
     }
+}
+
+/// Set the low / high 32-bit half of a 64-bit register slot. Matches
+/// `virtio.rs`'s helpers of the same name (duplicated, not shared — each
+/// device stays self-contained, same reasoning as the wire-format
+/// reimplementation this module's header comment describes).
+fn put_low(slot: &mut u64, value: u32) {
+    *slot = (*slot & !0xFFFF_FFFF) | u64::from(value);
+}
+fn put_high(slot: &mut u64, value: u32) {
+    *slot = (*slot & 0xFFFF_FFFF) | (u64::from(value) << 32);
 }
 
 /// Build the one-entry directory blob: `[count: u32 BE][entry]`, entry =
@@ -322,5 +395,25 @@ mod tests {
     fn ramfb_cfg_is_none_until_a_write_completes() {
         let dev = Fwcfg::new();
         assert_eq!(dev.ramfb_cfg(), None);
+    }
+
+    #[test]
+    fn dma_addr_high_then_low_assembles_the_64_bit_descriptor_address() {
+        let mut dev = Fwcfg::new();
+        dev.write_dma_addr_high(0x0001_0203);
+        let assembled = dev.write_dma_addr_low(0x8000_2000);
+        assert_eq!(assembled, 0x0001_0203_8000_2000);
+    }
+
+    #[test]
+    fn writing_the_low_half_again_reassembles_with_the_last_staged_high_half() {
+        // Two back-to-back select+write sequences (the real driver's actual
+        // pattern, once per DMA op) must each assemble correctly, not leak
+        // the previous op's high half in some stale way.
+        let mut dev = Fwcfg::new();
+        dev.write_dma_addr_high(0x0000_0000);
+        assert_eq!(dev.write_dma_addr_low(0x8000_1000), 0x8000_1000);
+        dev.write_dma_addr_high(0x0000_0001);
+        assert_eq!(dev.write_dma_addr_low(0x8000_2000), 0x1_8000_2000);
     }
 }
