@@ -83,11 +83,12 @@ struct FieldTy {
     generic: Option<usize>,
 }
 
-/// A declared function's signature: its parameter types (in order) and its
-/// return type.
+/// A declared function's signature: its parameter types (in order), return type,
+/// and the capabilities it declares it `uses` (propagated to callers by C2).
 struct FnSig {
     params: Vec<Ty>,
     ret: Ty,
+    uses: Vec<String>,
 }
 
 /// The checking context: the program's declared constructors and function
@@ -558,13 +559,13 @@ fn collect_ctors(items: &[CoreItem], types: &BTreeSet<String>) -> BTreeMap<Strin
 fn collect_funcs(items: &[CoreItem], types: &BTreeSet<String>) -> BTreeMap<String, FnSig> {
     let mut funcs = BTreeMap::new();
     for item in items {
-        if let CoreItem::Func { name, params, ret, .. } = item {
+        if let CoreItem::Func { name, params, ret, uses, .. } = item {
             let params = params
                 .iter()
                 .map(|p| p.ty.as_ref().map_or(Ty::Dyn, |t| ty_of_annotation(t, types)))
                 .collect();
             let ret = ret.as_ref().map_or(Ty::Dyn, |t| ty_of_annotation(t, types));
-            funcs.insert(name.clone(), FnSig { params, ret });
+            funcs.insert(name.clone(), FnSig { params, ret, uses: uses.clone() });
         }
     }
     funcs
@@ -642,9 +643,10 @@ fn native_cap(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Collect the capabilities every effect-native *directly* called in `expr`
-/// requires, each mapped to its first call-site span. A name shadowed by a user
-/// function is a normal call, not an effect (its effects propagate in C2).
+/// Collect the capabilities `expr` requires, each mapped to its first call-site
+/// span: a call to an effect-native needs its cap; a call to a user function needs
+/// (propagates) every cap that function declares it `uses` (C2). A user function
+/// of the same name as a native shadows it — the declared `uses` win.
 fn required_effects(
     expr: &CoreExpr,
     funcs: &BTreeMap<String, FnSig>,
@@ -652,10 +654,14 @@ fn required_effects(
 ) {
     if let CoreExprKind::Call { callee, .. } = &expr.kind
         && let CoreExprKind::Var(name) = &callee.kind
-        && !funcs.contains_key(name)
-        && let Some(cap) = native_cap(name)
     {
-        required.entry(cap.to_string()).or_insert(expr.span);
+        if let Some(sig) = funcs.get(name) {
+            for cap in &sig.uses {
+                required.entry(cap.clone()).or_insert(expr.span);
+            }
+        } else if let Some(cap) = native_cap(name) {
+            required.entry(cap.to_string()).or_insert(expr.span);
+        }
     }
     let mut recurse = |child: &CoreExpr| required_effects(child, funcs, required);
     match &expr.kind {
@@ -1105,6 +1111,20 @@ mod tests {
             1,
             "a method effect needs its cap too"
         );
+    }
+
+    #[test]
+    fn calling_a_capability_using_function_propagates_the_requirement() {
+        // `g` calls `f`, which uses Telemetry, so `g` must declare Telemetry too.
+        let bad = r#"f() uses Telemetry = emit("x", 1)  g() = f()"#;
+        assert_eq!(errors(bad).len(), 1, "g calls f (uses Telemetry) undeclared, got {:?}", errors(bad));
+        // Declaring it up the chain is clean.
+        assert!(
+            errors(r#"f() uses Telemetry = emit("x", 1)  g() uses Telemetry = f()"#).is_empty(),
+            "g declares Telemetry → clean"
+        );
+        // Calling a pure function requires nothing.
+        assert!(errors("f() = 1  g() = f()").is_empty(), "calling a pure function → clean");
     }
 
     #[test]

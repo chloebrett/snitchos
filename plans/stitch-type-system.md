@@ -209,10 +209,16 @@ or it false-warns "unused" on a cap that's actually needed via a path the analys
   `f() = emit("x", 1)` → error; `f() uses Telemetry = emit(…)` clean; found nested in
   blocks/methods. 615 lib + all integration green — **prelude clean** (its `uses` are
   accurate, else the runtime gate would refuse). Mutation 13/16 caught, 0 survivors.
-- **C2 — Call-graph propagation (transitive forward).** Calling a user function requires
-  its declared `uses`; `required(g)` also unions the `uses` of every function `g` calls;
-  error when `g` under-declares. → `g() = f()` where `f() uses Telemetry` requires `g` to
-  declare `Telemetry`. *"Effects flow up the call graph."* Medium.
+- **C2 — Call-graph propagation (transitive forward) — ✅ DONE (2026-07-17).** `FnSig`
+  gained `uses`; `required_effects` now, for a call to a user function, unions that
+  function's declared `uses` into `required` (inverting C1's shadow-skip — declared `uses`
+  win over a same-named native). `g() = f()` where `f() uses Telemetry` → `g` must declare
+  `Telemetry`. 616 lib + all integration green, **prelude clean** (only `view` declares
+  `uses`, and nothing calls it under-declared). Mutation 2/5 caught (3 unviable),
+  0 survivors. **Note — stricter than the *soft* runtime:** `with_authority` at a call
+  boundary *replaces* authority with the callee's declared `uses` (grants fresh, no
+  caller-intersection), so a program C2 flags may still *run*; C2 is the compiler
+  enforcing the design's intended uses-up-the-call-graph ahead of the runtime gate.
 - **C3 — Reverse check: declared-but-unused warning** (the user's ask). `declared \
   required` → a warning per unused cap. **Depends on C2** for soundness (C1-only
   `required` misses transitive uses → false "unused"). Conservative — warn only when
