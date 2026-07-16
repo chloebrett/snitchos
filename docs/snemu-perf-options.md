@@ -117,7 +117,22 @@ macro). **Verified:** re-profiling `smp` release shows `InternTable::lookup_or_i
 gone from the top 12 — down from 15.4% (122M) to the sub-1.8% tail — with the reclaimed
 cycles now spent on real workload progress (`producer_entry` 59M→95M in the fixed
 window). `snemu-itest` stays green (113/114, 99% fidelity — the one miss is the standing
-FS-read fidelity gap, not a regression), confirming byte-identical wire behaviour.
+`framebuffer-presents` device-fidelity gap, not a regression), confirming
+byte-identical wire behaviour.
+
+### The bigger win, found alongside — `--speedup hi` is now the default (SHIPPED)
+
+While measuring the span fix, the gate's own wall-clock (~13s) didn't match this
+post's "`hi` = ~3s" claim. Cause: `--speedup` had no default, so `SpeedConfig::resolve`
+fell back to `Low` (idle-skip only — **block JIT off**). The gate had been running the
+slow config all along; the 3× block-JIT lever was built, measured, and switched off.
+Fix (`xtask/src/main.rs`): `--speedup` now defaults to `hi`
+(`speed[idle-skip,native-ops,tlb,jit-A,reg-cache]`), taking the everyday
+`cargo xtask snemu-itest` from **~13s → 3.6s**. Pass `--speedup low` for the
+idle-skip-only A/B baseline. This one-line default change is a larger win than the span
+fix and vastly larger than Backend B. Note: the `.snemu-itest-durations` packing cache
+held `low`-config timings, so the first `hi`-default run packed on stale numbers
+(self-corrects over the next runs).
 
 ### The fix, as originally planned
 
