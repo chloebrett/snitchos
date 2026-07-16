@@ -53,6 +53,16 @@ lands before the hard one.
     in QEMU** — that's inc 5. (`cargo xtask` is currently broken by an unrelated
     working-tree `snemu/src/fwcfg.rs` WIP making snemu's `Machine` non-`Send`; the
     itest harness can't run until that's resolved.)
+- **Increment 3.5 ✅ (mechanism) — killing blocked services**, per §3b.
+  - Pure `kernel_core::ipc::on_cancel` + 6 host tests (collapse-to-Idle, FIFO-preserving
+    extraction, idempotent no-op). Kernel `ipc::cancel_wait(target)` scans the endpoint
+    table + clears `pending`/`REPLIES`. 503 kernel-core tests green.
+  - Classifier collapsed: `KillTarget` drops `ready`; `KillAction::{Dequeue,
+    RefuseBlocked}` → one `Terminate`. `kill_task` calls `cancel_wait` unconditionally on
+    the terminate path. Only cross-hart *running* remains deferred (v2b, needs an IPI).
+  - Documented safe limitation: a task killed mid-`Call` leaves a lingering one-shot
+    reply cap (server's reply safely no-ops). Builds with/without `itest-workloads`;
+    QEMU exercise still pending inc 5.
 
 ### 1. Pure policy — `teardown_order` (`supervision` crate, host-tested) ✅
 
@@ -105,37 +115,64 @@ is safe — depends entirely on its scheduler state. Two facts drive the whole d
 | **Ready** | a `Candidate` in some `runqueues[h]` | **yes** — not running ⇒ its `satp` isn't loaded, its stack is quiescent | `runqueues[h].remove(target)`; `state = Exited`; `note_exit(target, KILLED)`; `wake(parent)` | ✅ |
 | **Running — self** | `CURRENT_TASK[me]` | n/a | that's `Exit`, not `Kill` | ❌ refuse (`BadArgument`) |
 | **Running — other hart** | `CURRENT_TASK[other]` | **no** — live stack + loaded `satp` | IPI the hart → target reads a per-hart die-flag → self-`exit_now` | ❌ **defer v2b** |
-| **Blocked — REAP / NOTIFY** | waiter slot in `ReapTable` / `NotifyTable` | yes — a stale waiter later `wake`s to a no-op (`on_wake(Exited)==false`) | `state = Exited`; `note_exit`; `wake(parent)`; leave the stale waiter | ⚠️ needs wait-kind tag |
-| **Blocked — IPC endpoint** | id inside an endpoint's `SendersWaiting`/`ReceiversWaiting` queue | **no** — *semantically*: a future rendezvous pops the dead id, stashes a message under it, `wake`s a no-op → the sender's message vanishes into a ghost (inline msgs aren't copied into peer AS at rendezvous, so it's not a hard UAF, but it corrupts the endpoint) | must `remove` the id from every endpoint queue *before* zombifying | ❌ **defer v2b** |
+| **Blocked — REAP / NOTIFY** | waiter slot in `ReapTable` / `NotifyTable` | yes — a stale waiter later `wake`s to a no-op (`on_wake(Exited)==false`) | `state = Exited`; `note_exit`; `wake(parent)`; leave the stale waiter | ✅ **(inc 3.5)** — not in any endpoint queue, so `cancel_wait`'s scan no-ops and the zombify is safe as-is |
+| **Blocked — IPC endpoint** | id inside an endpoint's `SendersWaiting`/`ReceiversWaiting` queue | **no** — *semantically*: a future rendezvous pops the dead id, stashes a message under it, `wake`s a no-op → the sender's message vanishes into a ghost (inline msgs aren't copied into peer AS at rendezvous, so it's not a hard UAF, but it corrupts the endpoint) | `cancel_wait` removes the id from every endpoint queue (`on_cancel`) + clears its `pending`/`REPLIES`, *then* zombify | ✅ **(inc 3.5)** |
 
-**v2a scope (first cut).** `kill_task` handles **Ready** (the happy path) and **Exited**
-(idempotent). It **refuses cleanly** — never crashes — for self, cross-hart-running, and
-(pending the decision below) blocked targets. The `supervised-kill-stops-a-child` itest
-kills a **Ready spinner** (a child that busy-yields, so it's always on a runqueue). The
-reverse-dep-shutdown itest uses cooperative children that exit on a `Signal`ed shutdown
-notification (`Signal` wakes a `WaitNotify`-blocked child → `Ready` → it exits itself), so
-graceful shutdown never needs to kill a blocked task — `Kill` is only the Ready-spinner
-force-stop. That keeps v2a's dangerous surface to the one provably-safe transition.
+**v2a scope (first cut — *superseded by inc 3.5, §3b*).** The initial cut handled only
+**Ready** + **Exited** and refused blocked targets. Inc 3.5 lifted that: `kill_task` now
+terminates any **off-CPU** target (`Ready` or `Blocked`), refusing cleanly only self and
+cross-hart-running. Kept here as the design record; the live behaviour is §3b.
 
 **Killed status.** A killed task's `WaitAny` parent should be able to tell a kill from a
 clean exit. `kill_task` records `note_exit(target, KILLED_STATUS)`; the parent reads it in
 `a0`. `KILLED_STATUS` = a documented kernel-side sentinel (`-9`, echoing SIGKILL though we
 have no signals).
 
-**Decisions (2026-07-17).** (Q1) **Defer all Blocked** — `kill_task` handles only
-`Ready` + idempotent `Exited`; every `Blocked` target is refused (deferred to v2b), so
-no new `Task` field and exactly one provably-safe transition ships. (Q2) **Reuse an
-existing `RefusalReason` + `emit_log`** for the deferred/self cases — no new wire enum
-variant (avoids the exhaustive-match ripple); the itest happy path kills a `Ready`
-spinner and never hits it.
+**Decisions (2026-07-17).** (Q1) Originally **defer all Blocked**; **superseded by inc
+3.5** (§3b), which supports blocked targets via `cancel_wait` — the only remaining
+deferral is cross-hart *running*. (Q2) **Reuse an existing `RefusalReason` + `emit_log`**
+for the deferred/self cases — no new wire enum variant (avoids the exhaustive-match
+ripple); the itest happy path terminates cleanly and never hits it.
 
-**Shape.** Pure classifier in `kernel_core::sched` (host-tested):
-`classify_kill(is_self, running_remote, ready, state) -> KillAction` where `KillAction ∈
-{ NoOp, Dequeue, RefuseSelf, RefuseRunningRemote, RefuseBlocked }`, precedence self →
-running-remote → Exited(NoOp) → Ready(Dequeue) → Blocked. Kernel-side
-`sched::kill_task(target)` reads the placement (`CURRENT_TASK[h]` per hart for running,
-runqueue scan for ready, `task.state`), calls the classifier, and on `Dequeue` removes
-the target from its runqueue, sets `state = Exited`, then (lock dropped)
+#### 3b. `cancel_wait` — killing blocked services (inc 3.5)
+
+The Ready-only cut can't kill the realistic uncooperative service: an idle IPC server
+blocked in `Receive`. Inc 3.5 lifts that, and the key realisation makes it *shrink* the
+code rather than grow it: **blocked ⇒ not running ⇒ its stack + `satp` are quiescent**,
+so reaping a blocked target is always *memory*-safe. The only hazard is the dangling id
+left in an endpoint wait queue (the ghost rendezvous). Every other block site
+(`WaitNotify`, `Wait`/`WaitAny`, a `Call` already-delivered) parks the id somewhere
+whose stale entry degrades to a harmless no-op `wake`, so it needs no cleanup at all.
+
+So the whole fix is: extract the id from any endpoint queue, then zombify like a Ready
+target.
+
+- Pure `kernel_core::ipc::on_cancel(state, me) -> EndpointState` — remove `me` from the
+  waiting queue, collapse to `Idle` if it was the last (mirror of `on_send`/`on_receive`,
+  upholding the never-empty-queue invariant). Idempotent (a no-op if `me` isn't waiting).
+  Host-tested (6 cases).
+- Kernel `ipc::cancel_wait(target)` — scan every endpoint (the id is parked in at most
+  one; the count is tiny, so a scan beats a per-task tag), apply `on_cancel`, drop any
+  `pending` message the target stashed and any awaited `REPLIES` slot. Safe + no-op for a
+  `Ready` target (in no queue), so `kill_task` calls it unconditionally.
+- The classifier **collapses**: `KillAction::{Dequeue, RefuseBlocked}` → one `Terminate`
+  covering `Ready`-or-`Blocked`; `ready` drops out of `KillTarget` entirely (it's
+  mechanism, not policy). What stays deferred to v2b is only cross-hart *running* (needs
+  an IPI) — which a same-hart supervisor demo never hits.
+
+**Known limitation (documented, safe):** a task killed mid-`Call` (already delivered,
+awaiting reply) leaves a one-shot reply cap in the server naming the dead task; the
+server's eventual `reply` safely no-op-`wake`s it, and the cap lingers until the server
+is reaped. No UAF, just a wasted reply. Reply-cap invalidation on kill is a later
+refinement.
+
+**Shape (final).** Pure classifier in `kernel_core::sched` (host-tested):
+`classify_kill(KillTarget { is_self, running_remote, is_exited }) -> KillAction` where
+`KillAction ∈ { NoOp, Terminate, RefuseSelf, RefuseRunningRemote }`, precedence self →
+running-remote → Exited(NoOp) → Terminate. Kernel-side `sched::kill_task(target)` reads
+the placement (`CURRENT_TASK[h]` per hart via `PerCpu::cells()` for running, `task.state`
+for exited), calls the classifier, and on `Terminate` removes the target from any
+runqueue + sets `state = Exited` (under the lock), then (lock dropped) `cancel_wait` +
 `note_exit(target, KILLED_STATUS)` + `wake(parent)`. It does **not** reap inline — the
 parent's `WaitAny` reaps the zombie via the existing `reap_task`. A killed task's open
 spans are abandoned (no `SpanEnd`); its cursor goes inert on reap.

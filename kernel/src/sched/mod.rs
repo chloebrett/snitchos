@@ -1380,18 +1380,19 @@ pub enum KillOutcome {
 /// `Ready` (in a runqueue), or `Blocked`/`Exited` — and routes it through the pure
 /// [`classify_kill`] policy.
 ///
-/// v2a ships exactly the one provably-safe transition: a `Ready` target is removed
-/// from its runqueue and marked `Exited` **in place** (not running ⇒ its stack and
-/// `satp` are quiescent, so no live state is pulled out from under it), then its
-/// killed status is recorded and its `WaitAny` parent woken. The parent's `Wait`
-/// reaps the zombie via the existing [`reap_task`] path — `kill_task` never reaps
-/// inline (it runs in the *killer's* address space, not the target's) and never
-/// `switch`es (it isn't the target). The target's open spans are abandoned (no
-/// `SpanEnd`); its cursor goes inert on reap.
+/// v2a terminates any **off-CPU** target — `Ready` or `Blocked`. It's removed from
+/// any runqueue and marked `Exited` in place (not running ⇒ its stack and `satp` are
+/// quiescent, so no live state is pulled out from under it), extracted from any
+/// endpoint wait via [`crate::ipc::cancel_wait`] (inc 3.5 — so no ghost id lingers to
+/// be popped by a future rendezvous), then its killed status is recorded and its
+/// `WaitAny` parent woken. The parent's `Wait` reaps the zombie via the existing
+/// [`reap_task`] path — `kill_task` never reaps inline (it runs in the *killer's*
+/// address space, not the target's) and never `switch`es (it isn't the target). The
+/// target's open spans are abandoned (no `SpanEnd`); its cursor goes inert on reap.
 ///
-/// Self, cross-hart-running, and blocked targets are **deferred** to v2b (an IPI to
-/// halt a remote runner; clean extraction from an IPC endpoint queue) and refused
-/// cleanly rather than risking a UAF or a ghost rendezvous.
+/// Self is refused (`Exit`'s job). A target running on **another hart** is **deferred**
+/// to v2b (its live stack + loaded `satp` need an IPI to halt before reap) and refused
+/// cleanly rather than risking a UAF.
 pub fn kill_task(target: TaskId) -> KillOutcome {
     let me = crate::percpu::current_hartid();
     let is_self = target == TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
@@ -1409,10 +1410,11 @@ pub fn kill_task(target: TaskId) -> KillOutcome {
             // Unknown id — already reaped. Idempotent success, nothing to wake.
             return KillOutcome::AlreadyDead;
         };
-        let ready = (0..crate::percpu::MAX_HARTS)
-            .any(|hart| sched.runqueues[hart].iter().any(|c| c.id == target));
-        let action = classify_kill(KillTarget { is_self, running_remote, is_exited, ready });
-        if action == KillAction::Dequeue {
+        let action = classify_kill(KillTarget { is_self, running_remote, is_exited });
+        if action == KillAction::Terminate {
+            // Remove it from any runqueue (a `Ready` target) and mark it `Exited`
+            // under the lock; the endpoint-queue cleanup (a `Blocked` target)
+            // happens after the lock drops, in `cancel_wait`.
             for hart in 0..crate::percpu::MAX_HARTS {
                 sched.runqueues[hart].remove(target);
             }
@@ -1421,14 +1423,17 @@ pub fn kill_task(target: TaskId) -> KillOutcome {
             }
         }
         action
-        // Lock dropped before note_exit/wake (never hold it across those).
+        // Lock dropped before cancel_wait/note_exit/wake (never hold it across those).
     };
 
     match action {
-        KillAction::Dequeue => {
-            // Record the zombie + killed status and wake the target's `WaitAny`
-            // parent so it reaps. `note_exit` returns `None` for a parentless task
-            // (nothing to wake — the zombie waits, harmless).
+        KillAction::Terminate => {
+            // Extract the target from any endpoint wait it was parked in, so no ghost
+            // id lingers to be popped by a future rendezvous (no-op for a `Ready`
+            // target — it's in no queue). Then record the zombie + killed status and
+            // wake the target's `WaitAny` parent so it reaps. `note_exit` returns
+            // `None` for a parentless task (nothing to wake — the zombie waits).
+            crate::ipc::cancel_wait(target);
             if let Some(parent) = note_exit(target, KILLED_STATUS) {
                 wake(parent);
             }
@@ -1436,7 +1441,7 @@ pub fn kill_task(target: TaskId) -> KillOutcome {
         }
         KillAction::NoOp => KillOutcome::AlreadyDead,
         KillAction::RefuseSelf => KillOutcome::RefusedSelf,
-        KillAction::RefuseRunningRemote | KillAction::RefuseBlocked => KillOutcome::Deferred,
+        KillAction::RefuseRunningRemote => KillOutcome::Deferred,
     }
 }
 

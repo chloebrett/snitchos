@@ -14,7 +14,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use kernel_core::ipc::{on_receive, on_send, EndpointId, EndpointState, RendezvousAction};
+use kernel_core::ipc::{on_cancel, on_receive, on_send, EndpointId, EndpointState, RendezvousAction};
 use kernel_core::sched::TaskId;
 use protocol::SpanId;
 
@@ -192,6 +192,31 @@ pub fn receive_begin(ep: EndpointId, me: TaskId) -> RecvStep {
 pub fn take_delivered(ep: EndpointId, me: TaskId) -> Delivered {
     let mut eps = ENDPOINTS.lock();
     eps[ep.0 as usize].pending.remove(&me).unwrap_or_default()
+}
+
+/// Extract a killed task's id from any endpoint wait it was parked in (v2a `Kill`,
+/// inc 3.5). A blocked `Send`/`Receive`/`Call` leaves the task's id in an endpoint's
+/// waiting queue (and a blocked `Send`/`Call` also stashes a `pending` message under
+/// it); reaping the task without removing these leaves a **ghost** — a future
+/// rendezvous would pop the dead id and deliver into the void. Scans every endpoint
+/// (the id is parked in at most one, and the count is tiny) applying [`on_cancel`],
+/// clears any `pending` message it stashed, and drops any awaited `REPLIES` slot.
+/// Idempotent + safe for a `Ready` target too (it's in no queue — the scan no-ops),
+/// so [`crate::sched::kill_task`] calls it unconditionally on the terminate path.
+pub fn cancel_wait(target: TaskId) {
+    {
+        let mut eps = ENDPOINTS.lock();
+        for endpoint in eps.iter_mut() {
+            let state = core::mem::replace(&mut endpoint.state, EndpointState::Idle);
+            endpoint.state = on_cancel(state, target);
+            // A blocked sender/caller stashed its message under its own id; drop it
+            // (no-op for a receiver, which stashes nothing until delivery).
+            endpoint.pending.remove(&target);
+        }
+    }
+    // A caller killed mid-`call` may have a reply slot awaiting it; clear it so a
+    // late `reply` finds nothing to stash (it already no-op-`wake`s the dead id).
+    REPLIES.lock().remove(&target);
 }
 
 /// A stashed reply: the response words plus an optional capability the server

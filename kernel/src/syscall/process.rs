@@ -90,7 +90,7 @@ pub(super) fn handle_kill(frame: &mut TrapFrame) {
             // log the precise deferred reason — the itest happy path kills a `Ready`
             // spinner and never lands here.
             crate::tracing::emit_log(&alloc::format!(
-                "kill deferred: target {} is self/running-remote/blocked (v2b)",
+                "kill deferred: target {} is self or running on another hart (v2b)",
                 target.0
             ));
             super::refuse(frame, sc, protocol::RefusalReason::CapWrongObject);

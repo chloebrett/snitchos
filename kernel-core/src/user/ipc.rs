@@ -86,6 +86,41 @@ pub fn on_send(state: EndpointState, me: TaskId) -> (EndpointState, RendezvousAc
     }
 }
 
+/// Transition for a waiter **leaving** the endpoint without rendezvousing — the
+/// v2a `Kill` extracting a blocked task's id from whichever queue holds it, so no
+/// ghost id lingers to be popped by a future rendezvous. Removes `me` from the
+/// waiting queue (idempotent — a no-op if `me` isn't waiting here), collapsing to
+/// `Idle` when it was the last waiter (upholding the never-empty-queue invariant).
+/// Unlike [`on_send`]/[`on_receive`] it never rendezvouses, so there's no action to
+/// return — just the next state.
+#[must_use]
+pub fn on_cancel(state: EndpointState, me: TaskId) -> EndpointState {
+    match state {
+        EndpointState::Idle => EndpointState::Idle,
+        EndpointState::SendersWaiting(queue) => {
+            without(queue, me, EndpointState::SendersWaiting)
+        }
+        EndpointState::ReceiversWaiting(queue) => {
+            without(queue, me, EndpointState::ReceiversWaiting)
+        }
+    }
+}
+
+/// Drop every occurrence of `me` from `queue`, collapsing to `Idle` when nothing
+/// remains; otherwise `rebuild` the same waiting variant around the survivors.
+fn without(
+    mut queue: VecDeque<TaskId>,
+    me: TaskId,
+    rebuild: impl FnOnce(VecDeque<TaskId>) -> EndpointState,
+) -> EndpointState {
+    queue.retain(|&id| id != me);
+    if queue.is_empty() {
+        EndpointState::Idle
+    } else {
+        rebuild(queue)
+    }
+}
+
 /// Transition for a receiver arriving at the endpoint. The mirror of
 /// [`on_send`].
 #[must_use]
@@ -200,5 +235,38 @@ mod tests {
 
         assert_eq!(action, RendezvousAction::Rendezvous { peer: TaskId(1) });
         assert_eq!(state, senders(&[2]));
+    }
+
+    #[test]
+    fn cancelling_the_only_sender_collapses_to_idle() {
+        // A killed task parked as the lone sender leaves no waiter — the endpoint
+        // returns to Idle, not an empty `SendersWaiting` (the invariant: a waiting
+        // queue is never empty).
+        assert_eq!(on_cancel(senders(&[3]), TaskId(3)), EndpointState::Idle);
+    }
+
+    #[test]
+    fn cancelling_the_only_receiver_collapses_to_idle() {
+        assert_eq!(on_cancel(receivers(&[3]), TaskId(3)), EndpointState::Idle);
+    }
+
+    #[test]
+    fn cancelling_one_of_several_senders_keeps_the_rest_in_fifo_order() {
+        // Killing the middle sender extracts just its id; the others keep their
+        // arrival order so the next receiver still rendezvouses with the front.
+        assert_eq!(on_cancel(senders(&[1, 2, 3]), TaskId(2)), senders(&[1, 3]));
+    }
+
+    #[test]
+    fn cancelling_a_task_that_is_not_waiting_is_a_no_op() {
+        // The target blocked elsewhere (another endpoint, notify, reap) — this
+        // endpoint's queue is untouched. Idempotent, so a blind scan-all-endpoints
+        // cancel is safe.
+        assert_eq!(on_cancel(senders(&[1, 2]), TaskId(99)), senders(&[1, 2]));
+    }
+
+    #[test]
+    fn cancelling_on_an_idle_endpoint_stays_idle() {
+        assert_eq!(on_cancel(EndpointState::Idle, TaskId(7)), EndpointState::Idle);
     }
 }

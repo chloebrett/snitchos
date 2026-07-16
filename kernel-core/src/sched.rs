@@ -342,25 +342,26 @@ pub fn on_wake(state: TaskState) -> bool {
 pub enum KillAction {
     /// The target already `Exited` — nothing to do; the kill succeeds idempotently.
     NoOp,
-    /// The target is `Ready` on a runqueue: pull it off and zombify it in place.
-    /// The one provably-safe transition v2a ships (not running ⇒ its stack + `satp`
-    /// are quiescent).
-    Dequeue,
+    /// The target is off-CPU (`Ready` on a runqueue **or** `Blocked` in a wait
+    /// structure): terminate it in place — remove it from any runqueue, cancel any
+    /// endpoint wait, zombify. Safe because a non-running target's stack + `satp`
+    /// are quiescent; the only hazard, a ghost id left in an endpoint queue, is
+    /// cleared by `ipc::cancel_wait` (inc 3.5).
+    Terminate,
     /// The target is the caller itself — that's `Exit`'s job, not `Kill`'s.
     RefuseSelf,
     /// The target is running on another hart: a live stack + loaded `satp` make an
     /// out-of-band reap a UAF. Deferred to v2b (needs an IPI to halt it).
     RefuseRunningRemote,
-    /// The target is `Blocked`, its id parked in some wait structure (IPC endpoint,
-    /// notify, or reap). Clean extraction is deferred to v2b; v2a refuses rather
-    /// than leave a ghost id in an endpoint queue.
-    RefuseBlocked,
 }
 
 /// The scheduler placement of a kill target — the inputs [`classify_kill`] reads,
 /// named so call sites don't pass a row of ambiguous bools (boolean blindness).
-/// `Default` is all-false = a blocked target (the base case), so a test names only
-/// the axis it exercises: `KillTarget { ready: true, ..Default::default() }`.
+/// `Default` is all-false = an off-CPU (`Ready`-or-`Blocked`) live target, the base
+/// case, so a test names only the axis it exercises: `KillTarget { is_self: true,
+/// ..Default::default() }`. Note `ready` is *not* an input: a non-running,
+/// non-exited target terminates whether `Ready` or `Blocked` (the runqueue-vs-
+/// endpoint cleanup is mechanism, done unconditionally in `kill_task`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct KillTarget {
     /// The target *is* the calling task (the runner on this hart).
@@ -369,31 +370,28 @@ pub struct KillTarget {
     pub running_remote: bool,
     /// The target has already `Exited` (kill is then an idempotent no-op).
     pub is_exited: bool,
-    /// The target sits in some hart's runqueue.
-    pub ready: bool,
 }
 
 /// Decide how to kill a target, given its scheduler placement. Pure so the v2a
-/// scope cut (`Ready`-only; defer running-remote + blocked) is host-tested away
-/// from the kernel's runqueue/`CURRENT_TASK` plumbing.
+/// scope (terminate any off-CPU target; defer only cross-hart-running) is
+/// host-tested away from the kernel's runqueue/`CURRENT_TASK`/endpoint plumbing.
 ///
-/// Precedence is self → running-remote → exited → ready → blocked. Self is decided
-/// first so the caller (which is the running task on this hart) never routes to a
-/// kill path; `running_remote` comes before `is_exited` because the kernel derives
+/// Precedence is self → running-remote → exited → terminate. Self is decided first
+/// so the caller (which is the running task on this hart) never routes to a kill
+/// path; `running_remote` comes before `is_exited` because the kernel derives
 /// running from `CURRENT_TASK`, not the `state` field, which does not reliably track
 /// `Running` (an incoming task is never re-labelled).
 #[must_use]
 pub fn classify_kill(target: KillTarget) -> KillAction {
-    let KillTarget { is_self, running_remote, is_exited, ready } = target;
-    // Arm order *is* the precedence — the first matching arm wins, so self beats
-    // running-remote beats exited beats ready beats blocked. The trailing arm
-    // (nothing self/remote/exited/ready) is a blocked target.
-    match (is_self, running_remote, is_exited, ready) {
-        (true, _, _, _) => KillAction::RefuseSelf,
-        (_, true, _, _) => KillAction::RefuseRunningRemote,
-        (_, _, true, _) => KillAction::NoOp,
-        (_, _, _, true) => KillAction::Dequeue,
-        _ => KillAction::RefuseBlocked,
+    let KillTarget { is_self, running_remote, is_exited } = target;
+    // Arm order *is* the precedence — the first matching arm wins. The trailing arm
+    // (not self / not running-remote / not exited) is an off-CPU live target, `Ready`
+    // or `Blocked`; both terminate now (inc 3.5 collapsed the blocked case).
+    match (is_self, running_remote, is_exited) {
+        (true, _, _) => KillAction::RefuseSelf,
+        (_, true, _) => KillAction::RefuseRunningRemote,
+        (_, _, true) => KillAction::NoOp,
+        _ => KillAction::Terminate,
     }
 }
 
@@ -803,14 +801,11 @@ mod tests {
     }
 
     #[test]
-    fn kill_a_ready_task_dequeues_it() {
-        // The one provably-safe transition: a Ready target isn't running (its
-        // stack + satp are quiescent), so it can be pulled off the runqueue and
-        // zombified in place.
-        assert_eq!(
-            classify_kill(KillTarget { ready: true, ..Default::default() }),
-            KillAction::Dequeue
-        );
+    fn killing_an_off_cpu_live_target_terminates_it() {
+        // Default = not self / not running-remote / not exited = an off-CPU live
+        // target (`Ready` or `Blocked`). Both terminate: not running ⇒ stack + satp
+        // quiescent, and any endpoint ghost is cleared by `cancel_wait` (inc 3.5).
+        assert_eq!(classify_kill(KillTarget::default()), KillAction::Terminate);
     }
 
     #[test]
@@ -825,10 +820,9 @@ mod tests {
 
     #[test]
     fn killing_yourself_is_refused() {
-        // Self-termination is `Exit`'s job, not `Kill`'s — even if the (nonsense)
-        // ready flag would otherwise classify.
+        // Self-termination is `Exit`'s job, not `Kill`'s.
         assert_eq!(
-            classify_kill(KillTarget { is_self: true, ready: true, ..Default::default() }),
+            classify_kill(KillTarget { is_self: true, ..Default::default() }),
             KillAction::RefuseSelf
         );
     }
@@ -844,24 +838,11 @@ mod tests {
     }
 
     #[test]
-    fn killing_a_blocked_task_is_deferred() {
-        // A Blocked target's id is parked in some wait structure (IPC endpoint /
-        // notify / reap). Extracting it cleanly is v2b; v2a refuses rather than
-        // leave a ghost in an endpoint queue. Default = all-false = blocked.
-        assert_eq!(classify_kill(KillTarget::default()), KillAction::RefuseBlocked);
-    }
-
-    #[test]
-    fn self_check_precedes_running_and_ready() {
+    fn self_check_precedes_running_remote() {
         // Precedence: self is decided before the placement flags, so the running
         // task on this hart (which IS the caller) never routes to a kill path.
         assert_eq!(
-            classify_kill(KillTarget {
-                is_self: true,
-                running_remote: true,
-                ready: true,
-                ..Default::default()
-            }),
+            classify_kill(KillTarget { is_self: true, running_remote: true, is_exited: true }),
             KillAction::RefuseSelf
         );
     }
