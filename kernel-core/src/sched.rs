@@ -357,39 +357,44 @@ pub enum KillAction {
     RefuseBlocked,
 }
 
-/// Decide how to kill `target`, given its placement in the scheduler. Pure so the
-/// v2a scope cut (`Ready`-only; defer running-remote + blocked) is host-tested away
+/// The scheduler placement of a kill target — the inputs [`classify_kill`] reads,
+/// named so call sites don't pass a row of ambiguous bools (boolean blindness).
+/// `Default` is all-false = a blocked target (the base case), so a test names only
+/// the axis it exercises: `KillTarget { ready: true, ..Default::default() }`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct KillTarget {
+    /// The target *is* the calling task (the runner on this hart).
+    pub is_self: bool,
+    /// The target is currently on-CPU on a **different** hart.
+    pub running_remote: bool,
+    /// The target has already `Exited` (kill is then an idempotent no-op).
+    pub is_exited: bool,
+    /// The target sits in some hart's runqueue.
+    pub ready: bool,
+}
+
+/// Decide how to kill a target, given its scheduler placement. Pure so the v2a
+/// scope cut (`Ready`-only; defer running-remote + blocked) is host-tested away
 /// from the kernel's runqueue/`CURRENT_TASK` plumbing.
 ///
-/// - `is_self`: the target *is* the calling task (the runner on this hart).
-/// - `running_remote`: the target is currently on-CPU on a **different** hart.
-/// - `ready`: the target sits in some hart's runqueue.
-/// - `state`: the target's `Task::state` field (only load-bearing here for `Exited`).
-///
-/// Precedence is self → running-remote → `Exited` → `Ready` → blocked. Self is
-/// decided first so the caller (which is the running task on this hart) never
-/// routes to a kill path; `running_remote` before the state field because that
-/// field does not reliably track `Running` (an incoming task is never re-labelled).
+/// Precedence is self → running-remote → exited → ready → blocked. Self is decided
+/// first so the caller (which is the running task on this hart) never routes to a
+/// kill path; `running_remote` comes before `is_exited` because the kernel derives
+/// running from `CURRENT_TASK`, not the `state` field, which does not reliably track
+/// `Running` (an incoming task is never re-labelled).
 #[must_use]
-pub fn classify_kill(
-    is_self: bool,
-    running_remote: bool,
-    ready: bool,
-    state: TaskState,
-) -> KillAction {
-    if is_self {
-        return KillAction::RefuseSelf;
+pub fn classify_kill(target: KillTarget) -> KillAction {
+    let KillTarget { is_self, running_remote, is_exited, ready } = target;
+    // Arm order *is* the precedence — the first matching arm wins, so self beats
+    // running-remote beats exited beats ready beats blocked. The trailing arm
+    // (nothing self/remote/exited/ready) is a blocked target.
+    match (is_self, running_remote, is_exited, ready) {
+        (true, _, _, _) => KillAction::RefuseSelf,
+        (_, true, _, _) => KillAction::RefuseRunningRemote,
+        (_, _, true, _) => KillAction::NoOp,
+        (_, _, _, true) => KillAction::Dequeue,
+        _ => KillAction::RefuseBlocked,
     }
-    if running_remote {
-        return KillAction::RefuseRunningRemote;
-    }
-    if state == TaskState::Exited {
-        return KillAction::NoOp;
-    }
-    if ready {
-        return KillAction::Dequeue;
-    }
-    KillAction::RefuseBlocked
 }
 
 #[cfg(test)]
@@ -803,7 +808,7 @@ mod tests {
         // stack + satp are quiescent), so it can be pulled off the runqueue and
         // zombified in place.
         assert_eq!(
-            classify_kill(false, false, true, TaskState::Ready),
+            classify_kill(KillTarget { ready: true, ..Default::default() }),
             KillAction::Dequeue
         );
     }
@@ -813,7 +818,7 @@ mod tests {
         // Idempotent: a target that already exited (raced its own exit, or a
         // double-kill) succeeds without touching the scheduler again.
         assert_eq!(
-            classify_kill(false, false, false, TaskState::Exited),
+            classify_kill(KillTarget { is_exited: true, ..Default::default() }),
             KillAction::NoOp
         );
     }
@@ -821,9 +826,9 @@ mod tests {
     #[test]
     fn killing_yourself_is_refused() {
         // Self-termination is `Exit`'s job, not `Kill`'s — even if the (nonsense)
-        // running/ready flags would otherwise classify.
+        // ready flag would otherwise classify.
         assert_eq!(
-            classify_kill(true, false, true, TaskState::Ready),
+            classify_kill(KillTarget { is_self: true, ready: true, ..Default::default() }),
             KillAction::RefuseSelf
         );
     }
@@ -833,7 +838,7 @@ mod tests {
         // A live target on another hart holds a loaded satp + an executing stack;
         // reaping it from here is a UAF. Deferred to v2b (needs an IPI to halt it).
         assert_eq!(
-            classify_kill(false, true, false, TaskState::Ready),
+            classify_kill(KillTarget { running_remote: true, ..Default::default() }),
             KillAction::RefuseRunningRemote
         );
     }
@@ -842,11 +847,8 @@ mod tests {
     fn killing_a_blocked_task_is_deferred() {
         // A Blocked target's id is parked in some wait structure (IPC endpoint /
         // notify / reap). Extracting it cleanly is v2b; v2a refuses rather than
-        // leave a ghost in an endpoint queue.
-        assert_eq!(
-            classify_kill(false, false, false, TaskState::Blocked),
-            KillAction::RefuseBlocked
-        );
+        // leave a ghost in an endpoint queue. Default = all-false = blocked.
+        assert_eq!(classify_kill(KillTarget::default()), KillAction::RefuseBlocked);
     }
 
     #[test]
@@ -854,7 +856,12 @@ mod tests {
         // Precedence: self is decided before the placement flags, so the running
         // task on this hart (which IS the caller) never routes to a kill path.
         assert_eq!(
-            classify_kill(true, true, true, TaskState::Running),
+            classify_kill(KillTarget {
+                is_self: true,
+                running_remote: true,
+                ready: true,
+                ..Default::default()
+            }),
             KillAction::RefuseSelf
         );
     }

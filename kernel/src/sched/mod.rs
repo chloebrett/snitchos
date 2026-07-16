@@ -25,7 +25,8 @@ use protocol::SwitchReason;
 
 use kernel_core::sched::{
     address_space_switch, classify_kill, on_cpu_delta, pick_next, quantum_expired, should_preempt,
-    Candidate, CurrentDisposition, KillAction, Priority, Runqueue, TaskDirectory, TaskId, TaskState,
+    Candidate, CurrentDisposition, KillAction, KillTarget, Priority, Runqueue, TaskDirectory,
+    TaskId, TaskState,
 };
 use kernel_core::span::SpanCursor;
 
@@ -1404,13 +1405,13 @@ pub fn kill_task(target: TaskId) -> KillOutcome {
 
     let action = {
         let mut sched = SCHEDULER.lock();
-        let Some(state) = sched.task(target).map(|t| t.state) else {
+        let Some(is_exited) = sched.task(target).map(|t| t.state == TaskState::Exited) else {
             // Unknown id — already reaped. Idempotent success, nothing to wake.
             return KillOutcome::AlreadyDead;
         };
         let ready = (0..crate::percpu::MAX_HARTS)
             .any(|hart| sched.runqueues[hart].iter().any(|c| c.id == target));
-        let action = classify_kill(is_self, running_remote, ready, state);
+        let action = classify_kill(KillTarget { is_self, running_remote, is_exited, ready });
         if action == KillAction::Dequeue {
             for hart in 0..crate::percpu::MAX_HARTS {
                 sched.runqueues[hart].remove(target);
