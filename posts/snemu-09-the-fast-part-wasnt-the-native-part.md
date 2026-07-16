@@ -133,3 +133,32 @@ one dependency graph, 85%→99% worker utilisation. That one actually paid — a
 different post. And a one-line `fw_cfg` stub in the bus, because the kernel's new
 ramfb bring-up touched a device snemu didn't model and faulted the boot. The ruler
 caught that too.)
+
+## Epilogue: the lever was switched off
+
+A couple of days after writing this, I went back to shave the snemu-itest wall-clock
+again, sure the remaining cost was cross-hart spin-waiting. I built the profile to
+prove it — and the debug build obliged, spin functions right near the top. Then I
+re-ran it against the *release* kernel, the one the gate actually runs. The spin
+functions vanished. A third of the debug profile had been iterator and UB-check
+machinery that doesn't exist in an optimised build. I'd relearned this post's lesson
+one level down: not just measure, but measure the thing you ship.
+
+The real pole was telemetry emission, and its worst line was the span path
+re-interning each span's name with an O(n) table scan on every open — every
+heartbeat, every tick. The metrics had cached their ids at registration ages ago;
+spans never got the same treatment. One per-call-site cache, byte-identical on the
+wire, ~15% of guest instret gone.
+
+And then the part that stings. This post crowned `--speedup hi` — the boring
+block-JIT frontend — the 3× lever. When I went to check the gate's numbers, the
+everyday `cargo xtask snemu-itest` was taking ~13 seconds. `hi` should have made it a
+few. It turned out `--speedup` defaulted to `low`: idle-skip only, block JIT off. The
+3× lever this very post had identified had been sitting switched off the entire time.
+Changing the default from `low` to `hi` — one line — took the suite from ~13s to
+3.6s. Bigger than the span fix. Far bigger than the native JIT the month went into.
+
+So the ledger for the whole stretch: a from-scratch AArch64 JIT delivered nothing,
+and the two things that actually made the ruler faster were a small kernel caching fix
+and *turning on a speedup I'd already built, measured, and then failed to make the
+default.* The bottleneck wasn't where the map said. It never is.
