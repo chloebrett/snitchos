@@ -156,11 +156,12 @@ enum Cmd {
         #[arg(long)]
         tlb: bool,
         /// Preset speedup bundle: `low` (idle-skip only), `med` (+native-ops +TLB),
-        /// `hi` (+block JIT / Backend A — the fastest *portable*), `extra` (+Backend B
-        /// native codegen — experimental, host-only, currently slower). Individual
-        /// `--jit`/`--tlb`/… flags layer on top. Omit for `low`.
-        #[arg(long, value_enum)]
-        speedup: Option<itest::snemu_audit::SpeedLevel>,
+        /// `hi` (+block JIT / Backend A — the fastest *portable*, **the default**),
+        /// `extra` (+Backend B native codegen — experimental, host-only, currently
+        /// slower). Individual `--jit`/`--tlb`/… flags layer on top. Pass
+        /// `--speedup low` for the idle-skip-only A/B baseline.
+        #[arg(long, value_enum, default_value = "hi")]
+        speedup: itest::snemu_audit::SpeedLevel,
     },
     /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
     /// run under snemu with exact per-PC counting and report the top kernel
@@ -791,7 +792,7 @@ fn main() -> ExitCode {
                 std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
             });
             let speed = itest::snemu_audit::SpeedConfig::resolve(
-                speedup, native_ops, block_jit, native_jit, tlb, no_idle_skip, no_reg_cache,
+                Some(speedup), native_ops, block_jit, native_jit, tlb, no_idle_skip, no_reg_cache,
             );
             itest::snemu_audit::run(steps, limit, only.as_deref(), jobs, order, opt, share_snapshots, speed)
         }
