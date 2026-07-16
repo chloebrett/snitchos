@@ -427,6 +427,13 @@ impl Machine {
         self.bus.push_console_input(bytes);
     }
 
+    /// Make `etc/ramfb` exist in the guest's fw_cfg directory — the snemu
+    /// equivalent of passing `-device ramfb` to real QEMU. Off by default;
+    /// call before booting a machine that should find it.
+    pub fn enable_fwcfg_ramfb(&mut self) {
+        self.bus.fwcfg_enable_ramfb();
+    }
+
     #[must_use]
     pub fn virtio_tx_output(&self) -> &[u8] {
         self.bus.virtio_tx_output()

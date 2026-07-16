@@ -80,6 +80,13 @@ pub(crate) struct Fwcfg {
     /// high/low 32-bit register writes (mirrors `virtio::Queue`'s
     /// `desc`/`avail`/`used` assembly via `put_low`/`put_high`).
     dma_addr: u64,
+    /// Whether `etc/ramfb` exists in the directory. **Off by default** —
+    /// matches the real QEMU harness's `ramfb: bool` (`Boot::spawn`), which
+    /// defaults every scenario to no `-device ramfb` unless it opts in.
+    /// Without this, a scenario that boots expecting *no* framebuffer (e.g.
+    /// `framebuffer-absent-degrades-gracefully`) would find one anyway under
+    /// snemu — the exact fidelity gap this flag closes.
+    ramfb_enabled: bool,
 }
 
 /// Atomics don't derive `Clone` (cloning one means loading its current value
@@ -93,6 +100,7 @@ impl Clone for Fwcfg {
             cursor: AtomicUsize::new(self.cursor.load(Ordering::Relaxed)),
             ramfb_cfg: self.ramfb_cfg,
             dma_addr: self.dma_addr,
+            ramfb_enabled: self.ramfb_enabled,
         }
     }
 }
@@ -104,7 +112,14 @@ impl Fwcfg {
             cursor: AtomicUsize::new(0),
             ramfb_cfg: None,
             dma_addr: 0,
+            ramfb_enabled: false,
         }
+    }
+
+    /// Make `etc/ramfb` exist in the directory — the equivalent of passing
+    /// `-device ramfb` to real QEMU.
+    pub(crate) fn enable_ramfb(&mut self) {
+        self.ramfb_enabled = true;
     }
 
     /// The captured `RAMFBCfg`, if a valid `etc/ramfb` DMA write has
@@ -182,17 +197,18 @@ impl Fwcfg {
         let selected = self.selected.load(Ordering::Relaxed);
         let Ok(key) = u16::try_from(selected) else { return 0 }; // -1 = none selected
         let cursor = self.cursor.load(Ordering::Relaxed);
-        let byte = Self::item_bytes(key).get(cursor).copied().unwrap_or(0);
+        let byte = self.item_bytes(key).get(cursor).copied().unwrap_or(0);
         self.cursor.store(cursor + 1, Ordering::Relaxed);
         byte
     }
 
     /// The byte content of item `key`: the one-entry file directory for
-    /// `SELECTOR_FILE_DIR`, empty for anything else (no other legacy items
-    /// exist this milestone).
-    fn item_bytes(key: u16) -> Vec<u8> {
+    /// `SELECTOR_FILE_DIR` (empty, not the `etc/ramfb` entry, unless
+    /// `enable_ramfb` was called), empty for anything else (no other legacy
+    /// items exist this milestone).
+    fn item_bytes(&self, key: u16) -> Vec<u8> {
         if key == SELECTOR_FILE_DIR {
-            directory_bytes()
+            directory_bytes(self.ramfb_enabled)
         } else {
             Vec::new()
         }
@@ -210,10 +226,16 @@ fn put_high(slot: &mut u64, value: u32) {
     *slot = (*slot & 0xFFFF_FFFF) | (u64::from(value) << 32);
 }
 
-/// Build the one-entry directory blob: `[count: u32 BE][entry]`, entry =
+/// Build the directory blob: `[count: u32 BE][entry; count]`, entry =
 /// `[size: u32 BE][select: u16 BE][reserved: u16][name: [u8; 56]]`. Matches
 /// `kernel-core/src/fwcfg.rs::find_file`'s parse exactly (host-tested there).
-fn directory_bytes() -> Vec<u8> {
+/// `ramfb_enabled=false` produces a valid, well-formed **empty** directory
+/// (`count=0`, no entries) — not a special case, just `count=0` — matching
+/// how a real machine without `-device ramfb` looks to `find_file`.
+fn directory_bytes(ramfb_enabled: bool) -> Vec<u8> {
+    if !ramfb_enabled {
+        return 0u32.to_be_bytes().to_vec();
+    }
     let mut buf = Vec::with_capacity(4 + ENTRY_SIZE);
     buf.extend_from_slice(&1u32.to_be_bytes()); // count = 1
     buf.extend_from_slice(&RAMFB_REPORTED_SIZE.to_be_bytes());
@@ -250,8 +272,19 @@ mod tests {
     }
 
     #[test]
+    fn ramfb_is_absent_by_default() {
+        // Matches the real QEMU harness's `ramfb: bool` defaulting off — a
+        // scenario that doesn't opt in sees a valid, well-formed *empty*
+        // directory, same as a machine booted without `-device ramfb`.
+        let mut dev = Fwcfg::new();
+        dev.write_selector(SELECTOR_FILE_DIR);
+        assert_eq!(read_n(&mut dev, 4), 0u32.to_be_bytes().to_vec(), "count = 0");
+    }
+
+    #[test]
     fn selecting_file_dir_then_reading_reproduces_the_directory_blob() {
         let mut dev = Fwcfg::new();
+        dev.enable_ramfb();
         dev.write_selector(SELECTOR_FILE_DIR);
         let blob = read_n(&mut dev, 4 + ENTRY_SIZE);
 
@@ -280,6 +313,7 @@ mod tests {
     #[test]
     fn reading_past_the_directory_end_returns_zero_not_panic() {
         let mut dev = Fwcfg::new();
+        dev.enable_ramfb();
         dev.write_selector(SELECTOR_FILE_DIR);
         let blob = read_n(&mut dev, 4 + ENTRY_SIZE + 16); // 16 bytes past the end
         assert!(blob[4 + ENTRY_SIZE..].iter().all(|&b| b == 0));
@@ -288,6 +322,7 @@ mod tests {
     #[test]
     fn reselecting_resets_the_read_cursor() {
         let mut dev = Fwcfg::new();
+        dev.enable_ramfb();
         dev.write_selector(SELECTOR_FILE_DIR);
         let first_four = read_n(&mut dev, 4);
         dev.write_selector(SELECTOR_FILE_DIR); // re-select the same key

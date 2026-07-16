@@ -52,6 +52,12 @@ impl Bus {
         }
     }
 
+    /// Make `etc/ramfb` exist in the fw_cfg directory — the snemu
+    /// equivalent of passing `-device ramfb` to real QEMU. Off by default.
+    pub(crate) fn fwcfg_enable_ramfb(&mut self) {
+        self.fwcfg.enable_ramfb();
+    }
+
     /// The captured `etc/ramfb` config, if a DMA write has completed.
     pub(crate) fn fwcfg_ramfb_cfg(&self) -> Option<RamfbCfg> {
         self.fwcfg.ramfb_cfg()
@@ -237,11 +243,25 @@ mod tests {
     #[test]
     fn fwcfg_selector_and_data_registers_serve_the_real_directory() {
         let mut bus = Bus::new(Memory::new(0x1000));
+        bus.fwcfg_enable_ramfb();
         // FW_CFG_FILE_DIR = 0x19; the driver writes `.to_be()` of the logical
         // value, so the raw wire value here is 0x0019u16.to_be().
         bus.write_u16(FWCFG_BASE + 0x08, 0x0019u16.to_be()).unwrap();
         let count_bytes: [u8; 4] = std::array::from_fn(|_| bus.read_u8(FWCFG_BASE).unwrap());
         assert_eq!(u32::from_be_bytes(count_bytes), 1, "one real file, not an empty directory");
+    }
+
+    /// Without `fwcfg_enable_ramfb`, the directory is empty — matches a real
+    /// machine booted without `-device ramfb`. This is the property that
+    /// keeps `framebuffer-absent-degrades-gracefully` passing under
+    /// `snemu-itest`: most scenarios never call `fwcfg_enable_ramfb`, so
+    /// they must see no file, not the one `framebuffer-presents` opts into.
+    #[test]
+    fn fwcfg_directory_is_empty_without_enabling_ramfb() {
+        let mut bus = Bus::new(Memory::new(0x1000));
+        bus.write_u16(FWCFG_BASE + 0x08, 0x0019u16.to_be()).unwrap();
+        let count_bytes: [u8; 4] = std::array::from_fn(|_| bus.read_u8(FWCFG_BASE).unwrap());
+        assert_eq!(u32::from_be_bytes(count_bytes), 0, "no file until opted in");
     }
 
     /// The stub is scoped to its page — RAM immediately below and above still works.

@@ -665,6 +665,14 @@ pub(crate) fn load_workload_machine(
     let mut machine = snemu::loader::load_machine(kernel, ram_bytes as usize, Some(&dtb), HART_COUNT)
         .map_err(|e| format!("snemu load: {e:?}"))?;
     machine.set_decode_cache(true);
+    // Mirrors the real QEMU harness's `ramfb` scenario tag → `-device ramfb`
+    // (`Boot::spawn`, xtask/src/itest/harness.rs): only the `framebuffer-
+    // presents` scenario's dedicated `{"ramfb"}` workload should see
+    // `etc/ramfb`. Every other workload (including `None`, the default)
+    // stays off, matching real QEMU's `ramfb: false` default.
+    if workload == Some("ramfb") {
+        machine.enable_fwcfg_ramfb();
+    }
     Ok(machine)
 }
 
