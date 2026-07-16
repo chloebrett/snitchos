@@ -8,9 +8,30 @@
 //! `kernel-core/src/fwcfg.rs` is the spec this must satisfy; nothing here
 //! shares code with it, only the wire layout.
 
+use crate::mem::Memory;
+
 /// Selector key for the file directory (`FW_CFG_FILE_DIR`), fixed by the
 /// `fw_cfg` spec — matches `kernel_core::fwcfg::SELECTOR_FILE_DIR`.
 const SELECTOR_FILE_DIR: u16 = 0x19;
+
+/// DMA control bits — matches `kernel_core::fwcfg::{DMA_CTL_SELECT,
+/// DMA_CTL_WRITE, DMA_CTL_ERROR}` (real spec values, low to high:
+/// `ERROR=0x01, READ=0x02, SKIP=0x04, SELECT=0x08, WRITE=0x10`).
+const DMA_CTL_SELECT: u32 = 0x08;
+const DMA_CTL_WRITE: u32 = 0x10;
+const DMA_CTL_ERROR: u32 = 0x01;
+
+/// The captured `RAMFBCfg` fields from a successful DMA write — this
+/// milestone's only writable file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RamfbCfg {
+    pub(crate) addr: u64,
+    pub(crate) fourcc: u32,
+    pub(crate) flags: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) stride: u32,
+}
 
 /// Size in bytes of one file-directory entry on the wire.
 const ENTRY_SIZE: usize = 64;
@@ -37,11 +58,54 @@ pub(crate) struct Fwcfg {
     selected: Option<u16>,
     /// Read cursor into the selected item's byte content.
     cursor: usize,
+    /// The captured config from a successful `etc/ramfb` DMA write, if any.
+    ramfb_cfg: Option<RamfbCfg>,
 }
 
 impl Fwcfg {
     pub(crate) fn new() -> Self {
-        Self { selected: None, cursor: 0 }
+        Self { selected: None, cursor: 0, ramfb_cfg: None }
+    }
+
+    /// The captured `RAMFBCfg`, if a valid `etc/ramfb` DMA write has
+    /// completed.
+    pub(crate) fn ramfb_cfg(&self) -> Option<RamfbCfg> {
+        self.ramfb_cfg
+    }
+
+    /// Complete a DMA select+write transfer: read the 16-byte descriptor at
+    /// `desc_pa`, validate it's a well-formed write to `etc/ramfb`'s select
+    /// key, capture the `RAMFBCfg` payload it points at, and write the
+    /// completion status back into the descriptor's `control` field —
+    /// `0` on success, [`DMA_CTL_ERROR`] otherwise. Mirrors `Virtio::
+    /// service_tx`'s split: the bus detects the trigger register write and
+    /// calls this; the RAM-touching work happens here, not at the register
+    /// write itself.
+    ///
+    /// All descriptor/register fields are big-endian on the wire regardless
+    /// of guest endianness (the `fw_cfg` convention) — `Memory` decodes
+    /// raw bytes as little-endian (this is a RISC-V guest), so every field
+    /// read here goes through `u32::from_be`/`u64::from_be` to recover the
+    /// logical value, and every field written goes through `.to_be()` to
+    /// place the correct wire bytes.
+    pub(crate) fn complete_dma(&mut self, ram: &mut Memory, desc_pa: u64) {
+        let control = u32::from_be(ram.read_u32(desc_pa).unwrap_or(0));
+        let length = u32::from_be(ram.read_u32(desc_pa + 4).unwrap_or(0));
+        let address = u64::from_be(ram.read_u64(desc_pa + 8).unwrap_or(0));
+
+        let select_key = (control >> 16) as u16;
+        let valid = control & DMA_CTL_SELECT != 0
+            && control & DMA_CTL_WRITE != 0
+            && select_key == RAMFB_SELECT_KEY
+            && length == RAMFB_REPORTED_SIZE;
+
+        let status = if valid {
+            self.ramfb_cfg = Some(read_ramfb_cfg(ram, address));
+            0
+        } else {
+            DMA_CTL_ERROR
+        };
+        let _ = ram.write_u32(desc_pa, status.to_be());
     }
 
     /// Select an item by key (the selector register, offset `0x08`). Resets
@@ -86,6 +150,21 @@ fn directory_bytes() -> Vec<u8> {
     name_field[..RAMFB_NAME.len()].copy_from_slice(RAMFB_NAME);
     buf.extend_from_slice(&name_field);
     buf
+}
+
+/// Decode a 28-byte `RAMFBCfg` from guest RAM at `address`, big-endian —
+/// matches `kernel-core/src/ramfb.rs::RamfbCfg::to_bytes`'s layout exactly.
+/// Unreadable bytes degrade to `0`, same as every other RAM read in this
+/// module — `complete_dma` has already validated the length before calling.
+fn read_ramfb_cfg(ram: &Memory, address: u64) -> RamfbCfg {
+    RamfbCfg {
+        addr: u64::from_be(ram.read_u64(address).unwrap_or(0)),
+        fourcc: u32::from_be(ram.read_u32(address + 8).unwrap_or(0)),
+        flags: u32::from_be(ram.read_u32(address + 12).unwrap_or(0)),
+        width: u32::from_be(ram.read_u32(address + 16).unwrap_or(0)),
+        height: u32::from_be(ram.read_u32(address + 20).unwrap_or(0)),
+        stride: u32::from_be(ram.read_u32(address + 24).unwrap_or(0)),
+    }
 }
 
 #[cfg(test)]
@@ -141,5 +220,107 @@ mod tests {
         dev.write_selector(SELECTOR_FILE_DIR); // re-select the same key
         let again = read_n(&mut dev, 4);
         assert_eq!(first_four, again, "re-selecting must restart the cursor at byte 0");
+    }
+
+    use crate::mem::{Memory, RAM_BASE};
+
+    const DESC_PA: u64 = RAM_BASE + 0x1000;
+    const PAYLOAD_PA: u64 = RAM_BASE + 0x2000;
+
+    /// Stage a valid select+write descriptor at `DESC_PA` pointing at a
+    /// 28-byte `RAMFBCfg` payload at `PAYLOAD_PA`, matching exactly what
+    /// `kernel/src/device/fwcfg.rs::write_file` stages for a real write.
+    fn stage_valid_write(mem: &mut Memory, cfg_bytes: &[u8; 28]) {
+        let control = (u32::from(RAMFB_SELECT_KEY) << 16) | DMA_CTL_SELECT | DMA_CTL_WRITE;
+        mem.write_u32(DESC_PA, control.to_be()).unwrap();
+        mem.write_u32(DESC_PA + 4, RAMFB_REPORTED_SIZE.to_be()).unwrap();
+        mem.write_u64(DESC_PA + 8, PAYLOAD_PA.to_be()).unwrap();
+        for (i, &b) in cfg_bytes.iter().enumerate() {
+            mem.write_u8(PAYLOAD_PA + i as u64, b).unwrap();
+        }
+    }
+
+    /// A `RAMFBCfg`'s 28 big-endian bytes, matching
+    /// `kernel-core/src/ramfb.rs::RamfbCfg::to_bytes` exactly — the fixture
+    /// every test below stages as the DMA payload.
+    fn sample_cfg_bytes() -> [u8; 28] {
+        let mut buf = [0u8; 28];
+        buf[0..8].copy_from_slice(&0x8000_1000u64.to_be_bytes()); // addr
+        buf[8..12].copy_from_slice(&0x3432_5258u32.to_be_bytes()); // fourcc (XRGB8888)
+        buf[12..16].copy_from_slice(&0u32.to_be_bytes()); // flags
+        buf[16..20].copy_from_slice(&1024u32.to_be_bytes()); // width
+        buf[20..24].copy_from_slice(&768u32.to_be_bytes()); // height
+        buf[24..28].copy_from_slice(&4096u32.to_be_bytes()); // stride
+        buf
+    }
+
+    #[test]
+    fn a_valid_select_and_write_captures_the_config_and_clears_control() {
+        let mut mem = Memory::new(0x10000);
+        stage_valid_write(&mut mem, &sample_cfg_bytes());
+        let mut dev = Fwcfg::new();
+
+        dev.complete_dma(&mut mem, DESC_PA);
+
+        assert_eq!(
+            dev.ramfb_cfg(),
+            Some(RamfbCfg {
+                addr: 0x8000_1000,
+                fourcc: 0x3432_5258,
+                flags: 0,
+                width: 1024,
+                height: 768,
+                stride: 4096,
+            })
+        );
+        assert_eq!(mem.read_u32(DESC_PA).unwrap(), 0, "control cleared on success");
+    }
+
+    #[test]
+    fn an_unknown_select_key_reports_error_and_captures_nothing() {
+        let mut mem = Memory::new(0x10000);
+        stage_valid_write(&mut mem, &sample_cfg_bytes());
+        // Corrupt just the select key half of control, leaving SELECT|WRITE set.
+        let bad_control = (0x9999u32 << 16) | DMA_CTL_SELECT | DMA_CTL_WRITE;
+        mem.write_u32(DESC_PA, bad_control.to_be()).unwrap();
+        let mut dev = Fwcfg::new();
+
+        dev.complete_dma(&mut mem, DESC_PA);
+
+        assert_eq!(dev.ramfb_cfg(), None);
+        assert_eq!(mem.read_u32(DESC_PA).unwrap().to_be(), DMA_CTL_ERROR);
+    }
+
+    #[test]
+    fn a_read_request_without_the_write_bit_is_rejected() {
+        let mut mem = Memory::new(0x10000);
+        stage_valid_write(&mut mem, &sample_cfg_bytes());
+        let read_control = (u32::from(RAMFB_SELECT_KEY) << 16) | DMA_CTL_SELECT; // no WRITE
+        mem.write_u32(DESC_PA, read_control.to_be()).unwrap();
+        let mut dev = Fwcfg::new();
+
+        dev.complete_dma(&mut mem, DESC_PA);
+
+        assert_eq!(dev.ramfb_cfg(), None);
+        assert_eq!(mem.read_u32(DESC_PA).unwrap().to_be(), DMA_CTL_ERROR);
+    }
+
+    #[test]
+    fn a_mismatched_length_is_rejected() {
+        let mut mem = Memory::new(0x10000);
+        stage_valid_write(&mut mem, &sample_cfg_bytes());
+        mem.write_u32(DESC_PA + 4, 4u32.to_be()).unwrap(); // wrong length
+        let mut dev = Fwcfg::new();
+
+        dev.complete_dma(&mut mem, DESC_PA);
+
+        assert_eq!(dev.ramfb_cfg(), None);
+        assert_eq!(mem.read_u32(DESC_PA).unwrap().to_be(), DMA_CTL_ERROR);
+    }
+
+    #[test]
+    fn ramfb_cfg_is_none_until_a_write_completes() {
+        let dev = Fwcfg::new();
+        assert_eq!(dev.ramfb_cfg(), None);
     }
 }
