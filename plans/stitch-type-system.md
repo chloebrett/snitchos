@@ -219,11 +219,15 @@ or it false-warns "unused" on a cap that's actually needed via a path the analys
   boundary *replaces* authority with the callee's declared `uses` (grants fresh, no
   caller-intersection), so a program C2 flags may still *run*; C2 is the compiler
   enforcing the design's intended uses-up-the-call-graph ahead of the runtime gate.
-- **C3 — Reverse check: declared-but-unused warning** (the user's ask). `declared \
-  required` → a warning per unused cap. **Depends on C2** for soundness (C1-only
-  `required` misses transitive uses → false "unused"). Conservative — warn only when
-  confident. Span at the body (or a lowering tweak to keep `uses` spans). → `f() uses
-  Telemetry = 1` warns "declares `uses Telemetry` but never uses it." *The uniquely-static
+- **C3 — Reverse check: declared-but-unused warning — ✅ DONE (2026-07-17).** `TypeError`
+  gained a `Severity` (Error | Warning); the effect check now also warns per `declared \
+  required` cap. `f() uses Telemetry = 1` → *warning* "declares `uses Telemetry` but never
+  uses it" (clean when used directly or transitively via a call). The runner labels by
+  severity (`type error:` / `type warning:`). 618 lib + all integration green, prelude
+  clean (its one `uses` fn exercises its caps directly). Mutation 6/6 caught. Span at the
+  body (uses-decl spans lost in lowering — follow-up). Conservative: `required`
+  under-approximates (effects via methods/higher-order calls aren't propagated yet), so a
+  cap used only that way could over-warn — none in real code today. *The uniquely-static
   least-authority win.*
 - **C4 — `without` attenuation (flow-sensitive precision, optional).** Track *available*
   authority through the body: inside `without Cap { … }`, `Cap` is unavailable, so an
