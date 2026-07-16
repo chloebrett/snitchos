@@ -47,17 +47,39 @@ pub enum Ty {
     Dyn,
 }
 
-/// A type error: a message plus the source span it should be reported at
-/// (rendered later through the `SourceMap`, like a runtime `Fault`).
+/// How serious a diagnostic is. An **error** is a real mistake (unsafe / wrong);
+/// a **warning** is advisory (e.g. an over-broad `uses` declaration). Both are
+/// gradual — reported, never blocking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+/// A type diagnostic: a message, the source span it should be reported at, and
+/// its severity (rendered later through the `SourceMap`, like a runtime `Fault`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeError {
     pub message: String,
     pub span: Span,
+    pub severity: Severity,
 }
 
 impl TypeError {
-    /// Render this error as `name:line:col: message` + the offending line and a
-    /// caret, resolving `span` against `source` in `sources` — the same
+    /// A hard error diagnostic.
+    #[must_use]
+    fn error(message: String, span: Span) -> TypeError {
+        TypeError { message, span, severity: Severity::Error }
+    }
+
+    /// An advisory warning diagnostic.
+    #[must_use]
+    fn warning(message: String, span: Span) -> TypeError {
+        TypeError { message, span, severity: Severity::Warning }
+    }
+
+    /// Render this diagnostic as `name:line:col: message` + the offending line and
+    /// a caret, resolving `span` against `source` in `sources` — the same
     /// presentation as a runtime `Fault`.
     #[must_use]
     pub fn render(&self, sources: &SourceMap, source: SourceId) -> String {
@@ -189,10 +211,10 @@ fn check_exhaustive(
     let missing: Vec<&str> =
         variants.iter().map(String::as_str).filter(|v| !covered.contains(*v)).collect();
     if !missing.is_empty() {
-        errors.push(TypeError {
-            message: format!("non-exhaustive match: missing {}", missing.join(", ")),
+        errors.push(TypeError::error(
+            format!("non-exhaustive match: missing {}", missing.join(", ")),
             span,
-        });
+        ));
     }
 }
 
@@ -234,10 +256,10 @@ fn synth_binary(
     if let Some(ty) = binop_type(op, &l, &r) {
         return ty;
     }
-    errors.push(TypeError {
-        message: format!("operator `{op:?}` cannot apply to `{l:?}` and `{r:?}`"),
+    errors.push(TypeError::error(
+        format!("operator `{op:?}` cannot apply to `{l:?}` and `{r:?}`"),
         span,
-    });
+    ));
     Ty::Dyn
 }
 
@@ -371,10 +393,10 @@ fn synth_field(object: &CoreExpr, name: &str, ctx: &Ctx, errors: &mut Vec<TypeEr
 fn check(expr: &CoreExpr, expected: &Ty, ctx: &Ctx, errors: &mut Vec<TypeError>) -> Ty {
     let got = synth(expr, ctx, errors);
     if !assignable(&got, expected, ctx.conformances) {
-        errors.push(TypeError {
-            message: format!("type mismatch: expected `{expected:?}`, found `{got:?}`"),
-            span: expr.span,
-        });
+        errors.push(TypeError::error(
+            format!("type mismatch: expected `{expected:?}`, found `{got:?}`"),
+            expr.span,
+        ));
     }
     got
 }
@@ -585,12 +607,12 @@ pub fn check_program(items: &[CoreItem]) -> Vec<TypeError> {
                 // Gate `@`: the self-type is meaningless in a top-level function
                 // (no receiver). Methods carry a receiver, so they're exempt.
                 if signature_mentions_self(params, ret.as_ref()) {
-                    errors.push(TypeError {
-                        message: format!(
+                    errors.push(TypeError::error(
+                        format!(
                             "`@` (self-type) is only valid in a method; `{name}` has no receiver"
                         ),
-                        span: body.span,
-                    });
+                        body.span,
+                    ));
                 }
                 world.check_callable(params, ret.as_ref(), uses, body, Ty::Dyn, &mut errors);
             }
@@ -810,18 +832,28 @@ impl World {
         let ctx = self.ctx(self_ty, locals);
         let expected = ret.map_or(Ty::Dyn, |t| ty_of_annotation(t, &self.types));
         check(body, &expected, &ctx, errors);
-        // Effect check (C1): every directly-performed effect's capability must be
-        // in the declared `uses`.
+        // Effect check. `required` = the caps the body exercises: direct effect
+        // natives (C1) and, transitively, the `uses` of functions it calls (C2).
         let mut required = BTreeMap::new();
         required_effects(body, &self.funcs, &mut required);
-        for (cap, span) in required {
-            if !uses.iter().any(|u| u == &cap) {
-                errors.push(TypeError {
-                    message: format!(
-                        "performs an effect that needs `uses {cap}`, which is not declared"
-                    ),
-                    span,
-                });
+        // Forward (C1/C2): a required cap that isn't declared is an error.
+        for (cap, span) in &required {
+            if !uses.iter().any(|u| u == cap) {
+                errors.push(TypeError::error(
+                    format!("performs an effect that needs `uses {cap}`, which is not declared"),
+                    *span,
+                ));
+            }
+        }
+        // Reverse (C3): a declared cap that's never exercised is a warning — the
+        // least-authority lint. (Conservative: `required` under-approximates, so
+        // effects reached only via methods/higher-order calls could over-warn.)
+        for cap in uses {
+            if !required.contains_key(cap) {
+                errors.push(TypeError::warning(
+                    format!("declares `uses {cap}` but never uses it"),
+                    body.span,
+                ));
             }
         }
     }
@@ -1110,6 +1142,22 @@ mod tests {
             errors(r#"prod P(n: Int)  on P { m() = emit("x", 1) }"#).len(),
             1,
             "a method effect needs its cap too"
+        );
+    }
+
+    #[test]
+    fn a_declared_but_unused_capability_is_a_warning() {
+        // Declaring a capability that's never exercised is a (non-fatal) warning —
+        // the least-authority lint: your `uses` should be exactly what you need.
+        let errs = errors("f() uses Telemetry = 1");
+        assert_eq!(errs.len(), 1, "one unused-cap warning, got {errs:?}");
+        assert_eq!(errs[0].severity, super::Severity::Warning, "it warns, not errors");
+        assert!(errs[0].message.contains("Telemetry"), "names the cap: {errs:?}");
+        // Exercising the capability — directly or via a call — is clean.
+        assert!(errors(r#"f() uses Telemetry = emit("x", 1)"#).is_empty(), "used directly → clean");
+        assert!(
+            errors(r#"g() uses Telemetry = emit("x", 1)  f() uses Telemetry = g()"#).is_empty(),
+            "used transitively via a call → clean"
         );
     }
 

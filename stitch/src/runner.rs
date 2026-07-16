@@ -58,14 +58,23 @@ pub fn run_program_source(src: &str) -> RunResult {
     result
 }
 
-/// Type-check `items` and render each error as a `type error: …` line. Gradual:
-/// the result is advisory text, prepended to a run's stderr — it never changes
-/// the exit code or halts evaluation.
+/// The `type error` / `type warning` label for a diagnostic's severity.
+fn diagnostic_label(severity: crate::check::Severity) -> &'static str {
+    match severity {
+        crate::check::Severity::Error => "type error",
+        crate::check::Severity::Warning => "type warning",
+    }
+}
+
+/// Type-check `items` and render each diagnostic as a `type error/warning: …` line.
+/// Gradual: the result is advisory text, prepended to a run's stderr — it never
+/// changes the exit code or halts evaluation.
 fn type_check_report(items: &[Item], sources: &SourceMap, source: crate::source::SourceId) -> String {
     let core = crate::lower::lower_items_to_core(items);
     let mut report = String::new();
     for error in crate::check::check_program(&core) {
-        writeln!(report, "type error: {}", error.render(sources, source)).expect(INFALLIBLE);
+        let line = error.render(sources, source);
+        writeln!(report, "{}: {line}", diagnostic_label(error.severity)).expect(INFALLIBLE);
     }
     report
 }
@@ -95,7 +104,8 @@ pub fn run_module_files(
     for module in &modules {
         let core = crate::lower::lower_items_to_core(&module.items);
         for error in crate::check::check_program(&core) {
-            writeln!(type_report, "type error: {}", error.message).expect(INFALLIBLE);
+            writeln!(type_report, "{}: {}", diagnostic_label(error.severity), error.message)
+                .expect(INFALLIBLE);
         }
     }
     // Multi-module source registration is a follow-up; faults render message-only
@@ -300,7 +310,8 @@ impl Repl {
         let mut out = String::new();
         let all_core = crate::lower::lower_items_to_core(&all);
         for error in crate::check::check_expr(&core_expr, &all_core) {
-            writeln!(out, "type error: {}", error.render(&sources, line_id)).expect(INFALLIBLE);
+            let line = error.render(&sources, line_id);
+            writeln!(out, "{}: {line}", diagnostic_label(error.severity)).expect(INFALLIBLE);
         }
         let env = self
             .env
@@ -392,6 +403,15 @@ mod tests {
         assert!(result.stderr.contains("type error"), "reports the error: {}", result.stderr);
         assert!(result.stderr.contains("<program>:2:"), "renders file:line:col: {}", result.stderr);
         assert!(result.stdout.contains("=> 1"), "the program still produced its result");
+    }
+
+    #[test]
+    fn an_unused_capability_is_rendered_as_a_warning() {
+        // Over-declared authority is advisory, not an error, and labelled as such.
+        let result = run_program_source("main() uses Telemetry = 1");
+        assert!(result.stderr.contains("type warning:"), "labelled a warning: {}", result.stderr);
+        assert!(result.stderr.contains("Telemetry"), "names the cap: {}", result.stderr);
+        assert_eq!(result.exit_code, 0, "a warning never blocks");
     }
 
     #[test]
