@@ -229,13 +229,18 @@ or it false-warns "unused" on a cap that's actually needed via a path the analys
   under-approximates (effects via methods/higher-order calls aren't propagated yet), so a
   cap used only that way could over-warn — none in real code today. *The uniquely-static
   least-authority win.*
-- **C4 — `without` attenuation (flow-sensitive precision, optional).** Track *available*
-  authority through the body: inside `without Cap { … }`, `Cap` is unavailable, so an
-  effect needing it there errors even if the function declares it — matching the runtime
-  refusal from the effects work. Turns the forward check flow-sensitive (an available-set
-  walk, not just `declared ⊇ required`). `handle` is not an attenuator. → `f() uses
-  Telemetry = without Telemetry { emit(…) }` errors. *Ties back to the `without`/`handle`
-  effect constructs; hardest, and the least essential.*
+- **C4 — `without` attenuation — ✅ DONE (2026-07-17).** `required_effects` became
+  `walk_effects` — flow-sensitive, carrying a `dropped` set: `without Cap { body }` adds
+  `Cap` to `dropped` for the body's extent, and an effect whose *declared* cap is in
+  `dropped` is an error ("withheld here by `without`"). The `&& declared.contains` guard
+  keeps an *undeclared* dropped effect from double-reporting (C1's "not declared" owns
+  it). Traversal extracted to `child_exprs` (avoids the closure/borrow clash the
+  `dropped`-per-`Without` scope introduced). `handle` is *not* an attenuator (gate fires
+  before the handler). `f() uses Telemetry = without Telemetry { emit(…) }` → error;
+  dropping a *different* cap is clean. 619 lib + all integration green, prelude clean.
+  Mutation 6/8 caught, 0 survivors. **The static effect check and the runtime `without`
+  refusal now agree on the same program** — the two halves of the effects story
+  reconnected.
 
 ### Sequencing
 

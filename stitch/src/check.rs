@@ -665,110 +665,109 @@ fn native_cap(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Collect the capabilities `expr` requires, each mapped to its first call-site
-/// span: a call to an effect-native needs its cap; a call to a user function needs
-/// (propagates) every cap that function declares it `uses` (C2). A user function
-/// of the same name as a native shadows it — the declared `uses` win.
-fn required_effects(
+/// Walk a body's effects flow-sensitively. Every capability the body exercises is
+/// recorded in `required` (an effect-native needs its cap; a called user function
+/// propagates its declared `uses` — C1/C2; a user function shadowing a native
+/// wins). And — C4 — an effect whose (declared) capability is *withheld* by an
+/// enclosing `without Cap { … }` is reported: `dropped` is the set of caps the
+/// enclosing `without`s have attenuated away.
+fn walk_effects(
     expr: &CoreExpr,
     funcs: &BTreeMap<String, FnSig>,
+    declared: &BTreeSet<String>,
+    dropped: &BTreeSet<String>,
     required: &mut BTreeMap<String, Span>,
+    errors: &mut Vec<TypeError>,
 ) {
     if let CoreExprKind::Call { callee, .. } = &expr.kind
         && let CoreExprKind::Var(name) = &callee.kind
     {
-        if let Some(sig) = funcs.get(name) {
-            for cap in &sig.uses {
-                required.entry(cap.clone()).or_insert(expr.span);
+        let caps: Vec<String> = funcs.get(name).map_or_else(
+            || native_cap(name).map(str::to_string).into_iter().collect(),
+            |sig| sig.uses.clone(),
+        );
+        for cap in caps {
+            // C4: a declared capability withheld by an enclosing `without` here.
+            if dropped.contains(&cap) && declared.contains(&cap) {
+                errors.push(TypeError::error(
+                    format!("performs an effect that needs `uses {cap}`, but it is withheld here by `without`"),
+                    expr.span,
+                ));
             }
-        } else if let Some(cap) = native_cap(name) {
-            required.entry(cap.to_string()).or_insert(expr.span);
+            required.entry(cap).or_insert(expr.span);
         }
     }
-    let mut recurse = |child: &CoreExpr| required_effects(child, funcs, required);
+    // `without Cap { body }` attenuates `Cap` for the body's extent; every other
+    // node passes `dropped` through unchanged.
+    if let CoreExprKind::Without { cap, body } = &expr.kind {
+        let mut inner = dropped.clone();
+        inner.insert(cap.clone());
+        walk_effects(body, funcs, declared, &inner, required, errors);
+        return;
+    }
+    for child in child_exprs(expr) {
+        walk_effects(child, funcs, declared, dropped, required, errors);
+    }
+}
+
+/// The immediate sub-expressions of `expr` (for a uniform traversal). `Without`'s
+/// body is *excluded* — its caller handles it specially (attenuated scope).
+fn child_exprs(expr: &CoreExpr) -> Vec<&CoreExpr> {
     match &expr.kind {
+        // Leaves — and `Without`, whose body the caller walks under an attenuated
+        // `dropped`, so it is *not* an ordinary child here.
         CoreExprKind::Int(_)
         | CoreExprKind::Float(_)
         | CoreExprKind::Bool(_)
         | CoreExprKind::Var(_)
-        | CoreExprKind::SelfRef => {}
+        | CoreExprKind::SelfRef
+        | CoreExprKind::Without { .. } => Vec::new(),
         CoreExprKind::Spread(e)
         | CoreExprKind::Unary { operand: e, .. }
         | CoreExprKind::Try(e)
         | CoreExprKind::Field { object: e, .. }
-        | CoreExprKind::SafeField { object: e, .. } => recurse(e),
-        CoreExprKind::Lambda { body, .. } => recurse(body),
+        | CoreExprKind::SafeField { object: e, .. } => vec![e],
+        CoreExprKind::Lambda { body, .. } => vec![body],
         CoreExprKind::Binary { left, right, .. }
-        | CoreExprKind::Index { object: left, index: right } => {
-            recurse(left);
-            recurse(right);
-        }
+        | CoreExprKind::Index { object: left, index: right } => vec![left, right],
         CoreExprKind::Call { callee, args } => {
-            recurse(callee);
-            for arg in args {
-                recurse(&arg.value);
-            }
+            let mut cs = vec![callee.as_ref()];
+            cs.extend(args.iter().map(|a| &a.value));
+            cs
         }
         CoreExprKind::Range { start, end, .. } => {
-            if let Some(e) = start {
-                recurse(e);
-            }
-            if let Some(e) = end {
-                recurse(e);
-            }
+            start.iter().chain(end.iter()).map(Box::as_ref).collect()
         }
-        CoreExprKind::If { cond, then, els } => {
-            recurse(cond);
-            recurse(then);
-            recurse(els);
-        }
-        CoreExprKind::Tuple(elems) | CoreExprKind::List(elems) => {
-            for e in elems {
-                recurse(e);
-            }
-        }
-        CoreExprKind::Map(entries) => {
-            for (k, v) in entries {
-                recurse(k);
-                recurse(v);
-            }
-        }
-        CoreExprKind::Str(segments) => {
-            for seg in segments {
-                if let CoreStrSegment::Interp(e) = seg {
-                    recurse(e);
-                }
-            }
-        }
+        CoreExprKind::If { cond, then, els } => vec![cond, then, els],
+        CoreExprKind::Tuple(elems) | CoreExprKind::List(elems) => elems.iter().collect(),
+        CoreExprKind::Map(entries) => entries.iter().flat_map(|(k, v)| [k, v]).collect(),
+        CoreExprKind::Str(segments) => segments
+            .iter()
+            .filter_map(|s| match s {
+                CoreStrSegment::Interp(e) => Some(e.as_ref()),
+                CoreStrSegment::Lit(_) => None,
+            })
+            .collect(),
         CoreExprKind::Block { stmts, result } => {
-            for stmt in stmts {
-                match stmt {
-                    CoreStmt::Let { value, .. } => recurse(value),
-                    CoreStmt::Assign { target, value } => {
-                        recurse(target);
-                        recurse(value);
-                    }
-                    CoreStmt::Expr(e) => recurse(e),
-                }
-            }
-            if let Some(e) = result {
-                recurse(e);
-            }
+            let mut cs: Vec<&CoreExpr> = stmts
+                .iter()
+                .flat_map(|s| match s {
+                    CoreStmt::Let { value, .. } | CoreStmt::Expr(value) => vec![value],
+                    CoreStmt::Assign { target, value } => vec![target, value],
+                })
+                .collect();
+            cs.extend(result.as_deref());
+            cs
         }
         CoreExprKind::Match { subject, arms } => {
-            recurse(subject);
+            let mut cs = vec![subject.as_ref()];
             for arm in arms {
-                if let Some(guard) = &arm.guard {
-                    recurse(guard);
-                }
-                recurse(&arm.body);
+                cs.extend(arm.guard.as_ref());
+                cs.push(&arm.body);
             }
+            cs
         }
-        CoreExprKind::Handle { handler, body, .. } => {
-            recurse(handler);
-            recurse(body);
-        }
-        CoreExprKind::Without { body, .. } => recurse(body),
+        CoreExprKind::Handle { handler, body, .. } => vec![handler, body],
     }
 }
 
@@ -832,13 +831,15 @@ impl World {
         let ctx = self.ctx(self_ty, locals);
         let expected = ret.map_or(Ty::Dyn, |t| ty_of_annotation(t, &self.types));
         check(body, &expected, &ctx, errors);
-        // Effect check. `required` = the caps the body exercises: direct effect
-        // natives (C1) and, transitively, the `uses` of functions it calls (C2).
+        // Effect check. `walk_effects` collects into `required` the caps the body
+        // exercises — direct effect natives (C1) and, transitively, the `uses` of
+        // functions it calls (C2) — and flags effects withheld by a `without` (C4).
+        let declared: BTreeSet<String> = uses.iter().cloned().collect();
         let mut required = BTreeMap::new();
-        required_effects(body, &self.funcs, &mut required);
+        walk_effects(body, &self.funcs, &declared, &BTreeSet::new(), &mut required, errors);
         // Forward (C1/C2): a required cap that isn't declared is an error.
         for (cap, span) in &required {
-            if !uses.iter().any(|u| u == cap) {
+            if !declared.contains(cap) {
                 errors.push(TypeError::error(
                     format!("performs an effect that needs `uses {cap}`, which is not declared"),
                     *span,
@@ -848,7 +849,7 @@ impl World {
         // Reverse (C3): a declared cap that's never exercised is a warning — the
         // least-authority lint. (Conservative: `required` under-approximates, so
         // effects reached only via methods/higher-order calls could over-warn.)
-        for cap in uses {
+        for cap in &declared {
             if !required.contains_key(cap) {
                 errors.push(TypeError::warning(
                     format!("declares `uses {cap}` but never uses it"),
@@ -1142,6 +1143,22 @@ mod tests {
             errors(r#"prod P(n: Int)  on P { m() = emit("x", 1) }"#).len(),
             1,
             "a method effect needs its cap too"
+        );
+    }
+
+    #[test]
+    fn an_effect_withheld_by_without_is_an_error_even_when_declared() {
+        // `f` declares Telemetry but drops it in the block, then emits there — a
+        // compile-time error, matching the runtime refusal.
+        let errs = errors(r#"f() uses Telemetry = without Telemetry { emit("x", 1) }"#);
+        assert_eq!(errs.len(), 1, "emit is withheld inside `without Telemetry`, got {errs:?}");
+        assert!(errs[0].message.contains("withheld"), "explains the withholding: {errs:?}");
+        // Emitting outside the `without` is fine (Telemetry is available).
+        assert!(errors(r#"f() uses Telemetry = emit("x", 1)"#).is_empty(), "not withheld → clean");
+        // Dropping a *different* capability doesn't withhold Telemetry.
+        assert!(
+            errors(r#"f() uses Telemetry = without ConsoleOut { emit("x", 1) }"#).is_empty(),
+            "dropping ConsoleOut doesn't withhold Telemetry"
         );
     }
 
