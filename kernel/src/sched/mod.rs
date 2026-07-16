@@ -24,8 +24,8 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use protocol::SwitchReason;
 
 use kernel_core::sched::{
-    address_space_switch, on_cpu_delta, pick_next, quantum_expired, should_preempt, Candidate,
-    CurrentDisposition, Priority, Runqueue, TaskDirectory, TaskId, TaskState,
+    address_space_switch, classify_kill, on_cpu_delta, pick_next, quantum_expired, should_preempt,
+    Candidate, CurrentDisposition, KillAction, Priority, Runqueue, TaskDirectory, TaskId, TaskState,
 };
 use kernel_core::span::SpanCursor;
 
@@ -1345,6 +1345,98 @@ pub fn note_spawn(parent: TaskId, child: TaskId) {
 /// the caller to [`wake`]. [`kernel_core::reap::ReapTable::on_exit`].
 pub fn note_exit(child: TaskId, status: i32) -> Option<TaskId> {
     REAP.lock().on_exit(child, status)
+}
+
+/// Status a `WaitAny` parent reads for a task terminated by [`kill_task`] (v2a).
+/// A **convention, not an unforgeable marker**: userspace fully controls its own
+/// `Exit` status (`handle_exit` reads `a0` verbatim), so a task could exit `-9`
+/// itself — a `WaitAny` parent cannot use this value alone to prove a kill. The
+/// authoritative, unforgeable signal that a kill occurred is the kernel-emitted
+/// `CapEvent::Revoked` for the spent lifecycle cap (see `handle_kill`); this status
+/// is just the human-facing convention the reaper surfaces. `-9` echoes SIGKILL,
+/// though SnitchOS has no signals (a shutdown is a `Notification`, not a signal).
+pub const KILLED_STATUS: i32 = -9;
+
+/// What [`kill_task`] did with a target — the syscall handler maps this to the
+/// caller's `a0` + telemetry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KillOutcome {
+    /// A `Ready` target was pulled off the runqueue and zombified; its `WaitAny`
+    /// parent was woken to reap it (or an already-`Exited` target — idempotent).
+    Killed,
+    /// The target id names no live task — already reaped. Idempotent success.
+    AlreadyDead,
+    /// The target is the caller itself; that's `Exit`'s job, not `Kill`'s.
+    RefusedSelf,
+    /// The target is running on another hart or blocked in a wait structure —
+    /// v2a defers both (see `plans/supervision-v2.md` §3a); handled in v2b.
+    Deferred,
+}
+
+/// Terminate `target`, a task that is **not** the one running (the v2a `Kill`
+/// mechanism). Reads the target's scheduler placement — is it the caller
+/// ([`current_task_id`]), running on another hart ([`CURRENT_TASK`] per hart),
+/// `Ready` (in a runqueue), or `Blocked`/`Exited` — and routes it through the pure
+/// [`classify_kill`] policy.
+///
+/// v2a ships exactly the one provably-safe transition: a `Ready` target is removed
+/// from its runqueue and marked `Exited` **in place** (not running ⇒ its stack and
+/// `satp` are quiescent, so no live state is pulled out from under it), then its
+/// killed status is recorded and its `WaitAny` parent woken. The parent's `Wait`
+/// reaps the zombie via the existing [`reap_task`] path — `kill_task` never reaps
+/// inline (it runs in the *killer's* address space, not the target's) and never
+/// `switch`es (it isn't the target). The target's open spans are abandoned (no
+/// `SpanEnd`); its cursor goes inert on reap.
+///
+/// Self, cross-hart-running, and blocked targets are **deferred** to v2b (an IPI to
+/// halt a remote runner; clean extraction from an IPC endpoint queue) and refused
+/// cleanly rather than risking a UAF or a ghost rendezvous.
+pub fn kill_task(target: TaskId) -> KillOutcome {
+    let me = crate::percpu::current_hartid();
+    let is_self = target == TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
+    // On-CPU on a *different* hart? A live stack + loaded satp there make an
+    // out-of-band reap a UAF, so that's the deferred cross-hart case.
+    let running_remote = CURRENT_TASK
+        .cells()
+        .iter()
+        .enumerate()
+        .any(|(hart, cell)| hart != me && cell.load(Ordering::Relaxed) == target.0);
+
+    let action = {
+        let mut sched = SCHEDULER.lock();
+        let Some(state) = sched.task(target).map(|t| t.state) else {
+            // Unknown id — already reaped. Idempotent success, nothing to wake.
+            return KillOutcome::AlreadyDead;
+        };
+        let ready = (0..crate::percpu::MAX_HARTS)
+            .any(|hart| sched.runqueues[hart].iter().any(|c| c.id == target));
+        let action = classify_kill(is_self, running_remote, ready, state);
+        if action == KillAction::Dequeue {
+            for hart in 0..crate::percpu::MAX_HARTS {
+                sched.runqueues[hart].remove(target);
+            }
+            if let Some(task) = sched.task_mut(target) {
+                task.state = TaskState::Exited;
+            }
+        }
+        action
+        // Lock dropped before note_exit/wake (never hold it across those).
+    };
+
+    match action {
+        KillAction::Dequeue => {
+            // Record the zombie + killed status and wake the target's `WaitAny`
+            // parent so it reaps. `note_exit` returns `None` for a parentless task
+            // (nothing to wake — the zombie waits, harmless).
+            if let Some(parent) = note_exit(target, KILLED_STATUS) {
+                wake(parent);
+            }
+            KillOutcome::Killed
+        }
+        KillAction::NoOp => KillOutcome::AlreadyDead,
+        KillAction::RefuseSelf => KillOutcome::RefusedSelf,
+        KillAction::RefuseRunningRemote | KillAction::RefuseBlocked => KillOutcome::Deferred,
+    }
 }
 
 /// The live notification registry (v0.12) — the general async kernel→user signal.

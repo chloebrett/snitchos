@@ -36,21 +36,66 @@ pub(super) fn handle_exit(frame: &TrapFrame) -> ! {
 }
 
 /// Terminate a child named by an `Object::Process` cap (`a0` = its handle), the
-/// v2a `Kill` syscall. **Increment 3 (WIP):** the real path is `invoke_kill` (which
-/// validates the `KILL` right + `Process` object — host-tested in `kernel_core::cap`)
-/// followed by tearing the target down. That teardown needs a `sched::kill_task`
-/// primitive able to stop a *non-current*, possibly-blocked task and wake its
-/// `WaitAny` parent — new scheduler machinery that must be QEMU-tested. Until it
-/// lands, `Kill` is wired end to end but inert: it refuses, so the ABI + dispatch are
-/// exercised without an untested termination path panicking the kernel.
+/// v2a `Kill` syscall. Resolves + validates the `KILL` right over a `Process`
+/// object (`invoke_kill`, host-tested in `kernel_core::cap`), then hands the target
+/// to [`crate::sched::kill_task`]. On a successful kill the lifecycle cap is
+/// **spent** — consumed from the caller's table and snitched as `CapEvent::Revoked`,
+/// the destruction half of the mint at `Spawn` (the lifecycle is symmetric on the
+/// wire). A missing/wrong cap refuses via the normal cap path; a target v2a can't yet
+/// safely kill (self / cross-hart-running / blocked — see `plans/supervision-v2.md`
+/// §3a) refuses cleanly and logs the precise deferred reason.
 pub(super) fn handle_kill(frame: &mut TrapFrame) {
+    use kernel_core::cap::{invoke_kill, Handle, Rights};
     use snitchos_abi::Syscall;
 
     let sc = Syscall::Kill as u8;
-    let Some(_proc) = super::current_process_or_refuse(frame, sc) else {
+    let Some(proc) = super::current_process_or_refuse(frame, sc) else {
         return;
     };
-    super::refuse(frame, sc, protocol::RefusalReason::CapNotFound);
+
+    let handle = Handle::from_raw(frame.a0 as u32);
+    // Resolve + validate the Process/KILL cap, capturing its global id for the
+    // Revoked event before we (maybe) consume the holding.
+    let (target, cap_id) = {
+        let caps = proc.caps.lock();
+        match invoke_kill(&caps, handle) {
+            Ok(t) => (t, caps.cap_id_of(handle).unwrap_or(0)),
+            Err(denied) => {
+                super::refuse(frame, sc, super::refusal_for(denied));
+                return;
+            }
+        }
+    };
+
+    match crate::sched::kill_task(target) {
+        crate::sched::KillOutcome::Killed | crate::sched::KillOutcome::AlreadyDead => {
+            // Spend the lifecycle cap: the object it named is gone. Consume the
+            // holding, then snitch a `Revoked` — creation minted this cap at `Spawn`,
+            // destruction spends it here.
+            proc.caps.lock().consume(handle);
+            crate::tracing::emit_cap_revoked(
+                cap_id,
+                0,
+                crate::sched::current_task_id().0,
+                protocol::CapObject::Process,
+                Rights::KILL.bits(),
+                0,
+                [0; snitchos_abi::CAP_NAME_LEN],
+            );
+            frame.a0 = 0;
+        }
+        crate::sched::KillOutcome::RefusedSelf | crate::sched::KillOutcome::Deferred => {
+            // The cap was valid, but v2a can't safely kill this target yet. Refuse
+            // (reusing an existing wire reason to avoid a protocol-enum ripple) and
+            // log the precise deferred reason — the itest happy path kills a `Ready`
+            // spinner and never lands here.
+            crate::tracing::emit_log(&alloc::format!(
+                "kill deferred: target {} is self/running-remote/blocked (v2b)",
+                target.0
+            ));
+            super::refuse(frame, sc, protocol::RefusalReason::CapWrongObject);
+        }
+    }
 }
 
 /// Wait for a child to exit and return its status (v0.12). `a0` = the child's
@@ -151,6 +196,35 @@ pub(super) fn handle_spawn(frame: &mut TrapFrame) {
     // exit matched to it.
     crate::sched::note_spawn(crate::sched::current_task_id(), child);
     frame.a0 = u64::from(child.0);
+    // Mint the caller a lifecycle cap over the child (v2a) so it can later `Kill`
+    // it. Additive: `a0` is the task id as before, `a1` the new Process-cap handle.
+    frame.a1 = mint_process_cap(proc, child);
+}
+
+/// Mint an `Object::Process { id: child }` capability carrying `KILL` into the
+/// caller's table and return its handle (v2a) — the "lifecycle cap" that authorizes
+/// a later `Kill` of the just-spawned child. Kernel-installed at `Spawn`, so it's a
+/// `CapEvent::Granted` (like the bootstrap sinks) and a derivation-tree root
+/// (`parent_cap_id == 0`); it **composes** — the parent can delegate `KILL` over its
+/// subtree to a sub-supervisor. A `Process` cap names a kernel-side task id, not a
+/// user-visible object, so it carries no wire name.
+fn mint_process_cap(proc: &crate::process::Process, child: kernel_core::sched::TaskId) -> u64 {
+    use kernel_core::cap::{Capability, Object, Rights};
+
+    let cap_id = crate::process::next_cap_id();
+    let handle = proc.caps.lock().insert_with_id(
+        Capability { object: Object::Process { id: child }, rights: Rights::KILL },
+        cap_id,
+        0,
+    );
+    crate::tracing::emit_cap_granted(
+        cap_id,
+        crate::sched::current_task_id().0,
+        protocol::CapObject::Process,
+        Rights::KILL.bits(),
+        [0; snitchos_abi::CAP_NAME_LEN],
+    );
+    u64::from(handle.raw())
 }
 
 /// Copy the caller's `[u32; N]` delegate-handle array (`ptr`/`n`) and resolve it
@@ -268,4 +342,5 @@ pub(super) fn handle_spawn_image(frame: &mut TrapFrame) {
     );
     crate::sched::note_spawn(crate::sched::current_task_id(), child);
     frame.a0 = u64::from(child.0);
+    frame.a1 = mint_process_cap(proc, child);
 }

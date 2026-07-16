@@ -334,6 +334,64 @@ pub fn on_wake(state: TaskState) -> bool {
     matches!(state, TaskState::Blocked)
 }
 
+/// What the kernel-side `kill_task` should do with a target, decided purely from
+/// its scheduler placement. The v2a `Kill` primitive terminates a task that is
+/// **not** the one running; where the target's id lives — and whether reaping it
+/// now is safe — is the whole design (see `plans/supervision-v2.md` §3a).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KillAction {
+    /// The target already `Exited` — nothing to do; the kill succeeds idempotently.
+    NoOp,
+    /// The target is `Ready` on a runqueue: pull it off and zombify it in place.
+    /// The one provably-safe transition v2a ships (not running ⇒ its stack + `satp`
+    /// are quiescent).
+    Dequeue,
+    /// The target is the caller itself — that's `Exit`'s job, not `Kill`'s.
+    RefuseSelf,
+    /// The target is running on another hart: a live stack + loaded `satp` make an
+    /// out-of-band reap a UAF. Deferred to v2b (needs an IPI to halt it).
+    RefuseRunningRemote,
+    /// The target is `Blocked`, its id parked in some wait structure (IPC endpoint,
+    /// notify, or reap). Clean extraction is deferred to v2b; v2a refuses rather
+    /// than leave a ghost id in an endpoint queue.
+    RefuseBlocked,
+}
+
+/// Decide how to kill `target`, given its placement in the scheduler. Pure so the
+/// v2a scope cut (`Ready`-only; defer running-remote + blocked) is host-tested away
+/// from the kernel's runqueue/`CURRENT_TASK` plumbing.
+///
+/// - `is_self`: the target *is* the calling task (the runner on this hart).
+/// - `running_remote`: the target is currently on-CPU on a **different** hart.
+/// - `ready`: the target sits in some hart's runqueue.
+/// - `state`: the target's `Task::state` field (only load-bearing here for `Exited`).
+///
+/// Precedence is self → running-remote → `Exited` → `Ready` → blocked. Self is
+/// decided first so the caller (which is the running task on this hart) never
+/// routes to a kill path; `running_remote` before the state field because that
+/// field does not reliably track `Running` (an incoming task is never re-labelled).
+#[must_use]
+pub fn classify_kill(
+    is_self: bool,
+    running_remote: bool,
+    ready: bool,
+    state: TaskState,
+) -> KillAction {
+    if is_self {
+        return KillAction::RefuseSelf;
+    }
+    if running_remote {
+        return KillAction::RefuseRunningRemote;
+    }
+    if state == TaskState::Exited {
+        return KillAction::NoOp;
+    }
+    if ready {
+        return KillAction::Dequeue;
+    }
+    KillAction::RefuseBlocked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,5 +795,67 @@ mod tests {
         // level may preempt it — this is what lets aging rescue a starved task
         // even from a higher-priority CPU hog. Low base, waited 2 steps → High.
         assert!(should_preempt(HIGH, [cand(1, Priority::Low, 80)], 100, 10));
+    }
+
+    #[test]
+    fn kill_a_ready_task_dequeues_it() {
+        // The one provably-safe transition: a Ready target isn't running (its
+        // stack + satp are quiescent), so it can be pulled off the runqueue and
+        // zombified in place.
+        assert_eq!(
+            classify_kill(false, false, true, TaskState::Ready),
+            KillAction::Dequeue
+        );
+    }
+
+    #[test]
+    fn killing_an_already_exited_task_is_a_no_op() {
+        // Idempotent: a target that already exited (raced its own exit, or a
+        // double-kill) succeeds without touching the scheduler again.
+        assert_eq!(
+            classify_kill(false, false, false, TaskState::Exited),
+            KillAction::NoOp
+        );
+    }
+
+    #[test]
+    fn killing_yourself_is_refused() {
+        // Self-termination is `Exit`'s job, not `Kill`'s — even if the (nonsense)
+        // running/ready flags would otherwise classify.
+        assert_eq!(
+            classify_kill(true, false, true, TaskState::Ready),
+            KillAction::RefuseSelf
+        );
+    }
+
+    #[test]
+    fn killing_a_task_running_on_another_hart_is_deferred() {
+        // A live target on another hart holds a loaded satp + an executing stack;
+        // reaping it from here is a UAF. Deferred to v2b (needs an IPI to halt it).
+        assert_eq!(
+            classify_kill(false, true, false, TaskState::Ready),
+            KillAction::RefuseRunningRemote
+        );
+    }
+
+    #[test]
+    fn killing_a_blocked_task_is_deferred() {
+        // A Blocked target's id is parked in some wait structure (IPC endpoint /
+        // notify / reap). Extracting it cleanly is v2b; v2a refuses rather than
+        // leave a ghost in an endpoint queue.
+        assert_eq!(
+            classify_kill(false, false, false, TaskState::Blocked),
+            KillAction::RefuseBlocked
+        );
+    }
+
+    #[test]
+    fn self_check_precedes_running_and_ready() {
+        // Precedence: self is decided before the placement flags, so the running
+        // task on this hart (which IS the caller) never routes to a kill path.
+        assert_eq!(
+            classify_kill(true, true, true, TaskState::Running),
+            KillAction::RefuseSelf
+        );
     }
 }

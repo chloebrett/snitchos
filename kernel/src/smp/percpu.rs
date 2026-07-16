@@ -266,6 +266,14 @@ impl<T> PerCpu<T> {
         &self.cells[current_hartid()]
     }
 
+    /// Every hart's slot, in logical-hart order. For the rare cross-hart read —
+    /// e.g. `kill_task` checking whether a target is currently on-CPU on *another*
+    /// hart before deciding it's safe to reap. Per-CPU discipline still holds: the
+    /// caller reasons about the whole array, not just its own slot.
+    pub fn cells(&self) -> &[T; MAX_HARTS] {
+        &self.cells
+    }
+
     #[expect(
         dead_code,
         reason = "mutable per-CPU accessor; the &self variant is used today, this lands when a caller needs &mut per-CPU state"
