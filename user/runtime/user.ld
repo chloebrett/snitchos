@@ -24,16 +24,26 @@ SECTIONS {
   .snitch.iface : {
     KEEP(*(.snitch.iface))
   } > ram
-  .data : {
+  /* Page-align the writable segment so it never shares a 4 KiB page with
+   * R-X code — lets the kernel map each PT_LOAD with real W^X. The RW
+   * PT_LOAD starts at whichever of .data/.bss comes first, so BOTH must be
+   * aligned: .data is empty in every program today, which is the only
+   * reason aligning .bss alone sufficed. One initialised mutable static
+   * would have started the RW segment mid-page — sharing page 0 with R-X
+   * code and silently producing an RWX page. (The linker does not
+   * page-align new PT_LOADs for us here: today's .rodata segment starts
+   * mid-page at 0x100006B0.) The kernel now refuses such an image
+   * outright — kernel_core::elf::page_perms, PlanError::WxViolation — so
+   * this alignment is what keeps that refusal from firing at boot.
+   *
+   * NOTE: the alignment MUST be the section's ALIGN() attribute (after the
+   * `:`). A bare `. = ALIGN(0x1000);` between sections is silently ignored
+   * when sections use a `> region` (`> ram` here): the section start comes
+   * from the region's allocation pointer, not the location counter. */
+  .data : ALIGN(0x1000) {
     *(.data .data*)
     *(.sdata .sdata*)
   } > ram
-  /* Page-align the writable segment so it never shares a 4 KiB page with
-   * R-X code — lets the kernel map each PT_LOAD with real W^X. NOTE: the
-   * alignment MUST be the section's ALIGN() attribute (after the `:`).
-   * A bare `. = ALIGN(0x1000);` between sections is silently ignored when
-   * sections use a `> region` (`> ram` here): the section start comes
-   * from the region's allocation pointer, not the location counter. */
   .bss : ALIGN(0x1000) {
     __bss_start = .;
     *(.bss .bss*)

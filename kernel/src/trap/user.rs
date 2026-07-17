@@ -16,7 +16,7 @@ use alloc::collections::BTreeMap;
 
 use kernel_core::bootargs::WorkloadKind;
 use kernel_core::cap::Rights;
-use kernel_core::elf::{self, LoadSegment, SegmentPerms};
+use kernel_core::elf::{self, SegmentPerms};
 use kernel_core::mmu::{MapError, PtePerms};
 use kernel_core::sched::Priority;
 use protocol::StringId;
@@ -108,6 +108,17 @@ pub static IPC_ECHO_CLIENT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_IPC_ECHO_C
 /// The `spinner` child (spawnable id 3): loops forever, never exits. A long-lived
 /// sibling so `WaitAny` deterministically returns the *other* child.
 pub static SPINNER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SPINNER_ELF"));
+
+/// The `workload=supervised-shutdown` graceful-shutdown supervisor (v2a step 4):
+/// brings a dependency tree up in `startup_order`, then tears it down in
+/// `teardown_order` — `Signal`ing cooperative services (clean exit) and `Kill`ing a
+/// forced one — so the tree comes down in the exact reverse of how it went up.
+pub static SUPERVISED_SHUTDOWN_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SUPERVISED_SHUTDOWN_ELF"));
+
+/// The `svc-worker` cooperative service (spawnable id 10): proves it came up, then
+/// parks on a delegated shutdown notification and `exit(0)`s cleanly when signalled —
+/// the cooperative half of the graceful-shutdown demo.
+pub static SVC_WORKER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SVC_WORKER_ELF"));
 
 /// The `workload=init` supervising root: spawns a child (delegating its span cap)
 /// and reaps it via `WaitAny` — the delegation-graph root (v0.13).
@@ -205,6 +216,9 @@ pub struct Loaded {
 pub enum LoadError {
     /// The embedded image is not a valid ELF we can load.
     Parse(elf::ElfError),
+    /// The image's segments cannot be mapped as asked — e.g. a page that would
+    /// end up both writable and executable. Refused, not mapped.
+    Plan(elf::PlanError),
     /// The frame allocator is exhausted.
     OutOfFrames,
     /// Installing a page-table entry failed.
@@ -335,6 +349,11 @@ pub static SUPERVISED: ProgramSpec = ProgramSpec { elf: SUPERVISED_ELF, launch: 
 /// `workload=supervised-ipc`: the cap-survival supervisor — owns its endpoint and
 /// grants from it (Launch::Plain; it `EndpointCreate`s + `Spawn`s its own services).
 pub static SUPERVISED_IPC: ProgramSpec = ProgramSpec { elf: SUPERVISED_IPC_ELF, launch: Launch::Plain };
+
+/// `workload=supervised-shutdown`: the graceful reverse-dep shutdown supervisor (v2a
+/// step 4) — spawns its service tree + shutdown notifications, then tears it down
+/// (Launch::Plain; it `Spawn`s/`NotifyCreate`s its own services).
+pub static SUPERVISED_SHUTDOWN: ProgramSpec = ProgramSpec { elf: SUPERVISED_SHUTDOWN_ELF, launch: Launch::Plain };
 
 /// `workload=init`: the supervising root — spawns + `WaitAny`-reaps a child,
 /// delegating its span cap downward. Holds only its bootstrap caps (Launch::Plain).
@@ -555,6 +574,7 @@ static SPAWNABLE: &[(&str, &[u8])] = &[
     ("cap-reporter", CAP_REPORTER_ELF), // 7
     ("ipc-echo-server", IPC_ECHO_SERVER_ELF), // 8
     ("ipc-echo-client", IPC_ECHO_CLIENT_ELF), // 9
+    ("svc-worker", SVC_WORKER_ELF),   // 10
 ];
 
 /// Resolve a `Spawn` program id to its `(name, image)`, or `None` if out of range.
@@ -749,6 +769,13 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::SupervisedIpc, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "supervised_ipc", program: &SUPERVISED_IPC, priority: Priority::Normal }],
+    }),
+    // Supervision v2a step 4: the graceful-shutdown supervisor. Only the root is in
+    // the layout; it spawns its service tree (svc-worker ×2 + spinner) and their
+    // shutdown notifications at runtime, then tears them down in reverse-dep order.
+    (WorkloadKind::SupervisedShutdown, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "supervised_shutdown", program: &SUPERVISED_SHUTDOWN, priority: Priority::Normal }],
     }),
     // v0.13 EndpointCreate: a single program manufactures its own endpoint and
     // proves it by minting — no kernel-created endpoint (`needs_endpoint: false`).
@@ -1027,59 +1054,39 @@ fn perms_for(p: SegmentPerms) -> PtePerms {
     perms
 }
 
-/// The page-aligned VAs a segment occupies in memory.
-fn pages_of(seg: &LoadSegment) -> impl Iterator<Item = usize> {
-    let start = seg.vaddr & !(FRAME_SIZE - 1);
-    let end = (seg.vaddr + seg.mem_size + FRAME_SIZE - 1) & !(FRAME_SIZE - 1);
-    (start..end).step_by(FRAME_SIZE)
-}
-
 /// Parse `image` and map its `PT_LOAD` segments into the page table rooted
-/// at `root_pa`. Two segments may share a page (e.g. R-X code + R rodata in
-/// the first page), so perms are unioned per page and each page is mapped
-/// once; file bytes are then copied in and the bss tail left zero. Returns
-/// the entry point.
+/// at `root_pa`. The page planning — unioning the perms of segments that share
+/// a page, enforcing W^X on the union, and splitting file bytes into per-page
+/// copy windows — is pure and host-tested in [`kernel_core::user::elf`]; this
+/// function is the effects: allocate, map, copy. Returns the entry point.
 pub fn load(root_pa: usize, image: &[u8]) -> Result<Loaded, LoadError> {
     let plan = elf::parse(image).map_err(LoadError::Parse)?;
-
-    // Union perms over every page each segment touches.
-    let mut perms_by_page: BTreeMap<usize, PtePerms> = BTreeMap::new();
-    for seg in &plan.segments {
-        let perms = perms_for(seg.perms);
-        for page_va in pages_of(seg) {
-            perms_by_page
-                .entry(page_va)
-                .and_modify(|p| *p = p.union(perms))
-                .or_insert(perms);
-        }
-    }
+    let perms_by_page = elf::page_perms(&plan, FRAME_SIZE).map_err(LoadError::Plan)?;
 
     // Allocate a zeroed frame per page and map it; remember its linear-map VA
     // so the copy pass can reach it.
     let mut dst_by_page: BTreeMap<usize, usize> = BTreeMap::new();
     for (&page_va, &perms) in &perms_by_page {
         let f = frame::alloc_zeroed().ok_or(LoadError::OutOfFrames)?;
-        mmu::map_in(root_pa, page_va, f.addr(), perms).map_err(LoadError::Map)?;
+        mmu::map_in(root_pa, page_va, f.addr(), perms_for(perms)).map_err(LoadError::Map)?;
         dst_by_page.insert(page_va, f.kernel_va());
     }
 
-    // Copy each segment's file bytes into the mapped frames.
+    // Copy each segment's file bytes into the mapped frames. The bss tail
+    // yields no windows, so the zeroed frames stay zeroed.
     for seg in &plan.segments {
-        let file_lo = seg.vaddr;
-        let file_hi = seg.vaddr + seg.file_size;
-        for page_va in pages_of(seg) {
-            let lo = file_lo.max(page_va);
-            let hi = file_hi.min(page_va + FRAME_SIZE);
-            if lo >= hi {
-                continue;
-            }
-            let dst = dst_by_page[&page_va] + (lo - page_va);
-            let src = seg.file_offset + (lo - file_lo);
+        for w in elf::copy_windows(seg, FRAME_SIZE) {
+            let dst = dst_by_page[&w.page_va] + w.page_off;
             // SAFETY: `dst` is a fresh frame's linear-map VA (writable, covers
-            // all RAM); the copy length is at most one page; `src` is in-bounds
-            // of `image` (the parser validated the segment file range).
+            // all RAM); a window never spans past its page; `src_off + len` is
+            // in-bounds of `image` (the parser validated the segment file
+            // range, and windows only narrow it).
             unsafe {
-                core::ptr::copy_nonoverlapping(image.as_ptr().add(src), dst as *mut u8, hi - lo);
+                core::ptr::copy_nonoverlapping(
+                    image.as_ptr().add(w.src_off),
+                    dst as *mut u8,
+                    w.len,
+                );
             }
         }
     }

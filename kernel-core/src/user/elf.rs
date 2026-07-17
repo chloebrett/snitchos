@@ -18,6 +18,7 @@
 //! [`ElfError`], never a panic. v0.10 (filesystem) loads untrusted
 //! images through the same parser unchanged.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 /// Read/write/execute permissions for a loadable segment, decoded from
@@ -155,6 +156,112 @@ pub fn parse(image: &[u8]) -> Result<LoadPlan, ElfError> {
     Ok(LoadPlan { entry, segments })
 }
 
+/// Why a [`LoadPlan`] cannot be turned into a page map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanError {
+    /// Some page ends up both writable and executable once the perms of every
+    /// segment touching it are unioned — a W^X violation. Two `PT_LOAD`s may
+    /// legitimately share a page (R-X code + R-- rodata unions to R-X, which is
+    /// fine), but a writable segment sharing a page with an executable one is
+    /// not: mapping it would hand userspace an RWX page. Refuse the image
+    /// instead. `page_va` is the offending page, for the refusal frame.
+    WxViolation { page_va: usize },
+}
+
+impl SegmentPerms {
+    /// The weakest perms allowing everything both sets allow — what a page
+    /// shared by two segments must be mapped with.
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            read: self.read || other.read,
+            write: self.write || other.write,
+            exec: self.exec || other.exec,
+        }
+    }
+
+    /// Writable *and* executable — the combination W^X forbids.
+    #[must_use]
+    pub fn is_wx(self) -> bool {
+        self.write && self.exec
+    }
+}
+
+/// The page-aligned VAs a segment occupies in memory, `mem_size` (not
+/// `file_size`) wide so the zero-filled bss tail gets pages too.
+fn pages_of(seg: &LoadSegment, page_size: usize) -> impl Iterator<Item = usize> {
+    let start = seg.vaddr & !(page_size - 1);
+    let end = (seg.vaddr + seg.mem_size).div_ceil(page_size) * page_size;
+    (start..end).step_by(page_size)
+}
+
+/// Map every page the plan's segments touch to the perms it must be mapped
+/// with. Segments may share a page, so perms are unioned; the W^X check runs
+/// on the *union*, because that is where the violation emerges — neither
+/// segment alone need be both writable and executable.
+///
+/// Returns [`PlanError::WxViolation`] rather than silently mapping an RWX page.
+pub fn page_perms(
+    plan: &LoadPlan,
+    page_size: usize,
+) -> Result<BTreeMap<usize, SegmentPerms>, PlanError> {
+    let mut by_page: BTreeMap<usize, SegmentPerms> = BTreeMap::new();
+    for seg in &plan.segments {
+        for page_va in pages_of(seg, page_size) {
+            let merged = by_page.get(&page_va).map_or(seg.perms, |p| p.union(seg.perms));
+            by_page.insert(page_va, merged);
+        }
+    }
+
+    match by_page.iter().find(|(_, perms)| perms.is_wx()) {
+        Some((&page_va, _)) => Err(PlanError::WxViolation { page_va }),
+        None => Ok(by_page),
+    }
+}
+
+/// One `copy_nonoverlapping` the loader must perform: copy `len` bytes from
+/// `image[src_off..]` into the frame mapped at `page_va`, starting `page_off`
+/// bytes into that frame.
+///
+/// Windows never span a page, because each page is a separately-allocated
+/// frame — the loader resolves `page_va` to that frame's address and copies
+/// within it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyWindow {
+    /// The page whose frame receives these bytes.
+    pub page_va: usize,
+    /// Offset into that page to start writing at.
+    pub page_off: usize,
+    /// Offset into the ELF image to read from.
+    pub src_off: usize,
+    /// How many bytes to copy. Never zero.
+    pub len: usize,
+}
+
+/// Split a segment's file bytes into per-page copy windows.
+///
+/// Only `file_size` bytes are copied; the `mem_size - file_size` bss tail
+/// yields no windows, leaving the zeroed frame zeroed. `page_off` and `src_off`
+/// are derived from different bases (the page vs the segment's `vaddr`), which
+/// is what makes a non-page-aligned `vaddr` worth testing.
+pub fn copy_windows(seg: &LoadSegment, page_size: usize) -> impl Iterator<Item = CopyWindow> + '_ {
+    let file_lo = seg.vaddr;
+    let file_hi = seg.vaddr + seg.file_size;
+    pages_of(seg, page_size).filter_map(move |page_va| {
+        let lo = file_lo.max(page_va);
+        let hi = file_hi.min(page_va + page_size);
+        if lo >= hi {
+            return None;
+        }
+        Some(CopyWindow {
+            page_va,
+            page_off: lo - page_va,
+            src_off: seg.file_offset + (lo - file_lo),
+            len: hi - lo,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +347,158 @@ mod tests {
     fn rejects_an_image_without_the_elf_magic() {
         let not_elf = [0u8; 64];
         assert_eq!(parse(&not_elf), Err(ElfError::BadMagic));
+    }
+
+    /// 4 KiB — the page size the kernel loader maps with. Passed explicitly so
+    /// `elf` stays free of any page-size assumption of its own.
+    const PAGE: usize = 4096;
+
+    fn seg(vaddr: usize, file_size: usize, mem_size: usize, perms: SegmentPerms) -> LoadSegment {
+        LoadSegment { vaddr, file_offset: 0, file_size, mem_size, perms }
+    }
+
+    const RX: SegmentPerms = SegmentPerms { read: true, write: false, exec: true };
+    const RW: SegmentPerms = SegmentPerms { read: true, write: true, exec: false };
+    const R: SegmentPerms = SegmentPerms { read: true, write: false, exec: false };
+
+    #[test]
+    fn refuses_a_page_shared_by_executable_and_writable_segments() {
+        // The W^X guard. Two PT_LOADs sharing one page union to R+W+X: exactly
+        // what `user.ld` intends to prevent by page-aligning the writable
+        // segment, and what a non-empty `.data` would silently reintroduce
+        // (the linker does NOT page-align new PT_LOADs here — today's `init`
+        // has an R-- rodata segment starting mid-page at 0x100006B0).
+        // Nothing else in the tree asserts this; refuse rather than map RWX.
+        let plan = LoadPlan {
+            entry: 0x1000,
+            segments: vec![seg(0x1000, 0x100, 0x100, RX), seg(0x1100, 0x80, 0x80, RW)],
+        };
+        assert_eq!(page_perms(&plan, PAGE), Err(PlanError::WxViolation { page_va: 0x1000 }));
+    }
+
+    #[test]
+    fn allows_executable_and_read_only_segments_to_share_a_page() {
+        // The guard must not over-refuse: this is exactly today's `init` —
+        // R-X code at 0x10000000 and R-- rodata starting mid-page at
+        // 0x100006B0. R-X ∪ R-- = R-X, no W, so it maps fine. If this ever
+        // fails, the kernel refuses to boot its own root process.
+        let plan = LoadPlan {
+            entry: 0x1000,
+            segments: vec![seg(0x1000, 0x6B0, 0x6B0, RX), seg(0x16B0, 0x258, 0x258, R)],
+        };
+        let pages = page_perms(&plan, PAGE).expect("R-X ∪ R-- is not a W^X violation");
+        assert_eq!(pages, BTreeMap::from([(0x1000, RX)]));
+    }
+
+    #[test]
+    fn union_takes_each_permission_bit_from_either_side() {
+        // Per-bit OR, not AND: a page shared by a read-only and an exec-only
+        // segment must keep BOTH bits. Every other test here uses segments that
+        // are all `read: true`, which cannot tell OR from AND on that bit — so
+        // this asymmetric case is the one that pins it. An AND would drop `R`
+        // from a shared page and fault the program on its first load.
+        let exec_only = SegmentPerms { read: false, write: false, exec: true };
+        assert_eq!(R.union(exec_only), RX);
+        assert_eq!(exec_only.union(R), RX, "union is symmetric");
+    }
+
+    #[test]
+    fn detects_a_wx_violation_that_only_exists_after_the_union() {
+        // Neither segment is itself W+X — the violation is created *by* sharing
+        // the page. Pins that the check runs on the union, not per-segment.
+        let plan = LoadPlan {
+            entry: 0x2000,
+            segments: vec![seg(0x2000, 0x10, 0x10, RX), seg(0x2010, 0x10, 0x10, RW)],
+        };
+        assert!(!RX.is_wx() && !RW.is_wx(), "neither segment alone is W+X");
+        assert_eq!(page_perms(&plan, PAGE), Err(PlanError::WxViolation { page_va: 0x2000 }));
+    }
+
+    #[test]
+    fn a_writable_segment_on_its_own_page_is_not_a_violation() {
+        // The layout `user.ld` intends: .bss page-aligned, so RW never meets
+        // R-X. Two pages, two distinct perms.
+        let plan = LoadPlan {
+            entry: 0x1000,
+            segments: vec![seg(0x1000, 0x100, 0x100, RX), seg(0x2000, 0x100, 0x100, RW)],
+        };
+        let pages = page_perms(&plan, PAGE).expect("page-separated RW and R-X are fine");
+        assert_eq!(pages, BTreeMap::from([(0x1000, RX), (0x2000, RW)]));
+    }
+
+    #[test]
+    fn pages_cover_the_zero_filled_bss_tail_beyond_the_file_bytes() {
+        // mem_size spans into a second page that file_size doesn't reach. Both
+        // pages must be mapped or the bss tail (which holds the user stack —
+        // see user.ld) is unmapped and `sp` faults.
+        let plan = LoadPlan { entry: 0, segments: vec![seg(0x1000, 0x10, PAGE + 0x10, RW)] };
+        let pages = page_perms(&plan, PAGE).expect("plain RW segment");
+        assert_eq!(pages.keys().copied().collect::<Vec<_>>(), vec![0x1000, 0x2000]);
+    }
+
+    #[test]
+    fn copies_a_page_straddling_segment_contiguously_from_the_file() {
+        // A segment whose vaddr is NOT page-aligned, spanning two pages. `dst`
+        // and `src` are computed from different bases (page_va vs vaddr), so an
+        // off-by-one here copies the image shifted by a few bytes — the program
+        // then executes garbage. Pins that consecutive windows read a
+        // *contiguous* file range: window 1 ends at src 0x500+0xF00 == window
+        // 2's src 0x1400.
+        let s = LoadSegment {
+            vaddr: 0x1100,
+            file_offset: 0x500,
+            file_size: 0x1000,
+            mem_size: 0x1000,
+            perms: R,
+        };
+        let windows: Vec<_> = copy_windows(&s, PAGE).collect();
+        assert_eq!(
+            windows,
+            vec![
+                CopyWindow { page_va: 0x1000, page_off: 0x100, src_off: 0x500, len: 0xF00 },
+                CopyWindow { page_va: 0x2000, page_off: 0, src_off: 0x1400, len: 0x100 },
+            ]
+        );
+        let copied: usize = windows.iter().map(|w| w.len).sum();
+        assert_eq!(copied, s.file_size, "every file byte is copied exactly once");
+    }
+
+    #[test]
+    fn skips_the_bss_tail_so_the_zeroed_frame_stays_zero() {
+        // file_size < mem_size: the tail pages have no file bytes. Emitting a
+        // window for them would copy unrelated image bytes over what must stay
+        // zeroed bss (which holds the user stack).
+        let s = LoadSegment {
+            vaddr: 0x1000,
+            file_offset: 0x40,
+            file_size: 0x10,
+            mem_size: PAGE * 2,
+            perms: RW,
+        };
+        let windows: Vec<_> = copy_windows(&s, PAGE).collect();
+        assert_eq!(
+            windows,
+            vec![CopyWindow { page_va: 0x1000, page_off: 0, src_off: 0x40, len: 0x10 }],
+            "only the file bytes are copied; the bss tail page gets no window"
+        );
+    }
+
+    #[test]
+    fn a_pure_bss_segment_copies_nothing() {
+        // Today's `init` RW segment: FileSize 0, MemSize 524336. Pages must be
+        // mapped (page_perms covers that) but nothing is copied.
+        let s =
+            LoadSegment { vaddr: 0x1000, file_offset: 0, file_size: 0, mem_size: PAGE, perms: RW };
+        assert_eq!(copy_windows(&s, PAGE).count(), 0);
+    }
+
+    #[test]
+    fn a_segment_ending_exactly_on_a_page_boundary_maps_no_extra_page() {
+        // Pins the end-rounding against an off-by-one: a segment exactly one
+        // page long must map one page, not two.
+        let plan = LoadPlan { entry: 0, segments: vec![seg(0x1000, PAGE, PAGE, RW)] };
+        let pages = page_perms(&plan, PAGE).expect("plain RW segment");
+        assert_eq!(pages.keys().copied().collect::<Vec<_>>(), vec![0x1000]);
     }
 
     #[test]
