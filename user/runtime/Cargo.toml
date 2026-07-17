@@ -27,3 +27,9 @@ snitchos-user-macros = { path = "../macros" }
 # `allocator`/`nightly_api` features (they need nightly) and supply our own
 # single-threaded no-op lock (`locking::AssumeUnlockable`).
 talc = { version = "4", default-features = false, features = ["lock_api"] }
+
+# Riscv-only, but unlike `kernel`/`hello`/`fs` this crate takes the workspace
+# pedantic lints cleanly — its hits are ordinary style, not the register/address
+# idiom friction that earns those three their `LINTS_EXEMPT` entry.
+[lints]
+workspace = true

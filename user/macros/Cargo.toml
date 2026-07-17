@@ -18,3 +18,8 @@ proc-macro = true
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
+
+# A host proc-macro crate — none of the bare-metal idiom friction that exempts
+# `kernel`/`hello`/`fs` applies here, so it inherits the workspace lints.
+[lints]
+workspace = true

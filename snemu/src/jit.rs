@@ -2,8 +2,11 @@
 //!
 //! Backend A walks the reified `Op` IR interpretively; Backend B lowers the same IR
 //! to **native AArch64** in an executable buffer and runs it, falling back to A for
-//! anything it can't emit. This module is host-only (`cfg(not(wasm))`) and the one
-//! place snemu uses `unsafe` — it generates and executes machine code.
+//! anything it can't emit. This module is gated to **`aarch64` + `macos`** (the inner
+//! attribute below) — it emits AArch64 and needs `MAP_JIT`, so it is narrower than
+//! host-only; every other target, wasm included, gets an empty module and falls back
+//! to A via `cpu.rs`'s paired `#[cfg(not(…))] run_block_native -> None`. It is also
+//! the one place snemu uses `unsafe` — it generates and executes machine code.
 //!
 //! Increment 0 (here): prove we can generate and run AArch64 on Apple Silicon at all.
 //! macOS enforces W^X in hardware, so the code buffer is `MAP_JIT` memory whose

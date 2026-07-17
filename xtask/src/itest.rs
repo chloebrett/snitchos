@@ -711,6 +711,104 @@ pub(crate) fn riscv_only_plan<'a>(
         .collect())
 }
 
+/// Crates that deliberately do **not** inherit the workspace lint table
+/// (`[lints] workspace = true`), each with the reason.
+///
+/// Unlike the test/clippy/mutation gates, this one cannot be derived: cargo has
+/// no workspace-wide lint inheritance, so `[lints] workspace = true` is
+/// structurally per-crate and omitting it is invisible. The
+/// `every_workspace_member_opts_in_or_has_a_written_reason` test is what turns
+/// that silent omission into a written decision.
+///
+/// All three below share one reason, and it is a real one: full pedantic fights
+/// the register/address idioms bare-metal code is made of. It is **not** a
+/// general "it's riscv" exemption — `snitchos-user` and `snitchos-std` are
+/// equally riscv-only and opt in fine, because their pedantic hits turned out to
+/// be ordinary style (doc backticks, `match`→`if let`), not idiom friction.
+pub(crate) const LINTS_EXEMPT: &[(&str, &str)] = &[
+    ("kernel", "bare-metal: full pedantic fights the register/address idioms it is built from"),
+    ("hello", "bare-metal U-mode program: same register/address idiom friction as `kernel`"),
+    ("fs", "bare-metal U-mode server: same register/address idiom friction as `kernel`"),
+];
+
+/// Whether a manifest inherits the workspace lint table.
+///
+/// Hand-scanned rather than parsed: xtask has no `toml` dependency and this is
+/// the only thing that would need one. The key must sit *inside* a `[lints]`
+/// section — `edition.workspace = true` under `[package]` is the common idiom
+/// and must not read as a lints opt-in.
+fn opts_into_workspace_lints(manifest: &str) -> bool {
+    let mut in_lints = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_lints = line == "[lints]";
+            continue;
+        }
+        if in_lints && line == "workspace = true" {
+            return true;
+        }
+    }
+    false
+}
+
+/// The crates that neither inherit the workspace lint table nor have a written
+/// reason not to, given each member's `(name, manifest text)`. Empty is the
+/// healthy state. A stale exemption is an error, as everywhere else.
+fn lints_optin_gaps<'a>(
+    manifests: &[(&'a str, String)],
+    exempt: &[(&str, &str)],
+) -> Result<Vec<&'a str>, String> {
+    let stale: Vec<&str> = exempt
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !manifests.iter().any(|(member, _)| member == name))
+        .collect();
+    if !stale.is_empty() {
+        return Err(format!(
+            "lint policy names crates that are not workspace members: {}. \
+             Renamed or removed? Update LINTS_EXEMPT in xtask/src/itest.rs.",
+            stale.join(", ")
+        ));
+    }
+
+    Ok(manifests
+        .iter()
+        .filter(|(name, text)| {
+            !opts_into_workspace_lints(text) && !exempt.iter().any(|(e, _)| e == name)
+        })
+        .map(|(name, _)| *name)
+        .collect())
+}
+
+/// Every workspace member's `(name, manifest text)`, via `cargo metadata`'s
+/// `manifest_path`. Only the lint-policy test needs the file bodies — the other
+/// gates work from names alone.
+#[cfg(test)]
+fn workspace_manifests() -> Result<Vec<(String, String)>, String> {
+    let out = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .output()
+        .map_err(|e| format!("run cargo metadata: {e}"))?;
+    if !out.status.success() {
+        return Err("cargo metadata failed".to_string());
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("parse cargo metadata: {e}"))?;
+    let packages = json["packages"].as_array().ok_or("cargo metadata: no packages array")?;
+    packages
+        .iter()
+        .map(|p| {
+            let name = p["name"].as_str().ok_or("cargo metadata: package with no name")?;
+            let path = p["manifest_path"]
+                .as_str()
+                .ok_or_else(|| format!("cargo metadata: {name} has no manifest_path"))?;
+            let text = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+            Ok((name.to_owned(), text))
+        })
+        .collect()
+}
+
 /// The workspace's package names, straight from `cargo metadata --no-deps`.
 pub(crate) fn workspace_members() -> Result<Vec<String>, String> {
     let out = Command::new("cargo")
@@ -834,7 +932,53 @@ pub fn run_unit_tests() -> ExitCode {
     if crate::links::check() != ExitCode::SUCCESS {
         return ExitCode::from(1);
     }
+    // The sibling of the markdown check above, for the links the *compiler*
+    // owns. Rustdoc resolves intra-doc links but only **warns** on a broken one,
+    // and nothing ran rustdoc — so they rot invisibly. The kernel-core split
+    // alone dangled four (`crate::frame::Bitmap` and friends, whose modules had
+    // moved to other crates), and a rename left `[`span_start`]` pointing at a
+    // function that no longer existed. `cargo build` sees none of it.
+    eprintln!("=== rustdoc ===");
+    if !check_rustdoc(&names) {
+        return ExitCode::from(1);
+    }
     ExitCode::SUCCESS
+}
+
+/// `cargo doc` every crate with `-D warnings`, so a broken intra-doc link fails
+/// the gate instead of rotting.
+///
+/// Same two-target split as `run_clippy`, for the same reason: the bare-metal
+/// crates can't be documented for the host. `--no-deps` because we're checking
+/// *our* prose, not our dependencies'.
+fn check_rustdoc(names: &[&str]) -> bool {
+    let deny = &[("RUSTDOCFLAGS", "-D warnings")];
+    let host_plan = match unit_test_plan(names, NOT_HOST_TESTED, EXTRA_TEST_ARGS) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("rustdoc: {e}");
+            return false;
+        }
+    };
+    // Reuses the test gate's per-crate feature args: a crate that needs
+    // `--features std` to compile needs it to document, too.
+    let host = host_plan.iter().all(|(crate_name, crate_args)| {
+        let mut args = vec!["doc", "--no-deps", "-q", "-p", *crate_name];
+        args.extend_from_slice(crate_args);
+        run_cargo_test(&format!("  {crate_name}"), &args, deny)
+    });
+    let riscv_plan = match riscv_only_plan(names, NOT_HOST_TESTED) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("rustdoc: {e}");
+            return false;
+        }
+    };
+    let riscv = riscv_plan.iter().all(|crate_name| {
+        let args = ["doc", "--no-deps", "-q", "-p", crate_name, "--target", crate::qemu::KERNEL_TARGET];
+        run_cargo_test(&format!("  {crate_name} (riscv)"), &args, deny)
+    });
+    host && riscv
 }
 
 /// Run one `cargo test` invocation, printing `ok`/`FAILED` for `label`.
@@ -993,6 +1137,91 @@ mod unit_test_plan_tests {
         let members = super::workspace_members().expect("cargo metadata");
         let names: Vec<&str> = members.iter().map(String::as_str).collect();
         unit_test_plan(&names, NOT_HOST_TESTED, EXTRA_TEST_ARGS).expect("committed lists are current");
+    }
+}
+
+#[cfg(test)]
+mod lints_policy_tests {
+    use super::{LINTS_EXEMPT, lints_optin_gaps, opts_into_workspace_lints};
+
+    #[test]
+    fn a_manifest_with_the_opt_in_is_detected() {
+        assert!(opts_into_workspace_lints("[package]\nname = \"x\"\n\n[lints]\nworkspace = true\n"));
+    }
+
+    #[test]
+    fn a_manifest_without_a_lints_section_does_not_opt_in() {
+        assert!(!opts_into_workspace_lints("[package]\nname = \"x\"\n"));
+    }
+
+    #[test]
+    fn a_lints_section_that_does_not_inherit_the_workspace_does_not_opt_in() {
+        assert!(!opts_into_workspace_lints("[lints]\nworkspace = false\n"));
+    }
+
+    /// `edition.workspace = true` under `[package]` is the common idiom and must
+    /// not read as a lints opt-in — the key has to sit *inside* `[lints]`.
+    #[test]
+    fn a_workspace_key_in_another_section_is_not_a_lints_opt_in() {
+        assert!(!opts_into_workspace_lints("[package]\nedition.workspace = true\n"));
+        assert!(!opts_into_workspace_lints("[dependencies]\nworkspace = true\n"));
+    }
+
+    /// The `[lints]` section ends at the next section header.
+    #[test]
+    fn a_workspace_key_after_the_lints_section_closes_does_not_count() {
+        assert!(!opts_into_workspace_lints("[lints]\n\n[dependencies]\nworkspace = true\n"));
+    }
+
+    #[test]
+    fn a_crate_missing_the_opt_in_is_reported() {
+        let gaps = lints_optin_gaps(&[("collector", "[package]\n".to_string())], &[])
+            .expect("valid policy");
+        assert_eq!(gaps, vec!["collector"]);
+    }
+
+    #[test]
+    fn a_crate_with_the_opt_in_is_not_reported() {
+        let gaps =
+            lints_optin_gaps(&[("collector", "[lints]\nworkspace = true\n".to_string())], &[])
+                .expect("valid policy");
+        assert!(gaps.is_empty(), "opted-in crate should not be reported: {gaps:?}");
+    }
+
+    #[test]
+    fn an_exempt_crate_missing_the_opt_in_is_not_reported() {
+        let gaps = lints_optin_gaps(&[("kernel", "[package]\n".to_string())], &[(
+            "kernel",
+            "register idioms",
+        )])
+        .expect("valid policy");
+        assert!(gaps.is_empty(), "exempt crate should not be reported: {gaps:?}");
+    }
+
+    #[test]
+    fn an_exemption_naming_a_departed_crate_is_an_error() {
+        let err = lints_optin_gaps(&[("collector", "[package]\n".to_string())], &[(
+            "kernel-core",
+            "gone",
+        )])
+        .expect_err("stale exemption must fail");
+        assert!(err.contains("kernel-core"), "error should name the stale entry: {err}");
+    }
+
+    /// The real gate: every workspace member either inherits the workspace lint
+    /// table or has a written reason not to. `[lints] workspace = true` is
+    /// structurally per-crate — cargo has no workspace-wide inheritance — so this
+    /// test is the only thing standing between the policy and silent drift.
+    #[test]
+    fn every_workspace_member_opts_in_or_has_a_written_reason() {
+        let manifests = super::workspace_manifests().expect("cargo metadata");
+        let borrowed: Vec<(&str, String)> =
+            manifests.iter().map(|(name, text)| (name.as_str(), text.clone())).collect();
+        let gaps = lints_optin_gaps(&borrowed, LINTS_EXEMPT).expect("committed list is current");
+        assert!(
+            gaps.is_empty(),
+            "these crates neither opt into the workspace lints nor have a LINTS_EXEMPT reason: {gaps:?}"
+        );
     }
 }
 

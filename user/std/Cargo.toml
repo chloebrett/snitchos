@@ -12,3 +12,8 @@ publish = false
 
 [dependencies]
 snitchos-user = { path = "../runtime" }
+
+# Riscv-only, but a std-shaped facade is ordinary Rust — it takes the workspace
+# pedantic lints cleanly, so it opts in rather than joining `LINTS_EXEMPT`.
+[lints]
+workspace = true

@@ -6,12 +6,22 @@ members = ["kernel", "kernel-mem", "kernel-obs", "kernel-devices", "kernel-boot"
 # never participates in the no_std/riscv64 kernel build.
 exclude = ["learning"]
 
-# Host-crate lint policy. Opt in per crate via `[lints] workspace = true`
-# (the kernel-{mem,obs,devices,boot,proc} crates, protocol, collector, xtask,
-# itest-harness). Pedantic as a
-# whole is `warn` — surface idiom hints without blocking the red-green loop.
-# The bare-metal `kernel` crate does NOT opt in (full pedantic fights
-# register/address idioms).
+# Workspace lint policy. Pedantic as a whole is `warn` — surface idiom hints
+# without blocking the red-green loop.
+#
+# **Every member opts in** via `[lints] workspace = true`, except the three on
+# `LINTS_EXEMPT` (`xtask/src/itest.rs`): `kernel`, `hello` and `fs`, where full
+# pedantic fights the register/address idioms bare-metal code is built from.
+# Cargo has no workspace-wide lint inheritance — the key is structurally
+# per-crate, so omitting it is invisible. Don't keep the roster here: this
+# comment listed nine opt-ins long after there were twenty-plus, which is
+# exactly the drift that let `snitchos-user`, `snitchos-std` and
+# `snitchos-user-macros` sit un-linted. The
+# `every_workspace_member_opts_in_or_has_a_written_reason` test is the roster
+# now, and it fails when a new crate forgets.
+#
+# Being riscv-only is NOT itself a reason: `snitchos-user` and `snitchos-std`
+# are bare-metal too and take the lints cleanly. Idiom friction is the test.
 #
 # Allowed members are the boilerplate-tax ones and the `cast_*` family. The
 # casts earned their `allow` empirically: this codebase does so much

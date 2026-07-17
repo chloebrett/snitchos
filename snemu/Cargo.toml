@@ -8,16 +8,19 @@ publish = false
 # Host-side telemetry decode: the binary turns the bytes snemu pulls off the
 # virtio-console back into `Frame`s. The emulator core (`lib`) stays decoupled.
 protocol = { path = "../protocol", features = ["std"] }
-# CLI arg parsing for the `snemu` binary (the lib is arg-free).
-clap = { version = "4", features = ["derive"] }
 
-# Backend B (native block JIT, host-only): `mmap`/`MAP_JIT` for executable memory.
-# Only the JIT module uses it; the interpreter core stays dependency-free and
-# `unsafe`-free. Scoped off wasm (the browser path is Backend A only).
+# `clap`: CLI arg parsing for the `snemu` binary (the lib is arg-free), so it is
+# dead weight in a wasm build — the browser embeds the *lib*, and there is no
+# argv in a tab. Scoped off wasm32 for the same reason `libc`/`minifb` are.
+#
+# Backend B (native block JIT, aarch64+macos only): `mmap`/`MAP_JIT` for
+# executable memory. Only the JIT module uses it; the interpreter core stays
+# dependency-free and `unsafe`-free.
 #
 # `minifb`: the `--window` CLI flag's live framebuffer display (main.rs only,
 # not the lib). Windowing is meaningless in a wasm build — scoped off it too.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 minifb = "0.27"
 
