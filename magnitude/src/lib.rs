@@ -13,7 +13,7 @@ const SUFFIXES: [(char, u64); 3] = [('B', 1_000_000_000), ('M', 1_000_000), ('K'
 
 /// Parse a count: bare digits (`1200000000`, `1_200_000_000`) or a decimal with
 /// a `K`/`M`/`B` suffix (`400M`, `1.2B`). Case-insensitive. Fractions must land
-/// on a whole unit — `1.5M` is 1_500_000, but `1.0000001M` is an error rather
+/// on a whole unit — `1.5M` is `1_500_000`, but `1.0000001M` is an error rather
 /// than a silent round.
 pub fn parse(text: &str) -> Result<u64, String> {
     let reject = || format!("invalid number `{text}` (expected e.g. `400M`, `1.2B`, `1200000000`)");

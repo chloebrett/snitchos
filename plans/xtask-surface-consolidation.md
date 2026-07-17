@@ -493,7 +493,58 @@ result; a reproducibility test (same tree → same instret).
 
 ---
 
-## Phase 3 — untangle the frame sources in `View`
+## Phase 3 — untangle the frame sources in `View` — 🟡 PART DONE
+
+**The enum landed** (decision: enum, not trait — the set is closed at three, and
+we'd already withdrawn the `qemu-itest` crate the trait was for). `View`'s
+`live: Option<LiveSnemu>` + `batch: bool` + `quiet: bool` + `input` + `log_path`
++ `recorder`/`cursor` are now one `source: FrameSource` field:
+
+```rust
+struct Streamed { recorder: Arc<Recorder>, cursor: usize }
+enum FrameSource {
+    Qemu { stream: Streamed, input: Arc<Mutex<Option<ChildStdin>>>, log_path: PathBuf },
+    Replay { stream: Streamed },
+    Live(LiveSnemu),
+}
+```
+
+What it bought, concretely:
+
+- **Three dummy fields per constructor are gone.** `View::live` and `View::replay`
+  each built an empty `Recorder`, a `Mutex::new(None)` stdin, and an empty
+  `PathBuf` log — meaningless values that existed only to satisfy the struct.
+- **`batch` and `quiet` were always equal** — both `false` for QEMU, both `true`
+  for replay and live. Two booleans that had never disagreed, both secretly
+  meaning "not QEMU". Now derived (`is_batch()`/`is_quiet()`), so they *can't*
+  disagree. `live: Some` + `batch: false` is no longer representable.
+- **Two error messages stopped lying.** `send_input` on a replay view blamed
+  "QEMU stdin was not piped" (wrong engine); `wait_for_log` on a replay view
+  polled an empty `PathBuf` for the full budget and then blamed the log. Both now
+  say what's actually true, and `wait_for_log` fails fast instead of burning the
+  budget.
+
+**Verification** (this was a REFACTOR under green, not RED-first — see the caveat
+below): `cargo test -p xtask` 116/116, clippy clean, no dead code, and
+`snemu-itest` 119/120 — the one failure (`supervised-regrants-caps-on-restart`,
+"the intensity guard never tripped Escalate") is unrelated in-flight supervision
+work, confirmed by the user, not the refactor.
+
+### the caveat: the enum costs the plan's chosen proof
+
+The RED this phase specified — *a `View` driven by a fake frame source* — is a
+**trait** affordance. With an enum, a test double needs a `#[cfg(test)]` variant.
+So this landed as a behaviour-preserving refactor guarded by the existing suite
+(116 unit + 120 scenarios) rather than proven by a new test. That's a legitimate
+REFACTOR, but a weaker proof than "the fake source compiles and drives it".
+
+**Still open:** `View` remains one type with per-variant `match`es rather than
+per-backend behaviour, so QEMU is *tidier* but not yet *liftable*. If a
+`qemu-itest` crate ever becomes a real goal (it isn't today — the quarantine was
+withdrawn), revisit trait-vs-enum then; the enum is a strictly better starting
+point than the `Option` was.
+
+
 
 **This is the important one**, and it's the enabling refactor everything else
 kept bumping into. It is *not* a consolidation step — it's a design fix that the

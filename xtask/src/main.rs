@@ -321,9 +321,17 @@ enum Cmd {
     },
     /// Run every host-side check across the workspace: the unit tests
     /// (the `kernel-*` crates, `protocol --features std`, `collector`, …), the
-    /// loom model-check tests (a separate `--cfg loom` compilation), and
-    /// the generated-diagram drift check. Fast (~1s). Doesn't touch QEMU.
+    /// loom model-check tests (a separate `--cfg loom` compilation), the
+    /// generated-diagram drift check, and the doc-link check. Fast (~1s).
+    /// Doesn't touch QEMU.
     Test,
+    /// Check that every relative `.md` link in the repo resolves.
+    ///
+    /// Also runs inside `cargo xtask test`; standalone here because it's
+    /// instant and the thing you want right after a `git mv`. A moved doc
+    /// breaks links both ways: inbound links still name the old path, and the
+    /// moved file's own `../` links now resolve one directory too high.
+    Links,
     /// Run kernel integration tests in QEMU.
     ///
     /// Runs integration only — it does **not** run the host-side checks
@@ -1000,6 +1008,7 @@ fn main() -> ExitCode {
         }
         Cmd::Stack { cmd } => stack(cmd),
         Cmd::Test => itest::run_unit_tests(),
+        Cmd::Links => links::check(),
         Cmd::ItestShow { run, scenario, tail, grep } => {
             itest::show(run.as_deref(), scenario.as_deref(), tail, grep.as_deref())
         }

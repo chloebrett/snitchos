@@ -67,6 +67,70 @@ the `project_userspace_defined_metrics` memory.
   `userspace-bad-ptr` itest (a new `bad-ptr` probe program passes an unmapped VA
   to `DebugWrite`; the kernel refuses and the process survives).
 
+## Correctness gaps
+
+### #12 — `elf::parse` doesn't bound `mem_size` *(security, small)*
+
+`kernel-proc/src/elf.rs` validates `file_size <= mem_size` and that the file
+range is in-bounds, but **nothing caps `mem_size`**. An image declaring
+`mem_size = 2^60` makes `elf::page_perms` build a `BTreeMap` with ~2^48 entries
+— the kernel hangs (or OOMs) before ever allocating a frame.
+
+This contradicts the module's own stated contract: *"a trust boundary … every
+field is validated and a malformed image yields an `ElfError`, never a panic."*
+A hang is worse than a panic. Pre-existing (the old `load` had the same unbounded
+`pages_of`), and surfaced by 4 mutation TIMEOUTs in `pages_of` — the mutants that
+enlarge the page range don't fail, they just never finish, which is the same
+shape as the bug.
+
+Live the moment v0.10 loads an image from the filesystem rather than an embedded
+one. Fix is a bound + a test; sits naturally beside the W^X guard already in
+`page_perms`.
+
+### #13 — `MmioRegions` + `satp` encode/decode are still kernel-side *(small)*
+
+Both are pure and host-testable, found by the `kernel/` sweep during the
+kernel-core split and never extracted (see `plans/legacy/kernel-core-split.md`):
+
+- `MmioRegions` (`kernel/src/mem/mmu.rs:33-66`, ~35 lines) — aligns-then-dedups
+  to 2 MiB and **silently clamps at 16 entries**. Tests would pin the
+  align/compare order (flip it and two devices in one 2 MiB region burn two boot
+  page-table slots) and the documented drop-on-overflow.
+- `satp_for` / the PPN decode in `current_satp_root` (`:456,465`, ~10 lines) — a
+  round-trip test would pin the mode-shift and PPN-mask constants *together*.
+  They live 10 lines apart today with nothing asserting they agree; a wrong shift
+  silently loads the wrong address space.
+
+Both land in `kernel-mem`.
+
+## Tooling gaps
+
+### #14 — `cargo doc` isn't in the gate *(small)*
+
+Broken intra-doc links rot silently: `kernel-obs/src/intern.rs` has two
+(`[`register_or_lookup`]`, `[`release`]` — bare method links need `Self::`) that
+have presumably been dead for a while, because nothing runs `cargo doc`. Adding
+it to `xtask test` catches the class rather than the instances. Expect a first
+pass to surface a backlog.
+
+### #15 — `xtask mutants` can't be scoped to one crate *(small)*
+
+`run_mutants` passes `--features protocol/std,stitch/testing` for the whole crate
+set. cargo-mutants narrows to the owning package per mutant, so any `-f`/`-p`
+filter fails the baseline with *"the package 'kernel-proc' does not contain this
+feature: stitch/testing"*. Whole-workspace runs are fine; scoping to one file —
+the normal way to use it during the mandated MUTATE step — is not. Worked around
+today by invoking `cargo mutants -p <crate> -f <file>` directly.
+
+### #16 — Userspace pinned to opt-1 to dodge a UB class *(latent, hard)*
+
+`kernel/build.rs` builds the embedded userspace with
+`--config profile.release.opt-level=1` because there's a latent opt≥2 UB class in
+the userspace crates (talc OOM-loop → hang; confirmed in `snitchos-user`, at
+least one more crate). The itest speedup is kernel-dominated, so the pin costs
+~nothing — but it's a real bug being routed around, not fixed. Repro:
+`cargo xtask snemu-itest --opt high`.
+
 ## Deferred placeholders (Tier 3)
 
 ### #7 — Capability generation / revocation

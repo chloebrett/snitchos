@@ -732,8 +732,17 @@ fn unit_test_plan<'a>(
 /// loom model-checks, and the generated-diagram drift check. Returns `SUCCESS`
 /// only if all pass. Bails out on first failure (no point continuing if a
 /// foundation crate is broken).
+/// Width of the [`progress_bar`] gauge, in characters (excluding the brackets).
+const BAR_WIDTH: usize = 20;
+
+/// An ASCII completion gauge: `[#####...............]`. Truncating division means
+/// a bar only reads full at `done == total`, so "full" always means finished.
+fn progress_bar(done: usize, total: usize, width: usize) -> String {
+    let filled = if total == 0 { 0 } else { done * width / total };
+    format!("[{}{}]", "#".repeat(filled), ".".repeat(width - filled))
+}
+
 pub fn run_unit_tests() -> ExitCode {
-    eprintln!("=== unit tests ===");
     let members = match workspace_members() {
         Ok(m) => m,
         Err(e) => {
@@ -749,10 +758,15 @@ pub fn run_unit_tests() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    for (crate_name, extra_args) in plan {
-        let mut args = vec!["test", "-p", crate_name, "--quiet"];
+    // +1 for the loom model-check below: the gauge counts every cargo suite the
+    // section runs, so it reaches full exactly when the section is done.
+    let total = plan.len() + 1;
+    eprintln!("=== unit tests ({total} suites) ===");
+    for (done, (crate_name, extra_args)) in plan.iter().enumerate() {
+        let mut args = vec!["test", "-p", *crate_name, "--quiet"];
         args.extend_from_slice(extra_args);
-        if !run_cargo_test(crate_name, &args, &[]) {
+        let label = format!("{} {:>2}/{total} {crate_name}", progress_bar(done, total, BAR_WIDTH), done + 1);
+        if !run_cargo_test(&label, &args, &[]) {
             return ExitCode::from(1);
         }
     }
@@ -762,8 +776,10 @@ pub fn run_unit_tests() -> ExitCode {
     // normal `cargo test` compiles the file to nothing. The config-level
     // rustflags are riscv-target-scoped, so overriding RUSTFLAGS for this
     // host build clobbers nothing.
+    let label =
+        format!("{} {total:>2}/{total} kernel-devices (loom)", progress_bar(total - 1, total, BAR_WIDTH));
     if !run_cargo_test(
-        "kernel-devices (loom)",
+        &label,
         &["test", "-p", "kernel-devices", "--test", "loom_tx", "--quiet"],
         &[("RUSTFLAGS", "--cfg loom")],
     ) {
@@ -849,6 +865,45 @@ fn detect_stale_qemus() -> Vec<u32> {
                 .unwrap_or_default()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::progress_bar;
+
+    #[test]
+    fn an_unstarted_run_shows_an_empty_bar() {
+        assert_eq!(progress_bar(0, 4, 8), "[........]");
+    }
+
+    #[test]
+    fn a_finished_run_shows_a_full_bar() {
+        assert_eq!(progress_bar(4, 4, 8), "[########]");
+    }
+
+    #[test]
+    fn progress_fills_proportionally() {
+        assert_eq!(progress_bar(2, 4, 8), "[####....]");
+        assert_eq!(progress_bar(1, 4, 8), "[##......]");
+    }
+
+    #[test]
+    fn the_bar_is_always_its_stated_width() {
+        for done in 0..=7 {
+            assert_eq!(progress_bar(done, 7, 12).len(), 14, "done={done}");
+        }
+    }
+
+    /// Partial progress must never render as finished — a full bar means done.
+    #[test]
+    fn progress_short_of_the_end_never_looks_full() {
+        assert_eq!(progress_bar(6, 7, 12), "[##########..]");
+    }
+
+    #[test]
+    fn an_empty_plan_does_not_divide_by_zero() {
+        assert_eq!(progress_bar(0, 0, 4), "[....]");
+    }
 }
 
 #[cfg(test)]

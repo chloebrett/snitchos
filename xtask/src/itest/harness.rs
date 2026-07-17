@@ -250,13 +250,78 @@ pub struct Boot {
 /// The frame-assertion API scenarios use: `wait_for`, `assert_absent`,
 /// `name_of`, `send_input`, `wait_for_log`. The executor reads `max_wait()` /
 /// `take_capture()` afterwards to build the scenario's report.
-pub struct View {
-    /// Shared with the owning `Boot`; retained so a `View` can keep
-    /// scanning buffered frames even after `Boot` drops (kills QEMU).
+/// A cursor over a recorded frame stream — the state the QEMU and replay paths
+/// share. `recorder` is retained (not borrowed) so a `View` can keep scanning
+/// buffered frames after its `Boot` drops and kills QEMU. `cursor` is this
+/// view's own position: several `View`s replay one boot independently.
+struct Streamed {
     recorder: Arc<Recorder>,
-    /// This view's position in `recorder.buf.frames`. Advancing it is
-    /// what `wait_for` does; `absorb` runs once per frame stepped over.
     cursor: usize,
+}
+
+/// Where a `View`'s frames come from — and so, what console it can reach.
+///
+/// Each variant carries only the state that variant actually has. Before this
+/// was an enum, `View` held `live: Option<LiveSnemu>` *plus* `batch: bool` *plus*
+/// a QEMU stdin handle and log path, and both non-QEMU constructors filled the
+/// QEMU fields with dummies (an empty `Recorder`, `Mutex::new(None)`, an empty
+/// `PathBuf`). Nonsense states like `live: Some` + `batch: false` were
+/// representable; now they aren't, and the budget semantics live on the type
+/// that owns them rather than in a comment beside an `Option`.
+enum FrameSource {
+    /// A live QEMU process: frames arrive on `Boot`'s reader thread, console
+    /// input is the process's stdin (the `-nographic` serial console), and
+    /// console output lands in a log file `wait_for_log` polls. The only source
+    /// whose stream can end *inconclusively* — a mid-run death.
+    Qemu {
+        stream: Streamed,
+        /// Shared write end of QEMU's stdin, for [`View::send_input`].
+        input: Arc<Mutex<Option<ChildStdin>>>,
+        /// This boot's QEMU log (kernel + userspace UART) — the only way to
+        /// assert on `ConsoleWrite` output, which never becomes a frame.
+        log_path: PathBuf,
+    },
+    /// A closed, pre-collected stream with no guest behind it. `wait_for`
+    /// resolves instantly; there is no stdin and no UART log, so scenarios
+    /// needing console I/O fail — exactly the fidelity gap the audit looks for.
+    Replay { stream: Streamed },
+    /// An in-process snemu machine, stepped on demand: input is fed reactively
+    /// and `wait_for` steps until the next frame, so interactive scenarios run
+    /// for real. Bounded by guest instret, not the wall clock.
+    Live(LiveSnemu),
+}
+
+impl FrameSource {
+    /// A *closed* stream: reaching its end means "the whole run was scanned and
+    /// the frame never appeared" — a clean absence, not the inconclusive mid-run
+    /// disconnect a live QEMU death would be. Derived from the variant, so it can
+    /// no longer disagree with it.
+    fn is_batch(&self) -> bool {
+        !matches!(self, FrameSource::Qemu { .. })
+    }
+
+    /// Suppress the per-scenario timeout/disconnect frame-tail dumps: the
+    /// fidelity audit runs many scenarios against closed streams, so every miss
+    /// would dump a tail and the summary report stands in for it. (Historically a
+    /// separate `quiet` flag that was always equal to `batch` — both really meant
+    /// "not QEMU".)
+    fn is_quiet(&self) -> bool {
+        !matches!(self, FrameSource::Qemu { .. })
+    }
+
+    /// The live machine, for the accessors that only mean something with a guest
+    /// (`console_output`, `guest_instret`, `ram_high_water`).
+    fn live(&self) -> Option<&LiveSnemu> {
+        match self {
+            FrameSource::Live(live) => Some(live),
+            _ => None,
+        }
+    }
+}
+
+pub struct View {
+    /// Where frames come from, and what console this view can reach.
+    source: FrameSource,
     strings: StringTable,
     /// Rolling window of the last few frames received. Printed on
     /// timeout so failures say "boot reached Hello + `SpanStart`, then
@@ -290,28 +355,6 @@ pub struct View {
     /// `assert_absent` and drained by the executor (`take_capture`) into
     /// the scenario's `ScenarioReport`. Replaces the old thread-local.
     captured: Option<FailureCapture>,
-    /// Shared write end of QEMU's stdin, for [`send_input`](Self::send_input).
-    input: Arc<Mutex<Option<ChildStdin>>>,
-    /// This boot's QEMU log (kernel + userspace UART output), for
-    /// [`wait_for_log`](Self::wait_for_log) — the only way to assert on-target
-    /// `ConsoleWrite` output, which goes to the UART, not the telemetry stream.
-    log_path: PathBuf,
-    /// Suppress the per-scenario timeout/disconnect frame-tail dumps. Set by
-    /// batch [`replay`](Self::replay): the fidelity audit runs many scenarios
-    /// against a closed stream, so every miss would dump a tail — the summary
-    /// report stands in for it. The live QEMU path leaves this `false`.
-    quiet: bool,
-    /// Batch-replay mode (a closed, pre-collected stream). Changes the meaning of
-    /// reaching the stream's end in [`assert_absent`]: for a fixed-budget capture,
-    /// "the whole run was scanned and the bad frame never appeared" is a valid
-    /// *clean absence*, not the inconclusive mid-run disconnect a live QEMU death
-    /// would be. `false` for the live path.
-    batch: bool,
-    /// When `Some`, frames come from stepping this snemu machine on demand rather
-    /// than from `recorder` — the interactive path (`send_input` reaches a real
-    /// UART). `None` for QEMU and batch replay. A live view is also `batch` (its
-    /// budget-exhaustion is a clean end, like a closed capture).
-    live: Option<LiveSnemu>,
     /// The console injections this scenario has performed, tagged by guest instret
     /// — the scenario's *branch key* for the snapshot tree. Empty ⇒ observe-only ⇒
     /// eligible for the zero-input collapse. Only the live path records (that's the
@@ -412,8 +455,11 @@ impl Boot {
     /// same boot independently (the shared-boot case).
     pub fn view(&self) -> View {
         View {
-            recorder: Arc::clone(&self.recorder),
-            cursor: 0,
+            source: FrameSource::Qemu {
+                stream: Streamed { recorder: Arc::clone(&self.recorder), cursor: 0 },
+                input: Arc::clone(&self.input),
+                log_path: self.log_path.clone(),
+            },
             strings: HashMap::new(),
             recent: VecDeque::new(),
             max_wait: (Duration::ZERO, Duration::ZERO),
@@ -424,11 +470,6 @@ impl Boot {
             last_t_per_hart: BTreeMap::new(),
             workload: self.workload.clone(),
             captured: None,
-            input: Arc::clone(&self.input),
-            log_path: self.log_path.clone(),
-            quiet: false,
-            batch: false,
-            live: None,
             branch_key: super::snapshot_tree::BranchKey::default(),
         }
     }
@@ -458,8 +499,9 @@ impl View {
     /// this path (a live view shares its `batch` semantics).
     pub(crate) fn replay(frames: Vec<OwnedFrame>) -> Self {
         View {
-            recorder: Arc::new(Recorder::from_closed(frames)),
-            cursor: 0,
+            source: FrameSource::Replay {
+                stream: Streamed { recorder: Arc::new(Recorder::from_closed(frames)), cursor: 0 },
+            },
             strings: HashMap::new(),
             recent: VecDeque::new(),
             max_wait: (Duration::ZERO, Duration::ZERO),
@@ -470,11 +512,6 @@ impl View {
             last_t_per_hart: BTreeMap::new(),
             workload: None,
             captured: None,
-            input: Arc::new(Mutex::new(None)),
-            log_path: PathBuf::new(),
-            quiet: true,
-            batch: true,
-            live: None,
             branch_key: super::snapshot_tree::BranchKey::default(),
         }
     }
@@ -487,8 +524,7 @@ impl View {
     /// end, like a closed capture).
     pub(crate) fn live(machine: snemu::machine::Machine, max_steps: u64) -> Self {
         View {
-            recorder: Arc::new(Recorder::from_closed(Vec::new())),
-            cursor: 0,
+            source: FrameSource::Live(LiveSnemu::new(machine, max_steps)),
             strings: HashMap::new(),
             recent: VecDeque::new(),
             max_wait: (Duration::ZERO, Duration::ZERO),
@@ -499,11 +535,6 @@ impl View {
             last_t_per_hart: BTreeMap::new(),
             workload: None,
             captured: None,
-            input: Arc::new(Mutex::new(None)),
-            log_path: PathBuf::new(),
-            quiet: true,
-            batch: true,
-            live: Some(LiveSnemu::new(machine, max_steps)),
             branch_key: super::snapshot_tree::BranchKey::default(),
         }
     }
@@ -515,29 +546,39 @@ impl View {
     /// via `ConsoleRead`. Wait for the program to be reading (e.g. an "alive"
     /// marker) before injecting, or early bytes can be dropped.
     pub fn send_input(&mut self, bytes: &[u8]) -> Result<(), String> {
-        if let Some(live) = self.live.as_mut() {
-            // Tap the injection into the scenario's branch key before feeding it:
-            // the guest instret *now* is the fork point where this scenario
-            // diverges from its observe-only siblings. A non-empty key marks the
-            // scenario ineligible for the zero-input collapse.
-            //
-            // On the *first* injection also capture the machine state hash — the fork
-            // point's content address, which lets a later run verify that the
-            // materialised fork node really is the state this scenario coincides at.
-            // Only on the first (the hash is O(written RAM), and the fork node sits
-            // before any input anyway).
-            if self.branch_key.fork_state_hash().is_none() {
-                let hash = live.machine.state_hash();
-                self.branch_key.set_fork_hash(hash);
+        match &mut self.source {
+            FrameSource::Live(live) => {
+                // Tap the injection into the scenario's branch key before feeding it:
+                // the guest instret *now* is the fork point where this scenario
+                // diverges from its observe-only siblings. A non-empty key marks the
+                // scenario ineligible for the zero-input collapse.
+                //
+                // On the *first* injection also capture the machine state hash — the fork
+                // point's content address, which lets a later run verify that the
+                // materialised fork node really is the state this scenario coincides at.
+                // Only on the first (the hash is O(written RAM), and the fork node sits
+                // before any input anyway).
+                if self.branch_key.fork_state_hash().is_none() {
+                    let hash = live.machine.state_hash();
+                    self.branch_key.set_fork_hash(hash);
+                }
+                self.branch_key.record(live.machine.instret(), bytes);
+                live.machine.push_console_input(bytes);
+                Ok(())
             }
-            self.branch_key.record(live.machine.instret(), bytes);
-            live.machine.push_console_input(bytes);
-            return Ok(());
+            FrameSource::Qemu { input, .. } => {
+                let mut guard = input.lock().map_err(|_| "input mutex poisoned".to_string())?;
+                let stdin = guard.as_mut().ok_or("QEMU stdin was not piped")?;
+                stdin.write_all(bytes).map_err(|e| format!("write to QEMU stdin: {e}"))?;
+                stdin.flush().map_err(|e| format!("flush QEMU stdin: {e}"))
+            }
+            // A closed stream has no guest to read the bytes. Previously this fell
+            // through to the QEMU arm and surfaced as "QEMU stdin was not piped",
+            // which named the wrong engine.
+            FrameSource::Replay { .. } => {
+                Err("send_input on a batch-replay view: no guest to receive it".to_string())
+            }
         }
-        let mut guard = self.input.lock().map_err(|_| "input mutex poisoned".to_string())?;
-        let stdin = guard.as_mut().ok_or("QEMU stdin was not piped")?;
-        stdin.write_all(bytes).map_err(|e| format!("write to QEMU stdin: {e}"))?;
-        stdin.flush().map_err(|e| format!("flush QEMU stdin: {e}"))
     }
 
     /// This scenario's branch key — the console injections it performed, tagged by
@@ -554,8 +595,8 @@ impl View {
     /// self-explaining instead of needing a manual re-run. `None` for the QEMU
     /// path (its console is already in the per-scenario log file).
     pub(crate) fn console_output(&self) -> Option<String> {
-        self.live
-            .as_ref()
+        self.source
+            .live()
             .map(|live| String::from_utf8_lossy(live.machine.uart_output()).into_owned())
     }
 
@@ -565,13 +606,13 @@ impl View {
     /// a block collapses). `None` for the QEMU / replay paths, which don't step a
     /// machine. The metric the audit sorts by to find CPU-heavy scenarios.
     pub(crate) fn guest_instret(&self) -> Option<u64> {
-        self.live.as_ref().map(|live| live.machine.instret())
+        self.source.live().map(|live| live.machine.instret())
     }
 
     /// Peak guest RAM footprint (`Machine::ram_high_water`) reaching the scenario's
     /// assertion — for right-sizing each workload's machine. `None` for QEMU/replay.
     pub(crate) fn ram_high_water(&self) -> Option<u64> {
-        self.live.as_ref().map(|live| live.machine.ram_high_water())
+        self.source.live().map(|live| live.machine.ram_high_water())
     }
 
     /// Block up to `budget` for the guest's UART output to contain `needle`. This
@@ -586,14 +627,25 @@ impl View {
         // there — those views never collapse) so the signal is captured wherever the
         // scenario body runs.
         self.branch_key.mark_console_read();
-        if let Some(live) = self.live.as_mut() {
-            return if live.wait_for_uart(needle) {
-                Ok(())
-            } else {
-                Err(format!("UART output never contained {needle:?} within the step budget"))
-            };
-        }
-        if poll_file_for(&self.log_path, needle, Instant::now() + budget) {
+        let log_path = match &mut self.source {
+            FrameSource::Live(live) => {
+                return if live.wait_for_uart(needle) {
+                    Ok(())
+                } else {
+                    Err(format!("UART output never contained {needle:?} within the step budget"))
+                };
+            }
+            FrameSource::Qemu { log_path, .. } => log_path.clone(),
+            // No guest wrote a UART log. Previously this polled an empty `PathBuf`
+            // for the full budget and then blamed the log; say what's actually true.
+            FrameSource::Replay { .. } => {
+                return Err(format!(
+                    "wait_for_log({needle:?}) on a batch-replay view: a recorded \
+                     telemetry stream carries no UART output"
+                ));
+            }
+        };
+        if poll_file_for(&log_path, needle, Instant::now() + budget) {
             Ok(())
         } else {
             Err(format!(
@@ -654,14 +706,16 @@ impl View {
         // wait. The next frame comes from stepping the machine; a spent budget is
         // an end-of-stream (`Disconnected`), which — being `batch` — reads as a
         // clean miss for `wait_for` and a clean window for `assert_absent`.
-        if let Some(live) = self.live.as_mut() {
-            return match live.next_frame() {
+        match &mut self.source {
+            FrameSource::Live(live) => match live.next_frame() {
                 Some(frame) => Advance::Frame(frame),
                 None => Advance::Disconnected,
-            };
+            },
+            FrameSource::Qemu { stream, .. } | FrameSource::Replay { stream } => {
+                let recorder = Arc::clone(&stream.recorder);
+                recorder.advance(&mut stream.cursor, deadline)
+            }
         }
-        let recorder = Arc::clone(&self.recorder);
-        recorder.advance(&mut self.cursor, deadline)
     }
 
     /// Negative oracle: assert a "bad" frame never appears within `window`.
@@ -701,7 +755,7 @@ impl View {
                 // capture without the bad frame IS a clean absence — the whole
                 // run was scanned. Only a *live* disconnect (QEMU dying mid-run)
                 // is inconclusive.
-                Advance::Disconnected if self.batch => break Ok(()),
+                Advance::Disconnected if self.source.is_batch() => break Ok(()),
                 Advance::Disconnected => {
                     self.dump_recent("QEMU disconnected");
                     self.record_failure_capture(WaitOutcome::Disconnected);
@@ -837,7 +891,7 @@ impl View {
         // Batch replay (the fidelity audit) runs many scenarios against a
         // closed stream; each miss would dump a tail. The summary report is the
         // signal there, so stay silent.
-        if self.quiet {
+        if self.source.is_quiet() {
             return;
         }
         // The ring may hold up to `TRANSCRIPT_TAIL_FRAMES` (or everything,
