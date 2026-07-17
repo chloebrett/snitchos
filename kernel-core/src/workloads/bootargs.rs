@@ -178,6 +178,11 @@ pub enum WorkloadKind {
     /// `Kill` and is refused (`SyscallRefused{Kill}`) — proving the kill authorization
     /// is real, not ambient. It survives the refusal and reports it.
     KillNoCap,
+    /// Multi-hart userspace de-risk (v2b step 1): a single userspace program placed on
+    /// **hart 0** (userspace normally runs on hart 1). It opens a span; the `SpanStart`
+    /// carries `hart_id == 0`, proving U-mode runs on the boot hart too — the
+    /// foundation for a cross-hart Kill consumer.
+    UserOnHart0,
     /// v0.13 EndpointCreate: a single program manufactures its own IPC endpoint
     /// via the `EndpointCreate` syscall and proves the returned cap is a real
     /// owning `RECV | MINT` by minting a badged `SEND` on it.
@@ -354,6 +359,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "supervised-ipc" => Some(WorkloadKind::SupervisedIpc),
             "supervised-shutdown" => Some(WorkloadKind::SupervisedShutdown),
             "kill-no-cap" => Some(WorkloadKind::KillNoCap),
+            "user-on-hart0" => Some(WorkloadKind::UserOnHart0),
             "endpoint-create" => Some(WorkloadKind::EndpointCreate),
             "demo" => Some(WorkloadKind::Demo),
             "cooperative" => Some(WorkloadKind::Cooperative),
@@ -466,6 +472,11 @@ mod tests {
     #[test]
     fn selects_kill_no_cap() {
         assert_eq!(select("workload=kill-no-cap"), Some(WorkloadKind::KillNoCap));
+    }
+
+    #[test]
+    fn selects_user_on_hart0() {
+        assert_eq!(select("workload=user-on-hart0"), Some(WorkloadKind::UserOnHart0));
     }
 
     #[test]

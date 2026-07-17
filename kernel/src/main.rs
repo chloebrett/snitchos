@@ -455,6 +455,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::SupervisedIpc)
         | Some(WorkloadKind::SupervisedShutdown)
         | Some(WorkloadKind::KillNoCap)
+        | Some(WorkloadKind::UserOnHart0)
         | Some(WorkloadKind::EndpointCreate)
         | Some(WorkloadKind::NotifySmoke)
         | Some(WorkloadKind::Priorities)
@@ -538,6 +539,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::Init
                     | WorkloadKind::Supervised
                     | WorkloadKind::SupervisedIpc
+                    | WorkloadKind::UserOnHart0
                     | WorkloadKind::EndpointCreate
                     | WorkloadKind::UserspaceBadPtr
                     | WorkloadKind::Priorities
@@ -585,8 +587,11 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
             // name it so `hold` shows `for=fs` (see capability-names-design.md).
             crate::ipc::DEMO_ENDPOINT.call_once(|| crate::ipc::create(snitchos_abi::pack_name("fs")));
         }
+        // Userspace normally runs on hart 1 (hart 0 heartbeats). The multi-hart
+        // de-risk places its program on hart 0 instead, to prove U-mode works there.
+        let user_hart = if selected == Some(WorkloadKind::UserOnHart0) { 0 } else { 1 };
         for p in layout.programs {
-            let _ = user::spawn_program(1, p.name, p.program, p.priority);
+            let _ = user::spawn_program(user_hart, p.name, p.program, p.priority);
         }
     }
 

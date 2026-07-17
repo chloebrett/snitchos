@@ -3487,6 +3487,28 @@ pub fn supervised_kill_stops_a_child(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Multi-hart userspace de-risk (v2b step 1) — a userspace process runs on **hart 0**
+/// (`workload=user-on-hart0`). Userspace normally runs on hart 1; the kernel places
+/// this program on hart 0 instead. It opens a span, and the `SpanStart` frame is
+/// emitted by the `SpanOpen` syscall handler on whichever hart is running the task —
+/// so a `hart_id == 0` on that frame proves U-mode works on the boot hart, the
+/// foundation for a cross-hart Kill consumer. If hart-0 U-mode were broken, the span
+/// never reaches the wire.
+pub fn userspace_runs_on_hart_0(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::SpanStart { name_id, hart_id, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("hart_probe.hello") && *hart_id == 0
+        }
+        _ => false,
+    })
+    .ok_or(
+        "no SpanStart{hart_probe.hello, hart_id==0} within 20s — userspace didn't run on hart 0 \
+         (U-mode on the boot hart may be broken)",
+    )?;
+
+    Ok(())
+}
+
 /// Supervision v2a negative — `Kill` is refused without the `Object::Process` cap
 /// (`workload=kill-no-cap`). A lone process holding only its bootstrap caps tries to
 /// `Kill` through a handle it doesn't hold; the kernel refuses

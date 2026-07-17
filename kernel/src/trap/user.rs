@@ -125,6 +125,11 @@ pub static SVC_WORKER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SVC_WORKER_ELF"
 /// ambient. It survives and reports the refusal.
 pub static KILL_NO_CAP_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KILL_NO_CAP_ELF"));
 
+/// The `workload=user-on-hart0` de-risk (v2b step 1): a trivial userspace program the
+/// kernel places on hart 0; it opens a span whose `SpanStart` carries `hart_id == 0`,
+/// proving U-mode runs on the boot hart.
+pub static HART_PROBE_ELF: &[u8] = include_bytes!(env!("SNITCHOS_HART_PROBE_ELF"));
+
 /// The `workload=init` supervising root: spawns a child (delegating its span cap)
 /// and reaps it via `WaitAny` — the delegation-graph root (v0.13).
 pub static INIT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_INIT_ELF"));
@@ -363,6 +368,10 @@ pub static SUPERVISED_SHUTDOWN: ProgramSpec = ProgramSpec { elf: SUPERVISED_SHUT
 /// `workload=kill-no-cap`: the negative — a lone process that tries to `Kill` without
 /// holding a `Process` cap and is refused (Launch::Plain; holds only bootstrap caps).
 pub static KILL_NO_CAP: ProgramSpec = ProgramSpec { elf: KILL_NO_CAP_ELF, launch: Launch::Plain };
+
+/// `workload=user-on-hart0`: the multi-hart de-risk — a trivial program placed on hart
+/// 0 that opens a span (Launch::Plain; holds only bootstrap caps).
+pub static HART_PROBE: ProgramSpec = ProgramSpec { elf: HART_PROBE_ELF, launch: Launch::Plain };
 
 /// `workload=init`: the supervising root — spawns + `WaitAny`-reaps a child,
 /// delegating its span cap downward. Holds only its bootstrap caps (Launch::Plain).
@@ -791,6 +800,12 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::KillNoCap, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "kill_no_cap", program: &KILL_NO_CAP, priority: Priority::Normal }],
+    }),
+    // Multi-hart userspace de-risk (v2b step 1): the launcher places this one on hart
+    // 0 (see `kmain`); it opens a span proving U-mode runs on the boot hart.
+    (WorkloadKind::UserOnHart0, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "hart_probe", program: &HART_PROBE, priority: Priority::Normal }],
     }),
     // v0.13 EndpointCreate: a single program manufactures its own endpoint and
     // proves it by minting — no kernel-created endpoint (`needs_endpoint: false`).
