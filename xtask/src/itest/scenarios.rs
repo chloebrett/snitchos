@@ -3509,6 +3509,47 @@ pub fn userspace_runs_on_hart_0(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Cross-hart Kill (v2b step 4) — a supervisor kills a child *running on another hart*
+/// (`workload=xhart-kill`). The `xhart-killer` runs on hart 1 and `SpawnOn`s a
+/// `hart-spinner` victim onto **hart 0**; the victim proves it reached U-mode there
+/// (`hart_spinner.up` `SpanStart` with `hart_id == 0`) and tight-loops, staying
+/// running. The supervisor then `Kill`s it: since the target is live on another core,
+/// the kill can't reap it out-of-band — it flags the victim + IPIs hart 0, which
+/// self-terminates it at its return-to-user checkpoint. Proof is the unforgeable
+/// `CapEvent::Revoked{Process}` (cap spent) plus the supervisor reaping it
+/// (`xhart.reaped`). Fills the last deferred row of the kill matrix.
+pub fn cross_hart_kill_stops_a_child(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+
+    // The victim reached U-mode on hart 0 — the genuine cross-hart setup (not a
+    // co-located kill).
+    h.wait_for(SEC * 20, |f, strings| match f {
+        OwnedFrame::SpanStart { name_id, hart_id, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("hart_spinner.up") && *hart_id == 0
+        }
+        _ => false,
+    })
+    .ok_or("no hart_spinner.up{hart_id==0} within 20s — the victim didn't run on hart 0")?;
+
+    // The kill spent the lifecycle cap (kernel-emitted, unforgeable).
+    h.wait_for(SEC * 20, |f, _| {
+        matches!(
+            f,
+            OwnedFrame::CapEvent { kind: CapEventKind::Revoked, object: CapObject::Process, .. }
+        )
+    })
+    .ok_or("no CapEvent::Revoked{Process} — the cross-hart kill didn't spend the cap")?;
+
+    // The victim self-terminated on hart 0 and the supervisor reaped it via WaitAny.
+    h.wait_for(SEC * 20, metric_where("snitchos.xhart.reaped", |v| v == 1))
+        .ok_or(
+            "no xhart.reaped == 1 — the cross-hart victim wasn't reaped (the flag/IPI/checkpoint \
+             path may not have honoured the kill)",
+        )?;
+
+    Ok(())
+}
+
 /// Supervision v2a negative — `Kill` is refused without the `Object::Process` cap
 /// (`workload=kill-no-cap`). A lone process holding only its bootstrap caps tries to
 /// `Kill` through a handle it doesn't hold; the kernel refuses

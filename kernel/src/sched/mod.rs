@@ -314,6 +314,12 @@ pub struct Task {
     /// How many times the scheduler has picked this task.
     /// `Relaxed`: counter.
     pub runs: AtomicU64,
+    /// Set by a cross-hart [`kill_task`] (v2b) when this task is running on another
+    /// hart: that hart's trap-return-to-user checkpoint sees it and self-terminates
+    /// the task, the only safe place to reclaim its live stack + `satp`. `Release` on
+    /// set (cross-hart), `Acquire` on the checkpoint read. Never cleared — the task is
+    /// gone the moment it's honoured; a fresh `Task` starts `false`.
+    pub kill_requested: core::sync::atomic::AtomicBool,
     /// Pre-registered metric ids so the heartbeat emit path doesn't
     /// re-format strings per tick. Populated by `spawn` /
     /// `register_bare_task`. Sentinel (`StringId(0)`) under the
@@ -391,6 +397,7 @@ impl Task {
             arg: 0,
             cpu_time_ticks: AtomicU64::new(0),
             runs: AtomicU64::new(0),
+            kill_requested: core::sync::atomic::AtomicBool::new(false),
             cpu_time_metric,
             runs_metric,
             stack_high_water_metric,
@@ -1001,7 +1008,7 @@ fn prepare_switch(
         };
 
         // Incoming task: bump its run count; capture its context + address space.
-        let (next_ctx, next_cursor, next_root, next_proc) = {
+        let (next_ctx, next_cursor, next_root, next_proc, next_kill_flagged) = {
             let task = sched
                 .task_mut(next_id)
                 .expect("prepare_switch: next task missing from table");
@@ -1011,8 +1018,18 @@ fn prepare_switch(
                 core::ptr::from_ref(&task.span_cursor).cast_mut(),
                 task.address_space.load(Ordering::Relaxed),
                 task.process.load(Ordering::Relaxed),
+                task.kill_requested.load(Ordering::Acquire),
             )
         };
+        // If the task we're about to run was flagged for a cross-hart kill (v2b) —
+        // e.g. it descheduled between the flag-set and the IPI — arm this hart's gate
+        // so its next return-to-user checkpoint self-terminates it. Closes the race
+        // the IPI alone would miss.
+        if next_kill_flagged {
+            crate::percpu::this_cpu()
+                .pending_kill_check
+                .store(true, Ordering::Release);
+        }
 
         if disposition.requeues() {
             // The outgoing task re-enters the ready set now — stamp its wait
@@ -1369,9 +1386,11 @@ pub enum KillOutcome {
     AlreadyDead,
     /// The target is the caller itself; that's `Exit`'s job, not `Kill`'s.
     RefusedSelf,
-    /// The target is running on another hart or blocked in a wait structure —
-    /// v2a defers both (see `plans/supervision-v2.md` §3a); handled in v2b.
-    Deferred,
+    /// The target was running on **another hart** (v2b): the kill was *requested*
+    /// asynchronously — it's flagged and its hart IPI'd, and it self-terminates at its
+    /// next return-to-user checkpoint. The caller treats this as success (the cap is
+    /// spent) and reaps via `WaitAny` once the target's hart honours the flag.
+    Requested,
 }
 
 /// Terminate `target`, a task that is **not** the one running (the v2a `Kill`
@@ -1390,19 +1409,22 @@ pub enum KillOutcome {
 /// address space, not the target's) and never `switch`es (it isn't the target). The
 /// target's open spans are abandoned (no `SpanEnd`); its cursor goes inert on reap.
 ///
-/// Self is refused (`Exit`'s job). A target running on **another hart** is **deferred**
-/// to v2b (its live stack + loaded `satp` need an IPI to halt before reap) and refused
-/// cleanly rather than risking a UAF.
+/// Self is refused (`Exit`'s job). A target running on **another hart** can't be reaped
+/// out-of-band (its stack + `satp` are live there), so the kill goes **async** (v2b):
+/// the target is flagged ([`Task::kill_requested`]) and its hart is IPI'd, and it
+/// self-terminates at its next return-to-user checkpoint — returning [`KillOutcome::Requested`].
 pub fn kill_task(target: TaskId) -> KillOutcome {
     let me = crate::percpu::current_hartid();
     let is_self = target == TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
-    // On-CPU on a *different* hart? A live stack + loaded satp there make an
-    // out-of-band reap a UAF, so that's the deferred cross-hart case.
-    let running_remote = CURRENT_TASK
+    // On-CPU on a *different* hart? Capture *which* hart, so we can nudge it. A live
+    // stack + loaded satp there rule out an out-of-band reap → the async cross-hart path.
+    let running_hart = CURRENT_TASK
         .cells()
         .iter()
         .enumerate()
-        .any(|(hart, cell)| hart != me && cell.load(Ordering::Relaxed) == target.0);
+        .find(|(hart, cell)| *hart != me && cell.load(Ordering::Acquire) == target.0)
+        .map(|(hart, _)| hart);
+    let running_remote = running_hart.is_some();
 
     let action = {
         let mut sched = SCHEDULER.lock();
@@ -1420,6 +1442,12 @@ pub fn kill_task(target: TaskId) -> KillOutcome {
             }
             if let Some(task) = sched.task_mut(target) {
                 task.state = TaskState::Exited;
+            }
+        } else if action == KillAction::RefuseRunningRemote {
+            // Cross-hart: flag the target to self-terminate on its own hart. Published
+            // (Release) before the IPI's Release `fetch_or`, so the target hart sees it.
+            if let Some(task) = sched.task_mut(target) {
+                task.kill_requested.store(true, Ordering::Release);
             }
         }
         action
@@ -1441,7 +1469,37 @@ pub fn kill_task(target: TaskId) -> KillOutcome {
         }
         KillAction::NoOp => KillOutcome::AlreadyDead,
         KillAction::RefuseSelf => KillOutcome::RefusedSelf,
-        KillAction::RefuseRunningRemote => KillOutcome::Deferred,
+        KillAction::RefuseRunningRemote => {
+            // Nudge the owning hart to trap promptly and notice the flag (it arms that
+            // hart's `pending_kill_check`, so its trap-return checkpoint self-exits the
+            // target). If the target descheduled since, the scheduler re-arms the gate
+            // when it next runs the flagged task, so the kill isn't lost.
+            if let Some(hart) = running_hart {
+                crate::ipi::send(hart, crate::ipi::IPI_KILL_CHECK);
+            }
+            KillOutcome::Requested
+        }
+    }
+}
+
+/// Terminate the current task **iff** it was flagged for a cross-hart kill
+/// ([`Task::kill_requested`]) — the v2b return-to-user checkpoint. Called from
+/// `trap_handler` on the way back to U-mode, gated by this hart's cheap
+/// `pending_kill_check`, so the scheduler lock is only taken when a kill is actually
+/// pending. On a hit it records the killed status, wakes the target's `WaitAny`
+/// parent, and `exit_now_owned`s — **never returns**. The task dies on its *own* hart,
+/// the only place its live stack + `satp` can be safely reclaimed.
+pub fn exit_if_kill_requested() {
+    let me = TaskId(CURRENT_TASK.this_cpu().load(Ordering::Relaxed));
+    let flagged = {
+        let sched = SCHEDULER.lock();
+        sched.task(me).is_some_and(|t| t.kill_requested.load(Ordering::Acquire))
+    };
+    if flagged {
+        if let Some(parent) = note_exit(me, KILLED_STATUS) {
+            wake(parent);
+        }
+        exit_now_owned(); // never returns
     }
 }
 

@@ -24,7 +24,17 @@ while its supervisor is on hart 1. That cross-hart relationship is what gives
 
 ## Increment breakdown
 
-### Step 1 — prove a userspace process runs on hart 0 (de-risk) ⏳
+### Step 1 — prove a userspace process runs on hart 0 (de-risk) ✅
+
+**Result: passed on the first try — U-mode works on hart 0 with no new kernel work.**
+The `user-on-hart0` workload places `hart-probe` on hart 0 (`user_hart` in the `kmain`
+launcher); it enters U-mode, opens a span, and the `SpanStart` reached the wire tagged
+`hart_id == 0`. Itest `userspace-runs-on-hart-0` green (max wait 0.2s). So the milestone
+foundation is solid: userspace runs on **both** harts. Steps 2–4 are now unblocked and
+should be quick. Shipped: `WorkloadKind::UserOnHart0` + parse (host test), `hart-probe`
+bin, ELF/ProgramSpec/LAYOUTS wiring, launcher `user_hart` placement, itest.
+
+Original plan:
 
 The whole milestone's risk is concentrated here: hart 0 has only ever run kernel tasks
 + the heartbeat, never U-mode. The machinery is per-hart (`CURRENT_PROCESS.this_cpu()`,
@@ -41,14 +51,31 @@ fully-set-up boot hart, arguably lower-risk than hart 1 was. But it's unrun.
 - **Outcome sizes the rest**: if it just works, steps 2–4 follow quickly; if not, it
   surfaces exactly what hart-0 U-mode needs (sscratch/exception-stack/satp/codegen).
 
-### Step 2 — hart-pinned userspace Spawn
+### Step 2 — hart-pinned userspace Spawn ✅
 
-Let a userspace supervisor place a child on a chosen hart (today `Spawn` pins to the
-caller's hart). Options (decide at step 2): a `Spawn` ABI variant carrying a target
-hart, or a dedicated `SpawnOn`. The child lands on the other hart's runqueue + an
-`IPI_WAKEUP` nudges it (as `spawn_on` already does cross-hart).
+Shipped a dedicated **`SpawnOn` syscall** (= 31; `a3` = target hart) rather than
+overloading `Spawn` (existing callers leave `a3` as garbage). Same `a0`/`a1`/`a2` +
+returns as `Spawn`; an out-of-range hart refuses. `handle_spawn`/`handle_spawn_on`
+share a `spawn_registry(frame, sc, hart)` inner. Runtime: `spawn_supervised_on(program,
+handles, hart) -> Option<Child>`. The child lands on the target hart's runqueue + gets
+an `IPI_WAKEUP` (via `spawn_on_with_arg`).
 
-### Step 3 — cross-hart Kill
+### Step 3 — cross-hart Kill ✅
+
+Shipped as designed:
+- `Task.kill_requested: AtomicBool`; `PerHartData.pending_kill_check: AtomicBool` (the
+  cheap gate, placed *after* `exc_stack_top` to keep its hardcoded offset).
+- `IPI_KILL_CHECK` (1 << 2): its handler just arms this hart's `pending_kill_check`.
+- `kill_task`, `running_remote`: set `target.kill_requested` (Release) under the lock +
+  `ipi::send(hart, IPI_KILL_CHECK)`, returns `KillOutcome::Requested`.
+- Checkpoint in `trap_handler` (after the scause match, gated `SPP == 0`): if the gate
+  `swap(false)` is set, `sched::exit_if_kill_requested()` → `note_exit(KILLED)` + wake
+  parent + `exit_now_owned` (never returns). The task dies on its own hart.
+- Race close: `prepare_switch` re-arms the gate when it runs a kill-flagged task, so a
+  target that descheduled between flag-set and IPI still dies at its next return.
+- `handle_kill` treats `Requested` like `Killed` (spend the cap + `CapEvent::Revoked`).
+
+### Step 3 — cross-hart Kill (original notes)
 
 Now reachable: a supervisor on hart 1 kills a child running on hart 0. Async by nature
 (the killer can't touch a task live on another core):
@@ -67,12 +94,18 @@ Now reachable: a supervisor on hart 1 kills a child running on hart 0. Async by 
   target that blocks forever without being woken is the residual edge (rare; a blocked
   target is normally killed synchronously via the v2a/inc-3.5 path anyway).
 
-### Step 4 — itest
+### Step 4 — itest ✅
 
-`workload` with a supervisor on hart 1 and a child on hart 0; the supervisor kills the
-cross-hart child. Assert `CapEvent::Revoked{Process}` + the child reaped, and (ideally)
-that the child was running on hart 0 (a frame tagged `hart_id == 0`) before the kill —
-so the test genuinely exercises the cross-hart path, not a co-located one.
+`workload=xhart-kill`: `xhart-killer` (hart 1) `SpawnOn`s a `hart-spinner` victim to
+hart 0. Scenario `cross-hart-kill-stops-a-child` asserts `hart_spinner.up` `SpanStart`
+with `hart_id == 0` (genuine cross-hart, not co-located), then `CapEvent::Revoked{Process}`
+(cap spent), then `xhart.reaped` (self-terminated on hart 0 + reaped). **Passes in QEMU**
+(max wait 0.7s). No regressions: SMP producer/consumer + supervision v2a still green.
+
+**v2b complete.** All four steps ship and pass. The kill matrix has no deferred rows
+left. Note (probabilistic): the victim tight-loops so it's *running* on hart 0 at the
+kill with high probability (→ the `running_remote` async path); the rare moment it's
+mid-preempt takes the synchronous off-CPU path — both correct, same observable outcome.
 
 ## Deferred / risks
 

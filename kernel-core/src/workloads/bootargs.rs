@@ -183,6 +183,12 @@ pub enum WorkloadKind {
     /// carries `hart_id == 0`, proving U-mode runs on the boot hart too — the
     /// foundation for a cross-hart Kill consumer.
     UserOnHart0,
+    /// Cross-hart Kill (v2b step 4): a supervisor on hart 1 `SpawnOn`s a victim to
+    /// **hart 0**, lets it run, then `Kill`s it — the `running_remote` case. The kill
+    /// flags the victim + IPIs hart 0, which self-terminates it at its return-to-user
+    /// checkpoint; the supervisor reaps it. Proves the last deferred row of the kill
+    /// matrix.
+    XhartKill,
     /// v0.13 EndpointCreate: a single program manufactures its own IPC endpoint
     /// via the `EndpointCreate` syscall and proves the returned cap is a real
     /// owning `RECV | MINT` by minting a badged `SEND` on it.
@@ -360,6 +366,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "supervised-shutdown" => Some(WorkloadKind::SupervisedShutdown),
             "kill-no-cap" => Some(WorkloadKind::KillNoCap),
             "user-on-hart0" => Some(WorkloadKind::UserOnHart0),
+            "xhart-kill" => Some(WorkloadKind::XhartKill),
             "endpoint-create" => Some(WorkloadKind::EndpointCreate),
             "demo" => Some(WorkloadKind::Demo),
             "cooperative" => Some(WorkloadKind::Cooperative),
@@ -477,6 +484,11 @@ mod tests {
     #[test]
     fn selects_user_on_hart0() {
         assert_eq!(select("workload=user-on-hart0"), Some(WorkloadKind::UserOnHart0));
+    }
+
+    #[test]
+    fn selects_xhart_kill() {
+        assert_eq!(select("workload=xhart-kill"), Some(WorkloadKind::XhartKill));
     }
 
     #[test]

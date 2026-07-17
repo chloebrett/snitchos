@@ -456,6 +456,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::SupervisedShutdown)
         | Some(WorkloadKind::KillNoCap)
         | Some(WorkloadKind::UserOnHart0)
+        | Some(WorkloadKind::XhartKill)
         | Some(WorkloadKind::EndpointCreate)
         | Some(WorkloadKind::NotifySmoke)
         | Some(WorkloadKind::Priorities)
@@ -540,6 +541,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::Supervised
                     | WorkloadKind::SupervisedIpc
                     | WorkloadKind::UserOnHart0
+                    | WorkloadKind::XhartKill
                     | WorkloadKind::EndpointCreate
                     | WorkloadKind::UserspaceBadPtr
                     | WorkloadKind::Priorities

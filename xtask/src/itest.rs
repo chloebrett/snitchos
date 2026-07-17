@@ -302,6 +302,7 @@ catalog! {
     cpu "supervised-kill-stops-a-child"   scenarios::supervised_kill_stops_a_child  [userspace]  {"supervised-shutdown"};
     cpu "kill-without-a-process-cap-is-refused" scenarios::kill_without_a_process_cap_is_refused [userspace] {"kill-no-cap"};
     cpu "userspace-runs-on-hart-0"        scenarios::userspace_runs_on_hart_0       [userspace]  {"user-on-hart0"};
+    cpu "cross-hart-kill-stops-a-child"   scenarios::cross_hart_kill_stops_a_child  [userspace]  {"xhart-kill"};
     cpu "endpoint-create-yields-owning-cap" scenarios::endpoint_create_yields_an_owning_cap [userspace] {"endpoint-create"};
     cpu "revoke-reclaims-a-minted-cap"    scenarios::revoke_reclaims_a_minted_cap   [userspace]  {"endpoint-create"};
     cpu "notify-signal-wakes-waiter"      scenarios::notify_signal_wakes_waiter     [userspace]  {"notify-smoke"};

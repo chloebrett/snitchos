@@ -201,6 +201,20 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
         TrapCause::UnknownException(12 | 13 | 15) => handle_kernel_fault(scause),
         other => panic!("unhandled trap: {other:?} (scause={scause:#x})"),
     }
+
+    // v2b cross-hart Kill checkpoint. Only on a return to **U-mode** (SPP == 0) — never
+    // mid-kernel-work, which could hold a lock or leave state half-updated. The cheap
+    // per-hart gate means the scheduler lock is taken only when a kill is actually
+    // pending (armed by the `IPI_KILL_CHECK` handler or the scheduler running a flagged
+    // task), not on every trap. `exit_if_kill_requested` never returns if it fires.
+    let from_user = unsafe { &*frame }.sstatus & SSTATUS_SPP == 0;
+    if from_user
+        && crate::percpu::this_cpu()
+            .pending_kill_check
+            .swap(false, core::sync::atomic::Ordering::Acquire)
+    {
+        crate::sched::exit_if_kill_requested();
+    }
 }
 
 /// An S-mode (kernel) page fault. If `stval` lands in a kernel-stack guard page,

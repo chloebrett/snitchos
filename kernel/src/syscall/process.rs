@@ -68,10 +68,15 @@ pub(super) fn handle_kill(frame: &mut TrapFrame) {
     };
 
     match crate::sched::kill_task(target) {
-        crate::sched::KillOutcome::Killed | crate::sched::KillOutcome::AlreadyDead => {
-            // Spend the lifecycle cap: the object it named is gone. Consume the
-            // holding, then snitch a `Revoked` — creation minted this cap at `Spawn`,
-            // destruction spends it here.
+        // `Requested` is the cross-hart async kill (v2b): the target is flagged + its
+        // hart IPI'd, and it self-terminates at its next return-to-user checkpoint.
+        // The cap is spent the moment the kill is committed, same as a synchronous one.
+        crate::sched::KillOutcome::Killed
+        | crate::sched::KillOutcome::AlreadyDead
+        | crate::sched::KillOutcome::Requested => {
+            // Spend the lifecycle cap: the object it named is gone (or going). Consume
+            // the holding, then snitch a `Revoked` — creation minted this cap at
+            // `Spawn`, destruction spends it here.
             proc.caps.lock().consume(handle);
             crate::tracing::emit_cap_revoked(
                 cap_id,
@@ -84,13 +89,11 @@ pub(super) fn handle_kill(frame: &mut TrapFrame) {
             );
             frame.a0 = 0;
         }
-        crate::sched::KillOutcome::RefusedSelf | crate::sched::KillOutcome::Deferred => {
-            // The cap was valid, but v2a can't safely kill this target yet. Refuse
-            // (reusing an existing wire reason to avoid a protocol-enum ripple) and
-            // log the precise deferred reason — the itest happy path kills a `Ready`
-            // spinner and never lands here.
+        crate::sched::KillOutcome::RefusedSelf => {
+            // Killing yourself is `Exit`'s job. Refuse (reusing an existing wire reason
+            // to avoid a protocol-enum ripple) and log why.
             crate::tracing::emit_log(&alloc::format!(
-                "kill deferred: target {} is self or running on another hart (v2b)",
+                "kill refused: target {} is the caller itself (use Exit)",
                 target.0
             ));
             super::refuse(frame, sc, protocol::RefusalReason::CapWrongObject);
@@ -159,10 +162,33 @@ pub(super) fn handle_wait_any(frame: &mut TrapFrame) {
 /// child's task id in `a0` (or `usize::MAX` on refusal). Ambient like `Yield`,
 /// but a process can only delegate authority it already holds.
 pub(super) fn handle_spawn(frame: &mut TrapFrame) {
-    use protocol::RefusalReason;
-    use snitchos_abi::Syscall;
+    let sc = snitchos_abi::Syscall::Spawn as u8;
+    spawn_registry(frame, sc, crate::percpu::current_hartid());
+}
 
-    let sc = Syscall::Spawn as u8;
+/// Like [`handle_spawn`], but places the child on a **specific hart** (`a3` = target
+/// hart id) instead of the caller's — the `SpawnOn` syscall (v2b), the prerequisite
+/// for a cross-hart `Kill`. Same `a0`/`a1`/`a2` and returns as `Spawn`; an
+/// out-of-range hart refuses. The cross-hart placement lands the child on the target
+/// hart's runqueue + IPIs it (via `spawn_on_with_arg`).
+pub(super) fn handle_spawn_on(frame: &mut TrapFrame) {
+    use protocol::RefusalReason;
+
+    let sc = snitchos_abi::Syscall::SpawnOn as u8;
+    let hart = frame.a3 as usize;
+    if hart >= crate::percpu::MAX_HARTS {
+        // A hart id no core answers to — refuse rather than silently retarget.
+        super::refuse(frame, sc, RefusalReason::BadUserRange);
+        return;
+    }
+    spawn_registry(frame, sc, hart);
+}
+
+/// The shared body of `Spawn`/`SpawnOn`: delegate the caller's caps and build the
+/// child on `hart`. `a0` = program id, `a1`/`a2` = the delegate handle array, and on
+/// success `a0` = child task id, `a1` = the minted `Process` (`KILL`) cap handle.
+fn spawn_registry(frame: &mut TrapFrame, sc: u8, hart: usize) {
+    use protocol::RefusalReason;
 
     // The caller's table is what we delegate *from*.
     let Some(proc) = super::current_process_or_refuse(frame, sc) else {
@@ -184,9 +210,9 @@ pub(super) fn handle_spawn(frame: &mut TrapFrame) {
         }
     };
 
-    // Build + queue the child on this hart; hand back its task id.
+    // Build + queue the child on `hart`; hand back its task id.
     let child = crate::user::spawn_process_with_caps(
-        crate::percpu::current_hartid(),
+        hart,
         name,
         image,
         delegated,

@@ -42,6 +42,12 @@ pub const IPI_WAKEUP: u32 = 1 << 0;
 /// the 7-step handshake in `kernel::percpu`'s module docstring.
 pub const IPI_TLB_SHOOTDOWN: u32 = 1 << 1;
 
+/// Cross-hart kill nudge (v2b): a `Kill` on another hart flagged a task
+/// (`Task::kill_requested`) that is running here. The handler just arms this hart's
+/// `pending_kill_check` gate so the trap-return-to-user checkpoint terminates the
+/// flagged task locally — the only safe place to reclaim its live stack + `satp`.
+pub const IPI_KILL_CHECK: u32 = 1 << 2;
+
 /// Cumulative count of software interrupts dispatched by this
 /// kernel. Drained by the heartbeat as
 /// `snitchos.ipi.received_total`. `Relaxed`: counter.
@@ -101,6 +107,12 @@ pub fn handle_pending() {
         // the value is that the trap broke `wfi`. Future runqueue
         // wake check happens after this returns when the resumed
         // code re-evaluates "is there work."
+    }
+    if bits & IPI_KILL_CHECK != 0 {
+        // A `Kill` from another hart flagged a task running here. Arm the gate; the
+        // trap-return-to-user checkpoint (in `trap_handler`) does the actual
+        // terminate-if-flagged, on this hart, where the task's stack + `satp` live.
+        percpu::this_cpu().pending_kill_check.store(true, Ordering::Release);
     }
     if bits & IPI_TLB_SHOOTDOWN != 0 {
         // The initiator wrote `shootdown_va` before the Release

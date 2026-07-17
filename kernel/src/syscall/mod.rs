@@ -55,6 +55,7 @@ pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::ClockFreq) => clock::handle_clock_freq(frame),
         Some(Syscall::Kill) => process::handle_kill(frame),
         Some(Syscall::Spawn) => process::handle_spawn(frame),
+        Some(Syscall::SpawnOn) => process::handle_spawn_on(frame),
         Some(Syscall::SpawnImage) => process::handle_spawn_image(frame),
         Some(Syscall::Wait) => process::handle_wait(frame),
         Some(Syscall::WaitAny) => process::handle_wait_any(frame),

@@ -250,6 +250,12 @@ pub enum Syscall {
     /// wakes with a killed status). Capability-authorized, so it composes to a
     /// sub-supervisor granted `KILL` over its subtree (supervision v2a).
     Kill = 30,
+    /// Like [`Self::Spawn`], but places the child on a **specific hart** (`a3` = target
+    /// hart id) instead of the caller's. Same `a0`/`a1`/`a2` (program id / handle-array
+    /// ptr / count) and same returns (`a0` = child task id, `a1` = its `Process` cap
+    /// handle). Lets a supervisor put a child on another core — the prerequisite for a
+    /// cross-hart `Kill` (v2b). An out-of-range hart refuses.
+    SpawnOn = 31,
 }
 
 impl Syscall {
@@ -290,6 +296,7 @@ impl Syscall {
             28 => Some(Self::Revoke),
             29 => Some(Self::ClockFreq),
             30 => Some(Self::Kill),
+            31 => Some(Self::SpawnOn),
             _ => None,
         }
     }

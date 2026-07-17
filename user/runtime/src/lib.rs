@@ -289,6 +289,35 @@ pub fn spawn_supervised(program_id: usize, handles: &[u32]) -> Option<Child> {
     }
 }
 
+/// Like [`spawn_supervised`], but places the child on a **specific hart** (`hart`)
+/// instead of the caller's — the `SpawnOn` syscall (v2b). Lets a supervisor put a
+/// child on another core so a later [`kill`] exercises the cross-hart path. Returns
+/// the child + its lifecycle cap handle, or `None` on refusal (bad hart, unheld
+/// delegate handle, unknown program).
+#[must_use]
+pub fn spawn_supervised_on(program_id: usize, handles: &[u32], hart: usize) -> Option<Child> {
+    let task: usize;
+    let kill: usize;
+    // SAFETY: `ecall`; as `spawn_supervised` but carries the target hart in `a3`. The
+    // kernel reads `a1` as the handles ptr, then overwrites it with the minted
+    // Process-cap handle. `handles` is validated kernel-side, never derefed in U-mode.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::SpawnOn as usize,
+            inlateout("a0") program_id => task,
+            inlateout("a1") handles.as_ptr() as usize => kill,
+            in("a2") handles.len(),
+            in("a3") hart,
+        );
+    }
+    if task == usize::MAX {
+        None
+    } else {
+        Some(Child { task: task as u32, kill: kill as u32 })
+    }
+}
+
 /// Force-terminate a child named by an `Object::Process` capability (`process_cap` =
 /// its handle, from [`spawn_supervised`]) — the v2a `Kill` syscall. On success the
 /// child is terminated + zombified (reap it with [`wait_any`]) and the kernel spends

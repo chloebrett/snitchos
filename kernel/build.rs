@@ -61,6 +61,8 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("supervised-shutdown", "SNITCHOS_SUPERVISED_SHUTDOWN_ELF"),
     ("kill-no-cap", "SNITCHOS_KILL_NO_CAP_ELF"),
     ("hart-probe", "SNITCHOS_HART_PROBE_ELF"),
+    ("hart-spinner", "SNITCHOS_HART_SPINNER_ELF"),
+    ("xhart-killer", "SNITCHOS_XHART_KILLER_ELF"),
 ];
 
 fn main() {

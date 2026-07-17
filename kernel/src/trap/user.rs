@@ -130,6 +130,15 @@ pub static KILL_NO_CAP_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KILL_NO_CAP_EL
 /// proving U-mode runs on the boot hart.
 pub static HART_PROBE_ELF: &[u8] = include_bytes!(env!("SNITCHOS_HART_PROBE_ELF"));
 
+/// The `hart-spinner` victim (spawnable id 11) for the cross-hart Kill itest (v2b): it
+/// opens a liveness span then tight-loops, staying *running* on hart 0 so a `Kill`
+/// from hart 1 exercises the `running_remote` path.
+pub static HART_SPINNER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_HART_SPINNER_ELF"));
+
+/// The `workload=xhart-kill` supervisor (v2b step 4): runs on hart 1, `SpawnOn`s the
+/// `hart-spinner` victim to hart 0, then cross-hart `Kill`s + reaps it.
+pub static XHART_KILLER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_XHART_KILLER_ELF"));
+
 /// The `workload=init` supervising root: spawns a child (delegating its span cap)
 /// and reaps it via `WaitAny` — the delegation-graph root (v0.13).
 pub static INIT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_INIT_ELF"));
@@ -373,6 +382,10 @@ pub static KILL_NO_CAP: ProgramSpec = ProgramSpec { elf: KILL_NO_CAP_ELF, launch
 /// 0 that opens a span (Launch::Plain; holds only bootstrap caps).
 pub static HART_PROBE: ProgramSpec = ProgramSpec { elf: HART_PROBE_ELF, launch: Launch::Plain };
 
+/// `workload=xhart-kill`: the cross-hart Kill supervisor — runs on hart 1, `SpawnOn`s
+/// its victim to hart 0 and kills it (Launch::Plain; spawns its own child at runtime).
+pub static XHART_KILLER: ProgramSpec = ProgramSpec { elf: XHART_KILLER_ELF, launch: Launch::Plain };
+
 /// `workload=init`: the supervising root — spawns + `WaitAny`-reaps a child,
 /// delegating its span cap downward. Holds only its bootstrap caps (Launch::Plain).
 pub static INIT: ProgramSpec = ProgramSpec { elf: INIT_ELF, launch: Launch::Plain };
@@ -593,6 +606,7 @@ static SPAWNABLE: &[(&str, &[u8])] = &[
     ("ipc-echo-server", IPC_ECHO_SERVER_ELF), // 8
     ("ipc-echo-client", IPC_ECHO_CLIENT_ELF), // 9
     ("svc-worker", SVC_WORKER_ELF),   // 10
+    ("hart-spinner", HART_SPINNER_ELF), // 11
 ];
 
 /// Resolve a `Spawn` program id to its `(name, image)`, or `None` if out of range.
@@ -806,6 +820,12 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::UserOnHart0, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "hart_probe", program: &HART_PROBE, priority: Priority::Normal }],
+    }),
+    // Cross-hart Kill (v2b step 4): the killer runs on hart 1 (normal placement) and
+    // `SpawnOn`s its victim to hart 0 at runtime, so only the killer is in the layout.
+    (WorkloadKind::XhartKill, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "xhart_killer", program: &XHART_KILLER, priority: Priority::Normal }],
     }),
     // v0.13 EndpointCreate: a single program manufactures its own endpoint and
     // proves it by minting — no kernel-created endpoint (`needs_endpoint: false`).

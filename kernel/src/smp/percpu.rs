@@ -128,6 +128,13 @@ pub struct PerHartData {
     /// the asm treats as "not ready, use the current stack"). `AtomicUsize` for a
     /// plain set-once store; the asm load needs no atomic semantics.
     pub exc_stack_top: AtomicUsize,
+    /// Cheap gate for the v2b cross-hart-kill checkpoint: set by this hart's
+    /// `IPI_KILL_CHECK` handler (and when the scheduler runs a kill-flagged task), so
+    /// the trap-return-to-user path only takes the scheduler lock to look for a
+    /// `Task::kill_requested` when a kill is actually pending — not on every trap.
+    /// `Release` on set, `Acquire`-`swap(false)` at the checkpoint. Placed **after**
+    /// `exc_stack_top` so its hardcoded [`EXC_STACK_TOP_OFFSET`] doesn't move.
+    pub pending_kill_check: core::sync::atomic::AtomicBool,
 }
 
 /// Byte offset of [`PerHartData::exc_stack_top`] — hardcoded in `trap.S`'s
@@ -185,6 +192,7 @@ pub static PER_HART_DATA: [PerHartData; MAX_HARTS] = [
         shootdown_va: AtomicU64::new(0),
         shootdown_ack: AtomicU64::new(0),
         exc_stack_top: AtomicUsize::new(0),
+        pending_kill_check: core::sync::atomic::AtomicBool::new(false),
     },
     PerHartData {
         hart_id: 1,
@@ -192,6 +200,7 @@ pub static PER_HART_DATA: [PerHartData; MAX_HARTS] = [
         shootdown_va: AtomicU64::new(0),
         shootdown_ack: AtomicU64::new(0),
         exc_stack_top: AtomicUsize::new(0),
+        pending_kill_check: core::sync::atomic::AtomicBool::new(false),
     },
 ];
 
