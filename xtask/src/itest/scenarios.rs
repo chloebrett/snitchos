@@ -3426,6 +3426,67 @@ pub fn supervised_ipc_client_cap_survives(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Supervision v2a step 4 — graceful reverse-dependency shutdown
+/// (`workload=supervised-shutdown`). The supervisor brings an `alpha → beta → gamma`
+/// dependency chain up in `startup_order`, then tears it down in `teardown_order`
+/// (`[gamma, beta, alpha]`): `gamma` (a forced `spinner`) via `Kill`, the cooperative
+/// workers `beta`/`alpha` via a `Signal`ed shutdown notification (clean exit). Each
+/// stop emits `snitchos.svc.<name>.stopped` *after* the service is reaped.
+///
+/// The cursor order is the whole proof: observing `gamma.stopped` → `beta.stopped` →
+/// `alpha.stopped` in sequence means each was emitted after the previous, so the tree
+/// came down in the exact reverse of dependency order. A wrong order would strand a
+/// later `wait_for` behind the cursor and time out.
+pub fn supervised_shuts_down_in_reverse_dep_order(h: &mut View) -> Result<(), String> {
+    // Leaf first: `gamma` depends on `beta` depends on `alpha`, so teardown stops
+    // `gamma` before anything it depends on.
+    h.wait_for(SEC * 20, metric_where("snitchos.svc.gamma.stopped", |v| v == 1))
+        .ok_or("no svc.gamma.stopped — the leaf service never stopped (shutdown didn't start)")?;
+
+    // Then its dependency, then the root of the chain — each strictly after the last.
+    h.wait_for(SEC * 20, metric_where("snitchos.svc.beta.stopped", |v| v == 1))
+        .ok_or("no svc.beta.stopped after gamma — teardown left reverse-dep order")?;
+    h.wait_for(SEC * 20, metric_where("snitchos.svc.alpha.stopped", |v| v == 1))
+        .ok_or("no svc.alpha.stopped after beta — teardown left reverse-dep order")?;
+
+    // The whole tree came down cleanly.
+    h.wait_for(SEC * 20, metric_where("snitchos.supervised_shutdown.complete", |v| v == 1))
+        .ok_or("no supervised_shutdown.complete — the supervisor didn't finish the teardown")?;
+
+    Ok(())
+}
+
+/// Supervision v2a step 4 — the `Kill` primitive stops an uncooperative service
+/// (`workload=supervised-shutdown`). `gamma` is a `spinner` that never opts into a
+/// shutdown notification, so the supervisor force-terminates it via the
+/// `Object::Process` (`KILL`) cap the kernel minted at `Spawn`. That kill **spends**
+/// the lifecycle cap, so the kernel emits a `CapEvent::Revoked` naming a `Process`
+/// object — the unforgeable, on-the-wire proof that the kill happened *and* that a
+/// real capability authorized it. The service is then reaped (`gamma.stopped`).
+pub fn supervised_kill_stops_a_child(h: &mut View) -> Result<(), String> {
+    use protocol::{CapEventKind, CapObject};
+
+    // The forced service came up.
+    h.wait_for(SEC * 20, is_thread_register_named("spinner"))
+        .ok_or("no ThreadRegister for 'spinner' — the supervisor didn't bring up the forced service")?;
+
+    // THE PROOF: killing it spent the lifecycle cap — a `Revoked` CapEvent over a
+    // `Process` object. Unforgeable (kernel-emitted) and cap-authorized.
+    h.wait_for(SEC * 20, |f, _strings| {
+        matches!(
+            f,
+            OwnedFrame::CapEvent { kind: CapEventKind::Revoked, object: CapObject::Process, .. }
+        )
+    })
+    .ok_or("no CapEvent::Revoked{Process} — the forced service wasn't killed via its Process cap")?;
+
+    // And it was reaped, closing the stop.
+    h.wait_for(SEC * 20, metric_where("snitchos.svc.gamma.stopped", |v| v == 1))
+        .ok_or("no svc.gamma.stopped — the killed service wasn't reaped")?;
+
+    Ok(())
+}
+
 /// v0.13 `EndpointCreate` — a process manufactures its own IPC endpoint and gets
 /// back a real *owning* capability (`workload=endpoint-create`). `ep_maker`
 /// creates an endpoint, then mints a badged `SEND` cap on it; minting requires the

@@ -234,12 +234,18 @@ until the `cargo xtask` breakage is resolved.
 
 ### 5. Acceptance itest(s)
 
-- **`supervised-kill-stops-a-child`** — the supervisor `Kill`s a running service and
-  it's reaped (proves the primitive + the Process cap authorized it).
-- **`supervised-shuts-down-in-reverse-dep-order`** — bring up a dep chain `a→b→c`,
-  trigger shutdown, assert the stops land in reverse-dep order on the wire.
-- **negative** — a process without the Process cap that tries to `Kill` is refused
-  (a `SyscallRefused`), proving the authorization is real.
+- **`supervised-shuts-down-in-reverse-dep-order`** ✅ — brings up `alpha→beta→gamma`,
+  asserts `gamma.stopped → beta.stopped → alpha.stopped → complete` in cursor order
+  (reverse-dep). **Passes in QEMU** (max wait 0.2s).
+- **`supervised-kill-stops-a-child`** ✅ — asserts the forced `spinner`'s
+  `CapEvent::Revoked{Process}` (unforgeable kill proof + cap authorization) then
+  `gamma.stopped`. **Passes in QEMU.**
+- **negative** ⏳ — a process without the Process cap that tries to `Kill` is refused
+  (a `SyscallRefused`), proving the authorization is real. Not yet written (needs a
+  small bin that `kill`s a bogus handle and reports the refusal).
+
+**The `cargo xtask` blocker is resolved** (snemu `Machine: Send` fixed; the tree also
+gained a `kernel-mem` crate extraction). Both shutdown scenarios run green.
 
 ## The observability payoff
 

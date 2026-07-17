@@ -107,6 +107,10 @@ For detailed patterns and examples, load the `functional` skill.
 For detailed TDD workflow, load the `tdd` skill.
 For refactoring methodology, load the `refactoring` skill.
 For significant work, load the `planning` skill. Plans live in `plans/` directory.
+**Override of the planning skill's "delete when complete" step**: on completion, move
+the plan to `plans/legacy/` (`git mv`) instead of deleting it — keep the historical
+record. `plans/legacy/` already holds many prior completed plans; follow that
+precedent.
 For CI failure diagnosis, load the `ci-debugging` skill.
 For hexagonal architecture projects, load the `hexagonal-architecture` skill.
 For Domain-Driven Design projects, load the `domain-driven-design` skill.
