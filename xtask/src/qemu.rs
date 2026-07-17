@@ -19,8 +19,8 @@ pub const DEFAULT_RAM_MB: u32 = 128;
 /// Headless (`-nographic`), no `ramfb` device — the shape every existing
 /// caller (itest harness, `measure`, `snemu-diff`) needs. For a ramfb-
 /// enabled and/or on-screen invocation, use [`base_command_ex`].
-pub fn base_command(chardev_arg: &str, ram_mb: u32) -> Command {
-    base_command_ex(chardev_arg, ram_mb, false, None)
+pub fn base_command(chardev_arg: &str, ram_mb: u32, opt: OptLevel) -> Command {
+    base_command_ex(chardev_arg, ram_mb, false, None, opt)
 }
 
 /// Like [`base_command`], with two independent extras:
@@ -31,7 +31,13 @@ pub fn base_command(chardev_arg: &str, ram_mb: u32) -> Command {
 ///   show an actual window, replacing `-nographic` (the two conflict —
 ///   `-nographic` forces `-display none`). `None` keeps the existing
 ///   headless behaviour.
-pub fn base_command_ex(chardev_arg: &str, ram_mb: u32, ramfb: bool, display: Option<&str>) -> Command {
+pub fn base_command_ex(
+    chardev_arg: &str,
+    ram_mb: u32,
+    ramfb: bool,
+    display: Option<&str>,
+    opt: OptLevel,
+) -> Command {
     let mut cmd = Command::new("qemu-system-riscv64");
     cmd.args([
         "-machine", "virt",
@@ -59,7 +65,9 @@ pub fn base_command_ex(chardev_arg: &str, ram_mb: u32, ramfb: bool, display: Opt
     }
     cmd.args([
         "-bios", "default",
-        "-kernel", KERNEL_BIN,
+        // The kernel ELF for this opt regime: `debug/kernel` for Low, `release/kernel`
+        // for Mid/High. Matches whatever `build_kernel_profiled(_, opt)` just wrote.
+        "-kernel", kernel_bin(opt.is_release()),
         // Force modern virtio-mmio (version 2). Without this, QEMU
         // exposes the legacy (version 1) layout for backward compat,
         // which has a different register set we don't implement.

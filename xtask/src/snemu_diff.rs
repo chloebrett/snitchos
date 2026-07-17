@@ -305,7 +305,9 @@ fn collect_qemu(
         "socket,path={},server=on,wait=on,id=telemetry",
         socket.display()
     );
-    let mut cmd = qemu::base_command(&chardev, qemu::DEFAULT_RAM_MB);
+    // snemu-diff builds at `OptLevel::Low` (see `prepare`), so QEMU boots the matching
+    // debug ELF. (A `--opt` for release-vs-release diffing is a follow-up.)
+    let mut cmd = qemu::base_command(&chardev, qemu::DEFAULT_RAM_MB, qemu::OptLevel::Low);
     if let Some(w) = workload {
         cmd.args(["-append", &format!("workload={w}")]);
     }

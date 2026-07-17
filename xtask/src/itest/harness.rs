@@ -372,7 +372,7 @@ impl Boot {
     /// or group name). `ramfb` adds `-device ramfb` to the QEMU invocation
     /// (see the `framebuffer-presents` scenario). See
     /// `docs/runtime-workload-selection-design.md`.
-    pub fn spawn(label: &str, workload: Option<&str>, ramfb: bool) -> Result<Self, String> {
+    pub fn spawn(label: &str, workload: Option<&str>, ramfb: bool, opt: crate::qemu::OptLevel) -> Result<Self, String> {
         // No build here: the kernel is built once up-front in
         // `itest::run` (so `--repeat N` doesn't race with mid-run source
         // edits or burn time on per-iteration build checks). Scenarios
@@ -405,7 +405,7 @@ impl Boot {
         // `-device ramfb` (the `ramfb` scenario tag — see `run_group`); every
         // other caller passes `false`, matching `base_command`'s old behaviour.
         let mut qemu_cmd =
-            qemu::base_command_ex(&chardev, crate::snemu_diff::ram_mb_for(workload), ramfb, None);
+            qemu::base_command_ex(&chardev, crate::snemu_diff::ram_mb_for(workload), ramfb, None, opt);
         if let Some(workload) = workload {
             // Lands in /chosen/bootargs; `kmain` reads it to pick the
             // runtime workload.

@@ -359,6 +359,20 @@ enum Cmd {
         /// per-scenario isolation of separate boots.
         #[arg(long, default_value_t = false)]
         shared: bool,
+        /// Optimization regime — the QEMU counterpart to `snemu-itest --opt`, for
+        /// catching release-codegen divergences under QEMU, not just snemu:
+        /// - `low` (default): debug, opt-0 everywhere — today's behavior.
+        /// - `mid`: **release kernel** (opt-3) with the embedded userspace pinned to
+        ///   opt-1 (the `build.rs` default). Exercises kernel release codegen while
+        ///   dodging the userspace opt≥2 UB class.
+        /// - `high`: **release everywhere** — userspace at opt-3 too. Same kernel as
+        ///   `mid`, but lifts the userspace pin, so it *surfaces* the userspace opt≥2
+        ///   UB (talc OOM-loop / hang) that `mid` sidesteps.
+        ///
+        /// So `mid` vs `high` isolates *where* a release-only failure lives: reproducing
+        /// under `mid` points at kernel codegen; only under `high` points at userspace.
+        #[arg(long, value_enum, default_value_t = qemu::OptLevel::Low)]
+        opt: qemu::OptLevel,
     },
     /// Inspect and manage the integration-test baseline
     /// (`.itest-baseline.toml`) and per-run history (`.itest-runs/`).
@@ -1120,6 +1134,7 @@ fn main() -> ExitCode {
             skip,
             tag,
             shared,
+            opt,
         } => {
             let profile_filter = profile.map(|p| match p {
                 ProfileFilter::Wfi => itest_harness::CpuProfile::Wfi,
@@ -1139,6 +1154,7 @@ fn main() -> ExitCode {
                 skip,
                 tags: tag,
                 shared,
+                opt,
             })
         }
         Cmd::Baseline { cmd } => baseline(cmd),
@@ -1319,7 +1335,7 @@ fn debug(features: &str) -> ExitCode {
     eprintln!("After the trampoline, symbol breakpoints work normally.");
     eprintln!();
 
-    let status = qemu::base_command(&chardev_arg, qemu::DEFAULT_RAM_MB)
+    let status = qemu::base_command(&chardev_arg, qemu::DEFAULT_RAM_MB, qemu::OptLevel::Low)
         // -s = listen on localhost:1234 for GDB.
         // -S = halt CPU at startup; wait for the debugger to `continue`.
         .args(["-s", "-S"])
@@ -1363,7 +1379,7 @@ fn boot(
     // terminal to satisfy that wait.
     let chardev_arg = format!("socket,path={TELEMETRY_SOCKET},server=on,wait=on,id=telemetry");
 
-    let mut cmd = qemu::base_command_ex(&chardev_arg, qemu::DEFAULT_RAM_MB, ramfb, display);
+    let mut cmd = qemu::base_command_ex(&chardev_arg, qemu::DEFAULT_RAM_MB, ramfb, display, qemu::OptLevel::Low);
     // Lands in /chosen/bootargs; `kmain` reads it to pick the runtime
     // workload + burst.
     let bootargs: Vec<String> = workload

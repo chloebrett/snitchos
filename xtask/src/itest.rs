@@ -356,6 +356,12 @@ pub struct RunConfig {
     /// Shared-boot mode: group scenarios by `workload` and run each group
     /// against one kernel boot. `false` = separate boots (the flake gate).
     pub shared: bool,
+    /// Kernel optimization regime (`low` = debug, the default; `mid`/`high` =
+    /// release). Threads into both the kernel *build* and the QEMU `-kernel` path,
+    /// so `--opt mid` runs the whole suite against the release kernel — the QEMU
+    /// counterpart to `snemu-itest --opt`, for catching release-codegen divergences
+    /// under QEMU rather than only snemu.
+    pub opt: qemu::OptLevel,
 }
 
 /// Entry point from `main`: select scenarios per `config`, run them in QEMU
@@ -375,6 +381,7 @@ pub fn run(config: RunConfig) -> ExitCode {
         skip,
         tags,
         shared,
+        opt,
     } = config;
     if !qemu_available() {
         eprintln!("xtask test: qemu-system-riscv64 not on PATH — skipping");
@@ -514,7 +521,7 @@ pub fn run(config: RunConfig) -> ExitCode {
     // (additive guarantee), so default-demo scenarios use it as-is;
     // workload scenarios select via QEMU `-append`. No per-scenario
     // rebuilds. See `docs/runtime-workload-selection-design.md`.
-    let build = || match qemu::build_kernel(&["itest-workloads"]) {
+    let build = || match qemu::build_kernel_profiled(&["itest-workloads"], opt) {
         // A non-zero exit (e.g. a compile error) MUST abort the run —
         // otherwise the suite silently runs the previously-built (stale)
         // kernel and reports bogus pass/fail. `map(|_| ())` used to drop
@@ -538,7 +545,7 @@ pub fn run(config: RunConfig) -> ExitCode {
     let run_group = |scns: &[&Scenario]| -> Vec<ScenarioReport> {
         let Some(first) = scns.first() else { return Vec::new() };
         let ramfb = first.tags.contains(&"ramfb");
-        let boot = match Boot::spawn(first.name, first.workload, ramfb) {
+        let boot = match Boot::spawn(first.name, first.workload, ramfb, opt) {
             Ok(boot) => boot,
             // Spawn failure is infra, not a scenario assertion: report it
             // for every member so the runner records each as failed.
