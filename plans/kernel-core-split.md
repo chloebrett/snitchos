@@ -77,8 +77,8 @@ kernel-core's 393 remaining tests).
 | `kernel-mem` ✅ | mmu, frame, heap, heap_smoke | 2445 | 121 | **none** |
 | `kernel-obs` ✅ | intern, span, preinit, sink, batch_ring, panic_log, clock | 1356 | 45 | protocol, postcard |
 | `kernel-devices` ✅ | virtio, fwcfg, ramfb, framebuffer, console | 1469 | 62 | **none** |
-| `kernel-boot` | bootargs, workload, trap | 931 | 69 | **none** |
-| `kernel-proc` | sched, cap, ipc, notify, reap, elf, stack, metric, span_name | 4377 | 217 | protocol, abi, kernel-mem |
+| `kernel-boot` ✅ | bootargs, workload, trap | 931 | 73 | **none** |
+| `kernel-proc` | sched, cap, ipc, notify, reap, elf, stack, metric, span_name | 4377 | 216 | protocol, abi, kernel-mem |
 
 The concepts:
 
@@ -212,8 +212,16 @@ only one with real design work.
   edited in it (the `kernel_core::` → `kernel_devices::` path and the stale run
   command in its doc comment) — an integration test names its crate externally,
   so this is unavoidable, not the boundary bending.
-- **Step 4: `kernel-boot`** — 3 modules, ~71 tests, dependency-free.
-- **Step 5: `kernel-proc`** — 9 modules, 217 tests. The residual, and the only
+- ~~**Step 4: `kernel-boot`**~~ **DONE** — 73 tests, dependency-free, all three
+  modules moved with `| 0` diffs. Production code doesn't allocate (`alloc` is
+  `cfg(test)`-only, as in `kernel-devices`).
+
+  **Method note worth keeping:** the dep survey grepped for `use` statements and
+  therefore *missed* a fully-qualified `alloc::collections::BTreeSet` in
+  `workload`'s tests — the crate didn't compile on the first try. Grepping `use`
+  finds imports, not usage. For `kernel-proc`, check fully-qualified paths too
+  (`grep -rn 'alloc::\|protocol::\|snitchos_abi::'`), not just the `use` lines.
+- **Step 5: `kernel-proc`** — 9 modules, 216 tests. The residual, and the only
   genuine design work: it holds the `cap`/`ipc`/`notify`/`sched` cluster whose
   internal coupling is the reason `kernel-ids` isn't needed. Its one outbound edge
   is `stack → kernel_mem::mmu::PAGE_SIZE`.

@@ -10,17 +10,16 @@
 
 extern crate alloc;
 
-// What's left of the original grab-bag: the process/authority modules (`user/`,
-// plus sched/reap/notify/stack) and the boot-time ones (`workloads/`, `trap`).
-// Both groups are still to be carved out — see `plans/kernel-core-split.md`.
+// What's left of the original grab-bag: the process/authority modules — `user/`
+// plus sched/reap/notify/stack. These become `kernel-proc`, the last carve-out,
+// after which this crate holds no code at all and is deleted. See
+// `plans/kernel-core-split.md`.
 pub mod notify;
 pub mod reap;
 pub mod sched;
 pub mod stack;
-pub mod trap;
 
 mod user;
-mod workloads;
 
 // `mem`, `obs` and `devices` now live in their own crates so they build and test
 // without the rest of kernel-core — see `plans/kernel-core-split.md`. Re-exported
@@ -28,8 +27,8 @@ mod workloads;
 // the moves are invisible to consumers. These re-exports are scaffolding — the
 // plan's final step removes them, repoints callers at the real crates, and deletes
 // this crate.
+pub use kernel_boot::{bootargs, trap, workload};
 pub use kernel_devices::{console, framebuffer, fwcfg, ramfb, virtio};
 pub use kernel_mem::{frame, heap, heap_smoke, mmu};
 pub use kernel_obs::{batch_ring, clock, intern, panic_log, preinit, sink, span};
 pub use user::{cap, elf, ipc, metric, span_name};
-pub use workloads::{bootargs, workload};

@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 # Carved out of this crate; re-exported at the crate root so `kernel_core::mmu`
 # and friends still resolve. See `plans/kernel-core-split.md`.
+kernel-boot = { path = "../kernel-boot" }
 kernel-devices = { path = "../kernel-devices" }
 kernel-mem = { path = "../kernel-mem" }
 kernel-obs = { path = "../kernel-obs" }

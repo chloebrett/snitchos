@@ -878,9 +878,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kernel-boot"
+version = "0.0.1"
+
+[[package]]
 name = "kernel-core"
 version = "0.0.1"
 dependencies = [
+ "kernel-boot",
  "kernel-devices",
  "kernel-mem",
  "kernel-obs",

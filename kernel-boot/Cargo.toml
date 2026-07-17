@@ -1,0 +1,14 @@
+[package]
+name = "kernel-boot"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Dependency-free, and the production code doesn't allocate either (`alloc` is
+# cfg(test)-only, for one assertion). Boot-time decisions are string parsing and
+# bit-twiddling over values the caller already has: which workload was asked for,
+# and what the trap cause was. Nothing here talks to a device or the wire.
+[dependencies]
+
+[lints]
+workspace = true
