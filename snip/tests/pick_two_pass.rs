@@ -12,9 +12,10 @@ fn candidate(path: &str) -> Candidate {
 
 /// A fake `claude` that answers the pass-1 (triage) prompt and the pass-2 (full)
 /// prompt differently, keyed on a marker only the triage prompt contains.
-fn fake_claude(name: &str, triage_result: &str, full_result: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("snip-2pass-test");
-    fs::create_dir_all(&dir).unwrap();
+/// The caller owns `dir` (a `TempDir`) so each test gets its own — a shared path
+/// under `temp_dir()` is mutable state between tests and races any concurrent
+/// run of this suite.
+fn fake_claude(dir: &Path, name: &str, triage_result: &str, full_result: &str) -> PathBuf {
     let path = dir.join(name);
     // The triage prompt is the only one containing "settled_include"; branch on it.
     let script = format!(
@@ -40,7 +41,8 @@ fn cfg(program: &Path) -> ClaudeCfg {
 #[test]
 fn settling_everything_in_pass_one_skips_the_full_pass() {
     let triage = r#"{"settled_include":["a.rs"],"settled_exclude":["b.rs"],"needs_diff":[]}"#;
-    let program = fake_claude("all-settled.sh", triage, "SHOULD_NOT_BE_USED");
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let program = fake_claude(scratch.path(), "all-settled.sh", triage, "SHOULD_NOT_BE_USED");
     let candidates = [candidate("a.rs"), candidate("b.rs")];
 
     let (sel, usage) = pick_two_pass("msg", &candidates, &cfg(&program)).expect("two-pass ok");
@@ -55,7 +57,8 @@ fn settling_everything_in_pass_one_skips_the_full_pass() {
 fn a_needs_diff_file_triggers_the_full_pass() {
     let triage = r#"{"settled_include":["a.rs"],"settled_exclude":[],"needs_diff":["c.rs"]}"#;
     let full = r#"{"include":[{"path":"c.rs","reason":"the parser change","confidence":"high"}],"exclude":[],"overall":"high"}"#;
-    let program = fake_claude("escalate.sh", triage, full);
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let program = fake_claude(scratch.path(), "escalate.sh", triage, full);
     let candidates = [candidate("a.rs"), candidate("c.rs")];
 
     let (sel, usage) = pick_two_pass("msg", &candidates, &cfg(&program)).expect("two-pass ok");

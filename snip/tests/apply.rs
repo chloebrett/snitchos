@@ -35,36 +35,36 @@ fn git_apply_cached(dir: &Path, patch: &str) {
 // Building fixture text; efficiency of the construction is irrelevant here.
 #[allow(clippy::format_collect)]
 fn stages_only_the_selected_hunk_via_git_apply() {
-    let dir = std::env::temp_dir().join("snip-apply-test");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    // A private scratch repo, removed when `scratch` drops. Not a fixed path:
+    // this test wipes its directory on entry, so a shared one corrupts any
+    // concurrent run of the same suite.
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let dir = scratch.path();
 
-    git(&dir, &["init", "-q", "-b", "main"]);
+    git(dir, &["init", "-q", "-b", "main"]);
     // Twenty lines so edits far apart produce two hunks whose 3-line context
     // regions don't touch (and thus don't merge into one hunk).
     let base: String = (1..=20).map(|i| format!("line {i}\n")).collect();
     std::fs::write(dir.join("f.txt"), &base).unwrap();
-    git(&dir, &["add", "f.txt"]);
-    git(&dir, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]);
+    git(dir, &["add", "f.txt"]);
+    git(dir, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"]);
 
     // Edit line 2 (hunk 1) and line 18 (hunk 2).
     let edited = base.replace("line 2\n", "line 2 EDITED\n").replace("line 18\n", "line 18 EDITED\n");
     std::fs::write(dir.join("f.txt"), &edited).unwrap();
 
-    let diff = git(&dir, &["diff", "HEAD", "--", "f.txt"]);
+    let diff = git(dir, &["diff", "HEAD", "--", "f.txt"]);
     let file = parse_hunks(&diff);
     assert_eq!(file.hunks.len(), 2, "the two edits are separate hunks");
 
     // Stage only the second hunk.
     let patch = build_patch(&file, &["H2".to_string()]).expect("H2 patch");
-    git_apply_cached(&dir, &patch);
+    git_apply_cached(dir, &patch);
 
-    let staged = git(&dir, &["diff", "--cached"]);
+    let staged = git(dir, &["diff", "--cached"]);
     assert!(staged.contains("line 18 EDITED"), "H2 is staged");
     assert!(!staged.contains("line 2 EDITED"), "H1 is NOT staged");
 
-    let unstaged = git(&dir, &["diff"]);
+    let unstaged = git(dir, &["diff"]);
     assert!(unstaged.contains("line 2 EDITED"), "H1 remains unstaged");
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

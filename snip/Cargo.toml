@@ -12,5 +12,13 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[dev-dependencies]
+# Per-test scratch dirs, unique by construction and removed on drop. These tests
+# shell out to `git` and to fake `claude` scripts, so they need real files on
+# disk; a fixed path under `temp_dir()` raced any concurrent run of the same
+# suite (two `cargo xtask test` gates at once wiped each other's fixture
+# mid-`git apply`).
+tempfile = "3"
+
 [lints]
 workspace = true
