@@ -206,9 +206,15 @@ enum Cmd {
         args: Vec<String>,
     },
     /// Run mutation testing against the host-testable crates (collector,
-    /// protocol, the `kernel-*` crates, hitch). Trailing args are forwarded to
-    /// cargo-mutants, e.g. `cargo xtask mutants -- -j 4`.
+    /// protocol, the `kernel-*` crates, hitch, stitch) — one cargo-mutants run
+    /// per crate, each with the features its own tests need.
+    ///
+    /// Name a crate to mutate just that one, which is what you want during the
+    /// MUTATE step: `cargo xtask mutants kernel-proc -- -f kernel-proc/src/elf.rs`.
+    /// Trailing args are forwarded to cargo-mutants, e.g. `-- -j 4`.
     Mutants {
+        /// Mutate only this crate (default: every crate, in turn).
+        krate: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -1100,7 +1106,7 @@ fn main() -> ExitCode {
         Cmd::Measure { workload, seconds, warmup, timebase_hz, burst, markdown } => {
             measure::measure(&workload, seconds, warmup, timebase_hz, burst, markdown)
         }
-        Cmd::Mutants { args } => run_mutants(&args),
+        Cmd::Mutants { krate, args } => run_mutants(krate.as_deref(), &args),
         Cmd::Clippy { args } => run_clippy(&args),
         Cmd::Collect { args } => run_collector(&args),
         Cmd::Reader { args } => {
@@ -1454,41 +1460,64 @@ fn run_clippy(extra_args: &[String]) -> ExitCode {
     }
 }
 
-fn run_mutants(extra_args: &[String]) -> ExitCode {
-    let status = Command::new("cargo")
-        .args([
-            "mutants",
-            "-p",
-            "collector",
-            "-p",
-            "protocol",
-            "-p",
-            "kernel-mem",
-            "-p",
-            "kernel-obs",
-            "-p",
-            "kernel-devices",
-            "-p",
-            "kernel-boot",
-            "-p",
-            "kernel-proc",
-            "-p",
-            "hitch",
-            "-p",
-            "hitch-pod",
-            "-p",
-            "stitch",
-            "--features",
-            "protocol/std,stitch/testing",
-        ])
+/// Crates worth mutating, plus the features each one's *own* test suite needs.
+///
+/// One invocation per crate, rather than one invocation naming them all. That
+/// isn't ceremony: cargo-mutants narrows `cargo test` to the mutant's owning
+/// package, so a workspace-wide `--features protocol/std,stitch/testing` is
+/// invalid for any package that doesn't depend on stitch. It survived only
+/// because an unscoped baseline builds every `-p` together; the moment you
+/// scope a run (`-f one/file.rs`) — which is the normal way to use this during
+/// the MUTATE step — the baseline failed with *"the package 'kernel-proc' does
+/// not contain this feature: stitch/testing"*. Per-crate, the feature list is
+/// always the one that crate actually has.
+const MUTANT_CRATES: &[(&str, &[&str])] = &[
+    ("collector", &[]),
+    ("protocol", &["--features", "std"]),
+    ("kernel-mem", &[]),
+    ("kernel-obs", &[]),
+    ("kernel-devices", &[]),
+    ("kernel-boot", &[]),
+    ("kernel-proc", &[]),
+    ("hitch", &[]),
+    ("hitch-pod", &[]),
+    ("stitch", &["--features", "testing"]),
+];
+
+/// One cargo-mutants invocation. Returns `true` iff it passed.
+fn run_mutants_for(name: &str, features: &[&str], extra_args: &[String]) -> bool {
+    Command::new("cargo")
+        .args(["mutants", "-p", name])
+        .args(features)
         .args(extra_args)
         .status()
-        .expect("failed to invoke cargo mutants");
-    if status.success() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
+        .expect("failed to invoke cargo mutants")
+        .success()
+}
+
+/// Mutate `only` (or every crate in [`MUTANT_CRATES`] in turn). Trailing args
+/// go to cargo-mutants — scope a run with
+/// `cargo xtask mutants kernel-proc -- -f kernel-proc/src/elf.rs`.
+fn run_mutants(only: Option<&str>, extra_args: &[String]) -> ExitCode {
+    let crates: Vec<(&str, &[&str])> = match only {
+        Some(name) => match MUTANT_CRATES.iter().find(|(c, _)| *c == name) {
+            Some(entry) => vec![*entry],
+            None => {
+                let known: Vec<&str> = MUTANT_CRATES.iter().map(|(c, _)| *c).collect();
+                eprintln!("unknown crate `{name}`; known: {}", known.join(", "));
+                return ExitCode::from(2);
+            }
+        },
+        None => MUTANT_CRATES.to_vec(),
+    };
+
+    for (name, features) in crates {
+        eprintln!("=== mutants: {name} ===");
+        if !run_mutants_for(name, features, extra_args) {
+            return ExitCode::from(1);
+        }
     }
+    ExitCode::SUCCESS
 }
 
 fn run_collector(extra_args: &[String]) -> ExitCode {
