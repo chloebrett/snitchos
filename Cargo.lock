@@ -882,6 +882,7 @@ name = "kernel-core"
 version = "0.0.1"
 dependencies = [
  "kernel-mem",
+ "kernel-obs",
  "loom",
  "postcard",
  "protocol",
@@ -891,6 +892,14 @@ dependencies = [
 [[package]]
 name = "kernel-mem"
 version = "0.0.1"
+
+[[package]]
+name = "kernel-obs"
+version = "0.0.1"
+dependencies = [
+ "postcard",
+ "protocol",
+]
 
 [[package]]
 name = "lazy_static"

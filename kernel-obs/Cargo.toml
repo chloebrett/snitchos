@@ -1,0 +1,16 @@
+[package]
+name = "kernel-obs"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# The only kernel-* crate that touches the wire format: this is where the kernel
+# decides what to say about itself. `postcard` is a production dep, not just a
+# test one — `panic_log` encodes its `Frame::Log` without allocating, because the
+# panic path cannot reach the intern table or the heap.
+[dependencies]
+protocol = { path = "../protocol" }
+postcard = { version = "1", default-features = false }
+
+[lints]
+workspace = true

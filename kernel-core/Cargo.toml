@@ -8,6 +8,7 @@ publish = false
 # Carved out of this crate; re-exported at the crate root so `kernel_core::mmu`
 # and friends still resolve. See `plans/kernel-core-split.md`.
 kernel-mem = { path = "../kernel-mem" }
+kernel-obs = { path = "../kernel-obs" }
 protocol = { path = "../protocol" }
 postcard = { version = "1", default-features = false }
 # The kernel↔user ABI: single source of truth for capability rights bits
