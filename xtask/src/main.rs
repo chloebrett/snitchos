@@ -42,97 +42,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SnemuCmd,
     },
-    /// Fidelity audit: replay every itest scenario's assertion against a
-    /// snemu-produced frame stream (no QEMU) and report how many pass. Sizes the
-    /// "can snemu back the itests" gap without rewriting scenarios.
-    ///
-    /// Pick a speed regime with `--speedup {low,med,hi,extra}`. The individual
-    /// levers behind it (`--jit`, `--native-jit`, `--tlb`, `--native-ops`,
-    /// `--no-reg-cache`, `--no-idle-skip`, `--share-snapshots`) still work but are
-    /// hidden from this help: they're snemu-development knobs for the oracle A/B
-    /// ("on vs off must be byte-identical, only faster"), not test-suite knobs.
-    /// See `docs/snemu-perf-options.md`.
-    SnemuItest {
-        /// Per-scenario snemu instruction-step budget. Passing scenarios
-        /// short-circuit well under this; the budget only bounds failing ones and
-        /// the slow OOM/cooperative workloads. 400M recovers the budget-sensitive
-        /// scenarios (e.g. `sched-yield-round-trips`). Accepts `K`/`M`/`B`
-        /// suffixes, e.g. `400M`, `1.2B`.
-        #[arg(long, default_value = "400M", value_parser = magnitude::parse)]
-        steps: u64,
-        /// Audit only the first N scenarios (faster smoke).
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Audit only scenarios whose name contains this substring.
-        #[arg(long)]
-        only: Option<String>,
-        /// Parallel host workers. Scenarios are independent (each owns its own
-        /// snemu machine), so they fan out across cores. snemu is a pure
-        /// interpreter (CPU-bound), so the sweet spot is the physical core
-        /// count. Defaults to the machine's available parallelism; `1` forces
-        /// serial. Results stay in deterministic report order regardless.
-        #[arg(long, short = 'j')]
-        jobs: Option<usize>,
-        /// Disable `wfi` idle-skip (on by default). The A/B baseline: run the
-        /// audit both ways and confirm fidelity + per-scenario instret are
-        /// identical — idle-skip must change only speed, never telemetry.
-        #[arg(long, hide = true)]
-        no_idle_skip: bool,
-        /// Scenario packing order: `wall` (default — LPT by the previous run's
-        /// wall-time, the true optimisation target but noisy), `instret` (LPT by
-        /// prior instret — deterministic, reproducible), or `selection` (no packing —
-        /// the A/B baseline). The report prints both counterfactuals regardless.
-        #[arg(long, value_enum, default_value_t)]
-        order: itest::snemu_audit::PackOrder,
-        /// Optimization regime, with distinct failure modes — flick between them to
-        /// localize a bug: `low` (debug, opt-0 — the faithful correctness floor, whole
-        /// suite incl. supervision green, so a failure is a real logic bug), `mid`
-        /// (release kernel + opt-1 userspace — fast, the former `--release`, but where
-        /// release-codegen-vs-debug divergences under snemu surface: a scenario green
-        /// under `low`+QEMU can still fail here), or `high` (release everywhere —
-        /// surfaces the userspace opt≥2 UB class).
-        #[arg(long, value_enum, default_value_t = qemu::OptLevel::Mid)]
-        opt: qemu::OptLevel,
-        /// Enable the native-op helper (tier-0.5 JIT): fast-path guest memset/memcpy
-        /// (execute natively + charge the interpreter-equivalent instret). A/B it —
-        /// on vs off must keep the suite green (fidelity), only faster.
-        #[arg(long, hide = true)]
-        native_ops: bool,
-        /// Enable the Tier-2 block JIT (M6): compile + run hot basic blocks. A/B it
-        /// against off while ISA coverage expands — on vs off must stay green +
-        /// byte-identical guest instret (the oracle), only faster.
-        #[arg(long = "jit", hide = true)]
-        block_jit: bool,
-        /// With `--jit`, disable the block executor's register caching (M6 inc 4) —
-        /// the A/B baseline to isolate the caching's wall-time effect.
-        #[arg(long, hide = true)]
-        no_reg_cache: bool,
-        /// Enable the discovered-snapshot-tree collapse (off by default — the A/B
-        /// baseline). Observe-only scenarios (empty branch key, learned from a prior
-        /// run's persisted keys) of a workload share one forward run instead of each
-        /// re-executing the identical deterministic guest; each replays a prefix of
-        /// that shared stream truncated to its own budget, so verdicts are identical
-        /// to the fork-per-scenario path. See `docs/snemu-itest-snapshot-tree-design.md`.
-        #[arg(long, hide = true)]
-        share_snapshots: bool,
-        /// Enable **Backend B** (native AArch64 codegen) for the block JIT — implies
-        /// `--jit`. Host-only (arm64/macos); A/B it against off, which must stay green
-        /// + byte-identical guest instret (the oracle), only faster.
-        #[arg(long = "native-jit", hide = true)]
-        native_jit: bool,
-        /// Enable the software **TLB** (Sv39 translation cache). A/B it against off,
-        /// which must stay green + byte-identical guest instret (the oracle), only
-        /// faster — this is the lever for the memory/translation pole.
-        #[arg(long, hide = true)]
-        tlb: bool,
-        /// Preset speedup bundle: `low` (idle-skip only), `med` (+native-ops +TLB),
-        /// `hi` (+block JIT / Backend A — the fastest *portable*, **the default**),
-        /// `extra` (+Backend B native codegen — experimental, host-only, currently
-        /// slower). Individual `--jit`/`--tlb`/… flags layer on top. Pass
-        /// `--speedup low` for the idle-skip-only A/B baseline.
-        #[arg(long, value_enum, default_value = "hi")]
-        speedup: itest::snemu_audit::SpeedLevel,
-    },
     /// Build the kernel and run it in QEMU.
     ///
     /// Use `--workload <name>` to boot a runtime-selected workload for
@@ -266,9 +175,78 @@ enum Cmd {
     /// them but does not kill them — the itest lock already prevents
     /// itest-vs-itest races. Kill stragglers manually if needed.
     Itest {
-        /// Scenario name, or a comma-separated list (`a,b,c`). Omit to
-        /// run all.
+        /// Scenario to run. Omit to run all.
+        ///
+        /// The engines read this differently, and an exact name is the safe
+        /// form on both: under `--engine qemu` it is an exact name or a
+        /// comma-separated list (`a,b,c`); under snemu it is a **substring**
+        /// filter (this was `snemu-itest --only`). So `itest sched` runs every
+        /// `sched-*` scenario under snemu, and is an unknown-name error under
+        /// qemu.
         scenario: Option<String>,
+        /// Which engine runs the scenarios. See [`Engine`].
+        #[arg(long, value_enum, default_value_t)]
+        engine: Engine,
+        /// Per-scenario snemu instruction-step budget. Passing scenarios
+        /// short-circuit well under this; the budget only bounds failing ones and
+        /// the slow OOM/cooperative workloads. 400M recovers the budget-sensitive
+        /// scenarios (e.g. `sched-yield-round-trips`). Accepts `K`/`M`/`B`
+        /// suffixes, e.g. `400M`, `1.2B`.
+        #[arg(long, default_value = "400M", value_parser = magnitude::parse)]
+        steps: u64,
+        /// Audit only the first N scenarios (faster smoke).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Disable `wfi` idle-skip (on by default). The A/B baseline: run the
+        /// audit both ways and confirm fidelity + per-scenario instret are
+        /// identical — idle-skip must change only speed, never telemetry.
+        #[arg(long, hide = true)]
+        no_idle_skip: bool,
+        /// Scenario packing order: `wall` (default — LPT by the previous run's
+        /// wall-time, the true optimisation target but noisy), `instret` (LPT by
+        /// prior instret — deterministic, reproducible), or `selection` (no packing —
+        /// the A/B baseline). The report prints both counterfactuals regardless.
+        #[arg(long, value_enum, default_value_t)]
+        order: itest::snemu_audit::PackOrder,
+        /// Enable the native-op helper (tier-0.5 JIT): fast-path guest memset/memcpy
+        /// (execute natively + charge the interpreter-equivalent instret). A/B it —
+        /// on vs off must keep the suite green (fidelity), only faster.
+        #[arg(long, hide = true)]
+        native_ops: bool,
+        /// Enable the Tier-2 block JIT (M6): compile + run hot basic blocks. A/B it
+        /// against off while ISA coverage expands — on vs off must stay green +
+        /// byte-identical guest instret (the oracle), only faster.
+        #[arg(long = "jit", hide = true)]
+        block_jit: bool,
+        /// With `--jit`, disable the block executor's register caching (M6 inc 4) —
+        /// the A/B baseline to isolate the caching's wall-time effect.
+        #[arg(long, hide = true)]
+        no_reg_cache: bool,
+        /// Enable the discovered-snapshot-tree collapse (off by default — the A/B
+        /// baseline). Observe-only scenarios (empty branch key, learned from a prior
+        /// run's persisted keys) of a workload share one forward run instead of each
+        /// re-executing the identical deterministic guest; each replays a prefix of
+        /// that shared stream truncated to its own budget, so verdicts are identical
+        /// to the fork-per-scenario path. See `docs/snemu-itest-snapshot-tree-design.md`.
+        #[arg(long, hide = true)]
+        share_snapshots: bool,
+        /// Enable **Backend B** (native AArch64 codegen) for the block JIT — implies
+        /// `--jit`. Host-only (arm64/macos); A/B it against off, which must stay green
+        /// + byte-identical guest instret (the oracle), only faster.
+        #[arg(long = "native-jit", hide = true)]
+        native_jit: bool,
+        /// Enable the software **TLB** (Sv39 translation cache). A/B it against off,
+        /// which must stay green + byte-identical guest instret (the oracle), only
+        /// faster — this is the lever for the memory/translation pole.
+        #[arg(long, hide = true)]
+        tlb: bool,
+        /// Preset speedup bundle: `low` (idle-skip only), `med` (+native-ops +TLB),
+        /// `hi` (+block JIT / Backend A — the fastest *portable*, **the default**),
+        /// `extra` (+Backend B native codegen — experimental, host-only, currently
+        /// slower). Individual `--jit`/`--tlb`/… flags layer on top. Pass
+        /// `--speedup low` for the idle-skip-only A/B baseline.
+        #[arg(long, value_enum, default_value = "hi")]
+        speedup: itest::snemu_audit::SpeedLevel,
         /// Number of times to repeat the run. Useful for flake
         /// detection. Default 1.
         #[arg(long, default_value_t = 1)]
@@ -302,20 +280,23 @@ enum Cmd {
         /// noise.
         #[arg(long, default_value_t = false)]
         no_auto_push: bool,
-        /// Number of scenarios to run in parallel. Default `10`
-        /// (validated against an empirical A/B at this width — all
-        /// scenarios stayed `consistent` against the sequential
-        /// baseline). The runner partitions scenarios into
-        /// Wfi-bounded (parallel at `--jobs` width) and Cpu-bounded
-        /// (parallel at `--cpu-jobs` width, run as a separate pass
-        /// after Wfi). Pass `--jobs 1` to force sequential. See
-        /// `plans/legacy/itest-parallel-scenarios.md`.
-        #[arg(
-            long,
-            default_value_t = 10,
-            value_parser = clap::value_parser!(u32).range(1..=64),
-        )]
-        jobs: u32,
+        /// Number of scenarios to run in parallel; `1` forces sequential.
+        ///
+        /// **The default differs per engine**, so this is left unset rather than
+        /// carrying one default that would be wrong for one of them (resolved at
+        /// dispatch):
+        ///
+        /// - **snemu**: the machine's available parallelism. Scenarios are
+        ///   independent (each owns its own machine) and snemu is a pure
+        ///   CPU-bound interpreter, so the sweet spot is the physical core count.
+        ///   Turn it down to measure scenario packing, or to leave cores free.
+        /// - **qemu**: `10` — validated against an empirical A/B at that width
+        ///   (every scenario stayed `consistent` against the sequential
+        ///   baseline). The QEMU runner also splits Wfi-bounded (parallel at
+        ///   `--jobs`) from Cpu-bounded (`--cpu-jobs`, a separate pass after).
+        ///   See `plans/legacy/itest-parallel-scenarios.md`.
+        #[arg(long, short = 'j', value_parser = clap::value_parser!(u32).range(1..=64))]
+        jobs: Option<u32>,
         /// Worker count for the Cpu-bound scenario batch. Defaults to
         /// `1` (fully serial): Cpu scenarios run real guest work — often
         /// multi-vcpu (e.g. the SMP workload + deflake storms use 2
@@ -365,20 +346,32 @@ enum Cmd {
         /// per-scenario isolation of separate boots.
         #[arg(long, default_value_t = false)]
         shared: bool,
-        /// Optimization regime — the QEMU counterpart to `snemu-itest --opt`, for
-        /// catching release-codegen divergences under QEMU, not just snemu:
-        /// - `low` (default): debug, opt-0 everywhere — today's behavior.
+        /// Optimization regime — which kernel/userspace build the scenarios run
+        /// against. Each level has distinct failure modes, so flicking between them
+        /// localizes a bug:
+        ///
+        /// - `low`: debug, opt-0 everywhere — the faithful correctness floor. The
+        ///   whole suite (incl. supervision) is green here, so a failure is a real
+        ///   logic bug.
         /// - `mid`: **release kernel** (opt-3) with the embedded userspace pinned to
         ///   opt-1 (the `build.rs` default). Exercises kernel release codegen while
-        ///   dodging the userspace opt≥2 UB class.
+        ///   dodging the userspace opt≥2 UB class. Fast. This is where
+        ///   release-codegen-vs-debug divergences surface: a scenario green under
+        ///   `low` can still fail here.
         /// - `high`: **release everywhere** — userspace at opt-3 too. Same kernel as
         ///   `mid`, but lifts the userspace pin, so it *surfaces* the userspace opt≥2
         ///   UB (talc OOM-loop / hang) that `mid` sidesteps.
         ///
-        /// So `mid` vs `high` isolates *where* a release-only failure lives: reproducing
-        /// under `mid` points at kernel codegen; only under `high` points at userspace.
-        #[arg(long, value_enum, default_value_t = qemu::OptLevel::Low)]
-        opt: qemu::OptLevel,
+        /// So `mid` vs `high` isolates *where* a release-only failure lives:
+        /// reproducing under `mid` points at kernel codegen; only under `high` points
+        /// at userspace.
+        ///
+        /// **The default differs per engine** (so this is unset here and resolved at
+        /// dispatch, like `--jobs`): snemu defaults to `mid` — fast and green, the
+        /// everyday gate; qemu defaults to `low`, its long-standing behaviour. Merging
+        /// them onto one default would silently change which kernel one engine tests.
+        #[arg(long, value_enum)]
+        opt: Option<qemu::OptLevel>,
     },
     /// Inspect and manage the integration-test baseline
     /// (`.itest-baseline.toml`) and per-run history (`.itest-runs/`).
@@ -679,6 +672,23 @@ enum DiagramTarget {
     Png,
 }
 
+/// Which engine `cargo xtask itest` runs scenarios under.
+///
+/// The promotion (plans/xtask-surface-consolidation.md, Step 2.1): snemu is the
+/// everyday runner because it is **deterministic** — one run is the gate, where
+/// the QEMU suite needed `--repeat 10` to say anything at its flake rate. QEMU
+/// keeps a real job, just not the inner-loop one: it is the oracle snemu is
+/// checked against (`cargo xtask snemu diff`), and the escape hatch for when a
+/// snemu verdict is doubted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum Engine {
+    /// The snemu emulator: deterministic, fast, in-process. **The default.**
+    #[default]
+    Snemu,
+    /// QEMU: one process per scenario, wall-clock timeouts, flake-prone.
+    Qemu,
+}
+
 /// Scenario classification filter for `cargo xtask itest --profile`.
 /// Maps to `itest_harness::CpuProfile`. The variant set is open —
 /// add new ones (e.g. `Smp`, `Deflake`) as more useful axes emerge.
@@ -817,9 +827,140 @@ fn scrub_inherited_cargo_env() {
 /// deliberately changes the surface, the failing test here is the point, and the
 /// step updates it.
 #[cfg(test)]
+mod mutant_plan_tests {
+    use super::{NOT_MUTATED, mutant_plan};
+    use crate::itest::{EXTRA_TEST_ARGS, NOT_HOST_TESTED};
+
+    const NO_ARGS: &[&str] = &[];
+
+    /// The anti-drift property: a crate joins the mutation gate by existing, not
+    /// by someone remembering to list it. The old hardcoded allow-list is exactly
+    /// how `snemu`, `supervision`, `ramfs` and ten others were never mutated.
+    #[test]
+    fn a_new_host_crate_is_mutated_by_default() {
+        let plan = mutant_plan(&["brand-new-crate"], &[], &[], &[]).expect("valid plan");
+        assert_eq!(plan, vec![("brand-new-crate", NO_ARGS)]);
+    }
+
+    #[test]
+    fn a_riscv_only_crate_is_not_mutated() {
+        let plan = mutant_plan(&["kernel", "collector"], &[("kernel", "riscv only")], &[], &[])
+            .expect("valid plan");
+        assert_eq!(plan, vec![("collector", NO_ARGS)]);
+    }
+
+    #[test]
+    fn a_deliberately_exempt_crate_is_not_mutated() {
+        let plan = mutant_plan(&["snemu", "collector"], &[], &[("snemu", "too big")], &[])
+            .expect("valid plan");
+        assert_eq!(plan, vec![("collector", NO_ARGS)]);
+    }
+
+    /// The feature args a crate's own suite needs are the same ones cargo-mutants
+    /// needs to run that suite — one table, not two.
+    #[test]
+    fn feature_args_come_from_the_test_gates_table() {
+        let plan = mutant_plan(&["protocol"], &[], &[], &[("protocol", &["--features", "std"])])
+            .expect("valid plan");
+        assert_eq!(plan, vec![("protocol", &["--features", "std"] as &[&str])]);
+    }
+
+    /// A renamed or deleted crate must not leave a silent entry behind.
+    #[test]
+    fn an_exemption_naming_a_departed_crate_is_an_error() {
+        let err = mutant_plan(&["collector"], &[], &[("kernel-core", "gone")], &[])
+            .expect_err("stale exemption must fail");
+        assert!(err.contains("kernel-core"), "error should name the stale entry: {err}");
+    }
+
+    /// Characterisation: deriving the list must not silently change *which* crates
+    /// get mutated. This is the exact set the hardcoded `MUTANT_CRATES` named.
+    /// Changing it is a deliberate act — enrolling a drift candidate from
+    /// `NOT_MUTATED` should fail here first.
+    #[test]
+    fn the_derived_plan_matches_the_previously_hardcoded_set() {
+        let members = crate::itest::workspace_members().expect("cargo metadata");
+        let names: Vec<&str> = members.iter().map(String::as_str).collect();
+        let plan = mutant_plan(&names, NOT_HOST_TESTED, NOT_MUTATED, EXTRA_TEST_ARGS)
+            .expect("committed lists are current");
+
+        let mut got: Vec<&str> = plan.iter().map(|(name, _)| *name).collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![
+            "collector",
+            "hitch",
+            "hitch-pod",
+            "kernel-boot",
+            "kernel-devices",
+            "kernel-mem",
+            "kernel-obs",
+            "kernel-proc",
+            "protocol",
+            "stitch",
+        ]);
+    }
+}
+
+#[cfg(test)]
 mod cli_surface_tests {
     use super::Cli;
     use clap::{CommandFactory, Parser};
+
+    /// Step 2.1 — the promotion. `itest` is snemu-backed by default: deterministic,
+    /// so a single run is the gate. QEMU stays reachable as `--engine qemu` — the
+    /// fidelity oracle snemu is checked against — and `snemu-itest` is gone.
+    #[test]
+    fn itest_is_snemu_backed_with_qemu_behind_an_engine_flag() {
+        use super::{Cmd, Engine};
+
+        let cli = Cli::try_parse_from(["xtask", "itest"]).expect("bare itest parses");
+        let Cmd::Itest { engine, .. } = cli.cmd else { panic!("expected Itest") };
+        assert_eq!(engine, Engine::Snemu, "itest must default to snemu — the promotion");
+
+        let cli = Cli::try_parse_from(["xtask", "itest", "--engine", "qemu"]).expect("parses");
+        let Cmd::Itest { engine, .. } = cli.cmd else { panic!("expected Itest") };
+        assert_eq!(engine, Engine::Qemu, "QEMU stays reachable");
+
+        // A scenario name works against both engines.
+        assert!(Cli::try_parse_from(["xtask", "itest", "boot-reaches-heartbeat"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["xtask", "itest", "--engine", "qemu", "boot-reaches-heartbeat"])
+                .is_ok()
+        );
+
+        // The old name is gone; a bogus engine is rejected.
+        assert!(Cli::try_parse_from(["xtask", "snemu-itest"]).is_err());
+        assert!(Cli::try_parse_from(["xtask", "itest", "--engine", "bochs"]).is_err());
+    }
+
+    /// Both engines' flags still parse after the merge — 2.2 gates them per
+    /// engine; 2.1 only moves them under one verb.
+    #[test]
+    fn the_merged_itest_accepts_both_engines_flags() {
+        for argv in [
+            // snemu-side (was `snemu-itest`)
+            ["itest", "--steps", "400M"].as_slice(),
+            ["itest", "--limit", "5"].as_slice(),
+            ["itest", "--order", "instret"].as_slice(),
+            ["itest", "--opt", "high"].as_slice(),
+            ["itest", "--speedup", "low"].as_slice(),
+            ["itest", "--jit"].as_slice(),
+            // qemu-side
+            ["itest", "--engine", "qemu", "--repeat", "3"].as_slice(),
+            ["itest", "--engine", "qemu", "--capture", "full"].as_slice(),
+            ["itest", "--engine", "qemu", "--cpu-jobs", "2"].as_slice(),
+            ["itest", "--engine", "qemu", "--profile", "wfi"].as_slice(),
+            ["itest", "--engine", "qemu", "--shared"].as_slice(),
+            // shared: --jobs is the packing lever on BOTH engines (its default
+            // differs per engine, so it is Option, resolved at dispatch).
+            ["itest", "--jobs", "4"].as_slice(),
+            ["itest", "--engine", "qemu", "--jobs", "4"].as_slice(),
+            ["itest", "--tag", "userspace"].as_slice(),
+        ] {
+            let full: Vec<&str> = std::iter::once("xtask").chain(argv.iter().copied()).collect();
+            assert!(Cli::try_parse_from(&full).is_ok(), "should parse: {argv:?}");
+        }
+    }
 
     /// clap's own consistency check: duplicate flags, bad defaults, conflicting
     /// short options. Cheap, and it fails at definition time rather than leaving
@@ -836,7 +977,6 @@ mod cli_surface_tests {
         const MINIMAL_ARGV: &[&[&str]] = &[
             &["build"],
             &["snemu", "boot"],
-            &["snemu-itest"],
             &["boot"],
             &["measure", "--workload", "smp"],
             &["collect"],
@@ -891,7 +1031,7 @@ mod cli_surface_tests {
             assert!(Cli::try_parse_from(["xtask", gone]).is_err(), "{gone} should be gone");
         }
         // …but the one being promoted in 2.1 stays where it is.
-        assert!(Cli::try_parse_from(["xtask", "snemu-itest"]).is_ok());
+        assert!(Cli::try_parse_from(["xtask", "itest"]).is_ok());
     }
 
     /// A verb we never had must not parse — proves the net actually discriminates
@@ -946,8 +1086,8 @@ mod cli_surface_tests {
         let itest = Cli::command();
         let itest = itest
             .get_subcommands()
-            .find(|c| c.get_name() == "snemu-itest")
-            .expect("snemu-itest exists");
+            .find(|c| c.get_name() == "itest")
+            .expect("itest exists");
         let hidden: Vec<&str> = [
             "native-ops", "jit", "no-reg-cache", "native-jit", "tlb", "no-idle-skip",
             "share-snapshots",
@@ -969,17 +1109,17 @@ mod cli_surface_tests {
     #[test]
     fn snemu_itest_perf_levers_parse_today() {
         for argv in [
-            ["snemu-itest", "--speedup", "low"].as_slice(),
-            ["snemu-itest", "--jit"].as_slice(),
-            ["snemu-itest", "--native-jit"].as_slice(),
-            ["snemu-itest", "--tlb"].as_slice(),
-            ["snemu-itest", "--native-ops"].as_slice(),
-            ["snemu-itest", "--no-reg-cache"].as_slice(),
-            ["snemu-itest", "--no-idle-skip"].as_slice(),
-            ["snemu-itest", "--share-snapshots"].as_slice(),
-            ["snemu-itest", "--order", "instret"].as_slice(),
-            ["snemu-itest", "--opt", "high"].as_slice(),
-            ["snemu-itest", "-j", "4"].as_slice(),
+            ["itest", "--speedup", "low"].as_slice(),
+            ["itest", "--jit"].as_slice(),
+            ["itest", "--native-jit"].as_slice(),
+            ["itest", "--tlb"].as_slice(),
+            ["itest", "--native-ops"].as_slice(),
+            ["itest", "--no-reg-cache"].as_slice(),
+            ["itest", "--no-idle-skip"].as_slice(),
+            ["itest", "--share-snapshots"].as_slice(),
+            ["itest", "--order", "instret"].as_slice(),
+            ["itest", "--opt", "high"].as_slice(),
+            ["itest", "-j", "4"].as_slice(),
         ] {
             let full: Vec<&str> = std::iter::once("xtask").chain(argv.iter().copied()).collect();
             assert!(Cli::try_parse_from(&full).is_ok(), "snemu-itest flag should parse: {argv:?}");
@@ -1028,7 +1168,7 @@ mod retired_command_tests {
         assert!(Cli::try_parse_from(["xtask", "snemu", "boot"]).is_ok());
         assert!(Cli::try_parse_from(["xtask", "snemu", "diff"]).is_ok());
         assert!(Cli::try_parse_from(["xtask", "snemu", "fork"]).is_ok());
-        assert!(Cli::try_parse_from(["xtask", "snemu-itest"]).is_ok());
+        assert!(Cli::try_parse_from(["xtask", "itest"]).is_ok());
     }
 }
 
@@ -1092,21 +1232,6 @@ fn main() -> ExitCode {
     match Cli::parse().cmd {
         Cmd::Build => build(),
         Cmd::Snemu { cmd } => run_snemu(cmd),
-        Cmd::SnemuItest {
-            steps, limit, only, jobs, no_idle_skip, order, opt, native_ops, block_jit, no_reg_cache,
-            share_snapshots,
-            native_jit,
-            tlb,
-            speedup,
-        } => {
-            let jobs = jobs.unwrap_or_else(|| {
-                std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-            });
-            let speed = itest::snemu_audit::SpeedConfig::resolve(
-                Some(speedup), native_ops, block_jit, native_jit, tlb, no_idle_skip, no_reg_cache,
-            );
-            itest::snemu_audit::run(steps, limit, only.as_deref(), jobs, order, opt, share_snapshots, speed)
-        }
         Cmd::Boot { features, workload, burst, ramfb, display } => {
             boot(&features, workload.as_deref(), burst, ramfb, display.as_deref())
         }
@@ -1135,6 +1260,18 @@ fn main() -> ExitCode {
         }
         Cmd::Itest {
             scenario,
+            engine,
+            steps,
+            limit,
+            no_idle_skip,
+            order,
+            native_ops,
+            block_jit,
+            no_reg_cache,
+            share_snapshots,
+            native_jit,
+            tlb,
+            speedup,
             repeat,
             force,
             update_baseline,
@@ -1148,28 +1285,58 @@ fn main() -> ExitCode {
             tag,
             shared,
             opt,
-        } => {
-            let profile_filter = profile.map(|p| match p {
-                ProfileFilter::Wfi => itest_harness::CpuProfile::Wfi,
-                ProfileFilter::Cpu => itest_harness::CpuProfile::Cpu,
-            });
-            itest::set_capture_level(capture.into());
-            itest::run(itest::RunConfig {
-                name: scenario,
-                repeat,
-                force,
-                update_baseline,
-                fail_fast,
-                auto_push: !no_auto_push,
-                jobs,
-                cpu_jobs,
-                profile_filter,
-                skip,
-                tags: tag,
-                shared,
-                opt,
-            })
-        }
+        } => match engine {
+            // The default. Deterministic, so one run is the gate.
+            Engine::Snemu => {
+                let jobs = jobs.map_or_else(
+                    || std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+                    |j| j as usize,
+                );
+                let speed = itest::snemu_audit::SpeedConfig::resolve(
+                    Some(speedup),
+                    native_ops,
+                    block_jit,
+                    native_jit,
+                    tlb,
+                    no_idle_skip,
+                    no_reg_cache,
+                );
+                itest::snemu_audit::run(
+                    steps,
+                    limit,
+                    scenario.as_deref(),
+                    jobs,
+                    order,
+                    opt.unwrap_or(qemu::OptLevel::Mid),
+                    share_snapshots,
+                    speed,
+                )
+            }
+            // The escape hatch: slower and flake-prone, but it's the engine snemu is
+            // checked against, so it stays runnable.
+            Engine::Qemu => {
+                let profile_filter = profile.map(|p| match p {
+                    ProfileFilter::Wfi => itest_harness::CpuProfile::Wfi,
+                    ProfileFilter::Cpu => itest_harness::CpuProfile::Cpu,
+                });
+                itest::set_capture_level(capture.into());
+                itest::run(itest::RunConfig {
+                    name: scenario,
+                    repeat,
+                    force,
+                    update_baseline,
+                    fail_fast,
+                    auto_push: !no_auto_push,
+                    jobs: jobs.unwrap_or(10),
+                    cpu_jobs,
+                    profile_filter,
+                    skip,
+                    tags: tag,
+                    shared,
+                    opt: opt.unwrap_or(qemu::OptLevel::Low),
+                })
+            }
+        },
         Cmd::Baseline { cmd } => baseline(cmd),
         Cmd::Diagram { target, check, workload, steps } => match target {
             DiagramTarget::Deps => diagram_cmd::deps(check),
@@ -1482,7 +1649,44 @@ fn run_clippy(extra_args: &[String]) -> ExitCode {
     }
 }
 
-/// Crates worth mutating, plus the features each one's *own* test suite needs.
+/// Host crates the mutation gate deliberately does **not** mutate, each with the
+/// reason. Every other host-tested crate is mutated: the gate derives its list
+/// from `cargo metadata`, so a crate joins by existing and this list is the only
+/// way out. Opting out is a decision someone has to write down.
+///
+/// The inverse (the allow-list this replaced) let a crate be silently never
+/// mutated by simple omission — which is how every entry below marked *drift*
+/// got here. Unlike the test and clippy gates, mutation is expensive enough that
+/// blanket enrolment is a real cost, so the exemptions stay; what changes is that
+/// they are now written down rather than implied by absence.
+const NOT_MUTATED: &[(&str, &str)] = &[
+    // Structural — mutation would produce noise, not signal.
+    ("fs-core", "no test suite of its own — every mutant would survive unkilled"),
+    ("hitch-derive", "no test suite of its own; its output is exercised through `hitch`"),
+    // Cost — real value, prohibitive runtime.
+    ("snemu", "~10k lines, and each mutant re-runs an emulator suite; runtime is the blocker, not the value"),
+    ("xtask", "the harness that runs this gate — mutating the judge"),
+    // Drift — these have real suites and are unmutated by accident, not decision.
+    // Enrolling one means deleting its line here and updating the
+    // `the_derived_plan_matches_the_previously_hardcoded_set` characterisation test.
+    ("diagram", "drift: has a real suite; enrolment candidate"),
+    ("fs-proto", "drift: has a real suite; enrolment candidate"),
+    ("itest-harness", "drift: has a real suite; enrolment candidate"),
+    ("magnitude", "drift: has a real suite; enrolment candidate"),
+    ("ramfs", "drift: has a real suite; enrolment candidate"),
+    ("snip", "drift: has a real suite; enrolment candidate"),
+    ("snitchos-abi", "drift: has a real suite; enrolment candidate"),
+    ("snitchos-user-macros", "drift: has a real suite; enrolment candidate"),
+    ("supervision", "drift: has a real suite; enrolment candidate"),
+];
+
+/// The crates the mutation gate mutates, plus the features each one's *own* test
+/// suite needs: every host-tested crate, minus the riscv-only ones (no host suite
+/// to kill mutants with) and minus [`NOT_MUTATED`].
+///
+/// The feature args come from the test gate's own table — the features a crate
+/// needs to compile its suite are exactly the ones cargo-mutants needs to *run*
+/// that suite, so there is one table rather than two to drift apart.
 ///
 /// One invocation per crate, rather than one invocation naming them all. That
 /// isn't ceremony: cargo-mutants narrows `cargo test` to the mutant's owning
@@ -1493,18 +1697,27 @@ fn run_clippy(extra_args: &[String]) -> ExitCode {
 /// the MUTATE step — the baseline failed with *"the package 'kernel-proc' does
 /// not contain this feature: stitch/testing"*. Per-crate, the feature list is
 /// always the one that crate actually has.
-const MUTANT_CRATES: &[(&str, &[&str])] = &[
-    ("collector", &[]),
-    ("protocol", &["--features", "std"]),
-    ("kernel-mem", &[]),
-    ("kernel-obs", &[]),
-    ("kernel-devices", &[]),
-    ("kernel-boot", &[]),
-    ("kernel-proc", &[]),
-    ("hitch", &[]),
-    ("hitch-pod", &[]),
-    ("stitch", &["--features", "testing"]),
-];
+fn mutant_plan<'a>(
+    members: &[&'a str],
+    riscv_only: &[(&str, &str)],
+    not_mutated: &[(&str, &str)],
+    extra_args: &[(&'static str, &'static [&'static str])],
+) -> Result<Vec<(&'a str, &'static [&'static str])>, String> {
+    // Checked here rather than left to `unit_test_plan`, so a stale entry names
+    // the list it actually lives in.
+    let stale: Vec<&str> =
+        not_mutated.iter().map(|(name, _)| *name).filter(|name| !members.contains(name)).collect();
+    if !stale.is_empty() {
+        return Err(format!(
+            "mutation policy names crates that are not workspace members: {}. \
+             Renamed or removed? Update NOT_MUTATED in xtask/src/main.rs.",
+            stale.join(", ")
+        ));
+    }
+
+    let excluded: Vec<(&str, &str)> = riscv_only.iter().chain(not_mutated.iter()).copied().collect();
+    itest::unit_test_plan(members, &excluded, extra_args)
+}
 
 /// One cargo-mutants invocation. Returns `true` iff it passed.
 fn run_mutants_for(name: &str, features: &[&str], extra_args: &[String]) -> bool {
@@ -1517,20 +1730,44 @@ fn run_mutants_for(name: &str, features: &[&str], extra_args: &[String]) -> bool
         .success()
 }
 
-/// Mutate `only` (or every crate in [`MUTANT_CRATES`] in turn). Trailing args
-/// go to cargo-mutants — scope a run with
+/// Mutate `only` (or every crate the mutation gate covers, in turn). Trailing
+/// args go to cargo-mutants — scope a run with
 /// `cargo xtask mutants kernel-proc -- -f kernel-proc/src/elf.rs`.
 fn run_mutants(only: Option<&str>, extra_args: &[String]) -> ExitCode {
+    let members = match itest::workspace_members() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("mutants: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let names: Vec<&str> = members.iter().map(String::as_str).collect();
+    let plan = match mutant_plan(&names, itest::NOT_HOST_TESTED, NOT_MUTATED, itest::EXTRA_TEST_ARGS)
+    {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("mutants: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
     let crates: Vec<(&str, &[&str])> = match only {
-        Some(name) => match MUTANT_CRATES.iter().find(|(c, _)| *c == name) {
+        Some(name) => match plan.iter().find(|(c, _)| *c == name) {
             Some(entry) => vec![*entry],
             None => {
-                let known: Vec<&str> = MUTANT_CRATES.iter().map(|(c, _)| *c).collect();
-                eprintln!("unknown crate `{name}`; known: {}", known.join(", "));
+                let known: Vec<&str> = plan.iter().map(|(c, _)| *c).collect();
+                let exempt = NOT_MUTATED.iter().find(|(c, _)| *c == name);
+                match exempt {
+                    Some((_, reason)) => {
+                        eprintln!("`{name}` is exempt from the mutation gate: {reason}");
+                        eprintln!("Remove its NOT_MUTATED entry in xtask/src/main.rs to enrol it.");
+                    }
+                    None => eprintln!("unknown crate `{name}`; known: {}", known.join(", ")),
+                }
                 return ExitCode::from(2);
             }
         },
-        None => MUTANT_CRATES.to_vec(),
+        None => plan.iter().map(|(name, args)| (*name, *args)).collect(),
     };
 
     for (name, features) in crates {
