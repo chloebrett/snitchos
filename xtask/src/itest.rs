@@ -732,11 +732,11 @@ pub(crate) fn riscv_only_plan<'a>(
 /// The reason mattered: while it stood, it was the template for three further
 /// bogus exemptions (`snitchos-user`, `snitchos-std`, `snitchos-user-macros`) that
 /// were never justified either. A false reason propagates.
-pub(crate) const LINTS_EXEMPT: &[(&str, &str)] = &[(
-    "kernel",
-    "104 un-triaged pedantic hits (~half mechanical doc-backticks); a volume \
-     problem, not an idiom one — opt in once triaged",
-)];
+/// **Empty is the goal state, and we are there.** `kernel` was the last holdout;
+/// its 104 hits turned out to be ~54 mechanical doc-backticks plus ordinary
+/// style, and it now opts in like everything else. Keep it empty unless a crate
+/// earns an entry with a *measured* reason — "it's bare-metal" is not one.
+pub(crate) const LINTS_EXEMPT: &[(&str, &str)] = &[];
 
 /// Whether a manifest inherits the workspace lint table.
 ///

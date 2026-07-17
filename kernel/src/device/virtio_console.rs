@@ -132,8 +132,7 @@ fn find_console_base(dtb: &Fdt) -> Option<usize> {
     for node in dtb.all_nodes() {
         let is_virtio = node
             .compatible()
-            .map(|c| c.all().any(|s| s == "virtio,mmio"))
-            .unwrap_or(false);
+            .is_some_and(|c| c.all().any(|s| s == "virtio,mmio"));
         if !is_virtio {
             continue;
         }

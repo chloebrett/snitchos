@@ -40,7 +40,7 @@ fn panic(info: &PanicInfo) -> ! {
         // higher-half-only).
         use core::fmt::Write;
         let mut uart = unsafe { uart::Uart16550::new(console::emergency_uart_base()) };
-        let _ = writeln!(&mut uart, "Kernel panic: {}", info);
+        let _ = writeln!(&mut uart, "Kernel panic: {info}");
 
         // Snitch the panic on the *structured* channel too, not just the UART —
         // for an observability-first kernel, its own death is the one event most

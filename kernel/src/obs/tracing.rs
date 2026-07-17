@@ -31,7 +31,7 @@ pub fn timestamp() -> u64 {
 /// what `timebase_hz` to use when interpreting subsequent timestamps.
 pub fn send_hello(timebase_hz: u32) {
     let frame = Frame::Hello {
-        timebase_hz: timebase_hz as u64,
+        timebase_hz: u64::from(timebase_hz),
         protocol_version: protocol::PROTOCOL_VERSION,
     };
     let mut buf = [0u8; 32];

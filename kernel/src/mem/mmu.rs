@@ -42,8 +42,7 @@ pub fn collect_mmio_regions(dtb: &Fdt) -> MmioRegions {
     for node in dtb.all_nodes() {
         let is_mmio = node
             .compatible()
-            .map(|c| c.all().any(|s| s == "ns16550a" || s == "virtio,mmio"))
-            .unwrap_or(false);
+            .is_some_and(|c| c.all().any(|s| s == "ns16550a" || s == "virtio,mmio"));
         if !is_mmio {
             continue;
         }

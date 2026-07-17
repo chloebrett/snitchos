@@ -31,9 +31,9 @@ pub(crate) use obs::{counter, heartbeat, tracing};
 pub(crate) use sched::{demo_tasks, process};
 pub(crate) use smp::{ipi, percpu, secondary, sync};
 pub(crate) use trap::{ipc, user};
-pub(crate) use workloads::{boot_workload, workload};
 #[cfg(feature = "itest-workloads")]
 pub(crate) use workloads::storms;
+pub(crate) use workloads::{boot_workload, workload};
 
 // Pull in the boot stub (entry.S). It defines `_start`, sets up the stack
 // pointer, zeros .bss, and calls `kmain`. See linker.ld for the memory layout
@@ -147,9 +147,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         span!("kernel.runs_at_higher_half");
     }
 
-    let timebase_hz = dtb::timebase_hz(&dtb)
-        .expect("DTB missing /cpus/timebase-frequency — can't run without a clock")
-        as u64;
+    let timebase_hz = u64::from(
+        dtb::timebase_hz(&dtb)
+            .expect("DTB missing /cpus/timebase-frequency — can't run without a clock"),
+    );
 
     // Install the trap vector. `trap_entry`'s symbol value is a
     // higher-half VA, so `stvec` only points somewhere meaningful with
@@ -220,7 +221,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     unsafe { trap::init_timer(timebase_hz / trap::TICKS_PER_HEARTBEAT) };
     // Publish the raw timebase for the `ClockFreq` syscall (userspace `Instant`
     // divides a `ClockNow` tick delta by this to get a real `Duration`).
-    trap::TIMEBASE_HZ.store(u64::from(timebase_hz), Ordering::Relaxed);
+    trap::TIMEBASE_HZ.store(timebase_hz, Ordering::Relaxed);
 
     // v0.6 step 7: enable S-mode software interrupts (the IPI
     // channel). Trap vector + handler are already installed; the
@@ -385,65 +386,58 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // Storms spawn post-secondary (task storms) or are entirely
         // heartbeat-driven (spawn/ipi/shootdown). `live-tasks` fills its table in
         // the post-secondary match below too.
-        Some(WorkloadKind::SpawnStorm)
-        | Some(WorkloadKind::LiveTasks)
-        | Some(WorkloadKind::IpiPong)
-        | Some(WorkloadKind::ShootdownStorm)
-        | Some(WorkloadKind::MutexStorm)
-        | Some(WorkloadKind::VirtioStorm)
-        | Some(WorkloadKind::TlbShootdown)
-        | Some(WorkloadKind::PingPong)
-        // Userspace: hart 0 just heartbeats; the user program is placed on
-        // hart 1 after SECONDARY_READY.
-        | Some(WorkloadKind::Userspace)
-        | Some(WorkloadKind::UserspaceFault)
-        | Some(WorkloadKind::UserspaceBadPtr)
-        | Some(WorkloadKind::UserspaceSpanFlood)
-        | Some(WorkloadKind::Workers)
-        | Some(WorkloadKind::HeapGrow)
-        | Some(WorkloadKind::UserHog)
-        | Some(WorkloadKind::SyscallHog)
-        | Some(WorkloadKind::ConsoleEcho)
-        | Some(WorkloadKind::StitchRepl)
-        | Some(WorkloadKind::StitchFs)
-        | Some(WorkloadKind::SpawnImage)
-        | Some(WorkloadKind::ManifestIface)
-        | Some(WorkloadKind::ManifestSatisfy)
-        | Some(WorkloadKind::Probe)
-        | Some(WorkloadKind::StackGuard)
-        | Some(WorkloadKind::PanicNow)
-        | Some(WorkloadKind::StackOverflowDeep)
-        | Some(WorkloadKind::BootStackGuard)
-        | Some(WorkloadKind::SpawnDemo)
-        | Some(WorkloadKind::SpawnReap)
-        | Some(WorkloadKind::WaitAny)
-        | Some(WorkloadKind::Init)
-        | Some(WorkloadKind::Supervised)
-        | Some(WorkloadKind::SupervisedIpc)
-        | Some(WorkloadKind::SupervisedShutdown)
-        | Some(WorkloadKind::KillNoCap)
-        | Some(WorkloadKind::UserOnHart0)
-        | Some(WorkloadKind::XhartKill)
-        | Some(WorkloadKind::HungDetect)
-        | Some(WorkloadKind::EndpointCreate)
-        | Some(WorkloadKind::NotifySmoke)
-        | Some(WorkloadKind::Priorities)
-        | Some(WorkloadKind::Ipc)
-        | Some(WorkloadKind::IpcRpc)
-        | Some(WorkloadKind::BadgeMint)
-        | Some(WorkloadKind::BadgeHandout)
-        | Some(WorkloadKind::Fs)
-        | Some(WorkloadKind::ViewDemo)
-        | Some(WorkloadKind::Shell)
-        // The OOM workloads: their pressure lives entirely in the heartbeat smoke
-        // (`frame_smoke` / `heap_smoke_pattern`), keyed on the workload — no demo
-        // tasks needed. Running them light (no task_a/task_b burning between ticks)
-        // keeps the *gradual*, multi-heartbeat exhaustion the scenarios assert
-        // while making each interval idle-cheap.
-        | Some(WorkloadKind::FrameOom)
-        | Some(WorkloadKind::HeapOom)
-        // The no-bootarg default boots `init` (userspace, placed on hart 1 via the
-        // layout below) — nothing to spawn on hart 0 here.
+        Some(
+            WorkloadKind::SpawnStorm
+            | WorkloadKind::LiveTasks
+            | WorkloadKind::IpiPong
+            | WorkloadKind::ShootdownStorm
+            | WorkloadKind::MutexStorm
+            | WorkloadKind::VirtioStorm
+            | WorkloadKind::TlbShootdown
+            | WorkloadKind::PingPong
+            | WorkloadKind::Userspace
+            | WorkloadKind::UserspaceFault
+            | WorkloadKind::UserspaceBadPtr
+            | WorkloadKind::UserspaceSpanFlood
+            | WorkloadKind::Workers
+            | WorkloadKind::HeapGrow
+            | WorkloadKind::UserHog
+            | WorkloadKind::SyscallHog
+            | WorkloadKind::ConsoleEcho
+            | WorkloadKind::StitchRepl
+            | WorkloadKind::StitchFs
+            | WorkloadKind::SpawnImage
+            | WorkloadKind::ManifestIface
+            | WorkloadKind::ManifestSatisfy
+            | WorkloadKind::Probe
+            | WorkloadKind::StackGuard
+            | WorkloadKind::PanicNow
+            | WorkloadKind::StackOverflowDeep
+            | WorkloadKind::BootStackGuard
+            | WorkloadKind::SpawnDemo
+            | WorkloadKind::SpawnReap
+            | WorkloadKind::WaitAny
+            | WorkloadKind::Init
+            | WorkloadKind::Supervised
+            | WorkloadKind::SupervisedIpc
+            | WorkloadKind::SupervisedShutdown
+            | WorkloadKind::KillNoCap
+            | WorkloadKind::UserOnHart0
+            | WorkloadKind::XhartKill
+            | WorkloadKind::HungDetect
+            | WorkloadKind::EndpointCreate
+            | WorkloadKind::NotifySmoke
+            | WorkloadKind::Priorities
+            | WorkloadKind::Ipc
+            | WorkloadKind::IpcRpc
+            | WorkloadKind::BadgeMint
+            | WorkloadKind::BadgeHandout
+            | WorkloadKind::Fs
+            | WorkloadKind::ViewDemo
+            | WorkloadKind::Shell
+            | WorkloadKind::FrameOom
+            | WorkloadKind::HeapOom,
+        )
         | None => {}
     }
 
@@ -556,11 +550,16 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         if layout.needs_endpoint {
             // The shared workload endpoint is the FS server's in the fs workloads;
             // name it so `hold` shows `for=fs` (see capability-names-design.md).
-            crate::ipc::DEMO_ENDPOINT.call_once(|| crate::ipc::create(snitchos_abi::pack_name("fs")));
+            crate::ipc::DEMO_ENDPOINT
+                .call_once(|| crate::ipc::create(snitchos_abi::pack_name("fs")));
         }
         // Userspace normally runs on hart 1 (hart 0 heartbeats). The multi-hart
         // de-risk places its program on hart 0 instead, to prove U-mode works there.
-        let user_hart = if selected == Some(WorkloadKind::UserOnHart0) { 0 } else { 1 };
+        let user_hart = if selected == Some(WorkloadKind::UserOnHart0) {
+            0
+        } else {
+            1
+        };
         for p in layout.programs {
             let _ = user::spawn_program(user_hart, p.name, p.program, p.priority);
         }
@@ -619,7 +618,10 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // Tier-B deep-overflow smoke: a kernel task recurses into its guard page;
         // the fault handler (on the per-hart exception stack) reports cleanly.
         Some(WorkloadKind::StackOverflowDeep) => {
-            let _ = sched::spawn("stack_overflow_deep", storms::stack_overflow_deep::smoke_body);
+            let _ = sched::spawn(
+                "stack_overflow_deep",
+                storms::stack_overflow_deep::smoke_body,
+            );
         }
         // Boot-stack guard smoke: a kernel task stores into the boot stack's guard
         // page; the trap handler recognizes the boot guard region, snitches + panics.
