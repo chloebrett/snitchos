@@ -13,58 +13,18 @@ use core::arch::asm;
 use fdt::Fdt;
 use kernel_mem::mmu::{self as core_mmu, MapError, PageTable, PtMem, Pte, PtePerms};
 
-pub use kernel_mem::mmu::{KERNEL_OFFSET, LINEAR_OFFSET, va_to_pa};
-
-/// 2 MiB — the page size for every leaf in our boot table.
-const PAGE_2MIB: usize = 2 * 1024 * 1024;
+// The pure halves live in `kernel-mem` (host-tested): the megapage geometry, the
+// MMIO-region set, and the `satp` encode/decode pair. What stays here is what
+// touches hardware — the CSR writes, the asm, the boot-table construction.
+pub use kernel_mem::mmu::{
+    KERNEL_OFFSET, LINEAR_OFFSET, MEGAPAGE_SIZE, MmioRegions, root_from_satp, satp_for, va_to_pa,
+};
 
 /// 2 MiB-aligned base of the MMIO region on QEMU `virt`. Covers the
 /// NS16550A UART at `0x10000000` plus the eight virtio-mmio slots at
 /// `0x10001000+`. Hardcoded here while DTB-driven discovery is
 /// parked (see `collect_mmio_regions`).
 pub const QEMU_VIRT_MMIO_BASE: usize = 0x10000000;
-
-/// Sv39 mode field value for the `satp` register.
-const SATP_MODE_SV39: u64 = 8;
-
-/// A set of 2 MiB-aligned physical bases to identity-map for MMIO.
-/// Collected from the DTB before `mmu::enable` runs so that page-table
-/// construction is decoupled from DTB traversal.
-pub struct MmioRegions {
-    bases: [usize; Self::CAP],
-    len: usize,
-}
-
-impl MmioRegions {
-    const CAP: usize = 16;
-
-    pub const fn new() -> Self {
-        Self {
-            bases: [0; Self::CAP],
-            len: 0,
-        }
-    }
-
-    /// Insert a 2 MiB-aligned base if not already present. Silently
-    /// drops the entry if the buffer is full (QEMU `virt` collapses
-    /// to 1-2 distinct 2 MiB regions; 16 is plenty of headroom).
-    pub fn insert(&mut self, base: usize) {
-        let aligned = base & !(PAGE_2MIB - 1);
-        for i in 0..self.len {
-            if self.bases[i] == aligned {
-                return;
-            }
-        }
-        if self.len < Self::CAP {
-            self.bases[self.len] = aligned;
-            self.len += 1;
-        }
-    }
-
-    pub fn as_slice(&self) -> &[usize] {
-        &self.bases[..self.len]
-    }
-}
 
 /// Walk the DTB for `ns16550a` and `virtio,mmio` nodes; return the set
 /// of distinct 2 MiB-aligned bases covering them.
@@ -210,13 +170,13 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
         // Kernel image: dual-mapped at identity (where the kernel runs
         // at boot) and higher-half (where it runs after the
         // trampoline). Identity gets unmapped in `unmap_identity_kernel`.
-        let kstart_aligned = kernel_start & !(PAGE_2MIB - 1);
-        let kend_aligned = (kernel_end + PAGE_2MIB - 1) & !(PAGE_2MIB - 1);
+        let kstart_aligned = kernel_start & !(MEGAPAGE_SIZE - 1);
+        let kend_aligned = (kernel_end + MEGAPAGE_SIZE - 1) & !(MEGAPAGE_SIZE - 1);
         let mut addr = kstart_aligned;
         while addr < kend_aligned {
             map_id_kernel(addr, addr);
             map_higher_kernel(addr + KERNEL_OFFSET, addr);
-            addr += PAGE_2MIB;
+            addr += MEGAPAGE_SIZE;
         }
 
         // MMIO: dual-mapped at identity (used by `init_handshake`
@@ -249,16 +209,18 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
         // (timebase_hz, uart_addr, virtio_console::init). One 2 MiB
         // page covers any sane DTB (< 64 KiB). Routes through whichever
         // identity mid table covers its gigapage.
-        let dtb_aligned = dtb_phys & !(PAGE_2MIB - 1);
+        let dtb_aligned = dtb_phys & !(MEGAPAGE_SIZE - 1);
         if (dtb_aligned >> 30) == (kernel_start >> 30) {
             map_id_kernel(dtb_aligned, dtb_aligned);
         } else {
             map_id_mmio(dtb_aligned, dtb_aligned);
         }
 
-        // Turn it on. PPN field is bits 43:0; MODE in bits 63:60.
+        // Turn it on. `satp_for` had been open-coded here *and* defined below —
+        // the same encode written twice, either of which could have been fixed
+        // without the other. One host-tested source now.
         let root_pa = (&raw const BOOT_PT_ROOT) as usize;
-        let satp_value = (SATP_MODE_SV39 << 60) | ((root_pa as u64) >> 12);
+        let satp_value = satp_for(root_pa);
         asm!(
             "csrw satp, {satp}",
             "sfence.vma",
@@ -451,23 +413,16 @@ pub fn free_user_root(root_pa: usize) {
     });
 }
 
-/// The `satp` value (Sv39 mode + root PPN) that activates the address
-/// space rooted at `root_pa`. Written with `csrw satp` + `sfence.vma`.
-pub fn satp_for(root_pa: usize) -> u64 {
-    (SATP_MODE_SV39 << 60) | ((root_pa as u64) >> 12)
-}
-
 /// Physical address of the root page table currently active in `satp` on
 /// this hart. Reads the live CSR (PPN is bits 43:0 in Sv39) and shifts it
 /// back to a PA — the single source of truth for "which address space is
 /// loaded," so the scheduler needn't track it separately.
 #[must_use]
 pub fn current_satp_root() -> usize {
-    let satp: usize;
+    let satp: u64;
     // SAFETY: reads a CSR; no memory access, no side effects.
     unsafe { asm!("csrr {}, satp", out(reg) satp, options(nomem, nostack)) };
-    const PPN_MASK: usize = (1 << 44) - 1;
-    (satp & PPN_MASK) << 12
+    root_from_satp(satp)
 }
 
 /// Whether the user range `[ptr, ptr+len)` is mapped readable (`R|U`) in the

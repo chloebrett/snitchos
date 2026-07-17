@@ -103,6 +103,24 @@ a plan — see `plans/` for active implementation tracks.
   bound would reject real programs, and that surfaces as a boot panic rather than
   a red test. Mutation-clean (0 missed); `init` boots unaffected.
 
+- **#13 — `MmioRegions` + the `satp` encode/decode are host-tested.** Both moved
+  to `kernel-mem`; `kernel/src/mem/mmu.rs` keeps only what touches hardware (the
+  CSR read/write and the boot-table construction). 9 new tests. The find that
+  justified it on its own: **`satp_for` was open-coded a second time inside
+  `mmu::enable`** — the same mode-shift/PPN encode written twice, either of which
+  could have been fixed without the other. One host-tested source now.
+  `root_from_satp` is the named inverse (was an anonymous `PPN_MASK` inside
+  `current_satp_root`), and the round-trip test pins the two constants *together*
+  — they sat 10 lines apart with nothing asserting they agreed, and a mismatch
+  silently activates the wrong address space rather than failing. `MEGAPAGE_SIZE`
+  is derived as `512 * PAGE_SIZE` (the table geometry) rather than a `2 * 1024 *
+  1024` literal, so it can't drift. `MmioRegions::insert` aligns *then* compares
+  (two devices in one megapage → one boot leaf, which is exactly QEMU `virt`'s
+  UART + virtio-mmio slots), and its silent drop past 16 is now pinned by a test
+  instead of promised by a comment — it's silent by design, since it runs pre-MMU
+  where there is nowhere to report. One documented equivalent mutant (`|`→`^` in
+  `satp_for`: the mode and PPN fields are disjoint, so no test can tell them
+  apart).
 - **#7 — Capability generation is load-bearing; revocation shipped.** The entry
   said `generation` was "dead-weight at 0" and `Stale`-on-revoke "unbuilt" —
   both stale. `CapTable::consume` bumps the generation (the single-use reply-cap
@@ -122,22 +140,6 @@ a plan — see `plans/` for active implementation tracks.
   to `DebugWrite`; the kernel refuses and the process survives).
 
 ## Correctness gaps
-
-### #13 — `MmioRegions` + `satp` encode/decode are still kernel-side *(small)*
-
-Both are pure and host-testable, found by the `kernel/` sweep during the
-kernel-core split and never extracted (see `plans/legacy/kernel-core-split.md`):
-
-- `MmioRegions` (`kernel/src/mem/mmu.rs:33-66`, ~35 lines) — aligns-then-dedups
-  to 2 MiB and **silently clamps at 16 entries**. Tests would pin the
-  align/compare order (flip it and two devices in one 2 MiB region burn two boot
-  page-table slots) and the documented drop-on-overflow.
-- `satp_for` / the PPN decode in `current_satp_root` (`:456,465`, ~10 lines) — a
-  round-trip test would pin the mode-shift and PPN-mask constants *together*.
-  They live 10 lines apart today with nothing asserting they agree; a wrong shift
-  silently loads the wrong address space.
-
-Both land in `kernel-mem`.
 
 ### #16 — Userspace pinned to opt-1 to dodge a UB class *(latent, hard)*
 

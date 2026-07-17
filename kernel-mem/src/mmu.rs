@@ -122,6 +122,94 @@ impl PtePerms {
 /// Bytes per 4 KiB page — the granularity a cross-AS copy walks at.
 pub const PAGE_SIZE: usize = 4096;
 
+/// 2 MiB — the Sv39 level-1 ("megapage") leaf size, and the granularity the boot
+/// table maps at. Derived from the table geometry (512 entries × 4 KiB) rather
+/// than written as a literal, so it can't drift from [`PAGE_SIZE`].
+pub const MEGAPAGE_SIZE: usize = 512 * PAGE_SIZE;
+
+/// A set of megapage-aligned physical bases to identity-map for MMIO.
+///
+/// Collected before `mmu::enable` runs so page-table construction is decoupled
+/// from DTB traversal. Fixed-capacity and `const`-constructible: it's built
+/// pre-MMU, where there is no allocator.
+pub struct MmioRegions {
+    bases: [usize; Self::CAP],
+    len: usize,
+}
+
+impl Default for MmioRegions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MmioRegions {
+    /// QEMU `virt` collapses to 1–2 distinct megapages; 16 is headroom.
+    const CAP: usize = 16;
+
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { bases: [0; Self::CAP], len: 0 }
+    }
+
+    /// Insert the megapage containing `base`, if not already present.
+    ///
+    /// Aligns **then** compares, so two devices in one megapage collapse to a
+    /// single entry (the UART and the virtio-mmio slots on QEMU `virt` do
+    /// exactly this) — one boot page-table leaf covers both.
+    ///
+    /// Silently drops past [`CAP`](Self::CAP): this runs pre-MMU, before there
+    /// is any way to report. The drop is pinned by a test rather than left to
+    /// this comment.
+    pub fn insert(&mut self, base: usize) {
+        let aligned = base & !(MEGAPAGE_SIZE - 1);
+        if self.bases[..self.len].contains(&aligned) {
+            return;
+        }
+        if self.len < Self::CAP {
+            self.bases[self.len] = aligned;
+            self.len += 1;
+        }
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[usize] {
+        &self.bases[..self.len]
+    }
+}
+
+/// Sv39 mode field value for `satp` (bits 63:60). 8 = Sv39.
+const SATP_MODE_SV39: u64 = 8;
+
+/// `satp`'s PPN field: bits 43:0.
+const SATP_PPN_MASK: u64 = (1 << 44) - 1;
+
+/// The `satp` value that activates the address space rooted at `root_pa`.
+///
+/// Paired with [`root_from_satp`], which must undo it — the two constants above
+/// only mean anything together, and a mismatch silently activates the *wrong*
+/// address space rather than failing.
+///
+/// **Equivalent mutant:** the `|` here survives mutation to `^`. The two fields
+/// are disjoint by construction — mode is bits 63:60, and `root_pa >> 12` can
+/// reach at most bit 51 — so `|` and `^` agree for every input, and no test can
+/// tell them apart. Same reasoning as [`Pte::perms`]' literal mask, which has no
+/// literal equivalent to reach for here (this packs a parameter). Writing `+`
+/// would make it killable, but bit-packing with `+` is worse code than the
+/// finding is worth.
+#[must_use]
+pub const fn satp_for(root_pa: usize) -> u64 {
+    (SATP_MODE_SV39 << 60) | ((root_pa as u64) >> 12)
+}
+
+/// The root page-table PA encoded in `satp` — the inverse of [`satp_for`].
+///
+/// Masks the PPN out first, so the mode field never leaks into the address.
+#[must_use]
+pub const fn root_from_satp(satp: u64) -> usize {
+    ((satp & SATP_PPN_MASK) << 12) as usize
+}
+
 /// PTE bit positions defined by the privileged spec.
 const PTE_V: u64 = 1 << 0;
 const PTE_A: u64 = 1 << 6;
@@ -638,6 +726,82 @@ mod tests {
     #[test]
     fn user_range_accepts_low_half_buffer() {
         assert!(user_range_ok(0x1000, 16));
+    }
+
+    #[test]
+    fn mmio_regions_collapse_two_devices_in_one_megapage_to_one_entry() {
+        // The whole point: the boot table maps MMIO at 2 MiB granularity, so
+        // devices sharing a megapage need one leaf between them. QEMU `virt`'s
+        // UART (0x10000000) and virtio-mmio slots (0x10001000+) are exactly this.
+        // `insert` must align *then* compare — comparing raw bases first would
+        // store both and burn two boot page-table slots on one region.
+        let mut regions = MmioRegions::new();
+        regions.insert(0x1000_0000);
+        regions.insert(0x1000_1000);
+        regions.insert(0x1010_0000);
+        assert_eq!(regions.as_slice(), &[0x1000_0000]);
+    }
+
+    #[test]
+    fn mmio_regions_align_down_and_keep_distinct_megapages_apart() {
+        let mut regions = MmioRegions::new();
+        regions.insert(0x1000_1234);
+        regions.insert(0x1020_0000);
+        assert_eq!(regions.as_slice(), &[0x1000_0000, 0x1020_0000]);
+    }
+
+    #[test]
+    fn mmio_regions_silently_drop_past_capacity() {
+        // Documents the degradation rather than leaving it to a comment: the
+        // 17th *distinct* region is dropped and the first 16 survive. Silent by
+        // design (this runs pre-MMU, where there is nowhere to report), so the
+        // behaviour is worth pinning — if it ever needs to be loud, this test
+        // is what says it changed.
+        let mut regions = MmioRegions::new();
+        for i in 0..20 {
+            regions.insert(i * MEGAPAGE_SIZE);
+        }
+        assert_eq!(regions.as_slice().len(), 16);
+        assert_eq!(regions.as_slice()[0], 0);
+        assert_eq!(regions.as_slice()[15], 15 * MEGAPAGE_SIZE);
+    }
+
+    #[test]
+    fn mmio_regions_dedup_still_works_at_capacity() {
+        // A duplicate must be a no-op even when full — not a silent drop that
+        // masks the dedup being broken.
+        let mut regions = MmioRegions::new();
+        for i in 0..16 {
+            regions.insert(i * MEGAPAGE_SIZE);
+        }
+        regions.insert(0);
+        assert_eq!(regions.as_slice().len(), 16);
+    }
+
+    #[test]
+    fn satp_round_trips_a_root_page_table_address() {
+        // The encode's mode-shift and the decode's PPN mask are two constants
+        // that must agree; nothing else asserts that they do. A wrong shift or
+        // mask silently activates the wrong address space — the kernel would
+        // load garbage as a page table rather than fail visibly.
+        for root_pa in [0x8000_0000, 0x8020_0000, 0x0, 0xF_FFFF_F000] {
+            assert_eq!(root_from_satp(satp_for(root_pa)), root_pa, "round trip {root_pa:#x}");
+        }
+    }
+
+    #[test]
+    fn satp_encodes_sv39_in_the_mode_field() {
+        // Mode 8 = Sv39, in bits 63:60. Pins the encode against the decode
+        // above: a round trip alone would still pass if *both* were wrong.
+        assert_eq!(satp_for(0x8000_0000) >> 60, 8);
+    }
+
+    #[test]
+    fn root_from_satp_ignores_the_mode_field() {
+        // The PPN is bits 43:0; the mode bits must not leak into the address.
+        let ppn = 0x8000_0000 >> 12;
+        assert_eq!(root_from_satp((8 << 60) | ppn), 0x8000_0000);
+        assert_eq!(root_from_satp((15 << 60) | ppn), 0x8000_0000, "any mode, same root");
     }
 
     #[test]
