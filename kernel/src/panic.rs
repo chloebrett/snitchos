@@ -62,7 +62,7 @@ fn panic(info: &PanicInfo) -> ! {
 /// - **no blocking** — [`virtio_console::try_send_panic`](crate::virtio_console::try_send_panic)
 ///   `try_lock`s the console and skips on contention (a hart may have panicked
 ///   *mid-send*, already holding the lock — a blocking send would deadlock);
-/// - **single writer** — the `PANICKING` swap in [`panic`] admits exactly one
+/// - **single writer** — the `PANICKING` swap in [`panic()`] admits exactly one
 ///   hart into the panic branch, so this is the sole writer to the static buffer.
 ///
 /// If the console isn't up yet, or its lock is held, the frame is silently

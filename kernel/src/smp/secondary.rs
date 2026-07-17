@@ -80,7 +80,7 @@ pub static PROBE_TICKS: DeferredCounter = DeferredCounter::new("snitchos.smp.har
 /// what `yield_now` on hart 1 executes after picking it.
 pub extern "C" fn probe_entry() -> ! {
     loop {
-        // A span tagged with this hart's id (via `span_start`'s
+        // A span tagged with this hart's id (via `span_start_id`'s
         // `current_hartid()`). It is the wire-format proof that a
         // cross-hart-spawned task both *runs on* and is *attributed to*
         // hart 1 — drives `smp-spans-carry-hart-id` and

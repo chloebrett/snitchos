@@ -4,11 +4,11 @@
 //! the per-tick smoke patterns (frame + heap exercise, see feature
 //! flags), and emits every metric registered in [`Metrics`].
 //!
-//! The metric set is built with the [`define_metrics!`] macro: one
+//! The metric set is built with the `define_metrics!` macro: one
 //! list, one line per metric, with optional `#[cfg]` per line. The
 //! macro generates both the struct declaration and the
 //! `register()` constructor, so adding or removing a metric is a
-//! one-line edit. Inside [`run`], the [`emit!`] macro wraps the
+//! one-line edit. Inside [`run`], the `emit!` macro wraps the
 //! `tracing::emit_metric(..., expr as i64)` call so each emission
 //! is one line.
 

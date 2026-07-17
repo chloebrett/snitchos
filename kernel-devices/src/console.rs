@@ -1,6 +1,7 @@
 //! A fixed-capacity byte FIFO for console (UART) input — the Tier-0 polled-RX
-//! ring. Pure bookkeeping, host-tested like [`crate::frame::Bitmap`] and
-//! [`crate::sched::Runqueue`]; the kernel owns the live instance.
+//! ring. Pure bookkeeping, host-tested like `kernel_mem::frame::Bitmap` and
+//! `kernel_proc::sched::Runqueue`; the kernel owns the live instance. (Plain
+//! code spans, not intra-doc links: this crate deliberately depends on neither.)
 //!
 //! **Why `&mut self` is enough (no atomics).** The kernel wraps this in a
 //! `kernel::sync::Mutex` taken by *both* the timer-driven RX drain and the

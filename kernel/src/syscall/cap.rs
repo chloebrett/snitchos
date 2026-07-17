@@ -77,7 +77,7 @@ pub(super) fn handle_mint_badged(frame: &mut TrapFrame) {
 /// Enumerate the caller's **own** capability table (`hold`). `a0` = pointer to a
 /// `[CapDesc; N]` buffer in the caller's space, `a1` = `N` (capacity in entries).
 /// Snapshots the live caps via the pure host-tested [`kernel_proc::cap::CapTable::describe`],
-/// writes up to `N` packed [`CapDesc`] records out, and returns the **total** live
+/// writes up to `N` packed `CapDesc` records out, and returns the **total** live
 /// count in `a0` (so a too-small buffer is detectable: returned `>` `N`), or refuses
 /// with `a0 = u64::MAX` on a bad/unwritable range. Introspection, not authority — so
 /// it is ungated (no cap argument), like `ConsoleRead`/`ClockNow`.
@@ -112,7 +112,7 @@ pub(super) fn handle_cap_list(frame: &mut TrapFrame) {
     }
 }
 
-/// Revoke the capabilities **derived from** the holding `a0` (a [`Handle`]) names —
+/// Revoke the capabilities **derived from** the holding `a0` (a `Handle`) names —
 /// the powerbox reclaim. Authority is implicit: resolving the handle in the
 /// caller's own table proves it holds the cap, which *is* the right to reclaim what
 /// was delegated from it (no separate ancestry check). The caller's own holding

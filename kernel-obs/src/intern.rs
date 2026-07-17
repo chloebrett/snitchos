@@ -135,7 +135,7 @@ impl InternTable {
     /// `StringRegister` then a `MetricRegister` carrying `kind` and the registering
     /// `task_id` (the emitter dimension). Always appends — no cross-process dedup,
     /// so each process's metric is its own `StringId` and can't forge another's.
-    /// The name is reclaimable via [`release`](Self::release) on process exit.
+    /// The name is reclaimable via [`release`](Self::release)(Self::release) on process exit.
     pub fn register_metric_owned<S: FrameSink>(
         &mut self,
         name: Box<str>,
@@ -199,11 +199,11 @@ impl InternTable {
     }
 
     /// Intern a heap-`Owned` name (a userspace span/metric name), emitting its
-    /// `StringRegister`, and return its id. Unlike [`register_or_lookup`] this
+    /// `StringRegister`, and return its id. Unlike [`register_or_lookup`](Self::register_or_lookup) this
     /// **always appends** — the caller (a per-process `SpanNameTable` /
     /// `MetricTable`) has already deduped within its own scope, and the table
     /// must *not* dedup across processes (that's the name-poisoning boundary).
-    /// The table takes ownership so the name can be dropped via [`release`] when
+    /// The table takes ownership so the name can be dropped via [`release`](Self::release) when
     /// the process exits.
     pub fn register_owned<S: FrameSink>(&mut self, name: Box<str>, sink: &mut S) -> StringId {
         let id = self.push(InternEntry {
@@ -247,8 +247,8 @@ impl InternTable {
     /// names). It deduplicates across the *whole* table — every process and the
     /// kernel — so resolving a userspace name through it would let a process
     /// alias another's (or the kernel's) `StringId`: the span-name poisoning hole
-    /// fixed by per-process [`SpanNameTable`](crate::span_name::SpanNameTable) /
-    /// [`MetricTable`](crate::metric::MetricTable) scoping. Kept for content
+    /// fixed by per-process `SpanNameTable` /
+    /// `MetricTable` scoping. Kept for content
     /// lookups that are legitimately global (and as a test oracle for the
     /// inline→overflow scan).
     #[must_use]

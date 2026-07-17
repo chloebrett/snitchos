@@ -166,7 +166,7 @@ pub enum Multiplicity {
 
 /// An opaque reference to a capability *within the table that issued it*.
 ///
-/// Packs a slot `index` (low [`Handle::INDEX_BITS`] bits) and a
+/// Packs a slot `index` (low `INDEX_BITS` bits) and a
 /// `generation` (the rest) into one `u32` — the width the syscall ABI
 /// carries in a register. The generation is dead weight in v0.7b
 /// (nothing frees a slot, so it is always 0), but it is what lets a
@@ -578,7 +578,7 @@ impl CapTable {
 
     /// Grant `cap` as a single-use [`Multiplicity::Once`] capability, stamping
     /// the holding with the global `cap_id` + `parent_cap_id`. The id'd twin of
-    /// [`insert_once`].
+    /// [`insert_once`](Self::insert_once).
     pub fn insert_once_with_id(
         &mut self,
         cap: Capability,

@@ -158,9 +158,9 @@ impl MmioRegions {
     /// single entry (the UART and the virtio-mmio slots on QEMU `virt` do
     /// exactly this) — one boot page-table leaf covers both.
     ///
-    /// Silently drops past [`CAP`](Self::CAP): this runs pre-MMU, before there
-    /// is any way to report. The drop is pinned by a test rather than left to
-    /// this comment.
+    /// Silently drops past its 16-entry capacity: this runs pre-MMU, before
+    /// there is any way to report. The drop is pinned by a test rather than
+    /// left to this comment.
     pub fn insert(&mut self, base: usize) {
         let aligned = base & !(MEGAPAGE_SIZE - 1);
         if self.bases[..self.len].contains(&aligned) {
@@ -193,7 +193,7 @@ const SATP_PPN_MASK: u64 = (1 << 44) - 1;
 /// **Equivalent mutant:** the `|` here survives mutation to `^`. The two fields
 /// are disjoint by construction — mode is bits 63:60, and `root_pa >> 12` can
 /// reach at most bit 51 — so `|` and `^` agree for every input, and no test can
-/// tell them apart. Same reasoning as [`Pte::perms`]' literal mask, which has no
+/// tell them apart. Same reasoning as `Pte::perms`' literal mask, which has no
 /// literal equivalent to reach for here (this packs a parameter). Writing `+`
 /// would make it killable, but bit-packing with `+` is worse code than the
 /// finding is worth.
@@ -427,7 +427,7 @@ pub enum MapError {
 }
 
 /// Install a 4 KiB leaf PTE mapping VA `va` → PA `pa` with `perms`.
-/// Walks the table tree rooted at `root_pa` from VPN[2] to VPN[0],
+/// Walks the table tree rooted at `root_pa` from `VPN[2]` to `VPN[0]`,
 /// allocating intermediate tables from `mem` on demand. The caller
 /// is responsible for `sfence.vma` after a successful return.
 ///
@@ -658,6 +658,15 @@ pub fn copy_across(
 /// the same `translate` walk `copy_across` uses, without moving any bytes.
 /// Subsumes [`user_range_ok`] (a range outside the user half is `false`);
 /// `len == 0` is vacuously `true`.
+///
+/// **Two equivalent mutants live in the loop below**, both in the chunk-size
+/// arithmetic (`off`, and `len - done`) rather than in the address checked. The
+/// address is `va + done` at the `translate` call — mutate *that* and tests fail
+/// immediately. The size arithmetic can't change the verdict: the advance is
+/// capped at `min(PAGE_SIZE - off, ..)`, so consecutive checks stay at most one
+/// page apart and no page can be skipped however wrongly `off` is computed; and
+/// `len - done` only sizes the *final* chunk, on the iteration where the loop
+/// exits regardless. A wrong chunk size makes this walk slower, never wronger.
 #[must_use]
 pub fn range_mapped(root_pa: usize, va: usize, len: usize, required: PtePerms, mem: &dyn PtMem) -> bool {
     if len == 0 {

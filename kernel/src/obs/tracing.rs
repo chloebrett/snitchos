@@ -124,7 +124,7 @@ pub fn emit_log(msg: &str) {
 /// Intern `name` (a runtime string copied from U-mode) and open a span on the
 /// calling task's cursor, returning the `{id, parent}` close token (which
 /// userspace holds, just as the kernel's `Span` guard does). Non-RAII twin of
-/// [`span_start`]: the matching `SpanEnd` comes from a later
+/// [`span_start_id`]: the matching `SpanEnd` comes from a later
 /// [`span_close_checked`].
 ///
 /// Names are scoped **per process** via `span_names` (the caller's own
@@ -175,7 +175,7 @@ pub fn span_open_bounded(
 }
 
 /// Close a userspace span: the caller hands back the `{id, parent}` token from
-/// [`span_open_owned`]. Validates `id` against the **cursor top** — only the
+/// [`span_open_bounded`]. Validates `id` against the **cursor top** — only the
 /// innermost open span may close — refusing an out-of-order or forged id
 /// (returns `false`). On success emits `SpanEnd` and restores the cursor to
 /// `parent`. The cursor is per-task, so a bad close can only desync the
@@ -501,7 +501,7 @@ macro_rules! span {
     ($name:expr) => {
         // Intern the name once per call site (the name is a fixed `&'static
         // str` here), caching its `StringId` — so a span opened every tick
-        // skips the O(n) intern-table scan `span_start` would repeat. Mirrors
+        // skips the O(n) intern-table scan `span_start_id` would repeat. Mirrors
         // the `DeferredCounter` id cache. First open emits the `StringRegister`;
         // later opens reuse the id, so the wire output is unchanged.
         let _span = {
@@ -553,7 +553,7 @@ pub fn current_span_id() -> protocol::SpanId {
 }
 
 /// Seed the running task's cursor with an incoming parent span, so its next
-/// [`span_start`] (or U-mode `SpanOpen`) opens a child of `parent`. The IPC
+/// [`span_start_id`] (or U-mode `SpanOpen`) opens a child of `parent`. The IPC
 /// `receive` path calls this with the sender's span id — the kernel-populated
 /// trace context crossing the process boundary. `SpanId(0)` is a no-op-shaped
 /// seed (the next span is a root), so an IPC with no open sender span is safe.
@@ -561,10 +561,10 @@ pub fn set_current_parent(parent: protocol::SpanId) {
     current_cursor().set_current(parent);
 }
 
-/// RAII guard returned by `span_start`. Drop emits `SpanEnd` and
+/// RAII guard returned by `span_start_id`. Drop emits `SpanEnd` and
 /// pops the span off the cursor it was opened on.
 ///
-/// `cursor` is the cursor that was current at `span_start` time. We
+/// `cursor` is the cursor that was current at `span_start_id` time. We
 /// keep it so a span that survives a context switch closes on the
 /// same cursor it opened on, rather than picking up whichever task
 /// happens to be running at Drop time.
@@ -584,7 +584,7 @@ impl Drop for Span {
             id: self.open.id,
             t: timestamp(),
         });
-        // SAFETY: cursor was valid at span_start; pointer to a
+        // SAFETY: cursor was valid at span_start_id; pointer to a
         // `SpanCursor` inside a `Box<Task>` (or the static fallback)
         // stays valid for the lifetime of this kernel.
         let cursor = unsafe { &*self.cursor };
