@@ -174,6 +174,10 @@ pub enum WorkloadKind {
     /// forced one via `Kill`. The stops land in the exact reverse of startup, each an
     /// observable event on the wire (a forced stop also a `CapEvent::Revoked`).
     SupervisedShutdown,
+    /// Supervision v2a negative: a process holding no `Object::Process` cap tries to
+    /// `Kill` and is refused (`SyscallRefused{Kill}`) — proving the kill authorization
+    /// is real, not ambient. It survives the refusal and reports it.
+    KillNoCap,
     /// v0.13 EndpointCreate: a single program manufactures its own IPC endpoint
     /// via the `EndpointCreate` syscall and proves the returned cap is a real
     /// owning `RECV | MINT` by minting a badged `SEND` on it.
@@ -349,6 +353,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "supervised" => Some(WorkloadKind::Supervised),
             "supervised-ipc" => Some(WorkloadKind::SupervisedIpc),
             "supervised-shutdown" => Some(WorkloadKind::SupervisedShutdown),
+            "kill-no-cap" => Some(WorkloadKind::KillNoCap),
             "endpoint-create" => Some(WorkloadKind::EndpointCreate),
             "demo" => Some(WorkloadKind::Demo),
             "cooperative" => Some(WorkloadKind::Cooperative),
@@ -456,6 +461,11 @@ mod tests {
             select("workload=supervised-shutdown"),
             Some(WorkloadKind::SupervisedShutdown)
         );
+    }
+
+    #[test]
+    fn selects_kill_no_cap() {
+        assert_eq!(select("workload=kill-no-cap"), Some(WorkloadKind::KillNoCap));
     }
 
     #[test]

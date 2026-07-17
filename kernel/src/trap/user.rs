@@ -120,6 +120,11 @@ pub static SUPERVISED_SHUTDOWN_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SUPERV
 /// the cooperative half of the graceful-shutdown demo.
 pub static SVC_WORKER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_SVC_WORKER_ELF"));
 
+/// The `workload=kill-no-cap` negative (v2a): a process holding no `Object::Process`
+/// cap tries to `Kill` and is refused — proving the kill authority is real, not
+/// ambient. It survives and reports the refusal.
+pub static KILL_NO_CAP_ELF: &[u8] = include_bytes!(env!("SNITCHOS_KILL_NO_CAP_ELF"));
+
 /// The `workload=init` supervising root: spawns a child (delegating its span cap)
 /// and reaps it via `WaitAny` — the delegation-graph root (v0.13).
 pub static INIT_ELF: &[u8] = include_bytes!(env!("SNITCHOS_INIT_ELF"));
@@ -354,6 +359,10 @@ pub static SUPERVISED_IPC: ProgramSpec = ProgramSpec { elf: SUPERVISED_IPC_ELF, 
 /// step 4) — spawns its service tree + shutdown notifications, then tears it down
 /// (Launch::Plain; it `Spawn`s/`NotifyCreate`s its own services).
 pub static SUPERVISED_SHUTDOWN: ProgramSpec = ProgramSpec { elf: SUPERVISED_SHUTDOWN_ELF, launch: Launch::Plain };
+
+/// `workload=kill-no-cap`: the negative — a lone process that tries to `Kill` without
+/// holding a `Process` cap and is refused (Launch::Plain; holds only bootstrap caps).
+pub static KILL_NO_CAP: ProgramSpec = ProgramSpec { elf: KILL_NO_CAP_ELF, launch: Launch::Plain };
 
 /// `workload=init`: the supervising root — spawns + `WaitAny`-reaps a child,
 /// delegating its span cap downward. Holds only its bootstrap caps (Launch::Plain).
@@ -776,6 +785,12 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::SupervisedShutdown, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "supervised_shutdown", program: &SUPERVISED_SHUTDOWN, priority: Priority::Normal }],
+    }),
+    // Supervision v2a negative: a lone process tries to `Kill` without a Process cap
+    // and is refused — no children, holds only its bootstrap caps.
+    (WorkloadKind::KillNoCap, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "kill_no_cap", program: &KILL_NO_CAP, priority: Priority::Normal }],
     }),
     // v0.13 EndpointCreate: a single program manufactures its own endpoint and
     // proves it by minting — no kernel-created endpoint (`needs_endpoint: false`).

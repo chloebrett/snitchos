@@ -14,8 +14,12 @@ clap = { version = "4", features = ["derive"] }
 # Backend B (native block JIT, host-only): `mmap`/`MAP_JIT` for executable memory.
 # Only the JIT module uses it; the interpreter core stays dependency-free and
 # `unsafe`-free. Scoped off wasm (the browser path is Backend A only).
+#
+# `minifb`: the `--window` CLI flag's live framebuffer display (main.rs only,
+# not the lib). Windowing is meaningless in a wasm build — scoped off it too.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libc = "0.2"
+minifb = "0.27"
 
 [dev-dependencies]
 # Read-only FDT parser (the same one the kernel uses) — verifies the bootargs

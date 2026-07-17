@@ -3487,6 +3487,35 @@ pub fn supervised_kill_stops_a_child(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Supervision v2a negative — `Kill` is refused without the `Object::Process` cap
+/// (`workload=kill-no-cap`). A lone process holding only its bootstrap caps tries to
+/// `Kill` through a handle it doesn't hold; the kernel refuses
+/// (`SyscallRefused{Kill, CapNotFound}`) rather than ending anything. The refusal
+/// (kernel-emitted, unforgeable) proves the kill authority is real, not ambient — you
+/// cannot end a process without holding a cap that authorizes it. The process then
+/// survives and reports it saw the refusal (`killnocap.refused`), so an *allowed*
+/// kill (the failure the test guards against) would show as a missing refusal.
+pub fn kill_without_a_process_cap_is_refused(h: &mut View) -> Result<(), String> {
+    let kill = snitchos_abi::Syscall::Kill as u8;
+
+    // THE PROOF: the kernel refused the Kill, naming the syscall and the reason — no
+    // Process cap held, so no authority to end anything.
+    h.wait_for(SEC * 10, |f, _| {
+        matches!(f, OwnedFrame::SyscallRefused { syscall, reason, .. }
+            if *syscall == kill && matches!(reason, protocol::RefusalReason::CapNotFound))
+    })
+    .ok_or(
+        "no SyscallRefused{Kill, CapNotFound} within 10s — a Kill without a Process cap wasn't \
+         refused (the kill authorization isn't real)",
+    )?;
+
+    // And the process survived the refusal and observed it (not a silent allow).
+    h.wait_for(SEC * 10, metric_where("snitchos.killnocap.refused", |v| v == 1))
+        .ok_or("no killnocap.refused == 1 — the process didn't survive/observe the refusal")?;
+
+    Ok(())
+}
+
 /// v0.13 `EndpointCreate` — a process manufactures its own IPC endpoint and gets
 /// back a real *owning* capability (`workload=endpoint-create`). `ep_maker`
 /// creates an endpoint, then mints a badged `SEND` cap on it; minting requires the

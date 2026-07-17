@@ -240,12 +240,16 @@ until the `cargo xtask` breakage is resolved.
 - **`supervised-kill-stops-a-child`** ✅ — asserts the forced `spinner`'s
   `CapEvent::Revoked{Process}` (unforgeable kill proof + cap authorization) then
   `gamma.stopped`. **Passes in QEMU.**
-- **negative** ⏳ — a process without the Process cap that tries to `Kill` is refused
-  (a `SyscallRefused`), proving the authorization is real. Not yet written (needs a
-  small bin that `kill`s a bogus handle and reports the refusal).
+- **`kill-without-a-process-cap-is-refused`** ✅ — `workload=kill-no-cap`: a lone
+  process holding no `Process` cap tries `kill(99)`; asserts `SyscallRefused{Kill,
+  CapNotFound}` (unforgeable, kernel-emitted) then `killnocap.refused == 1` (it
+  survived and observed the refusal). Proves the authorization is real, not ambient.
+  **Passes in QEMU.**
 
-**The `cargo xtask` blocker is resolved** (snemu `Machine: Send` fixed; the tree also
-gained a `kernel-mem` crate extraction). Both shutdown scenarios run green.
+**v2a is complete.** All three acceptance scenarios pass end-to-end. The `cargo xtask`
+blocker is resolved (snemu `Machine: Send` fixed; the tree also gained a `kernel-mem`
+crate extraction). Deferred to v2b: cross-hart-running `Kill` (needs an IPI), timed
+`WaitAny` + hung detection.
 
 ## The observability payoff
 
