@@ -57,6 +57,8 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("viewer", "SNITCHOS_VIEWER_ELF"),
     ("view-demo", "SNITCHOS_VIEW_DEMO_ELF"),
     ("shell", "SNITCHOS_SHELL_ELF"),
+    ("svc-worker", "SNITCHOS_SVC_WORKER_ELF"),
+    ("supervised-shutdown", "SNITCHOS_SUPERVISED_SHUTDOWN_ELF"),
 ];
 
 fn main() {

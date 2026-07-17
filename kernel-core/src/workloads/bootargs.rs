@@ -168,6 +168,12 @@ pub enum WorkloadKind {
     /// lands on each fresh server incarnation), proving a minted cap survives its
     /// server dying because it names the durable object, not the process.
     SupervisedIpc,
+    /// Supervision v2a: the graceful-shutdown supervisor. Brings a small dependency
+    /// tree up in `startup_order`, then tears it down in `teardown_order` — stopping
+    /// cooperative services via a `Signal`ed shutdown notification (clean exit) and a
+    /// forced one via `Kill`. The stops land in the exact reverse of startup, each an
+    /// observable event on the wire (a forced stop also a `CapEvent::Revoked`).
+    SupervisedShutdown,
     /// v0.13 EndpointCreate: a single program manufactures its own IPC endpoint
     /// via the `EndpointCreate` syscall and proves the returned cap is a real
     /// owning `RECV | MINT` by minting a badged `SEND` on it.
@@ -342,6 +348,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "init" => Some(WorkloadKind::Init),
             "supervised" => Some(WorkloadKind::Supervised),
             "supervised-ipc" => Some(WorkloadKind::SupervisedIpc),
+            "supervised-shutdown" => Some(WorkloadKind::SupervisedShutdown),
             "endpoint-create" => Some(WorkloadKind::EndpointCreate),
             "demo" => Some(WorkloadKind::Demo),
             "cooperative" => Some(WorkloadKind::Cooperative),
@@ -441,6 +448,14 @@ mod tests {
     #[test]
     fn selects_userspace() {
         assert_eq!(select("workload=userspace"), Some(WorkloadKind::Userspace));
+    }
+
+    #[test]
+    fn selects_supervised_shutdown() {
+        assert_eq!(
+            select("workload=supervised-shutdown"),
+            Some(WorkloadKind::SupervisedShutdown)
+        );
     }
 
     #[test]

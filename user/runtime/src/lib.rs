@@ -250,6 +250,67 @@ pub fn spawn(program_id: usize, handles: &[u32]) -> Option<u32> {
     if ret == usize::MAX { None } else { Some(ret as u32) }
 }
 
+/// A freshly spawned child plus the authority to end it (v2a). `task` is the child
+/// task id (as [`spawn`] returns); `kill` is the handle of the `Object::Process` cap
+/// (carrying `KILL`) the kernel minted into our table for this child at `Spawn`
+/// (increment 3) — pass it to [`kill`] to force-terminate the child.
+#[derive(Debug, Clone, Copy)]
+pub struct Child {
+    pub task: u32,
+    pub kill: u32,
+}
+
+/// Like [`spawn`], but also captures the child's lifecycle (`Object::Process`) cap
+/// handle so the caller can later [`kill`] it — the supervisor path. The kernel
+/// returns the task id in `a0` and writes the Process-cap handle back into `a1`
+/// (increment 3); `a1` is `inlateout` because it carries the handles pointer *in*
+/// and the minted handle *out*. `None` on refusal (as [`spawn`]).
+#[must_use]
+pub fn spawn_supervised(program_id: usize, handles: &[u32]) -> Option<Child> {
+    let task: usize;
+    let kill: usize;
+    // SAFETY: `ecall`; identical to `spawn` but reads back the `a1` the kernel
+    // overwrites with the freshly-minted Process-cap handle (it reads `a1` as the
+    // handles ptr first, then stores the handle there). `handles` is validated
+    // kernel-side and never dereferenced in U-mode.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::Spawn as usize,
+            inlateout("a0") program_id => task,
+            inlateout("a1") handles.as_ptr() as usize => kill,
+            in("a2") handles.len(),
+        );
+    }
+    if task == usize::MAX {
+        None
+    } else {
+        Some(Child { task: task as u32, kill: kill as u32 })
+    }
+}
+
+/// Force-terminate a child named by an `Object::Process` capability (`process_cap` =
+/// its handle, from [`spawn_supervised`]) — the v2a `Kill` syscall. On success the
+/// child is terminated + zombified (reap it with [`wait_any`]) and the kernel spends
+/// the lifecycle cap (a `CapEvent::Revoked` on the wire). `Err(Denied)` if the kernel
+/// refused — the handle isn't a live `Process`/`KILL` cap, or the target can't yet be
+/// safely killed (running on another hart; v2b). Graceful shutdown should prefer a
+/// cooperative `Signal` + clean exit and use this only as the force-stop.
+pub fn kill(process_cap: u32) -> Result<(), Denied> {
+    let ret: usize;
+    // SAFETY: `ecall`; the kernel validates the handle (needs `KILL` over a
+    // `Process`), terminates the target, and returns 0 in a0 (`usize::MAX` if
+    // refused).
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::Kill as usize,
+            inlateout("a0") process_cap as usize => ret,
+        );
+    }
+    if ret == usize::MAX { Err(Denied) } else { Ok(()) }
+}
+
 /// Spawn a child process from a **caller-supplied ELF image** (`SpawnImage`) —
 /// the path for running an executable read out of the filesystem, vs [`spawn`]'s
 /// kernel-embedded registry. `image` is the ELF bytes; `handles` are caps to

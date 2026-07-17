@@ -453,6 +453,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::Init)
         | Some(WorkloadKind::Supervised)
         | Some(WorkloadKind::SupervisedIpc)
+        | Some(WorkloadKind::SupervisedShutdown)
         | Some(WorkloadKind::EndpointCreate)
         | Some(WorkloadKind::NotifySmoke)
         | Some(WorkloadKind::Priorities)

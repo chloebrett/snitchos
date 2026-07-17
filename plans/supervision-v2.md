@@ -185,6 +185,53 @@ shutdown `Notification` and `WaitAny` its clean exit (cooperative), or `Kill` it
 the wire. The reverse-dep order is the observable payoff (services stop in the mirror
 of how they started).
 
+#### 4a. Design (2026-07-17) — a new `supervised-shutdown` workload
+
+Kept **separate** from the crash-restart `supervised` engine (whose itests assert its
+crash-loop behaviour) — a new root bin + `WorkloadKind::SupervisedShutdown`. Shape:
+
+- **Userspace runtime (foundational):**
+  - `kill(process_cap: u32) -> Result<(), Denied>` — wraps `Syscall::Kill` (a0 = the
+    `Object::Process` handle; `usize::MAX` = refused, mirroring `signal`/`wait`).
+  - `spawn_supervised(program, handles) -> Option<Child>` where `Child { task, kill }`.
+    Captures the inc-3 Process-cap handle the kernel writes back in `a1` (via
+    `inlateout("a1")` — the kernel reads `a1` as the handles ptr, then overwrites it
+    with the handle). `spawn` stays as-is for the ~11 existing callers.
+- **Cooperative worker** (`user/hello/src/bin/svc-worker.rs`, new SPAWNABLE id): reads a
+  delegated shutdown `Notification` at `delegated_handle(0)`, emits
+  `snitchos.svc.<name>.up = 1` (liveness), then `WaitNotify`s — on signal, `exit(0)`.
+- **Forced service**: reuse `spinner` (program 3) — never cooperates, so the supervisor
+  must `Kill` it (proving the inc-3 primitive + the Process cap authorized it).
+- **Supervisor** (`user/hello/src/bin/supervised-shutdown.rs`): service table with a
+  dep chain + a per-service `Shutdown { Cooperative(notify) | Forced }`. Bring up in
+  `startup_order` (`notify_create` + delegate for cooperative ones), each proving `up`.
+  Then walk `teardown_order`: cooperative → `Signal` its notify + `wait_any` its clean
+  exit; forced → `kill(child.kill)` + `wait_any` its reap. Emit
+  `snitchos.svc.<name>.stopped` per stop — the **emission order is the reverse-dep
+  proof**. A forced stop also puts a `CapEvent::Revoked{Process}` on the wire (the
+  kernel spends the lifecycle cap).
+
+Not host-testable (no_std syscall bins); validated by inc 5. Only compilation gates it
+until the `cargo xtask` breakage is resolved.
+
+**Increment 4 ✅ (mechanism; itest = inc 5).** Shipped:
+- Runtime (`snitchos-user`): `kill(process_cap) -> Result<(), Denied>`; `Child { task,
+  kill }` + `spawn_supervised(program, handles) -> Option<Child>` (captures the inc-3
+  Process-cap handle from `a1` via `inlateout`). `spawn` unchanged for existing callers.
+- `user/hello/src/bin/svc-worker.rs` (cooperative service, SPAWNABLE id 10): emits
+  `snitchos.svcworker.up`, `WaitNotify`s a delegated shutdown notification, `exit(0)`.
+- `user/hello/src/bin/supervised-shutdown.rs` (root): `alpha→beta→gamma` tree (two
+  cooperative workers + a forced `spinner`); brings up in `startup_order` (delegating a
+  per-service notification to cooperative ones), tears down in `teardown_order` —
+  `Signal` for cooperative, `kill` for forced — reaping each and emitting
+  `snitchos.svc.<name>.stopped` in reverse-dep order.
+- Wiring: `WorkloadKind::SupervisedShutdown` + parse arm (host test); kernel ELF
+  statics, SPAWNABLE id 10, `SUPERVISED_SHUTDOWN` ProgramSpec, LAYOUTS entry, main.rs
+  dispatch arm; `build.rs` rows for both bins.
+- Kernel builds (default + `itest-workloads`) with both new bins embedded; 514
+  kernel-core tests green. **Not yet QEMU-exercised** — inc 5, still blocked on the
+  `cargo xtask`/snemu-WIP breakage.
+
 ### 5. Acceptance itest(s)
 
 - **`supervised-kill-stops-a-child`** — the supervisor `Kill`s a running service and
