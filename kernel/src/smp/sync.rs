@@ -18,7 +18,7 @@
 //! later if a perf-critical hot path proves it needs them; the
 //! wrapper internals change, callers stay the same.
 //!
-//! See `plans/v0.5-pre-smp-sync-prefactor.md`.
+//! See `plans/legacy/v0.5-pre-smp-sync-prefactor.md`.
 
 #![allow(
     clippy::disallowed_types,

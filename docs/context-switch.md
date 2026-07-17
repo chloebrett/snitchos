@@ -51,5 +51,5 @@ sequenceDiagram
 | **idle** | `loop { wfi; yield_now(); }` — owns the only `wfi` in the kernel |
 | **task_a / task_b** | demo workers; task_a holds a `task_a.tick` span open across a yield to exercise `SpanCursor` correctness |
 
-See `../plans/v0.5-threading.md` for the design and
+See `../plans/legacy/v0.5-threading.md` for the design and
 `../posts/post-12-the-kernel-takes-turns.md` for the devlog.

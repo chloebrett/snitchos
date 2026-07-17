@@ -1,7 +1,7 @@
 # Plan: stim v1 — a minimal modal editor as a Stitch program
 
 **Status**: **RESUMED (2026-07-08)** — the A+B blocker is cleared: [Stitch core
-redesign](stitch-core-redesign.md) Phase A (spans) is done and Phase B's fuel,
+redesign](legacy/stitch-core-redesign.md) Phase A (spans) is done and Phase B's fuel,
 depth-guard, **and self-tail trampoline (B4)** are all in (`self_tail_recursive_*`
 tests green). stim now builds on the rebuilt foundation as intended. The
 **stim-vs-bytecode-VM** ordering is still decided at the redesign's post-Phase-D

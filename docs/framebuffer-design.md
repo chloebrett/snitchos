@@ -22,7 +22,7 @@ rectangle, on the wire, in Tempo. I don't know of another system that does that.
 ## The device choice forks the browser dream
 
 There are two realistic framebuffer devices on QEMU `virt`, and the choice trades off
-along the axis we care most about: **[snemu](../plans/snemu-lockstep-native-ops.md)
+along the axis we care most about: **[snemu](../plans/legacy/snemu-lockstep-native-ops.md)
 parity → SnitchOS-in-a-browser-tab.**
 
 | | **ramfb** (via fw_cfg) | **virtio-gpu** |
@@ -42,7 +42,7 @@ new device.
 
 > **Action item for the snemu track**: a ramfb device model is now on snemu's critical
 > path. It's the cheapest possible display device to emulate and it's what lets the
-> physics desktop render into a browser canvas. See [snemu progress](../plans/snemu-lockstep-native-ops.md).
+> physics desktop render into a browser canvas. See [snemu progress](../plans/legacy/snemu-lockstep-native-ops.md).
 
 ## The framebuffer is just a big, persistent DMA buffer
 

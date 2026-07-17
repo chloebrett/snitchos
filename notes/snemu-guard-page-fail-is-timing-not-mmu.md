@@ -126,7 +126,7 @@ Reporting distinguishes the two cases. Unit-tested:
 **Robustness tightening — SHIPPED (was the one open limitation).** The benign
 pass used to forgive `kernel.heartbeat`-only-in-snemu *unconditionally*, which
 would mask a hypothetical snemu bug that fails to halt and over-emits heartbeats.
-Closed by [plans/panic-emits-telemetry.md](panic-emits-telemetry.md): the kernel
+Closed by [plans/legacy/panic-emits-telemetry.md](../plans/legacy/panic-emits-telemetry.md): the kernel
 panic handler now emits a `Log("kernel panic …")` on the wire, so `invented_names`
 takes a `snemu_crashed` flag (`snemu_reached_crash` = a panic Log is present) and
 forgives `kernel.heartbeat` **only when snemu is proven to have reached the crash**.
@@ -141,7 +141,7 @@ the same handler.)
 1. **~~Oracle robustness~~ — RESOLVED** (was the one real open item). The
    "clean fix" below shipped: the panic handler now emits a `kernel panic` `Log`
    (panic-safe: no alloc/intern, non-blocking bounded-retry send —
-   [plans/panic-emits-telemetry.md](panic-emits-telemetry.md)), and the oracle
+   [plans/legacy/panic-emits-telemetry.md](../plans/legacy/panic-emits-telemetry.md)), and the oracle
    forgives `kernel.heartbeat`-only-in-snemu **only when that panic frame is
    present** (`snemu_reached_crash`). A fail-to-halt snemu — heartbeats but no
    panic — now FAILs. The fragile heartbeat-count threshold was avoided entirely.

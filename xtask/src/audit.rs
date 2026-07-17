@@ -6,7 +6,7 @@
 //! no name resolution. Counts can over-report callers (a name collision looks
 //! like a use) but never under-report — so a flagged zero-caller `pub` is a
 //! high-confidence *candidate*, which the skill verifies against design docs
-//! (rule 6) before anyone deletes. See `plans/xtask-audit.md`.
+//! (rule 6) before anyone deletes. See `plans/legacy/xtask-audit.md`.
 
 use std::fs;
 use std::path::{Path, PathBuf};

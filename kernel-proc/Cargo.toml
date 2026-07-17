@@ -1,0 +1,19 @@
+[package]
+name = "kernel-proc"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+# `stack` needs `mmu::PAGE_SIZE` — the single edge between the two crates.
+kernel-mem = { path = "../kernel-mem" }
+# `StringId` only: `metric`/`span_name` hold ids the kernel interned for them.
+# Note this crate does NOT depend on `kernel-obs` — it names metrics, it doesn't
+# emit them.
+protocol = { path = "../protocol" }
+# The kernel↔user ABI: single source of truth for capability rights bits
+# (`Rights` wraps `snitchos_abi::rights::*`).
+snitchos-abi = { path = "../abi" }
+
+[lints]
+workspace = true

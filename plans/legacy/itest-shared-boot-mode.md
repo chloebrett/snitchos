@@ -76,9 +76,11 @@ failure-signature capture that the separate-boot model gives us.
     Shared mode cuts CPU time **78.3s → 47.0s** (~40% fewer boots); wall
     time 44.5s → 41.2s (modest — the 19-scenario default-demo group is a
     serial long-pole on one worker).
-- **Next: step 8 (docs)** + optional wall-clock tuning (parallelise Views
-  *within* a shared group; and/or the 10 Hz itest-timer from the suite
-  audit — orthogonal, multiplies with this).
+- **Step 8 (docs) done** — `--shared` is documented in the README (the
+  `cargo xtask itest` flag list). **Plan complete.**
+- Optional, not done (and not blocking): wall-clock tuning — parallelise Views
+  *within* a shared group; and/or the 10 Hz itest-timer from the suite audit
+  (orthogonal, multiplies with this).
 
 Non-goal: replacing the separate-boot model. Shared mode is an
 additional, opt-in mode. The flake gate (`--repeat 10`) and baseline

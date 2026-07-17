@@ -58,4 +58,4 @@ enum EndpointState { Idle, SendersWaiting(VecDeque<TaskId>), ReceiversWaiting(Ve
 - `kernel-core/src/user/ipc.rs` (pure rendezvous), `kernel-core/src/cap.rs` (caps/rights/invoke_*)
 - `kernel/src/trap/mod.rs` (handle_send/receive/call/reply/reply_recv/mint_badged), `kernel/src/trap/ipc.rs` (tables, pending, stash)
 - `protocol/src/lib.rs` (frames), `user/runtime/src/lib.rs` (bindings), `user/hello/src/bin/{ipc,rpc,badge}-*.rs`
-- Plans: `plans/v0.9-ipc.md`, `v0.9b-call-reply.md`, `v0.9c-badges.md`; docs: `docs/ipc-design.md`, `docs/capability-system-design.md`
+- Plans: `plans/legacy/v0.9-ipc.md`, `v0.9b-call-reply.md`, `v0.9c-badges.md`; docs: `docs/ipc-design.md`, `docs/capability-system-design.md`

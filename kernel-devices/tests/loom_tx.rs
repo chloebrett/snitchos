@@ -1,7 +1,7 @@
 //! Loom model-check of the virtio TX staging critical section.
 //!
 //! This is the deterministic regression for the cross-hart bug in
-//! `kernel::virtio_console::send` (see plans/tx-staging-cross-hart-race.md):
+//! `kernel::virtio_console::send` (see plans/legacy/tx-staging-cross-hart-race.md):
 //! the original `let base = *handle.lock();` copied `base` out and dropped
 //! the `CONSOLE` guard at the `;`, leaving the shared `TX_STAGING` buffer
 //! unprotected while two harts emitted concurrently. It reproduced only
@@ -21,7 +21,7 @@
 //!
 //! - `correct_model` — buffer lives *inside* the mutex (today's
 //!   `Mutex<TxStaging>`), driven through the real
-//!   `kernel_core::virtio::stage_and_emit`. Race-free across all
+//!   `kernel_devices::virtio::stage_and_emit`. Race-free across all
 //!   interleavings.
 //! - `buggy_model` — mirrors the *pre-fix* architecture: a `Mutex` that
 //!   guards only `base`, plus the staging buffer in a separate

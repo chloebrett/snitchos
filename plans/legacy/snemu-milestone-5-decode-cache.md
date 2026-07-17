@@ -19,9 +19,9 @@ instruction decode — it was per-instruction CSR reads (`pending_interrupt` pro
 The op pre-decode (the *original* inc-3 idea) is deferred — dispatch is cheap
 jump-table matching, not the cap; revisit only if a JIT tier needs it.
 
-Design context: the tier ladder in [docs/snemu-design.md](../docs/snemu-design.md)
+Design context: the tier ladder in [docs/snemu-design.md](../../docs/snemu-design.md)
 (*JIT: the tier ladder*). Measured against the M4 spine
-([plans/snemu-milestone-4-measurement.md](snemu-milestone-4-measurement.md)).
+([plans/snemu-milestone-4-measurement.md](../snemu-milestone-4-measurement.md)).
 
 ## What shipped (increment 1)
 

@@ -80,7 +80,7 @@ CoW + snapshots → content-addressed + Merkle ("filesystem-as-Git"), additive b
 
 # Hardening (some milestones, some tax)
 - **Notifications primitive** — milestone-worthy; folded into v0.12 (child-exit/wait is its first consumer; devices reuse it).
-- **Kernel stack guard pages** — its own small hardening item: Tier A (canary + high-water gauge) is cheap; guard pages are the real fault-on-overflow fix. Motivated by the v0.11 spawn stack overflow. See [plans/kernel-stack-guard-pages.md](plans/kernel-stack-guard-pages.md).
+- **Kernel stack guard pages** — its own small hardening item: Tier A (canary + high-water gauge) is cheap; guard pages are the real fault-on-overflow fix. Motivated by the v0.11 spawn stack overflow. See [plans/legacy/kernel-stack-guard-pages.md](../plans/legacy/kernel-stack-guard-pages.md).
 - **FS end-to-end verification** and **Exit/teardown reclaim** — tax within v0.12/v0.13, not milestones.
 
 # Open questions

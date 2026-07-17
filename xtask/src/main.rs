@@ -29,14 +29,9 @@ struct Cli {
 enum Cmd {
     /// Build the kernel ELF.
     Build,
-    /// Boot the `minimal-boot` kernel under the snemu emulator and assert it
-    /// prints its greeting (throwaway M1 console-out smoke; superseded by
-    /// `itest`/`boot --snemu` once snemu models Sv39 + virtio in M2).
-    Snemu,
-    /// Build the *full* kernel (no `minimal-boot`) and run it under snemu,
-    /// streaming snemu's output. This is the meta-loop driver: it always
-    /// rebuilds the real boot path (so a prior `snemu` run's minimal-boot ELF
-    /// can't be run stale), then reports where snemu stops.
+    /// Build the kernel and run it under snemu, streaming snemu's output. This
+    /// is the meta-loop driver: it always rebuilds the real boot path, then
+    /// reports where snemu stops.
     SnemuBoot {
         /// Cargo features to enable on the kernel build, comma-separated.
         #[arg(long, default_value = "")]
@@ -77,6 +72,10 @@ enum Cmd {
     /// Snapshot/fork harness: boot the common prefix once under snemu, then fork
     /// every workload from that snapshot (clone + DTB bootarg patch). snemu-only;
     /// proves boot amortization.
+    ///
+    /// Distinct from `snemu-itest --share-snapshots`, which shares a boot only
+    /// among scenarios of the *same* workload. This forks one boot across
+    /// *different* workloads via a layout-preserving DTB overwrite.
     SnemuFork {
         /// Per-workload step budget after the fork.
         #[arg(long, default_value_t = 20_000_000)]
@@ -378,7 +377,7 @@ enum Cmd {
         /// Wfi-bounded (parallel at `--jobs` width) and Cpu-bounded
         /// (parallel at `--cpu-jobs` width, run as a separate pass
         /// after Wfi). Pass `--jobs 1` to force sequential. See
-        /// `plans/itest-parallel-scenarios.md`.
+        /// `plans/legacy/itest-parallel-scenarios.md`.
         #[arg(
             long,
             default_value_t = 10,
@@ -742,6 +741,33 @@ fn scrub_inherited_cargo_env() {
 }
 
 #[cfg(test)]
+mod retired_command_tests {
+    use super::Cli;
+    use clap::Parser;
+
+    /// The snemu milestone-1 console-out smoke. Superseded by `snemu-itest`
+    /// once snemu modelled Sv39 + virtio (M2); the `minimal-boot` kernel
+    /// feature it existed to build went with it.
+    #[test]
+    fn snemu_m1_smoke_is_gone() {
+        assert!(Cli::try_parse_from(["xtask", "snemu"]).is_err());
+    }
+
+    /// The deletion is scoped: the rest of the snemu family stays. In
+    /// particular `snemu-fork` — it forks one boot across *different*
+    /// workloads (layout-preserving DTB overwrite), which
+    /// `snemu-itest --share-snapshots` does not do: that shares a boot only
+    /// among scenarios of the same workload.
+    #[test]
+    fn the_rest_of_the_snemu_family_still_parses() {
+        assert!(Cli::try_parse_from(["xtask", "snemu-boot"]).is_ok());
+        assert!(Cli::try_parse_from(["xtask", "snemu-diff"]).is_ok());
+        assert!(Cli::try_parse_from(["xtask", "snemu-fork"]).is_ok());
+        assert!(Cli::try_parse_from(["xtask", "snemu-itest"]).is_ok());
+    }
+}
+
+#[cfg(test)]
 mod env_scrub_tests {
     use super::should_scrub_env_key;
 
@@ -769,7 +795,6 @@ fn main() -> ExitCode {
     scrub_inherited_cargo_env();
     match Cli::parse().cmd {
         Cmd::Build => build(),
-        Cmd::Snemu => snemu(),
         Cmd::SnemuBoot { features, max_steps, frames, workload } => {
             snemu_boot(&features, max_steps, frames, workload.as_deref())
         }
@@ -963,43 +988,9 @@ fn build() -> ExitCode {
     }
 }
 
-/// Throwaway snemu milestone-1 acceptance: build the `minimal-boot` kernel,
-/// run it under the snemu interpreter, and check the greeting reaches the
-/// emulated UART. Always rebuilds (no stale binary). Replaced by `--snemu` on
-/// `itest`/`boot` once snemu can run the full kernel + virtio (M2).
-fn snemu() -> ExitCode {
-    const GREETING: &str = "Hello from snemu (minimal-boot)";
-
-    // Overwrites the debug kernel ELF; boot/itest rebuild it (features differ).
-    let kernel = qemu::build_kernel(&["minimal-boot"]).expect("failed to invoke cargo");
-    if !kernel.success() {
-        eprintln!("snemu: minimal-boot kernel build failed");
-        return ExitCode::from(1);
-    }
-
-    // Build + run the emulator on the freshly-built ELF (cap the wfi spin).
-    let out = Command::new("cargo")
-        .args(["run", "-q", "-p", "snemu", "--", qemu::KERNEL_BIN, "100000"])
-        .output()
-        .expect("failed to invoke cargo run -p snemu");
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    if stdout.contains(GREETING) {
-        print!("{stdout}");
-        eprintln!("snemu: console-out OK");
-        ExitCode::SUCCESS
-    } else {
-        eprintln!("snemu: FAILED — greeting not found on the UART");
-        eprintln!("--- snemu stdout ---\n{stdout}");
-        eprintln!("--- snemu stderr ---\n{}", String::from_utf8_lossy(&out.stderr));
-        ExitCode::from(1)
-    }
-}
-
-/// Build the full kernel and run it under snemu, inheriting stdio so snemu's
-/// UART output (stdout) and its stop reason (stderr) stream straight to the
-/// terminal. Always rebuilds without `minimal-boot`, so the meta-loop never
-/// runs a stale ELF left by `cargo xtask snemu`.
+/// Build the kernel and run it under snemu, inheriting stdio so snemu's UART
+/// output (stdout) and its stop reason (stderr) stream straight to the
+/// terminal.
 fn snemu_boot(
     features: &str,
     max_steps: Option<u64>,

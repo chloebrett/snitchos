@@ -8,11 +8,11 @@ known-good increment). Phases below are the review/commit milestones.
 
 Two follow-ons deliberately left out of this plan, each tracked elsewhere: the
 bytecode VM (see "Deferred to the bytecode-VM milestone") and the static type
-checker (see "Parallel track", [stitch-type-system.md](stitch-type-system.md)).
+checker (see "Parallel track", [stitch-type-system.md](../stitch-type-system.md)).
 
 ## Goal
 
-Execute the [Stitch tokenizer/parser/interpreter redesign review](../docs/redesign-reviews/stitch-tokenizer-parser-interpreter.md)
+Execute the [Stitch tokenizer/parser/interpreter redesign review](../../docs/redesign-reviews/stitch-tokenizer-parser-interpreter.md)
 as an **incremental, in-place evolution that keeps all 504 tests green at every
 step** — not a rewrite. The review was written cost-blind (that's the exercise);
 this plan is the cost- and risk-aware path to the same destination.
@@ -123,7 +123,7 @@ noted: a behaviour-preserving mechanical reshape guarded by the full suite.)*
 budget (unbounded by default so existing tests are unaffected).
 **RED**: a non-terminating program halts with the fuel fault under a small budget.
 **GREEN**: a per-step decrement + check in `eval`.
-*Why it's load-bearing:* the [Stitch mutation tester](../docs/stitch-mutation-testing-design.md)'s
+*Why it's load-bearing:* the [Stitch mutation tester](../../docs/stitch-mutation-testing-design.md)'s
 fuel cap **is** this.
 
 ### Step B3: Call-frame stack + depth guard
@@ -546,7 +546,7 @@ green.
 first?** Decide with the **Phase-B5 leak finding** in hand and the felt experience
 of the rebuilt core. Because stim is a Stitch *program* on the now-stable IR/effect
 interface, the VM can later replace the tree-walker *underneath it* without a
-rewrite — so this is a "when," not a "whether." Update [stim-v1](stim-v1.md) here.
+rewrite — so this is a "when," not a "whether." Update [stim-v1](../stim-v1.md) here.
 
 ---
 
@@ -589,13 +589,13 @@ type system (downstream of it), not on the VM. *(Its own plan when started.)*
 
 ## Cross-refs & knock-ons
 
-- [redesign review](../docs/redesign-reviews/stitch-tokenizer-parser-interpreter.md) — the source.
-- [stim-v1](stim-v1.md) — **paused pending Phase A+B**; its native-trampoline
+- [redesign review](../../docs/redesign-reviews/stitch-tokenizer-parser-interpreter.md) — the source.
+- [stim-v1](../stim-v1.md) — **paused pending Phase A+B**; its native-trampoline
   driver may become a Stitch loop once B4 lands; stim-vs-VM decided at the Phase-D
   decision point.
-- [stitch mutation testing](../docs/stitch-mutation-testing-design.md) — its fuel
+- [stitch mutation testing](../../docs/stitch-mutation-testing-design.md) — its fuel
   cap is Phase B2.
-- [release-build perf](../docs/stitch-mutation-testing-design.md) — a release build
+- [release-build perf](../../docs/stitch-mutation-testing-design.md) — a release build
   compounds interpreter throughput (mutation tester + stim); orthogonal to this plan.
 
 ---

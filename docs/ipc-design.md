@@ -35,7 +35,7 @@ Accepted costs: deadlock is possible (A calls B, B calls A) — requires acyclic
 ## Notifications — the async primitive ✅ (v0.12)
 The physical world is asynchronous — interrupts happen whether or not anyone is ready to receive. So an async primitive is mandatory. But it does not have to be buffered channels; it is a **notification**: async signalling stripped to the bone. A per-object word of bits; signalling sets bits and wakes any waiter; it carries no payload. No arbitrary-message buffer, so no buffering problem. Models interrupts arriving and readiness signals ("data is ready, come do a synchronous receive").
 
-It is the **async dual of the synchronous endpoint**: a `send`/`call` *rendezvouses* (the initiator can block, a message crosses); a `signal` is *fire-and-forget* (the signaller never blocks, no data, signals **coalesce**). What shipped (plan: [plans/v0.12-notifications.md](../plans/v0.12-notifications.md); pure core `kernel-core/src/notify.rs`):
+It is the **async dual of the synchronous endpoint**: a `send`/`call` *rendezvouses* (the initiator can block, a message crosses); a `signal` is *fire-and-forget* (the signaller never blocks, no data, signals **coalesce**). What shipped (plan: [plans/legacy/v0.12-notifications.md](../plans/legacy/v0.12-notifications.md); pure core `kernel-core/src/notify.rs`):
 
 - `Object::Notification { id }` with `SIGNAL` / `WAIT` rights (the producer/consumer split, like the endpoint's `SEND`/`RECV`). Created by `NotifyCreate` (returns a `SIGNAL | WAIT` cap); ends handed out via cap-transfer.
 - `Signal(notif, mask)` ORs `mask` into the pending bits and wakes a waiter — **never blocks, never fails for resources**. Repeated signals before a wait coalesce (it's a bitset OR, not a queue).
@@ -53,7 +53,7 @@ Three tiers, by size and synchrony:
 
 # Endpoint capabilities: badges, minting, and cap-transfer ✅ (v0.9c)
 
-**Shipped in v0.9c.** A single endpoint serves many clients and many objects behind one receive loop. The filesystem is the motivating consumer (see [filesystem-design.md](filesystem-design.md) → *Capability mechanism*): one FS endpoint, one file capability per `(inode, rights)`. Plan + step-by-step rationale: [plans/v0.9c-badges.md](../plans/v0.9c-badges.md).
+**Shipped in v0.9c.** A single endpoint serves many clients and many objects behind one receive loop. The filesystem is the motivating consumer (see [filesystem-design.md](filesystem-design.md) → *Capability mechanism*): one FS endpoint, one file capability per `(inode, rights)`. Plan + step-by-step rationale: [plans/legacy/v0.9c-badges.md](../plans/legacy/v0.9c-badges.md).
 
 **The framing that made it small: a badge is the generalized reply cap.** v0.9b's `Object::Reply { caller }` was already a kernel-stamped, unforgeable value transferred into a process's table and delivered on invoke. v0.9c freed that mechanism along three axes already in the code — *who mints* (kernel→server), *lifetime* (`Once`→`Persistent`, the existing `Multiplicity`), and *stamped value* (`caller`→arbitrary `badge`). The general thing is *less* mechanism than the special case. And all three pieces below are generic because **the kernel never learns what the server's objects mean**.
 
@@ -106,7 +106,7 @@ The kernel resolves `reply` → the blocked `caller`'s `root_pa`, walks both pag
 - **Validated per page in each AS:** `ptr+len` no-overflow, wholly in the user half (`user_range_ok`), leaf has `U` + `R` (source) / `W` (dest). Any miss → refuse + snitch (`SyscallRefused`), never a kernel fault.
 - **Kernel stays object-ignorant:** it copies `len` opaque bytes; it never decodes the opcode, the badge's `(inode, rights)`, or the FS protocol.
 
-**Split:** the page-walk + chunking + validation is pure host-tested logic in `kernel-core` (`translate(root, va, &dyn PtMem)` + a `copy_across` orchestrator over a byte-copy callback, exercised against a `PtMem` mock); the kernel side wires the two syscalls (reply-cap → `root_pa`, `KernelPtMem` translation, linear-map copy, snitch). Plan: [plans/v0.10-ramfs.md](../plans/v0.10-ramfs.md) → Step 3.
+**Split:** the page-walk + chunking + validation is pure host-tested logic in `kernel-core` (`translate(root, va, &dyn PtMem)` + a `copy_across` orchestrator over a byte-copy callback, exercised against a `PtMem` mock); the kernel side wires the two syscalls (reply-cap → `root_pa`, `KernelPtMem` translation, linear-map copy, snitch). Plan: [plans/legacy/v0.10-ramfs.md](../plans/legacy/v0.10-ramfs.md) → Step 3.
 
 # Async-with-data = shared region + notification, behind a channel library
 There is no buffered-channel primitive in the kernel. When userspace wants async delivery of data, the pattern is: a shared `MemoryRegion` (the ring buffer) + a `Notification` (the "I added something" poke). The buffering *policy* lives in userspace, where it is testable and replaceable — mechanism in the kernel, policy in userspace.

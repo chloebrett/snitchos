@@ -2,7 +2,7 @@
 
 **Status**: **IMPLEMENTED — Phase 4 complete.** P4b-0 (accumulator consolidation),
 P4b-1 (`Range` + object-pending + `iw`/`aw`), and P4b-2 (quote objects `i"`/`a"`)
-all shipped; see the P4b entries in [stim-grammar.md](stim-grammar.md) for the
+all shipped; see the P4b entries in [stim-grammar.md](../stim-grammar.md) for the
 as-built record. Bracket objects (`i(`/`i{`/`i[`) were deferred past v1.
 
 This file remains as the design rationale behind that work. The payoff of the range

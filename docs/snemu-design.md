@@ -2,7 +2,7 @@
 
 *A SnitchOS-native RISC-V emulator: replace QEMU for the functional itest suite with a small RV64GC interpreter written in Rust, running on the macOS host. Telemetry is a first-class concern of the emulator itself — not something decoded off a socket after the fact. Determinism by default; controllable concurrency for race-hunting.*
 
-Status: **proposed** (design only; no code). First milestone planned in detail in [plans/snemu-milestone-1-console-out.md](../plans/snemu-milestone-1-console-out.md).
+Status: **proposed** (design only; no code). First milestone planned in detail in [plans/legacy/snemu-milestone-1-console-out.md](../plans/legacy/snemu-milestone-1-console-out.md).
 
 ## Why this step
 
@@ -42,7 +42,7 @@ The obvious worry is that determinism costs us the ability to reproduce the cros
 - **Interleaving races** — two harts touch shared state; the bug appears at certain *orderings* of their operations. Reproduced by **any** concurrent execution, including instruction-granularity interleaving on a single host thread.
 - **Reordering races** — need genuine weak-memory *reordering* (RVWMO) to manifest at all.
 
-Our marquee cross-hart bug, the `TX_STAGING` wedge, was a dropped `MutexGuard` — *"not a memory-ordering race"* (see [plans/tx-staging-cross-hart-race.md](../plans/tx-staging-cross-hart-race.md)). That is an **interleaving** race. Nearly all the cross-hart pain we've documented is interleaving, not reordering.
+Our marquee cross-hart bug, the `TX_STAGING` wedge, was a dropped `MutexGuard` — *"not a memory-ordering race"* (see [plans/legacy/tx-staging-cross-hart-race.md](../plans/legacy/tx-staging-cross-hart-race.md)). That is an **interleaving** race. Nearly all the cross-hart pain we've documented is interleaving, not reordering.
 
 For interleaving races a **single-threaded interpreter with a controllable, seedable scheduler** is *strictly better* than real threads:
 
@@ -123,7 +123,7 @@ So console-out is reachable with no page-table walker: load ELF at physical addr
 
 ## Milestones
 
-Detailed plan for milestone 1: [plans/snemu-milestone-1-console-out.md](../plans/snemu-milestone-1-console-out.md) (M2/M3 sketched there); measurement spine: [plans/snemu-milestone-4-measurement.md](../plans/snemu-milestone-4-measurement.md). Later milestones promote to their own plans as they come up.
+Detailed plan for milestone 1: [plans/legacy/snemu-milestone-1-console-out.md](../plans/legacy/snemu-milestone-1-console-out.md) (M2/M3 sketched there); measurement spine: [plans/snemu-milestone-4-measurement.md](../plans/snemu-milestone-4-measurement.md). Later milestones promote to their own plans as they come up.
 
 **Guiding principle — measure first, then tune what you measured.** An observability-first project building an emulator makes the emulator observe *itself* first, then optimizes against its own telemetry — the same way the kernel tunes its heap watermark against heap metrics. The measurement spine (M4) is the load-bearing artifact; every JIT tier after it is an *episode measured against it*. Cheap counters (instret, wall-clock) are baked in from M1 so measurement is never retrofitted. The whole arc is also a devlog series — one post per milestone.
 

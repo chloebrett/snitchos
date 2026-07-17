@@ -146,7 +146,7 @@ architecture doesn't block on it.
 ## Forward direction: the clipboard service (build toward, not away from)
 
 The stim register is the **soft form** of the future clipboard primitive
-([docs/clipboard-design.md](../docs/clipboard-design.md)): eventually there is *one*
+([docs/clipboard-design.md](../../docs/clipboard-design.md)): eventually there is *one*
 capability-scoped clipboard *service*, vim's registers are **named slots in it**, and
 an entry is an immutable record `{value, schema, provenance, label, caps}` reached
 over IPC. Phase 2 must not paint us into a corner against that. Concretely:

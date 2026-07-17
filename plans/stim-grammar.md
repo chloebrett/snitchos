@@ -201,7 +201,7 @@ semantics deferred); (2) **within-line only** — cross-line word motion deferre
 (`dw` on the last word clamps to EOL, which happens to match vim); (3) the `cw`==`ce`
 vim special-case is skipped (`cw` changes over `[cursor, w-target)`).
 
-*P4b — text objects.* Designed in [stim-phase4b-text-objects.md](stim-phase4b-text-objects.md).
+*P4b — text objects.* Designed in [stim-phase4b-text-objects.md](legacy/stim-phase4b-text-objects.md).
 The payoff of the range model + the data-structure evolution: a cursor-independent
 `Range` (both ends set by the object) and a text-object-pending sub-state (the `i`/`a`
 prefix) that reworks the operator-pending `None` branch. `i` = contents only, `a` =

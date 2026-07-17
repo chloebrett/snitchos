@@ -95,23 +95,37 @@ subcommand error; `minimal-boot` appears nowhere in `kernel/Cargo.toml` or
 for any other caller.
 **Done when**: snemu-itest green, README's `snemu` mention gone.
 
-### Step 0.2: Delete `snemu-fork`
+### ~~Step 0.2: Delete `snemu-fork`~~ — WITHDRAWN, the justification was wrong
 
-`snemu-fork` exists to *prove* boot amortization works. That proof shipped as
-`snemu-itest --share-snapshots` — same idea, plus verdict checking, `state_hash`
-verification, and self-healing fallback. Keeping it means keeping a demo of a
-capability we already ship for real. Its only references outside `xtask` are a
-README aside and one plan line noting the design it proved (both stay true in the
-past tense).
+The original claim was that `snemu-fork`'s purpose (proving boot amortization)
+shipped as `snemu-itest --share-snapshots`, so it was a demo of a capability we
+already ship. **That is false, and the deletion was reverted.**
 
-**Acceptance criteria**: `cargo xtask snemu-fork` rejected; `snemu_diff::run_fork`
-and its ~70 lines gone; `snemu-diff` and `snemu-diff --all` unaffected.
-**RED**: `try_parse_from(["xtask", "snemu-fork"])` is an error.
-**GREEN**: drop the variant, the arm, and `run_fork`.
-**MUTATE / KILL**: n/a — pure deletion.
-**REFACTOR**: `snemu_diff.rs` is 1172 lines; if `run_fork`'s removal orphans
-snapshot helpers, drop those too.
-**Done when**: `plans/snemu-multi-hart.md`'s reference reworded to past tense.
+The two share a *design*, not a *capability*:
+
+- `--share-snapshots` collapses scenarios **of the same workload** — see
+  `snapshot_tree.rs`: *"Two scenarios sharing a workload coincide up to their
+  first injection."* It never patches the DTB.
+- `snemu-fork` forks one boot across **different workloads**, by overwriting the
+  `workload=` bootarg in the booted snapshot's RAM. It works only because
+  `workload_dtb` pads the bootarg to a fixed 40-char field, so every workload's
+  DTB is byte-identical in size and the overwrite is layout-preserving.
+
+That fixed-width trick is subtle, hard-won, and lives nowhere else. Deleting
+`snemu-fork` would delete the only working demonstration of cross-workload boot
+amortization — a real unrealized optimization for the suite, which today still
+boots once per workload group.
+
+**How the error happened, so it doesn't recur:** `plans/snemu-multi-hart.md` says
+*"Reuses the snapshot design `snemu-fork` already proved."* That sentence says the
+design was reused; it was read as saying the capability was replaced. A citation
+is not an equivalence. This is exactly the case the
+[don't-retire-distinct-path-coverage](../.claude/CLAUDE.md) rule exists for, and
+the rule caught it — one layer later than it should have.
+
+**If anything, the follow-up points the other way:** applying the DTB-patch trick
+to `snemu-itest` would let one boot serve all ~20 workloads instead of one per
+group. That's a candidate optimization, not a deletion. Out of scope here.
 
 ---
 

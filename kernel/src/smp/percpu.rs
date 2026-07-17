@@ -123,7 +123,7 @@ pub struct PerHartData {
     /// Top of this hart's **exception stack** — the known-good per-hart stack
     /// `trap.S` switches to on a trap taken *from S-mode* (so a kernel-stack
     /// overflow's guard fault builds its frame here, not on the overflowed stack —
-    /// see `plans/kernel-stack-hardening.md`). Set once by [`init`]; read
+    /// see `plans/legacy/kernel-stack-hardening.md`). Set once by [`init`]; read
     /// `tp`-relative from asm at [`EXC_STACK_TOP_OFFSET`] (0 until `init`, which
     /// the asm treats as "not ready, use the current stack"). `AtomicUsize` for a
     /// plain set-once store; the asm load needs no atomic semantics.

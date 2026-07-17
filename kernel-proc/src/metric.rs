@@ -16,12 +16,12 @@
 //! interned names are **reclaimed on process exit** — `reap_task` walks
 //! [`ids`](MetricTable::ids) and releases each from the global intern table. (No
 //! cross-process dedup, so each spawn registers its own; reclaim is what keeps a
-//! long-running spawner bounded. See `plans/span-and-metric-name-gc.md`.)
+//! long-running spawner bounded. See `plans/legacy/span-and-metric-name-gc.md`.)
 //!
 //! Pure data + bookkeeping: no `unsafe`, no MMIO, no CSRs. Host-tested here;
 //! the `kernel` side only decides *where the table lives* (the process struct)
 //! and wires the `RegisterMetric` / `EmitMetric` syscall arms.
-//! See `plans/userspace-defined-metrics.md`.
+//! See `plans/legacy/userspace-defined-metrics.md`.
 
 use alloc::vec::Vec;
 

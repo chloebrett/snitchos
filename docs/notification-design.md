@@ -2,7 +2,7 @@
 
 > **Status: SHIPPED (v0.12).** Built as designed (Option A). Implementation notes,
 > what-shipped-vs-planned, and the verification record live in
-> [plans/v0.12-notifications.md](../plans/v0.12-notifications.md). A couple of
+> [plans/legacy/v0.12-notifications.md](../plans/legacy/v0.12-notifications.md). A couple of
 > details settled differently in the build (syscall numbers 21/22/23 not 19/21;
 > frames emit per-signal rather than only on empty→nonempty) — flagged inline below.
 
@@ -158,5 +158,5 @@ In Tempo these let you *see the edge*: task X signals at t₀, task Y was parked
 - `kernel_core::reap` (`kernel-core/src/reap.rs`) — the pure-core bookkeeping pattern this mirrors; also the path child-exit uses today.
 - `kernel_core::user::cap` — `Object` / `Rights` / `Multiplicity`; where the `Notification` variant + `SIGNAL`/`WAIT` bits land.
 - `kernel::sched::{block_current, wake}` (`kernel/src/sched/mod.rs`) — the park/unpark primitives the kernel side reuses verbatim.
-- [plans/v0.12-exit-wait.md](../plans/v0.12-exit-wait.md) — edge #2 ("general notification primitive — TODO") is this document's mandate.
+- [plans/legacy/v0.12-exit-wait.md](../plans/legacy/v0.12-exit-wait.md) — edge #2 ("general notification primitive — TODO") is this document's mandate.
 - [docs/roadmap-and-milestones.md](roadmap-and-milestones.md) — v0.12 lifecycle; v0.13 shell is the next consumer of a reliable `Wait`.

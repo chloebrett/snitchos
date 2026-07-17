@@ -12,7 +12,7 @@
 //! the kernel can already query `current_task_id()` (and emit it on
 //! `SpanStart`).
 //!
-//! See `plans/v0.5-threading.md`.
+//! See `plans/legacy/v0.5-threading.md`.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -124,7 +124,7 @@ static STACK_SLOTS: Mutex<kernel_core::stack::SlotAllocator> =
 /// shootdown. Mapped-stack memory is bounded by *peak concurrent* tasks (the pool
 /// caps at the high-water mark), not by lifetime spawn count. `Drop` pushes; `new`
 /// pops (re-sentinel-filling for the high-water gauge). See
-/// `plans/scheduler-o1-task-lookup.md`.
+/// `plans/legacy/scheduler-o1-task-lookup.md`.
 static MAPPED_STACK_POOL: Mutex<alloc::vec::Vec<usize>> = Mutex::new(alloc::vec::Vec::new());
 
 /// Install the kstack window's root-level page-table subtree (root PTE 257) in the
@@ -431,7 +431,7 @@ pub struct Scheduler {
     /// `TaskId → index into tasks`, kept in lockstep with `tasks` on every
     /// `push`/`swap_remove` so a lookup by id is a map probe, not an O(tasks) scan
     /// (`prepare_switch` touches only the two tasks it switches between). See
-    /// `plans/scheduler-o1-task-lookup.md`.
+    /// `plans/legacy/scheduler-o1-task-lookup.md`.
     directory: TaskDirectory,
     /// One runqueue per hart. Hart `i` pops from `runqueues[i]`.
     runqueues: [Runqueue; crate::percpu::MAX_HARTS],

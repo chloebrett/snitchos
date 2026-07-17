@@ -156,7 +156,7 @@ fn unreached_run() -> Result<(), String> {
 /// — `wfi` is wfi-bounded (fans out across the parallel pool), `cpu` runs
 /// real guest work (a serial pass); tags feed `--tag` selection; the
 /// braced workload is the `workload=` bootarg + the shared-boot grouping
-/// key. (`cpu_bound` classification per plans/itest-parallel-scenarios.md.)
+/// key. (`cpu_bound` classification per plans/legacy/itest-parallel-scenarios.md.)
 macro_rules! catalog {
     ( $(
         $profile:ident $name:literal $func:path

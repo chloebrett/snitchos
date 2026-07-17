@@ -6,7 +6,7 @@
 //! threads, transferable caps, a real `init` grant graph — grows here in
 //! v0.8. The capability *machinery* is pure and host-tested in
 //! [`kernel_core::cap`]; this module only decides *where the table lives*
-//! and grants the bootstrap capability. See `plans/v0.7b-capabilities.md`.
+//! and grants the bootstrap capability. See `plans/legacy/v0.7b-capabilities.md`.
 
 use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 

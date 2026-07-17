@@ -10,7 +10,7 @@
 //! the `ENDPOINTS` lock; the *decision* (whom to wake, whether to block) is
 //! computed under the lock and the lock is dropped before `block_current`/
 //! `wake` run (never hold a `Mutex` across the switch — see CLAUDE.md). See
-//! `plans/v0.9-ipc.md`.
+//! `plans/legacy/v0.9-ipc.md`.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;

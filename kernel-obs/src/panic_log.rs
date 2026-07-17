@@ -5,7 +5,7 @@
 //! It reuses [`protocol::Frame::Log`], which inlines its message as a `&str`
 //! (no `StringId`, no interning), and encodes it into a **caller-provided fixed
 //! buffer** with no heap. This module is that pure encode step, host-tested; the
-//! kernel side (see `plans/panic-emits-telemetry.md`) supplies a `static` buffer
+//! kernel side (see `plans/legacy/panic-emits-telemetry.md`) supplies a `static` buffer
 //! and the panic-safe task/hart/timestamp reads, then pushes the bytes to the
 //! virtio-console via a non-blocking `try_lock`.
 

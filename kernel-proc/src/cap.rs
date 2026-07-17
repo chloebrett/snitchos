@@ -10,7 +10,7 @@
 //! Pure data + bookkeeping: no `unsafe`, no MMIO, no CSRs. Host-tested
 //! here; the `kernel` side only decides *where the table lives* (the
 //! process struct) and wires the syscall trap arm to [`CapTable::resolve`].
-//! See `plans/v0.7b-capabilities.md`.
+//! See `plans/legacy/v0.7b-capabilities.md`.
 
 use alloc::vec::Vec;
 

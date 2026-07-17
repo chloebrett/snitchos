@@ -10,7 +10,7 @@
 //! invariant. Mirrors `heap::watermark_grow_decision` /
 //! `sched::quantum_expired`.
 //!
-//! See `plans/v0.9-ipc.md`.
+//! See `plans/legacy/v0.9-ipc.md`.
 
 use alloc::collections::VecDeque;
 

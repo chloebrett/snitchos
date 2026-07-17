@@ -18,7 +18,7 @@
 //! and releases each from the global intern table, then this table is dropped.
 //! (Per-process scoping removed cross-process dedup, so each spawn registers its
 //! own names; without reclaim a long-running spawner like the shell would grow the
-//! intern table by O(spawns × names). See `plans/span-and-metric-name-gc.md`.)
+//! intern table by O(spawns × names). See `plans/legacy/span-and-metric-name-gc.md`.)
 //!
 //! Pure data + bookkeeping: no `unsafe`, no MMIO, no CSRs. Host-tested here; the
 //! `kernel` side allocates the global `StringId` via the intern table (which owns

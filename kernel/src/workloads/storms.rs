@@ -111,7 +111,7 @@ pub mod stack_overflow_deep {
     //! memory and snitches `Log("kernel stack overflow: task … guard page …")`
     //! before panicking — where *without* the exception stack a deep overflow would
     //! double-fault on the overflowed stack and hang/reset. The capability proof
-    //! for `plans/kernel-stack-hardening.md` Phase 1.
+    //! for `plans/legacy/kernel-stack-hardening.md` Phase 1.
 
     /// Recurse with a ~1 KiB frame each call until the stack crosses into the guard
     /// page. `#[inline(never)]` + work *after* the recursive call defeats tail-call

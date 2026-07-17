@@ -3,7 +3,7 @@
 **Branch**: main (project works directly on main; the user commits)
 **Status**: Active
 
-Companion to [docs/framebuffer-design.md](../docs/framebuffer-design.md). This plan
+Companion to [docs/framebuffer-design.md](../../docs/framebuffer-design.md). This plan
 implements the *first coherent slice* of Milestone 0: **a ramfb framebuffer brought up
 over fw_cfg, cleared to a color, with a present counter on the wire.** The moving rect,
 input, damage/scanout caps, and the snemu ramfb model are explicit follow-ups (see
@@ -171,7 +171,7 @@ absent-ramfb graceful path also covered (assert refusal + heartbeat).
 - **Damage rectangles as provenance + cap-bounded `Scanout{rect}`** — the actual
   "snitch" thesis; needs the compositor-as-capped-actor. (Steps 3.)
 - **snemu ramfb device model** — ~50-line guest-RAM-region → `<canvas>` blit; on
-  snemu's critical path but a separate track ([snemu progress](../plans/snemu-lockstep-native-ops.md)).
+  snemu's critical path but a separate track ([snemu progress](snemu-lockstep-native-ops.md)).
 - **virtio-gpu** — the grown-up device; deferred until real-hardware fidelity matters.
 - **Double-buffering / tear-free present** — ramfb is single-buffered; a shadow buffer
   in the FB window is a later refinement (open question in the design doc).

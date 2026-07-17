@@ -78,7 +78,7 @@ kernel-core's 393 remaining tests).
 | `kernel-obs` ✅ | intern, span, preinit, sink, batch_ring, panic_log, clock | 1356 | 45 | protocol, postcard |
 | `kernel-devices` ✅ | virtio, fwcfg, ramfb, framebuffer, console | 1469 | 62 | **none** |
 | `kernel-boot` ✅ | bootargs, workload, trap | 931 | 73 | **none** |
-| `kernel-proc` | sched, cap, ipc, notify, reap, elf, stack, metric, span_name | 4377 | 216 | protocol, abi, kernel-mem |
+| `kernel-proc` ✅ | sched, cap, ipc, notify, reap, elf, stack, metric, span_name | 4377 | 216 | protocol, abi, kernel-mem |
 
 The concepts:
 
@@ -221,12 +221,29 @@ only one with real design work.
   `workload`'s tests — the crate didn't compile on the first try. Grepping `use`
   finds imports, not usage. For `kernel-proc`, check fully-qualified paths too
   (`grep -rn 'alloc::\|protocol::\|snitchos_abi::'`), not just the `use` lines.
-- **Step 5: `kernel-proc`** — 9 modules, 216 tests. The residual, and the only
-  genuine design work: it holds the `cap`/`ipc`/`notify`/`sched` cluster whose
-  internal coupling is the reason `kernel-ids` isn't needed. Its one outbound edge
-  is `stack → kernel_mem::mmu::PAGE_SIZE`.
+- ~~**Step 5: `kernel-proc`**~~ **DONE** — 9 modules, 216 tests, all moved with
+  `| 0` diffs. Deps came out exactly as predicted (`protocol`, `abi`,
+  `kernel-mem`), and notably **not** `kernel-obs`: this crate *names* metrics, it
+  doesn't emit them. The `user/` subdir was flattened (it existed to organise
+  *within* the grab-bag; the whole crate is now that concern) — which also kept
+  `use crate::ipc::EndpointId` resolving with zero edits.
+
+  Two things the module survey missed, both caught by the compiler:
+  - **`fixtures/sample-user.elf`** — `elf.rs` loads it via
+    `include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), …))`. Non-source assets
+    don't show up in an import grep. It moved to `kernel-proc/fixtures/`.
+  - **Empty directories.** `git mv` leaves them behind (git doesn't track dirs);
+    `rmdir` them, which refuses if anything is actually left.
+
+  **`kernel-core` now holds no code — only `lib.rs` re-exports, and 0 tests.**
+
 - **Step 6: the facade sweep** — delete the `pub use` lines, repoint ~200 call
   sites, delete `kernel-core`. One mechanical commit, compiler-driven.
+
+  The umbrella question the plan deferred can now be settled with the thing in
+  front of us: `kernel-core` is currently a crate with **zero code, zero tests,
+  and five dependencies** — it rebuilds whenever any of them changes and produces
+  nothing. That is the hub the split existed to break. Delete it.
 
 ## risks and known weaknesses
 

@@ -42,7 +42,7 @@ use crate::verdict::{ComparisonRender, DEFAULT_ALPHA, render_comparison, verdict
 /// workloads). Each one wants its own host core; running two
 /// `Cpu` scenarios simultaneously can stretch wall-clock past the
 /// harness's per-scenario timeout. See
-/// `plans/itest-parallel-scenarios.md`.
+/// `plans/legacy/itest-parallel-scenarios.md`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CpuProfile {
     #[default]
@@ -65,7 +65,7 @@ pub struct Scenario {
     /// bootarg), or `None` for the default demo. This is the **grouping
     /// key** for shared-boot mode: scenarios with the same `workload`
     /// read one boot. Declared on the catalog row via `on_workload`; see
-    /// `plans/itest-shared-boot-mode.md`.
+    /// `plans/legacy/itest-shared-boot-mode.md`.
     pub workload: Option<&'static str>,
 }
 
@@ -228,7 +228,7 @@ pub struct RunnerConfig<'a> {
     /// Number of worker threads for per-iteration scenario fan-out.
     /// `0` and `1` both mean sequential execution (preserves the
     /// pre-parallel output format). `>1` enables the worker pool
-    /// (see `plans/itest-parallel-scenarios.md`). Each iteration
+    /// (see `plans/legacy/itest-parallel-scenarios.md`). Each iteration
     /// still runs to completion (its own `RunTotals`, fail-fast and
     /// interrupt check) before the next begins — fan-out is intra-
     /// iteration only.
@@ -253,7 +253,7 @@ pub struct RunnerConfig<'a> {
     /// flake-gate semantics). `true` = shared: scenarios are grouped by
     /// `workload`, so each group's same-workload scenarios run against one
     /// subject. The executor is identical for both — only the grouping
-    /// differs. See `plans/itest-shared-boot-mode.md`.
+    /// differs. See `plans/legacy/itest-shared-boot-mode.md`.
     pub shared: bool,
 }
 
@@ -478,7 +478,7 @@ pub fn run(
             eprintln!("\n=== run {}/{} ===", run_idx + 1, runs);
         }
 
-        // Step 3 of plans/itest-parallel-scenarios.md: fan-out is
+        // Step 3 of plans/legacy/itest-parallel-scenarios.md: fan-out is
         // intra-iteration. `jobs == 1` keeps the sequential output
         // format ("test X ... ok"); `jobs > 1` runs N worker threads
         // pulling from a shared queue, prefix-line output.

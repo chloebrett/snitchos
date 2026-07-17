@@ -23,7 +23,7 @@
 //! fan-out is a documented growth point.
 //!
 //! See [docs/notification-design.md](../../../docs/notification-design.md) and
-//! `plans/v0.12-notifications.md`.
+//! `plans/legacy/v0.12-notifications.md`.
 
 use alloc::collections::BTreeMap;
 

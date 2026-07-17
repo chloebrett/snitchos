@@ -72,7 +72,7 @@ applied to the SnitchOS thesis.
 ## It wants to be deterministic — and the discipline already exists
 
 A physics desktop is a fixed-timestep simulation. The kernel just landed
-[lockstep-preserving native memops](../plans/snemu-lockstep-native-ops.md), and snemu
+[lockstep-preserving native memops](../plans/legacy/snemu-lockstep-native-ops.md), and snemu
 is a deterministic replayable emulator. Same discipline, one layer up.
 
 The payoff: **record the input stream, replay the entire desktop session bit-exact** —

@@ -225,7 +225,7 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
 /// the current stack — `sscratch == 0`), so a *deep* overflow that creeps to the
 /// page boundary can double-fault while building the trap frame. Robust reporting
 /// of deep overflows needs a per-hart exception stack (the Linux double-fault
-/// stack) — documented follow-up in `plans/kernel-stack-guard-pages.md`. The guard
+/// stack) — documented follow-up in `plans/legacy/kernel-stack-guard-pages.md`. The guard
 /// page still converts silent corruption into a deterministic fault either way.
 fn handle_kernel_fault(scause: u64) -> ! {
     let stval: usize;

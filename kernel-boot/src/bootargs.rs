@@ -101,13 +101,13 @@ pub enum WorkloadKind {
     /// timer can't fire mid-syscall (`SIE == 0` throughout trap handling), so it
     /// fires the instant the syscall `sret`s back to U-mode (`SPP == 0`). Guards
     /// against a regression that re-enables interrupts inside long syscalls
-    /// without a `need_resched` drain. See `plans/v0.8c-need-resched-on-syscall-return.md`.
+    /// without a `need_resched` drain. See `plans/legacy/v0.8c-need-resched-on-syscall-return.md`.
     SyscallHog,
     /// v0.11 Tier-0 console input: a `console-echo` program that loops
     /// `ConsoleRead` → `DebugWrite`, echoing typed UART input back as `Log`
     /// frames. Proves the polled-RX path (UART → timer drain → ring →
     /// `ConsoleRead` → userspace) end to end. See
-    /// `plans/console-tier0-polled-rx.md`.
+    /// `plans/legacy/console-tier0-polled-rx.md`.
     ConsoleEcho,
     /// The Stitch tree-walk interpreter running as a userspace REPL on the metal:
     /// boots a self-test (`1 + 2`), then loops `ConsoleRead` → evaluate →

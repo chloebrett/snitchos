@@ -4,23 +4,15 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
+# This crate holds no code — it re-exports the five kernel-* crates so
+# `kernel_core::…` paths keep resolving while the split lands. The final step of
+# `plans/kernel-core-split.md` deletes it. Nothing should be added here.
 [dependencies]
-# Carved out of this crate; re-exported at the crate root so `kernel_core::mmu`
-# and friends still resolve. See `plans/kernel-core-split.md`.
 kernel-boot = { path = "../kernel-boot" }
 kernel-devices = { path = "../kernel-devices" }
 kernel-mem = { path = "../kernel-mem" }
 kernel-obs = { path = "../kernel-obs" }
-protocol = { path = "../protocol" }
-postcard = { version = "1", default-features = false }
-# The kernel↔user ABI: single source of truth for capability rights bits
-# (`Rights` wraps `snitchos_abi::rights::*`).
-snitchos-abi = { path = "../abi" }
-
-# loom is pulled in ONLY under `--cfg loom` (the model-check test run);
-# normal `cargo test` / the kernel build never see it. See tests/loom_tx.rs.
-[target.'cfg(loom)'.dev-dependencies]
-loom = "0.7"
+kernel-proc = { path = "../kernel-proc" }
 
 [lints]
 workspace = true

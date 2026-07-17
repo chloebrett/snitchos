@@ -10,7 +10,7 @@
 //! program headers, `PT_LOAD` only. No section headers, symbols,
 //! relocations, or dynamic linking — the user program is linked
 //! position-dependent at a fixed VA, so segments map at `p_vaddr`
-//! verbatim. See `plans/v0.7a-first-userspace.md` and
+//! verbatim. See `plans/legacy/v0.7a-first-userspace.md` and
 //! `docs/v0.7-userspace-concepts.md`.
 //!
 //! This is a trust boundary even though v0.7a's input is embedded and

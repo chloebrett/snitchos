@@ -889,10 +889,7 @@ dependencies = [
  "kernel-devices",
  "kernel-mem",
  "kernel-obs",
- "loom",
- "postcard",
- "protocol",
- "snitchos-abi",
+ "kernel-proc",
 ]
 
 [[package]]
@@ -912,6 +909,15 @@ version = "0.0.1"
 dependencies = [
  "postcard",
  "protocol",
+]
+
+[[package]]
+name = "kernel-proc"
+version = "0.0.1"
+dependencies = [
+ "kernel-mem",
+ "protocol",
+ "snitchos-abi",
 ]
 
 [[package]]

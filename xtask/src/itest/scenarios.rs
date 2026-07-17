@@ -975,7 +975,7 @@ pub fn workload_cooperative_baseline(h: &mut View) -> Result<(), String> {
 /// emits `context_switches_total` then `lookup_probes_total` within one heartbeat, so
 /// the probes reading captured right after a switches reading is from the same tick —
 /// a consistent ratio. Proven to bite by reverting the directory lookup to a scan
-/// (see `plans/scheduler-o1-task-lookup.md`): only this scenario fails, every
+/// (see `plans/legacy/scheduler-o1-task-lookup.md`): only this scenario fails, every
 /// behavioural test still passes.
 pub fn sched_task_lookup_is_o1(h: &mut View) -> Result<(), String> {
     // Round-robin the 200-task table many times over first, so the lookup cost is
@@ -1415,7 +1415,7 @@ pub fn stack_guard_fault_detected(h: &mut View) -> Result<(), String> {
 /// `Log` reaches the wire *carrying the real reason* (increment 6): it contains
 /// both the `"kernel panic"` marker and the workload's own panic message. For an
 /// observability-first kernel, its own death is the one event most worth a frame,
-/// and this proves it's no longer UART-only. See `plans/panic-emits-telemetry.md`.
+/// and this proves it's no longer UART-only. See `plans/legacy/panic-emits-telemetry.md`.
 pub fn kernel_panic_emits_frame(h: &mut View) -> Result<(), String> {
     h.wait_for(SEC * 20, |f, _| {
         matches!(f, OwnedFrame::Log { msg, .. }
@@ -2894,7 +2894,7 @@ pub fn preemption_telemetry(h: &mut View) -> Result<(), String> {
 /// a preemption. Regression guard: if a future version ever re-enables interrupts
 /// inside long syscalls without a `need_resched` drain, a near-100%-S-mode task
 /// like this one would dodge preemption and this assertion would fail. See
-/// `plans/v0.8c-need-resched-on-syscall-return.md`.
+/// `plans/legacy/v0.8c-need-resched-on-syscall-return.md`.
 pub fn syscall_hog_still_preempted(h: &mut View) -> Result<(), String> {
     let hog_id = match h
         .wait_for(SEC * 20, is_thread_register_named("syscall_hog"))
@@ -2930,7 +2930,7 @@ pub fn syscall_hog_still_preempted(h: &mut View) -> Result<(), String> {
 /// guest UART (QEMU stdin); the `console_echo` program drains them via
 /// `ConsoleRead` and echoes them back via `DebugWrite`, observed here as a `Log`
 /// frame. Proves the whole polled-RX path: UART → timer drain → ring →
-/// `ConsoleRead` → `copy_to_user` → userspace. See `plans/console-tier0-polled-rx.md`.
+/// `ConsoleRead` → `copy_to_user` → userspace. See `plans/legacy/console-tier0-polled-rx.md`.
 pub fn console_echo_round_trips(h: &mut View) -> Result<(), String> {
     // Wait until the echo program is up and reading, so injected bytes aren't
     // dropped before it starts polling.

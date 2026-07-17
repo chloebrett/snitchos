@@ -31,7 +31,7 @@ lands before the hard one.
 ### Status (2026-07-17)
 
 **Cross-hart `Kill` has since landed** — see
-[multi-hart-userspace.md](multi-hart-userspace.md) Step 3. The "only cross-hart
+[multi-hart-userspace.md](legacy/multi-hart-userspace.md) Step 3. The "only cross-hart
 running remains deferred" caveat in increment 3.5 below is **no longer true**:
 `kill_task` now handles a target running on another hart by setting
 `Task.kill_requested` + sending an `IPI_KILL_CHECK`, and the target

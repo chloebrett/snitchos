@@ -12,7 +12,7 @@ stdout via an emulated ns16550a UART. No paging — the run ends at the
 decode / execute / CSR / trap / MMIO core *in isolation*; it is the
 right engineering checkpoint even though it is a thin functional slice.
 
-Design + scope: [docs/snemu-design.md](../docs/snemu-design.md).
+Design + scope: [docs/snemu-design.md](../../docs/snemu-design.md).
 
 ## Why this step
 
@@ -203,7 +203,7 @@ Rough shape:
   seeded interleaving that reproduces (e.g.) a `TX_STAGING`-class
   ordering bug on demand — Heisenbug → fixed-seed regression test.
 
-## Milestone 4 — measurement spine *(its own plan: [snemu-milestone-4-measurement.md](snemu-milestone-4-measurement.md))*
+## Milestone 4 — measurement spine *(its own plan: [snemu-milestone-4-measurement.md](../snemu-milestone-4-measurement.md))*
 
 The load-bearing artifact: snemu observing itself, the QEMU baseline,
 the workload taxonomy, and the nested overhead-factor methodology.

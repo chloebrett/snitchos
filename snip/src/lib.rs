@@ -1,4 +1,4 @@
-//! Sonnet-assisted staging core. See `plans/snip-stage-picker.md`.
+//! Sonnet-assisted staging core. See `plans/legacy/snip-stage-picker.md`.
 //!
 //! Pure, testable: [`build_prompt`] renders the prompt sent to `claude -p`, and
 //! [`parse_reply`] parses + validates the model's JSON answer against the real

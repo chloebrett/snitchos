@@ -40,27 +40,6 @@ pub(crate) use workloads::storms;
 // it depends on (__stack_top, __bss_start, __bss_end).
 global_asm!(include_str!("entry.S"));
 
-/// Write a fixed greeting to the ns16550a UART and halt, without enabling
-/// paging. The UART is identity-accessible while the MMU is off, so this needs
-/// nothing the trampoline sets up — it's the console-out smoke for an emulator
-/// that doesn't model Sv39 yet (snemu milestone 1).
-#[cfg(feature = "minimal-boot")]
-fn minimal_boot() -> ! {
-    const UART_THR: *mut u8 = 0x1000_0000 as *mut u8;
-    const UART_LSR: *const u8 = 0x1000_0005 as *const u8;
-    const LSR_THRE: u8 = 0x20; // transmit holding register empty
-
-    for &byte in b"Hello from snemu (minimal-boot)\n" {
-        // SAFETY: ns16550a MMIO, identity-mapped with the MMU off.
-        while unsafe { core::ptr::read_volatile(UART_LSR) } & LSR_THRE == 0 {}
-        unsafe { core::ptr::write_volatile(UART_THR, byte) };
-    }
-    loop {
-        // SAFETY: `wfi` is always valid in S-mode.
-        unsafe { core::arch::asm!("wfi") };
-    }
-}
-
 /// Kernel entry point, called from `_start` (see entry.S).
 ///
 /// Inputs come from OpenSBI's S-mode handoff contract:
@@ -81,19 +60,7 @@ fn minimal_boot() -> ! {
 ///   immediately; the panic handler may not produce output before
 ///   `console::init` runs.
 #[unsafe(no_mangle)]
-#[cfg_attr(
-    feature = "minimal-boot",
-    allow(
-        unreachable_code,
-        unused,
-        reason = "minimal_boot diverges before the normal boot path"
-    )
-)]
 pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
-    // snemu milestone-1 console-out smoke: greet and halt before any paging.
-    #[cfg(feature = "minimal-boot")]
-    minimal_boot();
-
     // DTB parse must come first — we need it to discover MMIO regions
     // before we build the boot page table. Pure parsing, no formatted
     // output, no fn-pointer-dispatched calls. Safe with MMU off

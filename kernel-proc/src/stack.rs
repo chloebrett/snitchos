@@ -15,7 +15,7 @@
 //!
 //! Pure logic, host-tested here; the `kernel` side owns the stack bytes + MMU.
 //! (The earlier Tier-A bottom-canary panic was retired once guard pages report
-//! cleanly — see `plans/kernel-stack-hardening.md`.)
+//! cleanly — see `plans/legacy/kernel-stack-hardening.md`.)
 
 use alloc::vec::Vec;
 

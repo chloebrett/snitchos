@@ -216,7 +216,7 @@ Useful flags:
 
 - `--repeat N` — run the whole suite N times back-to-back, then print an aggregate flake table listing scenarios that failed at least once.
 - `--tag <tag>` — run every scenario carrying `<tag>` (union). Repeatable / comma-separated: `--tag frame --tag heap` or `--tag frame,heap` runs scenarios tagged either — same comma-means-also convention as the positional scenario list. An unknown tag errors with the known set; can't be combined with a named scenario. Tags are set per-row in the `catalog!` table in `xtask/src/itest.rs` (`boot`, `frame`, `heap`, `oom`, `sched`, `smp`, `ipi`, `workload`, `stress`, `userspace`).
-- `--shared` — shared-boot mode: group scenarios by their `workload` and run each group against a _single_ kernel boot instead of one boot per scenario (the ~19 default-demo and the userspace scenarios each boot QEMU once). Each scenario reads the same recorded frame stream through its own cursor. Off by default — the flake gate (`--repeat 10`) and baselines want the per-scenario isolation of separate boots. Composes with `--tag`/`--skip`. Cuts total QEMU boots (CPU time ~40% on a full run); see [plans/itest-shared-boot-mode.md](plans/itest-shared-boot-mode.md).
+- `--shared` — shared-boot mode: group scenarios by their `workload` and run each group against a _single_ kernel boot instead of one boot per scenario (the ~19 default-demo and the userspace scenarios each boot QEMU once). Each scenario reads the same recorded frame stream through its own cursor. Off by default — the flake gate (`--repeat 10`) and baselines want the per-scenario isolation of separate boots. Composes with `--tag`/`--skip`. Cuts total QEMU boots (CPU time ~40% on a full run); see [plans/legacy/itest-shared-boot-mode.md](plans/legacy/itest-shared-boot-mode.md).
 - `--keep-existing-qemus` — don't `pkill` stale QEMUs at start (rare; useful if you want a concurrent debug QEMU).
 - `--skip-unit-tests` — bypass the unit-test prerequisite.
 
@@ -250,8 +250,8 @@ scenarios by workload to cut total boots substantially.
 - [plans/legacy/v0.4-memory-step-3-frame-allocator.md](plans/legacy/v0.4-memory-step-3-frame-allocator.md) — frame allocator implementation plan.
 - [plans/legacy/v0.4-memory-step-4-kernel-heap.md](plans/legacy/v0.4-memory-step-4-kernel-heap.md) — kernel heap implementation plan.
 - [plans/v0.4-memory-findings.md](plans/v0.4-memory-findings.md) — what we learned (and what we worked around) building higher-half.
-- [plans/v0.5-pre-smp-sync-prefactor.md](plans/v0.5-pre-smp-sync-prefactor.md) — `kernel::sync` chokepoint + `PerCpu<T>` stub. The SMP-shaped pre-factor that landed before v0.5 threading.
-- [plans/v0.5-threading.md](plans/v0.5-threading.md) — cooperative round-robin scheduler, per-task span stack, `ThreadRegister` + `ContextSwitch` wire frames.
+- [plans/legacy/v0.5-pre-smp-sync-prefactor.md](plans/legacy/v0.5-pre-smp-sync-prefactor.md) — `kernel::sync` chokepoint + `PerCpu<T>` stub. The SMP-shaped pre-factor that landed before v0.5 threading.
+- [plans/legacy/v0.5-threading.md](plans/legacy/v0.5-threading.md) — cooperative round-robin scheduler, per-task span stack, `ThreadRegister` + `ContextSwitch` wire frames.
 - [plans/legacy/v0.6-smp-cooperative.md](plans/legacy/v0.6-smp-cooperative.md) — the SMP-cooperative milestone: producer/consumer workload migrated across two harts in three posts.
 - [plans/scaling-corners.md](plans/scaling-corners.md) — known corners for SMP / interrupts.
 - [posts/](posts/) — devlog notes as we go.

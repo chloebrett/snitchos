@@ -1,4 +1,4 @@
-//! Backend B — the native block JIT (design: `plans/snemu-milestone-6-block-jit.md`).
+//! Backend B — the native block JIT (design: `plans/legacy/snemu-milestone-6-block-jit.md`).
 //!
 //! Backend A walks the reified `Op` IR interpretively; Backend B lowers the same IR
 //! to **native AArch64** in an executable buffer and runs it, falling back to A for

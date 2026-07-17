@@ -3,7 +3,7 @@
 //! the actual task list, stacks, and the runqueue-as-`Mutex`-protected
 //! static — this module is pure bookkeeping.
 //!
-//! See `plans/v0.5-threading.md`.
+//! See `plans/legacy/v0.5-threading.md`.
 
 use alloc::collections::{BTreeMap, VecDeque};
 

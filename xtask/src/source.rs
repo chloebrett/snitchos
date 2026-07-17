@@ -2,7 +2,7 @@
 //!
 //! These are line/char level — no `syn`, no name resolution. They are good
 //! enough to *flag candidates* for the `crate-audit` skill, never to decide
-//! deletion. See `plans/xtask-audit.md`.
+//! deletion. See `plans/legacy/xtask-audit.md`.
 
 /// One bool per line of `content`: `true` if the line falls within a
 /// `#[cfg(test)]` / `#[test]` attributed item (the attribute line, and every

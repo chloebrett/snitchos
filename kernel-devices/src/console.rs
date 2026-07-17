@@ -15,7 +15,7 @@
 //! byte is dropped rather than overwriting unread data. A slow consumer loses the
 //! newest input, never corrupts the FIFO.
 //!
-//! See `plans/console-tier0-polled-rx.md`.
+//! See `plans/legacy/console-tier0-polled-rx.md`.
 
 /// A byte FIFO of fixed capacity `N`. `head` is the next byte to read, `tail`
 /// the next slot to write; `len` tracks occupancy so a full ring (`len == N`) is

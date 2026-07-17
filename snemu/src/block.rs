@@ -12,7 +12,7 @@
 //! oracle discipline as the decode cache: a block must execute byte-identically to
 //! the interpreter, proven by the `snemu-itest` on↔off A/B.
 //!
-//! See `plans/snemu-milestone-6-block-jit.md`.
+//! See `plans/legacy/snemu-milestone-6-block-jit.md`.
 
 use std::sync::Arc;
 

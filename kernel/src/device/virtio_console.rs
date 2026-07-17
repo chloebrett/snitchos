@@ -179,7 +179,7 @@ const TX_STAGING_LEN: usize = 256;
 /// (two harts emitting at once). Crucially, `TxStaging` is **not**
 /// `Copy`, so the old footgun `let base = *handle.lock();` — which
 /// copied `base` out and dropped the guard early, leaving the buffer
-/// unprotected — no longer compiles. See plans/tx-staging-cross-hart-race.md.
+/// unprotected — no longer compiles. See plans/legacy/tx-staging-cross-hart-race.md.
 pub struct TxStaging {
     base: usize,
     buf: [u8; TX_STAGING_LEN],

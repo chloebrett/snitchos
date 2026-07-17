@@ -3,7 +3,7 @@
 **Branch**: main (project works directly on main; the user commits)
 **Status**: Active
 
-Companion to [docs/framebuffer-design.md](../docs/framebuffer-design.md) and
+Companion to [docs/framebuffer-design.md](../../docs/framebuffer-design.md) and
 [plans/framebuffer-milestone-0.md](framebuffer-milestone-0.md) (complete — real QEMU
 ramfb bring-up, both itests green). Right now snemu's `fw_cfg` support is a **no-op
 stub** (`snemu/src/bus.rs`, current at time of writing): reads return 0, writes are

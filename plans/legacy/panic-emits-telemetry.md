@@ -6,7 +6,7 @@ on the panic frame. Increment 6 (dynamic message) SHIPPED — the frame now carr
 `panic_log::MsgWriter` (char-boundary truncation, 11/11 mutants caught); the itest
 now asserts the real reason reaches the wire, gate 10/10 @ ~500 ms.**
 Motivated by the snemu differential-oracle work
-([notes/snemu-guard-page-fail-is-timing-not-mmu.md](snemu-guard-page-fail-is-timing-not-mmu.md)):
+([notes/snemu-guard-page-fail-is-timing-not-mmu.md](../../notes/snemu-guard-page-fail-is-timing-not-mmu.md)):
 a kernel panic is currently invisible on the structured telemetry channel — it
 goes out the emergency UART only. For an OS whose first-class concern is
 observability, the single most important event (the kernel dying) is the one thing

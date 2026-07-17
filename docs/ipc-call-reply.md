@@ -47,4 +47,4 @@ sequenceDiagram
   `reply` *consumes* it.
 
 See [ipc-design.md](ipc-design.md) for the full design and
-`../plans/v0.10-ramfs.md` for the bulk-copy path.
+`../plans/legacy/v0.10-ramfs.md` for the bulk-copy path.
