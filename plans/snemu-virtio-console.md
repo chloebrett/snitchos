@@ -1,5 +1,11 @@
 # snemu virtio-console device model
 
+**Status: SHIPPED.** All three layers landed (register file + handshake,
+virtqueue/descriptor ring, output sink + differential oracle). `cargo xtask
+snemu-diff` is the oracle this plan set out to build. Deliberately out of scope
+and still unbuilt: the RX path, `MULTIPORT`/`SIZE` features, interrupts (the
+driver polls), and more than one live device.
+
 ## Goal
 
 Teach snemu enough virtio-mmio + virtio-console to receive the kernel's
@@ -27,7 +33,7 @@ index 7); the other 7 slots are empty (present, `DeviceID == 0`).
 
 ## Layers
 
-### Layer 1 — MMIO register file + probe/handshake  ← THIS STEP
+### Layer 1 — MMIO register file + probe/handshake  ✅ SHIPPED
 
 A `Virtio` device in snemu's bus that answers the discovery reads and drives the
 full feature + queue-config handshake to completion (mirrors `FakeVirtioDevice`).

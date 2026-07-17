@@ -1,5 +1,13 @@
 # snemu M6 — the block JIT (reified-IR, backend A first)
 
+**Status: SHIPPED.** Backend A (the portable block JIT, `snemu/src/block.rs`)
+landed and is at parity with the interpreter — which is this plan's whole scope.
+Backend B (native AArch64 codegen, `snemu/src/jit.rs`) is the "later, host-only
+milestone" flagged below and is **still in progress**: it is oracle-clean
+(byte-identical instret to the interpreter) but not yet faster than A, because
+the hot scheduler/spin blocks contain loads/stores and fall back to A. The next
+lever there is memory-op codegen.
+
 ## Where this sits
 
 The meta-loop's speed levers, in order shipped: M5 decode cache (skip re-fetch/

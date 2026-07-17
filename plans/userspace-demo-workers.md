@@ -1,8 +1,9 @@
 # Userspace demo workers + userspace tracing (v0.7 follow-on)
 
 **Work lands on:** `main` (no feature branches — see CLAUDE.md)
-**Status:** Active — prerequisite for `plans/v0.8-preemption.md`.
-**Progress (2026-06-13):** Steps 1–5 ✅ **— plan essentially complete.** Steps 1–4
+**Status:** **COMPLETE.** Was the prerequisite for
+[v0.8-preemption.md](v0.8-preemption.md), which has since shipped.
+**Progress (2026-06-13):** Steps 1–5 ✅ **— plan complete.** Steps 1–4
 (Yield, `copy_from_user`, full userspace tracing, single `worker`) plus Step 5
 (the *address-space-aware scheduler* + two cooperative userspace workers). **Step
 6 (retire `task_a`/`task_b`) was CANCELLED** in favour of "keep both" — the

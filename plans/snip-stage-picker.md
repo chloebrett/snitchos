@@ -1,6 +1,8 @@
 # `snip` — Sonnet-assisted staging for parallel-agent workflows
 
-> Status: **DESIGN** (approved plan, not yet built). TDD from here.
+> Status: **SHIPPED.** `cargo xtask snip` is built (`xtask/src/snip.rs`);
+> see "Update (shipped)" below for what landed beyond the original design
+> (hunk-level staging, timing/token reporting, auto-stage on full confidence).
 
 ## Problem
 

@@ -1,5 +1,12 @@
 # itest parallel scenarios
 
+**Status: SHIPPED.** The build order below landed: `--jobs` plumbing, the
+per-worker aggregator + merge, the worker pool, the NDJSON writer lock, and the
+cheap/expensive classification (`CpuProfile { Wfi, Cpu }` in
+`itest-harness/src/runner.rs`, with `jobs` / `cpu_jobs` in
+`xtask/src/itest.rs`). The "Deferred: parallel iterations of one scenario"
+section stayed deferred, as intended.
+
 Run the integration suite's scenarios concurrently inside one
 `cargo xtask itest` invocation. Goal: cut the dev-loop wall-clock by
 running ~N scenarios in parallel on N cores. Non-goal (for now):

@@ -1,6 +1,7 @@
 # Kernel stack hardening — exception stack → canary retirement → boot-stack guard
 
-**Status:** In progress (2026-06-28). Follow-on to the shipped per-task guard pages
+**Status:** **COMPLETE — all three phases shipped 2026-06-28** (see "Milestone
+complete" below; full itest suite 92/0). Follow-on to the shipped per-task guard pages
 ([`plans/kernel-stack-guard-pages.md`](kernel-stack-guard-pages.md), Tier A + B).
 Completes the two limitations that work documented.
 

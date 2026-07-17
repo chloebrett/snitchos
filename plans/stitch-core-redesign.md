@@ -1,8 +1,14 @@
 # Plan: Stitch core redesign (tokenizer · parser · interpreter)
 
-**Status**: Active
+**Status**: **COMPLETE (2026-07-11)** — all phases done: A (spans), B (reified
+evaluator + fuel + trampoline), C (surface AST + core IR), D (effects: `handle`/
+`with` + `without` attenuation), F (cleanups). 587 tests green.
 **Lands on**: `main`, incrementally (no feature branches; the user commits each
 known-good increment). Phases below are the review/commit milestones.
+
+Two follow-ons deliberately left out of this plan, each tracked elsewhere: the
+bytecode VM (see "Deferred to the bytecode-VM milestone") and the static type
+checker (see "Parallel track", [stitch-type-system.md](stitch-type-system.md)).
 
 ## Goal
 
@@ -544,9 +550,10 @@ rewrite — so this is a "when," not a "whether." Update [stim-v1](stim-v1.md) h
 
 ---
 
-## Phase F — Cleanups (independent; drop in anytime)
+## Phase F — Cleanups (independent; drop in anytime) — ✅ DONE
 
-Low-risk, no ordering dependency on A–D.
+Low-risk, no ordering dependency on A–D. All three landed: `NATIVES` /
+`BUILTIN_MODULE_SPECS` / `parens_then_arrow` no longer exist in `stitch/src/`.
 - **Natives declared in their module namespace** — retire the flat `NATIVES` table
   + hand-maintained `BUILTIN_MODULE_SPECS` map (`interp.rs:86,316`); adding
   `Str.slice` touched three places.

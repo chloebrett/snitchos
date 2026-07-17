@@ -1,6 +1,13 @@
 # Plan: Stitch type system (bidirectional, gradual)
 
-**Status**: Active — Stage 1 (skeleton + nominal checks)
+**Status**: Active — **Stage 6 (capabilities-as-effects) complete; generics are
+what's left.** Done: Stage 1 (skeleton + nominal checks), Stage 2 (exhaustive
+`match`), Stage 3 (`@` self-type), method-body checking, Stage 5 (contract
+subtyping), Stage 4's G1–G2 (type-argument annotations, generic constructor
+instantiation), and Stage 6's C1–C4 (native requirements, call-graph
+propagation, declared-but-unused, `without` attenuation).
+**Next**: G3–G6 — generic function/method syntax, rigid type-params, call
+inference, and bounds.
 **Track**: parallel to the bytecode VM; a pass over the Phase-C Core IR, VM-independent.
 **Design source**: `docs/language-design.md` → *Type system* (worked out, pre-implementation).
 

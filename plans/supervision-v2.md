@@ -28,7 +28,19 @@ lands before the hard one.
 
 ## Increments (TDD each; policy-before-mechanism, mirroring v1)
 
-### Status (2026-07-15)
+### Status (2026-07-17)
+
+**Cross-hart `Kill` has since landed** — see
+[multi-hart-userspace.md](multi-hart-userspace.md) Step 3. The "only cross-hart
+running remains deferred" caveat in increment 3.5 below is **no longer true**:
+`kill_task` now handles a target running on another hart by setting
+`Task.kill_requested` + sending an `IPI_KILL_CHECK`, and the target
+self-terminates at its next checkpoint (`KillOutcome::Requested`). The
+`KillAction::RefuseRunningRemote` classifier arm survives in `kernel-core`, but
+the kernel translates it into that async request rather than a refusal.
+
+**Remaining here: increments 4 (graceful shutdown engine) and 5 (acceptance
+itest).** The `Kill` mechanism itself is done.
 
 - **Increment 1 ✅** — `teardown_order` in the `supervision` crate (17 tests green).
 - **Increment 2 ✅** — the cap primitive, host-tested: `abi` (`Syscall::Kill = 30`,

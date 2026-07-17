@@ -1,5 +1,10 @@
 # snemu milestone 1 — console out (UART only)
 
+**Status: SHIPPED — and long since overtaken.** The acceptance goal (kernel's
+first "Hello" via an emulated ns16550a, run ending at the MMU cliff) was met, and
+snemu has since grown paging, virtio-console, multi-hart, a ramfb device model,
+and a block JIT on top of it. Kept as the record of how the interpreter started.
+
 Stand up a RV64IMC interpreter (`snemu`, the SnitchOS emulator) that loads the kernel ELF, executes the
 boot path, and prints the kernel's first unformatted "Hello" to host
 stdout via an emulated ns16550a UART. No paging — the run ends at the
