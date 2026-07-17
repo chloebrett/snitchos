@@ -310,13 +310,18 @@ enum Cmd {
         #[command(subcommand)]
         cmd: StackCmd,
     },
-    /// Run all host-side unit tests across the workspace
-    /// (`kernel-core`, `protocol --features std`, `collector`).
-    /// Fast (~1s). Doesn't touch QEMU.
+    /// Run every host-side check across the workspace: the unit tests
+    /// (`kernel-core`, `protocol --features std`, `collector`, …), the
+    /// loom model-check tests (a separate `--cfg loom` compilation), and
+    /// the generated-diagram drift check. Fast (~1s). Doesn't touch QEMU.
     Test,
-    /// Run kernel integration tests in QEMU. By default, runs the
-    /// workspace unit tests first and only proceeds to integration
-    /// if they all pass (use `--skip-unit-tests` to bypass).
+    /// Run kernel integration tests in QEMU.
+    ///
+    /// Runs integration only — it does **not** run the host-side checks
+    /// first. Compose the gate explicitly:
+    /// `cargo xtask test && cargo xtask itest`. (`xtask test` is the
+    /// unit tests *plus* the loom model-checks and the generated-diagram
+    /// drift check.)
     ///
     /// With no scenario name, runs every known integration
     /// scenario and reports a pass/fail summary. Use `--repeat N`
@@ -344,11 +349,6 @@ enum Cmd {
         /// the OS releases on holder death, including Ctrl-C).
         #[arg(long, default_value_t = false)]
         force: bool,
-        /// Skip running the workspace unit tests as a prerequisite.
-        /// Off by default — unit tests run first; integration only
-        /// proceeds if they pass.
-        #[arg(long, default_value_t = false)]
-        skip_unit_tests: bool,
         /// After the run, overwrite the `current` baseline entry for
         /// each scenario in `.itest-baseline.toml` with the current
         /// run's results. The previous `current` (if any) is pushed
@@ -753,6 +753,21 @@ mod retired_command_tests {
         assert!(Cli::try_parse_from(["xtask", "snemu"]).is_err());
     }
 
+    /// `itest` no longer runs the host-side checks as a prerequisite, so the
+    /// flag that existed to undo that is gone too. The gate composes explicitly:
+    /// `cargo xtask test && cargo xtask itest`.
+    #[test]
+    fn itest_skip_unit_tests_flag_is_gone() {
+        assert!(Cli::try_parse_from(["xtask", "itest", "--skip-unit-tests"]).is_err());
+    }
+
+    /// Removing the flag must not disturb `itest`'s own arguments.
+    #[test]
+    fn itest_still_takes_a_scenario_and_its_own_flags() {
+        assert!(Cli::try_parse_from(["xtask", "itest", "boot-reaches-heartbeat"]).is_ok());
+        assert!(Cli::try_parse_from(["xtask", "itest", "--repeat", "3"]).is_ok());
+    }
+
     /// The deletion is scoped: the rest of the snemu family stays. In
     /// particular `snemu-fork` — it forks one boot across *different*
     /// workloads (layout-preserving DTB overwrite), which
@@ -864,7 +879,6 @@ fn main() -> ExitCode {
             scenario,
             repeat,
             force,
-            skip_unit_tests,
             update_baseline,
             fail_fast,
             no_auto_push,
@@ -876,16 +890,6 @@ fn main() -> ExitCode {
             tag,
             shared,
         } => {
-            if !skip_unit_tests {
-                let unit = itest::run_unit_tests();
-                if unit != ExitCode::SUCCESS {
-                    eprintln!(
-                        "\nunit tests failed — skipping integration. Pass --skip-unit-tests to force."
-                    );
-                    return unit;
-                }
-                eprintln!();
-            }
             let profile_filter = profile.map(|p| match p {
                 ProfileFilter::Wfi => itest_harness::CpuProfile::Wfi,
                 ProfileFilter::Cpu => itest_harness::CpuProfile::Cpu,

@@ -105,17 +105,27 @@ this is the call to confirm.)*
   `hung_detected == 1`, then `CapEvent::Revoked{Process}` + the service reaped — the
   wedge was noticed *because of the deadline* and force-stopped.
 
-## Increment breakdown
+## Increment breakdown — ✅ all shipped, itest green
 
-1. **Pure `TimeoutQueue`** + `NotifyTable::cancel_wait` + `ReapTable::cancel_wait_any`
-   (kernel-core, host-tested, TDD).
-2. **Per-hart queue + timer drain** (`handle_timer` → `wake` expired). Kernel; covered
-   by the itest (no host path).
-3. **Timed `WaitNotify`** (ABI extend + wrapper update + `wait_timeout`) — the
-   hung-detection primitive.
-4. **Timed `WaitAny`** (same machinery; `wait_any_timeout`).
-5. **Hung-detection demo** (`hung-service` + `hung-supervisor` + workload wiring).
-6. **itest** `supervisor-detects-and-kills-a-hung-service`.
+1. ✅ **Pure `TimeoutQueue`** (`kernel_proc::timeout`, 6 host tests) + `Notification::{take_pending,
+   cancel_wait}` + `NotifyTable::{take_pending, cancel_wait}` + `ReapTable::cancel_wait_any`
+   (TDD; 228 kernel-proc tests green). `take_pending` was the one extra: the notification's
+   single-waiter model returns `Busy` (not `Block`) to a stale waiter, so the timed loop
+   needs a "bits-or-nothing, leave the waiter" resolution to tell a signal from a timeout.
+2. ✅ **Per-hart queue + timer drain**: `PerCpu<Mutex<TimeoutQueue>>` in `sched` +
+   `timeout_register`/`timeout_cancel`/`wake_expired_timeouts`; `handle_timer` drains
+   before `maybe_preempt` (so it runs every tick even if preemption switches away).
+3. ✅ **Timed `WaitNotify`**: `a1` = deadline in / timed-out flag out; `wait()` passes
+   `a1 = 0`, new `wait_timeout(deadline) -> Result<Option<u64>, Denied>`.
+4. ✅ **Timed `WaitAny`**: `a2` = deadline in / timed-out flag out (a0/a1 stay
+   status/child); `wait_any()` passes `a2 = 0`, new `wait_any_timeout(deadline) ->
+   Option<(i32, u32)>`.
+5. ✅ **Hung-detection demo**: `hung-service` (SPAWNABLE 12 — beats then wedges) +
+   `hung-supervisor` (`workload=hung-detect` — `wait_timeout` the liveness beat, kill on
+   timeout).
+6. ✅ **itest** `supervisor-detects-and-kills-a-hung-service` — asserts `beats_seen ≥ 1`
+   → `hung_detected` → `reaped`. **Passes in QEMU** (max wait 0.5s). No regressions:
+   untimed `WaitNotify` (notify-smoke) + `WaitAny` (init-supervises-a-child) still green.
 
 ## Decisions to confirm
 

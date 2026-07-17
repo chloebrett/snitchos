@@ -1,14 +1,44 @@
 # Userspace runtime maturity — alloc → `main()` → growable heap → std
 
 **Work lands on:** `main` (no feature branches — see CLAUDE.md)
-**Status:** Design / staging. The first increment (alloc MVP) is ready to build;
-the rest is a sequenced vision, not committed scope.
+**Status (2026-07-17): steps 1–3 SHIPPED; 4a in progress; 4 is the north star.**
+This plan is **live** — `user/std/src/lib.rs` names it as the tracker for what's
+left of std, so it should not be retired while that pointer stands.
 
-The `snitchos-user` runtime is currently `no_std` with **no allocator**:
-programs use only fixed/static data (e.g. `span-flood` needs a static literal
-name table because it can't `format!`). This plan stages the runtime toward
-richer programs and, eventually, a `std`-compatible userspace — **without ever
-betraying the capability model.**
+- **1 · alloc MVP** ✅ — the runtime has a heap (`talc`); `format!` works.
+- **2 · `fn main()`** ✅ — the `#[entry]` macro, now used by every program
+  (and grown a `needs = […]` manifest arg the original sketch didn't have).
+- **3 · growable heap** ✅ — shipped mmap-shaped as `MapAnon`, not `sbrk`.
+- **4a · `snitchos-std` facade** — in progress; see the revised section below.
+- **4 · real `std`** — unchanged: a custom `riscv64-snitchos` target + nightly
+  `build-std` + a `sys` port. Deliberately *not* committed scope.
+
+**What's actually left of 4a** (from `user/std/src/lib.rs`'s own list) — each is
+blocked on a *mechanism*, not on effort:
+
+| absent | needs |
+|---|---|
+| `thread::spawn` / `sync::Mutex` | multi-threaded processes (one thread per process today), a thread-create syscall, a futex |
+| `thread::sleep` | a **block-until-deadline** syscall — see below |
+| `collections::HashMap`/`HashSet` | `hashbrown` + a `RandomState` seed (an entropy syscall), or a fixed hasher |
+| `fs` / `net` / `env` | capability-rooted designs (a granted dir cap / socket-as-endpoint / startup-info), never ambient |
+
+**`thread::sleep`'s blocker is being built right now.** The "block-until-deadline
+syscall" it waits on is exactly the timer-driven timeout queue in
+[timed-waitany-hung-detection.md](timed-waitany-hung-detection.md) (v2b). If that
+lands, `sleep` becomes reachable — worth revisiting then rather than rediscovering
+the link later.
+
+**`env`'s blocker moved.** This plan and the facade both say `env` needs "a
+startup-info (`BootInfo`) mechanism". Manifest v2 shipped **without** a BootInfo
+page — delivery is *manifest-as-index* (`bootstrap().get::<T>("role")` against
+`__SNITCH_SLOTS`). That mechanism delivers **caps by role**, not string args/vars,
+so `env` is not simply unblocked — but the shape it was waiting for was decided,
+and differently. Re-scope before building.
+
+The original framing, kept because the *goal* still holds: this plan stages the
+runtime toward richer programs and, eventually, a `std`-compatible userspace —
+**without ever betraying the capability model.**
 
 ## Staging
 
@@ -151,6 +181,25 @@ not full ambient POSIX std.
 
 ### 4a. `snitchos-std` facade ✅ STARTED — the stepping stone
 
+> **Design reversal (recorded 2026-07-17): the `todo!` map below is gone, on
+> purpose.** This section says the crate stubs unbuilt items with
+> `todo!("…why…")` so that "reading the crate is the *what's left of std* map".
+> The crate now does the **opposite**, and says so at the top of `lib.rs`: *"The
+> surface only contains what actually works… nothing type-checks and then panics
+> at runtime."* Unbuilt items are **absent from the callable surface** and
+> documented in prose under *Not yet provided*. There are zero `todo!`s left in
+> `user/std/`.
+>
+> The reasoning is better than the plan's: a `todo!` stub type-checks, so a caller
+> only discovers the gap when it panics at runtime — on the metal, in a program
+> that already shipped. Absence fails at compile time instead. The cost is that
+> the crate no longer self-documents the gap *at the call site*, which is why the
+> table in the status header above now carries that map.
+>
+> Also since written: **`time::Instant` was filled** (via the `ClockNow` syscall) —
+> it is listed as a `todo!` below and is now real (`now`/`elapsed`/
+> `duration_since`/`saturating_duration_since`).
+
 Real std needs a custom *target* + nightly `build-std` + a `sys` port (and only
 *that* drops `#![no_std]` / runs external `std` crates). As a stable stepping
 stone, **`snitchos-std`** (`user/std`) is a std-*shaped* facade over `core` +
@@ -174,9 +223,11 @@ chunk to the kernel's copy limit. `hello` prints "hello from userspace";
 `userspace-prints` asserts the `Log` frame, 10/10. `DebugWrite` is ungated
 (printing isn't an authority, like `Yield`).
 
-Next stubs, one `todo!` at a time: `time::Instant` (read-clock syscall),
+~~Next stubs, one `todo!` at a time: `time::Instant` (read-clock syscall),
 `collections::HashMap` (hashbrown + a seed), `sync::Mutex` / `thread::spawn`
-(threads), and the capability-rooted `fs`/`net`/`env`.
+(threads), and the capability-rooted `fs`/`net`/`env`.~~
+**Superseded** — `time::Instant` is done; the rest are *absent, not stubbed* (see
+the reversal note above). The live list is the table in the status header.
 
 ### The split
 

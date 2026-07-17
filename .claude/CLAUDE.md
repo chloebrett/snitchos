@@ -201,7 +201,7 @@ cargo xtask boot --workload smp   # boot a runtime-selected workload (implies it
 cargo xtask collect           # build + run collector (OTLP + Prometheus)
 cargo xtask reader            # collector in text-only mode (no docker stack)
 cargo xtask stack {up,down,logs}  # docker-compose the Tempo/Prometheus/Grafana stack
-cargo xtask itest [scenario]  # kernel integration tests in QEMU (host unit tests are `cargo xtask test`)
+cargo xtask itest [scenario]  # kernel integration tests in QEMU (integration only; gate = `cargo xtask test && cargo xtask itest`)
 cargo xtask build             # just build the kernel ELF
 cargo xtask clippy [-- args]  # clippy the WHOLE workspace correctly (see note below)
 cargo xtask diagram <target>  # generate a diagram (deps|itest-matrix|caps|trace|switches) into docs/generated/; --check gates the static ones
@@ -231,7 +231,15 @@ Those sites carry a justified `#[allow(clippy::deref_addrof, reason = ...)]`.
 | Unit (kernel-core) | `cargo test -p kernel-core` | Intern table, span registry, pre-init buffer, scause decoding, frame sink capture |
 | Unit (protocol)    | `cargo test -p protocol --features std` | Frame roundtrips + stream decoder |
 | Unit (collector)   | `cargo test -p collector` | Span state machine, prom/otlp encoding |
-| Integration        | `cargo xtask test` | Boots the kernel in QEMU, asserts on the decoded wire frame sequence |
+| All host checks    | `cargo xtask test` | Every unit crate above + the loom model-checks (`--cfg loom`) + the generated-diagram drift check |
+| Integration        | `cargo xtask itest` | Boots the kernel in QEMU, asserts on the decoded wire frame sequence |
+
+**The gate composes explicitly: `cargo xtask test && cargo xtask itest`.** `itest`
+runs integration *only* — it does not run the host checks first (that coupling,
+and the `--skip-unit-tests` flag that existed to undo it, were removed). Note that
+`cargo xtask test` carries more than its name suggests: the loom model-checks need
+a separate `--cfg loom` compilation, and the generated diagrams in `docs/generated/`
+are contract artifacts whose drift fails here.
 
 The kernel binary itself has no `#[test]`s — it's `no_std`/`no_main` and won't build for the host target. All testable logic lives in `kernel-core`; everything that touches asm / CSRs / MMIO stays in `kernel/` and is covered (transitively) by the QEMU integration tests.
 

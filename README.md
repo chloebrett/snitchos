@@ -151,8 +151,9 @@ cargo xtask reader             # collector in text-only mode (no docker needed)
 cargo xtask stack up           # docker-compose up the stack
 cargo xtask stack down         # docker-compose down
 cargo xtask stack logs         # tail container logs
-cargo xtask test               # run all host-side unit tests (kernel-core, protocol, collector)
-cargo xtask itest              # run kernel integration tests in QEMU (unit tests run first; --skip-unit-tests to bypass)
+cargo xtask test               # all host-side checks: unit tests + loom model-checks + diagram drift
+cargo xtask itest              # run kernel integration tests in QEMU (integration only)
+cargo xtask test && cargo xtask itest   # the gate: host checks, then integration
 cargo xtask itest <scenario>   # run one scenario by name
 cargo xtask itest --tag userspace  # run all scenarios carrying a tag
 cargo xtask itest --shared     # group scenarios by workload; one kernel boot per group (faster)
@@ -180,15 +181,17 @@ cargo xtask --help
 
 Two layers, two commands.
 
-**`cargo xtask test`** runs all host-side unit tests in ~1 second:
+**`cargo xtask test`** runs every host-side check in ~1 second:
 
 - `kernel-core` — intern table, span registry, pre-init buffer, scause decoding, MMU walk logic, frame bitmap, heap watermark policy, scheduler runqueue, workload pure logic (LCG / bin_of / bin_sample).
 - `protocol --features std` — wire-format roundtrip tests + OwnedFrame conversion.
 - `collector` — span state machine, OTLP/Prometheus encoding, histogram bucketing.
+- the **loom model-check** tests — a separate `--cfg loom` compilation, so a plain `cargo test` compiles them to nothing.
+- the **generated-diagram drift check** — `docs/generated/` are contract artifacts; a stale one fails here.
 
-**`cargo xtask itest`** runs kernel integration scenarios in QEMU.
-By default, unit tests run first; integration only proceeds if they
-pass (skip with `--skip-unit-tests`). Each scenario spawns its own
+**`cargo xtask itest`** runs kernel integration scenarios in QEMU —
+**integration only**. It does not run the host-side checks first; compose
+the gate explicitly with `cargo xtask test && cargo xtask itest`. Each scenario spawns its own
 QEMU and asserts on the decoded wire stream. Requires
 `qemu-system-riscv64` on `PATH` (skips cleanly if missing). Stale
 QEMU processes from prior `cargo xtask boot` or debug sessions are
@@ -218,7 +221,6 @@ Useful flags:
 - `--tag <tag>` — run every scenario carrying `<tag>` (union). Repeatable / comma-separated: `--tag frame --tag heap` or `--tag frame,heap` runs scenarios tagged either — same comma-means-also convention as the positional scenario list. An unknown tag errors with the known set; can't be combined with a named scenario. Tags are set per-row in the `catalog!` table in `xtask/src/itest.rs` (`boot`, `frame`, `heap`, `oom`, `sched`, `smp`, `ipi`, `workload`, `stress`, `userspace`).
 - `--shared` — shared-boot mode: group scenarios by their `workload` and run each group against a _single_ kernel boot instead of one boot per scenario (the ~19 default-demo and the userspace scenarios each boot QEMU once). Each scenario reads the same recorded frame stream through its own cursor. Off by default — the flake gate (`--repeat 10`) and baselines want the per-scenario isolation of separate boots. Composes with `--tag`/`--skip`. Cuts total QEMU boots (CPU time ~40% on a full run); see [plans/legacy/itest-shared-boot-mode.md](plans/legacy/itest-shared-boot-mode.md).
 - `--keep-existing-qemus` — don't `pkill` stale QEMUs at start (rare; useful if you want a concurrent debug QEMU).
-- `--skip-unit-tests` — bypass the unit-test prerequisite.
 
 On each test line, the runner prints `(max wait Xs of Ys budget)` so
 over-sized budgets are visible at a glance. On failure, the last 80

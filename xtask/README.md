@@ -14,8 +14,8 @@ the [`itest-harness`](../itest-harness/README.md) library.
 | `cargo xtask collect [-- args]` | Build + run the host-side collector (OTLP + Loki + Prometheus) |
 | `cargo xtask reader` | Collector in text-only mode (no docker stack needed) |
 | `cargo xtask stack {up,down,logs}` | docker-compose the Tempo + Prometheus + Loki + Grafana stack |
-| `cargo xtask test` | Run host unit tests across the workspace |
-| `cargo xtask itest [...]` | Kernel integration tests in QEMU. See below. |
+| `cargo xtask test` | All host-side checks: unit tests + loom model-checks + generated-diagram drift |
+| `cargo xtask itest [...]` | Kernel integration tests in QEMU (integration only). See below. |
 | `cargo xtask baseline <verb>` | Inspect/manage the flake baseline + run history: `show`, `promote`, `discard`, `recover`, `adopt`, `prune`, `export`, `push`. See below. |
 | `cargo xtask clippy [-- args]` | Lint the WHOLE workspace correctly (kernel for riscv, host for host) |
 | `cargo xtask mutants [-- args]` | Mutation testing with the right config + feature flags |
@@ -37,7 +37,6 @@ cargo xtask itest                                # every scenario, once
 cargo xtask itest <name>                         # single scenario
 cargo xtask itest --repeat 100                   # flake-hunt
 cargo xtask itest --repeat 1000 --fail-fast 3    # bail after 3 failures
-cargo xtask itest --skip-unit-tests              # skip cargo test -p kernel-core
 cargo xtask itest --force                        # ignore the .itest.lock mutex
 cargo xtask itest --capture full                 # full frame transcript per failure
 ```

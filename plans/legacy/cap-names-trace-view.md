@@ -1,7 +1,46 @@
 # Plan: Cap names in the trace view
 
 **Branch**: main (project rule: all work lands on `main`; user handles commits)
-**Status**: Active
+**Status**: **COMPLETE (verified 2026-07-17)** — all five steps shipped and every
+acceptance criterion below has a test. Retired to `legacy/`.
+
+The gap this plan opened against is closed: `collector/src/state.rs` no longer
+handles `Frame::CapEvent` with a bare `advance_anchor` — it feeds a `CapTracker`
+(`collector/src/caps.rs`, 13 tests) and exposes `drain_cap_spans` / `flush_caps`.
+
+| step | landed as |
+|---|---|
+| 1 · `build_proto_span` seam | `collector/src/otlp.rs:144` (+ `build_proto_span_maps_fields_onto_proto`, `…uses_empty_bytes_for_root_span`) |
+| 2 · trace discriminator + extras + events | `TraceKind`, `extra_attributes`, `SpanEvent` in `otlp.rs`/`state.rs` |
+| 3 · pure `CapTracker` | `collector/src/caps.rs` — its doc comment cites this plan's Step 4 by name |
+| 4 · wire into `State` | `state.rs:386` feeds `cap_tracker`; `drain_cap_spans:455`, `flush_caps:461` |
+| 5 · end-to-end proof | `state.rs:937 cap_derivation_tree_full_flow` — drives the realistic `grant fs` → `mint SEND` → `revoke` stream and asserts the tree. **Built at `State` level via `drain_cap_spans`, not via the fake `SpanExporter` this plan specified** — the seam returns `CompletedSpan`s directly, so the extra double was unnecessary. Same guarantee, less scaffolding. |
+
+**Every acceptance criterion has a named test** (`caps.rs` unless noted):
+`grant_revoke_produces_duration_span` · `open_cap_emitted_at_flush` ·
+`transitive_revoke_closes_each_cap_on_its_own_revoked_event` ·
+`root_cap_has_no_parent_span` + `derived_cap_carries_parent_span_id` ·
+`reply_cap_is_dropped` · `span_carries_granted_and_revoked_events` ·
+`build_proto_span_selects_cap_trace_id_for_cap_span` +
+`…uses_session_trace_id_for_session_span` (otlp.rs, the session-unchanged guard).
+
+**Three things landed beyond the plan:** `unnamed_cap_uses_object_kind_as_label`,
+`badge_attribute_present_only_when_nonzero`, and — the notable one — support for a
+**fourth event kind this plan predates**. `CapEventKind::Minted` was appended to the
+wire afterwards (self-service provenance: `EndpointCreate`/`NotifyCreate`, always a
+derivation-tree root). The span model here says *`Granted`/`Transferred` starts a
+holding, `Revoked` ends it*; reality has a third starter, handled by
+`minted_event_opens_holding_named_minted`.
+
+**Follow-up status:**
+- **The live metric/log channel — still not built.** No `caps_held{object,holder}`
+  gauge exists in `collector/src/prom.rs`. A Loki exporter *does* now exist
+  (`collector/src/loki.rs`), but it is generic — it turns **every** `CompletedSpan`
+  into a log line, so cap spans reach Loki only as structure-on-close, which is not
+  the grant-increments/revoke-decrements live signal this section asked for.
+- **`view a-file` — SHIPPED.** Listed here as "unblocked by this but separate"; it
+  is now the shell's `view <path>` verb + the `viewer` program
+  ([legacy/spawn-shell-and-console.md](spawn-shell-and-console.md)).
 
 ## Goal
 
@@ -51,22 +90,22 @@ closes that gap.
 
 ## Acceptance Criteria
 
-- [ ] A `grant → revoke` frame sequence yields a cap span with start = grant `t`,
+- [x] A `grant → revoke` frame sequence yields a cap span with start = grant `t`,
       end = revoke `t`, `cap.revoked = true`, name = the object name.
-- [ ] A granted-but-never-revoked cap yields, at flush, a cap span ending at the
+- [x] A granted-but-never-revoked cap yields, at flush, a cap span ending at the
       last-seen timestamp with `cap.revoked = false`.
-- [ ] A transitive revoke closes every span in the subtree at the same `t`,
+- [x] A transitive revoke closes every span in the subtree at the same `t`,
       because the kernel emits one `Revoked` per swept cap (`CapEventKind::Revoked`
       doc: "A transitive revoke emits one `Revoked` per swept descendant") — the
       collector closes each cap on its own `Revoked` event; no software-side tree
       walk is needed.
-- [ ] `parent_cap_id` linkage is preserved: a derived cap's span parents onto its
+- [x] `parent_cap_id` linkage is preserved: a derived cap's span parents onto its
       source cap's span; a root grant (`parent_cap_id == 0`) has no parent.
-- [ ] Reply caps (`CapObject::Reply`) produce no cap span.
-- [ ] Each cap span carries OTLP `events` for its `granted`/`transferred`/`revoked`
+- [x] Reply caps (`CapObject::Reply`) produce no cap span.
+- [x] Each cap span carries OTLP `events` for its `granted`/`transferred`/`revoked`
       moments, each timestamped and tagged with the `holder` at that moment.
-- [ ] Cap spans carry the `capabilities` trace_id, distinct from the session trace.
-- [ ] Existing session-span export is unchanged (all current collector tests green).
+- [x] Cap spans carry the `capabilities` trace_id, distinct from the session trace.
+- [x] Existing session-span export is unchanged (all current collector tests green).
 
 ## Steps
 
