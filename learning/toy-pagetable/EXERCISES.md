@@ -11,7 +11,7 @@ cargo test -p toy-pagetable translate    # just exercise 2
 cargo test -p toy-pagetable map_         # just exercise 3
 ```
 
-Maps to **`kernel-core/src/mmu.rs`** — same bit layouts, same walk; only the
+Maps to **`kernel-mem/src/mmu.rs`** — same bit layouts, same walk; only the
 backing store differs (a `Vec` of tables instead of real frames).
 
 ---
@@ -22,7 +22,7 @@ backing store differs (a `Vec` of tables instead of real frames).
 9 bits because each table has 512 = 2⁹ entries; 12 bits because a page is
 4 KiB = 2¹². 3 × 9 + 12 = 39 → "Sv39".
 
-**Maps to:** `split_va` in `kernel-core/src/mmu.rs` (identical).
+**Maps to:** `split_va` in `kernel-mem/src/mmu.rs` (identical).
 
 **Done when:** the three `split_va_*` tests pass.
 
@@ -51,7 +51,7 @@ a **page fault** → `None`.
 
 **Why it matters here:** the 1 GiB leaf (level 2) is exactly how the kernel's
 linear map covers all of RAM with a single root PTE — `LINEAR_OFFSET` in
-`kernel-core/src/mmu.rs`. Implementing this is the "aha" for that design.
+`kernel-mem/src/mmu.rs`. Implementing this is the "aha" for that design.
 
 **Done when:** all five `translate_*` tests pass (4 KiB, 2 MiB, 1 GiB, and two
 fault cases).
@@ -72,7 +72,7 @@ Walk vpn2 then vpn1, and at each upper level:
 At level 0: if the slot is already valid → `Err(AlreadyMapped)`; else write
 `leaf_pte(pa, perms)`.
 
-**Maps to:** `map` + `walk_or_install` in `kernel-core/src/mmu.rs`. Note the
+**Maps to:** `map` + `walk_or_install` in `kernel-mem/src/mmu.rs`. Note the
 real one (and this) does **not** unwind partially-installed tables on
 `OutOfFrames` — a documented simplification.
 

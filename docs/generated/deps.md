@@ -34,7 +34,11 @@ graph LR
     end
     subgraph kernel
         kernel["kernel"]
-        kernel_core["kernel-core"]
+        kernel_boot["kernel-boot"]
+        kernel_devices["kernel-devices"]
+        kernel_mem["kernel-mem"]
+        kernel_obs["kernel-obs"]
+        kernel_proc["kernel-proc"]
     end
     supervision["supervision"]
     collector --> protocol
@@ -60,11 +64,17 @@ graph LR
     hitch --> snitchos_abi
     hitch_pod --> hitch_derive
     kernel --> hitch_pod
-    kernel --> kernel_core
+    kernel --> kernel_boot
+    kernel --> kernel_devices
+    kernel --> kernel_mem
+    kernel --> kernel_obs
+    kernel --> kernel_proc
     kernel --> protocol
     kernel --> snitchos_abi
-    kernel_core --> protocol
-    kernel_core --> snitchos_abi
+    kernel_obs --> protocol
+    kernel_proc --> kernel_mem
+    kernel_proc --> protocol
+    kernel_proc --> snitchos_abi
     protocol --> snitchos_abi
     ramfs --> fs_core
     snemu --> protocol

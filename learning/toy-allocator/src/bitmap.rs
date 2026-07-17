@@ -1,5 +1,5 @@
 //! A one-bit-per-frame allocator — the fixed-size cousin of the
-//! free-list. This is a faithful miniature of `kernel-core/src/frame.rs`.
+//! free-list. This is a faithful miniature of `kernel-mem/src/frame.rs`.
 //!
 //! Convention (same as the real one): **bit = 1 means FREE**, bit = 0
 //! means in-use. That choice is deliberate — "find a free frame"
@@ -83,7 +83,7 @@ impl FrameBitmap {
     //   * guard against a "free" bit that lies past `capacity` (the
     //     last word can have padding bits) — return None in that case.
     //
-    // This is line-for-line `Bitmap::alloc` in kernel-core/src/frame.rs.
+    // This is line-for-line `Bitmap::alloc` in kernel-mem/src/frame.rs.
     // -------------------------------------------------------------------
     pub fn alloc(&mut self) -> Option<usize> {
         if self.free == 0 {

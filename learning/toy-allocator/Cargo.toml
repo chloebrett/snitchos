@@ -5,7 +5,7 @@ edition = "2021"
 
 # A standalone allocator playground. `std` is fine here — this is a
 # learning aid, not kernel code. The *algorithms* are identical to the
-# real ones in kernel-core; only the storage is a plain Vec instead of
+# real ones in kernel-mem; only the storage is a plain Vec instead of
 # a static byte region.
 
 [dependencies]

@@ -4,7 +4,7 @@
 primitive contract for the v0.13 shell. Sits *between* the two existing docs:
 [shell-surface-and-tui-design.md](shell-surface-and-tui-design.md) is the
 *identity* (powerbox "grant, then watch"; `hold`/`view`/`watch`; the ANSI TUI),
-and [plans/spawn-shell-and-console.md](../plans/spawn-shell-and-console.md) is the
+and [plans/legacy/spawn-shell-and-console.md](../plans/legacy/spawn-shell-and-console.md) is the
 *mechanism* (`Spawn`/`Exit`/`Wait`/console — all shipped). This doc answers the
 question those two leave open: **what, exactly, are the primitives the first shell
 is built from, and how does each one bottom out in a shipped syscall?**

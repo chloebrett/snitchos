@@ -8,7 +8,7 @@
 //!
 //! - [`bitmap`] — a one-bit-per-frame allocator. This is the model
 //!   behind the *physical frame allocator*
-//!   (`kernel-core/src/frame.rs`). Fixed-size allocations; no
+//!   (`kernel-mem/src/frame.rs`). Fixed-size allocations; no
 //!   fragmentation, but no variable sizes either.
 //!
 //! - [`buddy`] — a power-of-two buddy allocator. Not used by SnitchOS

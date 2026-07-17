@@ -78,7 +78,7 @@ impl Arena {
     //
     // Real-world twin: `Heap::allocate_first_fit` in
     // vendor/linked_list_allocator, and `Bitmap::alloc` in
-    // kernel-core/src/frame.rs (which is the fixed-size cousin).
+    // kernel-mem/src/frame.rs (which is the fixed-size cousin).
     // -------------------------------------------------------------------
     pub fn alloc(&mut self, size: usize) -> Option<usize> {
         if size == 0 {

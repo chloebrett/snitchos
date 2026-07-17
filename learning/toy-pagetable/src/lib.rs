@@ -23,9 +23,9 @@
 //! - leaf at level 2 → 1 GiB page   (offset = low 30 bits) ← "gigapage"
 //!
 //! The 1 GiB leaf is how the kernel's linear map covers all of RAM with
-//! a single root PTE (see `LINEAR_OFFSET` in kernel-core/src/mmu.rs).
+//! a single root PTE (see `LINEAR_OFFSET` in kernel-mem/src/mmu.rs).
 //!
-//! Everything here mirrors `kernel-core/src/mmu.rs`. The three `todo!()`
+//! Everything here mirrors `kernel-mem/src/mmu.rs`. The three `todo!()`
 //! exercises are: [`split_va`], [`translate`], and [`Mem::map_4kib`].
 //! See `EXERCISES.md`.
 
@@ -62,7 +62,7 @@ impl Perms {
     }
 }
 
-// --- PTE encode / decode (provided — these mirror kernel-core exactly) ---
+// --- PTE encode / decode (provided — these mirror kernel-mem exactly) ---
 
 /// The PPN (physical page number) field lives at PTE bits 53:10, while a
 /// PA's page number is at bits 55:12. So encoding is `pa >> 12 << 10`,
@@ -166,7 +166,7 @@ impl Mem {
     // ===================================================================
     // EXERCISE 3 — install a 4 KiB leaf (the WRITE walk).
     //
-    // Mirror kernel-core's `map` + `walk_or_install`. Walk from the root
+    // Mirror kernel-mem's `map` + `walk_or_install`. Walk from the root
     // using vpn2, then vpn1, allocating an intermediate table whenever a
     // slot is empty (write a `branch_pte` to it). At level 0, write the
     // `leaf_pte(pa, perms)` for vpn0.
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn split_va_extracts_indices() {
         // 0x80200000 → vpn2=2, vpn1=1, vpn0=0, offset=0 (mirrors the
-        // real kernel-core test).
+        // real kernel-mem test).
         assert_eq!(split_va(0x80200000), (2, 1, 0, 0));
     }
 

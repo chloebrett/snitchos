@@ -4,7 +4,7 @@
 Records a design discussion about *what the shell should be* — its surface
 language and its terminal UX — as distinct from the *mechanism* of spawning with
 delegated capabilities, which lives in
-[plans/spawn-shell-and-console.md](../plans/spawn-shell-and-console.md). Read that
+[plans/legacy/spawn-shell-and-console.md](../plans/legacy/spawn-shell-and-console.md). Read that
 for `Spawn`/cap-delegation; read this for "what does the terminal look and feel
 like, and what's the grammar."
 
@@ -229,7 +229,7 @@ native syscall wrappers is now buildable — the remaining work is the natives
   exact prompt + verb vocabulary; how far up the TUI spectrum to commit; the
   telemetry-tap mechanism (for system-wide observation).
 - **Dependencies:** an `init` to spawn the shell with its session caps
-  (plans/spawn-shell-and-console.md); the in-progress **notification** primitive
+  (plans/legacy/spawn-shell-and-console.md); the in-progress **notification** primitive
   (gateway to interrupt-driven input — which would also make the polled-RX latency
   work moot); the cap-delegation `CapEvent` trace (so grants are visible — "mostly
   free", item 21 in the spawn plan).

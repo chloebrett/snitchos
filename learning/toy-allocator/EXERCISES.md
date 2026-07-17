@@ -65,9 +65,9 @@ which is a single `trailing_zeros` per 64-bit word. No fragmentation possible
 `free` counter so the empty-pool check is O(1). The real kernel learned this
 the hard way — popcount-scanning every word on each failed alloc stalled
 heartbeats during the OOM stress test. See the note in
-`kernel-core/src/frame.rs` and CLAUDE.md’s frame-allocator gotcha.
+`kernel-mem/src/frame.rs` and CLAUDE.md’s frame-allocator gotcha.
 
-**Maps to:** `Bitmap::alloc` in `kernel-core/src/frame.rs` — your version
+**Maps to:** `Bitmap::alloc` in `kernel-mem/src/frame.rs` — your version
 should end up nearly identical.
 
 **Done when:** all `bitmap::tests` pass.
