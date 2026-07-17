@@ -255,7 +255,7 @@ fn watch_bin_dependency_closure(ws: &Path) {
 }
 
 /// Seed the closure walk with the packages that *own* an embedded bin, and fill
-/// `manifest_of` for every package (the id -> manifest_path map the walk needs).
+/// `manifest_of` for every package (the id -> `manifest_path` map the walk needs).
 ///
 /// A package is a seed iff it has a `bin` target whose name is in
 /// [`USER_PROGRAMS`] — so the seed set is **derived from that single source of

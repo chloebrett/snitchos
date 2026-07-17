@@ -88,7 +88,7 @@ impl FrameSink for KernelSink {
 /// emitting.
 ///
 /// Known weakness: holds the table lock during the wire emit. Locking
-/// order is intern → virtio_console::CONSOLE. As long as nothing else
+/// order is intern → `virtio_console::CONSOLE`. As long as nothing else
 /// takes them in the opposite order we're fine; v0.1 has no other lockers.
 pub fn register_or_lookup(name: &'static str) -> StringId {
     INTERN_TABLE.lock().register_or_lookup(name, &mut KernelSink)
@@ -227,7 +227,7 @@ pub fn register_counter(name: &'static str) -> StringId {
 /// Like `register_counter` but takes an owned `String` — the kernel
 /// leaks it into `'static`. Use only for runtime-built names whose
 /// total count is bounded (e.g. per-task metric names registered
-/// once per task at spawn time). Every call commits ~bytes_of(name)
+/// once per task at spawn time). Every call commits ~`bytes_of(name)`
 /// to the heap forever.
 pub fn register_counter_owned(name: alloc::string::String) -> StringId {
     let leaked: &'static str = alloc::boxed::Box::leak(name.into_boxed_str());
@@ -570,7 +570,7 @@ pub fn set_current_parent(parent: protocol::SpanId) {
 /// happens to be running at Drop time.
 ///
 /// Known weakness: `mem::forget(span)` skips Drop, leaking the span
-/// (no SpanEnd on the wire) and leaving the cursor pointing at this
+/// (no `SpanEnd` on the wire) and leaving the cursor pointing at this
 /// span forever. The `span!` macro avoids handing the user a name-bound
 /// guard they could forget.
 pub struct Span {

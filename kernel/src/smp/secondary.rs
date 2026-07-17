@@ -1,6 +1,6 @@
 //! Secondary-hart bring-up: the Rust side of `_secondary_start`.
 //!
-//! Boot-hart side (in kmain): stash SATP + KERNEL_OFFSET into the
+//! Boot-hart side (in kmain): stash SATP + `KERNEL_OFFSET` into the
 //! statics that the secondary's asm reads, then call
 //! `sbi::hart_start(1, va_to_pa(_secondary_start), 1)`. After the
 //! call returns, hart 0 spin-waits on `SECONDARY_READY` so it
@@ -52,7 +52,7 @@ static mut SECONDARY_STACK_TOP: u64 = 0;
 #[used]
 static mut SECONDARY_SATP: u64 = 0;
 
-/// KERNEL_OFFSET as a static so the asm can load it (the value
+/// `KERNEL_OFFSET` as a static so the asm can load it (the value
 /// doesn't fit in an immediate). Initialised at boot.
 #[unsafe(no_mangle)]
 #[used]
@@ -99,7 +99,7 @@ pub extern "C" fn probe_entry() -> ! {
 ///
 /// Single-call from hart 0 boot path. Writes to `static mut`s; the
 /// data hazard is "secondary hart starts reading before we finish
-/// writing." SBI hart_start has a Release-style barrier in OpenSBI
+/// writing." SBI `hart_start` has a Release-style barrier in `OpenSBI`
 /// (it touches CLINT MSIP, which is an MMIO write — fully ordered
 /// w.r.t. prior loads/stores on the issuing hart). So as long as
 /// `prepare_for_secondary` runs before `sbi::hart_start`, hart 1's
@@ -137,11 +137,11 @@ pub unsafe fn prepare_for_secondary() {
 }
 
 /// Entry point from `_secondary_start` after SATP + trampoline.
-/// PC + sp are at higher-half VAs. `tp` is still whatever OpenSBI
+/// PC + sp are at higher-half VAs. `tp` is still whatever `OpenSBI`
 /// left it as — `percpu::init` is the first thing we do.
 ///
 /// `a0 = mhartid` (SBI handoff), `a1 = opaque` (logical hartid we
-/// passed to sbi_hart_start).
+/// passed to `sbi_hart_start`).
 #[unsafe(no_mangle)]
 pub extern "C" fn secondary_main(_mhartid: usize, hartid: usize) -> ! {
     // Set tp = &PER_HART_DATA[hartid]. From here on

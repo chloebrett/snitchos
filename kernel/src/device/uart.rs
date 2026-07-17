@@ -15,7 +15,7 @@ use core::fmt::Write;
 ///   meaningful to log we'll want interrupt-driven TX.
 /// - **No initialization step.** Real drivers configure baud rate (DLL/DLM
 ///   divisor latches), line control (LCR: bits, parity, stop), and the FIFO
-///   (FCR). We rely on whatever OpenSBI configured during M-mode init.
+///   (FCR). We rely on whatever `OpenSBI` configured during M-mode init.
 /// - **No receive path.** We only transmit. Input handling waits until we
 ///   build a debug shell.
 /// - **No error checking.** LSR error bits (overrun, parity, framing) are

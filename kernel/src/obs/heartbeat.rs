@@ -71,9 +71,9 @@ macro_rules! emit {
     };
 }
 
-/// mhartid OpenSBI handed kmain as `_hart_id`. Captured at the top of
+/// mhartid `OpenSBI` handed kmain as `_hart_id`. Captured at the top of
 /// the bring-up block; drained by the heartbeat as
-/// `snitchos.smp.boot_hart_id`. Useful because OpenSBI's choice of
+/// `snitchos.smp.boot_hart_id`. Useful because `OpenSBI`'s choice of
 /// boot hart is not always 0 under `-smp 2`. `Relaxed`: single writer
 /// (boot path), read by heartbeat on the same hart.
 pub static BOOT_MHARTID: AtomicU64 = AtomicU64::new(0);
@@ -192,11 +192,11 @@ pub fn run(metrics: Metrics) -> ! {
 /// ~4-heartbeat drain under sustained pressure — not a one-shot OOM (the trivial
 /// case). The rate is pool-relative (`total / 4`) rather than a fixed count so the
 /// gradual ~4-heartbeat shape holds **at any RAM size** — the point being that
-/// SnitchOS's OOM path works regardless of physical RAM, so `frame-oom` boots on a
+/// `SnitchOS`'s OOM path works regardless of physical RAM, so `frame-oom` boots on a
 /// deliberately small machine (snemu 48 MiB; see `xtask` `ram_mb_for`) while QEMU
 /// and the default run 128 MiB, and `total/4` is exactly the old `8192/tick` at
 /// 128 MiB. Drives the `frame-allocator-oom` scenario; `frame-oom` also runs on
-/// the light spawn layout (no demo task_a/task_b burning between ticks; see
+/// the light spawn layout (no demo `task_a/task_b` burning between ticks; see
 /// `kmain`).
 fn frame_smoke() {
     use kernel_boot::bootargs::WorkloadKind;

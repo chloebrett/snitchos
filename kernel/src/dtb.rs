@@ -1,5 +1,5 @@
 //! Device Tree Blob helpers — pull load-bearing values out of the DTB that
-//! OpenSBI hands us at boot.
+//! `OpenSBI` hands us at boot.
 
 use fdt::Fdt;
 

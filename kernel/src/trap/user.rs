@@ -369,41 +369,41 @@ pub static SPAWNER: ProgramSpec = ProgramSpec { elf: SPAWNER_ELF, launch: Launch
 pub static SUPERVISOR: ProgramSpec = ProgramSpec { elf: SUPERVISOR_ELF, launch: Launch::Plain };
 
 /// `workload=supervised`: the generic supervisor root — data-driven service
-/// table + policy-driven restarts. Holds only its bootstrap caps (Launch::Plain);
+/// table + policy-driven restarts. Holds only its bootstrap caps (`Launch::Plain`);
 /// it spawns its services (spinner/spawnee) from the `SPAWNABLE` registry.
 pub static SUPERVISED: ProgramSpec = ProgramSpec { elf: SUPERVISED_ELF, launch: Launch::Plain };
 
 /// `workload=supervised-ipc`: the cap-survival supervisor — owns its endpoint and
-/// grants from it (Launch::Plain; it `EndpointCreate`s + `Spawn`s its own services).
+/// grants from it (`Launch::Plain`; it `EndpointCreate`s + `Spawn`s its own services).
 pub static SUPERVISED_IPC: ProgramSpec = ProgramSpec { elf: SUPERVISED_IPC_ELF, launch: Launch::Plain };
 
 /// `workload=supervised-shutdown`: the graceful reverse-dep shutdown supervisor (v2a
 /// step 4) — spawns its service tree + shutdown notifications, then tears it down
-/// (Launch::Plain; it `Spawn`s/`NotifyCreate`s its own services).
+/// (`Launch::Plain`; it `Spawn`s/`NotifyCreate`s its own services).
 pub static SUPERVISED_SHUTDOWN: ProgramSpec = ProgramSpec { elf: SUPERVISED_SHUTDOWN_ELF, launch: Launch::Plain };
 
 /// `workload=kill-no-cap`: the negative — a lone process that tries to `Kill` without
-/// holding a `Process` cap and is refused (Launch::Plain; holds only bootstrap caps).
+/// holding a `Process` cap and is refused (`Launch::Plain`; holds only bootstrap caps).
 pub static KILL_NO_CAP: ProgramSpec = ProgramSpec { elf: KILL_NO_CAP_ELF, launch: Launch::Plain };
 
 /// `workload=user-on-hart0`: the multi-hart de-risk — a trivial program placed on hart
-/// 0 that opens a span (Launch::Plain; holds only bootstrap caps).
+/// 0 that opens a span (`Launch::Plain`; holds only bootstrap caps).
 pub static HART_PROBE: ProgramSpec = ProgramSpec { elf: HART_PROBE_ELF, launch: Launch::Plain };
 
 /// `workload=xhart-kill`: the cross-hart Kill supervisor — runs on hart 1, `SpawnOn`s
-/// its victim to hart 0 and kills it (Launch::Plain; spawns its own child at runtime).
+/// its victim to hart 0 and kills it (`Launch::Plain`; spawns its own child at runtime).
 pub static XHART_KILLER: ProgramSpec = ProgramSpec { elf: XHART_KILLER_ELF, launch: Launch::Plain };
 
 /// `workload=hung-detect`: the hung-detection supervisor — `wait_timeout`s a liveness
-/// notification and kills the wedged service (Launch::Plain; spawns its own child).
+/// notification and kills the wedged service (`Launch::Plain`; spawns its own child).
 pub static HUNG_SUPERVISOR: ProgramSpec = ProgramSpec { elf: HUNG_SUPERVISOR_ELF, launch: Launch::Plain };
 
 /// `workload=init`: the supervising root — spawns + `WaitAny`-reaps a child,
-/// delegating its span cap downward. Holds only its bootstrap caps (Launch::Plain).
+/// delegating its span cap downward. Holds only its bootstrap caps (`Launch::Plain`).
 pub static INIT: ProgramSpec = ProgramSpec { elf: INIT_ELF, launch: Launch::Plain };
 
 /// `workload=endpoint-create`: manufactures its own endpoint via `EndpointCreate`
-/// (ambient — no kernel-created endpoint, Launch::Plain) and proves it by minting.
+/// (ambient — no kernel-created endpoint, `Launch::Plain`) and proves it by minting.
 pub static EP_MAKER: ProgramSpec = ProgramSpec { elf: EP_MAKER_ELF, launch: Launch::Plain };
 
 /// `workload=spawn-reap`: the reclaim-test parent (ambient — `Spawn`/`Wait` need

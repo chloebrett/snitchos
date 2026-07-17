@@ -42,7 +42,7 @@ global_asm!(include_str!("entry.S"));
 
 /// Kernel entry point, called from `_start` (see entry.S).
 ///
-/// Inputs come from OpenSBI's S-mode handoff contract:
+/// Inputs come from `OpenSBI`'s S-mode handoff contract:
 /// - `_hart_id`: which hart we booted on (we only have one in v0.1).
 /// - `dtb_phys`: physical address of the device tree blob.
 ///

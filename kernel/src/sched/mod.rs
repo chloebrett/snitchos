@@ -784,7 +784,7 @@ pub static CURRENT_SPAN_CURSOR: PerCpu<AtomicPtr<SpanCursor>> =
 
 /// Install a freshly-built task into the table without a stack or
 /// context. v0.5 step 4 scope: lets the boot path register itself as
-/// task 0 so `current_task_id()` and SpanStart task_id round-trip
+/// task 0 so `current_task_id()` and `SpanStart` `task_id` round-trip
 /// correctly. Spawning real threads (with stacks + entry functions)
 /// lands in step 6.
 pub fn register_bare_task(name: &str, state: TaskState) -> TaskId {
@@ -1374,7 +1374,7 @@ pub fn note_exit(child: TaskId, status: i32) -> Option<TaskId> {
 /// authoritative, unforgeable signal that a kill occurred is the kernel-emitted
 /// `CapEvent::Revoked` for the spent lifecycle cap (see `handle_kill`); this status
 /// is just the human-facing convention the reaper surfaces. `-9` echoes SIGKILL,
-/// though SnitchOS has no signals (a shutdown is a `Notification`, not a signal).
+/// though `SnitchOS` has no signals (a shutdown is a `Notification`, not a signal).
 pub const KILLED_STATUS: i32 = -9;
 
 /// What [`kill_task`] did with a target — the syscall handler maps this to the

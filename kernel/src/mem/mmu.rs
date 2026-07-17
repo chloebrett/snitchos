@@ -320,7 +320,7 @@ impl PtMem for KernelPtMem {
 ///   no other hart can have a stale TLB entry for a VA that was
 ///   previously unmapped; they'd just take a fault and walk the new
 ///   PTE. Cross-hart `shootdown(va)` is the primitive for **remap**
-///   and **unmap** flows (not yet wired into mmu::map proper).
+///   and **unmap** flows (not yet wired into `mmu::map` proper).
 pub fn map(va: usize, pa: usize, perms: PtePerms) -> Result<(), MapError> {
     let root_pa = va_to_pa((&raw const BOOT_PT_ROOT) as usize);
     let result = map_in(root_pa, va, pa, perms);

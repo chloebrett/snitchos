@@ -35,3 +35,14 @@ hitch-pod = { path = "../hitch-pod" }
 linked_list_allocator = { version = "0.10", default-features = false }
 # Lock-free SPSC ring for the `workload=smp-spsc` variant (v0.6 step 12).
 heapless = "0.8"
+
+# The kernel takes the workspace pedantic lints like everything else. It was the
+# last holdout, exempted on a reason ("pedantic fights register/address idioms")
+# that measured false — the `cast_*` / `unreadable_literal` allows already absorb
+# that friction, and what remained was ordinary style.
+#
+# Caveat that outlives the opt-in: do NOT blanket `clippy --fix` this crate. The
+# `deref_addrof` autofix rewrites the required `&mut *(&raw mut STATIC)` idiom
+# into a forbidden direct `&mut STATIC`. Scope any fix to a named lint.
+[lints]
+workspace = true

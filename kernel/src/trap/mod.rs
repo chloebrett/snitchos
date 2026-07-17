@@ -87,7 +87,7 @@ pub static TICK_PENDING: PerCpu<AtomicBool> =
 /// after wake and emits a histogram observation. One cell per hart
 /// so each hart's heartbeat reports its own IRQ cost. (We can't
 /// emit telemetry from the IRQ itself — would deadlock on the
-/// intern / virtio_console mutexes.)
+/// intern / `virtio_console` mutexes.)
 /// `Relaxed`: same-CPU IRQ handoff — see block comment above.
 pub static LAST_IRQ_DURATION: PerCpu<AtomicU64> =
     PerCpu::new([AtomicU64::new(0), AtomicU64::new(0)]);

@@ -1,4 +1,4 @@
-//! virtio-console (DeviceID 3 over virtio-mmio). Telemetry channel —
+//! virtio-console (`DeviceID` 3 over virtio-mmio). Telemetry channel —
 //! separate from the NS16550A used for `println!` text.
 //!
 //! Discovers the device by walking the DTB, drives the full virtio
@@ -118,7 +118,7 @@ unsafe fn queue_config(sel: u32, queue: *const Virtqueue) -> kernel_devices::vir
 
 /// Walk the DTB for `virtio,mmio` slots, probe each, and return the
 /// MMIO base of the first one whose attached device is a
-/// virtio-console (DeviceID 3). Returns the **higher-half VA** of the
+/// virtio-console (`DeviceID` 3). Returns the **higher-half VA** of the
 /// base; probes run through that VA too, so the function doesn't
 /// depend on identity-MMIO being live. Returns `None` if no console
 /// is attached.
@@ -195,7 +195,7 @@ pub static CONSOLE: crate::sync::Once<crate::sync::Mutex<TxStaging>> = crate::sy
 /// `kernel_devices::virtio::handshake` did (`Handshake`).
 #[derive(Debug)]
 pub enum InitError {
-    /// No virtio-mmio slot advertised DeviceID 3 (console).
+    /// No virtio-mmio slot advertised `DeviceID` 3 (console).
     NotFound,
     /// The device bring-up handshake failed — see the wrapped reason.
     Handshake(
@@ -335,7 +335,7 @@ const PANIC_SEND_TRY_LOCK_SPINS: u32 = 200_000_000;
 /// # Safety
 ///
 /// `base` must be the MMIO base of a real virtio-mmio device whose
-/// DeviceID is `3` (virtio-console). The device must not currently be
+/// `DeviceID` is `3` (virtio-console). The device must not currently be
 /// in use by anyone else — this function resets it.
 unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
     let mut dev = MmioConsole { base };
@@ -401,7 +401,7 @@ unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
 ///   driver bounds the wait and surfaces a `DeviceStuck` error.
 /// - **No queue-init check.** SAFETY comment says you must call
 ///   `init_handshake` first; if you don't, this writes into an
-///   un-set-up TX_QUEUE that the device isn't reading. The device
+///   un-set-up `TX_QUEUE` that the device isn't reading. The device
 ///   never advances `used.idx`, and we spin forever.
 unsafe fn transmit(base: usize, bytes: &[u8]) {
     // 1. Fill descriptor slot 0 with the buffer pointer + length.

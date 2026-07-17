@@ -164,16 +164,16 @@ static mut EXCEPTION_STACKS: [ExceptionStack; MAX_HARTS] =
 /// signalling (IPIs, TLB shootdowns). Bit `i` set ⇒ hart `i` is online
 /// and will respond to IPIs. `mmu::shootdown` consults this so it
 /// doesn't try to handshake with a target that's still parked in
-/// OpenSBI (which would spin-wait forever for an ack).
+/// `OpenSBI` (which would spin-wait forever for an ack).
 ///
-/// `AtomicU64` so MAX_HARTS up to 64 fits naturally. `Relaxed` on
+/// `AtomicU64` so `MAX_HARTS` up to 64 fits naturally. `Relaxed` on
 /// reads/writes: the actual cross-hart synchronisation a shootdown
 /// needs is provided by the `ipi_pending`/`shootdown_ack` handshake
 /// — this bitmap only gates *whether* to attempt that handshake.
 pub static SMP_ONLINE_HARTS: AtomicU64 = AtomicU64::new(0);
 
 /// Logical hart id (`0..MAX_HARTS`) → platform `mhartid`. Written by
-/// `kmain` once OpenSBI's boot hart selection is known; read by
+/// `kmain` once `OpenSBI`'s boot hart selection is known; read by
 /// `ipi::send` to translate the logical target to the mhartid the
 /// SBI `send_ipi` call expects.
 ///
@@ -212,7 +212,7 @@ pub static PER_HART_DATA: [PerHartData; MAX_HARTS] = [
 /// after the trampoline (the static's address is a higher-half VA) and
 /// before any code that calls `current_hartid()` — which today means
 /// before the first `span!` emission, since `tracing::span_start`
-/// reads `current_hartid()` to populate `hart_id` on the SpanStart
+/// reads `current_hartid()` to populate `hart_id` on the `SpanStart`
 /// frame.
 ///
 /// # Safety

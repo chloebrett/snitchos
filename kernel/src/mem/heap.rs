@@ -25,7 +25,7 @@ use kernel_mem::mmu::{HEAP_VA_BASE, PtePerms};
 pub use kernel_mem::heap::{Stats, WatermarkConfig, watermark_grow_decision};
 
 /// Watermark policy for this kernel. Grow at 25% free, 256 frames per
-/// grow event, ceiling at MAX_HEAP_SIZE.
+/// grow event, ceiling at `MAX_HEAP_SIZE`.
 pub const WATERMARK: WatermarkConfig = WatermarkConfig {
     max_size: MAX_HEAP_SIZE,
     free_threshold_pct: 25,
@@ -72,7 +72,7 @@ static HEAP_TOP: AtomicUsize = AtomicUsize::new(HEAP_VA_BASE);
 /// `GlobalAlloc` wrapper around a `kernel::sync::Mutex<Heap>`. We
 /// don't use `linked_list_allocator::LockedHeap` directly because we
 /// need to bump `ALLOC_COUNT` / `DEALLOC_COUNT` / `ALLOC_FAIL_COUNT`
-/// in the alloc/dealloc paths, and LockedHeap doesn't expose hooks
+/// in the alloc/dealloc paths, and `LockedHeap` doesn't expose hooks
 /// for that. Going through `kernel::sync` also keeps the lock type
 /// consistent with the rest of the kernel — preempt/IRQ-disable
 /// hooks land in one place when they land.

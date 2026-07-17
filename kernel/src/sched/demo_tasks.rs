@@ -39,7 +39,7 @@ pub extern "C" fn idle_entry() -> ! {
 
 /// Burn an appreciable amount of CPU so the per-task `cpu_time_ticks`
 /// rate is visible against idle's wfi-dominated time. ~15M LCG iters
-/// is ~50ms of wallclock on QEMU virt; task_b doubles it.
+/// is ~50ms of wallclock on QEMU virt; `task_b` doubles it.
 ///
 /// `black_box(x)` keeps the loop body from being optimised out — the
 /// LCG state has to look observable to the compiler.

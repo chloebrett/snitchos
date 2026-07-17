@@ -1,4 +1,4 @@
-//! Thinnest possible SBI shim. SnitchOS only calls SBI for things
+//! Thinnest possible SBI shim. `SnitchOS` only calls SBI for things
 //! the kernel cannot do directly — today that's IPI delivery
 //! (`send_ipi`). The clock uses Sstc CSRs directly, no SBI; console
 //! is virtio not SBI; no HSM yet (secondary harts in step 8 will
