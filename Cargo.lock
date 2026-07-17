@@ -737,11 +737,16 @@ dependencies = [
 name = "kernel-core"
 version = "0.0.1"
 dependencies = [
+ "kernel-mem",
  "loom",
  "postcard",
  "protocol",
  "snitchos-abi",
 ]
+
+[[package]]
+name = "kernel-mem"
+version = "0.0.1"
 
 [[package]]
 name = "lazy_static"

@@ -288,18 +288,48 @@ inbound edge (`stack.rs` → `PAGE_SIZE`).
    `use kernel_mem::mmu::PAGE_SIZE;` (or leave it — the facade re-export means
    `crate::mmu::PAGE_SIZE` also resolves).
 
-**Then measure and record here, before step 2:**
+### as-built: `kernel-mem` (DONE) — and the measurement that stops the plan
 
-| metric | before | after |
-|---|---|---|
-| `cargo test -p kernel-mem --no-run` (touch mmu.rs) | n/a (12.2s for all) | ? |
-| `cargo test -p kernel-core --no-run` (touch cap.rs) | 12.2s | ? |
-| full cold `cargo test --no-run` for both | ? | ? |
-| peak CPU on full build | 43% | ? |
+Landed exactly as scripted. `kernel-mem` is dependency-free (`mem/` imports only
+`alloc`), 121 tests pass from the new crate, kernel-core keeps 393 — **514 total,
+unchanged**. The facade held: **the kernel builds with zero edits to any
+`kernel/` source file**, and all four modules moved as tracked renames, so blame
+survives. Total non-generated diff: one import (`stack.rs`), one facade line, two
+Cargo.tomls, one workspace member.
 
-**The decision rule:** if the focused `-p kernel-mem` loop doesn't land
-meaningfully under 12.2s, steps 2–8 won't help either — stop and delete this
-plan. One afternoon spent learning that beats seven.
+Measured on a quiet tree (the earlier 55–60s readings were cargo build-lock
+contention from a concurrent build, not real):
+
+| metric | before | after | |
+|---|---|---|---|
+| touch `mmu.rs` → `cargo test -p kernel-mem --no-run` | 11.9s | **6.3s** | **−47%** |
+| touch `cap.rs` → `cargo test -p kernel-core --no-run` | 11.9s | 11.6s | −2.5% |
+| touch `mmu.rs` → rebuild **both** crates' tests | 11.9s | **17.6s** | **+48%** |
+| CPU during rebuild | 43% | 45% | — |
+
+**The verdict: keep this step, do not do steps 2–8.**
+
+The decision rule (focused loop meaningfully under 12.2s) passed — 6.3s is a real,
+usable win. But the second row is what kills the rest of the plan: **kernel-core
+shed 23% of its lines and only 2.5% of its build time.** Build cost here is not
+proportional to line count; it is dominated by a fixed per-test-binary floor
+(~5–6s of codegen + link). A 2445-line dependency-free crate costs 6.3s; an
+8.3k-line crate costs 11.6s.
+
+That floor inverts the whole premise. Each further extraction adds a test binary
+to link (row 3: touching `mmu.rs` and running everything is now *48% slower*)
+while shaving ~nothing off the residual. Seven crates would mean seven ~5s floors
+against 45% CPU — there isn't enough parallelism to absorb that. Steps 2–8 would
+make the full suite slower to buy focused loops nobody asked for.
+
+Why `kernel-mem` still earns its place: it is the one extraction where the focused
+loop is worth having (`mmu` alone is 1575 lines / 74 tests and the densest
+iteration target in the crate), it cost one import to do, and it is
+dependency-free — so it never waits on the `protocol`/`serde` proc-macro chain.
+
+**Steps 2–8 are hereby not planned work.** Revisit only if some specific module
+becomes a hot iteration target on its own, and only with a measurement in hand.
+The remaining table is kept as a record of the analysis, not a roadmap.
 
 ## steps 2–8
 
@@ -357,4 +387,28 @@ Stated plainly so the plan isn't oversold:
 - Measurement table above filled in, and a go/no-go recorded for steps 2–8.
 
 ---
-*Delete this file when the plan is complete or abandoned.*
+
+## outcome
+
+Both items that earned their place shipped; the rest was cancelled by
+measurement rather than by taste.
+
+- **ELF page-planning extracted** to `kernel_core::user::elf`, with a W^X guard
+  that refuses `PlanError::WxViolation` instead of mapping an RWX page. Found and
+  demonstrated a real latent hole: one initialised mutable static would have
+  handed userspace a writable-executable page containing all its code. `user.ld`
+  now aligns `.data`, and the itest suite guards that alignment.
+- **`kernel-mem` carved out** — 121 tests, dependency-free, focused loop −47%.
+- **Steps 2–8 cancelled.** The fixed ~5–6s per-test-binary floor means further
+  splits would slow the full suite (+48% already on the both-crates path) to buy
+  focused loops nobody needs. See the as-built table above.
+
+The durable lesson, worth more than the crate: **`unsafe`-freedom is not the test
+for what belongs in kernel-core** — glue that locks a static and threads a
+`TrapFrame` has no `unsafe` and still can't run on the host. The test is *does it
+touch statics, `TrapFrame`, or MMIO*. By that test the boundary was already
+clean, and the only real residue was pure arithmetic hiding *inside* an
+`unsafe` function — the opposite of what a file-level search finds.
+
+Open follow-ups are listed under the ELF as-built section above (unbounded
+`mem_size`; hex `Debug` for `WxViolation`).

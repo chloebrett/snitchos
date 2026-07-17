@@ -28,12 +28,15 @@ pub mod stack;
 pub mod trap;
 pub mod virtio;
 
-mod mem;
 mod obs;
 mod user;
 mod workloads;
 
-pub use mem::{frame, heap, heap_smoke, mmu};
+// `mem` now lives in its own crate (`kernel-mem`) so it builds and tests without
+// the rest of kernel-core — see `plans/kernel-core-split.md`. Re-exported here so
+// the public paths stay `kernel_core::mmu`, `kernel_core::frame`, etc.: the move
+// is invisible to consumers.
+pub use kernel_mem::{frame, heap, heap_smoke, mmu};
 pub use obs::{batch_ring, intern, preinit, sink, span};
 pub use user::{cap, elf, ipc, metric, span_name};
 pub use workloads::{bootargs, workload};

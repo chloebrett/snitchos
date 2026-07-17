@@ -19,7 +19,7 @@
 
 use alloc::vec::Vec;
 
-use crate::mem::mmu::PAGE_SIZE;
+use kernel_mem::mmu::PAGE_SIZE;
 
 /// Bytes per kernel stack (the mapped region of a slot). 16 KiB.
 pub const STACK_BYTES: usize = 16384;

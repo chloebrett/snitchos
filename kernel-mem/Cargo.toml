@@ -1,0 +1,14 @@
+[package]
+name = "kernel-mem"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Deliberately dependency-free. The memory bookkeeping is pure `core` + `alloc`
+# arithmetic over caller-supplied storage — it has no wire format, no ABI, and no
+# device to talk to. Keeping it that way is what lets it compile in parallel with
+# every other crate instead of waiting on the `protocol`/`serde` proc-macro chain.
+[dependencies]
+
+[lints]
+workspace = true
