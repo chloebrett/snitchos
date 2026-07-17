@@ -32,13 +32,40 @@ Sorting them by *why they exist* is the whole plan:
 | `--repeat N` | flake rate must be *sampled* | a scenario fails 0% or 100%; sampling learns nothing |
 | `--fail-fast N` | confirm flakiness cheaply | nothing to confirm |
 | `baseline` (7 verbs, Wilson scores, `history`) | estimate per-scenario flake rate from noisy runs | there is no rate to estimate |
-| `--jobs` / `--cpu-jobs` / `--profile {wfi,cpu}` | QEMU scenarios oversubscribe host cores → timing flakes | snemu-itest already has `-j` + a precedence-aware scheduler |
+| `--cpu-jobs` / `--profile {wfi,cpu}` (the **partition**, not `--jobs`) | QEMU scenarios oversubscribe host cores → timing flakes | verified dead on the snemu path — see below |
 | `--force` + `target/.itest.lock` | concurrent QEMU runs compete for CPU | snemu machines don't share timing |
 | `--capture {summary,tail,signal,full}` + `itest-show` | post-mortem for failures you can't reproduce | re-run the one scenario |
 
 Six flag families, one 7-verb subcommand group, and ~1150 lines across
 `itest/baseline.rs` + the harness capture plumbing, all resting on one premise.
 Remove the premise and they don't need arguing about individually.
+
+### `--jobs` survives — it is not the same `--jobs`
+
+There are **two** `--jobs` in this surface and they must not be conflated:
+
+- **QEMU `itest --jobs` / `--cpu-jobs` / `--profile {wfi,cpu}`** — the wfi/cpu
+  *partition*. This is the QEMU artifact.
+- **`snemu-itest -j` / `--jobs`** — worker count, defaults to
+  `available_parallelism()`. **This survives the promotion and is load-bearing:**
+  turning it down is how we measure the impact of scenario packing (the A/B for
+  `--order` and the critical-path scheduler), and how we leave host cores free
+  for other work. It is a real knob, not a leftover.
+
+Only the *partition* dies. The evidence, checked rather than assumed:
+
+- `CpuProfile`'s own doc says the split exists because *"running two `Cpu`
+  scenarios simultaneously can stretch wall-clock past the harness's
+  per-scenario timeout"* — a host-wall-clock concern. snemu scenarios are
+  bounded by **instret**, not by a wall-clock timeout that host contention can
+  blow.
+- `snemu_audit.rs` and `schedule.rs` **never read `cpu_profile`**. The
+  precedence-aware critical-path scheduler packs by `--order` (wall/instret),
+  not by the wfi/cpu split. The classification is already dead on the snemu path.
+
+This is the check Step 0.2 skipped. Unlike `snemu-fork` — where the supposed
+replacement covered a *different axis* — here the replacement genuinely doesn't
+consult the thing being retired.
 
 **This is the controversial part, and it is deliberately last.** Phases 0–2 are
 free wins that stand on their own even if we never promote `itest`.
@@ -131,6 +158,46 @@ group. That's a candidate optimization, not a deletion. Out of scope here.
 
 ## Phase 1 — regrouping (mechanical, low risk)
 
+### Step 1.0: Stop `itest` from running the host-side checks
+
+`itest` runs the workspace host checks first and only proceeds if they pass;
+`--skip-unit-tests` bypasses. **That flag is the tell** — its only job is to undo
+something the command does that you didn't ask for. One verb, one job:
+`cargo xtask test` already exists for this and is fast.
+
+Three things make this a clean cut rather than a preference:
+
+- **`snemu-itest` already doesn't do it.** So Step 2.1's promotion would
+  *silently drop* the prerequisite. Cutting it deliberately, now, beats having
+  the engine swap do it by accident later.
+- **The commit gate already skips it.** The gate is `snemu-itest`, which never
+  ran the checks. The coupling only fires on the QEMU path — the one being
+  demoted — so removing it loses nothing the gate has. It makes an existing hole
+  *visible*.
+- **Composition is trivial**: `cargo xtask test && cargo xtask itest`.
+
+**Caveat — `run_unit_tests` is misnamed.** It runs the unit tests, *plus* the
+loom model-check tests (`kernel-core/tests/loom_tx.rs`, a separate `--cfg loom`
+compilation) *plus* the **generated-diagram drift check**. That last one is a
+contract gate. Dropping the prerequisite drops all three from `itest`, so the
+gate docs must name `cargo xtask test` explicitly — this is the step where
+"the gate is `snemu-itest`" stops being sufficient shorthand.
+
+Consider renaming `Cmd::Test` → something that says what it is (`check`?) while
+we're here — but that's a separate call, and renaming the thing everyone types is
+not free. Flag it, don't bundle it.
+
+**Acceptance criteria**: `cargo xtask itest` runs no host checks; `--skip-unit-tests`
+no longer parses; `cargo xtask test` is unchanged; CLAUDE.md's gate section names
+`cargo xtask test && cargo xtask itest` rather than implying `itest` covers it.
+**RED**: `try_parse_from(["xtask","itest","--skip-unit-tests"])` is an error; a
+test asserting the itest path doesn't invoke `run_unit_tests`.
+**GREEN**: drop the flag + the prerequisite block in `main.rs`.
+**MUTATE**: n/a — removal.
+**REFACTOR**: none.
+**Done when**: CLAUDE.md's gate is explicit and [[feedback_commit_gate_repeat_tests]]'s
+"gate is `snemu-itest`" is updated to the composed form.
+
 ### Step 1.1: Add CLI parse tests for the current surface
 
 The safety net Phase 2 needs, written **before** anything moves. Characterisation,
@@ -199,11 +266,104 @@ gone.
 ## Phase 2 — the promotion (substantial; the controversial one)
 
 **Do not start Phase 2 until Phase 1's parse tests are green.** Every step here
-is a rename or a deletion across a surface with no other net.
+is a rename or a move across a surface with no other net.
 
-Sequenced so the engine swap and the flake-machinery removal are **separate
-commits**. If the promotion needs to be reverted, we want to revert the swap
-without resurrecting 1150 lines by hand.
+### ~~the quarantine~~ — WITHDRAWN, `itest-harness` is already layered correctly
+
+A draft of this section proposed extracting a `qemu-itest` crate above
+`itest-harness`, moving `CpuProfile`, `baseline`, `history`, `lock`, `signature`,
+`stats` (Wilson), `aggregate` and `metrics` into it — on the claim that the shared
+substrate was full of QEMU-specific flake apparatus. **That was wrong on both
+halves of the claim.**
+
+The test that breaks it: *`qemu-itest` should own only what is **only** useful to
+QEMU.* Nothing on that list passes.
+
+- **Wilson scores / the z-test / baseline / history / the signature classifier /
+  Prom+OTLP** are generic — and not incidentally so. Per
+  [open-sourcing-extractables.md](open-sourcing-extractables.md), `itest-harness`
+  is the repo's **highest-reuse-value** extraction candidate precisely because it
+  *"owns everything that has nothing to do with QEMU or RISC-V"*, and that doc
+  names this exact list as the product. The quarantine would have buried the best
+  open-sourcing candidate in the repo inside a QEMU-specific crate.
+- **`CpuProfile`** fails the test too. It classifies *host-CPU contention* —
+  "burns a core" vs "idles on a timer" — which is meaningful for any subject that
+  burns host CPU. The open-sourcing plan explicitly wants `RunnerConfig` proven
+  against a **non-QEMU subject**; that generality is a feature of the harness, not
+  a leak. snemu not reading `cpu_profile` means *unused by one consumer*, not
+  *belongs to the other*. Those were conflated.
+- **What is genuinely QEMU-only** — process lifecycle, socket cleanup, `-append`
+  bootargs — already lives xtask-side in `xtask/src/itest/harness.rs`, exactly
+  where the open-sourcing plan says it should. But it is **tangled with
+  `LiveSnemu`** there, so even that file isn't purely QEMU. That tangle — not the
+  statistics — is the real seam, and it's Phase 3.
+
+**So the layering is already right and Phase 2 should not touch it.** What
+survives of Phase 2 is the engine swap (2.1), gating the flake flags to
+`--engine qemu` (2.2b), the docs split (2.2c), and the instret baseline (2.3).
+
+### the QEMU runner survives
+
+An earlier draft had `--engine qemu` surviving Step 2.1 while Step 2.2 deleted
+`CpuProfile`. **That was incoherent**: the partition is exactly what the QEMU path
+needs, and a QEMU runner that fans cpu-bound scenarios out at `--jobs` width blows
+its own per-scenario wall-clock timeouts. It would degrade the escape hatch
+precisely when you'd reach for it — when you distrust snemu and need QEMU to
+arbitrate.
+
+So the QEMU scenario runner **stays, and keeps its machinery**. What changes is
+*where that machinery lives*:
+
+> **`qemu-itest`, a new crate layered ABOVE `itest-harness`.**
+
+Today the layering is backwards. `CpuProfile` — a concept whose entire meaning is
+"QEMU scenarios contend for host cores" — lives in `itest-harness/src/runner.rs`,
+the *shared* substrate. The snemu path links it and ignores it
+(`snemu_audit.rs`/`schedule.rs` never read `cpu_profile`). The same is true of
+most of the crate: `baseline`, `history`, `lock`, `signature`, `stats` (Wilson
+scores), `aggregate`, `metrics` are all flake apparatus sitting in shared space.
+
+The engine-neutral core inside `itest-harness` is small — `Scenario` (name, run,
+tags, workload) and `select_by_tags`. So the extraction is close to an
+**inversion**: shrink `itest-harness` to the neutral core it was meant to be, and
+let `qemu-itest` above it own the rest.
+
+This is the house argument, third time: `kernel::sync`'s chokepoint, the
+`kernel-core` split, and this crate's own extraction note — *"we're going to want
+this even if no one else ever uses the harness crate — the boundary is the
+discipline."* A crate boundary makes "the snemu path grew a dependency on QEMU
+flake machinery" a **compile error** instead of something review has to catch.
+
+### what this costs the plan, honestly
+
+Phase 2 is no longer "delete ~1150 lines". Those lines survive, relocated. The
+win changes shape:
+
+- the **default surface** gets clean (the flake flags become qemu-engine-only);
+- the QEMU apparatus is **contained** — it can sit still without spreading, and
+  its cost is visible as a crate rather than diffused through the substrate;
+- the snemu path **cannot** regrow a dependency on it.
+
+That's a real win and arguably a better one than deletion — a quarantined escape
+hatch keeps QEMU able to arbitrate. But it is not the line-count win the first
+draft advertised, and the summary table below is corrected accordingly.
+
+### the open design question: where does the classification live?
+
+`CpuProfile` is a *field on the shared `Scenario`* (`Scenario::cpu_bound`), and
+the `catalog!` macro's row grammar (`wfi`/`cpu`) sets it across ~119 rows. If the
+concept moves to `qemu-itest`, the shared struct must stop carrying it. Options:
+
+- **(a)** `qemu-itest` owns a `const CPU_BOUND: &[&str]` name list. Simple; risks
+  drift from the catalog.
+- **(b)** `catalog!` co-generates a third item — a qemu-side classification table
+  — alongside `SCENARIOS` and `scenario_view_fn`. The macro already co-generates
+  two items *specifically so they can't drift*; this extends the same discipline.
+- **(c)** `Scenario` keeps an opaque engine-hints bag. Rejected: that's the
+  current leak with extra indirection.
+
+**(b) is the recommendation** — it preserves the anti-drift property the macro
+exists for. Settle this before writing 2.2.
 
 ### Step 2.1: Make `itest` snemu-backed, QEMU behind `--engine qemu`
 
@@ -219,35 +379,49 @@ match the pre-rename baselines.
 **GREEN**: rename the variant, add `--engine`, dispatch to the two runners.
 **MUTATE**: over the engine-dispatch + flag-compat logic.
 **KILL MUTANTS**: as found.
-**REFACTOR**: hold off — Step 2.2 deletes half of what's here.
+**REFACTOR**: hold off — Step 2.2 moves much of what's here.
 **Done when**: both engines reachable, verdicts match, CLAUDE.md's commands table
 updated.
 
-### Step 2.2: Retire the flake machinery with the QEMU runner
+### Step 2.2: Make the flake flags qemu-engine-only
 
-The payload step. Delete `--repeat`, `--fail-fast`, `--force` + `.itest.lock`,
-`--jobs`/`--cpu-jobs`/`--profile`, `--capture` + `itest-show`, and the
-`.itest-runs/` history writer.
+The machinery stays where it is (see above — it's generic and it's the
+open-sourcing candidate). What changes is only the **surface**: `--repeat`,
+`--fail-fast`, `--force`, `--cpu-jobs`, `--profile`, `--capture` and `itest-show`
+are meaningful only under `--engine qemu`, and should parse-error (not silently
+no-op) on the snemu path.
 
-**Ships with the CLAUDE.md rewrite of the `.itest-runs/` debugging habit — not
-after it.** The replacement instruction is "re-run the single scenario; it will
-fail the same way."
+This is a clap-level change. No crate moves, no deletions in `itest-harness`.
 
-**Acceptance criteria**: `cargo xtask itest <scenario>` reproduces a failure
-identically on consecutive runs (demonstrated on a real failing scenario — the
-~2 standing snemu FS-read fidelity gaps are the natural subject); none of the
-retired flags parse; `.itest-runs/` is no longer written; CLAUDE.md and the
-memory note describe the new workflow.
-**RED**: parse tests reject each retired flag; a determinism test runs one
-scenario twice and asserts byte-identical verdicts + instret.
-**GREEN**: delete the flags, the lock, `itest/baseline.rs`'s flake paths, the
-capture levels, `itest-show`.
-**MUTATE**: over whatever survives in the harness.
+**`--jobs` is NOT in that list.** snemu-itest's `-j` survives as the promoted
+`itest`'s worker knob — it's the packing-measurement lever and the way to leave
+host cores free. Quarantining the *partition* must not take the *knob* with it.
+
+**Acceptance criteria**: `itest --repeat 3` errors with a message naming
+`--engine qemu`; `itest --engine qemu --repeat 3` works; `itest --jobs 4` works on
+**both** engines; `cargo xtask itest <scenario>` reproduces a failure identically
+on consecutive runs (demonstrate on a real failing scenario).
+**RED**: parse tests for each flag × engine combination; a determinism test
+running one scenario twice asserting byte-identical verdict + instret.
+**GREEN**: gate the flags on the engine.
+**MUTATE**: over the flag/engine compatibility matrix.
 **KILL MUTANTS**: as found.
-**REFACTOR**: `itest/harness.rs` (1287 lines) should shrink hard here — reassess
-what it's still for.
-**Done when**: the determinism demonstration is recorded in the plan, CLAUDE.md
-updated, `cargo xtask itest` green.
+**REFACTOR**: assess whether the two engines want distinct arg structs rather
+than one struct with engine-conditional fields.
+**Done when**: the determinism demonstration is recorded here.
+
+### Step 2.2c: Rewrite the `.itest-runs/` debugging habit
+
+Separate from 2.2b because it's a docs/memory change, and because the habit
+outlives the flag: `.itest-runs/` still gets written **by the QEMU engine**. The
+instruction that needs rewriting is the *default* one — on a snemu failure, re-run
+the single scenario rather than reading a capture directory that the snemu path
+never populated.
+
+**Acceptance criteria**: CLAUDE.md and the `feedback_itest_runs_debugging` memory
+distinguish the two paths — snemu: re-run the scenario; QEMU (`--engine qemu`):
+read `.itest-runs/<ts>/` as before.
+**Done when**: both documents state which engine each workflow belongs to.
 
 ### Step 2.3: Reframe the baseline as an instret gate
 
@@ -277,17 +451,118 @@ result; a reproducibility test (same tree → same instret).
 
 ---
 
+---
+
+## Phase 3 — untangle the frame sources in `View`
+
+**This is the important one**, and it's the enabling refactor everything else
+kept bumping into. It is *not* a consolidation step — it's a design fix that the
+consolidation work surfaced.
+
+### the tangle
+
+`xtask/src/itest/harness.rs` (1287 lines) mixes **three different frame sources**
+behind one `View` type:
+
+| source | constructor | what it is |
+|---|---|---|
+| QEMU child process | `Boot::view` | `Child` + unix socket + `ChildStdin`; frames arrive on a reader thread |
+| live snemu machine | `View::live` | in-process `snemu::machine::Machine`, stepped on demand, instret-budgeted |
+| batch replay | `View::replay` | a previously captured frame stream, no guest at all |
+
+`View` selects between them with a **field** — `live: Option<LiveSnemu>` — and
+branches on it per operation (`wait_for`, `send_input`, `wait_for_log`). So:
+
+- **QEMU cannot be extracted.** Any `qemu-itest` crate would have to take `View`
+  with it, and `View` is what the snemu path uses too. The `Option` field *is* the
+  coupling.
+- The three sources' differences are real and interesting — the doc comments on
+  `LiveSnemu::max_instret` (budget in guest instret, not host `step()` calls, so
+  the block JIT can't scan more guest work for the same budget) and on `View::live`
+  vs `View::replay` (interactive input→output loops a batch capture can't
+  reproduce) are *exactly* the kind of thing a type should encode, not a comment
+  next to an `Option`.
+
+### the shape
+
+A frame-source abstraction — trait or enum — carrying the operations `View`
+actually needs: advance-until-next-frame, send input, read UART/log, and report a
+budget/deadline. Then `View` is a neutral cursor + assertion API over it, and each
+source is a backend:
+
+- QEMU backend (`Boot`, `Child`, socket, stdin) — **now extractable** to
+  `qemu-itest`, and the only thing that genuinely belongs there.
+- live-snemu backend (`LiveSnemu`).
+- replay backend.
+
+**Trait vs enum is an open call.** The set is closed and small (three), which
+argues enum; but the QEMU variant is what we want to be able to *lift out of the
+crate*, which argues trait. Decide when writing it — the deciding question is
+whether `qemu-itest` is a real goal or just a tidiness one.
+
+### sequencing
+
+**Phase 3 does not block Phases 0–2**, and Phases 0–2 don't block it. But Phase 3
+**is a precondition for any `qemu-itest` crate** — the thing the withdrawn
+quarantine was reaching for. If the goal is really "QEMU can't contaminate the
+snemu path," this is the step that delivers it, and the quarantine was a
+shortcut around it.
+
+Do it before 2.2 if the engine-gated flags turn out to need per-engine arg
+structs (2.2's REFACTOR note asks the same question from the other side).
+
+### steps
+
+**Acceptance criteria**: `View`'s public assertion API (`wait_for`,
+`assert_absent`, `name_of`, `send_input`, `wait_for_log`) is unchanged from a
+scenario's point of view — all ~119 scenarios compile and pass untouched; `View`
+holds no engine-specific field; each backend's budget semantics are encoded in its
+own type rather than in a comment.
+**RED**: a test constructing a `View` over a **fake** frame source — impossible
+today, and the proof the abstraction is real. If a hand-rolled test double can
+drive `View`, the coupling is gone.
+**GREEN**: introduce the abstraction, move the three sources behind it.
+**MUTATE**: over the per-source advance/budget logic — `LiveSnemu`'s instret
+accounting is the subtle part and mutants should find any off-by-one in it.
+**KILL MUTANTS**: as found.
+**REFACTOR**: 1287 lines should split along the new seam; check the pieces are
+each readable alone.
+**Done when**: all scenarios green under both engines, the fake-source test
+exists, and `qemu-itest` is *possible* (whether or not we then do it).
+
+---
+
 ## Where this lands
 
 | | before | after |
 |---|---|---|
-| top-level commands | 22 | ~15 |
-| `itest` flags | 13 | ~5 |
-| `baseline` verbs | 7 | 2 (`export`, `push`) |
+| top-level commands | 22 | ~16 (0.2 withdrawn) |
+| `itest` flags (default/snemu path) | 13 | ~5 (the rest are `--engine qemu`-only) |
+| `baseline` verbs | 7 | 7, but `export`/`push` retargeted at instret (2.3) |
 | CLI parse tests | 0 | the whole tree |
+| `itest-harness` | already correct | **untouched** |
 
-Plus a kernel feature flag (`minimal-boot`) and roughly 1150 lines of flake
-apparatus.
+Plus one kernel feature flag (`minimal-boot`), deleted in Phase 0.
+
+**Both deletion claims are withdrawn.** The first draft promised ~1150 lines
+removed; the second promised them relocated. Neither happens: the machinery is
+generic, it's the repo's best open-sourcing candidate, and the QEMU runner stays.
+
+**What this plan actually delivers, then:** one dead verb + one dead kernel
+feature (Phase 0), a snemu family that reads as a group and an itest surface that
+doesn't show you a register allocator (Phase 1), a default engine that's
+deterministic with the flake flags gated behind `--engine qemu` (Phase 2), an
+instret regression gate (2.3), and CLI parse tests where there were none. That's
+a decent, honest outcome. It is not a debloat.
+
+**The pattern worth remembering.** Every deletion claim in this plan that rested
+on "X is redundant with Y" was wrong: `snemu-fork` (different axis), the flake
+apparatus (generic, not QEMU's), `CpuProfile` (unused ≠ owned elsewhere). The one
+that held — `snemu`/`minimal-boot` — was the one with a **single checkable
+consumer**. The rule that falls out: *"consumer C doesn't use X" is evidence about
+C, not about X.* Before retiring anything here, name the thing that makes it
+redundant and check that it covers the same axis — don't reason from who ignores
+it.
 
 ## What this plan explicitly does not do
 
@@ -303,12 +578,13 @@ apparatus.
 
 ## Pre-commit gate (per step)
 
-1. `cargo xtask itest` (post-2.1; `snemu-itest` before that) — the deterministic
+1. `cargo xtask test` — unit tests **+ loom model-checks + the generated-diagram
+   drift check** (the `itest-matrix` diagram trips if scenario plumbing moves).
+   **Post-1.0 this is no longer implied by `itest` — run it.**
+2. `cargo xtask itest` (post-2.1; `snemu-itest` before that) — the deterministic
    gate; a single run replaces `--repeat 10`.
-2. `cargo xtask clippy` — **not** `cargo clippy --workspace`.
-3. `cargo xtask mutants` where the step has logic (1.3, 2.1, 2.2, 2.3).
-4. `cargo xtask test` — includes the generated-diagram drift check, which the
-   `itest-matrix` diagram will trip if scenario plumbing moves.
+3. `cargo xtask clippy` — **not** `cargo clippy --workspace`.
+4. `cargo xtask mutants` where the step has logic (1.3, 2.1, 2.3).
 
 Work lands directly on `main`. Present each step and stop; the user commits.
 

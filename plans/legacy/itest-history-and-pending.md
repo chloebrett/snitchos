@@ -1,5 +1,25 @@
 # Design: per-iteration run history + pending-file baseline workflow
 
+**Status: SHIPPED — plan complete (verified 2026-07-17).** Steps A–H all landed.
+`.itest-runs/` is the live per-run history (and the first thing to read when an itest
+fails — see CLAUDE.md). The baseline is a projection: `promote_pending` /
+`discard_pending` (`baseline.rs:276`, `:303`) + `xtask itest recover`.
+H1 (Prometheus textfile, `prom.rs::render_prometheus` + atomic write) and H2 (live
+OTLP push, `otlp.rs::push_with_timeout`) shipped too, with a provisioned Grafana
+dashboard at `stack/grafana/provisioning/dashboards/snitchos-itest-baselines.json`.
+
+**Every open question resolved — each the way this doc leaned:**
+
+| question | resolution | evidence |
+|---|---|---|
+| `ctrlc` crate vs raw `libc::signal` | **`ctrlc`** | `xtask/Cargo.toml`; harness takes `interrupt: Option<&AtomicBool>`, xtask sets it from the handler |
+| per-iteration `flush()` vs buffered | **flush each row**, no `sync_all` (best-effort) | `history.rs::append` |
+| `metadata.toml` `hostname` | **included**, best-effort from `HOSTNAME` | `history.rs::current_hostname` |
+| pending shape | **extended `Baseline`** with `partial: Option<PartialMarker>` | `baseline.rs:76,89` |
+| auto-prune vs explicit | **explicit only** — `xtask itest prune --keep-last N` | `history.rs::prune_runs`; guards against deleting user-placed files |
+| run-dir name format | **timestamp**, second precision (the itest lock rules out collisions, so no nanoseconds) | `history.rs::run_dir_name` |
+| disk pressure | **accepted + guarded** by `prune_runs` | — |
+
 Two changes that compose, designed together so we don't paint ourselves into a corner. The pending file is what makes interrupted runs safe; the per-iteration NDJSON is what makes the baseline a *projection* (re-derivable) rather than an independent source of truth.
 
 ## goals

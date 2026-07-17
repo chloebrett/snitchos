@@ -1,11 +1,57 @@
 # Spawn, the explicit-authority shell, and console input — design
 
-**Status:** **Reconciled 2026-06-27 — most of the critical path has SHIPPED; this
+**Status:** **COMPLETE — reconciled again 2026-07-17. Every item on this plan's
+"remaining work" list has shipped; what's still open was always scoped out to
+other milestones.** Retired to `legacy/`.
+
+The payoff this plan existed for — *watch least-authority happen* — is live and
+itested. `workload=shell` (`user/hello/src/bin/shell.rs`) runs `view <path>`:
+look the file up on the FS with READ-only rights, `Spawn` the `viewer` holding
+**only** that attenuated cap, then `revoke` it when the viewer exits. The whole
+delegate → use → revoke cycle is CapEvents on the wire. Two itests pin it:
+`viewer-reads-delegated-file` and `shell-view-command-revokes-cap`.
+
+**Reconciliation — the five "remaining work" items, as built (names drifted):**
+
+1. ✅ **`ConsoleWrite` (19)** — was already marked shipped below.
+2. ✅ **`init`** — shipped as v0.13, the userspace delegation-graph root.
+3. ✅ **the shell** — `user/hello/src/bin/shell.rs`, not `user/shell`. **Milestone A
+   (`help`/`echo`/`ls`/`cat` builtins) was skipped**, deliberately: the shell went
+   straight to Milestone B, the capability demo. It has one verb, `view`.
+4. ✅ **the delegated-file reader** — shipped as **`viewer`** + the `view` verb, not
+   as `cat`/`ls`. Same design: a bin that holds only a narrowed File cap and reads
+   through it.
+5. ✅ **cap-delegation trace** — the `CapEvent` chain is the demo, and
+   `shell-view-command-revokes-cap` asserts the revoke end of it.
+
+**A deferral that has since landed:** Spawn **Phase 1b** — `SpawnImage = 26`
+(`snitchos_user::spawn_image`) runs an executable read out of the filesystem;
+`fs-probe` and `fs-hungry` use it. **Caveat:** it shipped *without* the `EXEC`
+right this plan imagined — no `rights::EXEC` exists. The caller reads the bytes
+with its own READ cap and passes them to the kernel, so "may this image be
+executed?" is not a cap-gated question today. If that gate is ever wanted, it is
+new work, not leftover work.
+
+**Genuinely still open — but never this plan's scope:** the **Tier-1** userspace
+virtio console driver (PLIC + MMIO + DMA caps; called out below as "its own
+milestone") and **Q-D** resource quotas (the resource axis, explicitly deferred).
+
+**Where the shell went next:** this plan's shell is the minimal Rust powerbox. The
+project's shell is now **Stitch** — its `hold`/`grant`/`revoke` verbs shipped under
+[shell-grant-revoke.md](shell-grant-revoke.md), and the interpreter runs on the
+metal via `workload=stitch-repl`.
+
+<details>
+<summary>Original status (2026-06-27), kept for the record</summary>
+
+**Reconciled 2026-06-27 — most of the critical path has SHIPPED; this
 revision re-plans from the current state toward a _terminal_ shell.** The original
 design (2026-06-18) said "no code yet"; since then `Spawn`, `Exit`+`Wait`, the
 blocking-wait primitive, `ConsoleRead` + polled UART RX, and the FS-over-IPC stack
 have all landed. The remaining work for an interactive terminal shell is small and
 named below.
+
+</details>
 
 **What shipped since this was written (verified 2026-06-27):**
 
@@ -137,7 +183,7 @@ first consumer of "async kernel→user signal," independent of devices.
 > `ls`/`cat`/`ps`, the powerbox/observe identity, and the ANSI-escape TUI plan
 > (host-testable rendering lib; Tier 0→2; the shell as a Stitch program with Rust
 > natives) — is designed in
-> [docs/shell-surface-and-tui-design.md](../docs/shell-surface-and-tui-design.md).**
+> [docs/shell-surface-and-tui-design.md](../../docs/shell-surface-and-tui-design.md).**
 > This section is the _mechanism_ (the spawn/delegate/wait loop).
 
 A userspace process init spawns, holding: its **session File/dir caps** (its
@@ -306,20 +352,26 @@ What's left, in build order:
    `ConsoleWrite`, reading input via `ConsoleRead`. Both console primitives now
    proven on the metal. (Gotcha found: the 16 KiB user stack silently overflowed
    the recursive interpreter — bumped `user/runtime/user.ld` to 512 KiB.)
-2. **`init` (first-process bootstrap)** `[CP]` — a real first process that holds
+2. ✅ **`init` (first-process bootstrap)** — SHIPPED as v0.13. A real first process that holds
    root caps, `Spawn`s the FS server, holds the FS endpoint cap, and `Spawn`s the
    shell granting it its **session caps** (the FS cap, console access). Generalizes
    today's per-workload `kmain` spawns; root of the delegation graph. Add the new
    programs (`init`, `shell`, `cat`, `ls`) to the `SPAWNABLE` registry.
-3. **`user/shell`** `[CP]` — the loop: `ConsoleRead`-poll a line (line discipline —
+3. ✅ **the shell** — SHIPPED as `user/hello/src/bin/shell.rs` (`workload=shell`).
+   **Milestone A was skipped** — no `help`/`echo`/`ls`/`cat` builtins; it went
+   straight to Milestone B (the capability demo) with a single `view` verb.
+   Original text: the loop: `ConsoleRead`-poll a line (line discipline —
    echo via `ConsoleWrite`, backspace, enter — in userspace) → parse → dispatch →
    `Wait`. **Milestone A:** builtins only (`help`, `echo`, and `ls`/`cat` by the
    shell itself talking to the FS server over IPC) — a breathing terminal shell.
    **Milestone B:** the capability demo — `cat <file>` mints a narrowed `(inode, READ)`
    File cap and `Spawn`s a separate `cat` holding _only_ that.
-4. **`cat` / `ls` programs** `[CP for Milestone B]` — small bins that take a File
+4. ✅ **the delegated-file reader** — SHIPPED as **`viewer`** (+ the shell's `view`
+   verb), not as `cat`/`ls`. Itest: `viewer-reads-delegated-file`. Original text:
+   small bins that take a File
    cap and read through it; rely on the startup-cap ABI (handles 2.. = delegated).
-5. **Cap-delegation trace** `[CP for the payoff]` — emit `CapEvent::Transferred` per
+5. ✅ **Cap-delegation trace** — SHIPPED; the `revoke` end is pinned by
+   `shell-view-command-revokes-cap`. Original text: emit `CapEvent::Transferred` per
    delegated cap in `Spawn`, so `cat /foo` produces the visible "shell minted
    `(foo, READ)` → granted to `cat` → `cat` read → exited" chain. _That trace is the
    demo._ (Item 21; "mostly free.")
@@ -334,9 +386,10 @@ its own milestone; resource quotas (Q-D).
 1. Notification primitive (v0.9d)        ✅ resolved as blocking Wait
 2. Exit + Wait/join                       ✅ shipped
 3. Spawn-with-caps (Phase 1a, embedded)   ✅ shipped
-4. Shell program                          ← NEXT (see "Remaining work" above)
-5. Spawn Phase 1b (ELF from FS + EXEC)    ← deferred
-6. Tier-1 userspace virtio console driver ← deferred (separate milestone)
+4. Shell program                          ✅ shipped (`workload=shell`, `view` verb)
+5. Spawn Phase 1b (ELF from FS + EXEC)    ✅ shipped as `SpawnImage = 26` — but
+                                             WITHOUT the `EXEC` right (never added)
+6. Tier-1 userspace virtio console driver ← still deferred (separate milestone)
 ```
 
 ## Observability angle (the post)
@@ -346,16 +399,21 @@ visible chain: shell mints `(foo, READ)` → grants it to a fresh `cat` → `cat
 → exits. _"I didn't build sandboxing; I just stopped handing out authority — and
 here's the trace proving cat could only ever touch one file."_
 
-## Open items (consolidated)
+## Open items (consolidated) — resolved 2026-07-17
 
-- Q-A telemetry/span auto-grant vs delegate (lean: auto-grant).
-- Q-B Spawn ambient vs cap-gated (lean: ambient for now).
-- Q-C copy vs move delegation (lean: copy; attenuate via mint-then-pass).
-- Q-D spawn/memory resource quota (deferred; the resource axis).
-- Notification primitive shape (payload-free signal vs a value; one-shot vs latching).
-- Exit/Wait semantics (blocking `Wait(child)` vs an exit notification on an endpoint).
-- Program source progression: embedded id → FS File cap + EXEC enforcement (~v0.11).
-- Tier-1 driver: IOMMU caveat is an explicit non-goal; revisit if isolation is ever required.
+- ✅ Q-A telemetry/span auto-grant vs delegate — **auto-grant** (the lean was taken;
+  a child is born with telemetry@0, span@1, delegated caps at `2..`).
+- ✅ Q-B Spawn ambient vs cap-gated — **ambient** (the lean was taken).
+- ✅ Q-C copy vs move delegation — **copy** (attenuate via mint-then-pass). The known
+  wart: init over-holds `RECV` on the endpoint it gives the FS server.
+- ⏸ Q-D spawn/memory resource quota — **still deferred** (the resource axis).
+- ✅ Notification primitive shape — resolved by **v0.12 `Notification`**
+  (`NotifyCreate`/`Signal`/`WaitNotify`).
+- ✅ Exit/Wait semantics — resolved to **blocking `Wait`** (+ `WaitAny` in v0.13).
+- ✅ Program source progression — `SpawnImage = 26` runs an ELF read from the FS.
+  **`EXEC` enforcement never landed** (no `rights::EXEC`); the caller reads bytes
+  with its own READ cap. Cap-gating execution would be new work.
+- ⏸ Tier-1 driver: IOMMU caveat is an explicit non-goal; revisit if isolation is ever required.
 
 ```
 

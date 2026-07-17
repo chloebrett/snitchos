@@ -1,5 +1,34 @@
 # snemu milestone 4 — the measurement spine
 
+**Status (2026-07-17): PARTIAL — steps 2/3/4 shipped, step 5 shipped in substance,
+steps 6 and 7 not built. Step 1 deferred.**
+
+- **Step 5 — hot-block/dispatch profiling: shipped as `cargo xtask snemu-profile`**
+  (`xtask/src/snemu_profile.rs`), though not under this plan's name. It is a **per-PC**
+  instret counter (`Machine::take_profile()`), aggregated per-function via the symbol
+  table and printed as a top-N share table — which *is* the "what fraction of execution
+  lives in the top-N blocks" concentration metric this step asked for. Host-tested.
+  Not there: block-cache hit-rate / dispatch counts as reported metrics, and no test
+  asserting "tight loop ⇒ high concentration, flat workload ⇒ low" — the concentration
+  read is by eye off the table.
+- **Step 6 — Grafana dashboard: NOT BUILT.** Nothing in `stack/` mentions snemu; no
+  snemu measurement metrics flow out as `Frame`s to the collector.
+- **Step 7 — nested overhead-factor (`H/G`): NOT BUILT.** No marker channel, no
+  snemu-under-snemu run, no per-class ALU/memory/exit microbenchmarks. `bench.rs` is
+  step 2's harness only (`StartupMark`/`Sample`/`mips()`/`BenchReport`).
+
+**Two of the four acceptance criteria are unmet** (the dashboard; the reproducible
+`H/G` + per-class profile).
+
+**The premise has decayed, and that's the real decision here.** This plan's whole
+argument was *measure first, then tune what you measured* — every later tier "an
+episode measured against it". But M5 (`decode_cache.rs`) and M6 (`block.rs`, `jit.rs`)
+shipped anyway, **without** the M4 spine they were meant to be measured against. So
+step 7's "prove each tier did what it claimed" is now retrospective, not gating. Worth
+deciding deliberately: finish 6+7 as an *audit* of tiers already shipped, or accept
+that `snemu-profile` + the per-tier instret oracles covered the need in practice and
+retire the rest. Don't leave it half-open by default.
+
 Make snemu observe *itself*, rigorously, before any optimization work.
 This is the load-bearing artifact of the whole snemu arc: every JIT tier
 after it (M5, M6, …) is an *episode measured against it*. The guiding

@@ -30,7 +30,7 @@ house position:
   boundary is structural.
 - `kernel::sync` + the `disallowed_types` clippy lint — one chokepoint, enforced
   by tooling rather than by remembering.
-- and from [itest-harness-extraction.md](itest-harness-extraction.md): *"We're
+- and from [itest-harness-extraction.md](legacy/itest-harness-extraction.md): *"We're
   going to want this even if no one else ever uses the harness crate — **the
   boundary is the discipline.**"*
 

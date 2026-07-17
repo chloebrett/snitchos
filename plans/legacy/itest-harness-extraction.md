@@ -1,5 +1,35 @@
 # Extracting the integration-test harness into its own crate
 
+**Status: SHIPPED — plan complete (verified 2026-07-17).** The `itest-harness/`
+crate exists and owns the generic runner mechanics; QEMU/SnitchOS glue stayed in
+`xtask/src/itest/`. The boundary held.
+
+**The "decisions to surface as we go" all resolved — three of them by the design
+going somewhere better than this plan guessed:**
+
+- **`next_event` return type · timeout-vs-disconnect · async** — *moot; never built.*
+  There is no `Subject` trait and no `next_event`. The event stream stayed entirely
+  xtask-side (`xtask/src/itest/harness.rs`), and the boundary landed instead as a
+  `run_group` executor callback (`itest-harness/src/runner.rs:171`, `RunGroupFn`),
+  which also replaced the older `log_path_for`/`max_wait_for`/`capture_for`
+  thread-local hooks. The harness never owns the channel, so the question dissolved.
+  Not async.
+- **`Scenario` trait or struct** — **struct** (`runner.rs:57`), and it outgrew the
+  shape sketched here: it gained `cpu_profile`, `tags`, and `workload` (the
+  shared-boot grouping key).
+- **`RunnerConfig` hooks: `&dyn Fn` or named-method trait** — **`&dyn Fn`**, as
+  leaned. It also grew `fail_fast`, `pending_baseline`, `interrupt`, `history_root`,
+  and `jobs`.
+- **clap struct behind a feature flag** — **no, the opposite.** `itest-harness` has
+  no `clap` dep and no `[features]`; the consumer wires its own CLI.
+
+**Step 7 — 3 of 4 landed:** inline per-scenario rates with CI framing
+(`stats.rs::wilson_score_95`), `--fail-fast=K`, and a baseline-comparison verdict on
+every run (`verdict.rs::two_proportion_p_value` — a z-test, chosen over Fisher's).
+The **counterfactual-matrix runner was never built** — it is a speculative tooling
+idea that never had a consumer, not stalled migration work, so it does not hold this
+plan open. Re-home it to a tooling-ideas note if it still appeals.
+
 ## why
 
 `xtask/src/itest/` mixes two concerns:
