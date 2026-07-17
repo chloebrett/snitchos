@@ -458,15 +458,34 @@ fn invented_names(only_snemu: &[String], snemu_crashed: bool) -> Vec<String> {
         .collect()
 }
 
+/// The only-qemu names that indicate snemu **dropped** telemetry QEMU emits — a
+/// fidelity gap, the mirror of [`invented_names`]. A name only QEMU has is normally
+/// benign: snemu ran out of its step budget before reaching that behavior. But that
+/// excuse only holds if snemu was actually *truncated* — if snemu produced **at least
+/// as many frames as QEMU** and *still* lacks these names, it didn't run short, it
+/// **diverged** (e.g. stalled in a loop), so the drop is real. (This is what
+/// `snemu-itest --opt mid` trips over on `supervised`: snemu emits *more* frames than
+/// QEMU yet never reaches the escalate trio — a real gap the old `only_qemu`-always-
+/// forgiven rule missed.) Empty ⇒ no dropped-frame gap.
+fn dropped_names(only_qemu: &[String], snemu_frames: usize, qemu_frames: usize) -> Vec<String> {
+    if snemu_frames >= qemu_frames {
+        only_qemu.to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
 impl Comparison {
-    /// Faithful ⇔ snemu invented no telemetry QEMU never emitted. Names only QEMU
-    /// has are behavior snemu didn't reach in its budget; recurring-infra names
-    /// (heartbeat) only snemu has are behavior *QEMU* didn't reach before halting —
-    /// but that excuse holds *only if snemu itself reached the crash*
-    /// (`snemu_crashed`). Otherwise, and for any other only-snemu name, it's a
-    /// genuine invention ([`invented_names`]) and breaks faithfulness.
+    /// Faithful ⇔ snemu neither **invented** telemetry QEMU never emits
+    /// ([`invented_names`]) **nor dropped** telemetry QEMU does ([`dropped_names`]).
+    /// A name only-snemu-has is a genuine invention unless it's recurring infra a
+    /// crash truncated (and snemu reached the crash). A name only-QEMU-has is a
+    /// genuine drop unless snemu was legitimately budget-truncated before reaching it
+    /// (snemu produced fewer frames than QEMU) — if snemu ran *at least as long* and
+    /// still lacks it, it diverged. Both directions must be clean.
     fn faithful(&self) -> bool {
         invented_names(&self.only_snemu, self.snemu_crashed).is_empty()
+            && dropped_names(&self.only_qemu, self.snemu_frames, self.qemu_frames).is_empty()
     }
 }
 
@@ -960,20 +979,32 @@ fn print_detailed(cmp: &Comparison) {
     if !cmp.only_snemu.is_empty() {
         eprintln!("  only in snemu: {:?}", cmp.only_snemu);
     }
+    if !cmp.only_qemu.is_empty() {
+        eprintln!("  only in qemu:  {:?}", cmp.only_qemu);
+    }
     let invented = invented_names(&cmp.only_snemu, cmp.snemu_crashed);
+    let dropped = dropped_names(&cmp.only_qemu, cmp.snemu_frames, cmp.qemu_frames);
     if cmp.faithful() {
-        if cmp.only_snemu.is_empty() {
-            eprintln!("snemu-diff: PASS — snemu faithful to QEMU (nothing only-in-snemu).");
+        if cmp.only_snemu.is_empty() && cmp.only_qemu.is_empty() {
+            eprintln!("snemu-diff: PASS — snemu faithful to QEMU (vocabularies match).");
         } else {
             eprintln!(
                 "snemu-diff: PASS — only-in-snemu is recurring infra QEMU halted before \
-                 reaching ({:?}); snemu reached the crash too (panic frame present), so it's \
-                 a benign clock-ordering truncation, not invented telemetry.",
-                cmp.only_snemu
+                 reaching, and any only-in-qemu is snemu budget-truncation (fewer frames than \
+                 QEMU); neither is invented or dropped telemetry."
             );
         }
     } else {
-        eprintln!("snemu-diff: FAIL — snemu invented telemetry QEMU never emits: {invented:?}");
+        if !invented.is_empty() {
+            eprintln!("snemu-diff: FAIL — snemu invented telemetry QEMU never emits: {invented:?}");
+        }
+        if !dropped.is_empty() {
+            eprintln!(
+                "snemu-diff: FAIL — snemu DROPPED telemetry QEMU emits (a fidelity gap — snemu \
+                 ran {} frames ≥ QEMU's {}, so it diverged rather than ran short): {dropped:?}",
+                cmp.snemu_frames, cmp.qemu_frames
+            );
+        }
     }
 }
 
