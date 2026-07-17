@@ -91,6 +91,16 @@ the `project_userspace_defined_metrics` memory.
   bound would reject real programs, and that surfaces as a boot panic rather than
   a red test. Mutation-clean (0 missed); `init` boots unaffected.
 
+- **#7 — Capability generation is load-bearing; revocation shipped.** The entry
+  said `generation` was "dead-weight at 0" and `Stale`-on-revoke "unbuilt" —
+  both stale. `CapTable::consume` bumps the generation (the single-use reply-cap
+  path), `revoke_by_cap_id` bumps it to reclaim a grant in *another* process's
+  table, and `CapError::Stale` is what a dead handle resolves to. On top of that
+  primitive: the transitive `Revoke` syscall (=28, by handle),
+  `CapEvent::Revoked`, `sched::revoke_descendants_of`'s cross-table
+  derivation-tree walk over `parent_cap_id`, `Endpoint::revoke_derived`, and the
+  `revoke-reclaims-a-minted-cap` itest. The Stitch shell's `hold`/`grant`/`revoke`
+  verbs close grant→use→reclaim end to end.
 - **#6 — Fault-safe user-copy.** `copy_from_user` only bounds-checked the user
   range (`user_range_ok`), so an in-range-but-unmapped pointer faulted the kernel
   on the `SUM` deref. Added `kernel_mem::mmu::range_mapped` (host-tested page-walk,
@@ -137,11 +147,6 @@ least one more crate). The itest speedup is kernel-dominated, so the pin costs
 `cargo xtask snemu-itest --opt high`.
 
 ## Deferred placeholders (Tier 3)
-
-### #7 — Capability generation / revocation
-
-`Capability.generation` exists as the revocation hook but is dead-weight at 0
-(`kernel-proc/src/cap.rs`); `Stale`-on-revoke is unbuilt.
 
 ### #8 — `kernel::sync` is one-flavor
 
