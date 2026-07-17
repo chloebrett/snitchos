@@ -952,14 +952,21 @@ pub fn run_unit_tests() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `cargo doc` every crate with `-D warnings`, so a broken intra-doc link fails
-/// the gate instead of rotting.
+/// `cargo doc` every crate, denying **broken** intra-doc links, so a link that
+/// resolves to nothing fails the gate instead of rotting.
+///
+/// Deliberately only `broken_intra_doc_links`, not `-D warnings`. The noisy
+/// neighbour is `private_intra_doc_links` (a public item's docs linking to a
+/// private one) — those links name something real, they just don't render, which
+/// is cosmetic and fires ~10× in `snemu` alone. A link pointing at a symbol that
+/// *doesn't exist* is the rot worth gating: it's how `[`span_start`]` outlived
+/// the function by several renames.
 ///
 /// Same two-target split as `run_clippy`, for the same reason: the bare-metal
 /// crates can't be documented for the host. `--no-deps` because we're checking
 /// *our* prose, not our dependencies'.
 fn check_rustdoc(names: &[&str]) -> bool {
-    let deny = &[("RUSTDOCFLAGS", "-D warnings")];
+    let deny = &[("RUSTDOCFLAGS", "-D rustdoc::broken_intra_doc_links")];
     let host_plan = match unit_test_plan(names, NOT_HOST_TESTED, EXTRA_TEST_ARGS) {
         Ok(plan) => plan,
         Err(e) => {
