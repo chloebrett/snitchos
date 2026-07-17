@@ -48,6 +48,16 @@ struct Cli {
     /// native ops off).
     #[arg(long)]
     calibrate_memops: bool,
+    /// Make `etc/ramfb` exist in the guest's fw_cfg directory — the snemu
+    /// equivalent of QEMU's `-device ramfb`. Off by default.
+    #[arg(long)]
+    ramfb: bool,
+    /// After running, write the captured `etc/ramfb` framebuffer to this
+    /// path as a binary PPM (P6) image (open with any image viewer). No-op
+    /// with a clear stderr message if no framebuffer was ever captured
+    /// (`--ramfb` wasn't passed, or the guest hasn't presented yet).
+    #[arg(long)]
+    dump_framebuffer: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -80,6 +90,9 @@ fn main() -> ExitCode {
     machine.set_block_jit(cli.block_jit);
     if cli.calibrate_memops {
         machine.enable_memop_probe();
+    }
+    if cli.ramfb {
+        machine.enable_fwcfg_ramfb();
     }
 
     let max_steps = cli.max_steps;
@@ -119,7 +132,27 @@ fn main() -> ExitCode {
 
     print!("{}", String::from_utf8_lossy(machine.uart_output()));
     report_frames(machine.virtio_tx_output(), cli.frames);
+    if let Some(path) = &cli.dump_framebuffer {
+        dump_framebuffer(&machine, path);
+    }
     ExitCode::SUCCESS
+}
+
+/// Write the machine's captured `etc/ramfb` framebuffer to `path` as a PPM
+/// image, or report on stderr why there's nothing to write — never a
+/// silent empty file.
+fn dump_framebuffer(machine: &snemu::machine::Machine, path: &std::path::Path) {
+    let Some(ppm) = machine.dump_framebuffer() else {
+        eprintln!(
+            "snemu: --dump-framebuffer requested but no framebuffer was captured \
+             (pass --ramfb, and make sure the guest reached its first present)"
+        );
+        return;
+    };
+    match std::fs::write(path, &ppm) {
+        Ok(()) => eprintln!("snemu: wrote {} ({} bytes)", path.display(), ppm.len()),
+        Err(e) => eprintln!("snemu: failed to write {}: {e}", path.display()),
+    }
 }
 
 /// Decode the bytes the kernel transmitted over the virtio-console back into

@@ -463,6 +463,8 @@ mod tests {
     /// captured state was ever hashed at all).
     #[test]
     fn different_captured_configs_hash_differently() {
+        use std::hash::{Hash, Hasher};
+
         let mut mem_a = Memory::new(0x10000);
         stage_valid_write(&mut mem_a, &sample_cfg_bytes());
         let mut dev_a = Fwcfg::new();
@@ -475,7 +477,6 @@ mod tests {
         let mut dev_b = Fwcfg::new();
         dev_b.complete_dma(&mut mem_b, DESC_PA);
 
-        use std::hash::{Hash, Hasher};
         let mut ha = std::collections::hash_map::DefaultHasher::new();
         dev_a.ramfb_cfg().hash(&mut ha);
         let mut hb = std::collections::hash_map::DefaultHasher::new();

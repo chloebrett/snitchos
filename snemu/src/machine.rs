@@ -434,6 +434,21 @@ impl Machine {
         self.bus.fwcfg_enable_ramfb();
     }
 
+    /// Render the captured `etc/ramfb` framebuffer as a binary PPM (P6)
+    /// image — `None` if no DMA write has completed (`etc/ramfb` was never
+    /// enabled, or the guest hasn't presented yet). The `--dump-framebuffer`
+    /// CLI flag's whole implementation; pixel-format conversion itself is
+    /// the pure, host-tested `framebuffer::render_ppm` — this is just the
+    /// thin, non-pure wrapper that extracts the pixel bytes from guest RAM.
+    #[must_use]
+    pub fn dump_framebuffer(&self) -> Option<Vec<u8>> {
+        let cfg = self.bus.fwcfg_ramfb_cfg()?;
+        let ram = self.bus.ram();
+        let len = u64::from(cfg.stride) * u64::from(cfg.height);
+        let pixels: Vec<u8> = (0..len).map(|i| ram.read_u8(cfg.addr + i).unwrap_or(0)).collect();
+        Some(crate::framebuffer::render_ppm(&pixels, cfg.width, cfg.height, cfg.stride))
+    }
+
     #[must_use]
     pub fn virtio_tx_output(&self) -> &[u8] {
         self.bus.virtio_tx_output()
