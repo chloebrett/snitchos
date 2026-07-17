@@ -148,7 +148,7 @@ a plan — see `plans/` for active implementation tracks.
 the userspace crates (talc OOM-loop → hang; confirmed in `snitchos-user`, at
 least one more crate). The itest speedup is kernel-dominated, so the pin costs
 ~nothing — which is exactly why it stays. The pin is the workaround; the UB is
-the debt. Repro: `cargo xtask snemu-itest --opt high`.
+the debt. Repro: `cargo xtask itest --opt high`.
 
 ## Tooling gaps
 

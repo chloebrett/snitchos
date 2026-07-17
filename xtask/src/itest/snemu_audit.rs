@@ -468,6 +468,7 @@ pub fn run(
     opt: crate::qemu::OptLevel,
     share_snapshots: bool,
     speed: SpeedConfig,
+    verbose: bool,
 ) -> ExitCode {
     let (kernel, dtb) = match snemu_diff::prepare_profiled(true, opt) {
         Ok(v) => v,
@@ -740,15 +741,19 @@ pub fn run(
                 let pass = matches!(outcome, Outcome::Pass);
                 push_segment(&segments, "scenario", s.name, s.workload, worker, start_s, started.elapsed().as_secs_f64(), instret, pass);
                 let n = done.fetch_add(1, Ordering::SeqCst) + 1;
-                eprintln!(
-                    "itest: [{n:>3}/{cap}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s  {:>4}/{}MiB{}",
-                    s.name,
-                    if pass { "ok" } else { "FAIL" },
-                    instret / 1_000_000,
-                    ram_used_bytes / (1024 * 1024),
-                    snemu_diff::ram_mb_for(s.workload),
-                    if collapsed { "  (shared)" } else { "" },
-                );
+                if verbose {
+                    // Note `n` is a *completion* counter, not progress: workers finish
+                    // out of order, so these arrive interleaved (…[113], [100]…).
+                    eprintln!(
+                        "itest: [{n:>3}/{cap}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s  {:>4}/{}MiB{}",
+                        s.name,
+                        if pass { "ok" } else { "FAIL" },
+                        instret / 1_000_000,
+                        ram_used_bytes / (1024 * 1024),
+                        snemu_diff::ram_mb_for(s.workload),
+                        if collapsed { "  (shared)" } else { "" },
+                    );
+                }
                 rows.lock().expect("rows")[*index] = Some(Row {
                     name: s.name,
                     outcome,
@@ -833,7 +838,7 @@ pub fn run(
         segs,
     );
 
-    let exit = print_report(&results, boot_instret, makespan.as_secs_f64());
+    let exit = print_report(&results, boot_instret, makespan.as_secs_f64(), verbose);
     print_utilization(&worker_busy, makespan, order, ideal_wall, ideal_instret);
     print_ram_sizing(&results);
     exit
@@ -1225,18 +1230,27 @@ fn budget_for(name: &str, default: u64) -> u64 {
     needed.max(default)
 }
 
-/// Print the per-scenario pass/fail lines, the slowest-scenario table (where the
-/// CPU goes), and the headline "N/M pass" summary. `boot_instret` is the one-time
-/// per-workload snapshot-boot cost, folded into the honest total-instret figure
-/// (the per-scenario steps are post-fork only).
-fn print_report(results: &[Row], boot_instret: u64, elapsed_secs: f64) -> ExitCode {
+/// Print the failures (always, with the guest's console), the slowest-scenario
+/// table (where the CPU goes), and the headline "N/M pass" summary.
+/// `boot_instret` is the one-time per-workload snapshot-boot cost, folded into
+/// the honest total-instret figure (the per-scenario steps are post-fork only).
+///
+/// `verbose` adds the full pass roll-call. It's off by default because a green
+/// `PASS` line per scenario is 120 lines saying what the summary says in one —
+/// and the deterministic suite has earned being believed. The failures, and the
+/// count, are the answer.
+fn print_report(results: &[Row], boot_instret: u64, elapsed_secs: f64, verbose: bool) -> ExitCode {
     let passed = results.iter().filter(|r| matches!(r.outcome, Outcome::Pass)).count();
     let total = results.len();
 
     println!("\n=== snemu itest fidelity ===");
     for Row { name, outcome, .. } in results {
         match outcome {
-            Outcome::Pass => println!("  PASS  {name}"),
+            Outcome::Pass => {
+                if verbose {
+                    println!("  PASS  {name}");
+                }
+            }
             Outcome::Fail { why, console } => {
                 println!("  FAIL  {name}\n          {}", first_line(why));
                 // The guest's own words at the moment of failure — the fastest way

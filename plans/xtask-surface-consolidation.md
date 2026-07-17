@@ -489,6 +489,37 @@ redo moved **one contiguous slice** — no per-field parsing, nothing to truncat
 and asserted every expected flag was present in the lifted text before splicing.
 *Structural edits should move blocks, not parse fields.*
 
+### Step 2.1b — ✅ DONE: quiet by default
+
+`itest` printed **~250 lines for 120 scenarios**, and said the one thing you
+wanted — which scenario failed — on line ~120 and again on line ~230. Every
+scenario was printed **twice**: once as a live progress line, once in the
+pass/fail roll-call.
+
+Both are now behind `--verbose` / `-v`. Default output: **63 lines** (from ~250),
+with the failure third from the top. `--verbose` restores all 239 lines — nothing
+was deleted, only moved.
+
+**Why they existed:** they're a holdover from the minutes-long, flake-prone QEMU
+suite, where you watched the progress to see it hadn't wedged and read the
+roll-call because you didn't trust a single green run. The suite is now **3.5s and
+deterministic**. The output should state the answer and stop.
+
+**The distinction that matters** (user's correction — my first idea list got this
+wrong): cargo's *build* chatter stays. The build genuinely takes a while, so
+"Compiling kernel" is real progress against a slow step. The *run* is 3.5s, so its
+per-scenario lines aren't progress, they're scrollback. **Speed is what decides
+whether progress output earns its place** — and only the run got fast.
+
+Also noted in code while gating it: the `[n/120]` counter is a *completion*
+counter, not progress — workers finish out of order, so it arrives interleaved
+(…[113], [100]…). Comment added rather than fixed; it's honest under `--verbose`.
+
+**Still open** (the "#2" of that list): the analysis tables — slowest-by-instret,
+worker utilization, RAM right-sizing — are ~45 of the remaining 63 lines. They're
+*tuning* output, not test results: excellent when packing, noise when gating.
+Candidate for `--stats`.
+
 ### ~~Step 2.1 (original text)~~
 
 The rename, and only the rename. The flake machinery stays alive (and reachable

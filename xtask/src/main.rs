@@ -187,6 +187,17 @@ enum Cmd {
         /// Which engine runs the scenarios. See [`Engine`].
         #[arg(long, value_enum, default_value_t)]
         engine: Engine,
+        /// Print a line per scenario as it completes (worker, verdict, guest
+        /// instret, wall, RAM), plus the full pass/fail roll-call.
+        ///
+        /// Off by default: the suite is ~3.5s and deterministic, so the default
+        /// output is the *answer* — the failures and a count — not a play-by-play.
+        /// The per-scenario lines are a holdover from the minutes-long, flake-prone
+        /// QEMU suite, where you watched them to see it hadn't wedged. (The build
+        /// chatter above is different — that step really is slow, so its progress
+        /// stays.)
+        #[arg(long, short = 'v')]
+        verbose: bool,
         /// Per-scenario snemu instruction-step budget. Passing scenarios
         /// short-circuit well under this; the budget only bounds failing ones and
         /// the slow OOM/cooperative workloads. 400M recovers the budget-sensitive
@@ -524,8 +535,12 @@ enum SnemuCmd {
         /// Accepts `K`/`M`/`B` suffixes, e.g. `400M`, `1.2B`.
         #[arg(long, default_value = "150M", value_parser = magnitude::parse)]
         steps: u64,
-        /// Seconds to collect QEMU telemetry before killing it.
-        #[arg(long, default_value_t = 6)]
+        /// Safety cap (seconds) on the QEMU collection. QEMU normally stops as soon as
+        /// it has emitted the same frame count snemu did (matched capture — see
+        /// `collect_qemu`); this bounds the wait if QEMU is slower to reach that count
+        /// or stalls. Raise it if a diff FAILs with QEMU having hit the cap short of
+        /// snemu's count.
+        #[arg(long, default_value_t = 10)]
         qemu_secs: u64,
         /// Runtime workload to run under both emulators (e.g. `demo`, `smp`).
         /// Implies the `itest-workloads` build. Omit for the default `init` boot.
@@ -934,6 +949,25 @@ mod cli_surface_tests {
         assert!(Cli::try_parse_from(["xtask", "itest", "--engine", "bochs"]).is_err());
     }
 
+    /// The suite is 3.5s and deterministic, so the default output is the answer —
+    /// failures and a count — not a play-by-play. `--verbose` brings back the
+    /// per-scenario lines.
+    #[test]
+    fn itest_takes_a_verbose_flag() {
+        use super::Cmd;
+
+        let cli = Cli::try_parse_from(["xtask", "itest"]).expect("parses");
+        let Cmd::Itest { verbose, .. } = cli.cmd else { panic!("expected Itest") };
+        assert!(!verbose, "quiet is the default — the run is 3.5s, not a progress bar");
+
+        for argv in [["itest", "--verbose"].as_slice(), ["itest", "-v"].as_slice()] {
+            let full: Vec<&str> = std::iter::once("xtask").chain(argv.iter().copied()).collect();
+            let cli = Cli::try_parse_from(&full).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            let Cmd::Itest { verbose, .. } = cli.cmd else { panic!("expected Itest") };
+            assert!(verbose, "{argv:?} should enable verbose");
+        }
+    }
+
     /// Both engines' flags still parse after the merge — 2.2 gates them per
     /// engine; 2.1 only moves them under one verb.
     #[test]
@@ -1262,6 +1296,7 @@ fn main() -> ExitCode {
         Cmd::Itest {
             scenario,
             engine,
+            verbose,
             steps,
             limit,
             no_idle_skip,
@@ -1311,6 +1346,7 @@ fn main() -> ExitCode {
                     opt.unwrap_or(qemu::OptLevel::Mid),
                     share_snapshots,
                     speed,
+                    verbose,
                 )
             }
             // The escape hatch: slower and flake-prone, but it's the engine snemu is

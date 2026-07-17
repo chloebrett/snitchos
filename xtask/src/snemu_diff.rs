@@ -203,7 +203,8 @@ pub(crate) fn timing_qemu(
     window: Duration,
     opt: qemu::OptLevel,
 ) -> Result<Timing, String> {
-    let (_frames, timing) = collect_qemu(window, workload, opt)?;
+    // Timing-only: collect for the full window (no frame-count match).
+    let (_frames, timing) = collect_qemu(window, workload, opt, usize::MAX)?;
     Ok(timing)
 }
 
@@ -290,14 +291,20 @@ fn collect_snemu(
     Ok((decode_frames(machine.virtio_tx_output()), stop, timing))
 }
 
-/// Boot the kernel under QEMU (with `workload`), collect the telemetry frames
-/// for `window`, then kill it. Timing is measured from spawn: `first_span` is
-/// when the first `SpanStart` arrives on the wire (a real streaming latency,
-/// including QEMU's firmware + DTB-gen startup); `total` is the whole window.
+/// Boot the kernel under QEMU (with `workload`), collect telemetry frames until QEMU
+/// has emitted `target_frames` (matching snemu's count, so both emulators capture the
+/// **same amount** of the workload — symmetric truncation, which is what makes the
+/// vocabulary diff meaningful rather than an artifact of one side stopping earlier),
+/// then kill it. `cap` is a **safety timeout**: QEMU stops at `target_frames` *or*
+/// `cap`, whichever first — guarding against QEMU being slower to reach the count or
+/// stalling. Pass `target_frames = usize::MAX` to collect for the full `cap` (the
+/// timing-only path). Timing is measured from spawn: `first_span` is the first
+/// `SpanStart`'s streaming latency; `total` is the whole run.
 fn collect_qemu(
-    window: Duration,
+    cap: Duration,
     workload: Option<&str>,
     opt: qemu::OptLevel,
+    target_frames: usize,
 ) -> Result<(Vec<OwnedFrame>, Timing), String> {
     let start = Instant::now();
     let socket = std::env::temp_dir().join(format!(
@@ -354,7 +361,18 @@ fn collect_qemu(
         }
     };
 
-    thread::sleep(window);
+    // Poll the frame count: stop as soon as QEMU matches snemu's count (symmetric
+    // capture), or the safety cap elapses. `frames` is filled by the reader thread.
+    let deadline = Instant::now() + cap;
+    loop {
+        if frames.lock().unwrap().len() >= target_frames {
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     let _ = qemu.kill();
     let _ = qemu.wait();
     if let Some(reader) = reader {
@@ -459,18 +477,16 @@ fn invented_names(only_snemu: &[String], snemu_crashed: bool) -> Vec<String> {
 }
 
 /// The only-qemu names that indicate snemu **dropped** telemetry QEMU emits — a
-/// fidelity gap, the mirror of [`invented_names`]. A vocabulary name only QEMU has is
-/// behaviour QEMU reached that snemu did not, in a *deterministic* workload: either
-/// snemu was **budget-truncated** (raise `--steps` and it clears) or snemu
-/// **diverged** and will never emit it (raise `--steps` and it persists — e.g.
-/// `supervised` under `--opt mid`, where release-snemu stalls after the crasher's 4th
-/// exit and never reaches the escalate trio, even at 25× the budget a faithful run
-/// needs). We can't tell the two apart from a single run — snemu's instruction budget
-/// and QEMU's wall-clock window produce *incomparable* frame counts, so counting
-/// frames doesn't help — so **any** non-empty only-qemu breaks faithfulness, with the
-/// caller printing a "raise `--steps` to rule out truncation" hint. (Requires a
-/// `--qemu-secs` long enough that QEMU itself reached the behaviour; too short a window
-/// truncates *QEMU* and shows up as false only-snemu instead.) Empty ⇒ no gap.
+/// fidelity gap, the mirror of [`invented_names`]. Meaningful because QEMU's capture is
+/// **frame-count-matched** to snemu's (see [`collect_qemu`]): both emulators stop at
+/// the same number of frames, so a name QEMU has that snemu lacks is behaviour QEMU
+/// reached within the *same budget* — snemu diverged, it didn't merely run shorter.
+/// (Without the match, an instruction-budgeted snemu and a wall-clock-windowed QEMU
+/// stop at incomparable points and every longer workload shows spurious both-direction
+/// diffs — the old fixed-window failure mode.) `supervised` under `--opt mid` is the
+/// canonical hit: release-snemu stalls after the crasher's 4th exit and never reaches
+/// the escalate trio, so it's the only-qemu even at matched frame counts. **Any**
+/// non-empty only-qemu breaks faithfulness. Empty ⇒ no gap.
 fn dropped_names(only_qemu: &[String]) -> Vec<String> {
     only_qemu.to_vec()
 }
@@ -479,10 +495,10 @@ impl Comparison {
     /// Faithful ⇔ snemu neither **invented** telemetry QEMU never emits
     /// ([`invented_names`]) **nor dropped** telemetry QEMU does ([`dropped_names`]).
     /// A name only-snemu-has is a genuine invention unless it's recurring infra a
-    /// crash truncated (and snemu reached the crash). A name only-QEMU-has is a
-    /// genuine drop unless snemu was legitimately budget-truncated before reaching it
-    /// (snemu produced fewer frames than QEMU) — if snemu ran *at least as long* and
-    /// still lacks it, it diverged. Both directions must be clean.
+    /// crash truncated (and snemu reached the crash). A name only-QEMU-has is a genuine
+    /// drop, because QEMU's capture is frame-count-matched to snemu's — both saw the
+    /// same amount, so QEMU reaching a name snemu didn't means snemu diverged, not that
+    /// it ran shorter. Both directions must be clean.
     fn faithful(&self) -> bool {
         invented_names(&self.only_snemu, self.snemu_crashed).is_empty()
             && dropped_names(&self.only_qemu).is_empty()
@@ -506,7 +522,11 @@ fn compare(
         None => dtb_base.to_vec(),
     };
     let (snemu, snemu_stop, snemu_timing) = collect_snemu(kernel, &dtb, max_steps)?;
-    let (qemu, qemu_timing) = collect_qemu(Duration::from_secs(qemu_secs), workload, opt)?;
+    // Match QEMU's capture to snemu's frame count so both stop at the same amount of
+    // the workload (`qemu_secs` is only a safety cap). Symmetric capture is what makes
+    // the vocabulary diff a real signal rather than a truncation artifact.
+    let (qemu, qemu_timing) =
+        collect_qemu(Duration::from_secs(qemu_secs), workload, opt, snemu.len())?;
 
     let d = diff_streams(&snemu, &qemu);
     let sv = string_vocabulary(&snemu);
@@ -1001,10 +1021,10 @@ fn print_detailed(cmp: &Comparison) {
         }
         if !dropped.is_empty() {
             eprintln!(
-                "snemu-diff: FAIL — snemu DROPPED telemetry QEMU emits: {dropped:?}. Either snemu \
-                 was budget-truncated (raise --steps and re-check — the drop should clear) or it \
-                 diverged and will never emit it (the drop persists). Ensure --qemu-secs was long \
-                 enough that QEMU itself reached this behaviour."
+                "snemu-diff: FAIL — snemu DROPPED telemetry QEMU emits (QEMU's capture is \
+                 frame-count-matched to snemu's, so this is a real divergence, not snemu running \
+                 shorter): {dropped:?}. If QEMU hit the --qemu-secs safety cap before matching \
+                 snemu's frame count, raise it."
             );
         }
     }
