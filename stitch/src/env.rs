@@ -197,7 +197,7 @@ impl Env {
     /// Enter a nested call: push a [`Frame`] for the function named `name` onto the
     /// run-shared call stack and hand back a [`CallGuard`] that pops it on drop (so
     /// the stack tracks *current* nesting on every exit path). `None` if entering
-    /// would exceed [`MAX_CALL_DEPTH`] — the caller should fault rather than recurse
+    /// would exceed `MAX_CALL_DEPTH` — the caller should fault rather than recurse
     /// into an overflow.
     #[must_use]
     pub fn enter_call(&self, name: Option<String>) -> Option<CallGuard> {

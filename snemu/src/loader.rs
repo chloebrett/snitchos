@@ -142,6 +142,13 @@ fn load_memory(
     let phnum = u64::from(u16_at(image, off::E_PHNUM)?);
 
     let mut mem = Memory::new(ram_size);
+    // Deterministic frame-scramble stress mode (opt-in). Enabled here — before any
+    // segment is written — so the loader's bulk writes scatter consistently. Forces
+    // the page-straddle hazard to fire everywhere instead of only when the guest
+    // allocator happens to fragment. See `Memory::scramble`.
+    if std::env::var("SNEMU_SCRAMBLE_FRAMES").is_ok_and(|v| !v.is_empty() && v != "0") {
+        mem.set_scramble(true);
+    }
     let mut entry_pa = None;
     for i in 0..phnum {
         let base = (phoff + i * phentsize) as usize;

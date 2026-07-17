@@ -6,7 +6,7 @@
 //! DTB and feeds it in. See `docs/runtime-workload-selection-design.md`.
 //!
 //! There is no table of bootarg names: a workload's name *is* the kebab-case of
-//! its [`WorkloadKind`] variant, derived at lookup time by [`kebab_eq`]. Adding a
+//! its [`WorkloadKind`] variant, derived at lookup time by `kebab_eq`. Adding a
 //! workload means adding one variant — nothing else to keep in sync. Variants are
 //! declared in sorted order, which the `workload_variants_are_declared_in_sorted_order`
 //! test enforces by reading this file's own source.

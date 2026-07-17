@@ -1,5 +1,5 @@
 //! Lowering Stitch's high-level [`TelemetryEvent`]s into `SnitchOS` wire
-//! [`Frame`](protocol::Frame)s — the bridge that turns "Stitch recorded some
+//! [`protocol::Frame`]s — the bridge that turns "Stitch recorded some
 //! telemetry" into "telemetry the collector can decode into Tempo/Prometheus".
 //!
 //! The two shapes don't match. A `TelemetryEvent` is string-named, untimed, and

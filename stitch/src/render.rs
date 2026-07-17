@@ -77,7 +77,7 @@ impl Table {
     }
 
     /// Each column's display width — the widest of its header (if any) and its
-    /// cells, counted in **terminal cells** ([`display_width`]): an emoji is one
+    /// cells, counted in **terminal cells** (`display_width`): an emoji is one
     /// `char` but two cells, so neither byte nor `char` length would align.
     #[must_use]
     pub fn widths(&self) -> Vec<usize> {

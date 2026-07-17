@@ -43,7 +43,10 @@ global_asm!(include_str!("entry.S"));
 /// Kernel entry point, called from `_start` (see entry.S).
 ///
 /// Inputs come from `OpenSBI`'s S-mode handoff contract:
-/// - `_hart_id`: which hart we booted on (we only have one in v0.1).
+/// - `hart_id`: the **mhartid** of the hart we booted on. Not a logical id and
+///   not necessarily 0 — `OpenSBI` picks the boot hart, and under QEMU `-smp 2`
+///   it can hand us 1. Everything downstream that says "the other hart" derives
+///   from it (see the `1 - hart_id` arithmetic below).
 /// - `dtb_phys`: physical address of the device tree blob.
 ///
 /// MMU is off, interrupts are off. We have a valid stack and a zeroed .bss.
@@ -60,7 +63,7 @@ global_asm!(include_str!("entry.S"));
 ///   immediately; the panic handler may not produce output before
 ///   `console::init` runs.
 #[unsafe(no_mangle)]
-pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
+pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // DTB parse must come first — we need it to discover MMIO regions
     // before we build the boot page table. Pure parsing, no formatted
     // output, no fn-pointer-dispatched calls. Safe with MMU off
@@ -117,7 +120,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // higher-half static, so this must run post-trampoline.
     //
     // We pass *logical* hartid 0 here, regardless of what mhartid
-    // OpenSBI handed us as `_hart_id`. The boot hart is by definition
+    // OpenSBI handed us as `hart_id`. The boot hart is by definition
     // logical hart 0 (kmain runs there once, owns all the boot
     // bookkeeping); the secondary always comes up as logical hart 1
     // via `secondary_main(_, 1)`. The platform `mhartid` is captured
@@ -131,9 +134,9 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     // Record the logical→mhartid mapping so `ipi::send(logical_id)`
     // can translate to the platform mhartid that `sbi_send_ipi`
     // expects. With MAX_HARTS=2 and OpenSBI free to pick either as
-    // boot, the mapping is { 0 → _hart_id, 1 → 1-_hart_id }.
-    percpu::LOGICAL_TO_MHARTID[0].store(_hart_id as u64, Ordering::Relaxed);
-    percpu::LOGICAL_TO_MHARTID[1].store(1u64 - _hart_id as u64, Ordering::Relaxed);
+    // boot, the mapping is { 0 → hart_id, 1 → 1-hart_id }.
+    percpu::LOGICAL_TO_MHARTID[0].store(hart_id as u64, Ordering::Relaxed);
+    percpu::LOGICAL_TO_MHARTID[1].store(1u64 - hart_id as u64, Ordering::Relaxed);
 
     // Verify we're actually at higher-half PC. `auipc rd, 0` puts
     // `current_pc + 0` in `rd`, so the result is the runtime address
@@ -449,12 +452,12 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
 
     // v0.6 step 8: bring up the *other* hart. OpenSBI's choice of
     // boot hart isn't always 0 — under QEMU `-smp 2` it can hand us
-    // `_hart_id=1`. So we compute the target as "any hart that isn't
-    // me," which for MAX_HARTS=2 is just `1 - _hart_id`. We also
-    // declare boot hart = hart whose mhartid is `_hart_id`, role Boot;
+    // `hart_id=1`. So we compute the target as "any hart that isn't
+    // me," which for MAX_HARTS=2 is just `1 - hart_id`. We also
+    // declare boot hart = hart whose mhartid is `hart_id`, role Boot;
     // the SECONDARY slot of PER_HART_DATA still uses logical hart_id=1
     // because that's where we statically placed it.
-    let boot_mhartid = _hart_id as u64;
+    let boot_mhartid = hart_id as u64;
     let secondary_mhartid = 1u64 - boot_mhartid;
     heartbeat::BOOT_MHARTID.store(boot_mhartid, Ordering::Relaxed);
     tracing::emit_hart_register(0, boot_mhartid, protocol::HartRole::Boot);

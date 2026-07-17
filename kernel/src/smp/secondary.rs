@@ -143,7 +143,7 @@ pub unsafe fn prepare_for_secondary() {
 /// `a0 = mhartid` (SBI handoff), `a1 = opaque` (logical hartid we
 /// passed to `sbi_hart_start`).
 #[unsafe(no_mangle)]
-pub extern "C" fn secondary_main(_mhartid: usize, hartid: usize) -> ! {
+pub extern "C" fn secondary_main(mhartid: usize, hartid: usize) -> ! {
     // Set tp = &PER_HART_DATA[hartid]. From here on
     // current_hartid() returns the right value.
     //
@@ -155,7 +155,7 @@ pub extern "C" fn secondary_main(_mhartid: usize, hartid: usize) -> ! {
     // subsequent frames to this register.
     tracing::emit_hart_register(
         hartid as u8,
-        _mhartid as u64,
+        mhartid as u64,
         protocol::HartRole::Worker,
     );
 

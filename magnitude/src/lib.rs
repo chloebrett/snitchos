@@ -2,7 +2,7 @@
 //!
 //! Large counts are error-prone to read and to type as bare digit strings.
 //! [`parse`] reads a decimal with an optional `K`/`M`/`B` magnitude suffix;
-//! [`format`] renders one back the same way, so a printed number can be pasted
+//! [`format()`] renders one back the same way, so a printed number can be pasted
 //! straight back into a flag that parses one.
 //!
 //! Suffixes are decimal (1K = 1000), not binary — this is for counting things,

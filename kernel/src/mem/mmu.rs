@@ -244,7 +244,7 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
 ///   PC would yank the rug out from under the running instruction
 ///   stream.
 /// - `CONSOLE` and `UART` statics must already hold higher-half VAs,
-///   and the panic-handler / `_pre_init_uart` paths must already
+///   and the panic-handler / `pre_init_uart` paths must already
 ///   route through `emergency_uart_base()`. Otherwise the next print
 ///   faults.
 /// - DTB region (which lived in the identity kernel gigapage) becomes

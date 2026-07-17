@@ -12,7 +12,7 @@ use kernel_devices::console::ConsoleRing;
 ///
 /// Known weaknesses:
 /// - Accessed via the print!/println! macros, which silently fall back to
-///   `_pre_init_uart()` (via `emergency_uart_base()`) if this hasn't been
+///   `pre_init_uart()` (via `emergency_uart_base()`) if this hasn't been
 ///   initialized yet. The base is hardcoded for QEMU `virt`; any other board
 ///   would lose pre-init output.
 /// - No re-entrancy guard. A panic inside a print would try to lock again and
@@ -42,7 +42,7 @@ pub unsafe fn init(uart_addr: usize) {
 }
 
 /// Hardcoded NS16550A physical MMIO base for QEMU `virt`. Used via
-/// `emergency_uart_base()` by both the macro fallback (`_pre_init_uart`)
+/// `emergency_uart_base()` by both the macro fallback (`pre_init_uart`)
 /// and the panic handler. Wrong on any other board — see `console.rs`
 /// known weaknesses.
 pub const QEMU_VIRT_UART_BASE: usize = 0x10000000;
@@ -59,15 +59,18 @@ pub const QEMU_VIRT_UART_BASE: usize = 0x10000000;
 ///
 /// Only safe to call before `console::init` has run — no other writer
 /// is using the device yet. Not exported for general use; it's `pub`
-/// so the macros can reach it, not because callers should.
-pub unsafe fn _pre_init_uart() -> Uart16550 {
+/// so the macros can reach it, not because callers should — which is what
+/// `#[doc(hidden)]` says. It used to say it with a `_` prefix, but that means
+/// "unused" and the macros below use it on every pre-init `print!`.
+#[doc(hidden)]
+pub unsafe fn pre_init_uart() -> Uart16550 {
   // SAFETY: see function-level doc; precondition is that no other code
   // currently holds the UART.
   unsafe { Uart16550::new(emergency_uart_base()) }
 }
 
 /// Pick the UART MMIO base address that's valid for the current
-/// `satp` state. Used by `_pre_init_uart` and the panic handler — both
+/// `satp` state. Used by `pre_init_uart` and the panic handler — both
 /// can fire at any boot stage, including pre-MMU and post-identity-unmap.
 pub fn emergency_uart_base() -> usize {
   let satp: u64;
@@ -138,7 +141,7 @@ pub fn read_into(dst: &mut [u8]) -> usize {
 /// Print formatted output to the kernel console (no trailing newline).
 ///
 /// Uses the initialized `UART` static once it's set; before that, falls back
-/// to `_pre_init_uart()` (which routes through `emergency_uart_base()` so
+/// to `pre_init_uart()` (which routes through `emergency_uart_base()` so
 /// the right address space is picked for the current MMU state).
 #[macro_export]
 macro_rules! print {
@@ -148,7 +151,7 @@ macro_rules! print {
       let _ = write!(&mut *uart.lock(), $($arg)*);
     } else {
       // SAFETY: pre-init fallback fires before console::init runs.
-      let mut uart = unsafe { $crate::console::_pre_init_uart() };
+      let mut uart = unsafe { $crate::console::pre_init_uart() };
       let _ = write!(&mut uart, $($arg)*);
     }
   }};
@@ -165,7 +168,7 @@ macro_rules! println {
       let _ = writeln!(&mut *uart.lock(), $($arg)*);
     } else {
       // SAFETY: pre-init fallback fires before console::init runs.
-      let mut uart = unsafe { $crate::console::_pre_init_uart() };
+      let mut uart = unsafe { $crate::console::pre_init_uart() };
       let _ = writeln!(&mut uart, $($arg)*);
     }
   }};

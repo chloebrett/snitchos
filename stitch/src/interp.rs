@@ -384,7 +384,7 @@ fn check_coherence(modules: &[Module]) -> Result<(), RuntimeError> {
 /// The built-in standard-library modules and the members each exposes — the
 /// Whether `name` is a built-in stdlib module (provided by the runtime, not read
 /// from a `.st` file) — the module loader skips these.
-/// Derived from the `module` field on each [`NativeFn`]; no separate spec table.
+/// Derived from the `module` field on each `NativeFn`; no separate spec table.
 #[must_use]
 pub fn is_builtin_module(name: &str) -> bool {
     NATIVES.iter().any(|n| n.module == Some(name))

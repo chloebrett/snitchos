@@ -230,7 +230,7 @@ pub enum Syscall {
     /// in `a0` (so a too-small buffer is detectable: returned `>` `N`), or
     /// `usize::MAX` on a bad/unwritable buffer range. Backs the shell's `hold`.
     CapList = 27,
-    /// Revoke the capabilities **derived from** the holding `a0` (a [`Handle`]) names
+    /// Revoke the capabilities **derived from** the holding `a0` (a `Handle`) names
     /// — its transitive descendants in the cap derivation tree, wherever they were
     /// delegated. Authority is implicit: holding the handle *is* the right to reclaim
     /// what you granted from it. The caller's own holding survives; each revoked
@@ -245,7 +245,7 @@ pub enum Syscall {
     /// platform rate — `Instant::elapsed()` divides a tick delta by this.
     ClockFreq = 29,
     /// Terminate a child process named by an `Object::Process` capability (`a0` =
-    /// [`Handle`]) the caller holds with the `KILL` right — minted into the parent's
+    /// `Handle`) the caller holds with the `KILL` right — minted into the parent's
     /// table at [`Self::Spawn`]. Tears down + reaps the target (its `WaitAny` parent
     /// wakes with a killed status). Capability-authorized, so it composes to a
     /// sub-supervisor granted `KILL` over its subtree (supervision v2a).

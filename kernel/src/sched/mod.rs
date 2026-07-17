@@ -259,7 +259,7 @@ impl Drop for KernelStack {
 
 /// One kernel thread. The `context` field holds the saved
 /// callee-saved register set while the task is off-CPU; the asm
-/// reads/writes it through a `*mut TaskContext`. `_stack` keeps the
+/// reads/writes it through a `*mut TaskContext`. `stack` keeps the
 /// stack memory alive — the raw `sp` value in `context` points into
 /// it, so the `Box` must outlive any running of this task.
 pub struct Task {
@@ -341,7 +341,7 @@ pub struct Task {
     /// for task 0, which inherits the boot stack. Read for `high_water_bytes` on
     /// the heartbeat; kept alive so `Drop` unmaps + frees the stack when the task
     /// is reaped. Overflow detection is the stack's guard page (Tier B), not a canary.
-    _stack: Option<KernelStack>,
+    stack: Option<KernelStack>,
 }
 
 // SAFETY: Task contains an UnsafeCell<TaskContext> (which is !Sync).
@@ -402,7 +402,7 @@ impl Task {
             runs_metric,
             stack_high_water_metric,
             context: UnsafeCell::new(TaskContext::default()),
-            _stack: None,
+            stack: None,
         }
     }
 }
@@ -599,7 +599,7 @@ pub fn task_snapshots() -> Vec<TaskSnapshot> {
             stack_high_water_metric: t.stack_high_water_metric,
             cpu_time_ticks: t.cpu_time_ticks.load(Ordering::Relaxed),
             runs: t.runs.load(Ordering::Relaxed),
-            stack_high_water_bytes: t._stack.as_ref().map_or(0, |s| s.high_water_bytes()),
+            stack_high_water_bytes: t.stack.as_ref().map_or(0, |s| s.high_water_bytes()),
         })
         .collect()
 }
@@ -647,7 +647,7 @@ pub fn touch_current_stack_guard() {
             .tasks
             .iter()
             .find(|t| t.id == id)
-            .and_then(|t| t._stack.as_ref())
+            .and_then(|t| t.stack.as_ref())
             .map(|s| kernel_proc::stack::slot_base_va(s.slot))
     };
     if let Some(va) = guard_va {
@@ -883,7 +883,7 @@ pub fn spawn_on_with_arg(
         ctx.ra = entry as *const () as u64;
         ctx.sp = sp;
     }
-    task._stack = Some(stack);
+    task.stack = Some(stack);
 
     let owned_name = task.name.clone();
     {
@@ -1628,7 +1628,7 @@ pub fn reap_task(child: TaskId) {
     if !process.is_null() {
         // SAFETY: `process` points at the child's `Process`, which lived in the
         // child's kernel-stack frame (`run_with_caps`/`spawned_entry` locals) and
-        // so is owned by `task._stack`, still alive here. The child has `Exited`,
+        // so is owned by `task.stack`, still alive here. The child has `Exited`,
         // nothing else references it, and the pointer is dropped exactly once.
         let proc_ref = unsafe { &*process };
         // Reclaim the process's interned span + metric names: drop their bytes and
