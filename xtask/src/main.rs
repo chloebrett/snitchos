@@ -1413,54 +1413,69 @@ fn boot(
     }
 }
 
+/// Lint the whole workspace, each crate for the target it actually builds for.
+///
+/// Both crate lists are **derived from `cargo metadata`**, not written down here.
+/// An allow-list let a crate be silently never-linted by simple omission, which is
+/// exactly what happened: `snemu`, `stitch`, `hitch` and eleven others were never
+/// linted at all, and the riscv half was missing `snitchos-std` and `fs`. Deriving
+/// them means a new crate is linted the moment it joins the workspace, and
+/// `itest::NOT_HOST_TESTED` is the only way out — the same shape the host test gate
+/// already uses, for the same reason.
+///
+/// Per-crate invocation (rather than one `-p a -p b …`) because the feature args a
+/// crate needs are its own: `--features stitch/testing` is invalid for any package
+/// that doesn't depend on stitch. Same lesson `MUTANT_CRATES` records.
 fn run_clippy(extra_args: &[String]) -> ExitCode {
-    // Host-buildable crates: lint everything including tests.
-    let host = Command::new("cargo")
-        .args([
-            "clippy",
-            "-p",
-            "kernel-mem",
-            "-p",
-            "kernel-obs",
-            "-p",
-            "kernel-devices",
-            "-p",
-            "kernel-boot",
-            "-p",
-            "kernel-proc",
-            "-p",
-            "protocol",
-            "-p",
-            "collector",
-            "-p",
-            "xtask",
-            "-p",
-            "snitchos-abi",
-            "--all-targets",
-        ])
-        .args(extra_args)
-        .status()
-        .expect("failed to invoke cargo clippy");
+    let members = match itest::workspace_members() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("clippy: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let names: Vec<&str> = members.iter().map(String::as_str).collect();
 
-    // The kernel and the userspace program only compile for bare-metal
-    // riscv. No `--all-targets`: neither has a host-buildable test target.
-    let kernel = Command::new("cargo")
-        .args([
-            "clippy",
-            "-p",
-            "kernel",
-            "-p",
-            "snitchos-user",
-            "-p",
-            "hello",
-            "--target",
-            qemu::KERNEL_TARGET,
-        ])
-        .args(extra_args)
-        .status()
-        .expect("failed to invoke cargo clippy");
+    // Host-buildable crates: lint everything including tests. Reuses the test
+    // gate's per-crate feature args — a crate that needs `--features std` to
+    // compile its tests needs it to lint them too.
+    let host_plan = match itest::unit_test_plan(&names, itest::NOT_HOST_TESTED, itest::EXTRA_TEST_ARGS) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("clippy: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let host = host_plan.iter().all(|(crate_name, crate_args)| {
+        let mut args = vec!["clippy", "-p", crate_name, "--all-targets"];
+        args.extend_from_slice(crate_args);
+        Command::new("cargo")
+            .args(&args)
+            .args(extra_args)
+            .status()
+            .expect("failed to invoke cargo clippy")
+            .success()
+    });
 
-    if host.success() && kernel.success() {
+    // The kernel and the userspace crates only compile for bare-metal riscv.
+    // No `--all-targets`: none has a host-buildable test target.
+    let riscv_plan = match itest::riscv_only_plan(&names, itest::NOT_HOST_TESTED) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("clippy: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let kernel = riscv_plan.iter().all(|crate_name| {
+        Command::new("cargo")
+            .args(["clippy", "-p", crate_name, "--target", qemu::KERNEL_TARGET])
+            .args(extra_args)
+            .status()
+            .expect("failed to invoke cargo clippy")
+            .success()
+    });
+
+    if host && kernel {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)

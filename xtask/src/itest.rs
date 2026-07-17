@@ -666,7 +666,7 @@ fn current_commit_short() -> Option<String> {
 ///
 /// The inverse (an allow-list) let a crate be silently never-tested by simple
 /// omission — which is exactly how the `kernel-core` rename slipped through.
-const NOT_HOST_TESTED: &[(&str, &str)] = &[
+pub(crate) const NOT_HOST_TESTED: &[(&str, &str)] = &[
     ("kernel", "no_std/no_main, riscv64-only — won't link for the host; its logic lives in the kernel-* crates"),
     ("snitchos-user", "riscv64-only userspace runtime (crt0 + syscall bindings)"),
     ("snitchos-std", "riscv64-only userspace std"),
@@ -676,7 +676,7 @@ const NOT_HOST_TESTED: &[(&str, &str)] = &[
 
 /// Extra `cargo test` args a crate's suite needs (features it can't get from
 /// its defaults). Entries naming a departed crate are an error, not a no-op.
-const EXTRA_TEST_ARGS: &[(&str, &[&str])] = &[
+pub(crate) const EXTRA_TEST_ARGS: &[(&str, &[&str])] = &[
     // `protocol::stream` (decoder + OwnedFrame) is behind `std`.
     ("protocol", &["--features", "std"]),
     // `--features testing` exposes `stitch::testing` so the integration tests
@@ -684,8 +684,35 @@ const EXTRA_TEST_ARGS: &[(&str, &[&str])] = &[
     ("stitch", &["--features", "testing"]),
 ];
 
+/// The crates the riscv gate lints: exactly the [`NOT_HOST_TESTED`] set, in
+/// member order. The two lists coincide for one reason — a crate is exempt from
+/// the host gate *because* it only builds for riscv64 — so that one axis decides
+/// both gates rather than each keeping its own list to drift.
+///
+/// A stale entry is an error, for the same reason it is in [`unit_test_plan`].
+pub(crate) fn riscv_only_plan<'a>(
+    members: &[&'a str],
+    riscv_only: &[(&str, &str)],
+) -> Result<Vec<&'a str>, String> {
+    let stale: Vec<&str> =
+        riscv_only.iter().map(|(name, _)| *name).filter(|name| !members.contains(name)).collect();
+    if !stale.is_empty() {
+        return Err(format!(
+            "riscv-only policy names crates that are not workspace members: {}. \
+             Renamed or removed? Update NOT_HOST_TESTED in xtask/src/itest.rs.",
+            stale.join(", ")
+        ));
+    }
+
+    Ok(members
+        .iter()
+        .filter(|name| riscv_only.iter().any(|(excluded, _)| excluded == *name))
+        .copied()
+        .collect())
+}
+
 /// The workspace's package names, straight from `cargo metadata --no-deps`.
-fn workspace_members() -> Result<Vec<String>, String> {
+pub(crate) fn workspace_members() -> Result<Vec<String>, String> {
     let out = Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .output()
@@ -703,7 +730,7 @@ fn workspace_members() -> Result<Vec<String>, String> {
 /// that isn't excluded, in member order. Both lists must describe crates that
 /// actually exist — a stale entry (renamed or deleted crate) is an error, so a
 /// rename can't quietly drop a crate out of the gate.
-fn unit_test_plan<'a>(
+pub(crate) fn unit_test_plan<'a>(
     members: &[&'a str],
     excluded: &[(&str, &str)],
     extra_args: &[(&'static str, &'static [&'static str])],
