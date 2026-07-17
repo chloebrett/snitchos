@@ -58,7 +58,26 @@ struct Cli {
     /// (`--ramfb` wasn't passed, or the guest hasn't presented yet).
     #[arg(long)]
     dump_framebuffer: Option<PathBuf>,
+    /// Open a live window showing the captured `etc/ramfb` framebuffer,
+    /// updated periodically as the guest runs. Black until the guest's
+    /// first present. Close the window or press Esc to stop the run.
+    #[arg(long)]
+    window: bool,
 }
+
+/// Fixed mode this milestone's kernel hardcodes
+/// (`kernel/src/device/ramfb.rs::{WIDTH,HEIGHT}`) — used to size the window
+/// before a config has been captured (nothing to derive dimensions from
+/// yet).
+const DEFAULT_WINDOW_WIDTH: usize = 1024;
+const DEFAULT_WINDOW_HEIGHT: usize = 768;
+
+/// How many guest steps between window redraws. `update_with_buffer` pumps
+/// OS events *and* redraws in one call — doing that every single `step()`
+/// would both tank throughput and redraw far more often than a human eye
+/// benefits from. A fixed constant for a first cut; tune once it's running
+/// (or promote to a `--window-interval` flag) if it's ever wrong.
+const WINDOW_UPDATE_INTERVAL: u64 = 200_000;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -95,9 +114,26 @@ fn main() -> ExitCode {
         machine.enable_fwcfg_ramfb();
     }
 
+    let mut window = if cli.window {
+        match minifb::Window::new(
+            "snemu framebuffer",
+            DEFAULT_WINDOW_WIDTH,
+            DEFAULT_WINDOW_HEIGHT,
+            minifb::WindowOptions::default(),
+        ) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                eprintln!("snemu: --window: failed to open a window: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+
     let max_steps = cli.max_steps;
     let mut steps = 0u64;
-    while steps < max_steps {
+    'run: while steps < max_steps {
         match machine.step() {
             Ok(()) => steps += 1,
             // The error carries the faulting pc / instruction; report the harts'
@@ -109,6 +145,14 @@ fn main() -> ExitCode {
                     machine.satp(1)
                 );
                 break;
+            }
+        }
+        if let Some(win) = &mut window
+            && steps.is_multiple_of(WINDOW_UPDATE_INTERVAL)
+        {
+            present_window(win, &machine);
+            if !win.is_open() || win.is_key_down(minifb::Key::Escape) {
+                break 'run;
             }
         }
     }
@@ -136,6 +180,18 @@ fn main() -> ExitCode {
         dump_framebuffer(&machine, path);
     }
     ExitCode::SUCCESS
+}
+
+/// Redraw `window` with the machine's captured framebuffer, or an all-black
+/// buffer of the default size if nothing has been captured yet (before
+/// `--ramfb`'s first present) or the captured dimensions are unexpected —
+/// never panics on a size mismatch.
+fn present_window(window: &mut minifb::Window, machine: &snemu::machine::Machine) {
+    let (buffer, width, height) = match machine.framebuffer_pixels() {
+        Some((buf, w, h)) if buf.len() == (w * h) as usize => (buf, w as usize, h as usize),
+        _ => (vec![0u32; DEFAULT_WINDOW_WIDTH * DEFAULT_WINDOW_HEIGHT], DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT),
+    };
+    let _ = window.update_with_buffer(&buffer, width, height);
 }
 
 /// Write the machine's captured `etc/ramfb` framebuffer to `path` as a PPM

@@ -434,19 +434,41 @@ impl Machine {
         self.bus.fwcfg_enable_ramfb();
     }
 
-    /// Render the captured `etc/ramfb` framebuffer as a binary PPM (P6)
-    /// image — `None` if no DMA write has completed (`etc/ramfb` was never
-    /// enabled, or the guest hasn't presented yet). The `--dump-framebuffer`
-    /// CLI flag's whole implementation; pixel-format conversion itself is
-    /// the pure, host-tested `framebuffer::render_ppm` — this is just the
-    /// thin, non-pure wrapper that extracts the pixel bytes from guest RAM.
-    #[must_use]
-    pub fn dump_framebuffer(&self) -> Option<Vec<u8>> {
+    /// Extract the captured `etc/ramfb` framebuffer's raw pixel bytes from
+    /// guest RAM, alongside its `(width, height, stride)` — `None` if no DMA
+    /// write has completed (`etc/ramfb` was never enabled, or the guest
+    /// hasn't presented yet). Shared by [`Self::dump_framebuffer`] and
+    /// [`Self::framebuffer_pixels`] so the RAM-extraction logic lives once;
+    /// each just applies a different pure conversion
+    /// (`framebuffer::render_ppm` vs `framebuffer::to_minifb_buffer`).
+    fn read_framebuffer(&self) -> Option<(Vec<u8>, u32, u32, u32)> {
         let cfg = self.bus.fwcfg_ramfb_cfg()?;
         let ram = self.bus.ram();
         let len = u64::from(cfg.stride) * u64::from(cfg.height);
         let pixels: Vec<u8> = (0..len).map(|i| ram.read_u8(cfg.addr + i).unwrap_or(0)).collect();
-        Some(crate::framebuffer::render_ppm(&pixels, cfg.width, cfg.height, cfg.stride))
+        Some((pixels, cfg.width, cfg.height, cfg.stride))
+    }
+
+    /// Render the captured `etc/ramfb` framebuffer as a binary PPM (P6)
+    /// image — `None` if nothing was ever captured (see
+    /// [`Self::read_framebuffer`]). The `--dump-framebuffer` CLI flag's whole
+    /// implementation; pixel-format conversion itself is the pure,
+    /// host-tested `framebuffer::render_ppm`.
+    #[must_use]
+    pub fn dump_framebuffer(&self) -> Option<Vec<u8>> {
+        let (pixels, width, height, stride) = self.read_framebuffer()?;
+        Some(crate::framebuffer::render_ppm(&pixels, width, height, stride))
+    }
+
+    /// Render the captured `etc/ramfb` framebuffer as a `minifb` pixel
+    /// buffer (one `u32` per pixel, `0x00RRGGBB`) plus its `(width, height)`
+    /// — `None` if nothing was ever captured. The `--window` CLI flag's
+    /// live-display counterpart to [`Self::dump_framebuffer`]; pixel-format
+    /// conversion is the pure, host-tested `framebuffer::to_minifb_buffer`.
+    #[must_use]
+    pub fn framebuffer_pixels(&self) -> Option<(Vec<u32>, u32, u32)> {
+        let (pixels, width, height, stride) = self.read_framebuffer()?;
+        Some((crate::framebuffer::to_minifb_buffer(&pixels, width, height, stride), width, height))
     }
 
     #[must_use]
