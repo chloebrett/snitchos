@@ -881,12 +881,20 @@ dependencies = [
 name = "kernel-core"
 version = "0.0.1"
 dependencies = [
+ "kernel-devices",
  "kernel-mem",
  "kernel-obs",
  "loom",
  "postcard",
  "protocol",
  "snitchos-abi",
+]
+
+[[package]]
+name = "kernel-devices"
+version = "0.0.1"
+dependencies = [
+ "loom",
 ]
 
 [[package]]

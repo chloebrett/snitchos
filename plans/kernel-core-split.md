@@ -75,8 +75,8 @@ kernel-core's 393 remaining tests).
 | crate | modules | lines | tests | deps |
 |---|---|---|---|---|
 | `kernel-mem` ✅ | mmu, frame, heap, heap_smoke | 2445 | 121 | **none** |
-| `kernel-obs` | intern, span, preinit, sink, batch_ring, panic_log, clock | 1356 | 45 | protocol |
-| `kernel-devices` | virtio, fwcfg, ramfb, framebuffer, console | 1469 | 62 | **none** |
+| `kernel-obs` ✅ | intern, span, preinit, sink, batch_ring, panic_log, clock | 1356 | 45 | protocol, postcard |
+| `kernel-devices` ✅ | virtio, fwcfg, ramfb, framebuffer, console | 1469 | 62 | **none** |
 | `kernel-boot` | bootargs, workload, trap | 931 | 69 | **none** |
 | `kernel-proc` | sched, cap, ipc, notify, reap, elf, stack, metric, span_name | 4377 | 217 | protocol, abi, kernel-mem |
 
@@ -100,8 +100,11 @@ The concepts:
 ### what stays put
 
 - Everything in `kernel/` — asm, MMIO, CSRs, statics. Untouched by the moves.
-- `tests/loom_tx.rs` — the `--cfg loom` model check. Stays with the last crate
-  standing; moving it early would duplicate the loom dev-dependency for no gain.
+
+(An earlier draft said `tests/loom_tx.rs` should "stay with the last crate
+standing". Wrong: it models `virtio::stage_and_emit`, so it moved with
+`kernel-devices` in step 3, taking the loom dev-dependency with it. A test
+belongs with the code it tests.)
 
 ## the endpoint: kernel-core dissolves
 
@@ -197,10 +200,19 @@ true`) → `lib.rs` (`#![no_std]`, `#![forbid(unsafe_code)]`, `extern crate allo
 (they are independent); `kernel-proc` is last because it is the biggest and the
 only one with real design work.
 
-- **Step 2: `kernel-obs`** — 7 modules, 45 tests, deps: `protocol`. Self-contained
-  (`intern → sink` is internal).
-- **Step 3: `kernel-devices`** — 5 modules, 62 tests, dependency-free.
-- **Step 4: `kernel-boot`** — 3 modules, 69 tests, dependency-free.
+- ~~**Step 2: `kernel-obs`**~~ **DONE** (`57f5280`) — 45 tests, all 7 modules moved
+  with `| 0` diffs (zero content edits). Correction to the plan: `panic_log` uses
+  `postcard` in *production*, not just tests — it encodes `Frame::Log` without
+  allocating, because the panic path cannot reach the intern table or the heap.
+- ~~**Step 3: `kernel-devices`**~~ **DONE** — 62 tests, dependency-free as
+  predicted, and the production code is pure `core` (only virtio's *test* reaches
+  for `Vec`, so `extern crate alloc` is `cfg(test)`-gated — the device logic
+  allocates nothing). `tests/loom_tx.rs` moved too; both loom models still pass
+  from the new home, including the buggy-twin detector-liveness check. Two lines
+  edited in it (the `kernel_core::` → `kernel_devices::` path and the stale run
+  command in its doc comment) — an integration test names its crate externally,
+  so this is unavoidable, not the boundary bending.
+- **Step 4: `kernel-boot`** — 3 modules, ~71 tests, dependency-free.
 - **Step 5: `kernel-proc`** — 9 modules, 217 tests. The residual, and the only
   genuine design work: it holds the `cap`/`ipc`/`notify`/`sched` cluster whose
   internal coupling is the reason `kernel-ids` isn't needed. Its one outbound edge

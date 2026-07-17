@@ -12,7 +12,7 @@
 //! to nothing. Run it with:
 //!
 //! ```text
-//! RUSTFLAGS="--cfg loom" cargo test -p kernel-core --test loom_tx
+//! RUSTFLAGS="--cfg loom" cargo test -p kernel-devices --test loom_tx
 //! ```
 //!
 //! Two models, asserting opposite outcomes (a detector-liveness check —
@@ -57,7 +57,7 @@ fn correct_model() {
                 thread::spawn(move || {
                     let mut buf = console.lock().unwrap();
                     let payload = [id; BUF];
-                    kernel_core::virtio::stage_and_emit(&mut buf[..], &payload, |staged| {
+                    kernel_devices::virtio::stage_and_emit(&mut buf[..], &payload, |staged| {
                         // The buffer is exclusively ours for the whole call.
                         assert!(staged.iter().all(|&b| b == id), "staged bytes were corrupted");
                     });
