@@ -459,20 +459,20 @@ fn invented_names(only_snemu: &[String], snemu_crashed: bool) -> Vec<String> {
 }
 
 /// The only-qemu names that indicate snemu **dropped** telemetry QEMU emits — a
-/// fidelity gap, the mirror of [`invented_names`]. A name only QEMU has is normally
-/// benign: snemu ran out of its step budget before reaching that behavior. But that
-/// excuse only holds if snemu was actually *truncated* — if snemu produced **at least
-/// as many frames as QEMU** and *still* lacks these names, it didn't run short, it
-/// **diverged** (e.g. stalled in a loop), so the drop is real. (This is what
-/// `snemu-itest --opt mid` trips over on `supervised`: snemu emits *more* frames than
-/// QEMU yet never reaches the escalate trio — a real gap the old `only_qemu`-always-
-/// forgiven rule missed.) Empty ⇒ no dropped-frame gap.
-fn dropped_names(only_qemu: &[String], snemu_frames: usize, qemu_frames: usize) -> Vec<String> {
-    if snemu_frames >= qemu_frames {
-        only_qemu.to_vec()
-    } else {
-        Vec::new()
-    }
+/// fidelity gap, the mirror of [`invented_names`]. A vocabulary name only QEMU has is
+/// behaviour QEMU reached that snemu did not, in a *deterministic* workload: either
+/// snemu was **budget-truncated** (raise `--steps` and it clears) or snemu
+/// **diverged** and will never emit it (raise `--steps` and it persists — e.g.
+/// `supervised` under `--opt mid`, where release-snemu stalls after the crasher's 4th
+/// exit and never reaches the escalate trio, even at 25× the budget a faithful run
+/// needs). We can't tell the two apart from a single run — snemu's instruction budget
+/// and QEMU's wall-clock window produce *incomparable* frame counts, so counting
+/// frames doesn't help — so **any** non-empty only-qemu breaks faithfulness, with the
+/// caller printing a "raise `--steps` to rule out truncation" hint. (Requires a
+/// `--qemu-secs` long enough that QEMU itself reached the behaviour; too short a window
+/// truncates *QEMU* and shows up as false only-snemu instead.) Empty ⇒ no gap.
+fn dropped_names(only_qemu: &[String]) -> Vec<String> {
+    only_qemu.to_vec()
 }
 
 impl Comparison {
@@ -485,7 +485,7 @@ impl Comparison {
     /// still lacks it, it diverged. Both directions must be clean.
     fn faithful(&self) -> bool {
         invented_names(&self.only_snemu, self.snemu_crashed).is_empty()
-            && dropped_names(&self.only_qemu, self.snemu_frames, self.qemu_frames).is_empty()
+            && dropped_names(&self.only_qemu).is_empty()
     }
 }
 
@@ -983,15 +983,16 @@ fn print_detailed(cmp: &Comparison) {
         eprintln!("  only in qemu:  {:?}", cmp.only_qemu);
     }
     let invented = invented_names(&cmp.only_snemu, cmp.snemu_crashed);
-    let dropped = dropped_names(&cmp.only_qemu, cmp.snemu_frames, cmp.qemu_frames);
+    let dropped = dropped_names(&cmp.only_qemu);
     if cmp.faithful() {
-        if cmp.only_snemu.is_empty() && cmp.only_qemu.is_empty() {
+        if cmp.only_snemu.is_empty() {
             eprintln!("snemu-diff: PASS — snemu faithful to QEMU (vocabularies match).");
         } else {
             eprintln!(
                 "snemu-diff: PASS — only-in-snemu is recurring infra QEMU halted before \
-                 reaching, and any only-in-qemu is snemu budget-truncation (fewer frames than \
-                 QEMU); neither is invented or dropped telemetry."
+                 reaching ({:?}); snemu reached the crash too (panic frame present), so it's \
+                 a benign clock-ordering truncation, not invented telemetry.",
+                cmp.only_snemu
             );
         }
     } else {
@@ -1000,9 +1001,10 @@ fn print_detailed(cmp: &Comparison) {
         }
         if !dropped.is_empty() {
             eprintln!(
-                "snemu-diff: FAIL — snemu DROPPED telemetry QEMU emits (a fidelity gap — snemu \
-                 ran {} frames ≥ QEMU's {}, so it diverged rather than ran short): {dropped:?}",
-                cmp.snemu_frames, cmp.qemu_frames
+                "snemu-diff: FAIL — snemu DROPPED telemetry QEMU emits: {dropped:?}. Either snemu \
+                 was budget-truncated (raise --steps and re-check — the drop should clear) or it \
+                 diverged and will never emit it (the drop persists). Ensure --qemu-secs was long \
+                 enough that QEMU itself reached this behaviour."
             );
         }
     }
