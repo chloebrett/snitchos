@@ -109,7 +109,7 @@ pub fn run(workload: Option<&str>, steps: u64, top: usize, release: bool) -> Exi
         }
     };
 
-    let mut machine = match snemu_diff::load_workload_machine(&kernel, &dtb, workload) {
+    let mut machine = match snemu_diff::load_workload_machine(&kernel, &dtb, workload, false) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("snemu-profile: load machine: {e}");

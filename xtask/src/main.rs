@@ -208,6 +208,15 @@ enum Cmd {
         /// `--verbose`: `-v --stats` is the full pre-quieting output.
         #[arg(long)]
         stats: bool,
+        /// Boot every scenario under snemu's **deterministic frame-scramble** — a
+        /// fixed permutation that places each guest RAM frame on a non-contiguous
+        /// physical frame. This forces the page-straddle access hazard to fire on
+        /// *every* boundary-crossing fetch/load instead of only when the guest
+        /// allocator happens to fragment, so it's the standing regression guard for
+        /// that bug class. Deterministic (no RNG), so still a one-run gate. Snemu
+        /// engine only (a snemu-internal storage remap; QEMU is unaffected).
+        #[arg(long)]
+        scramble: bool,
         /// Per-scenario snemu instruction-step budget. Passing scenarios
         /// short-circuit well under this; the budget only bounds failing ones and
         /// the slow OOM/cooperative workloads. 400M recovers the budget-sensitive
@@ -987,6 +996,22 @@ mod cli_surface_tests {
         assert!(stats && verbose);
     }
 
+    /// `--scramble` boots every scenario under the deterministic frame-scramble —
+    /// the standing regression guard for the page-straddle access hazard. Off by
+    /// default (the plain contiguous layout is the one real hardware produces).
+    #[test]
+    fn itest_takes_a_scramble_flag() {
+        use super::Cmd;
+
+        let cli = Cli::try_parse_from(["xtask", "itest"]).expect("parses");
+        let Cmd::Itest { scramble, .. } = cli.cmd else { panic!("expected Itest") };
+        assert!(!scramble, "contiguous is the default — it's what a real machine does");
+
+        let cli = Cli::try_parse_from(["xtask", "itest", "--scramble"]).expect("parses");
+        let Cmd::Itest { scramble, .. } = cli.cmd else { panic!("expected Itest") };
+        assert!(scramble, "--scramble forces the non-contiguous layout");
+    }
+
     /// The suite is 3.5s and deterministic, so the default output is the answer —
     /// failures and a count — not a play-by-play. `--verbose` brings back the
     /// per-scenario lines.
@@ -1356,6 +1381,7 @@ fn main() -> ExitCode {
             engine,
             verbose,
             stats,
+            scramble,
             steps,
             limit,
             no_idle_skip,
@@ -1407,6 +1433,7 @@ fn main() -> ExitCode {
                     speed,
                     verbose,
                     stats,
+                    scramble,
                 )
             }
             // The escape hatch: slower and flake-prone, but it's the engine snemu is

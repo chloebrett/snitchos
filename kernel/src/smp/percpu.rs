@@ -55,10 +55,10 @@
 //!        sees the bit, reads `shootdown_va` (now visible), runs
 //!        `sfence.vma vaddr`.
 //!     6. Target's handler bumps `shootdown_ack` with `Release`.
-//!     7. Initiator spin-waits `target.shootdown_ack.load(Acquire)
-//!        > pre`. Once true, the sfence happened-before this load —
-//!        > the initiator now knows it's safe to assume no stale TLB
-//!        > entries on the target.
+//!     7. Initiator spin-waits until `target.shootdown_ack.load(Acquire)`
+//!        exceeds `pre`. Once true, the sfence happened-before this load —
+//!        the initiator now knows it's safe to assume no stale TLB
+//!        entries on the target.
 //!   - **Cross-hart task wake** (`spawn_on(hart, ...)`): the target
 //!     hart's runqueue mutex provides the synchronisation for the
 //!     queue contents; the IPI's `Release` store on

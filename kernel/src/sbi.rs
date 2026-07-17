@@ -46,9 +46,7 @@ pub fn send_ipi(hart_mask: u64, hart_mask_base: u64) {
             options(nostack),
         );
     }
-    if error != 0 {
-        panic!("sbi_send_ipi failed: error={error}");
-    }
+    assert!(error == 0, "sbi_send_ipi failed: error={error}");
 }
 
 /// Wake a parked hart and jump it to `start_addr` (a *physical*

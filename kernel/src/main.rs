@@ -469,9 +469,7 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
         mmu::va_to_pa(_secondary_start as *const () as usize) as u64
     };
     let err = sbi::hart_start(secondary_mhartid, entry_pa, 1);
-    if err != 0 {
-        panic!("sbi_hart_start({secondary_mhartid}) failed: error={err}");
-    }
+    assert!(err == 0, "sbi_hart_start({secondary_mhartid}) failed: error={err}");
     // Acquire: pair with the Release on SECONDARY_READY in secondary_main.
     while !secondary::SECONDARY_READY.load(Ordering::Acquire) {
         core::hint::spin_loop();
@@ -481,8 +479,8 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // storm workloads (which drive hart 1 themselves), the userspace
     // workloads (which place their program on hart 1), and the no-bootarg
     // default (`None` → `init`, also a hart-1 userspace program) — hence
-    // `map_or(true, …)`: `None` skips the probe just like a userspace workload.
-    if !selected.map_or(true, |w| {
+    // `is_none_or`: `None` skips the probe just like a userspace workload.
+    if !selected.is_none_or(|w| {
         w.is_storm()
             || matches!(
                 w,
@@ -558,6 +556,11 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
         }
         // Userspace normally runs on hart 1 (hart 0 heartbeats). The multi-hart
         // de-risk places its program on hart 0 instead, to prove U-mode works there.
+        #[allow(
+            clippy::bool_to_int_with_if,
+            reason = "the if reads as 'hart 0 for UserOnHart0, else hart 1'; \
+                      usize::from(selected != …) inverts the sense and obscures it"
+        )]
         let user_hart = if selected == Some(WorkloadKind::UserOnHart0) {
             0
         } else {

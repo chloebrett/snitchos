@@ -599,7 +599,7 @@ pub fn task_snapshots() -> Vec<TaskSnapshot> {
             stack_high_water_metric: t.stack_high_water_metric,
             cpu_time_ticks: t.cpu_time_ticks.load(Ordering::Relaxed),
             runs: t.runs.load(Ordering::Relaxed),
-            stack_high_water_bytes: t.stack.as_ref().map_or(0, |s| s.high_water_bytes()),
+            stack_high_water_bytes: t.stack.as_ref().map_or(0, KernelStack::high_water_bytes),
         })
         .collect()
 }
@@ -903,11 +903,11 @@ pub fn spawn_on_with_arg(
     // would silently close the race window each iteration. See
     // `plans/residual-race-investigation.md` appendix A.
     if crate::boot_workload::selected()
-        != Some(kernel_boot::bootargs::WorkloadKind::SpawnStorm)
+        == Some(kernel_boot::bootargs::WorkloadKind::SpawnStorm)
     {
-        crate::tracing::emit_thread_register(id, &owned_name, priority);
-    } else {
         let _ = owned_name;
+    } else {
+        crate::tracing::emit_thread_register(id, &owned_name, priority);
     }
 
     // Cross-hart spawn: wake the target so it picks up the new task

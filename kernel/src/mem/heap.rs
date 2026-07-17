@@ -93,7 +93,7 @@ unsafe impl GlobalAlloc for KernelHeap {
                 ALLOC_COUNT.inc();
                 nn.as_ptr()
             }
-            Err(_) => {
+            Err(()) => {
                 ALLOC_FAIL_COUNT.inc();
                 core::ptr::null_mut()
             }

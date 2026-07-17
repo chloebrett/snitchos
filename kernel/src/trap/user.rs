@@ -923,6 +923,11 @@ fn run(image: &'static [u8]) -> ! {
 /// via `load_image` and enter it. The image source is pluggable: an embedded
 /// `&'static` slice ([`run_with_caps`]) or a caller-supplied owned buffer that
 /// `load_image` frees once mapped ([`run_image_with_caps`]). Never returns.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "`-> !` terminal owner of the delegated caps; borrowing would only push the \
+              same lint onto `run_with_caps`/`run_image_with_caps`, equally `-> !`"
+)]
 fn run_loaded_with_caps(
     delegated: alloc::vec::Vec<(kernel_proc::cap::Capability, u64)>,
     load_image: impl FnOnce(usize) -> Result<Loaded, LoadError>,
@@ -1235,6 +1240,11 @@ pub fn copy_to_user(ptr: usize, src: &[u8]) -> Option<usize> {
 /// (mask interrupts) *before* arming `sscratch`, so a stray timer IRQ can't
 /// see a nonzero `sscratch` in S-mode and mis-take the from-user path in
 /// `trap_entry`. `sret` then drops to U *and* restores `SIE` from `SPIE`.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "`-> !` — enters U-mode and never returns, so `loaded` is the terminal owner \
+              even though only `loaded.entry` is read; by-value marks the ownership sink"
+)]
 pub fn enter(
     loaded: Loaded,
     root_pa: usize,

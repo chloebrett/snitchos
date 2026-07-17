@@ -228,7 +228,8 @@ cargo xtask boot --workload smp   # boot a runtime-selected workload (implies it
 cargo xtask collect           # build + run collector (OTLP + Prometheus)
 cargo xtask reader            # collector in text-only mode (no docker stack)
 cargo xtask stack {up,down,logs}  # docker-compose the Tempo/Prometheus/Grafana stack
-cargo xtask itest [scenario]  # kernel integration tests under snemu — deterministic, ~4s (integration only; gate = `cargo xtask test && cargo xtask itest`)
+cargo xtask itest [scenario]  # kernel integration tests under snemu — deterministic, ~4s (integration only; gate = `cargo xtask test && cargo xtask itest && cargo xtask itest --scramble`)
+cargo xtask itest --scramble  # ...with deterministic frame-scramble: the page-straddle regression guard (2nd gate pass)
 cargo xtask itest --engine qemu    # ...under QEMU instead: slower + flaky, the fidelity escape hatch
 cargo xtask build             # just build the kernel ELF
 cargo xtask clippy [-- args]  # clippy the WHOLE workspace correctly (see note below)
@@ -267,13 +268,24 @@ Those sites carry a justified `#[allow(clippy::deref_addrof, reason = ...)]`.
 | Doc links          | `cargo xtask links` | Every relative `.md` link in the repo resolves (also runs inside `xtask test`) |
 | Integration        | `cargo xtask itest` | Boots the kernel **under snemu**, asserts on the decoded wire frame sequence. Deterministic → one run is the gate. `--engine qemu` runs the same scenarios under QEMU (the fidelity escape hatch). |
 
-**The gate composes explicitly: `cargo xtask test && cargo xtask itest`.** `itest`
-runs integration *only* — it does not run the host checks first (that coupling,
-and the `--skip-unit-tests` flag that existed to undo it, were removed). Note that
-`cargo xtask test` carries more than its name suggests: the loom model-checks need
-a separate `--cfg loom` compilation, the generated diagrams in `docs/generated/`
-are contract artifacts whose drift fails here, and **every relative `.md` link in
-the repo must resolve**.
+**The gate composes explicitly: `cargo xtask test && cargo xtask itest && cargo xtask
+itest --scramble`.** `itest` runs integration *only* — it does not run the host
+checks first (that coupling, and the `--skip-unit-tests` flag that existed to undo
+it, were removed). Note that `cargo xtask test` carries more than its name suggests:
+the loom model-checks need a separate `--cfg loom` compilation, the generated
+diagrams in `docs/generated/` are contract artifacts whose drift fails here, and
+**every relative `.md` link in the repo must resolve**.
+
+**Why itest runs twice — `--scramble`.** The second pass boots every scenario under
+snemu's **deterministic frame-scramble**: a fixed permutation that places each guest
+RAM frame on a non-contiguous physical frame, forcing the page-straddle access
+hazard (a 4-byte instruction or misaligned load spanning a page boundary) to fire on
+*every* boundary-crossing access instead of only when the guest allocator happens to
+fragment. The plain (contiguous) pass is what real hardware produces and covers the
+common fast path; the scrambled pass is the standing regression guard for the
+straddle bug class (see `plans/snemu-page-straddle-fix.md`). Both are deterministic,
+so each is a one-run gate (~1.7s). `--scramble` is snemu-only — it's a snemu-internal
+storage remap, invisible to the guest and to QEMU.
 
 **Doc links (`cargo xtask links`, also inside `xtask test`).** A markdown link is a
 contract nothing compiles, so a `git mv` breaks it silently — which happened on

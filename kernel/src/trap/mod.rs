@@ -228,17 +228,18 @@ pub extern "C" fn trap_handler(frame: *mut TrapFrame) {
 /// stack) — documented follow-up in `plans/legacy/kernel-stack-guard-pages.md`. The guard
 /// page still converts silent corruption into a deterministic fault either way.
 fn handle_kernel_fault(scause: u64) -> ! {
+    // The boot-stack (task 0) guard page symbol, from the linker script — a single
+    // page below the boot stack, in the kernel image rather than the window (see
+    // `mmu::guard_boot_stack`). Declared up front; used below.
+    unsafe extern "C" {
+        static __boot_stack_guard: u8;
+    }
     let stval: usize;
     // SAFETY: reads a CSR; no memory access, no side effects.
     unsafe { asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack)) };
     // Per-task kernel-stack window guard.
     if let Some(slot) = kernel_proc::stack::guard_slot_for(stval) {
         crate::sched::report_stack_guard_fault(slot, stval);
-    }
-    // Boot-stack (task 0) guard page — a single page below the boot stack, in the
-    // kernel image rather than the window (see `mmu::guard_boot_stack`).
-    unsafe extern "C" {
-        static __boot_stack_guard: u8;
     }
     let boot_guard = (&raw const __boot_stack_guard) as usize;
     if (boot_guard..boot_guard + kernel_mem::mmu::PAGE_SIZE).contains(&stval) {

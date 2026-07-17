@@ -96,7 +96,9 @@ fn main() -> ExitCode {
         None => DTB.to_vec(),
     };
 
-    let mut machine = match snemu::loader::load_machine(&image, RAM_SIZE, Some(&dtb), HART_COUNT) {
+    // Scramble is driven by the `SNEMU_SCRAMBLE_FRAMES` env var for the standalone
+    // binary (`load_memory` honours it), so pass `false` here.
+    let mut machine = match snemu::loader::load_machine(&image, RAM_SIZE, Some(&dtb), HART_COUNT, false) {
         Ok(machine) => machine,
         Err(e) => {
             eprintln!("snemu: load failed: {e:?}");

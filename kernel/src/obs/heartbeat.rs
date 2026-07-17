@@ -66,9 +66,15 @@ macro_rules! define_metrics {
 /// Centralises the `as i64` cast and the `m.field` access so each
 /// per-tick emit site is one line.
 macro_rules! emit {
-    ($m:expr, $field:ident = $value:expr) => {
-        tracing::emit_metric($m.$field, $value as i64)
-    };
+    ($m:expr, $field:ident = $value:expr) => {{
+        #[allow(
+            clippy::cast_lossless,
+            reason = "generic over metric integer widths — call sites pass u64/usize/i64 \
+                      where i64::from doesn't apply; the `as i64` is the one cast that fits all"
+        )]
+        let v = $value as i64;
+        tracing::emit_metric($m.$field, v)
+    }};
 }
 
 /// mhartid `OpenSBI` handed kmain as `_hart_id`. Captured at the top of
@@ -150,6 +156,11 @@ define_metrics! {
 /// handler to flip `TICK_PENDING`; on each tick opens a span, runs
 /// the smoke patterns, emits every metric, then yields back to the
 /// scheduler.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "`run` is `-> !` and is the terminal owner of the registered Metrics \
+              (see the handoff comment at the kmain call site); by-value is the honest signature"
+)]
 pub fn run(metrics: Metrics) -> ! {
     let mut count: i64 = 0;
     loop {

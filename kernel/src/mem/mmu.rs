@@ -273,7 +273,7 @@ struct KernelPtMem;
 
 impl PtMem for KernelPtMem {
     fn alloc_zeroed_table(&mut self) -> Option<usize> {
-        crate::frame::alloc_zeroed().map(|f| f.addr())
+        crate::frame::alloc_zeroed().map(crate::frame::PhysFrame::addr)
     }
 
     fn read_entry(&self, table_pa: usize, idx: usize) -> Pte {

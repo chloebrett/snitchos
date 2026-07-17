@@ -340,15 +340,17 @@ pub(super) fn handle_spawn_image(frame: &mut TrapFrame) {
     use protocol::RefusalReason;
     use snitchos_abi::Syscall;
 
+    // Bound on the ELF image copied out of user memory, so a bad/huge length
+    // can't ask the kernel to allocate unboundedly.
+    const MAX_IMAGE: usize = 4 * 1024 * 1024;
+
     let sc = Syscall::SpawnImage as u8;
 
     let Some(proc) = super::current_process_or_refuse(frame, sc) else {
         return;
     };
 
-    // Copy the ELF image out of user memory into an owned kernel buffer. Bounded
-    // so a bad/huge length can't ask the kernel to allocate unboundedly.
-    const MAX_IMAGE: usize = 4 * 1024 * 1024;
+    // Copy the ELF image out of user memory into an owned kernel buffer.
     let len = frame.a1 as usize;
     if len == 0 || len > MAX_IMAGE {
         super::refuse(frame, sc, RefusalReason::BadUserRange);

@@ -58,12 +58,9 @@ pub enum InitError {
 /// live linear map) and after `mmu::enable`, exactly once, before any
 /// other user of root PTE slot 258.
 pub unsafe fn init() -> Result<(), InitError> {
-    let file = match unsafe { crate::fwcfg::find_file("etc/ramfb") } {
-        Some(f) => f,
-        None => {
-            INIT_REFUSED.inc();
-            return Err(InitError::NotFound);
-        }
+    let Some(file) = (unsafe { crate::fwcfg::find_file("etc/ramfb") }) else {
+        INIT_REFUSED.inc();
+        return Err(InitError::NotFound);
     };
 
     let base_frame = frame::alloc_contiguous(FRAMES).ok_or(InitError::OutOfFrames)?;

@@ -103,6 +103,19 @@ a plan — see `plans/` for active implementation tracks.
   bound would reject real programs, and that surfaces as a boot panic rather than
   a red test. Mutation-clean (0 missed); `init` boots unaffected.
 
+- **#14 — Broken intra-doc links are gated.** Rustdoc resolves `[`link`]`s but
+  only *warns* on a broken one, and nothing ran rustdoc — so they rot invisibly.
+  `run_unit_tests` now runs `cargo doc --no-deps` across every crate with
+  `-D rustdoc::broken_intra_doc_links` (same two-target host/riscv split as
+  clippy, reusing `unit_test_plan`/`riscv_only_plan`). Scoped to *broken* links,
+  not `-D warnings`: the private-intra-doc-link class (a public item linking to a
+  private one — real target, just doesn't render) is cosmetic and fires ~10× in
+  `snemu`; the rot worth gating is a link to a symbol that *doesn't exist*.
+  Clearing the backlog to turn it on found the real prize: **`[`span_start`]` and
+  `[`span_open_owned`]` had outlived the functions by several renames**
+  (`span_start_id`, `span_open_bounded`) — the prose lied and nothing noticed.
+  Also four `crate::`-relative links the kernel-core split dangled (their modules
+  moved to other crates), plus mechanical `VPN[2]`-parsed-as-a-link cases.
 - **#13 — `MmioRegions` + the `satp` encode/decode are host-tested.** Both moved
   to `kernel-mem`; `kernel/src/mem/mmu.rs` keeps only what touches hardware (the
   CSR read/write and the boot-table construction). 9 new tests. The find that
@@ -149,16 +162,6 @@ the userspace crates (talc OOM-loop → hang; confirmed in `snitchos-user`, at
 least one more crate). The itest speedup is kernel-dominated, so the pin costs
 ~nothing — which is exactly why it stays. The pin is the workaround; the UB is
 the debt. Repro: `cargo xtask itest --opt high`.
-
-## Tooling gaps
-
-### #14 — `cargo doc` isn't in the gate *(small)*
-
-Broken intra-doc links rot silently: `kernel-obs/src/intern.rs` has two
-(`[`register_or_lookup`]`, `[`release`]` — bare method links need `Self::`) that
-have presumably been dead for a while, because nothing runs `cargo doc`. Adding
-it to `xtask test` catches the class rather than the instances. Expect a first
-pass to surface a backlog.
 
 ## Deferred placeholders (Tier 3)
 

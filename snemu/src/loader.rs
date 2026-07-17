@@ -92,7 +92,7 @@ fn validate_header(image: &[u8]) -> Result<(), ElfError> {
 /// a single-hart `Cpu` positioned at the entry point. If a `dtb` is given, it's
 /// placed in RAM and its address handed to the kernel in `a1` (as firmware would).
 pub fn load(image: &[u8], ram_size: usize, dtb: Option<&[u8]>) -> Result<Cpu, ElfError> {
-    let (mem, entry_pc, dtb_addr) = load_memory(image, ram_size, dtb)?;
+    let (mem, entry_pc, dtb_addr) = load_memory(image, ram_size, dtb, false)?;
     let mut cpu = Cpu::new(mem);
     cpu.set_pc(entry_pc);
     if let Some(addr) = dtb_addr {
@@ -109,8 +109,9 @@ pub fn load_machine(
     ram_size: usize,
     dtb: Option<&[u8]>,
     hart_count: usize,
+    scramble: bool,
 ) -> Result<Machine, ElfError> {
-    let (mem, entry_pc, dtb_addr) = load_memory(image, ram_size, dtb)?;
+    let (mem, entry_pc, dtb_addr) = load_memory(image, ram_size, dtb, scramble)?;
     let mut machine = Machine::new(mem, hart_count);
     machine.set_pc(0, entry_pc);
     if let Some(addr) = dtb_addr {
@@ -134,6 +135,7 @@ fn load_memory(
     image: &[u8],
     ram_size: usize,
     dtb: Option<&[u8]>,
+    scramble: bool,
 ) -> Result<(Memory, u64, Option<u64>), ElfError> {
     validate_header(image)?;
     let entry = u64_at(image, off::E_ENTRY)?;
@@ -142,11 +144,14 @@ fn load_memory(
     let phnum = u64::from(u16_at(image, off::E_PHNUM)?);
 
     let mut mem = Memory::new(ram_size);
-    // Deterministic frame-scramble stress mode (opt-in). Enabled here — before any
-    // segment is written — so the loader's bulk writes scatter consistently. Forces
-    // the page-straddle hazard to fire everywhere instead of only when the guest
-    // allocator happens to fragment. See `Memory::scramble`.
-    if std::env::var("SNEMU_SCRAMBLE_FRAMES").is_ok_and(|v| !v.is_empty() && v != "0") {
+    // Deterministic frame-scramble stress mode. Enabled here — before any segment is
+    // written — so the loader's bulk writes scatter consistently. Forces the
+    // page-straddle hazard to fire everywhere instead of only when the guest
+    // allocator happens to fragment. Driven by the explicit `scramble` argument (the
+    // `itest --scramble` flow) or the `SNEMU_SCRAMBLE_FRAMES` env var (a global
+    // override for `snemu boot`/`diff` without threading a flag). See `Memory::scramble`.
+    let env_scramble = std::env::var("SNEMU_SCRAMBLE_FRAMES").is_ok_and(|v| !v.is_empty() && v != "0");
+    if scramble || env_scramble {
         mem.set_scramble(true);
     }
     let mut entry_pa = None;

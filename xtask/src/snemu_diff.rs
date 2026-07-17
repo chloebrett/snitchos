@@ -254,7 +254,7 @@ fn collect_snemu(
     max_steps: u64,
 ) -> Result<(Vec<OwnedFrame>, String, Timing), String> {
     let start = Instant::now();
-    let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(dtb), HART_COUNT)
+    let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(dtb), HART_COUNT, false)
         .map_err(|e| format!("snemu load: {e:?}"))?;
     let mut steps = 0u64;
     let mut stop = format!("step limit ({max_steps})");
@@ -581,7 +581,7 @@ pub(crate) fn collect_frames_until_cap_quiescence(
             .ok_or("DTB patch failed")?,
         None => dtb_base,
     };
-    let mut machine = snemu::loader::load_machine(&kernel, RAM_SIZE, Some(&dtb), HART_COUNT)
+    let mut machine = snemu::loader::load_machine(&kernel, RAM_SIZE, Some(&dtb), HART_COUNT, false)
         .map_err(|e| format!("snemu load: {e:?}"))?;
     let mut quiescence = diagram::caps::CapQuiescence::new(quiescence_window);
     let mut steps = 0u64;
@@ -644,7 +644,7 @@ pub(crate) fn collect_workload_frames(
             .ok_or("DTB patch failed")?,
         None => dtb_base.to_vec(),
     };
-    let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(&dtb), HART_COUNT)
+    let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(&dtb), HART_COUNT, false)
         .map_err(|e| format!("snemu load: {e:?}"))?;
     machine.set_decode_cache(decode_cache);
     let mut steps = 0u64;
@@ -697,6 +697,7 @@ pub(crate) fn load_workload_machine(
     kernel: &[u8],
     dtb_base: &[u8],
     workload: Option<&str>,
+    scramble: bool,
 ) -> Result<snemu::machine::Machine, String> {
     let ram_bytes = u64::from(ram_mb_for(workload)) * 1024 * 1024;
     let mut dtb = match workload {
@@ -709,8 +710,9 @@ pub(crate) fn load_workload_machine(
     if ram_bytes != RAM_SIZE as u64 {
         dtb = snemu::dtb::set_memory_size(&dtb, ram_bytes).ok_or("DTB memory patch failed")?;
     }
-    let mut machine = snemu::loader::load_machine(kernel, ram_bytes as usize, Some(&dtb), HART_COUNT)
-        .map_err(|e| format!("snemu load: {e:?}"))?;
+    let mut machine =
+        snemu::loader::load_machine(kernel, ram_bytes as usize, Some(&dtb), HART_COUNT, scramble)
+            .map_err(|e| format!("snemu load: {e:?}"))?;
     machine.set_decode_cache(true);
     // Mirrors the real QEMU harness's `ramfb` scenario tag → `-device ramfb`
     // (`Boot::spawn`, xtask/src/itest/harness.rs): only the `framebuffer-
@@ -742,7 +744,7 @@ pub(crate) fn measure_workload(
             .ok_or("DTB patch failed")?,
         None => dtb_base.to_vec(),
     };
-    let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(&dtb), HART_COUNT)
+    let mut machine = snemu::loader::load_machine(kernel, RAM_SIZE, Some(&dtb), HART_COUNT, false)
         .map_err(|e| format!("snemu load: {e:?}"))?;
     machine.set_decode_cache(decode_cache);
     let start = Instant::now();
@@ -869,7 +871,7 @@ pub fn run_fork(max_steps: u64) -> ExitCode {
         eprintln!("snemu-fork: DTB patch failed");
         return ExitCode::from(1);
     };
-    let mut base = match snemu::loader::load_machine(&kernel, RAM_SIZE, Some(&boot_dtb), HART_COUNT) {
+    let mut base = match snemu::loader::load_machine(&kernel, RAM_SIZE, Some(&boot_dtb), HART_COUNT, false) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("snemu-fork: load: {e:?}");
