@@ -72,7 +72,35 @@ pub enum ElfError {
     SegmentOutOfBounds,
     /// A `PT_LOAD` segment has `p_filesz > p_memsz` (nonsensical).
     FileSizeExceedsMemSize,
+    /// The image's `PT_LOAD`s together declare more than
+    /// [`MAX_IMAGE_MEM_SIZE`] bytes of memory. Refused *before* planning:
+    /// `mem_size` is otherwise unbounded, and the page map is proportional to
+    /// it, so an absurd value costs time and memory rather than failing.
+    ImageTooLarge,
 }
+
+/// The most memory a loadable image may declare in total — the sum of every
+/// `PT_LOAD`'s `mem_size`.
+///
+/// This is a **sanity bound, not a layout rule.** Its job is to keep
+/// [`page_perms`]' page map proportional to something sane: at 4 KiB pages, 64
+/// MiB is ~16k entries, while the `u64` a program header can hold is ~2^52
+/// pages. It is deliberately loose — `user.ld` gives a program a 16 MiB region,
+/// so anything real is 4× under this; tightening it to the linker's figure would
+/// make this a layout check that breaks when the layout moves.
+///
+/// Summing (rather than bounding each segment) is what makes it a bound at all:
+/// `e_phnum` is a `u16`, so 65535 segments each just under a per-segment limit
+/// would multiply straight back to absurd. Overlapping segments make the sum an
+/// over-estimate of the true footprint, which is the safe direction.
+pub const MAX_IMAGE_MEM_SIZE: usize = 64 * 1024 * 1024;
+
+// `user.ld` hands the image region 16 MiB (ORIGIN 0x10000000, LENGTH 16M), so a
+// legitimately-linked program may legitimately declare that much. A bound under
+// it would reject real programs — and that failure surfaces as a boot panic
+// (`load` refusing `init`), not a red test. So it's a compile error instead: the
+// relationship between this constant and the linker script can't rot silently.
+const _: () = assert!(MAX_IMAGE_MEM_SIZE >= 16 * 1024 * 1024);
 
 /// Parse a static, position-dependent RISC-V ELF64 executable into a
 /// [`LoadPlan`]. Returns [`ElfError`] for any malformed input.
@@ -120,6 +148,7 @@ pub fn parse(image: &[u8]) -> Result<LoadPlan, ElfError> {
     let phnum = read_u16(image, 56)? as usize;
 
     let mut segments = Vec::new();
+    let mut total_mem_size: usize = 0;
     for i in 0..phnum {
         let base = phoff + i * phentsize;
         if read_u32(image, base)? != PT_LOAD {
@@ -138,6 +167,17 @@ pub fn parse(image: &[u8]) -> Result<LoadPlan, ElfError> {
             .ok_or(ElfError::SegmentOutOfBounds)?;
         if end > image.len() {
             return Err(ElfError::SegmentOutOfBounds);
+        }
+
+        // Running total, checked: `mem_size` is otherwise unbounded, and it sets
+        // how many pages `page_perms` will plan. `checked_add` because a handful
+        // of near-`u64::MAX` segments would otherwise wrap to a small sum and
+        // slip through.
+        total_mem_size = total_mem_size
+            .checked_add(mem_size)
+            .ok_or(ElfError::ImageTooLarge)?;
+        if total_mem_size > MAX_IMAGE_MEM_SIZE {
+            return Err(ElfError::ImageTooLarge);
         }
 
         segments.push(LoadSegment {
@@ -347,6 +387,72 @@ mod tests {
     fn rejects_an_image_without_the_elf_magic() {
         let not_elf = [0u8; 64];
         assert_eq!(parse(&not_elf), Err(ElfError::BadMagic));
+    }
+
+    #[test]
+    fn rejects_an_image_declaring_more_memory_than_it_could_ever_be_given() {
+        // A 2^60-byte bss tail. Every *other* check passes — `file_size <=
+        // mem_size` holds and the (empty) file range is in bounds — so without
+        // this bound the plan reaches `page_perms`, which would build a
+        // ~2^48-entry `BTreeMap` and hang the kernel before allocating a single
+        // frame. A hang is worse than the panic this module's trust-boundary
+        // contract already rules out, and v0.10 loads untrusted images through
+        // this same parser.
+        let img = valid_elf(
+            0x1000,
+            &[Ph {
+                p_type: PT_LOAD,
+                flags: PF_R | PF_W,
+                offset: 0,
+                vaddr: 0x1000,
+                filesz: 0,
+                memsz: 1 << 60,
+            }],
+            0,
+        );
+        assert_eq!(parse(&img), Err(ElfError::ImageTooLarge));
+    }
+
+    /// A `PT_LOAD` with a `mem_size`-only footprint (pure bss), which is the
+    /// shape that makes the bound matter — `file_size` is 0, so nothing about
+    /// the image's actual length constrains it.
+    fn bss_ph(memsz: u64) -> Ph {
+        Ph { p_type: PT_LOAD, flags: PF_R | PF_W, offset: 0, vaddr: 0x1000, filesz: 0, memsz }
+    }
+
+    #[test]
+    fn accepts_an_image_exactly_at_the_memory_bound() {
+        // The bound is inclusive: `>` not `>=`. Pins that a program sized
+        // exactly to the limit still loads.
+        let img = valid_elf(0x1000, &[bss_ph(MAX_IMAGE_MEM_SIZE as u64)], 0);
+        let plan = parse(&img).expect("an image exactly at the bound is loadable");
+        assert_eq!(plan.segments[0].mem_size, MAX_IMAGE_MEM_SIZE);
+    }
+
+    #[test]
+    fn rejects_an_image_one_byte_over_the_memory_bound() {
+        let img = valid_elf(0x1000, &[bss_ph(MAX_IMAGE_MEM_SIZE as u64 + 1)], 0);
+        assert_eq!(parse(&img), Err(ElfError::ImageTooLarge));
+    }
+
+    #[test]
+    fn bounds_the_total_across_segments_not_each_one() {
+        // Two segments, each comfortably under the bound, together over it.
+        // `e_phnum` is a u16 — a per-segment limit would let 65535 of these
+        // multiply straight back to absurd, so the bound must accumulate.
+        let half = MAX_IMAGE_MEM_SIZE as u64 / 2 + 1;
+        let img = valid_elf(0x1000, &[bss_ph(half), bss_ph(half)], 0);
+        assert!(parse(&valid_elf(0x1000, &[bss_ph(half)], 0)).is_ok(), "one alone fits");
+        assert_eq!(parse(&img), Err(ElfError::ImageTooLarge));
+    }
+
+    #[test]
+    fn rejects_a_segment_whose_size_would_overflow_the_running_total() {
+        // First segment is legal, so the accumulator is non-zero; the second
+        // then wraps a plain `+` back to a small value and slips through. This
+        // is why the total is a `checked_add`.
+        let img = valid_elf(0x1000, &[bss_ph(1024), bss_ph(u64::MAX)], 0);
+        assert_eq!(parse(&img), Err(ElfError::ImageTooLarge));
     }
 
     /// 4 KiB — the page size the kernel loader maps with. Passed explicitly so

@@ -59,6 +59,22 @@ the `project_userspace_defined_metrics` memory.
 
 ## Done (cont.)
 
+- **#12 — `elf::parse` now bounds the image's declared memory.** `mem_size` was
+  unbounded, so an image declaring `2^60` made `page_perms` build a ~2^48-entry
+  `BTreeMap` and hang — worse than the panic the module's trust-boundary contract
+  already ruled out, and live the moment v0.10 loads an untrusted image.
+  `MAX_IMAGE_MEM_SIZE` (64 MiB) now caps the **sum** of every `PT_LOAD`'s
+  `mem_size` (`ElfError::ImageTooLarge`). Summing is what makes it a bound:
+  `e_phnum` is a `u16`, so a per-segment limit would let 65535 segments multiply
+  straight back to absurd. The running total is a `checked_add` — a legal first
+  segment plus a `u64::MAX` second wraps a plain `+` back to a small value and
+  slips through (tested). The bound is deliberately 4× looser than `user.ld`'s 16
+  MiB region: it's a sanity bound keeping the page map ~16k entries, not a layout
+  rule that breaks when the layout moves. `const _: () = assert!(MAX_IMAGE_MEM_SIZE
+  >= 16 * 1024 * 1024)` ties it to the linker script at *compile* time — a tighter
+  bound would reject real programs, and that surfaces as a boot panic rather than
+  a red test. Mutation-clean (0 missed); `init` boots unaffected.
+
 - **#6 — Fault-safe user-copy.** `copy_from_user` only bounds-checked the user
   range (`user_range_ok`), so an in-range-but-unmapped pointer faulted the kernel
   on the `SUM` deref. Added `kernel_mem::mmu::range_mapped` (host-tested page-walk,
@@ -68,24 +84,6 @@ the `project_userspace_defined_metrics` memory.
   to `DebugWrite`; the kernel refuses and the process survives).
 
 ## Correctness gaps
-
-### #12 — `elf::parse` doesn't bound `mem_size` *(security, small)*
-
-`kernel-proc/src/elf.rs` validates `file_size <= mem_size` and that the file
-range is in-bounds, but **nothing caps `mem_size`**. An image declaring
-`mem_size = 2^60` makes `elf::page_perms` build a `BTreeMap` with ~2^48 entries
-— the kernel hangs (or OOMs) before ever allocating a frame.
-
-This contradicts the module's own stated contract: *"a trust boundary … every
-field is validated and a malformed image yields an `ElfError`, never a panic."*
-A hang is worse than a panic. Pre-existing (the old `load` had the same unbounded
-`pages_of`), and surfaced by 4 mutation TIMEOUTs in `pages_of` — the mutants that
-enlarge the page range don't fail, they just never finish, which is the same
-shape as the bug.
-
-Live the moment v0.10 loads an image from the filesystem rather than an embedded
-one. Fix is a bound + a test; sits naturally beside the W^X guard already in
-`page_perms`.
 
 ### #13 — `MmioRegions` + `satp` encode/decode are still kernel-side *(small)*
 

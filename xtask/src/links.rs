@@ -109,11 +109,42 @@ fn workspace_root() -> PathBuf {
 ///
 /// Pure: the caller resolves each target against the containing file's directory.
 pub fn extract_md_links(content: &str) -> Vec<Link> {
-    content
-        .lines()
-        .enumerate()
-        .flat_map(|(i, text)| targets_in_line(text).map(move |t| Link { target: t, line: i + 1 }))
-        .collect()
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for (i, text) in content.lines().enumerate() {
+        if text.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let prose = strip_inline_code(text);
+        out.extend(targets_in_line(&prose).map(|t| Link { target: t, line: i + 1 }));
+    }
+    out
+}
+
+/// Blank out `` `…` `` spans, preserving length so nothing else shifts.
+///
+/// Prose *about* markdown quotes link syntax in backticks; a renderer shows that
+/// as literal text, so there is no link to resolve. Without this, a doc
+/// explaining links reports itself as broken — which is exactly how this was
+/// found.
+fn strip_inline_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_code = false;
+    for ch in text.chars() {
+        if ch == '`' {
+            in_code = !in_code;
+            out.push(' ');
+        } else if in_code {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// The checkable `](target)` occurrences on one line.
@@ -134,7 +165,7 @@ fn checkable(target: &str) -> Option<String> {
         return None;
     }
     let path = target.split('#').next()?;
-    if !path.ends_with(".md") {
+    if !Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("md")) {
         return None;
     }
     Some(path.to_string())
@@ -179,6 +210,28 @@ mod tests {
         // files moving between directories. Staying narrow keeps it honest.
         let content = "![shot](posts/a.png) [dir](redesign-reviews/) [x](a.md)";
         assert_eq!(extract_md_links(content), vec![link("a.md", 1)]);
+    }
+
+    #[test]
+    fn ignores_link_syntax_inside_inline_code() {
+        // Prose *about* links quotes them in backticks. A renderer shows that as
+        // literal text, not a link, so there is nothing to resolve. Found by this
+        // repo's own devlog post quoting `[API Reference](docs/api.md)` as an
+        // example of an illustrative link — the checker flagged its own write-up.
+        let content = "a prompt library says `[API Reference](docs/api.md)` and means nothing by it";
+        assert_eq!(extract_md_links(content), vec![]);
+    }
+
+    #[test]
+    fn still_finds_a_real_link_on_a_line_that_also_has_code() {
+        let content = "`cargo xtask links` — see [the design](docs/x.md)";
+        assert_eq!(extract_md_links(content), vec![link("docs/x.md", 1)]);
+    }
+
+    #[test]
+    fn ignores_link_syntax_inside_a_fenced_code_block() {
+        let content = "intro\n```\n[example](nope.md)\n```\n[real](yes.md)\n";
+        assert_eq!(extract_md_links(content), vec![link("yes.md", 5)]);
     }
 
     #[test]
