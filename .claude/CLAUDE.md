@@ -216,7 +216,7 @@ posts/        Devlog notes per milestone.
 
 ### Running
 
-**`x` is shorthand for `cargo xtask`** — `x boot`, `x test`, `x snemu-itest --only foo`.
+**`x` is shorthand for `cargo xtask`** — `x boot`, `x test`, `x itest foo`.
 A shell alias in this environment (not a repo file), so it works in the terminal and in
 tool shells, but not in CI or a fresh clone. Scripts and docs spell out `cargo xtask`;
 type `x` interactively. Every command below accepts either.
@@ -228,7 +228,8 @@ cargo xtask boot --workload smp   # boot a runtime-selected workload (implies it
 cargo xtask collect           # build + run collector (OTLP + Prometheus)
 cargo xtask reader            # collector in text-only mode (no docker stack)
 cargo xtask stack {up,down,logs}  # docker-compose the Tempo/Prometheus/Grafana stack
-cargo xtask itest [scenario]  # kernel integration tests in QEMU (integration only; gate = `cargo xtask test && cargo xtask itest`)
+cargo xtask itest [scenario]  # kernel integration tests under snemu — deterministic, ~4s (integration only; gate = `cargo xtask test && cargo xtask itest`)
+cargo xtask itest --engine qemu    # ...under QEMU instead: slower + flaky, the fidelity escape hatch
 cargo xtask build             # just build the kernel ELF
 cargo xtask clippy [-- args]  # clippy the WHOLE workspace correctly (see note below)
 cargo xtask diagram <target>  # generate a diagram (deps|itest-matrix|caps|trace|switches) into docs/generated/; --check gates the static ones
@@ -264,7 +265,7 @@ Those sites carry a justified `#[allow(clippy::deref_addrof, reason = ...)]`.
 | Unit (collector)   | `cargo test -p collector` | Span state machine, prom/otlp encoding |
 | All host checks    | `cargo xtask test` | Every unit crate above + the loom model-checks (`--cfg loom`) + the generated-diagram drift check + the doc-link check |
 | Doc links          | `cargo xtask links` | Every relative `.md` link in the repo resolves (also runs inside `xtask test`) |
-| Integration        | `cargo xtask itest` | Boots the kernel in QEMU, asserts on the decoded wire frame sequence |
+| Integration        | `cargo xtask itest` | Boots the kernel **under snemu**, asserts on the decoded wire frame sequence. Deterministic → one run is the gate. `--engine qemu` runs the same scenarios under QEMU (the fidelity escape hatch). |
 
 **The gate composes explicitly: `cargo xtask test && cargo xtask itest`.** `itest`
 runs integration *only* — it does not run the host checks first (that coupling,
@@ -405,7 +406,7 @@ Gotchas worth re-reading `plans/v0.4-memory-findings.md` before disturbing:
 - Anything that needs the *physical* address of a kernel symbol (e.g., reserving the kernel image in the frame allocator's bitmap) must do `va_to_pa((&raw const __sym) as usize)` because post-trampoline that operand is a higher-half VA.
 - `fmt::Arguments` (every formatted `println!`) embeds absolute fn-pointer values to type-specific formatters. Those resolve only after the higher-half mapping is live, so **no formatted `println!` before `mmu::enable`**.
 - **The higher-half trampoline is not a barrier for PC-relative address materialization.** Under `code-model=medium`, `&static` is computed via `auipc` and resolves to *whichever half PC is in*. The optimizer may hoist a `&static`-into-register computation *before* the trampoline `jr` (where PC is still physical) and carry it in a callee-saved reg across the jump, yielding a **truncated/physical** address in a higher-half world. This bit `tp` in `percpu::init` (release-only; `mv tp, &PER_HART_DATA[hartid]` hoisted → `tp = 0x0000…8032xxxx`, masked for ages by `current_hartid`'s range check, exposed when the exception-stack asm `ld …,24(tp)` read it raw). Fix pattern: materialize the address with a **side-effecting `asm!("lla …")`** (ordered after the trampoline's `asm!`, so it can't hoist). Debug hides this; only release codegen hoists. See `notes/release-build-exposes-timer-death-and-uart-corruption.md`.
-- **Release itests build the kernel at opt-3 but pin the embedded userspace to opt-1** (`kernel/build.rs`, nested build `--config profile.release.opt-level=1`). There is a latent opt≥2 UB *class* in the userspace crates (talc OOM-loop → hang; confirmed in `snitchos-user`, at least one more crate); the itest speedup is kernel-dominated so opt-1 userspace costs ~nothing and sidesteps it. Root-causing the userspace UB (so the pin can go) is an open follow-up. Repro: `cargo xtask snemu-itest --release`.
+- **Release itests build the kernel at opt-3 but pin the embedded userspace to opt-1** (`kernel/build.rs`, nested build `--config profile.release.opt-level=1`). There is a latent opt≥2 UB *class* in the userspace crates (talc OOM-loop → hang; confirmed in `snitchos-user`, at least one more crate); the itest speedup is kernel-dominated so opt-1 userspace costs ~nothing and sidesteps it. Root-causing the userspace UB (so the pin can go) is an open follow-up. Repro: `cargo xtask itest --opt high`.
 - Anything that walks the DTB pre-MMU under higher-half link crashes silently in a way we never isolated. MMIO regions in `kmain` are hardcoded for QEMU `virt`; the DTB-driven `collect_mmio_regions` exists but is parked behind `#[expect(dead_code)]`.
 - The frame allocator's `Bitmap::frames_free` is the maintained source of truth for the free count. Don't compute `count_free` by popcount-scanning the bits — it's O(words) and the OOM workload showed it stalls heartbeats. The maintained counter is also what makes `alloc` O(1) when the pool is empty.
 - The kernel heap starts at 4 MiB and grows on demand via the heartbeat-driven watermark policy (`kernel_mem::heap::watermark_grow_decision`). It caps at 1 GiB (the full root-PTE slot). Each grow allocates frames + installs PTEs via `mmu::map`; the policy fires when `free < capacity * 25%`. Watermark constants live in `kernel::heap::WATERMARK`; tune there.

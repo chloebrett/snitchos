@@ -359,7 +359,7 @@ pub struct RunConfig {
     /// Kernel optimization regime (`low` = debug, the default; `mid`/`high` =
     /// release). Threads into both the kernel *build* and the QEMU `-kernel` path,
     /// so `--opt mid` runs the whole suite against the release kernel — the QEMU
-    /// counterpart to `snemu-itest --opt`, for catching release-codegen divergences
+    /// counterpart to the snemu engine's `--opt`, for catching release-codegen divergences
     /// under QEMU rather than only snemu.
     pub opt: qemu::OptLevel,
 }

@@ -35,8 +35,8 @@ enum Cmd {
     /// snapshot/fork harness (`fork`), the measurement spine (`bench`), and the
     /// guest instret profiler (`profile`).
     ///
-    /// `snemu-itest` is deliberately not in here: it is the everyday test
-    /// command, and is being promoted to `itest` (see
+    /// The everyday test command is not in here: it was promoted out to `itest`,
+    /// which is snemu-backed by default (see
     /// plans/xtask-surface-consolidation.md, Step 2.1).
     Snemu {
         #[command(subcommand)]
@@ -542,7 +542,8 @@ enum SnemuCmd {
         /// meaningless): `low` (debug, default), `mid` (release kernel), `high`
         /// (release everywhere). Use `--opt mid` to diff **release-vs-release** — the
         /// tool for localizing a snemu fidelity gap that only shows on the release
-        /// build (`snemu-itest --opt mid` fails while `itest --opt mid` passes).
+        /// build (`itest --opt mid` fails while `itest --engine qemu --opt mid`
+        /// passes).
         #[arg(long, value_enum, default_value_t = qemu::OptLevel::Low)]
         opt: qemu::OptLevel,
     },

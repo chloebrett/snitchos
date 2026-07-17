@@ -472,7 +472,7 @@ pub fn run(
     let (kernel, dtb) = match snemu_diff::prepare_profiled(true, opt) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("snemu-itest: {e}");
+            eprintln!("itest: {e}");
             return ExitCode::from(1);
         }
     };
@@ -484,7 +484,7 @@ pub fn run(
     let cap = limit.map_or(selected.len(), |l| l.min(selected.len()));
     let work: Vec<&itest_harness::Scenario> = selected.into_iter().take(cap).collect();
     eprintln!(
-        "snemu-itest: auditing {cap} of {} scenario(s), live under snemu, \
+        "itest: auditing {cap} of {} scenario(s), live under snemu, \
          up to {max_steps} steps each, {jobs} worker(s), speed[{}]",
         SCENARIOS.len(),
         speed.label(),
@@ -741,7 +741,7 @@ pub fn run(
                 push_segment(&segments, "scenario", s.name, s.workload, worker, start_s, started.elapsed().as_secs_f64(), instret, pass);
                 let n = done.fetch_add(1, Ordering::SeqCst) + 1;
                 eprintln!(
-                    "snemu-itest: [{n:>3}/{cap}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s  {:>4}/{}MiB{}",
+                    "itest: [{n:>3}/{cap}] w{worker:<2} {:<40} {:<4} {:>6}M {wall:>6.2}s  {:>4}/{}MiB{}",
                     s.name,
                     if pass { "ok" } else { "FAIL" },
                     instret / 1_000_000,
@@ -774,14 +774,14 @@ pub fn run(
     let fallbacks = fell_back.load(Ordering::Relaxed);
     if fallbacks > 0 {
         eprintln!(
-            "snemu-itest: {fallbacks} collapsed scenario(s) failed their shared stream and \
+            "itest: {fallbacks} collapsed scenario(s) failed their shared stream and \
              fell back to a live run (depth hint too short — self-healed for next run)"
         );
     }
     let unverified = unverified_shares.load(Ordering::Relaxed);
     if unverified > 0 {
         eprintln!(
-            "snemu-itest: ⚠ {unverified} fork-node share(s) FAILED the state-hash check \
+            "itest: ⚠ {unverified} fork-node share(s) FAILED the state-hash check \
              (materialised node ≠ the scenario's recorded fork-point state) — ran unshared. \
              Investigate: a determinism leak or a JIT/idle-skip boundary drift."
         );
@@ -885,10 +885,10 @@ fn write_packing_report(
                 let _ = std::fs::create_dir_all(dir);
             }
             if let Err(e) = std::fs::write(PACKING_PATH, json) {
-                eprintln!("snemu-itest: could not write {PACKING_PATH}: {e}");
+                eprintln!("itest: could not write {PACKING_PATH}: {e}");
             }
         }
-        Err(e) => eprintln!("snemu-itest: could not serialize packing report: {e}"),
+        Err(e) => eprintln!("itest: could not serialize packing report: {e}"),
     }
 }
 
@@ -1068,10 +1068,10 @@ fn save_prior_keys(kernel: &[u8], table: &BranchKeyTable) {
     match serde_json::to_string_pretty(&doc) {
         Ok(json) => {
             if let Err(e) = std::fs::write(BRANCH_KEYS_PATH, json) {
-                eprintln!("snemu-itest: could not write {BRANCH_KEYS_PATH}: {e}");
+                eprintln!("itest: could not write {BRANCH_KEYS_PATH}: {e}");
             }
         }
-        Err(e) => eprintln!("snemu-itest: could not serialize branch keys: {e}"),
+        Err(e) => eprintln!("itest: could not serialize branch keys: {e}"),
     }
 }
 

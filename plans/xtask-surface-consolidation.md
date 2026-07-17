@@ -454,7 +454,42 @@ concept moves to `qemu-itest`, the shared struct must stop carrying it. Options:
 **(b) is the recommendation** — it preserves the anti-drift property the macro
 exists for. Settle this before writing 2.2.
 
-### Step 2.1: Make `itest` snemu-backed, QEMU behind `--engine qemu`
+### Step 2.1 — ✅ DONE: Make `itest` snemu-backed, QEMU behind `--engine qemu`
+
+**The flip-over is landed.** `cargo xtask itest` runs the snemu audit;
+`--engine qemu` runs the QEMU suite unchanged; `snemu-itest` is gone. Both
+verified live (snemu: 3/3 + a positional filter; qemu: `boot-reaches-heartbeat`
+passed through the old runner). 137/137 xtask tests.
+
+**Two engine-conditional defaults, both nearly merged away silently:**
+
+- **`--jobs`** — snemu wants `available_parallelism()`, qemu wants `10`
+  (empirically A/B'd).
+- **`--opt`** — snemu wants `Mid`, qemu wants `Low`. This one only existed
+  because *concurrent work added `--opt` to the QEMU runner while this step was
+  in flight* — the two engines converged on the same concept from opposite sides,
+  and the merge would have silently changed which kernel one of them tests.
+
+Both are now `Option<T>` on the merged command, resolved per engine at dispatch,
+with the reason written next to the field. **A merged flag whose default differs
+per engine is the trap of this whole phase** — the flag looks shared, the default
+isn't.
+
+**`--only` is gone**: the positional `scenario` is the filter for both engines.
+That leaves one wrinkle documented on the field rather than papered over — qemu
+reads it as an *exact name or comma-list*, snemu as a *substring*. An exact name
+is safe on both; `itest sched` runs every `sched-*` under snemu and is an
+unknown-name error under qemu. Unifying that is 2.2 territory if it bites.
+
+**Process note — the first attempt was reverted.** A script lifted the snemu
+fields by walking back from each declaration to the nearest `///`, which silently
+kept only the **last line** of every multi-line doc comment. Eleven fields
+mangled; caught by eye, not by any test (clap docs aren't type-checked). The
+redo moved **one contiguous slice** — no per-field parsing, nothing to truncate —
+and asserted every expected flag was present in the lifted text before splicing.
+*Structural edits should move blocks, not parse fields.*
+
+### ~~Step 2.1 (original text)~~
 
 The rename, and only the rename. The flake machinery stays alive (and reachable
 via `--engine qemu`) through this step, precisely so this step is revertable.
