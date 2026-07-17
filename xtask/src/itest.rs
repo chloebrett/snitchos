@@ -720,16 +720,23 @@ pub(crate) fn riscv_only_plan<'a>(
 /// `every_workspace_member_opts_in_or_has_a_written_reason` test is what turns
 /// that silent omission into a written decision.
 ///
-/// All three below share one reason, and it is a real one: full pedantic fights
-/// the register/address idioms bare-metal code is made of. It is **not** a
-/// general "it's riscv" exemption — `snitchos-user` and `snitchos-std` are
-/// equally riscv-only and opt in fine, because their pedantic hits turned out to
-/// be ordinary style (doc backticks, `match`→`if let`), not idiom friction.
-pub(crate) const LINTS_EXEMPT: &[(&str, &str)] = &[
-    ("kernel", "bare-metal: full pedantic fights the register/address idioms it is built from"),
-    ("hello", "bare-metal U-mode program: same register/address idiom friction as `kernel`"),
-    ("fs", "bare-metal U-mode server: same register/address idiom friction as `kernel`"),
-];
+/// **Being bare-metal is not a reason.** This list used to say "full pedantic
+/// fights register/address idioms" and name `kernel`, `hello` and `fs`. Measured,
+/// that reason was false: `hello` produces 8 hits and `fs` a handful, **none**
+/// idiom-related, so both now opt in. The workspace's `cast_*` and
+/// `unreadable_literal` allows *are* the bare-metal accommodation — their own
+/// comments say so ("~200×", "mirror the linker script + Sv39 layout") — so by
+/// the time pedantic runs, that friction is already gone. What's left everywhere
+/// is ordinary style, doc-backticks above all.
+///
+/// The reason mattered: while it stood, it was the template for three further
+/// bogus exemptions (`snitchos-user`, `snitchos-std`, `snitchos-user-macros`) that
+/// were never justified either. A false reason propagates.
+pub(crate) const LINTS_EXEMPT: &[(&str, &str)] = &[(
+    "kernel",
+    "104 un-triaged pedantic hits (~half mechanical doc-backticks); a volume \
+     problem, not an idiom one — opt in once triaged",
+)];
 
 /// Whether a manifest inherits the workspace lint table.
 ///

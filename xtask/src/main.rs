@@ -537,6 +537,12 @@ enum SnemuCmd {
         /// DTB's /chosen/bootargs.
         #[arg(long)]
         workload: Option<String>,
+        /// Run the optimized (`--release`, opt-3) kernel — matches the release
+        /// itests and `diff --opt mid` / `profile --release`. The userspace stays
+        /// pinned to opt-1 (the `build.rs` default), same as `--opt mid`. Use this
+        /// to stream frames from a release-only fidelity gap, not just diff it.
+        #[arg(long)]
+        release: bool,
     },
     /// Differential oracle: boot the same kernel under snemu and QEMU and
     /// structurally diff their telemetry frame streams (timestamps normalized).
@@ -1101,6 +1107,26 @@ mod cli_surface_tests {
         assert!(Cli::try_parse_from(["xtask", "itest"]).is_ok());
     }
 
+    /// `snemu boot --release` runs the opt-3 kernel under snemu — the counterpart
+    /// to `profile --release` and `diff --opt mid`, so a release-only fidelity gap
+    /// can be observed by streaming frames, not just diffed. Default is debug.
+    #[test]
+    fn snemu_boot_takes_a_release_flag() {
+        use super::{Cmd, SnemuCmd};
+
+        let cli = Cli::try_parse_from(["xtask", "snemu", "boot"]).expect("parses");
+        let Cmd::Snemu { cmd: SnemuCmd::Boot { release, .. } } = cli.cmd else {
+            panic!("expected snemu boot")
+        };
+        assert!(!release, "debug is the default");
+
+        let cli = Cli::try_parse_from(["xtask", "snemu", "boot", "--release"]).expect("parses");
+        let Cmd::Snemu { cmd: SnemuCmd::Boot { release, .. } } = cli.cmd else {
+            panic!("expected snemu boot")
+        };
+        assert!(release, "--release enables the opt-3 kernel");
+    }
+
     /// A verb we never had must not parse — proves the net actually discriminates
     /// rather than accepting everything.
     #[test]
@@ -1266,8 +1292,8 @@ mod env_scrub_tests {
 /// Dispatch the `snemu` subcommand group.
 fn run_snemu(cmd: SnemuCmd) -> ExitCode {
     match cmd {
-        SnemuCmd::Boot { features, max_steps, frames, workload } => {
-            snemu_boot(&features, max_steps, frames, workload.as_deref())
+        SnemuCmd::Boot { features, max_steps, frames, workload, release } => {
+            snemu_boot(&features, max_steps, frames, workload.as_deref(), release)
         }
         SnemuCmd::Diff { steps, qemu_secs, workload, all, limit, opt } => {
             if all {
@@ -1498,6 +1524,7 @@ fn snemu_boot(
     max_steps: Option<u64>,
     frames: bool,
     workload: Option<&str>,
+    release: bool,
 ) -> ExitCode {
     let mut features_vec: Vec<&str> = if features.is_empty() {
         Vec::new()
@@ -1509,7 +1536,11 @@ fn snemu_boot(
     if workload.is_some() && !features_vec.contains(&"itest-workloads") {
         features_vec.push("itest-workloads");
     }
-    let status = qemu::build_kernel(&features_vec).expect("failed to invoke cargo");
+    // `Mid` = opt-3 kernel with the opt-1 userspace pin (same regime the release
+    // itests and `diff --opt mid` use); `Low` = debug. `High` (opt-3 userspace)
+    // isn't exposed here — that's the deliberate-UB build, reachable via `itest`.
+    let opt = if release { qemu::OptLevel::Mid } else { qemu::OptLevel::Low };
+    let status = qemu::build_kernel_profiled(&features_vec, opt).expect("failed to invoke cargo");
     if !status.success() {
         eprintln!("snemu-boot: kernel build failed");
         return ExitCode::from(1);
@@ -1523,7 +1554,7 @@ fn snemu_boot(
     if let Some(name) = workload {
         cmd.args(["--workload", name]);
     }
-    cmd.arg(qemu::KERNEL_BIN);
+    cmd.arg(qemu::kernel_bin(release));
     if let Some(n) = max_steps {
         cmd.arg(n.to_string());
     }

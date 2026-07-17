@@ -113,7 +113,8 @@ define_metrics! {
     // registry counters now; these are the sampled gauges.
     gauge     smp_harts_total           = "snitchos.smp.harts_total";
     gauge     smp_boot_hart_id          = "snitchos.smp.boot_hart_id";
-    // SMOKE TEST metrics — remove with heap_smoke module
+    // Fragmentation-workload metrics — the sawtooth these trace is what gives
+    // heap.free_blocks / largest_free_block_bytes above something to show.
     gauge     smoke_entries             = "snitchos.heap_smoke.entries";
     gauge     smoke_primes              = "snitchos.heap_smoke.primes";
     gauge     smoke_candidate           = "snitchos.heap_smoke.candidate";
@@ -330,7 +331,8 @@ fn emit_smp_metrics(m: &Metrics) {
     emit!(m, smp_boot_hart_id = BOOT_MHARTID.load(Ordering::Relaxed));
 }
 
-/// SMOKE TEST — remove with heap_smoke module.
+/// Steps the fragmentation workload and emits its gauges. Runs on every
+/// workload — the churn is what keeps the heap's free-block gauges alive.
 fn emit_heap_smoke_metrics(m: &Metrics, count: i64) {
     heap_smoke::step(count);
     let sst = heap_smoke::stats();
@@ -382,7 +384,7 @@ fn emit_storm_metrics(m: &Metrics, count: i64) {
             emit!(m, virtio_storm_hart0_emits      = crate::storms::virtio_storm::HART0_EMITS.load(Ordering::Relaxed));
             emit!(m, virtio_storm_hart1_iterations = crate::storms::virtio_storm::HART1_ITERATIONS.load(Ordering::Relaxed));
         }
-        WorkloadKind::TlbShootdownVisible => {
+        WorkloadKind::TlbShootdown => {
             if count == 1 {
                 crate::storms::tlb_shootdown::run();
             }

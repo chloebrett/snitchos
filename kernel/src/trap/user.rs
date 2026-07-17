@@ -732,7 +732,7 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     // Powerbox viewer demo: seeded FS server + view-demo launcher. view-demo
     // connects to the FS, looks up a file with READ-only rights, then spawns
     // the viewer (SPAWNABLE id 6) with that attenuated cap delegated.
-    (WorkloadKind::ViewerDemo, UserLayout {
+    (WorkloadKind::ViewDemo, UserLayout {
         needs_endpoint: true,
         programs: &[
             ProgramSpawn { name: "fs_server", program: &FS_SERVER_SEEDED, priority: Priority::Normal },

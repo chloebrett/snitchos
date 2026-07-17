@@ -6,8 +6,12 @@ publish = false
 
 # Bare-metal U-mode program. Like `kernel`, it only builds for
 # riscv64gc-unknown-none-elf (its own `user.ld` links it at a fixed
-# low-half VA) and does NOT opt into the workspace pedantic lints —
-# register/address idioms fight them. Built via `cargo xtask build`.
+# low-half VA). Built via `cargo xtask build`.
+#
+# It *does* opt into the workspace pedantic lints (below). It used to claim
+# "register/address idioms fight them" — measured, that was false: zero of its
+# hits are idiom-related, because the workspace's `cast_*` / `unreadable_literal`
+# allows already absorb exactly that friction. Bare-metal is not a reason.
 
 # The program logic only; crt0, panic handler, and the syscall/capability
 # API all come from the shared `snitchos-user` runtime.
@@ -28,3 +32,6 @@ fs-proto = { path = "../../fs-proto" }
 # Pure supervision policy — the `supervised` root's dependency ordering, restart
 # decision, and backoff/intensity live here (host-tested; userspace-safe).
 supervision = { path = "../../supervision" }
+
+[lints]
+workspace = true

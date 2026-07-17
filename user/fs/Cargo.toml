@@ -6,8 +6,12 @@ publish = false
 
 # Bare-metal U-mode FS server + client (the v0.10 RAMfs component). Like
 # `hello`, it only builds for riscv64gc-unknown-none-elf (its own `user.ld`
-# links it at a fixed low-half VA) and does NOT opt into the workspace pedantic
-# lints. Built via `kernel/build.rs`.
+# links it at a fixed low-half VA). Built via `kernel/build.rs`.
+#
+# It *does* opt into the workspace pedantic lints (below), despite being
+# bare-metal: measured, it produces zero register/address-idiom hits — the
+# workspace's `cast_*` / `unreadable_literal` allows already absorb that
+# friction. Being bare-metal is not itself a reason to opt out.
 [dependencies]
 snitchos-user = { path = "../runtime" }
 snitchos-std = { path = "../std" }
@@ -23,3 +27,6 @@ ramfs = { path = "../../ramfs" }
 # note into its `user.iface` xattr. `read`+`elf` only — no write, no other formats.
 [build-dependencies]
 object = { version = "0.36", default-features = false, features = ["read_core", "elf", "std"] }
+
+[lints]
+workspace = true

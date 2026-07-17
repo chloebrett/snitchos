@@ -13,8 +13,9 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-// Only `workload`'s tests reach for `alloc` (a `BTreeSet` to assert histogram
-// bins are distinct); the boot-time logic itself allocates nothing.
+// Only tests reach for `alloc` (`workload`: a `BTreeSet` to assert histogram bins
+// are distinct; `bootargs`: a `Vec` for the registry's self-sortedness check). The
+// boot-time logic itself allocates nothing.
 #[cfg(test)]
 extern crate alloc;
 

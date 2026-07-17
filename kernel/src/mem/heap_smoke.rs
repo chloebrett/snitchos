@@ -1,4 +1,4 @@
-// SMOKE TEST — remove once real kernel workloads drive heap metrics.
+// Fragmentation workload — see `kernel_mem::heap_smoke` for why it stays.
 // Holds the static FactorTable and exposes step()/stats() for the heartbeat
 // loop. All logic lives in kernel_mem::heap_smoke; this file only adds the
 // lock and the static.

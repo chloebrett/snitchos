@@ -1,4 +1,10 @@
-// SMOKE TEST — remove once real kernel workloads drive heap metrics.
+// Fragmentation workload — the kernel's only source of sustained alloc/free
+// churn, and so the only thing that drives `snitchos.heap.free_blocks` and
+// `snitchos.heap.largest_free_block_bytes` off a flat line. Real workloads
+// allocate at boot and then hold steady, which those two gauges can't see.
+// Delete this and the fragmentation panels go quiet, and the talc-vs-LLA
+// allocator comparison loses the workload it needs.
+//
 // Incrementally builds a prime-factor table: each call to `extend`
 // factorizes a batch of integers and stores (n → smallest_prime_factor(n))
 // in a BTreeMap. Periodic `evict_composites` frees non-prime entries,

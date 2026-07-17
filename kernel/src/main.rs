@@ -391,7 +391,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::ShootdownStorm)
         | Some(WorkloadKind::MutexStorm)
         | Some(WorkloadKind::VirtioStorm)
-        | Some(WorkloadKind::TlbShootdownVisible)
+        | Some(WorkloadKind::TlbShootdown)
         | Some(WorkloadKind::PingPong)
         // Userspace: hart 0 just heartbeats; the user program is placed on
         // hart 1 after SECONDARY_READY.
@@ -433,7 +433,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::BadgeMint)
         | Some(WorkloadKind::BadgeHandout)
         | Some(WorkloadKind::Fs)
-        | Some(WorkloadKind::ViewerDemo)
+        | Some(WorkloadKind::ViewDemo)
         | Some(WorkloadKind::Shell)
         // The OOM workloads: their pressure lives entirely in the heartbeat smoke
         // (`frame_smoke` / `heap_smoke_pattern`), keyed on the workload — no demo
@@ -589,7 +589,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         // TLB-shootdown correctness: hart 0's round loop is
         // heartbeat-driven (`emit_storm_metrics`); here we spawn the
         // hart-1 reader that holds the stale translation under test.
-        Some(WorkloadKind::TlbShootdownVisible) => {
+        Some(WorkloadKind::TlbShootdown) => {
             let _ = sched::spawn_on(1, "tlb_reader", storms::tlb_shootdown::reader_body);
         }
         // Many long-lived tasks: fill the scheduler table with N tasks that
