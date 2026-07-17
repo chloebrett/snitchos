@@ -30,34 +30,46 @@ a plan — see `plans/` for active implementation tracks.
   (sampled state), histograms, the `Acquire`-ordered `workload.samples_consumed`
   oracle, and the storm counters stay bespoke. Adding a counter is now a
   `DeferredCounter` declaration + a registry row.
+- **#2 — Userspace names its own metrics.** The complaint was a layering
+  inversion: the kernel owned the *names*. Fixed exactly as the entry specified —
+  `RegisterMetric` (=16) is live and cap-mediated (needs a `TelemetrySink`),
+  copying a name out of user memory into a per-process `MetricTable`; `EmitMetric`
+  resolves a handle against *that* table alone, so a process can only emit to
+  metrics it named. The entry's own motivating example is resolved in code that
+  cites it: the FS server calls `register_gauge("snitchos.fs.denied")` itself
+  (`user/fs/src/lib.rs`), and `kernel/src/trap/user.rs` records that it's "a plain
+  bootstrap sink like every other IPC program … so the kernel no longer
+  special-cases its telemetry."
 
----
+  Two things that look like residue but aren't, recorded so this doesn't get
+  re-filed:
 
-## High-leverage
+  - **The ~56 names still hardcoded in `heartbeat.rs` are the kernel's *own*
+    metrics** (`snitchos.heartbeat.count`, `snitchos.intern.strings_used`, the
+    frame/heap/sched counters). That isn't the inversion — no userspace knows the
+    intern table or the frame allocator exists, so there is nobody else to name
+    them. "Mechanism in the kernel, meaning in userspace" applies to *userspace's*
+    meanings.
+  - **"The intern table lives in kernel memory and userspace can pressure it"
+    isn't about names.** The kernel also holds `Mutex<CapTable>`, `Vec<Box<Task>>`,
+    16 KiB kernel stacks and page-table frames per process, all from the kernel
+    heap. The name table is one bounded item on that list — and the best-behaved
+    one (16/process, reclaimed on exit by the span/metric name GC). Singling it
+    out is arbitrary. The real target, if we ever want it, is an seL4-style
+    **untyped-memory discipline**: the kernel allocates nothing, userspace hands
+    it caps to memory it already owns and the kernel retypes them into kernel
+    objects, so quotas become unnecessary rather than tuned and every object has
+    an exact payer. That's a foundational redesign touching every kernel object
+    and the `init` bootstrap — it wants its own entry, honestly scoped, not a
+    leftover bullet here. (It would also make "who paid for this kernel object" a
+    first-class observable, which is unusually on-brand.)
 
-### #2 — Push the observability vocabulary out of the kernel *(architectural, large)*
-
-The kernel still owns the *names* of metrics — a layering inversion (it's the
-one place "mechanism in the kernel, meaning in userspace" isn't applied).
-
-- ~60 metric names are hardcoded in `kernel/src/obs/heartbeat.rs` (the
-  `define_metrics!` block).
-- The **intern table lives in kernel memory** (`kernel/src/obs/tracing.rs`) and
-  hosts *userspace-defined* span/metric names. The `Process::MAX_SPAN_NAMES`
-  quota is a band-aid on that — userspace can pressure a kernel resource.
-
-**End-state:** userspace names its own metrics via a `RegisterMetric` syscall
-that copies a name from user memory and interns it — the kernel **already does
-exactly this for span names** (`SpanOpen` under `user_range_ok`), so it's a copy
-of an existing path. The kernel then transports opaque metric frames and knows
-nothing of names or kinds. The v0.10 FS denial gauge had to be kernel-registered
-(`snitchos.fs.denied`) precisely because this doesn't exist yet — that's the
-motivating example. Protocol-level change; a milestone, not an afternoon. See
-the `project_userspace_defined_metrics` memory.
-
----
-
-## Done (cont.)
+  Remaining nit, deliberately not opened as an entry: the kernel still maps metric
+  *kinds* (`syscall/metric.rs::metric_kind_from_usize` → `Counter`/`Gauge`/
+  `Histogram`). That is a passthrough to the wire enum — no aggregation, no rates,
+  no interpretation — so the kernel transports the kind without acting on it. If
+  "the kernel shouldn't know a gauge from a counter" ever bites, that's a small
+  separate item.
 
 - **#15 — `xtask mutants` is scopable.** `run_mutants` passed a workspace-wide
   `--features protocol/std,stitch/testing` for all ten crates at once. That
@@ -127,6 +139,15 @@ kernel-core split and never extracted (see `plans/legacy/kernel-core-split.md`):
 
 Both land in `kernel-mem`.
 
+### #16 — Userspace pinned to opt-1 to dodge a UB class *(latent, hard)*
+
+`kernel/build.rs` builds the embedded userspace with
+`--config profile.release.opt-level=1` because there's a latent opt≥2 UB class in
+the userspace crates (talc OOM-loop → hang; confirmed in `snitchos-user`, at
+least one more crate). The itest speedup is kernel-dominated, so the pin costs
+~nothing — which is exactly why it stays. The pin is the workaround; the UB is
+the debt. Repro: `cargo xtask snemu-itest --opt high`.
+
 ## Tooling gaps
 
 ### #14 — `cargo doc` isn't in the gate *(small)*
@@ -136,15 +157,6 @@ Broken intra-doc links rot silently: `kernel-obs/src/intern.rs` has two
 have presumably been dead for a while, because nothing runs `cargo doc`. Adding
 it to `xtask test` catches the class rather than the instances. Expect a first
 pass to surface a backlog.
-
-### #16 — Userspace pinned to opt-1 to dodge a UB class *(latent, hard)*
-
-`kernel/build.rs` builds the embedded userspace with
-`--config profile.release.opt-level=1` because there's a latent opt≥2 UB class in
-the userspace crates (talc OOM-loop → hang; confirmed in `snitchos-user`, at
-least one more crate). The itest speedup is kernel-dominated, so the pin costs
-~nothing — but it's a real bug being routed around, not fixed. Repro:
-`cargo xtask snemu-itest --opt high`.
 
 ## Deferred placeholders (Tier 3)
 
