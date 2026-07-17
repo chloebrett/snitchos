@@ -469,6 +469,7 @@ pub fn run(
     share_snapshots: bool,
     speed: SpeedConfig,
     verbose: bool,
+    stats: bool,
 ) -> ExitCode {
     let (kernel, dtb) = match snemu_diff::prepare_profiled(true, opt) {
         Ok(v) => v,
@@ -838,9 +839,11 @@ pub fn run(
         segs,
     );
 
-    let exit = print_report(&results, boot_instret, makespan.as_secs_f64(), verbose);
-    print_utilization(&worker_busy, makespan, order, ideal_wall, ideal_instret);
-    print_ram_sizing(&results);
+    let exit = print_report(&results, boot_instret, makespan.as_secs_f64(), verbose, stats);
+    if stats {
+        print_utilization(&worker_busy, makespan, order, ideal_wall, ideal_instret);
+        print_ram_sizing(&results);
+    }
     exit
 }
 
@@ -1239,7 +1242,13 @@ fn budget_for(name: &str, default: u64) -> u64 {
 /// `PASS` line per scenario is 120 lines saying what the summary says in one —
 /// and the deterministic suite has earned being believed. The failures, and the
 /// count, are the answer.
-fn print_report(results: &[Row], boot_instret: u64, elapsed_secs: f64, verbose: bool) -> ExitCode {
+fn print_report(
+    results: &[Row],
+    boot_instret: u64,
+    elapsed_secs: f64,
+    verbose: bool,
+    stats: bool,
+) -> ExitCode {
     let passed = results.iter().filter(|r| matches!(r.outcome, Outcome::Pass)).count();
     let total = results.len();
 
@@ -1266,7 +1275,9 @@ fn print_report(results: &[Row], boot_instret: u64, elapsed_secs: f64, verbose: 
         }
     }
 
-    print_slowest(results, boot_instret);
+    if stats {
+        print_slowest(results, boot_instret);
+    }
 
     println!(
         "\n{passed}/{total} scenarios pass under snemu ({:.0}% fidelity, {elapsed_secs:.1}s)",

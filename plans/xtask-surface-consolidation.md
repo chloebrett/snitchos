@@ -515,10 +515,32 @@ Also noted in code while gating it: the `[n/120]` counter is a *completion*
 counter, not progress — workers finish out of order, so it arrives interleaved
 (…[113], [100]…). Comment added rather than fixed; it's honest under `--verbose`.
 
-**Still open** (the "#2" of that list): the analysis tables — slowest-by-instret,
-worker utilization, RAM right-sizing — are ~45 of the remaining 63 lines. They're
-*tuning* output, not test results: excellent when packing, noise when gating.
-Candidate for `--stats`.
+### Step 2.1c — ✅ DONE: analysis tables behind `--stats`
+
+The three tables (slowest-by-instret, worker utilization + packing
+counterfactuals, RAM right-sizing) are now behind `--stats`. They answer *"where
+does the time go?"*, not *"did I break anything?"* — what you want when tuning
+packing or sizing machines, noise when gating a commit.
+
+**Orthogonal to `--verbose`**, deliberately: `-v` is per-scenario detail, `--stats`
+is analysis. `-v --stats` reproduces the full pre-quieting output. A test pins
+that neither flag drags in the other.
+
+**Result: itest's own output is ~14 lines, down from ~250.** Banner, the failure
+with its console tail, the summary. (A raw `wc -l` reads higher only because
+cargo is currently emitting `never used` warnings from other sessions' in-flight
+dead code — not itest's.)
+
+    itest: auditing 120 of 120 scenario(s), live under snemu, …
+      FAIL  supervised-regrants-caps-on-restart
+              no svc.crasher.escalated == 1 — the intensity guard never tripped Escalate
+              --- console --- …
+    119/120 scenarios pass under snemu (99% fidelity, 3.8s)
+
+**Left alone deliberately:** the `[negative-oracle window elapsed clean: …]` line
+— it's a scenario's own diagnostic, and unlike the tables it reports a *negative
+oracle actually holding*, which is a result rather than analysis. Worth revisiting
+if more scenarios grow one.
 
 ### ~~Step 2.1 (original text)~~
 

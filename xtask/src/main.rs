@@ -198,6 +198,16 @@ enum Cmd {
         /// stays.)
         #[arg(long, short = 'v')]
         verbose: bool,
+        /// Print the analysis tables: slowest scenarios by guest instret, worker
+        /// utilization + packing counterfactuals, and per-workload RAM
+        /// right-sizing.
+        ///
+        /// Off by default because they answer *"where does the time go?"*, not
+        /// *"did I break anything?"* — they're what you want when tuning packing or
+        /// sizing machines, and noise when gating a commit. Orthogonal to
+        /// `--verbose`: `-v --stats` is the full pre-quieting output.
+        #[arg(long)]
+        stats: bool,
         /// Per-scenario snemu instruction-step budget. Passing scenarios
         /// short-circuit well under this; the budget only bounds failing ones and
         /// the slow OOM/cooperative workloads. 400M recovers the budget-sensitive
@@ -949,6 +959,28 @@ mod cli_surface_tests {
         assert!(Cli::try_parse_from(["xtask", "itest", "--engine", "bochs"]).is_err());
     }
 
+    /// The analysis tables answer "where does the time go?", not "did I break
+    /// anything?" — so they're behind `--stats`, orthogonal to `--verbose`.
+    #[test]
+    fn itest_takes_a_stats_flag_orthogonal_to_verbose() {
+        use super::Cmd;
+
+        let cli = Cli::try_parse_from(["xtask", "itest"]).expect("parses");
+        let Cmd::Itest { stats, verbose, .. } = cli.cmd else { panic!("expected Itest") };
+        assert!(!stats, "tables are tuning output, not gate output");
+        assert!(!verbose);
+
+        let cli = Cli::try_parse_from(["xtask", "itest", "--stats"]).expect("parses");
+        let Cmd::Itest { stats, verbose, .. } = cli.cmd else { panic!("expected Itest") };
+        assert!(stats);
+        assert!(!verbose, "--stats must not drag in the per-scenario roll-call");
+
+        // The two axes compose: `-v --stats` is the pre-2.1b output.
+        let cli = Cli::try_parse_from(["xtask", "itest", "-v", "--stats"]).expect("parses");
+        let Cmd::Itest { stats, verbose, .. } = cli.cmd else { panic!("expected Itest") };
+        assert!(stats && verbose);
+    }
+
     /// The suite is 3.5s and deterministic, so the default output is the answer —
     /// failures and a count — not a play-by-play. `--verbose` brings back the
     /// per-scenario lines.
@@ -1297,6 +1329,7 @@ fn main() -> ExitCode {
             scenario,
             engine,
             verbose,
+            stats,
             steps,
             limit,
             no_idle_skip,
@@ -1347,6 +1380,7 @@ fn main() -> ExitCode {
                     share_snapshots,
                     speed,
                     verbose,
+                    stats,
                 )
             }
             // The escape hatch: slower and flake-prone, but it's the engine snemu is
