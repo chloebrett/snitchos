@@ -198,8 +198,12 @@ pub(crate) fn timing_snemu(
 /// Wall-clock timing to the shared milestones for `workload` under **QEMU**
 /// (collected over `window`). The baseline snemu is measured against; note the
 /// determinism asymmetry — snemu is seeded once, QEMU is not.
-pub(crate) fn timing_qemu(workload: Option<&str>, window: Duration) -> Result<Timing, String> {
-    let (_frames, timing) = collect_qemu(window, workload)?;
+pub(crate) fn timing_qemu(
+    workload: Option<&str>,
+    window: Duration,
+    opt: qemu::OptLevel,
+) -> Result<Timing, String> {
+    let (_frames, timing) = collect_qemu(window, workload, opt)?;
     Ok(timing)
 }
 
@@ -293,6 +297,7 @@ fn collect_snemu(
 fn collect_qemu(
     window: Duration,
     workload: Option<&str>,
+    opt: qemu::OptLevel,
 ) -> Result<(Vec<OwnedFrame>, Timing), String> {
     let start = Instant::now();
     let socket = std::env::temp_dir().join(format!(
@@ -305,9 +310,9 @@ fn collect_qemu(
         "socket,path={},server=on,wait=on,id=telemetry",
         socket.display()
     );
-    // snemu-diff builds at `OptLevel::Low` (see `prepare`), so QEMU boots the matching
-    // debug ELF. (A `--opt` for release-vs-release diffing is a follow-up.)
-    let mut cmd = qemu::base_command(&chardev, qemu::DEFAULT_RAM_MB, qemu::OptLevel::Low);
+    // QEMU boots the ELF for this opt regime (matching the snemu side), so
+    // `--opt mid` diffs release-vs-release.
+    let mut cmd = qemu::base_command(&chardev, qemu::DEFAULT_RAM_MB, opt);
     if let Some(w) = workload {
         cmd.args(["-append", &format!("workload={w}")]);
     }
@@ -472,6 +477,7 @@ fn compare(
     workload: Option<&str>,
     max_steps: u64,
     qemu_secs: u64,
+    opt: qemu::OptLevel,
 ) -> Result<Comparison, String> {
     // Firmware role: inject the workload into the DTB snemu boots (QEMU gets it
     // via `-append`), so both emulators run the same scenario.
@@ -481,7 +487,7 @@ fn compare(
         None => dtb_base.to_vec(),
     };
     let (snemu, snemu_stop, snemu_timing) = collect_snemu(kernel, &dtb, max_steps)?;
-    let (qemu, qemu_timing) = collect_qemu(Duration::from_secs(qemu_secs), workload)?;
+    let (qemu, qemu_timing) = collect_qemu(Duration::from_secs(qemu_secs), workload, opt)?;
 
     let d = diff_streams(&snemu, &qemu);
     let sv = string_vocabulary(&snemu);
@@ -723,8 +729,8 @@ pub(crate) fn measure_workload(
 }
 
 /// Single-workload oracle: boot under both, diff, print the detailed report.
-pub fn run(max_steps: u64, qemu_secs: u64, workload: Option<&str>) -> ExitCode {
-    let (kernel, dtb) = match prepare(workload.is_some()) {
+pub fn run(max_steps: u64, qemu_secs: u64, workload: Option<&str>, opt: qemu::OptLevel) -> ExitCode {
+    let (kernel, dtb) = match prepare_profiled(workload.is_some(), opt) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("snemu-diff: {e}");
@@ -732,7 +738,7 @@ pub fn run(max_steps: u64, qemu_secs: u64, workload: Option<&str>) -> ExitCode {
         }
     };
     eprintln!("snemu-diff: workload = {}", workload.unwrap_or("default (init)"));
-    let cmp = match compare(&kernel, &dtb, workload, max_steps, qemu_secs) {
+    let cmp = match compare(&kernel, &dtb, workload, max_steps, qemu_secs, opt) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("snemu-diff: {e}");
@@ -745,8 +751,8 @@ pub fn run(max_steps: u64, qemu_secs: u64, workload: Option<&str>) -> ExitCode {
 
 /// Sweep the workloads (all, or the first `limit`) through the oracle and
 /// tabulate agree/disagree.
-pub fn run_all(max_steps: u64, qemu_secs: u64, limit: Option<usize>) -> ExitCode {
-    let (kernel, dtb) = match prepare(true) {
+pub fn run_all(max_steps: u64, qemu_secs: u64, limit: Option<usize>, opt: qemu::OptLevel) -> ExitCode {
+    let (kernel, dtb) = match prepare_profiled(true, opt) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("snemu-diff: {e}");
@@ -758,7 +764,7 @@ pub fn run_all(max_steps: u64, qemu_secs: u64, limit: Option<usize>) -> ExitCode
     let mut results: Vec<(String, Result<Comparison, String>)> = Vec::new();
     for (i, &w) in WORKLOADS.iter().take(count).enumerate() {
         eprint!("snemu-diff: [{}/{count}] {w:<22} ", i + 1);
-        let cmp = compare(&kernel, &dtb, Some(w), max_steps, qemu_secs);
+        let cmp = compare(&kernel, &dtb, Some(w), max_steps, qemu_secs, opt);
         match &cmp {
             Ok(c) => eprintln!(
                 "{} (snemu {} frames | 1st-span snemu {} vs qemu {})",

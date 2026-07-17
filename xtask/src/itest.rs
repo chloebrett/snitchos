@@ -968,3 +968,56 @@ mod unit_test_plan_tests {
         unit_test_plan(&names, NOT_HOST_TESTED, EXTRA_TEST_ARGS).expect("committed lists are current");
     }
 }
+
+#[cfg(test)]
+mod riscv_only_plan_tests {
+    use super::{NOT_HOST_TESTED, riscv_only_plan, unit_test_plan};
+
+    #[test]
+    fn returns_the_excluded_crates_in_member_order() {
+        let plan = riscv_only_plan(&["collector", "kernel", "hello"], &[
+            ("hello", "riscv only"),
+            ("kernel", "riscv only"),
+        ])
+        .expect("valid plan");
+        assert_eq!(plan, vec!["kernel", "hello"]);
+    }
+
+    #[test]
+    fn a_host_crate_is_not_in_the_riscv_plan() {
+        let plan = riscv_only_plan(&["collector"], &[]).expect("valid plan");
+        assert!(plan.is_empty(), "no exclusions means nothing is riscv-only: {plan:?}");
+    }
+
+    /// Same guard the unit-test plan has: a renamed crate must not leave a
+    /// silent entry behind.
+    #[test]
+    fn an_entry_naming_a_departed_crate_is_an_error() {
+        let err = riscv_only_plan(&["collector"], &[("kernel-core", "gone")])
+            .expect_err("stale entry must fail");
+        assert!(err.contains("kernel-core"), "error should name the stale entry: {err}");
+    }
+
+    /// The invariant the hardcoded clippy allow-list used to break: every
+    /// workspace member is linted by exactly one of the two gates. A crate can
+    /// no longer be silently unlinted by simple omission — which is how
+    /// `snemu`, `stitch`, `hitch` and eleven others drifted out.
+    #[test]
+    fn every_workspace_member_is_linted_by_exactly_one_gate() {
+        let members = super::workspace_members().expect("cargo metadata");
+        let names: Vec<&str> = members.iter().map(String::as_str).collect();
+        let host: Vec<&str> = unit_test_plan(&names, NOT_HOST_TESTED, &[])
+            .expect("valid plan")
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        let riscv = riscv_only_plan(&names, NOT_HOST_TESTED).expect("valid plan");
+
+        for member in &names {
+            let in_host = host.contains(member);
+            let in_riscv = riscv.contains(member);
+            assert!(in_host || in_riscv, "{member} is linted by neither gate");
+            assert!(!(in_host && in_riscv), "{member} is linted by both gates");
+        }
+    }
+}

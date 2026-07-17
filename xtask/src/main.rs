@@ -545,6 +545,13 @@ enum SnemuCmd {
         /// With `--all`, sweep only the first N workloads (faster).
         #[arg(long)]
         limit: Option<usize>,
+        /// Optimization regime for *both* emulators (they must match, or the diff is
+        /// meaningless): `low` (debug, default), `mid` (release kernel), `high`
+        /// (release everywhere). Use `--opt mid` to diff **release-vs-release** — the
+        /// tool for localizing a snemu fidelity gap that only shows on the release
+        /// build (`snemu-itest --opt mid` fails while `itest --opt mid` passes).
+        #[arg(long, value_enum, default_value_t = qemu::OptLevel::Low)]
+        opt: qemu::OptLevel,
     },
     /// Snapshot/fork harness: boot the common prefix once under snemu, then fork
     /// every workload from that snapshot (clone + DTB bootarg patch). snemu-only;
@@ -1055,11 +1062,11 @@ fn run_snemu(cmd: SnemuCmd) -> ExitCode {
         SnemuCmd::Boot { features, max_steps, frames, workload } => {
             snemu_boot(&features, max_steps, frames, workload.as_deref())
         }
-        SnemuCmd::Diff { steps, qemu_secs, workload, all, limit } => {
+        SnemuCmd::Diff { steps, qemu_secs, workload, all, limit, opt } => {
             if all {
-                snemu_diff::run_all(steps, qemu_secs, limit)
+                snemu_diff::run_all(steps, qemu_secs, limit, opt)
             } else {
-                snemu_diff::run(steps, qemu_secs, workload.as_deref())
+                snemu_diff::run(steps, qemu_secs, workload.as_deref(), opt)
             }
         }
         SnemuCmd::Fork { steps } => snemu_diff::run_fork(steps),

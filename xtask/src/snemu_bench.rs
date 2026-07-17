@@ -166,7 +166,7 @@ pub fn run_baseline(runs: u32, decode_cache: bool) -> ExitCode {
             .and_then(|t| t.milestone);
         // QEMU is best-effort: a missing binary or an unreached milestone leaves
         // the column blank rather than failing the whole baseline.
-        let qemu_milestone = snemu_diff::timing_qemu(Some(e.workload), QEMU_BASELINE_WINDOW)
+        let qemu_milestone = snemu_diff::timing_qemu(Some(e.workload), QEMU_BASELINE_WINDOW, crate::qemu::OptLevel::Low)
             .ok()
             .and_then(|t| t.milestone);
         rows.push(BaselineRow { entry: e, report, snemu_milestone, qemu_milestone });

@@ -59,6 +59,22 @@ the `project_userspace_defined_metrics` memory.
 
 ## Done (cont.)
 
+- **#15 — `xtask mutants` is scopable.** `run_mutants` passed a workspace-wide
+  `--features protocol/std,stitch/testing` for all ten crates at once. That
+  survived only because an unscoped baseline builds every `-p` together;
+  cargo-mutants narrows `cargo test` to the mutant's owning package, so any
+  `-f`/`-p` filter died with *"the package 'kernel-proc' does not contain this
+  feature: stitch/testing"* — i.e. the mandated MUTATE step worked only in its
+  slowest, least useful mode. Now one invocation per crate from a
+  `MUTANT_CRATES: &[(&str, &[&str])]` table (mirroring `UNIT_TEST_CRATES`), each
+  carrying the features its *own* tests need, so the flag is always valid for the
+  package it's applied to. `mutants [crate]` scopes it, matching the
+  `audit <crate>` convention:
+  `cargo xtask mutants kernel-proc -- -f kernel-proc/src/elf.rs`. An unknown name
+  exits 2 listing the known crates. Trade-off accepted: a full unscoped sweep now
+  pays ten baselines instead of one — mutation testing everything was already the
+  slow path, and the scoped run is the one people actually use.
+
 - **#12 — `elf::parse` now bounds the image's declared memory.** `mem_size` was
   unbounded, so an image declaring `2^60` made `page_perms` build a ~2^48-entry
   `BTreeMap` and hang — worse than the panic the module's trust-boundary contract
@@ -110,15 +126,6 @@ Broken intra-doc links rot silently: `kernel-obs/src/intern.rs` has two
 have presumably been dead for a while, because nothing runs `cargo doc`. Adding
 it to `xtask test` catches the class rather than the instances. Expect a first
 pass to surface a backlog.
-
-### #15 — `xtask mutants` can't be scoped to one crate *(small)*
-
-`run_mutants` passes `--features protocol/std,stitch/testing` for the whole crate
-set. cargo-mutants narrows to the owning package per mutant, so any `-f`/`-p`
-filter fails the baseline with *"the package 'kernel-proc' does not contain this
-feature: stitch/testing"*. Whole-workspace runs are fine; scoping to one file —
-the normal way to use it during the mandated MUTATE step — is not. Worked around
-today by invoking `cargo mutants -p <crate> -f <file>` directly.
 
 ### #16 — Userspace pinned to opt-1 to dodge a UB class *(latent, hard)*
 
