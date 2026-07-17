@@ -285,18 +285,28 @@ pub fn caps(workload: Option<&str>, steps: u64) -> ExitCode {
 
 /// Generate (or, with `check`, verify) the workspace crate-dependency graph.
 /// Editorial crate → layer mapping for the `deps` graph's clustering. Keeps the
-/// workspace legible by grouping crates into the four layers rather than a flat
+/// workspace legible by grouping crates into the five layers rather than a flat
 /// hairball. New crates land here (else they render ungrouped).
+///
+/// Every layer but one names a *relationship to SnitchOS*: `kernel` runs it,
+/// `userspace` runs on it, `shared` is the vocabulary crossing that boundary,
+/// `tooling` builds and observes it. `agnostic` is the absence of one — a crate
+/// that doesn't know SnitchOS exists and would be at home in any workspace. The
+/// membership test is a single question: **does this crate name a SnitchOS
+/// concept?** Note it is *not* "has no dependencies" — `kernel-mem`,
+/// `kernel-devices` and `kernel-boot` are all dependency-free and firmly
+/// `kernel`; the arrows already show leafness, so a layer needn't.
 fn deps_layer(crate_name: &str) -> Option<String> {
     let layer = match crate_name {
         "kernel" | "kernel-mem" | "kernel-obs" | "kernel-devices" | "kernel-boot"
         | "kernel-proc" => "kernel",
-        "protocol" | "snitchos-abi" | "fs-proto" | "fs-core" | "ramfs" | "hitch" | "hitch-pod"
-        | "hitch-derive" => "shared",
+        "protocol" | "snitchos-abi" | "fs-proto" | "fs-core" | "ramfs" | "supervision" | "hitch"
+        | "hitch-pod" | "hitch-derive" => "shared",
         "hello" | "fs" | "snitchos-user" | "snitchos-std" | "snitchos-user-macros" | "stitch" => {
             "userspace"
         }
         "xtask" | "collector" | "snemu" | "itest-harness" | "diagram" | "snip" => "tooling",
+        "magnitude" => "agnostic",
         _ => return None,
     };
     Some(layer.to_string())

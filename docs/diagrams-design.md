@@ -271,10 +271,31 @@ A visual audit (rendering every diagram to PNG and eyeballing it) drove these:
    this" caption (notation, colors, provenance), threaded through `render_doc`.
 5. **deps layer-clustering** — the `Graph` model gained subgraph support
    (`node_in` → mermaid `subgraph` / DOT `cluster_*`), and `workspace_graph`
-   takes an editorial `layer_of` map (kernel / shared / userspace / tooling in
-   `diagram_cmd::deps_layer`). The flat 21-crate hairball is now four labelled
-   boxes, so the layering — everything funnelling into the `shared` protocol/abi
-   layer — is legible at a glance.
+   takes an editorial `layer_of` map (kernel / shared / userspace / tooling /
+   agnostic in `diagram_cmd::deps_layer`). The flat 21-crate hairball is now five
+   labelled boxes, so the layering — everything funnelling into the `shared`
+   protocol/abi layer — is legible at a glance.
+
+   **The layer rule.** Four of the five name a *relationship to SnitchOS*:
+   `kernel` runs it, `userspace` runs on it, `shared` is the vocabulary crossing
+   that boundary, `tooling` builds and observes it. **`agnostic` is the absence
+   of one** — a crate that doesn't know SnitchOS exists and would be at home in
+   any workspace (`magnitude`, which turns `1.2B` into digits and back). The
+   membership test is one question: *does this crate name a SnitchOS concept?*
+
+   Two traps, both hit in practice:
+   - **It is not "has no dependencies."** `kernel-mem`, `kernel-devices` and
+     `kernel-boot` are all dependency-free and firmly `kernel`. Leafness is
+     already visible in the arrows; a layer named for it would say the same
+     thing twice and get it wrong. (This is why the layer isn't called `leaf`.)
+   - **Classify by what a crate *is*, not by who imports it.** `magnitude` is
+     only used by `xtask`, which argues for `tooling` — but that is reasoning
+     from consumers, which is exactly what produced the `kernel-core` grab-bag
+     this workspace just spent a day deleting.
+
+   A crate absent from the map renders **ungrouped**, which is silent — nothing
+   fails. `supervision` and `magnitude` both sat loose that way until someone
+   looked. Add new crates to `deps_layer`.
 
 ## Decisions
 

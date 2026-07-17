@@ -776,6 +776,14 @@ pub fn run_unit_tests() -> ExitCode {
     if crate::diagram_cmd::check_all() != ExitCode::SUCCESS {
         return ExitCode::from(1);
     }
+    // Same reasoning as the diagrams: a markdown link is a contract nothing
+    // compiles. Every `git mv` sweep this repo has done has left dead links
+    // behind — most often the moved file's own `../` links, which now resolve
+    // one directory too high. Cheap to check, invisible otherwise.
+    eprintln!("=== doc links ===");
+    if crate::links::check() != ExitCode::SUCCESS {
+        return ExitCode::from(1);
+    }
     ExitCode::SUCCESS
 }
 

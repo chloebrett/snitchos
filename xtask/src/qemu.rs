@@ -85,11 +85,14 @@ pub fn base_command_ex(chardev_arg: &str, ram_mb: u32, ramfb: bool, display: Opt
 /// Optimization regime for a kernel build. The three levels have *distinct*
 /// failure scenarios, which is why they're worth flicking between (esp. under
 /// `snemu-itest`):
-/// - **Low** — debug, opt-level 0 everywhere. The regime where scenarios that
-///   depend on unbuilt work (e.g. supervision) fail — the honest correctness test.
+/// - **Low** — debug, opt-level 0 everywhere. The faithful correctness floor: the
+///   whole suite (supervision included) is green here, so a Low failure is a real
+///   logic bug, not a codegen artifact. (The old note that "supervision fails under
+///   Low" predates supervision being built — it's now green.)
 /// - **Mid** — release kernel (opt-3) with the embedded userspace pinned to opt-1
-///   (the `build.rs` default, which dodges the userspace opt≥2 UB class). Fast, and
-///   currently green — the former `--release` behavior.
+///   (the `build.rs` default, which dodges the userspace opt≥2 UB class). Fast (the
+///   former `--release`), but this is where **release-codegen-vs-debug divergences
+///   surface under snemu**: a scenario green under Low + QEMU can still fail here.
 /// - **High** — release everywhere, userspace at opt-3 too. Surfaces the userspace
 ///   opt≥2 UB class (talc OOM loop / hang) `build.rs` otherwise sidesteps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]

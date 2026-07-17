@@ -616,7 +616,8 @@ mod tests {
         assert_eq!(Syscall::from_usize(28), Some(Syscall::Revoke));
         assert_eq!(Syscall::from_usize(29), Some(Syscall::ClockFreq));
         assert_eq!(Syscall::from_usize(30), Some(Syscall::Kill));
-        assert_eq!(Syscall::from_usize(31), None);
+        assert_eq!(Syscall::from_usize(31), Some(Syscall::SpawnOn));
+        assert_eq!(Syscall::from_usize(32), None);
     }
 
     #[test]

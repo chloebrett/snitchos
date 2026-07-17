@@ -216,6 +216,11 @@ posts/        Devlog notes per milestone.
 
 ### Running
 
+**`x` is shorthand for `cargo xtask`** — `x boot`, `x test`, `x snemu-itest --only foo`.
+A shell alias in this environment (not a repo file), so it works in the terminal and in
+tool shells, but not in CI or a fresh clone. Scripts and docs spell out `cargo xtask`;
+type `x` interactively. Every command below accepts either.
+
 ```
 cargo xtask boot              # build kernel + run in QEMU; no bootarg now boots `init` (the userspace root, v0.13)
 cargo xtask boot --workload demo  # the former default: kernel scheduler demo (task_a/task_b + producer/consumer)

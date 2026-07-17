@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 mod audit;
 mod diagram_cmd;
 mod itest;
+mod links;
 mod loc;
 mod measure;
 mod qemu;
@@ -120,10 +121,12 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t)]
         order: itest::snemu_audit::PackOrder,
         /// Optimization regime, with distinct failure modes — flick between them to
-        /// localize a bug: `low` (debug, opt-0 — where scenarios depending on unbuilt
-        /// work like supervision fail, the honest correctness test), `mid` (release
-        /// kernel + opt-1 userspace — fast and currently green, the former `--release`),
-        /// or `high` (release everywhere — surfaces the userspace opt≥2 UB class).
+        /// localize a bug: `low` (debug, opt-0 — the faithful correctness floor, whole
+        /// suite incl. supervision green, so a failure is a real logic bug), `mid`
+        /// (release kernel + opt-1 userspace — fast, the former `--release`, but where
+        /// release-codegen-vs-debug divergences under snemu surface: a scenario green
+        /// under `low`+QEMU can still fail here), or `high` (release everywhere —
+        /// surfaces the userspace opt≥2 UB class).
         #[arg(long, value_enum, default_value_t = qemu::OptLevel::Mid)]
         opt: qemu::OptLevel,
         /// Enable the native-op helper (tier-0.5 JIT): fast-path guest memset/memcpy
@@ -294,7 +297,7 @@ enum Cmd {
         args: Vec<String>,
     },
     /// Run mutation testing against the host-testable crates (collector,
-    /// protocol, kernel-core, hitch). Trailing args are forwarded to
+    /// protocol, the `kernel-*` crates, hitch). Trailing args are forwarded to
     /// cargo-mutants, e.g. `cargo xtask mutants -- -j 4`.
     Mutants {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -317,7 +320,7 @@ enum Cmd {
         cmd: StackCmd,
     },
     /// Run every host-side check across the workspace: the unit tests
-    /// (`kernel-core`, `protocol --features std`, `collector`, …), the
+    /// (the `kernel-*` crates, `protocol --features std`, `collector`, …), the
     /// loom model-check tests (a separate `--cfg loom` compilation), and
     /// the generated-diagram drift check. Fast (~1s). Doesn't touch QEMU.
     Test,
@@ -744,6 +747,124 @@ fn scrub_inherited_cargo_env() {
         // SAFETY: called as the first statement of `main`, before any thread is
         // spawned, so there is no concurrent access to the process environment.
         unsafe { std::env::remove_var(key) };
+    }
+}
+
+/// Characterisation of the CLI surface — the net the consolidation work
+/// (plans/xtask-surface-consolidation.md) renames things across. These assert
+/// what the tree accepts *today*; they are not a design statement. When a step
+/// deliberately changes the surface, the failing test here is the point, and the
+/// step updates it.
+#[cfg(test)]
+mod cli_surface_tests {
+    use super::Cli;
+    use clap::{CommandFactory, Parser};
+
+    /// clap's own consistency check: duplicate flags, bad defaults, conflicting
+    /// short options. Cheap, and it fails at definition time rather than leaving
+    /// a broken verb for someone to discover at the terminal.
+    #[test]
+    fn the_clap_definition_is_internally_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    /// Every top-level verb, by name, with the minimum argv that should parse.
+    /// A rename or accidental removal fails here.
+    #[test]
+    fn every_top_level_command_parses() {
+        const MINIMAL_ARGV: &[&[&str]] = &[
+            &["build"],
+            &["snemu-boot"],
+            &["snemu-diff"],
+            &["snemu-fork"],
+            &["snemu-itest"],
+            &["snemu-profile"],
+            &["snemu-bench"],
+            &["boot"],
+            &["measure", "--workload", "smp"],
+            &["collect"],
+            &["reader"],
+            &["mutants"],
+            &["clippy"],
+            &["stack", "up"],
+            &["test"],
+            &["itest"],
+            &["baseline", "show"],
+            &["diagram", "deps"],
+            &["loc"],
+            &["audit", "kernel-mem"],
+            &["debug"],
+            &["itest-show"],
+            &["snip", "a message"],
+        ];
+        for argv in MINIMAL_ARGV {
+            let full: Vec<&str> = std::iter::once("xtask").chain(argv.iter().copied()).collect();
+            assert!(
+                Cli::try_parse_from(&full).is_ok(),
+                "top-level command should parse: {argv:?}",
+            );
+        }
+    }
+
+    /// A verb we never had must not parse — proves the net actually discriminates
+    /// rather than accepting everything.
+    #[test]
+    fn an_unknown_command_is_rejected() {
+        assert!(Cli::try_parse_from(["xtask", "not-a-real-command"]).is_err());
+    }
+
+    /// `stack`/`baseline`/`diagram` are subcommand groups: the group alone is
+    /// incomplete, and a bogus member is rejected.
+    #[test]
+    fn subcommand_groups_require_a_valid_member() {
+        assert!(Cli::try_parse_from(["xtask", "stack"]).is_err());
+        assert!(Cli::try_parse_from(["xtask", "stack", "sideways"]).is_err());
+        assert!(Cli::try_parse_from(["xtask", "baseline"]).is_err());
+        assert!(Cli::try_parse_from(["xtask", "baseline", "promote"]).is_ok());
+        assert!(Cli::try_parse_from(["xtask", "diagram", "not-a-diagram"]).is_err());
+    }
+
+    /// The flags Phase 2 reshapes: `itest`'s flake surface (moves behind
+    /// `--engine qemu`) and `--jobs` (must survive on both engines — it's the
+    /// packing-measurement lever, not a QEMU artifact).
+    #[test]
+    fn itest_flake_flags_parse_today() {
+        for argv in [
+            ["itest", "--repeat", "3"].as_slice(),
+            ["itest", "--fail-fast", "2"].as_slice(),
+            ["itest", "--force"].as_slice(),
+            ["itest", "--jobs", "4"].as_slice(),
+            ["itest", "--cpu-jobs", "2"].as_slice(),
+            ["itest", "--profile", "wfi"].as_slice(),
+            ["itest", "--capture", "full"].as_slice(),
+            ["itest", "--shared"].as_slice(),
+            ["itest", "--tag", "userspace"].as_slice(),
+        ] {
+            let full: Vec<&str> = std::iter::once("xtask").chain(argv.iter().copied()).collect();
+            assert!(Cli::try_parse_from(&full).is_ok(), "itest flag should parse: {argv:?}");
+        }
+    }
+
+    /// The snemu perf A/B levers Step 1.3 moves off the itest surface, plus the
+    /// `--speedup` dial that stays.
+    #[test]
+    fn snemu_itest_perf_levers_parse_today() {
+        for argv in [
+            ["snemu-itest", "--speedup", "low"].as_slice(),
+            ["snemu-itest", "--jit"].as_slice(),
+            ["snemu-itest", "--native-jit"].as_slice(),
+            ["snemu-itest", "--tlb"].as_slice(),
+            ["snemu-itest", "--native-ops"].as_slice(),
+            ["snemu-itest", "--no-reg-cache"].as_slice(),
+            ["snemu-itest", "--no-idle-skip"].as_slice(),
+            ["snemu-itest", "--share-snapshots"].as_slice(),
+            ["snemu-itest", "--order", "instret"].as_slice(),
+            ["snemu-itest", "--opt", "high"].as_slice(),
+            ["snemu-itest", "-j", "4"].as_slice(),
+        ] {
+            let full: Vec<&str> = std::iter::once("xtask").chain(argv.iter().copied()).collect();
+            assert!(Cli::try_parse_from(&full).is_ok(), "snemu-itest flag should parse: {argv:?}");
+        }
     }
 }
 

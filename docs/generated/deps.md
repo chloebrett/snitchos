@@ -31,6 +31,7 @@ graph LR
         protocol["protocol"]
         ramfs["ramfs"]
         snitchos_abi["snitchos-abi"]
+        supervision["supervision"]
     end
     subgraph kernel
         kernel["kernel"]
@@ -40,7 +41,9 @@ graph LR
         kernel_obs["kernel-obs"]
         kernel_proc["kernel-proc"]
     end
-    supervision["supervision"]
+    subgraph agnostic
+        magnitude["magnitude"]
+    end
     collector --> protocol
     collector --> snitchos_abi
     diagram --> protocol
@@ -91,6 +94,7 @@ graph LR
     xtask --> diagram
     xtask --> fs_proto
     xtask --> itest_harness
+    xtask --> magnitude
     xtask --> protocol
     xtask --> snemu
     xtask --> snip

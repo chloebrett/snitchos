@@ -104,7 +104,7 @@ no behaviour to mutation-test. Don't manufacture one.
 Two verbs whose stated purpose is already served by shipped work. Neither has a
 consumer outside its own help text.
 
-### Step 0.1: Delete `snemu` (the M1 console-out smoke) and the `minimal-boot` kernel feature
+### Step 0.1 — ✅ DONE: Delete `snemu` (the M1 console-out smoke) and the `minimal-boot` kernel feature
 
 Its own doc comment says it: *"throwaway M1 console-out smoke; superseded by
 `itest`/`boot --snemu` once snemu models Sv39 + virtio in M2"*. M2 shipped long
@@ -158,7 +158,30 @@ group. That's a candidate optimization, not a deletion. Out of scope here.
 
 ## Phase 1 — regrouping (mechanical, low risk)
 
-### Step 1.0: Stop `itest` from running the host-side checks
+### Step 1.0 — ✅ DONE: Stop `itest` from running the host-side checks
+
+**Shipped.** Flag + prerequisite removed; gate documented as
+`cargo xtask test && cargo xtask itest` in README, xtask/README, CLAUDE.md, and
+[[feedback_commit_gate_repeat_tests]].
+
+**It immediately found two rotted checks** — both hidden for exactly the reason
+this step argues, i.e. they live in `cargo xtask test` and the gate everyone runs
+is `snemu-itest`:
+
+1. **The loom model-check had been broken since the kernel-core split** — xtask
+   still ran `-p kernel-core --test loom_tx` against a package that no longer
+   exists. Fixed to `kernel-devices`. `UNIT_TEST_CRATES` *was* updated during the
+   split; this was a second hardcoded crate name a few lines below it. Same
+   "where the compiler doesn't look" hazard [[project_kernel_core_split_and_wx]]
+   already names — one line down from where it was caught.
+2. **The `itest-matrix` diagram had drifted by six scenarios** (`hung-detect`,
+   `kill-no-cap`, 2× `supervised-shutdown`, `user-on-hart0`, `xhart-kill`) from
+   the Hung-detection and Cross-hart-kill commits. Regenerated.
+
+Note the coupling this step *removed* would not have caught either: it only fired
+on `itest`, which isn't the gate. The rot was behind the gate, not the flag.
+
+
 
 `itest` runs the workspace host checks first and only proceeds if they pass;
 `--skip-unit-tests` bypasses. **That flag is the tell** — its only job is to undo
@@ -198,7 +221,24 @@ test asserting the itest path doesn't invoke `run_unit_tests`.
 **Done when**: CLAUDE.md's gate is explicit and [[feedback_commit_gate_repeat_tests]]'s
 "gate is `snemu-itest`" is updated to the composed form.
 
-### Step 1.1: Add CLI parse tests for the current surface
+### Step 1.1 — ✅ DONE: Add CLI parse tests for the current surface
+
+**Shipped** as `cli_surface_tests` in `xtask/src/main.rs` (6 tests), alongside the
+`retired_command_tests` Phase 0 left behind. Covers: all 21 top-level verbs by
+name (minimal argv each), an unknown verb rejected (proves it discriminates), the
+three subcommand groups requiring a valid member, `itest`'s flake flags (what 2.2
+gates), and `snemu-itest`'s perf levers (what 1.3 moves). Plus
+`Cli::command().debug_assert()` — clap's own consistency check, which fails at
+definition time rather than at someone's terminal.
+
+**The net was proven, not assumed:** renamed `Loc` locally → the suite failed with
+`top-level command should parse: ["loc"]`, then reverted. A passing
+characterisation test proves nothing until you've watched it fail.
+
+Also fixed two stale `kernel-core` references in help text (`test`, `mutants`) —
+same rot family as the loom bug in 1.0; the crate hasn't existed since the split.
+
+
 
 The safety net Phase 2 needs, written **before** anything moves. Characterisation,
 not design: assert what the tree accepts *today*.
