@@ -859,6 +859,13 @@ impl Hart {
         let half = bus.read_u16(pa).ok()?;
         if is_compressed(half) {
             Some(Decoded { raw: expand(half)?, ilen: ILEN_COMPRESSED })
+        } else if pc & 0xfff > 0xffc {
+            // Upper half in the next page: translate it separately (the pages need
+            // not be physically contiguous — same hazard as the interpreter fetch).
+            // `None` on a fault ends the block; the interpreter re-fetches and traps.
+            let hi_pa = mmu::translate(satp, pc.wrapping_add(2), Access::Fetch, bus.ram(), user, sum).ok()?;
+            let raw = u32::from(half) | (u32::from(bus.read_u16(hi_pa).ok()?) << 16);
+            Some(Decoded { raw, ilen: ILEN_FULL })
         } else {
             Some(Decoded { raw: bus.read_u32(pa).ok()?, ilen: ILEN_FULL })
         }
@@ -918,7 +925,20 @@ impl Hart {
             expand(half).ok_or_else(|| self.unimplemented(u32::from(half)))?
         } else {
             self.cur_ilen = ILEN_FULL;
-            bus.read_u32(pc_pa)?
+            // A 4-byte instruction whose upper half spills into the next page must
+            // have that half translated on its own — the two pages need not be
+            // physically contiguous. Fetch each 16-bit half separately (reusing the
+            // low half already read); a faulting upper half traps as an
+            // instruction-page-fault, exactly like hardware.
+            if self.pc & 0xfff > 0xffc {
+                let Some(hi_pa) = self.translate_or_trap(self.pc.wrapping_add(2), Access::Fetch, bus)
+                else {
+                    return Ok(HartEffect::None); // upper half faulted → trapped
+                };
+                u32::from(half) | (u32::from(bus.read_u16(hi_pa)?) << 16)
+            } else {
+                bus.read_u32(pc_pa)?
+            }
         };
         if let Some(cache) = self.decode_cache.as_mut() {
             cache.insert(self.pc, Decoded { raw, ilen: self.cur_ilen });
@@ -1923,6 +1943,28 @@ mod tests {
             mem.write_u32(RAM_BASE + (i as u64) * 4, word).unwrap();
         }
         Cpu::new(mem)
+    }
+
+    /// A 4-byte instruction whose two halves land on **non-contiguous physical
+    /// frames** must still fetch correctly. Regression for the page-straddle fetch
+    /// bug: snemu translated the PC once and read 4 contiguous *physical* bytes, so
+    /// the upper half came from the physically-next frame instead of the guest's
+    /// next virtual page. The deterministic frame-scramble makes that layout
+    /// certain (frame 0's neighbour in storage is some other guest frame, here an
+    /// unwritten zero page), so the naive fetch reads a corrupted word.
+    #[test]
+    fn fetches_a_page_straddling_instruction_across_noncontiguous_frames() {
+        let mut mem = Memory::new(16 * 0x1000);
+        mem.set_scramble(true);
+        // `addi x5, x0, 0x123` at guest offset 0xffe: its 4 bytes cross the
+        // frame-0/frame-1 boundary. `write_bytes` scatters per page, so the guest
+        // sees the correct instruction there — only the *fetch* is under test.
+        let instr = 0x1230_0293u32;
+        mem.write_bytes(RAM_BASE + 0xffe, &instr.to_le_bytes()).unwrap();
+        let mut cpu = Cpu::new(mem);
+        cpu.set_pc(RAM_BASE + 0xffe);
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(5), 0x123, "the straddling addi must execute, not a corrupted fetch");
     }
 
     #[test]
