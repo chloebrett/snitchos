@@ -1085,12 +1085,14 @@ fn reschedule(reason: SwitchReason) {
 }
 
 /// Time slice a userspace task may run before the timer preempts it, in
-/// `time`-CSR ticks. The QEMU timer fires every ~1 s (timebase), which bounds
-/// the *effective* granularity to a tick; this quantum (well under that) means
-/// any user task still on-CPU at a timer tick has overrun and is descheduled,
-/// while a cooperative task (sub-millisecond slices) never accumulates a full
-/// quantum and is never forcibly preempted. Per-priority quanta are a v0.8b
-/// follow-on.
+/// `time`-CSR ticks. The timer fires every ~50 ms (`timebase / TICKS_PER_HEARTBEAT`
+/// = 10 MHz / 20), so this 200 ms quantum is *sampled* every tick: `maybe_preempt`
+/// compares on-CPU time against it and deschedules a user task once it has held the
+/// CPU a full quantum (with up to one tick, ~50 ms, of overshoot). A cooperative task
+/// (sub-millisecond slices) re-enters the runqueue far sooner, never accumulates a
+/// full quantum, and is never forcibly preempted — preemption is a safety net against a
+/// task that *won't* yield, not the scheduling mechanism. Per-priority quanta are a
+/// v0.8b follow-on.
 pub const QUANTUM_TICKS: u64 = 2_000_000; // 0.2 s at 10 MHz
 
 /// Aging step for priority scheduling (v0.8b): a ready task's effective
