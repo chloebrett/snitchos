@@ -3152,7 +3152,7 @@ pub fn manifest_satisfy_attenuates(h: &mut View) -> Result<(), String> {
 /// v0.11 spawn-with-caps (`workload=spawn-demo`): a parent `Spawn`s a child,
 /// delegating its `SpanSink` cap, and the child *uses* that delegated cap. Proves
 /// the whole path: `Spawn` creates a process holding exactly the delegated caps,
-/// and the child can exercise them. See `plans/spawn-shell-and-console.md`.
+/// and the child can exercise them. See `plans/legacy/spawn-shell-and-console.md`.
 pub fn spawn_delegates_to_child(h: &mut View) -> Result<(), String> {
     // NB: `wait_for` advances one forward cursor, so these must be asserted in
     // wire-emission order. The kernel registers the child *inside* `handle_spawn`
@@ -3483,6 +3483,30 @@ pub fn supervised_kill_stops_a_child(h: &mut View) -> Result<(), String> {
     // And it was reaped, closing the stop.
     h.wait_for(SEC * 20, metric_where("snitchos.svc.gamma.stopped", |v| v == 1))
         .ok_or("no svc.gamma.stopped — the killed service wasn't reaped")?;
+
+    Ok(())
+}
+
+/// Hung detection (v2b) — a supervisor times out a wedged service and kills it
+/// (`workload=hung-detect`). The `hung-service` beats a liveness `Notification` a few
+/// times (proving progress), then wedges (tight-loops, alive but stuck). The
+/// `hung-supervisor` `wait_timeout`s the WAIT end: it sees ≥1 beat (`beats_seen`),
+/// then the absent beat times out (`hung_detected`) — the timed `WaitNotify` + per-hart
+/// timeout queue firing — and it force-`Kill`s the service and reaps it (`reaped`).
+/// The whole point is the timeout: a live-but-stuck service is invisible to plain
+/// `WaitAny`/`Signal`, and only the deadline surfaces it.
+pub fn supervisor_detects_and_kills_a_hung_service(h: &mut View) -> Result<(), String> {
+    // The service made progress at least once (the healthy path — a beat within budget).
+    h.wait_for(SEC * 20, metric_where("snitchos.hung.beats_seen", |v| v >= 1))
+        .ok_or("no hung.beats_seen — the service never beat (liveness path didn't work)")?;
+
+    // Then it wedged and the supervisor's timed wait fired — hung detected.
+    h.wait_for(SEC * 20, metric_where("snitchos.hung.detected", |v| v == 1))
+        .ok_or("no hung.detected — the timeout never fired on the wedged service")?;
+
+    // And the supervisor force-killed + reaped it.
+    h.wait_for(SEC * 20, metric_where("snitchos.hung.reaped", |v| v == 1))
+        .ok_or("no hung.reaped — the wedged service wasn't killed + reaped after detection")?;
 
     Ok(())
 }

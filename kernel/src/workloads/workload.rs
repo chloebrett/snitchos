@@ -6,7 +6,7 @@
 //! cooperative scheduler can interleave them.
 //!
 //! Pure logic (`Lcg`, `bin_of`, `bin_sample`) lives in
-//! `kernel_core::workload` and is host-tested. This file wires those
+//! `kernel_boot::workload` and is host-tested. This file wires those
 //! primitives to the scheduler, to `kernel::sync::Mutex`, and to the
 //! atomic-backed counters the heartbeat drains.
 //!
@@ -20,8 +20,8 @@ use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use heapless::spsc::{Consumer, Producer, Queue};
-use kernel_core::batch_ring::BatchRing;
-use kernel_core::workload::{bin_of, Lcg, BUCKETS};
+use kernel_obs::batch_ring::BatchRing;
+use kernel_boot::workload::{bin_of, Lcg, BUCKETS};
 
 use crate::counter::DeferredCounter;
 use crate::sched;

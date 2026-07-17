@@ -493,9 +493,37 @@ pub fn wait_any() -> (i32, u32) {
             in("a7") Syscall::WaitAny as usize,
             out("a0") status,
             out("a1") child,
+            in("a2") 0usize, // deadline 0 = block forever (never times out)
         );
     }
     (status as i32, child as u32)
+}
+
+/// Like [`wait_any`], but bounded by an absolute-tick `deadline` (v2b):
+/// `Some((status, child))` a child exited, `None` the deadline passed first (timed
+/// out). Build `deadline` from [`clock_now`] + a timeout (via [`clock_freq`]). Lets a
+/// supervisor bound how long it waits for a child that should have exited by now.
+#[must_use]
+pub fn wait_any_timeout(deadline: u64) -> Option<(i32, u32)> {
+    let status: usize;
+    let child: usize;
+    let timed_out: usize;
+    // SAFETY: `ecall`; `a2` carries the deadline in and the timed-out flag out. The
+    // kernel returns status/child in a0/a1 (a2 = 0), or a2 = 1 on timeout.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") Syscall::WaitAny as usize,
+            out("a0") status,
+            out("a1") child,
+            inlateout("a2") deadline as usize => timed_out,
+        );
+    }
+    if timed_out != 0 {
+        None
+    } else {
+        Some((status as i32, child as u32))
+    }
 }
 
 /// Voluntarily yield the CPU. We can't call the kernel's `yield_now` directly
@@ -1253,9 +1281,39 @@ impl Notification {
                 "ecall",
                 in("a7") Syscall::WaitNotify as usize,
                 inlateout("a0") self.handle => ret,
+                in("a1") 0usize, // deadline 0 = block forever (never times out)
             );
         }
         if ret == usize::MAX { Err(Denied) } else { Ok(ret as u64) }
+    }
+
+    /// Like [`wait`](Self::wait), but bounded by an absolute-tick `deadline` (v2b):
+    /// `Ok(Some(bits))` a signal arrived, `Ok(None)` the deadline passed first (timed
+    /// out), `Err(Denied)` refused. Build `deadline` from [`clock_now`] + a timeout
+    /// (convert a duration via [`clock_freq`]). The hung-detection primitive — a
+    /// supervisor times out a liveness beat that never comes and force-stops the
+    /// wedged service.
+    pub fn wait_timeout(self, deadline: u64) -> Result<Option<u64>, Denied> {
+        let bits: usize;
+        let timed_out: usize;
+        // SAFETY: `ecall`; `a1` carries the deadline in and the timed-out flag out.
+        // The kernel returns bits in a0 (a1 = 0), or a0 = 0 / a1 = 1 on timeout, or
+        // a0 = usize::MAX if refused.
+        unsafe {
+            asm!(
+                "ecall",
+                in("a7") Syscall::WaitNotify as usize,
+                inlateout("a0") self.handle => bits,
+                inlateout("a1") deadline as usize => timed_out,
+            );
+        }
+        if bits == usize::MAX {
+            Err(Denied)
+        } else if timed_out != 0 {
+            Ok(None)
+        } else {
+            Ok(Some(bits as u64))
+        }
     }
 }
 

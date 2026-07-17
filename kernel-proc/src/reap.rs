@@ -13,7 +13,7 @@
 //! - [`ReapTable::on_exit`] — record the zombie; return the parent (if any) to
 //!   wake. The woken parent re-runs `on_wait`, finds the zombie, and reaps it.
 //!
-//! See `plans/spawn-shell-and-console.md`.
+//! See `plans/legacy/spawn-shell-and-console.md`.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 
@@ -105,6 +105,13 @@ impl ReapTable {
         WaitAnyStep::Block
     }
 
+    /// Deregister `parent` as an any-waiter (a timed-out [`on_wait_any`](Self::on_wait_any)).
+    /// Idempotent — a no-op if `parent` isn't currently any-waiting — so a racing
+    /// child-exit and timeout can't leave a phantom waiter the next `on_exit` wakes.
+    pub fn cancel_wait_any(&mut self, parent: TaskId) {
+        self.any_waiters.remove(&parent);
+    }
+
     /// `child` exited with `status`. Record the zombie, and return the parent to
     /// `wake` (if any): the specific waiter on `child`, or — failing that — the
     /// child's parent if it is blocked in `WaitAny`. The woken parent re-runs its
@@ -145,6 +152,18 @@ mod tests {
             t.on_wait_any(parent),
             WaitAnyStep::Ready { child: TaskId(3), status: 42 }
         );
+    }
+
+    #[test]
+    fn cancel_wait_any_deregisters_the_parent() {
+        // A timed-out `WaitAny` deregisters as an any-waiter; a later child exit
+        // then wakes nobody (the parent already moved on to handle the timeout).
+        let mut t = ReapTable::new();
+        let parent = TaskId(1);
+        t.on_spawn(parent, TaskId(2));
+        assert_eq!(t.on_wait_any(parent), WaitAnyStep::Block);
+        t.cancel_wait_any(parent);
+        assert_eq!(t.on_exit(TaskId(2), 0), None);
     }
 
     #[test]

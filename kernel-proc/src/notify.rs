@@ -104,6 +104,31 @@ impl Notification {
         self.waiter = Some(caller);
         WaitStep::Block
     }
+
+    /// Take the pending bits if any (read-and-clear, also clearing the waiter), else
+    /// `None` — **without** displacing any parked waiter. The post-wake resolution for
+    /// a timed [`wait`](Self::wait): `Some(bits)` = a signal arrived, `None` = woken by
+    /// the timeout with nothing pending (unlike `wait`, which would return `Busy`).
+    pub fn take_pending(&mut self) -> Option<u64> {
+        if self.pending != 0 {
+            let bits = self.pending;
+            self.pending = 0;
+            self.waiter = None;
+            Some(bits)
+        } else {
+            None
+        }
+    }
+
+    /// Deregister `caller` as the parked waiter (a timed-out [`wait`](Self::wait)),
+    /// freeing the single waiter slot. Idempotent, and only clears the slot if
+    /// `caller` actually holds it — so a racing timeout can't evict a different,
+    /// still-valid waiter.
+    pub fn cancel_wait(&mut self, caller: TaskId) {
+        if self.waiter == Some(caller) {
+            self.waiter = None;
+        }
+    }
 }
 
 /// The live registry of notifications the kernel owns behind a `Mutex`,
@@ -146,6 +171,20 @@ impl NotifyTable {
     /// such notification exists.
     pub fn wait(&mut self, id: NotificationId, caller: TaskId) -> Option<WaitStep> {
         self.notifications.get_mut(&id).map(|n| n.wait(caller))
+    }
+
+    /// [`Notification::cancel_wait`] on `id` — deregister `caller` as its waiter (a
+    /// timed-out `WaitNotify`). A no-op for an unknown `id`.
+    pub fn cancel_wait(&mut self, id: NotificationId, caller: TaskId) {
+        if let Some(n) = self.notifications.get_mut(&id) {
+            n.cancel_wait(caller);
+        }
+    }
+
+    /// [`Notification::take_pending`] on `id` — the post-wake resolution for a timed
+    /// wait. `None` if no bits pending (or unknown `id`).
+    pub fn take_pending(&mut self, id: NotificationId) -> Option<u64> {
+        self.notifications.get_mut(&id).and_then(Notification::take_pending)
     }
 }
 
@@ -202,6 +241,54 @@ mod tests {
         let mut n = Notification::new();
         assert_eq!(n.signal(0b1), SignalStep::NoWaiter);
         assert_eq!(n.wait(TaskId(1)), WaitStep::Ready(0b1));
+    }
+
+    #[test]
+    fn take_pending_returns_and_clears_the_bits() {
+        let mut n = Notification::new();
+        let _ = n.signal(0b11);
+        assert_eq!(n.take_pending(), Some(0b11));
+        assert_eq!(n.take_pending(), None); // read-and-clear
+    }
+
+    #[test]
+    fn take_pending_leaves_a_parked_waiter_when_empty() {
+        // No bits: `None`, *without* displacing the parked waiter (unlike `wait`,
+        // which returns `Busy`). The timed-wait loop uses this after a wake to tell a
+        // signal (bits) from a timeout (no bits, still parked).
+        let mut n = Notification::new();
+        assert_eq!(n.wait(TaskId(1)), WaitStep::Block);
+        assert_eq!(n.take_pending(), None);
+        assert_eq!(n.signal(0b1), SignalStep::Woke(TaskId(1))); // waiter intact
+    }
+
+    #[test]
+    fn cancel_wait_frees_the_slot_for_another_waiter() {
+        // A timed-out waiter deregisters; the notification's single waiter slot is
+        // free again, so a different task may now park (not refused `Busy`).
+        let mut n = Notification::new();
+        assert_eq!(n.wait(TaskId(1)), WaitStep::Block);
+        n.cancel_wait(TaskId(1));
+        assert_eq!(n.wait(TaskId(2)), WaitStep::Block);
+    }
+
+    #[test]
+    fn cancel_wait_ignores_a_non_waiter() {
+        // Cancelling a task that isn't the parked waiter must not evict the one that
+        // is — otherwise a racing timeout could strand the real waiter.
+        let mut n = Notification::new();
+        assert_eq!(n.wait(TaskId(1)), WaitStep::Block);
+        n.cancel_wait(TaskId(2));
+        assert_eq!(n.signal(0b1), SignalStep::Woke(TaskId(1)));
+    }
+
+    #[test]
+    fn cancel_wait_through_the_table() {
+        let mut t = NotifyTable::new();
+        let id = t.create();
+        assert_eq!(t.wait(id, TaskId(1)), Some(WaitStep::Block));
+        t.cancel_wait(id, TaskId(1));
+        assert_eq!(t.wait(id, TaskId(2)), Some(WaitStep::Block));
     }
 
     #[test]

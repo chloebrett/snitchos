@@ -8,9 +8,9 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use kernel_core::framebuffer::Framebuffer as PixelView;
-use kernel_core::mmu::PtePerms;
-use kernel_core::ramfb::{FOURCC_XRGB8888, RamfbCfg};
+use kernel_devices::framebuffer::Framebuffer as PixelView;
+use kernel_mem::mmu::PtePerms;
+use kernel_devices::ramfb::{FOURCC_XRGB8888, RamfbCfg};
 
 use crate::counter::DeferredCounter;
 use crate::{frame, mmu};
@@ -25,7 +25,7 @@ const FRAMES: usize = SIZE_BYTES / frame::FRAME_SIZE;
 
 /// Dedicated 1 GiB VA window for the framebuffer: root PTE slot 258,
 /// immediately above the kstack guard-page window (256 = heap,
-/// 257 = kstack; see `kernel_core::mmu`/`kernel_core::stack`). Shared
+/// 257 = kstack; see `kernel_mem::mmu`/`kernel_proc::stack`). Shared
 /// across every address space for free — `new_user_root` copies root
 /// slots `256..512` into every process — though only the kernel
 /// touches it in this milestone.

@@ -37,7 +37,7 @@ pub(super) fn handle_exit(frame: &TrapFrame) -> ! {
 
 /// Terminate a child named by an `Object::Process` cap (`a0` = its handle), the
 /// v2a `Kill` syscall. Resolves + validates the `KILL` right over a `Process`
-/// object (`invoke_kill`, host-tested in `kernel_core::cap`), then hands the target
+/// object (`invoke_kill`, host-tested in `kernel_proc::cap`), then hands the target
 /// to [`crate::sched::kill_task`]. On a successful kill the lifecycle cap is
 /// **spent** — consumed from the caller's table and snitched as `CapEvent::Revoked`,
 /// the destruction half of the mint at `Spawn` (the lifecycle is symmetric on the
@@ -45,7 +45,7 @@ pub(super) fn handle_exit(frame: &TrapFrame) -> ! {
 /// safely kill (self / cross-hart-running / blocked — see `plans/supervision-v2.md`
 /// §3a) refuses cleanly and logs the precise deferred reason.
 pub(super) fn handle_kill(frame: &mut TrapFrame) {
-    use kernel_core::cap::{invoke_kill, Handle, Rights};
+    use kernel_proc::cap::{invoke_kill, Handle, Rights};
     use snitchos_abi::Syscall;
 
     let sc = Syscall::Kill as u8;
@@ -106,8 +106,8 @@ pub(super) fn handle_kill(frame: &mut TrapFrame) {
 /// (re-checking on each wake), or returns immediately if it already exited
 /// (reaping the zombie). Same-hart in v0.12.
 pub(super) fn handle_wait(frame: &mut TrapFrame) {
-    use kernel_core::reap::WaitStep;
-    use kernel_core::sched::TaskId;
+    use kernel_proc::reap::WaitStep;
+    use kernel_proc::sched::TaskId;
 
     let me = crate::sched::current_task_id();
     let child = TaskId(frame.a0 as u32);
@@ -134,22 +134,49 @@ pub(super) fn handle_wait(frame: &mut TrapFrame) {
 /// immediately if one already exited (reaping the zombie). The supervising-parent
 /// variant of [`handle_wait`]; same-hart in v0.13.
 pub(super) fn handle_wait_any(frame: &mut TrapFrame) {
-    use kernel_core::reap::WaitAnyStep;
+    use kernel_proc::reap::WaitAnyStep;
 
+    // Timed in v2b: `a2` = absolute-tick deadline (`0` = block forever). On a normal
+    // reap, `a0` = status, `a1` = child, `a2` = 0; on timeout, `a2` = 1 (a0/a1 = 0).
+    let deadline = frame.a2;
     let me = crate::sched::current_task_id();
+
+    // Fast path: a child already exited → reap + return; else register as any-waiter.
+    match crate::sched::wait_for_any(me) {
+        WaitAnyStep::Ready { child, status } => {
+            crate::sched::reap_task(child);
+            frame.a0 = status as u64;
+            frame.a1 = u64::from(child.0);
+            frame.a2 = 0;
+            return;
+        }
+        WaitAnyStep::Block => {} // registered as any-waiter — fall through to park
+    }
+
+    crate::sched::timeout_register(deadline, me);
     loop {
+        crate::sched::block_current();
         match crate::sched::wait_for_any(me) {
             WaitAnyStep::Ready { child, status } => {
-                // The child is fully `Exited` and we run in our own address space,
-                // so it's safe to reclaim its resources now (see `reap_task`).
+                crate::sched::timeout_cancel(me);
                 crate::sched::reap_task(child);
                 frame.a0 = status as u64;
                 frame.a1 = u64::from(child.0);
+                frame.a2 = 0;
                 return;
             }
-            // Recorded as an any-waiter; block until a child's `Exit` wakes us,
-            // then loop to re-check (it'll find the zombie and reap it).
-            WaitAnyStep::Block => crate::sched::block_current(),
+            WaitAnyStep::Block => {
+                // No child exited. Timed out? (the timeout drain woke us with nothing
+                // ready). Otherwise an early wake — still registered, re-park.
+                if deadline != 0 && crate::tracing::timestamp() >= deadline {
+                    crate::sched::reap_cancel_wait_any(me);
+                    crate::sched::timeout_cancel(me);
+                    frame.a0 = 0;
+                    frame.a1 = 0;
+                    frame.a2 = 1;
+                    return;
+                }
+            }
         }
     }
 }
@@ -216,7 +243,7 @@ fn spawn_registry(frame: &mut TrapFrame, sc: u8, hart: usize) {
         name,
         image,
         delegated,
-        kernel_core::sched::Priority::Normal,
+        kernel_proc::sched::Priority::Normal,
     );
     // Record parentage so the caller can later `WaitAny` and have this child's
     // exit matched to it.
@@ -234,8 +261,8 @@ fn spawn_registry(frame: &mut TrapFrame, sc: u8, hart: usize) {
 /// (`parent_cap_id == 0`); it **composes** — the parent can delegate `KILL` over its
 /// subtree to a sub-supervisor. A `Process` cap names a kernel-side task id, not a
 /// user-visible object, so it carries no wire name.
-fn mint_process_cap(proc: &crate::process::Process, child: kernel_core::sched::TaskId) -> u64 {
-    use kernel_core::cap::{Capability, Object, Rights};
+fn mint_process_cap(proc: &crate::process::Process, child: kernel_proc::sched::TaskId) -> u64 {
+    use kernel_proc::cap::{Capability, Object, Rights};
 
     let cap_id = crate::process::next_cap_id();
     let handle = proc.caps.lock().insert_with_id(
@@ -263,8 +290,8 @@ fn delegate_from_user(
     proc: &crate::process::Process,
     ptr: usize,
     n: usize,
-) -> Result<alloc::vec::Vec<(kernel_core::cap::Capability, u64)>, protocol::RefusalReason> {
-    use kernel_core::cap::Handle;
+) -> Result<alloc::vec::Vec<(kernel_proc::cap::Capability, u64)>, protocol::RefusalReason> {
+    use kernel_proc::cap::Handle;
     use protocol::RefusalReason;
 
     const MAX_DELEGATE: usize = 16;
@@ -285,7 +312,7 @@ fn delegate_from_user(
     // Lock released with the returned `Vec` built, so the child build never
     // contends on the parent's table.
     let caps = proc.caps.lock();
-    kernel_core::cap::delegate(&caps, &handles)
+    kernel_proc::cap::delegate(&caps, &handles)
         .map(|caps_vec| {
             handles
                 .iter()
@@ -296,7 +323,7 @@ fn delegate_from_user(
         .map_err(|e| match e {
             // A `Once`/affine cap in the delegate set refuses the whole spawn,
             // snitched with its own reason rather than the generic not-found.
-            kernel_core::cap::CapError::NotDelegable => RefusalReason::CapNotDelegable,
+            kernel_proc::cap::CapError::NotDelegable => RefusalReason::CapNotDelegable,
             // A bad/stale handle: the delegated cap isn't held.
             _ => RefusalReason::CapNotFound,
         })
@@ -332,7 +359,7 @@ pub(super) fn handle_spawn_image(frame: &mut TrapFrame) {
     let mut image = alloc::vec![0u8; len];
     let mut off = 0;
     while off < len {
-        let take = core::cmp::min(kernel_core::mmu::MAX_USER_STR_LEN, len - off);
+        let take = core::cmp::min(kernel_mem::mmu::MAX_USER_STR_LEN, len - off);
         if crate::user::copy_from_user(frame.a0 as usize + off, take, &mut image[off..off + take])
             .is_none()
         {
@@ -346,7 +373,7 @@ pub(super) fn handle_spawn_image(frame: &mut TrapFrame) {
     // cleanly — the child's later `load` panics on a bad image, and a userspace
     // program must not be able to panic the kernel. (`UnknownProgram` = no
     // runnable program in this image.)
-    if kernel_core::elf::parse(&image).is_err() {
+    if kernel_proc::elf::parse(&image).is_err() {
         super::refuse(frame, sc, RefusalReason::UnknownProgram);
         return;
     }
@@ -364,7 +391,7 @@ pub(super) fn handle_spawn_image(frame: &mut TrapFrame) {
         "spawned-image",
         image.into_boxed_slice(),
         delegated,
-        kernel_core::sched::Priority::Normal,
+        kernel_proc::sched::Priority::Normal,
     );
     crate::sched::note_spawn(crate::sched::current_task_id(), child);
     frame.a0 = u64::from(child.0);

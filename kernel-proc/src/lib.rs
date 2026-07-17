@@ -34,3 +34,4 @@ pub mod reap;
 pub mod sched;
 pub mod span_name;
 pub mod stack;
+pub mod timeout;

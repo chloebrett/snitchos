@@ -24,7 +24,11 @@ fdt = "0.1.5"
 spin = "0.10"
 protocol = { path = "../protocol" }
 postcard = { version = "1", default-features = false }
-kernel-core = { path = "../kernel-core" }
+kernel-boot = { path = "../kernel-boot" }
+kernel-devices = { path = "../kernel-devices" }
+kernel-mem = { path = "../kernel-mem" }
+kernel-obs = { path = "../kernel-obs" }
+kernel-proc = { path = "../kernel-proc" }
 snitchos-abi = { path = "../abi" }
 # `pod_bytes` — the one audited byte cast for `CapDesc`-shaped syscall returns.
 hitch-pod = { path = "../hitch-pod" }

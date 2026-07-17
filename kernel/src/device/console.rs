@@ -2,7 +2,7 @@
 //! macros that write to it.
 
 use crate::uart::Uart16550;
-use kernel_core::console::ConsoleRing;
+use kernel_devices::console::ConsoleRing;
 
 /// The kernel's console UART, initialized lazily from the DTB at boot.
 ///
@@ -91,7 +91,7 @@ const RX_RING_CAP: usize = 256;
 /// Its `Mutex` is safe to take in the timer handler — unlike the println
 /// [`UART`] mutex — because it's held only by [`drain_rx`] and `ConsoleRead`,
 /// both of which run with `sstatus.SIE == 0` (so they can't nest on one hart),
-/// and neither allocates nor emits telemetry. See `kernel_core::console`.
+/// and neither allocates nor emits telemetry. See `kernel_devices::console`.
 static CONSOLE_RX: crate::sync::Mutex<ConsoleRing<RX_RING_CAP>> =
   crate::sync::Mutex::new(ConsoleRing::new());
 

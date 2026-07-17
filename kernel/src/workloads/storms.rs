@@ -496,7 +496,7 @@ pub mod tlb_shootdown {
 
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    use kernel_core::mmu::{PtePerms, pa_to_kernel_va};
+    use kernel_mem::mmu::{PtePerms, pa_to_kernel_va};
 
     /// Rounds the driver runs. Each is one cross-hart remap+shootdown
     /// round-trip; the scenario only needs to observe enough of them to
@@ -509,7 +509,7 @@ pub mod tlb_shootdown {
     /// Dedicated test VA in a fresh root slot one gigapage above the
     /// heap (root slot 257). Nothing else maps here, so the initial
     /// `map` installs clean intermediates and the remap can't collide.
-    const TEST_VA: usize = kernel_core::mmu::HEAP_VA_BASE + (1 << 30);
+    const TEST_VA: usize = kernel_mem::mmu::HEAP_VA_BASE + (1 << 30);
 
     /// Highest round hart 1 has read. Heartbeat re-emits as
     /// `snitchos.smp.tlb_remap_rounds` — proves the workload actually

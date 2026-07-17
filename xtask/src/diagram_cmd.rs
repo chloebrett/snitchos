@@ -289,7 +289,8 @@ pub fn caps(workload: Option<&str>, steps: u64) -> ExitCode {
 /// hairball. New crates land here (else they render ungrouped).
 fn deps_layer(crate_name: &str) -> Option<String> {
     let layer = match crate_name {
-        "kernel" | "kernel-core" => "kernel",
+        "kernel" | "kernel-mem" | "kernel-obs" | "kernel-devices" | "kernel-boot"
+        | "kernel-proc" => "kernel",
         "protocol" | "snitchos-abi" | "fs-proto" | "fs-core" | "ramfs" | "hitch" | "hitch-pod"
         | "hitch-derive" => "shared",
         "hello" | "fs" | "snitchos-user" | "snitchos-std" | "snitchos-user-macros" | "stitch" => {

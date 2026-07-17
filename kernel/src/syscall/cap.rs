@@ -1,6 +1,6 @@
 //! Capability syscalls: `MintBadged` — derive a narrower (badged) capability.
 //! Resolves a handle against the calling process's `CapTable` and acts on the
-//! pure, host-tested `kernel_core::cap` decision.
+//! pure, host-tested `kernel_proc::cap` decision.
 //!
 //! (The legacy `Invoke` syscall — emit to a `TelemetrySink`'s bound counter —
 //! was retired in debt #2's Step 5: telemetry now flows through
@@ -12,12 +12,12 @@ use crate::trap::TrapFrame;
 /// `a0` = endpoint handle (needs `MINT`), `a1` = the server-chosen `badge`,
 /// `a2` = requested rights. Resolve the parent against the running process's
 /// table, derive the child via the pure host-tested
-/// [`kernel_core::cap::mint_badged`], insert it into the caller's *own* table,
+/// [`kernel_proc::cap::mint_badged`], insert it into the caller's *own* table,
 /// and return its handle in `a0` (or refuse with `a0 = u64::MAX`). Snitched as
 /// `CapEvent::Transferred` carrying the badge. Handing the cap to a client is a
 /// later step; here it lands in the minter's table.
 pub(super) fn handle_mint_badged(frame: &mut TrapFrame) {
-    use kernel_core::cap::{mint_badged, Denied, Handle, Rights};
+    use kernel_proc::cap::{mint_badged, Denied, Handle, Rights};
     use snitchos_abi::Syscall;
 
     let sc = Syscall::MintBadged as u8;
@@ -45,7 +45,7 @@ pub(super) fn handle_mint_badged(frame: &mut TrapFrame) {
             let child = mint_badged(p, badge, rights)?;
             // The minted cap names the same endpoint object — capture its id so the
             // wire `CapEvent` carries the endpoint's name (resolved after the lock).
-            let kernel_core::cap::Object::Endpoint { id, .. } = p.object else {
+            let kernel_proc::cap::Object::Endpoint { id, .. } = p.object else {
                 return Err(Denied::WrongObject);
             };
             Ok((caps.insert_with_id(child, child_cap_id, parent_cap_id), parent_cap_id, id))
@@ -76,7 +76,7 @@ pub(super) fn handle_mint_badged(frame: &mut TrapFrame) {
 
 /// Enumerate the caller's **own** capability table (`hold`). `a0` = pointer to a
 /// `[CapDesc; N]` buffer in the caller's space, `a1` = `N` (capacity in entries).
-/// Snapshots the live caps via the pure host-tested [`kernel_core::cap::CapTable::describe`],
+/// Snapshots the live caps via the pure host-tested [`kernel_proc::cap::CapTable::describe`],
 /// writes up to `N` packed [`CapDesc`] records out, and returns the **total** live
 /// count in `a0` (so a too-small buffer is detectable: returned `>` `N`), or refuses
 /// with `a0 = u64::MAX` on a bad/unwritable range. Introspection, not authority — so
@@ -121,7 +121,7 @@ pub(super) fn handle_cap_list(frame: &mut TrapFrame) {
 /// `CapEvent::Revoked`. Returns the count revoked in `a0`, or refuses
 /// (`a0 = u64::MAX`) if the handle resolves nothing.
 pub(super) fn handle_revoke(frame: &mut TrapFrame) {
-    use kernel_core::cap::{Handle, Object};
+    use kernel_proc::cap::{Handle, Object};
     use protocol::RefusalReason;
     use snitchos_abi::Syscall;
 

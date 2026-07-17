@@ -207,7 +207,7 @@ pub struct RunnerConfig<'a> {
     /// Path where a *partial* baseline gets written if the run is
     /// interrupted mid-`--repeat` (graceful Ctrl-C). Only consulted
     /// when `update_baseline` is true; never overwrites the canonical
-    /// baseline file. See `plans/itest-history-and-pending.md`.
+    /// baseline file. See `plans/legacy/itest-history-and-pending.md`.
     pub pending_baseline: Option<PathBuf>,
 
     /// Interrupt signal. The runner reads this at every iteration
@@ -222,7 +222,7 @@ pub struct RunnerConfig<'a> {
     /// subdirectory at start, writes `metadata.toml`, and appends one
     /// JSON row per scenario invocation to `iterations.ndjson`. When
     /// `None`, no history is written. See
-    /// `plans/itest-history-and-pending.md` step C.
+    /// `plans/legacy/itest-history-and-pending.md` step C.
     pub history_root: Option<PathBuf>,
 
     /// Number of worker threads for per-iteration scenario fan-out.

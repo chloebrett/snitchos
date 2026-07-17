@@ -10,10 +10,10 @@
 use fdt::Fdt;
 
 /// The virtio-mmio register map, status bits, spec constants, and the
-/// virtqueue layout structs all live in `kernel_core::virtio` (pure
+/// virtqueue layout structs all live in `kernel_devices::virtio` (pure
 /// data, host-tested). The kernel owns the statics, the volatile
 /// register access, and the handshake driving them.
-use kernel_core::virtio::{
+use kernel_devices::virtio::{
     DEVICE_ID_CONSOLE, MAGIC, QSIZE, QUEUE_RX, QUEUE_TX, REG_DEVICE_ID, REG_MAGIC_VALUE,
     REG_QUEUE_NOTIFY, REG_VERSION, VERSION, VirtqAvail, VirtqDesc, VirtqUsed, VirtqUsedElem,
     Virtqueue,
@@ -93,7 +93,7 @@ unsafe fn write_reg(base: usize, offset: usize, value: u32) {
 
 /// Build a `QueueConfig` for one virtqueue: translate the three ring
 /// regions' VAs to physical addresses (the device has no MMU) so the
-/// host-tested `kernel_core::virtio::handshake` can install them.
+/// host-tested `kernel_devices::virtio::handshake` can install them.
 ///
 /// # Safety
 ///
@@ -101,13 +101,13 @@ unsafe fn write_reg(base: usize, offset: usize, value: u32) {
 /// which is why we take a pointer not a reference — the device writes
 /// to the used ring and we don't want to imply Rust's aliasing rules
 /// cover device accesses).
-unsafe fn queue_config(sel: u32, queue: *const Virtqueue) -> kernel_core::virtio::QueueConfig {
+unsafe fn queue_config(sel: u32, queue: *const Virtqueue) -> kernel_devices::virtio::QueueConfig {
     // `va_to_pa` is a no-op at identity PC and strips KERNEL_OFFSET once
     // the kernel runs higher-half.
     // SAFETY: `queue` is a 'static Virtqueue; taking the field addresses
     // and translating them to PAs is sound.
     unsafe {
-        kernel_core::virtio::QueueConfig {
+        kernel_devices::virtio::QueueConfig {
             sel,
             desc_pa: crate::mmu::va_to_pa(&raw const (*queue).desc as usize) as u64,
             avail_pa: crate::mmu::va_to_pa(&raw const (*queue).avail as usize) as u64,
@@ -192,7 +192,7 @@ pub static CONSOLE: crate::sync::Once<crate::sync::Mutex<TxStaging>> = crate::sy
 
 /// Errors that can arise during virtio-console initialization: either
 /// the kernel-side DTB discovery failed (`NotFound`), or the pure
-/// `kernel_core::virtio::handshake` did (`Handshake`).
+/// `kernel_devices::virtio::handshake` did (`Handshake`).
 #[derive(Debug)]
 pub enum InitError {
     /// No virtio-mmio slot advertised DeviceID 3 (console).
@@ -200,12 +200,12 @@ pub enum InitError {
     /// The device bring-up handshake failed — see the wrapped reason.
     Handshake(
         #[expect(dead_code, reason = "surfaced via Debug in the init-failure log, not matched on")]
-        kernel_core::virtio::HandshakeError,
+        kernel_devices::virtio::HandshakeError,
     ),
 }
 
-impl From<kernel_core::virtio::HandshakeError> for InitError {
-    fn from(e: kernel_core::virtio::HandshakeError) -> Self {
+impl From<kernel_devices::virtio::HandshakeError> for InitError {
+    fn from(e: kernel_devices::virtio::HandshakeError) -> Self {
         InitError::Handshake(e)
     }
 }
@@ -217,7 +217,7 @@ struct MmioConsole {
     base: usize,
 }
 
-impl kernel_core::virtio::MmioTransport for MmioConsole {
+impl kernel_devices::virtio::MmioTransport for MmioConsole {
     fn read_reg(&self, offset: usize) -> u32 {
         // SAFETY: `base` is a discovered virtio-mmio base (`find_console_base`)
         // and `offset` is a register within that device's region.
@@ -268,7 +268,7 @@ pub fn send(bytes: &[u8]) {
     // this hart is the single writer to the staging buffer and the sole
     // driver of the virtqueue while `transmit` runs. `staged` points into
     // the `.bss`-resident buffer, so `transmit`'s `va_to_pa` is correct.
-    kernel_core::virtio::stage_and_emit(&mut staging.buf, bytes, |staged| unsafe {
+    kernel_devices::virtio::stage_and_emit(&mut staging.buf, bytes, |staged| unsafe {
         transmit(base, staged);
     });
 }
@@ -312,7 +312,7 @@ pub fn try_send_panic(bytes: &[u8]) -> bool {
         // sole writer to `staging.buf` and sole driver of `TX_QUEUE` for this
         // critical section. `staged` points into the `.bss`-resident buffer, so
         // `transmit`'s `va_to_pa` is correct.
-        kernel_core::virtio::stage_and_emit(&mut staging.buf, bytes, |staged| unsafe {
+        kernel_devices::virtio::stage_and_emit(&mut staging.buf, bytes, |staged| unsafe {
             transmit(base, staged);
         });
         return true;
@@ -349,7 +349,7 @@ unsafe fn init_handshake(base: usize) -> Result<(), InitError> {
             queue_config(QUEUE_TX, &raw const TX_QUEUE),
         ]
     };
-    kernel_core::virtio::handshake(&mut dev, &queues, QSIZE).map_err(InitError::from)
+    kernel_devices::virtio::handshake(&mut dev, &queues, QSIZE).map_err(InitError::from)
 }
 
 /// Send a buffer of bytes out the virtio-console TX queue, blocking
@@ -426,7 +426,7 @@ unsafe fn transmit(base: usize, bytes: &[u8]) {
         // 3. Push descriptor index 0 into the available ring, then
         //    bump avail.idx. Ring slot + next index (with their distinct
         //    wrap points) come from the host-tested pure helper.
-        let enq = kernel_core::virtio::avail_enqueue(avail_idx_before, QSIZE);
+        let enq = kernel_devices::virtio::avail_enqueue(avail_idx_before, QSIZE);
         (&raw mut TX_QUEUE.avail.ring[enq.ring_slot]).write_volatile(0);
         (&raw mut TX_QUEUE.avail.idx).write_volatile(enq.next_idx);
 
@@ -439,7 +439,7 @@ unsafe fn transmit(base: usize, bytes: &[u8]) {
         write_reg(base, REG_QUEUE_NOTIFY, QUEUE_TX);
 
         // 5. Spin until the device confirms our descriptor is done.
-        while !kernel_core::virtio::used_advanced(
+        while !kernel_devices::virtio::used_advanced(
             used_idx_before,
             (&raw const TX_QUEUE.used.idx).read_volatile(),
         ) {}

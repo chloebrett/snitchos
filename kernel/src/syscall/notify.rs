@@ -1,6 +1,6 @@
 //! Notification syscalls (v0.12): `NotifyCreate`, `Signal`, `WaitNotify` — the
 //! general async kernel→user signal. The authority decisions are the pure,
-//! host-tested `kernel_core::cap::{invoke_signal, invoke_wait}`; the registry +
+//! host-tested `kernel_proc::cap::{invoke_signal, invoke_wait}`; the registry +
 //! park/unpark live in `crate::sched` (the `NOTIFY` table behind the same `Mutex`
 //! discipline as the runqueue). These handlers only marshal the `TrapFrame` and
 //! the `block_current` loop. See `docs/notification-design.md`.
@@ -12,7 +12,7 @@ use crate::trap::TrapFrame;
 /// the caller then attenuates + delegates the end(s) it wants. Snitched as
 /// `CapEvent::Minted` (self-minted-via-syscall provenance).
 pub(super) fn handle_notify_create(frame: &mut TrapFrame) {
-    use kernel_core::cap::{Capability, Object, Rights};
+    use kernel_proc::cap::{Capability, Object, Rights};
     use snitchos_abi::Syscall;
 
     let sc = Syscall::NotifyCreate as u8;
@@ -49,7 +49,7 @@ pub(super) fn handle_notify_create(frame: &mut TrapFrame) {
 /// `SIGNAL`), `a1` = bit mask. OR-s the mask in and wakes any waiter; never
 /// blocks. `a0 = 0` on success, `usize::MAX` if refused.
 pub(super) fn handle_signal(frame: &mut TrapFrame) {
-    use kernel_core::cap::{invoke_signal, Handle};
+    use kernel_proc::cap::{invoke_signal, Handle};
     use snitchos_abi::Syscall;
 
     let sc = Syscall::Signal as u8;
@@ -70,13 +70,15 @@ pub(super) fn handle_signal(frame: &mut TrapFrame) {
     }
 }
 
-/// Wait on a notification — the consumer end (v0.12). `a0` = handle (needs
-/// `WAIT`). Returns the pending bits in `a0` (read-and-cleared), blocking until a
-/// `Signal` arrives if none are pending. Refuses a bad cap or a second waiter
-/// (one waiter per notification).
+/// Wait on a notification — the consumer end (v0.12, timed in v2b). `a0` = handle
+/// (needs `WAIT`); `a1` = absolute-tick **deadline** (`0` = block forever, backward
+/// compatible). Returns the pending bits in `a0` (read-and-cleared) with `a1 = 0`,
+/// blocking until a `Signal` arrives — or, if the deadline passes first, returns
+/// `a0 = 0, a1 = 1` (**timed out**). Refuses a bad cap or a second waiter (one waiter
+/// per notification).
 pub(super) fn handle_wait_notify(frame: &mut TrapFrame) {
-    use kernel_core::cap::{invoke_wait, Handle};
-    use kernel_core::notify::WaitStep;
+    use kernel_proc::cap::{invoke_wait, Handle};
+    use kernel_proc::notify::WaitStep;
     use protocol::RefusalReason;
     use snitchos_abi::Syscall;
 
@@ -94,26 +96,51 @@ pub(super) fn handle_wait_notify(frame: &mut TrapFrame) {
         }
     };
 
+    let deadline = frame.a1;
     let me = crate::sched::current_task_id();
-    loop {
-        match crate::sched::notify_wait(id, me) {
-            Some(WaitStep::Ready(bits)) => {
-                crate::tracing::emit_notify_wait(id.0, bits, me.0);
-                frame.a0 = bits;
-                return;
-            }
-            // Parked as the waiter; block until a `Signal` wakes us, then re-check
-            // (the bits the signaller OR-ed in are now pending → `Ready`).
-            Some(WaitStep::Block) => crate::sched::block_current(),
-            Some(WaitStep::Busy) => {
-                super::refuse(frame, sc, RefusalReason::NotificationBusy);
-                return;
-            }
-            // Unknown id behind a valid cap — a kernel-side bug; refuse loudly.
-            None => {
-                super::refuse(frame, sc, RefusalReason::CapNotFound);
-                return;
-            }
+
+    // Fast path: bits already pending → return at once; otherwise register as the
+    // single waiter (or refuse a second waiter / unknown id).
+    match crate::sched::notify_wait(id, me) {
+        Some(WaitStep::Ready(bits)) => {
+            crate::tracing::emit_notify_wait(id.0, bits, me.0);
+            frame.a0 = bits;
+            frame.a1 = 0;
+            return;
         }
+        Some(WaitStep::Block) => {} // registered as the waiter — fall through to park
+        Some(WaitStep::Busy) => {
+            super::refuse(frame, sc, RefusalReason::NotificationBusy);
+            return;
+        }
+        None => {
+            super::refuse(frame, sc, RefusalReason::CapNotFound);
+            return;
+        }
+    }
+
+    // Arm the timeout (no-op if `deadline == 0`) and park. Each wake is a `Signal`
+    // (bits pending) or the timeout drain (no bits) — `notify_take_pending`
+    // distinguishes them without disturbing our waiter registration.
+    crate::sched::timeout_register(deadline, me);
+    loop {
+        crate::sched::block_current();
+        if let Some(bits) = crate::sched::notify_take_pending(id) {
+            crate::sched::timeout_cancel(me);
+            crate::tracing::emit_notify_wait(id.0, bits, me.0);
+            frame.a0 = bits;
+            frame.a1 = 0;
+            return;
+        }
+        if deadline != 0 && crate::tracing::timestamp() >= deadline {
+            // Timed out: free our waiter slot + timeout entry, report it.
+            crate::sched::notify_cancel_wait(id, me);
+            crate::sched::timeout_cancel(me);
+            frame.a0 = 0;
+            frame.a1 = 1;
+            return;
+        }
+        // Woken with no bits and not yet timed out (idle-return / early wake): we're
+        // still the registered waiter — park again.
     }
 }

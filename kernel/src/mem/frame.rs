@@ -1,4 +1,4 @@
-//! Physical frame allocator. Wraps `kernel_core::frame::Bitmap` with
+//! Physical frame allocator. Wraps `kernel_mem::frame::Bitmap` with
 //! a global `Mutex`, the static backing storage, and the public
 //! `alloc` / `free` API.
 //!
@@ -7,8 +7,8 @@
 //! own lock (would deadlock — same constraint as the IRQ handler).
 
 use fdt::Fdt;
-use kernel_core::frame::Bitmap;
-use kernel_core::mmu::{pa_to_kernel_va, va_to_pa};
+use kernel_mem::frame::Bitmap;
+use kernel_mem::mmu::{pa_to_kernel_va, va_to_pa};
 
 use crate::counter::DeferredCounter;
 
@@ -153,7 +153,7 @@ pub unsafe fn init_from_dtb(dtb: &Fdt, dtb_phys: usize) -> Result<(), InitError>
     // All frames start in-use. Release everything that isn't in a
     // reserved region: the SBI hole below the kernel image, the kernel
     // image itself, and the DTB.
-    kernel_core::frame::release_unreserved(
+    kernel_mem::frame::release_unreserved(
         &mut bitmap,
         ram_base,
         FRAME_SIZE,

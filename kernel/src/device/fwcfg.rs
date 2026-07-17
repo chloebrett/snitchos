@@ -9,10 +9,10 @@
 //! buffers (same discipline as virtio-console's `TX_STAGING`: DMA
 //! descriptors need a `KERNEL_OFFSET`-range VA that `va_to_pa` can
 //! translate; heap VAs can't). The sequence logic itself
-//! (`kernel_core::fwcfg`) is pure and host-tested; this module is the
+//! (`kernel_devices::fwcfg`) is pure and host-tested; this module is the
 //! thin MMIO/memory adapter plus the legacy (non-DMA) directory read.
 
-use kernel_core::fwcfg::{self, FwCfgFile, FwCfgTransport, SELECTOR_FILE_DIR};
+use kernel_devices::fwcfg::{self, FwCfgFile, FwCfgTransport, SELECTOR_FILE_DIR};
 
 /// Fixed `fw_cfg` MMIO base on QEMU `virt`.
 const BASE_PA: usize = 0x1010_0000;
@@ -53,7 +53,7 @@ unsafe fn write_selector(value: u16) {
 /// # Safety
 ///
 /// Same as `read_data_byte`. `offset` must be a valid DMA register
-/// offset (`kernel_core::fwcfg::REG_DMA_ADDR_HIGH`/`_LOW`).
+/// offset (`kernel_devices::fwcfg::REG_DMA_ADDR_HIGH`/`_LOW`).
 unsafe fn write_dma_reg(offset: usize, value: u32) {
     let addr = (base() + offset) as *mut u32;
     unsafe { addr.write_volatile(value.to_be()) }
@@ -61,7 +61,7 @@ unsafe fn write_dma_reg(offset: usize, value: u32) {
 
 /// Directory read buffer. Sized generously for QEMU `virt`'s real
 /// directory (well under 64 entries); a directory that doesn't fit
-/// degrades safely — `kernel_core::fwcfg::find_file`'s bounds checks
+/// degrades safely — `kernel_devices::fwcfg::find_file`'s bounds checks
 /// just fail to find entries past the truncation point.
 const DIR_BUF_LEN: usize = 4096;
 static mut DIR_BUF: [u8; DIR_BUF_LEN] = [0u8; DIR_BUF_LEN];
@@ -84,7 +84,7 @@ struct Mmio;
 impl FwCfgTransport for Mmio {
     fn write_reg(&mut self, offset: usize, value: u32) {
         // SAFETY: `offset` is always `REG_DMA_ADDR_HIGH`/`_LOW` — the only
-        // offsets `kernel_core::fwcfg::write_file` passes.
+        // offsets `kernel_devices::fwcfg::write_file` passes.
         unsafe { write_dma_reg(offset, value) };
     }
 

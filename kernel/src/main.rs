@@ -6,7 +6,7 @@ extern crate alloc;
 use core::arch::global_asm;
 use core::sync::atomic::Ordering;
 use fdt::Fdt;
-use kernel_core::bootargs::WorkloadKind;
+use kernel_boot::bootargs::WorkloadKind;
 
 // Modules are grouped by concern into directory modules (`mem/`, `device/`,
 // `smp/`, `obs/`, `workloads/`, plus submodules under `sched`/`trap`). Each
@@ -319,16 +319,16 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
     let bootargs: Option<&str> = dtb.chosen().bootargs();
     #[cfg(not(feature = "itest-workloads"))]
     let bootargs: Option<&str> = None;
-    let selected: Option<WorkloadKind> = bootargs.and_then(kernel_core::bootargs::select);
+    let selected: Option<WorkloadKind> = bootargs.and_then(kernel_boot::bootargs::select);
     boot_workload::init(selected);
     // Optional `burst=N` tunes how many batches the producer/consumer
     // run per yield — used to dial up `Mutex` contention for the
     // mutex-vs-spsc measurement. Absent → default (1, low contention).
-    if let Some(n) = bootargs.and_then(|a| kernel_core::bootargs::param_usize(a, "burst")) {
+    if let Some(n) = bootargs.and_then(|a| kernel_boot::bootargs::param_usize(a, "burst")) {
         workload::set_burst(n);
     }
 
-    let _ = sched::register_bare_task("main", kernel_core::sched::TaskState::Running);
+    let _ = sched::register_bare_task("main", kernel_proc::sched::TaskState::Running);
     let _ = sched::spawn("idle", demo_tasks::idle_entry);
     // v0.5.x exit smoke: one task that bumps a counter then calls
     // `exit_now`. Asserts the asm + state-machine + snapshot-filter
@@ -424,6 +424,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
         | Some(WorkloadKind::KillNoCap)
         | Some(WorkloadKind::UserOnHart0)
         | Some(WorkloadKind::XhartKill)
+        | Some(WorkloadKind::HungDetect)
         | Some(WorkloadKind::EndpointCreate)
         | Some(WorkloadKind::NotifySmoke)
         | Some(WorkloadKind::Priorities)
@@ -509,6 +510,7 @@ pub extern "C" fn kmain(_hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::SupervisedIpc
                     | WorkloadKind::UserOnHart0
                     | WorkloadKind::XhartKill
+                    | WorkloadKind::HungDetect
                     | WorkloadKind::EndpointCreate
                     | WorkloadKind::UserspaceBadPtr
                     | WorkloadKind::Priorities

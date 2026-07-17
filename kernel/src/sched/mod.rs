@@ -1,7 +1,7 @@
 //! Kernel-side scheduler storage. Owns the task table (`Vec<Box<Task>>`)
 //! and the runqueue, both behind a single `kernel::sync::Mutex` so the
 //! preempt/IRQ hooks land in one place. The pure-logic
-//! `kernel_core::sched::Runqueue` does the actual FIFO bookkeeping;
+//! `kernel_proc::sched::Runqueue` does the actual FIFO bookkeeping;
 //! this module wraps it with the kernel-side state (statics, stacks,
 //! per-task span cursors) and exposes the `spawn` / `yield_now` /
 //! `current_task_id` API the rest of the kernel calls.
@@ -23,12 +23,12 @@ use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 
 use protocol::SwitchReason;
 
-use kernel_core::sched::{
+use kernel_proc::sched::{
     address_space_switch, classify_kill, on_cpu_delta, pick_next, quantum_expired, should_preempt,
     Candidate, CurrentDisposition, KillAction, KillTarget, Priority, Runqueue, TaskDirectory,
     TaskId, TaskState,
 };
-use kernel_core::span::SpanCursor;
+use kernel_obs::span::SpanCursor;
 
 use crate::counter::DeferredCounter;
 use crate::process::Process;
@@ -108,13 +108,13 @@ unsafe extern "C" {
 
 /// Per-task kernel stack size in bytes — the mapped region of a window slot.
 /// 16 KiB is generous for kernel work (our call graphs don't get deep).
-pub const STACK_SIZE: usize = kernel_core::stack::STACK_BYTES;
+pub const STACK_SIZE: usize = kernel_proc::stack::STACK_BYTES;
 
 /// Window-slot allocator for guard-paged kernel stacks. Recycles freed slots, so
 /// repeated spawning (the shell) reuses slots rather than exhausting the 1 GiB
-/// window. Pure bookkeeping in `kernel_core::stack::SlotAllocator`.
-static STACK_SLOTS: Mutex<kernel_core::stack::SlotAllocator> =
-    Mutex::new(kernel_core::stack::SlotAllocator::new());
+/// window. Pure bookkeeping in `kernel_proc::stack::SlotAllocator`.
+static STACK_SLOTS: Mutex<kernel_proc::stack::SlotAllocator> =
+    Mutex::new(kernel_proc::stack::SlotAllocator::new());
 
 /// Pool of window slots that are **mapped but idle** — freed by a task's `Drop`
 /// and ready to be handed to the next [`KernelStack::new`] with their mappings
@@ -135,8 +135,8 @@ static MAPPED_STACK_POOL: Mutex<alloc::vec::Vec<usize>> = Mutex::new(alloc::vec:
 /// page — `unmap` keeps the intermediate tables, leaving the shared subtree in
 /// place. Call once in `kmain` after `heap::init`, before any spawn.
 pub fn init_stack_window() {
-    let va = kernel_core::stack::slot_stack_base_va(0);
-    let perms = kernel_core::mmu::PtePerms::R.union(kernel_core::mmu::PtePerms::W);
+    let va = kernel_proc::stack::slot_stack_base_va(0);
+    let perms = kernel_mem::mmu::PtePerms::R.union(kernel_mem::mmu::PtePerms::W);
     let frame = crate::frame::alloc_zeroed().expect("kstack window init: out of frames");
     crate::mmu::map(va, frame.addr(), perms).expect("kstack window init: map");
     // SAFETY of the unwrap: we just mapped `va`, so the leaf exists.
@@ -147,7 +147,7 @@ pub fn init_stack_window() {
 /// A per-task kernel stack with a guard page (Tier B). `STACK_SIZE` of pages
 /// mapped in the dedicated kstack window, with an **unmapped guard page below**: a
 /// downward overflow store crosses into the hole and faults at the exact PC (named
-/// by the trap handler via [`kernel_core::stack::guard_slot_for`]), instead of
+/// by the trap handler via [`kernel_proc::stack::guard_slot_for`]), instead of
 /// silently corrupting a neighbour. Owns its window slot + backing frames; `Drop`
 /// unmaps the pages (freeing each frame) and releases the slot.
 ///
@@ -171,10 +171,10 @@ impl KernelStack {
             return Some(stack);
         }
         let slot = STACK_SLOTS.lock().alloc()?;
-        let base = kernel_core::stack::slot_stack_base_va(slot);
-        let perms = kernel_core::mmu::PtePerms::R.union(kernel_core::mmu::PtePerms::W);
-        for i in 0..kernel_core::stack::STACK_PAGES {
-            let va = base + i * kernel_core::mmu::PAGE_SIZE;
+        let base = kernel_proc::stack::slot_stack_base_va(slot);
+        let perms = kernel_mem::mmu::PtePerms::R.union(kernel_mem::mmu::PtePerms::W);
+        for i in 0..kernel_proc::stack::STACK_PAGES {
+            let va = base + i * kernel_mem::mmu::PAGE_SIZE;
             let Some(frame) = crate::frame::alloc_zeroed() else {
                 Self::teardown(slot, i);
                 return None;
@@ -194,9 +194,9 @@ impl KernelStack {
     /// release the slot. Rolls back a partial [`new`](Self::new); `Drop` calls it
     /// with every page mapped.
     fn teardown(slot: usize, mapped: usize) {
-        let base = kernel_core::stack::slot_stack_base_va(slot);
+        let base = kernel_proc::stack::slot_stack_base_va(slot);
         for i in 0..mapped {
-            let va = base + i * kernel_core::mmu::PAGE_SIZE;
+            let va = base + i * kernel_mem::mmu::PAGE_SIZE;
             if let Ok(pa) = crate::mmu::unmap(va) {
                 crate::frame::free(crate::frame::PhysFrame::from_addr(pa));
             }
@@ -207,7 +207,7 @@ impl KernelStack {
     /// Initial `sp`: one past the highest mapped stack byte (stacks grow down,
     /// 16-byte aligned since `STACK_SIZE` is a page multiple).
     fn top_addr(&self) -> u64 {
-        kernel_core::stack::slot_stack_top_va(self.slot) as u64
+        kernel_proc::stack::slot_stack_top_va(self.slot) as u64
     }
 
     /// The mapped stack bytes, lowest address first (`[0]` is the bottom, nearest
@@ -217,7 +217,7 @@ impl KernelStack {
         // slot is owned exclusively (`&self`); the region stays mapped until `Drop`.
         unsafe {
             core::slice::from_raw_parts(
-                kernel_core::stack::slot_stack_base_va(self.slot) as *const u8,
+                kernel_proc::stack::slot_stack_base_va(self.slot) as *const u8,
                 STACK_SIZE,
             )
         }
@@ -228,22 +228,22 @@ impl KernelStack {
         // SAFETY: as [`as_bytes`](Self::as_bytes), with `&mut self` giving exclusive access.
         unsafe {
             core::slice::from_raw_parts_mut(
-                kernel_core::stack::slot_stack_base_va(self.slot) as *mut u8,
+                kernel_proc::stack::slot_stack_base_va(self.slot) as *mut u8,
                 STACK_SIZE,
             )
         }
     }
 
-    /// Fill the stack with the overflow [`SENTINEL`](kernel_core::stack::SENTINEL)
+    /// Fill the stack with the overflow [`SENTINEL`](kernel_proc::stack::SENTINEL)
     /// at creation; the task overwrites it top-down and the untouched prefix is
     /// what the high-water scan reads back.
     fn fill_sentinel(&mut self) {
-        self.as_bytes_mut().fill(kernel_core::stack::SENTINEL);
+        self.as_bytes_mut().fill(kernel_proc::stack::SENTINEL);
     }
 
     /// Bytes ever used by this stack (high-water); heartbeat per-task gauge.
     fn high_water_bytes(&self) -> usize {
-        kernel_core::stack::high_water_bytes(self.as_bytes())
+        kernel_proc::stack::high_water_bytes(self.as_bytes())
     }
 }
 
@@ -367,8 +367,8 @@ impl Task {
             if matches!(
                 crate::boot_workload::selected(),
                 Some(
-                    kernel_core::bootargs::WorkloadKind::SpawnStorm
-                        | kernel_core::bootargs::WorkloadKind::LiveTasks
+                    kernel_boot::bootargs::WorkloadKind::SpawnStorm
+                        | kernel_boot::bootargs::WorkloadKind::LiveTasks
                 )
             ) {
                 (protocol::StringId(0), protocol::StringId(0), protocol::StringId(0))
@@ -607,7 +607,7 @@ pub fn task_snapshots() -> Vec<TaskSnapshot> {
 /// Report a kernel-stack **guard-page** fault (Tier B) and halt: an overflow store
 /// crossed into the unmapped guard below a stack and faulted at the exact PC.
 /// Snitch an observable named `Log`, then panic. `slot` is the window slot from
-/// [`guard_slot_for`](kernel_core::stack::guard_slot_for) and `va` the faulting
+/// [`guard_slot_for`](kernel_proc::stack::guard_slot_for) and `va` the faulting
 /// address; the running task owns that slot. Lock-free on purpose — a fault
 /// handler can't assume the offending task wasn't mid-`SCHEDULER` lock — so it
 /// reports by id + slot rather than looking up the name under the lock. Never
@@ -648,7 +648,7 @@ pub fn touch_current_stack_guard() {
             .iter()
             .find(|t| t.id == id)
             .and_then(|t| t._stack.as_ref())
-            .map(|s| kernel_core::stack::slot_base_va(s.slot))
+            .map(|s| kernel_proc::stack::slot_base_va(s.slot))
     };
     if let Some(va) = guard_va {
         // SAFETY: deliberate fault. `va` is the unmapped guard page below this
@@ -903,7 +903,7 @@ pub fn spawn_on_with_arg(
     // would silently close the race window each iteration. See
     // `plans/residual-race-investigation.md` appendix A.
     if crate::boot_workload::selected()
-        != Some(kernel_core::bootargs::WorkloadKind::SpawnStorm)
+        != Some(kernel_boot::bootargs::WorkloadKind::SpawnStorm)
     {
         crate::tracing::emit_thread_register(id, &owned_name, priority);
     } else {
@@ -1264,7 +1264,7 @@ pub fn block_current() {
 }
 
 /// Return a `Blocked` task to the runqueue so the scheduler can pick it.
-/// The [`kernel_core::sched::on_wake`] guard makes this idempotent: waking a
+/// The [`kernel_proc::sched::on_wake`] guard makes this idempotent: waking a
 /// task that is already `Ready`/`Running`/`Exited` (a racing or duplicate
 /// wake) is a no-op, so a task is never double-enqueued.
 pub fn wake(id: TaskId) {
@@ -1272,7 +1272,7 @@ pub fn wake(id: TaskId) {
     let me = crate::percpu::current_hartid();
     let mut sched = SCHEDULER.lock();
     let priority = sched.task_mut(id).and_then(|task| {
-        if kernel_core::sched::on_wake(task.state) {
+        if kernel_proc::sched::on_wake(task.state) {
             task.state = TaskState::Ready;
             Some(task.priority)
         } else {
@@ -1287,13 +1287,13 @@ pub fn wake(id: TaskId) {
 /// Wait/exit reaping table (v0.12) — zombies + parents blocked in `Wait`. Behind
 /// the same `Mutex` discipline as the runqueue: locked only inside [`wait_for`] /
 /// [`note_exit`], never held across a `block_current`/`switch`.
-static REAP: crate::sync::Mutex<kernel_core::reap::ReapTable> =
-    crate::sync::Mutex::new(kernel_core::reap::ReapTable::new());
+static REAP: crate::sync::Mutex<kernel_proc::reap::ReapTable> =
+    crate::sync::Mutex::new(kernel_proc::reap::ReapTable::new());
 
 /// `parent` waits on `child`: reap the zombie (return its status) if it already
 /// exited, else record the waiter and tell the caller to block. The pure
-/// decision is [`kernel_core::reap::ReapTable::on_wait`].
-pub fn wait_for(parent: TaskId, child: TaskId) -> kernel_core::reap::WaitStep {
+/// decision is [`kernel_proc::reap::ReapTable::on_wait`].
+pub fn wait_for(parent: TaskId, child: TaskId) -> kernel_proc::reap::WaitStep {
     REAP.lock().on_wait(parent, child)
 }
 
@@ -1314,11 +1314,11 @@ pub fn wait_for(parent: TaskId, child: TaskId) -> kernel_core::reap::WaitStep {
 /// `SCHEDULER` → `caps`). The caller must therefore **not** already hold any
 /// `caps` lock.
 ///
-/// [`children_cap_ids`]: kernel_core::cap::CapTable::children_cap_ids
-/// [`revoke_by_cap_id`]: kernel_core::cap::CapTable::revoke_by_cap_id
+/// [`children_cap_ids`]: kernel_proc::cap::CapTable::children_cap_ids
+/// [`revoke_by_cap_id`]: kernel_proc::cap::CapTable::revoke_by_cap_id
 pub fn revoke_descendants_of(
     root_cap_id: u64,
-) -> Vec<(u32, u64, u64, kernel_core::cap::Capability)> {
+) -> Vec<(u32, u64, u64, kernel_proc::cap::Capability)> {
     let mut revoked = Vec::new();
     if root_cap_id == 0 {
         return revoked;
@@ -1349,20 +1349,20 @@ pub fn revoke_descendants_of(
 
 /// `parent` waits for *any* of its children: reap whichever zombie exists (return
 /// its id + status), else record the any-waiter and tell the caller to block. The
-/// pure decision is [`kernel_core::reap::ReapTable::on_wait_any`].
-pub fn wait_for_any(parent: TaskId) -> kernel_core::reap::WaitAnyStep {
+/// pure decision is [`kernel_proc::reap::ReapTable::on_wait_any`].
+pub fn wait_for_any(parent: TaskId) -> kernel_proc::reap::WaitAnyStep {
     REAP.lock().on_wait_any(parent)
 }
 
 /// Record `parent → child` parentage for a freshly spawned `child`, so a later
-/// [`wait_for_any`] can match the child's exit. [`kernel_core::reap::ReapTable::on_spawn`].
+/// [`wait_for_any`] can match the child's exit. [`kernel_proc::reap::ReapTable::on_spawn`].
 pub fn note_spawn(parent: TaskId, child: TaskId) {
     REAP.lock().on_spawn(parent, child);
 }
 
 /// Record that `child` exited with `status` and return the parent (if any)
 /// blocked on it — a specific [`wait_for`] waiter or an any-waiting parent — for
-/// the caller to [`wake`]. [`kernel_core::reap::ReapTable::on_exit`].
+/// the caller to [`wake`]. [`kernel_proc::reap::ReapTable::on_exit`].
 pub fn note_exit(child: TaskId, status: i32) -> Option<TaskId> {
     REAP.lock().on_exit(child, status)
 }
@@ -1508,12 +1508,12 @@ pub fn exit_if_kill_requested() {
 /// The live notification registry (v0.12) — the general async kernel→user signal.
 /// Same `Mutex` discipline as [`REAP`]: locked only inside the helpers below, the
 /// lock dropped before any `wake`/`block_current`. The pure table is
-/// [`kernel_core::notify::NotifyTable`].
-static NOTIFY: crate::sync::Mutex<kernel_core::notify::NotifyTable> =
-    crate::sync::Mutex::new(kernel_core::notify::NotifyTable::new());
+/// [`kernel_proc::notify::NotifyTable`].
+static NOTIFY: crate::sync::Mutex<kernel_proc::notify::NotifyTable> =
+    crate::sync::Mutex::new(kernel_proc::notify::NotifyTable::new());
 
 /// Allocate a fresh notification and return its id (backs `NotifyCreate`).
-pub fn notify_create() -> kernel_core::notify::NotificationId {
+pub fn notify_create() -> kernel_proc::notify::NotificationId {
     NOTIFY.lock().create()
 }
 
@@ -1521,8 +1521,8 @@ pub fn notify_create() -> kernel_core::notify::NotificationId {
 /// if a waiter is parked, [`wake`]s it (the lock is released before the wake).
 /// `None` if `id` names no notification — a kernel-side bug, since the cap
 /// guaranteed it; the caller treats it as a refusal.
-pub fn notify_signal(id: kernel_core::notify::NotificationId, mask: u64) -> Option<()> {
-    use kernel_core::notify::SignalStep;
+pub fn notify_signal(id: kernel_proc::notify::NotificationId, mask: u64) -> Option<()> {
+    use kernel_proc::notify::SignalStep;
     let step = NOTIFY.lock().signal(id, mask)?;
     if let SignalStep::Woke(waiter) = step {
         wake(waiter);
@@ -1532,14 +1532,68 @@ pub fn notify_signal(id: kernel_core::notify::NotificationId, mask: u64) -> Opti
 
 /// Decide a `wait` on notification `id` for `caller` (backs `WaitNotify`): take
 /// pending bits, park, or refuse a second waiter. Returns the pure
-/// [`kernel_core::notify::WaitStep`] for the syscall handler to act on (it owns
+/// [`kernel_proc::notify::WaitStep`] for the syscall handler to act on (it owns
 /// the `block_current` loop), or `None` if `id` names no notification. The lock
 /// is dropped on return, never held across `block_current`.
 pub fn notify_wait(
-    id: kernel_core::notify::NotificationId,
+    id: kernel_proc::notify::NotificationId,
     caller: TaskId,
-) -> Option<kernel_core::notify::WaitStep> {
+) -> Option<kernel_proc::notify::WaitStep> {
     NOTIFY.lock().wait(id, caller)
+}
+
+/// Deregister `caller` as the waiter on notification `id` — a timed-out `WaitNotify`
+/// (the pure [`kernel_proc::notify::NotifyTable::cancel_wait`]). Frees the single
+/// waiter slot so a later real waiter isn't wrongly refused `Busy`.
+pub fn notify_cancel_wait(id: kernel_proc::notify::NotificationId, caller: TaskId) {
+    NOTIFY.lock().cancel_wait(id, caller);
+}
+
+/// Take notification `id`'s pending bits if any (read-and-clear) — the post-wake
+/// resolution for a timed `WaitNotify` ([`kernel_proc::notify::NotifyTable::take_pending`]).
+/// `Some(bits)` means a `Signal` arrived; `None` means the wake was the timeout.
+pub fn notify_take_pending(id: kernel_proc::notify::NotificationId) -> Option<u64> {
+    NOTIFY.lock().take_pending(id)
+}
+
+/// Deregister `parent` as a `WaitAny` any-waiter — a timed-out `WaitAny` (the pure
+/// [`kernel_proc::reap::ReapTable::cancel_wait_any`]).
+pub fn reap_cancel_wait_any(parent: TaskId) {
+    REAP.lock().cancel_wait_any(parent);
+}
+
+/// Per-hart timeout queue (v2b): absolute-tick deadlines for blocked timed waits.
+/// A waiter registers in *its* hart's queue; that hart's timer IRQ drains it and
+/// `wake`s expired tasks, which re-check and return `TimedOut`. Per-hart so the
+/// wake lands on the hart the waiter blocked on — no cross-hart migration — and each
+/// timer only scans its own queue. Same `Mutex` discipline as [`REAP`]/[`NOTIFY`]:
+/// locked only in the helpers below, dropped before any `wake`.
+static TIMEOUTS: PerCpu<Mutex<kernel_proc::timeout::TimeoutQueue>> =
+    PerCpu::new([const { Mutex::new(kernel_proc::timeout::TimeoutQueue::new()) }; MAX_HARTS]);
+
+/// Register `task` on this hart's timeout queue to be woken at absolute tick
+/// `deadline`. A `deadline` of `0` means "no timeout" (block forever) and registers
+/// nothing — the backward-compatible default for the un-timed waits.
+pub fn timeout_register(deadline: u64, task: TaskId) {
+    if deadline != 0 {
+        TIMEOUTS.this_cpu().lock().insert(deadline, task);
+    }
+}
+
+/// Cancel `task`'s pending timeout on this hart (its wait completed, or it timed
+/// out and is cleaning up). Idempotent.
+pub fn timeout_cancel(task: TaskId) {
+    TIMEOUTS.this_cpu().lock().remove(task);
+}
+
+/// Wake every task on this hart whose timeout deadline has passed (`<= now`). Called
+/// from the timer IRQ each tick. Drains under the queue lock, releases it, then
+/// `wake`s each (lock order queue → `SCHEDULER`, never held across the wake).
+pub fn wake_expired_timeouts(now: u64) {
+    let expired = TIMEOUTS.this_cpu().lock().drain_expired(now);
+    for task in expired {
+        wake(task);
+    }
 }
 
 /// Reclaim a fully-`Exited` child's resources once its parent has `Wait`ed on it.

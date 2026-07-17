@@ -5,14 +5,14 @@
 //! capability (the `TelemetrySink`). The full process object — multiple
 //! threads, transferable caps, a real `init` grant graph — grows here in
 //! v0.8. The capability *machinery* is pure and host-tested in
-//! [`kernel_core::cap`]; this module only decides *where the table lives*
+//! [`kernel_proc::cap`]; this module only decides *where the table lives*
 //! and grants the bootstrap capability. See `plans/legacy/v0.7b-capabilities.md`.
 
 use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
-use kernel_core::cap::{CapTable, Handle};
-use kernel_core::metric::MetricTable;
-use kernel_core::span_name::SpanNameTable;
+use kernel_proc::cap::{CapTable, Handle};
+use kernel_proc::metric::MetricTable;
+use kernel_proc::span_name::SpanNameTable;
 
 use crate::percpu::{MAX_HARTS, PerCpu};
 use crate::sync::Mutex;

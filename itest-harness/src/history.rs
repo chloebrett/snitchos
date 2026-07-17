@@ -4,7 +4,7 @@
 //! `history_root`. Files are append-only or write-once; the design
 //! goal is "process dies, last completed observation is preserved."
 //!
-//! See `plans/itest-history-and-pending.md` for the broader rationale.
+//! See `plans/legacy/itest-history-and-pending.md` for the broader rationale.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};

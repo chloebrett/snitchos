@@ -12,7 +12,7 @@
 use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use kernel_core::sched::TaskId;
+use kernel_proc::sched::TaskId;
 
 use crate::counter::DeferredCounter;
 

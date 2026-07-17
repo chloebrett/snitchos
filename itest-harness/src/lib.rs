@@ -6,7 +6,7 @@
 //! dependency on what's under test — consumers plug in their own
 //! `Subject` (process to launch + event stream to decode).
 //!
-//! See `plans/itest-harness-extraction.md` for the migration plan and
+//! See `plans/legacy/itest-harness-extraction.md` for the migration plan and
 //! the broader rationale.
 
 // Modules are private; the crate's public surface is exactly the flat

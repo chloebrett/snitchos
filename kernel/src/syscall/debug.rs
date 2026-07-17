@@ -10,7 +10,7 @@ use crate::trap::TrapFrame;
 /// not an authority, like `Yield`. The runtime chunks writes to fit
 /// `MAX_USER_STR_LEN`; a longer write becomes several `Log` frames.
 pub(super) fn handle_debug_write(frame: &mut TrapFrame) {
-    use kernel_core::mmu::MAX_USER_STR_LEN;
+    use kernel_mem::mmu::MAX_USER_STR_LEN;
     use protocol::RefusalReason;
     use snitchos_abi::Syscall;
 

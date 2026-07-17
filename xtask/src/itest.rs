@@ -303,6 +303,7 @@ catalog! {
     cpu "kill-without-a-process-cap-is-refused" scenarios::kill_without_a_process_cap_is_refused [userspace] {"kill-no-cap"};
     cpu "userspace-runs-on-hart-0"        scenarios::userspace_runs_on_hart_0       [userspace]  {"user-on-hart0"};
     cpu "cross-hart-kill-stops-a-child"   scenarios::cross_hart_kill_stops_a_child  [userspace]  {"xhart-kill"};
+    cpu "supervisor-detects-and-kills-a-hung-service" scenarios::supervisor_detects_and_kills_a_hung_service [userspace] {"hung-detect"};
     cpu "endpoint-create-yields-owning-cap" scenarios::endpoint_create_yields_an_owning_cap [userspace] {"endpoint-create"};
     cpu "revoke-reclaims-a-minted-cap"    scenarios::revoke_reclaims_a_minted_cap   [userspace]  {"endpoint-create"};
     cpu "notify-signal-wakes-waiter"      scenarios::notify_signal_wakes_waiter     [userspace]  {"notify-smoke"};
@@ -652,10 +653,17 @@ fn current_commit_short() -> Option<String> {
 
 /// Workspace crates that have host-runnable `cargo test` suites.
 /// The kernel itself is `no_std`/`no_main` and won't build for the
-/// host — testable logic lives in `kernel-core`. Each entry is the
-/// crate name plus any extra args (features) the suite needs.
+/// host — testable logic lives in the `kernel-*` crates. Each entry is
+/// the crate name plus any extra args (features) the suite needs.
+///
+/// Keep the `kernel-*` list in sync with the workspace members: a crate
+/// missing here is silently never host-tested (nothing else runs these).
 const UNIT_TEST_CRATES: &[(&str, &[&str])] = &[
-    ("kernel-core", &[]),
+    ("kernel-mem", &[]),
+    ("kernel-obs", &[]),
+    ("kernel-devices", &[]),
+    ("kernel-boot", &[]),
+    ("kernel-proc", &[]),
     ("protocol", &["--features", "std"]),
     ("collector", &[]),
     ("itest-harness", &[]),

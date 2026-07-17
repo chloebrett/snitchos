@@ -50,7 +50,8 @@ pub const QUEUE_TX: u32 = 1;
 /// Read/write access to a virtio-mmio device's 32-bit registers. The
 /// kernel implements this over volatile MMIO at the device base; host
 /// tests implement it with a `FakeVirtioDevice`. Keeping the handshake
-/// logic generic over this trait is what lets it move to kernel-core.
+/// logic generic over this trait is what lets it live here, host-tested,
+/// instead of in the kernel next to the MMIO.
 pub trait MmioTransport {
     fn read_reg(&self, offset: usize) -> u32;
     fn write_reg(&mut self, offset: usize, value: u32);

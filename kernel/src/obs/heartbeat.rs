@@ -198,7 +198,7 @@ pub fn run(metrics: Metrics) -> ! {
 /// the light spawn layout (no demo task_a/task_b burning between ticks; see
 /// `kmain`).
 fn frame_smoke() {
-    use kernel_core::bootargs::WorkloadKind;
+    use kernel_boot::bootargs::WorkloadKind;
     if boot_workload::selected() == Some(WorkloadKind::FrameOom) {
         let per_tick = frame::stats().map_or(8192, |s| s.total / 4);
         for _ in 0..per_tick {
@@ -218,7 +218,7 @@ fn frame_smoke() {
 /// bumps `alloc_failed_total` — so the counter climbs once per
 /// heartbeat post-OOM, and the kernel keeps heartbeating.
 fn heap_smoke_pattern(count: i64) {
-    use kernel_core::bootargs::WorkloadKind;
+    use kernel_boot::bootargs::WorkloadKind;
     if boot_workload::selected() != Some(WorkloadKind::HeapOom) {
         let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(256);
         v.push(count as u8);
@@ -271,7 +271,7 @@ fn emit_frame_metrics(m: &Metrics) {
 /// undercounts unavailable bytes.
 ///
 /// Also drives the watermark-grow side effect: the policy (when + by
-/// how much) is pure logic in `kernel_core::heap`; this fn owns the
+/// how much) is pure logic in `kernel_mem::heap`; this fn owns the
 /// side effect of acting on the decision. Heartbeat is
 /// single-threaded so it's safe to take the heap lock for `extend`.
 /// On failure (ceiling, OOM, map error) we bump `grow_failed_total`
@@ -301,8 +301,8 @@ fn emit_sched_metrics(m: &Metrics) {
     if !matches!(
         boot_workload::selected(),
         Some(
-            kernel_core::bootargs::WorkloadKind::SpawnStorm
-                | kernel_core::bootargs::WorkloadKind::LiveTasks
+            kernel_boot::bootargs::WorkloadKind::SpawnStorm
+                | kernel_boot::bootargs::WorkloadKind::LiveTasks
         )
     ) {
         for snap in sched::task_snapshots() {
@@ -347,7 +347,7 @@ fn emit_heap_smoke_metrics(m: &Metrics, count: i64) {
 /// boot.
 #[cfg(feature = "itest-workloads")]
 fn emit_storm_metrics(m: &Metrics, count: i64) {
-    use kernel_core::bootargs::WorkloadKind;
+    use kernel_boot::bootargs::WorkloadKind;
     // Only the storm workloads emit here; every other selection (default /
     // Smp* / OOM / userspace / IPC / FS) contributes no storm metrics.
     // `WorkloadKind::is_storm` (host-tested in kernel-core) is the single

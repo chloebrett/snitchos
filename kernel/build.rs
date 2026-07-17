@@ -63,6 +63,8 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("hart-probe", "SNITCHOS_HART_PROBE_ELF"),
     ("hart-spinner", "SNITCHOS_HART_SPINNER_ELF"),
     ("xhart-killer", "SNITCHOS_XHART_KILLER_ELF"),
+    ("hung-service", "SNITCHOS_HUNG_SERVICE_ELF"),
+    ("hung-supervisor", "SNITCHOS_HUNG_SUPERVISOR_ELF"),
 ];
 
 fn main() {

@@ -45,7 +45,7 @@ event stream) is a matter of passing a different `RunnerConfig`.
 
 ## Design docs
 
-- `plans/itest-harness-extraction.md` — the migration plan that
+- `plans/legacy/itest-harness-extraction.md` — the migration plan that
   carved this crate out of `xtask`.
-- `plans/itest-history-and-pending.md` — the history / pending /
+- `plans/legacy/itest-history-and-pending.md` — the history / pending /
   export design (tiers 1 through 3, Grafana ingestion path).

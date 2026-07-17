@@ -1,9 +1,9 @@
 // SMOKE TEST — remove once real kernel workloads drive heap metrics.
 // Holds the static FactorTable and exposes step()/stats() for the heartbeat
-// loop. All logic lives in kernel_core::heap_smoke; this file only adds the
+// loop. All logic lives in kernel_mem::heap_smoke; this file only adds the
 // lock and the static.
 
-use kernel_core::heap_smoke::FactorTable;
+use kernel_mem::heap_smoke::FactorTable;
 
 use crate::sync::Mutex;
 

@@ -20,9 +20,9 @@ use linked_list_allocator::Heap;
 
 use crate::counter::DeferredCounter;
 use crate::{frame, mmu};
-use kernel_core::mmu::{HEAP_VA_BASE, PtePerms};
+use kernel_mem::mmu::{HEAP_VA_BASE, PtePerms};
 
-pub use kernel_core::heap::{Stats, WatermarkConfig, watermark_grow_decision};
+pub use kernel_mem::heap::{Stats, WatermarkConfig, watermark_grow_decision};
 
 /// Watermark policy for this kernel. Grow at 25% free, 256 frames per
 /// grow event, ceiling at MAX_HEAP_SIZE.
@@ -184,7 +184,7 @@ fn grow_va_range(n: usize) -> Result<usize, ()> {
     let start_top = HEAP_TOP.load(Ordering::Relaxed);
     let ceiling = HEAP_VA_BASE + MAX_HEAP_SIZE;
     let end_top =
-        kernel_core::heap::next_heap_top(start_top, n, frame::FRAME_SIZE, ceiling).ok_or(())?;
+        kernel_mem::heap::next_heap_top(start_top, n, frame::FRAME_SIZE, ceiling).ok_or(())?;
     let perms = PtePerms::R.union(PtePerms::W).union(PtePerms::G);
     for i in 0..n {
         let frame = frame::alloc_zeroed().ok_or(())?;

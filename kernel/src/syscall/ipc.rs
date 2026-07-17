@@ -14,7 +14,7 @@ use crate::trap::TrapFrame;
 /// lock across the switch). Returns `0` on success, the error sentinel if the
 /// capability is refused.
 pub(super) fn handle_send(frame: &mut TrapFrame) {
-    use kernel_core::cap::{invoke_send, Handle};
+    use kernel_proc::cap::{invoke_send, Handle};
     use snitchos_abi::Syscall;
 
     let sc = Syscall::Send as u8;
@@ -58,7 +58,7 @@ pub(super) fn handle_send(frame: &mut TrapFrame) {
 /// Writes the words into `a1..=a4` and `0` into `a0`; refuses with the error
 /// sentinel if the capability is refused.
 pub(super) fn handle_receive(frame: &mut TrapFrame) {
-    use kernel_core::cap::{invoke_recv, Handle};
+    use kernel_proc::cap::{invoke_recv, Handle};
     use snitchos_abi::Syscall;
 
     let sc = Syscall::Receive as u8;
@@ -88,7 +88,7 @@ pub(super) fn handle_receive(frame: &mut TrapFrame) {
 fn receive_into_frame(
     proc: &crate::process::Process,
     frame: &mut TrapFrame,
-    ep: kernel_core::ipc::EndpointId,
+    ep: kernel_proc::ipc::EndpointId,
 ) {
     let me = crate::sched::current_task_id();
     let delivered = match crate::ipc::receive_begin(ep, me) {
@@ -140,10 +140,10 @@ fn receive_into_frame(
 /// the kernel grants the server authority to answer exactly this caller once.
 fn reply_handle_for(
     proc: &crate::process::Process,
-    holder: kernel_core::sched::TaskId,
-    reply_to: Option<kernel_core::sched::TaskId>,
+    holder: kernel_proc::sched::TaskId,
+    reply_to: Option<kernel_proc::sched::TaskId>,
 ) -> u64 {
-    use kernel_core::cap::{Capability, Object, Rights};
+    use kernel_proc::cap::{Capability, Object, Rights};
 
     let Some(caller) = reply_to else {
         return 0;
@@ -178,7 +178,7 @@ fn reply_handle_for(
 /// response words are written into `a1..=a4`. The caller's span stays open
 /// across the round-trip, so the server's handling span nests under it.
 pub(super) fn handle_call(frame: &mut TrapFrame) {
-    use kernel_core::cap::{invoke_send, Handle};
+    use kernel_proc::cap::{invoke_send, Handle};
     use snitchos_abi::Syscall;
 
     let sc = Syscall::Call as u8;
@@ -229,7 +229,7 @@ pub(super) fn handle_call(frame: &mut TrapFrame) {
             let cap_id = crate::process::next_cap_id();
             let handle = proc.caps.lock().insert_with_id(cap, cap_id, reply.parent_cap_id);
             let (badge, name) = match cap.object {
-                kernel_core::cap::Object::Endpoint { id, badge } => (badge, crate::ipc::name_of(id)),
+                kernel_proc::cap::Object::Endpoint { id, badge } => (badge, crate::ipc::name_of(id)),
                 _ => (0, [0; snitchos_abi::CAP_NAME_LEN]),
             };
             crate::tracing::emit_cap_transferred(
@@ -262,7 +262,7 @@ pub(super) fn handle_reply(frame: &mut TrapFrame) {
     let raw_handle = frame.a0 as u32;
     let resp = [frame.a1, frame.a2, frame.a3, frame.a4];
     // `a6` (v0.9c): a cap handle to transfer to the caller, `0` = none.
-    let transfer = (frame.a6 != 0).then(|| kernel_core::cap::Handle::from_raw(frame.a6 as u32));
+    let transfer = (frame.a6 != 0).then(|| kernel_proc::cap::Handle::from_raw(frame.a6 as u32));
     if reply_via_cap(proc, frame, sc, raw_handle, resp, transfer).is_ok() {
         frame.a0 = 0;
     }
@@ -279,9 +279,9 @@ fn reply_via_cap(
     sc: u8,
     raw_handle: u32,
     resp: crate::ipc::Message,
-    transfer: Option<kernel_core::cap::Handle>,
+    transfer: Option<kernel_proc::cap::Handle>,
 ) -> Result<(), ()> {
-    use kernel_core::cap::{invoke_reply, Handle};
+    use kernel_proc::cap::{invoke_reply, Handle};
 
     let handle = Handle::from_raw(raw_handle);
     // Resolve + consume the reply cap and, if the server is handing a cap to the
@@ -331,7 +331,7 @@ fn reply_via_cap(
 /// any), then runs a normal receive into `frame` for the next request. One trap
 /// instead of two; reuses [`reply_via_cap`] + [`receive_into_frame`].
 pub(super) fn handle_reply_recv(frame: &mut TrapFrame) {
-    use kernel_core::cap::{invoke_recv, Handle};
+    use kernel_proc::cap::{invoke_recv, Handle};
     use snitchos_abi::Syscall;
 
     let sc = Syscall::ReplyRecv as u8;
@@ -375,7 +375,7 @@ pub(super) fn handle_reply_recv(frame: &mut TrapFrame) {
 /// `NotifyCreate`: a process manufactures its own IPC world (e.g. `init` bringing
 /// up the FS server) instead of the kernel pre-creating it.
 pub(super) fn handle_endpoint_create(frame: &mut TrapFrame) {
-    use kernel_core::cap::{Capability, Object, Rights};
+    use kernel_proc::cap::{Capability, Object, Rights};
     use protocol::RefusalReason;
     use snitchos_abi::Syscall;
 

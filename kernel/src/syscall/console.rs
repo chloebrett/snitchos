@@ -55,7 +55,7 @@ pub(super) fn handle_console_read(frame: &mut TrapFrame) {
 /// `u64::MAX` on a bad pointer / non-UTF-8). Ambient, the mirror of `ConsoleRead`.
 /// The runtime chunks longer writes to fit `MAX_USER_STR_LEN`.
 pub(super) fn handle_console_write(frame: &mut TrapFrame) {
-    use kernel_core::mmu::MAX_USER_STR_LEN;
+    use kernel_mem::mmu::MAX_USER_STR_LEN;
     use protocol::RefusalReason;
     use snitchos_abi::Syscall;
 

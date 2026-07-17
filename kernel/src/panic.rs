@@ -57,7 +57,7 @@ fn panic(info: &PanicInfo) -> ! {
 /// Best-effort emit of a `kernel panic` telemetry frame on the virtio-console.
 ///
 /// Panic-safe by construction, because a panic can fire from anywhere:
-/// - **no alloc / no intern** — [`kernel_core::panic_log::encode`] reuses
+/// - **no alloc / no intern** — [`kernel_obs::panic_log::encode`] reuses
 ///   `Frame::Log` (inlines its `&str`) and encodes into a fixed buffer;
 /// - **no blocking** — [`virtio_console::try_send_panic`](crate::virtio_console::try_send_panic)
 ///   `try_lock`s the console and skips on contention (a hart may have panicked
@@ -70,7 +70,7 @@ fn panic(info: &PanicInfo) -> ! {
 /// a human can't see.
 ///
 /// The message carries the real panic reason + location, formatted from `info`
-/// into a fixed `static` buffer via [`kernel_core::panic_log::MsgWriter`] — the
+/// into a fixed `static` buffer via [`kernel_obs::panic_log::MsgWriter`] — the
 /// same no-alloc `core::fmt::Write` trick the emergency UART uses above,
 /// truncating at a char boundary if the message overruns the buffer.
 fn snitch_panic(info: &PanicInfo) {
@@ -98,13 +98,13 @@ fn snitch_panic(info: &PanicInfo) {
         (&mut *(&raw mut PANIC_MSG_BUF), &mut *(&raw mut PANIC_FRAME_BUF))
     };
 
-    let mut msg = kernel_core::panic_log::MsgWriter::new(msg_buf);
+    let mut msg = kernel_obs::panic_log::MsgWriter::new(msg_buf);
     // Never errors (overflow truncates); the emergency UART already has the full
     // text, so a truncated telemetry copy is acceptable.
     let _ = write!(msg, "kernel panic: {info}");
 
     if let Some(n) =
-        kernel_core::panic_log::encode(frame_buf, msg.as_str(), task_id, t, hart_id)
+        kernel_obs::panic_log::encode(frame_buf, msg.as_str(), task_id, t, hart_id)
     {
         let _ = crate::virtio_console::try_send_panic(&frame_buf[..n]);
     }

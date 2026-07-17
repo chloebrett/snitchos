@@ -868,7 +868,11 @@ dependencies = [
  "fdt",
  "heapless 0.8.0",
  "hitch-pod",
- "kernel-core",
+ "kernel-boot",
+ "kernel-devices",
+ "kernel-mem",
+ "kernel-obs",
+ "kernel-proc",
  "linked_list_allocator",
  "postcard",
  "protocol",
@@ -880,17 +884,6 @@ dependencies = [
 [[package]]
 name = "kernel-boot"
 version = "0.0.1"
-
-[[package]]
-name = "kernel-core"
-version = "0.0.1"
-dependencies = [
- "kernel-boot",
- "kernel-devices",
- "kernel-mem",
- "kernel-obs",
- "kernel-proc",
-]
 
 [[package]]
 name = "kernel-devices"

@@ -23,8 +23,8 @@ pub mod user;
 use core::arch::asm;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use kernel_core::clock::Clock;
-use kernel_core::trap::{TrapCause, decode_scause};
+use kernel_obs::clock::Clock;
+use kernel_boot::trap::{TrapCause, decode_scause};
 
 use crate::percpu::PerCpu;
 
@@ -94,7 +94,7 @@ pub static LAST_IRQ_DURATION: PerCpu<AtomicU64> =
 
 /// SSTC-based clock: reads `time` CSR directly, writes `stimecmp`
 /// (CSR 0x14d) to arm. No SBI round-trip. Implements
-/// `kernel_core::clock::Clock`.
+/// `kernel_obs::clock::Clock`.
 pub struct SstcClock;
 
 impl Clock for SstcClock {
@@ -232,7 +232,7 @@ fn handle_kernel_fault(scause: u64) -> ! {
     // SAFETY: reads a CSR; no memory access, no side effects.
     unsafe { asm!("csrr {}, stval", out(reg) stval, options(nomem, nostack)) };
     // Per-task kernel-stack window guard.
-    if let Some(slot) = kernel_core::stack::guard_slot_for(stval) {
+    if let Some(slot) = kernel_proc::stack::guard_slot_for(stval) {
         crate::sched::report_stack_guard_fault(slot, stval);
     }
     // Boot-stack (task 0) guard page — a single page below the boot stack, in the
@@ -241,7 +241,7 @@ fn handle_kernel_fault(scause: u64) -> ! {
         static __boot_stack_guard: u8;
     }
     let boot_guard = (&raw const __boot_stack_guard) as usize;
-    if (boot_guard..boot_guard + kernel_core::mmu::PAGE_SIZE).contains(&stval) {
+    if (boot_guard..boot_guard + kernel_mem::mmu::PAGE_SIZE).contains(&stval) {
         crate::sched::report_boot_stack_guard_fault(stval);
     }
     panic!("kernel page fault: scause={scause:#x} stval={stval:#x}");
@@ -293,6 +293,11 @@ fn handle_timer(frame: &TrapFrame) {
     if crate::percpu::current_hartid() == 0 {
         crate::console::drain_rx();
     }
+
+    // v2b timed waits: wake any task on this hart whose timeout deadline has passed,
+    // so its wait loop re-checks and returns `TimedOut`. Before `maybe_preempt`, which
+    // may switch away and not return this pass — the drain must run every tick.
+    crate::sched::wake_expired_timeouts(start);
 
     // v0.8 preemption: if this timer interrupted a *userspace* task that has
     // overrun its quantum, deschedule it now. `SPP == 0` means the trap came

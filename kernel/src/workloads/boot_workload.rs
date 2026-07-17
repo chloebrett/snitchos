@@ -5,7 +5,7 @@
 //!
 //! See `docs/runtime-workload-selection-design.md`.
 
-use kernel_core::bootargs::WorkloadKind;
+use kernel_boot::bootargs::WorkloadKind;
 
 use crate::sync::Once;
 

@@ -7,18 +7,18 @@
 //! generic [`program_entry`], which carries the spec through the task's `arg`
 //! word; `kmain` selects which to spawn per workload.
 //!
-//! [`load`] parses an embedded ELF with [`kernel_core::elf`] and maps its
+//! [`load`] parses an embedded ELF with [`kernel_proc::elf`] and maps its
 //! segments into a fresh per-process root page table (kernel high-half
 //! shared in) with the `U` bit; [`enter`] switches `satp` and drops to
 //! U-mode at the entry point.
 
 use alloc::collections::BTreeMap;
 
-use kernel_core::bootargs::WorkloadKind;
-use kernel_core::cap::Rights;
-use kernel_core::elf::{self, SegmentPerms};
-use kernel_core::mmu::{MapError, PtePerms};
-use kernel_core::sched::Priority;
+use kernel_boot::bootargs::WorkloadKind;
+use kernel_proc::cap::Rights;
+use kernel_proc::elf::{self, SegmentPerms};
+use kernel_mem::mmu::{MapError, PtePerms};
+use kernel_proc::sched::Priority;
 use protocol::StringId;
 
 use crate::frame::{self, FRAME_SIZE};
@@ -138,6 +138,14 @@ pub static HART_SPINNER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_HART_SPINNER_
 /// The `workload=xhart-kill` supervisor (v2b step 4): runs on hart 1, `SpawnOn`s the
 /// `hart-spinner` victim to hart 0, then cross-hart `Kill`s + reaps it.
 pub static XHART_KILLER_ELF: &[u8] = include_bytes!(env!("SNITCHOS_XHART_KILLER_ELF"));
+
+/// The `hung-service` victim (spawnable id 12) for hung detection (v2b): beats a
+/// liveness notification a few times, then wedges (tight-loop, alive but stuck).
+pub static HUNG_SERVICE_ELF: &[u8] = include_bytes!(env!("SNITCHOS_HUNG_SERVICE_ELF"));
+
+/// The `workload=hung-detect` supervisor (v2b): `wait_timeout`s a liveness
+/// notification and force-`Kill`s the service when a beat fails to arrive in time.
+pub static HUNG_SUPERVISOR_ELF: &[u8] = include_bytes!(env!("SNITCHOS_HUNG_SUPERVISOR_ELF"));
 
 /// The `workload=init` supervising root: spawns a child (delegating its span cap)
 /// and reaps it via `WaitAny` — the delegation-graph root (v0.13).
@@ -386,6 +394,10 @@ pub static HART_PROBE: ProgramSpec = ProgramSpec { elf: HART_PROBE_ELF, launch: 
 /// its victim to hart 0 and kills it (Launch::Plain; spawns its own child at runtime).
 pub static XHART_KILLER: ProgramSpec = ProgramSpec { elf: XHART_KILLER_ELF, launch: Launch::Plain };
 
+/// `workload=hung-detect`: the hung-detection supervisor — `wait_timeout`s a liveness
+/// notification and kills the wedged service (Launch::Plain; spawns its own child).
+pub static HUNG_SUPERVISOR: ProgramSpec = ProgramSpec { elf: HUNG_SUPERVISOR_ELF, launch: Launch::Plain };
+
 /// `workload=init`: the supervising root — spawns + `WaitAny`-reaps a child,
 /// delegating its span cap downward. Holds only its bootstrap caps (Launch::Plain).
 pub static INIT: ProgramSpec = ProgramSpec { elf: INIT_ELF, launch: Launch::Plain };
@@ -504,14 +516,14 @@ pub fn spawn_program(
     name: &str,
     program: &'static ProgramSpec,
     priority: Priority,
-) -> kernel_core::sched::TaskId {
+) -> kernel_proc::sched::TaskId {
     crate::sched::spawn_on_with_arg(hart, name, program_entry, core::ptr::from_ref(program) as usize, priority)
 }
 
 /// Map a kernel capability object to its wire [`protocol::CapObject`] kind, for
 /// snitching a `CapEvent` on a delegated grant or revoke.
-pub(crate) fn cap_object_kind(object: kernel_core::cap::Object) -> protocol::CapObject {
-    use kernel_core::cap::Object;
+pub(crate) fn cap_object_kind(object: kernel_proc::cap::Object) -> protocol::CapObject {
+    use kernel_proc::cap::Object;
     match object {
         Object::TelemetrySink => protocol::CapObject::TelemetrySink,
         Object::SpanSink => protocol::CapObject::SpanSink,
@@ -538,7 +550,7 @@ struct SpawnRequest {
     image: ProgramImage,
     /// Each delegated cap paired with its source holding's global cap id (the
     /// `parent_cap_id` for the child's `CapEvent::Transferred`).
-    delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
+    delegated: alloc::vec::Vec<(kernel_proc::cap::Capability, u64)>,
 }
 
 /// Task entry for a spawned child: reclaim its [`SpawnRequest`] from the task
@@ -566,9 +578,9 @@ pub fn spawn_process_with_caps(
     hart: usize,
     name: &str,
     image: &'static [u8],
-    delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
-    priority: kernel_core::sched::Priority,
-) -> kernel_core::sched::TaskId {
+    delegated: alloc::vec::Vec<(kernel_proc::cap::Capability, u64)>,
+    priority: kernel_proc::sched::Priority,
+) -> kernel_proc::sched::TaskId {
     let req = alloc::boxed::Box::new(SpawnRequest { image: ProgramImage::Embedded(image), delegated });
     let arg = alloc::boxed::Box::into_raw(req) as usize;
     crate::sched::spawn_on_with_arg(hart, name, spawned_entry, arg, priority)
@@ -582,9 +594,9 @@ pub fn spawn_image_with_caps(
     hart: usize,
     name: &str,
     image: alloc::boxed::Box<[u8]>,
-    delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
-    priority: kernel_core::sched::Priority,
-) -> kernel_core::sched::TaskId {
+    delegated: alloc::vec::Vec<(kernel_proc::cap::Capability, u64)>,
+    priority: kernel_proc::sched::Priority,
+) -> kernel_proc::sched::TaskId {
     let req = alloc::boxed::Box::new(SpawnRequest { image: ProgramImage::Owned(image), delegated });
     let arg = alloc::boxed::Box::into_raw(req) as usize;
     crate::sched::spawn_on_with_arg(hart, name, spawned_entry, arg, priority)
@@ -607,6 +619,7 @@ static SPAWNABLE: &[(&str, &[u8])] = &[
     ("ipc-echo-client", IPC_ECHO_CLIENT_ELF), // 9
     ("svc-worker", SVC_WORKER_ELF),   // 10
     ("hart-spinner", HART_SPINNER_ELF), // 11
+    ("hung-service", HUNG_SERVICE_ELF), // 12
 ];
 
 /// Resolve a `Spawn` program id to its `(name, image)`, or `None` if out of range.
@@ -619,7 +632,7 @@ pub fn spawnable_program(id: usize) -> Option<(&'static str, &'static [u8])> {
 pub struct ProgramSpawn {
     pub name: &'static str,
     pub program: &'static ProgramSpec,
-    pub priority: kernel_core::sched::Priority,
+    pub priority: kernel_proc::sched::Priority,
 }
 
 /// A userspace workload's spawn layout: whether it needs the shared IPC
@@ -827,6 +840,12 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "xhart_killer", program: &XHART_KILLER, priority: Priority::Normal }],
     }),
+    // Hung detection (v2b): the supervisor spawns its `hung-service` child at runtime
+    // and `wait_timeout`s a liveness notification, so only the supervisor is here.
+    (WorkloadKind::HungDetect, UserLayout {
+        needs_endpoint: false,
+        programs: &[ProgramSpawn { name: "hung_supervisor", program: &HUNG_SUPERVISOR, priority: Priority::Normal }],
+    }),
     // v0.13 EndpointCreate: a single program manufactures its own endpoint and
     // proves it by minting — no kernel-created endpoint (`needs_endpoint: false`).
     (WorkloadKind::EndpointCreate, UserLayout {
@@ -905,7 +924,7 @@ fn run(image: &'static [u8]) -> ! {
 /// `&'static` slice ([`run_with_caps`]) or a caller-supplied owned buffer that
 /// `load_image` frees once mapped ([`run_image_with_caps`]). Never returns.
 fn run_loaded_with_caps(
-    delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
+    delegated: alloc::vec::Vec<(kernel_proc::cap::Capability, u64)>,
     load_image: impl FnOnce(usize) -> Result<Loaded, LoadError>,
 ) -> ! {
     // Each process gets its own root page table (kernel high-half shared in).
@@ -934,7 +953,7 @@ fn run_loaded_with_caps(
             cap_id,
             holder,
             object,
-            kernel_core::cap::Rights::EMIT.bits(),
+            kernel_proc::cap::Rights::EMIT.bits(),
             [0; snitchos_abi::CAP_NAME_LEN], // bootstrap telemetry/span carry no name
         );
     }
@@ -949,7 +968,7 @@ fn run_loaded_with_caps(
             tracing::emit_metric(id, 1);
         }
         let (badge, name) = match cap.object {
-            kernel_core::cap::Object::Endpoint { id, badge } => (badge, crate::ipc::name_of(id)),
+            kernel_proc::cap::Object::Endpoint { id, badge } => (badge, crate::ipc::name_of(id)),
             _ => (0, [0; snitchos_abi::CAP_NAME_LEN]),
         };
         tracing::emit_cap_transferred(
@@ -995,7 +1014,7 @@ fn run_loaded_with_caps(
 /// Run an embedded program image (the `Spawn` path) with `delegated` caps.
 fn run_with_caps(
     image: &'static [u8],
-    delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
+    delegated: alloc::vec::Vec<(kernel_proc::cap::Capability, u64)>,
 ) -> ! {
     run_loaded_with_caps(delegated, |root_pa| load(root_pa, image))
 }
@@ -1005,7 +1024,7 @@ fn run_with_caps(
 /// U-mode — so a per-spawn ELF copy isn't leaked for the process's lifetime.
 fn run_image_with_caps(
     image: alloc::boxed::Box<[u8]>,
-    delegated: alloc::vec::Vec<(kernel_core::cap::Capability, u64)>,
+    delegated: alloc::vec::Vec<(kernel_proc::cap::Capability, u64)>,
 ) -> ! {
     run_loaded_with_caps(delegated, move |root_pa| {
         let loaded = load(root_pa, &image);
@@ -1020,13 +1039,13 @@ fn run_image_with_caps(
 /// `TelemetrySink` is bare authority, same as every program: any metric it wants
 /// it registers at runtime (debt #2). Never returns.
 ///
-/// [`Endpoint`]: kernel_core::cap::Object::Endpoint
+/// [`Endpoint`]: kernel_proc::cap::Object::Endpoint
 fn run_ipc(
     image: &'static [u8],
-    endpoint: kernel_core::ipc::EndpointId,
-    rights: kernel_core::cap::Rights,
+    endpoint: kernel_proc::ipc::EndpointId,
+    rights: kernel_proc::cap::Rights,
 ) -> ! {
-    use kernel_core::cap::{Capability, Object};
+    use kernel_proc::cap::{Capability, Object};
 
     let root_pa = mmu::new_user_root().expect("ipc: no frame for user root page table");
     let (process, bootstrap_handle, span_handle) = Process::bootstrap(root_pa);
@@ -1044,8 +1063,8 @@ fn run_ipc(
     // `run` does — now three: the two bootstrap authorities plus this endpoint.
     let holder = crate::sched::current_task_id().0;
     let grants = [
-        (bootstrap_handle, protocol::CapObject::TelemetrySink, kernel_core::cap::Rights::EMIT.bits()),
-        (span_handle, protocol::CapObject::SpanSink, kernel_core::cap::Rights::EMIT.bits()),
+        (bootstrap_handle, protocol::CapObject::TelemetrySink, kernel_proc::cap::Rights::EMIT.bits()),
+        (span_handle, protocol::CapObject::SpanSink, kernel_proc::cap::Rights::EMIT.bits()),
         (endpoint_handle, protocol::CapObject::Endpoint, rights.bits()),
     ];
     for (handle, object, rights_bits) in grants {
@@ -1058,8 +1077,8 @@ fn run_ipc(
             let caps = process.caps.lock();
             let cap_id = caps.cap_id_of(handle).unwrap_or(0);
             let ep_id = match caps.resolve(handle) {
-                Ok(kernel_core::cap::Capability {
-                    object: kernel_core::cap::Object::Endpoint { id, .. },
+                Ok(kernel_proc::cap::Capability {
+                    object: kernel_proc::cap::Object::Endpoint { id, .. },
                     ..
                 }) => Some(*id),
                 _ => None,
@@ -1107,7 +1126,7 @@ fn perms_for(p: SegmentPerms) -> PtePerms {
 /// Parse `image` and map its `PT_LOAD` segments into the page table rooted
 /// at `root_pa`. The page planning — unioning the perms of segments that share
 /// a page, enforcing W^X on the union, and splitting file bytes into per-page
-/// copy windows — is pure and host-tested in [`kernel_core::user::elf`]; this
+/// copy windows — is pure and host-tested in [`kernel_proc::elf`]; this
 /// function is the effects: allocate, map, copy. Returns the entry point.
 pub fn load(root_pa: usize, image: &[u8]) -> Result<Loaded, LoadError> {
     let plan = elf::parse(image).map_err(LoadError::Parse)?;

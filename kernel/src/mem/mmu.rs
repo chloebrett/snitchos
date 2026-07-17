@@ -1,7 +1,7 @@
 //! Boot-time identity page table and the `csrw satp` / `sfence.vma`
 //! bridge.
 //!
-//! The page-table type and PTE encoding live in `kernel_core::mmu` —
+//! The page-table type and PTE encoding live in `kernel_mem::mmu` —
 //! all bit-twiddling, host-tested. This module owns the singleton
 //! statics and the asm that flips translation on.
 //!
@@ -11,9 +11,9 @@
 use core::arch::asm;
 
 use fdt::Fdt;
-use kernel_core::mmu::{self as core_mmu, MapError, PageTable, PtMem, Pte, PtePerms};
+use kernel_mem::mmu::{self as core_mmu, MapError, PageTable, PtMem, Pte, PtePerms};
 
-pub use kernel_core::mmu::{KERNEL_OFFSET, LINEAR_OFFSET, va_to_pa};
+pub use kernel_mem::mmu::{KERNEL_OFFSET, LINEAR_OFFSET, va_to_pa};
 
 /// 2 MiB — the page size for every leaf in our boot table.
 const PAGE_2MIB: usize = 2 * 1024 * 1024;
@@ -316,7 +316,7 @@ impl PtMem for KernelPtMem {
     }
 
     fn read_entry(&self, table_pa: usize, idx: usize) -> Pte {
-        let ptr = kernel_core::mmu::pa_to_kernel_va(table_pa) as *const u64;
+        let ptr = kernel_mem::mmu::pa_to_kernel_va(table_pa) as *const u64;
         // SAFETY: `table_pa` was either returned by `alloc_zeroed_table`
         // (a frame the allocator handed us, reachable via the linear
         // map) or is the root table's PA. `idx` is in 0..512 — caller
@@ -326,7 +326,7 @@ impl PtMem for KernelPtMem {
     }
 
     fn write_entry(&mut self, table_pa: usize, idx: usize, value: Pte) {
-        let ptr = kernel_core::mmu::pa_to_kernel_va(table_pa) as *mut u64;
+        let ptr = kernel_mem::mmu::pa_to_kernel_va(table_pa) as *mut u64;
         // SAFETY: same as `read_entry`. `&mut self` ensures no
         // concurrent reader on this impl during the write; the MMU
         // walker is the only other reader and we sfence in the
@@ -375,7 +375,7 @@ pub fn map(va: usize, pa: usize, perms: PtePerms) -> Result<(), MapError> {
 /// [`map`], does **no** `sfence` — the intended use is building an
 /// *inactive* address space (e.g. a fresh user root before its `satp`
 /// switch), where no TLB entries exist yet. The walk is the host-tested
-/// `kernel_core::mmu::map`.
+/// `kernel_mem::mmu::map`.
 pub fn map_in(root_pa: usize, va: usize, pa: usize, perms: PtePerms) -> Result<(), MapError> {
     let mut mem = KernelPtMem;
     core_mmu::map(root_pa, va, pa, perms, &mut mem)
@@ -385,7 +385,7 @@ pub fn map_in(root_pa: usize, va: usize, pa: usize, perms: PtePerms) -> Result<(
 /// `dst_va` in `dst_root`, through the kernel's linear map — the cross-AS copy
 /// behind the option-D `CopyFromCaller`/`CopyToCaller` syscalls. The walk +
 /// per-page validation (`R|U` source / `W|U` dest) + chunking is the
-/// host-tested `kernel_core::mmu::copy_across`; this wraps it with the kernel's
+/// host-tested `kernel_mem::mmu::copy_across`; this wraps it with the kernel's
 /// `KernelPtMem` (table reads) and the actual byte move via `pa_to_kernel_va`.
 /// Returns bytes copied on success. No `satp` switch: both page tables are read
 /// — and both resolved frames touched — through the linear map, which is mapped

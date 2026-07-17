@@ -3,7 +3,7 @@
 //! [`handle_user_ecall`] is the syscall demux reached from the trap entry in
 //! [`crate::trap`]: `a7` selects the syscall and one handler module below
 //! implements it. The authority decisions themselves are the pure, host-tested
-//! `kernel_core::cap` functions; these handlers only marshal the [`TrapFrame`]
+//! `kernel_proc::cap` functions; these handlers only marshal the [`TrapFrame`]
 //! registers and act on the result. The shared refusal / process-resolution
 //! helpers live here (accessible to the child modules); the trap/IRQ entry
 //! machinery (`TrapFrame` layout, timer, CSR setup) lives in [`crate::trap`].
@@ -85,8 +85,8 @@ fn refuse(frame: &mut TrapFrame, syscall: u8, reason: protocol::RefusalReason) {
 }
 
 /// Map a capability-invocation denial to its wire refusal reason.
-fn refusal_for(denied: kernel_core::cap::Denied) -> protocol::RefusalReason {
-    use kernel_core::cap::Denied;
+fn refusal_for(denied: kernel_proc::cap::Denied) -> protocol::RefusalReason {
+    use kernel_proc::cap::Denied;
     use protocol::RefusalReason;
     match denied {
         Denied::NoSuchCapability => RefusalReason::CapNotFound,

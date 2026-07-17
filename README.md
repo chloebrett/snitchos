@@ -75,7 +75,7 @@ See [posts/post-9-moving-the-kernel-without-breaking-it.md](posts/post-9-moving-
 
 **v0.10 "RAMfs"** — _complete_ (cap-agnostic core + protocol; front-end wired). The deliverable is the **`Filesystem` trait** (`fs-core` — inode-addressed, host-testable, imports no cap/IPC types) with a flat in-memory impl (`ramfs`) behind it, and `fs-proto` (the `Badge` packing `(inode, file_rights)`, opcodes, wire `Request`/`Response`). A **File cap is a badged endpoint cap**: the FS owns `MINT` and attenuates on `lookup`. Bulk bytes cross via a kernel **cross-address-space copy** (`CopyFromCaller`/`CopyToCaller` — message-passing, not shared memory). The `user/fs` front-end (`fs-server`/`fs-client`) does the badge→inode demux above the cap-agnostic trait. See [docs/filesystem-design.md](docs/filesystem-design.md).
 
-**v0.11 "Console input & spawn"** — _in progress_. **Tier-0 polled console input**: a host-tested `ConsoleRing`, drained from the UART in the timer handler (hart 0) into a `ConsoleRead` syscall and a userspace `console_read` — a typed key round-trips host → kernel → userspace. **Spawn-with-caps**: a `Spawn` syscall that creates a userspace process holding **exactly** the capabilities the parent delegates (`spawn(program, caps)`), with `cap::delegate` the host-tested, all-or-nothing core. The road to an **explicit-authority shell** where every grant is an observable `CapEvent`. See [plans/spawn-shell-and-console.md](plans/spawn-shell-and-console.md).
+**v0.11 "Console input & spawn"** — _complete_. **Tier-0 polled console input**: a host-tested `ConsoleRing`, drained from the UART in the timer handler (hart 0) into a `ConsoleRead` syscall and a userspace `console_read` — a typed key round-trips host → kernel → userspace (`ConsoleWrite` mirrors it). **Spawn-with-caps**: a `Spawn` syscall that creates a userspace process holding **exactly** the capabilities the parent delegates (`spawn(program, caps)`), with `cap::delegate` the host-tested, all-or-nothing core. The road to an **explicit-authority shell** where every grant is an observable `CapEvent`. See [plans/legacy/spawn-shell-and-console.md](plans/legacy/spawn-shell-and-console.md).
 
 Working:
 
@@ -100,7 +100,7 @@ Working:
 - SMP-shaped sync primitives: every kernel lock goes through `kernel::sync::{Mutex, Once}`, a single chokepoint with no-op preempt/IRQ hooks today. `kernel::percpu::PerCpu<T>` + `current_hartid()` stub the per-CPU access pattern. Workspace `disallowed_types` clippy lint blocks raw `spin::Mutex` outside `kernel::sync`. Sets v0.5 threading up so preempt-disable + SMP IRQ-disable land in one file
 - cooperative round-robin kernel-thread scheduler: `Task` struct + `Scheduler` + asm context switch (`kernel::sched::switch`); 4 threads at boot (main, idle, task_a, task_b); `spawn(name, entry)` + `yield_now()` API; cumulative `context_switches_total`, per-task `cpu_time_ticks` + `runs_total` metrics; per-task `SpanCursor` swapped on context switch so spans can survive yields. Wire format additions: `ThreadRegister`, `ContextSwitch{reason}`, `task_id` on `SpanStart`. Collector populates OTLP `thread.id`, `thread.name`, and (v0.6) `host.cpu_id` attributes per span — Tempo trace view shows scheduler decisions inline and traces can be sliced by the hart they ran on.
 
-Up next: an **explicit-authority shell** — the remaining critical-path pieces in [plans/spawn-shell-and-console.md](plans/spawn-shell-and-console.md): `Exit`/`Wait` (a parent reaps its spawned children), an `init` that grants the shell its starting world, then `user/shell` itself (read line → resolve → delegate → `spawn`). The payoff: `cat /foo` launches `cat` holding one read-only file cap and nothing else — and the delegation shows up live in the trace.
+The **explicit-authority shell has landed** — everything it depended on (`Exit`/`Wait`, `init`, the shell itself) shipped across v0.12 and v0.13. `workload=shell` runs `view <path>`: the shell looks the file up on the FS with READ-only rights, spawns a separate `viewer` holding **only** that attenuated cap, and revokes it when the viewer exits. The whole delegate → use → revoke cycle is `CapEvent`s in the trace, pinned by the `viewer-reads-delegated-file` and `shell-view-command-revokes-cap` itests.
 
 See [posts/](posts/) for the per-milestone devlog.
 
@@ -237,7 +237,7 @@ scenarios by workload to cut total boots substantially.
 - [docs/capability-system-design.md](docs/capability-system-design.md) — the v0.7b capability model (handles, CapTable, rights, no ambient authority).
 - [docs/ipc-design.md](docs/ipc-design.md) — v0.9 endpoints, reply caps, badges.
 - [docs/filesystem-design.md](docs/filesystem-design.md) — v0.10 RAMfs: the `Filesystem` trait, File caps as badged endpoints, option-D copy.
-- [plans/spawn-shell-and-console.md](plans/spawn-shell-and-console.md) — the v0.11 explicit-authority shell: component inventory + critical path.
+- [plans/legacy/spawn-shell-and-console.md](plans/legacy/spawn-shell-and-console.md) — the v0.11 explicit-authority shell: component inventory + critical path.
 - [docs/v0.1-hello-traced-world.md](docs/v0.1-hello-traced-world.md) — v0.1 milestone plan.
 - [plans/legacy/v0.2-grafana.md](plans/legacy/v0.2-grafana.md) — v0.2 implementation plan.
 - [plans/legacy/virtio-console.md](plans/legacy/virtio-console.md) — virtio-console implementation plan.

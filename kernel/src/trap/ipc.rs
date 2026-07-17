@@ -1,10 +1,10 @@
 //! Kernel-side synchronous IPC endpoints (v0.9).
 //!
-//! The pure rendezvous state machine lives in [`kernel_core::ipc`]; this
+//! The pure rendezvous state machine lives in [`kernel_proc::ipc`]; this
 //! module owns the *table* of endpoints, the in-flight message storage, and
 //! wires `send`/`receive` to [`crate::sched`]'s `block_current`/`wake`.
 //! Mirrors how [`crate::sched`] owns the task table over
-//! `kernel_core::sched::Runqueue`.
+//! `kernel_proc::sched::Runqueue`.
 //!
 //! Lock discipline: every endpoint-state and `pending` access happens under
 //! the `ENDPOINTS` lock; the *decision* (whom to wake, whether to block) is
@@ -14,8 +14,8 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use kernel_core::ipc::{on_cancel, on_receive, on_send, EndpointId, EndpointState, RendezvousAction};
-use kernel_core::sched::TaskId;
+use kernel_proc::ipc::{on_cancel, on_receive, on_send, EndpointId, EndpointState, RendezvousAction};
+use kernel_proc::sched::TaskId;
 use protocol::SpanId;
 
 use crate::counter::DeferredCounter;
@@ -226,7 +226,7 @@ pub fn cancel_wait(target: TaskId) {
 #[derive(Clone, Copy)]
 pub struct StashedReply {
     pub msg: Message,
-    pub cap: Option<kernel_core::cap::Capability>,
+    pub cap: Option<kernel_proc::cap::Capability>,
     /// The `cap_id` of the server holding `cap` was moved from — the child's
     /// parent in the derivation tree. Captured before the server consumes its
     /// holding so the caller's re-insert links the edge (and `Revoke` can reach

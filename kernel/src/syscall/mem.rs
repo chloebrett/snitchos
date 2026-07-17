@@ -15,7 +15,7 @@ use crate::trap::TrapFrame;
 /// bump pointer (`heap_top`) for now; the allocator doesn't assume regions
 /// abut, so disjoint placement + unmap can land later without an ABI change.
 pub(super) fn handle_map_anon(frame: &mut TrapFrame) {
-    use kernel_core::mmu::PtePerms;
+    use kernel_mem::mmu::PtePerms;
     use protocol::RefusalReason;
     use snitchos_abi::Syscall;
 

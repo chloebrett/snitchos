@@ -11,7 +11,7 @@
 //! `rename` into `<path>` so partially-written files never get
 //! scraped. `write_atomic` does this.
 //!
-//! See `plans/itest-history-and-pending.md` step H1.
+//! See `plans/legacy/itest-history-and-pending.md` step H1.
 
 use std::fmt::Write as _;
 use std::io;

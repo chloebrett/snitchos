@@ -11,8 +11,8 @@ use crate::trap::TrapFrame;
 /// before it replies). `None` if the handle isn't a live `Reply` cap or the
 /// caller has no user space. The authority check for the cross-AS copy: a server
 /// may only touch a caller that is awaiting *its* reply.
-fn caller_root_from_reply(proc: &crate::process::Process, handle: kernel_core::cap::Handle) -> Option<usize> {
-    use kernel_core::cap::Object;
+fn caller_root_from_reply(proc: &crate::process::Process, handle: kernel_proc::cap::Handle) -> Option<usize> {
+    use kernel_proc::cap::Object;
     let caller = {
         let caps = proc.caps.lock();
         match caps.resolve(handle).map(|cap| cap.object) {
@@ -30,7 +30,7 @@ fn caller_root_from_reply(proc: &crate::process::Process, handle: kernel_core::c
 /// server's space. Returns bytes copied in `a0`, or snitches a refusal
 /// (`a0 = usize::MAX`) on a bad cap / pointer / range. The `write`/`create` half.
 pub(super) fn handle_copy_from_caller(frame: &mut TrapFrame) {
-    use kernel_core::cap::Handle;
+    use kernel_proc::cap::Handle;
     use snitchos_abi::Syscall;
 
     let sc = Syscall::CopyFromCaller as u8;
@@ -52,7 +52,7 @@ pub(super) fn handle_copy_from_caller(frame: &mut TrapFrame) {
 /// option D) — the mirror of [`handle_copy_from_caller`]. `a1` = source VA in
 /// the server's space, `a3` = destination VA in the caller's. The `read` half.
 pub(super) fn handle_copy_to_caller(frame: &mut TrapFrame) {
-    use kernel_core::cap::Handle;
+    use kernel_proc::cap::Handle;
     use snitchos_abi::Syscall;
 
     let sc = Syscall::CopyToCaller as u8;

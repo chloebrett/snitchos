@@ -1,7 +1,8 @@
 //! The `Filesystem` trait (shipped in v0.10).
 //!
 //! Cap-agnostic and host-testable: this crate imports **no** capability or
-//! IPC types, so it compiles and unit-tests on the host like `kernel-core`.
+//! IPC types, so it compiles and unit-tests on the host like the `kernel-*`
+//! crates.
 //! The trait speaks only of inodes and bytes; the meaning of a "file
 //! capability" (badge packing, rights enforcement, cap minting on lookup)
 //! lives entirely in the IPC connecting layer above it (`user/fs`).

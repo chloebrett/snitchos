@@ -192,7 +192,7 @@ pub extern "C" fn secondary_main(_mhartid: usize, hartid: usize) -> ! {
     // someone has `spawn_on(1, ...)`d will land here.
     let _ = crate::sched::register_bare_task(
         "hart_1_main",
-        kernel_core::sched::TaskState::Running,
+        kernel_proc::sched::TaskState::Running,
     );
 
     // SMP-cooperative idle loop: yield first (picks up any queued task), then

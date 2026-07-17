@@ -142,7 +142,7 @@ pub enum WorkloadKind {
     /// v0.11 spawn-with-caps demo: a `spawner` parent that `Spawn`s a `spawnee`
     /// child at runtime, delegating its span cap. Proves the `Spawn` syscall
     /// carries delegated authority into a freshly-created process. See
-    /// `plans/spawn-shell-and-console.md`.
+    /// `plans/legacy/spawn-shell-and-console.md`.
     SpawnDemo,
     /// v0.12 reclaim test: a `reaper` parent that `Spawn`s + `Wait`s a
     /// memory-hungry `memhog` child 30×. Proves Exit reclaims the child's user
@@ -189,6 +189,11 @@ pub enum WorkloadKind {
     /// checkpoint; the supervisor reaps it. Proves the last deferred row of the kill
     /// matrix.
     XhartKill,
+    /// Hung detection (v2b): a supervisor holds a liveness `Notification` and
+    /// `wait_timeout`s it; a `hung-service` beats a few times then wedges (alive but
+    /// stuck). The absent beat times out ⇒ the supervisor `Kill`s the wedged service.
+    /// Proves timed `WaitNotify` + the per-hart timeout queue.
+    HungDetect,
     /// v0.13 EndpointCreate: a single program manufactures its own IPC endpoint
     /// via the `EndpointCreate` syscall and proves the returned cap is a real
     /// owning `RECV | MINT` by minting a badged `SEND` on it.
@@ -367,6 +372,7 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
             "kill-no-cap" => Some(WorkloadKind::KillNoCap),
             "user-on-hart0" => Some(WorkloadKind::UserOnHart0),
             "xhart-kill" => Some(WorkloadKind::XhartKill),
+            "hung-detect" => Some(WorkloadKind::HungDetect),
             "endpoint-create" => Some(WorkloadKind::EndpointCreate),
             "demo" => Some(WorkloadKind::Demo),
             "cooperative" => Some(WorkloadKind::Cooperative),
@@ -484,6 +490,11 @@ mod tests {
     #[test]
     fn selects_user_on_hart0() {
         assert_eq!(select("workload=user-on-hart0"), Some(WorkloadKind::UserOnHart0));
+    }
+
+    #[test]
+    fn selects_hung_detect() {
+        assert_eq!(select("workload=hung-detect"), Some(WorkloadKind::HungDetect));
     }
 
     #[test]

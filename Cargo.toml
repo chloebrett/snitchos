@@ -1,13 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "kernel-core", "kernel-mem", "kernel-obs", "kernel-devices", "kernel-boot", "kernel-proc", "protocol", "collector", "stitch", "hitch", "hitch-pod", "hitch-derive", "xtask", "itest-harness", "abi", "fs-core", "ramfs", "fs-proto", "supervision", "user/macros", "user/runtime", "user/std", "user/hello", "user/fs", "snemu", "diagram", "snip"]
+members = ["kernel", "kernel-mem", "kernel-obs", "kernel-devices", "kernel-boot", "kernel-proc", "protocol", "collector", "stitch", "hitch", "hitch-pod", "hitch-derive", "xtask", "itest-harness", "abi", "fs-core", "ramfs", "fs-proto", "supervision", "user/macros", "user/runtime", "user/std", "user/hello", "user/fs", "snemu", "diagram", "snip"]
 # `learning/` is a separate, host-targeted workspace of standalone "toy"
 # crates for understanding kernel concepts in isolation. Excluded so it
 # never participates in the no_std/riscv64 kernel build.
 exclude = ["learning"]
 
 # Host-crate lint policy. Opt in per crate via `[lints] workspace = true`
-# (kernel-core, protocol, collector, xtask, itest-harness). Pedantic as a
+# (the kernel-{mem,obs,devices,boot,proc} crates, protocol, collector, xtask,
+# itest-harness). Pedantic as a
 # whole is `warn` — surface idiom hints without blocking the red-green loop.
 # The bare-metal `kernel` crate does NOT opt in (full pedantic fights
 # register/address idioms).
@@ -18,9 +19,9 @@ exclude = ["learning"]
 # and are overwhelmingly correct-by-context — a blanket warn there is noise,
 # not signal. Audit a specific suspect truncation with `try_into()` instead.
 [workspace.lints.rust]
-# `--cfg loom` is set via RUSTFLAGS for the kernel-core loom model-check
-# tests (tests/loom_tx.rs). Declare it so check-cfg doesn't flag the
-# `#[cfg(loom)]` gates as unexpected.
+# `--cfg loom` is set via RUSTFLAGS for the kernel-devices loom model-check
+# tests (kernel-devices/tests/loom_tx.rs — it models virtio's TX staging).
+# Declare it so check-cfg doesn't flag the `#[cfg(loom)]` gates as unexpected.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [workspace.lints.clippy]

@@ -5,7 +5,7 @@
 //! per-process table is the forgery boundary — a process can only emit to a
 //! metric it registered, never another's or the kernel's own telemetry.
 //!
-//! The authority gate is the host-tested `kernel_core::cap::authorize_telemetry`
+//! The authority gate is the host-tested `kernel_proc::cap::authorize_telemetry`
 //! decision (a `TelemetrySink` with `EMIT`) — the sink is pure authority, so
 //! there is nothing to hand back beyond "permitted."
 
@@ -29,8 +29,8 @@ fn metric_kind_from_usize(n: usize) -> Option<protocol::MetricKind> {
 /// name, interns it into a fresh id, stores it in the caller's table, and
 /// returns the metric handle in `a0` (or `u64::MAX` on refusal).
 pub(super) fn handle_register_metric(frame: &mut TrapFrame) {
-    use kernel_core::cap::{Handle, authorize_telemetry};
-    use kernel_core::mmu::MAX_USER_STR_LEN;
+    use kernel_proc::cap::{Handle, authorize_telemetry};
+    use kernel_mem::mmu::MAX_USER_STR_LEN;
     use protocol::RefusalReason;
     use snitchos_abi::Syscall;
 
@@ -101,7 +101,7 @@ pub(super) fn handle_register_metric(frame: &mut TrapFrame) {
 /// registered is refused (`SyscallRefused{BadMetricHandle}`), never silently
 /// emitted — possession of a valid handle is the authority.
 pub(super) fn handle_emit_metric(frame: &mut TrapFrame) {
-    use kernel_core::metric::MetricHandle;
+    use kernel_proc::metric::MetricHandle;
     use protocol::RefusalReason;
     use snitchos_abi::Syscall;
 

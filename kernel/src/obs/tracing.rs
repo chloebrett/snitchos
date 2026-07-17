@@ -7,11 +7,11 @@
 
 use protocol::{Frame, MetricKind, SpanId, StringId};
 
-use kernel_core::clock::Clock;
-use kernel_core::intern::InternTable;
-use kernel_core::preinit::PreInitBuffer;
-use kernel_core::sink::FrameSink;
-use kernel_core::span::{self, SpanCursor, SpanIds};
+use kernel_obs::clock::Clock;
+use kernel_obs::intern::InternTable;
+use kernel_obs::preinit::PreInitBuffer;
+use kernel_obs::sink::FrameSink;
+use kernel_obs::span::{self, SpanCursor, SpanIds};
 
 use crate::trap::CLOCK;
 use crate::virtio_console;
@@ -42,7 +42,7 @@ pub fn send_hello(timebase_hz: u32) {
 
 // --- String intern table ---
 //
-// The table logic lives in `kernel_core::intern::InternTable`. The
+// The table logic lives in `kernel_obs::intern::InternTable`. The
 // kernel binary holds the one global instance behind a Mutex, plus a
 // `KernelSink` adapter that routes frame emits through `emit_frame`.
 
@@ -138,10 +138,10 @@ pub fn emit_log(msg: &str) {
 /// registration all run under the per-process span-name lock, so the decision is
 /// precise.
 ///
-/// [`SpanNameTable`]: kernel_core::span_name::SpanNameTable
+/// [`SpanNameTable`]: kernel_proc::span_name::SpanNameTable
 pub fn span_open_bounded(
     name: &str,
-    span_names: &crate::sync::Mutex<kernel_core::span_name::SpanNameTable>,
+    span_names: &crate::sync::Mutex<kernel_proc::span_name::SpanNameTable>,
 ) -> Option<span::SpanOpen> {
     let name_id = {
         let mut names = span_names.lock();
@@ -292,9 +292,9 @@ pub fn emit_metric(name_id: StringId, value: i64) {
 /// `priority` is the task's static scheduling level (`Priority as u8`:
 /// 0 = Low, 1 = Normal, 2 = High) so the trace can group/colour by it.
 pub fn emit_thread_register(
-    id: kernel_core::sched::TaskId,
+    id: kernel_proc::sched::TaskId,
     name: &str,
-    priority: kernel_core::sched::Priority,
+    priority: kernel_proc::sched::Priority,
 ) {
     emit_frame(&Frame::ThreadRegister { id: id.0, name, priority: priority as u8 });
 }
@@ -447,8 +447,8 @@ pub fn emit_notify_wait(notification: u32, bits: u64, to_task: u32) {
 /// every actual switch. Makes scheduler decisions first-class
 /// traceable events.
 pub fn emit_context_switch(
-    from: kernel_core::sched::TaskId,
-    to: kernel_core::sched::TaskId,
+    from: kernel_proc::sched::TaskId,
+    to: kernel_proc::sched::TaskId,
     reason: protocol::SwitchReason,
 ) {
     emit_frame(&Frame::ContextSwitch {
@@ -574,7 +574,7 @@ pub fn set_current_parent(parent: protocol::SpanId) {
 /// span forever. The `span!` macro avoids handing the user a name-bound
 /// guard they could forget.
 pub struct Span {
-    open: kernel_core::span::SpanOpen,
+    open: kernel_obs::span::SpanOpen,
     cursor: *const SpanCursor,
 }
 
@@ -615,7 +615,7 @@ pub fn span_start_id(name_id: StringId) -> Span {
 // --- Frame emission, with pre-init buffering ---
 
 /// Bytes we buffer up before `virtio_console::init` has completed. The
-/// storage and append/drain mechanics live in `kernel_core::preinit`;
+/// storage and append/drain mechanics live in `kernel_obs::preinit`;
 /// this is just the kernel's one instance.
 static PRE_INIT_BUFFER: crate::sync::Mutex<PreInitBuffer> = crate::sync::Mutex::new(PreInitBuffer::new());
 

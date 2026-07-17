@@ -10,8 +10,8 @@ use crate::trap::TrapFrame;
 /// name, opens a span on the calling task's cursor, and returns the span id in
 /// `a0` (or `u64::MAX` on refusal).
 pub(super) fn handle_span_open(frame: &mut TrapFrame) {
-    use kernel_core::cap::{Handle, invoke_span};
-    use kernel_core::mmu::MAX_USER_STR_LEN;
+    use kernel_proc::cap::{Handle, invoke_span};
+    use kernel_mem::mmu::MAX_USER_STR_LEN;
     use protocol::RefusalReason;
     use snitchos_abi::Syscall;
 
