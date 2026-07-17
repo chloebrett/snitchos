@@ -30,64 +30,28 @@ struct Cli {
 enum Cmd {
     /// Build the kernel ELF.
     Build,
-    /// Build the kernel and run it under snemu, streaming snemu's output. This
-    /// is the meta-loop driver: it always rebuilds the real boot path, then
-    /// reports where snemu stops.
-    SnemuBoot {
-        /// Cargo features to enable on the kernel build, comma-separated.
-        #[arg(long, default_value = "")]
-        features: String,
-        /// Cap the run at N instruction steps (snemu's default is 50M).
-        /// Accepts `K`/`M`/`B` suffixes, e.g. `400M`, `1.2B`.
-        #[arg(long, value_parser = magnitude::parse)]
-        max_steps: Option<u64>,
-        /// Dump every telemetry frame snemu decodes off the virtio-console.
-        #[arg(long)]
-        frames: bool,
-        /// Select a runtime workload (e.g. `demo`, `smp`). Implies the
-        /// `itest-workloads` kernel build and injects `workload=<name>` into the
-        /// DTB's /chosen/bootargs.
-        #[arg(long)]
-        workload: Option<String>,
-    },
-    /// Differential oracle: boot the same kernel under snemu and QEMU and
-    /// structurally diff their telemetry frame streams (timestamps normalized).
-    SnemuDiff {
-        /// snemu instruction-step budget (round-robin splits it across harts).
-        /// Accepts `K`/`M`/`B` suffixes, e.g. `400M`, `1.2B`.
-        #[arg(long, default_value = "150M", value_parser = magnitude::parse)]
-        steps: u64,
-        /// Seconds to collect QEMU telemetry before killing it.
-        #[arg(long, default_value_t = 6)]
-        qemu_secs: u64,
-        /// Runtime workload to run under both emulators (e.g. `demo`, `smp`).
-        /// Implies the `itest-workloads` build. Omit for the default `init` boot.
-        #[arg(long)]
-        workload: Option<String>,
-        /// Sweep *every* workload and print an agree/disagree summary table.
-        /// (Ignores `--workload`.)
-        #[arg(long)]
-        all: bool,
-        /// With `--all`, sweep only the first N workloads (faster).
-        #[arg(long)]
-        limit: Option<usize>,
-    },
-    /// Snapshot/fork harness: boot the common prefix once under snemu, then fork
-    /// every workload from that snapshot (clone + DTB bootarg patch). snemu-only;
-    /// proves boot amortization.
+    /// Everything that runs the kernel under the snemu emulator: the
+    /// meta-loop driver (`boot`), the QEMU differential oracle (`diff`), the
+    /// snapshot/fork harness (`fork`), the measurement spine (`bench`), and the
+    /// guest instret profiler (`profile`).
     ///
-    /// Distinct from `snemu-itest --share-snapshots`, which shares a boot only
-    /// among scenarios of the *same* workload. This forks one boot across
-    /// *different* workloads via a layout-preserving DTB overwrite.
-    SnemuFork {
-        /// Per-workload step budget after the fork. Accepts `K`/`M`/`B`
-        /// suffixes, e.g. `400M`, `1.2B`.
-        #[arg(long, default_value = "20M", value_parser = magnitude::parse)]
-        steps: u64,
+    /// `snemu-itest` is deliberately not in here: it is the everyday test
+    /// command, and is being promoted to `itest` (see
+    /// plans/xtask-surface-consolidation.md, Step 2.1).
+    Snemu {
+        #[command(subcommand)]
+        cmd: SnemuCmd,
     },
     /// Fidelity audit: replay every itest scenario's assertion against a
     /// snemu-produced frame stream (no QEMU) and report how many pass. Sizes the
     /// "can snemu back the itests" gap without rewriting scenarios.
+    ///
+    /// Pick a speed regime with `--speedup {low,med,hi,extra}`. The individual
+    /// levers behind it (`--jit`, `--native-jit`, `--tlb`, `--native-ops`,
+    /// `--no-reg-cache`, `--no-idle-skip`, `--share-snapshots`) still work but are
+    /// hidden from this help: they're snemu-development knobs for the oracle A/B
+    /// ("on vs off must be byte-identical, only faster"), not test-suite knobs.
+    /// See `docs/snemu-perf-options.md`.
     SnemuItest {
         /// Per-scenario snemu instruction-step budget. Passing scenarios
         /// short-circuit well under this; the budget only bounds failing ones and
@@ -112,7 +76,7 @@ enum Cmd {
         /// Disable `wfi` idle-skip (on by default). The A/B baseline: run the
         /// audit both ways and confirm fidelity + per-scenario instret are
         /// identical — idle-skip must change only speed, never telemetry.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         no_idle_skip: bool,
         /// Scenario packing order: `wall` (default — LPT by the previous run's
         /// wall-time, the true optimisation target but noisy), `instret` (LPT by
@@ -132,16 +96,16 @@ enum Cmd {
         /// Enable the native-op helper (tier-0.5 JIT): fast-path guest memset/memcpy
         /// (execute natively + charge the interpreter-equivalent instret). A/B it —
         /// on vs off must keep the suite green (fidelity), only faster.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         native_ops: bool,
         /// Enable the Tier-2 block JIT (M6): compile + run hot basic blocks. A/B it
         /// against off while ISA coverage expands — on vs off must stay green +
         /// byte-identical guest instret (the oracle), only faster.
-        #[arg(long = "jit")]
+        #[arg(long = "jit", hide = true)]
         block_jit: bool,
         /// With `--jit`, disable the block executor's register caching (M6 inc 4) —
         /// the A/B baseline to isolate the caching's wall-time effect.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         no_reg_cache: bool,
         /// Enable the discovered-snapshot-tree collapse (off by default — the A/B
         /// baseline). Observe-only scenarios (empty branch key, learned from a prior
@@ -149,17 +113,17 @@ enum Cmd {
         /// re-executing the identical deterministic guest; each replays a prefix of
         /// that shared stream truncated to its own budget, so verdicts are identical
         /// to the fork-per-scenario path. See `docs/snemu-itest-snapshot-tree-design.md`.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         share_snapshots: bool,
         /// Enable **Backend B** (native AArch64 codegen) for the block JIT — implies
         /// `--jit`. Host-only (arm64/macos); A/B it against off, which must stay green
         /// + byte-identical guest instret (the oracle), only faster.
-        #[arg(long = "native-jit")]
+        #[arg(long = "native-jit", hide = true)]
         native_jit: bool,
         /// Enable the software **TLB** (Sv39 translation cache). A/B it against off,
         /// which must stay green + byte-identical guest instret (the oracle), only
         /// faster — this is the lever for the memory/translation pole.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         tlb: bool,
         /// Preset speedup bundle: `low` (idle-skip only), `med` (+native-ops +TLB),
         /// `hi` (+block JIT / Backend A — the fastest *portable*, **the default**),
@@ -168,61 +132,6 @@ enum Cmd {
         /// `--speedup low` for the idle-skip-only A/B baseline.
         #[arg(long, value_enum, default_value = "hi")]
         speedup: itest::snemu_audit::SpeedLevel,
-    },
-    /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
-    /// run under snemu with exact per-PC counting and report the top kernel
-    /// functions by instructions retired. Answers *which code* a scenario spends
-    /// its cycles in (e.g. a cross-hart spin-wait vs. real work), the per-function
-    /// complement to `snemu-itest`'s per-scenario ruler.
-    SnemuProfile {
-        /// Workload to profile (implies the `itest-workloads` build). Omit for the
-        /// default `init` boot.
-        #[arg(long)]
-        workload: Option<String>,
-        /// Instructions to run (post-boot) under the profiler. Accepts
-        /// `K`/`M`/`B` suffixes, e.g. `400M`, `1.2B`.
-        #[arg(long, default_value = "400M", value_parser = magnitude::parse)]
-        steps: u64,
-        /// How many top functions to list.
-        #[arg(long, default_value_t = 25)]
-        top: usize,
-        /// Profile the optimized (`--release`) kernel (matches the release itests).
-        #[arg(long)]
-        release: bool,
-    },
-    /// Measurement spine: run a workload under snemu N times and report guest
-    /// MIPS + wall-clock spread over a deterministic instret. The "measure
-    /// first" baseline every JIT tier is judged against.
-    SnemuBench {
-        /// Workload to measure (implies the `itest-workloads` build). Omit for
-        /// the default `init` boot.
-        #[arg(long)]
-        workload: Option<String>,
-        /// Instruction-step budget per run. Accepts `K`/`M`/`B` suffixes, e.g.
-        /// `400M`, `1.2B`.
-        #[arg(long, default_value = "50M", value_parser = magnitude::parse)]
-        steps: u64,
-        /// Number of timed runs (determinism check + wall-clock spread).
-        #[arg(long, default_value_t = 5)]
-        runs: u32,
-        /// Sweep the four taxonomy classes (startup/compute/memory/trap-MMIO)
-        /// and print a comparison table. Ignores `--workload`/`--steps`.
-        #[arg(long)]
-        taxonomy: bool,
-        /// Like `--taxonomy`, plus a QEMU wall-clock baseline overlay (time to
-        /// the shared 100-frame milestone, snemu vs QEMU). Ignores
-        /// `--workload`/`--steps`.
-        #[arg(long)]
-        baseline: bool,
-        /// Enable the Tier-1 decode cache (M5). A/B against the default (off) to
-        /// read the speedup; instret stays identical (correctness).
-        #[arg(long)]
-        decode_cache: bool,
-        /// Verify the decode cache is faithful: run each taxonomy workload with
-        /// the cache off and on and assert identical telemetry. Overrides the
-        /// other modes.
-        #[arg(long)]
-        verify_cache: bool,
     },
     /// Build the kernel and run it in QEMU.
     ///
@@ -570,6 +479,123 @@ enum Cmd {
     },
 }
 
+/// The snemu family. These all mean "do a thing under snemu"; as five
+/// top-level `snemu-*` verbs they took five slots and read as unrelated
+/// siblings.
+#[derive(Subcommand)]
+enum SnemuCmd {
+    /// Build the kernel and run it under snemu, streaming snemu's output. This
+    /// is the meta-loop driver: it always rebuilds the real boot path, then
+    /// reports where snemu stops.
+    Boot {
+        /// Cargo features to enable on the kernel build, comma-separated.
+        #[arg(long, default_value = "")]
+        features: String,
+        /// Cap the run at N instruction steps (snemu's default is 50M).
+        /// Accepts `K`/`M`/`B` suffixes, e.g. `400M`, `1.2B`.
+        #[arg(long, value_parser = magnitude::parse)]
+        max_steps: Option<u64>,
+        /// Dump every telemetry frame snemu decodes off the virtio-console.
+        #[arg(long)]
+        frames: bool,
+        /// Select a runtime workload (e.g. `demo`, `smp`). Implies the
+        /// `itest-workloads` kernel build and injects `workload=<name>` into the
+        /// DTB's /chosen/bootargs.
+        #[arg(long)]
+        workload: Option<String>,
+    },
+    /// Differential oracle: boot the same kernel under snemu and QEMU and
+    /// structurally diff their telemetry frame streams (timestamps normalized).
+    Diff {
+        /// snemu instruction-step budget (round-robin splits it across harts).
+        /// Accepts `K`/`M`/`B` suffixes, e.g. `400M`, `1.2B`.
+        #[arg(long, default_value = "150M", value_parser = magnitude::parse)]
+        steps: u64,
+        /// Seconds to collect QEMU telemetry before killing it.
+        #[arg(long, default_value_t = 6)]
+        qemu_secs: u64,
+        /// Runtime workload to run under both emulators (e.g. `demo`, `smp`).
+        /// Implies the `itest-workloads` build. Omit for the default `init` boot.
+        #[arg(long)]
+        workload: Option<String>,
+        /// Sweep *every* workload and print an agree/disagree summary table.
+        /// (Ignores `--workload`.)
+        #[arg(long)]
+        all: bool,
+        /// With `--all`, sweep only the first N workloads (faster).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Snapshot/fork harness: boot the common prefix once under snemu, then fork
+    /// every workload from that snapshot (clone + DTB bootarg patch). snemu-only;
+    /// proves boot amortization.
+    ///
+    /// Distinct from `snemu-itest --share-snapshots`, which shares a boot only
+    /// among scenarios of the *same* workload. This forks one boot across
+    /// *different* workloads via a layout-preserving DTB overwrite.
+    Fork {
+        /// Per-workload step budget after the fork. Accepts `K`/`M`/`B`
+        /// suffixes, e.g. `400M`, `1.2B`.
+        #[arg(long, default_value = "20M", value_parser = magnitude::parse)]
+        steps: u64,
+    },
+    /// Guest instret profiler: boot a workload to the heartbeat checkpoint, then
+    /// run under snemu with exact per-PC counting and report the top kernel
+    /// functions by instructions retired. Answers *which code* a scenario spends
+    /// its cycles in (e.g. a cross-hart spin-wait vs. real work), the per-function
+    /// complement to `snemu-itest`'s per-scenario ruler.
+    Profile {
+        /// Workload to profile (implies the `itest-workloads` build). Omit for the
+        /// default `init` boot.
+        #[arg(long)]
+        workload: Option<String>,
+        /// Instructions to run (post-boot) under the profiler. Accepts
+        /// `K`/`M`/`B` suffixes, e.g. `400M`, `1.2B`.
+        #[arg(long, default_value = "400M", value_parser = magnitude::parse)]
+        steps: u64,
+        /// How many top functions to list.
+        #[arg(long, default_value_t = 25)]
+        top: usize,
+        /// Profile the optimized (`--release`) kernel (matches the release itests).
+        #[arg(long)]
+        release: bool,
+    },
+    /// Measurement spine: run a workload under snemu N times and report guest
+    /// MIPS + wall-clock spread over a deterministic instret. The "measure
+    /// first" baseline every JIT tier is judged against.
+    Bench {
+        /// Workload to measure (implies the `itest-workloads` build). Omit for
+        /// the default `init` boot.
+        #[arg(long)]
+        workload: Option<String>,
+        /// Instruction-step budget per run. Accepts `K`/`M`/`B` suffixes, e.g.
+        /// `400M`, `1.2B`.
+        #[arg(long, default_value = "50M", value_parser = magnitude::parse)]
+        steps: u64,
+        /// Number of timed runs (determinism check + wall-clock spread).
+        #[arg(long, default_value_t = 5)]
+        runs: u32,
+        /// Sweep the four taxonomy classes (startup/compute/memory/trap-MMIO)
+        /// and print a comparison table. Ignores `--workload`/`--steps`.
+        #[arg(long)]
+        taxonomy: bool,
+        /// Like `--taxonomy`, plus a QEMU wall-clock baseline overlay (time to
+        /// the shared 100-frame milestone, snemu vs QEMU). Ignores
+        /// `--workload`/`--steps`.
+        #[arg(long)]
+        baseline: bool,
+        /// Enable the Tier-1 decode cache (M5). A/B against the default (off) to
+        /// read the speedup; instret stays identical (correctness).
+        #[arg(long)]
+        decode_cache: bool,
+        /// Verify the decode cache is faithful: run each taxonomy workload with
+        /// the cache off and on and assert identical telemetry. Overrides the
+        /// other modes.
+        #[arg(long)]
+        verify_cache: bool,
+    },
+}
+
 /// Failure-capture transcript depth for `cargo xtask itest --capture`.
 /// Maps to `itest_harness::CaptureLevel`.
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -782,12 +808,8 @@ mod cli_surface_tests {
     fn every_top_level_command_parses() {
         const MINIMAL_ARGV: &[&[&str]] = &[
             &["build"],
-            &["snemu-boot"],
-            &["snemu-diff"],
-            &["snemu-fork"],
+            &["snemu", "boot"],
             &["snemu-itest"],
-            &["snemu-profile"],
-            &["snemu-bench"],
             &["boot"],
             &["measure", "--workload", "smp"],
             &["collect"],
@@ -812,6 +834,37 @@ mod cli_surface_tests {
                 "top-level command should parse: {argv:?}",
             );
         }
+    }
+
+    /// The snemu family is one subcommand group: five verbs that all mean "do a
+    /// thing under snemu" took five top-level slots and read as unrelated
+    /// siblings.
+    ///
+    /// `snemu-itest` is deliberately NOT in the group — Step 2.1 renames it to
+    /// `itest`, and moving it here first would rename it twice.
+    #[test]
+    fn the_snemu_family_is_a_subcommand_group() {
+        for argv in [
+            ["snemu", "boot"].as_slice(),
+            ["snemu", "boot", "--workload", "smp"].as_slice(),
+            ["snemu", "diff"].as_slice(),
+            ["snemu", "diff", "--all"].as_slice(),
+            ["snemu", "fork"].as_slice(),
+            ["snemu", "bench"].as_slice(),
+            ["snemu", "profile"].as_slice(),
+        ] {
+            let full: Vec<&str> = std::iter::once("xtask").chain(argv.iter().copied()).collect();
+            assert!(Cli::try_parse_from(&full).is_ok(), "should parse: {argv:?}");
+        }
+        // The group needs a member, and a bogus one is rejected.
+        assert!(Cli::try_parse_from(["xtask", "snemu"]).is_err());
+        assert!(Cli::try_parse_from(["xtask", "snemu", "sideways"]).is_err());
+        // The old hyphenated names are gone.
+        for gone in ["snemu-boot", "snemu-diff", "snemu-fork", "snemu-bench", "snemu-profile"] {
+            assert!(Cli::try_parse_from(["xtask", gone]).is_err(), "{gone} should be gone");
+        }
+        // …but the one being promoted in 2.1 stays where it is.
+        assert!(Cli::try_parse_from(["xtask", "snemu-itest"]).is_ok());
     }
 
     /// A verb we never had must not parse — proves the net actually discriminates
@@ -853,8 +906,39 @@ mod cli_surface_tests {
         }
     }
 
-    /// The snemu perf A/B levers Step 1.3 moves off the itest surface, plus the
-    /// `--speedup` dial that stays.
+    /// Step 1.3: the seven perf levers are **hidden** from the itest help — they
+    /// are snemu-development knobs (the oracle A/B), not test-suite knobs, and
+    /// someone running the suite shouldn't be reading about a register allocator.
+    /// Hidden, not removed: every A/B workflow keeps working unchanged.
+    ///
+    /// `--speedup` stays visible — one dial, four positions, the documented way
+    /// to pick a regime.
+    #[test]
+    fn the_perf_levers_are_hidden_but_speedup_is_visible() {
+        use clap::CommandFactory;
+        let itest = Cli::command();
+        let itest = itest
+            .get_subcommands()
+            .find(|c| c.get_name() == "snemu-itest")
+            .expect("snemu-itest exists");
+        let hidden: Vec<&str> = [
+            "native-ops", "jit", "no-reg-cache", "native-jit", "tlb", "no-idle-skip",
+            "share-snapshots",
+        ]
+        .into_iter()
+        .filter(|name| {
+            itest.get_arguments().any(|a| a.get_long() == Some(name) && !a.is_hide_set())
+        })
+        .collect();
+        assert!(hidden.is_empty(), "these perf levers are still visible in help: {hidden:?}");
+
+        let speedup_visible = itest
+            .get_arguments()
+            .any(|a| a.get_long() == Some("speedup") && !a.is_hide_set());
+        assert!(speedup_visible, "--speedup must stay visible");
+    }
+
+    /// The levers stay *reachable* — hiding is a help-text change, not a removal.
     #[test]
     fn snemu_itest_perf_levers_parse_today() {
         for argv in [
@@ -881,13 +965,16 @@ mod retired_command_tests {
     use super::Cli;
     use clap::Parser;
 
-    /// The snemu milestone-1 console-out smoke. Superseded by `snemu-itest`
-    /// once snemu modelled Sv39 + virtio (M2); the `minimal-boot` kernel
-    /// feature it existed to build went with it.
-    #[test]
-    fn snemu_m1_smoke_is_gone() {
-        assert!(Cli::try_parse_from(["xtask", "snemu"]).is_err());
-    }
+    // The M1 console-out smoke used to be `xtask snemu`, and this module asserted
+    // `["xtask", "snemu"]` was rejected. Step 1.2 took that name for the snemu
+    // *group*, so bare `snemu` now errors as "missing subcommand" — the assertion
+    // survived but stopped testing its own name. Deleted rather than left to read
+    // as coverage it no longer provides.
+    //
+    // The smoke's real epitaph isn't a CLI fact anyway: it existed to build the
+    // `minimal-boot` kernel feature, and that feature is gone from
+    // `kernel/Cargo.toml`. `the_snemu_family_is_a_subcommand_group` covers bare
+    // `snemu` being rejected.
 
     /// `itest` no longer runs the host-side checks as a prerequisite, so the
     /// flag that existed to undo that is gone too. The gate composes explicitly:
@@ -904,16 +991,16 @@ mod retired_command_tests {
         assert!(Cli::try_parse_from(["xtask", "itest", "--repeat", "3"]).is_ok());
     }
 
-    /// The deletion is scoped: the rest of the snemu family stays. In
-    /// particular `snemu-fork` — it forks one boot across *different*
-    /// workloads (layout-preserving DTB overwrite), which
-    /// `snemu-itest --share-snapshots` does not do: that shares a boot only
-    /// among scenarios of the same workload.
+    /// The deletion is scoped: the rest of the snemu family stays (now under the
+    /// `snemu` group — see `the_snemu_family_is_a_subcommand_group`). In
+    /// particular `snemu fork` — it forks one boot across *different* workloads
+    /// (layout-preserving DTB overwrite), which `snemu-itest --share-snapshots`
+    /// does not do: that shares a boot only among scenarios of the same workload.
     #[test]
     fn the_rest_of_the_snemu_family_still_parses() {
-        assert!(Cli::try_parse_from(["xtask", "snemu-boot"]).is_ok());
-        assert!(Cli::try_parse_from(["xtask", "snemu-diff"]).is_ok());
-        assert!(Cli::try_parse_from(["xtask", "snemu-fork"]).is_ok());
+        assert!(Cli::try_parse_from(["xtask", "snemu", "boot"]).is_ok());
+        assert!(Cli::try_parse_from(["xtask", "snemu", "diff"]).is_ok());
+        assert!(Cli::try_parse_from(["xtask", "snemu", "fork"]).is_ok());
         assert!(Cli::try_parse_from(["xtask", "snemu-itest"]).is_ok());
     }
 }
@@ -942,21 +1029,42 @@ mod env_scrub_tests {
     }
 }
 
-fn main() -> ExitCode {
-    scrub_inherited_cargo_env();
-    match Cli::parse().cmd {
-        Cmd::Build => build(),
-        Cmd::SnemuBoot { features, max_steps, frames, workload } => {
+/// Dispatch the `snemu` subcommand group.
+fn run_snemu(cmd: SnemuCmd) -> ExitCode {
+    match cmd {
+        SnemuCmd::Boot { features, max_steps, frames, workload } => {
             snemu_boot(&features, max_steps, frames, workload.as_deref())
         }
-        Cmd::SnemuDiff { steps, qemu_secs, workload, all, limit } => {
+        SnemuCmd::Diff { steps, qemu_secs, workload, all, limit } => {
             if all {
                 snemu_diff::run_all(steps, qemu_secs, limit)
             } else {
                 snemu_diff::run(steps, qemu_secs, workload.as_deref())
             }
         }
-        Cmd::SnemuFork { steps } => snemu_diff::run_fork(steps),
+        SnemuCmd::Fork { steps } => snemu_diff::run_fork(steps),
+        SnemuCmd::Profile { workload, steps, top, release } => {
+            snemu_profile::run(workload.as_deref(), steps, top, release)
+        }
+        SnemuCmd::Bench { workload, steps, runs, taxonomy, baseline, decode_cache, verify_cache } => {
+            if verify_cache {
+                snemu_bench::run_verify()
+            } else if baseline {
+                snemu_bench::run_baseline(runs, decode_cache)
+            } else if taxonomy {
+                snemu_bench::run_taxonomy(runs, decode_cache)
+            } else {
+                snemu_bench::run(workload.as_deref(), steps, runs, decode_cache)
+            }
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    scrub_inherited_cargo_env();
+    match Cli::parse().cmd {
+        Cmd::Build => build(),
+        Cmd::Snemu { cmd } => run_snemu(cmd),
         Cmd::SnemuItest {
             steps, limit, only, jobs, no_idle_skip, order, opt, native_ops, block_jit, no_reg_cache,
             share_snapshots,
@@ -971,20 +1079,6 @@ fn main() -> ExitCode {
                 Some(speedup), native_ops, block_jit, native_jit, tlb, no_idle_skip, no_reg_cache,
             );
             itest::snemu_audit::run(steps, limit, only.as_deref(), jobs, order, opt, share_snapshots, speed)
-        }
-        Cmd::SnemuProfile { workload, steps, top, release } => {
-            snemu_profile::run(workload.as_deref(), steps, top, release)
-        }
-        Cmd::SnemuBench { workload, steps, runs, taxonomy, baseline, decode_cache, verify_cache } => {
-            if verify_cache {
-                snemu_bench::run_verify()
-            } else if baseline {
-                snemu_bench::run_baseline(runs, decode_cache)
-            } else if taxonomy {
-                snemu_bench::run_taxonomy(runs, decode_cache)
-            } else {
-                snemu_bench::run(workload.as_deref(), steps, runs, decode_cache)
-            }
         }
         Cmd::Boot { features, workload, burst, ramfb, display } => {
             boot(&features, workload.as_deref(), burst, ramfb, display.as_deref())

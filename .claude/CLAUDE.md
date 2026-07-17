@@ -262,15 +262,28 @@ Those sites carry a justified `#[allow(clippy::deref_addrof, reason = ...)]`.
 | Unit (kernel-proc) | `cargo test -p kernel-proc` | Runqueue/preempt/kill, caps, IPC, reaping, ELF + W^X planning |
 | Unit (protocol)    | `cargo test -p protocol --features std` | Frame roundtrips + stream decoder |
 | Unit (collector)   | `cargo test -p collector` | Span state machine, prom/otlp encoding |
-| All host checks    | `cargo xtask test` | Every unit crate above + the loom model-checks (`--cfg loom`) + the generated-diagram drift check |
+| All host checks    | `cargo xtask test` | Every unit crate above + the loom model-checks (`--cfg loom`) + the generated-diagram drift check + the doc-link check |
+| Doc links          | `cargo xtask links` | Every relative `.md` link in the repo resolves (also runs inside `xtask test`) |
 | Integration        | `cargo xtask itest` | Boots the kernel in QEMU, asserts on the decoded wire frame sequence |
 
 **The gate composes explicitly: `cargo xtask test && cargo xtask itest`.** `itest`
 runs integration *only* — it does not run the host checks first (that coupling,
 and the `--skip-unit-tests` flag that existed to undo it, were removed). Note that
 `cargo xtask test` carries more than its name suggests: the loom model-checks need
-a separate `--cfg loom` compilation, and the generated diagrams in `docs/generated/`
-are contract artifacts whose drift fails here.
+a separate `--cfg loom` compilation, the generated diagrams in `docs/generated/`
+are contract artifacts whose drift fails here, and **every relative `.md` link in
+the repo must resolve**.
+
+**Doc links (`cargo xtask links`, also inside `xtask test`).** A markdown link is a
+contract nothing compiles, so a `git mv` breaks it silently — which happened on
+*every* plan-archiving sweep this repo has done. A moved file breaks links in **both
+directions**: inbound links still name the old path, and the moved file's own `../`
+links now resolve one directory too high (from `plans/legacy/`, `../docs/` means
+`plans/docs/`, which has never existed — that one bit three times in a single
+session). Run `cargo xtask links` right after any `git mv` of a doc. Scope: relative
+`.md` targets only; external URLs, anchors, and images are skipped, as are the
+`.claude/{agents,commands,skills}` prompt libraries, whose markdown is illustrative
+rather than navigable (`.claude/CLAUDE.md` itself *is* checked).
 
 The kernel binary itself has no `#[test]`s — it's `no_std`/`no_main` and won't build for the host target. All testable logic lives in the `kernel-*` crates; everything that touches asm / CSRs / MMIO stays in `kernel/` and is covered (transitively) by the QEMU integration tests.
 

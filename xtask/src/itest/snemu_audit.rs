@@ -355,7 +355,7 @@ pub enum SpeedLevel {
 /// The snemu optimisation toggles, bundled — every knob that changes only speed, not
 /// behaviour (each on↔off byte-identical by its own oracle). Threaded as one value
 /// instead of six bools; applied to a machine by [`apply`](Self::apply).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpeedConfig {
     pub idle_skip: bool,
     pub native_ops: bool,
@@ -1305,6 +1305,71 @@ fn console_tail(output: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{SpeedConfig, SpeedLevel};
+
+    /// No overrides ⇒ the preset, exactly. The four tiers are cumulative:
+    /// Low ⊂ Med ⊂ Hi ⊂ Extra, with `idle_skip`/`reg_cache` on throughout.
+    #[test]
+    fn a_preset_with_no_overrides_is_the_preset() {
+        let low = SpeedConfig::resolve(Some(SpeedLevel::Low), false, false, false, false, false, false);
+        assert!(low.idle_skip && low.reg_cache, "Low is the fidelity floor, not a no-op");
+        assert!(!low.native_ops && !low.tlb && !low.block_jit && !low.native_jit);
+
+        let med = SpeedConfig::resolve(Some(SpeedLevel::Med), false, false, false, false, false, false);
+        assert!(med.native_ops && med.tlb, "Med adds the memory speedups");
+        assert!(!med.block_jit);
+
+        let hi = SpeedConfig::resolve(Some(SpeedLevel::Hi), false, false, false, false, false, false);
+        assert!(hi.block_jit && hi.native_ops && hi.tlb, "Hi is Med + Backend A");
+        assert!(!hi.native_jit);
+
+        let extra =
+            SpeedConfig::resolve(Some(SpeedLevel::Extra), false, false, false, false, false, false);
+        assert!(extra.native_jit && extra.block_jit, "Extra is Hi + Backend B");
+    }
+
+    /// The enable overrides layer *on top of* a preset — they force a knob on, and
+    /// never off. `--speedup low --jit` is the Low floor plus the block JIT.
+    #[test]
+    fn enable_overrides_add_to_a_preset() {
+        let cfg = SpeedConfig::resolve(Some(SpeedLevel::Low), true, true, false, true, false, false);
+        assert!(cfg.native_ops && cfg.block_jit && cfg.tlb);
+        assert!(cfg.idle_skip, "an enable override must not disturb the floor");
+    }
+
+    /// `--native-jit` implies the block-JIT frontend: Backend B is a codegen for
+    /// blocks, so asking for it without the frontend is meaningless.
+    #[test]
+    fn native_jit_implies_the_block_jit_frontend() {
+        let cfg = SpeedConfig::resolve(Some(SpeedLevel::Low), false, false, true, false, false, false);
+        assert!(cfg.native_jit, "asked for Backend B");
+        assert!(cfg.block_jit, "Backend B is a block codegen — it needs the frontend");
+    }
+
+    /// The two `--no-*` flags are the only way to turn something *off*, and they
+    /// beat the preset that turned it on. (There is deliberately no `--no-jit`:
+    /// step down a tier instead.)
+    #[test]
+    fn no_overrides_force_a_knob_off_against_the_preset() {
+        let cfg = SpeedConfig::resolve(Some(SpeedLevel::Hi), false, false, false, false, true, true);
+        assert!(!cfg.idle_skip, "--no-idle-skip beats the preset");
+        assert!(!cfg.reg_cache, "--no-reg-cache beats the preset");
+        assert!(cfg.block_jit, "…and disturbs nothing else");
+    }
+
+    /// **The regression this pins.** `resolve(None, ..)` falls back to `Low` — so
+    /// the default lives in clap's `default_value = "hi"`, not here. That split has
+    /// bitten once already: `--speedup` shipped with no clap default, silently fell
+    /// back to `Low`, and the 3× JIT lever sat switched off. If a future edit drops
+    /// the clap default, this is the behaviour it silently reverts to.
+    #[test]
+    fn an_unset_level_falls_back_to_low_not_to_the_cli_default() {
+        let cfg = SpeedConfig::resolve(None, false, false, false, false, false, false);
+        let low = SpeedConfig::resolve(Some(SpeedLevel::Low), false, false, false, false, false, false);
+        assert_eq!(cfg, low, "None must mean Low — the CLI default is clap's job");
+        assert!(!cfg.block_jit, "the fallback is the slow floor, not `hi`");
+    }
+
     #[test]
     fn packing_report_serializes_to_the_documented_json_schema() {
         use super::{PackingReport, Segment, WorkerStat};

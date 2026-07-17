@@ -254,7 +254,31 @@ locally and confirm the test catches it (prove the net has no hole).
 **Done when**: `cargo test -p xtask` covers the tree; the deliberate-rename check
 was performed and reverted.
 
-### Step 1.2: Collapse the snemu family into one subcommand group
+### Step 1.2 — ✅ DONE: Collapse the snemu family into one subcommand group
+
+**Shipped**: `cargo xtask snemu {boot,diff,fork,profile,bench}`. Five top-level
+slots → one. `snemu-itest` deliberately stayed top-level (2.1 renames it to
+`itest`; moving it here first would rename it twice).
+
+**Plan correction:** this step was written assuming 0.2 would delete `snemu-fork`,
+so it listed the family as four. Fork survived the withdrawal, so it joined the
+group — five, not four.
+
+**Two things the work turned up:**
+
+- The family was **not contiguous** in the `Cmd` enum — `SnemuItest` sits in the
+  middle of it (boot, diff, fork, *itest*, profile, bench). The lift had to take
+  two ranges either side.
+- **A test went quietly vacuous.** `retired_command_tests::snemu_m1_smoke_is_gone`
+  asserted `["xtask", "snemu"]` is rejected — proving the M1 smoke verb was gone.
+  This step took `snemu` as the *group* name, so bare `snemu` now errors as
+  "missing subcommand": the assertion still passed, but had stopped testing its
+  own name. Deleted rather than left reading as coverage. (The smoke's real
+  epitaph isn't a CLI fact anyway — it's that `minimal-boot` is gone from
+  `kernel/Cargo.toml`.) *Worth noting the net caught the rename in two places
+  first, exactly as 1.1 intended.*
+
+### ~~Step 1.2 (original text)~~
 
 After Phase 0 the family is `snemu-boot`, `snemu-diff`, `snemu-bench`,
 `snemu-profile` — four top-level slots that all mean "do a thing under snemu".
@@ -272,7 +296,32 @@ to the expected variant.
 **REFACTOR**: the four impls stay in their modules; only the enum moves.
 **Done when**: README + `xtask/README.md` updated.
 
-### Step 1.3: Move the snemu perf A/B knobs off the itest surface
+### Step 1.3 — ✅ DONE: Move the snemu perf A/B knobs off the itest surface
+
+**Shipped, as `hide = true` rather than a move.** The seven levers (`--jit`,
+`--native-jit`, `--tlb`, `--native-ops`, `--no-reg-cache`, `--no-idle-skip`,
+`--share-snapshots`) are gone from `snemu-itest --help` but **fully functional** —
+every A/B workflow and script keeps working, zero migration. `--speedup` stays
+visible, and the command's doc comment names the hidden levers so they stay
+discoverable. That meets this step's acceptance criteria exactly ("help no longer
+mentions JIT internals" + "levers still reachable") at a fraction of the cost of
+rehoming them under the `snemu` group.
+
+**The mutation testing this step called for found the interesting thing.**
+`SpeedConfig::resolve` had **one call site and zero tests** — a boolean
+precedence lattice, exactly as predicted. Added a matrix test (preset ⊂ tiers,
+enable-overrides layer on, `--native-jit` implies the block-JIT frontend, the two
+`--no-*` beat the preset). `cargo mutants` over `resolve`/`preset`: **11 mutants,
+9 caught, 2 unviable, 0 missed.**
+
+**A live trap, now pinned:** `resolve(None, ..)` falls back to `Low`, so the real
+default lives in clap's `default_value = "hi"` — two places. That split has bitten
+once already ([[feedback_commit_gate_repeat_tests]]): `--speedup` shipped with no
+clap default, silently fell back to `Low`, and the 3× JIT lever sat switched off.
+`an_unset_level_falls_back_to_low_not_to_the_cli_default` now pins the fallback so
+a future edit that drops the clap default fails loudly instead of getting slow.
+
+### ~~Step 1.3 (original text)~~
 
 `snemu-itest` carries seven perf levers — `--jit`, `--native-jit`, `--tlb`,
 `--native-ops`, `--no-reg-cache`, `--no-idle-skip`, `--share-snapshots` — plus
@@ -625,10 +674,15 @@ exists, and `qemu-itest` is *possible* (whether or not we then do it).
 
 ## Where this lands
 
-| | before | after |
-|---|---|---|
-| top-level commands | 22 | ~16 (0.2 withdrawn) |
-| `itest` flags (default/snemu path) | 13 | ~5 (the rest are `--engine qemu`-only) |
+**Counting correction:** the opening survey said "22 top-level commands". It was
+**24** — miscounted by hand. Verified since with
+`xtask --help | grep -E '^  [a-z]'`. Numbers below are measured, not estimated.
+
+| | before | now (Phases 0–1 done) | after Phase 2 |
+|---|---|---|---|
+| top-level commands | 24 | **20** (incl. `links`, added by other work — so 19 of ours) | ~19 |
+| `snemu-itest` visible flags | 14 | **7** (the 7 perf levers hidden) | — |
+| `itest` flags (default/snemu path) | 13 | 13 | ~5 (rest `--engine qemu`-only) |
 | `baseline` verbs | 7 | 7, but `export`/`push` retargeted at instret (2.3) |
 | CLI parse tests | 0 | the whole tree |
 | `itest-harness` | already correct | **untouched** |

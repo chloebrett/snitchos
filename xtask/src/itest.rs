@@ -808,29 +808,29 @@ pub fn run_unit_tests() -> ExitCode {
 /// with `--verbose`. `env` overrides are applied to the child (e.g.
 /// `RUSTFLAGS=--cfg loom`). Returns `true` iff the suite passed.
 fn run_cargo_test(label: &str, args: &[&str], env: &[(&str, &str)]) -> bool {
-    eprint!("  {label} ... ");
+    // Cargo's stderr is inherited, not captured: compiling is what the wall-clock
+    // is actually spent on (suites *run* in ~0-3s), so cargo's own `Compiling …`
+    // progress is the live signal. Capturing it to replay only on failure is what
+    // made the gate look hung for minutes at a time. The label goes on its own
+    // line so cargo's output streams beneath it rather than trailing it.
+    eprintln!("  {label}");
     let mut cmd = std::process::Command::new("cargo");
-    cmd.args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
+    cmd.args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::inherit());
     for (key, value) in env {
         cmd.env(key, value);
     }
-    match cmd.output() {
-        Ok(out) if out.status.success() => {
-            eprintln!("ok");
+    match cmd.status() {
+        Ok(status) if status.success() => {
+            eprintln!("    ok");
             true
         }
-        Ok(out) => {
-            eprintln!("FAILED");
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            for line in stderr.lines() {
-                eprintln!("    {line}");
-            }
+        // Cargo already streamed the failure to the terminal — don't replay it.
+        Ok(_) => {
+            eprintln!("    FAILED");
             false
         }
         Err(e) => {
-            eprintln!("FAILED to invoke cargo: {e}");
+            eprintln!("    FAILED to invoke cargo: {e}");
             false
         }
     }

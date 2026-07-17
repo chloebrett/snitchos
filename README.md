@@ -138,20 +138,21 @@ cargo xtask reader -- --pretty  # multi-line debug format
 ```
 cargo xtask build              # build the kernel ELF
 cargo xtask boot                 # build kernel + run in QEMU
-cargo xtask snemu-boot         # build full kernel + run under the snemu emulator (meta-loop driver)
-cargo xtask snemu-boot --max-steps 3000000  # cap the run at N instruction steps
-cargo xtask snemu-boot --frames  # also decode + dump the telemetry frames snemu captures off the virtio-console
-cargo xtask snemu-boot --workload demo  # boot a runtime workload under snemu (injects the DTB bootarg)
-cargo xtask snemu-diff          # differential oracle: diff snemu vs QEMU telemetry on the default boot
-cargo xtask snemu-diff --workload demo  # ...on a specific workload (both emulators run it)
-cargo xtask snemu-diff --all    # sweep every workload; print an agree/disagree summary table
+cargo xtask snemu boot         # build full kernel + run under the snemu emulator (meta-loop driver)
+cargo xtask snemu boot --max-steps 3000000  # cap the run at N instruction steps
+cargo xtask snemu boot --frames  # also decode + dump the telemetry frames snemu captures off the virtio-console
+cargo xtask snemu boot --workload demo  # boot a runtime workload under snemu (injects the DTB bootarg)
+cargo xtask snemu diff          # differential oracle: diff snemu vs QEMU telemetry on the default boot
+cargo xtask snemu diff --workload demo  # ...on a specific workload (both emulators run it)
+cargo xtask snemu diff --all    # sweep every workload; print an agree/disagree summary table
 cargo xtask collect            # build + run collector (OTLP + Prometheus)
 cargo xtask collect -- --text  # also print decoded frames to stdout
 cargo xtask reader             # collector in text-only mode (no docker needed)
 cargo xtask stack up           # docker-compose up the stack
 cargo xtask stack down         # docker-compose down
 cargo xtask stack logs         # tail container logs
-cargo xtask test               # all host-side checks: unit tests + loom model-checks + diagram drift
+cargo xtask test               # all host-side checks: unit tests + loom model-checks + diagram drift + doc links
+cargo xtask links              # just the doc-link check (instant; run it after any `git mv` of a doc)
 cargo xtask itest              # run kernel integration tests in QEMU (integration only)
 cargo xtask test && cargo xtask itest   # the gate: host checks, then integration
 cargo xtask itest <scenario>   # run one scenario by name
@@ -172,7 +173,7 @@ cargo xtask --help
 > **snemu runs optimized by default.** xtask runs the snemu interpreter
 > in-process, and `[profile.dev.package.snemu] opt-level = 3` (root `Cargo.toml`)
 > keeps just that crate optimized even under the default dev build — so
-> `snemu-boot` / `snemu-diff` / `snemu-fork` are ~20x faster without recompiling
+> `snemu boot` / `snemu diff` / `snemu fork` are ~20x faster without recompiling
 > the rest of xtask in release. snemu is deterministic (instruction-count clock),
 > so this changes only speed, never the guest's execution or telemetry. To debug
 > snemu itself, set that `opt-level = 0` temporarily.

@@ -91,7 +91,7 @@ fn collect_md_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> std::io:
         }
         if path.is_dir() {
             collect_md_files(root, &path, out)?;
-        } else if path.extension().is_some_and(|e| e == "md") {
+        } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")) {
             out.push(path);
         }
     }
