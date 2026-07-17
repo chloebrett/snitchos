@@ -50,6 +50,24 @@ fn decode_pixel(pixels: &[u8], offset: usize) -> (u8, u8, u8) {
     (r, g, b)
 }
 
+/// Render `pixels` (same shape as [`render_ppm`]'s argument) as a `minifb`
+/// pixel buffer: one `u32` per pixel, `0x00RRGGBB`, row-major — `minifb`'s
+/// `Window::update_with_buffer` expects exactly this format. Pure, same
+/// degrade-on-out-of-range behavior as `render_ppm`, sharing the same
+/// [`decode_pixel`] so the two functions are provably decoding identically,
+/// only packing differently.
+pub fn to_minifb_buffer(pixels: &[u8], width: u32, height: u32, stride: u32) -> Vec<u32> {
+    let mut out = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        let row_start = (y * stride) as usize;
+        for x in 0..width {
+            let (r, g, b) = decode_pixel(pixels, row_start + (x * 4) as usize);
+            out.push((u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +124,36 @@ mod tests {
         let ppm = render_ppm(&[0u8; 4 * 3 * 2], 3, 2, 12);
         let header_len = b"P6\n3 2\n255\n".len();
         assert_eq!(ppm.len() - header_len, 3 * 2 * 3, "width*height RGB triples");
+    }
+
+    #[test]
+    fn minifb_single_pixel_packs_into_0x00rrggbb() {
+        // Same fixture as single_pixel_converts_xrgb8888_to_rgb_dropping_the_pad_byte
+        // — proves the two functions decode identically, just pack differently.
+        let pixel = [0x40, 0x20, 0x20, 0xff];
+        let buf = to_minifb_buffer(&pixel, 1, 1, 4);
+        assert_eq!(buf, vec![0x00_20_20_40]);
+    }
+
+    #[test]
+    fn minifb_stride_wider_than_width_times_four_skips_row_padding() {
+        // Same fixture as stride_wider_than_width_times_four_skips_row_padding.
+        let mut pixels = vec![0u8; 16];
+        pixels[0..4].copy_from_slice(&[0x01, 0x02, 0x03, 0xff]); // row 0 pixel
+        pixels[8..12].copy_from_slice(&[0x04, 0x05, 0x06, 0xff]); // row 1 pixel
+        let buf = to_minifb_buffer(&pixels, 1, 2, 8);
+        assert_eq!(buf, vec![0x00_03_02_01, 0x00_06_05_04]);
+    }
+
+    #[test]
+    fn minifb_out_of_range_pixel_degrades_to_black_not_panic() {
+        let buf = to_minifb_buffer(&[], 1, 1, 4);
+        assert_eq!(buf, vec![0]);
+    }
+
+    #[test]
+    fn minifb_buffer_has_exactly_width_times_height_entries() {
+        let buf = to_minifb_buffer(&[0u8; 4 * 3 * 2], 3, 2, 12);
+        assert_eq!(buf.len(), 3 * 2);
     }
 }
