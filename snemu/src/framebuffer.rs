@@ -30,16 +30,24 @@ pub fn render_ppm(pixels: &[u8], width: u32, height: u32, stride: u32) -> Vec<u8
     for y in 0..height {
         let row_start = (y * stride) as usize;
         for x in 0..width {
-            let px = row_start + (x * 4) as usize;
-            let [b, g, r] = [
-                pixels.get(px).copied().unwrap_or(0),
-                pixels.get(px + 1).copied().unwrap_or(0),
-                pixels.get(px + 2).copied().unwrap_or(0),
-            ];
+            let (r, g, b) = decode_pixel(pixels, row_start + (x * 4) as usize);
             out.extend_from_slice(&[r, g, b]);
         }
     }
     out
+}
+
+/// Decode one XRGB8888 pixel's `(r, g, b)` channels from `pixels` at byte
+/// offset `offset` — little-endian `[B, G, R, pad]`, so `pixels[offset]` is
+/// blue, `+1` green, `+2` red (the pad byte at `+3` is never read). Missing
+/// bytes (an `offset` past `pixels`' end) degrade that channel to `0`
+/// individually, not the whole pixel — see `render_ppm`'s degrade-to-black
+/// doc for why a partially-out-of-range pixel isn't fully blacked out.
+fn decode_pixel(pixels: &[u8], offset: usize) -> (u8, u8, u8) {
+    let b = pixels.get(offset).copied().unwrap_or(0);
+    let g = pixels.get(offset + 1).copied().unwrap_or(0);
+    let r = pixels.get(offset + 2).copied().unwrap_or(0);
+    (r, g, b)
 }
 
 #[cfg(test)]
