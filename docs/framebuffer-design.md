@@ -1,6 +1,12 @@
 # Design: a framebuffer that snitches
 
-**Status**: Vision / design note (unbuilt). Infrastructure milestone. Surfaced as
+**Status**: Vision / design note — **milestone 0 SHIPPED; the thesis is unbuilt.**
+There *is* a working screen: a real ramfb device on QEMU **and** a real ramfb device
+model in snemu, both itest-verified, with a PPM dump for visual proof
+([plans/legacy/framebuffer-milestone-0.md](../plans/legacy/framebuffer-milestone-0.md),
+[plans/legacy/snemu-ramfb-model.md](../plans/legacy/snemu-ramfb-model.md)). What this
+page is actually *about* — damage as provenance, cap-bounded scanout, a screen that
+snitches — is still ahead. Infrastructure milestone. Surfaced as
 the load-bearing prerequisite for the [physics desktop](physics-desktop-design.md),
 but it stands on its own — a screen is something many future SnitchOS features will
 want, and on this OS a screen is not a black box.

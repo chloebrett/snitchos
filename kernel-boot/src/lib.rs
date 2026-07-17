@@ -2,7 +2,7 @@
 //! `WorkloadKind` registry (`bootargs`), the producer/consumer workload logic
 //! (`workload`), and `scause` decoding (`trap`).
 //!
-//! Carved out of `kernel-core` — see `plans/kernel-core-split.md`. These are the
+//! Carved out of `kernel-core` — see `plans/legacy/kernel-core-split.md`. These are the
 //! pure answers to "what was the kernel asked to run?" and "what just trapped?".
 //! Acting on either — spawning the tasks, servicing the trap — stays in
 //! `kernel/`, next to the CSRs and the asm.

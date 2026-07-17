@@ -212,7 +212,7 @@ impl From<kernel_devices::virtio::HandshakeError> for InitError {
 
 /// A virtio-mmio device addressed by its higher-half MMIO base. Adapts
 /// the kernel's volatile register access to the host-testable
-/// `MmioTransport` trait so the feature handshake can live in kernel-core.
+/// `MmioTransport` trait so the feature handshake can live in kernel-devices.
 struct MmioConsole {
     base: usize,
 }

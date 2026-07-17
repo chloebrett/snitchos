@@ -2,7 +2,13 @@
 
 *A SnitchOS-native RISC-V emulator: replace QEMU for the functional itest suite with a small RV64GC interpreter written in Rust, running on the macOS host. Telemetry is a first-class concern of the emulator itself — not something decoded off a socket after the fact. Determinism by default; controllable concurrency for race-hunting.*
 
-Status: **proposed** (design only; no code). First milestone planned in detail in [plans/legacy/snemu-milestone-1-console-out.md](../plans/legacy/snemu-milestone-1-console-out.md).
+Status: **BUILT** (2026-07-17). snemu boots the kernel, runs the integration suite,
+and is well past this document's original scope: paging, virtio-console, multi-hart,
+a real ramfb device model, a software TLB, an M5 decode cache, an M6 block JIT (+ a
+native AArch64 backend), and a snapshot-tree scheduler all landed. `cargo xtask
+snemu-diff` is the differential oracle against QEMU. This page is the **design
+rationale**; the milestone plans in [plans/legacy/](../plans/legacy/) record how it
+was built, and the *Exploration notes* below are where the thinking lives.
 
 ## Why this step
 

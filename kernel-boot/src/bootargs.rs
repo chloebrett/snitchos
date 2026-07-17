@@ -22,7 +22,7 @@ pub enum WorkloadKind {
     /// per-item.
     SmpSpsc,
     /// As [`SmpSpsc`](Self::SmpSpsc) but over a batched ring
-    /// (`kernel_core::batch_ring`) that fences once *per batch* — the
+    /// (`kernel_obs::batch_ring`) that fences once *per batch* — the
     /// controlled third variant isolating per-item vs per-batch
     /// cross-hart fence cost.
     SmpSpscBatch,

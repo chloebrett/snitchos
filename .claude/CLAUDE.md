@@ -173,12 +173,34 @@ kernel/       no_std, no_main, riscv64gc-unknown-none-elf only.
               and the `#[global_allocator]` `heap::HEAP` backed by
               `linked_list_allocator` over a 4 MiB linear-map region.
               Statics live here.
-kernel-core/  no_std, host-buildable. Pure data + bookkeeping with
-              no asm / MMIO / CSRs: intern table, span registry,
-              pre-init buffer, scause decoding, Clock + FrameSink
-              traits, Sv39 page-table primitives + `KERNEL_OFFSET` /
-              `LINEAR_OFFSET` / `va_to_pa` / `pa_to_kernel_va`, and
-              the `frame::Bitmap`. All host-tested via `cargo test`.
+              (There is no `kernel-core/` any more — it was a grab-bag
+              meaning "the host-testable bits" and was split into the
+              five `kernel-*` crates below. See
+              plans/legacy/kernel-core-split.md.)
+kernel-mem/   no_std, host-buildable, NO deps. Memory bookkeeping:
+              Sv39 page-table primitives + `KERNEL_OFFSET` /
+              `LINEAR_OFFSET` / `va_to_pa` / `pa_to_kernel_va`, the
+              `frame::Bitmap`, the heap watermark-grow policy.
+kernel-obs/   no_std, host-buildable. Deps: protocol, postcard. How the
+              kernel talks about itself — intern table, span registry,
+              pre-init buffer, batch ring, the alloc-free panic
+              encoder, Clock + FrameSink traits. THE ONLY kernel-*
+              crate that touches the wire format.
+kernel-devices/ no_std, host-buildable, NO deps (prod code is pure
+              `core` — it never allocates). Device *protocol* logic, no
+              MMIO: virtqueue/TX-staging sequencing, the fw_cfg DMA
+              handshake, ramfb config, the console ring. Also owns the
+              `--cfg loom` model check (tests/loom_tx.rs).
+kernel-boot/  no_std, host-buildable, NO deps. Boot-time decisions:
+              the `workload=` bootarg parser + `WorkloadKind` registry,
+              producer/consumer workload logic, scause decoding.
+kernel-proc/  no_std, host-buildable. Deps: protocol, snitchos-abi,
+              kernel-mem. Tasks, their authority, their lifecycle:
+              runqueue + preempt/kill policy, exit/wait reaping,
+              blocking, cap table, IPC rendezvous, the ELF loader
+              front-end + W^X page planning, per-process name quotas.
+              All five are host-tested via `cargo test`. Statics live
+              in `kernel/`; these crates decide, the kernel acts.
 protocol/     no_std by default. The `Frame` enum + postcard
               encoding. `features = ["std"]` opts in to
               `protocol::stream` (decoder + `OwnedFrame`).
@@ -228,7 +250,11 @@ Those sites carry a justified `#[allow(clippy::deref_addrof, reason = ...)]`.
 
 | Layer | Command | What it covers |
 |---|---|---|
-| Unit (kernel-core) | `cargo test -p kernel-core` | Intern table, span registry, pre-init buffer, scause decoding, frame sink capture |
+| Unit (kernel-mem)  | `cargo test -p kernel-mem` | Sv39 walk/map/remap, frame bitmap, heap watermark policy |
+| Unit (kernel-obs)  | `cargo test -p kernel-obs` | Intern table, span registry, pre-init buffer, frame sink capture, panic encoding |
+| Unit (kernel-devices) | `cargo test -p kernel-devices` | Virtqueue + TX staging, fw_cfg handshake, ramfb, console ring |
+| Unit (kernel-boot) | `cargo test -p kernel-boot` | `workload=` bootarg parsing, workload logic, scause decoding |
+| Unit (kernel-proc) | `cargo test -p kernel-proc` | Runqueue/preempt/kill, caps, IPC, reaping, ELF + W^X planning |
 | Unit (protocol)    | `cargo test -p protocol --features std` | Frame roundtrips + stream decoder |
 | Unit (collector)   | `cargo test -p collector` | Span state machine, prom/otlp encoding |
 | All host checks    | `cargo xtask test` | Every unit crate above + the loom model-checks (`--cfg loom`) + the generated-diagram drift check |
@@ -241,7 +267,9 @@ and the `--skip-unit-tests` flag that existed to undo it, were removed). Note th
 a separate `--cfg loom` compilation, and the generated diagrams in `docs/generated/`
 are contract artifacts whose drift fails here.
 
-The kernel binary itself has no `#[test]`s — it's `no_std`/`no_main` and won't build for the host target. All testable logic lives in `kernel-core`; everything that touches asm / CSRs / MMIO stays in `kernel/` and is covered (transitively) by the QEMU integration tests.
+The kernel binary itself has no `#[test]`s — it's `no_std`/`no_main` and won't build for the host target. All testable logic lives in the `kernel-*` crates; everything that touches asm / CSRs / MMIO stays in `kernel/` and is covered (transitively) by the QEMU integration tests.
+
+**The boundary test is not `unsafe`-freedom.** Most of `kernel/` carries no `unsafe` and still belongs there: glue that locks a static and threads a `TrapFrame` can't run on the host either. Ask instead: *does it touch statics, `TrapFrame`, or MMIO?* If not, it belongs in a `kernel-*` crate — and note that pure logic often hides *inside* an `unsafe` function, which a file-level search won't find.
 
 ### Integration test scenarios
 
@@ -275,7 +303,7 @@ Non-default boot behaviours (the SMP cross-hart workload, the OOM leaks, the str
 
 - **From a scenario:** `Harness::spawn_with_workload(label, "smp")` — boots the shared `itest-workloads` build with `-append workload=smp`. `Harness::spawn(label)` boots the same build with no bootarg (now `init`, the userspace root). Neither rebuilds; the suite builds once.
 - **Live (measurement / demo):** `cargo xtask boot --workload smp` then `cargo xtask reader` (or `collect` → Grafana). No rebuild to switch workloads.
-- **Adding a workload:** add a `WorkloadKind` variant + parse arm in `kernel-core::bootargs` (host-tested), then dispatch on `boot_workload::selected()` in `kmain` (spawn layout) and/or `heartbeat` (per-tick behaviour); storm bodies live in `kernel::storms` (itest-workloads only).
+- **Adding a workload:** add a `WorkloadKind` variant + parse arm in `kernel_boot::bootargs` (host-tested), then dispatch on `boot_workload::selected()` in `kmain` (spawn layout) and/or `heartbeat` (per-tick behaviour); storm bodies live in `kernel::storms` (itest-workloads only).
 - **Genuinely compile-time variants** (rare — something that must change codegen, not just boot behaviour) would reintroduce a build hook; none exist today.
 
 Skips cleanly (exit 0) if `qemu-system-riscv64` isn't on `PATH`.
@@ -284,7 +312,7 @@ Skips cleanly (exit 0) if `qemu-system-riscv64` isn't on `PATH`.
 
 `protocol::Frame` is the contract between kernel and host. If you:
 
-- **Add a variant**: update `kernel-core::sink::FrameSink` consumers if relevant, then add a matching arm in `OwnedFrame::from_borrowed` (`protocol/src/stream.rs`). Tests will fail to compile until you do.
+- **Add a variant**: update `kernel_obs::sink::FrameSink` consumers if relevant, then add a matching arm in `OwnedFrame::from_borrowed` (`protocol/src/stream.rs`). Tests will fail to compile until you do.
 - **Change a field**: re-run the integration tests; they assert on the post-decode shape.
 - **Reorder existing variants**: don't. Postcard's enum encoding is positional — reordering silently breaks the wire format for all old captures.
 
@@ -295,7 +323,7 @@ Skips cleanly (exit 0) if `qemu-system-riscv64` isn't on `PATH`.
 
 ### Scheduler (v0.5)
 
-Cooperative round-robin over a single CPU. The kernel runs out of one of its tasks at any moment; there is no dedicated scheduler thread. The scheduler is a *library*: `kernel_core::sched::Runqueue` + `kernel::sched::yield_now()`. `yield_now` runs on the calling task's stack — saves its callee-saved registers into its `TaskContext`, picks the next ready task, loads its registers, `ret`s into it.
+Cooperative round-robin over a single CPU. The kernel runs out of one of its tasks at any moment; there is no dedicated scheduler thread. The scheduler is a *library*: `kernel_proc::sched::Runqueue` + `kernel::sched::yield_now()`. `yield_now` runs on the calling task's stack — saves its callee-saved registers into its `TaskContext`, picks the next ready task, loads its registers, `ret`s into it.
 
 Four tasks at boot:
 
@@ -337,7 +365,7 @@ Spawn-with-caps, v0.12 Exit/Wait/reap + the Notification primitive, and v0.13 th
 boots **`init`** (the userspace delegation-graph root); the former kernel scheduler
 demo (`task_a`/`task_b` + producer/consumer + cross-hart probe) is `workload=demo`.
 
-- **Caps** (`kernel-core/src/user/cap.rs`, host-tested): `Capability { object, rights }` named by an opaque `Handle` (slot+generation `u32`), validated against the calling process's `CapTable`. `Object` = `TelemetrySink | SpanSink | Endpoint{id,badge} | Reply{caller} | Notification{id}` (no separate `File` object — FS files are *badged* `Endpoint` caps the FS server mints). `generation` is the revocation hook (dead-weight at 0).
+- **Caps** (`kernel-proc/src/cap.rs`, host-tested): `Capability { object, rights }` named by an opaque `Handle` (slot+generation `u32`), validated against the calling process's `CapTable`. `Object` = `TelemetrySink | SpanSink | Endpoint{id,badge} | Reply{caller} | Notification{id}` (no separate `File` object — FS files are *badged* `Endpoint` caps the FS server mints). `generation` is the revocation hook (dead-weight at 0).
 - **Cap-id spine (v0.13)**: every *holding* (a `CapTable` slot) carries a stable global `cap_id` (`Slot.cap_id`, set via `insert_with_id`/`bootstrap_with_ids`, read via `cap_id_of`), minted kernel-side (`next_cap_id`). A transfer records the **source holding's** id as the child's `parent_cap_id` — so `CapEvent::Transferred` frames reconstruct the derivation tree. Wire `cap_id` == stored id at every grant/transfer site (`run_with_caps`, `run_ipc`, `handle_mint_badged`, `NotifyCreate`, `EndpointCreate`). Only genuinely-root grants (and the not-yet-linked reply-cap mint) keep `parent_cap_id: 0`.
 - **Syscalls** (`abi::Syscall` 0–25, dispatch `kernel/src/syscall/mod.rs`): cap-mediated — `SpanOpen`/`Send`/`Receive`/`Call`/`Reply`/`ReplyRecv`/`MintBadged`/`Signal`/`WaitNotify`/`EmitMetric`/`RegisterMetric`. Ambient — `Exit`/`Yield`/`SpanClose`/`MapAnon`/`DebugWrite`/`ConsoleRead`/`ConsoleWrite`/`ClockNow`/`Spawn`/`Wait`/`WaitAny`/`NotifyCreate`/`EndpointCreate`. Refusals snitch (`SyscallRefused` frame + counter), never silent.
 - **Startup-cap ABI**: a spawned child is born with bootstrap telemetry@handle 0, span@1, then parent-**delegated** caps at handles `2..` (`delegated_handle(i) = 2 + i`). `Spawn`'s `a1`=`[u32;N]` handle array delegates from the caller's table (copy semantics, all-or-nothing). **An endpoint lands at handle 2 in *both* launch paths** — `run_ipc` (after the two bootstrap caps) and an init-`Spawn` delegating it (delegated[0]) — so IPC programs read their endpoint via `delegated_handle(0)`, not the legacy `a2` startup slot.
@@ -362,10 +390,10 @@ Gotchas worth re-reading `plans/v0.4-memory-findings.md` before disturbing:
 - **Release itests build the kernel at opt-3 but pin the embedded userspace to opt-1** (`kernel/build.rs`, nested build `--config profile.release.opt-level=1`). There is a latent opt≥2 UB *class* in the userspace crates (talc OOM-loop → hang; confirmed in `snitchos-user`, at least one more crate); the itest speedup is kernel-dominated so opt-1 userspace costs ~nothing and sidesteps it. Root-causing the userspace UB (so the pin can go) is an open follow-up. Repro: `cargo xtask snemu-itest --release`.
 - Anything that walks the DTB pre-MMU under higher-half link crashes silently in a way we never isolated. MMIO regions in `kmain` are hardcoded for QEMU `virt`; the DTB-driven `collect_mmio_regions` exists but is parked behind `#[expect(dead_code)]`.
 - The frame allocator's `Bitmap::frames_free` is the maintained source of truth for the free count. Don't compute `count_free` by popcount-scanning the bits — it's O(words) and the OOM workload showed it stalls heartbeats. The maintained counter is also what makes `alloc` O(1) when the pool is empty.
-- The kernel heap starts at 4 MiB and grows on demand via the heartbeat-driven watermark policy (`kernel_core::heap::watermark_grow_decision`). It caps at 1 GiB (the full root-PTE slot). Each grow allocates frames + installs PTEs via `mmu::map`; the policy fires when `free < capacity * 25%`. Watermark constants live in `kernel::heap::WATERMARK`; tune there.
+- The kernel heap starts at 4 MiB and grows on demand via the heartbeat-driven watermark policy (`kernel_mem::heap::watermark_grow_decision`). It caps at 1 GiB (the full root-PTE slot). Each grow allocates frames + installs PTEs via `mmu::map`; the policy fires when `free < capacity * 25%`. Watermark constants live in `kernel::heap::WATERMARK`; tune there.
 - All kernel-internal locking goes through `kernel::sync::{Mutex, MutexGuard, Once}` — thin wrappers over `spin` types with no-op acquisition/release hooks today. The wrappers exist so preempt-disable (v0.5.x) and SMP IRQ-disable (v0.7+) land in one file. A workspace `disallowed_types` clippy lint blocks raw `spin::Mutex` / `spin::Once` outside `kernel::sync`. One flavour (always-IRQ-safe-when-implemented); two-flavour split (Linux-style `lock` vs `lock_irqsave`) is documented as a deferred follow-up if a hot path proves it needs it.
 - Per-CPU storage goes through `kernel::percpu::PerCpu<T>` + `current_hartid()`. As of v0.6 `MAX_HARTS = 2` and `current_hartid()` reads the running hart's logical id through `tp` (set up in `percpu::init` to point at this hart's `PER_HART_DATA` slot); it falls back to 0 only if `tp` is outside that static (pre-init). Call sites stayed stable across the single→multi-hart change.
-- `kernel::mmu::map(va, pa, perms)` is the runtime page-table-mutation primitive; `kernel::mmu::remap(va, new_pa, perms)` overwrites an existing leaf. Walk logic lives in `kernel_core::mmu::{map,remap}` (pure, host-tested via a `PtMem` mock; no `unsafe` in kernel-core), kernel-side adds `KernelPtMem` over `frame::alloc_zeroed` + `pa_to_kernel_va`. `map` does a local `sfence.vma vaddr`; `remap` follows the PTE write with a cross-hart `kernel::mmu::shootdown(va)` (TLB-shootdown IPI + per-hart ack barrier), since overwriting a cached translation must invalidate it on every hart. The kernel heap (`heap::init` + `heap::extend`) was the first consumer; v0.7 userspace page tables use the same primitive.
+- `kernel::mmu::map(va, pa, perms)` is the runtime page-table-mutation primitive; `kernel::mmu::remap(va, new_pa, perms)` overwrites an existing leaf. Walk logic lives in `kernel_mem::mmu::{map,remap}` (pure, host-tested via a `PtMem` mock; no `unsafe` in kernel-mem), kernel-side adds `KernelPtMem` over `frame::alloc_zeroed` + `pa_to_kernel_va`. `map` does a local `sfence.vma vaddr`; `remap` follows the PTE write with a cross-hart `kernel::mmu::shootdown(va)` (TLB-shootdown IPI + per-hart ack barrier), since overwriting a cached translation must invalidate it on every hart. The kernel heap (`heap::init` + `heap::extend`) was the first consumer; v0.7 userspace page tables use the same primitive.
 - Never emit a telemetry frame from inside `GlobalAlloc::alloc`/`dealloc`. The virtio TX path takes a `Mutex` that, on first use of a string, registers through the intern table which may itself allocate. Re-entry deadlock. Same pattern as the frame allocator and the IRQ handler: bump an atomic in the alloc path, drain in the heartbeat loop.
 
 ### Architecture references

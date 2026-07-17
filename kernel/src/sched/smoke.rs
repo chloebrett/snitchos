@@ -3,7 +3,7 @@
 //! is production behaviour: the `smoke()` round-trip runs once at boot, and the
 //! `*_entry` functions are spawned only under the `workload=` selections that
 //! the integration scenarios drive. All of it is asm/`unsafe`/statics-bound, so
-//! it stays kernel-side (it can't move to host-buildable `kernel-core`); this
+//! it stays kernel-side (it can't move to the host-buildable `kernel-*` crates); this
 //! module just keeps it out of the way.
 //!
 //! Re-exported from `sched` (`pub use smoke::…`) so call sites stay

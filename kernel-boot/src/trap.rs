@@ -1,6 +1,6 @@
 //! Trap-cause decoding. Pure bit-twiddling on the `scause` CSR value
 //! handed to us by the trap entry assembly — no asm, no CSR reads, so
-//! this module lives in `kernel-core` and is host-testable.
+//! this module lives in `kernel-boot` and is host-testable.
 
 /// Decoded form of the `scause` CSR. The top bit of `scause` is the
 /// interrupt-vs-exception flag; the remaining bits are the cause code

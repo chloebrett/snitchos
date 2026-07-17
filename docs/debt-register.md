@@ -61,7 +61,7 @@ the `project_userspace_defined_metrics` memory.
 
 - **#6 — Fault-safe user-copy.** `copy_from_user` only bounds-checked the user
   range (`user_range_ok`), so an in-range-but-unmapped pointer faulted the kernel
-  on the `SUM` deref. Added `kernel_core::mmu::range_mapped` (host-tested page-walk,
+  on the `SUM` deref. Added `kernel_mem::mmu::range_mapped` (host-tested page-walk,
   reusing `translate`) + the `kernel::mmu::user_range_readable` wrapper; the copy
   now refuses (`BadUserRange`) instead of faulting. Proven end-to-end by the
   `userspace-bad-ptr` itest (a new `bad-ptr` probe program passes an unmapped VA
@@ -72,7 +72,7 @@ the `project_userspace_defined_metrics` memory.
 ### #7 — Capability generation / revocation
 
 `Capability.generation` exists as the revocation hook but is dead-weight at 0
-(`kernel-core/src/user/cap.rs`); `Stale`-on-revoke is unbuilt.
+(`kernel-proc/src/cap.rs`); `Stale`-on-revoke is unbuilt.
 
 ### #8 — `kernel::sync` is one-flavor
 

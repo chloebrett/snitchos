@@ -471,7 +471,7 @@ impl CapTable {
     }
 
     /// Snapshot the live capabilities in this table as packed [`CapDesc`] records,
-    /// in slot order — the kernel-core half of the `CapList` syscall (`hold`). One
+    /// in slot order — the kernel-proc half of the `CapList` syscall (`hold`). One
     /// entry per live slot: its [`Handle`] (raw), the [`object_kind`] discriminant,
     /// the raw [`Rights`] bits, and the endpoint badge (`0` for non-endpoints).
     /// `reserved` is `0`. This is the "packed hitch" the syscall copies out;

@@ -2,7 +2,15 @@
 
 *No ambient authority. Every resource access goes through an unforgeable handle. The project's second pillar.*
 
-Not built until v0.7b. Designed now because it is a compounding decision — the kernel/userspace boundary, IPC, and the syscall surface all assume this shape.
+**Status: SHIPPED at v0.7b, and now the project's spine.** Everything since builds on
+it — IPC (v0.9), RAMfs-as-badged-caps (v0.10), Spawn-with-caps (v0.11), `init` (v0.13),
+revocation, and the shell's `view` verb. The body below is maintained (see the
+per-section "v0.7b status" / "Shipped `CapEventKind`" notes); this page is the design
+rationale for a built system, not a forward plan.
+
+*(Originally written pre-implementation: "Not built until v0.7b. Designed now because
+it is a compounding decision — the kernel/userspace boundary, IPC, and the syscall
+surface all assume this shape." That bet paid off.)*
 
 > **Numbering note:** this page predates the SMP insertion at v0.6, which pushed everything downstream forward by one. References below have been updated: capabilities land at **v0.7b** (was v0.6b), the deliberately-wrong first syscall at **v0.7a** (was v0.6a), and IPC endpoints/notifications at **v0.8** (was v0.7). See `docs/roadmap-and-milestones.md` for the current sequence.
 

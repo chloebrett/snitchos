@@ -144,18 +144,23 @@ fn print_report(workload: Option<&str>, total: u64, rows: &[(String, u64)], top:
     #[allow(clippy::cast_precision_loss)]
     let pct = |n: u64| if total == 0 { 0.0 } else { n as f64 * 100.0 / total as f64 };
     println!(
-        "\n=== instret profile: workload={label} (post-boot, {}M over {} PCs) ===",
-        total / 1_000_000,
+        "\n=== instret profile: workload={label} (post-boot, {} over {} PCs) ===",
+        magnitude::format(total),
         rows.len(),
     );
     println!("  {:>7}  {:>8}  function", "share", "instret");
     for (name, count) in rows.iter().take(top) {
-        println!("  {:>6.1}%  {:>7}M  {name}", pct(*count), count / 1_000_000);
+        println!("  {:>6.1}%  {:>8}  {name}", pct(*count), magnitude::format(*count));
     }
     let shown: u64 = rows.iter().take(top).map(|(_, c)| c).sum();
     let rest = total.saturating_sub(shown);
     if rest > 0 {
-        println!("  {:>6.1}%  {:>7}M  [{} more]", pct(rest), rest / 1_000_000, rows.len().saturating_sub(top));
+        println!(
+            "  {:>6.1}%  {:>8}  [{} more]",
+            pct(rest),
+            magnitude::format(rest),
+            rows.len().saturating_sub(top)
+        );
     }
 }
 

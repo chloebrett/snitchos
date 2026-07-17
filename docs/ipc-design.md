@@ -35,7 +35,7 @@ Accepted costs: deadlock is possible (A calls B, B calls A) — requires acyclic
 ## Notifications — the async primitive ✅ (v0.12)
 The physical world is asynchronous — interrupts happen whether or not anyone is ready to receive. So an async primitive is mandatory. But it does not have to be buffered channels; it is a **notification**: async signalling stripped to the bone. A per-object word of bits; signalling sets bits and wakes any waiter; it carries no payload. No arbitrary-message buffer, so no buffering problem. Models interrupts arriving and readiness signals ("data is ready, come do a synchronous receive").
 
-It is the **async dual of the synchronous endpoint**: a `send`/`call` *rendezvouses* (the initiator can block, a message crosses); a `signal` is *fire-and-forget* (the signaller never blocks, no data, signals **coalesce**). What shipped (plan: [plans/legacy/v0.12-notifications.md](../plans/legacy/v0.12-notifications.md); pure core `kernel-core/src/notify.rs`):
+It is the **async dual of the synchronous endpoint**: a `send`/`call` *rendezvouses* (the initiator can block, a message crosses); a `signal` is *fire-and-forget* (the signaller never blocks, no data, signals **coalesce**). What shipped (plan: [plans/legacy/v0.12-notifications.md](../plans/legacy/v0.12-notifications.md); pure core `kernel-proc/src/notify.rs`):
 
 - `Object::Notification { id }` with `SIGNAL` / `WAIT` rights (the producer/consumer split, like the endpoint's `SEND`/`RECV`). Created by `NotifyCreate` (returns a `SIGNAL | WAIT` cap); ends handed out via cap-transfer.
 - `Signal(notif, mask)` ORs `mask` into the pending bits and wakes a waiter — **never blocks, never fails for resources**. Repeated signals before a wait coalesce (it's a bitset OR, not a queue).
@@ -66,14 +66,14 @@ Three tiers, by size and synchrony:
 One endpoint thus stands in for an unbounded set of server objects with no kernel object per object — the badge *is* the object selector, interpreted entirely in userspace.
 
 ## Mint / derive
-The `MintBadged` syscall (`a0` = endpoint handle, needs `MINT`; `a1` = badge; `a2` = rights) derives a child `Endpoint` cap naming the same endpoint, stamped with the badge + rights, into the caller's table; it snitches a `CapEvent::Transferred` carrying the badge. The pure derive is `kernel_core::cap::mint_badged` (host-tested).
+The `MintBadged` syscall (`a0` = endpoint handle, needs `MINT`; `a1` = badge; `a2` = rights) derives a child `Endpoint` cap naming the same endpoint, stamped with the badge + rights, into the caller's table; it snitches a `CapEvent::Transferred` carrying the badge. The pure derive is `kernel_proc::cap::mint_badged` (host-tested).
 
 The **`MINT`-holder owns the object and sets the child's rights freely** (it is granting authority to *its* endpoint, not attenuating its own). Monotonic narrowing by non-owners is the lever for *client re-delegation* — **deferred**: clients hold no `MINT`, so they cannot mint at all yet.
 
 > **Two rights layers** (see filesystem-design.md → *Two rights namespaces*): the kernel's generic `rights` mask governs **endpoint operations** (below). A server packs its own **object rights** (e.g. file `READ`/`WRITE`) into the **badge**, where they are immutable and server-interpreted. Narrowing *object* rights is therefore a server mint, not a kernel derive — until the deferred typed-capability generalization.
 
 ## Endpoint rights (the generic mask)
-Defined in `snitchos_abi::rights` (single source of truth; `kernel_core::cap::Rights` wraps them):
+Defined in `snitchos_abi::rights` (single source of truth; `kernel_proc::cap::Rights` wraps them):
 - **`SEND`** — may `send`/`call` on this endpoint (client side).
 - **`RECV`** — may `receive` on this endpoint (server side; normally held only by the server).
 - **`MINT`** — may derive badged children of this cap.
@@ -84,7 +84,7 @@ A typical FS *client* cap is `SEND`; the server holds `RECV | MINT`. (A `GRANT` 
 A `reply`/`reply_recv` may carry one capability to hand back to the caller: the cap handle rides in **`a6`**, the kernel **moves** it out of the server's table into the caller's, and the caller's `call` returns its fresh handle in **`a5`**. This is load-bearing for the FS — `lookup`/`open` is a `call` whose reply hands back a freshly-minted, badged child cap. (The reply cap is the kernel-minted special case of the same move.) General `send`-carries-caps + a `GRANT` gate is the deferred follow-on.
 
 ## Revocation
-The per-process cap table's **generation** field (`kernel-core/src/cap.rs`) — given a real job by v0.9b's single-use `consume` — is the kernel-side revocation hook: bump a slot's generation and every outstanding handle to it fails to resolve. Finer liveness (per-badge — e.g. a deleted inode) is revoked in userspace: the server drops the badge→object mapping and replies not-found. **Coarse (whole-cap) revocation is the kernel's; fine (per-object) revocation is the server's.**
+The per-process cap table's **generation** field (`kernel-proc/src/cap.rs`) — given a real job by v0.9b's single-use `consume` — is the kernel-side revocation hook: bump a slot's generation and every outstanding handle to it fails to resolve. Finer liveness (per-badge — e.g. a deleted inode) is revoked in userspace: the server drops the badge→object mapping and replies not-found. **Coarse (whole-cap) revocation is the kernel's; fine (per-object) revocation is the server's.**
 
 # Bulk transfer — cross-address-space copy (option D)
 

@@ -37,7 +37,8 @@ enum Cmd {
         #[arg(long, default_value = "")]
         features: String,
         /// Cap the run at N instruction steps (snemu's default is 50M).
-        #[arg(long)]
+        /// Accepts `K`/`M`/`B` suffixes, e.g. `400M`, `1.2B`.
+        #[arg(long, value_parser = magnitude::parse)]
         max_steps: Option<u64>,
         /// Dump every telemetry frame snemu decodes off the virtio-console.
         #[arg(long)]
@@ -52,7 +53,8 @@ enum Cmd {
     /// structurally diff their telemetry frame streams (timestamps normalized).
     SnemuDiff {
         /// snemu instruction-step budget (round-robin splits it across harts).
-        #[arg(long, default_value_t = 150_000_000)]
+        /// Accepts `K`/`M`/`B` suffixes, e.g. `400M`, `1.2B`.
+        #[arg(long, default_value = "150M", value_parser = magnitude::parse)]
         steps: u64,
         /// Seconds to collect QEMU telemetry before killing it.
         #[arg(long, default_value_t = 6)]
@@ -77,8 +79,9 @@ enum Cmd {
     /// among scenarios of the *same* workload. This forks one boot across
     /// *different* workloads via a layout-preserving DTB overwrite.
     SnemuFork {
-        /// Per-workload step budget after the fork.
-        #[arg(long, default_value_t = 20_000_000)]
+        /// Per-workload step budget after the fork. Accepts `K`/`M`/`B`
+        /// suffixes, e.g. `400M`, `1.2B`.
+        #[arg(long, default_value = "20M", value_parser = magnitude::parse)]
         steps: u64,
     },
     /// Fidelity audit: replay every itest scenario's assertion against a
@@ -88,8 +91,9 @@ enum Cmd {
         /// Per-scenario snemu instruction-step budget. Passing scenarios
         /// short-circuit well under this; the budget only bounds failing ones and
         /// the slow OOM/cooperative workloads. 400M recovers the budget-sensitive
-        /// scenarios (e.g. `sched-yield-round-trips`).
-        #[arg(long, default_value_t = 400_000_000)]
+        /// scenarios (e.g. `sched-yield-round-trips`). Accepts `K`/`M`/`B`
+        /// suffixes, e.g. `400M`, `1.2B`.
+        #[arg(long, default_value = "400M", value_parser = magnitude::parse)]
         steps: u64,
         /// Audit only the first N scenarios (faster smoke).
         #[arg(long)]
@@ -172,8 +176,9 @@ enum Cmd {
         /// default `init` boot.
         #[arg(long)]
         workload: Option<String>,
-        /// Instructions to run (post-boot) under the profiler.
-        #[arg(long, default_value_t = 400_000_000)]
+        /// Instructions to run (post-boot) under the profiler. Accepts
+        /// `K`/`M`/`B` suffixes, e.g. `400M`, `1.2B`.
+        #[arg(long, default_value = "400M", value_parser = magnitude::parse)]
         steps: u64,
         /// How many top functions to list.
         #[arg(long, default_value_t = 25)]
@@ -190,8 +195,9 @@ enum Cmd {
         /// the default `init` boot.
         #[arg(long)]
         workload: Option<String>,
-        /// Instruction-step budget per run.
-        #[arg(long, default_value_t = 50_000_000)]
+        /// Instruction-step budget per run. Accepts `K`/`M`/`B` suffixes, e.g.
+        /// `400M`, `1.2B`.
+        #[arg(long, default_value = "50M", value_parser = magnitude::parse)]
         steps: u64,
         /// Number of timed runs (determinism check + wall-clock spread).
         #[arg(long, default_value_t = 5)]
@@ -457,7 +463,8 @@ enum Cmd {
         #[arg(long)]
         workload: Option<String>,
         /// (`caps` only) snemu instruction-step budget for the capture boot.
-        #[arg(long, default_value_t = 150_000_000)]
+        /// Accepts `K`/`M`/`B` suffixes, e.g. `400M`, `1.2B`.
+        #[arg(long, default_value = "150M", value_parser = magnitude::parse)]
         steps: u64,
     },
     /// Count lines of code across the workspace, split by crate and

@@ -8,7 +8,7 @@
 use alloc::collections::{BTreeMap, VecDeque};
 
 /// Identifier for a task. Allocated by the kernel-side task table;
-/// kernel-core treats it as an opaque newtype.
+/// kernel-proc treats it as an opaque newtype.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TaskId(pub u32);
 

@@ -1,6 +1,6 @@
 //! Tasks, their authority, and their lifecycle — host-tested.
 //!
-//! The last carve-out from `kernel-core` (see `plans/kernel-core-split.md`), and
+//! The last carve-out from `kernel-core` (see `plans/legacy/kernel-core-split.md`), and
 //! the one concept that crate was really about once memory, observability,
 //! devices and boot had been lifted out of it.
 //!

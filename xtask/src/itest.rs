@@ -3,7 +3,7 @@
 //! decoded `Frame` sequence. See `plans/kernel-integration-tests.md`.
 
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use itest_harness::{CpuProfile, ItestLock, LockError, RunnerConfig};
@@ -651,49 +651,120 @@ fn current_commit_short() -> Option<String> {
     }
 }
 
-/// Workspace crates that have host-runnable `cargo test` suites.
-/// The kernel itself is `no_std`/`no_main` and won't build for the
-/// host — testable logic lives in the `kernel-*` crates. Each entry is
-/// the crate name plus any extra args (features) the suite needs.
+/// Crates the host gate deliberately does **not** `cargo test`, each with the
+/// reason. Every other workspace member is tested by default: the gate derives
+/// its list from `cargo metadata`, so a new crate is host-tested the moment it
+/// joins the workspace, and this list is the only way out. Opting out is a
+/// decision someone has to write down.
 ///
-/// Keep the `kernel-*` list in sync with the workspace members: a crate
-/// missing here is silently never host-tested (nothing else runs these).
-const UNIT_TEST_CRATES: &[(&str, &[&str])] = &[
-    ("kernel-mem", &[]),
-    ("kernel-obs", &[]),
-    ("kernel-devices", &[]),
-    ("kernel-boot", &[]),
-    ("kernel-proc", &[]),
+/// The inverse (an allow-list) let a crate be silently never-tested by simple
+/// omission — which is exactly how the `kernel-core` rename slipped through.
+const NOT_HOST_TESTED: &[(&str, &str)] = &[
+    ("kernel", "no_std/no_main, riscv64-only — won't link for the host; its logic lives in the kernel-* crates"),
+    ("snitchos-user", "riscv64-only userspace runtime (crt0 + syscall bindings)"),
+    ("snitchos-std", "riscv64-only userspace std"),
+    ("hello", "riscv64-only userspace binaries"),
+    ("fs", "riscv64-only userspace FS server"),
+];
+
+/// Extra `cargo test` args a crate's suite needs (features it can't get from
+/// its defaults). Entries naming a departed crate are an error, not a no-op.
+const EXTRA_TEST_ARGS: &[(&str, &[&str])] = &[
+    // `protocol::stream` (decoder + OwnedFrame) is behind `std`.
     ("protocol", &["--features", "std"]),
-    ("collector", &[]),
-    ("itest-harness", &[]),
-    ("diagram", &[]),
     // `--features testing` exposes `stitch::testing` so the integration tests
     // (e.g. the stim FSM in `tests/stim_fsm.rs`) can run the interpreter.
     ("stitch", &["--features", "testing"]),
 ];
 
-/// Run every workspace crate's host unit tests, in order. Returns
-/// `SUCCESS` only if all crates pass. Bails out on first failure
-/// (no point continuing if `kernel-core` is broken).
+/// The workspace's package names, straight from `cargo metadata --no-deps`.
+fn workspace_members() -> Result<Vec<String>, String> {
+    let out = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .output()
+        .map_err(|e| format!("run cargo metadata: {e}"))?;
+    if !out.status.success() {
+        return Err("cargo metadata failed".to_string());
+    }
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("parse cargo metadata: {e}"))?;
+    let packages = json["packages"].as_array().ok_or("cargo metadata: no packages array")?;
+    Ok(packages.iter().filter_map(|p| p["name"].as_str().map(str::to_owned)).collect())
+}
+
+/// Decide which crates the host gate tests, and with what args: every member
+/// that isn't excluded, in member order. Both lists must describe crates that
+/// actually exist — a stale entry (renamed or deleted crate) is an error, so a
+/// rename can't quietly drop a crate out of the gate.
+fn unit_test_plan<'a>(
+    members: &[&'a str],
+    excluded: &[(&str, &str)],
+    extra_args: &[(&'static str, &'static [&'static str])],
+) -> Result<Vec<(&'a str, &'static [&'static str])>, String> {
+    let stale: Vec<&str> = excluded
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(extra_args.iter().map(|(name, _)| *name))
+        .filter(|name| !members.contains(name))
+        .collect();
+    if !stale.is_empty() {
+        return Err(format!(
+            "unit-test policy names crates that are not workspace members: {}. \
+             Renamed or removed? Update NOT_HOST_TESTED / EXTRA_TEST_ARGS in xtask/src/itest.rs.",
+            stale.join(", ")
+        ));
+    }
+
+    Ok(members
+        .iter()
+        .filter(|name| !excluded.iter().any(|(excluded, _)| excluded == *name))
+        .map(|name| {
+            let args = extra_args
+                .iter()
+                .find(|(crate_name, _)| crate_name == name)
+                .map_or(&[] as &'static [&'static str], |(_, args)| *args);
+            (*name, args)
+        })
+        .collect())
+}
+
+/// Run every host-side check, in order: each workspace crate's unit tests, the
+/// loom model-checks, and the generated-diagram drift check. Returns `SUCCESS`
+/// only if all pass. Bails out on first failure (no point continuing if a
+/// foundation crate is broken).
 pub fn run_unit_tests() -> ExitCode {
     eprintln!("=== unit tests ===");
-    for (crate_name, extra_args) in UNIT_TEST_CRATES {
+    let members = match workspace_members() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("unit tests: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let names: Vec<&str> = members.iter().map(String::as_str).collect();
+    let plan = match unit_test_plan(&names, NOT_HOST_TESTED, EXTRA_TEST_ARGS) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("unit tests: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    for (crate_name, extra_args) in plan {
         let mut args = vec!["test", "-p", crate_name, "--quiet"];
         args.extend_from_slice(extra_args);
         if !run_cargo_test(crate_name, &args, &[]) {
             return ExitCode::from(1);
         }
     }
-    // The loom model-check tests (kernel-core/tests/loom_tx.rs) live
+    // The loom model-check tests (kernel-devices/tests/loom_tx.rs) live
     // behind `--cfg loom`, where loom swaps in its own Mutex/thread/
     // UnsafeCell. They need a separate compilation with that cfg set; a
     // normal `cargo test` compiles the file to nothing. The config-level
     // rustflags are riscv-target-scoped, so overriding RUSTFLAGS for this
     // host build clobbers nothing.
     if !run_cargo_test(
-        "kernel-core (loom)",
-        &["test", "-p", "kernel-core", "--test", "loom_tx", "--quiet"],
+        "kernel-devices (loom)",
+        &["test", "-p", "kernel-devices", "--test", "loom_tx", "--quiet"],
         &[("RUSTFLAGS", "--cfg loom")],
     ) {
         return ExitCode::from(1);
@@ -770,4 +841,60 @@ fn detect_stale_qemus() -> Vec<u32> {
                 .unwrap_or_default()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod unit_test_plan_tests {
+    use super::{EXTRA_TEST_ARGS, NOT_HOST_TESTED, unit_test_plan};
+
+    #[test]
+    fn a_crate_nobody_mentions_is_tested_by_default() {
+        let plan = unit_test_plan(&["brand-new-crate"], &[], &[]).expect("valid plan");
+        assert_eq!(plan, vec![("brand-new-crate", &[] as &[&str])]);
+    }
+
+    #[test]
+    fn an_excluded_crate_is_skipped() {
+        let plan = unit_test_plan(&["kernel", "collector"], &[("kernel", "riscv only")], &[])
+            .expect("valid plan");
+        assert_eq!(plan, vec![("collector", &[] as &[&str])]);
+    }
+
+    #[test]
+    fn extra_args_attach_to_their_crate() {
+        let plan = unit_test_plan(&["protocol"], &[], &[("protocol", &["--features", "std"])])
+            .expect("valid plan");
+        assert_eq!(plan, vec![("protocol", &["--features", "std"] as &[&str])]);
+    }
+
+    #[test]
+    fn plan_follows_member_order() {
+        let plan = unit_test_plan(&["b", "a"], &[], &[]).expect("valid plan");
+        assert_eq!(plan.iter().map(|(n, _)| *n).collect::<Vec<_>>(), vec!["b", "a"]);
+    }
+
+    /// A renamed or deleted crate must not leave a silent entry behind — that is
+    /// how `kernel-core`'s rename slipped past the gate.
+    #[test]
+    fn an_exclusion_naming_a_departed_crate_is_an_error() {
+        let err = unit_test_plan(&["collector"], &[("kernel-core", "gone")], &[])
+            .expect_err("stale exclusion must fail");
+        assert!(err.contains("kernel-core"), "error should name the stale entry: {err}");
+    }
+
+    #[test]
+    fn extra_args_naming_a_departed_crate_are_an_error() {
+        let err = unit_test_plan(&["collector"], &[], &[("kernel-core", &["--features", "std"])])
+            .expect_err("stale args must fail");
+        assert!(err.contains("kernel-core"), "error should name the stale entry: {err}");
+    }
+
+    /// The committed lists describe the real workspace, checked against the real
+    /// `cargo metadata` — this is what fails when a crate is renamed or removed.
+    #[test]
+    fn the_committed_lists_match_the_workspace() {
+        let members = super::workspace_members().expect("cargo metadata");
+        let names: Vec<&str> = members.iter().map(String::as_str).collect();
+        unit_test_plan(&names, NOT_HOST_TESTED, EXTRA_TEST_ARGS).expect("committed lists are current");
+    }
 }

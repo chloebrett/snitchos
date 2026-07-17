@@ -94,7 +94,7 @@ pub const fn user_range_ok(ptr: usize, len: usize) -> bool {
 /// PTE this module produces. A (accessed) and D (dirty) are pre-set
 /// to 1 on every leaf — eliminates the hardware-update trap path.
 /// G (global) is set on kernel-shared mappings; the kernel passes it
-/// in via `PtePerms` since `kernel-core` doesn't know which side of
+/// in via `PtePerms` since `kernel-mem` doesn't know which side of
 /// the canonical-half divide we're on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PtePerms(u64);

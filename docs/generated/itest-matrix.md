@@ -37,6 +37,7 @@
 | fs-write-read | fs | wfi | userspace, ipc |
 | heap-grows-on-demand | heap-grow | wfi | userspace |
 | heap-oom | heap-oom | cpu | heap, oom |
+| supervisor-detects-and-kills-a-hung-service | hung-detect | cpu | userspace |
 | boot-reaches-heartbeat | init | wfi | boot |
 | frame-allocator-metrics | init | wfi | frame |
 | heartbeat-cadence | init | wfi | boot |
@@ -60,6 +61,7 @@
 | rpc-telemetry | ipc-rpc | wfi | userspace, ipc |
 | rpc-trace-nests | ipc-rpc | wfi | userspace, ipc |
 | ipi-pong | ipi-pong | cpu | smp, ipi, stress |
+| kill-without-a-process-cap-is-refused | kill-no-cap | cpu | userspace |
 | sched-task-lookup-is-o1 | live-tasks | cpu | sched |
 | manifest-iface-served | manifest-iface | wfi | userspace, fs |
 | manifest-satisfy-attenuates | manifest-satisfy | wfi | userspace, fs |
@@ -98,10 +100,13 @@
 | stitch-telemetry-on-the-wire | stitch-repl | wfi | userspace, stitch |
 | supervised-regrants-caps-on-restart | supervised | cpu | userspace |
 | supervised-ipc-client-cap-survives | supervised-ipc | cpu | userspace |
+| supervised-kill-stops-a-child | supervised-shutdown | cpu | userspace |
+| supervised-shuts-down-in-reverse-dep-order | supervised-shutdown | cpu | userspace |
 | syscall-hog-still-preempted | syscall-hog | cpu | userspace |
 | smp-tlb-shootdown-visible | tlb-shootdown | cpu | smp |
 | preempt-runaway-user-task | user-hog | cpu | userspace |
 | preemption-telemetry | user-hog | cpu | userspace |
+| userspace-runs-on-hart-0 | user-on-hart0 | cpu | userspace |
 | userspace-cap-denied | userspace | wfi | userspace |
 | userspace-cap-granted-event | userspace | wfi | userspace |
 | userspace-emits-span | userspace | wfi | userspace |
@@ -120,3 +125,4 @@
 | virtio-storm | virtio-storm | cpu | smp, stress |
 | wait-any-reaps-exiting-child | wait-any | cpu | userspace |
 | two-userspace-workers-round-robin | workers | cpu | userspace |
+| cross-hart-kill-stops-a-child | xhart-kill | cpu | userspace |

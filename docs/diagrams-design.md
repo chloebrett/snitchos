@@ -1,7 +1,12 @@
 # Diagrams: what we draw by hand, what the code draws for us
 
-> **Status:** design, unbuilt. First slice = one hand-drawn diagram + one
-> generated one, to prove the split and the `xtask diagram` scaffolding.
+> **Status (2026-07-17): BUILT.** The `diagram` crate + `cargo xtask diagram` ship
+> both buckets: static targets (`deps`, `itest-matrix`) are `--check`-gated so drift
+> fails the test gate, and the telemetry-projected targets (`caps`, `trace`,
+> `switches`) fold `OwnedFrame`s from a snemu boot. Renders live in
+> `docs/generated/`; the hand-drawn set carries a `<!-- diagram: reviewed <date>,
+> owner=… -->` banner. See "Audit follow-ups (shipped)" below for what landed after
+> the first slice.
 >
 > **Thesis:** A diagram is either an *editorial claim* about the system (needs
 > judgement, drifts slowly, hand-drawn) or a *projection* of a source of truth
@@ -187,7 +192,7 @@ cargo xtask diagram <target> [--check] [--out PATH] [--capture PATH | --workload
 **Crate boundary:** diagram logic lives in its **own `diagram` library crate**,
 not inside xtask. This keeps the projections pure, host-tested, and
 independently mutation-testable (add it to the `xtask mutants` set), and matches
-the workspace grain — xtask orchestrates libs (`kernel-core`, `protocol`,
+the workspace grain — xtask orchestrates libs (the `kernel-*` crates, `protocol`,
 `collector`), it doesn't house them. xtask stays a thin I/O shell: it shells out
 `cargo metadata`, drives snemu for a capture, does `--check` diffs and file
 writes, then **delegates every projection to `diagram`**.

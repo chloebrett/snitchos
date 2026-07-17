@@ -6,6 +6,9 @@ publish = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+# Human-scale integers (`1.2B` ⇄ 1_200_000_000): backs the `--steps` value
+# parsers and the instret renders, so a reported count pastes back into a flag.
+magnitude = { path = "../magnitude" }
 # Diagram generation lib — xtask provides the I/O (cargo metadata, capture,
 # --check diffs, file writes) and delegates every projection here.
 diagram = { path = "../diagram" }

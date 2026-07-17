@@ -1,6 +1,6 @@
 # Splitting kernel-core into per-concern crates
 
-The original carve-out plan ([legacy/kernel-core-carveout.md](legacy/kernel-core-carveout.md))
+The original carve-out plan ([kernel-core-carveout.md](kernel-core-carveout.md))
 closed with: *"No splitting the kernel binary further. Just one new crate. If
 later we want `kernel-trap-core` / `kernel-tracing-core` separation, fine — but
 speculative now."*
@@ -30,7 +30,7 @@ house position:
   boundary is structural.
 - `kernel::sync` + the `disallowed_types` clippy lint — one chokepoint, enforced
   by tooling rather than by remembering.
-- and from [itest-harness-extraction.md](legacy/itest-harness-extraction.md): *"We're
+- and from [itest-harness-extraction.md](itest-harness-extraction.md): *"We're
   going to want this even if no one else ever uses the harness crate — **the
   boundary is the discipline.**"*
 
@@ -237,13 +237,41 @@ only one with real design work.
 
   **`kernel-core` now holds no code — only `lib.rs` re-exports, and 0 tests.**
 
-- **Step 6: the facade sweep** — delete the `pub use` lines, repoint ~200 call
-  sites, delete `kernel-core`. One mechanical commit, compiler-driven.
+- ~~**Step 6: the facade sweep**~~ **DONE — `kernel-core` no longer exists.**
 
-  The umbrella question the plan deferred can now be settled with the thing in
-  front of us: `kernel-core` is currently a crate with **zero code, zero tests,
-  and five dependencies** — it rebuilds whenever any of them changes and produces
-  nothing. That is the hub the split existed to break. Delete it.
+  The umbrella question settled itself: by step 5 `kernel-core` was a crate with
+  zero code, zero tests, and five dependencies — it rebuilt whenever any of them
+  changed and produced nothing. Deleted.
+
+  The `kernel/` rewrite was genuinely mechanical (33 files, all simple
+  `use kernel_core::<module>::…` forms, no grouped imports to split). **The three
+  near-miss pairs land in different crates** — `frame`/`framebuffer`,
+  `heap`/`heap_smoke`, `span`/`span_name` — so the rewrite needs word boundaries;
+  naive substring replacement silently sends `framebuffer` to `kernel-mem`.
+
+  **What the compiler could NOT catch — the real work of this step:**
+  - **`xtask/src/itest.rs::UNIT_TEST_CRATES`** listed `kernel-core`. This is what
+    `cargo xtask test` runs. Missing a crate here means it is *silently never
+    host-tested*. Now lists all five, with a comment saying so.
+  - **`xtask` clippy + mutants crate lists** (`main.rs`) hardcoded `-p kernel-core`
+    → hard error.
+  - **`xtask/src/diagram_cmd.rs::deps_layer`** maps crate → cluster; unlisted
+    crates "render ungrouped". The five would have rendered as a hairball.
+  - **`docs/generated/deps.md`** was *already stale from steps 1–5* — the
+    `--check` gate would have failed `cargo xtask test`. Regenerated; it now
+    documents the architecture (kernel → all five; obs → protocol; proc → mem).
+  - **`learning/` toys** — an *excluded* workspace, so nothing compiles them.
+    Their comments cite `kernel-core/src/mmu.rs` / `frame.rs` as teaching paths;
+    a learner would have followed them to a dead end. Repointed at `kernel-mem`.
+  - **Workspace `Cargo.toml` comments** (lint opt-in list, loom cfg note).
+
+  Prose: CLAUDE.md's layout block + test table rewritten (it is the map every
+  session reads — a stale one misleads every future session). Living design docs
+  had their qualified paths remapped. **Deliberately left alone:** dated records
+  (`fable-kernel-review-2026-07-05.md`, `v0.6-mutex-vs-spsc-measurements.md`,
+  `roadmap-historical-through-v0.11.md`), `posts/` (a lab notebook), and
+  `plans/legacy/`. Rewriting a dated record to say `kernel-proc` would falsify
+  history — those sentences were true when written.
 
 ## risks and known weaknesses
 
@@ -373,6 +401,61 @@ as tracked renames, so blame survives. Total hand-written diff: one import
 
 Measurements are in "the cost we're accepting" above — they are the reason this
 plan is now justified on factoring grounds rather than speed.
+
+---
+
+# outcome
+
+**Done. `kernel-core` no longer exists.** `kernel/Cargo.toml` names five crates
+that each mean something:
+
+```
+kernel → kernel-mem     (none)                    121 tests
+       → kernel-obs     (protocol, postcard)       45
+       → kernel-devices (none)                     62
+       → kernel-boot    (none)                     73
+       → kernel-proc    (protocol, abi, mem)      216+
+```
+
+`cargo xtask test` green (all five + loom + diagram drift); `cargo xtask clippy`
+clean; 119/119 snemu-itest. Every `src/` module moved with a **`| 0`** diff —
+not one line of moved code was edited to make it fit, across all five crates.
+That was the acceptance criterion, and it held from step 1 to step 5: the
+boundaries were found, not forced.
+
+Three of the five are **dependency-free**, and two of those (`devices`, `boot`)
+don't allocate in production either (`extern crate alloc` is `cfg(test)`-gated).
+Most of what was called "core" turns out to have nothing to do with the wire
+format — a fact that was undiscoverable while it was one crate.
+
+**What this cost, honestly:** the build measurements never turned in the split's
+favour (see "the cost we're accepting"). This was bought with build time and paid
+for in enforcement. If the full-suite cost ever bites, merge crates back — don't
+re-litigate the boundary.
+
+**The durable lessons, worth more than the crates:**
+
+1. **`unsafe`-freedom is not the test for what belongs out of the kernel.** Glue
+   that locks a static and threads a `TrapFrame` has no `unsafe` and still can't
+   run on the host. The test is *statics, `TrapFrame`, or MMIO*. And pure logic
+   hides *inside* `unsafe` functions — which is where the W^X bug was, and which
+   a file-level search cannot find.
+2. **Survey references, not imports.** Grepping `use` missed a fully-qualified
+   `alloc::collections::BTreeSet` (step 4) and an `include_bytes!` fixture
+   (step 5). Both were caught by the compiler — but the same blind spot in
+   `xtask`'s hardcoded crate lists would have *silently* stopped running tests.
+3. **The compiler is not the gate.** The genuinely dangerous work in step 6 was
+   all in places rustc never looks: test-crate lists, diagram layer maps, an
+   excluded workspace's teaching paths.
+
+Open follow-ups (both from the ELF work, neither blocking):
+
+- **`mem_size` is unbounded** in `elf::parse` — a malicious ELF declaring
+  `mem_size = 2^60` makes `page_perms` build an enormous `BTreeMap` and hang.
+  Contradicts the module's own "never a panic" trust-boundary claim; matters for
+  v0.10's untrusted images.
+- **`WxViolation` prints its page in decimal** (`268435456`); a hex `Debug` would
+  make the panic line readable.
 
 ---
 *On completion, `git mv` this file to `plans/legacy/` — do not delete it.*

@@ -18,7 +18,7 @@ This page commits the object shape and the syscall surface before any code, the 
 
 We already wake a parent when a child exits — `ReapTable` + the kernel's `block_current`/`wake`. So why not just keep doing that per case?
 
-Because that path is **welded to one meaning.** `kernel_core::reap::ReapTable` knows about zombies and exit statuses; `sched::wait_for`/`note_exit` know about parents and children. The next async wake — a device IRQ arriving for a driver — has nothing to do with zombies, but it needs the identical control-flow: *a userspace task parks; something happens in the kernel (or another task); the task is made runnable and told it happened.* Two bespoke copies of that is two places to get the blocking/wake race wrong.
+Because that path is **welded to one meaning.** `kernel_proc::reap::ReapTable` knows about zombies and exit statuses; `sched::wait_for`/`note_exit` know about parents and children. The next async wake — a device IRQ arriving for a driver — has nothing to do with zombies, but it needs the identical control-flow: *a userspace task parks; something happens in the kernel (or another task); the task is made runnable and told it happened.* Two bespoke copies of that is two places to get the blocking/wake race wrong.
 
 A `Notification` is that control-flow **with the meaning removed.** The kernel carries a bit; userspace decides the bit means "your child exited" or "the UART has a byte" or "the timer fired." Same object, same syscalls, same trace shape — interpreted entirely above the kernel. This is the project's recurring move (badges, span names, metric names): *the kernel provides the mechanism and stays ignorant of the semantics.*
 
@@ -43,10 +43,10 @@ The bit *mask* is the one word of meaning we permit, and it is **userspace-defin
 
 ## Pure core, mirroring `ReapTable`
 
-The bookkeeping is pure data — no `unsafe`, no MMIO, host-tested — exactly like `kernel_core::reap` and `kernel_core::ipc`. Sketch:
+The bookkeeping is pure data — no `unsafe`, no MMIO, host-tested — exactly like `kernel_proc::reap` and `kernel_proc::ipc`. Sketch:
 
 ```rust
-// kernel_core::notify
+// kernel_proc::notify
 pub enum SignalStep { Woke(TaskId), NoWaiter }   // kernel wakes the returned task
 pub enum WaitStep   { Ready(u64), Block }         // bits, or park-and-block
 
@@ -141,7 +141,7 @@ In Tempo these let you *see the edge*: task X signals at t₀, task Y was parked
 
 # What v0.12 ships vs. defers
 
-**Ships:** the `Notification` object (`kernel_core::notify`, host-tested), `Object::Notification` + `SIGNAL`/`WAIT` rights, `NotifyCreate`/`Signal`/`WaitNotify` syscalls + runtime bindings, one waiter per notification (second waiter refused + snitched), the two wire frames, and a minimal two-task itest scenario (`A` signals, `B` waits, assert `B` wakes with the right bits and a `NotifySignal`→`NotifyWait` pair on the wire).
+**Ships:** the `Notification` object (`kernel_proc::notify`, host-tested), `Object::Notification` + `SIGNAL`/`WAIT` rights, `NotifyCreate`/`Signal`/`WaitNotify` syscalls + runtime bindings, one waiter per notification (second waiter refused + snitched), the two wire frames, and a minimal two-task itest scenario (`A` signals, `B` waits, assert `B` wakes with the right bits and a `NotifySignal`→`NotifyWait` pair on the wire).
 
 **Defers (documented growth points, not silent gaps):**
 - **Folding child-exit onto the notification** (Option B) — after the device-IRQ consumer validates the generic shape.
@@ -155,8 +155,8 @@ In Tempo these let you *see the edge*: task X signals at t₀, task Y was parked
 # References
 
 - [docs/ipc-design.md](ipc-design.md) — the synchronous endpoint half; notifications are its async sibling (the doc sketches both).
-- `kernel_core::reap` (`kernel-core/src/reap.rs`) — the pure-core bookkeeping pattern this mirrors; also the path child-exit uses today.
-- `kernel_core::user::cap` — `Object` / `Rights` / `Multiplicity`; where the `Notification` variant + `SIGNAL`/`WAIT` bits land.
+- `kernel_proc::reap` (`kernel-proc/src/reap.rs`) — the pure-core bookkeeping pattern this mirrors; also the path child-exit uses today.
+- `kernel_proc::cap` — `Object` / `Rights` / `Multiplicity`; where the `Notification` variant + `SIGNAL`/`WAIT` bits land.
 - `kernel::sched::{block_current, wake}` (`kernel/src/sched/mod.rs`) — the park/unpark primitives the kernel side reuses verbatim.
 - [plans/legacy/v0.12-exit-wait.md](../plans/legacy/v0.12-exit-wait.md) — edge #2 ("general notification primitive — TODO") is this document's mandate.
 - [docs/roadmap-and-milestones.md](roadmap-and-milestones.md) — v0.12 lifecycle; v0.13 shell is the next consumer of a reliable `Wait`.

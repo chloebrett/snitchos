@@ -1277,11 +1277,14 @@ fn print_slowest(results: &[Row], boot_instret: u64) {
     // only, so the boot line makes the north-star figure honest.
     let scenario_total: u64 = ranked.iter().map(|r| r.instret).sum();
     let total = scenario_total + boot_instret;
-    println!("\n=== slowest by guest instructions (Minstret; {}M total, {}M boot-once) ===",
-        total / 1_000_000, boot_instret / 1_000_000);
+    println!(
+        "\n=== slowest by guest instructions ({} total, {} boot-once) ===",
+        magnitude::format(total),
+        magnitude::format(boot_instret)
+    );
     for r in ranked.iter().take(TOP) {
         let pct = if total == 0 { 0.0 } else { 100.0 * r.instret as f64 / total as f64 };
-        println!("  {:>7}M  {:>4.1}%  {}", r.instret / 1_000_000, pct, r.name);
+        println!("  {:>8}  {:>4.1}%  {}", magnitude::format(r.instret), pct, r.name);
     }
 }
 

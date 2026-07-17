@@ -998,6 +998,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "magnitude"
+version = "0.0.1"
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2393,6 +2397,7 @@ dependencies = [
  "diagram",
  "fs-proto",
  "itest-harness",
+ "magnitude",
  "object",
  "postcard",
  "protocol",

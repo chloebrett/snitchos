@@ -225,7 +225,7 @@ real hardware:
    accept the cost knowingly.
 3. **Tunable heartbeat period via bootargs.** `TICKS_PER_HEARTBEAT` is a hardcoded
    const (`kernel/src/trap/mod.rs:71`); `bootargs::param_usize`
-   (`kernel-core/src/workloads/bootargs.rs:270`) already exists, so `hb_div=<n>` is a
+   (`kernel-boot/src/bootargs.rs:270`) already exists, so `hb_div=<n>` is a
    small, host-testable change. **Caveat:** per the reframing fact, this only pays
    for scenarios where busy tasks pin the clock to real instret *while* the scenario
    waits for the Nth heartbeat (e.g. the OOM leaks, which leak per heartbeat while
@@ -290,7 +290,7 @@ an itest wall-clock play, the weakest option here.
 | Per-block interrupt check / block dispatch | `snemu/src/cpu.rs:881, 892` |
 | Block exit paths (chaining hook) | `snemu/src/block.rs:395-527` |
 | Heartbeat period const | `kernel/src/trap/mod.rs:71` |
-| Bootarg param parsing | `kernel-core/src/workloads/bootargs.rs:270` |
+| Bootarg param parsing | `kernel-boot/src/bootargs.rs:270` |
 | Shootdown ack spin | `kernel/src/mem/mmu.rs:688` |
 | Storm spin loops (UART-fenced) | `kernel/src/workloads/storms.rs:332, 610, 623, 705` |
 | Frame↔instret tagging | `xtask/src/itest/snemu_audit.rs:47` |

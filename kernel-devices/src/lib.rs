@@ -3,7 +3,7 @@
 //! blob (`ramfb`), framebuffer geometry (`framebuffer`), and the console input
 //! ring (`console`).
 //!
-//! Carved out of `kernel-core` — see `plans/kernel-core-split.md`. **No MMIO.**
+//! Carved out of `kernel-core` — see `plans/legacy/kernel-core-split.md`. **No MMIO.**
 //! Every register poke lives in `kernel/src/device/`; what's here is the part
 //! that decides *what* to write and *in what order* — the part with branches
 //! worth asserting on. The kernel side reaches it through trait seams

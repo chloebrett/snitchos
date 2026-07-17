@@ -8,7 +8,9 @@ _Stitch: a small, immutable-by-default managed language for SnitchOS — an **ef
 
 Exploratory. Not on the milestone roadmap — a **parallel side project** that can move independently of the kernel track. Its first-class concern is the _implementer's_ education: how a Java-like language is actually built (front end → tree-walk → bytecode VM → generational GC). The novelty that earns it a place _on SnitchOS specifically_ is the capability and telemetry integration; the runtime techniques are deliberately conventional and well-trodden.
 
-> **Status:** design only, nothing built. This page records the decisions made so far and the open questions still on the table, so the spine is written down and can be interrogated before any code exists.
+> **Status (2026-07-17): substantially BUILT — this page is now design rationale, not a pre-implementation spec.** Shipped: the lexer/parser (spanned), a surface AST lowered to a Core IR, the tree-walk interpreter (fuel + depth guards, spanned faults, backtraces), effect handlers (`handle`/`with`/`without`), modules + visibility (`ext`/`use`), an organised stdlib (`Str`/`Seq`), and a bidirectional gradual **type checker** — including the headline **capabilities-as-effects** checking. ~600 tests green. The interpreter is `no_std` + `alloc` and **runs on riscv64** (`workload=stitch-repl`). Still ahead: the bytecode VM and the generational GC (the tree-walker leaks `Rc` cycles by design until then), and generics in the checker.
+>
+> Read the sections below as *why it is the way it is*. Where a section says "will" or "planned", check `plans/stitch-*.md` and `plans/lang/` for what actually landed — several decisions were taken differently in the building.
 
 # Primary goal: learn how Java-likes are implemented
 

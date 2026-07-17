@@ -350,7 +350,7 @@ fn emit_storm_metrics(m: &Metrics, count: i64) {
     use kernel_boot::bootargs::WorkloadKind;
     // Only the storm workloads emit here; every other selection (default /
     // Smp* / OOM / userspace / IPC / FS) contributes no storm metrics.
-    // `WorkloadKind::is_storm` (host-tested in kernel-core) is the single
+    // `WorkloadKind::is_storm` (host-tested in kernel-boot) is the single
     // source of truth, so a new *non-storm* workload needs no change here.
     let Some(kind) = boot_workload::selected().filter(|k| k.is_storm()) else {
         return;

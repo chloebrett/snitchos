@@ -1,6 +1,14 @@
 # Capability revocation — design
 
-**Status:** Design / exploration (captured 2026-06-28). Pre-implementation.
+**Status: SHIPPED (2026-06-28) — built as designed, and transitive from day one.**
+`Syscall::Revoke = 28` takes a *handle* (holding the cap **is** the authority to
+reclaim its derivations); `sched::revoke_descendants_of` is the cross-table fixpoint;
+each swept holding emits a `CapEvent::Revoked`. Userspace binding:
+`Endpoint::revoke_derived`. Itest: `revoke-reclaims-a-minted-cap`. The Stitch shell's
+`hold`/`grant`/`revoke` verbs landed too, closing grant → use → reclaim end to end.
+Deferred, as scoped below: object-level revoke and `DropCap`.
+
+Originally captured 2026-06-28 as design / exploration.
 Prework for the **Stitch shell** (decided: the shell is Stitch). The shell is a
 powerbox — *"grant, then watch"* ([shell-surface-and-tui-design.md],
 [userland-text-streams-and-the-actor-model-design.md]) — and revocation completes

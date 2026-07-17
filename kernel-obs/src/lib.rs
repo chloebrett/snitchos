@@ -3,7 +3,7 @@
 //! (`sink`), the batching ring (`batch_ring`), the alloc-free panic encoder
 //! (`panic_log`), and the `Clock` trait (`clock`).
 //!
-//! Carved out of `kernel-core` — see `plans/kernel-core-split.md`. Pure
+//! Carved out of `kernel-core` — see `plans/legacy/kernel-core-split.md`. Pure
 //! bookkeeping: no asm, no MMIO, no statics. The `kernel` binary owns the live
 //! instances and the actual wire; this crate decides *what* to say and *when*,
 //! never *how* it gets out. That seam is [`sink::FrameSink`].

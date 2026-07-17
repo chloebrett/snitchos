@@ -1,6 +1,15 @@
 # Capability object names — design
 
-**Status:** Proposed.
+**Status: SHIPPED.** `abi::pack_name` + `CAP_NAME_LEN` + `CapDesc.name`,
+`protocol::CapEvent.name`, and the kernel's `handle_endpoint_create` /
+`handle_cap_list` / `emit_cap_*` all carry the name. Names flow end to end: the
+shell's `hold` renders them, and the collector reconstructs the named derivation
+tree from `CapEvent` frames into a `capabilities` Tempo trace
+([plans/legacy/cap-names-trace-view.md](../plans/legacy/cap-names-trace-view.md)).
+
+Reviewed adversarially against this design on 2026-07-05 —
+[cap-names-review-2026-07-05.md](cap-names-review-2026-07-05.md). **Check that
+review's findings before treating this page as the last word.**
 
 ## The problem
 

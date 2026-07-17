@@ -45,7 +45,7 @@ A File cap must name an identity that **survives rename** — a path doesn't, an
 - **Hierarchical later:** `directory` becomes a tree of dir-inodes; `lookup` walks components.
 
 ## The `Filesystem` trait (the deliverable — cap-agnostic, host-testable)
-Inode-addressed; imports **no** cap/IPC types, so it unit-tests host-side like `kernel-core`.
+Inode-addressed; imports **no** cap/IPC types, so it unit-tests host-side like the `kernel-*` crates.
 
 ```rust
 pub struct InodeId(u32);
