@@ -168,16 +168,12 @@ pub unsafe fn init_from_dtb(dtb: &Fdt, dtb_phys: usize) -> Result<(), InitError>
 pub fn alloc() -> Option<PhysFrame> {
     let alloc = FRAME_ALLOC.get()?;
     let result = alloc.lock().alloc();
-    match result {
-        Some(frame) => {
-            ALLOC_COUNT.inc();
-            Some(frame)
-        }
-        None => {
-            ALLOC_FAIL_COUNT.inc();
-            None
-        }
+    if result.is_some() {
+        ALLOC_COUNT.inc();
+    } else {
+        ALLOC_FAIL_COUNT.inc();
     }
+    result
 }
 
 /// Allocate a frame and zero it via the linear map. Useful for fresh
@@ -201,16 +197,12 @@ pub fn alloc_zeroed() -> Option<PhysFrame> {
 pub fn alloc_contiguous(n: usize) -> Option<PhysFrame> {
     let alloc = FRAME_ALLOC.get()?;
     let result = alloc.lock().alloc_contiguous(n);
-    match result {
-        Some(frame) => {
-            ALLOC_COUNT.add(n as u64);
-            Some(frame)
-        }
-        None => {
-            ALLOC_FAIL_COUNT.inc();
-            None
-        }
+    if result.is_some() {
+        ALLOC_COUNT.add(n as u64);
+    } else {
+        ALLOC_FAIL_COUNT.inc();
     }
+    result
 }
 
 /// Return a frame to the free pool. Double-free is idempotent

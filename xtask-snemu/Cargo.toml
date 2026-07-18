@@ -1,0 +1,30 @@
+[package]
+name = "xtask-snemu"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The snemu emulator, driven in-process for the differential oracle (`diff`),
+# the measurement spine (`bench`), and the guest instret profiler (`profile`).
+snemu = { path = "../snemu" }
+protocol = { path = "../protocol", features = ["std"] }
+# `snemu_diff::collect_frames_until_cap_quiescence` uses the cap-event
+# quiescence detector from the diagram crate.
+diagram = { path = "../diagram" }
+# QEMU/kernel-build helpers (`base_command`, `build_kernel_profiled`, `OptLevel`).
+xtask-qemu = { path = "../xtask-qemu" }
+# ELF symbol-table parsing for the profiler: map executed PCs to fn names.
+object = { version = "0.36", default-features = false, features = ["read", "std", "elf"] }
+# Demangle Rust symbol names in the profiler report.
+rustc-demangle = "0.1"
+# Human-scale integers (`1.2B`) for the profiler's instret renders.
+magnitude = { path = "../magnitude" }
+
+[dev-dependencies]
+# Encode `Frame`s into a byte stream for the incremental-decoder unit test
+# (mirrors the on-wire postcard encoding the kernel produces).
+postcard = { version = "1", features = ["alloc"] }
+
+[lints]
+workspace = true

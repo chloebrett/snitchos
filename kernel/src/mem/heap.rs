@@ -88,15 +88,12 @@ static HEAP: KernelHeap = KernelHeap {
 unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let result = self.inner.lock().allocate_first_fit(layout);
-        match result {
-            Ok(nn) => {
-                ALLOC_COUNT.inc();
-                nn.as_ptr()
-            }
-            Err(()) => {
-                ALLOC_FAIL_COUNT.inc();
-                core::ptr::null_mut()
-            }
+        if let Ok(nn) = result {
+            ALLOC_COUNT.inc();
+            nn.as_ptr()
+        } else {
+            ALLOC_FAIL_COUNT.inc();
+            core::ptr::null_mut()
         }
     }
 
@@ -159,22 +156,17 @@ pub unsafe fn init() {
 ///
 /// Bumps `GROW_COUNT` on success, `GROW_FAIL_COUNT` on failure.
 pub fn extend(extra_frames: usize) -> Result<(), ()> {
-    let result = grow_va_range(extra_frames);
-    match result {
-        Ok(extra_bytes) => {
-            // SAFETY: `grow_va_range` just installed PTEs for
-            // `[prev_top, prev_top + extra_bytes)`, contiguous with
-            // the existing heap top. `linked_list_allocator::extend`
-            // requires exactly that.
-            unsafe { HEAP.inner.lock().extend(extra_bytes) };
-            GROW_COUNT.inc();
-            Ok(())
-        }
-        Err(()) => {
-            GROW_FAIL_COUNT.inc();
-            Err(())
-        }
-    }
+    let Ok(extra_bytes) = grow_va_range(extra_frames) else {
+        GROW_FAIL_COUNT.inc();
+        return Err(());
+    };
+    // SAFETY: `grow_va_range` just installed PTEs for
+    // `[prev_top, prev_top + extra_bytes)`, contiguous with
+    // the existing heap top. `linked_list_allocator::extend`
+    // requires exactly that.
+    unsafe { HEAP.inner.lock().extend(extra_bytes) };
+    GROW_COUNT.inc();
+    Ok(())
 }
 
 /// Allocate `n` frames and `map` each into the heap VA range

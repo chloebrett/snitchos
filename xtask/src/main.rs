@@ -2,18 +2,20 @@ use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-mod audit;
+// `qemu` moved to the `xtask-qemu` crate (extracted so scenario edits don't
+// recompile it). Aliased here so every existing `crate::qemu::…` reference in
+// the submodules keeps resolving unchanged.
+use xtask_qemu as qemu;
+// snemu tooling moved to the `xtask-snemu` crate; re-imported at root so the
+// submodules' `crate::snemu_diff::…` references keep resolving unchanged.
+use xtask_snemu::{snemu_bench, snemu_diff, snemu_profile};
+// Standalone commands moved to the `xtask-cmds` crate; re-imported at root so
+// existing `crate::links::…` / `crate::source::…` references (and the dispatch
+// calls below) keep resolving unchanged.
+use xtask_cmds::{audit, links, loc, measure, snip};
+
 mod diagram_cmd;
 mod itest;
-mod links;
-mod loc;
-mod measure;
-mod qemu;
-mod snemu_bench;
-mod snemu_diff;
-mod snemu_profile;
-mod snip;
-mod source;
 
 const COLLECTOR_BIN: &str = "target/debug/collector";
 const TELEMETRY_SOCKET: &str = "/tmp/snitch-telemetry.sock";
@@ -617,9 +619,17 @@ enum SnemuCmd {
         /// How many top functions to list.
         #[arg(long, default_value_t = 25)]
         top: usize,
-        /// Profile the optimized (`--release`) kernel (matches the release itests).
+        /// Build/opt regime: `low` (debug), `mid` (release kernel + opt-1
+        /// userspace), `hi` (opt-2 userspace), `max` (opt-3 userspace). `hi`/`max`
+        /// build the userspace UB class on purpose.
+        #[arg(long, value_enum, default_value_t = qemu::OptLevel::Mid)]
+        opt: qemu::OptLevel,
+        /// Split userspace out per-PC (`[user:0x…]`) instead of collapsing it to
+        /// one `[userspace]` bucket. Locates a userspace hot-spot (e.g. a
+        /// spin-loop) by raw address — objdump the owning program there. Pair
+        /// with `--opt hi`/`max` to profile a specific userspace opt level.
         #[arg(long)]
-        release: bool,
+        user_detail: bool,
     },
     /// Measurement spine: run a workload under snemu N times and report guest
     /// MIPS + wall-clock spread over a deterministic instret. The "measure
@@ -659,7 +669,7 @@ enum SnemuCmd {
 
 /// Failure-capture transcript depth for `cargo xtask itest --capture`.
 /// Maps to `itest_harness::CaptureLevel`.
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum CaptureArg {
     /// Summary record only — no frame transcript.
     Summary,
@@ -972,6 +982,39 @@ mod cli_surface_tests {
         // The old name is gone; a bogus engine is rejected.
         assert!(Cli::try_parse_from(["xtask", "snemu-itest"]).is_err());
         assert!(Cli::try_parse_from(["xtask", "itest", "--engine", "bochs"]).is_err());
+    }
+
+    /// Step 2.2 — the QEMU-only flake/baseline flags error under the default
+    /// (snemu) engine instead of being silently ignored. `--repeat 10` on a
+    /// deterministic engine looks like it flake-tested but ran once.
+    #[test]
+    fn qemu_only_flags_are_rejected_under_snemu() {
+        use super::{Engine, misplaced_qemu_flags};
+
+        // Nothing set → nothing rejected, on either engine.
+        assert!(misplaced_qemu_flags(Engine::Snemu, &[]).is_empty());
+        assert!(misplaced_qemu_flags(Engine::Qemu, &[("repeat", true)]).is_empty());
+
+        // A QEMU-only flag set under snemu is named as misplaced.
+        assert_eq!(
+            misplaced_qemu_flags(Engine::Snemu, &[("--repeat", true), ("--capture", false)]),
+            vec!["--repeat"],
+        );
+
+        // Under QEMU the same flags are fine.
+        assert!(
+            misplaced_qemu_flags(Engine::Qemu, &[("--repeat", true), ("--profile", true)])
+                .is_empty(),
+        );
+
+        // All offenders are collected, in order, for one clear message.
+        assert_eq!(
+            misplaced_qemu_flags(
+                Engine::Snemu,
+                &[("--repeat", true), ("--force", true), ("--shared", true)],
+            ),
+            vec!["--repeat", "--force", "--shared"],
+        );
     }
 
     /// The analysis tables answer "where does the time go?", not "did I break
@@ -1328,8 +1371,8 @@ fn run_snemu(cmd: SnemuCmd) -> ExitCode {
             }
         }
         SnemuCmd::Fork { steps } => snemu_diff::run_fork(steps),
-        SnemuCmd::Profile { workload, steps, top, release } => {
-            snemu_profile::run(workload.as_deref(), steps, top, release)
+        SnemuCmd::Profile { workload, steps, top, opt, user_detail } => {
+            snemu_profile::run(workload.as_deref(), steps, top, opt, user_detail)
         }
         SnemuCmd::Bench { workload, steps, runs, taxonomy, baseline, decode_cache, verify_cache } => {
             if verify_cache {
@@ -1342,6 +1385,25 @@ fn run_snemu(cmd: SnemuCmd) -> ExitCode {
                 snemu_bench::run(workload.as_deref(), steps, runs, decode_cache)
             }
         }
+    }
+}
+
+/// The QEMU-only flags among `flags` (each `(name, was_set)`) that were set under
+/// the snemu engine — where they do nothing.
+///
+/// `itest` merges both engines' flags onto one verb, so a flag only the QEMU
+/// runner reads would otherwise be silently ignored under the default snemu
+/// engine. That is worst for the flake machinery: `--repeat 10` on a
+/// deterministic engine looks like a flake sweep but runs once. Return the
+/// offenders (in argv order, for one clear message) so the caller can refuse and
+/// point at `--engine qemu`. Empty under `Engine::Qemu` — there they're valid.
+///
+/// Display flags (`--verbose`/`--stats`) are deliberately not in the caller's
+/// list: a no-op display flag misleads no one, unlike a no-op `--repeat`.
+fn misplaced_qemu_flags<'a>(engine: Engine, flags: &[(&'a str, bool)]) -> Vec<&'a str> {
+    match engine {
+        Engine::Qemu => Vec::new(),
+        Engine::Snemu => flags.iter().filter(|(_, set)| *set).map(|(n, _)| *n).collect(),
     }
 }
 
@@ -1406,7 +1468,43 @@ fn main() -> ExitCode {
             tag,
             shared,
             opt,
-        } => match engine {
+        } => {
+            // Refuse the QEMU-only flake/baseline/partition flags under the snemu
+            // engine, where they'd do nothing. `was_set` is true when the flag
+            // departs from its default; `--repeat`/`--cpu-jobs`/`--capture` carry
+            // meaningful defaults, so compare against them rather than "present".
+            let misplaced = misplaced_qemu_flags(
+                engine,
+                &[
+                    ("--repeat", repeat != 1),
+                    ("--fail-fast", fail_fast.is_some()),
+                    ("--force", force),
+                    ("--update-baseline", update_baseline),
+                    ("--no-auto-push", no_auto_push),
+                    ("--cpu-jobs", cpu_jobs != 1),
+                    ("--profile", profile.is_some()),
+                    ("--capture", capture != CaptureArg::Signal),
+                    ("--shared", shared),
+                    ("--tag", !tag.is_empty()),
+                    ("--skip", !skip.is_empty()),
+                ],
+            );
+            if !misplaced.is_empty() {
+                use clap::CommandFactory;
+                Cli::command()
+                    .error(
+                        clap::error::ErrorKind::ArgumentConflict,
+                        format!(
+                            "{} only applies under `--engine qemu`; the default snemu \
+                             engine is deterministic, so the flake/baseline machinery \
+                             is meaningless there. Re-run with `--engine qemu`, or drop \
+                             the flag.",
+                            misplaced.join(", "),
+                        ),
+                    )
+                    .exit();
+            }
+            match engine {
             // The default. Deterministic, so one run is the gate.
             Engine::Snemu => {
                 let jobs = jobs.map_or_else(
@@ -1460,7 +1558,8 @@ fn main() -> ExitCode {
                     opt: opt.unwrap_or(qemu::OptLevel::Low),
                 })
             }
-        },
+            }
+        }
         Cmd::Baseline { cmd } => baseline(cmd),
         Cmd::Diagram { target, check, workload, steps } => match target {
             DiagramTarget::Deps => diagram_cmd::deps(check),

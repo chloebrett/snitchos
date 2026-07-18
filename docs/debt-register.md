@@ -171,25 +171,36 @@ a plan — see `plans/` for active implementation tracks.
 `SNITCHOS_USERSPACE_OPT`) because there's a latent opt≥2 UB in the userspace
 crates. The itest speedup is kernel-dominated, so the pin costs ~nothing — which
 is exactly why it stays. The pin is the workaround; the UB is the debt. Repro:
-`cargo xtask itest --opt high` (sets the env override to lift the pin).
+`cargo xtask itest --opt hi spawn-reclaims-memory` (`hi` = opt-2, the minimal
+level that reproduces; `max` = opt-3).
 
-**Narrowed 2026-07-18.** At opt-high, exactly **two** scenarios fail under snemu:
+**Narrowed 2026-07-18.** Exactly **two** scenarios fail:
 `spawn-reclaims-memory` and `supervised-ipc-client-cap-survives` (both
 userspace-heap-heavy) — the rest of the 120 boot and pass. It is **not** a total
 "nothing boots" failure; that description belonged to snemu `--scramble`, a
 different thing.
 
 **It is genuine userspace UB, not a snemu artifact — confirmed on the QEMU
-oracle.** `spawn-reclaims-memory --opt high --engine qemu` boots ("I am alive",
+oracle.** `spawn-reclaims-memory --opt max --engine qemu` boots ("I am alive",
 "entering heartbeat") then `hart_stalled`. QEMU has real RISC-V semantics and
 never had snemu's memory-straddle bug (fixed in `657afa0`, which `--scramble`
 stress-tests), so a hang there rules out the emulator. The straddle fix landing a
 week after the pin (2026-07-10 pin, 2026-07-17 fix) was coincidence, not cause —
 tested and rejected, not assumed.
 
-Next step for whoever picks this up: bisect the opt level (opt-2 vs opt-3) and the
-crate on `spawn-reclaims-memory` under QEMU; the failure is a post-boot hart stall
-in userspace, so it's a userspace-codegen miscompile or genuine UB, not kernel.
+**It's a spin, not a fault** (2026-07-18): `snemu boot --workload spawn-reap` at
+opt≥2 runs 91M instret with the kernel still heartbeating and *no* `scause`/
+`sepc`/panic — a userspace task is stuck in a loop, not faulting. So fault-report
+tooling won't help; the locator is the profiler.
+
+**opt-2 already reproduces it** — so bisect opt-1→opt-2 (few transforms) not
+opt-1→opt-3 (noisy). Tooling now supports this directly: `--opt hi` (opt-2) /
+`--opt max` (opt-3) are first-class levels, and `cargo xtask snemu profile --opt
+hi --user-detail --workload spawn-reap` splits userspace per-PC so the spin-loop's
+address surfaces. Next step: read the hot PC off that profile → objdump the owning
+program → compare that one function's codegen at opt-1 vs opt-2. "Terminates at
+-O1, spins at -O2" is the classic signature of UB the optimiser exploits, so the
+source is likely fixable (pin comes off), not a compiler bug to route around.
 
 ## Deferred placeholders (Tier 3)
 

@@ -108,11 +108,9 @@ fn current_process_or_refuse(
     // in that never-returning frame, so a non-null pointer is valid for the
     // life of the kernel. Null only if no user process runs here — which then
     // could not have issued this U-mode `ecall`.
-    match unsafe { proc.as_ref() } {
-        Some(proc) => Some(proc),
-        None => {
-            refuse(frame, syscall, protocol::RefusalReason::NoProcess);
-            None
-        }
+    let resolved = unsafe { proc.as_ref() };
+    if resolved.is_none() {
+        refuse(frame, syscall, protocol::RefusalReason::NoProcess);
     }
+    resolved
 }

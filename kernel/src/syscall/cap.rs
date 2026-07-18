@@ -135,13 +135,11 @@ pub(super) fn handle_revoke(frame: &mut TrapFrame) {
     // then drop the lock — the walk locks *every* process's caps, including this one.
     let root_cap_id = {
         let caps = proc.caps.lock();
-        match caps.cap_id_of(handle) {
-            Ok(id) => id,
-            Err(_) => {
-                super::refuse(frame, sc, RefusalReason::CapNotFound);
-                return;
-            }
-        }
+        let Ok(id) = caps.cap_id_of(handle) else {
+            super::refuse(frame, sc, RefusalReason::CapNotFound);
+            return;
+        };
+        id
     };
 
     let revoked = crate::sched::revoke_descendants_of(root_cap_id);

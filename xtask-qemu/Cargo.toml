@@ -1,0 +1,13 @@
+[package]
+name = "xtask-qemu"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+# `OptLevel` derives `clap::ValueEnum` so it can be a `--opt` flag value
+# directly in the xtask CLI.
+clap = { version = "4", features = ["derive"] }
+
+[lints]
+workspace = true

@@ -30,14 +30,20 @@ const FW_BASE: u64 = 0x8000_0000;
 const KERNEL_PHYS: u64 = 0x8020_0000;
 
 /// The bucket a single PC rolls up to: a kernel function name, or a coarse
-/// non-kernel category (userspace / firmware / other). Userspace ELFs are
-/// separate + release-stripped, so they collapse to one `[userspace]` bucket.
-fn classify(pc: u64, symtab: &SymbolTable) -> String {
+/// non-kernel category (userspace / firmware / other).
+///
+/// `user_detail` splits userspace out per-PC (`[user:0x100053ac]`) instead of
+/// collapsing it to one `[userspace]` bucket. Userspace ELFs are separate +
+/// release-stripped so there are no symbols to resolve against — but a raw hot
+/// PC is exactly what locates a spin-loop (objdump the owning program at that
+/// address). Off by default (the profiler's main job is kernel profiling, where
+/// per-PC userspace would be noise).
+fn classify(pc: u64, symtab: &SymbolTable, user_detail: bool) -> String {
     if pc >= KERNEL_HIGH_HALF {
         return symtab.resolve(pc).map_or_else(|| "[kernel:unknown]".to_owned(), str::to_owned);
     }
     if (USER_BASE..USER_END).contains(&pc) {
-        return "[userspace]".to_owned();
+        return if user_detail { format!("[user:{pc:#010x}]") } else { "[userspace]".to_owned() };
     }
     if (FW_BASE..KERNEL_PHYS).contains(&pc) {
         return "[firmware/OpenSBI]".to_owned();
@@ -54,10 +60,10 @@ fn classify(pc: u64, symtab: &SymbolTable) -> String {
 
 /// Fold a `PC → instret` histogram into `bucket → instret`, sorted by instret
 /// descending (ties broken by name for determinism).
-fn aggregate(profile: &HashMap<u64, u64>, symtab: &SymbolTable) -> Vec<(String, u64)> {
+fn aggregate(profile: &HashMap<u64, u64>, symtab: &SymbolTable, user_detail: bool) -> Vec<(String, u64)> {
     let mut by_bucket: HashMap<String, u64> = HashMap::new();
     for (&pc, &count) in profile {
-        *by_bucket.entry(classify(pc, symtab)).or_insert(0) += count;
+        *by_bucket.entry(classify(pc, symtab, user_detail)).or_insert(0) += count;
     }
     let mut rows: Vec<(String, u64)> = by_bucket.into_iter().collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -90,10 +96,11 @@ const CHECKPOINT_BUDGET: u64 = 60_000_000;
 
 /// Boot `workload` to the heartbeat checkpoint (unprofiled), then run `steps`
 /// instructions with profiling on and print the top `top` functions by instret.
-pub fn run(workload: Option<&str>, steps: u64, top: usize, release: bool) -> ExitCode {
-    // The profiler's `--release` maps to `Mid` (release kernel + opt-1 userspace);
-    // it profiles the kernel, so the userspace opt level is immaterial here.
-    let opt = if release { crate::qemu::OptLevel::Mid } else { crate::qemu::OptLevel::Low };
+pub fn run(workload: Option<&str>, steps: u64, top: usize, opt: crate::qemu::OptLevel, user_detail: bool) -> ExitCode {
+    // `opt` picks the build regime, including the userspace opt-level: `--opt hi`
+    // profiles the opt-2 userspace (where the UB class first bites), `--opt max`
+    // the opt-3 one. Pair with `--user-detail` to see *which* userspace PC a hang
+    // is spinning at.
     let (kernel, dtb) = match snemu_diff::prepare_profiled(true, opt) {
         Ok(v) => v,
         Err(e) => {
@@ -130,7 +137,7 @@ pub fn run(workload: Option<&str>, steps: u64, top: usize, release: bool) -> Exi
         ran += 1;
     }
     let profile = machine.take_profile().unwrap_or_default();
-    let rows = aggregate(&profile, &symtab);
+    let rows = aggregate(&profile, &symtab, user_detail);
     // The denominator is instructions *retired* (the histogram sum), not scheduler
     // rounds: a round retires one instruction per running hart, so with 2 harts the
     // retired count is up to 2× `ran`. Summing the histogram is the honest total.
@@ -178,16 +185,26 @@ mod tests {
     #[test]
     fn classify_buckets_kernel_userspace_and_firmware() {
         let t = symtab();
-        assert_eq!(classify(0xffff_ffff_8020_1040, &t), "yield_now");
-        assert_eq!(classify(0x1000_1234, &t), "[userspace]");
-        assert_eq!(classify(0x8000_4000, &t), "[firmware/OpenSBI]");
+        assert_eq!(classify(0xffff_ffff_8020_1040, &t, false), "yield_now");
+        assert_eq!(classify(0x1000_1234, &t, false), "[userspace]");
+        assert_eq!(classify(0x8000_4000, &t, false), "[firmware/OpenSBI]");
+    }
+
+    #[test]
+    fn classify_user_detail_splits_userspace_per_pc() {
+        let t = symtab();
+        // Off: one bucket. On: the raw PC, so a spin-loop address surfaces.
+        assert_eq!(classify(0x1000_53ac, &t, false), "[userspace]");
+        assert_eq!(classify(0x1000_53ac, &t, true), "[user:0x100053ac]");
+        // Kernel PCs are unaffected by the flag.
+        assert_eq!(classify(0xffff_ffff_8020_1040, &t, true), "yield_now");
     }
 
     #[test]
     fn classify_lifts_early_boot_physical_pcs_to_the_symbol() {
         let t = symtab();
         // A physical PC inside kmain's higher-half range, pre-trampoline.
-        assert_eq!(classify(0x8020_0040, &t), "kmain [boot-phys]");
+        assert_eq!(classify(0x8020_0040, &t, false), "kmain [boot-phys]");
     }
 
     #[test]
@@ -199,7 +216,7 @@ mod tests {
             (0xffff_ffff_8020_1000, 30), // yield_now
             (0x1000_0000, 7),            // userspace
         ]);
-        let rows = aggregate(&profile, &t);
+        let rows = aggregate(&profile, &t, false);
         assert_eq!(rows[0], ("yield_now".to_owned(), 30));
         assert_eq!(rows[1], ("kmain".to_owned(), 15));
         assert_eq!(rows[2], ("[userspace]".to_owned(), 7));

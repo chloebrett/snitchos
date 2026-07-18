@@ -101,21 +101,38 @@ pub fn base_command_ex(
 ///   (the `build.rs` default, which dodges the userspace opt≥2 UB class). Fast (the
 ///   former `--release`), but this is where **release-codegen-vs-debug divergences
 ///   surface under snemu**: a scenario green under Low + QEMU can still fail here.
-/// - **High** — release everywhere, userspace at opt-3 too. Surfaces the userspace
-///   opt≥2 UB class (talc OOM loop / hang) `build.rs` otherwise sidesteps.
+/// - **Hi** — release kernel, userspace at opt-**2**. The first level the userspace
+///   opt≥2 UB class appears (talc OOM loop / hang). Distinct from `Max` so a
+///   bisect can tell "opt-2 already broke it" (fewer transforms to blame) from
+///   "only opt-3 breaks it".
+/// - **Max** — release everywhere, userspace at opt-3 too. Was `High`.
+///
+/// The ladder is monotonic in userspace opt-level: Low(0) → Mid(1) → Hi(2) → Max(3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum OptLevel {
     Low,
     #[default]
     Mid,
-    High,
+    Hi,
+    Max,
 }
 
 impl OptLevel {
-    /// Whether this builds the optimized (`--release`) kernel profile. `Mid`/`High`
-    /// both do (they differ only in the *userspace* opt level); `Low` is debug.
+    /// Whether this builds the optimized (`--release`) kernel profile. Everything
+    /// but `Low` does (they differ only in the *userspace* opt level).
     pub fn is_release(self) -> bool {
         !matches!(self, OptLevel::Low)
+    }
+
+    /// The userspace opt-level this regime forces via `SNITCHOS_USERSPACE_OPT`,
+    /// or `None` to leave `build.rs`'s default (opt-1) in place. `Low`/`Mid` take
+    /// the default; `Hi`/`Max` opt in to the UB-exposing levels on purpose.
+    fn userspace_opt_override(self) -> Option<&'static str> {
+        match self {
+            OptLevel::Low | OptLevel::Mid => None,
+            OptLevel::Hi => Some("2"),
+            OptLevel::Max => Some("3"),
+        }
     }
 }
 
@@ -150,11 +167,11 @@ pub fn build_kernel_profiled(
     if opt.is_release() {
         cmd.arg("--release");
     }
-    // `High` lets the embedded userspace reach opt-3; the kernel's `build.rs` reads
-    // this to override its default opt-1 userspace pin (so `Mid` leaves it unset and
-    // gets the pin). Building the UB class on purpose is the whole point of `High`.
-    if matches!(opt, OptLevel::High) {
-        cmd.env("SNITCHOS_USERSPACE_OPT", "3");
+    // `Hi`/`Max` lift the embedded userspace to opt-2/opt-3; the kernel's `build.rs`
+    // reads this to override its default opt-1 userspace pin (so `Low`/`Mid` leave it
+    // unset and get the pin). Building the UB class on purpose is the point of both.
+    if let Some(us_opt) = opt.userspace_opt_override() {
+        cmd.env("SNITCHOS_USERSPACE_OPT", us_opt);
     }
     if !features.is_empty() {
         cmd.arg("--features").arg(features.join(","));
@@ -174,9 +191,19 @@ mod tests {
     }
 
     #[test]
-    fn opt_level_low_is_debug_mid_and_high_are_release() {
+    fn only_low_is_debug_the_rest_are_release() {
         assert!(!OptLevel::Low.is_release());
         assert!(OptLevel::Mid.is_release());
-        assert!(OptLevel::High.is_release());
+        assert!(OptLevel::Hi.is_release());
+        assert!(OptLevel::Max.is_release());
+    }
+
+    #[test]
+    fn userspace_opt_override_climbs_the_ladder() {
+        // Low/Mid take build.rs's default (opt-1) pin; Hi/Max opt into the UB levels.
+        assert_eq!(OptLevel::Low.userspace_opt_override(), None);
+        assert_eq!(OptLevel::Mid.userspace_opt_override(), None);
+        assert_eq!(OptLevel::Hi.userspace_opt_override(), Some("2"));
+        assert_eq!(OptLevel::Max.userspace_opt_override(), Some("3"));
     }
 }

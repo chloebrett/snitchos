@@ -55,9 +55,10 @@ pub fn print_info(dtb: &Fdt, uart_addr: usize) {
     );
   }
 
-  match timebase_hz(dtb) {
-    Some(hz) => crate::println!("timebase: {} Hz", hz),
-    None => crate::println!("timebase: <missing>"),
+  if let Some(hz) = timebase_hz(dtb) {
+    crate::println!("timebase: {} Hz", hz);
+  } else {
+    crate::println!("timebase: <missing>");
   }
 
   crate::println!("uart: {:#x}", uart_addr);

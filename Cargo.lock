@@ -2399,15 +2399,46 @@ dependencies = [
  "fs-proto",
  "itest-harness",
  "magnitude",
+ "protocol",
+ "serde",
+ "serde_json",
+ "snemu",
+ "snitchos-abi",
+ "xtask-cmds",
+ "xtask-qemu",
+ "xtask-snemu",
+]
+
+[[package]]
+name = "xtask-cmds"
+version = "0.0.1"
+dependencies = [
+ "protocol",
+ "serde",
+ "serde_json",
+ "snip",
+ "xtask-qemu",
+]
+
+[[package]]
+name = "xtask-qemu"
+version = "0.0.1"
+dependencies = [
+ "clap",
+]
+
+[[package]]
+name = "xtask-snemu"
+version = "0.0.1"
+dependencies = [
+ "diagram",
+ "magnitude",
  "object",
  "postcard",
  "protocol",
  "rustc-demangle",
- "serde",
- "serde_json",
  "snemu",
- "snip",
- "snitchos-abi",
+ "xtask-qemu",
 ]
 
 [[package]]

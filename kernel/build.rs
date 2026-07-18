@@ -72,8 +72,8 @@ fn main() {
     println!("cargo:rustc-link-arg=-T{dir}/linker.ld");
     println!("cargo:rerun-if-changed={dir}/linker.ld");
     println!("cargo:rerun-if-changed={dir}/src/entry.S");
-    // The embedded-userspace opt override (`snemu-itest --opt=high`); rebuild the
-    // embed when it flips so mid↔high actually re-optimizes the userspace.
+    // The embedded-userspace opt override (`itest --opt hi`/`max`); rebuild the
+    // embed when it flips so the userspace actually re-optimizes across levels.
     println!("cargo:rerun-if-env-changed=SNITCHOS_USERSPACE_OPT");
 
     build_and_embed_user(&dir);
@@ -130,10 +130,10 @@ fn build_and_embed_user(kernel_dir: &str) {
             // opt-level (3). Root-causing the userspace UB is a separate follow-up
             // (see notes/release-build-exposes-timer-death-and-uart-corruption.md).
             //
-            // `SNITCHOS_USERSPACE_OPT` overrides the pin — `snemu-itest --opt=high`
-            // sets it to `3` to *reproduce* the UB class on purpose (vs `--opt=mid`,
+            // `SNITCHOS_USERSPACE_OPT` overrides the pin — `itest --opt hi`/`max`
+            // set it to `2`/`3` to *reproduce* the UB class on purpose (vs `--opt mid`,
             // which leaves it unset and gets the safe opt-1). `rerun-if-env-changed`
-            // (in `main`) rerebuilds when flicking between the two.
+            // (in `main`) rebuilds when flicking between levels.
             let us_opt = std::env::var("SNITCHOS_USERSPACE_OPT").unwrap_or_else(|_| "1".into());
             cmd.args(["--config", &format!("profile.release.opt-level={us_opt}")]);
         }

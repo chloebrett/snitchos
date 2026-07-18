@@ -549,7 +549,7 @@ fn compare(
 /// Boot the kernel under snemu (optionally selecting `workload`) and return the
 /// decoded telemetry frames after `max_steps`. Used by `diagram trace`/`switches`,
 /// whose folds collapse by name/task so a fixed budget captures the structure.
-pub(crate) fn collect_frames(
+pub fn collect_frames(
     workload: Option<&str>,
     max_steps: u64,
 ) -> Result<Vec<OwnedFrame>, String> {
@@ -570,7 +570,7 @@ pub(crate) fn collect_frames(
 /// its authority graph during early boot then just heartbeats, so running the
 /// full ceiling would waste most of the wall-clock. Also returns the step count
 /// actually reached. The snemu half of the oracle, minus the QEMU side.
-pub(crate) fn collect_frames_until_cap_quiescence(
+pub fn collect_frames_until_cap_quiescence(
     workload: Option<&str>,
     max_steps: u64,
     quiescence_window: u64,
@@ -612,7 +612,7 @@ pub(crate) fn prepare(with_workloads: bool) -> Result<(Vec<u8>, Vec<u8>), String
 /// Like [`prepare`], but builds the kernel at the given [`qemu::OptLevel`] and reads
 /// the matching ELF. Used by `snemu-itest --opt=<low|mid|high>` to run the same
 /// scenarios under three optimization regimes with distinct failure modes.
-pub(crate) fn prepare_profiled(
+pub fn prepare_profiled(
     with_workloads: bool,
     opt: qemu::OptLevel,
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
@@ -674,7 +674,7 @@ pub(crate) fn collect_workload_frames(
 ///
 /// Shared with the QEMU harness (`-m`) so **both** engines run the identical
 /// machine — the test is only meaningful if snemu and QEMU agree on the RAM size.
-pub(crate) fn ram_mb_for(workload: Option<&str>) -> u32 {
+pub fn ram_mb_for(workload: Option<&str>) -> u32 {
     // Right-sized from the `snemu-itest` RAM report: every scenario except the two
     // OOM-teeth workloads peaks at ≤12 MiB of guest footprint, so 16 MiB is ~1.3×
     // headroom — keeping fork-clones cheap without crowding any real usage.
@@ -693,7 +693,7 @@ pub(crate) fn ram_mb_for(workload: Option<&str>) -> u32 {
     }
 }
 
-pub(crate) fn load_workload_machine(
+pub fn load_workload_machine(
     kernel: &[u8],
     dtb_base: &[u8],
     workload: Option<&str>,
