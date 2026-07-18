@@ -1,8 +1,9 @@
 # Plan — snemu page-straddling access fix + fidelity-debugging robustness
 
-**Status:** Fix 1 (fetch) **SHIPPED**; frame-scramble stress mode **SHIPPED** and
-wired into the gate. Open: Fix 2 (data load/store straddle, defensive), the
-debugging-robustness follow-ups (A–D), and the sweep clock-skew verdict.
+**Status:** Fix 1 (fetch) **SHIPPED**; frame-scramble stress mode = follow-up **D,
+SHIPPED** and wired into the gate. Open: Fix 2 (data load/store straddle,
+defensive), debugging-robustness follow-ups **A/B/C**, and the sweep clock-skew
+verdict.
 
 ## Shipped
 
@@ -216,13 +217,21 @@ snemu has `0`" — would have pointed straight at the faulting instruction. This
 tool this whole *class* of deterministic-fidelity bug will keep wanting; worth a
 milestone of its own.
 
-### D. Fragmenting test allocator
+### D. Fragmenting test allocator — **SHIPPED**
 
 This bug was masked for a long time because snemu's tests map pages contiguously (the
 natural thing to write), hiding the entire straddle/contiguity dimension. A test
 harness that deliberately **scrambles frame assignment** would surface not just this
 but the whole class of "assumed physical contiguity" defects (Fix 2's data-straddle
 included). The helper from the Tests section is the seed of this.
+
+**Done** — this is the deterministic frame-scramble mode (see Shipped, above):
+`Memory::scramble`'s fixed bijection permutes frame assignment, `itest --scramble` /
+`SNEMU_SCRAMBLE_FRAMES` drive it, and the gate runs a scrambled itest pass as a
+standing regression guard (120/120). It surfaces the "assumed contiguity" class by
+forcing the straddle hazard on every access rather than waiting for a guest layout to
+hit it. (Fix 2 — the data load/store straddle it would also catch — remains open, but
+the *detector* D describes is shipped.)
 
 ## Related but separate — the `snemu diff --all` clock-skew verdict
 
