@@ -187,14 +187,56 @@ fn build_and_embed_user(kernel_dir: &str) {
     // failure mode a maintained allow-list invites.
     //
     // Two inputs the graph walk can't see, so they are watched explicitly here:
-    //  * `fs-image` — data baked into `fs-server-seeded` at compile time, not a crate.
+    //  * `fs-image` seed *data* — baked into `fs-server-seeded` at compile time,
+    //    not a crate. Watched EXCEPT `fs-image/bin/`, which this very script
+    //    *writes* via the `copy_if_different` calls above. Watching a directory we
+    //    write into makes this build script perpetually self-stale: each build
+    //    advances `fs-image/bin/`'s mtime, so the next build under any *other*
+    //    profile/feature-set finds its build-script fingerprint outdated and
+    //    recompiles the kernel from scratch — the `x build`↔`x itest` and
+    //    `--opt=low`↔`--opt=mid` thrash. The bins' *sources* are already covered
+    //    by `watch_bin_dependency_closure`, so watching the outputs is redundant
+    //    as well as harmful. (The seed baker `user/fs/build.rs` still watches
+    //    `bin/` as its own input — correct there, where the bins ARE inputs.)
     //  * `Cargo.lock` — a `cargo update` can bump an *external* (registry)
     //    dependency of a bin without touching any in-tree source. The walk only
     //    watches workspace crates (registry sources are immutable per lockfile),
     //    so the lockfile is what re-triggers on a resolved-version change.
-    println!("cargo:rerun-if-changed={}", ws.join("fs-image").display());
+    watch_fs_image_data(&ws.join("fs-image"));
     println!("cargo:rerun-if-changed={}", ws.join("Cargo.lock").display());
     watch_bin_dependency_closure(ws);
+}
+
+/// Emit `cargo:rerun-if-changed` for every file under `fs-image/` **except** the
+/// build-generated `bin/` subtree (which this script writes — see the call site).
+/// Recurses, so a new seed file in any subdirectory is picked up automatically
+/// without a hand-maintained list.
+fn watch_fs_image_data(image_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(image_dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        // Prune the generated binaries this script writes into `fs-image/bin/`.
+        if path.is_dir() && path.file_name().is_some_and(|n| n == "bin") {
+            continue;
+        }
+        watch_path_recursive(&path);
+    }
+}
+
+/// Emit `cargo:rerun-if-changed` for `path`, recursing into directories.
+fn watch_path_recursive(path: &Path) {
+    if path.is_dir() {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            watch_path_recursive(&entry.path());
+        }
+    } else {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 }
 
 /// Emit `cargo:rerun-if-changed` for every **workspace crate** the embedded bins

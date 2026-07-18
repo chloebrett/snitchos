@@ -93,6 +93,35 @@ Safety net is strong: the whole itest suite + unit tests + `cargo xtask test`
 characterise xtask's behaviour. This is a pure refactor — behaviour must not
 change.
 
+## Phase 1 RESULT (measured 2026-07-18)
+
+`xtask-qemu`, `xtask-snemu`, `xtask-cmds` extracted; bin dropped from ~15.1k to
+~10.2k lines. Cross-crate fixes needed: promote 5 `snemu_diff` fns `pub(crate)`
+→ `pub`; move `postcard` dev-dep + add `diagram` dep to `xtask-snemu`.
+
+**The scenario-edit loop did NOT get faster.** `-Ztime-passes` total for the bin
+after `touch scenarios.rs`: **7.996s**, vs **7.98s** pre-split. Identical.
+
+Why: the ~5k lines extracted were compile-*cheap*. The bin's ~8s is concentrated
+in what remains — clap-derive expansion in `main.rs` + monomorphization of
+`itest-harness`/`snemu`/`protocol` generics instantiated by the itest cluster +
+`scenarios.rs` itself. Removing simple command modules doesn't touch that.
+
+**What Phase 1 DID buy:** edits to a *non-itest* path — a snemu tool
+(`xtask-snemu`), an auditor/measure command (`xtask-cmds`) — now rebuild only
+that ~1–3k-line lib + a 0.18s relink, instead of the whole bin. The cold paths
+are isolated; the hot path (scenarios) is not, because scenarios still lives in
+the bin.
+
+**Implication for Phase 2/3:** the scenario-loop win requires getting
+`scenarios.rs` into its own crate (Phase 3, which needs Phase 2's `xtask-itest`
+lib first, since scenarios depends on `Harness`). Its payoff hinges on clap's
+share of the 8s: a scenarios crate rebuild skips clap-derive entirely, so if clap
+is a big fixed chunk the win is large; if the 8s is mostly itest-harness mono
+(which the scenarios crate still pays) the win is modest. `cargo llvm-lines`
+would predict this, but it's not installed and the sandbox blocks installing it —
+so Phase 3 is its own definitive measurement.
+
 ## Phasing (each phase leaves a green tree)
 
 1. **Extract the independent clusters first** (lowest coupling, immediate win):
