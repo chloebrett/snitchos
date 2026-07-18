@@ -151,17 +151,45 @@ a plan — see `plans/` for active implementation tracks.
   now refuses (`BadUserRange`) instead of faulting. Proven end-to-end by the
   `userspace-bad-ptr` itest (a new `bad-ptr` probe program passes an unmapped VA
   to `DebugWrite`; the kernel refuses and the process survives).
+- **#11 — `Exit` vs `Yield` is on the wire (entry was stale).** The entry claimed
+  "the wire only carries `Yield`-shaped context-switch frames" — false. `exit_now`
+  passes `SwitchReason::Exit` to `prepare_switch` (`sched/mod.rs:1194`), which
+  emits it via `emit_context_switch` (`:1056`), and the `sched-task-exits-cleanly`
+  itest asserts a `ContextSwitch{Exit}` reaches the wire, distinct from a yield.
+  What the entry *should* have said, now the only residue: the **collector**
+  doesn't read the reason (`state.rs` never matches `SwitchReason`), so an exit
+  and a yield produce identical OTLP today. That's a host-side feature ("surface
+  task lifecycle in the trace view"), not the kernel-wire debt this described —
+  file it there if wanted.
 
 ## Correctness gaps
 
 ### #16 — Userspace pinned to opt-1 to dodge a UB class *(latent, hard)*
 
-`kernel/build.rs` builds the embedded userspace with
-`--config profile.release.opt-level=1` because there's a latent opt≥2 UB class in
-the userspace crates (talc OOM-loop → hang; confirmed in `snitchos-user`, at
-least one more crate). The itest speedup is kernel-dominated, so the pin costs
-~nothing — which is exactly why it stays. The pin is the workaround; the UB is
-the debt. Repro: `cargo xtask itest --opt high`.
+`kernel/build.rs` pins the embedded userspace to `opt-level=1`
+(`profile.release.opt-level`, default `1`, overridable via
+`SNITCHOS_USERSPACE_OPT`) because there's a latent opt≥2 UB in the userspace
+crates. The itest speedup is kernel-dominated, so the pin costs ~nothing — which
+is exactly why it stays. The pin is the workaround; the UB is the debt. Repro:
+`cargo xtask itest --opt high` (sets the env override to lift the pin).
+
+**Narrowed 2026-07-18.** At opt-high, exactly **two** scenarios fail under snemu:
+`spawn-reclaims-memory` and `supervised-ipc-client-cap-survives` (both
+userspace-heap-heavy) — the rest of the 120 boot and pass. It is **not** a total
+"nothing boots" failure; that description belonged to snemu `--scramble`, a
+different thing.
+
+**It is genuine userspace UB, not a snemu artifact — confirmed on the QEMU
+oracle.** `spawn-reclaims-memory --opt high --engine qemu` boots ("I am alive",
+"entering heartbeat") then `hart_stalled`. QEMU has real RISC-V semantics and
+never had snemu's memory-straddle bug (fixed in `657afa0`, which `--scramble`
+stress-tests), so a hang there rules out the emulator. The straddle fix landing a
+week after the pin (2026-07-10 pin, 2026-07-17 fix) was coincidence, not cause —
+tested and rejected, not assumed.
+
+Next step for whoever picks this up: bisect the opt level (opt-2 vs opt-3) and the
+crate on `spawn-reclaims-memory` under QEMU; the failure is a post-boot hart stall
+in userspace, so it's a userspace-codegen miscompile or genuine UB, not kernel.
 
 ## Deferred placeholders (Tier 3)
 
@@ -182,7 +210,3 @@ MMIO regions are hardcoded for QEMU `virt` in `kmain`; the DTB-driven
 `collect_mmio_regions` is parked behind `#[expect(dead_code)]` (the pre-MMU DTB
 crash under the higher-half link was never isolated).
 
-### #11 — `Exit` vs `Yield` wire distinction
-
-Tasks exit, but the wire only carries `Yield`-shaped context-switch frames
-(noted in `kernel/src/sched/mod.rs`); a dedicated `Exit` reason is deferred.

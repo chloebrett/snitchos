@@ -9,10 +9,11 @@ exclude = ["learning"]
 # Workspace lint policy. Pedantic as a whole is `warn` — surface idiom hints
 # without blocking the red-green loop.
 #
-# **Every member opts in** via `[lints] workspace = true`, except those on
-# `LINTS_EXEMPT` (`xtask/src/itest.rs`) — today just `kernel`, and only on
-# un-triaged volume, not principle. Cargo has no workspace-wide lint
-# inheritance — the key is structurally per-crate, so omitting it is invisible.
+# **Every member opts in** via `[lints] workspace = true` — `LINTS_EXEMPT`
+# (`xtask/src/itest.rs`) is empty; even `kernel`, the last holdout, opts in now.
+# A future exemption needs a *measured* reason recorded there. Cargo has no
+# workspace-wide lint inheritance — the key is structurally per-crate, so
+# omitting it is invisible.
 # Don't keep the roster here: this comment listed nine opt-ins long after there
 # were twenty-plus, which is exactly the drift that let `snitchos-user`,
 # `snitchos-std` and `snitchos-user-macros` sit un-linted. The

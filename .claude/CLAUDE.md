@@ -253,6 +253,15 @@ required `&mut *(&raw mut STATIC)` idiom into a forbidden direct `&mut STATIC`.
 Those sites carry a justified `#[allow(clippy::deref_addrof, reason = ...)]`.
 (Stable can't auto-target a single package; `forced-target` needs nightly.)
 
+The kernel opts into the workspace pedantic lints like every other crate (the old
+"pedantic fights register/address idioms" exemption was measured false and removed).
+The danger the exemption feared is real but **narrow**: it is *only* `deref_addrof`,
+above. The rest of clippy's pointer-idiom lints are the opposite of a clobber —
+`borrow_as_ptr` / `ref_as_ptr` / `ptr_cast_constness` push `&x as *const T` toward
+`&raw const x` / `ptr::from_ref(x)` / `.cast_mut()`, which is the idiom this codebase
+already prefers. Fix those by hand (a named `-W <lint>` scope, never blanket `--fix`)
+and they improve the code. Only `deref_addrof` needs the `#[allow]` guard.
+
 ### Tests, by layer
 
 | Layer | Command | What it covers |

@@ -1,6 +1,31 @@
 # Plan — snemu page-straddling access fix + fidelity-debugging robustness
 
-**Status:** planned (not started). Root cause confirmed; fix + follow-ups scoped below.
+**Status:** Fix 1 (fetch) **SHIPPED**; frame-scramble stress mode **SHIPPED** and
+wired into the gate. Open: Fix 2 (data load/store straddle, defensive), the
+debugging-robustness follow-ups (A–D), and the sweep clock-skew verdict.
+
+## Shipped
+
+- **Straddle-aware fetch** in `Hart::step` (interpreter/oracle) *and*
+  `fetch_for_compile` (block-JIT frontend): when `pc & 0xfff > 0xffc`, translate
+  `pc+2` on its own and combine the two 16-bit halves; a faulting upper half traps
+  like hardware. TDD'd (`fetches_a_page_straddling_instruction_across_noncontiguous_frames`).
+- **Deterministic frame-scramble** (`snemu/src/mem.rs` `Memory::scramble`): a fixed
+  bijection `permute(f) = f*k mod N` (k coprime to N, near N/2, no RNG). `span`
+  permutes the base once (preserves the hazard); `write_bytes` goes per-page (bulk
+  stays correct). Driven by `itest --scramble` (threaded `scramble` param) or the
+  `SNEMU_SCRAMBLE_FRAMES` env var (global override for `snemu boot`/`diff`).
+- **Gate runs itest twice** — `cargo xtask test && cargo xtask itest && cargo xtask
+  itest --scramble` (CLAUDE.md updated). The scrambled pass is the standing
+  regression guard; ~1.7s, deterministic.
+- **Validated:** 207 snemu unit tests; itest 120/120 both plain and `--scramble`;
+  `supervised --opt mid` diff PASS (escalate trio no longer dropped); scrambled demo
+  boot 334k-instret panic → 270M instret + 12566 frames. The framebuffer capture
+  path reads RAM byte-by-byte through `span` (`machine.rs::read_framebuffer`), so it's
+  scramble-safe — no false positive on `framebuffer-presents`.
+
+The rest of this document is the original plan; the remaining open items are Fix 2
+and the follow-ups below.
 
 ## The bug
 

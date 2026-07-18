@@ -609,7 +609,7 @@ pub fn span_start_id(name_id: StringId) -> Span {
         task_id: crate::sched::current_task_id().0,
         hart_id: crate::percpu::current_hartid() as u8,
     });
-    Span { open, cursor: cursor as *const _ }
+    Span { open, cursor: core::ptr::from_ref(cursor) }
 }
 
 // --- Frame emission, with pre-init buffering ---

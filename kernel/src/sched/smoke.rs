@@ -122,7 +122,7 @@ pub unsafe fn smoke() {
     // Leak — one-time smoke, the 16 KiB stack belongs to the marker
     // forever. Step 6's `spawn` will track stack ownership properly.
     let stack: Box<SmokeStack> = Box::new(SmokeStack([0u8; STACK_SIZE]));
-    let stack_top = (stack.as_ref() as *const _ as u64) + STACK_SIZE as u64;
+    let stack_top = (core::ptr::from_ref(stack.as_ref()) as u64) + STACK_SIZE as u64;
     core::mem::forget(stack);
 
     // SAFETY: single-hart, single-thread, smoke runs once at init;

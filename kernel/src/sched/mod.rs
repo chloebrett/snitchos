@@ -794,7 +794,7 @@ pub fn register_bare_task(name: &str, state: TaskState) -> TaskId {
     // Pointer to this task's cursor — stable because Box<Task> heap
     // address won't change. Used to seed `CURRENT_SPAN_CURSOR` so the
     // calling hart's span emissions parent correctly under this task.
-    let cursor_ptr = (&task.span_cursor as *const SpanCursor) as *mut SpanCursor;
+    let cursor_ptr = core::ptr::from_ref(&task.span_cursor).cast_mut();
     SCHEDULER.lock().insert_task(task);
     // Seed this hart's per-CPU current-task slots so subsequent
     // `current_task_id()`, span emissions, and the first `yield_now`
