@@ -30,3 +30,9 @@ object = { version = "0.36", default-features = false, features = ["read_core", 
 
 [lints]
 workspace = true
+
+[lib]
+# No doctests in this crate; doctest=false keeps `cargo test` off the slow
+# rustdoc doc-test compile. The gate runs nextest (never runs doctests) — see
+# CLAUDE.md "use nextest". Add doctest=false to any new lib crate too.
+doctest = false

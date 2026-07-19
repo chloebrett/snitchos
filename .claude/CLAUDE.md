@@ -277,6 +277,29 @@ and they improve the code. Only `deref_addrof` needs the `#[allow]` guard.
 | Doc links          | `cargo xtask links` | Every relative `.md` link in the repo resolves (also runs inside `xtask test`) |
 | Integration        | `cargo xtask itest` | Boots the kernel **under snemu**, asserts on the decoded wire frame sequence. Deterministic → one run is the gate. `--engine qemu` runs the same scenarios under QEMU (the fidelity escape hatch). |
 
+**Run host tests with `cargo nextest run`, never plain `cargo test`.** The gate
+already does (`cargo xtask test` shells out to nextest), and hand-runs should match.
+Two reasons: (1) nextest never runs doctests, so it skips the rustdoc doc-test
+compile that made `cargo test -p <crate>` take ~6s to run zero doctests; every lib
+crate also carries `[lib] doctest = false` as a belt-and-suspenders (add it to any
+new lib crate). (2) One nextest invocation compiles all suites off a shared graph and
+runs them in parallel, versus cargo's per-crate serialize-and-restart. So:
+`cargo nextest run -p kernel-proc`, not `cargo test -p kernel-proc`.
+
+**macOS: first-run test stall (Gatekeeper), per-machine setup.** On macOS the *first*
+`cargo nextest` / `cargo test` / `cargo xtask itest` run after a recompile can stall
+~25–60s at near-zero CPU. Cause: Gatekeeper (`syspolicyd`) assesses each freshly-built,
+ad-hoc-signed binary by contacting Apple's notarization service; with no usable network
+the connection idles ~25s before falling back to "allow." nextest's process-per-test
+multiplies it; a re-run is fast (verdict cached by code-hash), and Wi-Fi off doesn't
+help (the wait is a fixed idle timeout, not a fast failure). Fix once per machine: add
+your **terminal emulator** — the TCC *responsible process*, e.g. wezterm, **not**
+Terminal.app — to *System Settings → Privacy & Security → Developer Tools*, toggle it
+**ON**, and **relaunch** the terminal (the grant doesn't apply to an already-running
+app). Verify: `touch <crate>/src/lib.rs && time cargo nextest run -p <crate>` should be
+compile-bound, not stalled. (Diagnosed 2026-07: the tell is a `syspolicyd … Error
+checking with notarization daemon` + `connection_idle @~25s` storm in `log stream`.)
+
 **The gate composes explicitly: `cargo xtask test && cargo xtask itest && cargo xtask
 itest --scramble`.** `itest` runs integration *only* — it does not run the host
 checks first (that coupling, and the `--skip-unit-tests` flag that existed to undo
