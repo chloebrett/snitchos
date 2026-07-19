@@ -1,7 +1,39 @@
 # Plan: Split xtask so the test path is snemu-free
 
 **Branch**: main (no feature branch, per repo convention)
-**Status**: Active
+**Status**: Step 1a committed. Steps 1b + 2 DONE (uncommitted) — see result below.
+
+## RESULT — Steps 1b + 2 (2026-07-19)
+
+Done together (the diagram coupling below made the dep removal fall out naturally):
+
+- **`xtask-itest` crate created**; the runner half (`itest.rs` + submodules),
+  the `snemu` group (`run_snemu`/`snemu_boot`/`SnemuCmd`), baseline, itest-show,
+  and their `cli_surface_tests`/`retired_command_tests` moved into it. Lean `xtask`
+  forwards `itest`/`snemu`/`baseline`/`itest-show`/`diagram` via a raw-argv
+  `delegate_itest("<sub>", &args)` → `cargo run -p xtask-itest -- <sub> …`.
+- **Diagram had to move too (unplanned).** `diagram_cmd` reads `itest::SCENARIOS`
+  (now in xtask-itest) *and* folds snemu frames via `snemu_diff` — so it's
+  fundamentally heavy. Moved `diagram_cmd.rs` to xtask-itest; lean `diagram`
+  delegates. The generated-diagram **drift check moved out of lean `xtask test`**
+  into an xtask-itest `#[test]` (`diagram_drift_tests`), which runs in the nextest
+  phase so the lean tool never links snemu. (This is the "diagram nuance" the plan
+  flagged, resolved.)
+- **Step 2 folded in:** with all snemu-touching code gone from lean, its `snemu` /
+  `xtask-snemu` / `itest-harness` / `diagram` (+ now-unused `magnitude` / `protocol`
+  / `snitchos-abi` / `fs-proto`) deps were removed from `xtask/Cargo.toml`.
+  `cargo tree -p xtask | grep -c snemu` = **0**.
+
+**Verified:** `touch snemu/src/lib.rs && cargo build -p xtask` → no snemu compile in
+the tool; full gate `cargo xtask test` = 2098 tests, **1984 pass, only the
+pre-existing `mutant_plan_tests` trip-wire fails** (user-owned; it now also lists
+`xtask-itest`); `cargo xtask itest boot-reaches-heartbeat` and `cargo xtask diagram
+deps --check` both work via delegation; `cargo xtask links` clean; clippy no errors.
+`deps.md` regenerated (new `xtask-itest` node). Trade-off accepted: standalone
+`cargo xtask diagram …` now builds xtask-itest (snemu); the frequent path (drift via
+`test`) stays snemu-free.
+
+Left for Step 3: docs (CLAUDE.md xtask-layout note). Not yet done.
 
 ## Goal
 

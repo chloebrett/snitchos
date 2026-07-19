@@ -44,6 +44,10 @@ graph LR
     subgraph agnostic
         magnitude["magnitude"]
     end
+    xtask_cmds["xtask-cmds"]
+    xtask_itest["xtask-itest"]
+    xtask_qemu["xtask-qemu"]
+    xtask_snemu["xtask-snemu"]
     collector --> protocol
     collector --> snitchos_abi
     diagram --> protocol
@@ -91,12 +95,23 @@ graph LR
     stitch --> snitchos_abi
     stitch --> fs_proto
     stitch --> snitchos_user
-    xtask --> diagram
-    xtask --> fs_proto
-    xtask --> itest_harness
-    xtask --> magnitude
-    xtask --> protocol
-    xtask --> snemu
-    xtask --> snip
-    xtask --> snitchos_abi
+    xtask --> xtask_cmds
+    xtask --> xtask_qemu
+    xtask_cmds --> protocol
+    xtask_cmds --> snip
+    xtask_cmds --> xtask_qemu
+    xtask_itest --> diagram
+    xtask_itest --> fs_proto
+    xtask_itest --> itest_harness
+    xtask_itest --> magnitude
+    xtask_itest --> protocol
+    xtask_itest --> snemu
+    xtask_itest --> snitchos_abi
+    xtask_itest --> xtask_qemu
+    xtask_itest --> xtask_snemu
+    xtask_snemu --> diagram
+    xtask_snemu --> magnitude
+    xtask_snemu --> protocol
+    xtask_snemu --> snemu
+    xtask_snemu --> xtask_qemu
 ```

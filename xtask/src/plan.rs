@@ -288,11 +288,10 @@ pub fn run_unit_tests() -> ExitCode {
     }
     // Generated diagrams (docs/generated/) are contract artifacts: a stale one
     // means the source of truth moved without the committed diagram noticing.
-    // `--check` re-derives and diffs, failing the gate on drift.
-    eprintln!("=== generated diagrams ===");
-    if crate::diagram_cmd::check_all() != ExitCode::SUCCESS {
-        return ExitCode::from(1);
-    }
+    // The drift check now lives in the `xtask-itest` crate (its `diagram_cmd`
+    // reads the `SCENARIOS` registry + folds snemu frames), running as a test in
+    // the nextest phase so the lean tool never links snemu — see
+    // plans/xtask-lean-test-binary.md and xtask-itest's `diagram_drift_tests`.
     // Same reasoning as the diagrams: a markdown link is a contract nothing
     // compiles. Every `git mv` sweep this repo has done has left dead links
     // behind — most often the moved file's own `../` links, which now resolve

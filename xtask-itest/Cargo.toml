@@ -1,0 +1,32 @@
+[package]
+name = "xtask-itest"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# The snemu-linked half of xtask: the integration-test runner (`itest`), the
+# snemu emulator tooling (`snemu diff|bench|profile`), and baseline management.
+# Split out of `xtask` so the lean tool (`test`/`clippy`/`build`/…) no longer
+# links `snemu` — see plans/xtask-lean-test-binary.md. Lean `xtask` delegates
+# the commands here via `cargo run -p xtask-itest --`.
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+magnitude = { path = "../magnitude" }
+# `diagram_cmd` lives here: its telemetry targets fold snemu frames and its
+# itest-matrix target reads the `itest::SCENARIOS` registry, both of which are in
+# this crate. The drift check runs as a test (see diagram_drift_tests).
+diagram = { path = "../diagram" }
+protocol = { path = "../protocol", features = ["std"] }
+snitchos-abi = { path = "../abi" }
+fs-proto = { path = "../fs-proto" }
+itest-harness = { path = "../itest-harness" }
+xtask-qemu = { path = "../xtask-qemu" }
+xtask-snemu = { path = "../xtask-snemu" }
+# The snemu emulator itself — the itest harness drives a `Machine` directly.
+snemu = { path = "../snemu" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ctrlc = "3"
+
+[lints]
+workspace = true

@@ -4,31 +4,17 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
+# The lean half of xtask: build/boot/test/clippy/collect/… — everything that does
+# NOT link `snemu`. The snemu-linked half (itest / snemu group / diagram) lives in
+# `xtask-itest` and is reached by delegation. Keeping `snemu` out of this manifest
+# is the whole point: `cargo xtask test` no longer compiles the emulator into the
+# tool. See plans/xtask-lean-test-binary.md.
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-# Human-scale integers (`1.2B` ⇄ 1_200_000_000): backs the `--steps` value
-# parsers and the instret renders, so a reported count pastes back into a flag.
-magnitude = { path = "../magnitude" }
-# Diagram generation lib — xtask provides the I/O (cargo metadata, capture,
-# --check diffs, file writes) and delegates every projection here.
-diagram = { path = "../diagram" }
-protocol = { path = "../protocol", features = ["std"] }
-# The kernel↔user ABI — scenarios assert on `Syscall::*` by name, not a magic number.
-snitchos-abi = { path = "../abi" }
-# FS protocol — scenarios assert on the demo marker sentinels by name, shared
-# with the `user/fs` client that emits them (see `fs_proto::markers`).
-fs-proto = { path = "../fs-proto" }
-itest-harness = { path = "../itest-harness" }
 # QEMU invocation + kernel-build helpers (`base_command`, `build_kernel*`,
-# `OptLevel`), extracted so editing itest/scenarios doesn't recompile them.
+# `OptLevel`), used by `boot`/`debug`/`measure`.
 xtask-qemu = { path = "../xtask-qemu" }
-# snemu-driven tooling (diff/bench/profile), extracted so scenario edits don't
-# recompile the emulator-facing modules or their heavy dep tree.
-xtask-snemu = { path = "../xtask-snemu" }
-# The snemu emulator itself — the itest harness drives a `Machine` directly.
-snemu = { path = "../snemu" }
-# Standalone commands (audit/loc/links/measure/snip/source) with no itest
-# coupling, extracted so scenario edits don't recompile them.
+# Standalone commands (audit/loc/links/measure/snip) with no itest coupling.
 xtask-cmds = { path = "../xtask-cmds" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

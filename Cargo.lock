@@ -2395,18 +2395,10 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "ctrlc",
- "diagram",
- "fs-proto",
- "itest-harness",
- "magnitude",
- "protocol",
  "serde",
  "serde_json",
- "snemu",
- "snitchos-abi",
  "xtask-cmds",
  "xtask-qemu",
- "xtask-snemu",
 ]
 
 [[package]]
@@ -2418,6 +2410,25 @@ dependencies = [
  "serde_json",
  "snip",
  "xtask-qemu",
+]
+
+[[package]]
+name = "xtask-itest"
+version = "0.0.1"
+dependencies = [
+ "clap",
+ "ctrlc",
+ "diagram",
+ "fs-proto",
+ "itest-harness",
+ "magnitude",
+ "protocol",
+ "serde",
+ "serde_json",
+ "snemu",
+ "snitchos-abi",
+ "xtask-qemu",
+ "xtask-snemu",
 ]
 
 [[package]]
