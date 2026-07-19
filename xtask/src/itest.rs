@@ -788,20 +788,31 @@ fn lints_optin_gaps<'a>(
         .collect())
 }
 
-/// Every workspace member's `(name, manifest text)`, via `cargo metadata`'s
-/// `manifest_path`. Only the lint-policy test needs the file bodies — the other
-/// gates work from names alone.
-#[cfg(test)]
-fn workspace_manifests() -> Result<Vec<(String, String)>, String> {
+/// Run `cargo metadata --no-deps` and return the parsed JSON.
+///
+/// Inherits stderr rather than capturing it (as `.output()` does by default), so
+/// cargo's "Blocking waiting for file lock on package cache" — printed when
+/// rust-analyzer or another cargo holds the lock — is visible instead of leaving
+/// `x test` looking like a silent hang before the first `=== unit tests ===`
+/// line. stdout is still captured, since that's the JSON we parse.
+fn cargo_metadata_json() -> Result<serde_json::Value, String> {
     let out = Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--no-deps"])
+        .stderr(std::process::Stdio::inherit())
         .output()
         .map_err(|e| format!("run cargo metadata: {e}"))?;
     if !out.status.success() {
         return Err("cargo metadata failed".to_string());
     }
-    let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("parse cargo metadata: {e}"))?;
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("parse cargo metadata: {e}"))
+}
+
+/// Every workspace member's `(name, manifest text)`, via `cargo metadata`'s
+/// `manifest_path`. Only the lint-policy test needs the file bodies — the other
+/// gates work from names alone.
+#[cfg(test)]
+fn workspace_manifests() -> Result<Vec<(String, String)>, String> {
+    let json = cargo_metadata_json()?;
     let packages = json["packages"].as_array().ok_or("cargo metadata: no packages array")?;
     packages
         .iter()
@@ -818,15 +829,7 @@ fn workspace_manifests() -> Result<Vec<(String, String)>, String> {
 
 /// The workspace's package names, straight from `cargo metadata --no-deps`.
 pub(crate) fn workspace_members() -> Result<Vec<String>, String> {
-    let out = Command::new("cargo")
-        .args(["metadata", "--format-version", "1", "--no-deps"])
-        .output()
-        .map_err(|e| format!("run cargo metadata: {e}"))?;
-    if !out.status.success() {
-        return Err("cargo metadata failed".to_string());
-    }
-    let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("parse cargo metadata: {e}"))?;
+    let json = cargo_metadata_json()?;
     let packages = json["packages"].as_array().ok_or("cargo metadata: no packages array")?;
     Ok(packages.iter().filter_map(|p| p["name"].as_str().map(str::to_owned)).collect())
 }
