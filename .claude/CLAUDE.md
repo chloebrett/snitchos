@@ -206,8 +206,21 @@ protocol/     no_std by default. The `Frame` enum + postcard
               `protocol::stream` (decoder + `OwnedFrame`).
 collector/    Host-side decoder. Reads virtio-console socket,
               decodes frames, exports OTLP + serves Prometheus.
-xtask/        Build / run / test orchestration. See subcommands
-              in README.
+xtask/        Build / run / test orchestration — the **lean** half:
+              build/boot/test/clippy/collect/measure/loc/audit/links/snip.
+              Does NOT link `snemu`, so `cargo xtask test` never compiles the
+              emulator into the tool. See subcommands in README.
+xtask-itest/  The **snemu-linked** half of xtask: `itest`, the `snemu` group
+              (diff/bench/profile), `baseline`, `itest-show`, and `diagram`
+              (its telemetry targets fold snemu frames; `itest-matrix` reads
+              `itest::SCENARIOS`). Lean `xtask` forwards these via
+              `cargo run -p xtask-itest -- <sub> …` (the `cargo xtask` alias is
+              unchanged). The generated-diagram drift check runs here as a
+              `#[test]` (nextest phase), not in lean `xtask test`. Split so an
+              edit to `snemu` recompiles it once (for the tests) instead of
+              twice (tool + tests). See plans/xtask-lean-test-binary.md.
+              Caveat: standalone `cargo xtask diagram …` now builds snemu; the
+              frequent path (drift via `test`) stays snemu-free.
 stack/        docker-compose for Tempo + Prometheus + Grafana.
 plans/        Per-milestone and per-refactor implementation plans.
 docs/         Architecture and design.

@@ -819,6 +819,17 @@ const NOT_MUTATED: &[(&str, &str)] = &[
     // Cost — real value, prohibitive runtime.
     ("snemu", "~10k lines, and each mutant re-runs an emulator suite; runtime is the blocker, not the value"),
     ("xtask", "the harness that runs this gate — mutating the judge"),
+    // Tooling — the xtask binary split (plans/xtask-lean-test-binary.md). Real
+    // suites, but tooling; enrolling them expands the gate beyond the core, so
+    // they're held as candidates like the subsystem crates below. `xtask-itest`
+    // is additionally integration-tested — its scenarios/runner run under snemu
+    // via `cargo xtask itest`, not the unit suite, so many mutants would survive
+    // as noise. Enrol one by deleting its line and updating the
+    // `the_derived_plan_matches_the_previously_hardcoded_set` characterisation.
+    ("xtask-cmds", "tooling: real suite; enrolment candidate"),
+    ("xtask-itest", "tooling: runner is integration-tested via `cargo xtask itest`; enrolment candidate"),
+    ("xtask-qemu", "tooling: real suite; enrolment candidate"),
+    ("xtask-snemu", "tooling: real suite; enrolment candidate"),
     // Drift — these have real suites and are unmutated by accident, not decision.
     // Enrolling one means deleting its line here and updating the
     // `the_derived_plan_matches_the_previously_hardcoded_set` characterisation test.
