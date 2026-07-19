@@ -560,7 +560,44 @@ match the pre-rename baselines.
 **Done when**: both engines reachable, verdicts match, CLAUDE.md's commands table
 updated.
 
-### Step 2.2: Make the flake flags qemu-engine-only
+### Step 2.2 — ✅ DONE: Make the flake flags qemu-engine-only
+
+**Shipped.** The eleven QEMU-only flags — `--repeat`, `--fail-fast`, `--force`,
+`--update-baseline`, `--no-auto-push`, `--cpu-jobs`, `--profile`, `--capture`,
+`--shared`, `--tag`, `--skip` — now **error under the default snemu engine**
+naming `--engine qemu`, instead of being silently ignored. Verified: `itest
+--repeat 3` errors; `itest --engine qemu --repeat 2` runs a real flake sweep;
+`itest --engine qemu --tag boot` runs 5 scenarios (it was a silent no-op under
+snemu before).
+
+**`--tag`/`--skip` turned out to be silent no-ops too**, not just cosmetic: the
+snemu audit filters only by substring + `--limit` (`snemu_audit.rs`), never by
+tag. So `itest --tag userspace` under snemu ran *everything*. They're gated now;
+teaching snemu tag-filtering is a follow-up, not this step.
+
+**Mechanism — a refinement of the plan's RED.** clap's arg-relations are
+presence-based, so "valid only when `--engine=qemu`" is not expressible as a
+declarative *parse* rule. So this is a pure, tested `misplaced_qemu_flags(engine,
+&[(name, was_set)])` function wired into the `Itest` dispatch, which raises a
+`clap::Error` (same formatting + exit code as a parse error). The RED tests the
+function directly rather than via `try_parse_from` — honest, and better unit
+isolation. `was_set` compares against each flag's default (`repeat != 1`,
+`capture != Signal`, …) so a meaningful default doesn't read as "set".
+
+**Scope note:** this gates the QEMU→snemu direction (the muscle-memory case:
+`--repeat 10` that silently ran once). The reverse — snemu-only flags under
+`--engine qemu` — is *not* gated here; most are already `hide`den, and clean
+detection would need several defaulted flags made `Option`. Flagged as follow-up.
+
+**Survived a tree earthquake.** Mid-step, another session extracted `itest` into
+its own `xtask-itest` crate (+ `xtask-qemu`, `xtask-cmds`, `xtask-snemu`), moving
+the very `main.rs` this work lived in. The uncommitted 2.1/2.1b/2.1c/2.2 changes
+were carried into the new crate intact — nothing lost. (First read looked like a
+clobber; it was a relocation.) Lesson stands: on a shared worktree with no
+branches, concurrent edits to the same file are a real hazard — pausing when the
+build broke was correct.
+
+### ~~Step 2.2 (original text)~~
 
 The machinery stays where it is (see above — it's generic and it's the
 open-sourcing candidate). What changes is only the **surface**: `--repeat`,
