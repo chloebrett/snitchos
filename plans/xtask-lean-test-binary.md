@@ -1,0 +1,138 @@
+# Plan: Split xtask so the test path is snemu-free
+
+**Branch**: main (no feature branch, per repo convention)
+**Status**: Active
+
+## Goal
+
+Stop `cargo xtask test` (and every other non-emulator command) from compiling
+`snemu` into the xtask *tool* binary, so editing `snemu` and running `x test`
+compiles snemu **once** (its own test-profile build inside nextest) instead of twice.
+
+## Background — why two compiles today
+
+`xtask` is a single binary that statically links `snemu` (directly, and via
+`xtask-snemu`) because the itest harness drives a `snemu::Machine` in-process. So
+`touch snemu/src/lib.rs && cargo xtask test` does:
+
+1. **Build the tool** (`dev` profile) — recompiles snemu → xtask-snemu → xtask just to
+   produce the `xtask` binary. ~27s. **Pure overhead for `test`**, which never runs the
+   emulator.
+2. **Run nextest** (`test` profile) — recompiles snemu with the test harness to run
+   snemu's own unit tests. ~31s. **Inherent** — we want those tests.
+
+Only (1) is waste. Cargo compiles a crate's declared deps regardless of which
+subcommand runs, so the only way to keep snemu out of the tool is to keep it out of the
+tool *crate*. That means a **binary split**, not a feature flag (feature toggling one
+crate would rebuild the xtask binary on every `test`↔`itest` alternation — worse
+thrash). "snemu as a binary artifact dep" is also rejected: `xtask-snemu`/`itest`
+use snemu's *library* API richly (Machine, `state_hash`, snapshot-tree, folds,
+profiling); a subprocess boundary would be a large rewrite that loses that and saves
+nothing for `itest` (which must compile snemu either way).
+
+## The split
+
+- **Lean `xtask`** (no snemu): `test`, `build`, `boot`, `collect`, `reader`, `stack`,
+  `clippy`, `links`, `audit`, `loc`, `measure`, `snip`, and the **static** diagram drift
+  check that `test` performs (via the `diagram` lib + cargo metadata — no snemu boot).
+- **Heavy `xtask-itest`** (links snemu): `itest` (+ `--engine qemu`/`--scramble`/`--opt`
+  …), the `snemu` command group (`diff`/`bench`/`profile`), and the **telemetry**
+  diagram targets (`caps`/`trace`/`switches`, which fold frames from a snemu boot).
+- **Routing:** the `cargo xtask = run --package xtask --` alias is unchanged. Lean
+  `xtask` recognises the heavy subcommands and forwards raw argv via
+  `cargo run -p xtask-itest -- …`. `x`/`cargo xtask itest …` keep working verbatim.
+
+**Diagram nuance (decide during Step 2):** the `test` drift check needs only the
+`diagram` *library* on static projections (already the case — xtask boots snemu and
+hands frames in; the lib itself doesn't depend on snemu). So the lean binary keeps the
+drift check by calling the lib directly, while the `diagram` *command's* telemetry
+targets move to `xtask-itest`. Confirm `diagram` has no `snemu` dep before relying on
+this.
+
+## Acceptance Criteria
+
+- [ ] `touch snemu/src/lib.rs && cargo xtask test` shows **`Compiling snemu` exactly
+      once** (inside the nextest build), with **no** snemu compile in a preceding
+      tool-build phase.
+- [ ] Every subcommand behaves identically: `cargo xtask itest [scenario]`,
+      `--engine qemu`, `--scramble`, `--opt …`, `snemu diff|bench|profile`,
+      `diagram <target>`, `test`, `build`, `boot`, `clippy`, `links`.
+- [ ] The gate passes end to end: `cargo xtask test && cargo xtask itest && cargo xtask
+      itest --scramble`.
+- [ ] CLI-surface parity: every argv that parsed before still parses (the moved
+      `cli_surface_tests` stay green in their new crate).
+- [ ] `x test`, `x itest`, `x boot` (the shell alias) all still work.
+
+## Steps
+
+Each step leaves the gate green. This is a build-structure refactor, so the headline
+acceptance (Step 2) is a **measured** build-graph outcome, not a unit assertion; CLI
+parity and dispatch *are* unit-tested.
+
+### Step 1: Create `xtask-itest` binary owning the snemu-linked commands; delegate to it
+
+**Acceptance criteria**: `cargo run -p xtask-itest -- itest boot-reaches-heartbeat` runs
+the scenario; `cargo xtask itest boot-reaches-heartbeat` runs it too (lean `xtask`
+forwards). `xtask` still declares its snemu deps at this step (no win yet) — behaviour
+is identical and the gate is green. **Present the crate boundary (which commands move,
+which argv the lean side forwards) and get confirmation before writing code.**
+**RED**: move `xtask/src/itest.rs` + the itest/snemu-group `cli_surface_tests` into
+`xtask-itest`; those tests must compile and pass from their new home (they fail to build
+until the module + clap definitions move). Add a lean-side test that the `itest`/`snemu`
+arms forward argv unchanged to a `cargo run -p xtask-itest` invocation (assert on the
+constructed `Command`, injected, not executed).
+**GREEN**: implement the `xtask-itest` clap binary (deps: snemu, xtask-snemu,
+itest-harness, xtask-qemu, protocol, snitchos-abi, fs-proto, magnitude) and the lean
+forwarding shim.
+**MUTATE / KILL MUTANTS**: run `mutation-testing` on the forwarding/dispatch logic
+(argv pass-through, exit-code propagation).
+**REFACTOR**: only if it clarifies the dispatch seam.
+**Done when**: both entry points run scenarios identically; gate green; work approved.
+
+### Step 2: Drop `snemu`/`xtask-snemu`/`itest-harness` from the lean `xtask` crate
+
+**Acceptance criteria**: `touch snemu/src/lib.rs && cargo xtask test` compiles snemu
+exactly once (the win). Resolve the diagram nuance: keep the static drift check in lean
+`xtask` via the `diagram` lib; move telemetry diagram targets to `xtask-itest`.
+**RED**: add/keep a check that lean `xtask` no longer references snemu types (a grep
+gate in CI, or simply that removing the deps still compiles). The drift-check path must
+stay covered — `cargo xtask test` still fails on a deliberately drifted generated
+diagram.
+**GREEN**: remove the three deps + the now-dead snemu-using arms from
+`xtask/Cargo.toml`/`main.rs`; drop any dep that only itest used (audit `fs-proto`,
+`snitchos-abi`, `protocol` usage in the lean crate and remove if unused).
+**MUTATE / KILL MUTANTS**: n/a for dep removal; ensure the drift-check test still kills
+its mutant (drift detected).
+**REFACTOR**: tidy `main.rs` now that the heavy arms are gone.
+**Done when**: the one-compile acceptance holds and the full gate is green.
+
+### Step 3: Docs + alias/dispatch polish
+
+**Acceptance criteria**: CLAUDE.md's testing/xtask sections describe the two binaries
+and the routing; README `x …` examples unchanged and correct; `cargo xtask links`
+passes.
+**RED**: `cargo xtask links` (and the doc-link check inside `cargo xtask test`) fail if
+any moved/renamed path breaks a relative `.md` link.
+**GREEN**: update CLAUDE.md (the "x test compiles snemu once" note; the xtask
+crate-layout paragraph), README, and confirm the `cargo xtask` alias needs no change.
+**Done when**: docs match reality, all links resolve, gate green.
+
+## Pre-PR Quality Gate
+
+1. `cargo xtask test && cargo xtask itest && cargo xtask itest --scramble` green.
+2. Mutation testing on the new dispatch/forwarding logic.
+3. `cargo xtask clippy` clean.
+4. `cargo xtask links` clean.
+5. Manual: `touch snemu/src/lib.rs && time cargo xtask test` shows a single snemu
+   compile (record before/after wall-clock in the PR description).
+
+## Rejected alternatives
+
+- **snemu as a binary-artifact dependency** — loses the library integration
+  (`state_hash`, snapshot-tree, folds, profiling); zero benefit for `itest`.
+- **Cargo feature flag on the single binary** — feature-set flips between `test` and
+  `itest` would rebuild the xtask binary each alternation: more thrash, not less.
+
+---
+*On completion, `git mv` this file to `plans/legacy/` per the CLAUDE.md override (keep
+the historical record), rather than deleting it.*
