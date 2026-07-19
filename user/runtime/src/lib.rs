@@ -28,7 +28,7 @@ use talc::{OomHandler, Span as TalcSpan, Talc, Talck};
 
 /// Mark a program's entry function. Write `#[snitchos_user::entry] fn main()`
 /// (or `use snitchos_user::entry;` then `#[entry]`); the macro supplies the
-/// `#[unsafe(no_mangle)] extern "C"` decoration that [`__snitchos_start`] calls.
+/// `#[unsafe(no_mangle)] extern "C"` decoration that `__snitchos_start` calls.
 pub use snitchos_user_macros::entry;
 
 core::arch::global_asm!(include_str!("start.S"));

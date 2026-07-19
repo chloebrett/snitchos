@@ -1,4 +1,4 @@
-//! `#[derive(Schema)]` for [`hitch::Schema`]: reflect a Rust struct or enum into
+//! `#[derive(Schema)]` for `hitch::Schema`: reflect a Rust struct or enum into
 //! its const `hitch::ConstSchema` at compile time (an associated `const SCHEMA`),
 //! recursing into field types.
 //!
