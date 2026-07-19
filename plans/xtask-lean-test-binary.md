@@ -63,31 +63,65 @@ this.
       `cli_surface_tests` stay green in their new crate).
 - [ ] `x test`, `x itest`, `x boot` (the shell alias) all still work.
 
+## `itest.rs` is two disjoint halves (verified) — do NOT move it wholesale
+
+The original Step 1 said "move `itest.rs` wholesale into `xtask-itest`." That is **wrong**
+and would drag `test`/`clippy`/`mutants` into the snemu-linked binary. `xtask/src/itest.rs`
+holds two halves that do **not** cross-reference (grep-verified):
+
+- **Lean gate machinery** (implements `test`/`clippy`/`mutants`, no snemu, no
+  itest-harness): `run_unit_tests`, `workspace_members`, `unit_test_plan`,
+  `riscv_only_plan`, `NOT_HOST_TESTED`, `EXTRA_TEST_ARGS`, `check_rustdoc`,
+  `run_cargo_test`, `cargo_metadata_json`, `workspace_manifests`, the in-flight lints
+  WIP (`LINTS_EXEMPT`, `opts_into_workspace_lints`, `lints_optin_gaps`), and the
+  `unit_test_plan_tests`/`lints_policy_tests`/`riscv_only_plan_tests` modules. **Stays
+  in `xtask`** (extract to a new `xtask/src/plan.rs`).
+- **Heavy runner** (the `itest`/`snemu` commands): the 7 submodules
+  (`harness`/`scenarios`/`matchers`/`schedule`/`snapshot_tree`/`snemu_audit`) + `baseline`,
+  `run`/`RunConfig`/`set_capture_level`/`show`/`latest_run_dir`/`find_capture`/
+  `try_auto_push`/`unreached_run`/`install_ctrlc_handler`, and `qemu_available`/
+  `detect_stale_qemus` (called only from `run`). Heavy only via `snemu_audit`'s direct
+  `snemu` use + the `snemu` group. **Moves to `xtask-itest`.** (itest-harness itself
+  does NOT link snemu.)
+
+No shared lib crate is needed — the halves are independent.
+
 ## Steps
 
-Each step leaves the gate green. This is a build-structure refactor, so the headline
-acceptance (Step 2) is a **measured** build-graph outcome, not a unit assertion; CLI
-parity and dispatch *are* unit-tested.
+Each step leaves the gate green (except the pre-existing mutant trip-wire, owned by the
+user). This is a build-structure refactor, so the headline acceptance (Step 2) is a
+**measured** build-graph outcome; CLI parity and dispatch *are* unit-tested.
 
-### Step 1: Create `xtask-itest` binary owning the snemu-linked commands; delegate to it
+> **Sequencing caveat:** the lean half contains the user's uncommitted lints WIP. Do
+> Step 1a only after that WIP is committed/settled, or explicitly accept relocating it.
+
+### Step 1a: Extract the lean `plan` module out of `itest.rs` (lands in `xtask`, green)
+
+**Acceptance criteria**: the gate-machinery items above move from `itest.rs` to
+`xtask/src/plan.rs` (or similar); `test`/`clippy`/`mutants` call `plan::…` instead of
+`itest::…`; nothing changes behaviourally; gate green. Pure intra-crate refactor — no new
+crate, no snemu movement yet.
+**RED/GREEN**: the moved `unit_test_plan_tests`/`lints_policy_tests`/`riscv_only_plan_tests`
+compile and pass from `plan.rs`; `cargo xtask test` still runs the full suite.
+**Done when**: `itest.rs` holds only the runner half; gate green; approved.
+
+### Step 1b: Move the runner half + `snemu` group into `xtask-itest`; delegate
 
 **Acceptance criteria**: `cargo run -p xtask-itest -- itest boot-reaches-heartbeat` runs
-the scenario; `cargo xtask itest boot-reaches-heartbeat` runs it too (lean `xtask`
-forwards). `xtask` still declares its snemu deps at this step (no win yet) — behaviour
-is identical and the gate is green. **Present the crate boundary (which commands move,
-which argv the lean side forwards) and get confirmation before writing code.**
-**RED**: move `xtask/src/itest.rs` + the itest/snemu-group `cli_surface_tests` into
-`xtask-itest`; those tests must compile and pass from their new home (they fail to build
-until the module + clap definitions move). Add a lean-side test that the `itest`/`snemu`
-arms forward argv unchanged to a `cargo run -p xtask-itest` invocation (assert on the
-constructed `Command`, injected, not executed).
-**GREEN**: implement the `xtask-itest` clap binary (deps: snemu, xtask-snemu,
-itest-harness, xtask-qemu, protocol, snitchos-abi, fs-proto, magnitude) and the lean
-forwarding shim.
-**MUTATE / KILL MUTANTS**: run `mutation-testing` on the forwarding/dispatch logic
-(argv pass-through, exit-code propagation).
-**REFACTOR**: only if it clarifies the dispatch seam.
-**Done when**: both entry points run scenarios identically; gate green; work approved.
+the scenario; `cargo xtask itest …` / `cargo xtask snemu …` forward to it and behave
+identically. `xtask` keeps its snemu deps for now (no win yet). Baseline / itest-show
+commands (runner-adjacent, no snemu) move with the runner. **Present the final command
+boundary + delegation mechanism and confirm before writing code.**
+**RED**: the itest/snemu `cli_surface_tests` move to `xtask-itest` and pass there; add a
+lean-side test that the `itest`/`snemu` arms construct a `cargo run -p xtask-itest -- …`
+command with argv forwarded unchanged (assert on the injected `Command`, don't execute).
+**GREEN**: new `xtask-itest` binary crate (deps: snemu, xtask-snemu, itest-harness,
+xtask-qemu, protocol[std], snitchos-abi, fs-proto, magnitude, serde, serde_json, ctrlc);
+lean forwarding shim; register in workspace; update xtask's committed derived-lists to
+include `xtask-itest` so `unit_test_plan_tests::the_committed_lists_match_the_workspace`
+stays green.
+**MUTATE / KILL MUTANTS**: `mutation-testing` on the forwarding/dispatch logic.
+**Done when**: both entry points run scenarios identically; gate green; approved.
 
 ### Step 2: Drop `snemu`/`xtask-snemu`/`itest-harness` from the lean `xtask` crate
 

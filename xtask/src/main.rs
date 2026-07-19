@@ -16,6 +16,7 @@ use xtask_cmds::{audit, links, loc, measure, snip};
 
 mod diagram_cmd;
 mod itest;
+mod plan;
 
 const COLLECTOR_BIN: &str = "target/debug/collector";
 const TELEMETRY_SOCKET: &str = "/tmp/snitch-telemetry.sock";
@@ -880,7 +881,7 @@ fn scrub_inherited_cargo_env() {
 #[cfg(test)]
 mod mutant_plan_tests {
     use super::{NOT_MUTATED, mutant_plan};
-    use crate::itest::{EXTRA_TEST_ARGS, NOT_HOST_TESTED};
+    use crate::plan::{EXTRA_TEST_ARGS, NOT_HOST_TESTED};
 
     const NO_ARGS: &[&str] = &[];
 
@@ -930,7 +931,7 @@ mod mutant_plan_tests {
     /// `NOT_MUTATED` should fail here first.
     #[test]
     fn the_derived_plan_matches_the_previously_hardcoded_set() {
-        let members = crate::itest::workspace_members().expect("cargo metadata");
+        let members = crate::plan::workspace_members().expect("cargo metadata");
         let names: Vec<&str> = members.iter().map(String::as_str).collect();
         let plan = mutant_plan(&names, NOT_HOST_TESTED, NOT_MUTATED, EXTRA_TEST_ARGS)
             .expect("committed lists are current");
@@ -1083,7 +1084,7 @@ mod cli_surface_tests {
             ["itest", "--steps", "400M"].as_slice(),
             ["itest", "--limit", "5"].as_slice(),
             ["itest", "--order", "instret"].as_slice(),
-            ["itest", "--opt", "high"].as_slice(),
+            ["itest", "--opt", "max"].as_slice(),
             ["itest", "--speedup", "low"].as_slice(),
             ["itest", "--jit"].as_slice(),
             // qemu-side
@@ -1279,7 +1280,7 @@ mod cli_surface_tests {
             ["itest", "--no-idle-skip"].as_slice(),
             ["itest", "--share-snapshots"].as_slice(),
             ["itest", "--order", "instret"].as_slice(),
-            ["itest", "--opt", "high"].as_slice(),
+            ["itest", "--opt", "max"].as_slice(),
             ["itest", "-j", "4"].as_slice(),
         ] {
             let full: Vec<&str> = std::iter::once("xtask").chain(argv.iter().copied()).collect();
@@ -1433,7 +1434,7 @@ fn main() -> ExitCode {
             run_collector(&all)
         }
         Cmd::Stack { cmd } => stack(cmd),
-        Cmd::Test => itest::run_unit_tests(),
+        Cmd::Test => plan::run_unit_tests(),
         Cmd::Links => links::check(),
         Cmd::ItestShow { run, scenario, tail, grep } => {
             itest::show(run.as_deref(), scenario.as_deref(), tail, grep.as_deref())
@@ -1815,14 +1816,14 @@ fn boot(
 /// exactly what happened: `snemu`, `stitch`, `hitch` and eleven others were never
 /// linted at all, and the riscv half was missing `snitchos-std` and `fs`. Deriving
 /// them means a new crate is linted the moment it joins the workspace, and
-/// `itest::NOT_HOST_TESTED` is the only way out — the same shape the host test gate
+/// `plan::NOT_HOST_TESTED` is the only way out — the same shape the host test gate
 /// already uses, for the same reason.
 ///
 /// Per-crate invocation (rather than one `-p a -p b …`) because the feature args a
 /// crate needs are its own: `--features stitch/testing` is invalid for any package
 /// that doesn't depend on stitch. Same lesson `MUTANT_CRATES` records.
 fn run_clippy(extra_args: &[String]) -> ExitCode {
-    let members = match itest::workspace_members() {
+    let members = match plan::workspace_members() {
         Ok(m) => m,
         Err(e) => {
             eprintln!("clippy: {e}");
@@ -1834,7 +1835,7 @@ fn run_clippy(extra_args: &[String]) -> ExitCode {
     // Host-buildable crates: lint everything including tests. Reuses the test
     // gate's per-crate feature args — a crate that needs `--features std` to
     // compile its tests needs it to lint them too.
-    let host_plan = match itest::unit_test_plan(&names, itest::NOT_HOST_TESTED, itest::EXTRA_TEST_ARGS) {
+    let host_plan = match plan::unit_test_plan(&names, plan::NOT_HOST_TESTED, plan::EXTRA_TEST_ARGS) {
         Ok(plan) => plan,
         Err(e) => {
             eprintln!("clippy: {e}");
@@ -1854,7 +1855,7 @@ fn run_clippy(extra_args: &[String]) -> ExitCode {
 
     // The kernel and the userspace crates only compile for bare-metal riscv.
     // No `--all-targets`: none has a host-buildable test target.
-    let riscv_plan = match itest::riscv_only_plan(&names, itest::NOT_HOST_TESTED) {
+    let riscv_plan = match plan::riscv_only_plan(&names, plan::NOT_HOST_TESTED) {
         Ok(plan) => plan,
         Err(e) => {
             eprintln!("clippy: {e}");
@@ -1944,7 +1945,7 @@ fn mutant_plan<'a>(
     }
 
     let excluded: Vec<(&str, &str)> = riscv_only.iter().chain(not_mutated.iter()).copied().collect();
-    itest::unit_test_plan(members, &excluded, extra_args)
+    plan::unit_test_plan(members, &excluded, extra_args)
 }
 
 /// One cargo-mutants invocation. Returns `true` iff it passed.
@@ -1962,7 +1963,7 @@ fn run_mutants_for(name: &str, features: &[&str], extra_args: &[String]) -> bool
 /// args go to cargo-mutants — scope a run with
 /// `cargo xtask mutants kernel-proc -- -f kernel-proc/src/elf.rs`.
 fn run_mutants(only: Option<&str>, extra_args: &[String]) -> ExitCode {
-    let members = match itest::workspace_members() {
+    let members = match plan::workspace_members() {
         Ok(m) => m,
         Err(e) => {
             eprintln!("mutants: {e}");
@@ -1970,7 +1971,7 @@ fn run_mutants(only: Option<&str>, extra_args: &[String]) -> ExitCode {
         }
     };
     let names: Vec<&str> = members.iter().map(String::as_str).collect();
-    let plan = match mutant_plan(&names, itest::NOT_HOST_TESTED, NOT_MUTATED, itest::EXTRA_TEST_ARGS)
+    let plan = match mutant_plan(&names, plan::NOT_HOST_TESTED, NOT_MUTATED, plan::EXTRA_TEST_ARGS)
     {
         Ok(plan) => plan,
         Err(e) => {
