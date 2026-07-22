@@ -126,6 +126,7 @@ fn find_capture(dir: &Path, scenario: Option<&str>) -> Option<PathBuf> {
 }
 
 pub(crate) mod baseline;
+pub(crate) mod instret_baseline;
 mod harness;
 mod matchers;
 mod scenarios;

@@ -471,6 +471,8 @@ pub fn run(
     verbose: bool,
     stats: bool,
     scramble: bool,
+    instret_gate: Option<crate::itest::instret_baseline::InstretGate>,
+    export_instret: Option<std::path::PathBuf>,
 ) -> ExitCode {
     let (kernel, dtb) = match snemu_diff::prepare_profiled(true, opt) {
         Ok(v) => v,
@@ -844,6 +846,28 @@ pub fn run(
     if stats {
         print_utilization(&worker_busy, makespan, order, ideal_wall, ideal_instret);
         print_ram_sizing(&results);
+    }
+
+    // The instret perf gate (--record-instret / --check-instret). Only the passing
+    // scenarios contribute a baseline number — a failed scenario's instret is its
+    // budget cap, not real work, so recording it would poison the baseline.
+    if instret_gate.is_some() || export_instret.is_some() {
+        use crate::itest::instret_baseline::{InstretBaseline, apply_gate};
+        let current = InstretBaseline::from_pairs(
+            results
+                .iter()
+                .filter(|r| matches!(r.outcome, Outcome::Pass))
+                .map(|r| (r.name.to_string(), r.instret)),
+        );
+        if let Some(path) = export_instret {
+            match std::fs::write(&path, current.render_prometheus()) {
+                Ok(()) => eprintln!("instret: exported Prometheus textfile to {}", path.display()),
+                Err(e) => eprintln!("instret: could not export {}: {e}", path.display()),
+            }
+        }
+        if instret_gate.is_some_and(|gate| !apply_gate(&gate, &current)) {
+            return ExitCode::from(1);
+        }
     }
     exit
 }

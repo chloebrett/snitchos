@@ -313,21 +313,53 @@ pub fn run_unit_tests() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `cargo doc` every crate, denying **broken** intra-doc links, so a link that
-/// resolves to nothing fails the gate instead of rotting.
+/// Rustdoc lints the gate deliberately does **not** enforce, each with the reason.
 ///
-/// Deliberately only `broken_intra_doc_links`, not `-D warnings`. The noisy
-/// neighbour is `private_intra_doc_links` (a public item's docs linking to a
-/// private one) — those links name something real, they just don't render, which
-/// is cosmetic and fires ~10× in `snemu` alone. A link pointing at a symbol that
-/// *doesn't exist* is the rot worth gating: it's how `[`span_start`]` outlived
-/// the function by several renames.
+/// The gate denies *every* doc-build warning (`-D warnings`, see [`check_rustdoc`])
+/// and this list allows specific lints back — the same opt-out shape as the
+/// workspace clippy table (pedantic `warn`, named lints `allow`ed back) and
+/// [`LINTS_EXEMPT`] (every crate linted, named crates excused). A lint earns a
+/// spot here only with a written, ideally *measured*, reason.
+///
+/// The previous design was the inverse: an opt-*in* list naming the single lint to
+/// enforce (`broken_intra_doc_links`). Everything nobody thought to add —
+/// `bare_urls`, `unescaped_backticks`, `invalid_html_tags` — was ignored by
+/// default, the same silent-omission failure the crate lists above exist to
+/// prevent. Opt-out means a new rustdoc lint is enforced the moment the toolchain
+/// ships it, and turning one off is a decision someone has to write down.
+pub(crate) const RUSTDOC_EXEMPT: &[(&str, &str)] = &[
+    (
+        "private_intra_doc_links",
+        "a public item's docs linking to a private one: the link names something \
+         real, it just doesn't render as a link (cosmetic). Measured at ~10× in \
+         `snemu` when this policy was written; drop the exemption if a re-measure \
+         reaches zero. Prefer demoting the offending link to a plain `code span` \
+         over widening this exemption.",
+    ),
+];
+
+/// The `RUSTDOCFLAGS` value: deny every doc-build warning, then allow back exactly
+/// the lints named in `exempt`. Pure so the flag string is unit-testable; the
+/// allow-backs follow the deny so they win (rustc applies flags left-to-right).
+fn rustdoc_deny_flags(exempt: &[(&str, &str)]) -> String {
+    let mut flags = String::from("-D warnings");
+    for (lint, _) in exempt {
+        flags.push_str(" -A rustdoc::");
+        flags.push_str(lint);
+    }
+    flags
+}
+
+/// `cargo doc` every crate, denying all doc-build warnings so a broken link, bare
+/// URL, or malformed doc fails the gate instead of rotting. `RUSTDOC_EXEMPT` is
+/// the only way to quiet a specific lint, and every entry there carries a reason.
 ///
 /// Same two-target split as `run_clippy`, for the same reason: the bare-metal
 /// crates can't be documented for the host. `--no-deps` because we're checking
 /// *our* prose, not our dependencies'.
 fn check_rustdoc(names: &[&str]) -> bool {
-    let deny = &[("RUSTDOCFLAGS", "-D rustdoc::broken_intra_doc_links")];
+    let flags = rustdoc_deny_flags(RUSTDOC_EXEMPT);
+    let deny = &[("RUSTDOCFLAGS", flags.as_str())];
     let host_plan = match unit_test_plan(names, NOT_HOST_TESTED, EXTRA_TEST_ARGS) {
         Ok(plan) => plan,
         Err(e) => {
@@ -442,6 +474,47 @@ mod unit_test_plan_tests {
         let members = super::workspace_members().expect("cargo metadata");
         let names: Vec<&str> = members.iter().map(String::as_str).collect();
         unit_test_plan(&names, NOT_HOST_TESTED, EXTRA_TEST_ARGS).expect("committed lists are current");
+    }
+}
+
+#[cfg(test)]
+mod rustdoc_policy_tests {
+    use super::{RUSTDOC_EXEMPT, rustdoc_deny_flags};
+
+    /// With nothing exempt the gate denies every doc-build warning — opt-out, so a
+    /// rustdoc lint nobody has named is on by default.
+    #[test]
+    fn with_no_exemptions_all_warnings_are_denied() {
+        assert_eq!(rustdoc_deny_flags(&[]), "-D warnings");
+    }
+
+    #[test]
+    fn an_exemption_is_allowed_back_under_the_rustdoc_prefix() {
+        assert_eq!(
+            rustdoc_deny_flags(&[("private_intra_doc_links", "noisy")]),
+            "-D warnings -A rustdoc::private_intra_doc_links",
+        );
+    }
+
+    /// Allow-backs follow the deny so they win, and compose in list order.
+    #[test]
+    fn exemptions_compose_after_the_deny() {
+        assert_eq!(
+            rustdoc_deny_flags(&[("a", "r1"), ("b", "r2")]),
+            "-D warnings -A rustdoc::a -A rustdoc::b",
+        );
+    }
+
+    /// Same discipline as the crate lists: an exemption is a written decision, so
+    /// every entry carries a non-empty reason and no lint is listed twice.
+    #[test]
+    fn committed_exemptions_are_written_decisions() {
+        let mut seen = std::collections::HashSet::new();
+        for (lint, reason) in RUSTDOC_EXEMPT {
+            assert!(!lint.is_empty(), "exemption with an empty lint name");
+            assert!(!reason.trim().is_empty(), "the `{lint}` exemption has no reason");
+            assert!(seen.insert(*lint), "`{lint}` is listed twice in RUSTDOC_EXEMPT");
+        }
     }
 }
 

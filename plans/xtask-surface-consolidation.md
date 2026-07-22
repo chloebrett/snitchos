@@ -624,7 +624,23 @@ running one scenario twice asserting byte-identical verdict + instret.
 than one struct with engine-conditional fields.
 **Done when**: the determinism demonstration is recorded here.
 
-### Step 2.2c: Rewrite the `.itest-runs/` debugging habit
+### Step 2.2c — ✅ DONE: Rewrite the `.itest-runs/` debugging habit
+
+**Done** (docs/memory only). The `feedback_itest_runs_debugging` memory + its
+MEMORY.md index line now split by engine:
+
+- **snemu (default):** a failure prints the guest console tail *inline*, and the
+  run is deterministic — so re-run the one scenario (`itest <name>`). Verified
+  snemu writes **no** per-scenario `.itest-runs/*.capture.json` (only
+  `snemu-packing.json` / `snemu-branch-keys.json`), so the old "read the capture
+  dir" instruction genuinely doesn't apply there.
+- **QEMU (`--engine qemu`):** the `.itest-runs/<ts>/` capture workflow, unchanged
+  — and it's the *right* tool there, since QEMU is flake-prone and re-running
+  isn't reliable.
+
+CLAUDE.md needed no change — it never referenced `.itest-runs/` directly.
+
+### ~~Step 2.2c (original text)~~
 
 Separate from 2.2b because it's a docs/memory change, and because the habit
 outlives the flag: `.itest-runs/` still gets written **by the QEMU engine**. The
@@ -637,7 +653,39 @@ distinguish the two paths — snemu: re-run the scenario; QEMU (`--engine qemu`)
 read `.itest-runs/<ts>/` as before.
 **Done when**: both documents state which engine each workflow belongs to.
 
-### Step 2.3: Reframe the baseline as an instret gate
+### Step 2.3 — ✅ DONE (additive): a snemu instret perf gate
+
+**Reframed per the user's call: additive, not a retarget.** The original step
+deleted the flake baseline to repoint it at instret — but that baseline *stays*
+(it serves `--engine qemu` and is the open-sourcing candidate; see the quarantine
+withdrawal). So instead this adds a **separate** per-scenario instret gate for the
+snemu path, touching neither `baseline.rs` nor `itest-harness`.
+
+New module `xtask-itest/src/itest/instret_baseline.rs` (`InstretBaseline`):
+
+- `--record-instret <PATH>` — write this run's `scenario → instret` (a tab-separated
+  storage file). Only *passing* scenarios contribute — a failed scenario's instret
+  is its budget cap, not real work.
+- `--check-instret <PATH>` — compare a fresh run against a recorded baseline; any
+  scenario grown past `--instret-tolerance` (default 5%) prints the regression and
+  **fails the run** (non-zero exit). `record`/`check` are `conflicts_with` at the
+  CLI.
+- `--export-instret <PATH>` — a Prometheus textfile
+  (`snitchos_itest_scenario_instret{scenario="…"}`) for a Grafana panel; composes
+  with any run.
+
+**Proven end-to-end**, which is the whole acceptance: record → an identical re-run
+reports *no* regression (determinism) → a synthetic +100% (tampered baseline) trips
+the gate, names the scenario, and exits non-zero. 6 module tests, `cargo mutants`
+**24 caught / 0 missed**, clippy clean, plain `itest` unaffected (120/120, no
+instret output unless a flag is passed).
+
+**Deferred, noted:** (1) these three flags are snemu-only but not yet rejected
+under `--engine qemu` — the same reverse-direction gating 2.2 deferred; a
+follow-up. (2) The per-scenario **instret breakdown** (classify the number by
+behaviour) — the plan's noted sequel, still out of scope.
+
+### ~~Step 2.3 (original text)~~
 
 The one part of `baseline` with a life after determinism — but its **subject**
 must change. Tracking pass rate over time is pointless when it's always 1.0.

@@ -87,6 +87,29 @@ enum Cmd {
         /// `--verbose`: `-v --stats` is the full pre-quieting output.
         #[arg(long)]
         stats: bool,
+        /// Record the run's per-scenario guest instret to `<PATH>` as a perf
+        /// baseline (snemu only — instret is deterministic here, so the numbers
+        /// reproduce exactly). Later `--check-instret <PATH>` fails the run if any
+        /// scenario has grown past the tolerance. Distinct from the flake
+        /// `baseline` (QEMU failure rates); see `itest/instret_baseline.rs`.
+        #[arg(long, value_name = "PATH", conflicts_with = "check_instret")]
+        record_instret: Option<std::path::PathBuf>,
+        /// Compare the run's per-scenario instret against the baseline at `<PATH>`
+        /// (from a prior `--record-instret`) and exit non-zero if any scenario has
+        /// grown by more than `--instret-tolerance`. The deterministic-perf gate.
+        #[arg(long, value_name = "PATH")]
+        check_instret: Option<std::path::PathBuf>,
+        /// Fractional growth a scenario may drift before `--check-instret` calls it
+        /// a regression (`0.05` = 5%). Absorbs the ordinary instret wobble of
+        /// unrelated kernel changes.
+        #[arg(long, default_value_t = 0.05, value_name = "FRAC")]
+        instret_tolerance: f64,
+        /// Also write the run's per-scenario instret to `<PATH>` as a Prometheus
+        /// textfile (`node_exporter --collector.textfile`) — the deterministic
+        /// perf number on a Grafana panel. Composes with a normal or `--check`
+        /// run; independent of the storage-format `--record-instret`.
+        #[arg(long, value_name = "PATH")]
+        export_instret: Option<std::path::PathBuf>,
         /// Boot every scenario under snemu's **deterministic frame-scramble** — a
         /// fixed permutation that places each guest RAM frame on a non-contiguous
         /// physical frame. This forces the page-straddle access hazard to fire on
@@ -1081,6 +1104,10 @@ fn main() -> ExitCode {
             engine,
             verbose,
             stats,
+            record_instret,
+            check_instret,
+            instret_tolerance,
+            export_instret,
             scramble,
             steps,
             limit,
@@ -1149,6 +1176,15 @@ fn main() -> ExitCode {
                     || std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
                     |j| j as usize,
                 );
+                // `conflicts_with` makes at most one of these Some; fold into the gate.
+                let instret_gate = record_instret
+                    .map(itest::instret_baseline::InstretGate::Record)
+                    .or_else(|| {
+                        check_instret.map(|path| itest::instret_baseline::InstretGate::Check {
+                            path,
+                            tolerance: instret_tolerance,
+                        })
+                    });
                 let speed = itest::snemu_audit::SpeedConfig::resolve(
                     Some(speedup),
                     native_ops,
@@ -1170,6 +1206,8 @@ fn main() -> ExitCode {
                     verbose,
                     stats,
                     scramble,
+                    instret_gate,
+                    export_instret,
                 )
             }
             // The escape hatch: slower and flake-prone, but it's the engine snemu is
