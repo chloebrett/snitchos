@@ -1,0 +1,328 @@
+<title>VisionFive 2 — Board Map</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#eaefed; --surface:#ffffff; --ink:#132420;
+    --muted:#5a6c65; --line:#d5ddd9; --line-strong:#c2ccc7;
+    --copper:#bf6d2a; --copper-2:#d98a3f; --gold:#c9a24b;
+    --board:#0d3b33; --board-line:#2f6b60; --silk:#dfeae6;
+    --good:#3f8f6b; --warn:#c26a2a;
+    --pcb-shadow:rgba(6,30,26,.35);
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0b1513; --surface:#111e1a; --ink:#e7ede9; --muted:#93a49d;
+      --line:#22302b; --line-strong:#2c3b35;
+      --copper:#d98a3f; --copper-2:#eaa456; --gold:#d8b566;
+      --board:#0a332c; --board-line:#2f6b60; --silk:#dce8e3;
+      --good:#63b98d; --warn:#e0913f;
+      --pcb-shadow:rgba(0,0,0,.5);
+    }
+  }
+  :root[data-theme="light"]{
+    --bg:#eaefed; --surface:#ffffff; --ink:#132420; --muted:#5a6c65;
+    --line:#d5ddd9; --line-strong:#c2ccc7; --copper:#bf6d2a; --copper-2:#d98a3f;
+    --gold:#c9a24b; --board:#0d3b33; --silk:#dfeae6; --good:#3f8f6b; --warn:#c26a2a;
+    --pcb-shadow:rgba(6,30,26,.35);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0b1513; --surface:#111e1a; --ink:#e7ede9; --muted:#93a49d;
+    --line:#22302b; --line-strong:#2c3b35; --copper:#d98a3f; --copper-2:#eaa456;
+    --gold:#d8b566; --board:#0a332c; --silk:#dce8e3; --good:#63b98d; --warn:#e0913f;
+    --pcb-shadow:rgba(0,0,0,.5);
+  }
+
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    line-height:1.55; letter-spacing:.005em;
+  }
+  .mono{font-family:ui-monospace,"SF Mono",Menlo,"Cascadia Mono",Consolas,monospace}
+  .wrap{max-width:940px; margin:0 auto; padding:clamp(20px,4vw,44px)}
+
+  header.head{margin-bottom:28px}
+  .eyebrow{
+    font-family:ui-monospace,Menlo,monospace; font-size:12px; letter-spacing:.16em;
+    text-transform:uppercase; color:var(--copper); margin:0 0 10px;
+  }
+  h1{
+    font-size:clamp(26px,4.5vw,40px); line-height:1.05; margin:0 0 10px;
+    font-weight:680; text-wrap:balance; letter-spacing:-.015em;
+  }
+  .sub{color:var(--muted); max-width:60ch; margin:0; font-size:15.5px}
+  .sub a{color:var(--copper); text-underline-offset:2px}
+
+  section{margin-top:40px}
+  h2{
+    font-size:13px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--muted); margin:0 0 16px; font-weight:640;
+    display:flex; align-items:center; gap:12px;
+  }
+  h2::after{content:""; flex:1; height:1px; background:var(--line)}
+
+  /* ---------- PCB board map ---------- */
+  .board{
+    position:relative; background:
+      radial-gradient(120% 140% at 12% 0%, #12463c 0%, var(--board) 55%);
+    border:1px solid var(--board-line); border-radius:14px;
+    padding:18px; box-shadow:0 18px 40px -22px var(--pcb-shadow);
+    color:var(--silk);
+  }
+  .hole{position:absolute; width:14px; height:14px; border-radius:50%;
+    background:var(--bg); border:2px solid var(--board-line);
+    box-shadow:inset 0 0 0 2px rgba(0,0,0,.25)}
+  .hole.tl{top:9px;left:9px}.hole.tr{top:9px;right:9px}
+  .hole.bl{bottom:9px;left:9px}.hole.br{bottom:9px;right:9px}
+
+  .board-grid{
+    display:grid; gap:10px;
+    grid-template-columns:repeat(12,1fr);
+    grid-auto-rows:minmax(46px,auto);
+    padding:10px;
+  }
+  .part{
+    border:1px solid var(--board-line); border-radius:8px;
+    background:rgba(3,28,23,.42); padding:9px 11px;
+    display:flex; flex-direction:column; justify-content:center; gap:2px;
+    min-width:0;
+  }
+  .part .nm{font-weight:640; font-size:13.5px; line-height:1.2}
+  .part .dt{font-size:11.5px; color:#a7c5bd; line-height:1.25}
+  .part.soc{
+    background:linear-gradient(135deg,#0a2621,#093a30);
+    border-color:var(--copper); align-items:center; text-align:center;
+  }
+  .part.soc .nm{font-size:16px; letter-spacing:.02em}
+  .part.soc .dt{color:#e0b487}
+  .part.hi{border-color:var(--copper); box-shadow:0 0 0 1px var(--copper) inset}
+  .part.hi .tag{color:var(--copper-2); font-weight:700}
+  .edge-lbl{
+    grid-column:1/-1; font-family:ui-monospace,Menlo,monospace;
+    font-size:10.5px; letter-spacing:.14em; text-transform:uppercase;
+    color:#79a89e; padding:2px 2px 0;
+  }
+  .schem-note{font-size:12.5px; color:var(--muted); margin:10px 2px 0}
+
+  /* spans */
+  .c12{grid-column:span 12}.c8{grid-column:span 8}.c6{grid-column:span 6}
+  .c4{grid-column:span 4}.c3{grid-column:span 3}.c2{grid-column:span 2}
+  @media (max-width:620px){
+    .c8,.c6,.c4,.c3{grid-column:span 6}
+    .c2{grid-column:span 3}
+  }
+
+  /* ---------- 40-pin header ---------- */
+  .hdr-card{
+    background:var(--surface); border:1px solid var(--line);
+    border-radius:12px; padding:18px; overflow-x:auto;
+  }
+  .header40{display:inline-flex; flex-direction:column; gap:8px; min-width:100%}
+  .pin-row{display:grid; grid-template-columns:64px repeat(20,1fr); gap:6px; align-items:center}
+  .row-lbl{font-family:ui-monospace,Menlo,monospace; font-size:11px; color:var(--muted)}
+  .pin{
+    aspect-ratio:1/1; border-radius:50%;
+    background:radial-gradient(circle at 38% 34%, var(--gold), #96742f 78%);
+    border:1px solid rgba(0,0,0,.22);
+    display:flex; align-items:center; justify-content:center;
+    font-family:ui-monospace,Menlo,monospace; font-size:10px; color:#221a06;
+    font-weight:700; position:relative; min-width:16px;
+  }
+  .pin.uart{
+    background:radial-gradient(circle at 38% 34%, var(--copper-2), #8f4d18 80%);
+    box-shadow:0 0 0 2px var(--copper), 0 0 14px -2px var(--copper);
+    color:#fff;
+  }
+  .pin .call{
+    position:absolute; font-size:10px; font-weight:700; white-space:nowrap;
+    color:var(--copper); letter-spacing:.04em;
+  }
+  .pin.top .call{bottom:calc(100% + 5px)}
+  .pin.bot .call{top:calc(100% + 5px)}
+  .legend{display:flex; flex-wrap:wrap; gap:16px 22px; margin-top:16px; font-size:13px}
+  .legend span{display:inline-flex; align-items:center; gap:8px; color:var(--muted)}
+  .dot{width:13px; height:13px; border-radius:50%; flex:none}
+  .dot.g{background:radial-gradient(circle at 38% 34%,var(--gold),#96742f)}
+  .dot.c{background:var(--copper); box-shadow:0 0 0 2px color-mix(in srgb,var(--copper) 40%,transparent)}
+
+  /* ---------- generic info cards ---------- */
+  .cols{display:grid; grid-template-columns:1fr 1fr; gap:16px}
+  @media (max-width:640px){.cols{grid-template-columns:1fr}}
+  .card{
+    background:var(--surface); border:1px solid var(--line);
+    border-radius:12px; padding:18px 20px;
+  }
+  .card h3{margin:0 0 8px; font-size:15.5px; letter-spacing:-.01em}
+  .card p{margin:0 0 10px; font-size:14px; color:var(--ink)}
+  .card p:last-child{margin-bottom:0}
+  .card .k{color:var(--muted)}
+  .wire{font-family:ui-monospace,Menlo,monospace; font-size:12.5px}
+  .wire b{color:var(--copper)}
+
+  table.bm{border-collapse:collapse; width:100%; font-size:13.5px; margin-top:2px}
+  table.bm th,table.bm td{text-align:left; padding:7px 10px; border-bottom:1px solid var(--line)}
+  table.bm th{font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); font-weight:640}
+  table.bm td.mono{font-family:ui-monospace,Menlo,monospace}
+  tr .yes{color:var(--good); font-weight:640}
+
+  .callout{
+    border-left:3px solid var(--copper); background:color-mix(in srgb,var(--copper) 8%,var(--surface));
+    padding:14px 18px; border-radius:0 10px 10px 0; font-size:14px;
+  }
+  .callout b{color:var(--copper)}
+  .warn-chip{
+    display:inline-flex; align-items:center; gap:7px; font-size:12.5px; font-weight:640;
+    color:var(--warn); border:1px solid color-mix(in srgb,var(--warn) 40%,transparent);
+    background:color-mix(in srgb,var(--warn) 10%,transparent);
+    padding:3px 10px; border-radius:999px;
+  }
+
+  footer{margin-top:44px; padding-top:18px; border-top:1px solid var(--line);
+    font-size:12.5px; color:var(--muted)}
+  footer a{color:var(--copper)} footer p{margin:0 0 6px}
+</style>
+
+<div class="wrap">
+  <header class="head">
+    <p class="eyebrow">SnitchOS · target hardware</p>
+    <h1>VisionFive 2 — the board, part by part</h1>
+    <p class="sub">A StarFive JH7110 RISC-V single-board computer. Below: a schematic map of every
+      connector and chip, then the one thing you'll actually wire — the debug UART on the 40-pin header.
+      Layout is grouped by function, not photographed to scale; the
+      <a href="https://doc-en.rvspace.org/VisionFive2/Datasheet/VisionFive_2/block_diagram.html">official diagram</a>
+      is the authoritative geometry.</p>
+  </header>
+
+  <section>
+    <h2>The board at a glance</h2>
+    <div class="board">
+      <span class="hole tl"></span><span class="hole tr"></span>
+      <span class="hole bl"></span><span class="hole br"></span>
+      <div class="board-grid">
+
+        <div class="edge-lbl">I/O edge — the ports facing you</div>
+        <div class="part c3"><span class="nm">USB-C power</span><span class="dt">5 V / 3 A in</span></div>
+        <div class="part c3"><span class="nm">HDMI</span><span class="dt">display out (no OS = dark)</span></div>
+        <div class="part c3"><span class="nm">USB-A ×4</span><span class="dt">USB 3.0 / 2.0</span></div>
+        <div class="part c3"><span class="nm">Ethernet ×2</span><span class="dt">Gigabit — eth0 / eth1</span></div>
+
+        <div class="edge-lbl">Compute</div>
+        <div class="part soc c6"><span class="nm">JH7110 SoC</span><span class="dt">4× SiFive U74 (RV64GC) + 1× S7 · Sv39</span></div>
+        <div class="part c3"><span class="nm">LPDDR4</span><span class="dt">2 / 4 / 8 GB · RAM @ 0x4000_0000</span></div>
+        <div class="part c3 hi"><span class="nm">QSPI flash <span class="tag">◄ U-Boot</span></span><span class="dt">16 MiB · holds SPL+OpenSBI+U-Boot</span></div>
+
+        <div class="edge-lbl">Storage &amp; expansion</div>
+        <div class="part c3"><span class="nm">microSD</span><span class="dt">slot (underside)</span></div>
+        <div class="part c3"><span class="nm">eMMC socket</span><span class="dt">B2B — optional module</span></div>
+        <div class="part c3"><span class="nm">M.2 M-key</span><span class="dt">PCIe — NVMe (underside)</span></div>
+        <div class="part c3"><span class="nm">MIPI DSI / CSI</span><span class="dt">FPC — display / camera</span></div>
+
+        <div class="edge-lbl">Headers &amp; switches — where we connect</div>
+        <div class="part c6 hi"><span class="nm">40-pin GPIO header <span class="tag">◄ debug UART lives here</span></span><span class="dt">pins 6 / 8 / 10 = GND / TX / RX · detailed below</span></div>
+        <div class="part c3 hi"><span class="nm">Boot-mode switch <span class="tag">◄</span></span><span class="dt">2× RGPIO — picks boot source</span></div>
+        <div class="part c3"><span class="nm">Power LED + fan hdr</span><span class="dt">power LED = hardwired, not software</span></div>
+
+      </div>
+    </div>
+    <p class="schem-note">Highlighted in copper = the three things this port cares about: <b>QSPI flash</b> (where U-Boot
+      already lives), the <b>40-pin header</b> (our serial console), and the <b>boot-mode switch</b>.</p>
+  </section>
+
+  <section>
+    <h2>The debug UART — what you actually wire</h2>
+    <div class="hdr-card">
+      <div class="header40">
+        <div class="pin-row">
+          <span class="row-lbl">odd&nbsp;→</span>
+          <span class="pin">1</span><span class="pin">3</span>
+          <span class="pin uart top">5<span class="call"></span></span>
+          <span class="pin uart top">7<span class="call"></span></span>
+          <span class="pin uart top">9<span class="call"></span></span>
+          <span class="pin">11</span><span class="pin">13</span><span class="pin">15</span><span class="pin">17</span>
+          <span class="pin">19</span><span class="pin">21</span><span class="pin">23</span><span class="pin">25</span>
+          <span class="pin">27</span><span class="pin">29</span><span class="pin">31</span><span class="pin">33</span>
+          <span class="pin">35</span><span class="pin">37</span><span class="pin">39</span>
+        </div>
+        <div class="pin-row">
+          <span class="row-lbl">even→</span>
+          <span class="pin">2</span><span class="pin">4</span>
+          <span class="pin uart bot">6<span class="call">GND</span></span>
+          <span class="pin uart bot">8<span class="call">TX → adapter RX</span></span>
+          <span class="pin uart bot">10<span class="call">RX → adapter TX</span></span>
+          <span class="pin">12</span><span class="pin">14</span><span class="pin">16</span><span class="pin">18</span>
+          <span class="pin">20</span><span class="pin">22</span><span class="pin">24</span><span class="pin">26</span>
+          <span class="pin">28</span><span class="pin">30</span><span class="pin">32</span><span class="pin">34</span>
+          <span class="pin">36</span><span class="pin">38</span><span class="pin">40</span>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i class="dot g"></i> gold = an ordinary GPIO/power pin</span>
+        <span><i class="dot c"></i> copper = the three UART pins you use</span>
+        <span class="mono" style="color:var(--muted)">115200 · 8N1</span>
+      </div>
+    </div>
+
+    <div class="cols" style="margin-top:16px">
+      <div class="card">
+        <h3>What the "UART hardware" physically is</h3>
+        <p>There's no special connector — the UART is just <b>three of the forty pins</b> on that pin header
+          (the same 0.1&quot; header a Raspberry Pi has). Pin 1 is the corner nearest the board edge; count
+          across in pairs.</p>
+        <p class="wire"><span class="k">board</span> pin 6 &nbsp;<b>GND</b>&nbsp; → adapter GND<br>
+          <span class="k">board</span> pin 8 &nbsp;<b>TX</b>&nbsp;&nbsp; → adapter <b>RX</b><br>
+          <span class="k">board</span> pin 10 <b>RX</b>&nbsp;&nbsp; → adapter <b>TX</b></p>
+        <p class="k">TX and RX cross over — the board's "talk" wire goes to the adapter's "listen" wire.</p>
+      </div>
+      <div class="card">
+        <h3>The other half: a USB-serial adapter</h3>
+        <p>A thumb-sized <span class="mono">USB ↔ TTL</span> dongle (CH340 / CP2102 / FTDI, ~$6). USB-A into your
+          Mac on one end; three dupont jumper wires to the pins on the other. It turns the board's raw serial
+          pins into a COM port your terminal opens at 115200.</p>
+        <p><span class="warn-chip">⚠ must be 3.3&nbsp;V logic</span></p>
+        <p class="k">The header is 3.3&nbsp;V-only. A 5&nbsp;V adapter's data lines can damage the board — check the
+          dongle has a 3.3&nbsp;V jumper or is 3.3&nbsp;V native.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The boot-mode switch — two tiny jumpers</h2>
+    <div class="hdr-card" style="overflow-x:auto">
+      <table class="bm">
+        <thead><tr><th>RGPIO_1</th><th>RGPIO_0</th><th>Boots from</th><th>When you'd use it</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">Low</td><td class="mono">Low</td><td><b>QSPI flash</b></td><td class="k yes">← default: runs the U-Boot already in flash</td></tr>
+          <tr><td class="mono">Low</td><td class="mono">High</td><td>microSD</td><td class="k">boot a distro image straight from SD</td></tr>
+          <tr><td class="mono">High</td><td class="mono">Low</td><td>eMMC</td><td class="k">boot from an installed eMMC module</td></tr>
+          <tr><td class="mono">High</td><td class="mono">High</td><td>UART</td><td class="k">one-time bootloader recovery / re-flash</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="schem-note">For SnitchOS you leave it on <b>QSPI flash</b> — the board boots U-Boot, and U-Boot fetches
+      your kernel over the network (TFTP). You only ever move these to <span class="mono">High/High</span> if you
+      need to re-flash U-Boot itself.</p>
+  </section>
+
+  <section>
+    <h2>So… is there a light we can flash?</h2>
+    <div class="callout">
+      <p style="margin:0 0 8px"><b>Two different "flash."</b> "Flash an SD card" / "boot from flash" means writing to
+        <i>flash memory</i> (storage) — no light. And when I said the "blink" milestone, I was borrowing the
+        embedded tradition where a new board's first sign of life is a blinked LED.</p>
+      <p style="margin:0">But on this board the <b>power LED is hardwired</b>, not software-controllable, and a
+        genuinely blinkable LED would need a GPIO/pinmux driver SnitchOS doesn't have yet. The <b>UART already
+        works</b> (it inherits OpenSBI's setup), so our real "first light" is the <b>serial boot log</b>, not a
+        blinked LED — text on your terminal <i>is</i> the blink.</p>
+    </div>
+  </section>
+
+  <footer>
+    <p>Schematic reference for SnitchOS bring-up — grouped by function, not to scale. Verify geometry against StarFive's own docs.</p>
+    <p>Sources:
+      <a href="https://doc-en.rvspace.org/VisionFive2/Datasheet/VisionFive_2/block_diagram.html">VF2 block diagram</a> ·
+      <a href="https://doc-en.rvspace.org/VisionFive2/PDF/VisionFive2_QSG.pdf">Quick Start Guide</a> ·
+      <a href="https://doc-en.rvspace.org/VisionFive2/40-Pin_GPIO_Header_UG/VisionFive2_40pin_UG/gpio_pinout%20-%20vf2.html">40-pin header UG</a> ·
+      <a href="https://wiki.gentoo.org/wiki/StarFive_VisionFive_2">Gentoo wiki</a></p>
+  </footer>
+</div>
