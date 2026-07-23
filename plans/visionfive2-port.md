@@ -1,9 +1,21 @@
 # Porting SnitchOS to the VisionFive 2 (StarFive JH7110)
 
-**Status:** scoping only. No code. This maps the gap between what the kernel
-assumes today (QEMU `virt`) and what a real StarFive JH7110 board needs, ranks
-the blockers, and proposes risk-ordered milestones. Nothing here is committed
-work yet.
+**Status:** **M1 first-light is code-complete** (2026-07-24). All four first-light
+blockers are done — **B4 (console) ✓, B1 (SBI timer) ✓, B6 (multi-hart) ✓, B2 (RAM
+base) ✓** — each TDD'd where host-testable and validated on QEMU/snemu (121/121
+itests green). A `cargo build -p kernel --features vf2` now links/loads at
+`0x4020_0000`, drives the `snps,dw-apb-uart`, arms the timer via SBI, and maps RAM
+at `0x4000_0000`: **theoretically bootable on the VisionFive 2.** Not yet booted on
+hardware — the board-specific paths (DesignWare stride, real OpenSBI `set_timer`,
+RAM `0x4000_0000`, non-zero boot hartid) are exercised only on the board. Next:
+actually boot it (M0's TFTP loop + `bootelf`/Image handoff), then **M2 — telemetry
+over UART.** The section below is the original scoping; per-blocker ✓ notes mark
+what shipped.
+
+> B6 was re-scoped during the work: it turned out to be an **M3 (SMP)** item, not an
+> M1 gate (the boot hart is hardcoded logical 0, so a non-zero boot hartid never
+> OOBs). It was done ahead of schedule as the full multi-hart generalization — see
+> [plans/legacy/vf2-b6-multihart.md](legacy/vf2-b6-multihart.md).
 
 ## The one-sentence thesis
 
@@ -66,7 +78,11 @@ gigapage `[0, 0x4000_0000)` is unchanged and already covers UART/CLINT/PLIC. (Fu
 Ordered by how much it blocks a first boot. Each cites where the assumption
 lives so the eventual plan has anchors.
 
-### B1 — Timer: Sstc → SBI `set_timer` *(hard blocker)*
+### B1 — Timer: Sstc → SBI `set_timer` *(hard blocker)* — ✓ SHIPPED
+
+> Went SBI-only (deleted the Sstc `stimecmp` path): `SbiClock` arms via
+> `sbi_set_timer`, reads via `rdtime`. Required **teaching snemu the SBI TIME
+> extension** (it serviced only IPI/HSM) so the one code path stays tested on both.
 
 `SstcClock` reads `rdtime` and arms `stimecmp` (CSR `0x14d`) directly
 (`kernel/src/trap/mod.rs:95-113`). That's the Sstc extension. QEMU implements
@@ -85,7 +101,11 @@ OS has no pulse on the board at all.
   just move everything to SBI (SBI works on QEMU too — probably simplest to go
   SBI-only and delete the Sstc path, keeping one code path tested on both).
 
-### B2 — RAM base `0x8000_0000` → `0x4000_0000` *(hard blocker)*
+### B2 — RAM base `0x8000_0000` → `0x4000_0000` *(hard blocker)* — ✓ SHIPPED
+
+> Single `kernel_mem::mmu::RAM_BASE` (feature-gated); `build.rs` generates
+> `linker.ld` from `linker.ld.in`. `KERNEL_OFFSET` needed no change. QEMU binary
+> byte-identical; the `vf2` feature flips LMA/VMA + the identity/linear gigapages.
 
 The load address, the identity gigapage, and the linear map all hardcode RAM at
 `0x8000_0000` (`kernel/linker.ld:3,10`; `kernel/src/mem/mmu.rs:194-262`). On the
@@ -127,7 +147,12 @@ discover. The frames need a physical wire.
   hardware, selected at boot. Probably worth it — don't regress the QEMU/snemu
   path that the whole test gate depends on.
 
-### B4 — UART discovery: match `snps,dw-apb-uart` *(easy, but blocks console)*
+### B4 — UART discovery: match `snps,dw-apb-uart` *(easy, but blocks console)* — ✓ SHIPPED
+
+> Accepts both compatible strings + reads `reg-shift`/`reg-io-width` (default 0/1).
+> Driver computes offsets `reg << reg_shift` (host-tested in `kernel_devices::uart`)
+> and does width-dispatched MMIO (32-bit for `reg-io-width=4`). Pre-init/emergency
+> paths still QEMU-byte-default — a documented board follow-up.
 
 DTB lookup hardcodes `compatible = "ns16550a"` (`kernel/src/dtb.rs:12-18`); the
 comment there already flags that boards reporting `snps,dw-apb-uart` won't match
@@ -162,7 +187,15 @@ higher-half link — the parser exists but is parked (`collect_mmio_regions`,
   board. Flag as a fast-follow, not a milestone-0 gate.
 - **Risk:** medium, and annoying to debug (silent pre-MMU crash).
 
-### B6 — hart topology: `MAX_HARTS=2` / `1 - hart_id` → real ids *(now a FIRST-BOOT blocker)*
+### B6 — hart topology: `MAX_HARTS=2` / `1 - hart_id` → real ids *(now a FIRST-BOOT blocker)* — ✓ SHIPPED (as M3)
+
+> Correction: **not** a first-boot blocker — the boot hart is hardcoded logical 0,
+> so a non-zero boot hartid never OOBs `PER_HART_DATA`. Done as the full multi-hart
+> generalization (DTB `/cpus` enumeration → dense logical ids, drop `1 - hart_id`,
+> per-hart secondary stacks, bring-up loop, a 4-hart `smp4` workload). Full writeup:
+> [plans/legacy/vf2-b6-multihart.md](legacy/vf2-b6-multihart.md). En route it caught
+> a real release-build miscompile (a loop-invariant `entry_pa` read back 0 on the
+> 2nd bring-up iteration — fresh-per-iteration `lla` was the fix).
 
 Bringup is proper SBI HSM (`sbi::hart_start`, `kernel/src/main.rs:453-472`) which
 is portable — but `MAX_HARTS = 2` (`kernel/src/smp/percpu.rs:80`) and the
@@ -205,11 +238,13 @@ the QEMU/snemu test gate**, which everything else in the repo depends on.
   `bootelf`/`tftpboot` dev loop. Full mechanics in
   **[Bring-up mechanics](#bring-up-mechanics-m0-in-detail)** below.
 
-- **M1 — First light: boot to the human UART log.** B4 (match
-  `snps,dw-apb-uart`) + B2 (RAM base) + B1 (SBI timer). Success = the NS16550
-  boot log and a heartbeat *tick* over the human UART on real silicon. No
-  telemetry frames yet. This proves MMU, higher-half, trampoline, and time all
-  work on hardware — the scariest 20%.
+- **M1 — First light: boot to the human UART log.** ✅ **CODE-COMPLETE
+  (2026-07-24), not yet run on hardware.** B4 (`snps,dw-apb-uart`) + B2 (RAM base)
+  + B1 (SBI timer) all shipped and green on QEMU/snemu; a `--features vf2` kernel
+  links at `0x4020_0000`. Success *on silicon* = the NS16550 boot log and a
+  heartbeat *tick* over the human UART — still to be observed on the board. This
+  proves MMU, higher-half, trampoline, and time all work on hardware — the scariest
+  20%.
 
 - **M2 — Telemetry on hardware.** B3: `UartFrameSink` + collector serial source.
   Success = spans and metrics from the real board decoded by the collector and
