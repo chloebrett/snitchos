@@ -91,9 +91,12 @@ pub const MAX_HARTS: usize = 2;
 /// hart 1's cache of an unrelated field.
 #[repr(C, align(64))]
 pub struct PerHartData {
-    /// Dense logical id `0..MAX_HARTS`. Read by `current_hartid()`
-    /// via `tp`. Initialised once in `init()`.
-    pub hart_id: u32,
+    /// Dense logical id `0..MAX_HARTS`. Read by `current_hartid()` via `tp`.
+    /// Written once by `init()`: the static default is 0 for every slot (a
+    /// `[const { … }; MAX_HARTS]` array can't stamp a per-index value), so `init`
+    /// stores the real logical id. Only ever read through `tp` *after* `init`
+    /// set both, so the 0 default is never observed.
+    pub hart_id: AtomicU32,
     /// IPI pending bitflags. Sender does
     /// `ipi_pending.fetch_or(msg_bit, Release)` (publishes any
     /// payload it wrote first); receiver does
@@ -137,6 +140,22 @@ pub struct PerHartData {
     pub pending_kill_check: core::sync::atomic::AtomicBool,
 }
 
+impl PerHartData {
+    /// A zeroed slot. `hart_id` defaults to 0 and is stamped with the real
+    /// logical id by [`init`]; every atomic starts cleared. `const` so the
+    /// `PER_HART_DATA` static can be `[const { PerHartData::new() }; MAX_HARTS]`.
+    const fn new() -> Self {
+        Self {
+            hart_id: AtomicU32::new(0),
+            ipi_pending: AtomicU32::new(0),
+            shootdown_va: AtomicU64::new(0),
+            shootdown_ack: AtomicU64::new(0),
+            exc_stack_top: AtomicUsize::new(0),
+            pending_kill_check: core::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
 /// Byte offset of [`PerHartData::exc_stack_top`] — hardcoded in `trap.S`'s
 /// `ld …, EXC_STACK_TOP_OFFSET(tp)`. The `const` assert below fails the build if
 /// the struct layout ever drifts from this value.
@@ -157,9 +176,6 @@ struct ExceptionStack([u8; EXCEPTION_STACK_SIZE]);
 static mut EXCEPTION_STACKS: [ExceptionStack; MAX_HARTS] =
     [const { ExceptionStack([0; EXCEPTION_STACK_SIZE]) }; MAX_HARTS];
 
-/// One slot per hart. Statically initialised to `hart_id = i` so a
-/// secondary hart starting cold (before its `init()` runs) at least
-/// sees a stable value at its slot.
 /// Bitmap of harts that have run `init()` and are live for cross-hart
 /// signalling (IPIs, TLB shootdowns). Bit `i` set ⇒ hart `i` is online
 /// and will respond to IPIs. `mmu::shootdown` consults this so it
@@ -173,36 +189,16 @@ static mut EXCEPTION_STACKS: [ExceptionStack; MAX_HARTS] =
 pub static SMP_ONLINE_HARTS: AtomicU64 = AtomicU64::new(0);
 
 /// Logical hart id (`0..MAX_HARTS`) → platform `mhartid`. Written by
-/// `kmain` once `OpenSBI`'s boot hart selection is known; read by
-/// `ipi::send` to translate the logical target to the mhartid the
-/// SBI `send_ipi` call expects.
+/// `kmain` once `OpenSBI`'s boot hart selection is known (via
+/// `kernel_boot::harts::assign_logical`); read by `ipi::send` to translate the
+/// logical target to the mhartid the SBI `send_ipi` call expects.
 ///
-/// Initialised to the identity mapping so single-hart and "boot hart
-/// is mhartid 0" cases work without any explicit setup. Boot path
-/// overwrites with the actual mapping derived from `_hart_id`.
-pub static LOGICAL_TO_MHARTID: [core::sync::atomic::AtomicU64; MAX_HARTS] = [
-    core::sync::atomic::AtomicU64::new(0),
-    core::sync::atomic::AtomicU64::new(1),
-];
+/// Zero-initialised; the boot path fills every live slot before any `ipi::send`.
+pub static LOGICAL_TO_MHARTID: [core::sync::atomic::AtomicU64; MAX_HARTS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_HARTS];
 
-pub static PER_HART_DATA: [PerHartData; MAX_HARTS] = [
-    PerHartData {
-        hart_id: 0,
-        ipi_pending: AtomicU32::new(0),
-        shootdown_va: AtomicU64::new(0),
-        shootdown_ack: AtomicU64::new(0),
-        exc_stack_top: AtomicUsize::new(0),
-        pending_kill_check: core::sync::atomic::AtomicBool::new(false),
-    },
-    PerHartData {
-        hart_id: 1,
-        ipi_pending: AtomicU32::new(0),
-        shootdown_va: AtomicU64::new(0),
-        shootdown_ack: AtomicU64::new(0),
-        exc_stack_top: AtomicUsize::new(0),
-        pending_kill_check: core::sync::atomic::AtomicBool::new(false),
-    },
-];
+pub static PER_HART_DATA: [PerHartData; MAX_HARTS] =
+    [const { PerHartData::new() }; MAX_HARTS];
 
 /// Initialise this hart's per-CPU context. Sets `tp` to point at this
 /// hart's `PER_HART_DATA` slot so subsequent `current_hartid()` calls
@@ -253,6 +249,9 @@ pub unsafe fn init(hartid: usize) {
         let base = unsafe { &raw const EXCEPTION_STACKS[hartid] } as usize;
         base + EXCEPTION_STACK_SIZE
     };
+    // Stamp this slot's logical id (the static default is 0). Must precede any
+    // `current_hartid()` on this hart — which reads it back through `tp`, just set.
+    PER_HART_DATA[hartid].hart_id.store(hartid as u32, core::sync::atomic::Ordering::Relaxed);
     PER_HART_DATA[hartid].exc_stack_top.store(exc_top, core::sync::atomic::Ordering::Relaxed);
     // Announce we're online. Any initiator that observes our bit set
     // will start expecting shootdown acks from us.
@@ -312,7 +311,7 @@ pub fn current_hartid() -> usize {
     // SAFETY: tp is in the PER_HART_DATA range, so it points at a
     // valid PerHartData. The `hart_id` field is at offset 0 (per the
     // `#[repr(C)]` layout).
-    unsafe { (*(tp as *const PerHartData)).hart_id as usize }
+    unsafe { (*(tp as *const PerHartData)).hart_id.load(core::sync::atomic::Ordering::Relaxed) as usize }
 }
 
 /// Borrow this hart's `PerHartData` slot for direct field access

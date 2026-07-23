@@ -74,13 +74,13 @@ pub const TICKS_PER_HEARTBEAT: u64 = 20;
 /// [`TICKS_PER_HEARTBEAT`] ticks (the heartbeat), while the handler drains RX and
 /// checks preemption on *every* tick.
 pub static TICK_COUNT: PerCpu<AtomicU64> =
-    PerCpu::new([AtomicU64::new(0), AtomicU64::new(0)]);
+    PerCpu::new([const { AtomicU64::new(0) }; crate::percpu::MAX_HARTS]);
 
 /// Set by the timer IRQ handler once per heartbeat; the main/idle loop polls +
 /// clears. One cell per hart — see block comment above.
 /// `Relaxed`: same-CPU IRQ handoff — trap return sequences memory.
 pub static TICK_PENDING: PerCpu<AtomicBool> =
-    PerCpu::new([AtomicBool::new(false), AtomicBool::new(false)]);
+    PerCpu::new([const { AtomicBool::new(false) }; crate::percpu::MAX_HARTS]);
 
 /// Duration of the most recent timer IRQ in ticks. The IRQ handler
 /// measures `rdtime` at entry and exit; the main thread reads this
@@ -90,7 +90,7 @@ pub static TICK_PENDING: PerCpu<AtomicBool> =
 /// intern / `virtio_console` mutexes.)
 /// `Relaxed`: same-CPU IRQ handoff — see block comment above.
 pub static LAST_IRQ_DURATION: PerCpu<AtomicU64> =
-    PerCpu::new([AtomicU64::new(0), AtomicU64::new(0)]);
+    PerCpu::new([const { AtomicU64::new(0) }; crate::percpu::MAX_HARTS]);
 
 /// SSTC-based clock: reads `time` CSR directly, writes `stimecmp`
 /// (CSR 0x14d) to arm. No SBI round-trip. Implements
