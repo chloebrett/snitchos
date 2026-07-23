@@ -146,6 +146,24 @@ discover. The frames need a physical wire.
 - **Deferred alternative:** keep virtio-console for QEMU and add UART framing for
   hardware, selected at boot. Probably worth it — don't regress the QEMU/snemu
   path that the whole test gate depends on.
+- **No "wait for the collector" on the board.** `x boot` today passes QEMU
+  `socket,…,server=on,wait=on`: the hypervisor *freezes the guest until the
+  collector connects*, giving lossless capture from frame 0. Real hardware has no
+  such lever — the U74 runs on power-up and can't block on a host consumer. So the
+  board model inverts: **run the collector first (a persistent serial reader), then
+  reset the board** — the reset is the sync point, not a socket connect. Telemetry
+  is a **fire-and-forget UART stream**. Consequences for the design:
+  - The `UartFrameSink` **must never block on backpressure** (UART is slow, the
+    heartbeat is chatty) — drop-and-count, same discipline as the alloc/IRQ
+    deferred-emission paths, never stall the kernel waiting for a reader.
+  - Startup-window loss is small: the kernel's pre-init buffer flushes once the
+    sink is up, so if the host reader is attached by then, early frames still
+    arrive (the `Dropped(N)` frame reports any overflow).
+  - To *recover* losslessness (some demos want frame 0): an app-level "reader
+    ready" handshake — the sink waits for a byte on UART RX before flushing the
+    pre-init buffer (~10 lines, adds an RX dependency to boot). Or a `ser2net`
+    bridge on the host to get connect-then-read ergonomics over TCP (no
+    losslessness, but the collector connects rather than free-reads).
 
 ### B4 — UART discovery: match `snps,dw-apb-uart` *(easy, but blocks console)* — ✓ SHIPPED
 

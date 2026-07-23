@@ -7,7 +7,6 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::console;
-use crate::uart;
 
 /// Recursion guard for the panic handler. Set on entry; if already
 /// set, we must already be panicking and shouldn't try to print again
@@ -39,7 +38,7 @@ fn panic(info: &PanicInfo) -> ! {
         // stage (MMU off, identity-MMIO mapped, or
         // higher-half-only).
         use core::fmt::Write;
-        let mut uart = unsafe { uart::Uart16550::new(console::emergency_uart_base()) };
+        let mut uart = unsafe { console::emergency_uart_at(console::emergency_uart_base()) };
         let _ = writeln!(&mut uart, "Kernel panic: {info}");
 
         // Snitch the panic on the *structured* channel too, not just the UART —

@@ -69,7 +69,7 @@ pub const QEMU_VIRT_UART_BASE: usize = 0x10000000;
 pub unsafe fn pre_init_uart() -> Uart16550 {
   // SAFETY: see function-level doc; precondition is that no other code
   // currently holds the UART.
-  unsafe { Uart16550::new(emergency_uart_base()) }
+  unsafe { emergency_uart_at(emergency_uart_base()) }
 }
 
 /// Pick the UART MMIO base address that's valid for the current
@@ -84,6 +84,39 @@ pub fn emergency_uart_base() -> usize {
   } else {
     QEMU_VIRT_UART_BASE
   }
+}
+
+/// Register layout for the pre-init / emergency / panic UART. These paths fire
+/// before `console::init` reads the DTB, so the layout has to be a compile-time
+/// constant. UART0 sits at `QEMU_VIRT_UART_BASE` (`0x1000_0000`) on both QEMU
+/// `virt` and the VisionFive 2, but the VF2's DesignWare UART spaces its registers
+/// 4 bytes apart (`reg-shift = 2`) and takes 32-bit accesses (`reg-io-width = 4`);
+/// QEMU's ns16550a is byte-spaced. Without matching this, an early fault on the
+/// board polls the wrong `LSR` offset and prints nothing — see B4 in
+/// `plans/visionfive2-port.md`.
+#[cfg(not(feature = "vf2"))]
+const EMERGENCY_UART_REG_SHIFT: u8 = 0;
+#[cfg(not(feature = "vf2"))]
+const EMERGENCY_UART_IO_WIDTH: u8 = 1;
+#[cfg(feature = "vf2")]
+const EMERGENCY_UART_REG_SHIFT: u8 = 2;
+#[cfg(feature = "vf2")]
+const EMERGENCY_UART_IO_WIDTH: u8 = 4;
+
+/// Construct a UART for the pre-init / emergency / panic paths at `base`, with the
+/// board's compile-time register layout ([`EMERGENCY_UART_REG_SHIFT`] /
+/// [`EMERGENCY_UART_IO_WIDTH`]). The one constructor these paths share so the board
+/// layout lives in exactly one place.
+///
+/// # Safety
+///
+/// Same as [`Uart16550::with_layout`]: `base` must be a real 8250-compatible UART
+/// base, and no coordinated writer may conflict — sound here because these paths
+/// run when nothing else holds the device (pre-init, or a panic that has already
+/// stopped the world).
+pub unsafe fn emergency_uart_at(base: usize) -> Uart16550 {
+  // SAFETY: forwarded to the caller's contract above.
+  unsafe { Uart16550::with_layout(base, EMERGENCY_UART_REG_SHIFT, EMERGENCY_UART_IO_WIDTH) }
 }
 
 /// Capacity of the console RX ring — bytes buffered between the timer-driven
@@ -116,7 +149,7 @@ static CONSOLE_RX: crate::sync::Mutex<ConsoleRing<RX_RING_CAP>> =
 pub fn drain_rx() {
   // SAFETY: RX-only access (LSR/RBR), disjoint from the `UART`-mutex-guarded TX
   // path's THR writes; see the fn doc for why this needs no coordination.
-  let uart = unsafe { Uart16550::new(emergency_uart_base()) };
+  let uart = unsafe { emergency_uart_at(emergency_uart_base()) };
   let mut ring = CONSOLE_RX.lock();
   while let Some(byte) = uart.read_byte() {
     ring.push(byte); // drop-on-full is handled inside the ring
