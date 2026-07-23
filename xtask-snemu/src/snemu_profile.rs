@@ -116,7 +116,13 @@ pub fn run(workload: Option<&str>, steps: u64, top: usize, opt: crate::qemu::Opt
         }
     };
 
-    let mut machine = match snemu_diff::load_workload_machine(&kernel, &dtb, workload, false) {
+    let mut machine = match snemu_diff::load_workload_machine(
+        &kernel,
+        &dtb,
+        workload,
+        false,
+        snemu_diff::HART_COUNT,
+    ) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("snemu-profile: load machine: {e}");

@@ -23,8 +23,11 @@ use crate::qemu;
 
 /// QEMU `virt` RAM the snemu machine mirrors.
 const RAM_SIZE: usize = 128 * 1024 * 1024;
-/// Two harts, matching the kernel's `MAX_HARTS` and the QEMU `-smp 2`.
-const HART_COUNT: usize = 2;
+/// Default hart count for the snemu machine — matches the QEMU `-smp 2` that
+/// `snemu/virt.dtb` is dumped at. A scenario can override it via
+/// `load_workload_machine`'s `hart_count` (the 4-hart topology scenario pairs a
+/// larger count with a 4-cpu DTB). Kept ≤ the kernel's `MAX_HARTS`.
+pub const HART_COUNT: usize = 2;
 /// The device tree snemu feeds the guest (dumped at `-smp 2`).
 const SNEMU_DTB: &str = "snemu/virt.dtb";
 
@@ -698,6 +701,7 @@ pub fn load_workload_machine(
     dtb_base: &[u8],
     workload: Option<&str>,
     scramble: bool,
+    hart_count: usize,
 ) -> Result<snemu::machine::Machine, String> {
     let ram_bytes = u64::from(ram_mb_for(workload)) * 1024 * 1024;
     let mut dtb = match workload {
@@ -711,7 +715,7 @@ pub fn load_workload_machine(
         dtb = snemu::dtb::set_memory_size(&dtb, ram_bytes).ok_or("DTB memory patch failed")?;
     }
     let mut machine =
-        snemu::loader::load_machine(kernel, ram_bytes as usize, Some(&dtb), HART_COUNT, scramble)
+        snemu::loader::load_machine(kernel, ram_bytes as usize, Some(&dtb), hart_count, scramble)
             .map_err(|e| format!("snemu load: {e:?}"))?;
     machine.set_decode_cache(true);
     // Mirrors the real QEMU harness's `ramfb` scenario tag → `-device ramfb`

@@ -648,7 +648,13 @@ pub fn run(
         let machine = match forked {
             Some(m) => Some(m),
             None => read_snapshot(&snap_store, s.workload).or_else(|| {
-                match snemu_diff::load_workload_machine(&kernel, &dtb, s.workload, scramble) {
+                match snemu_diff::load_workload_machine(
+                    &kernel,
+                    &dtb,
+                    s.workload,
+                    scramble,
+                    snemu_diff::HART_COUNT,
+                ) {
                     Ok(mut m) => {
                         speed.apply(&mut m);
                         Some(m)
@@ -1186,7 +1192,8 @@ fn boot_snapshot(
     speed: SpeedConfig,
     scramble: bool,
 ) -> Result<(snemu::machine::Machine, u64), String> {
-    let mut machine = snemu_diff::load_workload_machine(kernel, dtb, workload, scramble)?;
+    let mut machine =
+        snemu_diff::load_workload_machine(kernel, dtb, workload, scramble, snemu_diff::HART_COUNT)?;
     // Set on the snapshot; the per-scenario forks inherit it through `clone`.
     speed.apply(&mut machine);
     machine.run_until_uart(CHECKPOINT, CHECKPOINT_BUDGET)?;
