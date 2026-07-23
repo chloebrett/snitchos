@@ -28,6 +28,11 @@ struct Cli {
 enum Cmd {
     /// Build the kernel ELF.
     Build,
+    /// Build the VisionFive 2 (`vf2`) kernel and emit a RISC-V `Image`
+    /// (`snitchos.img`) for U-Boot `booti`. The 64-byte Image header is embedded
+    /// at the start of the kernel by `entry.S`, so this is a straight ELF→binary
+    /// `objcopy`. Load it on the board with `booti` (see the printed hint).
+    Image,
     /// Everything that runs the kernel under the snemu emulator: the
     /// meta-loop driver (`boot`), the QEMU differential oracle (`diff`), the
     /// snapshot/fork harness (`fork`), the measurement spine (`bench`), and the
@@ -537,6 +542,7 @@ fn main() -> ExitCode {
     scrub_inherited_cargo_env();
     match Cli::parse().cmd {
         Cmd::Build => build(),
+        Cmd::Image => image(),
         Cmd::Snemu { args } => delegate_itest("snemu", &args),
         Cmd::Boot { features, workload, burst, ramfb, display } => {
             boot(&features, workload.as_deref(), burst, ramfb, display.as_deref())
@@ -678,6 +684,40 @@ fn debug(features: &str) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+/// Build the `vf2` kernel and objcopy it to a flat RISC-V `Image` (`snitchos.img`)
+/// for U-Boot `booti` on the VisionFive 2. The 64-byte Image header is embedded at
+/// the start of the kernel by `entry.S`, so this is a straight ELF→binary copy —
+/// no header to prepend, so the kernel's link addresses stay intact.
+fn image() -> ExitCode {
+    // Board build: RAM base 0x4000_0000 (the `vf2` feature), no test workloads.
+    let status = qemu::build_kernel(&["vf2"]).expect("failed to invoke cargo");
+    if !status.success() {
+        return ExitCode::from(1);
+    }
+    let elf = qemu::kernel_bin(false);
+    let out = "snitchos.img";
+    // `rust-objcopy` (cargo-binutils) wraps `llvm-objcopy`; on PATH after
+    // `cargo install cargo-binutils` + `rustup component add llvm-tools`.
+    match Command::new("rust-objcopy")
+        .args(["-O", "binary", elf, out])
+        .status()
+    {
+        Ok(s) if s.success() => {
+            eprintln!("wrote {out} — RISC-V Image for U-Boot `booti`.");
+            eprintln!("At the VisionFive 2's U-Boot prompt (TFTP the file first):");
+            eprintln!("  tftpboot 0x40200000 snitchos.img");
+            eprintln!("  booti 0x40200000 - ${{fdtcontroladdr}}");
+            ExitCode::SUCCESS
+        }
+        Ok(_) => ExitCode::from(1),
+        Err(e) => {
+            eprintln!("rust-objcopy failed to launch: {e}");
+            eprintln!("install: cargo install cargo-binutils && rustup component add llvm-tools");
+            ExitCode::from(1)
+        }
     }
 }
 

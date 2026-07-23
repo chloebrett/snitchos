@@ -60,3 +60,7 @@ docs/*.png
 # copies them here for SpawnImage). Source files in fs-image/ are committed; the
 # generated ELFs under fs-image/bin/ are not.
 fs-image/bin/
+
+# RISC-V Image emitted by `cargo xtask image` for the VisionFive 2 (`booti`).
+# A build artifact — regenerate from the vf2 kernel; not reviewed.
+/snitchos.img

@@ -39,30 +39,19 @@ pub struct Uart16550 {
 }
 
 impl Uart16550 {
-    /// Construct a driver for the **byte-spaced** ns16550a layout (`reg-shift = 0`,
-    /// `reg-io-width = 1`) — QEMU `virt`. Used by the pre-init / emergency / panic
-    /// paths that fire before the DTB-configured console exists.
-    ///
-    /// # Safety
-    ///
-    /// `base` must be the MMIO base of a real NS16550A-compatible UART, and the
-    /// caller must ensure any other code touching the same registers either
-    /// coordinates through this driver (e.g. via a shared `Mutex`) or doesn't
-    /// conflict. Two uncoordinated `Uart16550`s on the same region is UB at the
-    /// device-state level (the type system can't see it).
-    pub const unsafe fn new(base: usize) -> Self {
-        Uart16550 { base, reg_shift: 0, io_width: 1 }
-    }
-
     /// Construct a driver with the register layout the DTB reports — `reg_shift`
-    /// (spacing) and `io_width` (1 or 4 bytes). E.g. the JH7110 `snps,dw-apb-uart`
-    /// is `with_layout(base, 2, 4)`; QEMU's ns16550a is `with_layout(base, 0, 1)`,
-    /// equivalent to [`new`](Self::new).
+    /// (spacing) and `io_width` (1 or 4 bytes). The JH7110 `snps,dw-apb-uart` is
+    /// `with_layout(base, 2, 4)`; QEMU's byte-spaced ns16550a is
+    /// `with_layout(base, 0, 1)`.
     ///
     /// # Safety
     ///
-    /// Same contract as [`new`](Self::new); `reg_shift` / `io_width` must match the
-    /// hardware or the driver pokes the wrong offsets / widths.
+    /// `base` must be the MMIO base of a real 8250-compatible UART, and `reg_shift`
+    /// / `io_width` must match the hardware (or the driver pokes the wrong offsets /
+    /// widths). The caller must ensure any other code touching the same registers
+    /// either coordinates through this driver (a shared `Mutex`) or doesn't
+    /// conflict — two uncoordinated `Uart16550`s on one region is UB at the
+    /// device-state level (the type system can't see it).
     pub const unsafe fn with_layout(base: usize, reg_shift: u8, io_width: u8) -> Self {
         Uart16550 { base, reg_shift, io_width }
     }
