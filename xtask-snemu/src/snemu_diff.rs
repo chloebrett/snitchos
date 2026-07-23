@@ -30,6 +30,32 @@ const RAM_SIZE: usize = 128 * 1024 * 1024;
 pub const HART_COUNT: usize = 2;
 /// The device tree snemu feeds the guest (dumped at `-smp 2`).
 const SNEMU_DTB: &str = "snemu/virt.dtb";
+/// The 4-cpu device tree for the `smp4` topology scenario (QEMU `virt -smp 4`,
+/// dumped beside `virt.dtb`). Embedded — not `fs::read` like `SNEMU_DTB` — so the
+/// path resolves at compile time, independent of CWD.
+const SNEMU_DTB_SMP4: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../snemu/virt-smp4.dtb"));
+
+/// Hart count a workload boots with: the `smp4` topology demo runs 4, everything
+/// else the default [`HART_COUNT`].
+#[must_use]
+pub fn hart_count_for(workload: Option<&str>) -> usize {
+    match workload {
+        Some("smp4") => 4,
+        _ => HART_COUNT,
+    }
+}
+
+/// The DTB base a workload boots against. `smp4` needs the 4-cpu DTB so the
+/// kernel's `/cpus` enumeration finds — and brings up — all four harts; every
+/// other workload uses `default` (the 2-cpu `virt.dtb` the caller loaded).
+#[must_use]
+pub fn dtb_base_for<'a>(workload: Option<&str>, default: &'a [u8]) -> &'a [u8] {
+    match workload {
+        Some("smp4") => SNEMU_DTB_SMP4,
+        _ => default,
+    }
+}
 
 /// Normalize a frame for structural comparison: zero the timestamp everywhere it
 /// appears, and zero the (wall-clock-driven) metric value. Everything else — ids,

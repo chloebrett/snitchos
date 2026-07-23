@@ -1,7 +1,21 @@
 # Plan: B6 — real multi-hart topology (drop the `{0,1}` / `1 - hart_id` assumption)
 
 **Branch**: main (repo works directly on main per CLAUDE.md; user commits)
-**Status**: Active
+**Status**: COMPLETE — all steps (1, 2, 3, 4, 5, 6a, 6b) shipped. Gate green:
+`cargo xtask test` + `itest` 121/121 + `itest --scramble` 121/121.
+
+## Key finding (6b): a real release-build miscompile, caught by snemu
+
+The 4-hart bring-up hung, and snemu pinned it: `hart_start` for logical hart 2
+received `start_addr = 0` (hart 1 got the correct `0x80200032`), so hart 2 executed
+from PC 0 and faulted `Bus(OutOfRange { addr: 0 })`. Root cause: `entry_pa`
+(`va_to_pa(_secondary_start)`), hoisted **out** of the bring-up loop as a
+loop-invariant, read back **0** on the 2nd iteration under the release optimizer —
+the same address-materialization hazard as the `tp`-truncation bug
+(`plans/v0.4-memory-findings.md`). Neither a side-effecting `lla` nor `black_box`
+on the hoisted value fixed it; **computing `entry_pa` fresh inside the loop** (with
+the non-pure `lla`) did. This bug would bite on QEMU/hardware too — snemu found a
+real kernel bug, exactly the kind of multi-hart fidelity the port needs.
 
 ## Context
 

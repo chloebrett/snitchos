@@ -812,6 +812,38 @@ pub fn smp_spans_carry_hart_id(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// The `smp4` workload runs a worker on every secondary hart (`1..num_harts`),
+/// each opening a `smp4.tick` span carrying its `hart_id`. The harness boots it on
+/// a 4-hart machine (4-cpu DTB + `hart_count=4`), so all four harts come up and
+/// harts 1, 2, 3 each run the worker — wire-level proof that every brought-up hart
+/// executes work (hart 0 works via the heartbeat). The four-hart analogue of
+/// `smp-spans-carry-hart-id`.
+pub fn smp4_uses_all_harts(h: &mut View) -> Result<(), String> {
+    // `wait_for`'s predicate is `Fn`, so accumulate which secondary harts have run
+    // the worker through a `Cell` bitmask (bit i = hart i seen). One pass is robust
+    // to the harts' `smp4.tick` spans interleaving on the wire in any order.
+    let seen = std::cell::Cell::new(0u8);
+    h.wait_for(SEC * 20, |f, strings| {
+        if let OwnedFrame::SpanStart { name_id, hart_id, .. } = f {
+            if (1u8..=3).contains(hart_id)
+                && strings.get(name_id).map(String::as_str) == Some("smp4.tick")
+            {
+                seen.set(seen.get() | (1u8 << *hart_id));
+            }
+        }
+        seen.get() & 0b1110 == 0b1110
+    })
+    .ok_or_else(|| {
+        format!(
+            "not all secondary harts ran the smp4 worker within 20s (seen-hart bitmask \
+             {:#06b}, want bits 1,2,3) — the bring-up loop or Smp4 dispatch didn't reach \
+             every hart.",
+            seen.get(),
+        )
+    })?;
+    Ok(())
+}
+
 /// v0.6 step 13: an idle hart is woken by an IPI to run new work.
 /// hart 1 boots straight into its idle task (`wfi`) with an empty
 /// runqueue; the only thing that puts it to work is hart 0's

@@ -206,6 +206,7 @@ catalog! {
     wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots       [smp]           {"init"};
     wfi "smp-spawn-on-hart-1-runs"        scenarios::smp_spawn_on_hart_1_runs       [smp]           {"demo"};
     wfi "smp-spans-carry-hart-id"         scenarios::smp_spans_carry_hart_id        [smp]           {"demo"};
+    wfi "smp-four-harts-all-run"          scenarios::smp4_uses_all_harts            [smp]           {"smp4"};
     wfi "smp-ipi-wakes-idle-hart"         scenarios::smp_ipi_wakes_idle_hart        [smp, ipi]      {"demo"};
     cpu "spawn-storm"                     scenarios::spawn_storm                    [smp, stress]   {"spawn-storm"};
     cpu "ipi-pong"                        scenarios::ipi_pong                       [smp, ipi, stress] {"ipi-pong"};

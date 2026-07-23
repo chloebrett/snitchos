@@ -226,6 +226,12 @@ workloads! {
         /// Cross-hart producer/consumer over `Mutex<VecDeque>`: producer on
         /// hart 0, consumer on hart 1 (v0.6 step 11).
         Smp,
+        /// Four-hart demonstration: a worker task on every secondary hart
+        /// (`1..num_harts`), each opening a `smp4.tick` span (tagged with its
+        /// `hart_id`) and yielding — proof that all brought-up harts execute work.
+        /// Selected by `workload=smp4`; the itest harness pairs it with a 4-cpu DTB
+        /// and `hart_count=4`.
+        Smp4,
         /// As [`Smp`](Self::Smp) but over a lock-free `heapless::spsc`
         /// queue instead of `Mutex<VecDeque>` (v0.6 step 12). The A/B
         /// counterpart for the lock-contention measurement. Fences
@@ -492,6 +498,15 @@ mod tests {
             .map(|w| (w[0], w[1]))
             .collect();
         assert_eq!(out_of_order, [], "WorkloadKind variants must stay sorted");
+    }
+
+    #[test]
+    fn selects_smp4() {
+        assert_eq!(select("workload=smp4"), Some(WorkloadKind::Smp4));
+        // The digit is part of the word: `smp4` must not parse as `smp`, nor
+        // `smp` as `smp4`.
+        assert_ne!(select("workload=smp4"), Some(WorkloadKind::Smp));
+        assert_ne!(select("workload=smp"), Some(WorkloadKind::Smp4));
     }
 
     #[test]

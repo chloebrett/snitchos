@@ -17,7 +17,7 @@
 //! spawning lands in step 10.
 
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::counter::DeferredCounter;
 
@@ -33,8 +33,12 @@ const SECONDARY_STACK_SIZE: usize = 16 * 1024;
 #[repr(C, align(16))]
 struct SecondaryStack([u8; SECONDARY_STACK_SIZE]);
 
-#[unsafe(no_mangle)]
-static mut SECONDARY_STACK: SecondaryStack = SecondaryStack([0; SECONDARY_STACK_SIZE]);
+/// One bring-up stack per hart, indexed by *logical* id. Slot 0 (the boot hart,
+/// which runs on its `entry.S` stack) is unused — index-is-hartid clarity is worth
+/// the 16 KiB. Each secondary runs on its slot for its whole life, so they can't
+/// share one stack; hence an array sized by `MAX_HARTS`, not a single stack.
+static mut SECONDARY_STACKS: [SecondaryStack; percpu::MAX_HARTS] =
+    [const { SecondaryStack([0; SECONDARY_STACK_SIZE]) }; percpu::MAX_HARTS];
 
 /// Stack-top address (`&SECONDARY_STACK + STACK_SIZE`) — written by
 /// `prepare_for_secondary` from hart 0 *before* `sbi_hart_start`.
@@ -61,7 +65,13 @@ static mut KERNEL_OFFSET_VALUE: u64 = 0;
 /// Set by `secondary_main` after `HartRegister` emission. Hart 0
 /// spin-waits on this before `unmap_identity` so it doesn't tear
 /// down the mapping hart 1 is mid-trampoline through.
-pub static SECONDARY_READY: AtomicBool = AtomicBool::new(false);
+/// Bitmap of secondary harts that have finished bring-up (init + trap vector +
+/// timer), by logical id — bit `i` set ⇒ hart `i` is fully up. Hart 0 waits for
+/// each secondary's bit before starting the next (and before `unmap_identity`). A
+/// bitmap, not a single `bool`, so N secondaries each signal independently.
+/// Distinct from `SMP_ONLINE_HARTS` (set earlier in `percpu::init`, before trap
+/// setup): the cross-hart probe needs the *fully-up* point, not just "online."
+pub static SECONDARY_READY: AtomicU64 = AtomicU64::new(0);
 
 /// Cumulative count of `wfi`s on the secondary hart. Bumped each
 /// time the idle loop completes a sleep. Useful as a "hart 1 is
@@ -92,6 +102,24 @@ pub extern "C" fn probe_entry() -> ! {
     }
 }
 
+/// Cumulative `smp4.tick`s across every hart running the `smp4` worker.
+/// `Relaxed`: a plain counter, drained by the heartbeat.
+pub static SMP4_WORKER_TICKS: DeferredCounter =
+    DeferredCounter::new("snitchos.smp4.worker_ticks_total");
+
+/// Worker for the `smp4` four-hart demo, spawned on every secondary hart. Each
+/// iteration opens a `smp4.tick` span — tagged with this hart's id via
+/// `current_hartid()` at span open — bumps [`SMP4_WORKER_TICKS`], and yields, so
+/// the wire carries `smp4.tick` spans attributed to every hart that ran one. That
+/// per-hart attribution is what `smp-four-harts-all-run` asserts.
+pub extern "C" fn smp4_worker_entry() -> ! {
+    loop {
+        crate::span!("smp4.tick");
+        SMP4_WORKER_TICKS.inc();
+        crate::sched::yield_now();
+    }
+}
+
 /// Stash boot-time values the secondary's asm + Rust need to read.
 /// **Call from hart 0 before `sbi::hart_start`.**
 ///
@@ -104,20 +132,23 @@ pub extern "C" fn probe_entry() -> ! {
 /// w.r.t. prior loads/stores on the issuing hart). So as long as
 /// `prepare_for_secondary` runs before `sbi::hart_start`, hart 1's
 /// reads see the published values.
-pub unsafe fn prepare_for_secondary() {
+pub unsafe fn prepare_for_secondary(logical_id: usize) {
     // Snapshot current SATP — same root PT that hart 0 is running on.
     let satp: u64;
     unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp); }
 
-    // Address of one-past-end of the secondary stack. Hart 1's sp
-    // starts here and grows down through SECONDARY_STACK.
+    // Address of one-past-end of this hart's stack slot. `sp` starts here and
+    // grows down through `SECONDARY_STACKS[logical_id]`. (The asm reads `la
+    // SECONDARY_STACK_TOP` for this value, so the slot must hold the stack top.)
     //
-    // Computing the stack's end address is safe: `&raw const` takes a
-    // pointer without dereferencing, and the rest is plain usize math.
-    // (The asm reads `la SECONDARY_STACK_TOP` to get the address of the
-    // static, so the value stored there must be the stack top.)
-    let stack_top =
-        (&raw const SECONDARY_STACK as usize) + core::mem::size_of::<SecondaryStack>();
+    // SAFETY: `&raw const` takes the slot's address without forming a reference or
+    // reading the static; the rest is plain usize math. `logical_id < num_harts <=
+    // MAX_HARTS` (the array length), so the index is in bounds. (Indexing a
+    // `static mut` is what needs the `unsafe`, unlike a direct `&raw const STATIC`.)
+    let stack_top = unsafe {
+        (&raw const SECONDARY_STACKS[logical_id] as usize)
+            + core::mem::size_of::<SecondaryStack>()
+    };
 
     unsafe {
         // Stack-top address. The asm `la t0, X; ld sp, 0(t0)`
@@ -184,7 +215,7 @@ pub extern "C" fn secondary_main(mhartid: usize, hartid: usize) -> ! {
         crate::trap::enable_software_interrupts();
     }
 
-    SECONDARY_READY.store(true, Ordering::Release);
+    SECONDARY_READY.fetch_or(1 << hartid, Ordering::Release);
 
     // v0.6 step 10: enroll in the scheduler as this hart's "main"
     // task. From here on `current_task_id()` returns our id and

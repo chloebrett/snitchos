@@ -79,6 +79,7 @@
 | shell-view-command-revokes-cap | shell | cpu | userspace |
 | shootdown-storm | shootdown-storm | cpu | smp, stress |
 | smp-producer-consumer-correctness | smp burst=256 | cpu | smp, workload |
+| smp-four-harts-all-run | smp4 | wfi | smp |
 | spawn-delegates-to-child | spawn-demo | cpu | userspace |
 | spawn-transfer-links-to-parent | spawn-demo | cpu | userspace |
 | spawn-image-loads-from-fs | spawn-image | wfi | userspace, spawn, fs |

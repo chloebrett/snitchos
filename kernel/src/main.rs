@@ -455,7 +455,9 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
             | WorkloadKind::ViewDemo
             | WorkloadKind::Shell
             | WorkloadKind::FrameOom
-            | WorkloadKind::HeapOom,
+            | WorkloadKind::HeapOom
+            // smp4's workers are placed on the secondaries post-bring-up (below).
+            | WorkloadKind::Smp4,
         )
         | None => {}
     }
@@ -473,25 +475,47 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     let boot_mhartid = hart_id as u64;
     heartbeat::BOOT_MHARTID.store(boot_mhartid, Ordering::Relaxed);
     tracing::emit_hart_register(0, boot_mhartid, protocol::HartRole::Boot);
-    // Guarded by `num_harts >= 2` so a DTB-declared single-hart machine (the
-    // VisionFive 2 booting one U74) doesn't `hart_start` a phantom hart. The
-    // multi-secondary loop over `1..num_harts` + per-hart stacks lands in the next
-    // step, with the 4-hart test that exercises it. (Full single-hart boot also
-    // needs the `spawn_on(1, …)` task placement below to fall back to hart 0 —
-    // board-M1 follow-up, not this step; on QEMU `-smp 2` `num_harts` is always 2.)
-    if num_harts >= 2 {
-        let secondary_mhartid = percpu::LOGICAL_TO_MHARTID[1].load(Ordering::Relaxed);
-        unsafe { secondary::prepare_for_secondary() };
+    // Bring up each secondary hart (logical `1..num_harts`) in turn. Sequential:
+    // each hart latches its stack from `SECONDARY_STACK_TOP` early in `secondary.S`
+    // before we rewrite that slot for the next, and we wait on its `SECONDARY_READY`
+    // bit — fully up: init + trap vector + timer — before starting the next, which
+    // is also the barrier `unmap_identity` needs. A DTB-declared single-hart machine
+    // (`num_harts == 1`, e.g. the VisionFive 2 on one U74) runs this loop zero
+    // times, so it never `hart_start`s a phantom hart. (Full single-hart boot also
+    // needs the `spawn_on(logical, …)` task placement below to target hart 0 —
+    // board-M1 follow-up; on QEMU `-smp 2` `num_harts` is 2.)
+    for logical in 1..num_harts {
+        let secondary_mhartid = percpu::LOGICAL_TO_MHARTID[logical].load(Ordering::Relaxed);
+        // Physical entry of `_secondary_start`, recomputed each iteration.
+        // Materialize its (higher-half) VA with a side-effecting `lla`, not
+        // `_secondary_start as usize`: the plain cast is a pure value the release
+        // optimizer mis-hoisted as a loop invariant — it read back **0** on the 2nd
+        // iteration, so `hart_start` for logical hart 2 got `start_addr = 0` and
+        // that hart faulted at PC 0. Same address-materialization hazard as the `tp`
+        // fix — see `plans/v0.4-memory-findings.md` and `kernel/src/smp/percpu.rs`.
         let entry_pa = {
             unsafe extern "C" {
                 fn _secondary_start();
             }
-            mmu::va_to_pa(_secondary_start as *const () as usize) as u64
+            let entry_va: usize;
+            // SAFETY: `lla` loads a link-time symbol address into a register; no
+            // memory access, no clobbers beyond the named output.
+            unsafe {
+                core::arch::asm!(
+                    "lla {r}, {s}",
+                    r = out(reg) entry_va,
+                    s = sym _secondary_start,
+                    options(nostack, preserves_flags, nomem),
+                );
+            }
+            mmu::va_to_pa(entry_va) as u64
         };
-        let err = sbi::hart_start(secondary_mhartid, entry_pa, 1);
+        unsafe { secondary::prepare_for_secondary(logical) };
+        let err = sbi::hart_start(secondary_mhartid, entry_pa, logical as u64);
         assert!(err == 0, "sbi_hart_start({secondary_mhartid}) failed: error={err}");
-        // Acquire: pair with the Release on SECONDARY_READY in secondary_main.
-        while !secondary::SECONDARY_READY.load(Ordering::Acquire) {
+        // Acquire: pair with the Release on this hart's `SECONDARY_READY` bit.
+        let bit = 1u64 << logical;
+        while secondary::SECONDARY_READY.load(Ordering::Acquire) & bit == 0 {
             core::hint::spin_loop();
         }
     }
@@ -536,6 +560,9 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::BadgeMint
                     | WorkloadKind::BadgeHandout
                     | WorkloadKind::Fs
+                    // smp4 places its own workers on every secondary (below);
+                    // it doesn't want the single-hart demo probe on hart 1.
+                    | WorkloadKind::Smp4
             )
     }) {
         let _ = sched::spawn_on(1, "hart_1_probe", secondary::probe_entry);
@@ -555,6 +582,13 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
         }
         Some(WorkloadKind::SmpSpscBatch) => {
             let _ = sched::spawn_on(1, "workload_consumer", workload::spsc_batch_consumer_entry);
+        }
+        // The four-hart demo: a worker on every secondary hart. Hart 0 keeps
+        // heartbeating; each worker emits `smp4.tick` spans tagged with its hart id.
+        Some(WorkloadKind::Smp4) => {
+            for logical in 1..num_harts {
+                let _ = sched::spawn_on(logical, "smp4_worker", secondary::smp4_worker_entry);
+            }
         }
         _ => {}
     }
