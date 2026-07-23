@@ -20,5 +20,6 @@
 extern crate alloc;
 
 pub mod bootargs;
+pub mod harts;
 pub mod trap;
 pub mod workload;
