@@ -33,6 +33,34 @@ work is concentrated at the metal boundary.
 | Firmware | OpenSBI `fw_dynamic`, S-mode handoff `a0=hartid a1=DTB` | **same** (OpenSBI → U-Boot → payload) — the one big thing that carries over cleanly |
 | Delivery | `qemu -kernel elf` | build `Image`, U-Boot `booti` from SD/eMMC/TFTP |
 
+## Ground truth (measured on the board, 2026-07-23)
+
+Read off a live Ubuntu 24.04 boot + the `StarFive #` U-Boot prompt on the actual
+**VF2 v1.3B** (JH7110, 4 GiB), post firmware-update to U-Boot 2025.10 / modern
+OpenSBI. These retire most of the "measure on the board" unknowns; see
+[../notes/visionfive2-first-boot-and-firmware-update.md](../notes/visionfive2-first-boot-and-firmware-update.md).
+
+| Fact | Value | Feeds |
+|---|---|---|
+| RAM | base `0x4000_0000`, size 4 GiB → `0x1_4000_0000` | B2 |
+| OpenSBI M-mode reserved | `[0x4000_0000, 0x4006_0000)` (384 KiB) — keep kernel above | B2 |
+| **Kernel load address (LMA)** | **`0x4020_0000`** (`kernel_addr_r`; FIT loads U-Boot here too) = RAM base **+ 2 MiB, same offset as QEMU** | B2 |
+| `fdt_addr_r` | `0x4600_0000`; U-Boot passes its DTB via `${fdtcontroladdr}` | handoff |
+| **Boot hartid** | U-Boot on **hart 2**, handed Linux **hart 4** — arbitrary in **1..4, never 0** (S7 = hart 0, disabled) | B6 |
+| ISA | `rv64imafdc` + `zba zbb zicntr zicsr zifencei zihpm zaamo zalrsc zca zcd` — **no `sstc`** | B1 |
+| timebase-frequency | **4 MHz** (`0x3D0900`) | B1 |
+| SBI | OpenSBI, spec v3.0; ext: **TIME, IPI, RFENCE, SRST, DBCN, FWFT, HSM, PMU** | B1, M0.5, SMP |
+| Console UART0 | `serial@10000000`, `snps,dw-apb-uart`, **`reg-shift=2`, `reg-io-width=4`** (32-bit regs, 4-byte stride), clock 24 MHz | B4 |
+| CLINT / PLIC | `0x0200_0000` / `0x0C00_0000` (both < `0x4000_0000`, inside identity MMIO gigapage; same as QEMU) | B5 |
+| NIC (future) | 2× `snps,dwmac-5.20` @ `0x1603_0000`/`0x1604_0000`, PHY **Motorcomm YT8531**, RGMII-id, MDIO | M2.5 |
+| QSPI layout | `spl@0` `[0,0xf0000)`, `uboot-env@0xf0000`, `uboot@0x100000` | firmware |
+
+**Identity-map consequence for B2:** the RAM identity gigapage moves from QEMU's
+root entry 2 (`[0x8000_0000, 0xC000_0000)`) to **entry 1** (`[0x4000_0000,
+0x8000_0000)`); the linear-map base shifts to `0x4000_0000`. The MMIO identity
+gigapage `[0, 0x4000_0000)` is unchanged and already covers UART/CLINT/PLIC. (Full
+4 GiB needs more than one leaf, but first-boot only touches the low 1 GiB.)
+
 ## Gap analysis, by subsystem
 
 Ordered by how much it blocks a first boot. Each cites where the assumption
@@ -107,9 +135,14 @@ comment there already flags that boards reporting `snps,dw-apb-uart` won't match
 16550-register-compatible (`kernel/src/device/uart.rs`), and it deliberately does
 no baud/divisor init, relying on OpenSBI's config — which holds on VF2 too.
 
-- **Work:** add `"snps,dw-apb-uart"` to the accepted compatible strings. One
-  line. Without it, no boot log at all.
-- **Risk:** trivial.
+- **Work:** add `"snps,dw-apb-uart"` to the accepted compatible strings **and
+  handle the register stride** — the board reports `reg-shift=2` / `reg-io-width=4`
+  (32-bit registers spaced 4 bytes apart), vs QEMU's byte-spaced ns16550a. The
+  driver hardcodes the QEMU stride, so it must parameterize the shift (from the DTB
+  `reg-shift`) or it pokes the wrong offsets. So: compatible string **+ register
+  stride**, not a one-liner.
+- **Risk:** low (measured, mechanical) — but not zero; the stride is easy to get
+  wrong and produces garbage or silence.
 
 ### B5 — DTB-before-MMU crash / MMIO hardcoding *(latent blocker for portability)*
 
@@ -129,20 +162,27 @@ higher-half link — the parser exists but is parked (`collect_mmio_regions`,
   board. Flag as a fast-follow, not a milestone-0 gate.
 - **Risk:** medium, and annoying to debug (silent pre-MMU crash).
 
-### B6 — SMP hart topology: `1 - hart_id` → real N *(scoped out of first boot)*
+### B6 — hart topology: `MAX_HARTS=2` / `1 - hart_id` → real ids *(now a FIRST-BOOT blocker)*
 
 Bringup is proper SBI HSM (`sbi::hart_start`, `kernel/src/main.rs:453-472`) which
 is portable — but `MAX_HARTS = 2` (`kernel/src/smp/percpu.rs:80`) and the
 `secondary = 1 - boot_hart` arithmetic (`main.rs:139,456,461`) hardwire exactly
-two harts. The JH7110 has 4 U74 harts (+ an S7 monitor that isn't ours to use),
-and the boot hartid isn't 0.
+two harts with ids `{0,1}`.
 
-- **Work:** generalise from "the other hart" to "iterate the U74 harts from the
-  DTB." Real change (per-hart arrays, runqueues, exception stacks all sized by
-  `MAX_HARTS`).
-- **Risk:** medium, but **entirely deferrable** — boot single-hart first. The
-  scheduler runs fine on one hart; SMP is a later milestone. Do *not* let hart
-  topology gate first light.
+**The board disproves the "deferrable" assumption.** Measured boot hartid is **2
+or 4** (never 0; U74s are harts 1–4, S7 is 0). `percpu::init` indexes
+`PER_HART_DATA[hartid]` — so a boot hartid of 2–4 with `MAX_HARTS=2` reads/writes
+**past the array before the kernel prints anything**. This gates M1 (single-hart
+first light), not just SMP.
+
+- **Work (minimum, for M1):** size the per-hart arrays for physical hartid ≤ 4
+  (`MAX_HARTS ≥ 5`, S7 at 0 included) **or** remap physical hartid → logical index
+  before the first per-hart access. Boot only the boot hart.
+- **Work (full, later):** iterate the U74 harts from the DTB; drop the `1 -
+  hart_id` "other hart" arithmetic. Per-hart arrays, runqueues, exception stacks
+  all sized by `MAX_HARTS`.
+- **Risk:** medium. The M1 slice (array sizing / remap) is small but **mandatory**
+  — a silent OOB at boot is exactly the no-output failure M0.5 exists to avoid.
 
 ### Dropped for now — framebuffer (fw_cfg / ramfb)
 
@@ -307,13 +347,18 @@ auto-MDI-X):**
 ## Biggest unknowns to de-risk early
 
 1. **Delivery + serial loop (M0).** Everything downstream is undebuggable
-   without it. Do this before writing a line of kernel code.
-2. **The `booti` load address on VF2.** Fixes the LMA for B2. Measure it; don't
-   assume.
-3. **Does OpenSBI on VF2 hand off S-mode identically to QEMU's?** The handoff
-   contract (`a0=hartid`, `a1=DTB`, MMU off) is standard, but the boot hartid is
-   *not* 0 and the DTB layout differs. Verify against the actual board DTB.
-4. **UART framing design (B3).** The one genuinely new design problem —
+   without it. Do this before writing a line of kernel code. *(Board boots stock
+   Ubuntu — the hardware/firmware half is proven; the serial adapter is en route.)*
+2. ~~**The `booti` load address on VF2.**~~ **Resolved:** `0x4020_0000` (= RAM
+   base + 2 MiB, same offset as QEMU). See ground-truth table.
+3. ~~**Does OpenSBI hand off S-mode identically?**~~ **Mostly resolved:** standard
+   `a0=hartid`, `a1=DTB` handoff, modern OpenSBI (SBI v3.0, DBCN/TIME/HSM present).
+   The *live* wrinkle is the **non-zero, non-deterministic boot hartid (1–4)** —
+   see B6, now a first-boot blocker.
+4. **How does U-Boot launch a bare kernel?** `booti` wants a RISC-V *Image*
+   (64-byte header) we don't emit; options are `bootelf` on the ELF or adding an
+   Image header. Now well-scoped (load addr known); resolve before M1.
+5. **UART framing design (B3).** The one genuinely new design problem —
    boundaries, backpressure, flow control on a raw byte pipe. Worth a small
    design note of its own before M2.
 
