@@ -340,8 +340,36 @@ SnitchOS's `a1 = DTB` handoff with the board's *real* devicetree, no DTB of our
 own to supply. Save these into U-Boot's `bootcmd` and the board auto-fetches on
 reset — rebuild on the Mac → power-cycle → fresh kernel, no SD shuffling.
 
-**SD vs TFTP:** SD (`fatload mmc … ; booti`) means popping the card each build —
-fine for the first known-good boot, slow to iterate. TFTP is the iteration loop.
+**Delivery methods — three ways to land `snitchos.img` in RAM at `0x4020_0000`,
+then the same `booti 0x40200000 - ${fdtcontroladdr}`.** Build the Image with
+`cargo xtask image` (objcopy of the `vf2` kernel; the 64-byte RISC-V Image header
+is embedded in `entry.S`, so it's a straight ELF→binary copy — `booti`/`e_entry`
+both land on `code0`, a `JAL` over the header).
+
+- **TFTP over Ethernet** *(the iteration loop, above)* — fast, and `bootcmd` can
+  auto-fetch on reset. Needs the board and Mac on one network: board→router by
+  cable + Mac on Wi-Fi (same subnet, **main** Wi-Fi not guest), or a direct
+  Mac↔board cable (USB-C Ethernet adapter + static IPs). `serverip` = the Mac's IP
+  on that network (`ipconfig getifaddr en0`). Mac TFTP server: `dnsmasq
+  --enable-tftp --tftp-root="$(pwd)" --port=0 --no-daemon` (serves the repo dir +
+  logs requests) or the built-in `tftpd` (`/private/tftpboot`).
+- **microSD** — no network at all: FAT32-format an SD on the Mac, copy the Image,
+  read it on the board:
+  ```
+  mmc dev 1                                 # microSD is mmc 1; eMMC is mmc 0
+  fatload mmc 1:1 0x40200000 snitchos.img
+  booti 0x40200000 - ${fdtcontroladdr}
+  ```
+  Pop the card each rebuild — slower loop, but uses only the SD reader you already
+  have and doesn't touch the SPI firmware.
+- **Serial Y-modem over the console UART** — needs *only the UART cable*:
+  `loady 0x40200000` at U-Boot, send `snitchos.img` from a Y-modem-capable terminal
+  (`minicom` `Ctrl-A S`, `lrzsz`), then `booti …`. But ~4 min per boot at 115200 for
+  the 2.75 MB debug image. The pure-one-cable fallback.
+
+**With only the UART adapter on hand** (no Ethernet adapter yet, router across the
+room), **microSD is the pragmatic first-boot path**; serial Y-modem is the
+zero-extra-gear fallback; TFTP is the loop to switch to once the adapter arrives.
 
 ## Ethernet: three different asks
 

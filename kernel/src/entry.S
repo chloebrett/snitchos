@@ -17,7 +17,9 @@ _start:
   .option pop
   .4byte 0              # code1 (unused; the header data below is never executed)
   .8byte 0x200000       # text_offset: load addr = RAM_BASE + 0x200000
-  .8byte 0              # image_size (0 = image already at text_offset; no reloc)
+  .8byte __kernel_end - _start  # image_size: memory footprint. U-Boot booti rejects
+                                # a zero image_size ("Image lacks image_size field").
+                                # Resolved at link time (RISC-V ADD64/SUB64 relocs).
   .8byte 0              # flags (bit 0 = 0 -> little-endian)
   .4byte 0x00000002     # version: (major 0 << 16) | minor 2
   .4byte 0              # res1
