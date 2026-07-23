@@ -118,49 +118,67 @@ else keep glue minimal and cover via Step 5's boot smoke.
 **GREEN**: implement the walk.
 **Done when**: enumeration returns the expected shape on QEMU's DTB.
 
-### Step 5: Configurable harness hart count + default most scenarios low
+Investigation refined the original Steps 5–6 into 5 / 6a / 6b. The snemu hart
+count is a single `const HART_COUNT: usize = 2` (`xtask-snemu/src/snemu_diff.rs:27`)
+feeding every `load_machine`; the DTB is the fixed 2-cpu `snemu/virt.dtb`. "Most
+itests at 1 or 2" is read as **keep the 2-hart default** (no 1-cpu-DTB churn); we
+only *add* a 4-hart capability.
 
-**Acceptance criteria**: the itest `Harness` gains a per-scenario `-smp` count
-(e.g. `spawn_with_smp` / a `Scenario.smp` field), default 1 (or 2 where a scenario
-already needs cross-hart). Non-SMP scenarios run at 1 hart (also covering the
-single-hart boot path M1 needs); the existing SMP/cross-hart scenarios keep 2. No
-kernel change — the kernel already reads count from the DTB after Step 4. Gate green.
-**RED**: assert an SMP scenario still passes at 2 and a chosen non-SMP scenario at 1.
-**GREEN**: thread the count through the QEMU/snemu spawn.
-**Done when**: criterion (harness `-smp` count) met; gate green.
+### Step 5: Thread a per-scenario hart count through the snemu path
 
-### Step 6: Wire enumeration + multi-secondary bringup; delete `1 - hart_id`
+**Acceptance criteria**: `load_workload_machine` (and the other `load_machine`
+callers in `snemu_diff.rs`) take a `hart_count` parameter instead of the global
+`HART_COUNT` const; default stays 2 so every scenario is unchanged. Gate green.
+**RED**: none new — a pure parameter-threading refactor; the gate is the guard.
+**GREEN**: replace the const with a plumbed argument, default 2.
+**Done when**: gate green; no behavior change.
 
-**Acceptance criteria**: `kmain` builds `LOGICAL_TO_MHARTID` for all N via
-`kernel_boot::harts::assign_logical(enumerate_harts(...), boot_mhartid)`, then
-loops logical `1..N` starting each secondary (its real mhartid + logical id),
-waiting for each ready signal. No `1 - hart_id` / `1u64 - boot_mhartid` remains.
-DTB borrow lifetime adjusted (enumerate before the `let _ = dtb` drop at
-`main.rs:451`). Add exactly one **4-hart** scenario asserting `HartRegister` for
-logical 0–3 with distinct mhartids + continued heartbeat.
-**RED**: the 4-hart scenario, **run under snemu** (the default engine). snemu is
-already hart-count-parameterized (`Machine::new(mem, hart_count)`, `machine.rs:76`);
-the work is (a) threading `hart_count=4` from the harness and (b) ensuring snemu's
-presented DTB (`snemu/src/dtb.rs`) advertises 4 `cpu@N` nodes so the kernel's
-`/cpus` enumeration finds them. Extend snemu if it advertises fewer.
-**GREEN**: implement the loop + mapping wiring.
-**Done when**: criteria (4-hart bringup, no `1 - hart_id`) met; low-smp gate green;
-4-hart scenario green.
+### Step 6a: Kernel wiring — enumerate → assign → multi-secondary bringup loop
+
+**Acceptance criteria**: `kmain` fills `LOGICAL_TO_MHARTID` via
+`assign_logical(enumerate_harts(&dtb, …), boot_mhartid, …)`, then loops logical
+`1..N` starting each secondary (real mhartid + logical id), waiting for each. No
+`1 - hart_id` / `1u64 - boot_mhartid` remains. DTB enumerated before the `let _ =
+dtb` drop (`main.rs:451`). **Still 2 harts** (DTB lists 2), so this is
+behavior-preserving — the generalized loop brings up exactly one secondary, same as
+before. `SECONDARY_READY` single-flag → per-hart ready (reuse the `SMP_ONLINE_HARTS`
+bitmap as the barrier).
+**RED**: none new — behavior-preserving refactor of bringup, guarded by the
+existing SMP itests (`smp-secondary-hart-boots`, `smp-spans-carry-hart-id`,
+`smp-producer-consumer-correctness`).
+**GREEN**: implement the enumerate/assign/loop; delete the arithmetic.
+**Done when**: full gate green at 2 harts; `1 - hart_id` gone.
+
+### Step 6b: snemu 4-cpu DTB + the 4-hart scenario (the payoff)
+
+**Acceptance criteria**: a checked-in `snemu/virt-smp4.dtb` (QEMU
+`-machine virt -smp 4 -machine dumpdtb=…`; a documented one-liner) advertising 4
+`cpu@N` nodes; the snemu path selects it + `hart_count=4` for the new scenario.
+Exactly one **4-hart** itest scenario asserts `HartRegister` for logical 0–3 with
+distinct mhartids + continued heartbeat, **under snemu**.
+**RED**: the 4-hart scenario — fails until both the 4-cpu DTB is presented and the
+Step-6a bringup loop starts harts 2–3.
+**GREEN**: regenerate + commit the DTB; thread `hart_count=4`/DTB selection; verify
+`hart_start`/IPI/percpu for hartids 2–3.
+**Done when**: 4-hart scenario green under snemu; 2-hart gate still green.
 
 ## Risks / open questions
 
-- **snemu hart count.** Resolved-ish: `Machine::new(mem, hart_count)` already
-  builds `Vec<Hart>` of any size and `hart_start` indexes it, so the 4-hart
-  scenario runs under snemu. Remaining: thread `hart_count` from the harness and
-  make snemu's presented DTB advertise 4 `cpu@N` nodes (it may currently list 2).
-  Verify `hart_start`/IPI/percpu paths for hartids 2–3 while there.
-- **`SECONDARY_READY` is a single flag.** Multi-secondary bringup needs a per-hart
-  ready signal or a count barrier (reuse `SMP_ONLINE_HARTS` bitmap). Decide in Step 5.
-- **Board DTB `status` spelling.** Assumed `status="okay"` / `"disabled"`. Verify
-  against the VF2 DTS (user can `dtc`/dump `${fdtcontroladdr}` at the U-Boot prompt);
-  the `usable` predicate is the one board-specific bit and is isolated to Step 4.
-- **Pre-heap alloc.** Enumeration runs in `kmain`; `Vec` needs the heap. If it runs
-  before heap init, use a fixed `[HartInfo; MAX_HARTS+1]`. Confirm ordering in Step 4.
+- **snemu 4-cpu DTB (Step 6b).** snemu's DTB is the fixed 2-cpu `snemu/virt.dtb`;
+  `Machine::new` already takes any hart_count. Plan: check in a QEMU-dumped
+  `virt-smp4.dtb` and select it for the 4-hart scenario. QEMU 11.0.1 is on PATH, so
+  the dump is a one-liner. (There are two `virt.dtb` copies — `snemu/`, `dtb/`;
+  the snemu path reads `snemu/virt.dtb`.) Verify `hart_start`/IPI/percpu for hartids
+  2–3 when the scenario first runs.
+- **`SECONDARY_READY` is a single flag → per-hart barrier.** Decided (Step 6a):
+  reuse the `SMP_ONLINE_HARTS` bitmap — after starting logical `1..N`, spin until
+  all their bits are set, rather than one boolean.
+- **Board DTB `status` spelling.** Assumed `status="okay"` / `"disabled"` — matches
+  the `is_usable` predicate (Step 4, done). Verify against the VF2 DTS (user can
+  `dtc`/dump `${fdtcontroladdr}` at the U-Boot prompt); it's the one board-specific
+  bit and is isolated to `is_usable`, which already handles the `"ok"`/NUL variants.
+- **Pre-heap alloc — resolved.** `enumerate_harts`/`assign_logical` fill
+  caller-provided slices; no alloc, so enumeration order vs heap init is a non-issue.
 
 ## Pre-PR Quality Gate
 
