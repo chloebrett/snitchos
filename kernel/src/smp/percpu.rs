@@ -73,11 +73,13 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
 
-/// Maximum harts supported. Bumped to 2 in v0.6 step 8 for the
-/// cooperative-SMP demo (one boot hart + one worker). Each hart
-/// gets its own `PER_HART_DATA` slot, its own `PerCpu<T>` cell, and
-/// (step 10) its own runqueue + idle task.
-pub const MAX_HARTS: usize = 2;
+/// Maximum harts supported — the capacity of every per-hart array
+/// (`PER_HART_DATA`, `EXCEPTION_STACKS`, each `PerCpu<T>`, the runqueues).
+/// Sized to the VisionFive 2's 4× U74 (the JH7110's S7 monitor is filtered
+/// out by `status`, so it never claims a logical slot). The *actual* live
+/// hart count is discovered at boot from the DTB and is ≤ this; QEMU `-smp N`
+/// runs with `N` live harts and the surplus slots stay idle.
+pub const MAX_HARTS: usize = 4;
 
 /// Per-hart bookkeeping. `tp` register points at this hart's slot in
 /// `PER_HART_DATA`. New fields land here as v0.6 steps progress —
