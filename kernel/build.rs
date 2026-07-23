@@ -67,11 +67,37 @@ const USER_PROGRAMS: &[(&str, &str)] = &[
     ("hung-supervisor", "SNITCHOS_HUNG_SUPERVISOR_ELF"),
 ];
 
+/// Fill `linker.ld.in`'s `@KERNEL_VMA@` / `@KERNEL_LMA@` from the RAM base — QEMU
+/// `virt` (`0x8000_0000`) by default, the VisionFive 2 (`0x4000_0000`) under the
+/// `vf2` feature — and emit the concrete `linker.ld` to `OUT_DIR`, linking against
+/// it. The arithmetic mirrors `kernel_mem::mmu::{RAM_BASE, kernel_lma, kernel_vma}`
+/// (host-tested there); keep the two in lockstep.
+fn generate_linker_script(dir: &str) {
+    const KERNEL_OFFSET: u64 = 0xffff_ffff_0000_0000;
+    let ram_base: u64 = if std::env::var_os("CARGO_FEATURE_VF2").is_some() {
+        0x4000_0000
+    } else {
+        0x8000_0000
+    };
+    let lma = ram_base + 0x20_0000; // kernel_lma(ram_base)
+    let vma = lma + KERNEL_OFFSET; // kernel_vma(ram_base)
+    let script = std::fs::read_to_string(format!("{dir}/linker.ld.in"))
+        .expect("read linker.ld.in")
+        .replace("@KERNEL_VMA@", &format!("{vma:#x}"))
+        .replace("@KERNEL_LMA@", &format!("{lma:#x}"));
+    let out = std::env::var("OUT_DIR").unwrap();
+    let path = format!("{out}/linker.ld");
+    std::fs::write(&path, script).expect("write linker.ld");
+    println!("cargo:rustc-link-arg=-T{path}");
+}
+
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    println!("cargo:rustc-link-arg=-T{dir}/linker.ld");
-    println!("cargo:rerun-if-changed={dir}/linker.ld");
+    generate_linker_script(&dir);
+    println!("cargo:rerun-if-changed={dir}/linker.ld.in");
     println!("cargo:rerun-if-changed={dir}/src/entry.S");
+    // Regenerate the linker script when the RAM-base feature flips.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_VF2");
     // The embedded-userspace opt override (`itest --opt hi`/`max`); rebuild the
     // embed when it flips so the userspace actually re-optimizes across levels.
     println!("cargo:rerun-if-env-changed=SNITCHOS_USERSPACE_OPT");

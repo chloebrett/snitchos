@@ -10,6 +10,30 @@
 /// `0xffffffff_80200000`.
 pub const KERNEL_OFFSET: usize = 0xffffffff_00000000;
 
+/// Physical base of RAM. QEMU `virt` places DRAM at `0x8000_0000`; the VisionFive
+/// 2 (JH7110) at `0x4000_0000`, selected by the `vf2` feature. Everything
+/// RAM-base-dependent — the kernel LMA/VMA the linker uses, the identity gigapage
+/// index, the linear-map leaf — derives from this one constant. Off-by-default so
+/// the QEMU/snemu gate is unaffected.
+#[cfg(not(feature = "vf2"))]
+pub const RAM_BASE: usize = 0x8000_0000;
+#[cfg(feature = "vf2")]
+pub const RAM_BASE: usize = 0x4000_0000;
+
+/// Physical load address (LMA) of the kernel image: 2 MiB above RAM base. OpenSBI /
+/// M-mode firmware reserves the low 2 MiB, so the S-mode payload lands here — the
+/// same +2 MiB offset on QEMU `virt` and the VisionFive 2. The linker anchors
+/// `.text`'s LMA here; `build.rs` derives the same value for the generated script.
+pub const fn kernel_lma(ram_base: usize) -> usize {
+    ram_base + 0x20_0000
+}
+
+/// Higher-half virtual address the kernel image is linked at: LMA + `KERNEL_OFFSET`.
+/// `KERNEL_OFFSET` is RAM-base-independent, so only the LMA moves with the board.
+pub const fn kernel_vma(ram_base: usize) -> usize {
+    kernel_lma(ram_base) + KERNEL_OFFSET
+}
+
 /// Base offset for the kernel's linear map of physical memory.
 /// PA `p` is reachable at VA `p + LINEAR_OFFSET` for the range covered
 /// by `mmu::enable`'s linear-map leaf (currently a single 1 GiB Sv39
@@ -1220,6 +1244,18 @@ mod tests {
         let bits_63_39 = HEAP_VA_BASE >> 39;
         assert_eq!(bit_38, 1);
         assert_eq!(bits_63_39, 0x1FFFFFF);
+    }
+
+    #[test]
+    fn kernel_load_and_link_addresses_derive_from_ram_base() {
+        // QEMU `virt`: RAM at 0x8000_0000, kernel image at +2 MiB, higher-half VMA.
+        assert_eq!(kernel_lma(0x8000_0000), 0x8020_0000);
+        assert_eq!(kernel_vma(0x8000_0000), 0xffffffff_8020_0000);
+        // VisionFive 2 / JH7110: RAM at 0x4000_0000, same +2 MiB offset.
+        assert_eq!(kernel_lma(0x4000_0000), 0x4020_0000);
+        assert_eq!(kernel_vma(0x4000_0000), 0xffffffff_4020_0000);
+        // Default build targets QEMU (no `vf2` feature).
+        assert_eq!(RAM_BASE, 0x8000_0000);
     }
 
     #[test]

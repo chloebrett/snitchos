@@ -1,16 +1,21 @@
+/* TEMPLATE — `kernel/build.rs` substitutes @KERNEL_VMA@ / @KERNEL_LMA@ from the
+ * RAM base (QEMU `virt` 0x8000_0000 by default; 0x4000_0000 under the `vf2`
+ * feature) and writes the concrete `linker.ld` to OUT_DIR. Both derive from
+ * `kernel_mem::mmu::{kernel_lma, kernel_vma}` (host-tested); build.rs mirrors them.
+ * Edit this file, not the generated one. */
 ENTRY(_start)
 MEMORY {
-  ram (rwx) : ORIGIN = 0xffffffff80200000, LENGTH = 128M
+  ram (rwx) : ORIGIN = @KERNEL_VMA@, LENGTH = 128M
 }
 /* VMA in higher-half (matches Linux RISC-V's PAGE_OFFSET). LMA is the
- * physical address OpenSBI loads us at; AT(0x80200000) anchors LMAs
+ * physical address OpenSBI loads us at; AT(@KERNEL_LMA@) anchors LMAs
  * on .text, and subsequent sections follow contiguously. */
 SECTIONS {
   __kernel_start = ORIGIN(ram);
-  .text : AT(0x80200000) {
-    /* `_start` must be at PA 0x80200000 — that's where OpenSBI jumps
-     * the boot hart. `.text.entry` is the dedicated section just for
-     * the entry stub (entry.S) so it's never reordered relative to
+  .text : AT(@KERNEL_LMA@) {
+    /* `_start` must be at PA @KERNEL_LMA@ (= RAM base + 2 MiB) — that's where
+     * OpenSBI jumps the boot hart. `.text.entry` is the dedicated section just
+     * for the entry stub (entry.S) so it's never reordered relative to
      * other boot-time asm (`.text.boot`, e.g. secondary.S). */
     KEEP(*(.text.entry))
     KEEP(*(.text.boot))

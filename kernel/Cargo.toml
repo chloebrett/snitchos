@@ -13,6 +13,12 @@ default = []
 # leave this off (no test/destructive workloads compiled in). See
 # `docs/runtime-workload-selection-design.md`.
 itest-workloads = []
+# Target the VisionFive 2 / JH7110: RAM base 0x4000_0000 instead of QEMU's
+# 0x8000_0000. Selects `kernel_mem::mmu::RAM_BASE` and the generated linker script's
+# load/link addresses (`build.rs`). Off by default (QEMU `virt`); untested in CI
+# until board bring-up. See plans/legacy/vf2-b6-multihart.md and B2 in
+# plans/visionfive2-port.md.
+vf2 = ["kernel-mem/vf2"]
 
 [build-dependencies]
 # Host-only (build script): parse `cargo metadata` to derive the embedded-bin

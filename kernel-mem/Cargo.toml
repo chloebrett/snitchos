@@ -10,6 +10,12 @@ publish = false
 # every other crate instead of waiting on the `protocol`/`serde` proc-macro chain.
 [dependencies]
 
+# Selects the physical RAM base: default is QEMU `virt` (0x8000_0000); `vf2`
+# switches to the VisionFive 2 / JH7110 (0x4000_0000). Off by default so the
+# QEMU/snemu test gate is unaffected. See `mmu::RAM_BASE`.
+[features]
+vf2 = []
+
 [lints]
 workspace = true
 

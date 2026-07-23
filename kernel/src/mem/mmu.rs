@@ -17,7 +17,8 @@ use kernel_mem::mmu::{self as core_mmu, MapError, PageTable, PtMem, Pte, PtePerm
 // MMIO-region set, and the `satp` encode/decode pair. What stays here is what
 // touches hardware — the CSR writes, the asm, the boot-table construction.
 pub use kernel_mem::mmu::{
-    KERNEL_OFFSET, LINEAR_OFFSET, MEGAPAGE_SIZE, MmioRegions, root_from_satp, satp_for, va_to_pa,
+    KERNEL_OFFSET, LINEAR_OFFSET, MEGAPAGE_SIZE, MmioRegions, RAM_BASE, root_from_satp, satp_for,
+    va_to_pa,
 };
 
 /// 2 MiB-aligned base of the MMIO region on QEMU `virt`. Covers the
@@ -190,18 +191,19 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
         }
 
         // Linear map: one 1 GiB Sv39 huge-page leaf installed directly
-        // in the root, mapping
-        // `[LINEAR_OFFSET + 0x80000000, LINEAR_OFFSET + 0xC0000000)`
-        // to physical `[0x80000000, 0xC0000000)`. Covers all of
-        // QEMU `virt`'s RAM up to 1 GiB; platforms with more RAM
-        // would need additional leaves.
+        // in the root, mapping `[LINEAR_OFFSET + RAM_BASE, +1 GiB)` to
+        // physical `[RAM_BASE, RAM_BASE + 1 GiB)`. Covers all of the
+        // machine's RAM up to 1 GiB (QEMU `virt` at 0x8000_0000, the
+        // VisionFive 2 at 0x4000_0000); platforms with more RAM would
+        // need additional leaves. `RAM_BASE` is 1 GiB-aligned, so it's a
+        // valid gigapage leaf PA.
         //
         // This is the mapping the frame allocator will use to give
         // any allocated frame a kernel-reachable VA via
         // `pa_to_kernel_va`.
-        let linear_va = LINEAR_OFFSET + 0x80000000;
+        let linear_va = LINEAR_OFFSET + RAM_BASE;
         let linear_idx = (linear_va >> 30) & 0x1ff;
-        let linear_leaf = Pte::leaf(0x80000000, perms);
+        let linear_leaf = Pte::leaf(RAM_BASE, perms);
         (&mut *(&raw mut BOOT_PT_ROOT)).set_entry(linear_idx, linear_leaf);
 
         // DTB region. Kernel keeps using `&Fdt` after this returns
@@ -230,8 +232,9 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
 }
 
 /// Tear down both identity mappings: the kernel-image gigapage
-/// (`[0x80000000, 0xC0000000)` = root entry 2) and the MMIO gigapage
-/// (`[0x00000000, 0x40000000)` = root entry 0). After this returns,
+/// (`[RAM_BASE, RAM_BASE + 1 GiB)` = root entry `RAM_BASE >> 30`; entry 2 on QEMU,
+/// 1 on the VF2) and the MMIO gigapage (`[0x00000000, 0x40000000)` = root entry
+/// 0). After this returns,
 /// any access to an identity-half VA faults — the kernel must use
 /// higher-half VAs exclusively, including for MMIO.
 ///
@@ -257,11 +260,13 @@ pub unsafe fn enable(mmio_regions: &MmioRegions, dtb_phys: usize) {
 pub unsafe fn unmap_identity() {
     unsafe {
         let root = &mut *(&raw mut BOOT_PT_ROOT);
-        // Root entry 0: identity [0x00000000, 0x40000000) — MMIO.
+        // Root entry 0: identity [0x00000000, 0x40000000) — MMIO. RAM-base-
+        // independent: MMIO sits below RAM on both QEMU and the VisionFive 2.
         root.set_entry(0, Pte::INVALID);
-        // Root entry 2: identity [0x80000000, 0xC0000000) — kernel
-        // image, stack, DTB.
-        root.set_entry(2, Pte::INVALID);
+        // The identity kernel gigapage — [RAM_BASE, RAM_BASE + 1 GiB), covering the
+        // kernel image, stack, and DTB. Root entry 2 on QEMU (RAM at 0x8000_0000),
+        // entry 1 on the VF2 (0x4000_0000).
+        root.set_entry((RAM_BASE >> 30) & 0x1ff, Pte::INVALID);
         asm!("sfence.vma", options(nostack, nomem));
     }
 }
