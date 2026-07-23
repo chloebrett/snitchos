@@ -2,6 +2,7 @@
 //! `OpenSBI` hands us at boot.
 
 use fdt::Fdt;
+use kernel_boot::harts::{is_usable, HartInfo};
 
 /// Find the first `ns16550a`-compatible serial port in the DTB and return
 /// its MMIO base address.
@@ -15,6 +16,35 @@ use fdt::Fdt;
 pub fn uart_addr(dtb: &Fdt) -> usize {
   let uart = dtb.find_compatible(&["ns16550a"]).unwrap();
   uart.reg().unwrap().next().unwrap().starting_address as usize
+}
+
+/// Enumerate the harts the DTB advertises under `/cpus`, filling `out` with one
+/// [`HartInfo`] per `cpu@N` node — its `reg` (the `mhartid`) and whether its
+/// `status` marks it usable (the JH7110's S7 monitor is `status="disabled"` and
+/// comes back `usable = false`; QEMU's harts have no status and come back usable).
+/// Writes at most `out.len()` entries and returns how many were written.
+///
+/// The `usable` decision and the subsequent logical-id assignment are pure and
+/// host-tested in `kernel_boot::harts`; this is the thin `fdt` glue, like
+/// [`uart_addr`]. It runs post-MMU (during secondary bring-up), so the
+/// higher-level `fdt` iterators are safe here — unlike the pre-MMU `timebase_hz`
+/// path, which deliberately avoids closure chains.
+#[expect(
+  dead_code,
+  reason = "wired into secondary bring-up in the next step (Step 6 of plans/vf2-b6-multihart.md); the glue lands separately so the enumeration + its pure logic are reviewable in isolation"
+)]
+pub fn enumerate_harts(dtb: &Fdt, out: &mut [HartInfo]) -> usize {
+  let mut n = 0;
+  for cpu in dtb.cpus() {
+    if n >= out.len() {
+      break;
+    }
+    let mhartid = cpu.ids().first() as u64;
+    let usable = is_usable(cpu.property("status").map(|p| p.value));
+    out[n] = HartInfo { mhartid, usable };
+    n += 1;
+  }
+  n
 }
 
 /// CPU timebase frequency in Hz, parsed from the `cpus` node's

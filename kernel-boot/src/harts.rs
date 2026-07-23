@@ -10,7 +10,7 @@
 //! `LOGICAL_TO_MHARTID`.
 
 /// One hart as reported by the DTB `/cpus` enumeration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HartInfo {
     /// Platform `mhartid` — the DTB `cpu@N` `reg` value.
     pub mhartid: u64,
@@ -18,6 +18,23 @@ pub struct HartInfo {
     /// core (the JH7110 S7 at hart 0). The boot hart is always brought up
     /// regardless of this flag — we're already running on it.
     pub usable: bool,
+}
+
+/// Decide whether a DTB `cpu@N` node's `status` property means "bring this hart
+/// up". Per the devicetree spec a node is enabled unless it has a `status` that
+/// is present and not `"okay"` — so an absent status (`None`) is usable, and the
+/// JH7110's S7 monitor core (`status = "disabled"`) is not. `"ok"` is accepted as
+/// the legacy alias for `"okay"`. The value is the raw property bytes, which carry
+/// the DTB string's trailing NUL — trimmed here.
+#[must_use]
+pub fn is_usable(status: Option<&[u8]>) -> bool {
+    match status {
+        None => true,
+        Some(s) => {
+            let s = s.strip_suffix(b"\0").unwrap_or(s);
+            s == b"okay" || s == b"ok"
+        }
+    }
 }
 
 /// Fill `out` with the logical→mhartid mapping: `out[0]` = the boot hart, then
@@ -112,6 +129,28 @@ mod tests {
         let n = assign_logical(&harts, 0, &mut out);
         assert_eq!(n, 4);
         assert_eq!(out, [0, 1, 2, 3], "hart 4 dropped by capacity");
+    }
+
+    #[test]
+    fn status_absent_is_usable() {
+        // DT spec: a node with no `status` is enabled.
+        assert!(is_usable(None));
+    }
+
+    #[test]
+    fn status_okay_variants_are_usable() {
+        assert!(is_usable(Some(b"okay")));
+        assert!(is_usable(Some(b"okay\0")), "DTB strings carry a trailing NUL");
+        assert!(is_usable(Some(b"ok")), "legacy alias");
+        assert!(is_usable(Some(b"ok\0")));
+    }
+
+    #[test]
+    fn status_disabled_or_unknown_is_not_usable() {
+        assert!(!is_usable(Some(b"disabled")));
+        assert!(!is_usable(Some(b"disabled\0")));
+        assert!(!is_usable(Some(b"")), "empty is not okay");
+        assert!(!is_usable(Some(b"reserved\0")));
     }
 
     #[test]
