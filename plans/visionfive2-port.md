@@ -198,13 +198,12 @@ board build simply doesn't call `ramfb::init` (`kernel/src/main.rs:286`).
 Each leaves the tree in a known-good state and — critically — **does not regress
 the QEMU/snemu test gate**, which everything else in the repo depends on.
 
-- **M0 — Get bits onto the board, get a serial console.** No kernel code.
-  Establish the physical loop: USB-serial adapter on the console UART, U-Boot
-  prompt reached, a known-good `Image` booted to prove the board + toolchain +
-  delivery path. This de-risks everything: without it, every kernel bug looks the
-  same (silence). *This is the real first task and it's logistics, not Rust.*
-  Full mechanics in **[Bring-up mechanics](#bring-up-mechanics-m0-in-detail)**
-  below.
+- **M0 — Serial console + delivery loop.** ✅ **Mostly done (2026-07-23):**
+  CP2102 serial adapter wired to the console UART, `StarFive #` prompt reached,
+  stock Ubuntu booted — board + firmware + toolchain proven, and ground-truth
+  values read off the live board. **Remaining:** TFTP server on the Mac for the
+  `bootelf`/`tftpboot` dev loop. Full mechanics in
+  **[Bring-up mechanics](#bring-up-mechanics-m0-in-detail)** below.
 
 - **M1 — First light: boot to the human UART log.** B4 (match
   `snps,dw-apb-uart`) + B2 (RAM base) + B1 (SBI timer). Success = the NS16550
@@ -346,18 +345,25 @@ auto-MDI-X):**
 
 ## Biggest unknowns to de-risk early
 
-1. **Delivery + serial loop (M0).** Everything downstream is undebuggable
-   without it. Do this before writing a line of kernel code. *(Board boots stock
-   Ubuntu — the hardware/firmware half is proven; the serial adapter is en route.)*
+1. ~~**Delivery + serial loop (M0).**~~ **Mostly done:** serial console is wired
+   and working (that's how the ground-truth values above were read), board boots
+   stock Ubuntu, `StarFive #` prompt reachable. Remaining M0 bit: stand up the
+   TFTP server on the Mac for the `tftpboot`/`bootelf` dev loop.
 2. ~~**The `booti` load address on VF2.**~~ **Resolved:** `0x4020_0000` (= RAM
    base + 2 MiB, same offset as QEMU). See ground-truth table.
 3. ~~**Does OpenSBI hand off S-mode identically?**~~ **Mostly resolved:** standard
    `a0=hartid`, `a1=DTB` handoff, modern OpenSBI (SBI v3.0, DBCN/TIME/HSM present).
    The *live* wrinkle is the **non-zero, non-deterministic boot hartid (1–4)** —
    see B6, now a first-boot blocker.
-4. **How does U-Boot launch a bare kernel?** `booti` wants a RISC-V *Image*
-   (64-byte header) we don't emit; options are `bootelf` on the ELF or adding an
-   Image header. Now well-scoped (load addr known); resolve before M1.
+4. ~~**How does U-Boot launch a bare kernel?**~~ **Resolved (both, staged):**
+   `bootelf` loads our existing ELF and jumps to `e_entry` — **zero build step**,
+   but does *not* set `a0=hartid`/`a1=dtb` (no boot protocol). `booti addr -
+   ${fdtcontroladdr}` *does* guarantee that handoff but needs a RISC-V **Image**
+   (64-byte header, `code0 = j _start`) we must emit. Plan: **M0.5 smoke via
+   `bootelf`** (DBCN needs no `a0`/`a1`), **M1 via `booti` + Image header** (for
+   the real hartid/DTB handoff). `${fdtcontroladdr}` = U-Boot's live DTB
+   (`0xff7105e0` on this board). Both paths require B2 first (kernel linked at
+   `0x4020_0000`).
 5. **UART framing design (B3).** The one genuinely new design problem —
    boundaries, backpressure, flow control on a raw byte pipe. Worth a small
    design note of its own before M2.
