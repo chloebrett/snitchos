@@ -4,18 +4,36 @@
 use fdt::Fdt;
 use kernel_boot::harts::{is_usable, HartInfo};
 
-/// Find the first `ns16550a`-compatible serial port in the DTB and return
-/// its MMIO base address.
+/// Find the console serial port in the DTB and return its MMIO base plus register
+/// layout — `(base, reg_shift, io_width)`.
 ///
-/// Known weaknesses:
-/// - Panics on missing/malformed entries via `.unwrap()`. Fine for v0.1
-///   (no DTB → no kernel), but a real driver would surface the error.
-/// - Hardcodes the `"ns16550a"` compatible string. Boards that report
-///   `"snps,dw-apb-uart"` or `"arm,pl011"` etc. won't match. Will need a
-///   compatibility list when we add a second platform.
-pub fn uart_addr(dtb: &Fdt) -> usize {
-  let uart = dtb.find_compatible(&["ns16550a"]).unwrap();
-  uart.reg().unwrap().next().unwrap().starting_address as usize
+/// Accepts QEMU's `ns16550a` and the JH7110's `snps,dw-apb-uart`; both are
+/// 8250-register-compatible and differ only in `reg-shift` (register spacing) and
+/// `reg-io-width` (access width). Absent `reg-shift` / `reg-io-width` default to
+/// `0` / `1` — QEMU's byte-spaced, byte-wide layout. The offset math these feed is
+/// host-tested in `kernel_devices::uart`.
+///
+/// Runs post-MMU (`kmain` calls it after the trampoline), so the higher-level
+/// `fdt` accessors are safe — unlike the pre-MMU MMIO-discovery path.
+///
+/// Known weakness: panics on a missing/malformed UART node via `.unwrap()`. Fine
+/// for boot (no console → no kernel); a real driver would surface the error.
+pub fn uart_config(dtb: &Fdt) -> (usize, u8, u8) {
+  let uart = dtb
+    .find_compatible(&["ns16550a", "snps,dw-apb-uart"])
+    .unwrap();
+  let base = uart.reg().unwrap().next().unwrap().starting_address as usize;
+  // `reg-shift` / `reg-io-width` are 4-byte big-endian `u32`s; decode by hand
+  // (the `fdt` 0.1.5 accessor set doesn't surface them).
+  let prop_u8 = |name: &str, default: u8| -> u8 {
+    match uart.property(name) {
+      Some(p) if p.value.len() == 4 => {
+        u32::from_be_bytes([p.value[0], p.value[1], p.value[2], p.value[3]]) as u8
+      }
+      _ => default,
+    }
+  };
+  (base, prop_u8("reg-shift", 0), prop_u8("reg-io-width", 1))
 }
 
 /// Enumerate the harts the DTB advertises under `/cpus`, filling `out` with one
@@ -26,7 +44,7 @@ pub fn uart_addr(dtb: &Fdt) -> usize {
 ///
 /// The `usable` decision and the subsequent logical-id assignment are pure and
 /// host-tested in `kernel_boot::harts`; this is the thin `fdt` glue, like
-/// [`uart_addr`]. It runs post-MMU (during secondary bring-up), so the
+/// [`uart_config`]. It runs post-MMU (during secondary bring-up), so the
 /// higher-level `fdt` iterators are safe here — unlike the pre-MMU `timebase_hz`
 /// path, which deliberately avoids closure chains.
 pub fn enumerate_harts(dtb: &Fdt, out: &mut [HartInfo]) -> usize {

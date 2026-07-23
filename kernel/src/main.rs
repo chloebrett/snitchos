@@ -185,14 +185,15 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     {
         span!("kernel.boot");
 
-        let uart_addr = dtb::uart_addr(&dtb);
+        let (uart_base, uart_reg_shift, uart_io_width) = dtb::uart_config(&dtb);
         {
             span!("console_init");
-            // SAFETY: uart_addr came from the DTB's ns16550a node.
-            unsafe { console::init(uart_addr) };
+            // SAFETY: the config came from the DTB's console UART node, and
+            // `mmu::enable` has run so the higher-half MMIO mapping is live.
+            unsafe { console::init(uart_base, uart_reg_shift, uart_io_width) };
         }
 
-        dtb::print_info(&dtb, uart_addr);
+        dtb::print_info(&dtb, uart_base);
 
         {
             span!("telemetry_init");

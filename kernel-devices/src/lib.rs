@@ -23,4 +23,5 @@ pub mod console;
 pub mod framebuffer;
 pub mod fwcfg;
 pub mod ramfb;
+pub mod uart;
 pub mod virtio;

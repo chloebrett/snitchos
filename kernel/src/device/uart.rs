@@ -1,13 +1,19 @@
-//! Driver for the NS16550A UART (and any register-compatible clone, such as
-//! the one QEMU's `virt` machine exposes via MMIO).
+//! Driver for the NS16550A UART and register-compatible clones — QEMU `virt`'s
+//! byte-spaced ns16550a and the JH7110's `snps,dw-apb-uart` (DesignWare 8250),
+//! which spaces its registers 4 bytes apart (`reg-shift = 2`) and takes 32-bit
+//! accesses (`reg-io-width = 4`). The register *map* (offsets, status bits) lives
+//! in `kernel_devices::uart` and is host-tested; this file does the MMIO.
 
 use core::fmt::Write;
 
-/// Driver for an NS16550A UART at a given MMIO base address.
+use kernel_devices::uart::{reg_offset, LSR, LSR_DR, LSR_THRE, THR_RBR};
+
+/// Driver for an 8250-family UART at a given MMIO base, with the register layout
+/// (`reg_shift`) and access width (`io_width`, 1 or 4 bytes) the DTB reports.
 ///
-/// Storing the base as `usize` rather than `*mut u8` sidesteps `*mut`'s
-/// `!Sync` default — the struct is naturally `Send + Sync` because it's just
-/// an integer wearing a type.
+/// Storing the base as `usize` rather than `*mut u8` sidesteps `*mut`'s `!Sync`
+/// default — the struct is naturally `Send + Sync` because it's just integers
+/// wearing a type.
 ///
 /// Known weaknesses:
 /// - **Polled output only.** `putchar` spins on LSR bit 5. No interrupts, no
@@ -15,9 +21,8 @@ use core::fmt::Write;
 ///   meaningful to log we'll want interrupt-driven TX.
 /// - **No initialization step.** Real drivers configure baud rate (DLL/DLM
 ///   divisor latches), line control (LCR: bits, parity, stop), and the FIFO
-///   (FCR). We rely on whatever `OpenSBI` configured during M-mode init.
-/// - **No receive path.** We only transmit. Input handling waits until we
-///   build a debug shell.
+///   (FCR). We rely on whatever `OpenSBI` configured during M-mode init — which
+///   holds on QEMU `virt` and on the VisionFive 2.
 /// - **No error checking.** LSR error bits (overrun, parity, framing) are
 ///   ignored. A real driver surfaces them.
 /// - **Multiple `Uart16550`s pointing at the same MMIO address don't
@@ -26,64 +31,114 @@ use core::fmt::Write;
 ///   there. Serialization is provided externally via `kernel::sync::Mutex<Uart16550>`.
 pub struct Uart16550 {
     base: usize,
+    /// Register spacing exponent: register `r` sits at `base + (r << reg_shift)`.
+    reg_shift: u8,
+    /// Access width in bytes (1 or 4). DesignWare (`reg-io-width = 4`) requires
+    /// 32-bit accesses; the meaningful byte is the low 8 bits.
+    io_width: u8,
 }
 
 impl Uart16550 {
-    /// Construct a driver for a UART at the given MMIO base address.
+    /// Construct a driver for the **byte-spaced** ns16550a layout (`reg-shift = 0`,
+    /// `reg-io-width = 1`) — QEMU `virt`. Used by the pre-init / emergency / panic
+    /// paths that fire before the DTB-configured console exists.
     ///
     /// # Safety
     ///
-    /// `base` must be the MMIO base of a real NS16550A-compatible UART, and
-    /// the caller must ensure that any other code touching the same registers
-    /// either coordinates through this driver (e.g. via a shared `Mutex`) or
-    /// doesn't conflict. Constructing two `Uart16550`s pointing at the same
-    /// region without external coordination is undefined behavior at the
+    /// `base` must be the MMIO base of a real NS16550A-compatible UART, and the
+    /// caller must ensure any other code touching the same registers either
+    /// coordinates through this driver (e.g. via a shared `Mutex`) or doesn't
+    /// conflict. Two uncoordinated `Uart16550`s on the same region is UB at the
     /// device-state level (the type system can't see it).
     pub const unsafe fn new(base: usize) -> Self {
-        Uart16550 { base }
+        Uart16550 { base, reg_shift: 0, io_width: 1 }
+    }
+
+    /// Construct a driver with the register layout the DTB reports — `reg_shift`
+    /// (spacing) and `io_width` (1 or 4 bytes). E.g. the JH7110 `snps,dw-apb-uart`
+    /// is `with_layout(base, 2, 4)`; QEMU's ns16550a is `with_layout(base, 0, 1)`,
+    /// equivalent to [`new`](Self::new).
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`new`](Self::new); `reg_shift` / `io_width` must match the
+    /// hardware or the driver pokes the wrong offsets / widths.
+    pub const unsafe fn with_layout(base: usize, reg_shift: u8, io_width: u8) -> Self {
+        Uart16550 { base, reg_shift, io_width }
+    }
+
+    /// MMIO address of a logical register.
+    fn addr(&self, reg: u8) -> usize {
+        self.base + reg_offset(reg, self.reg_shift)
+    }
+
+    /// Read a logical register, honoring the access width.
+    ///
+    /// # Safety
+    ///
+    /// MMIO read of a register this driver owns; see the type contract.
+    unsafe fn read_reg(&self, reg: u8) -> u8 {
+        let addr = self.addr(reg);
+        // SAFETY: `addr` is within this UART's MMIO block; width matches the DTB.
+        unsafe {
+            if self.io_width == 4 {
+                (addr as *const u32).read_volatile() as u8
+            } else {
+                (addr as *const u8).read_volatile()
+            }
+        }
+    }
+
+    /// Write a logical register, honoring the access width.
+    ///
+    /// # Safety
+    ///
+    /// MMIO write to a register this driver owns; see the type contract.
+    unsafe fn write_reg(&self, reg: u8, val: u8) {
+        let addr = self.addr(reg);
+        // SAFETY: `addr` is within this UART's MMIO block; width matches the DTB.
+        unsafe {
+            if self.io_width == 4 {
+                (addr as *mut u32).write_volatile(u32::from(val));
+            } else {
+                (addr as *mut u8).write_volatile(val);
+            }
+        }
     }
 
     /// Block until the transmit holding register is empty, then send one byte.
     ///
-    /// Spins on LSR bit 5 (THRE — Transmit Holding Register Empty). At 115200
-    /// baud each byte takes ~87 microseconds on the wire; the CPU spins
-    /// millions of times faster, so this loop dominates transmit time.
+    /// Spins on LSR `THRE` (Transmit Holding Register Empty). At 115200 baud each
+    /// byte takes ~87 microseconds on the wire; the CPU spins millions of times
+    /// faster, so this loop dominates transmit time.
     pub fn putchar(&self, c: u8) {
-        let thr_addr = self.base as *mut u8;
-        let lsr_addr = (self.base + 5) as *const u8;
+        // SAFETY: LSR/THR MMIO on a UART this driver owns; see the type contract.
         unsafe {
-            while lsr_addr.read_volatile() & 0b0010_0000 == 0 {}
-            thr_addr.write_volatile(c);
+            while self.read_reg(LSR) & LSR_THRE == 0 {}
+            self.write_reg(THR_RBR, c);
         }
     }
 
     /// Read one byte if the receiver has data waiting, else `None`.
     ///
-    /// Polled RX — the mirror of [`putchar`](Self::putchar). Check `LSR`
-    /// (`base + 5`) bit 0 (DR — Data Ready); if set, read the waiting byte from
-    /// `RBR`, the *read* side of `base + 0` (the same address `putchar` writes
-    /// `THR` to). Non-blocking: returns `None` when nothing is buffered, so the
-    /// timer-driven drain never spins on the hardware.
-    ///
-    /// Like `putchar`, this does volatile MMIO on `base`; the one-coordinated-owner
-    /// contract on `Uart16550` is what keeps it sound.
+    /// Polled RX — the mirror of [`putchar`](Self::putchar). Checks LSR `DR` (Data
+    /// Ready); if set, reads the waiting byte from `RBR` (the read side of the same
+    /// logical register `THR` writes). Non-blocking: returns `None` when nothing is
+    /// buffered, so the timer-driven drain never spins on the hardware.
     pub fn read_byte(&self) -> Option<u8> {
-        let lsr_addr = (self.base + 5) as *const u8;
-        let rbr_addr = self.base as *const u8;
-
+        // SAFETY: LSR/RBR MMIO on a UART this driver owns; see the type contract.
         unsafe {
-            if lsr_addr.read_volatile() & 0b0000_0001 != 0 {
-                return Some(rbr_addr.read_volatile());
+            if self.read_reg(LSR) & LSR_DR != 0 {
+                return Some(self.read_reg(THR_RBR));
             }
         }
-
         None
     }
 }
 
-/// `core::fmt::Write` impl so the UART can back the `print!`/`println!`
-/// macros. `write_str` needs `&mut self` per trait contract; we delegate to
-/// `&self` `putchar` because the struct itself has no state to mutate.
+/// `core::fmt::Write` impl so the UART can back the `print!`/`println!` macros.
+/// `write_str` needs `&mut self` per trait contract; we delegate to `&self`
+/// `putchar` because the struct itself has no state to mutate.
 impl Write for Uart16550 {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for byte in s.bytes() {

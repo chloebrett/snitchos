@@ -33,12 +33,15 @@ pub static UART: crate::sync::Once<crate::sync::Mutex<Uart16550>> = crate::sync:
 ///
 /// # Safety
 ///
-/// `uart_addr` must be the physical MMIO base of a real
-/// NS16550A-compatible UART, and `mmu::enable` must have run (so the
-/// higher-half MMIO mapping is live).
-pub unsafe fn init(uart_addr: usize) {
-  let va = uart_addr + crate::mmu::KERNEL_OFFSET;
-  UART.call_once(|| crate::sync::Mutex::new(unsafe { Uart16550::new(va) }));
+/// `uart_base` must be the physical MMIO base of a real 8250-compatible UART with
+/// register layout `reg_shift` / `io_width` (from the DTB), and `mmu::enable` must
+/// have run (so the higher-half MMIO mapping is live).
+pub unsafe fn init(uart_base: usize, reg_shift: u8, io_width: u8) {
+  let va = uart_base + crate::mmu::KERNEL_OFFSET;
+  // SAFETY: per the fn contract — DTB-derived base + layout, higher-half mapped.
+  UART.call_once(|| {
+    crate::sync::Mutex::new(unsafe { Uart16550::with_layout(va, reg_shift, io_width) })
+  });
 }
 
 /// Hardcoded NS16550A physical MMIO base for QEMU `virt`. Used via
