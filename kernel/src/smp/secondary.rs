@@ -200,13 +200,13 @@ pub extern "C" fn secondary_main(mhartid: usize, hartid: usize) -> ! {
     // Install the trap vector (same `trap_entry` hart 0 uses, lives
     // at a higher-half VA). Then enable software interrupts (IPIs)
     // and timer interrupts. Hart 1 needs its own timer cadence: each
-    // hart has independent `stimecmp`, and without a wakeup source
-    // hart 1's idle-style loop would `wfi` forever after the first
-    // task yields back.
+    // hart arms its own timer (the SBI `set_timer` call is per-hart), and
+    // without a wakeup source hart 1's idle-style loop would `wfi` forever
+    // after the first task yields back.
     //
     // SAFETY: post-MMU, trap_entry's higher-half VA resolves;
-    // `init_timer` arms *this hart's* stimecmp and enables STIE +
-    // SIE; `enable_software_interrupts` enables SSIE.
+    // `init_timer` arms *this hart's* timer (via SBI `set_timer`) and enables
+    // STIE + SIE; `enable_software_interrupts` enables SSIE.
     unsafe {
         crate::trap::set_trap_vector();
         let interval = crate::trap::TIMER_INTERVAL_TICKS

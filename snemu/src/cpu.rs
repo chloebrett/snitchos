@@ -90,6 +90,11 @@ mod sbi {
     /// Hart State Management extension id (`"HSM"`), function 0 = `sbi_hart_start`.
     pub const EID_HSM: u64 = 0x0048_534D;
     pub const FID_HART_START: u64 = 0;
+    /// Timer extension id (`"TIME"`), function 0 = `sbi_set_timer`. The board's
+    /// U74 cores have no Sstc, so the kernel arms the timer through this SBI call
+    /// rather than writing `stimecmp` directly.
+    pub const EID_TIME: u64 = 0x5449_4D45;
+    pub const FID_SET_TIMER: u64 = 0;
     pub const SUCCESS: i64 = 0;
     pub const ERR_NOT_SUPPORTED: i64 = -2;
     pub const ERR_INVALID_PARAM: i64 = -3;
@@ -1564,6 +1569,7 @@ pub(crate) fn service_sbi(harts: &mut [Hart], caller: usize, req: &SbiRequest) {
             (sbi::SUCCESS, 0)
         }
         (sbi::EID_HSM, sbi::FID_HART_START) => hart_start(harts, req.arg0, req.arg1, req.arg2),
+        (sbi::EID_TIME, sbi::FID_SET_TIMER) => set_timer(harts, caller, req.arg0),
         _ => (sbi::ERR_NOT_SUPPORTED, 0),
     };
     harts[caller].set_reg(10, error as u64);
@@ -1591,6 +1597,17 @@ fn hart_start(harts: &mut [Hart], hartid: u64, start_addr: u64, opaque: u64) -> 
             (sbi::SUCCESS, 0)
         }
     }
+}
+
+/// `sbi_set_timer(deadline)` — arm the caller hart's supervisor timer to fire at
+/// absolute time `deadline`. snemu delivers the timer through `stimecmp` (its Sstc
+/// fire path), so this writes the caller's `STIMECMP`; a future deadline clears any
+/// pending timer interrupt, since pending is computed dynamically as `cycle >=
+/// stimecmp`. QEMU and the board deliver the same via OpenSBI — the kernel's clock
+/// is SBI-only and never touches `stimecmp` directly.
+fn set_timer(harts: &mut [Hart], caller: usize, deadline: u64) -> (i64, u64) {
+    harts[caller].csr_write(addr::STIMECMP, deadline);
+    (sbi::SUCCESS, 0)
 }
 
 #[cfg(test)]
@@ -2584,6 +2601,20 @@ mod tests {
         cpu.step().unwrap();
         assert_eq!(cpu.reg(10), 0); // a0 = SBI_SUCCESS
         assert_ne!(cpu.hart.csr.read(addr::SIP).unwrap() & (1 << 1), 0); // SSIP raised
+    }
+
+    #[test]
+    fn sbi_set_timer_arms_the_supervisor_timer() {
+        // The kernel's clock is SBI-only (no direct `stimecmp` write): it arms the
+        // timer via `sbi_set_timer`, which snemu services by programming the caller
+        // hart's `stimecmp` (its Sstc fire mechanism).
+        let mut cpu = cpu_with(&[ecall()]);
+        cpu.set_reg(17, 0x5449_4D45); // a7 = EID "TIME"
+        cpu.set_reg(16, 0); // a6 = FID 0 = set_timer
+        cpu.set_reg(10, 12_345); // a0 = absolute deadline
+        cpu.step().unwrap();
+        assert_eq!(cpu.reg(10), 0, "a0 = SBI_SUCCESS");
+        assert_eq!(cpu.hart.csr.read(addr::STIMECMP).unwrap(), 12_345, "stimecmp armed");
     }
 
     #[test]

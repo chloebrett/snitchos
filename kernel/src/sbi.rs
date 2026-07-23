@@ -1,8 +1,9 @@
-//! Thinnest possible SBI shim. `SnitchOS` only calls SBI for things
-//! the kernel cannot do directly — today that's IPI delivery
-//! (`send_ipi`). The clock uses Sstc CSRs directly, no SBI; console
-//! is virtio not SBI; no HSM yet (secondary harts in step 8 will
-//! grow this module).
+//! Thinnest possible SBI shim. `SnitchOS` calls SBI for things the kernel cannot
+//! (or should not) do directly: IPI delivery (`send_ipi`), secondary bring-up
+//! (`hart_start`), and arming the supervisor timer (`set_timer`). The clock is
+//! SBI-only — it reads `time` via `rdtime` but arms through `set_timer`, not a
+//! direct `stimecmp` write, so it runs on cores without Sstc (the JH7110 U74).
+//! Console is virtio, not SBI.
 //!
 //! Calling convention (SBI 1.0):
 //!   - a7 = EID (extension id)
@@ -21,6 +22,28 @@ const EID_IPI: u64 = 0x735049;
 
 /// SBI HSM (Hart State Management) extension id ("HSM" packed as ASCII).
 const EID_HSM: u64 = 0x48534D;
+
+/// SBI TIME extension id ("TIME" packed as ASCII).
+const EID_TIME: u64 = 0x5449_4D45;
+
+/// Arm the supervisor timer to fire at absolute time `deadline` (in `time`-CSR
+/// units). SBI TIME extension, FID 0 (`sbi_set_timer`) — portable to cores without
+/// Sstc (the JH7110 U74): the firmware programs the timer and delivers `STIP`.
+/// Setting a future deadline also clears any pending timer interrupt (SBI spec).
+/// Panics on error: a kernel that can't arm its heartbeat clock can't run.
+pub fn set_timer(deadline: u64) {
+    let error: i64;
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") EID_TIME,
+            in("a6") 0_u64,            // FID 0 = sbi_set_timer
+            inlateout("a0") deadline => error,
+            options(nostack),
+        );
+    }
+    assert!(error == 0, "sbi_set_timer failed: error={error}");
+}
 
 /// Send an inter-processor interrupt to a set of harts.
 ///

@@ -92,23 +92,23 @@ pub static TICK_PENDING: PerCpu<AtomicBool> =
 pub static LAST_IRQ_DURATION: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; crate::percpu::MAX_HARTS]);
 
-/// SSTC-based clock: reads `time` CSR directly, writes `stimecmp`
-/// (CSR 0x14d) to arm. No SBI round-trip. Implements
-/// `kernel_obs::clock::Clock`.
-pub struct SstcClock;
+/// SBI-based clock: reads `time` via `rdtime`, arms via `sbi_set_timer` (SBI TIME
+/// extension) rather than a direct `stimecmp` (CSR `0x14d`) write. Portable to
+/// cores without Sstc — the JH7110 U74s — where a `stimecmp` write would trap;
+/// QEMU and snemu service the same SBI call. Implements `kernel_obs::clock::Clock`.
+pub struct SbiClock;
 
-impl Clock for SstcClock {
+impl Clock for SbiClock {
     fn now(&self) -> u64 {
         let t: u64;
+        // SAFETY: `rdtime` is a non-trapping read of the `time` CSR in S-mode.
         unsafe {
             asm!("rdtime {}", out(reg) t);
         }
         t
     }
     fn arm(&self, deadline: u64) {
-        unsafe {
-            asm!("csrw 0x14d, {}", in(reg) deadline);
-        }
+        crate::sbi::set_timer(deadline);
     }
 }
 
@@ -116,7 +116,7 @@ impl Clock for SstcClock {
 /// single concrete instance lives here so the handler doesn't need to
 /// take a `&dyn Clock` (no allocator, and the cost of dynamic dispatch
 /// in an IRQ is silly when we only ever have one impl).
-pub const CLOCK: SstcClock = SstcClock;
+pub const CLOCK: SbiClock = SbiClock;
 
 /// The current monotonic clock tick count — the timestamp source spans use.
 /// Exposed for the `ClockNow` syscall (the `Clock` trait is already in scope here).
