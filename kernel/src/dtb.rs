@@ -29,10 +29,6 @@ pub fn uart_addr(dtb: &Fdt) -> usize {
 /// [`uart_addr`]. It runs post-MMU (during secondary bring-up), so the
 /// higher-level `fdt` iterators are safe here — unlike the pre-MMU `timebase_hz`
 /// path, which deliberately avoids closure chains.
-#[expect(
-  dead_code,
-  reason = "wired into secondary bring-up in the next step (Step 6 of plans/vf2-b6-multihart.md); the glue lands separately so the enumeration + its pure logic are reviewable in isolation"
-)]
 pub fn enumerate_harts(dtb: &Fdt, out: &mut [HartInfo]) -> usize {
   let mut n = 0;
   for cpu in dtb.cpus() {

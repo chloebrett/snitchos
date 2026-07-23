@@ -131,12 +131,28 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // per-hart-aware code has run yet.
     unsafe { percpu::init(0) };
 
-    // Record the logical→mhartid mapping so `ipi::send(logical_id)`
-    // can translate to the platform mhartid that `sbi_send_ipi`
-    // expects. With MAX_HARTS=2 and OpenSBI free to pick either as
-    // boot, the mapping is { 0 → hart_id, 1 → 1-hart_id }.
-    percpu::LOGICAL_TO_MHARTID[0].store(hart_id as u64, Ordering::Relaxed);
-    percpu::LOGICAL_TO_MHARTID[1].store(1u64 - hart_id as u64, Ordering::Relaxed);
+    // Enumerate the harts the DTB advertises and assign dense logical ids: the
+    // boot hart (mhartid `hart_id`) becomes logical 0, the other *usable* harts
+    // follow in ascending mhartid order. `ipi::send(logical_id)` then translates
+    // through `LOGICAL_TO_MHARTID` to the platform mhartid `sbi_send_ipi` expects.
+    //
+    // This replaces the old `{ 0 → hart_id, 1 → 1-hart_id }` two-hart arithmetic,
+    // which underflowed on a boot hartid > 1 — the VisionFive 2 boots on an
+    // arbitrary U74 (harts 1–4). The JH7110's S7 monitor (`status="disabled"`) is
+    // filtered out by `is_usable`. `num_harts` (carried to bring-up below) is how
+    // many we run; on QEMU `-smp 2` it is 2. Alloc-free fixed buffers: the cpu
+    // list holds the DTB's cpus (S7 + up to 4 U74s), the map holds `MAX_HARTS`.
+    let mut hart_list = [kernel_boot::harts::HartInfo::default(); 8];
+    let n_listed = dtb::enumerate_harts(&dtb, &mut hart_list);
+    let mut mhartid_map = [0u64; percpu::MAX_HARTS];
+    let num_harts = kernel_boot::harts::assign_logical(
+        &hart_list[..n_listed],
+        hart_id as u64,
+        &mut mhartid_map,
+    );
+    for (logical, &mhartid) in mhartid_map.iter().enumerate().take(num_harts) {
+        percpu::LOGICAL_TO_MHARTID[logical].store(mhartid, Ordering::Relaxed);
+    }
 
     // Verify we're actually at higher-half PC. `auipc rd, 0` puts
     // `current_pc + 0` in `rd`, so the result is the runtime address
@@ -450,29 +466,34 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // impl, so this is just a binding-scope close.
     let _ = dtb;
 
-    // v0.6 step 8: bring up the *other* hart. OpenSBI's choice of
-    // boot hart isn't always 0 — under QEMU `-smp 2` it can hand us
-    // `hart_id=1`. So we compute the target as "any hart that isn't
-    // me," which for MAX_HARTS=2 is just `1 - hart_id`. We also
-    // declare boot hart = hart whose mhartid is `hart_id`, role Boot;
-    // the SECONDARY slot of PER_HART_DATA still uses logical hart_id=1
-    // because that's where we statically placed it.
+    // Declare the boot hart (logical 0, role Boot), then bring up the secondary.
+    // The logical→mhartid map was computed from the DTB above, so the secondary's
+    // mhartid is `LOGICAL_TO_MHARTID[1]` — no `1 - hart_id` arithmetic (which
+    // underflowed on a boot hartid > 1).
     let boot_mhartid = hart_id as u64;
-    let secondary_mhartid = 1u64 - boot_mhartid;
     heartbeat::BOOT_MHARTID.store(boot_mhartid, Ordering::Relaxed);
     tracing::emit_hart_register(0, boot_mhartid, protocol::HartRole::Boot);
-    unsafe { secondary::prepare_for_secondary() };
-    let entry_pa = {
-        unsafe extern "C" {
-            fn _secondary_start();
+    // Guarded by `num_harts >= 2` so a DTB-declared single-hart machine (the
+    // VisionFive 2 booting one U74) doesn't `hart_start` a phantom hart. The
+    // multi-secondary loop over `1..num_harts` + per-hart stacks lands in the next
+    // step, with the 4-hart test that exercises it. (Full single-hart boot also
+    // needs the `spawn_on(1, …)` task placement below to fall back to hart 0 —
+    // board-M1 follow-up, not this step; on QEMU `-smp 2` `num_harts` is always 2.)
+    if num_harts >= 2 {
+        let secondary_mhartid = percpu::LOGICAL_TO_MHARTID[1].load(Ordering::Relaxed);
+        unsafe { secondary::prepare_for_secondary() };
+        let entry_pa = {
+            unsafe extern "C" {
+                fn _secondary_start();
+            }
+            mmu::va_to_pa(_secondary_start as *const () as usize) as u64
+        };
+        let err = sbi::hart_start(secondary_mhartid, entry_pa, 1);
+        assert!(err == 0, "sbi_hart_start({secondary_mhartid}) failed: error={err}");
+        // Acquire: pair with the Release on SECONDARY_READY in secondary_main.
+        while !secondary::SECONDARY_READY.load(Ordering::Acquire) {
+            core::hint::spin_loop();
         }
-        mmu::va_to_pa(_secondary_start as *const () as usize) as u64
-    };
-    let err = sbi::hart_start(secondary_mhartid, entry_pa, 1);
-    assert!(err == 0, "sbi_hart_start({secondary_mhartid}) failed: error={err}");
-    // Acquire: pair with the Release on SECONDARY_READY in secondary_main.
-    while !secondary::SECONDARY_READY.load(Ordering::Acquire) {
-        core::hint::spin_loop();
     }
     // v0.6 step 10: cross-hart spawn smoke. Probe lands on hart 1's
     // runqueue + IPI wakeup nudges hart 1 to pick it. Skipped for the

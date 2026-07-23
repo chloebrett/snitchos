@@ -133,33 +133,52 @@ callers in `snemu_diff.rs`) take a `hart_count` parameter instead of the global
 **GREEN**: replace the const with a plumbed argument, default 2.
 **Done when**: gate green; no behavior change.
 
-### Step 6a: Kernel wiring — enumerate → assign → multi-secondary bringup loop
+Two hidden deps found while reading `secondary.rs` pushed the multi-secondary
+*machinery* out of 6a into 6b (where the 4-hart test exercises it):
+(1) `SECONDARY_STACK` is a **single shared** 16 KiB stack the secondary runs on for
+life → >1 secondary needs **per-hart stacks**; (2) `SECONDARY_READY` means "fully
+up" (init + trap vector + timer, `secondary.rs:187`), *later* than the
+`SMP_ONLINE_HARTS` bit (set in `percpu::init`, before trap setup) — and the
+cross-hart probe (`main.rs:483`) needs the target's trap vector up, so the barrier
+must be "fully up." Hence `SECONDARY_READY` → **bitmap** (not a reuse of
+`SMP_ONLINE_HARTS`).
 
-**Acceptance criteria**: `kmain` fills `LOGICAL_TO_MHARTID` via
-`assign_logical(enumerate_harts(&dtb, …), boot_mhartid, …)`, then loops logical
-`1..N` starting each secondary (real mhartid + logical id), waiting for each. No
-`1 - hart_id` / `1u64 - boot_mhartid` remains. DTB enumerated before the `let _ =
-dtb` drop (`main.rs:451`). **Still 2 harts** (DTB lists 2), so this is
-behavior-preserving — the generalized loop brings up exactly one secondary, same as
-before. `SECONDARY_READY` single-flag → per-hart ready (reuse the `SMP_ONLINE_HARTS`
-bitmap as the barrier).
-**RED**: none new — behavior-preserving refactor of bringup, guarded by the
-existing SMP itests (`smp-secondary-hart-boots`, `smp-spans-carry-hart-id`,
-`smp-producer-consumer-correctness`).
-**GREEN**: implement the enumerate/assign/loop; delete the arithmetic.
+### Step 6a: Kernel wiring — enumerate → assign → fill map; delete `1 - hart_id`
+
+**Acceptance criteria**: `kmain` fills `LOGICAL_TO_MHARTID[0..N]` via
+`assign_logical(enumerate_harts(&dtb, …), boot_mhartid, …)` (early, before the `let
+_ = dtb` drop at `main.rs:451`), computing `num_harts`. Both `1 - hart_id` /
+`1u64 - boot_mhartid` sites gone; `secondary_mhartid` read from
+`LOGICAL_TO_MHARTID[1]`. **Single-secondary bringup unchanged** but guarded by `if
+num_harts >= 2` (single-hart boot — board M1 — starts no phantom secondary). Still
+exactly one secondary at 2 harts → behavior-preserving.
+**RED**: none new — behavior-preserving at 2 harts, guarded by the existing SMP
+itests (`smp-secondary-hart-boots`, `smp-spans-carry-hart-id`,
+`smp-producer-consumer-correctness`). (The `num_harts < 2` guard is board-only-
+exercised — no 1-cpu DTB — but trivially correct.)
+**GREEN**: enumerate/assign/fill; delete the arithmetic; add the guard.
 **Done when**: full gate green at 2 harts; `1 - hart_id` gone.
 
-### Step 6b: snemu 4-cpu DTB + the 4-hart scenario (the payoff)
+### Step 6b: multi-secondary machinery + snemu 4-cpu DTB + the 4-hart scenario
 
-**Acceptance criteria**: a checked-in `snemu/virt-smp4.dtb` (QEMU
-`-machine virt -smp 4 -machine dumpdtb=…`; a documented one-liner) advertising 4
-`cpu@N` nodes; the snemu path selects it + `hart_count=4` for the new scenario.
-Exactly one **4-hart** itest scenario asserts `HartRegister` for logical 0–3 with
-distinct mhartids + continued heartbeat, **under snemu**.
-**RED**: the 4-hart scenario — fails until both the 4-cpu DTB is presented and the
-Step-6a bringup loop starts harts 2–3.
-**GREEN**: regenerate + commit the DTB; thread `hart_count=4`/DTB selection; verify
-`hart_start`/IPI/percpu for hartids 2–3.
+**Acceptance criteria**:
+- **Machinery**: `SECONDARY_STACK` → `SECONDARY_STACKS[MAX_HARTS]` (per-hart,
+  **indexed by logical id** — slot 0 = boot hart is unused, traded for index=hartid
+  clarity; "secondary" kept to match the module's `SECONDARY_*` family);
+  `prepare_for_secondary(logical_id)` picks the stack; `SECONDARY_READY: AtomicBool`
+  → `AtomicU64` bitmap (secondary sets its bit after full setup); `kmain` **loops**
+  logical `1..num_harts` — `prepare(i)` → `hart_start(LOGICAL_TO_MHARTID[i], …, i)` →
+  wait bit `i`. Sequential (the per-hart stack is latched in `secondary.S` before the
+  next `prepare`).
+- **DTB + scenario**: a checked-in `snemu/virt-smp4.dtb` (QEMU `-machine virt -smp 4
+  -machine dumpdtb=…`; documented one-liner) with 4 `cpu@N` nodes; the snemu path
+  selects it + `hart_count=4` for the new scenario. Exactly one **4-hart** itest
+  asserts `HartRegister` for logical 0–3 with distinct mhartids + continued
+  heartbeat, **under snemu**.
+**RED**: the 4-hart scenario — fails until the loop starts harts 2–3 *and* the 4-cpu
+DTB is presented.
+**GREEN**: per-hart stacks + bitmap barrier + loop; regen/commit the DTB; thread
+`hart_count=4`/DTB selection; verify `hart_start`/IPI/percpu for hartids 2–3.
 **Done when**: 4-hart scenario green under snemu; 2-hart gate still green.
 
 ## Risks / open questions
