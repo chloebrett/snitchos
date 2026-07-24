@@ -175,19 +175,18 @@ pub fn run(metrics: Metrics) -> ! {
         {
             span!("kernel.heartbeat");
             count += 1;
-            // Board liveness pulse on the human UART — the board has no telemetry
-            // transport yet (virtio-console is QEMU-only), so the heartbeat is
-            // otherwise invisible. `vf2`-only so the QEMU console stays quiet.
-            //
-            // DISABLED: the kernel and userspace `ConsoleWrite` share this UART with
-            // no arbitration, so on any workload that owns the console (the Stitch
-            // REPL) this pulse lands mid-token and shreds the prompt — observed
-            // interleaving `stitch>` and a typed expression on the board. Liveness
-            // there is the prompt itself. Re-enable for a headless board bring-up,
-            // or delete once M2/B3 puts the heartbeat on the telemetry channel where
-            // it belongs (the real fix: one writer per stream, not a quieter kernel).
-            #[cfg(all(feature = "vf2", feature = "board-heartbeat-print"))]
-            crate::println!("hb {count}");
+            // Board liveness pulse on the human UART. `vf2`-only so QEMU stays quiet,
+            // and **text mode only**: in `console=frames` the heartbeat span and every
+            // other frame already carry liveness on the wire, and a raw `hb` line would
+            // both be redundant and shred a console-owning workload (the Stitch REPL) —
+            // the interleaving bug that `console=frames` exists to fix (one writer per
+            // stream). This replaces the old `board-heartbeat-print` feature: the mode
+            // subsumes it. Run the REPL with `console=frames`, a headless bring-up with
+            // `console=text`.
+            #[cfg(feature = "vf2")]
+            if crate::console::console_mode() == kernel_boot::bootargs::ConsoleMode::Text {
+                crate::println!("hb {count}");
+            }
             frame_smoke();
             heap_smoke_pattern(count);
             crate::ramfb::present();

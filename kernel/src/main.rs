@@ -416,6 +416,11 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
     let bootargs: Option<&str> = dtb.chosen().bootargs();
     let selected: Option<WorkloadKind> = bootargs.and_then(kernel_boot::bootargs::select);
     boot_workload::init(selected);
+    // `console=frames` routes the kernel's human log through `Frame::Log` on the
+    // telemetry wire (default `text` keeps raw UART). Orthogonal to the workload;
+    // set before the heartbeat/userspace so their output honours it. See
+    // docs/uart-telemetry-design.md Decision 4.
+    console::set_console_mode(kernel_boot::bootargs::console_mode(bootargs.unwrap_or("")));
     // Optional `burst=N` tunes how many batches the producer/consumer
     // run per yield — used to dial up `Mutex` contention for the
     // mutex-vs-spsc measurement. Absent → default (1, low contention).

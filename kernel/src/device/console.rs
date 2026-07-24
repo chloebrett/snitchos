@@ -1,6 +1,10 @@
 //! Kernel console: the global UART instance plus the `print!`/`println!`
 //! macros that write to it.
 
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+use kernel_boot::bootargs::ConsoleMode;
+
 use crate::uart::Uart16550;
 use kernel_devices::console::ConsoleRing;
 
@@ -174,38 +178,101 @@ pub fn read_into(dst: &mut [u8]) -> usize {
   n
 }
 
+/// Human-console output mode (`console=` bootarg). `0` = [`ConsoleMode::Text`],
+/// the default before [`set_console_mode`] runs — so early boot is always text.
+static CONSOLE_MODE: AtomicU8 = AtomicU8::new(0);
+
+/// Re-entrancy guard for the frames path. Emitting a `Frame::Log` runs the
+/// telemetry TX path (staging + virtqueue + intern locks); a `println!` from
+/// inside that path would deadlock, so a re-entrant call drops its line instead.
+static IN_FRAMES: AtomicBool = AtomicBool::new(false);
+
+/// Longest kernel log line carried as a `Frame::Log` in frames mode; longer lines
+/// are truncated at a UTF-8 boundary by [`kernel_obs::panic_log::MsgWriter`].
+const LOG_LINE_MAX: usize = 256;
+
+/// Record the console output mode. Call once from `kmain` after the `console=`
+/// bootarg is parsed; before it, output defaults to [`ConsoleMode::Text`].
+pub fn set_console_mode(mode: ConsoleMode) {
+  CONSOLE_MODE.store(mode as u8, Ordering::Relaxed);
+}
+
+/// The current console output mode.
+#[must_use]
+pub fn console_mode() -> ConsoleMode {
+  match CONSOLE_MODE.load(Ordering::Relaxed) {
+    1 => ConsoleMode::Frames,
+    _ => ConsoleMode::Text,
+  }
+}
+
+/// The routing behind `print!`/`println!`. Pre-init (console not up) is always
+/// raw emergency UART — early output must never depend on the frame sink (the
+/// stale-image / `ph!`-markers lessons). Once the console is up, [`ConsoleMode`]
+/// decides: `Text` writes the UART as before; `Frames` emits the formatted line
+/// as a `Frame::Log` on the telemetry wire, so the wire carries one content type.
+///
+/// `newline` distinguishes `print!` from `println!`; in frames mode it's implicit
+/// (a `Frame::Log` is one line), so `print!` fragments each become their own
+/// `Log` — a known coarseness, fine for the whole-line output the kernel emits.
+#[doc(hidden)]
+pub fn write_console(args: core::fmt::Arguments<'_>, newline: bool) {
+  use core::fmt::Write;
+  let Some(uart) = UART.get() else {
+    // SAFETY: pre-init fallback fires before console::init runs.
+    let mut u = unsafe { pre_init_uart() };
+    let _ = u.write_fmt(args);
+    if newline {
+      let _ = u.write_str("\n");
+    }
+    return;
+  };
+  match console_mode() {
+    ConsoleMode::Text => {
+      let mut g = uart.lock();
+      let _ = g.write_fmt(args);
+      if newline {
+        let _ = g.write_str("\n");
+      }
+    }
+    ConsoleMode::Frames => emit_console_frame(args),
+  }
+}
+
+/// Format `args` into a fixed buffer and emit it as a `Frame::Log`, guarded
+/// against re-entry (see [`IN_FRAMES`]). Empty lines are skipped.
+fn emit_console_frame(args: core::fmt::Arguments<'_>) {
+  use core::fmt::Write;
+  if IN_FRAMES.swap(true, Ordering::Acquire) {
+    return; // re-entrant emit — drop rather than deadlock
+  }
+  let mut buf = [0u8; LOG_LINE_MAX];
+  let mut w = kernel_obs::panic_log::MsgWriter::new(&mut buf);
+  let _ = w.write_fmt(args);
+  let line = w.as_str();
+  if !line.is_empty() {
+    crate::tracing::emit_log(line);
+  }
+  IN_FRAMES.store(false, Ordering::Release);
+}
+
 /// Print formatted output to the kernel console (no trailing newline).
 ///
-/// Uses the initialized `UART` static once it's set; before that, falls back
-/// to `pre_init_uart()` (which routes through `emergency_uart_base()` so
-/// the right address space is picked for the current MMU state).
+/// Routes through [`write_console`]: raw UART pre-init, then per [`ConsoleMode`]
+/// once the console is up (UART text, or a `Frame::Log` on the telemetry wire).
 #[macro_export]
 macro_rules! print {
   ($($arg:tt)*) => {{
-    use core::fmt::Write;
-    if let Some(uart) = $crate::console::UART.get() {
-      let _ = write!(&mut *uart.lock(), $($arg)*);
-    } else {
-      // SAFETY: pre-init fallback fires before console::init runs.
-      let mut uart = unsafe { $crate::console::pre_init_uart() };
-      let _ = write!(&mut uart, $($arg)*);
-    }
+    $crate::console::write_console(::core::format_args!($($arg)*), false);
   }};
 }
 
 /// Print formatted output to the kernel console followed by a newline.
-/// Same fallback behavior as `print!`.
+/// Same routing as `print!`.
 #[macro_export]
 macro_rules! println {
-  () => { $crate::print!("\n") };
+  () => { $crate::console::write_console(::core::format_args!(""), true) };
   ($($arg:tt)*) => {{
-    use core::fmt::Write;
-    if let Some(uart) = $crate::console::UART.get() {
-      let _ = writeln!(&mut *uart.lock(), $($arg)*);
-    } else {
-      // SAFETY: pre-init fallback fires before console::init runs.
-      let mut uart = unsafe { $crate::console::pre_init_uart() };
-      let _ = writeln!(&mut uart, $($arg)*);
-    }
+    $crate::console::write_console(::core::format_args!($($arg)*), true);
   }};
 }

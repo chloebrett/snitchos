@@ -44,6 +44,7 @@ graph LR
     subgraph agnostic
         magnitude["magnitude"]
     end
+    kernel_net["kernel-net"]
     xtask_cmds["xtask-cmds"]
     xtask_itest["xtask-itest"]
     xtask_qemu["xtask-qemu"]

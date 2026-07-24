@@ -398,6 +398,35 @@ impl WorkloadKind {
     }
 }
 
+/// Where the kernel's human log output goes, selected by the `console=` bootarg.
+/// Orthogonal to [`WorkloadKind`] — a board boots e.g. `workload=stitch-repl
+/// console=frames`. See `docs/uart-telemetry-design.md` Decision 4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConsoleMode {
+    /// Human-readable text on the UART — the default. A dumb terminal (`screen`)
+    /// reads it; no collector required. The bring-up and "something is wrong" mode.
+    #[default]
+    Text,
+    /// Every post-init kernel log line becomes a `Frame::Log` on the telemetry
+    /// wire, which the collector renders. One content type on the wire — the
+    /// board's one-cable telemetry mode.
+    Frames,
+}
+
+/// Parse `console=<mode>` from the bootargs. Unknown or absent → [`ConsoleMode::Text`]:
+/// fail safe to the mode that always works and needs no collector (and so that a
+/// Linux-style `console=ttyS0` never accidentally selects frames).
+#[must_use]
+pub fn console_mode(bootargs: &str) -> ConsoleMode {
+    bootargs
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix("console="))
+        .map_or(ConsoleMode::Text, |v| match v {
+            "frames" => ConsoleMode::Frames,
+            _ => ConsoleMode::Text,
+        })
+}
+
 /// Parse a `workload=<name>` selection out of the bootargs string, where `<name>`
 /// is the kebab-case of a [`WorkloadKind`] variant.
 ///
@@ -636,5 +665,36 @@ mod tests {
     #[test]
     fn workload_key_position_independent() {
         assert_eq!(select("loglevel=7 workload=smp"), Some(WorkloadKind::Smp));
+    }
+
+    #[test]
+    fn console_mode_defaults_to_text_when_absent() {
+        assert_eq!(console_mode("workload=init"), ConsoleMode::Text);
+        assert_eq!(console_mode(""), ConsoleMode::Text);
+    }
+
+    #[test]
+    fn console_mode_parses_frames() {
+        assert_eq!(console_mode("console=frames"), ConsoleMode::Frames);
+    }
+
+    #[test]
+    fn console_mode_parses_text_explicitly() {
+        assert_eq!(console_mode("console=text"), ConsoleMode::Text);
+    }
+
+    #[test]
+    fn console_mode_unknown_value_falls_back_to_text() {
+        // `console=ttyS0` is Linux's serial-console selector, not ours — a value we
+        // don't recognise must fail safe to the mode that always works.
+        assert_eq!(console_mode("console=ttyS0"), ConsoleMode::Text);
+    }
+
+    #[test]
+    fn console_mode_coexists_with_workload() {
+        // The board boots e.g. `workload=stitch-repl console=frames` — one bootargs
+        // string, two independent keys.
+        assert_eq!(console_mode("workload=stitch-repl console=frames"), ConsoleMode::Frames);
+        assert_eq!(select("workload=stitch-repl console=frames"), Some(WorkloadKind::StitchRepl));
     }
 }
