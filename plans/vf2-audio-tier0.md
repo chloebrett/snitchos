@@ -110,7 +110,15 @@ SYSCRG consumers (the display port will want it too).
 > mainline, but we're writing raw offsets. Do this datasheet pass first; it de-risks
 > Increments 2–3.
 
-## Increment 4 — tone generator + gain (the volume knob)
+## Increment 4 — tone generator + gain (the volume knob) — ✅ DONE (square; sine → 4b)
+
+Shipped in `pwmdac.rs`: `Gain` (Q0.16 fixed-point, `SILENCE`/`UNITY`, rejects
+>unity) and `Tone::square(freq, fs, gain, peak) -> Option<Tone>` yielding one period
+of signed PCM (DC-centred, `+high`/`−high` halves), rejecting 0 Hz and supra-Nyquist.
+8 tests (period length, half-first/low-second, unity=peak, silence=0, half-gain,
+DC-free, rejection). **No runtime FP** — pure integer/fixed-point. Mutation: all new
+mutants caught. Deferred to **Increment 4b:** a sine wave via a `build.rs`-generated
+`const [i16; N]` LUT (needs a build script; square is a fine beep meanwhile).
 
 **RED:** `generate_tone(waveform, freq_hz, fs_hz, gain: Gain, resolution) -> impl
 Iterator<Item = u16>` (or a fixed-capacity buffer — no alloc in this layer). Assert:

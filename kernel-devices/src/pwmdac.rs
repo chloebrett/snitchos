@@ -150,6 +150,80 @@ pub fn plan_rate(sample_rate_hz: u32) -> Option<RatePlan> {
     Some(RatePlan { core_clk_hz, cnt_n: CntN::new(cnt_n)? })
 }
 
+/// Fixed-point linear gain, Q0.16: `0` = silence, `1 << 16` = unity. The volume
+/// knob — no hardware gain register exists, so amplitude is scaled digitally here.
+/// Deliberately fixed-point, not `f32`: the kernel emits no floating-point at
+/// runtime (see `docs/vf2-audio-design.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gain(u32);
+
+impl Gain {
+    /// Full attenuation — output is mid-scale (0 in signed PCM).
+    pub const SILENCE: Gain = Gain(0);
+    /// Unity gain — samples pass through at full amplitude.
+    pub const UNITY: Gain = Gain(1 << 16);
+
+    /// A gain from a Q0.16 value (`1 << 16` = unity). `None` above unity: this is a
+    /// pure attenuator, amplification would clip.
+    #[must_use]
+    pub fn from_q16(q16: u32) -> Option<Gain> {
+        (q16 <= (1 << 16)).then_some(Gain(q16))
+    }
+
+    fn apply(self, sample: i16) -> i16 {
+        ((i64::from(sample) * i64::from(self.0)) >> 16) as i16
+    }
+}
+
+/// A generated tone — a fixed number of samples per period at a fixed amplitude.
+/// Signed 16-bit PCM, DC-centred at 0; the driver maps this to the `WDATA` word
+/// format (`DATA_MODE`/`DATA_SHIFT`) at emit time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tone {
+    period: u32,
+    high: i16,
+}
+
+impl Tone {
+    /// A square wave at `freq_hz`, sampled at `fs_hz`, scaled by `gain` about a
+    /// `peak` amplitude. `None` if `freq_hz` is 0 or at/above Nyquist (fewer than
+    /// two samples per period — no meaningful square).
+    #[must_use]
+    pub fn square(freq_hz: u32, fs_hz: u32, gain: Gain, peak: i16) -> Option<Tone> {
+        if freq_hz == 0 {
+            return None;
+        }
+        let period = fs_hz / freq_hz;
+        (period >= 2).then_some(Tone { period, high: gain.apply(peak) })
+    }
+
+    /// Samples in one period. The driver repeats this for the tone's duration.
+    #[must_use]
+    pub fn period_samples(self) -> u32 {
+        self.period
+    }
+
+    /// One period of signed PCM: first half `+high`, second half `-high`.
+    pub fn samples(self) -> impl Iterator<Item = i16> {
+        let period = self.period;
+        let high = self.high;
+        (0..period).map(move |i| if i < period / 2 { high } else { -high })
+    }
+}
+
+/// Timer ticks between consecutive `WDATA` writes to emit at `sample_rate_hz`,
+/// given a timebase of `timer_hz` (the VF2's is 4 MHz, read from the DTB). `None`
+/// for a zero sample rate.
+///
+/// Rounded to nearest, so per-sample pacing carries up to half a tick of error —
+/// a small fixed pitch offset, fine for a fixed-frequency beep. A fractional-phase
+/// accumulator (drift-free) is a Tier 1 / streaming concern, not this.
+#[must_use]
+pub fn sample_interval_ticks(sample_rate_hz: u32, timer_hz: u64) -> Option<u64> {
+    let fs = u64::from(sample_rate_hz);
+    (fs != 0).then(|| (timer_hz + fs / 2) / fs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +370,78 @@ mod tests {
             let plan = plan_rate(fs).expect("supported");
             assert_eq!(plan.core_clk_hz, fs * u32::from(plan.cnt_n.get()) * 256, "rate {fs} Hz");
         }
+    }
+
+    #[test]
+    fn gain_above_unity_is_rejected() {
+        assert!(Gain::from_q16((1 << 16) + 1).is_none(), "amplification would clip");
+        assert!(Gain::from_q16(1 << 16).is_some(), "unity is the max");
+        assert!(Gain::from_q16(0).is_some(), "silence is valid");
+    }
+
+    #[test]
+    fn square_period_length_is_fs_over_freq() {
+        let tone = Tone::square(400, 8000, Gain::UNITY, 1000).expect("valid");
+        assert_eq!(tone.period_samples(), 20);
+        assert_eq!(tone.samples().count(), 20);
+    }
+
+    #[test]
+    fn square_is_high_for_the_first_half_then_low() {
+        let tone = Tone::square(400, 8000, Gain::UNITY, 1000).expect("valid");
+        assert!(tone.samples().take(10).all(|x| x == 1000), "first half high");
+        assert!(tone.samples().skip(10).all(|x| x == -1000), "second half low");
+    }
+
+    #[test]
+    fn unity_gain_reaches_the_peak() {
+        let tone = Tone::square(1000, 48000, Gain::UNITY, 20000).expect("valid");
+        assert_eq!(tone.samples().next(), Some(20000));
+    }
+
+    #[test]
+    fn silence_gain_is_all_zero() {
+        let tone = Tone::square(1000, 48000, Gain::SILENCE, 20000).expect("valid");
+        assert!(tone.samples().all(|x| x == 0));
+    }
+
+    #[test]
+    fn half_gain_halves_the_amplitude() {
+        let half = Gain::from_q16(1 << 15).expect("half is below unity");
+        let tone = Tone::square(1000, 48000, half, 20000).expect("valid");
+        assert_eq!(tone.samples().next(), Some(10000));
+    }
+
+    #[test]
+    fn one_period_is_dc_free_for_even_periods() {
+        let tone = Tone::square(400, 8000, Gain::UNITY, 1000).expect("period 20 is even");
+        let sum: i32 = tone.samples().map(i32::from).sum();
+        assert_eq!(sum, 0);
+    }
+
+    #[test]
+    fn zero_frequency_and_supra_nyquist_are_rejected() {
+        assert!(Tone::square(0, 8000, Gain::UNITY, 1000).is_none(), "0 Hz");
+        assert!(Tone::square(8000, 8000, Gain::UNITY, 1000).is_none(), "period 1");
+        assert!(Tone::square(4000, 8000, Gain::UNITY, 1000).is_some(), "period 2 is the min");
+    }
+
+    #[test]
+    fn interval_for_8k_at_the_4mhz_vf2_timebase_is_500_ticks() {
+        // 4_000_000 / 8000 = 500, exactly — the beep's target rate on the board.
+        assert_eq!(sample_interval_ticks(8000, 4_000_000), Some(500));
+    }
+
+    #[test]
+    fn interval_rounds_to_the_nearest_tick() {
+        // 4_000_000 / 44100 = 90.70… → 91 (nearest), not 90 (truncated).
+        assert_eq!(sample_interval_ticks(44100, 4_000_000), Some(91));
+        // 4_000_000 / 48000 = 83.33… → 83 (nearest).
+        assert_eq!(sample_interval_ticks(48000, 4_000_000), Some(83));
+    }
+
+    #[test]
+    fn zero_sample_rate_is_rejected() {
+        assert!(sample_interval_ticks(0, 4_000_000).is_none());
     }
 }
