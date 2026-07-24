@@ -22,6 +22,7 @@ extern crate alloc;
 pub mod console;
 pub mod framebuffer;
 pub mod fwcfg;
+pub mod pwmdac;
 pub mod ramfb;
 pub mod uart;
 pub mod virtio;
