@@ -33,6 +33,52 @@ pub use snitchos_user_macros::entry;
 
 core::arch::global_asm!(include_str!("start.S"));
 
+/// The one place the syscall register ABI is written down.
+///
+/// `args` are the values for `a0..a6`; the returned array is `a0..a6` *after* the
+/// trap. Callers pass `0` for arguments a syscall ignores and read back only the
+/// registers it defines — see `snitchos_abi::Syscall` and the handlers in
+/// `kernel/src/syscall/`.
+///
+/// **Why this exists rather than an `asm!` block per wrapper.** Every register is
+/// declared `inlateout`, so it is not *expressible* here to promise the compiler
+/// that a register survives the `ecall`. That promise — `in("aN")` on a register
+/// the callee writes — is a bug the compiler cannot catch, tests cannot catch, and
+/// that only fires when codegen happens to park a live value in the wrong
+/// register. It was found seven times in one day across both privilege boundaries
+/// (three SBI calls, four syscalls); the seven were fixed by hand, and this makes
+/// the eighth unrepresentable. Same move as `#[inline(never)] kmain_higher_half`:
+/// retire the family structurally, not case-by-case. See the SBI-clobber callout
+/// in `plans/visionfive2-port.md`.
+///
+/// Not used by `exit` (divergent — `options(noreturn)`) or by wrappers that must
+/// shape their own operands; those keep bespoke blocks and are individually
+/// reviewed.
+///
+/// # Safety
+///
+/// Traps to the kernel. The caller must uphold whatever contract the specific
+/// syscall requires of its arguments (valid handles, in-range pointers, …).
+#[inline]
+unsafe fn ecall(nr: Syscall, args: [usize; 7]) -> [usize; 7] {
+    let [mut a0, mut a1, mut a2, mut a3, mut a4, mut a5, mut a6] = args;
+    // SAFETY: caller's contract; a7 selects the syscall, a0..a6 are in/out.
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") nr as usize,
+            inlateout("a0") a0,
+            inlateout("a1") a1,
+            inlateout("a2") a2,
+            inlateout("a3") a3,
+            inlateout("a4") a4,
+            inlateout("a5") a5,
+            inlateout("a6") a6,
+        );
+    }
+    [a0, a1, a2, a3, a4, a5, a6]
+}
+
 /// Page size — must match the kernel's `FRAME_SIZE`.
 const PAGE_SIZE: usize = 4096;
 /// Minimum bytes to `map_anon` per growth, to amortize the syscall across many
@@ -68,17 +114,9 @@ static ALLOC: Talck<AssumeUnlockable, MmapOnOom> = Talck::new(Talc::new(MmapOnOo
 /// `MapAnon` syscall: ask the kernel for `bytes` of fresh anonymous memory,
 /// returning the region's base VA (or `usize::MAX` if refused).
 fn sys_map_anon(bytes: usize) -> usize {
-    let base: usize;
-    // SAFETY: `ecall` traps to the kernel, which maps `bytes` of anon R/W
-    // frames and returns the base in a0.
-    unsafe {
-        asm!(
-            "ecall",
-            in("a7") Syscall::MapAnon as usize,
-            inlateout("a0") bytes => base,
-        );
-    }
-    base
+    // SAFETY: traps to the kernel, which maps `bytes` of anon R/W frames and
+    // returns the base in a0.
+    (unsafe { ecall(Syscall::MapAnon, [bytes, 0, 0, 0, 0, 0, 0]) })[0]
 }
 
 // The two startup capability handles the kernel delivers in `a0`/`a1`.
@@ -234,24 +272,14 @@ impl BootstrapCap for Notification {
 /// (see [`delegated_handle`]).
 #[must_use]
 pub fn spawn(program_id: usize, handles: &[u32]) -> Option<u32> {
-    let ret: usize;
-    // SAFETY: `ecall`; the kernel resolves the program + every handle against this
-    // process's table (refusing the whole spawn on any miss) and returns the child
-    // task id, or `usize::MAX` on refusal. `handles` is range-validated kernel-side.
-    unsafe {
-        asm!(
-            "ecall",
-            in("a7") Syscall::Spawn as usize,
-            inlateout("a0") program_id => ret,
-            // `Spawn` mints a process cap into a1 (`spawn_registry`) — see
-            // `spawn_with_kill`, which reads it. This wrapper ignores the handle
-            // but must still declare the clobber: `in` would promise the compiler
-            // a1 is unchanged. Same defect class as the SBI ecalls; see the
-            // callout in plans/visionfive2-port.md.
-            inlateout("a1") handles.as_ptr() as usize => _,
-            in("a2") handles.len(),
-        );
-    }
+    // SAFETY: the kernel resolves the program + every handle against this process's
+    // table (refusing the whole spawn on any miss) and returns the child task id, or
+    // `usize::MAX` on refusal. `handles` is range-validated kernel-side. (`Spawn`
+    // also mints a process cap into a1 — see `spawn_with_kill`, which keeps it;
+    // here it's simply not read.)
+    let ret = unsafe {
+        ecall(Syscall::Spawn, [program_id, handles.as_ptr() as usize, handles.len(), 0, 0, 0, 0])
+    }[0];
     if ret == usize::MAX { None } else { Some(ret as u32) }
 }
 
@@ -272,21 +300,13 @@ pub struct Child {
 /// and the minted handle *out*. `None` on refusal (as [`spawn`]).
 #[must_use]
 pub fn spawn_supervised(program_id: usize, handles: &[u32]) -> Option<Child> {
-    let task: usize;
-    let kill: usize;
-    // SAFETY: `ecall`; identical to `spawn` but reads back the `a1` the kernel
-    // overwrites with the freshly-minted Process-cap handle (it reads `a1` as the
-    // handles ptr first, then stores the handle there). `handles` is validated
-    // kernel-side and never dereferenced in U-mode.
-    unsafe {
-        asm!(
-            "ecall",
-            in("a7") Syscall::Spawn as usize,
-            inlateout("a0") program_id => task,
-            inlateout("a1") handles.as_ptr() as usize => kill,
-            in("a2") handles.len(),
-        );
-    }
+    // SAFETY: identical to `spawn` but reads back the `a1` the kernel overwrites
+    // with the freshly-minted Process-cap handle (it reads `a1` as the handles ptr
+    // first, then stores the handle there). `handles` is validated kernel-side and
+    // never dereferenced in U-mode.
+    let [task, kill, ..] = unsafe {
+        ecall(Syscall::Spawn, [program_id, handles.as_ptr() as usize, handles.len(), 0, 0, 0, 0])
+    };
     if task == usize::MAX {
         None
     } else {
@@ -301,21 +321,15 @@ pub fn spawn_supervised(program_id: usize, handles: &[u32]) -> Option<Child> {
 /// delegate handle, unknown program).
 #[must_use]
 pub fn spawn_supervised_on(program_id: usize, handles: &[u32], hart: usize) -> Option<Child> {
-    let task: usize;
-    let kill: usize;
-    // SAFETY: `ecall`; as `spawn_supervised` but carries the target hart in `a3`. The
-    // kernel reads `a1` as the handles ptr, then overwrites it with the minted
-    // Process-cap handle. `handles` is validated kernel-side, never derefed in U-mode.
-    unsafe {
-        asm!(
-            "ecall",
-            in("a7") Syscall::SpawnOn as usize,
-            inlateout("a0") program_id => task,
-            inlateout("a1") handles.as_ptr() as usize => kill,
-            in("a2") handles.len(),
-            in("a3") hart,
-        );
-    }
+    // SAFETY: as `spawn_supervised` but carries the target hart in `a3`. The kernel
+    // reads `a1` as the handles ptr, then overwrites it with the minted Process-cap
+    // handle. `handles` is validated kernel-side, never derefed in U-mode.
+    let [task, kill, ..] = unsafe {
+        ecall(
+            Syscall::SpawnOn,
+            [program_id, handles.as_ptr() as usize, handles.len(), hart, 0, 0, 0],
+        )
+    };
     if task == usize::MAX {
         None
     } else {
@@ -331,17 +345,9 @@ pub fn spawn_supervised_on(program_id: usize, handles: &[u32], hart: usize) -> O
 /// safely killed (running on another hart; v2b). Graceful shutdown should prefer a
 /// cooperative `Signal` + clean exit and use this only as the force-stop.
 pub fn kill(process_cap: u32) -> Result<(), Denied> {
-    let ret: usize;
-    // SAFETY: `ecall`; the kernel validates the handle (needs `KILL` over a
-    // `Process`), terminates the target, and returns 0 in a0 (`usize::MAX` if
-    // refused).
-    unsafe {
-        asm!(
-            "ecall",
-            in("a7") Syscall::Kill as usize,
-            inlateout("a0") process_cap as usize => ret,
-        );
-    }
+    // SAFETY: the kernel validates the handle (needs `KILL` over a `Process`),
+    // terminates the target, and returns 0 in a0 (`usize::MAX` if refused).
+    let ret = unsafe { ecall(Syscall::Kill, [process_cap as usize, 0, 0, 0, 0, 0, 0]) }[0];
     if ret == usize::MAX { Err(Denied) } else { Ok(()) }
 }
 
@@ -354,23 +360,25 @@ pub fn kill(process_cap: u32) -> Result<(), Denied> {
 /// `2..` (see [`delegated_handle`]).
 #[must_use]
 pub fn spawn_image(image: &[u8], handles: &[u32]) -> Option<u32> {
-    let ret: usize;
-    // SAFETY: `ecall`; the kernel copies `image` in (range-validated, bounded),
-    // loads it, resolves every handle against this process's table (refusing the
-    // whole spawn on any miss), and returns the child task id, or `usize::MAX` on
-    // refusal. Neither `image` nor `handles` is dereferenced in U-mode.
-    unsafe {
-        asm!(
-            "ecall",
-            in("a7") Syscall::SpawnImage as usize,
-            inlateout("a0") image.as_ptr() as usize => ret,
-            // `handle_spawn_image` mints a process cap into a1; declare the
-            // clobber even though this wrapper drops it. See `spawn` above.
-            inlateout("a1") image.len() => _,
-            in("a2") handles.as_ptr() as usize,
-            in("a3") handles.len(),
-        );
-    }
+    // SAFETY: the kernel copies `image` in (range-validated, bounded), loads it,
+    // resolves every handle against this process's table (refusing the whole spawn
+    // on any miss), and returns the child task id, or `usize::MAX` on refusal.
+    // Neither `image` nor `handles` is dereferenced in U-mode. (`handle_spawn_image`
+    // also mints a process cap into a1; not read here.)
+    let ret = unsafe {
+        ecall(
+            Syscall::SpawnImage,
+            [
+                image.as_ptr() as usize,
+                image.len(),
+                handles.as_ptr() as usize,
+                handles.len(),
+                0,
+                0,
+                0,
+            ],
+        )
+    }[0];
     if ret == usize::MAX { None } else { Some(ret as u32) }
 }
 
@@ -471,17 +479,9 @@ pub fn exit_with(code: i32) -> ! {
 /// its exit status. If the child already exited, returns its status immediately.
 #[must_use]
 pub fn wait(child: u32) -> i32 {
-    let ret: usize;
-    // SAFETY: `ecall`; the kernel blocks us until the child exits, then returns
-    // its status in `a0` (resuming us right here on a later reschedule).
-    unsafe {
-        asm!(
-            "ecall",
-            in("a7") Syscall::Wait as usize,
-            inlateout("a0") child as usize => ret,
-        );
-    }
-    ret as i32
+    // SAFETY: the kernel blocks us until the child exits, then returns its status
+    // in `a0` (resuming us right here on a later reschedule).
+    (unsafe { ecall(Syscall::Wait, [child as usize, 0, 0, 0, 0, 0, 0]) })[0] as i32
 }
 
 /// Block until **any** child this process spawned exits, returning its exit
@@ -490,23 +490,10 @@ pub fn wait(child: u32) -> i32 {
 /// If one has already exited, returns immediately (reaping the zombie).
 #[must_use]
 pub fn wait_any() -> (i32, u32) {
-    let status: usize;
-    let child: usize;
-    // SAFETY: `ecall`; the kernel blocks us until any child exits, then returns
-    // its status in a0 and its task id in a1 (resuming us here on a reschedule).
-    unsafe {
-        asm!(
-            "ecall",
-            in("a7") Syscall::WaitAny as usize,
-            out("a0") status,
-            out("a1") child,
-            // `inlateout … => _`, not `in`: the kernel writes a2 on this path
-            // (`handle_wait_any` sets it as the timed-out flag), so `in` would
-            // promise the compiler a register the syscall clobbers. See the
-            // SBI-clobber callout in plans/visionfive2-port.md.
-            inlateout("a2") 0usize => _, // deadline 0 = block forever
-        );
-    }
+    // SAFETY: the kernel blocks us until any child exits, then returns its status in
+    // a0 and its task id in a1 (resuming us here on a reschedule). a2 = deadline 0,
+    // i.e. block forever; the kernel writes it back as the timed-out flag.
+    let [status, child, ..] = unsafe { ecall(Syscall::WaitAny, [0, 0, 0, 0, 0, 0, 0]) };
     (status as i32, child as u32)
 }
 
@@ -545,6 +532,11 @@ pub fn wait_any_timeout(deadline: u64) -> Option<(i32, u32)> {
 pub fn yield_now() {
     // SAFETY: `ecall` traps to the kernel, which runs `yield_now()` and
     // resumes us at the instruction after the `ecall` with our frame intact.
+    //
+    // Deliberately not routed through `ecall(…)`: with no operand registers there
+    // is nothing to mis-declare, and this is a hot path — the helper's blanket
+    // `inlateout` on a0..a6 would force the compiler to spill live values around
+    // every yield for no correctness gain.
     unsafe {
         asm!("ecall", in("a7") Syscall::Yield as usize);
     }
@@ -1062,26 +1054,12 @@ impl Endpoint {
     /// Returns the four words, or `Err(Denied)` if the kernel refused the
     /// capability (no `RECV`, or not an endpoint handle).
     pub fn receive(self) -> Result<[u64; MSG_WORDS], Denied> {
-        let ret: usize;
-        let w0: u64;
-        let w1: u64;
-        let w2: u64;
-        let w3: u64;
-        // SAFETY: `ecall` traps to the kernel, which validates the handle
-        // (needs `RECV`), blocks us until a sender rendezvouses, then writes
-        // status into a0 and the four message words into a1..=a4.
-        unsafe {
-            asm!(
-                "ecall",
-                in("a7") Syscall::Receive as usize,
-                inlateout("a0") self.handle => ret,
-                out("a1") w0,
-                out("a2") w1,
-                out("a3") w2,
-                out("a4") w3,
-            );
-        }
-        if ret == 0 { Ok([w0, w1, w2, w3]) } else { Err(Denied) }
+        // SAFETY: traps to the kernel, which validates the handle (needs `RECV`),
+        // blocks us until a sender rendezvouses, then writes status into a0 and the
+        // four message words into a1..=a4.
+        let [ret, w0, w1, w2, w3, ..] =
+            unsafe { ecall(Syscall::Receive, [self.handle, 0, 0, 0, 0, 0, 0]) };
+        if ret == 0 { Ok([w0 as u64, w1 as u64, w2 as u64, w3 as u64]) } else { Err(Denied) }
     }
 
     /// RPC `call`: send a request and **block until the server replies**,
@@ -1091,67 +1069,45 @@ impl Endpoint {
     /// open across the round-trip, so the server's handling span nests under it.
     /// `Err(Denied)` if the kernel refused the capability.
     pub fn call(self, msg: [u64; MSG_WORDS]) -> Result<([u64; MSG_WORDS], Option<usize>), Denied> {
-        let ret: usize;
-        let r0: u64;
-        let r1: u64;
-        let r2: u64;
-        let r3: u64;
-        let cap: usize;
-        // SAFETY: `ecall`; the kernel validates the handle (needs `SEND`),
-        // delivers the request, mints a reply cap into the server, parks us
-        // until `reply`, then writes status in a0, the response in a1..=a4, and
-        // any transferred cap handle in a5 (0 = none).
-        unsafe {
-            asm!(
-                "ecall",
-                in("a7") Syscall::Call as usize,
-                inlateout("a0") self.handle => ret,
-                inlateout("a1") msg[0] => r0,
-                inlateout("a2") msg[1] => r1,
-                inlateout("a3") msg[2] => r2,
-                inlateout("a4") msg[3] => r3,
-                out("a5") cap,
-            );
-        }
+        // SAFETY: the kernel validates the handle (needs `SEND`), delivers the
+        // request, mints a reply cap into the server, parks us until `reply`, then
+        // writes status in a0, the response in a1..=a4, and any transferred cap
+        // handle in a5 (0 = none).
+        let [ret, r0, r1, r2, r3, cap, _] = unsafe {
+            ecall(
+                Syscall::Call,
+                [
+                    self.handle,
+                    msg[0] as usize,
+                    msg[1] as usize,
+                    msg[2] as usize,
+                    msg[3] as usize,
+                    0,
+                    0,
+                ],
+            )
+        };
         if ret != 0 {
             return Err(Denied);
         }
-        Ok(([r0, r1, r2, r3], (cap != 0).then_some(cap)))
+        Ok(([r0 as u64, r1 as u64, r2 as u64, r3 as u64], (cap != 0).then_some(cap)))
     }
 
     /// Receive a message **and** the reply handle: `Some(handle)` if it came
     /// from a `call` (answer it with [`reply`]), `None` for a one-way `send`.
     /// The RPC server's receive primitive.
     pub fn receive_with_reply(self) -> Result<Received, Denied> {
-        let ret: usize;
-        let w0: u64;
-        let w1: u64;
-        let w2: u64;
-        let w3: u64;
-        let reply_handle: usize;
-        let badge: u64;
-        // SAFETY: as `receive`, plus the kernel returns the reply-cap handle in
-        // a5 (0 = one-way `send`) and the sender cap's badge in a6 (0 = bare).
-        unsafe {
-            asm!(
-                "ecall",
-                in("a7") Syscall::Receive as usize,
-                inlateout("a0") self.handle => ret,
-                out("a1") w0,
-                out("a2") w1,
-                out("a3") w2,
-                out("a4") w3,
-                out("a5") reply_handle,
-                out("a6") badge,
-            );
-        }
+        // SAFETY: as `receive`, plus the kernel returns the reply-cap handle in a5
+        // (0 = one-way `send`) and the sender cap's badge in a6 (0 = bare).
+        let [ret, w0, w1, w2, w3, reply_handle, badge] =
+            unsafe { ecall(Syscall::Receive, [self.handle, 0, 0, 0, 0, 0, 0]) };
         if ret != 0 {
             return Err(Denied);
         }
         Ok(Received {
-            msg: [w0, w1, w2, w3],
+            msg: [w0 as u64, w1 as u64, w2 as u64, w3 as u64],
             reply: (reply_handle != 0).then_some(reply_handle),
-            badge,
+            badge: badge as u64,
         })
     }
 
@@ -1164,37 +1120,30 @@ impl Endpoint {
     /// `let mut prev = None; loop { let r = ep.reply_recv(prev)?; prev = r.reply.map(|h| (h, handle(r))); }`.
     pub fn reply_recv(self, prev: Option<(usize, [u64; MSG_WORDS])>) -> Result<Received, Denied> {
         let (prev_handle, resp) = prev.map_or((0, [0u64; MSG_WORDS]), |(h, r)| (h, r));
-        let status: usize;
-        let w0: u64;
-        let w1: u64;
-        let w2: u64;
-        let w3: u64;
-        let next_handle: usize;
-        let badge: u64;
-        // SAFETY: `ecall`; a0=endpoint→status, a1..=a4=response→next request,
-        // a5=prev reply handle→next reply handle, a6→sender badge (0 = bare). The
-        // kernel replies the previous caller (if `prev_handle != 0`) then blocks
-        // receiving.
-        unsafe {
-            asm!(
-                "ecall",
-                in("a7") Syscall::ReplyRecv as usize,
-                inlateout("a0") self.handle => status,
-                inlateout("a1") resp[0] => w0,
-                inlateout("a2") resp[1] => w1,
-                inlateout("a3") resp[2] => w2,
-                inlateout("a4") resp[3] => w3,
-                inlateout("a5") prev_handle => next_handle,
-                out("a6") badge,
-            );
-        }
+        // SAFETY: a0=endpoint→status, a1..=a4=response→next request, a5=prev reply
+        // handle→next reply handle, a6→sender badge (0 = bare). The kernel replies
+        // the previous caller (if `prev_handle != 0`) then blocks receiving.
+        let [status, w0, w1, w2, w3, next_handle, badge] = unsafe {
+            ecall(
+                Syscall::ReplyRecv,
+                [
+                    self.handle,
+                    resp[0] as usize,
+                    resp[1] as usize,
+                    resp[2] as usize,
+                    resp[3] as usize,
+                    prev_handle,
+                    0,
+                ],
+            )
+        };
         if status != 0 {
             return Err(Denied);
         }
         Ok(Received {
-            msg: [w0, w1, w2, w3],
+            msg: [w0 as u64, w1 as u64, w2 as u64, w3 as u64],
             reply: (next_handle != 0).then_some(next_handle),
-            badge,
+            badge: badge as u64,
         })
     }
 }
@@ -1283,20 +1232,11 @@ impl Notification {
     /// `Err(Denied)` if the kernel refused (cap lacks `WAIT`, not a notification
     /// handle, or another task is already waiting — one waiter per notification).
     pub fn wait(self) -> Result<u64, Denied> {
-        let ret: usize;
-        // SAFETY: `ecall`; the kernel validates the handle (needs `WAIT`), and
-        // either returns pending bits in a0 or blocks us until a signal arrives,
-        // then resumes us here with the bits in a0 (usize::MAX if refused).
-        unsafe {
-            asm!(
-                "ecall",
-                in("a7") Syscall::WaitNotify as usize,
-                inlateout("a0") self.handle => ret,
-                // `handle_wait_notify` writes a1 (the timed-out flag) on every
-                // return path; declare the clobber. See `spawn` above.
-                inlateout("a1") 0usize => _, // deadline 0 = block forever
-            );
-        }
+        // SAFETY: the kernel validates the handle (needs `WAIT`), and either returns
+        // pending bits in a0 or blocks us until a signal arrives, then resumes us
+        // here with the bits in a0 (usize::MAX if refused). a1 = deadline 0, i.e.
+        // block forever; the kernel writes it back as the timed-out flag.
+        let ret = unsafe { ecall(Syscall::WaitNotify, [self.handle, 0, 0, 0, 0, 0, 0]) }[0];
         if ret == usize::MAX { Err(Denied) } else { Ok(ret as u64) }
     }
 

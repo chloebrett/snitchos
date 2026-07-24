@@ -107,6 +107,31 @@ callout below for what that episode actually taught.
 > silent hang into a panic with an `sepc` to disassemble. Lesson: when a harness
 > goes quiet, instrument the harness before theorising about the guest.
 >
+> **Audit done (2026-07-24)** — every `asm!` in `kernel/` and `user/` checked for
+> the same shape: *a register declared `in(...)` that the callee actually writes.*
+> Four more live instances, all userspace→kernel syscalls:
+>
+> | wrapper | reg | kernel writes it in |
+> |---|---|---|
+> | `spawn` | `a1` | `spawn_registry` (mints the process cap) |
+> | `spawn_image` | `a1` | `handle_spawn_image` |
+> | `Notification::wait` | `a1` | `handle_wait_notify` (timed-out flag) |
+> | `wait_any` | `a2` | `handle_wait_any` (timed-out flag) |
+>
+> Everything else is clean: the remaining inline asm is CSR reads/writes (no
+> callee) and the drop-to-U-mode `sret`, which is `options(noreturn)` so its
+> `in("a0")`/`in("a1")` can never be observed. The tell that found `spawn` was an
+> *inconsistency*: `spawn` used `in("a1")` while `spawn_with_kill` used
+> `inlateout("a1") … => kill` for the **same syscall**. When one call site reads a
+> register back and another declares it untouched, the reader is right.
+>
+> **Worth making structural.** Review found these; nothing prevents the next one.
+> The syscall wrappers are hand-rolled `asm!` blocks that each re-declare the ABI,
+> so a new wrapper can silently get it wrong and only fail under some future
+> release codegen. A single `syscall!` macro that declares a0–a6 as
+> `lateout`-clobbered unless a wrapper explicitly claims a register would make the
+> bug unrepresentable rather than merely absent.
+>
 > **Still open (minor):** `run_until_uart` (`snemu/src/machine.rs`) rescans the
 > entire accumulated UART buffer with `windows(marker.len()).any(…)` every time
 > output grows — O(n²) in UART bytes, and the banner made boot output ~14×
