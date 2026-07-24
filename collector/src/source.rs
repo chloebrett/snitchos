@@ -107,6 +107,16 @@ mod tests {
     }
 
     #[test]
+    fn describe_names_the_transport_and_the_path() {
+        // The log line must let a reader tell which source (and which file/socket)
+        // the collector is on — the whole point of printing it at startup.
+        let socket = Source::Socket(PathBuf::from("/tmp/snitch.sock")).describe();
+        assert!(socket.contains("socket") && socket.contains("/tmp/snitch.sock"), "{socket}");
+        let replay = Source::Replay(PathBuf::from("/rec/boot.bin")).describe();
+        assert!(replay.contains("replay") && replay.contains("/rec/boot.bin"), "{replay}");
+    }
+
+    #[test]
     fn socket_fails_fast_and_replay_resyncs() {
         assert_eq!(Source::Socket(PathBuf::from("/s")).policy(), OnDecodeError::Fail);
         assert_eq!(Source::Replay(PathBuf::from("/r")).policy(), OnDecodeError::Resync);
