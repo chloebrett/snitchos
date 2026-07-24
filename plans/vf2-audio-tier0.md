@@ -1,6 +1,11 @@
 # Tier 0 — first beep from the VF2 audio jack (CPU PIO)
 
-**Status:** 📋 **PLAN — not started.** TDD-decomposition of Tier 0 from
+**Status:** 🚧 **IN PROGRESS — the pure layer is done.** Increments 1, 2, 4, 5 shipped
+in `kernel-devices/src/pwmdac.rs` (26 host tests, clippy-clean, mutation-verified — the
+only survivors are documented `| → ^` equivalents). Remaining: **Increment 3** (SYSCRG,
+gated on a datasheet register-offset check), **4b** (sine LUT via `build.rs`), and
+**6–8** (kernel MMIO glue, the `audio-beep` workload, the snemu code-path guard — all
+need the board/kernel). TDD-decomposition of Tier 0 from
 [../docs/vf2-audio-design.md](../docs/vf2-audio-design.md). Goal: **the board emits a
 fixed-frequency tone from the 3.5mm jack**, fed by CPU PIO writes to the JH7110
 PWMDAC — no DMA engine. Everything here is deferrable-free (gated on nothing
@@ -132,7 +137,11 @@ at runtime** — if the LUT is precomputed with float math, do it in `build.rs` 
 a `const [i16; N]`; the runtime path only indexes + fixed-point-scales it. Add a test
 (or a `#![deny]`/grep guard) asserting the runtime module is FP-free.
 
-## Increment 5 — PIO pacing interval
+## Increment 5 — PIO pacing interval — ✅ DONE
+
+Shipped `sample_interval_ticks(sample_rate_hz, timer_hz) -> Option<u64>` in
+`pwmdac.rs` — round-to-nearest ticks between `WDATA` writes (8 kHz @ the VF2's 4 MHz
+timebase = 500), rejecting a zero rate. 3 tests; mutation: all new mutants caught.
 
 **RED:** `sample_interval_ticks(fs_hz, timer_hz) -> u64` — ticks between `WDATA`
 writes. Assert 8 kHz @ the VF2's 4 MHz timebase = 500 ticks; assert a rate that

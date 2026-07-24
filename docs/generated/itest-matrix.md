@@ -52,6 +52,7 @@
 | smp-secondary-hart-boots | init | wfi | smp |
 | default-boot-starts-init | init (default) | wfi | boot |
 | framebuffer-absent-degrades-gracefully | init (default) | wfi | display |
+| console-frames-routes-log | init console=frames | wfi | boot |
 | ipc-message-crosses | ipc | wfi | userspace, ipc |
 | ipc-telemetry | ipc | wfi | userspace, ipc |
 | ipc-trace-crosses | ipc | wfi | userspace, ipc |
