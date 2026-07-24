@@ -33,8 +33,10 @@ const SNEMU_DTB: &str = "snemu/virt.dtb";
 /// The 4-cpu device tree for the `smp4` topology scenario (QEMU `virt -smp 4`,
 /// dumped beside `virt.dtb`). Embedded — not `fs::read` like `SNEMU_DTB` — so the
 /// path resolves at compile time, independent of CWD.
-const SNEMU_DTB_SMP4: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../snemu/virt-smp4.dtb"));
+const SNEMU_DTB_SMP4: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../snemu/virt-smp4.dtb"
+));
 
 /// Hart count a workload boots with: the `smp4` topology demo runs 4, everything
 /// else the default [`HART_COUNT`].
@@ -66,7 +68,14 @@ pub(crate) fn canonical(frame: &OwnedFrame) -> OwnedFrame {
         NotifyWait, SpanEnd, SpanStart, SyscallRefused,
     };
     match frame {
-        SpanStart { id, parent, name_id, task_id, hart_id, .. } => SpanStart {
+        SpanStart {
+            id,
+            parent,
+            name_id,
+            task_id,
+            hart_id,
+            ..
+        } => SpanStart {
             id: *id,
             parent: *parent,
             name_id: *name_id,
@@ -75,43 +84,89 @@ pub(crate) fn canonical(frame: &OwnedFrame) -> OwnedFrame {
             hart_id: *hart_id,
         },
         SpanEnd { id, .. } => SpanEnd { id: *id, t: 0 },
-        Event { span_id, name_id, .. } => Event { span_id: *span_id, name_id: *name_id, t: 0 },
-        Metric { name_id, hart_id, .. } => Metric { name_id: *name_id, value: 0, t: 0, hart_id: *hart_id },
-        ContextSwitch { from, to, reason, hart_id, .. } => ContextSwitch {
+        Event {
+            span_id, name_id, ..
+        } => Event {
+            span_id: *span_id,
+            name_id: *name_id,
+            t: 0,
+        },
+        Metric {
+            name_id, hart_id, ..
+        } => Metric {
+            name_id: *name_id,
+            value: 0,
+            t: 0,
+            hart_id: *hart_id,
+        },
+        ContextSwitch {
+            from,
+            to,
+            reason,
+            hart_id,
+            ..
+        } => ContextSwitch {
             from: *from,
             to: *to,
             t: 0,
             reason: *reason,
             hart_id: *hart_id,
         },
-        CapEvent { kind, cap_id, parent_cap_id, holder, object, rights, badge, hart_id, name, .. } => {
-            CapEvent {
-                kind: *kind,
-                cap_id: *cap_id,
-                parent_cap_id: *parent_cap_id,
-                holder: *holder,
-                object: *object,
-                rights: *rights,
-                badge: *badge,
-                t: 0,
-                hart_id: *hart_id,
-                name: *name,
-            }
-        }
-        SyscallRefused { syscall, reason, task_id, hart_id, .. } => SyscallRefused {
+        CapEvent {
+            kind,
+            cap_id,
+            parent_cap_id,
+            holder,
+            object,
+            rights,
+            badge,
+            hart_id,
+            name,
+            ..
+        } => CapEvent {
+            kind: *kind,
+            cap_id: *cap_id,
+            parent_cap_id: *parent_cap_id,
+            holder: *holder,
+            object: *object,
+            rights: *rights,
+            badge: *badge,
+            t: 0,
+            hart_id: *hart_id,
+            name: *name,
+        },
+        SyscallRefused {
+            syscall,
+            reason,
+            task_id,
+            hart_id,
+            ..
+        } => SyscallRefused {
             syscall: *syscall,
             reason: *reason,
             task_id: *task_id,
             t: 0,
             hart_id: *hart_id,
         },
-        Log { msg, task_id, hart_id, .. } => Log {
+        Log {
+            msg,
+            task_id,
+            hart_id,
+            ..
+        } => Log {
             msg: msg.clone(),
             task_id: *task_id,
             t: 0,
             hart_id: *hart_id,
         },
-        Message { endpoint, from, to, parent_span, hart_id, .. } => Message {
+        Message {
+            endpoint,
+            from,
+            to,
+            parent_span,
+            hart_id,
+            ..
+        } => Message {
             endpoint: *endpoint,
             from: *from,
             to: *to,
@@ -119,14 +174,26 @@ pub(crate) fn canonical(frame: &OwnedFrame) -> OwnedFrame {
             t: 0,
             hart_id: *hart_id,
         },
-        NotifySignal { notification, mask, from_task, hart_id, .. } => NotifySignal {
+        NotifySignal {
+            notification,
+            mask,
+            from_task,
+            hart_id,
+            ..
+        } => NotifySignal {
             notification: *notification,
             mask: *mask,
             from_task: *from_task,
             t: 0,
             hart_id: *hart_id,
         },
-        NotifyWait { notification, bits, to_task, hart_id, .. } => NotifyWait {
+        NotifyWait {
+            notification,
+            bits,
+            to_task,
+            hart_id,
+            ..
+        } => NotifyWait {
             notification: *notification,
             bits: *bits,
             to_task: *to_task,
@@ -136,7 +203,11 @@ pub(crate) fn canonical(frame: &OwnedFrame) -> OwnedFrame {
         // `mhartid` is the raw platform boot-hart id (snemu boots on 0, QEMU on 1) —
         // firmware noise, not kernel behavior, so it must not halt a structural diff.
         // Normalize it; keep `id` (the logical hart) and `role`, which are semantic.
-        HartRegister { id, role, .. } => HartRegister { id: *id, mhartid: 0, role: *role },
+        HartRegister { id, role, .. } => HartRegister {
+            id: *id,
+            mhartid: 0,
+            role: *role,
+        },
         // No timestamp / volatile field: Hello, StringRegister, MetricRegister,
         // ThreadRegister, Dropped.
         other => other.clone(),
@@ -165,7 +236,10 @@ pub(crate) fn diff_streams(snemu: &[OwnedFrame], qemu: &[OwnedFrame]) -> Diff {
             break;
         }
     }
-    Diff { common_prefix, divergence }
+    Diff {
+        common_prefix,
+        divergence,
+    }
 }
 
 /// The set of registered string names in a stream (the kernel's telemetry
@@ -238,7 +312,9 @@ pub(crate) fn timing_qemu(
 }
 
 fn has_span(frames: &[OwnedFrame]) -> bool {
-    frames.iter().any(|f| matches!(f, OwnedFrame::SpanStart { .. }))
+    frames
+        .iter()
+        .any(|f| matches!(f, OwnedFrame::SpanStart { .. }))
 }
 
 /// Incremental decode of a growing telemetry buffer: tracks how many complete
@@ -316,7 +392,11 @@ fn collect_snemu(
             }
         }
     }
-    let timing = Timing { first_span, milestone, total: start.elapsed() };
+    let timing = Timing {
+        first_span,
+        milestone,
+        total: start.elapsed(),
+    };
     Ok((decode_frames(machine.virtio_tx_output()), stop, timing))
 }
 
@@ -435,13 +515,50 @@ fn connect_with_deadline(path: &std::path::Path, timeout: Duration) -> Result<Un
 /// The runtime workloads snemu can select (mirrors `kernel_core::workloads::
 /// bootargs::select`). The sweep runs the oracle over every one.
 pub(crate) const WORKLOADS: &[&str] = &[
-    "demo", "init", "smp", "smp-spsc", "smp-spsc-batch", "priorities", "block-wake", "workers",
-    "heap-grow", "frame-oom", "heap-oom", "spawn-storm", "ipi-pong", "shootdown-storm",
-    "mutex-storm", "virtio-storm", "tlb-shootdown", "ping-pong", "userspace", "userspace-fault",
-    "userspace-bad-ptr", "userspace-span-flood", "user-hog", "syscall-hog", "console-echo",
-    "spawn-image", "manifest-iface", "probe", "panic-now", "stack-guard", "stack-overflow-deep",
-    "boot-stack-guard", "spawn-demo", "spawn-reap", "wait-any", "endpoint-create", "ipc",
-    "ipc-rpc", "badge-mint", "badge-handout", "fs", "notify-smoke", "stitch-repl", "stitch-fs",
+    "demo",
+    "init",
+    "smp",
+    "smp-spsc",
+    "smp-spsc-batch",
+    "priorities",
+    "block-wake",
+    "workers",
+    "heap-grow",
+    "frame-oom",
+    "heap-oom",
+    "spawn-storm",
+    "ipi-pong",
+    "shootdown-storm",
+    "mutex-storm",
+    "virtio-storm",
+    "tlb-shootdown",
+    "ping-pong",
+    "userspace",
+    "userspace-fault",
+    "userspace-bad-ptr",
+    "userspace-span-flood",
+    "user-hog",
+    "syscall-hog",
+    "console-echo",
+    "spawn-image",
+    "manifest-iface",
+    "probe",
+    "panic-now",
+    "stack-guard",
+    "stack-overflow-deep",
+    "boot-stack-guard",
+    "spawn-demo",
+    "spawn-reap",
+    "wait-any",
+    "endpoint-create",
+    "ipc",
+    "ipc-rpc",
+    "badge-mint",
+    "badge-handout",
+    "fs",
+    "notify-smoke",
+    "stitch-repl",
+    "stitch-fs",
 ];
 
 /// The structured outcome of comparing one workload under snemu vs QEMU.
@@ -578,10 +695,7 @@ fn compare(
 /// Boot the kernel under snemu (optionally selecting `workload`) and return the
 /// decoded telemetry frames after `max_steps`. Used by `diagram trace`/`switches`,
 /// whose folds collapse by name/task so a fixed budget captures the structure.
-pub fn collect_frames(
-    workload: Option<&str>,
-    max_steps: u64,
-) -> Result<Vec<OwnedFrame>, String> {
+pub fn collect_frames(workload: Option<&str>, max_steps: u64) -> Result<Vec<OwnedFrame>, String> {
     let (kernel, dtb_base) = prepare(workload.is_some())?;
     let dtb = match workload {
         Some(w) => snemu::dtb::set_bootargs(&dtb_base, &format!("workload={w}"))
@@ -623,8 +737,10 @@ pub fn collect_frames_until_cap_quiescence(
         let tx = machine.virtio_tx_output();
         if tx.len() != seen_tx {
             seen_tx = tx.len();
-            let caps =
-                decode_frames(tx).iter().filter(|f| matches!(f, OwnedFrame::CapEvent { .. })).count();
+            let caps = decode_frames(tx)
+                .iter()
+                .filter(|f| matches!(f, OwnedFrame::CapEvent { .. }))
+                .count();
             if quiescence.observe(caps, steps) {
                 break;
             }
@@ -645,12 +761,16 @@ pub fn prepare_profiled(
     with_workloads: bool,
     opt: qemu::OptLevel,
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let features: &[&str] = if with_workloads { &["itest-workloads"] } else { &[] };
+    let features: &[&str] = if with_workloads {
+        &["itest-workloads"]
+    } else {
+        &[]
+    };
     if !qemu::build_kernel_profiled(features, opt).is_ok_and(|s| s.success()) {
         return Err("kernel build failed".to_string());
     }
-    let kernel =
-        std::fs::read(qemu::kernel_bin(opt.is_release())).map_err(|e| format!("read kernel: {e}"))?;
+    let kernel = std::fs::read(qemu::kernel_bin(opt.is_release()))
+        .map_err(|e| format!("read kernel: {e}"))?;
     let dtb = std::fs::read(SNEMU_DTB).map_err(|e| format!("read {SNEMU_DTB}: {e}"))?;
     Ok((kernel, dtb))
 }
@@ -796,11 +916,20 @@ pub(crate) fn measure_workload(
         }
     }
     let wall = start.elapsed();
-    Ok(snemu::bench::Sample { instret: machine.instret(), wall, startup })
+    Ok(snemu::bench::Sample {
+        instret: machine.instret(),
+        wall,
+        startup,
+    })
 }
 
 /// Single-workload oracle: boot under both, diff, print the detailed report.
-pub fn run(max_steps: u64, qemu_secs: u64, workload: Option<&str>, opt: qemu::OptLevel) -> ExitCode {
+pub fn run(
+    max_steps: u64,
+    qemu_secs: u64,
+    workload: Option<&str>,
+    opt: qemu::OptLevel,
+) -> ExitCode {
     let (kernel, dtb) = match prepare_profiled(workload.is_some(), opt) {
         Ok(v) => v,
         Err(e) => {
@@ -808,7 +937,10 @@ pub fn run(max_steps: u64, qemu_secs: u64, workload: Option<&str>, opt: qemu::Op
             return ExitCode::from(1);
         }
     };
-    eprintln!("snemu-diff: workload = {}", workload.unwrap_or("default (init)"));
+    eprintln!(
+        "snemu-diff: workload = {}",
+        workload.unwrap_or("default (init)")
+    );
     let cmp = match compare(&kernel, &dtb, workload, max_steps, qemu_secs, opt) {
         Ok(c) => c,
         Err(e) => {
@@ -817,12 +949,21 @@ pub fn run(max_steps: u64, qemu_secs: u64, workload: Option<&str>, opt: qemu::Op
         }
     };
     print_detailed(&cmp);
-    if cmp.faithful() { ExitCode::SUCCESS } else { ExitCode::from(1) }
+    if cmp.faithful() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }
 
 /// Sweep the workloads (all, or the first `limit`) through the oracle and
 /// tabulate agree/disagree.
-pub fn run_all(max_steps: u64, qemu_secs: u64, limit: Option<usize>, opt: qemu::OptLevel) -> ExitCode {
+pub fn run_all(
+    max_steps: u64,
+    qemu_secs: u64,
+    limit: Option<usize>,
+    opt: qemu::OptLevel,
+) -> ExitCode {
     let (kernel, dtb) = match prepare_profiled(true, opt) {
         Ok(v) => v,
         Err(e) => {
@@ -901,13 +1042,14 @@ pub fn run_fork(max_steps: u64) -> ExitCode {
         eprintln!("snemu-fork: DTB patch failed");
         return ExitCode::from(1);
     };
-    let mut base = match snemu::loader::load_machine(&kernel, RAM_SIZE, Some(&boot_dtb), HART_COUNT, false) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("snemu-fork: load: {e:?}");
-            return ExitCode::from(1);
-        }
-    };
+    let mut base =
+        match snemu::loader::load_machine(&kernel, RAM_SIZE, Some(&boot_dtb), HART_COUNT, false) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("snemu-fork: load: {e:?}");
+                return ExitCode::from(1);
+            }
+        };
 
     // Boot once to the "I am alive" marker — the last checkpoint before the
     // kernel reads the workload bootarg (kernel/src/main.rs:228 vs :339).
@@ -928,7 +1070,10 @@ pub fn run_fork(max_steps: u64) -> ExitCode {
 
     let sweep_start = Instant::now();
     println!();
-    println!("{:<22} {:>7} {:>9} {:>8}  {}", "WORKLOAD", "FRAMES", "FORK+RUN", "1ST-SPAN", "STOP");
+    println!(
+        "{:<22} {:>7} {:>9} {:>8}  {}",
+        "WORKLOAD", "FRAMES", "FORK+RUN", "1ST-SPAN", "STOP"
+    );
     for &w in WORKLOADS {
         let mut m = snapshot.clone();
         if let Some(dtb) = workload_dtb(&base_dtb, w) {
@@ -994,7 +1139,11 @@ fn fork_collect(
             }
         }
     }
-    (decode_frames(machine.virtio_tx_output()), stop, (start.elapsed(), first_span))
+    (
+        decode_frames(machine.virtio_tx_output()),
+        stop,
+        (start.elapsed(), first_span),
+    )
 }
 
 /// The detailed single-workload report.
@@ -1018,7 +1167,10 @@ fn print_detailed(cmp: &Comparison) {
         cmp.common_prefix
     );
     if let Some((s, q)) = &cmp.divergence {
-        eprintln!("snemu-diff: first divergence at frame {}:", cmp.common_prefix);
+        eprintln!(
+            "snemu-diff: first divergence at frame {}:",
+            cmp.common_prefix
+        );
         eprintln!("  snemu: {s:?}");
         eprintln!("  qemu:  {q:?}");
     }
@@ -1097,13 +1249,23 @@ fn print_summary(results: &[(String, Result<Comparison, String>)]) -> ExitCode {
             }
             Err(e) => {
                 errored += 1;
-                println!("{name:<22} {:<5} {:>5} {:>9} {:>15} {:>15}  {e}", "ERR", "-", "-", "-", "-");
+                println!(
+                    "{name:<22} {:<5} {:>5} {:>9} {:>15} {:>15}  {e}",
+                    "ERR", "-", "-", "-", "-"
+                );
             }
         }
     }
     println!();
-    println!("snemu-diff: {pass} PASS, {fail} FAIL, {errored} ERROR of {} workloads", results.len());
-    if fail == 0 && errored == 0 { ExitCode::SUCCESS } else { ExitCode::from(1) }
+    println!(
+        "snemu-diff: {pass} PASS, {fail} FAIL, {errored} ERROR of {} workloads",
+        results.len()
+    );
+    if fail == 0 && errored == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
 }
 
 #[cfg(test)]
@@ -1112,7 +1274,10 @@ mod tests {
     use protocol::{SpanId, StringId};
 
     fn hello() -> OwnedFrame {
-        OwnedFrame::Hello { timebase_hz: 10_000_000, protocol_version: 4 }
+        OwnedFrame::Hello {
+            timebase_hz: 10_000_000,
+            protocol_version: 4,
+        }
     }
     fn span_start(id: u64, t: u64) -> OwnedFrame {
         OwnedFrame::SpanStart {
@@ -1125,14 +1290,27 @@ mod tests {
         }
     }
     fn metric(value: i64, t: u64) -> OwnedFrame {
-        OwnedFrame::Metric { name_id: StringId(4), value, t, hart_id: 0 }
+        OwnedFrame::Metric {
+            name_id: StringId(4),
+            value,
+            t,
+            hart_id: 0,
+        }
     }
     fn strreg(id: u32, value: &str) -> OwnedFrame {
-        OwnedFrame::StringRegister { id: StringId(id), value: value.to_string() }
+        OwnedFrame::StringRegister {
+            id: StringId(id),
+            value: value.to_string(),
+        }
     }
 
     fn log(msg: &str) -> OwnedFrame {
-        OwnedFrame::Log { msg: msg.to_string(), task_id: 0, t: 0, hart_id: 0 }
+        OwnedFrame::Log {
+            msg: msg.to_string(),
+            task_id: 0,
+            t: 0,
+            hart_id: 0,
+        }
     }
 
     #[test]
@@ -1159,14 +1337,20 @@ mod tests {
             "kernel.heartbeat".to_string(),
             "snitchos.task.ghost.runs_total".to_string(),
         ];
-        assert_eq!(invented_names(&only_snemu, true), vec!["snitchos.task.ghost.runs_total"]);
+        assert_eq!(
+            invented_names(&only_snemu, true),
+            vec!["snitchos.task.ghost.runs_total"]
+        );
     }
 
     #[test]
     fn snemu_reached_crash_keys_on_the_panic_log() {
         // The panic handler emits `Log("kernel panic …")`; its presence proves
         // snemu ran to the crash (just later than QEMU), not that it hung past it.
-        assert!(snemu_reached_crash(&[hello(), log("kernel panic: deliberate")]));
+        assert!(snemu_reached_crash(&[
+            hello(),
+            log("kernel panic: deliberate")
+        ]));
         assert!(!snemu_reached_crash(&[hello(), span_start(1, 1)]));
     }
 
@@ -1197,8 +1381,16 @@ mod tests {
         // 1) while the logical topology is identical. That's firmware noise, not a
         // structural divergence — canonicalization must normalize it so the diff sees
         // past early boot instead of halting on it (`id`, the logical hart, is kept).
-        let snemu = vec![OwnedFrame::HartRegister { id: 0, mhartid: 0, role: protocol::HartRole::Boot }];
-        let qemu = vec![OwnedFrame::HartRegister { id: 0, mhartid: 1, role: protocol::HartRole::Boot }];
+        let snemu = vec![OwnedFrame::HartRegister {
+            id: 0,
+            mhartid: 0,
+            role: protocol::HartRole::Boot,
+        }];
+        let qemu = vec![OwnedFrame::HartRegister {
+            id: 0,
+            mhartid: 1,
+            role: protocol::HartRole::Boot,
+        }];
         let d = diff_streams(&snemu, &qemu);
         assert_eq!(d.common_prefix, 1);
         assert!(d.divergence.is_none());

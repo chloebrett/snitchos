@@ -679,12 +679,40 @@ pub fn run(
         let t0 = Instant::now();
         match &kinds[task] {
             PipelineTask::Boot(workload) => {
+                // Phase 1 is silent by nature: every scenario depends on its
+                // workload's boot task, so a boot that never reaches CHECKPOINT
+                // produces *no* output at all — not a failure line, not a slow
+                // scenario, nothing. That reads as a hung harness and sent one
+                // debugging session chasing the kernel instead of the boot task.
+                // Narrate both edges so the next one starts with the answer.
+                if verbose {
+                    eprintln!(
+                        "itest: boot task starting   w{worker}  {}",
+                        workload.unwrap_or("(default)")
+                    );
+                }
                 let snapshot =
                     boot_snapshot(&kernel, &dtb, *workload, speed, scramble);
                 let (machine, boot_instret) = match snapshot {
                     Ok((m, n)) => (Ok(m), n),
                     Err(e) => (Err(e), 0),
                 };
+                if verbose {
+                    match &machine {
+                        Ok(_) => eprintln!(
+                            "itest: boot task completed  w{worker}  {}  {boot_instret} instret  {:.2}s",
+                            workload.unwrap_or("(default)"),
+                            t0.elapsed().as_secs_f64()
+                        ),
+                        // Not fatal — each scenario falls back to a fresh boot — but
+                        // it silently multiplies the suite's cost, so say so loudly.
+                        Err(why) => eprintln!(
+                            "itest: boot task FAILED     w{worker}  {}  {why} \
+                             (scenarios fall back to fresh boots)",
+                            workload.unwrap_or("(default)")
+                        ),
+                    }
+                }
                 boot_instret_acc.fetch_add(boot_instret, Ordering::Relaxed);
                 snap_store
                     .lock()

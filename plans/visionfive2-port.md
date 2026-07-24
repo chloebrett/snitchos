@@ -66,31 +66,52 @@ their keep the same day; they stay with `smp:`/`hb` until M2's real frames repla
 them, at which point removing the macro removes all 18 call sites at once. See the
 callout below for what that episode actually taught.
 
-> ### 🔴 OPEN — two known failures from commit `32cd6fc`, both deferred
+> ### ✅ FIXED — the SBI ecall clobber: `a1` is a return register, not an input
 >
-> `907df0a` is itest 121/121 green; `32cd6fc` is not. Neither affects the board
-> (it boots and heartbeats), so both are parked — but the gate is **red** until
-> they're fixed, and nothing should be committed on top without knowing that.
+> Adding the boot banner turned itest from 121/121 green into *every scenario
+> failing*, and the board stayed perfectly happy. The banner was not the bug. All
+> three SBI wrappers in `kernel/src/sbi.rs` under-declared their clobbers:
 >
-> **1. `banner::print()` hangs every scenario under snemu.** Commenting it out
-> restores 120/121. The board is fine — it prints the banner and boots on — so
-> this is snemu-side or an interaction with it. Prime suspect: `rule()` writes 60
-> chars via 60 separate `print!` calls, and `println!` is ~1,400 bytes at boot
-> versus 12 for the `I am alive` it replaced; every char spins on
-> `while LSR & THRE == 0`. Real UART drains at 115200 baud, snemu's model may not
-> under whatever the harness does. Unproven — snemu's `Uart::read` looks like it
-> returns `THRE | TEMT` unconditionally, which would *contradict* that theory, so
-> start by checking whether the hang is in `putchar` at all rather than assuming.
+> | call | was | wrong because |
+> |---|---|---|
+> | `set_timer` | `a1` not mentioned | compiler assumes a1 survives the `ecall` |
+> | `send_ipi` | `in("a1")` | `in` *promises* the register is unchanged |
+> | `hart_start` | `in("a1")` | same |
 >
-> **2. `heap-oom` fails** (`no heap.grow_total > 0 within 30s`) with the banner
-> commented out — a real second failure, not a knock-on. Lead: its console shows
-> `memory: 16777216` (16 MiB), but the workload is designed to leak ~16 MiB *per
-> heartbeat* against ~120 MiB (`frame-allocator-oom`, right next to it in the
-> registry, runs at 128 MiB). Either the scenario's RAM sizing is wrong or
-> something in `32cd6fc` changed the boot-time allocation balance — the only
-> behavioural delta left for a non-`vf2` build is `ramfb::init()` becoming
-> conditional on `dtb::has_fw_cfg`. Cheapest experiment: make that call
-> unconditional again and re-run `cargo xtask itest heap-oom`.
+> SBI returns `sbiret { error, value }` in **a0 and a1**, so firmware overwrites
+> a1 on every call. The compiler, told otherwise, parked the `PER_HART_DATA` base
+> in a1 across `sbi_set_timer`, read back `value == 0`, and the trap handler's
+> per-hart counter did `amoadd.d` at `0 + idx*8 + 0x40` — the observed
+> `scause=0xf stval=0x40`. Fix: `lateout("a1") _` on `set_timer`,
+> `inlateout("a1") … => _` on the other two. (a2–a7 stay `in`: SBI preserves
+> everything except a0/a1.)
+>
+> **This was latent on every SBI call since v0.6**, `hart_start` included. The
+> banner only perturbed register allocation until a1 drew the short straw. The
+> board escapes it because `cargo xtask image` builds a **debug** profile; itest
+> builds release. Fourth member of the family after the `tp` truncation and the
+> `entry_pa` hoist: *a value the compiler believes it owns across a boundary that
+> actually clobbers it.*
+>
+> It also silently fixed the `heap-oom` failure that looked like a separate bug —
+> heap growth is heartbeat-driven, so the corrupted timer path broke it too. Two
+> symptoms, one cause.
+>
+> **How it was actually found**, because none of the intuitions worked: the
+> harness was silent for minutes, and four successive theories (a `fw_cfg` bus
+> probe, `putchar`/THRE spinning, release-vs-debug, snemu's own optimizations)
+> were each disproven. What cracked it was **narrating itest's phase-1 boot task**
+> (`boot task starting` / `completed` / `FAILED`), which converted "the harness
+> hangs" into "the boot task never reached CHECKPOINT" — and then running that
+> workload directly (`snemu boot --release --workload init`), which turned a
+> silent hang into a panic with an `sepc` to disassemble. Lesson: when a harness
+> goes quiet, instrument the harness before theorising about the guest.
+>
+> **Still open (minor):** `run_until_uart` (`snemu/src/machine.rs`) rescans the
+> entire accumulated UART buffer with `windows(marker.len()).any(…)` every time
+> output grows — O(n²) in UART bytes, and the banner made boot output ~14×
+> longer. Not the hang (host-side cost, no guest steps), but worth fixing with a
+> scan offset that only tests windows overlapping the newly-appended bytes.
 
 The section below is the
 original scoping; per-blocker ✓ notes mark what shipped.

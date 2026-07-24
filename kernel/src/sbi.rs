@@ -39,6 +39,15 @@ pub fn set_timer(deadline: u64) {
             in("a7") EID_TIME,
             in("a6") 0_u64,            // FID 0 = sbi_set_timer
             inlateout("a0") deadline => error,
+            // SBI returns `sbiret { error, value }` in a0 **and a1**, so a1 is
+            // clobbered by every ecall even when we ignore the value. Declaring it
+            // is not optional: without this the compiler may keep a live value in
+            // a1 across the call and read back the firmware's return instead. That
+            // is exactly what happened — a release build parked the `PER_HART_DATA`
+            // base in a1 here, got 0 back, and the trap handler's per-hart counter
+            // stored to 0x40. See the SBI-clobber callout in
+            // plans/visionfive2-port.md.
+            lateout("a1") _,
             options(nostack),
         );
     }
@@ -65,7 +74,10 @@ pub fn send_ipi(hart_mask: u64, hart_mask_base: u64) {
             in("a7") EID_IPI,
             in("a6") 0_u64,           // FID 0 = sbi_send_ipi
             inlateout("a0") hart_mask => error,
-            in("a1") hart_mask_base,
+            // `inlateout … => _`, not `in`: a1 is an argument *and* a return slot.
+            // `in` would promise the compiler a1 still holds `hart_mask_base` after
+            // the ecall, which the firmware has already overwritten.
+            inlateout("a1") hart_mask_base => _,
             options(nostack),
         );
     }
@@ -89,7 +101,9 @@ pub fn hart_start(hartid: u64, start_addr: u64, opaque: u64) -> i64 {
             in("a7") EID_HSM,
             in("a6") 0_u64,  // FID 0 = sbi_hart_start
             inlateout("a0") hartid => error,
-            in("a1") start_addr,
+            // Argument *and* return slot — see `send_ipi`. a2 stays `in`: SBI
+            // preserves every register except a0/a1.
+            inlateout("a1") start_addr => _,
             in("a2") opaque,
             options(nostack),
         );

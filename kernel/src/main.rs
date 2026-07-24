@@ -262,7 +262,7 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
     }
 
     ph!("pre-banner");
-    //banner::print();
+    banner::print();
     ph!("post-banner");
 
     // Register the metric set early — BEFORE timer init, spawns, or
