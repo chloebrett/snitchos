@@ -107,7 +107,7 @@ impl OwnedFrame {
     }
 }
 
-/// Try to decode one COBS-framed [`Frame`] (see [`wire_encode`]) from the front of
+/// Try to decode one COBS-framed [`Frame`] (see [`crate::wire_encode`]) from the front of
 /// `buf`, returning it in owned form plus the number of bytes it consumed (the
 /// frame body **and** its `0x00` terminator).
 ///
@@ -169,7 +169,7 @@ pub struct DecodeSummary {
 }
 
 /// Drive the read-decode-emit loop over any byte source. Each COBS-framed
-/// [`Frame`] (see [`wire_encode`]) is handed to `on_frame` in borrowed form.
+/// [`Frame`] (see [`crate::wire_encode`]) is handed to `on_frame` in borrowed form.
 /// Returns the run's [`DecodeSummary`] on clean EOF; under [`OnDecodeError::Fail`]
 /// returns `Err` on the first undecodable chunk.
 pub fn decode_stream<R: Read>(

@@ -47,7 +47,7 @@ macro_rules! workloads {
     };
 }
 
-/// True when the PascalCase `ident` kebab-cases to `name` — `SmpSpscBatch`
+/// True when the `PascalCase` `ident` kebab-cases to `name` — `SmpSpscBatch`
 /// matches `smp-spsc-batch`. Each interior capital must be met by a `-`, so
 /// `Smp` does not match `smp-spsc` and digits stay attached to the word they
 /// follow (`UserOnHart0` is `user-on-hart0`, not `user-on-hart-0`).

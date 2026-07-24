@@ -43,31 +43,31 @@ impl VersionField {
 
 /// Banner lines above the version field.
 pub const ART_ABOVE: &[&str] = &[
-    r#"          .----------------------------."#,
+    r"          .----------------------------.",
     r#"         (      say "i am alive"        )"#,
-    r#"          '------.---------------------'"#,
-    r#"                /"#,
-    r#"               /             .-----------------------------."#,
-    r#"              /              |  .-----------------------.  |"#,
+    r"          '------.---------------------'",
+    r"                /",
+    r"               /             .-----------------------------.",
+    r"              /              |  .-----------------------.  |",
 ];
 
 /// The version line, up to the field itself.
-pub const VERSION_PREFIX: &str = r#"        .--. '               |  | snitchos v"#;
+pub const VERSION_PREFIX: &str = r"        .--. '               |  | snitchos v";
 
 /// The version line, after the field.
-pub const VERSION_SUFFIX: &str = r#"|  |"#;
+pub const VERSION_SUFFIX: &str = r"|  |";
 
 /// Banner lines below the version field.
 pub const ART_BELOW: &[&str] = &[
-    r#"       /    \                |  | > I AM ALIVE          |  |"#,
-    r#"      |  o   |               |  | _                     |  |"#,
-    r#"       \    /                |  '-----------------------'  |"#,
-    r#"        '--'                 '-----------------------------'"#,
-    r#"        /  \ .---------------.        |            |"#,
-    r#"       /    (  oh my god.     )        '------------'"#,
-    r#"      |     |'---------------'"#,
-    r#"      |      |"#,
-    r#"      |      |"#,
+    r"       /    \                |  | > I AM ALIVE          |  |",
+    r"      |  o   |               |  | _                     |  |",
+    r"       \    /                |  '-----------------------'  |",
+    r"        '--'                 '-----------------------------'",
+    r"        /  \ .---------------.        |            |",
+    r"       /    (  oh my god.     )        '------------'",
+    r"      |     |'---------------'",
+    r"      |      |",
+    r"      |      |",
 ];
 
 /// Width of the widest banner line — the length of the rule that fences the
