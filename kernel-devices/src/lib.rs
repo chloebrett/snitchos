@@ -24,5 +24,6 @@ pub mod framebuffer;
 pub mod fwcfg;
 pub mod pwmdac;
 pub mod ramfb;
+pub mod syscrg;
 pub mod uart;
 pub mod virtio;
