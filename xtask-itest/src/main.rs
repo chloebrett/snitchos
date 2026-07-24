@@ -487,11 +487,11 @@ enum SnemuCmd {
         /// `--workload`/`--steps`.
         #[arg(long)]
         baseline: bool,
-        /// Enable the Tier-1 decode cache (M5). A/B against the default (off) to
+        /// Enable the Tier-1 fetch cache (M5). A/B against the default (off) to
         /// read the speedup; instret stays identical (correctness).
         #[arg(long)]
-        decode_cache: bool,
-        /// Verify the decode cache is faithful: run each taxonomy workload with
+        fetch_cache: bool,
+        /// Verify the fetch cache is faithful: run each taxonomy workload with
         /// the cache off and on and assert identical telemetry. Overrides the
         /// other modes.
         #[arg(long)]
@@ -1059,15 +1059,15 @@ fn run_snemu(cmd: SnemuCmd) -> ExitCode {
         SnemuCmd::Profile { workload, steps, top, opt, user_detail } => {
             snemu_profile::run(workload.as_deref(), steps, top, opt, user_detail)
         }
-        SnemuCmd::Bench { workload, steps, runs, taxonomy, baseline, decode_cache, verify_cache } => {
+        SnemuCmd::Bench { workload, steps, runs, taxonomy, baseline, fetch_cache, verify_cache } => {
             if verify_cache {
                 snemu_bench::run_verify()
             } else if baseline {
-                snemu_bench::run_baseline(runs, decode_cache)
+                snemu_bench::run_baseline(runs, fetch_cache)
             } else if taxonomy {
-                snemu_bench::run_taxonomy(runs, decode_cache)
+                snemu_bench::run_taxonomy(runs, fetch_cache)
             } else {
-                snemu_bench::run(workload.as_deref(), steps, runs, decode_cache)
+                snemu_bench::run(workload.as_deref(), steps, runs, fetch_cache)
             }
         }
     }

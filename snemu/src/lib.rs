@@ -10,7 +10,7 @@ pub mod cpu;
 pub mod dtb;
 mod csr;
 mod decode;
-mod decode_cache;
+mod fetch_cache;
 mod framebuffer;
 mod fwcfg;
 mod jit;

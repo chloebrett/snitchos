@@ -5,7 +5,7 @@
 //! a single scenario.
 //!
 //! It reuses the exact `fn(&mut View)` assertion bodies the QEMU suite runs
-//! ([`scenario_view_fn`](super::scenario_view_fn)); the only substitution is the
+//! ([`scenario_view_fn`]); the only substitution is the
 //! frame source. snemu boots each distinct `workload` once (to a step budget),
 //! its telemetry is decoded, and every scenario in that group replays against it
 //! via [`View::replay`](super::harness::View::replay). Replay is instant: the

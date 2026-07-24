@@ -1,13 +1,20 @@
-//! Tier-1 JIT — a per-hart **decode cache** (snemu milestone M5).
+//! Tier-1 JIT — a per-hart **fetch cache** (snemu milestone M5).
 //!
 //! The pure interpreter re-does the full fetch pipeline for *every* executed
 //! instruction: a Sv39 page walk to translate the PC, a byte fetch, and (for the
 //! compressed set) an expansion — before it even dispatches. In a loop that runs
 //! the same instructions millions of times, that work is pure waste. This cache
-//! stores the fetch+expand result keyed by virtual PC, so a re-executed
-//! instruction skips straight to dispatch.
+//! stores the translated-fetch-plus-expand result keyed by virtual PC, so a
+//! re-executed instruction skips straight to dispatch.
 //!
-//! **Data, not code:** the cache is a plain map of decoded structs — no generated
+//! **Not a *decode* cache — a fetch cache.** What it stores is a [`Fetched`]: the
+//! raw 32-bit instruction word (compressed forms already expanded) and its length.
+//! It does *not* cache field extraction — the executor still cracks the word into
+//! opcode/funct/registers/immediate on every run. The expensive thing eliminated
+//! is the Sv39 **page walk** to translate the PC (plus the memory read and the
+//! compressed expansion), which is why entries die when translations change.
+//!
+//! **Data, not code:** the cache is a plain map of small structs — no generated
 //! machine code, no executable memory. So it stays portable, `no_std`-friendly in
 //! spirit, and nests. It changes only *how fast* an instruction runs, never
 //! *what* runs, so instret and telemetry are byte-identical to the interpreter —
@@ -15,10 +22,10 @@
 //! a differential check asserts the equivalence.
 //!
 //! **Correctness rides the guest's own TLB-coherence contract.** A cached entry
-//! is a *translated* instruction, valid only while its translation is: for one
+//! is a *translated* fetch, valid only while its translation is: for one
 //! address space (`satp`) and until the guest invalidates translations. A `satp`
-//! change flushes ([`get`](DecodeCache::get) detects it); an `sfence.vma` flushes
-//! explicitly ([`flush`](DecodeCache::flush)). Self-modifying code that rewrites
+//! change flushes ([`get`](FetchCache::get) detects it); an `sfence.vma` flushes
+//! explicitly ([`flush`](FetchCache::flush)). Self-modifying code that rewrites
 //! an already-cached page without an `sfence` would go stale — not something the
 //! kernel/itest workloads do, and the differential check would catch it.
 
@@ -30,36 +37,37 @@ const INDEX_BITS: u32 = 15;
 const SLOTS: usize = 1 << INDEX_BITS;
 const INDEX_MASK: u64 = (SLOTS as u64) - 1;
 
-/// A decoded instruction ready for the executor: the 32-bit form it consumes
+/// A fetched instruction ready for the executor: the 32-bit form it consumes
 /// (compressed instructions stored already-expanded, as the interpreter runs
-/// them) plus the length to advance the PC by.
+/// them) plus the length to advance the PC by. Not field-decoded — the executor
+/// still cracks `raw` into its fields on every run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Decoded {
+pub(crate) struct Fetched {
     pub raw: u32,
     pub ilen: u64,
 }
 
 /// One direct-mapped slot: the full PC as a tag (to detect the aliasing two PCs
 /// that share an index), the epoch it was written in (for O(1) flush), and the
-/// decoded instruction.
+/// fetched instruction.
 #[derive(Clone, Copy, Default)]
 struct Slot {
     epoch: u64,
     tag: u64,
-    decoded: Decoded,
+    fetched: Fetched,
 }
 
-/// A per-hart decode cache — a **direct-mapped array**, not a hash map: a PC
+/// A per-hart fetch cache — a **direct-mapped array**, not a hash map: a PC
 /// indexes straight into `slots` with a shift+mask (no hashing, which measured
 /// *slower* than the page walk it was meant to save). A cached entry is a
-/// translated instruction, valid until the guest changes translations; the hart
+/// translated fetch, valid until the guest changes translations; the hart
 /// flushes on a `satp` write and on `sfence.vma`, both via an O(1) **epoch bump**
 /// (a slot counts only if its epoch matches the current one). Keeping `satp`
 /// invalidation out of the lookup means the fast path never re-reads the CSR file
 /// — the hot path is a single array probe. Tracks hit/miss counts for the
 /// hot-block metrics (M4 step 5) and to prove the fast path engaged.
 #[derive(Clone)]
-pub(crate) struct DecodeCache {
+pub(crate) struct FetchCache {
     /// Slots written with an earlier epoch are stale. Starts at 1 so the
     /// zero-initialised slots (epoch 0) are invalid from birth.
     epoch: u64,
@@ -68,7 +76,7 @@ pub(crate) struct DecodeCache {
     misses: u64,
 }
 
-impl DecodeCache {
+impl FetchCache {
     pub(crate) fn new() -> Self {
         Self {
             epoch: 1,
@@ -83,27 +91,27 @@ impl DecodeCache {
         ((pc >> 1) & INDEX_MASK) as usize
     }
 
-    /// Look up `pc`. Returns the cached [`Decoded`] on a hit — the slot's epoch is
+    /// Look up `pc`. Returns the cached [`Fetched`] on a hit — the slot's epoch is
     /// current AND its tag matches this exact PC (not an aliasing neighbour that
     /// shares its index) — bumping hits; else `None`, bumping misses, and the
     /// caller does the slow fetch+expand and [`insert`](Self::insert)s. No `satp`
     /// check here: the hart flushes on any translation change, so a live slot is
     /// by construction valid for the current address space.
-    pub(crate) fn get(&mut self, pc: u64) -> Option<Decoded> {
+    pub(crate) fn get(&mut self, pc: u64) -> Option<Fetched> {
         let slot = &self.slots[Self::index(pc)];
         if slot.epoch == self.epoch && slot.tag == pc {
             self.hits += 1;
-            Some(slot.decoded)
+            Some(slot.fetched)
         } else {
             self.misses += 1;
             None
         }
     }
 
-    /// Record the slow-path decode of `pc`, evicting whatever aliased its slot.
-    pub(crate) fn insert(&mut self, pc: u64, decoded: Decoded) {
+    /// Record the slow-path fetch of `pc`, evicting whatever aliased its slot.
+    pub(crate) fn insert(&mut self, pc: u64, fetched: Fetched) {
         let epoch = self.epoch;
-        self.slots[Self::index(pc)] = Slot { epoch, tag: pc, decoded };
+        self.slots[Self::index(pc)] = Slot { epoch, tag: pc, fetched };
     }
 
     /// Invalidate every slot in O(1) — the guest invalidated translations
@@ -119,7 +127,7 @@ impl DecodeCache {
     }
 }
 
-impl Default for DecodeCache {
+impl Default for FetchCache {
     fn default() -> Self {
         Self::new()
     }
@@ -127,14 +135,14 @@ impl Default for DecodeCache {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeCache, Decoded};
+    use super::{FetchCache, Fetched};
 
-    const A: Decoded = Decoded { raw: 0x0000_0013, ilen: 4 }; // nop (addi x0,x0,0)
-    const B: Decoded = Decoded { raw: 0x0010_0093, ilen: 4 }; // addi x1,x0,1
+    const A: Fetched = Fetched { raw: 0x0000_0013, ilen: 4 }; // nop (addi x0,x0,0)
+    const B: Fetched = Fetched { raw: 0x0010_0093, ilen: 4 }; // addi x1,x0,1
 
     #[test]
-    fn a_miss_then_insert_then_hit_returns_the_decoded_instruction() {
-        let mut cache = DecodeCache::default();
+    fn a_miss_then_insert_then_hit_returns_the_fetched_instruction() {
+        let mut cache = FetchCache::default();
         assert_eq!(cache.get(0x1000), None, "cold lookup misses");
         cache.insert(0x1000, A);
         assert_eq!(cache.get(0x1000), Some(A), "warm lookup hits");
@@ -144,7 +152,7 @@ mod tests {
     fn a_flush_drops_every_entry() {
         // The invalidation hook (satp write / sfence.vma): after a flush, a
         // previously-warm PC misses.
-        let mut cache = DecodeCache::default();
+        let mut cache = FetchCache::default();
         cache.insert(0x2000, B);
         assert_eq!(cache.get(0x2000), Some(B));
         cache.flush();
@@ -160,7 +168,7 @@ mod tests {
         // means the evicted one misses (never returns the wrong instruction) and
         // the resident one hits. `SLOTS << 1` in PC space is exactly one index
         // period apart.
-        let mut cache = DecodeCache::default();
+        let mut cache = FetchCache::default();
         let p1 = 0x8000;
         let p2 = p1 + ((super::SLOTS as u64) << 1); // same index, different tag
         cache.insert(p1, A);
@@ -172,7 +180,7 @@ mod tests {
 
     #[test]
     fn hits_count_only_the_fast_path() {
-        let mut cache = DecodeCache::default();
+        let mut cache = FetchCache::default();
         let _ = cache.get(0x1000); // miss
         cache.insert(0x1000, A);
         let _ = cache.get(0x1000); // hit

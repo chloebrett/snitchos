@@ -524,13 +524,13 @@ impl Machine {
         self.harts.iter().map(Hart::timer_fires).sum()
     }
 
-    /// Enable or disable the Tier-1 decode cache (M5) on **every** hart. Off by
+    /// Enable or disable the Tier-1 fetch cache (M5) on **every** hart. Off by
     /// default (the pure interpreter is the oracle); snemu exposes this as a flag
     /// so a run with it on can be proven identical to one with it off — same
     /// instret, same telemetry, only faster.
-    pub fn set_decode_cache(&mut self, on: bool) {
+    pub fn set_fetch_cache(&mut self, on: bool) {
         for hart in &mut self.harts {
-            hart.set_decode_cache(on);
+            hart.set_fetch_cache(on);
         }
     }
 

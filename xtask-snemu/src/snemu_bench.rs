@@ -64,7 +64,7 @@ pub const TAXONOMY: &[TaxonomyEntry] = &[
 /// `max_steps` budget, then print the MIPS/wall-clock report. Determinism is
 /// enforced by [`BenchReport::from_samples`]: identical `instret` every run, or
 /// it errors loudly.
-pub fn run(workload: Option<&str>, max_steps: u64, runs: u32, decode_cache: bool) -> ExitCode {
+pub fn run(workload: Option<&str>, max_steps: u64, runs: u32, fetch_cache: bool) -> ExitCode {
     if runs == 0 {
         eprintln!("snemu bench: --runs must be at least 1");
         return ExitCode::from(2);
@@ -78,10 +78,10 @@ pub fn run(workload: Option<&str>, max_steps: u64, runs: u32, decode_cache: bool
     };
 
     let label = workload.unwrap_or("default (init)");
-    let cache = if decode_cache { " [decode-cache]" } else { "" };
+    let cache = if fetch_cache { " [fetch-cache]" } else { "" };
     eprintln!("snemu bench: {label}{cache} — {runs} run(s) at up to {max_steps} steps each");
 
-    match bench_one(&kernel, &dtb, workload, max_steps, runs, decode_cache, true) {
+    match bench_one(&kernel, &dtb, workload, max_steps, runs, fetch_cache, true) {
         Ok(r) => {
             print_report(label, &r);
             ExitCode::SUCCESS
@@ -97,7 +97,7 @@ pub fn run(workload: Option<&str>, max_steps: u64, runs: u32, decode_cache: bool
 /// and print a one-row-per-class comparison table. The "various workloads"
 /// picture: MIPS varies with the instruction mix, and each row is a bar a JIT
 /// tier will try to move.
-pub fn run_taxonomy(runs: u32, decode_cache: bool) -> ExitCode {
+pub fn run_taxonomy(runs: u32, fetch_cache: bool) -> ExitCode {
     if runs == 0 {
         eprintln!("snemu bench: --runs must be at least 1");
         return ExitCode::from(2);
@@ -118,7 +118,7 @@ pub fn run_taxonomy(runs: u32, decode_cache: bool) -> ExitCode {
             "snemu bench: {:<16} {} — {runs} run(s) at up to {} steps",
             e.class, e.workload, e.steps,
         );
-        match bench_one(&kernel, &dtb, Some(e.workload), e.steps, runs, decode_cache, false) {
+        match bench_one(&kernel, &dtb, Some(e.workload), e.steps, runs, fetch_cache, false) {
             Ok(r) => rows.push((e, r)),
             Err(err) => {
                 eprintln!("snemu bench: {} ({}): {err}", e.class, e.workload);
@@ -136,7 +136,7 @@ pub fn run_taxonomy(runs: u32, decode_cache: bool) -> ExitCode {
 /// fair cross-engine axis is that milestone, not instret — QEMU's instruction
 /// count is nondeterministic for this (timer-driven) guest, so only wall-clock
 /// to an observable point compares apples-to-apples. See step 4.
-pub fn run_baseline(runs: u32, decode_cache: bool) -> ExitCode {
+pub fn run_baseline(runs: u32, fetch_cache: bool) -> ExitCode {
     if runs == 0 {
         eprintln!("snemu bench: --runs must be at least 1");
         return ExitCode::from(2);
@@ -152,7 +152,7 @@ pub fn run_baseline(runs: u32, decode_cache: bool) -> ExitCode {
     let mut rows: Vec<BaselineRow> = Vec::new();
     for e in TAXONOMY {
         eprintln!("snemu bench: {:<16} {} — snemu ×{runs} + QEMU baseline", e.class, e.workload);
-        let report = match bench_one(&kernel, &dtb, Some(e.workload), e.steps, runs, decode_cache, false) {
+        let report = match bench_one(&kernel, &dtb, Some(e.workload), e.steps, runs, fetch_cache, false) {
             Ok(r) => r,
             Err(err) => {
                 eprintln!("snemu bench: {} ({}): {err}", e.class, e.workload);
@@ -286,12 +286,12 @@ fn bench_one(
     workload: Option<&str>,
     steps: u64,
     runs: u32,
-    decode_cache: bool,
+    fetch_cache: bool,
     verbose: bool,
 ) -> Result<BenchReport, String> {
     let mut samples: Vec<Sample> = Vec::with_capacity(runs as usize);
     for i in 0..runs {
-        let s = snemu_diff::measure_workload(kernel, dtb, workload, steps, decode_cache)?;
+        let s = snemu_diff::measure_workload(kernel, dtb, workload, steps, fetch_cache)?;
         if verbose {
             let startup = s.startup.map_or_else(
                 || " (silent)".to_string(),

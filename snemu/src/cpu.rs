@@ -7,7 +7,7 @@ use crate::block::{self, Block, BlockCache, Compiled};
 use crate::bus::Bus;
 use crate::csr::{Csr, CsrError, addr, sstatus};
 use crate::decode::{Instr, amo_op, expand, funct3, funct7, is_compressed, opcode, priv12, system};
-use crate::decode_cache::{DecodeCache, Decoded};
+use crate::fetch_cache::{FetchCache, Fetched};
 use crate::mem::{BusError, Memory, RAM_BASE};
 use crate::mmu::{self, Access};
 
@@ -269,10 +269,10 @@ pub(crate) struct Hart {
     /// An SBI request captured from an S-mode `ecall` this step, drained by
     /// `step` into a [`HartEffect`] for the driver to service.
     pending_sbi: Option<SbiRequest>,
-    /// Tier-1 decode cache (M5), or `None` when disabled — the default, which
+    /// Tier-1 fetch cache (M5), or `None` when disabled — the default, which
     /// runs the pure interpreter (the correctness oracle). Toggled per hart via
-    /// [`set_decode_cache`](Self::set_decode_cache).
-    decode_cache: Option<DecodeCache>,
+    /// [`set_fetch_cache`](Self::set_fetch_cache).
+    fetch_cache: Option<FetchCache>,
     /// Tier-2 block JIT (M6) `PC → block` cache, or `None` when disabled (the
     /// default oracle path). Toggled per hart via [`set_block_jit`](Self::set_block_jit).
     block_cache: Option<BlockCache>,
@@ -283,7 +283,7 @@ pub(crate) struct Hart {
     /// Whether `wfi` parks the hart (Idle) so the driver can fast-forward the
     /// clock over idle time, vs. acting as a bare nop that advances. On by
     /// default; toggled per hart via [`set_idle_skip`](Self::set_idle_skip) so a
-    /// run with it on can be proven identical to one with it off (the decode-cache
+    /// run with it on can be proven identical to one with it off (the fetch-cache
     /// philosophy — the interpreter stays the oracle).
     idle_skip: bool,
     /// Whether the block JIT uses **Backend B** (native AArch64 codegen) instead of
@@ -395,9 +395,9 @@ impl Cpu {
         self.hart.instret
     }
 
-    /// Enable or disable this hart's Tier-1 decode cache (M5).
-    pub fn set_decode_cache(&mut self, on: bool) {
-        self.hart.set_decode_cache(on);
+    /// Enable or disable this hart's Tier-1 fetch cache (M5).
+    pub fn set_fetch_cache(&mut self, on: bool) {
+        self.hart.set_fetch_cache(on);
     }
 
     /// Enable/disable the Tier-2 block JIT on the lone hart.
@@ -428,12 +428,12 @@ impl Cpu {
         self.hart.set_idle_skip(on);
     }
 
-    /// Decode-cache hits so far (0 when the cache is disabled). Used by the
+    /// Fetch-cache hits so far (0 when the cache is disabled). Used by the
     /// equivalence test to confirm the fast path engaged.
     #[cfg(test)]
     #[must_use]
-    pub fn decode_cache_hits(&self) -> u64 {
-        self.hart.decode_cache.as_ref().map_or(0, DecodeCache::hits)
+    pub fn fetch_cache_hits(&self) -> u64 {
+        self.hart.fetch_cache.as_ref().map_or(0, FetchCache::hits)
     }
 }
 
@@ -453,7 +453,7 @@ impl Hart {
             reservation: None,
             state: HartState::Running,
             pending_sbi: None,
-            decode_cache: None,
+            fetch_cache: None,
             block_cache: None,
             reg_cache: true,
             idle_skip: true,
@@ -470,12 +470,12 @@ impl Hart {
         self.timer_fires
     }
 
-    /// Enable or disable this hart's Tier-1 decode cache. Enabling starts from a
+    /// Enable or disable this hart's Tier-1 fetch cache. Enabling starts from a
     /// cold cache; disabling drops it (back to the pure interpreter). The flag is
     /// what lets snemu run the interpreter as the oracle and prove the cache
     /// changes nothing but speed.
-    pub(crate) fn set_decode_cache(&mut self, on: bool) {
-        self.decode_cache = on.then(DecodeCache::default);
+    pub(crate) fn set_fetch_cache(&mut self, on: bool) {
+        self.fetch_cache = on.then(FetchCache::default);
     }
 
     /// Enable or disable this hart's Tier-2 block JIT (M6). Like the decode cache,
@@ -856,23 +856,23 @@ impl Hart {
     /// block compiler walks a block this way. `None` on a fetch fault or an illegal
     /// compressed encoding: the compiler ends the block there and the interpreter
     /// re-fetches and traps correctly at run time. Side-effect-free (`&self`).
-    fn fetch_for_compile(&self, pc: u64, bus: &Bus) -> Option<Decoded> {
+    fn fetch_for_compile(&self, pc: u64, bus: &Bus) -> Option<Fetched> {
         let satp = self.csr.read(addr::SATP).ok()?;
         let user = self.privilege == Privilege::User;
         let sum = self.csr_read(addr::SSTATUS) & sstatus::SUM != 0;
         let pa = mmu::translate(satp, pc, Access::Fetch, bus.ram(), user, sum).ok()?;
         let half = bus.read_u16(pa).ok()?;
         if is_compressed(half) {
-            Some(Decoded { raw: expand(half)?, ilen: ILEN_COMPRESSED })
+            Some(Fetched { raw: expand(half)?, ilen: ILEN_COMPRESSED })
         } else if pc & 0xfff > 0xffc {
             // Upper half in the next page: translate it separately (the pages need
             // not be physically contiguous — same hazard as the interpreter fetch).
             // `None` on a fault ends the block; the interpreter re-fetches and traps.
             let hi_pa = mmu::translate(satp, pc.wrapping_add(2), Access::Fetch, bus.ram(), user, sum).ok()?;
             let raw = u32::from(half) | (u32::from(bus.read_u16(hi_pa).ok()?) << 16);
-            Some(Decoded { raw, ilen: ILEN_FULL })
+            Some(Fetched { raw, ilen: ILEN_FULL })
         } else {
-            Some(Decoded { raw: bus.read_u32(pa).ok()?, ilen: ILEN_FULL })
+            Some(Fetched { raw: bus.read_u32(pa).ok()?, ilen: ILEN_FULL })
         }
     }
 
@@ -914,9 +914,9 @@ impl Hart {
         // guards). No satp read here: the cache is flushed on any translation
         // change (satp write / sfence.vma), so a live entry is valid by
         // construction — the hot path is a single array probe.
-        if let Some(decoded) = self.decode_cache.as_mut().and_then(|c| c.get(self.pc)) {
-            self.cur_ilen = decoded.ilen;
-            self.execute(decoded.raw, bus)?;
+        if let Some(fetched) = self.fetch_cache.as_mut().and_then(|c| c.get(self.pc)) {
+            self.cur_ilen = fetched.ilen;
+            self.execute(fetched.raw, bus)?;
             self.instret += 1;
             return Ok(self.pending_sbi.take().map_or(HartEffect::None, HartEffect::Sbi));
         }
@@ -945,8 +945,8 @@ impl Hart {
                 bus.read_u32(pc_pa)?
             }
         };
-        if let Some(cache) = self.decode_cache.as_mut() {
-            cache.insert(self.pc, Decoded { raw, ilen: self.cur_ilen });
+        if let Some(cache) = self.fetch_cache.as_mut() {
+            cache.insert(self.pc, Fetched { raw, ilen: self.cur_ilen });
         }
         self.execute(raw, bus)?;
         self.instret += 1;
@@ -1336,10 +1336,10 @@ impl Hart {
         if do_write {
             self.csr.write(csr, new).map_err(|e| csr_step_error(pc, e))?;
             // Writing `satp` switches the address space, so every cached
-            // (translated) instruction is now stale. This is the coherence hook
+            // (translated) fetch is now stale. This is the coherence hook
             // that lets the fast path skip re-reading satp per instruction.
             if csr == addr::SATP {
-                if let Some(cache) = self.decode_cache.as_mut() {
+                if let Some(cache) = self.fetch_cache.as_mut() {
                     cache.flush();
                 }
                 if let Some(cache) = self.block_cache.as_mut() {
@@ -1361,10 +1361,10 @@ impl Hart {
     fn priv_op(&mut self, instr: Instr) -> Result<(), StepError> {
         if instr.funct7() == funct7::SFENCE_VMA {
             // No hardware TLB to flush — translation walks every access. But the
-            // decode cache IS a translated-instruction cache, so the guest's
+            // fetch cache IS a translated-fetch cache, so the guest's
             // invalidation must drop it (this is the coherence hook that lets the
             // fast path skip re-translation safely).
-            if let Some(cache) = self.decode_cache.as_mut() {
+            if let Some(cache) = self.fetch_cache.as_mut() {
                 cache.flush();
             }
             if let Some(cache) = self.block_cache.as_mut() {
@@ -2230,7 +2230,7 @@ mod tests {
     }
 
     #[test]
-    fn the_decode_cache_changes_nothing_but_speed() {
+    fn the_fetch_cache_changes_nothing_but_speed() {
         // A tiny loop that re-executes the same PCs, so the cache takes hits:
         // `addi x1,x1,1` once, then `jal x0,0` spinning on itself. Running it with
         // the cache OFF and ON must yield byte-identical architectural state —
@@ -2238,7 +2238,7 @@ mod tests {
         let program = &[0x0010_8093, 0x0000_006f]; // addi x1,x1,1 ; jal x0,0
         let run = |cache: bool| {
             let mut cpu = cpu_with(program);
-            cpu.set_decode_cache(cache);
+            cpu.set_fetch_cache(cache);
             for _ in 0..8 {
                 cpu.step().unwrap();
             }
@@ -2249,11 +2249,11 @@ mod tests {
         assert_eq!(on, off, "cache ON must equal cache OFF");
         // And the fast path actually engaged (the jal re-executed).
         let mut cpu = cpu_with(program);
-        cpu.set_decode_cache(true);
+        cpu.set_fetch_cache(true);
         for _ in 0..8 {
             cpu.step().unwrap();
         }
-        assert!(cpu.decode_cache_hits() > 0, "the loop should hit the cache");
+        assert!(cpu.fetch_cache_hits() > 0, "the loop should hit the cache");
     }
 
     #[test]
