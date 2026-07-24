@@ -72,7 +72,15 @@ test — the encoder must reject or mask, documented.
 layout/no-MMIO style of `kernel-devices/src/uart.rs`. `WDATA`/`CTRL` offsets as
 consts here too.
 
-## Increment 2 — sample-rate → (`pwmdac_core` rate, `cnt_n`)
+## Increment 2 — sample-rate → (`pwmdac_core` rate, `cnt_n`) — ✅ DONE
+
+Shipped `plan_rate(sample_rate_hz) -> Option<RatePlan>` in `pwmdac.rs`, transcribing
+mainline `hw_params`' 7-row switch (8000/11025/16000/22050/32000/44100/48000 Hz).
+3 tests: exact table, rejection of unsupported rates, and the property
+`core_clk = fs × cnt_n × 256` (256 = 2⁸, the 8-bit PWM period). Mutation: all new
+`plan_rate` mutants caught; only the pre-documented `| → ^` equivalents survive.
+**Resolves the Increment 1 `cnt_n` worry:** the real field values are 1/2/3, so the
+512 discrepancy never bites Tier 0 — but keep it flagged for a 10-bit/high-rate future.
 
 **RED:** `plan_rate(target_fs_hz) -> RatePlan { core_clk_hz, cnt_n }` returns the
 known-good pairs from the design doc for 8 kHz (6.144 MHz), 44.1 kHz (11.2896 MHz),

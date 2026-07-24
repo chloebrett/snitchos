@@ -118,6 +118,38 @@ impl Ctrl {
     }
 }
 
+/// A programmed sample rate: the `pwmdac_core` clock to request via the SYSCRG and
+/// the `CNT_N` oversampling divider that together realise it.
+///
+/// The relationship is `core_clk = sample_rate × cnt_n × 256`, where 256 = 2⁸ is
+/// the 8-bit PWM period (`Resolution::Bits8`). `cnt_n` is chosen per rate so the
+/// core clock lands on a value the audio PLL can actually synthesise — which is why
+/// it varies (3 at 8 kHz, 1 at 44.1/48 kHz). Transcribed from mainline
+/// `jh7110_pwmdac_hw_params`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RatePlan {
+    pub core_clk_hz: u32,
+    pub cnt_n: CntN,
+}
+
+/// Plan the `pwmdac_core` clock + `CNT_N` divider for a PCM sample rate, or `None`
+/// if unsupported. Mainline supports 8000/11025/16000/22050/32000/44100/48000 Hz
+/// (`SNDRV_PCM_RATE_8000_48000`); anything else the driver rejects with `-EINVAL`.
+#[must_use]
+pub fn plan_rate(sample_rate_hz: u32) -> Option<RatePlan> {
+    let (core_clk_hz, cnt_n) = match sample_rate_hz {
+        8000 => (6_144_000, 3),
+        11025 => (5_644_800, 2),
+        16000 => (12_288_000, 3),
+        22050 => (5_644_800, 1),
+        32000 => (8_192_000, 1),
+        44100 => (11_289_600, 1),
+        48000 => (12_288_000, 1),
+        _ => return None,
+    };
+    Some(RatePlan { core_clk_hz, cnt_n: CntN::new(cnt_n)? })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +260,41 @@ mod tests {
         assert!(DataShift::new(8).is_none(), "8 does not fit a 3-bit field");
         assert!(DataShift::new(7).is_some());
         assert_eq!(DataShift::new(5).expect("in range").get(), 5);
+    }
+
+    /// The seven `(sample_rate, core_clk, cnt_n)` rows the mainline driver's
+    /// `hw_params` switch encodes.
+    const RATE_TABLE: [(u32, u32, u16); 7] = [
+        (8000, 6_144_000, 3),
+        (11025, 5_644_800, 2),
+        (16000, 12_288_000, 3),
+        (22050, 5_644_800, 1),
+        (32000, 8_192_000, 1),
+        (44100, 11_289_600, 1),
+        (48000, 12_288_000, 1),
+    ];
+
+    #[test]
+    fn supported_rates_map_to_the_mainline_clock_and_divider() {
+        for (fs, core, n) in RATE_TABLE {
+            let expected = RatePlan { core_clk_hz: core, cnt_n: CntN::new(n).expect("in range") };
+            assert_eq!(plan_rate(fs), Some(expected), "rate {fs} Hz");
+        }
+    }
+
+    #[test]
+    fn unsupported_rates_are_rejected() {
+        for fs in [0, 7999, 44099, 88200, 96000, 192_000] {
+            assert!(plan_rate(fs).is_none(), "rate {fs} Hz is unsupported");
+        }
+    }
+
+    #[test]
+    fn core_clock_is_sample_rate_times_cnt_n_times_the_8bit_period() {
+        // Documents the formula the table encodes: core = fs × cnt_n × 2⁸.
+        for (fs, _, _) in RATE_TABLE {
+            let plan = plan_rate(fs).expect("supported");
+            assert_eq!(plan.core_clk_hz, fs * u32::from(plan.cnt_n.get()) * 256, "rate {fs} Hz");
+        }
     }
 }
