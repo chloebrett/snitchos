@@ -27,11 +27,12 @@ time. The old `1 - hart_id` could not have survived this — B6 was load-bearing
 Delivery: `cargo xtask image` → RISC-V Image (header embedded in `entry.S`) →
 TFTP → `booti`. See [Bring-up mechanics](#bring-up-mechanics-m0-in-detail).
 
-**Two board-only deviations remain (see B-notes below):** `ramfb::init` is skipped
-(fw_cfg is a QEMU invention — its DMA handshake *hangs* on the board), and
-`unmap_identity` is **temporarily** skipped pending the `kmain`-frame fix below.
+**One board-only deviation remains:** `ramfb::init` is skipped (fw_cfg is a QEMU
+invention — its DMA handshake *hangs* on the board; a runtime signature check +
+bounded poll would beat the feature gate). The `unmap_identity` deviation is **gone**
+— see the fixed callout below.
 
-> ### ⚠ Latent bug found at first light: `kmain`'s frame straddles the trampoline
+> ### ✅ FIXED — latent bug found at first light: `kmain`'s frame straddled the trampoline
 >
 > `entry.S` enters `kmain` with a **physical** `sp`; the higher-half trampoline then
 > shifts `sp` *in the middle of* `kmain`. In a debug build `kmain`'s frame is large,
@@ -39,16 +40,27 @@ TFTP → `booti`. See [Bring-up mechanics](#bring-up-mechanics-m0-in-detail).
 > computed pre-trampoline stay **physical forever**. They work only while the
 > identity map is live, and fault the instant `unmap_identity` runs (observed:
 > `scause=0xf stval=0x40506de0 sepc=…`, a store to a physical boot-stack address on
-> the very next `println!`). **This is not board-specific** — QEMU's codegen just
-> happens not to spill one that survives. **Fix:** split `kmain` so all
-> post-trampoline work runs in a *fresh* frame allocated with the higher-half `sp`.
-> Third instance of this hazard family after the `tp` truncation and the `entry_pa`
-> loop-invariant miscompile — worth fixing structurally, not case-by-case.
+> the very next `println!`). **This was not board-specific** — QEMU's codegen just
+> happens not to spill one that survives, so it shipped green for months.
+>
+> **Fixed (2026-07-24), hardware-confirmed.** `kmain` is now pre-trampoline only
+> (MMIO regions, `mmu::enable`, the trampoline) and hands off to
+> `#[inline(never)] kmain_higher_half`, whose frame is allocated *after* the `sp`
+> shift — so no post-trampoline local can have a physical address. The DTB is parsed
+> in the new frame too. `unmap_identity` is unconditional again on every target, and
+> the board boots clean through it to a live heartbeat. `#[inline(never)]` is
+> load-bearing: inlining it back would recreate the straddling frame.
+>
+> **The rule this leaves:** *no cached address, and no stack frame, may span the
+> trampoline.* Third instance of the family after the `tp` truncation and the
+> `entry_pa` loop-invariant miscompile — fixed structurally, not case-by-case.
 
-Next: the `kmain` split (re-enable `unmap_identity`), then **M2 — telemetry over
-UART** (the `hb` line above is a debug `println!`, not the frame pipeline; the board
-has no telemetry transport yet). The section below is the original scoping;
-per-blocker ✓ notes mark what shipped.
+Next: **M2 — telemetry over UART** (the `hb` line above is a debug `println!`, not
+the frame pipeline; the board has no telemetry transport yet). Smaller debts: drop
+the `ph:` phase markers, keep `smp:`/`hb` until M2 replaces them with real frames,
+clear the ~21 `vf2` dead-code warnings, and consider a runtime fw_cfg guard (bounded
+poll + signature check) instead of the `cfg(vf2)` ramfb skip. The section below is
+the original scoping; per-blocker ✓ notes mark what shipped.
 
 > B6 was re-scoped during the work: it turned out to be an **M3 (SMP)** item, not an
 > M1 gate (the boot hart is hardcoded logical 0, so a non-zero boot hartid never

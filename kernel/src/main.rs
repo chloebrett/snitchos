@@ -64,11 +64,12 @@ global_asm!(include_str!("entry.S"));
 ///   `console::init` runs.
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
-    // DTB parse must come first — we need it to discover MMIO regions
-    // before we build the boot page table. Pure parsing, no formatted
-    // output, no fn-pointer-dispatched calls. Safe with MMU off
-    // regardless of where the kernel is linked.
-    let dtb = unsafe { Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
+    // Nothing here may outlive this function: `kmain`'s frame is allocated with a
+    // *physical* `sp` (see the hand-off comment at the end). The DTB is parsed in
+    // `kmain_higher_half` instead — it isn't needed here, because MMIO discovery is
+    // hardcoded. (If `collect_mmio_regions` is ever revived — B5 — it would need a
+    // pre-MMU parse right here, and its results must be *values*, not pointers.)
+    //
     // MMIO regions: hardcoded for QEMU `virt`. DTB-driven discovery
     // (`collect_mmio_regions`) crashes pre-MMU under higher-half link
     // in a way we haven't isolated; see plans/v0.4-memory-findings.md.
@@ -115,6 +116,35 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
             options(nostack),
         );
     }
+
+    // Hand off to a *fresh* stack frame. `kmain`'s own frame was allocated with a
+    // **physical** `sp` (entry.S enters pre-MMU), and the shift above only
+    // re-aliases those same bytes — so any address of a `kmain` local that the
+    // compiler materialised or spilled *before* this point stays physical forever.
+    // Such a pointer works only while the identity map is live and faults the
+    // instant `unmap_identity` runs. Calling a separate function means every local
+    // from here on gets its address computed against the higher-half `sp`.
+    //
+    // Third instance of the "address materialised on the wrong side of the
+    // trampoline" family, after the `tp` truncation and the `entry_pa`
+    // loop-invariant miscompile — see the ⚠ callout in plans/visionfive2-port.md.
+    // The rule: no cached address, and no stack frame, may span the trampoline.
+    kmain_higher_half(hart_id, dtb_phys)
+}
+
+/// The boot sequence proper, running entirely at higher-half PC **and** `sp`.
+///
+/// Split out of [`kmain`] so this frame is allocated *after* the trampoline — see
+/// the hand-off comment there for why that matters. `#[inline(never)]` is
+/// load-bearing: inlining this back into `kmain` would recreate the straddling
+/// frame and the bug with it.
+#[inline(never)]
+fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
+    // Parsed here rather than pre-trampoline so the `Fdt` — and every address
+    // derived from it — belongs to this frame. The DTB bytes stay reachable
+    // through the identity map until `unmap_identity`; the borrow is dropped
+    // before that (`let _ = dtb` below).
+    let dtb = unsafe { Fdt::from_ptr(dtb_phys as *const u8) }.unwrap();
 
     // v0.6 step 4: install the per-hart pointer. `PER_HART_DATA` is a
     // higher-half static, so this must run post-trampoline.
@@ -736,18 +766,12 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: kernel is running at higher-half PC + sp (trampoline
     // executed above). `CONSOLE` and `UART` were initialized with
     // higher-half VAs in earlier increments.
-    // TEMPORARY (board bring-up): skipped on vf2. `kmain`'s stack frame is
-    // allocated *before* the higher-half trampoline (entry.S enters with a physical
-    // `sp`; the trampoline shifts it mid-function), so the compiler spills physical
-    // addresses of `kmain`'s own locals. Those stay valid only while the identity
-    // map is live — tearing it down here faults on the next use (observed on the
-    // board: store to 0x40506de0, a physical boot-stack address, right after this
-    // call). The real fix is to split `kmain` so post-trampoline work runs in a
-    // fresh frame; until then keep identity mapped on the board.
-    #[cfg(not(feature = "vf2"))]
+    // Safe on every target again: the post-trampoline boot sequence runs in
+    // `kmain_higher_half`'s frame, so it holds no physical self-pointers to be
+    // invalidated here. (This briefly had to be skipped on the board — a store to a
+    // physical boot-stack address faulted right after this call — which is what
+    // uncovered the straddling-frame bug. See the hand-off comment in `kmain`.)
     unsafe { mmu::unmap_identity() };
-    #[cfg(feature = "vf2")]
-    println!("ph: unmap-identity SKIPPED (board)");
 
     println!("entering heartbeat");
     heartbeat::run(metrics)
