@@ -138,6 +138,15 @@ mod tests {
     }
 
     #[test]
+    fn ip_checksum_folds_end_around_carries() {
+        // 0xffff + 0xffff + 0x0001 = 0x1ffff, which carries twice: the first
+        // fold produces 0x10000, the second reduces it to 1. Exercises the
+        // carry-fold arithmetic that a header summing under 0x10000 never
+        // touches (verified against the Python reference: 0xfffe).
+        assert_eq!(ip_checksum(&[0xff, 0xff, 0xff, 0xff, 0x00, 0x01]), 0xfffe);
+    }
+
+    #[test]
     fn a_complete_header_checksums_to_zero() {
         // The defining property of the IP checksum: fold the header *including*
         // its own checksum field and the result is zero. Independent of the
@@ -164,5 +173,13 @@ mod tests {
             build_udp_datagram(&test_config(), b"snitch", &mut buf),
             Err(BufferTooSmall)
         );
+    }
+
+    #[test]
+    fn an_exactly_sized_buffer_succeeds() {
+        // The boundary: 42 + 6 = 48 bytes is an exact fit, not too small.
+        let mut buf = [0u8; 48];
+        let got = build_udp_datagram(&test_config(), b"snitch", &mut buf).expect("exact fit");
+        assert_eq!(got, &GOLDEN);
     }
 }

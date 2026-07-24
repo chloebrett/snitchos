@@ -32,6 +32,10 @@ exclude_re = [
   # are disjoint bits (RECV|WAIT for read, EMIT|SEND|SIGNAL for write), so
   # `rights & (A | B)` and `rights & (A ^ B)` mask the same value.
   "replace \\| with \\^ in rights_glyphs",
+  # Equivalent mutant in kernel-net ip_checksum: the word assembly is
+  # `(hi << 8) | lo` where `hi << 8` occupies bits 15:8 and `lo` (a u8)
+  # occupies bits 7:0 — disjoint by construction, so | and ^ are identical.
+  "replace \\| with \\^ in ip_checksum",
   # Equivalent mutant in fs-proto Badge::pack: inode occupies bits [0..32)
   # and rights [32..48) — disjoint by construction, so | and ^ are identical.
   "replace \\| with \\^ in Badge::pack",
