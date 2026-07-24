@@ -49,7 +49,15 @@ then the minimum code to pass. Assess refactor after each green.
 
 ---
 
-## Increment 1 — `CTRL` register encoding
+## Increment 1 — `CTRL` register encoding — ✅ DONE
+
+Shipped `kernel-devices/src/pwmdac.rs`: `Ctrl::to_bits()` + `CntN`/`DataShift`
+newtypes + `Resolution`/`DutyCycle`/`DataMode` enums, 12 host tests, clippy-clean.
+Mutation: 18/24 caught; the 6 survivors are the `| → ^` equivalent-mutant class
+(disjoint fields), documented in `to_bits`. **Finding to carry to Increment 6:**
+mainline's `PWMDAC_SAMPLE_CNT_512 = 512` overflows the 9-bit `CNT_N` field
+(`GENMASK(12,4)`, max 511) — `CntN::new` rejects 512; resolve against the datasheet
+before writing hardware.
 
 **RED** (`kernel-devices/src/pwmdac.rs` tests): a typed `Ctrl` config
 (`enable: bool`, `resolution: Resolution` {Bits8, Bits10} → `SHIFT`,

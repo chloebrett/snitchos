@@ -1,5 +1,5 @@
 //! JH7110 PWMDAC control-register *layout* logic — the part that decides what
-//! `u32` to write to `CTRL`, no MMIO. Drives the VisionFive 2's 3.5mm analog
+//! `u32` to write to `CTRL`, no MMIO. Drives the `VisionFive` 2's 3.5mm analog
 //! audio-out jack. The kernel driver (`kernel/src/device/pwmdac.rs`) does the
 //! volatile writes at these offsets; what's here is pure and host-tested.
 //!
@@ -100,6 +100,12 @@ pub struct Ctrl {
 
 impl Ctrl {
     /// Encode to the `u32` written to the `CTRL` register.
+    ///
+    /// The fields occupy disjoint bit ranges — enforced by the `CntN` (`≤ 511`,
+    /// bits 12:4) and `DataShift` (`≤ 7`, bits 17:15) bounds and the small enum
+    /// discriminants — so no two `|` operands ever share a set bit. That makes
+    /// `|` and `^` equivalent here: mutation testing reports the `| → ^` mutants
+    /// as survivors, and they are genuine equivalent mutants, not a test gap.
     #[must_use]
     pub fn to_bits(&self) -> u32 {
         u32::from(self.enable)
