@@ -281,49 +281,52 @@ Whichever transport, the *ownership* rule holds: **one writer per stream.** The
 kernel's ambient `println!` is the anomaly, and should eventually be a capability
 the kernel holds like anyone else.
 
-## Throughput — a budget that needs measuring
+## Throughput — measured, and 115200 suffices
 
-Two incidental data points from `snemu boot` (worth re-measuring properly rather
-than trusting; different builds and workloads, not a controlled comparison):
+**Measured 2026-07 under snemu (Step 6).** The earlier "~60 KB/s" estimate was
+wrong — it was **boot-transient-dominated**, taken over ~5 heartbeats where the
+one-time registration + spawn burst swamps the sample. Measured properly, as a
+two-point delta that excludes the transient — bytes emitted between ~13 and ~53
+heartbeats, `steady = (bytes_B − bytes_A) / (heartbeats_B − heartbeats_A)`, with
+`heartbeats = timer_fires / TICKS_PER_HEARTBEAT(20)` and one heartbeat ≈ one guest
+second:
 
-| build | bytes | frames | timer fires | ≈ heartbeats |
-|---|---|---|---|---|
-| dev, default | 12,016 | 998 | 152 | 7.6 |
-| release, `workload=init` | 326,192 | 35,902 | 109 | 5.5 |
+| workload | Δbytes | Δheartbeats | **steady-state** |
+|---|---|---|---|
+| `init` (the board's default boot) | 221,809 | 40 | **≈ 5.5 KB/s** |
+| `demo` (scheduler + producer/consumer) | 434,977 | 160 | **≈ 2.7 KB/s** |
 
-`TICKS_PER_HEARTBEAT = 20` and the heartbeat is ~1/s, so the second row is
-roughly **60 KB/s of telemetry**. Against a 115200 UART's 11.5 KB/s that is a
-**5× overrun** — we would drop ~80% of frames. The first row is ~1.6 KB/s and
-fits comfortably. The two disagree by more than the workload difference should
-explain, which is itself a reason to measure rather than assume.
+`init` is the *heavier* of the two (it runs userspace + the FS server/client, so
+per-heartbeat it adds IPC frames, cap events, and more per-task metrics — the rate
+*ramps* as it spawns children, it doesn't decay). Both are **single-digit KB/s**,
+comfortably under a **115200 UART's ~11.5 KB/s**.
 
-Levers, once measured:
+**So the baud lever is optional, not required.** 115200 carries `init`'s
+steady-state with ~2× headroom; the boot transient is front-loaded (registration
++ pre-init flush) and absorbed by the existing pre-init buffer + drop-and-count,
+and even the boot-window *average* is ~3.3 KB/s. This flips the earlier
+conclusion: one 115200 cable is enough for the workloads that exist today.
 
-- **Raise the baud — the decisive lever, and it makes one cable viable.** Today
-  the driver "deliberately does no baud/divisor init, relying on `OpenSBI`'s
-  config", so we inherit whatever firmware set (115200). Changing it is standard
-  8250 work: set `LCR.DLAB`, write the divisor to `DLL`/`DLM`, clear `DLAB`, where
-  `divisor = uart_clock / (16 × baud)`. The input clock comes from the DTB
-  (`clock-frequency` on the UART node) — the same manual-decode path B4 already
-  built for `reg-shift`/`reg-io-width`, so there is a place to put it.
+Levers, in the order they now matter:
 
-  | baud | throughput | vs observed ~60 KB/s |
-  |---|---|---|
-  | 115200 | 11.5 KB/s | **5× short** |
-  | 921600 | 92 KB/s | fits, ~65% utilisation |
-  | 1.5M | 150 KB/s | comfortable |
+- **Emit less / accept sampling — the honest defaults, and already sufficient.**
+  Drop-and-count makes any overflow observable (`Frame::Dropped`); at 5.5 KB/s vs
+  11.5 KB/s there is nothing to drop for `init`. Per-task metrics are the bulk and
+  scale with task count, so a genuinely task-heavy board workload is the only thing
+  that would approach the ceiling — and a metric subset / sampling is a policy knob
+  if it ever does.
+- **Raise the baud — headroom, not a fix.** Kept in the back pocket for a
+  future task-heavy workload or a tighter no-drop guarantee, *not* needed for the
+  telemetry that exists. Standard 8250 work: `LCR.DLAB`, divisor to `DLL`/`DLM`,
+  `divisor = uart_clock / (16 × baud)`, clock from the DTB `clock-frequency` — the
+  manual-decode path B4 built for `reg-shift`/`reg-io-width`. At 921600 → ~92 KB/s.
+  Caveats if pursued: the CP2102 adapter's ceiling (~1 Mbaud) and that the console
+  must reconnect at the new rate (switch **early and once**, document next to
+  `setenv bootargs`).
 
-  921600 clears the measured load on a single line — which is what lets Decision 4
-  choose one cable. Two constraints to check before committing: the **USB-serial
-  adapter's** ceiling (the original CP2102 tops out near 1 Mbaud; CP2102N goes
-  higher), and that changing the console UART's baud mid-boot means the terminal
-  must reconnect at the new rate — garbage until it does. The latter is an
-  argument for switching baud **early and once**, and for documenting it in the
-  boot procedure next to `setenv bootargs`.
-- **Emit less.** Per-task metrics scale with task count and are the bulk of the
-  heartbeat. Sampling or a board-specific metric subset is a policy knob.
-- **Accept sampling.** Drop-and-count already makes this honest; a system that
-  reports "I dropped 40,000 frames" is telling the truth.
+**Consequence for the plan:** Step 7 (baud programming) drops from prerequisite to
+*optional headroom*. Chosen baud for the board: **115200** (inherited from OpenSBI,
+no divisor programming needed). Revisit only if a measured workload exceeds it.
 
 Do not design around 115200 by default. **Measure first**, then pick a baud.
 

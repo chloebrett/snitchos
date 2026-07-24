@@ -223,25 +223,29 @@ Deferred here because it needs the bidirectional serial wire (Step 10) and
 through `reader` on the board. The down-payment on the dashboards-plus-terminal end
 state — not a workaround for losing `screen`.
 
-### Step 6: Measure real telemetry throughput
+### Step 6: Measure real telemetry throughput — ✅ DONE
 
-**Acceptance criteria**: a documented steady-state bytes/second figure for a
-representative workload, measured under snemu, recorded in the design note; a
-baud target chosen from it.
-**RED**: n/a — this is a measurement, not a behaviour change. Say so rather than
-inventing a test.
-**GREEN**: measure; write the number and method into
-`docs/uart-telemetry-design.md`, replacing the two incidental data points.
-**Done when**: the design note states a measured figure and a chosen baud. *The
-existing ~60 KB/s estimate comes from two boots that disagree by more than the
-workload difference explains; steps 7–10 depend on it, so it gets measured
-properly first.*
+**Result**: measured steady-state (two-point delta, excluding the boot transient)
+under snemu — `init` **≈ 5.5 KB/s**, `demo` **≈ 2.7 KB/s**. The earlier "~60 KB/s"
+was boot-transient-dominated (~5-heartbeat sample). Both are **single-digit KB/s,
+under 115200's ~11.5 KB/s** → **chosen baud: 115200** (inherited from OpenSBI, no
+divisor programming). Method + tables written into `docs/uart-telemetry-design.md`
+("Throughput — measured, and 115200 suffices").
+**RED**: n/a — a measurement, not a behaviour change.
+**Done when**: the design note states the measured figures and a chosen baud. ✅
+**Consequence**: **Step 7 drops from prerequisite to optional headroom** (below).
 
-### Step 7: Program the UART baud
+### Step 7: Program the UART baud — ⏸ OPTIONAL (deferred; Step 6 showed 115200 suffices)
 
-**Acceptance criteria**: the kernel sets the divisor from the DTB clock and the
-chosen baud; the board's console still prints when the terminal reconnects at the
-new rate.
+**Downgraded by Step 6's measurement:** steady-state telemetry is single-digit
+KB/s, under 115200's 11.5 KB/s, so the board keeps OpenSBI's 115200 and needs no
+divisor programming. This step is kept as documented *headroom* for a future
+task-heavy workload or a tighter no-drop guarantee — **do it only if a measured
+workload exceeds 115200.** Not on the critical path to Step 8/9/10.
+
+**Acceptance criteria** *(if pursued)*: the kernel sets the divisor from the DTB
+clock and the chosen baud; the board's console still prints when the terminal
+reconnects at the new rate.
 **RED**: pure divisor math in `kernel-devices::uart` — `divisor = clk / (16 ×
 baud)`, host-tested, including rounding and a rejected-out-of-range case.
 **GREEN**: divisor computation + the `LCR.DLAB` / `DLL` / `DLM` write sequence.

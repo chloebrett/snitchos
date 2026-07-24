@@ -155,6 +155,17 @@ in *this* OS rather than being a toy:
   folds frames and models MMIO devices), and you can *hear* a boot replay — or diff
   two boots by ear. Converges with the snemu-wasm + collector-as-server direction.
 
+> **Emulator audio — snemu yes, QEMU no.** The testing-useful slice of this (capture
+> the `WDATA` write stream, render a `.wav`, listen) is pulled *forward* into Tier 0
+> as [../plans/vf2-audio-tier0.md](../plans/vf2-audio-tier0.md) Increment 9: it gives
+> by-ear confirmation without hardware and an exact itest oracle. It works because
+> snemu is a deterministic MMIO-device emulator and the guest's `mtime`-paced writes
+> already encode the sample rate — so snemu need model no analog clock. **QEMU can't
+> do this**: it has an audio subsystem (`-audiodev`) but its audio device models are
+> PCI/virtio (`intel-hda`, `virtio-sound`), never a StarFive PWMDAC, and our itests
+> run on `virt`/snemu where `0x100b0000` isn't mapped at all. Modelling it in QEMU
+> would mean a custom C device model for no gain over the snemu route.
+
 This reframes the whole thing from "make the board beep" to "a new telemetry
 channel," which is on-thesis. The roadmap already gestures at it:
 `docs/roadmap-and-milestones.md:78` ("over-engineered audio: RT deadlines, XRun

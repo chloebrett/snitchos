@@ -190,6 +190,12 @@ by-ear (documented — no automated audio oracle exists).
 
 ## Increment 8 — automated code-path guard (no audio model needed)
 
+*(The cheap, zero-dependency guard — lands the moment 6/7 do, and its counter is a
+real telemetry metric that ships to Grafana on hardware. Increment 9 later supersedes
+it as the itest **oracle**, but does not retire it: 8 needs no snemu model and covers
+the production metric path.)*
+
+
 **RED:** an itest scenario `audio-beep-emits-samples` that boots `workload=audio-beep`
 under snemu and asserts a `snitchos.audio.samples_emitted_total` metric frame reaches
 the wire with value ≥ 1. This proves the driver loop executed (clock bring-up →
@@ -203,6 +209,41 @@ This is the standing regression guard: it fails if clock bring-up or the driver 
 breaks, without anyone needing to plug in headphones.
 
 ---
+
+## Increment 9 — snemu PWMDAC model + WAV capture (by-ear off the emulator)
+
+Pulls the testing-useful slice of the Tier 2 "hear a replay" idea forward, because it
+does double duty: **manual by-ear confirmation without hardware**, and it turns
+Increment 8's proxy-metric into a real sample-stream oracle. QEMU can't do this (it has
+an audio subsystem but no PWMDAC device model, and itests run on `virt`/snemu where the
+block isn't mapped at all) — snemu can, and it's on-thesis ("a device model is a
+collector"). Needs Increment 6 (the kernel actually driving `WDATA`) to have something
+to capture.
+
+snemu already models MMIO devices (ramfb, virtio-console) and runs deterministically.
+Add a PWMDAC device model:
+
+- **Capture:** intercept writes to `WDATA` (`0x100b0000`+0x00) and `CTRL` (+0x04).
+  Timestamp each `WDATA` write on snemu's guest clock (instret/`mtime`). Because the
+  guest paces writes via `mtime` (Increment 5), the **inter-write timing already
+  encodes the sample rate** — snemu reconstructs the waveform from real guest timing
+  and need *not* model the PLL/core clock at all (it may cross-check against
+  `CTRL.cnt_n`). This also sidesteps the open `WDATA`-FIFO/latch unknown: snemu records
+  what the guest wrote, when.
+- **Render (the by-ear path):** decode the captured stream to a `.wav`,
+  `snemu … --audio-out beep.wav` → open it, listen. Deterministic ⇒ byte-identical run
+  to run, so the WAV (or a hash of its samples) is a snapshot-testable artifact too.
+- **Optional live playback:** a host audio crate (cpal/rodio) for real-time; the WAV
+  dump is the sufficient MVP and matches snemu's existing file-artifact style. In wasm,
+  Web Audio (converges with snemu-wasm + collector-as-server).
+- **Itest oracle:** the `audio-beep` scenario asserts snemu captured N samples at the
+  expected period/amplitude — an exact, analog-free oracle backing (not replacing)
+  Increment 8's metric.
+
+**Testable pieces (host-side, TDD):** the `WDATA`-stream → PCM/WAV decoder (sample
+count, rate reconstruction from timestamps, WAV header bytes) is a pure module with
+real unit tests; the snemu MMIO hook is thin glue over it, mirroring how the
+ramfb/virtio models are structured. Design home: `docs/snemu-design.md`.
 
 ## Acceptance summary
 
