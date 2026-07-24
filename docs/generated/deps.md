@@ -95,6 +95,7 @@ graph LR
     stitch --> snitchos_abi
     stitch --> fs_proto
     stitch --> snitchos_user
+    xtask --> kernel_boot
     xtask --> xtask_cmds
     xtask --> xtask_qemu
     xtask_cmds --> protocol

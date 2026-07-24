@@ -243,7 +243,12 @@ pub fn spawn(program_id: usize, handles: &[u32]) -> Option<u32> {
             "ecall",
             in("a7") Syscall::Spawn as usize,
             inlateout("a0") program_id => ret,
-            in("a1") handles.as_ptr() as usize,
+            // `Spawn` mints a process cap into a1 (`spawn_registry`) — see
+            // `spawn_with_kill`, which reads it. This wrapper ignores the handle
+            // but must still declare the clobber: `in` would promise the compiler
+            // a1 is unchanged. Same defect class as the SBI ecalls; see the
+            // callout in plans/visionfive2-port.md.
+            inlateout("a1") handles.as_ptr() as usize => _,
             in("a2") handles.len(),
         );
     }
@@ -359,7 +364,9 @@ pub fn spawn_image(image: &[u8], handles: &[u32]) -> Option<u32> {
             "ecall",
             in("a7") Syscall::SpawnImage as usize,
             inlateout("a0") image.as_ptr() as usize => ret,
-            in("a1") image.len(),
+            // `handle_spawn_image` mints a process cap into a1; declare the
+            // clobber even though this wrapper drops it. See `spawn` above.
+            inlateout("a1") image.len() => _,
             in("a2") handles.as_ptr() as usize,
             in("a3") handles.len(),
         );
@@ -493,7 +500,11 @@ pub fn wait_any() -> (i32, u32) {
             in("a7") Syscall::WaitAny as usize,
             out("a0") status,
             out("a1") child,
-            in("a2") 0usize, // deadline 0 = block forever (never times out)
+            // `inlateout … => _`, not `in`: the kernel writes a2 on this path
+            // (`handle_wait_any` sets it as the timed-out flag), so `in` would
+            // promise the compiler a register the syscall clobbers. See the
+            // SBI-clobber callout in plans/visionfive2-port.md.
+            inlateout("a2") 0usize => _, // deadline 0 = block forever
         );
     }
     (status as i32, child as u32)
@@ -1281,7 +1292,9 @@ impl Notification {
                 "ecall",
                 in("a7") Syscall::WaitNotify as usize,
                 inlateout("a0") self.handle => ret,
-                in("a1") 0usize, // deadline 0 = block forever (never times out)
+                // `handle_wait_notify` writes a1 (the timed-out flag) on every
+                // return path; declare the clobber. See `spawn` above.
+                inlateout("a1") 0usize => _, // deadline 0 = block forever
             );
         }
         if ret == usize::MAX { Err(Denied) } else { Ok(ret as u64) }
