@@ -19,6 +19,7 @@
 #[cfg(test)]
 extern crate alloc;
 
+pub mod banner;
 pub mod bootargs;
 pub mod harts;
 pub mod trap;

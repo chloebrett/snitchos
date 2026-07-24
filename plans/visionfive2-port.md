@@ -27,10 +27,11 @@ time. The old `1 - hart_id` could not have survived this — B6 was load-bearing
 Delivery: `cargo xtask image` → RISC-V Image (header embedded in `entry.S`) →
 TFTP → `booti`. See [Bring-up mechanics](#bring-up-mechanics-m0-in-detail).
 
-**One board-only deviation remains:** `ramfb::init` is skipped (fw_cfg is a QEMU
-invention — its DMA handshake *hangs* on the board; a runtime signature check +
-bounded poll would beat the feature gate). The `unmap_identity` deviation is **gone**
-— see the fixed callout below.
+**No board-only deviations remain.** `ramfb::init` is still not called on the
+board — fw_cfg is a QEMU invention that doesn't exist there — but that is now a
+*runtime* answer, not a `cfg(vf2)` gate: `dtb::has_fw_cfg` asks the DTB for a
+`qemu,fw-cfg-mmio` node and the board simply hasn't got one. The `unmap_identity`
+deviation is **gone** — see the fixed callout below.
 
 > ### ✅ FIXED — latent bug found at first light: `kmain`'s frame straddled the trampoline
 >
@@ -56,11 +57,50 @@ bounded poll would beat the feature gate). The `unmap_identity` deviation is **g
 > `entry_pa` loop-invariant miscompile — fixed structurally, not case-by-case.
 
 Next: **M2 — telemetry over UART** (the `hb` line above is a debug `println!`, not
-the frame pipeline; the board has no telemetry transport yet). Smaller debts: drop
-the `ph:` phase markers, keep `smp:`/`hb` until M2 replaces them with real frames,
-clear the ~21 `vf2` dead-code warnings, and consider a runtime fw_cfg guard (bounded
-poll + signature check) instead of the `cfg(vf2)` ramfb skip. The section below is
-the original scoping; per-blocker ✓ notes mark what shipped.
+the frame pipeline; the board has no telemetry transport yet). Of the smaller
+debts (2026-07-24): the ~21 `vf2` dead-code warnings are **gone**, and the
+`cfg(vf2)` ramfb skip is **replaced by DTB discovery** (`dtb::has_fw_cfg`). The
+`ph:` phase markers were dropped and then **deliberately restored** as a `ph!`
+macro — deleting them cost us the only diagnostic the board has, and they earned
+their keep the same day; they stay with `smp:`/`hb` until M2's real frames replace
+them, at which point removing the macro removes all 18 call sites at once. See the
+callout below for what that episode actually taught. The section below is the
+original scoping; per-blocker ✓ notes mark what shipped.
+
+> ### ⚠️ Lesson — a stale image looks exactly like a regression
+>
+> Clearing these debts cost two board flashes and a wrong diagnosis, and the
+> actual cause was neither of the code changes under suspicion: **the board was
+> booting a stale `snitchos.img`** — `cargo xtask image` hadn't been re-run, so
+> both "hangs" were the *previous* image running the *previous* code.
+>
+> The tell was in the capture the whole time and got missed twice: the banner
+> source prints a `====` rule above and below the art, and neither rule appeared
+> in either capture. Output that doesn't match the source you're holding is the
+> signature of a stale artifact — check that **before** theorising about the
+> hardware. On a board there is no compiler to tell you the binary is old.
+>
+> The wrong diagnosis is worth recording too. A runtime `fw_cfg` **signature
+> probe** (select `FW_CFG_SIGNATURE`, read four bytes, compare to `QEMU`) was
+> blamed for the hang and reverted. It was never running on the board, so it was
+> never shown to be at fault — the confirmation was an artifact of the stale
+> image, and "the symptom persisted after I reverted my change" should have been
+> read as *exonerating* evidence immediately, not as a second mystery.
+>
+> **`dtb::has_fw_cfg` is still the right design**, on its own merits rather than
+> on that non-existent hardware evidence: a load to an address with no responding
+> slave need not fault and need not return garbage — on a fabric with no default
+> slave it can simply never complete. "Four reads, no polling loop" bounds
+> *instructions*, not *time*. QEMU always answers, so no host test could ever
+> exercise the case. Presence is a question firmware already answered in the DTB;
+> read that instead of poking the address to find out. Same discipline B4 used
+> for the UART. (Board-confirmed: `ph: pre-ramfb (fw_cfg in dtb: false)`.)
+>
+> Process footnote: the `ph:` markers were deleted in the same change that
+> introduced the probe, so the board's only diagnostic was "stops after the
+> banner." Restoring them localised the truth in a single flash. Land risky
+> changes *while* the instrumentation still exists — and keep board
+> instrumentation until something better replaces it (M2/B3).
 
 > B6 was re-scoped during the work: it turned out to be an **M3 (SMP)** item, not an
 > M1 gate (the boot hart is hardcoded logical 0, so a non-zero boot hartid never
@@ -291,8 +331,9 @@ fw_cfg is a QEMU invention at a hardcoded port (`kernel/src/device/fwcfg.rs:18`,
 `0x1010_0000`) and ramfb rides it (`kernel/src/device/ramfb.rs`). Neither exists
 on hardware. A real display means writing a JH7110 display-controller + HDMI
 driver — a whole project. **Out of scope.** The framebuffer / physics-desktop
-work stays QEMU-only until someone wants to write that driver. Guard it so the
-board build simply doesn't call `ramfb::init` (`kernel/src/main.rs:286`).
+work stays QEMU-only until someone wants to write that driver. ✓ Guarded by
+`dtb::has_fw_cfg` — a machine whose DTB declares no `qemu,fw-cfg-mmio` node never
+calls `ramfb::init`, so no build flag is involved and no MMIO is touched.
 
 ## Proposed milestones (risk-ordered)
 

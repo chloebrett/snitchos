@@ -16,6 +16,11 @@ clap = { version = "4", features = ["derive"] }
 xtask-qemu = { path = "../xtask-qemu" }
 # Standalone commands (audit/loc/links/measure/snip) with no itest coupling.
 xtask-cmds = { path = "../xtask-cmds" }
+# The workload registry, so `image --workload` validates the name against the
+# same parser the kernel uses instead of keeping a second copy of the list. On
+# the board an unknown name would otherwise boot the default silently, and you'd
+# only find out after a TFTP + `booti` round trip.
+kernel-boot = { path = "../kernel-boot" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ctrlc = "3"

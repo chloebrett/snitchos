@@ -32,7 +32,16 @@ enum Cmd {
     /// (`snitchos.img`) for U-Boot `booti`. The 64-byte Image header is embedded
     /// at the start of the kernel by `entry.S`, so this is a straight ELF→binary
     /// `objcopy`. Load it on the board with `booti` (see the printed hint).
-    Image,
+    Image {
+        /// Validate `<name>` against the workload registry and print the U-Boot
+        /// `setenv bootargs` line for it (e.g. `stitch-repl`). Does *not* change
+        /// the build — every image reads `/chosen/bootargs`, so this is a
+        /// convenience + typo check, and switching workload on the board is a
+        /// re-typed `setenv`, never a reflash. Storm workloads need
+        /// `itest-workloads` and are inert in a board image.
+        #[arg(long)]
+        workload: Option<String>,
+    },
     /// Everything that runs the kernel under the snemu emulator: the
     /// meta-loop driver (`boot`), the QEMU differential oracle (`diff`), the
     /// snapshot/fork harness (`fork`), the measurement spine (`bench`), and the
@@ -542,7 +551,7 @@ fn main() -> ExitCode {
     scrub_inherited_cargo_env();
     match Cli::parse().cmd {
         Cmd::Build => build(),
-        Cmd::Image => image(),
+        Cmd::Image { workload } => image(workload.as_deref()),
         Cmd::Snemu { args } => delegate_itest("snemu", &args),
         Cmd::Boot { features, workload, burst, ramfb, display } => {
             boot(&features, workload.as_deref(), burst, ramfb, display.as_deref())
@@ -691,8 +700,20 @@ fn debug(features: &str) -> ExitCode {
 /// for U-Boot `booti` on the VisionFive 2. The 64-byte Image header is embedded at
 /// the start of the kernel by `entry.S`, so this is a straight ELF→binary copy —
 /// no header to prepend, so the kernel's link addresses stay intact.
-fn image() -> ExitCode {
-    // Board build: RAM base 0x4000_0000 (the `vf2` feature), no test workloads.
+fn image(workload: Option<&str>) -> ExitCode {
+    // Board build: RAM base 0x4000_0000 (the `vf2` feature), and nothing else —
+    // `--workload` deliberately does NOT imply `itest-workloads`. Every build
+    // reads `/chosen/bootargs`, so real workloads (`stitch-repl`, `userspace`,
+    // the `init` default) are selectable from a lean production image; only the
+    // storm bodies need the test feature, and they aren't what you flash a board
+    // for. Validate the name here so a typo fails at build time rather than after
+    // a TFTP + `booti` round trip.
+    if let Some(name) = workload {
+        if kernel_boot::bootargs::select(&format!("workload={name}")).is_none() {
+            eprintln!("unknown workload {name:?} — see `kernel_boot::bootargs::WorkloadKind`.");
+            return ExitCode::from(2);
+        }
+    }
     let status = qemu::build_kernel(&["vf2"]).expect("failed to invoke cargo");
     if !status.success() {
         return ExitCode::from(1);
@@ -709,6 +730,12 @@ fn image() -> ExitCode {
             eprintln!("wrote {out} — RISC-V Image for U-Boot `booti`.");
             eprintln!("At the VisionFive 2's U-Boot prompt (TFTP the file first):");
             eprintln!("  tftpboot 0x40200000 snitchos.img");
+            if let Some(name) = workload {
+                // U-Boot fills `/chosen/bootargs` from its `bootargs` env var when
+                // booting with `${fdtcontroladdr}` — that's the whole delivery
+                // mechanism, so switching workload is a retype, not a reflash.
+                eprintln!("  setenv bootargs 'workload={name}'");
+            }
             eprintln!("  booti 0x40200000 - ${{fdtcontroladdr}}");
             ExitCode::SUCCESS
         }

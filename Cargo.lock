@@ -2395,6 +2395,7 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "ctrlc",
+ "kernel-boot",
  "serde",
  "serde_json",
  "xtask-cmds",

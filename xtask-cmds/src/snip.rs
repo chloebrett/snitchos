@@ -5,7 +5,7 @@
 //! lives in the `snip` crate; this module owns all the git I/O and the CLI.
 //!
 //! Flow (three explicit steps — see `plans/legacy/snip-stage-picker.md`):
-//!   cargo xtask snip "<message>"   propose (asks Sonnet, writes a plan)
+//!   `cargo xtask snip "<message>"` propose (asks Sonnet, writes a plan)
 //!   cargo xtask snip stage         `git add` the planned files
 //!   cargo xtask snip commit        `git commit` the plan's message
 

@@ -36,6 +36,24 @@ pub fn uart_config(dtb: &Fdt) -> (usize, u8, u8) {
   (base, prop_u8("reg-shift", 0), prop_u8("reg-io-width", 1))
 }
 
+/// Whether this machine has QEMU's `fw_cfg` guest-configuration device, per the
+/// DTB. QEMU `virt` advertises `fw-cfg@10100000`; the JH7110 has no such node.
+///
+/// Ask the DTB, never the bus. The tempting alternative — read the device's
+/// signature register and see if it answers `QEMU` — is unsafe on real silicon
+/// in a way that isn't obvious: a load to an address with no responding slave
+/// need not fault or return garbage, it can simply never complete, stalling the
+/// hart forever on one instruction. QEMU always answers, so that design tests
+/// clean and hangs the board. This is the same discovery discipline the UART
+/// already uses; see `uart_config`.
+///
+/// Known weakness: the `fw_cfg` MMIO base stays hardcoded in
+/// `device::fwcfg::BASE_PA` rather than being read from this node's `reg` — two
+/// sources for one truth, worth collapsing when something needs the address.
+pub fn has_fw_cfg(dtb: &Fdt) -> bool {
+  dtb.find_compatible(&["qemu,fw-cfg-mmio"]).is_some()
+}
+
 /// Enumerate the harts the DTB advertises under `/cpus`, filling `out` with one
 /// [`HartInfo`] per `cpu@N` node — its `reg` (the `mhartid`) and whether its
 /// `status` marks it usable (the JH7110's S7 monitor is `status="disabled"` and
