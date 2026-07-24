@@ -77,6 +77,10 @@ sd   a1, 0x0(a0)               ← ***fault*** — a0 = 0x40506de0, a PHYSICAL a
 
 - the genuinely unsettling part: **none of this is board-specific.** QEMU's codegen just happens not to spill a physical self-pointer that survives to the teardown. adding a `println!` changes whether it triggers. I have been shipping this the whole time.
 
+- so I fixed it properly the same evening, and the fix is almost insultingly small: `kmain` keeps only the pre-trampoline work — MMIO regions, `mmu::enable`, the trampoline itself — and then **hands off to a separate `#[inline(never)] kmain_higher_half()`**. that function's frame is allocated *after* the `sp` shift, so every local in it gets an address computed against the higher-half stack. the DTB parse moved in there too, so the `Fdt` and everything derived from it belong to the new frame. `unmap_identity` went back to unconditional on every target — the board deviation **deleted**, not disabled — and the board booted straight through it to a live heartbeat. QEMU stayed 121/121.
+
+- the `#[inline(never)]` is not decoration. inline it back and the two frames merge and the bug returns, silently, exactly as before. an attribute is a load-bearing structural claim here, which is uncomfortable — the invariant lives in the optimizer's willingness to respect a hint. I check it with `rust-nm | grep kmain`: if `kmain_higher_half` isn't its own symbol, the fix is gone.
+
 ## what the emulator bought, and what it couldn't
 
 - snemu ([[project_snemu_progress]]) caught the `entry_pa` miscompile **before the board ever had power** — a real kernel bug that would have bitten identically on hardware, found host-side. and it was found by instrumenting the _emulator_ rather than the guest: printing `hart_start`'s arguments and the faulting hart's registers from snemu itself, precisely because adding guest `println!`s perturbed the timing enough to make the bug vanish. an emulator you own is a debugger with a god view.

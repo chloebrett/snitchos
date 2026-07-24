@@ -48,6 +48,18 @@
 
 - the question that separates them is one sentence: *if I deleted this list, could I recompute it?* if yes, it was never a list — it was a cache you were refreshing by hand, and the keep-sorted annotation was a smoke detector for a fire you could just not light. if no, it's policy, and opt-out with written reasons is as good as it gets.
 
+## how you find out at all
+
+- the fork tells you what to *do* with a rotting list once you're staring at it. it doesn't tell you to look. and both lists in this post announced themselves: the workload names because I was asked to sort them, the rustdoc lints because the toolchain offered more to enforce and somebody reached for it. attention landed on each by luck. that's the easy case, and it's the one that flatters you into thinking the hard part is the fix.
+
+- the same session had the unlucky case, and it's the one worth keeping. the commit gate had quietly stopped being one command. `itest` used to run the workspace's host checks first, then integration; when the fast deterministic emulator became the thing everyone actually typed, `itest` ran integration *only*, and nothing composed the host checks anymore. the repair was mechanical — recompose the gate explicitly, `cargo xtask test && cargo xtask itest`. the consequence was not.
+
+- the moment `cargo xtask test` was back in the path people run, three checks that had been green for weeks turned red on the first honest pass. the loom concurrency model-check, still invoking `-p kernel-core` — a crate a rename had deleted out from under it ([[project_kernel_core_split_and_wx]]). the generated-diagram drift check, six scenarios stale. and the one that stings: a test asserting `xtask snemu` was *rejected*, which kept passing for the wrong reason after `snemu` became a subcommand group — bare `snemu` still errored, just as "missing subcommand" instead of "no such command." it had stopped testing its own name and reported nothing wrong.
+
+- none of those was *failing*. they were **unrun**, and unrun is indistinguishable from passing. a red test complains; a test that never executes is silent, and silence renders as green on every dashboard you own. the workload list, if it drifted, would eventually boot the wrong workload and you'd see it. a check that falls out of the gate produces no symptom at all — not once, not ever — until something drags it back into the path and it finally gets to speak.
+
+- so the meanest enumeration in the whole session was the one not in any file. it's the set of checks your gate actually runs: a list nobody wrote down, that shrinks by omission every time a crate is renamed or a command is split, and never mentions that it did. **you only learn which of your checks are alive by making the gate honest and watching what turns red.** the command-consolidation this all fell out of justified itself on nothing grander than that — recomposing one gate forced every check behind it to prove it still ran.
+
 ## what I learned
 
 - **"can we enforce this list stays consistent" is sometimes the wrong question.** the right one is "why are there two lists?" a keep-sorted guard is the correct tool for a redundancy you've chosen to keep; but the better move is often to notice you didn't have to keep it. I was asked to maintain a copy better and the answer was to stop having the copy.
@@ -61,6 +73,8 @@
 - **deleting a list is not always cheaper than keeping it.** exact string equality handed me prefix-disambiguation for free; the derived comparison had to re-earn it. computing-at-use removed the storage but added the logic that storage was standing in for. usually a good trade. not automatically one.
 
 - **the list you can't delete still gets the opt-out treatment.** post 57 derived crate membership for clippy and mutants; this did the same for rustdoc lints. every gate that enumerates what's *in* is a slow leak. when there's nothing to derive it from, at least flip the default to "everything" and make each exception a sentence someone had to write.
+
+- **the list you can't *see* is the gate's own contents.** the two lists in this post announced themselves; the set of checks a gate actually runs announces nothing. it shrinks silently when a crate is renamed or a command is split, and a check that drops out doesn't fail — it goes unrun, which every dashboard draws as green. three had rotted exactly that way, quietly, for weeks. the only way I found the live ones was to recompose the gate honestly and watch what broke. a rotting list you can read is a lucky problem; the dangerous one is the enumeration nobody thinks of as a list.
 
 ## what's next
 
