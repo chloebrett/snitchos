@@ -1,0 +1,22 @@
+[package]
+name = "kernel-net"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Dependency-free and no-alloc, deliberately: this is the *packet-construction*
+# logic (Ethernet II / IPv4 / UDP header layout + checksums) for egress-only
+# telemetry, over caller-supplied buffers. It speaks to the wire's byte layout,
+# not to `protocol`'s frame semantics — the payload is opaque here — so nothing
+# depends on `protocol`/`postcard`. The NIC drivers that consume it live in
+# `kernel/`; what's here is what decides *which bytes* a datagram is made of.
+# See docs/network-telemetry-design.md.
+[dependencies]
+
+[lints]
+workspace = true
+
+[lib]
+# No doctests (see CLAUDE.md "use nextest"); keeps `cargo test` off the slow
+# rustdoc doc-test compile.
+doctest = false

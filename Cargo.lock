@@ -898,6 +898,10 @@ name = "kernel-mem"
 version = "0.0.1"
 
 [[package]]
+name = "kernel-net"
+version = "0.0.1"
+
+[[package]]
 name = "kernel-obs"
 version = "0.0.1"
 dependencies = [

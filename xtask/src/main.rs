@@ -415,6 +415,7 @@ mod mutant_plan_tests {
             "kernel-boot",
             "kernel-devices",
             "kernel-mem",
+            "kernel-net",
             "kernel-obs",
             "kernel-proc",
             "protocol",
