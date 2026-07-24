@@ -82,6 +82,10 @@ pub fn pwmdac_bringup(core_divider: u32) -> Option<[Op; 4]> {
     }
     let reset = reset_bit(PWMDAC_APB_RESET);
     Some([
+        // The gate (bit 31) and divider (bits 23:0) are disjoint, and the masked
+        // `core_divider` can't reach bit 31 — so `|` and `^` are equivalent here.
+        // Mutation testing flags the `| → ^` mutants as survivors; they are genuine
+        // equivalent mutants, as in `pwmdac::Ctrl::to_bits`.
         Op::Rmw {
             offset: clock_reg_offset(PWMDAC_CORE_CLK),
             mask: CLK_DIV_MASK | CLK_ENABLE,

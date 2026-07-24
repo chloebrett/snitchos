@@ -1,11 +1,11 @@
 # Tier 0 — first beep from the VF2 audio jack (CPU PIO)
 
-**Status:** 🚧 **IN PROGRESS — the pure layer is done.** Increments 1, 2, 4, 5 shipped
-in `kernel-devices/src/pwmdac.rs` (26 host tests, clippy-clean, mutation-verified — the
-only survivors are documented `| → ^` equivalents). Remaining: **Increment 3** (SYSCRG,
-gated on a datasheet register-offset check), **4b** (sine LUT via `build.rs`), and
-**6–8** (kernel MMIO glue, the `audio-beep` workload, the snemu code-path guard — all
-need the board/kernel). TDD-decomposition of Tier 0 from
+**Status:** 🚧 **IN PROGRESS — the whole pure/host-testable layer is done.** Increments
+1, 2, 4, 5 (`kernel-devices/src/pwmdac.rs`) and 3 (`kernel-devices/src/syscrg.rs`)
+shipped — 33 host tests, clippy-clean, mutation-verified (the only survivors are the
+documented `| → ^` disjoint-field equivalents). Remaining: **4b** (sine LUT via
+`build.rs`) and **6–8** (kernel MMIO glue, the `audio-beep` workload, the snemu
+code-path guard — all need the board/kernel). TDD-decomposition of Tier 0 from
 [../docs/vf2-audio-design.md](../docs/vf2-audio-design.md). Goal: **the board emits a
 fixed-frequency tone from the 3.5mm jack**, fed by CPU PIO writes to the JH7110
 PWMDAC — no DMA engine. Everything here is deferrable-free (gated on nothing
@@ -96,7 +96,16 @@ panic.
 **GREEN:** the pure rate-planning fn. This is where the fs↔divider relationship is
 documented in code.
 
-## Increment 3 — SYSCRG bring-up ops
+## Increment 3 — SYSCRG bring-up ops — ✅ DONE
+
+Shipped `kernel-devices/src/syscrg.rs`: the generic JH7110 SYSCRG model
+(`clock_reg_offset` = `index×4`, `reset_{assert,status}_offset`/`reset_bit` for the
+`id/32`,`id%32` split, `CLK_ENABLE`=BIT(31), `CLK_DIV_MASK`=bits 23:0) plus
+`pwmdac_bringup(core_divider) -> Option<[Op;4]>` — ungate core (divider+gate) → APB
+(gate) → release reset (write 0) → poll status until set. 7 tests; clippy-clean;
+mutation 34/38 caught, the 2 survivors the documented `| → ^` disjoint-field
+equivalents. `core_divider` (`= audio_root_rate / core_clk_hz`) is a driver-supplied
+runtime value, validated `1..=256`. The generic model is reusable by the display port.
 
 **RED** (`kernel-devices/src/syscrg.rs`, new): a pure function that, given the
 PWMDAC's clock/reset selectors, produces the ordered list of
@@ -109,11 +118,13 @@ ungate-before-deassert-reset.
 **GREEN:** the pure op-list builder. No MMIO. This crate becomes the home for future
 SYSCRG consumers (the display port will want it too).
 
-> **Blocking check before this increment:** confirm the SYSCRG base + the
-> `pwmdac_apb`/`pwmdac_core` gate/divider register offsets and the reset register bit
-> against the JH7110 datasheet register chapter. The clock *IDs* are authoritative in
-> mainline, but we're writing raw offsets. Do this datasheet pass first; it de-risks
-> Increments 2–3.
+> **Blocking check — RESOLVED.** The offsets were confirmed not from the datasheet
+> but from the mainline clock/reset drivers, which are authoritative for what runs on
+> the silicon: SYSCRG base `0x13020000`; clock reg = `index×4` (`clk-starfive-jh71x0`),
+> so PWMDAC_APB (157)→`0x274`, PWMDAC_CORE (158)→`0x278`; reset id 96 → assert `0x304`
+> bit 0 / status `0x314` bit 0 (`reset-starfive-jh7110`, `assert_offset=0x2F8`,
+> `status_offset=0x308`). **Still worth a hardware sanity-check** at bring-up (Increment
+> 6), but no longer a blocker.
 
 ## Increment 4 — tone generator + gain (the volume knob) — ✅ DONE (square; sine → 4b)
 
