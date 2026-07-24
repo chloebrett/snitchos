@@ -3,17 +3,22 @@
 **Status:** 🚧 **IN PROGRESS — the whole pure/host-testable layer is done.** Increments
 1, 2, 4, 5 (`kernel-devices/src/pwmdac.rs`) and 3 (`kernel-devices/src/syscrg.rs`)
 shipped — 33 host tests, clippy-clean, mutation-verified (the only survivors are the
-documented `| → ^` disjoint-field equivalents). Remaining: **4b** (sine LUT via
-`build.rs`) and **6–8** (kernel MMIO glue, the `audio-beep` workload, the snemu
-code-path guard — all need the board/kernel). TDD-decomposition of Tier 0 from
+documented `| → ^` disjoint-field equivalents). Next up is **9a** — the snemu PWMDAC
+device model + a pure (kernel-independent) WAV decoder — which now sequences **before**
+the kernel glue: snemu halts on unmapped MMIO writes, so its PWMDAC region is a
+prerequisite for anything audio to run under snemu, and it's the harness that makes the
+kernel work observable off-hardware. Full order: **9a → 6 → 7 → 8 → 9b**. Also
+outstanding: **4b** (sine LUT via `build.rs`). TDD-decomposition of Tier 0 from
 [../docs/vf2-audio-design.md](../docs/vf2-audio-design.md). Goal: **the board emits a
 fixed-frequency tone from the 3.5mm jack**, fed by CPU PIO writes to the JH7110
 PWMDAC — no DMA engine. Everything here is deferrable-free (gated on nothing
 external); the design doc justifies every hardware fact.
 
 **Non-goals (explicitly Tier 1+):** gapless/streaming audio, the dw-axi-dmac driver,
-arbitrary PCM playback, mixing/resampling, telemetry sonification, a snemu PWMDAC
-model. This plan stops at "a tone comes out, on demand, at a safe volume."
+arbitrary PCM playback, mixing/resampling, telemetry sonification. This plan stops at
+"a tone comes out, on demand, at a safe volume." (A snemu PWMDAC *capture* model is now
+**in** scope — Increment 9a — because it's the emulator test harness; the full Tier-2
+"sonify telemetry / hear any boot replay" experience stays out.)
 
 ## Volume, decided up front
 
@@ -188,18 +193,18 @@ pattern).
 board → **hear a 440 Hz tone.** This is the acceptance gate; it is manual and
 by-ear (documented — no automated audio oracle exists).
 
-## Increment 8 — automated code-path guard (no audio model needed)
+## Increment 8 — automated code-path guard (production metric)
 
-*(The cheap, zero-dependency guard — lands the moment 6/7 do, and its counter is a
-real telemetry metric that ships to Grafana on hardware. Increment 9 later supersedes
-it as the itest **oracle**, but does not retire it: 8 needs no snemu model and covers
-the production metric path.)*
-
+*(Depends on 9a: snemu **halts the run** on a write to an unmapped MMIO address
+(`bus.rs:216` → `main.rs:139`), so without 9a's PWMDAC/SYSCRG region this scenario
+can't boot — my earlier "no audio model needed" was wrong. Given 9a exists, this adds
+the cheap **production-metric** assertion: a real telemetry counter that also ships to
+Grafana on hardware, so it's distinct from 9b's sample-stream oracle, not redundant.)*
 
 **RED:** an itest scenario `audio-beep-emits-samples` that boots `workload=audio-beep`
-under snemu and asserts a `snitchos.audio.samples_emitted_total` metric frame reaches
-the wire with value ≥ 1. This proves the driver loop executed (clock bring-up →
-CTRL → the WDATA write loop ran) even though snemu can't model the analog output.
+under snemu (with 9a's PWMDAC region present) and asserts a
+`snitchos.audio.samples_emitted_total` metric frame reaches the wire with value ≥ 1.
+This proves the driver loop executed (clock bring-up → CTRL → the WDATA write loop ran).
 
 **GREEN:** bump an atomic in `play_tone`'s write loop; emit it as a metric from the
 heartbeat drain (the standard deferred-emission pattern — **never emit from inside
@@ -210,46 +215,69 @@ breaks, without anyone needing to plug in headphones.
 
 ---
 
-## Increment 9 — snemu PWMDAC model + WAV capture (by-ear off the emulator)
+## Increment 9a — snemu PWMDAC device model + WAV decoder — ⚠️ SEQUENCED BEFORE 6
 
-Pulls the testing-useful slice of the Tier 2 "hear a replay" idea forward, because it
-does double duty: **manual by-ear confirmation without hardware**, and it turns
-Increment 8's proxy-metric into a real sample-stream oracle. QEMU can't do this (it has
-an audio subsystem but no PWMDAC device model, and itests run on `virt`/snemu where the
-block isn't mapped at all) — snemu can, and it's on-thesis ("a device model is a
-collector"). Needs Increment 6 (the kernel actually driving `WDATA`) to have something
-to capture.
+**Why it moves first (not last).** Two grounded findings flipped this from Tier-2
+polish to a Tier-0 prerequisite:
+1. **snemu halts on unmapped MMIO writes** — a write to `0x100b0000` falls through to
+   RAM and returns `OutOfRange`, stopping the guest (`snemu/src/bus.rs:216`,
+   `main.rs:139`). So *nothing* audio-related can run under snemu until snemu has a
+   PWMDAC (+ SYSCRG `0x13020000`) region. The stub and the real capture model are the
+   same work (snemu has no device trait — you add a `Bus` field + address branches in
+   the read/write methods and fold state into `hash_state`; `bus.rs:37-53`), so build
+   the capturing model once, here.
+2. It's the **development harness**: with it, Increment 6 is observable in the emulator
+   loop (and by ear) instead of hardware-only.
 
-snemu already models MMIO devices (ramfb, virtio-console) and runs deterministically.
-Add a PWMDAC device model:
+**Decision needed before 6 (virt-vs-VF2):** snemu is virt-only (RAM `0x8000_0000`),
+while the PWMDAC is VF2-only and its driver would be `cfg(vf2)`-gated — so a virt-build
+kernel wouldn't even compile the audio path. Resolve by either (a) snemu models the
+PWMDAC as a **synthetic device in its virt machine** and the `audio-beep` workload
+drives `0x100b0000` **address-driven, not hard `cfg(vf2)`** (mirrors how ramfb was
+added to snemu's virt map), or (b) audio stays hardware-only for by-ear and snemu gets
+the model purely to service the itest. (a) is preferred — it keeps the whole loop
+off-hardware. This is a real fork for Increment 6's structure; pick it first.
 
-- **Capture:** intercept writes to `WDATA` (`0x100b0000`+0x00) and `CTRL` (+0x04).
-  Timestamp each `WDATA` write on snemu's guest clock (instret/`mtime`). Because the
-  guest paces writes via `mtime` (Increment 5), the **inter-write timing already
-  encodes the sample rate** — snemu reconstructs the waveform from real guest timing
-  and need *not* model the PLL/core clock at all (it may cross-check against
-  `CTRL.cnt_n`). This also sidesteps the open `WDATA`-FIFO/latch unknown: snemu records
+**What ships in 9a:**
+- **snemu device model:** a `Pwmdac` bus device that accepts `WDATA` (`+0x00`)/`CTRL`
+  (`+0x04`) and swallows the SYSCRG-region writes, wired into all `read_u*`/`write_u*`
+  and `hash_state` (determinism). Timestamp each `WDATA` write on the guest clock
+  (instret/`mtime`). Because the guest paces writes via `mtime` (Increment 5), the
+  **inter-write timing already encodes the sample rate** — snemu reconstructs the
+  waveform from real guest timing and need *not* model the PLL/core clock (may
+  cross-check `CTRL.cnt_n`). Also sidesteps the open `WDATA`-FIFO unknown: it records
   what the guest wrote, when.
-- **Render (the by-ear path):** decode the captured stream to a `.wav`,
-  `snemu … --audio-out beep.wav` → open it, listen. Deterministic ⇒ byte-identical run
-  to run, so the WAV (or a hash of its samples) is a snapshot-testable artifact too.
-- **Optional live playback:** a host audio crate (cpal/rodio) for real-time; the WAV
-  dump is the sufficient MVP and matches snemu's existing file-artifact style. In wasm,
-  Web Audio (converges with snemu-wasm + collector-as-server).
-- **Itest oracle:** the `audio-beep` scenario asserts snemu captured N samples at the
-  expected period/amplitude — an exact, analog-free oracle backing (not replacing)
-  Increment 8's metric.
+- **Pure WAV decoder (host-TDD):** `WDATA`-stream + timestamps → PCM → WAV bytes
+  (sample count, rate reconstruction, header). A pure module with real unit tests fed
+  synthetic writes — **no kernel dependency, buildable now.** Follows the
+  `--dump-framebuffer` artifact precedent (`framebuffer.rs::render_ppm` +
+  `fs::write` behind a flag; `main.rs:202`): `snemu … --audio-out beep.wav`.
 
-**Testable pieces (host-side, TDD):** the `WDATA`-stream → PCM/WAV decoder (sample
-count, rate reconstruction from timestamps, WAV header bytes) is a pure module with
-real unit tests; the snemu MMIO hook is thin glue over it, mirroring how the
-ramfb/virtio models are structured. Design home: `docs/snemu-design.md`.
+QEMU can't do any of this (audio subsystem but no PWMDAC device model; virt map has
+nothing at `0x100b0000`). Design home: `docs/snemu-design.md`.
+
+## Increment 9b — by-ear WAV + itest oracle (after 6/7)
+
+With 6/7 driving real `WDATA` writes: dump the boot's tone to `.wav` and listen (the
+by-ear proof off the emulator), and upgrade the `audio-beep` scenario to assert snemu
+captured N samples at the expected period/amplitude — an exact, analog-free oracle
+**backing, not replacing,** Increment 8's production metric. Optional later: live
+playback via a host audio crate (cpal/rodio); in wasm, Web Audio (converges with
+snemu-wasm + collector-as-server).
+
+## Sequencing
+
+**9a → 6 → 7 → 8 → 9b.** 9a's pure WAV decoder has no kernel dependency and can start
+immediately after the current pure layer; its snemu device model is the prerequisite
+that lets everything downstream run under snemu at all.
 
 ## Acceptance summary
 
-- **Automated (gate):** Increment 8 — `samples_emitted_total ≥ 1` under snemu.
+- **Automated (gate):** Increment 8 — `samples_emitted_total ≥ 1` under snemu (needs
+  9a's region); Increment 9b — snemu-captured sample count/shape matches expectation.
 - **Manual (the real proof):** `cargo xtask boot --workload audio-beep` on the VF2 →
-  audible 440 Hz tone at the default (low) volume.
+  audible 440 Hz tone; or 9b's `--audio-out beep.wav` off snemu → listen without
+  hardware.
 
 ## Risks carried from the design doc
 
