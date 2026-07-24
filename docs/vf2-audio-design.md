@@ -161,6 +161,38 @@ channel," which is on-thesis. The roadmap already gestures at it:
 forensics") and `docs/arcade-and-real-hardware-direction.md:189` (the PWM-vs-I2S-DMA
 fork).
 
+## Floating point: deliberately none (a kernel-wide invariant)
+
+The kernel has emitted **zero floating-point instructions** to date. That is
+load-bearing, not incidental: FP register state (`f0–f31` + `fcsr`) is **not** in
+`TaskContext` and is **not** saved on trap entry, so `sstatus.FS` can sit at `Off`.
+The first FP instruction in kernel code either traps (FS=Off) or silently corrupts FP
+state across context switches. Audio *feels* float-heavy, but Tier 0 keeps the
+invariant intact:
+
+- **Sine/square LUT** = a `const [i16; N]` baked into the binary, generated at *build
+  time* (`build.rs`, where floats are free) or via a `const fn` integer approximation.
+  Zero runtime FP.
+- **Gain** = fixed-point (Q0.16 multiply + shift), not a float.
+- **Rate/divider + PIO pacing** = integer.
+
+**Decision: FP lives in userspace, never the kernel.** The kernel's zero-FP property
+is now a *permanent invariant*, not a Tier-0 convenience. Real DSP (resampling,
+filters, an FFT for XRun forensics, softvol in dB) is float-natural, and all of it
+belongs in userspace. The rejected alternatives, for the record: fixed-point DSP
+in-kernel (hand-rolled Q-format, keeps the invariant but pushes float-natural work
+into the wrong place), and `kernel_fpu_begin/end`-style regions (adds FP-save cost and
+risk to the kernel for no benefit once userspace can do it).
+
+**What this makes prerequisite.** Userspace FP requires a discrete new kernel feature:
+**lazy FP context switching** — `sstatus.FS` Dirty-tracking plus save/restore of
+`f0–f31` + `fcsr` across the switch (they are not in `TaskContext` today). This gates
+the **DSP**, not raw streaming: Tier 1's DMA PCM path is integer and needs no FP, so
+this feature can land independently, whenever the first userspace float-consumer
+does. **On-thesis payoff:** the `FS`-Dirty bit tracked for *correctness* is exactly
+the signal for a *snitch* — "task went FP-dirty," lazy-FP trap counts, first-FP-use
+spans. FP state becomes observable for free as a side effect of supporting it.
+
 ## Recommendation
 
 Do **Tier 0 now** — it is the cheapest path to a real "hardware makes a sound" win
