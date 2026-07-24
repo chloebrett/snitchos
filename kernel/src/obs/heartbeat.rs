@@ -178,7 +178,15 @@ pub fn run(metrics: Metrics) -> ! {
             // Board liveness pulse on the human UART — the board has no telemetry
             // transport yet (virtio-console is QEMU-only), so the heartbeat is
             // otherwise invisible. `vf2`-only so the QEMU console stays quiet.
-            #[cfg(feature = "vf2")]
+            //
+            // DISABLED: the kernel and userspace `ConsoleWrite` share this UART with
+            // no arbitration, so on any workload that owns the console (the Stitch
+            // REPL) this pulse lands mid-token and shreds the prompt — observed
+            // interleaving `stitch>` and a typed expression on the board. Liveness
+            // there is the prompt itself. Re-enable for a headless board bring-up,
+            // or delete once M2/B3 puts the heartbeat on the telemetry channel where
+            // it belongs (the real fix: one writer per stream, not a quieter kernel).
+            #[cfg(all(feature = "vf2", feature = "board-heartbeat-print"))]
             crate::println!("hb {count}");
             frame_smoke();
             heap_smoke_pattern(count);

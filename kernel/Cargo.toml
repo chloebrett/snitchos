@@ -13,6 +13,12 @@ default = []
 # leave this off (no test/destructive workloads compiled in). See
 # `docs/runtime-workload-selection-design.md`.
 itest-workloads = []
+# Print a `hb <n>` liveness pulse per heartbeat on the board's human UART.
+# Off by default: the kernel and userspace `ConsoleWrite` share that UART with no
+# arbitration, so the pulse shreds any workload that owns the console (the Stitch
+# REPL). Turn on for a headless board bring-up where liveness is otherwise
+# invisible. Retires when M2/B3 moves the heartbeat to the telemetry channel.
+board-heartbeat-print = []
 # Target the VisionFive 2 / JH7110: RAM base 0x4000_0000 instead of QEMU's
 # 0x8000_0000. Selects `kernel_mem::mmu::RAM_BASE` and the generated linker script's
 # load/link addresses (`build.rs`). Off by default (QEMU `virt`); untested in CI

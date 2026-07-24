@@ -64,7 +64,35 @@ debts (2026-07-24): the ~21 `vf2` dead-code warnings are **gone**, and the
 macro — deleting them cost us the only diagnostic the board has, and they earned
 their keep the same day; they stay with `smp:`/`hb` until M2's real frames replace
 them, at which point removing the macro removes all 18 call sites at once. See the
-callout below for what that episode actually taught. The section below is the
+callout below for what that episode actually taught.
+
+> ### 🔴 OPEN — two known failures from commit `32cd6fc`, both deferred
+>
+> `907df0a` is itest 121/121 green; `32cd6fc` is not. Neither affects the board
+> (it boots and heartbeats), so both are parked — but the gate is **red** until
+> they're fixed, and nothing should be committed on top without knowing that.
+>
+> **1. `banner::print()` hangs every scenario under snemu.** Commenting it out
+> restores 120/121. The board is fine — it prints the banner and boots on — so
+> this is snemu-side or an interaction with it. Prime suspect: `rule()` writes 60
+> chars via 60 separate `print!` calls, and `println!` is ~1,400 bytes at boot
+> versus 12 for the `I am alive` it replaced; every char spins on
+> `while LSR & THRE == 0`. Real UART drains at 115200 baud, snemu's model may not
+> under whatever the harness does. Unproven — snemu's `Uart::read` looks like it
+> returns `THRE | TEMT` unconditionally, which would *contradict* that theory, so
+> start by checking whether the hang is in `putchar` at all rather than assuming.
+>
+> **2. `heap-oom` fails** (`no heap.grow_total > 0 within 30s`) with the banner
+> commented out — a real second failure, not a knock-on. Lead: its console shows
+> `memory: 16777216` (16 MiB), but the workload is designed to leak ~16 MiB *per
+> heartbeat* against ~120 MiB (`frame-allocator-oom`, right next to it in the
+> registry, runs at 128 MiB). Either the scenario's RAM sizing is wrong or
+> something in `32cd6fc` changed the boot-time allocation balance — the only
+> behavioural delta left for a non-`vf2` build is `ramfb::init()` becoming
+> conditional on `dtb::has_fw_cfg`. Cheapest experiment: make that call
+> unconditional again and re-run `cargo xtask itest heap-oom`.
+
+The section below is the
 original scoping; per-blocker ✓ notes mark what shipped.
 
 > ### ⚠️ Lesson — a stale image looks exactly like a regression

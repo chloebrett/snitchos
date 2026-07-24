@@ -262,7 +262,7 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
     }
 
     ph!("pre-banner");
-    banner::print();
+    //banner::print();
     ph!("post-banner");
 
     // Register the metric set early — BEFORE timer init, spawns, or
@@ -590,7 +590,10 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
         #[cfg(feature = "vf2")]
         println!("smp: starting hart {logical} (mhartid {secondary_mhartid})");
         let err = sbi::hart_start(secondary_mhartid, entry_pa, logical as u64);
-        assert!(err == 0, "sbi_hart_start({secondary_mhartid}) failed: error={err}");
+        assert!(
+            err == 0,
+            "sbi_hart_start({secondary_mhartid}) failed: error={err}"
+        );
         // Acquire: pair with the Release on this hart's `SECONDARY_READY` bit.
         let bit = 1u64 << logical;
         while secondary::SECONDARY_READY.load(Ordering::Acquire) & bit == 0 {
