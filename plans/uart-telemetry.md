@@ -79,22 +79,35 @@ wasm-buildability, and clippy isn't in the `xtask test` gate — a `CapEvent`-st
 refactor is its own task.
 **Done when**: gate green, wasm target builds. ✅
 
-### Step 1: COBS the wire format, both transports
+### Step 1: COBS the wire format — ✅ DONE
 
 **Acceptance criteria**: every frame on the wire is COBS-encoded and `0x00`
-delimited, on **both** virtio and (future) UART; `itest` is green; a byte
-inserted mid-stream costs exactly one frame, not the stream.
-**RED**: `protocol` unit tests — encode/decode round-trip through COBS; a frame
-containing `0x00` bytes in its payload survives; a truncated frame yields
-`DeserializeUnexpectedEnd`, not garbage.
-**GREEN**: switch the encode site to `postcard::to_slice_cobs`; teach
-`try_decode_frame`/`decode_stream` the delimiter.
-**MUTATE**: `cargo xtask mutants protocol`.
-**KILL MUTANTS**: expect survivors around delimiter handling — that is the
-load-bearing logic, so strengthen rather than accept.
-**REFACTOR**: assess.
-**Done when**: gate green. **This changes the wire format** — do it in one
-increment across both transports so the two never diverge.
+delimited; `itest` green; a frame whose encoding contains `0x00` survives (the
+delimiter is unambiguous); truncation before the delimiter reads as "need more,"
+not an error.
+**RED**: three new `protocol::stream` tests against a not-yet-existent
+`wire_encode` — round-trip through `decode_stream`, interior-`0x00` survival,
+two-frames-back-to-back. Compile-failed (RED).
+**GREEN**: added `protocol::wire_encode` (no_std, `to_slice_cobs`); rewrote
+`try_decode_frame` (now returns `Result<Option<(OwnedFrame, usize)>, DecodeError>`
+— splits on `0x00`, COBS-decodes the chunk) and `decode_stream` (COBS-in-place on
+its owned buffer). Bumped `PROTOCOL_VERSION` 7→8 with a history note.
+**Blast radius handled**: 3 kernel encode sites (`send_hello`, `KernelSink`,
+`panic_log`) → `wire_encode`; the `kernel-obs` capture sink + its intern.rs/self
+decoders → COBS; 4 external `try_decode_frame` consumers (snemu_audit ×2,
+harness, snemu_diff) → new return shape; the `wire_stability` snapshot re-blessed
+(only the version line changed — payload bytes identical, confirming framing-only).
+`decode_stream`'s signature was **kept unchanged**, so its 3 consumers (collector,
+measure, snemu/main) needed no edits.
+**Scope correction**: the "corrupted byte costs one frame" *recovery* moved to
+Step 2 — Step 1 is fail-fast on a bad chunk (correct for the lossless socket),
+and the COBS framing is what makes Step 2's resync possible. `DecodeError.consumed`
+already carries the resync offset Step 2 will use.
+**MUTATE**: pending — `cargo xtask mutants protocol` before commit; delimiter
+handling is the load-bearing logic to watch.
+**Verified**: itest 121/121, `--scramble` 121/121, protocol/kernel-obs/xtask-snemu
+suites green.
+**Done when**: gate green, mutation reviewed, commit approved.
 
 ### Step 2: Decode errors become recoverable
 

@@ -48,7 +48,7 @@ fn record_shared_stream(
     mut machine: snemu::machine::Machine,
     depth: u64,
 ) -> Vec<(u64, protocol::stream::OwnedFrame)> {
-    use protocol::stream::{OwnedFrame, try_decode_frame};
+    use protocol::stream::try_decode_frame;
     let mut consumed = 0usize;
     let mut out = Vec::new();
     loop {
@@ -57,9 +57,7 @@ fn record_shared_stream(
         loop {
             let decoded = {
                 let tx = machine.virtio_tx_output();
-                try_decode_frame(&tx[consumed..])
-                    .ok()
-                    .map(|(frame, n)| (OwnedFrame::from_borrowed(&frame), n))
+                try_decode_frame(&tx[consumed..]).ok().flatten()
             };
             match decoded {
                 Some((frame, n)) => {
@@ -80,9 +78,7 @@ fn record_shared_stream(
                 loop {
                     let decoded = {
                         let tx = machine.virtio_tx_output();
-                        try_decode_frame(&tx[consumed..])
-                            .ok()
-                            .map(|(frame, n)| (OwnedFrame::from_borrowed(&frame), n))
+                        try_decode_frame(&tx[consumed..]).ok().flatten()
                     };
                     match decoded {
                         Some((frame, n)) => {

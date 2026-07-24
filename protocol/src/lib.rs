@@ -1,7 +1,9 @@
-//! Wire format for `SnitchOS` telemetry. Postcard-encoded `Frame` enum.
-//! Postcard's encoding is self-delimiting, so frames are written
-//! back-to-back with no outer length prefix; the decoder peels one frame
-//! at a time (see `stream::try_decode_frame`).
+//! Wire format for `SnitchOS` telemetry: postcard-encoded `Frame` enum, then
+//! COBS-framed with a `0x00` delimiter per frame (see [`wire_encode`]). COBS
+//! keeps the encoded body free of `0x00`, so the delimiter is an unambiguous
+//! boundary a decoder can resynchronise on after byte loss — the property that
+//! lets the stream ride a raw, lossy serial line, not just a message-framed
+//! virtqueue. The decoder peels one frame at a time (see `stream::decode_stream`).
 //!
 //! `no_std` so the kernel can use it; tests are hosted.
 
@@ -39,7 +41,12 @@ pub mod stream;
 ///   - 7: appended `CapEventKind::Minted` (self-minted-via-syscall provenance —
 ///     `EndpointCreate`/`NotifyCreate`). Additive enum variant; old captures never
 ///     carry it, but an old decoder can't read a new one.
-pub const PROTOCOL_VERSION: u8 = 7;
+///   - 8: **framing change, not a payload change** — frames are now COBS-encoded
+///     and `0x00`-delimited on the wire (see [`wire_encode`]) instead of written
+///     as bare back-to-back postcard. Old captures won't decode; the corpus is
+///     regenerable. Enables byte-loss resync on a raw serial line — the M2/B3
+///     prerequisite (`docs/uart-telemetry-design.md` Decision 1).
+pub const PROTOCOL_VERSION: u8 = 8;
 
 /// A received `Hello.protocol_version` disagreed with the version this build
 /// speaks. Names both sides so the consumer can say exactly what diverged.
@@ -237,6 +244,27 @@ pub enum Frame<'a> {
   /// half of the async edge. New variants go at the END — postcard encodes
   /// discriminants positionally.
   NotifyWait { notification: u32, bits: u64, to_task: u32, t: u64, hart_id: u8 },
+}
+
+/// Encode `frame` as one self-delimited wire unit: postcard, then COBS, then a
+/// `0x00` terminator. Returns the written prefix of `buf`, or `Err` if `buf` is
+/// too small.
+///
+/// This is *the* wire framing — every transport (virtio today, UART next) writes
+/// frames this way, and [`stream::decode_stream`] reads them. COBS guarantees the
+/// encoded body contains no `0x00`, so the terminator is an unambiguous frame
+/// boundary that survives byte loss: a decoder that loses its place discards bytes
+/// until the next `0x00` and is back in sync, having lost at most one frame. That
+/// property is why the wire can be a raw, lossy byte pipe (a serial line) and not
+/// just a message-framed virtqueue. See `docs/uart-telemetry-design.md` Decision 1.
+///
+/// # Errors
+/// [`postcard::Error::SerializeBufferFull`] if the COBS output doesn't fit `buf`.
+pub fn wire_encode<'a>(
+  frame: &Frame<'_>,
+  buf: &'a mut [u8],
+) -> Result<&'a [u8], postcard::Error> {
+  postcard::to_slice_cobs(frame, buf).map(|s| &*s)
 }
 
 /// The lifecycle phase of a [`Frame::CapEvent`]. v0.7b emits only

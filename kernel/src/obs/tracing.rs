@@ -34,8 +34,8 @@ pub fn send_hello(timebase_hz: u32) {
         timebase_hz: u64::from(timebase_hz),
         protocol_version: protocol::PROTOCOL_VERSION,
     };
-    let mut buf = [0u8; 32];
-    if let Ok(encoded) = postcard::to_slice(&frame, &mut buf) {
+    let mut buf = [0u8; 40];
+    if let Ok(encoded) = protocol::wire_encode(&frame, &mut buf) {
         virtio_console::send(encoded);
     }
 }
@@ -56,13 +56,14 @@ static INTERN_TABLE: crate::sync::Mutex<InternTable> = crate::sync::Mutex::new(I
 /// `strings_used` gauge: used drops, released climbs.
 static STRINGS_RELEASED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// The kernel's single `FrameSink`: encode the frame with postcard,
-/// then either ship to the virtio-console (if it's up) or append to
-/// the pre-init buffer for later flush.
+/// The kernel's single `FrameSink`: encode the frame with `wire_encode`
+/// (postcard + COBS + delimiter — the wire framing), then either ship to the
+/// virtio-console (if it's up) or append to the pre-init buffer for later flush.
 ///
-/// The 512-byte encode buffer holds span / event / metric frames, short
+/// The 520-byte encode buffer holds span / event / metric frames, short
 /// `StringRegister`s, and a `Frame::Log` line (a userspace `println!`, capped
-/// at `MAX_USER_STR_LEN` bytes of message + framing). Frames that don't fit are
+/// at `MAX_USER_STR_LEN` bytes of message + framing), plus COBS's few bytes of
+/// overhead over the ~512-byte postcard payload. Frames that don't fit are
 /// silently dropped — encoding failure is a programmer error (frame too big or
 /// postcard bug), distinct from pre-init overflow which the buffer counts and
 /// the host learns about via `Frame::Dropped`.
@@ -70,8 +71,8 @@ struct KernelSink;
 
 impl FrameSink for KernelSink {
     fn emit(&mut self, frame: &Frame<'_>) {
-        let mut buf = [0u8; 512];
-        let Ok(bytes) = postcard::to_slice(frame, &mut buf) else {
+        let mut buf = [0u8; 520];
+        let Ok(bytes) = protocol::wire_encode(frame, &mut buf) else {
             return;
         };
         if virtio_console::CONSOLE.get().is_some() {

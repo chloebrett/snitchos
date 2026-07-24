@@ -340,9 +340,9 @@ impl FrameProgress {
     /// boundary, so the trailing partial frame is re-read (just that one) once it
     /// completes — never the whole buffer.
     fn advance(&mut self, tx: &[u8]) {
-        while let Ok((frame, n)) = protocol::stream::try_decode_frame(&tx[self.consumed..]) {
+        while let Ok(Some((frame, n))) = protocol::stream::try_decode_frame(&tx[self.consumed..]) {
             self.count += 1;
-            if matches!(frame, protocol::Frame::SpanStart { .. }) {
+            if matches!(frame, protocol::stream::OwnedFrame::SpanStart { .. }) {
                 self.saw_span = true;
             }
             self.consumed += n;
@@ -1439,7 +1439,8 @@ mod tests {
         ];
         let mut bytes = Vec::new();
         for f in &frames {
-            bytes.extend_from_slice(&postcard::to_allocvec(f).expect("encode"));
+            let mut buf = [0u8; 256];
+            bytes.extend_from_slice(protocol::wire_encode(f, &mut buf).expect("encode"));
         }
         // Feed the buffer one byte at a time — the pathological growth the old
         // O(n²) re-decode suffered — and assert the incremental tracker ends at

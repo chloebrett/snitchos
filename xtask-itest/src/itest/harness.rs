@@ -70,9 +70,7 @@ impl LiveSnemu {
             // machine ends before we step, so the two never overlap).
             let decoded = {
                 let tx = self.machine.virtio_tx_output();
-                try_decode_frame(&tx[self.tx_consumed..])
-                    .ok()
-                    .map(|(frame, n)| (OwnedFrame::from_borrowed(&frame), n))
+                try_decode_frame(&tx[self.tx_consumed..]).ok().flatten()
             };
             if let Some((frame, n)) = decoded {
                 self.tx_consumed += n;

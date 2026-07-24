@@ -11,15 +11,17 @@
 
 use protocol::Frame;
 
-/// Encode a panic [`Frame::Log`] into `buf` (postcard, no allocation). Returns
-/// the number of bytes written, or `None` if `buf` is too small — the safety
-/// valve that keeps the panic path from ever writing past its fixed `static`
-/// buffer. `Log` inlines `msg` as a `&str`, so no interning or heap is touched.
+/// Encode a panic [`Frame::Log`] into `buf` as one wire unit (postcard + COBS +
+/// delimiter, via [`protocol::wire_encode`]; no allocation). Returns the number of
+/// bytes written, or `None` if `buf` is too small — the safety valve that keeps
+/// the panic path from ever writing past its fixed `static` buffer. `Log` inlines
+/// `msg` as a `&str`, so no interning or heap is touched. The panic frame rides
+/// the same COBS framing as every other frame, so the host decodes it identically.
 #[must_use]
 pub fn encode(buf: &mut [u8], msg: &str, task_id: u32, t: u64, hart_id: u8) -> Option<usize> {
-    postcard::to_slice(&Frame::Log { msg, task_id, t, hart_id }, buf)
+    protocol::wire_encode(&Frame::Log { msg, task_id, t, hart_id }, buf)
         .ok()
-        .map(|written| written.len())
+        .map(<[u8]>::len)
 }
 
 /// A [`core::fmt::Write`] sink over a caller-provided fixed buffer, used by the
@@ -73,7 +75,8 @@ mod tests {
         // bytes decode back to exactly the Log we asked for.
         let mut buf = [0u8; 256];
         let n = encode(&mut buf, "kernel panic", 3, 42, 1).expect("fits in 256 bytes");
-        let decoded: Frame = postcard::from_bytes(&buf[..n]).expect("decodes");
+        // The bytes are COBS-framed (the wire format), so decode with the COBS path.
+        let decoded: Frame = postcard::from_bytes_cobs(&mut buf[..n]).expect("decodes");
         assert_eq!(
             decoded,
             Frame::Log { msg: "kernel panic", task_id: 3, t: 42, hart_id: 1 }

@@ -16,13 +16,14 @@ pub trait FrameSink {
 
 #[cfg(test)]
 pub(crate) mod capture {
-    //! Test-only capturing sink. Records frames as postcard-encoded
-    //! bytes and exposes them via `decoded()` for assertions.
+    //! Test-only capturing sink. Records frames as wire-encoded bytes
+    //! (COBS-framed, via `protocol::wire_encode`) and exposes them via
+    //! `raw()` for assertions.
     //!
     //! Encoding is the realistic path — the kernel does the same encode
-    //! before pushing to the wire — but tests get a typed `Frame` back
-    //! to assert on. The `Vec<Vec<u8>>` storage is fine because test
-    //! builds link std.
+    //! before pushing to the wire — so consumers decode with the COBS path
+    //! (`postcard::from_bytes_cobs`), exactly as the host collector does. The
+    //! `Vec<Vec<u8>>` storage is fine because test builds link std.
 
     use super::*;
     use protocol::Frame;
@@ -51,9 +52,9 @@ pub(crate) mod capture {
 
     impl FrameSink for CapturingSink {
         fn emit(&mut self, frame: &Frame<'_>) {
-            let mut buf = [0u8; 256];
-            let bytes = postcard::to_slice(frame, &mut buf)
-                .expect("test frame must fit in 256 bytes");
+            let mut buf = [0u8; 264];
+            let bytes = protocol::wire_encode(frame, &mut buf)
+                .expect("test frame must fit in 264 bytes");
             self.encoded.push(bytes.to_vec());
         }
     }
@@ -68,7 +69,8 @@ pub(crate) mod capture {
             let mut sink = CapturingSink::new();
             sink.emit(&Frame::SpanEnd { id: SpanId(7), t: 42 });
             assert_eq!(sink.len(), 1);
-            let decoded: Frame = postcard::from_bytes(&sink.raw()[0]).unwrap();
+            let mut bytes = sink.raw()[0].clone();
+            let decoded: Frame = postcard::from_bytes_cobs(&mut bytes).unwrap();
             assert_eq!(decoded, Frame::SpanEnd { id: SpanId(7), t: 42 });
         }
 
@@ -78,8 +80,10 @@ pub(crate) mod capture {
             sink.emit(&Frame::SpanEnd { id: SpanId(1), t: 10 });
             sink.emit(&Frame::SpanEnd { id: SpanId(2), t: 20 });
             assert_eq!(sink.len(), 2);
-            let first: Frame = postcard::from_bytes(&sink.raw()[0]).unwrap();
-            let second: Frame = postcard::from_bytes(&sink.raw()[1]).unwrap();
+            let mut b0 = sink.raw()[0].clone();
+            let mut b1 = sink.raw()[1].clone();
+            let first: Frame = postcard::from_bytes_cobs(&mut b0).unwrap();
+            let second: Frame = postcard::from_bytes_cobs(&mut b1).unwrap();
             assert_eq!(first, Frame::SpanEnd { id: SpanId(1), t: 10 });
             assert_eq!(second, Frame::SpanEnd { id: SpanId(2), t: 20 });
         }

@@ -306,8 +306,11 @@ mod tests {
     use std::boxed::Box;
     use std::format;
 
-    fn decode(bytes: &[u8]) -> Frame<'_> {
-        postcard::from_bytes(bytes).unwrap()
+    // The capture sink stores COBS-framed bytes (the real wire format), so decode
+    // with the COBS path. `from_bytes_cobs` decodes in place, hence `&mut`; callers
+    // pass a `.clone()` of the captured bytes.
+    fn decode(bytes: &mut [u8]) -> Frame<'_> {
+        postcard::from_bytes_cobs(bytes).unwrap()
     }
 
     #[test]
@@ -320,7 +323,7 @@ mod tests {
         assert_eq!(id, StringId(0));
         assert_eq!(sink.len(), 1);
         assert_eq!(
-            decode(&sink.raw()[0]),
+            decode(&mut sink.raw()[0].clone()),
             Frame::StringRegister { id: StringId(0), value: "foo" },
         );
     }
@@ -439,7 +442,7 @@ mod tests {
         table.register_metric("m", MetricKind::Gauge, 42, &mut sink);
         // [0] = StringRegister (new name), [1] = MetricRegister (first declaration).
         assert!(matches!(
-            decode(&sink.raw()[1]),
+            decode(&mut sink.raw()[1].clone()),
             Frame::MetricRegister { kind: MetricKind::Gauge, task_id: 42, .. }
         ));
     }
@@ -459,7 +462,7 @@ mod tests {
         // Exactly: StringRegister + MetricRegister(Counter). Nothing else.
         assert_eq!(sink.len(), 2);
         assert!(matches!(
-            decode(&sink.raw()[1]),
+            decode(&mut sink.raw()[1].clone()),
             Frame::MetricRegister { kind: MetricKind::Counter, .. },
         ));
     }
@@ -476,8 +479,8 @@ mod tests {
         table.register_metric("m", MetricKind::Counter, 0, &mut sink);
 
         assert_eq!(sink.len(), 2);
-        assert!(matches!(decode(&sink.raw()[0]), Frame::StringRegister { .. }));
-        assert!(matches!(decode(&sink.raw()[1]), Frame::MetricRegister { .. }));
+        assert!(matches!(decode(&mut sink.raw()[0].clone()), Frame::StringRegister { .. }));
+        assert!(matches!(decode(&mut sink.raw()[1].clone()), Frame::MetricRegister { .. }));
     }
 
     #[test]
@@ -493,7 +496,7 @@ mod tests {
 
         assert_eq!(table.lookup_by_content("proc.span"), Some(id));
         assert_eq!(
-            decode(&sink.raw()[0]),
+            decode(&mut sink.raw()[0].clone()),
             Frame::StringRegister { id, value: "proc.span" },
         );
     }
@@ -511,11 +514,11 @@ mod tests {
 
         assert_eq!(sink.len(), 2);
         assert_eq!(
-            decode(&sink.raw()[0]),
+            decode(&mut sink.raw()[0].clone()),
             Frame::StringRegister { id, value: "proc.metric" },
         );
         assert!(matches!(
-            decode(&sink.raw()[1]),
+            decode(&mut sink.raw()[1].clone()),
             Frame::MetricRegister { name_id, kind: MetricKind::Counter, task_id: 5 } if name_id == id,
         ));
 

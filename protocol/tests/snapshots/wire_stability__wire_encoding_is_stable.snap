@@ -2,7 +2,7 @@
 source: protocol/tests/wire_stability.rs
 expression: out
 ---
-PROTOCOL_VERSION = 7
+PROTOCOL_VERSION = 8
 
 == Frame variants (discriminant = first byte; append at END) ==
 Hello            00 01 06

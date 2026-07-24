@@ -107,25 +107,52 @@ impl OwnedFrame {
     }
 }
 
-/// Try to decode one `Frame` from the front of `buf`. Returns the
-/// decoded frame and the number of bytes it consumed.
+/// Try to decode one COBS-framed [`Frame`] (see [`wire_encode`]) from the front of
+/// `buf`, returning it in owned form plus the number of bytes it consumed (the
+/// frame body **and** its `0x00` terminator).
 ///
-/// `Result` (rather than `Option`) keeps the caller honest:
-/// `postcard::Error::DeserializeUnexpectedEnd` means "the buffer ended
-/// mid-frame, read more"; any other error means "the bytes don't match
-/// the protocol," which is worth surfacing rather than silently
-/// spinning forever.
+/// `Ok(None)` means "no complete frame yet — the buffer holds no `0x00`
+/// terminator, read more." `Err` means a `0x00`-delimited chunk was present but
+/// failed to COBS/postcard-decode (corruption): the caller drops it and continues
+/// from the byte after the terminator (`n` still points past the delimiter), which
+/// is the resync — the delimiter is where the stream finds its feet again.
 ///
-/// Public so a caller holding a *growing in-memory* buffer (rather than a
-/// `Read` stream) can decode incrementally — advancing an offset by the returned
-/// consumed-count — instead of re-decoding the whole buffer on every growth.
-pub fn try_decode_frame(buf: &[u8]) -> Result<(Frame<'_>, usize), postcard::Error> {
-    postcard::take_from_bytes(buf).map(|(frame, rest)| (frame, buf.len() - rest.len()))
+/// Returns [`OwnedFrame`] rather than a borrowed [`Frame`]: COBS decodes in place,
+/// and the decode happens in a scratch buffer here, so nothing borrowed can
+/// escape. Every existing caller converts to [`OwnedFrame`] immediately anyway.
+///
+/// Public so a caller holding a *growing in-memory* buffer (rather than a `Read`
+/// stream) can decode incrementally — advancing an offset by the returned count.
+pub fn try_decode_frame(buf: &[u8]) -> Result<Option<(OwnedFrame, usize)>, DecodeError> {
+    let Some(zero) = buf.iter().position(|&b| b == 0) else {
+        return Ok(None); // no terminator yet — need more bytes
+    };
+    let consumed = zero + 1;
+    let mut chunk = buf[..consumed].to_vec();
+    match postcard::take_from_bytes_cobs::<Frame<'_>>(&mut chunk) {
+        Ok((frame, _)) => Ok(Some((OwnedFrame::from_borrowed(&frame), consumed))),
+        Err(_) => Err(DecodeError { consumed }),
+    }
 }
 
-/// Drive the read-decode-emit loop over any byte source. Each fully
-/// decoded `Frame` is handed to `on_frame`. Returns when the stream
-/// closes cleanly (EOF), or with `Err` on I/O or decode error.
+/// A `0x00`-delimited chunk failed to decode. Carries how many bytes to skip
+/// (through the terminator) so the caller can resync at the next frame boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeError {
+    /// Bytes to advance past the bad frame (including its `0x00` terminator).
+    pub consumed: usize,
+}
+
+/// Drive the read-decode-emit loop over any byte source. Each COBS-framed
+/// [`Frame`] is handed to `on_frame` in borrowed form. Returns when the source
+/// closes cleanly (EOF), or `Err` if a `0x00`-delimited chunk fails to decode.
+///
+/// Fail-fast on a bad chunk is deliberate at this step: on a lossless transport (a
+/// Unix socket) an undecodable frame is a real bug worth surfacing, not noise to
+/// swallow. The recoverable variant — skip to the next delimiter and count the
+/// resync — is what a lossy serial line needs, and lands next (Step 2 of
+/// `plans/uart-telemetry.md`). The COBS framing here is what *makes* that resync
+/// possible; this step just doesn't exercise it yet.
 pub fn decode_stream<R: Read>(
     stream: &mut R,
     mut on_frame: impl FnMut(&Frame<'_>),
@@ -134,21 +161,20 @@ pub fn decode_stream<R: Read>(
     let mut tmp = [0u8; 256];
 
     loop {
-        loop {
-            let consumed = match try_decode_frame(&buf) {
-                Ok((frame, n)) => {
-                    on_frame(&frame);
-                    n
-                }
-                Err(postcard::Error::DeserializeUnexpectedEnd) => break,
+        // Decode every complete (`0x00`-terminated) frame in the buffer. COBS
+        // decode is in place, so we drain a prefix into a scratch Vec and hand the
+        // borrow to `on_frame` before dropping it.
+        while let Some(zero) = buf.iter().position(|&b| b == 0) {
+            let mut chunk: Vec<u8> = buf.drain(..=zero).collect();
+            match postcard::take_from_bytes_cobs::<Frame<'_>>(&mut chunk) {
+                Ok((frame, _)) => on_frame(&frame),
                 Err(e) => {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         std::format!("frame decode error: {e:?}"),
                     ));
                 }
-            };
-            buf.drain(..consumed);
+            }
         }
 
         let n = stream.read(&mut tmp)?;
@@ -259,25 +285,76 @@ mod tests {
         }
     }
 
-    // --- Moved verbatim from collector/src/main.rs (decode tests) ---
+    // --- COBS wire framing (Step 1: docs/uart-telemetry-design.md Decision 1) ---
+
+    #[test]
+    fn wire_encoded_frame_round_trips_through_the_stream_decoder() {
+        let frame = Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 };
+        let mut buf = [0u8; 64];
+        let bytes = crate::wire_encode(&frame, &mut buf).expect("encode fits").to_vec();
+        let mut got = None;
+        decode_stream(&mut Cursor::new(bytes), |f| got = Some(OwnedFrame::from_borrowed(f)))
+            .expect("clean stream decodes");
+        assert_eq!(got, Some(OwnedFrame::from_borrowed(&frame)));
+    }
+
+    #[test]
+    fn a_frame_whose_encoding_contains_a_zero_byte_survives_the_delimiter() {
+        // The whole reason for COBS: `0x00` is the frame delimiter, so any `0x00`
+        // *inside* an encoded frame would be a false boundary. A field of value 0
+        // (t = 0) postcard-encodes to a literal `0x00`; this frame must still
+        // round-trip whole, proving the delimiter can't occur in the payload.
+        let frame = Frame::SpanEnd { id: SpanId(0), t: 0 };
+        let mut buf = [0u8; 64];
+        let bytes = crate::wire_encode(&frame, &mut buf).expect("encode fits");
+        assert!(
+            bytes[..bytes.len() - 1].iter().all(|&b| b != 0),
+            "COBS output before the trailing delimiter must contain no 0x00"
+        );
+        let mut got = None;
+        decode_stream(&mut Cursor::new(bytes.to_vec()), |f| got = Some(OwnedFrame::from_borrowed(f)))
+            .expect("clean stream decodes");
+        assert_eq!(got, Some(OwnedFrame::from_borrowed(&frame)));
+    }
+
+    #[test]
+    fn two_wire_frames_back_to_back_both_decode() {
+        let a = Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 };
+        let b = Frame::SpanEnd { id: SpanId(42), t: 1234 };
+        let mut wire = Vec::new();
+        let mut buf = [0u8; 64];
+        wire.extend_from_slice(crate::wire_encode(&a, &mut buf).unwrap());
+        wire.extend_from_slice(crate::wire_encode(&b, &mut buf).unwrap());
+        let mut got = Vec::new();
+        decode_stream(&mut Cursor::new(wire), |f| got.push(OwnedFrame::from_borrowed(f)))
+            .expect("clean stream decodes");
+        assert_eq!(got, vec![OwnedFrame::from_borrowed(&a), OwnedFrame::from_borrowed(&b)]);
+    }
+
+    // --- Decode tests (COBS-framed; see `wire_encode`) ---
+
+    /// Encode `frame` through the wire framing into an owned `Vec` — the tests'
+    /// stand-in for what the kernel puts on the wire.
+    fn wire(frame: &Frame<'_>) -> Vec<u8> {
+        let mut buf = [0u8; 128];
+        crate::wire_encode(frame, &mut buf).expect("encode fits").to_vec()
+    }
 
     #[test]
     fn decodes_hello() {
         let frame = Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 };
-        let mut buf = [0u8; 64];
-        let encoded_len = postcard::to_slice(&frame, &mut buf).unwrap().len();
-
+        let bytes = wire(&frame);
         let (decoded, consumed) =
-            try_decode_frame(&buf[..encoded_len]).expect("decode should succeed");
-        assert_eq!(decoded, frame);
-        assert_eq!(consumed, encoded_len);
+            try_decode_frame(&bytes).expect("no decode error").expect("a complete frame");
+        assert_eq!(decoded, OwnedFrame::from_borrowed(&frame));
+        assert_eq!(consumed, bytes.len());
     }
 
     #[test]
-    fn round_trips_a_revoked_cap_event_over_postcard() {
+    fn round_trips_a_revoked_cap_event() {
         // The `Revoked` kind is the newest CapEventKind discriminant (appended
-        // after Granted/Transferred). Encode + decode over postcard so a future
-        // reorder — which would silently break the wire — fails this test.
+        // after Granted/Transferred). Round-trip it so a future reorder — which
+        // would silently break the wire — fails this test.
         let frame = Frame::CapEvent {
             kind: CapEventKind::Revoked,
             cap_id: 77,
@@ -290,23 +367,19 @@ mod tests {
             hart_id: 0,
             name: [0; snitchos_abi::CAP_NAME_LEN],
         };
-        let mut buf = [0u8; 64];
-        let encoded_len = postcard::to_slice(&frame, &mut buf).unwrap().len();
-        let (decoded, _) = try_decode_frame(&buf[..encoded_len]).expect("decode should succeed");
-        assert_eq!(decoded, frame, "Revoked CapEvent survives the wire intact");
-        // And it converts to the owned form (the harness/collector path).
+        let (decoded, _) =
+            try_decode_frame(&wire(&frame)).expect("no decode error").expect("a frame");
         assert!(matches!(
-            OwnedFrame::from_borrowed(&frame),
+            decoded,
             OwnedFrame::CapEvent { kind: CapEventKind::Revoked, cap_id: 77, holder: 4, .. },
         ));
     }
 
     #[test]
-    fn round_trips_a_minted_cap_event_over_postcard() {
+    fn round_trips_a_minted_cap_event() {
         // `Minted` is the newest CapEventKind discriminant (appended after
-        // Revoked — self-minted-via-syscall provenance). Encode + decode over
-        // postcard so a future reorder — which would silently break the wire —
-        // fails this test.
+        // Revoked — self-minted-via-syscall provenance). Round-trip guards a
+        // future reorder.
         let frame = Frame::CapEvent {
             kind: CapEventKind::Minted,
             cap_id: 88,
@@ -319,54 +392,52 @@ mod tests {
             hart_id: 1,
             name: [0; snitchos_abi::CAP_NAME_LEN],
         };
-        let mut buf = [0u8; 64];
-        let encoded_len = postcard::to_slice(&frame, &mut buf).unwrap().len();
-        let (decoded, _) = try_decode_frame(&buf[..encoded_len]).expect("decode should succeed");
-        assert_eq!(decoded, frame, "Minted CapEvent survives the wire intact");
-        // And it converts to the owned form (the harness/collector path).
+        let (decoded, _) =
+            try_decode_frame(&wire(&frame)).expect("no decode error").expect("a frame");
         assert!(matches!(
-            OwnedFrame::from_borrowed(&frame),
+            decoded,
             OwnedFrame::CapEvent { kind: CapEventKind::Minted, cap_id: 88, holder: 5, .. },
         ));
     }
 
     #[test]
-    fn truncated_returns_unexpected_end() {
-        let frame = Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 };
-        let mut buf = [0u8; 64];
-        let encoded_len = postcard::to_slice(&frame, &mut buf).unwrap().len();
-        let truncated = &buf[..encoded_len - 1];
-        let err = try_decode_frame(truncated).expect_err("truncated should fail");
-        assert!(matches!(err, postcard::Error::DeserializeUnexpectedEnd));
+    fn a_buffer_without_a_delimiter_yields_no_frame_yet() {
+        // Truncation before the `0x00` terminator (the COBS body has no interior
+        // zeros by construction) means "read more", not an error.
+        let bytes = wire(&Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 });
+        let truncated = &bytes[..bytes.len() - 1]; // drops the terminator
+        assert_eq!(try_decode_frame(truncated), Ok(None));
     }
 
     #[test]
-    fn ignores_trailing_bytes() {
-        let frame = Frame::SpanEnd { id: SpanId(7), t: 99 };
-        let mut buf = [0u8; 64];
-        let encoded_len = postcard::to_slice(&frame, &mut buf).unwrap().len();
-        let garbage = [0xAAu8, 0xBB, 0xCC, 0xDD];
-        let mut combined = Vec::with_capacity(encoded_len + garbage.len());
-        combined.extend_from_slice(&buf[..encoded_len]);
-        combined.extend_from_slice(&garbage);
+    fn a_chunk_that_fails_to_decode_reports_an_error_not_a_panic() {
+        // `[0x01, 0x00]` is a well-formed COBS frame whose decoded body is empty;
+        // postcard can't read a `Frame` from zero bytes. `try_decode_frame` reports
+        // the error with a resync offset past the delimiter — Step 2 uses that
+        // offset to skip and continue rather than dying.
+        assert_eq!(try_decode_frame(&[0x01, 0x00]), Err(DecodeError { consumed: 2 }));
+    }
+
+    #[test]
+    fn try_decode_frame_consumes_exactly_through_the_first_delimiter() {
+        // Bytes after a frame's terminator belong to the next frame, not this one.
+        let a = Frame::SpanEnd { id: SpanId(7), t: 99 };
+        let b = Frame::Hello { timebase_hz: 1, protocol_version: 1 };
+        let a_bytes = wire(&a);
+        let mut combined = a_bytes.clone();
+        combined.extend_from_slice(&wire(&b));
         let (decoded, consumed) =
-            try_decode_frame(&combined).expect("decode should succeed");
-        assert_eq!(decoded, frame);
-        assert_eq!(consumed, encoded_len);
+            try_decode_frame(&combined).expect("no decode error").expect("first frame");
+        assert_eq!(decoded, OwnedFrame::from_borrowed(&a));
+        assert_eq!(consumed, a_bytes.len(), "stops at the first delimiter");
     }
 
     #[test]
     fn decode_stream_yields_single_hello() {
         let frame = Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 };
-        let mut buf = [0u8; 64];
-        let encoded_len = postcard::to_slice(&frame, &mut buf).unwrap().len();
-        let bytes: Vec<u8> = buf[..encoded_len].to_vec();
         let mut count = 0;
-        decode_stream(&mut Cursor::new(bytes), |f| {
-            assert!(matches!(
-                f,
-                Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 }
-            ));
+        decode_stream(&mut Cursor::new(wire(&frame)), |f| {
+            assert!(matches!(f, Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 }));
             count += 1;
         })
         .expect("decode_stream should succeed");
@@ -377,12 +448,8 @@ mod tests {
     fn decode_stream_yields_multiple_frames() {
         let frame_a = Frame::Hello { timebase_hz: 10_000_000, protocol_version: 1 };
         let frame_b = Frame::SpanEnd { id: SpanId(42), t: 1234 };
-        let mut buf = Vec::new();
-        {
-            let mut scratch = [0u8; 64];
-            buf.extend_from_slice(postcard::to_slice(&frame_a, &mut scratch).unwrap());
-            buf.extend_from_slice(postcard::to_slice(&frame_b, &mut scratch).unwrap());
-        }
+        let mut buf = wire(&frame_a);
+        buf.extend_from_slice(&wire(&frame_b));
         let mut seen: Vec<&'static str> = Vec::new();
         decode_stream(&mut Cursor::new(buf), |f| match f {
             Frame::Hello { .. } => seen.push("hello"),
@@ -414,9 +481,7 @@ mod tests {
     #[test]
     fn decode_stream_handles_partial_reads() {
         let frame = Frame::MetricRegister { name_id: StringId(7), kind: MetricKind::Counter, task_id: 9 };
-        let mut scratch = [0u8; 64];
-        let encoded = postcard::to_slice(&frame, &mut scratch).unwrap();
-        let reader = ChunkedReader { data: encoded.to_vec(), pos: 0, chunk_size: 1 };
+        let reader = ChunkedReader { data: wire(&frame), pos: 0, chunk_size: 1 };
         let mut count = 0;
         decode_stream(&mut { reader }, |_| count += 1)
             .expect("decode_stream should succeed");
