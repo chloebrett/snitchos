@@ -289,6 +289,15 @@ one of those constants is wrong.
 
 ### B3 — Telemetry transport: virtio-console → UART framing *(the real design work)*
 
+> **Design note written: [docs/uart-telemetry-design.md](../docs/uart-telemetry-design.md).**
+> It corrects two premises below. **Framing is already solved** — the decoder is
+> `postcard::take_from_bytes` over a growing buffer and `decode_stream` is generic
+> over `R: Read`, so the wire has always been an unframed byte stream and virtio's
+> message boundaries were never load-bearing. The genuinely new problem is
+> **resync after byte loss** (COBS), plus a measured **throughput** budget: the
+> observed ~60 KB/s of telemetry is ~5× what a 115200 UART carries, so the baud
+> matters more than the framing. The sketch below is the original scoping.
+
 This is the port's *point*. The postcard `Frame` stream is SnitchOS's entire
 reason to exist, and today it rides a virtio-console over virtio-mmio
 (`kernel/src/device/virtio_console.rs`). The address is DTB-discovered, so it's
