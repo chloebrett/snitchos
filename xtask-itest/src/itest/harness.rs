@@ -23,7 +23,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use protocol::stream::{OwnedFrame, decode_stream, try_decode_frame};
+use protocol::stream::{OnDecodeError, OwnedFrame, decode_stream, try_decode_frame};
 use protocol::StringId;
 
 use itest_harness::{CaptureLevel, ErrorOrigin, FailureCapture, WaitOutcome};
@@ -429,7 +429,7 @@ impl Boot {
         let reader_recorder = Arc::clone(&recorder);
         thread::spawn(move || {
             let mut stream = stream;
-            let _ = decode_stream(&mut stream, |frame| {
+            let _ = decode_stream(&mut stream, OnDecodeError::Fail, |frame| {
                 reader_recorder.push(OwnedFrame::from_borrowed(frame));
             });
             // Stream ended (socket EOF / QEMU exit): mark closed so a waiter

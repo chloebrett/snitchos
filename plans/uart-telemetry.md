@@ -109,20 +109,31 @@ handling is the load-bearing logic to watch.
 suites green.
 **Done when**: gate green, mutation reviewed, commit approved.
 
-### Step 2: Decode errors become recoverable
+### Step 2: Decode errors become recoverable — ✅ DONE
 
-**Acceptance criteria**: given a stream with a corrupt/partial frame, the decoder
-skips to the next `0x00`, counts a resync, and continues delivering subsequent
-frames; the socket path's fail-fast behaviour is preserved where it is correct.
-**RED**: `collector` unit tests over a synthetic byte stream with damage injected
-at frame boundaries, mid-frame, and in the delimiter itself.
-**GREEN**: resync loop + a `resyncs` counter.
-**MUTATE**: `cargo xtask mutants collector`.
-**KILL MUTANTS**: address survivors.
-**REFACTOR**: the error policy differs per transport (lossless socket vs lossy
-serial) — prefer expressing that in a type over a bool flag threaded through the
-loop.
-**Done when**: gate green. Still no hardware.
+**Acceptance criteria**: a stream with an undecodable frame between two good ones:
+the decoder skips the bad `0x00`-delimited chunk, counts a resync, and still
+delivers the neighbours; the socket path stays fail-fast (a bad frame on a
+lossless wire is a real bug, surfaced as `Err`); the resync count is observable.
+**RED**: four `protocol::stream` tests — resync skips a corrupt frame and delivers
+neighbours (count 1), fail-policy returns `Err` on the same input, a clean stream
+reports 0 resyncs, consecutive bad chunks don't wedge (count 2). Compile-failed.
+**GREEN**: `OnDecodeError::{Fail, Resync}` policy enum + `DecodeSummary { resyncs }`
+returned from `decode_stream`; the decode-error branch dispatches on the policy
+(dropping the chunk past its delimiter *is* the resync). Home is `protocol::stream`
+(where `decode_stream` lives), not `collector` as the plan first assumed — the
+collector just picks the policy.
+**MUTATE**: pending — `cargo xtask mutants protocol -f stream.rs` before commit.
+**REFACTOR**: the per-transport policy is a **type at the call site**
+(`OnDecodeError`), per the plan's steer, not a bool in the loop. Chosen over a
+separate `decode_stream_resync` fn (user call): one entry point, explicit policy.
+**Consumer churn**: `decode_stream` gained the policy arg, so all 6 callers
+(collector, measure, snemu/main, snemu_diff ×2, harness) pass `OnDecodeError::Fail`
+— all are lossless (socket / in-memory) today. The serial source (Step 10) is the
+first `Resync` caller.
+**Verified**: itest 121/121; protocol/collector/xtask-snemu/xtask-itest suites
+green (207).
+**Done when**: gate green, mutation reviewed, commit approved.
 
 ### Step 3: A frame stream is a source — add replay
 

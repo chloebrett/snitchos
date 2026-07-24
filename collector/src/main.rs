@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use protocol::Frame;
-use protocol::stream::decode_stream;
+use protocol::stream::{OnDecodeError, decode_stream};
 
 use collector::{SpanExporter, loki, otlp, prom, state};
 
@@ -95,7 +95,7 @@ fn main() -> std::io::Result<()> {
 
     let mut stream = UnixStream::connect(SOCKET_PATH)?;
     eprintln!("collector: connected; waiting for frames");
-    decode_stream(&mut stream, |frame| {
+    decode_stream(&mut stream, OnDecodeError::Fail, |frame| {
         if args.text {
             print_frame(frame, args.pretty);
         }

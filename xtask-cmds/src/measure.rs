@@ -16,7 +16,7 @@ use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use protocol::stream::{decode_stream, OwnedFrame};
+use protocol::stream::{OnDecodeError, decode_stream, OwnedFrame};
 use protocol::StringId;
 
 use crate::qemu;
@@ -272,7 +272,7 @@ pub fn measure(
     let (tx, rx) = channel();
     thread::spawn(move || {
         let mut stream = stream;
-        let _ = decode_stream(&mut stream, |frame| {
+        let _ = decode_stream(&mut stream, OnDecodeError::Fail, |frame| {
             let _ = tx.send(OwnedFrame::from_borrowed(frame));
         });
     });

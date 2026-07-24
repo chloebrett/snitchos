@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use protocol::stream::{OwnedFrame, decode_stream};
+use protocol::stream::{OnDecodeError, OwnedFrame, decode_stream};
 
 use crate::qemu;
 
@@ -260,7 +260,7 @@ pub(crate) fn string_vocabulary(frames: &[OwnedFrame]) -> std::collections::BTre
 fn decode_frames(bytes: &[u8]) -> Vec<OwnedFrame> {
     let mut frames = Vec::new();
     let mut cursor = Cursor::new(bytes);
-    let _ = decode_stream(&mut cursor, |f| frames.push(OwnedFrame::from_borrowed(f)));
+    let _ = decode_stream(&mut cursor, OnDecodeError::Fail, |f| frames.push(OwnedFrame::from_borrowed(f)));
     frames
 }
 
@@ -449,7 +449,7 @@ fn collect_qemu(
             let milestone_at = Arc::clone(&milestone);
             Some(thread::spawn(move || {
                 let mut stream = stream;
-                let _ = decode_stream(&mut stream, |f| {
+                let _ = decode_stream(&mut stream, OnDecodeError::Fail, |f| {
                     if matches!(f, protocol::Frame::SpanStart { .. }) {
                         let mut slot = span_at.lock().unwrap();
                         if slot.is_none() {

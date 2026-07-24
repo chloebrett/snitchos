@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use protocol::stream::{OwnedFrame, decode_stream};
+use protocol::stream::{OnDecodeError, OwnedFrame, decode_stream};
 
 /// QEMU `virt` default RAM (128 MiB).
 const RAM_SIZE: usize = 128 * 1024 * 1024;
@@ -228,7 +228,7 @@ fn dump_framebuffer(machine: &snemu::machine::Machine, path: &std::path::Path) {
 fn report_frames(bytes: &[u8], dump: bool) {
     let mut frames = Vec::new();
     let mut cursor = Cursor::new(bytes);
-    let result = decode_stream(&mut cursor, |f| frames.push(OwnedFrame::from_borrowed(f)));
+    let result = decode_stream(&mut cursor, OnDecodeError::Fail, |f| frames.push(OwnedFrame::from_borrowed(f)));
 
     eprintln!(
         "snemu: virtio-console transmitted {} bytes, decoded {} telemetry frames",
