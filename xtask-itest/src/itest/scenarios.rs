@@ -1462,6 +1462,27 @@ pub fn kernel_panic_emits_frame(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// `console=frames` routes the kernel's human log through `Frame::Log` on the
+/// telemetry wire (Step 4, `plans/uart-telemetry.md`). Booted with
+/// `console=frames`, the kernel's unconditional `println!("entering heartbeat")` —
+/// raw UART text under the default `console=text` — must instead arrive as a `Log`
+/// frame the collector can render. Proves the print-macro routing and the
+/// `console=` bootarg end to end (the boot checkpoint is mode-robust, so this
+/// shares the snapshot like any other scenario). The `console=text` default is
+/// covered implicitly: every *other* scenario boots in it and still asserts on
+/// UART / non-Log frames.
+pub fn console_frames_routes_log(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 20, |f, _| {
+        matches!(f, OwnedFrame::Log { msg, .. } if msg.contains("entering heartbeat"))
+    })
+    .ok_or(
+        "no Log carrying 'entering heartbeat' within 20s under console=frames — the print \
+         macro didn't route kernel println! through Frame::Log, or the console= bootarg \
+         didn't take (see console::write_console / kernel_boot::bootargs::console_mode)",
+    )?;
+    Ok(())
+}
+
 /// Kernel-stack *deep* overflow reported cleanly (`workload=stack-overflow-deep`,
 /// Tier B + per-hart exception stack): a kernel task (`stack_overflow_deep`)
 /// recurses until it genuinely overflows its stack into the unmapped guard page.

@@ -1206,6 +1206,41 @@ const CHECKPOINT: &[u8] = b"entering heartbeat";
 /// fallback).
 const CHECKPOINT_BUDGET: u64 = 60_000_000;
 
+/// Step `machine` until [`CHECKPOINT`] appears on **either** the UART
+/// (`console=text`, the default) or the virtio telemetry stream (`console=frames`
+/// routes the marker into a `Log` frame; its COBS payload preserves the ASCII
+/// bytes, which contain no `0x00`). Unlike [`snemu::machine::Machine::run_until_uart`],
+/// this is console-mode-robust — a `console=frames` scenario shares the boot-once
+/// snapshot like any other instead of burning the budget then falling back.
+fn run_to_checkpoint(machine: &mut snemu::machine::Machine, budget: u64) -> Result<(), String> {
+    let contains = |hay: &[u8]| hay.windows(CHECKPOINT.len()).any(|w| w == CHECKPOINT);
+    let mut steps = 0u64;
+    let (mut uart_seen, mut tx_seen) = (0usize, 0usize);
+    while steps < budget {
+        {
+            let uart = machine.uart_output();
+            if uart.len() != uart_seen {
+                uart_seen = uart.len();
+                if contains(uart) {
+                    return Ok(());
+                }
+            }
+        }
+        {
+            let tx = machine.virtio_tx_output();
+            if tx.len() != tx_seen {
+                tx_seen = tx.len();
+                if contains(tx) {
+                    return Ok(());
+                }
+            }
+        }
+        machine.step().map_err(|e| format!("fault before checkpoint: {e:?}"))?;
+        steps += 1;
+    }
+    Err(format!("checkpoint not seen within {budget} steps"))
+}
+
 /// Boot a fresh machine for `workload` to [`CHECKPOINT`] with idle-skip set — the
 /// shared snapshot every scenario on this workload forks. `Err` if it never reached
 /// the checkpoint (each scenario then boots fresh).
@@ -1226,7 +1261,7 @@ fn boot_snapshot(
         )?;
     // Set on the snapshot; the per-scenario forks inherit it through `clone`.
     speed.apply(&mut machine);
-    machine.run_until_uart(CHECKPOINT, CHECKPOINT_BUDGET)?;
+    run_to_checkpoint(&mut machine, CHECKPOINT_BUDGET)?;
     // Report the boot-once cost as guest instret (not host step calls) to match the
     // per-scenario metric — a block collapses many instructions into one step.
     let boot_instret = machine.instret();

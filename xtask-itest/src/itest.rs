@@ -221,6 +221,11 @@ catalog! {
     wfi "deep-overflow-reports-cleanly"   scenarios::deep_overflow_reports_cleanly  [sched]         {"stack-overflow-deep"};
     wfi "boot-stack-guard-fault-detected" scenarios::boot_stack_guard_fault_detected [sched]        {"boot-stack-guard"};
     wfi "kernel-panic-emits-frame"        scenarios::kernel_panic_emits_frame       [sched]         {"panic-now"};
+    // Workload string carries two bootarg tokens: `workload=init` (the default
+    // userspace root) + `console=frames`. Both parsers split on whitespace, so
+    // `format!("workload={w}")` → `workload=init console=frames` selects Init and
+    // routes the human log to frames.
+    wfi "console-frames-routes-log"       scenarios::console_frames_routes_log      [boot]          {"init console=frames"};
     wfi "block-wake-smoke"                scenarios::block_wake_smoke               [sched]         {"block-wake"};
     wfi "ipc-message-crosses"             scenarios::ipc_message_crosses            [userspace, ipc] {"ipc"};
     wfi "ipc-trace-crosses"               scenarios::ipc_trace_crosses              [userspace, ipc] {"ipc"};
