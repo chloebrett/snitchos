@@ -1,16 +1,54 @@
 # Porting SnitchOS to the VisionFive 2 (StarFive JH7110)
 
-**Status:** **M1 first-light is code-complete** (2026-07-24). All four first-light
-blockers are done — **B4 (console) ✓, B1 (SBI timer) ✓, B6 (multi-hart) ✓, B2 (RAM
-base) ✓** — each TDD'd where host-testable and validated on QEMU/snemu (121/121
-itests green). A `cargo build -p kernel --features vf2` now links/loads at
-`0x4020_0000`, drives the `snps,dw-apb-uart`, arms the timer via SBI, and maps RAM
-at `0x4000_0000`: **theoretically bootable on the VisionFive 2.** Not yet booted on
-hardware — the board-specific paths (DesignWare stride, real OpenSBI `set_timer`,
-RAM `0x4000_0000`, non-zero boot hartid) are exercised only on the board. Next:
-actually boot it (M0's TFTP loop + `bootelf`/Image handoff), then **M2 — telemetry
-over UART.** The section below is the original scoping; per-blocker ✓ notes mark
-what shipped.
+**Status:** 🎉 **M1 FIRST LIGHT ACHIEVED ON HARDWARE — 2026-07-24.** SnitchOS boots
+on the VisionFive 2, brings up all four U74s, realises userspace, and heartbeats.
+All four blockers shipped and are now **hardware-proven**, not just QEMU-green:
+**B4 (console) ✓, B1 (SBI timer) ✓, B6 (multi-hart) ✓, B2 (RAM base) ✓.**
+
+Board console at first light:
+
+```
+memory: 0x40000000 (4294967296 bytes)   ← B2: RAM base + 4 GiB, higher-half OK
+timebase: 4000000 Hz                    ← B1: 4 MHz, from the board DTB
+uart: 0x10000000                        ← B4: snps,dw-apb-uart @ reg-shift=2
+virtio-console: init failed: NotFound    ← expected; no virtio on hardware (→ M2)
+I am alive
+smp: starting hart 1 (mhartid 1) … up   ← B6: all three secondaries up
+smp: starting hart 2 (mhartid 2) … up
+smp: starting hart 3 (mhartid 3) … up
+entering heartbeat
+hb 1 … hb 5                              ← live clock, on real silicon
+```
+
+**The boot hartid genuinely varies run to run** (observed mhartid 2 and mhartid 4 as
+the boot hart on consecutive boots); `assign_logical` mapped it to logical 0 every
+time. The old `1 - hart_id` could not have survived this — B6 was load-bearing.
+
+Delivery: `cargo xtask image` → RISC-V Image (header embedded in `entry.S`) →
+TFTP → `booti`. See [Bring-up mechanics](#bring-up-mechanics-m0-in-detail).
+
+**Two board-only deviations remain (see B-notes below):** `ramfb::init` is skipped
+(fw_cfg is a QEMU invention — its DMA handshake *hangs* on the board), and
+`unmap_identity` is **temporarily** skipped pending the `kmain`-frame fix below.
+
+> ### ⚠ Latent bug found at first light: `kmain`'s frame straddles the trampoline
+>
+> `entry.S` enters `kmain` with a **physical** `sp`; the higher-half trampoline then
+> shifts `sp` *in the middle of* `kmain`. In a debug build `kmain`'s frame is large,
+> so the compiler materialises and **spills addresses of its own locals** — any
+> computed pre-trampoline stay **physical forever**. They work only while the
+> identity map is live, and fault the instant `unmap_identity` runs (observed:
+> `scause=0xf stval=0x40506de0 sepc=…`, a store to a physical boot-stack address on
+> the very next `println!`). **This is not board-specific** — QEMU's codegen just
+> happens not to spill one that survives. **Fix:** split `kmain` so all
+> post-trampoline work runs in a *fresh* frame allocated with the higher-half `sp`.
+> Third instance of this hazard family after the `tp` truncation and the `entry_pa`
+> loop-invariant miscompile — worth fixing structurally, not case-by-case.
+
+Next: the `kmain` split (re-enable `unmap_identity`), then **M2 — telemetry over
+UART** (the `hb` line above is a debug `println!`, not the frame pipeline; the board
+has no telemetry transport yet). The section below is the original scoping;
+per-blocker ✓ notes mark what shipped.
 
 > B6 was re-scoped during the work: it turned out to be an **M3 (SMP)** item, not an
 > M1 gate (the boot hart is hardcoded logical 0, so a non-zero boot hartid never
@@ -256,13 +294,14 @@ the QEMU/snemu test gate**, which everything else in the repo depends on.
   `bootelf`/`tftpboot` dev loop. Full mechanics in
   **[Bring-up mechanics](#bring-up-mechanics-m0-in-detail)** below.
 
-- **M1 — First light: boot to the human UART log.** ✅ **CODE-COMPLETE
-  (2026-07-24), not yet run on hardware.** B4 (`snps,dw-apb-uart`) + B2 (RAM base)
-  + B1 (SBI timer) all shipped and green on QEMU/snemu; a `--features vf2` kernel
-  links at `0x4020_0000`. Success *on silicon* = the NS16550 boot log and a
-  heartbeat *tick* over the human UART — still to be observed on the board. This
-  proves MMU, higher-half, trampoline, and time all work on hardware — the scariest
-  20%.
+- **M1 — First light: boot to the human UART log.** 🎉 **ACHIEVED ON HARDWARE
+  (2026-07-24).** B4 (`snps,dw-apb-uart`) + B2 (RAM base) + B1 (SBI timer) — plus
+  B6 (multi-hart) for free — all confirmed on real silicon: the boot log *and* a
+  live heartbeat over the DesignWare UART, with all four U74s brought up and
+  userspace realised. MMU, higher-half, trampoline, and time all work on hardware —
+  the scariest 20%, done. Console transcript + the caveats are in the Status block
+  at the top. Two board-only deviations carried: `ramfb::init` skipped (no fw_cfg)
+  and `unmap_identity` temporarily skipped (pending the `kmain`-frame split).
 
 - **M2 — Telemetry on hardware.** B3: `UartFrameSink` + collector serial source.
   Success = spans and metrics from the real board decoded by the collector and
