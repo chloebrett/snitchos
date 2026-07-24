@@ -51,20 +51,33 @@ without a failing test. Gate is
 Mutation testing is `cargo xtask mutants <crate>` (host crates only — `kernel` is
 bare-metal and excluded; its logic lives in `kernel-*`).
 
-### Step 0: Keep the collector core wasm-buildable
+### Step 0: Keep the collector core wasm-buildable — ✅ DONE
 
-**Acceptance criteria**: `cargo build -p collector --target wasm32-unknown-unknown
---no-default-features` succeeds; the OTLP and Loki exporters are behind a default
+**Acceptance criteria**: `cargo build -p collector --lib --no-default-features
+--target wasm32-unknown-unknown` succeeds; the HTTP exporters are behind a default
 feature; `cargo xtask test` fails if the wasm build breaks.
-**RED**: A gate test asserting the wasm target builds (mirroring the existing
-`xtask` policy tests in `plan.rs`).
-**GREEN**: Feature-gate `ureq` and the `otlp`/`loki` modules; add the target to
-the gate.
-**MUTATE**: n/a (build-config change) — note this explicitly rather than skipping
-silently.
-**REFACTOR**: none expected.
-**Done when**: gate green, wasm target builds. *Cheap now (ureq is confined to two
-files), expensive after more exporters land.*
+**RED**: `--lib --no-default-features --target wasm32` failed —
+`ureq`→`ring` has no wasm build, and `--no-default-features` still pulled it in,
+so `ureq` was a hard dependency.
+**GREEN**: added a `native` default feature (`ureq`, `tiny_http`, `clap`
+optional); created the previously-empty `lib.rs` as the real crate root
+(`pub mod state`, `pub trait SpanExporter`, `caps`/`url` crate-internal,
+`otlp`/`loki`/`prom` `#[cfg(feature = "native")]`); `main.rs` became a thin native
+binary over `collector::`; added a `portability` build check to `run_unit_tests`.
+**MUTATE**: n/a — build-config + module move, no new logic. The existing 82
+collector tests passing is what proves the move preserved behaviour.
+**REFACTOR**: made `caps`/`url` crate-internal `mod` rather than `pub` — they're
+implementation details, and keeping them public tripped `new_without_default`.
+**Scope note / correction**: I had claimed in the plan's framing that "collector
+is already lib + bin" — it was **not**; `lib.rs` was 0 bytes and every module
+lived in `main.rs`. So this step created the library, a real (if small) refactor,
+not the pure feature-gate the plan implied. Also: there were **two** wasm-hostile
+deps (`tiny_http` as well as `ureq`), not one.
+**Known pre-existing, left alone**: `caps::observe` trips clippy
+`too_many_arguments` (10 args). Predates this change, orthogonal to
+wasm-buildability, and clippy isn't in the `xtask test` gate — a `CapEvent`-struct
+refactor is its own task.
+**Done when**: gate green, wasm target builds. ✅
 
 ### Step 1: COBS the wire format, both transports
 

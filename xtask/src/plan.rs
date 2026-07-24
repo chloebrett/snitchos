@@ -330,6 +330,32 @@ pub fn run_unit_tests() -> ExitCode {
     ) {
         return ExitCode::from(1);
     }
+    // The collector's *core* — decode, span/cap state, the projections — must keep
+    // compiling for wasm, because the browser front-end runs it in-tab with no
+    // backend at all (snemu already compiles to wasm32 unmodified, and it would be
+    // absurd for the collector to become the reason a server is required). The
+    // exporters that speak HTTP (`ureq`, `tiny_http`) are native-only by nature and
+    // live behind the default `native` feature; this builds the core without them.
+    // A build check rather than a test: there is nothing to assert beyond "it still
+    // compiles for that target", and that is exactly what rots silently.
+    // See docs/uart-telemetry-design.md §"Where this is going".
+    eprintln!("=== portability ===");
+    if !run_cargo_test(
+        "collector core (wasm32)",
+        &[
+            "build",
+            "-q",
+            "-p",
+            "collector",
+            "--lib",
+            "--no-default-features",
+            "--target",
+            "wasm32-unknown-unknown",
+        ],
+        &[],
+    ) {
+        return ExitCode::from(1);
+    }
     // Generated diagrams (docs/generated/) are contract artifacts: a stale one
     // means the source of truth moved without the committed diagram noticing.
     // The drift check now lives in the `xtask-itest` crate (its `diagram_cmd`

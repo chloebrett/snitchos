@@ -7,13 +7,24 @@ publish = false
 [dev-dependencies]
 mutants = "0.0.3"
 
+[features]
+# `native` bundles everything that only makes sense on a host: the HTTP exporters
+# (OTLP via `ureq`, Loki), the Prometheus server (`tiny_http`), and the CLI. The
+# binary depends on it; the *library core* (decode, span/cap state, the frame
+# projections) builds without it, which is what keeps it compiling for wasm32 —
+# the browser front-end runs that core in-tab with no backend. `ureq` drags in
+# `ring`, which has no wasm build, so this split is load-bearing, not cosmetic.
+# See docs/uart-telemetry-design.md §"Where this is going".
+default = ["native"]
+native = ["dep:ureq", "dep:tiny_http", "dep:clap"]
+
 [dependencies]
 protocol = { path = "../protocol", features = ["std"] }
 snitchos-abi = { path = "../abi" }
-clap = { version = "4", features = ["derive"] }
 prost = "0.13"
-ureq = "2"
-tiny_http = "0.12"
+clap = { version = "4", features = ["derive"], optional = true }
+ureq = { version = "2", optional = true }
+tiny_http = { version = "0.12", optional = true }
 
 [lints]
 workspace = true

@@ -13,20 +13,7 @@ use clap::Parser;
 use protocol::Frame;
 use protocol::stream::decode_stream;
 
-mod caps;
-mod loki;
-mod otlp;
-mod prom;
-mod state;
-mod url;
-
-/// Sink for completed spans. Implement this to add a new output format.
-/// Each implementation receives every `CompletedSpan` produced by the
-/// kernel session; routing (enable/disable, endpoint config) is the
-/// caller's responsibility.
-pub trait SpanExporter: Send {
-    fn export(&self, span: &state::CompletedSpan);
-}
+use collector::{SpanExporter, loki, otlp, prom, state};
 
 const SOCKET_PATH: &str = "/tmp/snitch-telemetry.sock";
 
