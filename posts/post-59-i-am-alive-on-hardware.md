@@ -10,7 +10,7 @@ virtio-console: init failed: NotFound
 I am alive
 ```
 
-- `I am alive` is not new. it's a `println!` that has been firing on every QEMU boot for months; I didn't touch it for this. nothing about that line changed. **what changed is who said it** — a StarFive JH7110 on my desk, four SiFive U74 cores, RAM at `0x4000_0000`, running a kernel I linked at an address QEMU has never used. every line above it is a claim the hardware finally graded, and it graded them pass. this post is about the four things that stood between "code-complete" and those five words, and the one bug that turned out to be three bugs wearing a trench coat.
+- `I am alive` is not new. it's a `println!` that has been firing on every QEMU boot for months; I didn't touch it for this. nothing about that line changed. **what changed is who said it** — a StarFive JH7110 on my desk, four SiFive U74 cores, RAM at `0x4000_0000`, running a kernel I linked at an address QEMU has never used. every line above it is a claim the hardware finally graded, and it graded them pass. this post is about the four things that stood between "code-complete" and those three words, and the one bug that turned out to be three bugs wearing a trench coat.
 
 ## the emulator is a comfortable liar
 
