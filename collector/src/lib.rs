@@ -26,6 +26,10 @@ mod url;
 // wasm build, so these are gated: present for the binary, absent for wasm.
 #[cfg(feature = "native")]
 pub mod loki;
+// The frame-stream source (socket / file replay / serial). Native: it opens
+// sockets and files. The wasm front-end feeds `decode_stream` an in-memory buffer.
+#[cfg(feature = "native")]
+pub mod source;
 #[cfg(feature = "native")]
 pub mod otlp;
 #[cfg(feature = "native")]

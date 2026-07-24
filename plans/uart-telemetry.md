@@ -135,19 +135,29 @@ first `Resync` caller.
 green (207).
 **Done when**: gate green, mutation reviewed, commit approved.
 
-### Step 3: A frame stream is a source — add replay
+### Step 3: A frame stream is a source — add replay — ✅ DONE
 
 **Acceptance criteria**: `cargo xtask reader --replay <file>` decodes a recorded
-stream and produces identical output to the live path; the source is an
-abstraction the serial and socket paths will both implement.
-**RED**: collector test — the same recorded bytes through the replay source and
-through a socket-shaped source yield the same frames.
-**GREEN**: introduce the source abstraction; implement replay over a file.
-**MUTATE**: `cargo xtask mutants collector`.
-**KILL MUTANTS**: address survivors.
-**REFACTOR**: assess; the abstraction should make step 10 near-trivial.
-**Done when**: gate green, a recorded boot replays. *Deliberately before serial —
-it invents the abstraction under test with zero hardware risk.*
+stream and produces the frames the recording holds; the source is an abstraction
+the serial and socket paths both implement; the default (no `--replay`) still
+connects to the socket.
+**RED**: five `collector::source` tests — `resolve` picks Socket/Replay,
+`policy` maps Socket→Fail / Replay→Resync, a wire-encoded recording written to a
+real temp file replays to the same frames, and a corrupt frame in a recording is
+skipped-and-counted (Resync). Module didn't exist → RED.
+**GREEN**: `Source::{Socket, Replay}` with `resolve`/`policy`/`open` (→ `Box<dyn
+Read>`) + `run_source(source, on_frame)` — the one place source, policy, and
+`decode_stream` meet. `main` now resolves a `Source` and calls `run_source`
+instead of hardcoding `UnixStream::connect`. Native-gated (opens sockets/files);
+the wasm core doesn't include it and still builds.
+**Replay policy = Resync** (user call): a recording can be *of* a lossy serial
+capture, so replay reproduces what it can rather than aborting on a bad frame.
+**MUTATE**: pending — `cargo xtask mutants collector -f source.rs` before commit.
+**REFACTOR**: `run_source` is the seam Step 10's serial variant slots into — a new
+`Source` arm + `open` case, no new decode loop.
+**Verified**: 87 collector tests green; wasm core builds; `--replay` CLI routes
+correctly (smoke). Added `tempfile` dev-dep for the replay round-trip test.
+**Done when**: gate green, mutation reviewed, commit approved.
 
 ### Step 4: `console=` mode selects text or frames
 

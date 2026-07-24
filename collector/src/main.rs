@@ -6,13 +6,13 @@
 //! Loki log push, and a Prometheus `/metrics` endpoint. OTLP, Loki, and
 //! Prometheus are on by default; each has a `--no-*` flag to disable it.
 
-use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use protocol::Frame;
-use protocol::stream::{OnDecodeError, decode_stream};
 
+use collector::source::{Source, run_source};
 use collector::{SpanExporter, loki, otlp, prom, state};
 
 const SOCKET_PATH: &str = "/tmp/snitch-telemetry.sock";
@@ -59,6 +59,13 @@ struct Args {
     /// Disable the Prometheus /metrics endpoint.
     #[arg(long)]
     no_prometheus: bool,
+
+    /// Replay a recorded wire stream from a file instead of connecting to the
+    /// live socket. Decodes with resync tolerance, so a recording of a lossy
+    /// serial capture still replays. Pairs with `--text` to inspect a boot with
+    /// no board or QEMU attached.
+    #[arg(long, value_name = "FILE")]
+    replay: Option<PathBuf>,
 }
 
 #[cfg_attr(test, mutants::skip)] // I/O entry point — not unit-testable
@@ -78,7 +85,8 @@ fn main() -> std::io::Result<()> {
         prom::serve(state.clone(), args.prometheus)?;
     }
 
-    eprintln!("collector: connecting to {SOCKET_PATH}");
+    let source = Source::resolve(args.replay.clone(), PathBuf::from(SOCKET_PATH));
+    eprintln!("collector: source = {}", source.describe());
     if !args.no_otlp {
         eprintln!("collector: exporting OTLP traces to {}", &args.otlp);
         eprintln!("collector: view traces at http://localhost:3000 (Grafana → Explore → Tempo)");
@@ -93,9 +101,7 @@ fn main() -> std::io::Result<()> {
         eprintln!("collector: text output enabled");
     }
 
-    let mut stream = UnixStream::connect(SOCKET_PATH)?;
-    eprintln!("collector: connected; waiting for frames");
-    decode_stream(&mut stream, OnDecodeError::Fail, |frame| {
+    run_source(&source, |frame| {
         if args.text {
             print_frame(frame, args.pretty);
         }
@@ -130,7 +136,10 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    eprintln!("kernel disconnected; restart with `cargo xtask collect`");
+    match args.replay {
+        Some(_) => eprintln!("collector: replay complete"),
+        None => eprintln!("kernel disconnected; restart with `cargo xtask collect`"),
+    }
     Ok(())
 }
 

@@ -225,6 +225,7 @@ dependencies = [
  "prost",
  "protocol",
  "snitchos-abi",
+ "tempfile",
  "tiny_http",
  "ureq",
 ]

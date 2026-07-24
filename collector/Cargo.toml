@@ -6,6 +6,9 @@ publish = false
 
 [dev-dependencies]
 mutants = "0.0.3"
+# Replay-source test writes a wire-encoded recording to a real temp file and
+# reads it back through `Source::Replay` (native feature only).
+tempfile = "3"
 
 [features]
 # `native` bundles everything that only makes sense on a host: the HTTP exporters
