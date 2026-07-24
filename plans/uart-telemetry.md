@@ -159,21 +159,37 @@ capture, so replay reproduces what it can rather than aborting on a bad frame.
 correctly (smoke). Added `tempfile` dev-dep for the replay round-trip test.
 **Done when**: gate green, mutation reviewed, commit approved.
 
-### Step 4: `console=` mode selects text or frames
+### Step 4: `console=` mode selects text or frames — ✅ DONE
 
-**Acceptance criteria**: with no bootarg the board behaves exactly as today
-(human-readable text); `console=frames` routes kernel `println!` through
-`Frame::Log`; pre-init and panic paths stay raw text in **both** modes.
-**RED**: `kernel_boot` parse tests for the new bootarg (host-tested, like
-`workload=`); an `itest` scenario asserting a `Frame::Log` reaches the wire under
-`console=frames`.
-**GREEN**: parse arm + a console-mode dispatch in the print path.
-**MUTATE**: `cargo xtask mutants kernel-boot`.
-**KILL MUTANTS**: address survivors.
-**REFACTOR**: this subsumes the `board-heartbeat-print` feature added as a
-workaround — **retire it in this step** rather than leaving two mechanisms.
-**Done when**: gate green. Default stays `text`: the day telemetry breaks is the
-day you need the console most.
+**Acceptance criteria**: no bootarg → today's behaviour (human text on UART);
+`console=frames` routes **every post-init** kernel `println!` through `Frame::Log`
+on the telemetry wire (full macro routing — user call); pre-init and panic stay
+raw UART always.
+**RED**: 5 `kernel_boot::console_mode` parse tests (default text, parses frames /
+text, unknown→text, coexists with `workload=`); an itest asserting a `Log`
+carrying "entering heartbeat" under `console=frames`.
+**GREEN**: `ConsoleMode` + `console_mode()` parser; kernel `console::write_console`
+routes text→UART / frames→`tracing::emit_log`, behind rewritten `print!`/`println!`
+macros (now `write_console(format_args!…)`); a re-entrancy guard (`IN_FRAMES`) drops
+a `println!` fired from inside the emit path rather than deadlocking; `kmain` sets
+the mode from the bootarg.
+**MUTATE**: `console_mode` — 2 mutants, both caught, 0 missed.
+**REFACTOR**: **retired `board-heartbeat-print`** — the `hb` line is now
+`vf2 && console_mode()==Text` (frames mode gets liveness from the heartbeat span;
+text mode keeps the raw pulse for headless bring-up). Feature deleted.
+**Harness change**: the boot checkpoint ("entering heartbeat") becomes a `Log`
+frame under `console=frames`, so `boot_snapshot` now scans the virtio TX stream as
+well as the UART (`run_to_checkpoint`) — mode-robust, so the frames scenario shares
+the snapshot instead of a slow fallback. The COBS payload preserves the ASCII
+marker (no `0x00`).
+**Known coarseness**: in frames mode each `print!` fragment becomes its own `Log`
+(no line-buffer); fine for the whole-line output the kernel emits. **Out of scope**:
+userspace `ConsoleWrite` still writes raw UART — so on the board's single wire it
+would still interleave with frames; routing it is a follow-up (the REPL case).
+**Verified**: kernel-boot 61 tests; itest 122/122; `--scramble` 122/122; both
+kernel targets build.
+**Done when**: gate green, mutation reviewed, commit approved. Default stays
+`text`: the day telemetry breaks is the day you need the console most.
 
 ### Step 5: The collector is the terminal
 
