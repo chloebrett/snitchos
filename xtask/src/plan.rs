@@ -24,6 +24,50 @@ pub(crate) const NOT_HOST_TESTED: &[(&str, &str)] = &[
     ("fs", "riscv64-only userspace FS server"),
 ];
 
+/// Userspace wrappers allowed to hand-roll `asm!("ecall", …)` **permanently**,
+/// each with the reason. Everything else must go through the
+/// `ecall(nr, [usize; 7])` helper in `user/runtime`, which declares every
+/// argument register `inlateout` so "this register survives the call" is not
+/// expressible — the promise that produced seven bugs in one day.
+pub(crate) const RAW_ECALL_INTENTIONAL: &[(&str, &str)] = &[
+    ("ecall", "the helper itself — the one place the syscall register ABI is written down"),
+    ("exit_with", "divergent (`options(noreturn)`); nothing returns, so nothing can be clobbered"),
+    ("yield_now", "no operand registers to mis-declare, and a hot path the helper would pessimise"),
+];
+
+/// Wrappers still carrying a hand-rolled `ecall` that simply haven't been ported
+/// yet. **This number may only ever go down.** It is a ratchet, not a budget: it
+/// grandfathers what exists so an *eighth* instance of the clobber bug can't be
+/// added silently, without demanding a big-bang rewrite of correct code.
+pub(crate) const RAW_ECALL_GRANDFATHERED: usize = 22;
+
+/// Names of the functions containing a hand-rolled `asm!("ecall", …)` in `src`.
+///
+/// Deliberately crude — a line scan tracking the most recent `fn`, keyed on the
+/// `"ecall"` string literal (which only ever appears as asm text; prose uses
+/// backticks). A real parser would be more precise and far more machinery than a
+/// ratchet warrants.
+pub(crate) fn raw_ecall_sites(src: &str) -> Vec<&str> {
+    let mut current = "";
+    let mut found = Vec::new();
+    for line in src.lines() {
+        if let Some(name) = fn_name_on(line) {
+            current = name;
+        }
+        if line.contains("\"ecall\"") && !found.contains(&current) {
+            found.push(current);
+        }
+    }
+    found
+}
+
+/// The function name declared on `line`, if it declares one.
+fn fn_name_on(line: &str) -> Option<&str> {
+    let after = line.split_once("fn ")?.1;
+    let name = after.split(['(', '<', ' ']).next()?;
+    (!name.is_empty()).then_some(name)
+}
+
 /// Extra `cargo test` args a crate's suite needs (features it can't get from
 /// its defaults). Entries naming a departed crate are an error, not a no-op.
 pub(crate) const EXTRA_TEST_ARGS: &[(&str, &[&str])] = &[
@@ -418,6 +462,92 @@ fn run_cargo_test(label: &str, args: &[&str], env: &[(&str, &str)]) -> bool {
             eprintln!("    FAILED to invoke cargo: {e}");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod raw_ecall_ratchet_tests {
+    use super::{RAW_ECALL_GRANDFATHERED, RAW_ECALL_INTENTIONAL, raw_ecall_sites};
+
+    #[test]
+    fn a_hand_rolled_ecall_is_attributed_to_its_function() {
+        let src = "pub fn spawn(x: usize) {\n    asm!(\n        \"ecall\",\n    );\n}\n";
+        assert_eq!(raw_ecall_sites(src), vec!["spawn"]);
+    }
+
+    #[test]
+    fn an_asm_block_without_an_ecall_is_ignored() {
+        // CSR twiddling and the like is not a syscall and has no ABI to mis-declare.
+        let src = "pub fn sum() {\n    asm!(\"csrs sstatus, {}\", in(reg) 1);\n}\n";
+        assert!(raw_ecall_sites(src).is_empty());
+    }
+
+    #[test]
+    fn each_site_is_attributed_separately() {
+        let src = "fn a() {\n  asm!(\"ecall\");\n}\nfn b() {\n  asm!(\"ecall\");\n}\n";
+        assert_eq!(raw_ecall_sites(src), vec!["a", "b"]);
+    }
+
+    /// The ratchet. Every hand-rolled `asm!("ecall", …)` in the userspace runtime
+    /// re-declares the syscall register ABI, and declaring a register `in(...)`
+    /// that the kernel writes is a bug no compiler or test can catch — it fires
+    /// only when codegen parks a live value there. Seven instances were found in
+    /// one day (see the SBI-clobber callout in plans/visionfive2-port.md).
+    ///
+    /// New wrappers must route through the `ecall(nr, [usize; 7])` helper, where
+    /// the mistake is not expressible. This test lets the existing unported
+    /// wrappers stay while forbidding an eighth.
+    #[test]
+    fn no_new_hand_rolled_ecall_wrappers() {
+        let src = include_str!("../../user/runtime/src/lib.rs");
+        let unported: Vec<&str> = raw_ecall_sites(src)
+            .into_iter()
+            .filter(|f| !RAW_ECALL_INTENTIONAL.iter().any(|(name, _)| name == f))
+            .collect();
+        assert!(
+            unported.len() <= RAW_ECALL_GRANDFATHERED,
+            "{} hand-rolled `ecall` wrappers in user/runtime, budget is {}.\n\
+             Route new syscalls through the `ecall(nr, [usize; 7])` helper instead \
+             of writing an `asm!` block — see its doc comment for why.\n\
+             If you *ported* one, lower RAW_ECALL_GRANDFATHERED; it must only go down.\n\
+             sites: {unported:?}",
+            unported.len(),
+            RAW_ECALL_GRANDFATHERED,
+        );
+    }
+
+    /// A renamed or deleted wrapper must not leave a silent entry behind — same
+    /// reasoning as `NOT_HOST_TESTED`'s staleness check: a permanent exemption
+    /// naming a function that no longer hand-rolls an `ecall` is an exemption
+    /// nobody is checking, and it would silently cover a *future* function that
+    /// happens to reuse the name.
+    #[test]
+    fn every_permanent_exemption_still_names_a_real_site() {
+        let src = include_str!("../../user/runtime/src/lib.rs");
+        let sites = raw_ecall_sites(src);
+        for (name, reason) in RAW_ECALL_INTENTIONAL {
+            assert!(
+                sites.contains(name),
+                "RAW_ECALL_INTENTIONAL lists `{name}` ({reason}) but it has no \
+                 hand-rolled `ecall` — drop the entry."
+            );
+        }
+    }
+
+    /// Porting a wrapper must be reflected in the budget, or the ratchet silently
+    /// stops ratcheting — the same failure mode as an allow-list by omission.
+    #[test]
+    fn the_grandfathered_budget_is_not_slack() {
+        let src = include_str!("../../user/runtime/src/lib.rs");
+        let unported = raw_ecall_sites(src)
+            .into_iter()
+            .filter(|f| !RAW_ECALL_INTENTIONAL.iter().any(|(name, _)| name == f))
+            .count();
+        assert_eq!(
+            unported, RAW_ECALL_GRANDFATHERED,
+            "RAW_ECALL_GRANDFATHERED is {RAW_ECALL_GRANDFATHERED} but {unported} \
+             wrappers remain — lower it to {unported}."
+        );
     }
 }
 
