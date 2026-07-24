@@ -131,6 +131,11 @@ impl Uart16550 {
 impl Write for Uart16550 {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for byte in s.bytes() {
+            // Real serial terminals need CR+LF: a bare `\n` steps down without
+            // returning to column 0 (harmless on QEMU, a staircase on the board).
+            if byte == b'\n' {
+                self.putchar(b'\r');
+            }
             self.putchar(byte);
         }
         Ok(())

@@ -224,6 +224,8 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // registered `Metrics` is held until `heartbeat::run` consumes
     // it at the end of kmain.
     let metrics = heartbeat::Metrics::register();
+    #[cfg(feature = "vf2")]
+    println!("ph: metrics registered");
     // Intern the `DeferredCounter` registry's names too, at boot — same
     // rationale as `Metrics::register` (keep the `StringRegister` sends off the
     // task-time path). The heartbeat then drains them via `counter::drain_all`.
@@ -238,7 +240,11 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // `TICKS_PER_HEARTBEAT`): the timer fires often for responsive console-RX
     // drain + preemption, while the heartbeat still runs at the per-second
     // cadence (gated in the handler). One heartbeat period = `timebase_hz` ticks.
+    #[cfg(feature = "vf2")]
+    println!("ph: pre-timer");
     unsafe { trap::init_timer(timebase_hz / trap::TICKS_PER_HEARTBEAT) };
+    #[cfg(feature = "vf2")]
+    println!("ph: post-timer (interrupts on)");
     // Publish the raw timebase for the `ClockFreq` syscall (userspace `Instant`
     // divides a `ClockNow` tick delta by this to get a real `Duration`).
     trap::TIMEBASE_HZ.store(timebase_hz, Ordering::Relaxed);
@@ -256,6 +262,8 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // The `ipi-self-wakeup` integration scenario asserts the
     // counter reaches at least 1.
     ipi::send(percpu::current_hartid(), ipi::IPI_WAKEUP);
+    #[cfg(feature = "vf2")]
+    println!("ph: post-ipi");
 
     // Frame allocator init. Walks the DTB's `/memory` node, marks
     // SBI / kernel-image / DTB regions as reserved, releases everything
@@ -269,6 +277,8 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // corresponding `dtb_phys`, post-trampoline (so `__kernel_*`
     // symbol VAs resolve and `va_to_pa` recovers their physical bounds).
     unsafe { frame::init_from_dtb(&dtb, dtb_phys).expect("frame allocator init") };
+    #[cfg(feature = "vf2")]
+    println!("ph: post-frame-alloc");
 
     // Kernel heap. Pulls a contiguous run of frames from the frame
     // allocator and hands their linear-map VA to
@@ -279,18 +289,24 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: called exactly once, after frame allocator init, with
     // the linear map live (installed by `mmu::enable`).
     unsafe { heap::init() };
+    #[cfg(feature = "vf2")]
+    println!("ph: heap init");
 
     // Install the guard-paged kstack window's shared root subtree (root PTE 257)
     // before any spawn or user address space, so every process sees kernel-stack
     // mappings (a task runs on its kernel stack under its own `satp`). After
     // `heap::init` (needs frames + the live linear map), before the first spawn.
     sched::init_stack_window();
+    #[cfg(feature = "vf2")]
+    println!("ph: stack window");
 
     // Punch a guard page below the boot stack (task 0) — splits the 2 MiB
     // kernel-image leaf and unmaps the guard so a boot-stack overflow faults
     // instead of corrupting `.bss`. Boot hart only, after the frame allocator is
     // up (the split needs a page-table frame).
     mmu::guard_boot_stack();
+    #[cfg(feature = "vf2")]
+    println!("ph: guard boot stack");
 
     // Framebuffer bring-up (Milestone 0). Best-effort: a machine booted
     // without `-device ramfb` has no `etc/ramfb` fw_cfg file, so `init`
@@ -300,7 +316,17 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: called exactly once, after heap::init (needs frames + the
     // live linear map) and after mmu::enable, before any other user of
     // root PTE slot 258.
+    // ramfb rides QEMU's `fw_cfg` device, which is absent on the VisionFive 2 —
+    // probing it there hangs the fw_cfg DMA handshake (`find_file` polls a control
+    // bit the missing device never clears). Skip it on the board; a real display
+    // needs a JH7110 DC/HDMI driver (out of scope). `present()` no-ops while ramfb
+    // is uninitialised, so the heartbeat is unaffected. See "dropped — framebuffer"
+    // in plans/visionfive2-port.md. (A runtime fw_cfg-signature check would make
+    // this robust without the feature gate — a follow-up.)
+    #[cfg(not(feature = "vf2"))]
     let _ = unsafe { ramfb::init() };
+    #[cfg(feature = "vf2")]
+    println!("ph: ramfb (skipped on board)");
 
     // v0.5 step 5 smoke: build a marker task context, switch into
     // it, marker bumps a counter and switches back. Proves the
@@ -312,6 +338,8 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: called exactly once, with the heap live and no other
     // task running.
     unsafe { sched::smoke() };
+    #[cfg(feature = "vf2")]
+    println!("ph: sched smoke");
 
     // v0.5 step 6: register the boot context as task 0 ("main") and
     // spawn a demo task. `register_bare_task` doesn't allocate a
@@ -512,6 +540,8 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
             mmu::va_to_pa(entry_va) as u64
         };
         unsafe { secondary::prepare_for_secondary(logical) };
+        #[cfg(feature = "vf2")]
+        println!("smp: starting hart {logical} (mhartid {secondary_mhartid})");
         let err = sbi::hart_start(secondary_mhartid, entry_pa, logical as u64);
         assert!(err == 0, "sbi_hart_start({secondary_mhartid}) failed: error={err}");
         // Acquire: pair with the Release on this hart's `SECONDARY_READY` bit.
@@ -519,6 +549,8 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
         while secondary::SECONDARY_READY.load(Ordering::Acquire) & bit == 0 {
             core::hint::spin_loop();
         }
+        #[cfg(feature = "vf2")]
+        println!("smp: hart {logical} up");
     }
     // v0.6 step 10: cross-hart spawn smoke. Probe lands on hart 1's
     // runqueue + IPI wakeup nudges hart 1 to pick it. Skipped for the
@@ -602,6 +634,8 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // The no-bootarg default boots `init` — resolve `None` to its layout so the
     // default boot realises the userspace root. Named userspace workloads use their
     // own layout; non-userspace selections (demo, SMP, storms) have none.
+    #[cfg(feature = "vf2")]
+    println!("ph: pre-userspace");
     if let Some(layout) = user::user_layout(selected.unwrap_or(WorkloadKind::Init)) {
         user::init_metric();
         if layout.needs_endpoint {
@@ -702,7 +736,18 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // SAFETY: kernel is running at higher-half PC + sp (trampoline
     // executed above). `CONSOLE` and `UART` were initialized with
     // higher-half VAs in earlier increments.
+    // TEMPORARY (board bring-up): skipped on vf2. `kmain`'s stack frame is
+    // allocated *before* the higher-half trampoline (entry.S enters with a physical
+    // `sp`; the trampoline shifts it mid-function), so the compiler spills physical
+    // addresses of `kmain`'s own locals. Those stay valid only while the identity
+    // map is live — tearing it down here faults on the next use (observed on the
+    // board: store to 0x40506de0, a physical boot-stack address, right after this
+    // call). The real fix is to split `kmain` so post-trampoline work runs in a
+    // fresh frame; until then keep identity mapped on the board.
+    #[cfg(not(feature = "vf2"))]
     unsafe { mmu::unmap_identity() };
+    #[cfg(feature = "vf2")]
+    println!("ph: unmap-identity SKIPPED (board)");
 
     println!("entering heartbeat");
     heartbeat::run(metrics)

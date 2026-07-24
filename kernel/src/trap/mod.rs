@@ -245,7 +245,12 @@ fn handle_kernel_fault(scause: u64) -> ! {
     if (boot_guard..boot_guard + kernel_mem::mmu::PAGE_SIZE).contains(&stval) {
         crate::sched::report_boot_stack_guard_fault(stval);
     }
-    panic!("kernel page fault: scause={scause:#x} stval={stval:#x}");
+    // `sepc` is the faulting PC — the single most useful field for locating a
+    // kernel fault (look it up with `rust-nm`/`addr2line` against the kernel ELF).
+    let sepc: usize;
+    // SAFETY: reads a CSR; no memory access, no side effects.
+    unsafe { asm!("csrr {}, sepc", out(reg) sepc, options(nomem, nostack)) };
+    panic!("kernel page fault: scause={scause:#x} stval={stval:#x} sepc={sepc:#x}");
 }
 
 /// `sstatus.SPP` (bit 8): the privilege the trap came from. 0 = User.

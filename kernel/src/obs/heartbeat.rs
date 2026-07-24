@@ -175,6 +175,11 @@ pub fn run(metrics: Metrics) -> ! {
         {
             span!("kernel.heartbeat");
             count += 1;
+            // Board liveness pulse on the human UART — the board has no telemetry
+            // transport yet (virtio-console is QEMU-only), so the heartbeat is
+            // otherwise invisible. `vf2`-only so the QEMU console stays quiet.
+            #[cfg(feature = "vf2")]
+            crate::println!("hb {count}");
             frame_smoke();
             heap_smoke_pattern(count);
             crate::ramfb::present();
