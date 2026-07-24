@@ -145,9 +145,15 @@ fn main() -> std::io::Result<()> {
 
 /// Print a decoded frame to stdout. Uses the derived `Debug` impl; with
 /// `pretty=true`, multi-line pretty format for easier inspection.
+///
+/// A `Frame::Log` is the guest's own console line — printed verbatim (via
+/// [`collector::log_text`]) so `console=frames` output reads like a console, not
+/// a struct dump. Telemetry frames still show `Debug`.
 #[cfg_attr(test, mutants::skip)] // pure stdout I/O — behaviour verified by running the binary
 fn print_frame(frame: &Frame<'_>, pretty: bool) {
-    if pretty {
+    if let Some(line) = collector::log_text(frame) {
+        println!("{line}");
+    } else if pretty {
         println!("{frame:#?}");
     } else {
         println!("{frame:?}");

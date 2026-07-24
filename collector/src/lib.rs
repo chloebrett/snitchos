@@ -41,3 +41,37 @@ pub mod prom;
 pub trait SpanExporter: Send {
     fn export(&self, span: &state::CompletedSpan);
 }
+
+/// The console text a frame carries, if it is a guest log line (`Frame::Log`);
+/// `None` for telemetry frames (spans, metrics, cap events, …).
+///
+/// The *render* half of "collector as terminal": under `console=frames` a `Log`
+/// is the guest's own console output and should read as a plain line, not a
+/// `Log { msg: …, task_id: … }` struct dump. The reader prints the returned line
+/// verbatim and falls back to the `Debug` form otherwise. See
+/// `docs/uart-telemetry-design.md` Decision 4.
+#[must_use]
+pub fn log_text<'m>(frame: &protocol::Frame<'m>) -> Option<&'m str> {
+    match frame {
+        protocol::Frame::Log { msg, .. } => Some(msg),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod log_text_tests {
+    use super::log_text;
+    use protocol::{Frame, SpanId};
+
+    #[test]
+    fn a_log_frame_yields_its_message() {
+        let f = Frame::Log { msg: "entering heartbeat", task_id: 0, t: 1, hart_id: 0 };
+        assert_eq!(log_text(&f), Some("entering heartbeat"));
+    }
+
+    #[test]
+    fn a_telemetry_frame_yields_nothing() {
+        // A span end is telemetry, not a console line — the reader shows it as Debug.
+        assert_eq!(log_text(&Frame::SpanEnd { id: SpanId(1), t: 2 }), None);
+    }
+}

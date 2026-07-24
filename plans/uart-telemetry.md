@@ -191,20 +191,37 @@ kernel targets build.
 **Done when**: gate green, mutation reviewed, commit approved. Default stays
 `text`: the day telemetry breaks is the day you need the console most.
 
-### Step 5: The collector is the terminal
+### Step 5: The collector renders the log (the *render* half of "collector as terminal")
 
-**Acceptance criteria**: `cargo xtask reader` renders `Frame::Log` to stdout and
-relays raw-mode stdin to the guest; the Stitch REPL is usable through it over the
-**QEMU socket path** (no board needed).
-**RED**: unit tests for the relay/render logic (byte in → guest write, `Log`
-frame → rendered line), separated from the raw-mode terminal I/O.
-**GREEN**: minimal relay + render.
-**MUTATE**: `cargo xtask mutants collector`.
-**KILL MUTANTS**: address survivors.
-**REFACTOR**: assess.
-**Done when**: gate green and the REPL is usable through the collector. *This is
-the step that makes `console=frames` viable, and it is a down-payment on the
-dashboards-plus-terminal end state — not a workaround for losing `screen`.*
+**Scope split (decided in-flight):** the original Step 5 conflated two halves with
+very different dependencies. The **render** half — `Frame::Log` → clean stdout text
+— is pure, testable, and immediately useful under `console=frames`. The
+**interactive relay** half — raw stdin → the guest REPL — is entangled: the REPL's
+I/O is on the *console/UART* channel, not telemetry (two separate sockets on QEMU,
+one wire only on the board), and it needs userspace `ConsoleWrite`→frames routing
+(deferred from Step 4). So the relay moves to **Step 5b, after Step 10** (the
+bidirectional `--serial` source on the board's single wire), where the model is
+clean. This step is the render half only.
+
+**Acceptance criteria**: in `cargo xtask reader` (`--text`), a `Frame::Log` prints
+as just its message line (the guest's own console output), not the `Log { msg: …,
+task_id: … }` Debug dump; other frames still show Debug for inspection.
+**RED**: `collector` unit test — a pure `log_text(frame)` returns the message for
+a `Log` and `None` for telemetry frames.
+**GREEN**: the pure extractor + wire it into the reader's frame printer.
+**MUTATE**: `log_text` — 4 mutants, all caught. — ✅ DONE
+**Verified**: `log_text` unit tests + an end-to-end integration test
+(`collector/tests/replay_render.rs`) that runs the real binary over a recorded
+`--replay` file and asserts `Log` frames print as bare lines (no `Log { … }` dump)
+while telemetry still shows Debug. wasm core still builds (log_text is in it).
+**Done when**: gate green; `reader` shows clean log lines. ✅
+
+### Step 5b (after Step 10): the interactive relay — raw stdin → guest REPL
+
+Deferred here because it needs the bidirectional serial wire (Step 10) and
+`ConsoleWrite`→frames routing. Raw-mode stdin → serial TX; the Stitch REPL usable
+through `reader` on the board. The down-payment on the dashboards-plus-terminal end
+state — not a workaround for losing `screen`.
 
 ### Step 6: Measure real telemetry throughput
 
