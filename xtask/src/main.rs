@@ -194,11 +194,14 @@ enum Cmd {
     /// reuse the corpus, train the vocab, train the model, write a
     /// checkpoint and a loss curve.
     ///
-    /// `cargo xtask train --rung drivel`. Forwarded verbatim to
-    /// `xtask-train`, which links `cram` — kept out of lean `xtask` for
-    /// the same reason `snemu` is: an edit to the trainer should not
-    /// recompile the tool that runs `cargo xtask test`.
-    Train {
+    /// `cargo xtask cram --rung drivel`. Named for the trainer, not the
+    /// verb — `cram` is the host-side pipeline that stuffs a corpus into
+    /// a model, the counterpart to `kvetch` which serves it.
+    ///
+    /// Forwarded verbatim to `xtask-cram`, which links `cram` — kept out
+    /// of lean `xtask` for the same reason `snemu` is: an edit to the
+    /// trainer should not recompile the tool that runs `cargo xtask test`.
+    Cram {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -631,7 +634,7 @@ fn main() -> ExitCode {
         Cmd::Links => links::check(),
         Cmd::ItestShow { args } => delegate_itest("itest-show", &args),
         Cmd::Itest { args } => delegate_itest("itest", &args),
-        Cmd::Train { args } => delegate_to("xtask-train", None, &args, Profile::Release),
+        Cmd::Cram { args } => delegate_to("xtask-cram", None, &args, Profile::Release),
         Cmd::Baseline { args } => delegate_itest("baseline", &args),
         Cmd::Diagram { args } => delegate_itest("diagram", &args),
         Cmd::Loc => loc::run(),
