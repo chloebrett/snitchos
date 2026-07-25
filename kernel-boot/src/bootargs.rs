@@ -447,9 +447,163 @@ pub fn select(bootargs: &str) -> Option<WorkloadKind> {
         .and_then(WorkloadKind::from_kebab)
 }
 
+/// Static addressing for the network telemetry sink, parsed from the `net=`
+/// bootarg. Kernel-boot-local (this crate has no deps); `kmain` converts it to a
+/// `kernel_net::NetConfig` when installing the UDP sink. The source port is not
+/// on the wire format — the kernel defaults it at conversion. See
+/// `docs/network-telemetry-design.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetBoot {
+    pub src_ip: [u8; 4],
+    pub src_mac: [u8; 6],
+    pub dst_ip: [u8; 4],
+    pub dst_mac: [u8; 6],
+    pub dst_port: u16,
+}
+
+/// Why a `net=` value was rejected. The kernel snitches on this rather than
+/// booting with half-configured networking (refusals are observable, never silent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetParseError {
+    /// Not exactly five comma-separated fields.
+    FieldCount,
+    /// An IP address wasn't four decimal octets, each in `0..=255`.
+    Ip,
+    /// A MAC wasn't six colon-separated hex bytes.
+    Mac,
+    /// The port wasn't a decimal `u16`.
+    Port,
+}
+
+/// Parse `net=<our-ip>,<our-mac>,<dst-ip>,<dst-mac>,<dst-port>` from the bootargs.
+///
+/// `None` = no `net=` key (default transport unchanged); `Some(Ok)` = a valid
+/// config; `Some(Err)` = a malformed value the caller must snitch on rather than
+/// silently ignore.
+#[must_use]
+pub fn net(bootargs: &str) -> Option<Result<NetBoot, NetParseError>> {
+    let value = bootargs
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix("net="))?;
+    Some(parse_net(value))
+}
+
+fn parse_net(value: &str) -> Result<NetBoot, NetParseError> {
+    let mut fields = value.split(',');
+    let src_ip = parse_bytes::<4>(field(&mut fields)?, '.', 10, NetParseError::Ip)?;
+    let src_mac = parse_bytes::<6>(field(&mut fields)?, ':', 16, NetParseError::Mac)?;
+    let dst_ip = parse_bytes::<4>(field(&mut fields)?, '.', 10, NetParseError::Ip)?;
+    let dst_mac = parse_bytes::<6>(field(&mut fields)?, ':', 16, NetParseError::Mac)?;
+    let dst_port = field(&mut fields)?.parse().map_err(|_| NetParseError::Port)?;
+    if fields.next().is_some() {
+        return Err(NetParseError::FieldCount);
+    }
+    Ok(NetBoot { src_ip, src_mac, dst_ip, dst_mac, dst_port })
+}
+
+fn field<'a>(fields: &mut impl Iterator<Item = &'a str>) -> Result<&'a str, NetParseError> {
+    fields.next().ok_or(NetParseError::FieldCount)
+}
+
+/// Parse exactly `N` `sep`-separated bytes in the given `radix` (10 for IPv4
+/// octets, 16 for MAC bytes). Any wrong count, out-of-range value, or bad digit
+/// is `err`.
+fn parse_bytes<const N: usize>(
+    s: &str,
+    sep: char,
+    radix: u32,
+    err: NetParseError,
+) -> Result<[u8; N], NetParseError> {
+    let mut parts = s.split(sep);
+    let mut out = [0u8; N];
+    for slot in &mut out {
+        *slot = u8::from_str_radix(parts.next().ok_or(err)?, radix).map_err(|_| err)?;
+    }
+    if parts.next().is_some() {
+        return Err(err);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn net_parses_a_full_config() {
+        let got = net("net=10.0.0.2,52:54:00:12:34:56,10.0.0.1,aa:bb:cc:dd:ee:ff,9000");
+        assert_eq!(
+            got,
+            Some(Ok(NetBoot {
+                src_ip: [10, 0, 0, 2],
+                src_mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+                dst_ip: [10, 0, 0, 1],
+                dst_mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                dst_port: 9000,
+            }))
+        );
+    }
+
+    #[test]
+    fn net_parses_when_mixed_with_other_bootargs() {
+        // Whole-token, order-independent — like `workload=`/`console=`.
+        let got = net("workload=smp net=1.2.3.4,00:11:22:33:44:55,5.6.7.8,66:77:88:99:aa:bb,1234 console=frames");
+        assert_eq!(got.unwrap().unwrap().dst_port, 1234);
+    }
+
+    #[test]
+    fn net_absent_is_none() {
+        assert_eq!(net("workload=smp console=frames"), None);
+        assert_eq!(net(""), None);
+    }
+
+    #[test]
+    fn net_rejects_a_too_large_octet() {
+        assert_eq!(
+            net("net=10.0.0.256,52:54:00:12:34:56,10.0.0.1,aa:bb:cc:dd:ee:ff,9000"),
+            Some(Err(NetParseError::Ip))
+        );
+    }
+
+    #[test]
+    fn net_rejects_an_ip_with_wrong_octet_count() {
+        assert_eq!(
+            net("net=10.0.0,52:54:00:12:34:56,10.0.0.1,aa:bb:cc:dd:ee:ff,9000"),
+            Some(Err(NetParseError::Ip))
+        );
+    }
+
+    #[test]
+    fn net_rejects_a_short_mac() {
+        assert_eq!(
+            net("net=10.0.0.2,52:54:00:12:34,10.0.0.1,aa:bb:cc:dd:ee:ff,9000"),
+            Some(Err(NetParseError::Mac))
+        );
+    }
+
+    #[test]
+    fn net_rejects_a_non_hex_mac_byte() {
+        assert_eq!(
+            net("net=10.0.0.2,52:54:00:12:34:gg,10.0.0.1,aa:bb:cc:dd:ee:ff,9000"),
+            Some(Err(NetParseError::Mac))
+        );
+    }
+
+    #[test]
+    fn net_rejects_a_port_above_u16() {
+        assert_eq!(
+            net("net=10.0.0.2,52:54:00:12:34:56,10.0.0.1,aa:bb:cc:dd:ee:ff,70000"),
+            Some(Err(NetParseError::Port))
+        );
+    }
+
+    #[test]
+    fn net_rejects_the_wrong_field_count() {
+        assert_eq!(
+            net("net=10.0.0.2,52:54:00:12:34:56,10.0.0.1"),
+            Some(Err(NetParseError::FieldCount))
+        );
+    }
     use alloc::string::String;
     use alloc::vec::Vec;
 
