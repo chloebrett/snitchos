@@ -1,15 +1,17 @@
-//! JH7110 PWMDAC driver — brings up the audio clocks/reset and drives a
-//! fixed-frequency square-wave tone out the `VisionFive` 2's 3.5mm jack. The
-//! register layout, sample-rate planning, tone generation, and pacing are all the
-//! host-tested `kernel_devices::pwmdac` / `kernel_devices::syscrg`; this file is
-//! the thin `unsafe` MMIO glue that applies them, plus the boot task that plays
-//! the beep. See `plans/vf2-audio-tier0.md` (Increment 6).
+//! JH7110 PWMDAC driver — brings up the audio clocks/reset and drives signed-PCM
+//! samples out the `VisionFive` 2's 3.5mm jack. The register layout, sample-rate
+//! planning, and pacing are the host-tested `kernel_devices::pwmdac` /
+//! `kernel_devices::syscrg`; this file is the thin `unsafe` MMIO glue that applies
+//! them. Synthesis lives in userspace now — the `glitch` server generates samples
+//! and hands them down via the cap-gated `AudioWrite` syscall ([`play_samples`]);
+//! the in-kernel beep task was retired once `glitch-beep` shipped. See
+//! `plans/glitch.md` and `plans/vf2-audio-tier0.md`.
 //!
 //! Address-driven, not `cfg(vf2)`-gated: the same code runs on the board and under
-//! snemu's synthetic PWMDAC device (the `audio-beep` workload), so the beep is
-//! observable off-hardware via the `audio-beep-emits-samples` scenario and snemu's
-//! `--audio-out` WAV. The `PWMDAC` block sits in the UART's already-mapped 2 MiB
-//! megapage; SYSCRG needs `kmain`'s `insert(0x1300_0000)`.
+//! snemu's synthetic PWMDAC device, so the path is observable off-hardware via the
+//! `glitch-beep-plays` scenario and snemu's `--audio-out` WAV. The `PWMDAC` block
+//! sits in the UART's already-mapped 2 MiB megapage; SYSCRG needs `kmain`'s
+//! `insert(0x1300_0000)`.
 
 use kernel_devices::pwmdac::{
     plan_rate, sample_interval_ticks, Ctrl, DataMode, DataShift, DutyCycle, Resolution, CTRL_OFFSET,
@@ -17,7 +19,6 @@ use kernel_devices::pwmdac::{
 };
 use kernel_devices::iomux::{self, FieldWrite};
 use kernel_devices::syscrg::{self, Op};
-use synth::{Gain, Tone};
 
 use crate::obs::counter::DeferredCounter;
 
@@ -43,11 +44,10 @@ const IOMUX_VA: usize = iomux::BASE + crate::mmu::KERNEL_OFFSET;
 /// in-range value drives the beep for the itest; `1` is a safe placeholder.
 const CORE_DIVIDER: u32 = 1;
 
-/// The beep: a low-volume 440 Hz square at 8 kHz. `PEAK` is deliberately well
-/// below full scale — a square wave is harsh, and this drives headphones.
-const BEEP_FREQ_HZ: u32 = 440;
-const BEEP_RATE_HZ: u32 = 8000;
-const BEEP_PEAK: i16 = 4000;
+/// The sample rate the DAC is configured for. **Must match the userspace
+/// synthesis rate** (`glitch_core::FS_HZ`): the kernel paces `WDATA` at this rate,
+/// so samples generated at any other rate play at the wrong pitch.
+const DAC_RATE_HZ: u32 = 8000;
 
 /// Apply a SYSCRG bring-up op via read-modify-write / poll on its MMIO register.
 fn apply_syscrg(ops: &[Op]) {
@@ -131,7 +131,7 @@ static PACING_TICKS: crate::sync::Once<u64> = crate::sync::Once::new();
 fn ensure_up() -> u64 {
     *PACING_TICKS.call_once(|| {
         bringup();
-        configure(BEEP_RATE_HZ).unwrap_or(0)
+        configure(DAC_RATE_HZ).unwrap_or(0)
     })
 }
 
@@ -154,33 +154,4 @@ fn write_sample(sample: i16) {
     let addr = PWMDAC_VA + WDATA_OFFSET;
     // SAFETY: PWMDAC `WDATA` MMIO, in the UART's mapped megapage.
     unsafe { (addr as *mut u32).write_volatile(u32::from(sample as u16)) };
-}
-
-/// Boot task: bring the DAC up and loop emitting the beep, yielding each period so
-/// the heartbeat runs (and drains `SAMPLES_EMITTED`). `-> !` per the scheduler ABI.
-pub extern "C" fn audio_beep_entry() -> ! {
-    // Boot-log breadcrumbs (NS16550A console) for first-hardware bring-up: if the
-    // second line never prints, the SYSCRG reset `PollUntilSet` hung (real status
-    // semantics differ from snemu's always-released model).
-    crate::println!("audio: bringing up PWMDAC...");
-    bringup();
-    let interval = configure(BEEP_RATE_HZ);
-    let tone = Tone::square(BEEP_FREQ_HZ, BEEP_RATE_HZ, Gain::UNITY, BEEP_PEAK);
-    match (tone, interval) {
-        (Some(_), Some(ticks)) => crate::println!(
-            "audio: PWMDAC up — playing {BEEP_FREQ_HZ} Hz @ {BEEP_RATE_HZ} Hz ({ticks} ticks/sample)"
-        ),
-        _ => crate::println!("audio: config failed — {BEEP_RATE_HZ} Hz unsupported?"),
-    }
-    loop {
-        if let (Some(tone), Some(interval)) = (tone, interval) {
-            for sample in tone.samples() {
-                write_sample(sample);
-                SAMPLES_EMITTED.inc();
-                let next = crate::trap::now_ticks() + interval;
-                while crate::trap::now_ticks() < next {}
-            }
-        }
-        crate::sched::yield_now();
-    }
 }
