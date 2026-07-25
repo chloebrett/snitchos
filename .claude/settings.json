@@ -93,6 +93,8 @@
       "Bash(cargo build:*)",
       "Bash(cargo check:*)",
       "Bash(cargo test:*)",
+      "Bash(cargo nextest:*)",
+      "Bash(BABBLE_PRINT_SEEDS=*)",
       "Bash(INSTA_UPDATE=always cargo test:*)",
       "Bash(INSTA_UPDATE=new cargo test:*)",
       "Bash(cargo clippy:*)",
