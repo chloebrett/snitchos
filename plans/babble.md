@@ -1,6 +1,8 @@
 # babble — the weight-free model (TDD plan)
 
-**Status:** 🚧 **IN PROGRESS — increments 1–2 done.** The oracle
+**Status:** 🚧 **IN PROGRESS — increments 1, 2, 4 done** (3 deferred: it is
+the char-level view, which stim needs and babble does not — babble appends
+whole space-separated tokens, so maximal munch cannot bite it). The oracle
 (`stitch/src/oracle.rs`) answers `valid_next` across the grammar; 9 tests
 green. **Mechanism changed from the design doc's "instrument `expect`/`peek`"
 to *trial-by-append*** — append a class's representative lexeme and read
@@ -9,7 +11,13 @@ to *trial-by-append*** — append a class's representative lexeme and read
 The real parser answers every query, so the oracle cannot drift from the
 grammar — no second copy of grammar knowledge exists. Cost is one parse per
 class (58) per query; fine for babble, and the deferred snapshot-caching is
-the stim-time fix. **Found and fixed a real parser bug on the way**: the
+the stim-time fix. **Increment 4 shipped as `ParseError::expected(src)` +
+`render`**: diagnostics now end with `expected one of: …`, sourced from the
+oracle rather than a hand-maintained list, so mask and message can never
+disagree. No recursion risk — the oracle parses, so it is consulted on a
+*returned* error, never from inside a parse. Known gap: `expected` answers
+for **program entry**, so expression-entry (`parse`, the REPL) errors get no
+continuation line — which is also why zero snapshots churned. **Found and fixed a real parser bug on the way**: the
 three post-`bump` `self.err()` sites in `parse_atom`/`parse_pattern_atom`
 blamed the token *after* the offending one (the caret pointed one token too
 far right, and it made the oracle unsound); `expect` had always been
