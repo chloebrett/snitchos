@@ -4,6 +4,7 @@
 
 use crate::fwcfg::{Fwcfg, RamfbCfg};
 use crate::mem::{BusError, Memory};
+use crate::plic::Plic;
 use crate::pwmdac::Pwmdac;
 use crate::uart::Uart;
 use crate::virtio::Virtio;
@@ -17,6 +18,20 @@ fn uart_offset(addr: u64) -> Option<usize> {
     (UART_BASE..UART_BASE + UART_SIZE)
         .contains(&addr)
         .then(|| (addr - UART_BASE) as usize)
+}
+
+/// QEMU `virt` PLIC base and window (the kernel touches only the low registers,
+/// but the whole block is dispatched so a stray access RAM-faults nothing).
+const PLIC_BASE: u64 = 0x0c00_0000;
+const PLIC_SIZE: u64 = 0x0060_0000;
+/// PLIC source the UART is wired to on QEMU `virt` — the one device line modelled.
+const UART_PLIC_SOURCE: u32 = 10;
+
+/// Offset into the PLIC window, or `None` if `addr` isn't the PLIC.
+fn plic_offset(addr: u64) -> Option<usize> {
+    (PLIC_BASE..PLIC_BASE + PLIC_SIZE)
+        .contains(&addr)
+        .then(|| (addr - PLIC_BASE) as usize)
 }
 
 /// QEMU `virt` fw_cfg MMIO base (fixed at `0x1010_0000`) and its register page.
@@ -42,6 +57,7 @@ pub(crate) struct Bus {
     virtio: Virtio,
     fwcfg: Fwcfg,
     pwmdac: Pwmdac,
+    plic: Plic,
 }
 
 impl Bus {
@@ -52,7 +68,23 @@ impl Bus {
             virtio: Virtio::new(),
             fwcfg: Fwcfg::new(),
             pwmdac: Pwmdac::new(),
+            plic: Plic::new(),
         }
+    }
+
+    /// Whether `context` has a deliverable external (PLIC) interrupt — the hart's
+    /// `sip.SEIP` signal, derived like the timer's `cycle >= stimecmp`. The UART's
+    /// line is kept synced into the PLIC on every UART write (see `sync_uart_line`).
+    pub(crate) fn external_pending(&self, context: u32) -> bool {
+        self.plic.seip(context)
+    }
+
+    /// Push the UART's current interrupt-line level into the PLIC. Called after any
+    /// UART register write, since the line follows `IER` (and, for RX, the receive
+    /// FIFO). The kernel uses only the TX (THRE) interrupt, whose line changes only
+    /// on `IER` writes — so syncing on writes is exact for that path.
+    fn sync_uart_line(&mut self) {
+        self.plic.set_source(UART_PLIC_SOURCE, self.uart.interrupt_asserted());
     }
 
     /// Make `etc/ramfb` exist in the fw_cfg directory — the snemu
@@ -149,6 +181,11 @@ impl Bus {
         if Virtio::in_window(addr) {
             return Ok(self.virtio.read(addr));
         }
+        if let Some(off) = plic_offset(addr) {
+            // A claim-register read mutates in-progress state, but the PLIC records
+            // it atomically, so this stays on the `&self` read path.
+            return Ok(self.plic.read(off));
+        }
         match uart_offset(addr) {
             Some(off) => Ok(u32::from(self.uart.read(off))),
             None => self.ram.read_u32(addr),
@@ -178,7 +215,10 @@ impl Bus {
         }
         match uart_offset(addr) {
             Some(off) => {
+                // The kernel writes IER (and THR) as 8-bit stores — the width the
+                // real `reg-io-width=1` UART uses — so the line sync lives here.
                 self.uart.write(off, value);
+                self.sync_uart_line();
                 Ok(())
             }
             None => self.ram.write_u8(addr, value),
@@ -204,6 +244,7 @@ impl Bus {
         match uart_offset(addr) {
             Some(off) => {
                 self.uart.write(off, value as u8);
+                self.sync_uart_line();
                 Ok(())
             }
             None => self.ram.write_u16(addr, value),
@@ -241,9 +282,14 @@ impl Bus {
             }
             return Ok(());
         }
+        if let Some(off) = plic_offset(addr) {
+            self.plic.write(off, value);
+            return Ok(());
+        }
         match uart_offset(addr) {
             Some(off) => {
                 self.uart.write(off, value as u8);
+                self.sync_uart_line();
                 Ok(())
             }
             None => self.ram.write_u32(addr, value),
@@ -261,6 +307,7 @@ impl Bus {
         match uart_offset(addr) {
             Some(off) => {
                 self.uart.write(off, value as u8);
+                self.sync_uart_line();
                 Ok(())
             }
             None => self.ram.write_u64(addr, value),

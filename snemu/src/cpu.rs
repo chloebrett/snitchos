@@ -73,11 +73,16 @@ mod cause {
     pub const SUPERVISOR_SOFTWARE: u64 = 1;
     /// Supervisor timer interrupt code (with [`INTERRUPT`] set).
     pub const SUPERVISOR_TIMER: u64 = 5;
+    /// Supervisor external interrupt code (with [`INTERRUPT`] set) — a PLIC
+    /// interrupt. Highest priority of the three supervisor interrupts.
+    pub const SUPERVISOR_EXTERNAL: u64 = 9;
 }
 
-/// `sie.STIE` / `sie.SSIE` — supervisor timer / software interrupt enables.
+/// `sie.STIE` / `sie.SSIE` / `sie.SEIE` — supervisor timer / software / external
+/// interrupt enables.
 const SIE_STIE: u64 = 1 << 5;
 const SIE_SSIE: u64 = 1 << 1;
+const SIE_SEIE: u64 = 1 << 9;
 /// `sip.SSIP` — supervisor software interrupt pending (set by an IPI, cleared
 /// by the kernel's `csrc sip`).
 const SIP_SSIP: u64 = 1 << 1;
@@ -306,6 +311,11 @@ pub(crate) struct Hart {
     native_cache: crate::jit::NativeCache,
     /// Diagnostic: supervisor timer interrupts actually delivered to this hart.
     timer_fires: u64,
+    /// This hart's id (its `mhartid` = its index in the machine). Used to pick the
+    /// PLIC context for external-interrupt delivery (`2·hartid + 1` = S-mode).
+    /// Defaults to 0 (the lone `Cpu` hart / the boot hart); `Machine::new` stamps
+    /// each hart's index.
+    hartid: u64,
 }
 
 /// A single-hart machine: one [`Hart`] plus the [`Bus`] it owns. The convenience
@@ -462,7 +472,14 @@ impl Hart {
             #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
             native_cache: crate::jit::NativeCache::new(),
             timer_fires: 0,
+            hartid: 0,
         }
+    }
+
+    /// Set this hart's id (its `mhartid` / machine index). `Machine::new` calls it
+    /// once per hart; the lone `Cpu` hart keeps the default 0.
+    pub(crate) fn set_hartid(&mut self, hartid: u64) {
+        self.hartid = hartid;
     }
 
     /// Supervisor timer interrupts delivered to this hart (diagnostic).
@@ -883,14 +900,20 @@ impl Hart {
         // becomes pending against the current clock — then it wakes and falls
         // through to deliver that interrupt as a trap.
         if self.state == HartState::Idle {
-            if self.pending_interrupt().is_none() {
+            if self.pending_interrupt().is_none() && !self.external_interrupt_pending(bus) {
                 return Ok(HartEffect::Idle);
             }
             self.state = HartState::Running;
         }
         // Deliver a pending interrupt before fetching: `sepc` then points at the
-        // un-run instruction, so `sret` resumes exactly where we left off.
-        if let Some(cause) = self.pending_interrupt() {
+        // un-run instruction, so `sret` resumes exactly where we left off. External
+        // (PLIC) is highest priority, then software, then timer.
+        let cause = if self.external_interrupt_pending(bus) {
+            Some(cause::INTERRUPT | cause::SUPERVISOR_EXTERNAL)
+        } else {
+            self.pending_interrupt()
+        };
+        if let Some(cause) = cause {
             if cause == cause::INTERRUPT | cause::SUPERVISOR_TIMER {
                 self.timer_fires += 1;
             }
@@ -1439,6 +1462,23 @@ impl Hart {
             return Some(cause::INTERRUPT | cause::SUPERVISOR_TIMER);
         }
         None
+    }
+
+    /// Whether a supervisor **external** (PLIC) interrupt is pending and
+    /// deliverable to this hart: `sie.SEIE` set, the privilege gate met, and the
+    /// PLIC signalling this hart's S-mode context. The "pending" bit is derived
+    /// live from the PLIC (`bus`), the same shape as the timer's `cycle >=
+    /// stimecmp` — snemu has no stored `sip.SEIP`.
+    fn external_interrupt_pending(&self, bus: &Bus) -> bool {
+        if self.csr_read(addr::SIE) & SIE_SEIE == 0 {
+            return false;
+        }
+        let gate = match self.privilege {
+            Privilege::User => true,
+            Privilege::Supervisor => self.csr_read(addr::SSTATUS) & sstatus::SIE != 0,
+        };
+        // QEMU `virt` numbers hart N's S-mode context `2N + 1`.
+        gate && bus.external_pending((2 * self.hartid + 1) as u32)
     }
 
     /// Whether a supervisor software interrupt (an IPI) is pending and currently

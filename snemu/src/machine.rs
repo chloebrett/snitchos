@@ -74,7 +74,13 @@ impl Machine {
     /// secondary starts parked, waiting for an SBI `hart_start`.
     #[must_use]
     pub fn new(mem: Memory, hart_count: usize) -> Self {
-        let mut harts: Vec<Hart> = (0..hart_count).map(|_| Hart::new()).collect();
+        let mut harts: Vec<Hart> = (0..hart_count)
+            .map(|i| {
+                let mut hart = Hart::new();
+                hart.set_hartid(i as u64);
+                hart
+            })
+            .collect();
         for hart in harts.iter_mut().skip(1) {
             hart.park();
         }

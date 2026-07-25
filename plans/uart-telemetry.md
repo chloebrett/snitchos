@@ -266,11 +266,20 @@ no ring to build; the work is entirely the external-interrupt subsystem, which
 does not exist yet (the trap handler dispatches only timer + software IPIs; console
 RX is timer-*polled*).
 
-**⚠ Test-strategy caveat:** **snemu models no external interrupts** (`cpu.rs`
-says so) and its UART ignores IER — so the interrupt *firing* can't run under the
-default snemu itest gate. Integration coverage for this path is **QEMU-only**
-(`--engine qemu`) unless snemu grows a PLIC + UART-interrupt model. The *pure*
-logic below is host-tested regardless.
+**Test strategy: snemu now models the PLIC** (was QEMU-only). The interrupt path
+runs in the **deterministic** gate, no QEMU flakiness. What was added to snemu:
+- `snemu::plic` — a PLIC device model (registers + level-triggered gateway +
+   claim/complete + `seip`), 7 host tests.
+- `snemu::uart` — IER modelled + `interrupt_asserted()` (THRE always ready, so the
+   TX line follows `ETBEI`), 3 new tests.
+- `snemu::bus` — owns the PLIC, routes its MMIO window, syncs the UART line on
+   every UART write, exposes `external_pending(context)`.
+- `snemu::cpu` — external-interrupt delivery: `SUPERVISOR_EXTERNAL`/`SIE_SEIE`, a
+   per-hart `hartid` → S-context, `external_interrupt_pending(bus)` (derived like
+   the timer), delivered highest-priority in `step`.
+All inert until the kernel enables `SEIE` + the UART THRE interrupt (Commit C) —
+so the existing gate is unchanged, and **Commit A can un-gate `cfg(vf2)` once B/C
+exercise it** through this model. (`--engine qemu` remains the fidelity oracle.)
 
 Increments:
 1. **PLIC register offsets** (`kernel-devices::plic`, pure) — priority / enable /

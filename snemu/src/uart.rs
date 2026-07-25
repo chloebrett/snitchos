@@ -12,8 +12,18 @@ pub(crate) mod reg {
     pub const THR: usize = 0;
     /// Receive buffer register (read side of offset 0). A read pops one byte.
     pub const RBR: usize = 0;
+    /// Interrupt enable register.
+    pub const IER: usize = 1;
     /// Line status register.
     pub const LSR: usize = 5;
+}
+
+/// Interrupt-enable-register bits.
+pub(crate) mod ier {
+    /// Enable "received data available" interrupt.
+    pub const ERBFI: u8 = 0x01;
+    /// Enable "transmit holding register empty" (THRE) interrupt.
+    pub const ETBEI: u8 = 0x02;
 }
 
 /// Line-status-register bits.
@@ -40,6 +50,9 @@ pub(crate) mod lsr {
 pub(crate) struct Uart {
     out: Vec<u8>,
     rx: Mutex<VecDeque<u8>>,
+    /// Interrupt-enable register (offset 1). Drives whether the UART asserts its
+    /// PLIC line — see [`interrupt_asserted`](Uart::interrupt_asserted).
+    ier: u8,
 }
 
 impl Clone for Uart {
@@ -47,19 +60,21 @@ impl Clone for Uart {
         Self {
             out: self.out.clone(),
             rx: Mutex::new(self.rx.lock().expect("uart rx").clone()),
+            ier: self.ier,
         }
     }
 }
 
 impl Uart {
     pub(crate) fn new() -> Self {
-        Self { out: Vec::new(), rx: Mutex::new(VecDeque::new()) }
+        Self { out: Vec::new(), rx: Mutex::new(VecDeque::new()), ier: 0 }
     }
 
     pub(crate) fn read(&self, offset: usize) -> u8 {
         match offset {
             // RBR (== THR offset): pop one received byte, or 0 if the FIFO's dry.
             reg::RBR => self.rx.lock().expect("uart rx").pop_front().unwrap_or(0),
+            reg::IER => self.ier,
             reg::LSR => {
                 let dr = if self.rx.lock().expect("uart rx").is_empty() { 0 } else { lsr::DR };
                 lsr::THRE | lsr::TEMT | dr
@@ -69,9 +84,21 @@ impl Uart {
     }
 
     pub(crate) fn write(&mut self, offset: usize, value: u8) {
-        if offset == reg::THR {
-            self.out.push(value);
+        match offset {
+            reg::THR => self.out.push(value),
+            reg::IER => self.ier = value,
+            _ => {}
         }
+    }
+
+    /// Whether the UART is currently asserting its interrupt line (the level the
+    /// PLIC gateway sees). THRE is modelled as always ready, so the TX interrupt
+    /// asserts whenever the guest enables `ETBEI`; the RX interrupt asserts while
+    /// `ERBFI` is enabled and a received byte is waiting.
+    pub(crate) fn interrupt_asserted(&self) -> bool {
+        let tx = self.ier & ier::ETBEI != 0;
+        let rx = self.ier & ier::ERBFI != 0 && !self.rx.lock().expect("uart rx").is_empty();
+        tx || rx
     }
 
     /// Queue host-supplied console input for the guest to read via RBR. The
@@ -104,11 +131,30 @@ mod tests {
     }
 
     #[test]
-    fn other_registers_read_zero_and_ignore_writes() {
+    fn ier_round_trips_and_does_not_transmit() {
         let mut uart = Uart::new();
-        uart.write(1, 0xff); // IER: ignored
-        assert_eq!(uart.read(1), 0);
-        assert!(uart.output().is_empty());
+        uart.write(reg::IER, ier::ETBEI);
+        assert_eq!(uart.read(reg::IER), ier::ETBEI);
+        assert!(uart.output().is_empty(), "an IER write is not a THR write");
+    }
+
+    #[test]
+    fn tx_interrupt_line_follows_etbei() {
+        let mut uart = Uart::new();
+        assert!(!uart.interrupt_asserted(), "quiet with interrupts off");
+        uart.write(reg::IER, ier::ETBEI);
+        assert!(uart.interrupt_asserted(), "THRE always ready → asserts while enabled");
+        uart.write(reg::IER, 0);
+        assert!(!uart.interrupt_asserted(), "cleared when the guest disables it");
+    }
+
+    #[test]
+    fn rx_interrupt_line_needs_both_enable_and_a_waiting_byte() {
+        let mut uart = Uart::new();
+        uart.write(reg::IER, ier::ERBFI);
+        assert!(!uart.interrupt_asserted(), "enabled but no byte waiting");
+        uart.push_input(b"x");
+        assert!(uart.interrupt_asserted(), "enabled and a byte waiting");
     }
 
     #[test]

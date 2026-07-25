@@ -12,8 +12,11 @@
 //! Bounded to what the kernel touches (source 10 = UART0, contexts 0..4 = two
 //! harts × M/S). Registers outside the modelled range read 0 / ignore writes.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 /// Highest interrupt source id modelled (UART0 is 10). Sources pack 32 per word,
-/// so 64 covers two enable/pending words.
+/// so 64 covers two enable/pending words. Also the width of the `in_progress`
+/// bitmask — keep ≤ 64.
 const N_SOURCES: usize = 64;
 /// Contexts modelled: hart 0 M/S = 0/1, hart 1 M/S = 2/3.
 const N_CONTEXTS: usize = 4;
@@ -34,16 +37,32 @@ pub struct Plic {
     threshold: [u32; N_CONTEXTS],
     /// Per-context enable bits, packed 32 sources per word.
     enable: [[u32; N_WORDS]; N_CONTEXTS],
-    /// Device-driven interrupt line level, per source (set by [`set_source`]).
+    /// Device-driven interrupt line level, per source (set by [`set_source`]),
+    /// updated only on the bus's `&mut` write path.
     line: [bool; N_SOURCES],
-    /// Claimed-but-not-completed, per source: the gateway stops forwarding a source
-    /// between claim and complete, even if the line stays asserted.
-    in_progress: [bool; N_SOURCES],
+    /// Claimed-but-not-completed, one bit per source: the gateway stops forwarding
+    /// a source between claim and complete, even if the line stays asserted. An
+    /// atomic bitmask so a **claim** (which reads the claim register — an MMIO
+    /// *read*, on the bus's `&self` path) can record it without `&mut`, keeping
+    /// `Machine: Sync` for snapshot sharing (same reason the UART's `rx` is a lock).
+    in_progress: AtomicU64,
 }
 
 impl Default for Plic {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Clone for Plic {
+    fn clone(&self) -> Self {
+        Self {
+            priority: self.priority,
+            threshold: self.threshold,
+            enable: self.enable,
+            line: self.line,
+            in_progress: AtomicU64::new(self.in_progress.load(Ordering::Relaxed)),
+        }
     }
 }
 
@@ -55,7 +74,7 @@ impl Plic {
             threshold: [0; N_CONTEXTS],
             enable: [[0; N_WORDS]; N_CONTEXTS],
             line: [false; N_SOURCES],
-            in_progress: [false; N_SOURCES],
+            in_progress: AtomicU64::new(0),
         }
     }
 
@@ -68,11 +87,15 @@ impl Plic {
         }
     }
 
+    fn is_in_progress(&self, source: usize) -> bool {
+        self.in_progress.load(Ordering::Relaxed) & (1 << source) != 0
+    }
+
     /// Whether `source` is currently forwarding to the PLIC core: line asserted and
     /// not mid-claim. (A source can be enabled by several contexts; this is the
     /// gateway state, independent of context.)
     fn forwarding(&self, source: usize) -> bool {
-        self.line[source] && !self.in_progress[source]
+        self.line[source] && !self.is_in_progress(source)
     }
 
     /// Whether `context` enables `source`.
@@ -103,28 +126,28 @@ impl Plic {
 
     /// Claim the top interrupt for `context` (the claim-register read): returns its
     /// id (0 = none) and marks it in-progress so the gateway stops forwarding it
-    /// until [`complete`](Self::complete).
-    fn claim(&mut self, context: usize) -> u32 {
+    /// until [`complete`](Self::complete). `&self` via the atomic bitmask.
+    fn claim(&self, context: usize) -> u32 {
         match self.top_pending(context) {
             Some(source) => {
-                self.in_progress[source as usize] = true;
+                self.in_progress.fetch_or(1 << source, Ordering::Relaxed);
                 source
             }
             None => 0,
         }
     }
 
-    /// Complete `source` for `context` (the claim-register write): the gateway may
-    /// forward it again if its line is still asserted.
-    fn complete(&mut self, source: u32) {
-        if let Some(slot) = self.in_progress.get_mut(source as usize) {
-            *slot = false;
+    /// Complete `source` (the claim-register write): the gateway may forward it
+    /// again if its line is still asserted.
+    fn complete(&self, source: u32) {
+        if (source as usize) < N_SOURCES {
+            self.in_progress.fetch_and(!(1 << source), Ordering::Relaxed);
         }
     }
 
-    /// MMIO read (32-bit). Reading a context's claim register **claims** — hence
-    /// `&mut`.
-    pub fn read(&mut self, offset: usize) -> u32 {
+    /// MMIO read (32-bit). Reading a context's claim register **claims**; `&self`
+    /// (the in-progress record is atomic) so it sits on the bus's read path.
+    pub fn read(&self, offset: usize) -> u32 {
         if offset < ENABLE_BASE {
             // Priority block: 4 bytes per source.
             return *self.priority.get(offset / 4).unwrap_or(&0);
