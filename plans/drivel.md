@@ -74,6 +74,35 @@ that is the finding, and it is the bottom point of the ladder's scaling curve �
 which the ladder doc explicitly wants measured rather than assumed. "drivel" names
 the rung, not a parameter count we are married to.
 
+## Order of execution (not the increment numbering)
+
+Increments are units of work; this is the order they land in. **The
+grammar-learnability probe comes first**, because it has no corpus dependency at
+all: babble generates unlimited valid training data, held-out is more of the
+same, and `unconstrained-parse%` needs only the `stitch` parser. That makes it
+the shortest path to an end-to-end pipe — vocab → corpus → train → export → load
+→ generate → measure — with data scarcity, train/held-out leakage, and corpus
+curation all held out of the picture.
+
+> **1 (trainer) → 4 (rig) → 5 (probe) → 2 (corpus) → 3 (harness) → 6 (tracer) → 7 (manifest)**
+
+The real-corpus work rides on infrastructure the probe has already proved. If the
+probe fails, increments 2/3/6 were never going to work and the corpus effort is
+saved — which is the point of running it first.
+
+### The probe vocab is NOT the frozen vocab
+
+The trap this ordering creates, stated before it bites: a vocab trained on babble
+output is trained on *uniform-over-legal* text — wordlist identifiers, no idiom,
+no real token frequencies. It is exactly wrong for real Stitch, and freezing it
+would bind the entire ladder to an artifact derived from the null model.
+
+So: increment 5 uses a **disposable probe vocab**, regenerable from a seed and
+pinned by nothing. The freeze — increment 1's hash test — happens later, once
+increment 2's real corpus exists, and the frozen vocab is trained on the
+*training split only*. The freeze is not "the first vocab we trained"; it is "the
+vocab the ladder ships with". Probes freeze nothing.
+
 ## Placement decisions
 
 Two load-bearing calls, and neither is about drivel:

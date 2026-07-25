@@ -1,6 +1,6 @@
 # babble — the weight-free model (TDD plan)
 
-**Status:** 🚧 **IN PROGRESS — increments 1, 2, 4, 4b, 5, 6, 7, 8, 10 done**
+**Status:** 🚧 **IN PROGRESS — increments 1, 2, 4, 4b, 5, 6, 7, 8, 10, 11 done**
 (9 deferred to when the corpus pipeline starts — its summary format should be
 built against the real validator/metrics harness, not guessed at; 3 deferred: it is
 the char-level view, which stim needs and babble does not — babble appends
@@ -110,6 +110,31 @@ not link the sampler (and through it the whole Stitch parser) — the same reaso
   correction above.
 - Malformed input is a `WireError` to reply to, never a panic: unknown tag,
   prefix-exceeds-buffer, buffer-too-large, unknown status. 6 tests.
+
+**Increment 11 (seed derivation) done** — `kvetch_proto::request_seed(boot_seed,
+counter)`, SplitMix64's finalizer, pinned by golden vectors because a host-side
+reproducer must derive the same seed the server used, on any engine, forever.
+Takes no clock *by signature*, which is the enforcement of the seed-provenance
+rule rather than a comment asking for it. **The golden test immediately earned
+its keep**: `request_seed(0, 0)` was `0` — SplitMix64 maps zero to zero, and
+boot-seed 0 (no `seed=` bootarg) with request 0 is the plainest run the system
+has, so the most common path handed the sampler its most degenerate state.
+Fixed with `counter + 1`; a property test now pins the non-degeneracy alongside
+an avalanche test (a weak mix would correlate consecutive requests' completions,
+since the counter is dense).
+
+**Comments: decided, documented** — Stitch's lexer skips them, so they never
+reach the grammar and the oracle needs no change; the question is purely about
+the model. Settled as **input-only, loss-masked, uniform across every rung**:
+a per-rung policy was drafted and rejected because differing training data
+would not break speculative decoding's *correctness* but would collapse its
+*acceptance rate* exactly where docstrings carry signal. The decisive argument
+for never generating is **verification**, not capacity — comments are the one
+artifact the parse/typecheck/test stack cannot check, so a confidently wrong
+one passes every gate we have. Full reasoning in
+[../docs/generative-ladder.md](../docs/generative-ladder.md). babble is the one
+exception (it has no vocabulary) and may emit them behind a flag, off for
+corpus generation.
 
 **Post material** (noted 2026-07-25): the raw babbled output — legal-but-
 meaningless Stitch, every identifier `x` and every number `0` because the

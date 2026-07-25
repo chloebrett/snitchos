@@ -99,6 +99,199 @@ hand-written corpus in the training mix: total real Stitch today is ~2K lines
 ≈ 20K tokens (≈0.05% of target volume) — repeat it heavily; it's the only
 "how Stitch is actually used here" signal the bulk tier merely imitates.
 
+## Comments: invisible below ballad (decided 2026-07-25)
+
+Stitch's lexer *skips* comments (`//`, nestable `/* */`), so they never become
+tokens: they are legal at any token boundary, invisible to the grammar, and
+the continuation oracle needs no change for them. The decision is entirely
+about the **model**, and it is a vocabulary decision.
+
+Including comments means learning **two distributions at once** — code
+(low-entropy, highly structured, where the grammar mask does most of the work)
+and prose (high-entropy, where the mask does nothing). At 10–30M params that
+degrades both: ~30M is roughly the floor for coherent simple English *alone*
+(TinyStories), and the vocab cost is lopsided — comments might be 10–20% of
+tokens while demanding most of a 2–4K vocab, or else English shreds into byte
+fragments and inflates corpus size for content the model cannot use.
+
+The honest cost: **comment→code is the most valuable completion scenario in
+real editors** (docstring above, body below). Excluding comments forecloses it
+until a bigger rung.
+
+### The policy is uniform across the ladder — per-rung differences break spec decode
+
+A first draft of this section varied the policy by rung (invisible below
+ballad, input-only at ballad). That is wrong. Vocabulary uniformity is already
+law, so comment tokens exist for every rung or none; the subtler failure is
+that **per-rung *training* differences do not break speculative decoding's
+correctness — they destroy its economics.** The acceptance test stays valid
+whatever the draft was trained on (the output distribution is still exactly
+the target's); what collapses is the acceptance *rate*, and it collapses
+precisely in buffers where a docstring carries signal — the completions that
+matter most. One policy, every rung.
+
+### Input-only, permanently — the argument is verification, not capacity
+
+The quality mechanism of this whole arc is generate → verify: parse,
+typecheck, run the tests, check authority against the kernel oracle.
+**Comments are the one artifact that stack cannot check.** A confidently wrong
+comment passes every gate we have; everything else the model emits is
+falsifiable, prose is not. So "read but never author" is not a scale-driven
+compromise to revisit at saga — it is the same rule as the rest of the design:
+do not emit what you cannot verify. It also composes with provenance, since
+model-written prose explaining model-written code is the highest-trust,
+lowest-verification artifact the system could produce.
+
+**Input-only is a training decision, not a decode mask** — this is the crux:
+
+- comments appear **in the context window**;
+- comment tokens are **masked out of the loss**: the model is never trained to
+  predict them;
+- at decode the mask never admits them (free — constrained decoding already
+  does exactly this, which most stacks cannot cleanly do).
+
+The loss mask is what makes this a capacity *saving*. Without it, "input-only"
+is merely a decode restriction and the prose tax has already been paid in
+training. With it, the model learns to *condition* on documentation without
+spending parameters learning to *produce* it — and because the policy is
+uniform, spec decode is unaffected: both models condition identically, neither
+proposes comment tokens.
+
+This fully supports the valuable scenario: docstring above, body below is FIM
+with the comment as context. Generating comments was always the less valuable
+direction.
+
+### What owning the corpus buys, and where it stops
+
+Real Stitch comments are *discursive* — `fs-image/stim/stim.st` opens with
+multi-paragraph essays using rare vocabulary (`operator-pending`, `charwise`),
+cross-file references and nested parentheticals. Nothing on this ladder will
+learn to write those, which is the empirical case for never trying.
+
+We can define **synthetic** comments as a controlled sublanguage (small
+vocabulary, template shapes, validated by a micro-grammar — the
+generate→validate loop applied to documentation, with Tier-2 prompts
+instructed and non-conforming programs rejected). But **we do not own the
+user's future comments**: train on a tidy sublanguage, meet `stim.st` at
+inference, and the distribution mismatch has moved rather than disappeared.
+Two things genuinely help:
+
+1. **Normalize on input.** Because comments are never reproduced, kvetch may
+   preprocess them — first sentence only, drop rare tokens, truncate — mapping
+   real prose *toward* the training distribution. This option exists only
+   because we chose input-only.
+2. **Own the convention, not just the corpus.** If Stitch adopts a doc-comment
+   convention (`///` attached to declarations) and the canon stratum plus the
+   user docs follow it, real code converges toward the learnable form. That is
+   corpus ownership at full strength — house style, not just synthetic data —
+   and it is available here in a way it is not for a language with existing
+   users.
+
+**Doc comments only, not free-floating ones**: positionally structured, shorter,
+more formulaic, and exactly where the signal is. `stim.st`'s file-header essays
+would be excluded from training context; its per-declaration comments kept.
+
+babble is the one exception, and only because it has no vocabulary at all: it
+may emit comments behind a flag — free, and good devlog material — but the flag
+must be **off** for Tier-0 corpus generation.
+
+### The simple-register idea (open, and time-sensitive for the vocab freeze)
+
+Rewrite the corpus's comments in **TinyStories register** — the ~1500 simple
+English words a small child knows — as a *derived* corpus, not a source
+rewrite. Four reasons it is more than a joke:
+
+- **It is the one prose regime with direct evidence at this scale.** TinyStories'
+  result is precisely that this vocabulary is coherently learnable at 10–30M
+  params. Every other register we might pick is a guess; this one is measured,
+  and by us.
+- **The register is the provenance marker.** The hazard with generated comments
+  is that prose is trusted most and verified least — but picture-book register
+  *announces itself*. Nobody mistakes "this bit takes the list and makes it
+  bigger" for a human's `// operator-pending state for r`. In-band, legible at
+  a glance, not forgeable by accident.
+- **A controlled vocabulary is machine-checkable.** "Write good comments" is not
+  a validator; "use only these words" is set membership. It drops straight into
+  the generate→validate pipeline as a rejection rule at no cost.
+- *(Considered and rejected: initialising from the existing 30M TinyStories
+  checkpoint. The ladder is built from scratch in candle — see
+  [../plans/drivel.md](../plans/drivel.md) — so inheriting that architecture is
+  not wanted. The register idea stands on its own; it does not need the
+  transfer, and the vocabulary therefore carries no freeze-time urgency beyond
+  covering whichever register the corpus adopts.)*
+
+It also answers the distribution-mismatch problem that input-normalization only
+half-solved: rather than normalizing real prose at inference, **transform it at
+training**, and teach the model the single register it can actually reach.
+Applied as a transform it extends to Stitch whose comments we did not author.
+
+**Where this direction went:** once a comment-free model works, the register
+idea is best pursued as an **off-ladder sibling captioner**, not as a mode of
+the code model — which dissolves the vocabulary, capacity, per-rung-policy and
+spec-decode problems in one move, and admits a real check
+(execution-based back-translation). Full design:
+[prattle-design.md](prattle-design.md).
+
+**What it does not fix:** verification. "Makes the list bigger" attached to a
+function that shrinks it passes every gate we have — simple prose is *feasible*
+prose, not *checkable* prose. So input-only remains the shipping default; this
+is the one credible path to generation, and it costs nothing to keep open.
+
+**Do not apply it to real sources.** `stim.st`'s comments are genuinely good
+technical writing — the why, the cross-references, the rationale — and are part
+of the project's pedagogical value. The simple-register twin is a build
+artifact derived from them, never a replacement for them.
+
+**Drop rationale comments from the transform — keeping them trains
+fabrication.** Simple vocabulary makes prose *fluent*, not *grounded*. A
+comment like "operator-pending stays within Normal mode, so the cursor still
+shows" states a design consequence that **is not present in the code**: no
+model of any size recovers it from the declaration, because it was never in
+the training signal. Transform such a comment and the corpus teaches the model
+to produce rationale-*shaped* assertions it cannot possibly ground — confident
+invention, in the most authoritative-sounding register in the file. So the
+transform keeps **signature-adjacent** comments and drops rationale ones, and
+the earlier observation that cross-references and design intent "die in the
+transform" is the transform working, not a loss.
+
+The general form of this is worth stating: **the valuable comments are the
+unlearnable ones, and the learnable ones mostly restate the signature.** That
+is a third independent argument for input-only, after verification and
+capacity.
+
+### When the user's comment is not in the register
+
+The realistic case, and it needs a deterministic answer. It cannot break
+correctness — grammar-constrained decoding still guarantees legal Stitch, so
+the mask is a floor on quality. What degrades is conditioning: an
+out-of-register comment shreds into many subword or byte pieces (a 20-word
+technical comment can cost 80+ tokens), those tokens carry barely-trained
+embeddings, and the KV cache fills with low-information context — paid twice on
+a bandwidth-bound board. Note this forces a vocab decision: **byte-fallback is
+effectively mandatory**, or the tokenizer fails outright on unexpected input.
+
+**The fix is a `<comment>` sentinel.** A comment that fails the whitelist is
+replaced, before sampling, by one opaque token:
+
+- fixed cost regardless of length — no context bloat;
+- honest — the model learns "documentation here that I cannot read", instead of
+  pretending to understand fragments;
+- preserves the structural signal that a declaration *is* documented, which is
+  informative on its own;
+- deterministic and model-free at inference (set membership) — unlike
+  "normalize the prose", which quietly required a model to do the simplifying.
+
+**The corpus must contain sentinels too** — sentinel-ise a fraction during the
+transform, or the token is itself out-of-distribution the first time a user
+hits it. The same mechanism covers non-English comments, ASCII-art headers, and
+**commented-out code** (which is not prose at all, and would otherwise tempt
+the model to suggest reinstating whatever was disabled).
+
+**Make it measurable:** emit `kvetch.comments_elided_total`. If real usage
+elides most comments, the register choice was wrong — and that arrives as a
+number on a dashboard rather than a slow mystery about why completions feel
+worse in well-documented files.
+
 ## One vocab, one scaling curve, one draft
 
 **The vocab freeze is law.** Every rung shares tokenizer + vocab exactly.
@@ -230,6 +423,9 @@ modal grammar in the loop. Findings from the design discussion:
 
 - Vocab design: BPE size (~2–4K), identifier word-piece treatment — decided
   once at quip time, then frozen. What goes in the freeze-break checklist?
+  The vocabulary must cover whichever comment register the corpus adopts (see
+  the simple-register section) — but no transfer-learning constraint applies,
+  since the ladder is trained from scratch.
 - Where the knee of the scaling curve sits (the {1,3,10,30}M sweep answers
   this — don't pre-commit ballad as the ship rung until measured).
 - Spec-decode pairing: quip→ballad assumed; is cliché→saga worth it on host?
