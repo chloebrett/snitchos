@@ -144,6 +144,13 @@ about the mechanism: GPT-2's rule (one leading space joins its word; longer
 whitespace runs stand alone) satisfies it exactly, so `"\n   "` can still become
 a token. Lexeme atomicity is now measured on `" let"`, not `"let "`.
 
+**The probe corpus exists: 1M programs, 83 MB, 24.2M tokens, 7.7 minutes.**
+`corpora/babble-0-1000000`. Generation is parallel across cores and
+byte-identical to the sequential output regardless of core count (verified by
+`cmp`, not asserted) — safe because a program's seed is a pure function of its
+index. 24.2M tokens is the Chinchilla-ish 20 tokens/param for a 1M model, so the
+probe is not data-limited.
+
 **babble's lexicon saturates at 571 tokens — a hard ceiling on the probe
 vocab.** Asked for 4096 over the 30K-program corpus, the trainer returns 571 and
 stops: babble draws identifiers from a fixed wordlist and operators from a fixed
@@ -234,11 +241,11 @@ reserve for an eval/judge layer if it ever wants its own name.)
   (`Rung::{Drivel, Quip, Cliche, Ballad, Saga}` → `ModelConfig`, pure data,
   host-tested). Direct ancestor of kvetch's int8 kernels; the eval harness and any
   future itest link this and never a training framework.
-- **`cram/`** — **excluded from the workspace** (the `learning/` precedent in
-  the root `Cargo.toml`). `candle` + Metal backend; the training loop, autodiff,
-  and checkpoint export. Takes a `Rung` + a corpus, emits a checkpoint. Excluded so
-  `cargo xtask test` never compiles candle and a framework bump cannot break the
-  gate.
+- **`cram/`** — in-workspace, host-only. The training loop: hand-written backward
+  pass, AdamW, batching, checkpoint export. Takes a `Rung` + a corpus, emits a
+  checkpoint. It was to be *excluded* from the workspace to keep candle out of the
+  gate; with no framework there is nothing to exclude, and being in-workspace means
+  gradient checking runs in `cargo xtask test` like any other suite.
 - **`cram-corpus/`** — in-workspace, host-only. Corpus assembly, the
   deterministic split, augmentation, the validator funnel, the per-batch report.
   Depends on `stitch` (parse + type-check) and `babble` (Tier-0 generation).
@@ -275,17 +282,97 @@ made here is narrower: **keep the forward pass generic over a `Weights` accessor
 rather than indexing `&[f32]` directly**, so int8 arrives as a second impl rather
 than a rewrite. Nothing more is designed until a rung needs it.
 
-### Why candle, and the one risk it carries
+### No framework: `cram` hand-writes the backward pass (decided 2026-07-25)
 
-candle over burn/dfdx/tch: it is the closest thing to "llama2.c in Rust", has a
-Metal backend for the M1 Max, and its model code reads like the fixed-point
-kernels kvetch will eventually need. burn is more ergonomic and heavier; tch is
-PyTorch wearing a Rust hat, which defeats the point.
+candle is **not** used. The whole pipe — forward, backward, AdamW, data loading,
+checkpointing — is ours, in roughly 1000 lines. `llm.c` is the existence proof at
+this scale, and the project's value here is understanding, not delivery.
 
-The risk is real and named: **candle's training path is less battle-tested than
-PyTorch, so a loss curve that refuses to descend has two suspects instead of
-one.** Increment 4 exists solely to eliminate the rig as a suspect before any
-real data is involved.
+**The seam that keeps this reversible is `Gemm`, not "the framework".** Over 95%
+of training FLOPs are matmul, and the backward pass is *also* matmuls
+(`dX = dY·Wᵀ`, `dW = Xᵀ·dY`); norms, softmax and SiLU are memory-bound and cheap
+enough that our own code is fine. So one trait with one method carries the entire
+performance story:
+
+| Backend | LOC | Throughput | Role |
+|---|---|---|---|
+| `NaiveGemm` | ~15 | 1–2 GFLOP/s | reference; `no_std`; ancestor of the on-target kernels |
+| `BlockedGemm` | ~100 | 50–100 GFLOP/s | portable fast path, zero deps |
+| `AccelerateGemm` | ~20 | ~1 TFLOP/s | macOS AMX via `cblas_sgemm`; the training workhorse |
+| candle | — | — | escape hatch, never load-bearing |
+
+Trait-ing at the GEMM level rather than the framework level is what keeps a
+framework a genuine swap-in without letting its design shape ours. "All backends
+agree within tolerance" is a real test, and it replaces the
+cross-implementation agreement check with something cheaper to keep honest.
+
+### Backend throughput, measured (2026-07-25, M1 Max)
+
+`cargo run --release -p cram --bin bench-gemm`, 2048-row multiplies at the
+ladder's own projection shapes. GFLOP/s, best-of-N:
+
+| shape | naive | blocked | accelerate |
+|---|---:|---:|---:|
+| drivel attn 128×128 | 3 | 131 | 1064 |
+| drivel ffn-up 128×512 | 2 | 121 | 1748 |
+| drivel ffn-down 512×128 | 2 | 118 | 1951 |
+| ballad attn 384×384 | 2 | 126 | 2413 |
+| ballad ffn-up 384×1536 | 2 | 135 | 2500 |
+| ballad ffn-down 1536×384 | 2 | 147 | 2481 |
+
+**The `Gemm` seam is worth ~500–1000×.** That spread is the whole justification
+for the trait: the same model code runs at 2 GFLOP/s on the `no_std` reference
+and 2.5 TFLOP/s on AMX, and the reference stays readable *because* it is not
+where performance lives.
+
+Shape sensitivity is real but mild and only bites at the bottom: drivel's
+128×128 attention projection is the worst case at 1064, roughly 2.3× off the
+2500 that ballad's larger shapes reach. Small `k` costs arithmetic intensity, as
+expected — and it costs it where we can most afford it.
+
+**Why this is affordable.** Training compute is `6ND`. The corpus is
+data-limited at ~40M tokens (the ladder is not Chinchilla-limited), so `D` is
+roughly constant across rungs and cost scales with parameters alone. At the
+measured rates:
+
+| Rung | FLOPs/epoch | 4-epoch run (GEMM-bound) |
+|---|---|---|
+| drivel 1M | 2.4e14 | ~11 min |
+| quip 3M | 7.2e14 | ~25 min |
+| cliché 10M | 2.4e15 | ~1.2 h |
+| ballad 30M | 7.2e15 | ~3.3 h |
+| saga 100M | 2.4e16 | ~11 h |
+
+**Read those as lower bounds.** They are pure-GEMM projections, and the
+non-matmul work — norms, softmax, attention itself, the optimizer — is
+memory-bound and gets no acceleration at all. Amdahl applies: expect real
+training at 50–70% of these figures, so drivel ~15–25 min and ballad ~5–7 h.
+
+**This retires the earlier "DIY dies at cliché" exit criterion**, which assumed a
+blocked-NEON backend and was stale by an order of magnitude — as was the ~1
+TFLOP/s guess that replaced it, in the other direction. DIY reaches saga.
+
+**The candle comparison is still outstanding** and remains the honest test of the
+parity claim: AMX at 1–2.5 TFLOP/s against an M1 Max GPU whose fp32 peak is
+~10 TFLOP/s. Plausibly within the 1.5× bar, plausibly not; unmeasured either way,
+and it needs a network fetch to add the dependency.
+
+**Above quip, compute is not the binding constraint anyway** — the real Stitch
+corpus those rungs need does not exist yet. Training cost stops being the thing
+that decides.
+
+**The risk this trades into:** a hand-written backward pass is where bugs hide,
+and there is no second implementation to agree with. The replacement is
+**gradient checking** — analytic gradients against finite differences, per-op,
+~30 lines. That is a *stronger* test than agreeing with candle, because it
+validates against the mathematical definition rather than against another
+implementation's choices.
+
+**Inference needs none of this.** With a KV cache each decode step is a
+matrix-*vector* product — memory-bound, ~2 MFLOP/token at drivel — so even
+`NaiveGemm` yields ~500–1000 tok/s. A 200-token sample is ~0.2 s and 1000 sampled
+programs is ~3 minutes. Increment 5's generation is not a performance problem;
+only training is.
 
 ## Non-goals (explicitly later)
 
@@ -345,19 +432,23 @@ anti-drift discipline `admits_next`/`valid_next` already use in the oracle).
 
 ## Increment 4 — the rig can learn at all
 
-**RED** (`cram`, host-only, not in the gate): training 8 fixed sequences
-for N steps drives loss below a threshold near zero. The classic overfit-one-batch
-sanity check, promoted to the rig's unit test. A rig that cannot memorize 8
-sequences is broken, and this is the only increment where that is cheap to tell.
+**RED 1 — gradient checking.** Every backward op's analytic gradient matches a
+finite-difference estimate of the same quantity, per-op rather than only
+end-to-end. This is the increment's real deliverable: with no framework there is
+no second implementation to agree with, so correctness comes from the
+mathematical definition instead.
 
-Second RED: a checkpoint exported by `cram` and loaded by `kvetch-model`
-produces **identical logits** for a fixed input. The two implementations of the
-forward pass — candle's and ours — must agree, or every later number is measuring
-the wrong model. This test is ladder-wide: it is the same assertion that will
-later guard int8 export against the f32 reference.
+**RED 2 — backend agreement.** Every `Gemm` backend produces the same result
+within tolerance for the same inputs. Cheap, and it is what makes the fast paths
+safe to trust.
 
-**GREEN**: the `Rung` registry, training loop, checkpoint format, the
-`kvetch-model` forward pass.
+**RED 3 — the rig can learn.** Training 8 fixed sequences for N steps drives loss
+below a threshold near zero. The classic overfit-one-batch check, promoted to a
+unit test: a rig that cannot memorize 8 sequences is broken, and this is the only
+place where that is cheap to tell.
+
+**GREEN**: the `Rung` registry and forward pass (done), the `Gemm` trait and its
+backends, the backward pass, AdamW, and the checkpoint format.
 
 ## Increment 5 — the grammar-learnability probe (drivel-on-babble)
 

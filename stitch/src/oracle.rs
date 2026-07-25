@@ -194,6 +194,46 @@ impl TokenSet {
     pub const fn with(self, class: TokenClass) -> Self {
         Self(self.0 | (1u64 << (class as u32)))
     }
+
+    /// Everything legal in either set.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// This set without `class`.
+    #[must_use]
+    pub const fn without(self, class: TokenClass) -> Self {
+        Self(self.0 & !(1u64 << (class as u32)))
+    }
+
+    /// How many classes are in the set.
+    #[must_use]
+    pub const fn len(self) -> u32 {
+        self.0.count_ones()
+    }
+}
+
+/// Does this class have exactly one spelling?
+///
+/// The distinction a completer needs: a keyword or a delimiter can be *typed
+/// for* the user, because there is only one way to write it. A class carrying a
+/// payload cannot — only the user knows which identifier or which number, and
+/// inserting the oracle's probe lexeme (`x`, `0`) would be inventing code
+/// rather than completing it. `Bool` counts as payload-carrying: `true` and
+/// `false` are two spellings, not one. `Eof` is not typed at all.
+#[must_use]
+pub const fn has_one_spelling(class: TokenClass) -> bool {
+    !matches!(
+        class,
+        TokenClass::Int
+            | TokenClass::Float
+            | TokenClass::Bool
+            | TokenClass::Str
+            | TokenClass::Ident
+            | TokenClass::Placeholder
+            | TokenClass::Eof
+    )
 }
 
 /// A token's class — its kind with the payload dropped.
