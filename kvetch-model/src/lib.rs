@@ -270,6 +270,17 @@ pub struct Trace {
     pub logits: Vec<f32>,
 }
 
+/// Identifies a checkpoint file. Its absence is what distinguishes "not a
+/// checkpoint" from "a checkpoint I cannot read".
+const CHECKPOINT_MAGIC: [u8; 8] = *b"KVETCHCK";
+
+/// Bumped whenever the header or weight layout changes. Old checkpoints are
+/// then refused rather than silently misread.
+const CHECKPOINT_VERSION: u32 = 1;
+
+/// Magic plus seven `u32` header fields.
+const CHECKPOINT_HEADER: usize = 8 + 7 * 4;
+
 /// `RMSNorm`'s denominator guard.
 const NORM_EPS: f32 = 1e-5;
 
@@ -318,6 +329,81 @@ impl Model {
     /// The flat weight vector, in the layout [`Model`] documents.
     pub fn weights(&self) -> &[f32] {
         &self.weights
+    }
+
+    /// Serialize to the checkpoint format.
+    ///
+    /// **Field order and widths are wire law**, the same rule as
+    /// `protocol::Frame`: a checkpoint written today must load on the board
+    /// years from now, and the reader has no way to detect a reordering.
+    /// Little-endian throughout because both the host and RISC-V are.
+    pub fn encode(&self) -> Vec<u8> {
+        let header = [
+            CHECKPOINT_VERSION,
+            self.config.d_model as u32,
+            self.config.layers as u32,
+            self.config.heads as u32,
+            self.config.ffn as u32,
+            self.vocab as u32,
+            self.weights.len() as u32,
+        ];
+
+        let mut out = Vec::with_capacity(CHECKPOINT_HEADER + self.weights.len() * 4);
+        out.extend_from_slice(&CHECKPOINT_MAGIC);
+        for field in header {
+            out.extend_from_slice(&field.to_le_bytes());
+        }
+        for weight in &self.weights {
+            out.extend_from_slice(&weight.to_le_bytes());
+        }
+
+        out
+    }
+
+    /// Load a checkpoint, or `None` if it is not one this build can read.
+    ///
+    /// Every rejection path — bad magic, unknown version, truncation, a declared
+    /// weight count that disagrees with the payload — returns `None` rather than
+    /// panicking or guessing. A checkpoint is the one artifact that arrives from
+    /// outside the program; misreading one produces a model that runs and is
+    /// wrong, which is far worse than refusing to start.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < CHECKPOINT_HEADER || bytes[..8] != CHECKPOINT_MAGIC {
+            return None;
+        }
+
+        let field = |index: usize| {
+            let start = 8 + index * 4;
+            Some(u32::from_le_bytes(
+                bytes.get(start..start + 4)?.try_into().ok()?,
+            ) as usize)
+        };
+
+        if field(0)? != CHECKPOINT_VERSION as usize {
+            return None;
+        }
+        let config = ModelConfig {
+            d_model: field(1)?,
+            layers: field(2)?,
+            heads: field(3)?,
+            ffn: field(4)?,
+        };
+        let vocab = field(5)?;
+        let declared = field(6)?;
+
+        let payload = bytes.get(CHECKPOINT_HEADER..)?;
+        if payload.len() != declared * 4 {
+            return None;
+        }
+
+        let weights = payload
+            .chunks_exact(4)
+            .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect();
+
+        // `new` re-derives the expected count from the config, so a header
+        // whose dimensions disagree with its own weight count is caught here.
+        Self::new(config, vocab, weights)
     }
 
     /// Logits for every position, using the reference multiply.
@@ -723,6 +809,46 @@ mod tests {
         assert!(
             logits.iter().all(|value| value.is_finite()),
             "non-finite logits mean the numerics are wrong, not the shape"
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_round_trips_a_model_exactly() {
+        let original = tiny_model();
+
+        let restored = Model::decode(&original.encode()).expect("own output must decode");
+
+        assert_eq!(restored.config(), original.config());
+        assert_eq!(restored.vocab(), original.vocab());
+        assert_eq!(
+            restored.weights(),
+            original.weights(),
+            "weights must survive bit-for-bit; a lossy checkpoint silently \
+             changes the model between training and serving"
+        );
+    }
+
+    #[test]
+    fn a_damaged_checkpoint_is_rejected_rather_than_misread() {
+        let encoded = tiny_model().encode();
+
+        let mut wrong_magic = encoded.clone();
+        wrong_magic[0] ^= 0xff;
+        assert!(Model::decode(&wrong_magic).is_none(), "magic not checked");
+
+        assert!(
+            Model::decode(&encoded[..encoded.len() - 4]).is_none(),
+            "truncation not detected"
+        );
+        assert!(Model::decode(&[]).is_none(), "empty input not rejected");
+
+        let mut wrong_count = encoded.clone();
+        // Corrupt the recorded weight count: the header would then describe a
+        // model whose weights are not there.
+        wrong_count[24] ^= 0x01;
+        assert!(
+            Model::decode(&wrong_count).is_none(),
+            "declared size not cross-checked against the payload"
         );
     }
 
