@@ -29,8 +29,21 @@ pub const PEAK: i16 = 4000;
 #[must_use]
 pub fn plan_play(req: Play) -> Option<impl Iterator<Item = i16>> {
     let tone = Tone::square(req.freq_hz, FS_HZ, Gain::UNITY, PEAK)?;
-    let count = (u64::from(req.duration_ms) * u64::from(FS_HZ) / 1000) as u32;
+    let count = sample_count(req.duration_ms);
     Some((0..count).map(move |i| tone.sample_at(i)))
+}
+
+/// Samples needed to fill `duration_ms` at [`FS_HZ`] (`fs · ms / 1000`), computed
+/// in `u64` to avoid overflowing the intermediate. Factored out so the arithmetic
+/// is asserted directly, not only through a full-length iterator.
+///
+/// Mutation note: `cargo mutants` reports the `/1000 → *1000` mutant here as a
+/// **timeout**, not a fast kill — it inflates the count to billions, so the
+/// `.count()`-based iterator tests hang before failing. That is a valid catch (no
+/// surviving mutant); killing it *fast* would need an artificial max-length cap,
+/// which we don't add for mutation cosmetics.
+fn sample_count(duration_ms: u32) -> u32 {
+    (u64::from(duration_ms) * u64::from(FS_HZ) / 1000) as u32
 }
 
 #[cfg(test)]

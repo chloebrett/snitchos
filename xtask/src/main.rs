@@ -411,6 +411,8 @@ mod mutant_plan_tests {
         assert_eq!(got, vec![
             "babble",
             "collector",
+            "glitch-core",
+            "glitch-proto",
             "hitch",
             "hitch-pod",
             "kernel-boot",
@@ -422,6 +424,7 @@ mod mutant_plan_tests {
             "kvetch-proto",
             "protocol",
             "stitch",
+            "synth",
         ]);
     }
 }

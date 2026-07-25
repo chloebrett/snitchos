@@ -24,7 +24,7 @@ fn glitch_endpoint() -> Endpoint {
 }
 
 /// The `AudioSink` cap the kernel granted glitch — the **second** delegated cap,
-/// right after the endpoint (`run_ipc` grants endpoint then AudioSink).
+/// right after the endpoint (`run_ipc` grants endpoint then `AudioSink`).
 fn audio_sink() -> usize {
     delegated_handle(1)
 }

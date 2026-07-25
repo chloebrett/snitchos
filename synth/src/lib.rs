@@ -66,11 +66,18 @@ impl Tone {
         self.period
     }
 
+    /// The `i`-th sample of the *infinite* square (period-periodic): `+high` on
+    /// the first half of each period, `-high` on the second. Lets a caller repeat
+    /// the tone for an arbitrary duration by indexing, without a `Clone` iterator
+    /// (`Clone` doesn't propagate through [`Self::samples`]'s opaque return).
+    #[must_use]
+    pub fn sample_at(self, i: u32) -> i16 {
+        if i % self.period < self.period / 2 { self.high } else { -self.high }
+    }
+
     /// One period of signed PCM: first half `+high`, second half `-high`.
     pub fn samples(self) -> impl Iterator<Item = i16> {
-        let period = self.period;
-        let high = self.high;
-        (0..period).map(move |i| if i < period / 2 { high } else { -high })
+        (0..self.period).map(move |i| self.sample_at(i))
     }
 }
 
@@ -130,5 +137,17 @@ mod tests {
         assert!(Tone::square(0, 8000, Gain::UNITY, 1000).is_none(), "0 Hz");
         assert!(Tone::square(8000, 8000, Gain::UNITY, 1000).is_none(), "period 1");
         assert!(Tone::square(4000, 8000, Gain::UNITY, 1000).is_some(), "period 2 is the min");
+    }
+
+    #[test]
+    fn sample_at_indexes_the_infinite_square() {
+        // period 20: first half (0..10) high, second half (10..20) low, then it
+        // repeats — index 20 aliases index 0. Lets a caller repeat the tone for a
+        // duration without needing a `Clone` iterator.
+        let tone = Tone::square(400, 8000, Gain::UNITY, 1000).expect("valid");
+        assert_eq!(tone.sample_at(0), 1000, "opens high");
+        assert_eq!(tone.sample_at(9), 1000, "last of the high half");
+        assert_eq!(tone.sample_at(10), -1000, "first of the low half");
+        assert_eq!(tone.sample_at(20), tone.sample_at(0), "wraps at the period");
     }
 }

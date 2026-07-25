@@ -578,6 +578,26 @@ pub fn debug_write_raw(ptr: usize, len: usize) -> usize {
     ret
 }
 
+/// Largest sample batch one [`audio_write`] carries — matches the kernel's
+/// `MAX_SAMPLES`. The `glitch` server chunks longer audio into repeated calls.
+pub const AUDIO_WRITE_MAX: usize = 256;
+
+/// Emit signed-PCM `samples` to the DAC via the `AudioWrite` syscall, gated on the
+/// `AudioSink` capability at handle `sink`. The kernel owns the DAC MMIO + per-sample
+/// pacing; this just hands it the buffer (`a0` = handle, `a1` = ptr, `a2` = count).
+/// `Ok(())` on success; `Err(Denied)` if the kernel refused — the caller doesn't hold
+/// an `AudioSink` (with `AUDIO`), or `samples` exceeds [`AUDIO_WRITE_MAX`] / names a
+/// bad range. Chunk longer audio to [`AUDIO_WRITE_MAX`] per call.
+pub fn audio_write(sink: usize, samples: &[i16]) -> Result<(), Denied> {
+    // SAFETY: `ecall`; the kernel validates the `AudioSink` cap at a0 and the
+    // `(ptr, count)` range, copies the samples out (never dereferencing the pointer
+    // in U-mode), and returns 0 in a0 — `usize::MAX` if refused.
+    let ret = unsafe {
+        ecall(Syscall::AudioWrite, [sink, samples.as_ptr() as usize, samples.len(), 0, 0, 0, 0])
+    }[0];
+    if ret == usize::MAX { Err(Denied) } else { Ok(()) }
+}
+
 /// Read up to `dst.len()` buffered console-input bytes into `dst`; returns how
 /// many were read (`0` if nothing is buffered — non-blocking). The input mirror
 /// of [`debug_write`] (the `ConsoleRead` syscall). A caller wanting a full line

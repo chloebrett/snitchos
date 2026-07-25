@@ -22,6 +22,7 @@ pub(crate) const NOT_HOST_TESTED: &[(&str, &str)] = &[
     ("snitchos-std", "riscv64-only userspace std"),
     ("hello", "riscv64-only userspace binaries"),
     ("fs", "riscv64-only userspace FS server"),
+    ("glitch", "riscv64-only userspace audio server"),
 ];
 
 /// Userspace wrappers allowed to hand-roll `asm!("ecall", …)` **permanently**,
