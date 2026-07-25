@@ -190,6 +190,21 @@ pub trait Platform {
         false
     }
 
+    /// Ask a completion service to continue `prefix` by at most `max_tokens`
+    /// tokens, returning **only the appended text**.
+    ///
+    /// `None` when this backend has no completion endpoint — which is most of
+    /// them, and is not an error: the caller falls back to grammar-only
+    /// completion, which is correct-by-construction and instant. A model is an
+    /// improvement on that floor, never a prerequisite for it.
+    ///
+    /// The answer is a *fragment*: it extends the prefix legally and stops on
+    /// the budget, rather than trying to finish the program.
+    fn complete(&self, prefix: &str, max_tokens: u32) -> Option<alloc::string::String> {
+        let _ = (prefix, max_tokens);
+        None
+    }
+
     /// Revoke every capability *derived from* the holding at `handle` — the
     /// transitive reclaim. Returns the number of descendant caps invalidated
     /// (`0` if none were derived), or `None` if the caller holds no cap at
@@ -263,6 +278,12 @@ pub struct FakePlatform {
     /// Scripted raw bytes for `read_byte` — the stim driver's keystroke source.
     /// Drained front-to-back, then `None`.
     bytes: core::cell::RefCell<alloc::collections::VecDeque<u8>>,
+    /// The canned answer for `complete`; `None` models "no completion service",
+    /// which is the common case on the host.
+    completion: core::cell::RefCell<Option<alloc::string::String>>,
+    /// How many times `complete` was called — so a test can assert a round trip
+    /// did *not* happen, which is the point of resolving forced tokens locally.
+    completions_requested: core::cell::Cell<usize>,
     /// Recorded `fs_write`s — `(file-cap handle, payload)` — so a driver test can
     /// assert the saved bytes.
     writes: core::cell::RefCell<alloc::vec::Vec<(Handle, alloc::vec::Vec<u8>)>>,
@@ -290,6 +311,19 @@ impl FakePlatform {
     #[must_use]
     pub fn with_caps(caps: alloc::vec::Vec<CapInfo>) -> Self {
         Self { caps: core::cell::RefCell::new(caps), ..Self::default() }
+    }
+
+    /// Script the answer `complete` returns — i.e. pretend a completion service
+    /// is attached. Unset (the default) models "no service", the common case.
+    pub fn set_completion(&self, text: &str) {
+        *self.completion.borrow_mut() = Some(alloc::string::String::from(text));
+    }
+
+    /// How many times `complete` has been asked. Lets a test assert a round
+    /// trip did *not* occur.
+    #[must_use]
+    pub fn completions_requested(&self) -> usize {
+        self.completions_requested.get()
     }
 
     /// Script raw byte input for `read_byte` — the stim driver's keystroke source.
@@ -333,6 +367,11 @@ impl FakePlatform {
 impl Platform for FakePlatform {
     fn read_line(&self) -> Option<alloc::string::String> {
         self.input.borrow_mut().pop_front()
+    }
+
+    fn complete(&self, _prefix: &str, _max_tokens: u32) -> Option<alloc::string::String> {
+        self.completions_requested.set(self.completions_requested.get() + 1);
+        self.completion.borrow().clone()
     }
 
     fn read_byte(&self) -> Option<u8> {
@@ -641,6 +680,15 @@ mod tests {
     fn a_backend_that_sources_no_input_reads_no_byte() {
         // `NullPlatform` uses the trait's default `read_byte` — "no input".
         assert_eq!(NullPlatform.read_byte(), None);
+    }
+
+    #[test]
+    fn a_backend_with_no_completion_service_completes_nothing() {
+        // The default is "no endpoint, no completion" — never a panic and never
+        // a wait. Every context without a kvetch cap (the host CLI, the
+        // `stitch-repl` workload, tests) must degrade to grammar-only
+        // completion, which is a floor worth having rather than an error.
+        assert_eq!(NullPlatform.complete("greet(", 4), None);
     }
 
     #[test]

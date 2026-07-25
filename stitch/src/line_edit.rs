@@ -83,9 +83,12 @@ impl LineEditor {
     /// Apply one Tab press, appending whatever the terminal should show.
     fn complete_into(&mut self, echo: &mut Vec<u8>, completer: &dyn Completer) {
         match completer.complete_line(&self.buffer) {
-            Completion::Forced(lexeme) => {
-                self.buffer.push_str(&lexeme);
-                echo.extend_from_slice(lexeme.as_bytes());
+            // A certainty and a guess are both inserted — pressing Tab *is* the
+            // request. They stay distinct so a richer terminal can render the
+            // guess differently; this one has no way to.
+            Completion::Forced(text) | Completion::Suggested(text) => {
+                self.buffer.push_str(&text);
+                echo.extend_from_slice(text.as_bytes());
             }
             Completion::Choices(choices) => {
                 echo.extend_from_slice(b"\r\n");

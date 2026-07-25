@@ -23,6 +23,29 @@ editor asks its completer once per Tab; it is the *ranking* completer
 (increment 5) that must resolve `Forced` from the grammar locally and only
 consult the model when the choice is ambiguous. Putting that rule in the editor
 would have leaked grammar knowledge into it.
+
+**Increment 5 done (host half).** `Platform::complete(prefix, max_tokens) ->
+Option<String>` with a `None` default — no endpoint is the *common* case, not
+an error path, and it degrades to grammar-only. `ModelCompleter` composes the
+two, and the round-trip rule lives there as designed: a `Forced` token or a
+dead line is decided by the grammar alone and **never asks the service**
+(pinned by a fake that counts requests and asserts zero). 757/757, clippy clean.
+
+Two things the increment added beyond the plan:
+
+- **`Completion::Suggested`** — a model's guess is legal but not certain, so it
+  is a distinct variant from `Forced`. The line editor inserts both (pressing
+  Tab *is* the request), but the distinction is now available to any surface
+  that can render a guess differently.
+- **The suggestion is validated locally.** kvetch only emits oracle-approved
+  tokens — but a client that *assumed* that would be trusting another process
+  to police its own output. `ModelCompleter` checks the suggestion leaves the
+  line viable and falls back to the menu if not. A suggestion that kills the
+  buffer is worse than no suggestion.
+
+**Remaining for 5:** `RuntimePlatform::complete` over `kvetch_proto` — the
+on-target half, which needs the second endpoint cap and so lands with
+increment 6.
  `stitch::complete` returns
 `Forced` / `Choices` / `None` over the union of both entries; 6 tests green,
 clippy clean, full stitch suite 723/723. Real output:

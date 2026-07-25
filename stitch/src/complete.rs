@@ -34,6 +34,55 @@ impl Completer for GrammarCompleter {
     }
 }
 
+/// The grammar, plus a completion service for the cases the grammar cannot
+/// decide.
+///
+/// **A forced token never costs a round trip.** Where exactly one spelling is
+/// legal the grammar already knows the answer, and no model can improve on a
+/// certainty — waiting on one would make the best case the slowest. A dead line
+/// is the same: nothing can rescue it. Only an ambiguous choice is worth
+/// asking about.
+///
+/// This is also where the round-trip discipline belongs, rather than in the
+/// line editor: putting it there would have leaked grammar knowledge into a
+/// component whose whole virtue is not having any.
+pub struct ModelCompleter<'a> {
+    platform: &'a dyn crate::platform::Platform,
+    max_tokens: u32,
+}
+
+impl<'a> ModelCompleter<'a> {
+    #[must_use]
+    pub fn new(platform: &'a dyn crate::platform::Platform, max_tokens: u32) -> Self {
+        Self { platform, max_tokens }
+    }
+}
+
+impl Completer for ModelCompleter<'_> {
+    fn complete_line(&self, line: &str) -> Completion {
+        let grammar = complete(line, line.len());
+        let Completion::Choices(choices) = grammar else {
+            return grammar; // forced or dead — decided already, and for free
+        };
+        let Some(text) = self.platform.complete(line, self.max_tokens) else {
+            return Completion::Choices(choices); // no service: the menu is the floor
+        };
+        // The suggestion crossed a process boundary. kvetch only emits
+        // oracle-approved tokens, but a client that *assumed* that would be
+        // trusting another process to police its own output — so check here
+        // that the line survives it. A suggestion that kills the buffer is
+        // worse than no suggestion.
+        let extended = format!("{line}{text}");
+        let survives = !valid_next_in(&extended, extended.len(), Entry::Program)
+            .union(valid_next_in(&extended, extended.len(), Entry::Expr))
+            .is_empty();
+        if text.is_empty() || !survives {
+            return Completion::Choices(choices);
+        }
+        Completion::Suggested(text)
+    }
+}
+
 /// Completes nothing — what [`crate::line_edit::LineEditor::feed`] uses, so
 /// callers that never opted in behave exactly as they did before completion
 /// existed.
@@ -89,6 +138,10 @@ pub enum Completion {
     /// write it. Not a suggestion — a certainty, so it can be inserted without
     /// asking anything (and without a round trip to a model).
     Forced(String),
+    /// A model's guess: legal, but one of several legal things. Distinct from
+    /// [`Self::Forced`] so a caller can treat certainty and guesswork
+    /// differently — the register of an editor hint, if nothing else.
+    Suggested(String),
     /// Several classes are legal, or one that the user must spell themselves.
     Choices(Vec<TokenClass>),
     /// Nothing can follow: the line is dead in both readings.
@@ -126,7 +179,7 @@ pub fn complete(line: &str, cursor: usize) -> Completion {
 
 #[cfg(test)]
 mod tests {
-    use super::{Completion, complete};
+    use super::{Completer, Completion, complete};
     use crate::oracle::TokenClass;
 
     #[test]
@@ -210,6 +263,53 @@ mod tests {
             panic!("an identifier is the only legal class");
         };
         assert_eq!(super::menu(&choices), "a name");
+    }
+
+    #[test]
+    fn a_forced_token_never_costs_a_round_trip() {
+        // The discipline that keeps completion instant where it can be: the
+        // grammar already knows `{` is the only thing that follows `use M.`, so
+        // no service is consulted. A model cannot improve a certainty, and
+        // waiting on one would make the best case the slowest.
+        let platform = crate::platform::FakePlatform::new();
+        platform.set_completion("SHOULD NOT BE ASKED");
+        let completer = super::ModelCompleter::new(&platform, 8);
+
+        assert_eq!(completer.complete_line("use M."), Completion::Forced("{".into()));
+        assert_eq!(platform.completions_requested(), 0);
+    }
+
+    #[test]
+    fn an_ambiguous_position_asks_the_model() {
+        let platform = crate::platform::FakePlatform::new();
+        platform.set_completion(" 42");
+        let completer = super::ModelCompleter::new(&platform, 8);
+
+        assert_eq!(completer.complete_line("let x ="), Completion::Suggested(" 42".into()));
+        assert_eq!(platform.completions_requested(), 1);
+    }
+
+    #[test]
+    fn without_a_service_the_grammar_still_answers() {
+        // No endpoint is the common case (the host CLI, the plain REPL). The
+        // menu is a floor, not an error path.
+        let platform = crate::platform::FakePlatform::new();
+        let completer = super::ModelCompleter::new(&platform, 8);
+
+        assert!(matches!(completer.complete_line("let x ="), Completion::Choices(_)));
+    }
+
+    #[test]
+    fn an_illegal_suggestion_is_refused_and_the_menu_shown_instead() {
+        // The suggestion crosses a process boundary. kvetch only emits
+        // oracle-approved tokens, but a client that *assumed* that would be
+        // trusting another process to police its own output — so check locally
+        // that the line survives the suggestion.
+        let platform = crate::platform::FakePlatform::new();
+        platform.set_completion(" ;;;");
+        let completer = super::ModelCompleter::new(&platform, 8);
+
+        assert!(matches!(completer.complete_line("let x ="), Completion::Choices(_)));
     }
 
     #[test]
