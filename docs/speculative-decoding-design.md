@@ -189,7 +189,14 @@ finding.
 ## Open questions
 
 - Does `c` on the VF2 actually land near 1.5, and does it move between cliché and
-  ballad? (One microbenchmark on-target, once a runner exists.)
+  ballad? **`c` need not be a microbenchmark** — it falls out of the runner's own
+  telemetry, since `kvetch.prefill_tokens` vs `decode_tokens`, `tokens_per_sec`
+  and the KV block counters in [llm-design.md](llm-design.md) already
+  distinguish a bandwidth-bound step from a compute-bound one. The OS that
+  snitches on itself can report which regime its own model is in, and the cutoff
+  becomes a derived quantity rather than a tuned constant. Both mechanisms here
+  are plug-and-play behind the mask, so this can be measured on real hardware
+  whenever ballad lands rather than being decided now.
 - Draft length `k > 1` under a grammar mask: each drafted token narrows the next
   legal set, so `n` is not independent across a draft window — does the chain
   concentrate on small `n` or escape it?

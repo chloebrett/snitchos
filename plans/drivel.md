@@ -129,11 +129,40 @@ occurrence threshold, which states the real contract and stops the assertion
 drifting with corpus size. That babble under-produces those classes is itself a
 production-coverage signal, and belongs in increment 2's report.
 
-**The trainer's `O(target_size × corpus_len)` is now a measured blocker, not a
-hypothetical.** 256 merges over 17 KB takes 3.8 s; the probe's 4K vocab over
-2.48 MB extrapolates to **~2 hours**. The incremental-count rewrite has to land
-before the probe vocab is trained, so it moves from "known fix if it hurts" to
-the next piece of work.
+**The trainer's `O(target_size × corpus_len)` was a measured blocker — now
+fixed.** The projected ~2 hours for a 4K vocab over 2.48 MB is **0.1 s**. The fix
+was not the incremental-count rewrite that was planned, but **pre-tokenization
+plus chunk-frequency aggregation** — the standard BPE trainer structure, which
+turns the cost into `O(target_size × distinct_chunks)`. It also removed the
+phrase-memorization pathology in the same change, since merges can no longer
+cross a word boundary. The longest learned tokens are now clean lexemes
+(`" contract"`, `" \"buffer\""`) where they used to be `"prod frame < "`.
+
+This reverses the earlier "no pre-tokenization" decision. The original reasoning
+— code wants indent runs as tokens — was right about the requirement and wrong
+about the mechanism: GPT-2's rule (one leading space joins its word; longer
+whitespace runs stand alone) satisfies it exactly, so `"\n   "` can still become
+a token. Lexeme atomicity is now measured on `" let"`, not `"let "`.
+
+**babble's lexicon saturates at 571 tokens — a hard ceiling on the probe
+vocab.** Asked for 4096 over the 30K-program corpus, the trainer returns 571 and
+stops: babble draws identifiers from a fixed wordlist and operators from a fixed
+grammar, so once every distinct chunk is a single token there is nothing left to
+merge. Confirmed by the compression figure — 721,876 tokens for 721,876
+whitespace lexemes, exactly one token each.
+
+Consequences, in order of importance:
+
+1. **The frozen ladder vocab cannot be derived from babble at all.** This is a
+   second, independent, and much harder reason than the distribution argument
+   below: it is not that a babble-trained vocab would be *wrong*, it is that it
+   cannot reach 2–4K entries.
+2. **The probe's vocab is ~571 tokens**, which is fine and arguably good — a 1M
+   model spends less of its budget on embeddings.
+3. **Corpus volume, not vocab, is the probe's constraint.** 30K programs yield
+   722K tokens; a 1M-param model wants ~20M. At 500 programs/s that is ~1M
+   programs and ~33 minutes of generation — affordable, and now the sizing
+   question for increment 5.
 
 ## Order of execution (not the increment numbering)
 

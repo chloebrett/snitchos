@@ -104,12 +104,45 @@ pub const SEPARATOR: &str = "\n\u{1e}---\n";
 
 /// Generate `program_count` babbled programs, program *n* from `seed + n`.
 ///
-/// Sequential rather than independently-drawn seeds so a corpus is described
+/// Consecutive rather than independently-drawn seeds so a corpus is described
 /// by two numbers and any program in it is reproducible on its own.
+///
+/// Generation is spread across all available cores. This is safe *because* the
+/// seed is a pure function of the program's index: workers share nothing, and
+/// results are reassembled in index order, so the corpus is byte-identical to
+/// the sequential one on any machine regardless of core count. Determinism is
+/// pinned by `generation_is_reproducible_from_the_seed`.
 pub fn generate(seed: u64, program_count: usize) -> Vec<String> {
-    (0..program_count as u64)
-        .map(|n| babble::generate(seed + n))
-        .collect()
+    if program_count == 0 {
+        return Vec::new();
+    }
+
+    let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let batch = program_count.div_ceil(workers.min(program_count));
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..program_count)
+            .step_by(batch)
+            .map(|start| {
+                let end = (start + batch).min(program_count);
+                scope.spawn(move || {
+                    (start..end)
+                        .map(|n| babble::generate(seed + n as u64))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .flat_map(|handle| {
+                // A panicking worker means the corpus is incomplete; carrying
+                // on would silently produce a short corpus that still looks
+                // fresh to the manifest.
+                handle.join().expect("babble generation panicked")
+            })
+            .collect()
+    })
 }
 
 /// Render programs to the on-disk corpus form.
