@@ -103,6 +103,8 @@ static COUNTERS: &[&DeferredCounter] = &[
     // display
     &crate::ramfb::FRAMES_PRESENTED,
     &crate::ramfb::INIT_REFUSED,
+    // audio
+    &crate::pwmdac::SAMPLES_EMITTED,
 ];
 
 /// Intern every registered counter's name. Call once at boot, before the

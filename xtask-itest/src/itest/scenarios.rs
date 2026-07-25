@@ -928,6 +928,29 @@ pub fn ipi_self_wakeup(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// Tier-0 audio smoke (`workload=audio-beep`): the kernel brings up the PWMDAC and
+/// drives a square-wave tone, bumping `snitchos.audio.samples_emitted_total` per
+/// sample. Under snemu the synthetic PWMDAC device accepts the `WDATA` writes and
+/// its all-ones SYSCRG reads let the reset `PollUntilSet` complete — so this proves
+/// the whole path ran (clock/reset → `CTRL` → the paced `WDATA` loop). snemu can't
+/// render analog output; the by-ear proof is `snemu … --audio-out`.
+pub fn audio_beep_emits_samples(h: &mut View) -> Result<(), String> {
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str)
+                == Some("snitchos.audio.samples_emitted_total")
+                && *value >= 1
+        }
+        _ => false,
+    })
+    .ok_or(
+        "audio.samples_emitted_total never reached 1 within 30s — \
+         PWMDAC bring-up hung (reset PollUntilSet never released?), the \
+         audio-beep workload wasn't selected, or the WDATA write loop didn't run",
+    )?;
+    Ok(())
+}
+
 /// v0.6 step 1: cooperative single-hart producer/consumer histogram.
 /// Producer task generates LCG samples in batches; consumer task
 /// drains them under a `kernel::sync::Mutex` and bins them into a

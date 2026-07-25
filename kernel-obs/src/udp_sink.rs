@@ -1,6 +1,5 @@
-//! `UdpFrameSink` — a [`FrameSink`](crate::sink::FrameSink) that batches
-//! COBS-framed frames into MTU-sized UDP datagrams and hands each to a
-//! [`NetDevice`](kernel_net::NetDevice).
+//! `UdpFrameSink` — a [`FrameSink`] that batches COBS-framed frames into
+//! MTU-sized UDP datagrams and hands each to a [`NetDevice`].
 //!
 //! The telemetry payload is the exact wire format the UART path uses
 //! ([`protocol::wire_encode`]); UDP only changes the envelope, and COBS is what
@@ -13,12 +12,14 @@ use crate::sink::FrameSink;
 use kernel_net::{NetConfig, NetDevice, build_udp_datagram};
 use protocol::{Frame, wire_encode};
 
-/// Standard Ethernet MTU (the IPv4 total-length ceiling).
-const MTU: usize = 1500;
-/// Room for the batch payload after the IPv4 (20) + UDP (8) headers.
-const MAX_BATCH: usize = MTU - 20 - 8;
-/// A whole Ethernet frame: 14-byte header + MTU.
-const DATAGRAM_MAX: usize = 14 + MTU;
+/// Batch payload capacity: the 1500-byte Ethernet MTU less the 20-byte IPv4 and
+/// 8-byte UDP headers (`1500 - 20 - 8`).
+const MAX_BATCH: usize = 1472;
+/// Scratch for one whole Ethernet frame: the 14-byte Ethernet header over a full
+/// 1500-byte MTU payload (`14 + 1500`). The hard ceiling — a datagram that would
+/// exceed it fails to build and is dropped, never fragmented, so it can never
+/// reach the wire oversized even if `MAX_BATCH` were mis-set.
+const DATAGRAM_MAX: usize = 1514;
 
 /// Accumulates COBS-framed frames into a batch and flushes each full batch as
 /// one UDP datagram through `D`.
@@ -152,6 +153,7 @@ mod tests {
         }
         sink.flush();
 
+        assert_eq!(sink.dropped(), 0, "a clean run drops nothing");
         let sent = dev.sent.borrow();
         assert_eq!(sent.len(), 1, "one batch → one datagram");
         let chunks = payload_frames(&sent[0]);
@@ -204,5 +206,19 @@ mod tests {
         sink.flush();
         assert_eq!(sink.dropped(), 1, "a successful flush doesn't count a drop");
         assert_eq!(dev.sent.borrow().len(), 1, "the sink recovers after a drop");
+    }
+
+    #[test]
+    fn a_frame_too_big_for_a_datagram_is_dropped_and_counted() {
+        let dev = MockNet::new();
+        let mut sink = UdpFrameSink::new(test_config(), dev.clone());
+
+        // A single frame larger than a whole batch can't be sent, even alone.
+        let huge = "x".repeat(2000);
+        sink.emit(&Frame::Log { msg: &huge, task_id: 1, t: 100, hart_id: 0 });
+        sink.flush();
+
+        assert_eq!(sink.dropped(), 1, "the un-encodable frame is counted");
+        assert!(dev.sent.borrow().is_empty(), "nothing reached the wire");
     }
 }

@@ -26,7 +26,7 @@ mod syscall;
 mod trap;
 mod workloads;
 
-pub(crate) use device::{console, fwcfg, ramfb, uart, virtio_console};
+pub(crate) use device::{console, fwcfg, pwmdac, ramfb, uart, virtio_console};
 pub(crate) use mem::{frame, heap, heap_smoke, mmu};
 pub(crate) use obs::{counter, heartbeat, tracing};
 pub(crate) use sched::{demo_tasks, process};
@@ -93,6 +93,9 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // in a way we haven't isolated; see plans/v0.4-memory-findings.md.
     let mut mmio_regions = mmu::MmioRegions::new();
     mmio_regions.insert(mmu::QEMU_VIRT_MMIO_BASE);
+    // JH7110 SYSCRG (audio clock/reset) — its own megapage, outside the UART's.
+    // The PWMDAC block itself (0x100b_0000) is already in the UART megapage.
+    mmio_regions.insert(0x1300_0000);
 
     // Turn paging on EARLY — before any code that loads an absolute
     // function-pointer value to a higher-half VA (formatted println!
@@ -475,6 +478,12 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
         Some(WorkloadKind::Cooperative) => {
             let _ = sched::spawn("workload_producer", workload::producer_entry);
             let _ = sched::spawn("workload_consumer", workload::consumer_entry);
+        }
+        // Tier-0 audio: bring up the PWMDAC and beep out the 3.5mm jack. A single
+        // kernel task that yields each period so the heartbeat drains the sample
+        // counter. Address-driven, so it runs under snemu's synthetic PWMDAC.
+        Some(WorkloadKind::AudioBeep) => {
+            let _ = sched::spawn("audio_beep", pwmdac::audio_beep_entry);
         }
         // v0.9 block/wake smoke: a blocker + waker on hart 0. The blocker
         // calls `block_current`; the waker `wake`s it. Single-hart, kernel

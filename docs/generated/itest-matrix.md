@@ -6,6 +6,7 @@
 
 | Scenario | Workload | Profile | Tags |
 | --- | --- | --- | --- |
+| audio-beep-emits-samples | audio-beep | cpu | audio |
 | badge-demux-distinguishes-clients | badge-handout | wfi | userspace, ipc |
 | badge-handout-links-derivation | badge-handout | wfi | userspace, ipc |
 | badge-handout-transfers-cap | badge-handout | wfi | userspace, ipc |

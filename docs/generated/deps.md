@@ -79,6 +79,7 @@ graph LR
     kernel --> kernel_proc
     kernel --> protocol
     kernel --> snitchos_abi
+    kernel_obs --> kernel_net
     kernel_obs --> protocol
     kernel_proc --> kernel_mem
     kernel_proc --> protocol

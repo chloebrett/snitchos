@@ -83,6 +83,13 @@ workloads! {
     /// no meaning — nothing depends on the discriminant values.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum WorkloadKind {
+        /// Tier-0 audio: bring up the JH7110 PWMDAC (SYSCRG clock/reset + `CTRL`)
+        /// and drive a fixed-frequency square-wave tone out the 3.5mm jack, bumping
+        /// `snitchos.audio.samples_emitted_total` per sample. Address-driven (not
+        /// board-gated), so it runs under snemu's synthetic PWMDAC device for the
+        /// `audio-beep-emits-samples` scenario + `--audio-out` by-ear WAV.
+        /// See `plans/vf2-audio-tier0.md`.
+        AudioBeep,
         /// v0.9c cap-transfer-in-reply: a `badge-handout-server` (`RECV | MINT`)
         /// mints a badged `SEND` cap per request and **hands it back in the reply**;
         /// a `badge-handout-client` `call`s, receives the badged cap, and signals
@@ -527,6 +534,11 @@ mod tests {
             .map(|w| (w[0], w[1]))
             .collect();
         assert_eq!(out_of_order, [], "WorkloadKind variants must stay sorted");
+    }
+
+    #[test]
+    fn selects_audio_beep() {
+        assert_eq!(select("workload=audio-beep"), Some(WorkloadKind::AudioBeep));
     }
 
     #[test]

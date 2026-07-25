@@ -1,14 +1,17 @@
 # Tier 0 — first beep from the VF2 audio jack (CPU PIO)
 
-**Status:** 🚧 **IN PROGRESS — the whole pure/host-testable layer is done.** Increments
-1, 2, 4, 5 (`kernel-devices/src/pwmdac.rs`) and 3 (`kernel-devices/src/syscrg.rs`)
-shipped — 33 host tests, clippy-clean, mutation-verified (the only survivors are the
-documented `| → ^` disjoint-field equivalents). **9a is also done** — the snemu PWMDAC
-device model + a pure WAV decoder + the `--audio-out` flag (the emulator harness that
-lets audio run/render off-hardware). **Next up is Increment 6** — the kernel MMIO glue
-(address-driven per fork (a)), now observable under snemu. Remaining order:
-**6 → 7 → 8 → 9b**; also outstanding: **4b** (sine LUT via `build.rs`). TDD-decomposition
-of Tier 0 from
+**Status:** ✅ **THE BEEP WORKS (under snemu).** Increments 1–8 + 9a all shipped: the
+pure layer (`kernel-devices/src/{pwmdac,syscrg}.rs`), the snemu PWMDAC device + WAV
+decoder (`snemu/src/{pwmdac,audio}.rs`) + `--audio-out`, the kernel driver
+(`kernel/src/device/pwmdac.rs`, address-driven per fork (a)), the `audio-beep` workload,
+and the `audio-beep-emits-samples` itest — **green, 100% fidelity**. End-to-end proof:
+`snemu … --workload audio-beep --audio-out beep.wav` renders a valid 24.6 s / 196 632-sample
+mono-16-bit-8 kHz WAV (RIFF header verified). All host tests clippy-clean + mutation-verified
+(only the documented `| → ^` disjoint-field equivalents survive). **Remaining: hardware
+validation on the actual VF2** (the design doc's open unknowns: `WDATA` FIFO, real SYSCRG
+offsets, `CORE_DIVIDER` calibration, analog-path GPIO) and two optional refinements — **4b**
+(sine LUT via `build.rs`) and a stronger **9b** oracle (assert on snemu's *captured* samples,
+not just the kernel counter). TDD-decomposition of Tier 0 from
 [../docs/vf2-audio-design.md](../docs/vf2-audio-design.md). Goal: **the board emits a
 fixed-frequency tone from the 3.5mm jack**, fed by CPU PIO writes to the JH7110
 PWMDAC — no DMA engine. Everything here is deferrable-free (gated on nothing
@@ -166,7 +169,16 @@ doesn't divide evenly is handled (round + documented drift), not silently trunca
 **GREEN:** the pure fn. Consumes the board timebase the port already reads from the
 DTB.
 
-## Increment 6 — kernel MMIO driver glue *(not host-tested)*
+## Increment 6 — kernel MMIO driver glue *(not host-tested)* — ✅ DONE
+
+Shipped `kernel/src/device/pwmdac.rs`: `bringup()` applies `syscrg::pwmdac_bringup`
+ops via RMW/poll volatile MMIO, `configure()` writes `CTRL` + returns the pacing
+interval, `audio_beep_entry` drives the tone paced by `now_ticks()`, yielding each
+period. Wired: `insert(0x1300_0000)` for SYSCRG, the crate re-export, the dispatch arm,
+`SAMPLES_EMITTED` in the counter registry. **Key gotcha caught:** MMIO is reached via
+the higher-half VA (`pa + KERNEL_OFFSET`) — the raw-physical first cut page-faulted at
+`0x13020278` once `unmap_identity` ran (same idiom as the UART). `CORE_DIVIDER` is a
+placeholder pending hardware calibration (swallowed by snemu).
 
 Wire the pure layers to hardware. `kernel/src/device/pwmdac.rs`:
 - `insert(0x1300_0000)` for SYSCRG in `kmain` (the DAC block at `0x100b0000` is
@@ -182,7 +194,12 @@ Wire the pure layers to hardware. `kernel/src/device/pwmdac.rs`:
 No unit tests (MMIO). Covered by Increment 7's manual acceptance. Keep it a thin
 translation of the pure layer — no logic that isn't already tested above.
 
-## Increment 7 — `audio-beep` runtime workload (acceptance)
+## Increment 7 — `audio-beep` runtime workload (acceptance) — ✅ DONE
+
+Added `WorkloadKind::AudioBeep` (host-tested parse in `kernel-boot`, sorted-order +
+all-variants tests green) + the `kmain` dispatch arm spawning the `audio_beep` task.
+`cargo run -p snemu -- <kernel> --workload audio-beep --audio-out beep.wav` → an
+audible 440 Hz tone WAV. (Board run is the hardware-validation step.)
 
 **RED (host-tested part):** add a `WorkloadKind::AudioBeep` variant + `workload=`
 parse arm in `kernel_boot::bootargs` (unit-tested there, per the runtime-workload
@@ -193,7 +210,12 @@ pattern).
 board → **hear a 440 Hz tone.** This is the acceptance gate; it is manual and
 by-ear (documented — no automated audio oracle exists).
 
-## Increment 8 — automated code-path guard (production metric)
+## Increment 8 — automated code-path guard (production metric) — ✅ DONE
+
+`audio-beep-emits-samples` scenario (`xtask-itest`): boots `workload=audio-beep` under
+snemu, asserts `snitchos.audio.samples_emitted_total >= 1`. **Green, 100% fidelity, 0.1s.**
+Proves clock/reset → `CTRL` → the paced `WDATA` loop all ran (and snemu's PWMDAC region
+kept the guest from halting).
 
 *(Depends on 9a: snemu **halts the run** on a write to an unmapped MMIO address
 (`bus.rs:216` → `main.rs:139`), so without 9a's PWMDAC/SYSCRG region this scenario
