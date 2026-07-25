@@ -108,6 +108,21 @@ data/vocab are four points on a capability curve nobody has published (a
 single-language, validated-corpus regime this small). drivel anchors the
 bottom; the knee's location decides how small the shipped model can be.
 
+**The ladder tops out at saga — above it, change species, don't scale.**
+A 300M/1B from-scratch rung is *not* blocked by training cost (we're
+data-limited; even 1B ≈ 1e18 FLOPs ≈ hours on an A100, <$10). It's blocked by
+two other things: (a) the corpus can't feed it — 1B against ~40M tokens is
+~100× over-parameterized, and past the corpus's information content extra
+params buy memorization of the synthetic programs, not capability; (b) on the
+host, the competition isn't a bigger from-scratch model but a **fine-tuned
+open one** — every ladder model knows *only Stitch* (no English, no
+world-code priors; it completes, it cannot explain), while a LoRA'd open
+4–8B-coder brings English + general code understanding + our corpus, and wins
+at everything the host tier is for (help synthesis, explanation, agent
+planning). So: **from-scratch below saga, fine-tune above it.** A 300M probe
+stays on the menu only if the sweep shows the curve still climbing at saga
+(a ~$3 experiment); 1B is struck.
+
 **Speculative decoding** (the shared vocab's payoff): quip drafts k tokens,
 ballad verifies them in one batched pass. On the VF2 ballad is
 *bandwidth-bound*, so verification reads the 30M weights once for k tokens —

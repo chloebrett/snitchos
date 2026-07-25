@@ -8,7 +8,10 @@ kernel-level authority checking of generated code, and OS-level provenance for
 model-written bytes. Nothing here is committed work; the sequencing section says
 what the keystone increment would be if any of it is greenlit.
 
-Related: [language-design.md](language-design.md) (Stitch),
+Related: [generative-ladder.md](generative-ladder.md) (the model tiers —
+babble/drivel/quip/cliché/ballad/saga — plus bootstrap stages, metrics,
+speculative decoding, and the retrain-as-CI lifecycle),
+[language-design.md](language-design.md) (Stitch),
 [stim-design.md](stim-design.md) (the editor this integrates with),
 [clipboard-design.md](clipboard-design.md) (the provenance substrate),
 [manifest-design.md](manifest-design.md) (authority description — the static twin
@@ -77,9 +80,20 @@ A userspace inference engine, llama2.c-shaped:
 - **Multi-hart matmul**: row-partitioned across harts using existing IPC/
   notification primitives; the cross-hart Release/Acquire oracle work already
   proved the ordering story.
-- **Serves completions as an IPC endpoint** — same `Call`/`Reply` loop as the FS
-  server. The client holds a `Send|Call` cap on a completion endpoint and neither
-  knows nor cares what's behind it (see "Local or network" below).
+- **kvetch is a userspace service, like the FS server** — completions served as
+  an IPC endpoint, same `Call`/`Reply` loop. The client holds a `Send|Call` cap
+  and neither knows nor cares what's behind it (see "Local or network" below).
+  Per-client badges give per-client token accounting (quota/metering via the cap
+  system, not app logic).
+- **Inference is an observability story.** Every completion is a span with
+  prefill and decode children; metrics via the shipped userspace `RegisterMetric`
+  path (mind the 16/process quota — register once, reuse handles):
+  `kvetch.kv.block_hits/misses` (the hit rate is *observable proof the
+  versioned-buffer protocol works* — an edit storm shows as suffix
+  invalidations), `kv.blocks_resident`/`evictions`, `prefill_tokens` vs
+  `decode_tokens` (their ratio is cache effectiveness), `tokens_per_sec`,
+  spec-decode `draft_accept_rate`, mask-computation time. The tour's model tab
+  falls out of these frames.
 - **Develop under snemu first**: deterministic, itest-able ("model emits ≥N tokens
   and heartbeat survives" is a scenario like any other), and `snemu profile` hands
   us the hot-loop breakdown. snemu at a few hundred MIPS runs the 30M model at
@@ -118,7 +132,10 @@ Design choices:
 - **FIM (fill-in-middle) training objective** — that's what makes it an
   autocompleter rather than a continuator.
 - **Context length 1–2K**, no longer than the VF2 can afford to serve.
-- **Size sweep 5/15/30M**; expect the knee below 30 for a single small language.
+- **Sizes are a named ladder** (babble 0 / drivel 1M / quip 3M / cliché 10M /
+  ballad 30M / saga 100M) sharing one frozen vocab — full design, bootstrap
+  sequence, and lifecycle in [generative-ladder.md](generative-ladder.md);
+  expect the capability knee at-or-below ballad for a single small language.
 
 ### Training cost (M1 Max baseline: 30M TinyStories = 9 h)
 
@@ -144,22 +161,62 @@ are the anchor, not the volume:
 | Tier | Source | Tokens | Cost |
 |---|---|---|---|
 | 0 | Grammar-directed sampling + augmentation | ~10M | ~$0 |
-| 1 | Opus seed set (quality anchor + few-shot library) | ~1M | ~$100 |
-| 2 | Cheap model (Flash/Haiku) bulk with ICL, ~60% validated yield | ~30M kept | ~$40–80 |
+| 1a | Gold exemplars: frontier-drafted, **hand-polished** (~5–10 programs) | ~5K | ~$0 |
+| 1b | Volume seed via open-weight frontier (K3-class, hosted) | ~1M | ~$15–20 |
+| 2 | Local open-weight 27–32B with ICL (overnight pilots → rented-GPU bulk run) | ~30M kept | ~$5–10 |
 | 3 | (later, optional) kvetch self-distillation under constrained decoding | — | — |
 
-vs ~$3–4K all-Opus for the same volume.
+Total ≈ **~$25–35**, vs ~$3–4K all-frontier-API for the same volume.
+
+- **The seed tier is two things, and only one needs money.** The **gold
+  exemplars** ride in every bulk prompt — the highest-leverage tokens in the
+  pipeline — and their quality comes from *hand-polishing* (any frontier model
+  drafts; the human is the only entity with taste in idiomatic Stitch). The
+  **volume seed** (drift-reference + training-mix) needs strong
+  instruction-following, not frontier taste — a K3-class open-weight frontier
+  over a hosted API is plenty (Kimi K3: weights open 2026-07-27; 2.8T MXFP4,
+  hosted-only at ~1.4 TB; official API $3/$15 per MTok in/out, $0.30 cached
+  input — so ~$15–20 for the seed, Sonnet-class pricing; the K3 case is
+  licensing, not cost. **Check the final license before the run** — terms were
+  unpublished as of 07-25, K2 precedent is modified-MIT). Tests filter *wrong*; they don't filter
+  legal-but-ugly — the exemplars + drift-judging cover that residual.
+- **Licensing is the tiebreaker for open-weight generation throughout.**
+  Closed-model ToS restrict training on outputs; open-weight outputs make the
+  corpus unencumbered and therefore *publishable alongside the
+  corpus-synthesis paper* — a corpus you can't share weakens the paper. The
+  expensive closed model's remaining role is **judge, not generator**
+  (drift-judging verdicts never enter training data, and judging is where
+  discernment pays anyway).
 
 - **Tier 0**: we own the AST — sample it directly, biased toward shape statistics
   measured from real code (CSmith-style probability tables). Perfect for syntax,
   semantically vacuous; cap at ~20–30% of the corpus. Plus semantics-preserving
   augmentation of every validated program (alpha-renaming, reordering,
   extract/inline) — a free 2–4× multiplier, validator-checked.
-- **Tier 2 disciplines**: context caching (the ~8–10K-token spec+exemplar prompt
-  is identical across tens of thousands of calls); track validated **yield per
-  prompt recipe** — a 20%-yield recipe means the cheap model doesn't understand
-  that idiom → add a targeted Tier-1 exemplar for it (spot-repair with the
-  expensive model only where the cheap one fails).
+- **Tier 2 runs on local open weights, default 27–32B q4** (Gemma-27B /
+  Qwen-32B class, ~17–18 GB — the 64 GB M1 Max yawns; weights load once, each
+  parallel stream adds only ~100–200 MB of KV). Batched decode (8–16 streams;
+  compute, not RAM, is the ceiling) ≈ 70–120 tok/s aggregate = **1.5–3M
+  tokens/overnight**; a 12B doubles that for daytime recipe-iteration loops.
+  Electricity ≈ $0.40 AUD/night — but money is the wrong axis: zero marginal
+  cost changes the experimental posture (lower yield just costs more free
+  tokens; rejection was already the plan). Must-do: keep the ~8–10K-token
+  spec+exemplar system prompt KV-cached across calls (llama.cpp persistent
+  slots / MLX prompt cache), else prefill dominates. **When the pipeline is
+  dialed in, do the final bulk run on a rented GPU with the *same* model**
+  (4090/A100 + vLLM: 1500–3000 tok/s batched → the whole bulk tier in ~4–8 h
+  for ~$3–8, and pilot + bulk stay distribution-identical). **Bonus diversity
+  axis the API plan priced out: model mixture** — rotate open models across
+  batches; different models' idioms attack the homogeneity risk in a way prompt
+  recipes can't. Flash-class API models exit the plan except as a
+  yield-comparison baseline (Flash's size is undisclosed; a good local 30B is
+  plausibly at-or-above it for exemplar-grounded generation in a niche
+  language).
+- **Tier 2 disciplines**: context caching (see above; on API, use provider
+  context caching); track validated **yield per prompt recipe** — a 20%-yield
+  recipe means the generating model doesn't understand that idiom → add a
+  targeted Tier-1 exemplar for it (spot-repair with the expensive model only
+  where the cheap one fails).
 - **The validators are the equalizer**: parse → type-check → run tests → dedup.
   Rejection is free and automated; we pay for candidates, not corpus.
 - **Tier 3 caveat**: model collapse (Shumailov et al. 2023); our
@@ -167,7 +224,7 @@ vs ~$3–4K all-Opus for the same volume.
   plan on this tier.
 - **Main risk is homogeneity, not cost**: a corpus that's 75% one cheap model's
   idea of Stitch. Mitigations: the diversity scheme below, the augmentation tier,
-  and periodic Opus-judging of random samples against the seed set for idiom
+  and periodic frontier-model judging of random samples against the seed set for idiom
   drift (pennies). If drift appears, tighten exemplars, don't upgrade the bulk
   model.
 
@@ -487,6 +544,32 @@ network, *enforced locally*, can — and the harness is mostly already built:
 - The Check oracle gives the agent (and its overseer) pre-flight "would this be
   approved?" — and probing is itself observable.
 
+### Badged token accounting: budgets are rights
+
+Per-client badges on the kvetch endpoint don't just meter — they make token
+accounting **attributable, delegable, and revocable**, entirely from shipped
+machinery:
+
+- **Attribution rolls up the delegation tree.** The cap-id spine records every
+  badged cap's lineage, so "this agent spent 40K tokens" decomposes into "…of
+  which 32K went to the subtask it spawned with a re-minted cap." Cost
+  attribution across a process tree — an unsolved bolt-on everywhere else
+  (API-key-per-team and prayer) — is a `CapEvent` fold here.
+- **Budgets become rights.** A quota isn't a number in kvetch's config; it
+  rides the badge. init mints an agent a completion cap good for N tokens;
+  exhaustion is a refusal-style event on the wire, never a silent 429.
+  Delegating authority to an agent *is* delegating its inference budget — same
+  gesture, same primitive.
+- **Revocation is the kill switch for runaway inference.** Revoke the cap and
+  generation dies at the next `Call`, as a traced event — the generation-counter
+  machinery built for files works unmodified for tokens.
+
+The pattern underneath, and increasingly this whole document's thesis: every
+hard governance problem in AI systems — sandboxing, provenance, attribution,
+budgets, revocation — is something the ambient-authority world must bolt on,
+and the capability world receives as a **corollary**. No new mechanisms; the
+OS already had them waiting.
+
 ## Sequencing
 
 The angles span runner, corpus, training, stim, provenance, network, agent —
@@ -510,7 +593,7 @@ on it.
    independent of 4–5).
 8. **Provenance labels + the paper**; **agent harness** last.
 
-Corpus generation (Opus/API budget, days of wall-clock) dominates the project;
+Corpus generation (pipeline engineering + overnight runs, days of wall-clock) dominates the project;
 training is the cheap part — the inverse of TinyStories, where data was free and
 the 9 hours was the cost.
 
