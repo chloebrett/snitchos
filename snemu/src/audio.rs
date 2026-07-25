@@ -40,6 +40,26 @@ pub fn encode_wav_mono_16(sample_rate_hz: u32, samples: &[i16]) -> Vec<u8> {
     out
 }
 
+/// Recover the effective sample rate (Hz) from the guest-clock `timestamps` of
+/// consecutive `WDATA` writes, given the guest `timer_hz`. `N` writes span `N-1`
+/// intervals over `last - first` ticks, so the rate is
+/// `(N-1) * timer_hz / (last - first)`, rounded to nearest.
+///
+/// `None` if there are fewer than two writes, or if the span is zero/non-increasing
+/// — no rate is defined. Because it measures the *actual* inter-write timing, it
+/// reflects any drift from Increment 5's integer pacing rather than the nominal
+/// rate — which is the point: snemu renders what the guest really produced.
+pub fn reconstruct_sample_rate(timestamps: &[u64], timer_hz: u64) -> Option<u32> {
+    let first = *timestamps.first()?;
+    let last = *timestamps.last()?;
+    let intervals = (timestamps.len() as u64).checked_sub(1)?;
+    let span = last.checked_sub(first)?;
+    if intervals == 0 || span == 0 {
+        return None;
+    }
+    Some(((intervals * timer_hz + span / 2) / span) as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +121,39 @@ mod tests {
         let wav = encode_wav_mono_16(8000, &[-1, 256]);
         assert_eq!(u32_at(&wav, 40), 2 * 2, "data size = 2 samples * 2 bytes");
         assert_eq!(&wav[44..48], &[0xFF, 0xFF, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn evenly_paced_writes_recover_the_source_rate() {
+        // 500-tick spacing at the VF2's 4 MHz timebase → 8 kHz (Increment 5).
+        let ts = [0, 500, 1000, 1500];
+        assert_eq!(reconstruct_sample_rate(&ts, 4_000_000), Some(8000));
+    }
+
+    #[test]
+    fn two_writes_are_enough() {
+        // One 250-tick interval at 4 MHz → 16 kHz.
+        assert_eq!(reconstruct_sample_rate(&[0, 250], 4_000_000), Some(16_000));
+    }
+
+    #[test]
+    fn fewer_than_two_writes_has_no_rate() {
+        assert!(reconstruct_sample_rate(&[], 4_000_000).is_none());
+        assert!(reconstruct_sample_rate(&[42], 4_000_000).is_none());
+    }
+
+    #[test]
+    fn zero_or_non_increasing_span_has_no_rate() {
+        assert!(reconstruct_sample_rate(&[10, 10], 4_000_000).is_none(), "zero span");
+        assert!(reconstruct_sample_rate(&[10, 5], 4_000_000).is_none(), "goes backwards");
+    }
+
+    #[test]
+    fn rate_rounds_to_nearest() {
+        // 1 interval of 3 ticks at 20 Hz → 6.67 → 7.
+        assert_eq!(reconstruct_sample_rate(&[0, 3], 20), Some(7));
+        // 1 interval of 4 ticks at 10 Hz → exactly 2.5 → rounds up to 3 (the
+        // half-way case that pins the `+ span/2` rounding term specifically).
+        assert_eq!(reconstruct_sample_rate(&[0, 4], 10), Some(3));
     }
 }

@@ -58,6 +58,14 @@ struct Cli {
     /// (`--ramfb` wasn't passed, or the guest hasn't presented yet).
     #[arg(long)]
     dump_framebuffer: Option<PathBuf>,
+    /// After running, write the captured PWMDAC audio to this path as a mono
+    /// 16-bit WAV (open with any audio player). No-op with a clear stderr
+    /// message if the guest never wrote a sample.
+    #[arg(long)]
+    audio_out: Option<PathBuf>,
+    /// Sample rate (Hz) for `--audio-out`'s WAV. The beep workload paces at 8 kHz.
+    #[arg(long, default_value_t = 8000)]
+    audio_rate: u32,
     /// Open a live window showing the captured `etc/ramfb` framebuffer,
     /// updated periodically as the guest runs. Black until the guest's
     /// first present. Close the window or press Esc to stop the run.
@@ -181,7 +189,23 @@ fn main() -> ExitCode {
     if let Some(path) = &cli.dump_framebuffer {
         dump_framebuffer(&machine, path);
     }
+    if let Some(path) = &cli.audio_out {
+        dump_audio(&machine, cli.audio_rate, path);
+    }
     ExitCode::SUCCESS
+}
+
+/// Write the machine's captured PWMDAC audio to `path` as a mono 16-bit WAV, or
+/// report on stderr why there's nothing to write — never a silent empty file.
+fn dump_audio(machine: &snemu::machine::Machine, rate: u32, path: &std::path::Path) {
+    let Some(wav) = machine.dump_audio_wav(rate) else {
+        eprintln!("snemu: --audio-out requested but the guest wrote no PWMDAC samples");
+        return;
+    };
+    match std::fs::write(path, &wav) {
+        Ok(()) => eprintln!("snemu: wrote {} ({} bytes)", path.display(), wav.len()),
+        Err(e) => eprintln!("snemu: failed to write {}: {e}", path.display()),
+    }
 }
 
 /// Redraw `window` with the machine's captured framebuffer, or an all-black

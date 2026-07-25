@@ -3,12 +3,12 @@
 **Status:** 🚧 **IN PROGRESS — the whole pure/host-testable layer is done.** Increments
 1, 2, 4, 5 (`kernel-devices/src/pwmdac.rs`) and 3 (`kernel-devices/src/syscrg.rs`)
 shipped — 33 host tests, clippy-clean, mutation-verified (the only survivors are the
-documented `| → ^` disjoint-field equivalents). Next up is **9a** — the snemu PWMDAC
-device model + a pure (kernel-independent) WAV decoder — which now sequences **before**
-the kernel glue: snemu halts on unmapped MMIO writes, so its PWMDAC region is a
-prerequisite for anything audio to run under snemu, and it's the harness that makes the
-kernel work observable off-hardware. Full order: **9a → 6 → 7 → 8 → 9b**. Also
-outstanding: **4b** (sine LUT via `build.rs`). TDD-decomposition of Tier 0 from
+documented `| → ^` disjoint-field equivalents). **9a is also done** — the snemu PWMDAC
+device model + a pure WAV decoder + the `--audio-out` flag (the emulator harness that
+lets audio run/render off-hardware). **Next up is Increment 6** — the kernel MMIO glue
+(address-driven per fork (a)), now observable under snemu. Remaining order:
+**6 → 7 → 8 → 9b**; also outstanding: **4b** (sine LUT via `build.rs`). TDD-decomposition
+of Tier 0 from
 [../docs/vf2-audio-design.md](../docs/vf2-audio-design.md). Goal: **the board emits a
 fixed-frequency tone from the 3.5mm jack**, fed by CPU PIO writes to the JH7110
 PWMDAC — no DMA engine. Everything here is deferrable-free (gated on nothing
@@ -215,7 +215,17 @@ breaks, without anyone needing to plug in headphones.
 
 ---
 
-## Increment 9a — snemu PWMDAC device model + WAV decoder — ⚠️ SEQUENCED BEFORE 6
+## Increment 9a — snemu PWMDAC device model + WAV decoder — ✅ DONE
+
+Shipped: `snemu/src/audio.rs` (`encode_wav_mono_16` — 13/13 mutants; `reconstruct_sample_rate`
+— 27/27), `snemu/src/pwmdac.rs` (the `Pwmdac` bus device: captures `WDATA`/`CTRL`,
+SYSCRG reads return all-ones so the guest's reset `PollUntilSet` completes, folded into
+`hash_state`; 23/24 mutants, 1 documented equivalent), wired into all 8 `Bus`
+accessors, plus `Machine::dump_audio_wav` + a `--audio-out <path> [--audio-rate]` flag
+(mirrors `--dump-framebuffer`). Full snemu suite green (228). Deferred refinement:
+timestamp plumbing (`instret` into the write path) to drive `reconstruct_sample_rate`
+for drift-accurate WAV — unnecessary for the 8 kHz beep (exact integer pacing), and the
+function is built and waiting.
 
 **Why it moves first (not last).** Two grounded findings flipped this from Tier-2
 polish to a Tier-0 prerequisite:
@@ -257,8 +267,9 @@ board-gated.
   - ✅ **WAV container encoding done** — `snemu/src/audio.rs::encode_wav_mono_16`
     (canonical 44-byte mono/16-bit header + LE samples), 7 host tests, 13/13 mutants
     caught, clippy-clean.
-  - ⏳ **Rate reconstruction** — timestamped `WDATA` writes → effective sample rate
-    (pure, next sub-cycle).
+  - ✅ **Rate reconstruction done** — `reconstruct_sample_rate` (N writes → effective
+    Hz from guest-clock span, round-to-nearest, rejects <2 writes / zero span), 5 host
+    tests, 27/27 mutants caught. Reflects real pacing drift, not the nominal rate.
 
 QEMU can't do any of this (audio subsystem but no PWMDAC device model; virt map has
 nothing at `0x100b0000`). Design home: `docs/snemu-design.md`.

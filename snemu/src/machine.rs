@@ -460,6 +460,16 @@ impl Machine {
         Some(crate::framebuffer::render_ppm(&pixels, width, height, stride))
     }
 
+    /// Render the captured PWMDAC sample stream as a mono 16-bit WAV at
+    /// `sample_rate_hz` — `None` if the guest never wrote a sample. The
+    /// `--audio-out` flag's whole implementation; the WAV encoding itself is the
+    /// pure, host-tested `audio::encode_wav_mono_16`.
+    #[must_use]
+    pub fn dump_audio_wav(&self, sample_rate_hz: u32) -> Option<Vec<u8>> {
+        let samples = self.bus.pwmdac_samples();
+        (!samples.is_empty()).then(|| crate::audio::encode_wav_mono_16(sample_rate_hz, samples))
+    }
+
     /// Render the captured `etc/ramfb` framebuffer as a `minifb` pixel
     /// buffer (one `u32` per pixel, `0x00RRGGBB`) plus its `(width, height)`
     /// — `None` if nothing was ever captured. The `--window` CLI flag's

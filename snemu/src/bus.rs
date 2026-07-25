@@ -4,6 +4,7 @@
 
 use crate::fwcfg::{Fwcfg, RamfbCfg};
 use crate::mem::{BusError, Memory};
+use crate::pwmdac::Pwmdac;
 use crate::uart::Uart;
 use crate::virtio::Virtio;
 
@@ -40,6 +41,7 @@ pub(crate) struct Bus {
     uart: Uart,
     virtio: Virtio,
     fwcfg: Fwcfg,
+    pwmdac: Pwmdac,
 }
 
 impl Bus {
@@ -49,6 +51,7 @@ impl Bus {
             uart: Uart::new(),
             virtio: Virtio::new(),
             fwcfg: Fwcfg::new(),
+            pwmdac: Pwmdac::new(),
         }
     }
 
@@ -83,6 +86,11 @@ impl Bus {
         self.virtio.tx_output()
     }
 
+    /// The captured PWMDAC sample stream, for `--audio-out` to render as WAV.
+    pub(crate) fn pwmdac_samples(&self) -> &[i16] {
+        self.pwmdac.samples()
+    }
+
     /// Fold the bus's guest-visible state into `h` for the machine state hash: guest
     /// RAM, plus the UART and virtio output streams (the emitted telemetry/console —
     /// device progress that a determinism divergence would show up in), plus the
@@ -94,6 +102,7 @@ impl Bus {
         self.uart.output().hash(h);
         self.virtio.tx_output().hash(h);
         self.fwcfg.ramfb_cfg().hash(h);
+        self.pwmdac.hash_state(h);
     }
 
     /// RAM, for the page-table walker (PTEs always live in physical memory).
@@ -102,6 +111,9 @@ impl Bus {
     }
 
     pub(crate) fn read_u8(&self, addr: u64) -> Result<u8, BusError> {
+        if Pwmdac::in_window(addr) {
+            return Ok(Pwmdac::read(addr) as u8);
+        }
         if addr == FWCFG_REG_DATA {
             return Ok(self.fwcfg.read_data_byte());
         }
@@ -115,6 +127,9 @@ impl Bus {
     }
 
     pub(crate) fn read_u16(&self, addr: u64) -> Result<u16, BusError> {
+        if Pwmdac::in_window(addr) {
+            return Ok(Pwmdac::read(addr) as u16);
+        }
         if in_fwcfg(addr) {
             return Ok(0);
         }
@@ -125,6 +140,9 @@ impl Bus {
     }
 
     pub(crate) fn read_u32(&self, addr: u64) -> Result<u32, BusError> {
+        if Pwmdac::in_window(addr) {
+            return Ok(Pwmdac::read(addr) as u32);
+        }
         if in_fwcfg(addr) {
             return Ok(0);
         }
@@ -138,6 +156,9 @@ impl Bus {
     }
 
     pub(crate) fn read_u64(&self, addr: u64) -> Result<u64, BusError> {
+        if Pwmdac::in_window(addr) {
+            return Ok(Pwmdac::read(addr));
+        }
         if in_fwcfg(addr) {
             return Ok(0);
         }
@@ -148,6 +169,10 @@ impl Bus {
     }
 
     pub(crate) fn write_u8(&mut self, addr: u64, value: u8) -> Result<(), BusError> {
+        if Pwmdac::in_window(addr) {
+            self.pwmdac.write(addr, u32::from(value));
+            return Ok(());
+        }
         if in_fwcfg(addr) {
             return Ok(());
         }
@@ -161,6 +186,10 @@ impl Bus {
     }
 
     pub(crate) fn write_u16(&mut self, addr: u64, value: u16) -> Result<(), BusError> {
+        if Pwmdac::in_window(addr) {
+            self.pwmdac.write(addr, u32::from(value));
+            return Ok(());
+        }
         if addr == FWCFG_REG_SELECTOR {
             // fw_cfg registers are big-endian on the wire regardless of guest
             // endianness; `value` is the raw wire value the guest's store
@@ -182,6 +211,10 @@ impl Bus {
     }
 
     pub(crate) fn write_u32(&mut self, addr: u64, value: u32) -> Result<(), BusError> {
+        if Pwmdac::in_window(addr) {
+            self.pwmdac.write(addr, value);
+            return Ok(());
+        }
         if addr == FWCFG_REG_DMA_ADDR_HIGH {
             self.fwcfg.write_dma_addr_high(u32::from_be(value));
             return Ok(());
@@ -218,6 +251,10 @@ impl Bus {
     }
 
     pub(crate) fn write_u64(&mut self, addr: u64, value: u64) -> Result<(), BusError> {
+        if Pwmdac::in_window(addr) {
+            self.pwmdac.write(addr, value as u32);
+            return Ok(());
+        }
         if in_fwcfg(addr) {
             return Ok(());
         }
@@ -265,6 +302,26 @@ mod tests {
         bus.write_u16(FWCFG_BASE + 0x08, 0x0019u16.to_be()).unwrap();
         let count_bytes: [u8; 4] = std::array::from_fn(|_| bus.read_u8(FWCFG_BASE).unwrap());
         assert_eq!(u32::from_be_bytes(count_bytes), 0, "no file until opted in");
+    }
+
+    /// A `WDATA` store routed through the bus is captured as a sample and does not
+    /// bus-fault (the pre-9a behaviour was a halt on the unmapped write).
+    #[test]
+    fn pwmdac_wdata_write_through_the_bus_is_captured() {
+        let mut bus = Bus::new(Memory::new(0x1000));
+        bus.write_u32(0x100b_0000, 42).unwrap();
+        bus.write_u32(0x100b_0000, 0xFFFF).unwrap(); // -1 as i16
+        assert_eq!(bus.pwmdac_samples(), &[42, -1]);
+    }
+
+    /// The guest's reset-status poll must complete under snemu: a SYSCRG status
+    /// read reports the reset released (all-ones), and a SYSCRG write is swallowed
+    /// rather than faulting.
+    #[test]
+    fn syscrg_status_reads_released_and_writes_do_not_fault() {
+        let mut bus = Bus::new(Memory::new(0x1000));
+        bus.write_u32(0x1302_0000 + 0x304, 0).unwrap(); // deassert reset — swallowed
+        assert_eq!(bus.read_u32(0x1302_0000 + 0x314).unwrap(), 0xFFFF_FFFF);
     }
 
     /// The stub is scoped to its page — RAM immediately below and above still works.
