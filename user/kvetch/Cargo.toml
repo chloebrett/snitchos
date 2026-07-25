@@ -1,0 +1,26 @@
+[package]
+name = "kvetch"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Bare-metal U-mode completion server + a fixed-request client. Like `fs`, it
+# only builds for riscv64gc-unknown-none-elf and is built via `kernel/build.rs`.
+#
+# The model behind the endpoint is `babble` — rung 0 of the generative ladder,
+# a sampler with no weights — which is exactly the point: the whole serving
+# path (protocol, serve loop, telemetry, itest) is proved before any model
+# exists. See docs/babble-design.md.
+[dependencies]
+snitchos-user = { path = "../runtime" }
+snitchos-std = { path = "../std" }
+babble = { path = "../../babble" }
+kvetch-proto = { path = "../../kvetch-proto" }
+
+[lints]
+workspace = true
+
+[lib]
+# No doctests in this crate; doctest=false keeps `cargo test` off the slow
+# rustdoc doc-test compile (the gate runs nextest). Add to any new lib crate.
+doctest = false

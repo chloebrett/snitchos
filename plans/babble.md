@@ -136,6 +136,38 @@ one passes every gate we have. Full reasoning in
 exception (it has no vocabulary) and may emit them behind a flag, off for
 corpus generation.
 
+**Increment 12 — pure core done and green; target glue written but not yet
+boot-verified.** Split at the usual boundary:
+
+- **`babble::serve::handle_request(buf, prefix_len, max_tokens, seed)`** — pure,
+  host-tested, works on a byte slice rather than the wire's `(ptr, cap)`, so the
+  one unsafe pointer conversion stays in the bin. Validates that the prefix is
+  UTF-8 rather than trusting a cross-process claim. 6 tests.
+- **Truncation never splits a token.** When the client's buffer cannot hold the
+  whole completion it is cut at a *token boundary*, never mid-token — a
+  half-written token can be a **different** token from the one the oracle
+  approved (` without` cut to ` with` becomes a keyword). The first version of
+  this test only checked "the buffer got shorter and is still viable", which
+  naive byte truncation passes; it was replaced by "the served token stream is a
+  genuine prefix of the untruncated one" at *every* buffer size, and verified by
+  temporarily reverting the implementation — it caught `Ident("t")` where
+  `Ident("task")` was approved.
+- **`user/kvetch`** — server (`RECV`) + fixed-request client (`SEND`), mirroring
+  `user/fs`: `receive_with_reply` → decode → `copy_from_caller` → sample →
+  `copy_to_caller` → `reply`. Per-request span, `requests_total`,
+  `bytes_emitted_total`, and **the seed on the wire** so a recorded completion is
+  replayable. `BOOT_SEED = 0` until the `seed=` bootarg (increment 14) lands.
+- Registered in `kernel/build.rs`, `trap/user.rs` (statics, specs, `LAYOUTS`),
+  `main.rs` dispatch, and `WorkloadKind::KvetchBabble` (kebab-derived, one
+  host test).
+
+**Verification status:** `babble`/`kvetch-proto`/`kernel-boot` green (102 tests);
+`cargo build -p kvetch --target riscv64gc-unknown-none-elf` clean;
+clippy clean. The **snemu boot of `workload=kvetch-babble` is not yet run** —
+it collided with concurrent in-flight `glitch` edits (a `run_ipc` signature
+change mid-flight). Run `cargo xtask snemu boot --workload kvetch-babble
+--frames` once that settles; that is the gate before increment 13's scenario.
+
 **Post material** (noted 2026-07-25): the raw babbled output — legal-but-
 meaningless Stitch, every identifier `x` and every number `0` because the
 oracle answers in *classes* and the sampler appends representative lexemes —
