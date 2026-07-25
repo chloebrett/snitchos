@@ -126,6 +126,45 @@ pub fn parse_corpus(text: &str) -> Vec<String> {
     text.split(SEPARATOR).map(str::to_string).collect()
 }
 
+/// How many token classes are legal at each decision a decoder would face while
+/// producing `src`: once before every token, and once at the end for the choice
+/// to stop.
+///
+/// This is the quantity that sizes both grammar-derived decode savings — forced
+/// tokens (`n == 1`, no forward pass at all) and babble-drafting (small `n`,
+/// acceptance bounded below by `1/n`). See
+/// [`docs/speculative-decoding-design.md`](../../docs/speculative-decoding-design.md).
+///
+/// Measured at *token boundaries*, because that is where a decoder chooses. A
+/// byte-offset scan would answer a different and less useful question.
+pub fn legal_counts(src: &str) -> Vec<usize> {
+    let boundaries = stitch::lexer::lex(src)
+        .tokens
+        .into_iter()
+        .map(|token| token.span.start);
+
+    core::iter::once(0)
+        .chain(boundaries.skip(1))
+        .chain(core::iter::once(src.len()))
+        .map(|pos| stitch::oracle::valid_next(src, pos).to_vec().len())
+        .collect()
+}
+
+/// Bucket `legal_counts` across many programs into a histogram indexed by set
+/// size, so `histogram[1]` is how many decisions had exactly one legal class.
+pub fn legal_histogram(programs: &[String]) -> Vec<usize> {
+    programs
+        .iter()
+        .flat_map(|program| legal_counts(program))
+        .fold(Vec::new(), |mut histogram, n| {
+            if histogram.len() <= n {
+                histogram.resize(n + 1, 0);
+            }
+            histogram[n] += 1;
+            histogram
+        })
+}
+
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -180,9 +219,8 @@ mod tests {
         // counts a rare lexeme as frequent and then blames the vocab for it.
         let emitted: Vec<&str> = joined.split_whitespace().collect();
 
-        // As the lexeme actually occurs: babble renders space-separated, so a
-        // lexeme's natural unit carries its trailing space — the mirror image
-        // of GPT-2's leading-space tokens.
+        // As the lexeme actually occurs: pre-tokenization keeps one leading
+        // space with its word, so a lexeme's natural unit is `" let"`.
         let occurrences =
             |lexeme: &str| emitted.iter().filter(|&&token| token == lexeme).count();
 
@@ -192,7 +230,7 @@ mod tests {
             .collect();
         let split: Vec<&String> = frequent
             .iter()
-            .filter(|lexeme| vocab.encode(&format!("{lexeme} ")).len() > 1)
+            .filter(|lexeme| vocab.encode(&format!(" {lexeme}")).len() > 1)
             .collect();
 
         assert!(!frequent.is_empty(), "no lexeme cleared the threshold");
@@ -200,6 +238,29 @@ mod tests {
             split.is_empty(),
             "frequent but not one token: {split:?} (of {} frequent lexemes)",
             frequent.len()
+        );
+    }
+
+    #[test]
+    fn legal_counts_measure_every_decision_a_decoder_would_face() {
+        let src = "let x = 1";
+        let token_count = stitch::lexer::lex(src).tokens.len();
+
+        let counts = legal_counts(src);
+
+        assert_eq!(
+            counts.len(),
+            token_count + 1,
+            "one decision per token, plus the choice to stop"
+        );
+        assert!(
+            counts.iter().all(|&n| n >= 1),
+            "a legal program cannot reach a position with no legal continuation: {counts:?}"
+        );
+        assert_eq!(
+            counts[0],
+            stitch::oracle::valid_next("", 0).to_vec().len(),
+            "the first decision is the set of program openers"
         );
     }
 

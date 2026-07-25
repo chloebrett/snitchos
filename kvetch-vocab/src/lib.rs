@@ -95,25 +95,24 @@ impl Vocab {
     /// The cost is that a merge may straddle a token boundary, which the
     /// keyword-atomicity test is there to bound.
     ///
-    /// Cost is `O(target_size × corpus_len)` — the counts are rebuilt from
-    /// scratch each round rather than updated incrementally. Fine for an
-    /// offline, run-rarely step; the incremental version is the known fix if a
-    /// real corpus makes it hurt.
+    /// Cost is `O(target_size × distinct_chunks)`, **not** `× corpus_len`:
+    /// [`pre_tokenize`] splits the corpus into chunks that repeat heavily, so
+    /// training counts over each distinct chunk once, weighted by how often it
+    /// occurs. A corpus of millions of bytes collapses to thousands of distinct
+    /// chunks, which is what makes a full-size vocab minutes rather than hours.
     pub fn train(corpus: &[&str], target_size: usize) -> Self {
-        let byte_level = Self::byte_level();
-        let mut sequences: Vec<Vec<TokenId>> =
-            corpus.iter().map(|text| byte_level.encode(text)).collect();
+        let mut chunks = chunk_frequencies(corpus);
         let mut merges: Vec<(TokenId, TokenId)> = Vec::new();
 
         while BYTE_TOKENS + merges.len() < target_size {
-            let Some(pair) = most_frequent_pair(&sequences) else {
+            let Some(pair) = most_frequent_pair(&chunks) else {
                 break;
             };
             let merged_id = (BYTE_TOKENS + merges.len()) as TokenId;
 
-            sequences = sequences
-                .iter()
-                .map(|ids| collapse_pair(ids, pair, merged_id))
+            chunks = chunks
+                .into_iter()
+                .map(|(ids, count)| (collapse_pair(&ids, pair, merged_id), count))
                 .collect();
             merges.push(pair);
         }
@@ -134,12 +133,24 @@ impl Vocab {
 
     /// Encode text into token ids. Total: any input encodes.
     ///
-    /// Merges are replayed in learning order, each pass collapsing every
-    /// adjacent occurrence of that pair. Applying them in order (rather than
-    /// repeatedly taking the highest-priority pair present) is what makes the
-    /// encoding a pure function of the merge list.
+    /// Each [`pre_tokenize`] chunk is encoded independently and the results
+    /// concatenated, so no token ever spans a word boundary — the encoder has
+    /// to honour the same split the trainer did, or it would produce tokens the
+    /// vocab was never trained to expect.
+    ///
+    /// Within a chunk, merges are replayed in learning order, each pass
+    /// collapsing every adjacent occurrence of that pair. Applying them in
+    /// order (rather than repeatedly taking the highest-priority pair present)
+    /// is what makes the encoding a pure function of the merge list.
     pub fn encode(&self, text: &str) -> Vec<TokenId> {
-        let initial = text.as_bytes().iter().map(|&b| TokenId::from(b)).collect();
+        pre_tokenize(text)
+            .into_iter()
+            .flat_map(|chunk| self.encode_chunk(chunk))
+            .collect()
+    }
+
+    fn encode_chunk(&self, chunk: &str) -> Vec<TokenId> {
+        let initial = chunk.as_bytes().iter().map(|&b| TokenId::from(b)).collect();
 
         self.merges
             .iter()
@@ -165,18 +176,90 @@ impl Vocab {
     }
 }
 
-/// The most frequent adjacent pair across `sequences`, or `None` when no
-/// sequence has two tokens left to pair.
+/// Split text into the chunks a merge may not cross.
+///
+/// A chunk is a run of non-whitespace with **at most one leading space**, or a
+/// run of whitespace. GPT-2's rule, and it earns its keep twice here:
+///
+/// - *Quality.* Without it, BPE trained on a small corpus spends its tail on
+///   whole phrases (`"prod frame < "`), memorizing the corpus instead of
+///   learning its lexicon.
+/// - *Cost.* Chunks repeat enormously, so training can count over **distinct
+///   chunks weighted by frequency** rather than over the corpus. That is the
+///   difference between a vocab that trains in seconds and one that takes hours.
+///
+/// Keeping the single leading space means a lexeme and its separator are one
+/// token (`" let"`), which is where the token budget wants them; keeping
+/// whitespace runs whole means indentation can become a token, which is what
+/// code corpora need and word-splitting alone would forbid.
+pub fn pre_tokenize(text: &str) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let mut rest = text;
+
+    while !rest.is_empty() {
+        let space_len = rest
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(rest.len());
+
+        if space_len == rest.len() {
+            chunks.push(rest);
+            break;
+        }
+
+        // Split a run of whitespace so exactly one separator stays with the
+        // word: `"\n    let"` becomes `"\n   "` then `" let"`.
+        if space_len > 1 {
+            let (run, tail) = rest.split_at(space_len - 1);
+            chunks.push(run);
+            rest = tail;
+        }
+
+        let separator = rest
+            .chars()
+            .next()
+            .filter(|c| c.is_whitespace())
+            .map_or(0, char::len_utf8);
+        let word_end = rest[separator..]
+            .find(char::is_whitespace)
+            .map_or(rest.len(), |offset| separator + offset);
+
+        chunks.push(&rest[..word_end]);
+        rest = &rest[word_end..];
+    }
+
+    chunks
+}
+
+/// The corpus as distinct byte-level chunks paired with how often each occurs.
+///
+/// This is the aggregation that makes training tractable: identical chunks —
+/// and in code they repeat relentlessly — are counted once and carry their
+/// weight, instead of being walked again for every merge.
+fn chunk_frequencies(corpus: &[&str]) -> Vec<(Vec<TokenId>, usize)> {
+    let byte_level = Vocab::byte_level();
+    let mut frequencies: BTreeMap<Vec<TokenId>, usize> = BTreeMap::new();
+
+    for text in corpus {
+        for chunk in pre_tokenize(text) {
+            *frequencies.entry(byte_level.encode(chunk)).or_insert(0) += 1;
+        }
+    }
+
+    frequencies.into_iter().collect()
+}
+
+/// The most frequent adjacent pair across the weighted `chunks`, or `None` when
+/// no chunk has two tokens left to pair.
 ///
 /// Ties resolve to the smallest pair: counts are accumulated in a `BTreeMap`
 /// (sorted) and the scan keeps the first strict maximum, so the choice never
 /// depends on iteration order.
-fn most_frequent_pair(sequences: &[Vec<TokenId>]) -> Option<(TokenId, TokenId)> {
+fn most_frequent_pair(chunks: &[(Vec<TokenId>, usize)]) -> Option<(TokenId, TokenId)> {
     let mut counts: BTreeMap<(TokenId, TokenId), usize> = BTreeMap::new();
 
-    for ids in sequences {
+    for (ids, weight) in chunks {
         for window in ids.windows(2) {
-            *counts.entry((window[0], window[1])).or_insert(0) += 1;
+            *counts.entry((window[0], window[1])).or_insert(0) += weight;
         }
     }
 
@@ -246,6 +329,41 @@ mod tests {
 
     fn encoded_len(vocab: &Vocab, corpus: &[&str]) -> usize {
         corpus.iter().map(|text| vocab.encode(text).len()).sum()
+    }
+
+    #[test]
+    fn training_stops_when_the_corpus_lexicon_is_exhausted() {
+        let corpus = ["let x", "let x", "let x"];
+
+        let vocab = Vocab::train(&corpus, BYTE_TOKENS + 1000);
+
+        assert!(
+            vocab.len() < BYTE_TOKENS + 1000,
+            "a tiny lexicon cannot fill a large vocab"
+        );
+        assert_eq!(
+            vocab.encode("let x").len(),
+            2,
+            "once every chunk is one token there is nothing left to merge"
+        );
+    }
+
+    #[test]
+    fn no_learned_token_spans_a_word_boundary() {
+        let corpus = ["let x = 1", "let y = 2", "let x = 3", "let y = 1"];
+
+        let vocab = Vocab::train(&corpus, BYTE_TOKENS + 32);
+
+        let spanning: Vec<String> = (BYTE_TOKENS..vocab.len())
+            .map(|id| vocab.decode(&[id as TokenId]))
+            .filter(|bytes| pre_tokenize(&String::from_utf8_lossy(bytes)).len() > 1)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .collect();
+
+        assert!(
+            spanning.is_empty(),
+            "tokens spanning a word boundary memorize phrases: {spanning:?}"
+        );
     }
 
     #[test]

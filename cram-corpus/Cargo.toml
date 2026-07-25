@@ -3,6 +3,8 @@ name = "cram-corpus"
 version = "0.0.1"
 edition = "2024"
 publish = false
+# Generating a corpus is the common case; the analysis bins are opt-in by name.
+default-run = "cram-corpus"
 
 [dependencies]
 # The Tier-0 sampler. Corpus generation is a *policy over* babble, not a second
@@ -12,10 +14,10 @@ babble = { path = "../babble" }
 # real Stitch-shaped text, so the "is this vocab any good" properties live here
 # rather than in `kvetch-vocab`, which stays dependency-free.
 kvetch-vocab = { path = "../kvetch-vocab" }
-
-[dev-dependencies]
-# Representative lexemes per token class — the drift-proof source for "what
-# must a Stitch tokenizer be able to say in one token".
+# The continuation oracle. Used directly for the legal-set histogram (which
+# sizes forced-token skipping and babble-drafting — see
+# docs/speculative-decoding-design.md), and in tests as the drift-proof source
+# of "what must a Stitch tokenizer be able to say in one token".
 stitch = { path = "../stitch" }
 
 [lints]
