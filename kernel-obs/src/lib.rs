@@ -23,4 +23,5 @@ pub mod panic_log;
 pub mod preinit;
 pub mod sink;
 pub mod span;
+pub mod uart_sink;
 pub mod udp_sink;
