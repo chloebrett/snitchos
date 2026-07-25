@@ -120,6 +120,34 @@ fn configure(sample_rate_hz: u32) -> Option<u64> {
     sample_interval_ticks(sample_rate_hz, timebase)
 }
 
+/// Cached per-sample pacing interval, set by the first [`ensure_up`] (which also
+/// runs the one-time bring-up). `Once` so the DAC is brought up exactly once no
+/// matter how many `AudioWrite`s land.
+static PACING_TICKS: crate::sync::Once<u64> = crate::sync::Once::new();
+
+/// Bring the DAC up on first call and return the per-sample pacing interval. The
+/// bring-up (clocks/reset/pins/`CTRL`) is idempotent but only run once.
+fn ensure_up() -> u64 {
+    *PACING_TICKS.call_once(|| {
+        bringup();
+        configure(BEEP_RATE_HZ).unwrap_or(0)
+    })
+}
+
+/// Play signed-PCM samples (little-endian bytes) to the DAC, paced at the
+/// configured rate — the kernel half of the `AudioWrite` syscall, doing the MMIO
+/// the `glitch` server can't. Brings the DAC up on first call. Trailing odd byte
+/// (if any) is ignored; samples are 16-bit.
+pub fn play_samples(bytes: &[u8]) {
+    let interval = ensure_up();
+    for chunk in bytes.chunks_exact(2) {
+        write_sample(i16::from_le_bytes([chunk[0], chunk[1]]));
+        SAMPLES_EMITTED.inc();
+        let next = crate::trap::now_ticks() + interval;
+        while crate::trap::now_ticks() < next {}
+    }
+}
+
 /// Write one signed-PCM sample to `WDATA` (low 16 bits carry the sample).
 fn write_sample(sample: i16) {
     let addr = PWMDAC_VA + WDATA_OFFSET;

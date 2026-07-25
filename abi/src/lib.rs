@@ -256,6 +256,13 @@ pub enum Syscall {
     /// handle). Lets a supervisor put a child on another core — the prerequisite for a
     /// cross-hart `Kill` (v2b). An out-of-range hart refuses.
     SpawnOn = 31,
+    /// Emit audio samples to the DAC through an `Object::AudioSink` capability
+    /// (`a0` = `Handle`, `a1` = ptr to `[i16]` samples in the caller's memory,
+    /// `a2` = sample count). Gated on the AUDIO right; the kernel writes the samples
+    /// to the PWMDAC, paced at the configured rate. Held only by the `glitch` audio
+    /// server — the DAC is one scarce resource mediated by one holder. Refuses
+    /// (`SyscallRefused`) a non-holder.
+    AudioWrite = 32,
 }
 
 impl Syscall {
@@ -297,6 +304,7 @@ impl Syscall {
             29 => Some(Self::ClockFreq),
             30 => Some(Self::Kill),
             31 => Some(Self::SpawnOn),
+            32 => Some(Self::AudioWrite),
             _ => None,
         }
     }
@@ -623,7 +631,8 @@ mod tests {
         assert_eq!(Syscall::from_usize(29), Some(Syscall::ClockFreq));
         assert_eq!(Syscall::from_usize(30), Some(Syscall::Kill));
         assert_eq!(Syscall::from_usize(31), Some(Syscall::SpawnOn));
-        assert_eq!(Syscall::from_usize(32), None);
+        assert_eq!(Syscall::from_usize(32), Some(Syscall::AudioWrite));
+        assert_eq!(Syscall::from_usize(33), None);
     }
 
     #[test]

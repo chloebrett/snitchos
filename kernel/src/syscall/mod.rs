@@ -8,6 +8,7 @@
 //! helpers live here (accessible to the child modules); the trap/IRQ entry
 //! machinery (`TrapFrame` layout, timer, CSR setup) lives in [`crate::trap`].
 
+mod audio;
 mod cap;
 mod clock;
 mod console;
@@ -65,6 +66,7 @@ pub(crate) fn handle_user_ecall(frame: &mut TrapFrame) {
         Some(Syscall::Signal) => notify::handle_signal(frame),
         Some(Syscall::WaitNotify) => notify::handle_wait_notify(frame),
         Some(Syscall::EndpointCreate) => ipc::handle_endpoint_create(frame),
+        Some(Syscall::AudioWrite) => audio::handle_audio_write(frame),
         None => {
             let n = frame.a7 as u8;
             refuse(frame, n, protocol::RefusalReason::UnknownSyscall);
