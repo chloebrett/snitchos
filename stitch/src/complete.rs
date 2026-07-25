@@ -12,7 +12,43 @@
 #[allow(clippy::wildcard_imports, reason = "alloc prelude for no_std")]
 use crate::prelude::*;
 
-use crate::oracle::{Entry, TokenClass, has_one_spelling, representative, valid_next_in};
+use crate::oracle::{Entry, TokenClass, describe, has_one_spelling, representative, valid_next_in};
+
+/// How many choices a menu names before summarising. An expression position
+/// admits about seventeen openers and a bare identifier two dozen operators;
+/// listing them all at a prompt buries the useful ones. Same policy, and the
+/// same shape of ellipsis, as `ParseError::render` — a person reading either is
+/// after the *first* few plausible things, not an inventory.
+pub const MENU_LIMIT: usize = 8;
+
+/// Render `choices` for a human: descriptions, not variant names, capped at
+/// [`MENU_LIMIT`] with a count of what was hidden.
+///
+/// Capping lives here rather than in [`complete`] because it is presentation
+/// policy: a ranker (a model, later) wants the whole legal set, and only the
+/// display is bounded.
+///
+/// **Renders whatever order it is handed.** Ranking is deliberately not done
+/// here: this is the grammar layer, which knows what is *legal* and has no
+/// opinion about what is *likely*. A ranker is therefore a pure pre-sort of
+/// `choices`, with no change to this function.
+///
+/// The oracle's discriminant order is what callers pass today, and it is
+/// measurably good for expression *openers* (literals and names first) and
+/// measurably bad for *continuations*: after a bare name the useful
+/// suggestions are `(` and `.`, but the cap fills with `and`, `or` and
+/// arithmetic first. That gap is the concrete case for ranking — the first
+/// place a model would earn its place here, and a measurable target rather
+/// than a hunch.
+#[must_use]
+pub fn menu(choices: &[TokenClass]) -> String {
+    let shown: Vec<String> = choices.iter().copied().take(MENU_LIMIT).map(describe).collect();
+    let mut rendered = shown.join(", ");
+    if choices.len() > MENU_LIMIT {
+        rendered.push_str(&format!(", … ({} total)", choices.len()));
+    }
+    rendered
+}
 
 /// What the completer can offer at a position.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +140,44 @@ mod tests {
         };
         assert!(choices.contains(&TokenClass::LParen), "the declaration reading");
         assert!(choices.contains(&TokenClass::Plus), "the expression reading");
+    }
+
+    #[test]
+    fn a_short_menu_lists_every_choice() {
+        // After `use M.{ a` only `}` or `,` can follow.
+        let Completion::Choices(choices) = complete("use M.{ a", 9) else {
+            panic!("two continuations, so nothing is forced");
+        };
+        assert_eq!(super::menu(&choices), "`}`, `,`");
+    }
+
+    #[test]
+    fn a_long_menu_is_capped_and_says_how_much_it_hid() {
+        // An expression position admits ~17 openers; listing them all at a
+        // prompt is a wall of text, so the menu shows a handful and counts the
+        // rest — the same policy as `ParseError::render`.
+        let Completion::Choices(choices) = complete("let x = ", 8) else {
+            panic!("an expression position has many openers");
+        };
+        let menu = super::menu(&choices);
+        assert!(menu.ends_with(&format!("… ({} total)", choices.len())), "got: {menu}");
+        assert_eq!(menu.matches(british_comma()).count(), super::MENU_LIMIT);
+    }
+
+    /// The separator `menu` joins with — spelled once so the count above cannot
+    /// drift from the renderer.
+    fn british_comma() -> &'static str {
+        ", "
+    }
+
+    #[test]
+    fn the_menu_describes_classes_rather_than_naming_them() {
+        // A prompt should say "a name", not "Ident" — the menu is read by a
+        // person, and `describe` is the same rendering diagnostics use.
+        let Completion::Choices(choices) = complete("use", 3) else {
+            panic!("an identifier is the only legal class");
+        };
+        assert_eq!(super::menu(&choices), "a name");
     }
 
     #[test]

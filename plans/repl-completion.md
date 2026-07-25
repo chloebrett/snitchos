@@ -25,7 +25,33 @@ Two findings worth carrying into increment 2:
    and tested: drop the Expr half and `greet` wrongly becomes `Forced("(")`;
    drop the Program half and `use M.` wrongly becomes `None`.
 
-**This is why increment 2 needs the cap**: a 24-item menu is noise at a prompt. The first place a human meets the
+**This is why increment 2 needs the cap**: a 24-item menu is noise at a prompt.
+
+**Increment 2 done** — `complete::menu` renders choices via `oracle::describe`,
+capped at `MENU_LIMIT` (8) with `… (N total)`, the same policy as
+`ParseError::render`. 12 tests green. **Capping lives in rendering, not in
+`complete`**: a ranker wants the whole legal set, only the display is bounded.
+
+**The finding that matters, and it is a measurable one.** The grammar-only
+menu is good at expression *openers* and bad at *continuations*:
+
+```
+"let x = "  an integer, a float, a boolean, a string, a name, a placeholder, `match`, `handle`, … (17 total)
+"greet"     `and`, `or`, `+`, `-`, `*`, `/`, `%`, `==`, … (24 total)
+```
+
+The first is genuinely useful. In the second, the suggestions a person actually
+wants after a bare name — `(` to call it, `.` for a field — are **buried past
+the cap** behind `and`/`or`/arithmetic, because discriminant order happens to
+front-load literals (good for openers) and keyword operators (bad for
+continuations).
+
+So ranking is not a nice-to-have: it is where the model first earns its place,
+with a concrete target. `menu` renders whatever order it is handed, so a ranker
+is a **pure pre-sort** — no change to the renderer, and the grammar layer keeps
+having no opinion about likelihood. Note the ranker cannot live in `stitch`
+(babble depends on stitch, not the reverse); it belongs at the REPL/kvetch
+layer, which is increments 4–5. The first place a human meets the
 completion stack. Realizes the division the design has been building toward:
 **the grammar supplies what is *legal*, the model supplies what is *likely*** —
 so the menu is never wrong, only variably helpful.
