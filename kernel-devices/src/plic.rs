@@ -52,9 +52,59 @@ pub const fn claim_offset(context: u32) -> usize {
     0x20_0004 + context as usize * 0x1000
 }
 
+/// MMIO access to a PLIC, abstracted so the register *sequence* logic here stays
+/// host-tested without a live device — the same seam `FwCfgTransport` gives the
+/// fw_cfg handshake. The kernel supplies the volatile-register impl.
+pub trait PlicTransport {
+    fn read_reg(&self, offset: usize) -> u32;
+    fn write_reg(&mut self, offset: usize, value: u32);
+}
+
+/// Route interrupt `source` to `context`: give it a nonzero priority, drop the
+/// context threshold to 0 (accept any nonzero-priority source), and set the
+/// source's enable bit — **preserving the other bits in that enable word**, since
+/// a context may enable several sources.
+pub fn enable_source<T: PlicTransport>(plic: &mut T, context: u32, source: u32) {
+    plic.write_reg(priority_offset(source), 1);
+    plic.write_reg(threshold_offset(context), 0);
+    let word = enable_offset(context, source);
+    let bit = 1u32 << enable_bit(source);
+    let current = plic.read_reg(word);
+    plic.write_reg(word, current | bit);
+}
+
+/// Claim the highest-priority interrupt pending for `context` (reads the
+/// claim register). `None` when nothing is pending — the PLIC returns id 0, the
+/// "no interrupt" sentinel — so the caller can loop until it drains.
+pub fn claim<T: PlicTransport>(plic: &T, context: u32) -> Option<u32> {
+    let id = plic.read_reg(claim_offset(context));
+    (id != 0).then_some(id)
+}
+
+/// Signal completion of `source` for `context` (writes the id back to the
+/// claim/complete register), re-arming the source for the next interrupt.
+pub fn complete<T: PlicTransport>(plic: &mut T, context: u32, source: u32) {
+    plic.write_reg(claim_offset(context), source);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::collections::BTreeMap;
+
+    /// Mock PLIC: a sparse register map. Reads default to 0 (a freshly-reset PLIC).
+    #[derive(Default)]
+    struct MockPlic {
+        regs: BTreeMap<usize, u32>,
+    }
+    impl PlicTransport for MockPlic {
+        fn read_reg(&self, offset: usize) -> u32 {
+            self.regs.get(&offset).copied().unwrap_or(0)
+        }
+        fn write_reg(&mut self, offset: usize, value: u32) {
+            self.regs.insert(offset, value);
+        }
+    }
 
     // Concrete exemplar: QEMU `virt` routes UART0 (ns16550a) to PLIC source 10,
     // and hart 0's S-mode is context 1. These are the numbers the kernel will use,
@@ -91,5 +141,54 @@ mod tests {
         // Context 0 (typically hart 0 M-mode) is the block base.
         assert_eq!(threshold_offset(0), 0x20_0000);
         assert_eq!(claim_offset(0), 0x20_0004);
+    }
+
+    #[test]
+    fn enable_source_sets_priority_threshold_and_the_enable_bit() {
+        let mut plic = MockPlic::default();
+        enable_source(&mut plic, HART0_S_CONTEXT, UART0_SOURCE);
+        assert_ne!(plic.read_reg(priority_offset(UART0_SOURCE)), 0, "source needs a nonzero priority");
+        assert_eq!(plic.read_reg(threshold_offset(HART0_S_CONTEXT)), 0, "threshold 0 accepts it");
+        let word = plic.read_reg(enable_offset(HART0_S_CONTEXT, UART0_SOURCE));
+        assert_eq!(word & (1 << enable_bit(UART0_SOURCE)), 1 << enable_bit(UART0_SOURCE));
+    }
+
+    #[test]
+    fn enable_source_preserves_other_bits_in_the_enable_word() {
+        // Two sources share the same enable word; enabling the second must not
+        // clear the first — a read-modify-write, not a blind store.
+        let mut plic = MockPlic::default();
+        enable_source(&mut plic, HART0_S_CONTEXT, 5);
+        enable_source(&mut plic, HART0_S_CONTEXT, UART0_SOURCE);
+        let word = plic.read_reg(enable_offset(HART0_S_CONTEXT, UART0_SOURCE));
+        assert_eq!(word & (1 << 5), 1 << 5, "the earlier source stayed enabled");
+        assert_eq!(word & (1 << UART0_SOURCE), 1 << UART0_SOURCE);
+    }
+
+    #[test]
+    fn enabling_a_source_twice_leaves_it_enabled() {
+        // The enable is a read-modify-write with OR — idempotent. A stray XOR would
+        // toggle the bit back OFF on the second call (re-enabling an already-enabled
+        // source is a normal thing to do during re-init).
+        let mut plic = MockPlic::default();
+        enable_source(&mut plic, HART0_S_CONTEXT, UART0_SOURCE);
+        enable_source(&mut plic, HART0_S_CONTEXT, UART0_SOURCE);
+        let word = plic.read_reg(enable_offset(HART0_S_CONTEXT, UART0_SOURCE));
+        assert_eq!(word & (1 << enable_bit(UART0_SOURCE)), 1 << enable_bit(UART0_SOURCE), "still enabled");
+    }
+
+    #[test]
+    fn claim_returns_the_pending_source_or_none() {
+        let mut plic = MockPlic::default();
+        assert_eq!(claim(&plic, HART0_S_CONTEXT), None, "id 0 = nothing pending");
+        plic.write_reg(claim_offset(HART0_S_CONTEXT), UART0_SOURCE);
+        assert_eq!(claim(&plic, HART0_S_CONTEXT), Some(UART0_SOURCE));
+    }
+
+    #[test]
+    fn complete_writes_the_source_back_to_the_claim_register() {
+        let mut plic = MockPlic::default();
+        complete(&mut plic, HART0_S_CONTEXT, UART0_SOURCE);
+        assert_eq!(plic.read_reg(claim_offset(HART0_S_CONTEXT)), UART0_SOURCE);
     }
 }

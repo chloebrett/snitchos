@@ -11,6 +11,9 @@ publish = false
 [dependencies]
 protocol = { path = "../protocol" }
 postcard = { version = "1", default-features = false }
+# The packet layer under the UDP telemetry sink (`udp_sink`). Dependency-free
+# and pure, so this edge adds no transitive weight. See kernel-net.
+kernel-net = { path = "../kernel-net" }
 
 [lints]
 workspace = true

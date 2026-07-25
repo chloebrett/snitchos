@@ -276,12 +276,18 @@ Increments:
 1. **PLIC register offsets** (`kernel-devices::plic`, pure) — priority / enable /
    threshold / claim-complete byte offsets, pinned to spec values. — ✅ DONE
    (4 tests, 32/32 mutants caught).
-2. **PLIC MMIO adapter** (`kernel/`) — volatile reads/writes; init (priorities,
-   enable UART source for hart-0 S-context, threshold 0); claim→handle→complete.
-3. **External-interrupt trap dispatch** — add `SupervisorExternalInterrupt` →
-   PLIC claim → device handler → complete; enable `SEIE`.
-4. **UART IER + ISR** — enable THRE (and keep RX); the ISR drains the TX ring to
-   the FIFO and fills the RX ring, replacing/reinforcing the timer-polled RX.
+2. **PLIC driver logic** (`kernel-devices::plic`, over a `PlicTransport` trait,
+   host-tested against a mock — the `FwCfgTransport` pattern): `enable_source`
+   (read-modify-write, idempotent), `claim` (None on sentinel 0), `complete`. —
+   ✅ DONE (9 tests, 41/41 mutants caught — a `|`→`^` miss killed by a
+   double-enable idempotency test).
+3. **Kernel MMIO glue** (`kernel/`) — the `PlicTransport` impl over volatile
+   registers + the DTB-derived (base, source, context); the untested adapter, like
+   `fwcfg`'s `Mmio`. Only exercised once wired into the trap handler, so it lands
+   with 4.
+4. **External-interrupt trap dispatch + UART IER/ISR** — `SupervisorExternalInterrupt`
+   → PLIC claim → UART ISR (drain TX ring to FIFO, fill RX ring) → complete;
+   enable `SEIE` + the UART's THRE/RX interrupt enables.
 5. **Wire the TX ring** into the emit path (push = non-blocking drop-and-count);
    the THRE ISR drains at wire speed.
 6. **QEMU itest** — interrupt-driven TX works end to end (snemu can't cover it).

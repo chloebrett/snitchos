@@ -905,6 +905,7 @@ version = "0.0.1"
 name = "kernel-obs"
 version = "0.0.1"
 dependencies = [
+ "kernel-net",
  "postcard",
  "protocol",
 ]
