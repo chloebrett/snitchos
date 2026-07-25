@@ -9,5 +9,6 @@ Err(
             start: 23,
             end: 24,
         },
+        entry: Expr,
     },
 )

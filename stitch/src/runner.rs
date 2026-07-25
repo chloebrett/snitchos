@@ -638,6 +638,13 @@ mod tests {
     }
 
     #[test]
+    fn a_repl_expression_error_names_the_legal_continuations() {
+        let out = Repl::new().eval_line("1 +");
+        assert!(out.contains("parse error"), "{out}");
+        assert!(out.contains("expected one of:"), "names continuations: {out}");
+    }
+
+    #[test]
     fn a_repl_load_error_carries_its_location_and_legal_continuations() {
         let out = Repl::new().load_source("greet(name age) = 1");
         assert!(out.contains('^'), "carries a caret: {out}");

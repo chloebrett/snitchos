@@ -353,6 +353,40 @@ pub fn describe(class: TokenClass) -> String {
     }
 }
 
+/// Which grammar the prefix is being read as. The same text has different
+/// continuations under each: after `1 +` an operand is legal as an
+/// *expression*, while as a *program* the prefix is already dead (an integer
+/// cannot open a declaration).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Entry {
+    /// A sequence of top-level declarations — a `.st` file, and what babble
+    /// and stim generate.
+    #[default]
+    Program,
+    /// A single expression — a REPL line, an interpolation body.
+    Expr,
+}
+
+impl Entry {
+    /// Does `src` parse whole under this entry?
+    fn accepts(self, src: &str) -> bool {
+        match self {
+            Self::Program => crate::parser::parse_program(src).is_ok(),
+            Self::Expr => crate::parser::parse(src).is_ok(),
+        }
+    }
+
+    /// Where does `src` stop parsing under this entry? `None` if it parses
+    /// whole.
+    fn stops_at(self, src: &str) -> Option<usize> {
+        let err = match self {
+            Self::Program => crate::parser::parse_program(src).err(),
+            Self::Expr => crate::parser::parse(src).err(),
+        };
+        err.map(|e| e.span.start)
+    }
+}
+
 /// Could a token of `class` legally follow `prefix`?
 ///
 /// Asked of the parser itself rather than of a second copy of the grammar:
@@ -361,22 +395,22 @@ pub fn describe(class: TokenClass) -> String {
 /// beyond it (or none at all) means the parser consumed it and wanted more —
 /// viable, which is precisely "this prefix is still extendable". Because the
 /// real parser answers, the oracle cannot drift from the grammar.
-fn admits(prefix: &str, class: TokenClass) -> bool {
+fn admits(prefix: &str, class: TokenClass, entry: Entry) -> bool {
     let Some(lexeme) = representative(class) else {
-        // `Eof`: the program may end here iff the prefix is already whole.
-        return crate::parser::parse_program(prefix).is_ok();
+        // `Eof`: input may end here iff the prefix is already whole.
+        return entry.accepts(prefix);
     };
     // The separating space is what makes this a question about *tokens* rather
     // than characters — without it `le` + `t` would munch into `let`.
     let probe = format!("{prefix} {lexeme}");
     let appended_at = prefix.len() + 1;
-    match crate::parser::parse_program(&probe) {
-        Ok(_) => true,
-        Err(err) => err.span.start > appended_at,
+    match entry.stops_at(&probe) {
+        None => true,
+        Some(stop) => stop > appended_at,
     }
 }
 
-/// Which token classes may legally follow `src[..pos]`?
+/// Which token classes may legally follow `src[..pos]`, read as a program?
 ///
 /// A function of the prefix alone: everything at or after `pos` is invisible
 /// (v0 contract — no consumer needs suffix-awareness yet).
@@ -385,12 +419,18 @@ fn admits(prefix: &str, class: TokenClass) -> bool {
 /// prefix is *dead* — no token can rescue it.
 #[must_use]
 pub fn valid_next(src: &str, pos: usize) -> TokenSet {
+    valid_next_in(src, pos, Entry::Program)
+}
+
+/// [`valid_next`], for a chosen [`Entry`] grammar.
+#[must_use]
+pub fn valid_next_in(src: &str, pos: usize, entry: Entry) -> TokenSet {
     let Some(prefix) = src.get(..pos) else {
         return TokenSet::EMPTY;
     };
     ALL.iter()
         .copied()
-        .filter(|class| admits(prefix, *class))
+        .filter(|class| admits(prefix, *class, entry))
         .fold(TokenSet::EMPTY, TokenSet::with)
 }
 

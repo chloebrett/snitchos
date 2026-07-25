@@ -12,6 +12,7 @@ use crate::ast::{
     Pattern, Stmt, StrSegment, Type, UnOp, Variant,
 };
 use crate::lexer::{LexError, Span, StrPart, Token, TokenKind, lex};
+use crate::oracle::Entry;
 
 /// A parse error: a human-readable message plus the source [`Span`] it points
 /// at (defaulted to the start of input for errors not yet span-attributed).
@@ -19,12 +20,22 @@ use crate::lexer::{LexError, Span, StrPart, Token, TokenKind, lex};
 pub struct ParseError {
     pub message: String,
     pub span: Span,
+    /// Which grammar was being parsed — recorded so [`Self::expected`] asks
+    /// the oracle the same question the parser was answering. Set at the entry
+    /// points; the internal constructors default to [`Entry::Program`].
+    pub entry: Entry,
 }
 
 impl ParseError {
     /// A parse error anchored at `span`.
     fn at(message: impl Into<String>, span: Span) -> Self {
-        Self { message: message.into(), span }
+        Self { message: message.into(), span, entry: Entry::Program }
+    }
+
+    /// This error, tagged with the entry point that produced it.
+    fn in_entry(mut self, entry: Entry) -> Self {
+        self.entry = entry;
+        self
     }
 
     /// The token classes that would have been legal where this error occurred.
@@ -39,7 +50,7 @@ impl ParseError {
     /// returned error, never from inside a parse.
     #[must_use]
     pub fn expected(&self, src: &str) -> crate::oracle::TokenSet {
-        crate::oracle::valid_next(src, self.span.start)
+        crate::oracle::valid_next_in(src, self.span.start, self.entry)
     }
 
     /// Render as `line:col: message`, followed by the offending source line and
@@ -53,10 +64,25 @@ impl ParseError {
         if legal.is_empty() {
             return caret;
         }
-        let names: Vec<String> = legal.into_iter().map(crate::oracle::describe).collect();
-        format!("{caret}\nexpected one of: {}", names.join(", "))
+        let total = legal.len();
+        let names: Vec<String> = legal
+            .into_iter()
+            .take(SHOWN_CONTINUATIONS)
+            .map(crate::oracle::describe)
+            .collect();
+        let more = if total > SHOWN_CONTINUATIONS {
+            format!(", … ({total} total)")
+        } else {
+            String::new()
+        };
+        format!("{caret}\nexpected one of: {}{more}", names.join(", "))
     }
 }
+
+/// How many legal continuations a diagnostic lists before summarising. Mid-
+/// expression the legal set runs to two dozen classes (every infix and postfix
+/// operator); listing them all is a wall of text.
+const SHOWN_CONTINUATIONS: usize = 8;
 
 /// Stitch has no statement terminators; `;` is lexed but never grammatical.
 const NO_SEMICOLONS: &str = "Stitch has no semicolons — remove the `;` (statements are separated by whitespace)";
@@ -66,6 +92,12 @@ const NO_SEMICOLONS: &str = "Stitch has no semicolons — remove the `;` (statem
 /// # Errors
 /// Returns `Err` on an unexpected/missing token or trailing input.
 pub fn parse(src: &str) -> Result<Expr, ParseError> {
+    parse_expr_entry(src).map_err(|err| err.in_entry(Entry::Expr))
+}
+
+/// [`parse`] without the entry tagging — split out so every failure path is
+/// tagged in one place.
+fn parse_expr_entry(src: &str) -> Result<Expr, ParseError> {
     let mut parser = Parser::new(src);
     if let Some(err) = parser.lex_error() {
         return Err(err);
@@ -1403,7 +1435,11 @@ mod tests {
     fn a_parse_error_renders_line_col_and_a_caret() {
         // The stray `2` starts at byte 2 → line 1, column 3.
         let err = parse("1 2").expect_err("a trailing token is a parse error");
-        assert_eq!(err.render("1 2"), "1:3: expected end of input\n1 2\n  ^");
+        assert_eq!(
+            err.render("1 2"),
+            "1:3: expected end of input\n1 2\n  ^\n\
+             expected one of: `and`, `or`, `+`, `-`, `*`, `/`, `%`, `==`, … (24 total)"
+        );
     }
 
     #[test]
@@ -1421,7 +1457,11 @@ mod tests {
         // The stray `2` is the first char of line 2 → 2:1, and the rendered
         // source line is line 2 alone. Exercises the preceding-newline path.
         let err = parse("1\n2 3").expect_err("a trailing token is a parse error");
-        assert_eq!(err.render("1\n2 3"), "2:1: expected end of input\n2 3\n^");
+        assert_eq!(
+            err.render("1\n2 3"),
+            "2:1: expected end of input\n2 3\n^\n\
+             expected one of: `and`, `or`, `+`, `-`, `*`, `/`, `%`, `==`, … (24 total)"
+        );
     }
 
     #[test]
@@ -2228,6 +2268,26 @@ mod tests {
         let mut want = vec![TokenClass::Colon, TokenClass::Comma, TokenClass::RParen];
         want.sort_unstable();
         assert_eq!(err.expected(src).to_vec(), want);
+    }
+
+    #[test]
+    fn an_expression_entry_error_reports_expression_continuations() {
+        use crate::oracle::TokenClass;
+        // `1 +` is a *program*-dead prefix (an integer cannot open a
+        // declaration), so answering it against program entry would report
+        // "nothing is legal" — wrong, and unhelpful at a REPL prompt. The
+        // error records which entry produced it.
+        let src = "1 +";
+        let err = parse(src).expect_err("a trailing operator has no operand");
+        let legal = err.expected(src);
+        assert!(!legal.is_empty(), "an operand is legal after `+`");
+        for class in [TokenClass::Int, TokenClass::Ident, TokenClass::LParen] {
+            assert!(legal.contains(class), "{class:?} can be an operand");
+        }
+        assert!(
+            !legal.contains(TokenClass::Comma),
+            "`,` cannot be an operand"
+        );
     }
 
     #[test]
