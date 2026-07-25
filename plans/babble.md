@@ -1,6 +1,8 @@
 # babble — the weight-free model (TDD plan)
 
-**Status:** 🚧 **IN PROGRESS — increments 1, 2, 4, 4b, 5, 6, 7, 8 done** (3 deferred: it is
+**Status:** 🚧 **IN PROGRESS — increments 1, 2, 4, 4b, 5, 6, 7, 8, 10 done**
+(9 deferred to when the corpus pipeline starts — its summary format should be
+built against the real validator/metrics harness, not guessed at; 3 deferred: it is
 the char-level view, which stim needs and babble does not — babble appends
 whole space-separated tokens, so maximal munch cannot bite it). The oracle
 (`stitch/src/oracle.rs`) answers `valid_next` across the grammar; 9 tests
@@ -88,6 +90,26 @@ binding), so emitting `Point` where `x` was approved would step outside what
 was checked. Capitalised names need the deferred payload-aware `TokenSet`
 refinement. A test pins that no wordlist entry lexes as a keyword — such an
 entry would silently substitute a different token for the approved one.
+
+**Increment 10 (protocol v0) done — as `kvetch-proto`, not `babble/src/proto.rs`,
+and not postcard.** House convention (`fs-proto`, `glitch-proto`) encodes IPC
+request/reply into `[u64; MSG_WORDS]` and versions by **append-only tags**, not
+a version field; the plan's postcard guess was mine and conflicted with it.
+Separate crate because the increment-13 client needs the message types but must
+not link the sampler (and through it the whole Stitch parser) — the same reason
+`fs-proto` is not part of `user/fs`. Design points:
+
+- **One buffer, in and out.** `Complete { max_tokens, ptr, cap, prefix_len }`:
+  the client's buffer holds the prefix on entry and receives the completion,
+  read-style. Two separate buffers would not fit the four-word message.
+- **No seed field, deliberately.** Entropy derives from the server's per-boot
+  root plus a request counter, so a client cannot silently diverge snemu from
+  hardware; itests pin the boot seed instead
+  ([../docs/randomness-and-entropy.md](../docs/randomness-and-entropy.md)).
+- `max_tokens` because a completion is a *fragment* — see the completeness
+  correction above.
+- Malformed input is a `WireError` to reply to, never a panic: unknown tag,
+  prefix-exceeds-buffer, buffer-too-large, unknown status. 6 tests.
 
 **Post material** (noted 2026-07-25): the raw babbled output — legal-but-
 meaningless Stitch, every identifier `x` and every number `0` because the

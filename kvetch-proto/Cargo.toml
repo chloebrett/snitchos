@@ -1,0 +1,16 @@
+[package]
+name = "kvetch-proto"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+snitchos-abi = { path = "../abi" }
+
+[lints]
+workspace = true
+
+[lib]
+# No doctests in this crate; doctest=false keeps `cargo test` off the slow
+# rustdoc doc-test compile (the gate runs nextest). Add to any new lib crate.
+doctest = false

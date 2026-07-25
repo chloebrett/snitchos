@@ -257,7 +257,7 @@ possible board increment: one observable bit. Verify the USB-serial adapter's
 ceiling first (original CP2102 ≈ 1 Mbaud). Document the new rate next to
 `setenv bootargs` in the boot procedure.*
 
-### Step 8: TX ring with THRE-interrupt drain — full PLIC path (decided)
+### Step 8: TX ring with THRE-interrupt drain — full PLIC path — ✅ DONE
 
 **Decision (2026-07):** the drain is the **full PLIC + THRE-interrupt** subsystem
 (user call), not a blocking or cooperative interim — the "right" long-term design.
@@ -312,11 +312,20 @@ Increments:
      kernel's PLIC register writes hit it) and confirms no spurious assertion.
    - The UART ISR body (drain TX ring) is the `// Next increment` stub.
 5. **Wire the TX ring** into the emit path (push = non-blocking drop-and-count);
-   the THRE ISR drains at wire speed.
-6. **QEMU itest** — interrupt-driven TX works end to end (snemu can't cover it).
+   the THRE ISR drains at wire speed. — **Commit C: ✅ DONE.** `TX_RING`
+   (`Mutex<ConsoleRing<512>>`), `tx_push` (interrupt-masked push + IER-enable),
+   `drain_tx` (THRE-drain, disables IER when empty), UART `thre`/`write_thr`/
+   `set_tx_interrupt`, `without_interrupts`, `IER`/`IER_ETBEI`.
+6. **itest — interrupt-driven TX end to end.** — **Commit C: ✅ DONE, and in the
+   *deterministic* snemu gate, not QEMU-only.** The `tx-irq-delivers` scenario
+   asserts the `tx-irq-ok` boot marker reaches the wire through PLIC → `SEIE` →
+   THRE → `drain_tx`. Regression found + fixed along the way: the PLIC's two MMIO
+   megapages (`0x0c00_0000`, `0x0c20_0000`) must be inserted into `MmioRegions` in
+   `kmain` — the higher-half MMIO mid table only leaf-maps inserted pages, so
+   `plic::init` was faulting on an unmapped VA.
 
-**Done when**: gate green (host + QEMU-engine itest), board boots with the ring +
-interrupt drain in the telemetry path.
+**Done when**: gate green (host + snemu itest incl. `tx-irq-delivers` + `--scramble`),
+board boots with the ring + interrupt drain in the telemetry path. ✅
 
 ### Step 9: `UartFrameSink`
 

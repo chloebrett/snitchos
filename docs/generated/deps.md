@@ -45,7 +45,10 @@ graph LR
         magnitude["magnitude"]
     end
     babble["babble"]
+    glitch_proto["glitch-proto"]
     kernel_net["kernel-net"]
+    kvetch_proto["kvetch-proto"]
+    synth["synth"]
     xtask_cmds["xtask-cmds"]
     xtask_itest["xtask-itest"]
     xtask_qemu["xtask-qemu"]
@@ -63,6 +66,7 @@ graph LR
     fs --> snitchos_user
     fs_proto --> fs_core
     fs_proto --> snitchos_abi
+    glitch_proto --> snitchos_abi
     hello --> fs_proto
     hello --> hitch
     hello --> snitchos_std
@@ -81,11 +85,13 @@ graph LR
     kernel --> kernel_proc
     kernel --> protocol
     kernel --> snitchos_abi
+    kernel --> synth
     kernel_obs --> kernel_net
     kernel_obs --> protocol
     kernel_proc --> kernel_mem
     kernel_proc --> protocol
     kernel_proc --> snitchos_abi
+    kvetch_proto --> snitchos_abi
     protocol --> snitchos_abi
     ramfs --> fs_core
     snemu --> protocol

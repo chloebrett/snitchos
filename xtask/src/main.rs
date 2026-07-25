@@ -409,6 +409,7 @@ mod mutant_plan_tests {
         let mut got: Vec<&str> = plan.iter().map(|(name, _)| *name).collect();
         got.sort_unstable();
         assert_eq!(got, vec![
+            "babble",
             "collector",
             "hitch",
             "hitch-pod",
@@ -418,6 +419,7 @@ mod mutant_plan_tests {
             "kernel-net",
             "kernel-obs",
             "kernel-proc",
+            "kvetch-proto",
             "protocol",
             "stitch",
         ]);
