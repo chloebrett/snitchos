@@ -41,6 +41,7 @@ fn main() -> std::io::Result<()> {
     std::fs::write(
         &manifest_path,
         Manifest {
+            format_version: cram_corpus::FORMAT_VERSION,
             seed,
             program_count: count,
             probe_digest: Manifest::probe_digest(),

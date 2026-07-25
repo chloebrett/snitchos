@@ -74,6 +74,67 @@ that is the finding, and it is the bottom point of the ladder's scaling curve �
 which the ladder doc explicitly wants measured rather than assumed. "drivel" names
 the rung, not a parameter count we are married to.
 
+## Findings so far (measured, 2026-07-25)
+
+**babble generation costs ~2 ms/program.** 500 programs/s in release, ~24
+lexemes and ~83 bytes each. 30K programs = 2.48 MB / 722K lexemes / 60 s. Cheap
+enough that corpus *size* is not a constraint on the probe — but not free, hence
+the on-disk cache (`corpora/`, gitignored, with a `.manifest` recording seed,
+count, and a fingerprint of babble's own output so a corpus that predates a
+babble change is detected rather than silently trained on).
+
+**Merges attach the *trailing* space** — `"let "`, `"prod "`, `"-> "` — because
+babble renders space-separated. This is GPT-2's leading-space behaviour
+mirrored, and it means lexeme atomicity must be measured *as the lexeme occurs*,
+not in isolation. It also sharpens the probe-vocab warning below: the vocab is
+shaped by babble's **renderer**, which emits neither newlines nor indentation, so
+it is doubly wrong for real Stitch.
+
+**`> =` is not a rendering bug — the space is load-bearing.** babble sampled the
+`Gt` class then the `Assign` class, two separate legal choices. Written adjacent,
+maximal munch would re-lex `>=` as a single `Ge` token, so the space is what
+preserves the identity of the tokens the oracle actually approved. (Proof in the
+same corpus: a walk that samples `Ge` emits `>= 3`.) The call-paren gotcha
+wearing a different hat.
+
+A **minimal-whitespace renderer** is the real fix for density and is cheap: for
+each adjacent pair, try joining, re-lex, and keep the space only when the token
+stream changes. Worth doing before Tier-0 output enters the *real* corpus, since
+padded operators are a distribution the model would otherwise learn.
+
+**Layout is absent because Stitch's grammar is whitespace-insensitive** — babble
+has no reason to emit newlines or indentation, so it doesn't. The right fix is
+not to teach babble layout but to **pretty-print**: babble output parses by
+construction, so parse it and render the AST. That needs an AST→source printer,
+which `stitch` does not have today (`render.rs` prints `Value` tables for the
+REPL, not source). It is independently valuable — a Stitch formatter is
+stim-shaped work — and it is *not* on the probe's path: `unconstrained-parse%`
+does not care about layout, and a flat token stream is arguably the purer test of
+grammar acquisition. Deferred, deliberately, and required before Tier-0 output
+joins the real corpus.
+
+**BPE memorizes phrases when the vocab is large relative to the corpus.** At 768
+merges over 400 programs the late merges are whole phrases (`"prod frame < "`,
+`"let buffer = "`). Vocab size has to be sized against corpus size, and the
+symptom is legible in the token list. **The freeze step must print the longest
+learned tokens**: a vocab whose tail is `"prod frame < "` is overfit to its
+corpus, and that is visible in ten lines of output but invisible in any summary
+statistic. Cheap, and it is the kind of check that only gets built if it is
+written down.
+
+**Atomicity is frequency-relative, not absolute.** A lexeme the corpus barely
+contains (`match`, `with`, `if`, `;` at 400 programs) is a *coverage* fact about
+babble, not a tokenizer defect. The test asserts only over lexemes above an
+occurrence threshold, which states the real contract and stops the assertion
+drifting with corpus size. That babble under-produces those classes is itself a
+production-coverage signal, and belongs in increment 2's report.
+
+**The trainer's `O(target_size × corpus_len)` is now a measured blocker, not a
+hypothetical.** 256 merges over 17 KB takes 3.8 s; the probe's 4K vocab over
+2.48 MB extrapolates to **~2 hours**. The incremental-count rewrite has to land
+before the probe vocab is trained, so it moves from "known fix if it hurts" to
+the next piece of work.
+
 ## Order of execution (not the increment numbering)
 
 Increments are units of work; this is the order they land in. **The
