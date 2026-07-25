@@ -170,6 +170,54 @@ ladder must never be more than one push-button run behind.
   Heterogeneous *single-model* training across Metal+ROCm: interesting
   research, terrible dependency — not doing it.
 
+## Deferred: editor-command / next-edit prediction
+
+Flagged for later, decided in outline (2026-07-25). The idea: predictions in
+stim's *command* vocabulary (`ciw` → replacement), not just inserted text —
+next-edit prediction à la Zed's Zeta / Cursor Tab, but with the editor's
+modal grammar in the loop. Findings from the design discussion:
+
+- **The decided shape, if/when built: one semantic-edit intelligence,
+  commands as a compilation target.** A mode-factored split (action model in
+  normal mode, content model in insert) was considered and **rejected**: the
+  interesting edits fuse location+transformation+content ("replace this word
+  with that one"), so choosing the action requires ~all of the content
+  understanding — the mode boundary is a UI joint, not a cognitive joint, and
+  the split duplicates intelligence. Instead: ballad-scale trunk,
+  mixture-trained (FIM + next-edit objectives; insert-completion is the edit
+  whose region is empty), predicting compact semantic edits conditioned on
+  edit history. A deterministic **golf-solver compiles predicted edits into
+  stim command sequences** for preview/provenance/tutoring ("model proposed
+  `ciw`") — always canonical-idiomatic, never model-fumbled. Training data is
+  native (before, after) pairs (git history, the stim edit log, synthetic
+  Stitch mutations) — no labeling pass needed; the solver's inference-time
+  rendering job replaces its training-time labeling job.
+- **The FSM routes queries, not models**: normal mode asks for edit
+  predictions, insert mode for FIM ghost text — same trunk, two prompts.
+- **No vocab reservation now.** Cheap push-button retraining is precisely
+  what makes early vocab insurance unnecessary — a future edit-format needs
+  only delimiter tokens, and bumping the vocab version costs one overnight
+  fleet retrain. (The freeze law's content is coordination *across* the
+  ladder at any moment, not permanence over time.)
+- **First iteration is the insert/FIM model only** — conceptually simplest
+  and ~90% of the pipeline; edit-prediction lands later as an additive
+  mixture objective + one retrain.
+- **The golf-solver is its own stim milestone first — a deterministic vim
+  coach, zero ML.** Pure function `(before, after, actual_commands) →
+  verdict`: segment the edit log into bursts (by thinking pauses), compare
+  actual against better sequences, teach via end-of-session digest or replay
+  mode (another fold over the edit log; never mid-flight). Cost model is
+  *idiomatic* cost, not golf cost — start as a peephole rule library
+  ("`xxxxx` → `5x`/`daw`", each rule carrying its explanation), graduate to
+  bounded search later. Every (actual, optimal) pair it computes is exactly
+  the future edit-model's supervision — the solver starts as coach, matures
+  into labeler, ends as compiler: three roles, one component, each funding
+  the next.
+- The fully unified *session-stream* model (predict the next event the editor
+  receives, commands and content interleaved) remains the research-flavored
+  horizon; nobody in the Zeta/NEP lineage models the editing *process*, and
+  we own editor, grammar, and model in one stack.
+
 ## Open questions
 
 - Vocab design: BPE size (~2–4K), identifier word-piece treatment — decided
