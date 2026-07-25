@@ -13,6 +13,12 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Cached training corpora (cram-corpus). Derived artifacts: reproducible from
+# the seed recorded in the sibling .manifest, and large enough that committing
+# them would dwarf the source. What's pinned is the generator and its seed —
+# same rule as docs/generated/, opposite conclusion about storing the bytes.
+/corpora
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

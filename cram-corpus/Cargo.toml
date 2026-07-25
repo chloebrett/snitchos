@@ -1,0 +1,25 @@
+[package]
+name = "cram-corpus"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The Tier-0 sampler. Corpus generation is a *policy over* babble, not a second
+# generator — the same reason babble is a policy over `stitch::oracle`.
+babble = { path = "../babble" }
+# The tokenizer trained on these corpora. `cram-corpus` is where a vocab meets
+# real Stitch-shaped text, so the "is this vocab any good" properties live here
+# rather than in `kvetch-vocab`, which stays dependency-free.
+kvetch-vocab = { path = "../kvetch-vocab" }
+
+[dev-dependencies]
+# Representative lexemes per token class — the drift-proof source for "what
+# must a Stitch tokenizer be able to say in one token".
+stitch = { path = "../stitch" }
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false

@@ -1,0 +1,107 @@
+//! Generate (or reuse) a cached babble corpus.
+//!
+//! `cargo run --release -p cram-corpus -- <seed> <count> [dir]`
+//!
+//! Thin I/O glue over the library: decide, generate, write. The decision —
+//! "is this cache still good?" — lives in [`cram_corpus::Manifest`] where it is
+//! host-tested; this file only moves bytes.
+//!
+//! **Run it in release.** Generation re-parses the prefix on every emitted
+//! token, so a debug build is roughly an order of magnitude slower for no
+//! reason.
+
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use cram_corpus::{Manifest, generate, parse_corpus, render_corpus};
+
+const DEFAULT_DIR: &str = "corpora";
+
+fn main() -> std::io::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let Some((seed, count)) = parse_args(&args) else {
+        eprintln!("usage: cram-corpus <seed> <count> [dir]");
+        std::process::exit(2);
+    };
+    let dir = args.get(2).map_or(PathBuf::from(DEFAULT_DIR), PathBuf::from);
+    let (corpus_path, manifest_path) = paths(&dir, seed, count);
+
+    if let Some(programs) = read_fresh_cache(&corpus_path, &manifest_path, seed, count) {
+        report("reused", &corpus_path, &programs, None);
+        return Ok(());
+    }
+
+    let started = Instant::now();
+    let programs = generate(seed, count);
+    let elapsed = started.elapsed();
+
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&corpus_path, render_corpus(&programs))?;
+    std::fs::write(
+        &manifest_path,
+        Manifest {
+            seed,
+            program_count: count,
+            probe_digest: Manifest::probe_digest(),
+        }
+        .render(),
+    )?;
+
+    report("generated", &corpus_path, &programs, Some(elapsed));
+    Ok(())
+}
+
+fn parse_args(args: &[String]) -> Option<(u64, usize)> {
+    Some((args.first()?.parse().ok()?, args.get(1)?.parse().ok()?))
+}
+
+fn paths(dir: &Path, seed: u64, count: usize) -> (PathBuf, PathBuf) {
+    let stem = format!("babble-{seed}-{count}");
+    (
+        dir.join(format!("{stem}.corpus")),
+        dir.join(format!("{stem}.manifest")),
+    )
+}
+
+/// The cached corpus, if one exists and still answers this request.
+///
+/// Every failure path — missing file, unreadable, unparseable manifest, stale
+/// generator — means "regenerate". A corpus is reproducible from its seed, so
+/// discarding a doubtful cache costs time and nothing else.
+fn read_fresh_cache(
+    corpus_path: &Path,
+    manifest_path: &Path,
+    seed: u64,
+    count: usize,
+) -> Option<Vec<String>> {
+    let manifest = Manifest::parse(&std::fs::read_to_string(manifest_path).ok()?)?;
+
+    if manifest.is_stale_for(seed, count) {
+        return None;
+    }
+
+    Some(parse_corpus(&std::fs::read_to_string(corpus_path).ok()?))
+}
+
+fn report(verb: &str, path: &Path, programs: &[String], elapsed: Option<std::time::Duration>) {
+    let bytes: usize = programs.iter().map(String::len).sum();
+    let words: usize = programs
+        .iter()
+        .map(|program| program.split_whitespace().count())
+        .sum();
+
+    println!("{verb} {} programs -> {}", programs.len(), path.display());
+    println!(
+        "  {bytes} bytes, {words} whitespace-separated lexemes, {:.1} lexemes/program",
+        words as f64 / programs.len().max(1) as f64
+    );
+
+    if let Some(elapsed) = elapsed {
+        println!(
+            "  {:.2}s ({:.1} programs/s)",
+            elapsed.as_secs_f64(),
+            programs.len() as f64 / elapsed.as_secs_f64()
+        );
+    }
+}
