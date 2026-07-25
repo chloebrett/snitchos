@@ -23,6 +23,12 @@ const CTRL_OFFSET: u64 = 0x04;
 const SYSCRG_BASE: u64 = 0x1302_0000;
 const SYSCRG_SIZE: u64 = 0x1_0000;
 
+/// SYS_IOMUX (pin-mux) — the guest routes the PWMDAC output pads here. snemu has no
+/// pads, so it just swallows the writes (reads fall through to 0); the point is only
+/// that the guest doesn't halt on an unmapped write.
+const IOMUX_BASE: u64 = 0x1304_0000;
+const IOMUX_SIZE: u64 = 0x1_0000;
+
 #[derive(Clone)]
 pub(crate) struct Pwmdac {
     samples: Vec<i16>,
@@ -38,6 +44,7 @@ impl Pwmdac {
     pub(crate) fn in_window(addr: u64) -> bool {
         (PWMDAC_BASE..PWMDAC_BASE + PWMDAC_SIZE).contains(&addr)
             || (SYSCRG_BASE..SYSCRG_BASE + SYSCRG_SIZE).contains(&addr)
+            || (IOMUX_BASE..IOMUX_BASE + IOMUX_SIZE).contains(&addr)
     }
 
     /// Read semantics for the two windows: 0 for the PWMDAC registers,
@@ -119,6 +126,7 @@ mod tests {
         assert!(Pwmdac::in_window(PWMDAC_BASE));
         assert!(Pwmdac::in_window(PWMDAC_BASE + CTRL_OFFSET));
         assert!(Pwmdac::in_window(SYSCRG_BASE + 0x314));
+        assert!(Pwmdac::in_window(IOMUX_BASE), "pin-mux writes must be accepted, not halt");
         assert!(!Pwmdac::in_window(RAM_BASE));
         assert!(!Pwmdac::in_window(0));
         assert!(!Pwmdac::in_window(PWMDAC_BASE + PWMDAC_SIZE), "just past the window");

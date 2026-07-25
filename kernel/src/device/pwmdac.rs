@@ -15,6 +15,7 @@ use kernel_devices::pwmdac::{
     plan_rate, sample_interval_ticks, Ctrl, DataMode, DataShift, DutyCycle, Gain, Resolution, Tone,
     CTRL_OFFSET, WDATA_OFFSET,
 };
+use kernel_devices::iomux::{self, FieldWrite};
 use kernel_devices::syscrg::{self, Op};
 
 use crate::obs::counter::DeferredCounter;
@@ -32,6 +33,8 @@ const PWMDAC_VA: usize = PWMDAC_BASE + crate::mmu::KERNEL_OFFSET;
 /// SYSCRG registers, likewise via the higher-half mapping (`kmain` inserts the
 /// `0x1300_0000` megapage).
 const SYSCRG_VA: usize = syscrg::BASE + crate::mmu::KERNEL_OFFSET;
+/// SYS_IOMUX (pin-mux) registers — same megapage as SYSCRG, so already mapped.
+const IOMUX_VA: usize = iomux::BASE + crate::mmu::KERNEL_OFFSET;
 
 /// `pwmdac_core` divider (`audio_root_rate / core_clk_hz`). The parent
 /// `audio_root` rate isn't known statically — this needs calibration against the
@@ -66,12 +69,35 @@ fn apply_syscrg(ops: &[Op]) {
     }
 }
 
-/// Bring up the PWMDAC clocks + reset. No-op if the divider is somehow out of
-/// range (it can't be — `CORE_DIVIDER` is a valid constant).
+/// Apply one IOMUX pad field via read-modify-write.
+fn apply_field(fw: FieldWrite) {
+    let addr = IOMUX_VA + fw.offset;
+    // SAFETY: SYS_IOMUX MMIO, in SYSCRG's already-mapped megapage.
+    unsafe {
+        let cur = (addr as *const u32).read_volatile();
+        (addr as *mut u32).write_volatile((cur & !fw.mask) | fw.value);
+    }
+}
+
+/// Route the PWMDAC's LEFT/RIGHT output signals onto their pads (GPIO 33/34) —
+/// without this the DAC runs but its output reaches no pin (silence).
+fn route_pins() {
+    for fw in iomux::route_output(iomux::PWMDAC_LEFT_GPIO, iomux::PWMDAC_LEFT_SIGNAL) {
+        apply_field(fw);
+    }
+    for fw in iomux::route_output(iomux::PWMDAC_RIGHT_GPIO, iomux::PWMDAC_RIGHT_SIGNAL) {
+        apply_field(fw);
+    }
+}
+
+/// Bring up the PWMDAC clocks + reset, then route its output pins. No-op on the
+/// clock step if the divider is somehow out of range (it can't be — `CORE_DIVIDER`
+/// is a valid constant).
 fn bringup() {
     if let Some(ops) = syscrg::pwmdac_bringup(CORE_DIVIDER) {
         apply_syscrg(&ops);
     }
+    route_pins();
 }
 
 /// Program `CTRL` for `sample_rate_hz`, enabling the DAC. Returns the per-sample
@@ -104,9 +130,19 @@ fn write_sample(sample: i16) {
 /// Boot task: bring the DAC up and loop emitting the beep, yielding each period so
 /// the heartbeat runs (and drains `SAMPLES_EMITTED`). `-> !` per the scheduler ABI.
 pub extern "C" fn audio_beep_entry() -> ! {
+    // Boot-log breadcrumbs (NS16550A console) for first-hardware bring-up: if the
+    // second line never prints, the SYSCRG reset `PollUntilSet` hung (real status
+    // semantics differ from snemu's always-released model).
+    crate::println!("audio: bringing up PWMDAC...");
     bringup();
     let interval = configure(BEEP_RATE_HZ);
     let tone = Tone::square(BEEP_FREQ_HZ, BEEP_RATE_HZ, Gain::UNITY, BEEP_PEAK);
+    match (tone, interval) {
+        (Some(_), Some(ticks)) => crate::println!(
+            "audio: PWMDAC up — playing {BEEP_FREQ_HZ} Hz @ {BEEP_RATE_HZ} Hz ({ticks} ticks/sample)"
+        ),
+        _ => crate::println!("audio: config failed — {BEEP_RATE_HZ} Hz unsupported?"),
+    }
     loop {
         if let (Some(tone), Some(interval)) = (tone, interval) {
             for sample in tone.samples() {
