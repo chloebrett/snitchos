@@ -1,79 +1,53 @@
-//! `UdpFrameSink` — a [`FrameSink`] that batches COBS-framed frames into
-//! MTU-sized UDP datagrams and hands each to a [`NetDevice`].
+//! `UdpFrameSink` — a [`FrameSink`] that encodes each frame and batches them
+//! into MTU-sized UDP datagrams via a [`kernel_net::UdpBatcher`].
 //!
-//! The telemetry payload is the exact wire format the UART path uses
-//! ([`protocol::wire_encode`]); UDP only changes the envelope, and COBS is what
-//! lets many frames share one datagram while staying independently decodable.
-//! See `docs/network-telemetry-design.md` Decision 2. Alloc-free and
-//! non-blocking: a full transmit path drops the batch and counts it, never
-//! stalls the kernel — the same discipline as the alloc and IRQ deferred paths.
+//! The batching + datagram framing is the shared byte-level core in `kernel-net`
+//! ([`kernel_net::UdpBatcher`]); this is the thin `Frame`-encoding wrapper over
+//! it. The kernel's telemetry path pushes bytes to the same batcher *already*
+//! encoded (its `KernelSink` did the [`protocol::wire_encode`]), so there is one
+//! encode step and one datagram format across every consumer. See
+//! `docs/network-telemetry-design.md`.
 
 use crate::sink::FrameSink;
-use kernel_net::{NetConfig, NetDevice, build_udp_datagram};
+use kernel_net::{NetConfig, NetDevice, UdpBatcher};
 use protocol::{Frame, wire_encode};
 
-/// Batch payload capacity: the 1500-byte Ethernet MTU less the 20-byte IPv4 and
-/// 8-byte UDP headers (`1500 - 20 - 8`).
-const MAX_BATCH: usize = 1472;
-/// Scratch for one whole Ethernet frame: the 14-byte Ethernet header over a full
-/// 1500-byte MTU payload (`14 + 1500`). The hard ceiling — a datagram that would
-/// exceed it fails to build and is dropped, never fragmented, so it can never
-/// reach the wire oversized even if `MAX_BATCH` were mis-set.
-const DATAGRAM_MAX: usize = 1514;
+/// Encode scratch, larger than [`kernel_net::MAX_BATCH`] so a frame too large to
+/// batch is caught and counted by the batcher rather than silently failing to
+/// encode. Real telemetry frames are far smaller (`KernelSink` uses 520).
+const ENCODE_SCRATCH: usize = 2048;
 
-/// Accumulates COBS-framed frames into a batch and flushes each full batch as
-/// one UDP datagram through `D`.
+/// Encodes each frame and hands the bytes to a [`UdpBatcher`].
 pub struct UdpFrameSink<D: NetDevice> {
-    config: NetConfig,
-    device: D,
-    batch: [u8; MAX_BATCH],
-    batch_len: usize,
-    dropped: u64,
+    batcher: UdpBatcher<D>,
 }
 
 impl<D: NetDevice> UdpFrameSink<D> {
     #[must_use]
     pub fn new(config: NetConfig, device: D) -> Self {
-        Self { config, device, batch: [0; MAX_BATCH], batch_len: 0, dropped: 0 }
+        Self { batcher: UdpBatcher::new(config, device) }
     }
 
-    /// Datagrams dropped because the transmit path was full when a batch was
-    /// flushed. Non-zero means telemetry was lost — surfaced as `Frame::Dropped`
-    /// by the caller.
+    /// Datagrams and frames dropped — see [`UdpBatcher::dropped`].
     #[must_use]
     pub fn dropped(&self) -> u64 {
-        self.dropped
+        self.batcher.dropped()
     }
 
-    /// Emit the accumulated batch as one datagram and clear it. The seam a
-    /// future heartbeat/time-based drain would call; today only overflow (in
-    /// [`FrameSink::emit`]) and the caller invoke it.
+    /// Flush the accumulated batch as one datagram. See [`UdpBatcher::flush`].
     pub fn flush(&mut self) {
-        if self.batch_len == 0 {
-            return;
-        }
-        let mut datagram = [0u8; DATAGRAM_MAX];
-        match build_udp_datagram(&self.config, &self.batch[..self.batch_len], &mut datagram) {
-            Ok(bytes) if self.device.send(bytes).is_ok() => {}
-            _ => self.dropped += 1,
-        }
-        self.batch_len = 0;
+        self.batcher.flush();
     }
 }
 
 impl<D: NetDevice> FrameSink for UdpFrameSink<D> {
     fn emit(&mut self, frame: &Frame<'_>) {
-        if let Ok(bytes) = wire_encode(frame, &mut self.batch[self.batch_len..]) {
-            self.batch_len += bytes.len();
-            return;
+        let mut scratch = [0u8; ENCODE_SCRATCH];
+        if let Ok(bytes) = wire_encode(frame, &mut scratch) {
+            self.batcher.push_bytes(bytes);
         }
-        // Didn't fit in the remaining batch space: flush what's there, then retry
-        // into an empty batch. A frame too big even alone is dropped and counted.
-        self.flush();
-        match wire_encode(frame, &mut self.batch) {
-            Ok(bytes) => self.batch_len = bytes.len(),
-            Err(_) => self.dropped += 1,
-        }
+        // A frame too large to even encode (> ENCODE_SCRATCH) is a programmer
+        // error, silently dropped — the same discipline as KernelSink.
     }
 }
 

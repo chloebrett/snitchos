@@ -11,6 +11,9 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+extern crate alloc;
+
 /// Static addressing for the one telemetry neighbour. All fields are known at
 /// boot (from the `net=` bootarg); nothing is discovered.
 pub struct NetConfig {
@@ -99,9 +102,199 @@ pub fn build_udp_datagram<'a>(
     Ok(&buf[..total])
 }
 
+/// Batch payload capacity: the 1500-byte Ethernet MTU less the 20-byte IPv4 and
+/// 8-byte UDP headers (`1500 - 20 - 8`).
+pub const MAX_BATCH: usize = 1472;
+/// Scratch for one whole Ethernet frame: the 14-byte Ethernet header over a full
+/// 1500-byte MTU payload (`14 + 1500`). The hard ceiling — a batch that would
+/// exceed it fails to build and is dropped, never fragmented.
+const DATAGRAM_MAX: usize = 1514;
+
+/// Batches already-encoded (COBS) frame bytes into MTU-sized UDP datagrams and
+/// flushes each full batch through a [`NetDevice`]. Alloc-free and non-blocking:
+/// a full transmit path drops the batch and counts it, never stalls the caller —
+/// the same discipline as the kernel's alloc and IRQ deferred paths.
+///
+/// This is the byte-level core the whole telemetry TX path shares: the kernel's
+/// `UdpTx` pushes bytes it already encoded, and `kernel_obs`'s `UdpFrameSink`
+/// wraps this with a `wire_encode` step. One batcher, one datagram format. See
+/// `docs/network-telemetry-design.md`.
+pub struct UdpBatcher<D: NetDevice> {
+    config: NetConfig,
+    device: D,
+    batch: [u8; MAX_BATCH],
+    batch_len: usize,
+    dropped: u64,
+}
+
+impl<D: NetDevice> UdpBatcher<D> {
+    #[must_use]
+    pub fn new(config: NetConfig, device: D) -> Self {
+        Self { config, device, batch: [0; MAX_BATCH], batch_len: 0, dropped: 0 }
+    }
+
+    /// Datagrams dropped because the transmit path was full when a batch was
+    /// flushed, plus any single frame too large to ever fit a datagram.
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Append one already-encoded frame's `bytes` to the current batch. A frame
+    /// that would overflow the batch flushes it first (never split); one too
+    /// large to ever fit is dropped and counted.
+    pub fn push_bytes(&mut self, bytes: &[u8]) {
+        if bytes.len() > MAX_BATCH {
+            self.dropped += 1;
+            return;
+        }
+        if self.batch_len + bytes.len() > MAX_BATCH {
+            self.flush();
+        }
+        self.batch[self.batch_len..self.batch_len + bytes.len()].copy_from_slice(bytes);
+        self.batch_len += bytes.len();
+    }
+
+    /// Emit the accumulated batch as one datagram and clear it. The seam a
+    /// future heartbeat/time-based drain would call.
+    pub fn flush(&mut self) {
+        if self.batch_len == 0 {
+            return;
+        }
+        let mut datagram = [0u8; DATAGRAM_MAX];
+        match build_udp_datagram(&self.config, &self.batch[..self.batch_len], &mut datagram) {
+            Ok(bytes) if self.device.send(bytes).is_ok() => {}
+            _ => self.dropped += 1,
+        }
+        self.batch_len = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::rc::Rc;
+    use alloc::vec::Vec;
+    use core::cell::{Cell, RefCell};
+
+    /// A `NetDevice` that records sent frames and can be told to fail — behind
+    /// shared handles so the test inspects/toggles them after `UdpBatcher` has
+    /// taken the device by value.
+    #[derive(Clone)]
+    struct MockNet {
+        sent: Rc<RefCell<Vec<Vec<u8>>>>,
+        fail: Rc<Cell<bool>>,
+    }
+
+    impl MockNet {
+        fn new() -> Self {
+            Self { sent: Rc::new(RefCell::new(Vec::new())), fail: Rc::new(Cell::new(false)) }
+        }
+    }
+
+    impl NetDevice for MockNet {
+        fn send(&mut self, frame: &[u8]) -> Result<(), TxFull> {
+            if self.fail.get() {
+                return Err(TxFull);
+            }
+            self.sent.borrow_mut().push(frame.to_vec());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn push_bytes_batches_and_flushes_as_one_datagram() {
+        let dev = MockNet::new();
+        let mut b = UdpBatcher::new(test_config(), dev.clone());
+        b.push_bytes(&[1, 2, 3]);
+        b.push_bytes(&[4, 5]);
+        b.push_bytes(&[6]);
+        b.flush();
+
+        assert_eq!(b.dropped(), 0, "a clean run drops nothing");
+        let sent = dev.sent.borrow();
+        assert_eq!(sent.len(), 1, "one batch → one datagram");
+        assert_eq!(&sent[0][42..], &[1, 2, 3, 4, 5, 6], "payload is the concatenated frames");
+    }
+
+    #[test]
+    fn an_overflowing_push_flushes_the_batch_first() {
+        let dev = MockNet::new();
+        let mut b = UdpBatcher::new(test_config(), dev.clone());
+        // Two ~800-byte frames can't share a 1472-byte batch.
+        let big = [0x5au8; 800];
+        b.push_bytes(&big);
+        b.push_bytes(&big);
+        b.flush();
+
+        let sent = dev.sent.borrow();
+        assert_eq!(sent.len(), 2, "each frame lands in its own datagram");
+        assert_eq!(&sent[0][42..], &big);
+        assert_eq!(&sent[1][42..], &big);
+    }
+
+    #[test]
+    fn a_frame_exactly_filling_the_batch_is_accepted() {
+        // MAX_BATCH bytes is the largest single frame that still fits — the
+        // boundary between "batched" and "dropped as too large".
+        let dev = MockNet::new();
+        let mut b = UdpBatcher::new(test_config(), dev.clone());
+        let exact = [0x11u8; MAX_BATCH];
+        b.push_bytes(&exact);
+        b.flush();
+
+        assert_eq!(b.dropped(), 0, "an exactly-max frame is not too large");
+        let sent = dev.sent.borrow();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(&sent[0][42..], &exact[..]);
+    }
+
+    #[test]
+    fn two_frames_summing_to_exactly_the_batch_share_one_datagram() {
+        // 1000 + 472 == MAX_BATCH: the second fits exactly, so no flush happens
+        // between them — the boundary of the overflow check.
+        let dev = MockNet::new();
+        let mut b = UdpBatcher::new(test_config(), dev.clone());
+        let a = [0xAAu8; 1000];
+        let c = [0xBBu8; MAX_BATCH - 1000];
+        b.push_bytes(&a);
+        b.push_bytes(&c);
+        b.flush();
+
+        let sent = dev.sent.borrow();
+        assert_eq!(sent.len(), 1, "an exact fit does not flush early");
+        assert_eq!(&sent[0][42..42 + 1000], &a[..]);
+        assert_eq!(&sent[0][42 + 1000..], &c[..]);
+    }
+
+    #[test]
+    fn bytes_too_large_for_a_datagram_are_dropped_and_counted() {
+        let dev = MockNet::new();
+        let mut b = UdpBatcher::new(test_config(), dev.clone());
+        b.push_bytes(&[0u8; 2000]);
+        b.flush();
+
+        assert_eq!(b.dropped(), 1, "the un-sendable frame is counted");
+        assert!(dev.sent.borrow().is_empty(), "nothing reached the wire");
+    }
+
+    #[test]
+    fn a_full_transmit_path_drops_and_counts_then_recovers() {
+        let dev = MockNet::new();
+        let mut b = UdpBatcher::new(test_config(), dev.clone());
+
+        dev.fail.set(true);
+        b.push_bytes(&[1, 2, 3]);
+        b.flush();
+        assert_eq!(b.dropped(), 1, "the dropped datagram is counted");
+        assert!(dev.sent.borrow().is_empty());
+
+        dev.fail.set(false);
+        b.push_bytes(&[4, 5, 6]);
+        b.flush();
+        assert_eq!(b.dropped(), 1, "a successful flush doesn't count a drop");
+        assert_eq!(dev.sent.borrow().len(), 1, "the batcher recovers after a drop");
+    }
 
     // A fixed neighbour used across the datagram tests. Golden bytes below were
     // computed from this config with an independent Python reference, not by
