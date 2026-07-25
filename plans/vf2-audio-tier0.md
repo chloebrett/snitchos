@@ -235,8 +235,11 @@ kernel wouldn't even compile the audio path. Resolve by either (a) snemu models 
 PWMDAC as a **synthetic device in its virt machine** and the `audio-beep` workload
 drives `0x100b0000` **address-driven, not hard `cfg(vf2)`** (mirrors how ramfb was
 added to snemu's virt map), or (b) audio stays hardware-only for by-ear and snemu gets
-the model purely to service the itest. (a) is preferred — it keeps the whole loop
-off-hardware. This is a real fork for Increment 6's structure; pick it first.
+the model purely to service the itest. **DECIDED (2026-07-25): (a)** — snemu models
+the PWMDAC as a synthetic device in its virt machine and the `audio-beep` workload
+drives `0x100b0000` address-driven (not hard `cfg(vf2)`), keeping the whole dev/test
+loop off-hardware. Increment 6's driver is therefore address/region-driven, not
+board-gated.
 
 **What ships in 9a:**
 - **snemu device model:** a `Pwmdac` bus device that accepts `WDATA` (`+0x00`)/`CTRL`
@@ -247,11 +250,15 @@ off-hardware. This is a real fork for Increment 6's structure; pick it first.
   waveform from real guest timing and need *not* model the PLL/core clock (may
   cross-check `CTRL.cnt_n`). Also sidesteps the open `WDATA`-FIFO unknown: it records
   what the guest wrote, when.
-- **Pure WAV decoder (host-TDD):** `WDATA`-stream + timestamps → PCM → WAV bytes
-  (sample count, rate reconstruction, header). A pure module with real unit tests fed
-  synthetic writes — **no kernel dependency, buildable now.** Follows the
-  `--dump-framebuffer` artifact precedent (`framebuffer.rs::render_ppm` +
-  `fs::write` behind a flag; `main.rs:202`): `snemu … --audio-out beep.wav`.
+- **Pure WAV decoder (host-TDD):** `WDATA`-stream + timestamps → PCM → WAV bytes. A
+  pure module with real unit tests fed synthetic writes — **no kernel dependency.**
+  Follows the `--dump-framebuffer` precedent (`framebuffer.rs::render_ppm` + `fs::write`
+  behind a flag; `main.rs:202`): `snemu … --audio-out beep.wav`.
+  - ✅ **WAV container encoding done** — `snemu/src/audio.rs::encode_wav_mono_16`
+    (canonical 44-byte mono/16-bit header + LE samples), 7 host tests, 13/13 mutants
+    caught, clippy-clean.
+  - ⏳ **Rate reconstruction** — timestamped `WDATA` writes → effective sample rate
+    (pure, next sub-cycle).
 
 QEMU can't do any of this (audio subsystem but no PWMDAC device model; virt map has
 nothing at `0x100b0000`). Design home: `docs/snemu-design.md`.

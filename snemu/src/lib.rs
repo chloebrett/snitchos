@@ -3,6 +3,7 @@
 //! A small RV64GC interpreter. See `docs/snemu-design.md` for scope and
 //! `plans/legacy/snemu-milestone-1-console-out.md` for the current milestone.
 
+pub mod audio;
 mod block;
 mod bus;
 pub mod bench;
