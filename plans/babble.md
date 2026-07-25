@@ -1,6 +1,11 @@
 # babble — the weight-free model (TDD plan)
 
-**Status:** 🚧 **IN PROGRESS — increments 1, 2, 4, 4b, 5, 6, 7, 8, 10, 11 done**
+**Status:** ✅ **COMPLETE for its purpose — increments 1, 2, 4, 4b, 5, 6, 7, 8,
+10, 11, 12, 13 done.** babble generates valid Stitch, serves completions over a
+capability-mediated IPC endpoint from a userspace process, and its output is
+byte-identical on host and target — the four contracts the ladder inherits
+(oracle API, bias tables, endpoint protocol, eval floor) all exist and are
+gated.
 (9 deferred to when the corpus pipeline starts — its summary format should be
 built against the real validator/metrics harness, not guessed at; 3 deferred: it is
 the char-level view, which stim needs and babble does not — babble appends
@@ -161,12 +166,32 @@ boot-verified.** Split at the usual boundary:
   `main.rs` dispatch, and `WorkloadKind::KvetchBabble` (kebab-derived, one
   host test).
 
-**Verification status:** `babble`/`kvetch-proto`/`kernel-boot` green (102 tests);
-`cargo build -p kvetch --target riscv64gc-unknown-none-elf` clean;
-clippy clean. The **snemu boot of `workload=kvetch-babble` is not yet run** —
-it collided with concurrent in-flight `glitch` edits (a `run_ipc` signature
-change mid-flight). Run `cargo xtask snemu boot --workload kvetch-babble
---frames` once that settles; that is the gate before increment 13's scenario.
+**Increment 13 (`kvetch-babble-serves`) done — and increments 12 + 13 are
+verified end to end.** The on-target run and the host sampler agree exactly:
+
+| | target (snemu guest) | host |
+|---|---|---|
+| seed | `-2152535657050944081` | `-2152535657050944081` |
+| bytes | 34 | 34 |
+| checksum | 6643581145736680012 | 6643581145736680012 |
+
+…for the completion `greet(name) { "price" ( ) ~> not ..= true delta`. The
+emitted seed equals `request_seed(0, 0)`'s golden vector, so the whole chain —
+derivation, sampler, tables — is pinned across engines. Span nesting worked
+too: `kvetch-client` → `kvetch.client` → `kvetch.complete` **on the server's
+task id**, i.e. the trace crosses the process boundary unaided.
+
+The scenario recomputes the expected completion host-side from the same crates
+the server used and asserts seed, length and checksum. **Verified to actually
+assert**: bumping the host's `max_tokens` by one made it fail with "the client
+never reported 37 bytes". Passes plain and `--scramble`; full suite 126/126
+both ways.
+
+**Verification status:** host gate green apart from the mutant-plan roster,
+which is missing three crates that belong to concurrent work
+(`cram-corpus`, `kvetch-model`, `kvetch-vocab`) — `babble` and `kvetch-proto`
+are already enrolled. `user/kvetch` is registered `NOT_HOST_TESTED` (riscv-only;
+its logic is host-tested in `babble::serve`).
 
 **Post material** (noted 2026-07-25): the raw babbled output — legal-but-
 meaningless Stitch, every identifier `x` and every number `0` because the

@@ -36,6 +36,7 @@
 | fs-stat-root | fs | wfi | userspace, ipc |
 | fs-workload | fs | wfi | userspace, ipc |
 | fs-write-read | fs | wfi | userspace, ipc |
+| glitch-beep-plays | glitch-beep | cpu | audio |
 | heap-grows-on-demand | heap-grow | wfi | userspace |
 | heap-oom | heap-oom | cpu | heap, oom |
 | supervisor-detects-and-kills-a-hung-service | hung-detect | cpu | userspace |
@@ -65,6 +66,7 @@
 | rpc-trace-nests | ipc-rpc | wfi | userspace, ipc |
 | ipi-pong | ipi-pong | cpu | smp, ipi, stress |
 | kill-without-a-process-cap-is-refused | kill-no-cap | cpu | userspace |
+| kvetch-babble-serves | kvetch-babble | cpu | kvetch |
 | sched-task-lookup-is-o1 | live-tasks | cpu | sched |
 | manifest-iface-served | manifest-iface | wfi | userspace, fs |
 | manifest-satisfy-attenuates | manifest-satisfy | wfi | userspace, fs |

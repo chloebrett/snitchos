@@ -951,6 +951,103 @@ pub fn audio_beep_emits_samples(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// kvetch v0 acceptance (`workload=kvetch-babble`): the completion-serving path,
+/// end to end, with a model that has no weights.
+///
+/// The headline assertion is **cross-engine byte-identity**: the client's
+/// checksum of what the on-target server produced must equal the *host*
+/// sampler's checksum for the same seed. That is what makes the whole entropy
+/// discipline real — the seed derives from a recorded per-boot root and a
+/// request counter with no clock anywhere in the chain
+/// (`docs/randomness-and-entropy.md`), so guest and host must agree exactly. If
+/// this fails, either the sampler diverged across engines or something reached
+/// for the clock.
+///
+/// Also asserts the seed itself is on the wire, which is what makes a recorded
+/// completion replayable — the system is deterministic *given its own trace*.
+pub fn kvetch_babble_serves(h: &mut View) -> Result<(), String> {
+    // Recompute what the server should have produced, from the same crates it
+    // used: identical seed derivation, identical sampler, identical tables.
+    let seed = kvetch_proto::request_seed(KVETCH_BOOT_SEED, 0);
+    let mut buf = vec![0u8; KVETCH_CAP];
+    buf[..KVETCH_PREFIX.len()].copy_from_slice(KVETCH_PREFIX.as_bytes());
+    let expected =
+        babble::serve::handle_request(&mut buf, KVETCH_PREFIX.len(), KVETCH_MAX_TOKENS, seed);
+    let completion = &buf[KVETCH_PREFIX.len()..KVETCH_PREFIX.len() + expected.written as usize];
+    let expected_checksum = kvetch_checksum(completion);
+
+    // The prefix plus the completion must parse as far as it goes — a fragment
+    // is not a whole program, but it must leave the buffer *viable*.
+    let served = core::str::from_utf8(&buf[..KVETCH_PREFIX.len() + expected.written as usize])
+        .map_err(|e| format!("host sampler produced non-UTF-8: {e}"))?;
+    if stitch::oracle::valid_next(served, served.len()).is_empty() {
+        return Err(format!("the completion leaves the buffer dead: {served:?}"));
+    }
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.kvetch.seed")
+                && *value == seed as i64
+        }
+        _ => false,
+    })
+    .ok_or_else(|| {
+        format!(
+            "the server never emitted seed {} — the seed is not on the wire, \
+             or the derivation diverged (a clock crept into it?)",
+            seed as i64
+        )
+    })?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.kvetch.client.written")
+                && *value == i64::from(expected.written)
+        }
+        _ => false,
+    })
+    .ok_or_else(|| {
+        format!(
+            "the client never reported {} bytes — the on-target sampler \
+             produced a different length from the host's",
+            expected.written
+        )
+    })?;
+
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, value, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.kvetch.client.checksum")
+                && *value == expected_checksum
+        }
+        _ => false,
+    })
+    .ok_or_else(|| {
+        format!(
+            "the client's completion checksum never matched the host's ({expected_checksum}) — \
+             same length, different bytes: the sampler diverged across engines"
+        )
+    })?;
+    Ok(())
+}
+
+/// The client's request, mirrored from `user/kvetch/src/bin/kvetch-client.rs`.
+/// Changing either side without the other is what the scenario exists to catch.
+const KVETCH_PREFIX: &str = "greet(name) {";
+const KVETCH_CAP: usize = 256;
+const KVETCH_MAX_TOKENS: u32 = 8;
+/// The server's per-boot entropy root while the `seed=` bootarg is unwired.
+const KVETCH_BOOT_SEED: u64 = 0;
+
+/// FNV-1a, matching the client's — the completion travels as one integer.
+fn kvetch_checksum(bytes: &[u8]) -> i64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (hash >> 1) as i64
+}
+
 /// glitch v1 acceptance (`workload=glitch-beep`): the whole userspace-audio path.
 /// A `beep` client `call`s the `glitch` server over IPC; the server (holding the
 /// endpoint + an `AudioSink` cap) synthesizes a 440 Hz tone and streams it through

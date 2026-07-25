@@ -19,6 +19,12 @@ diagram = { path = "../diagram" }
 protocol = { path = "../protocol", features = ["std"] }
 snitchos-abi = { path = "../abi" }
 fs-proto = { path = "../fs-proto" }
+# The `kvetch-babble-serves` scenario recomputes, host-side, exactly what the
+# on-target server should have produced — same seed derivation, same sampler,
+# same tables. Byte-identity between the two is the assertion.
+kvetch-proto = { path = "../kvetch-proto" }
+babble = { path = "../babble" }
+stitch = { path = "../stitch" }
 itest-harness = { path = "../itest-harness" }
 xtask-qemu = { path = "../xtask-qemu" }
 xtask-snemu = { path = "../xtask-snemu" }

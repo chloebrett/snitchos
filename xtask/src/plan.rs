@@ -23,6 +23,7 @@ pub(crate) const NOT_HOST_TESTED: &[(&str, &str)] = &[
     ("hello", "riscv64-only userspace binaries"),
     ("fs", "riscv64-only userspace FS server"),
     ("glitch", "riscv64-only userspace audio server"),
+    ("kvetch", "riscv64-only userspace completion server (its logic is host-tested in `babble::serve`)"),
 ];
 
 /// Userspace wrappers allowed to hand-roll `asm!("ecall", …)` **permanently**,
