@@ -81,7 +81,17 @@ the new packed record.
 `authorize_telemetry`, `cap.rs:280`), and the `protocol::CapObject::AudioSink` +
 `cap_object_kind` arm (`kernel/src/trap/user.rs:983`). Pure, fully host-tested.
 
-## Increment 2 — `AudioWrite` syscall ABI
+## Increment 2 — `AudioWrite` syscall ABI — ✅ DONE (with Increment 3)
+
+`AudioWrite = 32` + `from_usize` arm in `abi`, host-tested (RED→GREEN, the numbering
+round-trip). **Coupled to Increment 3:** the kernel's `handle_user_ecall` match is
+exhaustive (no `Some(_)` catch-all), so the ABI variant can't land without a dispatch
+arm — 2 and 3 are build-joined.
+
+**Wire-variant ripple (checklist for next time):** `protocol::CapObject::AudioSink`
+(Increment 1) is matched exhaustively in *three* more places that don't fail the crate
+you edit — `diagram/src/caps.rs`, `collector/src/caps.rs`, and the kernel's
+`cap_object_kind`; all needed an arm. (`scenarios.rs` uses `matches!`, so it's immune.)
 
 **RED** (`abi` tests): `Syscall::from_usize(32) == Some(AudioWrite)` and the variant
 round-trips (mirror the existing syscall-numbering test).
@@ -89,7 +99,18 @@ round-trips (mirror the existing syscall-numbering test).
 **GREEN:** add `AudioWrite = 32` to the enum (`abi/src/lib.rs:26-259`) **and** the
 `from_usize` arm (`:266-302`) — they must stay in sync. Small, host-tested.
 
-## Increment 3 — `AudioWrite` kernel handler *(MMIO glue; itest-verified)*
+## Increment 3 — `AudioWrite` kernel handler *(MMIO glue; itest-verified)* — ✅ DONE
+
+Shipped `kernel/src/syscall/audio.rs::handle_audio_write` (cap-gate via `authorize_audio`
+→ denial snitches `cap.denied` + `SyscallRefused`; `copy_from_user` the samples, bounded
+to `MAX_SAMPLES = 256`; refuses over-long/bad ranges) + the dispatch arm + `mod audio;`.
+The kernel half is `pwmdac::play_samples(bytes)` — lazy one-time `bringup`+`configure`
+behind a `Once`, then paced `write_sample` + `SAMPLES_EMITTED.inc()` per LE i16. Kernel
+builds clean; clippy-clean; the existing `audio-beep` itest stays green (additive —
+`audio_beep_entry` untouched). Verified end-to-end by Increment 8's itest.
+
+**Original plan notes below:**
+
 
 `kernel/src/syscall/audio.rs` (+ `mod audio;` and the dispatch arm in
 `kernel/src/syscall/mod.rs:33-77`). `handle_audio_write`: `current_process_or_refuse` →
