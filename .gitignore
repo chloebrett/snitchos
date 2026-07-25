@@ -19,6 +19,16 @@ target
 # same rule as docs/generated/, opposite conclusion about storing the bytes.
 /corpora
 
+# Trained checkpoints and their loss curves (`cargo xtask cram`). Same rule:
+# derived from a corpus, a config and a seed, all of which are pinned. A model
+# is also the worst thing to keep in git — many MB of f32 that re-diffs in full
+# on every run.
+#
+# One exception is coming: the plan enshrines a single tiny drivel checkpoint as
+# the deterministic eval fixture (plans/drivel.md). Force-add that one file when
+# it exists rather than un-ignoring the directory.
+/checkpoints
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
