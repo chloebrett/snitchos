@@ -15,9 +15,16 @@ the stim-time fix. **Increment 4 shipped as `ParseError::expected(src)` +
 `render`**: diagnostics now end with `expected one of: …`, sourced from the
 oracle rather than a hand-maintained list, so mask and message can never
 disagree. No recursion risk — the oracle parses, so it is consulted on a
-*returned* error, never from inside a parse. Known gap: `expected` answers
-for **program entry**, so expression-entry (`parse`, the REPL) errors get no
-continuation line — which is also why zero snapshots churned. **Found and fixed a real parser bug on the way**: the
+*returned* error, never from inside a parse. **Increment 4b** closed the
+entry-point gap: `oracle::Entry{Program,Expr}` + `valid_next_in`, and
+`ParseError` records which entry produced it (tagged at the two entry
+points), so REPL/expression errors get expression continuations rather than
+"nothing is legal". Diagnostics list at most `SHOWN_CONTINUATIONS` (8) then
+`… (N total)` — mid-expression the legal set is two dozen classes. Also
+fixed two paths that formatted `error.message` and so dropped the caret
+*and* the continuations: module loading and `Repl::load_source` — a parse
+error in a *file* had been strictly less helpful than the same error in a
+single-file program. **Found and fixed a real parser bug on the way**: the
 three post-`bump` `self.err()` sites in `parse_atom`/`parse_pattern_atom`
 blamed the token *after* the offending one (the caret pointed one token too
 far right, and it made the oracle unsound); `expect` had always been
