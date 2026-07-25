@@ -894,6 +894,7 @@ dependencies = [
  "serde_json",
  "snitchos-abi",
  "spin 0.10.0",
+ "synth",
 ]
 
 [[package]]
@@ -930,6 +931,13 @@ version = "0.0.1"
 dependencies = [
  "kernel-mem",
  "protocol",
+ "snitchos-abi",
+]
+
+[[package]]
+name = "kvetch-proto"
+version = "0.0.1"
+dependencies = [
  "snitchos-abi",
 ]
 
@@ -1673,6 +1681,10 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "synth"
+version = "0.0.1"
 
 [[package]]
 name = "talc"

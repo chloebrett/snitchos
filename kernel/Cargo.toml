@@ -36,6 +36,8 @@ kernel-mem = { path = "../kernel-mem" }
 kernel-obs = { path = "../kernel-obs" }
 kernel-proc = { path = "../kernel-proc" }
 snitchos-abi = { path = "../abi" }
+# Pure square-wave/gain DSP for the in-kernel beep — shared with userspace glitch.
+synth = { path = "../synth" }
 # `pod_bytes` — the one audited byte cast for `CapDesc`-shaped syscall returns.
 hitch-pod = { path = "../hitch-pod" }
 linked_list_allocator = { version = "0.10", default-features = false }

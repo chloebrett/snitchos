@@ -1,0 +1,20 @@
+[package]
+name = "synth"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# Dependency-free by design: pure signal synthesis (square-wave `Tone`, Q0.16
+# `Gain`) over `core` only, no kernel *and* no user-runtime deps. That's the
+# whole point — both sides may depend on it, which is what keeps `user/` off
+# `kernel-devices`. Extracted from `kernel-devices::pwmdac` (glitch Increment 5a);
+# the MMIO-layout logic (`Ctrl`/`plan_rate`/`sample_interval_ticks`) stays there.
+[dependencies]
+
+[lints]
+workspace = true
+
+[lib]
+# No doctests in this crate; doctest=false keeps `cargo test` off the slow
+# rustdoc doc-test compile (the gate runs nextest). Add to any new lib crate.
+doctest = false

@@ -12,11 +12,12 @@
 //! megapage; SYSCRG needs `kmain`'s `insert(0x1300_0000)`.
 
 use kernel_devices::pwmdac::{
-    plan_rate, sample_interval_ticks, Ctrl, DataMode, DataShift, DutyCycle, Gain, Resolution, Tone,
-    CTRL_OFFSET, WDATA_OFFSET,
+    plan_rate, sample_interval_ticks, Ctrl, DataMode, DataShift, DutyCycle, Resolution, CTRL_OFFSET,
+    WDATA_OFFSET,
 };
 use kernel_devices::iomux::{self, FieldWrite};
 use kernel_devices::syscrg::{self, Op};
+use synth::{Gain, Tone};
 
 use crate::obs::counter::DeferredCounter;
 
