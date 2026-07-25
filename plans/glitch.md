@@ -202,11 +202,15 @@ Shipped:
   to `NOT_HOST_TESTED`; the mutant-plan characterisation set updated (also picked up
   `glitch-proto`, stale since Increment 4). All 64 xtask plan tests green.
 
-## Increment 6 — the `beep` client
+## Increment 6 — the `beep` client — ✅ DONE
 
-**GREEN** (`user/glitch/src/bin/beep.rs`, mirror `fs-client.rs:48`):
-`#[entry(needs = [("glitch", ENDPOINT, SEND)])]`, `bootstrap().get::<Endpoint>("glitch")`,
-`call(Play { 440, 1000, gain, peak }.encode())`. Small; exercised by Increment 8.
+Shipped `user/glitch/src/bin/beep.rs` (mirrors `fs-client`): `#[entry(needs =
+[("glitch", ENDPOINT, SEND)])]`, `bootstrap().get::<Endpoint>("glitch")`,
+`call(Play { freq_hz: 440, duration_ms: 1000 }.encode())` inside a `beep.request`
+span, then decodes the reply and emits `snitchos.beep.played_total` on
+`Reply::Played` (the client-side witness; the itest asserts on the server metrics).
+Added the `hitch` dep (`default-features = false`) for the `#[entry(needs)]` note.
+Compiles clean for riscv; exercised end-to-end by Increment 8.
 
 ## Increment 7 — boot layout, `SPAWNABLE`, AudioSink grant
 

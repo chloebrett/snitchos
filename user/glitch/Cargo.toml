@@ -13,6 +13,10 @@ publish = false
 snitchos-user = { path = "../runtime" }
 glitch-core = { path = "../../glitch-core" }
 glitch-proto = { path = "../../glitch-proto" }
+# `#[entry(needs = [("glitch", ENDPOINT, SEND)])]` on the beep client emits a
+# `hitch`-encoded `.snitch.iface` note (its declared authority need).
+# `default-features = false` — a needs-only note carries no in/out schema types.
+hitch = { path = "../../hitch", default-features = false }
 
 [lints]
 workspace = true
