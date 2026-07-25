@@ -39,6 +39,9 @@ whose entire output is one judgment, named accordingly.
 
 ### babble is two components in one
 
+Full design: [babble-design.md](babble-design.md) (oracle API, bias
+tables, kvetch protocol v0, eval floor, increments).
+
 Uniform-random-over-valid-set is the **Tier-0 grammar sampler wearing the
 serving hat**: batch mode generates corpus, streaming mode is "model zero"
 behind the kvetch endpoint. Build it once (with the same mild depth/length
@@ -212,7 +215,12 @@ modal grammar in the loop. Findings from the design discussion:
   bounded search later. Every (actual, optimal) pair it computes is exactly
   the future edit-model's supervision — the solver starts as coach, matures
   into labeler, ends as compiler: three roles, one component, each funding
-  the next.
+  the next. The far-future growth of the coach — competence estimation,
+  passive spaced repetition over organic occurrences, FSRS-class memory
+  models trained on the user's own edit log, competence-gated
+  crutch-masking — is its own design (and plausibly its own paper):
+  [stim-tutor-design.md](stim-tutor-design.md). V1 here remains the
+  peephole digest.
 - The fully unified *session-stream* model (predict the next event the editor
   receives, commands and content interleaved) remains the research-flavored
   horizon; nobody in the Zeta/NEP lineage models the editing *process*, and

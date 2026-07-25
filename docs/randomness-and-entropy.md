@@ -39,6 +39,63 @@ Keys are generated from the CSPRNG or via key derivation. Where SnitchOS uses th
 - Signed capability tokens for cross-machine capability flow — unforgeable caps that travel between machines.
 - Sealing / unsealing capabilities, if implemented.
 
+## Needs statistical quality + replayability — seeded PRNG, seed on the wire (added 2026-07-25)
+
+The LLM work ([llm-design.md](llm-design.md), [babble-design.md](babble-design.md))
+exposed a third category the uniqueness/unpredictability distinction doesn't
+cover: **sampling randomness** (temperature sampling, babble's grammar walk).
+Security randomness exists to make outputs unreconstructable; sampling
+randomness wants the opposite — *any generation must be reproducible from its
+recorded seed*. Requirements: statistical quality yes, unpredictability no,
+replayability mandatory.
+
+Design: **entropy enters sampling only as an explicit seed, and the seed is
+telemetry** — pinned in the request for itests (babble protocol v0 carries
+it), minted per-request and emitted in the completion span in live use. The
+system stays *deterministic given its own trace*: nondeterminism isn't
+avoided, it's recorded. snemu models any future entropy device as a seeded
+PRNG with the seed in run metadata (the `--scramble` pattern); QEMU's
+virtio-rng stays genuinely nondeterministic (it's already the
+nondeterministic fidelity escape hatch).
+
+Consequences: **sampling does not pull the CSPRNG milestone forward.** The
+CSPRNG below stays deferred until a genuine unpredictability consumer exists
+(canaries / ASLR / keys). Any statistical PRNG (even a simple xorshift/PCG)
+is fine for sampling streams; MT's disqualification below is about
+*security* uses.
+
+**Reseeding: entropy as a recorded input stream (2026-07-25).** One boot
+seed suffices statistically for sampling (stream periods are ~2^64+; the
+pressure for reseeding is future security consumers and structural hygiene,
+not exhaustion), but the long-run design is: the kernel *requests* entropy
+at **defined, count-based points** (every 2^k draws / request-count
+milestones / boot-phase transitions — never time-based, or the reseed
+schedule itself diverges across engines), the host honours the request, and
+the exchange is recorded. Epoch structure: `stream = hash(epoch_seed,
+counter)`; each epoch's opening frame announces its id. **Two recording
+policies by category**: sampling entropy puts the received value on the wire
+in plaintext (that is what makes replay work); security entropy records
+*that* a reseed occurred, its trigger and source — not the value in normal
+operation (a canary seed on the telemetry channel is a self-inflicted leak),
+though a debug mode MAY record values for diagnosability, provided the mode
+itself is declared on the wire so a trace is self-describing about what it
+may contain. Disclosure-policy details are deliberately unresolved —
+bikeshed when a security consumer actually exists. Generalization:
+entropy becomes just another recorded input channel — snemu answers from its
+own seeded generator (journaled), QEMU/hardware answer with real entropy the
+kernel immediately confesses to the wire; replay works across reseeds and
+"deterministic given its own trace" survives arbitrary uptimes.
+
+**Seed-provenance rule: time never enters seed derivation.** Clock-derived
+seeds would promote engine clock skew (already the dominant benign noise in
+`snemu diff`) into full content divergence. Instead, one per-boot entropy
+root: `boot_seed` enters explicitly at boot (bootarg `seed=…`; hardware RNG
+later), is emitted as a telemetry frame immediately, and every downstream
+draw is `hash(boot_seed, counter)` — a pure function of recorded inputs.
+Same boot_seed + same request sequence → identical outputs across snemu,
+QEMU, and hardware; residual cross-engine divergence is always attributable
+to genuinely different inputs, never to gratuitous entropy.
+
 # Algorithm choice
 
 ## Mersenne Twister is disqualified for anything security-relevant
@@ -72,6 +129,7 @@ The entropy subsystem should itself be traced — estimated entropy at boot, eac
 - Span IDs: per-CPU-partitioned `u64` counter. No RNG.
 - No randomness subsystem in v0.1.
 - CSPRNG arrives ~v0.7b: ChaCha20-based, behind an `Rng`/`EntropySource` trait.
-- Seed source priority: virtio-rng → RISC-V `seed` CSR → device-tree seed → timing jitter.
+- Seed source priority: virtio-rng → RISC-V `seed` CSR → device-tree seed → timing jitter. (2026-07 addendum: the VF2's JH7110 has an on-chip TRNG with a mainline driver — slots in at hardware-RNG priority for the board port.)
+- Sampling randomness (LLM work) is its own category: seeded statistical PRNG, **seed on the wire** — replayable from telemetry, no CSPRNG dependency. See the 2026-07-25 section above.
 - Mersenne Twister: never used for anything security-relevant.
 - Entropy subsystem is traced like everything else.
