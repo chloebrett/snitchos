@@ -43,9 +43,53 @@ Two things the increment added beyond the plan:
   line viable and falls back to the menu if not. A suggestion that kills the
   buffer is worse than no suggestion.
 
-**Remaining for 5:** `RuntimePlatform::complete` over `kvetch_proto` — the
-on-target half, which needs the second endpoint cap and so lands with
-increment 6.
+**Increments 6 + 7 landed, and found a blocker.** `workload=stitch-kvetch`
+(kvetch server + REPL holding `SEND`), `RuntimePlatform::complete` over
+`kvetch_proto`, and the REPL's editor wired to `ModelCompleter`. All of it
+builds and boots. **Tab does not work on target**, for a reason worth
+recording carefully.
+
+### ⚠ The oracle is host-shaped, not metal-shaped
+
+One `complete()` makes **232 probes** — 58 token classes × 2 grammar entries —
+and each probe allocates a `format!("{prefix} {lexeme}")` string, a fresh token
+vector, and an AST. On the host that is microseconds. On target it exhausts the
+**16 MiB per-process heap** (`Process::HEAP_MAX`): talc maps a fresh ~68 KiB
+region per OOM, and 232 × 68 KiB ≈ 15.8 MiB lands almost exactly on the cap.
+The REPL then hangs in talc's OOM path — in `snitchos_user`'s panic handler,
+which spins, so **snemu reports the guest as idle** and the failure looks like
+"nothing happened" rather than a crash.
+
+How it was pinned down, since none of it was visible from the symptom:
+
+| Observation | What it ruled out |
+|---|---|
+| `emit("probe", 7)\n` round-trips | console input, injection, the workload |
+| `use M.` alone echoes | partial-line input, echo path |
+| `use M.\t` echoes *nothing* | — and explains why: `feed_with` returns its echo at the *end* of a chunk, so a hang on Tab swallows the preceding characters too |
+| a client-side counter never fires | the REPL never reaches the IPC call — the hang is in the *grammar*, not the wire |
+| `Forced` (`use M.`) hangs too | the model path entirely; it is `valid_next` itself |
+| process did not exit; instret flat at 15.4 M over a 20 s wait | computation — the guest is idle, i.e. blocked or spinning in a way snemu skips |
+
+**The fix (not yet done): stop re-lexing per probe.** `admits` currently
+formats a new source string and re-lexes the whole prefix for each of 58
+classes. Lexing the prefix *once* and appending a candidate token to a cloned
+token vector removes 232 string allocations and 232 lexes per query, leaving
+only the parses. That was already identified as the obvious optimisation when
+the oracle was built and deferred as "not needed yet" — this is the measurement
+that says it is needed. A second lever if that is not enough: the menu only
+ever displays `MENU_LIMIT` entries, so probing could stop early once enough
+classes are known, at the cost of an exact count.
+
+**The lesson worth keeping:** the design doc said "measure latency at increment
+4, before adding IPC on top". I skipped it, and the cost turned out not to be
+latency at all but *allocation volume* against a cap that does not exist on the
+host. Host-green is not target-green for anything that allocates in a loop.
+
+**Status of the pieces:** the workload, the server, the protocol, the client
+platform method and the scenario body all exist and are correct as far as they
+go; only `stitch-kvetch-completes` is unregistered (it cannot pass) so the gate
+stays green. The fix has a ready gate waiting.
  `stitch::complete` returns
 `Forced` / `Choices` / `None` over the union of both entries; 6 tests green,
 clippy clean, full stitch suite 723/723. Real output:

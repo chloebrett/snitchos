@@ -441,6 +441,9 @@ impl Model {
         let positions = tokens.len();
 
         let embedding = &self.weights[..self.vocab * d_model];
+        // Built once for the whole pass: the rotations are the same in every
+        // layer and every head.
+        let rotations = RotationTable::new(positions, head_dim);
 
         // Residual stream: one d_model vector per position.
         let mut stream: Vec<f32> = tokens
@@ -490,16 +493,18 @@ impl Model {
                 &project(&attention_normed, wq, d_model, d_model),
                 head_dim,
                 d_model,
+                &rotations,
             );
             let keys = rope(
                 &project(&attention_normed, wk, d_model, d_model),
                 head_dim,
                 d_model,
+                &rotations,
             );
             let values = project(&attention_normed, wv, d_model, d_model);
 
             let (attended, probabilities) =
-                attention(&queries, &keys, &values, positions, heads, head_dim);
+                attention(gemm, &queries, &keys, &values, positions, heads, head_dim);
             add_into(&mut stream, &project(&attended, wo, d_model, d_model));
 
             let post_attention = stream.clone();
@@ -601,15 +606,55 @@ pub fn rope_angle(position: usize, pair: usize, head_dim: usize) -> f32 {
     libm::powf(ROPE_BASE, -2.0 * pair as f32 / head_dim as f32) * position as f32
 }
 
+/// Precomputed `RoPE` rotations for one sequence length.
+///
+/// The rotation depends on `(position, pair)` and **not on the head**, and the
+/// frequency depends on `pair` alone. Computing it inline therefore repeated a
+/// `powf` per head per position — measured as the single largest cost in a
+/// training step, above every matmul. Building the table once and reading it is
+/// ~24× fewer transcendental calls.
+pub struct RotationTable {
+    pairs: usize,
+    sin: Vec<f32>,
+    cos: Vec<f32>,
+}
+
+impl RotationTable {
+    pub fn new(positions: usize, head_dim: usize) -> Self {
+        let pairs = head_dim / 2;
+        let mut sin = Vec::with_capacity(positions * pairs);
+        let mut cos = Vec::with_capacity(positions * pairs);
+
+        // One `powf` per pair, hoisted out of the position loop entirely.
+        let frequencies: Vec<f32> = (0..pairs)
+            .map(|pair| libm::powf(ROPE_BASE, -2.0 * pair as f32 / head_dim as f32))
+            .collect();
+
+        for position in 0..positions {
+            for &frequency in &frequencies {
+                let angle = frequency * position as f32;
+                sin.push(libm::sinf(angle));
+                cos.push(libm::cosf(angle));
+            }
+        }
+
+        Self { pairs, sin, cos }
+    }
+
+    pub fn at(&self, position: usize, pair: usize) -> (f32, f32) {
+        let index = position * self.pairs + pair;
+        (self.sin[index], self.cos[index])
+    }
+}
+
 /// Rotary position embedding, applied per head over adjacent dimension pairs.
-pub fn rope(rows: &[f32], head_dim: usize, d_model: usize) -> Vec<f32> {
+pub fn rope(rows: &[f32], head_dim: usize, d_model: usize, table: &RotationTable) -> Vec<f32> {
     let mut out = rows.to_vec();
 
     for (position, row) in out.chunks_mut(d_model).enumerate() {
         for head in row.chunks_mut(head_dim) {
             for pair in 0..head_dim / 2 {
-                let angle = rope_angle(position, pair, head_dim);
-                let (sin, cos) = (libm::sinf(angle), libm::cosf(angle));
+                let (sin, cos) = table.at(position, pair);
                 let (left, right) = (head[2 * pair], head[2 * pair + 1]);
 
                 head[2 * pair] = left * cos - right * sin;
@@ -629,7 +674,20 @@ pub fn rope(rows: &[f32], head_dim: usize, d_model: usize) -> Vec<f32> {
 /// `heads × positions × positions` with zeros above the diagonal. The
 /// probabilities are what the backward pass differentiates through, and
 /// recomputing them there would mean two definitions of the same softmax.
-pub fn attention(
+/// Both of attention's inner products are matmuls — `Q·Kᵀ` for the scores and
+/// `P·V` for the result — so both go through [`Gemm`] rather than scalar loops.
+///
+/// A head's data is strided through the residual stream, and BLAS wants
+/// contiguous rows, so each head is gathered into a `positions × head_dim`
+/// buffer first. That copy is `O(T·d)` against the multiply's `O(T²·d)` — a
+/// rounding error next to running the multiply itself in scalar Rust, which
+/// measured ~100× slower than the accelerated path.
+///
+/// The score matrix is computed in full and then masked, rather than computing
+/// only the lower triangle. Twice the arithmetic, but arithmetic is exactly what
+/// just got cheap; a triangular loop cannot be a GEMM.
+pub fn attention<G: Gemm>(
+    gemm: &G,
     queries: &[f32],
     keys: &[f32],
     values: &[f32],
@@ -643,49 +701,109 @@ pub fn attention(
     let mut probabilities = vec![0.0; heads * positions * positions];
 
     for head in 0..heads {
-        let offset = head * head_dim;
+        let query = gather_head(queries, head, positions, heads, head_dim);
+        let key = gather_head(keys, head, positions, heads, head_dim);
+        let value = gather_head(values, head, positions, heads, head_dim);
 
-        for query_pos in 0..positions {
-            let query = &queries[query_pos * d_model + offset..][..head_dim];
+        let scores = &mut probabilities[head * positions * positions..][..positions * positions];
+        gemm.sgemm(
+            GemmSpec {
+                m: positions,
+                k: head_dim,
+                n: positions,
+                transpose_a: false,
+                transpose_b: true,
+            },
+            &query,
+            &key,
+            scores,
+        );
 
-            let scores: Vec<f32> = (0..=query_pos)
-                .map(|key_pos| {
-                    let key = &keys[key_pos * d_model + offset..][..head_dim];
-                    query.iter().zip(key).map(|(q, k)| q * k).sum::<f32>() * scale
-                })
-                .collect();
-
-            for (key_pos, weight) in softmax(&scores).into_iter().enumerate() {
-                probabilities[(head * positions + query_pos) * positions + key_pos] = weight;
-
-                let value = &values[key_pos * d_model + offset..][..head_dim];
-                let target = &mut out[query_pos * d_model + offset..][..head_dim];
-                for (slot, v) in target.iter_mut().zip(value) {
-                    *slot += weight * v;
-                }
+        for (query_pos, row) in scores.chunks_mut(positions).enumerate() {
+            for (key_pos, score) in row.iter_mut().enumerate() {
+                // Causality: everything after this position is unreachable, and
+                // `-inf` is what makes softmax assign it exactly zero.
+                *score = if key_pos > query_pos {
+                    f32::NEG_INFINITY
+                } else {
+                    *score * scale
+                };
             }
+            softmax_in_place(row);
         }
+
+        let mut attended = vec![0.0; positions * head_dim];
+        gemm.sgemm(
+            GemmSpec {
+                m: positions,
+                k: positions,
+                n: head_dim,
+                transpose_a: false,
+                transpose_b: false,
+            },
+            scores,
+            &value,
+            &mut attended,
+        );
+        scatter_head(&mut out, &attended, head, positions, heads, head_dim);
     }
 
     (out, probabilities)
 }
 
+/// Copy one head's columns out of the residual stream into contiguous rows.
+pub fn gather_head(
+    data: &[f32],
+    head: usize,
+    positions: usize,
+    heads: usize,
+    head_dim: usize,
+) -> Vec<f32> {
+    let d_model = heads * head_dim;
+    let offset = head * head_dim;
+
+    (0..positions)
+        .flat_map(|position| data[position * d_model + offset..][..head_dim].iter().copied())
+        .collect()
+}
+
+/// The inverse of [`gather_head`], adding into the destination.
+pub fn scatter_head(
+    data: &mut [f32],
+    head_data: &[f32],
+    head: usize,
+    positions: usize,
+    heads: usize,
+    head_dim: usize,
+) {
+    let d_model = heads * head_dim;
+    let offset = head * head_dim;
+
+    for position in 0..positions {
+        let target = &mut data[position * d_model + offset..][..head_dim];
+        for (slot, value) in target.iter_mut().zip(&head_data[position * head_dim..]) {
+            *slot += value;
+        }
+    }
+}
+
+/// Max-subtracted softmax, in place. `-inf` entries become exactly zero.
+pub fn softmax_in_place(row: &mut [f32]) {
+    let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut total = 0.0;
+
+    for value in row.iter_mut() {
+        *value = libm::expf(*value - max);
+        total += *value;
+    }
+    for value in row.iter_mut() {
+        *value /= total;
+    }
+}
+
 /// The `1/√head_dim` factor on attention scores, shared with the backward pass.
 pub fn attention_scale(head_dim: usize) -> f32 {
     1.0 / libm::sqrtf(head_dim as f32)
-}
-
-/// Max-subtracted softmax — the subtraction is what keeps `exp` from
-/// overflowing on confident attention scores.
-fn softmax(scores: &[f32]) -> Vec<f32> {
-    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let exponentiated: Vec<f32> = scores
-        .iter()
-        .map(|score| libm::expf(score - max))
-        .collect();
-    let total: f32 = exponentiated.iter().sum();
-
-    exponentiated.into_iter().map(|value| value / total).collect()
 }
 
 fn add_into(stream: &mut [f32], delta: &[f32]) {

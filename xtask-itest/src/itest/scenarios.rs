@@ -928,26 +928,65 @@ pub fn ipi_self_wakeup(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
-/// Tier-0 audio smoke (`workload=audio-beep`): the kernel brings up the PWMDAC and
-/// drives a square-wave tone, bumping `snitchos.audio.samples_emitted_total` per
-/// sample. Under snemu the synthetic PWMDAC device accepts the `WDATA` writes and
-/// its all-ones SYSCRG reads let the reset `PollUntilSet` complete — so this proves
-/// the whole path ran (clock/reset → `CTRL` → the paced `WDATA` loop). snemu can't
-/// render analog output; the by-ear proof is `snemu … --audio-out`.
-pub fn audio_beep_emits_samples(h: &mut View) -> Result<(), String> {
+/// `workload=stitch-kvetch`: Tab at the Stitch prompt reaches a real completion
+/// service — the first place a *person* meets the completion stack.
+///
+/// **Not registered in `SCENARIOS` yet — it does not pass.** One `complete()`
+/// makes 232 probes (58 token classes × 2 grammar entries), each allocating a
+/// probe string, a token vector and an AST; that exhausts the 16 MiB
+/// per-process heap and the REPL hangs in talc's OOM path before it can ask
+/// the server anything. Kept here so the fix lands against a ready gate — see
+/// `plans/repl-completion.md`.
+#[allow(dead_code, reason = "registered once the oracle is affordable on target")]
+///
+/// The chain: a keystroke arrives over the UART, the line editor sees Tab, the
+/// grammar decides it cannot settle this position alone, and only then does the
+/// REPL `call` the kvetch server, which samples from babble and copies the
+/// answer back into the REPL's own buffer. The assertion is the server-side
+/// span appearing on the *server's* task id: the trace crossing the process
+/// boundary is what proves the round trip happened, rather than the REPL
+/// quietly falling back to its grammar-only menu.
+pub fn stitch_kvetch_completes(h: &mut View) -> Result<(), String> {
+    // The boot self-test confirms the REPL is up and polling the console, so
+    // injected keystrokes aren't dropped.
+    h.wait_for(SEC * 30, is_span_start_named("stitch.demo"))
+        .ok_or("stitch REPL never reached its boot self-test within 30s")?;
+
+    // `let x =` is deliberately ambiguous: seventeen classes may follow, so the
+    // grammar cannot force a token and the completer must ask. (A position with
+    // one legal spelling would be answered locally and never reach the server —
+    // that economy is the point, but it would make a poor test of the wire.)
+    h.send_input(b"let x =\t").map_err(|e| format!("inject REPL input: {e}"))?;
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("probe")
+        }
+        _ => false,
+    });
+    h.wait_for(SEC * 30, |f, strings| match f {
+        OwnedFrame::Metric { name_id, .. } => {
+            strings.get(name_id).map(String::as_str) == Some("snitchos.stitch.completions_asked")
+        }
+        _ => false,
+    })
+    .ok_or("DIAGNOSTIC: the REPL never reached the call")?;
+    return Err("DIAGNOSTIC: the REPL DID reach the call".to_string());
+    #[allow(unreachable_code)]
+
+    h.wait_for(SEC * 30, is_span_start_named("kvetch.complete")).ok_or(
+        "no 'kvetch.complete' span within 30s — Tab never reached the completion \
+         server: the REPL fell back to its grammar-only menu (no endpoint cap?), \
+         the editor ignored Tab, or the server never received the call",
+    )?;
+
     h.wait_for(SEC * 30, |f, strings| match f {
         OwnedFrame::Metric { name_id, value, .. } => {
-            strings.get(name_id).map(String::as_str)
-                == Some("snitchos.audio.samples_emitted_total")
+            strings.get(name_id).map(String::as_str) == Some("snitchos.kvetch.requests_total")
                 && *value >= 1
         }
         _ => false,
     })
-    .ok_or(
-        "audio.samples_emitted_total never reached 1 within 30s — \
-         PWMDAC bring-up hung (reset PollUntilSet never released?), the \
-         audio-beep workload wasn't selected, or the WDATA write loop didn't run",
-    )?;
+    .ok_or("the server never counted a request, despite opening a span for one")?;
     Ok(())
 }
 

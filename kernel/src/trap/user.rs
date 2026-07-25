@@ -462,6 +462,11 @@ pub static BADGE_HANDOUT_SERVER: ProgramSpec =
 /// `workload=badge-handout`: the client (`SEND`).
 pub static BADGE_HANDOUT_CLIENT: ProgramSpec = ipc_user(BADGE_HANDOUT_CLIENT_ELF, Rights::SEND.bits());
 
+/// `workload=stitch-kvetch`: the REPL holding `SEND` on the completion
+/// endpoint, so Tab at the prompt reaches a real service. It gets kvetch
+/// *instead of* the filesystem — see [`WorkloadKind::StitchKvetch`]'s note.
+pub static STITCH_REPL_KVETCH: ProgramSpec = ipc_user(STITCH_REPL_ELF, Rights::SEND.bits());
+
 /// `workload=kvetch-babble`: the completion server (`RECV`). The model behind
 /// the endpoint is babble — rung 0, no weights — so the serving path is proved
 /// before any checkpoint exists. See `docs/babble-design.md`.
@@ -750,6 +755,15 @@ static LAYOUTS: &[(WorkloadKind, UserLayout)] = &[
     (WorkloadKind::StitchRepl, UserLayout {
         needs_endpoint: false,
         programs: &[ProgramSpawn { name: "stitch_repl", program: &STITCH_REPL, priority: Priority::Normal }],
+    }),
+    // The REPL with Tab completion: a kvetch server plus the REPL holding
+    // `SEND` on it. Server first — it must be receiving before the REPL calls.
+    (WorkloadKind::StitchKvetch, UserLayout {
+        needs_endpoint: true,
+        programs: &[
+            ProgramSpawn { name: "kvetch_server", program: &KVETCH_SERVER, priority: Priority::Normal },
+            ProgramSpawn { name: "stitch_repl", program: &STITCH_REPL_KVETCH, priority: Priority::Normal },
+        ],
     }),
     // The completion endpoint, served by a model with no weights: kvetch backed
     // by babble, plus a client asking for one completion. Server first — it must

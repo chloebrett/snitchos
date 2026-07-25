@@ -2508,6 +2508,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xtask-cram"
+version = "0.0.1"
+dependencies = [
+ "cram",
+ "cram-corpus",
+ "kvetch-model",
+ "kvetch-vocab",
+]
+
+[[package]]
 name = "xtask-itest"
 version = "0.0.1"
 dependencies = [
@@ -2548,16 +2558,6 @@ dependencies = [
  "rustc-demangle",
  "snemu",
  "xtask-qemu",
-]
-
-[[package]]
-name = "xtask-train"
-version = "0.0.1"
-dependencies = [
- "cram",
- "cram-corpus",
- "kvetch-model",
- "kvetch-vocab",
 ]
 
 [[package]]

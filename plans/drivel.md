@@ -103,15 +103,24 @@ stream changes. Worth doing before Tier-0 output enters the *real* corpus, since
 padded operators are a distribution the model would otherwise learn.
 
 **Layout is absent because Stitch's grammar is whitespace-insensitive** — babble
-has no reason to emit newlines or indentation, so it doesn't. The right fix is
-not to teach babble layout but to **pretty-print**: babble output parses by
-construction, so parse it and render the AST. That needs an AST→source printer,
-which `stitch` does not have today (`render.rs` prints `Value` tables for the
-REPL, not source). It is independently valuable — a Stitch formatter is
-stim-shaped work — and it is *not* on the probe's path: `unconstrained-parse%`
-does not care about layout, and a flat token stream is arguably the purer test of
-grammar acquisition. Deferred, deliberately, and required before Tier-0 output
-joins the real corpus.
+has no reason to emit newlines or indentation, so it doesn't. The fix is not to
+teach babble layout but to **pretty-print**: babble output parses by
+construction, so parse it and render the AST.
+
+**Shipped (2026-07-26) as `Layout::{Flat, Printed}`** on the back of `stitch`'s
+new AST printer. `Printed` gives tight operators (`sum queue<value> = frame`
+where `Flat` had `sum queue < value > = frame`), real newlines, and indentation.
+Round-trip is guarded by comparing **ASTs** before and after printing, which is
+what catches the maximal-munch hazard — printing `Gt` then `Assign` adjacently
+would re-lex as `Ge` and silently change the program.
+
+**`Printed` is now the default for training**, reversing the earlier "not on the
+probe's path" call. That reasoning was right that `unconstrained-parse%` ignores
+layout, and wrong about what else layout buys: `Flat` teaches a model babble's
+*renderer* (space-padded operators that appear in no real Stitch), and it
+contains no indentation at all — so it never exercises the GPT-2 pre-tokenization
+rule, which exists precisely so an indent run can become one token. A corpus that
+cannot test that decision is the wrong corpus to freeze a vocab against.
 
 **BPE memorizes phrases when the vocab is large relative to the corpus.** At 768
 merges over 400 programs the late merges are whole phrases (`"prod frame < "`,
@@ -447,8 +456,66 @@ below a threshold near zero. The classic overfit-one-batch check, promoted to a
 unit test: a rig that cannot memorize 8 sequences is broken, and this is the only
 place where that is cheap to tell.
 
-**GREEN**: the `Rung` registry and forward pass (done), the `Gemm` trait and its
-backends, the backward pass, AdamW, and the checkpoint format.
+**GREEN**: the `Rung` registry and forward pass, the `Gemm` trait and its
+backends, the backward pass, `AdamW`, and the checkpoint format.
+
+**Status: COMPLETE (2026-07-26).** Plus `cargo xtask train --rung drivel`:
+push-button (corpus generated or reused, vocab trained, model trained,
+checkpoint + TSV loss curve written) and self-reporting.
+
+### Throughput, and what the self-report found
+
+The run reports loss, smoothed loss, learning rate, gradient norm, tok/s,
+elapsed and ETA every N steps. It earned that on the first run: **~3000 tok/s**,
+extrapolating to ~9 hours against an estimate of 15–25 minutes. Three fixes, each
+verified behaviour-preserving by an unchanged loss trajectory:
+
+| Change | tok/s |
+|---|---|
+| first run | 3,000 |
+| removed a `.to_vec()` and a loop-invariant in attention's inner loop | 4,136 |
+| ran the batch's sequences concurrently | 26,063 |
+| `Q·Kᵀ` and `P·V` as GEMMs instead of scalar loops | 37,055 |
+| precomputed the `RoPE` rotation table | **55,945** |
+
+Full 4-epoch run: **~29 minutes**, from ~9 hours.
+
+The last one was the surprise and the largest single win. `rope_angle` called
+`powf` per (position, head, pair) in both directions — but the frequency depends
+only on the pair and the rotation only on `(position, pair)`, never on the head.
+~2M transcendental calls per step became ~4K. **A table lookup beat every matmul
+optimization**, which is not where anyone looks first.
+
+Attention-as-GEMM under-delivered (1.4×, not the predicted 3×) because thread
+parallelism was already absorbing that cost — the two overlap rather than
+compound. Worth recording: the second optimization of the same bottleneck pays
+much less than the first.
+Six ops gradient-checked individually, then the whole model — every weight
+against a finite difference of the real loss. The per-op and whole-model checks
+catch different bug classes: an op can be individually correct while the
+composition puts a gradient at the wrong offset, counts a residual fork once
+instead of twice, or lets the tied embedding collect from only one of its two
+uses.
+
+Two invariants earned by measurement rather than assertion, both mutation-tested
+by deleting the term and confirming the check fails:
+
+- `RMSNorm`'s `1/rms` coupling term (fails at 40% error without it).
+- Attention's softmax row-coupling `−Σ p·dp`.
+
+Both are the terms a hand-derivation drops, and in both cases the wrong gradient
+is *stable* — it trains, slowly, to the wrong place. Nothing but finite
+differences would say so.
+
+**Two anti-drift structures hold the whole thing together**, and both are the
+same principle that put the oracle in `stitch`:
+
+- `ModelConfig::layer_offsets` is the single source of weight-layout truth;
+  forward reads through it and backward writes through it.
+- `forward_with` is `trace_with(...).logits`, so there is exactly one forward
+  implementation. A training-only copy would let training and serving drift —
+  and gradient checking *cannot* catch that, since it validates backward against
+  whichever forward it was handed. Both would be consistently wrong.
 
 ## Increment 5 — the grammar-learnability probe (drivel-on-babble)
 

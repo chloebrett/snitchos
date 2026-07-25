@@ -270,11 +270,19 @@ cap, every sound source is a client, and it's all observable on the wire.
 - **Discipline proved:** a `SyscallRefused` when a non-holder calls `AudioWrite` (a
   negative-path scenario or unit assert on `authorize_audio`).
 
-## Retiring the in-kernel beep (optional, after Increment 8)
+## Retiring the in-kernel beep — ✅ DONE
 
-Once `glitch-beep` is green, the `audio_beep_entry` kernel task + the `AudioBeep`
-workload can be removed (or kept as a lower-level MMIO smoke). Deferred — keeping both
-green through the build is the point of the additive approach.
+`glitch-beep` being green, the in-kernel beep was removed: `audio_beep_entry` (the boot
+task) + the `AudioBeep` `WorkloadKind` + its `kmain` arm + the `audio-beep-emits-samples`
+itest scenario. **The kernel's `synth` dependency dropped entirely** — `audio_beep_entry`
+was its only user, so steady state is now what the plan promised: `synth` is
+**userspace-only** (glitch generates; the kernel just writes bytes via `play_samples`).
+`kernel-devices::pwmdac` keeps the MMIO-layout logic; `kernel/src/device/pwmdac.rs` keeps
+the `unsafe` glue (`play_samples`/`write_sample`/`bringup`/`configure`/`SAMPLES_EMITTED`,
+all used by the `AudioWrite` syscall). The `BEEP_RATE_HZ` constant became `DAC_RATE_HZ`
+(must match `glitch_core::FS_HZ`). `glitch-beep` now covers the PWMDAC MMIO path (strictly
+more than audio-beep did), so no coverage was lost. The `itest-matrix` generated diagram
+was regenerated after the scenario removal.
 
 ## v2+ (deferred, in priority order)
 

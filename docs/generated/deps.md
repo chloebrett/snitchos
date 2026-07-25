@@ -45,17 +45,29 @@ graph LR
         magnitude["magnitude"]
     end
     babble["babble"]
+    cram["cram"]
+    cram_corpus["cram-corpus"]
+    glitch["glitch"]
+    glitch_core["glitch-core"]
     glitch_proto["glitch-proto"]
     kernel_net["kernel-net"]
+    kvetch["kvetch"]
+    kvetch_model["kvetch-model"]
     kvetch_proto["kvetch-proto"]
+    kvetch_vocab["kvetch-vocab"]
     synth["synth"]
     xtask_cmds["xtask-cmds"]
     xtask_itest["xtask-itest"]
     xtask_qemu["xtask-qemu"]
     xtask_snemu["xtask-snemu"]
+    babble --> kvetch_proto
     babble --> stitch
     collector --> protocol
     collector --> snitchos_abi
+    cram --> kvetch_model
+    cram_corpus --> babble
+    cram_corpus --> kvetch_vocab
+    cram_corpus --> stitch
     diagram --> protocol
     diagram --> snitchos_abi
     fs --> fs_core
@@ -66,6 +78,12 @@ graph LR
     fs --> snitchos_user
     fs_proto --> fs_core
     fs_proto --> snitchos_abi
+    glitch --> glitch_core
+    glitch --> glitch_proto
+    glitch --> hitch
+    glitch --> snitchos_user
+    glitch_core --> glitch_proto
+    glitch_core --> synth
     glitch_proto --> snitchos_abi
     hello --> fs_proto
     hello --> hitch
@@ -85,12 +103,15 @@ graph LR
     kernel --> kernel_proc
     kernel --> protocol
     kernel --> snitchos_abi
-    kernel --> synth
     kernel_obs --> kernel_net
     kernel_obs --> protocol
     kernel_proc --> kernel_mem
     kernel_proc --> protocol
     kernel_proc --> snitchos_abi
+    kvetch --> babble
+    kvetch --> kvetch_proto
+    kvetch --> snitchos_std
+    kvetch --> snitchos_user
     kvetch_proto --> snitchos_abi
     protocol --> snitchos_abi
     ramfs --> fs_core
@@ -104,6 +125,7 @@ graph LR
     stitch --> protocol
     stitch --> snitchos_abi
     stitch --> fs_proto
+    stitch --> kvetch_proto
     stitch --> snitchos_user
     xtask --> kernel_boot
     xtask --> xtask_cmds
@@ -111,13 +133,16 @@ graph LR
     xtask_cmds --> protocol
     xtask_cmds --> snip
     xtask_cmds --> xtask_qemu
+    xtask_itest --> babble
     xtask_itest --> diagram
     xtask_itest --> fs_proto
     xtask_itest --> itest_harness
+    xtask_itest --> kvetch_proto
     xtask_itest --> magnitude
     xtask_itest --> protocol
     xtask_itest --> snemu
     xtask_itest --> snitchos_abi
+    xtask_itest --> stitch
     xtask_itest --> xtask_qemu
     xtask_itest --> xtask_snemu
     xtask_snemu --> diagram

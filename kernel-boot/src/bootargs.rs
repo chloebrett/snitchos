@@ -83,13 +83,6 @@ workloads! {
     /// no meaning — nothing depends on the discriminant values.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum WorkloadKind {
-        /// Tier-0 audio: bring up the JH7110 PWMDAC (SYSCRG clock/reset + `CTRL`)
-        /// and drive a fixed-frequency square-wave tone out the 3.5mm jack, bumping
-        /// `snitchos.audio.samples_emitted_total` per sample. Address-driven (not
-        /// board-gated), so it runs under snemu's synthetic PWMDAC device for the
-        /// `audio-beep-emits-samples` scenario + `--audio-out` by-ear WAV.
-        /// See `plans/vf2-audio-tier0.md`.
-        AudioBeep,
         /// v0.9c cap-transfer-in-reply: a `badge-handout-server` (`RECV | MINT`)
         /// mints a badged `SEND` cap per request and **hands it back in the reply**;
         /// a `badge-handout-client` `call`s, receives the badged cap, and signals
@@ -295,6 +288,17 @@ workloads! {
         /// holding the FS endpoint cap, so `:load <name>` reads a baked-in `.st`
         /// file off the ramfs and runs it.
         StitchFs,
+        /// The Stitch REPL with **completion**: a `kvetch` server (babble behind
+        /// an endpoint) plus the REPL holding a `SEND` cap on it, so Tab at the
+        /// prompt asks a real completion service.
+        ///
+        /// Deliberately *instead of* the filesystem, not alongside it: a
+        /// `run_ipc`-launched program is granted one endpoint, and the REPL
+        /// reads it positionally. Holding both would need an init-style spawn
+        /// tree delegating two caps — which is exactly the positional-startup
+        /// fragility `docs/manifest-design.md` exists to kill, so it is left for
+        /// that work rather than worked around here.
+        StitchKvetch,
         /// The Stitch tree-walk interpreter running as a userspace REPL on the metal:
         /// boots a self-test (`1 + 2`), then loops `ConsoleRead` → evaluate →
         /// `ConsoleWrite`. First on-target run of the ported `no_std` interpreter.
@@ -704,13 +708,13 @@ mod tests {
     }
 
     #[test]
-    fn selects_audio_beep() {
-        assert_eq!(select("workload=audio-beep"), Some(WorkloadKind::AudioBeep));
+    fn selects_glitch_beep() {
+        assert_eq!(select("workload=glitch-beep"), Some(WorkloadKind::GlitchBeep));
     }
 
     #[test]
-    fn selects_glitch_beep() {
-        assert_eq!(select("workload=glitch-beep"), Some(WorkloadKind::GlitchBeep));
+    fn selects_stitch_kvetch() {
+        assert_eq!(select("workload=stitch-kvetch"), Some(WorkloadKind::StitchKvetch));
     }
 
     #[test]

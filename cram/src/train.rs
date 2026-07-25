@@ -7,7 +7,9 @@
 //! than agreement, because two implementations can share a misconception and
 //! finite differences cannot share one with us.
 
-use kvetch_model::{Gemm, GemmSpec, Model, attention_scale, rope_angle};
+use kvetch_model::{
+    Gemm, GemmSpec, Model, RotationTable, attention_scale, gather_head, scatter_head,
+};
 
 use alloc_free_math::softmax_in_place;
 
@@ -141,17 +143,21 @@ pub fn rms_norm_backward(
 /// Gradient of [`kvetch_model::rope`]: the inverse rotation.
 ///
 /// A rotation is orthogonal, so its transpose is its inverse — backward rotates
-/// by `−θ` and needs no saved activations at all. The angle comes from
-/// [`kvetch_model::rope_angle`] rather than being recomputed here, so forward
-/// and backward cannot drift apart on the geometry.
-pub fn rope_backward(d_output: &[f32], head_dim: usize, d_model: usize) -> Vec<f32> {
+/// by `−θ` and needs no saved activations at all. The angles come from the same
+/// [`RotationTable`] the forward pass used, so the two cannot drift apart on the
+/// geometry.
+pub fn rope_backward(
+    d_output: &[f32],
+    head_dim: usize,
+    d_model: usize,
+    table: &RotationTable,
+) -> Vec<f32> {
     let mut d_input = d_output.to_vec();
 
     for (position, row) in d_input.chunks_mut(d_model).enumerate() {
         for head in row.chunks_mut(head_dim) {
             for pair in 0..head_dim / 2 {
-                let angle = rope_angle(position, pair, head_dim);
-                let (sin, cos) = (angle.sin(), angle.cos());
+                let (sin, cos) = table.at(position, pair);
                 let (left, right) = (head[2 * pair], head[2 * pair + 1]);
 
                 head[2 * pair] = left * cos + right * sin;
@@ -180,18 +186,6 @@ pub struct AttentionShape {
     pub head_dim: usize,
 }
 
-/// One head's slice of one position's row.
-///
-/// A `fn` rather than a closure so the returned borrow is tied to `data` alone;
-/// a closure infers one lifetime for its whole environment and will not compile
-/// here. Views, never copies — this is the innermost thing the backward pass
-/// does, and the `.to_vec()` that used to live here cost more than the
-/// arithmetic it fed.
-fn head_view(data: &[f32], position: usize, offset: usize, shape: AttentionShape) -> &[f32] {
-    let start = position * shape.heads * shape.head_dim + offset;
-    &data[start..start + shape.head_dim]
-}
-
 /// Gradients of [`kvetch_model::attention`] with respect to queries, keys and
 /// values.
 ///
@@ -200,75 +194,117 @@ fn head_view(data: &[f32], position: usize, offset: usize, shape: AttentionShape
 /// carries `−Σ p·dp` from its own row. Dropping it gives gradients that still
 /// train, slowly and to the wrong place.
 ///
-/// Causality falls out of the loop bounds — key positions after the query are
-/// never visited, so they accumulate nothing.
-pub fn attention_backward<'a>(
-    saved: &AttentionForward<'a>,
-    d_output: &'a [f32],
+/// Causality needs no separate handling: the forward pass masked those scores to
+/// `-inf`, so their probabilities are exactly zero, and every gradient here is
+/// multiplied by one.
+pub fn attention_backward<G: Gemm>(
+    gemm: &G,
+    saved: &AttentionForward<'_>,
+    d_output: &[f32],
     shape: AttentionShape,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let &AttentionForward {
-        queries,
-        keys,
-        values,
-        probabilities,
-    } = saved;
     let AttentionShape {
         positions,
         heads,
         head_dim,
     } = shape;
-    let d_model = heads * head_dim;
     let scale = attention_scale(head_dim);
+    let d_model = heads * head_dim;
 
     let mut d_queries = vec![0.0; positions * d_model];
     let mut d_keys = vec![0.0; positions * d_model];
     let mut d_values = vec![0.0; positions * d_model];
 
+    let gather = |data: &[f32], head: usize| gather_head(data, head, positions, heads, head_dim);
+    let multiply = |a: &[f32], b: &[f32], out: &mut [f32], m, k, n, ta, tb| {
+        gemm.sgemm(
+            GemmSpec {
+                m,
+                k,
+                n,
+                transpose_a: ta,
+                transpose_b: tb,
+            },
+            a,
+            b,
+            out,
+        );
+    };
+
     for head in 0..heads {
-        let offset = head * head_dim;
-        let view = |data: &'a [f32], position: usize| head_view(data, position, offset, shape);
+        let probabilities =
+            &saved.probabilities[head * positions * positions..][..positions * positions];
+        let d_out = gather(d_output, head);
+        let query = gather(saved.queries, head);
+        let key = gather(saved.keys, head);
+        let value = gather(saved.values, head);
 
-        for query_pos in 0..positions {
-            let row = &probabilities[(head * positions + query_pos) * positions..][..positions];
-            let d_out = view(d_output, query_pos);
-            // Loop-invariant across key positions — reading it inside the inner
-            // loop re-derived the same slice `positions` times.
-            let query = view(queries, query_pos);
+        // dV = Pᵀ·dOut
+        let mut d_value = vec![0.0; positions * head_dim];
+        multiply(
+            probabilities,
+            &d_out,
+            &mut d_value,
+            positions,
+            positions,
+            head_dim,
+            true,
+            false,
+        );
 
-            // dL/dp for each attended position, and the row-sum that the
-            // softmax's normalization couples into every score.
-            let d_probabilities: Vec<f32> = (0..=query_pos)
-                .map(|key_pos| {
-                    view(values, key_pos)
-                        .iter()
-                        .zip(d_out)
-                        .map(|(v, d)| v * d)
-                        .sum::<f32>()
-                })
-                .collect();
-            let coupling: f32 = (0..=query_pos)
-                .map(|key_pos| row[key_pos] * d_probabilities[key_pos])
-                .sum();
-
-            for key_pos in 0..=query_pos {
-                let weight = row[key_pos];
-                let d_score = weight * (d_probabilities[key_pos] - coupling) * scale;
-                let key = view(keys, key_pos);
-
-                let value_base = key_pos * d_model + offset;
-                let query_base = query_pos * d_model + offset;
-                for dimension in 0..head_dim {
-                    d_values[value_base + dimension] += weight * d_out[dimension];
-                    d_queries[query_base + dimension] += d_score * key[dimension];
-                    d_keys[value_base + dimension] += d_score * query[dimension];
-                }
+        // dP = dOut·Vᵀ, then softmax's row coupling turns it into dScores.
+        let mut d_scores = vec![0.0; positions * positions];
+        multiply(
+            &d_out,
+            &value,
+            &mut d_scores,
+            positions,
+            head_dim,
+            positions,
+            false,
+            true,
+        );
+        for (query_pos, row) in d_scores.chunks_mut(positions).enumerate() {
+            let weights = &probabilities[query_pos * positions..][..positions];
+            let coupling: f32 = weights.iter().zip(row.iter()).map(|(p, d)| p * d).sum();
+            for (slot, weight) in row.iter_mut().zip(weights) {
+                *slot = weight * (*slot - coupling) * scale;
             }
         }
+
+        // dQ = dScores·K and dK = dScoresᵀ·Q. Masked entries carry zero
+        // probability, so causality needs no separate handling here.
+        let mut d_query = vec![0.0; positions * head_dim];
+        multiply(
+            &d_scores,
+            &key,
+            &mut d_query,
+            positions,
+            positions,
+            head_dim,
+            false,
+            false,
+        );
+        let mut d_key = vec![0.0; positions * head_dim];
+        multiply(
+            &d_scores,
+            &query,
+            &mut d_key,
+            positions,
+            positions,
+            head_dim,
+            true,
+            false,
+        );
+
+        scatter_head(&mut d_queries, &d_query, head, positions, heads, head_dim);
+        scatter_head(&mut d_keys, &d_key, head, positions, heads, head_dim);
+        scatter_head(&mut d_values, &d_value, head, positions, heads, head_dim);
     }
 
     (d_queries, d_keys, d_values)
 }
+
 
 /// Derivative of [`kvetch_model::silu`] at `value`: `σ + x·σ·(1 − σ)`.
 pub fn silu_backward(value: f32) -> f32 {
@@ -298,6 +334,8 @@ pub fn loss_and_gradient<G: Gemm>(
 
     let trace = model.trace_with(tokens, gemm);
     let (loss, d_logits) = cross_entropy(&trace.logits, targets, vocab);
+    // One table for the whole backward pass, matching the forward's.
+    let rotations = RotationTable::new(positions, head_dim);
 
     let weights = model.weights();
     let mut gradient = vec![0.0; weights.len()];
@@ -392,6 +430,7 @@ pub fn loss_and_gradient<G: Gemm>(
         accumulate(&mut gradient, offsets.wo, &d_wo);
 
         let (d_queries, d_keys, d_values) = attention_backward(
+            gemm,
             &AttentionForward {
                 queries: &saved.queries,
                 keys: &saved.keys,
@@ -408,8 +447,14 @@ pub fn loss_and_gradient<G: Gemm>(
 
         // Rotation is applied to q and k only, so only they unwind through it.
         let projected = [
-            (offsets.wq, rope_backward(&d_queries, head_dim, d_model)),
-            (offsets.wk, rope_backward(&d_keys, head_dim, d_model)),
+            (
+                offsets.wq,
+                rope_backward(&d_queries, head_dim, d_model, &rotations),
+            ),
+            (
+                offsets.wk,
+                rope_backward(&d_keys, head_dim, d_model, &rotations),
+            ),
             (offsets.wv, d_values),
         ];
 
@@ -624,10 +669,11 @@ mod tests {
         }
         let probe = pseudo_random_weights(positions * d_model, 32);
 
-        let analytic = rope_backward(&probe, head_dim, d_model);
+        let rotations = RotationTable::new(positions, head_dim);
+        let analytic = rope_backward(&probe, head_dim, d_model, &rotations);
 
         assert_matches_finite_differences(&mut rows, &analytic, |candidate| {
-            linear_probe(&rope(candidate, head_dim, d_model), &probe)
+            linear_probe(&rope(candidate, head_dim, d_model, &rotations), &probe)
         });
     }
 
@@ -645,10 +691,19 @@ mod tests {
         let probe = pseudo_random_weights(positions * d_model, 44);
 
         let attend = |q: &[f32], k: &[f32], v: &[f32]| {
-            attention(q, k, v, positions, heads, head_dim).0
+            attention(&NaiveGemm, q, k, v, positions, heads, head_dim).0
         };
-        let (_, probabilities) = attention(&queries, &keys, &values, positions, heads, head_dim);
+        let (_, probabilities) = attention(
+            &NaiveGemm,
+            &queries,
+            &keys,
+            &values,
+            positions,
+            heads,
+            head_dim,
+        );
         let (d_queries, d_keys, d_values) = attention_backward(
+            &NaiveGemm,
             &AttentionForward {
                 queries: &queries,
                 keys: &keys,

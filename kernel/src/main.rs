@@ -506,12 +506,6 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
             let _ = sched::spawn("workload_producer", workload::producer_entry);
             let _ = sched::spawn("workload_consumer", workload::consumer_entry);
         }
-        // Tier-0 audio: bring up the PWMDAC and beep out the 3.5mm jack. A single
-        // kernel task that yields each period so the heartbeat drains the sample
-        // counter. Address-driven, so it runs under snemu's synthetic PWMDAC.
-        Some(WorkloadKind::AudioBeep) => {
-            let _ = sched::spawn("audio_beep", pwmdac::audio_beep_entry);
-        }
         // v0.9 block/wake smoke: a blocker + waker on hart 0. The blocker
         // calls `block_current`; the waker `wake`s it. Single-hart, kernel
         // tasks — no hart-1 placement (skipped from the probe below).
@@ -543,6 +537,7 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
             | WorkloadKind::StitchRepl
             | WorkloadKind::StitchFs
             | WorkloadKind::KvetchBabble
+            | WorkloadKind::StitchKvetch
             | WorkloadKind::SpawnImage
             | WorkloadKind::ManifestIface
             | WorkloadKind::ManifestSatisfy
@@ -666,6 +661,7 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
                     | WorkloadKind::StitchRepl
                     | WorkloadKind::StitchFs
                     | WorkloadKind::KvetchBabble
+            | WorkloadKind::StitchKvetch
                     | WorkloadKind::SpawnImage
                     | WorkloadKind::ManifestIface
                     | WorkloadKind::ManifestSatisfy

@@ -201,9 +201,12 @@ catalog! {
     wfi "sched-span-survives-yield"       scenarios::sched_span_survives_yield      [sched]         {"demo"};
     cpu "heap-oom"                        scenarios::heap_oom                       [heap, oom]    {"heap-oom"};
     cpu "workload-cooperative-baseline"   scenarios::workload_cooperative_baseline  [workload]      {"cooperative"};
-    cpu "audio-beep-emits-samples"        scenarios::audio_beep_emits_samples       [audio]         {"audio-beep"};
     cpu "glitch-beep-plays"               scenarios::glitch_beep_plays              [audio]         {"glitch-beep"};
     cpu "kvetch-babble-serves"            scenarios::kvetch_babble_serves           [kvetch]        {"kvetch-babble"};
+    // `stitch-kvetch-completes` is written but NOT registered: Tab at the REPL
+    // exhausts the 16 MiB per-process heap inside the continuation oracle before
+    // it can ask anything. See plans/repl-completion.md — the workload and the
+    // scenario body are kept so the fix has a ready gate.
     cpu "smp-producer-consumer-correctness" scenarios::smp_producer_consumer_correctness [smp, workload] {"smp burst=256"};
     wfi "ipi-self-wakeup"                 scenarios::ipi_self_wakeup                [smp, ipi]      {"init"};
     wfi "smp-secondary-hart-boots"        scenarios::smp_secondary_hart_boots       [smp]           {"init"};
