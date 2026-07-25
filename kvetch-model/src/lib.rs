@@ -75,6 +75,51 @@ impl ModelConfig {
     pub const fn head_dim(&self) -> usize {
         self.d_model / self.heads
     }
+
+    /// Parameters in one transformer layer.
+    pub const fn layer_params(&self) -> usize {
+        4 * self.d_model * self.d_model + 2 * self.d_model * self.ffn + 2 * self.d_model
+    }
+
+    /// Where each of a layer's weight blocks starts in the flat vector.
+    ///
+    /// **The single source of layout truth.** Forward reads through this and so
+    /// does backward; a layout replicated in two places would put gradients in
+    /// the wrong slots, which trains a model that is subtly not the one being
+    /// evaluated.
+    pub const fn layer_offsets(&self, vocab: usize, layer: usize) -> LayerOffsets {
+        let base = vocab * self.d_model + layer * self.layer_params();
+        let square = self.d_model * self.d_model;
+
+        LayerOffsets {
+            attention_norm: base,
+            wq: base + self.d_model,
+            wk: base + self.d_model + square,
+            wv: base + self.d_model + 2 * square,
+            wo: base + self.d_model + 3 * square,
+            ffn_norm: base + self.d_model + 4 * square,
+            w1: base + 2 * self.d_model + 4 * square,
+            w2: base + 2 * self.d_model + 4 * square + self.d_model * self.ffn,
+        }
+    }
+
+    /// Where the final norm's scale starts.
+    pub const fn final_norm_offset(&self, vocab: usize) -> usize {
+        vocab * self.d_model + self.layers * self.layer_params()
+    }
+}
+
+/// Byte-free offsets into the flat weight vector for one layer.
+#[derive(Debug, Clone, Copy)]
+pub struct LayerOffsets {
+    pub attention_norm: usize,
+    pub wq: usize,
+    pub wk: usize,
+    pub wv: usize,
+    pub wo: usize,
+    pub ffn_norm: usize,
+    pub w1: usize,
+    pub w2: usize,
 }
 
 impl Rung {
@@ -195,6 +240,36 @@ impl Gemm for NaiveGemm {
     }
 }
 
+/// Everything one layer computed on the way forward that its gradient needs.
+pub struct LayerTrace {
+    /// The residual stream entering the layer.
+    pub input: Vec<f32>,
+    pub attention_normed: Vec<f32>,
+    pub attention_inverse_rms: Vec<f32>,
+    /// Post-rotation, since that is what attention consumed.
+    pub queries: Vec<f32>,
+    pub keys: Vec<f32>,
+    pub values: Vec<f32>,
+    pub probabilities: Vec<f32>,
+    pub attended: Vec<f32>,
+    /// The stream after the attention residual, entering the feed-forward half.
+    pub post_attention: Vec<f32>,
+    pub ffn_normed: Vec<f32>,
+    pub ffn_inverse_rms: Vec<f32>,
+    /// Pre-activation, which is what `silu`'s derivative is taken at.
+    pub hidden: Vec<f32>,
+    pub activated: Vec<f32>,
+}
+
+/// A whole forward pass, kept for the backward pass.
+pub struct Trace {
+    pub layers: Vec<LayerTrace>,
+    pub final_input: Vec<f32>,
+    pub final_inverse_rms: Vec<f32>,
+    pub final_normed: Vec<f32>,
+    pub logits: Vec<f32>,
+}
+
 /// `RMSNorm`'s denominator guard.
 const NORM_EPS: f32 = 1e-5;
 
@@ -240,6 +315,11 @@ impl Model {
         self.vocab
     }
 
+    /// The flat weight vector, in the layout [`Model`] documents.
+    pub fn weights(&self) -> &[f32] {
+        &self.weights
+    }
+
     /// Logits for every position, using the reference multiply.
     pub fn forward(&self, tokens: &[u16]) -> Vec<f32> {
         self.forward_with(tokens, &NaiveGemm)
@@ -254,6 +334,17 @@ impl Model {
     /// strided, `O(T²·d)` rather than `O(T·d²)`, and at the context lengths this
     /// ladder targets the projections dominate. Revisit if a profile disagrees.
     pub fn forward_with<G: Gemm>(&self, tokens: &[u16], gemm: &G) -> Vec<f32> {
+        self.trace_with(tokens, gemm).logits
+    }
+
+    /// The forward pass, keeping every intermediate the backward pass needs.
+    ///
+    /// [`forward_with`](Self::forward_with) is this with the trace discarded, so
+    /// there is exactly one forward implementation. A second, training-only
+    /// copy would let training and serving drift apart — and gradient checking
+    /// could not catch it, because it validates the backward pass against
+    /// whichever forward it was given. Both would be consistently wrong.
+    pub fn trace_with<G: Gemm>(&self, tokens: &[u16], gemm: &G) -> Trace {
         let ModelConfig {
             d_model,
             layers,
@@ -263,8 +354,7 @@ impl Model {
         let head_dim = self.config.head_dim();
         let positions = tokens.len();
 
-        let mut cursor = 0;
-        let embedding = self.take(&mut cursor, self.vocab * d_model);
+        let embedding = &self.weights[..self.vocab * d_model];
 
         // Residual stream: one d_model vector per position.
         let mut stream: Vec<f32> = tokens
@@ -274,16 +364,21 @@ impl Model {
                 embedding[row..row + d_model].iter().copied()
             })
             .collect();
+        let mut traces = Vec::with_capacity(layers);
 
-        for _ in 0..layers {
-            let attention_norm = self.take(&mut cursor, d_model);
-            let wq = self.take(&mut cursor, d_model * d_model);
-            let wk = self.take(&mut cursor, d_model * d_model);
-            let wv = self.take(&mut cursor, d_model * d_model);
-            let wo = self.take(&mut cursor, d_model * d_model);
-            let ffn_norm = self.take(&mut cursor, d_model);
-            let w1 = self.take(&mut cursor, d_model * ffn);
-            let w2 = self.take(&mut cursor, ffn * d_model);
+        for layer in 0..layers {
+            let offsets = self.config.layer_offsets(self.vocab, layer);
+            let block = |start: usize, len: usize| &self.weights[start..start + len];
+            let square = d_model * d_model;
+
+            let attention_norm = block(offsets.attention_norm, d_model);
+            let wq = block(offsets.wq, square);
+            let wk = block(offsets.wk, square);
+            let wv = block(offsets.wv, square);
+            let wo = block(offsets.wo, square);
+            let ffn_norm = block(offsets.ffn_norm, d_model);
+            let w1 = block(offsets.w1, d_model * ffn);
+            let w2 = block(offsets.w2, ffn * d_model);
 
             let project = |input: &[f32], weight: &[f32], in_dim: usize, out_dim: usize| {
                 let mut out = vec![0.0; positions * out_dim];
@@ -302,22 +397,52 @@ impl Model {
                 out
             };
 
-            let normed = rms_norm_rows(&stream, attention_norm, d_model);
-            let queries = rope(&project(&normed, wq, d_model, d_model), head_dim, d_model);
-            let keys = rope(&project(&normed, wk, d_model, d_model), head_dim, d_model);
-            let values = project(&normed, wv, d_model, d_model);
+            let input = stream.clone();
+            let (attention_normed, attention_inverse_rms) =
+                rms_norm(&stream, attention_norm, d_model);
+            let queries = rope(
+                &project(&attention_normed, wq, d_model, d_model),
+                head_dim,
+                d_model,
+            );
+            let keys = rope(
+                &project(&attention_normed, wk, d_model, d_model),
+                head_dim,
+                d_model,
+            );
+            let values = project(&attention_normed, wv, d_model, d_model);
 
-            let (attended, _) = attention(&queries, &keys, &values, positions, heads, head_dim);
+            let (attended, probabilities) =
+                attention(&queries, &keys, &values, positions, heads, head_dim);
             add_into(&mut stream, &project(&attended, wo, d_model, d_model));
 
-            let normed = rms_norm_rows(&stream, ffn_norm, d_model);
-            let hidden = project(&normed, w1, d_model, ffn);
+            let post_attention = stream.clone();
+            let (ffn_normed, ffn_inverse_rms) = rms_norm(&stream, ffn_norm, d_model);
+            let hidden = project(&ffn_normed, w1, d_model, ffn);
             let activated: Vec<f32> = hidden.iter().copied().map(silu).collect();
             add_into(&mut stream, &project(&activated, w2, ffn, d_model));
+
+            traces.push(LayerTrace {
+                input,
+                attention_normed,
+                attention_inverse_rms,
+                queries,
+                keys,
+                values,
+                probabilities,
+                attended,
+                post_attention,
+                ffn_normed,
+                ffn_inverse_rms,
+                hidden,
+                activated,
+            });
         }
 
-        let final_norm = self.take(&mut cursor, d_model);
-        let normed = rms_norm_rows(&stream, final_norm, d_model);
+        let final_offset = self.config.final_norm_offset(self.vocab);
+        let final_norm = &self.weights[final_offset..final_offset + d_model];
+        let final_input = stream;
+        let (final_normed, final_inverse_rms) = rms_norm(&final_input, final_norm, d_model);
 
         // Tied output projection: logits are the normed stream against the
         // embedding table, so `embedding` serves as both lookup and unembedding.
@@ -331,17 +456,18 @@ impl Model {
                 transpose_a: false,
                 transpose_b: true,
             },
-            &normed,
+            &final_normed,
             embedding,
             &mut logits,
         );
-        logits
-    }
 
-    fn take(&self, cursor: &mut usize, len: usize) -> &[f32] {
-        let slice = &self.weights[*cursor..*cursor + len];
-        *cursor += len;
-        slice
+        Trace {
+            layers: traces,
+            final_input,
+            final_inverse_rms,
+            final_normed,
+            logits,
+        }
     }
 }
 
@@ -372,10 +498,6 @@ pub fn rms_norm(rows: &[f32], scale: &[f32], d_model: usize) -> (Vec<f32>, Vec<f
         .collect();
 
     (normalized, inverse_rms)
-}
-
-fn rms_norm_rows(rows: &[f32], scale: &[f32], d_model: usize) -> Vec<f32> {
-    rms_norm(rows, scale, d_model).0
 }
 
 /// The feed-forward activation: `x · sigmoid(x)`.

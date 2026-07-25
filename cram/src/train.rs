@@ -7,7 +7,7 @@
 //! than agreement, because two implementations can share a misconception and
 //! finite differences cannot share one with us.
 
-use kvetch_model::{Gemm, GemmSpec, attention_scale, rope_angle};
+use kvetch_model::{Gemm, GemmSpec, Model, attention_scale, rope_angle};
 
 use alloc_free_math::softmax_in_place;
 
@@ -266,10 +266,198 @@ pub fn silu_backward(value: f32) -> f32 {
     sigmoid + value * sigmoid * (1.0 - sigmoid)
 }
 
+/// Mean cross-entropy of `targets` given `tokens`, and its gradient with
+/// respect to every weight — same layout as [`Model::weights`].
+///
+/// Walks the [`Trace`] backwards, composing the per-op gradients above. The
+/// residual stream is why each half adds two contributions: a residual connection
+/// forks the gradient, so the stream's gradient is what flowed from above *plus*
+/// what came back through the block.
+pub fn loss_and_gradient<G: Gemm>(
+    model: &Model,
+    tokens: &[u16],
+    targets: &[u16],
+    gemm: &G,
+) -> (f32, Vec<f32>) {
+    let config = model.config();
+    let vocab = model.vocab();
+    let (d_model, ffn, heads, head_dim) =
+        (config.d_model, config.ffn, config.heads, config.head_dim());
+    let positions = tokens.len();
+    let square = d_model * d_model;
+
+    let trace = model.trace_with(tokens, gemm);
+    let (loss, d_logits) = cross_entropy(&trace.logits, targets, vocab);
+
+    let weights = model.weights();
+    let mut gradient = vec![0.0; weights.len()];
+    let block = |start: usize, len: usize| &weights[start..start + len];
+
+    // Unembedding, tied: the table's gradient collects here and again at the
+    // very end from the lookup, which is exactly what tying means.
+    let mut d_stream = vec![0.0; positions * d_model];
+    gemm.sgemm(
+        GemmSpec {
+            m: positions,
+            k: vocab,
+            n: d_model,
+            transpose_a: false,
+            transpose_b: false,
+        },
+        &d_logits,
+        block(0, vocab * d_model),
+        &mut d_stream,
+    );
+    let mut d_embedding = vec![0.0; vocab * d_model];
+    gemm.sgemm(
+        GemmSpec {
+            m: vocab,
+            k: positions,
+            n: d_model,
+            transpose_a: true,
+            transpose_b: false,
+        },
+        &d_logits,
+        &trace.final_normed,
+        &mut d_embedding,
+    );
+    accumulate(&mut gradient, 0, &d_embedding);
+
+    let final_offset = config.final_norm_offset(vocab);
+    let (mut d_stream, d_final_scale) = rms_norm_backward(
+        &trace.final_input,
+        block(final_offset, d_model),
+        &trace.final_inverse_rms,
+        &d_stream,
+        d_model,
+    );
+    accumulate(&mut gradient, final_offset, &d_final_scale);
+
+    for (layer, saved) in trace.layers.iter().enumerate().rev() {
+        let offsets = config.layer_offsets(vocab, layer);
+
+        // Feed-forward half.
+        let (d_activated, d_w2) = matmul_backward(
+            gemm,
+            &saved.activated,
+            block(offsets.w2, ffn * d_model),
+            &d_stream,
+            (positions, ffn, d_model),
+        );
+        accumulate(&mut gradient, offsets.w2, &d_w2);
+
+        let d_hidden: Vec<f32> = d_activated
+            .iter()
+            .zip(&saved.hidden)
+            .map(|(gradient, &pre_activation)| gradient * silu_backward(pre_activation))
+            .collect();
+
+        let (d_ffn_normed, d_w1) = matmul_backward(
+            gemm,
+            &saved.ffn_normed,
+            block(offsets.w1, d_model * ffn),
+            &d_hidden,
+            (positions, d_model, ffn),
+        );
+        accumulate(&mut gradient, offsets.w1, &d_w1);
+
+        let (d_through_ffn, d_ffn_scale) = rms_norm_backward(
+            &saved.post_attention,
+            block(offsets.ffn_norm, d_model),
+            &saved.ffn_inverse_rms,
+            &d_ffn_normed,
+            d_model,
+        );
+        accumulate(&mut gradient, offsets.ffn_norm, &d_ffn_scale);
+        let d_post_attention = added(&d_stream, &d_through_ffn);
+
+        // Attention half.
+        let (d_attended, d_wo) = matmul_backward(
+            gemm,
+            &saved.attended,
+            block(offsets.wo, square),
+            &d_post_attention,
+            (positions, d_model, d_model),
+        );
+        accumulate(&mut gradient, offsets.wo, &d_wo);
+
+        let (d_queries, d_keys, d_values) = attention_backward(
+            &AttentionForward {
+                queries: &saved.queries,
+                keys: &saved.keys,
+                values: &saved.values,
+                probabilities: &saved.probabilities,
+            },
+            &d_attended,
+            AttentionShape {
+                positions,
+                heads,
+                head_dim,
+            },
+        );
+
+        // Rotation is applied to q and k only, so only they unwind through it.
+        let projected = [
+            (offsets.wq, rope_backward(&d_queries, head_dim, d_model)),
+            (offsets.wk, rope_backward(&d_keys, head_dim, d_model)),
+            (offsets.wv, d_values),
+        ];
+
+        let mut d_attention_normed = vec![0.0; positions * d_model];
+        for (offset, d_projection) in projected {
+            let (d_input, d_weight) = matmul_backward(
+                gemm,
+                &saved.attention_normed,
+                block(offset, square),
+                &d_projection,
+                (positions, d_model, d_model),
+            );
+            accumulate(&mut gradient, offset, &d_weight);
+            for (slot, value) in d_attention_normed.iter_mut().zip(&d_input) {
+                *slot += value;
+            }
+        }
+
+        let (d_through_attention, d_attention_scale) = rms_norm_backward(
+            &saved.input,
+            block(offsets.attention_norm, d_model),
+            &saved.attention_inverse_rms,
+            &d_attention_normed,
+            d_model,
+        );
+        accumulate(&mut gradient, offsets.attention_norm, &d_attention_scale);
+
+        d_stream = added(&d_post_attention, &d_through_attention);
+    }
+
+    // The embedding lookup: scatter each position's gradient back to the row it
+    // came from. Repeated tokens accumulate, which is why this is `+=`.
+    for (position, &token) in tokens.iter().enumerate() {
+        let row = token as usize * d_model;
+        for dimension in 0..d_model {
+            gradient[row + dimension] += d_stream[position * d_model + dimension];
+        }
+    }
+
+    (loss, gradient)
+}
+
+fn accumulate(gradient: &mut [f32], offset: usize, values: &[f32]) {
+    for (slot, value) in gradient[offset..offset + values.len()].iter_mut().zip(values) {
+        *slot += value;
+    }
+}
+
+fn added(left: &[f32], right: &[f32]) -> Vec<f32> {
+    left.iter().zip(right).map(|(a, b)| a + b).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kvetch_model::{NaiveGemm, attention, pseudo_random_weights, rms_norm, rope, silu};
+    use kvetch_model::{
+        ModelConfig, NaiveGemm, attention, pseudo_random_weights, rms_norm, rope, silu,
+    };
 
     /// Step size for the finite-difference estimate.
     ///
@@ -492,6 +680,43 @@ mod tests {
             // so summing them makes every partial derivative independent.
             candidate.iter().copied().map(silu).sum()
         });
+    }
+
+    /// The whole-model check: every weight's gradient against a finite
+    /// difference of the actual loss.
+    ///
+    /// This is what the per-op checks build up to. They can each be right while
+    /// the composition is wrong — a gradient added to the wrong offset, a
+    /// residual fork counted once instead of twice, the tied embedding
+    /// collecting from only one of its two uses. None of those show up until the
+    /// pieces are wired together.
+    #[test]
+    fn model_gradient_matches_finite_differences() {
+        let config = ModelConfig {
+            d_model: 8,
+            layers: 2,
+            heads: 2,
+            ffn: 16,
+        };
+        let vocab = 12;
+        let tokens: Vec<u16> = vec![3, 7, 1, 5];
+        let targets: Vec<u16> = vec![7, 1, 5, 2];
+
+        let mut weights = pseudo_random_weights(config.param_count(vocab), 77);
+        for value in &mut weights {
+            *value *= 8.0;
+        }
+
+        let loss_of = |candidate: &[f32]| {
+            let model = Model::new(config, vocab, candidate.to_vec())
+                .expect("weight count matches the config");
+            cross_entropy(&model.forward(&tokens), &targets, vocab).0
+        };
+
+        let model = Model::new(config, vocab, weights.clone()).expect("weight count matches");
+        let (_, gradient) = loss_and_gradient(&model, &tokens, &targets, &NaiveGemm);
+
+        assert_matches_finite_differences(&mut weights, &gradient, loss_of);
     }
 
     #[test]
