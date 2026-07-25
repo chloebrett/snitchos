@@ -14,6 +14,37 @@ use crate::prelude::*;
 
 use crate::oracle::{Entry, TokenClass, describe, has_one_spelling, representative, valid_next_in};
 
+/// Something that can answer "what may be typed at the end of this line?".
+///
+/// The seam. The line editor holds one of these rather than calling
+/// [`complete`] directly, so the grammar-only completer and a later
+/// model-ranked one are a *substitution*, not a rewrite — and so the editor
+/// stays a pure, host-testable thing that never knows whether a model exists.
+pub trait Completer {
+    fn complete_line(&self, line: &str) -> Completion;
+}
+
+/// The grammar alone: no model, no IPC, no network. Correct by construction
+/// and instant; the floor any ranked completer has to beat.
+pub struct GrammarCompleter;
+
+impl Completer for GrammarCompleter {
+    fn complete_line(&self, line: &str) -> Completion {
+        complete(line, line.len())
+    }
+}
+
+/// Completes nothing — what [`crate::line_edit::LineEditor::feed`] uses, so
+/// callers that never opted in behave exactly as they did before completion
+/// existed.
+pub struct NoCompleter;
+
+impl Completer for NoCompleter {
+    fn complete_line(&self, _line: &str) -> Completion {
+        Completion::None
+    }
+}
+
 /// How many choices a menu names before summarising. An expression position
 /// admits about seventeen openers and a bare identifier two dozen operators;
 /// listing them all at a prompt buries the useful ones. Same policy, and the
@@ -43,11 +74,12 @@ pub const MENU_LIMIT: usize = 8;
 #[must_use]
 pub fn menu(choices: &[TokenClass]) -> String {
     let shown: Vec<String> = choices.iter().copied().take(MENU_LIMIT).map(describe).collect();
-    let mut rendered = shown.join(", ");
+    let listed = shown.join(", ");
     if choices.len() > MENU_LIMIT {
-        rendered.push_str(&format!(", … ({} total)", choices.len()));
+        format!("{listed}, … ({} total)", choices.len())
+    } else {
+        listed
     }
-    rendered
 }
 
 /// What the completer can offer at a position.

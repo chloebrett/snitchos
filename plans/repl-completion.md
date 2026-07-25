@@ -1,6 +1,29 @@
 # Tab completion in the Stitch REPL (TDD plan)
 
-**Status:** 🚧 **IN PROGRESS — increment 1 done.** `stitch::complete` returns
+**Status:** 🚧 **IN PROGRESS — increments 1, 2, 3 done, and increment 4's seam
+with it.** `LineEditor::feed_with(bytes, &dyn Completer)` handles Tab; `feed`
+delegates to it with a `NoCompleter`, so every existing caller behaves exactly
+as before (Tab was already dropped with the other control bytes). 12
+line-editor tests, 752/752 across the crate, clippy clean.
+
+Increment 4 collapsed into 3 because the editor needs *something* to call, so
+the seam had to exist immediately. What remained worth keeping from 4 is the
+decoupling proof: a fake completer returning `Forced("!!!")` — an answer no
+grammar would give — is inserted verbatim, which could not pass if the editor
+consulted `stitch::complete` itself. That is what makes the model-backed
+completer a **substitution into** the editor rather than a rewrite of it.
+
+One plan prediction was wrong and is worth recording: *"Tab on an empty buffer
+is inert"* — it is not. The oracle has a real answer for the empty line (every
+declaration opener, plus every expression opener), so Tab there shows a menu.
+That is better behaviour than the plan imagined, so it stands.
+
+Where the round-trip discipline actually lives: **not** in the editor. The
+editor asks its completer once per Tab; it is the *ranking* completer
+(increment 5) that must resolve `Forced` from the grammar locally and only
+consult the model when the choice is ambiguous. Putting that rule in the editor
+would have leaked grammar knowledge into it.
+ `stitch::complete` returns
 `Forced` / `Choices` / `None` over the union of both entries; 6 tests green,
 clippy clean, full stitch suite 723/723. Real output:
 

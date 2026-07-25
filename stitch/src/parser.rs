@@ -200,7 +200,7 @@ fn range_kind(op: BinOp) -> Option<bool> {
 
 /// Comparisons and ranges are non-associative (§2): chaining them at the same
 /// precedence level (`a < b < c`, `1..2..3`) is a parse error, not a nesting.
-fn is_non_assoc(op: BinOp) -> bool {
+pub(crate) fn is_non_assoc(op: BinOp) -> bool {
     matches!(
         op,
         BinOp::Eq
@@ -225,7 +225,7 @@ fn non_assoc_message(op: BinOp) -> &'static str {
 
 /// `(left, right)` binding powers (§2 precedence table). Loosest = lowest;
 /// left < right gives left-associativity.
-fn binding_power(op: BinOp) -> (u8, u8) {
+pub(crate) fn binding_power(op: BinOp) -> (u8, u8) {
     match op {
         BinOp::Or => (1, 2),
         BinOp::And => (3, 4),

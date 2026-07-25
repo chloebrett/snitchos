@@ -40,6 +40,7 @@ pub mod oracle;
 pub mod parser;
 pub mod pattern;
 pub mod platform;
+pub mod print;
 pub mod render;
 pub mod registry;
 pub mod runner;
