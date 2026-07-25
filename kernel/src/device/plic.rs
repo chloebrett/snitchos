@@ -10,9 +10,11 @@
 
 use kernel_devices::plic::{self, PlicTransport};
 
-/// PLIC MMIO base. Hardcoded for QEMU `virt` (`0x0c00_0000`), which is also within
-/// the JH7110's range — it sits below `0x4000_0000`, so it is already inside the
-/// identity/higher-half MMIO gigapage `mmu::enable` installs (no new mapping).
+/// PLIC MMIO base. Hardcoded for QEMU `virt` (`0x0c00_0000`), which is also the
+/// JH7110's PLIC base. `kmain` inserts the two megapages covering it (`0x0c00_0000`
+/// for priority + enable, `0x0c20_0000` for the hart-0 S-context threshold + claim)
+/// into `MmioRegions`, so `mmu::enable` leaf-maps them in the higher-half MMIO
+/// window — the mid table only covers the pages that are explicitly inserted.
 ///
 /// `// board:` the exact base and the UART's interrupt source/context should come
 /// from the DTB (`/soc/plic`, the UART node's `interrupts`, `interrupts-extended`)

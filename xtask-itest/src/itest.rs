@@ -227,6 +227,8 @@ catalog! {
     // `format!("workload={w}")` → `workload=init console=frames` selects Init and
     // routes the human log to frames.
     wfi "console-frames-routes-log"       scenarios::console_frames_routes_log      [boot]          {"init console=frames"};
+    // wait_for_log forces a live boot; the marker is pushed in kmain (any workload).
+    cpu "tx-irq-delivers"                 scenarios::tx_irq_delivers                [boot]          {"init"};
     wfi "block-wake-smoke"                scenarios::block_wake_smoke               [sched]         {"block-wake"};
     wfi "ipc-message-crosses"             scenarios::ipc_message_crosses            [userspace, ipc] {"ipc"};
     wfi "ipc-trace-crosses"               scenarios::ipc_trace_crosses              [userspace, ipc] {"ipc"};

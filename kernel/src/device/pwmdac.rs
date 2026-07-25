@@ -33,7 +33,7 @@ const PWMDAC_VA: usize = PWMDAC_BASE + crate::mmu::KERNEL_OFFSET;
 /// SYSCRG registers, likewise via the higher-half mapping (`kmain` inserts the
 /// `0x1300_0000` megapage).
 const SYSCRG_VA: usize = syscrg::BASE + crate::mmu::KERNEL_OFFSET;
-/// SYS_IOMUX (pin-mux) registers — same megapage as SYSCRG, so already mapped.
+/// `SYS_IOMUX` (pin-mux) registers — same megapage as SYSCRG, so already mapped.
 const IOMUX_VA: usize = iomux::BASE + crate::mmu::KERNEL_OFFSET;
 
 /// `pwmdac_core` divider (`audio_root_rate / core_clk_hz`). The parent

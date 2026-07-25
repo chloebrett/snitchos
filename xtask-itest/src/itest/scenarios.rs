@@ -1506,6 +1506,19 @@ pub fn console_frames_routes_log(h: &mut View) -> Result<(), String> {
     Ok(())
 }
 
+/// The interrupt-driven TX ring delivers to the UART (Step 8, `plans/uart-telemetry.md`).
+/// At boot the kernel pushes a marker through `console::tx_push`, which enables the
+/// UART's THRE interrupt; the PLIC delivers it, `handle_external` runs `drain_tx`,
+/// and the bytes reach the FIFO. Asserts the marker appears on the UART — proving
+/// PLIC + `SEIE` + THRE + ring drain end to end. snemu models the interrupt, so
+/// this runs deterministically. A broken interrupt path means the ring never
+/// drains and the marker never appears (times out).
+pub fn tx_irq_delivers(h: &mut View) -> Result<(), String> {
+    h.wait_for_log(SEC * 20, "tx-irq-ok").map_err(|e| {
+        format!("{e} — the interrupt-driven TX path never delivered the marker (PLIC / SEIE / THRE / drain_tx)")
+    })
+}
+
 /// Kernel-stack *deep* overflow reported cleanly (`workload=stack-overflow-deep`,
 /// Tier B + per-hart exception stack): a kernel task (`stack_overflow_deep`)
 /// recurses until it genuinely overflows its stack into the unmapped guard page.

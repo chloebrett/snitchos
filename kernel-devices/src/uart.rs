@@ -10,6 +10,10 @@
 /// Transmit Holding / Receive Buffer register (logical register 0): write it to
 /// send a byte, read it (as RBR) to receive one.
 pub const THR_RBR: u8 = 0;
+/// Interrupt Enable Register (logical register 1).
+pub const IER: u8 = 1;
+/// IER bit 1 — enable the "transmit holding register empty" (THRE) interrupt.
+pub const IER_ETBEI: u8 = 0b0000_0010;
 /// Line Status Register (logical register 5).
 pub const LSR: u8 = 5;
 /// LSR bit 5 — Transmit Holding Register Empty: set when it's safe to write the

@@ -6,7 +6,7 @@
 
 use core::fmt::Write;
 
-use kernel_devices::uart::{reg_offset, LSR, LSR_DR, LSR_THRE, THR_RBR};
+use kernel_devices::uart::{reg_offset, IER, IER_ETBEI, LSR, LSR_DR, LSR_THRE, THR_RBR};
 
 /// Driver for an 8250-family UART at a given MMIO base, with the register layout
 /// (`reg_shift`) and access width (`io_width`, 1 or 4 bytes) the DTB reports.
@@ -105,6 +105,36 @@ impl Uart16550 {
         unsafe {
             while self.read_reg(LSR) & LSR_THRE == 0 {}
             self.write_reg(THR_RBR, c);
+        }
+    }
+
+    /// Whether the transmit holding register is empty (ready to accept a byte).
+    /// The non-blocking check the TX-ring drain uses instead of spinning.
+    #[must_use]
+    pub fn thre(&self) -> bool {
+        // SAFETY: LSR MMIO on a UART this driver owns; see the type contract.
+        unsafe { self.read_reg(LSR) & LSR_THRE != 0 }
+    }
+
+    /// Write one byte to the transmit holding register **without** waiting for
+    /// `THRE`. Only sound when the caller has just confirmed [`thre`](Self::thre);
+    /// the interrupt-driven drain checks room before each byte.
+    pub fn write_thr(&self, c: u8) {
+        // SAFETY: THR MMIO on a UART this driver owns; caller ensured THRE.
+        unsafe { self.write_reg(THR_RBR, c) };
+    }
+
+    /// Enable or disable the transmit-holding-empty (THRE) interrupt (`IER` bit 1).
+    /// Enabling makes the UART raise its PLIC line whenever the FIFO has room, so
+    /// the external-interrupt handler drains the TX ring; the handler clears it
+    /// once the ring empties, or THRE would interrupt continuously.
+    pub fn set_tx_interrupt(&self, on: bool) {
+        // SAFETY: IER MMIO on a UART this driver owns. Read-modify-write preserves
+        // any other IER bits (e.g. an RX-interrupt enable).
+        unsafe {
+            let ier = self.read_reg(IER);
+            let next = if on { ier | IER_ETBEI } else { ier & !IER_ETBEI };
+            self.write_reg(IER, next);
         }
     }
 

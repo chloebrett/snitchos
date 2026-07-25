@@ -160,6 +160,54 @@ pub fn drain_rx() {
   }
 }
 
+/// Capacity of the interrupt-driven TX ring — bytes queued between an emitter's
+/// [`tx_push`] and the THRE-interrupt [`drain_tx`]. Overflow drops the newest
+/// bytes (drop-and-count discipline; the drop is the caller's to count).
+const TX_RING_CAP: usize = 512;
+
+/// Bytes queued for interrupt-driven transmit. The producer ([`tx_push`], normal
+/// context) pushes and enables the UART's THRE interrupt; the consumer
+/// ([`drain_tx`], the external-interrupt handler) drains into the FIFO. Both run
+/// on hart 0.
+static TX_RING: crate::sync::Mutex<ConsoleRing<TX_RING_CAP>> =
+  crate::sync::Mutex::new(ConsoleRing::new());
+
+/// Queue `byte` for interrupt-driven transmit and arm the THRE interrupt, so the
+/// UART raises its PLIC line and [`drain_tx`] empties the ring. Non-blocking:
+/// drops the byte if the ring is full.
+///
+/// The push and the interrupt-enable run with S-mode interrupts masked
+/// ([`without_interrupts`](crate::trap::without_interrupts)): otherwise a THRE
+/// interrupt already pending from an earlier push could fire while we hold
+/// `TX_RING`, and `drain_tx` would deadlock re-taking it. `drain_tx` itself runs
+/// interrupts-masked (in the trap handler), so it never races this.
+pub fn tx_push(byte: u8) {
+  crate::trap::without_interrupts(|| {
+    TX_RING.lock().push(byte); // drop-on-full inside the ring
+    // A fresh RX-layout handle (not the println `UART` mutex — see `drain_rx`);
+    // only IER is touched here.
+    let uart = unsafe { emergency_uart_at(emergency_uart_base()) };
+    uart.set_tx_interrupt(true);
+  });
+}
+
+/// Drain the TX ring into the UART FIFO — the THRE-interrupt handler's body. Push
+/// bytes while the transmit register has room; when the ring empties, disable the
+/// THRE interrupt (else it would fire continuously on the empty FIFO). Runs with
+/// interrupts masked (trap entry), so it never nests with [`tx_push`].
+pub fn drain_tx() {
+  // A fresh handle, like `drain_rx` — no println `UART` mutex to deadlock on.
+  let uart = unsafe { emergency_uart_at(emergency_uart_base()) };
+  let mut ring = TX_RING.lock();
+  while uart.thre() {
+    let Some(byte) = ring.pop() else {
+      uart.set_tx_interrupt(false);
+      break;
+    };
+    uart.write_thr(byte);
+  }
+}
+
 /// Pop up to `dst.len()` buffered input bytes into `dst`; returns how many.
 /// The `ConsoleRead` syscall's drain side (consumer). Non-blocking: returns `0`
 /// when nothing is buffered.

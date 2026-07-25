@@ -96,6 +96,13 @@ pub extern "C" fn kmain(hart_id: usize, dtb_phys: usize) -> ! {
     // JH7110 SYSCRG (audio clock/reset) — its own megapage, outside the UART's.
     // The PWMDAC block itself (0x100b_0000) is already in the UART megapage.
     mmio_regions.insert(0x1300_0000);
+    // PLIC (`kernel::device::plic`, base 0x0c00_0000 on both QEMU `virt` and the
+    // JH7110). Two megapages: priority + per-context enable words live in the
+    // 0x0c00_0000 page; the hart-0 S-context threshold + claim/complete registers
+    // sit at 0x0c20_0000+ (the `0x20_0000` block base). Both must be leaf-mapped —
+    // the higher-half MMIO mid table only covers the pages we insert here.
+    mmio_regions.insert(0x0c00_0000);
+    mmio_regions.insert(0x0c20_0000);
 
     // Turn paging on EARLY — before any code that loads an absolute
     // function-pointer value to a higher-half VA (formatted println!
@@ -314,13 +321,19 @@ fn kmain_higher_half(hart_id: usize, dtb_phys: usize) -> ! {
     // by init_timer above.
     unsafe { trap::enable_software_interrupts() };
 
-    // Enable S-mode external (PLIC) interrupts. Inert until a source asserts — the
-    // only routed source is the UART, whose THRE interrupt is not yet enabled — so
-    // `handle_external` doesn't run at runtime. Wires the delivery path; the drain
-    // lands in a later increment.
+    // Enable S-mode external (PLIC) interrupts, then push a marker through the
+    // interrupt-driven TX ring. `tx_push` enables the UART's THRE interrupt, which
+    // asserts the PLIC line → `handle_external` → `drain_tx` writes the bytes to
+    // the FIFO. Proves PLIC + SEIE + THRE + ring drain end to end; the
+    // `tx-irq-delivers` scenario asserts the marker reaches the UART (and snemu
+    // now models the interrupt, so it runs in the deterministic gate). If the
+    // interrupt path is broken the ring never drains and the marker never appears.
     //
     // SAFETY: trap vector installed; `plic::init` routed the source; sstatus.SIE on.
     unsafe { trap::enable_external_interrupts() };
+    for &b in b"tx-irq-ok\n" {
+        console::tx_push(b);
+    }
 
     // Smoke: send ourselves a Wakeup IPI. The trap handler reads
     // ipi_pending via Acquire, bumps RECEIVED_TOTAL, and returns.

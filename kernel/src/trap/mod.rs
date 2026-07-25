@@ -325,10 +325,29 @@ fn handle_timer(frame: &TrapFrame) {
 fn handle_external() {
     while let Some(source) = crate::plic::claim() {
         if crate::plic::is_uart(source) {
-            // (Next increment: drain the UART TX ring into the FIFO here.)
+            crate::console::drain_tx();
         }
         crate::plic::complete(source);
     }
+}
+
+/// Run `f` with S-mode interrupts masked (`sstatus.SIE` cleared), restoring the
+/// prior state after. The minimal critical section for code that enables a device
+/// interrupt while holding a lock the interrupt handler also takes — without this,
+/// the interrupt could fire mid-section and the handler would deadlock re-taking
+/// the lock. (`kernel::sync::Mutex` reserves hooks for this but they're still
+/// no-ops; this is the targeted primitive until IRQ-safe locking lands.)
+pub fn without_interrupts<T>(f: impl FnOnce() -> T) -> T {
+    let sstatus: u64;
+    // SAFETY: `csrrci` reads sstatus and clears bit 1 (SIE) atomically; no memory
+    // touched, only the named output.
+    unsafe { asm!("csrrci {}, sstatus, 0b10", out(reg) sstatus, options(nomem, nostack)) };
+    let result = f();
+    if sstatus & (1 << 1) != 0 {
+        // SAFETY: restore SIE only if it was set on entry.
+        unsafe { asm!("csrsi sstatus, 0b10", options(nomem, nostack)) };
+    }
+    result
 }
 
 /// One-time timer setup: set the interval, arm the first deadline,
