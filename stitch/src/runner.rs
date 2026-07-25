@@ -136,7 +136,7 @@ pub fn discover_modules(
         }
         let source = fetch(&name)?;
         let items = parse_program(&source)
-            .map_err(|error| format!("in module `{name}`: {}", error.message))?;
+            .map_err(|error| format!("in module `{name}`: {}", error.render(&source)))?;
         for item in &items {
             if let Item::Use { module, .. } = item {
                 pending.push(module.clone());
@@ -262,7 +262,7 @@ impl Repl {
                 self.env = None;
                 format!("loaded {count} definition(s)\n")
             }
-            Err(error) => format!("load error: {}\n", error.message),
+            Err(error) => format!("load error: {}\n", error.render(src)),
         }
     }
 
@@ -618,6 +618,33 @@ mod tests {
         let result = run_module_files("main", fake_fs(&[("main", "use gone  main() = 1")]));
         assert_eq!(result.exit_code, 2);
         assert!(result.stderr.contains("gone"), "{}", result.stderr);
+    }
+
+    #[test]
+    fn a_module_parse_error_carries_its_location_and_legal_continuations() {
+        // The module path used to report the bare message, dropping both the
+        // caret and the oracle's continuations that `ParseError::render`
+        // produces — so a parse error in a file was strictly less helpful than
+        // the same error in a single-file program.
+        let result = run_module_files("main", fake_fs(&[("main", "greet(name age) = 1")]));
+        assert_eq!(result.exit_code, 2);
+        assert!(result.stderr.contains("1:12"), "names the position: {}", result.stderr);
+        assert!(result.stderr.contains('^'), "carries a caret: {}", result.stderr);
+        assert!(
+            result.stderr.contains("expected one of: `)`, `,`, `:`"),
+            "names the legal continuations: {}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn a_repl_load_error_carries_its_location_and_legal_continuations() {
+        let out = Repl::new().load_source("greet(name age) = 1");
+        assert!(out.contains('^'), "carries a caret: {out}");
+        assert!(
+            out.contains("expected one of: `)`, `,`, `:`"),
+            "names the legal continuations: {out}"
+        );
     }
 
     #[test]
