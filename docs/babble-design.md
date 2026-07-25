@@ -77,6 +77,31 @@ Design decisions:
   for riscv64 (established during stitch-on-the-metal) — the oracle must
   keep that property, since the serving hat runs it on-target.
 
+### Why not regex? (decided 2026-07-25)
+
+Stratify by layer, and the answer differs per layer:
+
+- **Lexeme/char layer — regex helps.** "Which *characters* may come next" is
+  genuinely regular (the union of the legal classes' lexeme regexes, plus the
+  partial token under the cursor). That is increment 3 / stim's highlighting,
+  and an FSM is the right formalism. Later, the same FSM is what makes a
+  precomputed **vocabulary index** possible (the Outlines / llguidance /
+  XGrammar trick) if BPE masking ever needs to be a table lookup rather than
+  a per-entry probe.
+- **Grammar layer — regex cannot, and should not.** Balanced delimiters are
+  not regular; matching them needs a pushdown automaton, i.e. a parser. The
+  stronger objection is architectural: a regex approximation of the grammar
+  would be a **second source of grammar truth**, free to drift from the
+  parser as Stitch grows — exactly what trial-by-append was chosen to
+  eliminate.
+- **Performance — regex is not the lever.** The cost is `O(classes × N²)`
+  (every probe re-parses the prefix). The fix is *resumable parser state*,
+  already deferred as the stim-time optimization. Measured alternative that
+  did work: lazy sampling (shuffle classes, take the first the oracle admits
+  — exactly a uniform draw over the legal set) cut the walk's cost ~6× and
+  the test suite from 50s to ~1s, because a sampler needs *one* viable class,
+  not all 58.
+
 ## Component 2: the sampler and its bias tables
 
 `babble(oracle, bias, seed) -> impl Iterator<Item = u8>` — a seeded walk.

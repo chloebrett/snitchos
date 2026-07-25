@@ -1,6 +1,6 @@
 # babble — the weight-free model (TDD plan)
 
-**Status:** 🚧 **IN PROGRESS — increments 1, 2, 4 done** (3 deferred: it is
+**Status:** 🚧 **IN PROGRESS — increments 1, 2, 4, 4b, 5 done** (3 deferred: it is
 the char-level view, which stim needs and babble does not — babble appends
 whole space-separated tokens, so maximal munch cannot bite it). The oracle
 (`stitch/src/oracle.rs`) answers `valid_next` across the grammar; 9 tests
@@ -24,7 +24,25 @@ points), so REPL/expression errors get expression continuations rather than
 fixed two paths that formatted `error.message` and so dropped the caret
 *and* the continuations: module loading and `Repl::load_source` — a parse
 error in a *file* had been strictly less helpful than the same error in a
-single-file program. **Found and fixed a real parser bug on the way**: the
+single-file program.
+
+**Increment 5 (sampler) done** — new `babble` crate: seeded xorshift64\*,
+`walk(seed)` recording a `Step` trace, `generate(seed) -> String`. Three tests
+green in ~1s. Two findings: (a) **lazy sampling** — shuffle the classes and
+take the first the oracle admits, which is *exactly* a uniform draw over the
+legal set but costs ~`58/|legal|` queries instead of 58; this plus a 200-token
+cap took the suite from 50s to 1.06s, and motivated exposing
+`oracle::admits_next` (single-class) beside `valid_next` (full set), with a
+test pinning that the two agree so they cannot drift; (b) walks currently run
+to the cap rather than choosing `Eof` — expected, and exactly what increment
+6's depth damping fixes, so babble's programs do not yet parse whole.
+
+**Post material** (noted 2026-07-25): the raw babbled output — legal-but-
+meaningless Stitch, every identifier `x` and every number `0` because the
+oracle answers in *classes* and the sampler appends representative lexemes —
+is a striking devlog visual. The narrative beat is that increment 7's terminal
+synthesis makes it *plausible* after increment 6 makes it *whole*: first
+legal, then finished, then plausible. **Found and fixed a real parser bug on the way**: the
 three post-`bump` `self.err()` sites in `parse_atom`/`parse_pattern_atom`
 blamed the token *after* the offending one (the caret pointed one token too
 far right, and it made the oracle unsound); `expect` had always been
