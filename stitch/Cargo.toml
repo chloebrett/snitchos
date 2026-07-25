@@ -33,6 +33,9 @@ snitchos-user = { path = "../user/runtime" }
 # The FS-over-IPC request/response protocol — for `RuntimePlatform::fs_read`'s
 # lookup + read through the process's endpoint cap (backs `readFile`/`view`).
 fs-proto = { path = "../fs-proto" }
+# The completion-endpoint protocol — for `RuntimePlatform::complete`'s call to
+# the `kvetch` server. Message types only; the sampler stays out of the REPL.
+kvetch-proto = { path = "../kvetch-proto" }
 
 [dev-dependencies]
 insta = "1"

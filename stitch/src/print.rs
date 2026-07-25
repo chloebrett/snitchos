@@ -90,7 +90,7 @@ fn print_item(item: &Item, depth: usize) -> String {
                 "{}{}let {mutability}{name} = {}",
                 indent(depth),
                 vis(*public),
-                print_at(value, LOOSEST_BP, depth)
+                print_body(value, depth)
             )
         }
         Item::Use { module, names } => {
@@ -120,7 +120,7 @@ fn print_item(item: &Item, depth: usize) -> String {
             print_params(params),
             print_ret(ret.as_ref()),
             print_uses(uses),
-            print_at(body, LOOSEST_BP, depth)
+            print_body(body, depth)
         ),
         Item::Contract { name, generics, methods } => format!(
             "{}contract {name}{} {}",
@@ -223,7 +223,7 @@ fn print_method(method: &Method, depth: usize) -> String {
     let body = method
         .body
         .as_ref()
-        .map_or(String::new(), |b| format!(" = {}", print_at(b, LOOSEST_BP, depth)));
+        .map_or(String::new(), |b| format!(" = {}", print_body(b, depth)));
     format!(
         "{modifier}{}({}){}{}{body}",
         method.name,
@@ -258,6 +258,69 @@ fn print_type(ty: &Type) -> String {
     }
 }
 
+/// Print the right-hand side of a top-level `=` — a function body, a method
+/// body, a module constant.
+///
+/// Items have no terminator, so the body's last token sits directly against the
+/// next declaration's first token. Almost every form closes itself; an
+/// open-ended range does not, and `f() = ..=` followed by `node() = 1` reads as
+/// the range `..=node()`. Parenthesising the body is what the source that
+/// produced such an AST must itself have done.
+fn print_body(expr: &Expr, depth: usize) -> String {
+    let text = print_at(expr, LOOSEST_BP, depth);
+    if right_open(&expr.kind) {
+        return format!("({text})");
+    }
+    text
+}
+
+/// Whether an expression's printed form ends *expecting more input* — the
+/// property that makes it swallow whatever follows. Two tokens do this: a range
+/// missing its end (takes the next expression), and a bare `@` (takes the next
+/// identifier, because `@name` is receiver-field shorthand — so `let a = @`
+/// above `beta() = 1` reads as the field `@beta` and then a stray `(`).
+/// Everything else closes with a delimiter or ends on a token no position can
+/// extend. The recursion walks the right spine, since that is where the last
+/// token comes from.
+fn right_open(kind: &ExprKind) -> bool {
+    match kind {
+        ExprKind::SelfRef => true,
+        ExprKind::Range { end, .. } => end.as_ref().is_none_or(|e| right_open(&e.kind)),
+        ExprKind::Binary { right, .. } => right_open(&right.kind),
+        ExprKind::Unary { operand, .. } => right_open(&operand.kind),
+        ExprKind::Lambda { body, .. } => right_open(&body.kind),
+        ExprKind::If { els, .. } => right_open(&els.kind),
+        _ => false,
+    }
+}
+
+/// Whether an expression's first token is one the parser recognises as opening
+/// an operand. Mirrors `Parser::starts_expr`, which is consulted at exactly one
+/// place: deciding whether a `..` has an end. `handle` and `without` head
+/// perfectly good expressions but are absent from that list, and a nested
+/// prefix range leads with `..`, which is likewise not an operand start.
+fn opens_an_operand(kind: &ExprKind) -> bool {
+    match kind {
+        ExprKind::Handle { .. } | ExprKind::Without { .. } => false,
+        ExprKind::Range { start, .. } => start.is_some(),
+        ExprKind::Binary { left, .. } => opens_an_operand(&left.kind),
+        ExprKind::Call { callee: inner, .. }
+        | ExprKind::Field { object: inner, .. }
+        | ExprKind::SafeField { object: inner, .. }
+        | ExprKind::Index { object: inner, .. }
+        | ExprKind::Try(inner) => opens_an_operand(&inner.kind),
+        _ => true,
+    }
+}
+
+/// Whether an infix operator's token can also *begin* an expression — the
+/// property that lets an open-ended range on its left reach past it and adopt
+/// the right operand as its end. `..  - items` becomes the range `..(-items)`;
+/// `.. * items` cannot, because `*` has no prefix meaning.
+fn starts_an_expression(op: BinOp) -> bool {
+    matches!(op, BinOp::Sub | BinOp::Range | BinOp::RangeIncl)
+}
+
 /// Concatenate two printed fragments without letting the lexer re-read the
 /// seam as a different token.
 ///
@@ -276,12 +339,13 @@ fn glue(left: &str, right: &str) -> String {
 /// Print `expr` in a position that binds at least as tightly as `min_bp`,
 /// wrapping it in parentheses when its own binding power is looser.
 fn print_at(expr: &Expr, min_bp: u8, depth: usize) -> String {
-    let text = print_bare(&expr.kind, depth);
+    // Inside parentheses the position resets to the loosest — that is what the
+    // parentheses buy. Passing `min_bp` on unchanged would make the contents
+    // defend against a boundary that is no longer theirs.
     if bp_of(&expr.kind) < min_bp {
-        format!("({text})")
-    } else {
-        text
+        return format!("({})", print_bare(&expr.kind, depth, LOOSEST_BP));
     }
+    print_bare(&expr.kind, depth, min_bp)
 }
 
 /// How tightly an expression binds *as a whole* — the thing a surrounding
@@ -307,7 +371,7 @@ fn bp_of(kind: &ExprKind) -> u8 {
     clippy::too_many_lines,
     reason = "one arm per AST node; splitting it would scatter the grammar"
 )]
-fn print_bare(kind: &ExprKind, depth: usize) -> String {
+fn print_bare(kind: &ExprKind, depth: usize, min_bp: u8) -> String {
     match kind {
         ExprKind::Int(n) => format!("{n}"),
         ExprKind::Float(f) => print_float(*f),
@@ -331,18 +395,61 @@ fn print_bare(kind: &ExprKind, depth: usize) -> String {
             // A non-associative operator can't have a same-level operand on
             // either side — `(a < b) < c` is the only way to write that tree.
             let left_bp = if is_non_assoc(*op) { r_bp } else { l_bp };
+            // An open-ended range (`a..`) has nothing to absorb on its right, so
+            // as a *left* operand it needs no parentheses however tightly the
+            // operator binds: `a.. * b` already parses as `(a..) * b`. Printing
+            // the parentheses anyway is not merely noisy — a statement that
+            // begins with `(` is read as a call of the statement before it.
+            //
+            // It holds only while nothing to the *left* can reach in and take
+            // the range's own `..` away. Inside another range's end (`..=(0..)
+            // + @`) something can, and there the parentheses are load-bearing.
+            let range_bp = binding_power(BinOp::Range).0;
+            let safe_bare_range = matches!(left.kind, ExprKind::Range { end: None, .. })
+                && min_bp <= range_bp
+                && !starts_an_expression(*op);
+            // The left operand renders at `min_bp`, not at `left_bp`. In a
+            // left-associative climb the parser builds the leftmost operand at
+            // whatever level it entered the expression, and only *then* looks
+            // for the operator — so `min_bp` is the context its text will
+            // actually be read in. `left_bp` decides the parentheses; it is not
+            // the position the operand sits in.
+            let left_text = if safe_bare_range || bp_of(&left.kind) >= left_bp {
+                print_bare(&left.kind, depth, min_bp)
+            } else {
+                format!("({})", print_bare(&left.kind, depth, LOOSEST_BP))
+            };
             format!(
                 "{} {} {}",
-                print_at(left, left_bp, depth),
+                left_text,
                 binop_text(*op),
                 print_at(right, r_bp, depth)
             )
         }
         ExprKind::Range { start, end, inclusive } => {
-            let (_, r_bp) = binding_power(BinOp::Range);
+            let (l_bp, r_bp) = binding_power(BinOp::Range);
             let dots = if *inclusive { "..=" } else { ".." };
-            let start = start.as_ref().map_or(String::new(), |e| print_at(e, r_bp, depth));
-            let end = end.as_ref().map_or(String::new(), |e| print_at(e, r_bp, depth));
+            let start = start.as_ref().map_or(String::new(), |e| {
+                // The start is whatever the parser had already built when it
+                // met the `..`, so it only has to bind tightly enough not to
+                // swallow the dots itself — `l_bp`, not `r_bp`. Demanding
+                // `r_bp` here parenthesises operands that need no help, and
+                // those parentheses go on to break statement juxtaposition.
+                // Another range is the exception: `a..b..c` doesn't chain.
+                let bp = if matches!(e.kind, ExprKind::Range { .. }) { r_bp } else { l_bp };
+                print_at(e, bp, depth)
+            });
+            let end = end.as_ref().map_or(String::new(), |e| {
+                // A range only takes an end when the next token *looks like* an
+                // expression start, and the parser's list of those omits
+                // `handle`, `without`, and a leading `..`. Written bare, the
+                // range closes early and the body becomes a stray declaration.
+                if opens_an_operand(&e.kind) {
+                    print_at(e, r_bp, depth)
+                } else {
+                    format!("({})", print_at(e, LOOSEST_BP, depth))
+                }
+            });
             glue(&start, dots) + &end
         }
         ExprKind::Call { callee, args } => format!(
@@ -419,11 +526,11 @@ fn print_bare(kind: &ExprKind, depth: usize) -> String {
                     .as_ref()
                     .map_or(String::new(), |g| format!(" if {}", print_at(g, BRANCH_BP, depth + 1)));
                 out.push_str(&indent(depth + 1));
-                out.push_str(&format!(
-                    "{}{guard} => {}\n",
-                    print_pattern(&arm.pattern),
-                    print_at(&arm.body, BRANCH_BP, depth + 1)
-                ));
+                out.push_str(&print_pattern(&arm.pattern));
+                out.push_str(&guard);
+                out.push_str(" => ");
+                out.push_str(&print_at(&arm.body, BRANCH_BP, depth + 1));
+                out.push('\n');
             }
             out.push_str(&indent(depth));
             out.push('}');
@@ -433,14 +540,15 @@ fn print_bare(kind: &ExprKind, depth: usize) -> String {
             let mut out = String::from("match {\n");
             for (cond, body) in arms {
                 out.push_str(&indent(depth + 1));
-                out.push_str(&format!(
-                    "{} => {}\n",
-                    print_at(cond, BRANCH_BP, depth + 1),
-                    print_at(body, BRANCH_BP, depth + 1)
-                ));
+                out.push_str(&print_at(cond, BRANCH_BP, depth + 1));
+                out.push_str(" => ");
+                out.push_str(&print_at(body, BRANCH_BP, depth + 1));
+                out.push('\n');
             }
             out.push_str(&indent(depth + 1));
-            out.push_str(&format!("_ => {}\n", print_at(default, BRANCH_BP, depth + 1)));
+            out.push_str("_ => ");
+            out.push_str(&print_at(default, BRANCH_BP, depth + 1));
+            out.push('\n');
             out.push_str(&indent(depth));
             out.push('}');
             out
@@ -453,20 +561,61 @@ fn print_block(stmts: &[Stmt], result: Option<&Expr>, depth: usize) -> String {
     if stmts.is_empty() && result.is_none() {
         return String::from("{ }");
     }
+    let mut lines: Vec<String> = stmts
+        .iter()
+        .map(|stmt| print_stmt(stmt, depth + 1))
+        .chain(result.map(|expr| print_at(expr, LOOSEST_BP, depth + 1)))
+        .collect();
+    seal_seams(&mut lines);
+
     let mut out = String::from("{\n");
-    for stmt in stmts {
+    for line in &lines {
         out.push_str(&indent(depth + 1));
-        out.push_str(&print_stmt(stmt, depth + 1));
-        out.push('\n');
-    }
-    if let Some(result) = result {
-        out.push_str(&indent(depth + 1));
-        out.push_str(&print_at(result, LOOSEST_BP, depth + 1));
+        out.push_str(line);
         out.push('\n');
     }
     out.push_str(&indent(depth));
     out.push('}');
     out
+}
+
+/// Parenthesise any statement that would otherwise reach across the newline and
+/// eat the next one.
+///
+/// Statements are separated by whitespace and terminated by nothing, so the
+/// boundary between two of them is decided entirely by the tokens either side.
+/// `@` before an identifier is the receiver-field shorthand (`@ line` is
+/// `@line`); an unfinished range before anything that opens an operand takes it
+/// as the range's end.
+///
+/// Deliberately pairwise rather than a blanket wrap of every risky statement:
+/// the parentheses are themselves a hazard, since a statement beginning with
+/// `(` reads as a *call* of the statement before it. `{ @ @ }` is two receiver
+/// statements and needs no help; `{ @ line }` cannot be written at all. Looking
+/// at both sides is what tells those apart.
+fn seal_seams(lines: &mut [String]) {
+    for i in 0..lines.len().saturating_sub(1) {
+        if absorbs(&lines[i], &lines[i + 1]) {
+            lines[i] = format!("({})", lines[i]);
+        }
+    }
+}
+
+/// Whether `left`'s last token would swallow `right`'s first.
+///
+/// Decided on tokens, not characters. `@` before `let` looks like a word
+/// boundary but `let` is a keyword, not an identifier, so no field shorthand
+/// forms; `..` before `without` looks like an expression but `without` is not
+/// something the parser accepts as an operand. Both distinctions are invisible
+/// to a character test and both cost a program if guessed wrong.
+fn absorbs(left: &str, right: &str) -> bool {
+    let Some(next) = crate::lexer::lex(right).tokens.first().map(|t| t.kind.clone()) else {
+        return false;
+    };
+    if left.ends_with('@') {
+        return matches!(next, crate::lexer::TokenKind::Ident(_));
+    }
+    (left.ends_with("..") || left.ends_with("..=")) && crate::parser::token_starts_expr(&next)
 }
 
 fn print_stmt(stmt: &Stmt, depth: usize) -> String {
@@ -475,9 +624,14 @@ fn print_stmt(stmt: &Stmt, depth: usize) -> String {
             let mutability = if *mutable { "mut " } else { "" };
             format!("let {mutability}{name} = {}", print_at(value, LOOSEST_BP, depth))
         }
+        // The target parses at the loosest precedence (the parser reads a whole
+        // expression, then looks for `=`), so it must print there too. Printing
+        // it tighter adds parentheses, and a statement that *starts* with `(`
+        // is read as a call of the statement before it — juxtaposition is
+        // application, and Stitch has no `;` to stop it.
         Stmt::Assign { target, value } => format!(
             "{} = {}",
-            print_at(target, POSTFIX_BP, depth),
+            print_at(target, LOOSEST_BP, depth),
             print_at(value, LOOSEST_BP, depth)
         ),
         Stmt::Use { binding, call } => {

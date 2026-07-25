@@ -463,6 +463,15 @@ mod on_target {
     use alloc::string::String;
     use alloc::vec::Vec;
 
+    /// Room for one completion request: the prefix plus what comes back. A REPL
+    /// line is short, and the server declines anything larger rather than
+    /// truncating silently.
+    const COMPLETION_BUF: usize = 256;
+
+    /// How many tokens one Tab asks for. Small: a completion at a prompt is a
+    /// nudge, not a paragraph, and a short answer is cheap to reject.
+    const COMPLETION_TOKENS: u32 = 6;
+
     use snitchos_user::{console_read, console_write, yield_now};
 
     #[derive(Default)]
@@ -511,7 +520,13 @@ mod on_target {
                     yield_now();
                     continue;
                 }
-                let echo = self.editor.borrow_mut().feed(&buf[..n]);
+                // Tab consults the completer: the grammar decides whatever it
+                // can for free, and only an ambiguous position costs a call to
+                // the completion service. `self` supplies that service — and
+                // where there is no endpoint, `Platform::complete` returns
+                // `None` and the grammar-only menu stands.
+                let completer = crate::complete::ModelCompleter::new(self, COMPLETION_TOKENS);
+                let echo = self.editor.borrow_mut().feed_with(&buf[..n], &completer);
                 console_write(&echo);
             }
         }
@@ -541,6 +556,44 @@ mod on_target {
                     name: d.name_str().into(),
                 })
                 .collect()
+        }
+
+        fn complete(&self, prefix: &str, max_tokens: u32) -> Option<String> {
+            use kvetch_proto::{Complete, Reply, Status};
+            use snitchos_user::{Endpoint, delegated_handle};
+
+            // One buffer, in and out: the prefix goes over, the completion
+            // comes back appended (the four-word message has no room for two).
+            let mut buf = [0u8; COMPLETION_BUF];
+            if prefix.len() > buf.len() {
+                return None;
+            }
+            buf[..prefix.len()].copy_from_slice(prefix.as_bytes());
+
+            let request = Complete {
+                max_tokens,
+                ptr: buf.as_ptr() as u64,
+                cap: buf.len() as u32,
+                prefix_len: prefix.len() as u32,
+            };
+            // The sole delegated endpoint. Which *server* is on the other end is
+            // the workload's choice: `stitch-kvetch` puts kvetch there,
+            // `stitch-fs` puts the filesystem there. A program launched by
+            // `run_ipc` holds one endpoint and names it positionally — see the
+            // `StitchKvetch` bootarg for why holding both is left to the
+            // manifest work rather than worked around.
+            // The client side of the round trip, on the wire: paired with the
+            // server's `kvetch.complete` span it shows the request leaving and
+            // arriving, so a hang has a side.
+            snitchos_user::register_counter("snitchos.stitch.completions_asked").emit(1);
+            let endpoint = Endpoint::from_raw_handle(delegated_handle(0));
+            let (words, _) = endpoint.call(request.encode()).ok()?;
+            let Reply { status, written } = Reply::decode(words).ok()?;
+            if status != Status::Ok || written == 0 {
+                return None;
+            }
+            let end = prefix.len() + written as usize;
+            core::str::from_utf8(buf.get(prefix.len()..end)?).ok().map(String::from)
         }
 
         fn fs_read(&self, name: &str) -> Option<String> {

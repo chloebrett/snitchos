@@ -461,24 +461,34 @@ impl Parser {
     /// Can the current token begin an expression atom? Used to tell an
     /// open-ended range (`n..`) from one with an end operand (`n..m`).
     fn starts_expr(&self) -> bool {
-        matches!(
-            self.peek(),
-            TokenKind::Int(_)
-                | TokenKind::Float(_)
-                | TokenKind::Bool(_)
-                | TokenKind::Ident(_)
-                | TokenKind::Str(_)
-                | TokenKind::Placeholder(_)
-                | TokenKind::LParen
-                | TokenKind::LBracket
-                | TokenKind::LBrace
-                | TokenKind::At
-                | TokenKind::Match
-                | TokenKind::Minus
-                | TokenKind::Not
-        )
+        token_starts_expr(self.peek())
     }
+}
 
+/// Whether a token can open an operand. Shared with [`crate::print`], which has
+/// to answer the same question from the other direction: whether a `..` it is
+/// about to write would reach across a statement boundary and take the next
+/// statement as its end.
+pub(crate) fn token_starts_expr(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Int(_)
+            | TokenKind::Float(_)
+            | TokenKind::Bool(_)
+            | TokenKind::Ident(_)
+            | TokenKind::Str(_)
+            | TokenKind::Placeholder(_)
+            | TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::LBrace
+            | TokenKind::At
+            | TokenKind::Match
+            | TokenKind::Minus
+            | TokenKind::Not
+    )
+}
+
+impl Parser {
     /// Postfix operators (call, field, `?.`, `?`, index) — the tightest layer,
     /// left-associative so `a.b.c` and `f(x)(y)` chain.
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
