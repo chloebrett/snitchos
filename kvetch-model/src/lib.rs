@@ -307,7 +307,7 @@ impl Model {
             let keys = rope(&project(&normed, wk, d_model, d_model), head_dim, d_model);
             let values = project(&normed, wv, d_model, d_model);
 
-            let attended = attention(&queries, &keys, &values, positions, heads, head_dim);
+            let (attended, _) = attention(&queries, &keys, &values, positions, heads, head_dim);
             add_into(&mut stream, &project(&attended, wo, d_model, d_model));
 
             let normed = rms_norm_rows(&stream, ffn_norm, d_model);
@@ -345,28 +345,63 @@ impl Model {
     }
 }
 
-fn rms_norm_rows(rows: &[f32], scale: &[f32], d_model: usize) -> Vec<f32> {
-    rows.chunks(d_model)
-        .flat_map(|row| {
+/// `RMSNorm` over each row, returning the normalized rows **and** each row's
+/// `1/rms`.
+///
+/// The reciprocal is returned because the backward pass needs it and
+/// recomputing it there would be a second definition of the same quantity —
+/// the forward pass is the only place it should be decided. Forward-only
+/// callers discard it; it costs one float per position.
+pub fn rms_norm(rows: &[f32], scale: &[f32], d_model: usize) -> (Vec<f32>, Vec<f32>) {
+    let inverse_rms: Vec<f32> = rows
+        .chunks(d_model)
+        .map(|row| {
             let mean_square = row.iter().map(|value| value * value).sum::<f32>() / d_model as f32;
-            let inverse = 1.0 / libm::sqrtf(mean_square + NORM_EPS);
+            1.0 / libm::sqrtf(mean_square + NORM_EPS)
+        })
+        .collect();
+
+    let normalized = rows
+        .chunks(d_model)
+        .zip(&inverse_rms)
+        .flat_map(|(row, &inverse)| {
             row.iter()
                 .zip(scale)
                 .map(move |(value, gain)| value * inverse * gain)
         })
-        .collect()
+        .collect();
+
+    (normalized, inverse_rms)
+}
+
+fn rms_norm_rows(rows: &[f32], scale: &[f32], d_model: usize) -> Vec<f32> {
+    rms_norm(rows, scale, d_model).0
+}
+
+/// The feed-forward activation: `x · sigmoid(x)`.
+pub fn silu(value: f32) -> f32 {
+    value / (1.0 + libm::expf(-value))
+}
+
+/// The rotation angle applied to dimension pair `pair` of a head at `position`.
+///
+/// Shared by the forward rotation and its inverse so the two cannot disagree
+/// about the geometry — a backward pass that rotates by a subtly different angle
+/// produces gradients that are wrong only for long sequences, which is the
+/// hardest kind of wrong to notice.
+pub fn rope_angle(position: usize, pair: usize, head_dim: usize) -> f32 {
+    libm::powf(ROPE_BASE, -2.0 * pair as f32 / head_dim as f32) * position as f32
 }
 
 /// Rotary position embedding, applied per head over adjacent dimension pairs.
-fn rope(rows: &[f32], head_dim: usize, d_model: usize) -> Vec<f32> {
+pub fn rope(rows: &[f32], head_dim: usize, d_model: usize) -> Vec<f32> {
     let mut out = rows.to_vec();
 
     for (position, row) in out.chunks_mut(d_model).enumerate() {
         for head in row.chunks_mut(head_dim) {
             for pair in 0..head_dim / 2 {
-                let frequency =
-                    libm::powf(ROPE_BASE, -2.0 * pair as f32 / head_dim as f32) * position as f32;
-                let (sin, cos) = (libm::sinf(frequency), libm::cosf(frequency));
+                let angle = rope_angle(position, pair, head_dim);
+                let (sin, cos) = (libm::sinf(angle), libm::cosf(angle));
                 let (left, right) = (head[2 * pair], head[2 * pair + 1]);
 
                 head[2 * pair] = left * cos - right * sin;
@@ -381,17 +416,23 @@ fn rope(rows: &[f32], head_dim: usize, d_model: usize) -> Vec<f32> {
 /// Causal multi-head attention. A position attends to itself and everything
 /// before it, never after — the property `logits_at_a_position_ignore_every_
 /// token_after_it` exists to hold.
-fn attention(
+///
+/// Returns the attended values **and** the attention probabilities, laid out
+/// `heads × positions × positions` with zeros above the diagonal. The
+/// probabilities are what the backward pass differentiates through, and
+/// recomputing them there would mean two definitions of the same softmax.
+pub fn attention(
     queries: &[f32],
     keys: &[f32],
     values: &[f32],
     positions: usize,
     heads: usize,
     head_dim: usize,
-) -> Vec<f32> {
+) -> (Vec<f32>, Vec<f32>) {
     let d_model = heads * head_dim;
-    let scale = 1.0 / libm::sqrtf(head_dim as f32);
+    let scale = attention_scale(head_dim);
     let mut out = vec![0.0; positions * d_model];
+    let mut probabilities = vec![0.0; heads * positions * positions];
 
     for head in 0..heads {
         let offset = head * head_dim;
@@ -402,16 +443,13 @@ fn attention(
             let scores: Vec<f32> = (0..=query_pos)
                 .map(|key_pos| {
                     let key = &keys[key_pos * d_model + offset..][..head_dim];
-                    query
-                        .iter()
-                        .zip(key)
-                        .map(|(q, k)| q * k)
-                        .sum::<f32>()
-                        * scale
+                    query.iter().zip(key).map(|(q, k)| q * k).sum::<f32>() * scale
                 })
                 .collect();
 
             for (key_pos, weight) in softmax(&scores).into_iter().enumerate() {
+                probabilities[(head * positions + query_pos) * positions + key_pos] = weight;
+
                 let value = &values[key_pos * d_model + offset..][..head_dim];
                 let target = &mut out[query_pos * d_model + offset..][..head_dim];
                 for (slot, v) in target.iter_mut().zip(value) {
@@ -421,7 +459,12 @@ fn attention(
         }
     }
 
-    out
+    (out, probabilities)
+}
+
+/// The `1/√head_dim` factor on attention scores, shared with the backward pass.
+pub fn attention_scale(head_dim: usize) -> f32 {
+    1.0 / libm::sqrtf(head_dim as f32)
 }
 
 /// Max-subtracted softmax — the subtraction is what keeps `exp` from
@@ -435,10 +478,6 @@ fn softmax(scores: &[f32]) -> Vec<f32> {
     let total: f32 = exponentiated.iter().sum();
 
     exponentiated.into_iter().map(|value| value / total).collect()
-}
-
-fn silu(value: f32) -> f32 {
-    value / (1.0 + libm::expf(-value))
 }
 
 fn add_into(stream: &mut [f32], delta: &[f32]) {
