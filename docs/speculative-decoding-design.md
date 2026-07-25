@@ -138,6 +138,54 @@ The babble-vs-real delta is not noise to be averaged away. It is the same
 [generative-ladder.md](generative-ladder.md) already asks for, arriving early and
 for free.
 
+## Measured (2026-07-25)
+
+`cargo run --release -p cram-corpus --bin legal-histogram`. 2000 babble programs
+(54,683 decisions) against all hand-written Stitch in the repo (6 files, 7,676
+decisions).
+
+| `n` | babble | real Stitch | ratio |
+|---|---|---|---|
+| `= 1` (forced) | 19.9% | **8.3%** | 2.4× |
+| `≤ 2` | 35.5% | 13.3% | 2.7× |
+| `≤ 3` | 50.8% | 19.1% | 2.7× |
+| `≤ 5` | 60.9% | 23.9% | 2.5× |
+
+**Measuring on babble would have overstated the win by ~2.5×.** The caveat that
+prompted this measurement was not a hedge — it was the finding. babble's walk
+concentrates in low-branching states; real code lives in the wide ones (real
+Stitch spikes hard at `n` = 17–18 and 25–27, the mid-expression positions where
+two dozen classes are legal).
+
+### What this does to the two mechanisms, on the board
+
+- **Forced tokens: keep, unconditionally.** 8.3% of decode steps cost *zero*
+  forward passes. Not spectacular, but free, exact, and it needs no second model.
+- **babble-drafting at ballad on the VF2: not worth it.** With `c ≈ 1.5` the
+  cutoff is `n_max = 2`, and `n = 1` is already handled by forced tokens — so
+  drafting applies only to the `n = 2` slice, which is **5.0%** of decisions. At
+  `n = 2` the worst-case `α = 0.5` is *exactly* the break-even `c − 1`. Guaranteed
+  gain: zero. Actual gain depends on how far the target is from a point mass,
+  and it is bounded by 5% of steps regardless.
+
+That is a real negative result and it should stay written down: the mechanism is
+sound, the maths is right, and the *distribution* is what kills it.
+
+**Where it does pay: anywhere closer to bandwidth-bound.** As `c → 1` the cutoff
+opens up and `n ≤ 5` covers 23.9% of decisions at `α ≥ 0.2`. That is the host
+tier, the browser tier, and plausibly the smaller rungs (cliché and below) on the
+board, where FLOPs stop competing with bandwidth. So the mechanism is a
+**small-model / fast-memory optimization**, not a ballad-on-VF2 one — the
+opposite of where it was first proposed.
+
+### Caveats on the real-Stitch column
+
+Six files and 7,676 decisions, dominated by `fs-image/stim/stim.st`, with
+`prelude.st` contributing library-shaped code. This is the same genre skew the
+canon stratum in [generative-ladder.md](generative-ladder.md) exists to fix.
+Re-measure when canon lands; the ratio, not the absolute number, is the durable
+finding.
+
 ## Open questions
 
 - Does `c` on the VF2 actually land near 1.5, and does it move between cliché and
