@@ -1,6 +1,6 @@
 # babble — the weight-free model (TDD plan)
 
-**Status:** 🚧 **IN PROGRESS — increments 1, 2, 4, 4b, 5 done** (3 deferred: it is
+**Status:** 🚧 **IN PROGRESS — increments 1, 2, 4, 4b, 5, 6, 8 done** (3 deferred: it is
 the char-level view, which stim needs and babble does not — babble appends
 whole space-separated tokens, so maximal munch cannot bite it). The oracle
 (`stitch/src/oracle.rs`) answers `valid_next` across the grammar; 9 tests
@@ -36,6 +36,35 @@ cap took the suite from 50s to 1.06s, and motivated exposing
 test pinning that the two agree so they cannot drift; (b) walks currently run
 to the cap rather than choosing `Eof` — expected, and exactly what increment
 6's depth damping fixes, so babble's programs do not yet parse whole.
+
+**Increments 6 + 8 (tables, termination, the parse property) done** — 7 tests,
+1.2s. Three findings, each from measurement rather than guesswork:
+
+1. **Weights alone cannot make a grammar walk terminate.** Damping every
+   obligation-creating class also damps the tokens that *pay* an existing debt
+   (the `{` a pending `match` is waiting for), so the walk enters constructs it
+   is then discouraged from finishing. Instrumenting showed `Eof` was legal at
+   only **2–7 of 200 steps** under both the uniform and the damped walk — the
+   pressure never got a turn. Fix: **ask the oracle when to stop.** Past
+   `wind_down`, end at the first point the program is complete; if the cap
+   arrives still owing a construct, rewind to the last complete point. A
+   babbled program is therefore always a whole program, never a truncated
+   prefix. Weights still shape *what* is generated — they just no longer have
+   to shape when it ends.
+2. **A per-class floor of 1 silently flattens the policy.** With ~25 operator
+   classes pinned at weight 1, they always outvoted `Eof`. Fixed by scaling
+   weights (`WEIGHT_SCALE`) so the floor is negligible, and capping pressure
+   (`PRESSURE_CAP`) so the divisions keep resolving instead of every class
+   bottoming out at 1 exactly when the walk most needs to finish.
+3. **TOML tables were dropped** — the plan called for
+   `babble/tables/default.toml` via `include_str!`, but the `toml` crate is
+   std-only and babble is `no_std`. Tables are a Rust `const` (`Tables::DEFAULT`),
+   still data rather than logic, still regenerable by the future
+   shape-statistics pipeline.
+
+Increment 8's property (`every_babbled_program_parses`, 64 seeds) fell out of
+(1) rather than needing its own work: babble stops only where the parser says
+the program is whole, so parseability is structural.
 
 **Post material** (noted 2026-07-25): the raw babbled output — legal-but-
 meaningless Stitch, every identifier `x` and every number `0` because the

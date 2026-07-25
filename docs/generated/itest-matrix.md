@@ -51,6 +51,7 @@
 | pre-init-order | init | wfi | boot |
 | sched-context-switch-smoke | init | wfi | sched |
 | smp-secondary-hart-boots | init | wfi | smp |
+| tx-irq-delivers | init | cpu | boot |
 | default-boot-starts-init | init (default) | wfi | boot |
 | framebuffer-absent-degrades-gracefully | init (default) | wfi | display |
 | console-frames-routes-log | init console=frames | wfi | boot |

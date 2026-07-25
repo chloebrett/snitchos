@@ -44,11 +44,13 @@ graph LR
     subgraph agnostic
         magnitude["magnitude"]
     end
+    babble["babble"]
     kernel_net["kernel-net"]
     xtask_cmds["xtask-cmds"]
     xtask_itest["xtask-itest"]
     xtask_qemu["xtask-qemu"]
     xtask_snemu["xtask-snemu"]
+    babble --> stitch
     collector --> protocol
     collector --> snitchos_abi
     diagram --> protocol
