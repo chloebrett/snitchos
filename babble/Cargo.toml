@@ -10,6 +10,10 @@ publish = false
 # lets the same walk serve both hats (corpus generation and model-zero
 # serving) and keeps it correct as Stitch evolves.
 stitch = { path = "../stitch" }
+# The completion-endpoint wire types. babble owns the *answering* of a
+# request; the message layout is shared with clients that must not link a
+# sampler.
+kvetch-proto = { path = "../kvetch-proto" }
 
 [lints]
 workspace = true

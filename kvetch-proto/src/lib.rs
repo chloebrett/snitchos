@@ -31,7 +31,7 @@ pub const MAX_BUFFER: u32 = 64 * 1024;
 /// only — this is the sampling category, not the security one, and deliberately
 /// not a CSPRNG.
 ///
-/// SplitMix64's finalizer: built precisely to turn a dense counter into
+/// `SplitMix64`'s finalizer: built precisely to turn a dense counter into
 /// well-separated 64-bit states, which matters because consecutive requests
 /// would otherwise hand near-identical states to the sampler's PRNG and
 /// correlate their completions.
