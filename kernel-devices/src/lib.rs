@@ -29,3 +29,4 @@ pub mod ramfb;
 pub mod syscrg;
 pub mod uart;
 pub mod virtio;
+pub mod virtio_net;
