@@ -1,7 +1,7 @@
-//! JH7110 SYS_IOMUX (pin-mux) register-layout logic — no MMIO. Routes a
+//! JH7110 `SYS_IOMUX` (pin-mux) register-layout logic — no MMIO. Routes a
 //! peripheral's output signal onto a physical GPIO pad, the step that gets the
 //! PWMDAC's PWM to the 3.5mm jack pins (GPIO 33 = LEFT, GPIO 34 = RIGHT on the
-//! VisionFive 2). Without it the DAC runs but its output reaches no pad → silence.
+//! `VisionFive` 2). Without it the DAC runs but its output reaches no pad → silence.
 //!
 //! Model (from mainline `pinctrl-starfive-jh7110-sys.c` + `jh7110-common.dtsi`):
 //! each pad's output signal lives in an 8-bit field in the `DOUT` bank and its
@@ -9,7 +9,7 @@
 //! word `base + 4*(g/4)`, bit-field `8*(g%4)`. Output-enable is **active-low**
 //! (`GPOEN_ENABLE = 0`). Transcribed from the board DTS's `pwmdac_pins` group.
 
-/// SYS_IOMUX MMIO base on JH7110. Shares SYSCRG's 2 MiB megapage (`0x1300_0000`),
+/// `SYS_IOMUX` MMIO base on JH7110. Shares SYSCRG's 2 MiB megapage (`0x1300_0000`),
 /// so `kmain`'s SYSCRG `insert` already maps it.
 pub const BASE: usize = 0x1304_0000;
 

@@ -8,8 +8,8 @@ its **deliverables are interfaces**. Building babble forces four contracts
 into existence that every later rung inherits: the continuation oracle's
 API, the sampler's bias tables (shared with Tier-0 corpus generation), the
 kvetch completion-endpoint protocol v0, and the eval report's chance-level
-floor. A tracer bullet for the tracer bullet (quip) to follow. Becomes a
-TDD plan in `plans/` once greenlit.
+floor. A tracer bullet for the tracer bullet (quip) to follow. TDD plan:
+[../plans/babble.md](../plans/babble.md).
 
 Related: [llm-design.md](llm-design.md) (continuation oracle rationale,
 kvetch service, help/completion architecture),
