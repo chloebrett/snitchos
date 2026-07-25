@@ -180,6 +180,18 @@ pub struct AttentionShape {
     pub head_dim: usize,
 }
 
+/// One head's slice of one position's row.
+///
+/// A `fn` rather than a closure so the returned borrow is tied to `data` alone;
+/// a closure infers one lifetime for its whole environment and will not compile
+/// here. Views, never copies — this is the innermost thing the backward pass
+/// does, and the `.to_vec()` that used to live here cost more than the
+/// arithmetic it fed.
+fn head_view(data: &[f32], position: usize, offset: usize, shape: AttentionShape) -> &[f32] {
+    let start = position * shape.heads * shape.head_dim + offset;
+    &data[start..start + shape.head_dim]
+}
+
 /// Gradients of [`kvetch_model::attention`] with respect to queries, keys and
 /// values.
 ///
@@ -190,9 +202,9 @@ pub struct AttentionShape {
 ///
 /// Causality falls out of the loop bounds — key positions after the query are
 /// never visited, so they accumulate nothing.
-pub fn attention_backward(
-    saved: &AttentionForward<'_>,
-    d_output: &[f32],
+pub fn attention_backward<'a>(
+    saved: &AttentionForward<'a>,
+    d_output: &'a [f32],
     shape: AttentionShape,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let &AttentionForward {
@@ -215,21 +227,22 @@ pub fn attention_backward(
 
     for head in 0..heads {
         let offset = head * head_dim;
-        let slice = |data: &[f32], position: usize| {
-            data[position * d_model + offset..][..head_dim].to_vec()
-        };
+        let view = |data: &'a [f32], position: usize| head_view(data, position, offset, shape);
 
         for query_pos in 0..positions {
             let row = &probabilities[(head * positions + query_pos) * positions..][..positions];
-            let d_out = slice(d_output, query_pos);
+            let d_out = view(d_output, query_pos);
+            // Loop-invariant across key positions — reading it inside the inner
+            // loop re-derived the same slice `positions` times.
+            let query = view(queries, query_pos);
 
             // dL/dp for each attended position, and the row-sum that the
             // softmax's normalization couples into every score.
             let d_probabilities: Vec<f32> = (0..=query_pos)
                 .map(|key_pos| {
-                    slice(values, key_pos)
+                    view(values, key_pos)
                         .iter()
-                        .zip(&d_out)
+                        .zip(d_out)
                         .map(|(v, d)| v * d)
                         .sum::<f32>()
                 })
@@ -240,18 +253,15 @@ pub fn attention_backward(
 
             for key_pos in 0..=query_pos {
                 let weight = row[key_pos];
-
-                for dimension in 0..head_dim {
-                    d_values[key_pos * d_model + offset + dimension] += weight * d_out[dimension];
-                }
-
                 let d_score = weight * (d_probabilities[key_pos] - coupling) * scale;
-                let query = slice(queries, query_pos);
-                let key = slice(keys, key_pos);
+                let key = view(keys, key_pos);
 
+                let value_base = key_pos * d_model + offset;
+                let query_base = query_pos * d_model + offset;
                 for dimension in 0..head_dim {
-                    d_queries[query_pos * d_model + offset + dimension] += d_score * key[dimension];
-                    d_keys[key_pos * d_model + offset + dimension] += d_score * query[dimension];
+                    d_values[value_base + dimension] += weight * d_out[dimension];
+                    d_queries[query_base + dimension] += d_score * key[dimension];
+                    d_keys[value_base + dimension] += d_score * query[dimension];
                 }
             }
         }

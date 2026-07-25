@@ -190,6 +190,18 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Train a rung of the generative ladder end to end: generate or
+    /// reuse the corpus, train the vocab, train the model, write a
+    /// checkpoint and a loss curve.
+    ///
+    /// `cargo xtask train --rung drivel`. Forwarded verbatim to
+    /// `xtask-train`, which links `cram` — kept out of lean `xtask` for
+    /// the same reason `snemu` is: an edit to the trainer should not
+    /// recompile the tool that runs `cargo xtask test`.
+    Train {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Inspect and manage the integration-test baseline
     /// (`.itest-baseline.toml`) and per-run history (`.itest-runs/`).
     /// These are the management verbs that used to be `itest` flags.
@@ -542,11 +554,46 @@ mod env_scrub_tests {
 /// plans/xtask-lean-test-binary.md. Argv is passed through verbatim; `xtask-itest`
 /// does the real parsing and validation.
 fn delegate_itest(subcommand: &str, args: &[String]) -> ExitCode {
-    let status = Command::new("cargo")
-        .args(["run", "-p", "xtask-itest", "--", subcommand])
+    delegate_to("xtask-itest", Some(subcommand), args, Profile::Dev)
+}
+
+/// Which cargo profile a delegated tool is built with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Profile {
+    /// `snemu` is already opt-3 via a per-package override, so `itest` gets a
+    /// fast emulator from a dev build and a `--release` here would only force a
+    /// second, redundant compilation of everything else.
+    Dev,
+    /// Training is a numerics loop where a dev build is ~20x slower; the run
+    /// dwarfs the compile, so release is always the right trade.
+    Release,
+}
+
+/// Forward argv verbatim to a heavyweight sibling tool.
+///
+/// The split exists so lean `xtask` links neither `snemu` nor `cram`: those are
+/// the two dependencies that make a rebuild expensive, and `cargo xtask test`
+/// runs far too often to pay for either. `subcommand` is `None` for tools whose
+/// argv starts with flags rather than a verb.
+fn delegate_to(
+    package: &str,
+    subcommand: Option<&str>,
+    args: &[String],
+    profile: Profile,
+) -> ExitCode {
+    let mut command = Command::new("cargo");
+    command.args(["run", "-p", package]);
+    if profile == Profile::Release {
+        command.arg("--release");
+    }
+
+    let status = command
+        .arg("--")
+        .args(subcommand)
         .args(args)
         .status()
-        .expect("failed to invoke cargo run -p xtask-itest");
+        .unwrap_or_else(|error| panic!("failed to invoke cargo run -p {package}: {error}"));
+
     match status.code() {
         Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         None => ExitCode::from(1),
@@ -584,6 +631,7 @@ fn main() -> ExitCode {
         Cmd::Links => links::check(),
         Cmd::ItestShow { args } => delegate_itest("itest-show", &args),
         Cmd::Itest { args } => delegate_itest("itest", &args),
+        Cmd::Train { args } => delegate_to("xtask-train", None, &args, Profile::Release),
         Cmd::Baseline { args } => delegate_itest("baseline", &args),
         Cmd::Diagram { args } => delegate_itest("diagram", &args),
         Cmd::Loc => loc::run(),

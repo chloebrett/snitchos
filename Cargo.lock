@@ -929,7 +929,6 @@ dependencies = [
  "serde_json",
  "snitchos-abi",
  "spin 0.10.0",
- "synth",
 ]
 
 [[package]]
@@ -1700,6 +1699,7 @@ dependencies = [
  "fs-proto",
  "hitch",
  "insta",
+ "kvetch-proto",
  "protocol",
  "snitchos-abi",
  "snitchos-user",
@@ -2548,6 +2548,16 @@ dependencies = [
  "rustc-demangle",
  "snemu",
  "xtask-qemu",
+]
+
+[[package]]
+name = "xtask-train"
+version = "0.0.1"
+dependencies = [
+ "cram",
+ "cram-corpus",
+ "kvetch-model",
+ "kvetch-vocab",
 ]
 
 [[package]]

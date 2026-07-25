@@ -51,6 +51,15 @@ impl AdamW {
         }
     }
 
+    /// Override the learning rate, so a schedule can drive it per step.
+    ///
+    /// Separate from the momentum state on purpose: changing the rate must not
+    /// reset the running means, or every schedule step would throw away Adam's
+    /// accumulated estimate of the gradient's shape.
+    pub const fn set_learning_rate(&mut self, learning_rate: f32) {
+        self.config.learning_rate = learning_rate;
+    }
+
     /// Apply one update in place.
     ///
     /// Both running means start at zero and are therefore biased toward it for

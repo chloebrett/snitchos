@@ -1,0 +1,18 @@
+[package]
+name = "xtask-train"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# The `cram`-linked half of xtask, split for the same reason `xtask-itest` is
+# split from `xtask`: an edit to the trainer should recompile it once, for this
+# tool, rather than dragging the lean `cargo xtask test` path along with it.
+# Lean `xtask` forwards `train` here via `cargo run -p xtask-train`.
+[dependencies]
+cram = { path = "../cram" }
+cram-corpus = { path = "../cram-corpus" }
+kvetch-model = { path = "../kvetch-model" }
+kvetch-vocab = { path = "../kvetch-vocab" }
+
+[lints]
+workspace = true
