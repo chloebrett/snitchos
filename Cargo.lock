@@ -573,6 +573,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "glitch"
+version = "0.0.1"
+dependencies = [
+ "glitch-core",
+ "glitch-proto",
+ "snitchos-user",
+]
+
+[[package]]
+name = "glitch-core"
+version = "0.0.1"
+dependencies = [
+ "glitch-proto",
+ "synth",
+]
+
+[[package]]
 name = "glitch-proto"
 version = "0.0.1"
 dependencies = [

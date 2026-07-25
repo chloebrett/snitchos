@@ -1,0 +1,21 @@
+[package]
+name = "glitch-core"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# The `glitch` server's pure synthesis policy, split out of `user/glitch` so it can
+# be host-tested — `user/glitch` depends on `snitchos-user` (riscv-only asm), so it
+# can't run on the host. Same split as `fs-core` vs `user/fs`. Deps are both pure,
+# host-buildable crates.
+[dependencies]
+synth = { path = "../synth" }
+glitch-proto = { path = "../glitch-proto" }
+
+[lints]
+workspace = true
+
+[lib]
+# No doctests in this crate; doctest=false keeps `cargo test` off the slow
+# rustdoc doc-test compile (the gate runs nextest). Add to any new lib crate.
+doctest = false

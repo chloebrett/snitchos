@@ -17,6 +17,35 @@ pub use snitchos_abi::MSG_WORDS;
 /// number that arrives from another process.
 pub const MAX_BUFFER: u32 = 64 * 1024;
 
+/// The seed for the `counter`-th completion of a boot whose entropy root is
+/// `boot_seed`.
+///
+/// **Wire law.** A host-side reproducer must derive the same seed the server
+/// used, on any engine, forever — so this function's output is as much a
+/// contract as the message layouts, and the golden vectors in the tests exist
+/// to make changing it a deliberate act.
+///
+/// **Takes no clock, by construction.** Seeding from time would promote engine
+/// clock skew into content divergence and poison `snemu diff`; the signature is
+/// the enforcement (see `docs/randomness-and-entropy.md`). Statistical quality
+/// only — this is the sampling category, not the security one, and deliberately
+/// not a CSPRNG.
+///
+/// SplitMix64's finalizer: built precisely to turn a dense counter into
+/// well-separated 64-bit states, which matters because consecutive requests
+/// would otherwise hand near-identical states to the sampler's PRNG and
+/// correlate their completions.
+#[must_use]
+pub const fn request_seed(boot_seed: u64, counter: u64) -> u64 {
+    // `counter + 1`, so the plainest run in the system — default boot seed 0,
+    // first completion — does not mix zero into a function that maps zero to
+    // zero.
+    let mut z = boot_seed.wrapping_add(counter.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// Why decoding a kvetch message failed — a malformed message is something to
 /// reply to, never a panic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,7 +174,76 @@ impl Reply {
 
 #[cfg(test)]
 mod tests {
-    use super::{Complete, MAX_BUFFER, Reply, Status, WireError};
+    use super::{Complete, MAX_BUFFER, Reply, Status, WireError, request_seed};
+
+    #[test]
+    fn each_request_in_a_boot_gets_its_own_seed() {
+        let boot = 0xDEAD_BEEF;
+        let seeds: [u64; 8] = core::array::from_fn(|i| request_seed(boot, i as u64));
+        for (i, seed) in seeds.iter().enumerate() {
+            for (j, other) in seeds.iter().enumerate() {
+                assert!(i == j || seed != other, "counters {i} and {j} collide");
+            }
+        }
+    }
+
+    #[test]
+    fn the_all_zero_case_is_not_degenerate() {
+        // Boot seed 0 is the documented default (no `seed=` bootarg), and
+        // request 0 is every boot's first completion — so the plainest run the
+        // system has lands exactly here. A bare mixing function maps zero to
+        // zero, which would hand the sampler its most degenerate state on the
+        // most common path.
+        assert_ne!(request_seed(0, 0), 0);
+    }
+
+    #[test]
+    fn the_derivation_is_pinned_forever() {
+        // Golden vectors. Changing this function silently re-seeds every
+        // completion the system has ever recorded, breaking replay of stored
+        // traces and cross-engine reproduction. Editing these numbers is the
+        // deliberate act of declaring a new derivation.
+        let vectors: [u64; 4] = [
+            request_seed(0, 0),
+            request_seed(0, 1),
+            request_seed(0xDEAD_BEEF, 0),
+            request_seed(0xDEAD_BEEF, 7),
+        ];
+        assert_eq!(
+            vectors,
+            [
+                16294208416658607535,
+                7960286522194355700,
+                5395234354446855067,
+                12901208535622949722
+            ]
+        );
+    }
+
+    #[test]
+    fn different_boots_diverge() {
+        assert_ne!(request_seed(1, 0), request_seed(2, 0));
+    }
+
+    #[test]
+    fn derivation_is_deterministic() {
+        assert_eq!(request_seed(7, 3), request_seed(7, 3));
+    }
+
+    #[test]
+    fn consecutive_counters_are_not_neighbours() {
+        // The counter is dense (0, 1, 2, …) and feeds a sampler's PRNG, so a
+        // weak mix would hand near-identical states to consecutive requests
+        // and correlate their completions. Require a real avalanche: about
+        // half the bits should flip for a one-bit input change.
+        for counter in 0..64u64 {
+            let flipped = (request_seed(99, counter) ^ request_seed(99, counter + 1)).count_ones();
+            assert!(
+                (16..=48).contains(&flipped),
+                "counter {counter}: only {flipped} bits differ from its successor"
+            );
+        }
+    }
 
     fn request() -> Complete {
         Complete { max_tokens: 12, ptr: 0xdead_0000, cap: 4096, prefix_len: 13 }

@@ -1,0 +1,23 @@
+[package]
+name = "glitch"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# The userspace `glitch` audio server. Like `fs`/`hello` it only builds for
+# riscv64gc-unknown-none-elf (it links against `snitchos-user`'s crt0 + the shared
+# `user.ld`); built via `kernel/build.rs`. The host-testable synthesis policy lives
+# in `glitch-core` — this crate is the riscv-only `serve` glue, so it is in
+# `NOT_HOST_TESTED` (xtask/src/plan.rs), verified by the Increment 8 itest.
+[dependencies]
+snitchos-user = { path = "../runtime" }
+glitch-core = { path = "../../glitch-core" }
+glitch-proto = { path = "../../glitch-proto" }
+
+[lints]
+workspace = true
+
+[lib]
+# No doctests in this crate; doctest=false keeps `cargo test` off the slow
+# rustdoc doc-test compile. The gate runs nextest. Add to any new lib crate too.
+doctest = false
