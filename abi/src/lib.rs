@@ -323,6 +323,10 @@ pub mod rights {
     pub const WAIT: u32 = 0b10_0000;
     /// May `kill` the process an `Object::Process` cap names (supervision v2a).
     pub const KILL: u32 = 0b100_0000;
+    /// May emit audio samples through an `Object::AudioSink` — the right to make
+    /// noise. Held by the `glitch` audio server; the DAC is a scarce resource
+    /// mediated by one holder.
+    pub const AUDIO: u32 = 0b1000_0000;
 }
 
 /// Object-kind discriminants for a [`CapDesc`]'s `kind` field — what sort of
@@ -343,6 +347,8 @@ pub mod object_kind {
     pub const NOTIFICATION: u32 = 4;
     /// A `Process` — a child's lifecycle handle, carrying `KILL` (supervision v2a).
     pub const PROCESS: u32 = 5;
+    /// An `AudioSink` — the right to emit audio samples (the `glitch` server).
+    pub const AUDIO_SINK: u32 = 6;
 }
 
 /// One capability in a process's own table, as written by [`Syscall::CapList`] —

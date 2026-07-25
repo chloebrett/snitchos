@@ -531,6 +531,7 @@ pub(crate) fn cap_object_kind(object: kernel_proc::cap::Object) -> protocol::Cap
         Object::Reply { .. } => protocol::CapObject::Reply,
         Object::Notification { .. } => protocol::CapObject::Notification,
         Object::Process { .. } => protocol::CapObject::Process,
+        Object::AudioSink => protocol::CapObject::AudioSink,
     }
 }
 

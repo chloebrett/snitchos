@@ -61,7 +61,14 @@ itest. snemu already models the PWMDAC (Tier 0), so the whole path runs under sn
 
 ---
 
-## Increment 1 — `Object::AudioSink` capability
+## Increment 1 — `Object::AudioSink` capability — ✅ DONE
+
+Shipped: `Object::AudioSink` + `Rights::AUDIO` (a dedicated right — the "right to make
+noise") + `authorize_audio` resolver + `describe` arm in `kernel-proc/src/cap.rs`;
+`rights::AUDIO = 0b1000_0000` / `object_kind::AUDIO_SINK = 6` in `abi`;
+`protocol::CapObject::AudioSink` (appended — wire-stability holds) + the kernel's
+`cap_object_kind` arm. 6 host tests (accept + 3 refusal paths + describe), mutation 2/2
+caught, clippy-clean, kernel builds. A faithful `authorize_telemetry` twin.
 
 **RED** (`kernel-proc/src/cap.rs` tests): mirror `authorize_telemetry_refuses_*`
 (`cap.rs:1269`). An `authorize_audio(table, handle)` accepts a cap with the AUDIO right,

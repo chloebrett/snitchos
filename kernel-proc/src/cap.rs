@@ -63,6 +63,10 @@ impl Rights {
     /// May `kill` the process an [`Object::Process`] cap names (supervision v2a).
     pub const KILL: Rights = Rights(snitchos_abi::rights::KILL);
 
+    /// May emit audio through an [`Object::AudioSink`] — the right to make noise
+    /// (the `glitch` server holds it).
+    pub const AUDIO: Rights = Rights(snitchos_abi::rights::AUDIO);
+
     /// Whether `self` grants every right in `other`.
     #[must_use]
     pub const fn contains(self, other: Rights) -> bool {
@@ -140,6 +144,12 @@ pub enum Object {
     /// the `Kill` syscall; [`Rights::KILL`] gates it. Composes: a parent can delegate
     /// the cap to a sub-supervisor, granting `KILL` over that subtree.
     Process { id: TaskId },
+    /// Authority to emit audio samples to the DAC — the right to make noise. Pure
+    /// authority (no payload), like [`TelemetrySink`](Self::TelemetrySink): the
+    /// kernel owns the PWMDAC MMIO, and the holder (the `glitch` audio server) asks
+    /// it to write samples through the `AudioWrite` syscall. One holder mediates the
+    /// single scarce DAC; clients reach it over IPC, never the hardware.
+    AudioSink,
 }
 
 /// An unforgeable `{ object, rights }` pair.
@@ -285,6 +295,23 @@ pub fn authorize_telemetry(table: &CapTable, handle: Handle) -> Result<(), Denie
         return Err(Denied::MissingRight);
     }
     let Object::TelemetrySink = cap.object else {
+        return Err(Denied::WrongObject);
+    };
+    Ok(())
+}
+
+/// Authorize an `AudioSink` use: `handle` must name a capability in `table`
+/// carrying [`Rights::AUDIO`] over an [`Object::AudioSink`]. Returns `Ok(())` when
+/// the holder may write samples to the DAC, or why it is refused — the audio twin
+/// of [`authorize_telemetry`]. `AudioWrite` gates on this. Pure and host-tested.
+pub fn authorize_audio(table: &CapTable, handle: Handle) -> Result<(), Denied> {
+    let cap = table
+        .resolve(handle)
+        .map_err(|_| Denied::NoSuchCapability)?;
+    if !cap.rights.contains(Rights::AUDIO) {
+        return Err(Denied::MissingRight);
+    }
+    let Object::AudioSink = cap.object else {
         return Err(Denied::WrongObject);
     };
     Ok(())
@@ -499,6 +526,7 @@ impl CapTable {
                     Object::Reply { .. } => (object_kind::REPLY, 0, unnamed),
                     Object::Notification { .. } => (object_kind::NOTIFICATION, 0, unnamed),
                     Object::Process { .. } => (object_kind::PROCESS, 0, unnamed),
+                    Object::AudioSink => (object_kind::AUDIO_SINK, 0, unnamed),
                 };
                 Some(CapDesc {
                     handle: Handle::new(index as u32, slot.generation).raw(),
@@ -1273,6 +1301,68 @@ mod tests {
             rights: Rights::EMIT,
         });
         assert_eq!(authorize_telemetry(&table, h), Err(Denied::WrongObject));
+    }
+
+    #[test]
+    fn authorize_audio_accepts_an_audiosink_with_the_audio_right() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::AudioSink,
+            rights: Rights::AUDIO,
+        });
+        assert_eq!(authorize_audio(&table, h), Ok(()));
+    }
+
+    #[test]
+    fn authorize_audio_refuses_an_unknown_handle() {
+        let table = CapTable::new();
+        assert_eq!(
+            authorize_audio(&table, Handle::from_raw(0)),
+            Err(Denied::NoSuchCapability)
+        );
+    }
+
+    #[test]
+    fn authorize_audio_refuses_an_audiosink_lacking_the_audio_right() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::AudioSink,
+            rights: Rights::NONE,
+        });
+        assert_eq!(authorize_audio(&table, h), Err(Denied::MissingRight));
+    }
+
+    #[test]
+    fn authorize_audio_refuses_the_audio_right_over_a_wrong_object() {
+        // Holding AUDIO over a TelemetrySink is not authority to make noise —
+        // the object kind gates as well as the right.
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::TelemetrySink,
+            rights: Rights::AUDIO,
+        });
+        assert_eq!(authorize_audio(&table, h), Err(Denied::WrongObject));
+    }
+
+    #[test]
+    fn describe_reports_an_audiosink_as_the_audio_sink_kind() {
+        let mut table = CapTable::new();
+        let h = table.insert(Capability {
+            object: Object::AudioSink,
+            rights: Rights::AUDIO,
+        });
+        let descs = table.describe(|_| [0; snitchos_abi::CAP_NAME_LEN]);
+        assert_eq!(
+            descs,
+            alloc::vec![CapDesc {
+                handle: h.raw(),
+                kind: object_kind::AUDIO_SINK,
+                rights: snitchos_abi::rights::AUDIO,
+                reserved: 0,
+                badge: 0,
+                name: [0; snitchos_abi::CAP_NAME_LEN],
+            }]
+        );
     }
 
     #[test]

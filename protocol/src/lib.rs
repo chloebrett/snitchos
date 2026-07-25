@@ -316,6 +316,10 @@ pub enum CapObject {
   /// A process lifecycle handle (v2a) — a parent's `KILL` cap over a child it
   /// `Spawn`ed. The bound task id lives kernel-side.
   Process,
+  /// The right to emit audio to the DAC (the `glitch` server). The PWMDAC MMIO
+  /// lives kernel-side; this wire tag attributes the grant to the audio-sink kind.
+  /// (Appended — postcard is positional.)
+  AudioSink,
 }
 
 /// Why the kernel refused a syscall (the `reason` in [`Frame::SyscallRefused`]).
