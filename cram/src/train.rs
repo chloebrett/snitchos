@@ -7,6 +7,8 @@
 //! than agreement, because two implementations can share a misconception and
 //! finite differences cannot share one with us.
 
+use kvetch_model::{Gemm, GemmSpec};
+
 use alloc_free_math::softmax_in_place;
 
 mod alloc_free_math {
@@ -54,10 +56,98 @@ pub fn cross_entropy(logits: &[f32], targets: &[u16], vocab: usize) -> (f32, Vec
     (loss / positions as f32, gradient)
 }
 
+/// Gradients of `Y = X·W` with respect to both operands.
+///
+/// Both are matmuls, which is why [`Gemm`] carries the whole performance story
+/// of training and not just of inference: `dX = dY·Wᵀ` and `dW = Xᵀ·dY`.
+pub fn matmul_backward<G: Gemm>(
+    gemm: &G,
+    inputs: &[f32],
+    weights: &[f32],
+    d_outputs: &[f32],
+    shape: (usize, usize, usize),
+) -> (Vec<f32>, Vec<f32>) {
+    let (m, k, n) = shape;
+
+    let mut d_inputs = vec![0.0; m * k];
+    gemm.sgemm(
+        GemmSpec {
+            m,
+            k: n,
+            n: k,
+            transpose_a: false,
+            transpose_b: true,
+        },
+        d_outputs,
+        weights,
+        &mut d_inputs,
+    );
+
+    let mut d_weights = vec![0.0; k * n];
+    gemm.sgemm(
+        GemmSpec {
+            m: k,
+            k: m,
+            n,
+            transpose_a: true,
+            transpose_b: false,
+        },
+        inputs,
+        d_outputs,
+        &mut d_weights,
+    );
+
+    (d_inputs, d_weights)
+}
+
+/// Gradients of [`kvetch_model::rms_norm`] with respect to its input and scale.
+///
+/// The second term is the one hand-derivations drop: normalizing couples every
+/// output in a row to every input in it, through `1/rms`. Without it the
+/// gradient is plausible, stable, and wrong — which is exactly the failure the
+/// finite-difference check exists to catch.
+pub fn rms_norm_backward(
+    rows: &[f32],
+    scale: &[f32],
+    inverse_rms: &[f32],
+    d_output: &[f32],
+    d_model: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let mut d_rows = vec![0.0; rows.len()];
+    let mut d_scale = vec![0.0; d_model];
+
+    for (position, row) in rows.chunks(d_model).enumerate() {
+        let inverse = inverse_rms[position];
+        let d_row = &d_output[position * d_model..][..d_model];
+        let target = &mut d_rows[position * d_model..][..d_model];
+
+        let coupling: f32 = row
+            .iter()
+            .zip(d_row)
+            .zip(scale)
+            .map(|((value, gradient), gain)| gradient * gain * value)
+            .sum();
+
+        for index in 0..d_model {
+            target[index] = scale[index] * inverse * d_row[index]
+                - inverse * inverse * inverse * row[index] * coupling / d_model as f32;
+            d_scale[index] += d_row[index] * row[index] * inverse;
+        }
+    }
+
+    (d_rows, d_scale)
+}
+
+/// Derivative of [`kvetch_model::silu`] at `value`: `σ + x·σ·(1 − σ)`.
+pub fn silu_backward(value: f32) -> f32 {
+    let sigmoid = 1.0 / (1.0 + (-value).exp());
+    sigmoid + value * sigmoid * (1.0 - sigmoid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kvetch_model::pseudo_random_weights;
+    use kvetch_model::{NaiveGemm, pseudo_random_weights, rms_norm, silu};
 
     /// Step size for the finite-difference estimate.
     ///
@@ -123,6 +213,97 @@ mod tests {
 
         assert_matches_finite_differences(&mut logits, &gradient, |probe| {
             cross_entropy(probe, &targets, vocab).0
+        });
+    }
+
+    /// A scalar loss from a vector output: `Σ output·probe`.
+    ///
+    /// Its gradient with respect to the output is exactly `probe`, so feeding
+    /// `probe` in as `d_output` and differentiating this loss checks the
+    /// backward op without needing a real loss function attached.
+    fn linear_probe(output: &[f32], probe: &[f32]) -> f32 {
+        output.iter().zip(probe).map(|(a, b)| a * b).sum()
+    }
+
+    #[test]
+    fn rms_norm_backward_matches_finite_differences() {
+        let (positions, d_model) = (3, 8);
+        let mut rows = pseudo_random_weights(positions * d_model, 5);
+        for value in &mut rows {
+            *value *= 20.0;
+        }
+        let scale = pseudo_random_weights(d_model, 6)
+            .iter()
+            .map(|value| 1.0 + value * 4.0)
+            .collect::<Vec<f32>>();
+        let probe = pseudo_random_weights(positions * d_model, 7);
+
+        let (_, inverse_rms) = rms_norm(&rows, &scale, d_model);
+        let (d_rows, d_scale) = rms_norm_backward(&rows, &scale, &inverse_rms, &probe, d_model);
+
+        assert_matches_finite_differences(&mut rows, &d_rows, |candidate| {
+            linear_probe(&rms_norm(candidate, &scale, d_model).0, &probe)
+        });
+
+        let mut scale_probe = scale.clone();
+        assert_matches_finite_differences(&mut scale_probe, &d_scale, |candidate| {
+            linear_probe(&rms_norm(&rows, candidate, d_model).0, &probe)
+        });
+    }
+
+    #[test]
+    fn matmul_backward_matches_finite_differences() {
+        let (m, k, n) = (3, 5, 4);
+        let mut inputs = pseudo_random_weights(m * k, 11);
+        let mut weights = pseudo_random_weights(k * n, 12);
+        for value in inputs.iter_mut().chain(weights.iter_mut()) {
+            *value *= 20.0;
+        }
+        let probe = pseudo_random_weights(m * n, 13);
+
+        let forward = |x: &[f32], w: &[f32]| {
+            let mut out = vec![0.0; m * n];
+            NaiveGemm.sgemm(
+                GemmSpec {
+                    m,
+                    k,
+                    n,
+                    transpose_a: false,
+                    transpose_b: false,
+                },
+                x,
+                w,
+                &mut out,
+            );
+            out
+        };
+
+        let (d_inputs, d_weights) =
+            matmul_backward(&NaiveGemm, &inputs, &weights, &probe, (m, k, n));
+
+        let fixed_weights = weights.clone();
+        assert_matches_finite_differences(&mut inputs, &d_inputs, |candidate| {
+            linear_probe(&forward(candidate, &fixed_weights), &probe)
+        });
+
+        let fixed_inputs = inputs.clone();
+        assert_matches_finite_differences(&mut weights, &d_weights, |candidate| {
+            linear_probe(&forward(&fixed_inputs, candidate), &probe)
+        });
+    }
+
+    #[test]
+    fn silu_backward_matches_finite_differences() {
+        let mut inputs = pseudo_random_weights(16, 21)
+            .iter()
+            .map(|value| value * 60.0)
+            .collect::<Vec<f32>>();
+        let analytic: Vec<f32> = inputs.iter().map(|&value| silu_backward(value)).collect();
+
+        assert_matches_finite_differences(&mut inputs, &analytic, |candidate| {
+            // One input at a time: each output depends only on its own input,
+            // so summing them makes every partial derivative independent.
+            candidate.iter().copied().map(silu).sum()
         });
     }
 
