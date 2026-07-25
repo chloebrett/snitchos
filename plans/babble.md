@@ -1,6 +1,6 @@
 # babble — the weight-free model (TDD plan)
 
-**Status:** 🚧 **IN PROGRESS — increments 1, 2, 4, 4b, 5, 6, 8 done** (3 deferred: it is
+**Status:** 🚧 **IN PROGRESS — increments 1, 2, 4, 4b, 5, 6, 7, 8 done** (3 deferred: it is
 the char-level view, which stim needs and babble does not — babble appends
 whole space-separated tokens, so maximal munch cannot bite it). The oracle
 (`stitch/src/oracle.rs`) answers `valid_next` across the grammar; 9 tests
@@ -65,6 +65,29 @@ to the cap rather than choosing `Eof` — expected, and exactly what increment
 Increment 8's property (`every_babbled_program_parses`, 64 seeds) fell out of
 (1) rather than needing its own work: babble stops only where the parser says
 the program is whole, so parseability is structural.
+
+**Completeness is a policy, not a property** (design correction, 2026-07-25).
+The whole-program guarantee above is right for the *corpus* hat and wrong for
+the *serving* hat: a completion at a cursor is a legal **fragment**, and
+demanding a whole program would mean answering `greet(name) {` with the rest of
+the file. So `Stop::{WholeProgram, AfterTokens}` parameterises the walk
+(`walk_from`, plus `complete(prefix, seed, max_tokens)` for the serving path).
+What survives in both modes is the property that actually matters: every
+emitted token was legal, so the buffer is always left **viable** — still
+extendable to something valid. That is strictly stronger than what mainstream
+autocomplete offers, and it is what increment 12's `handle_request` will
+serve.
+
+**Increment 7 (terminal synthesis) done** — payload classes draw from
+wordlist/literal stock instead of the oracle's probe lexeme, so output reads
+like Stitch (`ext let label = .. true >= 3 |> not - ( @ , false )`) rather than
+`x`/`0` monotony. **Names are lowercase-only by correctness, not style**: the
+oracle probes `Ident` with a lowercase representative and the parser branches
+on identifier case (`starts_uppercase` separates a constructor pattern from a
+binding), so emitting `Point` where `x` was approved would step outside what
+was checked. Capitalised names need the deferred payload-aware `TokenSet`
+refinement. A test pins that no wordlist entry lexes as a keyword — such an
+entry would silently substitute a different token for the approved one.
 
 **Post material** (noted 2026-07-25): the raw babbled output — legal-but-
 meaningless Stitch, every identifier `x` and every number `0` because the

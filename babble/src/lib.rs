@@ -14,6 +14,7 @@
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -183,6 +184,50 @@ impl Tables {
     }
 }
 
+/// Identifier stock. Deliberately mundane, lowercase, and keyword-free —
+/// `no_generated_name_is_a_keyword` is the guard, because a word that lexed as
+/// a keyword would make the emitted token a *different* one from the token the
+/// oracle approved.
+///
+/// Lowercase-only is a correctness constraint, not a style choice: the oracle
+/// probes `Ident` with a lowercase representative, and the parser branches on
+/// an identifier's case (`starts_uppercase` separates a constructor pattern
+/// from a binding). Emitting `Point` where `x` was approved would step outside
+/// what was actually checked. Generating capitalised names needs the
+/// payload-aware `TokenSet` refinement that is deferred with the rest of the
+/// constraint story.
+const WORDS: &[&str] = &[
+    "name", "count", "total", "items", "value", "result", "index", "label", "price", "user",
+    "node", "edge", "size", "depth", "score", "delta", "alpha", "token", "buffer", "frame",
+    "span", "task", "port", "byte", "line", "page", "entry", "field", "queue", "sink",
+];
+
+/// Literal stock, kept small and legible for the same reason.
+const INTS: &[i64] = &[0, 1, 2, 3, 7, 10, 42, 100, 255, 1024];
+const FLOATS: &[&str] = &["0.0", "0.5", "1.5", "2.25", "3.14", "10.0"];
+
+/// Render `class` as source text. Payload-carrying classes draw from the stock
+/// above; everything else is its one fixed lexeme.
+fn render(class: TokenClass, rng: &mut Rng) -> Option<String> {
+    let text = match class {
+        TokenClass::Ident => String::from(WORDS[rng.below(WORDS.len())]),
+        TokenClass::Int => format!("{}", INTS[rng.below(INTS.len())]),
+        TokenClass::Float => String::from(FLOATS[rng.below(FLOATS.len())]),
+        TokenClass::Bool => String::from(if rng.below(2) == 0 { "true" } else { "false" }),
+        TokenClass::Str => {
+            let mut buf = String::from("\"");
+            buf.push_str(WORDS[rng.below(WORDS.len())]);
+            buf.push('"');
+            buf
+        }
+        TokenClass::Placeholder => {
+            String::from(if rng.below(2) == 0 { "$" } else { "$a" })
+        }
+        fixed => String::from(representative(fixed)?),
+    };
+    Some(text)
+}
+
 /// One emission: the source as it stood *before* the token, and the class
 /// chosen. The trace a test replays to check the walk never stepped outside
 /// what the oracle allowed.
@@ -275,16 +320,57 @@ pub fn walk(seed: u64) -> Walk {
 /// [`walk`], with a chosen policy.
 #[must_use]
 pub fn walk_with(seed: u64, tables: &Tables) -> Walk {
+    walk_from("", seed, tables, Stop::WholeProgram)
+}
+
+/// When a walk should stop.
+///
+/// Completeness is a *policy*, not a property of the walk. The corpus hat
+/// needs whole programs — a truncated prefix cannot be validated or trained
+/// on. The serving hat completes at a cursor, where the right answer is a
+/// legal fragment; demanding a whole program there would mean answering
+/// `greet(name) {` with the rest of the file. What both keep is that every
+/// emitted token was legal, so the buffer is always left **viable**.
+#[derive(Debug, Clone, Copy)]
+pub enum Stop {
+    /// End at the first point past `wind_down` where the program is complete,
+    /// rewinding if the cap arrives mid-construct.
+    WholeProgram,
+    /// Emit at most this many tokens, wherever that lands.
+    AfterTokens(usize),
+}
+
+/// Extend `prefix` by at most `max_tokens` legal tokens.
+///
+/// The serving hat: a completion, not a program.
+#[must_use]
+pub fn complete(prefix: &str, seed: u64, max_tokens: usize) -> String {
+    walk_from(prefix, seed, &Tables::DEFAULT, Stop::AfterTokens(max_tokens)).source
+}
+
+/// The walk itself, from any starting prefix under any stopping policy.
+///
+/// Note for the serving hat: nesting depth restarts at zero rather than being
+/// recovered from `prefix`, so the finishing pressure is measured over the
+/// completion, not the whole buffer. Fine while completions are short.
+#[must_use]
+pub fn walk_from(prefix: &str, seed: u64, tables: &Tables, stop: Stop) -> Walk {
+    let budget = match stop {
+        Stop::WholeProgram => MAX_TOKENS,
+        Stop::AfterTokens(n) => n.min(MAX_TOKENS),
+    };
     let mut rng = Rng::new(seed);
-    let mut source = String::new();
+    let mut source = String::from(prefix);
     let mut steps = Vec::new();
     let mut depth = 0u32;
     // The most recent point at which the program was already complete, as
     // (source length, step count) — the fallback if the walk runs to the cap
     // still owing a construct.
-    let mut complete_at = (0usize, 0usize);
-    for emitted in 0..MAX_TOKENS {
-        if admits_next(&source, source.len(), TokenClass::Eof, Entry::Program) {
+    let mut complete_at = (prefix.len(), 0usize);
+    for emitted in 0..budget {
+        if matches!(stop, Stop::WholeProgram)
+            && admits_next(&source, source.len(), TokenClass::Eof, Entry::Program)
+        {
             complete_at = (source.len(), steps.len());
             if emitted >= tables.wind_down as usize {
                 steps.push(Step { source_before: source.clone(), class: TokenClass::Eof });
@@ -300,7 +386,7 @@ pub fn walk_with(seed: u64, tables: &Tables) -> Walk {
             depth = depth.saturating_sub(1);
         }
         steps.push(Step { source_before: source.clone(), class });
-        let Some(lexeme) = representative(class) else {
+        let Some(lexeme) = render(class, &mut rng) else {
             break; // Eof: the program is complete
         };
         // The separator keeps this a walk over *tokens*: without it adjacent
@@ -309,12 +395,17 @@ pub fn walk_with(seed: u64, tables: &Tables) -> Walk {
         if !source.is_empty() {
             source.push(' ');
         }
-        source.push_str(lexeme);
+        source.push_str(&lexeme);
+    }
+    if matches!(stop, Stop::AfterTokens(_)) {
+        // A completion stops where its budget ran out. It is a fragment by
+        // design — every token in it was legal, so the buffer is left viable.
+        return Walk { source, steps };
     }
     // The cap arrived while the walk still owed a construct. Rewind to the
-    // last point where the program *was* whole: a babbled program is always a
-    // complete program, never a truncated prefix. (Rewinding to nothing yields
-    // the empty program, which is valid Stitch.)
+    // last point where the program *was* whole: a babbled *program* is always
+    // a complete program, never a truncated prefix. (Rewinding to nothing
+    // yields the empty program, which is valid Stitch.)
     let (len, step_count) = complete_at;
     source.truncate(len);
     steps.truncate(step_count);
@@ -387,6 +478,80 @@ mod tests {
             assert!(
                 stitch::parser::parse_program(&source).is_ok(),
                 "seed {seed} produced unparseable output: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_completion_extends_a_prefix_without_having_to_finish_it() {
+        // The serving hat answers at a cursor, where the right answer is a
+        // legal *fragment*. Demanding a whole program here would mean
+        // answering `greet(name) {` with the rest of the file.
+        let prefix = "greet(name) {";
+        let completed = super::complete(prefix, 7, 6);
+        assert!(completed.starts_with(prefix), "completion must extend the prefix");
+        assert!(completed.len() > prefix.len(), "completion should add something");
+        // It need not parse — but it must leave the buffer *viable*: still
+        // extendable to something that does. That is the property a fragment
+        // can keep, and the one an editor actually needs.
+        assert!(
+            !stitch::oracle::valid_next(&completed, completed.len()).is_empty(),
+            "completion left the buffer dead: {completed:?}"
+        );
+        assert!(
+            stitch::parser::parse_program(&completed).is_err(),
+            "this prefix cannot be completed into a whole program in 6 tokens, \
+             so the fragment should still be incomplete: {completed:?}"
+        );
+    }
+
+    #[test]
+    fn a_completion_respects_its_token_budget() {
+        let prefix = "greet(name) {";
+        let short = super::complete(prefix, 3, 2);
+        let long = super::complete(prefix, 3, 12);
+        assert!(short.len() < long.len(), "a larger budget should generate more");
+    }
+
+    #[test]
+    fn names_and_literals_vary() {
+        use alloc::collections::BTreeSet;
+        use stitch::lexer::{TokenKind, lex};
+        // Until terminal synthesis, every name was `x` and every number `0` —
+        // the oracle answers in *classes*, and the sampler was appending the
+        // same representative lexeme it probes with.
+        let corpus: Vec<String> = (0..8).map(generate).collect();
+        let kinds: Vec<TokenKind> =
+            corpus.iter().flat_map(|s| lex(s).tokens).map(|t| t.kind).collect();
+        let names: BTreeSet<&str> = kinds
+            .iter()
+            .filter_map(|k| match k {
+                TokenKind::Ident(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.len() > 3, "names should vary, got {names:?}");
+        let ints: BTreeSet<i64> = kinds
+            .iter()
+            .filter_map(|k| match k {
+                TokenKind::Int(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        assert!(ints.len() > 1, "integers should vary, got {ints:?}");
+    }
+
+    #[test]
+    fn no_generated_name_is_a_keyword() {
+        use stitch::lexer::{TokenKind, lex};
+        // A wordlist entry that happened to be a keyword would lex as that
+        // keyword, silently making the emitted token a different one from the
+        // token the oracle approved.
+        for word in super::WORDS {
+            let lexed = lex(word);
+            assert!(
+                matches!(lexed.tokens.first().map(|t| &t.kind), Some(TokenKind::Ident(_))),
+                "{word:?} does not lex as an identifier"
             );
         }
     }
