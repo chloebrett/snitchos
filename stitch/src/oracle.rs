@@ -270,7 +270,8 @@ pub const fn class_of(kind: &TokenKind) -> TokenClass {
 /// pattern from a binding), the class-level answer is the one for a binding.
 /// Payload-sensitive refinement is deferred with the rest of `TokenSet`'s
 /// constraint story.
-const fn representative(class: TokenClass) -> Option<&'static str> {
+#[must_use]
+pub const fn representative(class: TokenClass) -> Option<&'static str> {
     Some(match class {
         TokenClass::Int => "0",
         TokenClass::Float => "0.0",
@@ -422,6 +423,25 @@ pub fn valid_next(src: &str, pos: usize) -> TokenSet {
     valid_next_in(src, pos, Entry::Program)
 }
 
+/// Every token class, in discriminant order — the candidate list a sampler
+/// walks.
+#[must_use]
+pub const fn all_classes() -> &'static [TokenClass] {
+    &ALL
+}
+
+/// May a token of `class` legally follow `src[..pos]`?
+///
+/// The single-class question. [`valid_next`] answers it for all 58 classes,
+/// which is what a decoder mask or a diagnostic needs — but a *sampler* needs
+/// only one viable class, and asking one at a time until it finds one is an
+/// order of magnitude cheaper (each query is a parse).
+#[must_use]
+pub fn admits_next(src: &str, pos: usize, class: TokenClass, entry: Entry) -> bool {
+    src.get(..pos)
+        .is_some_and(|prefix| admits(prefix, class, entry))
+}
+
 /// [`valid_next`], for a chosen [`Entry`] grammar.
 #[must_use]
 pub fn valid_next_in(src: &str, pos: usize, entry: Entry) -> TokenSet {
@@ -560,6 +580,24 @@ mod tests {
                 "{class:?}: {lexeme:?} lexes as {:?}",
                 kinds[0]
             );
+        }
+    }
+
+    #[test]
+    fn the_single_class_query_agrees_with_the_full_set() {
+        use super::{Entry, admits_next, all_classes};
+        // Samplers ask `admits_next` one class at a time (cheap); masks and
+        // diagnostics ask `valid_next` for all of them. They must be the same
+        // question — if they drift, babble emits tokens the mask forbids.
+        for prefix in ["", "greet", "greet(", "use M.{", "let x =", "greet() { 1 }"] {
+            let full = valid_next(prefix, prefix.len());
+            for class in all_classes() {
+                assert_eq!(
+                    full.contains(*class),
+                    admits_next(prefix, prefix.len(), *class, Entry::Program),
+                    "{prefix:?} / {class:?}"
+                );
+            }
         }
     }
 

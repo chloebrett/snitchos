@@ -1,0 +1,18 @@
+[package]
+name = "babble"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The continuation oracle and its lexeme table. babble is a *policy* over
+# `stitch::oracle` — it holds no grammar knowledge of its own, which is what
+# lets the same walk serve both hats (corpus generation and model-zero
+# serving) and keeps it correct as Stitch evolves.
+stitch = { path = "../stitch" }
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false
