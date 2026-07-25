@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cram_corpus::{generate, legal_histogram};
+use cram_corpus::{Layout, generate, legal_histogram};
 
 /// Where hand-written Stitch lives. Walked recursively for `.st` files.
 const REAL_SOURCE_ROOTS: [&str; 3] = ["fs-image", "stitch/src", "plans/lang"];
@@ -23,7 +23,10 @@ fn main() {
         .and_then(|arg| arg.parse().ok())
         .unwrap_or(2000);
 
-    report("babble", &generate(0, programs));
+    // Flat: the histogram counts *decisions*, and layout changes none of them —
+    // whitespace is not a token. Using the cheaper rendering keeps the measured
+    // quantity identical.
+    report("babble", &generate(0, programs, Layout::Flat));
     report("real Stitch", &real_sources());
 }
 

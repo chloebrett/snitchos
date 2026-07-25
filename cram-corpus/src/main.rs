@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use cram_corpus::{Manifest, generate, parse_corpus, render_corpus};
+use cram_corpus::{Layout, Manifest, generate, parse_corpus, render_corpus};
 
 const DEFAULT_DIR: &str = "corpora";
 
@@ -21,19 +21,27 @@ fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let Some((seed, count)) = parse_args(&args) else {
-        eprintln!("usage: cram-corpus <seed> <count> [dir]");
+        eprintln!("usage: cram-corpus <seed> <count> [flat|printed] [dir]");
         std::process::exit(2);
     };
-    let dir = args.get(2).map_or(PathBuf::from(DEFAULT_DIR), PathBuf::from);
-    let (corpus_path, manifest_path) = paths(&dir, seed, count);
+    let layout = match args.get(2).map(String::as_str) {
+        None | Some("flat") => Layout::Flat,
+        Some("printed") => Layout::Printed,
+        Some(other) => {
+            eprintln!("unknown layout {other:?}: expected `flat` or `printed`");
+            std::process::exit(2);
+        }
+    };
+    let dir = args.get(3).map_or(PathBuf::from(DEFAULT_DIR), PathBuf::from);
+    let (corpus_path, manifest_path) = paths(&dir, seed, count, layout);
 
-    if let Some(programs) = read_fresh_cache(&corpus_path, &manifest_path, seed, count) {
+    if let Some(programs) = read_fresh_cache(&corpus_path, &manifest_path, seed, count, layout) {
         report("reused", &corpus_path, &programs, None);
         return Ok(());
     }
 
     let started = Instant::now();
-    let programs = generate(seed, count);
+    let programs = generate(seed, count, layout);
     let elapsed = started.elapsed();
 
     std::fs::create_dir_all(&dir)?;
@@ -44,7 +52,8 @@ fn main() -> std::io::Result<()> {
             format_version: cram_corpus::FORMAT_VERSION,
             seed,
             program_count: count,
-            probe_digest: Manifest::probe_digest(),
+            layout,
+            probe_digest: Manifest::probe_digest(layout),
         }
         .render(),
     )?;
@@ -57,8 +66,11 @@ fn parse_args(args: &[String]) -> Option<(u64, usize)> {
     Some((args.first()?.parse().ok()?, args.get(1)?.parse().ok()?))
 }
 
-fn paths(dir: &Path, seed: u64, count: usize) -> (PathBuf, PathBuf) {
-    let stem = format!("babble-{seed}-{count}");
+/// The layout is part of the filename, not just the manifest: two layouts of the
+/// same seed and count are different corpora, and sharing a path would make one
+/// silently overwrite the other.
+fn paths(dir: &Path, seed: u64, count: usize, layout: Layout) -> (PathBuf, PathBuf) {
+    let stem = format!("babble-{seed}-{count}-{}", layout.as_str());
     (
         dir.join(format!("{stem}.corpus")),
         dir.join(format!("{stem}.manifest")),
@@ -75,10 +87,11 @@ fn read_fresh_cache(
     manifest_path: &Path,
     seed: u64,
     count: usize,
+    layout: Layout,
 ) -> Option<Vec<String>> {
     let manifest = Manifest::parse(&std::fs::read_to_string(manifest_path).ok()?)?;
 
-    if manifest.is_stale_for(seed, count) {
+    if manifest.is_stale_for(seed, count, layout) {
         return None;
     }
 

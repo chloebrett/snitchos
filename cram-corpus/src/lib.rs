@@ -12,6 +12,10 @@
 //! corpus that predates a babble change is detected rather than silently
 //! trained on.
 
+use std::collections::BTreeMap;
+
+use kvetch_vocab::{TokenId, Vocab};
+
 /// Seeds whose babbled output fingerprints the generator.
 ///
 /// Three programs is cheap enough to recompute on every cache check and
@@ -28,6 +32,42 @@ const PROBE_SEEDS: [u64; 3] = [0, 1, 2];
 /// key forgets.
 pub const FORMAT_VERSION: u32 = 2;
 
+/// How a corpus renders the programs it holds.
+///
+/// babble emits a flat, space-separated token stream — every lexeme is an
+/// independent oracle choice, so there is no reason for it to produce newlines,
+/// indentation, or tight operators, and it doesn't. That rendering is fine for
+/// the grammar-learnability probe (which asks only whether output parses) and
+/// wrong for the real training mix, where it would teach a model babble's
+/// renderer instead of Stitch. [`Layout::Printed`] parses each program and
+/// prints it back from its AST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// babble's own rendering, verbatim.
+    Flat,
+    /// Re-printed from the AST: real layout, no operator padding.
+    Printed,
+}
+
+impl Layout {
+    /// The on-disk spelling — also the corpus filename's discriminator.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flat => "flat",
+            Self::Printed => "printed",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "flat" => Some(Self::Flat),
+            "printed" => Some(Self::Printed),
+            _ => None,
+        }
+    }
+}
+
 /// What produced a cached corpus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Manifest {
@@ -37,15 +77,23 @@ pub struct Manifest {
     pub seed: u64,
     /// How many programs the corpus holds.
     pub program_count: usize,
+    /// How the programs are rendered.
+    pub layout: Layout,
     /// Fingerprint of the generator that produced it.
     pub probe_digest: u64,
 }
 
 impl Manifest {
-    /// The current generator's fingerprint.
-    pub fn probe_digest() -> u64 {
+    /// The current pipeline's fingerprint, for the layout in question.
+    ///
+    /// Digests what the corpus would actually contain — babble's output *after*
+    /// the layout is applied — so a change to either half moves it. A digest of
+    /// babble alone would be blind to the printer, and a printed corpus is as
+    /// much the printer's artifact as the generator's.
+    #[must_use]
+    pub fn probe_digest(layout: Layout) -> u64 {
         PROBE_SEEDS.iter().fold(FNV_OFFSET, |digest, &seed| {
-            fnv1a(digest, babble::generate(seed).as_bytes())
+            fnv1a(digest, render(&babble::generate(seed), layout).as_bytes())
         })
     }
 
@@ -55,11 +103,12 @@ impl Manifest {
     /// Deliberately not `PartialEq` on the whole manifest: the question is
     /// "does the cache answer this request", and the generator fingerprint is
     /// checked against *now*, not against what was recorded.
-    pub fn is_stale_for(&self, seed: u64, program_count: usize) -> bool {
+    pub fn is_stale_for(&self, seed: u64, program_count: usize, layout: Layout) -> bool {
         self.format_version != FORMAT_VERSION
             || self.seed != seed
             || self.program_count != program_count
-            || self.probe_digest != Self::probe_digest()
+            || self.layout != layout
+            || self.probe_digest != Self::probe_digest(layout)
     }
 
     /// The on-disk form: one `key=value` per line.
@@ -69,8 +118,12 @@ impl Manifest {
     /// earns nothing from a dependency here.
     pub fn render(&self) -> String {
         format!(
-            "format_version={}\nseed={}\nprogram_count={}\nprobe_digest={}\n",
-            self.format_version, self.seed, self.program_count, self.probe_digest
+            "format_version={}\nseed={}\nprogram_count={}\nlayout={}\nprobe_digest={}\n",
+            self.format_version,
+            self.seed,
+            self.program_count,
+            self.layout.as_str(),
+            self.probe_digest
         )
     }
 
@@ -86,6 +139,7 @@ impl Manifest {
             format_version: field("format_version")?.parse().ok()?,
             seed: field("seed")?.parse().ok()?,
             program_count: field("program_count")?.parse().ok()?,
+            layout: Layout::parse(field("layout")?)?,
             probe_digest: field("probe_digest")?.parse().ok()?,
         })
     }
@@ -112,7 +166,7 @@ pub const SEPARATOR: &str = "\n\u{1e}---\n";
 /// results are reassembled in index order, so the corpus is byte-identical to
 /// the sequential one on any machine regardless of core count. Determinism is
 /// pinned by `generation_is_reproducible_from_the_seed`.
-pub fn generate(seed: u64, program_count: usize) -> Vec<String> {
+pub fn generate(seed: u64, program_count: usize, layout: Layout) -> Vec<String> {
     if program_count == 0 {
         return Vec::new();
     }
@@ -127,7 +181,7 @@ pub fn generate(seed: u64, program_count: usize) -> Vec<String> {
                 let end = (start + batch).min(program_count);
                 scope.spawn(move || {
                     (start..end)
-                        .map(|n| babble::generate(seed + n as u64))
+                        .map(|n| render(&babble::generate(seed + n as u64), layout))
                         .collect::<Vec<_>>()
                 })
             })
@@ -145,6 +199,22 @@ pub fn generate(seed: u64, program_count: usize) -> Vec<String> {
     })
 }
 
+/// Apply a [`Layout`] to one babbled program.
+///
+/// The re-parse cannot fail: babble emits only programs the oracle approved, and
+/// `every_babbled_program_parses` pins that. Treating a failure as "keep the
+/// flat text" rather than a panic keeps a generator bug from destroying a
+/// long-running corpus build — the program stays in the corpus, in the wrong
+/// layout, where `printing_preserves_every_program_it_lays_out` will find it.
+fn render(program: &str, layout: Layout) -> String {
+    match layout {
+        Layout::Flat => program.to_string(),
+        Layout::Printed => stitch::parser::parse_program(program)
+            .map(|items| stitch::print::print_program(&items))
+            .unwrap_or_else(|_| program.to_string()),
+    }
+}
+
 /// Render programs to the on-disk corpus form.
 pub fn render_corpus(programs: &[String]) -> String {
     programs.join(SEPARATOR)
@@ -157,6 +227,27 @@ pub fn parse_corpus(text: &str) -> Vec<String> {
         return Vec::new();
     }
     text.split(SEPARATOR).map(str::to_string).collect()
+}
+
+/// Encode a whole corpus into one flat token stream.
+///
+/// Caches per distinct chunk, which is the difference between seconds and
+/// hours: [`Vocab::encode`] replays every merge over its input, so encoding
+/// 24M chunks directly would be ~10¹⁰ operations. Chunks repeat relentlessly in
+/// code — the same aggregation that makes *training* a vocab tractable makes
+/// *using* one tractable.
+pub fn tokenize(vocab: &Vocab, corpus: &str) -> Vec<TokenId> {
+    let mut cache: BTreeMap<&str, Vec<TokenId>> = BTreeMap::new();
+
+    kvetch_vocab::pre_tokenize(corpus)
+        .into_iter()
+        .flat_map(|chunk| {
+            cache
+                .entry(chunk)
+                .or_insert_with(|| vocab.encode(chunk))
+                .clone()
+        })
+        .collect()
 }
 
 /// How many token classes are legal at each decision a decoder would face while
@@ -221,7 +312,8 @@ mod tests {
             format_version: FORMAT_VERSION,
             seed: 7,
             program_count: 64,
-            probe_digest: Manifest::probe_digest(),
+            layout: Layout::Flat,
+            probe_digest: Manifest::probe_digest(Layout::Flat),
         }
     }
 
@@ -244,7 +336,7 @@ mod tests {
 
     #[test]
     fn a_trained_vocab_says_every_frequent_stitch_lexeme_in_one_token() {
-        let corpus = generate(0, 200);
+        let corpus = generate(0, 200, Layout::Flat);
         let texts: Vec<&str> = corpus.iter().map(String::as_str).collect();
         let vocab = Vocab::train(&texts, 512);
         let joined = corpus.join(" ");
@@ -299,7 +391,7 @@ mod tests {
 
     #[test]
     fn a_corpus_round_trips_through_its_on_disk_form() {
-        let programs = generate(3, 8);
+        let programs = generate(3, 8, Layout::Flat);
 
         let recovered = parse_corpus(&render_corpus(&programs));
 
@@ -309,8 +401,80 @@ mod tests {
 
     #[test]
     fn generation_is_reproducible_from_the_seed() {
-        assert_eq!(generate(11, 4), generate(11, 4));
-        assert_ne!(generate(11, 4), generate(12, 4));
+        assert_eq!(generate(11, 4, Layout::Flat), generate(11, 4, Layout::Flat));
+        assert_ne!(generate(11, 4, Layout::Flat), generate(12, 4, Layout::Flat));
+    }
+
+    /// babble renders a flat, space-padded token stream because each lexeme is
+    /// an independent oracle choice. Real Stitch has layout. A corpus in the
+    /// flat rendering teaches the model babble's *renderer*, so Tier-0 output
+    /// destined for the real training mix is printed from its AST first.
+    #[test]
+    fn the_printed_layout_gives_programs_the_shape_real_stitch_has() {
+        let flat = generate(0, 200, Layout::Flat);
+        let printed = generate(0, 200, Layout::Printed);
+
+        assert_eq!(printed.len(), flat.len(), "printing dropped programs");
+        assert!(
+            flat.iter().all(|program| !program.contains('\n')),
+            "babble's own rendering has no layout to begin with"
+        );
+        assert!(
+            printed.iter().any(|program| program.contains("\n    ")),
+            "no program came back indented"
+        );
+        let (flat_bytes, printed_bytes) = (total_len(&flat), total_len(&printed));
+        assert!(
+            printed_bytes < flat_bytes,
+            "printing should compress the padding: {printed_bytes} vs {flat_bytes}"
+        );
+    }
+
+    /// The layout is a *contract* with the model, so a printed program must
+    /// still be the program babble generated — not merely something that
+    /// parses. This is the printer's round-trip, asserted where the corpus is
+    /// assembled rather than trusted from another crate's test.
+    #[test]
+    fn printing_preserves_every_program_it_lays_out() {
+        let flat = generate(0, 200, Layout::Flat);
+        let printed = generate(0, 200, Layout::Printed);
+
+        for (flat, printed) in flat.iter().zip(&printed) {
+            let before = stitch::parser::parse_program(flat).expect("babble output parses");
+            let after = stitch::parser::parse_program(printed)
+                .unwrap_or_else(|e| panic!("printed program should parse: {e:?}\n{printed}"));
+            assert_eq!(before, after, "printing changed the program\n{printed}");
+        }
+    }
+
+    fn total_len(programs: &[String]) -> usize {
+        programs.iter().map(String::len).sum()
+    }
+
+    /// A printed corpus is produced by babble *and* the printer, so the
+    /// fingerprint has to cover both. Digesting only babble's output would let
+    /// a printer change — new layout, a different parenthesisation — leave
+    /// every cached printed corpus looking perfectly fresh, which is the exact
+    /// failure the `format_version` comment upstairs records having already been
+    /// caught once.
+    #[test]
+    fn the_fingerprint_covers_the_printer_not_just_the_generator() {
+        assert_ne!(
+            Manifest::probe_digest(Layout::Printed),
+            Manifest::probe_digest(Layout::Flat),
+            "the two layouts fingerprint identically, so a printer change is invisible"
+        );
+    }
+
+    #[test]
+    fn a_corpus_is_stale_when_the_layout_changed() {
+        let cached = manifest();
+
+        assert!(!cached.is_stale_for(cached.seed, cached.program_count, cached.layout));
+        assert!(
+            cached.is_stale_for(cached.seed, cached.program_count, Layout::Printed),
+            "a flat corpus cannot answer a request for a printed one"
+        );
     }
 
     #[test]
@@ -326,16 +490,16 @@ mod tests {
     fn a_corpus_is_stale_when_any_parameter_or_the_generator_changed() {
         let cached = manifest();
 
-        assert!(!cached.is_stale_for(cached.seed, cached.program_count));
-        assert!(cached.is_stale_for(cached.seed + 1, cached.program_count));
-        assert!(cached.is_stale_for(cached.seed, cached.program_count + 1));
+        assert!(!cached.is_stale_for(cached.seed, cached.program_count, cached.layout));
+        assert!(cached.is_stale_for(cached.seed + 1, cached.program_count, cached.layout));
+        assert!(cached.is_stale_for(cached.seed, cached.program_count + 1, cached.layout));
 
         let after_babble_changed = Manifest {
             probe_digest: cached.probe_digest ^ 1,
             ..cached
         };
         assert!(
-            after_babble_changed.is_stale_for(cached.seed, cached.program_count),
+            after_babble_changed.is_stale_for(cached.seed, cached.program_count, cached.layout),
             "a corpus generated by a different babble must not be reused"
         );
 
@@ -344,7 +508,7 @@ mod tests {
             ..cached
         };
         assert!(
-            older_layout.is_stale_for(cached.seed, cached.program_count),
+            older_layout.is_stale_for(cached.seed, cached.program_count, cached.layout),
             "a corpus in an older file layout must not be reused"
         );
     }
