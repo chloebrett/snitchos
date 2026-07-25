@@ -239,6 +239,36 @@ fork).
 >   *same* machinery as ARQ (a lost "over" is a lost ACK). Escape hatch for smooth
 >   char-mode: **full-duplex** via frequency-division (each direction its own tone
 >   band, à la Bell 103) or a stereo/2-wire cable (full-duplex free).
+> - **The modem is parameterizable — build both duplex modes, don't pick one.**
+>   Duplex isn't a mode, it's *band allocation*: `bands: Shared(b)` → directions
+>   collide → must turn-take (half); `Split{tx,rx}` → simultaneous (full/FDD). So
+>   turn-taking is a *consequence* of shared-band, not a switch. The modem factors
+>   into orthogonal axes — a `ModemConfig { modulation (FSK freqs → PSK/QAM), baud,
+>   bands (=duplex), reliability (BestEffort/ARQ), COBS }` — layered: shared
+>   modem-core (NCO + demod) → duplex layer → reliability → frames. The modem is a
+>   **`glitch` client** (glitch plays samples, never learns what a modem is; all
+>   config lives userspace).
+> - **You can TDD a modem, because the wire is deterministic.** mod/demod are pure
+>   round-trips; and the *whole path* is testable since snemu captures `WDATA`
+>   bit-for-bit: guest modulates → snemu captures samples → host demodulates → assert
+>   the bytes returned. Every config point is a host-testable round-trip, turning the
+>   config space into an A/B experiment platform (half vs full throughput, FSK vs PSK)
+>   — the allocator-/snemu-backend-A/B measurement culture, aimed at a modem.
+> - **Two snemu instances, audio-linked digitally — the test strategy for the whole
+>   arc.** No real audio need be harmed: run machine A and machine B, pipe A's
+>   PWMDAC sample-output into B's audio-*input* and vice versa (a deterministic
+>   sample-shuttle where speaker→air→mic would be). Everything runs and is tested —
+>   FSK mod/demod, framing, protocol, cross-machine `~>` — *except* the analog PHY,
+>   which was never the interesting part. It's **deterministic end-to-end** (two
+>   deterministic machines + a deterministic shuttle), so it's a *stronger* claim
+>   than single-instance TDD: a reproducible two-machine acoustic-protocol test with
+>   zero hardware. Real acoustic audio becomes the **moneyshot demo**, not a
+>   dependency. Needs: an audio-*input* device in snemu (mirror of `pwmdac_samples()`
+>   — and *also* rung-2's missing mic path, so building it for the test builds it for
+>   real), a `snemu link a.elf b.elf` harness, and **deliberate channel impairment**
+>   (`--loss`, `--snr`) as a *knob* to exercise Resync/ARQ on purpose. Generalizes:
+>   two instances + any digital link = a deterministic distributed-systems test
+>   harness; audio is just the first, most-charming instance.
 > - **Throughput reality:** a from-scratch FSK modem is ~300–1200 bps; the Shannon
 >   ceiling of a voiceband channel is ~35 kbps (why V.34 stopped at 33.6k), and
 >   over-the-air acoustic is ~100 bps–1 kbps. At ~1200 bps an ssh session is a
