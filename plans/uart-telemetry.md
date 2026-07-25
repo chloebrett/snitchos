@@ -257,23 +257,37 @@ possible board increment: one observable bit. Verify the USB-serial adapter's
 ceiling first (original CP2102 ≈ 1 Mbaud). Document the new rate next to
 `setenv bootargs` in the boot procedure.*
 
-### Step 8: TX ring with THRE-interrupt drain
+### Step 8: TX ring with THRE-interrupt drain — full PLIC path (decided)
 
-**Acceptance criteria**: bytes queued to the UART drain at wire speed without the
-caller blocking; the heartbeat's period is unchanged with a full ring; a full
-ring drops and counts rather than blocking.
-**RED**: ring behaviour in `kernel-devices` (host-tested, alongside the existing
-`ConsoleRing`): fill, drain, wrap, drop-on-full, count. Interrupt plumbing is
-covered by `itest`, not unit tests.
-**GREEN**: ring + THRE enable + ISR drain.
-**MUTATE**: `cargo xtask mutants kernel-devices`.
-**KILL MUTANTS**: address survivors.
-**REFACTOR**: assess.
-**Done when**: gate green, board boots with the ring in the print path. **Largest
-and riskiest step**: the UART driver is polled-only by explicit design, and PLIC
-routing for the console UART is not wired (the port plan scopes PLIC under M2.5).
-If PLIC turns out to be its own milestone, the fallback is blocking writes at a
-high baud — a deliberate decision to take, not a discovery to make.
+**Decision (2026-07):** the drain is the **full PLIC + THRE-interrupt** subsystem
+(user call), not a blocking or cooperative interim — the "right" long-term design.
+The `ConsoleRing` (drop-on-full byte ring) is **reused as-is** for TX, so there is
+no ring to build; the work is entirely the external-interrupt subsystem, which
+does not exist yet (the trap handler dispatches only timer + software IPIs; console
+RX is timer-*polled*).
+
+**⚠ Test-strategy caveat:** **snemu models no external interrupts** (`cpu.rs`
+says so) and its UART ignores IER — so the interrupt *firing* can't run under the
+default snemu itest gate. Integration coverage for this path is **QEMU-only**
+(`--engine qemu`) unless snemu grows a PLIC + UART-interrupt model. The *pure*
+logic below is host-tested regardless.
+
+Increments:
+1. **PLIC register offsets** (`kernel-devices::plic`, pure) — priority / enable /
+   threshold / claim-complete byte offsets, pinned to spec values. — ✅ DONE
+   (4 tests, 32/32 mutants caught).
+2. **PLIC MMIO adapter** (`kernel/`) — volatile reads/writes; init (priorities,
+   enable UART source for hart-0 S-context, threshold 0); claim→handle→complete.
+3. **External-interrupt trap dispatch** — add `SupervisorExternalInterrupt` →
+   PLIC claim → device handler → complete; enable `SEIE`.
+4. **UART IER + ISR** — enable THRE (and keep RX); the ISR drains the TX ring to
+   the FIFO and fills the RX ring, replacing/reinforcing the timer-polled RX.
+5. **Wire the TX ring** into the emit path (push = non-blocking drop-and-count);
+   the THRE ISR drains at wire speed.
+6. **QEMU itest** — interrupt-driven TX works end to end (snemu can't cover it).
+
+**Done when**: gate green (host + QEMU-engine itest), board boots with the ring +
+interrupt drain in the telemetry path.
 
 ### Step 9: `UartFrameSink`
 
